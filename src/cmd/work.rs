@@ -211,11 +211,7 @@ pub fn begin_change<'r>(ctx: &Ctx, repo: &'r Repo, line: &Line) -> Result<(crate
     repo.can_write_line(ctx, line)?;
     let lock = repo.p.lock()?;
     let line = repo.line(&line.id)?;
-    let saved = repo.save(ctx, &line, "before a layr command", false, false)?;
-    let w = match saved {
-        Some(s) => Some(s.id),
-        None => repo.last_auto(&line)?.map(|s| s.id),
-    };
+    let w = repo.working_state(ctx, &line, "before a layr command")?;
     Ok((lock, w))
 }
 
@@ -858,13 +854,14 @@ pub fn restore_impl(
 /// Record a change of the working content only (for undo).
 pub fn record_working(ctx: &Ctx, repo: &Repo, line: &Line, op: &str, working_before: Option<String>) -> Result<()> {
     let mut rec = Record::new(op);
+    let working_after = repo.after_state(ctx, line, op, &mut rec)?;
     rec.lines.insert(
         line.id.clone(),
         crate::model::LineChange {
             before: Some(repo.line_state(line, &line.head)),
             after: Some(repo.line_state(line, &line.head)),
             working_before,
-            working_after: None,
+            working_after,
         },
     );
     repo.commit_record(ctx, rec)?;
@@ -1114,13 +1111,14 @@ pub fn stash(ctx: &Ctx, args: &[String]) -> Result<i32> {
             repo.drop_stage(&line)?;
             let mut rec = Record::new("stash");
             rec.states.push(state.clone());
+            let working_after = repo.after_state(ctx, &line, "stash", &mut rec)?;
             rec.lines.insert(
                 line.id.clone(),
                 crate::model::LineChange {
                     before: Some(repo.line_state(&line, &line.head)),
                     after: Some(repo.line_state(&line, &line.head)),
                     working_before: w,
-                    working_after: None,
+                    working_after,
                 },
             );
             repo.commit_record(ctx, rec)?;

@@ -110,6 +110,21 @@ pub struct Project<'a> {
     pub db: Db,
 }
 
+/// An error after the record reached the log: the operation happened, its snapshots stay.
+#[derive(Debug)]
+pub struct Logged(pub String);
+
+impl std::fmt::Display for Logged {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+impl std::error::Error for Logged {}
+
+pub fn is_logged(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<Logged>().is_some()
+}
+
 pub struct Lock {
     _f: fs::File,
 }
@@ -341,8 +356,14 @@ impl<'a> Project<'a> {
         rec.actor = actor.clone();
         let line = oplog::sign_line(&rec, &m.key)?;
         oplog::append(&own, &line)?;
-        self.apply(&rec, &line)?;
-        self.db.set_applied(&m.id, rec.seq, fs::metadata(&own)?.len())?;
+        // From here the record is durable. An index failure does not undo it: the index is
+        // rebuilt from the log on the next open.
+        let indexed = self.apply(&rec, &line).and_then(|_| self.db.set_applied(&m.id, rec.seq, fs::metadata(&own)?.len()));
+        if let Err(e) = indexed {
+            return Err(anyhow::Error::new(Logged(format!(
+                "the operation was recorded in the log, but the index update failed: {e:#}. The index is updated from the log on the next command."
+            ))));
+        }
         Ok(rec)
     }
 

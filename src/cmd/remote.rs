@@ -249,7 +249,9 @@ pub fn push(ctx: &Ctx, args: &[String]) -> Result<i32> {
     repo.commit_record(ctx, rec)?;
     let _ = gitbridge::git_out(&gitbridge::store(repo), &["update-ref", &format!("refs/remotes/{remote}/{branch}"), &commit]);
     if let Some(l) = &line {
-        let _ = gitbridge::refresh_git_layer(repo, &repo.line(&l.id)?);
+        if let Err(e) = gitbridge::refresh_git_layer(repo, &repo.line(&l.id)?) {
+            eprintln!("warning: .git layer not updated: {e:#}");
+        }
     }
     if !a.has("-q") {
         outln!(ctx, "To {url}");

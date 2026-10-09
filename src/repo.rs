@@ -232,7 +232,9 @@ impl<'a> Repo<'a> {
         match self.p.append(rec, &ctx.actor()) {
             Ok(r) => Ok(r),
             Err(e) => {
-                self.discard_states(&states);
+                if !crate::store::is_logged(&e) {
+                    self.discard_states(&states);
+                }
                 Err(e)
             }
         }
@@ -262,6 +264,18 @@ impl<'a> Repo<'a> {
     /// The newest automatic state of a line, if any.
     pub fn last_auto(&self, line: &Line) -> Result<Option<StateRec>> {
         Ok(self.p.db.line_states(&line.id, StateKind::Auto)?.into_iter().find(|s| self.p.state_path(&s.id).exists()))
+    }
+
+    /// The id of a state equal to the working content: a new automatic state, or the previous
+    /// automatic state (or head) when nothing changed. The caller holds the project lock.
+    pub fn working_state(&self, ctx: &Ctx, line: &Line, message: &str) -> Result<Option<String>> {
+        if !self.working(line).exists() {
+            return Ok(None);
+        }
+        Ok(match self.save(ctx, line, message, false, false)? {
+            Some(s) => Some(s.id),
+            None => Some(self.last_auto(line)?.map(|s| s.id).unwrap_or(line.head.clone())),
+        })
     }
 
     /// Save the working content as an automatic state if it changed since the previous one.
@@ -514,7 +528,9 @@ impl<'a> Repo<'a> {
             self.p.append(rec, &ctx.actor())
         })();
         if let Err(e) = res {
-            let _ = btrfs::delete_tree(&dst);
+            if !crate::store::is_logged(&e) {
+                let _ = btrfs::delete_tree(&dst);
+            }
             return Err(e);
         }
         Ok(line)
@@ -573,21 +589,40 @@ impl<'a> Repo<'a> {
     ) -> Result<Record> {
         let mut rec = Record::new(op);
         rec.states = states;
+        let working_after = match &working_before {
+            Some(_) => self.after_state(ctx, line, op, &mut rec)?,
+            None => None,
+        };
         rec.lines.insert(
             line.id.clone(),
             LineChange {
                 before: Some(self.line_state(line, &line.head)),
                 after: Some(self.line_state(line, new_head)),
                 working_before,
-                working_after: None,
+                working_after,
             },
         );
         rec.data = data;
         let r = self.commit_record(ctx, rec)?;
         let mut moved = line.clone();
         moved.head = new_head.to_string();
-        let _ = crate::gitbridge::refresh_git_layer(self, &moved);
+        if let Err(e) = crate::gitbridge::refresh_git_layer(self, &moved) {
+            eprintln!("warning: .git layer of line {} not updated: {e:#}", line.name);
+        }
         Ok(r)
+    }
+
+    /// A snapshot of the working content right after an operation, so undo can revert only the
+    /// changes of that operation and keep later work.
+    pub fn after_state(&self, ctx: &Ctx, line: &Line, op: &str, rec: &mut Record) -> Result<Option<String>> {
+        let w = self.working(line);
+        if !w.exists() {
+            return Ok(None);
+        }
+        let st = self.new_state(ctx, &w, StateKind::Auto, vec![line.head.clone()], &format!("after {op}"), Some(line))?;
+        let id = st.id.clone();
+        rec.states.push(st);
+        Ok(Some(id))
     }
 
     // ----- ancestry -----

@@ -223,7 +223,7 @@ fn plan(repo: &Repo, mine: &BTreeSet<String>, theirs: &BTreeSet<String>, auto: b
     Ok(out)
 }
 
-fn send_states<R: Read, W: Write>(w: &mut Wire<R, W>, repo: &Repo, list: &[(String, Option<String>)]) -> Result<(usize, u64)> {
+fn send_states<R: Read, W: Write>(w: &mut Wire<R, W>, repo: &Repo, list: &[(String, Option<String>)], layers: bool) -> Result<(usize, u64)> {
     let mut bytes = 0;
     for (id, parent) in list {
         w.json(&json!({"op": "state", "id": id, "parent": parent}))?;
@@ -233,6 +233,24 @@ fn send_states<R: Read, W: Write>(w: &mut Wire<R, W>, repo: &Repo, list: &[(Stri
         let v = w.recv_json()?;
         if v["op"] != "ok" {
             bail!("peer did not store state {}", ids::short(id));
+        }
+        // Regenerable layers travel only for a live move (warm builds on the peer).
+        if layers {
+            if let Some(s) = repo.p.db.state(id)? {
+                for snap in s.layers.values() {
+                    let path = repo.p.states_dir().join(snap);
+                    if !path.exists() {
+                        continue;
+                    }
+                    w.json(&json!({"op": "layer", "name": snap}))?;
+                    let child = btrfs::send_command(None, &path).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+                    bytes += w.send_stream(child)?;
+                    let v = w.recv_json()?;
+                    if v["op"] != "ok" {
+                        bail!("peer did not store layer {snap}");
+                    }
+                }
+            }
         }
     }
     w.json(&json!({"op": "done"}))?;
@@ -245,6 +263,26 @@ fn recv_states<R: Read, W: Write>(w: &mut Wire<R, W>, p: &Project) -> Result<usi
         let v = w.recv_json()?;
         match v["op"].as_str() {
             Some("done") => break,
+            Some("layer") => {
+                let name = v["name"].as_str().ok_or_else(|| anyhow!("bad layer message"))?.to_string();
+                let (id, _) = name.split_once('@').ok_or_else(|| anyhow!("bad layer name"))?;
+                if uuid::Uuid::parse_str(id).is_err() || name.contains('/') {
+                    bail!("bad layer name");
+                }
+                let dst = p.states_dir().join(&name);
+                if dst.exists() {
+                    btrfs::delete_tree(&dst)?;
+                }
+                match w.recv_stream(&p.states_dir()) {
+                    Ok(()) if dst.exists() => w.json(&json!({"op": "ok"}))?,
+                    other => {
+                        let _ = btrfs::delete_tree(&dst);
+                        w.json(&json!({"op": "error", "message": format!("layer {name} not received")}))?;
+                        other?;
+                        bail!("layer {name} not received");
+                    }
+                }
+            }
             Some("state") => {
                 let id = v["id"].as_str().ok_or_else(|| anyhow!("bad state message"))?.to_string();
                 if uuid::Uuid::parse_str(&id).is_err() {
@@ -287,7 +325,7 @@ fn recv_states<R: Read, W: Write>(w: &mut Wire<R, W>, p: &Project) -> Result<usi
 }
 
 pub fn sync(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let spec = Spec::new().flag("--auto").flag("--push-only").flag("--pull-only").flag("-q|--quiet").value("--project");
+    let spec = Spec::new().flag("--auto").flag("--layers").flag("--push-only").flag("--pull-only").flag("-q|--quiet").value("--project");
     let a = parse(&spec, args)?;
     if a.paths.is_empty() {
         return Err(exit(128, "usage: layr sync [--auto] [--push-only|--pull-only] -- <command that runs 'layr serve-peer <project>' on the peer>"));
@@ -329,7 +367,7 @@ pub fn sync(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let (mut sent, mut bytes) = (0, 0);
         if !a.has("--pull-only") {
             let list = plan(repo, &mine, &peer_present, auto)?;
-            let (n, b) = send_states(&mut w, repo, &list)?;
+            let (n, b) = send_states(&mut w, repo, &list, a.has("--layers"))?;
             sent = n;
             bytes = b;
         } else {
@@ -342,7 +380,7 @@ pub fn sync(ctx: &Ctx, args: &[String]) -> Result<i32> {
         } else {
             peer_present.iter().filter(|id| !mine_now.contains(*id) && wanted(&repo.p, id, auto)).cloned().collect()
         };
-        w.json(&json!({"op": "want", "ids": want, "have": mine_now}))?;
+        w.json(&json!({"op": "want", "ids": want, "have": mine_now, "layers": a.has("--layers")}))?;
         let got = recv_states(&mut w, &repo.p)?;
         w.json(&json!({"op": "bye"}))?;
         Ok((sent_records, got_records, sent, got, bytes))
@@ -417,7 +455,7 @@ pub fn serve(ctx: &Ctx, args: &[String]) -> Result<i32> {
         have2.insert(id.clone());
         list.push((id, parent));
     }
-    send_states(&mut w, &repo, &list)?;
+    send_states(&mut w, &repo, &list, want["layers"].as_bool().unwrap_or(false))?;
     let _ = w.recv_json();
     let _ = ctx;
     Ok(0)

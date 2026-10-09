@@ -475,9 +475,39 @@ fn chain_dirs(root: &Path) -> Result<Vec<(u32, PathBuf)>> {
     Ok(v)
 }
 
+/// A manifest item names a plain file inside the chain folder: no folders, no `..`, no
+/// absolute paths. Every read and delete of a backup goes through this check.
+fn safe_item_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() < 200
+        && !name.starts_with('.')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '@')
+}
+
 fn read_manifest(dir: &Path) -> Result<Manifest> {
     let d = std::fs::read(dir.join("manifest.json")).with_context(|| format!("read {}/manifest.json", dir.display()))?;
-    Ok(serde_json::from_slice(&d)?)
+    let m: Manifest = serde_json::from_slice(&d)?;
+    for i in &m.items {
+        if !safe_item_name(&i.file) {
+            bail!("{}/manifest.json: item file name '{}' is not a plain file name", dir.display(), i.file);
+        }
+    }
+    Ok(m)
+}
+
+fn next_seq(m: &Manifest) -> u32 {
+    m.items.iter().map(|i| i.seq).max().unwrap_or(0) + 1
+}
+
+/// A file name that no earlier run of the chain used.
+fn unique_name(dir: &Path, m: &Manifest, seq: u32, tail: &str) -> String {
+    let mut n = format!("{seq:05}-{tail}");
+    let mut k = 1;
+    while dir.join(&n).exists() || m.items.iter().any(|i| i.file == n) {
+        n = format!("{seq:05}-{k}-{tail}");
+        k += 1;
+    }
+    n
 }
 
 fn write_manifest(dir: &Path, m: &Manifest) -> Result<()> {
@@ -538,8 +568,8 @@ pub fn run_backup(ctx: &Ctx, repo: &Repo, root: &Path, full: bool) -> Result<(u3
         }
         let s = repo.state(&id)?;
         let parent = s.parents.iter().find(|p| sent.contains(*p)).cloned().or(last_sent.clone());
-        let seq = m.items.len() as u32 + 1;
-        let file = format!("{seq:05}-{}.stream.zst", ids::short(&id));
+        let seq = next_seq(&m);
+        let file = unique_name(&dir, &m, seq, &format!("{}.stream.zst", ids::short(&id)));
         let pp = parent.as_ref().map(|p| repo.p.state_path(p));
         compress_to(btrfs::send_command(pp.as_deref(), &repo.p.state_path(&id)), &dir.join(&file))?;
         let sha = fsutil::sha256_file(&dir.join(&file))?;
@@ -557,8 +587,8 @@ pub fn run_backup(ctx: &Ctx, repo: &Repo, root: &Path, full: bool) -> Result<(u3
         let prev: Vec<String> = m.items.iter().filter(|i| i.kind == "git").flat_map(|i| i.tips.clone()).collect();
         let new: Vec<&String> = tips.iter().filter(|t| !prev.contains(t)).collect();
         if !tips.is_empty() && !new.is_empty() {
-            let seq = m.items.len() as u32 + 1;
-            let file = format!("{seq:05}-git.bundle");
+            let seq = next_seq(&m);
+            let file = unique_name(&dir, &m, seq, "git.bundle");
             let mut args = vec!["bundle".to_string(), "create".into(), dir.join(&file).to_string_lossy().into_owned(), "--all".into()];
             for p in &prev {
                 args.push(format!("^{p}"));
@@ -574,8 +604,8 @@ pub fn run_backup(ctx: &Ctx, repo: &Repo, root: &Path, full: bool) -> Result<(u3
         }
     }
     // The operation logs: the whole history of the project.
-    let seq = m.items.len() as u32 + 1;
-    let file = format!("{seq:05}-logs.tar.zst");
+    let seq = next_seq(&m);
+    let file = unique_name(&dir, &m, seq, "logs.tar.zst");
     let mut tar = Command::new("tar");
     tar.arg("-C").arg(repo.p.log_dir()).arg("-cf").arg("-").arg(".");
     compress_to(tar, &dir.join(&file))?;
@@ -587,7 +617,9 @@ pub fn run_backup(ctx: &Ctx, repo: &Repo, root: &Path, full: bool) -> Result<(u3
     m.items.push(Item { seq, kind: "logs".into(), state: None, parent: None, file, sha256: sha, bytes, tips: vec![], time: ids::now_ms() });
     write_manifest(&dir, &m)?;
     for f in old_logs {
-        let _ = std::fs::remove_file(dir.join(f));
+        if safe_item_name(&f) && m.items.iter().all(|i| i.file != f) {
+            let _ = std::fs::remove_file(dir.join(f));
+        }
     }
     File::open(&dir)?.sync_all()?;
     // Retention: the newest two chains.

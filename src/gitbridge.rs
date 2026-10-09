@@ -609,38 +609,47 @@ pub fn make_git_layer(repo: &Repo, line: &Line, state: &str) -> Result<()> {
 }
 
 /// Point the `.git` layer of a line at the commit of a new head (after an export or import).
+/// The layer belongs to the line owner, so all access goes through descriptors of the `.git`
+/// folder and never follows a link the owner made.
 pub fn refresh_git_layer(repo: &Repo, line: &Line) -> Result<()> {
     let g = repo.working(line).join(".git");
-    if !g.join("HEAD").exists() {
-        return Ok(());
-    }
-    if let Some((ast, c)) = mapped_ancestor(repo, &line.head)? {
-        let cur = std::fs::read_to_string(g.join("HEAD")).unwrap_or_default();
-        if cur.trim() == c {
+    let dir = match fsutil::open_dir_nofollow(&g) {
+        Ok(d) => d,
+        Err(_) => return Ok(()),
+    };
+    // Only the layer layr made (a nested subvolume); a .git folder the agent made is its own.
+    {
+        use std::os::unix::fs::MetadataExt;
+        if dir.metadata()?.ino() != 256 {
             return Ok(());
         }
-        std::fs::write(g.join("HEAD"), format!("{c}\n"))?;
+    }
+    // A HEAD that is not a regular file (for example a link) is replaced.
+    let cur = fsutil::read_at(&dir, "HEAD").map(|c| String::from_utf8_lossy(&c).trim().to_string()).unwrap_or_default();
+    if let Some((ast, c)) = mapped_ancestor(repo, &line.head)? {
+        if cur == c {
+            return Ok(());
+        }
+        let own = Some(repo.owner_ids(line));
+        let head = format!("{c}\n");
+        fsutil::replace_at(&dir, "HEAD", &mut |f| Ok((&*f).write_all(head.as_bytes())?), own)?;
         // The index of the mapped state: its stat data matches files copied from that state.
         let idx = index_path(repo, &ast);
-        let dst = g.join("index");
         if idx.exists() {
-            let tmp = g.join("index.layr-tmp");
-            {
-                let src = std::fs::File::open(&idx)?;
-                let d = std::fs::File::create(&tmp)?;
-                if crate::btrfs::clone_file(&src, &d).is_err() {
-                    std::fs::copy(&idx, &tmp)?;
-                }
-            }
-            std::fs::rename(&tmp, &dst)?;
+            fsutil::replace_at(
+                &dir,
+                "index",
+                &mut |f| {
+                    let src = std::fs::File::open(&idx)?;
+                    if crate::btrfs::clone_file(&src, f).is_err() {
+                        std::io::copy(&mut std::fs::File::open(&idx)?, &mut &*f)?;
+                    }
+                    Ok(())
+                },
+                own,
+            )?;
         } else {
-            let _ = std::fs::remove_file(&dst);
-        }
-        let (u, gid) = repo.owner_ids(line);
-        for f in ["HEAD", "index"] {
-            if g.join(f).exists() {
-                fsutil::chown_nofollow(&g.join(f), u, gid)?;
-            }
+            fsutil::unlink_at(&dir, "index");
         }
     }
     Ok(())

@@ -7,7 +7,7 @@ use base64::Engine;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::Deserialize;
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 #[derive(Deserialize)]
@@ -50,14 +50,47 @@ pub fn machine_key(rec: &Record) -> Result<VerifyingKey> {
     Ok(VerifyingKey::from_bytes(&arr)?)
 }
 
-/// Append a line and `fsync` the file.
+/// Append a line and `fsync` the file. The caller holds the project lock.
+///
+/// A crash during an earlier write can leave an incomplete last line. That record was never
+/// confirmed (the write did not finish, so its `fsync` did not return), and readers skip it. It
+/// is cut off here, so the new line starts on a line of its own.
 pub fn append(path: &Path, line: &str) -> Result<()> {
-    let mut f = OpenOptions::new().create(true).append(true).open(path).with_context(|| format!("open {}", path.display()))?;
+    let mut f = OpenOptions::new().create(true).read(true).write(true).open(path).with_context(|| format!("open {}", path.display()))?;
+    let len = f.metadata()?.len();
+    if len > 0 {
+        let mut last = [0u8; 1];
+        f.seek(SeekFrom::Start(len - 1))?;
+        f.read_exact(&mut last)?;
+        if last[0] != b'\n' {
+            let keep = complete_length(&mut f, len)?;
+            f.set_len(keep)?;
+            f.sync_all()?;
+        }
+    }
+    f.seek(SeekFrom::End(0))?;
     let mut buf = line.as_bytes().to_vec();
     buf.push(b'\n');
     f.write_all(&buf)?;
     f.sync_all()?;
     Ok(())
+}
+
+/// Length of the file up to and including its last newline.
+fn complete_length(f: &mut File, len: u64) -> Result<u64> {
+    let mut pos = len;
+    let mut buf = vec![0u8; 65536];
+    while pos > 0 {
+        let start = pos.saturating_sub(buf.len() as u64);
+        let n = (pos - start) as usize;
+        f.seek(SeekFrom::Start(start))?;
+        f.read_exact(&mut buf[..n])?;
+        if let Some(i) = buf[..n].iter().rposition(|b| *b == b'\n') {
+            return Ok(start + i as u64 + 1);
+        }
+        pos = start;
+    }
+    Ok(0)
 }
 
 /// Read records from byte offset `from`. Returns the records and the offset after the last

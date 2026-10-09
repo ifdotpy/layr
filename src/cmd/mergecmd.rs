@@ -85,7 +85,9 @@ fn finish(
     repo.move_head(ctx, op, line, new_head, states, working_before, data)?;
     let mut l2 = line.clone();
     l2.head = new_head.to_string();
-    let _ = crate::gitbridge::refresh_git_layer(repo, &l2);
+    if let Err(e) = crate::gitbridge::refresh_git_layer(repo, &l2) {
+        eprintln!("warning: .git layer not updated: {e:#}");
+    }
     Ok(applied)
 }
 

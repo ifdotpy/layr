@@ -466,3 +466,82 @@ pub fn sha256_file(p: &Path) -> Result<String> {
 pub fn is_binary(data: &[u8]) -> bool {
     data[..data.len().min(8000)].contains(&0)
 }
+
+// ----- writes into folders owned by agents, through file descriptors -----
+
+fn cstr(s: &str) -> Result<std::ffi::CString> {
+    Ok(std::ffi::CString::new(s)?)
+}
+
+/// Open a folder without following a link at its last component.
+pub fn open_dir_nofollow(path: &Path) -> Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(path)
+        .with_context(|| format!("open folder {}", path.display()))
+}
+
+/// Read a regular file `name` of an open folder; `None` if absent, a link or not a file.
+pub fn read_at(dir: &File, name: &str) -> Option<Vec<u8>> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let c = cstr(name).ok()?;
+    let fd = unsafe { libc::openat(dir.as_raw_fd(), c.as_ptr(), libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK) };
+    if fd < 0 {
+        return None;
+    }
+    let mut f = unsafe { File::from_raw_fd(fd) };
+    if !f.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut v = Vec::new();
+    f.read_to_end(&mut v).ok()?;
+    Some(v)
+}
+
+/// Replace `name` in an open folder: write a new file (never through an existing name), then
+/// rename it over `name`. A link at `name` is replaced, not followed.
+pub fn replace_at(dir: &File, name: &str, content: &mut dyn FnMut(&File) -> Result<()>, own: Option<(u32, u32)>) -> Result<()> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let tmp = format!(".{name}.layr-{}", std::process::id());
+    let ct = cstr(&tmp)?;
+    let cn = cstr(name)?;
+    unsafe {
+        libc::unlinkat(dir.as_raw_fd(), ct.as_ptr(), 0);
+    }
+    let fd = unsafe {
+        libc::openat(dir.as_raw_fd(), ct.as_ptr(), libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC, 0o644)
+    };
+    if fd < 0 {
+        return Err(anyhow!("create {tmp}: {}", std::io::Error::last_os_error()));
+    }
+    let f = unsafe { File::from_raw_fd(fd) };
+    let r = (|| -> Result<()> {
+        content(&f)?;
+        if let Some((u, g)) = own {
+            if unsafe { libc::fchown(f.as_raw_fd(), u, g) } != 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+        }
+        if unsafe { libc::renameat(dir.as_raw_fd(), ct.as_ptr(), dir.as_raw_fd(), cn.as_ptr()) } != 0 {
+            return Err(anyhow!("rename to {name}: {}", std::io::Error::last_os_error()));
+        }
+        Ok(())
+    })();
+    if r.is_err() {
+        unsafe {
+            libc::unlinkat(dir.as_raw_fd(), ct.as_ptr(), 0);
+        }
+    }
+    r
+}
+
+/// Remove `name` from an open folder (a link is removed, not followed).
+pub fn unlink_at(dir: &File, name: &str) {
+    use std::os::fd::AsRawFd;
+    if let Ok(c) = cstr(name) {
+        unsafe {
+            libc::unlinkat(dir.as_raw_fd(), c.as_ptr(), 0);
+        }
+    }
+}

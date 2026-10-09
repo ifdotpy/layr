@@ -76,15 +76,14 @@ pub fn branch(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 }
             }
             let _lock = repo.p.lock()?;
-            let saved = repo.save(ctx, &l, "before line delete", false, false)?;
-            let last = saved.map(|s| s.id).or(repo.last_auto(&l)?.map(|s| s.id));
-            let w = repo.working(&l);
-            crate::btrfs::delete_tree(&w)?;
-            repo.drop_stage(&l)?;
+            let last = repo.working_state(ctx, &l, "before line delete")?;
+            // Record first, then delete the folder: the content is in the saved state.
             let mut rec = Record::new("line.delete");
             rec.lines.insert(l.id.clone(), LineChange { before: Some(repo.line_state(&l, &l.head)), after: None, working_before: last.clone(), working_after: None });
             rec.data = serde_json::json!({"name": l.name, "final_state": last});
             repo.commit_record(ctx, rec)?;
+            crate::btrfs::delete_tree(&repo.working(&l))?;
+            repo.drop_stage(&l)?;
             outln!(ctx, "Deleted line {} (was {}).", l.name, ids::short(&l.head));
         }
         return Ok(0);

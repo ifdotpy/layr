@@ -105,15 +105,20 @@ pub fn undo(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let id = match a.pos.first() {
         Some(x) => find_record(repo, x)?,
         None => {
-            let line = h.line()?;
+            // The newest operation of this caller (user and agent label) in the project.
+            let agent = ctx.env("LAYR_AGENT").map(|s| s.to_string());
             let mut found = None;
-            for r in repo.p.db.records(1000)? {
-                if r.lines.contains_key(&line.id) && !NOT_UNDOABLE.contains(&r.op.as_str()) {
+            for r in repo.p.db.records(5000)? {
+                let local = r.lines.keys().all(|lid| {
+                    repo.p.db.line_by_id(lid).ok().flatten().map(|l| repo.p.line_path(&l.name).exists()).unwrap_or(false)
+                        || r.op == "line.delete"
+                });
+                if r.actor.uid == ctx.caller.uid && r.actor.agent == agent && local && !NOT_UNDOABLE.contains(&r.op.as_str()) {
                     found = Some(r.id.clone());
                     break;
                 }
             }
-            found.ok_or_else(|| exit(1, "error: nothing to undo on this line"))?
+            found.ok_or_else(|| exit(1, "error: nothing to undo"))?
         }
     };
     if a.has("-n") {
@@ -188,15 +193,25 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
         match (&ch.before, &cur) {
             (Some(b), Some(l)) if alive => {
                 // Save the current content, then restore the old pointers and content.
-                let saved = repo.save(ctx, l, "before undo", false, false)?;
-                wb = saved.map(|s| s.id).or(repo.last_auto(l)?.map(|s| s.id));
+                wb = repo.working_state(ctx, l, "before undo")?;
                 if b.name != l.name {
                     std::fs::rename(repo.p.line_path(&l.name), repo.p.line_path(&b.name))?;
                 }
                 let mut l2 = l.clone();
                 l2.name = b.name.clone();
-                if let Some(target) = ch.working_before.clone().or(if b.head != l.head { Some(b.head.clone()) } else { None }) {
-                    restore_working(repo, &l2, &target)?;
+                match (&ch.working_before, &ch.working_after) {
+                    // Revert only what the operation changed; later work stays.
+                    (Some(before), Some(after)) if repo.p.state_path(after).exists() => {
+                        let cur = repo.scan(&l2)?;
+                        let later: BTreeSet<String> = changes::file_changes(&repo.state_root(after)?, &cur.path)?
+                            .into_iter()
+                            .flat_map(|c| [Some(c.path.clone()), c.old_path.clone()])
+                            .flatten()
+                            .collect();
+                        repo.apply_delta(&repo.state_root(after)?, &repo.state_root(before)?, &repo.working(&l2), repo.own(&l2), &later, force)?;
+                    }
+                    (Some(before), _) => restore_working(repo, &l2, before)?,
+                    (None, _) => {}
                 }
                 repo.drop_stage(&l2)?;
             }
@@ -213,8 +228,7 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
             }
             (None, Some(l)) if alive => {
                 // The operation created the line: delete it (content saved first).
-                let saved = repo.save(ctx, l, "before undo", false, false)?;
-                wb = saved.map(|s| s.id).or(repo.last_auto(l)?.map(|s| s.id));
+                wb = repo.working_state(ctx, l, "before undo")?;
                 btrfs::delete_tree(&repo.working(l))?;
                 repo.drop_stage(l)?;
             }
