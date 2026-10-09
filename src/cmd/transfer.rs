@@ -12,7 +12,6 @@ use crate::privs::as_caller_fs;
 use crate::repo::{skip_path, Repo};
 use crate::revs;
 use crate::store::Project;
-use crate::outln;
 use anyhow::{bail, Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
@@ -91,7 +90,14 @@ fn state_files(root: &Path, tracked_only: bool) -> Result<Vec<String>> {
 
 /// Make `dst` (a caller folder) hold `to`. With `from` (the state it holds now), copy only the
 /// differences and the `stale` paths. Returns the paths skipped by the name rules.
-fn sync_folder(ctx: &Ctx, from: Option<&Path>, to: &Path, dst: &Path, stale: &[String], tracked: bool) -> Result<(usize, Vec<String>)> {
+fn sync_folder(
+    ctx: &Ctx,
+    from: Option<&Path>,
+    to: &Path,
+    dst: &Path,
+    stale: &[String],
+    tracked: bool,
+) -> Result<(usize, Vec<String>)> {
     let all = state_files(to, tracked)?;
     let bad = collisions(&all);
     let mut n = 0;
@@ -175,8 +181,10 @@ pub fn export(ctx: &Ctx, args: &[String]) -> Result<i32> {
         std::fs::create_dir_all(&dst)?;
         Ok(())
     })?;
-    let marker: Option<serde_json::Value> =
-        as_caller_fs(ctx, || Ok(std::fs::read(dst.join(MARKER)).ok())).ok().flatten().and_then(|d| serde_json::from_slice(&d).ok());
+    let marker: Option<serde_json::Value> = as_caller_fs(ctx, || Ok(std::fs::read(dst.join(MARKER)).ok()))
+        .ok()
+        .flatten()
+        .and_then(|d| serde_json::from_slice(&d).ok());
     let prev = marker
         .as_ref()
         .filter(|m| m["project"].as_str() == Some(h.repo.p.id.as_str()))
@@ -184,7 +192,10 @@ pub fn export(ctx: &Ctx, args: &[String]) -> Result<i32> {
         .filter(|s| h.repo.p.state_path(s).exists());
     let empty = as_caller_fs(ctx, || Ok(std::fs::read_dir(&dst)?.next().is_none()))?;
     if prev.is_none() && !empty && !a.has("-f") {
-        return Err(exit(1, format!("error: {} is not empty and was not exported by layr; use --force to write into it", dst.display())));
+        return Err(exit(
+            1,
+            format!("error: {} is not empty and was not exported by layr; use --force to write into it", dst.display()),
+        ));
     }
     let from = prev.as_ref().map(|p| h.repo.p.state_path(p));
     let (n, bad) = sync_folder(ctx, from.as_deref(), &to, &dst, &[], a.has("--tracked"))?;
@@ -244,9 +255,17 @@ pub fn slot(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 let empty = as_caller_fs(ctx, || Ok(std::fs::read_dir(&dst)?.next().is_none()))?;
                 if !empty {
                     if !a.has("-f") {
-                        return Err(exit(1, format!("error: slot {} is not empty and its state is unknown; use --force for a full copy", dst.display())));
+                        return Err(exit(
+                            1,
+                            format!(
+                                "error: slot {} is not empty and its state is unknown; use --force for a full copy",
+                                dst.display()
+                            ),
+                        ));
                     }
-                    let names: Vec<String> = as_caller_fs(ctx, || Ok(std::fs::read_dir(&dst)?.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect()))?;
+                    let names: Vec<String> = as_caller_fs(ctx, || {
+                        Ok(std::fs::read_dir(&dst)?.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+                    })?;
                     for n in names {
                         del_entry(ctx, &dst, &n)?;
                     }
@@ -259,7 +278,13 @@ pub fn slot(ctx: &Ctx, args: &[String]) -> Result<i32> {
             rec.data = serde_json::json!({"path": key, "state": state, "line": h.line.as_ref().map(|l| l.id.clone()), "stale": bad, "copied": n});
             repo.commit_record(ctx, rec)?;
             if !a.has("-q") {
-                outln!(ctx, "slot {} holds state {}: {n} path(s) copied in {:.2} s", dst.display(), ids::short(&state), started.elapsed().as_secs_f64());
+                outln!(
+                    ctx,
+                    "slot {} holds state {}: {n} path(s) copied in {:.2} s",
+                    dst.display(),
+                    ids::short(&state),
+                    started.elapsed().as_secs_f64()
+                );
             }
             if !bad.is_empty() {
                 outln!(ctx, "not copied (names differ only in case or Unicode form):");
@@ -284,7 +309,8 @@ pub fn slot(ctx: &Ctx, args: &[String]) -> Result<i32> {
             Ok(0)
         }
         "collect" => {
-            let (held_state, _) = held.ok_or_else(|| exit(1, "error: the slot holds no known state; run 'layr slot sync' first"))?;
+            let (held_state, _) =
+                held.ok_or_else(|| exit(1, "error: the slot holds no known state; run 'layr slot sync' first"))?;
             let base = repo.state_root(&held_state)?;
             let line = match a.get("--into") {
                 Some(n) => repo.line(n)?,
@@ -331,7 +357,17 @@ pub fn slot(ctx: &Ctx, args: &[String]) -> Result<i32> {
 /// held (base), the slot (theirs) and the line's current content (ours). If ours changed too,
 /// the result keeps both (text markers, or `<path>.slot-conflict` for binary files).
 #[allow(clippy::too_many_arguments)]
-fn collect(ctx: &Ctx, repo: &Repo, line: &Line, slot: &Path, key: &str, held: &str, base: &Path, paths: &[String], quiet: bool) -> Result<i32> {
+fn collect(
+    ctx: &Ctx,
+    repo: &Repo,
+    line: &Line,
+    slot: &Path,
+    key: &str,
+    held: &str,
+    base: &Path,
+    paths: &[String],
+    quiet: bool,
+) -> Result<i32> {
     let (_lock, w) = super::work::begin_change(ctx, repo, line)?;
     let line = repo.line(&line.id)?;
     let scan = repo.scan(&line)?;
@@ -378,7 +414,10 @@ fn collect(ctx: &Ctx, repo: &Repo, line: &Line, slot: &Path, key: &str, held: &s
             continue;
         }
         // Both changed.
-        let text = |r: &Path| fsutil::lmeta(r, p).map(|m| m.is_file()).unwrap_or(false) && !fsutil::is_binary(&fsutil::read_file(r, p).unwrap_or_default());
+        let text = |r: &Path| {
+            fsutil::lmeta(r, p).map(|m| m.is_file()).unwrap_or(false)
+                && !fsutil::is_binary(&fsutil::read_file(r, p).unwrap_or_default())
+        };
         if text(base) && text(&scan.path) && text(&tmp) {
             let ours = std::env::temp_dir().join(format!("layr-ours-{}", ids::new_id()));
             std::fs::copy(fsutil::safe_join(&scan.path, p)?, &ours)?;
@@ -408,7 +447,12 @@ fn collect(ctx: &Ctx, repo: &Repo, line: &Line, slot: &Path, key: &str, held: &s
     let mut rec = Record::new("slot.collect");
     rec.lines.insert(
         line.id.clone(),
-        crate::model::LineChange { before: Some(repo.line_state(&line, &line.head)), after: Some(repo.line_state(&line, &line.head)), working_before: w, working_after: None },
+        crate::model::LineChange {
+            before: Some(repo.line_state(&line, &line.head)),
+            after: Some(repo.line_state(&line, &line.head)),
+            working_before: w,
+            working_after: None,
+        },
     );
     rec.data = serde_json::json!({"path": key, "state": held, "copied": copied, "conflicts": conflicts});
     repo.commit_record(ctx, rec)?;
@@ -556,9 +600,23 @@ pub fn run_backup(ctx: &Ctx, repo: &Repo, root: &Path, full: bool) -> Result<(u3
         None => (1, proot.join("chain-0001"), None),
     };
     std::fs::create_dir_all(&dir)?;
-    let mut m = man.take().unwrap_or(Manifest { format: 1, project: repo.p.name.clone(), project_id: repo.p.id.clone(), chain: num, created: ids::now_ms(), items: vec![] });
+    let mut m = man.take().unwrap_or(Manifest {
+        format: 1,
+        project: repo.p.name.clone(),
+        project_id: repo.p.id.clone(),
+        chain: num,
+        created: ids::now_ms(),
+        items: vec![],
+    });
     let mut sent: BTreeSet<String> = m.items.iter().filter_map(|i| i.state.clone()).collect();
-    let mut order: Vec<(i64, String)> = repo.p.db.present_states()?.into_iter().filter(|(_, d)| !d).filter_map(|(id, _)| repo.p.db.state(&id).ok().flatten().map(|s| (s.time, id))).collect();
+    let mut order: Vec<(i64, String)> = repo
+        .p
+        .db
+        .present_states()?
+        .into_iter()
+        .filter(|(_, d)| !d)
+        .filter_map(|(id, _)| repo.p.db.state(&id).ok().flatten().map(|s| (s.time, id)))
+        .collect();
     order.sort();
     let mut count = 0;
     let mut last_sent: Option<String> = m.items.iter().rev().find_map(|i| i.state.clone());
@@ -574,7 +632,17 @@ pub fn run_backup(ctx: &Ctx, repo: &Repo, root: &Path, full: bool) -> Result<(u3
         compress_to(btrfs::send_command(pp.as_deref(), &repo.p.state_path(&id)), &dir.join(&file))?;
         let sha = fsutil::sha256_file(&dir.join(&file))?;
         let bytes = std::fs::metadata(dir.join(&file))?.len();
-        m.items.push(Item { seq, kind: "state".into(), state: Some(id.clone()), parent, file, sha256: sha, bytes, tips: vec![], time: ids::now_ms() });
+        m.items.push(Item {
+            seq,
+            kind: "state".into(),
+            state: Some(id.clone()),
+            parent,
+            file,
+            sha256: sha,
+            bytes,
+            tips: vec![],
+            time: ids::now_ms(),
+        });
         write_manifest(&dir, &m)?;
         sent.insert(id.clone());
         last_sent = Some(id);
@@ -583,13 +651,19 @@ pub fn run_backup(ctx: &Ctx, repo: &Repo, root: &Path, full: bool) -> Result<(u3
     // The git object store, as bundles (each one needs the previous ones).
     let gs = crate::gitbridge::store(repo);
     if gs.join("objects").is_dir() {
-        let tips: Vec<String> = crate::gitbridge::git_out(&gs, &["for-each-ref", "--format=%(objectname)"])?.lines().map(|s| s.to_string()).collect::<BTreeSet<_>>().into_iter().collect();
+        let tips: Vec<String> = crate::gitbridge::git_out(&gs, &["for-each-ref", "--format=%(objectname)"])?
+            .lines()
+            .map(|s| s.to_string())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
         let prev: Vec<String> = m.items.iter().filter(|i| i.kind == "git").flat_map(|i| i.tips.clone()).collect();
         let new: Vec<&String> = tips.iter().filter(|t| !prev.contains(t)).collect();
         if !tips.is_empty() && !new.is_empty() {
             let seq = next_seq(&m);
             let file = unique_name(&dir, &m, seq, "git.bundle");
-            let mut args = vec!["bundle".to_string(), "create".into(), dir.join(&file).to_string_lossy().into_owned(), "--all".into()];
+            let mut args =
+                vec!["bundle".to_string(), "create".into(), dir.join(&file).to_string_lossy().into_owned(), "--all".into()];
             for p in &prev {
                 args.push(format!("^{p}"));
             }
@@ -598,7 +672,17 @@ pub fn run_backup(ctx: &Ctx, repo: &Repo, root: &Path, full: bool) -> Result<(u3
                 File::open(dir.join(&file))?.sync_all()?;
                 let sha = fsutil::sha256_file(&dir.join(&file))?;
                 let bytes = std::fs::metadata(dir.join(&file))?.len();
-                m.items.push(Item { seq, kind: "git".into(), state: None, parent: None, file, sha256: sha, bytes, tips: tips.clone(), time: ids::now_ms() });
+                m.items.push(Item {
+                    seq,
+                    kind: "git".into(),
+                    state: None,
+                    parent: None,
+                    file,
+                    sha256: sha,
+                    bytes,
+                    tips: tips.clone(),
+                    time: ids::now_ms(),
+                });
                 write_manifest(&dir, &m)?;
             }
         }
@@ -614,7 +698,17 @@ pub fn run_backup(ctx: &Ctx, repo: &Repo, root: &Path, full: bool) -> Result<(u3
     // Only the newest log copy is needed.
     let old_logs: Vec<String> = m.items.iter().filter(|i| i.kind == "logs").map(|i| i.file.clone()).collect();
     m.items.retain(|i| i.kind != "logs");
-    m.items.push(Item { seq, kind: "logs".into(), state: None, parent: None, file, sha256: sha, bytes, tips: vec![], time: ids::now_ms() });
+    m.items.push(Item {
+        seq,
+        kind: "logs".into(),
+        state: None,
+        parent: None,
+        file,
+        sha256: sha,
+        bytes,
+        tips: vec![],
+        time: ids::now_ms(),
+    });
     write_manifest(&dir, &m)?;
     for f in old_logs {
         if safe_item_name(&f) && m.items.iter().all(|i| i.file != f) {
@@ -684,7 +778,14 @@ pub fn backup(ctx: &Ctx, args: &[String]) -> Result<i32> {
                         Ok(m) => {
                             let states = m.items.iter().filter(|i| i.kind == "state").count();
                             let bytes: u64 = m.items.iter().map(|i| i.bytes).sum();
-                            outln!(ctx, "{}\tchain {}\t{states} states\t{:.1} MiB\t{}", m.project, m.chain, bytes as f64 / 1048576.0, if sub == "verify" { "ok" } else { "" });
+                            outln!(
+                                ctx,
+                                "{}\tchain {}\t{states} states\t{:.1} MiB\t{}",
+                                m.project,
+                                m.chain,
+                                bytes as f64 / 1048576.0,
+                                if sub == "verify" { "ok" } else { "" }
+                            );
                         }
                         Err(err) => {
                             bad += 1;
@@ -699,7 +800,10 @@ pub fn backup(ctx: &Ctx, args: &[String]) -> Result<i32> {
             if !ctx.caller.is_root() {
                 return Err(exit(1, "error: restore needs root (it receives btrfs streams)"));
             }
-            let root = caller_path(ctx, a.pos.first().ok_or_else(|| exit(128, "usage: layr backup restore <folder> [--as <project>] [--chain N]"))?);
+            let root = caller_path(
+                ctx,
+                a.pos.first().ok_or_else(|| exit(128, "usage: layr backup restore <folder> [--as <project>] [--chain N]"))?,
+            );
             restore(ctx, &root, a.get("--as"), a.get("--chain").map(|c| c.parse()).transpose()?, a.has("-q"))
         }
         _ => unreachable!(),
@@ -709,7 +813,11 @@ pub fn backup(ctx: &Ctx, args: &[String]) -> Result<i32> {
 fn restore(ctx: &Ctx, root: &Path, as_name: Option<&str>, chain: Option<u32>, quiet: bool) -> Result<i32> {
     // The folder of one project (or the backup root with one project in it).
     let proot = if chain_dirs(root)?.is_empty() {
-        let mut v: Vec<PathBuf> = std::fs::read_dir(root)?.flatten().map(|e| e.path()).filter(|p| !chain_dirs(p).unwrap_or_default().is_empty()).collect();
+        let mut v: Vec<PathBuf> = std::fs::read_dir(root)?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| !chain_dirs(p).unwrap_or_default().is_empty())
+            .collect();
         if v.len() != 1 {
             bail!("{} holds {} projects; name one project folder", root.display(), v.len());
         }
@@ -733,7 +841,8 @@ fn restore(ctx: &Ctx, root: &Path, as_name: Option<&str>, chain: Option<u32>, qu
             match i.kind.as_str() {
                 "state" => {
                     let z = Command::new("zstd").args(["-q", "-d", "-c"]).arg(&f).stdout(Stdio::piped()).spawn()?;
-                    let st = Command::new("btrfs").args(["receive", "-q"]).arg(p.states_dir()).stdin(z.stdout.unwrap()).status()?;
+                    let st =
+                        Command::new("btrfs").args(["receive", "-q"]).arg(p.states_dir()).stdin(z.stdout.unwrap()).status()?;
                     if !st.success() {
                         bail!("btrfs receive of {} failed", i.file);
                     }
@@ -752,7 +861,8 @@ fn restore(ctx: &Ctx, root: &Path, as_name: Option<&str>, chain: Option<u32>, qu
                 }
                 "logs" => {
                     let z = Command::new("zstd").args(["-q", "-d", "-c"]).arg(&f).stdout(Stdio::piped()).spawn()?;
-                    let st = Command::new("tar").arg("-C").arg(p.log_dir()).arg("-xf").arg("-").stdin(z.stdout.unwrap()).status()?;
+                    let st =
+                        Command::new("tar").arg("-C").arg(p.log_dir()).arg("-xf").arg("-").stdin(z.stdout.unwrap()).status()?;
                     if !st.success() {
                         bail!("log restore failed");
                     }
@@ -785,7 +895,13 @@ fn restore(ctx: &Ctx, root: &Path, as_name: Option<&str>, chain: Option<u32>, qu
         if !has_auto {
             args.push("--head".into());
         }
-        let mut sub = Ctx { store: crate::store::Store::open(&ctx.store.root)?, caller: ctx.caller.clone(), cwd: repo.p.dir.clone(), env: ctx.env.clone(), out: std::cell::RefCell::new(Box::new(std::io::sink())) };
+        let mut sub = Ctx {
+            store: crate::store::Store::open(&ctx.store.root)?,
+            caller: ctx.caller.clone(),
+            cwd: repo.p.dir.clone(),
+            env: ctx.env.clone(),
+            out: std::cell::RefCell::new(Box::new(std::io::sink())),
+        };
         sub.env.insert("LAYR_PROJECT".into(), name.clone());
         sub.env.remove("LAYR_LINE");
         if super::branch::adopt(&sub, &args).is_ok() {
@@ -793,7 +909,14 @@ fn restore(ctx: &Ctx, root: &Path, as_name: Option<&str>, chain: Option<u32>, qu
         }
     }
     if !quiet {
-        outln!(ctx, "restored project {name} from {}: {n} state(s), {} line(s) [{}] in {:.1} s", dir.display(), adopted.len(), adopted.join(", "), started.elapsed().as_secs_f64());
+        outln!(
+            ctx,
+            "restored project {name} from {}: {n} state(s), {} line(s) [{}] in {:.1} s",
+            dir.display(),
+            adopted.len(),
+            adopted.join(", "),
+            started.elapsed().as_secs_f64()
+        );
     }
     let _ = File::open(&dir)?.read(&mut [0u8; 0]);
     Ok(0)

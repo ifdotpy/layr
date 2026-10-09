@@ -19,6 +19,7 @@ pub enum FType {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Meta {
     pub ftype: FType,
     pub mode: u32,
@@ -110,11 +111,8 @@ pub fn read_link(root: &Path, rel: &str) -> Result<String> {
 /// Read a regular file (not following links).
 pub fn read_file(root: &Path, rel: &str) -> Result<Vec<u8>> {
     let p = safe_join(root, rel)?;
-    let mut f = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(&p)
-        .with_context(|| format!("open {}", p.display()))?;
+    let mut f =
+        OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(&p).with_context(|| format!("open {}", p.display()))?;
     let mut v = Vec::new();
     f.read_to_end(&mut v)?;
     Ok(v)
@@ -131,11 +129,7 @@ pub fn entry_bytes(root: &Path, rel: &str) -> Result<Vec<u8>> {
 }
 
 fn open_ro(p: &Path) -> Result<File> {
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(p)
-        .with_context(|| format!("open {}", p.display()))
+    OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(p).with_context(|| format!("open {}", p.display()))
 }
 
 fn same_range(a: &mut File, b: &mut File, off: u64, len: u64) -> Result<bool> {
@@ -318,7 +312,11 @@ pub fn copy_entry(src_root: &Path, src_rel: &str, dst_root: &Path, dst_rel: &str
 
 fn update_in_place(src: &Path, dst: &Path, m: &fs::Metadata, own: Option<(u32, u32)>) -> Result<()> {
     let s = open_ro(src)?;
-    let d = OpenOptions::new().write(true).custom_flags(libc::O_NOFOLLOW).open(dst).with_context(|| format!("open {}", dst.display()))?;
+    let d = OpenOptions::new()
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(dst)
+        .with_context(|| format!("open {}", dst.display()))?;
     d.set_len(0)?;
     if crate::btrfs::clone_file(&s, &d).is_err() {
         let mut s2 = open_ro(src)?;
@@ -442,11 +440,6 @@ pub fn git_blob_id(data: &[u8]) -> String {
     hex::encode(h.finalize())
 }
 
-pub fn sha256_hex(data: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    hex::encode(Sha256::digest(data))
-}
-
 pub fn sha256_file(p: &Path) -> Result<String> {
     use sha2::{Digest, Sha256};
     let mut f = File::open(p)?;
@@ -486,7 +479,9 @@ pub fn open_dir_nofollow(path: &Path) -> Result<File> {
 pub fn read_at(dir: &File, name: &str) -> Option<Vec<u8>> {
     use std::os::fd::{AsRawFd, FromRawFd};
     let c = cstr(name).ok()?;
-    let fd = unsafe { libc::openat(dir.as_raw_fd(), c.as_ptr(), libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK) };
+    let fd = unsafe {
+        libc::openat(dir.as_raw_fd(), c.as_ptr(), libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+    };
     if fd < 0 {
         return None;
     }
@@ -510,7 +505,12 @@ pub fn replace_at(dir: &File, name: &str, content: &mut dyn FnMut(&File) -> Resu
         libc::unlinkat(dir.as_raw_fd(), ct.as_ptr(), 0);
     }
     let fd = unsafe {
-        libc::openat(dir.as_raw_fd(), ct.as_ptr(), libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC, 0o644)
+        libc::openat(
+            dir.as_raw_fd(),
+            ct.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o644,
+        )
     };
     if fd < 0 {
         return Err(anyhow!("create {tmp}: {}", std::io::Error::last_os_error()));

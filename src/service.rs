@@ -23,7 +23,7 @@ const MAX_REQ: usize = 4 << 20;
 
 fn send_with_fds(sock: &UnixStream, data: &[u8], fds: &[RawFd]) -> Result<()> {
     unsafe {
-        let space = libc::CMSG_SPACE((fds.len() * std::mem::size_of::<RawFd>()) as u32) as usize;
+        let space = libc::CMSG_SPACE(std::mem::size_of_val(fds) as u32) as usize;
         let mut cbuf = vec![0u8; space];
         let mut iov = libc::iovec { iov_base: data.as_ptr() as *mut _, iov_len: data.len() };
         let mut msg: libc::msghdr = std::mem::zeroed();
@@ -34,8 +34,8 @@ fn send_with_fds(sock: &UnixStream, data: &[u8], fds: &[RawFd]) -> Result<()> {
         let c = libc::CMSG_FIRSTHDR(&msg);
         (*c).cmsg_level = libc::SOL_SOCKET;
         (*c).cmsg_type = libc::SCM_RIGHTS;
-        (*c).cmsg_len = libc::CMSG_LEN((fds.len() * std::mem::size_of::<RawFd>()) as u32) as _;
-        std::ptr::copy_nonoverlapping(fds.as_ptr() as *const u8, libc::CMSG_DATA(c), fds.len() * std::mem::size_of::<RawFd>());
+        (*c).cmsg_len = libc::CMSG_LEN(std::mem::size_of_val(fds) as u32) as _;
+        std::ptr::copy_nonoverlapping(fds.as_ptr() as *const u8, libc::CMSG_DATA(c), std::mem::size_of_val(fds));
         let n = libc::sendmsg(sock.as_raw_fd(), &msg, 0);
         if n < 0 {
             return Err(std::io::Error::last_os_error().into());
@@ -82,7 +82,10 @@ fn recv_with_fds(sock: &UnixStream, buf: &mut [u8], max_fds: usize) -> Result<(u
 pub fn forward(argv: &[String]) -> Result<i32> {
     let path = socket_path();
     let sock = UnixStream::connect(&path).map_err(|e| {
-        anyhow!("cannot reach the layr service at {} ({e}). Start it as root with 'layr daemon', or run layr as root.", path.display())
+        anyhow!(
+            "cannot reach the layr service at {} ({e}). Start it as root with 'layr daemon', or run layr as root.",
+            path.display()
+        )
     })?;
     let cwd = std::env::current_dir()?;
     let env: HashMap<String, String> = std::env::vars().collect();
@@ -99,7 +102,9 @@ pub fn forward(argv: &[String]) -> Result<i32> {
 fn peer_uid(sock: &UnixStream) -> Result<(u32, u32, i32)> {
     let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
     let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
-    let rc = unsafe { libc::getsockopt(sock.as_raw_fd(), libc::SOL_SOCKET, libc::SO_PEERCRED, &mut cred as *mut _ as *mut _, &mut len) };
+    let rc = unsafe {
+        libc::getsockopt(sock.as_raw_fd(), libc::SOL_SOCKET, libc::SO_PEERCRED, &mut cred as *mut _ as *mut _, &mut len)
+    };
     if rc != 0 {
         return Err(std::io::Error::last_os_error().into());
     }
@@ -202,7 +207,13 @@ fn periodic(root: &Path, hourly: bool) {
             Ok(s) => s,
             Err(_) => return,
         };
-        let ctx = Ctx { store, caller: caller.clone(), cwd: PathBuf::from("/"), env: HashMap::new(), out: std::cell::RefCell::new(Box::new(std::io::sink())) };
+        let ctx = Ctx {
+            store,
+            caller: caller.clone(),
+            cwd: PathBuf::from("/"),
+            env: HashMap::new(),
+            out: std::cell::RefCell::new(Box::new(std::io::sink())),
+        };
         let repo = match crate::repo::Repo::open(&ctx, &name) {
             Ok(r) => r,
             Err(_) => continue,
@@ -317,4 +328,3 @@ pub fn daemon(args: &[String]) -> Result<i32> {
         }
     }
 }
-

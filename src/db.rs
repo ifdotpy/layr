@@ -210,7 +210,8 @@ impl Db {
             }
             "save.layers" => {
                 if let Some(st) = s("state") {
-                    let raw: Option<String> = tx.query_row("SELECT rec FROM states WHERE id=?1", params![st], |r| r.get(0)).optional()?;
+                    let raw: Option<String> =
+                        tx.query_row("SELECT rec FROM states WHERE id=?1", params![st], |r| r.get(0)).optional()?;
                     if let Some(raw) = raw {
                         let mut v: serde_json::Value = serde_json::from_str(&raw)?;
                         v["layers"] = d.get("layers").cloned().unwrap_or_default();
@@ -262,23 +263,9 @@ impl Db {
         Ok(v)
     }
 
-    pub fn all_states(&self) -> Result<Vec<StateRec>> {
-        let mut st = self.conn.prepare("SELECT rec FROM states ORDER BY time")?;
-        let v = st.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
-        v.into_iter().map(|r| Ok(serde_json::from_str(&r)?)).collect()
-    }
-
     pub fn present_states(&self) -> Result<Vec<(String, bool)>> {
         let mut st = self.conn.prepare("SELECT id, deleted FROM states WHERE present=1")?;
-        let v = st
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0)))?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(v)
-    }
-
-    pub fn children(&self, id: &str) -> Result<Vec<String>> {
-        let mut st = self.conn.prepare("SELECT state FROM parents WHERE parent=?1")?;
-        let v = st.query_map(params![id], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+        let v = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0)))?.collect::<Result<Vec<_>, _>>()?;
         Ok(v)
     }
 
@@ -312,8 +299,7 @@ impl Db {
     }
 
     pub fn lines(&self) -> Result<Vec<Line>> {
-        let mut st =
-            self.conn.prepare("SELECT id, name, owner, machine, head, grp FROM lines WHERE deleted=0 ORDER BY name")?;
+        let mut st = self.conn.prepare("SELECT id, name, owner, machine, head, grp FROM lines WHERE deleted=0 ORDER BY name")?;
         let v = st.query_map([], Self::line_row)?.collect::<Result<Vec<_>, _>>()?;
         Ok(v)
     }
@@ -341,9 +327,7 @@ impl Db {
 
     pub fn tags(&self) -> Result<Vec<(String, String, Option<String>)>> {
         let mut st = self.conn.prepare("SELECT name, state, message FROM tags ORDER BY name")?;
-        let v = st
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-            .collect::<Result<Vec<_>, _>>()?;
+        let v = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<Result<Vec<_>, _>>()?;
         Ok(v)
     }
 
@@ -361,10 +345,7 @@ impl Db {
     }
 
     pub fn git_commit_of(&self, state: &str) -> Result<Option<String>> {
-        Ok(self
-            .conn
-            .query_row("SELECT gcommit FROM git_map WHERE state=?1 LIMIT 1", params![state], |r| r.get(0))
-            .optional()?)
+        Ok(self.conn.query_row("SELECT gcommit FROM git_map WHERE state=?1 LIMIT 1", params![state], |r| r.get(0)).optional()?)
     }
 
     pub fn state_of_commit(&self, prefix: &str) -> Result<Vec<String>> {
@@ -374,8 +355,7 @@ impl Db {
     }
 
     pub fn exports(&self) -> Result<Vec<(String, String, String, String, String, String)>> {
-        let mut st =
-            self.conn.prepare("SELECT id, state, remote, branch, gcommit, status FROM exports ORDER BY time")?;
+        let mut st = self.conn.prepare("SELECT id, state, remote, branch, gcommit, status FROM exports ORDER BY time")?;
         let v = st
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?
             .collect::<Result<Vec<_>, _>>()?;
@@ -437,14 +417,11 @@ impl Db {
         Ok(self.conn.query_row("SELECT public_key FROM machines WHERE id=?1", params![id], |r| r.get(0)).optional()?)
     }
 
-    pub fn machine_name(&self, id: &str) -> Result<Option<String>> {
-        Ok(self.conn.query_row("SELECT name FROM machines WHERE id=?1", params![id], |r| r.get(0)).optional()?)
-    }
-
     /// A machine by its short id (the display form, random part first), full id or a unique name.
     pub fn machine_by_name(&self, name: &str) -> Result<Option<String>> {
         let all = self.machines()?;
-        let by_id: Vec<&(String, String)> = all.iter().filter(|(id, _)| id == name || (name.len() >= 4 && ids::display(id).starts_with(name))).collect();
+        let by_id: Vec<&(String, String)> =
+            all.iter().filter(|(id, _)| id == name || (name.len() >= 4 && ids::display(id).starts_with(name))).collect();
         if by_id.len() == 1 {
             return Ok(Some(by_id[0].0.clone()));
         }
@@ -492,9 +469,7 @@ impl Db {
 
     pub fn max_seqs(&self) -> Result<Vec<(String, u64)>> {
         let mut st = self.conn.prepare("SELECT machine, MAX(seq) FROM records GROUP BY machine")?;
-        let v = st
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64)))?
-            .collect::<Result<Vec<_>, _>>()?;
+        let v = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64)))?.collect::<Result<Vec<_>, _>>()?;
         Ok(v)
     }
 

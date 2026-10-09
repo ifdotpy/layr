@@ -13,7 +13,7 @@ use crate::model::Conflict;
 use crate::repo::skip_path;
 use anyhow::{bail, Context, Result};
 use ignore::gitignore::GitignoreBuilder;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -175,8 +175,12 @@ impl<'a, 'b> Ctx<'a, 'b> {
         let label = match kind {
             "content" => format!("CONFLICT (content): Merge conflict in {path}"),
             "add/add" => format!("CONFLICT (add/add): Merge conflict in {path}"),
-            "modify/delete" => format!("CONFLICT (modify/delete): {path} deleted in {} and modified in HEAD.", self.i.theirs_label),
-            "delete/modify" => format!("CONFLICT (modify/delete): {path} deleted in HEAD and modified in {}.", self.i.theirs_label),
+            "modify/delete" => {
+                format!("CONFLICT (modify/delete): {path} deleted in {} and modified in HEAD.", self.i.theirs_label)
+            }
+            "delete/modify" => {
+                format!("CONFLICT (modify/delete): {path} deleted in HEAD and modified in {}.", self.i.theirs_label)
+            }
             "binary" => format!("CONFLICT (binary): {path} changed on both sides; kept HEAD"),
             k => format!("CONFLICT ({k}): {path}"),
         };
@@ -319,12 +323,11 @@ pub fn merge(i: &Input) -> Result<Outcome> {
         if !parent.is_empty()
             && fsutil::lmeta(i.base, &parent).map(|m| m.is_dir()).unwrap_or(false)
             && fsutil::lmeta(i.ours, &parent).is_none()
+            && !matches!(ours.at(&parent), OursAt::Moved(_))
         {
-            if !matches!(ours.at(&parent), OursAt::Moved(_)) {
-                c.conflict(&p, "directory deleted by ours, theirs changed or added a file");
-                c.take_theirs(&p, &p)?;
-                continue;
-            }
+            c.conflict(&p, "directory deleted by ours, theirs changed or added a file");
+            c.take_theirs(&p, &p)?;
+            continue;
         }
         if a_b.is_none() {
             match &a_r {
@@ -397,7 +400,8 @@ fn add_add(c: &mut Ctx, p: &str, q: &str) -> Result<()> {
         if driver == "text" || driver == "union" {
             let empty = tempfile_path("base")?;
             std::fs::write(&empty, b"")?;
-            let r = run_merge_file(i, &fsutil::safe_join(i.result, q)?, &empty, &fsutil::safe_join(i.theirs, p)?, driver == "union");
+            let r =
+                run_merge_file(i, &fsutil::safe_join(i.result, q)?, &empty, &fsutil::safe_join(i.theirs, p)?, driver == "union");
             let _ = std::fs::remove_file(&empty);
             c.out.changed.insert(q.to_string());
             c.out.messages.push(format!("Auto-merging {q}"));
@@ -721,13 +725,4 @@ fn block_merge(
     }
     dst.sync_all()?;
     Ok(true)
-}
-
-/// For reports: conflicts grouped by kind.
-pub fn summarize(conflicts: &[Conflict]) -> BTreeMap<String, usize> {
-    let mut m = BTreeMap::new();
-    for c in conflicts {
-        *m.entry(c.kind.clone()).or_insert(0) += 1;
-    }
-    m
 }

@@ -145,14 +145,27 @@ pub fn fetch(ctx: &Ctx, repo: &Repo, remote: &str) -> Result<Vec<(String, String
         }
     }
     let mut c = base_cmd(&tmp);
-    c.args(["fetch", "-q", "--no-tags", "--no-write-fetch-head"]).arg(&url).arg(format!("+refs/heads/*:refs/remotes/{remote}/*")).arg("+refs/tags/*:refs/tags/*");
+    c.args(["fetch", "-q", "--no-tags", "--no-write-fetch-head"])
+        .arg(&url)
+        .arg(format!("+refs/heads/*:refs/remotes/{remote}/*"))
+        .arg("+refs/tags/*:refs/tags/*");
     as_caller(ctx, &mut c);
     let out = c.stdin(Stdio::null()).output().context("run git fetch")?;
     if !out.status.success() {
         let _ = std::fs::remove_dir_all(&tmp);
         bail!("git fetch {url} failed: {}", String::from_utf8_lossy(&out.stderr).trim());
     }
-    let r = git_out(&s, &["fetch", "-q", "--no-write-fetch-head", tmp.to_str().unwrap(), &format!("+refs/remotes/{remote}/*:refs/remotes/{remote}/*"), "+refs/tags/*:refs/tags/*"]);
+    let r = git_out(
+        &s,
+        &[
+            "fetch",
+            "-q",
+            "--no-write-fetch-head",
+            tmp.to_str().unwrap(),
+            &format!("+refs/remotes/{remote}/*:refs/remotes/{remote}/*"),
+            "+refs/tags/*:refs/tags/*",
+        ],
+    );
     let _ = std::fs::remove_dir_all(&tmp);
     r?;
     let list = git_out(&s, &["for-each-ref", "--format=%(refname:strip=2) %(objectname)", &format!("refs/remotes/{remote}/")])?;
@@ -258,7 +271,11 @@ fn materialize(s: &Path, commit: &str, dst: &Path, paths: Option<&[String]>, own
         }
         let mut header = String::new();
         stdout.read_line(&mut header)?;
-        let size: usize = header.split_whitespace().nth(2).and_then(|x| x.parse().ok()).ok_or_else(|| anyhow!("bad cat-file header {header}"))?;
+        let size: usize = header
+            .split_whitespace()
+            .nth(2)
+            .and_then(|x| x.parse().ok())
+            .ok_or_else(|| anyhow!("bad cat-file header {header}"))?;
         let mut data = vec![0u8; size];
         stdout.read_exact(&mut data)?;
         let mut nl = [0u8; 1];
@@ -311,7 +328,12 @@ pub fn import_commit(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str, author
             Some((pst, pc)) => {
                 crate::btrfs::snapshot(&repo.state_root(pst)?, &work, false)?;
                 let out = base_cmd(&s).args(["diff", "--name-only", "-z", "--no-renames", pc, commit]).output()?;
-                let paths: Vec<String> = out.stdout.split(|b| *b == 0).filter(|x| !x.is_empty()).map(|x| String::from_utf8_lossy(x).into_owned()).collect();
+                let paths: Vec<String> = out
+                    .stdout
+                    .split(|b| *b == 0)
+                    .filter(|x| !x.is_empty())
+                    .map(|x| String::from_utf8_lossy(x).into_owned())
+                    .collect();
                 materialize(&s, commit, &work, Some(&paths), None)?;
                 parents.push(pst.clone());
             }
@@ -359,7 +381,10 @@ pub fn build_index(repo: &Repo, state: &str, commit: &str, prev_state: Option<&s
     let prev_idx = prev_state.map(|p| index_path(repo, p)).filter(|p| p.exists());
     let run = |args: &[&str], input: Option<&[u8]>| -> Result<()> {
         let mut c = base_cmd(&s);
-        c.env("GIT_INDEX_FILE", &idx).env("GIT_WORK_TREE", &root).args(["-c", "core.checkStat=minimal", "-c", "core.trustctime=false"]).args(args);
+        c.env("GIT_INDEX_FILE", &idx)
+            .env("GIT_WORK_TREE", &root)
+            .args(["-c", "core.checkStat=minimal", "-c", "core.trustctime=false"])
+            .args(args);
         c.stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::null()).stderr(Stdio::piped());
         let mut ch = c.spawn()?;
         if let Some(d) = input {
@@ -466,7 +491,13 @@ pub fn make_commit(repo: &Repo, state: &StateRec, message: Option<&str>) -> Resu
             input.push(0);
         }
         let mut c = base_cmd(&s);
-        c.env("GIT_INDEX_FILE", &tmp_idx).env("GIT_WORK_TREE", &root).args(["update-index", "--add", "--remove", "-z", "--stdin"]);
+        c.env("GIT_INDEX_FILE", &tmp_idx).env("GIT_WORK_TREE", &root).args([
+            "update-index",
+            "--add",
+            "--remove",
+            "-z",
+            "--stdin",
+        ]);
         c.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped());
         let mut ch = c.spawn()?;
         ch.stdin.take().unwrap().write_all(&input)?;
@@ -474,11 +505,19 @@ pub fn make_commit(repo: &Repo, state: &StateRec, message: Option<&str>) -> Resu
         if !out.status.success() {
             bail!("git update-index failed: {}", String::from_utf8_lossy(&out.stderr));
         }
-        let tree = String::from_utf8_lossy(&base_cmd(&s).env("GIT_INDEX_FILE", &tmp_idx).args(["write-tree"]).output()?.stdout).trim().to_string();
+        let tree = String::from_utf8_lossy(&base_cmd(&s).env("GIT_INDEX_FILE", &tmp_idx).args(["write-tree"]).output()?.stdout)
+            .trim()
+            .to_string();
         if tree.is_empty() {
             bail!("git write-tree failed");
         }
-        let msg = message.map(|m| m.to_string()).unwrap_or_else(|| if state.message.is_empty() { "layr state".to_string() } else { state.message.clone() });
+        let msg = message.map(|m| m.to_string()).unwrap_or_else(|| {
+            if state.message.is_empty() {
+                "layr state".to_string()
+            } else {
+                state.message.clone()
+            }
+        });
         let secs = state.time / 1000;
         let date = format!("{secs} +0000");
         let mut c = base_cmd(&s);
@@ -578,7 +617,8 @@ pub fn make_git_layer(repo: &Repo, line: &Line, state: &str) -> Result<()> {
         Some((_, c)) => std::fs::write(g.join("HEAD"), format!("{c}\n"))?,
         None => std::fs::write(g.join("HEAD"), "ref: refs/heads/main\n")?,
     }
-    let refs = git_out(&s, &["for-each-ref", "--format=%(objectname) %(refname)", "refs/tags", "refs/remotes"]).unwrap_or_default();
+    let refs =
+        git_out(&s, &["for-each-ref", "--format=%(objectname) %(refname)", "refs/tags", "refs/remotes"]).unwrap_or_default();
     let mut packed = String::from("# pack-refs with: peeled fully-peeled sorted \n");
     for l in refs.lines() {
         packed.push_str(l);

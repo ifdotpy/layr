@@ -6,7 +6,6 @@ use crate::ctx::{Caller, Ctx};
 use crate::ids;
 use crate::model::{LineChange, Record, StateKind};
 use crate::revs;
-use crate::outln;
 use anyhow::Result;
 
 fn owner_arg(ctx: &Ctx, v: Option<&str>) -> Result<u32> {
@@ -79,7 +78,15 @@ pub fn branch(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let last = repo.working_state(ctx, &l, "before line delete")?;
             // Record first, then delete the folder: the content is in the saved state.
             let mut rec = Record::new("line.delete");
-            rec.lines.insert(l.id.clone(), LineChange { before: Some(repo.line_state(&l, &l.head)), after: None, working_before: last.clone(), working_after: None });
+            rec.lines.insert(
+                l.id.clone(),
+                LineChange {
+                    before: Some(repo.line_state(&l, &l.head)),
+                    after: None,
+                    working_before: last.clone(),
+                    working_after: None,
+                },
+            );
             rec.data = serde_json::json!({"name": l.name, "final_state": last});
             repo.commit_record(ctx, rec)?;
             crate::btrfs::delete_tree(&repo.working(&l))?;
@@ -105,7 +112,15 @@ pub fn branch(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let mut after = repo.line_state(&l, &l.head);
         after.name = new.clone();
         let mut rec = Record::new("line.rename");
-        rec.lines.insert(l.id.clone(), LineChange { before: Some(repo.line_state(&l, &l.head)), after: Some(after), working_before: None, working_after: None });
+        rec.lines.insert(
+            l.id.clone(),
+            LineChange {
+                before: Some(repo.line_state(&l, &l.head)),
+                after: Some(after),
+                working_before: None,
+                working_after: None,
+            },
+        );
         rec.data = serde_json::json!({"from": old, "to": new});
         repo.commit_record(ctx, rec)?;
         outln!(ctx, "Renamed line {old} to {new}: {}", repo.p.line_path(&new).display());
@@ -162,8 +177,18 @@ pub fn branch(ctx: &Ctx, args: &[String]) -> Result<i32> {
             if a.has("-v") {
                 let s = repo.state(&l.head)?;
                 let owner = Caller::from_uid(l.owner).user;
-                let here_m = if l.machine == repo.p.store.machine.id { String::new() } else { format!(" [machine {}]", &ids::display(&l.machine)[..8]) };
-                outln!(ctx, "{mark}{:<20} {} {} ({owner}){here_m}", l.name, ids::short(&l.head), s.message.lines().next().unwrap_or(""));
+                let here_m = if l.machine == repo.p.store.machine.id {
+                    String::new()
+                } else {
+                    format!(" [machine {}]", &ids::display(&l.machine)[..8])
+                };
+                outln!(
+                    ctx,
+                    "{mark}{:<20} {} {} ({owner}){here_m}",
+                    l.name,
+                    ids::short(&l.head),
+                    s.message.lines().next().unwrap_or("")
+                );
             } else {
                 outln!(ctx, "{mark}{}", l.name);
             }
@@ -197,7 +222,10 @@ pub fn switch(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let h = here(ctx)?;
     match a.pos.first() {
         Some(n) => match h.repo.line(n) {
-            Ok(l) => Err(exit(1, format!("Lines are folders: run 'cd {}' to work in line '{}'.", h.repo.working(&l).display(), l.name))),
+            Ok(l) => Err(exit(
+                1,
+                format!("Lines are folders: run 'cd {}' to work in line '{}'.", h.repo.working(&l).display(), l.name),
+            )),
             Err(_) => Err(exit(128, format!("fatal: invalid reference: {n}"))),
         },
         None => Err(exit(128, "fatal: missing line name")),
@@ -205,7 +233,14 @@ pub fn switch(ctx: &Ctx, args: &[String]) -> Result<i32> {
 }
 
 pub fn checkout(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let spec = Spec::new().value("-b").value("-B").flag("--ours").flag("--theirs").flag("-f|--force").flag("-q|--quiet").flag("--detach");
+    let spec = Spec::new()
+        .value("-b")
+        .value("-B")
+        .flag("--ours")
+        .flag("--theirs")
+        .flag("-f|--force")
+        .flag("-q|--quiet")
+        .flag("--detach");
     let a = parse(&spec, args)?;
     if let Some(n) = a.get("-b").or(a.get("-B")) {
         let mut v = vec![n.to_string()];
@@ -240,7 +275,10 @@ pub fn checkout(ctx: &Ctx, args: &[String]) -> Result<i32> {
             outln!(ctx, "Already on '{}'", l.name);
             return Ok(0);
         }
-        return Err(exit(1, format!("Lines are folders: run 'cd {}' to work in line '{}'.", h.repo.working(&l).display(), l.name)));
+        return Err(exit(
+            1,
+            format!("Lines are folders: run 'cd {}' to work in line '{}'.", h.repo.working(&l).display(), l.name),
+        ));
     }
     if revs::resolve(&h.repo, Some(&line), &target).is_ok() {
         // Could also be a path.
@@ -291,7 +329,15 @@ pub fn adopt(ctx: &Ctx, args: &[String]) -> Result<i32> {
         return Err(e);
     }
     let mut rec = Record::new("line.adopt");
-    rec.lines.insert(l.id.clone(), LineChange { before: Some(repo.line_state(&l, &l.head)), after: Some(repo.line_state(&moved, &l.head)), working_before: None, working_after: Some(start.clone()) });
+    rec.lines.insert(
+        l.id.clone(),
+        LineChange {
+            before: Some(repo.line_state(&l, &l.head)),
+            after: Some(repo.line_state(&moved, &l.head)),
+            working_before: None,
+            working_after: Some(start.clone()),
+        },
+    );
     rec.data = serde_json::json!({"name": l.name, "from_state": start});
     repo.commit_record(ctx, rec)?;
     outln!(ctx, "Line {} now has a working folder here: {} (content of {})", l.name, w.display(), ids::short(&start));
@@ -299,7 +345,13 @@ pub fn adopt(ctx: &Ctx, args: &[String]) -> Result<i32> {
 }
 
 pub fn tag(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let spec = Spec::new().flag("-a|--annotate").value("-m|--message").flag("-d|--delete").flag("-l|--list").flag("-f|--force").optional("-n");
+    let spec = Spec::new()
+        .flag("-a|--annotate")
+        .value("-m|--message")
+        .flag("-d|--delete")
+        .flag("-l|--list")
+        .flag("-f|--force")
+        .optional("-n");
     let a = parse(&spec, args)?;
     let h = here(ctx)?;
     let repo = &h.repo;

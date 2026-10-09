@@ -26,12 +26,6 @@ impl Change {
     pub fn src(&self) -> &str {
         self.old_path.as_deref().unwrap_or(&self.path)
     }
-    pub fn is_add(&self) -> bool {
-        self.old.is_none() && self.new.is_some()
-    }
-    pub fn is_delete(&self) -> bool {
-        self.old.is_some() && self.new.is_none()
-    }
     pub fn is_rename(&self) -> bool {
         self.old_path.is_some() && self.old.is_some() && self.new.is_some()
     }
@@ -51,16 +45,13 @@ fn build(parent: &Path, child: &Path, entries: Vec<stream::Entry>) -> Result<Vec
     let mut paths: BTreeMap<String, Option<Vec<(u64, u64)>>> = BTreeMap::new();
     let mut moves: Vec<(String, String, Vec<(u64, u64)>)> = Vec::new();
     let mut moved_dirs: Vec<(String, String)> = Vec::new();
-    let deleted: HashSet<String> =
-        entries.iter().filter(|e| e.path.is_none()).filter_map(|e| e.origin.clone()).collect();
-    let mut touch = |paths: &mut BTreeMap<String, Option<Vec<(u64, u64)>>>, p: &str, r: Option<Vec<(u64, u64)>>| {
-        match paths.get(p) {
-            Some(_) => {
-                paths.insert(p.to_string(), None);
-            }
-            None => {
-                paths.insert(p.to_string(), r);
-            }
+    let deleted: HashSet<String> = entries.iter().filter(|e| e.path.is_none()).filter_map(|e| e.origin.clone()).collect();
+    let touch = |paths: &mut BTreeMap<String, Option<Vec<(u64, u64)>>>, p: &str, r: Option<Vec<(u64, u64)>>| match paths.get(p) {
+        Some(_) => {
+            paths.insert(p.to_string(), None);
+        }
+        None => {
+            paths.insert(p.to_string(), r);
         }
     };
     for e in &entries {
@@ -123,9 +114,7 @@ fn build(parent: &Path, child: &Path, entries: Vec<stream::Entry>) -> Result<Vec
         }
         let ok = match (out.get(&src), out.get(&dst)) {
             (Some(s), Some(d)) => {
-                s.new.is_none()
-                    && d.old.is_none()
-                    && s.old.as_ref().map(|m| m.ftype) == d.new.as_ref().map(|m| m.ftype)
+                s.new.is_none() && d.old.is_none() && s.old.as_ref().map(|m| m.ftype) == d.new.as_ref().map(|m| m.ftype)
             }
             _ => false,
         };
@@ -169,7 +158,8 @@ pub fn really_changed(parent: &Path, child: &Path, c: &Change) -> Result<bool> {
 pub fn file_changes(parent: &Path, child: &Path) -> Result<Vec<Change>> {
     let mut out = Vec::new();
     for c in candidates(parent, child)? {
-        let is_dir_only = c.old.as_ref().map(|m| m.is_dir()).unwrap_or(true) && c.new.as_ref().map(|m| m.is_dir()).unwrap_or(true);
+        let is_dir_only =
+            c.old.as_ref().map(|m| m.is_dir()).unwrap_or(true) && c.new.as_ref().map(|m| m.is_dir()).unwrap_or(true);
         if is_dir_only {
             continue;
         }
@@ -199,7 +189,10 @@ pub fn without_moves(v: Vec<Change>) -> Vec<Change> {
     for c in v {
         if let Some(src) = c.old_path.clone() {
             out.insert(src.clone(), Change { path: src, old_path: None, old: c.old.clone(), new: None, ranges: None });
-            out.insert(c.path.clone(), Change { path: c.path.clone(), old_path: None, old: None, new: c.new.clone(), ranges: None });
+            out.insert(
+                c.path.clone(),
+                Change { path: c.path.clone(), old_path: None, old: None, new: c.new.clone(), ranges: None },
+            );
         } else {
             out.insert(c.path.clone(), c);
         }
@@ -207,16 +200,16 @@ pub fn without_moves(v: Vec<Change>) -> Vec<Change> {
     out.into_values().collect()
 }
 
-/// Map from path to change, for lookups.
-pub fn by_path(v: &[Change]) -> HashMap<String, Change> {
-    v.iter().map(|c| (c.path.clone(), c.clone())).collect()
-}
-
 /// Pair deleted and added files as moves when the content is equal, then (for small lists)
 /// when at least half of the lines are equal, as git's rename detection does.
 pub fn with_renames(parent: &Path, child: &Path, v: Vec<Change>) -> Vec<Change> {
     let is_file = |m: &Option<Meta>| m.as_ref().map(|x| x.ftype == crate::fsutil::FType::File).unwrap_or(false);
-    let dels: Vec<usize> = v.iter().enumerate().filter(|(_, c)| c.new.is_none() && c.old_path.is_none() && is_file(&c.old)).map(|(i, _)| i).collect();
+    let dels: Vec<usize> = v
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.new.is_none() && c.old_path.is_none() && is_file(&c.old))
+        .map(|(i, _)| i)
+        .collect();
     let adds: Vec<usize> = v.iter().enumerate().filter(|(_, c)| c.old.is_none() && is_file(&c.new)).map(|(i, _)| i).collect();
     if dels.is_empty() || adds.is_empty() {
         return v;

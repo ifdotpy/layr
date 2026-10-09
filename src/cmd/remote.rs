@@ -9,7 +9,6 @@ use crate::ids;
 use crate::model::Record;
 use crate::repo::Repo;
 use crate::revs;
-use crate::outln;
 use anyhow::Result;
 
 pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
@@ -70,7 +69,13 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
 
 /// Branches to import after a fetch: the requested ones, the ones imported before, and the
 /// ones that match a line name or the default branch.
-fn import_after_fetch(ctx: &Ctx, repo: &Repo, remote: &str, refs: &[(String, String)], only: Option<&str>) -> Result<Vec<(String, String, bool)>> {
+fn import_after_fetch(
+    ctx: &Ctx,
+    repo: &Repo,
+    remote: &str,
+    refs: &[(String, String)],
+    only: Option<&str>,
+) -> Result<Vec<(String, String, bool)>> {
     let mut out = Vec::new();
     let lines: Vec<String> = repo.lines()?.into_iter().map(|l| l.name).collect();
     for (name, commit) in refs {
@@ -115,14 +120,27 @@ pub fn fetch(ctx: &Ctx, args: &[String]) -> Result<i32> {
             outln!(ctx, "From {url}");
         }
         for (name, st, new) in done {
-            outln!(ctx, " {} {:<20} -> {} (state {})", if new { "* [new]" } else { "  " }, name.split('/').nth(1).unwrap_or(&name), name, ids::short(&st));
+            outln!(
+                ctx,
+                " {} {:<20} -> {} (state {})",
+                if new { "* [new]" } else { "  " },
+                name.split('/').nth(1).unwrap_or(&name),
+                name,
+                ids::short(&st)
+            );
         }
     }
     Ok(0)
 }
 
 pub fn pull(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let spec = Spec::new().flag("--ff-only").flag("--no-ff").flag("--rebase|-r").flag("-q|--quiet").flag("--no-rebase").value("--expect");
+    let spec = Spec::new()
+        .flag("--ff-only")
+        .flag("--no-ff")
+        .flag("--rebase|-r")
+        .flag("-q|--quiet")
+        .flag("--no-rebase")
+        .value("--expect");
     let a = parse(&spec, args)?;
     let h = here(ctx)?;
     let line = h.line()?.clone();
@@ -136,7 +154,10 @@ pub fn pull(ctx: &Ctx, args: &[String]) -> Result<i32> {
             } else if refs.iter().any(|(n, _)| n == &format!("{remote}/main")) {
                 "main".into()
             } else {
-                refs.iter().map(|(n, _)| n.split('/').nth(1).unwrap_or("").to_string()).find(|b| b == "master").unwrap_or_else(|| "main".into())
+                refs.iter()
+                    .map(|(n, _)| n.split('/').nth(1).unwrap_or("").to_string())
+                    .find(|b| b == "master")
+                    .unwrap_or_else(|| "main".into())
             }
         }
     };
@@ -192,12 +213,26 @@ pub fn push(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let state_id = revs::resolve(repo, line.as_ref(), &rev)?;
     let state = repo.state(&state_id)?;
     if !state.conflicts.is_empty() {
-        return Err(exit(1, format!("error: state {} has {} open conflict(s); resolve and commit them before a push", ids::short(&state_id), state.conflicts.len())));
+        return Err(exit(
+            1,
+            format!(
+                "error: state {} has {} open conflict(s); resolve and commit them before a push",
+                ids::short(&state_id),
+                state.conflicts.len()
+            ),
+        ));
     }
     if repo.p.config_bool("push.require_check", false) {
         let ok = repo.p.db.checks(&state_id)?.iter().any(|c| c.1 == 0);
         if !ok {
-            return Err(exit(1, format!("error: state {} has no passing check; run 'layr try {} -- <tests>' first", ids::short(&state_id), ids::short(&state_id))));
+            return Err(exit(
+                1,
+                format!(
+                    "error: state {} has no passing check; run 'layr try {} -- <tests>' first",
+                    ids::short(&state_id),
+                    ids::short(&state_id)
+                ),
+            ));
         }
     }
     let url = gitbridge::remote_url(repo, &remote)?;
@@ -209,11 +244,9 @@ pub fn push(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         if st == state_id && r == remote && b == branch && status == "pushed" {
             prepared = None;
-            if !a.has("-f") {
-                if gitbridge::ls_remote(ctx, repo, &url, &branch)?.as_deref() == Some(c.as_str()) {
-                    outln!(ctx, "Everything up-to-date ({} is {} on {remote}/{branch})", ids::short(&state_id), &c[..10]);
-                    return Ok(0);
-                }
+            if !a.has("-f") && gitbridge::ls_remote(ctx, repo, &url, &branch)?.as_deref() == Some(c.as_str()) {
+                outln!(ctx, "Everything up-to-date ({} is {} on {remote}/{branch})", ids::short(&state_id), &c[..10]);
+                return Ok(0);
             }
         }
     }

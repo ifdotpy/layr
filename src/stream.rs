@@ -120,9 +120,7 @@ pub fn parse(data: &[u8]) -> Result<Vec<Cmd>> {
             cmd::LINK => Cmd::Link { path: path(attr::PATH)?, target: path(attr::PATH_LINK)? },
             cmd::UNLINK => Cmd::Unlink { path: path(attr::PATH)? },
             cmd::RMDIR => Cmd::Rmdir { path: path(attr::PATH)? },
-            cmd::UPDATE_EXTENT => {
-                Cmd::Extent { path: path(attr::PATH)?, offset: num(attr::FILE_OFFSET), len: num(attr::SIZE) }
-            }
+            cmd::UPDATE_EXTENT => Cmd::Extent { path: path(attr::PATH)?, offset: num(attr::FILE_OFFSET), len: num(attr::SIZE) },
             cmd::CLONE => Cmd::Extent { path: path(attr::PATH)?, offset: num(attr::FILE_OFFSET), len: num(attr::CLONE_LEN) },
             cmd::WRITE | cmd::ENCODED_WRITE | cmd::FALLOCATE => {
                 Cmd::Extent { path: path(attr::PATH)?, offset: num(attr::FILE_OFFSET), len: u64::MAX }
@@ -328,10 +326,7 @@ mod tests {
 
     #[test]
     fn rename_of_folder_maps_children() {
-        let cmds = vec![
-            Cmd::Rename { from: s("a"), to: s("b") },
-            Cmd::Extent { path: s("b/x.txt"), offset: 0, len: 10 },
-        ];
+        let cmds = vec![Cmd::Rename { from: s("a"), to: s("b") }, Cmd::Extent { path: s("b/x.txt"), offset: 0, len: 10 }];
         let e = entries(&cmds);
         let x = e.iter().find(|e| e.path.as_deref() == Some("b/x.txt")).unwrap();
         assert_eq!(x.origin.as_deref(), Some("a/x.txt"));

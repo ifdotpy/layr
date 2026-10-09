@@ -9,7 +9,7 @@ use crate::ids;
 use crate::ignore_rules::Rules;
 use crate::model::{Conflict, Line, LineChange, LineState, Record, StateKind, StateRec};
 use crate::store::{check_name, Project};
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -291,9 +291,7 @@ impl<'a> Repo<'a> {
             let prev = self.last_auto(line)?.map(|s| s.id).unwrap_or(line.head.clone());
             let base = self.p.state_path(&prev);
             if base.exists() {
-                let changed = changes::candidates(&base, &self.p.state_path(&st.id))?
-                    .into_iter()
-                    .any(|c| !skip_path(&c.path));
+                let changed = changes::candidates(&base, &self.p.state_path(&st.id))?.into_iter().any(|c| !skip_path(&c.path));
                 if !changed {
                     self.discard_states(std::slice::from_ref(&st));
                     return Ok(None);
@@ -522,7 +520,12 @@ impl<'a> Repo<'a> {
             let mut rec = Record::new("line.create");
             rec.lines.insert(
                 line.id.clone(),
-                LineChange { before: None, after: Some(self.line_state(&line, start)), working_before: None, working_after: None },
+                LineChange {
+                    before: None,
+                    after: Some(self.line_state(&line, start)),
+                    working_before: None,
+                    working_after: None,
+                },
             );
             rec.data = serde_json::json!({"name": name, "start": start});
             self.p.append(rec, &ctx.actor())
@@ -687,10 +690,6 @@ impl<'a> Repo<'a> {
         }
         Ok(v)
     }
-
-    pub fn display_name(&self, id: &str) -> String {
-        ids::short(id)
-    }
 }
 
 /// True if a conflict is still open in `root`. A content conflict is open while the file holds
@@ -797,8 +796,4 @@ pub fn convert_layer(w: &Path, path: &str, uid: u32, gid: u32) -> Result<bool> {
     fsutil::chown_nofollow(&lp, uid, gid)?;
     std::fs::remove_dir_all(&old)?;
     Ok(true)
-}
-
-pub fn anyhow_ctx<T>(r: Option<T>, msg: &str) -> Result<T> {
-    r.ok_or_else(|| anyhow!("{msg}"))
 }

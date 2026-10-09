@@ -18,7 +18,6 @@ use crate::model::StateKind;
 use crate::oplog;
 use crate::repo::Repo;
 use crate::store::Project;
-use crate::outln;
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -85,7 +84,8 @@ impl<R: Read, W: Write> Wire<R, W> {
     }
     /// Receive a btrfs stream into a folder.
     fn recv_stream(&mut self, dir: &std::path::Path) -> Result<()> {
-        let mut child = Command::new("btrfs").args(["receive", "-q"]).arg(dir).stdin(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+        let mut child =
+            Command::new("btrfs").args(["receive", "-q"]).arg(dir).stdin(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
         let mut stdin = child.stdin.take().unwrap();
         let mut ok = true;
         loop {
@@ -215,7 +215,8 @@ fn plan(repo: &Repo, mine: &BTreeSet<String>, theirs: &BTreeSet<String>, auto: b
             }
         }
         if parent.is_none() {
-            parent = have.iter().filter_map(|h| repo.p.db.state(h).ok().flatten().map(|s| (s.time, h.clone()))).max().map(|x| x.1);
+            parent =
+                have.iter().filter_map(|h| repo.p.db.state(h).ok().flatten().map(|s| (s.time, h.clone()))).max().map(|x| x.1);
         }
         have.insert(id.clone());
         out.push((id, parent));
@@ -223,12 +224,18 @@ fn plan(repo: &Repo, mine: &BTreeSet<String>, theirs: &BTreeSet<String>, auto: b
     Ok(out)
 }
 
-fn send_states<R: Read, W: Write>(w: &mut Wire<R, W>, repo: &Repo, list: &[(String, Option<String>)], layers: bool) -> Result<(usize, u64)> {
+fn send_states<R: Read, W: Write>(
+    w: &mut Wire<R, W>,
+    repo: &Repo,
+    list: &[(String, Option<String>)],
+    layers: bool,
+) -> Result<(usize, u64)> {
     let mut bytes = 0;
     for (id, parent) in list {
         w.json(&json!({"op": "state", "id": id, "parent": parent}))?;
         let pp = parent.as_ref().map(|p| repo.p.state_path(p));
-        let child = btrfs::send_command(pp.as_deref(), &repo.p.state_path(id)).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+        let child =
+            btrfs::send_command(pp.as_deref(), &repo.p.state_path(id)).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
         bytes += w.send_stream(child)?;
         let v = w.recv_json()?;
         if v["op"] != "ok" {
@@ -297,7 +304,8 @@ fn recv_states<R: Read, W: Write>(w: &mut Wire<R, W>, p: &Project) -> Result<usi
                 }
                 let r = w.recv_stream(&p.states_dir());
                 let res = r.and_then(|_| {
-                    let info = btrfs::subvol_info(&dst).with_context(|| format!("stream did not contain state {}", ids::short(&id)))?;
+                    let info =
+                        btrfs::subvol_info(&dst).with_context(|| format!("stream did not contain state {}", ids::short(&id)))?;
                     if !info.readonly || info.received_uuid.is_none() {
                         bail!("incomplete receive of state {}", ids::short(&id));
                     }
@@ -325,10 +333,14 @@ fn recv_states<R: Read, W: Write>(w: &mut Wire<R, W>, p: &Project) -> Result<usi
 }
 
 pub fn sync(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let spec = Spec::new().flag("--auto").flag("--layers").flag("--push-only").flag("--pull-only").flag("-q|--quiet").value("--project");
+    let spec =
+        Spec::new().flag("--auto").flag("--layers").flag("--push-only").flag("--pull-only").flag("-q|--quiet").value("--project");
     let a = parse(&spec, args)?;
     if a.paths.is_empty() {
-        return Err(exit(128, "usage: layr sync [--auto] [--push-only|--pull-only] -- <command that runs 'layr serve-peer <project>' on the peer>"));
+        return Err(exit(
+            128,
+            "usage: layr sync [--auto] [--push-only|--pull-only] -- <command that runs 'layr serve-peer <project>' on the peer>",
+        ));
     }
     let h = here(ctx)?;
     h.repo.require_lead(ctx, "replicate the project")?;
@@ -442,7 +454,11 @@ pub fn serve(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let mine_set = present(&repo.p)?;
     let mut list = Vec::new();
     let mut have2 = have.clone();
-    let mut todo: Vec<(i64, String)> = ids_v.iter().filter(|i| mine_set.contains(*i)).filter_map(|i| repo.p.db.state(i).ok().flatten().map(|s| (s.time, i.clone()))).collect();
+    let mut todo: Vec<(i64, String)> = ids_v
+        .iter()
+        .filter(|i| mine_set.contains(*i))
+        .filter_map(|i| repo.p.db.state(i).ok().flatten().map(|s| (s.time, i.clone())))
+        .collect();
     todo.sort();
     for (_, id) in todo {
         let mut parent = None;

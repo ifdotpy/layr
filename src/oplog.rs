@@ -56,7 +56,8 @@ pub fn machine_key(rec: &Record) -> Result<VerifyingKey> {
 /// confirmed (the write did not finish, so its `fsync` did not return), and readers skip it. It
 /// is cut off here, so the new line starts on a line of its own.
 pub fn append(path: &Path, line: &str) -> Result<()> {
-    let mut f = OpenOptions::new().create(true).read(true).write(true).open(path).with_context(|| format!("open {}", path.display()))?;
+    let mut f =
+        OpenOptions::new().create(true).read(true).write(true).open(path).with_context(|| format!("open {}", path.display()))?;
     let len = f.metadata()?.len();
     if len > 0 {
         let mut last = [0u8; 1];

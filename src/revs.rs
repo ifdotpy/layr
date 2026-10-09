@@ -2,7 +2,6 @@
 //! state ids and their prefixes, git commit ids, `stash@{n}`, `HEAD@{n}` (automatic states,
 //! newest first) and the suffixes `~n`, `^` and `^n`.
 
-use crate::ids;
 use crate::model::{Line, StateKind};
 use crate::repo::Repo;
 use anyhow::{bail, Result};
@@ -23,11 +22,8 @@ pub fn resolve(repo: &Repo, line: Option<&Line>, rev: &str) -> Result<String> {
                 None => bail!("stash@{{{n}}} does not exist"),
             }
         } else {
-            let l = if name.is_empty() || name == "HEAD" || name == "@" {
-                need_line(line, rev)?.clone()
-            } else {
-                repo.line(name)?
-            };
+            let l =
+                if name.is_empty() || name == "HEAD" || name == "@" { need_line(line, rev)?.clone() } else { repo.line(name)? };
             let v = repo.p.db.line_states(&l.id, StateKind::Auto)?;
             match v.get(n) {
                 Some(s) => s.id.clone(),
@@ -143,10 +139,4 @@ fn base_state(repo: &Repo, line: Option<&Line>, name: &str) -> Result<String> {
         }
     }
     bail!("unknown revision '{name}'")
-}
-
-/// Resolve and also return a printable name.
-pub fn resolve_named(repo: &Repo, line: Option<&Line>, rev: &str) -> Result<(String, String)> {
-    let id = resolve(repo, line, rev)?;
-    Ok((id.clone(), if rev.is_empty() { ids::short(&id) } else { rev.to_string() }))
 }

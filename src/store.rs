@@ -237,11 +237,9 @@ impl<'a> Project<'a> {
         let id: Option<String> = self
             .db
             .conn
-            .query_row(
-                "SELECT json_extract(raw, '$.r.data.id') FROM records WHERE op='project' ORDER BY time LIMIT 1",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT json_extract(raw, '$.r.data.id') FROM records WHERE op='project' ORDER BY time LIMIT 1", [], |r| {
+                r.get(0)
+            })
             .ok();
         id.ok_or_else(|| anyhow!("project record missing"))
     }
@@ -283,7 +281,9 @@ impl<'a> Project<'a> {
         if pending.is_empty() {
             return Ok(());
         }
-        pending.sort_by(|a, b| (a.0.record.time, &a.0.record.machine, a.0.record.seq).cmp(&(b.0.record.time, &b.0.record.machine, b.0.record.seq)));
+        pending.sort_by(|a, b| {
+            (a.0.record.time, &a.0.record.machine, a.0.record.seq).cmp(&(b.0.record.time, &b.0.record.machine, b.0.record.seq))
+        });
         let mut last: std::collections::HashMap<String, (u64, u64)> = std::collections::HashMap::new();
         for (s, m, end) in &pending {
             self.apply(&s.record, &s.line)?;

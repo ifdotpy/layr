@@ -27,9 +27,6 @@ impl FileDiff {
         self.old.as_ref().map(|s| fsutil::is_binary(&s.data)).unwrap_or(false)
             || self.new.as_ref().map(|s| fsutil::is_binary(&s.data)).unwrap_or(false)
     }
-    pub fn renamed(&self) -> bool {
-        matches!((&self.old, &self.new), (Some(o), Some(n)) if o.path != n.path)
-    }
     pub fn status(&self) -> char {
         match (&self.old, &self.new) {
             (None, Some(_)) => 'A',

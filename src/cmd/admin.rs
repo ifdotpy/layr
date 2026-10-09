@@ -11,7 +11,6 @@ use crate::model::{Line, LineChange, Record, StateKind};
 use crate::repo::{skip_path, Repo};
 use crate::revs;
 use crate::store::Project;
-use crate::outln;
 use anyhow::{bail, Result};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -95,7 +94,22 @@ pub fn undo_last_of(ctx: &Ctx, repo: &Repo, line: &Line, ops: &[&str]) -> Result
     Err(exit(1, format!("error: no {} to undo", ops.join(" or "))))
 }
 
-const NOT_UNDOABLE: &[&str] = &["line.adopt", "slot.collect.done", "save", "save.layers", "check", "gc", "machine", "project", "export", "import", "slot", "rebase.step", "remote.ref", "config"];
+const NOT_UNDOABLE: &[&str] = &[
+    "line.adopt",
+    "slot.collect.done",
+    "save",
+    "save.layers",
+    "check",
+    "gc",
+    "machine",
+    "project",
+    "export",
+    "import",
+    "slot",
+    "rebase.step",
+    "remote.ref",
+    "config",
+];
 
 pub fn undo(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let spec = Spec::new().flag("-f|--force").flag("-n|--dry-run");
@@ -168,14 +182,23 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
             rec.data = serde_json::json!({"name": r.data["name"], "state": r.data["state"], "undo": r.id});
         }
         "stash.drop" => {
-            bail!("a dropped stash can be applied again with 'layr stash apply {}'", r.data["state"].as_str().map(ids::short).unwrap_or_default());
+            bail!(
+                "a dropped stash can be applied again with 'layr stash apply {}'",
+                r.data["state"].as_str().map(ids::short).unwrap_or_default()
+            );
         }
         _ => {}
     }
     for (lid, ch) in &r.lines {
         let cur = repo.p.db.line_by_id(lid)?;
-        let cur_state = cur.as_ref().filter(|_| repo.p.db.line_by_name(&cur.as_ref().unwrap().name).ok().flatten().is_some()).map(|l| repo.line_state(l, &l.head));
-        let alive = cur.as_ref().map(|l| repo.p.db.line_by_name(&l.name).ok().flatten().map(|x| x.id == l.id).unwrap_or(false)).unwrap_or(false);
+        let cur_state = cur
+            .as_ref()
+            .filter(|_| repo.p.db.line_by_name(&cur.as_ref().unwrap().name).ok().flatten().is_some())
+            .map(|l| repo.line_state(l, &l.head));
+        let alive = cur
+            .as_ref()
+            .map(|l| repo.p.db.line_by_name(&l.name).ok().flatten().map(|x| x.id == l.id).unwrap_or(false))
+            .unwrap_or(false);
         let cur_state = if alive { cur_state } else { None };
         if !force && cur_state.as_ref().map(|s| (&s.name, &s.head)) != ch.after.as_ref().map(|s| (&s.name, &s.head)) {
             return Err(exit(
@@ -186,7 +209,14 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
         // Required states must still exist (retention can delete old automatic states).
         for s in [ch.before.as_ref().map(|b| b.head.clone()), ch.working_before.clone()].into_iter().flatten() {
             if !repo.p.state_path(&s).exists() {
-                return Err(exit(1, format!("error: cannot undo: state {} was deleted by retention (undo window: {} days)", ids::short(&s), repo.p.config_u64("undo.days", 7))));
+                return Err(exit(
+                    1,
+                    format!(
+                        "error: cannot undo: state {} was deleted by retention (undo window: {} days)",
+                        ids::short(&s),
+                        repo.p.config_u64("undo.days", 7)
+                    ),
+                ));
             }
         }
         let mut wb = None;
@@ -208,7 +238,14 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
                             .flat_map(|c| [Some(c.path.clone()), c.old_path.clone()])
                             .flatten()
                             .collect();
-                        repo.apply_delta(&repo.state_root(after)?, &repo.state_root(before)?, &repo.working(&l2), repo.own(&l2), &later, force)?;
+                        repo.apply_delta(
+                            &repo.state_root(after)?,
+                            &repo.state_root(before)?,
+                            &repo.working(&l2),
+                            repo.own(&l2),
+                            &later,
+                            force,
+                        )?;
                     }
                     (Some(before), _) => restore_working(repo, &l2, before)?,
                     (None, _) => {}
@@ -217,13 +254,24 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
             }
             (Some(b), _) => {
                 // The line was deleted: make it again from its last content.
-                let src = ch.working_before.clone().or(r.data.get("final_state").and_then(|v| v.as_str()).map(|s| s.to_string())).unwrap_or(b.head.clone());
+                let src = ch
+                    .working_before
+                    .clone()
+                    .or(r.data.get("final_state").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                    .unwrap_or(b.head.clone());
                 let w = repo.p.line_path(&b.name);
                 if w.exists() {
                     bail!("{} exists", w.display());
                 }
                 btrfs::snapshot(&repo.state_root(&src)?, &w, false)?;
-                let l = Line { id: lid.clone(), name: b.name.clone(), head: b.head.clone(), owner: b.owner, machine: repo.p.store.machine.id.clone(), group: b.group.clone() };
+                let l = Line {
+                    id: lid.clone(),
+                    name: b.name.clone(),
+                    head: b.head.clone(),
+                    owner: b.owner,
+                    machine: repo.p.store.machine.id.clone(),
+                    group: b.group.clone(),
+                };
                 repo.prepare_working(&l, &src)?;
             }
             (None, Some(l)) if alive => {
@@ -234,7 +282,15 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
             }
             _ => {}
         }
-        rec.lines.insert(lid.clone(), LineChange { before: cur_state, after: ch.before.clone(), working_before: wb, working_after: ch.working_before.clone() });
+        rec.lines.insert(
+            lid.clone(),
+            LineChange {
+                before: cur_state,
+                after: ch.before.clone(),
+                working_before: wb,
+                working_after: ch.working_before.clone(),
+            },
+        );
     }
     let done = repo.commit_record(ctx, rec)?;
     outln!(ctx, "Undid {} {} ({}); undo it with 'layr undo {}'", short_op(&r.id), r.op, fmt_time(r.time), short_op(&done.id));
@@ -323,7 +379,14 @@ pub fn try_cmd(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let name = format!(".try-{}", &ids::new_id()[..8]);
     let dir = repo.p.line_path(&name);
     btrfs::snapshot(&repo.state_root(&state)?, &dir, false)?;
-    let tmp_line = Line { id: format!("try-{name}"), name: name.clone(), head: state.clone(), owner: ctx.caller.uid, machine: repo.p.store.machine.id.clone(), group: None };
+    let tmp_line = Line {
+        id: format!("try-{name}"),
+        name: name.clone(),
+        head: state.clone(),
+        owner: ctx.caller.uid,
+        machine: repo.p.store.machine.id.clone(),
+        group: None,
+    };
     let res = (|| -> Result<i32> {
         repo.prepare_working(&tmp_line, &state)?;
         if !a.has("-q") {
@@ -435,7 +498,15 @@ pub fn retention_plan(repo: &Repo) -> Result<(BTreeSet<String>, Vec<String>)> {
             keep.insert(s.id.clone());
         }
         for ch in r.lines.values() {
-            for x in [ch.before.as_ref().map(|b| b.head.clone()), ch.after.as_ref().map(|b| b.head.clone()), ch.working_before.clone(), ch.working_after.clone()].into_iter().flatten() {
+            for x in [
+                ch.before.as_ref().map(|b| b.head.clone()),
+                ch.after.as_ref().map(|b| b.head.clone()),
+                ch.working_before.clone(),
+                ch.working_after.clone(),
+            ]
+            .into_iter()
+            .flatten()
+            {
                 keep.insert(x);
             }
         }
@@ -507,7 +578,12 @@ pub fn run_gc(ctx: &Ctx, repo: &Repo, dry: bool) -> Result<Vec<String>> {
     for d in [repo.p.scan_dir(), repo.p.work_dir()] {
         if let Ok(rd) = std::fs::read_dir(&d) {
             for e in rd.flatten() {
-                let old = e.metadata().ok().and_then(|m| m.modified().ok()).map(|t| t.elapsed().map(|x| x.as_secs() > 3600).unwrap_or(false)).unwrap_or(false);
+                let old = e
+                    .metadata()
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .map(|t| t.elapsed().map(|x| x.as_secs() > 3600).unwrap_or(false))
+                    .unwrap_or(false);
                 if old {
                     let _ = btrfs::delete_tree(&e.path());
                 }
@@ -634,7 +710,8 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
         .value("-m|--message")
         .flag("-q|--quiet");
     let a = parse(&spec, args)?;
-    let name = a.pos.first().ok_or_else(|| exit(128, "usage: layr init <project> [--from <folder> | --git <url>] [--line main]"))?;
+    let name =
+        a.pos.first().ok_or_else(|| exit(128, "usage: layr init <project> [--from <folder> | --git <url>] [--line main]"))?;
     let line_name = a.get("--line").unwrap_or("main").to_string();
     let owner = match a.get("--owner") {
         Some(o) if ctx.caller.is_root() => o.parse::<u32>().or_else(|_| -> Result<u32> {
@@ -662,7 +739,10 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
             set_config(ctx, &repo, "remote.origin.url", serde_json::json!(url))?;
             let refs = crate::gitbridge::fetch(ctx, &repo, "origin")?;
             let branch = a.get("-b").map(|s| s.to_string()).or_else(|| default_branch(&repo)).unwrap_or_else(|| "main".into());
-            let commit = refs.iter().find(|(b, _)| b == &format!("origin/{branch}") || b.ends_with(&format!("/{branch}"))).map(|x| x.1.clone());
+            let commit = refs
+                .iter()
+                .find(|(b, _)| b == &format!("origin/{branch}") || b.ends_with(&format!("/{branch}")))
+                .map(|x| x.1.clone());
             let commit = commit.ok_or_else(|| exit(128, format!("fatal: remote has no branch '{branch}'")))?;
             let (st, _) = crate::gitbridge::import_commit(ctx, &repo, &commit, &format!("origin/{branch}"), owner)?;
             drop(cleanup);
@@ -675,7 +755,11 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 // folder's HEAD is the parent of the folder content.
                 let s = crate::gitbridge::init_store(&repo)?;
                 let url = crate::privs::as_caller_fs(ctx, || {
-                    Ok(std::process::Command::new("git").arg("-C").arg(&src).args(["config", "--get", "remote.origin.url"]).output()?)
+                    Ok(std::process::Command::new("git")
+                        .arg("-C")
+                        .arg(&src)
+                        .args(["config", "--get", "remote.origin.url"])
+                        .output()?)
                 })
                 .ok()
                 .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
@@ -724,7 +808,9 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
                             return Ok(true);
                         }
                         seen.insert(rel.to_string());
-                        if !fsutil::same_entry(&imported, rel, &snap.path, rel, None)? || fsutil::lmeta(&imported, rel).map(|x| x.mode != m.mode).unwrap_or(true) {
+                        if !fsutil::same_entry(&imported, rel, &snap.path, rel, None)?
+                            || fsutil::lmeta(&imported, rel).map(|x| x.mode != m.mode).unwrap_or(true)
+                        {
                             fsutil::copy_entry(&snap.path, rel, &work, rel, None)?;
                             changed = true;
                         }
@@ -771,7 +857,13 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let _lock = repo.p.lock()?;
     let l = repo.create_line(ctx, &line_name, &state, owner, None)?;
     if !a.has("-q") {
-        outln!(ctx, "Initialized project {name}: line {} at {} (state {})", l.name, repo.working(&l).display(), ids::short(&state));
+        outln!(
+            ctx,
+            "Initialized project {name}: line {} at {} (state {})",
+            l.name,
+            repo.working(&l).display(),
+            ids::short(&state)
+        );
     } else {
         outln!(ctx, "{}", repo.working(&l).display());
     }
@@ -903,7 +995,14 @@ pub fn machines(ctx: &Ctx, _args: &[String]) -> Result<i32> {
     let me = &h.repo.p.store.machine.id;
     for (id, name) in h.repo.p.db.machines()? {
         let key = h.repo.p.db.machine_key(&id)?.unwrap_or_default();
-        outln!(ctx, "{}{} {:<16} key {}", if &id == me { "* " } else { "  " }, &ids::display(&id)[..8], name, &key[..key.len().min(16)]);
+        outln!(
+            ctx,
+            "{}{} {:<16} key {}",
+            if &id == me { "* " } else { "  " },
+            &ids::display(&id)[..8],
+            name,
+            &key[..key.len().min(16)]
+        );
     }
     Ok(0)
 }
@@ -917,7 +1016,15 @@ pub fn debug(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let b = h.repo.state_root(&revs::resolve(&h.repo, h.line.as_ref(), &args[2])?)?;
             for c in changes::candidates(&a, &b)? {
                 let k = |m: &Option<fsutil::Meta>| m.as_ref().map(|x| format!("{:?}", x.ftype)).unwrap_or("-".into());
-                outln!(ctx, "{}\t{}\t{}\t{}\t{:?}", c.old_path.clone().unwrap_or_default(), c.path, k(&c.old), k(&c.new), c.ranges);
+                outln!(
+                    ctx,
+                    "{}\t{}\t{}\t{}\t{:?}",
+                    c.old_path.clone().unwrap_or_default(),
+                    c.path,
+                    k(&c.old),
+                    k(&c.new),
+                    c.ranges
+                );
             }
             Ok(0)
         }

@@ -61,9 +61,6 @@ impl Parsed {
     pub fn has(&self, name: &str) -> bool {
         self.flags.contains_key(name) || self.values.contains_key(name)
     }
-    pub fn count(&self, name: &str) -> usize {
-        self.flags.get(name).copied().unwrap_or(0)
-    }
     pub fn get(&self, name: &str) -> Option<&str> {
         self.values.get(name).and_then(|v| v.last()).map(|s| s.as_str())
     }
@@ -137,12 +134,12 @@ pub fn parse(spec: &Spec, args: &[String]) -> Result<Parsed> {
                     Some((_, c)) => *c,
                     None => bail!("unknown option: {key}"),
                 };
-                if spec.optional.iter().any(|n| *n == key) {
+                if spec.optional.contains(&key) {
                     let rest: String = chars[k + 1..].iter().collect();
                     p.values.entry(canon.to_string()).or_default().push(rest);
                     break;
                 }
-                if spec.values.iter().any(|n| *n == key) {
+                if spec.values.contains(&key) {
                     let rest: String = chars[k + 1..].iter().collect();
                     let v = if !rest.is_empty() {
                         rest

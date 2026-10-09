@@ -1,7 +1,6 @@
 //! Ids. Records and states use UUIDv7. A state is shown as 32 hex digits that start with the
 //! random part of the UUID, so short prefixes are unique like git hashes.
 
-use anyhow::{bail, Result};
 use uuid::Uuid;
 
 pub fn new_uuid() -> Uuid {
@@ -25,19 +24,6 @@ pub fn display(id: &str) -> String {
         }
         Err(_) => id.to_string(),
     }
-}
-
-/// Parse the full display form back to the UUID string.
-pub fn from_display(d: &str) -> Result<String> {
-    if d.len() != 32 {
-        bail!("not a full state id: {d}");
-    }
-    let v = hex::decode(d)?;
-    let mut b = [0u8; 16];
-    b[10..16].copy_from_slice(&v[0..6]);
-    b[6..10].copy_from_slice(&v[6..10]);
-    b[0..6].copy_from_slice(&v[10..16]);
-    Ok(Uuid::from_bytes(b).hyphenated().to_string())
 }
 
 pub fn short(id: &str) -> String {

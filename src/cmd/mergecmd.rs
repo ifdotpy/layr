@@ -10,7 +10,6 @@ use crate::merge;
 use crate::model::{Line, Record, StateKind, StateRec};
 use crate::repo::{skip_path, Repo};
 use crate::revs;
-use crate::outln;
 use anyhow::{bail, Result};
 
 /// Merge `theirs` into `ours` with `base`. Returns the new state (snapshot written, no record)
@@ -171,7 +170,11 @@ pub fn merge_rev(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str, a: &crate::args
         if want != theirs {
             return Err(exit(
                 1,
-                format!("error: {rev} is at {} but --expect names {}: the line changed after the review; review the new state first", ids::short(&theirs), ids::short(&want)),
+                format!(
+                    "error: {rev} is at {} but --expect names {}: the line changed after the review; review the new state first",
+                    ids::short(&theirs),
+                    ids::short(&want)
+                ),
             ));
         }
     }
@@ -199,7 +202,17 @@ pub fn merge_rev(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str, a: &crate::args
         Ok(())
     };
     if ff && !a.has("--no-ff") && !a.has("--squash") {
-        finish(ctx, repo, &line, "merge", &theirs, vec![], w, &local, serde_json::json!({"theirs": theirs, "fast_forward": true}))?;
+        finish(
+            ctx,
+            repo,
+            &line,
+            "merge",
+            &theirs,
+            vec![],
+            w,
+            &local,
+            serde_json::json!({"theirs": theirs, "fast_forward": true}),
+        )?;
         group_rec(ctx)?;
         if !quiet {
             outln!(ctx, "Updating {}..{}\nFast-forward", ids::short(&head), ids::short(&theirs));
@@ -242,7 +255,11 @@ pub fn merge_rev(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str, a: &crate::args
         outln!(ctx, "{m}");
     }
     if nconf > 0 {
-        outln!(ctx, "Automatic merge left {nconf} conflict(s) in state {}: fix them, then 'layr add' and 'layr commit'.", ids::short(&sid));
+        outln!(
+            ctx,
+            "Automatic merge left {nconf} conflict(s) in state {}: fix them, then 'layr add' and 'layr commit'.",
+            ids::short(&sid)
+        );
         return Ok(1);
     }
     if !quiet {
@@ -253,7 +270,15 @@ pub fn merge_rev(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str, a: &crate::args
 }
 
 fn pick(ctx: &Ctx, args: &[String], revert: bool) -> Result<i32> {
-    let spec = Spec::new().flag("-n|--no-commit").flag("-x").flag("--no-edit").flag("--abort").flag("--continue").value("-m|--mainline").flag("-e|--edit").flag("-q|--quiet");
+    let spec = Spec::new()
+        .flag("-n|--no-commit")
+        .flag("-x")
+        .flag("--no-edit")
+        .flag("--abort")
+        .flag("--continue")
+        .value("-m|--mainline")
+        .flag("-e|--edit")
+        .flag("-q|--quiet");
     let a = parse(&spec, args)?;
     let h = here(ctx)?;
     let line = h.line()?.clone();
@@ -301,19 +326,35 @@ fn pick(ctx: &Ctx, args: &[String], revert: bool) -> Result<i32> {
             c.message.clone()
         };
         let label = ids::short(&p);
-        let (mut state, out) = merge_states(ctx, repo, &line, &base, &line.head, &theirs, &label, vec![line.head.clone()], &message)?;
+        let (mut state, out) =
+            merge_states(ctx, repo, &line, &base, &line.head, &theirs, &label, vec![line.head.clone()], &message)?;
         if !revert {
             state.author = c.author.clone();
         }
         let sid = state.id.clone();
         let n = out.conflicts.len();
-        finish(ctx, repo, &line, if revert { "revert" } else { "cherry-pick" }, &sid, vec![state], first_w.take(), &local, serde_json::json!({"source": p}))?;
+        finish(
+            ctx,
+            repo,
+            &line,
+            if revert { "revert" } else { "cherry-pick" },
+            &sid,
+            vec![state],
+            first_w.take(),
+            &local,
+            serde_json::json!({"source": p}),
+        )?;
         line = repo.line(&line.id)?;
         for m in &out.messages {
             outln!(ctx, "{m}");
         }
         if n > 0 {
-            outln!(ctx, "{} {label} left {n} conflict(s) in state {}: fix them and commit.", if revert { "Revert of" } else { "Cherry-pick of" }, ids::short(&sid));
+            outln!(
+                ctx,
+                "{} {label} left {n} conflict(s) in state {}: fix them and commit.",
+                if revert { "Revert of" } else { "Cherry-pick of" },
+                ids::short(&sid)
+            );
             code = 1;
         } else if !a.has("-q") {
             outln!(ctx, "[{} {}] {}", line.name, ids::short(&sid), message.lines().next().unwrap_or(""));
@@ -331,7 +372,13 @@ pub fn revert(ctx: &Ctx, args: &[String]) -> Result<i32> {
 }
 
 pub fn rebase(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let spec = Spec::new().value("--onto").flag("--abort").flag("--continue").flag("-i|--interactive").flag("-q|--quiet").flag("--autostash");
+    let spec = Spec::new()
+        .value("--onto")
+        .flag("--abort")
+        .flag("--continue")
+        .flag("-i|--interactive")
+        .flag("-q|--quiet")
+        .flag("--autostash");
     let a = parse(&spec, args)?;
     if a.has("-i") {
         return Err(exit(1, "interactive rebase is not supported"));
@@ -387,9 +434,24 @@ pub fn rebase(ctx: &Ctx, args: &[String]) -> Result<i32> {
         states.push(s);
     }
     let local = st.local_paths();
-    finish(ctx, repo, &line, "rebase", &cur, vec![], w, &local, serde_json::json!({"upstream": upstream, "onto": onto, "count": states.len()}))?;
+    finish(
+        ctx,
+        repo,
+        &line,
+        "rebase",
+        &cur,
+        vec![],
+        w,
+        &local,
+        serde_json::json!({"upstream": upstream, "onto": onto, "count": states.len()}),
+    )?;
     if conflicts > 0 {
-        outln!(ctx, "Rebased {} state(s) onto {} with {conflicts} conflict(s): fix them and commit.", states.len(), ids::short(&onto));
+        outln!(
+            ctx,
+            "Rebased {} state(s) onto {} with {conflicts} conflict(s): fix them and commit.",
+            states.len(),
+            ids::short(&onto)
+        );
         return Ok(1);
     }
     outln!(ctx, "Successfully rebased {} onto {}.", line.name, ids::short(&onto));
@@ -430,7 +492,15 @@ pub fn group(ctx: &Ctx, args: &[String]) -> Result<i32> {
             rec.data = serde_json::json!({"name": g, "line": line.id});
             let mut after = repo.line_state(&line, &line.head);
             after.group = Some(g.clone());
-            rec.lines.insert(line.id.clone(), crate::model::LineChange { before: Some(repo.line_state(&line, &line.head)), after: Some(after), working_before: None, working_after: None });
+            rec.lines.insert(
+                line.id.clone(),
+                crate::model::LineChange {
+                    before: Some(repo.line_state(&line, &line.head)),
+                    after: Some(after),
+                    working_before: None,
+                    working_after: None,
+                },
+            );
             repo.commit_record(ctx, rec)?;
             Ok(0)
         }
@@ -439,7 +509,8 @@ pub fn group(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 if sub == "show" && rest.first().map(|r| r != &name).unwrap_or(false) {
                     continue;
                 }
-                let acc = accepted.and_then(|a| repo.p.db.line_by_id(&a).ok().flatten()).map(|l| l.name).unwrap_or_else(|| "-".into());
+                let acc =
+                    accepted.and_then(|a| repo.p.db.line_by_id(&a).ok().flatten()).map(|l| l.name).unwrap_or_else(|| "-".into());
                 outln!(ctx, "{name}\tepoch {epoch}\tbase {}\taccepted {acc}", ids::short(&base));
                 for (lid, e) in repo.p.db.group_lines(&name)? {
                     if let Some(l) = repo.p.db.line_by_id(&lid)? {

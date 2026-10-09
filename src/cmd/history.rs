@@ -10,7 +10,6 @@ use crate::ids;
 use crate::model::{Line, StateKind, StateRec};
 use crate::repo::{skip_path, Repo, Temp};
 use crate::revs;
-use crate::{out, outln};
 use anyhow::{bail, Result};
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -237,7 +236,10 @@ pub fn diff(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let (old, new) = if a.has("-R") { (new, old) } else { (old, new) };
     let mut list: Vec<Change> = changes::file_changes(&old, &new)?
         .into_iter()
-        .filter(|c| !skip_path(&c.path) && (matches(&specs, &c.path) || c.old_path.as_deref().map(|o| matches(&specs, o)).unwrap_or(false)))
+        .filter(|c| {
+            !skip_path(&c.path)
+                && (matches(&specs, &c.path) || c.old_path.as_deref().map(|o| matches(&specs, o)).unwrap_or(false))
+        })
         .collect();
     if working {
         // Untracked files are not part of a working tree diff.
@@ -302,7 +304,8 @@ impl Decor {
     pub fn load(repo: &Repo, current: Option<&Line>) -> Result<Decor> {
         let mut map: HashMap<String, Vec<String>> = HashMap::new();
         for l in repo.lines()? {
-            let name = if current.map(|c| c.id == l.id).unwrap_or(false) { format!("HEAD -> {}", l.name) } else { l.name.clone() };
+            let name =
+                if current.map(|c| c.id == l.id).unwrap_or(false) { format!("HEAD -> {}", l.name) } else { l.name.clone() };
             map.entry(l.head.clone()).or_default().push(name);
         }
         for (t, s, _) in repo.p.db.tags()? {
@@ -358,7 +361,7 @@ pub fn format_state(f: &str, s: &StateRec, decor: &Decor, date_style: &str) -> S
         let c = b[i + 1] as char;
         i += 2;
         let two = if i < b.len() { Some(b[i] as char) } else { None };
-        let mut take2 = |o: &mut String, v: String| {
+        let take2 = |o: &mut String, v: String| {
             o.push_str(&v);
         };
         match c {
@@ -499,7 +502,15 @@ fn print_state(ctx: &Ctx, s: &StateRec, fmt: Option<&str>, decor: &Decor, date_s
             if !first {
                 outln!(ctx);
             }
-            out!(ctx, "commit {}{}\nAuthor: {} <{}>\n\n    {}\n", ids::display(&s.id), decor.of(&s.id), s.author.name, s.author.email, subject(s));
+            out!(
+                ctx,
+                "commit {}{}\nAuthor: {} <{}>\n\n    {}\n",
+                ids::display(&s.id),
+                decor.of(&s.id),
+                s.author.name,
+                s.author.email,
+                subject(s)
+            );
             Ok(true)
         }
         Some("full") | Some("fuller") | Some("medium") | None => {
@@ -578,7 +589,11 @@ pub fn show(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 let id = revs::resolve(repo, line.as_ref(), rv)?;
                 root_path = repo.state_root(&id)?;
             }
-            let p = if path.starts_with("./") || path.starts_with("../") { super::normalize(&h.loc.sub, path)? } else { path.trim_start_matches('/').to_string() };
+            let p = if path.starts_with("./") || path.starts_with("../") {
+                super::normalize(&h.loc.sub, path)?
+            } else {
+                path.trim_start_matches('/').to_string()
+            };
             match fsutil::lmeta(&root_path, &p) {
                 None => return Err(exit(128, format!("fatal: path '{p}' does not exist in '{rv}'"))),
                 Some(m) if m.is_dir() => {
@@ -586,7 +601,9 @@ pub fn show(ctx: &Ctx, args: &[String]) -> Result<i32> {
                     let d = fsutil::safe_join(&root_path, &p)?;
                     let mut names: Vec<(String, bool)> = std::fs::read_dir(d)?
                         .flatten()
-                        .map(|e| (e.file_name().to_string_lossy().into_owned(), e.file_type().map(|t| t.is_dir()).unwrap_or(false)))
+                        .map(|e| {
+                            (e.file_name().to_string_lossy().into_owned(), e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+                        })
                         .filter(|(n, _)| !(p.is_empty() && n == ".git"))
                         .collect();
                     names.sort();
@@ -616,7 +633,8 @@ pub fn show(ctx: &Ctx, args: &[String]) -> Result<i32> {
             continue;
         }
         let fds = diff::file_diffs(&old, &new, &list)?;
-        if header_ends_blank && (opts.patch || opts.stat || opts.name_only || opts.name_status || opts.numstat || opts.shortstat) {
+        if header_ends_blank && (opts.patch || opts.stat || opts.name_only || opts.name_status || opts.numstat || opts.shortstat)
+        {
             outln!(ctx);
         }
         print_diffs(ctx, &fds, &opts);
@@ -647,7 +665,7 @@ fn parse_since(s: &str) -> Option<i64> {
     if let Ok(d) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
         return Some(d.and_hms_opt(0, 0, 0)?.and_utc().timestamp_millis());
     }
-    let parts: Vec<&str> = s.split(|c| c == ' ' || c == '.').filter(|x| !x.is_empty()).collect();
+    let parts: Vec<&str> = s.split([' ', '.']).filter(|x| !x.is_empty()).collect();
     if parts.len() >= 2 {
         let n: i64 = parts[0].parse().ok()?;
         let unit = parts[1].trim_end_matches('s');
@@ -781,7 +799,10 @@ pub fn log(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 continue;
             }
             let (_o, _t, _n, list) = state_changes(repo, &s)?;
-            if !list.iter().any(|c| matches(&specs, &c.path) || c.old_path.as_deref().map(|o| matches(&specs, o)).unwrap_or(false)) {
+            if !list
+                .iter()
+                .any(|c| matches(&specs, &c.path) || c.old_path.as_deref().map(|o| matches(&specs, o)).unwrap_or(false))
+            {
                 continue;
             }
         }
@@ -799,7 +820,11 @@ pub fn log(ctx: &Ctx, args: &[String]) -> Result<i32> {
         picked.reverse();
     }
     let decor = Decor::load(repo, line.as_ref())?;
-    let decor = if a.has("--decorate") || a.get("--format").map(|f| f.contains("%d") || f.contains("%D")).unwrap_or(false) { decor } else { Decor { map: HashMap::new() } };
+    let decor = if a.has("--decorate") || a.get("--format").map(|f| f.contains("%d") || f.contains("%D")).unwrap_or(false) {
+        decor
+    } else {
+        Decor { map: HashMap::new() }
+    };
     let date_style = a.get("--date").unwrap_or("default").to_string();
     let fmt = pretty_format(&a);
     let opts = DiffOpts::from(&a, false)?;
@@ -932,7 +957,15 @@ pub fn merge_base(ctx: &Ctx, args: &[String]) -> Result<i32> {
 }
 
 pub fn blame(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let spec = Spec::new().value("-L").flag("-s").flag("-e|--show-email").flag("-l").flag("--porcelain").flag("-w").flag("-M").flag("-C");
+    let spec = Spec::new()
+        .value("-L")
+        .flag("-s")
+        .flag("-e|--show-email")
+        .flag("-l")
+        .flag("--porcelain")
+        .flag("-w")
+        .flag("-M")
+        .flag("-C");
     let a = parse(&spec, args)?;
     let h = here(ctx)?;
     let repo = &h.repo;
@@ -1015,7 +1048,11 @@ pub fn blame(ctx: &Ctx, args: &[String]) -> Result<i32> {
         Some(r) => {
             let (x, y) = r.split_once(',').unwrap_or((r, r));
             let x: usize = x.parse().unwrap_or(1);
-            let y: usize = if let Some(n) = y.strip_prefix('+') { x + n.parse::<usize>().unwrap_or(1) - 1 } else { y.parse().unwrap_or(lines.len()) };
+            let y: usize = if let Some(n) = y.strip_prefix('+') {
+                x + n.parse::<usize>().unwrap_or(1) - 1
+            } else {
+                y.parse().unwrap_or(lines.len())
+            };
             (x.max(1), y.min(lines.len()))
         }
         None => (1, lines.len()),
@@ -1030,7 +1067,16 @@ pub fn blame(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 if a.has("-s") {
                     outln!(ctx, "00000000 {:>w$}) {}", i + 1, text, w = width);
                 } else {
-                    outln!(ctx, "00000000 ({:<nw$} {} {:>w$}) {}", "Not Committed Yet", fmt_date(ids::now_ms(), "iso"), i + 1, text, nw = name_w, w = width);
+                    outln!(
+                        ctx,
+                        "00000000 ({:<nw$} {} {:>w$}) {}",
+                        "Not Committed Yet",
+                        fmt_date(ids::now_ms(), "iso"),
+                        i + 1,
+                        text,
+                        nw = name_w,
+                        w = width
+                    );
                 }
             }
             Some(s) => {
@@ -1041,7 +1087,16 @@ pub fn blame(ctx: &Ctx, args: &[String]) -> Result<i32> {
                     outln!(ctx, "{pre}{idn} {:>w$}) {}", i + 1, text, w = width);
                 } else {
                     let who = if a.has("-e") { format!("<{}>", s.author.email) } else { s.author.name.clone() };
-                    outln!(ctx, "{pre}{idn} ({:<nw$} {} {:>w$}) {}", who, fmt_date(s.time, "iso"), i + 1, text, nw = name_w, w = width);
+                    outln!(
+                        ctx,
+                        "{pre}{idn} ({:<nw$} {} {:>w$}) {}",
+                        who,
+                        fmt_date(s.time, "iso"),
+                        i + 1,
+                        text,
+                        nw = name_w,
+                        w = width
+                    );
                 }
             }
         }

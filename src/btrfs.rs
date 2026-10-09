@@ -12,7 +12,6 @@ const SNAP_CREATE_V2: libc::c_ulong = 0x5000_9417;
 const SUBVOL_CREATE_V2: libc::c_ulong = 0x5000_9418;
 const SNAP_DESTROY_V2: libc::c_ulong = 0x5000_943f;
 const SUBVOL_GETFLAGS: libc::c_ulong = 0x8008_9419;
-const SUBVOL_SETFLAGS: libc::c_ulong = 0x4008_941a;
 const GET_SUBVOL_INFO: libc::c_ulong = 0x81f8_943c;
 const FICLONE: libc::c_ulong = 0x4004_9409;
 const FICLONERANGE: libc::c_ulong = 0x4020_940d;
@@ -67,6 +66,7 @@ struct CloneRange {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct SubvolInfo {
     pub tree_id: u64,
     pub generation: u64,
@@ -142,8 +142,7 @@ pub fn snapshot(src: &Path, dst: &Path, readonly: bool) -> Result<()> {
     let s = File::open(src).with_context(|| format!("open {}", src.display()))?;
     let (dir, name) = split_parent(dst)?;
     let mut a = vol_args(s.as_raw_fd() as i64, if readonly { SUBVOL_RDONLY } else { 0 }, &name);
-    ioctl(dir.as_raw_fd(), SNAP_CREATE_V2, &mut *a)
-        .with_context(|| format!("snapshot {} to {}", src.display(), dst.display()))
+    ioctl(dir.as_raw_fd(), SNAP_CREATE_V2, &mut *a).with_context(|| format!("snapshot {} to {}", src.display(), dst.display()))
 }
 
 /// Delete the subvolume at `path`. Nested subvolumes must be deleted first.
@@ -151,18 +150,6 @@ pub fn delete_subvolume(path: &Path) -> Result<()> {
     let (dir, name) = split_parent(path)?;
     let mut a = vol_args(0, 0, &name);
     ioctl(dir.as_raw_fd(), SNAP_DESTROY_V2, &mut *a).with_context(|| format!("delete subvolume {}", path.display()))
-}
-
-pub fn set_readonly(path: &Path, readonly: bool) -> Result<()> {
-    let f = File::open(path).with_context(|| format!("open {}", path.display()))?;
-    let mut flags: u64 = 0;
-    ioctl(f.as_raw_fd(), SUBVOL_GETFLAGS, &mut flags)?;
-    if readonly {
-        flags |= SUBVOL_RDONLY
-    } else {
-        flags &= !SUBVOL_RDONLY
-    }
-    ioctl(f.as_raw_fd(), SUBVOL_SETFLAGS, &mut flags).with_context(|| format!("set flags {}", path.display()))
 }
 
 pub fn subvol_info(path: &Path) -> Result<SubvolInfo> {
@@ -291,20 +278,4 @@ pub fn send_command(parent: Option<&Path>, child: &Path) -> Command {
     }
     c.arg(child);
     c
-}
-
-/// `btrfs receive` into `dir`, reading the stream from stdin of the child.
-pub fn receive_command(dir: &Path) -> Command {
-    let mut c = Command::new("btrfs");
-    c.arg("receive").arg("-q").arg("-e").arg(dir);
-    c
-}
-
-/// Commit the current transaction of the file system that holds `path`.
-pub fn sync(path: &Path) -> Result<()> {
-    let f = File::open(path)?;
-    if unsafe { libc::syncfs(f.as_raw_fd()) } != 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    Ok(())
 }

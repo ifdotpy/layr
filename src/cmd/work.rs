@@ -11,8 +11,7 @@ use crate::ids;
 use crate::model::{Line, Record, StateKind};
 use crate::repo::{conflict_open, skip_path, Repo, Status};
 use crate::revs;
-use crate::{out, outln};
-use anyhow::{bail, Result};
+use anyhow::Result;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -58,7 +57,13 @@ pub fn status(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let show_ignored = a.has("--ignored");
     let nul = a.has("-z");
     let end = if nul { "\0" } else { "\n" };
-    let path_of = |p: &str| -> String { if porcelain || nul { p.to_string() } else { h.rel(p) } };
+    let path_of = |p: &str| -> String {
+        if porcelain || nul {
+            p.to_string()
+        } else {
+            h.rel(p)
+        }
+    };
     let conflicted: BTreeSet<String> = st.conflicts.iter().map(|c| c.path.clone()).collect();
 
     if short {
@@ -117,7 +122,8 @@ pub fn status(ctx: &Ctx, args: &[String]) -> Result<i32> {
         outln!(ctx, "You have unmerged paths.\n  (fix conflicts and run \"layr commit\")\n");
     }
     let staged: Vec<&Change> = st.staged.iter().filter(|c| matches(&specs, &c.path) && !conflicted.contains(&c.path)).collect();
-    let unstaged: Vec<&Change> = st.unstaged.iter().filter(|c| matches(&specs, &c.path) && !conflicted.contains(&c.path)).collect();
+    let unstaged: Vec<&Change> =
+        st.unstaged.iter().filter(|c| matches(&specs, &c.path) && !conflicted.contains(&c.path)).collect();
     let untracked: Vec<String> = if untracked_mode == "no" {
         vec![]
     } else {
@@ -207,7 +213,7 @@ fn untracked_list(st: &Status, mode: &str) -> Vec<String> {
 }
 
 /// Lock the project and save the working content (snapshot rule 2).
-pub fn begin_change<'r>(ctx: &Ctx, repo: &'r Repo, line: &Line) -> Result<(crate::store::Lock, Option<String>)> {
+pub fn begin_change(ctx: &Ctx, repo: &Repo, line: &Line) -> Result<(crate::store::Lock, Option<String>)> {
     repo.can_write_line(ctx, line)?;
     let lock = repo.p.lock()?;
     let line = repo.line(&line.id)?;
@@ -281,7 +287,10 @@ pub fn add(ctx: &Ctx, args: &[String]) -> Result<i32> {
         .flag("-i|--interactive");
     let a = parse(&spec, args)?;
     if a.has("-p") || a.has("-i") {
-        return Err(exit(1, "interactive add is not supported: write the hunks to a patch file and run 'layr apply --cached <file>'"));
+        return Err(exit(
+            1,
+            "interactive add is not supported: write the hunks to a patch file and run 'layr apply --cached <file>'",
+        ));
     }
     let h = here(ctx)?;
     let line = h.line()?.clone();
@@ -433,7 +442,15 @@ pub fn mv(ctx: &Ctx, args: &[String]) -> Result<i32> {
             return Err(exit(128, format!("fatal: bad source, source={}, destination={}", h.rel(src), h.rel(&dst))));
         }
         let name = src.rsplit('/').next().unwrap_or(src);
-        let target = if dst_is_dir { if dst.is_empty() { name.to_string() } else { format!("{dst}/{name}") } } else { dst.clone() };
+        let target = if dst_is_dir {
+            if dst.is_empty() {
+                name.to_string()
+            } else {
+                format!("{dst}/{name}")
+            }
+        } else {
+            dst.clone()
+        };
         if fsutil::lmeta(&w, &target).is_some() && !a.has("-f") {
             return Err(exit(128, format!("fatal: destination exists, source={}, destination={}", h.rel(src), h.rel(&target))));
         }
@@ -453,7 +470,8 @@ pub fn mv(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let scan = h.repo.scan(&line)?;
     let mut paths = BTreeSet::new();
     for (s, t) in &moves {
-        for root in [&scan.path] {
+        {
+            let root = &scan.path;
             let mut push = |p: &str| {
                 paths.insert(p.to_string());
             };
@@ -765,7 +783,17 @@ pub fn restore(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if specs.is_empty() {
         return Err(exit(128, "fatal: you must specify path(s) to restore"));
     }
-    restore_impl(ctx, &h, &line, &specs, a.has("-S"), a.has("-W") || !a.has("-S"), a.get("-s"), a.has("--ours"), a.has("--theirs"))
+    restore_impl(
+        ctx,
+        &h,
+        &line,
+        &specs,
+        a.has("-S"),
+        a.has("-W") || !a.has("-S"),
+        a.get("-s"),
+        a.has("--ours"),
+        a.has("--theirs"),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -840,7 +868,8 @@ pub fn restore_impl(
         matched |= !d.is_empty();
     }
     if !matched {
-        let exists = specs.iter().any(|s| fsutil::lmeta(&src_root, s).is_some() || fsutil::lmeta(&repo.working(&line), s).is_some());
+        let exists =
+            specs.iter().any(|s| fsutil::lmeta(&src_root, s).is_some() || fsutil::lmeta(&repo.working(&line), s).is_some());
         if !exists {
             return Err(exit(1, format!("error: pathspec '{}' did not match any file(s) known to layr", h.rel(&specs[0]))));
         }
@@ -1063,7 +1092,12 @@ pub fn stash(ctx: &Ctx, args: &[String]) -> Result<i32> {
             Ok(0)
         }
         _ => {
-            let spec = Spec::new().value("-m|--message").flag("-u|--include-untracked").flag("-a|--all").flag("-q|--quiet").flag("-k|--keep-index");
+            let spec = Spec::new()
+                .value("-m|--message")
+                .flag("-u|--include-untracked")
+                .flag("-a|--all")
+                .flag("-q|--quiet")
+                .flag("-k|--keep-index");
             let a = parse(&spec, &rest)?;
             let (_lock, w) = begin_change(ctx, repo, &line)?;
             let line = repo.line(&line.id)?;
@@ -1131,7 +1165,14 @@ pub fn stash(ctx: &Ctx, args: &[String]) -> Result<i32> {
 }
 
 pub fn clean(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let spec = Spec::new().flag("-n|--dry-run").flag("-f|--force").flag("-d").flag("-x").flag("-X").flag("-q|--quiet").flag("-i|--interactive");
+    let spec = Spec::new()
+        .flag("-n|--dry-run")
+        .flag("-f|--force")
+        .flag("-d")
+        .flag("-x")
+        .flag("-X")
+        .flag("-q|--quiet")
+        .flag("-i|--interactive");
     let a = parse(&spec, args)?;
     if !a.has("-n") && !a.has("-f") {
         return Err(exit(128, "fatal: clean requires -f (force) or -n (dry run)"));
@@ -1149,7 +1190,9 @@ pub fn clean(ctx: &Ctx, args: &[String]) -> Result<i32> {
         if a.has("-d") {
             targets.extend(untracked_list(&st, "normal"));
         } else {
-            targets.extend(st.untracked.iter().filter(|u| !st.untracked_dirs.iter().any(|d| u.starts_with(&format!("{d}/")))).cloned());
+            targets.extend(
+                st.untracked.iter().filter(|u| !st.untracked_dirs.iter().any(|d| u.starts_with(&format!("{d}/")))).cloned(),
+            );
         }
     }
     if only_ignored || with_ignored {

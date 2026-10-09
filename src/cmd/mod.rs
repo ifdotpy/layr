@@ -93,7 +93,7 @@ pub fn relative_to(sub: &str, p: &str) -> String {
     while i < s.len() && i < t.len() && s[i] == t[i] {
         i += 1;
     }
-    let mut out: Vec<&str> = std::iter::repeat("..").take(s.len() - i).collect();
+    let mut out: Vec<&str> = std::iter::repeat_n("..", s.len() - i).collect();
     out.extend_from_slice(&t[i..]);
     out.join("/")
 }
@@ -113,7 +113,8 @@ pub fn glob(pat: &str, s: &str) -> bool {
                 }
                 if let Some(end) = p.iter().position(|c| *c == b']') {
                     let set = &p[1..end];
-                    let (neg, set) = if set.first() == Some(&b'!') || set.first() == Some(&b'^') { (true, &set[1..]) } else { (false, set) };
+                    let (neg, set) =
+                        if set.first() == Some(&b'!') || set.first() == Some(&b'^') { (true, &set[1..]) } else { (false, set) };
                     let mut hit = false;
                     let mut i = 0;
                     while i < set.len() {
@@ -146,10 +147,7 @@ pub fn matches(specs: &[String], path: &str) -> bool {
         return true;
     }
     specs.iter().any(|s| {
-        s.is_empty()
-            || path == s
-            || path.starts_with(&format!("{s}/"))
-            || (s.contains(['*', '?', '[']) && glob(s, path))
+        s.is_empty() || path == s || path.starts_with(&format!("{s}/")) || (s.contains(['*', '?', '[']) && glob(s, path))
     })
 }
 
@@ -240,10 +238,9 @@ pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
         "backup" => transfer::backup(ctx, &rest),
         "sync" => replicate::sync(ctx, &rest),
         "serve-peer" => replicate::serve(ctx, &rest),
-        "worktree" => Err(exit(
-            1,
-            "layr has no worktrees: each line is a folder. Create one with 'layr branch <name> [<start>]'.",
-        )),
+        "worktree" => {
+            Err(exit(1, "layr has no worktrees: each line is a folder. Create one with 'layr branch <name> [<start>]'."))
+        }
         other => Err(exit(1, format!("layr: '{other}' is not a layr command. See 'layr help'."))),
     }
 }
