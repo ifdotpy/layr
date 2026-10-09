@@ -358,7 +358,7 @@ pub fn op(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let lines: Vec<String> =
             String::from_utf8_lossy(&data).lines().filter(|l| !l.trim().is_empty()).map(|l| l.to_string()).collect();
         let _lock = h.repo.p.lock()?;
-        let n = h.repo.p.import_lines(&lines)?;
+        let n = h.repo.p.import_lines(&lines, false)?;
         outln!(ctx, "imported {n} new record(s) of {}", lines.len());
         return Ok(0);
     }
@@ -799,9 +799,9 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 // folder's HEAD is the parent of the folder content.
                 let s = crate::gitbridge::init_store(&repo)?;
                 let url = caller_git(ctx, &src, &["config", "--get", "remote.origin.url"])
-                .ok()
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                .filter(|s| !s.is_empty());
+                    .ok()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    .filter(|s| !s.is_empty());
                 set_config(ctx, &repo, "remote.local.url", serde_json::json!(src.to_string_lossy()))?;
                 if let Some(u) = &url {
                     set_config(ctx, &repo, "remote.origin.url", serde_json::json!(u))?;
@@ -1020,8 +1020,24 @@ pub fn layer(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
 }
 
-pub fn machines(ctx: &Ctx, _args: &[String]) -> Result<i32> {
+pub fn machines(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let h = here(ctx)?;
+    if args.first().map(|s| s.as_str()) == Some("trust") {
+        let spec = Spec::new().value("--key");
+        let a = parse(&spec, &args[1..])?;
+        h.repo.require_lead(ctx, "trust machines")?;
+        let id = a.pos.first().ok_or_else(|| exit(128, "usage: layr machines trust <id> --key <public key>"))?;
+        let key = a.get("--key").ok_or_else(|| exit(128, "usage: layr machines trust <id> --key <public key>"))?;
+        let full = if id.len() == 36 {
+            id.clone()
+        } else {
+            h.repo.p.db.machine_by_name(id)?.ok_or_else(|| exit(128, format!("unknown machine {id}: give its full id")))?
+        };
+        let _lock = h.repo.p.lock()?;
+        super::replicate::trust(ctx, &h.repo.p, &full, key)?;
+        outln!(ctx, "trusted machine {}", &ids::display(&full)[..8]);
+        return Ok(0);
+    }
     let me = &h.repo.p.store.machine.id;
     for (id, name) in h.repo.p.db.machines()? {
         let key = h.repo.p.db.machine_key(&id)?.unwrap_or_default();

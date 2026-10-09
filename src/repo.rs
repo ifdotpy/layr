@@ -110,6 +110,9 @@ impl<'a> Repo<'a> {
     }
 
     pub fn can_write_line(&self, ctx: &Ctx, line: &Line) -> Result<()> {
+        if line.owner == 0 && !ctx.caller.is_root() {
+            bail!("permission denied: only root can change the root-owned line '{}'", line.name);
+        }
         if ctx.caller.uid == 0 || ctx.caller.uid == line.owner || ctx.caller.uid == self.p.lead() {
             return Ok(());
         }

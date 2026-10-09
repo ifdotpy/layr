@@ -139,8 +139,29 @@ fn missing_lines(p: &Project, peer: &BTreeMap<String, u64>) -> Result<Vec<String
 }
 
 /// Check and store records from the peer.
-fn take_lines(p: &Project, lines: &[String]) -> Result<usize> {
-    p.import_lines(lines)
+fn take_lines(p: &Project, lines: &[String], bootstrap: bool) -> Result<usize> {
+    p.import_lines(lines, bootstrap)
+}
+
+/// Record that this project trusts a machine's records (its id and key).
+pub fn trust(ctx: &Ctx, p: &Project, machine: &str, key: &str) -> Result<bool> {
+    if machine == p.store.machine.id {
+        return Ok(false);
+    }
+    if let Some(k) = p.db.trusted(machine)? {
+        if k == key {
+            return Ok(false);
+        }
+        bail!("machine {} is trusted with another key", &ids::display(machine)[..8]);
+    }
+    let mut rec = crate::model::Record::new("machine.trust");
+    rec.data = json!({"machine": machine, "public_key": key});
+    p.append(rec, &ctx.actor())?;
+    Ok(true)
+}
+
+fn own_key(p: &Project) -> String {
+    hex::encode(p.store.machine.key.verifying_key().to_bytes())
 }
 
 fn wanted(p: &Project, id: &str, auto: bool) -> bool {
@@ -337,8 +358,15 @@ pub fn sync(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let auto = a.has("--auto");
     let result = (|| -> Result<(usize, usize, usize, usize, u64)> {
         let mine = present(&repo.p)?;
-        w.json(&json!({"op": "hello", "project": repo.p.name, "project_id": repo.p.id, "machine": repo.p.store.machine.id, "seqs": seqs(&repo.p)?, "present": mine, "layers": present_layers(&repo.p)?}))?;
+        w.json(&json!({"op": "hello", "project": repo.p.name, "project_id": repo.p.id, "machine": repo.p.store.machine.id, "public_key": own_key(&repo.p), "seqs": seqs(&repo.p)?, "present": mine, "layers": present_layers(&repo.p)?}))?;
         let hello = w.recv_json()?;
+        // The lead chose this peer: its machine is trusted from now on.
+        {
+            let _lock = repo.p.lock()?;
+            if let (Some(m), Some(k)) = (hello["machine"].as_str(), hello["public_key"].as_str()) {
+                trust(ctx, &repo.p, m, k)?;
+            }
+        }
         let peer_layers: BTreeSet<String> = serde_json::from_value(hello["layers"].clone()).unwrap_or_default();
         let peer_seqs: BTreeMap<String, u64> = serde_json::from_value(hello["seqs"].clone())?;
         let peer_present: BTreeSet<String> = serde_json::from_value(hello["present"].clone())?;
@@ -348,7 +376,10 @@ pub fn sync(ctx: &Ctx, args: &[String]) -> Result<i32> {
         w.json(&json!({"op": "records", "lines": out_lines}))?;
         let theirs = w.recv_json()?;
         let lines: Vec<String> = serde_json::from_value(theirs["lines"].clone())?;
-        let got_records = take_lines(&repo.p, &lines)?;
+        let got_records = {
+            let _lock = repo.p.lock()?;
+            take_lines(&repo.p, &lines, false)?
+        };
         let _ = w.recv_json()?;
         // States to the peer.
         let (mut sent, mut bytes) = (0, 0);
@@ -414,12 +445,23 @@ pub fn serve(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let repo = Repo { p };
     let peer_seqs: BTreeMap<String, u64> = serde_json::from_value(hello["seqs"].clone())?;
-    w.json(&json!({"op": "hello", "machine": repo.p.store.machine.id, "seqs": seqs(&repo.p)?, "present": present(&repo.p)?, "layers": present_layers(&repo.p)?}))?;
+    w.json(&json!({"op": "hello", "machine": repo.p.store.machine.id, "public_key": own_key(&repo.p), "seqs": seqs(&repo.p)?, "present": present(&repo.p)?, "layers": present_layers(&repo.p)?}))?;
     let recs = w.recv_json()?;
     let lines: Vec<String> = serde_json::from_value(recs["lines"].clone())?;
     let mine = missing_lines(&repo.p, &peer_seqs)?;
     w.json(&json!({"op": "records", "lines": mine}))?;
-    take_lines(&repo.p, &lines)?;
+    {
+        // A new replica trusts the machines of the project it copies; an existing one only takes
+        // records of machines it trusts.
+        let _lock = repo.p.lock()?;
+        let bootstrap = !exists;
+        take_lines(&repo.p, &lines, bootstrap)?;
+        if bootstrap {
+            for (m, k) in repo.p.machine_keys_of(&lines) {
+                trust(ctx, &repo.p, &m, &k)?;
+            }
+        }
+    }
     w.json(&json!({"op": "count", "count": mine.len()}))?;
     let _ = a.has("--create");
     recv_states(&mut w, &repo.p)?;

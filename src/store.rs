@@ -244,7 +244,7 @@ impl<'a> Project<'a> {
             self.db.clear_derived()?;
             for line in self.db.all_lines()? {
                 let s = oplog::parse_line(&line, None)?;
-                self.db.derive(&s.record, &present)?;
+                self.db.derive(&s.record, &present, &self.store.machine.id)?;
             }
             Ok(())
         })?;
@@ -276,7 +276,7 @@ impl<'a> Project<'a> {
                 mr.data = serde_json::json!({"name": m.name, "public_key": hex::encode(m.key.verifying_key().to_bytes())});
                 let line = oplog::sign_line(&mr, &m.key)?;
                 self.db.insert_record(&mr, &line)?;
-                self.db.derive(&mr, &present)?;
+                self.db.derive(&mr, &present, &m.id)?;
                 seq = 1;
             }
             rec.id = ids::new_id();
@@ -287,29 +287,56 @@ impl<'a> Project<'a> {
             rec.actor = actor.clone();
             let line = oplog::sign_line(&rec, &m.key)?;
             self.db.insert_record(&rec, &line)?;
-            self.db.derive(&rec, &present)?;
+            self.db.derive(&rec, &present, &m.id)?;
             Ok(())
         })?;
         Ok(rec)
     }
 
     /// Records of other machines (replication, restore): check each machine's chain (its key
-    /// from its first record, contiguous sequence numbers, signatures), then store them with
-    /// their derived rows in one transaction. Returns the number of new records.
-    pub fn import_lines(&self, lines: &[String]) -> Result<usize> {
-        use std::collections::BTreeMap;
-        let mut by: BTreeMap<String, Vec<oplog::Signed>> = BTreeMap::new();
+    /// from its first record, contiguous sequence numbers, signatures) and the project id, then
+    /// store them with their derived rows in one transaction. Returns the number of new records.
+    ///
+    /// Only records of trusted machines are taken: this machine, machines trusted by a
+    /// `machine.trust` record of a trusted machine (in the store or in the same batch), or, with
+    /// `bootstrap` (a new replica or a restore), every machine of the batch.
+    pub fn import_lines(&self, lines: &[String], bootstrap: bool) -> Result<usize> {
+        use std::collections::{BTreeMap, BTreeSet};
+        let mut parsed: Vec<oplog::Signed> = Vec::new();
         for l in lines {
-            let s = oplog::parse_line(l, None)?;
+            parsed.push(oplog::parse_line(l, None)?);
+        }
+        let project = if self.id.is_empty() {
+            parsed
+                .iter()
+                .find(|s| s.record.op == "project")
+                .and_then(|s| s.record.data["id"].as_str().map(|x| x.to_string()))
+                .unwrap_or_default()
+        } else {
+            self.id.clone()
+        };
+        for s in &parsed {
+            if !project.is_empty() && s.record.project != project {
+                bail!(
+                    "record {} of machine {} belongs to another project ({})",
+                    s.record.seq,
+                    s.record.machine,
+                    s.record.project
+                );
+            }
+        }
+        let mut by: BTreeMap<String, Vec<oplog::Signed>> = BTreeMap::new();
+        for s in parsed {
             by.entry(s.record.machine.clone()).or_default().push(s);
         }
         let present = self.state_present();
         let mut fresh: Vec<oplog::Signed> = Vec::new();
-        for (machine, mut recs) in by {
+        let mut keys: BTreeMap<String, String> = BTreeMap::new();
+        for (machine, recs) in by.iter_mut() {
             recs.sort_by_key(|s| s.record.seq);
-            let mut last = self.db.last_seq(&machine)?;
+            let mut last = self.db.last_seq(machine)?;
             let key = if last > 0 {
-                let first = self.db.lines_after(&machine, 0)?.into_iter().next().ok_or_else(|| anyhow!("no records"))?;
+                let first = self.db.record_line(machine, 1)?.ok_or_else(|| anyhow!("no records"))?;
                 oplog::machine_key(&oplog::parse_line(&first, None)?.record)?
             } else {
                 let f = recs.first().ok_or_else(|| anyhow!("no records"))?;
@@ -318,13 +345,17 @@ impl<'a> Project<'a> {
                 }
                 oplog::machine_key(&f.record)?
             };
-            for s in recs {
+            keys.insert(machine.clone(), hex::encode(key.to_bytes()));
+            for s in recs.iter() {
                 if s.record.seq <= last {
                     // A record we have: the copy must be the same bytes (else a changed or a
                     // forked history).
-                    let stored = self.db.record_line(&machine, s.record.seq)?;
+                    let stored = self.db.record_line(machine, s.record.seq)?;
                     if stored.as_deref() != Some(s.line.as_str()) {
-                        bail!("record {} of machine {machine} differs from the stored record (changed or forked history); signature not trusted", s.record.seq);
+                        bail!(
+                            "record {} of machine {machine} differs from the stored record (changed or forked history)",
+                            s.record.seq
+                        );
                     }
                     continue;
                 }
@@ -334,22 +365,76 @@ impl<'a> Project<'a> {
                 oplog::parse_line(&s.line, Some(&key))
                     .with_context(|| format!("record {} of machine {machine}", s.record.seq))?;
                 last = s.record.seq;
-                fresh.push(s);
+                fresh.push(oplog::Signed { record: s.record.clone(), line: s.line.clone() });
+            }
+        }
+        // Trust: known machines, then machines vouched for by trusted ones in this batch.
+        if !bootstrap {
+            let mut trusted: BTreeSet<String> = BTreeSet::new();
+            for m in keys.keys() {
+                if let Some(k) = self.db.trusted(m)? {
+                    if Some(&k) == keys.get(m) {
+                        trusted.insert(m.clone());
+                    }
+                }
+            }
+            trusted.insert(self.store.machine.id.clone());
+            loop {
+                let before = trusted.len();
+                for s in &fresh {
+                    if s.record.op == "machine.trust" && trusted.contains(&s.record.machine) {
+                        let (m, k) =
+                            (s.record.data["machine"].as_str().unwrap_or(""), s.record.data["public_key"].as_str().unwrap_or(""));
+                        if keys.get(m).map(|x| x == k).unwrap_or(false) {
+                            trusted.insert(m.to_string());
+                        }
+                    }
+                }
+                if trusted.len() == before {
+                    break;
+                }
+            }
+            let untrusted: Vec<String> = keys.keys().filter(|m| !trusted.contains(*m)).cloned().collect();
+            if !untrusted.is_empty() {
+                let list: Vec<String> = untrusted
+                    .iter()
+                    .map(|m| format!("{} (key {})", &crate::ids::display(m)[..8], keys.get(m).map(|k| k.as_str()).unwrap_or("")))
+                    .collect();
+                bail!(
+                    "records of untrusted machine(s): {}. If you trust them, run: layr machines trust <id> --key <key>",
+                    list.join(", ")
+                );
             }
         }
         fresh.sort_by(|a, b| {
             (a.record.time, &a.record.machine, a.record.seq).cmp(&(b.record.time, &b.record.machine, b.record.seq))
         });
         let n = fresh.len();
+        let local = self.store.machine.id.clone();
         self.db.with_tx(|| {
             for s in &fresh {
                 if self.db.insert_record(&s.record, &s.line)? {
-                    self.db.derive(&s.record, &present)?;
+                    self.db.derive(&s.record, &present, &local)?;
                 }
             }
             Ok(())
         })?;
         Ok(n)
+    }
+
+    /// Machines whose records this project has but does not trust yet, with their keys.
+    pub fn machine_keys_of(&self, lines: &[String]) -> Vec<(String, String)> {
+        let mut v = Vec::new();
+        for l in lines {
+            if let Ok(s) = oplog::parse_line(l, None) {
+                if s.record.op == "machine" {
+                    if let Some(k) = s.record.data["public_key"].as_str() {
+                        v.push((s.record.machine.clone(), k.to_string()));
+                    }
+                }
+            }
+        }
+        v
     }
 
     /// All records as JSONL (by machine and sequence number): the exchange and backup format.

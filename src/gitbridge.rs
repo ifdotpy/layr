@@ -101,8 +101,89 @@ pub fn remote_url(repo: &Repo, remote: &str) -> Result<String> {
     bail!("remote '{remote}' is not configured (layr remote add {remote} <url>)")
 }
 
+fn fetched_refs(ctx: &Ctx, tmp: &Path, remote: &str) -> Result<Vec<(String, String)>> {
+    let mut command = base_cmd(tmp);
+    command.args(["for-each-ref", "--format=%(objectname) %(refname)", &format!("refs/remotes/{remote}/"), "refs/tags/"]);
+    as_caller(ctx, &mut command, tmp)?;
+    let output = command.stdin(Stdio::null()).output()?;
+    if !output.status.success() {
+        bail!("cannot list fetched refs: {}", String::from_utf8_lossy(&output.stderr).trim());
+    }
+    let mut refs = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let (oid, name) = line.split_once(' ').ok_or_else(|| anyhow!("bad fetched ref"))?;
+        if oid.len() != 40 || !oid.bytes().all(|b| b.is_ascii_hexdigit()) {
+            bail!("bad fetched object id");
+        }
+        if !name.starts_with(&format!("refs/remotes/{remote}/")) && !name.starts_with("refs/tags/") {
+            bail!("bad fetched ref name");
+        }
+        refs.push((name.to_string(), oid.to_string()));
+    }
+    Ok(refs)
+}
+
+/// Import objects through a pipe. Root never opens the temporary repository that belongs to
+/// the caller, so links or alternates in it cannot make root read another path.
+fn import_fetched(ctx: &Ctx, store: &Path, tmp: &Path, refs: &[(String, String)]) -> Result<()> {
+    if refs.is_empty() {
+        return Ok(());
+    }
+    let known = git_out(store, &["for-each-ref", "--format=%(objectname)"])?;
+    let mut pack = base_cmd(tmp);
+    pack.args(["pack-objects", "--stdout", "--revs", "--thin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+    as_caller(ctx, &mut pack, tmp)?;
+    let mut pack = pack.spawn().context("start git pack-objects")?;
+    let pack_out = pack.stdout.take().ok_or_else(|| anyhow!("git pack-objects has no output"))?;
+
+    let mut index = base_cmd(store);
+    let mut index = index
+        .args(["index-pack", "--stdin", "--fix-thin"])
+        .stdin(Stdio::from(pack_out))
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .context("start git index-pack")?;
+    let write_result = (|| -> Result<()> {
+        let input = pack.stdin.as_mut().ok_or_else(|| anyhow!("git pack-objects has no input"))?;
+        for (_, oid) in refs {
+            writeln!(input, "{oid}")?;
+        }
+        for oid in known.lines().filter(|s| !s.is_empty()) {
+            writeln!(input, "^{oid}")?;
+        }
+        Ok(())
+    })();
+    drop(pack.stdin.take());
+    let pack_status = pack.wait()?;
+    let index_status = index.wait()?;
+    write_result?;
+    if !pack_status.success() || !index_status.success() {
+        bail!("cannot import fetched git objects");
+    }
+
+    let mut update = base_cmd(store);
+    update.args(["update-ref", "--stdin"]).stdin(Stdio::piped()).stderr(Stdio::piped());
+    let mut update = update.spawn()?;
+    {
+        let input = update.stdin.as_mut().ok_or_else(|| anyhow!("git update-ref has no input"))?;
+        for (name, oid) in refs {
+            writeln!(input, "update {name} {oid}")?;
+        }
+    }
+    drop(update.stdin.take());
+    let output = update.wait_with_output()?;
+    if !output.status.success() {
+        bail!("cannot update fetched refs: {}", String::from_utf8_lossy(&output.stderr).trim());
+    }
+    Ok(())
+}
+
 /// `git fetch` of a remote into the store. Network access runs as the caller, into a temporary
-/// repository that borrows the store objects; the service then copies the new objects.
+/// repository that borrows the store objects; the service then imports a pack through a pipe.
 pub fn fetch(ctx: &Ctx, repo: &Repo, remote: &str) -> Result<Vec<(String, String)>> {
     let s = init_store(repo)?;
     let url = remote_url(repo, remote)?;
@@ -145,21 +226,14 @@ pub fn fetch(ctx: &Ctx, repo: &Repo, remote: &str) -> Result<Vec<(String, String
         let _ = std::fs::remove_dir_all(&tmp);
         bail!("git fetch {url} failed: {}", String::from_utf8_lossy(&out.stderr).trim());
     }
-    let r = git_out(
-        &s,
-        &[
-            "fetch",
-            "-q",
-            "--no-write-fetch-head",
-            tmp.to_str().unwrap(),
-            &format!("+refs/remotes/{remote}/*:refs/remotes/{remote}/*"),
-            "+refs/tags/*:refs/tags/*",
-        ],
-    );
+    let refs = fetched_refs(ctx, &tmp, remote);
+    let r = refs.and_then(|refs| {
+        import_fetched(ctx, &s, &tmp, &refs)?;
+        Ok(refs)
+    });
     let _ = std::fs::remove_dir_all(&tmp);
-    r?;
-    let list = git_out(&s, &["for-each-ref", "--format=%(refname:strip=2) %(objectname)", &format!("refs/remotes/{remote}/")])?;
-    Ok(list.lines().filter_map(|l| l.split_once(' ').map(|(a, b)| (a.to_string(), b.to_string()))).collect())
+    let prefix = format!("refs/remotes/");
+    Ok(r?.into_iter().filter_map(|(name, oid)| name.strip_prefix(&prefix).map(|name| (name.to_string(), oid))).collect())
 }
 
 /// Read a remote ref without fetching (`git ls-remote`), as the caller.

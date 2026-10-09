@@ -505,6 +505,9 @@ struct Item {
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 struct Manifest {
     format: u32,
+    /// The machine that wrote the backup (its settings are taken over on restore).
+    #[serde(default)]
+    machine: String,
     project: String,
     project_id: String,
     chain: u32,
@@ -631,6 +634,7 @@ pub fn run_backup(ctx: &Ctx, repo: &Repo, root: &Path, full: bool, writer: (u32,
     w(&mut || Ok(std::fs::create_dir_all(&dir)?))?;
     let mut m = man.take().unwrap_or(Manifest {
         format: 1,
+        machine: repo.p.store.machine.id.clone(),
         project: repo.p.name.clone(),
         project_id: repo.p.id.clone(),
         chain: num,
@@ -912,7 +916,7 @@ fn restore(ctx: &Ctx, root: &Path, as_name: Option<&str>, chain: Option<u32>, qu
                     }
                     let lines: Vec<String> =
                         String::from_utf8_lossy(&out.stdout).lines().filter(|l| !l.is_empty()).map(|l| l.to_string()).collect();
-                    p.import_lines(&lines)?;
+                    p.import_lines(&lines, true)?;
                 }
                 _ => {}
             }
@@ -931,6 +935,30 @@ fn restore(ctx: &Ctx, root: &Path, as_name: Option<&str>, chain: Option<u32>, qu
     let p = Project::open(&ctx.store, &name)?;
     p.verify_records()?;
     p.rebuild_index()?;
+    {
+        // The machines of the backup are trusted, and this machine takes over the settings of
+        // the machine that wrote it (lead, members, remotes, merge commands).
+        let _lock = p.lock()?;
+        for m in p.db.record_machines()? {
+            if m != p.store.machine.id {
+                if let Some(k) = p.db.machine_key(&m)? {
+                    super::replicate::trust(ctx, &p, &m, &k)?;
+                }
+            }
+        }
+        let suffix = format!("@{}", m.machine);
+        let mut take = serde_json::Map::new();
+        for (k, v) in p.db.config_all()? {
+            if let Some(key) = k.strip_suffix(&suffix) {
+                take.insert(key.to_string(), serde_json::from_str(&v).unwrap_or(serde_json::Value::String(v)));
+            }
+        }
+        if !take.is_empty() {
+            let mut rec = Record::new("config");
+            rec.data = serde_json::json!({"config": take});
+            p.append(rec, &ctx.actor())?;
+        }
+    }
     std::fs::create_dir_all(p.git_dir().join("layr-index")).ok();
     let repo = Repo { p };
     let mut adopted = Vec::new();

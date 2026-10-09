@@ -21,19 +21,20 @@ CREATE TABLE IF NOT EXISTS states (id TEXT PRIMARY KEY, display TEXT UNIQUE, kin
 CREATE INDEX IF NOT EXISTS states_line ON states(line, kind, time);
 CREATE TABLE IF NOT EXISTS parents (state TEXT, parent TEXT, ord INTEGER, PRIMARY KEY(state, ord));
 CREATE INDEX IF NOT EXISTS parents_parent ON parents(parent);
-CREATE TABLE IF NOT EXISTS lines (id TEXT PRIMARY KEY, name TEXT, owner INTEGER, machine TEXT, head TEXT, grp TEXT, deleted INTEGER DEFAULT 0, time INTEGER);
-CREATE TABLE IF NOT EXISTS line_heads (line TEXT, machine TEXT, head TEXT, time INTEGER, PRIMARY KEY(line, machine));
-CREATE TABLE IF NOT EXISTS tags (name TEXT PRIMARY KEY, state TEXT, message TEXT, time INTEGER);
-CREATE TABLE IF NOT EXISTS remote_refs (name TEXT PRIMARY KEY, state TEXT, gcommit TEXT, time INTEGER);
+CREATE TABLE IF NOT EXISTS lines (id TEXT PRIMARY KEY, name TEXT, owner INTEGER, machine TEXT, head TEXT, grp TEXT, deleted INTEGER DEFAULT 0, time INTEGER, ord TEXT);
+CREATE TABLE IF NOT EXISTS line_heads (line TEXT, machine TEXT, head TEXT, time INTEGER, ord TEXT, PRIMARY KEY(line, machine));
+CREATE TABLE IF NOT EXISTS tags (name TEXT PRIMARY KEY, state TEXT, message TEXT, time INTEGER, deleted INTEGER DEFAULT 0, ord TEXT);
+CREATE TABLE IF NOT EXISTS remote_refs (name TEXT PRIMARY KEY, state TEXT, gcommit TEXT, time INTEGER, ord TEXT);
 CREATE TABLE IF NOT EXISTS git_map (state TEXT, gcommit TEXT, PRIMARY KEY(state, gcommit));
 CREATE INDEX IF NOT EXISTS git_map_commit ON git_map(gcommit);
-CREATE TABLE IF NOT EXISTS exports (id TEXT PRIMARY KEY, state TEXT, remote TEXT, branch TEXT, gcommit TEXT, status TEXT, time INTEGER);
+CREATE TABLE IF NOT EXISTS exports (id TEXT PRIMARY KEY, state TEXT, remote TEXT, branch TEXT, gcommit TEXT, status TEXT, time INTEGER, ord TEXT);
 CREATE TABLE IF NOT EXISTS checks (id TEXT PRIMARY KEY, state TEXT, command TEXT, exit INTEGER, time INTEGER, actor TEXT);
-CREATE TABLE IF NOT EXISTS groups (name TEXT PRIMARY KEY, epoch INTEGER, base TEXT, accepted TEXT, time INTEGER);
-CREATE TABLE IF NOT EXISTS group_lines (grp TEXT, line TEXT, epoch INTEGER, PRIMARY KEY(grp, line));
+CREATE TABLE IF NOT EXISTS groups (name TEXT PRIMARY KEY, epoch INTEGER, base TEXT, accepted TEXT, time INTEGER, ord TEXT);
+CREATE TABLE IF NOT EXISTS group_lines (grp TEXT, line TEXT, epoch INTEGER, ord TEXT, PRIMARY KEY(grp, line));
 CREATE TABLE IF NOT EXISTS machines (id TEXT PRIMARY KEY, name TEXT, public_key TEXT);
-CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT);
-CREATE TABLE IF NOT EXISTS slots (path TEXT PRIMARY KEY, state TEXT, line TEXT, time INTEGER);
+CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT, ord TEXT);
+CREATE TABLE IF NOT EXISTS trusted (machine TEXT PRIMARY KEY, public_key TEXT, by TEXT);
+CREATE TABLE IF NOT EXISTS slots (path TEXT PRIMARY KEY, state TEXT, line TEXT, time INTEGER, ord TEXT);
 "#;
 
 impl Db {
@@ -67,7 +68,8 @@ impl Db {
         self.conn.execute_batch(
             "DELETE FROM states; DELETE FROM parents; DELETE FROM lines; DELETE FROM line_heads;
              DELETE FROM tags; DELETE FROM remote_refs; DELETE FROM git_map; DELETE FROM exports; DELETE FROM checks;
-             DELETE FROM groups; DELETE FROM group_lines; DELETE FROM machines; DELETE FROM config; DELETE FROM slots;",
+             DELETE FROM groups; DELETE FROM group_lines; DELETE FROM machines; DELETE FROM config; DELETE FROM slots;
+             DELETE FROM trusted;",
         )?;
         Ok(())
     }
@@ -115,43 +117,57 @@ impl Db {
     }
 
     /// Update the derived tables for one record. Runs inside the caller's transaction.
-    pub fn derive(&self, rec: &Record, state_present: &dyn Fn(&str) -> bool) -> Result<()> {
+    ///
+    /// The result does not depend on the order in which records arrive: every row that a
+    /// later record can replace keeps the order key of the record that wrote it (time,
+    /// machine, sequence number), and only a record with a larger key replaces it. Deletes
+    /// leave a marked row for the same reason. Settings that act on this machine (lead,
+    /// members, merge commands, remotes, the backup folder) and the lines that have their
+    /// working folder here change only by this machine's records; the values written by other
+    /// machines are kept under `<key>@<machine>`.
+    pub fn derive(&self, rec: &Record, state_present: &dyn Fn(&str) -> bool, local: &str) -> Result<()> {
         let tx = &self.conn;
+        let ord = format!("{:016}:{}:{:012}", rec.time.max(0), rec.machine, rec.seq);
+        let foreign = rec.machine != local;
         for s in &rec.states {
             let present = state_present(&s.id);
             tx.execute(
-                "INSERT OR REPLACE INTO states(id, display, kind, line, time, rec, present, machine) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
-                params![
-                    s.id,
-                    ids::display(&s.id),
-                    kind_str(s.kind),
-                    s.line,
-                    s.time,
-                    serde_json::to_string(s)?,
-                    present as i64,
-                    rec.machine
-                ],
+                "INSERT OR IGNORE INTO states(id, display, kind, line, time, rec, present, machine) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+                params![s.id, ids::display(&s.id), kind_str(s.kind), s.line, s.time, serde_json::to_string(s)?, present as i64, rec.machine],
             )?;
             for (i, p) in s.parents.iter().enumerate() {
                 tx.execute("INSERT OR REPLACE INTO parents(state, parent, ord) VALUES(?1,?2,?3)", params![s.id, p, i as i64])?;
             }
         }
         for (id, ch) in &rec.lines {
+            // Heads per machine: each machine's own records, in its order.
+            if let Some(a) = &ch.after {
+                tx.execute(
+                    "INSERT INTO line_heads(line, machine, head, time, ord) VALUES(?1,?2,?3,?4,?5)
+                     ON CONFLICT(line, machine) DO UPDATE SET head=?3, time=?4, ord=?5 WHERE excluded.ord > line_heads.ord",
+                    params![id, rec.machine, a.head, rec.time, ord],
+                )?;
+            }
+            let row_machine: Option<String> =
+                tx.query_row("SELECT machine FROM lines WHERE id=?1", params![id], |r| r.get(0)).optional()?;
+            if foreign && row_machine.as_deref() == Some(local) {
+                continue;
+            }
             match &ch.after {
                 Some(a) => {
                     tx.execute(
-                        "INSERT INTO lines(id, name, owner, machine, head, grp, deleted, time) VALUES(?1,?2,?3,?4,?5,?6,0,?7)
-                         ON CONFLICT(id) DO UPDATE SET name=?2, owner=?3, machine=?4, head=?5, grp=?6, deleted=0, time=?7",
-                        params![id, a.name, a.owner as i64, a.machine, a.head, a.group, rec.time],
-                    )?;
-                    tx.execute(
-                        "INSERT INTO line_heads(line, machine, head, time) VALUES(?1,?2,?3,?4)
-                         ON CONFLICT(line, machine) DO UPDATE SET head=?3, time=?4",
-                        params![id, rec.machine, a.head, rec.time],
+                        "INSERT INTO lines(id, name, owner, machine, head, grp, deleted, time, ord) VALUES(?1,?2,?3,?4,?5,?6,0,?7,?8)
+                         ON CONFLICT(id) DO UPDATE SET name=?2, owner=?3, machine=?4, head=?5, grp=?6, deleted=0, time=?7, ord=?8
+                         WHERE excluded.ord > lines.ord OR (lines.machine <> ?4 AND ?4 = ?9)",
+                        params![id, a.name, a.owner as i64, a.machine, a.head, a.group, rec.time, ord, local],
                     )?;
                 }
                 None => {
-                    tx.execute("UPDATE lines SET deleted=1, time=?2 WHERE id=?1", params![id, rec.time])?;
+                    tx.execute(
+                        "INSERT INTO lines(id, name, owner, machine, head, grp, deleted, time, ord) VALUES(?1,'',0,?3,'',NULL,1,?2,?4)
+                         ON CONFLICT(id) DO UPDATE SET deleted=1, time=?2, ord=?4 WHERE excluded.ord > lines.ord",
+                        params![id, rec.time, rec.machine, ord],
+                    )?;
                 }
             }
         }
@@ -160,35 +176,55 @@ impl Db {
         match rec.op.as_str() {
             "machine" => {
                 tx.execute(
-                    "INSERT OR REPLACE INTO machines(id, name, public_key) VALUES(?1,?2,?3)",
+                    "INSERT OR IGNORE INTO machines(id, name, public_key) VALUES(?1,?2,?3)",
                     params![rec.machine, s("name"), s("public_key")],
+                )?;
+                if !foreign {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO trusted(machine, public_key, by) VALUES(?1,?2,?1)",
+                        params![rec.machine, s("public_key")],
+                    )?;
+                }
+            }
+            "machine.trust" => {
+                tx.execute(
+                    "INSERT OR IGNORE INTO trusted(machine, public_key, by) VALUES(?1,?2,?3)",
+                    params![s("machine"), s("public_key"), rec.machine],
                 )?;
             }
             "project" | "config" => {
                 if let Some(obj) = d.get("config").and_then(|v| v.as_object()) {
                     for (k, v) in obj {
-                        if v.is_null() {
-                            tx.execute("DELETE FROM config WHERE key=?1", params![k])?;
-                        } else {
-                            tx.execute("INSERT OR REPLACE INTO config(key, value) VALUES(?1,?2)", params![k, v.to_string()])?;
-                        }
+                        let key = if foreign && local_key(k) { format!("{k}@{}", rec.machine) } else { k.clone() };
+                        let val = if v.is_null() { None } else { Some(v.to_string()) };
+                        tx.execute(
+                            "INSERT INTO config(key, value, ord) VALUES(?1,?2,?3)
+                             ON CONFLICT(key) DO UPDATE SET value=?2, ord=?3 WHERE excluded.ord > config.ord",
+                            params![key, val, ord],
+                        )?;
                     }
                 }
             }
             "tag" => {
                 tx.execute(
-                    "INSERT OR REPLACE INTO tags(name, state, message, time) VALUES(?1,?2,?3,?4)",
-                    params![s("name"), s("state"), s("message"), rec.time],
+                    "INSERT INTO tags(name, state, message, time, deleted, ord) VALUES(?1,?2,?3,?4,0,?5)
+                     ON CONFLICT(name) DO UPDATE SET state=?2, message=?3, time=?4, deleted=0, ord=?5 WHERE excluded.ord > tags.ord",
+                    params![s("name"), s("state"), s("message"), rec.time, ord],
                 )?;
             }
             "tag.delete" => {
-                tx.execute("DELETE FROM tags WHERE name=?1", params![s("name")])?;
+                tx.execute(
+                    "INSERT INTO tags(name, state, message, time, deleted, ord) VALUES(?1,NULL,NULL,?2,1,?3)
+                     ON CONFLICT(name) DO UPDATE SET deleted=1, time=?2, ord=?3 WHERE excluded.ord > tags.ord",
+                    params![s("name"), rec.time, ord],
+                )?;
             }
             "import" | "remote.ref" => {
                 if let (Some(name), Some(st)) = (s("ref"), s("state")) {
                     tx.execute(
-                        "INSERT OR REPLACE INTO remote_refs(name, state, gcommit, time) VALUES(?1,?2,?3,?4)",
-                        params![name, st, s("commit"), rec.time],
+                        "INSERT INTO remote_refs(name, state, gcommit, time, ord) VALUES(?1,?2,?3,?4,?5)
+                         ON CONFLICT(name) DO UPDATE SET state=?2, gcommit=?3, time=?4, ord=?5 WHERE excluded.ord > remote_refs.ord",
+                        params![name, st, s("commit"), rec.time, ord],
                     )?;
                 }
                 if let (Some(st), Some(c)) = (s("state"), s("commit")) {
@@ -197,8 +233,10 @@ impl Db {
             }
             "export" => {
                 tx.execute(
-                    "INSERT OR REPLACE INTO exports(id, state, remote, branch, gcommit, status, time) VALUES(?1,?2,?3,?4,?5,?6,?7)",
-                    params![s("export"), s("state"), s("remote"), s("branch"), s("commit"), s("status"), rec.time],
+                    "INSERT INTO exports(id, state, remote, branch, gcommit, status, time, ord) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
+                     ON CONFLICT(id) DO UPDATE SET state=?2, remote=?3, branch=?4, gcommit=?5, status=?6, time=?7, ord=?8
+                     WHERE excluded.ord > exports.ord",
+                    params![s("export"), s("state"), s("remote"), s("branch"), s("commit"), s("status"), rec.time, ord],
                 )?;
                 if let (Some(st), Some(c)) = (s("state"), s("commit")) {
                     tx.execute("INSERT OR IGNORE INTO git_map(state, gcommit) VALUES(?1,?2)", params![st, c])?;
@@ -206,40 +244,47 @@ impl Db {
                 if s("status").as_deref() == Some("pushed") {
                     if let (Some(r), Some(b), Some(st), Some(c)) = (s("remote"), s("branch"), s("state"), s("commit")) {
                         tx.execute(
-                            "INSERT OR REPLACE INTO remote_refs(name, state, gcommit, time) VALUES(?1,?2,?3,?4)",
-                            params![format!("{r}/{b}"), st, c, rec.time],
+                            "INSERT INTO remote_refs(name, state, gcommit, time, ord) VALUES(?1,?2,?3,?4,?5)
+                             ON CONFLICT(name) DO UPDATE SET state=?2, gcommit=?3, time=?4, ord=?5 WHERE excluded.ord > remote_refs.ord",
+                            params![format!("{r}/{b}"), st, c, rec.time, ord],
                         )?;
                     }
                 }
             }
             "check" => {
                 tx.execute(
-                    "INSERT OR REPLACE INTO checks(id, state, command, exit, time, actor) VALUES(?1,?2,?3,?4,?5,?6)",
+                    "INSERT OR IGNORE INTO checks(id, state, command, exit, time, actor) VALUES(?1,?2,?3,?4,?5,?6)",
                     params![rec.id, s("state"), s("command"), d.get("exit").and_then(|v| v.as_i64()), rec.time, rec.actor.name],
                 )?;
             }
             "group.create" => {
                 tx.execute(
-                    "INSERT OR REPLACE INTO groups(name, epoch, base, accepted, time) VALUES(?1, 0, ?2, NULL, ?3)",
-                    params![s("name"), s("base"), rec.time],
+                    "INSERT OR IGNORE INTO groups(name, epoch, base, accepted, time, ord) VALUES(?1, 0, ?2, NULL, ?3, ?4)",
+                    params![s("name"), s("base"), rec.time, ord],
                 )?;
             }
             "group.add" => {
+                // The epoch a line joined at: the number of acceptances recorded before it.
                 tx.execute(
-                    "INSERT OR REPLACE INTO group_lines(grp, line, epoch) VALUES(?1, ?2, (SELECT epoch FROM groups WHERE name=?1))",
-                    params![s("name"), s("line")],
+                    "INSERT INTO group_lines(grp, line, epoch, ord) VALUES(?1, ?2, (SELECT COUNT(*) FROM records WHERE op='group.accept'
+                       AND json_extract(raw, '$.r.data.name')=?1 AND (printf('%016d:%s:%012d', time, machine, seq)) < ?3), ?3)
+                     ON CONFLICT(grp, line) DO UPDATE SET epoch=excluded.epoch, ord=?3 WHERE excluded.ord > group_lines.ord",
+                    params![s("name"), s("line"), ord],
                 )?;
             }
             "group.accept" => {
                 tx.execute(
-                    "UPDATE groups SET epoch=epoch+1, accepted=?2, time=?3 WHERE name=?1",
-                    params![s("name"), s("line"), rec.time],
+                    "UPDATE groups SET epoch=epoch+1, accepted=CASE WHEN ?3 > COALESCE(ord, '') THEN ?2 ELSE accepted END,
+                     ord=CASE WHEN ?3 > COALESCE(ord, '') THEN ?3 ELSE ord END, time=?4 WHERE name=?1",
+                    params![s("name"), s("line"), ord, rec.time],
                 )?;
             }
             "gc" => {
                 if let Some(arr) = d.get("deleted").and_then(|v| v.as_array()) {
                     for id in arr.iter().filter_map(|v| v.as_str()) {
-                        tx.execute("UPDATE states SET deleted=1, present=0 WHERE id=?1", params![id])?;
+                        if !foreign {
+                            tx.execute("UPDATE states SET deleted=1, present=0 WHERE id=?1", params![id])?;
+                        }
                     }
                 }
             }
@@ -258,14 +303,21 @@ impl Db {
                 tx.execute("UPDATE states SET dropped=1 WHERE id=?1", params![s("state")])?;
             }
             "slot" => {
-                tx.execute(
-                    "INSERT OR REPLACE INTO slots(path, state, line, time) VALUES(?1,?2,?3,?4)",
-                    params![s("path"), s("state"), s("line"), rec.time],
-                )?;
+                if !foreign {
+                    tx.execute(
+                        "INSERT INTO slots(path, state, line, time, ord) VALUES(?1,?2,?3,?4,?5)
+                         ON CONFLICT(path) DO UPDATE SET state=?2, line=?3, time=?4, ord=?5 WHERE excluded.ord > slots.ord",
+                        params![s("path"), s("state"), s("line"), rec.time, ord],
+                    )?;
+                }
             }
             _ => {}
         }
         Ok(())
+    }
+
+    pub fn trusted(&self, machine: &str) -> Result<Option<String>> {
+        Ok(self.conn.query_row("SELECT public_key FROM trusted WHERE machine=?1", params![machine], |r| r.get(0)).optional()?)
     }
 
     pub fn state(&self, id: &str) -> Result<Option<StateRec>> {
@@ -356,11 +408,11 @@ impl Db {
     }
 
     pub fn tag(&self, name: &str) -> Result<Option<String>> {
-        Ok(self.conn.query_row("SELECT state FROM tags WHERE name=?1", params![name], |r| r.get(0)).optional()?)
+        Ok(self.conn.query_row("SELECT state FROM tags WHERE name=?1 AND deleted=0", params![name], |r| r.get(0)).optional()?)
     }
 
     pub fn tags(&self) -> Result<Vec<(String, String, Option<String>)>> {
-        let mut st = self.conn.prepare("SELECT name, state, message FROM tags ORDER BY name")?;
+        let mut st = self.conn.prepare("SELECT name, state, message FROM tags WHERE deleted=0 ORDER BY name")?;
         let v = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<Result<Vec<_>, _>>()?;
         Ok(v)
     }
@@ -433,8 +485,11 @@ impl Db {
     }
 
     pub fn config(&self, key: &str) -> Result<Option<serde_json::Value>> {
-        let v: Option<String> =
-            self.conn.query_row("SELECT value FROM config WHERE key=?1", params![key], |r| r.get(0)).optional()?;
+        let v: Option<String> = self
+            .conn
+            .query_row("SELECT value FROM config WHERE key=?1", params![key], |r| r.get::<_, Option<String>>(0))
+            .optional()?
+            .flatten();
         Ok(match v {
             Some(s) => Some(serde_json::from_str(&s)?),
             None => None,
@@ -442,7 +497,7 @@ impl Db {
     }
 
     pub fn config_all(&self) -> Result<Vec<(String, String)>> {
-        let mut st = self.conn.prepare("SELECT key, value FROM config ORDER BY key")?;
+        let mut st = self.conn.prepare("SELECT key, value FROM config WHERE value IS NOT NULL ORDER BY key")?;
         let v = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<Vec<_>, _>>()?;
         Ok(v)
     }
@@ -515,6 +570,17 @@ impl Db {
         )?;
         Ok(n > 0)
     }
+}
+
+/// Settings that act on one machine: they never come from another machine's records.
+pub fn local_key(k: &str) -> bool {
+    k == "lead"
+        || k == "members"
+        || k == "backup.dir"
+        || k == "snapshot.interval"
+        || k.starts_with("merge.driver.")
+        || k.starts_with("merge.verify.")
+        || (k.starts_with("remote.") && k.ends_with(".url"))
 }
 
 pub fn kind_str(k: StateKind) -> &'static str {

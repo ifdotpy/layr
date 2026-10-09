@@ -36,15 +36,16 @@ pub fn as_user_fs<T>(uid: u32, gid: u32, f: impl FnOnce() -> Result<T>) -> Resul
             return Err(std::io::Error::last_os_error().into());
         }
     }
-    let old_gid = unsafe { libc::setfsgid(gid) };
-    if unsafe { libc::setfsgid(gid) } != gid {
+    // setfsgid/setfsuid return the previous id; a second call with the same id confirms it.
+    let old_gid = unsafe { libc::setfsgid(gid) } as u32;
+    if unsafe { libc::setfsgid(gid) } as u32 != gid {
         unsafe {
             libc::setgroups(old_groups.len(), old_groups.as_ptr());
         }
         bail!("cannot set filesystem gid to {gid}");
     }
-    let old_uid = unsafe { libc::setfsuid(uid) };
-    if unsafe { libc::setfsuid(uid) } != uid {
+    let old_uid = unsafe { libc::setfsuid(uid) } as u32;
+    if unsafe { libc::setfsuid(uid) } as u32 != uid {
         unsafe {
             libc::setfsgid(old_gid);
             libc::setgroups(old_groups.len(), old_groups.as_ptr());
@@ -54,11 +55,11 @@ pub fn as_user_fs<T>(uid: u32, gid: u32, f: impl FnOnce() -> Result<T>) -> Resul
     let r = f();
     let uid_ok = unsafe {
         libc::setfsuid(old_uid);
-        libc::setfsuid(old_uid) == old_uid
+        libc::setfsuid(old_uid) as u32 == old_uid
     };
     let gid_ok = unsafe {
         libc::setfsgid(old_gid);
-        libc::setfsgid(old_gid) == old_gid
+        libc::setfsgid(old_gid) as u32 == old_gid
     };
     let groups_ok = unsafe { libc::setgroups(old_groups.len(), old_groups.as_ptr()) == 0 };
     if !uid_ok || !gid_ok || !groups_ok {
