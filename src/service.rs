@@ -11,7 +11,7 @@ use crate::store::Store;
 use anyhow::{anyhow, bail, Context, Result};
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::os::fd::{AsRawFd, RawFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 
@@ -21,61 +21,32 @@ pub fn socket_path() -> PathBuf {
 
 const MAX_REQ: usize = 4 << 20;
 
-fn send_with_fds(sock: &UnixStream, data: &[u8], fds: &[RawFd]) -> Result<()> {
-    unsafe {
-        let space = libc::CMSG_SPACE(std::mem::size_of_val(fds) as u32) as usize;
-        let mut cbuf = vec![0u8; space];
-        let mut iov = libc::iovec { iov_base: data.as_ptr() as *mut _, iov_len: data.len() };
-        let mut msg: libc::msghdr = std::mem::zeroed();
-        msg.msg_iov = &mut iov;
-        msg.msg_iovlen = 1;
-        msg.msg_control = cbuf.as_mut_ptr() as *mut _;
-        msg.msg_controllen = space as _;
-        let c = libc::CMSG_FIRSTHDR(&msg);
-        (*c).cmsg_level = libc::SOL_SOCKET;
-        (*c).cmsg_type = libc::SCM_RIGHTS;
-        (*c).cmsg_len = libc::CMSG_LEN(std::mem::size_of_val(fds) as u32) as _;
-        std::ptr::copy_nonoverlapping(fds.as_ptr() as *const u8, libc::CMSG_DATA(c), std::mem::size_of_val(fds));
-        let n = libc::sendmsg(sock.as_raw_fd(), &msg, 0);
-        if n < 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
-        let n = n as usize;
-        if n < data.len() {
-            (&*sock).write_all(&data[n..])?;
-        }
+fn send_with_fds(sock: &UnixStream, data: &[u8], fds: &[BorrowedFd]) -> Result<()> {
+    use rustix::net::{SendAncillaryBuffer, SendAncillaryMessage, SendFlags};
+    let mut space = [std::mem::MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(4))];
+    let mut control = SendAncillaryBuffer::new(&mut space);
+    if !control.push(SendAncillaryMessage::ScmRights(fds)) {
+        bail!("too many descriptors");
+    }
+    let n = rustix::net::sendmsg(sock, &[std::io::IoSlice::new(data)], &mut control, SendFlags::empty())?;
+    if n < data.len() {
+        (&*sock).write_all(&data[n..])?;
     }
     Ok(())
 }
 
-fn recv_with_fds(sock: &UnixStream, buf: &mut [u8], max_fds: usize) -> Result<(usize, Vec<RawFd>)> {
-    unsafe {
-        let space = libc::CMSG_SPACE((max_fds * std::mem::size_of::<RawFd>()) as u32) as usize;
-        let mut cbuf = vec![0u8; space];
-        let mut iov = libc::iovec { iov_base: buf.as_mut_ptr() as *mut _, iov_len: buf.len() };
-        let mut msg: libc::msghdr = std::mem::zeroed();
-        msg.msg_iov = &mut iov;
-        msg.msg_iovlen = 1;
-        msg.msg_control = cbuf.as_mut_ptr() as *mut _;
-        msg.msg_controllen = space as _;
-        let n = libc::recvmsg(sock.as_raw_fd(), &mut msg, libc::MSG_CMSG_CLOEXEC);
-        if n < 0 {
-            return Err(std::io::Error::last_os_error().into());
+fn recv_with_fds(sock: &UnixStream, buf: &mut [u8]) -> Result<(usize, Vec<OwnedFd>)> {
+    use rustix::net::{RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags};
+    let mut space = [std::mem::MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(8))];
+    let mut control = RecvAncillaryBuffer::new(&mut space);
+    let r = rustix::net::recvmsg(sock, &mut [std::io::IoSliceMut::new(buf)], &mut control, RecvFlags::CMSG_CLOEXEC)?;
+    let mut fds = Vec::new();
+    for m in control.drain() {
+        if let RecvAncillaryMessage::ScmRights(it) = m {
+            fds.extend(it);
         }
-        let mut fds = Vec::new();
-        let mut c = libc::CMSG_FIRSTHDR(&msg);
-        while !c.is_null() {
-            if (*c).cmsg_level == libc::SOL_SOCKET && (*c).cmsg_type == libc::SCM_RIGHTS {
-                let count = ((*c).cmsg_len as usize - libc::CMSG_LEN(0) as usize) / std::mem::size_of::<RawFd>();
-                let p = libc::CMSG_DATA(c) as *const RawFd;
-                for i in 0..count {
-                    fds.push(*p.add(i));
-                }
-            }
-            c = libc::CMSG_NXTHDR(&msg, c);
-        }
-        Ok((n as usize, fds))
     }
+    Ok((r.bytes, fds))
 }
 
 /// Client: run a command through the service. Returns the exit code.
@@ -94,7 +65,7 @@ pub fn forward(argv: &[String]) -> Result<i32> {
     let mut data = (req.len() as u32).to_be_bytes().to_vec();
     data.extend_from_slice(&req);
     // The service answers "B" at once when it is busy, or "R" and the exit code at the end.
-    let _ = send_with_fds(&sock, &data, &[0, 1, 2, dir.as_raw_fd()]);
+    let _ = send_with_fds(&sock, &data, &[std::io::stdin().as_fd(), std::io::stdout().as_fd(), std::io::stderr().as_fd(), dir.as_fd()]);
     let mut kind = [0u8; 1];
     (&sock).read_exact(&mut kind).context("the layr service closed the connection")?;
     if kind[0] == b'B' {
@@ -106,15 +77,8 @@ pub fn forward(argv: &[String]) -> Result<i32> {
 }
 
 fn peer_uid(sock: &UnixStream) -> Result<(u32, u32, i32)> {
-    let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
-    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
-    let rc = unsafe {
-        libc::getsockopt(sock.as_raw_fd(), libc::SOL_SOCKET, libc::SO_PEERCRED, &mut cred as *mut _ as *mut _, &mut len)
-    };
-    if rc != 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    Ok((cred.uid, cred.gid, cred.pid))
+    let c = rustix::net::sockopt::socket_peercred(sock)?;
+    Ok((c.uid.as_raw(), c.gid.as_raw(), c.pid.as_raw_nonzero().get()))
 }
 
 fn limit(var: &str, default: usize) -> usize {
@@ -128,7 +92,7 @@ fn handle(sock: UnixStream, root: &Path) -> i32 {
         // A client that does not send its request in time does not hold a process.
         sock.set_read_timeout(Some(std::time::Duration::from_secs(10)))?;
         let mut first = vec![0u8; 65536];
-        let (n, fds) = recv_with_fds(&sock, &mut first, 8)?;
+        let (n, fds) = recv_with_fds(&sock, &mut first)?;
         if fds.len() != 4 {
             bail!("bad request: expected 4 descriptors");
         }
@@ -151,16 +115,11 @@ fn handle(sock: UnixStream, root: &Path) -> i32 {
         let v: serde_json::Value = serde_json::from_slice(&req)?;
         let argv: Vec<String> = serde_json::from_value(v["argv"].clone())?;
         let env: HashMap<String, String> = serde_json::from_value(v["env"].clone()).unwrap_or_default();
-        unsafe {
-            for (i, fd) in fds[..3].iter().enumerate() {
-                libc::dup2(*fd, i as i32);
-                libc::close(*fd);
-            }
-            if libc::fchdir(fds[3]) != 0 {
-                bail!("cannot enter the working folder");
-            }
-            libc::close(fds[3]);
-        }
+        rustix::stdio::dup2_stdin(&fds[0])?;
+        rustix::stdio::dup2_stdout(&fds[1])?;
+        rustix::stdio::dup2_stderr(&fds[2])?;
+        rustix::process::fchdir(&fds[3]).context("cannot enter the working folder")?;
+        drop(fds);
         let cwd = std::env::current_dir()?;
         Ok(run_as(argv, Caller::from_uid(uid), cwd, env, root))
     })();
@@ -259,7 +218,7 @@ fn periodic(root: &Path, hourly: bool) {
 }
 
 pub fn daemon(args: &[String]) -> Result<i32> {
-    if unsafe { libc::geteuid() } != 0 {
+    if !rustix::process::geteuid().is_root() {
         bail!("layr daemon must run as root");
     }
     let mut sock = socket_path();
@@ -305,17 +264,14 @@ pub fn daemon(args: &[String]) -> Result<i32> {
     let (max_total, max_per_user) = (limit("LAYR_MAX_REQUESTS", 256), limit("LAYR_MAX_REQUESTS_PER_USER", 32));
     loop {
         // Reap finished children.
-        loop {
-            let pid = unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG) };
-            if pid <= 0 {
-                break;
-            }
-            children.remove(&pid);
+        while let Ok(Some((pid, _))) = rustix::process::waitpid(None, rustix::process::WaitOptions::NOHANG) {
+            children.remove(&pid.as_raw_nonzero().get());
         }
-        let mut pfd = libc::pollfd { fd: listener.as_raw_fd(), events: libc::POLLIN, revents: 0 };
-        let wait = next.saturating_duration_since(std::time::Instant::now()).as_millis().min(1000) as i32;
-        let rc = unsafe { libc::poll(&mut pfd, 1, wait.max(0)) };
-        if rc > 0 && pfd.revents & libc::POLLIN != 0 {
+        let wait = next.saturating_duration_since(std::time::Instant::now()).min(std::time::Duration::from_secs(1));
+        let timeout = rustix::event::Timespec { tv_sec: wait.as_secs() as _, tv_nsec: wait.subsec_nanos() as _ };
+        let mut pfd = [rustix::event::PollFd::new(&listener, rustix::event::PollFlags::IN)];
+        let ready = rustix::event::poll(&mut pfd, Some(&timeout)).unwrap_or(0);
+        if ready > 0 && pfd[0].revents().contains(rustix::event::PollFlags::IN) {
             if let Ok((conn, _)) = listener.accept() {
                 let uid = peer_uid(&conn).map(|x| x.0).unwrap_or(u32::MAX);
                 let mine = children.values().filter(|u| **u == uid).count();
@@ -324,14 +280,14 @@ pub fn daemon(args: &[String]) -> Result<i32> {
                     drop(conn);
                     continue;
                 }
-                match unsafe { libc::fork() } {
-                    0 => {
+                match crate::sys::fork() {
+                    Ok(crate::sys::Fork::Child) => {
                         drop(listener);
                         let code = handle(conn, &root);
                         std::process::exit(if code >= 0 { 0 } else { 1 });
                     }
-                    -1 => eprintln!("layr service: fork failed"),
-                    pid => {
+                    Err(e) => eprintln!("layr service: fork failed: {e}"),
+                    Ok(crate::sys::Fork::Parent(pid)) => {
                         children.insert(pid, uid);
                         drop(conn);
                     }
@@ -346,7 +302,7 @@ pub fn daemon(args: &[String]) -> Result<i32> {
             if hourly {
                 last_hourly = now;
             }
-            if unsafe { libc::fork() } == 0 {
+            if let Ok(crate::sys::Fork::Child) = crate::sys::fork() {
                 drop(listener);
                 periodic(&root, hourly);
                 std::process::exit(0);

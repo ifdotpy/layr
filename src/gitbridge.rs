@@ -92,19 +92,13 @@ fn set_acl(path: &Path, users: &[u32]) -> Result<()> {
     acl_entry(&mut buf, 0x04, 5, UNDEFINED); // group r-x
     acl_entry(&mut buf, 0x10, 5, UNDEFINED); // mask r-x
     acl_entry(&mut buf, 0x20, 0, UNDEFINED); // others none
-    let p = std::ffi::CString::new(path.to_string_lossy().as_bytes())?;
-    let name = c"system.posix_acl_access";
-    if unsafe { libc::setxattr(p.as_ptr(), name.as_ptr(), buf.as_ptr() as *const libc::c_void, buf.len(), 0) } != 0 {
-        bail!("set access list on {}: {}", path.display(), std::io::Error::last_os_error());
-    }
+    rustix::fs::setxattr(path, "system.posix_acl_access", &buf, rustix::fs::XattrFlags::empty())
+        .map_err(|e| anyhow!("set access list on {}: {e}", path.display()))?;
     Ok(())
 }
 
 fn remove_acl(path: &Path) -> Result<()> {
-    let p = std::ffi::CString::new(path.to_string_lossy().as_bytes())?;
-    unsafe {
-        libc::removexattr(p.as_ptr(), c"system.posix_acl_access".as_ptr());
-    }
+    let _ = rustix::fs::removexattr(path, "system.posix_acl_access");
     Ok(())
 }
 
@@ -267,7 +261,7 @@ pub fn fetch(ctx: &Ctx, repo: &Repo, remote: &str) -> Result<Vec<(String, String
         }
     }
     std::fs::write(tmp.join("packed-refs"), packed)?;
-    if unsafe { libc::geteuid() } == 0 && ctx.caller.uid != 0 {
+    if rustix::process::geteuid().is_root() && ctx.caller.uid != 0 {
         let (u, g) = (ctx.caller.uid, ctx.caller.gid);
         let mut paths = Vec::new();
         fsutil::walk(&tmp, "", &mut |rel, _| {

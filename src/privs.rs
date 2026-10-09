@@ -1,69 +1,47 @@
 //! Acting as a user while the service runs as root.
 //!
-//! - File access: `setfsuid`/`setfsgid` change only the identity used for permission checks, for
-//!   the current thread. Commands that read or write paths named by the caller outside the store
-//!   use them, so the service cannot reach files the caller cannot reach.
+//! - File access: `setfsuid`/`setfsgid` and the user's groups change only the identity used
+//!   for permission checks. Commands that read or write paths named by the caller outside the
+//!   store use them, so the service cannot reach files the caller cannot reach.
 //! - Child processes: a clean environment (never the service's own), the user's groups, then the
 //!   user's gid and uid, all set in the child before `exec`.
 
 use crate::ctx::Ctx;
+use crate::sys;
 use anyhow::{anyhow, bail, Result};
-use std::ffi::CString;
 use std::process::Command;
+
+fn root() -> bool {
+    rustix::process::geteuid().is_root()
+}
 
 pub fn as_caller_fs<T>(ctx: &Ctx, f: impl FnOnce() -> Result<T>) -> Result<T> {
     as_user_fs(ctx.caller.uid, ctx.caller.gid, f)
 }
 
+/// Run `f` with the file permissions of `uid` (its groups included), then restore root's.
 pub fn as_user_fs<T>(uid: u32, gid: u32, f: impl FnOnce() -> Result<T>) -> Result<T> {
-    if unsafe { libc::geteuid() } != 0 || uid == 0 {
+    if !root() || uid == 0 {
         return f();
     }
     let mut target_groups = user(uid)?.groups;
     if !target_groups.contains(&gid) {
         target_groups.push(gid);
     }
-    let old_count = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
-    if old_count < 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    let mut old_groups = vec![0; old_count as usize];
-    if old_count > 0 && unsafe { libc::getgroups(old_count, old_groups.as_mut_ptr()) } < 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    unsafe {
-        if libc::setgroups(target_groups.len(), target_groups.as_ptr()) != 0 {
-            return Err(std::io::Error::last_os_error().into());
+    let old_groups = sys::groups()?;
+    sys::set_groups(&target_groups)?;
+    let (old_uid, old_gid) = match sys::set_fs_ids(uid, gid) {
+        Ok(x) => x,
+        Err(e) => {
+            let _ = sys::set_groups(&old_groups);
+            return Err(e);
         }
-    }
-    // setfsgid/setfsuid return the previous id; a second call with the same id confirms it.
-    let old_gid = unsafe { libc::setfsgid(gid) } as u32;
-    if unsafe { libc::setfsgid(gid) } as u32 != gid {
-        unsafe {
-            libc::setgroups(old_groups.len(), old_groups.as_ptr());
-        }
-        bail!("cannot set filesystem gid to {gid}");
-    }
-    let old_uid = unsafe { libc::setfsuid(uid) } as u32;
-    if unsafe { libc::setfsuid(uid) } as u32 != uid {
-        unsafe {
-            libc::setfsgid(old_gid);
-            libc::setgroups(old_groups.len(), old_groups.as_ptr());
-        }
-        bail!("cannot set filesystem uid to {uid}");
-    }
+    };
     let r = f();
-    let uid_ok = unsafe {
-        libc::setfsuid(old_uid);
-        libc::setfsuid(old_uid) as u32 == old_uid
-    };
-    let gid_ok = unsafe {
-        libc::setfsgid(old_gid);
-        libc::setfsgid(old_gid) as u32 == old_gid
-    };
-    let groups_ok = unsafe { libc::setgroups(old_groups.len(), old_groups.as_ptr()) == 0 };
-    if !uid_ok || !gid_ok || !groups_ok {
-        return Err(anyhow!("cannot restore filesystem credentials"));
+    let ids_ok = sys::set_fs_ids(old_uid, old_gid).is_ok();
+    let groups_ok = sys::set_groups(&old_groups).is_ok();
+    if !ids_ok || !groups_ok {
+        return Err(anyhow!("cannot restore file system credentials"));
     }
     r
 }
@@ -77,7 +55,7 @@ pub fn check_caller_writable(ctx: &Ctx, dir: &std::path::Path) -> Result<()> {
         std::fs::remove_file(&probe)?;
         Ok(())
     })
-    .map_err(|e| anyhow::anyhow!("permission denied: cannot write {} ({e})", dir.display()))
+    .map_err(|e| anyhow!("permission denied: cannot write {} ({e})", dir.display()))
 }
 
 pub struct User {
@@ -85,22 +63,18 @@ pub struct User {
     pub gid: u32,
     pub name: String,
     pub home: String,
-    pub groups: Vec<libc::gid_t>,
+    pub groups: Vec<u32>,
 }
 
 /// A user and the groups it belongs to.
 pub fn user(uid: u32) -> Result<User> {
-    let c = crate::ctx::Caller::from_uid(uid);
-    let mut groups: Vec<libc::gid_t> = vec![0; 256];
-    let mut n: libc::c_int = groups.len() as libc::c_int;
-    let name = CString::new(c.user.clone())?;
-    let rc = unsafe { libc::getgrouplist(name.as_ptr(), c.gid, groups.as_mut_ptr(), &mut n) };
-    if rc < 0 {
-        groups = vec![c.gid];
-    } else {
-        groups.truncate(n as usize);
+    match sys::user_by_uid(uid) {
+        Some(u) => {
+            let groups = sys::user_groups(&u.name, u.gid);
+            Ok(User { uid, gid: u.gid, name: u.name, home: u.home, groups })
+        }
+        None => Ok(User { uid, gid: uid, name: format!("uid{uid}"), home: "/".into(), groups: vec![uid] }),
     }
-    Ok(User { uid, gid: c.gid, name: c.user, home: c.home.to_string_lossy().into_owned(), groups })
 }
 
 /// Make `cmd` run as `uid` with a clean environment: HOME, USER, LOGNAME, PATH, and `env`.
@@ -113,23 +87,10 @@ pub fn command_as(cmd: &mut Command, uid: u32, env: &[(String, String)]) -> Resu
     for (k, v) in env {
         cmd.env(k, v);
     }
-    if unsafe { libc::geteuid() } == 0 && uid != 0 {
-        use std::os::unix::process::CommandExt;
-        let groups = u.groups.clone();
-        let (gid, uid) = (u.gid, u.uid);
-        unsafe {
-            cmd.pre_exec(move || {
-                if libc::setgroups(groups.len(), groups.as_ptr()) != 0
-                    || libc::setgid(gid) != 0
-                    || libc::setuid(uid) != 0
-                    || libc::geteuid() != uid
-                {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-    } else if unsafe { libc::geteuid() } != uid && unsafe { libc::geteuid() } != 0 {
+    let euid = rustix::process::geteuid().as_raw();
+    if euid == 0 && uid != 0 {
+        sys::switch_user_before_exec(cmd, u.uid, u.gid, u.groups);
+    } else if euid != uid && euid != 0 {
         bail!("cannot run a command as uid {uid}");
     }
     Ok(())

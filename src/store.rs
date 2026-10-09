@@ -22,7 +22,6 @@ use crate::oplog;
 use anyhow::{anyhow, bail, Context, Result};
 use ed25519_dalek::SigningKey;
 use std::fs;
-use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -255,9 +254,7 @@ impl<'a> Project<'a> {
 
     pub fn lock(&self) -> Result<Lock> {
         let f = fs::OpenOptions::new().create(true).write(true).truncate(false).open(self.meta_dir().join("lock"))?;
-        if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } != 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
+        rustix::fs::flock(&f, rustix::fs::FlockOperation::LockExclusive)?;
         Ok(Lock { _f: f })
     }
 

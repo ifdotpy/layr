@@ -760,12 +760,12 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let line_name = a.get("--line").unwrap_or("main").to_string();
     let owner = match a.get("--owner") {
         Some(o) if ctx.caller.is_root() => o.parse::<u32>().or_else(|_| -> Result<u32> {
-            let c = std::ffi::CString::new(o)?;
-            let pw = unsafe { libc::getpwnam(c.as_ptr()) };
-            if pw.is_null() {
-                bail!("unknown user {o}");
+            match crate::sys::user_by_name(o) {
+                Some(u) => Ok(u.uid),
+                None => {
+                    bail!("unknown user {o}");
+                }
             }
-            Ok(unsafe { (*pw).pw_uid })
         })?,
         Some(_) => return Err(exit(128, "fatal: only root can create a project for another user")),
         None => ctx.caller.uid,

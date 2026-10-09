@@ -657,7 +657,7 @@ fn private_dir(run_as: Option<(u32, u32)>) -> Result<PathBuf> {
 
 fn chown_tree(d: &Path, run_as: Option<(u32, u32)>) -> Result<()> {
     if let Some((u, g)) = run_as {
-        if unsafe { libc::geteuid() } == 0 {
+        if rustix::process::geteuid().is_root() {
             fsutil::chown_nofollow(d, u, g)?;
             for e in std::fs::read_dir(d)?.flatten() {
                 fsutil::chown_nofollow(&e.path(), u, g)?;
@@ -679,7 +679,7 @@ fn sh_quote_str(s: &str) -> String {
 /// environment. Never as root unless the caller of the merge is root.
 fn shell(cmd: &str, run_as: Option<(u32, u32)>, allow_root: bool) -> Result<bool> {
     let uid = run_as.map(|r| r.0).unwrap_or(0);
-    if uid == 0 && !allow_root && unsafe { libc::geteuid() } == 0 {
+    if uid == 0 && !allow_root && rustix::process::geteuid().is_root() {
         bail!("refusing to run a merge command as root (the project has no lead on this machine)");
     }
     let mut c = Command::new("sh");

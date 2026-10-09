@@ -1,5 +1,8 @@
 //! layr: local version control for agent workspaces on btrfs.
 
+// Unsafe code is allowed only in `sys` (system calls without safe wrappers).
+#![deny(unsafe_code)]
+
 #[macro_use]
 mod ctx;
 mod args;
@@ -21,6 +24,8 @@ mod revs;
 mod service;
 mod store;
 mod stream;
+#[allow(unsafe_code)]
+mod sys;
 mod tree;
 
 use std::collections::HashMap;
@@ -67,9 +72,9 @@ fn main() {
             }
         }
     }
-    let direct = unsafe { libc::geteuid() } == 0 || std::env::var("LAYR_DIRECT").map(|v| v == "1").unwrap_or(false);
+    let direct = rustix::process::geteuid().is_root() || std::env::var("LAYR_DIRECT").map(|v| v == "1").unwrap_or(false);
     let code = if direct {
-        let uid = unsafe { libc::getuid() };
+        let uid = rustix::process::getuid().as_raw();
         let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
         let env: HashMap<String, String> = std::env::vars().collect();
         service::run_as(argv, ctx::Caller::from_uid(uid), cwd, env, &store::default_root())

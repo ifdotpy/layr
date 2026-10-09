@@ -1,77 +1,19 @@
-//! Thin wrappers around the btrfs ioctls that layr needs, and the `btrfs` command for streams.
+//! btrfs operations: subvolumes, snapshots, reflinks (through `sys` and `rustix`), and the
+//! `btrfs` command for send streams.
 
+use crate::sys;
 use anyhow::{anyhow, bail, Context, Result};
-use std::ffi::CString;
 use std::fs::File;
-use std::os::fd::AsRawFd;
-use std::os::unix::ffi::OsStrExt;
+use std::os::fd::AsFd;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-const SNAP_CREATE_V2: libc::c_ulong = 0x5000_9417;
-const SUBVOL_CREATE_V2: libc::c_ulong = 0x5000_9418;
-const SNAP_DESTROY_V2: libc::c_ulong = 0x5000_943f;
-const SUBVOL_GETFLAGS: libc::c_ulong = 0x8008_9419;
-const GET_SUBVOL_INFO: libc::c_ulong = 0x81f8_943c;
-const FICLONE: libc::c_ulong = 0x4004_9409;
-const FICLONERANGE: libc::c_ulong = 0x4020_940d;
-const SUBVOL_RDONLY: u64 = 1 << 1;
 const BTRFS_SUPER_MAGIC: i64 = 0x9123_683e;
 const FIRST_FREE_OBJECTID: u64 = 256;
 
-#[repr(C)]
-struct VolArgsV2 {
-    fd: i64,
-    transid: u64,
-    flags: u64,
-    unused: [u64; 4],
-    name: [u8; 4040],
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Timespec {
-    sec: u64,
-    nsec: u32,
-}
-
-#[repr(C)]
-struct SubvolInfoArgs {
-    treeid: u64,
-    name: [u8; 256],
-    parent_id: u64,
-    dirid: u64,
-    generation: u64,
-    flags: u64,
-    uuid: [u8; 16],
-    parent_uuid: [u8; 16],
-    received_uuid: [u8; 16],
-    ctransid: u64,
-    otransid: u64,
-    stransid: u64,
-    rtransid: u64,
-    ctime: Timespec,
-    otime: Timespec,
-    stime: Timespec,
-    rtime: Timespec,
-    reserved: [u64; 8],
-}
-
-#[repr(C)]
-struct CloneRange {
-    src_fd: i64,
-    src_offset: u64,
-    src_length: u64,
-    dest_offset: u64,
-}
-
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct SubvolInfo {
-    pub tree_id: u64,
-    pub generation: u64,
     pub uuid: String,
-    pub parent_uuid: Option<String>,
     pub received_uuid: Option<String>,
     pub readonly: bool,
 }
@@ -83,43 +25,20 @@ fn fmt_uuid(b: &[u8; 16]) -> Option<String> {
     Some(uuid::Uuid::from_bytes(*b).hyphenated().to_string())
 }
 
-fn ioctl<T>(fd: i32, req: libc::c_ulong, arg: *mut T) -> std::io::Result<()> {
-    let rc = unsafe { libc::ioctl(fd, req as _, arg) };
-    if rc < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-fn split_parent(path: &Path) -> Result<(File, Vec<u8>)> {
+fn split_parent(path: &Path) -> Result<(File, String)> {
     let parent = path.parent().ok_or_else(|| anyhow!("no parent: {}", path.display()))?;
     let name = path.file_name().ok_or_else(|| anyhow!("no name: {}", path.display()))?;
     let dir = File::open(if parent.as_os_str().is_empty() { Path::new(".") } else { parent })
         .with_context(|| format!("open {}", parent.display()))?;
-    let bytes = name.as_bytes().to_vec();
-    if bytes.len() >= 4040 {
-        bail!("name too long: {}", path.display());
-    }
-    Ok((dir, bytes))
-}
-
-fn vol_args(fd: i64, flags: u64, name: &[u8]) -> Box<VolArgsV2> {
-    let mut a = Box::new(VolArgsV2 { fd, transid: 0, flags, unused: [0; 4], name: [0; 4040] });
-    a.name[..name.len()].copy_from_slice(name);
-    a
+    Ok((dir, name.to_string_lossy().into_owned()))
 }
 
 /// True when `path` lives on a btrfs file system.
 pub fn is_btrfs(path: &Path) -> bool {
-    let c = match CString::new(path.as_os_str().as_bytes()) {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-    let mut st: libc::statfs = unsafe { std::mem::zeroed() };
-    if unsafe { libc::statfs(c.as_ptr(), &mut st) } != 0 {
-        return false;
+    match rustix::fs::statfs(path) {
+        Ok(st) => st.f_type as i64 == BTRFS_SUPER_MAGIC,
+        Err(_) => false,
     }
-    st.f_type as i64 == BTRFS_SUPER_MAGIC
 }
 
 /// True when `path` is the root of a subvolume.
@@ -133,38 +52,31 @@ pub fn is_subvolume(path: &Path) -> bool {
 
 pub fn create_subvolume(path: &Path) -> Result<()> {
     let (dir, name) = split_parent(path)?;
-    let mut a = vol_args(0, 0, &name);
-    ioctl(dir.as_raw_fd(), SUBVOL_CREATE_V2, &mut *a).with_context(|| format!("create subvolume {}", path.display()))
+    sys::subvol_create(dir.as_fd(), &name).with_context(|| format!("create subvolume {}", path.display()))
 }
 
 /// Snapshot `src` (a subvolume) to `dst`. The destination must not exist.
 pub fn snapshot(src: &Path, dst: &Path, readonly: bool) -> Result<()> {
     let s = File::open(src).with_context(|| format!("open {}", src.display()))?;
     let (dir, name) = split_parent(dst)?;
-    let mut a = vol_args(s.as_raw_fd() as i64, if readonly { SUBVOL_RDONLY } else { 0 }, &name);
-    ioctl(dir.as_raw_fd(), SNAP_CREATE_V2, &mut *a).with_context(|| format!("snapshot {} to {}", src.display(), dst.display()))
+    sys::subvol_snapshot(s.as_fd(), dir.as_fd(), &name, readonly)
+        .with_context(|| format!("snapshot {} to {}", src.display(), dst.display()))
 }
 
 /// Delete the subvolume at `path`. Nested subvolumes must be deleted first.
 pub fn delete_subvolume(path: &Path) -> Result<()> {
     let (dir, name) = split_parent(path)?;
-    let mut a = vol_args(0, 0, &name);
-    ioctl(dir.as_raw_fd(), SNAP_DESTROY_V2, &mut *a).with_context(|| format!("delete subvolume {}", path.display()))
+    sys::subvol_destroy(dir.as_fd(), &name).with_context(|| format!("delete subvolume {}", path.display()))
 }
 
 pub fn subvol_info(path: &Path) -> Result<SubvolInfo> {
     let f = File::open(path).with_context(|| format!("open {}", path.display()))?;
-    let mut a: Box<SubvolInfoArgs> = Box::new(unsafe { std::mem::zeroed() });
-    ioctl(f.as_raw_fd(), GET_SUBVOL_INFO, &mut *a).with_context(|| format!("subvolume info {}", path.display()))?;
-    let mut flags: u64 = 0;
-    ioctl(f.as_raw_fd(), SUBVOL_GETFLAGS, &mut flags)?;
+    let raw = sys::subvol_info(f.as_fd()).with_context(|| format!("subvolume info {}", path.display()))?;
+    let flags = sys::subvol_flags(f.as_fd())?;
     Ok(SubvolInfo {
-        tree_id: a.treeid,
-        generation: a.generation,
-        uuid: fmt_uuid(&a.uuid).unwrap_or_default(),
-        parent_uuid: fmt_uuid(&a.parent_uuid),
-        received_uuid: fmt_uuid(&a.received_uuid),
-        readonly: flags & SUBVOL_RDONLY != 0,
+        uuid: fmt_uuid(&raw.uuid).unwrap_or_default(),
+        received_uuid: fmt_uuid(&raw.received_uuid),
+        readonly: flags & sys::SUBVOL_RDONLY != 0,
     })
 }
 
@@ -185,24 +97,15 @@ pub fn delete_tree(path: &Path) -> Result<()> {
     crate::tree::Tree::open(parent)?.remove(&name)
 }
 
-/// Reflink the whole content of `src` into `dst` (both open files).
+/// Reflink the whole content of `src` into `dst`.
 pub fn clone_file(src: &File, dst: &File) -> std::io::Result<()> {
-    let rc = unsafe { libc::ioctl(dst.as_raw_fd(), FICLONE as _, src.as_raw_fd()) };
-    if rc < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
+    rustix::fs::ioctl_ficlone(dst, src).map_err(std::io::Error::from)
 }
 
 /// Reflink a byte range. Offsets and length must be aligned to the block size, except a range
 /// that ends at the end of the source file.
 pub fn clone_range(src: &File, src_off: u64, len: u64, dst: &File, dst_off: u64) -> std::io::Result<()> {
-    let mut a = CloneRange { src_fd: src.as_raw_fd() as i64, src_offset: src_off, src_length: len, dest_offset: dst_off };
-    let rc = unsafe { libc::ioctl(dst.as_raw_fd(), FICLONERANGE as _, &mut a) };
-    if rc < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
+    sys::clone_range(src, src_off, len, dst, dst_off)
 }
 
 /// Run `btrfs send` with no file data and return the raw stream.

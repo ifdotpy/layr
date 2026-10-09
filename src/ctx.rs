@@ -4,7 +4,6 @@ use crate::model::{Actor, Author};
 use crate::store::Store;
 use anyhow::{bail, Result};
 use std::collections::HashMap;
-use std::ffi::CStr;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -18,14 +17,9 @@ pub struct Caller {
 
 impl Caller {
     pub fn from_uid(uid: u32) -> Caller {
-        unsafe {
-            let pw = libc::getpwuid(uid);
-            if pw.is_null() {
-                return Caller { uid, gid: uid, user: format!("uid{uid}"), home: PathBuf::from("/") };
-            }
-            let name = CStr::from_ptr((*pw).pw_name).to_string_lossy().into_owned();
-            let home = CStr::from_ptr((*pw).pw_dir).to_string_lossy().into_owned();
-            Caller { uid, gid: (*pw).pw_gid, user: name, home: PathBuf::from(home) }
+        match crate::sys::user_by_uid(uid) {
+            Some(u) => Caller { uid, gid: u.gid, user: u.name, home: PathBuf::from(u.home) },
+            None => Caller { uid, gid: uid, user: format!("uid{uid}"), home: PathBuf::from("/") },
         }
     }
     pub fn is_root(&self) -> bool {

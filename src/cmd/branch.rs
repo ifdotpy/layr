@@ -15,12 +15,12 @@ fn owner_arg(ctx: &Ctx, v: Option<&str>) -> Result<u32> {
             if let Ok(n) = s.parse::<u32>() {
                 return Ok(n);
             }
-            let c = std::ffi::CString::new(s)?;
-            let pw = unsafe { libc::getpwnam(c.as_ptr()) };
-            if pw.is_null() {
-                return Err(exit(128, format!("fatal: unknown user '{s}'")));
+            match crate::sys::user_by_name(s) {
+                Some(u) => Ok(u.uid),
+                None => {
+                    return Err(exit(128, format!("fatal: unknown user '{s}'")));
+                }
             }
-            Ok(unsafe { (*pw).pw_uid })
         }
     }
 }

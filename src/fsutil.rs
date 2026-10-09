@@ -213,15 +213,19 @@ pub fn make_parents(root: &Path, rel: &str, own: Option<(u32, u32)>) -> Result<(
 }
 
 pub fn chown_nofollow(p: &Path, uid: u32, gid: u32) -> Result<()> {
-    use std::os::unix::ffi::OsStrExt;
-    let c = std::ffi::CString::new(p.as_os_str().as_bytes())?;
-    if unsafe { libc::lchown(c.as_ptr(), uid, gid) } != 0 {
-        let e = std::io::Error::last_os_error();
-        if e.raw_os_error() != Some(libc::EPERM) || unsafe { libc::geteuid() } == 0 {
-            return Err(anyhow!("chown {}: {e}", p.display()));
-        }
+    let r = rustix::fs::chownat(
+        rustix::fs::CWD,
+        p,
+        Some(rustix::fs::Uid::from_raw(uid)),
+        Some(rustix::fs::Gid::from_raw(gid)),
+        rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+    );
+    match r {
+        Ok(()) => Ok(()),
+        // Without root, a chown to oneself fails harmlessly.
+        Err(rustix::io::Errno::PERM) if !rustix::process::geteuid().is_root() => Ok(()),
+        Err(e) => Err(anyhow!("chown {}: {e}", p.display())),
     }
-    Ok(())
 }
 
 /// Remove an entry (recursively for a folder; nested subvolumes are destroyed).
@@ -233,11 +237,8 @@ pub fn remove_entry(root: &Path, rel: &str) -> Result<()> {
 }
 
 fn fchown(f: &File, own: Option<(u32, u32)>) -> Result<()> {
-    use std::os::fd::AsRawFd;
     if let Some((u, g)) = own {
-        if unsafe { libc::fchown(f.as_raw_fd(), u, g) } != 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
+        rustix::fs::fchown(f, Some(rustix::fs::Uid::from_raw(u)), Some(rustix::fs::Gid::from_raw(g)))?;
     }
     Ok(())
 }
@@ -289,14 +290,11 @@ pub fn copy_entry(src_root: &Path, src_rel: &str, dst_root: &Path, dst_rel: &str
 }
 
 pub fn set_mtime(f: &File, sec: i64, nsec: i64) -> Result<()> {
-    use std::os::fd::AsRawFd;
-    let ts = [
-        libc::timespec { tv_sec: 0, tv_nsec: libc::UTIME_OMIT },
-        libc::timespec { tv_sec: sec as libc::time_t, tv_nsec: nsec as libc::c_long },
-    ];
-    if unsafe { libc::futimens(f.as_raw_fd(), ts.as_ptr()) } != 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
+    let ts = rustix::fs::Timestamps {
+        last_access: rustix::fs::Timespec { tv_sec: 0, tv_nsec: rustix::fs::UTIME_OMIT },
+        last_modification: rustix::fs::Timespec { tv_sec: sec, tv_nsec: nsec as _ },
+    };
+    rustix::fs::futimens(f, &ts)?;
     Ok(())
 }
 
@@ -408,10 +406,6 @@ pub fn is_binary(data: &[u8]) -> bool {
 
 // ----- writes into folders owned by agents, through file descriptors -----
 
-fn cstr(s: &str) -> Result<std::ffi::CString> {
-    Ok(std::ffi::CString::new(s)?)
-}
-
 /// Open a folder without following a link at its last component.
 pub fn open_dir_nofollow(path: &Path) -> Result<File> {
     OpenOptions::new()
@@ -423,15 +417,9 @@ pub fn open_dir_nofollow(path: &Path) -> Result<File> {
 
 /// Read a regular file `name` of an open folder; `None` if absent, a link or not a file.
 pub fn read_at(dir: &File, name: &str) -> Option<Vec<u8>> {
-    use std::os::fd::{AsRawFd, FromRawFd};
-    let c = cstr(name).ok()?;
-    let fd = unsafe {
-        libc::openat(dir.as_raw_fd(), c.as_ptr(), libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
-    };
-    if fd < 0 {
-        return None;
-    }
-    let mut f = unsafe { File::from_raw_fd(fd) };
+    use rustix::fs::{Mode, OFlags};
+    let fd = rustix::fs::openat(dir, name, OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK, Mode::empty()).ok()?;
+    let mut f = File::from(fd);
     if !f.metadata().ok()?.is_file() {
         return None;
     }
@@ -443,51 +431,30 @@ pub fn read_at(dir: &File, name: &str) -> Option<Vec<u8>> {
 /// Replace `name` in an open folder: write a new file (never through an existing name), then
 /// rename it over `name`. A link at `name` is replaced, not followed.
 pub fn replace_at(dir: &File, name: &str, content: &mut dyn FnMut(&File) -> Result<()>, own: Option<(u32, u32)>) -> Result<()> {
-    use std::os::fd::{AsRawFd, FromRawFd};
-    let tmp = format!(".{name}.layr-{}", std::process::id());
-    let ct = cstr(&tmp)?;
-    let cn = cstr(name)?;
-    unsafe {
-        libc::unlinkat(dir.as_raw_fd(), ct.as_ptr(), 0);
-    }
-    let fd = unsafe {
-        libc::openat(
-            dir.as_raw_fd(),
-            ct.as_ptr(),
-            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            0o644,
-        )
-    };
-    if fd < 0 {
-        return Err(anyhow!("create {tmp}: {}", std::io::Error::last_os_error()));
-    }
-    let f = unsafe { File::from_raw_fd(fd) };
+    use rustix::fs::{AtFlags, Mode, OFlags};
+    let tmp = format!(".{name}.layr-{}-{:016x}", std::process::id(), rand::random::<u64>());
+    let _ = rustix::fs::unlinkat(dir, tmp.as_str(), AtFlags::empty());
+    let fd = rustix::fs::openat(
+        dir,
+        tmp.as_str(),
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_raw_mode(0o644),
+    )
+    .map_err(|e| anyhow!("create {tmp}: {e}"))?;
+    let f = File::from(fd);
     let r = (|| -> Result<()> {
         content(&f)?;
-        if let Some((u, g)) = own {
-            if unsafe { libc::fchown(f.as_raw_fd(), u, g) } != 0 {
-                return Err(std::io::Error::last_os_error().into());
-            }
-        }
-        if unsafe { libc::renameat(dir.as_raw_fd(), ct.as_ptr(), dir.as_raw_fd(), cn.as_ptr()) } != 0 {
-            return Err(anyhow!("rename to {name}: {}", std::io::Error::last_os_error()));
-        }
+        fchown(&f, own)?;
+        rustix::fs::renameat(dir, tmp.as_str(), dir, name).map_err(|e| anyhow!("rename to {name}: {e}"))?;
         Ok(())
     })();
     if r.is_err() {
-        unsafe {
-            libc::unlinkat(dir.as_raw_fd(), ct.as_ptr(), 0);
-        }
+        let _ = rustix::fs::unlinkat(dir, tmp.as_str(), AtFlags::empty());
     }
     r
 }
 
 /// Remove `name` from an open folder (a link is removed, not followed).
 pub fn unlink_at(dir: &File, name: &str) {
-    use std::os::fd::AsRawFd;
-    if let Ok(c) = cstr(name) {
-        unsafe {
-            libc::unlinkat(dir.as_raw_fd(), c.as_ptr(), 0);
-        }
-    }
+    let _ = rustix::fs::unlinkat(dir, name, rustix::fs::AtFlags::empty());
 }
