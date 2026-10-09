@@ -9,6 +9,7 @@ use crate::ids;
 use crate::ignore_rules::Rules;
 use crate::model::{Conflict, Line, LineChange, LineState, Record, StateKind, StateRec};
 use crate::store::{check_name, Project};
+use crate::tree::Tree;
 use anyhow::{bail, Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -171,6 +172,12 @@ impl<'a> Repo<'a> {
     pub fn owner_ids(&self, line: &Line) -> (u32, u32) {
         let c = crate::ctx::Caller::from_uid(line.owner);
         (line.owner, c.gid)
+    }
+
+    /// The lead of this machine (uid, gid): configured commands run as this user.
+    pub fn lead_ids(&self) -> (u32, u32) {
+        let uid = self.p.lead();
+        (uid, crate::ctx::Caller::from_uid(uid).gid)
     }
 
     pub fn own(&self, line: &Line) -> Option<(u32, u32)> {
@@ -466,10 +473,10 @@ impl<'a> Repo<'a> {
         // Moves keep the inode; then deletes (a folder can replace a file); then writes.
         for c in &list {
             if let Some(src) = &c.old_path {
-                let (s, d) = (fsutil::safe_join(target, src)?, fsutil::safe_join(target, &c.path)?);
-                if s.symlink_metadata().is_ok() && d.symlink_metadata().is_err() {
-                    fsutil::make_parents(target, &c.path, own)?;
-                    std::fs::rename(&s, &d)?;
+                let t = Tree::open(target)?;
+                if t.stat(src).is_some() && t.stat(&c.path).is_none() {
+                    t.mkdirs_for(&c.path, own)?;
+                    t.rename(src, &c.path)?;
                 } else {
                     fsutil::remove_entry(target, src)?;
                 }
@@ -504,8 +511,6 @@ impl<'a> Repo<'a> {
         if dst.exists() {
             bail!("{} already exists", dst.display());
         }
-        let src = self.state_root(start)?;
-        btrfs::snapshot(&src, &dst, false)?;
         let line = Line {
             id: ids::new_id(),
             name: name.to_string(),
@@ -514,8 +519,8 @@ impl<'a> Repo<'a> {
             machine: self.p.store.machine.id.clone(),
             group: group.clone(),
         };
+        self.materialize(&line, start, &dst)?;
         let res = (|| -> Result<Record> {
-            self.prepare_working(&line, start)?;
             let mut rec = Record::new("line.create");
             rec.lines.insert(
                 line.id.clone(),
@@ -536,15 +541,29 @@ impl<'a> Repo<'a> {
         Ok(line)
     }
 
-    /// Owner, mode, git layer and regenerable layers of a new working folder.
-    pub fn prepare_working(&self, line: &Line, state: &str) -> Result<()> {
-        let w = self.working(line);
+    /// Make the working folder of a line at `dst` from a state. The folder is prepared in the
+    /// service's private work folder (owner, mode, git layer, layers) and appears at `dst` only
+    /// when it is ready, so no other user can change it while root works on it.
+    pub fn materialize(&self, line: &Line, state: &str, dst: &Path) -> Result<()> {
+        if dst.exists() {
+            bail!("{} already exists", dst.display());
+        }
+        let tmp = self.p.work_dir().join(ids::new_id());
+        btrfs::snapshot(&self.state_root(state)?, &tmp, false)?;
+        let r = self.prepare_at(line, state, &tmp).and_then(|_| Ok(std::fs::rename(&tmp, dst)?));
+        if r.is_err() {
+            let _ = btrfs::delete_tree(&tmp);
+        }
+        r
+    }
+
+    fn prepare_at(&self, line: &Line, state: &str, w: &Path) -> Result<()> {
         let (uid, gid) = self.owner_ids(line);
-        let root_meta = std::fs::symlink_metadata(&w)?;
+        let root_meta = std::fs::symlink_metadata(w)?;
         if root_meta.uid() != uid {
             // Files of another owner: give the whole tree to the line owner.
             let mut paths = Vec::new();
-            fsutil::walk(&w, "", &mut |rel, m| {
+            fsutil::walk(w, "", &mut |rel, m| {
                 if m.uid != uid {
                     paths.push(rel.to_string());
                 }
@@ -554,23 +573,24 @@ impl<'a> Repo<'a> {
                 fsutil::chown_nofollow(&w.join(p), uid, gid)?;
             }
         }
-        fsutil::chown_nofollow(&w, uid, gid)?;
-        std::fs::set_permissions(&w, std::fs::Permissions::from_mode(0o700))?;
-        crate::gitbridge::make_git_layer(self, line, state)?;
+        fsutil::chown_nofollow(w, uid, gid)?;
+        std::fs::set_permissions(w, std::fs::Permissions::from_mode(0o700))?;
+        crate::gitbridge::make_git_layer(self, line, state, w)?;
         let st = self.state(state)?;
         for path in self.p.config_strings("regenerable") {
-            let lp = fsutil::safe_join(&w, &path)?;
+            let lp = fsutil::safe_join(w, &path)?;
             if let Some(snap) = st.layers.get(&path) {
                 let src = self.p.states_dir().join(snap);
                 if src.exists() {
-                    if lp.exists() {
-                        fsutil::remove_entry(&w, &path)?;
+                    if lp.symlink_metadata().is_ok() {
+                        fsutil::remove_entry(w, &path)?;
                     }
+                    fsutil::make_parents(w, &path, Some((uid, gid)))?;
                     btrfs::snapshot(&src, &lp, false)?;
                     continue;
                 }
             }
-            make_layer(&w, &path, uid, gid)?;
+            make_layer(w, &path, uid, gid)?;
         }
         Ok(())
     }
@@ -718,23 +738,12 @@ pub fn has_markers(data: &[u8]) -> bool {
 
 /// Remove parent folders of `rel` in `target` that became empty and do not exist in `to`.
 fn prune_empty_parents(target: &Path, to: &Path, rel: &str) -> Result<()> {
+    let t = Tree::open(target)?;
     let mut comps: Vec<&str> = rel.split('/').collect();
     comps.pop();
     while !comps.is_empty() {
         let d = comps.join("/");
-        if fsutil::lmeta(to, &d).is_some() {
-            break;
-        }
-        let p = fsutil::safe_join(target, &d)?;
-        match std::fs::read_dir(&p) {
-            Ok(mut rd) => {
-                if rd.next().is_some() {
-                    break;
-                }
-            }
-            Err(_) => break,
-        }
-        if std::fs::remove_dir(&p).is_err() {
+        if fsutil::lmeta(to, &d).is_some() || !t.rmdir(&d) {
             break;
         }
         comps.pop();
@@ -744,53 +753,88 @@ fn prune_empty_parents(target: &Path, to: &Path, rel: &str) -> Result<()> {
 
 /// Create an empty nested subvolume for a regenerable layer at `path` in the working folder.
 pub fn make_layer(w: &Path, path: &str, uid: u32, gid: u32) -> Result<()> {
-    let lp = fsutil::safe_join(w, path)?;
-    if btrfs::is_subvolume(&lp) {
-        return Ok(());
-    }
-    if let Ok(m) = std::fs::symlink_metadata(&lp) {
-        if m.is_dir() && std::fs::read_dir(&lp)?.next().is_none() {
-            std::fs::remove_dir(&lp)?;
+    let t = Tree::open(w)?;
+    if let Some(m) = t.stat(path) {
+        if m.is_dir() && m.ino == 256 {
+            return Ok(());
+        }
+        if m.is_dir() && t.list(path)?.is_empty() {
+            t.rmdir(path);
         } else {
             return Ok(());
         }
     }
-    fsutil::make_parents(w, path, Some((uid, gid)))?;
-    btrfs::create_subvolume(&lp).with_context(|| format!("create layer {path}"))?;
-    fsutil::chown_nofollow(&lp, uid, gid)?;
+    t.mkdirs_for(path, Some((uid, gid)))?;
+    t.create_subvolume(path).with_context(|| format!("create layer {path}"))?;
+    t.chown(path, uid, gid)?;
+    Ok(())
+}
+
+/// Copy a folder within one tree (both sides may change under us: all through descriptors).
+fn copy_tree(t: &Tree, from: &str, to: &str, own: Option<(u32, u32)>) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    for name in t.list(from)? {
+        let (s, d) = (format!("{from}/{name}"), format!("{to}/{name}"));
+        let m = match t.stat(&s) {
+            Some(m) => m,
+            None => continue,
+        };
+        match m.ftype {
+            fsutil::FType::Dir => {
+                t.mkdirs(&d, own)?;
+                t.chmod(&d, m.mode)?;
+                copy_tree(t, &s, &d, own)?;
+            }
+            fsutil::FType::Symlink => {
+                let target = t.read_link(&s)?;
+                t.symlink(&d, &target)?;
+                if let Some((u, g)) = own {
+                    t.chown(&d, u, g)?;
+                }
+            }
+            fsutil::FType::File => {
+                let src = t.open_read(&s)?;
+                let dst = t.create(&d, m.mode)?;
+                if btrfs::clone_file(&src, &dst).is_err() {
+                    std::io::copy(&mut &src, &mut &dst)?;
+                }
+                dst.set_permissions(std::fs::Permissions::from_mode(m.mode))?;
+                fsutil::set_mtime(&dst, m.mtime, 0)?;
+                if let Some((u, g)) = own {
+                    t.chown(&d, u, g)?;
+                }
+            }
+            fsutil::FType::Special => {}
+        }
+    }
     Ok(())
 }
 
 /// Turn a plain folder at a layer path back into a nested subvolume (after a tool deleted the
 /// layer and made the folder again). Copies with reflinks: O(files) once.
 pub fn convert_layer(w: &Path, path: &str, uid: u32, gid: u32) -> Result<bool> {
-    let lp = fsutil::safe_join(w, path)?;
-    let m = match std::fs::symlink_metadata(&lp) {
-        Ok(m) => m,
-        Err(_) => {
+    let t = Tree::open(w)?;
+    let m = match t.stat(path) {
+        Some(m) => m,
+        None => {
             make_layer(w, path, uid, gid)?;
             return Ok(true);
         }
     };
-    if !m.is_dir() || btrfs::is_subvolume(&lp) {
+    if !m.is_dir() || m.ino == 256 {
         return Ok(false);
     }
-    let tmp_rel = format!("{path}.layr-new");
-    let tmp = fsutil::safe_join(w, &tmp_rel)?;
-    btrfs::create_subvolume(&tmp)?;
-    let mut entries = Vec::new();
-    fsutil::walk(w, path, &mut |rel, _| {
-        entries.push(rel.to_string());
-        Ok(true)
-    })?;
-    for rel in entries {
-        let tail = &rel[path.len() + 1..];
-        fsutil::copy_entry(w, &rel, &tmp, tail, Some((uid, gid)))?;
+    let (tmp, old) = (format!("{path}.layr-new"), format!("{path}.layr-old"));
+    for x in [&tmp, &old] {
+        if t.stat(x).is_some() {
+            t.remove(x)?;
+        }
     }
-    let old = fsutil::safe_join(w, &format!("{path}.layr-old"))?;
-    std::fs::rename(&lp, &old)?;
-    std::fs::rename(&tmp, &lp)?;
-    fsutil::chown_nofollow(&lp, uid, gid)?;
-    std::fs::remove_dir_all(&old)?;
+    t.create_subvolume(&tmp)?;
+    copy_tree(&t, path, &tmp, Some((uid, gid)))?;
+    t.rename(path, &old)?;
+    t.rename(&tmp, path)?;
+    t.chown(path, uid, gid)?;
+    t.remove(&old)?;
     Ok(true)
 }

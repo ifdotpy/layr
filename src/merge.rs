@@ -29,8 +29,10 @@ pub struct Input<'a> {
     pub theirs_label: &'a str,
     /// Project configuration: `merge.driver.<name>` and `merge.verify.<name>` commands.
     pub config: &'a dyn Fn(&str) -> Option<String>,
-    /// Owner of the line: drivers run as this user.
+    /// Configured drivers run as this user: the lead of this machine.
     pub run_as: Option<(u32, u32)>,
+    /// The caller is root: a driver may then run as root.
+    pub allow_root: bool,
 }
 
 #[derive(Default, Debug)]
@@ -634,7 +636,7 @@ fn verify(c: &mut Ctx, rp: &str) -> Result<()> {
     let a = dir.join("result");
     std::fs::write(&a, version_bytes(&fsutil::safe_join(i.result, rp)?))?;
     chown_tree(&dir, i.run_as)?;
-    let ok = shell(&cmd.replace("%A", &sh_quote(&a)).replace("%P", &sh_quote_str(rp)), i.run_as)?;
+    let ok = shell(&cmd.replace("%A", &sh_quote(&a)).replace("%P", &sh_quote_str(rp)), i.run_as, i.allow_root)?;
     let _ = std::fs::remove_dir_all(&dir);
     if !ok {
         // Keep ours: copy back the ours version.
@@ -673,21 +675,16 @@ fn sh_quote_str(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-fn shell(cmd: &str, run_as: Option<(u32, u32)>) -> Result<bool> {
-    use std::os::unix::process::CommandExt;
+/// Run a configured command as the driver user (the lead of this machine), with a clean
+/// environment. Never as root unless the caller of the merge is root.
+fn shell(cmd: &str, run_as: Option<(u32, u32)>, allow_root: bool) -> Result<bool> {
+    let uid = run_as.map(|r| r.0).unwrap_or(0);
+    if uid == 0 && !allow_root && unsafe { libc::geteuid() } == 0 {
+        bail!("refusing to run a merge command as root (the project has no lead on this machine)");
+    }
     let mut c = Command::new("sh");
     c.arg("-c").arg(cmd);
-    if let Some((u, g)) = run_as {
-        if unsafe { libc::geteuid() } == 0 && u != 0 {
-            c.uid(u).gid(g);
-            unsafe {
-                c.pre_exec(|| {
-                    libc::setgroups(0, std::ptr::null());
-                    Ok(())
-                });
-            }
-        }
-    }
+    crate::privs::command_as(&mut c, uid, &[])?;
     Ok(c.status().with_context(|| format!("run {cmd}"))?.success())
 }
 
@@ -706,7 +703,7 @@ fn run_command_driver(i: &Input, cmd: &str, b: &Path, r: &Path, t: &Path, rp: &s
         .replace("%B", &sh_quote(&bb))
         .replace("%P", &sh_quote_str(rp))
         .replace("%L", "7");
-    let ok = shell(&full, i.run_as)?;
+    let ok = shell(&full, i.run_as, i.allow_root)?;
     if ok {
         let data = std::fs::read(&a)?;
         let mode = fsutil::lmeta(i.result, rp).map(|m| m.mode).unwrap_or(0o644);
@@ -756,7 +753,8 @@ fn block_merge(
         return Ok(false);
     }
     let mut src = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(fsutil::safe_join(i.theirs, tp)?)?;
-    let mut dst = std::fs::OpenOptions::new().write(true).custom_flags(libc::O_NOFOLLOW).open(fsutil::safe_join(i.result, rp)?)?;
+    let mut dst =
+        std::fs::OpenOptions::new().write(true).custom_flags(libc::O_NOFOLLOW).open(fsutil::safe_join(i.result, rp)?)?;
     for (off, len) in tr {
         if off >= mt.size {
             continue;

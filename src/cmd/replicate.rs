@@ -118,7 +118,11 @@ fn seqs(p: &Project) -> Result<BTreeMap<String, u64>> {
 
 /// Layer snapshots on this machine (`<state-id>@<path>`).
 fn present_layers(p: &Project) -> Result<BTreeSet<String>> {
-    Ok(std::fs::read_dir(p.states_dir())?.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.contains('@')).collect())
+    Ok(std::fs::read_dir(p.states_dir())?
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains('@'))
+        .collect())
 }
 
 fn present(p: &Project) -> Result<BTreeSet<String>> {
@@ -322,16 +326,11 @@ pub fn sync(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let repo = &h.repo;
     let mut c = Command::new(&a.paths[0]);
     c.args(&a.paths[1..]).stdin(Stdio::piped()).stdout(Stdio::piped());
-    if unsafe { libc::geteuid() } == 0 && ctx.caller.uid != 0 {
-        use std::os::unix::process::CommandExt;
-        c.uid(ctx.caller.uid).gid(ctx.caller.gid);
-        c.env("HOME", &ctx.caller.home);
-    }
-    for k in ["SSH_AUTH_SOCK", "PATH", "LAYR_ROOT"] {
-        if let Some(v) = ctx.env(k) {
-            c.env(k, v);
-        }
-    }
+    crate::privs::command_as(
+        &mut c,
+        ctx.caller.uid,
+        &crate::privs::pick_env(ctx, &["SSH_AUTH_SOCK", "PATH", "LAYR_ROOT", "LAYR_SOCKET"]),
+    )?;
     let mut child = c.spawn().context("start the peer command")?;
     let mut w = Wire { r: child.stdout.take().unwrap(), w: std::io::BufWriter::new(child.stdin.take().unwrap()) };
     let started = std::time::Instant::now();

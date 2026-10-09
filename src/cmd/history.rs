@@ -1104,19 +1104,25 @@ pub fn blame(ctx: &Ctx, args: &[String]) -> Result<i32> {
     Ok(0)
 }
 
-fn search_root(repo: &Repo, line: Option<&Line>, rev: Option<&str>) -> Result<(PathBuf, Option<Temp>, Option<PathBuf>)> {
+fn search_root(repo: &Repo, line: Option<&Line>, rev: Option<&str>) -> Result<(PathBuf, Vec<Temp>, Option<PathBuf>)> {
     match rev {
         Some(r) => {
             let id = revs::resolve(repo, line, r)?;
-            Ok((repo.state_root(&id)?, None, None))
+            Ok((repo.state_root(&id)?, Vec::new(), None))
         }
         None => {
+            // A read-only snapshot of the working content: the live folder belongs to its owner
+            // and can change while the service (root) reads it.
             let l = match line {
                 Some(l) => l,
                 None => bail!("not in a line"),
             };
-            let (idx, t) = repo.index_view(l)?;
-            Ok((repo.working(l), t, Some(idx)))
+            let (idx, it) = repo.index_view(l)?;
+            let scan = repo.scan(l)?;
+            let root = scan.path.clone();
+            let mut keep = vec![scan];
+            keep.extend(it);
+            Ok((root, keep, Some(idx)))
         }
     }
 }
@@ -1184,7 +1190,7 @@ pub fn grep(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let (root, _t, index) = if a.has("--cached") {
         let l = h.line()?;
         let (idx, t) = repo.index_view(l)?;
-        (idx, t, None)
+        (idx, t.into_iter().collect(), None)
     } else {
         search_root(repo, line.as_ref(), rev.as_deref())?
     };

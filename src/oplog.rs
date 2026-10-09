@@ -47,4 +47,3 @@ pub fn machine_key(rec: &Record) -> Result<VerifyingKey> {
     let arr: [u8; 32] = b.try_into().map_err(|_| anyhow!("bad key length"))?;
     Ok(VerifyingKey::from_bytes(&arr)?)
 }
-

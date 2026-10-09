@@ -42,7 +42,8 @@ pub fn merge_states(
         ours_label: "HEAD",
         theirs_label,
         config: &cfg,
-        run_as: repo.own(line),
+        run_as: Some(repo.lead_ids()),
+        allow_root: ctx.caller.is_root(),
     })?;
     let own = repo.own(line);
     if let Some((u, g)) = own {

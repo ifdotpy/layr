@@ -567,24 +567,44 @@ fn write_manifest(dir: &Path, m: &Manifest) -> Result<()> {
     fsutil::atomic_write(&dir.join("manifest.json"), serde_json::to_string_pretty(m)?.as_bytes(), 0o644)
 }
 
-/// Run a producer command and compress its output with zstd into `out` (then `fsync`).
-fn compress_to(mut producer: Command, out: &Path) -> Result<()> {
+/// A new file for backup output, created as the writer (never through an existing name).
+fn create_out(path: &Path, writer: (u32, u32)) -> Result<File> {
+    crate::privs::as_user_fs(writer.0, writer.1, || {
+        use std::os::unix::fs::OpenOptionsExt;
+        let _ = std::fs::remove_file(path);
+        Ok(std::fs::OpenOptions::new().write(true).create_new(true).custom_flags(libc::O_NOFOLLOW).mode(0o644).open(path)?)
+    })
+}
+
+fn finish_out(tmp: &Path, out: &Path, writer: (u32, u32)) -> Result<()> {
+    crate::privs::as_user_fs(writer.0, writer.1, || {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(tmp)?.sync_all()?;
+        std::fs::rename(tmp, out)?;
+        Ok(())
+    })
+}
+
+/// Run a producer command (as root: it reads the store) and compress its output with zstd
+/// into `out`, a file created as the writer, then `fsync`.
+fn compress_to(mut producer: Command, out: &Path, writer: (u32, u32)) -> Result<()> {
     let tmp = out.with_extension("partial");
-    let f = File::create(&tmp)?;
+    let f = create_out(&tmp, writer)?;
     let mut p = producer.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().context("start producer")?;
     let pout = p.stdout.take().unwrap();
     let z = Command::new("zstd").args(["-q", "-3", "-c"]).stdin(pout).stdout(f).status().context("run zstd")?;
     let ps = p.wait_with_output()?;
     if !ps.status.success() || !z.success() {
-        let _ = std::fs::remove_file(&tmp);
+        let _ = crate::privs::as_user_fs(writer.0, writer.1, || Ok(std::fs::remove_file(&tmp)?));
         bail!("backup stream failed: {}", String::from_utf8_lossy(&ps.stderr).trim());
     }
-    File::open(&tmp)?.sync_all()?;
-    std::fs::rename(&tmp, out)?;
-    Ok(())
+    finish_out(&tmp, out, writer)
 }
 
-pub fn run_backup(ctx: &Ctx, repo: &Repo, root: &Path, full: bool) -> Result<(u32, usize)> {
+/// Write a backup into `root` as `writer` (uid, gid): every file and folder in the backup is
+/// created with the writer's permissions; the store is read as root.
+pub fn run_backup(ctx: &Ctx, repo: &Repo, root: &Path, full: bool, writer: (u32, u32)) -> Result<(u32, usize)> {
+    let w = |f: &mut dyn FnMut() -> Result<()>| crate::privs::as_user_fs(writer.0, writer.1, f);
     let _lock = repo.p.lock()?;
     // Working content of every local line, as automatic states.
     for l in repo.lines()? {
@@ -593,12 +613,12 @@ pub fn run_backup(ctx: &Ctx, repo: &Repo, root: &Path, full: bool) -> Result<(u3
         }
     }
     let proot = root.join(format!("{}-{}", repo.p.name, &repo.p.id[..8]));
-    std::fs::create_dir_all(&proot)?;
-    let chains = chain_dirs(&proot)?;
+    w(&mut || Ok(std::fs::create_dir_all(&proot)?))?;
+    let chains = crate::privs::as_user_fs(writer.0, writer.1, || chain_dirs(&proot))?;
     let week = 7 * 86400 * 1000;
     let (num, dir, mut man) = match chains.last() {
         Some((n, d)) if !full => {
-            let m = read_manifest(d)?;
+            let m = crate::privs::as_user_fs(writer.0, writer.1, || read_manifest(d))?;
             if ids::now_ms() - m.created > week {
                 (n + 1, proot.join(format!("chain-{:04}", n + 1)), None)
             } else {
@@ -608,7 +628,7 @@ pub fn run_backup(ctx: &Ctx, repo: &Repo, root: &Path, full: bool) -> Result<(u3
         Some((n, _)) => (n + 1, proot.join(format!("chain-{:04}", n + 1)), None),
         None => (1, proot.join("chain-0001"), None),
     };
-    std::fs::create_dir_all(&dir)?;
+    w(&mut || Ok(std::fs::create_dir_all(&dir)?))?;
     let mut m = man.take().unwrap_or(Manifest {
         format: 1,
         project: repo.p.name.clone(),
@@ -638,9 +658,8 @@ pub fn run_backup(ctx: &Ctx, repo: &Repo, root: &Path, full: bool) -> Result<(u3
         let seq = next_seq(&m);
         let file = unique_name(&dir, &m, seq, &format!("{}.stream.zst", ids::short(&id)));
         let pp = parent.as_ref().map(|p| repo.p.state_path(p));
-        compress_to(btrfs::send_command(pp.as_deref(), &repo.p.state_path(&id)), &dir.join(&file))?;
-        let sha = fsutil::sha256_file(&dir.join(&file))?;
-        let bytes = std::fs::metadata(dir.join(&file))?.len();
+        compress_to(btrfs::send_command(pp.as_deref(), &repo.p.state_path(&id)), &dir.join(&file), writer)?;
+        let (sha, bytes) = file_sum(&dir.join(&file), writer)?;
         m.items.push(Item {
             seq,
             kind: "state".into(),
@@ -652,7 +671,7 @@ pub fn run_backup(ctx: &Ctx, repo: &Repo, root: &Path, full: bool) -> Result<(u3
             tips: vec![],
             time: ids::now_ms(),
         });
-        write_manifest(&dir, &m)?;
+        w(&mut || write_manifest(&dir, &m))?;
         sent.insert(id.clone());
         last_sent = Some(id);
         count += 1;
@@ -671,16 +690,18 @@ pub fn run_backup(ctx: &Ctx, repo: &Repo, root: &Path, full: bool) -> Result<(u3
         if !tips.is_empty() && !new.is_empty() {
             let seq = next_seq(&m);
             let file = unique_name(&dir, &m, seq, "git.bundle");
+            // git writes the bundle to stdout; the file is created as the writer.
             let mut args =
-                vec!["bundle".to_string(), "create".into(), dir.join(&file).to_string_lossy().into_owned(), "--all".into()];
+                vec!["-c".to_string(), "safe.directory=*".into(), "bundle".into(), "create".into(), "-".into(), "--all".into()];
             for p in &prev {
                 args.push(format!("^{p}"));
             }
-            let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            if crate::gitbridge::git_out(&gs, &refs).is_ok() && dir.join(&file).exists() {
-                File::open(dir.join(&file))?.sync_all()?;
-                let sha = fsutil::sha256_file(&dir.join(&file))?;
-                let bytes = std::fs::metadata(dir.join(&file))?.len();
+            let tmp = dir.join(format!("{file}.partial"));
+            let out = create_out(&tmp, writer)?;
+            let st = Command::new("git").env("GIT_DIR", &gs).args(&args).stdout(out).stderr(Stdio::null()).status()?;
+            if st.success() {
+                finish_out(&tmp, &dir.join(&file), writer)?;
+                let (sha, bytes) = file_sum(&dir.join(&file), writer)?;
                 m.items.push(Item {
                     seq,
                     kind: "git".into(),
@@ -692,7 +713,9 @@ pub fn run_backup(ctx: &Ctx, repo: &Repo, root: &Path, full: bool) -> Result<(u3
                     tips: tips.clone(),
                     time: ids::now_ms(),
                 });
-                write_manifest(&dir, &m)?;
+                w(&mut || write_manifest(&dir, &m))?;
+            } else {
+                let _ = w(&mut || Ok(std::fs::remove_file(&tmp)?));
             }
         }
     }
@@ -702,39 +725,54 @@ pub fn run_backup(ctx: &Ctx, repo: &Repo, root: &Path, full: bool) -> Result<(u3
     let jsonl = repo.p.export_jsonl()?;
     {
         let tmp = dir.join(format!("{file}.partial"));
-        let f = File::create(&tmp)?;
+        let f = create_out(&tmp, writer)?;
         let mut z = Command::new("zstd").args(["-q", "-3", "-c"]).stdin(Stdio::piped()).stdout(f).spawn().context("run zstd")?;
         z.stdin.take().unwrap().write_all(jsonl.as_bytes())?;
         if !z.wait()?.success() {
             bail!("zstd failed");
         }
-        File::open(&tmp)?.sync_all()?;
-        std::fs::rename(&tmp, dir.join(&file))?;
+        finish_out(&tmp, &dir.join(&file), writer)?;
     }
-    let sha = fsutil::sha256_file(&dir.join(&file))?;
-    let bytes = std::fs::metadata(dir.join(&file))?.len();
+    let (sha, bytes) = file_sum(&dir.join(&file), writer)?;
     // Only the newest copy of the records is needed.
     let old_logs: Vec<String> = m.items.iter().filter(|i| i.kind == "records").map(|i| i.file.clone()).collect();
     m.items.retain(|i| i.kind != "records");
-    m.items.push(Item { seq, kind: "records".into(), state: None, parent: None, file, sha256: sha, bytes, tips: vec![], time: ids::now_ms() });
-    write_manifest(&dir, &m)?;
-    for f in old_logs {
-        if safe_item_name(&f) && m.items.iter().all(|i| i.file != f) {
-            let _ = std::fs::remove_file(dir.join(f));
+    m.items.push(Item {
+        seq,
+        kind: "records".into(),
+        state: None,
+        parent: None,
+        file,
+        sha256: sha,
+        bytes,
+        tips: vec![],
+        time: ids::now_ms(),
+    });
+    w(&mut || write_manifest(&dir, &m))?;
+    w(&mut || {
+        for f in &old_logs {
+            if safe_item_name(f) && m.items.iter().all(|i| &i.file != f) {
+                let _ = std::fs::remove_file(dir.join(f));
+            }
         }
-    }
-    File::open(&dir)?.sync_all()?;
-    // Retention: the newest two chains.
-    let chains = chain_dirs(&proot)?;
-    if chains.len() > 2 {
-        for (_, d) in &chains[..chains.len() - 2] {
-            let _ = std::fs::remove_dir_all(d);
+        File::open(&dir)?.sync_all()?;
+        // Retention: the newest two chains.
+        let chains = chain_dirs(&proot)?;
+        if chains.len() > 2 {
+            for (_, d) in &chains[..chains.len() - 2] {
+                let _ = std::fs::remove_dir_all(d);
+            }
         }
-    }
+        Ok(())
+    })?;
     let mut rec = Record::new("backup");
     rec.data = serde_json::json!({"dir": dir.to_string_lossy(), "chain": num, "states": count});
     repo.commit_record(ctx, rec)?;
     Ok((num, count))
+}
+
+fn file_sum(p: &Path, writer: (u32, u32)) -> Result<(String, u64)> {
+    crate::privs::as_user_fs(writer.0, writer.1, || Ok((fsutil::sha256_file(p)?, std::fs::symlink_metadata(p)?.len())))
 }
 
 fn verify_chain(dir: &Path) -> Result<Manifest> {
@@ -771,7 +809,7 @@ pub fn backup(ctx: &Ctx, args: &[String]) -> Result<i32> {
             if !ctx.caller.is_root() {
                 crate::privs::check_caller_writable(ctx, &dir)?;
             }
-            let (n, c) = run_backup(ctx, &h.repo, &dir, a.has("--full"))?;
+            let (n, c) = run_backup(ctx, &h.repo, &dir, a.has("--full"), (ctx.caller.uid, ctx.caller.gid))?;
             if !a.has("-q") {
                 outln!(ctx, "backup chain {n}: {c} new state stream(s), logs and git objects written to {}", dir.display());
             }
@@ -872,7 +910,8 @@ fn restore(ctx: &Ctx, root: &Path, as_name: Option<&str>, chain: Option<u32>, qu
                     if !out.status.success() {
                         bail!("cannot read {}", i.file);
                     }
-                    let lines: Vec<String> = String::from_utf8_lossy(&out.stdout).lines().filter(|l| !l.is_empty()).map(|l| l.to_string()).collect();
+                    let lines: Vec<String> =
+                        String::from_utf8_lossy(&out.stdout).lines().filter(|l| !l.is_empty()).map(|l| l.to_string()).collect();
                     p.import_lines(&lines)?;
                 }
                 _ => {}

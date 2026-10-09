@@ -173,7 +173,14 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
     // user who made it.
     for (lid, ch) in &r.lines {
         let owner = repo.p.db.line_by_id(lid)?.map(|l| l.owner).or(ch.before.as_ref().map(|b| b.owner)).unwrap_or(0);
-        let probe = Line { id: lid.clone(), name: ch.before.as_ref().or(ch.after.as_ref()).map(|s| s.name.clone()).unwrap_or_default(), head: String::new(), owner, machine: String::new(), group: None };
+        let probe = Line {
+            id: lid.clone(),
+            name: ch.before.as_ref().or(ch.after.as_ref()).map(|s| s.name.clone()).unwrap_or_default(),
+            head: String::new(),
+            owner,
+            machine: String::new(),
+            group: None,
+        };
         repo.can_write_line(ctx, &probe)?;
     }
     if r.lines.is_empty() && !repo.is_lead(ctx) && r.actor.uid != ctx.caller.uid {
@@ -274,7 +281,6 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
                 if w.exists() {
                     bail!("{} exists", w.display());
                 }
-                btrfs::snapshot(&repo.state_root(&src)?, &w, false)?;
                 let l = Line {
                     id: lid.clone(),
                     name: b.name.clone(),
@@ -283,7 +289,7 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
                     machine: repo.p.store.machine.id.clone(),
                     group: b.group.clone(),
                 };
-                repo.prepare_working(&l, &src)?;
+                repo.materialize(&l, &src, &w)?;
             }
             (None, Some(l)) if alive => {
                 // The operation created the line: delete it (content saved first).
@@ -349,14 +355,18 @@ pub fn op(ctx: &Ctx, args: &[String]) -> Result<i32> {
             }
             Some(f) => super::work::read_caller_file(ctx, f)?,
         };
-        let lines: Vec<String> = String::from_utf8_lossy(&data).lines().filter(|l| !l.trim().is_empty()).map(|l| l.to_string()).collect();
+        let lines: Vec<String> =
+            String::from_utf8_lossy(&data).lines().filter(|l| !l.trim().is_empty()).map(|l| l.to_string()).collect();
         let _lock = h.repo.p.lock()?;
         let n = h.repo.p.import_lines(&lines)?;
         outln!(ctx, "imported {n} new record(s) of {}", lines.len());
         return Ok(0);
     }
     if sub != "log" && sub != "show" {
-        return Err(exit(128, "usage: layr op log [-n N] [--all] | layr op show <id> | layr op export | layr op import [<file>]"));
+        return Err(exit(
+            128,
+            "usage: layr op log [-n N] [--all] | layr op show <id> | layr op export | layr op import [<file>]",
+        ));
     }
     let spec = Spec::new().value("-n").flag("--all").flag("--json");
     let a = parse(&spec, args.get(1..).unwrap_or(&[]))?;
@@ -410,9 +420,8 @@ pub fn try_cmd(ctx: &Ctx, args: &[String]) -> Result<i32> {
         return Err(exit(128, "usage: layr try <rev> -- <command>..."));
     }
     let state = revs::resolve(repo, h.line.as_ref(), rev)?;
-    let name = format!(".try-{}", &ids::new_id()[..8]);
+    let name = format!(".try-{:016x}", rand::random::<u64>());
     let dir = repo.p.line_path(&name);
-    btrfs::snapshot(&repo.state_root(&state)?, &dir, false)?;
     let tmp_line = Line {
         id: format!("try-{name}"),
         name: name.clone(),
@@ -421,31 +430,18 @@ pub fn try_cmd(ctx: &Ctx, args: &[String]) -> Result<i32> {
         machine: repo.p.store.machine.id.clone(),
         group: None,
     };
+    repo.materialize(&tmp_line, &state, &dir)?;
     let res = (|| -> Result<i32> {
-        repo.prepare_working(&tmp_line, &state)?;
         if !a.has("-q") {
             eprintln!("layr try: running in {} (state {})", dir.display(), ids::short(&state));
         }
         let started = std::time::Instant::now();
         let mut c = std::process::Command::new(&a.paths[0]);
         c.args(&a.paths[1..]).current_dir(&dir);
-        c.env_clear();
-        for (k, v) in &ctx.env {
-            c.env(k, v);
-        }
-        c.env("LAYR_TRY_STATE", ids::display(&state));
-        if unsafe { libc::geteuid() } == 0 && ctx.caller.uid != 0 {
-            use std::os::unix::process::CommandExt;
-            let (u, g) = (ctx.caller.uid, ctx.caller.gid);
-            c.uid(u).gid(g);
-            unsafe {
-                c.pre_exec(move || {
-                    let gs = [g];
-                    libc::setgroups(1, gs.as_ptr());
-                    Ok(())
-                });
-            }
-        }
+        // The caller's own environment and identity (uid, groups), never the service's.
+        let mut env: Vec<(String, String)> = ctx.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        env.push(("LAYR_TRY_STATE".into(), ids::display(&state)));
+        crate::privs::command_as(&mut c, ctx.caller.uid, &env)?;
         let st = c.status()?;
         let code = st.code().unwrap_or(128);
         let _lock = repo.p.lock()?;
@@ -740,6 +736,13 @@ fn copy_folder(ctx: &Ctx, src: &std::path::Path, dst: &std::path::Path, include_
     Ok(n)
 }
 
+fn caller_git(ctx: &Ctx, dir: &std::path::Path, args: &[&str]) -> Result<std::process::Output> {
+    let mut command = std::process::Command::new("git");
+    command.arg("-c").arg("safe.directory=*").arg("-C").arg(dir).args(args);
+    crate::privs::command_as(&mut command, ctx.caller.uid, &[])?;
+    Ok(command.output()?)
+}
+
 pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let spec = Spec::new()
         .value("--from")
@@ -795,13 +798,7 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 // Keep the git history: the store gets the folder's objects; the state of the
                 // folder's HEAD is the parent of the folder content.
                 let s = crate::gitbridge::init_store(&repo)?;
-                let url = crate::privs::as_caller_fs(ctx, || {
-                    Ok(std::process::Command::new("git")
-                        .arg("-C")
-                        .arg(&src)
-                        .args(["config", "--get", "remote.origin.url"])
-                        .output()?)
-                })
+                let url = caller_git(ctx, &src, &["config", "--get", "remote.origin.url"])
                 .ok()
                 .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
                 .filter(|s| !s.is_empty());
@@ -810,21 +807,9 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
                     set_config(ctx, &repo, "remote.origin.url", serde_json::json!(u))?;
                 }
                 let refs = crate::gitbridge::fetch(ctx, &repo, "local")?;
-                let head = std::process::Command::new("git")
-                    .arg("-c")
-                    .arg("safe.directory=*")
-                    .arg("-C")
-                    .arg(&src)
-                    .args(["rev-parse", "HEAD"])
-                    .output()?;
+                let head = caller_git(ctx, &src, &["rev-parse", "HEAD"])?;
                 let head = String::from_utf8_lossy(&head.stdout).trim().to_string();
-                let branch = std::process::Command::new("git")
-                    .arg("-c")
-                    .arg("safe.directory=*")
-                    .arg("-C")
-                    .arg(&src)
-                    .args(["rev-parse", "--abbrev-ref", "HEAD"])
-                    .output()?;
+                let branch = caller_git(ctx, &src, &["rev-parse", "--abbrev-ref", "HEAD"])?;
                 let branch = String::from_utf8_lossy(&branch.stdout).trim().to_string();
                 let _ = (s, refs);
                 if !head.is_empty() && head != "HEAD" {
@@ -969,6 +954,10 @@ pub fn config(ctx: &Ctx, args: &[String]) -> Result<i32> {
         };
     }
     repo.require_lead(ctx, "change the project configuration")?;
+    let key = a.get("--unset").unwrap_or_else(|| a.pos.first().map(|s| s.as_str()).unwrap_or(""));
+    if key == "lead" && !ctx.caller.is_root() {
+        return Err(exit(1, format!("permission denied: only root changes '{key}'")));
+    }
     let _lock = repo.p.lock()?;
     if let Some(k) = a.get("--unset") {
         set_config(ctx, repo, k, serde_json::Value::Null)?;

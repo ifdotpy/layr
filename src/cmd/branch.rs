@@ -142,6 +142,9 @@ pub fn branch(ctx: &Ctx, args: &[String]) -> Result<i32> {
         if owner != ctx.caller.uid && !repo.is_lead(ctx) {
             return Err(exit(128, "fatal: only the project lead can create a line for another user"));
         }
+        if owner == 0 && !ctx.caller.is_root() {
+            return Err(exit(128, "fatal: only root can create a line owned by root"));
+        }
         let group = a.get("--group").map(|s| s.to_string());
         if let Some(g) = &group {
             if repo.p.db.group(g)?.is_none() {
@@ -321,13 +324,9 @@ pub fn adopt(ctx: &Ctx, args: &[String]) -> Result<i32> {
             .map(|s| s.id)
             .unwrap_or(l.head.clone()),
     };
-    crate::btrfs::snapshot(&repo.state_root(&start)?, &w, false)?;
     let mut moved = l.clone();
     moved.machine = repo.p.store.machine.id.clone();
-    if let Err(e) = repo.prepare_working(&moved, &start) {
-        let _ = crate::btrfs::delete_tree(&w);
-        return Err(e);
-    }
+    repo.materialize(&moved, &start, &w)?;
     let mut rec = Record::new("line.adopt");
     rec.lines.insert(
         l.id.clone(),

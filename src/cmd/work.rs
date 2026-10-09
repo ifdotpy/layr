@@ -240,8 +240,7 @@ fn stage_paths(repo: &Repo, line: &Line, scan: &Path, paths: &BTreeSet<String>) 
     for p in paths {
         if let (Some(m), None) = (fsutil::lmeta(scan, p), fsutil::lmeta(&stage, p)) {
             if let Some(from) = gone.remove(&m.ino) {
-                fsutil::make_parents(&stage, p, own)?;
-                std::fs::rename(fsutil::safe_join(&stage, &from)?, fsutil::safe_join(&stage, p)?)?;
+                crate::tree::Tree::open(&stage)?.rename(&from, p)?;
             }
         }
     }
@@ -408,8 +407,8 @@ pub fn rm(ctx: &Ctx, args: &[String]) -> Result<i32> {
             for f in &files {
                 fsutil::remove_entry(&w, f)?;
             }
-            if fsutil::lmeta(&w, s).map(|m| m.is_dir()).unwrap_or(false) {
-                let _ = std::fs::remove_dir(fsutil::safe_join(&w, s)?);
+            if crate::tree::Tree::open(&w)?.stat(s).map(|m| m.is_dir()).unwrap_or(false) {
+                crate::tree::Tree::open(&w)?.rmdir(s);
             }
         }
         removed.extend(files);
@@ -462,9 +461,10 @@ pub fn mv(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         return Ok(0);
     }
+    let tree = crate::tree::Tree::open(&w)?;
     for (s, t) in &moves {
-        fsutil::make_parents(&w, t, h.repo.own(&line))?;
-        std::fs::rename(fsutil::safe_join(&w, s)?, fsutil::safe_join(&w, t)?)?;
+        tree.mkdirs_for(t, h.repo.own(&line))?;
+        tree.rename(s, t)?;
     }
     // Stage both sides of each move.
     let scan = h.repo.scan(&line)?;
@@ -543,7 +543,7 @@ pub fn apply(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     if a.has("--stat") || a.has("--numstat") {
         let mode = if a.has("--stat") { "--stat" } else { "--numstat" };
-        let out = run_git_apply(Path::new("/"), &patch, &[mode.to_string()])?;
+        let out = run_git_apply(Path::new("/"), &patch, &[mode.to_string()], ctx.caller.uid)?;
         ctx.print(&out);
         return Ok(0);
     }
@@ -552,30 +552,34 @@ pub fn apply(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let (_lock, _w) = begin_change(ctx, &h.repo, &line)?;
     let line = h.repo.line(&line.id)?;
     let own = h.repo.own(&line);
-    let mut targets = Vec::new();
+    // The staging line is private to the service (applied as root, then given to the owner);
+    // the working folder belongs to the owner, so the patch is applied there as the owner.
+    let mut targets: Vec<(std::path::PathBuf, u32)> = Vec::new();
     if to_stage {
-        targets.push(h.repo.ensure_stage(&line)?);
+        targets.push((h.repo.ensure_stage(&line)?, 0));
     }
     if to_work {
-        targets.push(h.repo.working(&line));
+        targets.push((h.repo.working(&line), line.owner));
     }
     // Check all targets first, then apply.
-    for t in &targets {
+    for (t, uid) in &targets {
         let mut f = flags.clone();
         f.push("--check".into());
-        run_git_apply(t, &patch, &f)?;
+        run_git_apply(t, &patch, &f, *uid)?;
     }
     if a.has("--check") {
         return Ok(0);
     }
     let touched = patch_paths(&patch);
-    for t in &targets {
-        run_git_apply(t, &patch, &flags)?;
-        if let Some((u, g)) = own {
-            for p in &touched {
-                if let Ok(full) = fsutil::safe_join(t, p) {
-                    if full.symlink_metadata().is_ok() {
-                        fsutil::chown_nofollow(&full, u, g)?;
+    for (t, uid) in &targets {
+        run_git_apply(t, &patch, &flags, *uid)?;
+        if *uid == 0 {
+            if let Some((u, g)) = own {
+                for p in &touched {
+                    if let Ok(full) = fsutil::safe_join(t, p) {
+                        if full.symlink_metadata().is_ok() {
+                            fsutil::chown_nofollow(&full, u, g)?;
+                        }
                     }
                 }
             }
@@ -598,13 +602,15 @@ fn patch_paths(patch: &[u8]) -> Vec<String> {
     v
 }
 
-fn run_git_apply(dir: &Path, patch: &[u8], flags: &[String]) -> Result<String> {
+fn run_git_apply(dir: &Path, patch: &[u8], flags: &[String], uid: u32) -> Result<String> {
     use std::io::Write;
     let mut c = std::process::Command::new("git");
     c.arg("apply").args(flags).arg("-").current_dir(dir);
-    c.env("GIT_CEILING_DIRECTORIES", dir.parent().unwrap_or(Path::new("/")));
-    c.env("GIT_DIR", "/nonexistent-layr");
-    c.env_remove("GIT_WORK_TREE");
+    let env = vec![
+        ("GIT_CEILING_DIRECTORIES".to_string(), dir.parent().unwrap_or(Path::new("/")).to_string_lossy().into_owned()),
+        ("GIT_DIR".to_string(), "/nonexistent-layr".to_string()),
+    ];
+    crate::privs::command_as(&mut c, uid, &env)?;
     c.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
     let mut ch = c.spawn()?;
     ch.stdin.take().unwrap().write_all(patch)?;
@@ -1057,7 +1063,8 @@ pub fn stash(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 ours_label: "Updated upstream",
                 theirs_label: "Stashed changes",
                 config: &cfg,
-                run_as: repo.own(&line),
+                run_as: Some(repo.lead_ids()),
+                allow_root: ctx.caller.is_root(),
             })?;
             let result = repo.temp_snapshot(&work.path, true)?;
             let wdir = repo.working(&line);

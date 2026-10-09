@@ -21,6 +21,7 @@ mod revs;
 mod service;
 mod store;
 mod stream;
+mod tree;
 
 use std::collections::HashMap;
 

@@ -61,14 +61,10 @@ impl Ctx {
 
     fn git_config(&self, key: &str) -> Option<String> {
         let f = self.caller.home.join(".gitconfig");
-        let out = std::process::Command::new("git")
-            .args(["config", "--file"])
-            .arg(&f)
-            .arg(key)
-            .env_clear()
-            .env("PATH", "/usr/local/bin:/usr/bin:/bin")
-            .output()
-            .ok()?;
+        let mut command = std::process::Command::new("git");
+        command.args(["config", "--file"]).arg(&f).arg(key);
+        crate::privs::command_as(&mut command, self.caller.uid, &[]).ok()?;
+        let out = command.output().ok()?;
         let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if s.is_empty() {
             None

@@ -205,25 +205,11 @@ pub fn same_entry(ra: &Path, pa: &str, rb: &Path, pb: &str, ranges: Option<&[(u6
 }
 
 /// Create the parent folders of `rel` below `root`, with owner `own`.
+///
+/// All writes below a root go through `Tree` (descriptor based, no link is followed), because a
+/// line belongs to its owner while the service writes as root.
 pub fn make_parents(root: &Path, rel: &str, own: Option<(u32, u32)>) -> Result<()> {
-    let comps: Vec<&str> = rel.split('/').filter(|c| !c.is_empty()).collect();
-    let mut cur = root.to_path_buf();
-    for c in &comps[..comps.len().saturating_sub(1)] {
-        cur.push(c);
-        match fs::symlink_metadata(&cur) {
-            Ok(m) if m.is_dir() => continue,
-            Ok(m) if m.file_type().is_symlink() => bail!("path goes through a symbolic link: {rel}"),
-            Ok(_) => {
-                fs::remove_file(&cur)?;
-            }
-            Err(_) => {}
-        }
-        fs::create_dir(&cur).with_context(|| format!("mkdir {}", cur.display()))?;
-        if let Some((u, g)) = own {
-            chown_nofollow(&cur, u, g)?;
-        }
-    }
-    Ok(())
+    crate::tree::Tree::open(root)?.mkdirs_for(rel, own)
 }
 
 pub fn chown_nofollow(p: &Path, uid: u32, gid: u32) -> Result<()> {
@@ -238,96 +224,66 @@ pub fn chown_nofollow(p: &Path, uid: u32, gid: u32) -> Result<()> {
     Ok(())
 }
 
-/// Remove an entry (recursively for a folder). Nested subvolumes are deleted as subvolumes.
+/// Remove an entry (recursively for a folder; nested subvolumes are destroyed).
 pub fn remove_entry(root: &Path, rel: &str) -> Result<()> {
-    let p = safe_join(root, rel)?;
-    let m = match fs::symlink_metadata(&p) {
-        Ok(m) => m,
-        Err(_) => return Ok(()),
-    };
-    if m.is_dir() {
-        if crate::btrfs::is_subvolume(&p) {
-            crate::btrfs::delete_tree(&p)
-        } else {
-            for nested in crate::btrfs::nested_subvolumes(&p)? {
-                crate::btrfs::delete_tree(&nested)?;
-            }
-            fs::remove_dir_all(&p).with_context(|| format!("remove {}", p.display()))
-        }
-    } else {
-        fs::remove_file(&p).with_context(|| format!("remove {}", p.display()))
+    if rel.is_empty() {
+        bail!("refusing to remove the root of {}", root.display());
     }
+    crate::tree::Tree::open(root)?.remove(rel)
 }
 
-/// Copy one entry from `src_root/src_rel` to `dst_root/dst_rel`: a reflink copy for a file,
-/// the same target for a link, an empty folder for a folder. Replaces what is at the target.
-pub fn copy_entry(src_root: &Path, src_rel: &str, dst_root: &Path, dst_rel: &str, own: Option<(u32, u32)>) -> Result<()> {
-    let src = safe_join(src_root, src_rel)?;
-    let m = fs::symlink_metadata(&src).with_context(|| format!("stat {}", src.display()))?;
-    make_parents(dst_root, dst_rel, own)?;
-    let dst = safe_join(dst_root, dst_rel)?;
-    if let Ok(dm) = fs::symlink_metadata(&dst) {
-        if m.file_type().is_file() && dm.file_type().is_file() {
-            // Keep the inode of the target: btrfs then reports an in-place change with byte
-            // ranges, and running tools keep their file handles.
-            return update_in_place(&src, &dst, &m, own);
-        }
-        if !(m.is_dir() && dm.is_dir()) {
-            remove_entry(dst_root, dst_rel)?;
-        }
-    }
-    let ft = m.file_type();
-    if ft.is_symlink() {
-        let t = fs::read_link(&src)?;
-        std::os::unix::fs::symlink(&t, &dst).with_context(|| format!("symlink {}", dst.display()))?;
-    } else if ft.is_dir() {
-        if fs::symlink_metadata(&dst).is_err() {
-            fs::create_dir(&dst).with_context(|| format!("mkdir {}", dst.display()))?;
-        }
-        fs::set_permissions(&dst, fs::Permissions::from_mode(m.mode() & 0o7777))?;
-    } else if ft.is_file() {
-        let s = open_ro(&src)?;
-        let d = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .custom_flags(libc::O_NOFOLLOW)
-            .mode(m.mode() & 0o7777)
-            .open(&dst)
-            .with_context(|| format!("create {}", dst.display()))?;
-        if crate::btrfs::clone_file(&s, &d).is_err() {
-            let mut s2 = open_ro(&src)?;
-            let mut d2 = d.try_clone()?;
-            std::io::copy(&mut s2, &mut d2)?;
-        }
-        d.set_permissions(fs::Permissions::from_mode(m.mode() & 0o7777))?;
-        set_mtime(&d, m.mtime(), m.mtime_nsec())?;
-    } else {
-        bail!("cannot copy special file {}", src.display());
-    }
+fn fchown(f: &File, own: Option<(u32, u32)>) -> Result<()> {
+    use std::os::fd::AsRawFd;
     if let Some((u, g)) = own {
-        chown_nofollow(&dst, u, g)?;
+        if unsafe { libc::fchown(f.as_raw_fd(), u, g) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
     }
     Ok(())
 }
 
-fn update_in_place(src: &Path, dst: &Path, m: &fs::Metadata, own: Option<(u32, u32)>) -> Result<()> {
-    let s = open_ro(src)?;
-    let d = OpenOptions::new()
-        .write(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(dst)
-        .with_context(|| format!("open {}", dst.display()))?;
-    d.set_len(0)?;
+/// Copy one entry from `src_root/src_rel` (a snapshot or a private folder) to
+/// `dst_root/dst_rel`: a reflink copy for a file (in place when a file is there, so the inode
+/// stays), the same target for a link, a folder for a folder.
+pub fn copy_entry(src_root: &Path, src_rel: &str, dst_root: &Path, dst_rel: &str, own: Option<(u32, u32)>) -> Result<()> {
+    let src = safe_join(src_root, src_rel)?;
+    let m = fs::symlink_metadata(&src).with_context(|| format!("stat {}", src.display()))?;
+    let t = crate::tree::Tree::open(dst_root)?;
+    let ft = m.file_type();
+    if ft.is_symlink() {
+        let target = fs::read_link(&src)?.to_string_lossy().into_owned();
+        t.symlink(dst_rel, &target)?;
+        if let Some((u, g)) = own {
+            t.chown(dst_rel, u, g)?;
+        }
+        return Ok(());
+    }
+    if ft.is_dir() {
+        t.mkdirs(dst_rel, own)?;
+        t.chmod(dst_rel, m.mode() & 0o7777)?;
+        return Ok(());
+    }
+    if !ft.is_file() {
+        bail!("cannot copy special file {}", src.display());
+    }
+    let s = open_ro(&src)?;
+    // Keep the inode of a file that is there: btrfs then reports an in-place change with byte
+    // ranges, and running tools keep their file handles.
+    let d = match t.open_write(dst_rel)? {
+        Some(d) => {
+            d.set_len(0)?;
+            d
+        }
+        None => t.create(dst_rel, m.mode() & 0o7777)?,
+    };
     if crate::btrfs::clone_file(&s, &d).is_err() {
-        let mut s2 = open_ro(src)?;
+        let mut s2 = open_ro(&src)?;
         let mut d2 = d.try_clone()?;
         std::io::copy(&mut s2, &mut d2)?;
     }
     d.set_permissions(fs::Permissions::from_mode(m.mode() & 0o7777))?;
     set_mtime(&d, m.mtime(), m.mtime_nsec())?;
-    if let Some((u, g)) = own {
-        chown_nofollow(dst, u, g)?;
-    }
+    fchown(&d, own)?;
     Ok(())
 }
 
@@ -343,37 +299,19 @@ pub fn set_mtime(f: &File, sec: i64, nsec: i64) -> Result<()> {
     Ok(())
 }
 
-/// Write bytes as a file at `root/rel` (replacing it), with a mode and owner.
+/// Write bytes as a new file at `root/rel` (replacing what is there), with a mode and owner.
 pub fn write_file(root: &Path, rel: &str, data: &[u8], mode: u32, own: Option<(u32, u32)>) -> Result<()> {
     use std::io::Write;
-    make_parents(root, rel, own)?;
-    let dst = safe_join(root, rel)?;
-    if fs::symlink_metadata(&dst).is_ok() {
-        remove_entry(root, rel)?;
-    }
-    let mut f = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .mode(mode)
-        .open(&dst)
-        .with_context(|| format!("create {}", dst.display()))?;
+    let t = crate::tree::Tree::open(root)?;
+    let mut f = t.create(rel, mode)?;
     f.write_all(data)?;
     f.set_permissions(fs::Permissions::from_mode(mode))?;
-    if let Some((u, g)) = own {
-        chown_nofollow(&dst, u, g)?;
-    }
+    fchown(&f, own)?;
     Ok(())
 }
 
 pub fn set_mode(root: &Path, rel: &str, mode: u32) -> Result<()> {
-    let p = safe_join(root, rel)?;
-    let m = fs::symlink_metadata(&p)?;
-    if m.file_type().is_symlink() {
-        return Ok(());
-    }
-    fs::set_permissions(&p, fs::Permissions::from_mode(mode & 0o7777))?;
-    Ok(())
+    crate::tree::Tree::open(root)?.chmod(rel, mode)
 }
 
 /// Walk all entries below `root/rel` (not following links, not entering nested subvolumes).
@@ -420,9 +358,15 @@ pub fn walk(root: &Path, rel: &str, f: &mut dyn FnMut(&str, &Meta) -> Result<boo
 pub fn atomic_write(path: &Path, data: &[u8], mode: u32) -> Result<()> {
     use std::io::Write;
     let dir = path.parent().ok_or_else(|| anyhow!("no parent"))?;
-    let tmp = dir.join(format!(".{}.tmp{}", path.file_name().unwrap().to_string_lossy(), std::process::id()));
+    // A new file with an unpredictable name, never through an existing name or a link.
+    let tmp = dir.join(format!(
+        ".{}.tmp-{}-{:016x}",
+        path.file_name().unwrap().to_string_lossy(),
+        std::process::id(),
+        rand::random::<u64>()
+    ));
     {
-        let mut f = OpenOptions::new().write(true).create(true).truncate(true).mode(mode).open(&tmp)?;
+        let mut f = OpenOptions::new().write(true).create_new(true).custom_flags(libc::O_NOFOLLOW).mode(mode).open(&tmp)?;
         f.write_all(data)?;
         f.sync_all()?;
     }

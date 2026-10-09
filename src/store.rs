@@ -331,12 +331,15 @@ impl<'a> Project<'a> {
                 if s.record.seq != last + 1 {
                     bail!("gap in the records of machine {machine}: have {last}, got {}", s.record.seq);
                 }
-                oplog::parse_line(&s.line, Some(&key)).with_context(|| format!("record {} of machine {machine}", s.record.seq))?;
+                oplog::parse_line(&s.line, Some(&key))
+                    .with_context(|| format!("record {} of machine {machine}", s.record.seq))?;
                 last = s.record.seq;
                 fresh.push(s);
             }
         }
-        fresh.sort_by(|a, b| (a.record.time, &a.record.machine, a.record.seq).cmp(&(b.record.time, &b.record.machine, b.record.seq)));
+        fresh.sort_by(|a, b| {
+            (a.record.time, &a.record.machine, a.record.seq).cmp(&(b.record.time, &b.record.machine, b.record.seq))
+        });
         let n = fresh.len();
         self.db.with_tx(|| {
             for s in &fresh {

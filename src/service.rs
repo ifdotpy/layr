@@ -93,7 +93,13 @@ pub fn forward(argv: &[String]) -> Result<i32> {
     let dir = std::fs::File::open(&cwd)?;
     let mut data = (req.len() as u32).to_be_bytes().to_vec();
     data.extend_from_slice(&req);
-    send_with_fds(&sock, &data, &[0, 1, 2, dir.as_raw_fd()])?;
+    // The service answers "B" at once when it is busy, or "R" and the exit code at the end.
+    let _ = send_with_fds(&sock, &data, &[0, 1, 2, dir.as_raw_fd()]);
+    let mut kind = [0u8; 1];
+    (&sock).read_exact(&mut kind).context("the layr service closed the connection")?;
+    if kind[0] == b'B' {
+        bail!("the layr service is busy (too many running requests); try again");
+    }
     let mut code = [0u8; 4];
     (&sock).read_exact(&mut code).context("the layr service closed the connection")?;
     Ok(i32::from_be_bytes(code))
@@ -111,10 +117,16 @@ fn peer_uid(sock: &UnixStream) -> Result<(u32, u32, i32)> {
     Ok((cred.uid, cred.gid, cred.pid))
 }
 
+fn limit(var: &str, default: usize) -> usize {
+    std::env::var(var).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+
 /// Child process: serve one request, then exit.
 fn handle(sock: UnixStream, root: &Path) -> i32 {
     let res = (|| -> Result<i32> {
         let (uid, _gid, _pid) = peer_uid(&sock)?;
+        // A client that does not send its request in time does not hold a process.
+        sock.set_read_timeout(Some(std::time::Duration::from_secs(10)))?;
         let mut first = vec![0u8; 65536];
         let (n, fds) = recv_with_fds(&sock, &mut first, 8)?;
         if fds.len() != 4 {
@@ -159,7 +171,9 @@ fn handle(sock: UnixStream, root: &Path) -> i32 {
             128
         }
     };
-    let _ = (&sock).write_all(&code.to_be_bytes());
+    let mut reply = vec![b'R'];
+    reply.extend_from_slice(&code.to_be_bytes());
+    let _ = (&sock).write_all(&reply);
     code
 }
 
@@ -236,7 +250,8 @@ fn periodic(root: &Path, hourly: bool) {
             let _ = crate::cmd::admin::run_gc(&ctx, &repo, false);
             if let Ok(Some(dir)) = repo.p.config_value("backup.dir") {
                 if let Some(d) = dir.as_str() {
-                    let _ = crate::cmd::transfer::run_backup(&ctx, &repo, Path::new(d), false);
+                    // Written as the lead of this machine, who configured the folder.
+                    let _ = crate::cmd::transfer::run_backup(&ctx, &repo, Path::new(d), false, repo.lead_ids());
                 }
             }
         }
@@ -282,30 +297,44 @@ pub fn daemon(args: &[String]) -> Result<i32> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o666))?;
     }
-    unsafe {
-        libc::signal(libc::SIGCHLD, libc::SIG_IGN);
-    }
     eprintln!("layr service: listening on {} (store {})", sock.display(), root.display());
     let mut last_hourly: i64 = 0;
     let mut next = std::time::Instant::now() + std::time::Duration::from_secs(tick);
+    // Running request processes, by caller: limits keep one user from exhausting the service.
+    let mut children: HashMap<i32, u32> = HashMap::new();
+    let (max_total, max_per_user) = (limit("LAYR_MAX_REQUESTS", 256), limit("LAYR_MAX_REQUESTS_PER_USER", 32));
     loop {
+        // Reap finished children.
+        loop {
+            let pid = unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG) };
+            if pid <= 0 {
+                break;
+            }
+            children.remove(&pid);
+        }
         let mut pfd = libc::pollfd { fd: listener.as_raw_fd(), events: libc::POLLIN, revents: 0 };
-        let wait = next.saturating_duration_since(std::time::Instant::now()).as_millis() as i32;
+        let wait = next.saturating_duration_since(std::time::Instant::now()).as_millis().min(1000) as i32;
         let rc = unsafe { libc::poll(&mut pfd, 1, wait.max(0)) };
         if rc > 0 && pfd.revents & libc::POLLIN != 0 {
             if let Ok((conn, _)) = listener.accept() {
+                let uid = peer_uid(&conn).map(|x| x.0).unwrap_or(u32::MAX);
+                let mine = children.values().filter(|u| **u == uid).count();
+                if children.len() >= max_total || (uid != 0 && mine >= max_per_user) {
+                    let _ = (&conn).write_all(b"B");
+                    drop(conn);
+                    continue;
+                }
                 match unsafe { libc::fork() } {
                     0 => {
                         drop(listener);
-                        // Children wait for their own processes (git, btrfs).
-                        unsafe {
-                            libc::signal(libc::SIGCHLD, libc::SIG_DFL);
-                        }
                         let code = handle(conn, &root);
                         std::process::exit(if code >= 0 { 0 } else { 1 });
                     }
                     -1 => eprintln!("layr service: fork failed"),
-                    _ => drop(conn),
+                    pid => {
+                        children.insert(pid, uid);
+                        drop(conn);
+                    }
                 }
             }
         }
@@ -319,9 +348,6 @@ pub fn daemon(args: &[String]) -> Result<i32> {
             }
             if unsafe { libc::fork() } == 0 {
                 drop(listener);
-                unsafe {
-                    libc::signal(libc::SIGCHLD, libc::SIG_DFL);
-                }
                 periodic(&root, hourly);
                 std::process::exit(0);
             }

@@ -168,60 +168,21 @@ pub fn subvol_info(path: &Path) -> Result<SubvolInfo> {
     })
 }
 
-/// Delete a subvolume and every subvolume nested inside it.
+/// Delete a subvolume and every subvolume nested inside it, or a plain folder tree. The tree is
+/// walked through descriptors (no link is followed), because a line belongs to its owner.
 pub fn delete_tree(path: &Path) -> Result<()> {
-    if !path.exists() {
+    if std::fs::symlink_metadata(path).is_err() {
         return Ok(());
     }
     if is_subvolume(path) {
-        let info = subvol_info(path)?;
-        if info.readonly {
-            // Nested subvolumes of a read-only snapshot are only placeholders.
-            return delete_subvolume(path);
+        if !subvol_info(path)?.readonly {
+            crate::tree::Tree::open(path)?.destroy_nested()?;
         }
+        return delete_subvolume(path);
     }
-    for nested in nested_subvolumes(path)? {
-        delete_tree(&nested)?;
-    }
-    if is_subvolume(path) {
-        delete_subvolume(path)
-    } else {
-        std::fs::remove_dir_all(path).with_context(|| format!("remove {}", path.display()))
-    }
-}
-
-/// Subvolumes nested anywhere below `root` (not following symlinks, not entering them).
-pub fn nested_subvolumes(root: &Path) -> Result<Vec<std::path::PathBuf>> {
-    use std::os::unix::fs::MetadataExt;
-    let mut out = Vec::new();
-    let root_dev = std::fs::symlink_metadata(root)?.dev();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let rd = match std::fs::read_dir(&dir) {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-        for e in rd.flatten() {
-            let ft = match e.file_type() {
-                Ok(t) => t,
-                Err(_) => continue,
-            };
-            if !ft.is_dir() {
-                continue;
-            }
-            let p = e.path();
-            let m = match std::fs::symlink_metadata(&p) {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
-            if m.dev() != root_dev && m.ino() == FIRST_FREE_OBJECTID {
-                out.push(p);
-            } else if m.dev() == root_dev {
-                stack.push(p);
-            }
-        }
-    }
-    Ok(out)
+    let parent = path.parent().ok_or_else(|| anyhow!("no parent: {}", path.display()))?;
+    let name = path.file_name().ok_or_else(|| anyhow!("no name: {}", path.display()))?.to_string_lossy().into_owned();
+    crate::tree::Tree::open(parent)?.remove(&name)
 }
 
 /// Reflink the whole content of `src` into `dst` (both open files).

@@ -15,7 +15,6 @@ use crate::repo::{skip_path, Repo};
 use anyhow::{anyhow, bail, Context, Result};
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -81,25 +80,16 @@ const NET_ENV: &[&str] = &[
     "GIT_CONFIG_GLOBAL",
 ];
 
-fn as_caller(ctx: &Ctx, c: &mut Command) {
-    c.env("HOME", &ctx.caller.home);
-    c.env("PATH", ctx.env("PATH").unwrap_or("/usr/local/bin:/usr/bin:/bin"));
-    for k in NET_ENV {
-        if let Some(v) = ctx.env(k) {
-            c.env(k, v);
-        }
+/// Network git commands run as the caller: its uid, groups and selected environment (ssh agent,
+/// tokens, proxies), never the service's environment.
+fn as_caller(ctx: &Ctx, c: &mut Command, git_dir: &Path) -> Result<()> {
+    let mut env = crate::privs::pick_env(ctx, NET_ENV);
+    if let Some(p) = ctx.env("PATH") {
+        env.push(("PATH".into(), p.to_string()));
     }
-    if unsafe { libc::geteuid() } == 0 && ctx.caller.uid != 0 {
-        let (uid, gid) = (ctx.caller.uid, ctx.caller.gid);
-        c.uid(uid).gid(gid);
-        unsafe {
-            c.pre_exec(move || {
-                let groups = [gid];
-                libc::setgroups(1, groups.as_ptr());
-                Ok(())
-            });
-        }
-    }
+    env.push(("GIT_DIR".into(), git_dir.to_string_lossy().into_owned()));
+    env.push(("GIT_TERMINAL_PROMPT".into(), "0".into()));
+    crate::privs::command_as(c, ctx.caller.uid, &env)
 }
 
 pub fn remote_url(repo: &Repo, remote: &str) -> Result<String> {
@@ -149,7 +139,7 @@ pub fn fetch(ctx: &Ctx, repo: &Repo, remote: &str) -> Result<Vec<(String, String
         .arg(&url)
         .arg(format!("+refs/heads/*:refs/remotes/{remote}/*"))
         .arg("+refs/tags/*:refs/tags/*");
-    as_caller(ctx, &mut c);
+    as_caller(ctx, &mut c, &tmp)?;
     let out = c.stdin(Stdio::null()).output().context("run git fetch")?;
     if !out.status.success() {
         let _ = std::fs::remove_dir_all(&tmp);
@@ -177,7 +167,7 @@ pub fn ls_remote(ctx: &Ctx, repo: &Repo, url: &str, branch: &str) -> Result<Opti
     let s = init_store(repo)?;
     let mut c = base_cmd(&s);
     c.args(["ls-remote", url, &format!("refs/heads/{branch}")]);
-    as_caller(ctx, &mut c);
+    as_caller(ctx, &mut c, &s)?;
     let out = c.stdin(Stdio::null()).output()?;
     if !out.status.success() {
         bail!("git ls-remote failed: {}", String::from_utf8_lossy(&out.stderr).trim());
@@ -572,7 +562,7 @@ pub fn push(ctx: &Ctx, repo: &Repo, url: &str, commit: &str, branch: &str, force
     c.args(["push", "-q", url]);
     let spec = format!("{}{commit}:refs/heads/{branch}", if force { "+" } else { "" });
     c.arg(spec);
-    as_caller(ctx, &mut c);
+    as_caller(ctx, &mut c, &s)?;
     let out = c.stdin(Stdio::null()).output().context("run git push")?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
@@ -588,11 +578,10 @@ pub fn push(ctx: &Ctx, repo: &Repo, url: &str, commit: &str, branch: &str, force
 
 /// Give a new working folder a `.git` layer (a nested subvolume) so tools that call git see the
 /// nearest mapped commit. Objects come from the project store through `alternates`.
-pub fn make_git_layer(repo: &Repo, line: &Line, state: &str) -> Result<()> {
+pub fn make_git_layer(repo: &Repo, line: &Line, state: &str, w: &Path) -> Result<()> {
     if !has_store(repo) {
         return Ok(());
     }
-    let w = repo.working(line);
     let g = w.join(".git");
     if let Ok(m) = std::fs::symlink_metadata(&g) {
         if m.is_dir() && !crate::btrfs::is_subvolume(&g) && std::fs::read_dir(&g)?.next().is_none() {
