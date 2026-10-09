@@ -130,11 +130,29 @@ impl<'a> Project<'a> {
     pub fn git_dir(&self) -> PathBuf {
         self.dir.join("git")
     }
+    /// Path of a state snapshot. Only a canonical UUID names one; anything else gives a path
+    /// that never exists, so no record can make the service touch another path.
     pub fn state_path(&self, id: &str) -> PathBuf {
-        self.states_dir().join(id)
+        if crate::model::is_uuid(id) {
+            self.states_dir().join(id)
+        } else {
+            self.states_dir().join(".invalid-id")
+        }
     }
     pub fn line_path(&self, name: &str) -> PathBuf {
-        self.lines_dir().join(name)
+        if check_name("line", name).is_ok() || (name.starts_with(".try-") && name[5..].chars().all(|c| c.is_ascii_hexdigit())) {
+            self.lines_dir().join(name)
+        } else {
+            self.lines_dir().join(".invalid-name")
+        }
+    }
+    /// Path of a layer snapshot `<state-id>@<path>`.
+    pub fn layer_path(&self, state: &str, name: &str) -> PathBuf {
+        if crate::model::is_layer_name(name, state) {
+            self.states_dir().join(name)
+        } else {
+            self.states_dir().join(".invalid-layer")
+        }
     }
     pub fn stage_path(&self, line_id: &str) -> PathBuf {
         self.meta_dir().join("stage").join(line_id)
@@ -209,6 +227,11 @@ impl<'a> Project<'a> {
         }
         let db = Db::open(&dir.join("meta").join("layr.sqlite"))?;
         let mut p = Project { store, name: name.to_string(), dir, id: String::new(), db };
+        if p.db.stale {
+            // A schema upgrade: derived tables come back from the records.
+            p.rebuild_index()?;
+            p.db.stale = false;
+        }
         p.id = p.project_id()?;
         Ok(p)
     }
@@ -294,6 +317,7 @@ impl<'a> Project<'a> {
             rec.time = ids::now_ms();
             rec.project = project.clone();
             rec.actor = actor.clone();
+            crate::model::validate(&rec)?;
             let line = oplog::sign_line(&rec, &m.key)?;
             self.db.insert_record(&rec, &line)?;
             self.db.derive(&rec, &present, &m.id)?;
@@ -325,6 +349,7 @@ impl<'a> Project<'a> {
             self.id.clone()
         };
         for s in &parsed {
+            crate::model::validate(&s.record)?;
             if !project.is_empty() && s.record.project != project {
                 bail!(
                     "record {} of machine {} belongs to another project ({})",

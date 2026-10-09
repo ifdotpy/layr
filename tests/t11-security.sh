@@ -88,6 +88,34 @@ before=$(l --project s config --list | md5sum)
 l --project s reindex >/dev/null
 eq "settings after a rebuild equal the incremental result" "$before" "$(l --project s config --list | md5sum)"
 
+# Second review (2026-10-09).
+# Settings of a peer never act here.
+LAYR_ROOT=$BR l --project s config retention.auto 1
+LAYR_ROOT=$BR l --project s config push.members true
+cd $P/main && l sync -q -- env LAYR_ROOT=$BR $LAYR serve-peer s
+eq "a peer does not change retention here" "" "$(l --project s config retention.auto)"
+eq "a peer does not change the push policy here" "" "$(l --project s config push.members)"
+# Frames from the network have a size limit.
+has "a huge frame is refused without allocating it" "frame" "$(printf 'J\377\377\377\377' | timeout 10 $LAYR serve-peer s 2>&1)"
+# A manifest is read without links and with a size limit.
+mkdir -p $T/bkx/s-x/chain-0001 && ln -s /dev/zero $T/bkx/s-x/chain-0001/manifest.json
+has "a manifest link is refused" "manifest.json" "$(timeout 20 $LAYR backup list $T/bkx 2>&1)"
+# The schema version: an old database is upgraded from its records, a newer one is refused.
+before=$(l --project s --line main log --format=%H | md5sum)
+python3 -c "import sqlite3; c=sqlite3.connect('$LAYR_ROOT/projects/s/meta/layr.sqlite'); c.execute('PRAGMA user_version=1'); c.execute('DROP TABLE tags'); c.commit()"
+eq "an old schema is rebuilt from the records" "$before" "$(l --project s --line main log --format=%H | md5sum)"
+python3 -c "import sqlite3; c=sqlite3.connect('$LAYR_ROOT/projects/s/meta/layr.sqlite'); c.execute('PRAGMA user_version=99'); c.commit()"
+has "a newer schema is refused" "newer layr" "$(l --project s --line main log 2>&1)"
+python3 -c "import sqlite3; c=sqlite3.connect('$LAYR_ROOT/projects/s/meta/layr.sqlite'); c.execute('PRAGMA user_version=3'); c.commit()"
+# Git objects follow the member list.
+git init -q --bare $T/gr.git; cd $P/main; l --project s remote add origin $T/gr.git >/dev/null 2>&1; l --project s --line main push -q origin t >/dev/null 2>&1
+l --project s config members "[$(id -u layr-lead)]"
+eq "the git store is closed to others" "750" "$(stat -c %a $LAYR_ROOT/projects/s/git)"
+no "another user cannot read git objects" runuser -u layr-a2 -- ls $LAYR_ROOT/projects/s/git/objects
+ok "the lead can" runuser -u layr-lead -- ls $LAYR_ROOT/projects/s/git/objects
+l --project s config members '"*"'
+eq "with members * it is open again" "755" "$(stat -c %a $LAYR_ROOT/projects/s/git)"
+
 # 8. Limits of the service.
 runuser -u layr-lead -- python3 - "$LAYR_SOCKET" <<'PY' &
 import socket, sys, time

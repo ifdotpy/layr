@@ -541,6 +541,8 @@ impl<'a> Repo<'a> {
             let _ = btrfs::delete_tree(&dst);
             return Err(e);
         }
+        // The owner of the new line may read the git objects (its .git layer uses them).
+        crate::gitbridge::sync_store_access(self)?;
         Ok(line)
     }
 
@@ -580,10 +582,17 @@ impl<'a> Repo<'a> {
         std::fs::set_permissions(w, std::fs::Permissions::from_mode(0o700))?;
         crate::gitbridge::make_git_layer(self, line, state, w)?;
         let st = self.state(state)?;
-        for path in self.p.config_strings("regenerable") {
+        // Layers of this machine's setting, and the layers the state carries (a live move).
+        let mut paths: Vec<String> = self.p.config_strings("regenerable");
+        for k in st.layers.keys() {
+            if !paths.contains(k) {
+                paths.push(k.clone());
+            }
+        }
+        for path in paths {
             let lp = fsutil::safe_join(w, &path)?;
             if let Some(snap) = st.layers.get(&path) {
-                let src = self.p.states_dir().join(snap);
+                let src = self.p.layer_path(state, snap);
                 if src.exists() {
                     if lp.symlink_metadata().is_ok() {
                         fsutil::remove_entry(w, &path)?;

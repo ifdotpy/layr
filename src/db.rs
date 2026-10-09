@@ -11,6 +11,8 @@ use std::path::Path;
 
 pub struct Db {
     pub conn: Connection,
+    /// The derived tables were dropped by a schema upgrade: the project rebuilds them.
+    pub stale: bool,
 }
 
 const SCHEMA: &str = r#"
@@ -37,15 +39,40 @@ CREATE TABLE IF NOT EXISTS trusted (machine TEXT PRIMARY KEY, public_key TEXT, b
 CREATE TABLE IF NOT EXISTS slots (path TEXT PRIMARY KEY, state TEXT, line TEXT, time INTEGER, ord TEXT);
 "#;
 
+/// Version of the derived tables. Records never change shape; a database with an older version
+/// drops its derived tables, creates them new and rebuilds them from the records.
+pub const SCHEMA_VERSION: i64 = 3;
+
+const DERIVED: &[&str] =
+    &["states", "parents", "lines", "line_heads", "tags", "remote_refs", "git_map", "exports", "checks", "groups", "group_lines", "machines", "config", "slots", "trusted"];
+
 impl Db {
+    /// Open the database. Returns it and whether the derived tables must be rebuilt.
     pub fn open(path: &Path) -> Result<Db> {
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         // FULL: a committed record survives a power loss (NORMAL can lose the last commits).
         conn.pragma_update(None, "synchronous", "FULL")?;
         conn.busy_timeout(std::time::Duration::from_secs(30))?;
-        conn.execute_batch(SCHEMA)?;
-        Ok(Db { conn })
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        let has_records: bool =
+            conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='records'", [], |r| r.get::<_, i64>(0))? > 0;
+        let mut db = Db { conn, stale: false };
+        if version < SCHEMA_VERSION {
+            if has_records {
+                for t in DERIVED {
+                    db.conn.execute_batch(&format!("DROP TABLE IF EXISTS {t}"))?;
+                }
+                db.stale = true;
+            }
+            db.conn.execute_batch(SCHEMA)?;
+            db.conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        } else if version > SCHEMA_VERSION {
+            anyhow::bail!("{} was written by a newer layr (schema {version})", path.display());
+        } else {
+            db.conn.execute_batch(SCHEMA)?;
+        }
+        Ok(db)
     }
 
     /// Run `f` in one write transaction (`BEGIN IMMEDIATE`): all or nothing.
@@ -572,15 +599,12 @@ impl Db {
     }
 }
 
-/// Settings that act on one machine: they never come from another machine's records.
-pub fn local_key(k: &str) -> bool {
-    k == "lead"
-        || k == "members"
-        || k == "backup.dir"
-        || k == "snapshot.interval"
-        || k.starts_with("merge.driver.")
-        || k.starts_with("merge.verify.")
-        || (k.starts_with("remote.") && k.ends_with(".url"))
+/// Every setting acts on one machine (lead, members, merge commands, remotes, retention,
+/// push policy, layers, backups): settings never come from another machine's records. Those
+/// values stay as `<key>@<machine>`; a restore takes over the values of the machine that wrote
+/// the backup.
+pub fn local_key(_k: &str) -> bool {
+    true
 }
 
 pub fn kind_str(k: StateKind) -> &'static str {

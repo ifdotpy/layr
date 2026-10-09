@@ -140,3 +140,200 @@ pub struct Line {
     pub machine: String,
     pub group: Option<String>,
 }
+
+// ----- checks of records that come from other machines -----
+
+pub fn is_uuid(s: &str) -> bool {
+    s.len() == 36 && uuid::Uuid::parse_str(s).map(|u| u.hyphenated().to_string() == s).unwrap_or(false)
+}
+
+pub fn is_name(s: &str) -> bool {
+    crate::store::check_name("name", s).is_ok()
+}
+
+/// A layer snapshot name: `<state-id>@<path with '/' as %2F>`.
+pub fn is_layer_name(s: &str, state: &str) -> bool {
+    match s.split_once('@') {
+        Some((id, p)) => {
+            id == state && !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || "._-%".contains(c)) && !p.starts_with('.')
+        }
+        None => false,
+    }
+}
+
+fn is_ref(s: &str) -> bool {
+    !s.is_empty() && !s.contains("..") && !s.starts_with('/') && s.chars().all(|c| c.is_ascii_alphanumeric() || "._/-".contains(c))
+}
+
+/// Every id, name and path in a record is checked before the record is stored: ids are
+/// canonical UUIDs, names follow the name rules, paths are relative. A record from another
+/// machine can then never name a path outside the project.
+pub fn validate(r: &Record) -> anyhow::Result<()> {
+    use anyhow::bail;
+    let uuid = |what: &str, v: &str| -> anyhow::Result<()> {
+        if !is_uuid(v) {
+            bail!("record {}: {what} is not an id: {v:?}", r.seq);
+        }
+        Ok(())
+    };
+    uuid("id", &r.id)?;
+    uuid("machine", &r.machine)?;
+    if !r.project.is_empty() {
+        uuid("project", &r.project)?;
+    }
+    for s in &r.states {
+        uuid("state", &s.id)?;
+        for p in &s.parents {
+            uuid("parent", p)?;
+        }
+        if let Some(l) = &s.line {
+            uuid("line", l)?;
+        }
+        for (path, snap) in &s.layers {
+            crate::fsutil::check_rel(path)?;
+            if !is_layer_name(snap, &s.id) {
+                bail!("record {}: bad layer name {snap:?}", r.seq);
+            }
+        }
+        for c in &s.conflicts {
+            crate::fsutil::check_rel(&c.path)?;
+            for x in [&c.base, &c.ours, &c.theirs].into_iter().flatten() {
+                uuid("conflict state", x)?;
+            }
+        }
+    }
+    for (id, ch) in &r.lines {
+        uuid("line", id)?;
+        for st in [&ch.before, &ch.after].into_iter().flatten() {
+            if !is_name(&st.name) {
+                bail!("record {}: bad line name {:?}", r.seq, st.name);
+            }
+            uuid("head", &st.head)?;
+            uuid("line machine", &st.machine)?;
+            if let Some(g) = &st.group {
+                if !is_name(g) {
+                    bail!("record {}: bad group name {g:?}", r.seq);
+                }
+            }
+        }
+        for x in [&ch.working_before, &ch.working_after].into_iter().flatten() {
+            uuid("working state", x)?;
+        }
+    }
+    let d = &r.data;
+    for k in ["state", "line", "start", "final_state", "undo", "base", "theirs", "onto", "upstream", "source", "export", "id"] {
+        if let Some(v) = d.get(k).and_then(|v| v.as_str()) {
+            uuid(k, v)?;
+        }
+    }
+    if let Some(v) = d.get("machine").and_then(|v| v.as_str()) {
+        uuid("machine", v)?;
+    }
+    for k in ["name", "from", "to", "remote"] {
+        if let Some(v) = d.get(k).and_then(|v| v.as_str()) {
+            if !is_name(v) {
+                bail!("record {}: bad {k} {v:?}", r.seq);
+            }
+        }
+    }
+    for k in ["ref", "branch"] {
+        if let Some(v) = d.get(k).and_then(|v| v.as_str()) {
+            if !is_ref(v) {
+                bail!("record {}: bad {k} {v:?}", r.seq);
+            }
+        }
+    }
+    if let Some(a) = d.get("deleted").and_then(|v| v.as_array()) {
+        for v in a {
+            uuid("deleted state", v.as_str().unwrap_or(""))?;
+        }
+    }
+    if let (Some(st), Some(l)) = (d.get("state").and_then(|v| v.as_str()), d.get("layers").and_then(|v| v.as_object())) {
+        for (path, snap) in l {
+            crate::fsutil::check_rel(path)?;
+            if !is_layer_name(snap.as_str().unwrap_or(""), st) {
+                bail!("record {}: bad layer name", r.seq);
+            }
+        }
+    }
+    if let Some(c) = d.get("config").and_then(|v| v.as_object()) {
+        for k in c.keys() {
+            if !k.chars().all(|ch| ch.is_ascii_alphanumeric() || "._-@*".contains(ch)) {
+                bail!("record {}: bad setting name {k:?}", r.seq);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rec() -> Record {
+        let mut r = Record::new("commit");
+        r.id = "01a12290-0000-7000-8000-000000000001".into();
+        r.machine = "01a12290-0000-7000-8000-000000000002".into();
+        r.seq = 2;
+        r
+    }
+
+    fn state(id: &str) -> StateRec {
+        StateRec {
+            id: id.into(),
+            kind: StateKind::Commit,
+            parents: vec![],
+            line: None,
+            subvol: String::new(),
+            author: Author::default(),
+            message: String::new(),
+            time: 0,
+            turn: None,
+            running: false,
+            conflicts: vec![],
+            layers: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn accepts_a_normal_record() {
+        let mut r = rec();
+        r.states.push(state("01a12290-0000-7000-8000-000000000003"));
+        assert!(validate(&r).is_ok());
+    }
+
+    #[test]
+    fn refuses_paths_as_ids_and_names() {
+        let mut r = rec();
+        r.states.push(state("/etc"));
+        assert!(validate(&r).is_err());
+        let mut r = rec();
+        let mut s = state("01a12290-0000-7000-8000-000000000003");
+        s.layers.insert("target".into(), "../../etc".into());
+        r.states.push(s);
+        assert!(validate(&r).is_err());
+        let mut r = rec();
+        r.lines.insert(
+            "01a12290-0000-7000-8000-000000000004".into(),
+            LineChange {
+                before: None,
+                after: Some(LineState {
+                    name: "../main".into(),
+                    head: "01a12290-0000-7000-8000-000000000003".into(),
+                    owner: 0,
+                    machine: "01a12290-0000-7000-8000-000000000002".into(),
+                    group: None,
+                }),
+                working_before: None,
+                working_after: None,
+            },
+        );
+        assert!(validate(&r).is_err());
+        let mut r = rec();
+        r.data = serde_json::json!({"deleted": ["/"]});
+        assert!(validate(&r).is_err());
+        let mut r = rec();
+        r.data = serde_json::json!({"state": "01A12290-0000-7000-8000-000000000003"});
+        assert!(validate(&r).is_err(), "ids must be canonical (lower case)");
+    }
+}

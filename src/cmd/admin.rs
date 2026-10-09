@@ -77,7 +77,7 @@ fn snapshot_layers(repo: &Repo, line: &Line, state: &str) -> Result<BTreeMap<Str
         let lp = fsutil::safe_join(&w, &p)?;
         if btrfs::is_subvolume(&lp) {
             let name = format!("{state}@{}", p.replace('/', "%2F"));
-            btrfs::snapshot(&lp, &repo.p.states_dir().join(&name), true)?;
+            btrfs::snapshot(&lp, &repo.p.layer_path(state, &name), true)?;
             m.insert(p, name);
         }
     }
@@ -595,7 +595,7 @@ pub fn run_gc(ctx: &Ctx, repo: &Repo, dry: bool) -> Result<Vec<String>> {
         let s = repo.p.db.state(id)?;
         if let Some(s) = &s {
             for snap in s.layers.values() {
-                let _ = btrfs::delete_tree(&repo.p.states_dir().join(snap));
+                let _ = btrfs::delete_tree(&repo.p.layer_path(id, snap));
             }
         }
         if btrfs::delete_tree(&repo.p.state_path(id)).is_ok() {
@@ -967,6 +967,9 @@ pub fn config(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let (k, v) = (&a.pos[0], a.pos[1..].join(" "));
     let val: serde_json::Value = serde_json::from_str(&v).unwrap_or(serde_json::Value::String(v.clone()));
     set_config(ctx, repo, k, val)?;
+    if k == "members" || k == "lead" {
+        crate::gitbridge::sync_store_access(repo)?;
+    }
     Ok(0)
 }
 

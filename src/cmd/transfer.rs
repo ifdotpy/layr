@@ -541,7 +541,19 @@ fn safe_item_name(name: &str) -> bool {
 }
 
 fn read_manifest(dir: &Path) -> Result<Manifest> {
-    let d = std::fs::read(dir.join("manifest.json")).with_context(|| format!("read {}/manifest.json", dir.display()))?;
+    // A regular file, not through a link, at most 64 MiB.
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(dir.join("manifest.json"))
+        .with_context(|| format!("read {}/manifest.json", dir.display()))?;
+    if !f.metadata()?.is_file() {
+        bail!("{}/manifest.json is not a regular file", dir.display());
+    }
+    let mut d = Vec::new();
+    f.take(64 << 20).read_to_end(&mut d)?;
     let m: Manifest = serde_json::from_slice(&d)?;
     for i in &m.items {
         if !safe_item_name(&i.file) {
@@ -821,30 +833,8 @@ pub fn backup(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         "list" | "verify" => {
             let root = caller_path(ctx, a.pos.first().ok_or_else(|| exit(128, "usage: layr backup verify <folder>"))?);
-            let mut bad = 0;
-            for e in std::fs::read_dir(&root)?.flatten() {
-                for (_, d) in chain_dirs(&e.path())? {
-                    match if sub == "verify" { verify_chain(&d) } else { read_manifest(&d) } {
-                        Ok(m) => {
-                            let states = m.items.iter().filter(|i| i.kind == "state").count();
-                            let bytes: u64 = m.items.iter().map(|i| i.bytes).sum();
-                            outln!(
-                                ctx,
-                                "{}\tchain {}\t{states} states\t{:.1} MiB\t{}",
-                                m.project,
-                                m.chain,
-                                bytes as f64 / 1048576.0,
-                                if sub == "verify" { "ok" } else { "" }
-                            );
-                        }
-                        Err(err) => {
-                            bad += 1;
-                            outln!(ctx, "{}: {err}", d.display());
-                        }
-                    }
-                }
-            }
-            Ok(if bad > 0 { 1 } else { 0 })
+            // The folder belongs to the caller: read it with the caller's permissions.
+            crate::privs::as_caller_fs(ctx, || list_or_verify(ctx, &root, sub == "verify"))
         }
         "restore" => {
             if !ctx.caller.is_root() {
@@ -858,6 +848,33 @@ pub fn backup(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         _ => unreachable!(),
     }
+}
+
+fn list_or_verify(ctx: &Ctx, root: &Path, verify: bool) -> Result<i32> {
+    let mut bad = 0;
+    for e in std::fs::read_dir(root)?.flatten() {
+        for (_, d) in chain_dirs(&e.path())? {
+            match if verify { verify_chain(&d) } else { read_manifest(&d) } {
+                Ok(m) => {
+                    let states = m.items.iter().filter(|i| i.kind == "state").count();
+                    let bytes: u64 = m.items.iter().map(|i| i.bytes).sum();
+                    outln!(
+                        ctx,
+                        "{}\tchain {}\t{states} states\t{:.1} MiB\t{}",
+                        m.project,
+                        m.chain,
+                        bytes as f64 / 1048576.0,
+                        if verify { "ok" } else { "" }
+                    );
+                }
+                Err(err) => {
+                    bad += 1;
+                    outln!(ctx, "{}: {err}", d.display());
+                }
+            }
+        }
+    }
+    Ok(if bad > 0 { 1 } else { 0 })
 }
 
 fn restore(ctx: &Ctx, root: &Path, as_name: Option<&str>, chain: Option<u32>, quiet: bool) -> Result<i32> {
@@ -958,6 +975,10 @@ fn restore(ctx: &Ctx, root: &Path, as_name: Option<&str>, chain: Option<u32>, qu
             rec.data = serde_json::json!({"config": take});
             p.append(rec, &ctx.actor())?;
         }
+    }
+    {
+        let r = Repo { p: Project::open(&ctx.store, &name)? };
+        crate::gitbridge::sync_store_access(&r)?;
     }
     std::fs::create_dir_all(p.git_dir().join("layr-index")).ok();
     let repo = Repo { p };

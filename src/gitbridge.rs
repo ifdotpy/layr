@@ -45,6 +45,69 @@ pub fn git_out(git_dir: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Who can read the git object store. With `members = "*"` every local user may read the
+/// project history, so the store is 0755. With a list of members it is 0750 for root, plus an
+/// access list (POSIX ACL) with read access for the lead, the members and the owners of lines
+/// on this machine: the objects are the project history too.
+pub fn sync_store_access(repo: &Repo) -> Result<()> {
+    let s = store(repo);
+    if !s.join("objects").is_dir() {
+        return Ok(());
+    }
+    if repo.members_all() {
+        std::fs::set_permissions(&s, std::fs::Permissions::from_mode(0o755))?;
+        let _ = remove_acl(&s);
+        return Ok(());
+    }
+    let mut uids: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+    uids.insert(repo.p.lead());
+    if let Some(v) = repo.p.config_value("members")? {
+        if let Some(a) = v.as_array() {
+            uids.extend(a.iter().filter_map(|x| x.as_u64()).map(|x| x as u32));
+        }
+    }
+    for l in repo.lines()? {
+        if l.machine == repo.p.store.machine.id {
+            uids.insert(l.owner);
+        }
+    }
+    uids.remove(&0);
+    std::fs::set_permissions(&s, std::fs::Permissions::from_mode(0o750))?;
+    set_acl(&s, &uids.into_iter().collect::<Vec<_>>())
+}
+
+fn acl_entry(buf: &mut Vec<u8>, tag: u16, perm: u16, id: u32) {
+    buf.extend_from_slice(&tag.to_le_bytes());
+    buf.extend_from_slice(&perm.to_le_bytes());
+    buf.extend_from_slice(&id.to_le_bytes());
+}
+
+fn set_acl(path: &Path, users: &[u32]) -> Result<()> {
+    const UNDEFINED: u32 = u32::MAX;
+    let mut buf = 2u32.to_le_bytes().to_vec();
+    acl_entry(&mut buf, 0x01, 7, UNDEFINED); // owner rwx
+    for u in users {
+        acl_entry(&mut buf, 0x02, 5, *u); // listed users r-x
+    }
+    acl_entry(&mut buf, 0x04, 5, UNDEFINED); // group r-x
+    acl_entry(&mut buf, 0x10, 5, UNDEFINED); // mask r-x
+    acl_entry(&mut buf, 0x20, 0, UNDEFINED); // others none
+    let p = std::ffi::CString::new(path.to_string_lossy().as_bytes())?;
+    let name = c"system.posix_acl_access";
+    if unsafe { libc::setxattr(p.as_ptr(), name.as_ptr(), buf.as_ptr() as *const libc::c_void, buf.len(), 0) } != 0 {
+        bail!("set access list on {}: {}", path.display(), std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn remove_acl(path: &Path) -> Result<()> {
+    let p = std::ffi::CString::new(path.to_string_lossy().as_bytes())?;
+    unsafe {
+        libc::removexattr(p.as_ptr(), c"system.posix_acl_access".as_ptr());
+    }
+    Ok(())
+}
+
 pub fn init_store(repo: &Repo) -> Result<PathBuf> {
     let s = store(repo);
     if !has_store(repo) {
@@ -54,7 +117,8 @@ pub fn init_store(repo: &Repo) -> Result<PathBuf> {
         }
         git_out(&s, &["config", "core.logAllRefUpdates", "false"])?;
         git_out(&s, &["config", "gc.auto", "0"])?;
-        std::fs::set_permissions(&s, std::fs::Permissions::from_mode(0o755))?;
+        std::fs::set_permissions(&s, std::fs::Permissions::from_mode(0o750))?;
+        sync_store_access(repo)?;
     }
     std::fs::create_dir_all(s.join("layr-index"))?;
     Ok(s)
