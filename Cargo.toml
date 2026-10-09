@@ -3,7 +3,7 @@ name = "layr"
 version = "0.1.0"
 edition = "2021"
 description = "Local version control for agent workspaces on btrfs"
-license = "UNLICENSED"
+license = "MIT"
 publish = false
 
 [[bin]]
