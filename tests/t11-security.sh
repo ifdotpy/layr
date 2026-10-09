@@ -79,8 +79,9 @@ import json, sys
 for l in sys.stdin:
     if json.loads(l)['r']['machine'] == '$CID': sys.stdout.write(l)" > $T/c.jsonl
 has "records of an untrusted machine are refused" "untrusted" "$(l --project s op import $T/c.jsonl 2>&1)"
-key=$(LAYR_ROOT=$CR l --project s machines | awk '/^\*/{print $6}'); idc=$(LAYR_ROOT=$CR l --project s machines | awk '/^\*/{print $2}')
-eq "an explicit trust takes them" "0" "$(l --project s machines trust $CID --key $key >/dev/null 2>&1; l --project s op import $T/c.jsonl >/dev/null 2>&1; echo $?)"
+key=$(LAYR_ROOT=$CR l --project s machines | sed -n 's/^\* .* key \([0-9a-f]*\)$/\1/p')
+l --project s machines trust $CID --key $key >/dev/null
+has "an explicit trust takes them" "imported" "$(l --project s op import $T/c.jsonl 2>&1)"
 
 # 7. The result does not depend on the order of records.
 before=$(l --project s config --list | md5sum)

@@ -1042,14 +1042,8 @@ pub fn machines(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let me = &h.repo.p.store.machine.id;
     for (id, name) in h.repo.p.db.machines()? {
         let key = h.repo.p.db.machine_key(&id)?.unwrap_or_default();
-        outln!(
-            ctx,
-            "{}{} {:<16} key {}",
-            if &id == me { "* " } else { "  " },
-            &ids::display(&id)[..8],
-            name,
-            &key[..key.len().min(16)]
-        );
+        let trusted = if &id == me || h.repo.p.db.trusted(&id)?.as_deref() == Some(key.as_str()) { "trusted" } else { "untrusted" };
+        outln!(ctx, "{}{} {:<16} {:<9} id {} key {}", if &id == me { "* " } else { "  " }, &ids::display(&id)[..8], name, trusted, id, key);
     }
     Ok(0)
 }
