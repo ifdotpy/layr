@@ -39,9 +39,13 @@ eq "B sees A's head as main@A" "on A" "$(B log -1 --format=%s main@$(l --project
 cd $A/main
 
 # A changed record is refused.
-f=$BR/projects/x/meta/log/$(cat $BR/machine/id).jsonl
 cd $BR/projects/x/lines/main && echo t >> notes.txt && B commit -qam "later on B" && cd $A/main
-sed -i '$ s/later on B/CHANGED/' $f
+python3 - $BR/projects/x/meta/layr.sqlite <<'PY'
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1])
+c.execute("UPDATE records SET raw = replace(raw, 'later on B', 'CHANGED') WHERE raw LIKE '%later on B%'")
+c.commit()
+PY
 eq "a changed record stops the sync" "128" "$(l sync -q -- $(peer) >/dev/null 2>&1; echo $?)"
 no "the changed record is not taken" sh -c "l log --all --format=%s | grep -q CHANGED"
 
@@ -49,4 +53,17 @@ no "the changed record is not taken" sh -c "l log --all --format=%s | grep -q CH
 new_fs $T/c 2G
 mkdir -p $T/s2; echo other > $T/s2/f; LAYR_ROOT=$T/c/store l init x --from $T/s2 -q >/dev/null
 eq "another project id is refused" "128" "$(l sync -q -- env LAYR_ROOT=$T/c/store $LAYR serve-peer x >/dev/null 2>&1; echo $?)"
+# Records also travel as JSONL (export and import), checked like a sync.
+new_fs $T/d 2G
+l op export > $T/records.jsonl
+eq "export holds every record" "$(l op log --all -n 100000 | wc -l)" "$(wc -l < $T/records.jsonl)"
+cd $A/main
+python3 - $T/records.jsonl <<'PY'
+import sys
+lines = open(sys.argv[1]).read().splitlines()
+lines[3] = lines[3].replace('"seq":4', '"seq":4 ')
+open(sys.argv[1] + ".bad", "w").write("\n".join(lines) + "\n")
+PY
+has "import checks signatures" "signature" "$(l op import $T/records.jsonl.bad 2>&1)"
+eq "a valid import adds nothing new here" "imported 0 new record(s) of $(wc -l < $T/records.jsonl)" "$(l op import $T/records.jsonl)"
 finish

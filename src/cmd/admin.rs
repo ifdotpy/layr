@@ -321,8 +321,31 @@ fn restore_working(repo: &Repo, line: &Line, state: &str) -> Result<()> {
 
 pub fn op(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let sub = args.first().map(|s| s.as_str()).unwrap_or("log");
+    if sub == "export" {
+        let h = here(ctx)?;
+        h.repo.require_lead(ctx, "export the records")?;
+        ctx.print(&h.repo.p.export_jsonl()?);
+        return Ok(0);
+    }
+    if sub == "import" {
+        let h = here(ctx)?;
+        h.repo.require_lead(ctx, "import records")?;
+        let data = match args.get(1).map(|s| s.as_str()) {
+            None | Some("-") => {
+                let mut v = Vec::new();
+                std::io::Read::read_to_end(&mut std::io::stdin(), &mut v)?;
+                v
+            }
+            Some(f) => super::work::read_caller_file(ctx, f)?,
+        };
+        let lines: Vec<String> = String::from_utf8_lossy(&data).lines().filter(|l| !l.trim().is_empty()).map(|l| l.to_string()).collect();
+        let _lock = h.repo.p.lock()?;
+        let n = h.repo.p.import_lines(&lines)?;
+        outln!(ctx, "imported {n} new record(s) of {}", lines.len());
+        return Ok(0);
+    }
     if sub != "log" && sub != "show" {
-        return Err(exit(128, "usage: layr op log [-n N] [--all] | layr op show <id>"));
+        return Err(exit(128, "usage: layr op log [-n N] [--all] | layr op show <id> | layr op export | layr op import [<file>]"));
     }
     let spec = Spec::new().value("-n").flag("--all").flag("--json");
     let a = parse(&spec, args.get(1..).unwrap_or(&[]))?;
@@ -617,13 +640,20 @@ pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
     repo.require_lead(ctx, "run fsck")?;
     let _lock = repo.p.lock()?;
     let mut problems = 0;
-    for e in std::fs::read_dir(repo.p.log_dir())?.flatten() {
-        match crate::oplog::verify_file(&e.path()) {
-            Ok((m, n)) => outln!(ctx, "log {}: {n} records, signatures ok", &m[..8]),
-            Err(err) => {
-                problems += 1;
-                outln!(ctx, "log {}: {err}", e.path().display());
+    let ic: String = repo.p.db.conn.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
+    if ic != "ok" {
+        problems += 1;
+        outln!(ctx, "database: {ic}");
+    }
+    match repo.p.verify_records() {
+        Ok(v) => {
+            for (m, n) in v {
+                outln!(ctx, "records of machine {}: {n}, signatures ok", &ids::display(&m)[..8]);
             }
+        }
+        Err(err) => {
+            problems += 1;
+            outln!(ctx, "records: {err:#}");
         }
     }
     // Snapshots without a record (a crash between the snapshot and the record).

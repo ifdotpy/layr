@@ -124,69 +124,15 @@ fn present(p: &Project) -> Result<BTreeSet<String>> {
 /// Records this side has beyond the peer's sequence numbers, as stored lines.
 fn missing_lines(p: &Project, peer: &BTreeMap<String, u64>) -> Result<Vec<String>> {
     let mut out = Vec::new();
-    for e in std::fs::read_dir(p.log_dir())?.flatten() {
-        let n = e.file_name().to_string_lossy().into_owned();
-        let m = match n.strip_suffix(".jsonl") {
-            Some(m) => m.to_string(),
-            None => continue,
-        };
-        let have = peer.get(&m).copied().unwrap_or(0);
-        let (recs, _) = oplog::read_from(&e.path(), 0)?;
-        for s in recs {
-            if s.record.seq > have {
-                out.push(s.line);
-            }
-        }
+    for m in p.db.record_machines()? {
+        out.extend(p.db.lines_after(&m, peer.get(&m).copied().unwrap_or(0))?);
     }
     Ok(out)
 }
 
-/// Check and append records from the peer.
+/// Check and store records from the peer.
 fn take_lines(p: &Project, lines: &[String]) -> Result<usize> {
-    let mut by: BTreeMap<String, Vec<oplog::Signed>> = BTreeMap::new();
-    for l in lines {
-        let s = oplog::parse_line(l, None)?;
-        by.entry(s.record.machine.clone()).or_default().push(s);
-    }
-    let mut n = 0;
-    for (m, mut recs) in by {
-        if m == p.store.machine.id {
-            continue;
-        }
-        recs.sort_by_key(|s| s.record.seq);
-        let path = p.log_dir().join(format!("{m}.jsonl"));
-        let (have, _) = oplog::read_from(&path, 0)?;
-        let mut last = have.last().map(|s| s.record.seq).unwrap_or(0);
-        let key = match have.first() {
-            Some(f) => oplog::machine_key(&f.record)?,
-            None => {
-                let f = recs.first().ok_or_else(|| anyhow!("no records"))?;
-                if f.record.op != "machine" || f.record.seq != 1 {
-                    bail!("records of machine {m} do not start with its key");
-                }
-                if let Some(known) = p.db.machine_key(&m)? {
-                    if known != f.record.data["public_key"].as_str().unwrap_or("") {
-                        bail!("machine {m} presents a different key");
-                    }
-                }
-                oplog::machine_key(&f.record)?
-            }
-        };
-        for s in recs {
-            if s.record.seq <= last {
-                continue;
-            }
-            if s.record.seq != last + 1 {
-                bail!("gap in the records of machine {m}: have {last}, got {}", s.record.seq);
-            }
-            oplog::parse_line(&s.line, Some(&key)).with_context(|| format!("record {} of machine {m}", s.record.seq))?;
-            oplog::append(&path, &s.line)?;
-            last = s.record.seq;
-            n += 1;
-        }
-    }
-    p.catch_up()?;
-    Ok(n)
+    p.import_lines(lines)
 }
 
 fn wanted(p: &Project, id: &str, auto: bool) -> bool {
@@ -425,7 +371,7 @@ pub fn serve(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let mut w = Wire { r: stdin.lock(), w: std::io::BufWriter::new(stdout.lock()) };
     let hello = w.recv_json()?;
     let pid = hello["project_id"].as_str().unwrap_or("").to_string();
-    let exists = ctx.store.projects_dir().join(&name).join("meta").join("log").is_dir();
+    let exists = ctx.store.projects_dir().join(&name).join("meta").join("layr.sqlite").is_file();
     if !exists {
         Project::create_empty(&ctx.store, &name)?;
     }

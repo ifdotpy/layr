@@ -232,9 +232,8 @@ impl<'a> Repo<'a> {
         match self.p.append(rec, &ctx.actor()) {
             Ok(r) => Ok(r),
             Err(e) => {
-                if !crate::store::is_logged(&e) {
-                    self.discard_states(&states);
-                }
+                // The record and its rows are one transaction: nothing was recorded.
+                self.discard_states(&states);
                 Err(e)
             }
         }
@@ -531,9 +530,7 @@ impl<'a> Repo<'a> {
             self.p.append(rec, &ctx.actor())
         })();
         if let Err(e) = res {
-            if !crate::store::is_logged(&e) {
-                let _ = btrfs::delete_tree(&dst);
-            }
+            let _ = btrfs::delete_tree(&dst);
             return Err(e);
         }
         Ok(line)

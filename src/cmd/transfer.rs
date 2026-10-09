@@ -687,28 +687,27 @@ pub fn run_backup(ctx: &Ctx, repo: &Repo, root: &Path, full: bool) -> Result<(u3
             }
         }
     }
-    // The operation logs: the whole history of the project.
+    // The operation records as JSONL: the whole history of the project.
     let seq = next_seq(&m);
-    let file = unique_name(&dir, &m, seq, "logs.tar.zst");
-    let mut tar = Command::new("tar");
-    tar.arg("-C").arg(repo.p.log_dir()).arg("-cf").arg("-").arg(".");
-    compress_to(tar, &dir.join(&file))?;
+    let file = unique_name(&dir, &m, seq, "records.jsonl.zst");
+    let jsonl = repo.p.export_jsonl()?;
+    {
+        let tmp = dir.join(format!("{file}.partial"));
+        let f = File::create(&tmp)?;
+        let mut z = Command::new("zstd").args(["-q", "-3", "-c"]).stdin(Stdio::piped()).stdout(f).spawn().context("run zstd")?;
+        z.stdin.take().unwrap().write_all(jsonl.as_bytes())?;
+        if !z.wait()?.success() {
+            bail!("zstd failed");
+        }
+        File::open(&tmp)?.sync_all()?;
+        std::fs::rename(&tmp, dir.join(&file))?;
+    }
     let sha = fsutil::sha256_file(&dir.join(&file))?;
     let bytes = std::fs::metadata(dir.join(&file))?.len();
-    // Only the newest log copy is needed.
-    let old_logs: Vec<String> = m.items.iter().filter(|i| i.kind == "logs").map(|i| i.file.clone()).collect();
-    m.items.retain(|i| i.kind != "logs");
-    m.items.push(Item {
-        seq,
-        kind: "logs".into(),
-        state: None,
-        parent: None,
-        file,
-        sha256: sha,
-        bytes,
-        tips: vec![],
-        time: ids::now_ms(),
-    });
+    // Only the newest copy of the records is needed.
+    let old_logs: Vec<String> = m.items.iter().filter(|i| i.kind == "records").map(|i| i.file.clone()).collect();
+    m.items.retain(|i| i.kind != "records");
+    m.items.push(Item { seq, kind: "records".into(), state: None, parent: None, file, sha256: sha, bytes, tips: vec![], time: ids::now_ms() });
     write_manifest(&dir, &m)?;
     for f in old_logs {
         if safe_item_name(&f) && m.items.iter().all(|i| i.file != f) {
@@ -859,13 +858,13 @@ fn restore(ctx: &Ctx, root: &Path, as_name: Option<&str>, chain: Option<u32>, qu
                     }
                     crate::gitbridge::git_out(&s, &["fetch", "-q", f.to_str().unwrap(), "+refs/*:refs/*"])?;
                 }
-                "logs" => {
-                    let z = Command::new("zstd").args(["-q", "-d", "-c"]).arg(&f).stdout(Stdio::piped()).spawn()?;
-                    let st =
-                        Command::new("tar").arg("-C").arg(p.log_dir()).arg("-xf").arg("-").stdin(z.stdout.unwrap()).status()?;
-                    if !st.success() {
-                        bail!("log restore failed");
+                "records" => {
+                    let out = Command::new("zstd").args(["-q", "-d", "-c"]).arg(&f).output()?;
+                    if !out.status.success() {
+                        bail!("cannot read {}", i.file);
                     }
+                    let lines: Vec<String> = String::from_utf8_lossy(&out.stdout).lines().filter(|l| !l.is_empty()).map(|l| l.to_string()).collect();
+                    p.import_lines(&lines)?;
                 }
                 _ => {}
             }
@@ -880,11 +879,9 @@ fn restore(ctx: &Ctx, root: &Path, as_name: Option<&str>, chain: Option<u32>, qu
         }
     };
     drop(p);
-    // Verify the logs, then rebuild the index and give the lines working folders here.
+    // Check the records, mark the received states, give the lines working folders here.
     let p = Project::open(&ctx.store, &name)?;
-    for e in std::fs::read_dir(p.log_dir())?.flatten() {
-        crate::oplog::verify_file(&e.path())?;
-    }
+    p.verify_records()?;
     p.rebuild_index()?;
     std::fs::create_dir_all(p.git_dir().join("layr-index")).ok();
     let repo = Repo { p };

@@ -1,4 +1,7 @@
-//! The query index: a SQLite file rebuilt from the operation logs at any time.
+//! The project database (SQLite). The `records` table holds the signed, immutable operation
+//! records: the source of truth. All other tables are derived from the records. A record and
+//! its derived rows are written in one transaction, so they cannot disagree after a crash. The
+//! derived tables can be rebuilt from the records at any time.
 
 use crate::ids;
 use crate::model::{Line, Record, StateKind, StateRec};
@@ -13,6 +16,7 @@ pub struct Db {
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS records (id TEXT PRIMARY KEY, machine TEXT, seq INTEGER, time INTEGER, op TEXT, actor_uid INTEGER, raw TEXT);
 CREATE INDEX IF NOT EXISTS records_time ON records(time);
+CREATE UNIQUE INDEX IF NOT EXISTS records_seq ON records(machine, seq);
 CREATE TABLE IF NOT EXISTS states (id TEXT PRIMARY KEY, display TEXT UNIQUE, kind TEXT, line TEXT, time INTEGER, rec TEXT, present INTEGER DEFAULT 1, deleted INTEGER DEFAULT 0, dropped INTEGER DEFAULT 0, machine TEXT);
 CREATE INDEX IF NOT EXISTS states_line ON states(line, kind, time);
 CREATE TABLE IF NOT EXISTS parents (state TEXT, parent TEXT, ord INTEGER, PRIMARY KEY(state, ord));
@@ -30,58 +34,89 @@ CREATE TABLE IF NOT EXISTS group_lines (grp TEXT, line TEXT, epoch INTEGER, PRIM
 CREATE TABLE IF NOT EXISTS machines (id TEXT PRIMARY KEY, name TEXT, public_key TEXT);
 CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS slots (path TEXT PRIMARY KEY, state TEXT, line TEXT, time INTEGER);
-CREATE TABLE IF NOT EXISTS applied (machine TEXT PRIMARY KEY, seq INTEGER, offset INTEGER);
 "#;
 
 impl Db {
     pub fn open(path: &Path) -> Result<Db> {
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        // FULL: a committed record survives a power loss (NORMAL can lose the last commits).
+        conn.pragma_update(None, "synchronous", "FULL")?;
         conn.busy_timeout(std::time::Duration::from_secs(30))?;
         conn.execute_batch(SCHEMA)?;
         Ok(Db { conn })
     }
 
-    pub fn clear(&self) -> Result<()> {
+    /// Run `f` in one write transaction (`BEGIN IMMEDIATE`): all or nothing.
+    pub fn with_tx<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        match f() {
+            Ok(v) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(v)
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
+    /// Delete all derived rows (records stay).
+    pub fn clear_derived(&self) -> Result<()> {
         self.conn.execute_batch(
-            "DELETE FROM records; DELETE FROM states; DELETE FROM parents; DELETE FROM lines; DELETE FROM line_heads;
+            "DELETE FROM states; DELETE FROM parents; DELETE FROM lines; DELETE FROM line_heads;
              DELETE FROM tags; DELETE FROM remote_refs; DELETE FROM git_map; DELETE FROM exports; DELETE FROM checks;
-             DELETE FROM groups; DELETE FROM group_lines; DELETE FROM machines; DELETE FROM config; DELETE FROM slots;
-             DELETE FROM applied;",
+             DELETE FROM groups; DELETE FROM group_lines; DELETE FROM machines; DELETE FROM config; DELETE FROM slots;",
         )?;
         Ok(())
     }
 
-    pub fn applied(&self, machine: &str) -> Result<(u64, u64)> {
-        Ok(self
-            .conn
-            .query_row("SELECT seq, offset FROM applied WHERE machine=?1", params![machine], |r| {
-                Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64))
-            })
-            .optional()?
-            .unwrap_or((0, 0)))
-    }
-
-    pub fn set_applied(&self, machine: &str, seq: u64, offset: u64) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO applied(machine, seq, offset) VALUES(?1, ?2, ?3) ON CONFLICT(machine) DO UPDATE SET seq=?2, offset=?3",
-            params![machine, seq as i64, offset as i64],
-        )?;
-        Ok(())
-    }
-
-    /// Apply one record to the index.
-    pub fn apply(&self, rec: &Record, line: &str, state_present: &dyn Fn(&str) -> bool) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
-        let fresh = tx.execute(
+    /// Insert a stored record line. Returns false if the record exists already.
+    pub fn insert_record(&self, rec: &Record, line: &str) -> Result<bool> {
+        let n = self.conn.execute(
             "INSERT OR IGNORE INTO records(id, machine, seq, time, op, actor_uid, raw) VALUES(?1,?2,?3,?4,?5,?6,?7)",
             params![rec.id, rec.machine, rec.seq as i64, rec.time, rec.op, rec.actor.uid as i64, line],
         )?;
-        if fresh == 0 {
-            tx.commit()?;
-            return Ok(());
-        }
+        Ok(n > 0)
+    }
+
+    pub fn last_seq(&self, machine: &str) -> Result<u64> {
+        let v: Option<i64> =
+            self.conn.query_row("SELECT MAX(seq) FROM records WHERE machine=?1", params![machine], |r| r.get(0))?;
+        Ok(v.unwrap_or(0) as u64)
+    }
+
+    /// Stored lines of one machine after a sequence number, in order.
+    pub fn lines_after(&self, machine: &str, seq: u64) -> Result<Vec<String>> {
+        let mut st = self.conn.prepare("SELECT raw FROM records WHERE machine=?1 AND seq>?2 ORDER BY seq")?;
+        let v = st.query_map(params![machine, seq as i64], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+        Ok(v)
+    }
+
+    pub fn record_line(&self, machine: &str, seq: u64) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT raw FROM records WHERE machine=?1 AND seq=?2", params![machine, seq as i64], |r| r.get(0))
+            .optional()?)
+    }
+
+    pub fn record_machines(&self) -> Result<Vec<String>> {
+        let mut st = self.conn.prepare("SELECT DISTINCT machine FROM records ORDER BY machine")?;
+        let v = st.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+        Ok(v)
+    }
+
+    /// All stored lines in apply order.
+    pub fn all_lines(&self) -> Result<Vec<String>> {
+        let mut st = self.conn.prepare("SELECT raw FROM records ORDER BY time, machine, seq")?;
+        let v = st.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+        Ok(v)
+    }
+
+    /// Update the derived tables for one record. Runs inside the caller's transaction.
+    pub fn derive(&self, rec: &Record, state_present: &dyn Fn(&str) -> bool) -> Result<()> {
+        let tx = &self.conn;
         for s in &rec.states {
             let present = state_present(&s.id);
             tx.execute(
@@ -230,7 +265,6 @@ impl Db {
             }
             _ => {}
         }
-        tx.commit()?;
         Ok(())
     }
 

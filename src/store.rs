@@ -1,4 +1,4 @@
-//! The store: machine identity, projects, their folders, the operation log and the index.
+//! The store: machine identity, projects, their folders and the project database.
 //!
 //! ```text
 //! <root>/machine/{id,name,key}        machine identity (0700)
@@ -6,11 +6,14 @@
 //!   states/<state-id>                 read-only snapshots (0700)
 //!   lines/<line-name>                 writable snapshots (0711, no listing)
 //!   git/                              git object store for the remote bridge (0755)
-//!   meta/log/<machine-id>.jsonl       operation log, one file per machine (0700)
-//!   meta/index.sqlite                 query index, rebuilt from the logs
+//!   meta/layr.sqlite                  signed operation records and derived tables (0700)
 //!   meta/stage/<line-id>              staging lines (the index of `layr add`)
 //!   meta/scan, meta/work              temporary snapshots
 //! ```
+//!
+//! Write order of an operation: snapshots first, then one database transaction with the record
+//! and its derived rows. After a crash only a snapshot without a record can exist; `layr fsck`
+//! deletes it. Records leave the database as JSONL lines (replication, backups, export).
 
 use crate::db::Db;
 use crate::ids;
@@ -80,7 +83,7 @@ impl Store {
     pub fn project_names(&self) -> Result<Vec<String>> {
         let mut v = Vec::new();
         for e in fs::read_dir(self.projects_dir())?.flatten() {
-            if e.path().join("meta").join("log").is_dir() {
+            if e.path().join("meta").join("layr.sqlite").is_file() {
                 v.push(e.file_name().to_string_lossy().into_owned());
             }
         }
@@ -110,21 +113,6 @@ pub struct Project<'a> {
     pub db: Db,
 }
 
-/// An error after the record reached the log: the operation happened, its snapshots stay.
-#[derive(Debug)]
-pub struct Logged(pub String);
-
-impl std::fmt::Display for Logged {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-impl std::error::Error for Logged {}
-
-pub fn is_logged(e: &anyhow::Error) -> bool {
-    e.downcast_ref::<Logged>().is_some()
-}
-
 pub struct Lock {
     _f: fs::File,
 }
@@ -138,9 +126,6 @@ impl<'a> Project<'a> {
     }
     pub fn meta_dir(&self) -> PathBuf {
         self.dir.join("meta")
-    }
-    pub fn log_dir(&self) -> PathBuf {
-        self.meta_dir().join("log")
     }
     pub fn git_dir(&self) -> PathBuf {
         self.dir.join("git")
@@ -160,14 +145,11 @@ impl<'a> Project<'a> {
     pub fn work_dir(&self) -> PathBuf {
         self.meta_dir().join("work")
     }
-    pub fn own_log(&self) -> PathBuf {
-        self.log_dir().join(format!("{}.jsonl", self.store.machine.id))
-    }
 
     pub fn create(store: &'a Store, name: &str, actor: &Actor, config: serde_json::Value) -> Result<Project<'a>> {
         check_name("project", name)?;
         let dir = store.projects_dir().join(name);
-        if dir.join("meta").join("log").exists() {
+        if dir.join("meta").join("layr.sqlite").exists() {
             bail!("project '{name}' already exists");
         }
         if !crate::btrfs::is_btrfs(&store.projects_dir()) {
@@ -177,11 +159,11 @@ impl<'a> Project<'a> {
         mkdir_mode(&dir.join("states"), 0o700)?;
         mkdir_mode(&dir.join("lines"), 0o711)?;
         mkdir_mode(&dir.join("meta"), 0o700)?;
-        for d in ["log", "stage", "scan", "work"] {
+        for d in ["stage", "scan", "work"] {
             mkdir_mode(&dir.join("meta").join(d), 0o700)?;
         }
         let id = ids::new_id();
-        let db = Db::open(&dir.join("meta").join("index.sqlite"))?;
+        let db = Db::open(&dir.join("meta").join("layr.sqlite"))?;
         let p = Project { store, name: name.to_string(), dir, id: id.clone(), db };
         let mut rec = Record::new("project");
         rec.data = serde_json::json!({"name": name, "id": id, "config": config});
@@ -193,7 +175,7 @@ impl<'a> Project<'a> {
     pub fn create_empty(store: &'a Store, name: &str) -> Result<Project<'a>> {
         check_name("project", name)?;
         let dir = store.projects_dir().join(name);
-        if dir.join("meta").join("log").exists() {
+        if dir.join("meta").join("layr.sqlite").exists() {
             bail!("project '{name}' already exists");
         }
         if !crate::btrfs::is_btrfs(&store.projects_dir()) {
@@ -203,19 +185,18 @@ impl<'a> Project<'a> {
         mkdir_mode(&dir.join("states"), 0o700)?;
         mkdir_mode(&dir.join("lines"), 0o711)?;
         mkdir_mode(&dir.join("meta"), 0o700)?;
-        for d in ["log", "stage", "scan", "work"] {
+        for d in ["stage", "scan", "work"] {
             mkdir_mode(&dir.join("meta").join(d), 0o700)?;
         }
-        let db = Db::open(&dir.join("meta").join("index.sqlite"))?;
+        let db = Db::open(&dir.join("meta").join("layr.sqlite"))?;
         Ok(Project { store, name: name.to_string(), dir, id: String::new(), db })
     }
 
     /// Open a project that may not have its records yet.
     pub fn open_partial(store: &'a Store, name: &str) -> Result<Project<'a>> {
         let dir = store.projects_dir().join(name);
-        let db = Db::open(&dir.join("meta").join("index.sqlite"))?;
+        let db = Db::open(&dir.join("meta").join("layr.sqlite"))?;
         let mut p = Project { store, name: name.to_string(), dir, id: String::new(), db };
-        p.catch_up()?;
         p.id = p.project_id().unwrap_or_default();
         Ok(p)
     }
@@ -223,12 +204,11 @@ impl<'a> Project<'a> {
     pub fn open(store: &'a Store, name: &str) -> Result<Project<'a>> {
         check_name("project", name)?;
         let dir = store.projects_dir().join(name);
-        if !dir.join("meta").join("log").is_dir() {
+        if !dir.join("meta").join("layr.sqlite").is_file() {
             bail!("project '{name}' not found");
         }
-        let db = Db::open(&dir.join("meta").join("index.sqlite"))?;
+        let db = Db::open(&dir.join("meta").join("layr.sqlite"))?;
         let mut p = Project { store, name: name.to_string(), dir, id: String::new(), db };
-        p.catch_up()?;
         p.id = p.project_id()?;
         Ok(p)
     }
@@ -252,119 +232,156 @@ impl<'a> Project<'a> {
         Ok(Lock { _f: f })
     }
 
-    fn log_files(&self) -> Result<Vec<(String, PathBuf)>> {
-        let mut v = Vec::new();
-        for e in fs::read_dir(self.log_dir())?.flatten() {
-            let n = e.file_name().to_string_lossy().into_owned();
-            if let Some(m) = n.strip_suffix(".jsonl") {
-                v.push((m.to_string(), e.path()));
-            }
-        }
-        Ok(v)
-    }
-
-    /// Apply log records that the index does not have yet.
-    pub fn catch_up(&self) -> Result<()> {
-        let mut pending: Vec<(oplog::Signed, String, u64)> = Vec::new();
-        for (m, path) in self.log_files()? {
-            let (_, off) = self.db.applied(&m)?;
-            let (recs, end) = oplog::read_from(&path, off)?;
-            if recs.is_empty() {
-                continue;
-            }
-            let n = recs.len();
-            for (i, r) in recs.into_iter().enumerate() {
-                let e = if i + 1 == n { end } else { 0 };
-                pending.push((r, m.clone(), e));
-            }
-        }
-        if pending.is_empty() {
-            return Ok(());
-        }
-        pending.sort_by(|a, b| {
-            (a.0.record.time, &a.0.record.machine, a.0.record.seq).cmp(&(b.0.record.time, &b.0.record.machine, b.0.record.seq))
-        });
-        let mut last: std::collections::HashMap<String, (u64, u64)> = std::collections::HashMap::new();
-        for (s, m, end) in &pending {
-            self.apply(&s.record, &s.line)?;
-            let e = last.entry(m.clone()).or_insert((0, 0));
-            e.0 = e.0.max(s.record.seq);
-            if *end > 0 {
-                e.1 = *end;
-            }
-        }
-        for (m, (seq, off)) in last {
-            if off > 0 {
-                self.db.set_applied(&m, seq, off)?;
-            }
-        }
-        Ok(())
-    }
-
-    fn apply(&self, rec: &Record, line: &str) -> Result<()> {
+    fn state_present(&self) -> impl Fn(&str) -> bool + '_ {
         let sd = self.states_dir();
-        self.db.apply(rec, line, &|id| sd.join(id).exists())
+        move |id: &str| sd.join(id).exists()
     }
 
-    /// Drop the index and rebuild it from all logs.
+    /// Rebuild the derived tables from the records.
     pub fn rebuild_index(&self) -> Result<()> {
-        self.db.clear()?;
-        self.catch_up()?;
+        let present = self.state_present();
+        self.db.with_tx(|| {
+            self.db.clear_derived()?;
+            for line in self.db.all_lines()? {
+                let s = oplog::parse_line(&line, None)?;
+                self.db.derive(&s.record, &present)?;
+            }
+            Ok(())
+        })?;
         for (id, deleted) in self.db.present_states()? {
             if deleted || !self.state_path(&id).exists() {
                 self.db.set_present(&id, false)?;
             }
         }
-        let mut st = self.db.conn.prepare("SELECT id FROM states WHERE present=0 AND deleted=0")?;
-        let missing: Vec<String> = st.query_map([], |r| r.get(0))?.collect::<Result<Vec<_>, _>>()?;
-        drop(st);
-        for id in missing {
-            if self.state_path(&id).exists() {
-                self.db.set_present(&id, true)?;
-            }
-        }
         Ok(())
     }
 
-    /// Append a record to this machine's log (`fsync`), then update the index.
+    /// Write a record: sign it and store it with its derived rows in one transaction.
     /// The caller holds the project lock and has created all snapshots the record names.
     pub fn append(&self, mut rec: Record, actor: &Actor) -> Result<Record> {
-        self.catch_up()?;
-        let own = self.own_log();
         let m = &self.store.machine;
-        let (mut seq, _) = self.db.applied(&m.id)?;
-        if seq == 0 && !own.exists() {
-            let mut mr = Record::new("machine");
-            mr.id = ids::new_id();
-            mr.machine = m.id.clone();
-            mr.seq = 1;
-            mr.time = ids::now_ms();
-            mr.project = if rec.op == "project" { rec.data["id"].as_str().unwrap_or("").to_string() } else { self.id.clone() };
-            mr.actor = actor.clone();
-            mr.data = serde_json::json!({"name": m.name, "public_key": hex::encode(m.key.verifying_key().to_bytes())});
-            let line = oplog::sign_line(&mr, &m.key)?;
-            oplog::append(&own, &line)?;
-            seq = 1;
-            self.apply(&mr, &line)?;
-            self.db.set_applied(&m.id, 1, fs::metadata(&own)?.len())?;
-        }
-        rec.id = ids::new_id();
-        rec.machine = m.id.clone();
-        rec.seq = seq + 1;
-        rec.time = ids::now_ms();
-        rec.project = if rec.op == "project" { rec.data["id"].as_str().unwrap_or("").to_string() } else { self.id.clone() };
-        rec.actor = actor.clone();
-        let line = oplog::sign_line(&rec, &m.key)?;
-        oplog::append(&own, &line)?;
-        // From here the record is durable. An index failure does not undo it: the index is
-        // rebuilt from the log on the next open.
-        let indexed = self.apply(&rec, &line).and_then(|_| self.db.set_applied(&m.id, rec.seq, fs::metadata(&own)?.len()));
-        if let Err(e) = indexed {
-            return Err(anyhow::Error::new(Logged(format!(
-                "the operation was recorded in the log, but the index update failed: {e:#}. The index is updated from the log on the next command."
-            ))));
-        }
+        let present = self.state_present();
+        let project = if rec.op == "project" { rec.data["id"].as_str().unwrap_or("").to_string() } else { self.id.clone() };
+        self.db.with_tx(|| {
+            let mut seq = self.db.last_seq(&m.id)?;
+            if seq == 0 {
+                // The first record of this machine publishes its key.
+                let mut mr = Record::new("machine");
+                mr.id = ids::new_id();
+                mr.machine = m.id.clone();
+                mr.seq = 1;
+                mr.time = ids::now_ms();
+                mr.project = project.clone();
+                mr.actor = actor.clone();
+                mr.data = serde_json::json!({"name": m.name, "public_key": hex::encode(m.key.verifying_key().to_bytes())});
+                let line = oplog::sign_line(&mr, &m.key)?;
+                self.db.insert_record(&mr, &line)?;
+                self.db.derive(&mr, &present)?;
+                seq = 1;
+            }
+            rec.id = ids::new_id();
+            rec.machine = m.id.clone();
+            rec.seq = seq + 1;
+            rec.time = ids::now_ms();
+            rec.project = project.clone();
+            rec.actor = actor.clone();
+            let line = oplog::sign_line(&rec, &m.key)?;
+            self.db.insert_record(&rec, &line)?;
+            self.db.derive(&rec, &present)?;
+            Ok(())
+        })?;
         Ok(rec)
+    }
+
+    /// Records of other machines (replication, restore): check each machine's chain (its key
+    /// from its first record, contiguous sequence numbers, signatures), then store them with
+    /// their derived rows in one transaction. Returns the number of new records.
+    pub fn import_lines(&self, lines: &[String]) -> Result<usize> {
+        use std::collections::BTreeMap;
+        let mut by: BTreeMap<String, Vec<oplog::Signed>> = BTreeMap::new();
+        for l in lines {
+            let s = oplog::parse_line(l, None)?;
+            by.entry(s.record.machine.clone()).or_default().push(s);
+        }
+        let present = self.state_present();
+        let mut fresh: Vec<oplog::Signed> = Vec::new();
+        for (machine, mut recs) in by {
+            recs.sort_by_key(|s| s.record.seq);
+            let mut last = self.db.last_seq(&machine)?;
+            let key = if last > 0 {
+                let first = self.db.lines_after(&machine, 0)?.into_iter().next().ok_or_else(|| anyhow!("no records"))?;
+                oplog::machine_key(&oplog::parse_line(&first, None)?.record)?
+            } else {
+                let f = recs.first().ok_or_else(|| anyhow!("no records"))?;
+                if f.record.op != "machine" || f.record.seq != 1 {
+                    bail!("records of machine {machine} do not start with its key");
+                }
+                oplog::machine_key(&f.record)?
+            };
+            for s in recs {
+                if s.record.seq <= last {
+                    // A record we have: the copy must be the same bytes (else a changed or a
+                    // forked history).
+                    let stored = self.db.record_line(&machine, s.record.seq)?;
+                    if stored.as_deref() != Some(s.line.as_str()) {
+                        bail!("record {} of machine {machine} differs from the stored record (changed or forked history); signature not trusted", s.record.seq);
+                    }
+                    continue;
+                }
+                if s.record.seq != last + 1 {
+                    bail!("gap in the records of machine {machine}: have {last}, got {}", s.record.seq);
+                }
+                oplog::parse_line(&s.line, Some(&key)).with_context(|| format!("record {} of machine {machine}", s.record.seq))?;
+                last = s.record.seq;
+                fresh.push(s);
+            }
+        }
+        fresh.sort_by(|a, b| (a.record.time, &a.record.machine, a.record.seq).cmp(&(b.record.time, &b.record.machine, b.record.seq)));
+        let n = fresh.len();
+        self.db.with_tx(|| {
+            for s in &fresh {
+                if self.db.insert_record(&s.record, &s.line)? {
+                    self.db.derive(&s.record, &present)?;
+                }
+            }
+            Ok(())
+        })?;
+        Ok(n)
+    }
+
+    /// All records as JSONL (by machine and sequence number): the exchange and backup format.
+    pub fn export_jsonl(&self) -> Result<String> {
+        let mut out = String::new();
+        for m in self.db.record_machines()? {
+            for l in self.db.lines_after(&m, 0)? {
+                out.push_str(&l);
+                out.push('\n');
+            }
+        }
+        Ok(out)
+    }
+
+    /// Check every machine's chain of records: key, sequence numbers, signatures.
+    pub fn verify_records(&self) -> Result<Vec<(String, u64)>> {
+        let mut out = Vec::new();
+        for m in self.db.record_machines()? {
+            let lines = self.db.lines_after(&m, 0)?;
+            let first = oplog::parse_line(lines.first().ok_or_else(|| anyhow!("no records"))?, None)?;
+            if first.record.op != "machine" {
+                bail!("machine {m}: the first record is not its key");
+            }
+            let key = oplog::machine_key(&first.record)?;
+            let mut seq = 0;
+            for l in &lines {
+                let s = oplog::parse_line(l, Some(&key)).with_context(|| format!("machine {m}"))?;
+                if s.record.seq != seq + 1 {
+                    bail!("machine {m}: sequence gap at {}", s.record.seq);
+                }
+                seq = s.record.seq;
+            }
+            out.push((m, seq));
+        }
+        Ok(out)
     }
 
     pub fn config_value(&self, key: &str) -> Result<Option<serde_json::Value>> {

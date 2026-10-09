@@ -83,8 +83,9 @@ btrfs subvolume snapshot -r $P/main $LAYR_ROOT/projects/u/states/01999999-0000-7
 eq "fsck finds it" "1 problem(s)" "$(l fsck | tail -1)"
 l fsck --repair >/dev/null
 eq "fsck repairs it" "0 problem(s)" "$(l fsck | tail -1)"
-# The index is rebuilt from the logs.
-before=$(l log --format=%H | md5sum)
-rm $LAYR_ROOT/projects/u/meta/index.sqlite*
-eq "index rebuilt from the logs on open" "$before" "$(l log --format=%H | md5sum)"
+# The derived tables are rebuilt from the records.
+before=$(l log --format=%H | md5sum); lines=$(l branch -v | md5sum)
+l reindex >/dev/null
+eq "history after a rebuild from the records" "$before" "$(l log --format=%H | md5sum)"
+eq "lines after a rebuild from the records" "$lines" "$(l branch -v | md5sum)"
 finish

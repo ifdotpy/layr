@@ -1,14 +1,12 @@
-//! The append-only operation log: one JSON line per record, one file per machine.
-//! Each line is `{"r": <record>, "s": "<Ed25519 signature of the exact record bytes>"}`.
+//! Signed operation records. A stored record is one JSON line
+//! `{"r": <record>, "s": "<Ed25519 signature of the exact record bytes>"}`; the same line is the
+//! JSONL form used for replication, backups and export.
 
 use crate::model::Record;
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, Context, Result};
 use base64::Engine;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::Deserialize;
-use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
-use std::path::Path;
 
 #[derive(Deserialize)]
 struct Line<'a> {
@@ -50,100 +48,3 @@ pub fn machine_key(rec: &Record) -> Result<VerifyingKey> {
     Ok(VerifyingKey::from_bytes(&arr)?)
 }
 
-/// Append a line and `fsync` the file. The caller holds the project lock.
-///
-/// A crash during an earlier write can leave an incomplete last line. That record was never
-/// confirmed (the write did not finish, so its `fsync` did not return), and readers skip it. It
-/// is cut off here, so the new line starts on a line of its own.
-pub fn append(path: &Path, line: &str) -> Result<()> {
-    let mut f =
-        OpenOptions::new().create(true).read(true).write(true).open(path).with_context(|| format!("open {}", path.display()))?;
-    let len = f.metadata()?.len();
-    if len > 0 {
-        let mut last = [0u8; 1];
-        f.seek(SeekFrom::Start(len - 1))?;
-        f.read_exact(&mut last)?;
-        if last[0] != b'\n' {
-            let keep = complete_length(&mut f, len)?;
-            f.set_len(keep)?;
-            f.sync_all()?;
-        }
-    }
-    f.seek(SeekFrom::End(0))?;
-    let mut buf = line.as_bytes().to_vec();
-    buf.push(b'\n');
-    f.write_all(&buf)?;
-    f.sync_all()?;
-    Ok(())
-}
-
-/// Length of the file up to and including its last newline.
-fn complete_length(f: &mut File, len: u64) -> Result<u64> {
-    let mut pos = len;
-    let mut buf = vec![0u8; 65536];
-    while pos > 0 {
-        let start = pos.saturating_sub(buf.len() as u64);
-        let n = (pos - start) as usize;
-        f.seek(SeekFrom::Start(start))?;
-        f.read_exact(&mut buf[..n])?;
-        if let Some(i) = buf[..n].iter().rposition(|b| *b == b'\n') {
-            return Ok(start + i as u64 + 1);
-        }
-        pos = start;
-    }
-    Ok(0)
-}
-
-/// Read records from byte offset `from`. Returns the records and the offset after the last
-/// complete line. A partial last line (a crash during a write) is ignored.
-pub fn read_from(path: &Path, from: u64) -> Result<(Vec<Signed>, u64)> {
-    let mut f = match File::open(path) {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Vec::new(), from)),
-        Err(e) => return Err(e.into()),
-    };
-    f.seek(SeekFrom::Start(from))?;
-    let mut r = BufReader::new(f);
-    let mut out = Vec::new();
-    let mut off = from;
-    let mut buf = String::new();
-    loop {
-        buf.clear();
-        let n = r.read_line(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        if !buf.ends_with('\n') {
-            break;
-        }
-        let line = buf.trim_end_matches('\n');
-        if !line.is_empty() {
-            out.push(parse_line(line, None).with_context(|| format!("{} at byte {off}", path.display()))?);
-        }
-        off += n as u64;
-    }
-    Ok((out, off))
-}
-
-/// Check a whole log file: signatures, sequence numbers, one machine.
-pub fn verify_file(path: &Path) -> Result<(String, u64)> {
-    let (recs, _) = read_from(path, 0)?;
-    let first = recs.first().ok_or_else(|| anyhow!("empty log {}", path.display()))?;
-    if first.record.op != "machine" {
-        bail!("{}: first record is not a machine record", path.display());
-    }
-    let key = machine_key(&first.record)?;
-    let machine = first.record.machine.clone();
-    let mut seq = 0;
-    for s in &recs {
-        parse_line(&s.line, Some(&key))?;
-        if s.record.machine != machine {
-            bail!("{}: record of another machine", path.display());
-        }
-        if s.record.seq != seq + 1 {
-            bail!("{}: sequence gap at {}", path.display(), s.record.seq);
-        }
-        seq = s.record.seq;
-    }
-    Ok((machine, seq))
-}
