@@ -443,7 +443,7 @@ pub fn serve(ctx: &Ctx, args: &[String]) -> Result<i32> {
         w.json(&json!({"op": "error", "message": format!("project '{name}' here has another id")}))?;
         bail!("project id mismatch");
     }
-    let repo = Repo { p };
+    let mut repo = Repo { p };
     let peer_seqs: BTreeMap<String, u64> = serde_json::from_value(hello["seqs"].clone())?;
     w.json(&json!({"op": "hello", "machine": repo.p.store.machine.id, "public_key": own_key(&repo.p), "seqs": seqs(&repo.p)?, "present": present(&repo.p)?, "layers": present_layers(&repo.p)?}))?;
     let recs = w.recv_json()?;
@@ -456,6 +456,9 @@ pub fn serve(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let _lock = repo.p.lock()?;
         let bootstrap = !exists;
         take_lines(&repo.p, &lines, bootstrap)?;
+        if repo.p.id.is_empty() {
+            repo.p.reload_id()?;
+        }
         if bootstrap {
             for (m, k) in repo.p.machine_keys_of(&lines) {
                 trust(ctx, &repo.p, &m, &k)?;

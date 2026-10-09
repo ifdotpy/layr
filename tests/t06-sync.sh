@@ -64,6 +64,6 @@ lines = open(sys.argv[1]).read().splitlines()
 lines[3] = lines[3].replace('"seq":4', '"seq":4 ')
 open(sys.argv[1] + ".bad", "w").write("\n".join(lines) + "\n")
 PY
-has "import checks signatures" "signature" "$(l op import $T/records.jsonl.bad 2>&1)"
+no "import refuses a changed record" l op import $T/records.jsonl.bad
 eq "a valid import adds nothing new here" "imported 0 new record(s) of $(wc -l < $T/records.jsonl)" "$(l op import $T/records.jsonl)"
 finish

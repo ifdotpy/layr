@@ -96,7 +96,8 @@ pub fn undo_last_of(ctx: &Ctx, repo: &Repo, line: &Line, ops: &[&str]) -> Result
 
 const NOT_UNDOABLE: &[&str] = &[
     "line.adopt",
-    "slot.collect.done",
+    "machine.trust",
+    "backup",
     "save",
     "save.layers",
     "check",

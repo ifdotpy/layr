@@ -240,7 +240,9 @@ fn stage_paths(repo: &Repo, line: &Line, scan: &Path, paths: &BTreeSet<String>) 
     for p in paths {
         if let (Some(m), None) = (fsutil::lmeta(scan, p), fsutil::lmeta(&stage, p)) {
             if let Some(from) = gone.remove(&m.ino) {
-                crate::tree::Tree::open(&stage)?.rename(&from, p)?;
+                let t = crate::tree::Tree::open(&stage)?;
+                t.mkdirs_for(p, own)?;
+                t.rename(&from, p)?;
             }
         }
     }

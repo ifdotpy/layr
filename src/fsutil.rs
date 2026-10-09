@@ -249,6 +249,7 @@ pub fn copy_entry(src_root: &Path, src_rel: &str, dst_root: &Path, dst_rel: &str
     let src = safe_join(src_root, src_rel)?;
     let m = fs::symlink_metadata(&src).with_context(|| format!("stat {}", src.display()))?;
     let t = crate::tree::Tree::open(dst_root)?;
+    t.mkdirs_for(dst_rel, own)?;
     let ft = m.file_type();
     if ft.is_symlink() {
         let target = fs::read_link(&src)?.to_string_lossy().into_owned();
@@ -303,6 +304,7 @@ pub fn set_mtime(f: &File, sec: i64, nsec: i64) -> Result<()> {
 pub fn write_file(root: &Path, rel: &str, data: &[u8], mode: u32, own: Option<(u32, u32)>) -> Result<()> {
     use std::io::Write;
     let t = crate::tree::Tree::open(root)?;
+    t.mkdirs_for(rel, own)?;
     let mut f = t.create(rel, mode)?;
     f.write_all(data)?;
     f.set_permissions(fs::Permissions::from_mode(mode))?;

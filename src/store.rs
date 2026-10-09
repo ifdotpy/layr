@@ -213,6 +213,12 @@ impl<'a> Project<'a> {
         Ok(p)
     }
 
+    /// Take the project id from the records (after a replica or a restore received them).
+    pub fn reload_id(&mut self) -> Result<()> {
+        self.id = self.project_id()?;
+        Ok(())
+    }
+
     fn project_id(&self) -> Result<String> {
         let id: Option<String> = self
             .db
@@ -262,6 +268,9 @@ impl<'a> Project<'a> {
         let m = &self.store.machine;
         let present = self.state_present();
         let project = if rec.op == "project" { rec.data["id"].as_str().unwrap_or("").to_string() } else { self.id.clone() };
+        if project.is_empty() {
+            bail!("project id unknown: the project has no records yet");
+        }
         self.db.with_tx(|| {
             let mut seq = self.db.last_seq(&m.id)?;
             if seq == 0 {
