@@ -51,7 +51,8 @@ impl Db {
     pub fn open(path: &Path) -> Result<Db> {
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
-        // FULL: a committed record survives a power loss (NORMAL can lose the last commits).
+        // FULL: a committed record survives a power loss. The database has its own subvolume,
+        // so this fsync costs a few milliseconds even right after a snapshot.
         conn.pragma_update(None, "synchronous", "FULL")?;
         conn.busy_timeout(std::time::Duration::from_secs(30))?;
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -60,13 +61,17 @@ impl Db {
         let mut db = Db { conn, stale: false };
         if version < SCHEMA_VERSION {
             if has_records {
+                // The project rebuilds the derived tables and only then writes the version
+                // (`mark_current`): a failed rebuild is tried again on the next open.
                 for t in DERIVED {
                     db.conn.execute_batch(&format!("DROP TABLE IF EXISTS {t}"))?;
                 }
                 db.stale = true;
+                db.conn.execute_batch(SCHEMA)?;
+            } else {
+                db.conn.execute_batch(SCHEMA)?;
+                db.conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             }
-            db.conn.execute_batch(SCHEMA)?;
-            db.conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         } else if version > SCHEMA_VERSION {
             anyhow::bail!("{} was written by a newer layr (schema {version})", path.display());
         } else {
@@ -76,6 +81,13 @@ impl Db {
     }
 
     /// Run `f` in one write transaction (`BEGIN IMMEDIATE`): all or nothing.
+    /// Write the schema version after the derived tables were rebuilt.
+    pub fn mark_current(&mut self) -> Result<()> {
+        self.conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        self.stale = false;
+        Ok(())
+    }
+
     pub fn with_tx<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
         match f() {
@@ -157,13 +169,19 @@ impl Db {
         let ord = format!("{:016}:{}:{:012}", rec.time.max(0), rec.machine, rec.seq);
         let foreign = rec.machine != local;
         for s in &rec.states {
+            // A state id names one state forever: a second record with the same id is refused
+            // (the import checks this before; here it is a guard).
+            let exists: bool = tx.query_row("SELECT COUNT(*) FROM states WHERE id=?1", params![s.id], |r| r.get::<_, i64>(0))? > 0;
+            if exists {
+                anyhow::bail!("state {} is named by two records", s.id);
+            }
             let present = state_present(&s.id);
             tx.execute(
-                "INSERT OR IGNORE INTO states(id, display, kind, line, time, rec, present, machine) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+                "INSERT INTO states(id, display, kind, line, time, rec, present, machine) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
                 params![s.id, ids::display(&s.id), kind_str(s.kind), s.line, s.time, serde_json::to_string(s)?, present as i64, rec.machine],
             )?;
             for (i, p) in s.parents.iter().enumerate() {
-                tx.execute("INSERT OR REPLACE INTO parents(state, parent, ord) VALUES(?1,?2,?3)", params![s.id, p, i as i64])?;
+                tx.execute("INSERT OR IGNORE INTO parents(state, parent, ord) VALUES(?1,?2,?3)", params![s.id, p, i as i64])?;
             }
         }
         for (id, ch) in &rec.lines {
@@ -316,13 +334,18 @@ impl Db {
                 }
             }
             "save.layers" => {
+                // Only the machine that made the state adds its layers (names and subvolume
+                // UUIDs, which a receiver checks).
                 if let Some(st) = s("state") {
-                    let raw: Option<String> =
-                        tx.query_row("SELECT rec FROM states WHERE id=?1", params![st], |r| r.get(0)).optional()?;
-                    if let Some(raw) = raw {
-                        let mut v: serde_json::Value = serde_json::from_str(&raw)?;
-                        v["layers"] = d.get("layers").cloned().unwrap_or_default();
-                        tx.execute("UPDATE states SET rec=?2 WHERE id=?1", params![st, v.to_string()])?;
+                    let row: Option<(String, String)> =
+                        tx.query_row("SELECT rec, machine FROM states WHERE id=?1", params![st], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+                    if let Some((raw, machine)) = row {
+                        if machine == rec.machine {
+                            let mut v: serde_json::Value = serde_json::from_str(&raw)?;
+                            v["layers"] = d.get("layers").cloned().unwrap_or_default();
+                            v["layer_uuids"] = d.get("uuids").cloned().unwrap_or_default();
+                            tx.execute("UPDATE states SET rec=?2 WHERE id=?1", params![st, v.to_string()])?;
+                        }
                     }
                 }
             }
@@ -341,6 +364,14 @@ impl Db {
             _ => {}
         }
         Ok(())
+    }
+
+    /// The subvolume UUID of a layer snapshot, from the signed save.layers record.
+    pub fn layer_uuid(&self, state: &str, name: &str) -> Result<Option<String>> {
+        let raw: Option<String> = self.conn.query_row("SELECT rec FROM states WHERE id=?1", params![state], |r| r.get(0)).optional()?;
+        Ok(raw
+            .and_then(|r| serde_json::from_str::<serde_json::Value>(&r).ok())
+            .and_then(|v| v["layer_uuids"][name].as_str().map(|s| s.to_string())))
     }
 
     pub fn trusted(&self, machine: &str) -> Result<Option<String>> {
@@ -618,4 +649,46 @@ pub fn kind_str(k: StateKind) -> &'static str {
 
 pub fn need<T>(v: Option<T>, what: &str) -> Result<T> {
     v.ok_or_else(|| anyhow!("{what} not found"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Author, StateKind, StateRec};
+
+    fn state_record(seq: u64, state: &str, parents: Vec<String>) -> Record {
+        let mut r = Record::new("commit");
+        r.id = format!("01a12290-0000-7000-8000-{:012}", seq);
+        r.machine = "01a12290-0000-7000-8000-00000000aaaa".into();
+        r.seq = seq;
+        r.time = seq as i64;
+        r.states.push(StateRec {
+            id: state.into(),
+            kind: StateKind::Commit,
+            parents,
+            line: None,
+            subvol: String::new(),
+            author: Author::default(),
+            message: String::new(),
+            time: 0,
+            turn: None,
+            running: false,
+            conflicts: vec![],
+            layers: Default::default(),
+        });
+        r
+    }
+
+    #[test]
+    fn a_state_id_cannot_be_named_twice() {
+        let dir = std::env::temp_dir().join(format!("layr-db-test-{}", std::process::id()));
+        let db = Db::open(&dir).unwrap();
+        let st = "01a12290-0000-7000-8000-00000000bbbb";
+        let parent = "01a12290-0000-7000-8000-00000000cccc".to_string();
+        db.derive(&state_record(1, st, vec![parent.clone()]), &|_| true, "x").unwrap();
+        let other = "01a12290-0000-7000-8000-00000000dddd".to_string();
+        assert!(db.derive(&state_record(2, st, vec![other]), &|_| true, "x").is_err());
+        assert_eq!(db.state(st).unwrap().unwrap().parents, vec![parent]);
+        let _ = std::fs::remove_file(&dir);
+    }
 }

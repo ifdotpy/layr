@@ -40,7 +40,7 @@ cd $A/main
 
 # A changed record is refused.
 cd $BR/projects/x/lines/main && echo t >> notes.txt && B commit -qam "later on B" && cd $A/main
-python3 - $BR/projects/x/meta/layr.sqlite <<'PY'
+python3 - $BR/projects/x/meta/db/layr.sqlite <<'PY'
 import sqlite3, sys
 c = sqlite3.connect(sys.argv[1])
 c.execute("UPDATE records SET raw = replace(raw, 'later on B', 'CHANGED') WHERE raw LIKE '%later on B%'")

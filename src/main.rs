@@ -24,6 +24,7 @@ mod revs;
 mod service;
 mod store;
 mod stream;
+mod trace;
 #[allow(unsafe_code)]
 mod sys;
 mod tree;

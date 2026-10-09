@@ -9,7 +9,9 @@ The commands follow the git verbs and print git formats, so models that know git
 without training. Output of `diff`, `status --porcelain`, `show`, `log --format` and `--stat`
 matches git byte for byte for the same content (tests/t08-gitcompat.sh).
 
-Status: working implementation, Linux only (btrfs, kernel 5.6 or newer). Built for the Codex
+Status: working implementation, Linux only (btrfs, kernel 5.6 or newer). Unsafe code is limited
+to `src/sys.rs` (btrfs ioctls, fork, user switching, the user database); everything else uses
+`rustix` and the standard library, and the crate denies `unsafe_code` outside that module. Built for the Codex
 Studio Linux VM, where all agents run. The design contract is
 `docs/btrfs-local-vcs.md` in the Codex Studio repository.
 
@@ -106,7 +108,7 @@ $LAYR_ROOT/projects/<p>/
   states/<state-id>                    read-only snapshots (0700)
   lines/<line>                         working folders (0711; each line 0700, its owner)
   git/                                 git object store for the remote bridge
-  meta/layr.sqlite                     signed records + derived tables (0700)
+  meta/db/layr.sqlite                  signed records + derived tables (own subvolume, 0700)
   meta/stage, meta/scan, meta/work     staging lines and temporary snapshots
 ```
 
@@ -145,11 +147,26 @@ exchanges records both ways and sends missing states with `btrfs send -p <common
 
 ## Performance
 
-Measured in a Linux VM (OrbStack, 17 vCPU), release build, project of 200,000 small files
-and one 100 MiB file, btrfs on a loop file; see `Performance` in the commit history for the
-script. Numbers are from one run.
+One run in a Linux VM (OrbStack, 17 vCPU, kernel 7.0), release build, btrfs on a loop file.
+Project: 200,000 small files and one 100 MiB file. The second column follows a write of 300 MiB
+of ignored build output, so btrfs is still flushing; the third is a quiet tree.
 
-PERF_TABLE
+| Operation                                | after a large write | quiet  |
+| ---------------------------------------- | ------------------: | -----: |
+| `status`, clean                          | 0.02 s              | 0.02 s |
+| `status`, 101 edits                      | 0.80 s              | 0.05 s |
+| `diff --stat`                            | 0.24 s              |        |
+| `add -A`                                 | 0.68 s              |        |
+| `commit`                                 | 1.48 s              | 0.35 to 0.5 s |
+| `branch` (a new line, any size)          | 0.18 s              | 0.28 s |
+| `merge` (50 + 50 changed files)          | 1.35 s              |        |
+| `log -5`, `show --stat`                  | 0.003 s, 0.014 s    |        |
+| `git status` of the same tree, for scale | 0.14 s              |        |
+
+Most of the time is btrfs transaction commits: every snapshot commits one (15 to 600 ms, more
+while dirty data is being written). The database lives in its own subvolume: an fsync there
+after a snapshot takes about 6 ms, against about 100 ms in the subvolume that holds the
+snapshot folders.
 
 ## Not in this version
 
@@ -158,3 +175,6 @@ PERF_TABLE
   provides the slot copies (`layr slot`).
 - Structured (AST) merge; format drivers can be plugged in through `merge.driver.<name>`.
 - `layrhub`: records, ids and stream transport are ready for it; the protocol is not.
+- Content checks of replicated states: a received state must be the subvolume its signed record
+  names (`received_uuid`), but its file content is trusted together with the machine that made
+  it. Layer snapshots are checked the same way through the signed `save.layers` record.

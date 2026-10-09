@@ -128,14 +128,22 @@ fn send_records<R: Read, W: Write>(w: &mut Wire<R, W>, lines: &[String]) -> Resu
     w.json(&json!({"op": "records", "lines": [], "more": false}))
 }
 
+/// Records of one sync, in total at most this many bytes.
+const MAX_RECORDS_BYTES: usize = 512 << 20;
+
 fn recv_records<R: Read, W: Write>(w: &mut Wire<R, W>) -> Result<Vec<String>> {
     let mut all = Vec::new();
+    let mut bytes = 0usize;
     loop {
         let v = w.recv_json()?;
         if v["op"] != "records" {
             bail!("protocol error: expected records");
         }
         let lines: Vec<String> = serde_json::from_value(v["lines"].clone())?;
+        bytes += lines.iter().map(|l| l.len()).sum::<usize>();
+        if bytes > MAX_RECORDS_BYTES {
+            bail!("the peer sends more than {} MiB of records in one sync", MAX_RECORDS_BYTES >> 20);
+        }
         all.extend(lines);
         if !v["more"].as_bool().unwrap_or(false) {
             return Ok(all);
@@ -345,7 +353,9 @@ fn recv_states<R: Read, W: Write>(w: &mut Wire<R, W>, p: &Project) -> Result<usi
                 if p.layer_path(&id, &name).exists() {
                     bail!("layer {name} exists here already");
                 }
-                receive_one(w, p, &name, None)
+                // The layer must be the subvolume that the signed save.layers record names.
+                let uuid = p.db.layer_uuid(&id, &name)?.ok_or_else(|| anyhow!("no signed subvolume id for layer {name}"))?;
+                receive_one(w, p, &name, Some(&uuid))
             }
             Some("state") => {
                 // Only a state that a signed record names, as the subvolume that record names.
@@ -357,9 +367,13 @@ fn recv_states<R: Read, W: Write>(w: &mut Wire<R, W>, p: &Project) -> Result<usi
                 if p.state_path(&id).exists() {
                     bail!("state {} exists here already", ids::short(&id));
                 }
-                receive_one(w, p, &id, Some(&rec.subvol)).map(|_| {
-                    let _ = p.db.set_present(&id, true);
+                receive_one(w, p, &id, Some(&rec.subvol)).and_then(|_| {
+                    if let Err(e) = p.db.set_present(&id, true) {
+                        let _ = btrfs::delete_tree(&p.state_path(&id));
+                        return Err(e);
+                    }
                     n += 1;
+                    Ok(())
                 })
             }
             _ => bail!("protocol error: {v}"),
@@ -473,7 +487,7 @@ pub fn serve(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let mut w = Wire { r: stdin.lock(), w: std::io::BufWriter::new(stdout.lock()) };
     let hello = w.recv_json()?;
     let pid = hello["project_id"].as_str().unwrap_or("").to_string();
-    let exists = ctx.store.projects_dir().join(&name).join("meta").join("layr.sqlite").is_file();
+    let exists = crate::store::db_file(&ctx.store.projects_dir().join(&name)).is_file();
     if !exists {
         Project::create_empty(&ctx.store, &name)?;
     }

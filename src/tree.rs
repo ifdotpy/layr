@@ -272,9 +272,16 @@ fn remove_at(dir: &OwnedFd, name: &str) -> Result<()> {
     let pst = rustix::fs::fstat(dir)?;
     let sub = rustix::fs::openat(dir, name, OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty())?;
     if is_subvol_root(&st, pst.st_dev) {
-        destroy_nested_in(&sub)?;
-        drop(sub);
-        return crate::sys::subvol_destroy(dir.as_fd(), name);
+        // O(1) unless it holds nested subvolumes itself.
+        match crate::sys::subvol_destroy(dir.as_fd(), name) {
+            Ok(()) => return Ok(()),
+            Err(e) if crate::btrfs::is_not_empty(&e) => {
+                destroy_nested_in(&sub)?;
+                drop(sub);
+                return crate::sys::subvol_destroy(dir.as_fd(), name);
+            }
+            Err(e) => return Err(e),
+        }
     }
     for child in list_fd(&sub)? {
         remove_at(&sub, &child)?;

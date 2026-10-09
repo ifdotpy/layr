@@ -345,6 +345,22 @@ impl<'a> Repo<'a> {
         Ok(p)
     }
 
+    /// The staging line if it was made from the current head (a stale one is dropped).
+    pub fn current_stage(&self, line: &Line) -> Result<Option<PathBuf>> {
+        match self.stage(line) {
+            Some(s) => {
+                let base = std::fs::read_to_string(self.stage_base_file(line)).unwrap_or_default();
+                if base.trim() == line.head {
+                    Ok(Some(s))
+                } else {
+                    self.drop_stage(line)?;
+                    Ok(None)
+                }
+            }
+            None => Ok(None),
+        }
+    }
+
     pub fn drop_stage(&self, line: &Line) -> Result<()> {
         let p = self.p.stage_path(&line.id);
         if p.exists() {

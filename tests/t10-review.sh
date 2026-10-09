@@ -44,9 +44,9 @@ eq "three backups in a row verify" "ok" "$(l backup verify $T/bk | awk '{print $
 # 4. A failed database write records nothing and leaves no snapshot.
 states_before=$(ls $LAYR_ROOT/projects/p/states | wc -l)
 echo d > d.txt; l add d.txt
-chattr +i $LAYR_ROOT/projects/p/meta/layr.sqlite $LAYR_ROOT/projects/p/meta/layr.sqlite-wal 2>/dev/null
+chattr +i $LAYR_ROOT/projects/p/meta/db/layr.sqlite $LAYR_ROOT/projects/p/meta/db/layr.sqlite-wal 2>/dev/null
 out=$(l commit -qm d 2>&1); rc=$?
-chattr -i $LAYR_ROOT/projects/p/meta/layr.sqlite $LAYR_ROOT/projects/p/meta/layr.sqlite-wal 2>/dev/null
+chattr -i $LAYR_ROOT/projects/p/meta/db/layr.sqlite $LAYR_ROOT/projects/p/meta/db/layr.sqlite-wal 2>/dev/null
 eq "the commit fails" "128" "$rc"
 eq "no record" "b" "$(l log -1 --format=%s)"
 eq "no snapshot is left" "$states_before" "$(ls $LAYR_ROOT/projects/p/states | wc -l)"

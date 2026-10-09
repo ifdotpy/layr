@@ -661,17 +661,31 @@ pub fn commit(ctx: &Ctx, args: &[String]) -> Result<i32> {
     h.repo.can_write_line(ctx, &line)?;
     let _lock = h.repo.p.lock()?;
     let line = h.repo.line(&line.id)?;
-    let (st, scan, _it, _index) = h.repo.status(&line)?;
     if a.has("-a") {
+        let (st, scan, _it, _index) = h.repo.status(&line)?;
         let paths: BTreeSet<String> = st.unstaged.iter().map(|c| c.path.clone()).collect();
         if !paths.is_empty() {
             stage_paths(&h.repo, &line, &scan.path, &paths)?;
         }
     }
-    let (index, _t) = h.repo.index_view(&line)?;
+    // The new state is a snapshot of the staging line (or the head when nothing is staged);
+    // its changes against the head say whether there is anything to commit.
     let head_root = h.repo.state_root(&line.head)?;
-    let staged: Vec<Change> = changes::file_changes(&head_root, &index)?.into_iter().filter(|c| !skip_path(&c.path)).collect();
+    let parents = if a.has("--amend") { head.parents.clone() } else { vec![line.head.clone()] };
+    let src = match h.repo.current_stage(&line)? {
+        Some(s) => s,
+        None => head_root.clone(),
+    };
+    let mut state = h.repo.new_state(ctx, &src, StateKind::Commit, parents, &message, Some(&line))?;
+    let staged: Vec<Change> = match changes::file_changes(&head_root, &h.repo.p.state_path(&state.id)) {
+        Ok(v) => v.into_iter().filter(|c| !skip_path(&c.path)).collect(),
+        Err(e) => {
+            h.repo.discard_states(std::slice::from_ref(&state));
+            return Err(e);
+        }
+    };
     if staged.is_empty() && !a.has("--allow-empty") && !a.has("--amend") {
+        h.repo.discard_states(std::slice::from_ref(&state));
         let (st2, _s2, _i2, _x2) = h.repo.status(&line)?;
         outln!(ctx, "On line {}", line.name);
         if !st2.unstaged.is_empty() {
@@ -687,12 +701,6 @@ pub fn commit(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         return Ok(1);
     }
-    let parents = if a.has("--amend") { head.parents.clone() } else { vec![line.head.clone()] };
-    let src = match h.repo.stage(&line) {
-        Some(s) => s,
-        None => head_root.clone(),
-    };
-    let mut state = h.repo.new_state(ctx, &src, StateKind::Commit, parents, &message, Some(&line))?;
     if let Some(au) = a.get("--author") {
         if let Some((n, e)) = au.split_once('<') {
             state.author.name = n.trim().to_string();

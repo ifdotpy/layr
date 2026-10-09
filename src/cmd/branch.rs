@@ -91,6 +91,8 @@ pub fn branch(ctx: &Ctx, args: &[String]) -> Result<i32> {
             repo.commit_record(ctx, rec)?;
             crate::btrfs::delete_tree(&repo.working(&l))?;
             repo.drop_stage(&l)?;
+            // The owner of a deleted line no longer reads the git objects.
+            crate::gitbridge::sync_store_access(repo)?;
             outln!(ctx, "Deleted line {} (was {}).", l.name, ids::short(&l.head));
         }
         return Ok(0);
@@ -327,6 +329,7 @@ pub fn adopt(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let mut moved = l.clone();
     moved.machine = repo.p.store.machine.id.clone();
     repo.materialize(&moved, &start, &w)?;
+    crate::gitbridge::sync_store_access(repo)?;
     let mut rec = Record::new("line.adopt");
     rec.lines.insert(
         l.id.clone(),

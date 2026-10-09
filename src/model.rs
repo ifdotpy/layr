@@ -256,6 +256,14 @@ pub fn validate(r: &Record) -> anyhow::Result<()> {
             }
         }
     }
+    if let (Some(st), Some(u)) = (d.get("state").and_then(|v| v.as_str()), d.get("uuids").and_then(|v| v.as_object())) {
+        for (snap, id) in u {
+            if !is_layer_name(snap, st) {
+                bail!("record {}: bad layer name", r.seq);
+            }
+            uuid("layer subvolume", id.as_str().unwrap_or(""))?;
+        }
+    }
     if let Some(c) = d.get("config").and_then(|v| v.as_object()) {
         for k in c.keys() {
             if !k.chars().all(|ch| ch.is_ascii_alphanumeric() || "._-@*".contains(ch)) {

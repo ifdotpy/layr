@@ -51,8 +51,13 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
                     let layers = snapshot_layers(repo, &l, &s.id)?;
                     if !layers.is_empty() {
                         s.layers = layers.clone();
+                        let mut uuids = serde_json::Map::new();
+                        for snap in layers.values() {
+                            let info = btrfs::subvol_info(&repo.p.layer_path(&s.id, snap))?;
+                            uuids.insert(snap.clone(), serde_json::Value::String(info.uuid));
+                        }
                         let mut rec = Record::new("save.layers");
-                        rec.data = serde_json::json!({"state": s.id, "layers": layers});
+                        rec.data = serde_json::json!({"state": s.id, "layers": layers, "uuids": uuids});
                         repo.commit_record(ctx, rec)?;
                     }
                 }
@@ -311,6 +316,7 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
         );
     }
     let done = repo.commit_record(ctx, rec)?;
+    crate::gitbridge::sync_store_access(repo)?;
     outln!(ctx, "Undid {} {} ({}); undo it with 'layr undo {}'", short_op(&r.id), r.op, fmt_time(r.time), short_op(&done.id));
     Ok(0)
 }
