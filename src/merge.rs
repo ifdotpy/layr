@@ -449,6 +449,13 @@ fn file_merge(c: &mut Ctx, bp: &str, tp: &str, rp: &str, ours: &Side, theirs: &S
     if mt.ftype != FType::File {
         return Ok(());
     }
+    if mb.ftype != FType::File {
+        // The base was a link or a folder: both sides made a file here.
+        if !c.content_same(i.result, rp, i.theirs, tp)? {
+            add_add(c, tp, rp)?;
+        }
+        return Ok(());
+    }
     // Content.
     let t_changed = !c.content_same(i.base, bp, i.theirs, tp)?;
     if t_changed {
@@ -507,19 +514,56 @@ fn tempfile_path(tag: &str) -> Result<PathBuf> {
     Ok(std::env::temp_dir().join(format!("layr-{tag}-{}", crate::ids::new_id())))
 }
 
-/// `git merge-file`: writes the result into `ours`, returns the number of conflicts.
+/// The bytes of a regular file of a version, read without following links. Anything else (a
+/// link, a folder, nothing) reads as empty: a link in a merged tree must never make the
+/// service read the file it points to.
+fn version_bytes(path: &Path) -> Vec<u8> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let f = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path);
+    match f {
+        Ok(mut f) if f.metadata().map(|m| m.is_file()).unwrap_or(false) => {
+            let mut v = Vec::new();
+            use std::io::Read;
+            let _ = f.read_to_end(&mut v);
+            v
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// `git merge-file` on private copies: writes the result into `ours`, returns the number of
+/// conflicts.
 fn run_merge_file(i: &Input, ours: &Path, base: &Path, theirs: &Path, union: bool) -> Result<i32> {
+    let dir = private_dir(None)?;
+    let (o, b, t) = (dir.join("ours"), dir.join("base"), dir.join("theirs"));
+    std::fs::write(&o, version_bytes(ours))?;
+    std::fs::write(&b, version_bytes(base))?;
+    std::fs::write(&t, version_bytes(theirs))?;
     let mut cmd = Command::new("git");
     cmd.arg("merge-file");
     if union {
         cmd.arg("--union");
     }
-    cmd.args(["-L", i.ours_label, "-L", "base", "-L", i.theirs_label]).arg(ours).arg(base).arg(theirs);
-    let st = cmd.status().context("run git merge-file")?;
-    match st.code() {
-        Some(n) if n >= 0 => Ok(n),
-        _ => bail!("git merge-file failed"),
-    }
+    cmd.args(["-L", i.ours_label, "-L", "base", "-L", i.theirs_label]).arg(&o).arg(&b).arg(&t);
+    let st = cmd.status().context("run git merge-file");
+    let res = match st {
+        Ok(st) => match st.code() {
+            Some(n) if n >= 0 => {
+                // Write in place (same inode), never through a link.
+                let data = std::fs::read(&o)?;
+                use std::io::Write;
+                use std::os::unix::fs::OpenOptionsExt;
+                let mut f = std::fs::OpenOptions::new().write(true).custom_flags(libc::O_NOFOLLOW).open(ours)?;
+                f.set_len(0)?;
+                f.write_all(&data)?;
+                Ok(n)
+            }
+            _ => Err(anyhow::anyhow!("git merge-file failed")),
+        },
+        Err(e) => Err(e),
+    };
+    let _ = std::fs::remove_dir_all(&dir);
+    res
 }
 
 fn run_driver(
@@ -588,7 +632,7 @@ fn verify(c: &mut Ctx, rp: &str) -> Result<()> {
     };
     let dir = private_dir(i.run_as)?;
     let a = dir.join("result");
-    std::fs::copy(fsutil::safe_join(i.result, rp)?, &a)?;
+    std::fs::write(&a, version_bytes(&fsutil::safe_join(i.result, rp)?))?;
     chown_tree(&dir, i.run_as)?;
     let ok = shell(&cmd.replace("%A", &sh_quote(&a)).replace("%P", &sh_quote_str(rp)), i.run_as)?;
     let _ = std::fs::remove_dir_all(&dir);
@@ -652,9 +696,9 @@ fn shell(cmd: &str, run_as: Option<(u32, u32)>) -> Result<bool> {
 fn run_command_driver(i: &Input, cmd: &str, b: &Path, r: &Path, t: &Path, rp: &str) -> Result<bool> {
     let dir = private_dir(i.run_as)?;
     let (o, a, bb) = (dir.join("base"), dir.join("ours"), dir.join("theirs"));
-    std::fs::copy(b, &o)?;
-    std::fs::copy(r, &a)?;
-    std::fs::copy(t, &bb)?;
+    std::fs::write(&o, version_bytes(b))?;
+    std::fs::write(&a, version_bytes(r))?;
+    std::fs::write(&bb, version_bytes(t))?;
     chown_tree(&dir, i.run_as)?;
     let full = cmd
         .replace("%O", &sh_quote(&o))
@@ -707,8 +751,12 @@ fn block_merge(
         return Ok(false);
     }
     use std::io::{Read, Seek, SeekFrom, Write};
-    let mut src = std::fs::File::open(fsutil::safe_join(i.theirs, tp)?)?;
-    let mut dst = std::fs::OpenOptions::new().write(true).open(fsutil::safe_join(i.result, rp)?)?;
+    use std::os::unix::fs::OpenOptionsExt;
+    if mb.ftype != FType::File || mo.ftype != FType::File || mt.ftype != FType::File {
+        return Ok(false);
+    }
+    let mut src = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(fsutil::safe_join(i.theirs, tp)?)?;
+    let mut dst = std::fs::OpenOptions::new().write(true).custom_flags(libc::O_NOFOLLOW).open(fsutil::safe_join(i.result, rp)?)?;
     for (off, len) in tr {
         if off >= mt.size {
             continue;

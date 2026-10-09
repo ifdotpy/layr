@@ -357,6 +357,7 @@ pub fn tag(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let repo = &h.repo;
     let line = h.line.clone();
     if a.has("-d") {
+        repo.require_lead(ctx, "delete tags")?;
         let _lock = repo.p.lock()?;
         for t in &a.pos {
             let id = repo.p.db.tag(t)?.ok_or_else(|| exit(1, format!("error: tag '{t}' not found.")))?;
@@ -386,8 +387,11 @@ pub fn tag(ctx: &Ctx, args: &[String]) -> Result<i32> {
     crate::store::check_name("tag", name)?;
     let id = revs::resolve(repo, line.as_ref(), a.pos.get(1).map(|s| s.as_str()).unwrap_or("HEAD"))?;
     let _lock = repo.p.lock()?;
-    if repo.p.db.tag(name)?.is_some() && !a.has("-f") {
-        return Err(exit(128, format!("fatal: tag '{name}' already exists")));
+    if repo.p.db.tag(name)?.is_some() {
+        if !a.has("-f") {
+            return Err(exit(128, format!("fatal: tag '{name}' already exists")));
+        }
+        repo.require_lead(ctx, "move a tag")?;
     }
     let mut rec = Record::new("tag");
     rec.data = serde_json::json!({"name": name, "state": id, "message": a.get("-m")});

@@ -55,6 +55,27 @@ has "push needs a passing check" "no passing check" "$(as layr-lead $L push orig
 as layr-lead $L try -q HEAD -- true
 eq "push after a check" "0" "$(as layr-lead $L push -q origin t >/dev/null 2>&1; echo $?)"
 
+# Review findings 2026-10-09: undo and other operations respect line owners.
+UNDO_MAIN=$(as layr-lead $L op log -n 1 | awk '{print $1}')
+cd $P/w1
+no "an agent cannot undo an operation on the lead's line" as layr-a1 $L undo --force $UNDO_MAIN
+eq "the main line did not move" "lead" "$(cd $P/main && as layr-lead $L log -1 --format=%s)"
+no "an agent cannot push" as layr-a1 $L push origin t2
+no "an agent cannot delete a tag" sh -c "as layr-lead env LAYR_PROJECT=perm LAYR_LINE=main $L tag v1 && as layr-a1 $L tag -d v1"
+no "an agent cannot put another agent's line in a group" sh -c "as layr-lead env LAYR_PROJECT=perm LAYR_LINE=main $L group create g1 && as layr-a2 env LAYR_PROJECT=perm $L group add g1 w1"
+
+# A merge driver never reads the target of a link in the merged trees.
+cd $P/main
+as layr-lead sh -c "printf 'x merge=keep\n' > .layrattributes && echo base > x && $L add -A && $L commit -qm attrs"
+as layr-lead $L config merge.driver.keep 'cat %O > %A'
+as layr-lead $L branch -q d1 --owner layr-a1
+cd $P/d1 && as layr-a1 sh -c "rm x && ln -s /etc/shadow x && $L add -A && $L commit -qm link" && cd $P/main
+as layr-lead $L merge -q d1 >/dev/null 2>&1
+as layr-lead sh -c "echo ours > x && $L commit -qam ours"
+cd $P/d1 && as layr-a1 sh -c "rm x && echo theirs > x && $L add -A && $L commit -qm theirs" && cd $P/main
+as layr-lead $L merge -q d1 >/dev/null 2>&1
+no "no secret content reaches the merged file" grep -q 'root:' x
+
 # Files written by layr belong to the line owner.
 cd $P/w1
 as layr-a1 sh -c "rm a1.txt && $L restore a1.txt"

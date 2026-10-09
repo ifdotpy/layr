@@ -100,6 +100,7 @@ fn sync_folder(
 ) -> Result<(usize, Vec<String>)> {
     let all = state_files(to, tracked)?;
     let bad = collisions(&all);
+    let rules = crate::ignore_rules::Rules::new(to);
     let mut n = 0;
     match from {
         Some(f) => {
@@ -115,6 +116,13 @@ fn sync_folder(
             }
             for p in paths {
                 if bad.contains(&p) {
+                    continue;
+                }
+                // The same filter as a full copy: an ignored file is never written out.
+                if tracked && rules.ignored(&p, false) {
+                    if fsutil::lmeta(dst, &p).is_some() {
+                        del_entry(ctx, dst, &p)?;
+                    }
                     continue;
                 }
                 match fsutil::lmeta(to, &p) {
@@ -166,13 +174,13 @@ fn caller_path(ctx: &Ctx, p: &str) -> PathBuf {
 const MARKER: &str = ".layr-export.json";
 
 pub fn export(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let spec = Spec::new().flag("--tracked").flag("-f|--force").flag("-q|--quiet");
+    let spec = Spec::new().flag("--tracked").flag("--all").flag("-f|--force").flag("-q|--quiet");
     let a = parse(&spec, args)?;
     let h = here(ctx)?;
     let (rev, folder) = match a.pos.len() {
         1 => (None, a.pos[0].clone()),
         2 => (Some(a.pos[0].clone()), a.pos[1].clone()),
-        _ => return Err(exit(128, "usage: layr export [<rev>] <folder> [--tracked]")),
+        _ => return Err(exit(128, "usage: layr export [<rev>] <folder> [--all]")),
     };
     let dst = caller_path(ctx, &folder);
     let state = source_state(ctx, &h, rev.as_deref())?;
@@ -198,7 +206,8 @@ pub fn export(ctx: &Ctx, args: &[String]) -> Result<i32> {
         ));
     }
     let from = prev.as_ref().map(|p| h.repo.p.state_path(p));
-    let (n, bad) = sync_folder(ctx, from.as_deref(), &to, &dst, &[], a.has("--tracked"))?;
+    // Ignored files (build output, local secrets) stay out unless --all.
+    let (n, bad) = sync_folder(ctx, from.as_deref(), &to, &dst, &[], !a.has("--all"))?;
     let m = serde_json::json!({"project": h.repo.p.id, "project_name": h.repo.p.name, "state": state, "time": ids::now_ms()});
     as_caller_fs(ctx, || {
         let mut f = File::create(dst.join(MARKER))?;

@@ -210,6 +210,10 @@ pub fn push(ctx: &Ctx, args: &[String]) -> Result<i32> {
         },
         None => ("HEAD".to_string(), h.line()?.name.clone()),
     };
+    // The lead decides when a task goes to the remote (members with push.members = true too).
+    if !repo.is_lead(ctx) && !repo.p.config_bool("push.members", false) {
+        return Err(exit(1, "permission denied: only the project lead pushes (set push.members true to allow members)"));
+    }
     let state_id = revs::resolve(repo, line.as_ref(), &rev)?;
     let state = repo.state(&state_id)?;
     if !state.conflicts.is_empty() {

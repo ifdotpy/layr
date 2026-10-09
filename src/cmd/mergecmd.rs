@@ -465,6 +465,7 @@ pub fn group(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let rest = args.get(1..).unwrap_or(&[]);
     match sub {
         "create" => {
+            repo.require_lead(ctx, "create exploration groups")?;
             let name = rest.first().ok_or_else(|| exit(128, "usage: layr group create <name> [<base>]"))?;
             crate::store::check_name("group", name)?;
             let base = revs::resolve(repo, h.line.as_ref(), rest.get(1).map(|s| s.as_str()).unwrap_or("HEAD"))?;
@@ -484,6 +485,7 @@ pub fn group(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 _ => return Err(exit(128, "usage: layr group add <group> <line>")),
             };
             let line = repo.line(l)?;
+            repo.can_write_line(ctx, &line)?;
             if repo.p.db.group(g)?.is_none() {
                 return Err(exit(128, format!("fatal: no group '{g}'")));
             }

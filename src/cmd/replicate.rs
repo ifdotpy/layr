@@ -15,7 +15,6 @@ use crate::btrfs;
 use crate::ctx::Ctx;
 use crate::ids;
 use crate::model::StateKind;
-use crate::oplog;
 use crate::repo::Repo;
 use crate::store::Project;
 use anyhow::{anyhow, bail, Context, Result};
@@ -117,6 +116,11 @@ fn seqs(p: &Project) -> Result<BTreeMap<String, u64>> {
     Ok(p.db.max_seqs()?.into_iter().collect())
 }
 
+/// Layer snapshots on this machine (`<state-id>@<path>`).
+fn present_layers(p: &Project) -> Result<BTreeSet<String>> {
+    Ok(std::fs::read_dir(p.states_dir())?.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.contains('@')).collect())
+}
+
 fn present(p: &Project) -> Result<BTreeSet<String>> {
     Ok(p.db.present_states()?.into_iter().filter(|(_, d)| !d).map(|(id, _)| id).filter(|id| p.state_path(id).exists()).collect())
 }
@@ -170,13 +174,38 @@ fn plan(repo: &Repo, mine: &BTreeSet<String>, theirs: &BTreeSet<String>, auto: b
     Ok(out)
 }
 
+fn send_layer<R: Read, W: Write>(w: &mut Wire<R, W>, repo: &Repo, snap: &str) -> Result<u64> {
+    w.json(&json!({"op": "layer", "name": snap}))?;
+    let child =
+        btrfs::send_command(None, &repo.p.states_dir().join(snap)).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let n = w.send_stream(child)?;
+    if w.recv_json()?["op"] != "ok" {
+        bail!("peer did not store layer {snap}");
+    }
+    Ok(n)
+}
+
 fn send_states<R: Read, W: Write>(
     w: &mut Wire<R, W>,
     repo: &Repo,
     list: &[(String, Option<String>)],
     layers: bool,
+    peer_layers: &BTreeSet<String>,
+    peer_states: &BTreeSet<String>,
 ) -> Result<(usize, u64)> {
     let mut bytes = 0;
+    // Layers of states the peer has already (sent earlier without --layers).
+    if layers {
+        for id in peer_states {
+            if let Some(s) = repo.p.db.state(id)? {
+                for snap in s.layers.values() {
+                    if !peer_layers.contains(snap) && repo.p.states_dir().join(snap).exists() {
+                        bytes += send_layer(w, repo, snap)?;
+                    }
+                }
+            }
+        }
+    }
     for (id, parent) in list {
         w.json(&json!({"op": "state", "id": id, "parent": parent}))?;
         let pp = parent.as_ref().map(|p| repo.p.state_path(p));
@@ -192,7 +221,7 @@ fn send_states<R: Read, W: Write>(
             if let Some(s) = repo.p.db.state(id)? {
                 for snap in s.layers.values() {
                     let path = repo.p.states_dir().join(snap);
-                    if !path.exists() {
+                    if !path.exists() || peer_layers.contains(snap) {
                         continue;
                     }
                     w.json(&json!({"op": "layer", "name": snap}))?;
@@ -309,8 +338,9 @@ pub fn sync(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let auto = a.has("--auto");
     let result = (|| -> Result<(usize, usize, usize, usize, u64)> {
         let mine = present(&repo.p)?;
-        w.json(&json!({"op": "hello", "project": repo.p.name, "project_id": repo.p.id, "machine": repo.p.store.machine.id, "seqs": seqs(&repo.p)?, "present": mine}))?;
+        w.json(&json!({"op": "hello", "project": repo.p.name, "project_id": repo.p.id, "machine": repo.p.store.machine.id, "seqs": seqs(&repo.p)?, "present": mine, "layers": present_layers(&repo.p)?}))?;
         let hello = w.recv_json()?;
+        let peer_layers: BTreeSet<String> = serde_json::from_value(hello["layers"].clone()).unwrap_or_default();
         let peer_seqs: BTreeMap<String, u64> = serde_json::from_value(hello["seqs"].clone())?;
         let peer_present: BTreeSet<String> = serde_json::from_value(hello["present"].clone())?;
         // Records both ways.
@@ -325,7 +355,7 @@ pub fn sync(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let (mut sent, mut bytes) = (0, 0);
         if !a.has("--pull-only") {
             let list = plan(repo, &mine, &peer_present, auto)?;
-            let (n, b) = send_states(&mut w, repo, &list, a.has("--layers"))?;
+            let (n, b) = send_states(&mut w, repo, &list, a.has("--layers"), &peer_layers, &peer_present)?;
             sent = n;
             bytes = b;
         } else {
@@ -338,7 +368,7 @@ pub fn sync(ctx: &Ctx, args: &[String]) -> Result<i32> {
         } else {
             peer_present.iter().filter(|id| !mine_now.contains(*id) && wanted(&repo.p, id, auto)).cloned().collect()
         };
-        w.json(&json!({"op": "want", "ids": want, "have": mine_now, "layers": a.has("--layers")}))?;
+        w.json(&json!({"op": "want", "ids": want, "have": mine_now, "layers": a.has("--layers"), "have_layers": present_layers(&repo.p)?}))?;
         let got = recv_states(&mut w, &repo.p)?;
         w.json(&json!({"op": "bye"}))?;
         Ok((sent_records, got_records, sent, got, bytes))
@@ -385,7 +415,7 @@ pub fn serve(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let repo = Repo { p };
     let peer_seqs: BTreeMap<String, u64> = serde_json::from_value(hello["seqs"].clone())?;
-    w.json(&json!({"op": "hello", "machine": repo.p.store.machine.id, "seqs": seqs(&repo.p)?, "present": present(&repo.p)?}))?;
+    w.json(&json!({"op": "hello", "machine": repo.p.store.machine.id, "seqs": seqs(&repo.p)?, "present": present(&repo.p)?, "layers": present_layers(&repo.p)?}))?;
     let recs = w.recv_json()?;
     let lines: Vec<String> = serde_json::from_value(recs["lines"].clone())?;
     let mine = missing_lines(&repo.p, &peer_seqs)?;
@@ -417,7 +447,8 @@ pub fn serve(ctx: &Ctx, args: &[String]) -> Result<i32> {
         have2.insert(id.clone());
         list.push((id, parent));
     }
-    send_states(&mut w, &repo, &list, want["layers"].as_bool().unwrap_or(false))?;
+    let peer_layers: BTreeSet<String> = serde_json::from_value(want["have_layers"].clone()).unwrap_or_default();
+    send_states(&mut w, &repo, &list, want["layers"].as_bool().unwrap_or(false), &peer_layers, &have)?;
     let _ = w.recv_json();
     let _ = ctx;
     Ok(0)

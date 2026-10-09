@@ -168,6 +168,17 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
     if NOT_UNDOABLE.contains(&r.op.as_str()) {
         return Err(exit(1, format!("error: operation '{}' has nothing to undo", r.op)));
     }
+    // Permissions: undo changes every line the operation changed, so the caller must be allowed
+    // to change each of them. An operation without lines (tags, groups) needs the lead or the
+    // user who made it.
+    for (lid, ch) in &r.lines {
+        let owner = repo.p.db.line_by_id(lid)?.map(|l| l.owner).or(ch.before.as_ref().map(|b| b.owner)).unwrap_or(0);
+        let probe = Line { id: lid.clone(), name: ch.before.as_ref().or(ch.after.as_ref()).map(|s| s.name.clone()).unwrap_or_default(), head: String::new(), owner, machine: String::new(), group: None };
+        repo.can_write_line(ctx, &probe)?;
+    }
+    if r.lines.is_empty() && !repo.is_lead(ctx) && r.actor.uid != ctx.caller.uid {
+        return Err(exit(1, "permission denied: only the project lead or the user who made it can undo this operation"));
+    }
     let _lock = repo.p.lock()?;
     let mut rec = Record::new("undo");
     rec.data = serde_json::json!({"undo": r.id, "op": r.op});
