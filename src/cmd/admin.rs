@@ -13,6 +13,7 @@ use crate::revs;
 use crate::store::Project;
 use anyhow::{bail, Result};
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let spec =
@@ -33,20 +34,11 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let l = repo.line(&l.id)?;
         let st = repo.save(ctx, &l, &msg, a.has("--running"), a.has("--force") || a.has("--layers"))?;
         match st {
-            Some(mut s) => {
+            Some(s) => {
                 if a.has("--layers") {
-                    let layers = snapshot_layers(repo, &l, &s.id)?;
-                    if !layers.is_empty() {
-                        s.layers = layers.clone();
-                        let mut uuids = serde_json::Map::new();
-                        for snap in layers.values() {
-                            let info = btrfs::subvol_info(&repo.p.layer_path(&s.id, snap))?;
-                            uuids.insert(snap.clone(), serde_json::Value::String(info.uuid));
-                        }
-                        let mut rec = Record::new("save.layers");
-                        rec.data = serde_json::json!({"state": s.id, "layers": layers, "uuids": uuids});
-                        repo.commit_record(ctx, rec)?;
-                    }
+                    // Layers saved on a protected line may warm other users' lines.
+                    let shared = repo.policy().rule_for(&l.name).is_some();
+                    record_layers(ctx, repo, &s.id, &repo.working(&l), repo.owner_ids(&l), shared)?;
                 }
                 if !a.has("-q") {
                     outln!(ctx, "{} {}", l.name, ids::display(&s.id));
@@ -62,18 +54,44 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
     Ok(0)
 }
 
-fn snapshot_layers(repo: &Repo, line: &Line, state: &str) -> Result<BTreeMap<String, String>> {
-    let mut m = BTreeMap::new();
-    let w = repo.working(line);
+/// Snapshot the layers of a working folder (`w`) as the layers of `state` and record them
+/// (`save.layers`, with their subvolume UUIDs). `shared`: they may go to other users' lines.
+/// A layer folder that a tool made again as a plain folder becomes a layer first.
+pub fn record_layers(
+    ctx: &Ctx,
+    repo: &Repo,
+    state: &str,
+    w: &Path,
+    owner: (u32, u32),
+    shared: bool,
+) -> Result<BTreeMap<String, String>> {
+    let mut layers = BTreeMap::new();
     for p in repo.p.config_strings("regenerable") {
-        let lp = fsutil::safe_join(&w, &p)?;
-        if btrfs::is_subvolume(&lp) {
-            let name = format!("{state}@{}", p.replace('/', "%2F"));
+        let _ = crate::repo::convert_layer(w, &p, owner.0, owner.1);
+        let lp = fsutil::safe_join(w, &p)?;
+        let name = format!("{state}@{}", p.replace('/', "%2F"));
+        if btrfs::is_subvolume(&lp) && !repo.p.layer_path(state, &name).exists() {
             btrfs::snapshot(&lp, &repo.p.layer_path(state, &name), true)?;
-            m.insert(p, name);
+            layers.insert(p, name);
         }
     }
-    Ok(m)
+    if layers.is_empty() {
+        return Ok(layers);
+    }
+    let mut uuids = serde_json::Map::new();
+    for snap in layers.values() {
+        let info = btrfs::subvol_info(&repo.p.layer_path(state, snap))?;
+        uuids.insert(snap.clone(), serde_json::Value::String(info.uuid));
+    }
+    let mut rec = Record::new("save.layers");
+    rec.data = serde_json::json!({"state": state, "layers": layers, "uuids": uuids, "shared": shared});
+    if let Err(e) = repo.commit_record(ctx, rec) {
+        for snap in layers.values() {
+            let _ = btrfs::delete_tree(&repo.p.layer_path(state, snap));
+        }
+        return Err(e);
+    }
+    Ok(layers)
 }
 
 /// Undo the newest operation of the given kinds on a line.
@@ -414,15 +432,18 @@ pub fn try_cmd(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let state = revs::resolve(repo, h.line.as_ref(), rev)?;
     // `try` is the caller's own command: it gets the caller's environment.
     let env: Vec<(String, String)> = ctx.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-    run_check_in(ctx, repo, &state, &a.paths, &a.paths.join(" "), &env, a.has("-q"), a.has("--keep"))
+    run_check_in(ctx, repo, &state, &a.paths, &a.paths.join(" "), &env, a.has("-q"), a.has("--keep"), false)
 }
 
 /// Run a configured check as the caller in a temporary copy of `state` and record its exit code
 /// as a check of that state (`command` is the text recorded). The check runs the code of the
 /// state, which may come from another user: it gets a clean environment (no tokens or keys of
 /// the caller), only HOME, USER, LOGNAME and PATH.
+///
+/// After a passing check, the layers of the copy (its build output) become the layers of the
+/// state, shared: the next lines from this state, and the next checks, start warm.
 pub fn run_check(ctx: &Ctx, repo: &Repo, state: &str, argv: &[String], command: &str, quiet: bool) -> Result<i32> {
-    run_check_in(ctx, repo, state, argv, command, &[], quiet, false)
+    run_check_in(ctx, repo, state, argv, command, &[], quiet, false, true)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -435,6 +456,7 @@ fn run_check_in(
     env: &[(String, String)],
     quiet: bool,
     keep: bool,
+    capture_layers: bool,
 ) -> Result<i32> {
     let name = format!(".try-{:016x}", rand::random::<u64>());
     let dir = repo.p.line_path(&name);
@@ -460,6 +482,12 @@ fn run_check_in(
         let st = c.status()?;
         let code = st.code().unwrap_or(128);
         let _lock = repo.p.lock()?;
+        if code == 0 && capture_layers && repo.p.db.state(state)?.map(|s| s.layers.is_empty()).unwrap_or(false) {
+            let owner = (ctx.caller.uid, ctx.caller.gid);
+            if let Err(e) = record_layers(ctx, repo, state, &dir, owner, true) {
+                eprintln!("warning: the layers of the check were not kept: {e:#}");
+            }
+        }
         let mut rec = Record::new("check");
         rec.data =
             serde_json::json!({"state": state, "command": command, "exit": code, "seconds": started.elapsed().as_secs_f64()});
@@ -595,7 +623,7 @@ pub fn retention_plan(repo: &Repo) -> Result<(BTreeSet<String>, Vec<String>)> {
 pub fn run_gc(ctx: &Ctx, repo: &Repo, dry: bool) -> Result<Vec<String>> {
     let _lock = repo.p.lock()?;
     let (_keep, delete) = retention_plan(repo)?;
-    if dry || delete.is_empty() {
+    if dry {
         return Ok(delete);
     }
     let mut deleted = Vec::new();
@@ -610,9 +638,12 @@ pub fn run_gc(ctx: &Ctx, repo: &Repo, dry: bool) -> Result<Vec<String>> {
             deleted.push(id.clone());
         }
     }
-    let mut rec = Record::new("gc");
-    rec.data = serde_json::json!({"deleted": deleted});
-    repo.commit_record(ctx, rec)?;
+    let layers = prune_layers(repo)?;
+    if !deleted.is_empty() || !layers.is_empty() {
+        let mut rec = Record::new("gc");
+        rec.data = serde_json::json!({"deleted": deleted, "layers": layers});
+        repo.commit_record(ctx, rec)?;
+    }
     // Old temporary snapshots.
     for d in [repo.p.scan_dir(), repo.p.work_dir()] {
         if let Ok(rd) = std::fs::read_dir(&d) {
@@ -626,6 +657,36 @@ pub fn run_gc(ctx: &Ctx, repo: &Repo, dry: bool) -> Result<Vec<String>> {
                 if old {
                     let _ = btrfs::delete_tree(&e.path());
                 }
+            }
+        }
+    }
+    Ok(deleted)
+}
+
+/// Layer snapshots (build output) are large and only the newest ones warm new lines: they stay
+/// for the heads of lines and for the newest `retention.layers` (5) states with layers. The
+/// states themselves stay; only their layer snapshots go.
+fn prune_layers(repo: &Repo) -> Result<Vec<String>> {
+    let keep_n = repo.p.config_u64("retention.layers", 5) as usize;
+    let heads: BTreeSet<String> = repo.p.db.lines()?.into_iter().map(|l| l.head).collect();
+    let mut layered: Vec<(i64, String, Vec<String>)> = Vec::new();
+    for (id, _) in repo.p.db.present_states()? {
+        if let Some(s) = repo.p.db.state(&id)? {
+            let snaps: Vec<String> = s.layers.values().filter(|n| repo.p.layer_path(&id, n).exists()).cloned().collect();
+            if !snaps.is_empty() {
+                layered.push((s.time, id, snaps));
+            }
+        }
+    }
+    layered.sort_by_key(|x| std::cmp::Reverse(x.0));
+    let mut deleted = Vec::new();
+    for (_, id, snaps) in layered.into_iter().skip(keep_n) {
+        if heads.contains(&id) {
+            continue;
+        }
+        for n in snaps {
+            if btrfs::delete_tree(&repo.p.layer_path(&id, &n)).is_ok() {
+                deleted.push(n);
             }
         }
     }

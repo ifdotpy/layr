@@ -355,6 +355,8 @@ impl Db {
                             let mut v: serde_json::Value = serde_json::from_str(&raw)?;
                             v["layers"] = d.get("layers").cloned().unwrap_or_default();
                             v["layer_uuids"] = d.get("uuids").cloned().unwrap_or_default();
+                            v["layer_by"] = serde_json::json!(rec.actor.uid);
+                            v["layer_shared"] = serde_json::json!(d.get("shared").and_then(|x| x.as_bool()).unwrap_or(false));
                             tx.execute("UPDATE states SET rec=?2 WHERE id=?1", params![st, v.to_string()])?;
                         }
                     }
@@ -408,6 +410,11 @@ impl Db {
         let mut st = self.conn.prepare("SELECT id FROM states WHERE display LIKE ?1 || '%' LIMIT 3")?;
         let v = st.query_map(params![prefix], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
         Ok(v)
+    }
+
+    /// The machine that made a state.
+    pub fn state_machine(&self, id: &str) -> Result<Option<String>> {
+        Ok(self.conn.query_row("SELECT machine FROM states WHERE id=?1", params![id], |r| r.get(0)).optional()?)
     }
 
     /// The state whose signed record names subvolume `uuid`.
@@ -643,6 +650,8 @@ mod tests {
             running: false,
             conflicts: vec![],
             layers: Default::default(),
+            layer_by: None,
+            layer_shared: false,
         });
         r
     }

@@ -315,6 +315,8 @@ impl<'a> Repo<'a> {
             running: false,
             conflicts: Vec::new(),
             layers: BTreeMap::new(),
+            layer_by: None,
+            layer_shared: false,
         })
     }
 
@@ -695,20 +697,53 @@ impl<'a> Repo<'a> {
         }
         for path in paths {
             let lp = fsutil::safe_join(w, &path)?;
-            if let Some(snap) = st.layers.get(&path) {
-                let src = self.p.layer_path(state, snap);
-                if src.exists() {
-                    if lp.symlink_metadata().is_ok() {
-                        fsutil::remove_entry(w, &path)?;
-                    }
-                    fsutil::make_parents(w, &path, Some((uid, gid)))?;
-                    btrfs::snapshot(&src, &lp, false)?;
-                    continue;
+            if let Some(src) = self.warm_layer(state, &path, uid)? {
+                if lp.symlink_metadata().is_ok() {
+                    fsutil::remove_entry(w, &path)?;
                 }
+                fsutil::make_parents(w, &path, Some((uid, gid)))?;
+                btrfs::snapshot(&src, &lp, false)?;
+                // The copy shares its blocks; only its files change owner.
+                give_tree(&lp, uid, gid)?;
+                continue;
             }
             make_layer(w, &path, uid, gid)?;
         }
         Ok(())
+    }
+
+    /// The layer snapshot that a line of `uid` starting at `state` takes for `path`: the state's
+    /// own, or else the one of its nearest ancestor that has one on this machine (the build
+    /// output closest to the line's content). A layer made by another user is taken only if it
+    /// was made on a protected line (`layer_shared`): a layer holds code that review does not see.
+    pub fn warm_layer(&self, state: &str, path: &str, uid: u32) -> Result<Option<PathBuf>> {
+        const SEARCH: usize = 200;
+        let local = self.p.store.machine.id.clone();
+        let mut seen = BTreeSet::new();
+        let mut q = std::collections::VecDeque::from([state.to_string()]);
+        while let Some(id) = q.pop_front() {
+            if seen.len() >= SEARCH {
+                break;
+            }
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            let rec = match self.p.db.state(&id)? {
+                Some(r) => r,
+                None => continue,
+            };
+            if let Some(snap) = rec.layers.get(path) {
+                let src = self.p.layer_path(&id, snap);
+                let owner_of_line = rec.line.as_ref().and_then(|l| self.p.db.line_by_id(l).ok().flatten()).map(|l| l.owner);
+                let allowed = rec.layer_shared || rec.layer_by == Some(uid) || owner_of_line == Some(uid);
+                // Another state's layer only from this machine; the state's own also after a move.
+                if src.exists() && allowed && (id == state || self.p.db.state_machine(&id)?.as_deref() == Some(local.as_str())) {
+                    return Ok(Some(src));
+                }
+            }
+            q.extend(rec.parents);
+        }
+        Ok(None)
     }
 
     /// Record a new head for a line (and optionally a working state change).
@@ -866,6 +901,22 @@ fn prune_empty_parents(target: &Path, to: &Path, rel: &str) -> Result<()> {
         comps.pop();
     }
     Ok(())
+}
+
+/// Give every entry of a tree (a new layer copy, still private) to `uid:gid`, without following
+/// links and without entering nested subvolumes.
+fn give_tree(root: &Path, uid: u32, gid: u32) -> Result<()> {
+    let mut paths = Vec::new();
+    fsutil::walk(root, "", &mut |rel, m| {
+        if m.uid != uid || m.gid != gid {
+            paths.push(rel.to_string());
+        }
+        Ok(true)
+    })?;
+    for p in paths {
+        fsutil::chown_nofollow(&root.join(p), uid, gid)?;
+    }
+    fsutil::chown_nofollow(root, uid, gid)
 }
 
 /// Create an empty nested subvolume for a regenerable layer at `path` in the working folder.

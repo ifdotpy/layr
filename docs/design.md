@@ -96,7 +96,29 @@ git commit, with the same parents (merges stay merges). The same state always gi
 commit. `layr push --squash` exports the pushed state as one commit on top of the last exported
 one; a program on top that wants one commit per task uses it.
 
-## 5. What is not in layr
+## 5. Warm layers
+
+A layer is a folder of regenerable content (`target`, `node_modules`, `.venv`) kept as a nested
+subvolume, outside states, diffs and backups. Every working folder would otherwise build from
+nothing, and the same build output would be on disk once per folder.
+
+- A new line (and the temporary copy of a check) takes for each layer the snapshot of its start
+  state, or else of the nearest ancestor state on this machine that has one. The copy shares
+  all blocks; only its files change owner. A build tool then rebuilds what changed.
+- A layer made by another user goes to a line only if it was made on a protected line, because
+  a layer holds code that review does not see. Other layers go only to lines of the user who
+  made them.
+- The checks of a protected line build the state the line takes. After a passing check its
+  layers become the layers of that state, shared. So the protected line gets warm build output
+  without a separate build, and the next checks start warm too. `layr save --layers` keeps the
+  layers of a line's working folder as well (shared when the line is protected).
+- gc keeps the layer snapshots of line heads and of the newest `retention.layers` (5) states
+  with layers; the states themselves stay.
+
+Who builds, and when, is the choice of the program on top: it can run its checks on the
+protected line, or build in its own line and `save --layers`.
+
+## 6. What is not in layr
 
 - Choosing between several attempts at one task, and marking the others stale: a workflow of
   the program on top. It uses lines, `merge --expect` and deny rules.
@@ -104,7 +126,7 @@ one; a program on top that wants one commit per task uses it.
   program on top builds this from `export`, `diff` and the line folder itself.
 - Any notion of agents, tasks, turns or a lead.
 
-## 6. Planned
+## 7. Planned
 
 - Lines outside the store: a working folder anywhere on the same btrfs file system, as git
   worktrees can be anywhere.
@@ -115,6 +137,3 @@ one; a program on top that wants one commit per task uses it.
 - Path rules: protection settings for paths, such as CI configuration (Perforce, CODEOWNERS
   with "all of" semantics).
 - A dry-run mode for rule changes that reports what would be refused (GitHub rule evaluation).
-- Warm layers: a new line takes a reflink copy of a layer from the newest state of a protected
-  line that has it, given to the new owner. A layer passes to another owner only from a
-  protected line, because a layer holds code that review does not see.
