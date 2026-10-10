@@ -90,8 +90,9 @@ state id prefixes, git commit ids of imported or pushed states, `stash@{n}`, `HE
    command in a temporary copy of that state and records the result.
 4. A maintainer runs `layr merge topic-1 --expect <state>` in the protected main line: it merges
    exactly the reviewed state and refuses if the line moved. When main's rule names checks
-   (`layr config check.unit 'cargo test'; layr protect main --check unit`), they run on the
-   merge result as the caller, without the project lock, and main moves only if they pass and
+   (`layr config check.unit 'PATH=$HOME/.cargo/bin:$PATH cargo test'; layr protect main --check
+   unit`), they run on the merge result as the caller, in a clean environment (the command sets
+   what it needs), without the project lock, and main moves only if they pass and
    main did not move in the meantime. A merge never stops on a conflict: the new state lists the
    conflicts, text files get markers, and `layr status` shows them. A line with checks takes no
    result with conflicts: they are resolved in a line first.

@@ -78,7 +78,7 @@ example: the group of AI agents may not push, sync or trust machines.
 |---|---|---|
 | `update` | maintainer | lowest role that may merge into the line |
 | `expect` | true | a merge must name the exact reviewed state (`--expect`) |
-| `check` | none | named checks (`layr config check.<name> '<command>'`) that must pass on the merge result before the line moves; the command runs as the caller in a temporary copy of the result with a clean environment (it runs code that may come from another user), and a passing check of the same state and command is reused |
+| `check` | none | named checks (`layr config check.<name> '<command>'`) that must pass on the merge result before the line moves; the command runs as the caller in a temporary copy of the result with a clean environment (it runs code that may come from another user): only HOME, USER, LOGNAME and `PATH=/usr/local/bin:/usr/bin:/bin`, so the command sets what else it needs, for example `PATH=$HOME/.cargo/bin:$PATH cargo test`. A passing check of the same state and command is reused |
 | `direct` | false | the owner may also commit, reset or apply in the line directly |
 | `rewrite` | admin | lowest role that may move the line to a state that is not a descendant (reset, undo of a merge) |
 
