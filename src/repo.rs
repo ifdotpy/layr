@@ -83,7 +83,7 @@ impl<'a> Repo<'a> {
 
     pub fn can_read(&self, ctx: &Ctx) -> Result<()> {
         let uid = ctx.caller.uid;
-        if uid == 0 || uid == self.p.lead() || self.members_all() {
+        if uid == 0 || uid == self.p.admin() || self.members_all() {
             return Ok(());
         }
         let members: Vec<u64> = self
@@ -98,13 +98,13 @@ impl<'a> Repo<'a> {
         bail!("permission denied: user {} is not a member of project {}", ctx.caller.user, self.p.name)
     }
 
-    pub fn is_lead(&self, ctx: &Ctx) -> bool {
-        ctx.caller.uid == 0 || ctx.caller.uid == self.p.lead()
+    pub fn is_admin(&self, ctx: &Ctx) -> bool {
+        ctx.caller.uid == 0 || ctx.caller.uid == self.p.admin()
     }
 
-    pub fn require_lead(&self, ctx: &Ctx, what: &str) -> Result<()> {
-        if !self.is_lead(ctx) {
-            bail!("permission denied: only the project lead can {what}");
+    pub fn require_admin(&self, ctx: &Ctx, what: &str) -> Result<()> {
+        if !self.is_admin(ctx) {
+            bail!("permission denied: only the project admin can {what}");
         }
         Ok(())
     }
@@ -113,7 +113,7 @@ impl<'a> Repo<'a> {
         if line.owner == 0 && !ctx.caller.is_root() {
             bail!("permission denied: only root can change the root-owned line '{}'", line.name);
         }
-        if ctx.caller.uid == 0 || ctx.caller.uid == line.owner || ctx.caller.uid == self.p.lead() {
+        if ctx.caller.uid == 0 || ctx.caller.uid == line.owner || ctx.caller.uid == self.p.admin() {
             return Ok(());
         }
         bail!("permission denied: line '{}' belongs to another user", line.name)
@@ -177,9 +177,9 @@ impl<'a> Repo<'a> {
         (line.owner, c.gid)
     }
 
-    /// The lead of this machine (uid, gid): configured commands run as this user.
-    pub fn lead_ids(&self) -> (u32, u32) {
-        let uid = self.p.lead();
+    /// The admin of this machine (uid, gid): configured commands run as this user.
+    pub fn admin_ids(&self) -> (u32, u32) {
+        let uid = self.p.admin();
         (uid, crate::ctx::Caller::from_uid(uid).gid)
     }
 
@@ -222,7 +222,6 @@ impl<'a> Repo<'a> {
             author: ctx.author(),
             message: message.to_string(),
             time: ids::now_ms(),
-            turn: ctx.turn(),
             running: false,
             conflicts: Vec::new(),
             layers: BTreeMap::new(),
@@ -740,7 +739,7 @@ impl<'a> Repo<'a> {
 /// True if a conflict is still open in `root`. A content conflict is open while the file holds
 /// conflict markers (a merge writes markers only into files of at most `MAX_TEXT` bytes, so a
 /// larger file has none). Other kinds (moves, deletes, types, binary files) stay open until the
-/// next commit of the line, which is the lead's decision.
+/// next commit of the line, which is the admin's decision.
 pub fn conflict_open(root: &Path, c: &Conflict) -> Result<bool> {
     if c.kind == "content" || c.kind == "add/add" {
         return Ok(match fsutil::lmeta(root, &c.path) {

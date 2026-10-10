@@ -42,7 +42,7 @@ pub fn merge_states(
         ours_label: "HEAD",
         theirs_label,
         config: &cfg,
-        run_as: Some(repo.lead_ids()),
+        run_as: Some(repo.admin_ids()),
         allow_root: ctx.caller.is_root(),
     })?;
     let own = repo.own(line);
@@ -466,7 +466,7 @@ pub fn group(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let rest = args.get(1..).unwrap_or(&[]);
     match sub {
         "create" => {
-            repo.require_lead(ctx, "create exploration groups")?;
+            repo.require_admin(ctx, "create exploration groups")?;
             let name = rest.first().ok_or_else(|| exit(128, "usage: layr group create <name> [<base>]"))?;
             crate::store::check_name("group", name)?;
             let base = revs::resolve(repo, h.line.as_ref(), rest.get(1).map(|s| s.as_str()).unwrap_or("HEAD"))?;

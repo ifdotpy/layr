@@ -41,7 +41,7 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 (Some(n), Some(u)) => (n, u),
                 _ => return Err(exit(128, "usage: layr remote add <name> <url>")),
             };
-            repo.require_lead(ctx, "change remotes")?;
+            repo.require_admin(ctx, "change remotes")?;
             crate::store::check_name("remote", n)?;
             if sub == "add" && repo.p.config_value(&format!("remote.{n}.url"))?.is_some() {
                 return Err(exit(3, format!("error: remote {n} already exists.")));
@@ -53,7 +53,7 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         "remove" | "rm" => {
             let n = args.get(1).ok_or_else(|| exit(128, "usage: layr remote remove <name>"))?;
-            repo.require_lead(ctx, "change remotes")?;
+            repo.require_admin(ctx, "change remotes")?;
             let _lock = repo.p.lock()?;
             set_config(ctx, repo, &format!("remote.{n}.url"), serde_json::Value::Null)?;
             Ok(0)
@@ -210,9 +210,9 @@ pub fn push(ctx: &Ctx, args: &[String]) -> Result<i32> {
         },
         None => ("HEAD".to_string(), h.line()?.name.clone()),
     };
-    // The lead decides when a task goes to the remote (members with push.members = true too).
-    if !repo.is_lead(ctx) && !repo.p.config_bool("push.members", false) {
-        return Err(exit(1, "permission denied: only the project lead pushes (set push.members true to allow members)"));
+    // The admin decides when a state goes to the remote (members with push.members = true too).
+    if !repo.is_admin(ctx) && !repo.p.config_bool("push.members", false) {
+        return Err(exit(1, "permission denied: only the project admin pushes (set push.members true to allow members)"));
     }
     let state_id = revs::resolve(repo, line.as_ref(), &rev)?;
     let state = repo.state(&state_id)?;

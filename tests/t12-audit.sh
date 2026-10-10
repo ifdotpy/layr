@@ -4,7 +4,7 @@
 . "$(dirname "$0")/lib.sh"
 
 chmod 755 $T $LAYR_ROOT
-for u in layr-lead layr-a1; do id $u >/dev/null 2>&1 || useradd -m $u; done
+for u in layr-admin layr-u1; do id $u >/dev/null 2>&1 || useradd -m $u; done
 export LAYR_SOCKET=$T/layr.sock
 cp $LAYR $T/layr && chmod 755 $T/layr
 $T/layr daemon --socket $LAYR_SOCKET --tick 60 > $T/daemon.log 2>&1 &
@@ -13,7 +13,7 @@ trap 'kill $DPID 2>/dev/null; cleanup' EXIT
 for i in $(seq 1 50); do [ -S $LAYR_SOCKET ] && break; sleep 0.1; done
 as() { local u=$1; shift; runuser -u $u -- env LAYR_SOCKET=$LAYR_SOCKET PATH=/usr/bin:/bin "$@"; }
 sample $T/src
-l init s --from $T/src --owner layr-lead -q >/dev/null
+l init s --from $T/src --owner layr-admin -q >/dev/null
 P=$LAYR_ROOT/projects/s/lines
 cd $P/main || exit 1
 echo two >> notes.txt; l commit -qam two
@@ -90,14 +90,14 @@ has "listed as a conflict" "big.bin" "$(l status -s)"
 eq "grep skips it" "1" "$(mem $LAYR grep -q theirs; echo $?)"
 has "blame refuses it" "larger than 64 MiB" "$(mem $LAYR blame big.bin 2>&1)"
 
-# 5. Tags are set by the lead.
-l branch -q t1 --owner layr-a1
-out=$(cd $P/t1 && as layr-a1 $T/layr tag v-member 2>&1); rc=$?
+# 5. Tags are set by the admin.
+l branch -q t1 --owner layr-u1
+out=$(cd $P/t1 && as layr-u1 $T/layr tag v-member 2>&1); rc=$?
 eq "a member cannot create a tag" "128" "$rc"
 has "with the reason" "create tags" "$out"
 eq "no tag" "" "$(l tag -l v-member)"
-ok "the lead can" sh -c "cd $P/main && runuser -u layr-lead -- env LAYR_SOCKET=$LAYR_SOCKET $T/layr tag v-lead"
-eq "the lead's tag" "v-lead" "$(l tag -l v-lead)"
+ok "the admin can" sh -c "cd $P/main && runuser -u layr-admin -- env LAYR_SOCKET=$LAYR_SOCKET $T/layr tag v-admin"
+eq "the admin's tag" "v-admin" "$(l tag -l v-admin)"
 
 # 6. Sync trusts the peer only after its records passed the checks.
 cat > $T/fake-peer.py <<'PY'
@@ -132,6 +132,6 @@ PY
 for i in $(seq 1 50); do [ -S $T/fake.sock ] && break; sleep 0.1; done
 big=$(head -c 100000 /dev/zero | tr '\0' x)
 envs=(); for i in $(seq 1 15); do envs+=("V$i=$big"); done
-out=$(cd /tmp && runuser -u layr-a1 -- env LAYR_SOCKET=$T/fake.sock "${envs[@]}" $T/layr status 2>&1)
+out=$(cd /tmp && runuser -u layr-u1 -- env LAYR_SOCKET=$T/fake.sock "${envs[@]}" $T/layr status 2>&1)
 has "a failed send is reported" "cannot send the request" "$out"
 finish

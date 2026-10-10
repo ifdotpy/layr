@@ -18,8 +18,8 @@ eq "automatic states do not hold the layer content" "" "$(l show HEAD@{0}:target
 eq "status ignores the layer" " M notes.txt" "$(l status -s)"
 rm -rf target; mkdir target; echo rebuilt > target/out
 eq "a tool replaced the layer with a plain folder" "plain" "$(l layer list | awk '{print $2}')"
-l save -q --turn-end
-eq "the end of the turn makes it a layer again" "layer" "$(l layer list | awk '{print $2}')"
+l layer repair >/dev/null; l save -q
+eq "layer repair makes it a layer again" "layer" "$(l layer list | awk '{print $2}')"
 eq "and keeps its content" "rebuilt" "$(cat target/out)"
 # A live move with warm build output. The first sync sends the state without layers; the next
 # sync with --layers must still send them.

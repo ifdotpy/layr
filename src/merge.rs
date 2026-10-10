@@ -29,7 +29,7 @@ pub struct Input<'a> {
     pub theirs_label: &'a str,
     /// Project configuration: `merge.driver.<name>` and `merge.verify.<name>` commands.
     pub config: &'a dyn Fn(&str) -> Option<String>,
-    /// Configured drivers run as this user: the lead of this machine.
+    /// Configured drivers run as this user: the admin of this machine.
     pub run_as: Option<(u32, u32)>,
     /// The caller is root: a driver may then run as root.
     pub allow_root: bool,
@@ -713,12 +713,12 @@ fn sh_quote_str(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// Run a configured command as the driver user (the lead of this machine), with a clean
+/// Run a configured command as the driver user (the admin of this machine), with a clean
 /// environment. Never as root unless the caller of the merge is root.
 fn shell(cmd: &str, run_as: Option<(u32, u32)>, allow_root: bool) -> Result<bool> {
     let uid = run_as.map(|r| r.0).unwrap_or(0);
     if uid == 0 && !allow_root && rustix::process::geteuid().is_root() {
-        bail!("refusing to run a merge command as root (the project has no lead on this machine)");
+        bail!("refusing to run a merge command as root (the project has no admin on this machine)");
     }
     let mut c = Command::new("sh");
     c.arg("-c").arg(cmd);

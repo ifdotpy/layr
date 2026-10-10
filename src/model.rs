@@ -9,9 +9,10 @@ pub struct Author {
     pub email: String,
     #[serde(default)]
     pub uid: u32,
-    /// Agent label, for example "codex worker 3".
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent: Option<String>,
+    /// The label of the session that made it (a terminal, a CI job, a tool), from
+    /// `LAYR_SESSION`. Free text: layr shows it and never decides anything from it.
+    #[serde(default, alias = "agent", skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -53,8 +54,6 @@ pub struct StateRec {
     #[serde(default)]
     pub message: String,
     pub time: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub turn: Option<String>,
     /// Taken while processes ran in the line: crash-consistent only.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub running: bool,
@@ -92,8 +91,9 @@ pub struct LineChange {
 pub struct Actor {
     pub uid: u32,
     pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent: Option<String>,
+    /// See `Author::session`.
+    #[serde(default, alias = "agent", skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,7 +123,7 @@ impl Record {
             time: 0,
             op: op.to_string(),
             project: String::new(),
-            actor: Actor { uid: 0, name: String::new(), agent: None },
+            actor: Actor { uid: 0, name: String::new(), session: None },
             states: Vec::new(),
             lines: BTreeMap::new(),
             data: serde_json::Value::Null,
@@ -302,11 +302,17 @@ mod tests {
             author: Author::default(),
             message: String::new(),
             time: 0,
-            turn: None,
             running: false,
             conflicts: vec![],
             layers: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn reads_the_session_label_of_older_records() {
+        let a: Actor = serde_json::from_str(r#"{"uid":1,"name":"u","agent":"old label"}"#).unwrap();
+        assert_eq!(a.session.as_deref(), Some("old label"));
+        assert!(serde_json::to_string(&a).unwrap().contains(r#""session":"old label""#));
     }
 
     #[test]

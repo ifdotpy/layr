@@ -1,19 +1,20 @@
 # layr
 
-Local version control for agent workspaces on btrfs. Git and GitHub stay the remote layer
+Local version control on btrfs, for many users and many working folders on one machine. Git and GitHub stay the remote layer
 (push, pull requests, CI). Everything local is btrfs: each line (branch and worktree in one) is a
 writable snapshot, each state (commit) is a read-only snapshot, change lists come from
 `btrfs send --no-data` in O(changes), and a merge copies files with reflinks.
 
-The commands follow the git verbs and print git formats, so models that know git use layr
-without training. Output of `diff`, `status --porcelain`, `show`, `log --format` and `--stat`
+The commands follow the git verbs and print git formats, so people and tools that know git use
+layr without new habits. Output of `diff`, `status --porcelain`, `show`, `log --format` and `--stat`
 matches git byte for byte for the same content (tests/t08-gitcompat.sh).
 
 Status: working implementation, Linux only (btrfs, kernel 5.6 or newer). Unsafe code is limited
 to `src/sys.rs` (btrfs ioctls, fork, user switching, the user database); everything else uses
-`rustix` and the standard library, and the crate denies `unsafe_code` outside that module. Built for the Codex
-Studio Linux VM, where all agents run. The design contract is
-`docs/btrfs-local-vcs.md` in the Codex Studio repository.
+`rustix` and the standard library, and the crate denies `unsafe_code` outside that module.
+
+layr is a general tool: it knows Unix users, projects, lines, states and rules, and nothing about
+the programs that use it. Programs built on top of it use only its public commands.
 
 ## Requirements
 
@@ -32,15 +33,15 @@ cargo test                   # unit tests
 
 ```sh
 sudo layr daemon &                                   # the root service, /run/layr/layr.sock
-sudo layr init app --from ~/src/app --owner lead     # or: layr clone <git url> app
-cd /studio/projects/app/lines/main                   # a line is a folder
+sudo layr init app --from ~/src/app --owner alice    # or: layr clone <git url> app
+cd /var/lib/layr/projects/app/lines/main             # a line is a folder
 layr status; layr diff; layr add -A; layr commit -m "change"
-layr branch worker-1 --owner agent1                  # a new line: O(1), its own folder
-layr merge worker-1 --expect <state id the lead reviewed>
-layr push origin task-123                            # one git commit for the task
+layr branch topic-1 --owner bob                      # a new line: O(1), its own folder
+layr merge topic-1 --expect <state id alice reviewed>
+layr push origin topic-1                             # one git commit for the change
 ```
 
-The store lives under `$LAYR_ROOT` (default `/studio`). Users other than root talk to the
+The store lives under `$LAYR_ROOT` (default `/var/lib/layr`). Users other than root talk to the
 service; root can run every command directly.
 
 ## Concepts
@@ -49,7 +50,9 @@ service; root can run every command directly.
 | --------- | ------------------------------------------------------------------------------------------- |
 | state     | read-only snapshot + signed record (id, parents, author, message, conflicts). A commit.    |
 | line      | writable snapshot at `projects/<p>/lines/<name>` with an owner and a head state             |
-| auto state| a snapshot of the working content: before every changing command, at the end of an agent turn (`layr save --turn-end`), and every 10 minutes when the content changed (the service) |
+| auto state| a snapshot of the working content: before every changing command, on `layr save`, and every 10 minutes when the content changed (the service) |
+| layer     | a folder of regenerable content (`target`, `node_modules`) kept as a nested subvolume: outside states, diffs and backups |
+| session   | a free-text label of the program that runs layr (`LAYR_SESSION`): shown in `op log` and used by `undo` to find "my last operation"; layr never decides permissions by it |
 | record    | one signed operation (Ed25519, UUIDv7 ids) in the project database; undo restores pointers |
 
 States are folders: `layr show <state>:<path>` and `layr grep <pattern> <state>` read them
@@ -65,23 +68,24 @@ without a checkout.
 | safety        | `undo`, `op log`, `save`, `try <state> -- <cmd>`, `checks`, `gc`, `fsck`, `reindex`           |
 | remote (git)  | `remote`, `fetch`, `pull`, `push`, `clone`                                                    |
 | machines      | `sync -- <cmd>` / `serve-peer`, `machines [trust]`, `op export` / `op import` (JSONL), `backup` / `backup restore` / `backup verify` |
-| copies        | `export <folder>`, `slot sync|collect|status|forget` (host_exec slots on the Mac)              |
-| setup         | `init`, `projects`, `config`, `layer add|remove|list`, `daemon`                               |
+| copies        | `export <folder>`, `mirror sync|collect|status|forget <folder>` (a copy kept in step with a line; changes made in it come back with a three-way merge) |
+| setup         | `init`, `projects`, `config`, `layer add|remove|list|repair`, `daemon`                        |
 
 Revisions: `HEAD`, `@`, `HEAD~2`, `HEAD^2`, line names, `line@machine`, tags, `origin/main`,
 state id prefixes, git commit ids of imported or pushed states, `stash@{n}`, `HEAD@{n}`
 (automatic states, newest first).
 
-## Agent workflow
+## Workflow
 
-1. The lead gives each worker a line: `layr branch w1 --owner agent1`.
-2. The worker commits in its folder. Studio calls `layr save --turn-end` after each turn.
-3. Review takes an exact state: `layr diff main...w1`, `layr try <state> -- <tests>` runs the
+1. The admin gives a user a line: `layr branch topic-1 --owner bob`.
+2. The user works and commits in that folder. A tool that drives the user can call `layr save`
+   at quiet points, and `layr layer repair` when a build tool made a layer folder again.
+3. Review takes an exact state: `layr diff main...topic-1`, `layr try <state> -- <tests>` runs the
    command in a temporary copy of that state and records the result.
-4. `layr merge w1 --expect <state>` merges exactly the reviewed state and refuses if the line
+4. `layr merge topic-1 --expect <state>` merges exactly the reviewed state and refuses if the line
    moved. A merge never stops on a conflict: the new state lists the conflicts, text files get
    markers, and `layr status` shows them.
-5. `layr push origin <task-branch>` exports the head as one git commit. The exact commit id is
+5. `layr push origin <branch>` exports the head as one git commit. The exact commit id is
    recorded before the push; after a lost response, a repeated push reads the remote ref first.
    With `push.require_check true`, a push needs a passing `layr try` of that exact state.
 
@@ -98,7 +102,7 @@ rename/rename and delete/modify. Files changed on both sides use the driver from
 | `text` (default)  | three-way line merge (`git merge-file`)                                           |
 | `union`, `ours`, `theirs`, `binary` | as in git                                                       |
 | `blocks`          | binary merge by byte ranges from the change lists: allowed when both sides kept the inode and size and the ranges do not overlap; `merge-verify=<name>` runs a check command |
-| `<name>`          | `merge.driver.<name>` command with `%O %A %B %P`, run as the lead of this machine   |
+| `<name>`          | `merge.driver.<name>` command with `%O %A %B %P`, run as the admin of this machine  |
 
 ## Storage and consistency
 
@@ -119,21 +123,24 @@ its record and the derived rows. After a crash only a snapshot without a record 
 
 ## Security model
 
-- The service runs as root; every other user is a client (`SO_PEERCRED`). Agents cannot read
+- The service runs as root; every other user is a client (`SO_PEERCRED`). Clients cannot read
   `states/` or the database; they read history through layr.
 - A line belongs to its owner. All writes of the service into a line go through descriptors
   (`openat2` with `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS`); a link in a line never redirects a
   root write. New working folders are prepared in a private folder and appear when ready.
 - Commands for users (git network access, `try`, `sync`, merge drivers, `apply` in a line) run
   with that user's uid, groups and a clean environment. Paths named by a user outside the store
-  (export, slots, backups, patch files) are accessed with the user's file permissions, and so
+  (export, mirrors, backups, patch files) are accessed with the user's file permissions, and so
   is a file such a command leaves for the service (the result of a merge driver).
-- Undo, merge, push, tags and groups check line owners and the project lead. Only the lead sets
-  tags (they are project-wide names and keep their states from gc). Only root changes the lead
-  or makes root-owned lines.
-- Replication takes records only from trusted machines (`layr sync` trusts the peer the lead
+- Undo, merge, push, tags and groups check line owners and the project admin (`layr config
+  admin <uid>`; older stores call the key `lead`). Only the admin sets tags (they are
+  project-wide names and keep their states from gc). Only root changes the admin or makes
+  root-owned lines.
+- Replication takes records only from trusted machines (`layr sync` trusts the peer the admin
   chose once its records passed the checks; `layr machines trust`), checks the project id,
-  signatures and sequence numbers, and refuses a changed copy of a known record.
+  signatures and sequence numbers, and refuses a changed copy of a known record. Admin,
+  members, merge commands, remotes and the backup folder are per machine; other machines'
+  records never change a local line.
 - A btrfs stream from a peer or a backup passes a check on its way to `btrfs receive`, which
   would otherwise find snapshot and clone sources by UUID anywhere on the file system: one
   subvolume with the name and UUID its signed record names, a parent only from the same
@@ -141,8 +148,7 @@ its record and the derived rows. After a crash only a snapshot without a record 
   subvolume. After the receive, the new subvolume must be a snapshot of exactly that parent.
 - Files larger than 64 MiB count as binary for diff, grep, blame, rename detection and merge:
   the service never reads such a file into memory (`show` and merge drivers copy it in
-  pieces). Patches, messages and records named by a user are limited in size too. Lead, members, merge commands, remotes and the
-  backup folder are per machine; other machines' records never change a local line.
+  pieces). Patches, messages and records named by a user are limited in size too.
 - The service limits running requests per user and in total, and drops a client that does not
   send its request within 10 seconds.
 
@@ -157,8 +163,9 @@ backup's records give for the machine that wrote it (this machine's own key when
 machine), imports the records, receives each stream through the stream check, compares each
 file with its SHA-256 while reading it once (no links, pipes or devices), and gives the lines
 working folders on the new machine. A restore trusts the machine that signed the backup: a
-backup made entirely by another machine identity restores as that machine's project. `layr sync -- ssh host layr serve-peer <p>`
-exchanges records both ways and sends missing states with `btrfs send -p <common state>`;
+backup made entirely by another machine identity restores as that machine's project.
+
+`layr sync -- ssh host layr serve-peer <p>` exchanges records both ways and sends missing states with `btrfs send -p <common state>`;
 `--auto --layers` also carries working content and build output for a live move.
 
 ## Performance
@@ -186,9 +193,7 @@ snapshot folders.
 
 ## Not in this version
 
-- APFS backend (macOS projects outside the VM).
-- The host_exec channel itself and the read-only network share are Studio features; layr
-  provides the slot copies (`layr slot`).
+- APFS backend (macOS).
 - Structured (AST) merge; format drivers can be plugged in through `merge.driver.<name>`.
 - `layrhub`: records, ids and stream transport are ready for it; the protocol is not.
 - Content checks of replicated states: a received state must be the subvolume its signed record

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copies outside the store: export (with the APFS name rules), host_exec slots (sync, collect,
+# Copies outside the store: export (with the APFS name rules), mirrors (sync, collect,
 # conflicts), backups of the whole project and their restore on another file system.
 . "$(dirname "$0")/lib.sh"
 
@@ -32,26 +32,26 @@ has "the colliding names are listed" "README" "$(l export $T/exp3 2>&1)"
 no "colliding names are not written" test -e $T/exp3/README
 rm Readme README
 
-# slots
-l slot sync -q $T/slot
-eq "slot holds the content" "$(cat notes.txt)" "$(cat $T/slot/notes.txt)"
+# mirrors
+l mirror sync -q $T/mirror
+eq "the mirror holds the content" "$(cat notes.txt)" "$(cat $T/mirror/notes.txt)"
 echo q >> notes.txt
-has "slot sync copies the difference only" "1 path(s)" "$(l slot sync $T/slot)"
-echo "from mac" > $T/slot/made-on-mac.txt; echo "mac edit" >> $T/slot/src/main.rs
-printf 'made-on-mac.txt\nsrc/main.rs\n' > $T/changed.txt
-l slot collect -q $T/slot --paths-from $T/changed.txt
-eq "collect copies a new file back" "from mac" "$(cat made-on-mac.txt)"
-eq "collect copies an edit back" "mac edit" "$(tail -1 src/main.rs)"
-l slot sync -q $T/slot
-echo "agent edit" >> src/main.rs; echo "mac edit 2" >> $T/slot/src/main.rs
-eq "both changed: collect reports a conflict" "1" "$(l slot collect $T/slot src/main.rs >/dev/null 2>&1; echo $?)"
+has "mirror sync copies the difference only" "1 path(s)" "$(l mirror sync $T/mirror)"
+echo "made outside" > $T/mirror/made-outside.txt; echo "outside edit" >> $T/mirror/src/main.rs
+printf 'made-outside.txt\nsrc/main.rs\n' > $T/changed.txt
+l mirror collect -q $T/mirror --paths-from $T/changed.txt
+eq "collect copies a new file back" "made outside" "$(cat made-outside.txt)"
+eq "collect copies an edit back" "outside edit" "$(tail -1 src/main.rs)"
+l mirror sync -q $T/mirror
+echo "line edit" >> src/main.rs; echo "outside edit 2" >> $T/mirror/src/main.rs
+eq "both changed: collect reports a conflict" "1" "$(l mirror collect $T/mirror src/main.rs >/dev/null 2>&1; echo $?)"
 ok "text conflict has markers" grep -q '^<<<<<<< line' src/main.rs
-printf '\x00bin-agent' > blob.bin; l slot sync -q $T/slot; printf '\x00bin-agent2' > blob.bin; printf '\x00bin-mac' > $T/slot/blob.bin
-l slot collect -q $T/slot blob.bin >/dev/null
-ok "binary conflict keeps the line version" grep -q 'bin-agent2' blob.bin
-ok "and keeps the slot version next to it" grep -q 'bin-mac' blob.bin.slot-conflict
-has "a slot whose state is unknown is not overwritten" "not empty" "$(l slot sync $T/busy 2>&1)"
-git checkout -q 2>/dev/null; l restore src/main.rs; rm -f blob.bin blob.bin.slot-conflict made-on-mac.txt
+printf '\x00bin-line' > blob.bin; l mirror sync -q $T/mirror; printf '\x00bin-line2' > blob.bin; printf '\x00bin-outside' > $T/mirror/blob.bin
+l mirror collect -q $T/mirror blob.bin >/dev/null
+ok "binary conflict keeps the line version" grep -q 'bin-line2' blob.bin
+ok "and keeps the mirror version next to it" grep -q 'bin-outside' blob.bin.mirror-conflict
+has "a mirror whose state is unknown is not overwritten" "not empty" "$(l mirror sync $T/busy 2>&1)"
+git checkout -q 2>/dev/null; l restore src/main.rs; rm -f blob.bin blob.bin.mirror-conflict made-outside.txt
 
 # backup and restore of the whole project
 l commit -qam "before backup"; l branch -q side; l tag v1

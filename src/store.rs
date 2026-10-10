@@ -39,7 +39,7 @@ pub struct Store {
 }
 
 pub fn default_root() -> PathBuf {
-    std::env::var_os("LAYR_ROOT").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/studio"))
+    std::env::var_os("LAYR_ROOT").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/var/lib/layr"))
 }
 
 fn mkdir_mode(p: &Path, mode: u32) -> Result<()> {
@@ -571,7 +571,8 @@ impl<'a> Project<'a> {
             .unwrap_or_default()
     }
 
-    pub fn lead(&self) -> u32 {
-        self.config_u64("lead", 0) as u32
+    /// The admin of the project on this machine (uid). `lead` is the key of older versions.
+    pub fn admin(&self) -> u32 {
+        self.config_u64("admin", self.config_u64("lead", 0)) as u32
     }
 }

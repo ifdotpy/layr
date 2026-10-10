@@ -1,4 +1,4 @@
-//! Replication between machines over any byte channel (ssh, the paired Studio server channel).
+//! Replication between machines over any byte channel (ssh or any other pipe).
 //!
 //! `layr sync -- <command>` starts `<command>`, which must run `layr serve-peer <project>` on the
 //! other machine, and talks to it over the command's stdin and stdout:
@@ -406,7 +406,7 @@ pub fn sync(ctx: &Ctx, args: &[String]) -> Result<i32> {
         ));
     }
     let h = here(ctx)?;
-    h.repo.require_lead(ctx, "replicate the project")?;
+    h.repo.require_admin(ctx, "replicate the project")?;
     let repo = &h.repo;
     let mut c = Command::new(&a.paths[0]);
     c.args(&a.paths[1..]).stdin(Stdio::piped()).stdout(Stdio::piped());
@@ -437,7 +437,7 @@ pub fn sync(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let sent_records = out_lines.len();
         send_records(&mut w, &out_lines)?;
         let lines = recv_records(&mut w)?;
-        // The lead chose this peer: its records are taken, and after they passed the checks its
+        // The admin chose this peer: its records are taken, and after they passed the checks its
         // machine is trusted from now on.
         let got_records = {
             let _lock = repo.p.lock()?;

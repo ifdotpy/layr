@@ -15,35 +15,22 @@ use anyhow::{bail, Result};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let spec = Spec::new()
-        .value("-m|--message")
-        .flag("--turn-end")
-        .flag("--running")
-        .flag("--force")
-        .flag("--layers")
-        .flag("--all")
-        .flag("-q|--quiet");
+    let spec =
+        Spec::new().value("-m|--message").flag("--running").flag("--force").flag("--layers").flag("--all").flag("-q|--quiet");
     let a = parse(&spec, args)?;
     let h = here(ctx)?;
     let repo = &h.repo;
     let lines: Vec<Line> = if a.has("--all") {
-        repo.require_lead(ctx, "save all lines")?;
+        repo.require_admin(ctx, "save all lines")?;
         repo.lines()?.into_iter().filter(|l| repo.working(l).exists()).collect()
     } else {
         vec![h.line()?.clone()]
     };
-    let msg = a.get("-m").unwrap_or(if a.has("--turn-end") { "end of turn" } else { "" }).to_string();
+    let msg = a.get("-m").unwrap_or("").to_string();
     for l in lines {
         repo.can_write_line(ctx, &l)?;
         let _lock = repo.p.lock()?;
         let l = repo.line(&l.id)?;
-        if a.has("--turn-end") {
-            // A quiet point: turn regenerable folders that a tool recreated back into layers.
-            let (u, g) = repo.owner_ids(&l);
-            for p in repo.p.config_strings("regenerable") {
-                let _ = crate::repo::convert_layer(&repo.working(&l), &p, u, g);
-            }
-        }
         let st = repo.save(ctx, &l, &msg, a.has("--running"), a.has("--force") || a.has("--layers"))?;
         match st {
             Some(mut s) => {
@@ -111,6 +98,7 @@ const NOT_UNDOABLE: &[&str] = &[
     "project",
     "export",
     "import",
+    "mirror",
     "slot",
     "rebase.step",
     "remote.ref",
@@ -125,15 +113,16 @@ pub fn undo(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let id = match a.pos.first() {
         Some(x) => find_record(repo, x)?,
         None => {
-            // The newest operation of this caller (user and agent label) in the project.
-            let agent = ctx.env("LAYR_AGENT").map(|s| s.to_string());
+            // The newest operation of this caller (user and session label) in the project.
+            let session = ctx.session();
             let mut found = None;
             for r in repo.p.db.records(5000)? {
                 let local = r.lines.keys().all(|lid| {
                     repo.p.db.line_by_id(lid).ok().flatten().map(|l| repo.p.line_path(&l.name).exists()).unwrap_or(false)
                         || r.op == "line.delete"
                 });
-                if r.actor.uid == ctx.caller.uid && r.actor.agent == agent && local && !NOT_UNDOABLE.contains(&r.op.as_str()) {
+                if r.actor.uid == ctx.caller.uid && r.actor.session == session && local && !NOT_UNDOABLE.contains(&r.op.as_str())
+                {
                     found = Some(r.id.clone());
                     break;
                 }
@@ -175,7 +164,7 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
         return Err(exit(1, format!("error: operation '{}' has nothing to undo", r.op)));
     }
     // Permissions: undo changes every line the operation changed, so the caller must be allowed
-    // to change each of them. An operation without lines (tags, groups) needs the lead or the
+    // to change each of them. An operation without lines (tags, groups) needs the admin or the
     // user who made it.
     for (lid, ch) in &r.lines {
         let owner = repo.p.db.line_by_id(lid)?.map(|l| l.owner).or(ch.before.as_ref().map(|b| b.owner)).unwrap_or(0);
@@ -189,8 +178,8 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
         };
         repo.can_write_line(ctx, &probe)?;
     }
-    if r.lines.is_empty() && !repo.is_lead(ctx) && r.actor.uid != ctx.caller.uid {
-        return Err(exit(1, "permission denied: only the project lead or the user who made it can undo this operation"));
+    if r.lines.is_empty() && !repo.is_admin(ctx) && r.actor.uid != ctx.caller.uid {
+        return Err(exit(1, "permission denied: only the project admin or the user who made it can undo this operation"));
     }
     let _lock = repo.p.lock()?;
     let mut rec = Record::new("undo");
@@ -347,13 +336,13 @@ pub fn op(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let sub = args.first().map(|s| s.as_str()).unwrap_or("log");
     if sub == "export" {
         let h = here(ctx)?;
-        h.repo.require_lead(ctx, "export the records")?;
+        h.repo.require_admin(ctx, "export the records")?;
         ctx.print(&h.repo.p.export_jsonl()?);
         return Ok(0);
     }
     if sub == "import" {
         let h = here(ctx)?;
-        h.repo.require_lead(ctx, "import records")?;
+        h.repo.require_admin(ctx, "import records")?;
         let data = super::work::read_caller_file(ctx, args.get(1).map(|s| s.as_str()).unwrap_or("-"), 512 << 20)?;
         let lines: Vec<String> =
             String::from_utf8_lossy(&data).lines().filter(|l| !l.trim().is_empty()).map(|l| l.to_string()).collect();
@@ -398,8 +387,8 @@ pub fn op(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 .first()
                 .map(|s| format!(" {} {}", ids::short(&s.id), s.message.lines().next().unwrap_or("")))
                 .unwrap_or_default();
-            let agent = r.actor.agent.as_ref().map(|a| format!(" [{a}]")).unwrap_or_default();
-            outln!(ctx, "{} {} {}{} {}{}{}", short_op(&r.id), fmt_time(r.time), r.actor.name, agent, r.op, what, undone);
+            let session = r.actor.session.as_ref().map(|a| format!(" [{a}]")).unwrap_or_default();
+            outln!(ctx, "{} {} {}{} {}{}{}", short_op(&r.id), fmt_time(r.time), r.actor.name, session, r.op, what, undone);
         }
         shown += 1;
         if shown >= n {
@@ -477,7 +466,7 @@ pub fn checks(ctx: &Ctx, args: &[String]) -> Result<i32> {
 }
 
 /// Retention. Kept: line heads and their history, tags, remote refs, groups, stashes, the newest
-/// export per branch, conflict sources, slot states, automatic states (the newest N per line and
+/// export per branch, conflict sources, mirror states, automatic states (the newest N per line and
 /// one per hour for a day), and every state that a record inside the undo window names.
 pub fn retention_plan(repo: &Repo) -> Result<(BTreeSet<String>, Vec<String>)> {
     let db = &repo.p.db;
@@ -519,10 +508,10 @@ pub fn retention_plan(repo: &Repo) -> Result<(BTreeSet<String>, Vec<String>)> {
         newest_export.insert((remote, branch), st);
     }
     roots.extend(newest_export.into_values());
-    let mut st = db.conn.prepare("SELECT state FROM slots")?;
-    let slots: Vec<String> = st.query_map([], |r| r.get(0))?.collect::<Result<Vec<_>, _>>()?;
+    let mut st = db.conn.prepare("SELECT state FROM mirrors")?;
+    let mirrors: Vec<String> = st.query_map([], |r| r.get(0))?.collect::<Result<Vec<_>, _>>()?;
     drop(st);
-    roots.extend(slots);
+    roots.extend(mirrors);
     for r in db.records_since(now - undo_days * 86400 * 1000)? {
         for s in &r.states {
             keep.insert(s.id.clone());
@@ -627,7 +616,7 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let spec = Spec::new().flag("-n|--dry-run").flag("-q|--quiet");
     let a = parse(&spec, args)?;
     let h = here(ctx)?;
-    h.repo.require_lead(ctx, "run gc")?;
+    h.repo.require_admin(ctx, "run gc")?;
     let v = run_gc(ctx, &h.repo, a.has("-n"))?;
     if !a.has("-q") {
         let verb = if a.has("-n") { "would delete" } else { "deleted" };
@@ -644,7 +633,7 @@ pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let a = parse(&spec, args)?;
     let h = here(ctx)?;
     let repo = &h.repo;
-    repo.require_lead(ctx, "run fsck")?;
+    repo.require_admin(ctx, "run fsck")?;
     let _lock = repo.p.lock()?;
     let mut problems = 0;
     let ic: String = repo.p.db.conn.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
@@ -701,7 +690,7 @@ pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
 
 pub fn reindex(ctx: &Ctx, _args: &[String]) -> Result<i32> {
     let h = here(ctx)?;
-    h.repo.require_lead(ctx, "rebuild the index")?;
+    h.repo.require_admin(ctx, "rebuild the index")?;
     let _lock = h.repo.p.lock()?;
     h.repo.p.rebuild_index()?;
     let n: i64 = h.repo.p.db.conn.query_row("SELECT COUNT(*) FROM records", [], |r| r.get(0))?;
@@ -770,7 +759,7 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
         None => ctx.caller.uid,
     };
     let actor = ctx.actor();
-    let p = Project::create(&ctx.store, name, &actor, serde_json::json!({"lead": owner, "members": "*"}))?;
+    let p = Project::create(&ctx.store, name, &actor, serde_json::json!({"admin": owner, "members": "*"}))?;
     let repo = Repo { p };
     let res = (|| -> Result<(String, String)> {
         let _lock = repo.p.lock()?;
@@ -953,9 +942,9 @@ pub fn config(ctx: &Ctx, args: &[String]) -> Result<i32> {
             None => Ok(1),
         };
     }
-    repo.require_lead(ctx, "change the project configuration")?;
+    repo.require_admin(ctx, "change the project configuration")?;
     let key = a.get("--unset").unwrap_or_else(|| a.pos.first().map(|s| s.as_str()).unwrap_or(""));
-    if key == "lead" && !ctx.caller.is_root() {
+    if (key == "admin" || key == "lead") && !ctx.caller.is_root() {
         return Err(exit(1, format!("permission denied: only root changes '{key}'")));
     }
     let _lock = repo.p.lock()?;
@@ -966,7 +955,7 @@ pub fn config(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let (k, v) = (&a.pos[0], a.pos[1..].join(" "));
     let val: serde_json::Value = serde_json::from_str(&v).unwrap_or(serde_json::Value::String(v.clone()));
     set_config(ctx, repo, k, val)?;
-    if k == "members" || k == "lead" {
+    if k == "members" || k == "admin" || k == "lead" {
         crate::gitbridge::sync_store_access(repo)?;
     }
     Ok(0)
@@ -986,7 +975,7 @@ pub fn layer(ctx: &Ctx, args: &[String]) -> Result<i32> {
                         if btrfs::is_subvolume(&lp) {
                             "layer"
                         } else if lp.exists() {
-                            "plain folder (run layr save --turn-end)"
+                            "plain folder (run layr layer repair)"
                         } else {
                             "absent"
                         }
@@ -998,7 +987,7 @@ pub fn layer(ctx: &Ctx, args: &[String]) -> Result<i32> {
             Ok(0)
         }
         "add" | "remove" => {
-            repo.require_lead(ctx, "change layers")?;
+            repo.require_admin(ctx, "change layers")?;
             let path = args.get(1).ok_or_else(|| exit(128, "usage: layr layer add|remove <path>"))?;
             fsutil::check_rel(path)?;
             let mut v = repo.p.config_strings("regenerable");
@@ -1019,7 +1008,22 @@ pub fn layer(ctx: &Ctx, args: &[String]) -> Result<i32> {
             }
             Ok(0)
         }
-        _ => Err(exit(128, "usage: layr layer (list|add|remove) [<path>]")),
+        "repair" => {
+            // Layer folders that a tool deleted and made again as plain folders become layers
+            // again. Best at a quiet point, when no build runs in the line.
+            let l = h.line()?.clone();
+            repo.can_write_line(ctx, &l)?;
+            let _lock = repo.p.lock()?;
+            let l = repo.line(&l.id)?;
+            let (u, g) = repo.owner_ids(&l);
+            for p in repo.p.config_strings("regenerable") {
+                if crate::repo::convert_layer(&repo.working(&l), &p, u, g)? {
+                    outln!(ctx, "{p}: a layer again");
+                }
+            }
+            Ok(0)
+        }
+        _ => Err(exit(128, "usage: layr layer (list|add|remove|repair) [<path>]")),
     }
 }
 
@@ -1028,7 +1032,7 @@ pub fn machines(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if args.first().map(|s| s.as_str()) == Some("trust") {
         let spec = Spec::new().value("--key");
         let a = parse(&spec, &args[1..])?;
-        h.repo.require_lead(ctx, "trust machines")?;
+        h.repo.require_admin(ctx, "trust machines")?;
         let id = a.pos.first().ok_or_else(|| exit(128, "usage: layr machines trust <id> --key <public key>"))?;
         let key = a.get("--key").ok_or_else(|| exit(128, "usage: layr machines trust <id> --key <public key>"))?;
         let full = if id.len() == 36 {

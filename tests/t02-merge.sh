@@ -9,20 +9,20 @@ ln -s t1 L; ln -s t1 M; ln -s t1 N; printf 'echo hi\n' > S.sh; chmod 644 S.sh; e
 echo q > Q.txt; echo c > c.txt; seq 1 10 | sed 's/^/z /' > Z.txt; echo w > W.txt
 l init m --from $T/src -q >/dev/null
 P=$LAYR_ROOT/projects/m/lines
-cd $P/main && l branch -q worker
+cd $P/main && l branch -q topic
 # ours (main)
 cd $P/main
 sed -i 's/^a 2$/a 2 OURS/' A.txt; rm -rf X; rm L; ln -s t2 L; rm N; ln -s t2 N; printf 'echo hi\necho ours\n' > S.sh
 echo f-ours > F.txt; echo same > Same.txt; echo ours > Diff.txt; mv Q.txt Qo.txt; sed -i 's/^z 9$/z 9 OURS/' Z.txt; rm W.txt
 l add -A && l commit -qm ours
-# theirs (worker)
-cd $P/worker
+# theirs (topic)
+cd $P/topic
 mv A.txt A2.txt; mkdir -p X; echo new > X/new.txt; rm M; ln -s t3 M; rm N; ln -s t3 N; chmod 755 S.sh
 rm F.txt; mkdir F.txt; echo inner > F.txt/inner; echo same > Same.txt; echo theirs > Diff.txt; mv Q.txt Qt.txt
 mv c.txt C.txt; rm -rf Y; sed -i 's/^z 1$/z 1 THEIRS/' Z.txt; echo w-theirs > W.txt
 l add -A && l commit -qm theirs
 cd $P/main
-out=$(l merge worker 2>&1); rc=$?
+out=$(l merge topic 2>&1); rc=$?
 eq "merge with conflicts exits 1" "1" "$rc"
 C=$(l show -s --format=%B HEAD; l status)
 ok "1 rename (theirs) vs modify (ours): A2.txt has the ours edit" grep -q 'a 2 OURS' A2.txt
@@ -45,44 +45,44 @@ eq "merge state has two parents" "2" "$(l show -s --format=%p HEAD | wc -w)"
 
 # text conflict and resolution
 l reset -q --hard HEAD~1
-cd $P/worker && l reset -q --hard HEAD~1 && sed -i 's/^z 5$/z 5 worker/' Z.txt && l commit -qam w5
+cd $P/topic && l reset -q --hard HEAD~1 && sed -i 's/^z 5$/z 5 topic/' Z.txt && l commit -qam w5
 cd $P/main && sed -i 's/^z 5$/z 5 main/' Z.txt && l commit -qam m5
-eq "text conflict exits 1" "1" "$(l merge -q worker >/dev/null 2>&1; echo $?)"
+eq "text conflict exits 1" "1" "$(l merge -q topic >/dev/null 2>&1; echo $?)"
 ok "conflict markers written" grep -q '^<<<<<<< HEAD' Z.txt
 eq "status shows the unmerged path" "UU Z.txt" "$(l status -s | grep Z.txt)"
-sed -i '/^<<<<<<<\|^=======\|^>>>>>>>/d; s/^z 5 worker$//' Z.txt; sed -i '/^$/d' Z.txt
+sed -i '/^<<<<<<<\|^=======\|^>>>>>>>/d; s/^z 5 topic$//' Z.txt; sed -i '/^$/d' Z.txt
 l add Z.txt && l commit -qm resolved
 eq "resolved: no conflicts left" "" "$(l status -s)"
 eq "the resolution state lists no conflicts" "" "$(l show -s --format=%B HEAD | grep -i conflict)"
 
 # fast-forward, already up to date, squash, --expect
-cd $P/worker && l reset -q --hard main && echo ff > ff.txt && l add ff.txt && l commit -qm ff
+cd $P/topic && l reset -q --hard main && echo ff > ff.txt && l add ff.txt && l commit -qm ff
 cd $P/main
-has "fast-forward" "Fast-forward" "$(l merge worker)"
-eq "already up to date" "Already up to date." "$(l merge worker)"
-cd $P/worker && echo s1 > s1.txt && l add s1.txt && l commit -qm s1 && echo s2 > s2.txt && l add s2.txt && l commit -qm s2
+has "fast-forward" "Fast-forward" "$(l merge topic)"
+eq "already up to date" "Already up to date." "$(l merge topic)"
+cd $P/topic && echo s1 > s1.txt && l add s1.txt && l commit -qm s1 && echo s2 > s2.txt && l add s2.txt && l commit -qm s2
 cd $P/main && echo m > mm.txt && l add mm.txt && l commit -qm mm
-l merge -q --squash -m "task: s1 and s2" worker
+l merge -q --squash -m "task: s1 and s2" topic
 eq "squash: one parent" "1" "$(l show -s --format=%p HEAD | wc -w)"
 ok "squash brings the files" test -f s2.txt
-W=$(cd $P/worker && l rev-parse HEAD)
-cd $P/worker && echo late > late.txt && l add late.txt && l commit -qm late
+W=$(cd $P/topic && l rev-parse HEAD)
+cd $P/topic && echo late > late.txt && l add late.txt && l commit -qm late
 cd $P/main
-eq "--expect refuses a moved line" "1" "$(l merge worker --expect $W >/dev/null 2>&1; echo $?)"
+eq "--expect refuses a moved line" "1" "$(l merge topic --expect $W >/dev/null 2>&1; echo $?)"
 l merge -q $W
 no "merge of an exact state does not take later work" test -e late.txt
 
 # local changes are protected
-cd $P/worker && echo w >> notes2.txt && l add notes2.txt && l commit -qm n2
+cd $P/topic && echo w >> notes2.txt && l add notes2.txt && l commit -qm n2
 cd $P/main && echo local > notes2.txt
-eq "untracked file in the way: refused" "1" "$(l merge worker >/dev/null 2>&1; echo $?)"
+eq "untracked file in the way: refused" "1" "$(l merge topic >/dev/null 2>&1; echo $?)"
 eq "the local file is untouched" "local" "$(cat notes2.txt)"
 rm notes2.txt
 
 # cherry-pick and revert
-cd $P/worker && echo pick > pick.txt && l add pick.txt && l commit -qm "pick me"
+cd $P/topic && echo pick > pick.txt && l add pick.txt && l commit -qm "pick me"
 cd $P/main
-l cherry-pick -q worker >/dev/null
+l cherry-pick -q topic >/dev/null
 eq "cherry-pick" "pick me" "$(l log -1 --format=%s)"
 ok "cherry-pick brings the file" test -f pick.txt
 l revert HEAD >/dev/null
@@ -90,7 +90,7 @@ eq "revert" 'Revert "pick me"' "$(l log -1 --format=%s)"
 no "revert removes the file" test -e pick.txt
 
 # rebase
-cd $P/worker && l reset -q --hard main~2 && echo r1 > r1.txt && l add r1.txt && l commit -qm r1 && echo r2 > r2.txt && l add r2.txt && l commit -qm r2
+cd $P/topic && l reset -q --hard main~2 && echo r1 > r1.txt && l add r1.txt && l commit -qm r1 && echo r2 > r2.txt && l add r2.txt && l commit -qm r2
 l rebase -q main >/dev/null
 eq "rebase replays two states" "r2 r1" "$(l log -2 --format=%s | tr '\n' ' ' | sed 's/ $//')"
 ok "rebased onto main" l merge-base --is-ancestor main HEAD

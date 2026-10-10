@@ -4,7 +4,7 @@
 //! standard input, output and error and an open handle of its working folder as `SCM_RIGHTS`.
 //! The service forks one process per request (the parent stays single threaded), takes the
 //! caller's uid from `SO_PEERCRED`, runs the command with the caller's streams and returns the
-//! exit code. Commands check the caller against line owners and the project lead.
+//! exit code. Commands check the caller against line owners and the project admin.
 
 use crate::ctx::{Caller, Ctx};
 use crate::store::Store;
@@ -222,8 +222,8 @@ fn periodic(root: &Path, hourly: bool) {
             let _ = crate::cmd::admin::run_gc(&ctx, &repo, false);
             if let Ok(Some(dir)) = repo.p.config_value("backup.dir") {
                 if let Some(d) = dir.as_str() {
-                    // Written as the lead of this machine, who configured the folder.
-                    let _ = crate::cmd::transfer::run_backup(&ctx, &repo, Path::new(d), false, repo.lead_ids());
+                    // Written as the admin of this machine, who configured the folder.
+                    let _ = crate::cmd::transfer::run_backup(&ctx, &repo, Path::new(d), false, repo.admin_ids());
                 }
             }
         }

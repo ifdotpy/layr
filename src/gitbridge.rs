@@ -1,6 +1,6 @@
 //! The remote bridge to git, and the `.git` layer of each line for tools that call git.
 //!
-//! The project git object store is `<project>/git` (a bare repository, readable by agents).
+//! The project git object store is `<project>/git` (a bare repository, readable by the members).
 //! Import makes a state from a git commit with only the changed paths. Export builds a git tree
 //! from the tree of the previous mapped commit plus the changed paths, makes one commit with
 //! fixed author and committer data, records the exact commit id, then pushes it. After a lost
@@ -47,7 +47,7 @@ pub fn git_out(git_dir: &Path, args: &[&str]) -> Result<String> {
 
 /// Who can read the git object store. With `members = "*"` every local user may read the
 /// project history, so the store is 0755. With a list of members it is 0750 for root, plus an
-/// access list (POSIX ACL) with read access for the lead, the members and the owners of lines
+/// access list (POSIX ACL) with read access for the admin, the members and the owners of lines
 /// on this machine: the objects are the project history too.
 pub fn sync_store_access(repo: &Repo) -> Result<()> {
     let s = store(repo);
@@ -60,7 +60,7 @@ pub fn sync_store_access(repo: &Repo) -> Result<()> {
         return Ok(());
     }
     let mut uids: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
-    uids.insert(repo.p.lead());
+    uids.insert(repo.p.admin());
     if let Some(v) = repo.p.config_value("members")? {
         if let Some(a) = v.as_array() {
             uids.extend(a.iter().filter_map(|x| x.as_u64()).map(|x| x as u32));
@@ -476,7 +476,7 @@ pub fn import_commit(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str, author
         }
         let (name, email, msg, time) = commit_info(&s, commit)?;
         let mut st = repo.new_state(ctx, &work, StateKind::Import, parents, &msg, None)?;
-        st.author = crate::model::Author { name, email, uid: 0, agent: None };
+        st.author = crate::model::Author { name, email, uid: 0, session: None };
         st.time = time.max(1);
         Ok(st)
     })();
@@ -778,7 +778,7 @@ pub fn refresh_git_layer(repo: &Repo, line: &Line) -> Result<()> {
         Ok(d) => d,
         Err(_) => return Ok(()),
     };
-    // Only the layer layr made (a nested subvolume); a .git folder the agent made is its own.
+    // Only the layer layr made (a nested subvolume); a .git folder the line owner made is its own.
     {
         use std::os::unix::fs::MetadataExt;
         if dir.metadata()?.ino() != 256 {

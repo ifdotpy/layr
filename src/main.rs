@@ -1,4 +1,4 @@
-//! layr: local version control for agent workspaces on btrfs.
+//! layr: local version control on btrfs.
 
 // Unsafe code is allowed only in `sys` (system calls without safe wrappers).
 #![deny(unsafe_code)]

@@ -1077,7 +1077,7 @@ pub fn stash(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 ours_label: "Updated upstream",
                 theirs_label: "Stashed changes",
                 config: &cfg,
-                run_as: Some(repo.lead_ids()),
+                run_as: Some(repo.admin_ids()),
                 allow_root: ctx.caller.is_root(),
             })?;
             let result = repo.temp_snapshot(&work.path, true)?;

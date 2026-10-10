@@ -36,12 +36,12 @@ CREATE TABLE IF NOT EXISTS group_lines (grp TEXT, line TEXT, epoch INTEGER, ord 
 CREATE TABLE IF NOT EXISTS machines (id TEXT PRIMARY KEY, name TEXT, public_key TEXT);
 CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT, ord TEXT);
 CREATE TABLE IF NOT EXISTS trusted (machine TEXT PRIMARY KEY, public_key TEXT, by TEXT);
-CREATE TABLE IF NOT EXISTS slots (path TEXT PRIMARY KEY, state TEXT, line TEXT, time INTEGER, ord TEXT);
+CREATE TABLE IF NOT EXISTS mirrors (path TEXT PRIMARY KEY, state TEXT, line TEXT, time INTEGER, ord TEXT);
 "#;
 
 /// Version of the derived tables. Records never change shape; a database with an older version
 /// drops its derived tables, creates them new and rebuilds them from the records.
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 const DERIVED: &[&str] = &[
     "states",
@@ -57,9 +57,12 @@ const DERIVED: &[&str] = &[
     "group_lines",
     "machines",
     "config",
-    "slots",
+    "mirrors",
     "trusted",
 ];
+
+/// Derived tables of older versions, dropped on migration.
+const RETIRED: &[&str] = &["slots"];
 
 impl Db {
     /// Open the database. Returns it and whether the derived tables must be rebuilt.
@@ -80,7 +83,7 @@ impl Db {
             if has_records {
                 // The project rebuilds the derived tables and only then writes the version
                 // (`mark_current`): a failed rebuild is tried again on the next open.
-                for t in DERIVED {
+                for t in DERIVED.iter().chain(RETIRED) {
                     db.conn.execute_batch(&format!("DROP TABLE IF EXISTS {t}"))?;
                 }
                 db.stale = true;
@@ -124,7 +127,7 @@ impl Db {
         self.conn.execute_batch(
             "DELETE FROM states; DELETE FROM parents; DELETE FROM lines; DELETE FROM line_heads;
              DELETE FROM tags; DELETE FROM remote_refs; DELETE FROM git_map; DELETE FROM exports; DELETE FROM checks;
-             DELETE FROM groups; DELETE FROM group_lines; DELETE FROM machines; DELETE FROM config; DELETE FROM slots;
+             DELETE FROM groups; DELETE FROM group_lines; DELETE FROM machines; DELETE FROM config; DELETE FROM mirrors;
              DELETE FROM trusted;",
         )?;
         Ok(())
@@ -177,7 +180,7 @@ impl Db {
     /// The result does not depend on the order in which records arrive: every row that a
     /// later record can replace keeps the order key of the record that wrote it (time,
     /// machine, sequence number), and only a record with a larger key replaces it. Deletes
-    /// leave a marked row for the same reason. Settings that act on this machine (lead,
+    /// leave a marked row for the same reason. Settings that act on this machine (admin,
     /// members, merge commands, remotes, the backup folder) and the lines that have their
     /// working folder here change only by this machine's records; the values written by other
     /// machines are kept under `<key>@<machine>`.
@@ -380,11 +383,12 @@ impl Db {
             "stash.drop" => {
                 tx.execute("UPDATE states SET dropped=1 WHERE id=?1", params![s("state")])?;
             }
-            "slot" => {
+            // "slot" is the name of older records.
+            "mirror" | "slot" => {
                 if !foreign {
                     tx.execute(
-                        "INSERT INTO slots(path, state, line, time, ord) VALUES(?1,?2,?3,?4,?5)
-                         ON CONFLICT(path) DO UPDATE SET state=?2, line=?3, time=?4, ord=?5 WHERE excluded.ord > slots.ord",
+                        "INSERT INTO mirrors(path, state, line, time, ord) VALUES(?1,?2,?3,?4,?5)
+                         ON CONFLICT(path) DO UPDATE SET state=?2, line=?3, time=?4, ord=?5 WHERE excluded.ord > mirrors.ord",
                         params![s("path"), s("state"), s("line"), rec.time, ord],
                     )?;
                 }
@@ -622,10 +626,10 @@ impl Db {
         Ok(v)
     }
 
-    pub fn slot(&self, path: &str) -> Result<Option<(String, Option<String>)>> {
+    pub fn mirror(&self, path: &str) -> Result<Option<(String, Option<String>)>> {
         Ok(self
             .conn
-            .query_row("SELECT state, line FROM slots WHERE path=?1", params![path], |r| Ok((r.get(0)?, r.get(1)?)))
+            .query_row("SELECT state, line FROM mirrors WHERE path=?1", params![path], |r| Ok((r.get(0)?, r.get(1)?)))
             .optional()?)
     }
 
@@ -667,7 +671,7 @@ impl Db {
     }
 }
 
-/// Every setting acts on one machine (lead, members, merge commands, remotes, retention,
+/// Every setting acts on one machine (admin, members, merge commands, remotes, retention,
 /// push policy, layers, backups): settings never come from another machine's records. Those
 /// values stay as `<key>@<machine>`; a restore takes over the values of the machine that wrote
 /// the backup.
@@ -708,7 +712,6 @@ mod tests {
             author: Author::default(),
             message: String::new(),
             time: 0,
-            turn: None,
             running: false,
             conflicts: vec![],
             layers: Default::default(),

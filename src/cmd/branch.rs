@@ -141,8 +141,8 @@ pub fn branch(ctx: &Ctx, args: &[String]) -> Result<i32> {
             },
         };
         let owner = owner_arg(ctx, a.get("--owner"))?;
-        if owner != ctx.caller.uid && !repo.is_lead(ctx) {
-            return Err(exit(128, "fatal: only the project lead can create a line for another user"));
+        if owner != ctx.caller.uid && !repo.is_admin(ctx) {
+            return Err(exit(128, "fatal: only the project admin can create a line for another user"));
         }
         if owner == 0 && !ctx.caller.is_root() {
             return Err(exit(128, "fatal: only root can create a line owned by root"));
@@ -359,7 +359,7 @@ pub fn tag(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let repo = &h.repo;
     let line = h.line.clone();
     if a.has("-d") {
-        repo.require_lead(ctx, "delete tags")?;
+        repo.require_admin(ctx, "delete tags")?;
         let _lock = repo.p.lock()?;
         for t in &a.pos {
             let id = repo.p.db.tag(t)?.ok_or_else(|| exit(1, format!("error: tag '{t}' not found.")))?;
@@ -387,8 +387,8 @@ pub fn tag(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let name = &a.pos[0];
     crate::store::check_name("tag", name)?;
-    // Tags are names of the whole project and keep their states from gc: the lead sets them.
-    repo.require_lead(ctx, "create tags")?;
+    // Tags are names of the whole project and keep their states from gc: the admin sets them.
+    repo.require_admin(ctx, "create tags")?;
     let id = revs::resolve(repo, line.as_ref(), a.pos.get(1).map(|s| s.as_str()).unwrap_or("HEAD"))?;
     let _lock = repo.p.lock()?;
     if repo.p.db.tag(name)?.is_some() && !a.has("-f") {

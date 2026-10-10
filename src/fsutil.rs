@@ -1,6 +1,6 @@
 //! File system helpers: metadata, content compare, reflink copies, walks and safe paths.
 //!
-//! Lines are writable by agents. Every write into a line checks that the parent folders of the
+//! Lines are writable by their owners. Every write into a line checks that the parent folders of the
 //! target are real folders inside the root, so a symbolic link in the line cannot redirect a write
 //! of the service (which runs as root) outside the line.
 
@@ -464,7 +464,7 @@ pub fn is_binary(data: &[u8]) -> bool {
     data[..data.len().min(8000)].contains(&0)
 }
 
-// ----- writes into folders owned by agents, through file descriptors -----
+// ----- writes into folders owned by users, through file descriptors -----
 
 /// Open a folder without following a link at its last component.
 pub fn open_dir_nofollow(path: &Path) -> Result<File> {

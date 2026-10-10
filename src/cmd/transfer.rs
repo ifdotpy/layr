@@ -1,4 +1,5 @@
-//! Copies outside the store: export, host_exec slots, backups and their restore.
+//! Copies outside the store: export, mirrors (a copy kept in step with a line, with changes
+//! collected back), backups and their restore.
 
 use super::{exit, here};
 use crate::args::{parse, Spec};
@@ -230,24 +231,24 @@ pub fn export(ctx: &Ctx, args: &[String]) -> Result<i32> {
     Ok(0)
 }
 
-pub fn slot(ctx: &Ctx, args: &[String]) -> Result<i32> {
+pub fn mirror(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let sub = args.first().map(|s| s.as_str()).unwrap_or("");
     let rest = args.get(1..).unwrap_or(&[]).to_vec();
     let spec = Spec::new().flag("-f|--force").value("--paths-from").flag("--all").flag("-q|--quiet").value("--into");
     let a = parse(&spec, &rest)?;
     let h = here(ctx)?;
     let repo = &h.repo;
-    let dir = a.pos.first().ok_or_else(|| exit(128, "usage: layr slot (sync|collect|status|forget) <slot-folder> ..."))?;
+    let dir = a.pos.first().ok_or_else(|| exit(128, "usage: layr mirror (sync|collect|status|forget) <folder> ..."))?;
     let dst = caller_path(ctx, dir);
     let key = dst.to_string_lossy().into_owned();
-    let held = repo.p.db.slot(&key)?;
+    let held = repo.p.db.mirror(&key)?;
     let held_stale: Vec<String> = {
         let raw: Option<String> = repo
             .p
             .db
             .conn
             .query_row(
-                "SELECT raw FROM records WHERE op='slot' AND json_extract(raw,'$.r.data.path')=?1 ORDER BY time DESC LIMIT 1",
+                "SELECT raw FROM records WHERE op IN ('mirror', 'slot') AND json_extract(raw,'$.r.data.path')=?1 ORDER BY time DESC LIMIT 1",
                 [&key],
                 |r| r.get(0),
             )
@@ -270,7 +271,7 @@ pub fn slot(ctx: &Ctx, args: &[String]) -> Result<i32> {
                         return Err(exit(
                             1,
                             format!(
-                                "error: slot {} is not empty and its state is unknown; use --force for a full copy",
+                                "error: mirror {} is not empty and its state is unknown; use --force for a full copy",
                                 dst.display()
                             ),
                         ));
@@ -286,13 +287,13 @@ pub fn slot(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let started = std::time::Instant::now();
             let (n, bad) = sync_folder(ctx, from.as_deref(), &to, &dst, &held_stale, false)?;
             let _lock = repo.p.lock()?;
-            let mut rec = Record::new("slot");
+            let mut rec = Record::new("mirror");
             rec.data = serde_json::json!({"path": key, "state": state, "line": h.line.as_ref().map(|l| l.id.clone()), "stale": bad, "copied": n});
             repo.commit_record(ctx, rec)?;
             if !a.has("-q") {
                 outln!(
                     ctx,
-                    "slot {} holds state {}: {n} path(s) copied in {:.2} s",
+                    "mirror {} holds state {}: {n} path(s) copied in {:.2} s",
                     dst.display(),
                     ids::short(&state),
                     started.elapsed().as_secs_f64()
@@ -308,27 +309,27 @@ pub fn slot(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         "status" => {
             match held {
-                Some((s, _)) => outln!(ctx, "slot {} holds state {}", dst.display(), ids::short(&s)),
-                None => outln!(ctx, "slot {} holds no known state", dst.display()),
+                Some((s, _)) => outln!(ctx, "mirror {} holds state {}", dst.display(), ids::short(&s)),
+                None => outln!(ctx, "mirror {} holds no known state", dst.display()),
             }
             Ok(0)
         }
         "forget" => {
             let _lock = repo.p.lock()?;
-            let mut rec = Record::new("slot");
+            let mut rec = Record::new("mirror");
             rec.data = serde_json::json!({"path": key, "state": null});
             repo.commit_record(ctx, rec)?;
             Ok(0)
         }
         "collect" => {
             let (held_state, _) =
-                held.ok_or_else(|| exit(1, "error: the slot holds no known state; run 'layr slot sync' first"))?;
+                held.ok_or_else(|| exit(1, "error: the mirror holds no known state; run 'layr mirror sync' first"))?;
             let base = repo.state_root(&held_state)?;
             let line = match a.get("--into") {
                 Some(n) => repo.line(n)?,
                 None => h.line()?.clone(),
             };
-            // The changed paths, from the Mac side (FSEvents) or by a full compare.
+            // The changed paths, as the caller names them (for example from file system events) or by a full compare.
             let mut paths: Vec<String> = a.pos[1..].iter().map(|p| p.trim_start_matches("./").to_string()).collect();
             if let Some(f) = a.get("--paths-from") {
                 let data = super::work::read_caller_file(ctx, f, fsutil::MAX_TEXT)?;
@@ -361,19 +362,19 @@ pub fn slot(ctx: &Ctx, args: &[String]) -> Result<i32> {
             }
             collect(ctx, repo, &line, &dst, &key, &held_state, &base, &paths, a.has("-q"))
         }
-        _ => Err(exit(128, "usage: layr slot (sync|collect|status|forget) <slot-folder> ...")),
+        _ => Err(exit(128, "usage: layr mirror (sync|collect|status|forget) <folder> ...")),
     }
 }
 
-/// Copy changes made in a slot back into a line. Three versions per path: the state the slot
-/// held (base), the slot (theirs) and the line's current content (ours). If ours changed too,
-/// the result keeps both (text markers, or `<path>.slot-conflict` for binary files).
+/// Copy changes made in a mirror back into a line. Three versions per path: the state the
+/// mirror held (base), the mirror (theirs) and the line's current content (ours). If ours changed
+/// too, the result keeps both (text markers, or `<path>.mirror-conflict` for binary files).
 #[allow(clippy::too_many_arguments)]
 fn collect(
     ctx: &Ctx,
     repo: &Repo,
     line: &Line,
-    slot: &Path,
+    mirror: &Path,
     key: &str,
     held: &str,
     base: &Path,
@@ -383,12 +384,12 @@ fn collect(
     let (_lock, w) = super::work::begin_change(ctx, repo, line)?;
     let line = repo.line(&line.id)?;
     let scan = repo.scan(&line)?;
-    // Read the slot side as the caller into a private temporary copy.
+    // Read the mirror side as the caller into a private temporary copy.
     let tmp = repo.p.work_dir().join(ids::new_id());
     btrfs::create_subvolume(&tmp)?;
     let _t = crate::repo::Temp { path: tmp.clone() };
     for p in paths {
-        let src = fsutil::safe_join(slot, p)?;
+        let src = fsutil::safe_join(mirror, p)?;
         let meta = as_caller_fs(ctx, || Ok(std::fs::symlink_metadata(&src).ok()))?;
         match meta {
             Some(m) if m.file_type().is_symlink() => {
@@ -438,7 +439,7 @@ fn collect(
             let ours = std::env::temp_dir().join(format!("layr-ours-{}", ids::new_id()));
             std::fs::copy(fsutil::safe_join(&scan.path, p)?, &ours)?;
             let st = Command::new("git")
-                .args(["merge-file", "-L", "line", "-L", "slot base", "-L", "slot"])
+                .args(["merge-file", "-L", "line", "-L", "mirror base", "-L", "mirror"])
                 .arg(&ours)
                 .arg(fsutil::safe_join(base, p)?)
                 .arg(fsutil::safe_join(&tmp, p)?)
@@ -455,14 +456,14 @@ fn collect(
                 conflicts.push(format!("{p} (content: markers written)"));
             }
         } else {
-            let side = format!("{p}.slot-conflict");
+            let side = format!("{p}.mirror-conflict");
             if fsutil::lmeta(&tmp, p).is_some() {
                 fsutil::copy_entry(&tmp, p, &wdir, &side, own)?;
             }
-            conflicts.push(format!("{p} (kept the line version; the slot version is {side})"));
+            conflicts.push(format!("{p} (kept the line version; the mirror version is {side})"));
         }
     }
-    let mut rec = Record::new("slot.collect");
+    let mut rec = Record::new("mirror.collect");
     rec.lines.insert(
         line.id.clone(),
         crate::model::LineChange {
@@ -474,14 +475,14 @@ fn collect(
     );
     rec.data = serde_json::json!({"path": key, "state": held, "copied": copied, "conflicts": conflicts});
     repo.commit_record(ctx, rec)?;
-    // The slot now differs from the held state at these paths: copy them again on the next sync.
+    // The mirror now differs from the held state at these paths: copy them again on the next sync.
     let mut stale: Vec<String> = paths.to_vec();
     stale.sort();
-    let mut rec = Record::new("slot");
+    let mut rec = Record::new("mirror");
     rec.data = serde_json::json!({"path": key, "state": held, "line": line.id, "stale": stale});
     repo.commit_record(ctx, rec)?;
     if !quiet {
-        outln!(ctx, "collected {} path(s) from the slot into line {}", copied.len(), line.name);
+        outln!(ctx, "collected {} path(s) from the mirror into line {}", copied.len(), line.name);
     }
     if !conflicts.is_empty() {
         outln!(ctx, "conflicts (the line also changed these paths):");
@@ -972,7 +973,7 @@ pub fn backup(ctx: &Ctx, args: &[String]) -> Result<i32> {
     match sub {
         "run" => {
             let h = here(ctx)?;
-            h.repo.require_lead(ctx, "make backups")?;
+            h.repo.require_admin(ctx, "make backups")?;
             let dir = match a.pos.first() {
                 Some(d) => caller_path(ctx, d),
                 None => match h.repo.p.config_value("backup.dir")?.and_then(|v| v.as_str().map(PathBuf::from)) {
@@ -1150,7 +1151,7 @@ fn restore(ctx: &Ctx, root: &Path, as_name: Option<&str>, chain: Option<u32>, qu
     p.rebuild_index()?;
     {
         // The machines of the backup are trusted, and this machine takes over the settings of
-        // the machine that wrote it (lead, members, remotes, merge commands).
+        // the machine that wrote it (admin, members, remotes, merge commands).
         let _lock = p.lock()?;
         for m in p.db.record_machines()? {
             if m != p.store.machine.id {

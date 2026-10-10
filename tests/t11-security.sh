@@ -5,7 +5,7 @@
 . "$(dirname "$0")/lib.sh"
 
 chmod 755 $T $LAYR_ROOT
-for u in layr-lead layr-a1 layr-a2; do id $u >/dev/null 2>&1 || useradd -m $u; done
+for u in layr-admin layr-u1 layr-u2; do id $u >/dev/null 2>&1 || useradd -m $u; done
 export LAYR_SOCKET=$T/layr.sock
 cp $LAYR $T/layr && chmod 755 $T/layr
 LAYR_MAX_REQUESTS_PER_USER=3 SECRET_OF_SERVICE=hidden $T/layr daemon --socket $LAYR_SOCKET --tick 60 > $T/daemon.log 2>&1 &
@@ -15,53 +15,53 @@ for i in $(seq 1 50); do [ -S $LAYR_SOCKET ] && break; sleep 0.1; done
 as() { local u=$1; shift; runuser -u $u -- env LAYR_SOCKET=$LAYR_SOCKET PATH=/usr/bin:/bin "$@"; }
 L=$T/layr
 sample $T/src
-l init s --from $T/src --owner layr-lead -q >/dev/null
+l init s --from $T/src --owner layr-admin -q >/dev/null
 P=$LAYR_ROOT/projects/s/lines
 cd $P/main
 
 # 1. Merge drivers never run as root for a non-root caller.
-no "the lead cannot make a root-owned line" as layr-lead $L branch -q r0 --owner 0
-no "the lead cannot change the lead" as layr-lead $L config lead 0
-as layr-lead sh -c "printf 'u.txt merge=who\n' > .layrattributes && echo 0 > u.txt && $L add -A && $L commit -qm attrs"
-as layr-lead $L config merge.driver.who 'id -u > %A'
-as layr-lead $L branch -q d1 --owner layr-a1
-cd $P/d1 && as layr-a1 sh -c "echo 1 > u.txt && $L commit -qam d1" && cd $P/main
-as layr-lead sh -c "echo 2 > u.txt && $L commit -qam main"
-as layr-lead $L merge -q d1 >/dev/null 2>&1
-eq "the driver ran as the lead" "$(id -u layr-lead)" "$(cat u.txt)"
+no "the admin cannot make a root-owned line" as layr-admin $L branch -q r0 --owner 0
+no "the admin cannot change the admin" as layr-admin $L config admin 0
+as layr-admin sh -c "printf 'u.txt merge=who\n' > .layrattributes && echo 0 > u.txt && $L add -A && $L commit -qm attrs"
+as layr-admin $L config merge.driver.who 'id -u > %A'
+as layr-admin $L branch -q d1 --owner layr-u1
+cd $P/d1 && as layr-u1 sh -c "echo 1 > u.txt && $L commit -qam d1" && cd $P/main
+as layr-admin sh -c "echo 2 > u.txt && $L commit -qam main"
+as layr-admin $L merge -q d1 >/dev/null 2>&1
+eq "the driver ran as the admin" "$(id -u layr-admin)" "$(cat u.txt)"
 # A driver that leaves a link instead of its result does not make the service read the target.
-as layr-lead sh -c "printf 'u.txt merge=who\nk.txt merge=leak\n' > .layrattributes && echo 0 > k.txt && $L add -A && $L commit -qm leak"
-as layr-lead $L config merge.driver.leak 'rm -f %A && ln -s /etc/shadow %A'
-as layr-lead $L branch -q d2 --owner layr-a1
-cd $P/d2 && as layr-a1 sh -c "echo 1 > k.txt && $L commit -qam d2" && cd $P/main
-as layr-lead sh -c "echo 2 > k.txt && $L commit -qam main2"
-eq "a driver result that is a link is a conflict" "1" "$(as layr-lead $L merge -q d2 >/dev/null 2>&1; echo $?)"
+as layr-admin sh -c "printf 'u.txt merge=who\nk.txt merge=leak\n' > .layrattributes && echo 0 > k.txt && $L add -A && $L commit -qm leak"
+as layr-admin $L config merge.driver.leak 'rm -f %A && ln -s /etc/shadow %A'
+as layr-admin $L branch -q d2 --owner layr-u1
+cd $P/d2 && as layr-u1 sh -c "echo 1 > k.txt && $L commit -qam d2" && cd $P/main
+as layr-admin sh -c "echo 2 > k.txt && $L commit -qam main2"
+eq "a driver result that is a link is a conflict" "1" "$(as layr-admin $L merge -q d2 >/dev/null 2>&1; echo $?)"
 no "the merge result has no root file" grep -q root: k.txt
 eq "the result keeps ours" "2" "$(cat k.txt)"
 
 # 2. A link inside a line never redirects a write of the service.
 cd $P/d1
 mkdir -p $T/outside && chmod 777 $T/outside
-as layr-a1 sh -c "mkdir -p docs && echo v1 > docs/a.txt && $L add -A && $L commit -qm docs"
-as layr-a1 sh -c "rm -rf docs && ln -s $T/outside docs"
-as layr-a1 $L restore docs/a.txt >/dev/null 2>&1
+as layr-u1 sh -c "mkdir -p docs && echo v1 > docs/a.txt && $L add -A && $L commit -qm docs"
+as layr-u1 sh -c "rm -rf docs && ln -s $T/outside docs"
+as layr-u1 $L restore docs/a.txt >/dev/null 2>&1
 no "restore did not write through the link" test -e $T/outside/a.txt
-eq "folders made by layr belong to the line owner" "layr-a1" "$(stat -c %U docs)"
-as layr-a1 sh -c "rm -rf docs && $L restore docs/a.txt"
+eq "folders made by layr belong to the line owner" "layr-u1" "$(stat -c %U docs)"
+as layr-u1 sh -c "rm -rf docs && $L restore docs/a.txt"
 eq "restore works when the folder is real again" "v1" "$(cat docs/a.txt)"
-as layr-a1 sh -c "ln -s /etc linked-etc"
-no "grep does not read through a link in the line" sh -c "as layr-a1 $L grep -l root 2>/dev/null | grep -q shadow"
+as layr-u1 sh -c "ln -s /etc linked-etc"
+no "grep does not read through a link in the line" sh -c "as layr-u1 $L grep -l root 2>/dev/null | grep -q shadow"
 
 # 3. Backups are written as the writer.
-mkdir -p $T/bk && chown layr-lead $T/bk
-cd $P/main && as layr-lead $L backup -q $T/bk
-eq "backup files belong to the lead" "layr-lead" "$(stat -c %U $(ls -d $T/bk/*/chain-0001/* | head -1))"
-no "a backup into a folder the caller cannot write is refused" as layr-lead $L backup -q /root
+mkdir -p $T/bk && chown layr-admin $T/bk
+cd $P/main && as layr-admin $L backup -q $T/bk
+eq "backup files belong to the admin" "layr-admin" "$(stat -c %U $(ls -d $T/bk/*/chain-0001/* | head -1))"
+no "a backup into a folder the caller cannot write is refused" as layr-admin $L backup -q /root
 
 # 4. Child processes get the user's environment and groups, not the service's.
 cd $P/main
-no "try does not see the service environment" as layr-lead $L try -q HEAD -- sh -c 'test -n "$SECRET_OF_SERVICE"'
-eq "try runs with the user's groups" "$(id -G layr-lead)" "$(as layr-lead $L try -q HEAD -- id -G)"
+no "try does not see the service environment" as layr-admin $L try -q HEAD -- sh -c 'test -n "$SECRET_OF_SERVICE"'
+eq "try runs with the user's groups" "$(id -G layr-admin)" "$(as layr-admin $L try -q HEAD -- id -G)"
 
 # 5. Peer records: trust and local settings.
 new_fs $T/b 3G
@@ -115,29 +115,29 @@ python3 -c "import sqlite3; c=sqlite3.connect('$LAYR_ROOT/projects/s/meta/db/lay
 eq "an old schema is rebuilt from the records" "$before" "$(l --project s --line main log --format=%H | md5sum)"
 python3 -c "import sqlite3; c=sqlite3.connect('$LAYR_ROOT/projects/s/meta/db/layr.sqlite'); c.execute('PRAGMA user_version=99'); c.commit()"
 has "a newer schema is refused" "newer layr" "$(l --project s --line main log 2>&1)"
-python3 -c "import sqlite3; c=sqlite3.connect('$LAYR_ROOT/projects/s/meta/db/layr.sqlite'); c.execute('PRAGMA user_version=3'); c.commit()"
+python3 -c "import sqlite3; c=sqlite3.connect('$LAYR_ROOT/projects/s/meta/db/layr.sqlite'); c.execute('PRAGMA user_version=4'); c.commit()"
 # Git objects follow the member list.
 git init -q --bare $T/gr.git; cd $P/main; l --project s remote add origin $T/gr.git >/dev/null 2>&1; l --project s --line main push -q origin t >/dev/null 2>&1
-l --project s config members "[$(id -u layr-lead)]"
+l --project s config members "[$(id -u layr-admin)]"
 eq "the git store is closed to others" "750" "$(stat -c %a $LAYR_ROOT/projects/s/git)"
-no "another user cannot read git objects" runuser -u layr-a2 -- ls $LAYR_ROOT/projects/s/git/objects
-ok "the lead can" runuser -u layr-lead -- ls $LAYR_ROOT/projects/s/git/objects
-l --project s --line main branch -q acl1 --owner layr-a2
-ok "a line owner can read git objects" runuser -u layr-a2 -- ls $LAYR_ROOT/projects/s/git/objects
+no "another user cannot read git objects" runuser -u layr-u2 -- ls $LAYR_ROOT/projects/s/git/objects
+ok "the admin can" runuser -u layr-admin -- ls $LAYR_ROOT/projects/s/git/objects
+l --project s --line main branch -q acl1 --owner layr-u2
+ok "a line owner can read git objects" runuser -u layr-u2 -- ls $LAYR_ROOT/projects/s/git/objects
 l --project s --line main branch -D acl1 >/dev/null
-no "after the line is deleted it cannot" runuser -u layr-a2 -- ls $LAYR_ROOT/projects/s/git/objects
+no "after the line is deleted it cannot" runuser -u layr-u2 -- ls $LAYR_ROOT/projects/s/git/objects
 l --project s config members '"*"'
 eq "with members * it is open again" "755" "$(stat -c %a $LAYR_ROOT/projects/s/git)"
 
 # 8. Limits of the service.
-runuser -u layr-lead -- python3 - "$LAYR_SOCKET" <<'PY' &
+runuser -u layr-admin -- python3 - "$LAYR_SOCKET" <<'PY' &
 import socket, sys, time
 s = [socket.socket(socket.AF_UNIX) for _ in range(3)]
 for x in s: x.connect(sys.argv[1])
 time.sleep(4)
 PY
 sleep 1
-has "a user over the limit gets a busy answer" "busy" "$(as layr-lead $L status 2>&1)"
+has "a user over the limit gets a busy answer" "busy" "$(as layr-admin $L status 2>&1)"
 sleep 12
-eq "silent clients time out and free their places" "0" "$(cd $P/main && as layr-lead $L status -s >/dev/null 2>&1; echo $?)"
+eq "silent clients time out and free their places" "0" "$(cd $P/main && as layr-admin $L status -s >/dev/null 2>&1; echo $?)"
 finish

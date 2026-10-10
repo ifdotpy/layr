@@ -70,7 +70,7 @@ l config retention.auto 3; l config retention.hours 0
 for i in 1 2 3 4 5 6; do echo $i > auto.txt; l save -q; done
 n_before=$(l log --auto --format=%h | wc -l)
 l config undo.days 0
-l gc -q
+ok "gc runs" l gc -q
 n_after=$(l log --auto --format=%h -n 100 | while read h; do l show -s --format=%h $h >/dev/null 2>&1 && echo $h; done | wc -l)
 ok "gc deletes old automatic states" test "$n_after" -lt "$n_before"
 eq "line history stays" "initial state" "$(l log --format=%s | tail -1)"
