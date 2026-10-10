@@ -5,6 +5,7 @@
 
 #[macro_use]
 mod ctx;
+mod access;
 mod args;
 mod btrfs;
 mod changes;

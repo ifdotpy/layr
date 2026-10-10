@@ -1,5 +1,4 @@
-//! Copies outside the store: export, mirrors (a copy kept in step with a line, with changes
-//! collected back), backups and their restore.
+//! Copies outside the store: export, backups and their restore.
 
 use super::{exit, here};
 use crate::args::{parse, Spec};
@@ -8,7 +7,7 @@ use crate::changes;
 use crate::ctx::Ctx;
 use crate::fsutil;
 use crate::ids;
-use crate::model::{Line, Record, StateKind};
+use crate::model::{Record, StateKind};
 use crate::privs::as_caller_fs;
 use crate::repo::{skip_path, Repo};
 use crate::revs;
@@ -152,7 +151,7 @@ fn source_state(ctx: &Ctx, h: &super::Here, rev: Option<&str>) -> Result<String>
         Some(r) => revs::resolve(&h.repo, h.line.as_ref(), r),
         None => {
             let l = h.line()?;
-            h.repo.can_write_line(ctx, l)?;
+            h.repo.authorize_line(ctx, l, crate::repo::LineOp::Save)?;
             let _lock = h.repo.p.lock()?;
             let l = h.repo.line(&l.id)?;
             let s = h.repo.save(ctx, &l, "copy out", false, false)?;
@@ -178,6 +177,7 @@ pub fn export(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let spec = Spec::new().flag("--tracked").flag("--all").flag("-f|--force").flag("-q|--quiet");
     let a = parse(&spec, args)?;
     let h = here(ctx)?;
+    h.repo.require(ctx, "export")?;
     let (rev, folder) = match a.pos.len() {
         1 => (None, a.pos[0].clone()),
         2 => (Some(a.pos[0].clone()), a.pos[1].clone()),
@@ -225,269 +225,6 @@ pub fn export(ctx: &Ctx, args: &[String]) -> Result<i32> {
         outln!(ctx, "not written (names differ only in case or Unicode form; they cannot coexist on APFS):");
         for b in bad {
             outln!(ctx, "\t{b}");
-        }
-        return Ok(1);
-    }
-    Ok(0)
-}
-
-pub fn mirror(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let sub = args.first().map(|s| s.as_str()).unwrap_or("");
-    let rest = args.get(1..).unwrap_or(&[]).to_vec();
-    let spec = Spec::new().flag("-f|--force").value("--paths-from").flag("--all").flag("-q|--quiet").value("--into");
-    let a = parse(&spec, &rest)?;
-    let h = here(ctx)?;
-    let repo = &h.repo;
-    let dir = a.pos.first().ok_or_else(|| exit(128, "usage: layr mirror (sync|collect|status|forget) <folder> ..."))?;
-    let dst = caller_path(ctx, dir);
-    let key = dst.to_string_lossy().into_owned();
-    let held = repo.p.db.mirror(&key)?;
-    let held_stale: Vec<String> = {
-        let raw: Option<String> = repo
-            .p
-            .db
-            .conn
-            .query_row(
-                "SELECT raw FROM records WHERE op IN ('mirror', 'slot') AND json_extract(raw,'$.r.data.path')=?1 ORDER BY time DESC LIMIT 1",
-                [&key],
-                |r| r.get(0),
-            )
-            .ok();
-        raw.and_then(|l| crate::oplog::parse_line(&l, None).ok())
-            .and_then(|s| s.record.data.get("stale").cloned())
-            .and_then(|v| serde_json::from_value(v).ok())
-            .unwrap_or_default()
-    };
-    match sub {
-        "sync" => {
-            let state = source_state(ctx, &h, a.pos.get(1).map(|s| s.as_str()))?;
-            let to = repo.state_root(&state)?;
-            as_caller_fs(ctx, || Ok(std::fs::create_dir_all(&dst)?))?;
-            let from = held.as_ref().map(|(s, _)| repo.p.state_path(s)).filter(|p| p.exists());
-            if from.is_none() {
-                let empty = as_caller_fs(ctx, || Ok(std::fs::read_dir(&dst)?.next().is_none()))?;
-                if !empty {
-                    if !a.has("-f") {
-                        return Err(exit(
-                            1,
-                            format!(
-                                "error: mirror {} is not empty and its state is unknown; use --force for a full copy",
-                                dst.display()
-                            ),
-                        ));
-                    }
-                    let names: Vec<String> = as_caller_fs(ctx, || {
-                        Ok(std::fs::read_dir(&dst)?.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect())
-                    })?;
-                    for n in names {
-                        del_entry(ctx, &dst, &n)?;
-                    }
-                }
-            }
-            let started = std::time::Instant::now();
-            let (n, bad) = sync_folder(ctx, from.as_deref(), &to, &dst, &held_stale, false)?;
-            let _lock = repo.p.lock()?;
-            let mut rec = Record::new("mirror");
-            rec.data = serde_json::json!({"path": key, "state": state, "line": h.line.as_ref().map(|l| l.id.clone()), "stale": bad, "copied": n});
-            repo.commit_record(ctx, rec)?;
-            if !a.has("-q") {
-                outln!(
-                    ctx,
-                    "mirror {} holds state {}: {n} path(s) copied in {:.2} s",
-                    dst.display(),
-                    ids::short(&state),
-                    started.elapsed().as_secs_f64()
-                );
-            }
-            if !bad.is_empty() {
-                outln!(ctx, "not copied (names differ only in case or Unicode form):");
-                for b in bad {
-                    outln!(ctx, "\t{b}");
-                }
-            }
-            Ok(0)
-        }
-        "status" => {
-            match held {
-                Some((s, _)) => outln!(ctx, "mirror {} holds state {}", dst.display(), ids::short(&s)),
-                None => outln!(ctx, "mirror {} holds no known state", dst.display()),
-            }
-            Ok(0)
-        }
-        "forget" => {
-            let _lock = repo.p.lock()?;
-            let mut rec = Record::new("mirror");
-            rec.data = serde_json::json!({"path": key, "state": null});
-            repo.commit_record(ctx, rec)?;
-            Ok(0)
-        }
-        "collect" => {
-            let (held_state, _) =
-                held.ok_or_else(|| exit(1, "error: the mirror holds no known state; run 'layr mirror sync' first"))?;
-            let base = repo.state_root(&held_state)?;
-            let line = match a.get("--into") {
-                Some(n) => repo.line(n)?,
-                None => h.line()?.clone(),
-            };
-            // The changed paths, as the caller names them (for example from file system events) or by a full compare.
-            let mut paths: Vec<String> = a.pos[1..].iter().map(|p| p.trim_start_matches("./").to_string()).collect();
-            if let Some(f) = a.get("--paths-from") {
-                let data = super::work::read_caller_file(ctx, f, fsutil::MAX_TEXT)?;
-                for l in String::from_utf8_lossy(&data).lines() {
-                    let l = l.trim();
-                    if !l.is_empty() {
-                        paths.push(l.trim_start_matches("./").to_string());
-                    }
-                }
-            }
-            if a.has("--all") {
-                let mut all = BTreeSet::new();
-                as_caller_fs(ctx, || {
-                    fsutil::walk(&dst, "", &mut |rel, m| {
-                        if !m.is_dir() && rel != MARKER {
-                            all.insert(rel.to_string());
-                        }
-                        Ok(true)
-                    })
-                })?;
-                for p in state_files(&base, false)? {
-                    all.insert(p);
-                }
-                paths.extend(all);
-            }
-            paths.sort();
-            paths.dedup();
-            for p in &paths {
-                fsutil::check_rel(p)?;
-            }
-            collect(ctx, repo, &line, &dst, &key, &held_state, &base, &paths, a.has("-q"))
-        }
-        _ => Err(exit(128, "usage: layr mirror (sync|collect|status|forget) <folder> ...")),
-    }
-}
-
-/// Copy changes made in a mirror back into a line. Three versions per path: the state the
-/// mirror held (base), the mirror (theirs) and the line's current content (ours). If ours changed
-/// too, the result keeps both (text markers, or `<path>.mirror-conflict` for binary files).
-#[allow(clippy::too_many_arguments)]
-fn collect(
-    ctx: &Ctx,
-    repo: &Repo,
-    line: &Line,
-    mirror: &Path,
-    key: &str,
-    held: &str,
-    base: &Path,
-    paths: &[String],
-    quiet: bool,
-) -> Result<i32> {
-    let (_lock, w) = super::work::begin_change(ctx, repo, line)?;
-    let line = repo.line(&line.id)?;
-    let scan = repo.scan(&line)?;
-    // Read the mirror side as the caller into a private temporary copy.
-    let tmp = repo.p.work_dir().join(ids::new_id());
-    btrfs::create_subvolume(&tmp)?;
-    let _t = crate::repo::Temp { path: tmp.clone() };
-    for p in paths {
-        let src = fsutil::safe_join(mirror, p)?;
-        let meta = as_caller_fs(ctx, || Ok(std::fs::symlink_metadata(&src).ok()))?;
-        match meta {
-            Some(m) if m.file_type().is_symlink() => {
-                let t = as_caller_fs(ctx, || Ok(std::fs::read_link(&src)?))?;
-                fsutil::make_parents(&tmp, p, None)?;
-                std::os::unix::fs::symlink(t, fsutil::safe_join(&tmp, p)?)?;
-            }
-            Some(m) if m.is_file() => {
-                // Opened as the caller, copied in pieces.
-                let mut f = as_caller_fs(ctx, || {
-                    let f = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(&src)?;
-                    if !f.metadata()?.is_file() {
-                        bail!("{} is not a regular file", src.display());
-                    }
-                    Ok(f)
-                })?;
-                use std::os::unix::fs::MetadataExt;
-                fsutil::write_file_from(&tmp, p, &mut f, m.mode() & 0o777, None)?;
-            }
-            _ => {}
-        }
-    }
-    let wdir = repo.working(&line);
-    let own = repo.own(&line);
-    let (mut copied, mut conflicts) = (Vec::new(), Vec::new());
-    for p in paths {
-        if skip_path(p) || p == MARKER {
-            continue;
-        }
-        if fsutil::same_entry(base, p, &tmp, p, None)? {
-            continue;
-        }
-        if fsutil::same_entry(&scan.path, p, &tmp, p, None)? {
-            continue;
-        }
-        if fsutil::same_entry(base, p, &scan.path, p, None)? {
-            match fsutil::lmeta(&tmp, p) {
-                Some(_) => fsutil::copy_entry(&tmp, p, &wdir, p, own)?,
-                None => fsutil::remove_entry(&wdir, p)?,
-            }
-            copied.push(p.clone());
-            continue;
-        }
-        // Both changed.
-        let text = |r: &Path| fsutil::lmeta(r, p).map(|m| m.is_file()).unwrap_or(false) && !fsutil::is_binary_file(r, p);
-        if text(base) && text(&scan.path) && text(&tmp) {
-            let ours = std::env::temp_dir().join(format!("layr-ours-{}", ids::new_id()));
-            std::fs::copy(fsutil::safe_join(&scan.path, p)?, &ours)?;
-            let st = Command::new("git")
-                .args(["merge-file", "-L", "line", "-L", "mirror base", "-L", "mirror"])
-                .arg(&ours)
-                .arg(fsutil::safe_join(base, p)?)
-                .arg(fsutil::safe_join(&tmp, p)?)
-                .status()?;
-            let mode = fsutil::lmeta(&scan.path, p).map(|m| m.mode).unwrap_or(0o644);
-            let written = File::open(&ours)
-                .map_err(anyhow::Error::from)
-                .and_then(|mut f| fsutil::write_file_from(&wdir, p, &mut f, mode, own));
-            let _ = std::fs::remove_file(&ours);
-            written?;
-            if st.code().unwrap_or(1) == 0 {
-                copied.push(p.clone());
-            } else {
-                conflicts.push(format!("{p} (content: markers written)"));
-            }
-        } else {
-            let side = format!("{p}.mirror-conflict");
-            if fsutil::lmeta(&tmp, p).is_some() {
-                fsutil::copy_entry(&tmp, p, &wdir, &side, own)?;
-            }
-            conflicts.push(format!("{p} (kept the line version; the mirror version is {side})"));
-        }
-    }
-    let mut rec = Record::new("mirror.collect");
-    rec.lines.insert(
-        line.id.clone(),
-        crate::model::LineChange {
-            before: Some(repo.line_state(&line, &line.head)),
-            after: Some(repo.line_state(&line, &line.head)),
-            working_before: w,
-            working_after: None,
-        },
-    );
-    rec.data = serde_json::json!({"path": key, "state": held, "copied": copied, "conflicts": conflicts});
-    repo.commit_record(ctx, rec)?;
-    // The mirror now differs from the held state at these paths: copy them again on the next sync.
-    let mut stale: Vec<String> = paths.to_vec();
-    stale.sort();
-    let mut rec = Record::new("mirror");
-    rec.data = serde_json::json!({"path": key, "state": held, "line": line.id, "stale": stale});
-    repo.commit_record(ctx, rec)?;
-    if !quiet {
-        outln!(ctx, "collected {} path(s) from the mirror into line {}", copied.len(), line.name);
-    }
-    if !conflicts.is_empty() {
-        outln!(ctx, "conflicts (the line also changed these paths):");
-        for c in &conflicts {
-            outln!(ctx, "\t{c}");
         }
         return Ok(1);
     }
@@ -973,7 +710,7 @@ pub fn backup(ctx: &Ctx, args: &[String]) -> Result<i32> {
     match sub {
         "run" => {
             let h = here(ctx)?;
-            h.repo.require_admin(ctx, "make backups")?;
+            h.repo.require(ctx, "backup")?;
             let dir = match a.pos.first() {
                 Some(d) => caller_path(ctx, d),
                 None => match h.repo.p.config_value("backup.dir")?.and_then(|v| v.as_str().map(PathBuf::from)) {

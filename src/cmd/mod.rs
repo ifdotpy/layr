@@ -179,11 +179,11 @@ Read history:
    log, show, blame, grep, ls-files, rev-parse, merge-base
 Lines and states:
    branch, switch, checkout, tag, merge, cherry-pick, revert, rebase
-   save, undo, op, try, checks, group, adopt
+   save, undo, op, try, checks, adopt
 Remote (git bridge):
    remote, fetch, pull, push, clone
 Projects and machines:
-   init, projects, config, layer, export, mirror, backup, sync, serve-peer, gc, fsck, reindex, daemon
+   init, projects, config, layer, export, backup, sync, serve-peer, gc, fsck, reindex, daemon
 
 Lines are folders: <root>/projects/<project>/lines/<line>. Run commands inside a line folder.
 ";
@@ -233,11 +233,12 @@ pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
         "cherry-pick" => mergecmd::cherry_pick(ctx, &rest),
         "revert" => mergecmd::revert(ctx, &rest),
         "rebase" => mergecmd::rebase(ctx, &rest),
-        "group" => mergecmd::group(ctx, &rest),
         "save" => admin::save(ctx, &rest),
         "undo" => admin::undo(ctx, &rest),
         "op" => admin::op(ctx, &rest),
         "try" => admin::try_cmd(ctx, &rest),
+        "access" => admin::access(ctx, &rest),
+        "protect" => admin::protect(ctx, &rest),
         "checks" => admin::checks(ctx, &rest),
         "gc" => admin::gc(ctx, &rest),
         "fsck" => admin::fsck(ctx, &rest),
@@ -254,7 +255,6 @@ pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
         "push" => remote::push(ctx, &rest),
         "clone" => remote::clone(ctx, &rest),
         "export" => transfer::export(ctx, &rest),
-        "mirror" => transfer::mirror(ctx, &rest),
         "backup" => transfer::backup(ctx, &rest),
         "sync" => replicate::sync(ctx, &rest),
         "serve-peer" => replicate::serve(ctx, &rest),

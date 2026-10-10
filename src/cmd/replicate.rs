@@ -406,7 +406,7 @@ pub fn sync(ctx: &Ctx, args: &[String]) -> Result<i32> {
         ));
     }
     let h = here(ctx)?;
-    h.repo.require_admin(ctx, "replicate the project")?;
+    h.repo.require(ctx, "sync")?;
     let repo = &h.repo;
     let mut c = Command::new(&a.paths[0]);
     c.args(&a.paths[1..]).stdin(Stdio::piped()).stdout(Stdio::piped());

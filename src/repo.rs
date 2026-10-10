@@ -1,5 +1,6 @@
 //! Repository operations on one project: snapshots, lines, staging, status and in-place updates.
 
+use crate::access::{Policy, Role, Rule, Who};
 use crate::btrfs;
 use crate::changes::{self, Change};
 use crate::ctx::Ctx;
@@ -64,6 +65,22 @@ pub fn skip_path(p: &str) -> bool {
     p == ".git" || p.starts_with(".git/")
 }
 
+/// The kinds of change to a line, for `Repo::authorize_line`.
+#[derive(Clone, Copy, Debug)]
+pub enum LineOp {
+    /// Snapshots of the working content (save, layer repair): the owner.
+    Save,
+    /// Commit, reset, add, apply, stash and the other work commands: the owner, and only if the
+    /// line is not protected or its rule allows direct changes.
+    Direct,
+    /// A merge into the line: the owner; for a protected line the rule's update role.
+    Merge { expect: bool },
+    /// Delete, rename or adopt: the owner, or a maintainer.
+    Manage,
+    /// Moving the head back: the owner; for a protected line the rule's rewrite role.
+    Rewrite,
+}
+
 impl<'a> Repo<'a> {
     pub fn open(ctx: &'a Ctx, project: &str) -> Result<Repo<'a>> {
         let p = Project::open(&ctx.store, project)?;
@@ -72,51 +89,136 @@ impl<'a> Repo<'a> {
         Ok(r)
     }
 
-    // ----- permissions -----
+    // ----- permissions (docs/design.md, section 3; src/access.rs) -----
 
-    pub fn members_all(&self) -> bool {
-        match self.p.config_value("members").ok().flatten() {
-            None => true,
-            Some(v) => v.as_str() == Some("*"),
-        }
+    pub fn policy(&self) -> Policy {
+        Policy::load(&self.p)
     }
 
-    pub fn can_read(&self, ctx: &Ctx) -> Result<()> {
-        let uid = ctx.caller.uid;
-        if uid == 0 || uid == self.p.admin() || self.members_all() {
-            return Ok(());
-        }
-        let members: Vec<u64> = self
-            .p
-            .config_value("members")?
-            .and_then(|v| v.as_array().cloned())
-            .map(|a| a.into_iter().filter_map(|x| x.as_u64()).collect())
-            .unwrap_or_default();
-        if members.contains(&(uid as u64)) || self.p.db.lines()?.iter().any(|l| l.owner == uid) {
-            return Ok(());
-        }
-        bail!("permission denied: user {} is not a member of project {}", ctx.caller.user, self.p.name)
+    pub fn who(ctx: &Ctx) -> Who {
+        Who::of(ctx.caller.uid, ctx.caller.gid)
     }
 
+    /// The caller may take a project action (`access::ACTIONS`), or an error that says why not.
+    pub fn require(&self, ctx: &Ctx, action: &str) -> Result<()> {
+        if ctx.caller.is_root() {
+            return Ok(());
+        }
+        self.policy().check(&Self::who(ctx), action).map_err(|r| anyhow::anyhow!("permission denied: {r}"))
+    }
+
+    /// The caller has the admin role (root has).
     pub fn is_admin(&self, ctx: &Ctx) -> bool {
-        ctx.caller.uid == 0 || ctx.caller.uid == self.p.admin()
+        ctx.caller.is_root() || self.policy().role(&Self::who(ctx)) == Role::Admin
     }
 
-    pub fn require_admin(&self, ctx: &Ctx, what: &str) -> Result<()> {
-        if !self.is_admin(ctx) {
-            bail!("permission denied: only the project admin can {what}");
-        }
-        Ok(())
-    }
-
-    pub fn can_write_line(&self, ctx: &Ctx, line: &Line) -> Result<()> {
-        if line.owner == 0 && !ctx.caller.is_root() {
-            bail!("permission denied: only root can change the root-owned line '{}'", line.name);
-        }
-        if ctx.caller.uid == 0 || ctx.caller.uid == line.owner || ctx.caller.uid == self.p.admin() {
+    /// Reading needs the reader role, or owning a line of the project (unless a deny rule takes
+    /// `read` away).
+    pub fn can_read(&self, ctx: &Ctx) -> Result<()> {
+        if ctx.caller.is_root() {
             return Ok(());
         }
-        bail!("permission denied: line '{}' belongs to another user", line.name)
+        let pol = self.policy();
+        let who = Self::who(ctx);
+        if pol.check(&who, "read").is_ok() {
+            return Ok(());
+        }
+        if pol.denied_by(&who, "read").is_none() && self.p.db.lines()?.iter().any(|l| l.owner == ctx.caller.uid) {
+            return Ok(());
+        }
+        bail!("permission denied: user {} may not read project {}", ctx.caller.user, self.p.name)
+    }
+
+    /// Whether the caller may make this kind of change to a line. Returns the line's protection
+    /// rule. Only the owner changes a line; a protected line changes through merges by the role
+    /// its rule names; moving a protected line back needs the rule's rewrite role.
+    pub fn authorize_line(&self, ctx: &Ctx, line: &Line, op: LineOp) -> Result<Option<Rule>> {
+        let pol = self.policy();
+        let rule = pol.rule_for(&line.name);
+        if ctx.caller.is_root() {
+            return Ok(rule);
+        }
+        let name = &line.name;
+        if line.owner == 0 {
+            bail!("permission denied: only root changes the root-owned line '{name}'");
+        }
+        let who = Self::who(ctx);
+        let role = pol.role(&who);
+        let owner = ctx.caller.uid == line.owner;
+        let not_owner = || anyhow::anyhow!("permission denied: line '{name}' belongs to another user");
+        match op {
+            LineOp::Save => {
+                if !owner {
+                    return Err(not_owner());
+                }
+            }
+            LineOp::Direct => {
+                if rule.as_ref().map(|r| !r.direct).unwrap_or(false) {
+                    bail!("line '{name}' is protected: it changes only through 'layr merge <line> --expect <state>'");
+                }
+                if !owner {
+                    return Err(not_owner());
+                }
+            }
+            LineOp::Merge { expect } => match &rule {
+                None if !owner => return Err(not_owner()),
+                None => {}
+                Some(r) => {
+                    pol.check(&who, "merge").map_err(|e| anyhow::anyhow!("permission denied: {e}"))?;
+                    if role < r.update {
+                        bail!(
+                            "permission denied: merging into the protected line '{name}' needs the role {}; you are {}",
+                            r.update.name(),
+                            role.name()
+                        );
+                    }
+                    if r.expect && !expect {
+                        bail!("the protected line '{name}' takes only a reviewed state: add --expect <state>");
+                    }
+                }
+            },
+            LineOp::Manage => {
+                if !(owner && rule.is_none()) {
+                    self.require(ctx, "line.manage")?;
+                }
+                if let Some(r) = &rule {
+                    if role < r.rewrite {
+                        bail!(
+                            "permission denied: this change of the protected line '{name}' needs the role {}",
+                            r.rewrite.name()
+                        );
+                    }
+                }
+            }
+            LineOp::Rewrite => match &rule {
+                None if !owner => return Err(not_owner()),
+                None => {}
+                Some(r) if role < r.rewrite => {
+                    bail!(
+                        "permission denied: moving the protected line '{name}' back needs the role {}; you are {}",
+                        r.rewrite.name(),
+                        role.name()
+                    );
+                }
+                Some(_) => {}
+            },
+        }
+        Ok(rule)
+    }
+
+    /// A move of a line's head that is not forward (reset, amend, undo of a merge) rewrites the
+    /// line's history.
+    pub fn check_move(&self, ctx: &Ctx, line: &Line, new_head: &str) -> Result<()> {
+        if new_head == line.head || self.is_ancestor(&line.head, new_head)? {
+            return Ok(());
+        }
+        self.authorize_line(ctx, line, LineOp::Rewrite).map(|_| ())
+    }
+
+    /// The user that the service's own backups are written as: the one who set `backup.dir`.
+    pub fn backup_writer(&self) -> (u32, u32) {
+        let uid = self.p.config_u64("backup.writer", self.p.legacy_admin() as u64) as u32;
+        (uid, crate::ctx::Caller::from_uid(uid).gid)
     }
 
     // ----- lookups -----
@@ -177,24 +279,12 @@ impl<'a> Repo<'a> {
         (line.owner, c.gid)
     }
 
-    /// The admin of this machine (uid, gid): configured commands run as this user.
-    pub fn admin_ids(&self) -> (u32, u32) {
-        let uid = self.p.admin();
-        (uid, crate::ctx::Caller::from_uid(uid).gid)
-    }
-
     pub fn own(&self, line: &Line) -> Option<(u32, u32)> {
         Some(self.owner_ids(line))
     }
 
     pub fn line_state(&self, line: &Line, head: &str) -> LineState {
-        LineState {
-            name: line.name.clone(),
-            head: head.to_string(),
-            owner: line.owner,
-            machine: line.machine.clone(),
-            group: line.group.clone(),
-        }
+        LineState { name: line.name.clone(), head: head.to_string(), owner: line.owner, machine: line.machine.clone() }
     }
 
     // ----- snapshots -----
@@ -520,7 +610,7 @@ impl<'a> Repo<'a> {
     // ----- lines -----
 
     /// Create a line from a state: a writable snapshot at `lines/<name>`.
-    pub fn create_line(&self, ctx: &Ctx, name: &str, start: &str, owner: u32, group: Option<String>) -> Result<Line> {
+    pub fn create_line(&self, ctx: &Ctx, name: &str, start: &str, owner: u32) -> Result<Line> {
         check_name("line", name)?;
         if self.p.db.line_by_name(name)?.is_some() {
             bail!("a line named '{name}' already exists");
@@ -535,7 +625,6 @@ impl<'a> Repo<'a> {
             head: start.to_string(),
             owner,
             machine: self.p.store.machine.id.clone(),
-            group: group.clone(),
         };
         self.materialize(&line, start, &dst)?;
         let res = (|| -> Result<Record> {

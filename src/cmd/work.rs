@@ -214,7 +214,12 @@ fn untracked_list(st: &Status, mode: &str) -> Vec<String> {
 
 /// Lock the project and save the working content (snapshot rule 2).
 pub fn begin_change(ctx: &Ctx, repo: &Repo, line: &Line) -> Result<(crate::store::Lock, Option<String>)> {
-    repo.can_write_line(ctx, line)?;
+    begin(ctx, repo, line, crate::repo::LineOp::Direct)
+}
+
+/// `begin_change` for another kind of change (a merge).
+pub fn begin(ctx: &Ctx, repo: &Repo, line: &Line, op: crate::repo::LineOp) -> Result<(crate::store::Lock, Option<String>)> {
+    repo.authorize_line(ctx, line, op)?;
     let lock = repo.p.lock()?;
     let line = repo.line(&line.id)?;
     let w = repo.working_state(ctx, &line, "before a layr command")?;
@@ -299,7 +304,7 @@ pub fn add(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if specs.is_empty() {
         specs = vec![String::new()];
     }
-    h.repo.can_write_line(ctx, &line)?;
+    h.repo.authorize_line(ctx, &line, crate::repo::LineOp::Direct)?;
     let _lock = h.repo.p.lock()?;
     let (st, scan, _it, index) = h.repo.status(&line)?;
     let mut paths: BTreeSet<String> = BTreeSet::new();
@@ -655,6 +660,10 @@ pub fn commit(ctx: &Ctx, args: &[String]) -> Result<i32> {
         message = String::from_utf8_lossy(&read_caller_file(ctx, f, fsutil::MAX_TEXT)?).into_owned();
     }
     let head = h.repo.state(&line.head)?;
+    if a.has("--amend") {
+        // The amended state replaces the head: the line's history changes.
+        h.repo.authorize_line(ctx, &line, crate::repo::LineOp::Rewrite)?;
+    }
     if a.has("--amend") && message.is_empty() {
         message = head.message.clone();
     }
@@ -662,7 +671,7 @@ pub fn commit(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if message.is_empty() {
         return Err(exit(1, "Aborting commit due to empty commit message (use -m <message>)."));
     }
-    h.repo.can_write_line(ctx, &line)?;
+    h.repo.authorize_line(ctx, &line, crate::repo::LineOp::Direct)?;
     let _lock = h.repo.p.lock()?;
     let line = h.repo.line(&line.id)?;
     if a.has("-a") {
@@ -940,6 +949,7 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let (_lock, w) = begin_change(ctx, &h.repo, &line)?;
     let line = h.repo.line(&line.id)?;
     let repo = &h.repo;
+    repo.check_move(ctx, &line, &target)?;
     let target_root = repo.state_root(&target)?;
     let mode = if a.has("--soft") {
         "soft"
@@ -1034,7 +1044,7 @@ pub fn stash(ctx: &Ctx, args: &[String]) -> Result<i32> {
             Ok(0)
         }
         "drop" | "clear" => {
-            repo.can_write_line(ctx, &line)?;
+            repo.authorize_line(ctx, &line, crate::repo::LineOp::Direct)?;
             let _lock = repo.p.lock()?;
             let list = repo.p.db.line_states(&line.id, StateKind::Stash)?;
             let targets: Vec<(usize, String)> = if sub == "clear" {
@@ -1077,7 +1087,7 @@ pub fn stash(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 ours_label: "Updated upstream",
                 theirs_label: "Stashed changes",
                 config: &cfg,
-                run_as: Some(repo.admin_ids()),
+                run_as: ctx.caller.driver_ids(),
                 allow_root: ctx.caller.is_root(),
             })?;
             let result = repo.temp_snapshot(&work.path, true)?;

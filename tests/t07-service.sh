@@ -16,6 +16,9 @@ L=$T/layr
 
 sample $T/src
 l init perm --from $T/src --owner layr-admin -q >/dev/null
+# An open project (everyone a writer) whose main line is not protected: this file tests the
+# service and the owners of lines; t13 tests roles and protected lines.
+l --project perm access grant '*' writer; l --project perm protect main --remove
 P=$LAYR_ROOT/projects/perm/lines
 cd $P/main
 eq "the admin works through the service" "" "$(as layr-admin $L status -s)"
@@ -62,7 +65,6 @@ no "a user cannot undo an operation on the admin's line" as layr-u1 $L undo --fo
 eq "the main line did not move" "admin" "$(cd $P/main && as layr-admin $L log -1 --format=%s)"
 no "a user cannot push" as layr-u1 $L push origin t2
 no "a user cannot delete a tag" sh -c "as layr-admin env LAYR_PROJECT=perm LAYR_LINE=main $L tag v1 && as layr-u1 $L tag -d v1"
-no "a user cannot put another user's line in a group" sh -c "as layr-admin env LAYR_PROJECT=perm LAYR_LINE=main $L group create g1 && as layr-u2 env LAYR_PROJECT=perm $L group add g1 w1"
 
 # A merge driver never reads the target of a link in the merged trees.
 cd $P/main

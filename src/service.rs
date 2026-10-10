@@ -223,7 +223,7 @@ fn periodic(root: &Path, hourly: bool) {
             if let Ok(Some(dir)) = repo.p.config_value("backup.dir") {
                 if let Some(d) = dir.as_str() {
                     // Written as the admin of this machine, who configured the folder.
-                    let _ = crate::cmd::transfer::run_backup(&ctx, &repo, Path::new(d), false, repo.admin_ids());
+                    let _ = crate::cmd::transfer::run_backup(&ctx, &repo, Path::new(d), false, repo.backup_writer());
                 }
             }
         }

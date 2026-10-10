@@ -21,14 +21,14 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let h = here(ctx)?;
     let repo = &h.repo;
     let lines: Vec<Line> = if a.has("--all") {
-        repo.require_admin(ctx, "save all lines")?;
+        repo.require(ctx, "line.manage")?;
         repo.lines()?.into_iter().filter(|l| repo.working(l).exists()).collect()
     } else {
         vec![h.line()?.clone()]
     };
     let msg = a.get("-m").unwrap_or("").to_string();
     for l in lines {
-        repo.can_write_line(ctx, &l)?;
+        repo.authorize_line(ctx, &l, crate::repo::LineOp::Save)?;
         let _lock = repo.p.lock()?;
         let l = repo.line(&l.id)?;
         let st = repo.save(ctx, &l, &msg, a.has("--running"), a.has("--force") || a.has("--layers"))?;
@@ -100,6 +100,10 @@ const NOT_UNDOABLE: &[&str] = &[
     "import",
     "mirror",
     "slot",
+    "group.create",
+    "group.add",
+    "group.accept",
+    "merge.candidate",
     "rebase.step",
     "remote.ref",
     "config",
@@ -174,9 +178,8 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
             head: String::new(),
             owner,
             machine: String::new(),
-            group: None,
         };
-        repo.can_write_line(ctx, &probe)?;
+        repo.authorize_line(ctx, &probe, crate::repo::LineOp::Rewrite)?;
     }
     if r.lines.is_empty() && !repo.is_admin(ctx) && r.actor.uid != ctx.caller.uid {
         return Err(exit(1, "permission denied: only the project admin or the user who made it can undo this operation"));
@@ -282,7 +285,6 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
                     head: b.head.clone(),
                     owner: b.owner,
                     machine: repo.p.store.machine.id.clone(),
-                    group: b.group.clone(),
                 };
                 repo.materialize(&l, &src, &w)?;
             }
@@ -336,13 +338,13 @@ pub fn op(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let sub = args.first().map(|s| s.as_str()).unwrap_or("log");
     if sub == "export" {
         let h = here(ctx)?;
-        h.repo.require_admin(ctx, "export the records")?;
+        h.repo.require(ctx, "records")?;
         ctx.print(&h.repo.p.export_jsonl()?);
         return Ok(0);
     }
     if sub == "import" {
         let h = here(ctx)?;
-        h.repo.require_admin(ctx, "import records")?;
+        h.repo.require(ctx, "records")?;
         let data = super::work::read_caller_file(ctx, args.get(1).map(|s| s.as_str()).unwrap_or("-"), 512 << 20)?;
         let lines: Vec<String> =
             String::from_utf8_lossy(&data).lines().filter(|l| !l.trim().is_empty()).map(|l| l.to_string()).collect();
@@ -404,49 +406,74 @@ pub fn try_cmd(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let a = parse(&spec, args)?;
     let h = here(ctx)?;
     let repo = &h.repo;
+    repo.require(ctx, "try")?;
     let rev = a.pos.first().ok_or_else(|| exit(128, "usage: layr try <rev> -- <command>..."))?;
     if a.paths.is_empty() {
         return Err(exit(128, "usage: layr try <rev> -- <command>..."));
     }
     let state = revs::resolve(repo, h.line.as_ref(), rev)?;
+    // `try` is the caller's own command: it gets the caller's environment.
+    let env: Vec<(String, String)> = ctx.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    run_check_in(ctx, repo, &state, &a.paths, &a.paths.join(" "), &env, a.has("-q"), a.has("--keep"))
+}
+
+/// Run a configured check as the caller in a temporary copy of `state` and record its exit code
+/// as a check of that state (`command` is the text recorded). The check runs the code of the
+/// state, which may come from another user: it gets a clean environment (no tokens or keys of
+/// the caller), only HOME, USER, LOGNAME and PATH.
+pub fn run_check(ctx: &Ctx, repo: &Repo, state: &str, argv: &[String], command: &str, quiet: bool) -> Result<i32> {
+    run_check_in(ctx, repo, state, argv, command, &[], quiet, false)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_check_in(
+    ctx: &Ctx,
+    repo: &Repo,
+    state: &str,
+    argv: &[String],
+    command: &str,
+    env: &[(String, String)],
+    quiet: bool,
+    keep: bool,
+) -> Result<i32> {
     let name = format!(".try-{:016x}", rand::random::<u64>());
     let dir = repo.p.line_path(&name);
     let tmp_line = Line {
         id: format!("try-{name}"),
         name: name.clone(),
-        head: state.clone(),
+        head: state.to_string(),
         owner: ctx.caller.uid,
         machine: repo.p.store.machine.id.clone(),
-        group: None,
     };
-    repo.materialize(&tmp_line, &state, &dir)?;
+    repo.materialize(&tmp_line, state, &dir)?;
     let res = (|| -> Result<i32> {
-        if !a.has("-q") {
-            eprintln!("layr try: running in {} (state {})", dir.display(), ids::short(&state));
+        if !quiet {
+            eprintln!("layr: running '{command}' in {} (state {})", dir.display(), ids::short(state));
         }
         let started = std::time::Instant::now();
-        let mut c = std::process::Command::new(&a.paths[0]);
-        c.args(&a.paths[1..]).current_dir(&dir);
-        // The caller's own environment and identity (uid, groups), never the service's.
-        let mut env: Vec<(String, String)> = ctx.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        env.push(("LAYR_TRY_STATE".into(), ids::display(&state)));
+        let mut c = std::process::Command::new(&argv[0]);
+        c.args(&argv[1..]).current_dir(&dir);
+        // The caller's identity (uid, groups), never the service's.
+        let mut env = env.to_vec();
+        env.push(("LAYR_TRY_STATE".into(), ids::display(state)));
         crate::privs::command_as(&mut c, ctx.caller.uid, &env)?;
         let st = c.status()?;
         let code = st.code().unwrap_or(128);
         let _lock = repo.p.lock()?;
         let mut rec = Record::new("check");
-        rec.data = serde_json::json!({"state": state, "command": a.paths.join(" "), "exit": code, "seconds": started.elapsed().as_secs_f64()});
+        rec.data =
+            serde_json::json!({"state": state, "command": command, "exit": code, "seconds": started.elapsed().as_secs_f64()});
         repo.commit_record(ctx, rec)?;
         Ok(code)
     })();
-    if a.has("--keep") {
+    if keep {
         eprintln!("layr try: kept {}", dir.display());
     } else {
         let _ = btrfs::delete_tree(&dir);
     }
     let code = res?;
-    if !a.has("-q") {
-        eprintln!("layr try: state {} exit {code}", ids::short(&state));
+    if !quiet {
+        eprintln!("layr: state {} exit {code}", ids::short(state));
     }
     Ok(code)
 }
@@ -465,8 +492,8 @@ pub fn checks(ctx: &Ctx, args: &[String]) -> Result<i32> {
     Ok(0)
 }
 
-/// Retention. Kept: line heads and their history, tags, remote refs, groups, stashes, the newest
-/// export per branch, conflict sources, mirror states, automatic states (the newest N per line and
+/// Retention. Kept: line heads and their history, tags, remote refs, stashes, the newest
+/// export per branch, conflict sources, automatic states (the newest N per line and
 /// one per hour for a day), and every state that a record inside the undo window names.
 pub fn retention_plan(repo: &Repo) -> Result<(BTreeSet<String>, Vec<String>)> {
     let db = &repo.p.db;
@@ -500,18 +527,11 @@ pub fn retention_plan(repo: &Repo) -> Result<(BTreeSet<String>, Vec<String>)> {
     for (_, s, _) in db.remote_refs()? {
         roots.push(s);
     }
-    for (_, _, base, _) in db.groups()? {
-        roots.push(base);
-    }
     let mut newest_export: BTreeMap<(String, String), String> = BTreeMap::new();
     for (_, st, remote, branch, _, _) in db.exports()? {
         newest_export.insert((remote, branch), st);
     }
     roots.extend(newest_export.into_values());
-    let mut st = db.conn.prepare("SELECT state FROM mirrors")?;
-    let mirrors: Vec<String> = st.query_map([], |r| r.get(0))?.collect::<Result<Vec<_>, _>>()?;
-    drop(st);
-    roots.extend(mirrors);
     for r in db.records_since(now - undo_days * 86400 * 1000)? {
         for s in &r.states {
             keep.insert(s.id.clone());
@@ -616,7 +636,7 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let spec = Spec::new().flag("-n|--dry-run").flag("-q|--quiet");
     let a = parse(&spec, args)?;
     let h = here(ctx)?;
-    h.repo.require_admin(ctx, "run gc")?;
+    h.repo.require(ctx, "gc")?;
     let v = run_gc(ctx, &h.repo, a.has("-n"))?;
     if !a.has("-q") {
         let verb = if a.has("-n") { "would delete" } else { "deleted" };
@@ -633,7 +653,7 @@ pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let a = parse(&spec, args)?;
     let h = here(ctx)?;
     let repo = &h.repo;
-    repo.require_admin(ctx, "run fsck")?;
+    repo.require(ctx, "fsck")?;
     let _lock = repo.p.lock()?;
     let mut problems = 0;
     let ic: String = repo.p.db.conn.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
@@ -690,7 +710,7 @@ pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
 
 pub fn reindex(ctx: &Ctx, _args: &[String]) -> Result<i32> {
     let h = here(ctx)?;
-    h.repo.require_admin(ctx, "rebuild the index")?;
+    h.repo.require(ctx, "fsck")?;
     let _lock = h.repo.p.lock()?;
     h.repo.p.rebuild_index()?;
     let n: i64 = h.repo.p.db.conn.query_row("SELECT COUNT(*) FROM records", [], |r| r.get(0))?;
@@ -759,7 +779,12 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
         None => ctx.caller.uid,
     };
     let actor = ctx.actor();
-    let p = Project::create(&ctx.store, name, &actor, serde_json::json!({"admin": owner, "members": "*"}))?;
+    let p = Project::create(
+        &ctx.store,
+        name,
+        &actor,
+        serde_json::json!({"access": {format!("user:{owner}"): "admin"}, "protect": {"main": {}}}),
+    )?;
     let repo = Repo { p };
     let res = (|| -> Result<(String, String)> {
         let _lock = repo.p.lock()?;
@@ -870,7 +895,7 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
     };
     let _lock = repo.p.lock()?;
-    let l = repo.create_line(ctx, &line_name, &state, owner, None)?;
+    let l = repo.create_line(ctx, &line_name, &state, owner)?;
     if !a.has("-q") {
         outln!(
             ctx,
@@ -942,8 +967,8 @@ pub fn config(ctx: &Ctx, args: &[String]) -> Result<i32> {
             None => Ok(1),
         };
     }
-    repo.require_admin(ctx, "change the project configuration")?;
     let key = a.get("--unset").unwrap_or_else(|| a.pos.first().map(|s| s.as_str()).unwrap_or(""));
+    repo.require(ctx, if POLICY_KEYS.contains(&key) { "access" } else { "config" })?;
     if (key == "admin" || key == "lead") && !ctx.caller.is_root() {
         return Err(exit(1, format!("permission denied: only root changes '{key}'")));
     }
@@ -955,9 +980,190 @@ pub fn config(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let (k, v) = (&a.pos[0], a.pos[1..].join(" "));
     let val: serde_json::Value = serde_json::from_str(&v).unwrap_or(serde_json::Value::String(v.clone()));
     set_config(ctx, repo, k, val)?;
-    if k == "members" || k == "admin" || k == "lead" {
+    if k == "backup.dir" {
+        // The service writes its own backups into this folder as the user who named it.
+        set_config(ctx, repo, "backup.writer", serde_json::json!(ctx.caller.uid))?;
+    }
+    if POLICY_KEYS.contains(&k.as_str()) {
         crate::gitbridge::sync_store_access(repo)?;
     }
+    Ok(0)
+}
+
+/// Settings that decide who may do what: changing them is the `access` action.
+const POLICY_KEYS: &[&str] = &["access", "deny", "protect", "members", "admin", "lead"];
+
+/// `layr access`: roles and deny rules (docs/design.md, section 3).
+pub fn access(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    use crate::access::{action_role, parse_principal, show_principal, Role, ACTIONS};
+    let h = here(ctx)?;
+    let repo = &h.repo;
+    let sub = args.first().map(|s| s.as_str()).unwrap_or("list");
+    let rest = args.get(1..).unwrap_or(&[]);
+    let principal = |s: Option<&String>| -> Result<String> {
+        let s =
+            s.ok_or_else(|| exit(128, "usage: layr access (grant|revoke|deny|allow|check) <user|@group|uid:N|gid:N|*> ..."))?;
+        parse_principal(s).ok_or_else(|| exit(128, format!("fatal: unknown user or group '{s}'")))
+    };
+    let pol = repo.policy();
+    match sub {
+        "list" => {
+            for (k, r) in &pol.access {
+                outln!(ctx, "{}	{}", show_principal(k), r.name());
+            }
+            for (k, v) in &pol.deny {
+                outln!(ctx, "{}	deny {}", show_principal(k), v.join(" "));
+            }
+            Ok(0)
+        }
+        "check" => {
+            // Explain a decision: `layr access check <principal> <action>`.
+            let k = principal(rest.first())?;
+            let action = rest.get(1).ok_or_else(|| exit(128, "usage: layr access check <principal> <action>"))?;
+            if action_role(action).is_none() {
+                return Err(exit(128, format!("fatal: unknown action '{action}'")));
+            }
+            let who = match k.strip_prefix("user:").and_then(|u| u.parse::<u32>().ok()) {
+                Some(uid) => crate::access::Who::of(uid, crate::ctx::Caller::from_uid(uid).gid),
+                None => return Err(exit(128, "fatal: check takes a user")),
+            };
+            match pol.check(&who, action) {
+                Ok(()) => outln!(ctx, "allowed: {} is {}", show_principal(&k), pol.role(&who).name()),
+                Err(e) => outln!(ctx, "refused: {e}"),
+            }
+            Ok(0)
+        }
+        "grant" | "revoke" | "deny" | "allow" => {
+            repo.require(ctx, "access")?;
+            let k = principal(rest.first())?;
+            let _lock = repo.p.lock()?;
+            let pol = repo.policy();
+            match sub {
+                "grant" => {
+                    let role = rest
+                        .get(1)
+                        .and_then(|r| Role::parse(r))
+                        .ok_or_else(|| exit(128, "usage: layr access grant <principal> (reader|writer|maintainer|admin)"))?;
+                    let mut m = pol.access.clone();
+                    m.insert(k, role);
+                    let v: serde_json::Map<String, serde_json::Value> =
+                        m.into_iter().map(|(k, r)| (k, serde_json::json!(r.name()))).collect();
+                    set_config(ctx, repo, "access", serde_json::Value::Object(v))?;
+                }
+                "revoke" => {
+                    let mut m = pol.access.clone();
+                    m.remove(&k);
+                    let v: serde_json::Map<String, serde_json::Value> =
+                        m.into_iter().map(|(k, r)| (k, serde_json::json!(r.name()))).collect();
+                    set_config(ctx, repo, "access", serde_json::Value::Object(v))?;
+                }
+                _ => {
+                    let actions: Vec<String> = rest[1..].to_vec();
+                    if actions.is_empty() {
+                        return Err(exit(128, format!("usage: layr access {sub} <principal> <action>...")));
+                    }
+                    for x in &actions {
+                        if x != "*" && action_role(x).is_none() {
+                            let known: Vec<&str> = ACTIONS.iter().map(|(a, _)| *a).collect();
+                            return Err(exit(128, format!("fatal: unknown action '{x}' (known: {})", known.join(", "))));
+                        }
+                    }
+                    let mut d = pol.deny.clone();
+                    let e = d.entry(k.clone()).or_default();
+                    if sub == "deny" {
+                        for x in actions {
+                            if !e.contains(&x) {
+                                e.push(x);
+                            }
+                        }
+                    } else {
+                        e.retain(|x| !actions.contains(x));
+                    }
+                    if e.is_empty() {
+                        d.remove(&k);
+                    }
+                    set_config(ctx, repo, "deny", serde_json::to_value(d)?)?;
+                }
+            }
+            crate::gitbridge::sync_store_access(repo)?;
+            Ok(0)
+        }
+        _ => Err(exit(128, "usage: layr access [list|grant|revoke|deny|allow|check] ...")),
+    }
+}
+
+/// `layr protect`: protection rules of line name patterns.
+pub fn protect(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    use crate::access::{Role, RuleSpec};
+    let spec = Spec::new()
+        .value("--update")
+        .flag("--no-expect")
+        .flag("--expect")
+        .value("--check")
+        .flag("--direct")
+        .flag("--no-direct")
+        .value("--rewrite")
+        .flag("--remove");
+    let a = parse(&spec, args)?;
+    let h = here(ctx)?;
+    let repo = &h.repo;
+    let pol = repo.policy();
+    let pattern = match a.pos.first() {
+        None => {
+            for (p, r) in &pol.protect {
+                let rule = pol.rule_for(p);
+                let checks = r.check.join(",");
+                match rule {
+                    Some(x) => outln!(
+                        ctx,
+                        "{p}	update {}	expect {}	check {}	direct {}	rewrite {}",
+                        x.update.name(),
+                        x.expect,
+                        if checks.is_empty() { "-".into() } else { checks },
+                        x.direct,
+                        x.rewrite.name()
+                    ),
+                    None => outln!(ctx, "{p}"),
+                }
+            }
+            return Ok(0);
+        }
+        Some(p) => p.clone(),
+    };
+    repo.require(ctx, "access")?;
+    let _lock = repo.p.lock()?;
+    let mut all = repo.policy().protect;
+    if a.has("--remove") {
+        all.remove(&pattern);
+    } else {
+        let mut r: RuleSpec = all.get(&pattern).cloned().unwrap_or_default();
+        let role = |s: &str| -> Result<String> {
+            Role::parse(s).map(|r| r.name().to_string()).ok_or_else(|| exit(128, format!("fatal: unknown role '{s}'")))
+        };
+        if let Some(u) = a.get("--update") {
+            r.update = Some(role(u)?);
+        }
+        if let Some(u) = a.get("--rewrite") {
+            r.rewrite = Some(role(u)?);
+        }
+        if a.has("--no-expect") {
+            r.expect = Some(false);
+        }
+        if a.has("--expect") {
+            r.expect = Some(true);
+        }
+        if a.has("--direct") {
+            r.direct = Some(true);
+        }
+        if a.has("--no-direct") {
+            r.direct = Some(false);
+        }
+        if let Some(c) = a.get("--check") {
+            r.check = c.split(',').filter(|x| !x.is_empty()).map(|x| x.to_string()).collect();
+        }
+        all.insert(pattern, r);
+    }
+    set_config(ctx, repo, "protect", serde_json::to_value(all)?)?;
     Ok(0)
 }
 
@@ -987,7 +1193,7 @@ pub fn layer(ctx: &Ctx, args: &[String]) -> Result<i32> {
             Ok(0)
         }
         "add" | "remove" => {
-            repo.require_admin(ctx, "change layers")?;
+            repo.require(ctx, "config")?;
             let path = args.get(1).ok_or_else(|| exit(128, "usage: layr layer add|remove <path>"))?;
             fsutil::check_rel(path)?;
             let mut v = repo.p.config_strings("regenerable");
@@ -1012,7 +1218,7 @@ pub fn layer(ctx: &Ctx, args: &[String]) -> Result<i32> {
             // Layer folders that a tool deleted and made again as plain folders become layers
             // again. Best at a quiet point, when no build runs in the line.
             let l = h.line()?.clone();
-            repo.can_write_line(ctx, &l)?;
+            repo.authorize_line(ctx, &l, crate::repo::LineOp::Save)?;
             let _lock = repo.p.lock()?;
             let l = repo.line(&l.id)?;
             let (u, g) = repo.owner_ids(&l);
@@ -1032,7 +1238,7 @@ pub fn machines(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if args.first().map(|s| s.as_str()) == Some("trust") {
         let spec = Spec::new().value("--key");
         let a = parse(&spec, &args[1..])?;
-        h.repo.require_admin(ctx, "trust machines")?;
+        h.repo.require(ctx, "sync")?;
         let id = a.pos.first().ok_or_else(|| exit(128, "usage: layr machines trust <id> --key <public key>"))?;
         let key = a.get("--key").ok_or_else(|| exit(128, "usage: layr machines trust <id> --key <public key>"))?;
         let full = if id.len() == 36 {

@@ -33,12 +33,13 @@ cargo test                   # unit tests
 
 ```sh
 sudo layr daemon &                                   # the root service, /run/layr/layr.sock
-sudo layr init app --from ~/src/app --owner alice    # or: layr clone <git url> app
-cd /var/lib/layr/projects/app/lines/main             # a line is a folder
+sudo layr init app --from ~/src/app --owner alice    # alice is the admin; main is protected
+layr access grant bob writer                         # (alice) roles: reader, writer, maintainer, admin
+layr branch topic-1 main                             # (bob) a new line: O(1), its own folder
+cd /var/lib/layr/projects/app/lines/topic-1          # a line is a folder
 layr status; layr diff; layr add -A; layr commit -m "change"
-layr branch topic-1 --owner bob                      # a new line: O(1), its own folder
-layr merge topic-1 --expect <state id alice reviewed>
-layr push origin topic-1                             # one git commit for the change
+layr merge topic-1 --expect <state alice reviewed>   # (alice, in main) exactly the reviewed state
+layr push origin main                                # every state of main becomes a git commit
 ```
 
 The store lives under `$LAYR_ROOT` (default `/var/lib/layr`). Users other than root talk to the
@@ -54,6 +55,8 @@ service; root can run every command directly.
 | layer     | a folder of regenerable content (`target`, `node_modules`) kept as a nested subvolume: outside states, diffs and backups |
 | session   | a free-text label of the program that runs layr (`LAYR_SESSION`): shown in `op log` and used by `undo` to find "my last operation"; layr never decides permissions by it |
 | record    | one signed operation (Ed25519, UUIDv7 ids) in the project database; undo restores pointers |
+| role      | reader, writer, maintainer or admin of a user, a Unix group or everyone, per project and machine |
+| protected line | a line (pattern) that changes only through merges of reviewed states, after its checks pass on the merge result |
 
 States are folders: `layr show <state>:<path>` and `layr grep <pattern> <state>` read them
 without a checkout.
@@ -64,11 +67,12 @@ without a checkout.
 | ------------- | -------------------------------------------------------------------------------------------- |
 | work          | `status`, `diff`, `add`, `rm`, `mv`, `apply [--cached]`, `commit [-a] [--amend]`, `restore`, `reset`, `stash`, `clean` |
 | history       | `log`, `show`, `blame`, `grep`, `ls-files`, `rev-parse`, `merge-base`                        |
-| lines         | `branch`, `tag`, `merge [--expect]`, `cherry-pick`, `revert`, `rebase`, `group`, `adopt`; `switch`/`checkout <line>` explain that lines are folders |
+| lines         | `branch`, `tag`, `merge [--expect]`, `cherry-pick`, `revert`, `rebase`, `adopt`; `switch`/`checkout <line>` explain that lines are folders |
+| access        | `access [list|grant|revoke|deny|allow|check]`, `protect [<pattern> --update <role> --check <names> --direct --rewrite <role> --no-expect | --remove]` |
 | safety        | `undo`, `op log`, `save`, `try <state> -- <cmd>`, `checks`, `gc`, `fsck`, `reindex`           |
-| remote (git)  | `remote`, `fetch`, `pull`, `push`, `clone`                                                    |
+| remote (git)  | `remote`, `fetch`, `pull`, `push [--squash]`, `clone`                                         |
 | machines      | `sync -- <cmd>` / `serve-peer`, `machines [trust]`, `op export` / `op import` (JSONL), `backup` / `backup restore` / `backup verify` |
-| copies        | `export <folder>`, `mirror sync|collect|status|forget <folder>` (a copy kept in step with a line; changes made in it come back with a three-way merge) |
+| copies        | `export <folder>`                                                                              |
 | setup         | `init`, `projects`, `config`, `layer add|remove|list|repair`, `daemon`                        |
 
 Revisions: `HEAD`, `@`, `HEAD~2`, `HEAD^2`, line names, `line@machine`, tags, `origin/main`,
@@ -77,17 +81,28 @@ state id prefixes, git commit ids of imported or pushed states, `stash@{n}`, `HE
 
 ## Workflow
 
-1. The admin gives a user a line: `layr branch topic-1 --owner bob`.
-2. The user works and commits in that folder. A tool that drives the user can call `layr save`
-   at quiet points, and `layr layer repair` when a build tool made a layer folder again.
+1. A writer makes a line (`layr branch topic-1 main`), or a maintainer makes one for a user
+   (`--owner bob`). Only the owner changes a line.
+2. The user works and commits in that folder. A program that drives the user can call
+   `layr save` at quiet points, and `layr layer repair` when a build tool made a layer folder
+   again.
 3. Review takes an exact state: `layr diff main...topic-1`, `layr try <state> -- <tests>` runs the
    command in a temporary copy of that state and records the result.
-4. `layr merge topic-1 --expect <state>` merges exactly the reviewed state and refuses if the line
-   moved. A merge never stops on a conflict: the new state lists the conflicts, text files get
-   markers, and `layr status` shows them.
-5. `layr push origin <branch>` exports the head as one git commit. The exact commit id is
-   recorded before the push; after a lost response, a repeated push reads the remote ref first.
-   With `push.require_check true`, a push needs a passing `layr try` of that exact state.
+4. A maintainer runs `layr merge topic-1 --expect <state>` in the protected main line: it merges
+   exactly the reviewed state and refuses if the line moved. When main's rule names checks
+   (`layr config check.unit 'cargo test'; layr protect main --check unit`), they run on the
+   merge result as the caller, without the project lock, and main moves only if they pass and
+   main did not move in the meantime. A merge never stops on a conflict: the new state lists the
+   conflicts, text files get markers, and `layr status` shows them. A line with checks takes no
+   result with conflicts: they are resolved in a line first.
+5. `layr push origin <branch>` exports the line's history: each state the remote lacks becomes
+   a git commit with the same parents. `--squash [-m <message>]` exports one commit on top of the
+   last exported state. The exact commit id is recorded before the push; after a lost response,
+   a repeated push reads the remote ref first. With `push.require_check true`, a push needs a
+   passing `layr try` of that exact state.
+
+The design and the reasons for it, including what layr leaves to programs built on it, are in
+`docs/design.md`.
 
 ## Merge engine
 
@@ -102,7 +117,7 @@ rename/rename and delete/modify. Files changed on both sides use the driver from
 | `text` (default)  | three-way line merge (`git merge-file`)                                           |
 | `union`, `ours`, `theirs`, `binary` | as in git                                                       |
 | `blocks`          | binary merge by byte ranges from the change lists: allowed when both sides kept the inode and size and the ranges do not overlap; `merge-verify=<name>` runs a check command |
-| `<name>`          | `merge.driver.<name>` command with `%O %A %B %P`, run as the admin of this machine  |
+| `<name>`          | `merge.driver.<name>` command with `%O %A %B %P`, run as the caller of the merge     |
 
 ## Storage and consistency
 
@@ -128,19 +143,20 @@ its record and the derived rows. After a crash only a snapshot without a record 
 - A line belongs to its owner. All writes of the service into a line go through descriptors
   (`openat2` with `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS`); a link in a line never redirects a
   root write. New working folders are prepared in a private folder and appear when ready.
-- Commands for users (git network access, `try`, `sync`, merge drivers, `apply` in a line) run
-  with that user's uid, groups and a clean environment. Paths named by a user outside the store
-  (export, mirrors, backups, patch files) are accessed with the user's file permissions, and so
+- Commands for users (git network access, `try`, checks, `sync`, merge drivers, `apply` in a
+  line) run with that user's uid, groups and a clean environment: a command never runs as
+  another user. Paths named by a user outside the store (export, backups, patch files) are accessed with the user's file permissions, and so
   is a file such a command leaves for the service (the result of a merge driver).
-- Undo, merge, push, tags and groups check line owners and the project admin (`layr config
-  admin <uid>`; older stores call the key `lead`). Only the admin sets tags (they are
-  project-wide names and keep their states from gc). Only root changes the admin or makes
-  root-owned lines.
+- Permissions (docs/design.md, section 3): roles per project and machine (`layr access`), deny
+  rules that win over any role, owners of lines, and protection rules of line patterns
+  (`layr protect`). A new project has one admin (its creator) and a protected `main`. Stores of
+  older versions keep their `admin` (or `lead`) and `members` settings as roles until `access`
+  is set. Root may do everything, and every record names who acted.
 - Replication takes records only from trusted machines (`layr sync` trusts the peer the admin
   chose once its records passed the checks; `layr machines trust`), checks the project id,
-  signatures and sequence numbers, and refuses a changed copy of a known record. Admin,
-  members, merge commands, remotes and the backup folder are per machine; other machines'
-  records never change a local line.
+  signatures and sequence numbers, and refuses a changed copy of a known record. Roles, deny
+  and protection rules, merge commands, remotes and the backup folder are per machine; other
+  machines' records never change a local line.
 - A btrfs stream from a peer or a backup passes a check on its way to `btrfs receive`, which
   would otherwise find snapshot and clone sources by UUID anywhere on the file system: one
   subvolume with the name and UUID its signed record names, a parent only from the same

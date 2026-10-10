@@ -16,6 +16,9 @@ as() { local u=$1; shift; runuser -u $u -- env LAYR_SOCKET=$LAYR_SOCKET PATH=/us
 L=$T/layr
 sample $T/src
 l init s --from $T/src --owner layr-admin -q >/dev/null
+# An open project (everyone a writer) whose main line is not protected: this file tests the
+# service and the owners of lines; t13 tests roles and protected lines.
+l --project s access grant '*' writer; l --project s protect main --remove
 P=$LAYR_ROOT/projects/s/lines
 cd $P/main
 
@@ -100,10 +103,10 @@ eq "settings after a rebuild equal the incremental result" "$before" "$(l --proj
 # Second review (2026-10-09).
 # Settings of a peer never act here.
 LAYR_ROOT=$BR l --project s config retention.auto 1
-LAYR_ROOT=$BR l --project s config push.members true
+LAYR_ROOT=$BR l --project s config push.require_check true
 cd $P/main && l sync -q -- env LAYR_ROOT=$BR $LAYR serve-peer s
 eq "a peer does not change retention here" "" "$(l --project s config retention.auto)"
-eq "a peer does not change the push policy here" "" "$(l --project s config push.members)"
+eq "a peer does not change the push policy here" "" "$(l --project s config push.require_check)"
 # Frames from the network have a size limit.
 has "a huge frame is refused without allocating it" "frame" "$(printf 'J\377\377\377\377' | timeout 10 $LAYR serve-peer s 2>&1)"
 # A manifest is read without links and with a size limit.
@@ -116,9 +119,9 @@ eq "an old schema is rebuilt from the records" "$before" "$(l --project s --line
 python3 -c "import sqlite3; c=sqlite3.connect('$LAYR_ROOT/projects/s/meta/db/layr.sqlite'); c.execute('PRAGMA user_version=99'); c.commit()"
 has "a newer schema is refused" "newer layr" "$(l --project s --line main log 2>&1)"
 python3 -c "import sqlite3; c=sqlite3.connect('$LAYR_ROOT/projects/s/meta/db/layr.sqlite'); c.execute('PRAGMA user_version=4'); c.commit()"
-# Git objects follow the member list.
+# Git objects follow the roles.
 git init -q --bare $T/gr.git; cd $P/main; l --project s remote add origin $T/gr.git >/dev/null 2>&1; l --project s --line main push -q origin t >/dev/null 2>&1
-l --project s config members "[$(id -u layr-admin)]"
+l --project s access revoke '*'
 eq "the git store is closed to others" "750" "$(stat -c %a $LAYR_ROOT/projects/s/git)"
 no "another user cannot read git objects" runuser -u layr-u2 -- ls $LAYR_ROOT/projects/s/git/objects
 ok "the admin can" runuser -u layr-admin -- ls $LAYR_ROOT/projects/s/git/objects
@@ -126,8 +129,8 @@ l --project s --line main branch -q acl1 --owner layr-u2
 ok "a line owner can read git objects" runuser -u layr-u2 -- ls $LAYR_ROOT/projects/s/git/objects
 l --project s --line main branch -D acl1 >/dev/null
 no "after the line is deleted it cannot" runuser -u layr-u2 -- ls $LAYR_ROOT/projects/s/git/objects
-l --project s config members '"*"'
-eq "with members * it is open again" "755" "$(stat -c %a $LAYR_ROOT/projects/s/git)"
+l --project s access grant '*' reader
+eq "with a role for everyone it is open again" "755" "$(stat -c %a $LAYR_ROOT/projects/s/git)"
 
 # 8. Limits of the service.
 runuser -u layr-admin -- python3 - "$LAYR_SOCKET" <<'PY' &

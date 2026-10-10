@@ -1,6 +1,6 @@
 #!/bin/bash
 # The merge engine through `layr merge`: tree cases, text merge, conflicts, drivers, block
-# merge, fast-forward, squash, --expect, cherry-pick, revert, rebase, exploration groups.
+# merge, fast-forward, squash, --expect, cherry-pick, revert, rebase.
 . "$(dirname "$0")/lib.sh"
 
 mkdir -p $T/src && cd $T/src
@@ -127,13 +127,4 @@ l checkout --theirs disk.img
 eq "checkout --theirs takes the other version" "THEM" "$(dd if=disk.img bs=1 skip=102 count=4 status=none)"
 l add disk.img && l commit -qm "take theirs"
 
-# exploration groups
-l group create g1 HEAD >/dev/null
-l branch -q try1 --group g1; l branch -q try2 --group g1
-cd $P/try1 && echo one > answer.txt && l add answer.txt && l commit -qm try1
-cd $P/try2 && echo two > answer.txt && l add answer.txt && l commit -qm try2
-cd $P/main
-l merge -q try1
-has "a second result of the group is refused" "stale" "$(l merge try2 2>&1)"
-eq "group epoch moved" "1" "$(l group list | awk '/^g1/{print $3}')"
 finish

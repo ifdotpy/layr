@@ -71,8 +71,6 @@ pub struct LineState {
     pub head: String,
     pub owner: u32,
     pub machine: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub group: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -138,7 +136,6 @@ pub struct Line {
     pub head: String,
     pub owner: u32,
     pub machine: String,
-    pub group: Option<String>,
 }
 
 // ----- checks of records that come from other machines -----
@@ -216,11 +213,6 @@ pub fn validate(r: &Record) -> anyhow::Result<()> {
             }
             uuid("head", &st.head)?;
             uuid("line machine", &st.machine)?;
-            if let Some(g) = &st.group {
-                if !is_name(g) {
-                    bail!("record {}: bad group name {g:?}", r.seq);
-                }
-            }
         }
         for x in [&ch.working_before, &ch.working_after].into_iter().flatten() {
             uuid("working state", x)?;
@@ -342,7 +334,6 @@ mod tests {
                     head: "01a12290-0000-7000-8000-000000000003".into(),
                     owner: 0,
                     machine: "01a12290-0000-7000-8000-000000000002".into(),
-                    group: None,
                 }),
                 working_before: None,
                 working_after: None,

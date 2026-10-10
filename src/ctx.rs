@@ -25,6 +25,11 @@ impl Caller {
     pub fn is_root(&self) -> bool {
         self.uid == 0
     }
+    /// The identity that configured commands (merge drivers and checks) run as for this
+    /// caller: the caller itself, never another user. None for root.
+    pub fn driver_ids(&self) -> Option<(u32, u32)> {
+        (!self.is_root()).then_some((self.uid, self.gid))
+    }
 }
 
 pub struct Ctx {

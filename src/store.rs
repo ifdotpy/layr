@@ -571,8 +571,8 @@ impl<'a> Project<'a> {
             .unwrap_or_default()
     }
 
-    /// The admin of the project on this machine (uid). `lead` is the key of older versions.
-    pub fn admin(&self) -> u32 {
+    /// The single admin of stores made before roles (`admin`, earlier `lead`); see `access`.
+    pub fn legacy_admin(&self) -> u32 {
         self.config_u64("admin", self.config_u64("lead", 0)) as u32
     }
 }

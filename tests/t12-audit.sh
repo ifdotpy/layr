@@ -94,7 +94,7 @@ has "blame refuses it" "larger than 64 MiB" "$(mem $LAYR blame big.bin 2>&1)"
 l branch -q t1 --owner layr-u1
 out=$(cd $P/t1 && as layr-u1 $T/layr tag v-member 2>&1); rc=$?
 eq "a member cannot create a tag" "128" "$rc"
-has "with the reason" "create tags" "$out"
+has "with the reason" "needs the role maintainer" "$out"
 eq "no tag" "" "$(l tag -l v-member)"
 ok "the admin can" sh -c "cd $P/main && runuser -u layr-admin -- env LAYR_SOCKET=$LAYR_SOCKET $T/layr tag v-admin"
 eq "the admin's tag" "v-admin" "$(l tag -l v-admin)"

@@ -26,7 +26,7 @@ l pull -q >/dev/null
 eq "pull merges" "four" "$(tail -1 src/a.txt)"
 ok "pull keeps local work" test -f local.txt
 
-out=$(l push origin task-1)
+out=$(l push --squash origin task-1)
 has "push makes a new branch" "[new branch]" "$out"
 eq "one commit on top of upstream" "upstream 2" "$(git -C $R log -1 --format=%s task-1~1)"
 eq "the commit has the task content" "local.txt" "$(git -C $R diff --name-only task-1~1 task-1)"
