@@ -25,6 +25,34 @@ system, an editor.
 - A program on top may label operations (`LAYR_SESSION`). layr stores, signs and shows labels
   and never decides permissions by them.
 
+### Why not git
+
+Git was made for one person with one working folder on a machine that this person trusts, and
+a remote host as the place of record. Its rough edges follow from these assumptions. layr starts
+from other ones: many writers on one machine, people and programs, and not every writer is
+trusted with every line.
+
+| Git assumes                                  | What breaks with many writers                                                                | layr                                                                                                      |
+| -------------------------------------------- | -------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| The working folder is not history            | Uncommitted work is invisible to others and is lost with `reset --hard` or `rm -rf`          | The working content is history: automatic states before every changing command, on `save`, and every 10 minutes; `undo` and `op log` |
+| One working folder per clone; a branch is a name | Worktrees, `stash` and `checkout` to move between branches                               | A line is a folder; a new line costs the same at any size                                                 |
+| Whoever can write `.git` owns it             | Hooks and local rules are advice: `--no-verify`, `update-ref` or deleting a hook goes past them; protection lives only on the host | Users, groups, roles, deny rules and protected lines, enforced by the root service on the machine itself  |
+| A merge takes what a branch name points to now | A change made after the review goes in unseen                                              | `merge --expect` takes exactly the reviewed state; checks run on the merge result before the line moves  |
+| Build output and dependencies are not its concern | Every new working folder builds from nothing and keeps its own copy                     | Layers: regenerable folders outside history; a new line starts with a copy-on-write copy (section 5)      |
+| History is an object store; files must be checked out | Reading an old state or starting a new folder costs a write of every file          | A state is a read-only folder; `show` and `grep` read it directly                                         |
+| A conflict stops the operation               | Work waits until someone resolves it                                                         | A merge never stops: the conflicts are part of the new state (a line with checks still takes none)        |
+
+The same ideas appear in other systems. Jujutsu makes the working copy a commit, keeps an
+operation log with undo, and lets conflicts be committed. Sapling with EdenFS gives working
+copies that do not write every file. layr reaches these ideas from the storage side: btrfs gives
+snapshots in constant time and change lists in O(changes), so the working folder can be history
+without a cost for each file. It adds two things that these systems leave to the host: rules
+that the machine itself enforces, and regenerable layers.
+
+The cost is the reason git stays at the edge. layr has its own store, so it runs only on Linux
+with btrfs, while editors, hosts and CI systems read git. layr imports from git, pushes states as
+git commits, and exports plain folders; it does not try to be git on disk.
+
 ## 2. Why a root service
 
 `btrfs send` (the source of every change list in O(changes)) and snapshots into protected
