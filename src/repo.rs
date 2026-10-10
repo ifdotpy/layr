@@ -100,11 +100,27 @@ impl<'a> Repo<'a> {
     }
 
     /// The caller may take a project action (`access::ACTIONS`), or an error that says why not.
+    /// Owning a line includes reading the project: the reader actions (`read`, `try`, `export`)
+    /// are open to line owners too, unless a deny rule takes them away.
     pub fn require(&self, ctx: &Ctx, action: &str) -> Result<()> {
         if ctx.caller.is_root() {
             return Ok(());
         }
-        self.policy().check(&Self::who(ctx), action).map_err(|r| anyhow::anyhow!("permission denied: {r}"))
+        let pol = self.policy();
+        let who = Self::who(ctx);
+        match pol.check(&who, action) {
+            Ok(()) => Ok(()),
+            Err(reason) => {
+                let reader_action = crate::access::action_role(action) == Some(Role::Reader);
+                if reader_action
+                    && pol.denied_by(&who, action).is_none()
+                    && self.p.db.lines()?.iter().any(|l| l.owner == ctx.caller.uid)
+                {
+                    return Ok(());
+                }
+                Err(anyhow::anyhow!("permission denied: {reason}"))
+            }
+        }
     }
 
     /// The caller has the admin role (root has).

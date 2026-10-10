@@ -6,7 +6,7 @@
 
 chmod 755 $T $LAYR_ROOT
 getent group layr-bots >/dev/null || groupadd layr-bots
-for u in layr-admin layr-u1 layr-u2 layr-u3; do id $u >/dev/null 2>&1 || useradd -m $u; done
+for u in layr-admin layr-u1 layr-u2 layr-u3 layr-u4; do id $u >/dev/null 2>&1 || useradd -m $u; done
 usermod -aG layr-bots layr-u3
 export LAYR_SOCKET=$T/layr.sock
 cp $LAYR $T/layr && chmod 755 $T/layr
@@ -47,6 +47,11 @@ sleep 4
 no "after it ends it does not" as layr-u1 $L --project p branch -q tmp2 main --owner layr-u2
 eq "the user keeps the role it had" "layr-u1	writer" "$(l --project p access | grep layr-u1)"
 eq "the owner of a line reads the project without a role" "0" "$(l --project p branch -q own-only main --owner layr-admin; echo $?)"
+# A line owner without a role (a line made for it by a maintainer) may export and try.
+l --project p branch -q u4-line main --owner layr-u4
+eq "it has no role" "refused" "$(l --project p access check layr-u4 export | cut -d: -f1)"
+ok "a line owner without a role exports" as layr-u4 env LAYR_PROJECT=p LAYR_LINE=u4-line $T/layr export HEAD /tmp/layr-u4-export-$$ -q
+ok "and tries" as layr-u4 env LAYR_PROJECT=p LAYR_LINE=u4-line $T/layr try -q HEAD -- true
 
 # 3. Only the owner changes a line, the admin included.
 cd $P/u1 && as layr-u1 sh -c "echo u1 > u1.txt && $L add u1.txt && $L commit -qm u1" && cd /tmp
