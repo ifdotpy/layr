@@ -24,9 +24,9 @@ mod revs;
 mod service;
 mod store;
 mod stream;
-mod trace;
 #[allow(unsafe_code)]
 mod sys;
+mod trace;
 mod tree;
 
 use std::collections::HashMap;

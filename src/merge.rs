@@ -536,7 +536,7 @@ fn version_bytes(path: &Path) -> Vec<u8> {
 /// `git merge-file` on private copies: writes the result into `ours`, returns the number of
 /// conflicts.
 fn run_merge_file(i: &Input, ours: &Path, base: &Path, theirs: &Path, union: bool) -> Result<i32> {
-    let dir = private_dir(None)?;
+    let dir = private_dir()?;
     let (o, b, t) = (dir.join("ours"), dir.join("base"), dir.join("theirs"));
     std::fs::write(&o, version_bytes(ours))?;
     std::fs::write(&b, version_bytes(base))?;
@@ -632,12 +632,13 @@ fn verify(c: &mut Ctx, rp: &str) -> Result<()> {
             return Ok(());
         }
     };
-    let dir = private_dir(i.run_as)?;
+    let dir = private_dir()?;
     let a = dir.join("result");
     std::fs::write(&a, version_bytes(&fsutil::safe_join(i.result, rp)?))?;
-    chown_tree(&dir, i.run_as)?;
-    let ok = shell(&cmd.replace("%A", &sh_quote(&a)).replace("%P", &sh_quote_str(rp)), i.run_as, i.allow_root)?;
-    let _ = std::fs::remove_dir_all(&dir);
+    hand_over(&dir, i.run_as)?;
+    let ok = shell(&cmd.replace("%A", &sh_quote(&a)).replace("%P", &sh_quote_str(rp)), i.run_as, i.allow_root);
+    remove_private(&dir, i.run_as);
+    let ok = ok?;
     if !ok {
         // Keep ours: copy back the ours version.
         fsutil::copy_entry(i.ours, rp, i.result, rp, None)?;
@@ -646,25 +647,55 @@ fn verify(c: &mut Ctx, rp: &str) -> Result<()> {
     Ok(())
 }
 
-fn private_dir(run_as: Option<(u32, u32)>) -> Result<PathBuf> {
+/// A new folder only root can use. The service writes the inputs of a command there, then
+/// hands it over to the command's user.
+fn private_dir() -> Result<PathBuf> {
     let d = tempfile_path("driver")?;
-    std::fs::create_dir(&d)?;
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700))?;
-    chown_tree(&d, run_as)?;
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new().mode(0o700).create(&d)?;
     Ok(d)
 }
 
-fn chown_tree(d: &Path, run_as: Option<(u32, u32)>) -> Result<()> {
+/// Give a private folder and the files in it to the command's user: the files first, the folder
+/// last, so the user cannot change the folder while the service still works in it.
+fn hand_over(d: &Path, run_as: Option<(u32, u32)>) -> Result<()> {
     if let Some((u, g)) = run_as {
         if rustix::process::geteuid().is_root() {
-            fsutil::chown_nofollow(d, u, g)?;
             for e in std::fs::read_dir(d)?.flatten() {
                 fsutil::chown_nofollow(&e.path(), u, g)?;
             }
+            fsutil::chown_nofollow(d, u, g)?;
         }
     }
     Ok(())
+}
+
+fn as_driver<T>(run_as: Option<(u32, u32)>, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    match run_as {
+        Some((u, g)) => crate::privs::as_user_fs(u, g, f),
+        None => f(),
+    }
+}
+
+/// The file a command wrote, read with the command user's file permissions and without
+/// following a link: whatever the user leaves at that name, the service reads only what the
+/// user can read.
+fn command_output(path: &Path, run_as: Option<(u32, u32)>) -> Result<Vec<u8>> {
+    as_driver(run_as, || {
+        use std::io::Read;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path)?;
+        if !f.metadata()?.is_file() {
+            bail!("{} is not a regular file", path.display());
+        }
+        let mut v = Vec::new();
+        f.read_to_end(&mut v)?;
+        Ok(v)
+    })
+}
+
+fn remove_private(d: &Path, run_as: Option<(u32, u32)>) {
+    let _ = as_driver(run_as, || Ok(std::fs::remove_dir_all(d)?));
 }
 
 fn sh_quote(p: &Path) -> String {
@@ -691,26 +722,34 @@ fn shell(cmd: &str, run_as: Option<(u32, u32)>, allow_root: bool) -> Result<bool
 /// A configured driver command, as in git: `%O` base, `%A` ours (the result is written here),
 /// `%B` theirs, `%P` path, `%L` marker size.
 fn run_command_driver(i: &Input, cmd: &str, b: &Path, r: &Path, t: &Path, rp: &str) -> Result<bool> {
-    let dir = private_dir(i.run_as)?;
+    let dir = private_dir()?;
     let (o, a, bb) = (dir.join("base"), dir.join("ours"), dir.join("theirs"));
     std::fs::write(&o, version_bytes(b))?;
     std::fs::write(&a, version_bytes(r))?;
     std::fs::write(&bb, version_bytes(t))?;
-    chown_tree(&dir, i.run_as)?;
+    hand_over(&dir, i.run_as)?;
     let full = cmd
         .replace("%O", &sh_quote(&o))
         .replace("%A", &sh_quote(&a))
         .replace("%B", &sh_quote(&bb))
         .replace("%P", &sh_quote_str(rp))
         .replace("%L", "7");
-    let ok = shell(&full, i.run_as, i.allow_root)?;
-    if ok {
-        let data = std::fs::read(&a)?;
-        let mode = fsutil::lmeta(i.result, rp).map(|m| m.mode).unwrap_or(0o644);
-        fsutil::write_file(i.result, rp, &data, mode, None)?;
+    let ran = shell(&full, i.run_as, i.allow_root);
+    // A result the service cannot read as the driver user (a link, a folder) is a failed driver.
+    let data = match ran {
+        Ok(true) => command_output(&a, i.run_as).ok(),
+        _ => None,
+    };
+    remove_private(&dir, i.run_as);
+    ran?;
+    match data {
+        Some(data) => {
+            let mode = fsutil::lmeta(i.result, rp).map(|m| m.mode).unwrap_or(0o644);
+            fsutil::write_file(i.result, rp, &data, mode, None)?;
+            Ok(true)
+        }
+        None => Ok(false),
     }
-    let _ = std::fs::remove_dir_all(&dir);
-    Ok(ok)
 }
 
 fn overlaps(a: &[(u64, u64)], b: &[(u64, u64)]) -> bool {

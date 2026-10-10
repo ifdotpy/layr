@@ -126,7 +126,8 @@ its record and the derived rows. After a crash only a snapshot without a record 
   root write. New working folders are prepared in a private folder and appear when ready.
 - Commands for users (git network access, `try`, `sync`, merge drivers, `apply` in a line) run
   with that user's uid, groups and a clean environment. Paths named by a user outside the store
-  (export, slots, backups, patch files) are accessed with the user's file permissions.
+  (export, slots, backups, patch files) are accessed with the user's file permissions, and so
+  is a file such a command leaves for the service (the result of a merge driver).
 - Undo, merge, push, tags and groups check line owners and the project lead. Only root changes
   the lead or makes root-owned lines.
 - Replication takes records only from trusted machines (`layr sync` trusts the peer the lead

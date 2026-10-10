@@ -43,8 +43,23 @@ CREATE TABLE IF NOT EXISTS slots (path TEXT PRIMARY KEY, state TEXT, line TEXT, 
 /// drops its derived tables, creates them new and rebuilds them from the records.
 pub const SCHEMA_VERSION: i64 = 3;
 
-const DERIVED: &[&str] =
-    &["states", "parents", "lines", "line_heads", "tags", "remote_refs", "git_map", "exports", "checks", "groups", "group_lines", "machines", "config", "slots", "trusted"];
+const DERIVED: &[&str] = &[
+    "states",
+    "parents",
+    "lines",
+    "line_heads",
+    "tags",
+    "remote_refs",
+    "git_map",
+    "exports",
+    "checks",
+    "groups",
+    "group_lines",
+    "machines",
+    "config",
+    "slots",
+    "trusted",
+];
 
 impl Db {
     /// Open the database. Returns it and whether the derived tables must be rebuilt.
@@ -57,7 +72,9 @@ impl Db {
         conn.busy_timeout(std::time::Duration::from_secs(30))?;
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         let has_records: bool =
-            conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='records'", [], |r| r.get::<_, i64>(0))? > 0;
+            conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='records'", [], |r| {
+                r.get::<_, i64>(0)
+            })? > 0;
         let mut db = Db { conn, stale: false };
         if version < SCHEMA_VERSION {
             if has_records {
@@ -171,14 +188,24 @@ impl Db {
         for s in &rec.states {
             // A state id names one state forever: a second record with the same id is refused
             // (the import checks this before; here it is a guard).
-            let exists: bool = tx.query_row("SELECT COUNT(*) FROM states WHERE id=?1", params![s.id], |r| r.get::<_, i64>(0))? > 0;
+            let exists: bool =
+                tx.query_row("SELECT COUNT(*) FROM states WHERE id=?1", params![s.id], |r| r.get::<_, i64>(0))? > 0;
             if exists {
                 anyhow::bail!("state {} is named by two records", s.id);
             }
             let present = state_present(&s.id);
             tx.execute(
                 "INSERT INTO states(id, display, kind, line, time, rec, present, machine) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
-                params![s.id, ids::display(&s.id), kind_str(s.kind), s.line, s.time, serde_json::to_string(s)?, present as i64, rec.machine],
+                params![
+                    s.id,
+                    ids::display(&s.id),
+                    kind_str(s.kind),
+                    s.line,
+                    s.time,
+                    serde_json::to_string(s)?,
+                    present as i64,
+                    rec.machine
+                ],
             )?;
             for (i, p) in s.parents.iter().enumerate() {
                 tx.execute("INSERT OR IGNORE INTO parents(state, parent, ord) VALUES(?1,?2,?3)", params![s.id, p, i as i64])?;
@@ -337,8 +364,9 @@ impl Db {
                 // Only the machine that made the state adds its layers (names and subvolume
                 // UUIDs, which a receiver checks).
                 if let Some(st) = s("state") {
-                    let row: Option<(String, String)> =
-                        tx.query_row("SELECT rec, machine FROM states WHERE id=?1", params![st], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+                    let row: Option<(String, String)> = tx
+                        .query_row("SELECT rec, machine FROM states WHERE id=?1", params![st], |r| Ok((r.get(0)?, r.get(1)?)))
+                        .optional()?;
                     if let Some((raw, machine)) = row {
                         if machine == rec.machine {
                             let mut v: serde_json::Value = serde_json::from_str(&raw)?;
@@ -368,7 +396,8 @@ impl Db {
 
     /// The subvolume UUID of a layer snapshot, from the signed save.layers record.
     pub fn layer_uuid(&self, state: &str, name: &str) -> Result<Option<String>> {
-        let raw: Option<String> = self.conn.query_row("SELECT rec FROM states WHERE id=?1", params![state], |r| r.get(0)).optional()?;
+        let raw: Option<String> =
+            self.conn.query_row("SELECT rec FROM states WHERE id=?1", params![state], |r| r.get(0)).optional()?;
         Ok(raw
             .and_then(|r| serde_json::from_str::<serde_json::Value>(&r).ok())
             .and_then(|v| v["layer_uuids"][name].as_str().map(|s| s.to_string())))

@@ -240,8 +240,10 @@ fn plan(repo: &Repo, mine: &BTreeSet<String>, theirs: &BTreeSet<String>, auto: b
 
 fn send_layer<R: Read, W: Write>(w: &mut Wire<R, W>, repo: &Repo, snap: &str) -> Result<u64> {
     w.json(&json!({"op": "layer", "name": snap}))?;
-    let child =
-        btrfs::send_command(None, &repo.p.layer_path(snap.split('@').next().unwrap_or(""), snap)).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let child = btrfs::send_command(None, &repo.p.layer_path(snap.split('@').next().unwrap_or(""), snap))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
     let n = w.send_stream(child)?;
     if w.recv_json()?["op"] != "ok" {
         bail!("peer did not store layer {snap}");
@@ -307,9 +309,11 @@ fn send_states<R: Read, W: Write>(
 /// read-only, with the received UUID that the signed record names (for a state).
 fn receive_one<R: Read, W: Write>(w: &mut Wire<R, W>, p: &Project, name: &str, expected_uuid: Option<&str>) -> Result<()> {
     let dir = p.states_dir();
-    let before: BTreeSet<String> = std::fs::read_dir(&dir)?.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    let before: BTreeSet<String> =
+        std::fs::read_dir(&dir)?.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
     let received = w.recv_stream(&dir);
-    let after: BTreeSet<String> = std::fs::read_dir(&dir)?.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    let after: BTreeSet<String> =
+        std::fs::read_dir(&dir)?.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
     let new: Vec<String> = after.difference(&before).cloned().collect();
     let check = (|| -> Result<()> {
         received?;

@@ -259,18 +259,15 @@ fn stage_paths(repo: &Repo, line: &Line, scan: &Path, paths: &BTreeSet<String>) 
 
 /// Remove parent folders that became empty (states hold files, as git trees do).
 fn prune_empty(root: &Path, rel: &str) {
+    if let Ok(t) = crate::tree::Tree::open(root) {
+        prune_empty_in(&t, rel);
+    }
+}
+
+fn prune_empty_in(t: &crate::tree::Tree, rel: &str) {
     let mut comps: Vec<&str> = rel.split('/').collect();
     comps.pop();
-    while !comps.is_empty() {
-        let d = comps.join("/");
-        match fsutil::safe_join(root, &d) {
-            Ok(p) => {
-                if std::fs::remove_dir(&p).is_err() {
-                    break;
-                }
-            }
-            Err(_) => break,
-        }
+    while !comps.is_empty() && t.rmdir(&comps.join("/")) {
         comps.pop();
     }
 }
@@ -1120,7 +1117,8 @@ pub fn stash(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let line = repo.line(&line.id)?;
             let (st, scan, _it, index) = repo.status(&line)?;
             let untracked = a.has("-u") || a.has("-a");
-            if st.clean() && (!untracked || st.untracked.is_empty()) {
+            let ignored = a.has("-a");
+            if st.clean() && (!untracked || st.untracked.is_empty()) && (!ignored || st.ignored.is_empty()) {
                 outln!(ctx, "No local changes to save");
                 return Ok(0);
             }
@@ -1138,6 +1136,9 @@ pub fn stash(ctx: &Ctx, args: &[String]) -> Result<i32> {
             if untracked {
                 paths.extend(st.untracked.iter().cloned());
             }
+            if ignored {
+                paths.extend(st.ignored.iter().cloned());
+            }
             for p in &paths {
                 if fsutil::lmeta(&scan.path, p).is_some() {
                     fsutil::copy_entry(&scan.path, p, &work.path, p, own)?;
@@ -1150,16 +1151,23 @@ pub fn stash(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 None => format!("WIP on {}: {} {}", line.name, ids::short(&line.head), head.message.lines().next().unwrap_or("")),
             };
             let state = repo.new_state(ctx, &work.path, StateKind::Stash, vec![line.head.clone()], &msg, Some(&line))?;
-            // Back to the head content.
+            // Back to the head content, or with --keep-index to the index content (the index
+            // stays). New files that went into the stash leave the working folder.
+            let keep_index = a.has("-k");
+            let target: &Path = if keep_index { &index } else { &head_root };
             let wdir = repo.working(&line);
+            let wtree = crate::tree::Tree::open(&wdir)?;
             for p in &paths {
-                if fsutil::lmeta(&head_root, p).is_some() {
-                    fsutil::copy_entry(&head_root, p, &wdir, p, own)?;
-                } else if fsutil::lmeta(&index, p).is_some() || untracked {
+                if fsutil::lmeta(target, p).is_some() {
+                    fsutil::copy_entry(target, p, &wdir, p, own)?;
+                } else if fsutil::lmeta(&index, p).is_some() || fsutil::lmeta(&head_root, p).is_some() || untracked {
                     fsutil::remove_entry(&wdir, p)?;
+                    prune_empty_in(&wtree, p);
                 }
             }
-            repo.drop_stage(&line)?;
+            if !keep_index {
+                repo.drop_stage(&line)?;
+            }
             let mut rec = Record::new("stash");
             rec.states.push(state.clone());
             let working_after = repo.after_state(ctx, &line, "stash", &mut rec)?;
@@ -1199,34 +1207,10 @@ pub fn clean(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let specs = h.specs(&a.rest())?;
     let (_lock, w) = if a.has("-n") { (h.repo.p.lock()?, None) } else { begin_change(ctx, &h.repo, &line)? };
     let line = h.repo.line(&line.id)?;
-    let (st, _scan, _it, _index) = h.repo.status(&line)?;
-    let mut targets: Vec<String> = Vec::new();
-    let only_ignored = a.has("-X");
-    let with_ignored = a.has("-x");
-    if !only_ignored {
-        if a.has("-d") {
-            targets.extend(untracked_list(&st, "normal"));
-        } else {
-            targets.extend(
-                st.untracked.iter().filter(|u| !st.untracked_dirs.iter().any(|d| u.starts_with(&format!("{d}/")))).cloned(),
-            );
-        }
-    }
-    if only_ignored || with_ignored {
-        let mut dirs: BTreeSet<String> = BTreeSet::new();
-        for i in &st.ignored {
-            let top = i.split('/').next().unwrap_or(i);
-            if a.has("-d") && i.contains('/') && fsutil::lmeta(&h.repo.state_root(&line.head)?, top).is_none() {
-                dirs.insert(format!("{top}/"));
-            } else if !i.contains('/') || !a.has("-d") {
-                targets.push(i.clone());
-            }
-        }
-        targets.extend(dirs);
-    }
-    targets.retain(|t| matches(&specs, t.trim_end_matches('/')));
+    let (st, scan, _it, index) = h.repo.status(&line)?;
+    let targets = clean_targets(&st, &scan.path, &index, a.has("-d"), a.has("-x"), a.has("-X"));
+    let mut targets: Vec<String> = targets.into_iter().filter(|t| matches(&specs, t.trim_end_matches('/'))).collect();
     targets.sort();
-    targets.dedup();
     let wdir = h.repo.working(&line);
     for t in &targets {
         if a.has("-n") {
@@ -1242,4 +1226,56 @@ pub fn clean(ctx: &Ctx, args: &[String]) -> Result<i32> {
         record_working(ctx, &h.repo, &line, "clean", w)?;
     }
     Ok(0)
+}
+
+/// What `clean` removes, as git does. A folder goes whole only when nothing in it is in the
+/// index and everything in it is of the kinds being removed: with `-X` an ignored folder, with
+/// `-x` any new folder, without them a new folder that holds no ignored files. Otherwise the
+/// files go one by one. Without `-d`, files in new folders stay.
+fn clean_targets(st: &Status, scan: &Path, index: &Path, dirs: bool, with_ignored: bool, only_ignored: bool) -> BTreeSet<String> {
+    let rules = crate::ignore_rules::Rules::new(scan);
+    let in_index = |d: &str| fsutil::lmeta(index, d).is_some();
+    let folders = |p: &str| -> Vec<String> {
+        let comps: Vec<&str> = p.split('/').collect();
+        (1..comps.len()).map(|n| comps[..n].join("/")).collect()
+    };
+    // The topmost folder of `p` that is not in the index.
+    let new_folder = |p: &str| folders(p).into_iter().find(|d| !in_index(d));
+    let has_ignored = |d: &str| st.ignored.iter().any(|i| i.starts_with(&format!("{d}/")));
+    let mut out = BTreeSet::new();
+    if !only_ignored {
+        for f in &st.untracked {
+            match new_folder(f) {
+                None => {
+                    out.insert(f.clone());
+                }
+                Some(d) if dirs => {
+                    out.insert(if with_ignored || !has_ignored(&d) { format!("{d}/") } else { f.clone() });
+                }
+                Some(_) => {}
+            }
+        }
+    }
+    if with_ignored || only_ignored {
+        for i in &st.ignored {
+            match new_folder(i) {
+                None => {
+                    out.insert(i.clone());
+                }
+                Some(d) if dirs => {
+                    let whole = if only_ignored {
+                        folders(i).into_iter().find(|f| !in_index(f) && rules.ignored(f, true))
+                    } else {
+                        Some(d)
+                    };
+                    out.insert(whole.map(|f| format!("{f}/")).unwrap_or_else(|| i.clone()));
+                }
+                Some(_) => {}
+            }
+        }
+    }
+    // A path inside a folder that goes whole is not listed again.
+    let all: Vec<String> = out.iter().cloned().collect();
+    out.retain(|p| !all.iter().any(|d| d.ends_with('/') && d != p && p.starts_with(d.as_str())));
+    out
 }

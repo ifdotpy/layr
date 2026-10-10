@@ -65,7 +65,11 @@ pub fn forward(argv: &[String]) -> Result<i32> {
     let mut data = (req.len() as u32).to_be_bytes().to_vec();
     data.extend_from_slice(&req);
     // The service answers "B" at once when it is busy, or "R" and the exit code at the end.
-    let _ = send_with_fds(&sock, &data, &[std::io::stdin().as_fd(), std::io::stdout().as_fd(), std::io::stderr().as_fd(), dir.as_fd()]);
+    let _ = send_with_fds(
+        &sock,
+        &data,
+        &[std::io::stdin().as_fd(), std::io::stdout().as_fd(), std::io::stderr().as_fd(), dir.as_fd()],
+    );
     let mut kind = [0u8; 1];
     (&sock).read_exact(&mut kind).context("the layr service closed the connection")?;
     if kind[0] == b'B' {

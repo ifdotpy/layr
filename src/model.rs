@@ -155,14 +155,20 @@ pub fn is_name(s: &str) -> bool {
 pub fn is_layer_name(s: &str, state: &str) -> bool {
     match s.split_once('@') {
         Some((id, p)) => {
-            id == state && !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || "._-%".contains(c)) && !p.starts_with('.')
+            id == state
+                && !p.is_empty()
+                && p.chars().all(|c| c.is_ascii_alphanumeric() || "._-%".contains(c))
+                && !p.starts_with('.')
         }
         None => false,
     }
 }
 
 fn is_ref(s: &str) -> bool {
-    !s.is_empty() && !s.contains("..") && !s.starts_with('/') && s.chars().all(|c| c.is_ascii_alphanumeric() || "._/-".contains(c))
+    !s.is_empty()
+        && !s.contains("..")
+        && !s.starts_with('/')
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || "._/-".contains(c))
 }
 
 /// Every id, name and path in a record is checked before the record is stored: ids are

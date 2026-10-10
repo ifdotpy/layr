@@ -418,7 +418,8 @@ pub fn open_dir_nofollow(path: &Path) -> Result<File> {
 /// Read a regular file `name` of an open folder; `None` if absent, a link or not a file.
 pub fn read_at(dir: &File, name: &str) -> Option<Vec<u8>> {
     use rustix::fs::{Mode, OFlags};
-    let fd = rustix::fs::openat(dir, name, OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK, Mode::empty()).ok()?;
+    let fd = rustix::fs::openat(dir, name, OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK, Mode::empty())
+        .ok()?;
     let mut f = File::from(fd);
     if !f.metadata().ok()?.is_file() {
         return None;

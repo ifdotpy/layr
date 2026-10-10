@@ -29,6 +29,15 @@ cd $P/d1 && as layr-a1 sh -c "echo 1 > u.txt && $L commit -qam d1" && cd $P/main
 as layr-lead sh -c "echo 2 > u.txt && $L commit -qam main"
 as layr-lead $L merge -q d1 >/dev/null 2>&1
 eq "the driver ran as the lead" "$(id -u layr-lead)" "$(cat u.txt)"
+# A driver that leaves a link instead of its result does not make the service read the target.
+as layr-lead sh -c "printf 'u.txt merge=who\nk.txt merge=leak\n' > .layrattributes && echo 0 > k.txt && $L add -A && $L commit -qm leak"
+as layr-lead $L config merge.driver.leak 'rm -f %A && ln -s /etc/shadow %A'
+as layr-lead $L branch -q d2 --owner layr-a1
+cd $P/d2 && as layr-a1 sh -c "echo 1 > k.txt && $L commit -qam d2" && cd $P/main
+as layr-lead sh -c "echo 2 > k.txt && $L commit -qam main2"
+eq "a driver result that is a link is a conflict" "1" "$(as layr-lead $L merge -q d2 >/dev/null 2>&1; echo $?)"
+no "the merge result has no root file" grep -q root: k.txt
+eq "the result keeps ours" "2" "$(cat k.txt)"
 
 # 2. A link inside a line never redirects a write of the service.
 cd $P/d1

@@ -115,4 +115,42 @@ eq "mode and link in name-status" "M	big.txt
 A	link" "$(l show --name-status --format= HEAD)"
 eq "link target" "renamed.txt" "$(l show HEAD:link)"
 has "mode change shown" "new mode 100755" "$(l show --format= HEAD)"
+# clean -X removes ignored files only; a folder goes whole only when nothing in it is in the
+# index and everything in it is of the kind being removed (review 2026-10-10).
+mkdir -p mixed fresh; echo keep > mixed/keep.txt; echo add > mixed/added.txt; echo j > mixed/junk.log
+echo keep > fresh/keep.txt; echo j > fresh/junk.log; mkdir -p target; echo z > target/x
+l add mixed/added.txt
+eq "clean -dX dry run" "Would remove fresh/junk.log
+Would remove mixed/junk.log
+Would remove other.log
+Would remove target/" "$(l clean -ndX)"
+l clean -fqdX
+eq "clean -dX keeps untracked and added files" "keep add keep" "$(cat mixed/keep.txt mixed/added.txt fresh/keep.txt | xargs)"
+eq "clean -dX removes the ignored ones" "" "$(ls -d mixed/junk.log fresh/junk.log other.log target 2>/dev/null)"
+echo j > fresh/junk.log
+eq "clean -d keeps ignored files of a new folder" "Would remove fresh/keep.txt
+Would remove mixed/keep.txt" "$(l clean -nd)"
+eq "clean -dx takes the whole new folder" "Would remove fresh/
+Would remove mixed/keep.txt" "$(l clean -ndx)"
+l clean -fqdx; l commit -qm mixed
+eq "clean -dx keeps the added file" "add" "$(cat mixed/added.txt)"
+
+# stash --keep-index keeps the index; stash --all takes ignored files too.
+echo staged >> big.txt; l add big.txt; echo unstaged >> renamed.txt
+l stash -q --keep-index
+eq "stash --keep-index: the index stays" "M  big.txt" "$(l status -s)"
+eq "stash --keep-index: the staged content stays" "staged" "$(tail -1 big.txt)"
+l reset -q --hard
+l stash pop >/dev/null
+eq "stash pop: both changes come back" " M big.txt
+ M renamed.txt" "$(l status -s)"
+l commit -qam "before stash --all"
+echo log > keep.log; echo u > untracked.txt; mkdir -p target; echo z > target/x
+l stash -q -u
+eq "stash -u leaves ignored files" "log z no" "$(cat keep.log target/x | xargs) $([ -e untracked.txt ] && echo yes || echo no)"
+l stash pop >/dev/null
+l stash -q --all
+eq "stash --all takes ignored files and folders" "" "$(ls -d keep.log untracked.txt target 2>/dev/null)"
+l stash pop >/dev/null
+eq "stash pop brings ignored files back" "log u z" "$(cat keep.log untracked.txt target/x | xargs)"
 finish
