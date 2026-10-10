@@ -139,6 +139,12 @@ ok "and forward again" in_line layr-u2 main merge -q u1 --expect $(in_line layr-
 # 6. A deny rule wins over any role.
 as layr-admin $L --project p access grant layr-u3 maintainer
 has "a maintainer in a denied group cannot push" "deny rule for @layr-bots" "$(in_line layr-u3 main push origin main 2>&1)"
+as layr-admin $L --project p access grant layr-u3 admin
+as layr-admin $L --project p access deny @layr-bots access
+no "an admin denied 'access' cannot change a check command" as layr-u3 $L --project p config check.unit true
+ok "but changes other settings" as layr-u3 $L --project p config retention.layers 5
+as layr-admin $L --project p access allow @layr-bots access
+as layr-admin $L --project p access grant layr-u3 maintainer
 
 # 7. Configured merge commands run as the caller, never as another user.
 cd $P/main && printf 'w.txt merge=who\n' > .layrattributes && echo 0 > w.txt && l add -A && l commit -qm attrs && cd /tmp

@@ -75,6 +75,8 @@ group or everyone, whatever the role. The actions are `read`, `try`, `export`, `
 `merge` (merges into protected lines), `line.manage`, `tag`, `push`, `access`, `config`,
 `remote`, `sync`, `backup`, `gc`, `records` and `fsck`. This is how a program on top limits its users, for
 example: the group of AI agents may not push, sync or trust machines.
+`access` covers the roles, deny rules, protection rules and the commands of named checks
+(`check.<name>`), so a user without it cannot weaken a protected line by any setting.
 
 **Protection rules** for line name patterns (`main` is protected when a project is made):
 

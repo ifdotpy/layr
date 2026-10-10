@@ -1031,7 +1031,7 @@ pub fn config(ctx: &Ctx, args: &[String]) -> Result<i32> {
         };
     }
     let key = a.get("--unset").unwrap_or_else(|| a.pos.first().map(|s| s.as_str()).unwrap_or(""));
-    repo.require(ctx, if POLICY_KEYS.contains(&key) { "access" } else { "config" })?;
+    repo.require(ctx, if policy_key(key) { "access" } else { "config" })?;
     if (key == "admin" || key == "lead") && !ctx.caller.is_root() {
         return Err(exit(1, format!("permission denied: only root changes '{key}'")));
     }
@@ -1055,6 +1055,11 @@ pub fn config(ctx: &Ctx, args: &[String]) -> Result<i32> {
 
 /// Settings that decide who may do what: changing them is the `access` action.
 const POLICY_KEYS: &[&str] = &["access", "grants", "deny", "protect", "members", "admin", "lead"];
+
+/// A named check's command belongs to the protection rules that name it (`check.<name>`).
+fn policy_key(key: &str) -> bool {
+    POLICY_KEYS.contains(&key) || key.starts_with("check.")
+}
 
 /// `layr access`: roles and deny rules (docs/design.md, section 3).
 pub fn access(ctx: &Ctx, args: &[String]) -> Result<i32> {
