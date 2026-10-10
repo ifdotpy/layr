@@ -1164,6 +1164,7 @@ pub fn protect(ctx: &Ctx, args: &[String]) -> Result<i32> {
         .flag("--direct")
         .flag("--no-direct")
         .value("--rewrite")
+        .value("--path")
         .flag("--remove");
     let a = parse(&spec, args)?;
     let h = here(ctx)?;
@@ -1175,15 +1176,19 @@ pub fn protect(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 let rule = pol.rule_for(p);
                 let checks = r.check.join(",");
                 match rule {
-                    Some(x) => outln!(
-                        ctx,
-                        "{p}	update {}	expect {}	check {}	direct {}	rewrite {}",
-                        x.update.name(),
-                        x.expect,
-                        if checks.is_empty() { "-".into() } else { checks },
-                        x.direct,
-                        x.rewrite.name()
-                    ),
+                    Some(x) => {
+                        let paths: Vec<String> = x.paths.iter().map(|(p, r)| format!("{p}={}", r.name())).collect();
+                        outln!(
+                            ctx,
+                            "{p}\tupdate {}\texpect {}\tcheck {}\tdirect {}\trewrite {}{}",
+                            x.update.name(),
+                            x.expect,
+                            if checks.is_empty() { "-".into() } else { checks },
+                            x.direct,
+                            x.rewrite.name(),
+                            if paths.is_empty() { String::new() } else { format!("\tpaths {}", paths.join(",")) }
+                        )
+                    }
                     None => outln!(ctx, "{p}"),
                 }
             }
@@ -1221,6 +1226,16 @@ pub fn protect(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         if let Some(c) = a.get("--check") {
             r.check = c.split(',').filter(|x| !x.is_empty()).map(|x| x.to_string()).collect();
+        }
+        // `--path <path>=<role>` (repeatable); an empty role removes the path rule.
+        for pr in a.all("--path") {
+            let (path, rl) = pr.split_once('=').ok_or_else(|| exit(128, "usage: --path <path>=<role>"))?;
+            fsutil::check_rel(path.trim_end_matches('/')).map_err(|_| exit(128, format!("fatal: bad path '{path}'")))?;
+            if rl.is_empty() {
+                r.paths.remove(path);
+            } else {
+                r.paths.insert(path.to_string(), role(rl)?);
+            }
         }
         all.insert(pattern, r);
     }

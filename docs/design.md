@@ -81,6 +81,7 @@ example: the group of AI agents may not push, sync or trust machines.
 | `check` | none | named checks (`layr config check.<name> '<command>'`) that must pass on the merge result before the line moves; the command runs as the caller in a temporary copy of the result with a clean environment (it runs code that may come from another user): only HOME, USER, LOGNAME and `PATH=/usr/local/bin:/usr/bin:/bin`, so the command sets what else it needs, for example `PATH=$HOME/.cargo/bin:$PATH cargo test`. A passing check of the same state and command is reused |
 | `direct` | false | the owner may also commit, reset or apply in the line directly |
 | `rewrite` | admin | lowest role that may move the line to a state that is not a descendant (reset, undo of a merge) |
+| `paths` | none | paths (a folder, a file or a glob) whose change needs a higher role than `update`, for example `.github=admin`: a merge that changes such a path needs that role (`layr protect main --path .github=admin`) |
 
 When several patterns match, the most restrictive value of each setting applies.
 
@@ -134,6 +135,4 @@ protected line, or build in its own line and `save --layers`.
   a given time, and revoking a grant revokes what was made from it (Biscuit, UCAN).
 - Approvals: signed records that name an exact state; a protection rule may require approvals
   from members of a group, and from a person other than the author (SLSA source level 4).
-- Path rules: protection settings for paths, such as CI configuration (Perforce, CODEOWNERS
-  with "all of" semantics).
 - A dry-run mode for rule changes that reports what would be refused (GitHub rule evaluation).

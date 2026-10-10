@@ -82,6 +82,9 @@ pub struct RuleSpec {
     pub direct: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rewrite: Option<String>,
+    /// Paths (a folder, a file or a glob) whose change needs a higher role than `update`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub paths: BTreeMap<String, String>,
 }
 
 /// The rule that applies to a line: every matching pattern combined, the most restrictive value
@@ -93,6 +96,20 @@ pub struct Rule {
     pub check: Vec<String>,
     pub direct: bool,
     pub rewrite: Role,
+    pub paths: BTreeMap<String, Role>,
+}
+
+impl Rule {
+    /// The role a merge needs that changes `path`: `update`, or higher for a path rule.
+    pub fn role_for_path(&self, path: &str) -> Role {
+        self.paths.iter().filter(|(pat, _)| path_matches(pat, path)).map(|(_, r)| *r).fold(self.update, Role::max)
+    }
+}
+
+/// A path rule matches the path itself, everything below a folder, or a glob.
+pub fn path_matches(pattern: &str, path: &str) -> bool {
+    let p = pattern.trim_end_matches('/');
+    path == p || path.starts_with(&format!("{p}/")) || crate::cmd::glob(p, path)
 }
 
 fn role_or(s: &Option<String>, default: Role) -> Role {
@@ -108,6 +125,7 @@ impl RuleSpec {
             check: self.check.clone(),
             direct: self.direct.unwrap_or(false),
             rewrite: role_or(&self.rewrite, Role::Admin),
+            paths: self.paths.iter().map(|(p, r)| (p.clone(), Role::parse(r).unwrap_or(Role::Admin))).collect(),
         }
     }
 }
@@ -234,6 +252,14 @@ impl Policy {
                     },
                     direct: o.direct && r.direct,
                     rewrite: o.rewrite.max(r.rewrite),
+                    paths: {
+                        let mut m = o.paths;
+                        for (p, role) in r.paths {
+                            let e = m.entry(p).or_insert(role);
+                            *e = (*e).max(role);
+                        }
+                        m
+                    },
                 },
             });
         }
@@ -351,6 +377,19 @@ mod tests {
         assert_eq!(r.check, vec!["lint".to_string(), "unit".to_string()]);
         assert_eq!(r.rewrite, Role::Admin);
         assert!(p.rule_for("topic").is_none());
+        // Path rules: the highest role of all matching paths.
+        p.protect.insert(
+            "main".into(),
+            RuleSpec {
+                paths: [(".github".to_string(), "admin".to_string()), ("tests/*.sh".into(), "maintainer".into())].into(),
+                ..Default::default()
+            },
+        );
+        let r = p.rule_for("main").unwrap();
+        assert_eq!(r.role_for_path(".github/workflows/ci.yml"), Role::Admin);
+        assert_eq!(r.role_for_path("tests/a.sh"), Role::Admin.max(r.update));
+        assert_eq!(r.role_for_path("src/x.rs"), r.update);
+        assert!(!path_matches(".github", ".githubx/y"));
         // An unknown role name in a rule restricts most.
         p.protect.insert("x".into(), RuleSpec { update: Some("bogus".into()), ..Default::default() });
         assert_eq!(p.rule_for("x").unwrap().update, Role::Admin);

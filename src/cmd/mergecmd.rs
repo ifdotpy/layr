@@ -95,6 +95,33 @@ fn finish(
     Ok(applied)
 }
 
+/// Path rules of a protected line: every path that the merge changes needs the role of its
+/// rule (`layr protect <line> --path <path>=<role>`).
+fn check_paths(ctx: &Ctx, repo: &Repo, line: &Line, rule: Option<&crate::access::Rule>, head: &str, result: &str) -> Result<()> {
+    let rule = match rule {
+        Some(r) if !r.paths.is_empty() && !ctx.caller.is_root() => r,
+        _ => return Ok(()),
+    };
+    let role = repo.policy().role(&Repo::who(ctx));
+    for c in changes::file_changes(&repo.state_root(head)?, &repo.state_root(result)?)? {
+        for p in [Some(c.path.clone()), c.old_path.clone()].into_iter().flatten() {
+            let need = rule.role_for_path(&p);
+            if role < need {
+                return Err(exit(
+                    1,
+                    format!(
+                        "permission denied: the merge changes '{p}', which in line '{}' needs the role {}; you are {}",
+                        line.name,
+                        need.name(),
+                        role.name()
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The checks of a protected line, on the state the line would take. They run as the caller
 /// without the project lock; a passing check of the same state and command is reused. Then the
 /// lock is taken again and the line must still be at `head`. Returns the lock (held until the
@@ -223,9 +250,10 @@ pub fn merge_rev(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str, a: &crate::args
     let mut local = st.local_paths();
     let ff = repo.is_ancestor(&head, &theirs)?;
     let quiet = a.has("-q");
-    let checks = rule.map(|r| r.check).unwrap_or_default();
+    let checks = rule.as_ref().map(|r| r.check.clone()).unwrap_or_default();
     let mut _relock = None;
     if ff && !a.has("--no-ff") && !a.has("--squash") {
+        check_paths(ctx, repo, &line, rule.as_ref(), &head, &theirs)?;
         if !checks.is_empty() {
             drop(lock);
             let (l, paths) = run_line_checks(ctx, repo, &line, &head, &theirs, &checks, quiet)?;
@@ -269,6 +297,10 @@ pub fn merge_rev(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str, a: &crate::args
     let sid = state.id.clone();
     let nconf = out.conflicts.len();
     let mut states = vec![state];
+    if let Err(e) = check_paths(ctx, repo, &line, rule.as_ref(), &head, &sid) {
+        repo.discard_states(&states);
+        return Err(e);
+    }
     if !checks.is_empty() {
         if nconf > 0 {
             repo.discard_states(&states);

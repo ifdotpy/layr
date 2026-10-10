@@ -83,11 +83,22 @@ ok "a second merge makes a merge state and checks it" in_line layr-u2 main merge
 eq "it is a merge" "2" "$(l --project p --line main log -1 --format=%p | wc -w)"
 has "checked" "test ! -e broken.txt" "$(l --project p --line main checks HEAD)"
 
+# Path rules: a change of CI configuration needs the admin, even through a maintainer's merge.
+l --project p protect main --path .github=admin
+has "the rule lists the path" "paths .github=admin" "$(l --project p protect)"
+cd $P/u1 && as layr-u1 sh -c "mkdir -p .github && echo ci > .github/ci.yml && $L add .github && $L commit -qm ci" && cd /tmp
+out=$(in_line layr-u2 main merge -q u1 --expect $(in_line layr-u1 u1 rev-parse HEAD) 2>&1); rc=$?
+eq "a maintainer cannot merge a change of .github" "1" "$rc"
+has "and is told which path needs whom" "'.github/ci.yml', which in line 'main' needs the role admin" "$out"
+ok "the admin can" as layr-admin env LAYR_PROJECT=p LAYR_LINE=main $T/layr merge -q u1 --expect $(in_line layr-u1 u1 rev-parse HEAD)
+l --project p protect main --path .github=
+
 # 5. Moving a protected line back needs its rewrite role (admin).
 no "a maintainer cannot undo a merge into main" in_line layr-u2 main undo --force
 MOP=$(l --project p op log -n 30 | grep -w merge | head -1 | awk '{print $1}')
+want=$(l --project p --line main rev-parse 'HEAD~1')
 ok "the admin can" as layr-admin $L --project p undo --force $MOP
-eq "main went back" "1" "$(l --project p --line main log -1 --format=%p | wc -w)"
+eq "main went back" "$want" "$(l --project p --line main rev-parse HEAD)"
 ok "and forward again" in_line layr-u2 main merge -q u1 --expect $(in_line layr-u1 u1 rev-parse HEAD)
 
 # 6. A deny rule wins over any role.
