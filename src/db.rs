@@ -34,11 +34,12 @@ CREATE TABLE IF NOT EXISTS checks (id TEXT PRIMARY KEY, state TEXT, command TEXT
 CREATE TABLE IF NOT EXISTS machines (id TEXT PRIMARY KEY, name TEXT, public_key TEXT);
 CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT, ord TEXT);
 CREATE TABLE IF NOT EXISTS trusted (machine TEXT PRIMARY KEY, public_key TEXT, by TEXT);
+CREATE TABLE IF NOT EXISTS approvals (id TEXT PRIMARY KEY, state TEXT, uid INTEGER, time INTEGER, withdrawn INTEGER DEFAULT 0);
 "#;
 
 /// Version of the derived tables. Records never change shape; a database with an older version
 /// drops its derived tables, creates them new and rebuilds them from the records.
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 const DERIVED: &[&str] = &[
     "states",
@@ -53,6 +54,7 @@ const DERIVED: &[&str] = &[
     "machines",
     "config",
     "trusted",
+    "approvals",
 ];
 
 /// Derived tables of older versions, dropped on migration.
@@ -122,7 +124,7 @@ impl Db {
             "DELETE FROM states; DELETE FROM parents; DELETE FROM lines; DELETE FROM line_heads;
              DELETE FROM tags; DELETE FROM remote_refs; DELETE FROM git_map; DELETE FROM exports; DELETE FROM checks;
              DELETE FROM machines; DELETE FROM config;
-             DELETE FROM trusted;",
+             DELETE FROM trusted; DELETE FROM approvals;",
         )?;
         Ok(())
     }
@@ -362,6 +364,19 @@ impl Db {
                     }
                 }
             }
+            // Approvals name users of this machine: only local records count.
+            "approve" if !foreign && s("state").map(|x| crate::model::is_uuid(&x)).unwrap_or(false) => {
+                tx.execute(
+                    "INSERT OR IGNORE INTO approvals(id, state, uid, time) VALUES(?1,?2,?3,?4)",
+                    params![rec.id, s("state"), rec.actor.uid as i64, rec.time],
+                )?;
+            }
+            "approve.withdraw" if !foreign => {
+                tx.execute(
+                    "UPDATE approvals SET withdrawn=1 WHERE state=?1 AND uid=?2",
+                    params![s("state"), rec.actor.uid as i64],
+                )?;
+            }
             "stash.drop" => {
                 tx.execute("UPDATE states SET dropped=1 WHERE id=?1", params![s("state")])?;
             }
@@ -409,6 +424,14 @@ impl Db {
     pub fn states_by_prefix(&self, prefix: &str) -> Result<Vec<String>> {
         let mut st = self.conn.prepare("SELECT id FROM states WHERE display LIKE ?1 || '%' LIMIT 3")?;
         let v = st.query_map(params![prefix], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+        Ok(v)
+    }
+
+    /// Users (uids of this machine) whose approval of `state` stands, with its time.
+    pub fn approvals(&self, state: &str) -> Result<Vec<(u32, i64)>> {
+        let mut st =
+            self.conn.prepare("SELECT uid, MAX(time) FROM approvals WHERE state=?1 AND withdrawn=0 GROUP BY uid ORDER BY uid")?;
+        let v = st.query_map(params![state], |r| Ok((r.get::<_, i64>(0)? as u32, r.get(1)?)))?.collect::<Result<Vec<_>, _>>()?;
         Ok(v)
     }
 

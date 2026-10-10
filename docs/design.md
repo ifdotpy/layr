@@ -82,6 +82,7 @@ example: the group of AI agents may not push, sync or trust machines.
 | `direct` | false | the owner may also commit, reset or apply in the line directly |
 | `rewrite` | admin | lowest role that may move the line to a state that is not a descendant (reset, undo of a merge) |
 | `paths` | none | paths (a folder, a file or a glob) whose change needs a higher role than `update`, for example `.github=admin`: a merge that changes such a path needs that role (`layr protect main --path .github=admin`) |
+| `approvals`, `approvers` | 0, maintainers | approvals the reviewed state needs (`layr approve <state>`, a signed record of exactly that state). An approval counts when its user is not an author of the states the merge brings in and matches every listed approver principal (with none listed: has the maintainer role). A program on top that wants "a person must approve" lists a group of people, for example `--approvals 1 --approvers @humans` (SLSA source level 4 asks for two persons: the author and an approver) |
 
 When several patterns match, the most restrictive value of each setting applies.
 
@@ -133,6 +134,4 @@ protected line, or build in its own line and `save --layers`.
   worktrees can be anywhere.
 - Grants with an end time: a user hands a narrower set of its own rights to another user until
   a given time, and revoking a grant revokes what was made from it (Biscuit, UCAN).
-- Approvals: signed records that name an exact state; a protection rule may require approvals
-  from members of a group, and from a person other than the author (SLSA source level 4).
 - A dry-run mode for rule changes that reports what would be refused (GitHub rule evaluation).

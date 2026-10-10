@@ -122,6 +122,57 @@ fn check_paths(ctx: &Ctx, repo: &Repo, line: &Line, rule: Option<&crate::access:
     Ok(())
 }
 
+/// Approvals of a protected line: the reviewed state (`theirs`) needs the rule's number of
+/// approvals of exactly that state, from users who may approve and who are not authors of the
+/// states the merge brings in.
+fn check_approvals(
+    ctx: &Ctx,
+    repo: &Repo,
+    line: &Line,
+    rule: Option<&crate::access::Rule>,
+    head: &str,
+    theirs: &str,
+) -> Result<()> {
+    let rule = match rule {
+        Some(r) if r.approvals > 0 && !ctx.caller.is_root() => r,
+        _ => return Ok(()),
+    };
+    let pol = repo.policy();
+    let have: std::collections::BTreeSet<String> = repo.ancestors(head)?.into_iter().collect();
+    let mut authors = std::collections::BTreeSet::new();
+    for s in repo.ancestors(theirs)? {
+        if !have.contains(&s) {
+            if let Some(r) = repo.p.db.state(&s)? {
+                authors.insert(r.author.uid);
+            }
+        }
+    }
+    let counted: Vec<u32> = repo
+        .p
+        .db
+        .approvals(theirs)?
+        .into_iter()
+        .map(|(u, _)| u)
+        .filter(|u| !authors.contains(u))
+        .filter(|u| pol.may_approve(rule, &crate::access::Who::of(*u, crate::ctx::Caller::from_uid(*u).gid)))
+        .collect();
+    if (counted.len() as u32) < rule.approvals {
+        let from: Vec<String> = rule.approvers.iter().map(|k| crate::access::show_principal(k)).collect();
+        return Err(exit(
+            1,
+            format!(
+                "error: line '{}' takes state {} after {} approval(s) of exactly that state by {} other than its authors; it has {}",
+                line.name,
+                ids::short(theirs),
+                rule.approvals,
+                if from.is_empty() { "maintainers".to_string() } else { from.join(" and ") },
+                counted.len()
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// The checks of a protected line, on the state the line would take. They run as the caller
 /// without the project lock; a passing check of the same state and command is reused. Then the
 /// lock is taken again and the line must still be at `head`. Returns the lock (held until the
@@ -254,6 +305,7 @@ pub fn merge_rev(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str, a: &crate::args
     let mut _relock = None;
     if ff && !a.has("--no-ff") && !a.has("--squash") {
         check_paths(ctx, repo, &line, rule.as_ref(), &head, &theirs)?;
+        check_approvals(ctx, repo, &line, rule.as_ref(), &head, &theirs)?;
         if !checks.is_empty() {
             drop(lock);
             let (l, paths) = run_line_checks(ctx, repo, &line, &head, &theirs, &checks, quiet)?;
@@ -297,7 +349,9 @@ pub fn merge_rev(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str, a: &crate::args
     let sid = state.id.clone();
     let nconf = out.conflicts.len();
     let mut states = vec![state];
-    if let Err(e) = check_paths(ctx, repo, &line, rule.as_ref(), &head, &sid) {
+    if let Err(e) = check_paths(ctx, repo, &line, rule.as_ref(), &head, &sid)
+        .and_then(|_| check_approvals(ctx, repo, &line, rule.as_ref(), &head, &theirs))
+    {
         repo.discard_states(&states);
         return Err(e);
     }

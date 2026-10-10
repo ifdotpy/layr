@@ -85,6 +85,12 @@ pub struct RuleSpec {
     /// Paths (a folder, a file or a glob) whose change needs a higher role than `update`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub paths: BTreeMap<String, String>,
+    /// Approvals of the merged state that a merge needs (`layr approve`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approvals: Option<u32>,
+    /// Who may approve: principals (an approver matches all of them); none: a maintainer.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub approvers: Vec<String>,
 }
 
 /// The rule that applies to a line: every matching pattern combined, the most restrictive value
@@ -97,6 +103,8 @@ pub struct Rule {
     pub direct: bool,
     pub rewrite: Role,
     pub paths: BTreeMap<String, Role>,
+    pub approvals: u32,
+    pub approvers: Vec<String>,
 }
 
 impl Rule {
@@ -126,6 +134,8 @@ impl RuleSpec {
             direct: self.direct.unwrap_or(false),
             rewrite: role_or(&self.rewrite, Role::Admin),
             paths: self.paths.iter().map(|(p, r)| (p.clone(), Role::parse(r).unwrap_or(Role::Admin))).collect(),
+            approvals: self.approvals.unwrap_or(0),
+            approvers: self.approvers.clone(),
         }
     }
 }
@@ -260,10 +270,30 @@ impl Policy {
                         }
                         m
                     },
+                    approvals: o.approvals.max(r.approvals),
+                    approvers: {
+                        let mut v = o.approvers;
+                        for x in r.approvers {
+                            if !v.contains(&x) {
+                                v.push(x);
+                            }
+                        }
+                        v
+                    },
                 },
             });
         }
         out
+    }
+
+    /// Whether `who` may approve for a rule: it matches every listed principal, or with none
+    /// listed it has the maintainer role. Not for the authors of the merged states.
+    pub fn may_approve(&self, rule: &Rule, who: &Who) -> bool {
+        if rule.approvers.is_empty() {
+            return self.role(who) >= Role::Maintainer;
+        }
+        let keys = who.keys();
+        rule.approvers.iter().all(|a| keys.contains(a))
     }
 
     /// Principals that may read the project (role reader or more), for the git store's access

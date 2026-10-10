@@ -118,7 +118,7 @@ python3 -c "import sqlite3; c=sqlite3.connect('$LAYR_ROOT/projects/s/meta/db/lay
 eq "an old schema is rebuilt from the records" "$before" "$(l --project s --line main log --format=%H | md5sum)"
 python3 -c "import sqlite3; c=sqlite3.connect('$LAYR_ROOT/projects/s/meta/db/layr.sqlite'); c.execute('PRAGMA user_version=99'); c.commit()"
 has "a newer schema is refused" "newer layr" "$(l --project s --line main log 2>&1)"
-python3 -c "import sqlite3; c=sqlite3.connect('$LAYR_ROOT/projects/s/meta/db/layr.sqlite'); c.execute('PRAGMA user_version=4'); c.commit()"
+python3 -c "import sqlite3; c=sqlite3.connect('$LAYR_ROOT/projects/s/meta/db/layr.sqlite'); c.execute('PRAGMA user_version=6'); c.commit()"
 # Git objects follow the roles.
 git init -q --bare $T/gr.git; cd $P/main; l --project s remote add origin $T/gr.git >/dev/null 2>&1; l --project s --line main push -q origin t >/dev/null 2>&1
 l --project s access revoke '*'

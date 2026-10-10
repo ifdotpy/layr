@@ -122,6 +122,8 @@ const NOT_UNDOABLE: &[&str] = &[
     "group.add",
     "group.accept",
     "merge.candidate",
+    "approve",
+    "approve.withdraw",
     "rebase.step",
     "remote.ref",
     "config",
@@ -1153,6 +1155,38 @@ pub fn access(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
 }
 
+/// `layr approve [<rev>] [--withdraw]`: approve an exact state (or withdraw the approval). A
+/// protection rule can require approvals of the state a merge takes (`--approvals`).
+pub fn approve(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    let spec = Spec::new().flag("--withdraw").flag("-q|--quiet");
+    let a = parse(&spec, args)?;
+    let h = here(ctx)?;
+    let repo = &h.repo;
+    let state = revs::resolve(repo, h.line.as_ref(), a.pos.first().map(|s| s.as_str()).unwrap_or("HEAD"))?;
+    let s = repo.state(&state)?;
+    let _lock = repo.p.lock()?;
+    let withdraw = a.has("--withdraw");
+    let mut rec = Record::new(if withdraw { "approve.withdraw" } else { "approve" });
+    rec.data = serde_json::json!({"state": state});
+    repo.commit_record(ctx, rec)?;
+    if !a.has("-q") {
+        let what = if withdraw { "Withdrew the approval of" } else { "Approved" };
+        outln!(ctx, "{what} state {} {}", ids::short(&state), s.message.lines().next().unwrap_or(""));
+    }
+    Ok(0)
+}
+
+/// `layr approvals [<rev>]`: who approved exactly this state.
+pub fn approvals(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    let h = here(ctx)?;
+    let state = revs::resolve(&h.repo, h.line.as_ref(), args.first().map(|s| s.as_str()).unwrap_or("HEAD"))?;
+    let v = h.repo.p.db.approvals(&state)?;
+    for (uid, time) in &v {
+        outln!(ctx, "{}\t{}", crate::ctx::Caller::from_uid(*uid).user, fmt_time(*time));
+    }
+    Ok(if v.is_empty() { 1 } else { 0 })
+}
+
 /// `layr protect`: protection rules of line name patterns.
 pub fn protect(ctx: &Ctx, args: &[String]) -> Result<i32> {
     use crate::access::{Role, RuleSpec};
@@ -1165,6 +1199,8 @@ pub fn protect(ctx: &Ctx, args: &[String]) -> Result<i32> {
         .flag("--no-direct")
         .value("--rewrite")
         .value("--path")
+        .value("--approvals")
+        .value("--approvers")
         .flag("--remove");
     let a = parse(&spec, args)?;
     let h = here(ctx)?;
@@ -1180,13 +1216,23 @@ pub fn protect(ctx: &Ctx, args: &[String]) -> Result<i32> {
                         let paths: Vec<String> = x.paths.iter().map(|(p, r)| format!("{p}={}", r.name())).collect();
                         outln!(
                             ctx,
-                            "{p}\tupdate {}\texpect {}\tcheck {}\tdirect {}\trewrite {}{}",
+                            "{p}\tupdate {}\texpect {}\tcheck {}\tdirect {}\trewrite {}{}{}",
                             x.update.name(),
                             x.expect,
                             if checks.is_empty() { "-".into() } else { checks },
                             x.direct,
                             x.rewrite.name(),
-                            if paths.is_empty() { String::new() } else { format!("\tpaths {}", paths.join(",")) }
+                            if paths.is_empty() { String::new() } else { format!("\tpaths {}", paths.join(",")) },
+                            if x.approvals == 0 {
+                                String::new()
+                            } else {
+                                let from: Vec<String> = x.approvers.iter().map(|k| crate::access::show_principal(k)).collect();
+                                format!(
+                                    "\tapprovals {} from {}",
+                                    x.approvals,
+                                    if from.is_empty() { "maintainers".to_string() } else { from.join(",") }
+                                )
+                            }
                         )
                     }
                     None => outln!(ctx, "{p}"),
@@ -1226,6 +1272,17 @@ pub fn protect(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         if let Some(c) = a.get("--check") {
             r.check = c.split(',').filter(|x| !x.is_empty()).map(|x| x.to_string()).collect();
+        }
+        if let Some(n) = a.get("--approvals") {
+            r.approvals = Some(n.parse().map_err(|_| exit(128, format!("fatal: --approvals takes a number, not '{n}'")))?);
+        }
+        if let Some(who) = a.get("--approvers") {
+            r.approvers = Vec::new();
+            for w in who.split(',').filter(|x| !x.is_empty()) {
+                r.approvers.push(
+                    crate::access::parse_principal(w).ok_or_else(|| exit(128, format!("fatal: unknown user or group '{w}'")))?,
+                );
+            }
         }
         // `--path <path>=<role>` (repeatable); an empty role removes the path rule.
         for pr in a.all("--path") {

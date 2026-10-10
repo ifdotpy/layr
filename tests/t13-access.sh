@@ -93,6 +93,29 @@ has "and is told which path needs whom" "'.github/ci.yml', which in line 'main' 
 ok "the admin can" as layr-admin env LAYR_PROJECT=p LAYR_LINE=main $T/layr merge -q u1 --expect $(in_line layr-u1 u1 rev-parse HEAD)
 l --project p protect main --path .github=
 
+# Approvals: the reviewed state needs an approval of exactly that state by a member of the
+# approvers group who is not one of its authors.
+getent group layr-humans >/dev/null || groupadd layr-humans
+usermod -aG layr-humans layr-admin
+l --project p protect main --approvals 1 --approvers @layr-humans
+has "the rule lists the approvals" "approvals 1 from @layr-humans" "$(l --project p protect)"
+cd $P/u1 && as layr-u1 sh -c "echo r > r.txt && $L add r.txt && $L commit -qm r" && cd /tmp
+R=$(in_line layr-u1 u1 rev-parse HEAD)
+has "without an approval the merge is refused" "after 1 approval(s)" "$(in_line layr-u2 main merge -q u1 --expect $R 2>&1)"
+in_line layr-u1 u1 approve -q $R
+in_line layr-u2 main approve -q $R
+has "approvals of the author and of a non-member do not count" "it has 0" "$(in_line layr-u2 main merge -q u1 --expect $R 2>&1)"
+as layr-admin env LAYR_PROJECT=p LAYR_LINE=main $T/layr approve -q $R
+eq "approvals are listed" "layr-admin layr-u1 layr-u2" "$(l --project p --line main approvals $R | awk '{print $1}' | sort | xargs)"
+as layr-admin env LAYR_PROJECT=p LAYR_LINE=main $T/layr approve -q --withdraw $R
+has "a withdrawn approval does not count" "it has 0" "$(in_line layr-u2 main merge -q u1 --expect $R 2>&1)"
+as layr-admin env LAYR_PROJECT=p LAYR_LINE=main $T/layr approve -q $R
+cd $P/u1 && as layr-u1 sh -c "echo r2 >> r.txt && $L commit -qam r2" && cd /tmp
+R2=$(in_line layr-u1 u1 rev-parse HEAD)
+has "an approval binds to the exact state" "it has 0" "$(in_line layr-u2 main merge -q u1 --expect $R2 2>&1)"
+ok "the approved state merges" in_line layr-u2 main merge -q $R --expect $R
+l --project p protect main --approvals 0
+
 # 5. Moving a protected line back needs its rewrite role (admin).
 no "a maintainer cannot undo a merge into main" in_line layr-u2 main undo --force
 MOP=$(l --project p op log -n 30 | grep -w merge | head -1 | awk '{print $1}')

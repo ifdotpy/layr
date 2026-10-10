@@ -239,6 +239,8 @@ pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
         "try" => admin::try_cmd(ctx, &rest),
         "access" => admin::access(ctx, &rest),
         "protect" => admin::protect(ctx, &rest),
+        "approve" => admin::approve(ctx, &rest),
+        "approvals" => admin::approvals(ctx, &rest),
         "checks" => admin::checks(ctx, &rest),
         "gc" => admin::gc(ctx, &rest),
         "fsck" => admin::fsck(ctx, &rest),
