@@ -134,25 +134,34 @@ one; a program on top that wants one commit per task uses it.
 
 ## 5. Warm layers
 
-A layer is a folder of regenerable content (`target`, `node_modules`, `.venv`) kept as a nested
+A layer is a folder of regenerable content, such as a Rust `target` folder, kept as a nested
 subvolume, outside states, diffs and backups. Every working folder would otherwise build from
 nothing, and the same build output would be on disk once per folder.
 
+layr keeps layers as storage and knows nothing about builds. It cannot tell whether build output
+is valid for a state, so it never decides that by itself:
+
 - A new line (and the temporary copy of a check) takes for each layer the snapshot of its start
   state, or else of the nearest ancestor state on this machine that has one. The copy shares
-  all blocks; only its files change owner. A build tool then rebuilds what changed.
-- A layer made by another user goes to a line only if it was made on a protected line, because
+  all blocks; only its files change owner. The build tool then decides what to rebuild.
+- Layers come only from `layr save --layers`, the explicit choice of someone who may save the
+  line. On a protected line with no changes since its head, it gives the layers to the head, so
+  the next lines from that head start warm; else to a new automatic state.
+- A layer made by another user goes to a line only if it was saved on a protected line, because
   a layer holds code that review does not see. Other layers go only to lines of the user who
   made them.
-- The checks of a protected line build the state the line takes. After a passing check its
-  layers become the layers of that state, shared. So the protected line gets warm build output
-  without a separate build, and the next checks start warm too. `layr save --layers` keeps the
-  layers of a line's working folder as well (shared when the line is protected).
+- A check starts from the warm layers of its state, but its build output is not kept.
 - gc keeps the layer snapshots of line heads and of the newest `retention.layers` (5) states
   with layers; the states themselves stay.
 
-Who builds, and when, is the choice of the program on top: it can run its checks on the
-protected line, or build in its own line and `save --layers`.
+A layer helps only a tool that checks its own output and accepts a new path, because every line
+has its own folder. Cargo's `target` does: Cargo compares fingerprints and rebuilds what a change
+or the new path made stale. A Python virtual environment does not: its scripts keep the absolute
+path of the folder where it was made, so in a copy they run the interpreter and packages of the
+original line. pnpm links packages by relative paths, but the scripts in `node_modules/.bin` set
+`NODE_PATH` to absolute paths of the original folder. Xcode and SwiftPM do not reuse build
+output at another path. Which folders are layers, who builds them, and when a build is good
+enough to save, is the choice of the program on top.
 
 ## 6. What is not in layr
 
@@ -168,6 +177,12 @@ protected line, or build in its own line and `save --layers`.
 
 ## 8. Decided against
 
+- **Keeping the build output of checks as layers.** A passing check of a protected line used to
+  give its build output to the state as a shared layer. Removed on 2026-10-10: a check passing
+  does not show that its build output is valid at another path or with another toolchain (a
+  copied Python environment runs the original line's interpreter), and the output holds code
+  that no one reviewed. A state is a key of sources only, not of the compiler and environment
+  that a build cache needs. Layers now come only from an explicit `save --layers`.
 - **Working folders outside the store.** A line's folder stays at
   `projects/<p>/lines/<name>`: snapshots, deletes and writes of the service go through the
   store's own folders, which no user can replace. A link (`ln -s <line folder> ~/code/topic`)
