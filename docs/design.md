@@ -66,6 +66,10 @@ project includes reading the project.
 other work commands). Nobody else writes into it, the admin included. To change another user's
 line, make a line from it and merge, or delete it (maintainer). Root can do everything.
 
+**Roles for a time.** `layr access grant <principal> <role> --until <30m|2h|1d>` adds a role
+that ends by itself, for example a maintainer role for one task; the principal keeps its role
+after that.
+
 **Deny rules.** `layr access deny <principal> <action>...` takes actions away from a user, a
 group or everyone, whatever the role. The actions are `read`, `try`, `export`, `line.create`,
 `merge` (merges into protected lines), `line.manage`, `tag`, `push`, `access`, `config`,
@@ -130,8 +134,16 @@ protected line, or build in its own line and `save --layers`.
 
 ## 7. Planned
 
-- Lines outside the store: a working folder anywhere on the same btrfs file system, as git
-  worktrees can be anywhere.
-- Grants with an end time: a user hands a narrower set of its own rights to another user until
-  a given time, and revoking a grant revokes what was made from it (Biscuit, UCAN).
 - A dry-run mode for rule changes that reports what would be refused (GitHub rule evaluation).
+
+## 8. Decided against
+
+- **Working folders outside the store.** A line's folder stays at
+  `projects/<p>/lines/<name>`: snapshots, deletes and writes of the service go through the
+  store's own folders, which no user can replace. A link (`ln -s <line folder> ~/code/topic`)
+  puts a line at any path; layr finds the line from the real path.
+- **Handing rights on by any user** (delegation chains as in Biscuit or UCAN). A user cannot
+  share writing in its line through layr, because the line folder is a Unix folder of that user;
+  and chains of rights from users who are not admins make the effective rights hard to see.
+  Instead the admin gives a role for a time (`layr access grant <principal> <role> --until 2h`),
+  which adds to the principal's role and ends by itself.

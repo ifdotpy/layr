@@ -39,6 +39,13 @@ ok "a writer makes its own line" as layr-u1 $L --project p branch -q u1 main
 no "a writer cannot make a line for another user" as layr-u1 $L --project p branch -q x1 main --owner layr-u2
 ok "a maintainer can" as layr-u2 $L --project p branch -q for-u1 main --owner layr-u1
 has "access check explains a deny rule" "deny rule for @layr-bots" "$(l --project p access check layr-u3 push)"
+# A role for a time adds to the user's role and ends by itself.
+as layr-admin $L --project p access grant layr-u1 maintainer --until 3s
+has "it is listed with its end" "maintainer	until" "$(l --project p access | grep layr-u1)"
+ok "while it lasts it works" as layr-u1 $L --project p branch -q tmp1 main --owner layr-u2
+sleep 4
+no "after it ends it does not" as layr-u1 $L --project p branch -q tmp2 main --owner layr-u2
+eq "the user keeps the role it had" "layr-u1	writer" "$(l --project p access | grep layr-u1)"
 eq "the owner of a line reads the project without a role" "0" "$(l --project p branch -q own-only main --owner layr-admin; echo $?)"
 
 # 3. Only the owner changes a line, the admin included.

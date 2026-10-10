@@ -1054,7 +1054,7 @@ pub fn config(ctx: &Ctx, args: &[String]) -> Result<i32> {
 }
 
 /// Settings that decide who may do what: changing them is the `access` action.
-const POLICY_KEYS: &[&str] = &["access", "deny", "protect", "members", "admin", "lead"];
+const POLICY_KEYS: &[&str] = &["access", "grants", "deny", "protect", "members", "admin", "lead"];
 
 /// `layr access`: roles and deny rules (docs/design.md, section 3).
 pub fn access(ctx: &Ctx, args: &[String]) -> Result<i32> {
@@ -1072,7 +1072,10 @@ pub fn access(ctx: &Ctx, args: &[String]) -> Result<i32> {
     match sub {
         "list" => {
             for (k, r) in &pol.access {
-                outln!(ctx, "{}	{}", show_principal(k), r.name());
+                outln!(ctx, "{}\t{}", show_principal(k), r.name());
+            }
+            for (k, (r, end)) in &pol.grants {
+                outln!(ctx, "{}\t{}\tuntil {}", show_principal(k), r.name(), fmt_time(*end));
             }
             for (k, v) in &pol.deny {
                 outln!(ctx, "{}	deny {}", show_principal(k), v.join(" "));
@@ -1103,22 +1106,30 @@ pub fn access(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let pol = repo.policy();
             match sub {
                 "grant" => {
-                    let role = rest
-                        .get(1)
-                        .and_then(|r| Role::parse(r))
-                        .ok_or_else(|| exit(128, "usage: layr access grant <principal> (reader|writer|maintainer|admin)"))?;
-                    let mut m = pol.access.clone();
-                    m.insert(k, role);
-                    let v: serde_json::Map<String, serde_json::Value> =
-                        m.into_iter().map(|(k, r)| (k, serde_json::json!(r.name()))).collect();
-                    set_config(ctx, repo, "access", serde_json::Value::Object(v))?;
+                    let role = rest.get(1).and_then(|r| Role::parse(r)).ok_or_else(|| {
+                        exit(128, "usage: layr access grant <principal> (reader|writer|maintainer|admin) [--until <30m|2h|1d>]")
+                    })?;
+                    let mut pol = pol.clone();
+                    match rest.iter().position(|x| x == "--until") {
+                        Some(i) => {
+                            // A role for a time adds to the principal's role and ends by itself.
+                            let d = rest.get(i + 1).ok_or_else(|| exit(128, "usage: --until <30m|2h|1d>"))?;
+                            pol.grants.insert(k, (role, ids::now_ms() + duration_ms(d)?));
+                            set_config(ctx, repo, "grants", pol.grants_json())?;
+                        }
+                        None => {
+                            pol.access.insert(k, role);
+                            set_config(ctx, repo, "access", pol.access_json())?;
+                        }
+                    }
                 }
                 "revoke" => {
-                    let mut m = pol.access.clone();
-                    m.remove(&k);
-                    let v: serde_json::Map<String, serde_json::Value> =
-                        m.into_iter().map(|(k, r)| (k, serde_json::json!(r.name()))).collect();
-                    set_config(ctx, repo, "access", serde_json::Value::Object(v))?;
+                    let mut pol = pol.clone();
+                    if pol.grants.remove(&k).is_some() {
+                        set_config(ctx, repo, "grants", pol.grants_json())?;
+                    }
+                    pol.access.remove(&k);
+                    set_config(ctx, repo, "access", pol.access_json())?;
                 }
                 _ => {
                     let actions: Vec<String> = rest[1..].to_vec();
@@ -1185,6 +1196,20 @@ pub fn approvals(ctx: &Ctx, args: &[String]) -> Result<i32> {
         outln!(ctx, "{}\t{}", crate::ctx::Caller::from_uid(*uid).user, fmt_time(*time));
     }
     Ok(if v.is_empty() { 1 } else { 0 })
+}
+
+/// A duration: `90s`, `30m`, `2h`, `1d`.
+fn duration_ms(s: &str) -> Result<i64> {
+    let (n, unit) = s.split_at(s.len().saturating_sub(1));
+    let n: i64 = n.parse().map_err(|_| exit(128, format!("fatal: bad duration '{s}' (for example 30m, 2h, 1d)")))?;
+    let k = match unit {
+        "s" => 1000,
+        "m" => 60_000,
+        "h" => 3_600_000,
+        "d" => 86_400_000,
+        _ => return Err(exit(128, format!("fatal: bad duration '{s}' (for example 30m, 2h, 1d)"))),
+    };
+    Ok(n.saturating_mul(k))
 }
 
 /// `layr protect`: protection rules of line name patterns.

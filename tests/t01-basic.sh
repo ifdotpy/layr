@@ -9,6 +9,8 @@ cd $LAYR_ROOT/projects/demo/lines/main || exit 1
 
 eq "ignored files are not imported" "no" "$([ -e target/out.bin ] || [ -e debug.log ] && echo yes || echo no)"
 eq "clean status" "nothing to commit, working tree clean" "$(l status | tail -1)"
+ln -s $LAYR_ROOT/projects/demo/lines/main $T/linked
+eq "a link to a line works as the line" "main" "$(cd $T/linked && l branch --show-current)"
 eq "porcelain clean" "" "$(l status --porcelain)"
 
 sed -i 's/line 5/line five/' notes.txt; echo new > added.txt; rm src/main.rs; mkdir -p docs/deep; echo d > docs/deep/a.md

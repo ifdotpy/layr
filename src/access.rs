@@ -167,6 +167,9 @@ impl Who {
 #[derive(Clone, Debug, Default)]
 pub struct Policy {
     pub access: BTreeMap<String, Role>,
+    /// Roles given for a time (`grants`): principal to (role, end in ms since the epoch). Ended
+    /// ones are not loaded. They add to the role in `access`, never replace it.
+    pub grants: BTreeMap<String, (Role, i64)>,
     pub deny: BTreeMap<String, Vec<String>>,
     pub protect: BTreeMap<String, RuleSpec>,
 }
@@ -175,6 +178,15 @@ impl Policy {
     pub fn load(p: &Project) -> Policy {
         let cfg = |k: &str| p.config_value(k).ok().flatten();
         let mut access = BTreeMap::new();
+        let mut grants = BTreeMap::new();
+        let now = crate::ids::now_ms();
+        for (k, v) in cfg("grants").and_then(|v| v.as_object().cloned()).unwrap_or_default() {
+            let end = v.get("until").and_then(|x| x.as_i64()).unwrap_or(0);
+            let role = v.get("role").and_then(|r| r.as_str()).and_then(Role::parse).unwrap_or(Role::None);
+            if end > now {
+                grants.insert(k, (role, end));
+            }
+        }
         match cfg("access").and_then(|v| v.as_object().cloned()) {
             Some(m) => {
                 for (k, v) in m {
@@ -206,7 +218,7 @@ impl Policy {
         }
         let deny = cfg("deny").and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
         let protect = cfg("protect").and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
-        Policy { access, deny, protect }
+        Policy { access, grants, deny, protect }
     }
 
     /// The highest role of the user, its groups and everyone. Root is admin.
@@ -214,7 +226,12 @@ impl Policy {
         if who.uid == 0 {
             return Role::Admin;
         }
-        who.keys().iter().filter_map(|k| self.access.get(k)).copied().max().unwrap_or(Role::None)
+        who.keys()
+            .iter()
+            .flat_map(|k| [self.access.get(k).copied(), self.grants.get(k).map(|g| g.0)])
+            .flatten()
+            .max()
+            .unwrap_or(Role::None)
     }
 
     /// The principal whose deny rule takes `action` away from `who`, if any. Never for root.
@@ -296,8 +313,19 @@ impl Policy {
         rule.approvers.iter().all(|a| keys.contains(a))
     }
 
+    /// The `access` and `grants` settings as stored.
+    pub fn access_json(&self) -> serde_json::Value {
+        serde_json::Value::Object(self.access.iter().map(|(k, r)| (k.clone(), serde_json::json!(r.name()))).collect())
+    }
+    pub fn grants_json(&self) -> serde_json::Value {
+        serde_json::Value::Object(
+            self.grants.iter().map(|(k, (r, end))| (k.clone(), serde_json::json!({"role": r.name(), "until": end}))).collect(),
+        )
+    }
+
     /// Principals that may read the project (role reader or more), for the git store's access
-    /// list: (everyone, uids, gids).
+    /// list: (everyone, uids, gids). Roles for a time are left out: the list does not change
+    /// when they end, and their users read through layr.
     pub fn readers(&self) -> (bool, Vec<u32>, Vec<u32>) {
         let mut all = false;
         let (mut users, mut groups) = (Vec::new(), Vec::new());
