@@ -116,6 +116,18 @@ pub fn check_name(kind: &str, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Which machines an import takes records from: this machine, machines this project trusts,
+/// and machines vouched for by a `machine.trust` record of a trusted machine in the same batch.
+#[derive(Clone, Copy)]
+pub enum Trust<'a> {
+    Known,
+    /// Also this machine with this key, for this batch only (the peer of a sync; the sync records
+    /// its trust after the records were taken).
+    Peer(&'a str, &'a str),
+    /// Every machine of the batch (a new replica or a restore).
+    All,
+}
+
 pub struct Project<'a> {
     pub store: &'a Store,
     pub name: String,
@@ -349,10 +361,8 @@ impl<'a> Project<'a> {
     /// from its first record, contiguous sequence numbers, signatures) and the project id, then
     /// store them with their derived rows in one transaction. Returns the number of new records.
     ///
-    /// Only records of trusted machines are taken: this machine, machines trusted by a
-    /// `machine.trust` record of a trusted machine (in the store or in the same batch), or, with
-    /// `bootstrap` (a new replica or a restore), every machine of the batch.
-    pub fn import_lines(&self, lines: &[String], bootstrap: bool) -> Result<usize> {
+    /// Only records of trusted machines are taken (see `Trust`).
+    pub fn import_lines(&self, lines: &[String], trust: Trust) -> Result<usize> {
         use std::collections::{BTreeMap, BTreeSet};
         let mut parsed: Vec<oplog::Signed> = Vec::new();
         for l in lines {
@@ -431,13 +441,18 @@ impl<'a> Project<'a> {
             }
         }
         // Trust: known machines, then machines vouched for by trusted ones in this batch.
-        if !bootstrap {
+        if !matches!(trust, Trust::All) {
             let mut trusted: BTreeSet<String> = BTreeSet::new();
             for m in keys.keys() {
                 if let Some(k) = self.db.trusted(m)? {
                     if Some(&k) == keys.get(m) {
                         trusted.insert(m.clone());
                     }
+                }
+            }
+            if let Trust::Peer(m, k) = trust {
+                if keys.get(m).map(|x| x == k).unwrap_or(false) {
+                    trusted.insert(m.to_string());
                 }
             }
             trusted.insert(self.store.machine.id.clone());

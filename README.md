@@ -128,11 +128,20 @@ its record and the derived rows. After a crash only a snapshot without a record 
   with that user's uid, groups and a clean environment. Paths named by a user outside the store
   (export, slots, backups, patch files) are accessed with the user's file permissions, and so
   is a file such a command leaves for the service (the result of a merge driver).
-- Undo, merge, push, tags and groups check line owners and the project lead. Only root changes
-  the lead or makes root-owned lines.
+- Undo, merge, push, tags and groups check line owners and the project lead. Only the lead sets
+  tags (they are project-wide names and keep their states from gc). Only root changes the lead
+  or makes root-owned lines.
 - Replication takes records only from trusted machines (`layr sync` trusts the peer the lead
-  chose; `layr machines trust`), checks the project id, signatures and sequence numbers, and
-  refuses a changed copy of a known record. Lead, members, merge commands, remotes and the
+  chose once its records passed the checks; `layr machines trust`), checks the project id,
+  signatures and sequence numbers, and refuses a changed copy of a known record.
+- A btrfs stream from a peer or a backup passes a check on its way to `btrfs receive`, which
+  would otherwise find snapshot and clone sources by UUID anywhere on the file system: one
+  subvolume with the name and UUID its signed record names, a parent only from the same
+  project, clones only from that parent or the new subvolume, and no path that leaves the
+  subvolume. After the receive, the new subvolume must be a snapshot of exactly that parent.
+- Files larger than 64 MiB count as binary for diff, grep, blame, rename detection and merge:
+  the service never reads such a file into memory (`show` and merge drivers copy it in
+  pieces). Patches, messages and records named by a user are limited in size too. Lead, members, merge commands, remotes and the
   backup folder are per machine; other machines' records never change a local line.
 - The service limits running requests per user and in total, and drops a client that does not
   send its request within 10 seconds.
@@ -140,9 +149,15 @@ its record and the derived rows. After a crash only a snapshot without a record 
 ## Backups and replication
 
 `layr backup <folder>` writes the whole project: one btrfs stream per state (incremental),
-git bundles, and all records as JSONL, with a SHA-256 manifest, written as the calling user.
-`layr backup restore` checks the manifest, receives the streams, imports the records, and gives
-the lines working folders on the new machine. `layr sync -- ssh host layr serve-peer <p>`
+git bundles, and all records as JSONL, written as the calling user. The manifest lists the
+SHA-256 of the bytes the service produced and is signed with the machine key, so a changed
+file or manifest fails the check (a chain that no longer verifies is not continued; the next
+backup starts a new chain). `layr backup restore` checks the signature with the key that the
+backup's records give for the machine that wrote it (this machine's own key when it names this
+machine), imports the records, receives each stream through the stream check, compares each
+file with its SHA-256 while reading it once (no links, pipes or devices), and gives the lines
+working folders on the new machine. A restore trusts the machine that signed the backup: a
+backup made entirely by another machine identity restores as that machine's project. `layr sync -- ssh host layr serve-peer <p>`
 exchanges records both ways and sends missing states with `btrfs send -p <common state>`;
 `--auto --layers` also carries working content and build output for a live move.
 

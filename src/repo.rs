@@ -738,12 +738,13 @@ impl<'a> Repo<'a> {
 }
 
 /// True if a conflict is still open in `root`. A content conflict is open while the file holds
-/// conflict markers. Other kinds (moves, deletes, types, binary files) stay open until the next
-/// commit of the line, which is the lead's decision.
+/// conflict markers (a merge writes markers only into files of at most `MAX_TEXT` bytes, so a
+/// larger file has none). Other kinds (moves, deletes, types, binary files) stay open until the
+/// next commit of the line, which is the lead's decision.
 pub fn conflict_open(root: &Path, c: &Conflict) -> Result<bool> {
     if c.kind == "content" || c.kind == "add/add" {
         return Ok(match fsutil::lmeta(root, &c.path) {
-            Some(m) if m.is_file() => has_markers(&fsutil::read_file(root, &c.path)?),
+            Some(m) if m.is_file() && m.size <= fsutil::MAX_TEXT => has_markers(&fsutil::read_file(root, &c.path)?),
             _ => false,
         });
     }

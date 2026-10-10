@@ -15,6 +15,8 @@ const FIRST_FREE_OBJECTID: u64 = 256;
 pub struct SubvolInfo {
     pub uuid: String,
     pub received_uuid: Option<String>,
+    /// The subvolume this one is a snapshot of.
+    pub parent_uuid: Option<String>,
     pub readonly: bool,
 }
 
@@ -77,6 +79,7 @@ pub fn subvol_info(path: &Path) -> Result<SubvolInfo> {
     Ok(SubvolInfo {
         uuid: fmt_uuid(&raw.uuid).unwrap_or_default(),
         received_uuid: fmt_uuid(&raw.received_uuid),
+        parent_uuid: fmt_uuid(&raw.parent_uuid),
         readonly: flags & sys::SUBVOL_RDONLY != 0,
     })
 }

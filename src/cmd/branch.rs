@@ -387,13 +387,12 @@ pub fn tag(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let name = &a.pos[0];
     crate::store::check_name("tag", name)?;
+    // Tags are names of the whole project and keep their states from gc: the lead sets them.
+    repo.require_lead(ctx, "create tags")?;
     let id = revs::resolve(repo, line.as_ref(), a.pos.get(1).map(|s| s.as_str()).unwrap_or("HEAD"))?;
     let _lock = repo.p.lock()?;
-    if repo.p.db.tag(name)?.is_some() {
-        if !a.has("-f") {
-            return Err(exit(128, format!("fatal: tag '{name}' already exists")));
-        }
-        repo.require_lead(ctx, "move a tag")?;
+    if repo.p.db.tag(name)?.is_some() && !a.has("-f") {
+        return Err(exit(128, format!("fatal: tag '{name}' already exists")));
     }
     let mut rec = Record::new("tag");
     rec.data = serde_json::json!({"name": name, "state": id, "message": a.get("-m")});

@@ -19,6 +19,7 @@ mod merge;
 mod model;
 mod oplog;
 mod privs;
+mod recv;
 mod repo;
 mod revs;
 mod service;

@@ -498,9 +498,25 @@ pub fn mv(ctx: &Ctx, args: &[String]) -> Result<i32> {
 }
 
 /// Read a file named by the caller with the caller's permissions.
-pub fn read_caller_file(ctx: &Ctx, path: &str) -> Result<Vec<u8>> {
+/// Read at most `limit` bytes; more is an error (the service holds the input in memory).
+pub fn read_limited(r: &mut dyn std::io::Read, limit: u64, what: &str) -> Result<Vec<u8>> {
+    let mut v = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::Read::take(r, limit + 1), &mut v)?;
+    if v.len() as u64 > limit {
+        anyhow::bail!("{what} is larger than {} MiB", limit >> 20);
+    }
+    Ok(v)
+}
+
+/// A file named by the caller (a patch, a message, records), read with the caller's
+/// permissions, or stdin for `-`.
+pub fn read_caller_file(ctx: &Ctx, path: &str, limit: u64) -> Result<Vec<u8>> {
+    if path == "-" {
+        return read_limited(&mut std::io::stdin(), limit, "the input");
+    }
     let p = if path.starts_with('/') { std::path::PathBuf::from(path) } else { ctx.cwd.join(path) };
-    crate::privs::as_caller_fs(ctx, || Ok(std::fs::read(&p)?))
+    let mut f = crate::privs::as_caller_fs(ctx, || Ok(std::fs::File::open(&p)?))?;
+    read_limited(&mut f, limit, path)
 }
 
 pub fn apply(ctx: &Ctx, args: &[String]) -> Result<i32> {
@@ -521,13 +537,11 @@ pub fn apply(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let line = h.line()?.clone();
     let files = a.rest();
     let patch: Vec<u8> = if files.is_empty() || files[0] == "-" {
-        let mut v = Vec::new();
-        std::io::Read::read_to_end(&mut std::io::stdin(), &mut v)?;
-        v
+        read_caller_file(ctx, "-", fsutil::MAX_TEXT)?
     } else {
         let mut v = Vec::new();
         for f in &files {
-            v.extend(read_caller_file(ctx, f)?);
+            v.extend(read_caller_file(ctx, f, fsutil::MAX_TEXT)?);
         }
         v
     };
@@ -638,14 +652,7 @@ pub fn commit(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let line = h.line()?.clone();
     let mut message: String = a.all("-m").join("\n\n");
     if let Some(f) = a.get("-F") {
-        message = String::from_utf8_lossy(&if f == "-" {
-            let mut v = Vec::new();
-            std::io::Read::read_to_end(&mut std::io::stdin(), &mut v)?;
-            v
-        } else {
-            read_caller_file(ctx, f)?
-        })
-        .into_owned();
+        message = String::from_utf8_lossy(&read_caller_file(ctx, f, fsutil::MAX_TEXT)?).into_owned();
     }
     let head = h.repo.state(&line.head)?;
     if a.has("--amend") && message.is_empty() {

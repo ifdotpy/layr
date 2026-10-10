@@ -436,6 +436,14 @@ impl Db {
         Ok(v)
     }
 
+    /// The state whose signed record names subvolume `uuid`.
+    pub fn state_by_subvol(&self, uuid: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT id FROM states WHERE json_extract(rec, '$.subvol')=?1 LIMIT 1", params![uuid], |r| r.get(0))
+            .optional()?)
+    }
+
     pub fn present_states(&self) -> Result<Vec<(String, bool)>> {
         let mut st = self.conn.prepare("SELECT id, deleted FROM states WHERE present=1")?;
         let v = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0)))?.collect::<Result<Vec<_>, _>>()?;

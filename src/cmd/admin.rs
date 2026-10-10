@@ -354,18 +354,11 @@ pub fn op(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if sub == "import" {
         let h = here(ctx)?;
         h.repo.require_lead(ctx, "import records")?;
-        let data = match args.get(1).map(|s| s.as_str()) {
-            None | Some("-") => {
-                let mut v = Vec::new();
-                std::io::Read::read_to_end(&mut std::io::stdin(), &mut v)?;
-                v
-            }
-            Some(f) => super::work::read_caller_file(ctx, f)?,
-        };
+        let data = super::work::read_caller_file(ctx, args.get(1).map(|s| s.as_str()).unwrap_or("-"), 512 << 20)?;
         let lines: Vec<String> =
             String::from_utf8_lossy(&data).lines().filter(|l| !l.trim().is_empty()).map(|l| l.to_string()).collect();
         let _lock = h.repo.p.lock()?;
-        let n = h.repo.p.import_lines(&lines, false)?;
+        let n = h.repo.p.import_lines(&lines, crate::store::Trust::Known)?;
         outln!(ctx, "imported {n} new record(s) of {}", lines.len());
         return Ok(0);
     }
@@ -1088,6 +1081,23 @@ pub fn debug(ctx: &Ctx, args: &[String]) -> Result<i32> {
             }
             Ok(0)
         }
-        _ => Err(exit(128, "usage: layr debug changes <a> <b>")),
+        // A checked receive of a stream from stdin into the project's states (for tests of
+        // the checks in `recv`): root only.
+        Some("receive") if args.len() >= 3 => {
+            if !ctx.caller.is_root() {
+                return Err(exit(1, "error: debug receive needs root"));
+            }
+            let p = &h.repo.p;
+            let parent = |u: &str| -> Option<std::path::PathBuf> {
+                let id = p.db.state_by_subvol(u).ok().flatten()?;
+                let path = p.state_path(&id);
+                path.exists().then_some(path)
+            };
+            let e = crate::recv::Expect { name: &args[1], uuid: &args[2], parent: &parent };
+            crate::recv::receive(&mut std::io::stdin(), &p.states_dir(), &e)?;
+            outln!(ctx, "received {}", args[1]);
+            Ok(0)
+        }
+        _ => Err(exit(128, "usage: layr debug changes <a> <b> | layr debug receive <name> <uuid> < stream")),
     }
 }

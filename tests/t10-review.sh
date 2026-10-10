@@ -18,24 +18,22 @@ eq "a link at .git/index does not redirect the write" "victim-index" "$(cat $T/v
 ok "HEAD is a regular file again" test -f .git/HEAD -a ! -L .git/HEAD
 ok "git works in the line" git log --oneline -1
 
-# 2. Manifest paths stay inside the backup folder.
+# 2. Manifest paths stay inside the backup folder. A changed manifest is checked in a copy.
 l backup -q $T/bk
-chain=$(ls -d $T/bk/*/chain-0001)
+cp -a $T/bk $T/bk-changed
+chain=$(ls -d $T/bk-changed/*/chain-0001)
 echo precious > $T/precious
-cp $chain/manifest.json $T/manifest.bak
 python3 - "$chain/manifest.json" "$T/precious" <<'PY'
 import json, sys
-m = json.load(open(sys.argv[1]))
-for i in m["items"]:
+d = json.load(open(sys.argv[1]))
+for i in d["manifest"]["items"]:
     if i["kind"] == "records":
         i["file"] = sys.argv[2]
-json.dump(m, open(sys.argv[1], "w"))
+json.dump(d, open(sys.argv[1], "w"))
 PY
-eq "a manifest with an absolute path is refused" "128" "$(l backup -q $T/bk >/dev/null 2>&1; echo $?)"
+has "a changed manifest is not continued" "starting chain 2" "$(l backup $T/bk-changed 2>&1)"
 eq "and the outside file stays" "precious" "$(cat $T/precious)"
-has "verify reports the bad name" "not a plain file name" "$(l backup verify $T/bk 2>&1)"
-sed -i 's|"file": *"[^"]*logs[^"]*"|"file":"../../precious"|' $chain/manifest.json 2>/dev/null
-cp $T/manifest.bak $chain/manifest.json
+has "verify reports the bad name" "not a plain file name" "$(l backup verify $T/bk-changed 2>&1)"
 
 # 3. Repeated backups without changes keep a complete chain.
 l backup -q $T/bk; l backup -q $T/bk; l backup -q $T/bk
