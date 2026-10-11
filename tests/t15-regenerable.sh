@@ -1,7 +1,7 @@
 #!/bin/bash
-# .layrattributes: the folders that it makes regenerable (gitignore patterns) become layers on
-# save --layers, if the ignore rules ignore them; a new line takes the nearest saved copy while
-# the attribute is still set; a folder whose files are in history never becomes a layer.
+# .layrattributes: the folders that it makes regenerable (gitignore patterns) become caches on
+# save --caches, if the ignore rules ignore them; a new line takes the nearest saved copy while
+# the attribute is still set; a folder whose files are in history never becomes a cache.
 . "$(dirname "$0")/lib.sh"
 
 chmod 755 $T $LAYR_ROOT
@@ -27,17 +27,17 @@ l --project r protect main --direct
 cd /tmp || exit 1
 tip() { in_line $1 $2 rev-parse HEAD; }
 
-# 1. A build in main makes plain folders; save --layers turns the named ones into layers. The
+# 1. A build in main makes plain folders; save --caches turns the named ones into caches. The
 #    ignored data/ folder that is not named changes too, but it is not a change of main.
 as layr-admin sh -c "cd $P/main && mkdir -p node_modules/pkg web/node_modules/x .venv/bin data && echo 1 > node_modules/pkg/index.js && echo 2 > web/node_modules/x/i.js && echo py > .venv/bin/python && echo d > data/d"
 mkdir -p $T/outside/node_modules && as layr-admin ln -s $T/outside $P/main/data/linked
 head_before=$(tip layr-admin main)
-ok "save --layers on main" in_line layr-admin main save -q --layers
+ok "save --caches on main" in_line layr-admin main save -q --caches
 eq "the head of main did not move" "$head_before" "$(tip layr-admin main)"
-eq "the named folders are layers, none behind a link" "$(printf '.venv\tlayer\nnode_modules\tlayer\nweb/node_modules\tlayer')" "$(in_line layr-admin main layer list)"
+eq "the named folders are caches, none behind a link" "$(printf '.venv\tcache\nnode_modules\tcache\nweb/node_modules\tcache')" "$(in_line layr-admin main cache list)"
 ok "a nested named folder is a subvolume" sh -c "btrfs subvolume show $P/main/web/node_modules >/dev/null"
 no "an ignored folder that is not named stays a folder" sh -c "btrfs subvolume show $P/main/data >/dev/null 2>&1"
-no "a named folder with files in history is no layer" sh -c "btrfs subvolume show $P/main/src >/dev/null 2>&1"
+no "a named folder with files in history is no cache" sh -c "btrfs subvolume show $P/main/src >/dev/null 2>&1"
 eq "its files stay in the state" "code" "$(in_line layr-admin main show HEAD:src/main.js)"
 
 # 2. A new line of another user starts warm from the protected main, and owns its copy.

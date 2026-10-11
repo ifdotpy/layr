@@ -1,6 +1,6 @@
 # layr
 
-Local version control on btrfs, for many users and many working folders on one machine. Git and GitHub stay the remote layer
+Local version control on btrfs, for many users and many working folders on one machine. Git and GitHub stay the remote
 (push, pull requests, CI). Everything local is btrfs: each line (branch and worktree in one) is a
 writable snapshot, each state (commit) is a read-only snapshot, change lists come from
 `btrfs send --no-data` in O(changes), and a merge copies files with reflinks.
@@ -53,7 +53,7 @@ service; root can run every command directly.
 | state     | read-only snapshot + signed record (id, parents, author, message, conflicts). A commit.    |
 | line      | writable snapshot at `projects/<p>/lines/<name>` with an owner and a head state             |
 | auto state| a snapshot of the working content: before every changing command, on `layr save`, and every 10 minutes when the content changed (the service) |
-| layer     | a folder of regenerable content (such as a Rust `target`) kept as a nested subvolume: outside states, diffs and backups. A new line starts with a reflink copy of the nearest ancestor's layer (another user's only from a protected line). Layers come only from `layr save --layers`; layr never keeps build output by itself. Layer folders: `layr layer add` and the folders that `.layrattributes` files mark `regenerable` |
+| cache     | a folder of regenerable content (such as a Rust `target`) kept as a nested subvolume: outside states, diffs and backups. A new line starts with a reflink copy of the nearest ancestor's cache (another user's only from a protected line). Caches come only from `layr save --caches`; layr never keeps build output by itself. Cache folders: `layr cache add` and the folders that `.layrattributes` files mark `regenerable` |
 | session   | a free-text label of the program that runs layr (`LAYR_SESSION`): shown in `op log` and used by `undo` to find "my last operation"; layr never decides permissions by it |
 | record    | one signed operation (Ed25519, UUIDv7 ids) in the project database; undo restores pointers |
 | role      | reader, writer, maintainer or admin of a user, a Unix group or everyone, per project and machine |
@@ -74,7 +74,7 @@ without a checkout.
 | remote (git)  | `remote`, `fetch`, `pull`, `push [--squash]`, `clone`                                         |
 | machines      | `sync -- <cmd>` / `serve-peer`, `machines [trust]`, `op export` / `op import` (JSONL), `backup` / `backup restore` / `backup verify` |
 | copies        | `export <folder>`                                                                              |
-| setup         | `init`, `projects`, `config`, `layer add|remove|list|repair`, `daemon`                        |
+| setup         | `init`, `projects`, `config`, `cache add|remove|list|repair`, `daemon`                        |
 
 Revisions: `HEAD`, `@`, `HEAD~2`, `HEAD^2`, line names, `line@machine`, tags, `origin/main`,
 state id prefixes, git commit ids of imported or pushed states, `stash@{n}`, `HEAD@{n}`
@@ -85,7 +85,7 @@ state id prefixes, git commit ids of imported or pushed states, `stash@{n}`, `HE
 1. A writer makes a line (`layr branch topic-1 main`), or a maintainer makes one for a user
    (`--owner bob`). Only the owner changes a line.
 2. The user works and commits in that folder. A program that drives the user can call
-   `layr save` at quiet points, and `layr layer repair` when a build tool made a layer folder
+   `layr save` at quiet points, and `layr cache repair` when a build tool made a cache folder
    again.
 3. Review takes an exact state: `layr diff main...topic-1`, `layr try <state> -- <tests>` runs the
    command in a temporary copy of that state and records the result.
@@ -184,7 +184,7 @@ working folders on the new machine. A restore trusts the machine that signed the
 backup made entirely by another machine identity restores as that machine's project.
 
 `layr sync -- ssh host layr serve-peer <p>` exchanges records both ways and sends missing states with `btrfs send -p <common state>`;
-`--auto --layers` also carries working content and build output for a live move.
+`--auto --caches` also carries working content and build output for a live move.
 
 ## Performance
 
@@ -216,4 +216,4 @@ snapshot folders.
 - `layrhub`: records, ids and stream transport are ready for it; the protocol is not.
 - Content checks of replicated states: a received state must be the subvolume its signed record
   names (`received_uuid`), but its file content is trusted together with the machine that made
-  it. Layer snapshots are checked the same way through the signed `save.layers` record.
+  it. Cache snapshots are checked the same way through the signed `save.caches` record.

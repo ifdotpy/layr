@@ -1,6 +1,6 @@
 #!/bin/bash
 # The remote bridge: clone, fetch, pull, push (one commit per task), a repeated push, a lost
-# response after the push, the .git layer for tools, a rejected push.
+# response after the push, the .git folder for tools, a rejected push.
 . "$(dirname "$0")/lib.sh"
 
 R=$T/remote.git; U=$T/up
@@ -13,9 +13,9 @@ l clone $R gp -q >/dev/null
 cd $LAYR_ROOT/projects/gp/lines/main || exit 1
 eq "clone: history from git" "upstream 1" "$(l log --format=%s)"
 eq "clone: clean status" "" "$(l status -s)"
-eq "git layer: clean for git" "" "$(git status --short)"
-eq "git layer: describe works" "v0.1" "$(git describe --tags)"
-eq "git layer: not part of states" "" "$(l show --name-only --format= HEAD | grep '^\.git/')"
+eq "git folder: clean for git" "" "$(git status --short)"
+eq "git folder: describe works" "v0.1" "$(git describe --tags)"
+eq "git folder: not part of states" "" "$(l show --name-only --format= HEAD | grep '^\.git/')"
 
 cd $U; echo four >> src/a.txt; git commit -qam "upstream 2"; git push -q
 cd $LAYR_ROOT/projects/gp/lines/main
@@ -35,8 +35,8 @@ c1=$(git -C $R rev-parse task-1)
 git -C $R update-ref -d refs/heads/task-1
 l push -q origin task-1
 eq "the same state gives the same commit" "$c1" "$(git -C $R rev-parse task-1)"
-eq "git layer after push: clean" "" "$(git status --short)"
-eq "git layer HEAD is the pushed commit" "$c1" "$(git rev-parse HEAD)"
+eq "git folder after push: clean" "" "$(git status --short)"
+eq "git folder HEAD is the pushed commit" "$c1" "$(git rev-parse HEAD)"
 
 # Lost response: the push reached the remote, the record of it did not.
 echo y >> local.txt; l commit -qam "second"

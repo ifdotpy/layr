@@ -112,7 +112,7 @@ def send(v):
     w.flush()
 hello = recv()
 send({"op": "hello", "project_id": hello["project_id"], "machine": "0190f0aa-0000-7000-8000-00000000f00d",
-      "public_key": "11" * 32, "seqs": {}, "present": [], "layers": []})
+      "public_key": "11" * 32, "seqs": {}, "present": [], "caches": []})
 while recv().get("more"):
     pass
 send({"op": "records", "lines": ["{\"r\": {}, \"s\": \"\"}"], "more": False})
