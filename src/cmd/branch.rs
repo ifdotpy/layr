@@ -90,6 +90,7 @@ pub fn branch(ctx: &Ctx, args: &[String]) -> Result<i32> {
             repo.commit_record(ctx, rec)?;
             crate::btrfs::delete_tree(&repo.working(&l))?;
             repo.drop_stage(&l)?;
+            repo.prune_bases(&l, None, 0)?;
             // The owner of a deleted line no longer reads the git objects.
             crate::gitbridge::sync_store_access(repo)?;
             outln!(ctx, "Deleted line {} (was {}).", l.name, ids::short(&l.head));
@@ -139,6 +140,16 @@ pub fn branch(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 },
             },
         };
+        // A line made from a line (its name, or the current line) shows the overlays of that line
+        // that its owner reads; a line made from a state shows none.
+        let source = match a.pos.get(1) {
+            Some(r) => repo.p.db.line_by_name(r)?.map(|l| repo.localize(l)).transpose()?,
+            None => match &current {
+                Some(c) => Some(c.clone()),
+                None => repo.p.db.line_by_name("main")?.map(|l| repo.localize(l)).transpose()?,
+            },
+        }
+        .filter(|l| l.head == start);
         let owner = owner_arg(ctx, a.get("--owner"))?;
         repo.require(ctx, "line.create").map_err(|e| exit(128, format!("fatal: {e}")))?;
         if owner != ctx.caller.uid {
@@ -148,7 +159,7 @@ pub fn branch(ctx: &Ctx, args: &[String]) -> Result<i32> {
             return Err(exit(128, "fatal: only root can create a line owned by root"));
         }
         let _lock = repo.p.lock()?;
-        let l = repo.create_line(ctx, name, &start, owner)?;
+        let l = repo.create_line_from(ctx, name, &start, owner, source.as_ref())?;
         if a.has("--path") {
             outln!(ctx, "{}", repo.working(&l).display());
         } else if !a.has("-q") {
