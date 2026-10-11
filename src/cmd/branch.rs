@@ -74,6 +74,24 @@ pub fn branch(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 }
             }
             let _lock = repo.p.lock()?;
+            // Automatic states leave overlay files out: uncommitted changes of them would be lost.
+            if !a.has("-f") && repo.is_stacked(&l)? && repo.working(&l).exists() {
+                let private = repo.private_paths(&l)?;
+                let (st, _scan, _it, _idx) = repo.status(&l)?;
+                let changed = st
+                    .staged
+                    .iter()
+                    .chain(st.unstaged.iter())
+                    .flat_map(|c| [Some(c.path.clone()), c.old_path.clone()])
+                    .flatten()
+                    .any(|p| private.contains(&p));
+                if changed || !repo.pending_moves(&l).is_empty() {
+                    return Err(exit(
+                        1,
+                        format!("error: line '{name}' has uncommitted changes of overlay files, which automatic states do not keep; commit them, or delete the line with -f"),
+                    ));
+                }
+            }
             let last = repo.working_state(ctx, &l, "before line delete")?;
             // Record first, then delete the folder: the content is in the saved state.
             let mut rec = Record::new("line.delete");
@@ -90,6 +108,7 @@ pub fn branch(ctx: &Ctx, args: &[String]) -> Result<i32> {
             repo.commit_record(ctx, rec)?;
             crate::btrfs::delete_tree(&repo.working(&l))?;
             repo.drop_stage(&l)?;
+            repo.set_pending_moves(&l, &Default::default())?;
             repo.prune_bases(&l, None, 0)?;
             // The owner of a deleted line no longer reads the git objects.
             crate::gitbridge::sync_store_access(repo)?;

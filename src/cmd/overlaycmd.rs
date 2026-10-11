@@ -1,7 +1,7 @@
 //! `layr overlay`: file trees with an owner, readers and their own history, shown in lines above
 //! the shared set (docs/overlays.md; the model is in src/overlay.rs).
 
-use super::{exit, here, work};
+use super::{exit, here};
 use crate::access::{parse_principal, show_principal, Policy, Role};
 use crate::args::{parse, Spec};
 use crate::btrfs;
@@ -18,7 +18,7 @@ const USAGE: &str = "usage: layr overlay create <name> [--readers <principal>,..
        layr overlay list
        layr overlay readers <name> [<principal>...]
        layr overlay use [--add|--remove] <name>... | --none
-       layr overlay move [--purge] <name> <path>...
+       layr overlay move [--purge] <name> <path>... | --cancel [<path>...]
        layr overlay log|show|diff|grep|ls-files|blame <name> [<args>]";
 
 pub fn overlay(ctx: &Ctx, args: &[String]) -> Result<i32> {
@@ -85,7 +85,7 @@ fn create(ctx: &Ctx, args: &[String]) -> Result<i32> {
             "access": access_map(owner, &readers),
             "overlay": {"project": repo.p.id, "name": name, "mode": mode.name()},
         });
-        let op = Project::create(&ctx.store, &pname, &ctx.actor(), config)?;
+        let op = Project::create_overlay(&ctx.store, &pname, &ctx.actor(), config)?;
         let orepo = Repo { p: op };
         // The first state of every overlay line: an empty tree.
         let id = ids::new_id();
@@ -259,8 +259,16 @@ fn change_stack(ctx: &Ctx, repo: &Repo, line: &crate::model::Line, layers: &[Lay
         return Ok(());
     }
     let (st, _scan, _it, _idx) = repo.status(line)?;
-    if !st.staged.is_empty() || !repo.pending_moves(line).is_empty() {
+    if !st.staged.is_empty() {
         return Err(exit(1, "error: the line has staged changes; commit them or unstage them ('layr restore --staged') first"));
+    }
+    for (p, o) in repo.pending_moves(line) {
+        if !layers.iter().any(|l| l.overlay == o) {
+            return Err(exit(
+                1,
+                format!("error: '{p}' is to move to overlay '{o}' at the next commit; commit first, or 'layr overlay move --cancel {p}'"),
+            ));
+        }
     }
     crate::overlay::set_layers(ctx, repo, line, layers, force, "overlay.use")?;
     Ok(())
@@ -269,11 +277,20 @@ fn change_stack(ctx: &Ctx, repo: &Repo, line: &crate::model::Line, layers: &[Lay
 /// Move files of the current line into an overlay: the next commit takes them out of the layer
 /// that has them and into the overlay's history.
 fn move_cmd(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let spec = Spec::new().flag("--purge").flag("-q|--quiet");
+    let spec = Spec::new().flag("--purge").flag("--cancel").flag("-q|--quiet");
     let a = parse(&spec, args)?;
     let h = here(ctx)?;
     let repo = &h.repo;
     let line = h.line()?.clone();
+    if a.has("--cancel") {
+        repo.authorize_line(ctx, &line, crate::repo::LineOp::Save)?;
+        let _lock = repo.p.lock()?;
+        let specs = h.specs(&a.rest())?;
+        let mut pending = repo.pending_moves(&line);
+        pending.retain(|p, _| !(specs.is_empty() || super::matches(&specs, p)));
+        repo.set_pending_moves(&line, &pending)?;
+        return Ok(0);
+    }
     if a.rest().len() < 2 {
         return Err(exit(128, USAGE));
     }
@@ -312,7 +329,6 @@ fn move_cmd(ctx: &Ctx, args: &[String]) -> Result<i32> {
             }
         }
     }
-    work::stage_paths(repo, &line, &scan.path, &paths)?;
     let mut pending = repo.pending_moves(&line);
     for p in &paths {
         pending.insert(p.clone(), name.clone());

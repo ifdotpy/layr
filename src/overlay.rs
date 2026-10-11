@@ -385,15 +385,16 @@ impl<'a> Repo<'a> {
         Ok(())
     }
 
-    /// The paths that `layr overlay move` sends to an overlay at the next commit (part of the
-    /// index: dropped with it).
+    /// The paths that `layr overlay move` sends to an overlay at the next commit. They stay until
+    /// that commit or `overlay move --cancel`, whatever happens to the index: until then the
+    /// automatic states leave them out.
     pub fn pending_moves(&self, line: &Line) -> BTreeMap<String, String> {
-        let f = self.p.meta_dir().join("stage").join(format!("{}.owners", line.id));
+        let f = self.p.meta_dir().join("stage").join(format!("{}.moves", line.id));
         std::fs::read(&f).ok().and_then(|d| serde_json::from_slice(&d).ok()).unwrap_or_default()
     }
 
     pub fn set_pending_moves(&self, line: &Line, m: &BTreeMap<String, String>) -> Result<()> {
-        let f = self.p.meta_dir().join("stage").join(format!("{}.owners", line.id));
+        let f = self.p.meta_dir().join("stage").join(format!("{}.moves", line.id));
         if m.is_empty() {
             let _ = std::fs::remove_file(&f);
             return Ok(());
@@ -768,6 +769,15 @@ pub fn commit_layers(
             st.author.name = n.clone();
             st.author.email = e.clone();
         }
+        // Conflicts of a merge of the overlay stay listed while the file has markers.
+        if let Some(prev) = orepo.p.db.state(&l.state)? {
+            let root = orepo.p.state_path(&st.id);
+            for c in &prev.conflicts {
+                if (c.kind == "content" || c.kind == "add/add") && crate::repo::conflict_open(&root, c)? {
+                    st.conflicts.push(c.clone());
+                }
+            }
+        }
         made.push((i, st, ol));
     }
     let head = repo.state(&line.head)?;
@@ -828,7 +838,10 @@ pub fn set_layers(ctx: &Ctx, repo: &Repo, line: &Line, layers: &[Layer], force: 
     let (st, _scan, _it, _idx) = repo.status(line)?;
     let view = repo.assemble(line, &line.head, layers)?;
     let wdir = repo.working(line);
-    let applied = repo.apply_delta(&old, &view.path, &wdir, repo.own(line), &st.local_paths(), force)?;
+    // An ignored file of the user (a key of its own) is a local file too: never overwritten.
+    let mut local = st.local_paths();
+    local.extend(st.ignored.iter().cloned());
+    let applied = repo.apply_delta(&old, &view.path, &wdir, repo.own(line), &local, force)?;
     let mut rec = Record::new(op);
     rec.data = serde_json::json!({"line": line.id, "stack": stack_data(&line.id, layers)});
     repo.commit_record(ctx, rec)?;

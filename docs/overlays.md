@@ -370,7 +370,7 @@ are in `tests/t16-overlays.sh`; the model is in `src/overlay.rs`.
 | `layr overlay list`                                         | The overlays of the project: mode, owner, readers. `*` marks those the current line shows. |
 | `layr overlay readers <name> [<principals>...]`             | Without principals: the readers. With them: sets the readers (the owner only).             |
 | `layr overlay use [<name>...]`                              | Without names: the stack of the current line. With names: the stack, bottom first; each overlay takes its newest state for this line. `--add` and `--remove` change one overlay and keep the others; `--none` clears the stack. The owner of the line only, who must read each overlay. The overlay files come into the folder or leave it; a local change in the way refuses (`-f` overwrites). |
-| `layr overlay move [--purge] <name> <paths>...`             | The files (a folder: all files below it) go to the overlay at the next commit. The line shows the overlay first if it did not. `--purge` deletes the automatic states of the line that hold the files. |
+| `layr overlay move [--purge] <name> <paths>...`             | The files (a folder: all files below it) go to the overlay at the next commit, which takes them from the working folder as they are then. The move waits for that commit whatever happens to the index; `--cancel [<paths>]` drops it. The line shows the overlay first if it did not. `--purge` deletes the automatic states of the line that hold the files. |
 | `layr overlay log\|show\|diff\|grep\|ls-files\|blame <name> [<args>]` | The command on the overlay's own history, as a reader: at the overlay line of the current line, else the caller's, else the owner's. `layr --project <project>%<name>` names an overlay too; it takes only reading commands. |
 
 The other commands work on the line as a whole, as in section 2: `status`, `diff`, `add`, `rm`,
@@ -391,7 +391,7 @@ The other commands work on the line as a whole, as in section 2: `status`, `diff
   head with the overlay files in place, the key a hash of the head and the stack. It is derived:
   made again when missing. `fsck` compares it with a new assembly.
 - No record of the project holds a path of an overlay. The paths of `overlay move` wait in
-  `meta/stage/<line id>.owners`, next to the index, until the commit.
+  `meta/stage/<line id>.moves` until the commit or `--cancel`.
 
 ### 9.3 Commit
 
@@ -407,7 +407,13 @@ The other commands work on the line as a whole, as in section 2: `status`, `diff
    (if the shared set changed) and the new stack. The committed tree becomes the base.
 
 A protected line takes a commit that changes only its overlays from its owner: the rule protects
-the shared set. A change of the shared set still needs the rule (`--direct`), as before.
+the shared set. A change of the shared set still needs the rule (`--direct`), as before. In the
+same way, the checks, approvals and path rules of a protected line apply to the shared set of a
+merge; its follow overlays change with the merge.
+
+Who writes an overlay: a reader changes it only in its own overlay lines. In shared mode that is
+the reader's `user-<uid>` line; in follow mode it is the line's own overlay line, which the line
+owner changes by commits and a user who merges into the line changes by the merge.
 
 ### 9.4 Who sees what
 
@@ -465,6 +471,14 @@ shared set only, which is safe but not a decision), 9 to 11 (folder overlays), 1
   shows no overlay files, and `fsck` reports the missing overlays), `--expect` of a stack
   (question 4: `--expect` names the shared state; the follow overlays are merged as they are).
 - `commit --amend` and `stash` refuse in a line with overlays.
+- `branch -d` and `-D` of a line with uncommitted changes of overlay files (or a pending move)
+  need `-f`: automatic states do not keep those changes.
+- `overlay use` and merges into a line with overlays never overwrite an ignored file of the user
+  (for example a key of its own at the path of an overlay file): they refuse, and `-f` overwrites.
+- A conflict of a merge of a follow overlay is listed by `status` and stays listed while the file
+  has markers; `restore --ours` and `--theirs` do not cover it.
+- `rm` or `rm --cached` of an overlay file takes it out of the overlay at the next commit; a file
+  left in the folder is then an ordinary untracked file.
 - `undo` of a commit moves the overlay lines back and keeps the changes in the folder. `undo` of
   a merge that changed follow overlays, and of `overlay use`, refuse.
 - Checks of protected lines (`try`, merge checks) run on the shared set only, without overlay

@@ -216,7 +216,9 @@ fn finish(
         Err(e) => return Err(fail(e)),
     };
     if let Some(o) = ovl.filter(|o| o.changed()) {
-        o.record(ctx, repo)?;
+        if let Err(e) = o.record(ctx, repo) {
+            return Err(fail(e));
+        }
         data["stack"] = crate::overlay::stack_data(&line.id, &layers);
         data["line"] = serde_json::json!(line.id);
         data["overlays"] = serde_json::json!(o.names());
@@ -358,7 +360,17 @@ fn run_line_checks(
         return Err(exit(1, format!("error: line '{}' moved while its checks ran; merge again", line.name)));
     }
     let (st, _scan, _it, _idx) = repo.status(&now)?;
-    Ok((lock, st.local_paths()))
+    Ok((lock, local_paths(repo, &now, &st)?))
+}
+
+/// Paths a merge must not overwrite: local changes, and in a line with overlays also ignored
+/// files (a user's own key where an overlay has one).
+fn local_paths(repo: &Repo, line: &Line, st: &crate::repo::Status) -> Result<std::collections::BTreeSet<String>> {
+    let mut local = st.local_paths();
+    if !repo.layers(line)?.is_empty() {
+        local.extend(st.ignored.iter().cloned());
+    }
+    Ok(local)
 }
 
 fn print_stat(ctx: &Ctx, repo: &Repo, from: &str, to: &str) -> Result<()> {
@@ -449,7 +461,7 @@ pub fn merge_rev(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str, a: &crate::args
     if !st.staged.is_empty() {
         return Err(exit(1, "error: you have staged changes; commit or stash them before merging."));
     }
-    let mut local = st.local_paths();
+    let mut local = local_paths(repo, &line, &st)?;
     let quiet = a.has("-q");
     let checks = rule.as_ref().map(|r| r.check.clone()).unwrap_or_default();
     // The follow overlays merge with the line: all of them or none.

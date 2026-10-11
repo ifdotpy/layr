@@ -219,7 +219,9 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
     let mut rec = Record::new("undo");
     rec.data = serde_json::json!({"undo": r.id, "op": r.op});
     // A commit that changed overlays: their lines move back and the line shows their earlier
-    // states again; the changes stay in the working folder, as for the shared set.
+    // states again; the changes stay in the working folder, as for the shared set. The overlay
+    // lines move only after every check of the undo passed.
+    let mut overlay_back: Vec<(String, Line, String)> = Vec::new();
     let changed: Vec<String> = r
         .data
         .get("overlays")
@@ -247,8 +249,7 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
             let info = repo.need_overlay(&l.overlay)?;
             if let Some(ol) = o.p.db.line_by_name(&Repo::overlay_line_name(&info, &line.id, line.owner))? {
                 if ol.head == l.state {
-                    let _ol = o.p.lock()?;
-                    crate::overlay::move_overlay_line(&o, ctx, "undo", &ol, &parent, Vec::new())?;
+                    overlay_back.push((l.overlay.clone(), ol, parent.clone()));
                 }
             }
             l.state = parent;
@@ -374,6 +375,11 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
                 working_after: ch.working_before.clone(),
             },
         );
+    }
+    for (name, ol, parent) in &overlay_back {
+        let o = repo.overlay_repo(name)?;
+        let _l = o.p.lock()?;
+        crate::overlay::move_overlay_line(&o, ctx, "undo", ol, parent, Vec::new())?;
     }
     let done = repo.commit_record(ctx, rec)?;
     crate::gitbridge::sync_store_access(repo)?;
@@ -878,11 +884,17 @@ fn fsck_overlays(ctx: &Ctx, repo: &Repo, repair: bool) -> Result<usize> {
         if !ok {
             continue;
         }
-        // The kept base against a new assembly of the same layers.
+        // The kept base against a new assembly of the same layers (a new line's base has empty
+        // cache folders where the state may have files).
         let base = repo.head_tree(&l)?;
         let fresh = repo.assemble(&l, &l.head, &layers)?;
-        let diff: Vec<String> =
-            changes::file_changes(&base, &fresh.path)?.into_iter().filter(|c| !skip_path(&c.path)).map(|c| c.path).collect();
+        let caches = repo.cache_paths(&repo.working(&l));
+        let in_cache = |p: &str| caches.iter().any(|c| p == c || p.starts_with(&format!("{c}/")));
+        let diff: Vec<String> = changes::file_changes(&base, &fresh.path)?
+            .into_iter()
+            .filter(|c| !skip_path(&c.path) && !in_cache(&c.path))
+            .map(|c| c.path)
+            .collect();
         if !diff.is_empty() {
             problems += 1;
             outln!(ctx, "line {}: its base differs from its layers in {} path(s)", l.name, diff.len());

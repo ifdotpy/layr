@@ -215,6 +215,19 @@ impl<'a> Project<'a> {
     }
 
     pub fn create(store: &'a Store, name: &str, actor: &Actor, config: serde_json::Value) -> Result<Project<'a>> {
+        check_name("project", name)?;
+        Self::create_in(store, name, actor, config)
+    }
+
+    /// The internal project of an overlay, `<project>%<overlay>` (`layr overlay create` only).
+    pub fn create_overlay(store: &'a Store, name: &str, actor: &Actor, config: serde_json::Value) -> Result<Project<'a>> {
+        if !name.contains('%') {
+            bail!("not an overlay name: {name}");
+        }
+        Self::create_in(store, name, actor, config)
+    }
+
+    fn create_in(store: &'a Store, name: &str, actor: &Actor, config: serde_json::Value) -> Result<Project<'a>> {
         let dir = store.project_dir(name)?;
         if db_file(&dir).exists() {
             bail!("project '{name}' already exists");
@@ -244,6 +257,7 @@ impl<'a> Project<'a> {
 
     /// Folders of a project without records (for a restore or a replica).
     pub fn create_empty(store: &'a Store, name: &str) -> Result<Project<'a>> {
+        check_name("project", name)?;
         let dir = store.project_dir(name)?;
         if db_file(&dir).exists() {
             bail!("project '{name}' already exists");

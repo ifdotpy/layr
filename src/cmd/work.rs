@@ -820,9 +820,15 @@ fn commit_stacked(
     };
     // The committed tree: the index, with `-a` the changed files too (staged into a copy, so a
     // refused commit leaves the index as it was). It becomes the line's base.
-    let new_tree = if all {
+    // The files of `overlay move` come from the working folder as they are now.
+    let pending = repo.pending_moves(line);
+    let new_tree = if all || !pending.is_empty() {
         let (st, scan, _it, _index) = repo.status(line)?;
-        let paths: BTreeSet<String> = st.unstaged.iter().map(|c| c.path.clone()).collect();
+        let mut paths: BTreeSet<String> = BTreeSet::new();
+        if all {
+            paths.extend(st.unstaged.iter().map(|c| c.path.clone()));
+        }
+        paths.extend(pending.keys().cloned());
         let work = repo.temp_work(&src)?;
         stage_into(repo, line, &work.path, &scan.path, &paths)?;
         repo.temp_snapshot(&work.path, true)?
@@ -834,6 +840,7 @@ fn commit_stacked(
         None => return nothing(h, line),
     };
     repo.drop_stage(line)?;
+    repo.set_pending_moves(line, &BTreeMap::new())?;
     if !quiet {
         let subject = message.lines().next().unwrap_or("");
         match &done.shared {

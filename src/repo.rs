@@ -609,7 +609,6 @@ impl<'a> Repo<'a> {
             btrfs::delete_tree(&p)?;
         }
         let _ = std::fs::remove_file(self.stage_base_file(line));
-        let _ = std::fs::remove_file(self.p.meta_dir().join("stage").join(format!("{}.owners", line.id)));
         Ok(())
     }
 
@@ -678,6 +677,18 @@ impl<'a> Repo<'a> {
         for c in &head_rec.conflicts {
             if conflict_open(scan, c)? {
                 st.conflicts.push(c.clone());
+            }
+        }
+        // Conflicts of a merge of the line's follow overlays.
+        if !self.p.is_overlay() {
+            for l in self.layers(line)? {
+                if let Some(rec) = self.overlay_repo(&l.overlay).ok().and_then(|o| o.p.db.state(&l.state).ok().flatten()) {
+                    for c in &rec.conflicts {
+                        if conflict_open(scan, c)? {
+                            st.conflicts.push(c.clone());
+                        }
+                    }
+                }
             }
         }
         Ok(st)

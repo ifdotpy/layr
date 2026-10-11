@@ -73,6 +73,7 @@ no "nor list its paths" in_line layr-o3 t3 overlay ls-files keychain
 no "nor through its project name" as layr-o3 $L --project sap%keychain --line user-$(id -u layr-o1) log
 no "an overlay takes reading commands only" as layr-o1 $L --project sap%keychain --line user-$(id -u layr-o1) access grant layr-o3 reader
 no "a non-reader cannot use the overlay" in_line layr-o3 t3 overlay use keychain
+no "a project name with % is refused" l init 'sap%keychain' --from $T/src -q
 # Automatic states of main leave the overlay files out.
 in_line layr-o1 main save -q --force
 no "main's automatic state lacks the file" in_line layr-o1 main show HEAD@{0}:.codex-keychain.envrc
@@ -176,6 +177,10 @@ ok "and can use the overlay" in_line layr-o3 g3 overlay use zulip
 eq "the new reader's line gets the owner's key" "ZULIP_APEIRO_SHOWROOM_API_KEY=$KEY" "$(sh_in layr-o3 g3 cat .zulip.env)"
 ok "a line can stop showing it" in_line layr-o3 g3 overlay use --none
 no "the file leaves the folder" test -e $P/g3/.zulip.env
+sh_in layr-o3 g3 "echo MY_OWN_KEY=1 > .zulip.env"
+has "use does not overwrite a local ignored file" "would be overwritten" "$(in_line layr-o3 g3 overlay use --add zulip 2>&1)"
+eq "the user's file stays" "MY_OWN_KEY=1" "$(sh_in layr-o3 g3 cat .zulip.env)"
+sh_in layr-o3 g3 "rm .zulip.env"
 
 # 8. Follow mode: the overlay line branches with the line; a merge of lines merges it.
 in_line layr-o1 main branch -q f1 main
@@ -201,6 +206,14 @@ ok "a merge of diverged overlay lines" in_line layr-o1 f1 merge -q f2
 eq "both changes are in" "top|note 1|note 2|note 3" "$(sh_in layr-o1 f1 cat private/notes.md | paste -sd'|')"
 eq "and in the overlay's history" "top|note 1|note 2|note 3" "$(in_line layr-o1 f1 overlay show notes HEAD:private/notes.md | paste -sd'|')"
 eq "f1 is clean after the merge" "" "$(in_line layr-o1 f1 status --porcelain)"
+# A conflict in a follow overlay: listed by status, resolved by a commit.
+sh_in layr-o1 f1 "sed -i 's/^note 1\$/note 1 (f1)/' private/notes.md && $L commit -qam 'f1 edit'"
+sh_in layr-o1 f2 "sed -i 's/^note 1\$/note 1 (f2)/' private/notes.md && $L commit -qam 'f2 edit'"
+eq "a conflicting overlay merge ends with 1" "1" "$(in_line layr-o1 f1 merge -q f2 >/dev/null 2>&1; echo $?)"
+eq "status lists the conflict" "UU private/notes.md" "$(in_line layr-o1 f1 status --porcelain)"
+sh_in layr-o1 f1 "printf 'top\nnote 1 (both)\nnote 2\nnote 3\n' > private/notes.md && $L commit -qam resolved"
+eq "the resolution clears it" "" "$(in_line layr-o1 f1 status --porcelain)"
+eq "the overlay has the resolution" "note 1 (both)" "$(in_line layr-o1 f1 overlay show notes HEAD:private/notes.md | sed -n 2p)"
 # A merge of a line with a follow overlay: the target shows it, and the merger reads it.
 in_line layr-o1 main branch -q m1 main
 has "a merge needs the overlay in the target" "does not use" "$(in_line layr-o1 m1 merge f2 2>&1)"
@@ -212,6 +225,27 @@ sh_in layr-o1 f1 "echo 'note 4' >> private/notes.md && $L commit -qam 'note 4'"
 ok "undo the commit" in_line layr-o1 f1 undo
 eq "the change is in the folder again" " M private/notes.md" "$(in_line layr-o1 f1 status --porcelain)"
 eq "the overlay is back" "note 3" "$(in_line layr-o1 f1 overlay show notes HEAD:private/notes.md | tail -1)"
+# A refused undo leaves the overlay lines as they were.
+sh_in layr-o1 f1 "$L commit -qam 'note 4 again' && echo s >> s2.txt && $L commit -qam 'shared after'"
+id=$(in_line layr-o1 f1 op log -n 2 | awk 'NR==2{print $1}')
+has "an undo of an older commit is refused" "changed after this operation" "$(in_line layr-o1 f1 undo $id 2>&1)"
+eq "and the overlay keeps its state" "note 4" "$(in_line layr-o1 f1 overlay show notes HEAD:private/notes.md | tail -1)"
+ok "the line still commits to the overlay" sh_in layr-o1 f1 "echo 'note 5' >> private/notes.md && $L commit -qam 'note 5'"
+# A move waits for the next commit, whatever happens to the index.
+sh_in layr-o1 f1 "echo draft > private/draft.md"
+in_line layr-o1 f1 overlay move -q notes private/draft.md
+ok "reset" in_line layr-o1 f1 reset -q
+has "the move stays after a reset" "notes: private/draft.md" "$(in_line layr-o1 f1 status)"
+in_line layr-o1 f1 save -q
+no "the automatic state leaves the file out" in_line layr-o1 f1 show HEAD@{0}:private/draft.md
+ok "commit" in_line layr-o1 f1 commit -qm draft
+ok "the file is in the overlay" in_line layr-o1 f1 overlay show notes HEAD:private/draft.md
+no "not in the shared set" in_line layr-o1 f1 show HEAD:private/draft.md
+# A line with uncommitted changes of overlay files is deleted only with -f.
+in_line layr-o1 f1 branch -q f3 f1
+sh_in layr-o1 f3 "echo x >> private/notes.md"
+has "a delete refuses" "uncommitted changes of overlay files" "$(in_line layr-o1 f1 branch -D f3 2>&1)"
+ok "with -f it deletes" in_line layr-o1 f1 branch -D -f f3
 
 # 10. A file of the shared set moves into an overlay: the next commit takes it out of the shared
 # set (earlier states keep it). Automatic states that held it can go with --purge.
