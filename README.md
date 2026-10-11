@@ -211,6 +211,7 @@ snapshot folders.
 
 ## Not in this version
 
+- Overlays: file trees with their own readers and history, stacked on a line (design and measurements in `docs/overlays.md`).
 - APFS backend (macOS).
 - Structured (AST) merge; format drivers can be plugged in through `merge.driver.<name>`.
 - `layrhub`: records, ids and stream transport are ready for it; the protocol is not.
