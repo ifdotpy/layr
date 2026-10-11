@@ -1,7 +1,7 @@
 #!/bin/bash
-# .regenerable: the folders it names (gitignore patterns) become layers on save --layers, if the
-# ignore rules ignore them; a new line takes the nearest saved copy while the file still names
-# the folder; a folder whose files are in history never becomes a layer.
+# .layrattributes: the folders that it makes regenerable (gitignore patterns) become layers on
+# save --layers, if the ignore rules ignore them; a new line takes the nearest saved copy while
+# the attribute is still set; a folder whose files are in history never becomes a layer.
 . "$(dirname "$0")/lib.sh"
 
 chmod 755 $T $LAYR_ROOT
@@ -19,7 +19,7 @@ S=$T/src
 rm -rf $S && mkdir -p $S/src $S/web
 echo code > $S/src/main.js && echo web > $S/web/app.js
 printf 'node_modules/\n.venv/\ndata/\n' > $S/.gitignore
-printf 'node_modules\n.venv\nsrc\n' > $S/.regenerable
+printf '# build output\nnode_modules regenerable\n.venv regenerable\nsrc regenerable\n' > $S/.layrattributes
 l init r --from $S --owner layr-admin -q >/dev/null
 P=$LAYR_ROOT/projects/r/lines
 l --project r access grant layr-u1 writer
@@ -52,8 +52,8 @@ as layr-admin sh -c "cd $P/main && echo two >> src/main.js && $L commit -qam two
 as layr-u1 $L --project r branch -q a2 main
 eq "a line from a later head starts warm" "1" "$(cat $P/a2/node_modules/pkg/index.js)"
 
-# 4. When .regenerable no longer names a folder, a new line does not take it.
-as layr-admin sh -c "cd $P/main && printf 'node_modules\n' > .regenerable && $L commit -qam narrower"
+# 4. When .layrattributes unsets the attribute of a folder, a new line does not take it.
+as layr-admin sh -c "cd $P/main && printf '*/ regenerable\n.venv -regenerable\n' > .layrattributes && $L commit -qam narrower"
 as layr-u1 $L --project r branch -q a3 main
 eq "the still named folder comes" "1" "$(cat $P/a3/node_modules/pkg/index.js)"
 no "a folder that is no longer named does not" test -e $P/a3/.venv/bin/python
