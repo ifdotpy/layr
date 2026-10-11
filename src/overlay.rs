@@ -601,9 +601,10 @@ impl<'a> Repo<'a> {
     pub fn inherit_layers(&self, ctx: &Ctx, source: &Line, line_id: &str, owner: u32) -> Result<Vec<Layer>> {
         let mut out = Vec::new();
         for l in self.layers(source)? {
+            // An overlay that is not on this machine (a restored project) is left out.
             let info = match self.overlay_info(&l.overlay)? {
-                Some(i) => i,
-                None => continue,
+                Some(i) if self.layer_root(&l).is_some() => i,
+                _ => continue,
             };
             if !self.owner_reads(&l.overlay, owner)? {
                 continue;

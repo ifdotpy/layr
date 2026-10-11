@@ -109,6 +109,7 @@ ok "the backup restores" env LAYR_ROOT=$T/b/store $LAYR backup restore -q $T/bk
 no "the restored main has no private file" test -e $T/b/store/projects/sap/lines/main/.codex-keychain.envrc
 eq "and is clean" "" "$(env LAYR_ROOT=$T/b/store $LAYR --project sap --line main status --porcelain)"
 eq "the restored store has no trace of the secret" "" "$(grep -rla $SECRET $T/b/store 2>/dev/null)"
+ok "a new line from the restored main" env LAYR_ROOT=$T/b/store $LAYR --project sap branch -q rb main
 umount $T/b
 
 # 5. The owner's other lines show it (shared mode: one overlay line for all lines of a user).
