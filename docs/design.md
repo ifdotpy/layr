@@ -144,9 +144,15 @@ is valid for a state, so it never decides that by itself:
 - A new line (and the temporary copy of a check) takes for each layer the snapshot of its start
   state, or else of the nearest ancestor state on this machine that has one. The copy shares
   all blocks; only its files change owner. The build tool then decides what to rebuild.
+- Which folders are layers: the paths of `layr layer add`, and the folders that `.regenerable`
+  files name. A `.regenerable` file has the form of a `.gitignore` and applies to its folder; it
+  is part of the project, so on a protected line it changes only through review. A named folder
+  is a layer only if the ignore rules ignore it: a layer must not hide files that are in history.
+  A new line takes a named folder only warm, while its `.regenerable` still names it.
 - Layers come only from `layr save --layers`, the explicit choice of someone who may save the
-  line. On a protected line with no changes since its head, it gives the layers to the head, so
-  the next lines from that head start warm; else to a new automatic state.
+  line. It first turns the named folders into layers, so their files stay out of the state. On a
+  protected line with no changes since its head (ignored files do not count), it gives the layers
+  to the head, so the next lines from that head start warm; else to a new automatic state.
 - A layer made by another user goes to a line only if it was saved on a protected line, because
   a layer holds code that review does not see. Other layers go only to lines of the user who
   made them.
