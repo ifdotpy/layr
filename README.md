@@ -58,6 +58,7 @@ service; root can run every command directly.
 | record    | one signed operation (Ed25519, UUIDv7 ids) in the project database; undo restores pointers |
 | role      | reader, writer, maintainer or admin of a user, a Unix group or everyone, per project and machine |
 | protected line | a line (pattern) that changes only through merges of reviewed states, after its checks pass on the merge result |
+| overlay   | files with their own owner, readers and history, shown in the lines of their readers above the shared set; `push`, exports, backups and every state of the project hold the shared set only (`docs/overlays.md`) |
 
 States are folders: `layr show <state>:<path>` and `layr grep <pattern> <state>` read them
 without a checkout.
@@ -74,6 +75,7 @@ without a checkout.
 | remote (git)  | `remote`, `fetch`, `pull`, `push [--squash]`, `clone`                                         |
 | machines      | `sync -- <cmd>` / `serve-peer`, `machines [trust]`, `op export` / `op import` (JSONL), `backup` / `backup restore` / `backup verify` |
 | copies        | `export <folder>`                                                                              |
+| overlays      | `overlay create <name> [--readers <principals>] [--mode shared\|follow]`, `overlay list`, `overlay readers`, `overlay use [--add\|--remove\|--none] <names>`, `overlay move [--purge] <name> <paths>`, `overlay log\|show\|diff\|grep\|ls-files <name>` |
 | setup         | `init`, `projects`, `config`, `cache add|remove|list|repair`, `daemon`                        |
 
 Revisions: `HEAD`, `@`, `HEAD~2`, `HEAD^2`, line names, `line@machine`, tags, `origin/main`,
@@ -131,6 +133,8 @@ $LAYR_ROOT/projects/<p>/
   git/                                 git object store for the remote bridge
   meta/db/layr.sqlite                  signed records + derived tables (own subvolume, 0700)
   meta/stage, meta/scan, meta/work     staging lines and temporary snapshots
+  meta/base/<line>@<key>               full tree of a line with overlays (derived)
+  meta/overlays/<overlay>/             an overlay: the internal project <p>%<overlay>, same layout
 ```
 
 An operation writes its snapshots first, then one SQLite transaction (synchronous=FULL) with
@@ -149,6 +153,9 @@ its record and the derived rows. After a crash only a snapshot without a record 
   line) run with that user's uid, groups and a clean environment: a command never runs as
   another user. Paths named by a user outside the store (export, backups, patch files) are accessed with the user's file permissions, and so
   is a file such a command leaves for the service (the result of a merge driver).
+- Overlays (docs/overlays.md): an overlay is read only through its own project, by its readers;
+  the working content of a line with overlays is open to its owner and to readers of all its
+  overlays; automatic states leave overlay files out, so no state of the project holds one.
 - Permissions (docs/design.md, section 3): roles per project and machine (`layr access`), deny
   rules that win over any role, owners of lines, and protection rules of line patterns
   (`layr protect`). A new project has one admin (its creator) and a protected `main`. Stores of
@@ -211,7 +218,8 @@ snapshot folders.
 
 ## Not in this version
 
-- Overlays: file trees with their own readers and history, stacked on a line (design and measurements in `docs/overlays.md`).
+- Overlays beyond the first slice: routing patterns, ephemeral mode, folder overlays, encrypted
+  backups and replication of overlays (`docs/overlays.md`, section 9.7).
 - APFS backend (macOS).
 - Structured (AST) merge; format drivers can be plugged in through `merge.driver.<name>`.
 - `layrhub`: records, ids and stream transport are ready for it; the protocol is not.

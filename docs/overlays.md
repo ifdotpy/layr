@@ -1,6 +1,8 @@
 # Overlays
 
-Status: design, not built. The numbers come from experiments on 2026-10-11 (section 5).
+Status: the first slice is built (section 9): file overlays in shared and follow mode. Sections 1
+to 8 are the design and the experiments of 2026-10-11; section 9 says what the slice does, where
+it differs from the design, and what is left.
 
 An overlay is a file tree with an owner, readers and its own history. A line shows several
 overlays as one folder. With overlays, a project keeps files in history that not every reader
@@ -58,7 +60,7 @@ In this file a **layer** is the shared set or an overlay of a stack.
 
 The other commands keep their meaning on the line as a whole: `status`, `diff`, `add`,
 `commit`, `log`, `show`, `merge`. Section 7 lists what is not decided yet, for example the
-place where a mode is set.
+place where a mode is set. Section 9.1 has the commands as built (`route` is not built).
 
 ## 3. How it maps to btrfs
 
@@ -311,6 +313,10 @@ extent (`filefrag -v`).
 
 ## 8. What to build first
 
+Steps 1 and 2 are built for file overlays, with assembly (step 3) and shared mode (step 4) as
+the two real uses need them (section 9). Routing patterns, `blame` and `try` with overlays, the
+stack record of question 4, ephemeral mode, encryption and folder overlays are not built.
+
 1. **File overlays in follow mode, with the apply commit.** Records: an overlay (owner,
    readers, patterns), the stack of a line, the stack head. Commands: `overlay create`, `route`,
    `move`, `use`. Reader checks on `show`, `diff`, `grep`, `blame`, `log`, `try`, `export`.
@@ -350,3 +356,165 @@ umount /root/ovl-bench/mnt && rm -rf /root/ovl-bench          # clean up
 ```
 
 The two folder overlays of 5.6 were folders of the tree with 185 and 8,117 files.
+
+## 9. Built: the first slice
+
+Built on 2026-10-11: file overlays (any paths of the tree) in shared and follow mode. The tests
+are in `tests/t16-overlays.sh`; the model is in `src/overlay.rs`.
+
+### 9.1 Commands
+
+| Command                                                     | Effect                                                                                    |
+| ----------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `layr overlay create <name> [--readers <principals>] [--mode shared\|follow]` | Makes an overlay. The caller is its owner and reads it. Readers are principals as in `layr access`: `alice`, `@group`, `uid:1001`, a comma list. The default mode is `shared`. Needs the writer role. |
+| `layr overlay list`                                         | The overlays of the project: mode, owner, readers. `*` marks those the current line shows. |
+| `layr overlay readers <name> [<principals>...]`             | Without principals: the readers. With them: sets the readers (the owner only).             |
+| `layr overlay use [<name>...]`                              | Without names: the stack of the current line. With names: the stack, bottom first; each overlay takes its newest state for this line. `--add` and `--remove` change one overlay and keep the others; `--none` clears the stack. The owner of the line only, who must read each overlay. The overlay files come into the folder or leave it; a local change in the way refuses (`-f` overwrites). |
+| `layr overlay move [--purge] <name> <paths>...`             | The files (a folder: all files below it) go to the overlay at the next commit. The line shows the overlay first if it did not. `--purge` deletes the automatic states of the line that hold the files. |
+| `layr overlay log\|show\|diff\|grep\|ls-files\|blame <name> [<args>]` | The command on the overlay's own history, as a reader: at the overlay line of the current line, else the caller's, else the owner's. `layr --project <project>%<name>` names an overlay too; it takes only reading commands. |
+
+The other commands work on the line as a whole, as in section 2: `status`, `diff`, `add`, `rm`,
+`mv`, `restore`, `reset`, `commit`, `merge`, `log` of the line's shared history.
+
+### 9.2 Storage and records
+
+- An overlay is the internal project `<project>%<overlay>` in `projects/<project>/meta/overlays/<overlay>/`
+  (inside the private `meta` folder): its own states, signed records and access policy. Its owner
+  is its admin; its readers have the reader role. Owning a line of an overlay does not give the
+  read right, unlike in a project.
+- Its lines have no working folders: `user-<uid>` in shared mode (one per user) and
+  `line-<line id>` in follow mode (one per line). The first state is empty.
+- The project records `overlay.<name>` (owner, mode, first state) and, for each line,
+  `stack.<line id>`: the overlays the line shows and the state of each. A record that changes a
+  stack carries `stack` in its data; `reindex` rebuilds the stacks from the records.
+- The base of a line with overlays is `meta/base/<line id>@<key>`: a read-only snapshot of the
+  head with the overlay files in place, the key a hash of the head and the stack. It is derived:
+  made again when missing. `fsck` compares it with a new assembly.
+- No record of the project holds a path of an overlay. The paths of `overlay move` wait in
+  `meta/stage/<line id>.owners`, next to the index, until the commit.
+
+### 9.3 Commit
+
+1. The committed tree is the index (with `-a`, the changed files too; staged into a copy, so a
+   refused commit leaves the index as it was).
+2. The change list from the base to that tree is split by layer. A change goes to the highest
+   layer that has the path. A new path goes to the shared set, unless `overlay move` named it. A
+   moved file (by inode, or by content as git finds renames) stays in the layer of its old path.
+   A delete goes to every layer that has the path.
+3. Each changed layer gets its next state from its previous one: a writable snapshot, its
+   changes as reflink copies, read-only (the apply method of section 3.2).
+4. The records of the overlays first, then one record of the project with the new shared state
+   (if the shared set changed) and the new stack. The committed tree becomes the base.
+
+A protected line takes a commit that changes only its overlays from its owner: the rule protects
+the shared set. A change of the shared set still needs the rule (`--direct`), as before.
+
+### 9.4 Who sees what
+
+- Overlay content is read only through the overlay's project, so its policy decides: `overlay log`,
+  `show`, `diff`, `grep`, `ls-files` and `--project <p>%<o>` refuse a user who does not read it, and
+  such a user cannot list its paths.
+- The working content of a line with overlays (`status`, `diff`, `ls-files`, `grep`, `blame`,
+  `show :<path>`) is open to its owner and to users who read all of its overlays.
+- A new line from a line shows the overlays of the source that its owner reads; other overlays
+  are left out, so the folder of a non-reader never gets their files. A line made from a state
+  shows none.
+- Automatic states of a line with overlays leave the overlay files out, the paths of pending
+  moves, and copies of overlay files under other names (moved, or the same content). So no state
+  of the project holds an overlay file, and `push`, `export`, `backup`, `sync` and `show`/`grep`
+  of any state give the shared set only.
+- Automatic states made before a file moved into an overlay hold it (an automatic state holds the
+  whole working folder, ignored files too), and every reader of the project reads them. `overlay
+  move --purge` deletes those states of the line. States of the shared set that held a file keep
+  it: layr does not rewrite history, and a pushed commit stays on the remote (`overlay move`
+  says so).
+
+### 9.5 Merges
+
+- Shared mode: an overlay is not part of a line's history. A merge changes the shared set only;
+  the overlay files of the target stay in place.
+- Follow mode: a merge of a line merges its follow overlays into those of the target, in the same
+  operation: a fast-forward or a three-way merge in the overlay (conflicts as in the shared set).
+  The user who merges must read each of them, and the target must show them; otherwise the merge
+  is refused. A merge that changes only the overlays makes no shared state.
+- `cherry-pick`, `revert` and `rebase` take the shared set only. `merge <state>` (not a line
+  name) merges the shared set only.
+
+### 9.6 Answers to the open questions (for this slice)
+
+1. A delete goes to every layer that has the path.
+2. A moved file stays in its layer (the owner follows the file).
+3. `overlay move` wins over ignore rules: an ignored file can move into an overlay. Routing
+   patterns are not built.
+5. Automatic states leave the overlay files out (one more step per save in a line with overlays:
+   a writable snapshot, the deletes, read-only).
+7. Shared mode: a commit that changes an overlay is refused when the overlay line moved since the
+   line took its state (another line of the user committed). `overlay use <names>` takes the
+   newest state, then the commit goes through.
+8. The mode is an option of `overlay create`. A line cannot override it.
+12. `overlay move` of a file of the shared set notes that earlier states keep it, and the remote
+    too when the project pushed.
+
+Not decided by the slice: 4 (the stack record), 6 (`diff main...topic` for non-readers shows the
+shared set only, which is safe but not a decision), 9 to 11 (folder overlays), 13 to 15.
+
+### 9.7 Limits and what is left
+
+- Not built: routing patterns (`overlay route`), ephemeral mode, folder overlays, encrypted
+  backups, replication of overlays (`sync` and `backup` carry the shared set; a restored project
+  shows no overlay files, and `fsck` reports the missing overlays), `--expect` of a stack
+  (question 4: `--expect` names the shared state; the follow overlays are merged as they are).
+- `commit --amend` and `stash` refuse in a line with overlays.
+- `undo` of a commit moves the overlay lines back and keeps the changes in the folder. `undo` of
+  a merge that changed follow overlays, and of `overlay use`, refuse.
+- Checks of protected lines (`try`, merge checks) run on the shared set only, without overlay
+  files.
+- In shared mode each reader has an own overlay line. A new reader starts from the state of the
+  line it branches from (or the owner's); a later change by the owner does not reach other users'
+  lines. A key that changes is changed in each reader's lines.
+- Overlay files have no automatic states: their history is their commits. Automatic states also
+  leave out a file that moved from an overlay path and a new file with the same content as an
+  overlay file (a copy, an editor's backup); a changed copy under another name (a swap file) goes
+  in.
+- `export` of the working content (no revision) and `try` give the shared set only.
+- If the owner of a line stops reading an overlay of its stack, the line refuses commits until
+  `overlay use --remove` takes the overlay out; its files stay in the folder as untracked files.
+
+### 9.8 Measured
+
+`docs/overlays-bench/commit.sh`: a release build in an OrbStack Linux VM, btrfs on a loop file,
+a tree of 10,000 small files, one line with the overlay and one without for each overlay size,
+5 runs each, `btrfs filesystem sync` before each commit. A commit of 10 changed files, 5 in the
+shared set and 5 in the overlay:
+
+| Overlay size | without overlays (median, ms) | with the overlay (median, ms) |
+| ------------ | ----------------------------: | ----------------------------: |
+| 10 files     | 51                            | 99 (54 to 114)                |
+| 1,000 files  | 32                            | 66 (64 to 67)                 |
+
+Each changed layer state took 7 to 12 ms (a writable snapshot, 5 reflink copies, read-only), as
+section 5.4 measured. Other steps with the 1,000 file overlay: `status` of a clean line 16 ms
+(8 without), `save` 34 ms (15 without), a new line from the line with the overlay 44 ms (20
+without; the assembly copies the overlay files). The debug build in `tests/t16-overlays.sh`
+prints its own numbers.
+
+### 9.9 Example: a private loader and a project key
+
+The owner of `main` in project SAP has `.codex-keychain.envrc` (a local loader for that user only)
+and `.zulip.env` (a project key, ignored by `.gitignore`, for the users of the group `sapdev`) in
+the folder of `main`. The shared `.envrc` loads the key with `dotenv_if_exists ./.zulip.env`. In
+the folder of `main`:
+
+```sh
+layr overlay create keychain                     # readers: the owner only
+layr overlay move --purge keychain .codex-keychain.envrc
+layr commit -m "Keep the keychain loader in an overlay"
+layr overlay create zulip --readers @sapdev      # or --readers alice,bob
+layr overlay move --purge zulip .zulip.env
+layr commit -m "Keep the Zulip key in an overlay"
+```
+
+Both commits change only overlays, so a protected `main` takes them. A new line from `main` shows
+the overlays its owner reads: a member of `sapdev` gets `.zulip.env`, other users get neither file.
+A reader adds an overlay to an older line with `layr overlay use --add zulip` in that line.
+

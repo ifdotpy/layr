@@ -181,7 +181,8 @@ enough to save, is the choice of the program on top.
 
 ## 7. Planned
 
-- Overlays: file trees with their own owner, readers and history, stacked on a line (`docs/overlays.md`).
+- Overlays: file trees with their own owner, readers and history, stacked on a line. The first
+  slice (file overlays, shared and follow mode) is built; the rest is planned (`docs/overlays.md`).
 - A dry-run mode for rule changes that reports what would be refused (GitHub rule evaluation).
 
 ## 8. Decided against
