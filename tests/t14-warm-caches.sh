@@ -1,7 +1,8 @@
 #!/bin/bash
 # Warm caches: a new line takes the build output of its nearest ancestor that has one; build
 # output of another user only from a protected line; caches come only from an explicit
-# save --caches, never from a check; gc keeps the caches of line heads and of the newest states.
+# save --caches, never from a check; gc keeps the caches of line heads and of the newest states;
+# each save --caches on a state adds to the caches that earlier saves gave it.
 . "$(dirname "$0")/lib.sh"
 
 chmod 755 $T $LAYR_ROOT
@@ -78,4 +79,41 @@ n_after=$(ls $LAYR_ROOT/projects/w/states | grep -c @)
 ok "gc deletes the caches of old states" test "$n_after" -lt "$n_before"
 as layr-u1 $L --project w branch -q a4 main
 eq "the head of main keeps its cache" "1" "$(cat $P/a4/target/count)"
+
+# 8. Each save --caches on the same head keeps the caches that earlier saves gave it: here a
+#    second cache folder, saved after the first.
+# db caches <state>: "<path>=<subvolume UUID>" of each cache of the state in the database.
+# db drop <state> <path>: forget one, as an older layr did (the newest record replaced the list).
+db() {
+    python3 - "$LAYR_ROOT/projects/w/meta/db/layr.sqlite" "$@" <<'PY'
+import json, sqlite3, sys
+c = sqlite3.connect(sys.argv[1])
+op, display = sys.argv[2], sys.argv[3]
+sid, raw = c.execute("SELECT id, rec FROM states WHERE display=?", (display,)).fetchone()
+v = json.loads(raw)
+if op == "id":
+    print(sid)
+elif op == "drop":
+    v["cache_uuids"].pop(v["caches"].pop(sys.argv[4], None), None)
+    c.execute("UPDATE states SET rec=? WHERE id=?", (json.dumps(v), sid))
+    c.commit()
+else:
+    print(" ".join(f"{p}={v['cache_uuids'][s]}" for p, s in sorted(v.get("caches", {}).items())))
+PY
+}
+snap_uuid() { btrfs subvolume show "$LAYR_ROOT/projects/w/states/$1" | awk '$1 == "UUID:" {print $2}'; }
+l --project w cache add gen
+as layr-admin sh -c "mkdir $P/main/gen && echo g > $P/main/gen/out"
+head=$(tip layr-admin main)
+id=$(db id $head)
+target_uuid=$(snap_uuid $id@target)
+ok "a second save --caches on the same head" in_line layr-admin main save -q --caches
+eq "the head of main did not move" "$head" "$(tip layr-admin main)"
+eq "the head names both caches, the earlier with its first snapshot" "gen=$(snap_uuid $id@gen) target=$target_uuid" "$(db caches $head)"
+db drop $head target
+ok "save --caches on a head that an older layr left with fewer caches" in_line layr-admin main save -q --caches
+eq "names the lost cache again" "gen=$(snap_uuid $id@gen) target=$target_uuid" "$(db caches $head)"
+as layr-u1 $L --project w branch -q a5 main
+eq "a new line from that head takes the earlier cache" "1" "$(cat $P/a5/target/count)"
+eq "and the later one" "g" "$(cat $P/a5/gen/out)"
 finish

@@ -154,7 +154,9 @@ is valid for a state, so it never decides that by itself:
 - Caches come only from `layr save --caches`, the explicit choice of someone who may save the
   line. It first turns the regenerable folders into caches, so their files stay out of the state. On a
   protected line with no changes since its head (ignored files do not count), it gives the caches
-  to the head, so the next lines from that head start warm; else to a new automatic state.
+  to the head, so the next lines from that head start warm; else to a new automatic state. A
+  later `save --caches` on the same state adds its caches to the ones that earlier saves gave
+  it; a cache that the state has keeps its first snapshot.
 - A cache made by another user goes to a line only if it was saved on a protected line, because
   a cache holds code that review does not see. Other caches go only to lines of the user who
   made them.

@@ -67,6 +67,8 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
 
 /// Snapshot the caches at `paths` of a working folder (`w`) as the caches of `state` and record
 /// them (`save.caches`, with their subvolume UUIDs). `shared`: they may go to other users' lines.
+/// A cache that an earlier save already gave the state keeps its snapshot and is recorded again,
+/// so the record names every cache of `paths` that the state has.
 pub fn record_caches(
     ctx: &Ctx,
     repo: &Repo,
@@ -75,31 +77,42 @@ pub fn record_caches(
     paths: &[String],
     shared: bool,
 ) -> Result<BTreeMap<String, String>> {
-    let mut caches = BTreeMap::new();
+    let (mut caches, mut made) = (BTreeMap::new(), Vec::new());
     for p in paths {
         let cp = fsutil::safe_join(w, p)?;
         let name = format!("{state}@{}", p.replace('/', "%2F"));
-        if crate::model::is_cache_name(&name, state) && btrfs::is_subvolume(&cp) && !repo.p.cache_path(state, &name).exists() {
-            btrfs::snapshot(&cp, &repo.p.cache_path(state, &name), true)?;
+        if !crate::model::is_cache_name(&name, state) {
+            continue;
+        }
+        let snap = repo.p.cache_path(state, &name);
+        if snap.exists() {
+            caches.insert(p.clone(), name);
+        } else if btrfs::is_subvolume(&cp) {
+            btrfs::snapshot(&cp, &snap, true)?;
+            made.push(snap);
             caches.insert(p.clone(), name);
         }
     }
-    if caches.is_empty() {
+    let undo = |e: anyhow::Error| {
+        for snap in &made {
+            let _ = btrfs::delete_tree(snap);
+        }
+        e
+    };
+    // Nothing to record when the state already names each of them (a repeated save). A state
+    // whose record lost some (an older layr replaced its caches) gets them back.
+    let known = repo.state(state).map_err(undo)?.caches;
+    if made.is_empty() && caches.iter().all(|(p, n)| known.get(p) == Some(n)) {
         return Ok(caches);
     }
     let mut uuids = serde_json::Map::new();
     for snap in caches.values() {
-        let info = btrfs::subvol_info(&repo.p.cache_path(state, snap))?;
+        let info = btrfs::subvol_info(&repo.p.cache_path(state, snap)).map_err(undo)?;
         uuids.insert(snap.clone(), serde_json::Value::String(info.uuid));
     }
     let mut rec = Record::new("save.caches");
     rec.data = serde_json::json!({"state": state, "caches": caches, "uuids": uuids, "shared": shared});
-    if let Err(e) = repo.commit_record(ctx, rec) {
-        for snap in caches.values() {
-            let _ = btrfs::delete_tree(&repo.p.cache_path(state, snap));
-        }
-        return Err(e);
-    }
+    repo.commit_record(ctx, rec).map_err(undo)?;
     Ok(caches)
 }
 
