@@ -146,6 +146,12 @@ its record and the derived rows. After a crash only a snapshot without a record 
 
 - The service runs as root; every other user is a client (`SO_PEERCRED`). Clients cannot read
   `states/` or the database; they read history through layr.
+- The git object store (`git/`) holds history too. Its folder alone decides who reads it: open
+  to the users and groups with a role and the owners of lines (an access list, or `0755` when
+  everyone may read). git writes below it with `core.sharedRepository=0644`, so a strict umask
+  of the service (such as `0077`) does not close the objects that the `.git` folder of a line
+  uses through `alternates`. A store of an earlier layr gets read access below its folder once:
+  at the next new line or role change, or at the first periodic run after the service starts.
 - A line belongs to its owner. All writes of the service into a line go through descriptors
   (`openat2` with `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS`); a link in a line never redirects a
   root write. New working folders are prepared in a private folder and appear when ready.
