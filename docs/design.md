@@ -149,8 +149,13 @@ is valid for a state, so it never decides that by itself:
   attributes (`node_modules regenerable`; `-regenerable` unsets it; the last matching line wins);
   a file applies to its folder. It is part of the project, so on a protected line it changes
   only through review. A regenerable folder is a cache only if the ignore rules ignore it: a
-  cache must not hide files that are in history. A new line takes a regenerable folder only
-  warm, while its `.layrattributes` still marks it.
+  cache must not hide files that are in history. For the same reason a folder with files in the
+  head state is not a cache, even when the ignore rules ignore it (files added with `add -f`, or
+  kept by `init --include-ignored`): `save --caches`, `cache add` and `cache list` say so, and
+  `save --caches` and `cache repair` turn such a folder that an older layr made a cache back into
+  a plain folder. A new line takes a regenerable folder only warm, while its `.layrattributes`
+  still marks it, and takes a folder with files from its state, even when an ancestor saved it
+  as a cache.
 - Caches come only from `layr save --caches`, the explicit choice of someone who may save the
   line. It first turns the regenerable folders into caches, so their files stay out of the state. On a
   protected line with no changes since its head (ignored files do not count), it gives the caches

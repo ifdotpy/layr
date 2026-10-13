@@ -1,7 +1,8 @@
 #!/bin/bash
 # .layrattributes: the folders that it makes regenerable (gitignore patterns) become caches on
 # save --caches, if the ignore rules ignore them; a new line takes the nearest saved copy while
-# the attribute is still set; a folder whose files are in history never becomes a cache.
+# the attribute is still set; a folder whose files are in history never becomes a cache, also
+# when the ignore rules ignore it, and one that an older layr made a cache becomes plain again.
 . "$(dirname "$0")/lib.sh"
 
 chmod 755 $T $LAYR_ROOT
@@ -57,4 +58,66 @@ as layr-admin sh -c "cd $P/main && printf '*/ regenerable\n.venv -regenerable\n'
 as layr-u1 $L --project r branch -q a3 main
 eq "the still named folder comes" "1" "$(cat $P/a3/node_modules/pkg/index.js)"
 no "a folder that is no longer named does not" test -e $P/a3/.venv/bin/python
+
+# 5. An ignored, regenerable folder whose files are in the head state (added with add -f, or
+#    kept by an import with --include-ignored) holds versioned files: it is no cache.
+#    save --caches says so and leaves it a plain folder, so its files stay in history.
+V=$T/v
+rm -rf $V && mkdir -p $V/artifacts
+echo code > $V/a.txt && echo kept > $V/artifacts/kept.txt
+printf 'artifacts/\nout/\n' > $V/.gitignore
+printf 'artifacts regenerable\nout regenerable\n' > $V/.layrattributes
+l init v --from $V --owner layr-admin --include-ignored -q >/dev/null
+l --project v access grant layr-u1 writer
+l --project v protect main --direct
+PV=$LAYR_ROOT/projects/v/lines
+in_v() { local u=$1 line=$2; shift 2; as $u env LAYR_PROJECT=v LAYR_LINE=$line $T/layr "$@"; }
+is_cache() { btrfs subvolume show "$1" >/dev/null 2>&1; }
+NOT="not a cache: has versioned files; remove them from history first"
+AGAIN="not a cache: has versioned files; a plain folder again"
+as layr-admin sh -c "cd $PV/main && mkdir out && echo bin > out/bin && echo new > artifacts/new.bin"
+eq "save --caches says why a folder is no cache" "artifacts: $NOT" "$(in_v layr-admin main save --caches | grep '^artifacts')"
+ok "the other folder is a cache" is_cache $PV/main/out
+no "the folder with versioned files stays a plain folder" is_cache $PV/main/artifacts
+eq "cache list says why" "$(printf 'artifacts\t%s\nout\tcache' "$NOT")" "$(in_v layr-admin main cache list)"
+eq "its files stay in the working content" "" "$(in_v layr-admin main status -s)"
+as layr-u1 $L --project v branch -q v1 main
+eq "a new line takes the folder from the state" "kept" "$(cat $PV/v1/artifacts/kept.txt)"
+no "without the build output of main" test -e $PV/v1/artifacts/new.bin
+no "as a plain folder" is_cache $PV/v1/artifacts
+eq "and the other cache warm" "bin" "$(cat $PV/v1/out/bin)"
+
+# 6. cache repair and cache add leave such a folder plain. One that an older layr made a cache
+#    (a subvolume with the same files) becomes a plain folder again.
+eq "cache repair leaves it plain" "" "$(in_v layr-admin main cache repair)"
+no "and a plain folder" is_cache $PV/main/artifacts
+eq "cache add says why" "artifacts: $NOT" "$(in_v layr-admin main cache add artifacts)"
+no "and leaves it a plain folder" is_cache $PV/main/artifacts
+l --project v cache remove artifacts
+ok "an automatic state" in_v layr-admin main save -q --force -m quiet
+eq "holds its files" "kept" "$(in_v layr-admin main show 'HEAD@{0}:artifacts/kept.txt')"
+older_cache() { # older_cache <line folder> <path>: as an older layr did
+    btrfs -q subvolume create "$1/$2.old" && cp -a --reflink=always "$1/$2/." "$1/$2.old/" &&
+        rm -rf "${1:?}/$2" && mv "$1/$2.old" "$1/$2" && chown layr-admin: "$1/$2"
+}
+older_cache $PV/main artifacts && echo stale > $PV/main/artifacts/stale.bin
+eq "cache list asks for a repair" "$(printf 'artifacts\tnot a cache: has versioned files (run layr cache repair)\nout\tcache')" "$(in_v layr-admin main cache list)"
+eq "cache repair makes it a plain folder again" "artifacts: $AGAIN" "$(in_v layr-admin main cache repair)"
+no "a plain folder" is_cache $PV/main/artifacts
+eq "with all its files" "kept stale" "$(cat $PV/main/artifacts/kept.txt $PV/main/artifacts/stale.bin | xargs)"
+eq "none of them deleted" "" "$(in_v layr-admin main status -s)"
+older_cache $PV/main artifacts
+eq "save --caches does the same" "artifacts: $AGAIN" "$(in_v layr-admin main save --caches | grep '^artifacts')"
+no "a plain folder after the save" is_cache $PV/main/artifacts
+eq "its files in the working content" "" "$(in_v layr-admin main status -s)"
+
+# 7. A folder that an earlier state saved as a cache, with versioned files since: a new line
+#    takes the files from its state, not the older cache.
+rm -rf $PV/main/out && mkdir $PV/main/out && echo keep > $PV/main/out/keep.txt && chown -R layr-admin: $PV/main/out
+as layr-admin sh -c "cd $PV/main && $L add -f out/keep.txt && $L commit -qm 'keep out'"
+eq "cache list says why" "$(printf 'artifacts\t%s\nout\t%s' "$NOT" "$NOT")" "$(in_v layr-admin main cache list)"
+as layr-u1 $L --project v branch -q v2 main
+eq "a new line takes the versioned file" "keep" "$(cat $PV/v2/out/keep.txt)"
+no "not the older cache" test -e $PV/v2/out/bin
+no "in a plain folder" is_cache $PV/v2/out
 finish
