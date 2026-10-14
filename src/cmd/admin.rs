@@ -1473,7 +1473,7 @@ pub fn debug(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 let path = p.state_path(&id);
                 path.exists().then_some(path)
             };
-            let e = crate::recv::Expect { name: &args[1], uuid: &args[2], parent: &parent };
+            let e = crate::recv::Expect { name: &args[1], uuid: &args[2], parent: &parent, clones: &[] };
             crate::recv::receive(&mut std::io::stdin(), &p.states_dir(), &e)?;
             outln!(ctx, "received {}", args[1]);
             Ok(0)

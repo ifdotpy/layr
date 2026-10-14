@@ -1,0 +1,823 @@
+{
+  "files": 10000,
+  "fixture_sha256": "8cbd3b8d566af27a79ec8fb63a7af9b42aef29946148dfad336a2e46b705f3c2",
+  "binaries": {
+    "before": {
+      "path": "/tmp/layr-apfs-linux-target/release/layr",
+      "sha256": "51ed50a0ad725fb9b9a0498892a7f0b72938ff031da77071a9a27ef8d4781ad9"
+    },
+    "after": {
+      "path": "/tmp/layr-btrfs-opt-target/release/layr",
+      "sha256": "cf43d4f9b758c895a68616e6c8d817fc1ef6894a7566ce9ab504ace21a41b113"
+    }
+  },
+  "samples": [
+    {
+      "trial": 0,
+      "command": "status_clean",
+      "binary": "before",
+      "seconds": 0.09706202299275901,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 0,
+      "command": "status_clean",
+      "binary": "after",
+      "seconds": 0.09479771699989215,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 0,
+      "command": "diff_states",
+      "binary": "before",
+      "seconds": 0.008635804013465531,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 0,
+      "command": "diff_states",
+      "binary": "after",
+      "seconds": 0.0028681429976131767,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 0,
+      "command": "save_clean",
+      "binary": "before",
+      "seconds": 0.14602832900709473,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 0,
+      "command": "save_clean",
+      "binary": "after",
+      "seconds": 0.3078037559898803,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 1,
+      "command": "status_clean",
+      "binary": "after",
+      "seconds": 0.06590520300960634,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 1,
+      "command": "status_clean",
+      "binary": "before",
+      "seconds": 0.04692525099380873,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 1,
+      "command": "diff_states",
+      "binary": "after",
+      "seconds": 0.002975269002490677,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 1,
+      "command": "diff_states",
+      "binary": "before",
+      "seconds": 0.008363636006833985,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 1,
+      "command": "save_clean",
+      "binary": "after",
+      "seconds": 0.032799454987980425,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 1,
+      "command": "save_clean",
+      "binary": "before",
+      "seconds": 0.02756013000907842,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 2,
+      "command": "status_clean",
+      "binary": "before",
+      "seconds": 0.08072496300155763,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 2,
+      "command": "status_clean",
+      "binary": "after",
+      "seconds": 0.09405608799715992,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 2,
+      "command": "diff_states",
+      "binary": "before",
+      "seconds": 0.00993943698995281,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 2,
+      "command": "diff_states",
+      "binary": "after",
+      "seconds": 0.004300567990867421,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 2,
+      "command": "save_clean",
+      "binary": "before",
+      "seconds": 0.023620813997695222,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 2,
+      "command": "save_clean",
+      "binary": "after",
+      "seconds": 0.02709467000386212,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 3,
+      "command": "status_clean",
+      "binary": "after",
+      "seconds": 0.03314624901395291,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 3,
+      "command": "status_clean",
+      "binary": "before",
+      "seconds": 0.0257581189944176,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 3,
+      "command": "diff_states",
+      "binary": "after",
+      "seconds": 0.005715827996027656,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 3,
+      "command": "diff_states",
+      "binary": "before",
+      "seconds": 0.01138311300019268,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 3,
+      "command": "save_clean",
+      "binary": "after",
+      "seconds": 0.02273068399517797,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 3,
+      "command": "save_clean",
+      "binary": "before",
+      "seconds": 0.018739200007985346,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 4,
+      "command": "status_clean",
+      "binary": "before",
+      "seconds": 0.024801780004054308,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 4,
+      "command": "status_clean",
+      "binary": "after",
+      "seconds": 0.019080951999058016,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 4,
+      "command": "diff_states",
+      "binary": "before",
+      "seconds": 0.008509886989486404,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 4,
+      "command": "diff_states",
+      "binary": "after",
+      "seconds": 0.004065692002768628,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 4,
+      "command": "save_clean",
+      "binary": "before",
+      "seconds": 0.020368251993204467,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 4,
+      "command": "save_clean",
+      "binary": "after",
+      "seconds": 0.02784284099470824,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 5,
+      "command": "status_clean",
+      "binary": "after",
+      "seconds": 0.026442706992384046,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 5,
+      "command": "status_clean",
+      "binary": "before",
+      "seconds": 0.030558148995623924,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 5,
+      "command": "diff_states",
+      "binary": "after",
+      "seconds": 0.0034857300051953644,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 5,
+      "command": "diff_states",
+      "binary": "before",
+      "seconds": 0.008523886994225904,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 5,
+      "command": "save_clean",
+      "binary": "after",
+      "seconds": 0.03666927099402528,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 5,
+      "command": "save_clean",
+      "binary": "before",
+      "seconds": 0.04025300100329332,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 6,
+      "command": "status_clean",
+      "binary": "before",
+      "seconds": 0.07617797600687481,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 6,
+      "command": "status_clean",
+      "binary": "after",
+      "seconds": 0.05278645500948187,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 6,
+      "command": "diff_states",
+      "binary": "before",
+      "seconds": 0.007085335993906483,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 6,
+      "command": "diff_states",
+      "binary": "after",
+      "seconds": 0.0034958969918079674,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 6,
+      "command": "save_clean",
+      "binary": "before",
+      "seconds": 0.09169403099804185,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 6,
+      "command": "save_clean",
+      "binary": "after",
+      "seconds": 0.08882830500078853,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 7,
+      "command": "status_clean",
+      "binary": "after",
+      "seconds": 0.06370260599942412,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 7,
+      "command": "status_clean",
+      "binary": "before",
+      "seconds": 0.03704131400445476,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 7,
+      "command": "diff_states",
+      "binary": "after",
+      "seconds": 0.0030948530038585886,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 7,
+      "command": "diff_states",
+      "binary": "before",
+      "seconds": 0.007303878999664448,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 7,
+      "command": "save_clean",
+      "binary": "after",
+      "seconds": 0.021923095002421178,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 7,
+      "command": "save_clean",
+      "binary": "before",
+      "seconds": 0.024455612001474947,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 8,
+      "command": "status_clean",
+      "binary": "before",
+      "seconds": 0.03526517799764406,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 8,
+      "command": "status_clean",
+      "binary": "after",
+      "seconds": 0.035798348995740525,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 8,
+      "command": "diff_states",
+      "binary": "before",
+      "seconds": 0.007190670003183186,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 8,
+      "command": "diff_states",
+      "binary": "after",
+      "seconds": 0.0027541840099729598,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 8,
+      "command": "save_clean",
+      "binary": "before",
+      "seconds": 0.059903875007876195,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 8,
+      "command": "save_clean",
+      "binary": "after",
+      "seconds": 0.04033700199215673,
+      "load": [
+        3.994140625,
+        3.3330078125,
+        3.04296875
+      ]
+    },
+    {
+      "trial": 9,
+      "command": "status_clean",
+      "binary": "after",
+      "seconds": 0.03185194901016075,
+      "load": [
+        3.833984375,
+        3.310546875,
+        3.037109375
+      ]
+    },
+    {
+      "trial": 9,
+      "command": "status_clean",
+      "binary": "before",
+      "seconds": 0.04911780699330848,
+      "load": [
+        3.833984375,
+        3.310546875,
+        3.037109375
+      ]
+    },
+    {
+      "trial": 9,
+      "command": "diff_states",
+      "binary": "after",
+      "seconds": 0.003401312991627492,
+      "load": [
+        3.833984375,
+        3.310546875,
+        3.037109375
+      ]
+    },
+    {
+      "trial": 9,
+      "command": "diff_states",
+      "binary": "before",
+      "seconds": 0.007191420008894056,
+      "load": [
+        3.833984375,
+        3.310546875,
+        3.037109375
+      ]
+    },
+    {
+      "trial": 9,
+      "command": "save_clean",
+      "binary": "after",
+      "seconds": 0.08237613999517635,
+      "load": [
+        3.833984375,
+        3.310546875,
+        3.037109375
+      ]
+    },
+    {
+      "trial": 9,
+      "command": "save_clean",
+      "binary": "before",
+      "seconds": 0.08353898099448998,
+      "load": [
+        3.833984375,
+        3.310546875,
+        3.037109375
+      ]
+    },
+    {
+      "trial": 10,
+      "command": "status_clean",
+      "binary": "before",
+      "seconds": 0.08276910099084489,
+      "load": [
+        3.833984375,
+        3.310546875,
+        3.037109375
+      ]
+    },
+    {
+      "trial": 10,
+      "command": "status_clean",
+      "binary": "after",
+      "seconds": 0.04385360798914917,
+      "load": [
+        3.833984375,
+        3.310546875,
+        3.037109375
+      ]
+    },
+    {
+      "trial": 10,
+      "command": "diff_states",
+      "binary": "before",
+      "seconds": 0.008385385997826234,
+      "load": [
+        3.833984375,
+        3.310546875,
+        3.037109375
+      ]
+    },
+    {
+      "trial": 10,
+      "command": "diff_states",
+      "binary": "after",
+      "seconds": 0.002503765994333662,
+      "load": [
+        3.833984375,
+        3.310546875,
+        3.037109375
+      ]
+    },
+    {
+      "trial": 10,
+      "command": "save_clean",
+      "binary": "before",
+      "seconds": 0.026603040998452343,
+      "load": [
+        3.833984375,
+        3.310546875,
+        3.037109375
+      ]
+    },
+    {
+      "trial": 10,
+      "command": "save_clean",
+      "binary": "after",
+      "seconds": 0.026621042008628137,
+      "load": [
+        3.833984375,
+        3.310546875,
+        3.037109375
+      ]
+    },
+    {
+      "trial": 11,
+      "command": "status_clean",
+      "binary": "after",
+      "seconds": 0.029869103993405588,
+      "load": [
+        3.833984375,
+        3.310546875,
+        3.037109375
+      ]
+    },
+    {
+      "trial": 11,
+      "command": "status_clean",
+      "binary": "before",
+      "seconds": 0.02132546599023044,
+      "load": [
+        3.833984375,
+        3.310546875,
+        3.037109375
+      ]
+    },
+    {
+      "trial": 11,
+      "command": "diff_states",
+      "binary": "after",
+      "seconds": 0.003047103004064411,
+      "load": [
+        3.833984375,
+        3.310546875,
+        3.037109375
+      ]
+    },
+    {
+      "trial": 11,
+      "command": "diff_states",
+      "binary": "before",
+      "seconds": 0.0060769550036638975,
+      "load": [
+        3.833984375,
+        3.310546875,
+        3.037109375
+      ]
+    },
+    {
+      "trial": 11,
+      "command": "save_clean",
+      "binary": "after",
+      "seconds": 0.021301507993484847,
+      "load": [
+        3.833984375,
+        3.310546875,
+        3.037109375
+      ]
+    },
+    {
+      "trial": 11,
+      "command": "save_clean",
+      "binary": "before",
+      "seconds": 0.019589955991250463,
+      "load": [
+        3.833984375,
+        3.310546875,
+        3.037109375
+      ]
+    }
+  ],
+  "diff_first_seconds": 0.00467807000677567,
+  "medians": {
+    "status_clean": {
+      "before": 0.04198328249913175,
+      "after": 0.03982597849244485
+    },
+    "diff_states": {
+      "before": 0.00837451100233011,
+      "after": 0.0032480829977430403
+    },
+    "save_clean": {
+      "before": 0.027081585503765382,
+      "after": 0.030321147991344333
+    }
+  }
+}

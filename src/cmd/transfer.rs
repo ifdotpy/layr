@@ -791,7 +791,7 @@ fn restore_item(p: &Project, d: &File, i: &Item) -> Result<bool> {
                 let path = p.state_path(&pid);
                 path.exists().then_some(path)
             };
-            let e = crate::recv::Expect { name: &id, uuid: &rec.subvol, parent: &parent };
+            let e = crate::recv::Expect { name: &id, uuid: &rec.subvol, parent: &parent, clones: &[] };
             let ((), (sha, _)) = decompress(f, |r| crate::recv::receive(r, &p.states_dir(), &e))?;
             if sha != i.sha256 {
                 let _ = btrfs::delete_tree(&p.state_path(&id));

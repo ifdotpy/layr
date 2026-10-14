@@ -23,6 +23,8 @@ mod recv;
 mod repo;
 mod revs;
 #[cfg(target_os = "linux")]
+mod send_cache;
+#[cfg(target_os = "linux")]
 mod service;
 #[cfg(target_os = "macos")]
 #[path = "service_local.rs"]

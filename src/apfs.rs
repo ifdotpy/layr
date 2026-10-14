@@ -7,7 +7,7 @@ use std::{
     fs::{self, File},
     io,
     os::unix::fs::{MetadataExt, PermissionsExt},
-    path::Path,
+    path::{Path, PathBuf},
     process::Command,
 };
 
@@ -205,6 +205,18 @@ pub fn clone_range(_src: &File, _off: u64, _len: u64, _dst: &File, _dst_off: u64
 }
 pub fn send_command(_parent: Option<&Path>, _child: &Path) -> Result<Command> {
     bail!("APFS does not yet support the btrfs transfer format")
+}
+
+pub fn send_optimized(parent: Option<&Path>, child: &Path, _clones: &[PathBuf], _compressed: bool) -> Result<Command> {
+    send_command(parent, child)
+}
+
+pub fn supports_compressed_receive() -> bool {
+    false
+}
+
+pub fn clone_identity(_path: &Path) -> Result<(String, u64)> {
+    bail!("APFS does not support btrfs stream identities")
 }
 pub fn candidates(parent: &Path, child: &Path) -> Result<Vec<crate::changes::Change>> {
     let (a, b) = (scan(parent)?, scan(child)?);

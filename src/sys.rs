@@ -114,12 +114,28 @@ pub fn subvol_flags(fd: BorrowedFd) -> io::Result<u64> {
     Ok(flags)
 }
 
+#[cfg(target_os = "linux")]
+pub fn filesystem_uuid(fd: BorrowedFd) -> io::Result<[u8; 16]> {
+    #[repr(C)]
+    struct FsInfo {
+        max_id: u64,
+        devices: u64,
+        uuid: [u8; 16],
+        rest: [u8; 992],
+    }
+    let mut info = FsInfo { max_id: 0, devices: 0, uuid: [0; 16], rest: [0; 992] };
+    ioctl_ptr(fd, 0x8400_941f, &mut info)?;
+    Ok(info.uuid)
+}
+
 pub struct RawSubvolInfo {
     pub tree_id: u64,
     pub generation: u64,
     pub uuid: [u8; 16],
     pub parent_uuid: [u8; 16],
     pub received_uuid: [u8; 16],
+    pub ctransid: u64,
+    pub stransid: u64,
 }
 
 pub fn subvol_info(fd: BorrowedFd) -> io::Result<RawSubvolInfo> {
@@ -132,7 +148,35 @@ pub fn subvol_info(fd: BorrowedFd) -> io::Result<RawSubvolInfo> {
         uuid: a.uuid,
         parent_uuid: a.parent_uuid,
         received_uuid: a.received_uuid,
+        ctransid: a.ctransid,
+        stransid: a.stransid,
     })
+}
+
+/// Produce a version 1 metadata stream through an open pipe.
+#[cfg(target_os = "linux")]
+pub fn send_no_data(src: BorrowedFd, out: BorrowedFd, parent_root: u64) -> io::Result<()> {
+    #[repr(C)]
+    struct SendArgs {
+        send_fd: i64,
+        clone_sources_count: u64,
+        clone_sources: u64,
+        parent_root: u64,
+        flags: u64,
+        version: u32,
+        reserved: [u8; 28],
+    }
+    // BTRFS_SEND_FLAG_NO_FILE_DATA. Version zero selects the original protocol.
+    let mut args = SendArgs {
+        send_fd: out.as_raw_fd() as i64,
+        clone_sources_count: 0,
+        clone_sources: 0,
+        parent_root,
+        flags: 1,
+        version: 0,
+        reserved: [0; 28],
+    };
+    ioctl_ptr(src, 0x4048_9426, &mut args)
 }
 
 /// Reflink a byte range from `src` into `dst`.

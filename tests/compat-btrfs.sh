@@ -26,4 +26,11 @@ LAYR_ROOT=$T/restored-old/store "$OLD_LAYR" backup restore -q "$T/new-backup"
 eq "old binary restores the new identifier" "$new_head" "$(LAYR_ROOT=$T/restored-old/store "$OLD_LAYR" --project compat --line main rev-parse HEAD)"
 "$OLD_LAYR" commit --allow-empty -qm previous
 ok "candidate accepts a later old-binary commit" l fsck
+# Both protocol roles must work when only one binary knows the new capabilities.
+new_fs "$T/peer-old" 2G
+ok "new client sends to old peer" l sync -q -- env LAYR_ROOT=$T/peer-old/store "$OLD_LAYR" serve-peer compat
+eq "old peer has the same head" "$(l rev-parse HEAD)" "$(LAYR_ROOT=$T/peer-old/store "$OLD_LAYR" --project compat --line main rev-parse HEAD)"
+new_fs "$T/peer-new" 2G
+ok "old client sends to new peer" "$OLD_LAYR" sync -q -- env LAYR_ROOT=$T/peer-new/store "$LAYR" serve-peer compat
+eq "new peer has the same head" "$(l rev-parse HEAD)" "$(LAYR_ROOT=$T/peer-new/store "$LAYR" --project compat --line main rev-parse HEAD)"
 finish

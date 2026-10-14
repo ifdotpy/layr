@@ -27,6 +27,23 @@ const MAX_FRAME: usize = 16 << 20;
 /// Records travel in messages of at most this many lines.
 const RECORDS_PER_MESSAGE: usize = 1000;
 
+const MAX_CLONE_SOURCES: usize = 8;
+
+#[derive(Clone, Copy, Default)]
+struct SendFeatures {
+    compressed: bool,
+    clones: bool,
+}
+
+impl SendFeatures {
+    fn from_hello(hello: &Value) -> Self {
+        Self {
+            compressed: hello["compressed_send_v2"].as_bool().unwrap_or(false),
+            clones: hello["clone_sources_v1"].as_bool().unwrap_or(false),
+        }
+    }
+}
+
 struct Wire<R: Read, W: Write> {
     r: R,
     w: W,
@@ -257,9 +274,9 @@ fn plan(repo: &Repo, mine: &BTreeSet<String>, theirs: &BTreeSet<String>, auto: b
     Ok(out)
 }
 
-fn send_layer<R: Read, W: Write>(w: &mut Wire<R, W>, repo: &Repo, snap: &str) -> Result<u64> {
+fn send_layer<R: Read, W: Write>(w: &mut Wire<R, W>, repo: &Repo, snap: &str, compressed: bool) -> Result<u64> {
     w.json(&json!({"op": "layer", "name": snap}))?;
-    let child = btrfs::send_command(None, &repo.p.layer_path(snap.split('@').next().unwrap_or(""), snap))?
+    let child = btrfs::send_optimized(None, &repo.p.layer_path(snap.split('@').next().unwrap_or(""), snap), &[], compressed)?
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
@@ -277,30 +294,53 @@ fn send_states<R: Read, W: Write>(
     layers: bool,
     peer_layers: &BTreeSet<String>,
     peer_states: &BTreeSet<String>,
+    features: SendFeatures,
 ) -> Result<(usize, u64)> {
     let mut bytes = 0;
+    let mut have = peer_states.clone();
     // Layers of states the peer has already (sent earlier without --layers).
     if layers {
         for id in peer_states {
             if let Some(s) = repo.p.db.state(id)? {
                 for snap in s.layers.values() {
                     if !peer_layers.contains(snap) && repo.p.layer_path(id, snap).exists() {
-                        bytes += send_layer(w, repo, snap)?;
+                        bytes += send_layer(w, repo, snap, features.compressed)?;
                     }
                 }
             }
         }
     }
     for (id, parent) in list {
-        w.json(&json!({"op": "state", "id": id, "parent": parent}))?;
+        let clones: Vec<String> = if features.clones {
+            have.iter()
+                .rev()
+                .filter(|source| Some(*source) != parent.as_ref() && *source != id)
+                // Bound the search when a peer lists many states absent on this machine.
+                .take(MAX_CLONE_SOURCES * 4)
+                .filter(|source| {
+                    repo.p.db.state(source).ok().flatten().is_some_and(|state| {
+                        btrfs::clone_identity(&repo.p.state_path(source)).ok().is_some_and(|(uuid, _)| uuid == state.subvol)
+                    })
+                })
+                .take(MAX_CLONE_SOURCES)
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        w.json(&json!({"op": "state", "id": id, "parent": parent, "clones": clones}))?;
         let pp = parent.as_ref().map(|p| repo.p.state_path(p));
-        let child =
-            btrfs::send_command(pp.as_deref(), &repo.p.state_path(id))?.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+        let sources: Vec<_> = clones.iter().map(|id| repo.p.state_path(id)).collect();
+        let child = btrfs::send_optimized(pp.as_deref(), &repo.p.state_path(id), &sources, features.compressed)?
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
         bytes += w.send_stream(child)?;
         let v = w.recv_json()?;
         if v["op"] != "ok" {
             bail!("peer did not store state {}", ids::short(id));
         }
+        have.insert(id.clone());
         // Regenerable layers travel only for a live move (warm builds on the peer).
         if layers {
             if let Some(s) = repo.p.db.state(id)? {
@@ -309,13 +349,7 @@ fn send_states<R: Read, W: Write>(
                     if !path.exists() || peer_layers.contains(snap) {
                         continue;
                     }
-                    w.json(&json!({"op": "layer", "name": snap}))?;
-                    let child = btrfs::send_command(None, &path)?.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
-                    bytes += w.send_stream(child)?;
-                    let v = w.recv_json()?;
-                    if v["op"] != "ok" {
-                        bail!("peer did not store layer {snap}");
-                    }
+                    bytes += send_layer(w, repo, snap, features.compressed)?;
                 }
             }
         }
@@ -326,7 +360,14 @@ fn send_states<R: Read, W: Write>(
 
 /// Receive one subvolume named `name` into `states/`, checked on the way (`recv`): the
 /// subvolume its signed record names, with a parent only from this project.
-fn receive_one<R: Read, W: Write>(w: &mut Wire<R, W>, p: &Project, name: &str, uuid: &str, incremental: bool) -> Result<()> {
+fn receive_one<R: Read, W: Write>(
+    w: &mut Wire<R, W>,
+    p: &Project,
+    name: &str,
+    uuid: &str,
+    incremental: bool,
+    clones: &[(String, u64, std::path::PathBuf)],
+) -> Result<()> {
     let parent = |u: &str| -> Option<std::path::PathBuf> {
         if !incremental {
             return None;
@@ -336,7 +377,7 @@ fn receive_one<R: Read, W: Write>(w: &mut Wire<R, W>, p: &Project, name: &str, u
         path.exists().then_some(path)
     };
     let mut frames = Frames { w, buf: Vec::new(), pos: 0, done: false };
-    let res = crate::recv::receive(&mut frames, &p.states_dir(), &crate::recv::Expect { name, uuid, parent: &parent });
+    let res = crate::recv::receive(&mut frames, &p.states_dir(), &crate::recv::Expect { name, uuid, parent: &parent, clones });
     let drained = frames.drain();
     res.and(drained)
 }
@@ -361,7 +402,7 @@ fn recv_states<R: Read, W: Write>(w: &mut Wire<R, W>, p: &Project) -> Result<usi
                 }
                 // The layer must be the subvolume that the signed save.layers record names.
                 let uuid = p.db.layer_uuid(&id, &name)?.ok_or_else(|| anyhow!("no signed subvolume id for layer {name}"))?;
-                receive_one(w, p, &name, &uuid, false)
+                receive_one(w, p, &name, &uuid, false, &[])
             }
             Some("state") => {
                 // Only a state that a signed record names, as the subvolume that record names.
@@ -373,7 +414,23 @@ fn recv_states<R: Read, W: Write>(w: &mut Wire<R, W>, p: &Project) -> Result<usi
                 if p.state_path(&id).exists() {
                     bail!("state {} exists here already", ids::short(&id));
                 }
-                receive_one(w, p, &id, &rec.subvol, true).and_then(|_| {
+                let ids: Vec<String> = match v.get("clones") {
+                    None => Vec::new(),
+                    Some(value) => serde_json::from_value(value.clone())?,
+                };
+                if ids.len() > MAX_CLONE_SOURCES {
+                    bail!("too many clone sources");
+                }
+                let mut clones = Vec::new();
+                for source in ids {
+                    let state = p.db.state(&source)?.ok_or_else(|| anyhow!("unknown clone source"))?;
+                    let identity = btrfs::clone_identity(&p.state_path(&source))?;
+                    if identity.0 != state.subvol {
+                        bail!("clone source does not match its signed state");
+                    }
+                    clones.push((identity.0, identity.1, p.state_path(&source)));
+                }
+                receive_one(w, p, &id, &rec.subvol, true, &clones).and_then(|_| {
                     if let Err(e) = p.db.set_present(&id, true) {
                         let _ = btrfs::delete_tree(&p.state_path(&id));
                         return Err(e);
@@ -421,7 +478,7 @@ pub fn sync(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let auto = a.has("--auto");
     let result = (|| -> Result<(usize, usize, usize, usize, u64)> {
         let mine = present(&repo.p)?;
-        w.json(&json!({"op": "hello", "project": repo.p.name, "project_id": repo.p.id, "machine": repo.p.store.machine.id, "public_key": own_key(&repo.p), "seqs": seqs(&repo.p)?, "present": mine, "layers": present_layers(&repo.p)?}))?;
+        w.json(&json!({"op": "hello", "compressed_send_v2": btrfs::supports_compressed_receive(), "clone_sources_v1": true, "project": repo.p.name, "project_id": repo.p.id, "machine": repo.p.store.machine.id, "public_key": own_key(&repo.p), "seqs": seqs(&repo.p)?, "present": mine, "layers": present_layers(&repo.p)?}))?;
         let hello = w.recv_json()?;
         // The peer holds this project, or a new empty copy of it.
         let peer_project = hello["project_id"].as_str().unwrap_or("");
@@ -452,7 +509,15 @@ pub fn sync(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let (mut sent, mut bytes) = (0, 0);
         if !a.has("--pull-only") {
             let list = plan(repo, &mine, &peer_present, auto)?;
-            let (n, b) = send_states(&mut w, repo, &list, a.has("--layers"), &peer_layers, &peer_present)?;
+            let (n, b) = send_states(
+                &mut w,
+                repo,
+                &list,
+                a.has("--layers"),
+                &peer_layers,
+                &peer_present,
+                SendFeatures::from_hello(&hello),
+            )?;
             sent = n;
             bytes = b;
         } else {
@@ -512,7 +577,7 @@ pub fn serve(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let mut repo = Repo { p };
     let peer_seqs: BTreeMap<String, u64> = serde_json::from_value(hello["seqs"].clone())?;
-    w.json(&json!({"op": "hello", "project_id": repo.p.id, "machine": repo.p.store.machine.id, "public_key": own_key(&repo.p), "seqs": seqs(&repo.p)?, "present": present(&repo.p)?, "layers": present_layers(&repo.p)?}))?;
+    w.json(&json!({"op": "hello", "compressed_send_v2": btrfs::supports_compressed_receive(), "clone_sources_v1": true, "project_id": repo.p.id, "machine": repo.p.store.machine.id, "public_key": own_key(&repo.p), "seqs": seqs(&repo.p)?, "present": present(&repo.p)?, "layers": present_layers(&repo.p)?}))?;
     let lines = recv_records(&mut w)?;
     let mine = missing_lines(&repo.p, &peer_seqs)?;
     send_records(&mut w, &mine)?;
@@ -572,7 +637,15 @@ pub fn serve(ctx: &Ctx, args: &[String]) -> Result<i32> {
         list.push((id, parent));
     }
     let peer_layers: BTreeSet<String> = serde_json::from_value(want["have_layers"].clone()).unwrap_or_default();
-    send_states(&mut w, &repo, &list, want["layers"].as_bool().unwrap_or(false), &peer_layers, &have)?;
+    send_states(
+        &mut w,
+        &repo,
+        &list,
+        want["layers"].as_bool().unwrap_or(false),
+        &peer_layers,
+        &have,
+        SendFeatures::from_hello(&hello),
+    )?;
     let _ = w.recv_json();
     let _ = ctx;
     Ok(0)

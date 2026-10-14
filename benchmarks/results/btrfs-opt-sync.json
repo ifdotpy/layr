@@ -1,0 +1,103 @@
+{
+  "fixture": {
+    "blob_bytes": 16777216,
+    "compressed_file_bytes": 18432000
+  },
+  "binaries": {
+    "before": {
+      "path": "/tmp/layr-apfs-linux-target/release/layr",
+      "sha256": "51ed50a0ad725fb9b9a0498892a7f0b72938ff031da77071a9a27ef8d4781ad9"
+    },
+    "after": {
+      "path": "/tmp/layr-btrfs-opt-target/release/layr",
+      "sha256": "23f34d052105d65c8f6bccd0222258bae8f67c45f48ba68bf7cb783cf9f53be1"
+    }
+  },
+  "clone": {
+    "before": {
+      "wire_bytes": 33588784,
+      "stream_bytes": 33579189,
+      "versions": [
+        1
+      ],
+      "commands": {
+        "1": 1,
+        "19": 4,
+        "18": 4,
+        "3": 3,
+        "9": 3,
+        "15": 685,
+        "20": 7,
+        "21": 4,
+        "2": 3,
+        "11": 1
+      },
+      "restored_blob_extents": {
+        "total": 16777216,
+        "exclusive": 16777216,
+        "shared": 0
+      }
+    },
+    "after": {
+      "wire_bytes": 16790991,
+      "stream_bytes": 16783017,
+      "versions": [
+        2
+      ],
+      "commands": {
+        "1": 1,
+        "19": 4,
+        "18": 4,
+        "3": 3,
+        "9": 3,
+        "15": 129,
+        "20": 7,
+        "21": 4,
+        "2": 3,
+        "11": 1,
+        "16": 1
+      },
+      "restored_blob_extents": {
+        "total": 16777216,
+        "exclusive": 0,
+        "shared": 16777216
+      }
+    }
+  },
+  "compression": {
+    "before": {
+      "wire_bytes": 18453932,
+      "stream_bytes": 18449311,
+      "versions": [
+        1
+      ],
+      "commands": {
+        "2": 1,
+        "3": 1,
+        "9": 1,
+        "15": 422,
+        "19": 1,
+        "18": 1,
+        "20": 2,
+        "21": 1
+      }
+    },
+    "after": {
+      "wire_bytes": 595103,
+      "stream_bytes": 590689,
+      "versions": [
+        2
+      ],
+      "commands": {
+        "2": 1,
+        "3": 1,
+        "9": 1,
+        "25": 141,
+        "19": 1,
+        "18": 1,
+        "20": 2,
+        "21": 1
+      }
+    }
+  }
+}

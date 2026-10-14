@@ -3,7 +3,7 @@
 Local version control on btrfs, for many users and many working folders on one machine. Git and GitHub stay the remote layer
 (push, pull requests, CI). Everything local is btrfs: each line (branch and worktree in one) is a
 writable snapshot, each state (commit) is a read-only snapshot, change lists come from
-`btrfs send --no-data` in O(changes), and a merge copies files with reflinks.
+the btrfs metadata-send ioctl in O(changes), and a merge copies files with reflinks.
 
 The commands follow the git verbs and print git formats, so people and tools that know git use
 layr without new habits. Output of `diff`, `status --porcelain`, `show`, `log --format` and `--stat`
@@ -204,8 +204,8 @@ its record and the derived rows. After a crash only a snapshot without a record 
 - A btrfs stream from a peer or a backup passes a check on its way to `btrfs receive`, which
   would otherwise find snapshot and clone sources by UUID anywhere on the file system: one
   subvolume with the name and UUID its signed record names, a parent only from the same
-  project, clones only from that parent or the new subvolume, and no path that leaves the
-  subvolume. After the receive, the new subvolume must be a snapshot of exactly that parent.
+  project, and clone sources limited to that parent, the new subvolume, or explicitly verified states of the same project.
+  Extra sources require an exact stream UUID and transaction ID. Their file paths cannot traverse symbolic links. After the receive, the new subvolume must be a snapshot of exactly that parent.
 - Files larger than 64 MiB count as binary for diff, grep, blame, rename detection and merge:
   the service never reads such a file into memory (`show` and merge drivers copy it in
   pieces). Patches, messages and records named by a user are limited in size too.
@@ -227,6 +227,79 @@ backup made entirely by another machine identity restores as that machine's proj
 
 `layr sync -- ssh host layr serve-peer <p>` exchanges records both ways and sends missing states with `btrfs send -p <common state>`;
 `--auto --layers` also carries working content and build output for a live move.
+
+## Btrfs execution and sync
+
+Metadata comparisons call the kernel directly. They do not start a `btrfs send` process.
+Comparisons of immutable state pairs can reuse a private cache in `meta/diff-cache`.
+The cache holds at most 256 entries and 32 MiB of file data per project.
+Each entry contains at most 8 MiB, including its checksum.
+New snapshots and temporary scans do not enter this cache during the command that creates them.
+A missing or damaged entry causes a fresh kernel comparison. Cache writes do not require an fsync.
+The cache is disposable and is not part of records or backups.
+
+Sync peers exchange capability fields in their initial message:
+
+- Peers that support extra clone sources can reuse data from up to eight additional shared states.
+  The sender examines at most 32 recent candidates for each state.
+  The receiver checks each source against a signed local state, its UUID, its transaction ID, and its read-only flag.
+- Peers with compatible btrfs tools can exchange compressed extents with stream protocol 2.
+  The sender also checks kernel support. This preserves existing compression; it does not compress uncompressed files.
+- A peer without these capabilities gets the previous stream and clone rules.
+  Backups retain protocol 1 and the previous manifest format.
+
+Working content still requires an atomic snapshot before comparison.
+The optimization does not replace this snapshot with an unsafe check of a writable tree.
+It does not enable filesystem compression or run defragmentation automatically.
+Defragmentation can break shared extents and increase disk use, as described in the
+[btrfs documentation](https://btrfs.readthedocs.io/en/latest/btrfs-filesystem.html#subcommand).
+Protocol requirements are described in [btrfs-send](https://btrfs.readthedocs.io/en/latest/btrfs-send.html).
+
+Reproduce the measurements on Linux with root access:
+
+```sh
+python3 benchmarks/btrfs-optimizations.py --before /path/to/old/layr --after target/release/layr \
+  --root /new/path/on/btrfs --files 10000 --repeats 12
+bash benchmarks/sync-storage.sh /path/to/old/layr target/release/layr /tmp/sync-results.json
+OLD_LAYR=/path/to/old/layr LAYR=$PWD/target/release/layr bash tests/compat-btrfs.sh
+```
+
+The compatibility test covers state IDs, signatures, backups in both directions, and both sync roles with an older binary.
+
+### Measured btrfs optimization results
+
+Measured on 2026-10-14 in the OrbStack Linux VM, with release binaries and 10,000 files of 4 KiB.
+The final test uses a separate 8 GiB loop filesystem and 12 pairs of commands with alternate execution order.
+The table shows median elapsed time, including command startup. The immutable diff uses a warm cache.
+
+| Operation | Before | After |
+| --- | ---: | ---: |
+| Clean status | 21.36 ms | 14.42 ms |
+| Repeated diff between states | 8.33 ms | 3.63 ms |
+| Clean save | 18.98 ms | 14.46 ms |
+
+The first diff with a cache miss takes 10.12 ms in this run.
+Earlier tests on the shared filesystem sometimes show slower status and save commands after the change.
+These results do not establish a general elapsed-time improvement for those commands.
+Repeated immutable diffs improve in every recorded run. Unrelated host activity was not controlled.
+
+Separate sync tests check exact file content and allocated extents after a filesystem sync:
+
+| Fixture | Stream bytes before | Stream bytes after | Reduction |
+| --- | ---: | ---: | ---: |
+| A 16 MiB file removed, then restored through a reflink | 33,579,189 | 16,783,017 | 50.0% |
+| An 18,432,000-byte text file already compressed with zstd | 18,449,311 | 590,689 | 96.8% |
+
+The restored file shares all 16 MiB of its data extents after sync. Previously, it had a separate 16 MiB allocation.
+This space comparison excludes filesystem metadata. Compression savings depend on the source data and its existing compression.
+
+Raw results contain binary hashes and individual samples:
+[final timing test](benchmarks/results/btrfs-opt-isolated-10000.json),
+[sync and extent checks](benchmarks/results/btrfs-opt-sync.json),
+[initial timing test](benchmarks/results/btrfs-opt-initial-10000.json),
+[shared filesystem repeat](benchmarks/results/btrfs-opt-shared-repeat-10000.json),
+and [shared filesystem CPU measurements](benchmarks/results/btrfs-opt-shared-cpu-10000.json).
+The earlier runs use intermediate builds; their hashes identify each build.
 
 ## Performance
 
@@ -260,8 +333,7 @@ The table gives median seconds, including command startup.
 
 APFS runs natively on macOS 27.2, on a case-sensitive volume in an ASIF image.
 btrfs runs in the OrbStack Linux VM on the same Mac.
-No benchmark or build from this task runs beside another benchmark.
-The host also runs other tasks. Their load is not controlled.
+Those initial backend runs were sequential. The host also ran other tasks. Their load was not controlled.
 
 | Operation | btrfs, 1,000 files | APFS, 1,000 files | btrfs, 10,000 files | APFS, 10,000 files |
 | --- | ---: | ---: | ---: | ---: |
@@ -277,7 +349,7 @@ These values are provisional. They do not establish an isolated filesystem speed
 A later test alternates clean status commands on both backends with 10,000 files.
 It measures APFS at 11.00 to 13.26 seconds and btrfs at 0.09 to 16.33 seconds.
 The host's one-minute load average ranges from 294 to 311 during that test.
-A further benchmark waits for a quiet interval and records host load throughout the run.
+A further benchmark found no quiet interval within 30 minutes. The comparison remains provisional.
 
 The APFS implementation clones every file for a snapshot and scans content for changed blocks.
 The btrfs implementation uses subvolume snapshots and send-stream change lists.
@@ -291,7 +363,7 @@ Raw data includes the binary hash and source content hash:
 [btrfs, 10,000 files](benchmarks/results/btrfs-10000.json),
 and [interleaved status](benchmarks/results/paired-status-10000.json).
 
-The previous btrfs binary (`c6063e4`) and the candidate pass nine compatibility checks.
+The previous btrfs binary (`c6063e4`) and the candidate pass thirteen compatibility checks.
 Both binaries read each other's states, verify signatures and restore each other's backups without changing state identifiers.
 Run those checks with `OLD_LAYR=/path/to/old/layr LAYR=/path/to/new/layr bash tests/compat-btrfs.sh` on Linux as root.
 
