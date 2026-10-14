@@ -5,16 +5,38 @@ set -u
 LAYR=${LAYR:-$(cd "$(dirname "$0")/.." && pwd)/target/debug/layr}
 PASS=0
 FAIL=0
-T=$(mktemp -d /var/tmp/layr-test.XXXXXX)
+if [ "$(uname -s)" = Darwin ]; then
+    : "${LAYR_APFS_TEST_ROOT:?Set LAYR_APFS_TEST_ROOT to a case-sensitive APFS volume}"
+    T=$(mktemp -d "$LAYR_APFS_TEST_ROOT/layr-test.XXXXXX")
+else
+    T=$(mktemp -d /var/tmp/layr-test.XXXXXX)
+fi
 export LAYR_ROOT=$T/store
 export GIT_AUTHOR_NAME=Tester GIT_AUTHOR_EMAIL=tester@example.com GIT_COMMITTER_NAME=Tester GIT_COMMITTER_EMAIL=tester@example.com
 export LAYR_AUTHOR_NAME=Tester LAYR_AUTHOR_EMAIL=tester@example.com
 unset LAYR_PROJECT LAYR_LINE LAYR_SOCKET
 
-l() { "$LAYR" "$@"; }
+l() {
+    "$LAYR" "$@"
+    local rc=$?
+    # The Linux suite runs as root and bypasses policy. On macOS the owner explicitly
+    # permits direct updates for these command tests. Access tests use their own policy.
+    if [ "$rc" -eq 0 ] && [ "${LAYR_TEST_DIRECT_MAIN:-}" = 1 ]; then
+        local project=""
+        case "${1:-}" in init) project=$2 ;; clone) project=$3 ;; esac
+        if [ -n "$project" ]; then
+            (cd "$LAYR_ROOT/projects/$project/lines/main" && "$LAYR" protect main --remove) || return $?
+        fi
+    fi
+    return "$rc"
+}
 
 new_fs() { # new_fs <mountpoint> <size>
     local mp=$1 size=${2:-8G}
+    if [ "$(uname -s)" = Darwin ]; then
+        mkdir -p "$mp"
+        return
+    fi
     truncate -s "$size" "$mp.img"
     mkfs.btrfs -q -f "$mp.img"
     mkdir -p "$mp"
@@ -23,6 +45,11 @@ new_fs() { # new_fs <mountpoint> <size>
 
 cleanup() {
     cd /
+    if [ "$(uname -s)" = Darwin ]; then
+        chflags -R nouchg "$T" 2>/dev/null || true
+        rm -rf "$T"
+        return
+    fi
     for mp in $(findmnt -rn -o TARGET | grep "^$T" | sort -r); do umount -l "$mp" 2>/dev/null; done
     rm -rf "$T"
 }

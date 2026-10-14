@@ -101,7 +101,8 @@ printf 'list.txt merge=union\nkeep.txt merge=ours\n*.img merge=blocks merge-veri
 printf 'a\n' > list.txt; echo base > keep.txt; head -c 65536 /dev/zero > disk.img; echo 1 > num.txt
 l add -A && l commit -qm "driver base"
 l config merge.driver.sum 'echo $(( $(cat %A) + $(cat %B) - $(cat %O) )) > %A'
-l config merge.verify.size 'test $(stat -c %s %A) = 65536'
+STAT=$(command -v stat)
+l config merge.verify.size "test \$($STAT -c %s %A) = 65536"
 l branch -q d2
 printf 'a\nmain\n' > list.txt; echo main > keep.txt; printf 'MAIN' | dd of=disk.img bs=1 seek=0 conv=notrunc status=none; echo 3 > num.txt
 l commit -qam "main side"

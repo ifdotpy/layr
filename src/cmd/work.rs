@@ -232,19 +232,19 @@ pub fn begin(ctx: &Ctx, repo: &Repo, line: &Line, op: crate::repo::LineOp) -> Re
 fn stage_paths(repo: &Repo, line: &Line, scan: &Path, paths: &BTreeSet<String>) -> Result<()> {
     let stage = repo.ensure_stage(line)?;
     let own = repo.own(line);
-    let mut gone: std::collections::HashMap<u64, String> = std::collections::HashMap::new();
+    let mut gone: std::collections::HashMap<Vec<u8>, String> = std::collections::HashMap::new();
     for p in paths {
         if fsutil::lmeta(scan, p).is_none() {
             if let Some(m) = fsutil::lmeta(&stage, p) {
                 if m.is_file() || m.ftype == fsutil::FType::Symlink {
-                    gone.insert(m.ino, p.clone());
+                    gone.insert(crate::storage::file_identity(&stage.join(p))?, p.clone());
                 }
             }
         }
     }
     for p in paths {
-        if let (Some(m), None) = (fsutil::lmeta(scan, p), fsutil::lmeta(&stage, p)) {
-            if let Some(from) = gone.remove(&m.ino) {
+        if let (Some(_), None) = (fsutil::lmeta(scan, p), fsutil::lmeta(&stage, p)) {
+            if let Some(from) = gone.remove(&crate::storage::file_identity(&scan.join(p))?) {
                 let t = crate::tree::Tree::open(&stage)?;
                 t.mkdirs_for(p, own)?;
                 t.rename(&from, p)?;
@@ -574,7 +574,7 @@ pub fn apply(ctx: &Ctx, args: &[String]) -> Result<i32> {
     // the working folder belongs to the owner, so the patch is applied there as the owner.
     let mut targets: Vec<(std::path::PathBuf, u32)> = Vec::new();
     if to_stage {
-        targets.push((h.repo.ensure_stage(&line)?, 0));
+        targets.push((h.repo.ensure_stage(&line)?, rustix::process::geteuid().as_raw()));
     }
     if to_work {
         targets.push((h.repo.working(&line), line.owner));
@@ -969,7 +969,7 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let mut l2 = line.clone();
             l2.head = target.clone();
             let stage = repo.p.stage_path(&line.id);
-            crate::btrfs::snapshot(&keep.path, &stage, false)?;
+            crate::storage::snapshot(&keep.path, &stage, false)?;
             fsutil::atomic_write(&repo.p.meta_dir().join("stage").join(format!("{}.base", line.id)), target.as_bytes(), 0o600)?;
         }
         "mixed" => repo.drop_stage(&line)?,

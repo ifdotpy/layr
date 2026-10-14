@@ -7,7 +7,6 @@
 mod ctx;
 mod access;
 mod args;
-mod btrfs;
 mod changes;
 mod cmd;
 mod db;
@@ -23,7 +22,17 @@ mod privs;
 mod recv;
 mod repo;
 mod revs;
+#[cfg(target_os = "linux")]
 mod service;
+#[cfg(target_os = "macos")]
+#[path = "service_local.rs"]
+mod service;
+#[cfg(target_os = "linux")]
+#[path = "btrfs.rs"]
+mod storage;
+#[cfg(target_os = "macos")]
+#[path = "apfs.rs"]
+mod storage;
 mod store;
 mod stream;
 #[allow(unsafe_code)]
@@ -34,6 +43,11 @@ mod tree;
 use std::collections::HashMap;
 
 fn main() {
+    #[cfg(target_os = "macos")]
+    if rustix::process::geteuid().is_root() {
+        eprintln!("fatal: the APFS backend runs as one local user; do not use sudo");
+        std::process::exit(128);
+    }
     let mut argv: Vec<String> = std::env::args().skip(1).collect();
     // Global options before the command.
     while let Some(first) = argv.first().cloned() {
@@ -75,7 +89,9 @@ fn main() {
             }
         }
     }
-    let direct = rustix::process::geteuid().is_root() || std::env::var("LAYR_DIRECT").map(|v| v == "1").unwrap_or(false);
+    let direct = cfg!(target_os = "macos")
+        || rustix::process::geteuid().is_root()
+        || std::env::var("LAYR_DIRECT").map(|v| v == "1").unwrap_or(false);
     let code = if direct {
         let uid = rustix::process::getuid().as_raw();
         let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());

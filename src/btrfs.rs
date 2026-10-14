@@ -36,7 +36,7 @@ fn split_parent(path: &Path) -> Result<(File, String)> {
 }
 
 /// True when `path` lives on a btrfs file system.
-pub fn is_btrfs(path: &Path) -> bool {
+pub fn is_supported(path: &Path) -> bool {
     match rustix::fs::statfs(path) {
         Ok(st) => st.f_type as i64 == BTRFS_SUPER_MAGIC,
         Err(_) => false,
@@ -47,7 +47,7 @@ pub fn is_btrfs(path: &Path) -> bool {
 pub fn is_subvolume(path: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     match std::fs::symlink_metadata(path) {
-        Ok(m) => m.is_dir() && m.ino() == FIRST_FREE_OBJECTID && is_btrfs(path),
+        Ok(m) => m.is_dir() && m.ino() == FIRST_FREE_OBJECTID && is_supported(path),
         Err(_) => false,
     }
 }
@@ -160,12 +160,18 @@ pub fn send_no_data(parent: &Path, child: &Path) -> Result<Vec<u8>> {
 }
 
 /// Start a full data `btrfs send` (with an optional parent) writing to stdout of the child.
-pub fn send_command(parent: Option<&Path>, child: &Path) -> Command {
+pub fn send_command(parent: Option<&Path>, child: &Path) -> Result<Command> {
     let mut c = Command::new("btrfs");
     c.arg("send").arg("-q");
     if let Some(p) = parent {
         c.arg("-p").arg(p);
     }
     c.arg(child);
-    c
+    Ok(c)
+}
+
+/// Identity retained by btrfs snapshots, used to stage file moves.
+pub fn file_identity(path: &Path) -> Result<Vec<u8>> {
+    use std::os::unix::fs::MetadataExt;
+    Ok(std::fs::symlink_metadata(path)?.ino().to_le_bytes().to_vec())
 }

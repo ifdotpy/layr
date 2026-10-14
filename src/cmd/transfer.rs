@@ -2,7 +2,6 @@
 
 use super::{exit, here};
 use crate::args::{parse, Spec};
-use crate::btrfs;
 use crate::changes;
 use crate::ctx::Ctx;
 use crate::fsutil;
@@ -11,6 +10,7 @@ use crate::model::{Record, StateKind};
 use crate::privs::as_caller_fs;
 use crate::repo::{skip_path, Repo};
 use crate::revs;
+use crate::storage as btrfs;
 use crate::store::Project;
 use anyhow::{bail, Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
@@ -495,7 +495,7 @@ pub fn run_backup(ctx: &Ctx, repo: &Repo, root: &Path, full: bool, writer: (u32,
         let seq = next_seq(&m);
         let file = unique_name(&dir, &m, seq, &format!("{}.stream.zst", ids::short(&id)));
         let pp = parent.as_ref().map(|p| repo.p.state_path(p));
-        let (sha, bytes) = compress_to(btrfs::send_command(pp.as_deref(), &repo.p.state_path(&id)), &dir.join(&file), writer)?;
+        let (sha, bytes) = compress_to(btrfs::send_command(pp.as_deref(), &repo.p.state_path(&id))?, &dir.join(&file), writer)?;
         m.items.push(Item {
             seq,
             kind: "state".into(),

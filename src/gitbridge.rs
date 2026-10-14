@@ -448,7 +448,7 @@ pub fn import_commit(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str, author
         let mut parents = Vec::new();
         match &prev {
             Some((pst, pc)) => {
-                crate::btrfs::snapshot(&repo.state_root(pst)?, &work, false)?;
+                crate::storage::snapshot(&repo.state_root(pst)?, &work, false)?;
                 let out = base_cmd(&s).args(["diff", "--name-only", "-z", "--no-renames", pc, commit]).output()?;
                 let paths: Vec<String> = out
                     .stdout
@@ -460,7 +460,7 @@ pub fn import_commit(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str, author
                 parents.push(pst.clone());
             }
             None => {
-                crate::btrfs::create_subvolume(&work)?;
+                crate::storage::create_subvolume(&work)?;
                 materialize(&s, commit, &work, None, None)?;
             }
         }
@@ -480,7 +480,7 @@ pub fn import_commit(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str, author
         st.time = time.max(1);
         Ok(st)
     })();
-    let _ = crate::btrfs::delete_tree(&work);
+    let _ = crate::storage::delete_tree(&work);
     let st = res?;
     let mut rec = Record::new("import");
     rec.states.push(st.clone());
@@ -785,13 +785,13 @@ pub fn make_git_layer(repo: &Repo, line: &Line, state: &str, w: &Path) -> Result
     }
     let g = w.join(".git");
     if let Ok(m) = std::fs::symlink_metadata(&g) {
-        if m.is_dir() && !crate::btrfs::is_subvolume(&g) && std::fs::read_dir(&g)?.next().is_none() {
+        if m.is_dir() && !crate::storage::is_subvolume(&g) && std::fs::read_dir(&g)?.next().is_none() {
             std::fs::remove_dir(&g)?;
         } else {
             return Ok(());
         }
     }
-    crate::btrfs::create_subvolume(&g)?;
+    crate::storage::create_subvolume(&g)?;
     let s = store(repo);
     for d in ["objects/info", "refs/heads", "refs/tags", "info"] {
         std::fs::create_dir_all(g.join(d))?;
@@ -820,7 +820,7 @@ pub fn make_git_layer(repo: &Repo, line: &Line, state: &str, w: &Path) -> Result
         if idx.exists() {
             let src = std::fs::File::open(&idx)?;
             let dst = std::fs::File::create(g.join("index"))?;
-            if crate::btrfs::clone_file(&src, &dst).is_err() {
+            if crate::storage::clone_file(&src, &dst).is_err() {
                 std::fs::copy(&idx, g.join("index"))?;
             }
         }
@@ -849,8 +849,7 @@ pub fn refresh_git_layer(repo: &Repo, line: &Line) -> Result<()> {
     };
     // Only the layer layr made (a nested subvolume); a .git folder the line owner made is its own.
     {
-        use std::os::unix::fs::MetadataExt;
-        if dir.metadata()?.ino() != 256 {
+        if !fsutil::is_layer(&repo.working(line), ".git", &fsutil::meta_of(&dir.metadata()?)) {
             return Ok(());
         }
     }
@@ -871,7 +870,7 @@ pub fn refresh_git_layer(repo: &Repo, line: &Line) -> Result<()> {
                 "index",
                 &mut |f| {
                     let src = std::fs::File::open(&idx)?;
-                    if crate::btrfs::clone_file(&src, f).is_err() {
+                    if crate::storage::clone_file(&src, f).is_err() {
                         std::io::copy(&mut std::fs::File::open(&idx)?, &mut &*f)?;
                     }
                     Ok(())

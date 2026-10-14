@@ -1,0 +1,386 @@
+//! APFS local-user backend. Clones data extents, scans directories, and rejects source changes.
+//! These are verified directory copies, not APFS volume snapshots or a btrfs send transport.
+use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::BTreeMap,
+    fs::{self, File},
+    io,
+    os::unix::fs::{MetadataExt, PermissionsExt},
+    path::Path,
+    process::Command,
+};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubvolInfo {
+    pub uuid: String,
+    pub received_uuid: Option<String>,
+    pub parent_uuid: Option<String>,
+    pub readonly: bool,
+}
+pub fn is_supported(path: &Path) -> bool {
+    crate::sys::apfs_supported(path)
+}
+pub fn is_subvolume(path: &Path) -> bool {
+    path.is_dir() && subvol_info(path).is_ok()
+}
+pub fn subvol_info(path: &Path) -> Result<SubvolInfo> {
+    Ok(serde_json::from_slice(&crate::sys::apfs_marker(path, None)?)?)
+}
+fn mark(path: &Path, parent: Option<String>, readonly: bool) -> Result<()> {
+    let info = SubvolInfo { uuid: crate::ids::new_id(), received_uuid: None, parent_uuid: parent, readonly };
+    let mode = fs::symlink_metadata(path)?.mode() & 0o7777;
+    if mode & 0o200 == 0 {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o200))?;
+    }
+    let marked = crate::sys::apfs_marker(path, Some(&serde_json::to_vec(&info)?));
+    if mode & 0o200 == 0 {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+    }
+    marked?;
+    Ok(())
+}
+pub fn create_subvolume(path: &Path) -> Result<()> {
+    if !is_supported(path.parent().context("missing parent")?) {
+        bail!("layr requires case-sensitive APFS on macOS");
+    }
+    fs::create_dir(path)?;
+    if let Err(e) = mark(path, None, false) {
+        let _ = fs::remove_dir(path);
+        return Err(e);
+    }
+    Ok(())
+}
+// Compare inode, device, permissions, size, mtime and ctime before and after cloning.
+// Do not use atime: reading the source can change it.
+type Fingerprint = (u64, u64, u32, u64, i64, i64, i64, i64);
+fn scan(root: &Path) -> Result<BTreeMap<String, Fingerprint>> {
+    fn visit(root: &Path, rel: &str, out: &mut BTreeMap<String, Fingerprint>) -> Result<()> {
+        let path = root.join(rel);
+        let m = fs::symlink_metadata(&path)?;
+        out.insert(rel.into(), (m.dev(), m.ino(), m.mode(), m.len(), m.mtime(), m.mtime_nsec(), m.ctime(), m.ctime_nsec()));
+        if m.is_dir() && (rel.is_empty() || !is_subvolume(&path)) {
+            for e in fs::read_dir(path)? {
+                let e = e?;
+                let name = e.file_name().into_string().map_err(|_| anyhow::anyhow!("non-UTF-8 file name"))?;
+                let next = if rel.is_empty() { name } else { format!("{rel}/{name}") };
+                visit(root, &next, out)?;
+            }
+        }
+        Ok(())
+    }
+    let mut out = BTreeMap::new();
+    visit(root, "", &mut out)?;
+    Ok(out)
+}
+pub fn file_identity(path: &Path) -> Result<Vec<u8>> {
+    match crate::sys::apfs_attribute(path, c"com.layr.origin", None) {
+        Ok(v) => Ok(v),
+        Err(e) if e.raw_os_error() == Some(libc::ENOATTR) => {
+            use std::os::macos::fs::MetadataExt as MacMetadataExt;
+            let m = fs::symlink_metadata(path)?;
+            Ok(format!("{}:{}:{}:{}", m.dev(), m.ino(), m.st_birthtime(), m.st_birthtime_nsec()).into_bytes())
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+fn copy_tree(src: &Path, dst: &Path, root: bool, links: &mut BTreeMap<(u64, u64), std::path::PathBuf>) -> Result<()> {
+    let m = fs::symlink_metadata(src)?;
+    if m.is_dir() {
+        fs::create_dir(dst)?;
+        if root || !is_subvolume(src) {
+            for e in fs::read_dir(src)? {
+                let e = e?;
+                copy_tree(&e.path(), &dst.join(e.file_name()), false, links)?;
+            }
+        }
+        if root || !is_subvolume(src) {
+            crate::sys::apfs_copy_metadata(src, dst)?;
+            crate::sys::apfs_immutable(dst, false)?;
+        }
+        fs::set_permissions(dst, fs::Permissions::from_mode(m.mode() & 0o7777))?;
+        crate::fsutil::set_mtime(&File::open(dst)?, m.mtime(), m.mtime_nsec())?;
+    } else if m.file_type().is_symlink() {
+        std::os::unix::fs::symlink(fs::read_link(src)?, dst)?;
+        crate::sys::apfs_copy_metadata(src, dst)?;
+        crate::sys::apfs_immutable(dst, false)?;
+    } else if m.is_file() {
+        let key = (m.dev(), m.ino());
+        if let Some(first) = links.get(&key) {
+            fs::hard_link(first, dst)?;
+        } else {
+            crate::sys::apfs_clone(src, dst).with_context(|| format!("clone {}", src.display()))?;
+            crate::sys::apfs_immutable(dst, false)?;
+            links.insert(key, dst.to_path_buf());
+        }
+    } else {
+        bail!("cannot snapshot special file {}", src.display());
+    }
+    // macOS requires write access for setxattr, including on an owned read-only file.
+    let needs_write = !m.file_type().is_symlink() && m.mode() & 0o200 == 0;
+    if needs_write {
+        fs::set_permissions(dst, fs::Permissions::from_mode((m.mode() & 0o7777) | 0o200))?;
+    }
+    crate::sys::apfs_attribute(dst, c"com.layr.origin", Some(&file_identity(src)?))
+        .with_context(|| format!("set file identity on {}", dst.display()))?;
+    if needs_write {
+        fs::set_permissions(dst, fs::Permissions::from_mode(m.mode() & 0o7777))?;
+    }
+    Ok(())
+}
+fn seal(path: &Path, readonly: bool) -> Result<()> {
+    let m = fs::symlink_metadata(path)?;
+    if !readonly {
+        crate::sys::apfs_immutable(path, false)?;
+        if m.is_dir() && m.mode() & 0o700 != 0o700 {
+            fs::set_permissions(path, fs::Permissions::from_mode((m.mode() & 0o7777) | 0o700))?;
+        }
+    }
+    if m.is_dir() {
+        for e in fs::read_dir(path)? {
+            seal(&e?.path(), readonly)?;
+        }
+    }
+    if readonly {
+        crate::sys::apfs_immutable(path, true)?;
+    }
+    Ok(())
+}
+pub fn snapshot(src: &Path, dst: &Path, readonly: bool) -> Result<()> {
+    let _t = crate::trace::span(format!("APFS clone {}", dst.display()));
+    if fs::symlink_metadata(dst).is_ok() {
+        bail!("snapshot destination already exists");
+    }
+    let parent = subvol_info(src)?.uuid;
+    let before = scan(src)?;
+    let temp = dst.with_file_name(format!(".apfs-{}", crate::ids::new_id()));
+    let mut published = false;
+    let result = (|| -> Result<()> {
+        copy_tree(src, &temp, true, &mut BTreeMap::new())?;
+        if before != scan(src)? {
+            bail!("source changed during APFS snapshot; retry when writers are idle");
+        }
+        mark(&temp, Some(parent), readonly)?;
+        crate::sys::apfs_publish(&temp, dst)?;
+        published = true;
+        if readonly {
+            seal(dst, true)?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = delete_tree(&temp);
+        if published {
+            let _ = delete_tree(dst);
+        }
+    }
+    result
+}
+pub fn delete_tree(path: &Path) -> Result<()> {
+    let m = match fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    seal(path, false)?;
+    if m.is_dir() {
+        fs::remove_dir_all(path)?;
+    } else {
+        fs::remove_file(path)?;
+    }
+    Ok(())
+}
+pub fn delete_subvolume(path: &Path) -> Result<()> {
+    delete_tree(path)
+}
+pub fn is_not_empty(e: &anyhow::Error) -> bool {
+    e.chain().any(|e| e.downcast_ref::<io::Error>().is_some_and(|e| e.raw_os_error() == Some(libc::ENOTEMPTY)))
+}
+// APFS cannot reflink into an existing destination inode. Callers use their byte-copy fallback.
+pub fn clone_file(_src: &File, _dst: &File) -> io::Result<()> {
+    Err(io::Error::from_raw_os_error(libc::ENOTSUP))
+}
+pub fn clone_range(_src: &File, _off: u64, _len: u64, _dst: &File, _dst_off: u64) -> io::Result<()> {
+    Err(io::Error::from_raw_os_error(libc::ENOTSUP))
+}
+pub fn send_command(_parent: Option<&Path>, _child: &Path) -> Result<Command> {
+    bail!("APFS does not yet support the btrfs transfer format")
+}
+pub fn candidates(parent: &Path, child: &Path) -> Result<Vec<crate::changes::Change>> {
+    let (a, b) = (scan(parent)?, scan(child)?);
+    let names: std::collections::BTreeSet<_> = a.keys().chain(b.keys()).filter(|s| !s.is_empty()).collect();
+    let mut changes: BTreeMap<_, _> = names
+        .into_iter()
+        .map(|p| {
+            (
+                p.clone(),
+                crate::changes::Change {
+                    path: p.clone(),
+                    old_path: None,
+                    old: crate::fsutil::lmeta(parent, p),
+                    new: crate::fsutil::lmeta(child, p),
+                    ranges: None,
+                },
+            )
+        })
+        .collect();
+    let mut removed: BTreeMap<Vec<u8>, Vec<String>> = BTreeMap::new();
+    let mut added: BTreeMap<Vec<u8>, Vec<String>> = BTreeMap::new();
+    for (p, c) in &changes {
+        if c.new.is_none() {
+            removed.entry(file_identity(&parent.join(p))?).or_default().push(p.clone());
+        }
+        if c.old.is_none() {
+            added.entry(file_identity(&child.join(p))?).or_default().push(p.clone());
+        }
+    }
+    for (id, srcs) in removed {
+        let Some(dsts) = added.get(&id) else {
+            continue;
+        };
+        // Multiple hard links have the same identity. Do not invent a unique move.
+        if srcs.len() != 1 || dsts.len() != 1 {
+            continue;
+        }
+        let (src, dst) = (&srcs[0], &dsts[0]);
+        if changes[src].old.as_ref().map(|m| m.ftype) != changes[dst].new.as_ref().map(|m| m.ftype) {
+            continue;
+        }
+        let old = changes.remove(src).unwrap().old;
+        let c = changes.get_mut(dst).unwrap();
+        c.old = old;
+        c.old_path = Some(src.clone());
+    }
+    for (p, c) in &mut changes {
+        if c.old_path.is_none()
+            && c.old.as_ref().is_some_and(|m| m.is_file())
+            && c.new.as_ref().is_some_and(|m| m.is_file())
+            && file_identity(&parent.join(p))? == file_identity(&child.join(p))?
+        {
+            c.ranges = Some(changed_ranges(&parent.join(p), &child.join(p))?);
+        }
+    }
+    Ok(changes.into_values().collect())
+}
+
+// Compare fixed blocks when APFS cannot report changed extents. Adjacent blocks coalesce.
+fn changed_ranges(a: &Path, b: &Path) -> Result<Vec<(u64, u64)>> {
+    use std::io::Read;
+    let (mut a, mut b) = (File::open(a)?, File::open(b)?);
+    let (alen, blen) = (a.metadata()?.len(), b.metadata()?.len());
+    let mut ranges: Vec<(u64, u64)> = Vec::new();
+    let (mut ab, mut bb) = ([0u8; 4096], [0u8; 4096]);
+    let mut pos = 0;
+    while pos < alen.max(blen) {
+        let an = (alen.saturating_sub(pos).min(4096)) as usize;
+        let bn = (blen.saturating_sub(pos).min(4096)) as usize;
+        a.read_exact(&mut ab[..an])?;
+        b.read_exact(&mut bb[..bn])?;
+        let len = an.max(bn) as u64;
+        if ab[..an] != bb[..bn] {
+            match ranges.last_mut() {
+                Some((start, n)) if *start + *n == pos => *n += len,
+                _ => ranges.push((pos, len)),
+            }
+        }
+        pos += len;
+    }
+    Ok(ranges)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    struct Sandbox(PathBuf);
+    impl Sandbox {
+        fn new() -> Self {
+            let base = std::env::var_os("LAYR_APFS_TEST_ROOT").expect("set LAYR_APFS_TEST_ROOT to a case-sensitive APFS volume");
+            let path = PathBuf::from(base).join(format!("backend-test-{}", crate::ids::new_id()));
+            fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for Sandbox {
+        fn drop(&mut self) {
+            let _ = delete_tree(&self.0);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a case-sensitive APFS test volume"]
+    fn snapshot_preserves_files_and_excludes_layers() -> Result<()> {
+        let s = Sandbox::new();
+        let src = s.0.join("work");
+        create_subvolume(&src)?;
+        fs::write(src.join("a"), b"lower")?;
+        fs::write(src.join("A"), b"upper")?;
+        fs::write(src.join("readonly"), b"read only")?;
+        fs::set_permissions(src.join("readonly"), fs::Permissions::from_mode(0o444))?;
+        fs::create_dir(src.join("dir"))?;
+        crate::sys::apfs_attribute(&src.join("dir"), c"com.layr.test", Some(b"directory metadata"))?;
+        fs::hard_link(src.join("a"), src.join("hard"))?;
+        std::os::unix::fs::symlink("a", src.join("link"))?;
+        fs::set_permissions(src.join("A"), fs::Permissions::from_mode(0o755))?;
+        create_subvolume(&src.join("layer"))?;
+        fs::write(src.join("layer/cache"), b"not in history")?;
+        fs::create_dir(src.join("readonly-dir"))?;
+        fs::write(src.join("readonly-dir/file"), b"data")?;
+        fs::set_permissions(src.join("readonly-dir"), fs::Permissions::from_mode(0o555))?;
+        fs::set_permissions(&src, fs::Permissions::from_mode(0o555))?;
+        let dst = s.0.join("state");
+        snapshot(&src, &dst, true)?;
+        assert_eq!(fs::read(dst.join("a"))?, b"lower");
+        assert_eq!(fs::read(dst.join("A"))?, b"upper");
+        assert_eq!(crate::sys::apfs_attribute(&dst.join("dir"), c"com.layr.test", None)?, b"directory metadata");
+        assert_eq!(fs::symlink_metadata(dst.join("A"))?.mode() & 0o777, 0o755);
+        assert_eq!(fs::read_link(dst.join("link"))?, Path::new("a"));
+        assert_eq!(fs::symlink_metadata(dst.join("a"))?.ino(), fs::symlink_metadata(dst.join("hard"))?.ino());
+        assert!(dst.join("layer").is_dir());
+        assert!(!dst.join("layer/cache").exists());
+        assert!(fs::write(dst.join("a"), b"bad").is_err());
+        assert!(fs::write(dst.join("new"), b"bad").is_err());
+        assert!(subvol_info(&dst)?.readonly);
+        fs::write(src.join("a"), b"new")?;
+        assert_eq!(fs::read(dst.join("a"))?, b"lower");
+        let branch = s.0.join("branch");
+        snapshot(&dst, &branch, false)?;
+        fs::write(branch.join("a"), b"branch")?;
+        assert_eq!(fs::read(dst.join("a"))?, b"lower");
+        // An existing destination must remain intact on failure.
+        assert!(snapshot(&src, &branch, false).is_err());
+        assert_eq!(fs::read(branch.join("a"))?, b"branch");
+        delete_tree(&dst)?;
+        assert!(!dst.exists());
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a case-sensitive APFS test volume"]
+    fn moves_and_block_ranges_survive_clones() -> Result<()> {
+        let s = Sandbox::new();
+        let src = s.0.join("work");
+        create_subvolume(&src)?;
+        fs::write(src.join("file"), vec![0u8; 16384])?;
+        let base = s.0.join("base");
+        snapshot(&src, &base, true)?;
+        let branch = s.0.join("branch");
+        snapshot(&base, &branch, false)?;
+        fs::rename(branch.join("file"), branch.join("moved"))?;
+        fs::write(branch.join("moved"), vec![1u8; 16384])?;
+        let next = s.0.join("next");
+        snapshot(&branch, &next, true)?;
+        let changes = candidates(&base, &next)?;
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].old_path.as_deref(), Some("file"));
+        assert_eq!(changes[0].path, "moved");
+        fs::rename(branch.join("moved"), branch.join("file"))?;
+        let mut data = vec![0u8; 16384];
+        data[8192] = 1;
+        fs::write(branch.join("file"), data)?;
+        let changes = candidates(&base, &branch)?;
+        assert_eq!(changes[0].ranges, Some(vec![(8192, 4096)]));
+        Ok(())
+    }
+}

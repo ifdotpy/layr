@@ -160,6 +160,7 @@ pub fn fork() -> io::Result<Fork> {
 }
 
 /// Make the child of `cmd` drop to a user before `exec`: its groups, then gid, then uid.
+#[cfg(target_os = "linux")]
 pub fn switch_user_before_exec(cmd: &mut Command, uid: u32, gid: u32, groups: Vec<u32>) {
     use std::os::unix::process::CommandExt;
     let gids: Vec<rustix::process::Gid> = groups.iter().map(|g| rustix::process::Gid::from_raw(*g)).collect();
@@ -180,6 +181,7 @@ pub fn switch_user_before_exec(cmd: &mut Command, uid: u32, gid: u32, groups: Ve
 }
 
 /// Set the file system uid and gid of the calling thread; returns the previous ids.
+#[cfg(target_os = "linux")]
 pub fn set_fs_ids(uid: u32, gid: u32) -> Result<(u32, u32)> {
     // SAFETY: setfsgid/setfsuid have no memory arguments; the second call with the same value
     // returns the current id, which confirms the change.
@@ -200,7 +202,7 @@ pub fn set_fs_ids(uid: u32, gid: u32) -> Result<(u32, u32)> {
 /// Set the supplementary groups of the process (the service child is single threaded).
 pub fn set_groups(groups: &[u32]) -> io::Result<()> {
     // SAFETY: the pointer and length describe a valid slice of gid_t for the call.
-    let rc = unsafe { libc::setgroups(groups.len(), groups.as_ptr()) };
+    let rc = unsafe { libc::setgroups(groups.len() as _, groups.as_ptr()) };
     if rc != 0 {
         return Err(io::Error::last_os_error());
     }
@@ -277,10 +279,136 @@ pub fn user_groups(name: &str, gid: u32) -> Vec<u32> {
     let mut n: libc::c_int = groups.len() as libc::c_int;
     // SAFETY: `groups` has room for `n` entries; getgrouplist writes at most `n` and stores the
     // real count in `n`.
-    let rc = unsafe { libc::getgrouplist(c.as_ptr(), gid, groups.as_mut_ptr(), &mut n) };
+    let rc = unsafe { libc::getgrouplist(c.as_ptr(), gid as _, groups.as_mut_ptr().cast(), &mut n) };
     if rc < 0 {
         return vec![gid];
     }
     groups.truncate(n as usize);
     groups
+}
+
+#[cfg(target_os = "macos")]
+pub fn switch_user_before_exec(_: &mut Command, _: u32, _: u32, _: Vec<u32>) {
+    unreachable!("privileged execution is disabled on macOS")
+}
+#[cfg(target_os = "macos")]
+pub fn set_fs_ids(_: u32, _: u32) -> Result<(u32, u32)> {
+    anyhow::bail!("file system credential switching is Linux only")
+}
+
+#[cfg(target_os = "macos")]
+fn cpath(path: &std::path::Path) -> io::Result<CString> {
+    use std::os::unix::ffi::OsStrExt;
+    CString::new(path.as_os_str().as_bytes()).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in path"))
+}
+#[cfg(target_os = "macos")]
+pub fn apfs_supported(path: &std::path::Path) -> bool {
+    let Ok(path) = cpath(path) else {
+        return false;
+    };
+    // SAFETY: statfs initializes a valid native structure; path is NUL-terminated.
+    unsafe {
+        let mut stat: libc::statfs = std::mem::zeroed();
+        libc::statfs(path.as_ptr(), &mut stat) == 0
+            && CStr::from_ptr(stat.f_fstypename.as_ptr()).to_bytes() == b"apfs"
+            && libc::pathconf(path.as_ptr(), libc::_PC_CASE_SENSITIVE) == 1
+    }
+}
+#[cfg(target_os = "macos")]
+pub fn apfs_clone(src: &std::path::Path, dst: &std::path::Path) -> io::Result<()> {
+    let (src, dst) = (cpath(src)?, cpath(dst)?);
+    // SAFETY: both paths are valid C strings; CLONE_NOFOLLOW_ANY prevents path traversal through symlinks.
+    if unsafe { libc::clonefile(src.as_ptr(), dst.as_ptr(), 0x0008 | 0x0002) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+#[cfg(target_os = "macos")]
+pub fn apfs_marker(path: &std::path::Path, value: Option<&[u8]>) -> io::Result<Vec<u8>> {
+    apfs_attribute(path, c"com.layr.subvolume", value)
+}
+#[cfg(target_os = "macos")]
+pub fn apfs_attribute(path: &std::path::Path, name: &CStr, value: Option<&[u8]>) -> io::Result<Vec<u8>> {
+    let path = cpath(path)?;
+    // SAFETY: paths and buffers remain live for the calls, the buffer length is bounded.
+    unsafe {
+        if let Some(v) = value {
+            if libc::setxattr(path.as_ptr(), name.as_ptr(), v.as_ptr().cast(), v.len(), 0, libc::XATTR_NOFOLLOW) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            return Ok(Vec::new());
+        }
+        let mut v = vec![0u8; 4096];
+        let n = libc::getxattr(path.as_ptr(), name.as_ptr(), v.as_mut_ptr().cast(), v.len(), 0, libc::XATTR_NOFOLLOW);
+        if n < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        v.truncate(n as usize);
+        Ok(v)
+    }
+}
+#[cfg(target_os = "macos")]
+pub fn apfs_immutable(path: &std::path::Path, readonly: bool) -> io::Result<()> {
+    use std::os::macos::fs::MetadataExt;
+    let flags = std::fs::symlink_metadata(path)?.st_flags();
+    let next = if readonly { flags | libc::UF_IMMUTABLE } else { flags & !libc::UF_IMMUTABLE };
+    if next == flags {
+        return Ok(());
+    }
+    let flags = next;
+    let path = cpath(path)?;
+    // SAFETY: the path is valid; lchflags changes the entry itself, never the target of a link.
+    if unsafe { libc::lchflags(path.as_ptr(), flags) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub fn apfs_publish(src: &std::path::Path, dst: &std::path::Path) -> io::Result<()> {
+    let (src, dst) = (cpath(src)?, cpath(dst)?);
+    // SAFETY: both paths are valid C strings. RENAME_EXCL never replaces an existing entry.
+    if unsafe { libc::renamex_np(src.as_ptr(), dst.as_ptr(), libc::RENAME_EXCL) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub fn apfs_copy_metadata(src: &std::path::Path, dst: &std::path::Path) -> io::Result<()> {
+    let (src, dst) = (cpath(src)?, cpath(dst)?);
+    // SAFETY: both paths are valid C strings. NOFOLLOW applies to both final entries.
+    if unsafe {
+        libc::copyfile(src.as_ptr(), dst.as_ptr(), std::ptr::null_mut(), libc::COPYFILE_METADATA | libc::COPYFILE_NOFOLLOW)
+    } != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub fn apfs_clone_at(src: std::os::fd::BorrowedFd<'_>, dir: std::os::fd::BorrowedFd<'_>, name: &str) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let name = CString::new(name)?;
+    // SAFETY: both descriptors are live; name is one NUL-terminated component.
+    if unsafe { libc::fclonefileat(src.as_raw_fd(), dir.as_raw_fd(), name.as_ptr(), 0x0002) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+#[cfg(target_os = "macos")]
+pub fn apfs_unseal_fd(fd: std::os::fd::BorrowedFd<'_>) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: fd is live; fstat initializes the structure before its flags are read.
+    unsafe {
+        let mut st: libc::stat = std::mem::zeroed();
+        if libc::fstat(fd.as_raw_fd(), &mut st) != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if st.st_flags & libc::UF_IMMUTABLE != 0 && libc::fchflags(fd.as_raw_fd(), st.st_flags & !libc::UF_IMMUTABLE) != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
 }

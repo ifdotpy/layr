@@ -88,7 +88,7 @@ pub fn branch(ctx: &Ctx, args: &[String]) -> Result<i32> {
             );
             rec.data = serde_json::json!({"name": l.name, "final_state": last});
             repo.commit_record(ctx, rec)?;
-            crate::btrfs::delete_tree(&repo.working(&l))?;
+            crate::storage::delete_tree(&repo.working(&l))?;
             repo.drop_stage(&l)?;
             // The owner of a deleted line no longer reads the git objects.
             crate::gitbridge::sync_store_access(repo)?;

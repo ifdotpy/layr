@@ -1,7 +1,6 @@
 //! Repository operations on one project: snapshots, lines, staging, status and in-place updates.
 
 use crate::access::{Policy, Role, Rule, Who};
-use crate::btrfs;
 use crate::changes::{self, Change};
 use crate::ctx::Ctx;
 use crate::db::need;
@@ -9,6 +8,7 @@ use crate::fsutil;
 use crate::ids;
 use crate::ignore_rules::Rules;
 use crate::model::{Conflict, Line, LineChange, LineState, Record, StateKind, StateRec};
+use crate::storage as btrfs;
 use crate::store::{check_name, Project};
 use crate::tree::Tree;
 use anyhow::{bail, Context, Result};
@@ -1037,7 +1037,7 @@ pub fn regenerable_folders(w: &Path) -> Vec<String> {
                         if ignored.ignored(&rel, true) {
                             found.push(rel);
                         }
-                    } else if m.ino != 256 {
+                    } else if !fsutil::is_layer(w, &rel, &m) {
                         // Another subvolume (a layer of the machine setting) is not entered.
                         stack.push(rel);
                     }
@@ -1054,7 +1054,7 @@ pub fn regenerable_folders(w: &Path) -> Vec<String> {
 pub fn make_layer(w: &Path, path: &str, uid: u32, gid: u32) -> Result<()> {
     let t = Tree::open(w)?;
     if let Some(m) = t.stat(path) {
-        if m.is_dir() && m.ino == 256 {
+        if fsutil::is_layer(w, path, &m) {
             return Ok(());
         }
         if m.is_dir() && t.list(path)?.is_empty() {
@@ -1120,7 +1120,7 @@ pub fn convert_layer(w: &Path, path: &str, uid: u32, gid: u32) -> Result<bool> {
             return Ok(true);
         }
     };
-    if !m.is_dir() || m.ino == 256 {
+    if !m.is_dir() || fsutil::is_layer(w, path, &m) {
         return Ok(false);
     }
     let (tmp, old) = (format!("{path}.layr-new"), format!("{path}.layr-old"));

@@ -8,16 +8,18 @@
 
 use crate::fsutil::{meta_of, Meta};
 use anyhow::{anyhow, bail, Context, Result};
-use rustix::fs::{AtFlags, FileType, Mode, OFlags, ResolveFlags};
+use rustix::fs::{AtFlags, FileType, Mode, OFlags};
 use std::fs::File;
 use std::io;
 use std::os::fd::{AsFd, OwnedFd};
 use std::path::{Path, PathBuf};
 
-fn resolve() -> ResolveFlags {
-    ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS
+#[cfg(target_os = "linux")]
+fn resolve() -> rustix::fs::ResolveFlags {
+    rustix::fs::ResolveFlags::BENEATH | rustix::fs::ResolveFlags::NO_SYMLINKS | rustix::fs::ResolveFlags::NO_MAGICLINKS
 }
 
+#[cfg(target_os = "linux")]
 fn openat2(dir: impl AsFd, path: &str, flags: OFlags) -> io::Result<OwnedFd> {
     let p = if path.is_empty() { "." } else { path };
     Ok(rustix::fs::openat2(dir, p, flags | OFlags::CLOEXEC, Mode::empty(), resolve())?)
@@ -45,7 +47,7 @@ pub struct Tree {
 
 impl Tree {
     pub fn open(path: &Path) -> Result<Tree> {
-        let fd = rustix::fs::open(path, OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty())
+        let fd = rustix::fs::open(path, path_flags() | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty())
             .map_err(|e| anyhow!("open {}: {e}", path.display()))?;
         Ok(Tree { root: fd, path: path.to_path_buf() })
     }
@@ -73,7 +75,7 @@ impl Tree {
         }
         let (d, n) = self.parent(rel).ok()?;
         // Open the entry itself (no follow) to get std metadata.
-        let fd = rustix::fs::openat(&d, n, OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty()).ok()?;
+        let fd = rustix::fs::openat(&d, n, entry_flags() | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty()).ok()?;
         File::from(fd).metadata().ok().map(|m| meta_of(&m))
     }
 
@@ -134,10 +136,30 @@ impl Tree {
             &d,
             n,
             OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::from_raw_mode(mode),
+            Mode::from_raw_mode(mode as _),
         )
         .map_err(|e| anyhow!("create {rel}: {e}"))?;
         Ok(File::from(fd))
+    }
+
+    /// Clone a new APFS file without a byte copy. Existing entries stay untouched.
+    #[cfg(target_os = "macos")]
+    pub fn clone_new_file(&self, src: &File, rel: &str) -> Result<Option<File>> {
+        let (dir, name) = self.parent(rel)?;
+        if lstat_at(&dir, name).is_some() {
+            return Ok(None);
+        }
+        match crate::sys::apfs_clone_at(src.as_fd(), dir.as_fd(), name) {
+            Ok(()) => {}
+            Err(e) if matches!(e.raw_os_error(), Some(libc::EXDEV | libc::ENOTSUP)) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        }
+        let fd = rustix::fs::openat(&dir, name, OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty())?;
+        crate::sys::apfs_unseal_fd(fd.as_fd())?;
+        let mode = rustix::fs::fstat(&fd)?.st_mode;
+        rustix::fs::fchmod(&fd, Mode::from_raw_mode(mode | 0o200))?;
+        let fd = rustix::fs::openat(&dir, name, OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty())?;
+        Ok(Some(File::from(fd)))
     }
 
     /// An existing regular file opened for writing, or None (absent, a link, not a file).
@@ -200,7 +222,10 @@ impl Tree {
 
     pub fn chown(&self, rel: &str, u: u32, g: u32) -> Result<()> {
         if rel.is_empty() {
+            #[cfg(target_os = "linux")]
             rustix::fs::chownat(&self.root, "", Some(uid(u)), Some(gid(g)), AtFlags::EMPTY_PATH)?;
+            #[cfg(target_os = "macos")]
+            rustix::fs::fchown(&self.root, Some(uid(u)), Some(gid(g)))?;
             return Ok(());
         }
         let (d, n) = self.parent(rel)?;
@@ -218,7 +243,7 @@ impl Tree {
             rustix::fs::openat(&d, n, OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK, Mode::empty()).ok()
         };
         if let Some(fd) = fd {
-            rustix::fs::fchmod(&fd, Mode::from_raw_mode(mode & 0o7777))?;
+            rustix::fs::fchmod(&fd, Mode::from_raw_mode((mode & 0o7777) as _))?;
         }
         Ok(())
     }
@@ -231,7 +256,15 @@ impl Tree {
 
     pub fn create_subvolume(&self, rel: &str) -> Result<()> {
         let (d, n) = self.parent(rel)?;
-        crate::sys::subvol_create(d.as_fd(), n)
+        #[cfg(target_os = "linux")]
+        {
+            crate::sys::subvol_create(d.as_fd(), n)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let _ = (d, n);
+            crate::storage::create_subvolume(&self.path.join(rel))
+        }
     }
 
     /// Destroy every subvolume nested in the tree (before the tree root is deleted).
@@ -261,8 +294,8 @@ fn list_fd(dir: &OwnedFd) -> Result<Vec<String>> {
     Ok(v)
 }
 
-fn is_subvol_root(st: &rustix::fs::Stat, parent_dev: u64) -> bool {
-    st.st_ino == 256 && st.st_dev != parent_dev
+fn is_subvol_root(st: &rustix::fs::Stat, parent_dev: rustix::fs::Dev) -> bool {
+    cfg!(target_os = "linux") && st.st_ino == 256 && st.st_dev != parent_dev
 }
 
 /// Remove `name` in the folder `dir`, recursively, never following links.
@@ -282,7 +315,7 @@ fn remove_at(dir: &OwnedFd, name: &str) -> Result<()> {
         // O(1) unless it holds nested subvolumes itself.
         match crate::sys::subvol_destroy(dir.as_fd(), name) {
             Ok(()) => return Ok(()),
-            Err(e) if crate::btrfs::is_not_empty(&e) => {
+            Err(e) if crate::storage::is_not_empty(&e) => {
                 destroy_nested_in(&sub)?;
                 drop(sub);
                 return crate::sys::subvol_destroy(dir.as_fd(), name);
@@ -320,4 +353,39 @@ fn destroy_nested_in(dir: &OwnedFd) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn path_flags() -> OFlags {
+    #[cfg(target_os = "linux")]
+    {
+        OFlags::PATH
+    }
+    #[cfg(target_os = "macos")]
+    {
+        OFlags::RDONLY
+    }
+}
+fn entry_flags() -> OFlags {
+    #[cfg(target_os = "linux")]
+    {
+        OFlags::PATH
+    }
+    #[cfg(target_os = "macos")]
+    {
+        OFlags::RDONLY | OFlags::SYMLINK | OFlags::NONBLOCK
+    }
+}
+#[cfg(target_os = "macos")]
+fn openat2(dir: impl AsFd, path: &str, flags: OFlags) -> io::Result<OwnedFd> {
+    crate::fsutil::check_rel(path).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
+    let parts: Vec<_> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let mut at = rustix::io::dup(dir)?;
+    for (i, part) in parts.iter().enumerate() {
+        let f = if i + 1 == parts.len() { flags } else { OFlags::RDONLY | OFlags::DIRECTORY };
+        at = rustix::fs::openat(&at, *part, f | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty())?;
+    }
+    if parts.is_empty() {
+        return Ok(rustix::fs::openat(&at, ".", flags | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty())?);
+    }
+    Ok(at)
 }

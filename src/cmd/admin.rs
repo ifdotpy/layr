@@ -2,7 +2,6 @@
 
 use super::{exit, here};
 use crate::args::{parse, Spec};
-use crate::btrfs;
 use crate::changes;
 use crate::ctx::Ctx;
 use crate::fsutil;
@@ -10,6 +9,7 @@ use crate::ids;
 use crate::model::{Line, LineChange, Record, StateKind};
 use crate::repo::{skip_path, Repo};
 use crate::revs;
+use crate::storage as btrfs;
 use crate::store::Project;
 use anyhow::{bail, Result};
 use std::collections::{BTreeMap, BTreeSet};

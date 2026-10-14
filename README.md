@@ -29,6 +29,48 @@ sudo tests/run.sh            # integration tests: each file gets a fresh btrfs o
 cargo test                   # unit tests
 ```
 
+## Experimental APFS backend
+
+The macOS build uses APFS. The Linux build continues to use btrfs with the existing store and record formats.
+This branch does not yet provide full backend compatibility.
+
+- The store requires a case-sensitive APFS volume.
+- Commands run as the current user. The root service is not available on macOS.
+- A snapshot clones each file and checks source metadata before and after the copy.
+  It fails if the source changes during the copy. It is not an atomic volume snapshot.
+- APFS work grows with the number of files. A diff also reads file content to find changed blocks.
+- File modes, symbolic links, hard links and file identity survive snapshots. Nested layers stay outside history.
+- Immutable flags prevent ordinary writes to states. The store owner can remove these flags.
+  This does not provide the Linux service's protection against other users.
+- Native `sync`, `serve-peer` and `backup` are unavailable. The Git remote bridge works.
+- APFS copies directory metadata, including access control lists and extended attributes.
+
+Use a separate test store on an existing case-sensitive APFS volume:
+
+```sh
+cargo build --release
+export LAYR_ROOT=/Volumes/YourCaseSensitiveVolume/layr-test-store
+./target/release/layr init app --from ~/src/app
+./target/release/layr --project app --line main branch topic
+```
+
+The core command tests also run on macOS. They require GNU coreutils and GNU sed in `PATH`.
+`LAYR_TEST_DIRECT_MAIN=1` removes the default `main` policy in test projects.
+The Linux tests use root and already bypass that policy. This option does not test access control.
+
+```sh
+export LAYR_APFS_TEST_ROOT=/Volumes/YourCaseSensitiveVolume
+LAYR_TEST_DIRECT_MAIN=1 tests/run.sh t01-basic t02-merge t03-git t08-gitcompat
+cargo test -- --ignored
+```
+
+The benchmark creates a new test directory and keeps its data and `results.json` for inspection:
+
+```sh
+python3 benchmarks/backends.py --binary target/release/layr \
+  --root /Volumes/YourCaseSensitiveVolume/layr-bench-1000 --files 1000 --repeats 3
+```
+
 ## Quick start
 
 ```sh

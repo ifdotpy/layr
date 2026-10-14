@@ -11,11 +11,11 @@
 
 use super::{exit, here};
 use crate::args::{parse, Spec};
-use crate::btrfs;
 use crate::ctx::Ctx;
 use crate::ids;
 use crate::model::StateKind;
 use crate::repo::Repo;
+use crate::storage as btrfs;
 use crate::store::{Project, Trust};
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
@@ -259,7 +259,7 @@ fn plan(repo: &Repo, mine: &BTreeSet<String>, theirs: &BTreeSet<String>, auto: b
 
 fn send_layer<R: Read, W: Write>(w: &mut Wire<R, W>, repo: &Repo, snap: &str) -> Result<u64> {
     w.json(&json!({"op": "layer", "name": snap}))?;
-    let child = btrfs::send_command(None, &repo.p.layer_path(snap.split('@').next().unwrap_or(""), snap))
+    let child = btrfs::send_command(None, &repo.p.layer_path(snap.split('@').next().unwrap_or(""), snap))?
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
@@ -295,7 +295,7 @@ fn send_states<R: Read, W: Write>(
         w.json(&json!({"op": "state", "id": id, "parent": parent}))?;
         let pp = parent.as_ref().map(|p| repo.p.state_path(p));
         let child =
-            btrfs::send_command(pp.as_deref(), &repo.p.state_path(id)).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+            btrfs::send_command(pp.as_deref(), &repo.p.state_path(id))?.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
         bytes += w.send_stream(child)?;
         let v = w.recv_json()?;
         if v["op"] != "ok" {
@@ -310,7 +310,7 @@ fn send_states<R: Read, W: Write>(
                         continue;
                     }
                     w.json(&json!({"op": "layer", "name": snap}))?;
-                    let child = btrfs::send_command(None, &path).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+                    let child = btrfs::send_command(None, &path)?.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
                     bytes += w.send_stream(child)?;
                     let v = w.recv_json()?;
                     if v["op"] != "ok" {

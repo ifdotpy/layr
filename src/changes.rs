@@ -3,8 +3,9 @@
 //! A change list is a candidate list: an entry that kept its inode and path has the changed byte
 //! ranges, so a content check reads only those ranges. Other entries are checked in full.
 
-use crate::btrfs;
 use crate::fsutil::{self, Meta};
+#[cfg(target_os = "linux")]
+use crate::storage as btrfs;
 use crate::stream;
 use anyhow::Result;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -32,6 +33,7 @@ impl Change {
 }
 
 /// Raw candidate list from the stream, without content checks.
+#[cfg(target_os = "linux")]
 pub fn candidates(parent: &Path, child: &Path) -> Result<Vec<Change>> {
     let data = btrfs::send_no_data(parent, child)?;
     let cmds = stream::parse(&data)?;
@@ -294,4 +296,9 @@ pub fn with_renames(parent: &Path, child: &Path, v: Vec<Change>) -> Vec<Change> 
 
 fn split(d: &[u8]) -> Vec<&[u8]> {
     d.split_inclusive(|b| *b == b'\n').collect()
+}
+
+#[cfg(target_os = "macos")]
+pub fn candidates(parent: &Path, child: &Path) -> Result<Vec<Change>> {
+    crate::storage::candidates(parent, child)
 }

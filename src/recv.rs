@@ -12,7 +12,7 @@
 //! After the receive, the new subvolume must be read-only, carry the expected received UUID and,
 //! for an incremental stream, be a snapshot of the expected local parent.
 
-use crate::btrfs;
+use crate::storage as btrfs;
 use anyhow::{anyhow, bail, Result};
 use std::collections::BTreeSet;
 use std::io::{Read, Write};
