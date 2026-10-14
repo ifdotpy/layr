@@ -9,7 +9,7 @@ The commands follow the git verbs and print git formats, so people and tools tha
 layr without new habits. Output of `diff`, `status --porcelain`, `show`, `log --format` and `--stat`
 matches git byte for byte for the same content (tests/t08-gitcompat.sh).
 
-Status: working implementation, Linux only (btrfs, kernel 5.6 or newer). Unsafe code is limited
+Supported backend: Linux (btrfs, kernel 5.6 or newer). The experimental APFS backend is described below. Unsafe code is limited
 to `src/sys.rs` (btrfs ioctls, fork, user switching, the user database); everything else uses
 `rustix` and the standard library, and the crate denies `unsafe_code` outside that module.
 
@@ -251,9 +251,53 @@ while dirty data is being written). The database lives in its own subvolume: an 
 after a snapshot takes about 6 ms, against about 100 ms in the subvolume that holds the
 snapshot folders.
 
+### Experimental APFS comparison (provisional)
+
+Measured on 2026-10-14 with the implementation in `ada0cef`.
+Each fixture contains 1,000 or 10,000 files of 4 KiB. Ten files receive an extra line.
+The source content hashes match across both backends. Each operation has three trials.
+The table gives median seconds, including command startup.
+
+APFS runs natively on macOS 27.2, on a case-sensitive volume in an ASIF image.
+btrfs runs in the OrbStack Linux VM on the same Mac.
+No benchmark or build from this task runs beside another benchmark.
+The host also runs other tasks. Their load is not controlled.
+
+| Operation | btrfs, 1,000 files | APFS, 1,000 files | btrfs, 10,000 files | APFS, 10,000 files |
+| --- | ---: | ---: | ---: | ---: |
+| init | 0.354 | 1.040 | 0.509 | 18.289 |
+| branch | 0.035 | 0.285 | 0.032 | 3.618 |
+| status, clean | 0.016 | 0.674 | 0.014 | 7.758 |
+| diff, 10 edits | 0.021 | 0.627 | 0.019 | 7.766 |
+| add -A | 0.028 | 0.897 | 0.024 | 12.314 |
+| commit | 0.030 | 0.534 | 0.025 | 8.849 |
+| merge, fast-forward | 0.043 | 1.350 | 0.040 | 35.101 |
+
+These values are provisional. They do not establish an isolated filesystem speed ratio.
+A later test alternates clean status commands on both backends with 10,000 files.
+It measures APFS at 11.00 to 13.26 seconds and btrfs at 0.09 to 16.33 seconds.
+The host's one-minute load average ranges from 294 to 311 during that test.
+A further benchmark waits for a quiet interval and records host load throughout the run.
+
+The APFS implementation clones every file for a snapshot and scans content for changed blocks.
+The btrfs implementation uses subvolume snapshots and send-stream change lists.
+Those mechanisms have different costs as the file count grows.
+The test image still has 96% free space after the runs. Spotlight indexing is disabled on it.
+
+Raw data includes the binary hash and source content hash:
+[APFS, 1,000 files](benchmarks/results/apfs-1000.json),
+[APFS, 10,000 files](benchmarks/results/apfs-10000.json),
+[btrfs, 1,000 files](benchmarks/results/btrfs-1000.json),
+[btrfs, 10,000 files](benchmarks/results/btrfs-10000.json),
+and [interleaved status](benchmarks/results/paired-status-10000.json).
+
+The previous btrfs binary (`c6063e4`) and the candidate pass nine compatibility checks.
+Both binaries read each other's states, verify signatures and restore each other's backups without changing state identifiers.
+Run those checks with `OLD_LAYR=/path/to/old/layr LAYR=/path/to/new/layr bash tests/compat-btrfs.sh` on Linux as root.
+
 ## Not in this version
 
-- APFS backend (macOS).
+- Complete APFS support: a privileged service, atomic snapshots and native state transfer.
 - Structured (AST) merge; format drivers can be plugged in through `merge.driver.<name>`.
 - `layrhub`: records, ids and stream transport are ready for it; the protocol is not.
 - Content checks of replicated states: a received state must be the subvolume its signed record
