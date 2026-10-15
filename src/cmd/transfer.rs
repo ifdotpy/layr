@@ -719,6 +719,7 @@ pub fn backup(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 },
             };
             if !ctx.caller.is_root() {
+                crate::privs::as_caller_fs(ctx, || Ok(std::fs::create_dir_all(&dir)?))?;
                 crate::privs::check_caller_writable(ctx, &dir)?;
             }
             let (n, c) = run_backup(ctx, &h.repo, &dir, a.has("--full"), (ctx.caller.uid, ctx.caller.gid))?;
@@ -733,8 +734,8 @@ pub fn backup(ctx: &Ctx, args: &[String]) -> Result<i32> {
             crate::privs::as_caller_fs(ctx, || list_or_verify(ctx, &root, sub == "verify"))
         }
         "restore" => {
-            if !ctx.caller.is_root() {
-                return Err(exit(1, "error: restore needs root (it receives btrfs streams)"));
+            if !ctx.caller.is_root() && !(cfg!(target_os = "macos") && rustix::process::geteuid().as_raw() == ctx.caller.uid) {
+                return Err(exit(1, "error: restore needs root through the service"));
             }
             let root = caller_path(
                 ctx,
@@ -903,6 +904,15 @@ fn restore(ctx: &Ctx, root: &Path, as_name: Option<&str>, chain: Option<u32>, qu
             if let Some(key) = k.strip_suffix(&suffix) {
                 take.insert(key.to_string(), serde_json::from_str(&v).unwrap_or(serde_json::Value::String(v)));
             }
+        }
+        #[cfg(target_os = "macos")]
+        if !ctx.caller.is_root() {
+            // A local restore creates a store owned by this user. Foreign numeric UIDs
+            // cannot leave its owner unable to administer the restored project.
+            let inherited = p.config_value("access")?.unwrap_or_else(|| serde_json::json!({}));
+            let access = take.entry("access").or_insert(inherited);
+            let access = access.as_object_mut().ok_or_else(|| anyhow::anyhow!("invalid restored access policy"))?;
+            access.insert(format!("user:{}", ctx.caller.uid), serde_json::json!("admin"));
         }
         if !take.is_empty() {
             let mut rec = Record::new("config");

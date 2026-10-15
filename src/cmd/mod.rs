@@ -196,11 +196,6 @@ const OVERLAY_READS: &[&str] =
     &["log", "show", "diff", "grep", "ls-files", "blame", "rev-parse", "merge-base", "fsck", "reindex", "help", "version"];
 
 pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
-    #[cfg(target_os = "macos")]
-    if argv.first().is_some_and(|s| matches!(s.as_str(), "sync" | "serve-peer" | "backup")) {
-        anyhow::bail!("btrfs stream transfer is not supported by the APFS backend; use the Git remote bridge or export");
-    }
-
     let (cmd, rest) = match argv.first() {
         Some(c) => (c.as_str(), &argv[1..]),
         None => {

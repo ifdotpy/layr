@@ -2,11 +2,12 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, feat/apfs-complete]
   pull_request:
 
 jobs:
   test:
+    needs: macos
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -22,3 +23,63 @@ jobs:
         run: |
           sudo modprobe btrfs || true
           sudo -E env "PATH=$PATH" LAYR="$PWD/target/debug/layr" tests/run.sh
+      - uses: actions/download-artifact@v4
+        with:
+          name: apfs-backup
+          path: ${{ runner.temp }}/apfs-backup
+      - name: Restore APFS backup and produce Linux backup
+        run: sudo env LAYR="$PWD/target/debug/layr" bash tests/cross-backup.sh extend "$RUNNER_TEMP/apfs-backup" "$RUNNER_TEMP/linux-backup"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-backup
+          path: ${{ runner.temp }}/linux-backup
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: brew install coreutils gnu-sed zstd
+      - name: Create the APFS test volume
+        run: |
+          hdiutil create -size 4g -fs APFSX -volname LayrCI -type SPARSE -o "$RUNNER_TEMP/layr.sparseimage"
+          hdiutil attach "$RUNNER_TEMP/layr.sparseimage" -nobrowse
+          sudo diskutil enableOwnership /Volumes/LayrCI
+      - name: Build and test APFS
+        env:
+          LAYR_APFS_TEST_ROOT: /Volumes/LayrCI
+        run: |
+          export PATH="$(brew --prefix coreutils)/libexec/gnubin:$(brew --prefix gnu-sed)/libexec/gnubin:$PATH"
+          cargo build --locked
+          cargo test --locked -- --include-ignored
+          export LAYR="$PWD/target/debug/layr"
+          bash tests/apfs-local.sh
+          LAYR_TEST_DIRECT_MAIN=1 bash tests/run.sh t01-basic t02-merge t03-git t05-transfer t06-sync t08-gitcompat
+          sudo env LAYR="$LAYR" LAYR_APFS_TEST_ROOT="$LAYR_APFS_TEST_ROOT" LAYR_APFS_TEST_USER="$(whoami)" bash tests/apfs-service.sh
+      - name: Produce APFS backup
+        run: LAYR_APFS_TEST_ROOT=/Volumes/LayrCI LAYR="$PWD/target/debug/layr" bash tests/cross-backup.sh create "$RUNNER_TEMP/apfs-backup"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apfs-backup
+          path: ${{ runner.temp }}/apfs-backup
+      - name: Detach the test volume
+        if: always()
+        run: hdiutil detach /Volumes/LayrCI || true
+  cross-return:
+    needs: test
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-backup
+          path: ${{ runner.temp }}/linux-backup
+      - name: Restore Linux backup on APFS
+        run: |
+          brew install zstd
+          hdiutil create -size 4g -fs APFSX -volname LayrReturn -type SPARSE -o "$RUNNER_TEMP/return.sparseimage"
+          hdiutil attach "$RUNNER_TEMP/return.sparseimage" -nobrowse
+          cargo build --locked
+          LAYR_APFS_TEST_ROOT=/Volumes/LayrReturn LAYR="$PWD/target/debug/layr" bash tests/cross-backup.sh check "$RUNNER_TEMP/linux-backup"
+      - name: Detach the test volume
+        if: always()
+        run: hdiutil detach /Volumes/LayrReturn || true

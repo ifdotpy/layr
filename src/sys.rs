@@ -341,12 +341,41 @@ pub fn user_groups(name: &str, gid: u32) -> Vec<u32> {
 }
 
 #[cfg(target_os = "macos")]
-pub fn switch_user_before_exec(_: &mut Command, _: u32, _: u32, _: Vec<u32>) {
-    unreachable!("privileged execution is disabled on macOS")
+pub fn switch_user_before_exec(cmd: &mut Command, uid: u32, gid: u32, groups: Vec<u32>) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: the child calls only async-signal-safe credential syscalls before exec.
+    unsafe {
+        cmd.pre_exec(move || {
+            if libc::setgroups(groups.len() as _, groups.as_ptr()) != 0 || libc::setgid(gid) != 0 || libc::setuid(uid) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if libc::geteuid() != uid {
+                return Err(io::Error::other("uid did not change"));
+            }
+            Ok(())
+        });
+    }
 }
 #[cfg(target_os = "macos")]
-pub fn set_fs_ids(_: u32, _: u32) -> Result<(u32, u32)> {
-    anyhow::bail!("file system credential switching is Linux only")
+pub fn set_fs_ids(uid: u32, gid: u32) -> Result<(u32, u32)> {
+    // The daemon forks a single-threaded command child. macOS has no setfsuid;
+    // temporary effective IDs restrict all its file access, with saved root retained.
+    // SAFETY: these syscalls have no pointer arguments. Restore root before changing gid.
+    unsafe {
+        let old = (libc::geteuid(), libc::getegid());
+        if uid == 0 && libc::seteuid(0) != 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        if libc::setegid(gid) != 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        if libc::seteuid(uid) != 0 {
+            let error = io::Error::last_os_error();
+            libc::setegid(old.1);
+            return Err(error.into());
+        }
+        Ok(old)
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -461,6 +490,124 @@ pub fn apfs_unseal_fd(fd: std::os::fd::BorrowedFd<'_>) -> io::Result<()> {
         }
         if st.st_flags & libc::UF_IMMUTABLE != 0 && libc::fchflags(fd.as_raw_fd(), st.st_flags & !libc::UF_IMMUTABLE) != 0 {
             return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub fn apfs_xattrs(path: &std::path::Path) -> io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+    let cp = cpath(path)?;
+    // SAFETY: the path and the allocated buffers remain valid during each call.
+    unsafe {
+        let n = libc::listxattr(cp.as_ptr(), std::ptr::null_mut(), 0, libc::XATTR_NOFOLLOW);
+        if n < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut names = vec![0u8; n as usize];
+        let n = libc::listxattr(cp.as_ptr(), names.as_mut_ptr().cast(), names.len(), libc::XATTR_NOFOLLOW);
+        if n < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        names.truncate(n as usize);
+        let mut result = Vec::new();
+        for name in names.split(|b| *b == 0).filter(|s| !s.is_empty()) {
+            let cn = std::ffi::CString::new(name)?;
+            let n = libc::getxattr(cp.as_ptr(), cn.as_ptr(), std::ptr::null_mut(), 0, 0, libc::XATTR_NOFOLLOW);
+            if n < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let mut value = vec![0u8; n as usize];
+            let n = libc::getxattr(cp.as_ptr(), cn.as_ptr(), value.as_mut_ptr().cast(), value.len(), 0, libc::XATTR_NOFOLLOW);
+            if n < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            value.truncate(n as usize);
+            result.push((name.to_vec(), value));
+        }
+        Ok(result)
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn apfs_remove_attribute(path: &std::path::Path, name: &CStr) -> io::Result<()> {
+    let path = cpath(path)?;
+    // SAFETY: both strings remain live; NOFOLLOW addresses the link itself.
+    if unsafe { libc::removexattr(path.as_ptr(), name.as_ptr(), libc::XATTR_NOFOLLOW) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+#[cfg(target_os = "macos")]
+pub fn apfs_mtime(path: &std::path::Path, sec: i64, nsec: i64) -> io::Result<()> {
+    let path = cpath(path)?;
+    let times = [libc::timespec { tv_sec: 0, tv_nsec: libc::UTIME_OMIT }, libc::timespec { tv_sec: sec, tv_nsec: nsec }];
+    // SAFETY: the path and two timespec values remain live for the call.
+    if unsafe { libc::utimensat(libc::AT_FDCWD, path.as_ptr(), times.as_ptr(), libc::AT_SYMLINK_NOFOLLOW) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub fn peer_credentials(sock: &std::os::unix::net::UnixStream) -> io::Result<(u32, u32)> {
+    use std::os::fd::AsRawFd;
+    let (mut uid, mut gid) = (0, 0);
+    // SAFETY: the socket is live, and both output pointers refer to writable uid/gid values.
+    if unsafe { libc::getpeereid(sock.as_raw_fd(), &mut uid, &mut gid) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok((uid, gid))
+}
+
+#[cfg(target_os = "macos")]
+pub fn apfs_owners_enabled(path: &std::path::Path) -> io::Result<bool> {
+    let path = cpath(path)?;
+    let mut st = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: statfs initializes the structure on success.
+    if unsafe { libc::statfs(path.as_ptr(), st.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let st = unsafe { st.assume_init() };
+    Ok(st.f_flags & (libc::MNT_IGNORE_OWNERSHIP as u32) == 0)
+}
+
+#[cfg(target_os = "macos")]
+pub fn apfs_has_acl(path: &std::path::Path) -> io::Result<bool> {
+    let path = cpath(path)?;
+    // SAFETY: CHECK inspects only the live source string and does not use a destination.
+    let result = unsafe {
+        libc::copyfile(
+            path.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            libc::COPYFILE_CHECK | libc::COPYFILE_ACL | libc::COPYFILE_NOFOLLOW,
+        )
+    };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(result as u32 & libc::COPYFILE_ACL != 0)
+}
+#[cfg(target_os = "macos")]
+pub fn apfs_clear_acl(path: &std::path::Path) -> io::Result<()> {
+    unsafe extern "C" {
+        fn acl_init(count: libc::c_int) -> *mut libc::c_void;
+        fn acl_set_link_np(path: *const libc::c_char, kind: libc::c_int, acl: *mut libc::c_void) -> libc::c_int;
+        fn acl_free(ptr: *mut libc::c_void) -> libc::c_int;
+    }
+    let path = cpath(path)?;
+    // SAFETY: an empty ACL is allocated, applied without following a link, and freed once.
+    unsafe {
+        let acl = acl_init(0);
+        if acl.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        let result = acl_set_link_np(path.as_ptr(), 0x100, acl);
+        let error = io::Error::last_os_error();
+        acl_free(acl);
+        if result != 0 {
+            return Err(error);
         }
     }
     Ok(())

@@ -886,6 +886,8 @@ impl<'a> Repo<'a> {
                 fsutil::chown_nofollow(&w.join(p), uid, gid)?;
             }
         }
+        #[cfg(target_os = "macos")]
+        crate::sys::apfs_clear_acl(w)?;
         fsutil::chown_nofollow(w, uid, gid)?;
         std::fs::set_permissions(w, std::fs::Permissions::from_mode(0o700))?;
         crate::gitbridge::make_git_folder(self, line, state, w)?;

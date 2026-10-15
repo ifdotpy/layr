@@ -1,5 +1,5 @@
 //! APFS local-user backend. Clones data extents, scans directories, and rejects source changes.
-//! These are verified directory copies, not APFS volume snapshots or a btrfs send transport.
+//! Snapshots use verified directory clones; transport uses the compatible btrfs stream format.
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -40,11 +40,30 @@ fn mark(path: &Path, parent: Option<String>, readonly: bool) -> Result<()> {
     marked?;
     Ok(())
 }
-pub fn set_readonly(_path: &Path) -> Result<()> {
-    bail!("overlays are not supported by the experimental APFS backend")
+fn update_readonly(path: &Path, readonly: bool) -> Result<()> {
+    let mut info = subvol_info(path)?;
+    // Keep the snapshot identity: signed records refer to this UUID.
+    crate::sys::apfs_immutable(path, false)?;
+    let mode = fs::symlink_metadata(path)?.mode() & 0o7777;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o200))?;
+    info.readonly = readonly;
+    let result = crate::sys::apfs_marker(path, Some(&serde_json::to_vec(&info)?));
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+    result?;
+    Ok(())
 }
-pub fn set_writable(_path: &Path) -> Result<()> {
-    bail!("overlays are not supported by the experimental APFS backend")
+pub fn set_readonly(path: &Path) -> Result<()> {
+    update_readonly(path, true)?;
+    if let Err(error) = seal(path, true, false) {
+        // Never advertise a partially sealed tree as immutable.
+        let _ = update_readonly(path, false);
+        return Err(error);
+    }
+    Ok(())
+}
+pub fn set_writable(path: &Path) -> Result<()> {
+    seal(path, false, false)?;
+    update_readonly(path, false)
 }
 pub fn create_subvolume(path: &Path) -> Result<()> {
     if !is_supported(path.parent().context("missing parent")?) {
@@ -134,17 +153,17 @@ fn copy_tree(src: &Path, dst: &Path, root: bool, links: &mut BTreeMap<(u64, u64)
     }
     Ok(())
 }
-fn seal(path: &Path, readonly: bool) -> Result<()> {
+fn seal(path: &Path, readonly: bool, for_delete: bool) -> Result<()> {
     let m = fs::symlink_metadata(path)?;
     if !readonly {
         crate::sys::apfs_immutable(path, false)?;
-        if m.is_dir() && m.mode() & 0o700 != 0o700 {
+        if for_delete && m.is_dir() && m.mode() & 0o700 != 0o700 {
             fs::set_permissions(path, fs::Permissions::from_mode((m.mode() & 0o7777) | 0o700))?;
         }
     }
     if m.is_dir() {
         for e in fs::read_dir(path)? {
-            seal(&e?.path(), readonly)?;
+            seal(&e?.path(), readonly, for_delete)?;
         }
     }
     if readonly {
@@ -170,7 +189,7 @@ pub fn snapshot(src: &Path, dst: &Path, readonly: bool) -> Result<()> {
         crate::sys::apfs_publish(&temp, dst)?;
         published = true;
         if readonly {
-            seal(dst, true)?;
+            seal(dst, true, false)?;
         }
         Ok(())
     })();
@@ -188,7 +207,7 @@ pub fn delete_tree(path: &Path) -> Result<()> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e.into()),
     };
-    seal(path, false)?;
+    seal(path, false, true)?;
     if m.is_dir() {
         fs::remove_dir_all(path)?;
     } else {
@@ -209,8 +228,10 @@ pub fn clone_file(_src: &File, _dst: &File) -> io::Result<()> {
 pub fn clone_range(_src: &File, _off: u64, _len: u64, _dst: &File, _dst_off: u64) -> io::Result<()> {
     Err(io::Error::from_raw_os_error(libc::ENOTSUP))
 }
-pub fn send_command(_parent: Option<&Path>, _child: &Path) -> Result<Command> {
-    bail!("APFS does not yet support the btrfs transfer format")
+pub fn send_command(_parent: Option<&Path>, child: &Path) -> Result<Command> {
+    let mut cmd = Command::new(std::env::current_exe()?);
+    cmd.arg("__apfs-send").arg(child);
+    Ok(cmd)
 }
 
 pub fn send_optimized(parent: Option<&Path>, child: &Path, _clones: &[PathBuf], _compressed: bool) -> Result<Command> {
@@ -218,18 +239,24 @@ pub fn send_optimized(parent: Option<&Path>, child: &Path, _clones: &[PathBuf], 
 }
 
 pub fn supports_local_clone_receive() -> bool {
-    false
+    true
 }
 
 pub fn supports_compressed_receive() -> bool {
     false
 }
 
-pub fn send_clone_identity(_path: &Path) -> Result<(String, u64)> {
-    bail!("native state transfer is not supported by the experimental APFS backend")
+pub fn send_clone_identity(path: &Path) -> Result<(String, u64)> {
+    Ok((clone_identity(path)?.0, 1))
 }
-pub fn clone_identity(_path: &Path) -> Result<(String, Option<u64>)> {
-    bail!("APFS does not support btrfs stream identities")
+pub fn clone_identity(path: &Path) -> Result<(String, Option<u64>)> {
+    let info = subvol_info(path)?;
+    if !info.readonly {
+        bail!("clone source is not immutable");
+    }
+    // The APFS receiver resolves a verified source path itself, without the kernel's
+    // UUID/transaction lookup. Its data therefore do not depend on a btrfs transaction.
+    Ok((info.received_uuid.unwrap_or(info.uuid), None))
 }
 pub fn candidates(parent: &Path, child: &Path) -> Result<Vec<crate::changes::Change>> {
     let (a, b) = (scan(parent)?, scan(child)?);
@@ -383,6 +410,30 @@ mod tests {
 
     #[test]
     #[ignore = "requires a case-sensitive APFS test volume"]
+    fn readonly_transitions_preserve_identity_and_modes() -> Result<()> {
+        let s = Sandbox::new();
+        let tree = s.0.join("tree");
+        create_subvolume(&tree)?;
+        fs::create_dir(tree.join("dir"))?;
+        fs::write(tree.join("dir/file"), b"data")?;
+        fs::set_permissions(tree.join("dir"), fs::Permissions::from_mode(0o555))?;
+        let id = subvol_info(&tree)?.uuid;
+        set_readonly(&tree)?;
+        assert!(fs::write(tree.join("dir/file"), b"bad").is_err());
+        set_writable(&tree)?;
+        assert_eq!(subvol_info(&tree)?.uuid, id);
+        assert!(!subvol_info(&tree)?.readonly);
+        assert_eq!(fs::metadata(tree.join("dir"))?.mode() & 0o777, 0o555);
+        fs::write(tree.join("dir/file"), b"new")?;
+        set_readonly(&tree)?;
+        assert_eq!(subvol_info(&tree)?.uuid, id);
+        assert!(subvol_info(&tree)?.readonly);
+        assert!(fs::write(tree.join("dir/file"), b"bad").is_err());
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a case-sensitive APFS test volume"]
     fn moves_and_block_ranges_survive_clones() -> Result<()> {
         let s = Sandbox::new();
         let src = s.0.join("work");
@@ -408,4 +459,15 @@ mod tests {
         assert_eq!(changes[0].ranges, Some(vec![(8192, 4096)]));
         Ok(())
     }
+}
+
+pub fn mark_received(path: &Path, uuid: &str) -> Result<()> {
+    let mut info = subvol_info(path)?;
+    info.received_uuid = Some(uuid.to_owned());
+    let mode = fs::symlink_metadata(path)?.mode() & 0o7777;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o200))?;
+    let result = crate::sys::apfs_marker(path, Some(&serde_json::to_vec(&info)?));
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+    result?;
+    Ok(())
 }

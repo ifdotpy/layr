@@ -58,6 +58,8 @@ fn mkdir_mode(p: &Path, mode: u32) -> Result<()> {
     if !p.exists() {
         fs::create_dir_all(p).with_context(|| format!("mkdir {}", p.display()))?;
     }
+    #[cfg(target_os = "macos")]
+    crate::sys::apfs_clear_acl(p)?;
     fs::set_permissions(p, fs::Permissions::from_mode(mode))?;
     Ok(())
 }

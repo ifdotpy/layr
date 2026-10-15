@@ -591,8 +591,8 @@ pub fn serve(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let spec = Spec::new().flag("--create");
     let a = parse(&spec, args)?;
     let name = a.pos.first().ok_or_else(|| exit(128, "usage: layr serve-peer <project>"))?.clone();
-    if !ctx.caller.is_root() {
-        return Err(exit(1, "error: serve-peer needs root (it receives btrfs streams)"));
+    if !ctx.caller.is_root() && !(cfg!(target_os = "macos") && rustix::process::geteuid().as_raw() == ctx.caller.uid) {
+        return Err(exit(1, "error: serve-peer needs root through the service"));
     }
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();

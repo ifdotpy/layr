@@ -22,9 +22,6 @@ const USAGE: &str = "usage: layr overlay create <name> [--readers <principal>,..
        layr overlay log|show|diff|grep|ls-files|blame <name> [<args>]";
 
 pub fn overlay(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    if cfg!(target_os = "macos") {
-        return Err(exit(128, "overlays are not supported by the experimental APFS backend"));
-    }
     let sub = args.first().map(|s| s.as_str()).unwrap_or("list");
     let rest = args.get(1..).unwrap_or(&[]).to_vec();
     match sub {

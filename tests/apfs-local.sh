@@ -36,4 +36,20 @@ ok "state signatures and snapshots pass fsck" l fsck
 l branch -q -D warm
 ok "gc can remove obsolete APFS trees" l gc -q
 ok "states remain valid after gc" l fsck
+cd "$P/topic" || exit 1
+printf 'private value\n' > private.env
+ok "create an APFS overlay" l overlay create local -q
+ok "move a file to the overlay" l overlay move local private.env
+ok "commit an APFS overlay" l commit -qm private
+eq "overlay keeps the file" "private value" "$(l overlay show local HEAD:private.env)"
+no "shared history excludes the overlay" l show HEAD:private.env
+eq "overlay status is clean" "" "$(l status --porcelain)"
+printf 'new value\n' > private.env
+ok "commit an overlay change" l commit -qam update
+eq "overlay history has the change" "new value" "$(l overlay show local HEAD:private.env)"
+ok "disable the overlay" l overlay use --none
+no "disabled overlay leaves the worktree" test -e private.env
+ok "restore the overlay" l overlay use local
+eq "restored overlay has the content" "new value" "$(cat private.env)"
+ok "overlay snapshots pass fsck" l fsck
 finish

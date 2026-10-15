@@ -6,6 +6,8 @@
 #[macro_use]
 mod ctx;
 mod access;
+#[cfg(target_os = "macos")]
+mod apfs_stream;
 mod args;
 mod changes;
 mod cmd;
@@ -25,10 +27,6 @@ mod repo;
 mod revs;
 #[cfg(target_os = "linux")]
 mod send_cache;
-#[cfg(target_os = "linux")]
-mod service;
-#[cfg(target_os = "macos")]
-#[path = "service_local.rs"]
 mod service;
 #[cfg(target_os = "linux")]
 #[path = "btrfs.rs"]
@@ -46,12 +44,21 @@ mod tree;
 use std::collections::HashMap;
 
 fn main() {
-    #[cfg(target_os = "macos")]
-    if rustix::process::geteuid().is_root() {
-        eprintln!("fatal: the APFS backend runs as one local user; do not use sudo");
-        std::process::exit(128);
-    }
     let mut argv: Vec<String> = std::env::args().skip(1).collect();
+    #[cfg(target_os = "macos")]
+    if argv.first().map(String::as_str) == Some("__apfs-send") {
+        let result = (|| -> anyhow::Result<()> {
+            if argv.len() != 2 {
+                anyhow::bail!("invalid internal send arguments");
+            }
+            crate::apfs_stream::send(std::path::Path::new(&argv[1]), &mut std::io::stdout().lock())
+        })();
+        if let Err(e) = result {
+            eprintln!("fatal: {e:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
     // Global options before the command.
     while let Some(first) = argv.first().cloned() {
         match first.as_str() {
@@ -92,7 +99,7 @@ fn main() {
             }
         }
     }
-    let direct = cfg!(target_os = "macos")
+    let direct = (cfg!(target_os = "macos") && std::env::var_os("LAYR_SOCKET").is_none())
         || rustix::process::geteuid().is_root()
         || std::env::var("LAYR_DIRECT").map(|v| v == "1").unwrap_or(false);
     let code = if direct {

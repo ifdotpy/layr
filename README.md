@@ -32,17 +32,29 @@ cargo test                   # unit tests
 ## Experimental APFS backend
 
 The macOS build uses APFS. The Linux build continues to use btrfs with the existing store and record formats.
-This branch does not yet provide full backend compatibility.
+The store and signed record formats remain compatible with the Linux backend.
 
 - The store requires a case-sensitive APFS volume.
-- Commands run as the current user. The root service is not available on macOS.
+- Commands run as the current user by default. Set `LAYR_SOCKET` to use the root service.
+- The service requires a volume with ownership enabled and a separate root-owned store.
+  It refuses volumes mounted with `noowners` and store folders that other users can change.
 - A snapshot clones each file and checks source metadata before and after the copy.
   It fails if the source changes during the copy. It is not an atomic volume snapshot.
 - APFS work grows with the number of files. A diff also reads file content to find changed blocks.
 - File modes, symbolic links, hard links and file identity survive snapshots. Nested layers stay outside history.
 - Immutable flags prevent ordinary writes to states. The store owner can remove these flags.
-  This does not provide the Linux service's protection against other users.
-- Native `sync`, `serve-peer` and `backup` are unavailable. The Git remote bridge works.
+  Use the root service for separate users and root-owned state storage.
+- Overlays, `sync`, `serve-peer`, backup and restore are available.
+- APFS sends full btrfs version 1 streams. Existing Linux peers can receive them without an update.
+- APFS receives full and incremental streams. It copies clone ranges when APFS cannot share those ranges.
+- APFS does not request compressed version 2 streams. Transfers between Linux peers retain their existing optimizations.
+- A local restore gives the current user the admin role on the restored project.
+- Transfers preserve file modes, hard links, symbolic links and extended attributes.
+  macOS attribute names use a reserved `user.layr.apfs.*` namespace on Linux.
+  Attributes of symbolic links use `trusted.layr.apfs.*`, because Linux forbids `user.*` attributes on symbolic links.
+- Native access control lists cannot use the same rules on both systems.
+  A transfer refuses macOS access control lists and Linux security attributes instead of silently losing their effects.
+- Device nodes, sockets and named pipes are not supported by the APFS backend.
 - APFS copies directory metadata, including access control lists and extended attributes.
 
 Use a separate test store on an existing case-sensitive APFS volume:
@@ -388,9 +400,26 @@ At the benchmark revision, the previous btrfs binary (`c6063e4`) and the candida
 Both binaries read each other's states, verify signatures and restore each other's backups without changing state identifiers.
 Run those checks with `OLD_LAYR=/path/to/old/layr LAYR=/path/to/new/layr bash tests/compat-btrfs.sh` on Linux as root.
 
+A later APFS run includes overlays and the compatible transfer implementation.
+Three trials give these median times:
+
+| Operation | 1,000 files | 10,000 files |
+| --- | ---: | ---: |
+| branch | 0.388 s | 4.058 s |
+| status, clean | 1.074 s | 9.264 s |
+| commit | 0.850 s | 8.666 s |
+| merge, fast-forward | 2.401 s | 22.721 s |
+
+The host had other work, so these results remain provisional.
+The Linux comparison could not start because the OrbStack executable was absent.
+These results do not establish a speed ratio against btrfs.
+The measured binary predates the final service permission checks.
+Raw data: [1,000 files](benchmarks/results/apfs-complete-1000.json)
+and [10,000 files](benchmarks/results/apfs-complete-10000.json).
+
 ## Not in this version
 
-- Complete APFS support: a privileged service, atomic snapshots, overlays and native state transfer.
+- APFS volume snapshots and incremental APFS sends. Current snapshots use verified directory clones; APFS sends use full streams.
 - Overlays beyond the first slice: routing patterns, ephemeral mode, folder overlays, encrypted
   backups and replication of overlays (`docs/overlays.md`, section 9.7).
 - Structured (AST) merge; format drivers can be plugged in through `merge.driver.<name>`.
@@ -398,3 +427,21 @@ Run those checks with `OLD_LAYR=/path/to/old/layr LAYR=/path/to/new/layr bash te
 - Content checks of replicated states: a received state must be the subvolume its signed record
   names (`received_uuid`), but its file content is trusted together with the machine that made
   it. Cache snapshots are checked the same way through the signed `save.caches` record.
+
+### APFS service test
+
+The service uses kernel peer credentials and runs each request in a separate process.
+The client supplies file descriptors for its current folder and standard streams.
+The service changes credentials before it accesses caller-owned paths or starts caller commands.
+
+Enable ownership on the dedicated test volume before the service test:
+
+```sh
+sudo diskutil enableOwnership /Volumes/YourCaseSensitiveVolume
+sudo env LAYR_APFS_TEST_ROOT=/Volumes/YourCaseSensitiveVolume \
+  LAYR_APFS_TEST_USER="$(whoami)" LAYR="$PWD/target/debug/layr" \
+  bash tests/apfs-service.sh
+```
+
+The test uses the current user and `nobody`. It creates no system accounts.
+Use `tests/apfs-cross.py` to test sync and backup compatibility with a Linux binary in an OrbStack VM.

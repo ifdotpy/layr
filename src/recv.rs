@@ -12,11 +12,14 @@
 //! After the receive, the new subvolume must be read-only, carry the expected received UUID and,
 //! for an incremental stream, be a snapshot of the expected local parent.
 
+#[cfg(target_os = "linux")]
 use crate::storage as btrfs;
 use anyhow::{anyhow, bail, Result};
+#[cfg(target_os = "linux")]
 use std::collections::BTreeSet;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
 use std::process::{Command, Stdio};
 
 const MAGIC: &[u8] = b"btrfs-stream\0";
@@ -97,7 +100,7 @@ fn check_path(p: &[u8]) -> Result<()> {
 
 /// Attributes of one command. In stream version 2 and later the data attribute has no length
 /// and takes the rest of the command.
-fn attrs(body: &[u8], version: u32) -> Result<Vec<(u16, &[u8])>> {
+pub(crate) fn attrs(body: &[u8], version: u32) -> Result<Vec<(u16, &[u8])>> {
     let mut v = Vec::new();
     let mut a = 0;
     while a < body.len() {
@@ -219,11 +222,13 @@ pub fn check(src: &mut dyn Read, out: &mut dyn Write, e: &Expect) -> Result<Opti
     Ok(parent_path)
 }
 
+#[cfg(target_os = "linux")]
 fn names(dir: &Path) -> Result<BTreeSet<String>> {
     Ok(std::fs::read_dir(dir)?.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect())
 }
 
 /// Receive one checked stream into `dir`. On any failure nothing new stays in `dir`.
+#[cfg(target_os = "linux")]
 pub fn receive(src: &mut dyn Read, dir: &Path, e: &Expect) -> Result<()> {
     let before = names(dir)?;
     // `-e`: stop at the end command.
@@ -368,4 +373,9 @@ mod tests {
         }
         std::fs::remove_dir_all(root).unwrap();
     }
+}
+
+#[cfg(target_os = "macos")]
+pub fn receive(src: &mut dyn Read, dir: &Path, e: &Expect) -> Result<()> {
+    crate::apfs_stream::receive(src, dir, e)
 }
