@@ -21,7 +21,7 @@ l init service --from "$T/src" --owner "$LAYR_APFS_TEST_USER" -q >/dev/null
 P=$LAYR_ROOT/projects/service/lines
 cd "$P/main"
 ok 'the owner reads through the service' as "$LAYR_APFS_TEST_USER" "$L" status -s
-as "$LAYR_APFS_TEST_USER" chmod +a "everyone allow list,search,readattr" "$P/main"
+as "$LAYR_APFS_TEST_USER" /bin/chmod +a "everyone allow list,search,readattr" "$P/main"
 ok 'the owner creates a line' as "$LAYR_APFS_TEST_USER" "$L" branch -q work
 cd "$P/work"
 as "$LAYR_APFS_TEST_USER" sh -c 'echo changed > file.txt'
