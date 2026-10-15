@@ -197,6 +197,9 @@ fn clone_identities(p: &Project) -> Result<BTreeMap<String, (String, Option<u64>
     let mut out = BTreeMap::new();
     for id in present(p)?.iter().rev().take(MAX_CLONE_SOURCES * 4) {
         if let Ok(identity) = btrfs::clone_identity(&p.state_path(id)) {
+            if identity.1.is_none() && !btrfs::supports_local_clone_receive() {
+                continue;
+            }
             if p.db.state(id)?.is_some_and(|s| s.subvol == identity.0) {
                 out.insert(id.clone(), identity);
             }

@@ -258,6 +258,7 @@ Sync peers exchange capability fields in their initial message:
   Peers exchange source identities and use ordinary data transfer when transaction identities do not match.
   The receiver checks each source against a signed local state, its UUID and its read-only flag.
   Received UUIDs must also match their recorded send transaction; original local UUIDs identify the source directly.
+  Reuse of original local UUIDs requires btrfs-progs 6.11 or later. Older receivers get file data for those sources.
 - Peers with compatible btrfs tools can exchange compressed extents with stream protocol 2.
   The sender also checks kernel support. This preserves existing compression; it does not compress uncompressed files.
 - A peer without these capabilities gets the previous stream and clone rules.

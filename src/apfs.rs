@@ -217,6 +217,10 @@ pub fn send_optimized(parent: Option<&Path>, child: &Path, _clones: &[PathBuf], 
     send_command(parent, child)
 }
 
+pub fn supports_local_clone_receive() -> bool {
+    false
+}
+
 pub fn supports_compressed_receive() -> bool {
     false
 }

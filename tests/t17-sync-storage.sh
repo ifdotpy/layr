@@ -102,7 +102,11 @@ returned=$(cat "$T/return-head")
 ok "the original machine receives the same blob" cmp blob "$P/states/$returned/blob"
 btrfs filesystem sync "$LAYR_ROOT" >/dev/null
 read -r _total exclusive _shared _name < <(btrfs filesystem du --raw "$P/states/$returned/blob" | tail -1)
-eq "the return trip also shares the blob extents" 0 "$exclusive"
+if btrfs version | python3 -c 'import re,sys; m=re.search(r"v(\d+)\.(\d+)",sys.stdin.read()); sys.exit(not (m and tuple(map(int,m.groups())) >= (6,11)))'; then
+    eq "the return trip also shares the blob extents" 0 "$exclusive"
+else
+    eq "older receive tools use a separate exact copy on return" 16777216 "$exclusive"
+fi
 ok "replica can send to another receiver" env LAYR_ROOT="$BR" "$LAYR" --project perf sync -q --push-only -- env LAYR_ROOT="$CR" "$LAYR" serve-peer perf
 ok "the third machine receives the same blob" cmp blob "$CR/projects/perf/states/$returned/blob"
 finish

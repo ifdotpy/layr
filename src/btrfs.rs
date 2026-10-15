@@ -219,16 +219,27 @@ pub fn send_optimized(parent: Option<&Path>, child: &Path, clones: &[PathBuf], c
     Ok(c)
 }
 
-pub fn supports_compressed_receive() -> bool {
-    static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *SUPPORTED.get_or_init(|| {
-        Command::new("btrfs").arg("version").output().ok().filter(|o| o.status.success()).is_some_and(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .split_whitespace()
-                .find_map(|s| s.strip_prefix('v')?.split('.').next()?.parse::<u32>().ok())
-                .is_some_and(|major| major >= 6)
+fn tools_version() -> Option<(u32, u32)> {
+    static VERSION: std::sync::OnceLock<Option<(u32, u32)>> = std::sync::OnceLock::new();
+    *VERSION.get_or_init(|| {
+        let out = Command::new("btrfs").arg("version").output().ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        String::from_utf8_lossy(&out.stdout).split_whitespace().find_map(|word| {
+            let mut parts = word.strip_prefix('v')?.split(|c: char| !c.is_ascii_digit());
+            Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
         })
     })
+}
+
+pub fn supports_compressed_receive() -> bool {
+    tools_version().is_some_and(|v| v >= (6, 0))
+}
+
+// Before 6.11, receive searches clone sources only by received UUID, not local UUID.
+pub fn supports_local_clone_receive() -> bool {
+    tools_version().is_some_and(|v| v >= (6, 11))
 }
 
 fn supports_compressed_send() -> bool {
