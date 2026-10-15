@@ -52,7 +52,6 @@ jobs:
           export PATH="$(brew --prefix coreutils)/libexec/gnubin:$(brew --prefix gnu-sed)/libexec/gnubin:$PATH"
           cargo build --locked
           cargo test --locked -- --include-ignored
-          LAYR_APFS_EXPERIMENT_CLONE_TREE=1 cargo test --locked -- --include-ignored
           export LAYR="$PWD/target/debug/layr"
           bash tests/apfs-local.sh
           LAYR_TEST_DIRECT_MAIN=1 bash tests/run.sh t01-basic t02-merge t03-git t05-transfer t06-sync t08-gitcompat

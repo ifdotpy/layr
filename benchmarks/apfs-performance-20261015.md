@@ -112,3 +112,9 @@ Trees with repeated file inodes now use the existing copy path, which preserves 
 Two added tests cover trees without layers, with and without hard links.
 All 30 Rust tests pass with the native flag and without it.
 CI runs both modes. Native directory mode remains opt-in.
+
+## Default behavior after review
+
+Whole-directory clones are now automatic. The experimental flag has been removed.
+Trees with hard links or nested layers still use file-by-file clones for correctness.
+The commands and flags above describe the historical experiment binaries.

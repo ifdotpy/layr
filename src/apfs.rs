@@ -203,15 +203,14 @@ pub fn snapshot(src: &Path, dst: &Path, readonly: bool) -> Result<()> {
         {
             let _t = crate::trace::span("APFS copy tree");
             let mut inodes = std::collections::HashSet::new();
-            let native = std::env::var_os("LAYR_APFS_EXPERIMENT_CLONE_TREE").is_some()
-                && !before.iter().any(|(p, e)| {
-                    e.meta.ftype == crate::fsutil::FType::Special
-                        || (!p.is_empty() && e.meta.is_dir() && is_subvolume(&src.join(p)))
-                        // Recursive clones copy hard links as separate files.
-                        || (e.meta.is_file() && !inodes.insert((e.fingerprint.0, e.fingerprint.1)))
-                });
+            let native = !before.iter().any(|(p, e)| {
+                e.meta.ftype == crate::fsutil::FType::Special
+                    || (!p.is_empty() && e.meta.is_dir() && is_subvolume(&src.join(p)))
+                    // Recursive clones copy hard links as separate files.
+                    || (e.meta.is_file() && !inodes.insert((e.fingerprint.0, e.fingerprint.1)))
+            });
             if native {
-                // Experimental floor: Darwin discourages recursive clonefile use.
+                // Clone the tree at once when no entry needs file-by-file handling.
                 crate::sys::apfs_clone(src, &temp)?;
                 seal(&temp, false, false)?;
                 for (p, entry) in &before {

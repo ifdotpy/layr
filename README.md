@@ -31,10 +31,9 @@ cargo test                   # unit tests
 
 ## Experimental APFS backend
 
-Set `LAYR_APFS_EXPERIMENT_CLONE_TREE=1` to test whole-directory clones in local commands.
-This opt-in mode reduces command time in the [10,000-file experiment](benchmarks/apfs-performance-20261015.md).
-Trees with hard links or nested layers use the existing file-by-file path.
-The default remains file-by-file clones. Recursive directory clones need further compatibility checks.
+APFS uses whole-directory clones automatically. There is no mode flag.
+Trees with hard links or nested layers use file-by-file clones to preserve their behavior.
+See the [10,000-file measurements](benchmarks/apfs-performance-20261015.md) for time and space costs.
 
 
 The macOS build uses APFS. The Linux build continues to use btrfs with the existing store and record formats.
@@ -390,7 +389,7 @@ It measures APFS at 11.00 to 13.26 seconds and btrfs at 0.09 to 16.33 seconds.
 The host's one-minute load average ranges from 294 to 311 during that test.
 A further benchmark found no quiet interval within 30 minutes. The comparison remains provisional.
 
-The APFS implementation clones every file for a snapshot and scans content for changed blocks.
+The measured baseline clones every file for a snapshot and scans content for changed blocks.
 The btrfs implementation uses subvolume snapshots and send-stream change lists.
 Those mechanisms have different costs as the file count grows.
 The test image still has 96% free space after the runs. Spotlight indexing is disabled on it.
