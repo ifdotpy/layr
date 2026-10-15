@@ -254,6 +254,10 @@ pub fn set_fs_ids(uid: u32, gid: u32) -> Result<(u32, u32)> {
 
 /// Set the supplementary groups of the process (the service child is single threaded).
 pub fn set_groups(groups: &[u32]) -> io::Result<()> {
+    // Darwin stores at most NGROUPS_MAX (16) supplementary groups. Its directory
+    // service can return more memberships than the kernel credential can contain.
+    #[cfg(target_os = "macos")]
+    let groups = &groups[..groups.len().min(16)];
     // SAFETY: the pointer and length describe a valid slice of gid_t for the call.
     let rc = unsafe { libc::setgroups(groups.len() as _, groups.as_ptr()) };
     if rc != 0 {
@@ -341,8 +345,10 @@ pub fn user_groups(name: &str, gid: u32) -> Vec<u32> {
 }
 
 #[cfg(target_os = "macos")]
-pub fn switch_user_before_exec(cmd: &mut Command, uid: u32, gid: u32, groups: Vec<u32>) {
+pub fn switch_user_before_exec(cmd: &mut Command, uid: u32, gid: u32, mut groups: Vec<u32>) {
     use std::os::unix::process::CommandExt;
+    // Match Darwin's fixed kernel group limit, as in set_groups.
+    groups.truncate(16);
     // SAFETY: the child calls only async-signal-safe credential syscalls before exec.
     unsafe {
         cmd.pre_exec(move || {

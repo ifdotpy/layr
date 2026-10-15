@@ -32,6 +32,7 @@ no 'another user cannot read the line' as nobody cat "$P/work/file.txt"
 cd /private/tmp
 no 'another user cannot read private history through the service' as nobody env LAYR_PROJECT=service LAYR_LINE=work "$L" show HEAD:file.txt
 cd "$P/work"
+/usr/bin/id "$LAYR_APFS_TEST_USER"
 check_identity() {
     as "$LAYR_APFS_TEST_USER" "$L" try HEAD -- /bin/sh -c "test \"\$(/usr/bin/id -u)\" = $(id -u "$LAYR_APFS_TEST_USER")" > "$T/check.log" 2>&1
 }
