@@ -103,3 +103,12 @@ This behavior exists in both versions. The directory-clone experiment does not i
 No product fix is included in this measurement.
 Raw data: `results/apfs-space-stages-20261016.json`.
 The stage script uses the owned images from the main space experiment and has fixed local paths.
+
+## Review before merge
+
+A test without nested layers exposes a hard-link defect in recursive clones.
+The native clone produces separate files for two names that share one inode.
+Trees with repeated file inodes now use the existing copy path, which preserves hard links.
+Two added tests cover trees without layers, with and without hard links.
+All 30 Rust tests pass with the native flag and without it.
+CI runs both modes. Native directory mode remains opt-in.

@@ -31,6 +31,12 @@ cargo test                   # unit tests
 
 ## Experimental APFS backend
 
+Set `LAYR_APFS_EXPERIMENT_CLONE_TREE=1` to test whole-directory clones in local commands.
+This opt-in mode reduces command time in the [10,000-file experiment](benchmarks/apfs-performance-20261015.md).
+Trees with hard links or nested layers use the existing file-by-file path.
+The default remains file-by-file clones. Recursive directory clones need further compatibility checks.
+
+
 The macOS build uses APFS. The Linux build continues to use btrfs with the existing store and record formats.
 The store and signed record formats remain compatible with the Linux backend.
 

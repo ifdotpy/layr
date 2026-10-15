@@ -202,8 +202,14 @@ pub fn snapshot(src: &Path, dst: &Path, readonly: bool) -> Result<()> {
     let result = (|| -> Result<()> {
         {
             let _t = crate::trace::span("APFS copy tree");
+            let mut inodes = std::collections::HashSet::new();
             let native = std::env::var_os("LAYR_APFS_EXPERIMENT_CLONE_TREE").is_some()
-                && !before.iter().any(|(p, e)| !p.is_empty() && e.meta.is_dir() && is_subvolume(&src.join(p)));
+                && !before.iter().any(|(p, e)| {
+                    e.meta.ftype == crate::fsutil::FType::Special
+                        || (!p.is_empty() && e.meta.is_dir() && is_subvolume(&src.join(p)))
+                        // Recursive clones copy hard links as separate files.
+                        || (e.meta.is_file() && !inodes.insert((e.fingerprint.0, e.fingerprint.1)))
+                });
             if native {
                 // Experimental floor: Darwin discourages recursive clonefile use.
                 crate::sys::apfs_clone(src, &temp)?;
@@ -410,6 +416,22 @@ mod tests {
     #[test]
     #[ignore = "requires a case-sensitive APFS test volume"]
     fn snapshot_preserves_files_and_excludes_layers() -> Result<()> {
+        check_snapshot_files(true, true)
+    }
+
+    #[test]
+    #[ignore = "requires a case-sensitive APFS test volume"]
+    fn snapshot_preserves_files_without_layers() -> Result<()> {
+        check_snapshot_files(false, true)
+    }
+
+    #[test]
+    #[ignore = "requires a case-sensitive APFS test volume"]
+    fn snapshot_preserves_files_without_hard_links_or_layers() -> Result<()> {
+        check_snapshot_files(false, false)
+    }
+
+    fn check_snapshot_files(with_layer: bool, with_hard_link: bool) -> Result<()> {
         let s = Sandbox::new();
         let src = s.0.join("work");
         create_subvolume(&src)?;
@@ -419,11 +441,15 @@ mod tests {
         fs::set_permissions(src.join("readonly"), fs::Permissions::from_mode(0o444))?;
         fs::create_dir(src.join("dir"))?;
         crate::sys::apfs_attribute(&src.join("dir"), c"com.layr.test", Some(b"directory metadata"))?;
-        fs::hard_link(src.join("a"), src.join("hard"))?;
+        if with_hard_link {
+            fs::hard_link(src.join("a"), src.join("hard"))?;
+        }
         std::os::unix::fs::symlink("a", src.join("link"))?;
         fs::set_permissions(src.join("A"), fs::Permissions::from_mode(0o755))?;
-        create_subvolume(&src.join("layer"))?;
-        fs::write(src.join("layer/cache"), b"not in history")?;
+        if with_layer {
+            create_subvolume(&src.join("layer"))?;
+            fs::write(src.join("layer/cache"), b"not in history")?;
+        }
         fs::create_dir(src.join("readonly-dir"))?;
         fs::write(src.join("readonly-dir/file"), b"data")?;
         fs::set_permissions(src.join("readonly-dir"), fs::Permissions::from_mode(0o555))?;
@@ -436,8 +462,10 @@ mod tests {
         assert_eq!(crate::sys::apfs_attribute(&dst.join("dir"), c"com.layr.test", None)?, b"directory metadata");
         assert_eq!(fs::symlink_metadata(dst.join("A"))?.mode() & 0o777, 0o755);
         assert_eq!(fs::read_link(dst.join("link"))?, Path::new("a"));
-        assert_eq!(fs::symlink_metadata(dst.join("a"))?.ino(), fs::symlink_metadata(dst.join("hard"))?.ino());
-        assert!(dst.join("layer").is_dir());
+        if with_hard_link {
+            assert_eq!(fs::symlink_metadata(dst.join("a"))?.ino(), fs::symlink_metadata(dst.join("hard"))?.ino());
+        }
+        assert_eq!(dst.join("layer").is_dir(), with_layer);
         assert!(!dst.join("layer/cache").exists());
         assert!(fs::write(dst.join("a"), b"bad").is_err());
         assert!(fs::write(dst.join("new"), b"bad").is_err());
