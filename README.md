@@ -1,6 +1,6 @@
 # layr
 
-Local version control on btrfs, for many users and many working folders on one machine. Git and GitHub stay the remote layer
+Local version control on btrfs, for many users and many working folders on one machine. Git and GitHub stay the remote
 (push, pull requests, CI). Everything local is btrfs: each line (branch and worktree in one) is a
 writable snapshot, each state (commit) is a read-only snapshot, change lists come from
 the btrfs metadata-send ioctl in O(changes), and a merge copies files with reflinks.
@@ -95,11 +95,12 @@ service; root can run every command directly.
 | state     | read-only snapshot + signed record (id, parents, author, message, conflicts). A commit.    |
 | line      | writable snapshot at `projects/<p>/lines/<name>` with an owner and a head state             |
 | auto state| a snapshot of the working content: before every changing command, on `layr save`, and every 10 minutes when the content changed (the service) |
-| layer     | a folder of regenerable content (such as a Rust `target`) kept as a nested subvolume: outside states, diffs and backups. A new line starts with a reflink copy of the nearest ancestor's layer (another user's only from a protected line). Layers come only from `layr save --layers`; layr never keeps build output by itself. Layer folders: `layr layer add` and the folders that `.layrattributes` files mark `regenerable` |
+| cache     | a folder of regenerable content (such as a Rust `target`) kept as a nested subvolume: outside states, diffs and backups. A new line starts with a reflink copy of the nearest ancestor's cache (another user's only from a protected line). Caches come only from `layr save --caches`; layr never keeps build output by itself. Cache folders: `layr cache add` and the folders that `.layrattributes` files mark `regenerable`; a folder with files in the head state is no cache |
 | session   | a free-text label of the program that runs layr (`LAYR_SESSION`): shown in `op log` and used by `undo` to find "my last operation"; layr never decides permissions by it |
 | record    | one signed operation (Ed25519, UUIDv7 ids) in the project database; undo restores pointers |
 | role      | reader, writer, maintainer or admin of a user, a Unix group or everyone, per project and machine |
 | protected line | a line (pattern) that changes only through merges of reviewed states, after its checks pass on the merge result |
+| overlay   | files with their own owner, readers and history, shown in the lines of their readers above the shared set; `push`, exports, backups and every state of the project hold the shared set only (`docs/overlays.md`) |
 
 States are folders: `layr show <state>:<path>` and `layr grep <pattern> <state>` read them
 without a checkout.
@@ -116,7 +117,8 @@ without a checkout.
 | remote (git)  | `remote`, `fetch`, `pull`, `push [--squash]`, `clone`                                         |
 | machines      | `sync -- <cmd>` / `serve-peer`, `machines [trust]`, `op export` / `op import` (JSONL), `backup` / `backup restore` / `backup verify` |
 | copies        | `export <folder>`                                                                              |
-| setup         | `init`, `projects`, `config`, `layer add|remove|list|repair`, `daemon`                        |
+| overlays      | `overlay create <name> [--readers <principals>] [--mode shared\|follow]`, `overlay list`, `overlay readers`, `overlay use [--add\|--remove\|--none] <names>`, `overlay move [--purge] <name> <paths>`, `overlay log\|show\|diff\|grep\|ls-files <name>` |
+| setup         | `init`, `projects`, `config`, `cache add|remove|list|repair`, `daemon`                        |
 
 Revisions: `HEAD`, `@`, `HEAD~2`, `HEAD^2`, line names, `line@machine`, tags, `origin/main`,
 state id prefixes, git commit ids of imported or pushed states, `stash@{n}`, `HEAD@{n}`
@@ -127,7 +129,7 @@ state id prefixes, git commit ids of imported or pushed states, `stash@{n}`, `HE
 1. A writer makes a line (`layr branch topic-1 main`), or a maintainer makes one for a user
    (`--owner bob`). Only the owner changes a line.
 2. The user works and commits in that folder. A program that drives the user can call
-   `layr save` at quiet points, and `layr layer repair` when a build tool made a layer folder
+   `layr save` at quiet points, and `layr cache repair` when a build tool made a cache folder
    again.
 3. Review takes an exact state: `layr diff main...topic-1`, `layr try <state> -- <tests>` runs the
    command in a temporary copy of that state and records the result.
@@ -173,6 +175,8 @@ $LAYR_ROOT/projects/<p>/
   git/                                 git object store for the remote bridge
   meta/db/layr.sqlite                  signed records + derived tables (own subvolume, 0700)
   meta/stage, meta/scan, meta/work     staging lines and temporary snapshots
+  meta/base/<line>@<key>               full tree of a line with overlays (derived)
+  meta/overlays/<overlay>/             an overlay: the internal project <p>%<overlay>, same layout
 ```
 
 An operation writes its snapshots first, then one SQLite transaction (synchronous=FULL) with
@@ -184,6 +188,12 @@ its record and the derived rows. After a crash only a snapshot without a record 
 
 - The service runs as root; every other user is a client (`SO_PEERCRED`). Clients cannot read
   `states/` or the database; they read history through layr.
+- The git object store (`git/`) holds history too. Its folder alone decides who reads it: open
+  to the users and groups with a role and the owners of lines (an access list, or `0755` when
+  everyone may read). git writes below it with `core.sharedRepository=0644`, so a strict umask
+  of the service (such as `0077`) does not close the objects that the `.git` folder of a line
+  uses through `alternates`. A store of an earlier layr gets read access below its folder once:
+  at the next new line or role change, or at the first periodic run after the service starts.
 - A line belongs to its owner. All writes of the service into a line go through descriptors
   (`openat2` with `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS`); a link in a line never redirects a
   root write. New working folders are prepared in a private folder and appear when ready.
@@ -191,6 +201,9 @@ its record and the derived rows. After a crash only a snapshot without a record 
   line) run with that user's uid, groups and a clean environment: a command never runs as
   another user. Paths named by a user outside the store (export, backups, patch files) are accessed with the user's file permissions, and so
   is a file such a command leaves for the service (the result of a merge driver).
+- Overlays (docs/overlays.md): an overlay is read only through its own project, by its readers;
+  the working content of a line with overlays is open to its owner and to readers of all its
+  overlays; automatic states leave overlay files out, so no state of the project holds one.
 - Permissions (docs/design.md, section 3): roles per project and machine (`layr access`), deny
   rules that win over any role, owners of lines, and protection rules of line patterns
   (`layr protect`). A new project has one admin (its creator) and a protected `main`. Stores of
@@ -226,7 +239,7 @@ working folders on the new machine. A restore trusts the machine that signed the
 backup made entirely by another machine identity restores as that machine's project.
 
 `layr sync -- ssh host layr serve-peer <p>` exchanges records both ways and sends missing states with `btrfs send -p <common state>`;
-`--auto --layers` also carries working content and build output for a live move.
+`--auto --caches` also carries working content and build output for a live move.
 
 ## Btrfs execution and sync
 
@@ -242,7 +255,9 @@ Sync peers exchange capability fields in their initial message:
 
 - Peers that support extra clone sources can reuse data from up to eight additional shared states.
   The sender examines at most 32 recent candidates for each state.
-  The receiver checks each source against a signed local state, its UUID, its transaction ID, and its read-only flag.
+  Peers exchange source identities and use ordinary data transfer when transaction identities do not match.
+  The receiver checks each source against a signed local state, its UUID and its read-only flag.
+  Received UUIDs must also match their recorded send transaction; original local UUIDs identify the source directly.
 - Peers with compatible btrfs tools can exchange compressed extents with stream protocol 2.
   The sender also checks kernel support. This preserves existing compression; it does not compress uncompressed files.
 - A peer without these capabilities gets the previous stream and clone rules.
@@ -265,6 +280,11 @@ OLD_LAYR=/path/to/old/layr LAYR=$PWD/target/release/layr bash tests/compat-btrfs
 ```
 
 The compatibility test covers state IDs, signatures, backups in both directions, and both sync roles with an older binary.
+It also checks saved cache content across old and new clients.
+The CLI uses `cache` and `--caches`; `layer` and `--layers` remain aliases.
+Cache records retain the legacy `save.layers` name and `layers` fields on disk.
+The reader also accepts the intermediate `save.caches` format.
+Sync selects the cache message name from the peer capabilities.
 
 ### Measured btrfs optimization results
 
@@ -363,15 +383,17 @@ Raw data includes the binary hash and source content hash:
 [btrfs, 10,000 files](benchmarks/results/btrfs-10000.json),
 and [interleaved status](benchmarks/results/paired-status-10000.json).
 
-The previous btrfs binary (`c6063e4`) and the candidate pass thirteen compatibility checks.
+At the benchmark revision, the previous btrfs binary (`c6063e4`) and the candidate passed thirteen compatibility checks.
 Both binaries read each other's states, verify signatures and restore each other's backups without changing state identifiers.
 Run those checks with `OLD_LAYR=/path/to/old/layr LAYR=/path/to/new/layr bash tests/compat-btrfs.sh` on Linux as root.
 
 ## Not in this version
 
-- Complete APFS support: a privileged service, atomic snapshots and native state transfer.
+- Complete APFS support: a privileged service, atomic snapshots, overlays and native state transfer.
+- Overlays beyond the first slice: routing patterns, ephemeral mode, folder overlays, encrypted
+  backups and replication of overlays (`docs/overlays.md`, section 9.7).
 - Structured (AST) merge; format drivers can be plugged in through `merge.driver.<name>`.
 - `layrhub`: records, ids and stream transport are ready for it; the protocol is not.
 - Content checks of replicated states: a received state must be the subvolume its signed record
   names (`received_uuid`), but its file content is trusted together with the machine that made
-  it. Layer snapshots are checked the same way through the signed `save.layers` record.
+  it. Cache snapshots are checked the same way through the signed `save.caches` record.

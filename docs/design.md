@@ -6,8 +6,8 @@ the commands; this file says why they are shaped the way they are.
 ## 1. What layr is
 
 layr is version control for one Linux machine with many users and many working folders, on
-btrfs. Git and its hosts (GitHub and others) stay the remote layer. layr is a general tool: it
-knows Unix users and groups, projects, lines, states, layers, records, rules and checks. It
+btrfs. Git and its hosts (GitHub and others) stay the remote. layr is a general tool: it
+knows Unix users and groups, projects, lines, states, caches, records, rules and checks. It
 knows nothing about the programs that use it.
 
 **The boundary test.** A feature belongs in layr when a team of people on a shared Linux server,
@@ -16,7 +16,7 @@ the program on top. Examples of programs on top: an orchestrator of AI coding ag
 system, an editor.
 
 - layr gives mechanisms with neutral defaults. The program on top chooses the values: which
-  role a user gets, which checks are required, when to save, who builds a warm layer.
+  role a user gets, which checks are required, when to save, who builds a warm cache.
 - A program on top uses only the public interface: the commands with their machine-readable
   output, and the record log (read only). It never reads the database or the store folders.
 - Every security rule is enforced by layr. A rule that only the program on top checks can be
@@ -38,7 +38,7 @@ trusted with every line.
 | One working folder per clone; a branch is a name | Worktrees, `stash` and `checkout` to move between branches                               | A line is a folder; a new line costs the same at any size                                                 |
 | Whoever can write `.git` owns it             | Hooks and local rules are advice: `--no-verify`, `update-ref` or deleting a hook goes past them; protection lives only on the host | Users, groups, roles, deny rules and protected lines, enforced by the root service on the machine itself  |
 | A merge takes what a branch name points to now | A change made after the review goes in unseen                                              | `merge --expect` takes exactly the reviewed state; checks run on the merge result before the line moves  |
-| Build output and dependencies are not its concern | Every new working folder builds from nothing and keeps its own copy                     | Layers: regenerable folders outside history; a new line starts with a copy-on-write copy (section 5)      |
+| Build output and dependencies are not its concern | Every new working folder builds from nothing and keeps its own copy                     | Caches: regenerable folders outside history; a new line starts with a copy-on-write copy (section 5)      |
 | History is an object store; files must be checked out | Reading an old state or starting a new folder costs a write of every file          | A state is a read-only folder; `show` and `grep` read it directly                                         |
 | A conflict stops the operation               | Work waits until someone resolves it                                                         | A merge never stops: the conflicts are part of the new state (a line with checks still takes none)        |
 
@@ -47,7 +47,7 @@ operation log with undo, and lets conflicts be committed. Sapling with EdenFS gi
 copies that do not write every file. layr reaches these ideas from the storage side: btrfs gives
 snapshots in constant time and change lists in O(changes), so the working folder can be history
 without a cost for each file. It adds two things that these systems leave to the host: rules
-that the machine itself enforces, and regenerable layers.
+that the machine itself enforces, and regenerable caches.
 
 The cost is the reason git stays at the edge. layr has its own store, so it runs only on Linux
 with btrfs, while editors, hosts and CI systems read git. layr imports from git, pushes states as
@@ -85,7 +85,7 @@ do everything, and every record names who acted.
 | reader | read history (`log`, `show`, `diff`, `grep`, `blame`), `try`, `export` |
 | writer | create own lines |
 | maintainer | update protected lines (per their rules), tags, push, create lines for other users, delete or adopt other users' lines |
-| admin | roles, deny rules, protection rules, checks, remotes, configuration, layers, replication and machine trust, backups, gc, record import and export, fsck |
+| admin | roles, deny rules, protection rules, checks, remotes, configuration, caches, replication and machine trust, backups, gc, record import and export, fsck |
 
 A user's role is the highest role of the user, the user's groups and `*`. Owning a line in a
 project includes reading the project.
@@ -132,43 +132,50 @@ git commit, with the same parents (merges stay merges). The same state always gi
 commit. `layr push --squash` exports the pushed state as one commit on top of the last exported
 one; a program on top that wants one commit per task uses it.
 
-## 5. Warm layers
+## 5. Warm caches
 
-A layer is a folder of regenerable content, such as a Rust `target` folder, kept as a nested
+A cache is a folder of regenerable content, such as a Rust `target` folder, kept as a nested
 subvolume, outside states, diffs and backups. Every working folder would otherwise build from
 nothing, and the same build output would be on disk once per folder.
 
-layr keeps layers as storage and knows nothing about builds. It cannot tell whether build output
+layr keeps caches as storage and knows nothing about builds. It cannot tell whether build output
 is valid for a state, so it never decides that by itself:
 
-- A new line (and the temporary copy of a check) takes for each layer the snapshot of its start
+- A new line (and the temporary copy of a check) takes for each cache the snapshot of its start
   state, or else of the nearest ancestor state on this machine that has one. The copy shares
   all blocks; only its files change owner. The build tool then decides what to rebuild.
-- Which folders are layers: the paths of `layr layer add`, and the folders that `.layrattributes`
+- Which folders are caches: the paths of `layr cache add`, and the folders that `.layrattributes`
   files mark `regenerable`. A `.layrattributes` line is a pattern of the `.gitignore` form and
   attributes (`node_modules regenerable`; `-regenerable` unsets it; the last matching line wins);
   a file applies to its folder. It is part of the project, so on a protected line it changes
-  only through review. A regenerable folder is a layer only if the ignore rules ignore it: a
-  layer must not hide files that are in history. A new line takes a regenerable folder only
-  warm, while its `.layrattributes` still marks it.
-- Layers come only from `layr save --layers`, the explicit choice of someone who may save the
-  line. It first turns the regenerable folders into layers, so their files stay out of the state. On a
-  protected line with no changes since its head (ignored files do not count), it gives the layers
-  to the head, so the next lines from that head start warm; else to a new automatic state.
-- A layer made by another user goes to a line only if it was saved on a protected line, because
-  a layer holds code that review does not see. Other layers go only to lines of the user who
+  only through review. A regenerable folder is a cache only if the ignore rules ignore it: a
+  cache must not hide files that are in history. For the same reason a folder with files in the
+  head state is not a cache, even when the ignore rules ignore it (files added with `add -f`, or
+  kept by `init --include-ignored`): `save --caches`, `cache add` and `cache list` say so, and
+  `save --caches` and `cache repair` turn such a folder that an older layr made a cache back into
+  a plain folder. A new line takes a regenerable folder only warm, while its `.layrattributes`
+  still marks it, and takes a folder with files from its state, even when an ancestor saved it
+  as a cache.
+- Caches come only from `layr save --caches`, the explicit choice of someone who may save the
+  line. It first turns the regenerable folders into caches, so their files stay out of the state. On a
+  protected line with no changes since its head (ignored files do not count), it gives the caches
+  to the head, so the next lines from that head start warm; else to a new automatic state. A
+  later `save --caches` on the same state adds its caches to the ones that earlier saves gave
+  it; a cache that the state has keeps its first snapshot.
+- A cache made by another user goes to a line only if it was saved on a protected line, because
+  a cache holds code that review does not see. Other caches go only to lines of the user who
   made them.
-- A check starts from the warm layers of its state, but its build output is not kept.
-- gc keeps the layer snapshots of line heads and of the newest `retention.layers` (5) states
-  with layers; the states themselves stay.
+- A check starts from the warm caches of its state, but its build output is not kept.
+- gc keeps the cache snapshots of line heads and of the newest `retention.caches` (5) states
+  with caches; the states themselves stay.
 
-A layer helps only a tool that checks its own output and accepts a new path, because every line
+A cache helps only a tool that checks its own output and accepts a new path, because every line
 has its own folder. Cargo's `target` does: Cargo compares fingerprints and rebuilds what a change
 or the new path made stale. A Python virtual environment does not: its scripts keep the absolute
 path of the folder where it was made, so in a copy they run the interpreter and packages of the
 original line. pnpm links packages by relative paths, but the scripts in `node_modules/.bin` set
 `NODE_PATH` to absolute paths of the original folder. Xcode and SwiftPM do not reuse build
-output at another path. Which folders are layers, who builds them, and when a build is good
+output at another path. Which folders are caches, who builds them, and when a build is good
 enough to save, is the choice of the program on top.
 
 ## 6. What is not in layr
@@ -181,16 +188,18 @@ enough to save, is the choice of the program on top.
 
 ## 7. Planned
 
+- Overlays: file trees with their own owner, readers and history, stacked on a line. The first
+  slice (file overlays, shared and follow mode) is built; the rest is planned (`docs/overlays.md`).
 - A dry-run mode for rule changes that reports what would be refused (GitHub rule evaluation).
 
 ## 8. Decided against
 
-- **Keeping the build output of checks as layers.** A passing check of a protected line used to
-  give its build output to the state as a shared layer. Removed on 2026-10-10: a check passing
+- **Keeping the build output of checks as caches.** A passing check of a protected line used to
+  give its build output to the state as a shared cache. Removed on 2026-10-10: a check passing
   does not show that its build output is valid at another path or with another toolchain (a
   copied Python environment runs the original line's interpreter), and the output holds code
   that no one reviewed. A state is a key of sources only, not of the compiler and environment
-  that a build cache needs. Layers now come only from an explicit `save --layers`.
+  that a build cache needs. Caches now come only from an explicit `save --caches`.
 - **Working folders outside the store.** A line's folder stays at
   `projects/<p>/lines/<name>`: snapshots, deletes and writes of the service go through the
   store's own folders, which no user can replace. A link (`ln -s <line folder> ~/code/topic`)

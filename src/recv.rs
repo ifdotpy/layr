@@ -49,7 +49,8 @@ pub struct Expect<'a> {
     /// The local subvolume of a state of this project, by the UUID its signed record names.
     pub parent: &'a dyn Fn(&str) -> Option<PathBuf>,
     /// Extra immutable sources verified against signed states of this project.
-    pub clones: &'a [(String, u64, PathBuf)],
+    /// A local original UUID has no transaction constraint; received UUIDs require the send transaction.
+    pub clones: &'a [(String, Option<u64>, PathBuf)],
 }
 
 /// Extra clone sources are immutable and remain under the project lock during receive.
@@ -196,9 +197,10 @@ pub fn check(src: &mut dyn Read, out: &mut dyn Write, e: &Expect) -> Result<Opti
                     let uuid = uuid_text(&source.0)?;
                     let transid =
                         u64::from_le_bytes(source.1.as_slice().try_into().map_err(|_| anyhow!("bad clone transaction"))?);
-                    let (_, _, root) = e.clones.iter().find(|(u, t, _)| *u == uuid && *t == transid).ok_or_else(|| {
-                        anyhow!("the stream clones from a subvolume outside this state and its allowed sources")
-                    })?;
+                    let (_, _, root) =
+                        e.clones.iter().find(|(u, t, _)| *u == uuid && t.is_none_or(|t| t == transid)).ok_or_else(|| {
+                            anyhow!("the stream clones from a subvolume outside this state and its allowed sources")
+                        })?;
                     check_clone_file(root, get(&at, A_CLONE_PATH).ok_or_else(|| anyhow!("clone without a source path"))?)?;
                 }
             }
@@ -340,7 +342,7 @@ mod tests {
         std::fs::write(root.join("g"), b"data").unwrap();
         std::os::unix::fs::symlink(root.join("g"), root.join("link")).unwrap();
         std::os::unix::fs::symlink(&root, root.join("dir-link")).unwrap();
-        let allowed = [(extra, 7, root.clone())];
+        let allowed = [(extra.clone(), Some(7), root.clone())];
         let e = Expect { name: "s1", uuid: &uuid, parent: &parent, clones: &allowed };
         let subvol = cmd(SUBVOL, &[(A_PATH, b"s1"), (A_UUID, &U), (A_CTRANSID, &t)]);
         let clone = |transid: &[u8], path: &[u8]| {
@@ -349,6 +351,10 @@ mod tests {
         let valid = stream(&[subvol.clone(), clone(&t, b"g"), cmd(END, &[])]);
         assert!(check(&mut valid.as_slice(), &mut Vec::new(), &e).is_ok());
         assert!(run(&valid).is_err(), "the old policy rejects the extra source");
+        let local = [(extra, None, root.clone())];
+        let local_expect = Expect { name: "s1", uuid: &uuid, parent: &parent, clones: &local };
+        let returned = stream(&[subvol.clone(), clone(&8u64.to_le_bytes(), b"g"), cmd(END, &[])]);
+        assert!(check(&mut returned.as_slice(), &mut Vec::new(), &local_expect).is_ok());
         for bad in [
             clone(&8u64.to_le_bytes(), b"g"),
             clone(&t, b"../secret"),

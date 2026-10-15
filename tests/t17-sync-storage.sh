@@ -26,6 +26,11 @@ l commit -qm return
 last=$(head_id)
 new_fs "$T/peer" 2G
 BR=$T/peer/store
+# Separate filesystem transaction numbers must not accidentally match in a return trip.
+for i in {1..8}; do
+    btrfs subvolume create "$T/peer/clock-$i" >/dev/null
+    btrfs subvolume delete "$T/peer/clock-$i" >/dev/null
+done
 ok "sync restores content from an extra source" l sync -q -- bash -c "tee '$T/clone.wire' | env LAYR_ROOT='$BR' '$LAYR' serve-peer perf"
 ok "received content matches the original" cmp blob "$BR/projects/perf/states/$last/blob"
 btrfs filesystem sync "$T/peer" >/dev/null
@@ -73,6 +78,10 @@ def commands(path):
 assert 16 in commands(sys.argv[1]), 'no clone command'
 assert 25 in commands(sys.argv[2]), 'no encoded write command'
 PY
+# A third machine has the original states, received independently from the first.
+new_fs "$T/third" 2G
+CR=$T/third/store
+l sync -q -- env LAYR_ROOT="$CR" "$LAYR" serve-peer perf
 # Received source UUIDs must also work when the replica sends new states back.
 AR=$LAYR_ROOT
 return_from_replica() (
@@ -93,4 +102,6 @@ ok "the original machine receives the same blob" cmp blob "$P/states/$returned/b
 btrfs filesystem sync "$LAYR_ROOT" >/dev/null
 read -r _total exclusive _shared _name < <(btrfs filesystem du --raw "$P/states/$returned/blob" | tail -1)
 eq "the return trip also shares the blob extents" 0 "$exclusive"
+ok "replica can send to another receiver" env LAYR_ROOT="$BR" "$LAYR" --project perf sync -q --push-only -- env LAYR_ROOT="$CR" "$LAYR" serve-peer perf
+ok "the third machine receives the same blob" cmp blob "$CR/projects/perf/states/$returned/blob"
 finish

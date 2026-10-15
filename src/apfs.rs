@@ -40,6 +40,12 @@ fn mark(path: &Path, parent: Option<String>, readonly: bool) -> Result<()> {
     marked?;
     Ok(())
 }
+pub fn set_readonly(_path: &Path) -> Result<()> {
+    bail!("overlays are not supported by the experimental APFS backend")
+}
+pub fn set_writable(_path: &Path) -> Result<()> {
+    bail!("overlays are not supported by the experimental APFS backend")
+}
 pub fn create_subvolume(path: &Path) -> Result<()> {
     if !is_supported(path.parent().context("missing parent")?) {
         bail!("layr requires case-sensitive APFS on macOS");
@@ -215,7 +221,10 @@ pub fn supports_compressed_receive() -> bool {
     false
 }
 
-pub fn clone_identity(_path: &Path) -> Result<(String, u64)> {
+pub fn send_clone_identity(_path: &Path) -> Result<(String, u64)> {
+    bail!("native state transfer is not supported by the experimental APFS backend")
+}
+pub fn clone_identity(_path: &Path) -> Result<(String, Option<u64>)> {
     bail!("APFS does not support btrfs stream identities")
 }
 pub fn candidates(parent: &Path, child: &Path) -> Result<Vec<crate::changes::Change>> {

@@ -68,7 +68,7 @@ pub fn skip_path(p: &str) -> bool {
 /// The kinds of change to a line, for `Repo::authorize_line`.
 #[derive(Clone, Copy, Debug)]
 pub enum LineOp {
-    /// Snapshots of the working content (save, layer repair): the owner.
+    /// Snapshots of the working content (save, cache repair): the owner.
     Save,
     /// Commit, reset, add, apply, stash and the other work commands: the owner, and only if the
     /// line is not protected or its rule allows direct changes.
@@ -112,7 +112,9 @@ impl<'a> Repo<'a> {
             Ok(()) => Ok(()),
             Err(reason) => {
                 let reader_action = crate::access::action_role(action) == Some(Role::Reader);
+                // An overlay is read by its readers only: a former reader keeps its overlay lines.
                 if reader_action
+                    && !self.p.is_overlay()
                     && pol.denied_by(&who, action).is_none()
                     && self.p.db.lines()?.iter().any(|l| l.owner == ctx.caller.uid)
                 {
@@ -139,7 +141,10 @@ impl<'a> Repo<'a> {
         if pol.check(&who, "read").is_ok() {
             return Ok(());
         }
-        if pol.denied_by(&who, "read").is_none() && self.p.db.lines()?.iter().any(|l| l.owner == ctx.caller.uid) {
+        if !self.p.is_overlay()
+            && pol.denied_by(&who, "read").is_none()
+            && self.p.db.lines()?.iter().any(|l| l.owner == ctx.caller.uid)
+        {
             return Ok(());
         }
         bail!("permission denied: user {} may not read project {}", ctx.caller.user, self.p.name)
@@ -330,10 +335,98 @@ impl<'a> Repo<'a> {
             time: ids::now_ms(),
             running: false,
             conflicts: Vec::new(),
-            layers: BTreeMap::new(),
-            layer_by: None,
-            layer_shared: false,
+            caches: BTreeMap::new(),
+            cache_by: None,
+            cache_shared: false,
         })
+    }
+
+    /// An automatic state of a line's working content. For a line with overlays the snapshot
+    /// leaves the overlay files out (a writable snapshot, the files removed, read-only): no state
+    /// of the project holds a file of an overlay.
+    pub fn working_snapshot(&self, ctx: &Ctx, line: &Line, parents: Vec<String>, message: &str) -> Result<StateRec> {
+        let w = self.working(line);
+        let private = self.private_paths(line)?;
+        if private.is_empty() {
+            return self.new_state(ctx, &w, StateKind::Auto, parents, message, Some(line));
+        }
+        let id = ids::new_id();
+        let dst = self.p.state_path(&id);
+        btrfs::snapshot(&w, &dst, false)?;
+        let made = (|| -> Result<btrfs::SubvolInfo> {
+            let t = Tree::open(&dst)?;
+            for p in &private {
+                if t.stat(p).is_some() {
+                    t.remove(p)?;
+                }
+            }
+            btrfs::set_readonly(&dst)?;
+            // An overlay file under another name leaves too: moved from an overlay path, or a
+            // new file with the content of an overlay file (a copy, an editor's backup).
+            let copies = self.private_copies(line, &dst, &private)?;
+            if !copies.is_empty() {
+                btrfs::set_writable(&dst)?;
+                for p in &copies {
+                    t.remove(p)?;
+                }
+                btrfs::set_readonly(&dst)?;
+            }
+            btrfs::subvol_info(&dst)
+        })();
+        let info = match made {
+            Ok(i) => i,
+            Err(e) => {
+                let _ = btrfs::delete_tree(&dst);
+                return Err(e);
+            }
+        };
+        Ok(StateRec {
+            id,
+            kind: StateKind::Auto,
+            parents,
+            line: Some(line.id.clone()),
+            subvol: info.uuid,
+            author: ctx.author(),
+            message: message.to_string(),
+            time: ids::now_ms(),
+            running: false,
+            conflicts: Vec::new(),
+            caches: BTreeMap::new(),
+            cache_by: None,
+            cache_shared: false,
+        })
+    }
+
+    /// Files of a snapshot of the working folder that hold an overlay file under another name:
+    /// moved from a path in `private`, or new with the same content as one of them.
+    fn private_copies(&self, line: &Line, snap: &Path, private: &BTreeSet<String>) -> Result<Vec<String>> {
+        let base = self.head_tree(line)?;
+        let mut by_size: std::collections::HashMap<u64, Vec<&String>> = std::collections::HashMap::new();
+        for p in private {
+            if let Some(m) = fsutil::lmeta(&base, p).filter(|m| !m.is_dir()) {
+                by_size.entry(m.size).or_default().push(p);
+            }
+        }
+        let mut out = Vec::new();
+        for c in changes::file_changes(&base, snap)? {
+            let n = match &c.new {
+                Some(n) => n,
+                None => continue,
+            };
+            if c.old_path.as_ref().map(|o| private.contains(o)).unwrap_or(false) {
+                out.push(c.path.clone());
+                continue;
+            }
+            if c.old.is_none() {
+                for p in by_size.get(&n.size).into_iter().flatten() {
+                    if fsutil::same_entry(&base, p, snap, &c.path, None)? {
+                        out.push(c.path.clone());
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// Remove state snapshots that were made for a record that was not written.
@@ -401,7 +494,7 @@ impl<'a> Repo<'a> {
         if !w.exists() {
             return Ok(None);
         }
-        let mut st = self.new_state(ctx, &w, StateKind::Auto, vec![line.head.clone()], message, Some(line))?;
+        let mut st = self.working_snapshot(ctx, line, vec![line.head.clone()], message)?;
         st.running = running;
         if !force {
             let prev = self.last_auto(line)?.map(|s| s.id).unwrap_or(line.head.clone());
@@ -421,27 +514,27 @@ impl<'a> Repo<'a> {
         Ok(Some(st))
     }
 
-    /// The state that `save --layers` gives a line's layers to: on a protected line with no
+    /// The state that `save --caches` gives a line's caches to: on a protected line with no
     /// changes since its head, the head, so the next lines made from that head start warm; else a
-    /// new automatic state. Only a protected line gives layers to a state that other lines share,
-    /// so such a state never holds a layer that only its maker may use.
-    pub fn layers_state(&self, ctx: &Ctx, line: &Line, message: &str, running: bool, layers: &[String]) -> Result<StateRec> {
+    /// new automatic state. Only a protected line gives caches to a state that other lines share,
+    /// so such a state never holds a cache that only its maker may use.
+    pub fn caches_state(&self, ctx: &Ctx, line: &Line, message: &str, running: bool, caches: &[String]) -> Result<StateRec> {
         let w = self.working(line);
         if !w.exists() {
             return Err(crate::cmd::exit(1, format!("error: the line '{}' has no working folder", line.name)));
         }
-        let mut st = self.new_state(ctx, &w, StateKind::Auto, vec![line.head.clone()], message, Some(line))?;
+        let mut st = self.working_snapshot(ctx, line, vec![line.head.clone()], message)?;
         if let Some(head) = self.p.db.state(&line.head)? {
             let base = self.p.state_path(&head.id);
             if self.policy().rule_for(&line.name).is_some() && base.exists() {
-                // Changes as git would see them: a layer is an empty folder in a snapshot, a
+                // Changes as git would see them: a cache is an empty folder in a snapshot, a
                 // merge leaves new owners and times on unchanged files, and ignored files (such
                 // as other build output) are not changes.
-                let in_layer = |path: &str| layers.iter().any(|l| path == l || path.starts_with(&format!("{l}/")));
+                let in_cache = |path: &str| caches.iter().any(|c| path == c || path.starts_with(&format!("{c}/")));
                 let rules = Rules::new(&self.p.state_path(&st.id));
                 let changed = changes::file_changes(&base, &self.p.state_path(&st.id))?
                     .into_iter()
-                    .any(|c| !skip_path(&c.path) && !in_layer(&c.path) && !rules.ignored(&c.path, false));
+                    .any(|c| !skip_path(&c.path) && !in_cache(&c.path) && !rules.ignored(&c.path, false));
                 if !changed {
                     self.discard_states(std::slice::from_ref(&st));
                     return Ok(head);
@@ -471,20 +564,27 @@ impl<'a> Repo<'a> {
         self.p.meta_dir().join("stage").join(format!("{}.base", line.id))
     }
 
-    /// The staging line, created from the head state if missing or based on an older head.
+    /// The staging line, created from the head (the full tree of a line with overlays) if
+    /// missing or based on an older head or stack.
     pub fn ensure_stage(&self, line: &Line) -> Result<PathBuf> {
         let p = self.p.stage_path(&line.id);
         let basef = self.stage_base_file(line);
+        let key = self.stage_key(line)?;
         if p.exists() {
             let base = std::fs::read_to_string(&basef).unwrap_or_default();
-            if base.trim() == line.head {
+            if base.trim() == key {
                 return Ok(p);
             }
-            btrfs::delete_tree(&p)?;
+            self.drop_stage(line)?;
         }
-        btrfs::snapshot(&self.state_root(&line.head)?, &p, false)?;
-        crate::fsutil::atomic_write(&basef, line.head.as_bytes(), 0o600)?;
+        btrfs::snapshot(&self.head_tree(line)?, &p, false)?;
+        crate::fsutil::atomic_write(&basef, key.as_bytes(), 0o600)?;
         Ok(p)
+    }
+
+    /// Write the key of a staging line made for `line` (a soft reset keeps the index for a new head).
+    pub fn mark_stage(&self, line: &Line) -> Result<()> {
+        crate::fsutil::atomic_write(&self.stage_base_file(line), self.stage_key(line)?.as_bytes(), 0o600)
     }
 
     /// The staging line if it was made from the current head (a stale one is dropped).
@@ -492,7 +592,7 @@ impl<'a> Repo<'a> {
         match self.stage(line) {
             Some(s) => {
                 let base = std::fs::read_to_string(self.stage_base_file(line)).unwrap_or_default();
-                if base.trim() == line.head {
+                if base.trim() == self.stage_key(line)? {
                     Ok(Some(s))
                 } else {
                     self.drop_stage(line)?;
@@ -517,14 +617,14 @@ impl<'a> Repo<'a> {
         match self.stage(line) {
             Some(s) => {
                 let base = std::fs::read_to_string(self.stage_base_file(line)).unwrap_or_default();
-                if base.trim() != line.head {
+                if base.trim() != self.stage_key(line)? {
                     self.drop_stage(line)?;
-                    return Ok((self.state_root(&line.head)?, None));
+                    return Ok((self.head_tree(line)?, None));
                 }
                 let t = self.temp_snapshot(&s, true)?;
                 Ok((t.path.clone(), Some(t)))
             }
-            None => Ok((self.state_root(&line.head)?, None)),
+            None => Ok((self.head_tree(line)?, None)),
         }
     }
 
@@ -533,7 +633,7 @@ impl<'a> Repo<'a> {
     /// Changes of the working content: staged (head to index), unstaged (index to working),
     /// untracked and ignored paths, and conflicts left by a merge.
     pub fn status_of(&self, line: &Line, scan: &Path, index: &Path) -> Result<Status> {
-        let head = self.state_root(&line.head)?;
+        let head = self.head_tree(line)?;
         let mut st = Status::default();
         if index != head.as_path() {
             let staged: Vec<Change> = changes::file_changes(&head, index)?.into_iter().filter(|c| !skip_path(&c.path)).collect();
@@ -577,6 +677,18 @@ impl<'a> Repo<'a> {
         for c in &head_rec.conflicts {
             if conflict_open(scan, c)? {
                 st.conflicts.push(c.clone());
+            }
+        }
+        // Conflicts of a merge of the line's follow overlays.
+        if !self.p.is_overlay() {
+            for l in self.layers(line)? {
+                if let Some(rec) = self.overlay_repo(&l.overlay).ok().and_then(|o| o.p.db.state(&l.state).ok().flatten()) {
+                    for c in &rec.conflicts {
+                        if conflict_open(scan, c)? {
+                            st.conflicts.push(c.clone());
+                        }
+                    }
+                }
             }
         }
         Ok(st)
@@ -664,6 +776,12 @@ impl<'a> Repo<'a> {
 
     /// Create a line from a state: a writable snapshot at `lines/<name>`.
     pub fn create_line(&self, ctx: &Ctx, name: &str, start: &str, owner: u32) -> Result<Line> {
+        self.create_line_from(ctx, name, start, owner, None)
+    }
+
+    /// Create a line; a line made from another line (`source`) shows the overlays of the source
+    /// that its owner reads (docs/overlays.md).
+    pub fn create_line_from(&self, ctx: &Ctx, name: &str, start: &str, owner: u32, source: Option<&Line>) -> Result<Line> {
         check_name("line", name)?;
         if self.p.db.line_by_name(name)?.is_some() {
             bail!("a line named '{name}' already exists");
@@ -679,7 +797,11 @@ impl<'a> Repo<'a> {
             owner,
             machine: self.p.store.machine.id.clone(),
         };
-        self.materialize(&line, start, &dst)?;
+        let layers = match source {
+            Some(s) if !self.p.is_overlay() => self.inherit_layers(ctx, s, &line.id, owner)?,
+            _ => Vec::new(),
+        };
+        self.materialize_with(&line, start, &dst, &layers, true)?;
         let res = (|| -> Result<Record> {
             let mut rec = Record::new("line.create");
             rec.lines.insert(
@@ -692,27 +814,56 @@ impl<'a> Repo<'a> {
                 },
             );
             rec.data = serde_json::json!({"name": name, "start": start});
+            if !layers.is_empty() {
+                rec.data["stack"] = crate::overlay::stack_data(&line.id, &layers);
+            }
             self.p.append(rec, &ctx.actor())
         })();
         if let Err(e) = res {
             let _ = btrfs::delete_tree(&dst);
+            let _ = self.prune_bases(&line, None, 0);
             return Err(e);
         }
-        // The owner of the new line may read the git objects (its .git layer uses them).
+        // The owner of the new line may read the git objects (its .git folder uses them).
         crate::gitbridge::sync_store_access(self)?;
         Ok(line)
     }
 
     /// Make the working folder of a line at `dst` from a state. The folder is prepared in the
-    /// service's private work folder (owner, mode, git layer, layers) and appears at `dst` only
+    /// service's private work folder (owner, mode, .git folder, caches) and appears at `dst` only
     /// when it is ready, so no other user can change it while root works on it.
     pub fn materialize(&self, line: &Line, state: &str, dst: &Path) -> Result<()> {
+        // A line with overlays gets their files too; its base is made when first needed.
+        let layers = if self.p.is_overlay() { Vec::new() } else { self.layers(line)? };
+        self.materialize_with(line, state, dst, &layers, false)
+    }
+
+    /// `materialize` with the overlay files of `layers`. With `base`, the new folder (made from
+    /// the line's head) is also kept as the line's base.
+    pub fn materialize_with(
+        &self,
+        line: &Line,
+        state: &str,
+        dst: &Path,
+        layers: &[crate::overlay::Layer],
+        base: bool,
+    ) -> Result<()> {
         if dst.exists() {
             bail!("{} already exists", dst.display());
         }
         let tmp = self.p.work_dir().join(ids::new_id());
         btrfs::snapshot(&self.state_root(state)?, &tmp, false)?;
-        let r = self.prepare_at(line, state, &tmp).and_then(|_| Ok(std::fs::rename(&tmp, dst)?));
+        let r = self
+            .put_layers(&tmp, layers, self.own(line))
+            .and_then(|_| self.prepare_at(line, state, &tmp))
+            .and_then(|_| {
+                if base && !layers.is_empty() {
+                    let view = self.temp_snapshot(&tmp, true)?;
+                    self.install_base(line, view, state, layers)?;
+                }
+                Ok(())
+            })
+            .and_then(|_| Ok(std::fs::rename(&tmp, dst)?));
         if r.is_err() {
             let _ = btrfs::delete_tree(&tmp);
         }
@@ -737,20 +888,20 @@ impl<'a> Repo<'a> {
         }
         fsutil::chown_nofollow(w, uid, gid)?;
         std::fs::set_permissions(w, std::fs::Permissions::from_mode(0o700))?;
-        crate::gitbridge::make_git_layer(self, line, state, w)?;
+        crate::gitbridge::make_git_folder(self, line, state, w)?;
         let st = self.state(state)?;
-        // Layers of this machine's setting, and the layers the state carries (a live move).
+        // Caches of this machine's setting, and the caches the state carries (a live move).
         let mut paths: Vec<String> = self.p.config_strings("regenerable");
-        for k in st.layers.keys() {
+        for k in st.caches.keys() {
             if !paths.contains(k) {
                 paths.push(k.clone());
             }
         }
-        // These always get a layer, warm or empty. A folder that the line's `.layrattributes`
+        // These always get a cache, warm or empty. A folder that the line's `.layrattributes`
         // makes regenerable gets one only warm, from an ancestor that saved it.
         let fixed = paths.len();
         let (regenerable, ignored) = (Rules::attribute(w, "regenerable"), Rules::new(w));
-        for k in self.saved_layer_paths(state)? {
+        for k in self.saved_cache_paths(state)? {
             let parent = Path::new(&k).parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
             let parent_ok = parent.is_empty() || fsutil::lmeta(w, &parent).map(|m| m.is_dir()).unwrap_or(false);
             if !paths.contains(&k) && parent_ok && regenerable.ignored(&k, true) && ignored.ignored(&k, true) {
@@ -758,27 +909,32 @@ impl<'a> Repo<'a> {
             }
         }
         for (i, path) in paths.iter().enumerate() {
-            let lp = fsutil::safe_join(w, path)?;
-            if let Some(src) = self.warm_layer(state, path, uid)? {
-                if lp.symlink_metadata().is_ok() {
+            // Versioned files win: a folder that holds files of the state comes from the state,
+            // also when a record of an older layr lists it as a cache.
+            if holds_files(w, path) {
+                continue;
+            }
+            let cp = fsutil::safe_join(w, path)?;
+            if let Some(src) = self.warm_cache(state, path, uid)? {
+                if cp.symlink_metadata().is_ok() {
                     fsutil::remove_entry(w, path)?;
                 }
                 fsutil::make_parents(w, path, Some((uid, gid)))?;
-                btrfs::snapshot(&src, &lp, false)?;
+                btrfs::snapshot(&src, &cp, false)?;
                 // The copy shares its blocks; only its files change owner.
-                give_tree(&lp, uid, gid)?;
+                give_tree(&cp, uid, gid)?;
                 continue;
             }
             if i < fixed {
-                make_layer(w, path, uid, gid)?;
+                make_cache(w, path, uid, gid)?;
             }
         }
         Ok(())
     }
 
-    /// The layer paths of the machine setting and of the folders that `.layrattributes` files in
+    /// The cache paths of the machine setting and of the folders that `.layrattributes` files in
     /// the working folder `w` make regenerable.
-    pub fn layer_paths(&self, w: &Path) -> Vec<String> {
+    pub fn cache_paths(&self, w: &Path) -> Vec<String> {
         let mut paths = self.p.config_strings("regenerable");
         for p in regenerable_folders(w) {
             if !paths.contains(&p) {
@@ -788,8 +944,15 @@ impl<'a> Repo<'a> {
         paths
     }
 
-    /// The layer paths that `state` or its ancestors saved (the search of `warm_layer`).
-    fn saved_layer_paths(&self, state: &str) -> Result<BTreeSet<String>> {
+    /// The cache paths of a line (`cache_paths`) in two lists: the caches, and the paths whose
+    /// folder holds files in the head of the line. Such a folder is versioned: never a cache.
+    pub fn line_cache_paths(&self, line: &Line) -> Result<(Vec<String>, Vec<String>)> {
+        let head = self.state_root(&line.head)?;
+        Ok(self.cache_paths(&self.working(line)).into_iter().partition(|p| !holds_files(&head, p)))
+    }
+
+    /// The cache paths that `state` or its ancestors saved (the search of `warm_cache`).
+    fn saved_cache_paths(&self, state: &str) -> Result<BTreeSet<String>> {
         const SEARCH: usize = 200;
         let (mut seen, mut found) = (BTreeSet::new(), BTreeSet::new());
         let mut q = std::collections::VecDeque::from([state.to_string()]);
@@ -801,18 +964,18 @@ impl<'a> Repo<'a> {
                 continue;
             }
             if let Some(rec) = self.p.db.state(&id)? {
-                found.extend(rec.layers.keys().cloned());
+                found.extend(rec.caches.keys().cloned());
                 q.extend(rec.parents);
             }
         }
         Ok(found)
     }
 
-    /// The layer snapshot that a line of `uid` starting at `state` takes for `path`: the state's
+    /// The cache snapshot that a line of `uid` starting at `state` takes for `path`: the state's
     /// own, or else the one of its nearest ancestor that has one on this machine (the build
-    /// output closest to the line's content). A layer made by another user is taken only if it
-    /// was made on a protected line (`layer_shared`): a layer holds code that review does not see.
-    pub fn warm_layer(&self, state: &str, path: &str, uid: u32) -> Result<Option<PathBuf>> {
+    /// output closest to the line's content). A cache made by another user is taken only if it
+    /// was made on a protected line (`cache_shared`): a cache holds code that review does not see.
+    pub fn warm_cache(&self, state: &str, path: &str, uid: u32) -> Result<Option<PathBuf>> {
         const SEARCH: usize = 200;
         let local = self.p.store.machine.id.clone();
         let mut seen = BTreeSet::new();
@@ -828,11 +991,11 @@ impl<'a> Repo<'a> {
                 Some(r) => r,
                 None => continue,
             };
-            if let Some(snap) = rec.layers.get(path) {
-                let src = self.p.layer_path(&id, snap);
+            if let Some(snap) = rec.caches.get(path) {
+                let src = self.p.cache_path(&id, snap);
                 let owner_of_line = rec.line.as_ref().and_then(|l| self.p.db.line_by_id(l).ok().flatten()).map(|l| l.owner);
-                let allowed = rec.layer_shared || rec.layer_by == Some(uid) || owner_of_line == Some(uid);
-                // Another state's layer only from this machine; the state's own also after a move.
+                let allowed = rec.cache_shared || rec.cache_by == Some(uid) || owner_of_line == Some(uid);
+                // Another state's cache only from this machine; the state's own also after a move.
                 if src.exists() && allowed && (id == state || self.p.db.state_machine(&id)?.as_deref() == Some(local.as_str())) {
                     return Ok(Some(src));
                 }
@@ -873,8 +1036,8 @@ impl<'a> Repo<'a> {
         let r = self.commit_record(ctx, rec)?;
         let mut moved = line.clone();
         moved.head = new_head.to_string();
-        if let Err(e) = crate::gitbridge::refresh_git_layer(self, &moved) {
-            eprintln!("warning: .git layer of line {} not updated: {e:#}", line.name);
+        if let Err(e) = crate::gitbridge::refresh_git_folder(self, &moved) {
+            eprintln!("warning: .git folder of line {} not updated: {e:#}", line.name);
         }
         Ok(r)
     }
@@ -886,7 +1049,7 @@ impl<'a> Repo<'a> {
         if !w.exists() {
             return Ok(None);
         }
-        let st = self.new_state(ctx, &w, StateKind::Auto, vec![line.head.clone()], &format!("after {op}"), Some(line))?;
+        let st = self.working_snapshot(ctx, line, vec![line.head.clone()], &format!("after {op}"))?;
         let id = st.id.clone();
         rec.states.push(st);
         Ok(Some(id))
@@ -999,7 +1162,7 @@ fn prune_empty_parents(target: &Path, to: &Path, rel: &str) -> Result<()> {
     Ok(())
 }
 
-/// Give every entry of a tree (a new layer copy, still private) to `uid:gid`, without following
+/// Give every entry of a tree (a new cache copy, still private) to `uid:gid`, without following
 /// links and without entering nested subvolumes.
 fn give_tree(root: &Path, uid: u32, gid: u32) -> Result<()> {
     let mut paths = Vec::new();
@@ -1016,8 +1179,8 @@ fn give_tree(root: &Path, uid: u32, gid: u32) -> Result<()> {
 }
 
 /// The folders of the working folder `w` that `.layrattributes` files make `regenerable` and
-/// that the ignore rules ignore. A regenerable folder that is not ignored is no layer: its files
-/// are in history, and a layer must not hide them. The walk does not enter a regenerable folder or
+/// that the ignore rules ignore. A regenerable folder that is not ignored is no cache: its files
+/// are in history, and a cache must not hide them. The walk does not enter a regenerable folder or
 /// another subvolume.
 pub fn regenerable_folders(w: &Path) -> Vec<String> {
     let (regenerable, ignored) = (Rules::attribute(w, "regenerable"), Rules::new(w));
@@ -1038,7 +1201,7 @@ pub fn regenerable_folders(w: &Path) -> Vec<String> {
                             found.push(rel);
                         }
                     } else if !fsutil::is_layer(w, &rel, &m) {
-                        // Another subvolume (a layer of the machine setting) is not entered.
+                        // Another subvolume (a cache of the machine setting) is not entered.
                         stack.push(rel);
                     }
                 }
@@ -1050,8 +1213,8 @@ pub fn regenerable_folders(w: &Path) -> Vec<String> {
     found
 }
 
-/// Create an empty nested subvolume for a regenerable layer at `path` in the working folder.
-pub fn make_layer(w: &Path, path: &str, uid: u32, gid: u32) -> Result<()> {
+/// Create an empty nested subvolume for a regenerable cache at `path` in the working folder.
+pub fn make_cache(w: &Path, path: &str, uid: u32, gid: u32) -> Result<()> {
     let t = Tree::open(w)?;
     if let Some(m) = t.stat(path) {
         if fsutil::is_layer(w, path, &m) {
@@ -1064,7 +1227,7 @@ pub fn make_layer(w: &Path, path: &str, uid: u32, gid: u32) -> Result<()> {
         }
     }
     t.mkdirs_for(path, Some((uid, gid)))?;
-    t.create_subvolume(path).with_context(|| format!("create layer {path}"))?;
+    t.create_subvolume(path).with_context(|| format!("create cache {path}"))?;
     t.chown(path, uid, gid)?;
     Ok(())
 }
@@ -1109,31 +1272,85 @@ fn copy_tree(t: &Tree, from: &str, to: &str, own: Option<(u32, u32)>) -> Result<
     Ok(())
 }
 
-/// Turn a plain folder at a layer path back into a nested subvolume (after a tool deleted the
-/// layer and made the folder again). Copies with reflinks: O(files) once.
-pub fn convert_layer(w: &Path, path: &str, uid: u32, gid: u32) -> Result<bool> {
+/// Turn a plain folder at a cache path back into a nested subvolume (after a tool deleted the
+/// cache and made the folder again). Copies with reflinks: O(files) once.
+pub fn convert_cache(w: &Path, path: &str, uid: u32, gid: u32) -> Result<bool> {
     let t = Tree::open(w)?;
     let m = match t.stat(path) {
         Some(m) => m,
         None => {
-            make_layer(w, path, uid, gid)?;
+            make_cache(w, path, uid, gid)?;
             return Ok(true);
         }
     };
     if !m.is_dir() || fsutil::is_layer(w, path, &m) {
         return Ok(false);
     }
+    replace_folder(&t, path, true, uid, gid)?;
+    Ok(true)
+}
+
+/// Turn a cache (a nested subvolume) at `path` back into a plain folder with the same files, so
+/// that states hold them again: the folder holds versioned files. Copies with reflinks.
+pub fn uncache(w: &Path, path: &str, uid: u32, gid: u32) -> Result<bool> {
+    let t = Tree::open(w)?;
+    match t.stat(path) {
+        Some(m) if fsutil::is_layer(w, path, &m) => {}
+        _ => return Ok(false),
+    }
+    replace_folder(&t, path, false, uid, gid)?;
+    Ok(true)
+}
+
+/// Replace the folder at `path` with a copy of its files in a new subvolume or plain folder.
+fn replace_folder(t: &Tree, path: &str, subvolume: bool, uid: u32, gid: u32) -> Result<()> {
+    let mode = t.stat(path).map(|m| m.mode).unwrap_or(0o755);
     let (tmp, old) = (format!("{path}.layr-new"), format!("{path}.layr-old"));
     for x in [&tmp, &old] {
         if t.stat(x).is_some() {
             t.remove(x)?;
         }
     }
-    t.create_subvolume(&tmp)?;
-    copy_tree(&t, path, &tmp, Some((uid, gid)))?;
+    if subvolume {
+        t.create_subvolume(&tmp)?;
+    } else {
+        t.mkdirs(&tmp, None)?;
+        t.chmod(&tmp, mode)?;
+    }
+    copy_tree(t, path, &tmp, Some((uid, gid)))?;
     t.rename(path, &old)?;
     t.rename(&tmp, path)?;
     t.chown(path, uid, gid)?;
     t.remove(&old)?;
-    Ok(true)
+    Ok(())
+}
+
+/// Whether the tree at `root` has a file, link or other entry that is not a folder at `path` or
+/// below it (a folder of a state that holds versioned files). A path below such an entry counts;
+/// an error counts too, so that a folder whose files cannot be read never becomes a cache.
+pub fn holds_files(root: &Path, path: &str) -> bool {
+    let start = match fsutil::safe_join(root, path) {
+        Ok(p) => p,
+        Err(_) => return true,
+    };
+    match std::fs::symlink_metadata(&start) {
+        Ok(m) if m.is_dir() => {}
+        Ok(_) => return true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(_) => return true,
+    }
+    let mut stack = vec![start];
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => return true,
+        };
+        for e in entries {
+            match e.and_then(|e| Ok((e.path(), e.file_type()?))) {
+                Ok((p, t)) if t.is_dir() => stack.push(p),
+                _ => return true,
+            }
+        }
+    }
+    false
 }

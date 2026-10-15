@@ -82,6 +82,20 @@ pub fn delete_subvolume(path: &Path) -> Result<()> {
     sys::subvol_destroy(dir.as_fd(), &name).with_context(|| format!("delete subvolume {}", path.display()))
 }
 
+/// Make a subvolume read-only (a writable snapshot becomes a state after its changes).
+pub fn set_readonly(path: &Path) -> Result<()> {
+    let f = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let flags = sys::subvol_flags(f.as_fd())?;
+    sys::subvol_set_flags(f.as_fd(), flags | sys::SUBVOL_RDONLY).with_context(|| format!("make {} read-only", path.display()))
+}
+
+/// Make a read-only subvolume writable again (btrfs does not rename a read-only subvolume).
+pub fn set_writable(path: &Path) -> Result<()> {
+    let f = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let flags = sys::subvol_flags(f.as_fd())?;
+    sys::subvol_set_flags(f.as_fd(), flags & !sys::SUBVOL_RDONLY).with_context(|| format!("make {} writable", path.display()))
+}
+
 pub fn subvol_info(path: &Path) -> Result<SubvolInfo> {
     let f = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let raw = sys::subvol_info(f.as_fd()).with_context(|| format!("subvolume info {}", path.display()))?;
@@ -103,14 +117,14 @@ pub fn delete_tree(path: &Path) -> Result<()> {
     }
     if is_subvolume(path) {
         // O(1) in the usual case. Only a subvolume with nested subvolumes (a working folder with
-        // its .git or build layers) answers ENOTEMPTY; then the nested ones are found and
+        // its .git folder or caches) answers ENOTEMPTY; then the nested ones are found and
         // destroyed first, through descriptors.
         let (dir, name) = split_parent(path)?;
         match sys::subvol_destroy(dir.as_fd(), &name) {
             Ok(()) => return Ok(()),
             Err(e) if is_not_empty(&e) => {
                 let t = crate::tree::Tree::open(path)?;
-                // The usual nested subvolume first (the .git layer), then a full search.
+                // The usual nested subvolume first (the .git folder), then a full search.
                 if t.stat(".git").map(|m| m.is_dir() && m.ino == FIRST_FREE_OBJECTID).unwrap_or(false) {
                     t.remove(".git")?;
                     if sys::subvol_destroy(dir.as_fd(), &name).is_ok() {
@@ -225,17 +239,26 @@ fn supports_compressed_send() -> bool {
             .is_some_and(|version| version >= 2)
 }
 
-/// The stream identity of an immutable local or received snapshot.
-pub fn clone_identity(path: &Path) -> Result<(String, u64)> {
+/// An immutable source identity accepted by the receiver. Local UUIDs do not need a remote transaction ID.
+pub fn clone_identity(path: &Path) -> Result<(String, Option<u64>)> {
     let f = File::open(path)?;
     if sys::subvol_flags(f.as_fd())? & sys::SUBVOL_RDONLY == 0 {
         bail!("clone source is not read-only");
     }
     let info = sys::subvol_info(f.as_fd())?;
     Ok(match fmt_uuid(&info.received_uuid) {
-        Some(uuid) => (uuid, info.stransid),
-        None => (fmt_uuid(&info.uuid).ok_or_else(|| anyhow!("clone source has no UUID"))?, info.ctransid),
+        Some(uuid) => (uuid, Some(info.stransid)),
+        // A return stream carries the remote ctransid. The original local UUID
+        // identifies its source without a transaction from the other filesystem.
+        None => (fmt_uuid(&info.uuid).ok_or_else(|| anyhow!("clone source has no UUID"))?, None),
     })
+}
+
+/// The kernel writes its local ctransid even when the UUID comes from a received snapshot.
+pub fn send_clone_identity(path: &Path) -> Result<(String, u64)> {
+    let (uuid, _) = clone_identity(path)?;
+    let f = File::open(path)?;
+    Ok((uuid, sys::subvol_info(f.as_fd())?.ctransid))
 }
 
 /// Identity retained by btrfs snapshots, used to stage file moves.

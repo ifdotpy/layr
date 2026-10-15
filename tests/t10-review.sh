@@ -1,5 +1,5 @@
 #!/bin/bash
-# Regressions from review findings (2026-10-09): links in the .git layer, backup manifest paths,
+# Regressions from review findings (2026-10-09): links in the .git folder, backup manifest paths,
 # repeated backups, a failed database write.
 . "$(dirname "$0")/lib.sh"
 
@@ -9,7 +9,7 @@ l clone $R p -q >/dev/null
 W=$LAYR_ROOT/projects/p/lines/main
 cd $W
 
-# 1. The .git layer belongs to the line owner: links in it must not redirect root writes.
+# 1. The .git folder belongs to the line owner: links in it must not redirect root writes.
 echo victim-head > $T/victim1; echo victim-index > $T/victim2
 rm .git/HEAD .git/index; ln -s $T/victim1 .git/HEAD; ln -s $T/victim2 .git/index
 echo b > b.txt; l add b.txt; l commit -qm b; l push -q origin t1

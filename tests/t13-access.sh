@@ -142,7 +142,7 @@ has "a maintainer in a denied group cannot push" "deny rule for @layr-bots" "$(i
 as layr-admin $L --project p access grant layr-u3 admin
 as layr-admin $L --project p access deny @layr-bots access
 no "an admin denied 'access' cannot change a check command" as layr-u3 $L --project p config check.unit true
-ok "but changes other settings" as layr-u3 $L --project p config retention.layers 5
+ok "but changes other settings" as layr-u3 $L --project p config retention.caches 5
 as layr-admin $L --project p access allow @layr-bots access
 as layr-admin $L --project p access grant layr-u3 maintainer
 

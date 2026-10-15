@@ -18,6 +18,7 @@ mod ignore_rules;
 mod merge;
 mod model;
 mod oplog;
+mod overlay;
 mod privs;
 mod recv;
 mod repo;
