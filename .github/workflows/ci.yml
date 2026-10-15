@@ -60,7 +60,7 @@ jobs:
         if: failure()
         run: |
           if [ -f "$RUNNER_TEMP/apfs-tests.log" ]; then
-            python3 -c 'import os,pathlib; s=pathlib.Path(os.environ["RUNNER_TEMP"],"apfs-tests.log").read_text(); print("::error::"+s[-18000:].replace("%","%25").replace("\r","%0D").replace("\n","%0A"))'
+            python3 -c 'import os,pathlib; s=pathlib.Path(os.environ["RUNNER_TEMP"],"apfs-tests.log").read_text(); print("::error::"+s[-3500:].replace("%","%25").replace("\r","%0D").replace("\n","%0A"))'
           fi
       - name: Produce APFS backup
         run: LAYR_APFS_TEST_ROOT=/Volumes/LayrCI LAYR="$PWD/target/debug/layr" bash tests/cross-backup.sh create "$RUNNER_TEMP/apfs-backup"
