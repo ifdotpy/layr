@@ -1,0 +1,238 @@
+{
+  "files": 10000,
+  "small_file_bytes": 4096,
+  "large_file_bytes": 67108864,
+  "measurement": "Isolated APFS container size minus free space; includes filesystem metadata.",
+  "rows": [
+    {
+      "trial": 0,
+      "variant": "baseline",
+      "phase": "empty",
+      "used_bytes": 8454144,
+      "samples": [
+        8454144,
+        8454144,
+        8454144
+      ]
+    },
+    {
+      "trial": 0,
+      "variant": "baseline",
+      "phase": "source",
+      "used_bytes": 120659968,
+      "samples": [
+        120659968,
+        120659968,
+        120659968
+      ]
+    },
+    {
+      "trial": 0,
+      "variant": "baseline",
+      "phase": "init",
+      "used_bytes": 128847872,
+      "samples": [
+        128847872,
+        128847872,
+        128847872
+      ]
+    },
+    {
+      "trial": 0,
+      "variant": "baseline",
+      "phase": "five_branches",
+      "used_bytes": 149803008,
+      "samples": [
+        149803008,
+        149803008,
+        149803008
+      ]
+    },
+    {
+      "trial": 0,
+      "variant": "baseline",
+      "phase": "five_commits",
+      "used_bytes": 506863616,
+      "samples": [
+        506863616,
+        506863616,
+        506863616
+      ]
+    },
+    {
+      "trial": 0,
+      "variant": "native",
+      "phase": "empty",
+      "used_bytes": 8454144,
+      "samples": [
+        8454144,
+        8454144,
+        8454144
+      ]
+    },
+    {
+      "trial": 0,
+      "variant": "native",
+      "phase": "source",
+      "used_bytes": 120659968,
+      "samples": [
+        120659968,
+        120659968,
+        120659968
+      ]
+    },
+    {
+      "trial": 0,
+      "variant": "native",
+      "phase": "init",
+      "used_bytes": 130797568,
+      "samples": [
+        130797568,
+        130797568,
+        130797568
+      ]
+    },
+    {
+      "trial": 0,
+      "variant": "native",
+      "phase": "five_branches",
+      "used_bytes": 152498176,
+      "samples": [
+        152453120,
+        152453120,
+        152498176
+      ]
+    },
+    {
+      "trial": 0,
+      "variant": "native",
+      "phase": "five_commits",
+      "used_bytes": 510357504,
+      "samples": [
+        510345216,
+        510345216,
+        510357504
+      ]
+    },
+    {
+      "trial": 1,
+      "variant": "native",
+      "phase": "empty",
+      "used_bytes": 8454144,
+      "samples": [
+        8454144,
+        8454144,
+        8454144
+      ]
+    },
+    {
+      "trial": 1,
+      "variant": "native",
+      "phase": "source",
+      "used_bytes": 120659968,
+      "samples": [
+        120659968,
+        120659968,
+        120659968
+      ]
+    },
+    {
+      "trial": 1,
+      "variant": "native",
+      "phase": "init",
+      "used_bytes": 130826240,
+      "samples": [
+        130826240,
+        130826240,
+        130826240
+      ]
+    },
+    {
+      "trial": 1,
+      "variant": "native",
+      "phase": "five_branches",
+      "used_bytes": 151580672,
+      "samples": [
+        151580672,
+        151580672,
+        151580672
+      ]
+    },
+    {
+      "trial": 1,
+      "variant": "native",
+      "phase": "five_commits",
+      "used_bytes": 508678144,
+      "samples": [
+        508678144,
+        508678144,
+        508678144
+      ]
+    },
+    {
+      "trial": 1,
+      "variant": "baseline",
+      "phase": "empty",
+      "used_bytes": 8454144,
+      "samples": [
+        8454144,
+        8454144,
+        8454144
+      ]
+    },
+    {
+      "trial": 1,
+      "variant": "baseline",
+      "phase": "source",
+      "used_bytes": 120659968,
+      "samples": [
+        120659968,
+        120659968,
+        120659968
+      ]
+    },
+    {
+      "trial": 1,
+      "variant": "baseline",
+      "phase": "init",
+      "used_bytes": 128827392,
+      "samples": [
+        128827392,
+        128827392,
+        128827392
+      ]
+    },
+    {
+      "trial": 1,
+      "variant": "baseline",
+      "phase": "five_branches",
+      "used_bytes": 149807104,
+      "samples": [
+        149807104,
+        149807104,
+        149807104
+      ]
+    },
+    {
+      "trial": 1,
+      "variant": "baseline",
+      "phase": "five_commits",
+      "used_bytes": 506863616,
+      "samples": [
+        506863616,
+        506863616,
+        506863616
+      ]
+    }
+  ],
+  "binaries": {
+    "baseline": "8d4dedb8a3d115e9c2c818ffe99f5d2bca620a68b3ea0d1edc8222b9b10fcdbb",
+    "native": "342c30374ef098e9cb50293272498c3667136b45902afc08f1c25ec0978de09e"
+  },
+  "verified": [
+    "baseline-0",
+    "native-0",
+    "native-1",
+    "baseline-1"
+  ]
+}

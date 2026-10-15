@@ -67,3 +67,39 @@ Use `benchmarks/backends.py` to create the common fixture.
 Use `benchmarks/apfs-paired.py --help` for the comparison arguments.
 Use `benchmarks/apfs-primitives.py --help` for the primitive arguments.
 Raw results are in the three adjacent JSON files with the date `20261015`.
+
+## Space comparison, 2026-10-16
+
+Two trials use separate 2 GiB case-sensitive APFS images for each variant.
+The measurement is container capacity minus free space, after sync. It includes filesystem metadata.
+The source has 10,000 files of 4 KiB and one file of 64 MiB (103.06 MiB of content).
+Each of five branches changes ten small files and 4 KiB of the large file, then commits.
+
+| Phase | Baseline MiB | Native MiB | Extra MiB |
+|---|---:|---:|---:|
+| Source | 115.07 | 115.07 | 0.00 |
+| Import | 122.87 | 124.75 | 1.88 |
+| Five branches | 142.87 | 145.00 | 2.13 |
+| Five commits | 483.38 | 485.91 | 2.53 |
+
+Values are means of two trials and include the source and the empty filesystem (8.06 MiB).
+The native variant adds 0.52% to final container use.
+Five branches add about 20 MiB in both variants, rather than five full copies of the content.
+Both variants use about 340 MiB more after five commits. A separate stage measurement locates this increase at `add`.
+All four trials pass fsck and preserve the source content of the large file in main.
+Raw data: `results/apfs-space-20261016.json`. Script: `apfs-space.py`.
+
+### Large file stage measurement
+
+A separate branch changes only 4 KiB in the 64 MiB file.
+The write adds 20 KiB of container use in both versions.
+The next `add` adds 68.09 MiB in the baseline and 67.98 MiB in native mode.
+The commit adds no further space in this test (allocation falls slightly).
+
+`fsutil::copy_entry` truncates an existing destination before the copy.
+APFS `clone_file` returns ENOTSUP for an existing destination inode, so the caller copies all bytes.
+Thus a small change can create a complete 64 MiB file copy at `add`, plus metadata.
+This behavior exists in both versions. The directory-clone experiment does not introduce it.
+No product fix is included in this measurement.
+Raw data: `results/apfs-space-stages-20261016.json`.
+The stage script uses the owned images from the main space experiment and has fixed local paths.

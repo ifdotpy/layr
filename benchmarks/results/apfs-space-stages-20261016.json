@@ -1,0 +1,52 @@
+[
+  {
+    "variant": "baseline",
+    "phase": "start",
+    "used_bytes": 506867712
+  },
+  {
+    "variant": "baseline",
+    "phase": "branch",
+    "used_bytes": 510636032
+  },
+  {
+    "variant": "baseline",
+    "phase": "write_4k",
+    "used_bytes": 510656512
+  },
+  {
+    "variant": "baseline",
+    "phase": "add",
+    "used_bytes": 582053888
+  },
+  {
+    "variant": "baseline",
+    "phase": "commit",
+    "used_bytes": 581980160
+  },
+  {
+    "variant": "native",
+    "phase": "start",
+    "used_bytes": 510357504
+  },
+  {
+    "variant": "native",
+    "phase": "branch",
+    "used_bytes": 514420736
+  },
+  {
+    "variant": "native",
+    "phase": "write_4k",
+    "used_bytes": 514441216
+  },
+  {
+    "variant": "native",
+    "phase": "add",
+    "used_bytes": 585723904
+  },
+  {
+    "variant": "native",
+    "phase": "commit",
+    "used_bytes": 585707520
+  }
+]
