@@ -120,22 +120,23 @@ fn copy_tree(src: &Path, dst: &Path, root: bool, links: &mut BTreeMap<(u64, u64)
             }
         }
         if root || !is_subvolume(src) {
-            crate::sys::apfs_copy_metadata(src, dst)?;
-            crate::sys::apfs_immutable(dst, false)?;
+            crate::sys::apfs_copy_metadata(src, dst).with_context(|| format!("copy metadata {}", dst.display()))?;
+            crate::sys::apfs_immutable(dst, false).with_context(|| format!("unseal {}", dst.display()))?;
         }
         fs::set_permissions(dst, fs::Permissions::from_mode(m.mode() & 0o7777))?;
-        crate::fsutil::set_mtime(&File::open(dst)?, m.mtime(), m.mtime_nsec())?;
+        crate::fsutil::set_mtime(&File::open(dst)?, m.mtime(), m.mtime_nsec())
+            .with_context(|| format!("set directory time {}", dst.display()))?;
     } else if m.file_type().is_symlink() {
         std::os::unix::fs::symlink(fs::read_link(src)?, dst)?;
-        crate::sys::apfs_copy_metadata(src, dst)?;
-        crate::sys::apfs_immutable(dst, false)?;
+        crate::sys::apfs_copy_metadata(src, dst).with_context(|| format!("copy metadata {}", dst.display()))?;
+        crate::sys::apfs_immutable(dst, false).with_context(|| format!("unseal {}", dst.display()))?;
     } else if m.is_file() {
         let key = (m.dev(), m.ino());
         if let Some(first) = links.get(&key) {
             fs::hard_link(first, dst)?;
         } else {
             crate::sys::apfs_clone(src, dst).with_context(|| format!("clone {}", src.display()))?;
-            crate::sys::apfs_immutable(dst, false)?;
+            crate::sys::apfs_immutable(dst, false).with_context(|| format!("unseal {}", dst.display()))?;
             links.insert(key, dst.to_path_buf());
         }
     } else {
@@ -185,11 +186,11 @@ pub fn snapshot(src: &Path, dst: &Path, readonly: bool) -> Result<()> {
         if before != scan(src)? {
             bail!("source changed during APFS snapshot; retry when writers are idle");
         }
-        mark(&temp, Some(parent), readonly)?;
-        crate::sys::apfs_publish(&temp, dst)?;
+        mark(&temp, Some(parent), readonly).context("mark snapshot")?;
+        crate::sys::apfs_publish(&temp, dst).context("publish snapshot")?;
         published = true;
         if readonly {
-            seal(dst, true, false)?;
+            seal(dst, true, false).context("seal snapshot")?;
         }
         Ok(())
     })();
@@ -382,7 +383,7 @@ mod tests {
         fs::set_permissions(src.join("readonly-dir"), fs::Permissions::from_mode(0o555))?;
         fs::set_permissions(&src, fs::Permissions::from_mode(0o555))?;
         let dst = s.0.join("state");
-        snapshot(&src, &dst, true)?;
+        snapshot(&src, &dst, true).context("snapshot original tree")?;
         assert_eq!(fs::read(dst.join("a"))?, b"lower");
         assert_eq!(fs::read(dst.join("A"))?, b"upper");
         assert_eq!(crate::sys::apfs_attribute(&dst.join("dir"), c"com.layr.test", None)?, b"directory metadata");
@@ -397,13 +398,13 @@ mod tests {
         fs::write(src.join("a"), b"new")?;
         assert_eq!(fs::read(dst.join("a"))?, b"lower");
         let branch = s.0.join("branch");
-        snapshot(&dst, &branch, false)?;
+        snapshot(&dst, &branch, false).context("branch from readonly snapshot")?;
         fs::write(branch.join("a"), b"branch")?;
         assert_eq!(fs::read(dst.join("a"))?, b"lower");
         // An existing destination must remain intact on failure.
         assert!(snapshot(&src, &branch, false).is_err());
         assert_eq!(fs::read(branch.join("a"))?, b"branch");
-        delete_tree(&dst)?;
+        delete_tree(&dst).context("delete readonly snapshot")?;
         assert!(!dst.exists());
         Ok(())
     }
