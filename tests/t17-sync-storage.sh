@@ -95,8 +95,9 @@ return_from_replica() (
     l commit -qm replica-return
     head_id > "$T/return-head"
     l sync -q --push-only -- env LAYR_ROOT="$AR" "$LAYR" serve-peer perf
-)
+) >"$T/return.log" 2>&1
 ok "replica reuses received sources when it sends back" return_from_replica
+sed 's/^/  /' "$T/return.log"
 returned=$(cat "$T/return-head")
 ok "the original machine receives the same blob" cmp blob "$P/states/$returned/blob"
 btrfs filesystem sync "$LAYR_ROOT" >/dev/null
