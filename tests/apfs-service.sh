@@ -32,7 +32,11 @@ no 'another user cannot read the line' as nobody cat "$P/work/file.txt"
 cd /private/tmp
 no 'another user cannot read private history through the service' as nobody env LAYR_PROJECT=service LAYR_LINE=work "$L" show HEAD:file.txt
 cd "$P/work"
-ok 'a check runs with the caller identity' as "$LAYR_APFS_TEST_USER" "$L" try -q HEAD -- sh -c "test \"\$(id -u)\" = $(id -u "$LAYR_APFS_TEST_USER")"
+check_identity() {
+    as "$LAYR_APFS_TEST_USER" "$L" try HEAD -- /bin/sh -c "test \"\$(/usr/bin/id -u)\" = $(id -u "$LAYR_APFS_TEST_USER")" > "$T/check.log" 2>&1
+}
+ok 'a check runs with the caller identity' check_identity
+cat "$T/check.log"
 eq 'a client cannot restore through the root service' '1' "$(as "$LAYR_APFS_TEST_USER" "$L" backup restore /private/tmp/nonexistent-layr-backup >/dev/null 2>&1; echo $?)"
 eq 'a client cannot serve peers through the root service' '1' "$(as "$LAYR_APFS_TEST_USER" "$L" serve-peer service </dev/null >/dev/null 2>&1; echo $?)"
 ok 'service snapshots pass fsck' as "$LAYR_APFS_TEST_USER" "$L" fsck
