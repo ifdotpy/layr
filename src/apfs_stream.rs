@@ -356,8 +356,14 @@ pub fn receive(src: &mut dyn Read, dir: &Path, expected: &crate::recv::Expect) -
         // An immutable directory cannot be renamed on macOS. Publish inside the locked store,
         // then seal before returning success; remove the tree if sealing fails.
         let target = dir.join(expected.name);
+        let mode = fs::symlink_metadata(&root)?.mode() & 0o7777;
+        fs::set_permissions(&root, fs::Permissions::from_mode(mode | 0o200))?;
         crate::sys::apfs_publish(&root, &target)?;
-        if let Err(e) = crate::storage::set_readonly(&target) {
+        let seal = (|| -> Result<()> {
+            fs::set_permissions(&target, fs::Permissions::from_mode(mode))?;
+            crate::storage::set_readonly(&target)
+        })();
+        if let Err(e) = seal {
             let _ = crate::storage::delete_tree(&target);
             return Err(e);
         }

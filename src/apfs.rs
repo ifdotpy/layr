@@ -187,8 +187,12 @@ pub fn snapshot(src: &Path, dst: &Path, readonly: bool) -> Result<()> {
             bail!("source changed during APFS snapshot; retry when writers are idle");
         }
         mark(&temp, Some(parent), readonly).context("mark snapshot")?;
+        // macOS 14 requires write access to a directory when rename updates its parent.
+        let mode = fs::symlink_metadata(&temp)?.mode() & 0o7777;
+        fs::set_permissions(&temp, fs::Permissions::from_mode(mode | 0o200))?;
         crate::sys::apfs_publish(&temp, dst).context("publish snapshot")?;
         published = true;
+        fs::set_permissions(dst, fs::Permissions::from_mode(mode))?;
         if readonly {
             seal(dst, true, false).context("seal snapshot")?;
         }
@@ -384,6 +388,7 @@ mod tests {
         fs::set_permissions(&src, fs::Permissions::from_mode(0o555))?;
         let dst = s.0.join("state");
         snapshot(&src, &dst, true).context("snapshot original tree")?;
+        assert_eq!(fs::symlink_metadata(&dst)?.mode() & 0o777, 0o555);
         assert_eq!(fs::read(dst.join("a"))?, b"lower");
         assert_eq!(fs::read(dst.join("A"))?, b"upper");
         assert_eq!(crate::sys::apfs_attribute(&dst.join("dir"), c"com.layr.test", None)?, b"directory metadata");
@@ -399,6 +404,7 @@ mod tests {
         assert_eq!(fs::read(dst.join("a"))?, b"lower");
         let branch = s.0.join("branch");
         snapshot(&dst, &branch, false).context("branch from readonly snapshot")?;
+        assert_eq!(fs::symlink_metadata(&branch)?.mode() & 0o777, 0o555);
         fs::write(branch.join("a"), b"branch")?;
         assert_eq!(fs::read(dst.join("a"))?, b"lower");
         // An existing destination must remain intact on failure.
