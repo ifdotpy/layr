@@ -153,6 +153,12 @@ pub fn really_changed(parent: &Path, child: &Path, c: &Change) -> Result<bool> {
     if o.is_dir() {
         return Ok(false);
     }
+    // APFS already compared every byte while it built these ranges. Both trees
+    // are read-only, so an empty result does not need another open and stat.
+    #[cfg(target_os = "macos")]
+    if o.is_file() && o.size == n.size && c.ranges.as_ref().is_some_and(|ranges| ranges.is_empty()) {
+        return Ok(false);
+    }
     Ok(!fsutil::same_entry(parent, c.src(), child, &c.path, c.ranges.as_deref())?)
 }
 

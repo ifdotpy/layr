@@ -79,11 +79,26 @@ pub fn create_subvolume(path: &Path) -> Result<()> {
 // Compare inode, device, permissions, size, mtime and ctime before and after cloning.
 // Do not use atime: reading the source can change it.
 type Fingerprint = (u64, u64, u32, u64, i64, i64, i64, i64);
-fn scan(root: &Path) -> Result<BTreeMap<String, Fingerprint>> {
-    fn visit(root: &Path, rel: &str, out: &mut BTreeMap<String, Fingerprint>) -> Result<()> {
+struct ScanEntry {
+    fingerprint: Fingerprint,
+    meta: crate::fsutil::Meta,
+}
+impl PartialEq for ScanEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.fingerprint == other.fingerprint
+    }
+}
+fn scan(root: &Path) -> Result<BTreeMap<String, ScanEntry>> {
+    fn visit(root: &Path, rel: &str, out: &mut BTreeMap<String, ScanEntry>) -> Result<()> {
         let path = root.join(rel);
         let m = fs::symlink_metadata(&path)?;
-        out.insert(rel.into(), (m.dev(), m.ino(), m.mode(), m.len(), m.mtime(), m.mtime_nsec(), m.ctime(), m.ctime_nsec()));
+        out.insert(
+            rel.into(),
+            ScanEntry {
+                fingerprint: (m.dev(), m.ino(), m.mode(), m.len(), m.mtime(), m.mtime_nsec(), m.ctime(), m.ctime_nsec()),
+                meta: crate::fsutil::meta_of(&m),
+            },
+        );
         if m.is_dir() && (rel.is_empty() || !is_subvolume(&path)) {
             for e in fs::read_dir(path)? {
                 let e = e?;
@@ -178,12 +193,41 @@ pub fn snapshot(src: &Path, dst: &Path, readonly: bool) -> Result<()> {
         bail!("snapshot destination already exists");
     }
     let parent = subvol_info(src)?.uuid;
-    let before = scan(src)?;
+    let before = {
+        let _t = crate::trace::span("APFS scan before");
+        scan(src)?
+    };
     let temp = dst.with_file_name(format!(".apfs-{}", crate::ids::new_id()));
     let mut published = false;
     let result = (|| -> Result<()> {
-        copy_tree(src, &temp, true, &mut BTreeMap::new())?;
-        if before != scan(src)? {
+        {
+            let _t = crate::trace::span("APFS copy tree");
+            let native = std::env::var_os("LAYR_APFS_EXPERIMENT_CLONE_TREE").is_some()
+                && !before.iter().any(|(p, e)| !p.is_empty() && e.meta.is_dir() && is_subvolume(&src.join(p)));
+            if native {
+                // Experimental floor: Darwin discourages recursive clonefile use.
+                crate::sys::apfs_clone(src, &temp)?;
+                seal(&temp, false, false)?;
+                for (p, entry) in &before {
+                    let dst = temp.join(p);
+                    let writable = !entry.meta.ftype.eq(&crate::fsutil::FType::Symlink) && entry.meta.mode & 0o200 == 0;
+                    if writable {
+                        fs::set_permissions(&dst, fs::Permissions::from_mode(entry.meta.mode | 0o200))?;
+                    }
+                    crate::sys::apfs_attribute(&dst, c"com.layr.origin", Some(&file_identity(&src.join(p))?))?;
+                    if writable {
+                        fs::set_permissions(&dst, fs::Permissions::from_mode(entry.meta.mode))?;
+                    }
+                }
+            } else {
+                copy_tree(src, &temp, true, &mut BTreeMap::new())?;
+            }
+        }
+        let after = {
+            let _t = crate::trace::span("APFS scan after");
+            scan(src)?
+        };
+        if before != after {
             bail!("source changed during APFS snapshot; retry when writers are idle");
         }
         mark(&temp, Some(parent), readonly).context("mark snapshot")?;
@@ -194,6 +238,7 @@ pub fn snapshot(src: &Path, dst: &Path, readonly: bool) -> Result<()> {
         published = true;
         fs::set_permissions(dst, fs::Permissions::from_mode(mode))?;
         if readonly {
+            let _t = crate::trace::span("APFS seal tree");
             seal(dst, true, false).context("seal snapshot")?;
         }
         Ok(())
@@ -264,6 +309,7 @@ pub fn clone_identity(path: &Path) -> Result<(String, Option<u64>)> {
     Ok((info.received_uuid.unwrap_or(info.uuid), None))
 }
 pub fn candidates(parent: &Path, child: &Path) -> Result<Vec<crate::changes::Change>> {
+    let _t = crate::trace::span("APFS candidates");
     let (a, b) = (scan(parent)?, scan(child)?);
     let names: std::collections::BTreeSet<_> = a.keys().chain(b.keys()).filter(|s| !s.is_empty()).collect();
     let mut changes: BTreeMap<_, _> = names
@@ -274,8 +320,8 @@ pub fn candidates(parent: &Path, child: &Path) -> Result<Vec<crate::changes::Cha
                 crate::changes::Change {
                     path: p.clone(),
                     old_path: None,
-                    old: crate::fsutil::lmeta(parent, p),
-                    new: crate::fsutil::lmeta(child, p),
+                    old: a.get(p).map(|entry| entry.meta.clone()),
+                    new: b.get(p).map(|entry| entry.meta.clone()),
                     ranges: None,
                 },
             )
@@ -309,11 +355,7 @@ pub fn candidates(parent: &Path, child: &Path) -> Result<Vec<crate::changes::Cha
         c.old_path = Some(src.clone());
     }
     for (p, c) in &mut changes {
-        if c.old_path.is_none()
-            && c.old.as_ref().is_some_and(|m| m.is_file())
-            && c.new.as_ref().is_some_and(|m| m.is_file())
-            && file_identity(&parent.join(p))? == file_identity(&child.join(p))?
-        {
+        if c.old_path.is_none() && c.old.as_ref().is_some_and(|m| m.is_file()) && c.new.as_ref().is_some_and(|m| m.is_file()) {
             c.ranges = Some(changed_ranges(&parent.join(p), &child.join(p))?);
         }
     }

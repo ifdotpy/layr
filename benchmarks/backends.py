@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import resource
 import subprocess
 import time
 
@@ -14,6 +15,7 @@ p.add_argument('--binary', required=True)
 p.add_argument('--root', required=True)
 p.add_argument('--files', type=int, default=1000)
 p.add_argument('--repeats', type=int, default=3)
+p.add_argument('--trace', action='store_true')
 a = p.parse_args()
 root = Path(a.root).resolve()
 root.mkdir(parents=True, exist_ok=False)
@@ -23,11 +25,16 @@ for key in ('LAYR_PROJECT', 'LAYR_LINE', 'LAYR_SOCKET'):
 binary = str(Path(a.binary).resolve())
 binary_sha256 = hashlib.sha256(Path(binary).read_bytes()).hexdigest()
 results = []
+commands = []
+if a.trace: env["LAYR_TRACE"] = "1"
 
 def run(cwd, *args):
     start = time.perf_counter()
+    before = resource.getrusage(resource.RUSAGE_CHILDREN)
     r = subprocess.run([binary, *args], cwd=cwd, env=env, text=True, capture_output=True)
     seconds = time.perf_counter() - start
+    after = resource.getrusage(resource.RUSAGE_CHILDREN)
+    commands.append({"args": args, "wall": seconds, "cpu": after.ru_utime+after.ru_stime-before.ru_utime-before.ru_stime, "stderr": r.stderr, "load": os.getloadavg()})
     if r.returncode:
         raise RuntimeError(f'{args}: {r.returncode}: {r.stderr}')
     return seconds, r.stdout
@@ -63,6 +70,6 @@ for trial in range(a.repeats):
     assert not status.strip(), status
     row['fsck'], _ = run(main, 'fsck')
     results.append(row)
-    report = {'platform': platform.platform(), 'files': a.files, 'binary_sha256': binary_sha256, 'fixture_sha256': digest.hexdigest(), 'results': results}
+    report = {'platform': platform.platform(), 'files': a.files, 'binary_sha256': binary_sha256, 'fixture_sha256': digest.hexdigest(), 'results': results, 'commands': commands}
     (root / 'results.json').write_text(json.dumps(report, indent=2) + '\n')
     print(json.dumps(row), flush=True)

@@ -1,0 +1,400 @@
+{
+  "binaries": {
+    "baseline": "8d4dedb8a3d115e9c2c818ffe99f5d2bca620a68b3ea0d1edc8222b9b10fcdbb",
+    "metadata": "342c30374ef098e9cb50293272498c3667136b45902afc08f1c25ec0978de09e",
+    "native_tree": "342c30374ef098e9cb50293272498c3667136b45902afc08f1c25ec0978de09e"
+  },
+  "rows": [
+    {
+      "trial": 0,
+      "variant": "baseline",
+      "operation": "branch",
+      "wall": 3.3089114998001605,
+      "cpu": 3.270622,
+      "load": [
+        9.30419921875,
+        35.8955078125,
+        57.39453125
+      ],
+      "trace": "trace      1.2 ms  open project\ntrace   3277.8 ms  APFS clone /Volumes/LayrAPFSCase/perf-baseline-current-10k/store/projects/p0/meta/work/01a14034-6fe8-7796-a801-e9348888844f\ntrace      0.5 ms  record line.create\n"
+    },
+    {
+      "trial": 0,
+      "variant": "baseline",
+      "operation": "status_clean",
+      "wall": 5.809706790838391,
+      "cpu": 5.655744,
+      "load": [
+        9.35986328125,
+        35.46533203125,
+        57.11669921875
+      ],
+      "trace": "trace      0.5 ms  open project\ntrace   3579.2 ms  APFS clone /Volumes/LayrAPFSCase/perf-baseline-current-10k/store/projects/p0/meta/scan/01a14034-7cc0-706a-9b58-31fea6cb3a66\n"
+    },
+    {
+      "trial": 0,
+      "variant": "baseline",
+      "operation": "diff_changed",
+      "wall": 6.652566500008106,
+      "cpu": 6.355628999999999,
+      "load": [
+        10.85205078125,
+        35.34130859375,
+        56.94580078125
+      ],
+      "trace": "trace      0.8 ms  open project\ntrace   4207.6 ms  APFS clone /Volumes/LayrAPFSCase/perf-baseline-current-10k/store/projects/p0/meta/scan/01a14034-9377-729d-9bdc-0b546a97b573\n"
+    },
+    {
+      "trial": 0,
+      "variant": "baseline",
+      "operation": "add",
+      "wall": 14.228145333006978,
+      "cpu": 13.347755000000001,
+      "load": [
+        11.3466796875,
+        34.24755859375,
+        56.17724609375
+      ],
+      "trace": "trace      0.7 ms  open project\ntrace   4914.1 ms  APFS clone /Volumes/LayrAPFSCase/perf-baseline-current-10k/store/projects/p0/meta/scan/01a14034-ad73-72e1-ada0-d8452b61fe53\ntrace   5049.4 ms  APFS clone /Volumes/LayrAPFSCase/perf-baseline-current-10k/store/projects/p0/meta/stage/01a14034-6fe8-7796-a801-e93378590711\n"
+    },
+    {
+      "trial": 0,
+      "variant": "baseline",
+      "operation": "commit",
+      "wall": 8.514776624972,
+      "cpu": 8.026581000000004,
+      "load": [
+        10.59814453125,
+        33.3330078125,
+        55.59619140625
+      ],
+      "trace": "trace      2.1 ms  open project\ntrace   6242.1 ms  APFS clone /Volumes/LayrAPFSCase/perf-baseline-current-10k/store/projects/p0/states/01a14034-e50e-7683-addf-553ab658c8df\ntrace      0.9 ms  record commit\n"
+    },
+    {
+      "trial": 0,
+      "variant": "metadata",
+      "operation": "branch",
+      "wall": 5.305436666822061,
+      "cpu": 4.892207999999997,
+      "load": [
+        10.3095703125,
+        32.8955078125,
+        55.31103515625
+      ],
+      "trace": "trace      1.7 ms  open project\ntrace     42.0 ms  APFS scan before\ntrace   4931.6 ms  APFS copy tree\ntrace     28.7 ms  APFS scan after\ntrace   5003.1 ms  APFS clone /Volumes/LayrAPFSCase/perf-baseline-current-10k/store/projects/p0/meta/work/01a14035-077f-7387-812c-bf78c71d2862\ntrace      0.6 ms  record line.create\n"
+    },
+    {
+      "trial": 0,
+      "variant": "metadata",
+      "operation": "status_clean",
+      "wall": 5.042153249960393,
+      "cpu": 4.900102000000011,
+      "load": [
+        9.96435546875,
+        32.44873046875,
+        55.02197265625
+      ],
+      "trace": "trace      0.6 ms  open project\ntrace     27.1 ms  APFS scan before\ntrace   3209.7 ms  APFS copy tree\ntrace     24.8 ms  APFS scan after\ntrace    458.3 ms  APFS seal tree\ntrace   3720.7 ms  APFS clone /Volumes/LayrAPFSCase/perf-baseline-current-10k/store/projects/p0/meta/scan/01a14035-1b15-77f3-80e2-f12a85510c3a\ntrace    581.8 ms  APFS candidates\n"
+    },
+    {
+      "trial": 0,
+      "variant": "metadata",
+      "operation": "diff_changed",
+      "wall": 9.023223374970257,
+      "cpu": 7.638947999999992,
+      "load": [
+        18.04736328125,
+        33.4248046875,
+        55.103515625
+      ],
+      "trace": "trace      0.6 ms  open project\ntrace     26.6 ms  APFS scan before\ntrace   4560.7 ms  APFS copy tree\ntrace     65.4 ms  APFS scan after\ntrace    917.6 ms  APFS seal tree\ntrace   5572.2 ms  APFS clone /Volumes/LayrAPFSCase/perf-baseline-current-10k/store/projects/p0/meta/scan/01a14035-2eca-711f-866f-a6ecea6b23bc\ntrace   2251.7 ms  APFS candidates\n"
+    },
+    {
+      "trial": 0,
+      "variant": "metadata",
+      "operation": "add",
+      "wall": 11.344017416937277,
+      "cpu": 10.997741000000005,
+      "load": [
+        17.3896484375,
+        32.77001953125,
+        54.6171875
+      ],
+      "trace": "trace      1.0 ms  open project\ntrace     44.7 ms  APFS scan before\ntrace   4094.6 ms  APFS copy tree\ntrace     28.9 ms  APFS scan after\ntrace    512.0 ms  APFS seal tree\ntrace   4681.1 ms  APFS clone /Volumes/LayrAPFSCase/perf-baseline-current-10k/store/projects/p0/meta/scan/01a14035-520e-7310-83aa-d60e26d2c855\ntrace    784.3 ms  APFS candidates\ntrace     32.1 ms  APFS scan before\ntrace   4619.3 ms  APFS copy tree\ntrace     35.6 ms  APFS scan after\ntrace   4687.8 ms  APFS clone /Volumes/LayrAPFSCase/perf-baseline-current-10k/store/projects/p0/meta/stage/01a14035-077f-7387-812c-bf77844cfc16\n"
+    },
+    {
+      "trial": 0,
+      "variant": "metadata",
+      "operation": "commit",
+      "wall": 5.111153582809493,
+      "cpu": 4.948581000000011,
+      "load": [
+        16.6376953125,
+        32.3583984375,
+        54.34375
+      ],
+      "trace": "trace      0.9 ms  open project\ntrace     45.5 ms  APFS scan before\ntrace   3612.5 ms  APFS copy tree\ntrace     26.6 ms  APFS scan after\ntrace    331.4 ms  APFS seal tree\ntrace   4016.8 ms  APFS clone /Volumes/LayrAPFSCase/perf-baseline-current-10k/store/projects/p0/states/01a14035-7e5e-72b0-a934-66597ac1ba9b\ntrace    696.6 ms  APFS candidates\ntrace      0.6 ms  record commit\n"
+    },
+    {
+      "trial": 0,
+      "variant": "native_tree",
+      "operation": "branch",
+      "wall": 1.3044394170865417,
+      "cpu": 1.278363000000013,
+      "load": [
+        16.6376953125,
+        32.3583984375,
+        54.34375
+      ],
+      "trace": "trace      0.5 ms  open project\ntrace     28.8 ms  APFS scan before\ntrace   1233.2 ms  APFS copy tree\ntrace     31.3 ms  APFS scan after\ntrace   1294.0 ms  APFS clone /Volumes/LayrAPFSCase/perf-baseline-current-10k/store/projects/p0/meta/work/01a14035-925d-7543-ae2a-ee91efd063b3\ntrace      0.6 ms  record line.create\n"
+    },
+    {
+      "trial": 0,
+      "variant": "native_tree",
+      "operation": "status_clean",
+      "wall": 3.7332369999494404,
+      "cpu": 3.4411309999999986,
+      "load": [
+        17.54736328125,
+        32.28564453125,
+        54.18896484375
+      ],
+      "trace": "trace      0.6 ms  open project\ntrace     28.1 ms  APFS scan before\ntrace    764.9 ms  APFS copy tree\ntrace     34.0 ms  APFS scan after\ntrace    656.1 ms  APFS seal tree\ntrace   1484.2 ms  APFS clone /Volumes/LayrAPFSCase/perf-baseline-current-10k/store/projects/p0/meta/scan/01a14035-9776-759e-b672-c23de576ff71\ntrace   1155.8 ms  APFS candidates\n"
+    },
+    {
+      "trial": 0,
+      "variant": "native_tree",
+      "operation": "diff_changed",
+      "wall": 3.5750575410202146,
+      "cpu": 3.314438999999993,
+      "load": [
+        19.26513671875,
+        32.39697265625,
+        54.099609375
+      ],
+      "trace": "trace      0.8 ms  open project\ntrace     38.3 ms  APFS scan before\ntrace    853.5 ms  APFS copy tree\ntrace     34.2 ms  APFS scan after\ntrace    595.6 ms  APFS seal tree\ntrace   1522.6 ms  APFS clone /Volumes/LayrAPFSCase/perf-baseline-current-10k/store/projects/p0/meta/scan/01a14035-a60e-74c5-a093-385173b56a2f\ntrace    886.1 ms  APFS candidates\n"
+    },
+    {
+      "trial": 0,
+      "variant": "native_tree",
+      "operation": "add",
+      "wall": 6.9757278331089765,
+      "cpu": 5.349564000000001,
+      "load": [
+        32.21630859375,
+        34.86376953125,
+        54.8427734375
+      ],
+      "trace": "trace      0.8 ms  open project\ntrace     40.5 ms  APFS scan before\ntrace   1060.9 ms  APFS copy tree\ntrace     43.3 ms  APFS scan after\ntrace    608.5 ms  APFS seal tree\ntrace   1754.3 ms  APFS clone /Volumes/LayrAPFSCase/perf-baseline-current-10k/store/projects/p0/meta/scan/01a14035-b408-71c4-b466-5a1d64a9c836\ntrace   1103.8 ms  APFS candidates\ntrace     41.2 ms  APFS scan before\ntrace   1647.3 ms  APFS copy tree\ntrace     70.9 ms  APFS scan after\ntrace   1761.6 ms  APFS clone /Volumes/LayrAPFSCase/perf-baseline-current-10k/store/projects/p0/meta/stage/01a14035-925d-7543-ae2a-ee901bef7d99\n"
+    },
+    {
+      "trial": 0,
+      "variant": "native_tree",
+      "operation": "commit",
+      "wall": 7.748678624862805,
+      "cpu": 3.545158999999998,
+      "load": [
+        36.20263671875,
+        35.64599609375,
+        55.00146484375
+      ],
+      "trace": "trace      1.3 ms  open project\ntrace    285.2 ms  APFS scan before\ntrace   2244.6 ms  APFS copy tree\ntrace     63.4 ms  APFS scan after\ntrace    816.0 ms  APFS seal tree\ntrace   3410.5 ms  APFS clone /Volumes/LayrAPFSCase/perf-baseline-current-10k/store/projects/p0/states/01a14035-cf52-758c-8668-6375b3fb3300\ntrace   1803.7 ms  APFS candidates\ntrace      1.3 ms  record commit\n"
+    },
+    {
+      "trial": 1,
+      "variant": "metadata",
+      "operation": "branch",
+      "wall": 19.77321487502195,
+      "cpu": 7.420980999999998,
+      "load": [
+        98.1318359375,
+        49.93603515625,
+        59.68310546875
+      ],
+      "trace": "trace      1.1 ms  open project\ntrace    175.0 ms  APFS scan before\ntrace  18929.1 ms  APFS copy tree\ntrace    636.3 ms  APFS scan after\ntrace  19742.2 ms  APFS clone /Volumes/LayrAPFSCase/perf-baseline-current-10k/store/projects/p0/meta/work/01a14035-ede3-73ef-accf-ca308f5b628d\ntrace      0.8 ms  record line.create\n"
+    },
+    {
+      "trial": 1,
+      "variant": "metadata",
+      "operation": "status_clean",
+      "wall": 19.826458333060145,
+      "cpu": 11.278422000000006,
+      "load": [
+        127.91748046875,
+        59.9560546875,
+        63.05517578125
+      ],
+      "trace": "trace      1.6 ms  open project\ntrace    428.7 ms  APFS scan before\ntrace  14279.2 ms  APFS copy tree\ntrace    110.1 ms  APFS scan after\ntrace    974.2 ms  APFS seal tree\ntrace  15794.0 ms  APFS clone /Volumes/LayrAPFSCase/perf-baseline-current-10k/store/projects/p0/meta/scan/01a14036-3b18-7375-8d45-0a5ee4df86d6\ntrace   2357.9 ms  APFS candidates\n"
+    },
+    {
+      "trial": 1,
+      "variant": "metadata",
+      "operation": "diff_changed",
+      "wall": 9.847029624972492,
+      "cpu": 9.247693999999996,
+      "load": [
+        112.63525390625,
+        58.919921875,
+        62.65087890625
+      ],
+      "trace": "trace      1.0 ms  open project\ntrace     99.3 ms  APFS scan before\ntrace   6122.7 ms  APFS copy tree\ntrace    115.1 ms  APFS scan after\ntrace    859.5 ms  APFS seal tree\ntrace   7198.1 ms  APFS clone /Volumes/LayrAPFSCase/perf-baseline-current-10k/store/projects/p0/meta/scan/01a14036-888d-732a-9850-4b39defc12c3\ntrace   1440.1 ms  APFS candidates\n"
+    },
+    {
+      "trial": 1,
+      "variant": "metadata",
+      "operation": "add",
+      "wall": 12.564212207915261,
+      "cpu": 12.111043999999993,
+      "load": [
+        89.99853515625,
+        56.55322265625,
+        61.74169921875
+      ],
+      "trace": "trace      1.0 ms  open project\ntrace     52.5 ms  APFS scan before\ntrace   5554.3 ms  APFS copy tree\ntrace     63.2 ms  APFS scan after\ntrace    719.8 ms  APFS seal tree\ntrace   6390.9 ms  APFS clone /Volumes/LayrAPFSCase/perf-baseline-current-10k/store/projects/p0/meta/scan/01a14036-af04-7540-9b2e-eb9ca1e10a37\ntrace   1201.8 ms  APFS candidates\ntrace     33.9 ms  APFS scan before\ntrace   4079.9 ms  APFS copy tree\ntrace     25.1 ms  APFS scan after\ntrace   4139.5 ms  APFS clone /Volumes/LayrAPFSCase/perf-baseline-current-10k/store/projects/p0/meta/stage/01a14035-ede3-73ef-accf-ca2fe81cf6cf\n"
+    },
+    {
+      "trial": 1,
+      "variant": "metadata",
+      "operation": "commit",
+      "wall": 4.39299033395946,
+      "cpu": 4.251336999999992,
+      "load": [
+        83.59228515625,
+        55.7802734375,
+        61.4384765625
+      ],
+      "trace": "trace      0.6 ms  open project\ntrace     31.5 ms  APFS scan before\ntrace   3043.8 ms  APFS copy tree\ntrace     26.3 ms  APFS scan after\ntrace    341.9 ms  APFS seal tree\ntrace   3444.2 ms  APFS clone /Volumes/LayrAPFSCase/perf-baseline-current-10k/store/projects/p0/states/01a14036-e014-71da-94ea-d2930d7a8c8a\ntrace    590.2 ms  APFS candidates\ntrace      0.6 ms  record commit\n"
+    },
+    {
+      "trial": 1,
+      "variant": "native_tree",
+      "operation": "branch",
+      "wall": 1.168287832988426,
+      "cpu": 1.1418139999999823,
+      "load": [
+        83.59228515625,
+        55.7802734375,
+        61.4384765625
+      ],
+      "trace": "trace      0.5 ms  open project\ntrace     24.5 ms  APFS scan before\ntrace   1105.0 ms  APFS copy tree\ntrace     28.8 ms  APFS scan after\ntrace   1159.0 ms  APFS clone /Volumes/LayrAPFSCase/perf-baseline-current-10k/store/projects/p0/meta/work/01a14036-f149-767e-9cb5-658c15e012ae\ntrace      0.6 ms  record line.create\n"
+    },
+    {
+      "trial": 1,
+      "variant": "native_tree",
+      "operation": "status_clean",
+      "wall": 2.4871142499614507,
+      "cpu": 2.356899999999996,
+      "load": [
+        83.59228515625,
+        55.7802734375,
+        61.4384765625
+      ],
+      "trace": "trace      0.5 ms  open project\ntrace     24.9 ms  APFS scan before\ntrace    668.0 ms  APFS copy tree\ntrace     26.6 ms  APFS scan after\ntrace    448.0 ms  APFS seal tree\ntrace   1168.4 ms  APFS clone /Volumes/LayrAPFSCase/perf-baseline-current-10k/store/projects/p0/meta/scan/01a14036-f5da-7558-9285-12b797659a43\ntrace    612.8 ms  APFS candidates\n"
+    },
+    {
+      "trial": 1,
+      "variant": "native_tree",
+      "operation": "diff_changed",
+      "wall": 2.4544720828998834,
+      "cpu": 2.298532999999992,
+      "load": [
+        77.61865234375,
+        55.00341796875,
+        61.130859375
+      ],
+      "trace": "trace      0.6 ms  open project\ntrace     28.7 ms  APFS scan before\ntrace    619.8 ms  APFS copy tree\ntrace     30.0 ms  APFS scan after\ntrace    441.5 ms  APFS seal tree\ntrace   1120.8 ms  APFS clone /Volumes/LayrAPFSCase/perf-baseline-current-10k/store/projects/p0/meta/scan/01a14036-ff93-70ba-8783-9dbf4ee23b96\ntrace    616.3 ms  APFS candidates\n"
+    },
+    {
+      "trial": 1,
+      "variant": "native_tree",
+      "operation": "add",
+      "wall": 3.7886187080293894,
+      "cpu": 3.574780000000004,
+      "load": [
+        73.40478515625,
+        54.5048828125,
+        60.9189453125
+      ],
+      "trace": "trace      0.6 ms  open project\ntrace     25.4 ms  APFS scan before\ntrace    652.2 ms  APFS copy tree\ntrace     24.8 ms  APFS scan after\ntrace    457.2 ms  APFS seal tree\ntrace   1160.3 ms  APFS clone /Volumes/LayrAPFSCase/perf-baseline-current-10k/store/projects/p0/meta/scan/01a14037-092a-716f-887e-7f73f05b6f91\ntrace    571.2 ms  APFS candidates\ntrace     22.8 ms  APFS scan before\ntrace   1096.0 ms  APFS copy tree\ntrace     29.1 ms  APFS scan after\ntrace   1148.6 ms  APFS clone /Volumes/LayrAPFSCase/perf-baseline-current-10k/store/projects/p0/meta/stage/01a14036-f149-767e-9cb5-658b68e2ddda\n"
+    },
+    {
+      "trial": 1,
+      "variant": "native_tree",
+      "operation": "commit",
+      "wall": 2.1527206250466406,
+      "cpu": 2.002742000000012,
+      "load": [
+        73.40478515625,
+        54.5048828125,
+        60.9189453125
+      ],
+      "trace": "trace      0.7 ms  open project\ntrace     30.5 ms  APFS scan before\ntrace    698.7 ms  APFS copy tree\ntrace     28.6 ms  APFS scan after\ntrace    391.4 ms  APFS seal tree\ntrace   1150.2 ms  APFS clone /Volumes/LayrAPFSCase/perf-baseline-current-10k/store/projects/p0/states/01a14037-17f9-7598-9494-ba551cef68f6\ntrace    632.4 ms  APFS candidates\ntrace      0.6 ms  record commit\n"
+    },
+    {
+      "trial": 1,
+      "variant": "baseline",
+      "operation": "branch",
+      "wall": 3.3868629161734134,
+      "cpu": 3.3206699999999785,
+      "load": [
+        68.1669921875,
+        53.732421875,
+        60.6083984375
+      ],
+      "trace": "trace      3.9 ms  open project\ntrace   3331.9 ms  APFS clone /Volumes/LayrAPFSCase/perf-baseline-current-10k/store/projects/p0/meta/work/01a14037-2097-779b-b23a-9c51c8feea5e\ntrace      0.5 ms  record line.create\n"
+    },
+    {
+      "trial": 1,
+      "variant": "baseline",
+      "operation": "status_clean",
+      "wall": 5.625729291932657,
+      "cpu": 5.487704000000008,
+      "load": [
+        64.5498046875,
+        53.22216796875,
+        60.3876953125
+      ],
+      "trace": "trace      0.5 ms  open project\ntrace   3667.5 ms  APFS clone /Volumes/LayrAPFSCase/perf-baseline-current-10k/store/projects/p0/meta/scan/01a14037-2da4-7177-bbda-c5d133d54d9d\n"
+    },
+    {
+      "trial": 1,
+      "variant": "baseline",
+      "operation": "diff_changed",
+      "wall": 6.197191332932562,
+      "cpu": 5.951305999999988,
+      "load": [
+        60.26123046875,
+        52.52099609375,
+        60.09814453125
+      ],
+      "trace": "trace      0.5 ms  open project\ntrace   3596.2 ms  APFS clone /Volumes/LayrAPFSCase/perf-baseline-current-10k/store/projects/p0/meta/scan/01a14037-43a1-769d-8743-26e07a0af8c4\n"
+    },
+    {
+      "trial": 1,
+      "variant": "baseline",
+      "operation": "add",
+      "wall": 10.13027845788747,
+      "cpu": 9.851062000000013,
+      "load": [
+        52.4404296875,
+        51.103515625,
+        59.50634765625
+      ],
+      "trace": "trace      1.0 ms  open project\ntrace   4629.0 ms  APFS clone /Volumes/LayrAPFSCase/perf-baseline-current-10k/store/projects/p0/meta/scan/01a14037-5bdb-7428-9d4c-2ead735633b5\ntrace   3310.2 ms  APFS clone /Volumes/LayrAPFSCase/perf-baseline-current-10k/store/projects/p0/meta/stage/01a14037-2097-779b-b23a-9c504f57e425\n"
+    },
+    {
+      "trial": 1,
+      "variant": "baseline",
+      "operation": "commit",
+      "wall": 5.8226684159599245,
+      "cpu": 5.6527659999999855,
+      "load": [
+        48.88134765625,
+        50.3876953125,
+        59.2041015625
+      ],
+      "trace": "trace      0.8 ms  open project\ntrace   4115.5 ms  APFS clone /Volumes/LayrAPFSCase/perf-baseline-current-10k/store/projects/p0/states/01a14037-836e-7171-abc4-7e917b22bbd9\ntrace      0.7 ms  record commit\n"
+    }
+  ],
+  "note": "Native tree mode is experimental; no claim of production compatibility."
+}
