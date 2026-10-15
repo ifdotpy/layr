@@ -410,6 +410,24 @@ mod tests {
 
     #[test]
     #[ignore = "requires a case-sensitive APFS test volume"]
+    fn clones_refuse_symlink_components() -> Result<()> {
+        let s = Sandbox::new();
+        let real = s.0.join("real");
+        fs::create_dir(&real)?;
+        fs::write(real.join("file"), b"data")?;
+        std::os::unix::fs::symlink(&real, s.0.join("link"))?;
+        assert!(crate::sys::apfs_clone(&s.0.join("link/file"), &s.0.join("copy")).is_err());
+        assert!(crate::sys::apfs_clone(&real.join("file"), &s.0.join("link/copy")).is_err());
+        std::os::unix::fs::symlink(real.join("file"), s.0.join("file-link"))?;
+        assert!(crate::sys::apfs_clone(&s.0.join("file-link"), &s.0.join("copy")).is_err());
+        assert!(!real.join("copy").exists());
+        crate::sys::apfs_clone(&real.join("file"), &s.0.join("copy"))?;
+        assert_eq!(fs::read(s.0.join("copy"))?, b"data");
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a case-sensitive APFS test volume"]
     fn readonly_transitions_preserve_identity_and_modes() -> Result<()> {
         let s = Sandbox::new();
         let tree = s.0.join("tree");

@@ -398,9 +398,33 @@ pub fn apfs_supported(path: &std::path::Path) -> bool {
 }
 #[cfg(target_os = "macos")]
 pub fn apfs_clone(src: &std::path::Path, dst: &std::path::Path) -> io::Result<()> {
-    let (src, dst) = (cpath(src)?, cpath(dst)?);
-    // SAFETY: both paths are valid C strings; CLONE_NOFOLLOW_ANY prevents path traversal through symlinks.
-    if unsafe { libc::clonefile(src.as_ptr(), dst.as_ptr(), 0x0008 | 0x0002) } != 0 {
+    use rustix::fs::{open, openat, Mode, OFlags};
+    use std::os::{fd::AsRawFd, unix::ffi::OsStrExt};
+    use std::path::Component;
+    fn open_parent(path: &std::path::Path) -> io::Result<std::os::fd::OwnedFd> {
+        let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let mut dir = open(if path.is_absolute() { "/" } else { "." }, flags, Mode::empty())?;
+        for part in path.parent().ok_or_else(|| io::Error::other("missing clone parent"))?.components() {
+            match part {
+                Component::RootDir | Component::CurDir => {}
+                Component::Normal(name) => dir = openat(&dir, name, flags, Mode::empty())?,
+                _ => return Err(io::Error::other("invalid clone path component")),
+            }
+        }
+        Ok(dir)
+    }
+    let source_dir = open_parent(src)?;
+    let source = openat(
+        &source_dir,
+        src.file_name().ok_or_else(|| io::Error::other("missing clone source name"))?,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+        Mode::empty(),
+    )?;
+    let destination = open_parent(dst)?;
+    let name = CString::new(dst.file_name().ok_or_else(|| io::Error::other("missing clone destination name"))?.as_bytes())?;
+    // SAFETY: the descriptors stay live. Each path component was opened without following
+    // links. The destination is a single name. fclonefileat also supports macOS 14.
+    if unsafe { libc::fclonefileat(source.as_raw_fd(), destination.as_raw_fd(), name.as_ptr(), 0x0002) } != 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(())
