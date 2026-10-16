@@ -108,7 +108,11 @@ pub fn send(root: &Path, out: &mut dyn Write) -> Result<()> {
         }
         if !linked {
             for (name, value) in crate::stream_fs::xattrs(&full)? {
-                if name == b"com.layr.subvolume" || name == b"com.layr.origin" || name == b"trusted.layr.origin" {
+                if name == b"com.layr.subvolume"
+                    || name == b"com.layr.origin"
+                    || name == b"trusted.layr.origin"
+                    || name == b"trusted.layr.cache-restore"
+                {
                     continue;
                 }
                 // Linux forbids user.* attributes on symlinks. Its root receiver can
@@ -272,7 +276,11 @@ pub fn receive(src: &mut dyn Read, dir: &Path, expected: &crate::recv::Expect) -
                         if !raw.starts_with(b"user.") { bail!("unsupported portable attribute namespace"); }
                         raw.to_vec()
                     };
-                    if name == b"com.layr.subvolume" || name == b"com.layr.origin" || name == b"trusted.layr.origin" {
+                    if name == b"com.layr.subvolume"
+                        || name == b"com.layr.origin"
+                        || name == b"trusted.layr.origin"
+                        || name == b"trusted.layr.cache-restore"
+                    {
                         bail!("stream cannot set internal APFS metadata");
                     }
                     let name = std::ffi::CString::new(name)?;

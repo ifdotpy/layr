@@ -26,17 +26,37 @@ The private `.layr-overlayfs` directory contains the mount registry and file dat
 The service restores the registered mounts when it opens the store after a VM restart.
 
 A writable line has an immutable lower directory and a private upper directory.
-A read-only state uses a read-only bind mount.
+A read-only state uses a read-only mount of its saved layers.
 A new line can share the lower directory of its source state.
 
-A snapshot of a writable line copies its visible files into a new private directory.
-XFS reflinks can share the file data. On ext4, the backend copies the data and preserves sparse holes.
-The backend flushes the new tree before it publishes the snapshot in the registry.
+A snapshot copies the upper layer into a new private directory. It shares the unchanged lower layers.
+The live mount does not change. Open files and current directories continue to refer to the same working tree.
+Later writes cannot change the saved copy.
+
+The upper layer contains all changes since the line's base. Later snapshots can copy those changed files again.
+The backend does not rotate the live upper layer after each commit.
+An ownership change can also copy a lower file into the upper layer. A service branch with a different owner can therefore copy many files.
+XFS reflinks can share copied data. On ext4, the backend copies allocated data and preserves sparse holes.
+The backend flushes new data before it publishes the snapshot in the registry.
 Concurrent source changes cause the snapshot to fail when the two metadata scans differ.
 This check does not provide an atomic filesystem snapshot of concurrent writes.
 
-If a source has hard links, the backend copies its tree into the new line's upper directory.
-This preserves the relationship between the hard links when a process writes through either name.
+The backend combines the layers before a new snapshot would reach 17 layers or exceed its mount-option budget.
+This operation copies the visible tree once. A moved lower directory also requires a copy of that directory.
+Trees with hard links use a full copy. New lines copy these trees into their upper directory.
+This preserves the relationship between hard links when a process writes through either name.
+
+## Caches
+
+A working cache is an ordinary directory. Tools can remove it with `rm -rf` and create it again.
+The registry keeps the cache path. Snapshots exclude the contents at that path, including after directory replacement.
+Saved caches use separate copies. A restored cache has its own files and cannot change another line's cache.
+On ext4, these copies require additional space. XFS can use reflinks.
+
+The backend converts old cache mounts when it opens the store.
+It first makes the old cache read-only, saves a durable copy, and records the conversion before it removes the mount.
+Close open files if the conversion reports a busy mount. The next open resumes an incomplete conversion.
+Do not use an older OverlayFS binary after this conversion. Use backup and restore to transfer to another backend.
 
 ## Transfer
 
@@ -51,10 +71,9 @@ It preserves state identifiers and signed records. It does not send compressed e
 
 See the [release measurements](../benchmarks/overlayfs-20261016/README.md) for 1,000 and 10,000 files.
 
-- Each line, state and cache requires a mount.
-- Snapshots of writable trees cost time in proportion to the file count.
+- Each line and state requires a mount. Working caches do not.
+- Snapshots still scan file metadata. A large upper layer increases the copy cost.
 - ext4 copies require more space than reflinks for files with allocated data.
-- A mounted cache root cannot be removed with `rm -rf`. A build can remove files inside that cache.
 - Store paths cannot contain whitespace, commas, colons or backslashes.
 - The portable stream rejects unsupported extended attributes and access control lists.
 - The current backend has no automatic limit on the number of mounts.
@@ -72,4 +91,4 @@ bash tests/run.sh t01-basic t02-merge t03-git t05-transfer t06-sync t07-service 
 ```
 
 Some existing btrfs tests directly create or inspect btrfs subvolumes. Those fixtures do not test an OverlayFS store.
-The backend unit tests cover hard links, sparse files, cache conversion and nested mount paths.
+The backend unit tests cover hard links, sparse files, cache conversion, open writers, layer compaction and mount paths.

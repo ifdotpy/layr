@@ -401,7 +401,9 @@ pub fn walk(root: &Path, rel: &str, f: &mut dyn FnMut(&str, &Meta) -> Result<boo
             };
             let meta = meta_of(&m);
             if meta.is_dir()
-                && (m.dev() != dev || (cfg!(target_os = "macos") && crate::storage::is_subvolume(&root.join(&child))))
+                && (m.dev() != dev
+                    || ((cfg!(target_os = "macos") || cfg!(feature = "overlayfs"))
+                        && crate::storage::is_subvolume(&root.join(&child))))
             {
                 continue;
             }

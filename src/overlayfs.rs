@@ -1,6 +1,6 @@
 //! OverlayFS trees for a Linux VM. The private registry restores mounts after reboot.
 //! Writable branches share an immutable lower tree. A snapshot of a writable tree
-//! copies the merged view, using reflinks when the backing filesystem supports them.
+//! copies its changed upper layer. Saved layers are immutable and shared by branches.
 use crate::sys;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -26,9 +26,18 @@ pub struct SubvolInfo {
 #[derive(Clone, Serialize, Deserialize)]
 struct Entry {
     info: SubvolInfo,
+    // Older binaries require `lower`; omit it so they reject this registry
+    // instead of ignoring delta layers or remounting an ordinary cache.
+    #[serde(rename = "base", alias = "lower")]
     lower: String,
     #[serde(default)]
     hard_links: bool,
+    #[serde(default)]
+    bases: Vec<String>,
+    #[serde(default)]
+    plain: bool,
+    #[serde(default)]
+    restore_cache: bool,
 }
 #[derive(Default, Serialize, Deserialize)]
 struct Registry {
@@ -97,8 +106,19 @@ impl Locked {
         Ok(id)
     }
     fn mount(&self, path: &Path, e: &Entry) -> Result<()> {
+        if e.plain {
+            return Ok(());
+        }
         let data = self.object(&e.lower).join("data");
-        if e.info.readonly {
+        let lowers = std::iter::once(&e.lower)
+            .chain(e.bases.iter())
+            .map(|id| self.object(id).join("data").display().to_string())
+            .collect::<Vec<_>>()
+            .join(":");
+        if e.info.readonly && !e.bases.is_empty() {
+            let opts = format!("lowerdir={lowers},redirect_dir=nofollow,index=off");
+            sys::overlay_mount(None, path, Some(c"overlay"), libc::MS_RDONLY, Some(&opts))?;
+        } else if e.info.readonly {
             sys::overlay_mount(Some(&data), path, None, libc::MS_BIND, None)?;
             if let Err(err) = sys::overlay_mount(None, path, None, libc::MS_BIND | libc::MS_REMOUNT | libc::MS_RDONLY, None) {
                 let _ = sys::overlay_unmount(path);
@@ -127,7 +147,7 @@ impl Locked {
             }
             let opts = format!(
                 "lowerdir={},upperdir={},workdir={},index=on,redirect_dir=on,metacopy=off",
-                data.display(),
+                lowers,
                 upper.display(),
                 work.display()
             );
@@ -137,7 +157,13 @@ impl Locked {
         Ok(())
     }
     fn collect(&self) -> Result<()> {
-        let used: HashSet<_> = self.registry.trees.values().flat_map(|e| [&e.lower, &e.info.uuid]).collect();
+        let used: HashSet<_> = self
+            .registry
+            .trees
+            .values()
+            .filter(|e| !e.plain || e.restore_cache)
+            .flat_map(|e| std::iter::once(&e.lower).chain(std::iter::once(&e.info.uuid)).chain(e.bases.iter()))
+            .collect();
         for e in fs::read_dir(self.home.join("objects"))? {
             let e = e?;
             let name = e.file_name().to_string_lossy().into_owned();
@@ -191,7 +217,7 @@ pub fn recover(root: &Path) -> Result<()> {
         valid_path(&to)?;
         if mounted(&from)? {
             sys::overlay_mount(Some(&from), &to, None, libc::MS_MOVE, None)?;
-        } else if !state.registry.trees.contains_key(&from) && from.exists() {
+        } else if !state.registry.trees.get(&from).is_some_and(|e| !e.plain) && from.exists() {
             if to.exists() {
                 bail!("both paths exist during OverlayFS rename recovery");
             }
@@ -209,23 +235,96 @@ pub fn recover(root: &Path) -> Result<()> {
             fs::remove_dir(&from)?;
         }
     }
-    for (path, e) in &state.registry.trees {
+    for (path, e) in state.registry.trees.clone().iter() {
         if !path.starts_with(&root) {
             bail!("OverlayFS mount outside its store");
         }
         valid_path(path)?;
+        if e.restore_cache {
+            finish_cache_restore(&mut state, path, e)?;
+        }
+        if e.plain {
+            continue;
+        }
         if !mounted(path)? {
             fs::create_dir_all(path)?;
             state.mount(path, e)?;
         }
     }
+    // Upgrade old nested cache mounts after their parent mounts exist.
+    let caches: Vec<_> = state
+        .registry
+        .trees
+        .iter()
+        .filter(|(p, e)| {
+            !e.info.readonly
+                && !e.plain
+                && state
+                    .registry
+                    .trees
+                    .iter()
+                    .any(|(parent, pe)| *p != parent && p.starts_with(parent) && !pe.info.readonly && !pe.plain)
+        })
+        .map(|(p, e)| (p.clone(), e.clone()))
+        .collect();
+    for (path, mut e) in caches {
+        let id = state.new_object()?;
+        // Freeze the old cache before its durable migration record. Open
+        // writers make this fail rather than lose writes after the copy.
+        sys::overlay_mount(None, &path, None, libc::MS_REMOUNT | libc::MS_RDONLY, None)
+            .context("close writers in the cache before its migration")?;
+        let copied = (|| -> Result<()> {
+            copy_stable(&path, &state.object(&id).join("data"), &HashSet::new())?;
+            sync_tree(&state.object(&id).join("data"))
+        })();
+        if let Err(error) = copied {
+            sys::overlay_mount(None, &path, None, libc::MS_REMOUNT, None)?;
+            return Err(error);
+        }
+        e.lower = id;
+        e.bases.clear();
+        e.plain = true;
+        e.restore_cache = true;
+        state.registry.trees.insert(path.clone(), e.clone());
+        state.save()?;
+        finish_cache_restore(&mut state, &path, &e)?;
+    }
     Ok(())
+}
+fn finish_cache_restore(state: &mut Locked, path: &Path, entry: &Entry) -> Result<()> {
+    if mounted(path)? {
+        sys::overlay_unmount(path).context("close files in the cache before its migration")?;
+    }
+    let parent = pinned_directory(path.parent().context("cache parent")?)?;
+    let name = path.file_name().context("cache name")?;
+    let anchored = PathBuf::from(format!("/proc/self/fd/{}", parent.as_raw_fd()));
+    if sys::overlay_attribute(&anchored.join(name), c"trusted.layr.cache-restore", None).ok().as_deref()
+        != Some(entry.lower.as_bytes())
+    {
+        let temp_name = format!(".layr-cache-restore-{}", entry.lower);
+        let temp = anchored.join(&temp_name);
+        if fs::symlink_metadata(&temp).is_ok() {
+            fs::remove_dir_all(&temp)?;
+        }
+        copy_cache_at(
+            &state.object(&entry.lower).join("data"),
+            &parent,
+            std::ffi::OsStr::new(&temp_name),
+            Some(entry.lower.as_bytes()),
+        )?;
+        // Replaces only an empty mountpoint. Never replace existing user data.
+        rustix::fs::renameat(&parent, &temp_name, &parent, name)?;
+        parent.sync_all()?;
+    }
+    state.registry.trees.get_mut(path).context("cache registry entry")?.restore_cache = false;
+    state.save()?;
+    state.collect()
 }
 pub fn is_supported(path: &Path) -> bool {
     rustix::process::geteuid().is_root() && lock(path).is_ok()
 }
 pub fn is_subvolume(path: &Path) -> bool {
-    subvol_info(path).is_ok()
+    path.is_dir() && subvol_info(path).is_ok()
 }
 pub fn subvol_info(path: &Path) -> Result<SubvolInfo> {
     let path = absolute(path)?;
@@ -245,6 +344,9 @@ pub fn create_subvolume(path: &Path) -> Result<()> {
         info: SubvolInfo { uuid: id.clone(), received_uuid: None, parent_uuid: None, readonly: false },
         lower: id,
         hard_links: false,
+        bases: Vec::new(),
+        restore_cache: false,
+        plain: state.registry.trees.iter().any(|(p, e)| path.starts_with(p) && !e.info.readonly && !e.plain),
     };
     fs::create_dir(&path)?;
     state.registry.trees.insert(path.clone(), entry.clone());
@@ -279,7 +381,7 @@ fn scan(path: &Path, nested: &HashSet<PathBuf>) -> Result<BTreeMap<PathBuf, Fing
     Ok(out)
 }
 fn copy_tree(src: &Path, dst: &Path, nested: &HashSet<PathBuf>, links: &mut HashMap<(u64, u64), PathBuf>) -> Result<()> {
-    copy_tree_at(src, src, dst, nested, links)
+    copy_tree_at(src, src, dst, nested, links, false)
 }
 fn copy_tree_at(
     src: &Path,
@@ -287,6 +389,7 @@ fn copy_tree_at(
     dst: &Path,
     nested: &HashSet<PathBuf>,
     links: &mut HashMap<(u64, u64), PathBuf>,
+    root_exists: bool,
 ) -> Result<()> {
     let m = fs::symlink_metadata(src)?;
     if m.is_dir() {
@@ -296,11 +399,13 @@ fn copy_tree_at(
             bail!("source directory changed during snapshot");
         }
         let anchored = PathBuf::from(format!("/proc/self/fd/{}", dir.as_raw_fd()));
-        fs::create_dir(dst)?;
+        if !root_exists {
+            fs::create_dir(dst)?;
+        }
         if !nested.contains(logical) {
             for e in fs::read_dir(&anchored)? {
                 let name = e?.file_name();
-                copy_tree_at(&anchored.join(&name), &logical.join(&name), &dst.join(&name), nested, links)?;
+                copy_tree_at(&anchored.join(&name), &logical.join(&name), &dst.join(&name), nested, links, false)?;
             }
         }
     } else if m.file_type().is_symlink() {
@@ -343,6 +448,50 @@ fn copy_tree_at(
     sys::overlay_mtime(dst, m.mtime(), m.mtime_nsec())?;
     Ok(())
 }
+// Cache destinations are inside a user's tree. Pin the parent and new root,
+// and keep the root private until all children have been copied. A rename or
+// symlink replacement cannot redirect privileged writes outside this directory.
+fn pinned_directory(path: &Path) -> Result<File> {
+    use rustix::fs::{open, openat, Mode, OFlags};
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut dir = open("/", flags, Mode::empty())?;
+    for component in absolute(path)?.components() {
+        if let std::path::Component::Normal(name) = component {
+            dir = openat(&dir, name, flags, Mode::empty())?;
+        }
+    }
+    Ok(File::from(dir))
+}
+fn copy_cache(src: &Path, dst: &Path) -> Result<()> {
+    let parent = pinned_directory(dst.parent().context("cache parent")?)?;
+    copy_cache_at(src, &parent, dst.file_name().context("cache name")?, None)
+}
+fn copy_cache_at(src: &Path, parent: &File, name: &std::ffi::OsStr, marker: Option<&[u8]>) -> Result<()> {
+    use rustix::fs::{mkdirat, openat, Mode, OFlags};
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    mkdirat(parent, name, Mode::from_raw_mode(0o700))?;
+    let root = File::from(openat(parent, name, flags, Mode::empty())?);
+    let m = root.metadata()?;
+    if m.uid() != 0 || m.mode() & 0o777 != 0o700 {
+        bail!("cache destination changed during restore");
+    }
+    let anchored = PathBuf::from(format!("/proc/self/fd/{}/.", root.as_raw_fd()));
+    let before = scan(src, &HashSet::new())?;
+    copy_tree_at(src, src, &anchored, &HashSet::new(), &mut HashMap::new(), true)?;
+    if before != scan(src, &HashSet::new())? {
+        bail!("cache source changed during restore");
+    }
+    if let Some(value) = marker {
+        sys::overlay_attribute(&anchored, c"trusted.layr.cache-restore", Some(value))?;
+    }
+    sync_tree(&anchored)?;
+    let named = rustix::fs::statat(parent, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)?;
+    if (named.st_dev as u64, named.st_ino as u64) != (m.dev(), m.ino()) {
+        bail!("cache destination moved during restore");
+    }
+    Ok(())
+}
+
 // OverlayFS can update directory metadata on the first access. Retry a full
 // copy, but publish only a copy whose before and after scans agree.
 fn copy_stable(src: &Path, dst: &Path, nested: &HashSet<PathBuf>) -> Result<()> {
@@ -362,6 +511,143 @@ fn sync_tree(path: &Path) -> Result<()> {
     rustix::fs::syncfs(File::open(path)?)?;
     Ok(())
 }
+// The live mount and its open file descriptors stay unchanged. Copy only its
+// upper layer, then mount that immutable copy above the same immutable bases.
+// Compact long chains and hard-linked trees into one portable tree.
+fn snapshot_layers(state: &Locked, src: &Path, parent: &Entry, id: &str) -> Result<(String, Vec<String>, bool)> {
+    let nested: HashSet<_> = state.registry.trees.keys().filter(|p| **p != src && p.starts_with(src)).cloned().collect();
+    let data = state.object(id).join("data");
+    if parent.plain {
+        // A build can replace a cache directory. Never follow its replacement
+        // symlink with the service's credentials.
+        let pinned = pinned_directory(src)?;
+        let anchored = PathBuf::from(format!("/proc/self/fd/{}/.", pinned.as_raw_fd()));
+        let excluded = nested.iter().map(|p| anchored.join(p.strip_prefix(src).unwrap())).collect();
+        copy_stable(&anchored, &data, &excluded)?;
+        sync_tree(&data)?;
+        return Ok((id.into(), Vec::new(), tree_has_links(&data)?));
+    }
+    let hard_links = tree_has_links_excluding(src, &nested)?;
+    let bases: Vec<_> = std::iter::once(parent.lower.clone()).chain(parent.bases.iter().cloned()).collect();
+    let option_bytes: usize = bases.iter().map(|id| state.object(id).as_os_str().len() + 6).sum();
+    if hard_links || bases.len() >= 16 || option_bytes > 2800 {
+        copy_stable(src, &data, &nested)?;
+        sync_tree(&data)?;
+        return Ok((id.into(), Vec::new(), hard_links));
+    }
+    let upper = state.object(&parent.info.uuid).join("upper");
+    for _ in 0..3 {
+        let excluded: HashSet<_> = nested.iter().map(|p| upper.join(p.strip_prefix(src).unwrap())).collect();
+        let upper_scan = || -> Result<_> {
+            let mut found = scan(&upper, &excluded)?;
+            for p in &excluded {
+                found.remove(p.strip_prefix(&upper)?);
+            }
+            Ok(found)
+        };
+        let before = upper_scan()?;
+        copy_delta(&upper, src, &data, &nested, &mut HashMap::new())?;
+        // A cache may exist only in a lower layer. Mask it in this snapshot.
+        for cache in &nested {
+            let rel = cache.strip_prefix(src)?;
+            let target = data.join(rel);
+            // Validate every parent before writing below a copied directory.
+            let mut p = data.clone();
+            for component in rel.components() {
+                p.push(component);
+                match fs::symlink_metadata(&p) {
+                    Ok(m) if m.is_dir() => {}
+                    Ok(_) => bail!("cache path crosses a non-directory"),
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => fs::create_dir(&p)?,
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            sys::overlay_attribute(&target, c"trusted.overlay.opaque", Some(b"y"))?;
+        }
+        if before == upper_scan()? {
+            sync_tree(&data)?;
+            return Ok((id.into(), bases, false));
+        }
+        fs::remove_dir_all(&data)?;
+    }
+    bail!("source changed during OverlayFS snapshot; retry when writers are idle")
+}
+fn tree_has_links_excluding(path: &Path, nested: &HashSet<PathBuf>) -> Result<bool> {
+    if nested.contains(path) {
+        return Ok(false);
+    }
+    let m = fs::symlink_metadata(path)?;
+    if m.is_file() {
+        return Ok(m.nlink() > 1);
+    }
+    if m.is_dir() {
+        for e in fs::read_dir(path)? {
+            if tree_has_links_excluding(&e?.path(), nested)? {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+fn copy_delta(
+    src: &Path,
+    visible: &Path,
+    dst: &Path,
+    nested: &HashSet<PathBuf>,
+    links: &mut HashMap<(u64, u64), PathBuf>,
+) -> Result<()> {
+    use std::os::unix::fs::FileTypeExt;
+    let m = fs::symlink_metadata(src)?;
+    let attrs = sys::overlay_xattrs(src)?;
+    if nested.contains(visible) {
+        fs::create_dir(dst)?;
+        sys::overlay_attribute(dst, c"trusted.overlay.opaque", Some(b"y"))?;
+        return Ok(());
+    }
+    if attrs.iter().any(|(name, _)| name == b"trusted.overlay.redirect") {
+        // Redirects refer to the old lower namespace. Materialize only this
+        // moved directory, with an opaque marker to hide its previous target.
+        copy_stable(visible, dst, nested)?;
+        sys::overlay_attribute(dst, c"trusted.overlay.opaque", Some(b"y"))?;
+        return Ok(());
+    }
+    if m.is_dir() {
+        let dir = fs::OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(src)?;
+        let actual = dir.metadata()?;
+        if (actual.dev(), actual.ino()) != (m.dev(), m.ino()) {
+            bail!("source directory changed during snapshot");
+        }
+        let anchored = PathBuf::from(format!("/proc/self/fd/{}", dir.as_raw_fd()));
+        fs::create_dir(dst)?;
+        for e in fs::read_dir(&anchored)? {
+            let name = e?.file_name();
+            copy_delta(&anchored.join(&name), &visible.join(&name), &dst.join(&name), nested, links)?;
+        }
+    } else if m.file_type().is_char_device() && m.rdev() == 0 {
+        rustix::fs::mknodat(rustix::fs::CWD, dst, rustix::fs::FileType::CharacterDevice, rustix::fs::Mode::empty(), 0)?;
+    } else {
+        copy_tree(src, dst, &HashSet::new(), links)?;
+    }
+    rustix::fs::chownat(
+        rustix::fs::CWD,
+        dst,
+        Some(rustix::fs::Uid::from_raw(m.uid())),
+        Some(rustix::fs::Gid::from_raw(m.gid())),
+        rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+    )?;
+    if !m.file_type().is_symlink() {
+        fs::set_permissions(dst, fs::Permissions::from_mode(m.mode() & 0o7777))?;
+    }
+    for (name, value) in attrs {
+        if name.starts_with(b"trusted.overlay.") && name != b"trusted.overlay.opaque" {
+            continue;
+        }
+        sys::overlay_attribute(dst, &std::ffi::CString::new(name)?, Some(&value))?;
+    }
+    sys::overlay_mtime(dst, m.mtime(), m.mtime_nsec())?;
+    Ok(())
+}
+
 pub fn snapshot(src: &Path, dst: &Path, readonly: bool) -> Result<()> {
     let src = absolute(src)?;
     let dst = absolute(dst)?;
@@ -375,25 +661,39 @@ pub fn snapshot(src: &Path, dst: &Path, readonly: bool) -> Result<()> {
     }
     let parent = state.registry.trees.get(&src).context("snapshot source is unmanaged")?.clone();
     let id = state.new_object()?;
-    let lower = if parent.info.readonly {
-        parent.lower.clone()
+    let (lower, bases, hard_links) = if parent.info.readonly {
+        (parent.lower.clone(), parent.bases.clone(), parent.hard_links)
     } else {
-        let nested = state.registry.trees.keys().filter(|p| **p != src && p.starts_with(&src)).cloned().collect();
-        if let Err(error) = copy_stable(&src, &state.object(&id).join("data"), &nested) {
-            state.collect()?;
-            return Err(error);
+        match snapshot_layers(&state, &src, &parent, &id) {
+            Ok(value) => value,
+            Err(error) => {
+                state.collect()?;
+                return Err(error);
+            }
         }
-        sync_tree(&state.object(&id).join("data"))?;
-        id.clone()
     };
-    let hard_links = if parent.info.readonly { parent.hard_links } else { tree_has_links(&state.object(&lower).join("data"))? };
+    let plain = !readonly && state.registry.trees.iter().any(|(p, e)| dst.starts_with(p) && !e.info.readonly && !e.plain);
     let entry = Entry {
         info: SubvolInfo { uuid: id, received_uuid: None, parent_uuid: Some(parent.info.uuid), readonly },
         lower,
         hard_links,
+        bases,
+        plain,
+        restore_cache: false,
     };
+    if plain {
+        // A cache is an ordinary directory. Its saved copy remains private.
+        if parent.plain {
+            copy_cache(&state.object(&entry.lower).join("data"), &dst)?;
+        } else {
+            copy_cache(&src, &dst)?;
+        }
+        sync_tree(&dst)?;
+    }
     File::open(state.object(&entry.lower))?.sync_all()?;
-    fs::create_dir(&dst)?;
+    if !plain {
+        fs::create_dir(&dst)?;
+    }
     state.registry.trees.insert(dst.clone(), entry.clone());
     state.save()?;
     if let Err(e) = state.mount(&dst, &entry) {
@@ -420,17 +720,21 @@ pub fn set_readonly(path: &Path) -> Result<()> {
     if e.info.readonly {
         return Ok(());
     }
-    let id = state.new_object()?;
-    let nested = state.registry.trees.keys().filter(|p| **p != path && p.starts_with(&path)).cloned().collect();
-    if let Err(error) = copy_stable(&path, &state.object(&id).join("data"), &nested) {
-        state.collect()?;
-        return Err(error);
+    if e.plain {
+        bail!("cannot seal a working cache in place; snapshot it instead");
     }
-    sync_tree(&state.object(&id).join("data"))?;
+    let id = state.new_object()?;
+    let (lower, bases, hard_links) = match snapshot_layers(&state, &path, &e, &id) {
+        Ok(value) => value,
+        Err(error) => {
+            state.collect()?;
+            return Err(error);
+        }
+    };
     sys::overlay_unmount(&path).with_context(|| format!("unmount {}", path.display()))?;
-    File::open(state.object(&id))?.sync_all()?;
-    e.hard_links = tree_has_links(&state.object(&id).join("data"))?;
-    e.lower = id;
+    e.hard_links = hard_links;
+    e.lower = lower;
+    e.bases = bases;
     e.info.readonly = true;
     state.registry.trees.insert(path.clone(), e.clone());
     state.save()?;
@@ -473,7 +777,7 @@ pub fn rename_tree(from: &Path, to: &Path) -> Result<()> {
     if lock_home(&to)? != state.home {
         bail!("rename must stay in one store");
     }
-    let managed_root = state.registry.trees.contains_key(&from);
+    let managed_root = state.registry.trees.get(&from).is_some_and(|e| !e.plain);
     if !state.registry.trees.keys().any(|p| p.starts_with(&from)) {
         return Ok(fs::rename(from, to)?);
     }
@@ -511,9 +815,6 @@ pub fn rename_tree(from: &Path, to: &Path) -> Result<()> {
 }
 pub fn delete_tree(path: &Path) -> Result<()> {
     let path = absolute(path)?;
-    if fs::symlink_metadata(&path).is_err() {
-        return Ok(());
-    }
     let mut state = lock(&path)?;
     valid_path(&path)?;
     let mut paths: Vec<_> = state.registry.trees.keys().filter(|p| p.starts_with(&path)).cloned().collect();
@@ -525,11 +826,11 @@ pub fn delete_tree(path: &Path) -> Result<()> {
         state.registry.trees.remove(&p);
         state.save()?;
     }
-    let m = fs::symlink_metadata(&path)?;
-    if m.is_dir() {
-        fs::remove_dir_all(&path)?;
-    } else {
-        fs::remove_file(&path)?;
+    match fs::symlink_metadata(&path) {
+        Ok(m) if m.is_dir() => fs::remove_dir_all(&path)?,
+        Ok(_) => fs::remove_file(&path)?,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
     }
     state.collect()
 }
@@ -721,6 +1022,162 @@ fn changed_ranges(a: &Path, b: &Path) -> Result<Vec<(u64, u64)>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "requires root and an OverlayFS test filesystem"]
+    fn cache_copy_stays_in_its_pinned_parent() -> Result<()> {
+        let root = PathBuf::from(std::env::var("LAYR_OVERLAYFS_TEST_ROOT")?).join(format!("cache-copy-{}", crate::ids::new_id()));
+        fs::create_dir(&root)?;
+        let src = root.join("source");
+        fs::create_dir(&src)?;
+        fs::write(src.join("file"), b"cache")?;
+        fs::hard_link(src.join("file"), src.join("hard"))?;
+        let parent = root.join("parent");
+        let moved = root.join("moved");
+        let outside = root.join("outside");
+        fs::create_dir(&parent)?;
+        fs::create_dir(&outside)?;
+        let fd = pinned_directory(&parent)?;
+        fs::rename(&parent, &moved)?;
+        std::os::unix::fs::symlink(&outside, &parent)?;
+        copy_cache_at(&src, &fd, std::ffi::OsStr::new("cache"), None)?;
+        assert_eq!(fs::read(moved.join("cache/file"))?, b"cache");
+        assert_eq!(fs::metadata(moved.join("cache/file"))?.ino(), fs::metadata(moved.join("cache/hard"))?.ino());
+        assert!(copy_cache(&src, &parent.join("escape")).is_err());
+        assert_eq!(fs::read_dir(&outside)?.count(), 0);
+        drop(fd);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+    #[test]
+    fn legacy_entries_read_but_new_entries_require_the_new_reader() -> Result<()> {
+        let old = serde_json::json!({
+            "info": {"uuid":"id", "received_uuid":null,"parent_uuid":null,"readonly":false},
+            "lower":"base", "hard_links":false
+        });
+        let entry: Entry = serde_json::from_value(old)?;
+        assert_eq!(entry.lower, "base");
+        assert!(entry.bases.is_empty());
+        assert!(!entry.plain);
+        let new = serde_json::to_value(entry)?;
+        assert!(new.get("lower").is_none());
+        assert_eq!(new["base"], "base");
+        Ok(())
+    }
+    #[test]
+    #[ignore = "requires root and a local filesystem with OverlayFS index support"]
+    fn delta_snapshots_keep_open_handles_and_bound_layers() -> Result<()> {
+        use std::io::Write;
+        let root = PathBuf::from(std::env::var("LAYR_OVERLAYFS_TEST_ROOT")?).join(format!("delta-{}", crate::ids::new_id()));
+        recover(&root)?;
+        let initial = root.join("initial");
+        create_subvolume(&initial)?;
+        fs::create_dir(initial.join("dir"))?;
+        fs::write(initial.join("dir/remove"), b"remove")?;
+        fs::write(initial.join("dir/keep"), b"keep")?;
+        fs::write(initial.join("unchanged"), vec![7; 1024 * 1024])?;
+        fs::write(initial.join("edit"), b"before")?;
+        set_readonly(&initial)?;
+        let work = root.join("work");
+        snapshot(&initial, &work, false)?;
+        let cache = work.join("cache");
+        create_subvolume(&cache)?;
+        fs::write(cache.join("output"), b"private")?;
+        fs::remove_dir_all(&cache)?;
+        fs::create_dir(&cache)?;
+        fs::write(cache.join("output"), b"rebuilt")?;
+        assert!(!mounted(&cache)?);
+        // A cache replaced by a symlink must never expose its target as history.
+        let outside = root.join("outside");
+        fs::create_dir(&outside)?;
+        fs::write(outside.join("secret"), b"private")?;
+        fs::remove_dir_all(&cache)?;
+        std::os::unix::fs::symlink(&outside, &cache)?;
+        assert!(snapshot(&cache, &root.join("escape"), true).is_err());
+        assert!(!root.join("escape").exists());
+        fs::remove_file(&cache)?;
+        fs::create_dir(&cache)?;
+        fs::write(cache.join("output"), b"rebuilt")?;
+        let mut writer = fs::OpenOptions::new().write(true).truncate(true).open(work.join("edit"))?;
+        writer.write_all(b"saved")?;
+        fs::remove_file(work.join("dir/remove"))?;
+        fs::rename(work.join("dir"), work.join("moved"))?;
+        let saved = root.join("saved");
+        snapshot(&work, &saved, true)?;
+        assert_eq!(fs::read(saved.join("edit"))?, b"saved");
+        assert!(!saved.join("dir").exists());
+        assert!(!saved.join("moved/remove").exists());
+        assert_eq!(fs::read(saved.join("moved/keep"))?, b"keep");
+        assert!(!saved.join("cache/output").exists());
+        {
+            let s = lock(&saved)?;
+            let e = &s.registry.trees[&saved];
+            assert!(!e.bases.is_empty());
+            assert!(!s.object(&e.lower).join("data/unchanged").exists());
+        }
+        writer.write_all(b" later")?;
+        assert_eq!(fs::read(work.join("edit"))?, b"saved later");
+        assert_eq!(fs::read(saved.join("edit"))?, b"saved");
+        drop(writer);
+        // Each branch adds a layer. The backend must compact before its limit.
+        let mut previous = saved;
+        for n in 0..20 {
+            let branch = root.join(format!("branch-{n}"));
+            snapshot(&previous, &branch, false)?;
+            fs::write(branch.join("edit"), format!("version {n}"))?;
+            let next = root.join(format!("state-{n}"));
+            snapshot(&branch, &next, true)?;
+            delete_tree(&branch)?;
+            delete_tree(&previous)?;
+            assert_eq!(fs::read(next.join("edit"))?, format!("version {n}").as_bytes());
+            assert_eq!(fs::read(next.join("unchanged"))?.len(), 1024 * 1024);
+            assert!(!next.join("dir/remove").exists());
+            assert!(lock(&next)?.registry.trees[&next].bases.len() < 16);
+            previous = next;
+        }
+        delete_tree(&work)?;
+        delete_tree(&initial)?;
+        delete_tree(&previous)?;
+        Ok(())
+    }
+    #[test]
+    #[ignore = "requires root and a local filesystem with OverlayFS index support"]
+    fn old_cache_mount_migrates_without_losing_data() -> Result<()> {
+        let root = PathBuf::from(std::env::var("LAYR_OVERLAYFS_TEST_ROOT")?).join(format!("migration-{}", crate::ids::new_id()));
+        recover(&root)?;
+        let work = root.join("work");
+        create_subvolume(&work)?;
+        let cache = work.join("cache");
+        create_subvolume(&cache)?;
+        // Reproduce the previous registry format and mounted cache.
+        {
+            let mut state = lock(&cache)?;
+            let mut e = state.registry.trees[&cache].clone();
+            e.plain = false;
+            state.mount(&cache, &e)?;
+            state.registry.trees.insert(cache.clone(), e);
+            state.save()?;
+        }
+        fs::write(cache.join("output"), b"old cache")?;
+        let open_dir = File::open(&cache)?;
+        assert!(recover(&root).is_err());
+        assert_eq!(fs::read(cache.join("output"))?, b"old cache");
+        drop(open_dir);
+        recover(&root)?;
+        assert!(!mounted(&cache)?);
+        assert_eq!(fs::read(cache.join("output"))?, b"old cache");
+        fs::write(cache.join("output"), b"new cache")?;
+        recover(&root)?;
+        assert_eq!(fs::read(cache.join("output"))?, b"new cache");
+        fs::remove_dir_all(&cache)?;
+        fs::create_dir(&cache)?;
+        fs::write(cache.join("rebuilt"), b"rebuilt")?;
+        let saved = root.join("saved");
+        snapshot(&work, &saved, true)?;
+        assert!(!saved.join("cache/rebuilt").exists());
+        delete_tree(&saved)?;
+        delete_tree(&work)?;
+        Ok(())
+    }
     #[test]
     #[ignore = "requires root and a local filesystem with OverlayFS index support"]
     fn snapshots_preserve_links_and_isolate_writes() -> Result<()> {
