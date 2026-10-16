@@ -79,4 +79,4 @@ Do not claim that every operation becomes faster, or compare these absolute time
 - The previous binary rejects the new registry instead of silently ignoring layers.
 
 The broad integration run precedes the final cache path guards. The final guards have unit, cache and service coverage.
-No remote CI run, push or merge was performed for this change.
+These verification results come from local tests, not remote CI.
