@@ -28,9 +28,9 @@ jobs:
           else
             mkfs.xfs -q -f "$RUNNER_TEMP/overlayfs.img"
           fi
-          mkdir "$RUNNER_TEMP/overlayfs"
-          sudo mount -o loop "$RUNNER_TEMP/overlayfs.img" "$RUNNER_TEMP/overlayfs"
-          sudo mount --make-private "$RUNNER_TEMP/overlayfs"
+          mkdir "/var/tmp/layr-overlayfs-ci"
+          sudo mount -o loop "$RUNNER_TEMP/overlayfs.img" "/var/tmp/layr-overlayfs-ci"
+          sudo mount --make-private "/var/tmp/layr-overlayfs-ci"
       - name: Build the OverlayFS binary and tests
         run: |
           cargo build --locked --features overlayfs
@@ -45,7 +45,7 @@ jobs:
           PY
       - name: Test snapshots, service, permissions and transfer
         run: |
-          export LAYR_OVERLAYFS_TEST_ROOT="$RUNNER_TEMP/overlayfs"
+          export LAYR_OVERLAYFS_TEST_ROOT="/var/tmp/layr-overlayfs-ci"
           export LAYR="$RUNNER_TEMP/layr-overlayfs"
           sudo env LAYR_OVERLAYFS_TEST_ROOT="$LAYR_OVERLAYFS_TEST_ROOT" "$UNIT_TESTS" --include-ignored
           sudo env LAYR_OVERLAYFS_TEST_ROOT="$LAYR_OVERLAYFS_TEST_ROOT" LAYR="$LAYR" bash tests/overlayfs-local.sh
@@ -54,9 +54,9 @@ jobs:
       - name: Exchange backups with btrfs
         run: |
           cargo build --locked
-          sudo env LAYR_OVERLAYFS_TEST_ROOT="$RUNNER_TEMP/overlayfs" LAYR="$RUNNER_TEMP/layr-overlayfs" bash tests/cross-backup.sh create "$RUNNER_TEMP/overlay-backup"
+          sudo env LAYR_OVERLAYFS_TEST_ROOT="/var/tmp/layr-overlayfs-ci" LAYR="$RUNNER_TEMP/layr-overlayfs" bash tests/cross-backup.sh create "$RUNNER_TEMP/overlay-backup"
           sudo env LAYR="$PWD/target/debug/layr" bash tests/cross-backup.sh extend "$RUNNER_TEMP/overlay-backup" "$RUNNER_TEMP/btrfs-backup"
-          sudo env LAYR_OVERLAYFS_TEST_ROOT="$RUNNER_TEMP/overlayfs" LAYR="$RUNNER_TEMP/layr-overlayfs" bash tests/cross-backup.sh check "$RUNNER_TEMP/btrfs-backup"
+          sudo env LAYR_OVERLAYFS_TEST_ROOT="/var/tmp/layr-overlayfs-ci" LAYR="$RUNNER_TEMP/layr-overlayfs" bash tests/cross-backup.sh check "$RUNNER_TEMP/btrfs-backup"
       - name: Unmount the test filesystem
         if: always()
-        run: sudo umount -R "$RUNNER_TEMP/overlayfs" || true
+        run: sudo umount -R "/var/tmp/layr-overlayfs-ci" || true

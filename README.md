@@ -63,6 +63,10 @@ See the [full report and raw samples](benchmarks/overlayfs-delta-20261016/README
 
 ### Disk use compared with Git worktrees
 
+**16 branches with private caches. About 94% less disk space.**
+Layr on btrfs: **153 MiB**. Git worktrees on btrfs with full cache copies: **2508 MiB**.
+These totals include the main workspace. The measured fixture uses 128 MiB of cache data per workspace.
+
 Two runs use the same synthetic project: 2,048 source files, one main workspace, and 16 branches with one edit and commit each.
 The cache case adds 128 MiB of private mutable data per workspace. Totals include history and additional filesystem metadata.
 
