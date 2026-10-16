@@ -69,7 +69,8 @@ It preserves state identifiers and signed records. It does not send compressed e
 
 ## Limits
 
-See the [release measurements](../benchmarks/overlayfs-20261016/README.md) for 1,000 and 10,000 files.
+See the [delta snapshot measurements](../benchmarks/overlayfs-delta-20261016/README.md) for 10,000 files.
+The [first backend measurements](../benchmarks/overlayfs-20261016/README.md) describe the previous full-tree implementation.
 
 - Each line and state requires a mount. Working caches do not.
 - Snapshots still scan file metadata. A large upper layer increases the copy cost.
