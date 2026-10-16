@@ -11,7 +11,19 @@ Build the Linux binary with the backend feature:
 cargo build --release --locked --features overlayfs
 ```
 
-Start the service with a new store on ext4 or XFS:
+The store must be below a private mount. A shared parent mount prevents Linux from moving received trees into place.
+The backend rejects that setup before it changes the store. Prepare a private bind mount for the store:
+
+```sh
+sudo mkdir -p /var/lib/layr-overlayfs
+sudo mount --bind /var/lib/layr-overlayfs /var/lib/layr-overlayfs
+sudo mount --make-private /var/lib/layr-overlayfs
+```
+
+Repeat this mount setup after a reboot, before the service starts.
+This changes only the store mount. It does not change mount propagation for the whole host.
+
+Start the service with the store on ext4 or XFS:
 
 ```sh
 sudo env LAYR_ROOT=/var/lib/layr-overlayfs ./target/release/layr daemon

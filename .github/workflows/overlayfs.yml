@@ -30,6 +30,7 @@ jobs:
           fi
           mkdir "$RUNNER_TEMP/overlayfs"
           sudo mount -o loop "$RUNNER_TEMP/overlayfs.img" "$RUNNER_TEMP/overlayfs"
+          sudo mount --make-private "$RUNNER_TEMP/overlayfs"
       - name: Build the OverlayFS binary and tests
         run: |
           cargo build --locked --features overlayfs

@@ -2,7 +2,7 @@
 //! Writable branches share an immutable lower tree. A snapshot of a writable tree
 //! copies its changed upper layer. Saved layers are immutable and shared by branches.
 use crate::sys;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -192,12 +192,35 @@ fn valid_path(path: &Path) -> Result<()> {
     }
     Ok(())
 }
+fn shared_parent(path: &Path, mounts: &str) -> bool {
+    mounts
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            let mount = Path::new(*fields.get(4)?);
+            if !path.starts_with(mount) {
+                return None;
+            }
+            let shared = fields.iter().skip(6).take_while(|f| **f != "-").any(|f| f.starts_with("shared:"));
+            Some((mount.components().count(), shared))
+        })
+        .max_by_key(|(depth, _)| *depth)
+        .is_some_and(|(_, shared)| shared)
+}
 pub fn recover(root: &Path) -> Result<()> {
     if !rustix::process::geteuid().is_root() {
         bail!("OverlayFS requires the root service or a root command");
     }
     let root = absolute(root)?;
     valid_path(&root)?;
+    // MS_MOVE cannot publish a received tree below a shared parent mount.
+    // Refuse this setup before creating a store or changing its registry.
+    let mounts = fs::read_to_string("/proc/self/mountinfo")?;
+    if shared_parent(&root, &mounts) {
+        bail!(
+            "OverlayFS store requires a private mount; bind-mount the store onto itself and run mount --make-private on that mount"
+        );
+    }
     fs::create_dir_all(&root)?;
     let home = root.join(".layr-overlayfs");
     if !home.exists() && root.join("machine/key").exists() {
@@ -452,7 +475,7 @@ fn copy_tree_at(
 // and keep the root private until all children have been copied. A rename or
 // symlink replacement cannot redirect privileged writes outside this directory.
 fn pinned_directory(path: &Path) -> Result<File> {
-    use rustix::fs::{open, openat, Mode, OFlags};
+    use rustix::fs::{Mode, OFlags, open, openat};
     let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     let mut dir = open("/", flags, Mode::empty())?;
     for component in absolute(path)?.components() {
@@ -467,7 +490,7 @@ fn copy_cache(src: &Path, dst: &Path) -> Result<()> {
     copy_cache_at(src, &parent, dst.file_name().context("cache name")?, None)
 }
 fn copy_cache_at(src: &Path, parent: &File, name: &std::ffi::OsStr, marker: Option<&[u8]>) -> Result<()> {
-    use rustix::fs::{mkdirat, openat, Mode, OFlags};
+    use rustix::fs::{Mode, OFlags, mkdirat, openat};
     let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     mkdirat(parent, name, Mode::from_raw_mode(0o700))?;
     let root = File::from(openat(parent, name, flags, Mode::empty())?);
@@ -851,7 +874,7 @@ pub fn clone_file(src: &File, dst: &File) -> io::Result<()> {
         Err(e) => return Err(e.into()),
     }
     // ext4 has no reflinks. Preserve holes instead of allocating their zero bytes.
-    use rustix::fs::{seek, SeekFrom};
+    use rustix::fs::{SeekFrom, seek};
     use std::io::Read;
     let source = src.metadata()?;
     let dest = dst.metadata()?;
@@ -1022,6 +1045,33 @@ fn changed_ranges(a: &Path, b: &Path) -> Result<Vec<(u64, u64)>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "requires root and an isolated test filesystem"]
+    fn shared_store_is_rejected_before_registry_changes() -> Result<()> {
+        let root = PathBuf::from(std::env::var("LAYR_OVERLAYFS_TEST_ROOT")?).join(format!("shared-{}", crate::ids::new_id()));
+        fs::create_dir(&root)?;
+        sys::overlay_mount(Some(&root), &root, None, libc::MS_BIND, None)?;
+        let result = (|| -> Result<()> {
+            sys::overlay_mount(None, &root, None, libc::MS_SHARED, None)?;
+            let error = recover(&root).unwrap_err();
+            assert!(error.to_string().contains("private mount"));
+            assert!(!root.join(".layr-overlayfs").exists());
+            sys::overlay_mount(None, &root, None, libc::MS_PRIVATE, None)?;
+            recover(&root)?;
+            assert!(root.join(".layr-overlayfs/registry.json").is_file());
+            Ok(())
+        })();
+        sys::overlay_unmount(&root)?;
+        fs::remove_dir_all(&root)?;
+        result
+    }
+    #[test]
+    fn private_store_mount_overrides_shared_parent() {
+        let mounts = "1 0 0:1 / / rw shared:1 - ext4 /dev/root rw\n2 1 0:1 /store /store rw - ext4 /dev/root rw\n";
+        assert!(shared_parent(Path::new("/other/store"), mounts));
+        assert!(!shared_parent(Path::new("/store/project"), mounts));
+        assert!(shared_parent(Path::new("/store-other"), mounts));
+    }
     #[test]
     #[ignore = "requires root and an OverlayFS test filesystem"]
     fn cache_copy_stays_in_its_pinned_parent() -> Result<()> {
