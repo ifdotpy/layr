@@ -338,7 +338,7 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
                 // Save the current content, then restore the old pointers and content.
                 wb = repo.working_state(ctx, l, "before undo")?;
                 if b.name != l.name {
-                    std::fs::rename(repo.p.line_path(&l.name), repo.p.line_path(&b.name))?;
+                    crate::fsutil::rename_tree(repo.p.line_path(&l.name), repo.p.line_path(&b.name))?;
                 }
                 let mut l2 = l.clone();
                 l2.name = b.name.clone();

@@ -109,6 +109,13 @@ impl Tree {
 
     /// Remove an entry; a folder with its content (nested subvolumes are destroyed).
     pub fn remove(&self, rel: &str) -> Result<()> {
+        #[cfg(feature = "overlayfs")]
+        if crate::storage::contains_managed_tree(&self.path.join(rel)) {
+            if self.parent(rel).is_err() {
+                return Ok(());
+            }
+            return crate::storage::delete_tree(&self.path.join(rel));
+        }
         // A parent that is missing, a file or a link: nothing of that name is in the tree.
         let (d, n) = match self.parent(rel) {
             Ok(x) => x,
@@ -213,6 +220,12 @@ impl Tree {
     }
 
     pub fn rename(&self, from: &str, to: &str) -> Result<()> {
+        #[cfg(feature = "overlayfs")]
+        if crate::storage::contains_managed_tree(&self.path.join(from)) {
+            self.mkdirs_for(to, None)?;
+            let _ = (self.parent(from)?, self.parent(to)?);
+            return crate::storage::rename_tree(&self.path.join(from), &self.path.join(to));
+        }
         let (df, nf) = self.parent(from)?;
         self.mkdirs_for(to, None)?;
         let (dt, nt) = self.parent(to)?;
@@ -255,8 +268,14 @@ impl Tree {
     }
 
     pub fn create_subvolume(&self, rel: &str) -> Result<()> {
+        #[cfg(feature = "overlayfs")]
+        {
+            let _ = self.parent(rel)?;
+            return crate::storage::create_subvolume(&self.path.join(rel));
+        }
+        #[cfg(not(feature = "overlayfs"))]
         let (d, n) = self.parent(rel)?;
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
         {
             crate::sys::subvol_create(d.as_fd(), n)
         }
@@ -295,7 +314,7 @@ fn list_fd(dir: &OwnedFd) -> Result<Vec<String>> {
 }
 
 fn is_subvol_root(st: &rustix::fs::Stat, parent_dev: rustix::fs::Dev) -> bool {
-    cfg!(target_os = "linux") && st.st_ino == 256 && st.st_dev != parent_dev
+    cfg!(all(target_os = "linux", not(feature = "overlayfs"))) && st.st_ino == 256 && st.st_dev != parent_dev
 }
 
 /// Remove `name` in the folder `dir`, recursively, never following links.

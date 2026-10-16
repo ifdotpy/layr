@@ -473,7 +473,7 @@ impl<'a> Repo<'a> {
         // btrfs renames only a writable subvolume: the view is complete, so it is writable only
         // for the rename.
         btrfs::set_writable(&view.path)?;
-        match std::fs::rename(&view.path, path) {
+        match crate::fsutil::rename_tree(&view.path, path) {
             Ok(()) => btrfs::set_readonly(path),
             // Another request made the same base at the same time.
             Err(_) if path.exists() => Ok(()),

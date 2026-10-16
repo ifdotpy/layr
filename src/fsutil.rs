@@ -545,13 +545,21 @@ pub fn unlink_at(dir: &File, name: &str) {
 
 /// Whether a known directory is a nested storage root.
 pub fn is_layer(root: &Path, rel: &str, m: &Meta) -> bool {
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
     {
         let _ = (root, rel);
         m.is_dir() && m.ino == 256
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", feature = "overlayfs"))]
     {
         m.is_dir() && crate::storage::is_subvolume(&root.join(rel))
     }
+}
+
+/// Move a managed tree, including its mount when the backend requires it.
+pub fn rename_tree(from: impl AsRef<Path>, to: impl AsRef<Path>) -> Result<()> {
+    #[cfg(feature = "overlayfs")]
+    return crate::storage::rename_tree(from.as_ref(), to.as_ref());
+    #[cfg(not(feature = "overlayfs"))]
+    Ok(fs::rename(from, to)?)
 }

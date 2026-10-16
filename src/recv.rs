@@ -12,14 +12,14 @@
 //! After the receive, the new subvolume must be read-only, carry the expected received UUID and,
 //! for an incremental stream, be a snapshot of the expected local parent.
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 use crate::storage as btrfs;
 use anyhow::{anyhow, bail, Result};
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 use std::collections::BTreeSet;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 use std::process::{Command, Stdio};
 
 const MAGIC: &[u8] = b"btrfs-stream\0";
@@ -222,13 +222,13 @@ pub fn check(src: &mut dyn Read, out: &mut dyn Write, e: &Expect) -> Result<Opti
     Ok(parent_path)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 fn names(dir: &Path) -> Result<BTreeSet<String>> {
     Ok(std::fs::read_dir(dir)?.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect())
 }
 
 /// Receive one checked stream into `dir`. On any failure nothing new stays in `dir`.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 pub fn receive(src: &mut dyn Read, dir: &Path, e: &Expect) -> Result<()> {
     let before = names(dir)?;
     // `-e`: stop at the end command.
@@ -375,7 +375,7 @@ mod tests {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", feature = "overlayfs"))]
 pub fn receive(src: &mut dyn Read, dir: &Path, e: &Expect) -> Result<()> {
     crate::apfs_stream::receive(src, dir, e)
 }

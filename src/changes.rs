@@ -4,7 +4,7 @@
 //! ranges, so a content check reads only those ranges. Other entries are checked in full.
 
 use crate::fsutil::{self, Meta};
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 use crate::storage as btrfs;
 use crate::stream;
 use anyhow::Result;
@@ -33,7 +33,7 @@ impl Change {
 }
 
 /// Raw candidate list from the stream, without content checks.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 pub fn candidates(parent: &Path, child: &Path) -> Result<Vec<Change>> {
     let data = btrfs::send_no_data(parent, child)?;
     let cmds = stream::parse(&data)?;
@@ -155,7 +155,7 @@ pub fn really_changed(parent: &Path, child: &Path, c: &Change) -> Result<bool> {
     }
     // APFS already compared every byte while it built these ranges. Both trees
     // are read-only, so an empty result does not need another open and stat.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", feature = "overlayfs"))]
     if o.is_file() && o.size == n.size && c.ranges.as_ref().is_some_and(|ranges| ranges.is_empty()) {
         return Ok(false);
     }
@@ -304,7 +304,7 @@ fn split(d: &[u8]) -> Vec<&[u8]> {
     d.split_inclusive(|b| *b == b'\n').collect()
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", feature = "overlayfs"))]
 pub fn candidates(parent: &Path, child: &Path) -> Result<Vec<Change>> {
     crate::storage::candidates(parent, child)
 }

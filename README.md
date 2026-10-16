@@ -29,6 +29,12 @@ sudo tests/run.sh            # integration tests: each file gets a fresh btrfs o
 cargo test                   # unit tests
 ```
 
+## Experimental OverlayFS backend
+
+The Linux `overlayfs` feature adds a backend for a VM with ext4 or XFS and root mount permission.
+See [the setup, transfer rules and limits](docs/overlayfs.md).
+The default Linux build remains btrfs.
+
 ## Experimental APFS backend
 
 APFS uses whole-directory clones automatically. There is no mode flag.

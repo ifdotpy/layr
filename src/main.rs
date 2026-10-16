@@ -6,8 +6,12 @@
 #[macro_use]
 mod ctx;
 mod access;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", feature = "overlayfs"))]
 mod apfs_stream;
+#[cfg(any(target_os = "macos", feature = "overlayfs"))]
+mod stream_fs;
+#[cfg(all(feature = "overlayfs", not(target_os = "linux")))]
+compile_error!("the overlayfs feature requires Linux");
 mod args;
 mod changes;
 mod cmd;
@@ -28,8 +32,11 @@ mod revs;
 #[cfg(target_os = "linux")]
 mod send_cache;
 mod service;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 #[path = "btrfs.rs"]
+mod storage;
+#[cfg(feature = "overlayfs")]
+#[path = "overlayfs.rs"]
 mod storage;
 #[cfg(target_os = "macos")]
 #[path = "apfs.rs"]
@@ -45,7 +52,7 @@ use std::collections::HashMap;
 
 fn main() {
     let mut argv: Vec<String> = std::env::args().skip(1).collect();
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", feature = "overlayfs"))]
     if argv.first().map(String::as_str) == Some("__apfs-send") {
         let result = (|| -> anyhow::Result<()> {
             if argv.len() != 2 {

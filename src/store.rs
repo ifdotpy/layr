@@ -70,6 +70,12 @@ fn hostname() -> String {
 
 impl Store {
     pub fn open(root: &Path) -> Result<Store> {
+        #[cfg(not(feature = "overlayfs"))]
+        if root.join(".layr-overlayfs").exists() {
+            bail!("this store requires a layr build with the overlayfs feature");
+        }
+        #[cfg(feature = "overlayfs")]
+        crate::storage::recover(root)?;
         let mdir = root.join("machine");
         if !mdir.join("key").exists() {
             if !root.exists() {
@@ -244,10 +250,12 @@ impl<'a> Project<'a> {
             bail!("project '{name}' already exists");
         }
         if !crate::storage::is_supported(&store.projects_dir()) {
-            #[cfg(target_os = "linux")]
+            #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
             bail!("{} is not on btrfs", store.projects_dir().display());
             #[cfg(target_os = "macos")]
             bail!("{} is not on case-sensitive APFS", store.projects_dir().display());
+            #[cfg(feature = "overlayfs")]
+            bail!("OverlayFS requires a local store and mount permission");
         }
         mkdir_mode(&dir, 0o755)?;
         mkdir_mode(&dir.join("states"), 0o700)?;
@@ -277,10 +285,12 @@ impl<'a> Project<'a> {
             bail!("project '{name}' already exists");
         }
         if !crate::storage::is_supported(&store.projects_dir()) {
-            #[cfg(target_os = "linux")]
+            #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
             bail!("{} is not on btrfs", store.projects_dir().display());
             #[cfg(target_os = "macos")]
             bail!("{} is not on case-sensitive APFS", store.projects_dir().display());
+            #[cfg(feature = "overlayfs")]
+            bail!("OverlayFS requires a local store and mount permission");
         }
         mkdir_mode(&dir, 0o755)?;
         mkdir_mode(&dir.join("states"), 0o700)?;

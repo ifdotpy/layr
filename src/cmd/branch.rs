@@ -129,7 +129,7 @@ pub fn branch(ctx: &Ctx, args: &[String]) -> Result<i32> {
         if repo.p.db.line_by_name(&new)?.is_some() {
             return Err(exit(128, format!("fatal: a line named '{new}' already exists")));
         }
-        std::fs::rename(repo.p.line_path(&l.name), repo.p.line_path(&new))?;
+        crate::fsutil::rename_tree(repo.p.line_path(&l.name), repo.p.line_path(&new))?;
         let mut after = repo.line_state(&l, &l.head);
         after.name = new.clone();
         let mut rec = Record::new("line.rename");

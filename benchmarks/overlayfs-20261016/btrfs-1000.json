@@ -1,0 +1,481 @@
+{
+  "platform": "Linux-7.2.9-orbstack-00391-g2b298d05fbd4-aarch64-with-glibc2.36",
+  "files": 1000,
+  "binary_sha256": "5b67fa8762df31c18ac215f16d04b8a983ef21d7531d6ba81850419cdf0fd8fa",
+  "fixture_sha256": "ec01d14b367c153be6e8a5cedc1c0496d3d6a6a3f4b6ef1cbc0d18e72fa279a5",
+  "results": [
+    {
+      "trial": 0,
+      "init": 0.16993401799845742,
+      "branch": 0.02185776700207498,
+      "status_clean": 0.005420659996161703,
+      "diff_changed": 0.006346624002617318,
+      "add": 0.015278724000381771,
+      "commit": 0.020338966001872905,
+      "merge": 0.03461334900202928,
+      "fsck": 0.0015614680014550686
+    },
+    {
+      "trial": 1,
+      "init": 0.12378396900021471,
+      "branch": 0.021637890000420157,
+      "status_clean": 0.006215123998117633,
+      "diff_changed": 0.005774204000772443,
+      "add": 0.0148896379978396,
+      "commit": 0.01547276700148359,
+      "merge": 0.021650889997545164,
+      "fsck": 0.001524551997135859
+    },
+    {
+      "trial": 2,
+      "init": 0.11751334500149824,
+      "branch": 0.01722919500025455,
+      "status_clean": 0.004947448993334547,
+      "diff_changed": 0.005799037004180718,
+      "add": 0.015892395000264514,
+      "commit": 0.017148776998510584,
+      "merge": 0.029827693004335742,
+      "fsck": 0.0015494679973926395
+    }
+  ],
+  "commands": [
+    {
+      "args": [
+        "init",
+        "p0",
+        "--from",
+        "/btrfs/bench-1000/source",
+        "-q"
+      ],
+      "wall": 0.16993401799845742,
+      "cpu": 0.025734,
+      "stderr": "trace      5.0 ms  record project\ntrace      6.1 ms  snapshot /btrfs/bench-1000/store/projects/p0/states/01a1442b-3ee6-7437-b977-422d0d1c0088\ntrace      2.8 ms  record commit\ntrace      0.8 ms  delete /btrfs/bench-1000/store/projects/p0/meta/work/01a1442b-3ed6-721a-b370-d8527e62793e\ntrace      3.6 ms  snapshot /btrfs/bench-1000/store/projects/p0/meta/work/01a1442b-3ef0-768a-9f09-7c2242afacbc\ntrace      3.6 ms  record line.create\n",
+      "load": [
+        2.81201171875,
+        1.32666015625,
+        0.974609375
+      ]
+    },
+    {
+      "args": [
+        "protect",
+        "main",
+        "--remove"
+      ],
+      "wall": 0.013876256001822185,
+      "cpu": 0.001908,
+      "stderr": "trace      0.4 ms  open project\ntrace      8.9 ms  record config\n",
+      "load": [
+        2.81201171875,
+        1.32666015625,
+        0.974609375
+      ]
+    },
+    {
+      "args": [
+        "branch",
+        "-q",
+        "topic"
+      ],
+      "wall": 0.02185776700207498,
+      "cpu": 0.0023229999999999987,
+      "stderr": "trace      0.3 ms  open project\ntrace      4.3 ms  snapshot /btrfs/bench-1000/store/projects/p0/meta/work/01a1442b-3f0c-71ed-8b02-4df59395a9b2\ntrace      9.3 ms  record line.create\n",
+      "load": [
+        2.81201171875,
+        1.32666015625,
+        0.974609375
+      ]
+    },
+    {
+      "args": [
+        "status",
+        "--porcelain"
+      ],
+      "wall": 0.005420659996161703,
+      "cpu": 0.0018189999999999942,
+      "stderr": "trace      0.3 ms  open project\ntrace      3.7 ms  snapshot /btrfs/bench-1000/store/projects/p0/meta/scan/01a1442b-3f21-70cc-8744-e54965109d5b\ntrace      0.2 ms  send --no-data\ntrace      0.0 ms  delete /btrfs/bench-1000/store/projects/p0/meta/scan/01a1442b-3f21-70cc-8744-e54965109d5b\n",
+      "load": [
+        2.81201171875,
+        1.32666015625,
+        0.974609375
+      ]
+    },
+    {
+      "args": [
+        "diff",
+        "--stat"
+      ],
+      "wall": 0.006346624002617318,
+      "cpu": 0.002284999999999999,
+      "stderr": "trace      0.3 ms  open project\ntrace      4.2 ms  snapshot /btrfs/bench-1000/store/projects/p0/meta/scan/01a1442b-3f27-73fd-a34e-bf9f71f8896e\ntrace      0.4 ms  send --no-data\ntrace      0.0 ms  delete /btrfs/bench-1000/store/projects/p0/meta/scan/01a1442b-3f27-73fd-a34e-bf9f71f8896e\n",
+      "load": [
+        2.81201171875,
+        1.32666015625,
+        0.974609375
+      ]
+    },
+    {
+      "args": [
+        "add",
+        "-A"
+      ],
+      "wall": 0.015278724000381771,
+      "cpu": 0.002744,
+      "stderr": "trace      0.3 ms  open project\ntrace      3.5 ms  snapshot /btrfs/bench-1000/store/projects/p0/meta/scan/01a1442b-3f2d-7311-a229-8a9a11ecfd54\ntrace      0.4 ms  send --no-data\ntrace      3.4 ms  snapshot /btrfs/bench-1000/store/projects/p0/meta/stage/01a1442b-3f0c-71ed-8b02-4df413a1f53b\ntrace      0.0 ms  delete /btrfs/bench-1000/store/projects/p0/meta/scan/01a1442b-3f2d-7311-a229-8a9a11ecfd54\n",
+      "load": [
+        2.81201171875,
+        1.32666015625,
+        0.974609375
+      ]
+    },
+    {
+      "args": [
+        "commit",
+        "-qm",
+        "ten files"
+      ],
+      "wall": 0.020338966001872905,
+      "cpu": 0.002815999999999999,
+      "stderr": "trace      0.3 ms  open project\ntrace      4.0 ms  snapshot /btrfs/bench-1000/store/projects/p0/states/01a1442b-3f3d-7792-8fef-d31d1d1a575a\ntrace      0.4 ms  send --no-data\ntrace      9.8 ms  record commit\ntrace      0.1 ms  delete /btrfs/bench-1000/store/projects/p0/meta/stage/01a1442b-3f0c-71ed-8b02-4df413a1f53b\n",
+      "load": [
+        2.81201171875,
+        1.32666015625,
+        0.974609375
+      ]
+    },
+    {
+      "args": [
+        "merge",
+        "-q",
+        "topic"
+      ],
+      "wall": 0.03461334900202928,
+      "cpu": 0.004452999999999999,
+      "stderr": "trace      0.3 ms  open project\ntrace      7.5 ms  snapshot /btrfs/bench-1000/store/projects/p0/states/01a1442b-3f51-74db-9268-c3aa02a315e9\ntrace      0.2 ms  send --no-data\ntrace      0.0 ms  delete /btrfs/bench-1000/store/projects/p0/states/01a1442b-3f51-74db-9268-c3aa02a315e9\ntrace      3.7 ms  snapshot /btrfs/bench-1000/store/projects/p0/meta/scan/01a1442b-3f59-72c6-bc5d-1c8aa7614745\ntrace      0.1 ms  send --no-data\ntrace      0.4 ms  send --no-data\ntrace      3.3 ms  snapshot /btrfs/bench-1000/store/projects/p0/states/01a1442b-3f5e-71c0-ac86-f9830d24db39\ntrace      8.8 ms  record merge\ntrace      0.0 ms  delete /btrfs/bench-1000/store/projects/p0/meta/scan/01a1442b-3f59-72c6-bc5d-1c8aa7614745\n",
+      "load": [
+        2.81201171875,
+        1.32666015625,
+        0.974609375
+      ]
+    },
+    {
+      "args": [
+        "status",
+        "--porcelain"
+      ],
+      "wall": 0.007999634995940141,
+      "cpu": 0.0019900000000000057,
+      "stderr": "trace      0.3 ms  open project\ntrace      6.1 ms  snapshot /btrfs/bench-1000/store/projects/p0/meta/scan/01a1442b-3f74-70e2-a565-6392bb1be0a0\ntrace      0.4 ms  send --no-data\ntrace      0.0 ms  delete /btrfs/bench-1000/store/projects/p0/meta/scan/01a1442b-3f74-70e2-a565-6392bb1be0a0\n",
+      "load": [
+        2.81201171875,
+        1.32666015625,
+        0.974609375
+      ]
+    },
+    {
+      "args": [
+        "fsck"
+      ],
+      "wall": 0.0015614680014550686,
+      "cpu": 0.0014290000000000032,
+      "stderr": "trace      0.3 ms  open project\n",
+      "load": [
+        2.81201171875,
+        1.32666015625,
+        0.974609375
+      ]
+    },
+    {
+      "args": [
+        "init",
+        "p1",
+        "--from",
+        "/btrfs/bench-1000/source",
+        "-q"
+      ],
+      "wall": 0.12378396900021471,
+      "cpu": 0.021501999999999997,
+      "stderr": "trace      2.8 ms  record project\ntrace      6.1 ms  snapshot /btrfs/bench-1000/store/projects/p1/states/01a1442b-3fe3-732e-9016-b5a853b3db57\ntrace      3.6 ms  record commit\ntrace      0.7 ms  delete /btrfs/bench-1000/store/projects/p1/meta/work/01a1442b-3fd3-758a-9e6c-6ed54927c68d\ntrace      3.6 ms  snapshot /btrfs/bench-1000/store/projects/p1/meta/work/01a1442b-3fed-76e6-abbb-1c918f264fe4\ntrace      3.4 ms  record line.create\n",
+      "load": [
+        2.81201171875,
+        1.32666015625,
+        0.974609375
+      ]
+    },
+    {
+      "args": [
+        "protect",
+        "main",
+        "--remove"
+      ],
+      "wall": 0.01631248099874938,
+      "cpu": 0.0016539999999999958,
+      "stderr": "trace      0.3 ms  open project\ntrace     11.7 ms  record config\n",
+      "load": [
+        2.81201171875,
+        1.32666015625,
+        0.974609375
+      ]
+    },
+    {
+      "args": [
+        "branch",
+        "-q",
+        "topic"
+      ],
+      "wall": 0.021637890000420157,
+      "cpu": 0.002237999999999997,
+      "stderr": "trace      0.3 ms  open project\ntrace      4.0 ms  snapshot /btrfs/bench-1000/store/projects/p1/meta/work/01a1442b-400a-7069-88d1-df3695c526f2\ntrace      8.6 ms  record line.create\n",
+      "load": [
+        2.81201171875,
+        1.32666015625,
+        0.974609375
+      ]
+    },
+    {
+      "args": [
+        "status",
+        "--porcelain"
+      ],
+      "wall": 0.006215123998117633,
+      "cpu": 0.0017409999999999995,
+      "stderr": "trace      0.3 ms  open project\ntrace      4.6 ms  snapshot /btrfs/bench-1000/store/projects/p1/meta/scan/01a1442b-4020-70fe-9dd4-ae4fe3366099\ntrace      0.2 ms  send --no-data\ntrace      0.0 ms  delete /btrfs/bench-1000/store/projects/p1/meta/scan/01a1442b-4020-70fe-9dd4-ae4fe3366099\n",
+      "load": [
+        2.81201171875,
+        1.32666015625,
+        0.974609375
+      ]
+    },
+    {
+      "args": [
+        "diff",
+        "--stat"
+      ],
+      "wall": 0.005774204000772443,
+      "cpu": 0.0021919999999999995,
+      "stderr": "trace      0.3 ms  open project\ntrace      3.7 ms  snapshot /btrfs/bench-1000/store/projects/p1/meta/scan/01a1442b-4026-70aa-b9dc-7df0e8aed0f8\ntrace      0.4 ms  send --no-data\ntrace      0.0 ms  delete /btrfs/bench-1000/store/projects/p1/meta/scan/01a1442b-4026-70aa-b9dc-7df0e8aed0f8\n",
+      "load": [
+        2.81201171875,
+        1.32666015625,
+        0.974609375
+      ]
+    },
+    {
+      "args": [
+        "add",
+        "-A"
+      ],
+      "wall": 0.0148896379978396,
+      "cpu": 0.0024990000000000012,
+      "stderr": "trace      0.3 ms  open project\ntrace      3.0 ms  snapshot /btrfs/bench-1000/store/projects/p1/meta/scan/01a1442b-402c-74c9-97bb-9dfd86d01e4d\ntrace      0.4 ms  send --no-data\ntrace      2.8 ms  snapshot /btrfs/bench-1000/store/projects/p1/meta/stage/01a1442b-400a-7069-88d1-df357cac3b8d\ntrace      0.0 ms  delete /btrfs/bench-1000/store/projects/p1/meta/scan/01a1442b-402c-74c9-97bb-9dfd86d01e4d\n",
+      "load": [
+        2.81201171875,
+        1.32666015625,
+        0.974609375
+      ]
+    },
+    {
+      "args": [
+        "commit",
+        "-qm",
+        "ten files"
+      ],
+      "wall": 0.01547276700148359,
+      "cpu": 0.002453000000000004,
+      "stderr": "trace      0.3 ms  open project\ntrace      3.6 ms  snapshot /btrfs/bench-1000/store/projects/p1/states/01a1442b-403b-70ee-9691-699e1642d7db\ntrace      0.4 ms  send --no-data\ntrace      6.4 ms  record commit\ntrace      0.1 ms  delete /btrfs/bench-1000/store/projects/p1/meta/stage/01a1442b-400a-7069-88d1-df357cac3b8d\n",
+      "load": [
+        2.81201171875,
+        1.32666015625,
+        0.974609375
+      ]
+    },
+    {
+      "args": [
+        "merge",
+        "-q",
+        "topic"
+      ],
+      "wall": 0.021650889997545164,
+      "cpu": 0.00395800000000001,
+      "stderr": "trace      0.3 ms  open project\ntrace      4.3 ms  snapshot /btrfs/bench-1000/store/projects/p1/states/01a1442b-404a-745e-b6e5-a17423cd2d45\ntrace      0.1 ms  send --no-data\ntrace      0.0 ms  delete /btrfs/bench-1000/store/projects/p1/states/01a1442b-404a-745e-b6e5-a17423cd2d45\ntrace      2.7 ms  snapshot /btrfs/bench-1000/store/projects/p1/meta/scan/01a1442b-404f-728c-a2ba-10cbef5ce06d\ntrace      0.1 ms  send --no-data\ntrace      0.4 ms  send --no-data\ntrace      3.1 ms  snapshot /btrfs/bench-1000/store/projects/p1/states/01a1442b-4053-7547-b87f-ca40df567822\ntrace      5.8 ms  record merge\ntrace      0.0 ms  delete /btrfs/bench-1000/store/projects/p1/meta/scan/01a1442b-404f-728c-a2ba-10cbef5ce06d\n",
+      "load": [
+        2.81201171875,
+        1.32666015625,
+        0.974609375
+      ]
+    },
+    {
+      "args": [
+        "status",
+        "--porcelain"
+      ],
+      "wall": 0.006062997003027704,
+      "cpu": 0.002012,
+      "stderr": "trace      0.3 ms  open project\ntrace      4.3 ms  snapshot /btrfs/bench-1000/store/projects/p1/meta/scan/01a1442b-4060-7613-afb0-cdb8de1c2e2f\ntrace      0.4 ms  send --no-data\ntrace      0.0 ms  delete /btrfs/bench-1000/store/projects/p1/meta/scan/01a1442b-4060-7613-afb0-cdb8de1c2e2f\n",
+      "load": [
+        2.81201171875,
+        1.32666015625,
+        0.974609375
+      ]
+    },
+    {
+      "args": [
+        "fsck"
+      ],
+      "wall": 0.001524551997135859,
+      "cpu": 0.0014310000000000017,
+      "stderr": "trace      0.3 ms  open project\n",
+      "load": [
+        2.81201171875,
+        1.32666015625,
+        0.974609375
+      ]
+    },
+    {
+      "args": [
+        "init",
+        "p2",
+        "--from",
+        "/btrfs/bench-1000/source",
+        "-q"
+      ],
+      "wall": 0.11751334500149824,
+      "cpu": 0.021762999999999998,
+      "stderr": "trace      2.5 ms  record project\ntrace      5.8 ms  snapshot /btrfs/bench-1000/store/projects/p2/states/01a1442b-40c8-7074-9a3d-36a9e22aa8a4\ntrace      2.9 ms  record commit\ntrace      0.8 ms  delete /btrfs/bench-1000/store/projects/p2/meta/work/01a1442b-40b8-72ba-a1af-cd4d49358a13\ntrace      4.0 ms  snapshot /btrfs/bench-1000/store/projects/p2/meta/work/01a1442b-40d2-7055-9e6e-9ddde72c4b6c\ntrace      3.2 ms  record line.create\n",
+      "load": [
+        2.81201171875,
+        1.32666015625,
+        0.974609375
+      ]
+    },
+    {
+      "args": [
+        "protect",
+        "main",
+        "--remove"
+      ],
+      "wall": 0.014448510002694093,
+      "cpu": 0.0013900000000000023,
+      "stderr": "trace      0.3 ms  open project\ntrace      8.3 ms  record config\n",
+      "load": [
+        2.81201171875,
+        1.32666015625,
+        0.974609375
+      ]
+    },
+    {
+      "args": [
+        "branch",
+        "-q",
+        "topic"
+      ],
+      "wall": 0.01722919500025455,
+      "cpu": 0.0021029999999999938,
+      "stderr": "trace      0.3 ms  open project\ntrace      6.2 ms  snapshot /btrfs/bench-1000/store/projects/p2/meta/work/01a1442b-40ec-74c1-9348-5542a374296d\ntrace      6.9 ms  record line.create\n",
+      "load": [
+        2.81201171875,
+        1.32666015625,
+        0.974609375
+      ]
+    },
+    {
+      "args": [
+        "status",
+        "--porcelain"
+      ],
+      "wall": 0.004947448993334547,
+      "cpu": 0.0015970000000000012,
+      "stderr": "trace      0.3 ms  open project\ntrace      3.6 ms  snapshot /btrfs/bench-1000/store/projects/p2/meta/scan/01a1442b-40fd-7248-9688-dfd213f7553d\ntrace      0.2 ms  send --no-data\ntrace      0.0 ms  delete /btrfs/bench-1000/store/projects/p2/meta/scan/01a1442b-40fd-7248-9688-dfd213f7553d\n",
+      "load": [
+        2.81201171875,
+        1.32666015625,
+        0.974609375
+      ]
+    },
+    {
+      "args": [
+        "diff",
+        "--stat"
+      ],
+      "wall": 0.005799037004180718,
+      "cpu": 0.0022320000000000118,
+      "stderr": "trace      0.2 ms  open project\ntrace      3.9 ms  snapshot /btrfs/bench-1000/store/projects/p2/meta/scan/01a1442b-4102-7156-a28b-7971b2d4520f\ntrace      0.4 ms  send --no-data\ntrace      0.1 ms  delete /btrfs/bench-1000/store/projects/p2/meta/scan/01a1442b-4102-7156-a28b-7971b2d4520f\n",
+      "load": [
+        2.81201171875,
+        1.32666015625,
+        0.974609375
+      ]
+    },
+    {
+      "args": [
+        "add",
+        "-A"
+      ],
+      "wall": 0.015892395000264514,
+      "cpu": 0.002588999999999994,
+      "stderr": "trace      0.2 ms  open project\ntrace      3.7 ms  snapshot /btrfs/bench-1000/store/projects/p2/meta/scan/01a1442b-4108-7370-9995-554fedbab715\ntrace      0.4 ms  send --no-data\ntrace      3.3 ms  snapshot /btrfs/bench-1000/store/projects/p2/meta/stage/01a1442b-40ec-74c1-9348-55418a75ac9a\ntrace      0.0 ms  delete /btrfs/bench-1000/store/projects/p2/meta/scan/01a1442b-4108-7370-9995-554fedbab715\n",
+      "load": [
+        2.81201171875,
+        1.32666015625,
+        0.974609375
+      ]
+    },
+    {
+      "args": [
+        "commit",
+        "-qm",
+        "ten files"
+      ],
+      "wall": 0.017148776998510584,
+      "cpu": 0.002901000000000001,
+      "stderr": "trace      0.3 ms  open project\ntrace      5.3 ms  snapshot /btrfs/bench-1000/store/projects/p2/states/01a1442b-4118-71df-99ee-cd6f8f6e1f2e\ntrace      0.4 ms  send --no-data\ntrace      6.8 ms  record commit\ntrace      0.1 ms  delete /btrfs/bench-1000/store/projects/p2/meta/stage/01a1442b-40ec-74c1-9348-55418a75ac9a\n",
+      "load": [
+        2.81201171875,
+        1.32666015625,
+        0.974609375
+      ]
+    },
+    {
+      "args": [
+        "merge",
+        "-q",
+        "topic"
+      ],
+      "wall": 0.029827693004335742,
+      "cpu": 0.004594999999999974,
+      "stderr": "trace      0.3 ms  open project\ntrace      5.0 ms  snapshot /btrfs/bench-1000/store/projects/p2/states/01a1442b-4129-7430-8332-a749eff743b5\ntrace      0.2 ms  send --no-data\ntrace      0.0 ms  delete /btrfs/bench-1000/store/projects/p2/states/01a1442b-4129-7430-8332-a749eff743b5\ntrace      3.4 ms  snapshot /btrfs/bench-1000/store/projects/p2/meta/scan/01a1442b-412e-72bd-b65e-6db91a10b302\ntrace      0.1 ms  send --no-data\ntrace      0.9 ms  send --no-data\ntrace      4.3 ms  snapshot /btrfs/bench-1000/store/projects/p2/states/01a1442b-4134-74c9-8fd3-a2c6b941a196\ntrace      9.7 ms  record merge\ntrace      0.1 ms  delete /btrfs/bench-1000/store/projects/p2/meta/scan/01a1442b-412e-72bd-b65e-6db91a10b302\n",
+      "load": [
+        2.81201171875,
+        1.32666015625,
+        0.974609375
+      ]
+    },
+    {
+      "args": [
+        "status",
+        "--porcelain"
+      ],
+      "wall": 0.006668584996077698,
+      "cpu": 0.00237900000000002,
+      "stderr": "trace      0.3 ms  open project\ntrace      4.7 ms  snapshot /btrfs/bench-1000/store/projects/p2/meta/scan/01a1442b-4147-7084-be10-f1382ebfe0d1\ntrace      0.4 ms  send --no-data\ntrace      0.1 ms  delete /btrfs/bench-1000/store/projects/p2/meta/scan/01a1442b-4147-7084-be10-f1382ebfe0d1\n",
+      "load": [
+        2.81201171875,
+        1.32666015625,
+        0.974609375
+      ]
+    },
+    {
+      "args": [
+        "fsck"
+      ],
+      "wall": 0.0015494679973926395,
+      "cpu": 0.0014170000000000155,
+      "stderr": "trace      0.3 ms  open project\n",
+      "load": [
+        2.81201171875,
+        1.32666015625,
+        0.974609375
+      ]
+    }
+  ]
+}

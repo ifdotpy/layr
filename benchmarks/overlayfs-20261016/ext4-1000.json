@@ -1,0 +1,481 @@
+{
+  "platform": "Linux-7.2.9-orbstack-00391-g2b298d05fbd4-aarch64-with-glibc2.36",
+  "files": 1000,
+  "binary_sha256": "ad8e2f9651789479efb54a86d06664248dc9002a17009fa4be96a52d06f51efe",
+  "fixture_sha256": "ec01d14b367c153be6e8a5cedc1c0496d3d6a6a3f4b6ef1cbc0d18e72fa279a5",
+  "results": [
+    {
+      "trial": 0,
+      "init": 0.2939553209944279,
+      "branch": 0.03281750400492456,
+      "status_clean": 0.09146075899479911,
+      "diff_changed": 0.08355979099724209,
+      "add": 0.11354431899962947,
+      "commit": 0.08078573199600214,
+      "merge": 0.233498055000382,
+      "fsck": 0.0023174740053946152
+    },
+    {
+      "trial": 1,
+      "init": 0.2372201620019041,
+      "branch": 0.031358745000034105,
+      "status_clean": 0.071497171993542,
+      "diff_changed": 0.07153854699572548,
+      "add": 0.1126164380038972,
+      "commit": 0.07979801700275857,
+      "merge": 0.23562860999663826,
+      "fsck": 0.0026044330006698146
+    },
+    {
+      "trial": 2,
+      "init": 0.23737632900156314,
+      "branch": 0.03520714399928693,
+      "status_clean": 0.08061989799898583,
+      "diff_changed": 0.08526959399750922,
+      "add": 0.16220813400286715,
+      "commit": 0.08816253000259167,
+      "merge": 0.3237706399959279,
+      "fsck": 0.004805739001312759
+    }
+  ],
+  "commands": [
+    {
+      "args": [
+        "init",
+        "p0",
+        "--from",
+        "/testfs/bench-1000/source",
+        "-q"
+      ],
+      "wall": 0.2939553209944279,
+      "cpu": 0.069102,
+      "stderr": "trace      2.5 ms  record project\ntrace      3.4 ms  record commit\ntrace      3.7 ms  record line.create\n",
+      "load": [
+        2.81201171875,
+        1.32666015625,
+        0.974609375
+      ]
+    },
+    {
+      "args": [
+        "protect",
+        "main",
+        "--remove"
+      ],
+      "wall": 0.011288157002127264,
+      "cpu": 0.001697000000000004,
+      "stderr": "trace      0.3 ms  open project\ntrace      6.3 ms  record config\n",
+      "load": [
+        2.81201171875,
+        1.32666015625,
+        0.974609375
+      ]
+    },
+    {
+      "args": [
+        "branch",
+        "-q",
+        "topic"
+      ],
+      "wall": 0.03281750400492456,
+      "cpu": 0.0026269999999999905,
+      "stderr": "trace      0.3 ms  open project\ntrace      5.5 ms  record line.create\n",
+      "load": [
+        2.9072265625,
+        1.37109375,
+        0.9912109375
+      ]
+    },
+    {
+      "args": [
+        "status",
+        "--porcelain"
+      ],
+      "wall": 0.09146075899479911,
+      "cpu": 0.046218,
+      "stderr": "trace      0.3 ms  open project\ntrace      6.2 ms  OverlayFS candidates\n",
+      "load": [
+        2.9072265625,
+        1.37109375,
+        0.9912109375
+      ]
+    },
+    {
+      "args": [
+        "diff",
+        "--stat"
+      ],
+      "wall": 0.08355979099724209,
+      "cpu": 0.04337200000000001,
+      "stderr": "trace      0.3 ms  open project\ntrace      5.7 ms  OverlayFS candidates\n",
+      "load": [
+        2.9072265625,
+        1.37109375,
+        0.9912109375
+      ]
+    },
+    {
+      "args": [
+        "add",
+        "-A"
+      ],
+      "wall": 0.11354431899962947,
+      "cpu": 0.044500999999999985,
+      "stderr": "trace      0.3 ms  open project\ntrace      5.9 ms  OverlayFS candidates\n",
+      "load": [
+        2.9072265625,
+        1.37109375,
+        0.9912109375
+      ]
+    },
+    {
+      "args": [
+        "commit",
+        "-qm",
+        "ten files"
+      ],
+      "wall": 0.08078573199600214,
+      "cpu": 0.04371,
+      "stderr": "trace      0.3 ms  open project\ntrace      6.0 ms  OverlayFS candidates\ntrace      4.9 ms  record commit\n",
+      "load": [
+        2.9072265625,
+        1.37109375,
+        0.9912109375
+      ]
+    },
+    {
+      "args": [
+        "merge",
+        "-q",
+        "topic"
+      ],
+      "wall": 0.233498055000382,
+      "cpu": 0.116757,
+      "stderr": "trace      0.3 ms  open project\ntrace      5.8 ms  OverlayFS candidates\ntrace      5.6 ms  record save\ntrace      5.8 ms  OverlayFS candidates\ntrace      5.2 ms  OverlayFS candidates\ntrace      2.8 ms  record merge\n",
+      "load": [
+        2.9072265625,
+        1.37109375,
+        0.9912109375
+      ]
+    },
+    {
+      "args": [
+        "status",
+        "--porcelain"
+      ],
+      "wall": 0.07629091099806828,
+      "cpu": 0.04349700000000001,
+      "stderr": "trace      0.3 ms  open project\ntrace      6.2 ms  OverlayFS candidates\n",
+      "load": [
+        2.9072265625,
+        1.37109375,
+        0.9912109375
+      ]
+    },
+    {
+      "args": [
+        "fsck"
+      ],
+      "wall": 0.0023174740053946152,
+      "cpu": 0.002159000000000022,
+      "stderr": "trace      0.3 ms  open project\n",
+      "load": [
+        2.9072265625,
+        1.37109375,
+        0.9912109375
+      ]
+    },
+    {
+      "args": [
+        "init",
+        "p1",
+        "--from",
+        "/testfs/bench-1000/source",
+        "-q"
+      ],
+      "wall": 0.2372201620019041,
+      "cpu": 0.07196000000000002,
+      "stderr": "trace      8.4 ms  record project\ntrace      2.7 ms  record commit\ntrace      4.4 ms  record line.create\n",
+      "load": [
+        2.9072265625,
+        1.37109375,
+        0.9912109375
+      ]
+    },
+    {
+      "args": [
+        "protect",
+        "main",
+        "--remove"
+      ],
+      "wall": 0.010378609003964812,
+      "cpu": 0.0022159999999999958,
+      "stderr": "trace      0.4 ms  open project\ntrace      5.0 ms  record config\n",
+      "load": [
+        2.9072265625,
+        1.37109375,
+        0.9912109375
+      ]
+    },
+    {
+      "args": [
+        "branch",
+        "-q",
+        "topic"
+      ],
+      "wall": 0.031358745000034105,
+      "cpu": 0.0030290000000000594,
+      "stderr": "trace      0.3 ms  open project\ntrace      6.0 ms  record line.create\n",
+      "load": [
+        2.9072265625,
+        1.37109375,
+        0.9912109375
+      ]
+    },
+    {
+      "args": [
+        "status",
+        "--porcelain"
+      ],
+      "wall": 0.071497171993542,
+      "cpu": 0.043139999999999956,
+      "stderr": "trace      0.3 ms  open project\ntrace      6.4 ms  OverlayFS candidates\n",
+      "load": [
+        2.9072265625,
+        1.37109375,
+        0.9912109375
+      ]
+    },
+    {
+      "args": [
+        "diff",
+        "--stat"
+      ],
+      "wall": 0.07153854699572548,
+      "cpu": 0.04531700000000005,
+      "stderr": "trace      0.3 ms  open project\ntrace      6.2 ms  OverlayFS candidates\n",
+      "load": [
+        2.9072265625,
+        1.37109375,
+        0.9912109375
+      ]
+    },
+    {
+      "args": [
+        "add",
+        "-A"
+      ],
+      "wall": 0.1126164380038972,
+      "cpu": 0.04600800000000005,
+      "stderr": "trace      0.3 ms  open project\ntrace      5.9 ms  OverlayFS candidates\n",
+      "load": [
+        2.9072265625,
+        1.37109375,
+        0.9912109375
+      ]
+    },
+    {
+      "args": [
+        "commit",
+        "-qm",
+        "ten files"
+      ],
+      "wall": 0.07979801700275857,
+      "cpu": 0.044802999999999926,
+      "stderr": "trace      0.3 ms  open project\ntrace      6.2 ms  OverlayFS candidates\ntrace      5.9 ms  record commit\n",
+      "load": [
+        2.9072265625,
+        1.37109375,
+        0.9912109375
+      ]
+    },
+    {
+      "args": [
+        "merge",
+        "-q",
+        "topic"
+      ],
+      "wall": 0.23562860999663826,
+      "cpu": 0.12138300000000002,
+      "stderr": "trace      0.3 ms  open project\ntrace      5.9 ms  OverlayFS candidates\ntrace      5.4 ms  record save\ntrace      5.8 ms  OverlayFS candidates\ntrace      5.4 ms  OverlayFS candidates\ntrace      3.2 ms  record merge\n",
+      "load": [
+        2.9072265625,
+        1.37109375,
+        0.9912109375
+      ]
+    },
+    {
+      "args": [
+        "status",
+        "--porcelain"
+      ],
+      "wall": 0.07514419499784708,
+      "cpu": 0.04513,
+      "stderr": "trace      0.3 ms  open project\ntrace      5.9 ms  OverlayFS candidates\n",
+      "load": [
+        2.9072265625,
+        1.37109375,
+        0.9912109375
+      ]
+    },
+    {
+      "args": [
+        "fsck"
+      ],
+      "wall": 0.0026044330006698146,
+      "cpu": 0.0024380000000001623,
+      "stderr": "trace      0.3 ms  open project\n",
+      "load": [
+        2.9072265625,
+        1.37109375,
+        0.9912109375
+      ]
+    },
+    {
+      "args": [
+        "init",
+        "p2",
+        "--from",
+        "/testfs/bench-1000/source",
+        "-q"
+      ],
+      "wall": 0.23737632900156314,
+      "cpu": 0.062317999999999985,
+      "stderr": "trace      2.6 ms  record project\ntrace      2.9 ms  record commit\ntrace      3.1 ms  record line.create\n",
+      "load": [
+        2.9072265625,
+        1.37109375,
+        0.9912109375
+      ]
+    },
+    {
+      "args": [
+        "protect",
+        "main",
+        "--remove"
+      ],
+      "wall": 0.011921494005946442,
+      "cpu": 0.002537999999999929,
+      "stderr": "trace      0.3 ms  open project\ntrace      6.9 ms  record config\n",
+      "load": [
+        2.9072265625,
+        1.37109375,
+        0.9912109375
+      ]
+    },
+    {
+      "args": [
+        "branch",
+        "-q",
+        "topic"
+      ],
+      "wall": 0.03520714399928693,
+      "cpu": 0.0034640000000000226,
+      "stderr": "trace      0.3 ms  open project\ntrace      5.1 ms  record line.create\n",
+      "load": [
+        2.9072265625,
+        1.37109375,
+        0.9912109375
+      ]
+    },
+    {
+      "args": [
+        "status",
+        "--porcelain"
+      ],
+      "wall": 0.08061989799898583,
+      "cpu": 0.05408700000000011,
+      "stderr": "trace      0.3 ms  open project\ntrace      6.4 ms  OverlayFS candidates\n",
+      "load": [
+        2.9072265625,
+        1.37109375,
+        0.9912109375
+      ]
+    },
+    {
+      "args": [
+        "diff",
+        "--stat"
+      ],
+      "wall": 0.08526959399750922,
+      "cpu": 0.05187199999999992,
+      "stderr": "trace      0.5 ms  open project\ntrace      7.0 ms  OverlayFS candidates\n",
+      "load": [
+        2.9072265625,
+        1.37109375,
+        0.9912109375
+      ]
+    },
+    {
+      "args": [
+        "add",
+        "-A"
+      ],
+      "wall": 0.16220813400286715,
+      "cpu": 0.06632499999999986,
+      "stderr": "trace      0.6 ms  open project\ntrace      7.8 ms  OverlayFS candidates\n",
+      "load": [
+        2.9072265625,
+        1.37109375,
+        0.9912109375
+      ]
+    },
+    {
+      "args": [
+        "commit",
+        "-qm",
+        "ten files"
+      ],
+      "wall": 0.08816253000259167,
+      "cpu": 0.05227800000000005,
+      "stderr": "trace      0.4 ms  open project\ntrace      7.4 ms  OverlayFS candidates\ntrace      9.5 ms  record commit\n",
+      "load": [
+        2.9072265625,
+        1.37109375,
+        0.9912109375
+      ]
+    },
+    {
+      "args": [
+        "merge",
+        "-q",
+        "topic"
+      ],
+      "wall": 0.3237706399959279,
+      "cpu": 0.16203499999999993,
+      "stderr": "trace      0.4 ms  open project\ntrace      6.8 ms  OverlayFS candidates\ntrace      4.5 ms  record save\ntrace      7.4 ms  OverlayFS candidates\ntrace      6.7 ms  OverlayFS candidates\ntrace      7.5 ms  record merge\n",
+      "load": [
+        2.9072265625,
+        1.37109375,
+        0.9912109375
+      ]
+    },
+    {
+      "args": [
+        "status",
+        "--porcelain"
+      ],
+      "wall": 0.07442789900233038,
+      "cpu": 0.05373400000000017,
+      "stderr": "trace      0.4 ms  open project\ntrace      6.5 ms  OverlayFS candidates\n",
+      "load": [
+        2.9072265625,
+        1.37109375,
+        0.9912109375
+      ]
+    },
+    {
+      "args": [
+        "fsck"
+      ],
+      "wall": 0.004805739001312759,
+      "cpu": 0.004610999999999921,
+      "stderr": "trace      0.4 ms  open project\n",
+      "load": [
+        2.9072265625,
+        1.37109375,
+        0.9912109375
+      ]
+    }
+  ]
+}

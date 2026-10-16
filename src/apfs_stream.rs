@@ -54,7 +54,7 @@ fn time(sec: i64, nano: i64) -> Vec<u8> {
 pub fn send(root: &Path, out: &mut dyn Write) -> Result<()> {
     let info = crate::storage::subvol_info(root)?;
     if !info.readonly {
-        bail!("only immutable APFS snapshots can be sent");
+        bail!("only immutable snapshots can be sent");
     }
     let uuid = uuid::Uuid::parse_str(info.received_uuid.as_deref().unwrap_or(&info.uuid))?;
     let name = root.file_name().context("snapshot has no name")?.as_bytes();
@@ -63,7 +63,7 @@ pub fn send(root: &Path, out: &mut dyn Write) -> Result<()> {
     fn visit(root: &Path, rel: &Path, out: &mut dyn Write, links: &mut BTreeMap<(u64, u64), Vec<u8>>) -> Result<()> {
         let full = root.join(rel);
         let m = fs::symlink_metadata(&full)?;
-        if crate::sys::apfs_has_acl(&full)? {
+        if crate::stream_fs::has_acl(&full)? {
             bail!("cannot transfer macOS access control lists to btrfs: {}", full.display());
         }
         let p = rel.as_os_str().as_bytes();
@@ -107,12 +107,13 @@ pub fn send(root: &Path, out: &mut dyn Write) -> Result<()> {
             }
         }
         if !linked {
-            for (name, value) in crate::sys::apfs_xattrs(&full)? {
-                if name == b"com.layr.subvolume" || name == b"com.layr.origin" {
+            for (name, value) in crate::stream_fs::xattrs(&full)? {
+                if name == b"com.layr.subvolume" || name == b"com.layr.origin" || name == b"trusted.layr.origin" {
                     continue;
                 }
                 // Linux forbids user.* attributes on symlinks. Its root receiver can
                 // retain them in trusted.*, including attributes specific to macOS.
+                #[cfg(target_os = "macos")]
                 let name = if m.file_type().is_symlink() {
                     format!("trusted.layr.apfs.{}", hex::encode(name)).into_bytes()
                 } else if name.starts_with(b"user.") {
@@ -120,6 +121,8 @@ pub fn send(root: &Path, out: &mut dyn Write) -> Result<()> {
                 } else {
                     format!("user.layr.apfs.{}", hex::encode(name)).into_bytes()
                 };
+                #[cfg(feature = "overlayfs")]
+                if !name.starts_with(b"user.") { bail!("cannot transfer attribute {}",String::from_utf8_lossy(&name)); }
                 command(out, 13, &[(15, p), (13, &name), (14, &value)])?;
             }
             if !m.file_type().is_symlink() {
@@ -178,7 +181,7 @@ pub fn receive(src: &mut dyn Read, dir: &Path, expected: &crate::recv::Expect) -
         spool.read_exact(&mut head)?;
         let version = u32::from_le_bytes(head[13..].try_into()?);
         if version > 2 {
-            bail!("APFS receive supports send stream versions 1 and 2");
+            bail!("portable receive supports send stream versions 1 and 2");
         }
         if let Some(p) = &parent {
             crate::storage::snapshot(p, &root, false)?;
@@ -256,6 +259,7 @@ pub fn receive(src: &mut dyn Read, dir: &Path, expected: &crate::recv::Expect) -
                     if raw.starts_with(b"system.posix_acl_") || raw.starts_with(b"security.") {
                         bail!("APFS cannot enforce the Linux security attribute {}", String::from_utf8_lossy(raw));
                     }
+                    #[cfg(target_os = "macos")]
                     let name = if let Some(encoded) =
                         raw.strip_prefix(b"user.layr.apfs.").or_else(|| raw.strip_prefix(b"trusted.layr.apfs."))
                     {
@@ -263,14 +267,19 @@ pub fn receive(src: &mut dyn Read, dir: &Path, expected: &crate::recv::Expect) -
                     } else {
                         raw.to_vec()
                     };
-                    if name == b"com.layr.subvolume" || name == b"com.layr.origin" {
+                    #[cfg(feature = "overlayfs")]
+                    let name = {
+                        if !raw.starts_with(b"user.") { bail!("unsupported portable attribute namespace"); }
+                        raw.to_vec()
+                    };
+                    if name == b"com.layr.subvolume" || name == b"com.layr.origin" || name == b"trusted.layr.origin" {
                         bail!("stream cannot set internal APFS metadata");
                     }
                     let name = std::ffi::CString::new(name)?;
                     if code == 13 {
-                        crate::sys::apfs_attribute(&p, &name, Some(value(&at, 14)?))?;
+                        crate::stream_fs::attribute(&p, &name, Some(value(&at, 14)?))?;
                     } else {
-                        crate::sys::apfs_remove_attribute(&p, &name)?;
+                        crate::stream_fs::remove_attribute(&p, &name)?;
                     }
                 }
                 15 => {
@@ -331,7 +340,7 @@ pub fn receive(src: &mut dyn Read, dir: &Path, expected: &crate::recv::Expect) -
                     }
                     times.insert(fs::symlink_metadata(&p)?.ino(), (sec, ns as i64));
                 }
-                _ => bail!("APFS cannot apply stream command {code}"),
+                _ => bail!("portable receive cannot apply stream command {code}"),
             }
         }
         fn finish(p: &Path, modes: &BTreeMap<u64, u32>, times: &BTreeMap<u64, (i64, i64)>) -> Result<()> {
@@ -342,7 +351,7 @@ pub fn receive(src: &mut dyn Read, dir: &Path, expected: &crate::recv::Expect) -
                 }
             }
             if let Some(&(s, n)) = times.get(&m.ino()) {
-                crate::sys::apfs_mtime(p, s, n)?;
+                crate::stream_fs::mtime(p, s, n)?;
             }
             if !m.file_type().is_symlink() {
                 if let Some(&mode) = modes.get(&m.ino()) {
@@ -358,7 +367,7 @@ pub fn receive(src: &mut dyn Read, dir: &Path, expected: &crate::recv::Expect) -
         let target = dir.join(expected.name);
         let mode = fs::symlink_metadata(&root)?.mode() & 0o7777;
         fs::set_permissions(&root, fs::Permissions::from_mode(mode | 0o200))?;
-        crate::sys::apfs_publish(&root, &target)?;
+        crate::stream_fs::publish(&root, &target)?;
         let seal = (|| -> Result<()> {
             fs::set_permissions(&target, fs::Permissions::from_mode(mode))?;
             crate::storage::set_readonly(&target)
@@ -380,9 +389,12 @@ mod tests {
     struct Sandbox(std::path::PathBuf);
     impl Sandbox {
         fn new() -> Self {
-            let p = std::path::PathBuf::from(std::env::var_os("LAYR_APFS_TEST_ROOT").expect("APFS test root"))
+            let key=if cfg!(feature="overlayfs") {"LAYR_OVERLAYFS_TEST_ROOT"} else {"LAYR_APFS_TEST_ROOT"};
+            let p = std::path::PathBuf::from(std::env::var_os(key).expect("backend test root"))
                 .join(format!("stream-test-{}", crate::ids::new_id()));
             fs::create_dir(&p).unwrap();
+            #[cfg(feature="overlayfs")]
+            crate::storage::recover(&p).unwrap();
             Self(p)
         }
     }
@@ -402,7 +414,7 @@ mod tests {
         fs::hard_link(src.join("dir/f"), src.join("hard"))?;
         std::os::unix::fs::symlink("dir/f", src.join("link"))?;
         fs::write(src.join("sparse"), vec![0; 200_000])?;
-        crate::sys::apfs_attribute(&src.join("dir/f"), c"com.layr.test", Some(b"metadata"))?;
+        crate::stream_fs::attribute(&src.join("dir/f"), c"user.layr.test", Some(b"metadata"))?;
         fs::set_permissions(src.join("dir/f"), fs::Permissions::from_mode(0o444))?;
         crate::storage::set_readonly(&src)?;
         let id = crate::storage::subvol_info(&src)?.uuid;
@@ -418,7 +430,7 @@ mod tests {
         assert_eq!(fs::read_link(dst.join("link"))?, Path::new("dir/f"));
         assert_eq!(fs::metadata(dst.join("dir/f"))?.mode() & 0o777, 0o444);
         assert_eq!(fs::read(dst.join("sparse"))?, vec![0; 200_000]);
-        assert_eq!(crate::sys::apfs_attribute(&dst.join("dir/f"), c"com.layr.test", None)?, b"metadata");
+        assert_eq!(crate::stream_fs::attribute(&dst.join("dir/f"), c"user.layr.test", None)?, b"metadata");
         assert!(fs::write(dst.join("dir/f"), b"bad").is_err());
         assert!(receive(&mut &bytes[..], &dir, &e).is_err());
         assert_eq!(fs::read(dst.join("dir/f"))?, b"content");
@@ -430,6 +442,7 @@ mod tests {
         Ok(())
     }
     #[test]
+    #[cfg(target_os="macos")]
     #[ignore = "requires a case-sensitive APFS test volume"]
     fn transfer_refuses_acl_instead_of_losing_access_rules() -> Result<()> {
         let s = Sandbox::new();
@@ -439,13 +452,13 @@ mod tests {
         let result =
             std::process::Command::new("/bin/chmod").args(["+a", "everyone deny read"]).arg(root.join("file")).status()?;
         assert!(result.success());
-        assert!(crate::sys::apfs_has_acl(&root.join("file"))?);
+        assert!(crate::stream_fs::has_acl(&root.join("file"))?);
         crate::storage::set_readonly(&root)?;
         let error = send(&root, &mut Vec::new()).unwrap_err();
         assert!(error.to_string().contains("access control lists"));
         crate::storage::set_writable(&root)?;
-        crate::sys::apfs_clear_acl(&root.join("file"))?;
-        assert!(!crate::sys::apfs_has_acl(&root.join("file"))?);
+        crate::stream_fs::clear_acl(&root.join("file"))?;
+        assert!(!crate::stream_fs::has_acl(&root.join("file"))?);
         Ok(())
     }
 

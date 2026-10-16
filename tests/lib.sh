@@ -5,7 +5,9 @@ set -u
 LAYR=${LAYR:-$(cd "$(dirname "$0")/.." && pwd)/target/debug/layr}
 PASS=0
 FAIL=0
-if [ "$(uname -s)" = Darwin ]; then
+if [ -n "${LAYR_OVERLAYFS_TEST_ROOT:-}" ]; then
+    T=$(mktemp -d "$LAYR_OVERLAYFS_TEST_ROOT/layr-test.XXXXXX")
+elif [ "$(uname -s)" = Darwin ]; then
     : "${LAYR_APFS_TEST_ROOT:?Set LAYR_APFS_TEST_ROOT to a case-sensitive APFS volume}"
     T=$(mktemp -d "$LAYR_APFS_TEST_ROOT/layr-test.XXXXXX")
 else
@@ -33,7 +35,7 @@ l() {
 
 new_fs() { # new_fs <mountpoint> <size>
     local mp=$1 size=${2:-8G}
-    if [ "$(uname -s)" = Darwin ]; then
+    if [ -n "${LAYR_OVERLAYFS_TEST_ROOT:-}" ] || [ "$(uname -s)" = Darwin ]; then
         mkdir -p "$mp"
         return
     fi

@@ -642,3 +642,116 @@ pub fn apfs_clear_acl(path: &std::path::Path) -> io::Result<()> {
     }
     Ok(())
 }
+
+// ----- OverlayFS mount and metadata operations -----
+#[cfg(feature = "overlayfs")]
+fn overlay_path(path: &std::path::Path) -> io::Result<CString> {
+    use std::os::unix::ffi::OsStrExt;
+    CString::new(path.as_os_str().as_bytes()).map_err(|_| io::Error::other("NUL in path"))
+}
+#[cfg(feature = "overlayfs")]
+pub fn overlay_mount(
+    source: Option<&std::path::Path>,
+    target: &std::path::Path,
+    kind: Option<&CStr>,
+    flags: libc::c_ulong,
+    options: Option<&str>,
+) -> io::Result<()> {
+    let source = source.map(overlay_path).transpose()?;
+    let target = overlay_path(target)?;
+    let options = options.map(CString::new).transpose().map_err(|_| io::Error::other("NUL in mount options"))?;
+    // SAFETY: all strings and optional pointers remain valid for mount.
+    let rc = unsafe {
+        libc::mount(
+            source.as_ref().map_or(std::ptr::null(), |s| s.as_ptr()),
+            target.as_ptr(),
+            kind.map_or(std::ptr::null(), |s| s.as_ptr()),
+            flags,
+            options.as_ref().map_or(std::ptr::null(), |s| s.as_ptr().cast()),
+        )
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+#[cfg(feature = "overlayfs")]
+pub fn overlay_unmount(path: &std::path::Path) -> io::Result<()> {
+    let p = overlay_path(path)?;
+    // SAFETY: p is a terminated path. Never use lazy detach for managed data.
+    if unsafe { libc::umount2(p.as_ptr(), 0) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+#[cfg(feature = "overlayfs")]
+pub fn overlay_attribute(path: &std::path::Path, name: &CStr, value: Option<&[u8]>) -> io::Result<Vec<u8>> {
+    let p = overlay_path(path)?;
+    if let Some(value) = value {
+        // SAFETY: path, name, and the input buffer are valid for the call.
+        if unsafe { libc::lsetxattr(p.as_ptr(), name.as_ptr(), value.as_ptr().cast(), value.len(), 0) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        return Ok(Vec::new());
+    }
+    // SAFETY: null buffer requests the attribute size.
+    let n = unsafe { libc::lgetxattr(p.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0) };
+    if n < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut buf = vec![0; n as usize];
+    // SAFETY: the output buffer has the supplied capacity.
+    let n = unsafe { libc::lgetxattr(p.as_ptr(), name.as_ptr(), buf.as_mut_ptr().cast(), buf.len()) };
+    if n < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    buf.truncate(n as usize);
+    Ok(buf)
+}
+#[cfg(feature = "overlayfs")]
+pub fn overlay_remove_attribute(path: &std::path::Path, name: &CStr) -> io::Result<()> {
+    let p = overlay_path(path)?;
+    // SAFETY: both strings remain valid for the call.
+    if unsafe { libc::lremovexattr(p.as_ptr(), name.as_ptr()) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+#[cfg(feature = "overlayfs")]
+pub fn overlay_xattrs(path: &std::path::Path) -> io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+    let p = overlay_path(path)?;
+    // SAFETY: null buffer requests the list size.
+    let n = unsafe { libc::llistxattr(p.as_ptr(), std::ptr::null_mut(), 0) };
+    if n < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut names = vec![0u8; n as usize];
+    // SAFETY: names is writable for its supplied length.
+    let n = unsafe { libc::llistxattr(p.as_ptr(), names.as_mut_ptr().cast(), names.len()) };
+    if n < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    names.truncate(n as usize);
+    names
+        .split(|b| *b == 0)
+        .filter(|s| !s.is_empty())
+        .map(|n| {
+            let name = CString::new(n)?;
+            Ok((n.to_vec(), overlay_attribute(path, &name, None)?))
+        })
+        .collect()
+}
+#[cfg(feature = "overlayfs")]
+pub fn overlay_mtime(path: &std::path::Path, sec: i64, nano: i64) -> io::Result<()> {
+    let p = overlay_path(path)?;
+    let times = [libc::timespec { tv_sec: 0, tv_nsec: libc::UTIME_OMIT }, libc::timespec { tv_sec: sec, tv_nsec: nano }];
+    // SAFETY: the two timespec entries and path remain valid for the call.
+    if unsafe { libc::utimensat(libc::AT_FDCWD, p.as_ptr(), times.as_ptr(), libc::AT_SYMLINK_NOFOLLOW) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}

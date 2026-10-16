@@ -360,15 +360,18 @@ impl<'a> Repo<'a> {
                     t.remove(p)?;
                 }
             }
+            drop(t);
             btrfs::set_readonly(&dst)?;
             // An overlay file under another name leaves too: moved from an overlay path, or a
             // new file with the content of an overlay file (a copy, an editor's backup).
             let copies = self.private_copies(line, &dst, &private)?;
             if !copies.is_empty() {
                 btrfs::set_writable(&dst)?;
+                let t = Tree::open(&dst)?;
                 for p in &copies {
                     t.remove(p)?;
                 }
+                drop(t);
                 btrfs::set_readonly(&dst)?;
             }
             btrfs::subvol_info(&dst)
@@ -863,7 +866,7 @@ impl<'a> Repo<'a> {
                 }
                 Ok(())
             })
-            .and_then(|_| Ok(std::fs::rename(&tmp, dst)?));
+            .and_then(|_| Ok(crate::fsutil::rename_tree(&tmp, dst)?));
         if r.is_err() {
             let _ = btrfs::delete_tree(&tmp);
         }

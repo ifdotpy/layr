@@ -1,0 +1,61 @@
+name: overlayfs
+
+on:
+  push:
+    branches: [main, feat/overlayfs-backend]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        filesystem: [ext4, xfs]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xfsprogs e2fsprogs btrfs-progs zstd git python3
+      - name: Create the test filesystem
+        env:
+          TEST_FILESYSTEM: ${{ matrix.filesystem }}
+        run: |
+          truncate -s 8G "$RUNNER_TEMP/overlayfs.img"
+          if [ "$TEST_FILESYSTEM" = ext4 ]; then
+            mkfs.ext4 -q -F "$RUNNER_TEMP/overlayfs.img"
+          else
+            mkfs.xfs -q -f "$RUNNER_TEMP/overlayfs.img"
+          fi
+          mkdir "$RUNNER_TEMP/overlayfs"
+          sudo mount -o loop "$RUNNER_TEMP/overlayfs.img" "$RUNNER_TEMP/overlayfs"
+      - name: Build the OverlayFS binary and tests
+        run: |
+          cargo build --locked --features overlayfs
+          cp target/debug/layr "$RUNNER_TEMP/layr-overlayfs"
+          cargo test --locked --features overlayfs --no-run --message-format=json > "$RUNNER_TEMP/unit.json"
+          python3 - <<'PY' >> "$GITHUB_ENV"
+          import json, os, pathlib
+          for line in pathlib.Path(os.environ['RUNNER_TEMP'], 'unit.json').read_text().splitlines():
+              item = json.loads(line)
+              if item.get('executable') and item.get('profile', {}).get('test'):
+                  print('UNIT_TESTS=' + item['executable'])
+          PY
+      - name: Test snapshots, service, permissions and transfer
+        run: |
+          export LAYR_OVERLAYFS_TEST_ROOT="$RUNNER_TEMP/overlayfs"
+          export LAYR="$RUNNER_TEMP/layr-overlayfs"
+          sudo env LAYR_OVERLAYFS_TEST_ROOT="$LAYR_OVERLAYFS_TEST_ROOT" "$UNIT_TESTS" --include-ignored
+          sudo env LAYR_OVERLAYFS_TEST_ROOT="$LAYR_OVERLAYFS_TEST_ROOT" LAYR="$LAYR" bash tests/overlayfs-local.sh
+          sudo env LAYR_OVERLAYFS_TEST_ROOT="$LAYR_OVERLAYFS_TEST_ROOT" LAYR="$LAYR" bash tests/overlayfs-caches.sh
+          sudo env LAYR_OVERLAYFS_TEST_ROOT="$LAYR_OVERLAYFS_TEST_ROOT" LAYR="$LAYR" bash tests/run.sh t01-basic t02-merge t03-git t05-transfer t06-sync t07-service t08-gitcompat t11-security t13-access t16-overlays
+      - name: Exchange backups with btrfs
+        run: |
+          cargo build --locked
+          sudo env LAYR_OVERLAYFS_TEST_ROOT="$RUNNER_TEMP/overlayfs" LAYR="$RUNNER_TEMP/layr-overlayfs" bash tests/cross-backup.sh create "$RUNNER_TEMP/overlay-backup"
+          sudo env LAYR="$PWD/target/debug/layr" bash tests/cross-backup.sh extend "$RUNNER_TEMP/overlay-backup" "$RUNNER_TEMP/btrfs-backup"
+          sudo env LAYR_OVERLAYFS_TEST_ROOT="$RUNNER_TEMP/overlayfs" LAYR="$RUNNER_TEMP/layr-overlayfs" bash tests/cross-backup.sh check "$RUNNER_TEMP/btrfs-backup"
+      - name: Unmount the test filesystem
+        if: always()
+        run: sudo umount -R "$RUNNER_TEMP/overlayfs" || true
