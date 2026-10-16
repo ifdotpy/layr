@@ -61,6 +61,28 @@ Commands run as root without the service; these tests do not measure changes of 
 
 See the [full report and raw samples](benchmarks/overlayfs-delta-20261016/README.md) for commands, hashes, all results and test coverage.
 
+### Disk use compared with Git worktrees
+
+Two runs use the same synthetic project: 2,048 source files, one main workspace, and 16 branches with one edit and commit each.
+The cache case adds 128 MiB of private mutable data per workspace. Totals include history and additional filesystem metadata.
+
+| Scenario | Layr | Git worktree |
+| --- | ---: | ---: |
+| Source only, btrfs | 22 MiB | 325 MiB |
+| Source only, OverlayFS on ext4 versus Git on ext4 | 33 MiB | 283 MiB |
+| Source only, OverlayFS on XFS versus Git on XFS | 19 MiB | 301 MiB |
+| Private caches, btrfs, full Git cache copies | 153 MiB | 2508 MiB |
+| Private caches, btrfs, reflink Git cache copies | 153 MiB | 455 MiB |
+
+Layr on btrfs uses about 94% less space than Git with full cache copies in this fixture.
+With reflink cache copies, the reduction is about 66%.
+Git worktree does not populate ignored caches itself; the benchmark copies them explicitly.
+Shared package-manager caches can change the result.
+
+The current OverlayFS cache path copies data even on XFS: 2324 MiB versus 432 MiB for Git with reflink cache copies.
+The source-only result does not establish the same benefit for private caches.
+See the [method, full comparison and both raw runs](benchmarks/workspace-disk-20261016/README.md).
+
 ## Experimental APFS backend
 
 APFS uses whole-directory clones automatically. There is no mode flag.
