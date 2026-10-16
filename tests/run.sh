@@ -9,9 +9,10 @@ files=("$@")
 failed=0
 for t in "${files[@]}"; do
     out=$(bash "tests/$t.sh" 2>&1)
-    echo "$out" | grep -E '^(FAIL|  )' || true
     summary=$(echo "$out" | tail -1)
-    echo "$summary"
-    case "$summary" in *", 0 failed") ;; *) failed=1 ;; esac
+    case "$summary" in
+        *", 0 failed") echo "$summary" ;;
+        *) printf '%s\n' "$out"; failed=1 ;;
+    esac
 done
 exit $failed

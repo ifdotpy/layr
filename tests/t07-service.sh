@@ -9,7 +9,7 @@ export LAYR_SOCKET=$T/layr.sock
 cp $LAYR $T/layr && chmod 755 $T/layr
 $T/layr daemon --socket $LAYR_SOCKET --tick 2 > $T/daemon.log 2>&1 &
 DPID=$!
-trap 'kill $DPID 2>/dev/null; cleanup' EXIT
+trap 'if [ "$FAIL" -ne 0 ]; then cat "$T/daemon.log"; fi; kill $DPID 2>/dev/null; cleanup' EXIT
 for i in $(seq 1 50); do [ -S $LAYR_SOCKET ] && break; sleep 0.1; done
 as() { local u=$1; shift; runuser -u $u -- env LAYR_SOCKET=$LAYR_SOCKET LAYR_SESSION=$u PATH=/usr/bin:/bin "$@"; }
 L=$T/layr
