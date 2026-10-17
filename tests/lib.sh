@@ -45,7 +45,20 @@ new_fs() { # new_fs <mountpoint> <size>
     mount -o loop,user_subvol_rm_allowed "$mp.img" "$mp"
 }
 
+# A failed cd must stop the test file: a later relative command (rm -rf ./*, layr commands)
+# would otherwise run in the previous folder, which can be / after cleanup steps.
+cd() {
+    builtin cd "$@" || {
+        echo "FATAL: cd $* failed; stopping this test file" >&2
+        exit 1
+    }
+}
+
 cleanup() {
+    # Never act on an empty or missing test root: "^$T" would match every mount.
+    if [ -z "${T:-}" ] || [ ! -d "$T" ] || [ "$T" = / ]; then
+        return
+    fi
     cd /
     if [ "$(uname -s)" = Darwin ]; then
         chflags -R nouchg "$T" 2>/dev/null || true
