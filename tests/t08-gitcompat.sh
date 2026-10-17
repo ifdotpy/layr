@@ -46,6 +46,11 @@ cmp_out "log --format=%s" log --format=%s
 cmp_out "show --name-status --format=" show --name-status --format= HEAD
 cmp_out "show --stat --format=%s" show --stat --format=%s HEAD
 cmp_out "log --format=%an%x09%ae" log --format=%an%x09%ae
+# The tree hash names the content: the same edits give the same hash in git and in layr,
+# although git commits and layr states have different identities.
+cmp_out "rev-parse HEAD^{tree}" rev-parse 'HEAD^{tree}'
+cmp_out "log --format=%T" log --format=%T
+cmp_out "log -1 --format=%T %t" log -1 '--format=%T %t'
 for root in $G $Lw; do cd $root; printf 'trailing   \n' >> a.txt; done
 cmp_out "diff --check" diff --check
 finish

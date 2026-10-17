@@ -61,6 +61,7 @@ sid=$(l rev-parse HEAD)
 cv=$(git -C $LAYR_ROOT/projects/gp/git rev-parse refs/layr/states/$sid)
 eq "git-sync: .git HEAD is the commit of the head state" "$cv" "$(git rev-parse HEAD)"
 eq "git-sync: clean for git" "" "$(git status --short)"
+eq "the tree hash of the head is the tree of its git commit" "$(git rev-parse 'HEAD^{tree}')" "$(l rev-parse 'HEAD^{tree}')"
 eq "git-sync: the remote is untouched" "$refs_before" "$(git -C $R for-each-ref)"
 records=$(l op log -n 50 | wc -l)
 l git-sync -q

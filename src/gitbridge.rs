@@ -604,6 +604,17 @@ pub fn make_commit(repo: &Repo, state: &StateRec, message: Option<&str>) -> Resu
     Ok((c, parents.into_iter().next()))
 }
 
+/// The git tree hash of a state: the content as git stores it, with the paths a push exports.
+/// It is the same on every machine and in git, unlike the state ID. A state without a commit
+/// gets one in the git store (an object only; no record, no ref).
+pub fn tree_of(repo: &Repo, state: &str) -> Result<String> {
+    let commit = match commit_of(repo, state)? {
+        Some(c) => c,
+        None => make_commit(repo, &repo.state(state)?, None)?.0,
+    };
+    Ok(git_out(&store(repo), &["rev-parse", &format!("{commit}^{{tree}}")])?.trim().to_string())
+}
+
 /// The commit of a state in the git store, if it has one.
 fn commit_of(repo: &Repo, state: &str) -> Result<Option<String>> {
     if let Some(c) = repo.p.db.git_commit_of(state)? {
