@@ -182,7 +182,7 @@ Lines and states:
    branch, switch, checkout, tag, merge, cherry-pick, revert, rebase
    save, undo, op, try, checks, adopt
 Remote (git bridge):
-   remote, fetch, pull, push, clone
+   remote, fetch, pull, push, clone, git-sync
 Overlays (files with their own readers and history, shown in lines):
    overlay create, list, readers, use, move, log, show, diff, grep, ls-files
 Projects and machines:
@@ -270,6 +270,7 @@ pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
         "fetch" => remote::fetch(ctx, &rest),
         "pull" => remote::pull(ctx, &rest),
         "push" => remote::push(ctx, &rest),
+        "git-sync" => remote::git_sync(ctx, &rest),
         "clone" => remote::clone(ctx, &rest),
         "overlay" => overlaycmd::overlay(ctx, &rest),
         "export" => transfer::export(ctx, &rest),
