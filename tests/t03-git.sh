@@ -53,6 +53,22 @@ cd $LAYR_ROOT/projects/gp/lines/main
 echo z >> local.txt; l commit -qam third
 has "non-fast-forward push is refused" "layr pull" "$(l push origin task-2 2>&1)"
 
+# git-sync: the .git folder shows the head without a remote; a later push sends the same commit.
+echo view > view.txt; l add view.txt; l commit -qm "local view"
+refs_before=$(git -C $R for-each-ref)
+l git-sync -q
+sid=$(l rev-parse HEAD)
+cv=$(git -C $LAYR_ROOT/projects/gp/git rev-parse refs/layr/states/$sid)
+eq "git-sync: .git HEAD is the commit of the head state" "$cv" "$(git rev-parse HEAD)"
+eq "git-sync: clean for git" "" "$(git status --short)"
+eq "git-sync: the remote is untouched" "$refs_before" "$(git -C $R for-each-ref)"
+records=$(l op log -n 50 | wc -l)
+l git-sync -q
+eq "git-sync again: no new record" "$records" "$(l op log -n 50 | wc -l)"
+no "the git-sync remote name is reserved" l remote add git-sync $R
+l push -q origin view-1
+eq "a later push sends the same commit" "$cv" "$(git -C $R rev-parse view-1)"
+
 # A branch made by someone else, merged here.
 cd $U; git checkout -q -b feature origin/main; echo feat > f.txt; git add f.txt; git commit -qm "feature work"; git push -q origin feature
 cd $LAYR_ROOT/projects/gp/lines/main
