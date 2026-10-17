@@ -199,6 +199,13 @@ Revisions: `HEAD`, `@`, `HEAD~2`, `HEAD^2`, line names, `line@machine`, tags, `o
 state id prefixes, git commit ids of imported or pushed states, `stash@{n}`, `HEAD@{n}`
 (automatic states, newest first).
 
+Content ids: a state ID is the same only in copies that share its record, but the git ids of its
+content are the same on every machine and in git. `layr rev-parse <rev>^{tree}` (and `%T`/`%t` in
+`--format`) prints the tree of the commit that `layr push` exports for the state. `layr rev-parse
+<rev>:<path>` prints the id of one path in that commit, as `git rev-parse` does: a tree for a
+folder, a blob for a file, the root tree for `<rev>:`. `./` and `../` resolve against the current
+folder. A path that the exported commit does not have fails with exit 128.
+
 ## Workflow
 
 1. A writer makes a line (`layr branch topic-1 main`), or a maintainer makes one for a user
