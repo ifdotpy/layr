@@ -51,6 +51,11 @@ cmp_out "log --format=%an%x09%ae" log --format=%an%x09%ae
 cmp_out "rev-parse HEAD^{tree}" rev-parse 'HEAD^{tree}'
 cmp_out "log --format=%T" log --format=%T
 cmp_out "log -1 --format=%T %t" log -1 '--format=%T %t'
+cmp_out "rev-parse HEAD:d (a tree)" rev-parse HEAD:d
+cmp_out "rev-parse HEAD:a.txt (a blob)" rev-parse HEAD:a.txt
+cmp_out "rev-parse HEAD: (the root tree)" rev-parse HEAD:
+cmp_out "rev-parse HEAD~1:gone.txt (a path of an older state)" rev-parse HEAD~1:gone.txt
+eq "rev-parse HEAD:gone.txt (a missing path) fails like git" "$(cd $G && git rev-parse HEAD:gone.txt 2>&1 >/dev/null)" "$(cd $Lw && l rev-parse HEAD:gone.txt 2>&1 >/dev/null)"
 for root in $G $Lw; do cd $root; printf 'trailing   \n' >> a.txt; done
 cmp_out "diff --check" diff --check
 finish

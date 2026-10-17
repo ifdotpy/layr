@@ -62,6 +62,27 @@ cv=$(git -C $LAYR_ROOT/projects/gp/git rev-parse refs/layr/states/$sid)
 eq "git-sync: .git HEAD is the commit of the head state" "$cv" "$(git rev-parse HEAD)"
 eq "git-sync: clean for git" "" "$(git status --short)"
 eq "the tree hash of the head is the tree of its git commit" "$(git rev-parse 'HEAD^{tree}')" "$(l rev-parse 'HEAD^{tree}')"
+# <rev>:<path> is the object of that path in the exported commit: a tree for a folder, a blob
+# for a file, the root tree for an empty path.
+G_STORE=$LAYR_ROOT/projects/gp/git
+eq "rev-parse <rev>:<dir> is the tree in the exported commit" "$(git -C $G_STORE rev-parse $cv:src)" "$(l rev-parse HEAD:src)"
+eq "rev-parse <rev>:<file> is the blob in the exported commit" "$(git -C $G_STORE rev-parse $cv:src/a.txt)" "$(l rev-parse HEAD:src/a.txt)"
+eq "rev-parse <rev>: is the root tree" "$(git -C $G_STORE rev-parse "$cv^{tree}")" "$(l rev-parse HEAD:)"
+eq "rev-parse <rev>: is the same as <rev>^{tree}" "$(l rev-parse 'HEAD^{tree}')" "$(l rev-parse HEAD:)"
+eq "rev-parse --short <rev>:<file>" "$(git rev-parse --short HEAD:src/a.txt)" "$(l rev-parse --short HEAD:src/a.txt)"
+cd src
+eq "rev-parse <rev>:./<file> resolves in the current folder" "$(git rev-parse HEAD:./a.txt)" "$(l rev-parse HEAD:./a.txt)"
+eq "rev-parse <rev>:../<dir> resolves in the current folder" "$(git rev-parse HEAD:../src)" "$(l rev-parse HEAD:../src)"
+cd ..
+# git also echoes the argument on stdout; layr prints only the error, as for other bad revisions.
+out=$(l rev-parse HEAD:nope 2>&1 >/dev/null); rc=$?
+eq "rev-parse <rev>:<missing> exits 128" 128 "$rc"
+eq "rev-parse <rev>:<missing> fails like git" "$(git rev-parse HEAD:nope 2>&1 >/dev/null)" "$out"
+cd src
+eq "rev-parse <rev>:./<missing> names the full path like git" "$(git rev-parse HEAD:./nope 2>&1 >/dev/null)" "$(l rev-parse HEAD:./nope 2>&1 >/dev/null)"
+cd ..
+l rev-parse -q HEAD:nope >/dev/null 2>&1; rc=$?
+eq "rev-parse -q <rev>:<missing> exits 1 quietly" 1 "$rc"
 eq "git-sync: the remote is untouched" "$refs_before" "$(git -C $R for-each-ref)"
 records=$(l op log -n 50 | wc -l)
 l git-sync -q
