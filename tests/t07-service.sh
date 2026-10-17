@@ -91,4 +91,20 @@ as layr-u1 sh -c 'echo bg > bg.txt'
 sleep 7
 has "the service saved the line" "periodic" "$(as layr-u1 $L log --auto --format=%s -n 3)"
 has "and marked it as taken while processes ran" "taken while processes ran" "$(as layr-u1 $L show -s HEAD@{0})"
+
+# An idle line is compared once per snapshot.interval, not on every tick: a check that found
+# no change counts as the line's last automatic state (tick 1 s, interval 3 s).
+# The trace counts btrfs comparisons; the OverlayFS backend compares without btrfs send.
+if [ -z "${LAYR_OVERLAYFS_TEST_ROOT:-}" ]; then
+kill $DPID; wait $DPID 2>/dev/null
+sleep 3.5
+LAYR_TRACE=1 $T/layr daemon --socket $LAYR_SOCKET --tick 1 > $T/daemon2.log 2>&1 &
+DPID=$!
+sleep 1.6
+first=$(grep -c "send --no-data" $T/daemon2.log)
+sleep 1.2
+eq "idle lines are not compared again before the interval" "$first" "$(grep -c 'send --no-data' $T/daemon2.log)"
+sleep 2.5
+ok "they are compared again after the interval" test "$(grep -c 'send --no-data' $T/daemon2.log)" -gt "$first"
+fi
 finish
