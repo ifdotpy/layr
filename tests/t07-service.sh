@@ -82,7 +82,7 @@ no "no secret content reaches the merged file" grep -q 'root:' x
 cd $P/w1
 as layr-u1 sh -c "rm a1.txt && $L restore a1.txt"
 eq "restored file owner" "layr-u1" "$(stat -c %U a1.txt)"
-as layr-u1 sh -c 'rm -rf ./*'
+as layr-u1 sh -c 'cd "$1" && rm -rf ./*' sh "$P/w1"
 as layr-u1 $L restore .
 eq "rm -rf of the line is restored" "a1" "$(head -1 a1.txt)"
 
