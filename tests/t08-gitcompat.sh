@@ -50,7 +50,7 @@ cmp_out "log --format=%an%x09%ae" log --format=%an%x09%ae
 # although git commits and layr states have different identities.
 cmp_out "rev-parse HEAD^{tree}" rev-parse 'HEAD^{tree}'
 cmp_out "log --format=%T" log --format=%T
-cmp_out "log -1 --format=%t" log -1 --format=%t
+cmp_out "log -1 --format=%T %t" log -1 '--format=%T %t'
 for root in $G $Lw; do cd $root; printf 'trailing   \n' >> a.txt; done
 cmp_out "diff --check" diff --check
 finish
