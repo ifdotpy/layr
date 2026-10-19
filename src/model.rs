@@ -73,6 +73,12 @@ pub struct StateRec {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     #[serde(rename = "layer_shared", alias = "cache_shared")]
     pub cache_shared: bool,
+    /// The platform the cache snapshots were made on (`cache_platform()`). Build output of one
+    /// operating system or processor does not run on another, so a line takes a cache only from
+    /// its own platform. None: saved by an older layr.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "layer_platform", alias = "cache_platform")]
+    pub cache_platform: Option<String>,
 }
 
 /// The pointers of a line at one time.
@@ -157,6 +163,14 @@ pub fn is_uuid(s: &str) -> bool {
 
 pub fn is_name(s: &str) -> bool {
     crate::store::check_name("name", s).is_ok()
+}
+
+/// The platform of this build of layr, `<os>-<arch>` as Rust names them (for example
+/// `linux-x86_64`, `linux-aarch64`, `macos-aarch64`). A cache snapshot records the platform it was
+/// saved on (`StateRec::cache_platform`); build output in it, such as a Rust `target` folder, is
+/// made for that platform.
+pub fn cache_platform() -> String {
+    format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
 }
 
 /// A cache snapshot name: `<state-id>@<path with '/' as %2F>`.
@@ -329,6 +343,7 @@ mod tests {
             caches: BTreeMap::new(),
             cache_by: None,
             cache_shared: false,
+            cache_platform: None,
         }
     }
 

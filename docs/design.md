@@ -82,7 +82,7 @@ do everything, and every record names who acted.
 
 | Role | Actions |
 |---|---|
-| reader | read history (`log`, `show`, `diff`, `grep`, `blame`), `try`, `export` |
+| reader | read history (`log`, `show`, `diff`, `grep`, `blame`, `ls-files`, `rev-parse`), `try`, `export` |
 | writer | create own lines |
 | maintainer | update protected lines (per their rules), tags, push, create lines for other users, delete or adopt other users' lines |
 | admin | roles, deny rules, protection rules, checks, remotes, configuration, caches, replication and machine trust, backups, gc, record import and export, fsck |
@@ -165,6 +165,11 @@ is valid for a state, so it never decides that by itself:
 - A cache made by another user goes to a line only if it was saved on a protected line, because
   a cache holds code that review does not see. Other caches go only to lines of the user who
   made them.
+- A cache is build output for one operating system and processor. Each save records its
+  platform (`<os>-<arch>`, for example `linux-aarch64` or `macos-aarch64`), and a line takes a
+  cache only on the same platform, so a live move (`sync --caches`) between a Mac and a Linux
+  machine never puts Mac binaries into a Linux line. A cache of an older layr, which names no
+  platform, warms only lines on the machine that saved it.
 - A check starts from the warm caches of its state, but its build output is not kept.
 - gc keeps the cache snapshots of line heads and of the newest `retention.caches` (5) states
   with caches; the states themselves stay.
@@ -204,6 +209,12 @@ enough to save, is the choice of the program on top.
   `projects/<p>/lines/<name>`: snapshots, deletes and writes of the service go through the
   store's own folders, which no user can replace. A link (`ln -s <line folder> ~/code/topic`)
   puts a line at any path; layr finds the line from the real path.
+- **A folder view of states for readers** (`projects/<p>/states/<id>/` opened to readers).
+  layr cannot check readers on such a folder: the kernel checks only file modes. The snapshots
+  keep the modes of the line owner (a line folder is 0700, private files 0600), and a read-only
+  snapshot takes no access list, so readers would see some files and not others. `states/` also
+  holds automatic states of working content and cache snapshots. Readers read states through the
+  service (`show`, `diff`, `grep`), or get a copy of their own with `try --keep` or `export`.
 - **Handing rights on by any user** (delegation chains as in Biscuit or UCAN). A user cannot
   share writing in its line through layr, because the line folder is a Unix folder of that user;
   and chains of rights from users who are not admins make the effective rights hard to see.

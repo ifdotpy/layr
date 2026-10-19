@@ -61,6 +61,15 @@ impl Status {
     }
 }
 
+/// Whether a cache saved on `saved` (None: by an older layr) may warm a line on the platform
+/// `local`. `here`: the cache was saved on this machine.
+pub fn cache_fits(saved: Option<&str>, local: &str, here: bool) -> bool {
+    match saved {
+        Some(p) => p == local,
+        None => here,
+    }
+}
+
 pub fn skip_path(p: &str) -> bool {
     p == ".git" || p.starts_with(".git/")
 }
@@ -338,6 +347,7 @@ impl<'a> Repo<'a> {
             caches: BTreeMap::new(),
             cache_by: None,
             cache_shared: false,
+            cache_platform: None,
         })
     }
 
@@ -397,6 +407,7 @@ impl<'a> Repo<'a> {
             caches: BTreeMap::new(),
             cache_by: None,
             cache_shared: false,
+            cache_platform: None,
         })
     }
 
@@ -980,9 +991,12 @@ impl<'a> Repo<'a> {
     /// own, or else the one of its nearest ancestor that has one on this machine (the build
     /// output closest to the line's content). A cache made by another user is taken only if it
     /// was made on a protected line (`cache_shared`): a cache holds code that review does not see.
+    /// A cache is taken only on the platform it was saved on (`model::cache_platform`); a cache
+    /// of an older layr that does not name its platform only on the machine that saved it.
     pub fn warm_cache(&self, state: &str, path: &str, uid: u32) -> Result<Option<PathBuf>> {
         const SEARCH: usize = 200;
         let local = self.p.store.machine.id.clone();
+        let platform = crate::model::cache_platform();
         let mut seen = BTreeSet::new();
         let mut q = std::collections::VecDeque::from([state.to_string()]);
         while let Some(id) = q.pop_front() {
@@ -1001,7 +1015,9 @@ impl<'a> Repo<'a> {
                 let owner_of_line = rec.line.as_ref().and_then(|l| self.p.db.line_by_id(l).ok().flatten()).map(|l| l.owner);
                 let allowed = rec.cache_shared || rec.cache_by == Some(uid) || owner_of_line == Some(uid);
                 // Another state's cache only from this machine; the state's own also after a move.
-                if src.exists() && allowed && (id == state || self.p.db.state_machine(&id)?.as_deref() == Some(local.as_str())) {
+                let here = self.p.db.state_machine(&id)?.as_deref() == Some(local.as_str());
+                if src.exists() && allowed && cache_fits(rec.cache_platform.as_deref(), &platform, here) && (id == state || here)
+                {
                     return Ok(Some(src));
                 }
             }
@@ -1358,4 +1374,21 @@ pub fn holds_files(root: &Path, path: &str) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod cache_platform_tests {
+    use super::cache_fits;
+
+    #[test]
+    fn a_cache_warms_only_lines_of_its_platform() {
+        // A Mac build in a Linux line: never, also after a move to this machine.
+        assert!(!cache_fits(Some("macos-aarch64"), "linux-aarch64", false));
+        assert!(!cache_fits(Some("macos-aarch64"), "linux-aarch64", true));
+        assert!(!cache_fits(Some("linux-x86_64"), "linux-aarch64", false));
+        assert!(cache_fits(Some("linux-aarch64"), "linux-aarch64", false));
+        // An older record names no platform: only a cache saved on this machine.
+        assert!(cache_fits(None, "linux-aarch64", true));
+        assert!(!cache_fits(None, "linux-aarch64", false));
+    }
 }

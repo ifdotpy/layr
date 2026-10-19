@@ -659,6 +659,7 @@ pub fn next_state(
         caches: BTreeMap::new(),
         cache_by: None,
         cache_shared: false,
+        cache_platform: None,
     })
 }
 

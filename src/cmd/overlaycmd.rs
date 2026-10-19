@@ -107,6 +107,7 @@ fn create(ctx: &Ctx, args: &[String]) -> Result<i32> {
             caches: BTreeMap::new(),
             cache_by: None,
             cache_shared: false,
+            cache_platform: None,
         };
         let mut rec = Record::new("commit");
         rec.states.push(st);

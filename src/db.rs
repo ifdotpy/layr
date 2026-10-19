@@ -391,6 +391,15 @@ impl Db {
                             }
                             v.as_object_mut().unwrap().remove("cache_by");
                             v.as_object_mut().unwrap().remove("cache_shared");
+                            v.as_object_mut().unwrap().remove("cache_platform");
+                            // The platform of the newest save; all saves of a state are made on
+                            // its own machine.
+                            match d.get("platform").and_then(|x| x.as_str()) {
+                                Some(p) => v["layer_platform"] = serde_json::json!(p),
+                                None => {
+                                    v.as_object_mut().unwrap().remove("layer_platform");
+                                }
+                            }
                             v["layer_by"] = serde_json::json!(rec.actor.uid);
                             v["layer_shared"] = serde_json::json!(d.get("shared").and_then(|x| x.as_bool()).unwrap_or(false));
                             tx.execute("UPDATE states SET rec=?2 WHERE id=?1", params![st, v.to_string()])?;
@@ -758,6 +767,7 @@ mod tests {
             caches: Default::default(),
             cache_by: None,
             cache_shared: false,
+            cache_platform: None,
         });
         r
     }
@@ -819,6 +829,27 @@ mod tests {
         {
             assert_eq!(db.cache_uuid(st, &format!("{st}@{path}")).unwrap().as_deref(), Some(uuid));
         }
+        // Records of an older layr name no platform.
+        assert_eq!(s.cache_platform, None);
+        let _ = std::fs::remove_file(&dir);
+    }
+
+    #[test]
+    fn a_state_keeps_the_platform_of_its_caches() {
+        let dir = std::env::temp_dir().join(format!("layr-db-platform-{}", std::process::id()));
+        let db = Db::open(&dir).unwrap();
+        let st = "01a12290-0000-7000-8000-00000000c1c1";
+        let machine = "01a12290-0000-7000-8000-00000000aaaa";
+        db.derive(&state_record(1, st, vec![]), &|_| true, machine).unwrap();
+        let mut r = Record::new("save.layers");
+        r.id = "01a12290-0000-7000-8000-000000000002".into();
+        r.machine = machine.into();
+        r.seq = 2;
+        r.time = 2;
+        let snap = format!("{st}@target");
+        r.data = serde_json::json!({"state": st, "layers": {"target": snap}, "uuids": {snap: "01a12290-0000-7000-8000-000000000003"}, "shared": false, "platform": "macos-aarch64"});
+        db.derive(&r, &|_| true, machine).unwrap();
+        assert_eq!(db.state(st).unwrap().unwrap().cache_platform.as_deref(), Some("macos-aarch64"));
         let _ = std::fs::remove_file(&dir);
     }
 

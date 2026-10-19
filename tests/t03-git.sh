@@ -91,6 +91,36 @@ no "the git-sync remote name is reserved" l remote add git-sync $R
 l push -q origin view-1
 eq "a later push sends the same commit" "$cv" "$(git -C $R rev-parse view-1)"
 
+# Every move of the head points .git HEAD at the commit of the new head: the commit that a push
+# sends for it, with the previous head's commit as parent. Tools that read git HEAD see the head.
+echo h1 > head.txt; l add head.txt; l commit -qm "head 1"
+h1=$(git rev-parse HEAD)
+eq "commit: .git HEAD has the tree of the new head" "$(l rev-parse 'HEAD^{tree}')" "$(git rev-parse 'HEAD^{tree}')"
+eq "commit: its parent is the commit of the previous head" "$cv" "$(git rev-parse HEAD^)"
+eq "commit: its subject is the message" "head 1" "$(git log -1 --format=%s)"
+eq "commit: clean for git" "" "$(git status --short)"
+has "commit: the commit is the newest record (no export record)" " commit " "$(l op log --all -n 1)"
+eq "layr reads the commit id of .git HEAD" "$(l rev-parse HEAD)" "$(l rev-parse $h1)"
+echo h2 >> head.txt; l commit -qam "head 2"
+eq "the next commit moves HEAD forward" "$h1" "$(git rev-parse HEAD^)"
+l commit -q --amend -m "head 2 amended"
+eq "amend: HEAD is the amended state on the same parent" "$h1 head 2 amended" "$(git rev-parse HEAD^) $(git log -1 --format=%s)"
+l reset -q --hard HEAD~1
+eq "reset: HEAD is the commit of the state it went to" "$h1" "$(git rev-parse HEAD)"
+eq "reset: clean for git" "" "$(git status --short)"
+echo h3 >> head.txt; l commit -qam "head 3"
+h3=$(git rev-parse HEAD)
+l push -q origin head-3
+eq "a push sends the commit that .git HEAD shows" "$h3" "$(git -C $R rev-parse head-3)"
+eq "and HEAD stays" "$h3" "$(git rev-parse HEAD)"
+
+# try: a temporary copy of a state, with that state's commit in its .git folder.
+l try -q HEAD~1 -- sh -c 'git rev-parse HEAD; git status --porcelain; cat head.txt' > $T/try.out
+eq "try: .git HEAD of the copy is the commit of the state, clean" "$h1 h1" "$(xargs < $T/try.out)"
+eq "try: the line did not change" "$h3" "$(git rev-parse HEAD)"
+has "try: a missing command is named" "cannot run 'no-such-command-x'" "$(l try -q HEAD -- no-such-command-x 2>&1)"
+has "try: a bad revision is named" "layr try: unknown revision 'nope'" "$(l try -q nope -- true 2>&1)"
+
 # A branch made by someone else, merged here.
 cd $U; git checkout -q -b feature origin/main; echo feat > f.txt; git add f.txt; git commit -qm "feature work"; git push -q origin feature
 cd $LAYR_ROOT/projects/gp/lines/main

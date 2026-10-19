@@ -67,7 +67,7 @@ pub fn resolve(repo: &Repo, line: Option<&Line>, rev: &str) -> Result<String> {
 fn need_line<'a>(line: Option<&'a Line>, rev: &str) -> Result<&'a Line> {
     match line {
         Some(l) => Ok(l),
-        None => bail!("{rev}: not in a line"),
+        None => bail!("{rev}: not in a line; name a line, tag or state id instead, or add --line <name>"),
     }
 }
 
@@ -136,6 +136,12 @@ fn base_state(repo: &Repo, line: Option<&Line>, name: &str) -> Result<String> {
         let g = repo.p.db.state_of_commit(&lower)?;
         if g.len() == 1 {
             return Ok(g[0].clone());
+        }
+        // A commit that layr made without a record: `git rev-parse HEAD` in a line.
+        if g.is_empty() {
+            if let Some(st) = crate::gitbridge::state_of_history_commit(repo, &lower)? {
+                return Ok(st);
+            }
         }
     }
     bail!("unknown revision '{name}'")
