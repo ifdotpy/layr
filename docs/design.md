@@ -165,6 +165,11 @@ is valid for a state, so it never decides that by itself:
 - A cache made by another user goes to a line only if it was saved on a protected line, because
   a cache holds code that review does not see. Other caches go only to lines of the user who
   made them.
+- A cache is build output for one operating system and processor. Each save records its
+  platform (`<os>-<arch>`, for example `linux-aarch64` or `macos-aarch64`), and a line takes a
+  cache only on the same platform, so a live move (`sync --caches`) between a Mac and a Linux
+  machine never puts Mac binaries into a Linux line. A cache of an older layr, which names no
+  platform, warms only lines on the machine that saved it.
 - A check starts from the warm caches of its state, but its build output is not kept.
 - gc keeps the cache snapshots of line heads and of the newest `retention.caches` (5) states
   with caches; the states themselves stay.

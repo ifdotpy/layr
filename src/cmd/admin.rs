@@ -124,7 +124,7 @@ pub fn record_caches(
         uuids.insert(snap.clone(), serde_json::Value::String(info.uuid));
     }
     let mut rec = Record::new("save.layers");
-    rec.data = serde_json::json!({"state": state, "layers": caches, "uuids": uuids, "shared": shared});
+    rec.data = serde_json::json!({"state": state, "layers": caches, "uuids": uuids, "shared": shared, "platform": crate::model::cache_platform()});
     repo.commit_record(ctx, rec).map_err(undo)?;
     Ok(caches)
 }
