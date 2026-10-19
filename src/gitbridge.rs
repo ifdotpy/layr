@@ -600,7 +600,7 @@ pub fn make_commit(repo: &Repo, state: &StateRec, message: Option<&str>) -> Resu
         }
     }
     let parents: Vec<String> = anc.iter().map(|(_, c)| c.clone()).collect();
-    let c = commit_tree(repo, state, anc.as_ref(), &parents, message)?;
+    let c = commit_tree(repo, state, anc.as_ref(), &parents, message, &format!("refs/layr/squash/{}", ids::display(&state.id)))?;
     Ok((c, parents.into_iter().next()))
 }
 
@@ -617,7 +617,7 @@ pub fn tree_of(repo: &Repo, state: &str) -> Result<String> {
 pub fn object_of(repo: &Repo, state: &str, path: &str) -> Result<Option<String>> {
     let commit = match commit_of(repo, state)? {
         Some(c) => c,
-        None => make_commit(repo, &repo.state(state)?, None)?.0,
+        None => export_history(repo, state)?.0,
     };
     let spec = format!("{commit}:{path}");
     let out =
@@ -630,11 +630,58 @@ pub fn object_of(repo: &Repo, state: &str, path: &str) -> Result<Option<String>>
     }
 }
 
-/// The commit of a state in the git store, if it has one.
+/// The commit of a state in the git store, if it has one: the commit a record names (import,
+/// push, git-sync), or else the history commit made for the state without a record
+/// (`history_commit`).
 fn commit_of(repo: &Repo, state: &str) -> Result<Option<String>> {
+    if let Some(c) = recorded_commit(repo, state)? {
+        return Ok(Some(c));
+    }
+    history_commit(repo, state)
+}
+
+/// The commit that a record names for a state (import, push, git-sync), if it is in the store.
+fn recorded_commit(repo: &Repo, state: &str) -> Result<Option<String>> {
     if let Some(c) = repo.p.db.git_commit_of(state)? {
         if git_out(&store(repo), &["cat-file", "-e", &format!("{c}^{{commit}}")]).is_ok() {
             return Ok(Some(c));
+        }
+    }
+    Ok(None)
+}
+
+/// The ref of the history commit of a state: the commit `export_history` makes for it, with the
+/// commits of its parent states as parents. The same state always gives the same commit, so the
+/// ref only saves the work of making it again; it is not a record and leaves the machine only
+/// in a push. (Commits of `push --squash` have other parents: `refs/layr/squash/<state>`.)
+fn history_ref(state: &str) -> String {
+    format!("refs/layr/states/{}", ids::display(state))
+}
+
+fn history_commit(repo: &Repo, state: &str) -> Result<Option<String>> {
+    let spec = format!("{}^{{commit}}", history_ref(state));
+    Ok(git_out(&store(repo), &["rev-parse", "--verify", "-q", &spec])
+        .ok()
+        .map(|c| c.trim().to_string())
+        .filter(|c| !c.is_empty()))
+}
+
+/// The state of a git commit that layr made without a record (a history commit, for example the
+/// `HEAD` of a line's `.git` folder). `name` is a full commit id or a prefix.
+pub fn state_of_history_commit(repo: &Repo, name: &str) -> Result<Option<String>> {
+    if !has_store(repo) {
+        return Ok(None);
+    }
+    let s = store(repo);
+    let commit = match git_out(&s, &["rev-parse", "--verify", "-q", &format!("{name}^{{commit}}")]) {
+        Ok(c) => c.trim().to_string(),
+        Err(_) => return Ok(None),
+    };
+    let refs = git_out(&s, &["for-each-ref", "--format=%(refname)", "--points-at", &commit, "refs/layr/states/"])?;
+    for r in refs.lines() {
+        let display = r.trim_start_matches("refs/layr/states/");
+        if let Some(st) = repo.p.db.states_by_prefix(display)?.into_iter().find(|st| ids::display(st) == display) {
+            return Ok(Some(st));
         }
     }
     Ok(None)
@@ -648,6 +695,7 @@ pub fn export_history(repo: &Repo, state: &str) -> Result<(String, Vec<(String, 
     let mut order: Vec<String> = Vec::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut stack: Vec<(String, bool)> = vec![(state.to_string(), false)];
+    let mut made = Vec::new();
     while let Some((s, parents_done)) = stack.pop() {
         if parents_done {
             order.push(s);
@@ -656,7 +704,13 @@ pub fn export_history(repo: &Repo, state: &str) -> Result<(String, Vec<(String, 
         if !seen.insert(s.clone()) {
             continue;
         }
-        if let Some(c) = commit_of(repo, &s)? {
+        if let Some(c) = recorded_commit(repo, &s)? {
+            known.insert(s, c);
+            continue;
+        }
+        // A history commit made earlier without a record: a record of this export names it.
+        if let Some(c) = history_commit(repo, &s)? {
+            made.push((s.clone(), c.clone()));
             known.insert(s, c);
             continue;
         }
@@ -666,7 +720,6 @@ pub fn export_history(repo: &Repo, state: &str) -> Result<(String, Vec<(String, 
             stack.push((p.clone(), false));
         }
     }
-    let mut made = Vec::new();
     for s in order {
         let rec = repo.state(&s)?;
         let parents: Vec<String> = rec
@@ -675,7 +728,7 @@ pub fn export_history(repo: &Repo, state: &str) -> Result<(String, Vec<(String, 
             .map(|p| known.get(p).cloned().ok_or_else(|| anyhow!("no commit for state {}", ids::short(p))))
             .collect::<Result<_>>()?;
         let base = rec.parents.first().map(|p| (p.clone(), known[p].clone()));
-        let c = commit_tree(repo, &rec, base.as_ref(), &parents, None)?;
+        let c = commit_tree(repo, &rec, base.as_ref(), &parents, None, &history_ref(&s))?;
         known.insert(s.clone(), c.clone());
         made.push((s, c));
     }
@@ -685,12 +738,14 @@ pub fn export_history(repo: &Repo, state: &str) -> Result<(String, Vec<(String, 
 
 /// Write the commit of a state: the tree from the index of `base` (a state with its commit) plus
 /// the paths that changed since, the given parent commits, author and committer from the state.
+/// `refname` is set to the commit.
 fn commit_tree(
     repo: &Repo,
     state: &StateRec,
     base: Option<&(String, String)>,
     parents: &[String],
     message: Option<&str>,
+    refname: &str,
 ) -> Result<String> {
     let s = init_store(repo)?;
     let root = repo.state_root(&state.id)?;
@@ -700,9 +755,8 @@ fn commit_tree(
         match base {
             Some((ast, ac)) => {
                 let ai = index_path(repo, ast);
-                if ai.exists() {
-                    std::fs::copy(&ai, &tmp_idx)?;
-                } else {
+                // gc may remove a kept index at any time: then the tree of the commit is read.
+                if !ai.exists() || std::fs::copy(&ai, &tmp_idx).is_err() {
                     let out = base_cmd(&s).env("GIT_INDEX_FILE", &tmp_idx).args(["read-tree", ac]).output()?;
                     if !out.status.success() {
                         bail!("git read-tree failed");
@@ -790,17 +844,70 @@ fn commit_tree(
             bail!("git commit-tree failed: {}", String::from_utf8_lossy(&out.stderr));
         }
         let commit = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        git_out(&s, &["update-ref", &format!("refs/layr/states/{}", ids::display(&state.id)), &commit])?;
+        git_out(&s, &["update-ref", refname, &commit])?;
         // Keep the index for the next export and for lines made from this state.
-        let dst = index_path(repo, &state.id);
-        if !dst.exists() {
-            std::fs::copy(&tmp_idx, &dst).context("keep the git index of the exported state")?;
-            let _ = refresh_index(repo, &state.id);
-        }
+        keep_index(repo, &state.id, &tmp_idx)?;
         Ok(commit)
     })();
     let _ = std::fs::remove_file(&tmp_idx);
     res
+}
+
+/// Keep `idx` as the index of `state` unless it has one. The file appears complete or not at
+/// all: other processes copy kept indexes without the project lock.
+fn keep_index(repo: &Repo, state: &str, idx: &Path) -> Result<()> {
+    let dst = index_path(repo, state);
+    if dst.exists() {
+        return Ok(());
+    }
+    let tmp = dst.with_file_name(format!("{state}.{}.tmp", ids::new_id()));
+    let r = std::fs::copy(idx, &tmp).map(|_| ()).and_then(|_| std::fs::rename(&tmp, &dst));
+    if r.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    r.context("keep the git index of the exported state")?;
+    let _ = refresh_index(repo, state);
+    Ok(())
+}
+
+/// Remove kept indexes that nothing needs soon: a state keeps its index while it is the head of
+/// a line or a record names its commit (imports and exports). Others are made again when needed
+/// (`line_commit`). Leftover temporary files of an interrupted write go after an hour.
+pub fn prune_indexes(repo: &Repo) -> Result<usize> {
+    let dir = store(repo).join("layr-index");
+    let rd = match std::fs::read_dir(&dir) {
+        Ok(rd) => rd,
+        Err(_) => return Ok(0),
+    };
+    let heads: BTreeSet<String> = repo.p.db.lines()?.into_iter().map(|l| l.head).collect();
+    let mut n = 0;
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let remove = if name.ends_with(".tmp") {
+            e.metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .map(|t| t.elapsed().map(|x| x.as_secs() > 3600).unwrap_or(false))
+                .unwrap_or(false)
+        } else {
+            !heads.contains(&name) && repo.p.db.git_commit_of(&name)?.is_none()
+        };
+        if remove && std::fs::remove_file(e.path()).is_ok() {
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
+/// The commit that the `.git` folder of a line shows for `state`: the commit that `layr push`
+/// would send for exactly this state (made in the git store when it has none, without a record),
+/// and a kept index of that state whose stat data matches files copied from it.
+pub fn line_commit(repo: &Repo, state: &str) -> Result<String> {
+    let (c, _) = export_history(repo, state)?;
+    if !index_path(repo, state).exists() {
+        build_index(repo, state, &c, None)?;
+    }
+    Ok(c)
 }
 
 fn refresh_index(repo: &Repo, state: &str) -> Result<()> {
@@ -838,7 +945,8 @@ pub fn push(ctx: &Ctx, repo: &Repo, url: &str, commit: &str, branch: &str, force
 // ----- the .git folder of a line -----
 
 /// Give a new working folder a `.git` folder (a nested subvolume) so tools that call git see the
-/// nearest mapped commit. Objects come from the project store through `alternates`.
+/// commit of the folder's state (`line_commit`). Objects come from the project store through
+/// `alternates`.
 pub fn make_git_folder(repo: &Repo, line: &Line, state: &str, w: &Path) -> Result<()> {
     if !has_store(repo) {
         return Ok(());
@@ -862,7 +970,14 @@ pub fn make_git_folder(repo: &Repo, line: &Line, state: &str, w: &Path) -> Resul
         "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n\tcheckStat = minimal\n\ttrustctime = false\n\tlogallrefupdates = false\n",
     )?;
     std::fs::write(g.join("info/exclude"), "")?;
-    let anc = mapped_ancestor(repo, state).ok().flatten();
+    // The state's own commit; if it cannot be made, the nearest commit a record names.
+    let anc = match line_commit(repo, state) {
+        Ok(c) => Some((state.to_string(), c)),
+        Err(e) => {
+            eprintln!("warning: .git folder shows an older commit: {e:#}");
+            mapped_ancestor(repo, state).ok().flatten()
+        }
+    };
     match &anc {
         Some((_, c)) => std::fs::write(g.join("HEAD"), format!("{c}\n"))?,
         None => std::fs::write(g.join("HEAD"), "ref: refs/heads/main\n")?,
@@ -898,7 +1013,10 @@ pub fn make_git_folder(repo: &Repo, line: &Line, state: &str, w: &Path) -> Resul
     Ok(())
 }
 
-/// Point the `.git` folder of a line at the commit of a new head (after an export or import).
+/// Point the `.git` folder of a line at the commit of its head (`line_commit`) after every move
+/// of the head: commit, amend, merge, reset, undo, pull, push. So `git rev-parse HEAD` in a line
+/// is the commit of the line's head, the same id that `layr push` sends. When the commit cannot
+/// be made, `HEAD` stays as it was and the error is returned.
 /// The folder belongs to the line owner, so all access goes through descriptors of the `.git`
 /// folder and never follows a link the owner made.
 pub fn refresh_git_folder(repo: &Repo, line: &Line) -> Result<()> {
@@ -915,31 +1033,30 @@ pub fn refresh_git_folder(repo: &Repo, line: &Line) -> Result<()> {
     }
     // A HEAD that is not a regular file (for example a link) is replaced.
     let cur = fsutil::read_at(&dir, "HEAD").map(|c| String::from_utf8_lossy(&c).trim().to_string()).unwrap_or_default();
-    if let Some((ast, c)) = mapped_ancestor(repo, &line.head)? {
-        if cur == c {
-            return Ok(());
-        }
-        let own = Some(repo.owner_ids(line));
-        let head = format!("{c}\n");
-        fsutil::replace_at(&dir, "HEAD", &mut |f| Ok((&*f).write_all(head.as_bytes())?), own)?;
-        // The index of the mapped state: its stat data matches files copied from that state.
-        let idx = index_path(repo, &ast);
-        if idx.exists() {
-            fsutil::replace_at(
-                &dir,
-                "index",
-                &mut |f| {
-                    let src = std::fs::File::open(&idx)?;
-                    if crate::storage::clone_file(&src, f).is_err() {
-                        std::io::copy(&mut std::fs::File::open(&idx)?, &mut &*f)?;
-                    }
-                    Ok(())
-                },
-                own,
-            )?;
-        } else {
-            fsutil::unlink_at(&dir, "index");
-        }
+    let c = line_commit(repo, &line.head)?;
+    if cur == c {
+        return Ok(());
+    }
+    let own = Some(repo.owner_ids(line));
+    let head = format!("{c}\n");
+    fsutil::replace_at(&dir, "HEAD", &mut |f| Ok((&*f).write_all(head.as_bytes())?), own)?;
+    // The index of the head state: its stat data matches files copied from that state.
+    let idx = index_path(repo, &line.head);
+    if idx.exists() {
+        fsutil::replace_at(
+            &dir,
+            "index",
+            &mut |f| {
+                let src = std::fs::File::open(&idx)?;
+                if crate::storage::clone_file(&src, f).is_err() {
+                    std::io::copy(&mut std::fs::File::open(&idx)?, &mut &*f)?;
+                }
+                Ok(())
+            },
+            own,
+        )?;
+    } else {
+        fsutil::unlink_at(&dir, "index");
     }
     Ok(())
 }

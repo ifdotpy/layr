@@ -137,6 +137,12 @@ fn base_state(repo: &Repo, line: Option<&Line>, name: &str) -> Result<String> {
         if g.len() == 1 {
             return Ok(g[0].clone());
         }
+        // A commit that layr made without a record: `git rev-parse HEAD` in a line.
+        if g.is_empty() {
+            if let Some(st) = crate::gitbridge::state_of_history_commit(repo, &lower)? {
+                return Ok(st);
+            }
+        }
     }
     bail!("unknown revision '{name}'")
 }

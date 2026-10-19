@@ -719,6 +719,9 @@ pub fn run_gc(ctx: &Ctx, repo: &Repo, dry: bool) -> Result<Vec<String>> {
     }
     let caches = prune_caches(repo)?;
     repo.prune_all_bases()?;
+    if crate::gitbridge::has_store(repo) {
+        crate::gitbridge::prune_indexes(repo)?;
+    }
     if !deleted.is_empty() || !caches.is_empty() {
         let mut rec = Record::new("gc");
         rec.data = serde_json::json!({"deleted": deleted, "caches": caches});
