@@ -169,4 +169,24 @@ eq "with the given message" "task" "$(git --git-dir=$T/r.git log -1 --format=%s 
 eq "the git store is closed" "750" "$(stat -c %a $LAYR_ROOT/projects/p/git)"
 ok "a member of a group with a role reads git objects" runuser -u layr-u3 -- ls $LAYR_ROOT/projects/p/git/objects
 no "a user without a role does not" runuser -u nobody -- ls $LAYR_ROOT/projects/p/git/objects
+
+# 9. A reader without a line reads every state through the service and changes nothing. The
+# socket is open to every user; the service decides by the caller's uid and role.
+eq "the socket is open to every user" "666" "$(stat -c %a $LAYR_SOCKET)"
+id layr-r1 >/dev/null 2>&1 || useradd -m layr-r1
+has "a user without a role is refused by the service, not by the socket" "may not read project p" "$(as layr-r1 $L --project p show main:notes.txt 2>&1)"
+as layr-admin $L --project p access grant layr-r1 reader
+eq "a reader reads the log of a line" "$(l --project p --line main log --oneline)" "$(as layr-r1 $L --project p --line main log --oneline)"
+eq "a reader shows a file of a state" "$(l --project p show main:notes.txt)" "$(as layr-r1 $L --project p show main:notes.txt)"
+eq "a reader diffs two states" "$(l --project p diff main~1 main)" "$(as layr-r1 $L --project p diff main~1 main)"
+eq "a reader diffs states of two lines" "$(l --project p diff main u1)" "$(as layr-r1 $L --project p diff main u1)"
+eq "a reader lists the files of a line" "$(l --project p --line main ls-files)" "$(as layr-r1 $L --project p --line main ls-files)"
+eq "a reader searches a state" "$(l --project p grep -n 'line 1' main)" "$(as layr-r1 $L --project p grep -n 'line 1' main)"
+eq "a reader resolves a state" "$(l --project p rev-parse u1)" "$(as layr-r1 $L --project p rev-parse u1)"
+ok "a reader tests another user's state in a temporary copy" as layr-r1 $L --project p try -q u1 -- test -f a.txt
+eq "the try copy is gone" "" "$(ls -a $P | grep '^\.try-')"
+has "HEAD needs a line" "add --line <name>" "$(as layr-r1 $L --project p log 2>&1)"
+has "a command outside a line names --project" "--project <name>" "$(as layr-r1 $L log 2>&1)"
+no "a reader makes no line" as layr-r1 $L --project p branch -q r1 main
+no "a reader does not commit in another user's line" in_line layr-r1 u1 commit --allow-empty -qm intrude
 finish

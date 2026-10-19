@@ -40,7 +40,7 @@ impl<'a> Here<'a> {
     pub fn line(&self) -> Result<&Line> {
         match &self.line {
             Some(l) => Ok(l),
-            None => bail!("not in a line: cd into lines/<name> of project {}", self.repo.p.name),
+            None => bail!("not in a line: cd into lines/<name> of project {}, or add --line <name>", self.repo.p.name),
         }
     }
 

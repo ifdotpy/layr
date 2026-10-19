@@ -170,7 +170,7 @@ service; root can run every command directly.
 | state     | read-only snapshot + signed record (id, parents, author, message, conflicts). A commit.    |
 | line      | writable snapshot at `projects/<p>/lines/<name>` with an owner and a head state             |
 | auto state| a snapshot of the working content: before every changing command, on `layr save`, and every 10 minutes when the content changed (the service) |
-| cache     | a folder of regenerable content (such as a Rust `target`) kept as a nested subvolume: outside states, diffs and backups. A new line starts with a reflink copy of the nearest ancestor's cache (another user's only from a protected line). Caches come only from `layr save --caches`; layr never keeps build output by itself. Cache folders: `layr cache add` and the folders that `.layrattributes` files mark `regenerable`; a folder with files in the head state is no cache |
+| cache     | a folder of regenerable content (such as a Rust `target`) kept as a nested subvolume: outside states, diffs and backups. A new line starts with a reflink copy of the nearest ancestor's cache (another user's only from a protected line; only one saved on the same platform, `<os>-<arch>`). Caches come only from `layr save --caches`; layr never keeps build output by itself. Cache folders: `layr cache add` and the folders that `.layrattributes` files mark `regenerable`; a folder with files in the head state is no cache |
 | session   | a free-text label of the program that runs layr (`LAYR_SESSION`): shown in `op log` and used by `undo` to find "my last operation"; layr never decides permissions by it |
 | record    | one signed operation (Ed25519, UUIDv7 ids) in the project database; undo restores pointers |
 | role      | reader, writer, maintainer or admin of a user, a Unix group or everyone, per project and machine |
@@ -232,6 +232,54 @@ folder. A path that the exported commit does not have fails with exit 128.
 The design and the reasons for it, including what layr leaves to programs built on it, are in
 `docs/design.md`.
 
+## Reading and testing other states
+
+A user with the reader role (or a line of their own) reads every state of the project through
+the service. A line is not needed: name the project with `--project` (and a line with `--line`
+when the command reads a line's head, index or working content).
+
+| Task | Command |
+| --- | --- |
+| history of a line | `layr --project app --line main log --oneline` |
+| one file of a state | `layr --project app show <state>:<path>` (`<state>:<folder>` lists the folder) |
+| changes between two states | `layr --project app diff <state1> <state2>`, `diff main...topic-1` |
+| files of a line's index | `layr --project app --line main ls-files` |
+| search a state | `layr --project app grep <pattern> <state>` |
+| git ids of a state | `layr --project app rev-parse <state>^{tree}`, `rev-parse <state>:<path>` |
+
+`layr try <state> -- <command>...` runs a command in a temporary copy of any state the caller may
+read, for example tests of another user's line:
+
+```sh
+layr --project app try topic-1 -- cargo test          # the head of bob's line topic-1
+layr try HEAD~1 -- sh -c 'git log -1 && make check'  # an older state of your own line
+```
+
+- The copy is a new folder `lines/.try-<random>` that belongs to the caller. It holds the full
+  content of the state, a `.git` folder whose `HEAD` is the state's commit (see "Git in a line"),
+  and warm caches by the usual rules. `git status` in it is clean.
+- The command runs as the caller, from the root of the copy, with the caller's environment
+  except the variables that would point git or layr elsewhere (`GIT_DIR`, `GIT_WORK_TREE`,
+  `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, `GIT_COMMON_DIR`, `LAYR_LINE`). `LAYR_TRY_STATE` is
+  the state id and `LAYR_PROJECT` the project.
+- The caller's line does not change. The copy is deleted afterwards (`--keep` keeps it and prints
+  its path); the exit code is the command's, and the result is recorded as a check of the state
+  (`layr checks <state>`).
+- It needs the `try` action (the reader role, or a line of your own), not write access.
+
+## Git in a line
+
+In a project with a git store (a clone, or a project with a remote), each line has a `.git`
+folder for tools that call git. Its objects come from the project store. After every move of the
+line's head (commit, amend, merge, reset, undo, pull, push), `HEAD` is the commit of the new head:
+the commit that `layr push` sends for that state, with the commit of the previous state as its
+parent, and the index of that state. So `git rev-parse HEAD` changes only when the head moves,
+`git status` shows only the uncommitted changes, and `layr rev-parse <commit>` finds the state of
+such a commit. The commit is made in the local git store only; nothing leaves the machine before
+a push. A push with `--squash` sends another commit for the same state; `HEAD` then shows that
+commit. `layr git-sync` also records the commits of the head and its ancestors, as a push does.
+A `.git` folder that the line owner made instead is left alone.
+
 ## Merge engine
 
 Change lists of both sides come from `btrfs send --no-data` against the common base. A path
@@ -270,6 +318,13 @@ its record and the derived rows. After a crash only a snapshot without a record 
 
 - The service runs as root; every other user is a client (`SO_PEERCRED`). Clients cannot read
   `states/` or the database; they read history through layr.
+- The socket (`/run/layr/layr.sock`, mode 0666 in a folder of mode 0755) is open to every local
+  user: the service decides each request by the caller's uid, groups and role, so a reader runs
+  every read command. A connection refused with "Operation not permitted" (EPERM) never comes
+  from layr: a sandbox or seccomp filter of the calling process refused the `connect()` system
+  call (for example a filter that denies `connect` for every socket family when network access is
+  off). Such a process needs `connect()` to the socket allowed, or must run layr outside that
+  sandbox; the client error says so.
 - The git object store (`git/`) holds history too. Its folder alone decides who reads it: open
   to the users and groups with a role and the owners of lines (an access list, or `0755` when
   everyone may read). git writes below it with `core.sharedRepository=0644`, so a strict umask

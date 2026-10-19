@@ -67,7 +67,7 @@ pub fn resolve(repo: &Repo, line: Option<&Line>, rev: &str) -> Result<String> {
 fn need_line<'a>(line: Option<&'a Line>, rev: &str) -> Result<&'a Line> {
     match line {
         Some(l) => Ok(l),
-        None => bail!("{rev}: not in a line"),
+        None => bail!("{rev}: not in a line; name a line, tag or state id instead, or add --line <name>"),
     }
 }
 

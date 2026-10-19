@@ -66,12 +66,7 @@ fn recv_with_fds(sock: &UnixStream, buf: &mut [u8]) -> Result<(usize, Vec<OwnedF
 /// Client: run a command through the service. Returns the exit code.
 pub fn forward(argv: &[String]) -> Result<i32> {
     let path = socket_path();
-    let sock = UnixStream::connect(&path).map_err(|e| {
-        anyhow!(
-            "cannot reach the layr service at {} ({e}). Start it as root with 'layr daemon', or run layr as root.",
-            path.display()
-        )
-    })?;
+    let sock = UnixStream::connect(&path).map_err(|e| connect_error(&path, &e))?;
     let cwd = std::env::current_dir()?;
     let env: HashMap<String, String> = std::env::vars().collect();
     let req = serde_json::to_vec(&serde_json::json!({"argv": argv, "cwd": cwd, "env": env}))?;
@@ -101,6 +96,37 @@ pub fn forward(argv: &[String]) -> Result<i32> {
     let mut code = [0u8; 4];
     (&sock).read_exact(&mut code).context("the layr service closed the connection")?;
     Ok(i32::from_be_bytes(code))
+}
+
+/// Why a client could not connect, and what to do. The service opens its socket to every local
+/// user (mode 0666 in a 0755 folder) and decides each request by the caller's uid; so a refused
+/// connection comes from the client's side or from a missing service, never from a role.
+fn connect_error(path: &Path, e: &std::io::Error) -> anyhow::Error {
+    let at = path.display();
+    match e.raw_os_error() {
+        // connect() itself refused by a system call filter (seccomp) or a sandbox profile: the
+        // service never saw the request. File permissions give EACCES, not EPERM.
+        Some(code) if code == rustix::io::Errno::PERM.raw_os_error() => anyhow!(
+            "cannot connect to the layr service at {at} ({e}). The socket is open to every user; the \
+             connect() system call was refused before it reached the service, usually by a sandbox or \
+             seccomp filter of this process. Run layr outside that sandbox, or allow connect() to {at}."
+        ),
+        Some(code) if code == rustix::io::Errno::ACCESS.raw_os_error() => anyhow!(
+            "cannot connect to the layr service at {at} ({e}). This user may not open the socket or a \
+             folder above it; the service makes the socket mode 0666 in a folder of mode 0755. Check \
+             those modes, or a security module (AppArmor, SELinux) that limits this process."
+        ),
+        Some(code)
+            if code == rustix::io::Errno::NOENT.raw_os_error() || code == rustix::io::Errno::CONNREFUSED.raw_os_error() =>
+        {
+            anyhow!(
+                "cannot reach the layr service at {at} ({e}). Start it as root with 'layr daemon', set \
+                 LAYR_SOCKET to its socket, or run layr as root. A sandbox that hides {at} gives the \
+                 same error."
+            )
+        }
+        _ => anyhow!("cannot reach the layr service at {at} ({e}). Start it as root with 'layr daemon', or run layr as root."),
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -410,5 +436,26 @@ mod tests {
         let (uid, gid, _) = super::peer_uid(&a).unwrap();
         assert_eq!(uid, rustix::process::geteuid().as_raw());
         assert_eq!(gid, rustix::process::getegid().as_raw());
+    }
+}
+
+#[cfg(test)]
+mod connect_tests {
+    use super::connect_error;
+    use std::path::Path;
+
+    fn msg(errno: rustix::io::Errno) -> String {
+        connect_error(Path::new("/run/layr/layr.sock"), &std::io::Error::from_raw_os_error(errno.raw_os_error())).to_string()
+    }
+
+    #[test]
+    fn a_refused_connect_names_its_cause() {
+        // EPERM: a filter of the client refused connect(); the socket itself is open.
+        assert!(msg(rustix::io::Errno::PERM).contains("sandbox or seccomp filter"));
+        // EACCES: file modes or a security module.
+        assert!(msg(rustix::io::Errno::ACCESS).contains("mode 0666"));
+        // No socket or no listener: the service is not running here.
+        assert!(msg(rustix::io::Errno::NOENT).contains("Start it as root"));
+        assert!(msg(rustix::io::Errno::CONNREFUSED).contains("Start it as root"));
     }
 }

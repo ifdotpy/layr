@@ -511,13 +511,20 @@ pub fn try_cmd(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let h = here(ctx)?;
     let repo = &h.repo;
     repo.require(ctx, "try")?;
-    let rev = a.pos.first().ok_or_else(|| exit(128, "usage: layr try <rev> -- <command>..."))?;
+    const USAGE: &str = "usage: layr try [--keep] [-q] <rev> -- <command>...\n\
+        Runs the command in a temporary copy of the state <rev> (with a .git folder at its commit) \
+        and deletes the copy afterwards; your line does not change.";
+    let rev = a.pos.first().ok_or_else(|| exit(128, USAGE))?;
     if a.paths.is_empty() {
-        return Err(exit(128, "usage: layr try <rev> -- <command>..."));
+        return Err(exit(128, USAGE));
     }
-    let state = revs::resolve(repo, h.line.as_ref(), rev)?;
-    // `try` is the caller's own command: it gets the caller's environment.
-    let env: Vec<(String, String)> = ctx.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let state = revs::resolve(repo, h.line.as_ref(), rev).map_err(|e| exit(128, format!("layr try: {e:#}")))?;
+    // `try` is the caller's own command: it gets the caller's environment, except the variables
+    // that would point git or layr at the caller's own folder instead of the copy.
+    const TO_COPY: &[&str] =
+        &["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR", "LAYR_LINE"];
+    let env: Vec<(String, String)> =
+        ctx.env.iter().filter(|(k, _)| !TO_COPY.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect();
     run_check_in(ctx, repo, &state, &a.paths, &a.paths.join(" "), &env, a.has("-q"), a.has("--keep"))
 }
 
@@ -563,8 +570,12 @@ fn run_check_in(
         // The caller's identity (uid, groups), never the service's.
         let mut env = env.to_vec();
         env.push(("LAYR_TRY_STATE".into(), ids::display(state)));
+        // layr commands in the copy read the project; the copy is no line of it.
+        env.retain(|(k, _)| k != "LAYR_PROJECT");
+        env.push(("LAYR_PROJECT".into(), repo.p.name.clone()));
         crate::privs::command_as(&mut c, ctx.caller.uid, &env)?;
-        let st = c.status()?;
+        let st =
+            c.status().map_err(|e| exit(127, format!("layr try: cannot run '{}' as user {}: {e}", argv[0], ctx.caller.user)))?;
         let code = st.code().unwrap_or(128);
         let _lock = repo.p.lock()?;
         let mut rec = Record::new("check");
