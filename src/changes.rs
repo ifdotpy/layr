@@ -153,8 +153,8 @@ pub fn really_changed(parent: &Path, child: &Path, c: &Change) -> Result<bool> {
     if o.is_dir() {
         return Ok(false);
     }
-    // APFS already compared every byte while it built these ranges. Both trees
-    // are read-only, so an empty result does not need another open and stat.
+    // The backend already proved equal data while it built these ranges.
+    // APFS also uses kernel clone IDs; live status reads validate generations.
     #[cfg(any(target_os = "macos", feature = "overlayfs"))]
     if o.is_file() && o.size == n.size && c.ranges.as_ref().is_some_and(|ranges| ranges.is_empty()) {
         return Ok(false);

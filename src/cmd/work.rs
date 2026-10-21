@@ -48,9 +48,16 @@ pub fn status(ctx: &Ctx, args: &[String]) -> Result<i32> {
         .flag("--no-renames");
     let a = parse(&spec, args)?;
     let h = here(ctx)?;
+    #[cfg(target_os = "macos")]
+    let _lock = h.repo.p.lock()?;
     let line = h.line()?.clone();
+    #[cfg(target_os = "macos")]
+    let line = h.repo.line(&line.id)?;
     h.repo.check_view(ctx, &line)?;
     let specs = h.specs(&a.rest())?;
+    #[cfg(target_os = "macos")]
+    let st = h.repo.status_report(&line)?;
+    #[cfg(not(target_os = "macos"))]
     let (st, _scan, _itemp, _index) = h.repo.status(&line)?;
     let porcelain = a.has("--porcelain");
     let short = a.has("-s") || porcelain;
@@ -268,7 +275,7 @@ fn stage_into(repo: &Repo, line: &Line, stage: &Path, scan: &Path, paths: &BTree
     }
     for p in paths {
         if fsutil::lmeta(scan, p).is_some() {
-            fsutil::copy_entry(scan, p, &stage, p, own)?;
+            fsutil::copy_index_entry(scan, p, &stage, p, own)?;
         } else if fsutil::lmeta(&stage, p).is_some() {
             fsutil::remove_entry(&stage, p)?;
             prune_empty(&stage, p);

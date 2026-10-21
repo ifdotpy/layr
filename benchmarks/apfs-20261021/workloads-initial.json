@@ -1,0 +1,982 @@
+{
+  "binary_sha256": "88602f0351b2d8d2bc4eb119369728f1e0ef6800e6cecc28c077ff2bdad04c18",
+  "rows": [
+    {
+      "kind": "density",
+      "parameter": 0,
+      "trial": 0,
+      "operation": "branch",
+      "wall": 0.9479930000000003,
+      "cpu": 0.7424280000000003,
+      "load": [
+        7.1416015625,
+        11.36474609375,
+        19.421875
+      ],
+      "trace": "trace      0.5 ms  open project\ntrace     21.3 ms  APFS scan before\ntrace    896.2 ms  APFS copy tree\ntrace     20.6 ms  APFS scan after\ntrace    938.8 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-0/store/projects/work/meta/work/01a15fd6-142a-7418-8848-5225ae13a491\ntrace      0.7 ms  record line.create\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 0,
+      "trial": 0,
+      "operation": "status",
+      "wall": 3.090214208,
+      "cpu": 1.7728029999999997,
+      "load": [
+        6.9697265625,
+        11.2587890625,
+        19.3369140625
+      ],
+      "trace": "trace      0.5 ms  open project\ntrace     22.1 ms  APFS scan before\ntrace    619.2 ms  APFS copy tree\ntrace     20.2 ms  APFS scan after\ntrace    285.1 ms  APFS seal tree\ntrace    947.3 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-0/store/projects/work/meta/scan/01a15fd6-17df-72c1-bfce-a691c6404107\ntrace   1550.5 ms  APFS candidates\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 0,
+      "trial": 0,
+      "operation": "diff",
+      "wall": 2.6066847499999994,
+      "cpu": 1.7267159999999997,
+      "load": [
+        6.9697265625,
+        11.2587890625,
+        19.3369140625
+      ],
+      "trace": "trace      0.5 ms  open project\ntrace     21.4 ms  APFS scan before\ntrace    625.7 ms  APFS copy tree\ntrace     21.3 ms  APFS scan after\ntrace    291.3 ms  APFS seal tree\ntrace    960.7 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-0/store/projects/work/meta/scan/01a15fd6-23f2-771f-9c2c-52388499f13b\ntrace   1050.0 ms  APFS candidates\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 0,
+      "trial": 1,
+      "operation": "branch",
+      "wall": 0.9986890000000006,
+      "cpu": 0.7695100000000021,
+      "load": [
+        6.9697265625,
+        11.2587890625,
+        19.3369140625
+      ],
+      "trace": "trace      0.5 ms  open project\ntrace     21.7 ms  APFS scan before\ntrace    944.6 ms  APFS copy tree\ntrace     22.0 ms  APFS scan after\ntrace    989.0 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-0/store/projects/work/meta/work/01a15fd6-2e21-76aa-96a0-77c34dfd1e99\ntrace      0.7 ms  record line.create\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 0,
+      "trial": 1,
+      "operation": "status",
+      "wall": 2.7656645000000015,
+      "cpu": 1.8572469999999992,
+      "load": [
+        6.9716796875,
+        11.18798828125,
+        19.26416015625
+      ],
+      "trace": "trace      0.5 ms  open project\ntrace     22.9 ms  APFS scan before\ntrace    655.6 ms  APFS copy tree\ntrace     20.6 ms  APFS scan after\ntrace    289.8 ms  APFS seal tree\ntrace    989.9 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-0/store/projects/work/meta/scan/01a15fd6-3208-707f-9a8f-cc969beea9d6\ntrace   1141.2 ms  APFS candidates\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 0,
+      "trial": 1,
+      "operation": "diff",
+      "wall": 2.8208952499999995,
+      "cpu": 1.9152719999999999,
+      "load": [
+        6.9716796875,
+        11.18798828125,
+        19.26416015625
+      ],
+      "trace": "trace      0.6 ms  open project\ntrace     23.2 ms  APFS scan before\ntrace    684.9 ms  APFS copy tree\ntrace     22.8 ms  APFS scan after\ntrace    347.9 ms  APFS seal tree\ntrace   1079.7 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-0/store/projects/work/meta/scan/01a15fd6-3cd7-76e0-8e30-8708e72d4b0f\ntrace   1094.7 ms  APFS candidates\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 0,
+      "trial": 2,
+      "operation": "branch",
+      "wall": 1.1131901250000027,
+      "cpu": 0.862566000000001,
+      "load": [
+        6.8935546875,
+        11.1015625,
+        19.18603515625
+      ],
+      "trace": "trace      0.5 ms  open project\ntrace     24.4 ms  APFS scan before\ntrace   1051.8 ms  APFS copy tree\ntrace     25.7 ms  APFS scan after\ntrace   1102.6 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-0/store/projects/work/meta/work/01a15fd6-47db-7573-8ed7-9dddeccca993\ntrace      0.5 ms  record line.create\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 0,
+      "trial": 2,
+      "operation": "status",
+      "wall": 2.996244666999999,
+      "cpu": 2.028397,
+      "load": [
+        6.8935546875,
+        11.1015625,
+        19.18603515625
+      ],
+      "trace": "trace      0.6 ms  open project\ntrace     27.9 ms  APFS scan before\ntrace    728.5 ms  APFS copy tree\ntrace     24.0 ms  APFS scan after\ntrace    343.3 ms  APFS seal tree\ntrace   1125.0 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-0/store/projects/work/meta/scan/01a15fd6-4c37-70b0-9db1-a204553a6c80\ntrace   1192.9 ms  APFS candidates\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 0,
+      "trial": 2,
+      "operation": "diff",
+      "wall": 2.704359499999999,
+      "cpu": 1.8266810000000007,
+      "load": [
+        6.98193359375,
+        11.0498046875,
+        19.1201171875
+      ],
+      "trace": "trace      0.6 ms  open project\ntrace     23.9 ms  APFS scan before\ntrace    695.5 ms  APFS copy tree\ntrace     23.4 ms  APFS scan after\ntrace    326.8 ms  APFS seal tree\ntrace   1070.6 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-0/store/projects/work/meta/scan/01a15fd6-57ea-7322-a6ad-2152a8eade47\ntrace   1053.8 ms  APFS candidates\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 10,
+      "trial": 0,
+      "operation": "branch",
+      "wall": 1.589246750000001,
+      "cpu": 1.2122289999999971,
+      "load": [
+        7.7109375,
+        11.06591796875,
+        19.03076171875
+      ],
+      "trace": "trace      0.8 ms  open project\ntrace     34.9 ms  APFS scan before\ntrace   1497.0 ms  APFS copy tree\ntrace     42.0 ms  APFS scan after\ntrace   1575.0 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-10/store/projects/work/meta/work/01a15fd6-7f07-7448-a2bf-5919a06dd9dd\ntrace      1.3 ms  record line.create\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 10,
+      "trial": 0,
+      "operation": "status",
+      "wall": 5.564533667000006,
+      "cpu": 3.4523960000000002,
+      "load": [
+        8.37451171875,
+        11.1474609375,
+        19.0126953125
+      ],
+      "trace": "trace      0.9 ms  open project\ntrace     45.5 ms  APFS scan before\ntrace   1210.0 ms  APFS copy tree\ntrace     50.0 ms  APFS scan after\ntrace    609.2 ms  APFS seal tree\ntrace   1916.2 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-10/store/projects/work/meta/scan/01a15fd6-8544-70d9-aab6-69045bcbbdd3\ntrace   2711.2 ms  APFS candidates\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 10,
+      "trial": 0,
+      "operation": "diff",
+      "wall": 3.841082458999999,
+      "cpu": 2.6880409999999983,
+      "load": [
+        8.37451171875,
+        11.1474609375,
+        19.0126953125
+      ],
+      "trace": "trace      0.8 ms  open project\ntrace     31.7 ms  APFS scan before\ntrace    995.0 ms  APFS copy tree\ntrace     33.6 ms  APFS scan after\ntrace    491.2 ms  APFS seal tree\ntrace   1552.6 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-10/store/projects/work/meta/scan/01a15fd6-9aff-74d6-84aa-e85401772ae0\ntrace   1441.7 ms  APFS candidates\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 10,
+      "trial": 0,
+      "operation": "add",
+      "wall": 5.309858083000002,
+      "cpu": 3.8035379999999996,
+      "load": [
+        8.95703125,
+        11.17578125,
+        18.93017578125
+      ],
+      "trace": "trace      1.0 ms  open project\ntrace     32.7 ms  APFS scan before\ntrace    907.6 ms  APFS copy tree\ntrace     35.4 ms  APFS scan after\ntrace    490.6 ms  APFS seal tree\ntrace   1467.6 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-10/store/projects/work/meta/scan/01a15fd6-aad3-70b2-a15a-9ae3029e51cc\ntrace   1488.2 ms  APFS candidates\ntrace     30.4 ms  APFS scan before\ntrace   1244.0 ms  APFS copy tree\ntrace     33.1 ms  APFS scan after\ntrace   1308.7 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-10/store/projects/work/meta/stage/01a15fd6-7f07-7448-a2bf-5918fcc5e9bd\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 10,
+      "trial": 0,
+      "operation": "add_allocation",
+      "bytes": 5320704
+    },
+    {
+      "kind": "density",
+      "parameter": 10,
+      "trial": 0,
+      "operation": "commit",
+      "wall": 3.2080752920000037,
+      "cpu": 2.1239040000000067,
+      "load": [
+        8.95703125,
+        11.17578125,
+        18.93017578125
+      ],
+      "trace": "trace      0.8 ms  open project\ntrace     38.6 ms  APFS scan before\ntrace    882.1 ms  APFS copy tree\ntrace     35.4 ms  APFS scan after\ntrace    389.9 ms  APFS seal tree\ntrace   1347.2 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-10/store/projects/work/states/01a15fd6-c063-73aa-b8f5-57073bca3151\ntrace   1305.0 ms  APFS candidates\ntrace      0.7 ms  record commit\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 10,
+      "trial": 0,
+      "operation": "fsck",
+      "wall": 0.013015666999997677,
+      "cpu": 0.009091999999995437,
+      "load": [
+        8.95703125,
+        11.17578125,
+        18.93017578125
+      ],
+      "trace": "trace      0.7 ms  open project\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 10,
+      "trial": 1,
+      "operation": "branch",
+      "wall": 1.598122042,
+      "cpu": 1.1265910000000048,
+      "load": [
+        8.421875,
+        10.98828125,
+        18.7724609375
+      ],
+      "trace": "trace      0.7 ms  open project\ntrace     31.0 ms  APFS scan before\ntrace   1515.6 ms  APFS copy tree\ntrace     33.9 ms  APFS scan after\ntrace   1581.4 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-10/store/projects/work/meta/work/01a15fd6-df28-70df-9c6a-a831b9333569\ntrace      0.7 ms  record line.create\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 10,
+      "trial": 1,
+      "operation": "status",
+      "wall": 3.730832417000002,
+      "cpu": 2.337417000000002,
+      "load": [
+        8.421875,
+        10.98828125,
+        18.7724609375
+      ],
+      "trace": "trace      0.8 ms  open project\ntrace     35.1 ms  APFS scan before\ntrace    948.1 ms  APFS copy tree\ntrace     31.1 ms  APFS scan after\ntrace    447.0 ms  APFS seal tree\ntrace   1462.5 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-10/store/projects/work/meta/scan/01a15fd6-e56c-7715-b42f-79cacd59596e\ntrace   1606.9 ms  APFS candidates\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 10,
+      "trial": 1,
+      "operation": "diff",
+      "wall": 3.4171860420000044,
+      "cpu": 1.8363259999999926,
+      "load": [
+        8.0673828125,
+        10.8720703125,
+        18.685546875
+      ],
+      "trace": "trace      0.6 ms  open project\ntrace     23.5 ms  APFS scan before\ntrace    718.2 ms  APFS copy tree\ntrace     22.5 ms  APFS scan after\ntrace    341.8 ms  APFS seal tree\ntrace   1106.9 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-10/store/projects/work/meta/scan/01a15fd6-f3fc-705a-8760-9f742c0b4979\ntrace   1703.1 ms  APFS candidates\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 10,
+      "trial": 1,
+      "operation": "add",
+      "wall": 3.8840474579999977,
+      "cpu": 2.671689999999998,
+      "load": [
+        7.6611328125,
+        10.7412109375,
+        18.59326171875
+      ],
+      "trace": "trace      0.6 ms  open project\ntrace     23.4 ms  APFS scan before\ntrace    723.0 ms  APFS copy tree\ntrace     24.5 ms  APFS scan after\ntrace    348.9 ms  APFS seal tree\ntrace   1120.8 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-10/store/projects/work/meta/scan/01a15fd7-01e0-7261-9c4f-9032e33db468\ntrace   1126.9 ms  APFS candidates\ntrace     20.9 ms  APFS scan before\ntrace    896.2 ms  APFS copy tree\ntrace     22.3 ms  APFS scan after\ntrace    940.1 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-10/store/projects/work/meta/stage/01a15fd6-df28-70df-9c6a-a8309460e6e4\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 10,
+      "trial": 1,
+      "operation": "add_allocation",
+      "bytes": 4173824
+    },
+    {
+      "kind": "density",
+      "parameter": 10,
+      "trial": 1,
+      "operation": "commit",
+      "wall": 2.411672875000008,
+      "cpu": 1.510356999999999,
+      "load": [
+        7.6611328125,
+        10.7412109375,
+        18.59326171875
+      ],
+      "trace": "trace      0.6 ms  open project\ntrace     24.3 ms  APFS scan before\ntrace    664.1 ms  APFS copy tree\ntrace     22.9 ms  APFS scan after\ntrace    270.6 ms  APFS seal tree\ntrace    982.8 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-10/store/projects/work/states/01a15fd7-1195-7378-b3e7-1c3c7135a977\ntrace   1063.7 ms  APFS candidates\ntrace      0.6 ms  record commit\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 10,
+      "trial": 1,
+      "operation": "fsck",
+      "wall": 0.008838707999998974,
+      "cpu": 0.0059309999999968,
+      "load": [
+        7.6611328125,
+        10.7412109375,
+        18.59326171875
+      ],
+      "trace": "trace      0.5 ms  open project\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 10,
+      "trial": 2,
+      "operation": "branch",
+      "wall": 1.0433522920000087,
+      "cpu": 0.7950540000000004,
+      "load": [
+        7.52783203125,
+        10.662109375,
+        18.51904296875
+      ],
+      "trace": "trace      0.5 ms  open project\ntrace     23.3 ms  APFS scan before\ntrace    981.5 ms  APFS copy tree\ntrace     23.2 ms  APFS scan after\ntrace   1028.9 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-10/store/projects/work/meta/work/01a15fd7-25b7-7207-b2c8-517143fd7c27\ntrace      2.9 ms  record line.create\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 10,
+      "trial": 2,
+      "operation": "status",
+      "wall": 2.8854037499999947,
+      "cpu": 1.9442020000000042,
+      "load": [
+        7.3251953125,
+        10.56787109375,
+        18.439453125
+      ],
+      "trace": "trace      0.5 ms  open project\ntrace     24.1 ms  APFS scan before\ntrace    718.6 ms  APFS copy tree\ntrace     24.5 ms  APFS scan after\ntrace    339.0 ms  APFS seal tree\ntrace   1107.3 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-10/store/projects/work/meta/scan/01a15fd7-29cf-7487-80b0-ae7ff44cdae2\ntrace   1125.5 ms  APFS candidates\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 10,
+      "trial": 2,
+      "operation": "diff",
+      "wall": 2.9711312920000097,
+      "cpu": 2.0114379999999983,
+      "load": [
+        7.3251953125,
+        10.56787109375,
+        18.439453125
+      ],
+      "trace": "trace      0.6 ms  open project\ntrace     23.7 ms  APFS scan before\ntrace    718.3 ms  APFS copy tree\ntrace     27.3 ms  APFS scan after\ntrace    384.0 ms  APFS seal tree\ntrace   1154.2 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-10/store/projects/work/meta/scan/01a15fd7-3515-75c6-b467-968e321a1dc7\ntrace   1183.7 ms  APFS candidates\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 10,
+      "trial": 2,
+      "operation": "add",
+      "wall": 3.8641398750000064,
+      "cpu": 2.6838689999999943,
+      "load": [
+        6.8984375,
+        10.42529296875,
+        18.3427734375
+      ],
+      "trace": "trace      0.5 ms  open project\ntrace     24.3 ms  APFS scan before\ntrace    694.4 ms  APFS copy tree\ntrace     23.6 ms  APFS scan after\ntrace    324.4 ms  APFS seal tree\ntrace   1067.5 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-10/store/projects/work/meta/scan/01a15fd7-413d-77eb-a585-a3552070109b\ntrace   1077.5 ms  APFS candidates\ntrace     24.5 ms  APFS scan before\ntrace    979.3 ms  APFS copy tree\ntrace     22.4 ms  APFS scan after\ntrace   1026.9 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-10/store/projects/work/meta/stage/01a15fd7-25b7-7207-b2c8-5170f1eeacdd\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 10,
+      "trial": 2,
+      "operation": "add_allocation",
+      "bytes": 4165632
+    },
+    {
+      "kind": "density",
+      "parameter": 10,
+      "trial": 2,
+      "operation": "commit",
+      "wall": 2.4066567090000035,
+      "cpu": 1.506225999999998,
+      "load": [
+        6.5859375,
+        10.3017578125,
+        18.25244140625
+      ],
+      "trace": "trace      0.5 ms  open project\ntrace     23.4 ms  APFS scan before\ntrace    651.5 ms  APFS copy tree\ntrace     24.0 ms  APFS scan after\ntrace    277.3 ms  APFS seal tree\ntrace    977.0 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-10/store/projects/work/states/01a15fd7-50e2-750a-99a4-61f18bc6a1bc\ntrace   1061.6 ms  APFS candidates\ntrace      0.5 ms  record commit\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 10,
+      "trial": 2,
+      "operation": "fsck",
+      "wall": 0.00844312499999944,
+      "cpu": 0.005820999999997412,
+      "load": [
+        6.5859375,
+        10.3017578125,
+        18.25244140625
+      ],
+      "trace": "trace      0.5 ms  open project\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 1000,
+      "trial": 0,
+      "operation": "branch",
+      "wall": 1.032942792,
+      "cpu": 0.8233200000000025,
+      "load": [
+        7.19677734375,
+        10.30810546875,
+        18.1611328125
+      ],
+      "trace": "trace      0.5 ms  open project\ntrace     23.4 ms  APFS scan before\ntrace    974.8 ms  APFS copy tree\ntrace     23.5 ms  APFS scan after\ntrace   1022.3 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-1000/store/projects/work/meta/work/01a15fd7-7f2e-7729-820a-c924b173bedc\ntrace      0.8 ms  record line.create\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 1000,
+      "trial": 0,
+      "operation": "status",
+      "wall": 3.27261604200001,
+      "cpu": 1.8858559999999969,
+      "load": [
+        7.19677734375,
+        10.30810546875,
+        18.1611328125
+      ],
+      "trace": "trace      0.5 ms  open project\ntrace     24.4 ms  APFS scan before\ntrace    665.0 ms  APFS copy tree\ntrace     21.5 ms  APFS scan after\ntrace    308.5 ms  APFS seal tree\ntrace   1020.4 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-1000/store/projects/work/meta/scan/01a15fd7-842e-753f-b24a-a1ed31672df7\ntrace   1612.4 ms  APFS candidates\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 1000,
+      "trial": 0,
+      "operation": "diff",
+      "wall": 2.7847510420000106,
+      "cpu": 1.843640999999991,
+      "load": [
+        7.1806640625,
+        10.2529296875,
+        18.095703125
+      ],
+      "trace": "trace      0.5 ms  open project\ntrace     22.9 ms  APFS scan before\ntrace    693.0 ms  APFS copy tree\ntrace     21.6 ms  APFS scan after\ntrace    301.3 ms  APFS seal tree\ntrace   1039.6 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-1000/store/projects/work/meta/scan/01a15fd7-90f7-7636-a6b5-c36aa0bafcd4\ntrace   1083.9 ms  APFS candidates\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 1000,
+      "trial": 0,
+      "operation": "add",
+      "wall": 3.939838042000005,
+      "cpu": 2.757196999999991,
+      "load": [
+        7.24609375,
+        10.21533203125,
+        18.0361328125
+      ],
+      "trace": "trace      0.5 ms  open project\ntrace     21.8 ms  APFS scan before\ntrace    698.5 ms  APFS copy tree\ntrace     22.7 ms  APFS scan after\ntrace    313.5 ms  APFS seal tree\ntrace   1057.4 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-1000/store/projects/work/meta/scan/01a15fd7-9c59-7260-9f13-b1e5bb121751\ntrace   1071.2 ms  APFS candidates\ntrace     20.5 ms  APFS scan before\ntrace    931.9 ms  APFS copy tree\ntrace     22.0 ms  APFS scan after\ntrace    975.2 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-1000/store/projects/work/meta/stage/01a15fd7-7f2e-7729-820a-c923e4d59fda\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 1000,
+      "trial": 0,
+      "operation": "add_allocation",
+      "bytes": 12390400
+    },
+    {
+      "kind": "density",
+      "parameter": 1000,
+      "trial": 0,
+      "operation": "commit",
+      "wall": 2.387397000000007,
+      "cpu": 1.5143640000000005,
+      "load": [
+        7.24609375,
+        10.21533203125,
+        18.0361328125
+      ],
+      "trace": "trace      0.6 ms  open project\ntrace     24.8 ms  APFS scan before\ntrace    636.5 ms  APFS copy tree\ntrace     24.1 ms  APFS scan after\ntrace    274.3 ms  APFS seal tree\ntrace    960.8 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-1000/store/projects/work/states/01a15fd7-ac3c-72ba-af72-592d9ecac411\ntrace   1076.0 ms  APFS candidates\ntrace      0.6 ms  record commit\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 1000,
+      "trial": 0,
+      "operation": "fsck",
+      "wall": 0.008832333000000858,
+      "cpu": 0.006166000000007443,
+      "load": [
+        7.24609375,
+        10.21533203125,
+        18.0361328125
+      ],
+      "trace": "trace      0.5 ms  open project\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 1000,
+      "trial": 1,
+      "operation": "branch",
+      "wall": 1.0153218330000016,
+      "cpu": 0.7751220000000103,
+      "load": [
+        6.90576171875,
+        10.09521484375,
+        17.94775390625
+      ],
+      "trace": "trace      0.5 ms  open project\ntrace     22.8 ms  APFS scan before\ntrace    959.6 ms  APFS copy tree\ntrace     22.3 ms  APFS scan after\ntrace   1005.3 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-1000/store/projects/work/meta/work/01a15fd7-c020-71dd-8bc9-83f13fca51b0\ntrace      0.5 ms  record line.create\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 1000,
+      "trial": 1,
+      "operation": "status",
+      "wall": 2.7004874590000014,
+      "cpu": 1.7987519999999932,
+      "load": [
+        6.4326171875,
+        9.94384765625,
+        17.84814453125
+      ],
+      "trace": "trace      0.5 ms  open project\ntrace     24.1 ms  APFS scan before\ntrace    656.8 ms  APFS copy tree\ntrace     21.8 ms  APFS scan after\ntrace    310.1 ms  APFS seal tree\ntrace   1013.7 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-1000/store/projects/work/meta/scan/01a15fd7-c519-770a-b8d0-decbd601ef07\ntrace   1067.1 ms  APFS candidates\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 1000,
+      "trial": 1,
+      "operation": "diff",
+      "wall": 2.9628900000000016,
+      "cpu": 2.0204239999999913,
+      "load": [
+        6.4326171875,
+        9.94384765625,
+        17.84814453125
+      ],
+      "trace": "trace      0.5 ms  open project\ntrace     22.4 ms  APFS scan before\ntrace    686.8 ms  APFS copy tree\ntrace     23.4 ms  APFS scan after\ntrace    340.2 ms  APFS seal tree\ntrace   1073.6 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-1000/store/projects/work/meta/scan/01a15fd7-cfa6-7023-a1fb-ee68ae780ed8\ntrace   1172.5 ms  APFS candidates\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 1000,
+      "trial": 1,
+      "operation": "add",
+      "wall": 4.064241874999993,
+      "cpu": 2.8694929999999914,
+      "load": [
+        6.07763671875,
+        9.8115234375,
+        17.7548828125
+      ],
+      "trace": "trace      0.6 ms  open project\ntrace     23.2 ms  APFS scan before\ntrace    680.4 ms  APFS copy tree\ntrace     21.9 ms  APFS scan after\ntrace    333.3 ms  APFS seal tree\ntrace   1059.7 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-1000/store/projects/work/meta/scan/01a15fd7-dbc1-700e-9013-bf848dfdc0c1\ntrace   1094.2 ms  APFS candidates\ntrace     22.9 ms  APFS scan before\ntrace    965.7 ms  APFS copy tree\ntrace     22.6 ms  APFS scan after\ntrace   1011.9 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-1000/store/projects/work/meta/stage/01a15fd7-c020-71dd-8bc9-83f09a0e321e\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 1000,
+      "trial": 1,
+      "operation": "add_allocation",
+      "bytes": 12382208
+    },
+    {
+      "kind": "density",
+      "parameter": 1000,
+      "trial": 1,
+      "operation": "commit",
+      "wall": 2.3957209999999947,
+      "cpu": 1.505024000000006,
+      "load": [
+        6.07763671875,
+        9.8115234375,
+        17.7548828125
+      ],
+      "trace": "trace      0.6 ms  open project\ntrace     26.0 ms  APFS scan before\ntrace    652.7 ms  APFS copy tree\ntrace     24.0 ms  APFS scan after\ntrace    267.7 ms  APFS seal tree\ntrace    971.3 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-1000/store/projects/work/states/01a15fd7-ec2b-7372-b71a-bdce079d5709\ntrace   1090.8 ms  APFS candidates\ntrace      0.5 ms  record commit\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 1000,
+      "trial": 1,
+      "operation": "fsck",
+      "wall": 0.009257291000011492,
+      "cpu": 0.006062000000014223,
+      "load": [
+        6.07763671875,
+        9.8115234375,
+        17.7548828125
+      ],
+      "trace": "trace      0.5 ms  open project\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 1000,
+      "trial": 2,
+      "operation": "branch",
+      "wall": 1.0146753340000032,
+      "cpu": 0.7887850000000043,
+      "load": [
+        5.8310546875,
+        9.6982421875,
+        17.66796875
+      ],
+      "trace": "trace      0.6 ms  open project\ntrace     24.5 ms  APFS scan before\ntrace    957.0 ms  APFS copy tree\ntrace     22.6 ms  APFS scan after\ntrace   1004.8 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-1000/store/projects/work/meta/work/01a15fd8-002e-709b-85ca-966e78c945ac\ntrace      0.5 ms  record line.create\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 1000,
+      "trial": 2,
+      "operation": "status",
+      "wall": 2.823866542000019,
+      "cpu": 1.9148119999999977,
+      "load": [
+        5.52392578125,
+        9.5703125,
+        17.57568359375
+      ],
+      "trace": "trace      0.5 ms  open project\ntrace     23.3 ms  APFS scan before\ntrace    670.6 ms  APFS copy tree\ntrace     22.7 ms  APFS scan after\ntrace    320.5 ms  APFS seal tree\ntrace   1037.8 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-1000/store/projects/work/meta/scan/01a15fd8-0508-7031-9d7d-9ebcb66fa3fd\ntrace   1107.3 ms  APFS candidates\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 1000,
+      "trial": 2,
+      "operation": "diff",
+      "wall": 3.7444165420000104,
+      "cpu": 2.603742000000011,
+      "load": [
+        5.88232421875,
+        9.5771484375,
+        17.53125
+      ],
+      "trace": "trace      0.6 ms  open project\ntrace     28.7 ms  APFS scan before\ntrace    894.0 ms  APFS copy tree\ntrace     29.7 ms  APFS scan after\ntrace    425.3 ms  APFS seal tree\ntrace   1378.7 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-1000/store/projects/work/meta/scan/01a15fd8-1011-7483-a324-fe4a76733f43\ntrace   1465.1 ms  APFS candidates\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 1000,
+      "trial": 2,
+      "operation": "add",
+      "wall": 4.508881916000007,
+      "cpu": 3.217372999999995,
+      "load": [
+        5.6513671875,
+        9.4677734375,
+        17.44580078125
+      ],
+      "trace": "trace      0.7 ms  open project\ntrace     30.7 ms  APFS scan before\ntrace    858.4 ms  APFS copy tree\ntrace     27.2 ms  APFS scan after\ntrace    371.7 ms  APFS seal tree\ntrace   1289.2 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-1000/store/projects/work/meta/scan/01a15fd8-1f6b-7060-80e2-852092c4d114\ntrace   1260.5 ms  APFS candidates\ntrace     25.5 ms  APFS scan before\ntrace   1010.1 ms  APFS copy tree\ntrace     25.8 ms  APFS scan after\ntrace   1062.2 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-1000/store/projects/work/meta/stage/01a15fd8-002e-709b-85ca-966dd3a1474a\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 1000,
+      "trial": 2,
+      "operation": "add_allocation",
+      "bytes": 12365824
+    },
+    {
+      "kind": "density",
+      "parameter": 1000,
+      "trial": 2,
+      "operation": "commit",
+      "wall": 2.323295833000003,
+      "cpu": 1.4527439999999956,
+      "load": [
+        5.6513671875,
+        9.4677734375,
+        17.44580078125
+      ],
+      "trace": "trace      0.6 ms  open project\ntrace     22.0 ms  APFS scan before\ntrace    638.2 ms  APFS copy tree\ntrace     19.5 ms  APFS scan after\ntrace    261.6 ms  APFS seal tree\ntrace    942.1 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-1000/store/projects/work/states/01a15fd8-3189-731c-a384-82e456e19d33\ntrace   1044.6 ms  APFS candidates\ntrace      0.5 ms  record commit\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 1000,
+      "trial": 2,
+      "operation": "fsck",
+      "wall": 0.00955504099999871,
+      "cpu": 0.006763000000006514,
+      "load": [
+        5.6513671875,
+        9.4677734375,
+        17.44580078125
+      ],
+      "trace": "trace      0.5 ms  open project\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 10000,
+      "trial": 0,
+      "operation": "branch",
+      "wall": 0.9662654999999916,
+      "cpu": 0.761273999999986,
+      "load": [
+        6.10498046875,
+        9.4365234375,
+        17.3408203125
+      ],
+      "trace": "trace      0.5 ms  open project\ntrace     22.1 ms  APFS scan before\ntrace    911.2 ms  APFS copy tree\ntrace     21.5 ms  APFS scan after\ntrace    955.5 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-10000/store/projects/work/meta/work/01a15fd8-5d43-7799-b143-f8865505fc66\ntrace      0.8 ms  record line.create\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 10000,
+      "trial": 0,
+      "operation": "status",
+      "wall": 6.199529041000005,
+      "cpu": 3.043140000000008,
+      "load": [
+        6.162109375,
+        9.33935546875,
+        17.21337890625
+      ],
+      "trace": "trace      0.5 ms  open project\ntrace     23.2 ms  APFS scan before\ntrace    642.8 ms  APFS copy tree\ntrace     25.3 ms  APFS scan after\ntrace    374.2 ms  APFS seal tree\ntrace   1066.7 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-10000/store/projects/work/meta/scan/01a15fd8-6a73-7127-9a89-728a921bb265\ntrace   4198.7 ms  APFS candidates\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 10000,
+      "trial": 0,
+      "operation": "diff",
+      "wall": 3.366708625000001,
+      "cpu": 2.3884860000000003,
+      "load": [
+        6.162109375,
+        9.33935546875,
+        17.21337890625
+      ],
+      "trace": "trace      0.7 ms  open project\ntrace     30.3 ms  APFS scan before\ntrace    767.4 ms  APFS copy tree\ntrace     24.2 ms  APFS scan after\ntrace    336.0 ms  APFS seal tree\ntrace   1158.9 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-10000/store/projects/work/meta/scan/01a15fd8-82ae-77fc-a406-57ebb4ea894c\ntrace   1212.3 ms  APFS candidates\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 10000,
+      "trial": 0,
+      "operation": "add",
+      "wall": 7.85217691699998,
+      "cpu": 3.9397200000000083,
+      "load": [
+        5.97021484375,
+        9.1953125,
+        17.0703125
+      ],
+      "trace": "trace      0.6 ms  open project\ntrace     20.6 ms  APFS scan before\ntrace    776.2 ms  APFS copy tree\ntrace     20.4 ms  APFS scan after\ntrace    288.4 ms  APFS seal tree\ntrace   1106.4 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-10000/store/projects/work/meta/scan/01a15fd8-9057-7787-9546-a7686f8d7fe2\ntrace   1540.4 ms  APFS candidates\ntrace     20.8 ms  APFS scan before\ntrace   1164.7 ms  APFS copy tree\ntrace     22.0 ms  APFS scan after\ntrace   1208.3 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-10000/store/projects/work/meta/stage/01a15fd8-5d43-7799-b143-f88512af86a4\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 10000,
+      "trial": 0,
+      "operation": "add_allocation",
+      "bytes": 87109632
+    },
+    {
+      "kind": "density",
+      "parameter": 10000,
+      "trial": 0,
+      "operation": "commit",
+      "wall": 3.1813530000000014,
+      "cpu": 1.5764560000000074,
+      "load": [
+        5.89208984375,
+        9.12548828125,
+        16.99951171875
+      ],
+      "trace": "trace      0.5 ms  open project\ntrace     22.2 ms  APFS scan before\ntrace    786.3 ms  APFS copy tree\ntrace     22.8 ms  APFS scan after\ntrace    287.1 ms  APFS seal tree\ntrace   1119.3 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-10000/store/projects/work/states/01a15fd8-af96-71d4-ae05-706a30780cd8\ntrace   1703.0 ms  APFS candidates\ntrace      0.7 ms  record commit\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 10000,
+      "trial": 0,
+      "operation": "fsck",
+      "wall": 0.008683333999982779,
+      "cpu": 0.005427999999994881,
+      "load": [
+        5.89208984375,
+        9.12548828125,
+        16.99951171875
+      ],
+      "trace": "trace      0.5 ms  open project\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 10000,
+      "trial": 1,
+      "operation": "branch",
+      "wall": 1.357735125000005,
+      "cpu": 0.8597239999999999,
+      "load": [
+        5.900390625,
+        9.0732421875,
+        16.93505859375
+      ],
+      "trace": "trace      0.5 ms  open project\ntrace     23.9 ms  APFS scan before\ntrace   1300.2 ms  APFS copy tree\ntrace     22.9 ms  APFS scan after\ntrace   1347.7 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-10000/store/projects/work/meta/work/01a15fd8-c9bb-72da-a1f1-b5c5040ca39e\ntrace      0.5 ms  record line.create\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 10000,
+      "trial": 1,
+      "operation": "status",
+      "wall": 3.6860052080000116,
+      "cpu": 1.8723409999999916,
+      "load": [
+        5.908203125,
+        9.02197265625,
+        16.87060546875
+      ],
+      "trace": "trace      0.6 ms  open project\ntrace     22.2 ms  APFS scan before\ntrace    583.6 ms  APFS copy tree\ntrace     22.1 ms  APFS scan after\ntrace    344.5 ms  APFS seal tree\ntrace    973.3 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-10000/store/projects/work/meta/scan/01a15fd8-d9f7-778e-97ae-2af52e2bd36a\ntrace   2109.8 ms  APFS candidates\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 10000,
+      "trial": 1,
+      "operation": "diff",
+      "wall": 3.1381529580000063,
+      "cpu": 2.1930550000000153,
+      "load": [
+        5.99560546875,
+        8.98828125,
+        16.8125
+      ],
+      "trace": "trace      0.5 ms  open project\ntrace     21.4 ms  APFS scan before\ntrace    586.6 ms  APFS copy tree\ntrace     19.8 ms  APFS scan after\ntrace    294.9 ms  APFS seal tree\ntrace    923.4 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-10000/store/projects/work/meta/scan/01a15fd8-e85e-762d-92f1-bbbf261d744c\ntrace   1213.6 ms  APFS candidates\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 10000,
+      "trial": 1,
+      "operation": "add",
+      "wall": 5.152056041000009,
+      "cpu": 3.902479999999997,
+      "load": [
+        5.91552734375,
+        8.921875,
+        16.7431640625
+      ],
+      "trace": "trace      0.6 ms  open project\ntrace     20.8 ms  APFS scan before\ntrace    576.4 ms  APFS copy tree\ntrace     19.7 ms  APFS scan after\ntrace    293.7 ms  APFS seal tree\ntrace    911.4 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-10000/store/projects/work/meta/scan/01a15fd8-f527-740d-ae07-6d8127b8a5e6\ntrace   1217.0 ms  APFS candidates\ntrace     20.8 ms  APFS scan before\ntrace    924.7 ms  APFS copy tree\ntrace     20.6 ms  APFS scan after\ntrace    966.7 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-10000/store/projects/work/meta/stage/01a15fd8-c9bb-72da-a1f1-b5c40a53787d\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 10000,
+      "trial": 1,
+      "operation": "add_allocation",
+      "bytes": 87085056
+    },
+    {
+      "kind": "density",
+      "parameter": 10000,
+      "trial": 1,
+      "operation": "commit",
+      "wall": 2.5380105829999877,
+      "cpu": 1.6264189999999985,
+      "load": [
+        5.91552734375,
+        8.921875,
+        16.7431640625
+      ],
+      "trace": "trace      0.6 ms  open project\ntrace     25.4 ms  APFS scan before\ntrace    657.5 ms  APFS copy tree\ntrace     24.3 ms  APFS scan after\ntrace    296.7 ms  APFS seal tree\ntrace   1004.9 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-10000/store/projects/work/states/01a15fd9-09d7-726b-a6c9-13e960625492\ntrace   1182.0 ms  APFS candidates\ntrace      0.6 ms  record commit\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 10000,
+      "trial": 1,
+      "operation": "fsck",
+      "wall": 0.008521040999994511,
+      "cpu": 0.0059269999999997935,
+      "load": [
+        5.91552734375,
+        8.921875,
+        16.7431640625
+      ],
+      "trace": "trace      0.5 ms  open project\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 10000,
+      "trial": 2,
+      "operation": "branch",
+      "wall": 1.1842632089999938,
+      "cpu": 0.9332820000000055,
+      "load": [
+        5.841796875,
+        8.8564453125,
+        16.67431640625
+      ],
+      "trace": "trace      0.6 ms  open project\ntrace     26.4 ms  APFS scan before\ntrace   1121.3 ms  APFS copy tree\ntrace     24.6 ms  APFS scan after\ntrace   1173.2 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-10000/store/projects/work/meta/work/01a15fd9-1f0c-72ff-8676-272a94ceea40\ntrace      0.5 ms  record line.create\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 10000,
+      "trial": 2,
+      "operation": "status",
+      "wall": 5.020958583000009,
+      "cpu": 2.6863660000000067,
+      "load": [
+        5.85400390625,
+        8.80859375,
+        16.611328125
+      ],
+      "trace": "trace      0.6 ms  open project\ntrace     23.7 ms  APFS scan before\ntrace    627.7 ms  APFS copy tree\ntrace     22.1 ms  APFS scan after\ntrace    349.2 ms  APFS seal tree\ntrace   1023.6 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-10000/store/projects/work/meta/scan/01a15fd9-2e47-761f-9f4d-d424b374953b\ntrace   1543.6 ms  APFS candidates\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 10000,
+      "trial": 2,
+      "operation": "diff",
+      "wall": 4.3336983750000115,
+      "cpu": 2.995667999999995,
+      "load": [
+        9.1484375,
+        9.4423828125,
+        16.7890625
+      ],
+      "trace": "trace      1.0 ms  open project\ntrace     46.0 ms  APFS scan before\ntrace   1397.9 ms  APFS copy tree\ntrace     35.8 ms  APFS scan after\ntrace    493.1 ms  APFS seal tree\ntrace   1974.2 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-10000/store/projects/work/meta/scan/01a15fd9-41ee-7411-b08b-724b40dfc64b\ntrace   1365.4 ms  APFS candidates\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 10000,
+      "trial": 2,
+      "operation": "add",
+      "wall": 5.417992749999996,
+      "cpu": 4.178906000000012,
+      "load": [
+        8.97607421875,
+        9.4013671875,
+        16.7314453125
+      ],
+      "trace": "trace      0.6 ms  open project\ntrace     22.2 ms  APFS scan before\ntrace    620.3 ms  APFS copy tree\ntrace     22.2 ms  APFS scan after\ntrace    318.4 ms  APFS seal tree\ntrace    984.0 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-10000/store/projects/work/meta/scan/01a15fd9-5365-7456-9abc-1a88fa5f96d2\ntrace   1250.9 ms  APFS candidates\ntrace     20.9 ms  APFS scan before\ntrace    934.3 ms  APFS copy tree\ntrace     21.0 ms  APFS scan after\ntrace    976.9 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-10000/store/projects/work/meta/stage/01a15fd9-1f0c-72ff-8676-27292c4dbd41\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 10000,
+      "trial": 2,
+      "operation": "add_allocation",
+      "bytes": 87105536
+    },
+    {
+      "kind": "density",
+      "parameter": 10000,
+      "trial": 2,
+      "operation": "commit",
+      "wall": 2.4771643329999904,
+      "cpu": 1.5790020000000027,
+      "load": [
+        8.6572265625,
+        9.328125,
+        16.66259765625
+      ],
+      "trace": "trace      0.7 ms  open project\ntrace     22.2 ms  APFS scan before\ntrace    610.9 ms  APFS copy tree\ntrace     20.8 ms  APFS scan after\ntrace    287.9 ms  APFS seal tree\ntrace    942.8 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/density-10000/store/projects/work/states/01a15fd9-692a-7047-aafd-fd00ca9af8aa\ntrace   1179.1 ms  APFS candidates\ntrace      0.6 ms  record commit\n"
+    },
+    {
+      "kind": "density",
+      "parameter": 10000,
+      "trial": 2,
+      "operation": "fsck",
+      "wall": 0.009039666000006719,
+      "cpu": 0.006233999999977868,
+      "load": [
+        8.6572265625,
+        9.328125,
+        16.66259765625
+      ],
+      "trace": "trace      0.5 ms  open project\n"
+    },
+    {
+      "kind": "hardlink",
+      "parameter": 1,
+      "trial": 0,
+      "operation": "branch",
+      "wall": 1.05358425,
+      "cpu": 0.8341360000000009,
+      "load": [
+        8.8955078125,
+        9.35107421875,
+        16.58447265625
+      ],
+      "trace": "trace      0.5 ms  open project\ntrace     22.2 ms  APFS scan before\ntrace    996.2 ms  APFS copy tree\ntrace     24.1 ms  APFS scan after\ntrace   1043.3 ms  APFS clone /private/tmp/layr-apfs-workloads-20261021/hardlink-1/store/projects/work/meta/work/01a15fd9-96b0-77a5-b800-2c4582125f81\ntrace      0.8 ms  record line.create\n"
+    }
+  ],
+  "verified": [
+    [
+      "density",
+      0
+    ],
+    [
+      "density",
+      10
+    ],
+    [
+      "density",
+      1000
+    ],
+    [
+      "density",
+      10000
+    ]
+  ]
+}

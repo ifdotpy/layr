@@ -82,14 +82,19 @@ type Fingerprint = (u64, u64, u32, u64, i64, i64, i64, i64);
 struct ScanEntry {
     fingerprint: Fingerprint,
     meta: crate::fsutil::Meta,
+    data: Option<crate::sys::ApfsDataIdentity>,
 }
 impl PartialEq for ScanEntry {
     fn eq(&self, other: &Self) -> bool {
-        self.fingerprint == other.fingerprint
+        self.fingerprint == other.fingerprint && self.data == other.data
     }
 }
 fn scan(root: &Path) -> Result<BTreeMap<String, ScanEntry>> {
-    fn visit(root: &Path, rel: &str, out: &mut BTreeMap<String, ScanEntry>) -> Result<()> {
+    scan_with_data(root, false)
+}
+
+fn scan_with_data(root: &Path, data: bool) -> Result<BTreeMap<String, ScanEntry>> {
+    fn visit(root: &Path, rel: &str, data: bool, out: &mut BTreeMap<String, ScanEntry>) -> Result<()> {
         let path = root.join(rel);
         let m = fs::symlink_metadata(&path)?;
         out.insert(
@@ -97,6 +102,7 @@ fn scan(root: &Path) -> Result<BTreeMap<String, ScanEntry>> {
             ScanEntry {
                 fingerprint: (m.dev(), m.ino(), m.mode(), m.len(), m.mtime(), m.mtime_nsec(), m.ctime(), m.ctime_nsec()),
                 meta: crate::fsutil::meta_of(&m),
+                data: if data && m.is_file() { Some(crate::sys::apfs_data_identity(&path)?) } else { None },
             },
         );
         if m.is_dir() && (rel.is_empty() || !is_subvolume(&path)) {
@@ -104,14 +110,37 @@ fn scan(root: &Path) -> Result<BTreeMap<String, ScanEntry>> {
                 let e = e?;
                 let name = e.file_name().into_string().map_err(|_| anyhow::anyhow!("non-UTF-8 file name"))?;
                 let next = if rel.is_empty() { name } else { format!("{rel}/{name}") };
-                visit(root, &next, out)?;
+                visit(root, &next, data, out)?;
             }
         }
         Ok(())
     }
     let mut out = BTreeMap::new();
-    visit(root, "", &mut out)?;
+    visit(root, "", data, &mut out)?;
     Ok(out)
+}
+
+/// Validate a read of live trees with kernel generation counts on both sides.
+/// Unknown counts (including mmap) or a concurrent change require a snapshot.
+pub fn stable_read<T>(roots: &[&Path], read: impl FnOnce() -> Result<T>) -> Result<Option<T>> {
+    let _t = crate::trace::span("APFS validated read");
+    let before = roots.iter().map(|root| scan_with_data(root, true)).collect::<Result<Vec<_>>>()?;
+    if before
+        .iter()
+        .any(|tree| tree.values().any(|entry| entry.meta.is_file() && entry.data.and_then(|d| d.generation).is_none()))
+    {
+        return Ok(None);
+    }
+    let result = read();
+    for (root, expected) in roots.iter().zip(before) {
+        // A deleted or replaced path can make either the read or the second scan fail.
+        // Discard the result and use the existing snapshot path in that case.
+        match scan_with_data(root, true) {
+            Ok(after) if after == expected => {}
+            _ => return Ok(None),
+        }
+    }
+    result.map(Some)
 }
 pub fn file_identity(path: &Path) -> Result<Vec<u8>> {
     match crate::sys::apfs_attribute(path, c"com.layr.origin", None) {
@@ -315,7 +344,7 @@ pub fn clone_identity(path: &Path) -> Result<(String, Option<u64>)> {
 }
 pub fn candidates(parent: &Path, child: &Path) -> Result<Vec<crate::changes::Change>> {
     let _t = crate::trace::span("APFS candidates");
-    let (a, b) = (scan(parent)?, scan(child)?);
+    let (a, b) = (scan_with_data(parent, true)?, scan_with_data(child, true)?);
     let names: std::collections::BTreeSet<_> = a.keys().chain(b.keys()).filter(|s| !s.is_empty()).collect();
     let mut changes: BTreeMap<_, _> = names
         .into_iter()
@@ -361,16 +390,23 @@ pub fn candidates(parent: &Path, child: &Path) -> Result<Vec<crate::changes::Cha
     }
     for (p, c) in &mut changes {
         if c.old_path.is_none() && c.old.as_ref().is_some_and(|m| m.is_file()) && c.new.as_ref().is_some_and(|m| m.is_file()) {
-            c.ranges = Some(changed_ranges(&parent.join(p), &child.join(p))?);
+            let old = &a[p];
+            let new = &b[p];
+            let shared = old.fingerprint.0 == new.fingerprint.0
+                && old.meta.size == new.meta.size
+                && old.data.zip(new.data).is_some_and(|(a, b)| {
+                    a.generation.is_some() && b.generation.is_some() && a.clone_id.is_some() && a.clone_id == b.clone_id
+                });
+            c.ranges = Some(if shared { Vec::new() } else { changed_ranges(parent, child, p)? });
         }
     }
     Ok(changes.into_values().collect())
 }
 
 // Compare fixed blocks when APFS cannot report changed extents. Adjacent blocks coalesce.
-fn changed_ranges(a: &Path, b: &Path) -> Result<Vec<(u64, u64)>> {
+fn changed_ranges(parent: &Path, child: &Path, rel: &str) -> Result<Vec<(u64, u64)>> {
     use std::io::Read;
-    let (mut a, mut b) = (File::open(a)?, File::open(b)?);
+    let (mut a, mut b) = (crate::tree::Tree::open(parent)?.open_read(rel)?, crate::tree::Tree::open(child)?.open_read(rel)?);
     let (alen, blen) = (a.metadata()?.len(), b.metadata()?.len());
     let mut ranges: Vec<(u64, u64)> = Vec::new();
     let (mut ab, mut bb) = ([0u8; 4096], [0u8; 4096]);
@@ -551,6 +587,133 @@ mod tests {
         fs::write(branch.join("file"), data)?;
         let changes = candidates(&base, &branch)?;
         assert_eq!(changes[0].ranges, Some(vec![(8192, 4096)]));
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a case-sensitive APFS test volume"]
+    fn kernel_identity_detects_writes_with_restored_mtime() -> Result<()> {
+        use std::os::unix::fs::FileExt;
+        let s = Sandbox::new();
+        let src = s.0.join("source");
+        create_subvolume(&src)?;
+        fs::write(src.join("file"), vec![0; 16384])?;
+        let base = s.0.join("base");
+        snapshot(&src, &base, true)?;
+        let left = crate::sys::apfs_data_identity(&src.join("file"))?;
+        let right = crate::sys::apfs_data_identity(&base.join("file"))?;
+        assert!(left.clone_id.is_some());
+        assert_eq!(left.clone_id, right.clone_id);
+        assert!(crate::changes::file_changes(&base, &src)?.is_empty());
+        let m = fs::metadata(src.join("file"))?;
+        let file = fs::OpenOptions::new().write(true).open(src.join("file"))?;
+        file.write_all_at(b"x", 8192)?;
+        crate::fsutil::set_mtime(&file, m.mtime(), m.mtime_nsec())?;
+        assert_ne!(crate::sys::apfs_data_identity(&src.join("file"))?.clone_id, right.clone_id);
+        let changes = crate::changes::file_changes(&base, &src)?;
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].ranges, Some(vec![(8192, 4096)]));
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a case-sensitive APFS test volume"]
+    fn live_read_rejects_writes_and_deletes() -> Result<()> {
+        use std::os::unix::fs::FileExt;
+        let s = Sandbox::new();
+        let path = s.0.join("file");
+        fs::write(&path, vec![0; 16384])?;
+        assert_eq!(stable_read(&[&s.0], || Ok(7))?, Some(7));
+        let m = fs::metadata(&path)?;
+        let file = fs::OpenOptions::new().read(true).write(true).open(&path)?;
+        assert_eq!(
+            stable_read(&[&s.0], || {
+                file.write_all_at(b"x", 0)?;
+                crate::fsutil::set_mtime(&file, m.mtime(), m.mtime_nsec())?;
+                Ok(7)
+            })?,
+            None
+        );
+        assert_eq!(
+            stable_read(&[&s.0], || {
+                fs::remove_file(&path)?;
+                Ok(7)
+            })?,
+            None
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a case-sensitive APFS test volume"]
+    fn index_replacement_shares_data_and_keeps_destination_metadata() -> Result<()> {
+        let s = Sandbox::new();
+        let src = s.0.join("source");
+        let dst = s.0.join("index");
+        create_subvolume(&src)?;
+        create_subvolume(&dst)?;
+        let source_file = File::create(src.join("file"))?;
+        source_file.set_len(64 * 1024 * 1024)?;
+        crate::fsutil::set_mtime(&source_file, 1600000000, 123456789)?;
+        crate::sys::apfs_attribute(&src.join("file"), c"com.layr.source-only", Some(b"remove"))?;
+        fs::set_permissions(src.join("file"), fs::Permissions::from_mode(0o444))?;
+        set_readonly(&src)?;
+        fs::write(dst.join("file"), b"old")?;
+        crate::sys::apfs_attribute(&dst.join("file"), c"com.layr.origin", Some(b"index origin"))?;
+        crate::sys::apfs_attribute(&dst.join("file"), c"com.layr.keep", Some(b"keep"))?;
+        let old_inode = fs::metadata(dst.join("file"))?.ino();
+        crate::fsutil::copy_index_entry(&src, "file", &dst, "file", None)?;
+        let a = crate::sys::apfs_data_identity(&src.join("file"))?;
+        let b = crate::sys::apfs_data_identity(&dst.join("file"))?;
+        assert!(a.clone_id.is_some());
+        assert_eq!(a.clone_id, b.clone_id);
+        let m = fs::metadata(dst.join("file"))?;
+        assert_ne!(m.ino(), old_inode);
+        assert_eq!(m.len(), 64 * 1024 * 1024);
+        assert_eq!(m.mode() & 0o7777, 0o444);
+        assert_eq!((m.mtime(), m.mtime_nsec()), (1600000000, 123456789));
+        assert_eq!(crate::sys::apfs_attribute(&dst.join("file"), c"com.layr.origin", None)?, b"index origin");
+        assert_eq!(crate::sys::apfs_attribute(&dst.join("file"), c"com.layr.keep", None)?, b"keep");
+        assert_eq!(
+            crate::sys::apfs_attribute(&dst.join("file"), c"com.layr.source-only", None).unwrap_err().raw_os_error(),
+            Some(libc::ENOATTR)
+        );
+        assert_eq!(fs::read_dir(&dst)?.count(), 1);
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a case-sensitive APFS test volume"]
+    fn index_copy_preserves_hard_links_and_failed_copy_keeps_original() -> Result<()> {
+        let s = Sandbox::new();
+        let src = s.0.join("source");
+        let dst = s.0.join("index");
+        fs::create_dir(&src)?;
+        fs::create_dir(&dst)?;
+        fs::write(src.join("file"), b"new")?;
+        fs::write(dst.join("file"), b"old")?;
+        fs::hard_link(dst.join("file"), dst.join("alias"))?;
+        let original = fs::metadata(dst.join("file"))?.ino();
+        crate::fsutil::copy_index_entry(&src, "file", &dst, "file", None)?;
+        assert_eq!(fs::metadata(dst.join("file"))?.ino(), original);
+        assert_eq!(fs::metadata(dst.join("alias"))?.ino(), original);
+        assert_eq!(fs::read(dst.join("alias"))?, b"new");
+        fs::remove_file(dst.join("alias"))?;
+        fs::write(src.join("file"), b"later")?;
+        let tree = crate::tree::Tree::open(&dst)?;
+        let result = tree.replace_index_file(&File::open(src.join("file"))?, "file", |_| bail!("test preparation error"));
+        assert!(result.is_err());
+        assert_eq!(fs::metadata(dst.join("file"))?.ino(), original);
+        assert_eq!(fs::read(dst.join("file"))?, b"new");
+        assert_eq!(fs::read_dir(&dst)?.count(), 1);
+        // The general copy path still updates a working inode in place.
+        crate::fsutil::copy_entry(&src, "file", &dst, "file", None)?;
+        assert_eq!(fs::metadata(dst.join("file"))?.ino(), original);
+        assert_eq!(fs::read(dst.join("file"))?, b"later");
+        crate::sys::apfs_immutable(&dst.join("file"), true)?;
+        assert!(!tree.replace_index_file(&File::open(src.join("file"))?, "file", |_| bail!("must not prepare"))?);
+        crate::sys::apfs_immutable(&dst.join("file"), false)?;
+        assert_eq!(fs::read_dir(&dst)?.count(), 1);
         Ok(())
     }
 }

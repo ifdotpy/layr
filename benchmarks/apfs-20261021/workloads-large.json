@@ -1,0 +1,394 @@
+{
+  "binary_sha256": "88602f0351b2d8d2bc4eb119369728f1e0ef6800e6cecc28c077ff2bdad04c18",
+  "rows": [
+    {
+      "kind": "large",
+      "parameter": 67108864,
+      "trial": 0,
+      "operation": "branch",
+      "wall": 0.10780524999999996,
+      "cpu": 0.09988399999999997,
+      "load": [
+        7.259765625,
+        8.85546875,
+        16.0673828125
+      ],
+      "trace": "trace      0.7 ms  open project\ntrace      3.0 ms  APFS scan before\ntrace     88.1 ms  APFS copy tree\ntrace      2.5 ms  APFS scan after\ntrace     93.9 ms  APFS clone /private/tmp/layr-apfs-large-20261021/large-67108864/store/projects/work/meta/work/01a15fda-2e2e-760a-a0f8-1e4a8ff0f4c4\ntrace      0.8 ms  record line.create\n"
+    },
+    {
+      "kind": "large",
+      "parameter": 67108864,
+      "trial": 0,
+      "operation": "add",
+      "wall": 0.6476844580000001,
+      "cpu": 0.43186499999999994,
+      "load": [
+        7.259765625,
+        8.85546875,
+        16.0673828125
+      ],
+      "trace": "trace      0.6 ms  open project\ntrace      3.0 ms  APFS scan before\ntrace     62.7 ms  APFS copy tree\ntrace      2.7 ms  APFS scan after\ntrace     39.5 ms  APFS seal tree\ntrace    108.2 ms  APFS clone /private/tmp/layr-apfs-large-20261021/large-67108864/store/projects/work/meta/scan/01a15fda-2f37-755f-b1db-bdbc78885b42\ntrace    265.9 ms  APFS candidates\ntrace      3.1 ms  APFS scan before\ntrace     93.5 ms  APFS copy tree\ntrace      3.4 ms  APFS scan after\ntrace    100.3 ms  APFS clone /private/tmp/layr-apfs-large-20261021/large-67108864/store/projects/work/meta/stage/01a15fda-2e2e-760a-a0f8-1e49e0a64058\n"
+    },
+    {
+      "kind": "large",
+      "parameter": 67108864,
+      "trial": 0,
+      "operation": "add_allocation",
+      "bytes": 67592192
+    },
+    {
+      "kind": "large",
+      "parameter": 67108864,
+      "trial": 0,
+      "operation": "commit",
+      "wall": 0.3276767089999999,
+      "cpu": 0.24502999999999986,
+      "load": [
+        7.259765625,
+        8.85546875,
+        16.0673828125
+      ],
+      "trace": "trace      0.7 ms  open project\ntrace      3.5 ms  APFS scan before\ntrace     65.9 ms  APFS copy tree\ntrace      3.1 ms  APFS scan after\ntrace     38.1 ms  APFS seal tree\ntrace    111.0 ms  APFS clone /private/tmp/layr-apfs-large-20261021/large-67108864/store/projects/work/states/01a15fda-327d-7220-a18f-55be1c8fac88\ntrace    161.8 ms  APFS candidates\ntrace      0.6 ms  record commit\n"
+    },
+    {
+      "kind": "large",
+      "parameter": 67108864,
+      "trial": 0,
+      "operation": "fsck",
+      "wall": 0.011506332999999813,
+      "cpu": 0.008142000000000316,
+      "load": [
+        7.259765625,
+        8.85546875,
+        16.0673828125
+      ],
+      "trace": "trace      0.7 ms  open project\n"
+    },
+    {
+      "kind": "large",
+      "parameter": 67108864,
+      "trial": 1,
+      "operation": "branch",
+      "wall": 0.11939258300000022,
+      "cpu": 0.11247000000000007,
+      "load": [
+        7.259765625,
+        8.85546875,
+        16.0673828125
+      ],
+      "trace": "trace      0.8 ms  open project\ntrace      3.2 ms  APFS scan before\ntrace     98.1 ms  APFS copy tree\ntrace      3.6 ms  APFS scan after\ntrace    105.2 ms  APFS clone /private/tmp/layr-apfs-large-20261021/large-67108864/store/projects/work/meta/work/01a15fda-354f-744a-9ec8-b235e7fee946\ntrace      0.6 ms  record line.create\n"
+    },
+    {
+      "kind": "large",
+      "parameter": 67108864,
+      "trial": 1,
+      "operation": "add",
+      "wall": 0.5633114159999995,
+      "cpu": 0.4316519999999997,
+      "load": [
+        7.259765625,
+        8.85546875,
+        16.0673828125
+      ],
+      "trace": "trace      0.7 ms  open project\ntrace      3.6 ms  APFS scan before\ntrace     68.8 ms  APFS copy tree\ntrace      2.9 ms  APFS scan after\ntrace     42.9 ms  APFS seal tree\ntrace    118.6 ms  APFS clone /private/tmp/layr-apfs-large-20261021/large-67108864/store/projects/work/meta/scan/01a15fda-366d-762c-8088-79ef0d139676\ntrace    184.1 ms  APFS candidates\ntrace      2.8 ms  APFS scan before\ntrace     94.1 ms  APFS copy tree\ntrace      3.3 ms  APFS scan after\ntrace    100.6 ms  APFS clone /private/tmp/layr-apfs-large-20261021/large-67108864/store/projects/work/meta/stage/01a15fda-354f-744a-9ec8-b23491c88049\n"
+    },
+    {
+      "kind": "large",
+      "parameter": 67108864,
+      "trial": 1,
+      "operation": "add_allocation",
+      "bytes": 67600384
+    },
+    {
+      "kind": "large",
+      "parameter": 67108864,
+      "trial": 1,
+      "operation": "commit",
+      "wall": 0.3421090419999997,
+      "cpu": 0.2539069999999999,
+      "load": [
+        7.259765625,
+        8.85546875,
+        16.0673828125
+      ],
+      "trace": "trace      0.8 ms  open project\ntrace      3.6 ms  APFS scan before\ntrace     68.3 ms  APFS copy tree\ntrace      3.5 ms  APFS scan after\ntrace     37.4 ms  APFS seal tree\ntrace    113.2 ms  APFS clone /private/tmp/layr-apfs-large-20261021/large-67108864/store/projects/work/states/01a15fda-393b-7698-93a2-c800fbf0dcb9\ntrace    173.6 ms  APFS candidates\ntrace      0.6 ms  record commit\n"
+    },
+    {
+      "kind": "large",
+      "parameter": 67108864,
+      "trial": 1,
+      "operation": "fsck",
+      "wall": 0.013674709000000007,
+      "cpu": 0.009741,
+      "load": [
+        7.259765625,
+        8.85546875,
+        16.0673828125
+      ],
+      "trace": "trace      0.9 ms  open project\n"
+    },
+    {
+      "kind": "large",
+      "parameter": 67108864,
+      "trial": 2,
+      "operation": "branch",
+      "wall": 0.12273208399999991,
+      "cpu": 0.11683000000000021,
+      "load": [
+        7.259765625,
+        8.85546875,
+        16.0673828125
+      ],
+      "trace": "trace      0.7 ms  open project\ntrace      3.4 ms  APFS scan before\ntrace    102.6 ms  APFS copy tree\ntrace      3.2 ms  APFS scan after\ntrace    109.6 ms  APFS clone /private/tmp/layr-apfs-large-20261021/large-67108864/store/projects/work/meta/work/01a15fda-3c17-7428-b4fc-545365cd513e\ntrace      0.6 ms  record line.create\n"
+    },
+    {
+      "kind": "large",
+      "parameter": 67108864,
+      "trial": 2,
+      "operation": "add",
+      "wall": 0.6087935839999998,
+      "cpu": 0.46305799999999975,
+      "load": [
+        7.259765625,
+        8.85546875,
+        16.0673828125
+      ],
+      "trace": "trace      0.9 ms  open project\ntrace      3.8 ms  APFS scan before\ntrace     70.9 ms  APFS copy tree\ntrace      3.4 ms  APFS scan after\ntrace     59.0 ms  APFS seal tree\ntrace    137.5 ms  APFS clone /private/tmp/layr-apfs-large-20261021/large-67108864/store/projects/work/meta/scan/01a15fda-3d4c-7673-a8a2-8b7014fa2ee9\ntrace    190.0 ms  APFS candidates\ntrace      3.7 ms  APFS scan before\ntrace    105.6 ms  APFS copy tree\ntrace      3.1 ms  APFS scan after\ntrace    112.8 ms  APFS clone /private/tmp/layr-apfs-large-20261021/large-67108864/store/projects/work/meta/stage/01a15fda-3c17-7428-b4fc-5452f2d208d4\n"
+    },
+    {
+      "kind": "large",
+      "parameter": 67108864,
+      "trial": 2,
+      "operation": "add_allocation",
+      "bytes": 67600384
+    },
+    {
+      "kind": "large",
+      "parameter": 67108864,
+      "trial": 2,
+      "operation": "commit",
+      "wall": 0.3710401250000004,
+      "cpu": 0.2719810000000007,
+      "load": [
+        7.71923828125,
+        8.923828125,
+        16.04931640625
+      ],
+      "trace": "trace      0.7 ms  open project\ntrace      3.5 ms  APFS scan before\ntrace     72.7 ms  APFS copy tree\ntrace      3.3 ms  APFS scan after\ntrace     39.4 ms  APFS seal tree\ntrace    119.3 ms  APFS clone /private/tmp/layr-apfs-large-20261021/large-67108864/store/projects/work/states/01a15fda-404b-72a6-89c2-7a74d1ea14c0\ntrace    190.0 ms  APFS candidates\ntrace      0.7 ms  record commit\n"
+    },
+    {
+      "kind": "large",
+      "parameter": 67108864,
+      "trial": 2,
+      "operation": "fsck",
+      "wall": 0.013942415999999902,
+      "cpu": 0.009696000000000371,
+      "load": [
+        7.71923828125,
+        8.923828125,
+        16.04931640625
+      ],
+      "trace": "trace      0.9 ms  open project\n"
+    },
+    {
+      "kind": "large",
+      "parameter": 1073741824,
+      "trial": 0,
+      "operation": "branch",
+      "wall": 0.1181759170000003,
+      "cpu": 0.1113079999999993,
+      "load": [
+        7.71923828125,
+        8.923828125,
+        16.04931640625
+      ],
+      "trace": "trace      0.6 ms  open project\ntrace      3.4 ms  APFS scan before\ntrace     97.6 ms  APFS copy tree\ntrace      3.0 ms  APFS scan after\ntrace    104.4 ms  APFS clone /private/tmp/layr-apfs-large-20261021/large-1073741824/store/projects/work/meta/work/01a15fda-4f1d-77d7-b858-cb9bbedd6476\ntrace      0.6 ms  record line.create\n"
+    },
+    {
+      "kind": "large",
+      "parameter": 1073741824,
+      "trial": 0,
+      "operation": "add",
+      "wall": 2.0814742499999994,
+      "cpu": 1.2877460000000012,
+      "load": [
+        7.66162109375,
+        8.8916015625,
+        15.99609375
+      ],
+      "trace": "trace      0.7 ms  open project\ntrace      3.3 ms  APFS scan before\ntrace     64.4 ms  APFS copy tree\ntrace      3.0 ms  APFS scan after\ntrace     42.5 ms  APFS seal tree\ntrace    113.5 ms  APFS clone /private/tmp/layr-apfs-large-20261021/large-1073741824/store/projects/work/meta/scan/01a15fda-5030-7045-b67d-039a1bd7e501\ntrace    969.1 ms  APFS candidates\ntrace      2.9 ms  APFS scan before\ntrace     93.1 ms  APFS copy tree\ntrace      2.9 ms  APFS scan after\ntrace     99.2 ms  APFS clone /private/tmp/layr-apfs-large-20261021/large-1073741824/store/projects/work/meta/stage/01a15fda-4f1d-77d7-b858-cb9a055210d5\n"
+    },
+    {
+      "kind": "large",
+      "parameter": 1073741824,
+      "trial": 0,
+      "operation": "add_allocation",
+      "bytes": 1074225152
+    },
+    {
+      "kind": "large",
+      "parameter": 1073741824,
+      "trial": 0,
+      "operation": "commit",
+      "wall": 0.6956135420000003,
+      "cpu": 0.5760149999999999,
+      "load": [
+        7.66162109375,
+        8.8916015625,
+        15.99609375
+      ],
+      "trace": "trace      0.6 ms  open project\ntrace      3.2 ms  APFS scan before\ntrace     58.5 ms  APFS copy tree\ntrace      2.8 ms  APFS scan after\ntrace     34.6 ms  APFS seal tree\ntrace     99.4 ms  APFS clone /private/tmp/layr-apfs-large-20261021/large-1073741824/store/projects/work/states/01a15fda-58e4-7496-b203-090ce0f652d9\ntrace    537.6 ms  APFS candidates\ntrace      0.6 ms  record commit\n"
+    },
+    {
+      "kind": "large",
+      "parameter": 1073741824,
+      "trial": 0,
+      "operation": "fsck",
+      "wall": 0.011173041999999356,
+      "cpu": 0.007699999999999818,
+      "load": [
+        7.66162109375,
+        8.8916015625,
+        15.99609375
+      ],
+      "trace": "trace      0.6 ms  open project\n"
+    },
+    {
+      "kind": "large",
+      "parameter": 1073741824,
+      "trial": 1,
+      "operation": "branch",
+      "wall": 0.12012616600000037,
+      "cpu": 0.11017200000000038,
+      "load": [
+        7.66162109375,
+        8.8916015625,
+        15.99609375
+      ],
+      "trace": "trace      0.7 ms  open project\ntrace      3.5 ms  APFS scan before\ntrace     94.9 ms  APFS copy tree\ntrace      3.1 ms  APFS scan after\ntrace    101.8 ms  APFS clone /private/tmp/layr-apfs-large-20261021/large-1073741824/store/projects/work/meta/work/01a15fda-5e96-72a6-8759-66bdbea39669\ntrace      2.9 ms  record line.create\n"
+    },
+    {
+      "kind": "large",
+      "parameter": 1073741824,
+      "trial": 1,
+      "operation": "add",
+      "wall": 1.5757675000000013,
+      "cpu": 1.2707260000000007,
+      "load": [
+        7.66162109375,
+        8.8916015625,
+        15.99609375
+      ],
+      "trace": "trace      0.7 ms  open project\ntrace      3.8 ms  APFS scan before\ntrace     69.6 ms  APFS copy tree\ntrace      3.7 ms  APFS scan after\ntrace     45.9 ms  APFS seal tree\ntrace    123.3 ms  APFS clone /private/tmp/layr-apfs-large-20261021/large-1073741824/store/projects/work/meta/scan/01a15fda-5fc8-749f-a5f2-d6d496f5621f\ntrace    567.9 ms  APFS candidates\ntrace      2.9 ms  APFS scan before\ntrace     91.9 ms  APFS copy tree\ntrace      3.0 ms  APFS scan after\ntrace     98.2 ms  APFS clone /private/tmp/layr-apfs-large-20261021/large-1073741824/store/projects/work/meta/stage/01a15fda-5e96-72a6-8759-66bc268bec8e\n"
+    },
+    {
+      "kind": "large",
+      "parameter": 1073741824,
+      "trial": 1,
+      "operation": "add_allocation",
+      "bytes": 1074233344
+    },
+    {
+      "kind": "large",
+      "parameter": 1073741824,
+      "trial": 1,
+      "operation": "commit",
+      "wall": 0.684651916,
+      "cpu": 0.5542859999999994,
+      "load": [
+        7.6083984375,
+        8.85986328125,
+        15.943359375
+      ],
+      "trace": "trace      0.6 ms  open project\ntrace      2.9 ms  APFS scan before\ntrace     56.9 ms  APFS copy tree\ntrace      2.7 ms  APFS scan after\ntrace     31.5 ms  APFS seal tree\ntrace     94.4 ms  APFS clone /private/tmp/layr-apfs-large-20261021/large-1073741824/store/projects/work/states/01a15fda-6680-76a2-ac90-630a7fcf3fa9\ntrace    535.3 ms  APFS candidates\ntrace      0.6 ms  record commit\n"
+    },
+    {
+      "kind": "large",
+      "parameter": 1073741824,
+      "trial": 1,
+      "operation": "fsck",
+      "wall": 0.010028374999997425,
+      "cpu": 0.0069480000000012865,
+      "load": [
+        7.6083984375,
+        8.85986328125,
+        15.943359375
+      ],
+      "trace": "trace      0.6 ms  open project\n"
+    },
+    {
+      "kind": "large",
+      "parameter": 1073741824,
+      "trial": 2,
+      "operation": "branch",
+      "wall": 0.10047799999999896,
+      "cpu": 0.09155400000000036,
+      "load": [
+        7.6083984375,
+        8.85986328125,
+        15.943359375
+      ],
+      "trace": "trace      0.5 ms  open project\ntrace      2.7 ms  APFS scan before\ntrace     80.3 ms  APFS copy tree\ntrace      2.8 ms  APFS scan after\ntrace     86.1 ms  APFS clone /private/tmp/layr-apfs-large-20261021/large-1073741824/store/projects/work/meta/work/01a15fda-6bc7-73ed-b107-e4ceb6d8dc44\ntrace      2.9 ms  record line.create\n"
+    },
+    {
+      "kind": "large",
+      "parameter": 1073741824,
+      "trial": 2,
+      "operation": "add",
+      "wall": 1.3329230830000007,
+      "cpu": 0.9863329999999983,
+      "load": [
+        7.6083984375,
+        8.85986328125,
+        15.943359375
+      ],
+      "trace": "trace      0.5 ms  open project\ntrace      2.5 ms  APFS scan before\ntrace     50.3 ms  APFS copy tree\ntrace      2.2 ms  APFS scan after\ntrace     31.0 ms  APFS seal tree\ntrace     86.3 ms  APFS clone /private/tmp/layr-apfs-large-20261021/large-1073741824/store/projects/work/meta/scan/01a15fda-6cac-753c-892c-558c70a8f86d\ntrace    466.4 ms  APFS candidates\ntrace      2.3 ms  APFS scan before\ntrace     74.1 ms  APFS copy tree\ntrace      2.6 ms  APFS scan after\ntrace     79.2 ms  APFS clone /private/tmp/layr-apfs-large-20261021/large-1073741824/store/projects/work/meta/stage/01a15fda-6bc7-73ed-b107-e4cdf750095a\n"
+    },
+    {
+      "kind": "large",
+      "parameter": 1073741824,
+      "trial": 2,
+      "operation": "add_allocation",
+      "bytes": 1074233344
+    },
+    {
+      "kind": "large",
+      "parameter": 1073741824,
+      "trial": 2,
+      "operation": "commit",
+      "wall": 0.6046724589999997,
+      "cpu": 0.4834890000000005,
+      "load": [
+        7.6083984375,
+        8.85986328125,
+        15.943359375
+      ],
+      "trace": "trace      0.6 ms  open project\ntrace      2.6 ms  APFS scan before\ntrace     50.4 ms  APFS copy tree\ntrace      2.4 ms  APFS scan after\ntrace     29.2 ms  APFS seal tree\ntrace     85.0 ms  APFS clone /private/tmp/layr-apfs-large-20261021/large-1073741824/store/projects/work/states/01a15fda-7263-72f5-b712-c7a6574f14cb\ntrace    470.2 ms  APFS candidates\ntrace      0.6 ms  record commit\n"
+    },
+    {
+      "kind": "large",
+      "parameter": 1073741824,
+      "trial": 2,
+      "operation": "fsck",
+      "wall": 0.00958775000000145,
+      "cpu": 0.006736999999999327,
+      "load": [
+        7.6083984375,
+        8.85986328125,
+        15.943359375
+      ],
+      "trace": "trace      0.6 ms  open project\n"
+    }
+  ],
+  "verified": [
+    [
+      "large",
+      67108864
+    ],
+    [
+      "large",
+      1073741824
+    ]
+  ],
+  "complete": true
+}

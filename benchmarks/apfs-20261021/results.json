@@ -1,0 +1,1220 @@
+{
+  "platform": "macOS-27.2-arm64-arm-64bit",
+  "commit": "dea82057fe6312a1365f9c34338c994bc48acc33",
+  "binary_sha256": "88602f0351b2d8d2bc4eb119369728f1e0ef6800e6cecc28c077ff2bdad04c18",
+  "rows": [
+    {
+      "operation": "stat",
+      "wall": 0.004066,
+      "entries": 1010,
+      "files": 1000,
+      "trial": 0,
+      "load": [
+        31.10205078125,
+        35.63525390625,
+        35.39501953125
+      ]
+    },
+    {
+      "operation": "bulk",
+      "wall": 0.002172,
+      "entries": 1010,
+      "files": 1000,
+      "trial": 0,
+      "load": [
+        31.10205078125,
+        35.63525390625,
+        35.39501953125
+      ]
+    },
+    {
+      "operation": "clone",
+      "wall": 0.014027,
+      "entries": 0,
+      "files": 1000,
+      "trial": 0,
+      "load": [
+        31.10205078125,
+        35.63525390625,
+        35.39501953125
+      ]
+    },
+    {
+      "operation": "unseal",
+      "wall": 0.046858,
+      "entries": 1011,
+      "files": 1000,
+      "trial": 0,
+      "load": [
+        31.10205078125,
+        35.63525390625,
+        35.39501953125
+      ]
+    },
+    {
+      "operation": "xattr",
+      "wall": 0.030439,
+      "entries": 1011,
+      "files": 1000,
+      "trial": 0,
+      "load": [
+        31.10205078125,
+        35.63525390625,
+        35.39501953125
+      ]
+    },
+    {
+      "operation": "seal",
+      "wall": 0.023594,
+      "entries": 1011,
+      "files": 1000,
+      "trial": 0,
+      "load": [
+        31.10205078125,
+        35.63525390625,
+        35.39501953125
+      ]
+    },
+    {
+      "operation": "unseal",
+      "wall": 0.023445,
+      "entries": 1011,
+      "files": 1000,
+      "trial": 0,
+      "load": [
+        31.10205078125,
+        35.63525390625,
+        35.39501953125
+      ]
+    },
+    {
+      "operation": "delete_tree",
+      "wall": 0.05359112500000007,
+      "files": 1000,
+      "trial": 0,
+      "load": [
+        31.10205078125,
+        35.63525390625,
+        35.39501953125
+      ]
+    },
+    {
+      "operation": "bulk",
+      "wall": 0.002165,
+      "entries": 1010,
+      "files": 1000,
+      "trial": 1,
+      "load": [
+        31.10205078125,
+        35.63525390625,
+        35.39501953125
+      ]
+    },
+    {
+      "operation": "stat",
+      "wall": 0.003507,
+      "entries": 1010,
+      "files": 1000,
+      "trial": 1,
+      "load": [
+        31.10205078125,
+        35.63525390625,
+        35.39501953125
+      ]
+    },
+    {
+      "operation": "clone",
+      "wall": 0.011404,
+      "entries": 0,
+      "files": 1000,
+      "trial": 1,
+      "load": [
+        31.10205078125,
+        35.63525390625,
+        35.39501953125
+      ]
+    },
+    {
+      "operation": "unseal",
+      "wall": 0.044551,
+      "entries": 1011,
+      "files": 1000,
+      "trial": 1,
+      "load": [
+        31.10205078125,
+        35.63525390625,
+        35.39501953125
+      ]
+    },
+    {
+      "operation": "xattr",
+      "wall": 0.028329,
+      "entries": 1011,
+      "files": 1000,
+      "trial": 1,
+      "load": [
+        31.10205078125,
+        35.63525390625,
+        35.39501953125
+      ]
+    },
+    {
+      "operation": "seal",
+      "wall": 0.028433,
+      "entries": 1011,
+      "files": 1000,
+      "trial": 1,
+      "load": [
+        31.10205078125,
+        35.63525390625,
+        35.39501953125
+      ]
+    },
+    {
+      "operation": "unseal",
+      "wall": 0.023522,
+      "entries": 1011,
+      "files": 1000,
+      "trial": 1,
+      "load": [
+        31.10205078125,
+        35.63525390625,
+        35.39501953125
+      ]
+    },
+    {
+      "operation": "delete_tree",
+      "wall": 0.09627624999999984,
+      "files": 1000,
+      "trial": 1,
+      "load": [
+        31.10205078125,
+        35.63525390625,
+        35.39501953125
+      ]
+    },
+    {
+      "operation": "stat",
+      "wall": 0.003672,
+      "entries": 1010,
+      "files": 1000,
+      "trial": 2,
+      "load": [
+        31.10205078125,
+        35.63525390625,
+        35.39501953125
+      ]
+    },
+    {
+      "operation": "bulk",
+      "wall": 0.00224,
+      "entries": 1010,
+      "files": 1000,
+      "trial": 2,
+      "load": [
+        31.10205078125,
+        35.63525390625,
+        35.39501953125
+      ]
+    },
+    {
+      "operation": "clone",
+      "wall": 0.01117,
+      "entries": 0,
+      "files": 1000,
+      "trial": 2,
+      "load": [
+        31.10205078125,
+        35.63525390625,
+        35.39501953125
+      ]
+    },
+    {
+      "operation": "unseal",
+      "wall": 0.044332,
+      "entries": 1011,
+      "files": 1000,
+      "trial": 2,
+      "load": [
+        31.10205078125,
+        35.63525390625,
+        35.39501953125
+      ]
+    },
+    {
+      "operation": "xattr",
+      "wall": 0.034948,
+      "entries": 1011,
+      "files": 1000,
+      "trial": 2,
+      "load": [
+        31.10205078125,
+        35.63525390625,
+        35.39501953125
+      ]
+    },
+    {
+      "operation": "seal",
+      "wall": 0.024579,
+      "entries": 1011,
+      "files": 1000,
+      "trial": 2,
+      "load": [
+        31.10205078125,
+        35.63525390625,
+        35.39501953125
+      ]
+    },
+    {
+      "operation": "unseal",
+      "wall": 0.021811,
+      "entries": 1011,
+      "files": 1000,
+      "trial": 2,
+      "load": [
+        31.10205078125,
+        35.63525390625,
+        35.39501953125
+      ]
+    },
+    {
+      "operation": "delete_tree",
+      "wall": 0.06808270799999994,
+      "files": 1000,
+      "trial": 2,
+      "load": [
+        31.10205078125,
+        35.63525390625,
+        35.39501953125
+      ]
+    },
+    {
+      "operation": "stat",
+      "wall": 0.03704,
+      "entries": 10100,
+      "files": 10000,
+      "trial": 0,
+      "load": [
+        31.173828125,
+        35.57470703125,
+        35.375
+      ]
+    },
+    {
+      "operation": "bulk",
+      "wall": 0.01916,
+      "entries": 10100,
+      "files": 10000,
+      "trial": 0,
+      "load": [
+        31.173828125,
+        35.57470703125,
+        35.375
+      ]
+    },
+    {
+      "operation": "clone",
+      "wall": 0.152694,
+      "entries": 0,
+      "files": 10000,
+      "trial": 0,
+      "load": [
+        31.173828125,
+        35.57470703125,
+        35.375
+      ]
+    },
+    {
+      "operation": "unseal",
+      "wall": 1.004342,
+      "entries": 10101,
+      "files": 10000,
+      "trial": 0,
+      "load": [
+        31.173828125,
+        35.57470703125,
+        35.375
+      ]
+    },
+    {
+      "operation": "xattr",
+      "wall": 0.780332,
+      "entries": 10101,
+      "files": 10000,
+      "trial": 0,
+      "load": [
+        31.173828125,
+        35.57470703125,
+        35.375
+      ]
+    },
+    {
+      "operation": "seal",
+      "wall": 0.873561,
+      "entries": 10101,
+      "files": 10000,
+      "trial": 0,
+      "load": [
+        31.173828125,
+        35.57470703125,
+        35.375
+      ]
+    },
+    {
+      "operation": "unseal",
+      "wall": 0.667307,
+      "entries": 10101,
+      "files": 10000,
+      "trial": 0,
+      "load": [
+        31.173828125,
+        35.57470703125,
+        35.375
+      ]
+    },
+    {
+      "operation": "delete_tree",
+      "wall": 0.7238743749999994,
+      "files": 10000,
+      "trial": 0,
+      "load": [
+        32.36083984375,
+        35.74755859375,
+        35.43701171875
+      ]
+    },
+    {
+      "operation": "bulk",
+      "wall": 0.02161,
+      "entries": 10100,
+      "files": 10000,
+      "trial": 1,
+      "load": [
+        32.36083984375,
+        35.74755859375,
+        35.43701171875
+      ]
+    },
+    {
+      "operation": "stat",
+      "wall": 0.03457,
+      "entries": 10100,
+      "files": 10000,
+      "trial": 1,
+      "load": [
+        32.36083984375,
+        35.74755859375,
+        35.43701171875
+      ]
+    },
+    {
+      "operation": "clone",
+      "wall": 0.272716,
+      "entries": 0,
+      "files": 10000,
+      "trial": 1,
+      "load": [
+        32.36083984375,
+        35.74755859375,
+        35.43701171875
+      ]
+    },
+    {
+      "operation": "unseal",
+      "wall": 0.455934,
+      "entries": 10101,
+      "files": 10000,
+      "trial": 1,
+      "load": [
+        32.36083984375,
+        35.74755859375,
+        35.43701171875
+      ]
+    },
+    {
+      "operation": "xattr",
+      "wall": 0.417959,
+      "entries": 10101,
+      "files": 10000,
+      "trial": 1,
+      "load": [
+        32.36083984375,
+        35.74755859375,
+        35.43701171875
+      ]
+    },
+    {
+      "operation": "seal",
+      "wall": 0.371587,
+      "entries": 10101,
+      "files": 10000,
+      "trial": 1,
+      "load": [
+        32.36083984375,
+        35.74755859375,
+        35.43701171875
+      ]
+    },
+    {
+      "operation": "unseal",
+      "wall": 0.295317,
+      "entries": 10101,
+      "files": 10000,
+      "trial": 1,
+      "load": [
+        32.36083984375,
+        35.74755859375,
+        35.43701171875
+      ]
+    },
+    {
+      "operation": "delete_tree",
+      "wall": 0.6319659590000004,
+      "files": 10000,
+      "trial": 1,
+      "load": [
+        32.36083984375,
+        35.74755859375,
+        35.43701171875
+      ]
+    },
+    {
+      "operation": "stat",
+      "wall": 0.036089,
+      "entries": 10100,
+      "files": 10000,
+      "trial": 2,
+      "load": [
+        32.36083984375,
+        35.74755859375,
+        35.43701171875
+      ]
+    },
+    {
+      "operation": "bulk",
+      "wall": 0.019794,
+      "entries": 10100,
+      "files": 10000,
+      "trial": 2,
+      "load": [
+        32.36083984375,
+        35.74755859375,
+        35.43701171875
+      ]
+    },
+    {
+      "operation": "clone",
+      "wall": 0.277469,
+      "entries": 0,
+      "files": 10000,
+      "trial": 2,
+      "load": [
+        32.36083984375,
+        35.74755859375,
+        35.43701171875
+      ]
+    },
+    {
+      "operation": "unseal",
+      "wall": 0.386797,
+      "entries": 10101,
+      "files": 10000,
+      "trial": 2,
+      "load": [
+        32.36083984375,
+        35.74755859375,
+        35.43701171875
+      ]
+    },
+    {
+      "operation": "xattr",
+      "wall": 0.366322,
+      "entries": 10101,
+      "files": 10000,
+      "trial": 2,
+      "load": [
+        32.36083984375,
+        35.74755859375,
+        35.43701171875
+      ]
+    },
+    {
+      "operation": "seal",
+      "wall": 0.287121,
+      "entries": 10101,
+      "files": 10000,
+      "trial": 2,
+      "load": [
+        32.36083984375,
+        35.74755859375,
+        35.43701171875
+      ]
+    },
+    {
+      "operation": "unseal",
+      "wall": 0.37439,
+      "entries": 10101,
+      "files": 10000,
+      "trial": 2,
+      "load": [
+        32.36083984375,
+        35.74755859375,
+        35.43701171875
+      ]
+    },
+    {
+      "operation": "delete_tree",
+      "wall": 0.5841215840000018,
+      "files": 10000,
+      "trial": 2,
+      "load": [
+        30.89013671875,
+        35.38623046875,
+        35.31103515625
+      ]
+    },
+    {
+      "operation": "stat",
+      "wall": 0.33673,
+      "entries": 101000,
+      "files": 100000,
+      "trial": 0,
+      "load": [
+        26.91455078125,
+        34.2880859375,
+        34.92041015625
+      ]
+    },
+    {
+      "operation": "bulk",
+      "wall": 0.160605,
+      "entries": 101000,
+      "files": 100000,
+      "trial": 0,
+      "load": [
+        26.91455078125,
+        34.2880859375,
+        34.92041015625
+      ]
+    },
+    {
+      "operation": "clone",
+      "wall": 3.233576,
+      "entries": 0,
+      "files": 100000,
+      "trial": 0,
+      "load": [
+        26.91455078125,
+        34.2880859375,
+        34.92041015625
+      ]
+    },
+    {
+      "operation": "unseal",
+      "wall": 4.507234,
+      "entries": 101001,
+      "files": 100000,
+      "trial": 0,
+      "load": [
+        27.40185546875,
+        34.2666015625,
+        34.90869140625
+      ]
+    },
+    {
+      "operation": "xattr",
+      "wall": 10.039211,
+      "entries": 101001,
+      "files": 100000,
+      "trial": 0,
+      "load": [
+        25.19384765625,
+        33.56591796875,
+        34.65234375
+      ]
+    },
+    {
+      "operation": "seal",
+      "wall": 10.572901,
+      "entries": 101001,
+      "files": 100000,
+      "trial": 0,
+      "load": [
+        24.41748046875,
+        33.1328125,
+        34.486328125
+      ]
+    },
+    {
+      "operation": "unseal",
+      "wall": 13.010043,
+      "entries": 101001,
+      "files": 100000,
+      "trial": 0,
+      "load": [
+        23.830078125,
+        32.55859375,
+        34.25634765625
+      ]
+    },
+    {
+      "operation": "delete_tree",
+      "wall": 13.324003542,
+      "files": 100000,
+      "trial": 0,
+      "load": [
+        28.03076171875,
+        33.04150390625,
+        34.3974609375
+      ]
+    },
+    {
+      "operation": "bulk",
+      "wall": 0.316134,
+      "entries": 101000,
+      "files": 100000,
+      "trial": 1,
+      "load": [
+        28.03076171875,
+        33.04150390625,
+        34.3974609375
+      ]
+    },
+    {
+      "operation": "stat",
+      "wall": 0.726549,
+      "entries": 101000,
+      "files": 100000,
+      "trial": 1,
+      "load": [
+        28.03076171875,
+        33.04150390625,
+        34.3974609375
+      ]
+    },
+    {
+      "operation": "clone",
+      "wall": 3.636271,
+      "entries": 0,
+      "files": 100000,
+      "trial": 1,
+      "load": [
+        27.30712890625,
+        32.80810546875,
+        34.30712890625
+      ]
+    },
+    {
+      "operation": "unseal",
+      "wall": 4.822221,
+      "entries": 101001,
+      "files": 100000,
+      "trial": 1,
+      "load": [
+        27.2822265625,
+        32.71142578125,
+        34.26416015625
+      ]
+    },
+    {
+      "operation": "xattr",
+      "wall": 11.440135,
+      "entries": 101001,
+      "files": 100000,
+      "trial": 1,
+      "load": [
+        28.02294921875,
+        32.701171875,
+        34.24267578125
+      ]
+    },
+    {
+      "operation": "seal",
+      "wall": 16.498986,
+      "entries": 101001,
+      "files": 100000,
+      "trial": 1,
+      "load": [
+        30.3388671875,
+        32.96435546875,
+        34.30859375
+      ]
+    },
+    {
+      "operation": "unseal",
+      "wall": 15.423563,
+      "entries": 101001,
+      "files": 100000,
+      "trial": 1,
+      "load": [
+        30.02001953125,
+        32.78173828125,
+        34.220703125
+      ]
+    },
+    {
+      "operation": "delete_tree",
+      "wall": 9.583449416999997,
+      "files": 100000,
+      "trial": 1,
+      "load": [
+        27.57568359375,
+        32.16357421875,
+        33.98388671875
+      ]
+    },
+    {
+      "operation": "stat",
+      "wall": 0.596803,
+      "entries": 101000,
+      "files": 100000,
+      "trial": 2,
+      "load": [
+        27.57568359375,
+        32.16357421875,
+        33.98388671875
+      ]
+    },
+    {
+      "operation": "bulk",
+      "wall": 0.225808,
+      "entries": 101000,
+      "files": 100000,
+      "trial": 2,
+      "load": [
+        27.57568359375,
+        32.16357421875,
+        33.98388671875
+      ]
+    },
+    {
+      "operation": "clone",
+      "wall": 2.575628,
+      "entries": 0,
+      "files": 100000,
+      "trial": 2,
+      "load": [
+        26.408203125,
+        31.84521484375,
+        33.86083984375
+      ]
+    },
+    {
+      "operation": "unseal",
+      "wall": 6.790637,
+      "entries": 101001,
+      "files": 100000,
+      "trial": 2,
+      "load": [
+        26.85595703125,
+        31.84765625,
+        33.849609375
+      ]
+    },
+    {
+      "operation": "xattr",
+      "wall": 9.905964,
+      "entries": 101001,
+      "files": 100000,
+      "trial": 2,
+      "load": [
+        25.61572265625,
+        31.4228515625,
+        33.67529296875
+      ]
+    },
+    {
+      "operation": "seal",
+      "wall": 13.217183,
+      "entries": 101001,
+      "files": 100000,
+      "trial": 2,
+      "load": [
+        24.93359375,
+        30.97900390625,
+        33.4765625
+      ]
+    },
+    {
+      "operation": "unseal",
+      "wall": 8.157424,
+      "entries": 101001,
+      "files": 100000,
+      "trial": 2,
+      "load": [
+        23.5771484375,
+        30.59716796875,
+        33.3271484375
+      ]
+    },
+    {
+      "operation": "delete_tree",
+      "wall": 6.774811083000003,
+      "files": 100000,
+      "trial": 2,
+      "load": [
+        22.20654296875,
+        30.08056640625,
+        33.1123046875
+      ]
+    },
+    {
+      "operation": "byte_copy",
+      "size": 67108864,
+      "trial": 0,
+      "wall": 0.037405833000008215,
+      "allocated_delta": 67108864,
+      "load": [
+        21.30908203125,
+        29.763671875,
+        32.982421875
+      ]
+    },
+    {
+      "operation": "clone_replace",
+      "size": 67108864,
+      "trial": 0,
+      "wall": 0.005299874999991516,
+      "allocated_delta": 0,
+      "load": [
+        21.30908203125,
+        29.763671875,
+        32.982421875
+      ]
+    },
+    {
+      "operation": "clone_replace",
+      "size": 67108864,
+      "trial": 1,
+      "wall": 0.005284249999988333,
+      "allocated_delta": 0,
+      "load": [
+        21.30908203125,
+        29.763671875,
+        32.982421875
+      ]
+    },
+    {
+      "operation": "byte_copy",
+      "size": 67108864,
+      "trial": 1,
+      "wall": 0.09365862499998912,
+      "allocated_delta": 67108864,
+      "load": [
+        21.30908203125,
+        29.763671875,
+        32.982421875
+      ]
+    },
+    {
+      "operation": "byte_copy",
+      "size": 67108864,
+      "trial": 2,
+      "wall": 0.08281854200001249,
+      "allocated_delta": 67108864,
+      "load": [
+        21.30908203125,
+        29.763671875,
+        32.982421875
+      ]
+    },
+    {
+      "operation": "clone_replace",
+      "size": 67108864,
+      "trial": 2,
+      "wall": 0.0057053339999981745,
+      "allocated_delta": 0,
+      "load": [
+        21.30908203125,
+        29.763671875,
+        32.982421875
+      ]
+    },
+    {
+      "operation": "byte_copy",
+      "size": 1073741824,
+      "trial": 0,
+      "wall": 2.317211083000018,
+      "allocated_delta": 1074790400,
+      "load": [
+        20.1630859375,
+        29.3857421875,
+        32.830078125
+      ]
+    },
+    {
+      "operation": "clone_replace",
+      "size": 1073741824,
+      "trial": 0,
+      "wall": 0.004890125000002854,
+      "allocated_delta": 0,
+      "load": [
+        19.02880859375,
+        28.9970703125,
+        32.6728515625
+      ]
+    },
+    {
+      "operation": "clone_replace",
+      "size": 1073741824,
+      "trial": 1,
+      "wall": 0.00596670799998833,
+      "allocated_delta": 0,
+      "load": [
+        19.02880859375,
+        28.9970703125,
+        32.6728515625
+      ]
+    },
+    {
+      "operation": "byte_copy",
+      "size": 1073741824,
+      "trial": 1,
+      "wall": 1.0301840829999946,
+      "allocated_delta": 1074790400,
+      "load": [
+        19.02880859375,
+        28.9970703125,
+        32.6728515625
+      ]
+    },
+    {
+      "operation": "byte_copy",
+      "size": 1073741824,
+      "trial": 2,
+      "wall": 1.7355335000000025,
+      "allocated_delta": 1074790400,
+      "load": [
+        17.9052734375,
+        28.5986328125,
+        32.51025390625
+      ]
+    },
+    {
+      "operation": "clone_replace",
+      "size": 1073741824,
+      "trial": 2,
+      "wall": 0.00842483400001015,
+      "allocated_delta": 0,
+      "load": [
+        17.9052734375,
+        28.5986328125,
+        32.51025390625
+      ]
+    },
+    {
+      "operation": "sparse_byte_copy",
+      "wall": 1.0029742910000152,
+      "allocated_delta": 1073741824,
+      "logical_size": 1073741824,
+      "reported_blocks": 2097152,
+      "load": [
+        17.03173828125,
+        28.23974609375,
+        32.3603515625
+      ]
+    },
+    {
+      "operation": "sparse_clone",
+      "wall": 0.007555416999991849,
+      "allocated_delta": 0,
+      "logical_size": 1073741824,
+      "reported_blocks": 64,
+      "load": [
+        17.03173828125,
+        28.23974609375,
+        32.3603515625
+      ]
+    },
+    {
+      "operation": "event",
+      "latency": 0.011158,
+      "flags": 102656,
+      "trial": 0,
+      "load": [
+        17.03173828125,
+        28.23974609375,
+        32.3603515625
+      ]
+    },
+    {
+      "operation": "events",
+      "wall": 0.127549,
+      "entries": 0,
+      "trial": 0,
+      "load": [
+        17.03173828125,
+        28.23974609375,
+        32.3603515625
+      ]
+    },
+    {
+      "operation": "event",
+      "latency": 0.012341,
+      "flags": 102656,
+      "trial": 1,
+      "load": [
+        17.03173828125,
+        28.23974609375,
+        32.3603515625
+      ]
+    },
+    {
+      "operation": "events",
+      "wall": 0.128787,
+      "entries": 0,
+      "trial": 1,
+      "load": [
+        17.03173828125,
+        28.23974609375,
+        32.3603515625
+      ]
+    },
+    {
+      "operation": "event",
+      "latency": 0.003042,
+      "flags": 102656,
+      "trial": 2,
+      "load": [
+        17.34912109375,
+        28.119140625,
+        32.29345703125
+      ]
+    },
+    {
+      "operation": "events",
+      "wall": 0.127956,
+      "entries": 0,
+      "trial": 2,
+      "load": [
+        17.34912109375,
+        28.119140625,
+        32.29345703125
+      ]
+    },
+    {
+      "operation": "snapshot_probe",
+      "rc": -1,
+      "errno": 1,
+      "load": [
+        17.34912109375,
+        28.119140625,
+        32.29345703125
+      ]
+    },
+    {
+      "operation": "snapshot",
+      "wall": 0.000102,
+      "entries": 0,
+      "load": [
+        17.34912109375,
+        28.119140625,
+        32.29345703125
+      ]
+    },
+    {
+      "operation": "cli_complete",
+      "files": 1000,
+      "repeats": 3,
+      "summary": "{\"trial\": 0, \"init\": 1.272048667, \"branch\": 0.1833207079999999, \"status_clean\": 0.6120994160000002, \"diff_changed\": 0.4978247920000003, \"add\": 0.702353875, \"commit\": 0.47411495800000036, \"merge\": 1.4231855419999997, \"fsck\": 0.02403783299999951}\n{\"trial\": 1, \"init\": 1.2023705839999996, \"branch\": 0.18192416700000003, \"status_clean\": 0.7888443330000001, \"diff_changed\": 0.5825750000000003, \"add\": 0.7422969580000007, \"commit\": 0.4353523329999991, \"merge\": 0.9757983750000001, \"fsck\": 0.014626249999999175}\n{\"trial\": 2, \"init\": 0.7681924579999997, \"branch\": 0.1847897500000002, \"status_clean\": 0.7852776660000007, \"diff_changed\": 0.725692582999999, \"add\": 0.8363767920000011, \"commit\": 0.4942777500000002, \"merge\": 0.9925339159999975, \"fsck\": 0.01506895800000052}\n",
+      "load": [
+        16.767578125,
+        27.47314453125,
+        31.990234375
+      ]
+    },
+    {
+      "operation": "cli_complete",
+      "files": 10000,
+      "repeats": 3,
+      "summary": "{\"trial\": 0, \"init\": 7.871332833, \"branch\": 1.8608492090000013, \"status_clean\": 5.800094124999999, \"diff_changed\": 4.425127167000003, \"add\": 5.636159916999997, \"commit\": 5.375072083999999, \"merge\": 10.493353124999999, \"fsck\": 0.013081457999994939}\n{\"trial\": 1, \"init\": 5.789855875000001, \"branch\": 1.3312495830000017, \"status_clean\": 4.717868291999999, \"diff_changed\": 3.438587040999998, \"add\": 4.180133500000004, \"commit\": 2.6214349159999983, \"merge\": 7.4685548750000095, \"fsck\": 0.013909541000003856}\n{\"trial\": 2, \"init\": 5.235089166999998, \"branch\": 1.0596769169999902, \"status_clean\": 3.1513361250000003, \"diff_changed\": 3.0128416670000036, \"add\": 3.8519037920000017, \"commit\": 2.4654380830000093, \"merge\": 8.873428875000002, \"fsck\": 0.00854308299999218}\n",
+      "load": [
+        10.0849609375,
+        22.18408203125,
+        29.39013671875
+      ]
+    },
+    {
+      "operation": "cli_complete",
+      "files": 100000,
+      "repeats": 1,
+      "summary": "{\"trial\": 0, \"init\": 69.91153575000001, \"branch\": 21.709134917, \"status_clean\": 84.32798762500002, \"diff_changed\": 64.05488308400001, \"add\": 119.52597416700002, \"commit\": 58.481655166999985, \"merge\": 129.09007887500002, \"fsck\": 0.011822124999980588}\n",
+      "load": [
+        7.75927734375,
+        11.69384765625,
+        19.6796875
+      ]
+    }
+  ],
+  "notes": [
+    "Warm/mixed cache; no cache purge.",
+    "Timing excludes sync unless specified.",
+    "Image on host Data volume; host free space and load recorded.",
+    "Primitive tests do not provide complete Layr semantics."
+  ],
+  "host_free_bytes": 21489500160,
+  "volume": {
+    "APFSContainerFree": 8353775616,
+    "APFSContainerReference": "disk17",
+    "APFSContainerSize": 8380178432,
+    "APFSPhysicalStores": [
+      {
+        "APFSPhysicalStore": "disk15s2"
+      }
+    ],
+    "APFSSnapshot": false,
+    "Bootable": true,
+    "BusProtocol": "Disk Image",
+    "CanBeMadeBootable": false,
+    "CanBeMadeBootableRequiresDestroy": false,
+    "CapacityInUse": 20480,
+    "Content": "41504653-0000-11AA-AA11-00306543ECAC",
+    "DeviceBlockSize": 4096,
+    "DeviceIdentifier": "disk17s1",
+    "DeviceNode": "/dev/disk17s1",
+    "DeviceTreePath": "IODeviceTree:/",
+    "DiskUUID": "415456F9-1373-4CFB-9A7E-62956A8FCEA9",
+    "Ejectable": true,
+    "EjectableMediaAutomaticUnderSoftwareControl": true,
+    "EjectableOnly": true,
+    "Encryption": false,
+    "EncryptionThisVolumeProper": false,
+    "FileVault": false,
+    "FilesystemName": "Case-sensitive APFS",
+    "FilesystemType": "apfs",
+    "FilesystemUserVisibleName": "APFS (Case-sensitive)",
+    "FreeSpace": 0,
+    "GlobalPermissionsEnabled": false,
+    "IOKitSize": 8380178432,
+    "IORegistryEntryName": "layr-benchmark",
+    "Internal": false,
+    "Locked": false,
+    "MediaName": "",
+    "MediaType": "Generic",
+    "MountPoint": "/private/tmp/layr-apfs-measure-20261021/volume",
+    "OSInternalMedia": false,
+    "ParentWholeDisk": "disk17",
+    "PartitionMapPartition": false,
+    "RAIDMaster": false,
+    "RAIDSlice": false,
+    "Removable": true,
+    "RemovableMedia": true,
+    "RemovableMediaOrExternalDevice": true,
+    "SMARTDeviceSpecificKeysMayVaryNotGuaranteed": {},
+    "SMARTStatus": "Not Supported",
+    "Sealed": "No",
+    "Size": 8380178432,
+    "SupportsGlobalPermissionsDisable": true,
+    "SystemImage": false,
+    "TotalSize": 8380178432,
+    "VolumeAllocationBlockSize": 4096,
+    "VolumeName": "layr-benchmark",
+    "VolumeSize": 0,
+    "VolumeUUID": "415456F9-1373-4CFB-9A7E-62956A8FCEA9",
+    "WholeDisk": false,
+    "Writable": true,
+    "WritableMedia": true,
+    "WritableVolume": true
+  },
+  "complete": true
+}

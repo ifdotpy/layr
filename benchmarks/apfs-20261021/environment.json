@@ -1,0 +1,15 @@
+{
+  "sw_vers": "ProductName:\t\tmacOS\nProductVersion:\t\t27.2\nBuildVersion:\t\t26B5091g\n",
+  "hardware": "hw.model: Mac17,7\nhw.ncpu: 18\nhw.memsize: 137438953472\n",
+  "initial_files": {
+    "run.py": "80c9695dc9070168d5556feb362231c178de2b897e4ddf32ba416d56b84df6b3",
+    "workloads.py": "4e49e76b4e24d9e6b68542a178c32e077f43bc324fda6ff9b3cbc2e39b039a26",
+    "primitives.c": "62800ad79b9b29f37fbcb215c46021032e00ccac330e3f9d064bbf706eb34134"
+  },
+  "final_files": {
+    "run.py": "80c9695dc9070168d5556feb362231c178de2b897e4ddf32ba416d56b84df6b3",
+    "workloads.py": "e86274fd5f548822ad80777e27b10941e582afeb5290a29ab4ed571d2743ad2a",
+    "primitives.c": "62800ad79b9b29f37fbcb215c46021032e00ccac330e3f9d064bbf706eb34134",
+    "workloads-initial.py": "4e49e76b4e24d9e6b68542a178c32e077f43bc324fda6ff9b3cbc2e39b039a26"
+  }
+}

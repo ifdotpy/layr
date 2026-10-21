@@ -1,0 +1,167 @@
+{
+  "platform": "macOS-27.2-arm64-arm-64bit",
+  "files": 100000,
+  "binary_sha256": "88602f0351b2d8d2bc4eb119369728f1e0ef6800e6cecc28c077ff2bdad04c18",
+  "fixture_sha256": "5de4dd8c206cb64bb5d47b37b6d95108691039b95e7aabf0c3bfae6dd4f4f5c5",
+  "results": [
+    {
+      "trial": 0,
+      "init": 69.91153575000001,
+      "branch": 21.709134917,
+      "status_clean": 84.32798762500002,
+      "diff_changed": 64.05488308400001,
+      "add": 119.52597416700002,
+      "commit": 58.481655166999985,
+      "merge": 129.09007887500002,
+      "fsck": 0.011822124999980588
+    }
+  ],
+  "commands": [
+    {
+      "args": [
+        "init",
+        "p0",
+        "--from",
+        "/private/tmp/layr-apfs-measure-20261021/volume/cli-100000/source",
+        "-q"
+      ],
+      "wall": 69.91153575000001,
+      "cpu": 46.978904,
+      "stderr": "trace      1.0 ms  record project\ntrace    288.6 ms  APFS scan before\ntrace  11721.4 ms  APFS copy tree\ntrace    467.5 ms  APFS scan after\ntrace   5833.8 ms  APFS seal tree\ntrace  18321.1 ms  APFS clone /private/tmp/layr-apfs-measure-20261021/volume/cli-100000/store/projects/p0/states/01a15fcd-00ce-7621-a345-1435bdd83f5b\ntrace      1.2 ms  record commit\ntrace    345.3 ms  APFS scan before\ntrace  20423.9 ms  APFS copy tree\ntrace    624.5 ms  APFS scan after\ntrace  21401.6 ms  APFS clone /private/tmp/layr-apfs-measure-20261021/volume/cli-100000/store/projects/p0/meta/work/01a15fcd-5f01-72f3-909e-a5e1c1420d4c\ntrace      0.2 ms  record line.create\n",
+      "load": [
+        7.7744140625,
+        17.8408203125,
+        26.888671875
+      ]
+    },
+    {
+      "args": [
+        "protect",
+        "main",
+        "--remove"
+      ],
+      "wall": 0.012779499999993504,
+      "cpu": 0.008421999999995933,
+      "stderr": "trace      0.7 ms  open project\ntrace      0.9 ms  record config\n",
+      "load": [
+        7.7744140625,
+        17.8408203125,
+        26.888671875
+      ]
+    },
+    {
+      "args": [
+        "branch",
+        "-q",
+        "topic"
+      ],
+      "wall": 21.709134917,
+      "cpu": 9.234464000000003,
+      "stderr": "trace      0.7 ms  open project\ntrace    334.9 ms  APFS scan before\ntrace  20954.1 ms  APFS copy tree\ntrace    371.9 ms  APFS scan after\ntrace  21669.7 ms  APFS clone /private/tmp/layr-apfs-measure-20261021/volume/cli-100000/store/projects/p0/meta/work/01a15fcd-b2b8-757b-a5fd-f1121b4358c9\ntrace      9.9 ms  record line.create\n",
+      "load": [
+        7.34912109375,
+        17.07666015625,
+        26.40283203125
+      ]
+    },
+    {
+      "args": [
+        "status",
+        "--porcelain"
+      ],
+      "wall": 84.32798762500002,
+      "cpu": 34.78416200000001,
+      "stderr": "trace      0.5 ms  open project\ntrace    437.3 ms  APFS scan before\ntrace  20336.9 ms  APFS copy tree\ntrace    707.6 ms  APFS scan after\ntrace   7634.1 ms  APFS seal tree\ntrace  29128.3 ms  APFS clone /private/tmp/layr-apfs-measure-20261021/volume/cli-100000/store/projects/p0/meta/scan/01a15fce-0782-7382-9fe4-5c0e38a0ded5\ntrace  36180.7 ms  APFS candidates\n",
+      "load": [
+        19.60595703125,
+        18.06005859375,
+        25.8515625
+      ]
+    },
+    {
+      "args": [
+        "diff",
+        "--stat"
+      ],
+      "wall": 64.05488308400001,
+      "cpu": 30.109246,
+      "stderr": "trace      0.6 ms  open project\ntrace   1457.2 ms  APFS scan before\ntrace  19882.1 ms  APFS copy tree\ntrace    427.7 ms  APFS scan after\ntrace   5440.7 ms  APFS seal tree\ntrace  27217.1 ms  APFS clone /private/tmp/layr-apfs-measure-20261021/volume/cli-100000/store/projects/p0/meta/scan/01a15fcf-50f7-7537-8423-20a6856707d5\ntrace  22599.2 ms  APFS candidates\n",
+      "load": [
+        11.93408203125,
+        15.98046875,
+        24.48828125
+      ]
+    },
+    {
+      "args": [
+        "add",
+        "-A"
+      ],
+      "wall": 119.52597416700002,
+      "cpu": 50.05905800000002,
+      "stderr": "trace      1.5 ms  open project\ntrace   2256.9 ms  APFS scan before\ntrace  16854.6 ms  APFS copy tree\ntrace    598.2 ms  APFS scan after\ntrace  11045.2 ms  APFS seal tree\ntrace  30768.1 ms  APFS clone /private/tmp/layr-apfs-measure-20261021/volume/cli-100000/store/projects/p0/meta/scan/01a15fd0-4b36-7315-92f0-e8975b5fe954\ntrace  32966.1 ms  APFS candidates\ntrace    510.8 ms  APFS scan before\ntrace  28609.2 ms  APFS copy tree\ntrace   2127.7 ms  APFS scan after\ntrace  31276.9 ms  APFS clone /private/tmp/layr-apfs-measure-20261021/volume/cli-100000/store/projects/p0/meta/stage/01a15fcd-b2b8-757b-a5fd-f111f53a19d9\n",
+      "load": [
+        18.9482421875,
+        16.5693359375,
+        23.55419921875
+      ]
+    },
+    {
+      "args": [
+        "commit",
+        "-qm",
+        "ten files"
+      ],
+      "wall": 58.481655166999985,
+      "cpu": 23.261507999999964,
+      "stderr": "trace      1.2 ms  open project\ntrace   1711.6 ms  APFS scan before\ntrace  15128.6 ms  APFS copy tree\ntrace    509.4 ms  APFS scan after\ntrace   9282.0 ms  APFS seal tree\ntrace  26642.3 ms  APFS clone /private/tmp/layr-apfs-measure-20261021/volume/cli-100000/store/projects/p0/states/01a15fd2-1e1f-736e-9ca5-07d4ee6b334d\ntrace  25619.2 ms  APFS candidates\ntrace      2.1 ms  record commit\n",
+      "load": [
+        13.65185546875,
+        15.71728515625,
+        22.7734375
+      ]
+    },
+    {
+      "args": [
+        "merge",
+        "-q",
+        "topic"
+      ],
+      "wall": 129.09007887500002,
+      "cpu": 54.21126800000005,
+      "stderr": "trace      1.1 ms  open project\ntrace   1596.2 ms  APFS scan before\ntrace  14765.1 ms  APFS copy tree\ntrace    675.3 ms  APFS scan after\ntrace   6757.9 ms  APFS seal tree\ntrace  23806.8 ms  APFS clone /private/tmp/layr-apfs-measure-20261021/volume/cli-100000/store/projects/p0/states/01a15fd3-0288-73fa-8cd0-a890f0c2093f\ntrace  20668.2 ms  APFS candidates\ntrace      3.6 ms  record save\ntrace   2143.9 ms  APFS scan before\ntrace  14841.4 ms  APFS copy tree\ntrace    391.2 ms  APFS scan after\ntrace   4835.5 ms  APFS seal tree\ntrace  22219.0 ms  APFS clone /private/tmp/layr-apfs-measure-20261021/volume/cli-100000/store/projects/p0/meta/scan/01a15fd3-b048-7470-9e7a-70ef59c0a847\ntrace  19990.0 ms  APFS candidates\ntrace  14773.8 ms  APFS candidates\ntrace   1654.5 ms  APFS scan before\ntrace  12109.8 ms  APFS copy tree\ntrace    378.5 ms  APFS scan after\ntrace   4640.1 ms  APFS seal tree\ntrace  18790.7 ms  APFS clone /private/tmp/layr-apfs-measure-20261021/volume/cli-100000/store/projects/p0/states/01a15fd4-8ee6-768e-a223-e7ac50818df3\ntrace      1.6 ms  record merge\n",
+      "load": [
+        6.7001953125,
+        12.43798828125,
+        20.5107421875
+      ]
+    },
+    {
+      "args": [
+        "status",
+        "--porcelain"
+      ],
+      "wall": 55.55106995799997,
+      "cpu": 25.42437700000002,
+      "stderr": "trace      1.0 ms  open project\ntrace   1230.2 ms  APFS scan before\ntrace  13068.6 ms  APFS copy tree\ntrace    529.0 ms  APFS scan after\ntrace   6406.3 ms  APFS seal tree\ntrace  21252.5 ms  APFS clone /private/tmp/layr-apfs-measure-20261021/volume/cli-100000/store/projects/p0/meta/scan/01a15fd4-faca-7090-9f10-5671dcf33f7c\ntrace  25421.4 ms  APFS candidates\n",
+      "load": [
+        7.75927734375,
+        11.69384765625,
+        19.6796875
+      ]
+    },
+    {
+      "args": [
+        "fsck"
+      ],
+      "wall": 0.011822124999980588,
+      "cpu": 0.006464999999991505,
+      "stderr": "trace      0.5 ms  open project\n",
+      "load": [
+        7.75927734375,
+        11.69384765625,
+        19.6796875
+      ]
+    }
+  ]
+}

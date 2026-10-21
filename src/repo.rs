@@ -626,19 +626,22 @@ impl<'a> Repo<'a> {
         Ok(())
     }
 
+    /// The caller must hold the project lock while it reads a mutable index.
+    fn index_source(&self, line: &Line) -> Result<(PathBuf, bool)> {
+        match self.current_stage(line)? {
+            Some(s) => Ok((s, true)),
+            None => Ok((self.head_tree(line)?, false)),
+        }
+    }
+
     /// The staging content as a read-only snapshot, or the head state when nothing is staged.
     pub fn index_view(&self, line: &Line) -> Result<(PathBuf, Option<Temp>)> {
-        match self.stage(line) {
-            Some(s) => {
-                let base = std::fs::read_to_string(self.stage_base_file(line)).unwrap_or_default();
-                if base.trim() != self.stage_key(line)? {
-                    self.drop_stage(line)?;
-                    return Ok((self.head_tree(line)?, None));
-                }
-                let t = self.temp_snapshot(&s, true)?;
-                Ok((t.path.clone(), Some(t)))
-            }
-            None => Ok((self.head_tree(line)?, None)),
+        let (source, mutable) = self.index_source(line)?;
+        if mutable {
+            let t = self.temp_snapshot(&source, true)?;
+            Ok((t.path.clone(), Some(t)))
+        } else {
+            Ok((source, None))
         }
     }
 
@@ -713,6 +716,24 @@ impl<'a> Repo<'a> {
         let (index, itemp) = self.index_view(line)?;
         let st = self.status_of(line, &scan.path, &index)?;
         Ok((st, scan, itemp, index))
+    }
+
+    /// A status report needs no retained snapshot. Call with the project lock held.
+    /// Commands that use the returned file bytes must still call `status`.
+    #[cfg(target_os = "macos")]
+    pub fn status_report(&self, line: &Line) -> Result<Status> {
+        let work = self.working(line);
+        let (index, _) = self.index_source(line)?;
+        let head = self.head_tree(line)?;
+        let mut roots = vec![head.as_path(), work.as_path()];
+        if index != head {
+            roots.push(index.as_path());
+        }
+        if let Some(st) = crate::storage::stable_read(&roots, || self.status_of(line, &work, &index))? {
+            return Ok(st);
+        }
+        let (st, _scan, _it, _index) = self.status(line)?;
+        Ok(st)
     }
 
     // ----- in-place updates -----

@@ -1,0 +1,579 @@
+{
+  "binaries": {
+    "baseline": {
+      "path": "/private/tmp/layr-apfs-before-20261021",
+      "sha256": "88602f0351b2d8d2bc4eb119369728f1e0ef6800e6cecc28c077ff2bdad04c18"
+    },
+    "candidate": {
+      "path": "/Users/igor/Projects/layr/target/release/layr",
+      "sha256": "40ceb6d727074f1d14a769a988eac889fd046d25d2acfac5c62aa48536a02a12"
+    }
+  },
+  "rows": [
+    {
+      "kind": "large",
+      "files": 1000,
+      "variant": "baseline",
+      "trial": 0,
+      "operation": "branch",
+      "wall": 0.24929554200000004,
+      "load": [
+        17.14013671875,
+        20.208984375,
+        19.69091796875
+      ],
+      "trace": "trace      1.0 ms  open project\ntrace      6.0 ms  APFS scan before\ntrace    206.2 ms  APFS copy tree\ntrace      5.4 ms  APFS scan after\ntrace    218.2 ms  APFS clone /private/tmp/layr-apfs-paired-large-retry-20261021/large-1000/store/projects/paired/meta/work/01a16023-7b66-77b6-a01f-95c42d220d9e\ntrace      1.8 ms  record line.create\n"
+    },
+    {
+      "kind": "large",
+      "files": 1000,
+      "variant": "baseline",
+      "trial": 0,
+      "operation": "status_dirty",
+      "wall": 1.9524024579999995,
+      "load": [
+        17.14013671875,
+        20.208984375,
+        19.69091796875
+      ],
+      "trace": "trace      1.0 ms  open project\ntrace      6.0 ms  APFS scan before\ntrace    114.8 ms  APFS copy tree\ntrace      5.2 ms  APFS scan after\ntrace     89.8 ms  APFS seal tree\ntrace    216.2 ms  APFS clone /private/tmp/layr-apfs-paired-large-retry-20261021/large-1000/store/projects/paired/meta/scan/01a16023-7c6e-7279-9764-40f9490d767d\ntrace   1548.6 ms  APFS candidates\n"
+    },
+    {
+      "kind": "large",
+      "files": 1000,
+      "variant": "baseline",
+      "trial": 0,
+      "operation": "add",
+      "wall": 3.536561333,
+      "load": [
+        20.892578125,
+        20.935546875,
+        19.9501953125
+      ],
+      "trace": "trace      1.3 ms  open project\ntrace      4.6 ms  APFS scan before\ntrace    116.7 ms  APFS copy tree\ntrace     11.7 ms  APFS scan after\ntrace     75.4 ms  APFS seal tree\ntrace    209.3 ms  APFS clone /private/tmp/layr-apfs-paired-large-retry-20261021/large-1000/store/projects/paired/meta/scan/01a16023-8638-72a2-badb-4e749d9c2033\ntrace   1464.5 ms  APFS candidates\ntrace      6.9 ms  APFS scan before\ntrace    161.7 ms  APFS copy tree\ntrace      5.1 ms  APFS scan after\ntrace    174.2 ms  APFS clone /private/tmp/layr-apfs-paired-large-retry-20261021/large-1000/store/projects/paired/meta/stage/01a16023-7b66-77b6-a01f-95c32648bf2b\n"
+    },
+    {
+      "kind": "large",
+      "files": 1000,
+      "variant": "baseline",
+      "trial": 0,
+      "operation": "add_allocation",
+      "bytes": 1074225152
+    },
+    {
+      "kind": "large",
+      "files": 1000,
+      "variant": "baseline",
+      "trial": 0,
+      "operation": "status_staged",
+      "wall": 3.922609832999999,
+      "load": [
+        21.22119140625,
+        21.0029296875,
+        19.9794921875
+      ],
+      "trace": "trace      1.5 ms  open project\ntrace      4.6 ms  APFS scan before\ntrace    101.4 ms  APFS copy tree\ntrace      5.7 ms  APFS scan after\ntrace     73.5 ms  APFS seal tree\ntrace    186.1 ms  APFS clone /private/tmp/layr-apfs-paired-large-retry-20261021/large-1000/store/projects/paired/meta/scan/01a16023-9595-7525-8c29-cb5e5beb1497\ntrace      6.6 ms  APFS scan before\ntrace    116.6 ms  APFS copy tree\ntrace      4.5 ms  APFS scan after\ntrace     83.7 ms  APFS seal tree\ntrace    212.0 ms  APFS clone /private/tmp/layr-apfs-paired-large-retry-20261021/large-1000/store/projects/paired/meta/scan/01a16023-964f-74ec-9488-1da6dc6f2b45\ntrace   1334.9 ms  APFS candidates\ntrace   1524.7 ms  APFS candidates\n"
+    },
+    {
+      "kind": "large",
+      "files": 1000,
+      "variant": "baseline",
+      "trial": 0,
+      "operation": "commit",
+      "wall": 3.3161975419999976,
+      "load": [
+        22.564453125,
+        21.28466796875,
+        20.0849609375
+      ],
+      "trace": "trace      1.0 ms  open project\ntrace      5.6 ms  APFS scan before\ntrace    553.8 ms  APFS copy tree\ntrace     43.8 ms  APFS scan after\ntrace    168.8 ms  APFS seal tree\ntrace    772.6 ms  APFS clone /private/tmp/layr-apfs-paired-large-retry-20261021/large-1000/store/projects/paired/states/01a16023-a4f5-7181-a7a0-8f8e217b92e2\ntrace   2202.2 ms  APFS candidates\ntrace      1.5 ms  record commit\n"
+    },
+    {
+      "kind": "large",
+      "files": 1000,
+      "variant": "baseline",
+      "trial": 0,
+      "operation": "fsck",
+      "wall": 0.029170041999996954,
+      "load": [
+        22.564453125,
+        21.28466796875,
+        20.0849609375
+      ],
+      "trace": "trace      1.4 ms  open project\n"
+    },
+    {
+      "kind": "large",
+      "files": 1000,
+      "variant": "candidate",
+      "trial": 0,
+      "operation": "branch",
+      "wall": 0.289123,
+      "load": [
+        24.36083984375,
+        21.67822265625,
+        20.23046875
+      ],
+      "trace": "trace     18.8 ms  open project\ntrace      8.2 ms  APFS scan before\ntrace    171.5 ms  APFS copy tree\ntrace      5.7 ms  APFS scan after\ntrace    187.7 ms  APFS clone /private/tmp/layr-apfs-paired-large-retry-20261021/large-1000/store/projects/paired/meta/work/01a16023-ca1b-7277-8764-7e7daa2fbd93\ntrace      6.9 ms  record line.create\n"
+    },
+    {
+      "kind": "large",
+      "files": 1000,
+      "variant": "candidate",
+      "trial": 0,
+      "operation": "status_dirty",
+      "wall": 1.2330313749999995,
+      "load": [
+        24.36083984375,
+        21.67822265625,
+        20.23046875
+      ],
+      "trace": "trace      1.1 ms  open project\ntrace   1165.1 ms  APFS candidates\ntrace   1202.3 ms  APFS validated read\n"
+    },
+    {
+      "kind": "large",
+      "files": 1000,
+      "variant": "candidate",
+      "trial": 0,
+      "operation": "add",
+      "wall": 3.4291181249999987,
+      "load": [
+        29.21630859375,
+        22.72900390625,
+        20.60986328125
+      ],
+      "trace": "trace      1.1 ms  open project\ntrace      6.1 ms  APFS scan before\ntrace    139.4 ms  APFS copy tree\ntrace      8.2 ms  APFS scan after\ntrace     79.2 ms  APFS seal tree\ntrace    233.7 ms  APFS clone /private/tmp/layr-apfs-paired-large-retry-20261021/large-1000/store/projects/paired/meta/scan/01a16023-d24b-712e-abaa-26b53051323a\ntrace   2348.0 ms  APFS candidates\ntrace      4.8 ms  APFS scan before\ntrace    392.4 ms  APFS copy tree\ntrace      5.2 ms  APFS scan after\ntrace    403.0 ms  APFS clone /private/tmp/layr-apfs-paired-large-retry-20261021/large-1000/store/projects/paired/meta/stage/01a16023-ca1b-7277-8764-7e7ccf6b0f9a\n"
+    },
+    {
+      "kind": "large",
+      "files": 1000,
+      "variant": "candidate",
+      "trial": 0,
+      "operation": "add_allocation",
+      "bytes": 417792
+    },
+    {
+      "kind": "large",
+      "files": 1000,
+      "variant": "candidate",
+      "trial": 0,
+      "operation": "status_staged",
+      "wall": 1.2297832500000005,
+      "load": [
+        29.03857421875,
+        22.7998046875,
+        20.64697265625
+      ],
+      "trace": "trace      1.0 ms  open project\ntrace   1104.5 ms  APFS candidates\ntrace     16.2 ms  APFS candidates\ntrace   1190.0 ms  APFS validated read\n"
+    },
+    {
+      "kind": "large",
+      "files": 1000,
+      "variant": "candidate",
+      "trial": 0,
+      "operation": "commit",
+      "wall": 2.0072155830000007,
+      "load": [
+        29.03857421875,
+        22.7998046875,
+        20.64697265625
+      ],
+      "trace": "trace      1.1 ms  open project\ntrace      5.1 ms  APFS scan before\ntrace    127.0 ms  APFS copy tree\ntrace      5.9 ms  APFS scan after\ntrace     66.9 ms  APFS seal tree\ntrace    205.5 ms  APFS clone /private/tmp/layr-apfs-paired-large-retry-20261021/large-1000/store/projects/paired/states/01a16023-e7c9-70de-a441-d41ad0b11823\ntrace   1637.9 ms  APFS candidates\ntrace      1.9 ms  record commit\n"
+    },
+    {
+      "kind": "large",
+      "files": 1000,
+      "variant": "candidate",
+      "trial": 0,
+      "operation": "fsck",
+      "wall": 0.02627570899999654,
+      "load": [
+        29.03857421875,
+        22.7998046875,
+        20.64697265625
+      ],
+      "trace": "trace      1.6 ms  open project\n"
+    },
+    {
+      "kind": "large",
+      "files": 1000,
+      "variant": "candidate",
+      "trial": 1,
+      "operation": "branch",
+      "wall": 0.2125330419999969,
+      "load": [
+        29.03857421875,
+        22.7998046875,
+        20.64697265625
+      ],
+      "trace": "trace      1.0 ms  open project\ntrace      5.2 ms  APFS scan before\ntrace    171.4 ms  APFS copy tree\ntrace      5.3 ms  APFS scan after\ntrace    182.4 ms  APFS clone /private/tmp/layr-apfs-paired-large-retry-20261021/large-1000/store/projects/paired/meta/work/01a16023-f214-758d-b59a-52cfacadcf1e\ntrace      6.1 ms  record line.create\n"
+    },
+    {
+      "kind": "large",
+      "files": 1000,
+      "variant": "candidate",
+      "trial": 1,
+      "operation": "status_dirty",
+      "wall": 1.3144315420000012,
+      "load": [
+        29.03857421875,
+        22.7998046875,
+        20.64697265625
+      ],
+      "trace": "trace      1.7 ms  open project\ntrace   1236.7 ms  APFS candidates\ntrace   1281.3 ms  APFS validated read\n"
+    },
+    {
+      "kind": "large",
+      "files": 1000,
+      "variant": "candidate",
+      "trial": 1,
+      "operation": "add",
+      "wall": 1.7911085830000033,
+      "load": [
+        30.31640625,
+        23.16796875,
+        20.78955078125
+      ],
+      "trace": "trace      3.7 ms  open project\ntrace     13.7 ms  APFS scan before\ntrace    139.5 ms  APFS copy tree\ntrace      9.8 ms  APFS scan after\ntrace     82.8 ms  APFS seal tree\ntrace    246.4 ms  APFS clone /private/tmp/layr-apfs-paired-large-retry-20261021/large-1000/store/projects/paired/meta/scan/01a16023-fa0d-76ce-865a-3a83d84f6ac2\ntrace   1046.2 ms  APFS candidates\ntrace      5.9 ms  APFS scan before\ntrace    207.5 ms  APFS copy tree\ntrace      5.4 ms  APFS scan after\ntrace    219.5 ms  APFS clone /private/tmp/layr-apfs-paired-large-retry-20261021/large-1000/store/projects/paired/meta/stage/01a16023-f214-758d-b59a-52ceb369b4b7\n"
+    },
+    {
+      "kind": "large",
+      "files": 1000,
+      "variant": "candidate",
+      "trial": 1,
+      "operation": "add_allocation",
+      "bytes": 421888
+    },
+    {
+      "kind": "large",
+      "files": 1000,
+      "variant": "candidate",
+      "trial": 1,
+      "operation": "status_staged",
+      "wall": 1.4237007919999982,
+      "load": [
+        30.31640625,
+        23.16796875,
+        20.78955078125
+      ],
+      "trace": "trace      1.5 ms  open project\ntrace   1322.6 ms  APFS candidates\ntrace     18.7 ms  APFS candidates\ntrace   1395.8 ms  APFS validated read\n"
+    },
+    {
+      "kind": "large",
+      "files": 1000,
+      "variant": "candidate",
+      "trial": 1,
+      "operation": "commit",
+      "wall": 2.0033454169999985,
+      "load": [
+        31.33203125,
+        23.4970703125,
+        20.91943359375
+      ],
+      "trace": "trace      1.0 ms  open project\ntrace      5.3 ms  APFS scan before\ntrace    147.6 ms  APFS copy tree\ntrace      9.1 ms  APFS scan after\ntrace    106.9 ms  APFS seal tree\ntrace    269.5 ms  APFS clone /private/tmp/layr-apfs-paired-large-retry-20261021/large-1000/store/projects/paired/states/01a16024-080f-7531-9059-46e99a403b1a\ntrace   1586.5 ms  APFS candidates\ntrace      1.2 ms  record commit\n"
+    },
+    {
+      "kind": "large",
+      "files": 1000,
+      "variant": "candidate",
+      "trial": 1,
+      "operation": "fsck",
+      "wall": 0.027861917000002734,
+      "load": [
+        31.33203125,
+        23.4970703125,
+        20.91943359375
+      ],
+      "trace": "trace      1.9 ms  open project\n"
+    },
+    {
+      "kind": "large",
+      "files": 1000,
+      "variant": "baseline",
+      "trial": 1,
+      "operation": "branch",
+      "wall": 0.267327458000004,
+      "load": [
+        31.33203125,
+        23.4970703125,
+        20.91943359375
+      ],
+      "trace": "trace      8.5 ms  open project\ntrace      8.5 ms  APFS scan before\ntrace    191.1 ms  APFS copy tree\ntrace      7.6 ms  APFS scan after\ntrace    209.2 ms  APFS clone /private/tmp/layr-apfs-paired-large-retry-20261021/large-1000/store/projects/paired/meta/work/01a16024-11c0-700c-9550-985c42f8e6cc\ntrace     10.5 ms  record line.create\n"
+    },
+    {
+      "kind": "large",
+      "files": 1000,
+      "variant": "baseline",
+      "trial": 1,
+      "operation": "status_dirty",
+      "wall": 3.2980730830000056,
+      "load": [
+        31.33203125,
+        23.4970703125,
+        20.91943359375
+      ],
+      "trace": "trace      1.3 ms  open project\ntrace     16.4 ms  APFS scan before\ntrace    213.7 ms  APFS copy tree\ntrace      5.7 ms  APFS scan after\ntrace    102.8 ms  APFS seal tree\ntrace    339.4 ms  APFS clone /private/tmp/layr-apfs-paired-large-retry-20261021/large-1000/store/projects/paired/meta/scan/01a16024-12c4-7477-9ede-dd17f8d6b8c1\ntrace   2751.9 ms  APFS candidates\n"
+    },
+    {
+      "kind": "large",
+      "files": 1000,
+      "variant": "baseline",
+      "trial": 1,
+      "operation": "add",
+      "wall": 4.337022583999996,
+      "load": [
+        33.14697265625,
+        24.00341796875,
+        21.11279296875
+      ],
+      "trace": "trace      1.0 ms  open project\ntrace      6.8 ms  APFS scan before\ntrace    108.0 ms  APFS copy tree\ntrace      6.5 ms  APFS scan after\ntrace     70.8 ms  APFS seal tree\ntrace    192.7 ms  APFS clone /private/tmp/layr-apfs-paired-large-retry-20261021/large-1000/store/projects/paired/meta/scan/01a16024-2161-73f7-bed6-aef9971381f4\ntrace   2194.8 ms  APFS candidates\ntrace      4.7 ms  APFS scan before\ntrace    184.4 ms  APFS copy tree\ntrace      5.1 ms  APFS scan after\ntrace    195.0 ms  APFS clone /private/tmp/layr-apfs-paired-large-retry-20261021/large-1000/store/projects/paired/meta/stage/01a16024-11c0-700c-9550-985b070791de\n"
+    },
+    {
+      "kind": "large",
+      "files": 1000,
+      "variant": "baseline",
+      "trial": 1,
+      "operation": "add_allocation",
+      "bytes": 1074225152
+    },
+    {
+      "kind": "large",
+      "files": 1000,
+      "variant": "baseline",
+      "trial": 1,
+      "operation": "status_staged",
+      "wall": 3.2558314999999993,
+      "load": [
+        33.775390625,
+        24.28515625,
+        21.22900390625
+      ],
+      "trace": "trace      1.2 ms  open project\ntrace      5.2 ms  APFS scan before\ntrace    116.9 ms  APFS copy tree\ntrace      4.6 ms  APFS scan after\ntrace     62.4 ms  APFS seal tree\ntrace    189.9 ms  APFS clone /private/tmp/layr-apfs-paired-large-retry-20261021/large-1000/store/projects/paired/meta/scan/01a16024-341f-7617-b797-2c4345d4e40a\ntrace      6.5 ms  APFS scan before\ntrace    109.2 ms  APFS copy tree\ntrace      5.5 ms  APFS scan after\ntrace     62.0 ms  APFS seal tree\ntrace    183.7 ms  APFS clone /private/tmp/layr-apfs-paired-large-retry-20261021/large-1000/store/projects/paired/meta/scan/01a16024-34dd-7242-87bb-cec2082bbfcc\ntrace   1230.5 ms  APFS candidates\ntrace   1299.6 ms  APFS candidates\n"
+    },
+    {
+      "kind": "large",
+      "files": 1000,
+      "variant": "baseline",
+      "trial": 1,
+      "operation": "commit",
+      "wall": 1.6007299999999987,
+      "load": [
+        33.775390625,
+        24.28515625,
+        21.22900390625
+      ],
+      "trace": "trace      1.2 ms  open project\ntrace      5.2 ms  APFS scan before\ntrace    118.2 ms  APFS copy tree\ntrace      5.3 ms  APFS scan after\ntrace     54.7 ms  APFS seal tree\ntrace    184.1 ms  APFS clone /private/tmp/layr-apfs-paired-large-retry-20261021/large-1000/store/projects/paired/states/01a16024-40d5-7087-8d7e-afed4f4d8562\ntrace   1293.2 ms  APFS candidates\ntrace      3.5 ms  record commit\n"
+    },
+    {
+      "kind": "large",
+      "files": 1000,
+      "variant": "baseline",
+      "trial": 1,
+      "operation": "fsck",
+      "wall": 0.032264042000001325,
+      "load": [
+        33.775390625,
+        24.28515625,
+        21.22900390625
+      ],
+      "trace": "trace      1.0 ms  open project\n"
+    },
+    {
+      "kind": "large",
+      "files": 1000,
+      "variant": "baseline",
+      "trial": 2,
+      "operation": "branch",
+      "wall": 0.199248874999995,
+      "load": [
+        33.232421875,
+        24.330078125,
+        21.2626953125
+      ],
+      "trace": "trace      1.2 ms  open project\ntrace      6.3 ms  APFS scan before\ntrace    160.5 ms  APFS copy tree\ntrace      5.9 ms  APFS scan after\ntrace    173.4 ms  APFS clone /private/tmp/layr-apfs-paired-large-retry-20261021/large-1000/store/projects/paired/meta/work/01a16024-55f1-76ba-af9b-56345af694dc\ntrace      0.9 ms  record line.create\n"
+    },
+    {
+      "kind": "large",
+      "files": 1000,
+      "variant": "baseline",
+      "trial": 2,
+      "operation": "status_dirty",
+      "wall": 1.679127084000001,
+      "load": [
+        34.49462890625,
+        24.7392578125,
+        21.4248046875
+      ],
+      "trace": "trace      1.0 ms  open project\ntrace      4.8 ms  APFS scan before\ntrace    110.6 ms  APFS copy tree\ntrace      5.3 ms  APFS scan after\ntrace     60.1 ms  APFS seal tree\ntrace    181.5 ms  APFS clone /private/tmp/layr-apfs-paired-large-retry-20261021/large-1000/store/projects/paired/meta/scan/01a16024-56cb-7030-a043-8a82e23aa08e\ntrace   1321.3 ms  APFS candidates\n"
+    },
+    {
+      "kind": "large",
+      "files": 1000,
+      "variant": "baseline",
+      "trial": 2,
+      "operation": "add",
+      "wall": 3.0535070829999995,
+      "load": [
+        34.49462890625,
+        24.7392578125,
+        21.4248046875
+      ],
+      "trace": "trace      1.0 ms  open project\ntrace      4.4 ms  APFS scan before\ntrace    116.1 ms  APFS copy tree\ntrace      4.7 ms  APFS scan after\ntrace     70.4 ms  APFS seal tree\ntrace    196.2 ms  APFS clone /private/tmp/layr-apfs-paired-large-retry-20261021/large-1000/store/projects/paired/meta/scan/01a16024-5ec2-7450-a35d-b2eac94dc1e0\ntrace   1268.1 ms  APFS candidates\ntrace      5.2 ms  APFS scan before\ntrace    146.7 ms  APFS copy tree\ntrace      4.5 ms  APFS scan after\ntrace    156.8 ms  APFS clone /private/tmp/layr-apfs-paired-large-retry-20261021/large-1000/store/projects/paired/meta/stage/01a16024-55f1-76ba-af9b-563308f1a981\n"
+    },
+    {
+      "kind": "large",
+      "files": 1000,
+      "variant": "baseline",
+      "trial": 2,
+      "operation": "add_allocation",
+      "bytes": 1074221056
+    },
+    {
+      "kind": "large",
+      "files": 1000,
+      "variant": "baseline",
+      "trial": 2,
+      "operation": "status_staged",
+      "wall": 3.329086916999998,
+      "load": [
+        33.01318359375,
+        24.59375,
+        21.392578125
+      ],
+      "trace": "trace      1.0 ms  open project\ntrace      7.2 ms  APFS scan before\ntrace    106.3 ms  APFS copy tree\ntrace      6.6 ms  APFS scan after\ntrace     64.7 ms  APFS seal tree\ntrace    185.7 ms  APFS clone /private/tmp/layr-apfs-paired-large-retry-20261021/large-1000/store/projects/paired/meta/scan/01a16024-6c4f-763a-b006-03a2afdabbf9\ntrace      6.4 ms  APFS scan before\ntrace    118.4 ms  APFS copy tree\ntrace      5.3 ms  APFS scan after\ntrace     66.6 ms  APFS seal tree\ntrace    197.4 ms  APFS clone /private/tmp/layr-apfs-paired-large-retry-20261021/large-1000/store/projects/paired/meta/scan/01a16024-6d09-71ea-873d-5aa860e8bc9b\ntrace   1190.3 ms  APFS candidates\ntrace   1447.1 ms  APFS candidates\n"
+    },
+    {
+      "kind": "large",
+      "files": 1000,
+      "variant": "baseline",
+      "trial": 2,
+      "operation": "commit",
+      "wall": 1.7136688749999962,
+      "load": [
+        33.01318359375,
+        24.59375,
+        21.392578125
+      ],
+      "trace": "trace      1.6 ms  open project\ntrace      6.4 ms  APFS scan before\ntrace    114.7 ms  APFS copy tree\ntrace      4.7 ms  APFS scan after\ntrace     55.6 ms  APFS seal tree\ntrace    182.0 ms  APFS clone /private/tmp/layr-apfs-paired-large-retry-20261021/large-1000/store/projects/paired/states/01a16024-7952-75bf-a812-684571ba037a\ntrace   1420.9 ms  APFS candidates\ntrace      1.7 ms  record commit\n"
+    },
+    {
+      "kind": "large",
+      "files": 1000,
+      "variant": "baseline",
+      "trial": 2,
+      "operation": "fsck",
+      "wall": 0.0212215829999991,
+      "load": [
+        33.01318359375,
+        24.59375,
+        21.392578125
+      ],
+      "trace": "trace      0.9 ms  open project\n"
+    },
+    {
+      "kind": "large",
+      "files": 1000,
+      "variant": "candidate",
+      "trial": 2,
+      "operation": "branch",
+      "wall": 0.17408887499999537,
+      "load": [
+        31.890625,
+        24.50048828125,
+        21.37841796875
+      ],
+      "trace": "trace      0.9 ms  open project\ntrace      4.8 ms  APFS scan before\ntrace    146.1 ms  APFS copy tree\ntrace      4.9 ms  APFS scan after\ntrace    156.3 ms  APFS clone /private/tmp/layr-apfs-paired-large-retry-20261021/large-1000/store/projects/paired/meta/work/01a16024-89c3-71bf-ba84-b8dffd45a04d\ntrace      0.8 ms  record line.create\n"
+    },
+    {
+      "kind": "large",
+      "files": 1000,
+      "variant": "candidate",
+      "trial": 2,
+      "operation": "status_dirty",
+      "wall": 0.6448711249999945,
+      "load": [
+        31.890625,
+        24.50048828125,
+        21.37841796875
+      ],
+      "trace": "trace      1.1 ms  open project\ntrace    601.2 ms  APFS candidates\ntrace    628.3 ms  APFS validated read\n"
+    },
+    {
+      "kind": "large",
+      "files": 1000,
+      "variant": "candidate",
+      "trial": 2,
+      "operation": "add",
+      "wall": 1.083007834,
+      "load": [
+        31.890625,
+        24.50048828125,
+        21.37841796875
+      ],
+      "trace": "trace      1.0 ms  open project\ntrace      4.7 ms  APFS scan before\ntrace     93.3 ms  APFS copy tree\ntrace      5.1 ms  APFS scan after\ntrace     51.2 ms  APFS seal tree\ntrace    154.8 ms  APFS clone /private/tmp/layr-apfs-paired-large-retry-20261021/large-1000/store/projects/paired/meta/scan/01a16024-8e03-7394-b388-29f9b58116fb\ntrace    598.4 ms  APFS candidates\ntrace      4.5 ms  APFS scan before\ntrace    134.0 ms  APFS copy tree\ntrace      4.4 ms  APFS scan after\ntrace    143.4 ms  APFS clone /private/tmp/layr-apfs-paired-large-retry-20261021/large-1000/store/projects/paired/meta/stage/01a16024-89c3-71bf-ba84-b8de3e66bd1d\n"
+    },
+    {
+      "kind": "large",
+      "files": 1000,
+      "variant": "candidate",
+      "trial": 2,
+      "operation": "add_allocation",
+      "bytes": 417792
+    },
+    {
+      "kind": "large",
+      "files": 1000,
+      "variant": "candidate",
+      "trial": 2,
+      "operation": "status_staged",
+      "wall": 0.6844661250000001,
+      "load": [
+        31.890625,
+        24.50048828125,
+        21.37841796875
+      ],
+      "trace": "trace      1.0 ms  open project\ntrace    614.3 ms  APFS candidates\ntrace     14.0 ms  APFS candidates\ntrace    669.7 ms  APFS validated read\n"
+    },
+    {
+      "kind": "large",
+      "files": 1000,
+      "variant": "candidate",
+      "trial": 2,
+      "operation": "commit",
+      "wall": 0.8815827079999963,
+      "load": [
+        31.49853515625,
+        24.54150390625,
+        21.4111328125
+      ],
+      "trace": "trace      1.1 ms  open project\ntrace      5.0 ms  APFS scan before\ntrace     96.9 ms  APFS copy tree\ntrace      4.8 ms  APFS scan after\ntrace     52.5 ms  APFS seal tree\ntrace    159.7 ms  APFS clone /private/tmp/layr-apfs-paired-large-retry-20261021/large-1000/store/projects/paired/states/01a16024-95f7-716c-a20b-d8944881b66c\ntrace    624.2 ms  APFS candidates\ntrace      1.1 ms  record commit\n"
+    },
+    {
+      "kind": "large",
+      "files": 1000,
+      "variant": "candidate",
+      "trial": 2,
+      "operation": "fsck",
+      "wall": 0.01726333300000249,
+      "load": [
+        31.49853515625,
+        24.54150390625,
+        21.4111328125
+      ],
+      "trace": "trace      1.1 ms  open project\n"
+    }
+  ],
+  "host_free_bytes": 77013450752,
+  "notes": [
+    "Warm/mixed cache; no cache purge.",
+    "Three trials; alternate binary order.",
+    "Container allocation includes metadata; sync excluded from timings."
+  ],
+  "verified": [
+    [
+      "large",
+      1000
+    ]
+  ],
+  "complete": true
+}

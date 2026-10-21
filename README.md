@@ -103,7 +103,11 @@ The store and signed record formats remain compatible with the Linux backend.
   It refuses volumes mounted with `noowners` and store folders that other users can change.
 - A snapshot clones each file and checks source metadata before and after the copy.
   It fails if the source changes during the copy. It is not an atomic volume snapshot.
-- APFS work grows with the number of files. A diff also reads file content to find changed blocks.
+- APFS work grows with the number of files. Files with the same valid APFS clone identity need no content comparison.
+  Other files require a content comparison to find changed blocks.
+- `status` checks kernel change counters before and after a live read. It uses a temporary snapshot if validation fails.
+  Files with an active memory mapping or an unavailable counter also use the snapshot path.
+- `add` clones changed files into the private index instead of copying all bytes. Hard-linked index files use the existing copy path.
 - File modes, symbolic links, hard links and file identity survive snapshots. Nested layers stay outside history.
 - Immutable flags prevent ordinary writes to states. The store owner can remove these flags.
   Use the root service for separate users and root-owned state storage.

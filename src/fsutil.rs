@@ -295,6 +295,22 @@ fn fchown(f: &File, own: Option<(u32, u32)>) -> Result<()> {
 /// `dst_root/dst_rel`: a reflink copy for a file (in place when a file is there, so the inode
 /// stays), the same target for a link, a folder for a folder.
 pub fn copy_entry(src_root: &Path, src_rel: &str, dst_root: &Path, dst_rel: &str, own: Option<(u32, u32)>) -> Result<()> {
+    copy_entry_impl(src_root, src_rel, dst_root, dst_rel, own, false)
+}
+
+/// Copy into a private index. APFS can replace a single-link inode with a new clone.
+pub fn copy_index_entry(src_root: &Path, src_rel: &str, dst_root: &Path, dst_rel: &str, own: Option<(u32, u32)>) -> Result<()> {
+    copy_entry_impl(src_root, src_rel, dst_root, dst_rel, own, true)
+}
+
+fn copy_entry_impl(
+    src_root: &Path,
+    src_rel: &str,
+    dst_root: &Path,
+    dst_rel: &str,
+    own: Option<(u32, u32)>,
+    _replace_index: bool,
+) -> Result<()> {
     let src = safe_join(src_root, src_rel)?;
     let m = fs::symlink_metadata(&src).with_context(|| format!("stat {}", src.display()))?;
     let t = crate::tree::Tree::open(dst_root)?;
@@ -317,6 +333,15 @@ pub fn copy_entry(src_root: &Path, src_rel: &str, dst_root: &Path, dst_rel: &str
         bail!("cannot copy special file {}", src.display());
     }
     let s = open_ro(&src)?;
+    let finish = |d: &File| -> Result<()> {
+        d.set_permissions(fs::Permissions::from_mode(m.mode() & 0o7777))?;
+        set_mtime(d, m.mtime(), m.mtime_nsec())?;
+        fchown(d, own)
+    };
+    #[cfg(target_os = "macos")]
+    if _replace_index && t.replace_index_file(&s, dst_rel, finish)? {
+        return Ok(());
+    }
     // Keep the inode of a file that is there: btrfs then reports an in-place change with byte
     // ranges, and running tools keep their file handles.
     let (d, cloned) = match t.open_write(dst_rel)? {
@@ -340,10 +365,7 @@ pub fn copy_entry(src_root: &Path, src_rel: &str, dst_root: &Path, dst_rel: &str
         let mut d2 = d.try_clone()?;
         std::io::copy(&mut s2, &mut d2)?;
     }
-    d.set_permissions(fs::Permissions::from_mode(m.mode() & 0o7777))?;
-    set_mtime(&d, m.mtime(), m.mtime_nsec())?;
-    fchown(&d, own)?;
-    Ok(())
+    finish(&d)
 }
 
 pub fn set_mtime(f: &File, sec: i64, nsec: i64) -> Result<()> {

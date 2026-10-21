@@ -1,0 +1,38 @@
+[
+  {
+    "stage": "source",
+    "inodes": [
+      18,
+      18
+    ],
+    "nlinks": [
+      2,
+      2
+    ],
+    "same_bytes": true
+  },
+  {
+    "stage": "main",
+    "inodes": [
+      30343,
+      35772
+    ],
+    "nlinks": [
+      1,
+      1
+    ],
+    "same_bytes": true
+  },
+  {
+    "stage": "branch",
+    "inodes": [
+      40447,
+      45876
+    ],
+    "nlinks": [
+      1,
+      1
+    ],
+    "same_bytes": true
+  }
+]

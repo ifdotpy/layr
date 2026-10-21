@@ -436,6 +436,60 @@ pub fn apfs_clone(src: &std::path::Path, dst: &std::path::Path) -> io::Result<()
     Ok(())
 }
 #[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ApfsDataIdentity {
+    pub generation: Option<u32>,
+    pub clone_id: Option<u64>,
+}
+
+/// Kernel data identity, not a timestamp or a user-writable extended attribute.
+#[cfg(target_os = "macos")]
+pub fn apfs_data_identity(path: &std::path::Path) -> io::Result<ApfsDataIdentity> {
+    let path = cpath(path)?;
+    let mut attrs = libc::attrlist {
+        bitmapcount: libc::ATTR_BIT_MAP_COUNT,
+        reserved: 0,
+        commonattr: libc::ATTR_CMN_RETURNED_ATTRS | libc::ATTR_CMN_GEN_COUNT,
+        volattr: 0,
+        dirattr: 0,
+        fileattr: 0,
+        forkattr: libc::ATTR_CMNEXT_CLONEID,
+    };
+    // getattrlist packs all fields on four-byte boundaries, including u64.
+    // PACK_INVAL_ATTRS keeps the layout fixed when an attribute is unsupported.
+    let mut buf = [0u8; 36];
+    let flags = libc::FSOPT_NOFOLLOW | libc::FSOPT_PACK_INVAL_ATTRS | libc::FSOPT_ATTR_CMN_EXTENDED;
+    // SAFETY: attrs and buf are valid for their declared sizes; path is NUL-terminated.
+    if unsafe {
+        libc::getattrlist(
+            path.as_ptr(),
+            (&mut attrs as *mut libc::attrlist).cast(),
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+            flags as _,
+        )
+    } != 0
+    {
+        let e = io::Error::last_os_error();
+        return match e.raw_os_error() {
+            Some(libc::ENOTSUP | libc::EINVAL) => Ok(ApfsDataIdentity::default()),
+            _ => Err(e),
+        };
+    }
+    let word = |off| u32::from_ne_bytes(buf[off..off + 4].try_into().unwrap());
+    if word(0) != buf.len() as u32 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid APFS data identity length"));
+    }
+    let generation = word(24);
+    let clone_id = u64::from_ne_bytes(buf[28..36].try_into().unwrap());
+    Ok(ApfsDataIdentity {
+        // Apple documents zero for an invalid count, including mapped files.
+        generation: (word(4) & libc::ATTR_CMN_GEN_COUNT != 0 && generation != 0).then_some(generation),
+        clone_id: (word(20) & libc::ATTR_CMNEXT_CLONEID != 0 && clone_id != 0).then_some(clone_id),
+    })
+}
+
+#[cfg(target_os = "macos")]
 pub fn apfs_marker(path: &std::path::Path, value: Option<&[u8]>) -> io::Result<Vec<u8>> {
     apfs_attribute(path, c"com.layr.subvolume", value)
 }
@@ -494,6 +548,16 @@ pub fn apfs_copy_metadata(src: &std::path::Path, dst: &std::path::Path) -> io::R
         libc::copyfile(src.as_ptr(), dst.as_ptr(), std::ptr::null_mut(), libc::COPYFILE_METADATA | libc::COPYFILE_NOFOLLOW)
     } != 0
     {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub fn apfs_copy_metadata_fd(src: std::os::fd::BorrowedFd<'_>, dst: std::os::fd::BorrowedFd<'_>) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: both descriptors remain open; the state pointer may be null.
+    if unsafe { libc::fcopyfile(src.as_raw_fd(), dst.as_raw_fd(), std::ptr::null_mut(), libc::COPYFILE_METADATA) } != 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(())
