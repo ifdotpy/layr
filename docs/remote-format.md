@@ -38,6 +38,11 @@ Content with an existing SHA-256 reuses that chain across lines.
 
 The tree header fields are `v`, `state`, `attempt`, `tree`, `base`, `parts`, `machine`, and `sig`.
 `v` is 2. `tree` is `full` or `delta`. `base` is null or `["<state UUID>","<attempt>"]`.
+The optional `btrfs` field is `{"uuid":"<UUID>","transid":<integer>}`.
+An original snapshot uses its UUID and ctransid. A received snapshot uses its received UUID and stransid.
+The uploader includes this field only when its UUID equals the signed state's subvolume UUID.
+Other snapshot backends omit it. The field is covered by the tree signature.
+After file verification, a btrfs restore sets this received identity before it becomes read only and visible.
 `sig` is the standard Base64 Ed25519 signature with padding.
 The signed bytes are:
 
@@ -48,7 +53,7 @@ UTF8("layr/store/v2/tree") || 0x00 || canonical(header without sig) || 0x0a || c
 The machine key comes from its first signed record, as in peer replication.
 Records retain their existing signatures over their exact record bytes. Segments do not rewrite records.
 New record fields, refs, and attestations travel inside these records without a separate store format.
-Readers validate sequence continuity, project identity, signatures, and local trust before they import records.
+Readers validate the contiguous sequence prefix, project identity, signatures, and local trust before they import records.
 Readers validate tree signatures and each restored file's size and SHA-256.
 
 State IDs are existing canonical UUIDs. They are not ciphertext hashes.
@@ -63,9 +68,24 @@ A paper key contains the paper identity's 32-byte secret as 24 BIP39 words, as i
 A machine slot uses the machine's existing Ed25519 seed through the standard OpenSSH encoding.
 The age and ssh-key crates perform the key conversion and encryption.
 A machine without a slot can encrypt uploads to the public recipient. It cannot decrypt the store.
+Only `remote add` creates a store. A new store requires `--paper-key-out <path>`.
+The path must not exist. The caller creates the file with mode 0600, outside local stores, remote stores, and line folders.
+No output, record, configuration, or local index contains the words.
+Move the words to paper. Delete the key file after you check the paper copy.
+S3 credentials come only from the caller's environment. They are not stored in project metadata.
+
+Initialization publishes the paper slot first, the machine slot second, and `store.json` last.
+A store without `store.json` is not initialized. No push or fetch creates it.
+A retry can use the existing paper file only when it opens the unfinished store's paper slot.
+A different paper key cannot complete another writer's initialization.
 
 ## Retry and collection
 
+Segments from one machine can overlap. Readers merge them by sequence number.
+Duplicate sequence numbers must have identical signed line bytes. A conflict rejects the machine's complete segment set.
+Readers import the longest contiguous prefix from record 1. They report a gap after that prefix.
+Another segment can fill a gap. An overlap is normal; `fsck --remote` reports its count separately from conflicts.
+A writer lists a machine's segments before upload. Its segment starts after the highest last sequence number in that listing.
 A record segment keeps its name and signed plaintext across retries.
 A 412 means the object already exists. Readers verify its record signatures and reject a conflicting sequence.
 A state retry uses a new attempt. A lost response can leave another complete attempt with the same state ID.
@@ -97,6 +117,25 @@ The store keeps all record segments and complete states by default.
 
 `canonical::tests::equals_python_json_dumps` contains the complete Unicode encoding vector.
 `format::tests::signatures_bind_header_tree_and_domain` uses Ed25519 seed `07` repeated 32 times.
-The signed tree is `{"files":{}}`. Changes to its header or content must fail verification.
+The signed tree is `{"files":{}}`. The state and machine UUID are `01a12290-0000-7000-8000-000000000001`.
+The attempt is `0123abcd`, the tree type is `full`, the base is null, and the part count is zero.
+Without `btrfs`, the signature is:
+
+```text
+yIMZ3tHimsJVUe2aJs7RJkVQr9mPaS8QazZnExdCmtVy2i063+jYI5TERQrvxlqYQsxOHTKk0yLlkvPfHfNiCQ==
+```
+
+With `btrfs.uuid` equal to that UUID and `btrfs.transid` equal to 7, the signature is:
+
+```text
+S7eww50UaRLUiyu646IdgZiC53cdiJQ7gTfMrT7cD9FnDeikWWfB3I4VC6LGDsUi7lSkm3ex6DkYBY7XCL+VDg==
+```
+
+Python JSON encoding and OpenSSL Ed25519 independently reproduce both vectors.
+Changes to the header, btrfs identity, or tree content must fail verification.
 `keys::tests::paper_and_machine_slots_open_the_same_identity` checks both slot forms and a wrong machine key.
 `zst::tests::frames_decode_with_and_without_a_base` checks full and raw-prefix delta frames.
+
+Legacy cache layer snapshots do not use this format. The writer reports their names as omitted.
+After Core adds cache states, `--caches` carries these ordinary states under `states/<UUID>/`.
+Before that, a store push with `--caches` fails with a clear error.
