@@ -450,6 +450,7 @@ The final snapshot of a deleted line always travels, because `undo` needs it.
   An unknown key requires `--public-key <ed25519>`.
   A new host gets its identity with `layr remote self --json`, outside any project.
   The result contains `id` (the machine UUID) and `public_key` (64 hexadecimal characters).
+  For a store remote, trust records the machine key and adds its encrypted machine slot.
 - `layr remote remove work` removes the remote configuration.
 
 Remote configuration uses signed `config` records in the project database.
