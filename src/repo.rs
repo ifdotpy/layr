@@ -1056,10 +1056,12 @@ impl<'a> Repo<'a> {
         Ok(st)
     }
 
+    #[cfg(target_os = "macos")]
     fn watch_cache_path(&self, line: &Line) -> PathBuf {
         self.p.meta_dir().join("watch").join(format!("{}.json", line.id))
     }
 
+    #[cfg(target_os = "macos")]
     fn save_watch(&self, line: &Line, cache: &WatchCache) -> Result<()> {
         crate::fsutil::atomic_write(&self.watch_cache_path(line), &serde_json::to_vec(cache)?, 0o600)
     }
@@ -1067,6 +1069,7 @@ impl<'a> Repo<'a> {
     /// What a saved status depends on besides the working folder: the head, the index layer,
     /// and the working folder itself. `None` when a saved status cannot be used: a line with
     /// overlays, or a complete index.
+    #[cfg(target_os = "macos")]
     fn watch_key(&self, line: &Line, work: &Path, stage: &Option<PathBuf>) -> Result<Option<String>> {
         use sha1::{Digest, Sha1};
         if self.p.is_overlay() || !self.layers(line)?.is_empty() {
@@ -1091,6 +1094,7 @@ impl<'a> Repo<'a> {
 
     /// The saved status, brought up to date for the paths that FSEvents reports as changed
     /// since it was saved. `None` when that answer is not proven: then the caller reads all.
+    #[cfg(target_os = "macos")]
     fn watched_status(&self, line: &Line, work: &Path, index: &Snap, key: &str) -> Result<Option<Status>> {
         use crate::sys::watch;
         let Ok(raw) = std::fs::read(self.watch_cache_path(line)) else {
