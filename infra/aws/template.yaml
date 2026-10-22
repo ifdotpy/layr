@@ -20,6 +20,12 @@ Resources:
             Prefix: !Sub '${Prefix}/states/'
             AbortIncompleteMultipartUpload:
               DaysAfterInitiation: 7
+          - Id: RemoveGarbageCollectedStateData
+            Status: Enabled
+            Prefix: !Sub '${Prefix}/states/'
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+            ExpiredObjectDeleteMarker: true
       VersioningConfiguration:
         Status: Enabled
       PublicAccessBlockConfiguration:
@@ -56,7 +62,6 @@ Resources:
               - Effect: Allow
                 Action: [s3:PutObject, s3:AbortMultipartUpload]
                 Resource:
-                  - !Sub '${Bucket.Arn}/${Prefix}/store.json'
                   - !Sub '${Bucket.Arn}/${Prefix}/records/*'
                   - !Sub '${Bucket.Arn}/${Prefix}/states/*'
                   - !Sub '${Bucket.Arn}/${Prefix}/slots/*'

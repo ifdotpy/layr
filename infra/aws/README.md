@@ -22,7 +22,9 @@ The gateway can change its DNS records when `Host` and `ZoneId` are set.
 
 Identity and Access Management (IAM) separates the project grants.
 The garbage collection (GC) role handles remote data deletion.
-The writer can create objects and abort multipart uploads.
+The writer can create records, states, and slots, and abort multipart uploads.
+Only the owner creates `store.json` with their own credentials.
+The writer cannot initialize a store.
 It cannot read or delete objects.
 The bucket requires `If-None-Match: *` for each object commit, including multipart completion.
 Multipart setup and part uploads do not require that header.
@@ -31,7 +33,11 @@ The GC role can delete only `<prefix>/states/*/*.data.age`.
 It cannot delete trees, records, slots, or object versions.
 The application checks the 24-hour grace period and references before each GC operation.
 The bucket aborts incomplete multipart uploads after seven days.
-It retains complete objects and old object versions.
+GC deletes add delete markers because the bucket has versioning.
+The lifecycle rule removes noncurrent state objects after 30 days, then removes expired delete markers.
+Thus, space from GC-deleted orphan parts becomes available after that retention period.
+The rule does not expire current objects.
+Objects cannot be overwritten, so only GC-deleted orphan parts become noncurrent during normal use.
 See the [AWS conditional-write policy reference](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes-enforce.html).
 
 ## Requirements
