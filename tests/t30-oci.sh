@@ -63,6 +63,10 @@ printf 'uncommitted\n' > bin/app
 SECOND=$(l push --runnable app external main --json)
 eq "repeat push skips all blobs" "0" "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["uploaded_blobs"])' "$SECOND")"
 eq "push reads the revision, not the working folder" "$IMAGE" "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["image"])' "$SECOND")"
+HUMAN=$(l push external main --runnable app)
+has "the default output names the runnable and tag" 'Pushed app:line-main' "$HUMAN"
+has "the default output shows the image digest" "$IMAGE" "$HUMAN"
+has "the default output shows skipped blobs" 'Blobs: 0 uploaded, 5 skipped' "$HUMAN"
 ok "skopeo pulls all image blobs from Distribution" skopeo copy --src-creds test:test --src-tls-verify=false "docker://127.0.0.1:$REGPORT/oci/app:line-main" "dir:$T/external-image"
 eq "the external registry preserves the manifest digest" "$IMAGE" "sha256:$(skopeo inspect --creds test:test --tls-verify=false --raw "docker://127.0.0.1:$REGPORT/oci/app:line-main" | sha256sum | cut -d' ' -f1)"
 export HELM_REGISTRY_CONFIG="$T/helm-auth.json"

@@ -78,7 +78,8 @@ The lead requires Phase B after review and merge of Core:
 The temporary cache currently has no Core derived-state records.
 The root integration function is `oci::push(&Ctx, url, rev, Option<runnable>) -> Result<i32>`.
 The temporary dispatcher in `cmd::remote::push` uses `cmd::oci::dispatch`.
-The root entry point always prints JSON for the generic remote dispatcher.
+The root `oci::push` entry point prints human text.
+The generic remote dispatcher calls `oci::push_json` when the user supplies `--json`.
 Ref reads currently use the project's reader policy because Core has no separate ref ACL.
 Exact views return `MANIFEST_UNKNOWN` until the Core resolver supports them.
 The implementation packages existing files and does not execute compiler commands or enqueue builds.

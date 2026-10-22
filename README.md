@@ -259,7 +259,8 @@ The cache in `meta/oci` uses content hashes.
 This temporary cache stores blobs outside Core derived states until the Core workstream supplies that integration.
 A repeated export reuses compressed blobs.
 A push checks each blob in the registry before upload.
-The JSON result includes `state`, `runnable`, `image`, `chart`, `tag`, and `uploaded_blobs`.
+The default output shows the runnable, destination, digests, and blob counts.
+With `--json`, the result includes `state`, `runnable`, `image`, `chart`, `tag`, `uploaded_blobs`, and `skipped_blobs`.
 
 A chart uses the same revision as its image.
 Layr sets `image.digest` in `values.yaml` to the exact image manifest digest.

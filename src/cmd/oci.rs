@@ -38,16 +38,12 @@ pub fn dispatch(ctx: &Ctx, args: &[String]) -> Result<Option<i32>> {
         return Err(exit(128, "usage: layr push <oci-remote> <rev> [--runnable <name>] [--json]"));
     }
     let report = push_report(ctx, &url, &a.pos[1], a.get("--runnable"), Some(remote))?;
-    if a.has("--json") {
-        outln!(ctx, "{}", report);
-    } else {
-        outln!(ctx, "{}", report["image"].as_str().unwrap_or(""));
-    }
+    print_report(ctx, &url, &report, a.has("--json"));
     Ok(Some(0))
 }
 
 /// Small public transport boundary for the generic remote workstream.
-pub fn push(ctx: &Ctx, url: &str, rev: &str, runnable: Option<&str>) -> Result<i32> {
+pub fn push(ctx: &Ctx, url: &str, rev: &str, runnable: Option<&str>, json: bool) -> Result<i32> {
     let h = here(ctx)?;
     let mut remote = None;
     for (key, raw) in h.repo.p.db.config_all()? {
@@ -60,8 +56,21 @@ pub fn push(ctx: &Ctx, url: &str, rev: &str, runnable: Option<&str>) -> Result<i
         }
     }
     let report = push_report(ctx, url, rev, runnable, remote.as_deref())?;
-    outln!(ctx, "{}", report);
+    print_report(ctx, url, &report, json);
     Ok(0)
+}
+
+fn print_report(ctx: &Ctx, url: &str, report: &serde_json::Value, json: bool) {
+    if json {
+        outln!(ctx, "{report}");
+        return;
+    }
+    outln!(ctx, "Pushed {}:{} to {url}", report["runnable"].as_str().unwrap_or(""), report["tag"].as_str().unwrap_or(""));
+    outln!(ctx, "Image: {}", report["image"].as_str().unwrap_or(""));
+    if let Some(chart) = report["chart"].as_str() {
+        outln!(ctx, "Chart: {chart}");
+    }
+    outln!(ctx, "Blobs: {} uploaded, {} skipped", report["uploaded_blobs"], report["skipped_blobs"]);
 }
 
 fn push_report(ctx: &Ctx, url: &str, rev: &str, runnable: Option<&str>, remote: Option<&str>) -> Result<serde_json::Value> {
@@ -93,8 +102,10 @@ fn push_report(ctx: &Ctx, url: &str, rev: &str, runnable: Option<&str>, remote: 
     let mut registry = Registry::new(url, insecure, username, password)?;
     let repo = registry.repository.clone();
     let tag = oci::revision_tag(&h.repo, rev, &e.state)?;
+    let mut total = e.image.layers.len() + 1;
     let mut uploaded = registry.push(&repo, &tag, &e.cache, &e.image)?;
     let chart = if let Some(c) = &e.chart {
+        total += c.layers.len() + 1;
         let (base, _) = repo.rsplit_once('/').unwrap_or(("", &repo));
         let target = if base.is_empty() { format!("charts/{}", e.runnable) } else { format!("{base}/charts/{}", e.runnable) };
         let version = e.chart_version.as_ref().unwrap().replace('+', "_");
@@ -104,7 +115,7 @@ fn push_report(ctx: &Ctx, url: &str, rev: &str, runnable: Option<&str>, remote: 
         None
     };
     Ok(
-        json!({"state": e.state, "runnable": e.runnable, "tag": tag, "image": e.image.manifest.digest, "chart": chart, "uploaded_blobs": uploaded}),
+        json!({"state": e.state, "runnable": e.runnable, "tag": tag, "image": e.image.manifest.digest, "chart": chart, "uploaded_blobs": uploaded, "skipped_blobs": total - uploaded}),
     )
 }
 

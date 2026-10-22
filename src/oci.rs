@@ -18,7 +18,12 @@ use std::path::{Path, PathBuf};
 
 /// Transport boundary used by the generic remote dispatcher.
 pub fn push(ctx: &crate::ctx::Ctx, url: &str, rev: &str, runnable: Option<&str>) -> Result<i32> {
-    crate::cmd::oci::push(ctx, url, rev, runnable)
+    crate::cmd::oci::push(ctx, url, rev, runnable, false)
+}
+
+/// JSON output variant for a remote command with --json.
+pub fn push_json(ctx: &crate::ctx::Ctx, url: &str, rev: &str, runnable: Option<&str>) -> Result<i32> {
+    crate::cmd::oci::push(ctx, url, rev, runnable, true)
 }
 
 pub const MANIFEST: &str = "application/vnd.oci.image.manifest.v1+json";
