@@ -468,11 +468,7 @@ fn changed_ranges(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), rel
     use std::io::Read;
     let open = |p: PathBuf| -> Result<File> {
         use std::os::unix::fs::OpenOptionsExt;
-        fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(&p)
-            .with_context(|| format!("open {}", p.display()))
+        fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(&p).with_context(|| format!("open {}", p.display()))
     };
     let (mut a, mut b) = (open(parent.at(rel)?)?, open(child.at(rel)?)?);
     let (alen, blen) = (a.metadata()?.len(), b.metadata()?.len());

@@ -191,7 +191,8 @@ impl Layered {
     pub fn materialize(&self, dst: &Path, readonly: bool) -> Result<()> {
         let _t = crate::trace::span(format!("thin materialize {} layers", self.layers.len()));
         let entries = apfs::scan_with_data(self.bottom(), false)?;
-        apfs::clone_complete(self.bottom(), dst, &entries, readonly).with_context(|| format!("clone {}", self.bottom().display()))?;
+        apfs::clone_complete(self.bottom(), dst, &entries, readonly)
+            .with_context(|| format!("clone {}", self.bottom().display()))?;
         let result = (|| -> Result<()> {
             for l in self.layers.iter().rev().skip(1) {
                 apply(l, dst)?;
@@ -923,7 +924,8 @@ mod tests {
     }
 
     fn linked(root: &Path) -> bool {
-        fs::symlink_metadata(root.join("b/linked")).unwrap().ino() == fs::symlink_metadata(root.join("a/deep/file")).unwrap().ino()
+        fs::symlink_metadata(root.join("b/linked")).unwrap().ino()
+            == fs::symlink_metadata(root.join("a/deep/file")).unwrap().ino()
     }
 
     fn change(root: &Path) {
