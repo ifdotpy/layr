@@ -115,7 +115,7 @@ pub(crate) fn scan_with_data(root: &Path, data: bool) -> Result<BTreeMap<String,
         return Ok(out);
     }
     let dir = crate::fsutil::open_dir_nofollow(root)?;
-    scan_bulk(&dir, root, "", &mut out)?;
+    scan_bulk(&dir, root, "", &mut out, &mut Vec::new())?;
     Ok(out)
 }
 
@@ -132,9 +132,15 @@ fn entry_of_metadata(m: &fs::Metadata, path: &Path, data: bool) -> Result<ScanEn
 
 /// Read a folder and its content with `getattrlistbulk`: one call per folder instead of two per
 /// entry. Nested layers (subvolumes) appear as folders without content.
-fn scan_bulk(dir: &File, root: &Path, rel: &str, out: &mut BTreeMap<String, ScanEntry>) -> Result<()> {
+fn scan_bulk(dir: &File, root: &Path, rel: &str, out: &mut BTreeMap<String, ScanEntry>, buf: &mut Vec<u8>) -> Result<()> {
     use std::os::fd::AsFd;
-    for e in crate::sys::apfs_bulk_read(dir.as_fd()).with_context(|| format!("read folder {}", root.join(rel).display()))? {
+    let entries = match crate::sys::apfs_bulk_read(dir.as_fd(), buf) {
+        Ok(v) => v,
+        // A folder that a writer removed while the scan ran: its parent shows the change.
+        Err(e) if !rel.is_empty() && matches!(e.raw_os_error(), Some(libc::ENOENT | libc::ENOTDIR)) => return Ok(()),
+        Err(e) => return Err(anyhow::Error::from(e).context(format!("read folder {}", root.join(rel).display()))),
+    };
+    for e in entries {
         let name = e.name.into_string().map_err(|_| anyhow::anyhow!("non-UTF-8 file name"))?;
         let next = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
         let kind = e.mode & libc::S_IFMT as u32;
@@ -168,7 +174,7 @@ fn scan_bulk(dir: &File, root: &Path, rel: &str, out: &mut BTreeMap<String, Scan
             if is_subvolume(&path) {
                 continue;
             }
-            let fd = rustix::fs::openat(
+            let fd = match rustix::fs::openat(
                 dir,
                 name.as_str(),
                 rustix::fs::OFlags::RDONLY
@@ -176,9 +182,16 @@ fn scan_bulk(dir: &File, root: &Path, rel: &str, out: &mut BTreeMap<String, Scan
                     | rustix::fs::OFlags::NOFOLLOW
                     | rustix::fs::OFlags::CLOEXEC,
                 rustix::fs::Mode::empty(),
-            )
-            .with_context(|| format!("open folder {}", path.display()))?;
-            scan_bulk(&File::from(fd), root, &next, out)?;
+            ) {
+                Ok(fd) => fd,
+                // Removed or replaced after the listing: a scan after the copy sees it.
+                Err(e) if matches!(e, rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR | rustix::io::Errno::LOOP) => {
+                    out.remove(&next);
+                    continue;
+                }
+                Err(e) => return Err(anyhow::Error::from(e).context(format!("open folder {}", path.display()))),
+            };
+            scan_bulk(&File::from(fd), root, &next, out, buf)?;
         }
     }
     Ok(())
@@ -319,7 +332,15 @@ fn copy_tree(src: &Path, dst: &Path, root: bool, links: &mut BTreeMap<(u64, u64)
         if root || !is_subvolume(src) {
             for e in fs::read_dir(src)? {
                 let e = e?;
-                copy_tree(&e.path(), &dst.join(e.file_name()), false, links)?;
+                let (from, to) = (e.path(), dst.join(e.file_name()));
+                if let Err(err) = copy_tree(&from, &to, false, links) {
+                    // An entry that a writer removed during the copy: the scan after the copy
+                    // sees the change. Any other failure stops the copy.
+                    if fs::symlink_metadata(&from).is_ok() {
+                        return Err(err);
+                    }
+                    let _ = delete_tree(&to);
+                }
             }
         }
         if root || !is_subvolume(src) {
@@ -444,6 +465,24 @@ pub fn snapshot(src: &Path, dst: &Path, readonly: bool) -> Result<()> {
             }
             let paths = crate::thin::changed_paths(&before, &after);
             let _t = crate::trace::span(format!("APFS copy {} changed entries again", paths.len()));
+            if needs_file_copies(src, &after) {
+                // Hard links survive only a copy of the whole tree with its map of inodes.
+                let mut copied = false;
+                for _ in 0..crate::thin::COPY_ROUNDS {
+                    crate::thin::settle(round);
+                    let now = scan(src)?;
+                    delete_tree(&temp)?;
+                    if clone_complete(src, &temp, &now, readonly).is_ok() {
+                        before = now;
+                        copied = true;
+                        break;
+                    }
+                }
+                if !copied {
+                    bail!("cannot copy {} while it changes", src.display());
+                }
+                continue;
+            }
             if let Err(e) = crate::thin::resync(src, &temp, &paths) {
                 // An entry that went away is a change: the next round copies it again.
                 // Without a change it is an error.
@@ -578,7 +617,7 @@ pub(crate) fn scan_at(root: &Path, rel: &str) -> Result<BTreeMap<String, ScanEnt
     out.insert(rel.to_string(), entry_of_metadata(&m, &path, true)?);
     if m.is_dir() && !is_subvolume(&path) {
         let dir = crate::fsutil::open_dir_nofollow(&path)?;
-        scan_bulk(&dir, root, rel, &mut out)?;
+        scan_bulk(&dir, root, rel, &mut out, &mut Vec::new())?;
     }
     Ok(out)
 }
@@ -705,6 +744,10 @@ const SHARED_MIN: u64 = 1 << 20;
 /// (start, end). The whole file when APFS does not report a mapping.
 fn unshared(a: &File, b: &File, len: u64) -> Vec<(u64, u64)> {
     let _t = crate::trace::span("APFS shared extents");
+    // Data in the page cache can still map to the old shared block: write it first.
+    if a.sync_data().is_err() || b.sync_data().is_err() {
+        return vec![(0, len)];
+    }
     let (Some(ea), Some(eb)) = (crate::sys::apfs_extents(a, len), crate::sys::apfs_extents(b, len)) else {
         return vec![(0, len)];
     };
@@ -970,6 +1013,13 @@ mod tests {
         fs::rename(s.0.join("big"), s.0.join("x/f"))?;
         fs::rename(s.0.join("copy"), s.0.join("y/f"))?;
         assert_eq!(changed_ranges(&s.0.join("x"), &s.0.join("y"), "f")?, vec![(100 * 4096, 4096), (1500 * 4096, 4096)]);
+        // A write that is still in the page cache counts too.
+        let f = fs::OpenOptions::new().write(true).open(s.0.join("y/f"))?;
+        f.write_all_at(b"not flushed", 700 * 4096)?;
+        assert_eq!(
+            changed_ranges(&s.0.join("x"), &s.0.join("y"), "f")?,
+            vec![(100 * 4096, 4096), (700 * 4096, 4096), (1500 * 4096, 4096)]
+        );
         Ok(())
     }
 

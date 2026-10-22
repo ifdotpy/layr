@@ -1036,11 +1036,8 @@ impl<'a> Repo<'a> {
             }
         }
         // The event ID before the read: changes during the read are in the next answer.
-        let (marker, _) = crate::sys::watch::files(&self.p.meta_dir(), &line.id);
-        let mark = key.as_ref().and_then(|_| {
-            std::fs::create_dir_all(marker.parent()?).ok()?;
-            crate::sys::watch::mark(&marker).ok()
-        });
+        let (dir, _) = crate::sys::watch::files(&self.p.meta_dir(), &line.id);
+        let mark = key.as_ref().and_then(|_| crate::sys::watch::mark(&dir, &line.id).ok());
         // States are immutable; the lock keeps the index still. Only the working folder moves.
         let mut roots = vec![work.as_path()];
         if let Some(s) = &stage {
@@ -1051,7 +1048,20 @@ impl<'a> Repo<'a> {
             None => self.status(line)?.0,
         };
         if let (Some(key), Some(event)) = (key, mark) {
-            let _ = self.save_watch(line, &WatchCache { version: 1, event, key, status: st.clone() });
+            // A change through a name outside the folder gives no event below it, and a write
+            // through a memory mapping gives none at all: a folder with hard links or mapped
+            // files reads all.
+            let unsafe_files = btrfs::scan_with_data(&work, true)?
+                .values()
+                .any(|e| e.meta.is_file() && (e.nlink > 1 || e.data.and_then(|d| d.generation).is_none()));
+            if !unsafe_files {
+                let cache = WatchCache { version: 1, event, key, full_at: crate::ids::now_ms(), status: st.clone() };
+                if self.save_watch(line, &cache).is_ok() {
+                    crate::sys::watch::forget(&dir, &line.id, event);
+                }
+            } else {
+                let _ = std::fs::remove_file(self.watch_cache_path(line));
+            }
         }
         Ok(st)
     }
@@ -1072,12 +1082,12 @@ impl<'a> Repo<'a> {
     #[cfg(target_os = "macos")]
     fn watch_key(&self, line: &Line, work: &Path, stage: &Option<PathBuf>) -> Result<Option<String>> {
         use sha1::{Digest, Sha1};
-        if self.p.is_overlay() || !self.layers(line)?.is_empty() {
+        if self.p.is_overlay() || !self.layers(line)?.is_empty() || !crate::sys::watch::logged(work) {
             return Ok(None);
         }
         let mut h = Sha1::new();
         let w = std::fs::symlink_metadata(work)?;
-        h.update(format!("{}|{}|{}|", line.head, w.dev(), w.ino()));
+        h.update(format!("{}|{}|{}|{}|", line.head, w.dev(), w.ino(), work.display()));
         if let Some(s) = stage {
             if !crate::thin::is_thin(s) {
                 return Ok(None);
@@ -1103,11 +1113,17 @@ impl<'a> Repo<'a> {
         let Ok(cache) = serde_json::from_slice::<WatchCache>(&raw) else {
             return Ok(None);
         };
-        if cache.version != 1 || cache.key != key {
+        // A write through a memory mapping that starts after the full read gives no event: the
+        // saved status serves only for `watch.full_seconds` after that read.
+        let limit = self.p.config_u64("watch.full_seconds", WATCH_FULL_SECONDS) as i64 * 1000;
+        if cache.version != 1 || cache.key != key || crate::ids::now_ms() - cache.full_at >= limit {
             return Ok(None);
         }
-        let (marker, cookie) = watch::files(&self.p.meta_dir(), &line.id);
-        let Some(events) = watch::changes(work, &marker, &cookie, cache.event) else {
+        let (dir, cookie) = watch::files(&self.p.meta_dir(), &line.id);
+        // The next baseline comes before this read: a change after the read's end is then in
+        // the next answer. Its marker has its own name, so it proves nothing for this read.
+        let event = watch::mark(&dir, &line.id)?;
+        let Some(events) = watch::changes(work, &watch::marker(&dir, &line.id, cache.event), &cookie, cache.event) else {
             return Ok(None);
         };
         let _t = crate::trace::span(format!("FSEvents read of {} paths", events.len()));
@@ -1139,7 +1155,6 @@ impl<'a> Repo<'a> {
         if paths.len() > WATCH_MAX_PATHS {
             return Ok(None);
         }
-        let event = watch::mark(&marker)?;
         let before = btrfs::scan_paths(work, &paths)?;
         let list = changes::file_changes_of(
             index,
@@ -1159,7 +1174,11 @@ impl<'a> Repo<'a> {
         st.untracked.sort();
         st.ignored.sort();
         self.finish_status(line, work, index, true, &mut st)?;
-        self.save_watch(line, &WatchCache { version: 1, event, key: key.to_string(), status: st.clone() })?;
+        self.save_watch(
+            line,
+            &WatchCache { version: 1, event, key: key.to_string(), full_at: cache.full_at, status: st.clone() },
+        )?;
+        watch::forget(&dir, &line.id, event);
         let _done = crate::trace::span("FSEvents status used");
         Ok(Some(st))
     }
@@ -1589,10 +1608,6 @@ impl<'a> Repo<'a> {
     }
 }
 
-/// True if a conflict is still open in `root`. A content conflict is open while the file holds
-/// conflict markers (a merge writes markers only into files of at most `MAX_TEXT` bytes, so a
-/// larger file has none). Other kinds (moves, deletes, types, binary files) stay open until the
-/// next commit of the line, which is the admin's decision.
 /// The saved status of a line and the FSEvents ID it was read at (`Repo::status_report`).
 #[cfg(target_os = "macos")]
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -1600,8 +1615,14 @@ struct WatchCache {
     version: u32,
     event: u64,
     key: String,
+    /// When the last full read ran, in milliseconds since the epoch.
+    full_at: i64,
     status: Status,
 }
+
+/// A saved status serves for this many seconds after a full read (setting `watch.full_seconds`).
+#[cfg(target_os = "macos")]
+const WATCH_FULL_SECONDS: u64 = 60;
 
 /// More changed paths than this read the whole folder.
 #[cfg(target_os = "macos")]
@@ -1626,6 +1647,10 @@ fn classify(scan: &Path, list: Vec<Change>, st: &mut Status) {
     }
 }
 
+/// True if a conflict is still open in `root`. A content conflict is open while the file holds
+/// conflict markers (a merge writes markers only into files of at most `MAX_TEXT` bytes, so a
+/// larger file has none). Other kinds (moves, deletes, types, binary files) stay open until the
+/// next commit of the line, which is the admin's decision.
 pub fn conflict_open(root: &(impl fsutil::Src + ?Sized), c: &Conflict) -> Result<bool> {
     if c.kind == "content" || c.kind == "add/add" {
         return Ok(match fsutil::lmeta(root, &c.path) {

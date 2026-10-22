@@ -547,7 +547,7 @@ pub struct BulkEntry {
 /// Read the metadata of all entries of an open folder with `getattrlistbulk`: one call returns
 /// many entries, with their change counters and clone IDs. The order is the folder order.
 #[cfg(target_os = "macos")]
-pub fn apfs_bulk_read(dir: std::os::fd::BorrowedFd<'_>) -> io::Result<Vec<BulkEntry>> {
+pub fn apfs_bulk_read(dir: std::os::fd::BorrowedFd<'_>, buf: &mut Vec<u8>) -> io::Result<Vec<BulkEntry>> {
     use std::os::fd::AsRawFd;
     use std::os::unix::ffi::OsStrExt;
     let mut attrs = libc::attrlist {
@@ -570,7 +570,9 @@ pub fn apfs_bulk_read(dir: std::os::fd::BorrowedFd<'_>) -> io::Result<Vec<BulkEn
         forkattr: libc::ATTR_CMNEXT_CLONEID,
     };
     let flags = libc::FSOPT_NOFOLLOW | libc::FSOPT_PACK_INVAL_ATTRS | libc::FSOPT_ATTR_CMN_EXTENDED;
-    let mut buf = vec![0u8; 256 * 1024];
+    if buf.len() < 256 * 1024 {
+        buf.resize(256 * 1024, 0);
+    }
     let mut out = Vec::new();
     loop {
         // SAFETY: the folder descriptor is live; attrs and buf are valid for their sizes.

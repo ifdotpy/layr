@@ -3,8 +3,9 @@
 //!
 //! The log can be off (disk images, `.fseventsd/no_log`), can drop events, and delivers events
 //! with a delay. Two marker files on the same volume guard against all three:
-//! - `mark` writes a marker right after it reads the current event ID. A later read must see
-//!   that marker, or the log does not cover the time since then.
+//! - `mark` writes a new marker file right after it reads the current event ID. A later read
+//!   must find that marker in the replayed history (before `HistoryDone`), or the log does not
+//!   cover the time since then. A young event can arrive live without any log.
 //! - `changes` writes a second marker after its stream starts and waits for it. Events come in
 //!   ID order, so every change before the marker has arrived.
 //! Any doubt returns `None`; the caller then reads the whole folder.
@@ -88,6 +89,8 @@ extern "C" {
 struct Seen {
     paths: Vec<(String, u32, u64)>,
     incomplete: bool,
+    /// The number of events before the end of the replayed history.
+    history: Option<usize>,
 }
 
 extern "C" fn on_events(
@@ -110,6 +113,8 @@ extern "C" fn on_events(
                 s.incomplete = true;
             }
             if f & HISTORY_DONE != 0 {
+                let n = s.paths.len();
+                s.history.get_or_insert(n);
                 continue;
             }
             let p = std::ffi::CStr::from_ptr(*paths.add(i)).to_string_lossy().into_owned();
@@ -128,12 +133,50 @@ fn touch(path: &Path) -> std::io::Result<()> {
     std::fs::write(path, crate::ids::new_id())
 }
 
-/// Read the current event ID, then change the marker file. `changes` later needs to see that
-/// marker change to trust the log since the returned ID.
-pub fn mark(marker: &Path) -> std::io::Result<u64> {
+/// True when the volume of `path` keeps an FSEvents log: its root has `.fseventsd` without a
+/// `no_log` file. Images attached with -nobrowse have none.
+pub fn logged(path: &Path) -> bool {
+    let Ok(c) = CString::new(path.to_string_lossy().as_bytes()) else {
+        return false;
+    };
+    // SAFETY: statfs fills a valid structure; the path is NUL-terminated.
+    let root = unsafe {
+        let mut st: libc::statfs = std::mem::zeroed();
+        if libc::statfs(c.as_ptr(), &mut st) != 0 {
+            return false;
+        }
+        std::ffi::CStr::from_ptr(st.f_mntonname.as_ptr()).to_string_lossy().into_owned()
+    };
+    let log = Path::new(&root).join(".fseventsd");
+    log.is_dir() && !log.join("no_log").exists()
+}
+
+/// The marker file of a baseline event ID of a line.
+pub fn marker(dir: &Path, line: &str, event: u64) -> PathBuf {
+    dir.join(format!("{line}.{event}.marker"))
+}
+
+/// Read the current event ID, then write the new marker file of that ID in `dir`. `changes`
+/// later needs that marker in the replayed history to trust the log since the returned ID.
+pub fn mark(dir: &Path, line: &str) -> std::io::Result<u64> {
+    std::fs::create_dir_all(dir)?;
     let id = current_id();
-    touch(marker)?;
+    touch(&marker(dir, line, id))?;
     Ok(id)
+}
+
+/// Remove the markers of a line except the one of `keep`.
+pub fn forget(dir: &Path, line: &str, keep: u64) {
+    let prefix = format!("{line}.");
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.starts_with(&prefix) && name.ends_with(".marker") && name != format!("{line}.{keep}.marker") {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
 }
 
 /// Paths below `root` that changed since `since`, relative to `root` ("" for the root itself),
@@ -178,12 +221,14 @@ pub fn changes(root: &Path, marker: &Path, cookie: &Path, since: u64) -> Option<
         let queue = dispatch_queue_create(label.as_ptr(), std::ptr::null());
         FSEventStreamSetDispatchQueue(stream, queue);
         let started = FSEventStreamStart(stream) != 0;
+        // Only this call's cookie counts: an event after this ID.
+        let touched = current_id();
         let mut ok = started && touch(&cookie).is_ok();
         let deadline = Instant::now() + Duration::from_secs(3);
         let cookie_s = cookie.to_string_lossy().into_owned();
         while ok {
             FSEventStreamFlushSync(stream);
-            if seen.lock().unwrap().paths.iter().any(|(p, _, id)| *p == cookie_s && *id > since) {
+            if seen.lock().unwrap().paths.iter().any(|(p, _, id)| *p == cookie_s && *id > touched) {
                 break;
             }
             if Instant::now() > deadline {
@@ -204,7 +249,10 @@ pub fn changes(root: &Path, marker: &Path, cookie: &Path, since: u64) -> Option<
     }
     let seen = seen.lock().unwrap();
     let marker_s = marker.to_string_lossy();
-    if seen.incomplete || !seen.paths.iter().any(|(p, _, id)| *p == marker_s && *id > since) {
+    // The marker must come from the replayed history. A young event can also arrive live after
+    // the start of the stream; that proves nothing about the log.
+    let history = seen.history.unwrap_or(0);
+    if seen.incomplete || !seen.paths[..history.min(seen.paths.len())].iter().any(|(p, _, id)| *p == marker_s && *id > since) {
         return None;
     }
     let prefix = format!("{}/", root.to_string_lossy());
@@ -226,8 +274,9 @@ pub fn changes(root: &Path, marker: &Path, cookie: &Path, since: u64) -> Option<
     Some(out)
 }
 
-/// The marker and cookie files of a line, in the project's private folder.
+/// The folder of marker and cookie files, in the project's private folder, and the cookie of a line.
 pub fn files(meta: &Path, line: &str) -> (PathBuf, PathBuf) {
     let dir = meta.join("watch");
-    (dir.join(format!("{line}.marker")), dir.join(format!("{line}.cookie")))
+    let cookie = dir.join(format!("{line}.cookie"));
+    (dir, cookie)
 }

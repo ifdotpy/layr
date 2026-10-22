@@ -4,7 +4,7 @@
 The test makes and attaches its own small case-sensitive APFS image without -nobrowse: macOS
 keeps an FSEvents log only on such volumes. It removes the image at the end.
 """
-import argparse, os, shutil, subprocess, tempfile
+import argparse, mmap, os, shutil, subprocess, tempfile, time
 from pathlib import Path
 
 p = argparse.ArgumentParser()
@@ -100,9 +100,27 @@ try:
     run(work, 'commit', '-qm', 'all')
     same('status after commit reads all', fast=False)
     same('clean after commit')
+    os.link(work / 'd0/sub0/f15', work / 'second-name')
+    same('a new hard link reads all', fast=False)
+    same('a folder with hard links keeps reading all', fast=False)
+    (work / 'second-name').unlink()
+    same('the link is gone: one full read', fast=False)
+    same('then FSEvents again')
     for i in range(40):
-        (work / f'd0/sub{i % 3}/f{i * 5}').write_text(f'again {i}\n')
+        (work / f'd1/sub{i % 3}/many{i}').write_text(f'again {i}\n')
     same('many changed files')
+    # A write through a memory mapping gives no event. The saved status serves only for
+    # watch.full_seconds after a full read; then a full read shows the write.
+    run(work, 'config', 'watch.full_seconds', '2')
+    time.sleep(2.2)
+    same('a saved status older than watch.full_seconds reads all', fast=False)
+    with (work / 'd1/sub1/f16').open('r+b') as f:
+        with mmap.mmap(f.fileno(), 0) as m:
+            m[0:1] = b'Z'
+            m.flush()
+    time.sleep(2.2)
+    same('a mapped write shows after watch.full_seconds', fast=False)
+    assert 'd1/sub1/f16' in run(work, 'status', '--porcelain').stdout
     print(f'{checks} status comparisons passed', flush=True)
 finally:
     subprocess.run(['hdiutil', 'detach', '-force', str(mount)], capture_output=True)

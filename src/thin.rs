@@ -463,6 +463,13 @@ pub fn add_entries<'a>(
         container(&mut dirs, r)?;
     }
     for k in write {
+        // Below a new folder that went away: the entry went away too.
+        if let Some(g) = gone.as_deref_mut() {
+            if ancestors(k).any(|a| g.contains(a)) {
+                g.insert(k.to_string());
+                continue;
+            }
+        }
         container(&mut dirs, k)?;
         let to = dst.join(k);
         let copied = (|| -> Result<()> {
@@ -1248,6 +1255,11 @@ mod tests {
                 let _ = fs::write(root.join(format!("d{}/f{}", i % 10, i)), format!("version {n}"));
                 let _ = fs::write(root.join(format!("tmp{}", n % 7)), b"short");
                 let _ = fs::remove_file(root.join(format!("tmp{}", (n + 3) % 7)));
+                // Folders come and go too.
+                let dir = root.join(format!("gone{}", n % 3));
+                let _ = fs::create_dir_all(dir.join("inner"));
+                let _ = fs::write(dir.join("inner/file"), b"x");
+                let _ = fs::remove_dir_all(root.join(format!("gone{}", (n + 1) % 3)));
                 n += 1;
             }
             n
@@ -1264,6 +1276,7 @@ mod tests {
             fs::create_dir_all(src.join(format!("d{}", i % 10)))?;
             fs::write(src.join(format!("d{}/f{i}", i % 10)), b"first")?;
         }
+        fs::hard_link(src.join("d5/f1005"), src.join("linked"))?;
         let base = s.0.join("base");
         apfs::snapshot(&src, &base, true)?;
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1282,6 +1295,11 @@ mod tests {
         // Each copy holds every file, each with one complete version.
         for n in 0..3 {
             let full = s.0.join(format!("full{n}"));
+            assert_eq!(
+                fs::metadata(full.join("linked"))?.ino(),
+                fs::metadata(full.join("d5/f1005"))?.ino(),
+                "hard link in copy {n}"
+            );
             let thin = Layered::over(&s.0.join(format!("thin{n}")), Layered::complete(&base))?;
             for i in 0..2000 {
                 let rel = format!("d{}/f{i}", i % 10);
