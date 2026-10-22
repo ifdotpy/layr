@@ -59,7 +59,7 @@ impl Drop for Temp {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Status {
     pub staged: Vec<Change>,
     pub unstaged: Vec<Change>,
@@ -961,25 +961,16 @@ impl<'a> Repo<'a> {
                 st.staged = changes::with_renames(&head, index, staged);
             }
         }
-        let rules = Rules::new(scan);
-        let mut untracked_files = Vec::new();
-        for c in changes::without_moves(changes::file_changes(index, scan)?) {
-            if skip_path(&c.path) {
-                continue;
-            }
-            if c.old.is_none() {
-                if rules.ignored(&c.path, false) {
-                    st.ignored.push(c.path.clone());
-                } else {
-                    untracked_files.push(c.path.clone());
-                }
-                continue;
-            }
-            st.unstaged.push(c);
-        }
+        classify(scan, changes::file_changes(index, scan)?, &mut st);
+        self.finish_status(line, scan, index, full, &mut st)?;
+        Ok(st)
+    }
+
+    /// Untracked folders and open conflicts of a status whose lists are complete.
+    fn finish_status(&self, line: &Line, scan: &Path, index: &Snap, full: bool, st: &mut Status) -> Result<()> {
         // Untracked folders: the topmost folder that does not exist in the index.
         let mut dirs: BTreeSet<String> = BTreeSet::new();
-        for f in &untracked_files {
+        for f in &st.untracked {
             let comps: Vec<&str> = f.split('/').collect();
             let mut top = None;
             for i in 1..comps.len() {
@@ -994,9 +985,9 @@ impl<'a> Repo<'a> {
             }
         }
         st.untracked_dirs = dirs.into_iter().collect();
-        st.untracked = untracked_files;
+        st.conflicts.clear();
         if !full {
-            return Ok(st);
+            return Ok(());
         }
         let head_rec = self.state(&line.head)?;
         for c in &head_rec.conflicts {
@@ -1016,7 +1007,7 @@ impl<'a> Repo<'a> {
                 }
             }
         }
-        Ok(st)
+        Ok(())
     }
 
     pub fn status(&self, line: &Line) -> Result<(Status, Temp, Option<Temp>, Snap)> {
@@ -1032,16 +1023,141 @@ impl<'a> Repo<'a> {
     pub fn status_report(&self, line: &Line) -> Result<Status> {
         let work = self.working(line);
         let (index, stage) = self.index_source(line)?;
+        // LAYR_NO_WATCH=1 reads the whole folder every time (for comparisons).
+        let key = match std::env::var_os("LAYR_NO_WATCH") {
+            Some(_) => None,
+            None => self.watch_key(line, &work, &stage)?,
+        };
+        if let Some(key) = &key {
+            match self.watched_status(line, &work, &index, key) {
+                Ok(Some(st)) => return Ok(st),
+                Ok(None) => {}
+                Err(e) => eprintln!("warning: FSEvents status failed, reading the whole folder: {e:#}"),
+            }
+        }
+        // The event ID before the read: changes during the read are in the next answer.
+        let (marker, _) = crate::sys::watch::files(&self.p.meta_dir(), &line.id);
+        let mark = key.as_ref().and_then(|_| {
+            std::fs::create_dir_all(marker.parent()?).ok()?;
+            crate::sys::watch::mark(&marker).ok()
+        });
         // States are immutable; the lock keeps the index still. Only the working folder moves.
         let mut roots = vec![work.as_path()];
         if let Some(s) = &stage {
             roots.push(s.as_path());
         }
-        if let Some(st) = crate::storage::stable_read(&roots, || self.status_of(line, &work, &index))? {
-            return Ok(st);
+        let st = match crate::storage::stable_read(&roots, || self.status_of(line, &work, &index))? {
+            Some(st) => st,
+            None => self.status(line)?.0,
+        };
+        if let (Some(key), Some(event)) = (key, mark) {
+            let _ = self.save_watch(line, &WatchCache { version: 1, event, key, status: st.clone() });
         }
-        let (st, _scan, _it, _index) = self.status(line)?;
         Ok(st)
+    }
+
+    fn watch_cache_path(&self, line: &Line) -> PathBuf {
+        self.p.meta_dir().join("watch").join(format!("{}.json", line.id))
+    }
+
+    fn save_watch(&self, line: &Line, cache: &WatchCache) -> Result<()> {
+        crate::fsutil::atomic_write(&self.watch_cache_path(line), &serde_json::to_vec(cache)?, 0o600)
+    }
+
+    /// What a saved status depends on besides the working folder: the head, the index layer,
+    /// and the working folder itself. `None` when a saved status cannot be used: a line with
+    /// overlays, or a complete index.
+    fn watch_key(&self, line: &Line, work: &Path, stage: &Option<PathBuf>) -> Result<Option<String>> {
+        use sha1::{Digest, Sha1};
+        if self.p.is_overlay() || !self.layers(line)?.is_empty() {
+            return Ok(None);
+        }
+        let mut h = Sha1::new();
+        let w = std::fs::symlink_metadata(work)?;
+        h.update(format!("{}|{}|{}|", line.head, w.dev(), w.ino()));
+        if let Some(s) = stage {
+            if !crate::thin::is_thin(s) {
+                return Ok(None);
+            }
+            h.update(std::fs::read(self.stage_base_file(line)).unwrap_or_default());
+            h.update(btrfs::subvol_info(s)?.uuid.as_bytes());
+            h.update(serde_json::to_vec(&crate::thin::removed_of(s)?)?);
+            for (k, e) in btrfs::scan_with_data(s, true)? {
+                h.update(format!("{k}|{:?}|{:?}\n", e.fingerprint, e.data).as_bytes());
+            }
+        }
+        Ok(Some(hex::encode(h.finalize())))
+    }
+
+    /// The saved status, brought up to date for the paths that FSEvents reports as changed
+    /// since it was saved. `None` when that answer is not proven: then the caller reads all.
+    fn watched_status(&self, line: &Line, work: &Path, index: &Snap, key: &str) -> Result<Option<Status>> {
+        use crate::sys::watch;
+        let Ok(raw) = std::fs::read(self.watch_cache_path(line)) else {
+            return Ok(None);
+        };
+        let Ok(cache) = serde_json::from_slice::<WatchCache>(&raw) else {
+            return Ok(None);
+        };
+        if cache.version != 1 || cache.key != key {
+            return Ok(None);
+        }
+        let (marker, cookie) = watch::files(&self.p.meta_dir(), &line.id);
+        let Some(events) = watch::changes(work, &marker, &cookie, cache.event) else {
+            return Ok(None);
+        };
+        let _t = crate::trace::span(format!("FSEvents read of {} paths", events.len()));
+        let mut paths: BTreeSet<String> = BTreeSet::new();
+        for (rel, flags) in events {
+            let name = rel.rsplit('/').next().unwrap_or("");
+            if name == ".gitignore" || name == ".layrignore" {
+                // Ignore rules decide the state of paths without events.
+                return Ok(None);
+            }
+            if flags & watch::ITEM_IS_HARDLINK != 0 {
+                // Another name of the same file may have changed without an event of its own.
+                return Ok(None);
+            }
+            let tree_change = flags & (watch::ITEM_CREATED | watch::ITEM_REMOVED | watch::ITEM_RENAMED) != 0;
+            if rel.is_empty() {
+                if tree_change {
+                    return Ok(None);
+                }
+                continue;
+            }
+            // A folder that only changed its time needs no new read; a new, removed, or
+            // renamed folder is read with its content.
+            if flags & watch::ITEM_IS_DIR != 0 && !tree_change {
+                continue;
+            }
+            paths.insert(rel);
+        }
+        if paths.len() > WATCH_MAX_PATHS {
+            return Ok(None);
+        }
+        let event = watch::mark(&marker)?;
+        let before = btrfs::scan_paths(work, &paths)?;
+        let list = changes::file_changes_of(
+            index,
+            work,
+            btrfs::candidates_scanned(index, work, btrfs::scan_paths(index, &paths)?, before.clone())?,
+        )?;
+        if btrfs::scan_paths(work, &paths)? != before {
+            return Ok(None);
+        }
+        let below = |p: &str| paths.contains(p) || p.match_indices('/').any(|(i, _)| paths.contains(&p[..i]));
+        let mut st = cache.status;
+        st.unstaged.retain(|c| !below(&c.path) && !c.old_path.as_deref().is_some_and(below));
+        st.untracked.retain(|p| !below(p));
+        st.ignored.retain(|p| !below(p));
+        classify(work, list, &mut st);
+        st.unstaged.sort_by(|a, b| a.path.cmp(&b.path));
+        st.untracked.sort();
+        st.ignored.sort();
+        self.finish_status(line, work, index, true, &mut st)?;
+        self.save_watch(line, &WatchCache { version: 1, event, key: key.to_string(), status: st.clone() })?;
+        let _done = crate::trace::span("FSEvents status used");
+        Ok(Some(st))
     }
 
     // ----- in-place updates -----
@@ -1473,6 +1589,39 @@ impl<'a> Repo<'a> {
 /// conflict markers (a merge writes markers only into files of at most `MAX_TEXT` bytes, so a
 /// larger file has none). Other kinds (moves, deletes, types, binary files) stay open until the
 /// next commit of the line, which is the admin's decision.
+/// The saved status of a line and the FSEvents ID it was read at (`Repo::status_report`).
+#[cfg(target_os = "macos")]
+#[derive(serde::Serialize, serde::Deserialize)]
+struct WatchCache {
+    version: u32,
+    event: u64,
+    key: String,
+    status: Status,
+}
+
+/// More changed paths than this read the whole folder.
+#[cfg(target_os = "macos")]
+const WATCH_MAX_PATHS: usize = 20_000;
+
+/// Sort index-to-working changes into unstaged, untracked, and ignored paths.
+fn classify(scan: &Path, list: Vec<Change>, st: &mut Status) {
+    let rules = Rules::new(scan);
+    for c in changes::without_moves(list) {
+        if skip_path(&c.path) {
+            continue;
+        }
+        if c.old.is_none() {
+            if rules.ignored(&c.path, false) {
+                st.ignored.push(c.path.clone());
+            } else {
+                st.untracked.push(c.path.clone());
+            }
+            continue;
+        }
+        st.unstaged.push(c);
+    }
+}
+
 pub fn conflict_open(root: &(impl fsutil::Src + ?Sized), c: &Conflict) -> Result<bool> {
     if c.kind == "content" || c.kind == "add/add" {
         return Ok(match fsutil::lmeta(root, &c.path) {

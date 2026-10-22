@@ -11,7 +11,7 @@ use anyhow::Result;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Change {
     /// Path in the child (or in the parent for a delete).
     pub path: String,
@@ -165,8 +165,13 @@ pub fn really_changed(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized),
 
 /// File level changes (folders dropped), confirmed by content. A move keeps `old_path`.
 pub fn file_changes(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<Change>> {
+    file_changes_of(parent, child, candidates(parent, child)?)
+}
+
+/// File level changes of a candidate list (`file_changes`).
+pub fn file_changes_of(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), list: Vec<Change>) -> Result<Vec<Change>> {
     let mut out = Vec::new();
-    for c in candidates(parent, child)? {
+    for c in list {
         let is_dir_only =
             c.old.as_ref().map(|m| m.is_dir()).unwrap_or(true) && c.new.as_ref().map(|m| m.is_dir()).unwrap_or(true);
         if is_dir_only {

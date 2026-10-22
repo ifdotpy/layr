@@ -543,7 +543,53 @@ pub(crate) fn scan_src(s: &(impl Src + ?Sized)) -> Result<BTreeMap<String, ScanE
 }
 pub fn candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<crate::changes::Change>> {
     let _t = crate::trace::span("APFS candidates");
-    let (a, b) = (scan_src(parent)?, scan_src(child)?);
+    candidates_scanned(parent, child, scan_src(parent)?, scan_src(child)?)
+}
+
+/// Entries at and below `paths` of a folder or a layered tree, as `scan_src` gives them.
+pub(crate) fn scan_paths(
+    s: &(impl Src + ?Sized),
+    paths: &std::collections::BTreeSet<String>,
+) -> Result<BTreeMap<String, ScanEntry>> {
+    let mut out = BTreeMap::new();
+    for p in paths {
+        if p.is_empty() || out.contains_key(p) {
+            continue;
+        }
+        match s.layered() {
+            Some(l) => out.extend(l.scan_at(p)?),
+            None => out.extend(scan_at(s.folder().context("missing tree folder")?, p)?),
+        }
+    }
+    Ok(out)
+}
+
+/// The entry at `rel` below `root` and its content, with paths relative to `root`.
+pub(crate) fn scan_at(root: &Path, rel: &str) -> Result<BTreeMap<String, ScanEntry>> {
+    let mut out = BTreeMap::new();
+    let Ok(path) = crate::fsutil::safe_join(root, rel) else {
+        return Ok(out);
+    };
+    let m = match fs::symlink_metadata(&path) {
+        Ok(m) => m,
+        Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory) => return Ok(out),
+        Err(e) => return Err(e.into()),
+    };
+    out.insert(rel.to_string(), entry_of_metadata(&m, &path, true)?);
+    if m.is_dir() && !is_subvolume(&path) {
+        let dir = crate::fsutil::open_dir_nofollow(&path)?;
+        scan_bulk(&dir, root, rel, &mut out)?;
+    }
+    Ok(out)
+}
+
+/// `candidates` from given scans of both trees.
+pub(crate) fn candidates_scanned(
+    parent: &(impl Src + ?Sized),
+    child: &(impl Src + ?Sized),
+    a: BTreeMap<String, ScanEntry>,
+    b: BTreeMap<String, ScanEntry>,
+) -> Result<Vec<crate::changes::Change>> {
     let names: std::collections::BTreeSet<_> = a.keys().chain(b.keys()).filter(|s| !s.is_empty()).collect();
     let mut changes: BTreeMap<_, _> = names
         .into_iter()

@@ -182,6 +182,23 @@ impl Layered {
         Ok(map)
     }
 
+    /// The entry at `rel` and its content in the merged tree, as `scan` gives them.
+    pub fn scan_at(&self, rel: &str) -> Result<BTreeMap<String, ScanEntry>> {
+        let mut map = apfs::scan_at(self.bottom(), rel)?;
+        for l in self.layers.iter().rev().skip(1) {
+            if hides(l, rel) {
+                map.clear();
+            } else {
+                let prefix = format!("{rel}/");
+                for r in l.removed.iter().filter(|r| r.starts_with(&prefix)) {
+                    remove_subtree(&mut map, r);
+                }
+            }
+            map.extend(apfs::scan_at(&l.root, rel)?);
+        }
+        Ok(map)
+    }
+
     /// Entries in walk order (a folder before its content), as `fsutil::walk` gives them.
     pub fn entries(&self, rel: &str) -> Result<Vec<(String, crate::fsutil::Meta)>> {
         let map = self.scan(false)?;

@@ -55,6 +55,7 @@ jobs:
           export LAYR="$PWD/target/debug/layr"
           python3 tests/apfs-index.py --binary "$LAYR" --root "$LAYR_APFS_TEST_ROOT"
           python3 tests/apfs-thin.py --binary "$LAYR" --root "$LAYR_APFS_TEST_ROOT"
+          mkdir -p "$RUNNER_TEMP/watch" && python3 tests/apfs-watch.py --binary "$LAYR" --root "$RUNNER_TEMP/watch"
           bash tests/apfs-local.sh
           LAYR_TEST_DIRECT_MAIN=1 bash tests/run.sh t01-basic t02-merge t03-git t05-transfer t06-sync t08-gitcompat
           sudo env LAYR="$LAYR" LAYR_APFS_TEST_ROOT="$LAYR_APFS_TEST_ROOT" LAYR_APFS_TEST_USER="$(whoami)" bash tests/apfs-service.sh

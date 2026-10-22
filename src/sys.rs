@@ -384,6 +384,11 @@ pub fn set_fs_ids(uid: u32, gid: u32) -> Result<(u32, u32)> {
     }
 }
 
+/// FSEvents, the only other place with unsafe code (it calls Core Services).
+#[cfg(target_os = "macos")]
+#[path = "watch.rs"]
+pub mod watch;
+
 #[cfg(target_os = "macos")]
 fn cpath(path: &std::path::Path) -> io::Result<CString> {
     use std::os::unix::ffi::OsStrExt;
