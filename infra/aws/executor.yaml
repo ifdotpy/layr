@@ -1,0 +1,311 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Layr executor, tailnet Graviton host and retained encrypted gp3 btrfs volume.
+Parameters:
+  ArtifactsBucket:
+    Type: String
+    AllowedPattern: '[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]'
+  ImageId:
+    Type: AWS::EC2::Image::Id
+    Description: Debian 13 ARM64 AMI with cloud-init.
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: IPv6-only gateway subnet with an IPv6 internet route.
+  AvailabilityZone:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Description: Availability zone of SubnetId.
+  TailnetHostname:
+    Type: String
+    Default: layr-executor
+    AllowedPattern: '[a-z0-9][a-z0-9-]{0,62}'
+  RoleName:
+    Type: String
+    Default: layr-executor
+    AllowedPattern: '[A-Za-z0-9+=,.@_-]{1,64}'
+  ReaderRoleArn:
+    Type: String
+  WriterRoleArn:
+    Type: String
+  AuthKeyParameter:
+    Type: String
+    AllowedPattern: '/[A-Za-z0-9_./-]+'
+    Default: /layr-store/executor/tailscale-auth-key
+  InstanceType:
+    Type: String
+    Default: t4g.small
+    AllowedValues: [t4g.small, t4g.medium, t4g.large, t4g.xlarge, t4g.2xlarge]
+  DataVolumeSize:
+    Type: Number
+    Default: 100
+    MinValue: 10
+    MaxValue: 16384
+Resources:
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Layr executor, WireGuard only
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: udp
+          FromPort: 41641
+          ToPort: 41641
+          CidrIpv6: '::/0'
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIpv6: '::/0'
+  Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref RoleName
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: executor
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::${ArtifactsBucket}/executor/*'
+              - Effect: Allow
+                Action: sts:AssumeRole
+                Resource: [!Ref ReaderRoleArn, !Ref WriterRoleArn]
+              - Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${AuthKeyParameter}'
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref Role]
+  DataVolume:
+    Type: AWS::EC2::Volume
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      AvailabilityZone: !Ref AvailabilityZone
+      VolumeType: gp3
+      Size: !Ref DataVolumeSize
+      Encrypted: true
+      Tags: [{Key: Name, Value: layr-executor-store}]
+  DataAttachment:
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      Device: /dev/sdf
+      InstanceId: !Ref Instance
+      VolumeId: !Ref DataVolume
+  Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref ImageId
+      InstanceType: !Ref InstanceType
+      CreditSpecification:
+        CPUCredits: standard
+      IamInstanceProfile: !Ref InstanceProfile
+      NetworkInterfaces:
+        - DeviceIndex: '0'
+          SubnetId: !Ref SubnetId
+          GroupSet: [!Ref SecurityGroup]
+          Ipv6AddressCount: 1
+          AssociatePublicIpAddress: false
+      MetadataOptions:
+        HttpEndpoint: enabled
+        HttpProtocolIpv6: enabled
+        HttpTokens: required
+        HttpPutResponseHopLimit: 1
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: 12
+            Encrypted: true
+            DeleteOnTermination: true
+      Tags: [{Key: Name, Value: layr-executor}]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euo pipefail
+          umask 022
+          export DEBIAN_FRONTEND=noninteractive
+          for try in 1 2 3 4 5; do apt-get update && break || sleep 15; done
+          apt-get install -y --no-install-recommends ca-certificates curl python3-boto3 \
+            btrfs-progs git zstd util-linux unattended-upgrades
+          if ! id -u layr-registry >/dev/null 2>&1; then
+            useradd --system --user-group --no-create-home --home-dir /nonexistent \
+              --shell /usr/sbin/nologin layr-registry
+          fi
+          test "$(id -u layr-registry)" -ne 0
+          curl -fsSL https://pkgs.tailscale.com/stable/debian/trixie.noarmor.gpg \
+            -o /usr/share/keyrings/tailscale-archive-keyring.gpg
+          curl -fsSL https://pkgs.tailscale.com/stable/debian/trixie.tailscale-keyring.list \
+            -o /etc/apt/sources.list.d/tailscale.list
+          apt-get update
+          apt-get install -y tailscale
+          cat > /etc/apt/apt.conf.d/52layr-executor <<'EOF'
+          APT::Periodic::Update-Package-Lists "1";
+          APT::Periodic::Unattended-Upgrade "1";
+          Unattended-Upgrade::Origins-Pattern:: "origin=Tailscale";
+          Unattended-Upgrade::Automatic-Reboot "true";
+          Unattended-Upgrade::Automatic-Reboot-Time "04:30";
+          EOF
+          install -d -m 0755 /etc/layr-executor
+          cat > /etc/layr-executor/source.json <<'EOF'
+          {"kind":"executor","hostname":"${TailnetHostname}","bucket":"${ArtifactsBucket}","region":"${AWS::Region}","authKeyParameter":"${AuthKeyParameter}"}
+          EOF
+          cat > /usr/local/sbin/layr-data <<'EOF'
+          #!/bin/bash
+          set -euo pipefail
+          serial=$(echo '${DataVolume}' | tr -d '-')
+          device=''
+          for try in $(seq 1 120); do
+            device=$(lsblk -dpno NAME,SERIAL | awk -v serial="$serial" '$2 == serial {print $1}')
+            [ -n "$device" ] && break
+            sleep 2
+          done
+          test -b "$device"
+          type=$(blkid -p -s TYPE -o value "$device" || true)
+          if [ -z "$type" ]; then
+            # Refuse a partition table or any other signature. Never use mkfs -f.
+            test -z "$(wipefs --noheadings --output TYPE "$device")"
+            test "$(lsblk -nrpo NAME "$device" | wc -l)" -eq 1
+            mkfs.btrfs "$device"
+          else
+            test "$type" = btrfs
+          fi
+          uuid=$(blkid -s UUID -o value "$device")
+          mkdir -p /var/lib/layr
+          if mountpoint -q /var/lib/layr; then
+            test "$(findmnt -nro UUID -T /var/lib/layr)" = "$uuid"
+          else
+            mount -t btrfs -o compress=zstd "UUID=$uuid" /var/lib/layr
+          fi
+          chmod 0755 /var/lib/layr
+          EOF
+          chmod 0755 /usr/local/sbin/layr-data
+          cat > /etc/systemd/system/layr-data.service <<'EOF'
+          [Unit]
+          Description=Mount the Layr btrfs data volume
+          After=systemd-udev-settle.service
+          Wants=systemd-udev-settle.service
+          Before=layr.service
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/usr/local/sbin/layr-data
+          TimeoutStartSec=5min
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          cat > /etc/systemd/system/layr.service <<'EOF'
+          [Unit]
+          Description=Layr service
+          Requires=layr-data.service
+          After=layr-data.service network-online.target tailscaled.service
+          Wants=network-online.target
+          ConditionPathExists=/etc/layr-executor/ready
+          [Service]
+          Environment=LAYR_ROOT=/var/lib/layr
+          Environment=LAYR_GATEWAY_TOKEN_FILE=/etc/layr-executor/write-token
+          Environment=AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE=IPv6
+          Environment=AWS_USE_DUALSTACK_ENDPOINT=true
+          ExecStart=/opt/layr-executor/current/layr daemon
+          Restart=on-failure
+          RestartSec=5
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          cat > /usr/local/sbin/layr-executor-transfer <<'EOF'
+          #!/bin/bash
+          set -euo pipefail
+          source /etc/layr-executor/profile.env
+          export LAYR_ROOT=/var/lib/layr
+          /opt/layr-executor/current/layr --project "$PROJECT" fetch origin
+          /opt/layr-executor/current/layr --project "$PROJECT" push origin
+          EOF
+          chmod 0755 /usr/local/sbin/layr-executor-transfer
+          cat > /etc/systemd/system/layr-transfer.service <<'EOF'
+          [Unit]
+          Description=Fetch and push the executor project
+          Requires=layr.service
+          After=layr.service
+          ConditionPathExists=/etc/layr-executor/ready
+          [Service]
+          Type=oneshot
+          Environment=LAYR_GATEWAY_TOKEN_FILE=/etc/layr-executor/write-token
+          ExecStart=/usr/local/sbin/layr-executor-transfer
+          TimeoutStartSec=1h
+          EOF
+          cat > /etc/systemd/system/layr-transfer.timer <<'EOF'
+          [Timer]
+          OnBootSec=2min
+          OnUnitInactiveSec=1min
+          RandomizedDelaySec=15s
+          [Install]
+          WantedBy=timers.target
+          EOF
+          systemctl daemon-reload
+          systemctl enable layr-data.service
+          systemctl enable layr.service
+          systemctl enable --now layr-transfer.timer
+          export AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE=IPv6 AWS_USE_DUALSTACK_ENDPOINT=true
+          cat > /usr/local/lib/layr-cloud-bootstrap.py <<'EOF'
+          import hashlib, io, json, os, re, sys, tarfile, tempfile
+          from pathlib import Path
+          os.environ['AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE'] = 'IPv6'
+          os.environ['AWS_USE_DUALSTACK_ENDPOINT'] = 'true'
+          import boto3
+          source = json.load(open(sys.argv[1]))
+          s3 = boto3.client('s3', region_name=source['region'])
+          kind = source['kind']
+          release = json.load(s3.get_object(Bucket=source['bucket'], Key=kind+'/release.json')['Body'])
+          digest = release['sha256']
+          if not re.fullmatch('[0-9a-f]{64}', digest) or release['key'] != kind+'/releases/'+digest+'.tgz':
+              raise ValueError('invalid release manifest')
+          data = s3.get_object(Bucket=source['bucket'], Key=release['key'])['Body'].read()
+          if hashlib.sha256(data).hexdigest() != digest:
+              raise ValueError('release SHA-256 mismatch')
+          archive = tarfile.open(fileobj=io.BytesIO(data))
+          member = archive.getmember('./sync.py')
+          if not member.isfile():
+              raise ValueError('sync.py must be a regular file')
+          script = archive.extractfile(member).read()
+          compile(script, 'sync.py', 'exec')
+          with tempfile.NamedTemporaryFile(dir='/usr/local/lib', delete=False) as tmp:
+              tmp.write(script)
+          os.chmod(tmp.name, 0o644)
+          os.replace(tmp.name, '/usr/local/lib/layr-cloud-sync.py')
+          os.execv('/usr/bin/python3', ['python3', '/usr/local/lib/layr-cloud-sync.py', sys.argv[1]])
+          EOF
+          cat > /etc/systemd/system/layr-executor-sync.service <<'EOF'
+          [Unit]
+          Description=Layr executor release sync
+          After=network-online.target tailscaled.service
+          Wants=network-online.target
+          [Service]
+          Type=oneshot
+          TimeoutStartSec=10min
+          ExecStart=/usr/bin/python3 /usr/local/lib/layr-cloud-bootstrap.py /etc/layr-executor/source.json
+          EOF
+          cat > /etc/systemd/system/layr-executor-sync.timer <<'EOF'
+          [Timer]
+          OnBootSec=1min
+          OnUnitActiveSec=5min
+          [Install]
+          WantedBy=timers.target
+          EOF
+          systemctl daemon-reload
+          systemctl enable --now layr-executor-sync.timer
+          systemctl start layr-executor-sync.service
+          cat /etc/layr-executor/machine.json
+Outputs:
+  InstanceId:
+    Value: !Ref Instance
+  RoleArn:
+    Value: !GetAtt Role.Arn
+  DataVolumeId:
+    Value: !Ref DataVolume

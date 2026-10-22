@@ -1,0 +1,25 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Layr store gateway domain (infra/aws/README.md). The registrar points the domain to these name servers.
+
+Parameters:
+  Domain:
+    Type: String
+    AllowedPattern: "[a-z0-9.-]{3,253}"
+
+Resources:
+  # The zone outlives the gateway because the registrar names its servers.
+  # The gateway role can change only its host and ACME challenge records.
+  Zone:
+    Type: AWS::Route53::HostedZone
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: !Ref Domain
+      HostedZoneConfig:
+        Comment: Layr store gateway
+
+Outputs:
+  ZoneId:
+    Value: !Ref Zone
+  NameServers:
+    Value: !Join [",", !GetAtt Zone.NameServers]

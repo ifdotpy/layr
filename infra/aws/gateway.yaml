@@ -1,0 +1,299 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Layr store gateway (infra/aws/README.md) - one IPv6-only Graviton host in the tailnet.
+
+Parameters:
+  ArtifactsBucket:
+    Type: String
+    AllowedPattern: '[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]'
+  TailnetHostname:
+    Type: String
+    Default: layr-gateway
+    AllowedPattern: '[a-z0-9][a-z0-9-]{0,62}'
+  RoleName:
+    Type: String
+    Default: layr-gateway
+    AllowedPattern: '[A-Za-z0-9+=,.@_-]{1,64}'
+  StoreRoleArns:
+    Type: CommaDelimitedList
+    Description: Exact reader, writer and GC role ARNs of the projects served by this gateway.
+  ImageId:
+    Type: AWS::EC2::Image::Id
+  # The gateway domain name and its Route 53 zone. Both are empty for a gateway without a
+  # domain of its own: it then serves its tailnet name with a certificate from the tailnet.
+  Host:
+    Type: String
+    AllowedPattern: "([a-z0-9.-]{3,253})?"
+    Default: ""
+  ZoneId:
+    Type: String
+    AllowedPattern: "(Z[A-Z0-9]{1,32})?"
+    Default: ""
+  AuthKeyParameter:
+    Type: String
+    AllowedPattern: '/[A-Za-z0-9_./-]+'
+    Default: /layr-store/gateway/tailscale-auth-key
+
+Rules:
+  HostAndZone:
+    Assertions:
+      - Assert: !Or
+          - !And [!Equals [!Ref Host, ''], !Equals [!Ref ZoneId, '']]
+          - !And [!Not [!Equals [!Ref Host, '']], !Not [!Equals [!Ref ZoneId, '']]]
+        AssertDescription: Set both Host and ZoneId, or leave both empty for a tailnet certificate.
+
+Conditions:
+  HasZone: !Not [!Equals [!Ref ZoneId, ""]]
+
+Resources:
+  # IPv6 only: no public IPv4 address to pay for. Tailscale, S3, STS, SSM, Route 53, Let's
+  # Encrypt and the Debian and Tailscale package servers all answer on IPv6.
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.77.0.0/24
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags: [{ Key: Name, Value: layr-store-gateway }]
+  VpcIpv6:
+    Type: AWS::EC2::VPCCidrBlock
+    Properties:
+      VpcId: !Ref Vpc
+      AmazonProvidedIpv6CidrBlock: true
+  Gateway:
+    Type: AWS::EC2::InternetGateway
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref Gateway
+  Routes:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+  DefaultIpv6Route:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttachment
+    Properties:
+      RouteTableId: !Ref Routes
+      DestinationIpv6CidrBlock: "::/0"
+      GatewayId: !Ref Gateway
+  Subnet:
+    Type: AWS::EC2::Subnet
+    DependsOn: VpcIpv6
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Ipv6Native: true
+      Ipv6CidrBlock:
+        !Select [0, !Cidr [!Select [0, !GetAtt Vpc.Ipv6CidrBlocks], 1, 64]]
+      AssignIpv6AddressOnCreation: true
+      PrivateDnsNameOptionsOnLaunch:
+        HostnameType: resource-name
+        EnableResourceNameDnsAAAARecord: true
+        EnableResourceNameDnsARecord: false
+  SubnetRoutes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref Subnet
+      RouteTableId: !Ref Routes
+
+  # Nothing comes in except WireGuard, which answers only tailnet peers; the gateway listens on the
+  # tailnet address only.
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Layr store gateway
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: udp
+          FromPort: 41641
+          ToPort: 41641
+          CidrIpv6: "::/0"
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIpv6: "::/0"
+
+  # A fixed name: project stacks in other accounts trust this role by its ARN.
+  Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref RoleName
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: layr-gateway
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub "arn:${AWS::Partition}:s3:::${ArtifactsBucket}/gateway/*"
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub "arn:${AWS::Partition}:s3:::${ArtifactsBucket}"
+                Condition:
+                  StringLike:
+                    s3:prefix: gateway/*
+              - Effect: Allow
+                Action: sts:AssumeRole
+                Resource: !Ref StoreRoleArns
+              - Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${AuthKeyParameter}"
+              # Only the host's address and its ACME challenge.
+              - !If
+                - HasZone
+                - Effect: Allow
+                  Action: route53:ChangeResourceRecordSets
+                  Resource: !Sub "arn:${AWS::Partition}:route53:::hostedzone/${ZoneId}"
+                  Condition:
+                    ForAllValues:StringEquals:
+                      route53:ChangeResourceRecordSetsNormalizedRecordNames:
+                        - !Ref Host
+                        - !Sub "_acme-challenge.${Host}"
+                - !Ref AWS::NoValue
+              - !If
+                - HasZone
+                - Effect: Allow
+                  Action: route53:ListResourceRecordSets
+                  Resource: !Sub "arn:${AWS::Partition}:route53:::hostedzone/${ZoneId}"
+                - !Ref AWS::NoValue
+              - !If
+                - HasZone
+                - Effect: Allow
+                  Action: [route53:GetChange, route53:ListHostedZones]
+                  Resource: "*"
+                - !Ref AWS::NoValue
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref Role]
+
+  Instance:
+    Type: AWS::EC2::Instance
+    DependsOn: DefaultIpv6Route
+    Properties:
+      ImageId: !Ref ImageId
+      InstanceType: t4g.nano
+      # Standard credits: a busy CPU slows down instead of adding charges.
+      CreditSpecification:
+        CPUCredits: standard
+      IamInstanceProfile: !Ref InstanceProfile
+      NetworkInterfaces:
+        - DeviceIndex: "0"
+          SubnetId: !Ref Subnet
+          GroupSet: [!Ref SecurityGroup]
+          Ipv6AddressCount: 1
+          AssociatePublicIpAddress: false
+      PrivateDnsNameOptions:
+        HostnameType: resource-name
+        EnableResourceNameDnsAAAARecord: true
+      MetadataOptions:
+        HttpEndpoint: enabled
+        HttpProtocolIpv6: enabled
+        HttpTokens: required
+        HttpPutResponseHopLimit: 1
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: 8
+            Encrypted: true
+            DeleteOnTermination: true
+      Tags: [{ Key: Name, Value: layr-store-gateway }]
+      # First boot only: packages, Tailscale's apt source, then sync.py from the current release,
+      # which converges the rest and installs its own timer.
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euo pipefail
+          umask 022
+          export DEBIAN_FRONTEND=noninteractive
+          fallocate -l 512M /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+          echo "/swapfile none swap sw 0 0" >> /etc/fstab
+          for try in 1 2 3 4 5; do apt-get update && break || sleep 15; done
+          apt-get install -y --no-install-recommends ca-certificates curl python3-boto3 \
+            certbot python3-certbot-dns-route53 unattended-upgrades
+          curl -fsSL https://pkgs.tailscale.com/stable/debian/trixie.noarmor.gpg \
+            -o /usr/share/keyrings/tailscale-archive-keyring.gpg
+          curl -fsSL https://pkgs.tailscale.com/stable/debian/trixie.tailscale-keyring.list \
+            -o /etc/apt/sources.list.d/tailscale.list
+          apt-get update
+          apt-get install -y tailscale
+          cat > /etc/apt/apt.conf.d/52layr-gateway <<'EOF'
+          APT::Periodic::Update-Package-Lists "1";
+          APT::Periodic::Unattended-Upgrade "1";
+          Unattended-Upgrade::Origins-Pattern:: "origin=Tailscale";
+          Unattended-Upgrade::Automatic-Reboot "true";
+          Unattended-Upgrade::Automatic-Reboot-Time "04:30";
+          EOF
+          mkdir -p /etc/layr-gateway
+          cat > /etc/layr-gateway/source.json <<'EOF'
+          {"kind": "gateway", "hostname": "${TailnetHostname}", "bucket": "${ArtifactsBucket}", "region": "${AWS::Region}", "authKeyParameter": "${AuthKeyParameter}"}
+          EOF
+          export AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE=IPv6 AWS_USE_DUALSTACK_ENDPOINT=true
+          cat > /usr/local/lib/layr-cloud-bootstrap.py <<'EOF'
+          import hashlib, io, json, os, re, sys, tarfile, tempfile
+          from pathlib import Path
+          os.environ['AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE'] = 'IPv6'
+          os.environ['AWS_USE_DUALSTACK_ENDPOINT'] = 'true'
+          import boto3
+          source = json.load(open(sys.argv[1]))
+          s3 = boto3.client('s3', region_name=source['region'])
+          kind = source['kind']
+          release = json.load(s3.get_object(Bucket=source['bucket'], Key=kind+'/release.json')['Body'])
+          digest = release['sha256']
+          if not re.fullmatch('[0-9a-f]{64}', digest) or release['key'] != kind+'/releases/'+digest+'.tgz':
+              raise ValueError('invalid release manifest')
+          data = s3.get_object(Bucket=source['bucket'], Key=release['key'])['Body'].read()
+          if hashlib.sha256(data).hexdigest() != digest:
+              raise ValueError('release SHA-256 mismatch')
+          archive = tarfile.open(fileobj=io.BytesIO(data))
+          member = archive.getmember('./sync.py')
+          if not member.isfile():
+              raise ValueError('sync.py must be a regular file')
+          script = archive.extractfile(member).read()
+          compile(script, 'sync.py', 'exec')
+          with tempfile.NamedTemporaryFile(dir='/usr/local/lib', delete=False) as tmp:
+              tmp.write(script)
+          os.chmod(tmp.name, 0o644)
+          os.replace(tmp.name, '/usr/local/lib/layr-cloud-sync.py')
+          os.execv('/usr/bin/python3', ['python3', '/usr/local/lib/layr-cloud-sync.py', sys.argv[1]])
+          EOF
+          cat > /etc/systemd/system/layr-gateway-sync.service <<'EOF'
+          [Unit]
+          Description=Layr gateway first boot and release sync
+          After=network-online.target tailscaled.service
+          Wants=network-online.target
+          [Service]
+          Type=oneshot
+          TimeoutStartSec=10min
+          ExecStart=/usr/bin/python3 /usr/local/lib/layr-cloud-bootstrap.py /etc/layr-gateway/source.json
+          EOF
+          cat > /etc/systemd/system/layr-gateway-sync.timer <<'EOF'
+          [Timer]
+          OnBootSec=1min
+          OnUnitActiveSec=5min
+          [Install]
+          WantedBy=timers.target
+          EOF
+          systemctl daemon-reload
+          systemctl enable --now layr-gateway-sync.timer
+          systemctl start layr-gateway-sync.service
+
+Outputs:
+  RoleArn:
+    Value: !GetAtt Role.Arn
+  InstanceId:
+    Value: !Ref Instance
+  SubnetId:
+    Value: !Ref Subnet
+  VpcId:
+    Value: !Ref Vpc
+  RouteTableId:
+    Value: !Ref Routes
