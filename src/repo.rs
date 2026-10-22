@@ -315,7 +315,6 @@ impl<'a> Repo<'a> {
         need(self.p.db.state(id)?, &format!("state {}", ids::short(id)))
     }
 
-    /// Path of a state snapshot on this machine.
     /// The complete tree of a state. On APFS a thin state gets a view (`thin::complete_tree`);
     /// commands that read few paths use `state_src` instead.
     pub fn state_root(&self, id: &str) -> Result<PathBuf> {
@@ -835,10 +834,9 @@ impl<'a> Repo<'a> {
                     base: None,
                 };
                 btrfs::write_info(&tmp, &info)?;
-                let old = self.p.work_dir().join(ids::new_id());
-                std::fs::rename(&p, &old)?;
-                std::fs::rename(&tmp, &p)?;
-                btrfs::delete_tree(&old)
+                // One atomic swap: a stop at any point leaves one complete index in place.
+                crate::sys::apfs_swap(&tmp, &p)?;
+                btrfs::delete_tree(&tmp)
             })();
             if done.is_err() {
                 let _ = btrfs::delete_tree(&tmp);

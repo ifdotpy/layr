@@ -90,6 +90,18 @@ try:
     assert 'd1/f100' in diff and 'new/deep/file' in diff, diff
     print('PASS a commit stores only its changes', flush=True)
 
+    # mv after a thin add makes the index complete and keeps the staged change.
+    (work / 'd6/f601').write_bytes(b'staged first\n')
+    run(work, 'add', 'd6/f601')
+    run(work, 'mv', 'd6/f600', 'd6/renamed')
+    status = run(work, 'status', '--porcelain').stdout
+    assert 'M  d6/f601' in status and 'R  d6/f600 -> d6/renamed' in status, status
+    run(work, 'commit', '-qm', 'complete index')
+    assert run(work, 'show', 'HEAD:d6/f601').stdout == 'staged first\n'
+    assert run(work, 'show', 'HEAD:d6/renamed').stdout == 'file 600\n'
+    assert not run(work, 'status', '--porcelain').stdout
+    print('PASS mv after a thin add keeps the staged change', flush=True)
+
     # A line made from a thin head has the complete content.
     run(work, 'branch', '-q', 'second')
     assert tree(main.parent / 'second') == tree(work)
@@ -97,11 +109,12 @@ try:
 
     # Automatic states are thin too; an unchanged folder makes none.
     (work / 'd4').joinpath('f400').write_bytes(b'not committed\n')
+    known = set(os.listdir(project / 'deltas'))
     run(work, 'save', '-q')
-    autos = [d.name for d in (project / 'deltas').iterdir() if d.name != h1]
+    autos = set(os.listdir(project / 'deltas')) - known
     assert len(autos) == 1, autos
     run(work, 'save', '-q')
-    assert len([d for d in (project / 'deltas').iterdir()]) == 2
+    assert set(os.listdir(project / 'deltas')) - known == autos
     (work / 'd4/f400').write_bytes(b'file 400\n')
     print('PASS automatic states are thin, and an unchanged folder makes none', flush=True)
 

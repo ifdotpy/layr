@@ -551,6 +551,17 @@ pub fn apfs_publish(src: &std::path::Path, dst: &std::path::Path) -> io::Result<
     Ok(())
 }
 
+/// Exchange two entries in one step.
+#[cfg(target_os = "macos")]
+pub fn apfs_swap(a: &std::path::Path, b: &std::path::Path) -> io::Result<()> {
+    let (a, b) = (cpath(a)?, cpath(b)?);
+    // SAFETY: both paths are valid C strings. RENAME_SWAP needs both entries to exist.
+    if unsafe { libc::renamex_np(a.as_ptr(), b.as_ptr(), libc::RENAME_SWAP) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "macos")]
 pub fn apfs_copy_metadata(src: &std::path::Path, dst: &std::path::Path) -> io::Result<()> {
     let (src, dst) = (cpath(src)?, cpath(dst)?);
