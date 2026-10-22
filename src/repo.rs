@@ -469,7 +469,7 @@ impl<'a> Repo<'a> {
             let id = ids::new_id();
             let src = self.state_src(base)?;
             let dst = self.p.delta_path(&id);
-            crate::thin::write_layer(&src.at("")?, &dst, &crate::thin::Diff::default(), base, false)?;
+            crate::thin::write_layer(&src.at("")?, &dst, &crate::thin::Diff::default(), base, false, None)?;
             return self.describe_state(ctx, id, kind, parents, message, line);
         }
         self.new_state(ctx, &self.state_root(base)?, kind, parents, message, line)
@@ -523,7 +523,7 @@ impl<'a> Repo<'a> {
             match crate::thin::snapshot_over(&head, &line.head, &w, &dst, false) {
                 Ok(Some(_)) => return self.describe_state(ctx, id, StateKind::Auto, parents, message, Some(line)),
                 Ok(None) => {
-                    crate::thin::write_layer(&head.at("")?, &dst, &crate::thin::Diff::default(), &line.head, false)?;
+                    crate::thin::write_layer(&head.at("")?, &dst, &crate::thin::Diff::default(), &line.head, false, None)?;
                     return self.describe_state(ctx, id, StateKind::Auto, parents, message, Some(line));
                 }
                 // Hard links need a complete tree.
@@ -700,7 +700,8 @@ impl<'a> Repo<'a> {
             let prev = self.last_auto(line)?.map(|s| s.id).unwrap_or(line.head.clone());
             let new = btrfs::scan_with_data(&w, true)?;
             let head = self.state_src(&line.head)?;
-            let head_diff = crate::thin::diff(&head.scan(true)?, &|k| head.path(k), &new, &w)?;
+            let head_scan = head.scan(true)?;
+            let head_diff = crate::thin::diff(&head_scan, &|k| head.path(k), &new, &w)?;
             let relevant = |d: &crate::thin::Diff| d.write.iter().chain(d.removed.iter()).any(|p| !skip_path(p));
             let changed = if prev == line.head {
                 relevant(&head_diff)
@@ -715,7 +716,7 @@ impl<'a> Repo<'a> {
             }
             let id = ids::new_id();
             let dst = self.p.delta_path(&id);
-            let mut st = match crate::thin::write_checked(&w, &new, &head_diff, &dst, &line.head, false) {
+            let mut st = match crate::thin::write_checked(&w, &head, &head_scan, &new, &head_diff, &dst, &line.head, false) {
                 Ok(()) => self.describe_state(ctx, id, StateKind::Auto, vec![line.head.clone()], message, Some(line))?,
                 // Hard links need a complete tree.
                 Err(e) if crate::thin::needs_complete(&e) => {

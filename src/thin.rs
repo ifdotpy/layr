@@ -383,7 +383,15 @@ pub fn diff(
 /// Write a thin layer at `dst` (which must not exist) with the entries of `src` that `d` names.
 /// The caller validates `src` against concurrent changes. `writable` keeps the layer open for
 /// later changes (an index); otherwise the layer is sealed.
-pub fn write_layer(src: &Path, dst: &Path, d: &Diff, base: &str, writable: bool) -> Result<()> {
+/// With `gone`, an entry that left `src` after `d` was made is skipped and named in `gone`.
+pub fn write_layer(
+    src: &Path,
+    dst: &Path,
+    d: &Diff,
+    base: &str,
+    writable: bool,
+    gone: Option<&mut BTreeSet<String>>,
+) -> Result<()> {
     let _t = crate::trace::span(format!("thin write {} entries", d.write.len()));
     ensure_parent(dst)?;
     fs::create_dir(dst)?;
@@ -399,7 +407,7 @@ pub fn write_layer(src: &Path, dst: &Path, d: &Diff, base: &str, writable: bool)
             },
         )?;
         set_removed(dst, &d.removed)?;
-        add_entries(src, dst, d.write.iter().map(|s| s.as_str()), d.removed.iter().map(|s| s.as_str()))?;
+        add_entries(src, dst, d.write.iter().map(|s| s.as_str()), d.removed.iter().map(|s| s.as_str()), gone)?;
         copy_dir_meta(src, dst, true)?;
         if !writable {
             apfs::seal(dst, true, false)?;
@@ -419,6 +427,7 @@ pub fn add_entries<'a>(
     dst: &Path,
     write: impl Iterator<Item = &'a str>,
     removed: impl Iterator<Item = &'a str>,
+    mut gone: Option<&mut BTreeSet<String>>,
 ) -> Result<()> {
     let mut dirs: BTreeSet<String> = BTreeSet::new();
     // The ancestors of written and removed paths are folders of the layer (layer rule 5).
@@ -438,23 +447,36 @@ pub fn add_entries<'a>(
     }
     for k in write {
         container(&mut dirs, k)?;
-        let from = crate::fsutil::safe_join(src, k)?;
         let to = dst.join(k);
-        let m = fs::symlink_metadata(&from)?;
-        if fs::symlink_metadata(&to).is_ok() {
-            open_parent(dst, k)?;
-            apfs::delete_tree(&to)?;
-        }
-        if m.is_dir() {
-            fs::create_dir(&to)?;
-            dirs.insert(k.to_string());
-        } else if m.is_file() {
-            crate::sys::apfs_clone(&from, &to).with_context(|| format!("clone {}", from.display()))?;
-            crate::sys::apfs_immutable(&to, false)?;
-        } else if m.file_type().is_symlink() {
-            clone_entry(&from, &to, &m)?;
-        } else {
-            bail!("cannot snapshot special file {}", from.display());
+        let copied = (|| -> Result<()> {
+            let from = crate::fsutil::safe_join(src, k)?;
+            let m = fs::symlink_metadata(&from)?;
+            if fs::symlink_metadata(&to).is_ok() {
+                open_parent(dst, k)?;
+                apfs::delete_tree(&to)?;
+            }
+            if m.is_dir() {
+                fs::create_dir(&to)?;
+                dirs.insert(k.to_string());
+            } else if m.is_file() {
+                crate::sys::apfs_clone(&from, &to).with_context(|| format!("clone {}", from.display()))?;
+                crate::sys::apfs_immutable(&to, false)?;
+            } else if m.file_type().is_symlink() {
+                clone_entry(&from, &to, &m)?;
+            } else {
+                bail!("cannot snapshot special file {}", from.display());
+            }
+            Ok(())
+        })();
+        if let Err(e) = copied {
+            let left = crate::fsutil::safe_join(src, k).ok().and_then(|f| fs::symlink_metadata(f).ok()).is_none();
+            match gone.as_deref_mut() {
+                Some(g) if left => {
+                    let _ = apfs::delete_tree(&to);
+                    g.insert(k.to_string());
+                }
+                _ => return Err(e),
+            }
         }
     }
     for d in dirs.iter().rev() {
@@ -515,7 +537,7 @@ pub fn is_thin(path: &Path) -> bool {
 
 /// Write an empty writable layer over `base`. Its root gets the metadata of `root`.
 pub fn empty_layer(dst: &Path, base: &str, root: &Path) -> Result<()> {
-    write_layer(root, dst, &Diff::default(), base, true)
+    write_layer(root, dst, &Diff::default(), base, true, None)
 }
 
 impl Layered {
@@ -691,29 +713,158 @@ pub fn snapshot_over(base: &Layered, base_id: &str, src: &Path, dst: &Path, writ
     if d.is_empty() {
         return Ok(None);
     }
-    write_checked(src, &before, &d, dst, base_id, writable)?;
+    write_checked(src, base, &old, &before, &d, dst, base_id, writable)?;
     Ok(Some(d))
 }
 
-/// Write the layer `d` of `src`, then check that `src` still matches the scan `before` that
-/// gave `d`. A changed file with more than one name returns `HardLinks`.
+/// Paths whose entries differ between two scans of one tree.
+pub(crate) fn changed_paths(before: &BTreeMap<String, ScanEntry>, after: &BTreeMap<String, ScanEntry>) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for (k, v) in before {
+        if after.get(k) != Some(v) {
+            out.insert(k.clone());
+        }
+    }
+    for k in after.keys() {
+        if !before.contains_key(k) {
+            out.insert(k.clone());
+        }
+    }
+    out
+}
+
+/// Bring the entries `paths` of the writable complete copy `dst` to their state in `src` now:
+/// remove, clone again, or copy the metadata of a folder. Folders keep their other content.
+pub(crate) fn resync(src: &Path, dst: &Path, paths: &BTreeSet<String>) -> Result<()> {
+    let mut dirs: BTreeSet<String> = BTreeSet::new();
+    let mut whole: Vec<String> = Vec::new();
+    for p in paths {
+        if p.is_empty() {
+            dirs.insert(String::new());
+            continue;
+        }
+        if whole.iter().any(|w| p.starts_with(&format!("{w}/"))) {
+            continue;
+        }
+        // An entry below a link: the link is in `paths` too and comes first.
+        let Ok(at) = crate::fsutil::safe_join(dst, p) else {
+            continue;
+        };
+        let from = crate::fsutil::safe_join(src, p).ok().and_then(|f| fs::symlink_metadata(&f).ok().map(|m| (f, m)));
+        let old = fs::symlink_metadata(&at).ok();
+        if let (Some((_, m)), Some(o)) = (&from, &old) {
+            if m.is_dir() && o.is_dir() {
+                dirs.insert(p.clone());
+                continue;
+            }
+        }
+        if !fs::symlink_metadata(dst.join(parent_of(p))).map(|m| m.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        open_parent(dst, p)?;
+        dirs.insert(parent_of(p).to_string());
+        if old.is_some() {
+            apfs::delete_tree(&at)?;
+        }
+        if let Some((f, m)) = from {
+            if m.is_dir() {
+                apfs::copy_subtree(&f, &at)?;
+                whole.push(p.clone());
+            } else if m.is_file() || m.file_type().is_symlink() {
+                clone_entry(&f, &at, &m)?;
+            } else {
+                bail!("cannot snapshot special file {}", f.display());
+            }
+        }
+    }
+    for d in dirs.iter().rev() {
+        let (Ok(f), Ok(t)) = (crate::fsutil::safe_join(src, d), crate::fsutil::safe_join(dst, d)) else {
+            continue;
+        };
+        if fs::symlink_metadata(&f).map(|m| m.is_dir()).unwrap_or(false)
+            && fs::symlink_metadata(&t).map(|m| m.is_dir()).unwrap_or(false)
+        {
+            copy_dir_meta(&f, &t, d.is_empty())?;
+        }
+    }
+    Ok(())
+}
+
+/// Rounds of copying again what changed during a copy, before Layr keeps the copy as it is.
+pub(crate) const COPY_ROUNDS: usize = 6;
+
+/// Wait a little longer after each round in which the source changed.
+pub(crate) fn settle(round: usize) {
+    std::thread::sleep(std::time::Duration::from_millis((25 * (round as u64 + 1)).min(200)));
+}
+
+/// Write the layer `d` of `src` over `base` (scanned as `old`), then check that `src` still
+/// matches the scan `before` that gave `d`. When `src` changed during the copy, the difference
+/// is made again and the layer is written again. After `COPY_ROUNDS` changed rounds the last
+/// layer stays: each entry is a consistent copy from some moment of the copy, as with `git add`.
+/// A changed file with more than one name returns `HardLinks`.
+#[allow(clippy::too_many_arguments)]
 pub fn write_checked(
     src: &Path,
+    base: &Layered,
+    old: &BTreeMap<String, ScanEntry>,
     before: &BTreeMap<String, ScanEntry>,
     d: &Diff,
     dst: &Path,
     base_id: &str,
     writable: bool,
 ) -> Result<()> {
-    if d.write.iter().any(|k| linked(&before[k])) {
-        bail!(HardLinks);
+    let mut before = before.clone();
+    let mut d = Diff { write: d.write.clone(), removed: d.removed.clone() };
+    let mut round = 0;
+    loop {
+        if d.write.iter().any(|k| before.get(k).is_some_and(linked)) {
+            bail!(HardLinks);
+        }
+        if round + 1 >= COPY_ROUNDS {
+            // The last round keeps what it copies. Entries that left during the copy are gone.
+            let mut gone = BTreeSet::new();
+            write_layer(src, dst, &d, base_id, true, Some(&mut gone))?;
+            if !gone.is_empty() {
+                let mut removed = d.removed.clone();
+                removed.extend(gone.into_iter().filter(|g| old.contains_key(g)));
+                set_removed(dst, &removed)?;
+            }
+            eprintln!(
+                "warning: {} changed during the whole copy; each file is kept as one of its versions from that time",
+                src.display()
+            );
+            if !writable {
+                apfs::seal(dst, true, false)?;
+            }
+            return Ok(());
+        }
+        let wrote = write_layer(src, dst, &d, base_id, true, None);
+        let after = apfs::scan_with_data(src, true)?;
+        if let Err(e) = wrote {
+            // A file that went away during the copy is a change; anything else is an error.
+            if after == before {
+                return Err(e);
+            }
+            settle(round);
+            round += 1;
+            d = diff(old, &|k| base.path(k), &after, src)?;
+            before = after;
+            continue;
+        }
+        if after == before {
+            if !writable {
+                apfs::seal(dst, true, false)?;
+            }
+            return Ok(());
+        }
+        // Writers changed the source during the copy: make the difference again.
+        apfs::delete_tree(dst)?;
+        settle(round);
+        round += 1;
+        d = diff(old, &|k| base.path(k), &after, src)?;
+        before = after;
     }
-    write_layer(src, dst, d, base_id, writable)?;
-    if apfs::scan_with_data(src, true).ok().as_ref() != Some(before) {
-        let _ = apfs::delete_tree(dst);
-        bail!("source changed during APFS snapshot; retry when writers are idle");
-    }
-    Ok(())
 }
 
 fn view_stamp(p: &Project, id: &str) -> PathBuf {
@@ -1068,6 +1219,61 @@ mod tests {
         assert!(!p.delta_path(&old).exists() && p.delta_path(&young).is_dir());
         // The base without a layer of its own is not touched.
         assert!(p.state_path(&base).is_dir());
+        Ok(())
+    }
+
+    /// Change, create, and delete files in `root` until `stop` is set.
+    fn writer(root: PathBuf, stop: std::sync::Arc<std::sync::atomic::AtomicBool>) -> std::thread::JoinHandle<usize> {
+        std::thread::spawn(move || {
+            let mut n = 0;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let i = n % 500;
+                let _ = fs::write(root.join(format!("d{}/f{}", i % 10, i)), format!("version {n}"));
+                let _ = fs::write(root.join(format!("tmp{}", n % 7)), b"short");
+                let _ = fs::remove_file(root.join(format!("tmp{}", (n + 3) % 7)));
+                n += 1;
+            }
+            n
+        })
+    }
+
+    #[test]
+    #[ignore = "requires a case-sensitive APFS test volume"]
+    fn copies_succeed_while_files_change() -> Result<()> {
+        let s = Sandbox::new();
+        let src = s.0.join("work");
+        apfs::create_subvolume(&src)?;
+        for i in 0..2000 {
+            fs::create_dir_all(src.join(format!("d{}", i % 10)))?;
+            fs::write(src.join(format!("d{}/f{i}", i % 10)), b"first")?;
+        }
+        let base = s.0.join("base");
+        apfs::snapshot(&src, &base, true)?;
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let w = writer(src.clone(), stop.clone());
+        let results = (|| -> Result<()> {
+            for n in 0..3 {
+                apfs::snapshot(&src, &s.0.join(format!("full{n}")), n % 2 == 0)?;
+                snapshot_over(&Layered::complete(&base), "base", &src, &s.0.join(format!("thin{n}")), false)?;
+            }
+            Ok(())
+        })();
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let writes = w.join().unwrap();
+        results?;
+        assert!(writes > 100, "the writer ran ({writes} writes)");
+        // Each copy holds every file, each with one complete version.
+        for n in 0..3 {
+            let full = s.0.join(format!("full{n}"));
+            let thin = Layered::over(&s.0.join(format!("thin{n}")), Layered::complete(&base))?;
+            for i in 0..2000 {
+                let rel = format!("d{}/f{i}", i % 10);
+                for bytes in [fs::read(full.join(&rel))?, fs::read(thin.path(&rel)?)?] {
+                    // The writer truncates before it writes: an empty file is one of its versions.
+                    assert!(bytes.is_empty() || bytes == b"first" || bytes.starts_with(b"version "), "{rel}: {bytes:?}");
+                }
+            }
+        }
         Ok(())
     }
 

@@ -308,6 +308,10 @@ pub(crate) fn keep_birthtime(src: &fs::Metadata, dst: &Path) -> Result<()> {
     crate::sys::apfs_set_birthtime(dst, src.st_birthtime(), src.st_birthtime_nsec())
         .with_context(|| format!("set creation time {}", dst.display()))
 }
+/// Copy a folder that is not a tree root, file by file. Nested layers stay empty.
+pub(crate) fn copy_subtree(src: &Path, dst: &Path) -> Result<()> {
+    copy_tree(src, dst, false, &mut BTreeMap::new())
+}
 fn copy_tree(src: &Path, dst: &Path, root: bool, links: &mut BTreeMap<(u64, u64), std::path::PathBuf>) -> Result<()> {
     let m = fs::symlink_metadata(src)?;
     if m.is_dir() {
@@ -404,16 +408,53 @@ pub fn snapshot(src: &Path, dst: &Path, readonly: bool) -> Result<()> {
     let temp = dst.with_file_name(format!(".apfs-{}", crate::ids::new_id()));
     let mut published = false;
     let result = (|| -> Result<()> {
-        {
+        let mut before = before;
+        for round in 0.. {
             let _t = crate::trace::span("APFS copy tree");
-            clone_complete(src, &temp, &before, readonly)?;
+            match clone_complete(src, &temp, &before, readonly) {
+                Ok(()) => break,
+                Err(e) => {
+                    let now = scan(src)?;
+                    if now == before || round + 1 >= crate::thin::COPY_ROUNDS {
+                        return Err(e);
+                    }
+                    let _ = delete_tree(&temp);
+                    crate::thin::settle(round);
+                    before = now;
+                }
+            }
         }
-        let after = {
-            let _t = crate::trace::span("APFS scan after");
-            scan(src)?
-        };
-        if before != after {
-            bail!("source changed during APFS snapshot; retry when writers are idle");
+        // Writers can change the source during the copy: copy again what changed, until a
+        // round sees no change. After COPY_ROUNDS rounds the copy stays: each entry is then a
+        // consistent copy from some moment of the copy, as with `git add`.
+        for round in 0..crate::thin::COPY_ROUNDS {
+            let after = {
+                let _t = crate::trace::span("APFS scan after");
+                scan(src)?
+            };
+            if before == after {
+                break;
+            }
+            if round + 1 == crate::thin::COPY_ROUNDS {
+                eprintln!(
+                    "warning: {} changed during the whole copy; each file is kept as one of its versions from that time",
+                    src.display()
+                );
+                break;
+            }
+            let paths = crate::thin::changed_paths(&before, &after);
+            let _t = crate::trace::span(format!("APFS copy {} changed entries again", paths.len()));
+            if let Err(e) = crate::thin::resync(src, &temp, &paths) {
+                // An entry that went away is a change: the next round copies it again.
+                // Without a change it is an error.
+                if scan(src)? == after {
+                    return Err(e);
+                }
+                crate::thin::settle(round);
+                continue;
+            }
+            crate::thin::settle(round);
+            before = after;
         }
         mark(&temp, Some(parent), readonly).context("mark snapshot")?;
         // macOS 14 requires write access to a directory when rename updates its parent.

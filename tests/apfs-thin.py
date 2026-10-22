@@ -158,6 +158,35 @@ try:
     run(work, 'commit', '-qam', 'after a linked change')
     print('PASS a changed file with two names makes a complete state', flush=True)
 
+    # Commands that copy the working folder succeed while a process writes in it.
+    import threading
+    stop = threading.Event()
+    def write():
+        n = 0
+        while not stop.is_set():
+            (work / f'd9/f{900 + n % 50}').write_bytes(f'busy {n}\n'.encode())
+            (work / f'busy{n % 5}').write_bytes(b'x')
+            try:
+                (work / f'busy{(n + 2) % 5}').unlink()
+            except FileNotFoundError:
+                pass
+            n += 1
+    t = threading.Thread(target=write)
+    t.start()
+    try:
+        run(work, 'save', '-q')
+        run(work, 'add', '-A')
+        run(work, 'commit', '-qm', 'during writes')
+        run(work, 'branch', '-q', 'busy-copy')
+    finally:
+        stop.set()
+        t.join()
+    for n in range(5):
+        (work / f'busy{n}').unlink(missing_ok=True)
+    run(work, 'add', '-A')
+    run(work, 'commit', '-qm', 'after writes')
+    print('PASS copies succeed while files change', flush=True)
+
     # A merge reads thin states and its result matches the line.
     run(main, 'merge', '-q', 'topic')
     assert tree(main) == tree(work)
