@@ -565,26 +565,27 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
             } else {
                 repo.p.db.machine_by_name(id)?.ok_or_else(|| exit(128, format!("unknown machine {id}")))?
             };
-            match kind(&url)? {
+            let remote_kind = kind(&url)?;
+            if remote_kind == Kind::Registry { bail!("remote trust is not available for an OCI registry"); }
+            let key = a.get("--public-key").map(str::to_owned).or(repo.p.db.machine_key(&full)?)
+                .ok_or_else(|| exit(128, "unknown machine key; give --public-key <ed25519>"))?;
+            let bytes = hex::decode(&key)?;
+            if bytes.len() != 32 { bail!("invalid machine key"); }
+            match remote_kind {
                 Kind::Store => {
                     let mut store = store_remote::open(&url, repo)?;
                     store.configure(ctx, &store_remote::ConfigureOptions::default())?;
-                    store.trust(repo, &full, a.get("--public-key"))?;
+                    {
+                        let _lock = repo.p.lock()?;
+                        replicate::trust(ctx, &repo.p, &full, &key)?;
+                    }
+                    store.trust(repo, &full, Some(&key))?;
                 }
                 Kind::Peer { .. } => {
-                    let key = a
-                        .get("--public-key")
-                        .map(str::to_owned)
-                        .or(repo.p.db.machine_key(&full)?)
-                        .ok_or_else(|| exit(128, "unknown machine key; give --public-key <ed25519>"))?;
-                    let bytes = hex::decode(&key)?;
-                    if bytes.len() != 32 {
-                        bail!("invalid machine key");
-                    }
                     let _lock = repo.p.lock()?;
                     replicate::trust(ctx, &repo.p, &full, &key)?;
                 }
-                Kind::Registry => bail!("remote trust is not available for an OCI registry"),
+                Kind::Registry => unreachable!(),
             }
             if a.has("--json") {
                 outln!(ctx, "{}", json!({"trusted": full}));
