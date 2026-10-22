@@ -36,9 +36,13 @@ New command group `layr queue` (new concept, RFC 12.6 rule 3):
 - `layr queue list [--into <line>] [--json]`, `layr queue remove <entry>`.
 - `layr queue run [--into <line>]` processes entries in order, one at a time:
   1. read the target head H;
-  2. run the existing protected merge of the entry's state into the target with
-     `--expect H` (so checks run on the exact merge result, derive rules apply, approvals of the
-     entry's exact state are required as today);
+  2. run the existing protected merge of the entry's state into the target through an internal
+     entry point that takes the expected target head H (compare-and-swap on the target inside the
+     lock of the move) and passes the entry's state as the existing `--expect` (which pins the
+     source state); checks run on the exact merge result, derive rules apply, approvals of the
+     entry's exact state are required as today. The public `merge` syntax does not change;
+  2a. a merge result with conflicts never moves the target, for protected and unprotected lines
+     alike: the entry fails with the conflicting paths;
   3. success: the line moves; the entry is done; record the result;
   4. failure (conflict, failed check, missing approval, moved head): the entry gets status
      `failed` with the reason and the queue continues with the next entry; a moved head only
