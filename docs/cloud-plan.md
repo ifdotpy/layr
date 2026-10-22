@@ -1,6 +1,10 @@
 # Layr and Layr Cloud: implementation plan
 
-Source of truth for decisions: `docs/cloud-rfc.md` (RFC 0.9). This file assigns the work.
+Source of truth for decisions: `docs/cloud-rfc.md` (RFC 0.9), overridden where stated by the lead's design files (`docs/remote-design.md`). This file assigns the work.
+
+Layr Desk will be deleted and replaced by Layr Cloud: no code in Layr may depend on the `layr-desk` repository; port what is needed.
+
+The word for the old whole-project copy command must not appear anywhere in Layr (user decision): remove the command, its code, tests, docs and messages.
 
 ## Scope
 
@@ -53,8 +57,9 @@ Out of scope for now:
 |---|---|---|---|
 | core | `cloud/core` | refs, attestations, ChangeId, state kinds, `change` commands, GC roots, `model.rs`, `db.rs`, `revs.rs`, new `cmd/refs.rs` | 3.0, 3.1, 6.9, 12.2, 12.5, 12.6 |
 | merge | `cloud/merge` | `derive` rules, `branch --count`, conflict radar in `status`, fast `reset --hard` | 4.6, 4.8, 4.10 |
-| remote | `cloud/remote` | storage format, `remote add`, `push`/`pull`/`fetch`/`clone` for `file://`, `ssh://`, `s3://`; `layr git …`; `sync`; `backup` removal after its checks | 6, 7, 12.3, 12.4, 13 (0B, 1A–1D) |
+| remote-store | `cloud/remote-store` | store format v2, `file://` and `s3://`, slots, push/fetch/clone of stores, `fsck/log/gc --remote`, Desk v1 import | `docs/remote-design.md` |
+| remote-cli | `cloud/remote-cli` | `remote add/list/remove/trust`, peer `ssh://` push/fetch/pull/sync, `layr git …`, removal of `machines` and of the old copy command, invariant tests | `docs/remote-design.md` |
 | oci | `cloud/oci` | `layr.toml` runnables, deterministic OCI export, `oci://` remote push, registry in the service (`registry.listen`), Helm chart | 30, 31 |
 | later | – | secret detector (4.7), `bisect run` (4.9), branch from `attestations/<id>` (4.11), probes and behavior diff, Layr Cloud server | 4.7, 4.9, 4.11, 29, Cloud |
 
-Wave 1: core, merge, remote, oci. Wave 2 starts from their results.
+Wave 1: core, merge, remote-store, remote-cli, oci. Wave 2 starts from their results.
