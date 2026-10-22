@@ -1,0 +1,11 @@
+{
+  "source_commit": "0713d25623a87b97d3a0aefb6c476205d478c3b2",
+  "container_id": "207550fd3de4c01e25255552b8f399cae579ebbb950dd1b7db407b8916a9f8b8",
+  "container_image": "sha256:edaa2a8cc254d5936207af267114814c61cceea40b46eaa4e976068af55e20e7",
+  "container_mounts": [],
+  "script_sha256": "56c44b46470c7526b8b5b32775ef1a6ce587a6a52ef4561f41a7cf27b3f56c46",
+  "apfs_binary_sha256": "30c4bf88e12e08789b6b8658d771fba013875f2f85ea98563ff9df3829b65be3",
+  "btrfs_binary_sha256": "abbe378b1585c6e40cf4971fa7ccbcf04be1a1f36e4930cfae3eee9403bd48b0",
+  "rustc_linux": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+  "btrfs_progs": "6.2"
+}

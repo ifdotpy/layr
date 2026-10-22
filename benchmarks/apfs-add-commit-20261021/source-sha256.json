@@ -1,0 +1,5 @@
+{
+  "benchmarks/apfs-add-commit-20261021/measure.py": "e6bcd5c4a74528217876529b8e7b946da6a822561b7195ddf91afbe9db0404a6",
+  "benchmarks/apfs-add-commit-20261021/measure-v3.py": "209d7c50a3568cc673f0d3e67de89438eeb762e870bd2556463c7cb0a9e69513",
+  "target/release/layr": "b7779a946bd6e0c2435e3e1bc105d24fdc55e18945f78afc2ed8981557613320"
+}

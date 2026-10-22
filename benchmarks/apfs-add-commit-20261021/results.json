@@ -1,0 +1,1730 @@
+{
+  "commit": "b0a41a3f7538c66a8e0e8e97f1fc3030b20abfb4",
+  "binary_sha256": "b7779a946bd6e0c2435e3e1bc105d24fdc55e18945f78afc2ed8981557613320",
+  "platform": "macOS-27.2-arm64-arm-64bit",
+  "host_free_bytes": 37115990016,
+  "rows": [
+    {
+      "files": 10000,
+      "changed": 1,
+      "trial": 0,
+      "operation": "status_phase1",
+      "wall": 0.4345746669999997,
+      "load": [
+        59.65576171875,
+        49.48046875,
+        41.4990234375
+      ],
+      "trace": "trace      1.3 ms  open project\ntrace    141.9 ms  APFS candidates\ntrace    417.1 ms  APFS validated read\n"
+    },
+    {
+      "files": 10000,
+      "changed": 1,
+      "trial": 0,
+      "operation": "add_first",
+      "wall": 5.938144749999999,
+      "load": [
+        56.15966796875,
+        48.92431640625,
+        41.349609375
+      ],
+      "trace": "trace      1.0 ms  open project\ntrace     43.3 ms  APFS scan before\ntrace   1126.6 ms  APFS copy tree\ntrace     41.6 ms  APFS scan after\ntrace    594.6 ms  APFS seal tree\ntrace   1807.7 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-10000/store/projects/bench/meta/scan/01a1604e-16cc-7338-9cb1-e3c92bf66499\ntrace    138.7 ms  APFS candidates\ntrace     40.8 ms  APFS scan before\ntrace   2308.3 ms  APFS copy tree\ntrace     51.8 ms  APFS scan after\ntrace   2402.3 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-10000/store/projects/bench/meta/stage/01a1604e-0d89-74f7-af7c-9bf8f22e9012\n"
+    },
+    {
+      "files": 10000,
+      "changed": 1,
+      "trial": 0,
+      "operation": "status_phase2",
+      "wall": 0.7730600410000008,
+      "load": [
+        54.14453125,
+        48.62646484375,
+        41.28857421875
+      ],
+      "trace": "trace      1.0 ms  open project\ntrace    151.4 ms  APFS candidates\ntrace    152.6 ms  APFS candidates\ntrace    747.9 ms  APFS validated read\n"
+    },
+    {
+      "files": 10000,
+      "changed": 1,
+      "trial": 0,
+      "operation": "add_existing_index",
+      "wall": 9.257666041,
+      "load": [
+        52.80859375,
+        48.50927734375,
+        41.33203125
+      ],
+      "trace": "trace      1.2 ms  open project\ntrace     56.0 ms  APFS scan before\ntrace   1525.4 ms  APFS copy tree\ntrace     50.7 ms  APFS scan after\ntrace    709.9 ms  APFS seal tree\ntrace   2352.2 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-10000/store/projects/bench/meta/scan/01a1604e-346d-7143-b42b-24f4e9510018\ntrace     65.1 ms  APFS scan before\ntrace   2140.1 ms  APFS copy tree\ntrace     56.7 ms  APFS scan after\ntrace    756.6 ms  APFS seal tree\ntrace   3020.5 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-10000/store/projects/bench/meta/scan/01a1604e-3d9d-761f-a3ed-07dc55d54a7a\ntrace    174.3 ms  APFS candidates\ntrace    172.4 ms  APFS candidates\n"
+    },
+    {
+      "files": 10000,
+      "changed": 1,
+      "trial": 0,
+      "operation": "commit",
+      "wall": 3.543371125,
+      "load": [
+        51.78271484375,
+        48.36767578125,
+        41.32421875
+      ],
+      "trace": "trace      2.5 ms  open project\ntrace     49.4 ms  APFS scan before\ntrace   1558.3 ms  APFS copy tree\ntrace     71.9 ms  APFS scan after\ntrace    663.2 ms  APFS seal tree\ntrace   2344.4 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-10000/store/projects/bench/states/01a1604e-5caa-748a-ad28-1c8d16367b4b\ntrace    197.8 ms  APFS candidates\ntrace      1.2 ms  record commit\n"
+    },
+    {
+      "files": 10000,
+      "changed": 1,
+      "trial": 0,
+      "operation": "prototype_selected_clone_validate",
+      "wall": 0.0008060420000006729,
+      "load": [
+        51.78271484375,
+        48.36767578125,
+        41.32421875
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 1,
+      "trial": 0,
+      "operation": "prototype_delta_seal_publish",
+      "wall": 0.0005707089999944515,
+      "load": [
+        51.78271484375,
+        48.36767578125,
+        41.32421875
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 1,
+      "trial": 0,
+      "operation": "prototype_delta_materialize",
+      "wall": 0.5058871670000045,
+      "load": [
+        51.78271484375,
+        48.36767578125,
+        41.32421875
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 1,
+      "trial": 0,
+      "operation": "prototype_full_clone_seal",
+      "wall": 1.2436790000000002,
+      "load": [
+        51.78271484375,
+        48.36767578125,
+        41.32421875
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 1,
+      "trial": 0,
+      "operation": "prototype_old_index_delete",
+      "wall": 0.9750581670000003,
+      "load": [
+        51.78271484375,
+        48.36767578125,
+        41.32421875
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 1,
+      "trial": 0,
+      "operation": "prototype_full_index_seal_promote",
+      "wall": 0.5671435410000001,
+      "load": [
+        53.0810546875,
+        48.693359375,
+        41.48046875
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 1,
+      "trial": 1,
+      "operation": "status_phase1",
+      "wall": 0.30876066599999774,
+      "load": [
+        50.03125,
+        48.1337890625,
+        41.3251953125
+      ],
+      "trace": "trace      0.8 ms  open project\ntrace     99.1 ms  APFS candidates\ntrace    295.1 ms  APFS validated read\n"
+    },
+    {
+      "files": 10000,
+      "changed": 1,
+      "trial": 1,
+      "operation": "add_first",
+      "wall": 5.506539165999996,
+      "load": [
+        47.2255859375,
+        47.58349609375,
+        41.1708984375
+      ],
+      "trace": "trace      0.7 ms  open project\ntrace     34.3 ms  APFS scan before\ntrace   1324.4 ms  APFS copy tree\ntrace     55.2 ms  APFS scan after\ntrace    681.2 ms  APFS seal tree\ntrace   2096.8 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-10000/store/projects/bench/meta/scan/01a1604e-9bb3-72e5-901e-a298e3db2daa\ntrace    153.7 ms  APFS candidates\ntrace     45.6 ms  APFS scan before\ntrace   1970.5 ms  APFS copy tree\ntrace     41.9 ms  APFS scan after\ntrace   2059.4 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-10000/store/projects/bench/meta/stage/01a1604e-93cc-7176-96dd-8654c6514550\n"
+    },
+    {
+      "files": 10000,
+      "changed": 1,
+      "trial": 1,
+      "operation": "status_phase2",
+      "wall": 0.583053416999995,
+      "load": [
+        47.2255859375,
+        47.58349609375,
+        41.1708984375
+      ],
+      "trace": "trace      0.8 ms  open project\ntrace    115.6 ms  APFS candidates\ntrace    114.0 ms  APFS candidates\ntrace    567.4 ms  APFS validated read\n"
+    },
+    {
+      "files": 10000,
+      "changed": 1,
+      "trial": 1,
+      "operation": "add_existing_index",
+      "wall": 7.837643041999996,
+      "load": [
+        47.08203125,
+        47.533203125,
+        41.22705078125
+      ],
+      "trace": "trace      1.5 ms  open project\ntrace     55.1 ms  APFS scan before\ntrace   1436.4 ms  APFS copy tree\ntrace     44.3 ms  APFS scan after\ntrace    633.9 ms  APFS seal tree\ntrace   2171.6 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-10000/store/projects/bench/meta/scan/01a1604e-b5b3-7276-a317-3f39cb249459\ntrace     54.2 ms  APFS scan before\ntrace   1498.2 ms  APFS copy tree\ntrace     49.5 ms  APFS scan after\ntrace    684.2 ms  APFS seal tree\ntrace   2287.7 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-10000/store/projects/bench/meta/scan/01a1604e-be2f-761d-a4f1-4e6c4a07f21f\ntrace    164.4 ms  APFS candidates\ntrace    168.8 ms  APFS candidates\n"
+    },
+    {
+      "files": 10000,
+      "changed": 1,
+      "trial": 1,
+      "operation": "commit",
+      "wall": 3.67519187500001,
+      "load": [
+        46.6748046875,
+        47.44091796875,
+        41.2314453125
+      ],
+      "trace": "trace      1.0 ms  open project\ntrace     49.0 ms  APFS scan before\ntrace   1556.5 ms  APFS copy tree\ntrace     55.6 ms  APFS scan after\ntrace    689.5 ms  APFS seal tree\ntrace   2352.1 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-10000/store/projects/bench/states/01a1604e-d79c-73be-91f4-3d53ab2c42a5\ntrace    185.6 ms  APFS candidates\ntrace      5.4 ms  record commit\n"
+    },
+    {
+      "files": 10000,
+      "changed": 1,
+      "trial": 1,
+      "operation": "prototype_selected_clone_validate",
+      "wall": 0.0010396659999969415,
+      "load": [
+        46.6748046875,
+        47.44091796875,
+        41.2314453125
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 1,
+      "trial": 1,
+      "operation": "prototype_delta_seal_publish",
+      "wall": 0.0005409999999983484,
+      "load": [
+        46.6748046875,
+        47.44091796875,
+        41.2314453125
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 1,
+      "trial": 1,
+      "operation": "prototype_delta_materialize",
+      "wall": 0.5228870830000005,
+      "load": [
+        46.6748046875,
+        47.44091796875,
+        41.2314453125
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 1,
+      "trial": 1,
+      "operation": "prototype_full_index_seal_promote",
+      "wall": 0.5946993329999941,
+      "load": [
+        46.6748046875,
+        47.44091796875,
+        41.2314453125
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 1,
+      "trial": 1,
+      "operation": "prototype_full_clone_seal",
+      "wall": 1.1663512920000016,
+      "load": [
+        45.41943359375,
+        47.16796875,
+        41.17138671875
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 1,
+      "trial": 1,
+      "operation": "prototype_old_index_delete",
+      "wall": 1.0062237920000001,
+      "load": [
+        45.41943359375,
+        47.16796875,
+        41.17138671875
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 1,
+      "trial": 2,
+      "operation": "status_phase1",
+      "wall": 0.6047559159999878,
+      "load": [
+        48.9130859375,
+        47.89404296875,
+        41.50048828125
+      ],
+      "trace": "trace      1.2 ms  open project\ntrace    206.3 ms  APFS candidates\ntrace    558.1 ms  APFS validated read\n"
+    },
+    {
+      "files": 10000,
+      "changed": 1,
+      "trial": 2,
+      "operation": "add_first",
+      "wall": 6.958692624999998,
+      "load": [
+        48.359375,
+        47.7958984375,
+        41.5029296875
+      ],
+      "trace": "trace      1.1 ms  open project\ntrace     53.2 ms  APFS scan before\ntrace   1688.8 ms  APFS copy tree\ntrace    132.9 ms  APFS scan after\ntrace    785.8 ms  APFS seal tree\ntrace   2662.5 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-10000/store/projects/bench/meta/scan/01a1604f-1ffb-768c-b92d-318414302c9a\ntrace    180.4 ms  APFS candidates\ntrace     48.7 ms  APFS scan before\ntrace   2344.4 ms  APFS copy tree\ntrace     52.9 ms  APFS scan after\ntrace   2447.6 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-10000/store/projects/bench/meta/stage/01a1604f-145b-779c-82aa-c6b86f0970d3\n"
+    },
+    {
+      "files": 10000,
+      "changed": 1,
+      "trial": 2,
+      "operation": "status_phase2",
+      "wall": 0.6443404170000093,
+      "load": [
+        45.52783203125,
+        47.2177734375,
+        41.33544921875
+      ],
+      "trace": "trace      0.9 ms  open project\ntrace    130.0 ms  APFS candidates\ntrace    122.5 ms  APFS candidates\ntrace    629.6 ms  APFS validated read\n"
+    },
+    {
+      "files": 10000,
+      "changed": 1,
+      "trial": 2,
+      "operation": "add_existing_index",
+      "wall": 6.211689708000009,
+      "load": [
+        42.7626953125,
+        46.6162109375,
+        41.1572265625
+      ],
+      "trace": "trace      0.8 ms  open project\ntrace     45.5 ms  APFS scan before\ntrace   1328.2 ms  APFS copy tree\ntrace     43.4 ms  APFS scan after\ntrace    516.2 ms  APFS seal tree\ntrace   1934.6 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-10000/store/projects/bench/meta/scan/01a1604f-40b8-77ac-bd60-1baee197412b\ntrace     40.7 ms  APFS scan before\ntrace   1242.4 ms  APFS copy tree\ntrace     45.3 ms  APFS scan after\ntrace    523.5 ms  APFS seal tree\ntrace   1853.8 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-10000/store/projects/bench/meta/scan/01a1604f-4847-7632-a686-4453486d4bfa\ntrace    156.6 ms  APFS candidates\ntrace    142.4 ms  APFS candidates\n"
+    },
+    {
+      "files": 10000,
+      "changed": 1,
+      "trial": 2,
+      "operation": "commit",
+      "wall": 2.1654171249999905,
+      "load": [
+        42.7626953125,
+        46.6162109375,
+        41.1572265625
+      ],
+      "trace": "trace      0.8 ms  open project\ntrace     37.3 ms  APFS scan before\ntrace   1001.0 ms  APFS copy tree\ntrace     36.0 ms  APFS scan after\ntrace    416.6 ms  APFS seal tree\ntrace   1492.3 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-10000/store/projects/bench/states/01a1604f-5b48-74da-9a32-ca800a8d55ad\ntrace    109.2 ms  APFS candidates\ntrace      0.8 ms  record commit\n"
+    },
+    {
+      "files": 10000,
+      "changed": 1,
+      "trial": 2,
+      "operation": "prototype_selected_clone_validate",
+      "wall": 0.0005550829999947382,
+      "load": [
+        42.7626953125,
+        46.6162109375,
+        41.1572265625
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 1,
+      "trial": 2,
+      "operation": "prototype_delta_seal_publish",
+      "wall": 0.0003846660000021984,
+      "load": [
+        42.7626953125,
+        46.6162109375,
+        41.1572265625
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 1,
+      "trial": 2,
+      "operation": "prototype_delta_materialize",
+      "wall": 0.35473570800000687,
+      "load": [
+        42.7626953125,
+        46.6162109375,
+        41.1572265625
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 1,
+      "trial": 2,
+      "operation": "prototype_full_clone_seal",
+      "wall": 0.7979106659999928,
+      "load": [
+        39.8984375,
+        45.95849609375,
+        40.95703125
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 1,
+      "trial": 2,
+      "operation": "prototype_old_index_delete",
+      "wall": 0.5974073750000031,
+      "load": [
+        39.8984375,
+        45.95849609375,
+        40.95703125
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 1,
+      "trial": 2,
+      "operation": "prototype_full_index_seal_promote",
+      "wall": 0.4189217919999919,
+      "load": [
+        39.8984375,
+        45.95849609375,
+        40.95703125
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 100,
+      "trial": 0,
+      "operation": "status_phase1",
+      "wall": 0.36487454199999547,
+      "load": [
+        37.50390625,
+        45.361328125,
+        40.775390625
+      ],
+      "trace": "trace      1.0 ms  open project\ntrace    133.1 ms  APFS candidates\ntrace    350.6 ms  APFS validated read\n"
+    },
+    {
+      "files": 10000,
+      "changed": 100,
+      "trial": 0,
+      "operation": "add_first",
+      "wall": 5.640772917000007,
+      "load": [
+        36.34228515625,
+        44.98974609375,
+        40.6708984375
+      ],
+      "trace": "trace      0.8 ms  open project\ntrace     41.5 ms  APFS scan before\ntrace   1192.8 ms  APFS copy tree\ntrace     43.7 ms  APFS scan after\ntrace    676.8 ms  APFS seal tree\ntrace   1957.5 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-10000/store/projects/bench/meta/scan/01a1604f-8849-76bd-9682-ec59f9f3bcbf\ntrace    196.3 ms  APFS candidates\ntrace     45.5 ms  APFS scan before\ntrace   1960.6 ms  APFS copy tree\ntrace     44.3 ms  APFS scan after\ntrace   2051.8 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-10000/store/projects/bench/meta/stage/01a1604f-8124-70ef-b301-c9de8e5f0454\n"
+    },
+    {
+      "files": 10000,
+      "changed": 100,
+      "trial": 0,
+      "operation": "status_phase2",
+      "wall": 0.7782228749999973,
+      "load": [
+        34.79296875,
+        44.52490234375,
+        40.53173828125
+      ],
+      "trace": "trace      1.1 ms  open project\ntrace    175.3 ms  APFS candidates\ntrace    164.5 ms  APFS candidates\ntrace    761.9 ms  APFS validated read\n"
+    },
+    {
+      "files": 10000,
+      "changed": 100,
+      "trial": 0,
+      "operation": "add_existing_index",
+      "wall": 7.348842166000011,
+      "load": [
+        32.96728515625,
+        43.98486328125,
+        40.3642578125
+      ],
+      "trace": "trace      1.1 ms  open project\ntrace     48.9 ms  APFS scan before\ntrace   1431.7 ms  APFS copy tree\ntrace     56.7 ms  APFS scan after\ntrace    656.1 ms  APFS seal tree\ntrace   2195.3 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-10000/store/projects/bench/meta/scan/01a1604f-a4b8-7399-af6e-0582af9728f5\ntrace     52.5 ms  APFS scan before\ntrace   1378.5 ms  APFS copy tree\ntrace     58.6 ms  APFS scan after\ntrace    606.5 ms  APFS seal tree\ntrace   2097.7 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-10000/store/projects/bench/meta/scan/01a1604f-ad4b-7156-96f7-3651c1d502d0\ntrace    169.4 ms  APFS candidates\ntrace    173.1 ms  APFS candidates\n"
+    },
+    {
+      "files": 10000,
+      "changed": 100,
+      "trial": 0,
+      "operation": "commit",
+      "wall": 2.940992499999993,
+      "load": [
+        31.8486328125,
+        43.56982421875,
+        40.23876953125
+      ],
+      "trace": "trace      1.0 ms  open project\ntrace     52.1 ms  APFS scan before\ntrace   1338.8 ms  APFS copy tree\ntrace     46.3 ms  APFS scan after\ntrace    524.0 ms  APFS seal tree\ntrace   1962.9 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-10000/store/projects/bench/states/01a1604f-c47b-7698-8dd5-39754123b353\ntrace    178.2 ms  APFS candidates\ntrace      1.0 ms  record commit\n"
+    },
+    {
+      "files": 10000,
+      "changed": 100,
+      "trial": 0,
+      "operation": "prototype_selected_clone_validate",
+      "wall": 0.019352582999999868,
+      "load": [
+        31.8486328125,
+        43.56982421875,
+        40.23876953125
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 100,
+      "trial": 0,
+      "operation": "prototype_delta_seal_publish",
+      "wall": 0.00359545799997818,
+      "load": [
+        31.8486328125,
+        43.56982421875,
+        40.23876953125
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 100,
+      "trial": 0,
+      "operation": "prototype_delta_materialize",
+      "wall": 0.6463974170000029,
+      "load": [
+        31.8486328125,
+        43.56982421875,
+        40.23876953125
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 100,
+      "trial": 0,
+      "operation": "prototype_full_clone_seal",
+      "wall": 1.4679038749999904,
+      "load": [
+        33.9423828125,
+        43.80908203125,
+        40.3427734375
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 100,
+      "trial": 0,
+      "operation": "prototype_old_index_delete",
+      "wall": 0.9644954999999982,
+      "load": [
+        33.9423828125,
+        43.80908203125,
+        40.3427734375
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 100,
+      "trial": 0,
+      "operation": "prototype_full_index_seal_promote",
+      "wall": 0.7830728330000056,
+      "load": [
+        33.9423828125,
+        43.80908203125,
+        40.3427734375
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 100,
+      "trial": 1,
+      "operation": "status_phase1",
+      "wall": 0.42569599999998786,
+      "load": [
+        32.41650390625,
+        43.16943359375,
+        40.15673828125
+      ],
+      "trace": "trace      1.0 ms  open project\ntrace    154.9 ms  APFS candidates\ntrace    410.2 ms  APFS validated read\n"
+    },
+    {
+      "files": 10000,
+      "changed": 100,
+      "trial": 1,
+      "operation": "add_first",
+      "wall": 5.961849833000002,
+      "load": [
+        31.181640625,
+        42.73486328125,
+        40.02099609375
+      ],
+      "trace": "trace      0.8 ms  open project\ntrace     47.2 ms  APFS scan before\ntrace   1299.3 ms  APFS copy tree\ntrace     50.5 ms  APFS scan after\ntrace    629.9 ms  APFS seal tree\ntrace   2028.6 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-10000/store/projects/bench/meta/scan/01a16050-0c64-72d9-8bbb-d6d58ae30625\ntrace    207.5 ms  APFS candidates\ntrace     42.7 ms  APFS scan before\ntrace   2056.6 ms  APFS copy tree\ntrace     63.5 ms  APFS scan after\ntrace   2164.0 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-10000/store/projects/bench/meta/stage/01a16050-03b5-7760-a131-2b12b2d87ea6\n"
+    },
+    {
+      "files": 10000,
+      "changed": 100,
+      "trial": 1,
+      "operation": "status_phase2",
+      "wall": 0.7731860000000097,
+      "load": [
+        31.181640625,
+        42.73486328125,
+        40.02099609375
+      ],
+      "trace": "trace      0.9 ms  open project\ntrace    153.8 ms  APFS candidates\ntrace    165.3 ms  APFS candidates\ntrace    757.0 ms  APFS validated read\n"
+    },
+    {
+      "files": 10000,
+      "changed": 100,
+      "trial": 1,
+      "operation": "add_existing_index",
+      "wall": 6.984398207999988,
+      "load": [
+        29.27978515625,
+        41.9384765625,
+        39.76904296875
+      ],
+      "trace": "trace      0.8 ms  open project\ntrace     41.4 ms  APFS scan before\ntrace   1230.0 ms  APFS copy tree\ntrace     48.8 ms  APFS scan after\ntrace    587.7 ms  APFS seal tree\ntrace   1909.6 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-10000/store/projects/bench/meta/scan/01a16050-29e0-7449-a19d-6ca7ff75647e\ntrace     49.2 ms  APFS scan before\ntrace   1234.5 ms  APFS copy tree\ntrace     44.0 ms  APFS scan after\ntrace    604.1 ms  APFS seal tree\ntrace   1933.6 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-10000/store/projects/bench/meta/scan/01a16050-3155-72e7-bac8-2dbad1442ca7\ntrace    196.1 ms  APFS candidates\ntrace    194.0 ms  APFS candidates\n"
+    },
+    {
+      "files": 10000,
+      "changed": 100,
+      "trial": 1,
+      "operation": "commit",
+      "wall": 2.8415615829999865,
+      "load": [
+        28.05615234375,
+        41.474609375,
+        39.61767578125
+      ],
+      "trace": "trace      0.9 ms  open project\ntrace     44.4 ms  APFS scan before\ntrace   1282.2 ms  APFS copy tree\ntrace     54.3 ms  APFS scan after\ntrace    510.8 ms  APFS seal tree\ntrace   1893.2 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-10000/store/projects/bench/states/01a16050-47cb-711f-b4eb-8c7e6bbf03aa\ntrace    209.6 ms  APFS candidates\ntrace      4.9 ms  record commit\n"
+    },
+    {
+      "files": 10000,
+      "changed": 100,
+      "trial": 1,
+      "operation": "prototype_selected_clone_validate",
+      "wall": 0.02416054200000417,
+      "load": [
+        28.05615234375,
+        41.474609375,
+        39.61767578125
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 100,
+      "trial": 1,
+      "operation": "prototype_delta_seal_publish",
+      "wall": 0.0044089170000063405,
+      "load": [
+        28.05615234375,
+        41.474609375,
+        39.61767578125
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 100,
+      "trial": 1,
+      "operation": "prototype_delta_materialize",
+      "wall": 0.4926330000000121,
+      "load": [
+        28.05615234375,
+        41.474609375,
+        39.61767578125
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 100,
+      "trial": 1,
+      "operation": "prototype_full_index_seal_promote",
+      "wall": 0.6142238749999933,
+      "load": [
+        28.05615234375,
+        41.474609375,
+        39.61767578125
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 100,
+      "trial": 1,
+      "operation": "prototype_full_clone_seal",
+      "wall": 1.9601333340000053,
+      "load": [
+        29.81298828125,
+        41.61572265625,
+        39.67822265625
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 100,
+      "trial": 1,
+      "operation": "prototype_old_index_delete",
+      "wall": 1.1072728750000067,
+      "load": [
+        29.81298828125,
+        41.61572265625,
+        39.67822265625
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 100,
+      "trial": 2,
+      "operation": "status_phase1",
+      "wall": 0.6474982500000124,
+      "load": [
+        36.41357421875,
+        42.5771484375,
+        40.05908203125
+      ],
+      "trace": "trace      1.0 ms  open project\ntrace    224.6 ms  APFS candidates\ntrace    610.2 ms  APFS validated read\n"
+    },
+    {
+      "files": 10000,
+      "changed": 100,
+      "trial": 2,
+      "operation": "add_first",
+      "wall": 8.19426150000001,
+      "load": [
+        36.22021484375,
+        42.4345703125,
+        40.0234375
+      ],
+      "trace": "trace      1.8 ms  open project\ntrace     60.7 ms  APFS scan before\ntrace   1765.5 ms  APFS copy tree\ntrace     47.8 ms  APFS scan after\ntrace    730.9 ms  APFS seal tree\ntrace   2606.6 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-10000/store/projects/bench/meta/scan/01a16050-a02f-74e1-87da-15cd0eb956e1\ntrace    283.1 ms  APFS candidates\ntrace     57.1 ms  APFS scan before\ntrace   2892.5 ms  APFS copy tree\ntrace     60.5 ms  APFS scan after\ntrace   3011.8 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-10000/store/projects/bench/meta/stage/01a16050-919e-7462-9f42-311152691b5a\n"
+    },
+    {
+      "files": 10000,
+      "changed": 100,
+      "trial": 2,
+      "operation": "status_phase2",
+      "wall": 0.9320047500000044,
+      "load": [
+        35.6416015625,
+        42.21142578125,
+        39.95849609375
+      ],
+      "trace": "trace      1.3 ms  open project\ntrace    197.7 ms  APFS candidates\ntrace    193.7 ms  APFS candidates\ntrace    903.7 ms  APFS validated read\n"
+    },
+    {
+      "files": 10000,
+      "changed": 100,
+      "trial": 2,
+      "operation": "add_existing_index",
+      "wall": 9.38198812500002,
+      "load": [
+        34.46875,
+        41.85888671875,
+        39.84716796875
+      ],
+      "trace": "trace      1.1 ms  open project\ntrace     51.5 ms  APFS scan before\ntrace   1824.3 ms  APFS copy tree\ntrace     48.5 ms  APFS scan after\ntrace    730.1 ms  APFS seal tree\ntrace   2656.2 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-10000/store/projects/bench/meta/scan/01a16050-c78b-73a7-b45f-a39094687af6\ntrace     54.0 ms  APFS scan before\ntrace   1421.1 ms  APFS copy tree\ntrace     52.7 ms  APFS scan after\ntrace    620.7 ms  APFS seal tree\ntrace   2150.3 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-10000/store/projects/bench/meta/scan/01a16050-d1ec-71e3-ac17-ca2400365fbe\ntrace    220.3 ms  APFS candidates\ntrace    238.3 ms  APFS candidates\n"
+    },
+    {
+      "files": 10000,
+      "changed": 100,
+      "trial": 2,
+      "operation": "commit",
+      "wall": 3.8083360830000004,
+      "load": [
+        34.99169921875,
+        41.84423828125,
+        39.853515625
+      ],
+      "trace": "trace      1.3 ms  open project\ntrace     55.6 ms  APFS scan before\ntrace   1706.8 ms  APFS copy tree\ntrace     73.3 ms  APFS scan after\ntrace    596.2 ms  APFS seal tree\ntrace   2434.3 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-10000/store/projects/bench/states/01a16050-eff0-7354-af38-1e7cc50c30d2\ntrace    237.4 ms  APFS candidates\ntrace      1.0 ms  record commit\n"
+    },
+    {
+      "files": 10000,
+      "changed": 100,
+      "trial": 2,
+      "operation": "prototype_selected_clone_validate",
+      "wall": 0.020723541000023715,
+      "load": [
+        34.83203125,
+        41.697265625,
+        39.81298828125
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 100,
+      "trial": 2,
+      "operation": "prototype_delta_seal_publish",
+      "wall": 0.006300707999997712,
+      "load": [
+        34.83203125,
+        41.697265625,
+        39.81298828125
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 100,
+      "trial": 2,
+      "operation": "prototype_delta_materialize",
+      "wall": 0.5135353330000214,
+      "load": [
+        34.83203125,
+        41.697265625,
+        39.81298828125
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 100,
+      "trial": 2,
+      "operation": "prototype_full_clone_seal",
+      "wall": 1.3962466659999961,
+      "load": [
+        34.83203125,
+        41.697265625,
+        39.81298828125
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 100,
+      "trial": 2,
+      "operation": "prototype_old_index_delete",
+      "wall": 1.1269602919999784,
+      "load": [
+        34.83203125,
+        41.697265625,
+        39.81298828125
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 100,
+      "trial": 2,
+      "operation": "prototype_full_index_seal_promote",
+      "wall": 0.9616930839999895,
+      "load": [
+        35.96630859375,
+        41.818359375,
+        39.86669921875
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 10000,
+      "trial": 0,
+      "operation": "status_phase1",
+      "wall": 6.765861874999985,
+      "load": [
+        38.8359375,
+        41.998046875,
+        39.97021484375
+      ],
+      "trace": "trace      1.2 ms  open project\ntrace   5210.9 ms  APFS candidates\ntrace   6735.2 ms  APFS validated read\n"
+    },
+    {
+      "files": 10000,
+      "changed": 10000,
+      "trial": 0,
+      "operation": "add_first",
+      "wall": 20.986619875000002,
+      "load": [
+        32.73681640625,
+        40.40869140625,
+        39.44677734375
+      ],
+      "trace": "trace      1.0 ms  open project\ntrace     46.1 ms  APFS scan before\ntrace   1628.6 ms  APFS copy tree\ntrace     51.9 ms  APFS scan after\ntrace    782.7 ms  APFS seal tree\ntrace   2511.1 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-10000/store/projects/bench/meta/scan/01a16051-62f1-7559-ac80-c96413eb8744\ntrace   4794.2 ms  APFS candidates\ntrace     36.7 ms  APFS scan before\ntrace   1518.3 ms  APFS copy tree\ntrace     36.9 ms  APFS scan after\ntrace   1593.2 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-10000/store/projects/bench/meta/stage/01a16051-35c0-7447-a589-b28b096b2cec\n"
+    },
+    {
+      "files": 10000,
+      "changed": 10000,
+      "trial": 0,
+      "operation": "status_phase2",
+      "wall": 8.335812583999996,
+      "load": [
+        38.58203125,
+        41.21533203125,
+        39.74462890625
+      ],
+      "trace": "trace      0.8 ms  open project\ntrace   1269.0 ms  APFS candidates\ntrace   3517.6 ms  APFS candidates\ntrace   8307.4 ms  APFS validated read\n"
+    },
+    {
+      "files": 10000,
+      "changed": 10000,
+      "trial": 0,
+      "operation": "add_existing_index",
+      "wall": 21.34941420800004,
+      "load": [
+        31.32373046875,
+        39.39990234375,
+        39.1279296875
+      ],
+      "trace": "trace      4.4 ms  open project\ntrace     57.0 ms  APFS scan before\ntrace   1362.9 ms  APFS copy tree\ntrace     45.0 ms  APFS scan after\ntrace    542.8 ms  APFS seal tree\ntrace   2009.3 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-10000/store/projects/bench/meta/scan/01a16051-ed6a-7247-9a66-04c81b605ed5\ntrace     49.9 ms  APFS scan before\ntrace   1136.0 ms  APFS copy tree\ntrace     37.3 ms  APFS scan after\ntrace    484.5 ms  APFS seal tree\ntrace   1709.1 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-10000/store/projects/bench/meta/scan/01a16051-f543-7405-a4c9-0cca407167fd\ntrace   2674.3 ms  APFS candidates\ntrace   2751.6 ms  APFS candidates\n"
+    },
+    {
+      "files": 10000,
+      "changed": 10000,
+      "trial": 0,
+      "operation": "commit",
+      "wall": 5.817988500000013,
+      "load": [
+        28.5537109375,
+        38.54541015625,
+        38.82763671875
+      ],
+      "trace": "trace      0.7 ms  open project\ntrace     37.1 ms  APFS scan before\ntrace   1079.4 ms  APFS copy tree\ntrace     45.4 ms  APFS scan after\ntrace    514.7 ms  APFS seal tree\ntrace   1678.2 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-10000/store/projects/bench/states/01a16052-50da-76f7-9df5-3546661d44d7\ntrace   2790.3 ms  APFS candidates\ntrace      3.3 ms  record commit\n"
+    },
+    {
+      "files": 10000,
+      "changed": 10000,
+      "trial": 0,
+      "operation": "prototype_selected_clone_validate",
+      "wall": 1.7763923339999792,
+      "load": [
+        27.22802734375,
+        38.1044921875,
+        38.67041015625
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 10000,
+      "trial": 0,
+      "operation": "prototype_delta_seal_publish",
+      "wall": 0.49019212499996456,
+      "load": [
+        34.41650390625,
+        39.4140625,
+        39.12890625
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 10000,
+      "trial": 0,
+      "operation": "prototype_delta_materialize",
+      "wall": 3.4423407909999924,
+      "load": [
+        33.501953125,
+        39.14111328125,
+        39.0341796875
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 10000,
+      "trial": 0,
+      "operation": "prototype_full_clone_seal",
+      "wall": 0.9432672909999837,
+      "load": [
+        31.85986328125,
+        38.70703125,
+        38.88134765625
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 10000,
+      "trial": 0,
+      "operation": "prototype_old_index_delete",
+      "wall": 0.7715196659999606,
+      "load": [
+        31.85986328125,
+        38.70703125,
+        38.88134765625
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 10000,
+      "trial": 0,
+      "operation": "prototype_full_index_seal_promote",
+      "wall": 0.6072454580000226,
+      "load": [
+        30.74951171875,
+        38.36279296875,
+        38.7587890625
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 10000,
+      "trial": 1,
+      "operation": "status_phase1",
+      "wall": 2.8282353339999986,
+      "load": [
+        27.02001953125,
+        37.0634765625,
+        38.28564453125
+      ],
+      "trace": "trace      0.9 ms  open project\ntrace   1679.7 ms  APFS candidates\ntrace   2804.5 ms  APFS validated read\n"
+    },
+    {
+      "files": 10000,
+      "changed": 10000,
+      "trial": 1,
+      "operation": "add_first",
+      "wall": 15.720060457999978,
+      "load": [
+        27.21435546875,
+        36.6181640625,
+        38.10498046875
+      ],
+      "trace": "trace      0.9 ms  open project\ntrace     45.5 ms  APFS scan before\ntrace   1393.8 ms  APFS copy tree\ntrace     97.9 ms  APFS scan after\ntrace    805.8 ms  APFS seal tree\ntrace   2344.8 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-10000/store/projects/bench/meta/scan/01a16053-138d-7419-9500-26cf2071ce89\ntrace   2846.9 ms  APFS candidates\ntrace     29.5 ms  APFS scan before\ntrace   1286.9 ms  APFS copy tree\ntrace     30.4 ms  APFS scan after\ntrace   1347.7 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-10000/store/projects/bench/meta/stage/01a16052-fa42-766d-a7ab-3160b4619aaf\n"
+    },
+    {
+      "files": 10000,
+      "changed": 10000,
+      "trial": 1,
+      "operation": "status_phase2",
+      "wall": 2.7572175410000455,
+      "load": [
+        25.67529296875,
+        36.142578125,
+        37.92822265625
+      ],
+      "trace": "trace      0.6 ms  open project\ntrace    863.0 ms  APFS candidates\ntrace    831.5 ms  APFS candidates\ntrace   2742.9 ms  APFS validated read\n"
+    },
+    {
+      "files": 10000,
+      "changed": 10000,
+      "trial": 1,
+      "operation": "add_existing_index",
+      "wall": 16.132271833999994,
+      "load": [
+        21.359375,
+        34.4677734375,
+        37.2841796875
+      ],
+      "trace": "trace      0.6 ms  open project\ntrace     26.8 ms  APFS scan before\ntrace    695.7 ms  APFS copy tree\ntrace     28.4 ms  APFS scan after\ntrace    384.8 ms  APFS seal tree\ntrace   1136.8 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-10000/store/projects/bench/meta/scan/01a16053-6e13-738a-aa16-5c813ecd896a\ntrace     34.2 ms  APFS scan before\ntrace    873.0 ms  APFS copy tree\ntrace     32.3 ms  APFS scan after\ntrace    413.4 ms  APFS seal tree\ntrace   1354.2 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-10000/store/projects/bench/meta/scan/01a16053-7284-7216-9f6d-e5289c5ca720\ntrace   2099.3 ms  APFS candidates\ntrace   2176.6 ms  APFS candidates\n"
+    },
+    {
+      "files": 10000,
+      "changed": 10000,
+      "trial": 1,
+      "operation": "commit",
+      "wall": 4.97857454199999,
+      "load": [
+        20.77001953125,
+        34.1279296875,
+        37.1474609375
+      ],
+      "trace": "trace      0.7 ms  open project\ntrace     36.5 ms  APFS scan before\ntrace    947.4 ms  APFS copy tree\ntrace     37.9 ms  APFS scan after\ntrace    432.4 ms  APFS seal tree\ntrace   1455.7 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-10000/store/projects/bench/states/01a16053-ba98-7404-ada7-de908653c892\ntrace   2508.9 ms  APFS candidates\ntrace      3.1 ms  record commit\n"
+    },
+    {
+      "files": 10000,
+      "changed": 10000,
+      "trial": 1,
+      "operation": "prototype_selected_clone_validate",
+      "wall": 2.069152625000015,
+      "load": [
+        20.6279296875,
+        33.87646484375,
+        37.041015625
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 10000,
+      "trial": 1,
+      "operation": "prototype_delta_seal_publish",
+      "wall": 0.4059009580000179,
+      "load": [
+        20.6279296875,
+        33.87646484375,
+        37.041015625
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 10000,
+      "trial": 1,
+      "operation": "prototype_delta_materialize",
+      "wall": 3.0021594159999836,
+      "load": [
+        20.41748046875,
+        33.61279296875,
+        36.92919921875
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 10000,
+      "trial": 1,
+      "operation": "prototype_full_index_seal_promote",
+      "wall": 0.4142843330000119,
+      "load": [
+        20.3037109375,
+        33.3701171875,
+        36.82373046875
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 10000,
+      "trial": 1,
+      "operation": "prototype_full_clone_seal",
+      "wall": 0.5088629589999982,
+      "load": [
+        20.3037109375,
+        33.3701171875,
+        36.82373046875
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 10000,
+      "trial": 1,
+      "operation": "prototype_old_index_delete",
+      "wall": 0.38824425000001384,
+      "load": [
+        20.3037109375,
+        33.3701171875,
+        36.82373046875
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 10000,
+      "trial": 2,
+      "operation": "status_phase1",
+      "wall": 1.9641644999999812,
+      "load": [
+        18.49169921875,
+        32.55078125,
+        36.49267578125
+      ],
+      "trace": "trace      0.7 ms  open project\ntrace   1168.5 ms  APFS candidates\ntrace   1945.4 ms  APFS validated read\n"
+    },
+    {
+      "files": 10000,
+      "changed": 10000,
+      "trial": 2,
+      "operation": "add_first",
+      "wall": 15.080156500000044,
+      "load": [
+        18.04541015625,
+        31.744140625,
+        36.13427734375
+      ],
+      "trace": "trace      0.7 ms  open project\ntrace     34.1 ms  APFS scan before\ntrace    969.5 ms  APFS copy tree\ntrace     34.5 ms  APFS scan after\ntrace    473.6 ms  APFS seal tree\ntrace   1512.9 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-10000/store/projects/bench/meta/scan/01a16054-307f-760c-901f-94b99240c174\ntrace   3073.1 ms  APFS candidates\ntrace     29.7 ms  APFS scan before\ntrace   1226.4 ms  APFS copy tree\ntrace     30.4 ms  APFS scan after\ntrace   1287.4 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-10000/store/projects/bench/meta/stage/01a16054-1bf1-75da-8320-c205ec7f2176\n"
+    },
+    {
+      "files": 10000,
+      "changed": 10000,
+      "trial": 2,
+      "operation": "status_phase2",
+      "wall": 5.975074458999984,
+      "load": [
+        17.7822265625,
+        31.02001953125,
+        35.798828125
+      ],
+      "trace": "trace      0.7 ms  open project\ntrace   1414.4 ms  APFS candidates\ntrace   1800.8 ms  APFS candidates\ntrace   5954.3 ms  APFS validated read\n"
+    },
+    {
+      "files": 10000,
+      "changed": 10000,
+      "trial": 2,
+      "operation": "add_existing_index",
+      "wall": 25.84392920800002,
+      "load": [
+        19.42041015625,
+        30.38037109375,
+        35.431640625
+      ],
+      "trace": "trace      1.2 ms  open project\ntrace     48.4 ms  APFS scan before\ntrace   1024.7 ms  APFS copy tree\ntrace     34.1 ms  APFS scan after\ntrace    453.8 ms  APFS seal tree\ntrace   1562.5 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-10000/store/projects/bench/meta/scan/01a16054-9741-72b1-ab0a-5ae401c9d7be\ntrace     36.6 ms  APFS scan before\ntrace    959.8 ms  APFS copy tree\ntrace     42.0 ms  APFS scan after\ntrace    514.3 ms  APFS seal tree\ntrace   1554.3 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-10000/store/projects/bench/meta/scan/01a16054-9d5b-776b-bb83-40305eea8bdc\ntrace   4020.0 ms  APFS candidates\ntrace   3539.6 ms  APFS candidates\n"
+    },
+    {
+      "files": 10000,
+      "changed": 10000,
+      "trial": 2,
+      "operation": "commit",
+      "wall": 6.387124792000009,
+      "load": [
+        18.359375,
+        29.79150390625,
+        35.1630859375
+      ],
+      "trace": "trace      0.7 ms  open project\ntrace     39.4 ms  APFS scan before\ntrace    983.3 ms  APFS copy tree\ntrace     36.7 ms  APFS scan after\ntrace    468.7 ms  APFS seal tree\ntrace   1529.6 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-10000/store/projects/bench/states/01a16055-0b79-7613-87a7-f657654bd176\ntrace   3747.1 ms  APFS candidates\ntrace      0.9 ms  record commit\n"
+    },
+    {
+      "files": 10000,
+      "changed": 10000,
+      "trial": 2,
+      "operation": "prototype_selected_clone_validate",
+      "wall": 1.4952541669999846,
+      "load": [
+        18.359375,
+        29.79150390625,
+        35.1630859375
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 10000,
+      "trial": 2,
+      "operation": "prototype_delta_seal_publish",
+      "wall": 0.29364987500002826,
+      "load": [
+        17.52978515625,
+        29.4296875,
+        35.00390625
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 10000,
+      "trial": 2,
+      "operation": "prototype_delta_materialize",
+      "wall": 2.2822872500000244,
+      "load": [
+        17.52978515625,
+        29.4296875,
+        35.00390625
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 10000,
+      "trial": 2,
+      "operation": "prototype_full_clone_seal",
+      "wall": 0.6008284999999773,
+      "load": [
+        16.7666015625,
+        29.07373046875,
+        34.84521484375
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 10000,
+      "trial": 2,
+      "operation": "prototype_old_index_delete",
+      "wall": 0.5037887909999768,
+      "load": [
+        16.7666015625,
+        29.07373046875,
+        34.84521484375
+      ]
+    },
+    {
+      "files": 10000,
+      "changed": 10000,
+      "trial": 2,
+      "operation": "prototype_full_index_seal_promote",
+      "wall": 0.41906333400004314,
+      "load": [
+        16.7666015625,
+        29.07373046875,
+        34.84521484375
+      ]
+    },
+    {
+      "files": 100000,
+      "changed": 10,
+      "trial": 0,
+      "operation": "status_phase1",
+      "wall": 4.703419957999927,
+      "load": [
+        35.63818359375,
+        41.64990234375,
+        39.580078125
+      ],
+      "trace": "trace      0.9 ms  open project\ntrace   1442.5 ms  APFS candidates\ntrace   4677.0 ms  APFS validated read\n"
+    },
+    {
+      "files": 100000,
+      "changed": 10,
+      "trial": 0,
+      "operation": "add_first",
+      "wall": 85.03899983300005,
+      "load": [
+        22.37255859375,
+        36.10205078125,
+        37.66455078125
+      ],
+      "trace": "trace      1.0 ms  open project\ntrace    516.5 ms  APFS scan before\ntrace  23511.5 ms  APFS copy tree\ntrace    561.2 ms  APFS scan after\ntrace   7255.6 ms  APFS seal tree\ntrace  31871.3 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-100000/store/projects/bench/meta/scan/01a16059-052e-76fb-a979-e98b1afd234d\ntrace   7524.8 ms  APFS candidates\ntrace    577.3 ms  APFS scan before\ntrace  27940.1 ms  APFS copy tree\ntrace    538.5 ms  APFS scan after\ntrace  29068.4 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-100000/store/projects/bench/meta/stage/01a16058-798d-76c8-9629-ba27acf66718\n"
+    },
+    {
+      "files": 100000,
+      "changed": 10,
+      "trial": 0,
+      "operation": "status_phase2",
+      "wall": 22.10850700000003,
+      "load": [
+        18.48046875,
+        33.41357421875,
+        36.609375
+      ],
+      "trace": "trace      1.0 ms  open project\ntrace   5363.6 ms  APFS candidates\ntrace   3547.0 ms  APFS candidates\ntrace  22085.9 ms  APFS validated read\n"
+    },
+    {
+      "files": 100000,
+      "changed": 10,
+      "trial": 0,
+      "operation": "add_existing_index",
+      "wall": 221.13360679200002,
+      "load": [
+        51.65185546875,
+        48.4267578125,
+        42.78125
+      ],
+      "trace": "trace      1.2 ms  open project\ntrace    458.0 ms  APFS scan before\ntrace  27634.5 ms  APFS copy tree\ntrace    575.5 ms  APFS scan after\ntrace   9273.1 ms  APFS seal tree\ntrace  38022.2 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-100000/store/projects/bench/meta/scan/01a1605a-fe7a-7523-a66f-586e0eba2b6f\ntrace  18480.2 ms  APFS scan before\ntrace  45836.6 ms  APFS copy tree\ntrace   1618.4 ms  APFS scan after\ntrace  12197.3 ms  APFS seal tree\ntrace  78175.0 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-100000/store/projects/bench/meta/scan/01a1605b-9343-7165-9325-e165907530d5\ntrace  23279.4 ms  APFS candidates\ntrace  13553.4 ms  APFS candidates\n"
+    },
+    {
+      "files": 100000,
+      "changed": 10,
+      "trial": 0,
+      "operation": "commit",
+      "wall": 123.63504024999997,
+      "load": [
+        54.47607421875,
+        49.650390625,
+        44.0400390625
+      ],
+      "trace": "trace      1.1 ms  open project\ntrace    511.8 ms  APFS scan before\ntrace  31973.4 ms  APFS copy tree\ntrace    556.1 ms  APFS scan after\ntrace  13712.7 ms  APFS seal tree\ntrace  47152.9 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-100000/store/projects/bench/states/01a1605e-fa9d-76bb-a6f0-2406344daca5\ntrace  22382.6 ms  APFS candidates\ntrace    208.7 ms  record commit\n"
+    },
+    {
+      "files": 100000,
+      "changed": 10,
+      "trial": 0,
+      "operation": "prototype_selected_clone_validate",
+      "wall": 0.00400945799992769,
+      "load": [
+        41.39208984375,
+        47.00439453125,
+        43.2783203125
+      ]
+    },
+    {
+      "files": 100000,
+      "changed": 10,
+      "trial": 0,
+      "operation": "prototype_delta_seal_publish",
+      "wall": 0.0007994579998467088,
+      "load": [
+        41.39208984375,
+        47.00439453125,
+        43.2783203125
+      ]
+    },
+    {
+      "files": 100000,
+      "changed": 10,
+      "trial": 0,
+      "operation": "prototype_delta_materialize",
+      "wall": 19.315819292000015,
+      "load": [
+        40.2822265625,
+        46.455078125,
+        43.1455078125
+      ]
+    },
+    {
+      "files": 100000,
+      "changed": 10,
+      "trial": 0,
+      "operation": "prototype_full_clone_seal",
+      "wall": 27.52774420799983,
+      "load": [
+        35.357421875,
+        44.11962890625,
+        42.443359375
+      ]
+    },
+    {
+      "files": 100000,
+      "changed": 10,
+      "trial": 0,
+      "operation": "prototype_old_index_delete",
+      "wall": 12.021518833000073,
+      "load": [
+        33.4697265625,
+        43.423828125,
+        42.2158203125
+      ]
+    },
+    {
+      "files": 100000,
+      "changed": 10,
+      "trial": 0,
+      "operation": "prototype_full_index_seal_promote",
+      "wall": 13.57436483299989,
+      "load": [
+        35.97705078125,
+        42.40234375,
+        41.884765625
+      ]
+    },
+    {
+      "files": 100000,
+      "changed": 10,
+      "trial": 1,
+      "operation": "status_phase1",
+      "wall": 8.259869541999933,
+      "load": [
+        30.353515625,
+        40.57177734375,
+        41.39208984375
+      ],
+      "trace": "trace      1.1 ms  open project\ntrace   1557.5 ms  APFS candidates\ntrace   8235.6 ms  APFS validated read\n"
+    },
+    {
+      "files": 100000,
+      "changed": 10,
+      "trial": 1,
+      "operation": "add_first",
+      "wall": 116.54490833299997,
+      "load": [
+        24.35986328125,
+        34.6572265625,
+        38.9365234375
+      ],
+      "trace": "trace      1.5 ms  open project\ntrace    740.3 ms  APFS scan before\ntrace  31621.8 ms  APFS copy tree\ntrace    703.9 ms  APFS scan after\ntrace   8372.6 ms  APFS seal tree\ntrace  41461.0 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-100000/store/projects/bench/meta/scan/01a16064-fe69-7522-a0d8-f6b81fc5d78e\ntrace  10919.5 ms  APFS candidates\ntrace   1650.3 ms  APFS scan before\ntrace  31967.7 ms  APFS copy tree\ntrace    789.5 ms  APFS scan after\ntrace  34423.3 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-100000/store/projects/bench/meta/stage/01a16064-6766-70e6-9d67-280eb3511b8e\n"
+    },
+    {
+      "files": 100000,
+      "changed": 10,
+      "trial": 1,
+      "operation": "status_phase2",
+      "wall": 16.595768000000135,
+      "load": [
+        18.34228515625,
+        32.205078125,
+        37.8984375
+      ],
+      "trace": "trace      0.7 ms  open project\ntrace   3320.4 ms  APFS candidates\ntrace   3262.3 ms  APFS candidates\ntrace  16579.7 ms  APFS validated read\n"
+    },
+    {
+      "files": 100000,
+      "changed": 10,
+      "trial": 1,
+      "operation": "add_existing_index",
+      "wall": 85.92180195800006,
+      "load": [
+        19.15869140625,
+        28.54931640625,
+        35.89208984375
+      ],
+      "trace": "trace      0.7 ms  open project\ntrace    318.4 ms  APFS scan before\ntrace  13929.6 ms  APFS copy tree\ntrace    403.8 ms  APFS scan after\ntrace   5565.6 ms  APFS seal tree\ntrace  20231.6 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-100000/store/projects/bench/meta/scan/01a16067-4617-7218-ae10-df4a43e1451b\ntrace   2426.1 ms  APFS scan before\ntrace  14066.5 ms  APFS copy tree\ntrace    494.0 ms  APFS scan after\ntrace   5971.1 ms  APFS seal tree\ntrace  22970.7 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-100000/store/projects/bench/meta/scan/01a16067-9520-7439-81b0-bd6ef834786c\ntrace   4976.6 ms  APFS candidates\ntrace   3801.4 ms  APFS candidates\n"
+    },
+    {
+      "files": 100000,
+      "changed": 10,
+      "trial": 2,
+      "operation": "status_phase1",
+      "wall": 5.343107041000003,
+      "load": [
+        18.56640625,
+        24.06201171875,
+        32.9404296875
+      ],
+      "trace": "trace      1.0 ms  open project\ntrace   1676.9 ms  APFS candidates\ntrace   5322.5 ms  APFS validated read\n"
+    },
+    {
+      "files": 100000,
+      "changed": 10,
+      "trial": 2,
+      "operation": "add_first",
+      "wall": 88.797183208,
+      "load": [
+        23.4814453125,
+        23.94677734375,
+        31.978515625
+      ],
+      "trace": "trace      0.9 ms  open project\ntrace    415.0 ms  APFS scan before\ntrace  19024.9 ms  APFS copy tree\ntrace    663.2 ms  APFS scan after\ntrace   7711.1 ms  APFS seal tree\ntrace  27835.3 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-100000/store/projects/bench/meta/scan/01a1606a-ad89-73ce-afe6-39c54a503ba0\ntrace   7332.3 ms  APFS candidates\ntrace    407.3 ms  APFS scan before\ntrace  29550.6 ms  APFS copy tree\ntrace    906.2 ms  APFS scan after\ntrace  31004.4 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-100000/store/projects/bench/meta/stage/01a1606a-1cb2-7468-82cc-e422a60bfc85\n"
+    },
+    {
+      "files": 100000,
+      "changed": 10,
+      "trial": 2,
+      "operation": "status_phase2",
+      "wall": 20.796406042,
+      "load": [
+        20.8759765625,
+        23.291015625,
+        31.328125
+      ],
+      "trace": "trace      0.8 ms  open project\ntrace   4465.8 ms  APFS candidates\ntrace   3178.9 ms  APFS candidates\ntrace  20776.8 ms  APFS validated read\n"
+    },
+    {
+      "files": 100000,
+      "changed": 10,
+      "trial": 2,
+      "operation": "add_existing_index",
+      "wall": 67.018886791,
+      "load": [
+        14.2177734375,
+        20.8583984375,
+        29.81884765625
+      ],
+      "trace": "trace      0.6 ms  open project\ntrace   1744.2 ms  APFS scan before\ntrace  10831.2 ms  APFS copy tree\ntrace    324.6 ms  APFS scan after\ntrace   4292.0 ms  APFS seal tree\ntrace  17205.5 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-100000/store/projects/bench/meta/scan/01a1606c-beda-7233-b398-0d5a6cb6e984\ntrace   2035.1 ms  APFS scan before\ntrace  12351.7 ms  APFS copy tree\ntrace    438.2 ms  APFS scan after\ntrace   5226.0 ms  APFS seal tree\ntrace  20064.5 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-100000/store/projects/bench/meta/scan/01a1606d-0212-719e-848a-a23c0acb2718\ntrace   3229.8 ms  APFS candidates\ntrace   2957.7 ms  APFS candidates\n"
+    },
+    {
+      "files": 100000,
+      "changed": 10,
+      "trial": 2,
+      "operation": "commit",
+      "wall": 54.67947375,
+      "load": [
+        17.779296875,
+        20.82958984375,
+        28.892578125
+      ],
+      "trace": "trace      0.8 ms  open project\ntrace    562.3 ms  APFS scan before\ntrace  34394.2 ms  APFS copy tree\ntrace    668.0 ms  APFS scan after\ntrace   5836.4 ms  APFS seal tree\ntrace  41472.8 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-100000/store/projects/bench/states/01a1606e-62af-75df-9216-24eec5fbf50f\ntrace   4288.9 ms  APFS candidates\ntrace      5.4 ms  record commit\n"
+    },
+    {
+      "files": 100000,
+      "changed": 10,
+      "trial": 2,
+      "operation": "prototype_selected_clone_validate",
+      "wall": 0.0012138330000084352,
+      "load": [
+        16.0478515625,
+        20.357421875,
+        28.63037109375
+      ]
+    },
+    {
+      "files": 100000,
+      "changed": 10,
+      "trial": 2,
+      "operation": "prototype_delta_seal_publish",
+      "wall": 0.000437125000019023,
+      "load": [
+        16.0478515625,
+        20.357421875,
+        28.63037109375
+      ]
+    },
+    {
+      "files": 100000,
+      "changed": 10,
+      "trial": 2,
+      "operation": "prototype_delta_materialize",
+      "wall": 7.867308541999989,
+      "load": [
+        15.4033203125,
+        20.15185546875,
+        28.50927734375
+      ]
+    },
+    {
+      "files": 100000,
+      "changed": 10,
+      "trial": 2,
+      "operation": "prototype_full_clone_seal",
+      "wall": 9.940674709000007,
+      "load": [
+        12.287109375,
+        19.05712890625,
+        27.873046875
+      ]
+    },
+    {
+      "files": 100000,
+      "changed": 10,
+      "trial": 2,
+      "operation": "prototype_old_index_delete",
+      "wall": 4.348997333999989,
+      "load": [
+        12.287109375,
+        19.05712890625,
+        27.873046875
+      ]
+    },
+    {
+      "files": 100000,
+      "changed": 10,
+      "trial": 2,
+      "operation": "prototype_full_index_seal_promote",
+      "wall": 4.413650458999996,
+      "load": [
+        10.70068359375,
+        18.2587890625,
+        27.380859375
+      ]
+    },
+    {
+      "files": 100000,
+      "changed": 10,
+      "trial": 3,
+      "operation": "status_phase1",
+      "wall": 4.219105458999991,
+      "load": [
+        9.0166015625,
+        15.8271484375,
+        25.62451171875
+      ],
+      "trace": "trace      1.1 ms  open project\ntrace   1293.5 ms  APFS candidates\ntrace   4201.1 ms  APFS validated read\n"
+    },
+    {
+      "files": 100000,
+      "changed": 10,
+      "trial": 3,
+      "operation": "add_first",
+      "wall": 84.394773042,
+      "load": [
+        14.11328125,
+        15.92138671875,
+        24.78271484375
+      ],
+      "trace": "trace      1.0 ms  open project\ntrace    459.5 ms  APFS scan before\ntrace  21377.7 ms  APFS copy tree\ntrace    676.8 ms  APFS scan after\ntrace   6662.3 ms  APFS seal tree\ntrace  29191.9 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-100000/store/projects/bench/meta/scan/01a16071-496e-7726-b03f-8d45f0415d38\ntrace   3887.7 ms  APFS candidates\ntrace    462.0 ms  APFS scan before\ntrace  31537.7 ms  APFS copy tree\ntrace   1019.3 ms  APFS scan after\ntrace  33032.6 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-100000/store/projects/bench/meta/stage/01a16070-cbb6-72d6-a183-9bb26207bcfe\n"
+    },
+    {
+      "files": 100000,
+      "changed": 10,
+      "trial": 3,
+      "operation": "status_phase2",
+      "wall": 22.125713375000032,
+      "load": [
+        15.693359375,
+        16.234375,
+        24.44921875
+      ],
+      "trace": "trace      1.2 ms  open project\ntrace   3454.5 ms  APFS candidates\ntrace   3194.8 ms  APFS candidates\ntrace  22101.2 ms  APFS validated read\n"
+    },
+    {
+      "files": 100000,
+      "changed": 10,
+      "trial": 3,
+      "operation": "add_existing_index",
+      "wall": 108.77570275000005,
+      "load": [
+        22.291015625,
+        18.25439453125,
+        24.22119140625
+      ],
+      "trace": "trace      1.0 ms  open project\ntrace    408.5 ms  APFS scan before\ntrace  20933.1 ms  APFS copy tree\ntrace    467.9 ms  APFS scan after\ntrace   6863.1 ms  APFS seal tree\ntrace  28687.1 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-100000/store/projects/bench/meta/scan/01a16073-4323-7739-881f-eb4d4ed8d8e8\ntrace   2450.5 ms  APFS scan before\ntrace  17279.4 ms  APFS copy tree\ntrace   1433.8 ms  APFS scan after\ntrace   9880.2 ms  APFS seal tree\ntrace  31057.9 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-100000/store/projects/bench/meta/scan/01a16073-b333-737b-b8c2-6b0de1880fb8\ntrace   4193.8 ms  APFS candidates\ntrace   3579.5 ms  APFS candidates\n"
+    },
+    {
+      "files": 100000,
+      "changed": 10,
+      "trial": 3,
+      "operation": "commit",
+      "wall": 76.38854174999994,
+      "load": [
+        51.14453125,
+        28.7021484375,
+        27.46728515625
+      ],
+      "trace": "trace      1.1 ms  open project\ntrace    561.4 ms  APFS scan before\ntrace  24995.1 ms  APFS copy tree\ntrace   1584.1 ms  APFS scan after\ntrace  13857.0 ms  APFS seal tree\ntrace  41027.9 ms  APFS clone /private/tmp/layr-apfs-add-commit-v3-20261021/volume/files-100000/store/projects/bench/states/01a16075-9c16-72ec-96db-2ded0874fa42\ntrace   7348.1 ms  APFS candidates\ntrace      4.5 ms  record commit\n"
+    },
+    {
+      "files": 100000,
+      "changed": 10,
+      "trial": 3,
+      "operation": "prototype_selected_clone_validate",
+      "wall": 0.002704583999957322,
+      "load": [
+        52.39990234375,
+        30.8603515625,
+        28.28466796875
+      ]
+    },
+    {
+      "files": 100000,
+      "changed": 10,
+      "trial": 3,
+      "operation": "prototype_delta_seal_publish",
+      "wall": 0.0008007500000530854,
+      "load": [
+        52.39990234375,
+        30.8603515625,
+        28.28466796875
+      ]
+    },
+    {
+      "files": 100000,
+      "changed": 10,
+      "trial": 3,
+      "operation": "prototype_delta_materialize",
+      "wall": 9.433716499999946,
+      "load": [
+        47.4951171875,
+        30.53173828125,
+        28.19873046875
+      ]
+    },
+    {
+      "files": 100000,
+      "changed": 10,
+      "trial": 3,
+      "operation": "prototype_full_index_seal_promote",
+      "wall": 4.76884199999995,
+      "load": [
+        38.42578125,
+        29.36083984375,
+        27.8212890625
+      ]
+    },
+    {
+      "files": 100000,
+      "changed": 10,
+      "trial": 3,
+      "operation": "prototype_full_clone_seal",
+      "wall": 11.791066125000043,
+      "load": [
+        31.048828125,
+        28.37744140625,
+        27.51171875
+      ]
+    },
+    {
+      "files": 100000,
+      "changed": 10,
+      "trial": 3,
+      "operation": "prototype_old_index_delete",
+      "wall": 4.818315167000037,
+      "load": [
+        29.52294921875,
+        28.10546875,
+        27.42041015625
+      ]
+    }
+  ],
+  "verified": [
+    {
+      "files": 10000,
+      "changed": 1
+    },
+    {
+      "files": 10000,
+      "changed": 100
+    },
+    {
+      "files": 10000,
+      "changed": 10000
+    },
+    {
+      "files": 100000,
+      "changed": 10
+    }
+  ],
+  "interrupted_trials": [
+    {
+      "files": 100000,
+      "changed": 10,
+      "trial": 1
+    }
+  ],
+  "complete": true
+}

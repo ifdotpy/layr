@@ -1,0 +1,73 @@
+{
+  "commit": "b0a41a3f7538c66a8e0e8e97f1fc3030b20abfb4",
+  "binary_sha256": "b7779a946bd6e0c2435e3e1bc105d24fdc55e18945f78afc2ed8981557613320",
+  "platform": "macOS-27.2-arm64-arm-64bit",
+  "host_free_bytes": 43265052672,
+  "rows": [
+    {
+      "files": 10000,
+      "changed": 1,
+      "trial": 0,
+      "operation": "status_phase1",
+      "wall": 0.4269267919999997,
+      "load": [
+        69.0048828125,
+        42.751953125,
+        37.5234375
+      ],
+      "trace": "trace      0.9 ms  open project\ntrace    138.4 ms  APFS candidates\ntrace    408.6 ms  APFS validated read\n"
+    },
+    {
+      "files": 10000,
+      "changed": 1,
+      "trial": 0,
+      "operation": "add_first",
+      "wall": 5.359637458,
+      "load": [
+        70.12548828125,
+        43.419921875,
+        37.78955078125
+      ],
+      "trace": "trace      1.0 ms  open project\ntrace     54.2 ms  APFS scan before\ntrace   1251.5 ms  APFS copy tree\ntrace     44.6 ms  APFS scan after\ntrace    616.3 ms  APFS seal tree\ntrace   1968.1 ms  APFS clone /private/tmp/layr-apfs-add-commit-20261021/volume/files-10000/store/projects/bench/meta/scan/01a1604a-a7d4-7510-a015-b50d72b00c27\ntrace    149.2 ms  APFS candidates\ntrace     42.7 ms  APFS scan before\ntrace   1772.4 ms  APFS copy tree\ntrace     47.7 ms  APFS scan after\ntrace   1864.6 ms  APFS clone /private/tmp/layr-apfs-add-commit-20261021/volume/files-10000/store/projects/bench/meta/stage/01a1604a-9f04-7423-bdcf-c7df227b3a2c\n"
+    },
+    {
+      "files": 10000,
+      "changed": 1,
+      "trial": 0,
+      "operation": "status_phase2",
+      "wall": 0.7277795000000005,
+      "load": [
+        68.75390625,
+        43.57861328125,
+        37.87841796875
+      ],
+      "trace": "trace      1.2 ms  open project\ntrace    154.3 ms  APFS candidates\ntrace    130.7 ms  APFS candidates\ntrace    708.8 ms  APFS validated read\n"
+    },
+    {
+      "files": 10000,
+      "changed": 1,
+      "trial": 0,
+      "operation": "add_existing_index",
+      "wall": 5.676102208,
+      "load": [
+        64.208984375,
+        43.05419921875,
+        37.7265625
+      ],
+      "trace": "trace      0.9 ms  open project\ntrace     41.8 ms  APFS scan before\ntrace   1037.5 ms  APFS copy tree\ntrace     36.6 ms  APFS scan after\ntrace    483.1 ms  APFS seal tree\ntrace   1600.4 ms  APFS clone /private/tmp/layr-apfs-add-commit-20261021/volume/files-10000/store/projects/bench/meta/scan/01a1604a-c2f8-72d8-bd98-c9791a93c0fb\ntrace     41.6 ms  APFS scan before\ntrace   1205.2 ms  APFS copy tree\ntrace     40.1 ms  APFS scan after\ntrace    554.6 ms  APFS seal tree\ntrace   1843.0 ms  APFS clone /private/tmp/layr-apfs-add-commit-20261021/volume/files-10000/store/projects/bench/meta/scan/01a1604a-c938-728b-a4f1-5499fd99bf67\ntrace    122.9 ms  APFS candidates\ntrace    111.0 ms  APFS candidates\n"
+    },
+    {
+      "files": 10000,
+      "changed": 1,
+      "trial": 0,
+      "operation": "commit",
+      "wall": 2.075095958000002,
+      "load": [
+        64.208984375,
+        43.05419921875,
+        37.7265625
+      ],
+      "trace": "trace      0.8 ms  open project\ntrace     32.1 ms  APFS scan before\ntrace    957.0 ms  APFS copy tree\ntrace     32.6 ms  APFS scan after\ntrace    408.1 ms  APFS seal tree\ntrace   1431.0 ms  APFS clone /private/tmp/layr-apfs-add-commit-20261021/volume/files-10000/store/projects/bench/states/01a1604a-db35-70d5-b96d-7afb5b3564d1\ntrace    100.4 ms  APFS candidates\ntrace      0.8 ms  record commit\n"
+    }
+  ]
+}

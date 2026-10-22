@@ -1,0 +1,1025 @@
+{
+  "backend": "btrfs",
+  "platform": "Linux-7.2.9-orbstack-00391-g2b298d05fbd4-aarch64-with-glibc2.36",
+  "binary_sha256": "abbe378b1585c6e40cf4971fa7ccbcf04be1a1f36e4930cfae3eee9403bd48b0",
+  "branches": 16,
+  "cases": [
+    {
+      "case": "empty-files",
+      "trial": 0,
+      "files": 10000,
+      "file_bytes": 0,
+      "large_bytes": 0,
+      "source_sha256": "daeaa5716fbada555f86195d19c2341919daee06a13cd9485e86a083df80487d",
+      "large_sha256": null,
+      "samples": [
+        {
+          "phase": "main",
+          "branches": 0,
+          "used_bytes": 8138752,
+          "samples": [
+            8171520,
+            8138752,
+            8138752
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t           8171520\n    Free (estimated):\t\t        8036143104\t(min: 4458401792)\n    Free (statfs, df):\t\t        8035094528\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 16384)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:143360 (0.02%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:3997696 (1.49%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t           8138752\n    Free (estimated):\t\t        8036143104\t(min: 4458401792)\n    Free (statfs, df):\t\t        8035094528\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:143360 (0.02%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:3981312 (1.48%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t           8138752\n    Free (estimated):\t\t        8036143104\t(min: 4458401792)\n    Free (statfs, df):\t\t        8035094528\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:143360 (0.02%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:3981312 (1.48%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n"
+          ],
+          "above_empty_bytes": 7843840
+        },
+        {
+          "phase": "branches",
+          "branches": 1,
+          "used_bytes": 8237056,
+          "samples": [
+            8237056,
+            8237056,
+            8237056
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t           8237056\n    Free (estimated):\t\t        8036110336\t(min: 4458369024)\n    Free (statfs, df):\t\t        8035061760\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:176128 (0.02%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:4014080 (1.50%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t           8237056\n    Free (estimated):\t\t        8036110336\t(min: 4458369024)\n    Free (statfs, df):\t\t        8035061760\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:176128 (0.02%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:4014080 (1.50%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t           8237056\n    Free (estimated):\t\t        8036110336\t(min: 4458369024)\n    Free (statfs, df):\t\t        8035061760\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:176128 (0.02%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:4014080 (1.50%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n"
+          ],
+          "above_empty_bytes": 7942144
+        },
+        {
+          "phase": "branches",
+          "branches": 4,
+          "used_bytes": 8462336,
+          "samples": [
+            8462336,
+            8462336,
+            8462336
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t           8462336\n    Free (estimated):\t\t        8036081664\t(min: 4458340352)\n    Free (statfs, df):\t\t        8035033088\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:204800 (0.02%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:4112384 (1.53%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t           8462336\n    Free (estimated):\t\t        8036081664\t(min: 4458340352)\n    Free (statfs, df):\t\t        8035033088\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:204800 (0.02%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:4112384 (1.53%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t           8462336\n    Free (estimated):\t\t        8036081664\t(min: 4458340352)\n    Free (statfs, df):\t\t        8035033088\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:204800 (0.02%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:4112384 (1.53%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n"
+          ],
+          "above_empty_bytes": 8167424
+        },
+        {
+          "phase": "branches",
+          "branches": 8,
+          "used_bytes": 8749056,
+          "samples": [
+            8749056,
+            8749056,
+            8749056
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t           8749056\n    Free (estimated):\t\t        8036089856\t(min: 4458348544)\n    Free (statfs, df):\t\t        8035041280\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:196608 (0.02%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:4259840 (1.59%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t           8749056\n    Free (estimated):\t\t        8036089856\t(min: 4458348544)\n    Free (statfs, df):\t\t        8035041280\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:196608 (0.02%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:4259840 (1.59%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t           8749056\n    Free (estimated):\t\t        8036089856\t(min: 4458348544)\n    Free (statfs, df):\t\t        8035041280\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:196608 (0.02%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:4259840 (1.59%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n"
+          ],
+          "above_empty_bytes": 8454144
+        },
+        {
+          "phase": "branches",
+          "branches": 16,
+          "used_bytes": 9322496,
+          "samples": [
+            9322496,
+            9322496,
+            9322496
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t           9322496\n    Free (estimated):\t\t        8036073472\t(min: 4458332160)\n    Free (statfs, df):\t\t        8035024896\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:212992 (0.02%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:4538368 (1.69%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t           9322496\n    Free (estimated):\t\t        8036073472\t(min: 4458332160)\n    Free (statfs, df):\t\t        8035024896\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:212992 (0.02%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:4538368 (1.69%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t           9322496\n    Free (estimated):\t\t        8036073472\t(min: 4458332160)\n    Free (statfs, df):\t\t        8035024896\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:212992 (0.02%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:4538368 (1.69%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n"
+          ],
+          "above_empty_bytes": 9027584
+        },
+        {
+          "phase": "commits",
+          "branches": 1,
+          "used_bytes": 9588736,
+          "samples": [
+            9752576,
+            9588736,
+            9588736
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t           9752576\n    Free (estimated):\t\t        8036036608\t(min: 4458295296)\n    Free (statfs, df):\t\t        8034988032\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 32768)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:249856 (0.03%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:4734976 (1.76%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t           9588736\n    Free (estimated):\t\t        8036036608\t(min: 4458295296)\n    Free (statfs, df):\t\t        8034988032\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:249856 (0.03%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:4653056 (1.73%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t           9588736\n    Free (estimated):\t\t        8036036608\t(min: 4458295296)\n    Free (statfs, df):\t\t        8034988032\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:249856 (0.03%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:4653056 (1.73%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n"
+          ],
+          "above_empty_bytes": 9293824
+        },
+        {
+          "phase": "commits",
+          "branches": 4,
+          "used_bytes": 10248192,
+          "samples": [
+            10739712,
+            10248192,
+            10248192
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          10739712\n    Free (estimated):\t\t        8035999744\t(min: 4458258432)\n    Free (statfs, df):\t\t        8034951168\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 32768)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:286720 (0.03%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:5210112 (1.94%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          10248192\n    Free (estimated):\t\t        8035999744\t(min: 4458258432)\n    Free (statfs, df):\t\t        8034951168\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:286720 (0.03%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:4964352 (1.85%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          10248192\n    Free (estimated):\t\t        8035999744\t(min: 4458258432)\n    Free (statfs, df):\t\t        8034951168\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:286720 (0.03%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:4964352 (1.85%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n"
+          ],
+          "above_empty_bytes": 9953280
+        },
+        {
+          "phase": "commits",
+          "branches": 8,
+          "used_bytes": 10874880,
+          "samples": [
+            11530240,
+            10874880,
+            10874880
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          11530240\n    Free (estimated):\t\t        8036028416\t(min: 4458287104)\n    Free (statfs, df):\t\t        8034979840\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 32768)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:258048 (0.03%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:5619712 (2.09%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          10874880\n    Free (estimated):\t\t        8036028416\t(min: 4458287104)\n    Free (statfs, df):\t\t        8034979840\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:258048 (0.03%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:5292032 (1.97%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          10874880\n    Free (estimated):\t\t        8036028416\t(min: 4458287104)\n    Free (statfs, df):\t\t        8034979840\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:258048 (0.03%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:5292032 (1.97%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n"
+          ],
+          "above_empty_bytes": 10579968
+        },
+        {
+          "phase": "commits",
+          "branches": 16,
+          "used_bytes": 12324864,
+          "samples": [
+            13668352,
+            12324864,
+            12324864
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          13668352\n    Free (estimated):\t\t        8035987456\t(min: 4458246144)\n    Free (statfs, df):\t\t        8034938880\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 49152)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:299008 (0.03%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:6668288 (2.48%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          12324864\n    Free (estimated):\t\t        8035987456\t(min: 4458246144)\n    Free (statfs, df):\t\t        8034938880\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:299008 (0.03%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:5996544 (2.23%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          12324864\n    Free (estimated):\t\t        8035987456\t(min: 4458246144)\n    Free (statfs, df):\t\t        8034938880\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:299008 (0.03%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:5996544 (2.23%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n"
+          ],
+          "above_empty_bytes": 12029952
+        }
+      ],
+      "verified": true,
+      "empty": {
+        "used_bytes": 294912,
+        "samples": [
+          294912,
+          294912,
+          294912
+        ],
+        "raw": [
+          "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t         562036736\n    Device unallocated:\t\t        8027897856\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t            294912\n    Free (estimated):\t\t        8036286464\t(min: 4022337536)\n    Free (statfs, df):\t\t        8035237888\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:8388608, Used:0 (0.00%)\n   /dev/loop0\t   8388608\n\nMetadata,DUP: Size:268435456, Used:131072 (0.05%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t8027897856\n",
+          "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t         562036736\n    Device unallocated:\t\t        8027897856\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t            294912\n    Free (estimated):\t\t        8036286464\t(min: 4022337536)\n    Free (statfs, df):\t\t        8035237888\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:8388608, Used:0 (0.00%)\n   /dev/loop0\t   8388608\n\nMetadata,DUP: Size:268435456, Used:131072 (0.05%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t8027897856\n",
+          "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t         562036736\n    Device unallocated:\t\t        8027897856\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t            294912\n    Free (estimated):\t\t        8036286464\t(min: 4022337536)\n    Free (statfs, df):\t\t        8035237888\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:8388608, Used:0 (0.00%)\n   /dev/loop0\t   8388608\n\nMetadata,DUP: Size:268435456, Used:131072 (0.05%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t8027897856\n"
+        ]
+      }
+    },
+    {
+      "case": "empty-files",
+      "trial": 1,
+      "files": 10000,
+      "file_bytes": 0,
+      "large_bytes": 0,
+      "source_sha256": "daeaa5716fbada555f86195d19c2341919daee06a13cd9485e86a083df80487d",
+      "large_sha256": null,
+      "samples": [
+        {
+          "phase": "main",
+          "branches": 0,
+          "used_bytes": 8138752,
+          "samples": [
+            8171520,
+            8138752,
+            8138752
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t           8171520\n    Free (estimated):\t\t        8036143104\t(min: 4458401792)\n    Free (statfs, df):\t\t        8035094528\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 16384)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:143360 (0.02%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:3997696 (1.49%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t           8138752\n    Free (estimated):\t\t        8036143104\t(min: 4458401792)\n    Free (statfs, df):\t\t        8035094528\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:143360 (0.02%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:3981312 (1.48%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t           8138752\n    Free (estimated):\t\t        8036143104\t(min: 4458401792)\n    Free (statfs, df):\t\t        8035094528\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:143360 (0.02%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:3981312 (1.48%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n"
+          ],
+          "above_empty_bytes": 7843840
+        },
+        {
+          "phase": "branches",
+          "branches": 1,
+          "used_bytes": 8237056,
+          "samples": [
+            8237056,
+            8237056,
+            8237056
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t           8237056\n    Free (estimated):\t\t        8036110336\t(min: 4458369024)\n    Free (statfs, df):\t\t        8035061760\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:176128 (0.02%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:4014080 (1.50%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t           8237056\n    Free (estimated):\t\t        8036110336\t(min: 4458369024)\n    Free (statfs, df):\t\t        8035061760\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:176128 (0.02%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:4014080 (1.50%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t           8237056\n    Free (estimated):\t\t        8036110336\t(min: 4458369024)\n    Free (statfs, df):\t\t        8035061760\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:176128 (0.02%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:4014080 (1.50%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n"
+          ],
+          "above_empty_bytes": 7942144
+        },
+        {
+          "phase": "branches",
+          "branches": 4,
+          "used_bytes": 8462336,
+          "samples": [
+            8462336,
+            8462336,
+            8462336
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t           8462336\n    Free (estimated):\t\t        8036081664\t(min: 4458340352)\n    Free (statfs, df):\t\t        8035033088\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:204800 (0.02%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:4112384 (1.53%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t           8462336\n    Free (estimated):\t\t        8036081664\t(min: 4458340352)\n    Free (statfs, df):\t\t        8035033088\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:204800 (0.02%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:4112384 (1.53%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t           8462336\n    Free (estimated):\t\t        8036081664\t(min: 4458340352)\n    Free (statfs, df):\t\t        8035033088\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:204800 (0.02%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:4112384 (1.53%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n"
+          ],
+          "above_empty_bytes": 8167424
+        },
+        {
+          "phase": "branches",
+          "branches": 8,
+          "used_bytes": 8749056,
+          "samples": [
+            8749056,
+            8749056,
+            8749056
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t           8749056\n    Free (estimated):\t\t        8036089856\t(min: 4458348544)\n    Free (statfs, df):\t\t        8035041280\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:196608 (0.02%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:4259840 (1.59%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t           8749056\n    Free (estimated):\t\t        8036089856\t(min: 4458348544)\n    Free (statfs, df):\t\t        8035041280\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:196608 (0.02%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:4259840 (1.59%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t           8749056\n    Free (estimated):\t\t        8036089856\t(min: 4458348544)\n    Free (statfs, df):\t\t        8035041280\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:196608 (0.02%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:4259840 (1.59%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n"
+          ],
+          "above_empty_bytes": 8454144
+        },
+        {
+          "phase": "branches",
+          "branches": 16,
+          "used_bytes": 9322496,
+          "samples": [
+            9322496,
+            9322496,
+            9322496
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t           9322496\n    Free (estimated):\t\t        8036073472\t(min: 4458332160)\n    Free (statfs, df):\t\t        8035024896\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:212992 (0.02%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:4538368 (1.69%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t           9322496\n    Free (estimated):\t\t        8036073472\t(min: 4458332160)\n    Free (statfs, df):\t\t        8035024896\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:212992 (0.02%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:4538368 (1.69%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t           9322496\n    Free (estimated):\t\t        8036073472\t(min: 4458332160)\n    Free (statfs, df):\t\t        8035024896\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:212992 (0.02%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:4538368 (1.69%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n"
+          ],
+          "above_empty_bytes": 9027584
+        },
+        {
+          "phase": "commits",
+          "branches": 1,
+          "used_bytes": 9588736,
+          "samples": [
+            9752576,
+            9588736,
+            9588736
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t           9752576\n    Free (estimated):\t\t        8036036608\t(min: 4458295296)\n    Free (statfs, df):\t\t        8034988032\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 32768)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:249856 (0.03%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:4734976 (1.76%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t           9588736\n    Free (estimated):\t\t        8036036608\t(min: 4458295296)\n    Free (statfs, df):\t\t        8034988032\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:249856 (0.03%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:4653056 (1.73%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t           9588736\n    Free (estimated):\t\t        8036036608\t(min: 4458295296)\n    Free (statfs, df):\t\t        8034988032\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:249856 (0.03%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:4653056 (1.73%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n"
+          ],
+          "above_empty_bytes": 9293824
+        },
+        {
+          "phase": "commits",
+          "branches": 4,
+          "used_bytes": 10182656,
+          "samples": [
+            10674176,
+            10182656,
+            10182656
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          10674176\n    Free (estimated):\t\t        8035999744\t(min: 4458258432)\n    Free (statfs, df):\t\t        8034951168\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 32768)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:286720 (0.03%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:5177344 (1.93%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          10182656\n    Free (estimated):\t\t        8035999744\t(min: 4458258432)\n    Free (statfs, df):\t\t        8034951168\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:286720 (0.03%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:4931584 (1.84%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          10182656\n    Free (estimated):\t\t        8035999744\t(min: 4458258432)\n    Free (statfs, df):\t\t        8034951168\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:286720 (0.03%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:4931584 (1.84%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n"
+          ],
+          "above_empty_bytes": 9887744
+        },
+        {
+          "phase": "commits",
+          "branches": 8,
+          "used_bytes": 10874880,
+          "samples": [
+            11530240,
+            10874880,
+            10874880
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          11530240\n    Free (estimated):\t\t        8036028416\t(min: 4458287104)\n    Free (statfs, df):\t\t        8034979840\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 32768)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:258048 (0.03%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:5619712 (2.09%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          10874880\n    Free (estimated):\t\t        8036028416\t(min: 4458287104)\n    Free (statfs, df):\t\t        8034979840\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:258048 (0.03%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:5292032 (1.97%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          10874880\n    Free (estimated):\t\t        8036028416\t(min: 4458287104)\n    Free (statfs, df):\t\t        8034979840\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:258048 (0.03%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:5292032 (1.97%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n"
+          ],
+          "above_empty_bytes": 10579968
+        },
+        {
+          "phase": "commits",
+          "branches": 16,
+          "used_bytes": 12292096,
+          "samples": [
+            13635584,
+            12292096,
+            12292096
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          13635584\n    Free (estimated):\t\t        8035987456\t(min: 4458246144)\n    Free (statfs, df):\t\t        8034938880\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 49152)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:299008 (0.03%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:6651904 (2.48%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          12292096\n    Free (estimated):\t\t        8035987456\t(min: 4458246144)\n    Free (statfs, df):\t\t        8034938880\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:299008 (0.03%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:5980160 (2.23%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        1434451968\n    Device unallocated:\t\t        7155482624\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          12292096\n    Free (estimated):\t\t        8035987456\t(min: 4458246144)\n    Free (statfs, df):\t\t        8034938880\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:880803840, Used:299008 (0.03%)\n   /dev/loop0\t 880803840\n\nMetadata,DUP: Size:268435456, Used:5980160 (2.23%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t7155482624\n"
+          ],
+          "above_empty_bytes": 11997184
+        }
+      ],
+      "verified": true,
+      "empty": {
+        "used_bytes": 294912,
+        "samples": [
+          294912,
+          294912,
+          294912
+        ],
+        "raw": [
+          "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t         562036736\n    Device unallocated:\t\t        8027897856\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t            294912\n    Free (estimated):\t\t        8036286464\t(min: 4022337536)\n    Free (statfs, df):\t\t        8035237888\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:8388608, Used:0 (0.00%)\n   /dev/loop0\t   8388608\n\nMetadata,DUP: Size:268435456, Used:131072 (0.05%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t8027897856\n",
+          "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t         562036736\n    Device unallocated:\t\t        8027897856\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t            294912\n    Free (estimated):\t\t        8036286464\t(min: 4022337536)\n    Free (statfs, df):\t\t        8035237888\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:8388608, Used:0 (0.00%)\n   /dev/loop0\t   8388608\n\nMetadata,DUP: Size:268435456, Used:131072 (0.05%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t8027897856\n",
+          "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t         562036736\n    Device unallocated:\t\t        8027897856\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t            294912\n    Free (estimated):\t\t        8036286464\t(min: 4022337536)\n    Free (statfs, df):\t\t        8035237888\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:8388608, Used:0 (0.00%)\n   /dev/loop0\t   8388608\n\nMetadata,DUP: Size:268435456, Used:131072 (0.05%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t8027897856\n"
+        ]
+      }
+    },
+    {
+      "case": "small-files",
+      "trial": 0,
+      "files": 10000,
+      "file_bytes": 4096,
+      "large_bytes": 0,
+      "source_sha256": "9ea0eefad42eb4b003697b7230aca6875c57159c93e73939e5b1c4fd3c9ea670",
+      "large_sha256": null,
+      "samples": [
+        {
+          "phase": "main",
+          "branches": 0,
+          "used_bytes": 54276096,
+          "samples": [
+            54308864,
+            54276096,
+            54276096
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          54308864\n    Free (estimated):\t\t        7995183104\t(min: 4853649408)\n    Free (statfs, df):\t\t        7994134528\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 16384)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41103360 (2.34%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:6586368 (2.45%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          54276096\n    Free (estimated):\t\t        7995183104\t(min: 4853649408)\n    Free (statfs, df):\t\t        7994134528\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41103360 (2.34%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:6569984 (2.45%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          54276096\n    Free (estimated):\t\t        7995183104\t(min: 4853649408)\n    Free (statfs, df):\t\t        7994134528\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41103360 (2.34%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:6569984 (2.45%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n"
+          ],
+          "above_empty_bytes": 53981184
+        },
+        {
+          "phase": "branches",
+          "branches": 1,
+          "used_bytes": 54374400,
+          "samples": [
+            54374400,
+            54374400,
+            54374400
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          54374400\n    Free (estimated):\t\t        7995150336\t(min: 4853616640)\n    Free (statfs, df):\t\t        7994101760\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41136128 (2.35%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:6602752 (2.46%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          54374400\n    Free (estimated):\t\t        7995150336\t(min: 4853616640)\n    Free (statfs, df):\t\t        7994101760\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41136128 (2.35%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:6602752 (2.46%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          54374400\n    Free (estimated):\t\t        7995150336\t(min: 4853616640)\n    Free (statfs, df):\t\t        7994101760\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41136128 (2.35%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:6602752 (2.46%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n"
+          ],
+          "above_empty_bytes": 54079488
+        },
+        {
+          "phase": "branches",
+          "branches": 4,
+          "used_bytes": 54599680,
+          "samples": [
+            54599680,
+            54599680,
+            54599680
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          54599680\n    Free (estimated):\t\t        7995121664\t(min: 4853587968)\n    Free (statfs, df):\t\t        7994073088\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41164800 (2.35%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:6701056 (2.50%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          54599680\n    Free (estimated):\t\t        7995121664\t(min: 4853587968)\n    Free (statfs, df):\t\t        7994073088\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41164800 (2.35%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:6701056 (2.50%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          54599680\n    Free (estimated):\t\t        7995121664\t(min: 4853587968)\n    Free (statfs, df):\t\t        7994073088\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41164800 (2.35%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:6701056 (2.50%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n"
+          ],
+          "above_empty_bytes": 54304768
+        },
+        {
+          "phase": "branches",
+          "branches": 8,
+          "used_bytes": 54853632,
+          "samples": [
+            54853632,
+            54853632,
+            54853632
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          54853632\n    Free (estimated):\t\t        7995129856\t(min: 4853596160)\n    Free (statfs, df):\t\t        7994081280\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41156608 (2.35%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:6832128 (2.55%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          54853632\n    Free (estimated):\t\t        7995129856\t(min: 4853596160)\n    Free (statfs, df):\t\t        7994081280\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41156608 (2.35%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:6832128 (2.55%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          54853632\n    Free (estimated):\t\t        7995129856\t(min: 4853596160)\n    Free (statfs, df):\t\t        7994081280\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41156608 (2.35%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:6832128 (2.55%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n"
+          ],
+          "above_empty_bytes": 54558720
+        },
+        {
+          "phase": "branches",
+          "branches": 16,
+          "used_bytes": 55459840,
+          "samples": [
+            55459840,
+            55459840,
+            55459840
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          55459840\n    Free (estimated):\t\t        7995113472\t(min: 4853579776)\n    Free (statfs, df):\t\t        7994064896\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41172992 (2.35%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:7127040 (2.66%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          55459840\n    Free (estimated):\t\t        7995113472\t(min: 4853579776)\n    Free (statfs, df):\t\t        7994064896\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41172992 (2.35%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:7127040 (2.66%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          55459840\n    Free (estimated):\t\t        7995113472\t(min: 4853579776)\n    Free (statfs, df):\t\t        7994064896\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41172992 (2.35%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:7127040 (2.66%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n"
+          ],
+          "above_empty_bytes": 55164928
+        },
+        {
+          "phase": "commits",
+          "branches": 1,
+          "used_bytes": 55734272,
+          "samples": [
+            55865344,
+            55734272,
+            55734272
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          55865344\n    Free (estimated):\t\t        7995035648\t(min: 4853501952)\n    Free (statfs, df):\t\t        7993987072\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 32768)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41250816 (2.35%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:7290880 (2.72%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          55734272\n    Free (estimated):\t\t        7995035648\t(min: 4853501952)\n    Free (statfs, df):\t\t        7993987072\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41250816 (2.35%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:7225344 (2.69%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          55734272\n    Free (estimated):\t\t        7995035648\t(min: 4853501952)\n    Free (statfs, df):\t\t        7993987072\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41250816 (2.35%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:7225344 (2.69%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n"
+          ],
+          "above_empty_bytes": 55439360
+        },
+        {
+          "phase": "commits",
+          "branches": 4,
+          "used_bytes": 56287232,
+          "samples": [
+            56680448,
+            56287232,
+            56287232
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          56680448\n    Free (estimated):\t\t        7994875904\t(min: 4853342208)\n    Free (statfs, df):\t\t        7993827328\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 32768)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41410560 (2.36%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:7618560 (2.84%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          56287232\n    Free (estimated):\t\t        7994875904\t(min: 4853342208)\n    Free (statfs, df):\t\t        7993827328\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41410560 (2.36%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:7421952 (2.76%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          56287232\n    Free (estimated):\t\t        7994875904\t(min: 4853342208)\n    Free (statfs, df):\t\t        7993827328\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41410560 (2.36%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:7421952 (2.76%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n"
+          ],
+          "above_empty_bytes": 55992320
+        },
+        {
+          "phase": "commits",
+          "branches": 8,
+          "used_bytes": 56881152,
+          "samples": [
+            57405440,
+            56881152,
+            56881152
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          57405440\n    Free (estimated):\t\t        7994740736\t(min: 4853207040)\n    Free (statfs, df):\t\t        7993692160\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 32768)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41545728 (2.37%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:7913472 (2.95%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          56881152\n    Free (estimated):\t\t        7994740736\t(min: 4853207040)\n    Free (statfs, df):\t\t        7993692160\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41545728 (2.37%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:7651328 (2.85%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          56881152\n    Free (estimated):\t\t        7994740736\t(min: 4853207040)\n    Free (statfs, df):\t\t        7993692160\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41545728 (2.37%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:7651328 (2.85%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n"
+          ],
+          "above_empty_bytes": 56586240
+        },
+        {
+          "phase": "commits",
+          "branches": 16,
+          "used_bytes": 58200064,
+          "samples": [
+            59281408,
+            58200064,
+            58200064
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          59281408\n    Free (estimated):\t\t        7994372096\t(min: 4852838400)\n    Free (statfs, df):\t\t        7993323520\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 49152)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41914368 (2.39%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:8667136 (3.23%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          58200064\n    Free (estimated):\t\t        7994372096\t(min: 4852838400)\n    Free (statfs, df):\t\t        7993323520\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41914368 (2.39%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:8126464 (3.03%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          58200064\n    Free (estimated):\t\t        7994372096\t(min: 4852838400)\n    Free (statfs, df):\t\t        7993323520\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41914368 (2.39%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:8126464 (3.03%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n"
+          ],
+          "above_empty_bytes": 57905152
+        }
+      ],
+      "verified": true,
+      "empty": {
+        "used_bytes": 294912,
+        "samples": [
+          294912,
+          294912,
+          294912
+        ],
+        "raw": [
+          "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t         562036736\n    Device unallocated:\t\t        8027897856\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t            294912\n    Free (estimated):\t\t        8036286464\t(min: 4022337536)\n    Free (statfs, df):\t\t        8035237888\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:8388608, Used:0 (0.00%)\n   /dev/loop0\t   8388608\n\nMetadata,DUP: Size:268435456, Used:131072 (0.05%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t8027897856\n",
+          "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t         562036736\n    Device unallocated:\t\t        8027897856\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t            294912\n    Free (estimated):\t\t        8036286464\t(min: 4022337536)\n    Free (statfs, df):\t\t        8035237888\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:8388608, Used:0 (0.00%)\n   /dev/loop0\t   8388608\n\nMetadata,DUP: Size:268435456, Used:131072 (0.05%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t8027897856\n",
+          "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t         562036736\n    Device unallocated:\t\t        8027897856\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t            294912\n    Free (estimated):\t\t        8036286464\t(min: 4022337536)\n    Free (statfs, df):\t\t        8035237888\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:8388608, Used:0 (0.00%)\n   /dev/loop0\t   8388608\n\nMetadata,DUP: Size:268435456, Used:131072 (0.05%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t8027897856\n"
+        ]
+      }
+    },
+    {
+      "case": "small-files",
+      "trial": 1,
+      "files": 10000,
+      "file_bytes": 4096,
+      "large_bytes": 0,
+      "source_sha256": "9ea0eefad42eb4b003697b7230aca6875c57159c93e73939e5b1c4fd3c9ea670",
+      "large_sha256": null,
+      "samples": [
+        {
+          "phase": "main",
+          "branches": 0,
+          "used_bytes": 54079488,
+          "samples": [
+            54112256,
+            54079488,
+            54079488
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          54112256\n    Free (estimated):\t\t        7995183104\t(min: 4853649408)\n    Free (statfs, df):\t\t        7994134528\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 16384)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41103360 (2.34%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:6488064 (2.42%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          54079488\n    Free (estimated):\t\t        7995183104\t(min: 4853649408)\n    Free (statfs, df):\t\t        7994134528\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41103360 (2.34%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:6471680 (2.41%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          54079488\n    Free (estimated):\t\t        7995183104\t(min: 4853649408)\n    Free (statfs, df):\t\t        7994134528\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41103360 (2.34%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:6471680 (2.41%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n"
+          ],
+          "above_empty_bytes": 53784576
+        },
+        {
+          "phase": "branches",
+          "branches": 1,
+          "used_bytes": 54177792,
+          "samples": [
+            54177792,
+            54177792,
+            54177792
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          54177792\n    Free (estimated):\t\t        7995150336\t(min: 4853616640)\n    Free (statfs, df):\t\t        7994101760\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41136128 (2.35%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:6504448 (2.42%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          54177792\n    Free (estimated):\t\t        7995150336\t(min: 4853616640)\n    Free (statfs, df):\t\t        7994101760\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41136128 (2.35%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:6504448 (2.42%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          54177792\n    Free (estimated):\t\t        7995150336\t(min: 4853616640)\n    Free (statfs, df):\t\t        7994101760\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41136128 (2.35%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:6504448 (2.42%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n"
+          ],
+          "above_empty_bytes": 53882880
+        },
+        {
+          "phase": "branches",
+          "branches": 4,
+          "used_bytes": 54403072,
+          "samples": [
+            54403072,
+            54403072,
+            54403072
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          54403072\n    Free (estimated):\t\t        7995121664\t(min: 4853587968)\n    Free (statfs, df):\t\t        7994073088\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41164800 (2.35%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:6602752 (2.46%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          54403072\n    Free (estimated):\t\t        7995121664\t(min: 4853587968)\n    Free (statfs, df):\t\t        7994073088\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41164800 (2.35%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:6602752 (2.46%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          54403072\n    Free (estimated):\t\t        7995121664\t(min: 4853587968)\n    Free (statfs, df):\t\t        7994073088\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41164800 (2.35%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:6602752 (2.46%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n"
+          ],
+          "above_empty_bytes": 54108160
+        },
+        {
+          "phase": "branches",
+          "branches": 8,
+          "used_bytes": 54657024,
+          "samples": [
+            54657024,
+            54657024,
+            54657024
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          54657024\n    Free (estimated):\t\t        7995129856\t(min: 4853596160)\n    Free (statfs, df):\t\t        7994081280\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41156608 (2.35%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:6733824 (2.51%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          54657024\n    Free (estimated):\t\t        7995129856\t(min: 4853596160)\n    Free (statfs, df):\t\t        7994081280\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41156608 (2.35%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:6733824 (2.51%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          54657024\n    Free (estimated):\t\t        7995129856\t(min: 4853596160)\n    Free (statfs, df):\t\t        7994081280\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41156608 (2.35%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:6733824 (2.51%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n"
+          ],
+          "above_empty_bytes": 54362112
+        },
+        {
+          "phase": "branches",
+          "branches": 16,
+          "used_bytes": 55263232,
+          "samples": [
+            55263232,
+            55263232,
+            55263232
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          55263232\n    Free (estimated):\t\t        7995113472\t(min: 4853579776)\n    Free (statfs, df):\t\t        7994064896\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41172992 (2.35%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:7028736 (2.62%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          55263232\n    Free (estimated):\t\t        7995113472\t(min: 4853579776)\n    Free (statfs, df):\t\t        7994064896\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41172992 (2.35%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:7028736 (2.62%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          55263232\n    Free (estimated):\t\t        7995113472\t(min: 4853579776)\n    Free (statfs, df):\t\t        7994064896\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41172992 (2.35%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:7028736 (2.62%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n"
+          ],
+          "above_empty_bytes": 54968320
+        },
+        {
+          "phase": "commits",
+          "branches": 1,
+          "used_bytes": 55504896,
+          "samples": [
+            55635968,
+            55504896,
+            55504896
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          55635968\n    Free (estimated):\t\t        7995035648\t(min: 4853501952)\n    Free (statfs, df):\t\t        7993987072\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 32768)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41250816 (2.35%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:7176192 (2.67%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          55504896\n    Free (estimated):\t\t        7995035648\t(min: 4853501952)\n    Free (statfs, df):\t\t        7993987072\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41250816 (2.35%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:7110656 (2.65%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          55504896\n    Free (estimated):\t\t        7995035648\t(min: 4853501952)\n    Free (statfs, df):\t\t        7993987072\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41250816 (2.35%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:7110656 (2.65%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n"
+          ],
+          "above_empty_bytes": 55209984
+        },
+        {
+          "phase": "commits",
+          "branches": 4,
+          "used_bytes": 56090624,
+          "samples": [
+            56483840,
+            56090624,
+            56090624
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          56483840\n    Free (estimated):\t\t        7994875904\t(min: 4853342208)\n    Free (statfs, df):\t\t        7993827328\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 32768)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41410560 (2.36%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:7520256 (2.80%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          56090624\n    Free (estimated):\t\t        7994875904\t(min: 4853342208)\n    Free (statfs, df):\t\t        7993827328\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41410560 (2.36%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:7323648 (2.73%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          56090624\n    Free (estimated):\t\t        7994875904\t(min: 4853342208)\n    Free (statfs, df):\t\t        7993827328\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41410560 (2.36%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:7323648 (2.73%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n"
+          ],
+          "above_empty_bytes": 55795712
+        },
+        {
+          "phase": "commits",
+          "branches": 8,
+          "used_bytes": 56684544,
+          "samples": [
+            57208832,
+            56684544,
+            56684544
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          57208832\n    Free (estimated):\t\t        7994740736\t(min: 4853207040)\n    Free (statfs, df):\t\t        7993692160\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 32768)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41545728 (2.37%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:7815168 (2.91%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          56684544\n    Free (estimated):\t\t        7994740736\t(min: 4853207040)\n    Free (statfs, df):\t\t        7993692160\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41545728 (2.37%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:7553024 (2.81%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          56684544\n    Free (estimated):\t\t        7994740736\t(min: 4853207040)\n    Free (statfs, df):\t\t        7993692160\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41545728 (2.37%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:7553024 (2.81%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n"
+          ],
+          "above_empty_bytes": 56389632
+        },
+        {
+          "phase": "commits",
+          "branches": 16,
+          "used_bytes": 58036224,
+          "samples": [
+            59117568,
+            58036224,
+            58036224
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          59117568\n    Free (estimated):\t\t        7994372096\t(min: 4852838400)\n    Free (statfs, df):\t\t        7993323520\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 49152)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41914368 (2.39%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:8585216 (3.20%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          58036224\n    Free (estimated):\t\t        7994372096\t(min: 4852838400)\n    Free (statfs, df):\t\t        7993323520\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41914368 (2.39%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:8044544 (3.00%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        2306867200\n    Device unallocated:\t\t        6283067392\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t          58036224\n    Free (estimated):\t\t        7994372096\t(min: 4852838400)\n    Free (statfs, df):\t\t        7993323520\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:1753219072, Used:41914368 (2.39%)\n   /dev/loop0\t1753219072\n\nMetadata,DUP: Size:268435456, Used:8044544 (3.00%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t6283067392\n"
+          ],
+          "above_empty_bytes": 57741312
+        }
+      ],
+      "verified": true,
+      "empty": {
+        "used_bytes": 294912,
+        "samples": [
+          294912,
+          294912,
+          294912
+        ],
+        "raw": [
+          "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t         562036736\n    Device unallocated:\t\t        8027897856\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t            294912\n    Free (estimated):\t\t        8036286464\t(min: 4022337536)\n    Free (statfs, df):\t\t        8035237888\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:8388608, Used:0 (0.00%)\n   /dev/loop0\t   8388608\n\nMetadata,DUP: Size:268435456, Used:131072 (0.05%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t8027897856\n",
+          "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t         562036736\n    Device unallocated:\t\t        8027897856\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t            294912\n    Free (estimated):\t\t        8036286464\t(min: 4022337536)\n    Free (statfs, df):\t\t        8035237888\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:8388608, Used:0 (0.00%)\n   /dev/loop0\t   8388608\n\nMetadata,DUP: Size:268435456, Used:131072 (0.05%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t8027897856\n",
+          "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t         562036736\n    Device unallocated:\t\t        8027897856\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t            294912\n    Free (estimated):\t\t        8036286464\t(min: 4022337536)\n    Free (statfs, df):\t\t        8035237888\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:8388608, Used:0 (0.00%)\n   /dev/loop0\t   8388608\n\nMetadata,DUP: Size:268435456, Used:131072 (0.05%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t8027897856\n"
+        ]
+      }
+    },
+    {
+      "case": "large-file",
+      "trial": 0,
+      "files": 1000,
+      "file_bytes": 4096,
+      "large_bytes": 1073741824,
+      "source_sha256": "5e0c9785f0cba85411764d4b10c8e62945ee4e0bc3bdb1f1a883efe3d5a43386",
+      "large_sha256": "dfe471633d4098eedbcb608601a0b1585a237513f30e789004d2db908f8c01b3",
+      "samples": [
+        {
+          "phase": "main",
+          "branches": 0,
+          "used_bytes": 1081913344,
+          "samples": [
+            1081946112,
+            1081913344,
+            1081913344
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1081946112\n    Free (estimated):\t\t        6958305280\t(min: 4252979200)\n    Free (statfs, df):\t\t        6957256704\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 16384)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1077981184 (41.06%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:1966080 (0.73%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1081913344\n    Free (estimated):\t\t        6958305280\t(min: 4252979200)\n    Free (statfs, df):\t\t        6957256704\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1077981184 (41.06%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:1949696 (0.73%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1081913344\n    Free (estimated):\t\t        6958305280\t(min: 4252979200)\n    Free (statfs, df):\t\t        6957256704\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1077981184 (41.06%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:1949696 (0.73%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n"
+          ],
+          "above_empty_bytes": 1081618432
+        },
+        {
+          "phase": "branches",
+          "branches": 1,
+          "used_bytes": 1082011648,
+          "samples": [
+            1082011648,
+            1082011648,
+            1082011648
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1082011648\n    Free (estimated):\t\t        6958272512\t(min: 4252946432)\n    Free (statfs, df):\t\t        6957223936\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078013952 (41.06%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:1982464 (0.74%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1082011648\n    Free (estimated):\t\t        6958272512\t(min: 4252946432)\n    Free (statfs, df):\t\t        6957223936\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078013952 (41.06%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:1982464 (0.74%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1082011648\n    Free (estimated):\t\t        6958272512\t(min: 4252946432)\n    Free (statfs, df):\t\t        6957223936\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078013952 (41.06%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:1982464 (0.74%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n"
+          ],
+          "above_empty_bytes": 1081716736
+        },
+        {
+          "phase": "branches",
+          "branches": 4,
+          "used_bytes": 1082236928,
+          "samples": [
+            1082236928,
+            1082236928,
+            1082236928
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1082236928\n    Free (estimated):\t\t        6958243840\t(min: 4252917760)\n    Free (statfs, df):\t\t        6957195264\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078042624 (41.06%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:2080768 (0.78%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1082236928\n    Free (estimated):\t\t        6958243840\t(min: 4252917760)\n    Free (statfs, df):\t\t        6957195264\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078042624 (41.06%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:2080768 (0.78%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1082236928\n    Free (estimated):\t\t        6958243840\t(min: 4252917760)\n    Free (statfs, df):\t\t        6957195264\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078042624 (41.06%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:2080768 (0.78%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n"
+          ],
+          "above_empty_bytes": 1081942016
+        },
+        {
+          "phase": "branches",
+          "branches": 8,
+          "used_bytes": 1082490880,
+          "samples": [
+            1082490880,
+            1082490880,
+            1082490880
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1082490880\n    Free (estimated):\t\t        6958252032\t(min: 4252925952)\n    Free (statfs, df):\t\t        6957203456\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078034432 (41.06%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:2211840 (0.82%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1082490880\n    Free (estimated):\t\t        6958252032\t(min: 4252925952)\n    Free (statfs, df):\t\t        6957203456\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078034432 (41.06%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:2211840 (0.82%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1082490880\n    Free (estimated):\t\t        6958252032\t(min: 4252925952)\n    Free (statfs, df):\t\t        6957203456\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078034432 (41.06%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:2211840 (0.82%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n"
+          ],
+          "above_empty_bytes": 1082195968
+        },
+        {
+          "phase": "branches",
+          "branches": 16,
+          "used_bytes": 1083031552,
+          "samples": [
+            1083031552,
+            1083031552,
+            1083031552
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1083031552\n    Free (estimated):\t\t        6958235648\t(min: 4252909568)\n    Free (statfs, df):\t\t        6957187072\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078050816 (41.06%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:2473984 (0.92%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1083031552\n    Free (estimated):\t\t        6958235648\t(min: 4252909568)\n    Free (statfs, df):\t\t        6957187072\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078050816 (41.06%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:2473984 (0.92%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1083031552\n    Free (estimated):\t\t        6958235648\t(min: 4252909568)\n    Free (statfs, df):\t\t        6957187072\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078050816 (41.06%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:2473984 (0.92%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n"
+          ],
+          "above_empty_bytes": 1082736640
+        },
+        {
+          "phase": "commits",
+          "branches": 1,
+          "used_bytes": 1083277312,
+          "samples": [
+            1083408384,
+            1083277312,
+            1083277312
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1083408384\n    Free (estimated):\t\t        6958153728\t(min: 4252827648)\n    Free (statfs, df):\t\t        6957105152\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 32768)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078132736 (41.06%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:2621440 (0.98%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1083277312\n    Free (estimated):\t\t        6958153728\t(min: 4252827648)\n    Free (statfs, df):\t\t        6957105152\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078132736 (41.06%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:2555904 (0.95%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1083277312\n    Free (estimated):\t\t        6958153728\t(min: 4252827648)\n    Free (statfs, df):\t\t        6957105152\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078132736 (41.06%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:2555904 (0.95%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n"
+          ],
+          "above_empty_bytes": 1082982400
+        },
+        {
+          "phase": "commits",
+          "branches": 4,
+          "used_bytes": 1083777024,
+          "samples": [
+            1084170240,
+            1083777024,
+            1083777024
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1084170240\n    Free (estimated):\t\t        6957981696\t(min: 4252655616)\n    Free (statfs, df):\t\t        6956933120\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 32768)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078304768 (41.07%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:2916352 (1.09%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1083777024\n    Free (estimated):\t\t        6957981696\t(min: 4252655616)\n    Free (statfs, df):\t\t        6956933120\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078304768 (41.07%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:2719744 (1.01%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1083777024\n    Free (estimated):\t\t        6957981696\t(min: 4252655616)\n    Free (statfs, df):\t\t        6956933120\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078304768 (41.07%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:2719744 (1.01%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n"
+          ],
+          "above_empty_bytes": 1083482112
+        },
+        {
+          "phase": "commits",
+          "branches": 8,
+          "used_bytes": 1084321792,
+          "samples": [
+            1084846080,
+            1084321792,
+            1084321792
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1084846080\n    Free (estimated):\t\t        6957830144\t(min: 4252504064)\n    Free (statfs, df):\t\t        6956781568\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 32768)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078456320 (41.07%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:3178496 (1.18%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1084321792\n    Free (estimated):\t\t        6957830144\t(min: 4252504064)\n    Free (statfs, df):\t\t        6956781568\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078456320 (41.07%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:2916352 (1.09%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1084321792\n    Free (estimated):\t\t        6957830144\t(min: 4252504064)\n    Free (statfs, df):\t\t        6956781568\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078456320 (41.07%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:2916352 (1.09%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n"
+          ],
+          "above_empty_bytes": 1084026880
+        },
+        {
+          "phase": "commits",
+          "branches": 16,
+          "used_bytes": 1085640704,
+          "samples": [
+            1086722048,
+            1085640704,
+            1085640704
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1086722048\n    Free (estimated):\t\t        6957428736\t(min: 4252102656)\n    Free (statfs, df):\t\t        6956380160\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 49152)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078857728 (41.09%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:3915776 (1.46%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1085640704\n    Free (estimated):\t\t        6957428736\t(min: 4252102656)\n    Free (statfs, df):\t\t        6956380160\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078857728 (41.09%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:3375104 (1.26%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1085640704\n    Free (estimated):\t\t        6957428736\t(min: 4252102656)\n    Free (statfs, df):\t\t        6956380160\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078857728 (41.09%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:3375104 (1.26%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n"
+          ],
+          "above_empty_bytes": 1085345792
+        }
+      ],
+      "verified": true,
+      "empty": {
+        "used_bytes": 294912,
+        "samples": [
+          294912,
+          294912,
+          294912
+        ],
+        "raw": [
+          "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t         562036736\n    Device unallocated:\t\t        8027897856\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t            294912\n    Free (estimated):\t\t        8036286464\t(min: 4022337536)\n    Free (statfs, df):\t\t        8035237888\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:8388608, Used:0 (0.00%)\n   /dev/loop0\t   8388608\n\nMetadata,DUP: Size:268435456, Used:131072 (0.05%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t8027897856\n",
+          "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t         562036736\n    Device unallocated:\t\t        8027897856\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t            294912\n    Free (estimated):\t\t        8036286464\t(min: 4022337536)\n    Free (statfs, df):\t\t        8035237888\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:8388608, Used:0 (0.00%)\n   /dev/loop0\t   8388608\n\nMetadata,DUP: Size:268435456, Used:131072 (0.05%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t8027897856\n",
+          "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t         562036736\n    Device unallocated:\t\t        8027897856\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t            294912\n    Free (estimated):\t\t        8036286464\t(min: 4022337536)\n    Free (statfs, df):\t\t        8035237888\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:8388608, Used:0 (0.00%)\n   /dev/loop0\t   8388608\n\nMetadata,DUP: Size:268435456, Used:131072 (0.05%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t8027897856\n"
+        ]
+      }
+    },
+    {
+      "case": "large-file",
+      "trial": 1,
+      "files": 1000,
+      "file_bytes": 4096,
+      "large_bytes": 1073741824,
+      "source_sha256": "5e0c9785f0cba85411764d4b10c8e62945ee4e0bc3bdb1f1a883efe3d5a43386",
+      "large_sha256": "dfe471633d4098eedbcb608601a0b1585a237513f30e789004d2db908f8c01b3",
+      "samples": [
+        {
+          "phase": "main",
+          "branches": 0,
+          "used_bytes": 1081913344,
+          "samples": [
+            1081946112,
+            1081913344,
+            1081913344
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1081946112\n    Free (estimated):\t\t        6958305280\t(min: 4252979200)\n    Free (statfs, df):\t\t        6957256704\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 16384)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1077981184 (41.06%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:1966080 (0.73%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1081913344\n    Free (estimated):\t\t        6958305280\t(min: 4252979200)\n    Free (statfs, df):\t\t        6957256704\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1077981184 (41.06%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:1949696 (0.73%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1081913344\n    Free (estimated):\t\t        6958305280\t(min: 4252979200)\n    Free (statfs, df):\t\t        6957256704\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1077981184 (41.06%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:1949696 (0.73%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n"
+          ],
+          "above_empty_bytes": 1081618432
+        },
+        {
+          "phase": "branches",
+          "branches": 1,
+          "used_bytes": 1082011648,
+          "samples": [
+            1082011648,
+            1082011648,
+            1082011648
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1082011648\n    Free (estimated):\t\t        6958272512\t(min: 4252946432)\n    Free (statfs, df):\t\t        6957223936\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078013952 (41.06%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:1982464 (0.74%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1082011648\n    Free (estimated):\t\t        6958272512\t(min: 4252946432)\n    Free (statfs, df):\t\t        6957223936\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078013952 (41.06%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:1982464 (0.74%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1082011648\n    Free (estimated):\t\t        6958272512\t(min: 4252946432)\n    Free (statfs, df):\t\t        6957223936\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078013952 (41.06%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:1982464 (0.74%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n"
+          ],
+          "above_empty_bytes": 1081716736
+        },
+        {
+          "phase": "branches",
+          "branches": 4,
+          "used_bytes": 1082236928,
+          "samples": [
+            1082236928,
+            1082236928,
+            1082236928
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1082236928\n    Free (estimated):\t\t        6958243840\t(min: 4252917760)\n    Free (statfs, df):\t\t        6957195264\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078042624 (41.06%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:2080768 (0.78%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1082236928\n    Free (estimated):\t\t        6958243840\t(min: 4252917760)\n    Free (statfs, df):\t\t        6957195264\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078042624 (41.06%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:2080768 (0.78%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1082236928\n    Free (estimated):\t\t        6958243840\t(min: 4252917760)\n    Free (statfs, df):\t\t        6957195264\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078042624 (41.06%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:2080768 (0.78%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n"
+          ],
+          "above_empty_bytes": 1081942016
+        },
+        {
+          "phase": "branches",
+          "branches": 8,
+          "used_bytes": 1082490880,
+          "samples": [
+            1082490880,
+            1082490880,
+            1082490880
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1082490880\n    Free (estimated):\t\t        6958252032\t(min: 4252925952)\n    Free (statfs, df):\t\t        6957203456\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078034432 (41.06%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:2211840 (0.82%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1082490880\n    Free (estimated):\t\t        6958252032\t(min: 4252925952)\n    Free (statfs, df):\t\t        6957203456\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078034432 (41.06%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:2211840 (0.82%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1082490880\n    Free (estimated):\t\t        6958252032\t(min: 4252925952)\n    Free (statfs, df):\t\t        6957203456\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078034432 (41.06%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:2211840 (0.82%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n"
+          ],
+          "above_empty_bytes": 1082195968
+        },
+        {
+          "phase": "branches",
+          "branches": 16,
+          "used_bytes": 1083031552,
+          "samples": [
+            1083031552,
+            1083031552,
+            1083031552
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1083031552\n    Free (estimated):\t\t        6958235648\t(min: 4252909568)\n    Free (statfs, df):\t\t        6957187072\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078050816 (41.06%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:2473984 (0.92%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1083031552\n    Free (estimated):\t\t        6958235648\t(min: 4252909568)\n    Free (statfs, df):\t\t        6957187072\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078050816 (41.06%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:2473984 (0.92%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1083031552\n    Free (estimated):\t\t        6958235648\t(min: 4252909568)\n    Free (statfs, df):\t\t        6957187072\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078050816 (41.06%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:2473984 (0.92%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n"
+          ],
+          "above_empty_bytes": 1082736640
+        },
+        {
+          "phase": "commits",
+          "branches": 1,
+          "used_bytes": 1083277312,
+          "samples": [
+            1083408384,
+            1083277312,
+            1083277312
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1083408384\n    Free (estimated):\t\t        6958153728\t(min: 4252827648)\n    Free (statfs, df):\t\t        6957105152\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 32768)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078132736 (41.06%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:2621440 (0.98%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1083277312\n    Free (estimated):\t\t        6958153728\t(min: 4252827648)\n    Free (statfs, df):\t\t        6957105152\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078132736 (41.06%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:2555904 (0.95%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1083277312\n    Free (estimated):\t\t        6958153728\t(min: 4252827648)\n    Free (statfs, df):\t\t        6957105152\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078132736 (41.06%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:2555904 (0.95%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n"
+          ],
+          "above_empty_bytes": 1082982400
+        },
+        {
+          "phase": "commits",
+          "branches": 4,
+          "used_bytes": 1083777024,
+          "samples": [
+            1084170240,
+            1083777024,
+            1083777024
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1084170240\n    Free (estimated):\t\t        6957981696\t(min: 4252655616)\n    Free (statfs, df):\t\t        6956933120\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 32768)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078304768 (41.07%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:2916352 (1.09%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1083777024\n    Free (estimated):\t\t        6957981696\t(min: 4252655616)\n    Free (statfs, df):\t\t        6956933120\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078304768 (41.07%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:2719744 (1.01%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1083777024\n    Free (estimated):\t\t        6957981696\t(min: 4252655616)\n    Free (statfs, df):\t\t        6956933120\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078304768 (41.07%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:2719744 (1.01%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n"
+          ],
+          "above_empty_bytes": 1083482112
+        },
+        {
+          "phase": "commits",
+          "branches": 8,
+          "used_bytes": 1084321792,
+          "samples": [
+            1084846080,
+            1084321792,
+            1084321792
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1084846080\n    Free (estimated):\t\t        6957830144\t(min: 4252504064)\n    Free (statfs, df):\t\t        6956781568\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 32768)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078456320 (41.07%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:3178496 (1.18%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1084321792\n    Free (estimated):\t\t        6957830144\t(min: 4252504064)\n    Free (statfs, df):\t\t        6956781568\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078456320 (41.07%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:2916352 (1.09%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1084321792\n    Free (estimated):\t\t        6957830144\t(min: 4252504064)\n    Free (statfs, df):\t\t        6956781568\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078456320 (41.07%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:2916352 (1.09%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n"
+          ],
+          "above_empty_bytes": 1084026880
+        },
+        {
+          "phase": "commits",
+          "branches": 16,
+          "used_bytes": 1085575168,
+          "samples": [
+            1086656512,
+            1085575168,
+            1085575168
+          ],
+          "raw": [
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1086656512\n    Free (estimated):\t\t        6957428736\t(min: 4252102656)\n    Free (statfs, df):\t\t        6956380160\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 49152)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078857728 (41.09%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:3883008 (1.45%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1085575168\n    Free (estimated):\t\t        6957428736\t(min: 4252102656)\n    Free (statfs, df):\t\t        6956380160\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078857728 (41.09%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:3342336 (1.25%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n",
+            "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t        3179282432\n    Device unallocated:\t\t        5410652160\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t        1085575168\n    Free (estimated):\t\t        6957428736\t(min: 4252102656)\n    Free (statfs, df):\t\t        6956380160\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:2625634304, Used:1078857728 (41.09%)\n   /dev/loop0\t2625634304\n\nMetadata,DUP: Size:268435456, Used:3342336 (1.25%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t5410652160\n"
+          ],
+          "above_empty_bytes": 1085280256
+        }
+      ],
+      "verified": true,
+      "empty": {
+        "used_bytes": 294912,
+        "samples": [
+          294912,
+          294912,
+          294912
+        ],
+        "raw": [
+          "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t         562036736\n    Device unallocated:\t\t        8027897856\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t            294912\n    Free (estimated):\t\t        8036286464\t(min: 4022337536)\n    Free (statfs, df):\t\t        8035237888\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:8388608, Used:0 (0.00%)\n   /dev/loop0\t   8388608\n\nMetadata,DUP: Size:268435456, Used:131072 (0.05%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t8027897856\n",
+          "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t         562036736\n    Device unallocated:\t\t        8027897856\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t            294912\n    Free (estimated):\t\t        8036286464\t(min: 4022337536)\n    Free (statfs, df):\t\t        8035237888\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:8388608, Used:0 (0.00%)\n   /dev/loop0\t   8388608\n\nMetadata,DUP: Size:268435456, Used:131072 (0.05%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t8027897856\n",
+          "Overall:\n    Device size:\t\t        8589934592\n    Device allocated:\t\t         562036736\n    Device unallocated:\t\t        8027897856\n    Device missing:\t\t                 0\n    Device slack:\t\t                 0\n    Used:\t\t\t            294912\n    Free (estimated):\t\t        8036286464\t(min: 4022337536)\n    Free (statfs, df):\t\t        8035237888\n    Data ratio:\t\t\t              1.00\n    Metadata ratio:\t\t              2.00\n    Global reserve:\t\t           5767168\t(used: 0)\n    Multiple profiles:\t\t                no\n\nData,single: Size:8388608, Used:0 (0.00%)\n   /dev/loop0\t   8388608\n\nMetadata,DUP: Size:268435456, Used:131072 (0.05%)\n   /dev/loop0\t 536870912\n\nSystem,DUP: Size:8388608, Used:16384 (0.20%)\n   /dev/loop0\t  16777216\n\nUnallocated:\n   /dev/loop0\t8027897856\n"
+        ]
+      }
+    }
+  ],
+  "complete": true,
+  "btrfs_version": "btrfs-progs v6.2\n",
+  "compression": "none; mkfs default metadata profile"
+}

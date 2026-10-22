@@ -1,0 +1,13 @@
+{
+  "src/apfs.rs": "2c27703e6f8640a967735e166c09f9f65325723fd9ad055054f57acdabd0e06d",
+  "src/apfs_commit.rs": "015a296ed721801edd1d30aaa3c85dd52c6f9b31f9ff29ce837f529aeaaa2af8",
+  "src/cmd/work.rs": "109919de4b0e6730c58478126b8ffb6608f94bad67a50854efe1bc3764ebaf36",
+  "src/main.rs": "bea34908fabe8b0acccab8aaf83fd3458a21cfce998c8d66d039902152a4d7dc",
+  "src/repo.rs": "75d53b43f6ef3c7572cb92ec49b8f60d28ca59acd50b327cb296daa434ae1e79",
+  "src/store.rs": "405cb83bf0afb0cdcc01877cd35936d86b3f880169aa45daffe7af6ae20e17cf",
+  "tests/apfs-add.py": "026172b57ecc442b6b46a85d4c183d1e70cbae9c6f4ec29fe80860716a42e579",
+  "tests/apfs-index.py": "ec1b904e42ac7b3c5b3690fa5bd5c8eea364ed4f63a4172bd114fcac4fbc6c4f",
+  ".github/workflows/ci.yml": "915cd4c578eb2cf2611d44f18dc885f474a2c839c87e2f03ca0213f9dba58853",
+  "README.md": "7fc6a7bc46d6c0104d23dd6329e082d711acc13d3e590cb3dd74cdf26d8ab038",
+  "benchmarks/apfs-index-20261022/paired.py": "733940f48696a3619a406958b711a181c39cb6e7c8dc83639a039b5315d66de9"
+}
