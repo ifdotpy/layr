@@ -108,6 +108,11 @@ The store and signed record formats remain compatible with the Linux backend.
 - `status` checks kernel change counters before and after a live read. It uses a temporary snapshot if validation fails.
   Files with an active memory mapping or an unavailable counter also use the snapshot path.
 - `add` clones changed files into the private index instead of copying all bytes. Hard-linked index files use the existing copy path.
+- `add` validates the working tree before and after it copies selected entries. It avoids full temporary snapshots when validation succeeds.
+  The first `add` still creates a complete index from the head. Active `mmap` files use the snapshot path.
+- A regular `commit` moves the prepared index into the state store and makes it immutable.
+  A journal restores the index after a process stops before the database transaction completes.
+  Commits with overlays retain the existing path.
 - File modes, symbolic links, hard links and file identity survive snapshots. Nested layers stay outside history.
 - Immutable flags prevent ordinary writes to states. The store owner can remove these flags.
   Use the root service for separate users and root-owned state storage.

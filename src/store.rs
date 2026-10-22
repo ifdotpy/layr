@@ -330,6 +330,11 @@ impl<'a> Project<'a> {
             p.db.mark_current()?;
         }
         p.id = p.project_id()?;
+        #[cfg(target_os = "macos")]
+        if crate::apfs_commit::pending(&p)? {
+            // Wait for a live commit, or recover the index after an interrupted one.
+            let _lock = p.lock()?;
+        }
         Ok(p)
     }
 
@@ -353,6 +358,8 @@ impl<'a> Project<'a> {
     pub fn lock(&self) -> Result<Lock> {
         let f = fs::OpenOptions::new().create(true).write(true).truncate(false).open(self.meta_dir().join("lock"))?;
         rustix::fs::flock(&f, rustix::fs::FlockOperation::LockExclusive)?;
+        #[cfg(target_os = "macos")]
+        crate::apfs_commit::recover(self)?;
         Ok(Lock { _f: f })
     }
 

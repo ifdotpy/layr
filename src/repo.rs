@@ -332,6 +332,20 @@ impl<'a> Repo<'a> {
         let id = ids::new_id();
         let dst = self.p.state_path(&id);
         btrfs::snapshot(src, &dst, true)?;
+        self.describe_state(ctx, id, kind, parents, message, line)
+    }
+
+    /// Describe an already prepared immutable tree. No record is written here.
+    pub fn describe_state(
+        &self,
+        ctx: &Ctx,
+        id: String,
+        kind: StateKind,
+        parents: Vec<String>,
+        message: &str,
+        line: Option<&Line>,
+    ) -> Result<StateRec> {
+        let dst = self.p.state_path(&id);
         let info = btrfs::subvol_info(&dst)?;
         Ok(StateRec {
             id,
@@ -446,6 +460,11 @@ impl<'a> Repo<'a> {
     /// Remove state snapshots that were made for a record that was not written.
     pub fn discard_states(&self, states: &[StateRec]) {
         for s in states {
+            #[cfg(target_os = "macos")]
+            if crate::apfs_commit::preserves(&self.p, &s.id).unwrap_or(true) {
+                // The journal owns rollback of the only staged copy.
+                continue;
+            }
             let _ = btrfs::delete_tree(&self.p.state_path(&s.id));
         }
     }
@@ -650,11 +669,24 @@ impl<'a> Repo<'a> {
     /// Changes of the working content: staged (head to index), unstaged (index to working),
     /// untracked and ignored paths, and conflicts left by a merge.
     pub fn status_of(&self, line: &Line, scan: &Path, index: &Path) -> Result<Status> {
-        let head = self.head_tree(line)?;
+        self.status_of_inner(line, scan, index, true)
+    }
+
+    /// Add only needs paths that differ between the index and the working tree.
+    #[cfg(target_os = "macos")]
+    pub fn status_for_add(&self, line: &Line, scan: &Path, index: &Path) -> Result<Status> {
+        self.status_of_inner(line, scan, index, false)
+    }
+
+    fn status_of_inner(&self, line: &Line, scan: &Path, index: &Path, full: bool) -> Result<Status> {
         let mut st = Status::default();
-        if index != head.as_path() {
-            let staged: Vec<Change> = changes::file_changes(&head, index)?.into_iter().filter(|c| !skip_path(&c.path)).collect();
-            st.staged = changes::with_renames(&head, index, staged);
+        if full {
+            let head = self.head_tree(line)?;
+            if index != head.as_path() {
+                let staged: Vec<Change> =
+                    changes::file_changes(&head, index)?.into_iter().filter(|c| !skip_path(&c.path)).collect();
+                st.staged = changes::with_renames(&head, index, staged);
+            }
         }
         let rules = Rules::new(scan);
         let mut untracked_files = Vec::new();
@@ -690,6 +722,9 @@ impl<'a> Repo<'a> {
         }
         st.untracked_dirs = dirs.into_iter().collect();
         st.untracked = untracked_files;
+        if !full {
+            return Ok(st);
+        }
         let head_rec = self.state(&line.head)?;
         for c in &head_rec.conflicts {
             if conflict_open(scan, c)? {

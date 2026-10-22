@@ -5,6 +5,8 @@
 
 #[macro_use]
 mod ctx;
+#[cfg(target_os = "macos")]
+mod apfs_commit;
 mod access;
 #[cfg(any(target_os = "macos", feature = "overlayfs"))]
 mod apfs_stream;

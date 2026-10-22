@@ -299,6 +299,54 @@ fn prune_empty_in(t: &crate::tree::Tree, rel: &str) {
     }
 }
 
+/// Resolve add pathspecs against one consistent view before modifying the index.
+fn select_add(
+    h: &Here<'_>,
+    a: &crate::args::Parsed,
+    specs: &[String],
+    st: &Status,
+    scan: &Path,
+    index: &Path,
+) -> Result<(BTreeSet<String>, Vec<String>)> {
+    let mut paths: BTreeSet<String> = BTreeSet::new();
+    for c in &st.unstaged {
+        if matches(specs, &c.path) {
+            paths.insert(c.path.clone());
+        }
+    }
+    if !a.has("-u") {
+        for u in &st.untracked {
+            if matches(specs, u) {
+                paths.insert(u.clone());
+            }
+        }
+    }
+    // Ignored paths named explicitly.
+    let mut ignored_named = Vec::new();
+    for s in specs {
+        if s.is_empty() {
+            continue;
+        }
+        let in_scan = fsutil::lmeta(scan, s).is_some();
+        let in_index = fsutil::lmeta(index, s).is_some();
+        let matched = paths.iter().any(|p| p == s || p.starts_with(&format!("{s}/"))) || s.contains(['*', '?']);
+        if !matched {
+            if st.ignored.iter().any(|i| i == s || i.starts_with(&format!("{s}/"))) {
+                if a.has("-f") {
+                    for i in st.ignored.iter().filter(|i| *i == s || i.starts_with(&format!("{s}/"))) {
+                        paths.insert(i.clone());
+                    }
+                } else {
+                    ignored_named.push(h.rel(s));
+                }
+            } else if !in_scan && !in_index {
+                return Err(exit(128, format!("fatal: pathspec '{}' did not match any files", h.rel(s))));
+            }
+        }
+    }
+    Ok((paths, ignored_named))
+}
+
 pub fn add(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let spec = Spec::new()
         .flag("-A|--all")
@@ -328,43 +376,30 @@ pub fn add(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     h.repo.authorize_line(ctx, &line, crate::repo::LineOp::Direct)?;
     let _lock = h.repo.p.lock()?;
-    let (st, scan, _it, index) = h.repo.status(&line)?;
-    let mut paths: BTreeSet<String> = BTreeSet::new();
-    for c in &st.unstaged {
-        if matches(&specs, &c.path) {
-            paths.insert(c.path.clone());
+    let line = h.repo.line(&line.id)?;
+    #[cfg(target_os = "macos")]
+    let prepared = {
+        let work = h.repo.working(&line);
+        let index = h.repo.current_stage(&line)?.unwrap_or(h.repo.head_tree(&line)?);
+        crate::storage::stable_read(&[&work, &index], || {
+            let st = h.repo.status_for_add(&line, &work, &index)?;
+            let (paths, ignored) = select_add(&h, &a, &specs, &st, &work, &index)?;
+            let scan = crate::repo::Temp { path: h.repo.p.scan_dir().join(ids::new_id()) };
+            crate::storage::create_subvolume(&scan.path)?;
+            crate::storage::copy_selected(&work, &scan.path, &paths)?;
+            Ok((scan, paths, ignored))
+        })?
+    };
+    #[cfg(not(target_os = "macos"))]
+    let prepared: Option<(crate::repo::Temp, BTreeSet<String>, Vec<String>)> = None;
+    let (scan, paths, ignored_named) = match prepared {
+        Some(v) => v,
+        None => {
+            let (st, scan, _it, index) = h.repo.status(&line)?;
+            let (paths, ignored) = select_add(&h, &a, &specs, &st, &scan.path, &index)?;
+            (scan, paths, ignored)
         }
-    }
-    if !a.has("-u") {
-        for u in &st.untracked {
-            if matches(&specs, u) {
-                paths.insert(u.clone());
-            }
-        }
-    }
-    // Ignored paths named explicitly.
-    let mut ignored_named = Vec::new();
-    for s in &specs {
-        if s.is_empty() {
-            continue;
-        }
-        let in_scan = fsutil::lmeta(&scan.path, s).is_some();
-        let in_index = fsutil::lmeta(&index, s).is_some();
-        let matched = paths.iter().any(|p| p == s || p.starts_with(&format!("{s}/"))) || s.contains(['*', '?']);
-        if !matched {
-            if st.ignored.iter().any(|i| i == s || i.starts_with(&format!("{s}/"))) {
-                if a.has("-f") {
-                    for i in st.ignored.iter().filter(|i| *i == s || i.starts_with(&format!("{s}/"))) {
-                        paths.insert(i.clone());
-                    }
-                } else {
-                    ignored_named.push(h.rel(s));
-                }
-            } else if !in_scan && !in_index {
-                return Err(exit(128, format!("fatal: pathspec '{}' did not match any files", h.rel(s))));
-            }
-        }
-    }
+    };
     if a.has("-n") {
         for p in &paths {
             let what = if fsutil::lmeta(&scan.path, p).is_some() { "add" } else { "remove" };
@@ -740,6 +775,19 @@ pub fn commit(ctx: &Ctx, args: &[String]) -> Result<i32> {
         Some(s) => s,
         None => head_root.clone(),
     };
+    #[cfg(target_os = "macos")]
+    let mut promotion = if src == h.repo.p.stage_path(&line.id) {
+        Some(crate::apfs_commit::IndexCommit::prepare(&h.repo.p, &line.id)?)
+    } else {
+        None
+    };
+    #[cfg(target_os = "macos")]
+    let mut state = if let Some(p) = &promotion {
+        h.repo.describe_state(ctx, p.id.clone(), StateKind::Commit, parents, &message, Some(&line))?
+    } else {
+        h.repo.new_state(ctx, &src, StateKind::Commit, parents, &message, Some(&line))?
+    };
+    #[cfg(not(target_os = "macos"))]
     let mut state = h.repo.new_state(ctx, &src, StateKind::Commit, parents, &message, Some(&line))?;
     let staged: Vec<Change> = match changes::file_changes(&head_root, &h.repo.p.state_path(&state.id)) {
         Ok(v) => v.into_iter().filter(|c| !skip_path(&c.path)).collect(),
@@ -750,6 +798,10 @@ pub fn commit(ctx: &Ctx, args: &[String]) -> Result<i32> {
     };
     if staged.is_empty() && !a.has("--allow-empty") && !a.has("--amend") {
         h.repo.discard_states(std::slice::from_ref(&state));
+        #[cfg(target_os = "macos")]
+        if let Some(p) = promotion.take() {
+            p.rollback()?;
+        }
         return nothing(&h, &line);
     }
     if let Some((n, e)) = author {
@@ -769,6 +821,10 @@ pub fn commit(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let rec = h.repo.move_head(ctx, "commit", &line, &state.id, vec![state.clone()], None, serde_json::json!({"line": line.id}));
     rec?;
+    #[cfg(target_os = "macos")]
+    if let Some(p) = promotion.take() {
+        p.finish()?;
+    }
     h.repo.drop_stage(&line)?;
     if !a.has("-q") {
         let root = if parents_empty(&state) { " (root-commit)" } else { "" };
@@ -954,7 +1010,7 @@ pub fn restore_impl(
         let wdir = repo.working(&line);
         let mut n = 0;
         for c in &head.conflicts {
-            if !matches(specs, &c.path) {
+            if !matches(&specs, &c.path) {
                 continue;
             }
             let sid = if ours { c.ours.clone() } else { c.theirs.clone() };

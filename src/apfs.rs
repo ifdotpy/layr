@@ -142,6 +142,51 @@ pub fn stable_read<T>(roots: &[&Path], read: impl FnOnce() -> Result<T>) -> Resu
     }
     result.map(Some)
 }
+
+/// Copy selected entries to a private tree. The caller must validate the live source
+/// before it publishes any of these bytes to an index.
+pub fn copy_selected(src: &Path, dst: &Path, paths: &std::collections::BTreeSet<String>) -> Result<()> {
+    let _t = crate::trace::span("APFS copy selected");
+    let source = crate::tree::Tree::open(src)?;
+    let target = crate::tree::Tree::open(dst)?;
+    for rel in paths {
+        // Descendants of a directory replaced by a symlink are deletions.
+        let path = match crate::fsutil::safe_join(src, rel) {
+            Ok(path) => path,
+            Err(_) => continue,
+        };
+        let m = match fs::symlink_metadata(path) {
+            Ok(metadata) => crate::fsutil::meta_of(&metadata),
+            Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory) => continue,
+            Err(e) => return Err(e.into()),
+        };
+        target.mkdirs_for(rel, None)?;
+        match m.ftype {
+            crate::fsutil::FType::File => {
+                let mut input = source.open_read(rel)?;
+                let metadata = input.metadata()?;
+                let output = match target.clone_new_file(&input, rel)? {
+                    Some(file) => file,
+                    None => {
+                        let mut file = target.create(rel, 0o600)?;
+                        io::copy(&mut input, &mut file)?;
+                        file
+                    }
+                };
+                crate::sys::apfs_attribute(&dst.join(rel), c"com.layr.origin", Some(&file_identity(&src.join(rel))?))?;
+                output.set_permissions(fs::Permissions::from_mode(m.mode & 0o7777))?;
+                crate::fsutil::set_mtime(&output, metadata.mtime(), metadata.mtime_nsec())?;
+            }
+            crate::fsutil::FType::Symlink => {
+                target.symlink(rel, &source.read_link(rel)?)?;
+                crate::sys::apfs_attribute(&dst.join(rel), c"com.layr.origin", Some(&file_identity(&src.join(rel))?))?;
+            }
+            crate::fsutil::FType::Dir => target.mkdirs(rel, None)?,
+            crate::fsutil::FType::Special => bail!("cannot snapshot special file {}", src.join(rel).display()),
+        }
+    }
+    Ok(())
+}
 pub fn file_identity(path: &Path) -> Result<Vec<u8>> {
     match crate::sys::apfs_attribute(path, c"com.layr.origin", None) {
         Ok(v) => Ok(v),
