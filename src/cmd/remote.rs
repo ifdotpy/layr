@@ -464,8 +464,21 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if args.iter().any(|s| matches!(s.as_str(), "-v" | "--verbose")) {
         return Err(exit(128, "use layr git remote -v"));
     }
-    let a = parse(&Spec::new().flag("--json").value("--key").value("--paper-key-out"), args)?;
+    let a = parse(&Spec::new().flag("--json").value("--public-key").value("--paper-key-out"), args)?;
     let sub = a.pos.first().map(String::as_str).unwrap_or("list");
+    if sub == "self" {
+        if a.pos.len() != 1 {
+            bail!("usage: layr remote self [--json]");
+        }
+        let machine = &ctx.store.machine;
+        let public_key = hex::encode(machine.key.verifying_key().to_bytes());
+        if a.has("--json") {
+            outln!(ctx, "{}", json!({"id": machine.id, "public_key": public_key}));
+        } else {
+            outln!(ctx, "id {}\npublic_key {public_key}", machine.id);
+        }
+        return Ok(0);
+    }
     if matches!(sub, "-v" | "--verbose" | "get-url" | "set-url" | "rm") {
         return Err(exit(128, format!("use layr git remote {sub}")));
     }
@@ -556,14 +569,14 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 Kind::Store => {
                     let mut store = store_remote::open(&url, repo)?;
                     store.configure(ctx, &store_remote::ConfigureOptions::default())?;
-                    store.trust(repo, &full)?;
+                    store.trust(repo, &full, a.get("--public-key"))?;
                 }
                 Kind::Peer { .. } => {
                     let key = a
                         .get("--key")
                         .map(str::to_owned)
                         .or(repo.p.db.machine_key(&full)?)
-                        .ok_or_else(|| exit(128, "unknown machine key; give --key <public key>"))?;
+                        .ok_or_else(|| exit(128, "unknown machine key; give --public-key <ed25519>"))?;
                     let bytes = hex::decode(&key)?;
                     if bytes.len() != 32 {
                         bail!("invalid machine key");
@@ -582,7 +595,7 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
         _ => {
             return Err(exit(
                 128,
-                "usage: layr remote add <name> <url> [--paper-key-out <path>] | list | remove <name> | trust <name> <machine> [--key <key>]",
+                "usage: layr remote add <name> <url> [--paper-key-out <path>] | list | self | remove <name> | trust <name> <machine> [--public-key <ed25519>]",
             ))
         }
     }
@@ -841,7 +854,7 @@ mod store_remote {
         pub fn gc(&self, _dry_run: bool) -> Result<Vec<String>> {
             bail!("store remote: not implemented")
         }
-        pub fn trust(&self, _repo: &Repo, _machine: &str) -> Result<()> {
+        pub fn trust(&self, _repo: &Repo, _machine: &str, _public_key: Option<&str>) -> Result<()> {
             bail!("store remote: not implemented")
         }
     }

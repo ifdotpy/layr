@@ -2,6 +2,13 @@
 # Named peer remotes, command migration, one-way exchange, pull and independent retention.
 . "$(dirname "$0")/lib.sh"
 set -e
+l remote self --json > "$T/self.json"
+ok "a host can show its identity outside a project" python3 - "$T/self.json" "$LAYR_ROOT/machine/id" <<'CHECK'
+import json,pathlib,sys,uuid
+d=json.load(open(sys.argv[1])); assert set(d)=={'id','public_key'}
+assert d['id']==pathlib.Path(sys.argv[2]).read_text().strip(); uuid.UUID(d['id'])
+assert len(bytes.fromhex(d['public_key']))==32
+CHECK
 sample "$T/src"
 l init x --from "$T/src" -q >/dev/null
 A=$LAYR_ROOT/projects/x
@@ -150,7 +157,9 @@ CHECK
 l reindex >/dev/null
 eq "reindex keeps the recovered snapshot readable" retained "$(l show "$retained:retained.txt")"
 ok "sync can repeat after reindex of recovered states" l sync peer --command -- "${transport[@]}"
-l remote trust peer "$(cat "$BR/machine/id")" >/dev/null
+B remote self --json > "$T/peer-self.json"
+peer_public_key=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["public_key"])' "$T/peer-self.json")
+l remote trust peer "$(cat "$BR/machine/id")" --public-key "$peer_public_key" >/dev/null
 ok "remote trust records the known key" l remote list --json
 
 has "old command transport names sync remote" "layr sync <remote>" "$(l sync -- false 2>&1 || true)"

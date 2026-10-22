@@ -199,7 +199,7 @@ without a checkout.
 | access        | `access [list|grant [--until <30m|2h|1d>]|revoke|deny|allow|check]`, `protect [<pattern> --update <role> --check <names> --path <path>=<role> --approvals <n> --approvers <principals> --direct --rewrite <role> --no-expect | --remove]`, `approve [--withdraw] <state>`, `attest <kind> <rev> [--payload <file>]`, `attestations <rev> [--kind <kind>] [--json]` |
 | safety        | `undo`, `op log`, `save`, `try <state> -- <cmd>`, `gc`, `fsck`, `reindex`           |
 | Git bridge    | `git remote`, `git fetch`, `git pull`, `git push [--squash]`, `git clone`, `git sync`                             |
-| remotes       | `remote add\|list\|remove\|trust`, `sync <remote>`, `push <remote>`, `fetch <remote>`, `pull <remote>`, `clone <url>` |
+| remotes       | `remote add\|list\|self\|remove\|trust`, `sync <remote>`, `push <remote>`, `fetch <remote>`, `pull <remote>`, `clone <url>` |
 | records       | `op export`, `op import` (JSONL) |
 | copies        | `export <folder>`                                                                              |
 | overlays      | `overlay create <name> [--readers <principals>] [--mode shared\|follow]`, `overlay list`, `overlay readers`, `overlay use [--add\|--remove\|--none] <names>`, `overlay move [--purge] <name> <paths>`, `overlay log\|show\|diff\|grep\|ls-files <name>` |
@@ -447,7 +447,9 @@ The final snapshot of a deleted line always travels, because `undo` needs it.
   The merge can fast-forward. Conflicts remain in the new state.
 - `layr remote list` shows remotes and known machines.
 - `layr remote trust work <machine>` trusts a known peer key.
-  An unknown key requires `--key <public-key>`.
+  An unknown key requires `--public-key <ed25519>`.
+  A new host gets its identity with `layr remote self --json`, outside any project.
+  The result contains `id` (the machine UUID) and `public_key` (64 hexadecimal characters).
 - `layr remote remove work` removes the remote configuration.
 
 Remote configuration uses signed `config` records in the project database.

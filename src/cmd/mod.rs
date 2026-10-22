@@ -186,7 +186,7 @@ Lines and states:
    save, undo, op, try, adopt
    ref set/list/log/delete, attest, attestations, change list/show/log/diff
 Remotes:
-   remote add, list, remove, trust; sync, fetch, pull, push, clone
+   remote add, list, self, remove, trust; sync, fetch, pull, push, clone
 Git bridge:
    git remote, fetch, pull, push, clone, sync
 Overlays (files with their own readers and history, shown in lines):

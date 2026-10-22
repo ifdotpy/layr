@@ -86,7 +86,7 @@ for l in sys.stdin:
     if json.loads(l)['r']['machine'] == '$CID': sys.stdout.write(l)" > $T/c.jsonl
 has "records of an untrusted machine are refused" "untrusted" "$(l --project s op import $T/c.jsonl 2>&1)"
 key=$(LAYR_ROOT=$CR l --project s remote list | sed -n 's/^\* .* key \([0-9a-f]*\)$/\1/p')
-l --project s remote trust test-peer $CID --key $key >/dev/null
+l --project s remote trust test-peer $CID --public-key $key >/dev/null
 has "an explicit trust takes them" "imported" "$(l --project s op import $T/c.jsonl 2>&1)"
 
 # 7. The result does not depend on the order of records.
