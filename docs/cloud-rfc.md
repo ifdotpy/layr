@@ -56,9 +56,9 @@
 
 ### 1.1. Layr [СУЩ]
 
-- Version control на Btrfs: `line` — writable snapshot, `state` — read-only snapshot плюс подписанная запись, diff/status основаны на metadata-send; merge использует reflinks. Есть Git bridge, операции с ролями, защита веток, auto states, backup/restore, peer sync.
+- Version control на Btrfs: `line` — writable snapshot, `state` — read-only snapshot плюс подписанная запись, diff/status основаны на metadata-send; merge использует reflinks. Есть Git bridge, операции с ролями, защита веток, auto states, копия проекта в папку с восстановлением, peer sync.
 - Оверлеи: отдельные истории файлов с собственными readers; `shared` видим всем читателям проекта, другие слои видимы их readers. Рабочая директория остаётся **обычным writable Btrfs subvolume**, слои физически собираются при смене stack; это **не OverlayFS**.
-- Кэши (`regenerable`): nested subvolumes вне основной истории, diff и backup. Новая линия может получить reflink-копию прогретого кэша ближайшего предка. Явное сохранение через `layr save --caches`.
+- Кэши (`regenerable`): nested subvolumes вне основной истории, diff и копий проекта. Новая линия может получить reflink-копию прогретого кэша ближайшего предка. Явное сохранение через `layr save --caches`.
 - Backends: btrfs на Linux поддерживается; OverlayFS (ext4/XFS) и APFS (macOS) экспериментальные. Форматы store и signed record совместимы между backends (`README.md`). Полного паритета у экспериментальных backends нет. Поэтому формат remote не должен зависеть от backend.
 - Signed record сейчас подписывает ключ машины. `Author.session` является свободным текстом из `LAYR_SESSION`: Layr его показывает, но не проверяет (`src/model.rs`).
 - Текущие ограничения overlays: нет полной реализации route-patterns, полноценного составного идентификатора stack для approvals, encryption/replication приватных overlays и некоторых режимов из дизайн-документа. Нужно сверять статус с конкретным коммитом перед разработкой.
@@ -114,7 +114,7 @@ APFS используется только для сборок, которым �
 3. **Layr Agents** — часть Studio, не Layr (1.5); интеграция через публичный CLI и API Layr; множество агентов создают независимые states и checkpoints; облачный worker — необязательный способ запуска.
 4. **Layr Compute** — CI и тесты, которые получают заранее подготовленные state и persistent caches, а не «checkout + install с нуля».
 5. **Layr Environments** — версионирование согласованного набора `code + config + cache descriptor + data snapshot + runtime description`.
-6. **Layr Cloud Storage / Desk** — E2EE backup, preview файлов, холодная история, key grants и BYO bucket.
+6. **Layr Cloud Storage / Desk** — E2EE копии проекта, preview файлов, холодная история, key grants и BYO bucket.
 7. **Layr Merge Queue** — очередь merge в защищённую линию: Layr собирает `main + A + B`, проверяет точный view и двигает ref только после проверки. `main` всегда проходит проверки. Подбор комбинаций (Integration Planner) остаётся исследованием этапа 5.
 
 ### 2.2. Отличительная UX-операция
@@ -441,6 +441,8 @@ Cloud может быть только metadata + S3 remote. Пользоват�
 
 ### 6.3. Предлагаемая раскладка S3 (V1)
 
+> **Решение реализации (22.10.2026):** разделы 6.3–6.5 заменены файлом `docs/remote-design.md`. Store remote несёт подписанный журнал операций и states в формате v2 (из Layr Desk); CAS refs, HMAC-имена и digest ciphertext не используются; повтор загрузки решает случайный `attempt`, как в Desk. Peer remote (`ssh://`) использует существующий протокол `sync`.
+
 ```text
 s3://layr-cloud-{region}/
   tenants/{tenant_id}/projects/{project_id}/
@@ -719,7 +721,7 @@ COGS = hot_EC2_hours
 **Database branching:** CoW clone согласованного cluster checkpoint на worker; каждому тестовому агенту своя DB instance. Например, 100 GB seed, 20 тестовых веток → исходные immutable блоки делятся, изменения/дополнительные WAL расходуют пространство отдельно. Это свойство CoW/Btrfs, а Layr добавляет версии, orchestration и link с кодом.
 
 Ограничения:
-- PostgreSQL: coherent base backup/snapshot всего cluster + WAL; tablespaces, fsync и recovery rules. Snapshot работающей базы без согласованной процедуры может быть невалиден.
+- PostgreSQL: coherent base copy/snapshot всего cluster + WAL; tablespaces, fsync и recovery rules. Snapshot работающей базы без согласованной процедуры может быть невалиден.
 - SQLite: согласовать WAL / checkpoint перед копированием.
 - RocksDB: SST files и manifests; compaction может резко увеличить уникальные bytes.
 - Не обещать ускорение SQL throughput: CoW может даже ухудшить write amplification и fsync latency.
@@ -874,7 +876,7 @@ Execution и approval не являются отдельными вызовам�
 **Сейчас (layr `ef7b637`, проверено 22.10.2026; в 0.2 был `dea8205`):**
 - `remote`, `fetch`, `pull`, `push`, `clone` работают с git bridge.
 - `sync` (двусторонняя репликация) запускает на другой стороне команду, которая вызывает `serve-peer`.
-- `backup` (односторонняя копия в папку, отдельно от cloud) имеет `run`, `verify`, `list`, `restore`.
+- Старая команда односторонней копии проекта в папку (отдельно от cloud) имеет подкоманды записи, проверки, списка и восстановления.
 - `machines trust` хранит ключи других машин.
 - `cache` имеет алиас `layer`.
 
@@ -886,19 +888,19 @@ Execution и approval не являются отдельными вызовам�
 | нет | `remote add <name> <url>` | Машина (`ssh://`), папка (`file://`), S3 vault Desk (`s3://`) или OCI registry (`oci://`, только `push` runnable view, 31) |
 | `sync -- <command>` | `sync [<remote>]` | Двусторонняя синхронизация своих машин; транспорт задаёт URL remote |
 | нет | `push`, `pull`, `fetch`, `clone` | Одно направление со своим remote; публикация ref через CAS (6.5) |
-| `backup`, `backup run`, `backup restore`, `backup verify`, `backup list` | удаляется | Отдельной функции backup нет. Копию вне машины даёт cloud remote (S3 vault Desk или Layr Cloud): `push`, `clone`, `fsck --remote <name>`, `log --remote <name>` |
+| старая команда копии проекта в папку и её подкоманды | удаляется вместе с именем (решение пользователя) | Отдельной функции копии нет. Копию вне машины даёт cloud remote (S3 vault Desk или Layr Cloud): `push`, `clone`, `fsck --remote <name>`, `log --remote <name>` |
 | `machines`, `machines trust` | `remote list`, `remote trust` | Одно слово для других машин |
 | `serve-peer` | внутренняя команда, нет в `help` | `sync` и `push` сами запускают её на другой стороне |
 | `cache` / `layer` | `cache` | «Layer» в этом RFC означает overlay и слои секретов (7.1) |
 
-**Почему нет отдельного backup.** Backup отдельно от cloud не имеет смысла: cloud remote уже хранит неизменяемые states вне машины (6.1). Защиту, ради которой backup был нужен, дают инварианты всех remote:
+**Почему нет отдельной команды копии.** Копия отдельно от cloud не имеет смысла: cloud remote уже хранит неизменяемые states вне машины (6.1). Защиту, ради которой она была нужна, дают инварианты всех remote:
 1. **Sync не удаляет states.** Sync и push двигают только refs. Старые позиции refs остаются в журнале операций, поэтому удалённую или переписанную линию можно вернуть через `undo` на любой копии.
 2. **States удаляет только GC, и по правилу хранения конкретного remote.** По умолчанию remote хранит всё. GC одной машины не удаляет states на других remote.
 3. **Ключ только на добавление.** Для cloud remote можно выдать машине ключ, который добавляет объекты и двигает refs через CAS, но не удаляет объекты. В S3 это обеспечивают права IAM и Object Lock. Так взломанная машина не уничтожит историю.
 
 Копия на внешний диск без работающего layr является remote `file://` с теми же инвариантами.
 
-**Первый шаг перед удалением `backup`:** проверить в коде Layr, что `sync` не распространяет удаление линий и что `gc` не удаляет states на других машинах. Если это не так, сначала исправить, а потом удалять `backup`.
+**Первый шаг перед удалением старой команды копии:** проверить в коде Layr, что `sync` не распространяет удаление линий и что `gc` не удаляет states на других машинах. Если это не так, сначала исправить, а потом удалять её.
 
 **Не переименовывать:** `status`, `diff`, `add`, `commit`, `branch`, `switch`, `merge`, `log`, `stash` и другие git-глаголы с тем же смыслом. `branch` не становится `line`, хотя в Layr это линия.
 
@@ -1031,7 +1033,7 @@ Execution и approval не являются отдельными вызовам�
 | 2C | Точное review и публикация в main проходят на двух Mac | 1C, 1E, 2B |
 | 2D | Merge queue: `main` двигается только после проверки точного view | 2C |
 
-После 1B фазы 1C, 1E и 2A можно выполнять независимо. Фаза 1D ждёт только 1C, потому что удаление `backup` требует гарантий хранения.
+После 1B фазы 1C, 1E и 2A можно выполнять независимо. Фаза 1D ждёт только 1C, потому что удаление старой команды копии требует гарантий хранения.
 Checkpoints Studio (2A) не зависят от имён команд CLI и от полного GC. До 1C remote хранит всё и ничего не удаляет.
 Общий формат из 0B обязателен для всех веток работ.
 
@@ -1043,7 +1045,7 @@ Checkpoints Studio (2A) не зависят от имён команд CLI и о
 
 **Область:** Layr, Studio, Desk. Разделы 1, 10 и 12.4.
 
-- Первым шагом, до любых изменений CLI: тест, который проверяет, что `sync` не удаляет линии на другой машине и что локальный `gc` не удаляет states на другой копии. Пока нет cloud remote, `backup` остаётся единственной копией вне машины.
+- Первым шагом, до любых изменений CLI: тест, который проверяет, что `sync` не удаляет линии на другой машине и что локальный `gc` не удаляет states на другой копии. Пока нет cloud remote, старая команда копии остаётся единственной копией вне машины.
 - Зафиксировать коммиты трёх проектов. Для каждой нужной функции записать: есть, частично готова, отсутствует.
 - Проверить overlays, подписи, sync, GC, формат Desk и перенос чата. Не считать описание в README доказательством поведения.
 - Составить список вызовов CLI в Studio, Desk, Attar и внешних скриптах.
@@ -1117,7 +1119,7 @@ Checkpoints Studio (2A) не зависят от имён команд CLI и о
 
 **Готово, когда:** GC одновременно с push и restore не повреждает ни одно сохраняемое состояние. Отдельный remote восстанавливает историю после удаления локальной линии.
 
-**Ограничение:** функцию `backup` нельзя удалять до прохождения этих проверок и готовности замен в фазе 1D.
+**Ограничение:** старую команду копии нельзя удалять до прохождения этих проверок и готовности замен в фазе 1D.
 
 #### Фаза 1D. Единый remote CLI и Git coexistence
 
@@ -1128,7 +1130,7 @@ Checkpoints Studio (2A) не зависят от имён команд CLI и о
 - Перенести Git bridge в `layr git …`. Сохранить обмен с внешними участниками через Git mirror.
 - Экспортировать в Git только разрешённую shared-проекцию. Проверить отсутствие private files, caches и secrets.
 - Обновить вызовы Studio, Desk, Attar и документацию из списка 0A в том же изменении.
-- Удалить отдельные backup-команды после проверки их замен. Для старых имён выдавать ошибку с новым именем, без алиасов.
+- Удалить старую команду копии вместе с именем после проверки замен; она становится неизвестной командой. Для остальных старых имён выдавать ошибку с новым именем, без алиасов.
 - Проверить чтение старых данных и документированный путь миграции. Не смешивать это с поддержкой старого синтаксиса.
 
 **Готово, когда:** машина, внешний диск и S3 проходят один набор проверок передачи и восстановления. Обновлённые потребители проходят свои проверки; Git mirror не раскрывает закрытые данные.
@@ -1260,7 +1262,7 @@ Checkpoints Studio (2A) не зависят от имён команд CLI и о
 | Multi-ref commit? | Отдельный CAS на каждый ref; `refs/head.json` только для атомарной публикации защищённых веток |
 | Имя объекта в S3? | `HMAC(K_name, plaintext)`, шифрование `age`; после 412 manifest берёт digest сохранённого объекта (6.3). Своей криптографии нет |
 | Модель ядра? | Пять сущностей: State, Ref, Attestation, View, Remote (3.0) |
-| Backup в CLI? | Нет отдельной функции; копию вне машины даёт cloud remote; инварианты remote защищают историю; git bridge в `layr git …` (12.4) |
+| Отдельная команда копии в CLI? | Нет; копию вне машины даёт cloud remote; инварианты remote защищают историю; git bridge в `layr git …` (12.4) |
 | Горячая копия на Mac? | Btrfs в Linux VM; APFS только для сборок, которым нужен Mac (1.6) |
 | Объём работы над APFS backend? | **Открыт.** Текущая работа идёт в APFS (1.6). Решить: изменить 1.6 или ограничить APFS сборками для Mac |
 | Control plane в Stage 1? | Нет для одного владельца: S3 + IAM + conditional writes. Нужен для reviews и чужих writers |
@@ -1557,10 +1559,10 @@ struct State {
 | Overlays | `overlay create/list/readers/use/move/log/show/diff/...` | Composite identity / routing |
 | Cache | `cache add/remove/list/repair` (алиас `layer`), `save --caches`, `regenerable` | Capture/fork/resolve/promote |
 | Policy | `access`, `protect`, `approve`, `approvals`, `try`, `checks` | Policy on artifact namespaces |
-| Replica/maintenance | `sync`, `serve-peer`, `machines`, `backup`, `export`, `gc`, `fsck`, `reindex`, `op log/export/import` | Object API / leases / event cursor |
+| Replica/maintenance | `sync`, `serve-peer`, `machines`, старая команда копии, `export`, `gc`, `fsck`, `reindex`, `op log/export/import` | Object API / leases / event cursor |
 | Git bridge | `remote`, `clone`, `fetch`, `pull`, `push`, `git-sync` | Separate adapter, not Core identity |
 
-Имена команд сверены с `src/cmd/mod.rs` на `070653e` (22.10.2026). Флаги не сверены. Переименования `machines`, `backup`, `serve-peer` и git bridge предложены в 12.4.
+Имена команд сверены с `src/cmd/mod.rs` на `070653e` (22.10.2026). Флаги не сверены. Переименования `machines`, удаление старой команды копии, `serve-peer` и git bridge предложены в 12.4.
 
 **Примечание:** таблица — карта обсуждённого функционала, а не автоматически сгенерированная проверка покрытия всех CLI flags. Существующие команды не следует перепроектировать только ради нового SDK.
 
@@ -1704,7 +1706,7 @@ Layr Cloud ------------- remote, scheduler, tenant billing, worker pool
 
 Правило, *какой* cache или artifact можно продвигать (роли, нужные attestations), хранит Layr как правило защищённой линии или namespace (12.5). Studio только запрашивает promotion и не обходит это правило.
 
-**Нельзя помещать в Core:** определение устаревших C++ объектных файлов, GN/Ninja dependency graph, интерпретацию LLVM bitcode, crash-consistent PostgreSQL backup, логику генерации source code AI-агентом, миграции баз данных и интерпретацию результатов тестов.
+**Нельзя помещать в Core:** определение устаревших C++ объектных файлов, GN/Ninja dependency graph, интерпретацию LLVM bitcode, crash-consistent PostgreSQL copy, логику генерации source code AI-агентом, миграции баз данных и интерпретацию результатов тестов.
 
 **Можно помещать в Core:** пять сущностей (3.0), scope прав, поток файловых изменений и GC. Pins и leases являются refs с TTL.
 
