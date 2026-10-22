@@ -50,14 +50,12 @@ pub fn refs(ctx: &Ctx, args: &[String]) -> Result<i32> {
             }
             repo.require(ctx, "line.manage")?;
             let name = &a.pos[1];
-            if matches!(name.as_str(), "HEAD" | "stash") {
-                bail!("'{name}' is a reserved revision name");
+            const PREFIXES: &[&str] = &["env/", "release/", "pins/", "holds/", "leases/", "caches/", "derived/"];
+            if !PREFIXES.iter().any(|p| name.starts_with(p)) {
+                bail!("mutable ref names must start with one of: {}", PREFIXES.join(", "));
             }
             if !crate::model::is_ref(name) {
                 bail!("invalid ref name '{name}'");
-            }
-            if ["changes/", "views/", "attestations/"].iter().any(|p| name.starts_with(p)) {
-                bail!("'{name}' is a reserved revision address, not a mutable ref");
             }
             let _lock = repo.p.lock()?;
             if repo.p.db.line_by_name(name)?.is_some() || repo.p.db.line_by_id(name)?.is_some() {

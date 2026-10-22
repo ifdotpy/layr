@@ -220,7 +220,8 @@ folder. A path that the exported commit does not have fails with exit 128.
 
 ## Refs, changes, and attestations
 
-Refs name states without a work folder. A ref can contain `/`, for example `env/prod` or `pins/build`.
+Refs name states without a work folder, for example `env/prod` or `pins/build`.
+Mutable ref names must start with `env/`, `release/`, `pins/`, `holds/`, `leases/`, `caches/`, or `derived/`.
 `ref set` refuses line names. Use `commit`, `merge`, or `reset` to change a line.
 `--expect` compares the current state before the update. A mismatch changes nothing and returns an error.
 `--ttl` accepts positive durations such as `30s`, `5m`, `2h`, and `1d`.
@@ -235,7 +236,7 @@ layr ref log env/prod
 layr undo
 ```
 
-`<ref>@{0}` selects the current position. Higher numbers select earlier positions.
+`<ref>@{0}` selects the current position. `<ref>@{1}` selects the previous position. `ref log` lists the newest position first.
 `ref log` retains positions after delete. `undo` restores a ref if no later update changes it.
 Garbage collection (GC) keeps live ref targets and their dependencies.
 Expired refs stop resolving. GC records their removal. The normal undo window can retain earlier positions.

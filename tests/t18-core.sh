@@ -11,6 +11,9 @@ echo first >> notes.txt
 l commit -qam first
 S2=$(l rev-parse HEAD)
 C=$(l change list --json | python3 -c 'import json,sys; print(next(x["change_id"] for x in json.load(sys.stdin) if x["message"]=="first"))')
+no 'unprefixed ref names fail' l ref set foo HEAD
+has 'the error lists all mutable ref prefixes' 'env/, release/, pins/, holds/, leases/, caches/, derived/' "$(l ref set foo HEAD 2>&1)"
+ok 'a prefixed ref name works' l ref set env/x HEAD
 ok 'set a ref' l ref set env/prod HEAD
 no 'ref set refuses a line' l ref set main HEAD~1
 no 'a stale expected position fails' l ref set env/prod HEAD~1 --expect HEAD~1
