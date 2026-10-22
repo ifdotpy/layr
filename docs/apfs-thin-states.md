@@ -45,6 +45,8 @@ Merges, imports, received states and lines with overlays keep complete trees.
 
 A state that is the base of another state stays on disk until that state goes.
 This is also true when `gc` deletes its record. A later `gc` deletes it.
+`overlay move --purge` cannot wait: it gives the upper states complete trees, then deletes the state.
+`gc` also deletes a layer that has no record after one hour: a process stopped before it wrote the record.
 
 ## Readers
 
@@ -75,6 +77,12 @@ A recursive clone copies hard links as separate files. Thin layers clone each en
 Move detection needs an identity that survives a clone. APFS clones, writes and renames keep the creation time.
 Layr uses the creation time as the identity. It no longer writes `com.layr.origin` on each entry.
 That attribute cost about 80 bytes per entry in each tree.
+
+A tool that sets an old modification time (tar, zip, npm) also lowers the creation time to it.
+Many unrelated files then share one creation time, usually with zero nanoseconds. So:
+
+- A creation time with zero nanoseconds is no identity for moves.
+- A deleted file and a new file are a move only when their identity is unique in both trees.
 
 ## Limits
 

@@ -124,6 +124,7 @@ The store and signed record formats remain compatible with the Linux backend.
 - A state that is the base of another state stays on disk until that state goes, also after `gc` deletes its record.
 - File modes, symbolic links, hard links and file identity survive snapshots. Nested layers stay outside history.
   The file identity for move detection is the creation time, which APFS clones, writes and renames keep.
+  A move needs an identity that is unique in both trees and is not a whole second.
 - Immutable flags prevent ordinary writes to states. The store owner can remove these flags.
   Use the root service for separate users and root-owned state storage.
 - Overlays, `sync`, `serve-peer`, backup and restore are available.
