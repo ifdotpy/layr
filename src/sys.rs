@@ -489,6 +489,141 @@ pub fn apfs_data_identity(path: &std::path::Path) -> io::Result<ApfsDataIdentity
     })
 }
 
+/// One entry of a folder as `getattrlistbulk` returns it.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BulkEntry {
+    pub name: std::ffi::OsString,
+    /// `st_mode`: the type bits and the permission bits.
+    pub mode: u32,
+    pub dev: u64,
+    pub ino: u64,
+    pub uid: u32,
+    pub gid: u32,
+    pub size: u64,
+    pub nlink: u64,
+    pub mtime: (i64, i64),
+    pub ctime: (i64, i64),
+    pub birth: (i64, i64),
+    pub data: ApfsDataIdentity,
+}
+
+/// Read the metadata of all entries of an open folder with `getattrlistbulk`: one call returns
+/// many entries, with their change counters and clone IDs. The order is the folder order.
+#[cfg(target_os = "macos")]
+pub fn apfs_bulk_read(dir: std::os::fd::BorrowedFd<'_>) -> io::Result<Vec<BulkEntry>> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    let mut attrs = libc::attrlist {
+        bitmapcount: libc::ATTR_BIT_MAP_COUNT,
+        reserved: 0,
+        commonattr: libc::ATTR_CMN_RETURNED_ATTRS
+            | libc::ATTR_CMN_NAME
+            | libc::ATTR_CMN_DEVID
+            | libc::ATTR_CMN_CRTIME
+            | libc::ATTR_CMN_MODTIME
+            | libc::ATTR_CMN_CHGTIME
+            | libc::ATTR_CMN_OWNERID
+            | libc::ATTR_CMN_GRPID
+            | libc::ATTR_CMN_ACCESSMASK
+            | libc::ATTR_CMN_GEN_COUNT
+            | libc::ATTR_CMN_FILEID,
+        volattr: 0,
+        dirattr: libc::ATTR_DIR_LINKCOUNT | libc::ATTR_DIR_DATALENGTH,
+        fileattr: libc::ATTR_FILE_LINKCOUNT | libc::ATTR_FILE_DATALENGTH,
+        forkattr: libc::ATTR_CMNEXT_CLONEID,
+    };
+    let flags = libc::FSOPT_NOFOLLOW | libc::FSOPT_PACK_INVAL_ATTRS | libc::FSOPT_ATTR_CMN_EXTENDED;
+    let mut buf = vec![0u8; 256 * 1024];
+    let mut out = Vec::new();
+    loop {
+        // SAFETY: the folder descriptor is live; attrs and buf are valid for their sizes.
+        let n = unsafe {
+            libc::getattrlistbulk(
+                dir.as_raw_fd(),
+                (&mut attrs as *mut libc::attrlist).cast(),
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+                flags as u64,
+            )
+        };
+        if n < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if n == 0 {
+            return Ok(out);
+        }
+        let mut pos = 0usize;
+        for _ in 0..n {
+            let rd = |off: usize, len: usize| -> io::Result<&[u8]> {
+                buf.get(off..off + len).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "short getattrlistbulk entry"))
+            };
+            let u32_at = |off: usize| -> io::Result<u32> { Ok(u32::from_ne_bytes(rd(off, 4)?.try_into().unwrap())) };
+            let i32_at = |off: usize| -> io::Result<i32> { Ok(i32::from_ne_bytes(rd(off, 4)?.try_into().unwrap())) };
+            let u64_at = |off: usize| -> io::Result<u64> { Ok(u64::from_ne_bytes(rd(off, 8)?.try_into().unwrap())) };
+            let time_at = |off: usize| -> io::Result<(i64, i64)> { Ok((u64_at(off)? as i64, u64_at(off + 8)? as i64)) };
+            let len = u32_at(pos)? as usize;
+            if len == 0 {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "empty getattrlistbulk entry"));
+            }
+            // Layout: length, returned attributes (5 words), then the attributes in bit order.
+            let returned = pos + 4;
+            let (cmn, fork) = (u32_at(returned)?, u32_at(returned + 16)?);
+            let mut q = returned + 20;
+            let name_ref = q;
+            q += 8;
+            let dev = u32_at(q)? as u64;
+            q += 4;
+            let birth = time_at(q)?;
+            q += 16;
+            let mtime = time_at(q)?;
+            q += 16;
+            let ctime = time_at(q)?;
+            q += 16;
+            let uid = u32_at(q)?;
+            q += 4;
+            let gid = u32_at(q)?;
+            q += 4;
+            let access = u32_at(q)?;
+            q += 4;
+            let generation = u32_at(q)?;
+            q += 4;
+            let ino = u64_at(q)?;
+            q += 8;
+            // The folder group comes only for folders, the file group only for other objects;
+            // both start with a link count and a size. The access mask carries the type bits.
+            // (Asking for ATTR_CMN_OBJTYPE as well makes the kernel drop the setuid bit.)
+            let links = u32_at(q)?;
+            q += 4;
+            let size = u64_at(q)?;
+            q += 8;
+            let clone_id = u64_at(q)?;
+            let name_off = name_ref as i64 + i32_at(name_ref)? as i64;
+            let name_len = u32_at(name_ref + 4)? as usize;
+            let raw = rd(name_off as usize, name_len)?;
+            let name = std::ffi::OsStr::from_bytes(raw.strip_suffix(&[0]).unwrap_or(raw)).to_os_string();
+            out.push(BulkEntry {
+                name,
+                mode: access,
+                dev,
+                ino,
+                uid,
+                gid,
+                size,
+                nlink: links as u64,
+                mtime,
+                ctime,
+                birth,
+                data: ApfsDataIdentity {
+                    generation: (cmn & libc::ATTR_CMN_GEN_COUNT != 0 && generation != 0).then_some(generation),
+                    clone_id: (fork & libc::ATTR_CMNEXT_CLONEID != 0 && clone_id != 0).then_some(clone_id),
+                },
+            });
+            pos += len;
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 pub fn apfs_marker(path: &std::path::Path, value: Option<&[u8]>) -> io::Result<Vec<u8>> {
     apfs_attribute(path, c"com.layr.subvolume", value)

@@ -106,6 +106,87 @@ fn scan(root: &Path) -> Result<BTreeMap<String, ScanEntry>> {
 }
 
 pub(crate) fn scan_with_data(root: &Path, data: bool) -> Result<BTreeMap<String, ScanEntry>> {
+    let _t = crate::trace::span("APFS bulk scan");
+    let _ = data;
+    let mut out = BTreeMap::new();
+    let m = fs::symlink_metadata(root)?;
+    out.insert(String::new(), entry_of_metadata(&m, root, true)?);
+    if !m.is_dir() {
+        return Ok(out);
+    }
+    let dir = crate::fsutil::open_dir_nofollow(root)?;
+    scan_bulk(&dir, root, "", &mut out)?;
+    Ok(out)
+}
+
+fn entry_of_metadata(m: &fs::Metadata, path: &Path, data: bool) -> Result<ScanEntry> {
+    use std::os::macos::fs::MetadataExt as MacMetadataExt;
+    Ok(ScanEntry {
+        fingerprint: (m.dev(), m.ino(), m.mode(), m.len(), m.mtime(), m.mtime_nsec(), m.ctime(), m.ctime_nsec()),
+        meta: crate::fsutil::meta_of(m),
+        data: if data && m.is_file() { Some(crate::sys::apfs_data_identity(path)?) } else { None },
+        nlink: m.nlink(),
+        birth: (m.st_birthtime(), m.st_birthtime_nsec()),
+    })
+}
+
+/// Read a folder and its content with `getattrlistbulk`: one call per folder instead of two per
+/// entry. Nested layers (subvolumes) appear as folders without content.
+fn scan_bulk(dir: &File, root: &Path, rel: &str, out: &mut BTreeMap<String, ScanEntry>) -> Result<()> {
+    use std::os::fd::AsFd;
+    for e in crate::sys::apfs_bulk_read(dir.as_fd()).with_context(|| format!("read folder {}", root.join(rel).display()))? {
+        let name = e.name.into_string().map_err(|_| anyhow::anyhow!("non-UTF-8 file name"))?;
+        let next = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
+        let kind = e.mode & libc::S_IFMT as u32;
+        let ftype = match kind {
+            k if k == libc::S_IFREG as u32 => crate::fsutil::FType::File,
+            k if k == libc::S_IFDIR as u32 => crate::fsutil::FType::Dir,
+            k if k == libc::S_IFLNK as u32 => crate::fsutil::FType::Symlink,
+            _ => crate::fsutil::FType::Special,
+        };
+        let is_file = ftype == crate::fsutil::FType::File;
+        out.insert(
+            next.clone(),
+            ScanEntry {
+                fingerprint: (e.dev, e.ino, e.mode, e.size, e.mtime.0, e.mtime.1, e.ctime.0, e.ctime.1),
+                meta: crate::fsutil::Meta {
+                    ftype,
+                    mode: e.mode & 0o7777,
+                    size: e.size,
+                    ino: e.ino,
+                    uid: e.uid,
+                    gid: e.gid,
+                    mtime: e.mtime.0,
+                },
+                data: is_file.then_some(e.data),
+                nlink: e.nlink,
+                birth: e.birth,
+            },
+        );
+        if ftype == crate::fsutil::FType::Dir {
+            let path = root.join(&next);
+            if is_subvolume(&path) {
+                continue;
+            }
+            let fd = rustix::fs::openat(
+                dir,
+                name.as_str(),
+                rustix::fs::OFlags::RDONLY
+                    | rustix::fs::OFlags::DIRECTORY
+                    | rustix::fs::OFlags::NOFOLLOW
+                    | rustix::fs::OFlags::CLOEXEC,
+                rustix::fs::Mode::empty(),
+            )
+            .with_context(|| format!("open folder {}", path.display()))?;
+            scan_bulk(&File::from(fd), root, &next, out)?;
+        }
+    }
+    Ok(())
+}
+
+/// The previous scan with one `lstat` and one `getattrlist` per entry, for comparison tests.
+#[cfg(test)]
+pub(crate) fn scan_with_lstat(root: &Path, data: bool) -> Result<BTreeMap<String, ScanEntry>> {
     fn visit(root: &Path, rel: &str, data: bool, out: &mut BTreeMap<String, ScanEntry>) -> Result<()> {
         let path = root.join(rel);
         let m = fs::symlink_metadata(&path)?;
@@ -686,6 +767,54 @@ mod tests {
         fs::write(branch.join("file"), data)?;
         let changes = candidates(&base, &branch)?;
         assert_eq!(changes[0].ranges, Some(vec![(8192, 4096)]));
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a case-sensitive APFS test volume"]
+    fn bulk_scan_matches_lstat_scan() -> Result<()> {
+        let s = Sandbox::new();
+        let src = s.0.join("work");
+        create_subvolume(&src)?;
+        fs::create_dir_all(src.join("a/b/c"))?;
+        fs::write(src.join("a/file"), b"data")?;
+        fs::write(src.join("empty"), b"")?;
+        fs::write(src.join("a/b/c/deep"), vec![7u8; 100_000])?;
+        fs::write(src.join("новый файл"), b"unicode")?;
+        fs::hard_link(src.join("a/file"), src.join("hard"))?;
+        std::os::unix::fs::symlink("a/file", src.join("link"))?;
+        std::os::unix::fs::symlink("missing/target", src.join("dangling"))?;
+        fs::write(src.join("ro"), b"read only")?;
+        fs::set_permissions(src.join("ro"), fs::Permissions::from_mode(0o4444))?;
+        fs::set_permissions(src.join("a/b"), fs::Permissions::from_mode(0o750))?;
+        create_subvolume(&src.join("layer"))?;
+        fs::write(src.join("layer/hidden"), b"not scanned")?;
+        crate::sys::apfs_clone(&src.join("a/file"), &src.join("clone"))?;
+        let (bulk, old) = (scan_with_data(&src, true)?, scan_with_lstat(&src, true)?);
+        assert_eq!(bulk.keys().collect::<Vec<_>>(), old.keys().collect::<Vec<_>>());
+        for (k, b) in &bulk {
+            let o = &old[k];
+            let (mut fb, mut fo) = (b.fingerprint, o.fingerprint);
+            if b.meta.is_dir() {
+                // Folder sizes are not compared anywhere.
+                (fb.3, fo.3) = (0, 0);
+            }
+            assert_eq!(fb, fo, "fingerprint of {k:?}");
+            assert_eq!(
+                (b.meta.ftype, b.meta.mode, b.meta.uid, b.meta.gid, b.meta.mtime, b.meta.ino),
+                (o.meta.ftype, o.meta.mode, o.meta.uid, o.meta.gid, o.meta.mtime, o.meta.ino),
+                "meta of {k:?}"
+            );
+            if !b.meta.is_dir() {
+                assert_eq!(b.meta.size, o.meta.size, "size of {k:?}");
+            }
+            assert_eq!(b.data, o.data, "data of {k:?}");
+            assert_eq!(b.birth, o.birth, "birth of {k:?}");
+            if b.meta.is_file() {
+                assert_eq!(b.nlink, o.nlink, "links of {k:?}");
+            }
+        }
+        assert!(bulk.contains_key("layer") && !bulk.contains_key("layer/hidden"));
         Ok(())
     }
 
