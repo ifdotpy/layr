@@ -49,8 +49,8 @@ snapshots in constant time and change lists in O(changes), so the working folder
 without a cost for each file. It adds two things that these systems leave to the host: rules
 that the machine itself enforces, and regenerable caches.
 
-The cost is the reason git stays at the edge. layr has its own store, so it runs only on Linux
-with btrfs, while editors, hosts and CI systems read git. layr imports from git, pushes states as
+The cost is the reason git stays at the edge. layr has its own store: btrfs on Linux is the
+supported backend, OverlayFS and APFS are experimental, while editors, hosts and CI systems read git. layr imports from git, pushes states as
 git commits, and exports plain folders; it does not try to be git on disk.
 
 ## 2. Why a root service
