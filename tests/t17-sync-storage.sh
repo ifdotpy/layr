@@ -31,7 +31,7 @@ for i in {1..8}; do
     btrfs subvolume create "$T/peer/clock-$i" >/dev/null
     btrfs subvolume delete "$T/peer/clock-$i" >/dev/null
 done
-ok "sync restores content from an extra source" l sync -q -- bash -c "tee '$T/clone.wire' | env LAYR_ROOT='$BR' '$LAYR' serve-peer perf"
+ok "sync restores content from an extra source" peer_exchange sync perf -q -- bash -c "tee '$T/clone.wire' | env LAYR_ROOT='$BR' '$LAYR' serve-peer perf"
 ok "received content matches the original" cmp blob "$BR/projects/perf/states/$last/blob"
 btrfs filesystem sync "$T/peer" >/dev/null
 # The receiver must share the restored extent with the earlier state.
@@ -47,7 +47,7 @@ PY
 l add compressed
 l commit -qm compressed
 last=$(head_id)
-ok "sync transfers compressed extents" l sync -q -- bash -c "tee '$T/compressed.wire' | env LAYR_ROOT='$BR' '$LAYR' serve-peer perf"
+ok "sync transfers compressed extents" peer_exchange sync perf -q -- bash -c "tee '$T/compressed.wire' | env LAYR_ROOT='$BR' '$LAYR' serve-peer perf"
 ok "compressed content restores exactly" cmp compressed "$BR/projects/perf/states/$last/compressed"
 # Inspect the actual bytes sent by layr, not a separately constructed stream.
 ok "wire uses encoded writes and external clone commands" python3 - "$T/clone.wire" "$T/compressed.wire" <<'PY'
@@ -81,11 +81,12 @@ PY
 # A third machine has the original states, received independently from the first.
 new_fs "$T/third" 2G
 CR=$T/third/store
-l sync -q -- env LAYR_ROOT="$CR" "$LAYR" serve-peer perf
+peer_exchange sync perf -q -- env LAYR_ROOT="$CR" "$LAYR" serve-peer perf
 # Received source UUIDs must also work when the replica sends new states back.
 AR=$LAYR_ROOT
 return_from_replica() (
     export LAYR_ROOT=$BR
+    l --project perf remote add test-peer ssh://test/perf
     l --project perf adopt main >/dev/null
     cd "$BR/projects/perf/lines/main" || exit 1
     rm blob
@@ -94,7 +95,7 @@ return_from_replica() (
     l add blob
     l commit -qm replica-return
     head_id > "$T/return-head"
-    l sync -q --push-only -- env LAYR_ROOT="$AR" "$LAYR" serve-peer perf
+    peer_exchange push perf -q -- env LAYR_ROOT="$AR" "$LAYR" serve-peer perf
 ) >"$T/return.log" 2>&1
 ok "replica reuses received sources when it sends back" return_from_replica
 sed 's/^/  /' "$T/return.log"
@@ -107,6 +108,6 @@ if btrfs version | python3 -c 'import re,sys; m=re.search(r"v(\d+)\.(\d+)",sys.s
 else
     eq "older receive tools use a separate exact copy on return" 16777216 "$exclusive"
 fi
-ok "replica can send to another receiver" env LAYR_ROOT="$BR" "$LAYR" --project perf sync -q --push-only -- env LAYR_ROOT="$CR" "$LAYR" serve-peer perf
+ok "replica can send to another receiver" env LAYR_ROOT="$BR" "$LAYR" --project perf push test-peer --command -q -- env LAYR_ROOT="$CR" "$LAYR" serve-peer perf
 ok "the third machine receives the same blob" cmp blob "$CR/projects/perf/states/$returned/blob"
 finish

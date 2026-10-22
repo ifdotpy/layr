@@ -142,7 +142,6 @@ pub fn undo_last_of(ctx: &Ctx, repo: &Repo, line: &Line, ops: &[&str]) -> Result
 const NOT_UNDOABLE: &[&str] = &[
     "line.adopt",
     "machine.trust",
-    "backup",
     "save",
     "save.caches",
     "save.layers",
@@ -225,7 +224,7 @@ fn fmt_time(ms: i64) -> String {
 pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32> {
     let r = repo.p.db.record(id)?.ok_or_else(|| exit(128, "fatal: unknown operation"))?;
     if r.op == "export" {
-        return Err(exit(1, "error: a push cannot be undone here: the commit is on the remote. Push a revert ('layr revert <state>' then 'layr push')."));
+        return Err(exit(1, "error: a push cannot be undone here: the commit is on the remote. Push a revert ('layr revert <state>' then 'layr git push')."));
     }
     if NOT_UNDOABLE.contains(&r.op.as_str()) {
         return Err(exit(1, format!("error: operation '{}' has nothing to undo", r.op)));
@@ -1249,10 +1248,6 @@ pub fn config(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let (k, v) = (&a.pos[0], a.pos[1..].join(" "));
     let val: serde_json::Value = serde_json::from_str(&v).unwrap_or(serde_json::Value::String(v.clone()));
     set_config(ctx, repo, k, val)?;
-    if k == "backup.dir" {
-        // The service writes its own backups into this folder as the user who named it.
-        set_config(ctx, repo, "backup.writer", serde_json::json!(ctx.caller.uid))?;
-    }
     if POLICY_KEYS.contains(&k.as_str()) {
         crate::gitbridge::sync_store_access(repo)?;
     }
@@ -1614,43 +1609,6 @@ pub fn cache(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         _ => Err(exit(128, "usage: layr cache (list|add|remove|repair) [<path>]")),
     }
-}
-
-pub fn machines(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let h = here(ctx)?;
-    if args.first().map(|s| s.as_str()) == Some("trust") {
-        let spec = Spec::new().value("--key");
-        let a = parse(&spec, &args[1..])?;
-        h.repo.require(ctx, "sync")?;
-        let id = a.pos.first().ok_or_else(|| exit(128, "usage: layr machines trust <id> --key <public key>"))?;
-        let key = a.get("--key").ok_or_else(|| exit(128, "usage: layr machines trust <id> --key <public key>"))?;
-        let full = if id.len() == 36 {
-            id.clone()
-        } else {
-            h.repo.p.db.machine_by_name(id)?.ok_or_else(|| exit(128, format!("unknown machine {id}: give its full id")))?
-        };
-        let _lock = h.repo.p.lock()?;
-        super::replicate::trust(ctx, &h.repo.p, &full, key)?;
-        outln!(ctx, "trusted machine {}", &ids::display(&full)[..8]);
-        return Ok(0);
-    }
-    let me = &h.repo.p.store.machine.id;
-    for (id, name) in h.repo.p.db.machines()? {
-        let key = h.repo.p.db.machine_key(&id)?.unwrap_or_default();
-        let trusted =
-            if &id == me || h.repo.p.db.trusted(&id)?.as_deref() == Some(key.as_str()) { "trusted" } else { "untrusted" };
-        outln!(
-            ctx,
-            "{}{} {:<16} {:<9} id {} key {}",
-            if &id == me { "* " } else { "  " },
-            &ids::display(&id)[..8],
-            name,
-            trusted,
-            id,
-            key
-        );
-    }
-    Ok(0)
 }
 
 /// Hidden helpers for tests: `layr debug changes <a> <b>` prints the raw change list.

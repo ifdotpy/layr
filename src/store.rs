@@ -18,7 +18,7 @@
 //!
 //! Write order of an operation: snapshots first, then one database transaction with the record
 //! and its derived rows. After a crash only a snapshot without a record can exist; `layr fsck`
-//! deletes it. Records leave the database as JSONL lines (replication, backups, export).
+//! deletes it. Records leave the database as JSONL lines (replication, remote copies, export).
 
 use crate::db::Db;
 use crate::ids;
@@ -594,7 +594,7 @@ impl<'a> Project<'a> {
         v
     }
 
-    /// All records as JSONL (by machine and sequence number): the exchange and backup format.
+    /// All records as JSONL (by machine and sequence number): the exchange and remote copy format.
     pub fn export_jsonl(&self) -> Result<String> {
         let mut out = String::new();
         for m in self.db.record_machines()? {

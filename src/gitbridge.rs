@@ -190,7 +190,7 @@ pub fn remote_url(repo: &Repo, remote: &str) -> Result<String> {
             return Ok(s.to_string());
         }
     }
-    bail!("remote '{remote}' is not configured (layr remote add {remote} <url>)")
+    bail!("remote '{remote}' is not configured (layr git remote add {remote} <url>)")
 }
 
 fn fetched_refs(ctx: &Ctx, tmp: &Path, remote: &str) -> Result<Vec<(String, String)>> {
@@ -901,7 +901,7 @@ pub fn prune_indexes(repo: &Repo) -> Result<usize> {
     Ok(n)
 }
 
-/// The commit that the `.git` folder of a line shows for `state`: the commit that `layr push`
+/// The commit that the `.git` folder of a line shows for `state`: the commit that `layr git push`
 /// would send for exactly this state (made in the git store when it has none, without a record),
 /// and a kept index of that state whose stat data matches files copied from it.
 pub fn line_commit(repo: &Repo, state: &str) -> Result<String> {
@@ -937,7 +937,7 @@ pub fn push(ctx: &Ctx, repo: &Repo, url: &str, commit: &str, branch: &str, force
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         if err.contains("non-fast-forward") || err.contains("fetch first") || err.contains("rejected") {
-            bail!("push rejected: the remote branch '{branch}' has commits that this state does not contain.\nRun 'layr pull' (fetch and merge), then push again.\n{}", err.trim());
+            bail!("push rejected: the remote branch '{branch}' has commits that this state does not contain.\nRun 'layr git pull' (fetch and merge), then push again.\n{}", err.trim());
         }
         bail!("git push failed: {}", err.trim());
     }
@@ -1017,7 +1017,7 @@ pub fn make_git_folder(repo: &Repo, line: &Line, state: &str, w: &Path) -> Resul
 
 /// Point the `.git` folder of a line at the commit of its head (`line_commit`) after every move
 /// of the head: commit, amend, merge, reset, undo, pull, push. So `git rev-parse HEAD` in a line
-/// is the commit of the line's head, the same id that `layr push` sends. When the commit cannot
+/// is the commit of the line's head, the same id that `layr git push` sends. When the commit cannot
 /// be made, `HEAD` stays as it was and the error is returned.
 /// The folder belongs to the line owner, so all access goes through descriptors of the `.git`
 /// folder and never follows a link the owner made.

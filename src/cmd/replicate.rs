@@ -1,7 +1,7 @@
 //! Replication between machines over any byte channel (ssh or any other pipe).
 //!
-//! `layr sync -- <command>` starts `<command>`, which must run `layr serve-peer <project>` on the
-//! other machine, and talks to it over the command's stdin and stdout:
+//! Named peer remotes start `ssh host layr serve-peer <project>` and exchange data over
+//! stdin and stdout. Tests can select a command transport with `--command -- <argv>`:
 //!
 //! 1. hello: project id, per-machine sequence numbers, states present.
 //! 2. records: each side sends the records the other lacks. Records are checked against the
@@ -260,18 +260,41 @@ fn own_key(p: &Project) -> String {
     hex::encode(p.store.machine.key.verifying_key().to_bytes())
 }
 
-fn wanted(p: &Project, id: &str, auto: bool) -> bool {
+// The final working snapshot of a deleted line is an undo dependency, even without --auto.
+fn deletion_states(rec: &crate::model::Record) -> BTreeSet<String> {
+    if rec.op != "line.delete" {
+        return BTreeSet::new();
+    }
+    rec.lines
+        .values()
+        .filter_map(|ch| ch.working_before.clone())
+        .chain(rec.data.get("final_state").and_then(Value::as_str).map(str::to_owned))
+        .collect()
+}
+
+fn undo_dependencies(p: &Project) -> Result<BTreeSet<String>> {
+    let mut stmt = p.db.conn.prepare("SELECT raw FROM records WHERE op='line.delete'")?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    let mut required = BTreeSet::new();
+    for raw in rows {
+        required.extend(deletion_states(&crate::oplog::parse_line(&raw?, None)?.record));
+    }
+    Ok(required)
+}
+
+fn wanted(p: &Project, id: &str, auto: bool, required: &BTreeSet<String>) -> bool {
     match p.db.state(id).ok().flatten() {
-        Some(s) => auto || s.kind != StateKind::Auto,
+        Some(s) => auto || s.kind != StateKind::Auto || required.contains(id),
         None => false,
     }
 }
 
 /// States to send, parents first, each with the best parent the peer has.
 fn plan(repo: &Repo, mine: &BTreeSet<String>, theirs: &BTreeSet<String>, auto: bool) -> Result<Vec<(String, Option<String>)>> {
+    let required = undo_dependencies(&repo.p)?;
     let mut todo: Vec<(i64, String)> = mine
         .iter()
-        .filter(|id| !theirs.contains(*id) && wanted(&repo.p, id, auto))
+        .filter(|id| !theirs.contains(*id) && wanted(&repo.p, id, auto, &required))
         .filter_map(|id| repo.p.db.state(id).ok().flatten().map(|s| (s.time, id.clone())))
         .collect();
     todo.sort();
@@ -411,11 +434,14 @@ fn receive_one<R: Read, W: Write>(
     res.and(drained)
 }
 
-fn recv_states<R: Read, W: Write>(w: &mut Wire<R, W>, p: &Project) -> Result<usize> {
+fn recv_states<R: Read, W: Write>(w: &mut Wire<R, W>, p: &Project, allow: bool) -> Result<usize> {
     let _lock = p.lock()?;
     let mut n = 0;
     loop {
         let v = w.recv_json()?;
+        if !allow && v["op"] != "done" {
+            bail!("state transfer violates the exchange direction");
+        }
         let res = match v["op"].as_str() {
             Some("done") => break,
             Some("cache" | "layer") => {
@@ -481,26 +507,19 @@ fn recv_states<R: Read, W: Write>(w: &mut Wire<R, W>, p: &Project) -> Result<usi
     Ok(n)
 }
 
-pub fn sync(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let spec = Spec::new()
-        .flag("--auto")
-        .flag("--caches|--layers")
-        .flag("--push-only")
-        .flag("--pull-only")
-        .flag("-q|--quiet")
-        .value("--project");
-    let a = parse(&spec, args)?;
-    if a.paths.is_empty() {
-        return Err(exit(
-            128,
-            "usage: layr sync [--auto] [--caches] [--push-only|--pull-only] -- <command that runs 'layr serve-peer <project>' on the peer>",
-        ));
-    }
+pub fn exchange(
+    ctx: &Ctx,
+    command: &[String],
+    direction: &str,
+    auto: bool,
+    caches: bool,
+    quiet: bool,
+    json_output: bool,
+) -> Result<i32> {
     let h = here(ctx)?;
-    h.repo.require(ctx, "sync")?;
     let repo = &h.repo;
-    let mut c = Command::new(&a.paths[0]);
-    c.args(&a.paths[1..]).stdin(Stdio::piped()).stdout(Stdio::piped());
+    let mut c = Command::new(&command[0]);
+    c.args(&command[1..]).stdin(Stdio::piped()).stdout(Stdio::piped());
     crate::privs::command_as(
         &mut c,
         ctx.caller.uid,
@@ -509,11 +528,13 @@ pub fn sync(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let mut child = c.spawn().context("start the peer command")?;
     let mut w = Wire { r: child.stdout.take().unwrap(), w: std::io::BufWriter::new(child.stdin.take().unwrap()) };
     let started = std::time::Instant::now();
-    let auto = a.has("--auto");
     let result = (|| -> Result<(usize, usize, usize, usize, u64)> {
         let mine = present(&repo.p)?;
-        w.json(&json!({"op": "hello", "compressed_send_v2": btrfs::supports_compressed_receive(), "clone_sources_v1": true, "clone_identities_v1": clone_identities(&repo.p)?, "project": repo.p.name, "project_id": repo.p.id, "machine": repo.p.store.machine.id, "public_key": own_key(&repo.p), "seqs": seqs(&repo.p)?, "present": mine, "caches": present_caches(&repo.p)?, "layers": present_caches(&repo.p)?}))?;
+        w.json(&json!({"op": "hello", "direction_v1": true, "direction": direction, "compressed_send_v2": btrfs::supports_compressed_receive(), "clone_sources_v1": true, "clone_identities_v1": clone_identities(&repo.p)?, "project": repo.p.name, "project_id": repo.p.id, "machine": repo.p.store.machine.id, "public_key": own_key(&repo.p), "seqs": seqs(&repo.p)?, "present": mine, "caches": present_caches(&repo.p)?, "layers": present_caches(&repo.p)?}))?;
         let hello = w.recv_json()?;
+        if direction != "sync" && hello["direction_v1"] != true {
+            bail!("the peer does not support one-way exchange; update it or use layr sync <remote>");
+        }
         // The peer holds this project, or a new empty copy of it.
         let peer_project = hello["project_id"].as_str().unwrap_or("");
         if !peer_project.is_empty() && peer_project != repo.p.id {
@@ -526,7 +547,7 @@ pub fn sync(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let peer_seqs: BTreeMap<String, u64> = serde_json::from_value(hello["seqs"].clone())?;
         let peer_present: BTreeSet<String> = serde_json::from_value(hello["present"].clone())?;
         // Records both ways.
-        let out_lines = missing_lines(&repo.p, &peer_seqs)?;
+        let out_lines = if direction == "fetch" { vec![] } else { missing_lines(&repo.p, &peer_seqs)? };
         let sent_records = out_lines.len();
         send_records(&mut w, &out_lines)?;
         let lines = recv_records(&mut w)?;
@@ -534,8 +555,11 @@ pub fn sync(ctx: &Ctx, args: &[String]) -> Result<i32> {
         // machine is trusted from now on.
         let got_records = {
             let _lock = repo.p.lock()?;
+            if direction == "push" && !lines.is_empty() {
+                bail!("the peer sent records during push");
+            }
             let n = take_lines(&repo.p, &lines, Trust::Peer(&peer.0, &peer.1))?;
-            if !peer.0.is_empty() && !peer.1.is_empty() {
+            if direction != "push" && !peer.0.is_empty() && repo.p.db.machine_key(&peer.0)?.as_deref() == Some(peer.1.as_str()) {
                 trust(ctx, &repo.p, &peer.0, &peer.1)?;
             }
             n
@@ -543,17 +567,9 @@ pub fn sync(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let _ = w.recv_json()?;
         // States to the peer.
         let (mut sent, mut bytes) = (0, 0);
-        if !a.has("--pull-only") {
+        if direction != "fetch" {
             let list = plan(repo, &mine, &peer_present, auto)?;
-            let (n, b) = send_states(
-                &mut w,
-                repo,
-                &list,
-                a.has("--caches"),
-                &peer_caches,
-                &peer_present,
-                SendFeatures::from_hello(&hello),
-            )?;
+            let (n, b) = send_states(&mut w, repo, &list, caches, &peer_caches, &peer_present, SendFeatures::from_hello(&hello))?;
             sent = n;
             bytes = b;
         } else {
@@ -561,23 +577,36 @@ pub fn sync(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         // States from the peer.
         let mine_now = present(&repo.p)?;
-        let want: Vec<String> = if a.has("--push-only") {
+        let required = undo_dependencies(&repo.p)?;
+        let want: Vec<String> = if direction == "push" {
             vec![]
         } else {
-            peer_present.iter().filter(|id| !mine_now.contains(*id) && wanted(&repo.p, id, auto)).cloned().collect()
+            peer_present.iter().filter(|id| !mine_now.contains(*id) && wanted(&repo.p, id, auto, &required)).cloned().collect()
         };
-        w.json(&json!({"op": "want", "clone_identities_v1": clone_identities(&repo.p)?, "ids": want, "have": mine_now, "caches": a.has("--caches"), "have_caches": present_caches(&repo.p)?, "have_layers": present_caches(&repo.p)?, "layers": a.has("--caches")}))?;
-        let got = recv_states(&mut w, &repo.p)?;
+        w.json(&json!({"op": "want", "clone_identities_v1": clone_identities(&repo.p)?, "ids": want, "have": mine_now, "caches": caches, "have_caches": present_caches(&repo.p)?, "have_layers": present_caches(&repo.p)?, "layers": caches}))?;
+        let got = recv_states(&mut w, &repo.p, direction != "push")?;
         w.json(&json!({"op": "bye"}))?;
         Ok((sent_records, got_records, sent, got, bytes))
     })();
     drop(w);
-    let _ = child.wait();
+    if result.is_err() {
+        let _ = child.kill();
+    }
+    let status = child.wait()?;
     let (sr, gr, ss, gs, bytes) = result?;
-    if !a.has("-q") {
+    if !status.success() {
+        bail!("the peer command failed: {status}");
+    }
+    if json_output {
         outln!(
             ctx,
-            "sync {}: records sent {sr}, received {gr}; states sent {ss} ({:.1} MiB), received {gs}; {:.2} s",
+            "{}",
+            json!({"direction": direction, "records_sent": sr, "records_received": gr, "states_sent": ss, "states_received": gs, "bytes_sent": bytes})
+        );
+    } else if !quiet {
+        outln!(
+            ctx,
+            "{direction} {}: records sent {sr}, received {gr}; states sent {ss} ({:.1} MiB), received {gs}; {:.2} s",
             repo.p.name,
             bytes as f64 / 1048576.0,
             started.elapsed().as_secs_f64()
@@ -598,8 +627,16 @@ pub fn serve(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let stdout = std::io::stdout();
     let mut w = Wire { r: stdin.lock(), w: std::io::BufWriter::new(stdout.lock()) };
     let hello = w.recv_json()?;
+    let direction = hello["direction"].as_str().unwrap_or("sync");
+    if !["sync", "push", "fetch"].contains(&direction) {
+        bail!("invalid peer direction");
+    }
     let pid = hello["project_id"].as_str().unwrap_or("").to_string();
     let exists = crate::store::db_file(&ctx.store.projects_dir().join(&name)).is_file();
+    if !exists && direction == "fetch" {
+        w.json(&json!({"op": "error", "message": "the peer project does not exist"}))?;
+        bail!("the peer project does not exist");
+    }
     if !exists {
         Project::create_empty(&ctx.store, &name)?;
     }
@@ -613,9 +650,12 @@ pub fn serve(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let mut repo = Repo { p };
     let peer_seqs: BTreeMap<String, u64> = serde_json::from_value(hello["seqs"].clone())?;
-    w.json(&json!({"op": "hello", "compressed_send_v2": btrfs::supports_compressed_receive(), "clone_sources_v1": true, "clone_identities_v1": clone_identities(&repo.p)?, "project_id": repo.p.id, "machine": repo.p.store.machine.id, "public_key": own_key(&repo.p), "seqs": seqs(&repo.p)?, "present": present(&repo.p)?, "caches": present_caches(&repo.p)?, "layers": present_caches(&repo.p)?}))?;
+    w.json(&json!({"op": "hello", "direction_v1": true, "compressed_send_v2": btrfs::supports_compressed_receive(), "clone_sources_v1": true, "clone_identities_v1": clone_identities(&repo.p)?, "project_id": repo.p.id, "machine": repo.p.store.machine.id, "public_key": own_key(&repo.p), "seqs": seqs(&repo.p)?, "present": present(&repo.p)?, "caches": present_caches(&repo.p)?, "layers": present_caches(&repo.p)?}))?;
     let lines = recv_records(&mut w)?;
-    let mine = missing_lines(&repo.p, &peer_seqs)?;
+    if direction == "fetch" && !lines.is_empty() {
+        bail!("the client sent records during fetch");
+    }
+    let mine = if direction == "push" { vec![] } else { missing_lines(&repo.p, &peer_seqs)? };
     send_records(&mut w, &mine)?;
     {
         // A new replica trusts the machines of the project it copies; an existing one only takes
@@ -648,9 +688,12 @@ pub fn serve(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     w.json(&json!({"op": "count", "count": mine.len()}))?;
     let _ = a.has("--create");
-    recv_states(&mut w, &repo.p)?;
+    recv_states(&mut w, &repo.p, direction != "fetch")?;
     let want = w.recv_json()?;
     let ids_v: Vec<String> = serde_json::from_value(want["ids"].clone())?;
+    if direction == "push" && !ids_v.is_empty() {
+        bail!("the client requested states during push");
+    }
     let have: BTreeSet<String> = serde_json::from_value(want["have"].clone())?;
     let mine_set = present(&repo.p)?;
     let mut list = Vec::new();
@@ -689,4 +732,21 @@ pub fn serve(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let _ = w.recv_json();
     let _ = ctx;
     Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn deleted_line_snapshots_are_undo_dependencies() {
+        let mut rec = crate::model::Record::new("line.delete");
+        rec.lines.insert(
+            "line".into(),
+            crate::model::LineChange { before: None, after: None, working_before: Some("working".into()), working_after: None },
+        );
+        rec.data = json!({"final_state": "working"});
+        assert_eq!(deletion_states(&rec), BTreeSet::from(["working".into()]));
+        rec.op = "save".into();
+        assert!(deletion_states(&rec).is_empty());
+    }
 }

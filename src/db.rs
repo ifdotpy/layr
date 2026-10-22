@@ -221,7 +221,7 @@ impl Db {
     /// later record can replace keeps the order key of the record that wrote it (time,
     /// machine, sequence number), and only a record with a larger key replaces it. Deletes
     /// leave a marked row for the same reason. Settings that act on this machine (admin,
-    /// members, merge commands, remotes, the backup folder) and the lines that have their
+    /// members, merge commands, remotes) and the lines that have their
     /// working folder here change only by this machine's records; the values written by other
     /// machines are kept under `<key>@<machine>`.
     pub fn derive(&self, rec: &Record, state_present: &dyn Fn(&str) -> bool, local: &str) -> Result<()> {
@@ -425,7 +425,7 @@ impl Db {
             "gc" => {
                 if let Some(arr) = d.get("deleted").and_then(|v| v.as_array()) {
                     for id in arr.iter().filter_map(|v| v.as_str()) {
-                        if !foreign {
+                        if !foreign && !state_present(id) {
                             tx.execute("UPDATE states SET deleted=1, present=0 WHERE id=?1", params![id])?;
                         }
                     }
@@ -537,7 +537,10 @@ impl Db {
     }
 
     pub fn set_present(&self, id: &str, present: bool) -> Result<()> {
-        self.conn.execute("UPDATE states SET present=?2 WHERE id=?1", params![id, present as i64])?;
+        self.conn.execute(
+            "UPDATE states SET present=?2, deleted=CASE WHEN ?2=1 THEN 0 ELSE deleted END WHERE id=?1",
+            params![id, present as i64],
+        )?;
         Ok(())
     }
 
@@ -874,9 +877,8 @@ impl Db {
 }
 
 /// Every setting acts on one machine (admin, members, merge commands, remotes, retention,
-/// push policy, caches, backups): settings never come from another machine's records. Those
-/// values stay as `<key>@<machine>`; a restore takes over the values of the machine that wrote
-/// the backup.
+/// push policy, caches): settings never come from another machine's records. Those
+/// values stay as `<key>@<machine>`.
 pub fn local_key(_k: &str) -> bool {
     true
 }
@@ -965,6 +967,32 @@ mod tests {
             cache_platform: None,
         });
         r
+    }
+
+    #[test]
+    fn restored_states_clear_local_gc_tombstones() {
+        let path = std::env::temp_dir().join(format!("layr-db-restore-{}", crate::ids::new_id()));
+        let db = Db::open(&path).unwrap();
+        let state = "01a12290-0000-7000-8000-00000000c0c0";
+        let machine = "01a12290-0000-7000-8000-00000000aaaa";
+        let creation = state_record(1, state, vec![]);
+        let mut gc = Record::new("gc");
+        gc.machine = machine.into();
+        gc.data = serde_json::json!({"deleted": [state]});
+        db.derive(&creation, &|_| true, machine).unwrap();
+        db.derive(&gc, &|_| false, machine).unwrap();
+        assert_eq!(db.state_flags(state).unwrap(), Some((false, true)));
+        db.set_present(state, true).unwrap();
+        assert_eq!(db.state_flags(state).unwrap(), Some((true, false)));
+        // Reindex replays an older gc record against the snapshots that exist now.
+        db.derive(&gc, &|_| true, machine).unwrap();
+        assert_eq!(db.state_flags(state).unwrap(), Some((true, false)));
+        // Another machine's gc never deletes the local copy.
+        gc.machine = "01a12290-0000-7000-8000-00000000bbbb".into();
+        db.derive(&gc, &|_| false, machine).unwrap();
+        assert_eq!(db.state_flags(state).unwrap(), Some((true, false)));
+        drop(db);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

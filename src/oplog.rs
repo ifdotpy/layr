@@ -1,6 +1,6 @@
 //! Signed operation records. A stored record is one JSON line
 //! `{"r": <record>, "s": "<Ed25519 signature of the exact record bytes>"}`; the same line is the
-//! JSONL form used for replication, backups and export.
+//! JSONL form used for replication, remote copies and export.
 
 use crate::model::Record;
 use anyhow::{anyhow, Context, Result};
@@ -48,7 +48,7 @@ pub fn machine_key(rec: &Record) -> Result<VerifyingKey> {
     Ok(VerifyingKey::from_bytes(&arr)?)
 }
 
-/// Sign bytes that are not a record (a backup manifest) with the machine key.
+/// Sign arbitrary bytes with the machine key.
 pub fn sign_bytes(data: &[u8], key: &SigningKey) -> String {
     base64::engine::general_purpose::STANDARD.encode(key.sign(data).to_bytes())
 }

@@ -52,18 +52,18 @@ eq "merge of the reviewed state" "a1" "$(as layr-admin cat a1.txt)"
 cd $P/w1 && as layr-u1 sh -c "echo more >> a1.txt && $L commit -qam more" && cd $P/main
 eq "--expect refuses a newer state" "1" "$(as layr-admin $L merge w1 --expect $S >/dev/null 2>&1; echo $?)"
 as layr-admin $L config push.require_check true
-git init -q --bare $T/r.git; chown -R layr-admin $T/r.git; as layr-admin $L remote add origin $T/r.git
+git init -q --bare $T/r.git; chown -R layr-admin $T/r.git; as layr-admin $L git remote add origin $T/r.git
 as layr-admin sh -c "echo admin > admin.txt && $L add admin.txt && $L commit -qm admin"
-has "push needs a passing check" "no passing check" "$(as layr-admin $L push origin t 2>&1)"
+has "push needs a passing check" "no passing check" "$(as layr-admin $L git push origin t 2>&1)"
 as layr-admin $L try -q HEAD -- true
-eq "push after a check" "0" "$(as layr-admin $L push -q origin t >/dev/null 2>&1; echo $?)"
+eq "push after a check" "0" "$(as layr-admin $L git push -q origin t >/dev/null 2>&1; echo $?)"
 
 # Review findings 2026-10-09: undo and other operations respect line owners.
 UNDO_MAIN=$(as layr-admin $L op log -n 1 | awk '{print $1}')
 cd $P/w1
 no "a user cannot undo an operation on the admin's line" as layr-u1 $L undo --force $UNDO_MAIN
 eq "the main line did not move" "admin" "$(cd $P/main && as layr-admin $L log -1 --format=%s)"
-no "a user cannot push" as layr-u1 $L push origin t2
+no "a user cannot push" as layr-u1 $L git push origin t2
 no "a user cannot delete a tag" sh -c "as layr-admin env LAYR_PROJECT=perm LAYR_LINE=main $L tag v1 && as layr-u1 $L tag -d v1"
 
 # A merge driver never reads the target of a link in the merged trees.

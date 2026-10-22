@@ -50,7 +50,7 @@ fn time(sec: i64, nano: i64) -> Vec<u8> {
     v
 }
 /// A full stream is valid even when the caller offers an incremental parent.
-/// This preserves old peer and backup compatibility without changing their protocol.
+/// This preserves old peer and remote copy compatibility without changing their protocol.
 pub fn send(root: &Path, out: &mut dyn Write) -> Result<()> {
     let info = crate::storage::subvol_info(root)?;
     if !info.readonly {

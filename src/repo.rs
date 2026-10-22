@@ -245,12 +245,6 @@ impl<'a> Repo<'a> {
         self.authorize_line(ctx, line, LineOp::Rewrite).map(|_| ())
     }
 
-    /// The user that the service's own backups are written as: the one who set `backup.dir`.
-    pub fn backup_writer(&self) -> (u32, u32) {
-        let uid = self.p.config_u64("backup.writer", self.p.legacy_admin() as u64) as u32;
-        (uid, crate::ctx::Caller::from_uid(uid).gid)
-    }
-
     // ----- lookups -----
 
     pub fn line(&self, name: &str) -> Result<Line> {
@@ -306,7 +300,7 @@ impl<'a> Repo<'a> {
         if !p.exists() {
             match self.p.db.state_flags(id)? {
                 Some((_, true)) => bail!("state {} was deleted by retention", ids::short(id)),
-                Some(_) => bail!("state {} is not on this machine (run layr sync)", ids::short(id)),
+                Some(_) => bail!("state {} is not on this machine (run layr fetch <remote>)", ids::short(id)),
                 None => bail!("unknown state {}", ids::short(id)),
             }
         }
@@ -403,7 +397,7 @@ impl<'a> Repo<'a> {
             drop(t);
             btrfs::set_readonly(&dst)?;
             // An overlay file under another name leaves too: moved from an overlay path, or a
-            // new file with the content of an overlay file (a copy, an editor's backup).
+            // new file with the content of an overlay file (a copy, an editor's extra copy).
             let copies = self.private_copies(line, &dst, &private)?;
             if !copies.is_empty() {
                 btrfs::set_writable(&dst)?;

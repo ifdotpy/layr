@@ -25,7 +25,7 @@ l() {
     # permits direct updates for these command tests. Access tests use their own policy.
     if [ "$rc" -eq 0 ] && [ "${LAYR_TEST_DIRECT_MAIN:-}" = 1 ]; then
         local project=""
-        case "${1:-}" in init) project=$2 ;; clone) project=$3 ;; esac
+        case "${1:-}" in init) project=$2 ;; git) [ "${2:-}" = clone ] && project=${4:-} ;; esac
         if [ -n "$project" ]; then
             (cd "$LAYR_ROOT/projects/$project/lines/main" && "$LAYR" protect main --remove) || return $?
         fi
@@ -102,4 +102,11 @@ sample() { # sample <dir>
     seq 1 20 | sed 's/^/line /' > "$1/notes.txt"
     printf 'target/\n*.log\n' > "$1/.gitignore"
     echo bin > "$1/target/out.bin"; echo x > "$1/debug.log"
+}
+
+# Run a peer command through a named remote with an explicit transport for tests.
+peer_exchange() {
+    local op=$1 project=$2; shift 2
+    l --project "$project" remote add test-peer "ssh://test/$project" >/dev/null 2>&1 || true
+    l --project "$project" "$op" test-peer --command "$@"
 }

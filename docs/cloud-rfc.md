@@ -58,7 +58,7 @@
 
 - Version control на Btrfs: `line` — writable snapshot, `state` — read-only snapshot плюс подписанная запись, diff/status основаны на metadata-send; merge использует reflinks. Есть Git bridge, операции с ролями, защита веток, auto states, копия проекта в папку с восстановлением, peer sync.
 - Оверлеи: отдельные истории файлов с собственными readers; `shared` видим всем читателям проекта, другие слои видимы их readers. Рабочая директория остаётся **обычным writable Btrfs subvolume**, слои физически собираются при смене stack; это **не OverlayFS**.
-- Кэши (`regenerable`): nested subvolumes вне основной истории, diff и копий проекта. Новая линия может получить reflink-копию прогретого кэша ближайшего предка. Явное сохранение через `layr save --caches`.
+- Кэши (`regenerable`): nested subvolumes вне основной истории и diff. Новая линия может получить reflink-копию прогретого кэша ближайшего предка. Явное сохранение через `layr save --caches`.
 - Backends: btrfs на Linux поддерживается; OverlayFS (ext4/XFS) и APFS (macOS) экспериментальные. Форматы store и signed record совместимы между backends (`README.md`). Полного паритета у экспериментальных backends нет. Поэтому формат remote не должен зависеть от backend.
 - Signed record сейчас подписывает ключ машины. `Author.session` является свободным текстом из `LAYR_SESSION`: Layr его показывает, но не проверяет (`src/model.rs`).
 - Текущие ограничения overlays: нет полной реализации route-patterns, полноценного составного идентификатора stack для approvals, encryption/replication приватных overlays и некоторых режимов из дизайн-документа. Нужно сверять статус с конкретным коммитом перед разработкой.
@@ -1559,8 +1559,8 @@ struct State {
 | Overlays | `overlay create/list/readers/use/move/log/show/diff/...` | Composite identity / routing |
 | Cache | `cache add/remove/list/repair` (алиас `layer`), `save --caches`, `regenerable` | Capture/fork/resolve/promote |
 | Policy | `access`, `protect`, `approve`, `approvals`, `try`, `checks` | Policy on artifact namespaces |
-| Replica/maintenance | `sync`, `serve-peer`, `machines`, старая команда копии, `export`, `gc`, `fsck`, `reindex`, `op log/export/import` | Object API / leases / event cursor |
-| Git bridge | `remote`, `clone`, `fetch`, `pull`, `push`, `git-sync` | Separate adapter, not Core identity |
+| Replica/maintenance | `sync`, `remote list`, `remote trust`, `export`, `gc`, `fsck`, `reindex`, `op log/export/import` | Object API / leases / event cursor |
+| Git bridge | `git remote`, `git clone`, `git fetch`, `git pull`, `git push`, `git sync` | Separate adapter, not Core identity |
 
 Имена команд сверены с `src/cmd/mod.rs` на `070653e` (22.10.2026). Флаги не сверены. Переименования `machines`, удаление старой команды копии, `serve-peer` и git bridge предложены в 12.4.
 
