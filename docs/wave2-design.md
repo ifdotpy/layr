@@ -96,3 +96,30 @@ New command group `layr queue` (new concept, RFC 12.6 rule 3):
 |---|---|---|
 | 1 and 2 | core (continues) | access.rs, cmd/admin.rs protect, cmd/refs.rs, new cmd/queue.rs, mergecmd.rs entry points only |
 | 3 and 4 | new worker `guard` | new cmd/bisect.rs, new src/secrets.rs, hooks in commit/merge/push paths (one call each) |
+
+## 5. Views (RFC 3.0, 3.1)
+
+Fact: a line already shows a stack, the shared head plus an ordered list of overlay layers
+`{overlay, state}` (`src/overlay.rs` `Layer`, setting `stack.<line id>`), and the base key is a
+hash of exactly that (`base_key`). A view is that stack made addressable.
+
+- `ViewId` = full SHA-256 hex of the canonical JSON
+  `{"format":1,"shared":"<state>","layers":[{"overlay":"<name>","state":"<state>"},…]}` in stack
+  order. Access policy is not part of it (RFC 3.1). A line without overlays has the view
+  `{"shared": head, "layers": []}`.
+- `layr view [<rev or line>] [--json]` prints the ViewId and descriptor of a line's current
+  stack (or of a state: no layers).
+- `layr view save [<line>]` writes a signed record `view.save` with the descriptor; after that
+  `views/<id>` resolves on every machine that has the record. Saving is idempotent.
+- `revs::resolve("views/<id>")` returns the shared state, so every command that takes a state
+  works. Commands that need the whole view use a new resolver `revs::resolve_view`:
+  `layr branch <name> views/<id>` (new line with head = shared and the same stack, only if the
+  caller may read every overlay layer; otherwise refused naming the overlay),
+  `layr try views/<id> -- <cmd>` (runs in the assembled view, using the existing `assemble`).
+- Attestations accept subject kind `view` (`layr attest <kind> views/<id>`). `try` on a line
+  or revision whose view has layers writes its check with subject = the view; without layers the
+  subject stays the state (unchanged behavior). `Db::check_exit` gets a view-subject variant.
+- Readers: the descriptor names overlays and state ids, never content; reading the layers still
+  needs overlay reader rights.
+
+Owner: worker `merge` (continues), branch `cloud/views`.
