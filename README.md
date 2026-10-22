@@ -102,11 +102,17 @@ The store and signed record formats remain compatible with the Linux backend.
 - The service requires a volume with ownership enabled and a separate root-owned store.
   It refuses volumes mounted with `noowners` and store folders that other users can change.
 - A snapshot clones each file and checks source metadata before and after the copy.
-  It fails if the source changes during the copy. It is not an atomic volume snapshot.
+  It is not an atomic volume snapshot.
 - APFS work grows with the number of files. Files with the same valid APFS clone identity need no content comparison.
   Other files require a content comparison to find changed blocks.
 - `status` checks kernel change counters before and after a live read. It uses a temporary snapshot if validation fails.
   Files with an active memory mapping or an unavailable counter also use the snapshot path.
+- On a volume with an FSEvents log, `status` brings its saved result up to date for the changed paths only.
+  A saved result serves for `watch.full_seconds` (60) after a full read; a write through a memory mapping gives no event.
+  `LAYR_NO_WATCH=1` reads all. See [APFS features](docs/apfs-features.md).
+- Scans read each folder with one `getattrlistbulk` call. Changed ranges of large clones skip blocks at the same physical address.
+- A copy of a folder that changes during the copy copies the changed entries again. After 6 rounds it keeps the last copy
+  with a warning: each file is one complete version from that time.
 - States are thin layers. A state in `deltas/<id>` keeps only the entries that differ from its base state
   and the paths that it removes. A chain of layers ends at a complete tree in `states/<id>`.
   See [thin APFS states](docs/apfs-thin-states.md) and [APFS compared with btrfs and git worktrees](docs/apfs-vs-btrfs.md).

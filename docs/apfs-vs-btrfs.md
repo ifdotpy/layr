@@ -7,13 +7,14 @@ See [thin APFS states](apfs-thin-states.md) and the [measurements](../benchmarks
 ## Where APFS is weaker than btrfs
 
 1. **Snapshots are not atomic.** A btrfs subvolume snapshot is one kernel operation.
-   On APFS, Layr scans the tree before and after a copy. A change during the copy fails the command
-   ("source changed during APFS snapshot; retry when writers are idle").
-   A line with constant writes (a build, a package install) can fail again and again.
-   Files with an active `mmap` have no change counter, so status uses a slow complete copy.
+   On APFS, Layr scans the tree before and after a copy and copies again what changed.
+   Under constant writes it keeps the last copy after 6 rounds, with a warning:
+   each file is then one complete version from some moment of the copy, not one moment for all files.
+   Files with an active `mmap` have no change counter, so status uses a slower complete copy.
 2. **Work grows with the number of files.** A btrfs branch costs the same for any tree.
    An APFS branch is one complete tree copy: about 1 s CPU for 10,000 files and about 20 s for 100,000.
-   `status`, `add` and automatic states scan the complete tree. btrfs gets changed paths from `send --no-data`.
+   `add` and automatic states scan the complete tree; btrfs gets changed paths from `send --no-data`.
+   `status` uses FSEvents on volumes with an event log, with the limits in [APFS features](apfs-features.md).
 3. **Weaker protection of history.** btrfs read-only subvolumes are kernel-enforced.
    APFS uses `UF_IMMUTABLE` on each file. The store owner can remove these flags, and setting them costs CPU per file.
    Real protection needs the root service on a volume with ownership enabled.
@@ -37,6 +38,7 @@ See [thin APFS states](apfs-thin-states.md) and the [measurements](../benchmarks
    It removes a layer without a record only after one hour. On btrfs an incomplete snapshot never appears.
 
 The two main limits are the non-atomic snapshot and the cost per file of each branch.
+See [APFS features](apfs-features.md) for the features that were reviewed to reduce them.
 Both need APFS volume snapshots, which need root and an Apple entitlement.
 
 ## Layr lines and git worktrees on APFS
