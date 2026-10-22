@@ -573,7 +573,7 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 }
                 Kind::Peer { .. } => {
                     let key = a
-                        .get("--key")
+                        .get("--public-key")
                         .map(str::to_owned)
                         .or(repo.p.db.machine_key(&full)?)
                         .ok_or_else(|| exit(128, "unknown machine key; give --public-key <ed25519>"))?;
