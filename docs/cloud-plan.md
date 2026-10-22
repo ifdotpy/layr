@@ -60,6 +60,9 @@ Out of scope for now:
 | remote-store | `cloud/remote-store` | store format v2, `file://` and `s3://`, slots, push/fetch/clone of stores, `fsck/log/gc --remote`, Desk v1 import | `docs/remote-design.md` |
 | remote-cli | `cloud/remote-cli` | `remote add/list/remove/trust`, peer `ssh://` push/fetch/pull/sync, `layr git …`, removal of `machines` and of the old copy command, invariant tests | `docs/remote-design.md` |
 | oci | `cloud/oci` | `layr.toml` runnables, deterministic OCI export, `oci://` remote push, registry in the service (`registry.listen`), Helm chart | 30, 31 |
-| later | – | secret detector (4.7), `bisect run` (4.9), branch from `attestations/<id>` (4.11), probes and behavior diff, Layr Cloud server | 4.7, 4.9, 4.11, 29, Cloud |
+| core-2 | `cloud/core-2` | protection rules for refs, merge queue | `docs/wave2-design.md` 1–2 |
+| guard | `cloud/guard` | `bisect run`, secret detector | `docs/wave2-design.md` 3–4 |
+| gateway, disk, infra | `cloud/gateway`, `cloud/disk`, `cloud/infra` | Layr Cloud V1 | `docs/cloud-design.md` |
+| later | – | probes and behavior diff (RFC 29, Change instead of PR) | 29 |
 
 Wave 1: core, merge, remote-store, remote-cli, oci. Wave 2 starts from their results.
