@@ -310,6 +310,7 @@ fn send_cache<R: Read, W: Write>(w: &mut Wire<R, W>, repo: &Repo, snap: &str, fe
 }
 
 fn send_states<R: Read, W: Write>(
+    ctx: &Ctx,
     w: &mut Wire<R, W>,
     repo: &Repo,
     list: &[(String, Option<String>)],
@@ -318,6 +319,9 @@ fn send_states<R: Read, W: Write>(
     peer_states: &BTreeSet<String>,
     features: SendFeatures,
 ) -> Result<(usize, u64)> {
+    for (id, _) in list {
+        crate::secrets::check_state(ctx, repo, id)?;
+    }
     let mut bytes = 0;
     let mut have = peer_states.clone();
     let mut identities = features.identities.clone();
@@ -546,6 +550,7 @@ pub fn sync(ctx: &Ctx, args: &[String]) -> Result<i32> {
         if !a.has("--pull-only") {
             let list = plan(repo, &mine, &peer_present, auto)?;
             let (n, b) = send_states(
+                ctx,
                 &mut w,
                 repo,
                 &list,
@@ -678,6 +683,7 @@ pub fn serve(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let mut features = SendFeatures::from_hello(&hello);
     features.identities = serde_json::from_value(want["clone_identities_v1"].clone()).unwrap_or_default();
     send_states(
+        ctx,
         &mut w,
         &repo,
         &list,

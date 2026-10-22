@@ -196,8 +196,8 @@ without a checkout.
 | work          | `status`, `diff`, `add`, `rm`, `mv`, `apply [--cached]`, `commit [-a] [--amend]`, `restore`, `reset`, `stash`, `clean` |
 | history       | `log`, `show`, `blame`, `grep`, `ls-files`, `rev-parse`, `merge-base`                        |
 | lines         | `branch`, `tag`, `merge [--expect]`, `cherry-pick`, `revert`, `rebase`, `adopt`; `switch`/`checkout <line>` explain that lines are folders |
-| access        | `access [list|grant [--until <30m|2h|1d>]|revoke|deny|allow|check]`, `protect [<pattern> --update <role> --check <names> --path <path>=<role> --approvals <n> --approvers <principals> --direct --rewrite <role> --no-expect | --remove]`, `approve [--withdraw] <state>`, `attest <kind> <rev> [--payload <file>]`, `attestations <rev> [--kind <kind>] [--json]` |
-| safety        | `undo`, `op log`, `save`, `try <state> -- <cmd>`, `gc`, `fsck`, `reindex`           |
+| access        | `access [list|grant [--until <30m|2h|1d>]|revoke|deny|allow|check]`, `protect [<pattern> --update <role> --check <names> --path <path>=<role> --approvals <n> --approvers <principals> --direct --rewrite <role> --no-expect | --remove]`, `approve [--withdraw] [--declassify <path>@<id>] <state>`, `attest <kind> <rev> [--payload <file>]`, `attestations <rev> [--kind <kind>] [--json]` |
+| safety        | `undo`, `op log`, `save`, `try <state> -- <cmd>`, `bisect run [--good <rev>] [--bad <rev>] [--auto] [--ref-log <ref>] [--json] -- <cmd>`, `gc`, `fsck`, `reindex`           |
 | remote (git)  | `remote`, `fetch`, `pull`, `push [--squash]`, `clone`, `git-sync`                             |
 | machines      | `sync -- <cmd>` / `serve-peer`, `machines [trust]`, `op export` / `op import` (JSONL), `backup` / `backup restore` / `backup verify` |
 | copies        | `export <folder>`                                                                              |
@@ -335,6 +335,68 @@ layr try HEAD~1 -- sh -c 'git log -1 && make check'  # an older state of your ow
   its path); the exit code is the command's, and the result is recorded as a check of the state
   (`layr attestations <state> --kind check`).
 - It needs the `try` action (the reader role, or a line of your own), not write access.
+
+## Find the first bad state
+
+```sh
+layr bisect run --good HEAD~10 --bad HEAD -- sh -c 'make test'
+layr bisect run --auto --good HEAD --json -- sh -c 'make test'
+layr bisect run --ref-log env/prod -- sh -c 'make test'
+```
+
+Bisect searches the first-parent history between the good state and the bad state.
+The command must pass before the fault and fail after the fault.
+Each test uses `try` and writes a check attestation.
+A check with the same command and state is reused, including a failed check.
+The working folder does not change.
+
+Without `--bad`, bisect saves the current working content as an auto state.
+Without `--good`, bisect uses the newest ancestor with a passing check for the same command.
+Use `--good` when no such check exists.
+`--auto` includes the line's auto states between the bounds, in time order.
+The result includes the first bad state, its message, its kind, and origin payload digests.
+`--json` includes every test step and whether bisect reused its result.
+Test output goes to standard error with `--json`.
+
+`--ref-log` searches the positions of that ref.
+Its default bad state is the newest ref position.
+Its default good state is the newest older position with a passing check for the command.
+Explicit bounds must be positions of that ref.
+
+## Secret checks
+
+Layr checks added lines before a shared commit or merge and before an export or push.
+It uses exact values from overlays that the caller can read and from files that match `secrets.paths`.
+
+```sh
+layr config secrets.paths '[".env", "private/*.key"]'
+```
+
+The sources include uncommitted files in the caller's lines.
+Candidates include `KEY=VALUE` values and whole files of at most 4 KiB.
+Each candidate needs at least 12 characters.
+Values with only letters or only digits need at least 20 characters.
+The index contains only HMAC-SHA256 values (a keyed hash).
+The random key stays in the project's private `meta` folder.
+Each check rebuilds the index to include source changes.
+For changed files above 64 MiB, Layr checks the whole new file as a stream.
+These refusals give a byte offset instead of a line.
+
+A refusal gives the path, line, and a declassify id.
+It never prints the value.
+An admin can permit that value at that path:
+
+```sh
+layr approve --declassify 'src/config.rs@<id-from-refusal>' HEAD
+```
+
+This writes an approval attestation with the full hash and path.
+The permission applies to that value at that path throughout the project.
+A different value or path needs another approval.
+`layr approve --withdraw <approval-subject>` revokes the caller's approvals on that subject and restores the check.
+
+Encoded or split secrets are not detected.
+This check adds protection to private overlays and does not replace them.
 
 ## Git in a line
 

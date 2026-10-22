@@ -185,6 +185,7 @@ pub fn export(ctx: &Ctx, args: &[String]) -> Result<i32> {
     };
     let dst = caller_path(ctx, &folder);
     let state = source_state(ctx, &h, rev.as_deref())?;
+    crate::secrets::check_contents(ctx, &h.repo, &state)?;
     let to = h.repo.state_root(&state)?;
     as_caller_fs(ctx, || {
         std::fs::create_dir_all(&dst)?;

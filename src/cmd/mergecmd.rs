@@ -191,6 +191,13 @@ fn finish(
     if let Err(e) = repo.check_move(ctx, line, new_head) {
         return Err(fail(e));
     }
+    if op == "merge" && new_head != line.head {
+        if let Err(e) =
+            crate::secrets::check_between(ctx, repo, &repo.state_root(&line.head)?, &repo.state_root(new_head)?, &line.head)
+        {
+            return Err(fail(e));
+        }
+    }
     // A line with overlays: the full trees of the old and the new head, with the overlays in
     // place, so the update never touches an overlay file it does not change.
     let layers = match ovl {
@@ -238,6 +245,7 @@ fn finish(
 /// Path rules of a protected line: every path that the merge changes needs the role of its
 /// rule (`layr protect <line> --path <path>=<role>`).
 fn check_paths(ctx: &Ctx, repo: &Repo, line: &Line, rule: Option<&crate::access::Rule>, head: &str, result: &str) -> Result<()> {
+    crate::secrets::check_between(ctx, repo, &repo.state_root(head)?, &repo.state_root(result)?, head)?;
     let rule = match rule {
         Some(r) if !r.paths.is_empty() && !ctx.caller.is_root() => r,
         _ => return Ok(()),

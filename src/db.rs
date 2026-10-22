@@ -664,6 +664,15 @@ impl Db {
         Ok(v)
     }
 
+    /// Active value declassifications, across all state subjects in this project.
+    pub fn declassifications(&self) -> Result<Vec<Record>> {
+        let mut st = self.conn.prepare("SELECT r.raw FROM attestations a JOIN records r ON r.id=a.id
+            WHERE a.kind='approval' AND json_extract(r.raw,'$.r.data.declassify') IS NOT NULL
+            AND NOT EXISTS (SELECT 1 FROM attestation_revocations v WHERE v.target=a.id AND v.machine=a.machine AND v.uid=a.uid AND v.ord>a.ord)")?;
+        let raw = st.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+        raw.into_iter().map(|r| Ok(crate::oplog::parse_line(&r, None)?.record)).collect()
+    }
+
     pub fn checks(&self, state: &str) -> Result<Vec<(String, i64, i64, String)>> {
         let mut st = self.conn.prepare("SELECT COALESCE(json_extract(r.raw,'$.r.data.check.command'),json_extract(r.raw,'$.r.data.command')),
             COALESCE(json_extract(r.raw,'$.r.data.check.exit'),json_extract(r.raw,'$.r.data.exit'),-1),r.time,json_extract(r.raw,'$.r.actor.name')
@@ -676,6 +685,36 @@ impl Db {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(v)
+    }
+
+    pub fn check_exit(&self, state: &str, argv: &[String], wanted_exit: Option<i64>) -> Result<Option<i64>> {
+        let mut statement=self.conn.prepare("SELECT COALESCE(json_extract(r.raw,'$.r.data.check'),json_extract(r.raw,'$.r.data'))
+            FROM attestations a JOIN records r ON r.id=a.id WHERE a.subject=?1 AND a.kind='check'
+            AND NOT EXISTS (SELECT 1 FROM attestation_revocations v WHERE v.target=a.id AND v.machine=a.machine AND v.uid=a.uid AND v.ord>a.ord)
+            ORDER BY a.ord DESC")?;
+        let rows = statement.query_map(params![state], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+        for row in rows {
+            let result: serde_json::Value = serde_json::from_str(&row)?;
+            let matches = match result.get("argv") {
+                Some(value) => {
+                    serde_json::from_value::<Vec<String>>(value.clone()).map(|recorded| recorded == argv).unwrap_or(false)
+                }
+                None => {
+                    argv.len() == 1
+                        && !argv[0].is_empty()
+                        && !argv[0].chars().any(|c| c.is_whitespace())
+                        && result["command"].as_str() == Some(argv[0].as_str())
+                }
+            };
+            if matches {
+                if let Some(code) = result["exit"].as_i64() {
+                    if wanted_exit.map(|wanted| wanted == code).unwrap_or(true) {
+                        return Ok(Some(code));
+                    }
+                }
+            }
+        }
+        Ok(None)
     }
 
     fn derive_attestation(&self, rec: &Record, local: bool) -> Result<()> {

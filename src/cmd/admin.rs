@@ -536,13 +536,20 @@ pub fn try_cmd(ctx: &Ctx, args: &[String]) -> Result<i32> {
         return Err(exit(128, USAGE));
     }
     let state = revs::resolve(repo, h.line.as_ref(), rev).map_err(|e| exit(128, format!("layr try: {e:#}")))?;
-    // `try` is the caller's own command: it gets the caller's environment, except the variables
-    // that would point git or layr at the caller's own folder instead of the copy.
+    try_state_in(ctx, repo, &state, &a.paths, a.has("-q"), a.has("--keep"), false)
+}
+
+/// Use the `try` copy and environment. JSON output sends child output to standard error.
+pub fn try_state(ctx: &Ctx, repo: &Repo, state: &str, argv: &[String], quiet: bool, json: bool) -> Result<i32> {
+    try_state_in(ctx, repo, state, argv, quiet, false, json)
+}
+
+fn try_state_in(ctx: &Ctx, repo: &Repo, state: &str, argv: &[String], quiet: bool, keep: bool, json: bool) -> Result<i32> {
     const TO_COPY: &[&str] =
         &["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR", "LAYR_LINE"];
     let env: Vec<(String, String)> =
         ctx.env.iter().filter(|(k, _)| !TO_COPY.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect();
-    run_check_in(ctx, repo, &state, &a.paths, &a.paths.join(" "), &env, a.has("-q"), a.has("--keep"))
+    run_check_in(ctx, repo, state, argv, &argv.join(" "), &env, quiet, keep, json)
 }
 
 /// Run a configured check as the caller in a temporary copy of `state` and record its exit code
@@ -553,7 +560,7 @@ pub fn try_cmd(ctx: &Ctx, args: &[String]) -> Result<i32> {
 /// The copy starts with the warm caches of the state, but its build output is never kept: layr
 /// cannot tell whether build output is valid for a state (docs/design.md, section 5).
 pub fn run_check(ctx: &Ctx, repo: &Repo, state: &str, argv: &[String], command: &str, quiet: bool) -> Result<i32> {
-    run_check_in(ctx, repo, state, argv, command, &[], quiet, false)
+    run_check_in(ctx, repo, state, argv, command, &[], quiet, false, false)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -566,6 +573,7 @@ fn run_check_in(
     env: &[(String, String)],
     quiet: bool,
     keep: bool,
+    json: bool,
 ) -> Result<i32> {
     let name = format!(".try-{:016x}", rand::random::<u64>());
     let dir = repo.p.line_path(&name);
@@ -584,6 +592,9 @@ fn run_check_in(
         let started = std::time::Instant::now();
         let mut c = std::process::Command::new(&argv[0]);
         c.args(&argv[1..]).current_dir(&dir);
+        if json {
+            c.stdout(std::process::Stdio::from(std::io::stderr()));
+        }
         // The caller's identity (uid, groups), never the service's.
         let mut env = env.to_vec();
         env.push(("LAYR_TRY_STATE".into(), ids::display(state)));
@@ -595,7 +606,7 @@ fn run_check_in(
             c.status().map_err(|e| exit(127, format!("layr try: cannot run '{}' as user {}: {e}", argv[0], ctx.caller.user)))?;
         let code = st.code().unwrap_or(128);
         let _lock = repo.p.lock()?;
-        let result = serde_json::json!({"command":command,"exit":code,"seconds":started.elapsed().as_secs_f64()});
+        let result = serde_json::json!({"command":command,"exit":code,"seconds":started.elapsed().as_secs_f64(),"argv":argv});
         let mut rec = super::attest::record(repo, state, "check", &serde_json::to_vec(&result)?)?;
         rec.data["check"] = result;
         repo.commit_record(ctx, rec)?;
@@ -1380,21 +1391,32 @@ pub fn access(ctx: &Ctx, args: &[String]) -> Result<i32> {
 /// `layr approve [<rev>] [--withdraw]`: approve an exact state (or withdraw the approval). A
 /// protection rule can require approvals of the state a merge takes (`--approvals`).
 pub fn approve(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let spec = Spec::new().flag("--withdraw").flag("-q|--quiet");
+    let spec = Spec::new().flag("--withdraw").flag("-q|--quiet").value("--declassify").flag("--json");
     let a = parse(&spec, args)?;
     let h = here(ctx)?;
     let repo = &h.repo;
     let state = revs::resolve(repo, h.line.as_ref(), a.pos.first().map(|s| s.as_str()).unwrap_or("HEAD"))?;
+    if a.pos.len() > 1 {
+        bail!("usage: layr approve [--declassify <path>@<id>] <rev>");
+    }
+    if a.has("--withdraw") && a.has("--declassify") {
+        bail!("--withdraw and --declassify cannot be combined");
+    }
     let s = repo.state(&state)?;
     let _lock = repo.p.lock()?;
     let withdraw = a.has("--withdraw");
-    let mut rec = super::attest::record(repo, &state, if withdraw { "revoke" } else { "approval" }, b"")?;
+    let mut rec = match a.get("--declassify") {
+        Some(scope) => crate::secrets::declassify(ctx, repo, scope, &state)?,
+        None => super::attest::record(repo, &state, if withdraw { "revoke" } else { "approval" }, b"")?,
+    };
     if withdraw {
         rec.data["revokes"] =
             serde_json::json!(repo.p.db.own_attestations(&state, &repo.p.store.machine.id, ctx.caller.uid, Some("approval"))?);
     }
-    repo.commit_record(ctx, rec)?;
-    if !a.has("-q") {
+    let rec = repo.commit_record(ctx, rec)?;
+    if a.has("--json") {
+        outln!(ctx, "{}", rec.data);
+    } else if !a.has("-q") {
         let what = if withdraw { "Withdrew the approval of" } else { "Approved" };
         outln!(ctx, "{what} state {} {}", ids::short(&state), s.message.lines().next().unwrap_or(""));
     }

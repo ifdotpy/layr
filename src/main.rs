@@ -31,6 +31,7 @@ mod privs;
 mod recv;
 mod repo;
 mod revs;
+mod secrets;
 #[cfg(target_os = "linux")]
 mod send_cache;
 mod service;
