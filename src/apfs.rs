@@ -577,31 +577,74 @@ pub fn candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> 
 
 // Compare fixed blocks when APFS cannot report changed extents. Adjacent blocks coalesce.
 fn changed_ranges(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), rel: &str) -> Result<Vec<(u64, u64)>> {
-    use std::io::Read;
+    use std::os::unix::fs::FileExt;
     let open = |p: PathBuf| -> Result<File> {
         use std::os::unix::fs::OpenOptionsExt;
         fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(&p).with_context(|| format!("open {}", p.display()))
     };
-    let (mut a, mut b) = (open(parent.at(rel)?)?, open(child.at(rel)?)?);
+    let (a, b) = (open(parent.at(rel)?)?, open(child.at(rel)?)?);
     let (alen, blen) = (a.metadata()?.len(), b.metadata()?.len());
+    let end = alen.max(blen);
+    // Blocks at the same physical address hold the same bytes: only the others are read.
+    let read = if alen == blen && alen >= SHARED_MIN { unshared(&a, &b, alen) } else { vec![(0, end)] };
     let mut ranges: Vec<(u64, u64)> = Vec::new();
     let (mut ab, mut bb) = ([0u8; 4096], [0u8; 4096]);
-    let mut pos = 0;
-    while pos < alen.max(blen) {
-        let an = (alen.saturating_sub(pos).min(4096)) as usize;
-        let bn = (blen.saturating_sub(pos).min(4096)) as usize;
-        a.read_exact(&mut ab[..an])?;
-        b.read_exact(&mut bb[..bn])?;
-        let len = an.max(bn) as u64;
-        if ab[..an] != bb[..bn] {
-            match ranges.last_mut() {
-                Some((start, n)) if *start + *n == pos => *n += len,
-                _ => ranges.push((pos, len)),
+    let mut done = 0u64;
+    for (from, to) in read {
+        let mut pos = (from - from % 4096).max(done);
+        while pos < to {
+            let an = (alen.saturating_sub(pos).min(4096)) as usize;
+            let bn = (blen.saturating_sub(pos).min(4096)) as usize;
+            a.read_exact_at(&mut ab[..an], pos)?;
+            b.read_exact_at(&mut bb[..bn], pos)?;
+            let len = an.max(bn) as u64;
+            if ab[..an] != bb[..bn] {
+                match ranges.last_mut() {
+                    Some((start, n)) if *start + *n == pos => *n += len,
+                    _ => ranges.push((pos, len)),
+                }
             }
+            pos += len;
         }
-        pos += len;
+        done = pos;
     }
     Ok(ranges)
+}
+
+/// Files smaller than this are compared in full: reading them costs less than the mapping.
+const SHARED_MIN: u64 = 1 << 20;
+
+/// Byte ranges of two files of length `len` that are not at the same physical address, as
+/// (start, end). The whole file when APFS does not report a mapping.
+fn unshared(a: &File, b: &File, len: u64) -> Vec<(u64, u64)> {
+    let _t = crate::trace::span("APFS shared extents");
+    let (Some(ea), Some(eb)) = (crate::sys::apfs_extents(a, len), crate::sys::apfs_extents(b, len)) else {
+        return vec![(0, len)];
+    };
+    let mut out: Vec<(u64, u64)> = Vec::new();
+    let (mut i, mut j, mut pos) = (0, 0, 0u64);
+    while pos < len && i < ea.len() && j < eb.len() {
+        let (oa, la, da) = ea[i];
+        let (ob, lb, db) = eb[j];
+        let stop = (oa + la).min(ob + lb);
+        if da + (pos - oa) != db + (pos - ob) {
+            match out.last_mut() {
+                Some((_, e)) if *e == pos => *e = stop,
+                _ => out.push((pos, stop)),
+            }
+        }
+        pos = stop;
+        if pos >= oa + la {
+            i += 1;
+        }
+        if pos >= ob + lb {
+            j += 1;
+        }
+    }
+    if pos < len {
+        out.push((pos, len));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -815,6 +858,31 @@ mod tests {
             }
         }
         assert!(bulk.contains_key("layer") && !bulk.contains_key("layer/hidden"));
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a case-sensitive APFS test volume"]
+    fn changed_ranges_read_only_unshared_blocks() -> Result<()> {
+        use std::os::unix::fs::FileExt;
+        let s = Sandbox::new();
+        let data: Vec<u8> = (0..8u32 << 20).map(|i| (i / 4096 % 251) as u8).collect();
+        fs::write(s.0.join("big"), &data)?;
+        File::open(s.0.join("big"))?.sync_all()?;
+        crate::sys::apfs_clone(&s.0.join("big"), &s.0.join("copy"))?;
+        let f = fs::OpenOptions::new().write(true).open(s.0.join("copy"))?;
+        f.write_all_at(b"changed", 100 * 4096 + 10)?;
+        f.write_all_at(b"changed", 1500 * 4096)?;
+        f.sync_all()?;
+        let (a, b) = (File::open(s.0.join("big"))?, File::open(s.0.join("copy"))?);
+        let read: u64 = unshared(&a, &b, data.len() as u64).iter().map(|(x, y)| y - x).sum();
+        assert!(read < 1 << 20, "read {read} bytes");
+        assert_eq!(changed_ranges(&s.0, &s.0, "big").ok(), Some(vec![]));
+        fs::create_dir(s.0.join("x"))?;
+        fs::create_dir(s.0.join("y"))?;
+        fs::rename(s.0.join("big"), s.0.join("x/f"))?;
+        fs::rename(s.0.join("copy"), s.0.join("y/f"))?;
+        assert_eq!(changed_ranges(&s.0.join("x"), &s.0.join("y"), "f")?, vec![(100 * 4096, 4096), (1500 * 4096, 4096)]);
         Ok(())
     }
 

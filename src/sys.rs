@@ -489,6 +489,37 @@ pub fn apfs_data_identity(path: &std::path::Path) -> io::Result<ApfsDataIdentity
     })
 }
 
+/// The physical extents of a file: (file offset, length, device offset). `None` when APFS does
+/// not report a mapping for some range (a hole, or data not yet allocated).
+#[cfg(target_os = "macos")]
+pub fn apfs_extents(f: &std::fs::File, len: u64) -> Option<Vec<(u64, u64, u64)>> {
+    use std::os::fd::AsRawFd;
+    // The kernel structure is packed to four bytes.
+    #[repr(C, packed(4))]
+    struct Log2Phys {
+        flags: u32,
+        contig: i64,
+        offset: i64,
+    }
+    let mut out = Vec::new();
+    let mut pos = 0u64;
+    while pos < len {
+        let mut l = Log2Phys { flags: 0, contig: (len - pos) as i64, offset: pos as i64 };
+        // SAFETY: the descriptor is live and `l` is the in/out structure of F_LOG2PHYS_EXT.
+        if unsafe { libc::fcntl(f.as_raw_fd(), libc::F_LOG2PHYS_EXT, &mut l as *mut Log2Phys) } != 0 {
+            return None;
+        }
+        let (contig, dev) = (l.contig, l.offset);
+        if contig <= 0 || dev < 0 {
+            return None;
+        }
+        let n = (contig as u64).min(len - pos);
+        out.push((pos, n, dev as u64));
+        pos += n;
+    }
+    Some(out)
+}
+
 /// One entry of a folder as `getattrlistbulk` returns it.
 #[cfg(target_os = "macos")]
 #[derive(Debug, Clone, PartialEq, Eq)]
