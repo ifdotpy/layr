@@ -80,9 +80,13 @@ New command group `layr queue` (new concept, RFC 12.6 rule 3):
 - Check points: `commit` and `merge` that produce a state of the shared set, `layr git push`
   and Git export, and `push` to any remote. Added lines of the diff are split into tokens
   (`[A-Za-z0-9_+/=.-]{12,}`) and compared by HMAC.
-- A match refuses the operation with path and line, never the value. Override: an `approval`
-  attestation with payload `{"declassify": "<path>:<line>"}` on that state, created by
-  `layr approve --declassify <path>:<line> <rev>` by a user with the admin role.
+- A match refuses the operation with path, line and a declassify id `<path>@<first 16 hex of the
+  HMAC>`, never the value, and prints the admin command
+  `layr approve --declassify <path>@<id> <rev>` (`<rev>`: head of the target line). That writes
+  an `approval` attestation with payload `{"declassify":{"path":"…","hmac":"<full hex>"}}`.
+  A later operation is allowed when the same value appears at the same path and a non-revoked
+  declassify attestation exists in the project; revoking it restores the refusal.
+- Every overlay visible to the caller is a source.
 - Limits stated in README: encoded or split secrets are not found; this adds to private
   overlays and does not replace them.
 
