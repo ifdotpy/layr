@@ -521,10 +521,16 @@ impl<'a> Repo<'a> {
             let id = ids::new_id();
             let head = self.state_src(&line.head)?;
             let dst = self.p.delta_path(&id);
-            if crate::thin::snapshot_over(&head, &line.head, &w, &dst, false)?.is_none() {
-                crate::thin::write_layer(&head.at("")?, &dst, &crate::thin::Diff::default(), &line.head, false)?;
+            match crate::thin::snapshot_over(&head, &line.head, &w, &dst, false) {
+                Ok(Some(_)) => return self.describe_state(ctx, id, StateKind::Auto, parents, message, Some(line)),
+                Ok(None) => {
+                    crate::thin::write_layer(&head.at("")?, &dst, &crate::thin::Diff::default(), &line.head, false)?;
+                    return self.describe_state(ctx, id, StateKind::Auto, parents, message, Some(line));
+                }
+                // Hard links need a complete tree.
+                Err(e) if crate::thin::needs_complete(&e) => {}
+                Err(e) => return Err(e),
             }
-            return self.describe_state(ctx, id, StateKind::Auto, parents, message, Some(line));
         }
         if private.is_empty() {
             return self.new_state(ctx, &w, StateKind::Auto, parents, message, Some(line));

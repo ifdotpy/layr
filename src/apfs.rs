@@ -91,6 +91,8 @@ pub(crate) struct ScanEntry {
     pub(crate) fingerprint: Fingerprint,
     pub(crate) meta: crate::fsutil::Meta,
     pub(crate) data: Option<crate::sys::ApfsDataIdentity>,
+    /// The number of names of the inode. Not part of the comparison.
+    pub(crate) nlink: u64,
 }
 impl PartialEq for ScanEntry {
     fn eq(&self, other: &Self) -> bool {
@@ -111,6 +113,7 @@ pub(crate) fn scan_with_data(root: &Path, data: bool) -> Result<BTreeMap<String,
                 fingerprint: (m.dev(), m.ino(), m.mode(), m.len(), m.mtime(), m.mtime_nsec(), m.ctime(), m.ctime_nsec()),
                 meta: crate::fsutil::meta_of(&m),
                 data: if data && m.is_file() { Some(crate::sys::apfs_data_identity(&path)?) } else { None },
+                nlink: m.nlink(),
             },
         );
         if m.is_dir() && (rel.is_empty() || !is_subvolume(&path)) {
@@ -262,6 +265,34 @@ pub(crate) fn seal(path: &Path, readonly: bool, for_delete: bool) -> Result<()> 
     }
     Ok(())
 }
+/// True when a scanned tree needs file-by-file copies: special files, nested layers, or hard
+/// links (a recursive clone copies hard links as separate files).
+pub(crate) fn needs_file_copies(src: &Path, entries: &BTreeMap<String, ScanEntry>) -> bool {
+    let mut inodes = std::collections::HashSet::new();
+    entries.iter().any(|(p, e)| {
+        e.meta.ftype == crate::fsutil::FType::Special
+            || (!p.is_empty() && e.meta.is_dir() && is_subvolume(&src.join(p)))
+            || (e.meta.is_file() && !inodes.insert((e.fingerprint.0, e.fingerprint.1)))
+    })
+}
+
+/// Copy the complete tree `src` (scanned as `entries`) to the new path `dst`. A read-only copy
+/// keeps the immutable flags of its entries except the root; a writable copy has none.
+pub(crate) fn clone_complete(src: &Path, dst: &Path, entries: &BTreeMap<String, ScanEntry>, readonly: bool) -> Result<()> {
+    if needs_file_copies(src, entries) {
+        return copy_tree(src, dst, true, &mut BTreeMap::new());
+    }
+    // Clone the tree at once when no entry needs file-by-file handling. The clone keeps flags,
+    // attributes, and creation times.
+    crate::sys::apfs_clone(src, dst)?;
+    if readonly {
+        crate::sys::apfs_immutable(dst, false)?;
+    } else {
+        seal(dst, false, false)?;
+    }
+    Ok(())
+}
+
 pub fn snapshot(src: &Path, dst: &Path, readonly: bool) -> Result<()> {
     let _t = crate::trace::span(format!("APFS clone {}", dst.display()));
     if fs::symlink_metadata(dst).is_ok() {
@@ -277,26 +308,7 @@ pub fn snapshot(src: &Path, dst: &Path, readonly: bool) -> Result<()> {
     let result = (|| -> Result<()> {
         {
             let _t = crate::trace::span("APFS copy tree");
-            let mut inodes = std::collections::HashSet::new();
-            let native = !before.iter().any(|(p, e)| {
-                e.meta.ftype == crate::fsutil::FType::Special
-                    || (!p.is_empty() && e.meta.is_dir() && is_subvolume(&src.join(p)))
-                    // Recursive clones copy hard links as separate files.
-                    || (e.meta.is_file() && !inodes.insert((e.fingerprint.0, e.fingerprint.1)))
-            });
-            if native {
-                // Clone the tree at once when no entry needs file-by-file handling.
-                // The clone keeps flags, attributes, and creation times. A sealed source
-                // stays sealed in an immutable snapshot; only its root must change.
-                crate::sys::apfs_clone(src, &temp)?;
-                if readonly {
-                    crate::sys::apfs_immutable(&temp, false)?;
-                } else {
-                    seal(&temp, false, false)?;
-                }
-            } else {
-                copy_tree(src, &temp, true, &mut BTreeMap::new())?;
-            }
+            clone_complete(src, &temp, &before, readonly)?;
         }
         let after = {
             let _t = crate::trace::span("APFS scan after");

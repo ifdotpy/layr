@@ -190,9 +190,9 @@ impl Layered {
     /// immutable flags of the cloned entries; the caller seals the rest and writes the marker.
     pub fn materialize(&self, dst: &Path, readonly: bool) -> Result<()> {
         let _t = crate::trace::span(format!("thin materialize {} layers", self.layers.len()));
-        crate::sys::apfs_clone(self.bottom(), dst).with_context(|| format!("clone {}", self.bottom().display()))?;
+        let entries = apfs::scan_with_data(self.bottom(), false)?;
+        apfs::clone_complete(self.bottom(), dst, &entries, readonly).with_context(|| format!("clone {}", self.bottom().display()))?;
         let result = (|| -> Result<()> {
-            crate::sys::apfs_immutable(dst, false)?;
             for l in self.layers.iter().rev().skip(1) {
                 apply(l, dst)?;
             }
@@ -469,6 +469,36 @@ pub fn ensure_parent(dst: &Path) -> Result<()> {
     Ok(())
 }
 
+/// A thin layer cannot keep hard links between its entries: the caller makes a complete tree.
+#[derive(Debug)]
+pub struct HardLinks;
+impl std::fmt::Display for HardLinks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a changed file has hard links")
+    }
+}
+impl std::error::Error for HardLinks {}
+
+/// True for an error that asks for a complete tree instead of a thin layer.
+pub fn needs_complete(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<HardLinks>().is_some()
+}
+
+fn linked(e: &ScanEntry) -> bool {
+    e.meta.is_file() && e.nlink > 1
+}
+
+/// True when a file at one of `paths` below `root` has another name: staging it into a thin
+/// layer would split the names.
+pub fn any_linked(root: &Path, paths: &BTreeSet<String>) -> bool {
+    paths.iter().any(|p| {
+        crate::fsutil::safe_join(root, p)
+            .ok()
+            .and_then(|f| fs::symlink_metadata(f).ok())
+            .is_some_and(|m| m.is_file() && m.nlink() > 1)
+    })
+}
+
 /// True when the tree at `path` is a thin layer over a base.
 pub fn is_thin(path: &Path) -> bool {
     apfs::subvol_info(path).ok().and_then(|i| i.base).is_some()
@@ -639,6 +669,9 @@ pub fn snapshot_over(base: &Layered, base_id: &str, src: &Path, dst: &Path, writ
     let d = diff(&old, &|k| base.path(k), &before, src)?;
     if d.is_empty() {
         return Ok(None);
+    }
+    if d.write.iter().any(|k| linked(&before[k])) {
+        bail!(HardLinks);
     }
     write_layer(src, dst, &d, base_id, writable)?;
     if apfs::scan_with_data(src, true).ok().as_ref() != Some(&before) {
@@ -886,6 +919,11 @@ mod tests {
         fs::write(root.join("swap-dir/child"), b"child").unwrap();
         fs::write(root.join("b/x"), b"x").unwrap();
         std::os::unix::fs::symlink("a/same", root.join("link")).unwrap();
+        fs::hard_link(root.join("a/deep/file"), root.join("b/linked")).unwrap();
+    }
+
+    fn linked(root: &Path) -> bool {
+        fs::symlink_metadata(root.join("b/linked")).unwrap().ino() == fs::symlink_metadata(root.join("a/deep/file")).unwrap().ino()
     }
 
     fn change(root: &Path) {
@@ -958,9 +996,16 @@ mod tests {
         let out = s.0.join("out");
         layered.materialize(&out, false)?;
         check_same(&Layered::complete(&out), &work);
+        assert!(linked(&base) && linked(&work) && linked(&out), "hard links survive");
         assert_eq!(fs::symlink_metadata(out.join("b"))?.mode() & 0o777, 0o750);
         fs::write(out.join("a/same"), b"writable")?;
         assert_eq!(fs::read(base.join("a/same"))?, b"same");
+        // A changed file with two names needs a complete tree.
+        let work3 = s.0.join("work3");
+        layered.materialize(&work3, false)?;
+        fs::write(work3.join("b/linked"), b"both names")?;
+        let e = snapshot_over(&layered, "layer-id", &work3, &s.0.join("refused"), false).unwrap_err();
+        assert!(needs_complete(&e) && !s.0.join("refused").exists());
         // A second layer over the first one.
         let work2 = s.0.join("work2");
         layered.materialize(&work2, false)?;

@@ -249,8 +249,13 @@ pub fn stage_paths(repo: &Repo, line: &Line, scan: &Path, paths: &BTreeSet<Strin
     let stage = repo.ensure_stage(line)?;
     #[cfg(target_os = "macos")]
     if crate::thin::is_thin(&stage) {
-        let (index, _) = repo.index_source(line)?;
-        return crate::thin::stage_entries(&index, scan, paths, repo.own(line));
+        // A file with several names keeps them only in a complete index.
+        if !crate::thin::any_linked(&repo.working(line), paths) {
+            let (index, _) = repo.index_source(line)?;
+            return crate::thin::stage_entries(&index, scan, paths, repo.own(line));
+        }
+        let stage = repo.ensure_full_stage(line)?;
+        return stage_into(repo, line, &stage, scan, paths);
     }
     stage_into(repo, line, &stage, scan, paths)
 }

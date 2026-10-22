@@ -107,13 +107,23 @@ The store and signed record formats remain compatible with the Linux backend.
   Other files require a content comparison to find changed blocks.
 - `status` checks kernel change counters before and after a live read. It uses a temporary snapshot if validation fails.
   Files with an active memory mapping or an unavailable counter also use the snapshot path.
-- `add` clones changed files into the private index instead of copying all bytes. Hard-linked index files use the existing copy path.
-- `add` validates the working tree before and after it copies selected entries. It avoids full temporary snapshots when validation succeeds.
-  The first `add` still creates a complete index from the head. Active `mmap` files use the snapshot path.
-- A regular `commit` moves the prepared index into the state store and makes it immutable.
+- States are thin layers. A state in `deltas/<id>` keeps only the entries that differ from its base state
+  and the paths that it removes. A chain of layers ends at a complete tree in `states/<id>`.
+  See [thin APFS states](docs/apfs-thin-states.md).
+- The index is a thin layer over the head. `add` clones only the selected entries into it.
+  `add` validates the working tree before and after it copies them. Active `mmap` files use the snapshot path.
+  `rm`, `mv`, `apply --cached` and `restore --staged` first make the index a complete tree.
+- A regular `commit` moves the index into `deltas/<id>` and makes it immutable. Its cost depends on the changed files.
   A journal restores the index after a process stops before the database transaction completes.
   Commits with overlays retain the existing path.
+- An automatic state copies only the entries that changed since the line head. An unchanged folder makes no state.
+- `status`, `add`, `commit`, `diff` and the git export read the layers directly.
+  Other commands that need a folder make a view in `states/<id>`.
+  `layr gc` removes views that no command used for 10 minutes (setting `thin.view_seconds`).
+  It also gives a line head with more than 32 layers a complete tree (setting `thin.chain`).
+- A state that is the base of another state stays on disk until that state goes, also after `gc` deletes its record.
 - File modes, symbolic links, hard links and file identity survive snapshots. Nested layers stay outside history.
+  The file identity for move detection is the creation time, which APFS clones, writes and renames keep.
 - Immutable flags prevent ordinary writes to states. The store owner can remove these flags.
   Use the root service for separate users and root-owned state storage.
 - Overlays, `sync`, `serve-peer`, backup and restore are available.

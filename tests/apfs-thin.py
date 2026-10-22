@@ -122,6 +122,20 @@ try:
     assert run(work, 'show', 'HEAD~3:d5/f500').stdout == 'commit 0\n'
     print('PASS gc removes unused views and shortens long chains', flush=True)
 
+    # A changed file with two names makes a complete automatic state, which keeps both names.
+    os.link(work / 'd9/f900', work / 'hard')
+    with open(work / 'hard', 'ab') as f:
+        f.write(b'both names\n')
+    known = set(os.listdir(project / 'states'))
+    run(work, 'save', '-q')
+    made = [d for d in set(os.listdir(project / 'states')) - known if '@' not in d]
+    assert len(made) == 1, made
+    auto = project / 'states' / made[0]
+    assert os.lstat(auto / 'hard').st_ino == os.lstat(auto / 'd9/f900').st_ino
+    os.unlink(work / 'hard')
+    run(work, 'commit', '-qam', 'after a linked change')
+    print('PASS a changed file with two names makes a complete state', flush=True)
+
     # A merge reads thin states and its result matches the line.
     run(main, 'merge', '-q', 'topic')
     assert tree(main) == tree(work)
