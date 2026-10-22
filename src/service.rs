@@ -347,6 +347,7 @@ pub fn daemon(args: &[String]) -> Result<i32> {
         }
         std::fs::remove_file(&sock)?;
     }
+    let registry_listeners = crate::oci::registry::listeners(&root)?;
     let listener = UnixListener::bind(&sock)?;
     {
         use std::os::unix::fs::PermissionsExt;
@@ -371,7 +372,10 @@ pub fn daemon(args: &[String]) -> Result<i32> {
         }
         let wait = next.saturating_duration_since(std::time::Instant::now()).min(std::time::Duration::from_secs(1));
         let timeout = rustix::event::Timespec { tv_sec: wait.as_secs() as _, tv_nsec: wait.subsec_nanos() as _ };
-        let mut pfd = [rustix::event::PollFd::new(&listener, rustix::event::PollFlags::IN)];
+        let mut pfd = vec![rustix::event::PollFd::new(&listener, rustix::event::PollFlags::IN)];
+        for (_, l) in &registry_listeners {
+            pfd.push(rustix::event::PollFd::new(l, rustix::event::PollFlags::IN));
+        }
         let ready = rustix::event::poll(&mut pfd, Some(&timeout)).unwrap_or(0);
         if ready > 0 && pfd[0].revents().contains(rustix::event::PollFlags::IN) {
             if let Ok((conn, _)) = listener.accept() {
@@ -393,6 +397,28 @@ pub fn daemon(args: &[String]) -> Result<i32> {
                         children.insert(pid, uid);
                         drop(conn);
                     }
+                }
+            }
+        }
+        for (i, (name, registry)) in registry_listeners.iter().enumerate() {
+            if !pfd[i + 1].revents().contains(rustix::event::PollFlags::IN) {
+                continue;
+            }
+            if let Ok((conn, _)) = registry.accept() {
+                if children.len() >= max_total {
+                    drop(conn);
+                    continue;
+                }
+                match crate::sys::fork() {
+                    Ok(crate::sys::Fork::Child) => {
+                        drop(listener);
+                        crate::oci::registry::handle(conn, &root, name);
+                        std::process::exit(0);
+                    }
+                    Ok(crate::sys::Fork::Parent(pid)) => {
+                        children.insert(pid, u32::MAX);
+                    }
+                    Err(e) => eprintln!("layr registry: fork failed: {e}"),
                 }
             }
         }

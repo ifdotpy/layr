@@ -19,6 +19,7 @@ base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 hex = "0.4"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 ignore = "0.4"
 libc = "0.2"
 rand = "0.8"
@@ -27,9 +28,13 @@ rustix = { version = "1", features = ["fs", "net", "process", "thread", "event",
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde_yaml = "0.9"
 sha1 = "0.10"
 sha2 = "0.10"
 similar = "2"
+tar = "0.4"
+toml = "0.8"
 unicode-normalization = "0.1"
 uuid = { version = "1", features = ["v7"] }
 

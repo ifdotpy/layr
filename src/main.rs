@@ -26,6 +26,7 @@ mod ignore_rules;
 mod merge;
 mod model;
 mod oplog;
+mod oci;
 mod overlay;
 mod privs;
 mod recv;
