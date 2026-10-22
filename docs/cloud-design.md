@@ -59,6 +59,31 @@ btrfs, a project store or root.
 10. **Not in V1:** the web site, passkeys (they need a browser), multi-tenant hosted service,
     billing, per-layer keys (RFC 7.2), compute scheduler (RFC stage 3).
 
+## Gateway configuration (contract between gateway and infra)
+
+`/etc/layr-gateway/config.json`, written by the host boot script, read again when it changes:
+
+```json
+{
+  "host": "desk.example.com",
+  "listen": "<tailnet address>:443",
+  "projects": {
+    "<project id>": {
+      "bucket": "…", "region": "eu-central-1", "prefix": "<project id>/",
+      "readerRoleArn": "arn:…", "writerRoleArn": "arn:…", "gcRoleArn": "arn:…",
+      "recipient": "age1…",
+      "writeTokenHashes": ["<sha256 hex>"], "gcTokenHashes": ["<sha256 hex>"]
+    }
+  }
+}
+```
+
+- Token fields hold SHA-256 hashes only, never tokens. `layr gateway token` prints a new token
+  once and adds its hash to this file.
+- TLS: systemd `LoadCredential=tls.crt` and `tls.key` (Desk's model), or `--tls tailscale`.
+- Config keys of the Layr service used by the executor profile: `queue.run` (workstream core-2)
+  and `registry.listen`, `registry.user` (workstream oci).
+
 ## Work split
 
 | Task | Owner | Depends on |
