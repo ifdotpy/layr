@@ -554,15 +554,19 @@ pub fn stage_entries(index: &Layered, src: &Path, paths: &BTreeSet<String>, own:
         if p.is_empty() {
             continue;
         }
-        let from = crate::fsutil::safe_join(src, p)?;
-        let new = fs::symlink_metadata(&from).ok();
-        let at = stage.join(p);
+        // A path below a folder that became a link is a deletion (`copy_selected`).
+        let from = crate::fsutil::safe_join(src, p).ok();
+        let new = from.as_ref().and_then(|f| fs::symlink_metadata(f).ok());
+        // Never follow a link of the index: a path below one is already gone.
+        let Ok(at) = crate::fsutil::safe_join(&stage, p) else {
+            continue;
+        };
         if fs::symlink_metadata(&at).is_ok() {
             open_parent(&stage, p)?;
             apfs::delete_tree(&at)?;
         }
-        let old = below.find(p)?.map(fs::symlink_metadata).transpose()?;
-        let Some(m) = new else {
+        let old = below.find(p).ok().flatten().map(fs::symlink_metadata).transpose()?;
+        let (Some(m), Some(from)) = (new, from) else {
             if old.is_some() {
                 removed.insert(p.clone());
             }
@@ -601,11 +605,11 @@ pub fn stage_entries(index: &Layered, src: &Path, paths: &BTreeSet<String>, own:
     // Folders that lost their last entry leave, the deepest first.
     for p in gone.iter().rev() {
         for a in ancestors(p).collect::<Vec<_>>().into_iter().rev() {
-            let is_dir = now.find(a)?.is_some_and(|f| fs::symlink_metadata(f).map(|m| m.is_dir()).unwrap_or(false));
+            let is_dir = now.find(a).ok().flatten().is_some_and(|f| fs::symlink_metadata(f).map(|m| m.is_dir()).unwrap_or(false));
             if !is_dir || !now.is_empty_dir(a)? {
                 break;
             }
-            let d = stage.join(a);
+            let d = crate::fsutil::safe_join(&stage, a)?;
             if fs::symlink_metadata(&d).is_ok() {
                 open_parent(&stage, a)?;
                 apfs::delete_tree(&d)?;
@@ -619,11 +623,13 @@ pub fn stage_entries(index: &Layered, src: &Path, paths: &BTreeSet<String>, own:
     }
     // Folders of the index keep the metadata that the index had.
     for d in dirs.iter().rev() {
-        let at = stage.join(d);
+        let Ok(at) = crate::fsutil::safe_join(&stage, d) else {
+            continue;
+        };
         if !fs::symlink_metadata(&at).map(|m| m.is_dir()).unwrap_or(false) {
             continue;
         }
-        if let Some(b) = below.find(d)?.filter(|b| fs::symlink_metadata(b).map(|m| m.is_dir()).unwrap_or(false)) {
+        if let Some(b) = below.find(d).ok().flatten().filter(|b| fs::symlink_metadata(b).map(|m| m.is_dir()).unwrap_or(false)) {
             copy_dir_meta(&b, &at, false)?;
         }
     }

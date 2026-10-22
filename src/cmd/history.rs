@@ -198,11 +198,8 @@ pub fn diff(ctx: &Ctx, args: &[String]) -> Result<i32> {
             if cached {
                 (repo.head_src(l)?, idx, false)
             } else {
-                let scan = repo.scan(l)?;
-                let p = snap(&scan.path);
-                keep.push(scan);
                 index_root = Some(idx.clone());
-                (idx, p, true)
+                (idx, snap(&repo.working(l)), true)
             }
         }
         1 => {
@@ -238,32 +235,54 @@ pub fn diff(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 if cached {
                     (old, idx, false)
                 } else {
-                    let scan = repo.scan(l)?;
-                    let p = snap(&scan.path);
-                    keep.push(scan);
                     index_root = Some(idx);
-                    (old, p, true)
+                    (old, snap(&repo.working(l)), true)
                 }
             }
         }
         _ => (resolve(&revs_v[0])?, resolve(&revs_v[1])?, false),
     };
-    let (old, new) = if a.has("-R") { (new, old) } else { (old, new) };
-    let mut list: Vec<Change> = changes::file_changes(&old, &new)?
-        .into_iter()
-        .filter(|c| {
-            !skip_path(&c.path)
-                && (matches(&specs, &c.path) || c.old_path.as_deref().map(|o| matches(&specs, o)).unwrap_or(false))
-        })
-        .collect();
-    if working {
-        // Untracked files are not part of a working tree diff.
-        let idx = index_root.clone().unwrap();
-        list = changes::without_moves(list);
-        list.retain(|c| !(c.old.is_none() && fsutil::lmeta(&idx, &c.path).is_none()));
-    }
-    let list = if a.has("--no-renames") { list } else { changes::with_renames(&old, &new, list) };
-    let fds = diff::file_diffs(&old, &new, &list)?;
+    let reverse = a.has("-R");
+    let renames = !a.has("--no-renames");
+    let compute = |old: &Snap, new: &Snap| -> Result<Vec<FileDiff>> {
+        let (old, new) = if reverse { (new, old) } else { (old, new) };
+        let mut list: Vec<Change> = changes::file_changes(old, new)?
+            .into_iter()
+            .filter(|c| {
+                !skip_path(&c.path)
+                    && (matches(&specs, &c.path) || c.old_path.as_deref().map(|o| matches(&specs, o)).unwrap_or(false))
+            })
+            .collect();
+        if working {
+            // Untracked files are not part of a working tree diff.
+            let idx = index_root.as_ref().unwrap();
+            list = changes::without_moves(list);
+            list.retain(|c| !(c.old.is_none() && fsutil::lmeta(idx, &c.path).is_none()));
+        }
+        let list = if renames { changes::with_renames(old, new, list) } else { list };
+        diff::file_diffs(old, new, &list)
+    };
+    let fds = if working {
+        // The live working folder, validated by kernel change counters as `status` does; a
+        // read-only snapshot when validation fails.
+        let l = h.line()?;
+        let live = repo.working(l);
+        #[cfg(target_os = "macos")]
+        let fast = crate::storage::stable_read(&[live.as_path()], || compute(&old, &new))?;
+        #[cfg(not(target_os = "macos"))]
+        let fast: Option<Vec<FileDiff>> = None;
+        match fast {
+            Some(v) => v,
+            None => {
+                let scan = repo.scan(l)?;
+                let v = compute(&old, &snap(&scan.path))?;
+                keep.push(scan);
+                v
+            }
+        }
+    } else {
+        compute(&old, &new)?
+    };
     let quiet = a.has("--quiet");
     let problems = if quiet { false } else { print_diffs(ctx, &fds, &opts) };
     drop(keep);
