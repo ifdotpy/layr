@@ -149,7 +149,10 @@ impl Layered {
             if i > 0 && hides(&self.layers[i - 1], rel) {
                 return Ok(None);
             }
-            let p = crate::fsutil::safe_join(&l.root, rel)?;
+            // A link above `rel` in this layer is the visible entry: the path does not exist.
+            let Ok(p) = crate::fsutil::safe_join(&l.root, rel) else {
+                return Ok(None);
+            };
             match fs::symlink_metadata(&p) {
                 Ok(_) => return Ok(Some(p)),
                 Err(e) if not_found(&e) => continue,
@@ -418,11 +421,9 @@ pub fn add_entries<'a>(
     removed: impl Iterator<Item = &'a str>,
 ) -> Result<()> {
     let mut dirs: BTreeSet<String> = BTreeSet::new();
-    for r in removed {
-        dirs.extend(ancestors(r).map(String::from));
-    }
-    for k in write {
-        for a in ancestors(k) {
+    // The ancestors of written and removed paths are folders of the layer (layer rule 5).
+    let mut container = |dirs: &mut BTreeSet<String>, rel: &str| -> Result<()> {
+        for a in ancestors(rel) {
             if dirs.insert(a.to_string()) || fs::symlink_metadata(dst.join(a)).is_err() {
                 match fs::create_dir(dst.join(a)) {
                     Err(e) if e.kind() != ErrorKind::AlreadyExists => return Err(e.into()),
@@ -430,6 +431,13 @@ pub fn add_entries<'a>(
                 }
             }
         }
+        Ok(())
+    };
+    for r in removed {
+        container(&mut dirs, r)?;
+    }
+    for k in write {
+        container(&mut dirs, k)?;
         let from = crate::fsutil::safe_join(src, k)?;
         let to = dst.join(k);
         let m = fs::symlink_metadata(&from)?;
@@ -540,6 +548,22 @@ impl Layered {
     }
 }
 
+/// Make the ancestors of `rel` folders of a writable layer. New folders get owner `own`.
+fn containers(stage: &Path, rel: &str, own: Option<(u32, u32)>, dirs: &mut BTreeSet<String>) -> Result<()> {
+    for a in ancestors(rel) {
+        let d = crate::fsutil::safe_join(stage, a)?;
+        if fs::symlink_metadata(&d).is_err() {
+            open_parent(stage, a)?;
+            fs::create_dir(&d)?;
+            if let Some((u, g)) = own {
+                crate::fsutil::chown_nofollow(&d, u, g)?;
+            }
+        }
+        dirs.insert(a.to_string());
+    }
+    Ok(())
+}
+
 /// Stage `paths` of `src` into the writable index layer at the top of `index`: an entry that
 /// `src` has replaces the index entry, an entry that it lacks leaves the index, and folders that
 /// become empty leave too (a state holds files, as a git tree does). New folders get owner `own`.
@@ -569,25 +593,15 @@ pub fn stage_entries(index: &Layered, src: &Path, paths: &BTreeSet<String>, own:
         let (Some(m), Some(from)) = (new, from) else {
             if old.is_some() {
                 removed.insert(p.clone());
+                containers(&stage, p, own, &mut dirs)?;
             }
-            dirs.extend(ancestors(p).map(String::from));
             gone.push(p.clone());
             continue;
         };
         if old.as_ref().is_some_and(|o| o.is_dir() != m.is_dir() || o.file_type().is_symlink() != m.file_type().is_symlink()) {
             removed.insert(p.clone());
         }
-        for a in ancestors(p) {
-            let d = stage.join(a);
-            if fs::symlink_metadata(&d).is_err() {
-                open_parent(&stage, a)?;
-                fs::create_dir(&d)?;
-                if let Some((u, g)) = own {
-                    crate::fsutil::chown_nofollow(&d, u, g)?;
-                }
-            }
-            dirs.insert(a.to_string());
-        }
+        containers(&stage, p, own, &mut dirs)?;
         if m.is_dir() {
             fs::create_dir(&at)?;
             dirs.insert(p.clone());
@@ -677,15 +691,29 @@ pub fn snapshot_over(base: &Layered, base_id: &str, src: &Path, dst: &Path, writ
     if d.is_empty() {
         return Ok(None);
     }
+    write_checked(src, &before, &d, dst, base_id, writable)?;
+    Ok(Some(d))
+}
+
+/// Write the layer `d` of `src`, then check that `src` still matches the scan `before` that
+/// gave `d`. A changed file with more than one name returns `HardLinks`.
+pub fn write_checked(
+    src: &Path,
+    before: &BTreeMap<String, ScanEntry>,
+    d: &Diff,
+    dst: &Path,
+    base_id: &str,
+    writable: bool,
+) -> Result<()> {
     if d.write.iter().any(|k| linked(&before[k])) {
         bail!(HardLinks);
     }
-    write_layer(src, dst, &d, base_id, writable)?;
-    if apfs::scan_with_data(src, true).ok().as_ref() != Some(&before) {
+    write_layer(src, dst, d, base_id, writable)?;
+    if apfs::scan_with_data(src, true).ok().as_ref() != Some(before) {
         let _ = apfs::delete_tree(dst);
         bail!("source changed during APFS snapshot; retry when writers are idle");
     }
-    Ok(Some(d))
+    Ok(())
 }
 
 fn view_stamp(p: &Project, id: &str) -> PathBuf {
@@ -775,6 +803,20 @@ pub fn delete_state(p: &Project, id: &str) -> Result<bool> {
     Ok(true)
 }
 
+/// Delete the trees of a state now, also when other thin states use it as their base: those
+/// states first get complete trees. For content that must leave the disk (`overlay move --purge`).
+pub fn delete_now(p: &Project, id: &str) -> Result<()> {
+    for (upper, base) in bases(p)? {
+        if base == id {
+            make_keyframe(p, &upper)?;
+        }
+    }
+    if !delete_state(p, id)? {
+        bail!("state {} is still the base of another state", crate::ids::short(id));
+    }
+    Ok(())
+}
+
 /// Remove the views that no command used within `thin.view_seconds`. Returns their count.
 pub fn evict_views(p: &Project, keep: &BTreeSet<String>) -> Result<usize> {
     let limit = p.config_u64("thin.view_seconds", VIEW_SECONDS);
@@ -816,8 +858,8 @@ pub struct Upkeep {
 }
 
 /// Upkeep for `layr gc`, with the project lock held: delete states that a record deleted while
-/// another thin state still used them, remove unused views, and give a head with a long chain a
-/// complete tree. `heads` are the states that lines read now.
+/// another thin state still used them and layers that never got a record, remove unused views,
+/// and give a head with a long chain a complete tree. `heads` are the states that lines read now.
 pub fn upkeep(p: &Project, heads: &BTreeSet<String>) -> Result<Upkeep> {
     let mut done = Upkeep::default();
     // Deleted states that stayed as a base: an upper state may have gone since.
@@ -830,7 +872,16 @@ pub fn upkeep(p: &Project, heads: &BTreeSet<String>) -> Result<Upkeep> {
             ids.insert(e.file_name().to_string_lossy().into_owned());
         }
         for id in ids {
-            if crate::model::is_uuid(&id) && !used.contains(&id) && matches!(p.db.state_flags(&id)?, Some((_, true))) {
+            if !crate::model::is_uuid(&id) || used.contains(&id) {
+                continue;
+            }
+            let gone_record = match p.db.state_flags(&id)? {
+                Some((_, deleted)) => deleted,
+                // A layer without a record: a process stopped before its record. A commit
+                // journal owns its own layer; a young layer may still get its record.
+                None => p.delta_path(&id).is_dir() && old_layer(&p.delta_path(&id)) && !crate::apfs_commit::preserves(p, &id)?,
+            };
+            if gone_record {
                 apfs::delete_tree(&p.state_path(&id))?;
                 apfs::delete_tree(&p.delta_path(&id))?;
                 let _ = fs::remove_file(view_stamp(p, &id));
@@ -851,6 +902,16 @@ pub fn upkeep(p: &Project, heads: &BTreeSet<String>) -> Result<Upkeep> {
         }
     }
     Ok(done)
+}
+
+/// True when a layer was made more than an hour ago.
+fn old_layer(path: &Path) -> bool {
+    use std::os::macos::fs::MetadataExt as MacMetadataExt;
+    let Ok(m) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    now - m.st_birthtime() > 3600
 }
 
 /// The number of layers of a state, or 0 when it is not on this machine.
@@ -915,7 +976,7 @@ mod tests {
 
     fn tree(root: &Path) {
         apfs::create_subvolume(root).unwrap();
-        for d in ["a", "a/deep", "b", "gone", "gone/inner", "swap-dir"] {
+        for d in ["a", "a/deep", "b", "gone", "gone/inner", "swap-dir", "linkdir", "quiet"] {
             fs::create_dir(root.join(d)).unwrap();
         }
         fs::write(root.join("a/same"), b"same").unwrap();
@@ -925,6 +986,9 @@ mod tests {
         fs::write(root.join("swap-file"), b"file").unwrap();
         fs::write(root.join("swap-dir/child"), b"child").unwrap();
         fs::write(root.join("b/x"), b"x").unwrap();
+        fs::write(root.join("linkdir/inner"), b"inner").unwrap();
+        fs::write(root.join("quiet/one"), b"one").unwrap();
+        fs::write(root.join("quiet/two"), b"two").unwrap();
         std::os::unix::fs::symlink("a/same", root.join("link")).unwrap();
         fs::hard_link(root.join("a/deep/file"), root.join("b/linked")).unwrap();
     }
@@ -948,6 +1012,12 @@ mod tests {
         std::os::unix::fs::symlink("a/new", root.join("link")).unwrap();
         fs::create_dir(root.join("fresh")).unwrap();
         fs::write(root.join("fresh/f"), b"fresh").unwrap();
+        fs::remove_dir_all(root.join("linkdir")).unwrap();
+        std::os::unix::fs::symlink("a", root.join("linkdir")).unwrap();
+        // A removal whose folder keeps its time: the layer still holds the folder.
+        let quiet = fs::metadata(root.join("quiet")).unwrap();
+        fs::remove_file(root.join("quiet/one")).unwrap();
+        crate::sys::apfs_mtime(&root.join("quiet"), quiet.mtime(), quiet.mtime_nsec()).unwrap();
     }
 
     #[test]
@@ -980,6 +1050,29 @@ mod tests {
 
     #[test]
     #[ignore = "requires a case-sensitive APFS test volume"]
+    fn gc_removes_old_layers_without_a_record() -> Result<()> {
+        let s = Sandbox::new();
+        let store = crate::store::Store::open(&s.0.join("store"))?;
+        let actor = crate::model::Actor { uid: rustix::process::geteuid().as_raw(), name: "test".into(), session: None };
+        let p = Project::create(&store, "p", &actor, serde_json::json!({}))?;
+        let base = crate::ids::new_id();
+        tree(&p.state_path(&base));
+        apfs::set_readonly(&p.state_path(&base))?;
+        let (old, young) = (crate::ids::new_id(), crate::ids::new_id());
+        for id in [&old, &young] {
+            empty_layer(&p.delta_path(id), &base, &p.state_path(&base))?;
+        }
+        crate::sys::apfs_set_birthtime(&p.delta_path(&old), 1_600_000_000, 1)?;
+        let done = upkeep(&p, &BTreeSet::new())?;
+        assert_eq!(done.deleted, 1);
+        assert!(!p.delta_path(&old).exists() && p.delta_path(&young).is_dir());
+        // The base without a layer of its own is not touched.
+        assert!(p.state_path(&base).is_dir());
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a case-sensitive APFS test volume"]
     fn layers_read_and_materialize_like_the_complete_tree() -> Result<()> {
         let s = Sandbox::new();
         let base = s.0.join("base");
@@ -997,6 +1090,13 @@ mod tests {
         let layered = Layered::over(&layer, Layered::complete(&base))?;
         check_same(&layered, &work);
         assert!(layered.find("gone/inner/file")?.is_none());
+        assert!(layered.find("linkdir/inner")?.is_none(), "a path below a new link is absent");
+        assert!(layer.join("quiet").is_dir() && d.removed.contains("quiet/one"));
+        let some = s.0.join("some");
+        extract(&layered, ["linkdir", "linkdir/inner", "a/edit", "gone/inner/file"].into_iter(), &some)?;
+        assert!(fs::symlink_metadata(some.join("linkdir"))?.file_type().is_symlink());
+        assert_eq!(fs::read(some.join("a/edit"))?, b"new bytes");
+        assert!(!some.join("gone").exists());
         assert!(layered.find("swap-dir/child")?.is_none());
         assert_eq!(fs::read(layered.path("a/same")?)?, b"same");
         assert!(layered.path("a/same")?.starts_with(&base));
@@ -1005,6 +1105,8 @@ mod tests {
         layered.materialize(&out, false)?;
         check_same(&Layered::complete(&out), &work);
         assert!(linked(&base) && linked(&work) && linked(&out), "hard links survive");
+        let (qw, qo) = (fs::metadata(work.join("quiet"))?, fs::metadata(out.join("quiet"))?);
+        assert_eq!((qw.mtime(), qw.mtime_nsec()), (qo.mtime(), qo.mtime_nsec()), "folder time of a removal");
         assert_eq!(fs::symlink_metadata(out.join("b"))?.mode() & 0o777, 0o750);
         fs::write(out.join("a/same"), b"writable")?;
         assert_eq!(fs::read(base.join("a/same"))?, b"same");

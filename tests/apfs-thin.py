@@ -88,6 +88,9 @@ try:
     assert run(work, 'show', 'HEAD:d0/f1').stdout == 'changed\n'
     diff = run(work, 'diff', '--stat', 'HEAD~1', 'HEAD').stdout
     assert 'd1/f100' in diff and 'new/deep/file' in diff, diff
+    views = set(os.listdir(project / 'states'))
+    log = run(work, 'log', '-p', '--', 'd0/f1').stdout
+    assert '+changed' in log and set(os.listdir(project / 'states')) == views, 'log made a view'
     print('PASS a commit stores only its changes', flush=True)
 
     # mv after a thin add makes the index complete and keeps the staged change.
@@ -101,6 +104,12 @@ try:
     assert run(work, 'show', 'HEAD:d6/renamed').stdout == 'file 600\n'
     assert not run(work, 'status', '--porcelain').stdout
     print('PASS mv after a thin add keeps the staged change', flush=True)
+
+    # A staged removal in a folder keeps the folder and its other files.
+    (work / 'd7/f700').unlink()
+    run(work, 'add', '-A')
+    run(work, 'commit', '-qm', 'remove one file of a folder')
+    assert run(work, 'show', 'HEAD:d7/f701').stdout == 'file 701\n'
 
     # A line made from a thin head has the complete content.
     run(work, 'branch', '-q', 'second')

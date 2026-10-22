@@ -796,6 +796,7 @@ fn commit_tree(
     let mut keep: Vec<crate::repo::Temp> = Vec::new();
     let res = (|| -> Result<String> {
         let mut paths: Vec<String> = Vec::new();
+        let mut full: Option<PathBuf> = None;
         match base {
             Some((ast, ac)) => {
                 let ai = index_path(repo, ast);
@@ -823,6 +824,7 @@ fn commit_tree(
             }
             None => {
                 let root = repo.complete(src.clone(), &mut keep)?;
+                full = Some(root.clone());
                 let rules = crate::ignore_rules::Rules::new(&root);
                 fsutil::walk(&root, "", &mut |rel, m| {
                     if skip_path(rel) || rules.ignored(rel, m.is_dir()) {
@@ -840,7 +842,10 @@ fn commit_tree(
             input.extend_from_slice(p.as_bytes());
             input.push(0);
         }
-        let root = work_tree(repo, &src, &paths, &mut keep)?;
+        let root = match full {
+            Some(root) => root,
+            None => work_tree(repo, &src, &paths, &mut keep)?,
+        };
         let mut c = base_cmd(&s);
         c.env("GIT_INDEX_FILE", &tmp_idx).env("GIT_WORK_TREE", &root).args([
             "update-index",

@@ -93,6 +93,8 @@ pub(crate) struct ScanEntry {
     pub(crate) data: Option<crate::sys::ApfsDataIdentity>,
     /// The number of names of the inode. Not part of the comparison.
     pub(crate) nlink: u64,
+    /// The creation time: the file identity for moves (`file_identity`).
+    pub(crate) birth: (i64, i64),
 }
 impl PartialEq for ScanEntry {
     fn eq(&self, other: &Self) -> bool {
@@ -114,6 +116,10 @@ pub(crate) fn scan_with_data(root: &Path, data: bool) -> Result<BTreeMap<String,
                 meta: crate::fsutil::meta_of(&m),
                 data: if data && m.is_file() { Some(crate::sys::apfs_data_identity(&path)?) } else { None },
                 nlink: m.nlink(),
+                birth: {
+                    use std::os::macos::fs::MetadataExt as MacMetadataExt;
+                    (m.st_birthtime(), m.st_birthtime_nsec())
+                },
             },
         );
         if m.is_dir() && (rel.is_empty() || !is_subvolume(&path)) {
@@ -203,7 +209,18 @@ pub fn copy_selected(src: &Path, dst: &Path, paths: &std::collections::BTreeSet<
 pub fn file_identity(path: &Path) -> Result<Vec<u8>> {
     use std::os::macos::fs::MetadataExt as MacMetadataExt;
     let m = fs::symlink_metadata(path)?;
-    Ok(format!("{}:{}", m.st_birthtime(), m.st_birthtime_nsec()).into_bytes())
+    Ok(identity((m.st_birthtime(), m.st_birthtime_nsec()), m.dev(), m.ino()))
+}
+
+/// A creation time with whole seconds usually comes from a tool that set an old modification
+/// time (tar, zip, npm): APFS then lowers the creation time to it, and many unrelated files share
+/// it. Such a file gets an identity of this tree only, so it never matches as a move.
+fn identity(birth: (i64, i64), dev: u64, ino: u64) -> Vec<u8> {
+    if birth.1 == 0 {
+        format!("inode:{dev}:{ino}").into_bytes()
+    } else {
+        format!("{}:{}", birth.0, birth.1).into_bytes()
+    }
 }
 pub(crate) fn keep_birthtime(src: &fs::Metadata, dst: &Path) -> Result<()> {
     use std::os::macos::fs::MetadataExt as MacMetadataExt;
@@ -421,14 +438,25 @@ pub fn candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> 
             )
         })
         .collect();
+    let id_of = |e: &ScanEntry| identity(e.birth, e.fingerprint.0, e.fingerprint.1);
+    // An identity that more than one entry of either tree has is no evidence of a move: hard
+    // links, copies that keep the creation time, or files with equal times.
+    let mut count: BTreeMap<(bool, Vec<u8>), usize> = BTreeMap::new();
+    for (side, tree) in [(false, &a), (true, &b)] {
+        for (p, e) in tree.iter() {
+            if !p.is_empty() {
+                *count.entry((side, id_of(e))).or_default() += 1;
+            }
+        }
+    }
     let mut removed: BTreeMap<Vec<u8>, Vec<String>> = BTreeMap::new();
     let mut added: BTreeMap<Vec<u8>, Vec<String>> = BTreeMap::new();
     for (p, c) in &changes {
         if c.new.is_none() {
-            removed.entry(file_identity(&parent.at(p)?)?).or_default().push(p.clone());
+            removed.entry(id_of(&a[p])).or_default().push(p.clone());
         }
         if c.old.is_none() {
-            added.entry(file_identity(&child.at(p)?)?).or_default().push(p.clone());
+            added.entry(id_of(&b[p])).or_default().push(p.clone());
         }
     }
     for (id, srcs) in removed {
@@ -437,6 +465,9 @@ pub fn candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> 
         };
         // Multiple hard links have the same identity. Do not invent a unique move.
         if srcs.len() != 1 || dsts.len() != 1 {
+            continue;
+        }
+        if count.get(&(false, id.clone())) != Some(&1) || count.get(&(true, id.clone())) != Some(&1) {
             continue;
         }
         let (src, dst) = (&srcs[0], &dsts[0]);
@@ -655,6 +686,30 @@ mod tests {
         fs::write(branch.join("file"), data)?;
         let changes = candidates(&base, &branch)?;
         assert_eq!(changes[0].ranges, Some(vec![(8192, 4096)]));
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a case-sensitive APFS test volume"]
+    fn old_fixed_times_do_not_make_moves() -> Result<()> {
+        use std::os::macos::fs::MetadataExt as MacMetadataExt;
+        // npm and tar set old whole-second times; APFS lowers the creation time to them.
+        let fixed = |p: &Path| crate::sys::apfs_mtime(p, 499162500, 0);
+        let s = Sandbox::new();
+        let src = s.0.join("work");
+        create_subvolume(&src)?;
+        fs::write(src.join("old.js"), b"one package")?;
+        fixed(&src.join("old.js"))?;
+        assert_eq!(fs::symlink_metadata(src.join("old.js"))?.st_birthtime(), 499162500);
+        let base = s.0.join("base");
+        snapshot(&src, &base, true)?;
+        let branch = s.0.join("branch");
+        snapshot(&base, &branch, false)?;
+        fs::remove_file(branch.join("old.js"))?;
+        fs::write(branch.join("new.js"), b"another package")?;
+        fixed(&branch.join("new.js"))?;
+        let changes = candidates(&base, &branch)?;
+        assert!(changes.iter().all(|c| c.old_path.is_none()), "{changes:?}");
         Ok(())
     }
 

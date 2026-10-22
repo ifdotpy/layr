@@ -463,15 +463,15 @@ impl<'a> Repo<'a> {
         message: &str,
         line: Option<&Line>,
     ) -> Result<StateRec> {
+        // Overlay projects read their states as folders: they keep complete trees.
         #[cfg(target_os = "macos")]
-        {
+        if !self.p.is_overlay() {
             let id = ids::new_id();
             let src = self.state_src(base)?;
             let dst = self.p.delta_path(&id);
             crate::thin::write_layer(&src.at("")?, &dst, &crate::thin::Diff::default(), base, false)?;
-            self.describe_state(ctx, id, kind, parents, message, line)
+            return self.describe_state(ctx, id, kind, parents, message, line);
         }
-        #[cfg(not(target_os = "macos"))]
         self.new_state(ctx, &self.state_root(base)?, kind, parents, message, line)
     }
 
@@ -695,18 +695,34 @@ impl<'a> Repo<'a> {
         }
         #[cfg(target_os = "macos")]
         if !force && self.private_paths(line)?.is_empty() && self.thin_line(line)? {
-            // Compare before any copy: an unchanged folder makes no state.
+            // Compare before any copy: an unchanged folder makes no state. One scan of the
+            // working folder serves the comparison and the layer over the head.
             let prev = self.last_auto(line)?.map(|s| s.id).unwrap_or(line.head.clone());
-            if self.p.has_state(&prev) {
+            let new = btrfs::scan_with_data(&w, true)?;
+            let head = self.state_src(&line.head)?;
+            let head_diff = crate::thin::diff(&head.scan(true)?, &|k| head.path(k), &new, &w)?;
+            let relevant = |d: &crate::thin::Diff| d.write.iter().chain(d.removed.iter()).any(|p| !skip_path(p));
+            let changed = if prev == line.head {
+                relevant(&head_diff)
+            } else if self.p.has_state(&prev) {
                 let base = self.state_src(&prev)?;
-                let old = base.scan(true)?;
-                let new = btrfs::scan_with_data(&w, true)?;
-                let d = crate::thin::diff(&old, &|k| base.path(k), &new, &w)?;
-                if !d.write.iter().chain(d.removed.iter()).any(|p| !skip_path(p)) {
-                    return Ok(None);
-                }
+                relevant(&crate::thin::diff(&base.scan(true)?, &|k| base.path(k), &new, &w)?)
+            } else {
+                true
+            };
+            if !changed {
+                return Ok(None);
             }
-            let mut st = self.working_snapshot(ctx, line, vec![line.head.clone()], message)?;
+            let id = ids::new_id();
+            let dst = self.p.delta_path(&id);
+            let mut st = match crate::thin::write_checked(&w, &new, &head_diff, &dst, &line.head, false) {
+                Ok(()) => self.describe_state(ctx, id, StateKind::Auto, vec![line.head.clone()], message, Some(line))?,
+                // Hard links need a complete tree.
+                Err(e) if crate::thin::needs_complete(&e) => {
+                    self.new_state(ctx, &w, StateKind::Auto, vec![line.head.clone()], message, Some(line))?
+                }
+                Err(e) => return Err(e),
+            };
             st.running = running;
             let mut rec = Record::new("save");
             rec.states.push(st.clone());
@@ -751,9 +767,9 @@ impl<'a> Repo<'a> {
                 // merge leaves new owners and times on unchanged files, and ignored files (such
                 // as other build output) are not changes.
                 let in_cache = |path: &str| caches.iter().any(|c| path == c || path.starts_with(&format!("{c}/")));
-                let made = self.state_root(&st.id)?;
-                let rules = Rules::new(&made);
-                let changed = changes::file_changes(&base, &self.state_src(&st.id)?)?
+                let made = self.state_src(&st.id)?;
+                let rules = Rules::of(&made);
+                let changed = changes::file_changes(&base, &made)?
                     .into_iter()
                     .any(|c| !skip_path(&c.path) && !in_cache(&c.path) && !rules.ignored(&c.path, false));
                 if !changed {

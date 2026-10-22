@@ -12,7 +12,7 @@ use crate::repo::{skip_path, snap, Repo, Snap, Temp};
 use crate::revs;
 use anyhow::{bail, Result};
 use std::collections::{BTreeSet, HashMap};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 fn diff_spec() -> Spec {
     Spec::new()
@@ -55,7 +55,7 @@ fn empty_root() -> Result<Temp> {
 }
 
 /// All files of a root as additions.
-fn all_files(root: &Path) -> Result<Vec<Change>> {
+fn all_files(root: &(impl fsutil::Src + ?Sized)) -> Result<Vec<Change>> {
     let mut v = Vec::new();
     fsutil::walk(root, "", &mut |rel, m| {
         if skip_path(rel) {
@@ -266,9 +266,8 @@ pub fn diff(ctx: &Ctx, args: &[String]) -> Result<i32> {
         // The live working folder, validated by kernel change counters as `status` does; a
         // read-only snapshot when validation fails.
         let l = h.line()?;
-        let live = repo.working(l);
         #[cfg(target_os = "macos")]
-        let fast = crate::storage::stable_read(&[live.as_path()], || compute(&old, &new))?;
+        let fast = crate::storage::stable_read(&[repo.working(l).as_path()], || compute(&old, &new))?;
         #[cfg(not(target_os = "macos"))]
         let fast: Option<Vec<FileDiff>> = None;
         match fast {
@@ -505,11 +504,11 @@ fn medium(s: &StateRec, decor: &Decor, date_style: &str, kind_note: bool) -> Str
 }
 
 /// Changes of a state against its first parent (all files for a root state).
-fn state_changes(repo: &Repo, s: &StateRec) -> Result<(PathBuf, Option<Temp>, PathBuf, Vec<Change>)> {
-    let root = repo.state_root(&s.id)?;
+fn state_changes(repo: &Repo, s: &StateRec) -> Result<(Snap, Option<Temp>, Snap, Vec<Change>)> {
+    let root = repo.state_src(&s.id)?;
     match s.parents.first() {
         Some(p) => {
-            let pr = repo.state_root(p)?;
+            let pr = repo.state_src(p)?;
             let v = changes::file_changes(&pr, &root)?.into_iter().filter(|c| !skip_path(&c.path)).collect();
             let v = changes::with_renames(&pr, &root, v);
             Ok((pr, None, root, v))
@@ -517,7 +516,7 @@ fn state_changes(repo: &Repo, s: &StateRec) -> Result<(PathBuf, Option<Temp>, Pa
         None => {
             let e = empty_root()?;
             let v = all_files(&root)?;
-            Ok((e.path.clone(), Some(e), root, v))
+            Ok((snap(&e.path), Some(e), root, v))
         }
     }
 }

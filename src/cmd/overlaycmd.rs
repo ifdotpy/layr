@@ -349,7 +349,11 @@ fn move_cmd(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if a.has("--purge") && !holding.is_empty() {
         let mut deleted = Vec::new();
         for id in &holding {
-            if repo.p.delete_state(id).is_ok() {
+            #[cfg(target_os = "macos")]
+            let gone = crate::thin::delete_now(&repo.p, id).is_ok();
+            #[cfg(not(target_os = "macos"))]
+            let gone = repo.p.delete_state(id).is_ok();
+            if gone {
                 deleted.push(id.clone());
             }
         }
