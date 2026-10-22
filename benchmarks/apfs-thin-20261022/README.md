@@ -77,6 +77,12 @@ other tests on the same volume freed space during that run.
 `diff.py` measures `layr diff --stat` against the working folder with 10 changed files, three runs each.
 CPU: 3.75 s before, 0.33 s after (`58e1ff2`). Both outputs are equal.
 
+## Layr lines and git worktrees
+
+`worktree.py` compares 4 git worktrees with 4 Layr lines on one APFS volume.
+Results: `worktree-small.json` (10,000 files of 4 KiB) and `worktree-large.json` (plus one file of 1 GiB).
+See [the comparison](../../docs/apfs-vs-btrfs.md#layr-lines-and-git-worktrees-on-apfs).
+
 ## Checks
 
 - Unit tests: 45 pass on a case-sensitive APFS volume.

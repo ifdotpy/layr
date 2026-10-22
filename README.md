@@ -109,7 +109,7 @@ The store and signed record formats remain compatible with the Linux backend.
   Files with an active memory mapping or an unavailable counter also use the snapshot path.
 - States are thin layers. A state in `deltas/<id>` keeps only the entries that differ from its base state
   and the paths that it removes. A chain of layers ends at a complete tree in `states/<id>`.
-  See [thin APFS states](docs/apfs-thin-states.md).
+  See [thin APFS states](docs/apfs-thin-states.md) and [APFS compared with btrfs and git worktrees](docs/apfs-vs-btrfs.md).
 - The index is a thin layer over the head. `add` clones only the selected entries into it.
   `add` validates the working tree before and after it copies them. Active `mmap` files use the snapshot path.
   `rm`, `mv`, `apply --cached` and `restore --staged` first make the index a complete tree.
