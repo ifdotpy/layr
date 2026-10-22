@@ -593,6 +593,7 @@ pub fn mapped_ancestor(repo: &Repo, state: &str) -> Result<Option<(String, Strin
 /// One commit for a state on top of the nearest exported ancestor (`push --squash`): the tree of
 /// the state, one parent. The same state gives the same commit.
 pub fn make_commit(repo: &Repo, state: &StateRec, message: Option<&str>) -> Result<(String, Option<String>)> {
+    repo.source_state(&state.id)?;
     let anc = mapped_ancestor(repo, &state.id)?;
     if let Some((ast, ac)) = &anc {
         if ast == &state.id {
@@ -691,6 +692,7 @@ pub fn state_of_history_commit(repo: &Repo, name: &str) -> Result<Option<String>
 /// parents as its state (a merge stays a merge). The same states give the same commits. Returns
 /// the commit of `state` and the new (state, commit) pairs.
 pub fn export_history(repo: &Repo, state: &str) -> Result<(String, Vec<(String, String)>)> {
+    repo.source_state(state)?;
     let mut known: BTreeMap<String, String> = BTreeMap::new();
     let mut order: Vec<String> = Vec::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();

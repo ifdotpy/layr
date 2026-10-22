@@ -4,9 +4,10 @@
 //! derived tables can be rebuilt from the records at any time.
 
 use crate::ids;
-use crate::model::{Line, Record, StateKind, StateRec};
+use crate::model::{Attestation, Line, Record, RefChange, RefState, StateKind, StateRec, Subject};
 use anyhow::{anyhow, Result};
 use rusqlite::{params, Connection, OptionalExtension};
+use sha2::{Digest, Sha256};
 use std::path::Path;
 
 pub struct Db {
@@ -35,6 +36,12 @@ CREATE TABLE IF NOT EXISTS machines (id TEXT PRIMARY KEY, name TEXT, public_key 
 CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT, ord TEXT);
 CREATE TABLE IF NOT EXISTS trusted (machine TEXT PRIMARY KEY, public_key TEXT, by TEXT);
 CREATE TABLE IF NOT EXISTS approvals (id TEXT PRIMARY KEY, state TEXT, uid INTEGER, time INTEGER, withdrawn INTEGER DEFAULT 0);
+CREATE TABLE IF NOT EXISTS refs (name TEXT PRIMARY KEY, target TEXT, expires_at INTEGER, deleted INTEGER DEFAULT 0, ord TEXT);
+CREATE TABLE IF NOT EXISTS ref_history (id TEXT PRIMARY KEY, name TEXT, rec TEXT, ord TEXT);
+CREATE INDEX IF NOT EXISTS ref_history_name ON ref_history(name, ord);
+CREATE TABLE IF NOT EXISTS attestations (id TEXT PRIMARY KEY, subject TEXT, kind TEXT, rec TEXT, machine TEXT, uid INTEGER, local INTEGER DEFAULT 0, ord TEXT);
+CREATE INDEX IF NOT EXISTS attestations_subject ON attestations(subject, kind, ord);
+CREATE TABLE IF NOT EXISTS attestation_revocations (id TEXT, target TEXT, machine TEXT, uid INTEGER, ord TEXT, PRIMARY KEY(id,target));
 "#;
 
 /// Version of the derived tables. Records never change shape; a database with an older version
@@ -55,6 +62,10 @@ const DERIVED: &[&str] = &[
     "config",
     "trusted",
     "approvals",
+    "refs",
+    "ref_history",
+    "attestations",
+    "attestation_revocations",
 ];
 
 /// Derived tables of older versions, dropped on migration.
@@ -82,7 +93,19 @@ impl Db {
             }
         }
         let stale = opened.map_err(|e| e.context(path.display().to_string()))?;
-        Ok(Db { conn, stale })
+        let db = Db { conn, stale };
+        // Older binaries can still add legacy records. Import their evidence on each open.
+        db.with_tx(|| {
+            let mut st = db.conn.prepare(
+                "SELECT raw FROM records WHERE op IN ('approve','approve.withdraw','check') ORDER BY time,machine,seq",
+            )?;
+            let raw = st.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+            for line in raw {
+                db.derive_attestation(&crate::oplog::parse_line(&line, None)?.record, false)?;
+            }
+            Ok(())
+        })?;
+        Ok(db)
     }
 
     /// Create or upgrade the schema inside the open transaction. Returns whether the derived
@@ -144,7 +167,8 @@ impl Db {
             "DELETE FROM states; DELETE FROM parents; DELETE FROM lines; DELETE FROM line_heads;
              DELETE FROM tags; DELETE FROM remote_refs; DELETE FROM git_map; DELETE FROM exports; DELETE FROM checks;
              DELETE FROM machines; DELETE FROM config;
-             DELETE FROM trusted; DELETE FROM approvals;",
+             DELETE FROM trusted; DELETE FROM approvals; DELETE FROM refs; DELETE FROM ref_history;
+             DELETE FROM attestations; DELETE FROM attestation_revocations;",
         )?;
         Ok(())
     }
@@ -226,6 +250,11 @@ impl Db {
                     rec.machine
                 ],
             )?;
+            for p in &s.parents {
+                if self.state(p)?.map(|p| p.kind.auxiliary()).unwrap_or(false) {
+                    anyhow::bail!("source history cannot have a cache or derived parent");
+                }
+            }
             for (i, p) in s.parents.iter().enumerate() {
                 tx.execute("INSERT OR IGNORE INTO parents(state, parent, ord) VALUES(?1,?2,?3)", params![s.id, p, i as i64])?;
             }
@@ -233,6 +262,9 @@ impl Db {
         for (id, ch) in &rec.lines {
             // Heads per machine: each machine's own records, in its order.
             if let Some(a) = &ch.after {
+                if self.state(&a.head)?.map(|s| s.kind.auxiliary()).unwrap_or(false) {
+                    anyhow::bail!("line head cannot be a cache or derived state");
+                }
                 tx.execute(
                     "INSERT INTO line_heads(line, machine, head, time, ord) VALUES(?1,?2,?3,?4,?5)
                      ON CONFLICT(line, machine) DO UPDATE SET head=?3, time=?4, ord=?5 WHERE excluded.ord > line_heads.ord",
@@ -261,6 +293,40 @@ impl Db {
                     )?;
                 }
             }
+        }
+        self.derive_attestation(rec, !foreign)?;
+        if !foreign {
+            if let Some(a) = rec.data.get("attestation") {
+                if a["kind"] == "revoke" {
+                    for id in rec.data["revokes"].as_array().into_iter().flatten().filter_map(|v| v.as_str()) {
+                        tx.execute("UPDATE approvals SET withdrawn=1 WHERE id=?1 AND uid=?2", params![id, rec.actor.uid as i64])?;
+                    }
+                }
+                if a["kind"] == "approval" {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO approvals(id,state,uid,time) VALUES(?1,?2,?3,?4)",
+                        params![rec.id, a["subject"]["id"].as_str(), rec.actor.uid as i64, rec.time],
+                    )?;
+                }
+            }
+        }
+        if let Some(v) = rec.data.get("ref_change") {
+            let ch: RefChange = serde_json::from_value(v.clone())?;
+            tx.execute(
+                "INSERT OR IGNORE INTO ref_history(id,name,rec,ord) VALUES(?1,?2,?3,?4)",
+                params![rec.id, ch.name, serde_json::to_string(&ch)?, ord],
+            )?;
+            tx.execute(
+                "INSERT INTO refs(name,target,expires_at,deleted,ord) VALUES(?1,?2,?3,?4,?5)
+                ON CONFLICT(name) DO UPDATE SET target=?2,expires_at=?3,deleted=?4,ord=?5 WHERE excluded.ord > refs.ord",
+                params![
+                    ch.name,
+                    ch.after.as_ref().map(|v| &v.target),
+                    ch.after.as_ref().and_then(|v| v.expires_at),
+                    ch.after.is_none() as i64,
+                    ord
+                ],
+            )?;
         }
         let d = &rec.data;
         let s = |k: &str| d.get(k).and_then(|v| v.as_str()).map(|x| x.to_string());
@@ -481,10 +547,14 @@ impl Db {
         Ok(v)
     }
 
-    /// Users (uids of this machine) whose approval of `state` stands, with its time.
+    /// Users of this machine whose approval of the exact subject still stands.
     pub fn approvals(&self, state: &str) -> Result<Vec<(u32, i64)>> {
-        let mut st =
-            self.conn.prepare("SELECT uid, MAX(time) FROM approvals WHERE state=?1 AND withdrawn=0 GROUP BY uid ORDER BY uid")?;
+        let mut st = self.conn.prepare(
+            "SELECT a.uid,MAX(json_extract(a.rec,'$.time')) FROM attestations a
+            WHERE (a.local=1 OR EXISTS (SELECT 1 FROM approvals p WHERE p.id=a.id)) AND a.subject=?1 AND a.kind='approval' AND NOT EXISTS
+            (SELECT 1 FROM attestation_revocations r WHERE r.target=a.id AND r.machine=a.machine AND r.uid=a.uid AND r.ord>a.ord)
+            GROUP BY a.machine,a.uid ORDER BY a.uid",
+        )?;
         let v = st.query_map(params![state], |r| Ok((r.get::<_, i64>(0)? as u32, r.get(1)?)))?.collect::<Result<Vec<_>, _>>()?;
         Ok(v)
     }
@@ -595,10 +665,130 @@ impl Db {
     }
 
     pub fn checks(&self, state: &str) -> Result<Vec<(String, i64, i64, String)>> {
-        let mut st = self.conn.prepare("SELECT command, exit, time, actor FROM checks WHERE state=?1 ORDER BY time")?;
+        let mut st = self.conn.prepare("SELECT COALESCE(json_extract(r.raw,'$.r.data.check.command'),json_extract(r.raw,'$.r.data.command')),
+            COALESCE(json_extract(r.raw,'$.r.data.check.exit'),json_extract(r.raw,'$.r.data.exit'),-1),r.time,json_extract(r.raw,'$.r.actor.name')
+            FROM attestations a JOIN records r ON r.id=a.id WHERE a.subject=?1 AND a.kind='check'
+            AND NOT EXISTS (SELECT 1 FROM attestation_revocations v WHERE v.target=a.id AND v.machine=a.machine AND v.uid=a.uid AND v.ord>a.ord)
+            ORDER BY a.ord")?;
         let v = st
-            .query_map(params![state], |r| Ok((r.get(0)?, r.get::<_, Option<i64>>(1)?.unwrap_or(-1), r.get(2)?, r.get(3)?)))?
+            .query_map(params![state], |r| {
+                Ok((r.get::<_, Option<String>>(0)?.unwrap_or_default(), r.get(1)?, r.get(2)?, r.get(3)?))
+            })?
             .collect::<Result<Vec<_>, _>>()?;
+        Ok(v)
+    }
+
+    fn derive_attestation(&self, rec: &Record, local: bool) -> Result<()> {
+        let ord = format!("{:016}:{}:{:012}", rec.time.max(0), rec.machine, rec.seq);
+        let a = if let Some(v) = rec.data.get("attestation") {
+            Some(serde_json::from_value::<Attestation>(v.clone())?)
+        } else if matches!(rec.op.as_str(), "approve" | "approve.withdraw" | "check") {
+            rec.data["state"].as_str().map(|state| Attestation {
+                format: 1,
+                attestation_id: rec.id.clone(),
+                subject: Subject { kind: "state".into(), id: state.into() },
+                change_id: self.state(state).ok().flatten().and_then(|s| s.change_id),
+                kind: match rec.op.as_str() {
+                    "approve" => "approval",
+                    "check" => "check",
+                    _ => "revoke",
+                }
+                .into(),
+                payload_digest: hex::encode(Sha256::digest(serde_json::to_vec(&rec.data).unwrap_or_default())),
+                payload_ref: None,
+                signer: rec.machine.clone(),
+                time: rec.time,
+            })
+        } else {
+            None
+        };
+        if let Some(a) = a {
+            self.conn.execute(
+                "INSERT INTO attestations(id,subject,kind,rec,machine,uid,ord,local) VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(id) DO UPDATE SET local=MAX(attestations.local,excluded.local)",
+                params![
+                    a.attestation_id,
+                    a.subject.id,
+                    a.kind,
+                    serde_json::to_string(&a)?,
+                    rec.machine,
+                    rec.actor.uid as i64,
+                    ord,
+                    local as i64
+                ],
+            )?;
+            if rec.op == "approve.withdraw" {
+                self.conn.execute("INSERT OR IGNORE INTO attestation_revocations(id,target,machine,uid,ord)
+                    SELECT ?1,id,?2,?3,?4 FROM attestations WHERE subject=?5 AND kind='approval' AND machine=?2 AND uid=?3 AND ord<?4",
+                    params![a.attestation_id,rec.machine,rec.actor.uid as i64,ord,a.subject.id])?;
+            }
+            if a.kind == "revoke" {
+                for id in rec.data["revokes"].as_array().into_iter().flatten().filter_map(|v| v.as_str()) {
+                    self.conn.execute(
+                        "INSERT OR IGNORE INTO attestation_revocations(id,target,machine,uid,ord)
+                         SELECT ?1,?2,?3,?4,?5 FROM attestations WHERE id=?2 AND subject=?6",
+                        params![a.attestation_id, id, rec.machine, rec.actor.uid as i64, ord, a.subject.id],
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn attestation(&self, id: &str) -> Result<Option<Attestation>> {
+        let raw: Option<String> =
+            self.conn.query_row("SELECT rec FROM attestations WHERE id=?1", params![id], |r| r.get(0)).optional()?;
+        raw.map(|r| Ok(serde_json::from_str(&r)?)).transpose()
+    }
+
+    pub fn attestations(&self, subject: &str, kind: Option<&str>) -> Result<Vec<Attestation>> {
+        let mut st =
+            self.conn.prepare("SELECT rec FROM attestations WHERE subject=?1 AND (?2 IS NULL OR kind=?2) ORDER BY ord,id")?;
+        let raw = st.query_map(params![subject, kind], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+        raw.into_iter().map(|r| Ok(serde_json::from_str(&r)?)).collect()
+    }
+
+    pub fn own_attestations(&self, subject: &str, machine: &str, uid: u32, kind: Option<&str>) -> Result<Vec<String>> {
+        let mut st = self.conn.prepare("SELECT id FROM attestations WHERE subject=?1 AND machine=?2 AND uid=?3 AND (?4 IS NULL OR kind=?4) AND kind<>'revoke'")?;
+        let v = st.query_map(params![subject, machine, uid as i64, kind], |r| r.get(0))?.collect::<Result<Vec<_>, _>>()?;
+        Ok(v)
+    }
+
+    pub fn refs(&self, prefix: &str, now: i64) -> Result<Vec<RefState>> {
+        let mut st = self.conn.prepare("SELECT name,target,expires_at FROM refs WHERE deleted=0 AND substr(name,1,length(?1))=?1 AND (expires_at IS NULL OR expires_at>?2) ORDER BY name")?;
+        let v = st
+            .query_map(params![prefix, now], |r| Ok(RefState { name: r.get(0)?, target: r.get(1)?, expires_at: r.get(2)? }))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(v)
+    }
+
+    pub fn ref_value(&self, name: &str, now: i64) -> Result<Option<RefState>> {
+        Ok(self.refs(name, now)?.into_iter().find(|r| r.name == name))
+    }
+
+    pub fn expired_refs(&self, now: i64) -> Result<Vec<RefState>> {
+        let mut st =
+            self.conn.prepare("SELECT name,target,expires_at FROM refs WHERE deleted=0 AND expires_at<=?1 ORDER BY name")?;
+        let v = st
+            .query_map(params![now], |r| Ok(RefState { name: r.get(0)?, target: r.get(1)?, expires_at: r.get(2)? }))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(v)
+    }
+
+    pub fn ref_log(&self, name: &str) -> Result<Vec<RefChange>> {
+        let mut st = self.conn.prepare("SELECT rec FROM ref_history WHERE name=?1 ORDER BY ord DESC,id DESC")?;
+        let raw = st.query_map(params![name], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+        raw.into_iter().map(|r| Ok(serde_json::from_str(&r)?)).collect()
+    }
+
+    pub fn change_versions(&self, id: &str) -> Result<Vec<StateRec>> {
+        let mut st = self.conn.prepare("SELECT rec FROM states WHERE json_extract(rec,'$.change_id')=?1 ORDER BY time,id")?;
+        let raw = st.query_map(params![id], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+        raw.into_iter().map(|r| Ok(serde_json::from_str(&r)?)).collect()
+    }
+
+    pub fn changes(&self) -> Result<Vec<String>> {
+        let mut st = self.conn.prepare("SELECT DISTINCT json_extract(rec,'$.change_id') FROM states WHERE json_extract(rec,'$.change_id') IS NOT NULL ORDER BY 1")?;
+        let v = st.query_map([], |r| r.get(0))?.collect::<Result<Vec<_>, _>>()?;
         Ok(v)
     }
 
@@ -697,6 +887,8 @@ pub fn kind_str(k: StateKind) -> &'static str {
         StateKind::Auto => "auto",
         StateKind::Stash => "stash",
         StateKind::Import => "import",
+        StateKind::Cache => "cache",
+        StateKind::Derived => "derived",
     }
 }
 
@@ -756,6 +948,9 @@ mod tests {
         r.states.push(StateRec {
             id: state.into(),
             kind: StateKind::Commit,
+            change_id: None,
+            derived_from: None,
+            context: None,
             parents,
             line: None,
             subvol: String::new(),
@@ -864,5 +1059,76 @@ mod tests {
         assert!(db.derive(&state_record(2, st, vec![other]), &|_| true, "x").is_err());
         assert_eq!(db.state(st).unwrap().unwrap().parents, vec![parent]);
         let _ = std::fs::remove_file(&dir);
+    }
+    fn memory() -> Db {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        Db { conn, stale: false }
+    }
+
+    #[test]
+    fn refs_replay_in_order_and_keep_their_history() {
+        let db = memory();
+        let a = "01a12290-0000-7000-8000-000000000003";
+        let b = "01a12290-0000-7000-8000-000000000004";
+        let rec = |n: u64, target: &str| {
+            let mut r = state_record(n, a, vec![]);
+            r.states.clear();
+            r.op = "ref.set".into();
+            r.data = serde_json::json!({"ref_change":RefChange { name:"env/prod".into(),before:None,after:Some(RefState{name:"env/prod".into(),target:target.into(),expires_at:Some(100)}) }});
+            r
+        };
+        db.derive(&rec(2, b), &|_| true, "local").unwrap();
+        db.derive(&rec(1, a), &|_| true, "local").unwrap();
+        assert_eq!(db.ref_value("env/prod", 99).unwrap().unwrap().target, b);
+        assert_eq!(db.ref_log("env/prod").unwrap().len(), 2);
+        assert!(db.refs("env/", 100).unwrap().is_empty());
+        assert_eq!(db.expired_refs(100).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn legacy_approvals_checks_and_withdrawals_become_attestations() {
+        let db = memory();
+        let state = "01a12290-0000-7000-8000-000000000003";
+        let machine = "01a12290-0000-7000-8000-00000000aaaa";
+        let key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+        for (seq, op) in [(1, "approve"), (2, "check"), (3, "approve.withdraw"), (4, "approve")] {
+            let mut r = state_record(seq, state, vec![]);
+            r.states.clear();
+            r.op = op.into();
+            r.data = serde_json::json!({"state":state,"command":"true","exit":0});
+            let raw = crate::oplog::sign_line(&r, &key).unwrap();
+            db.insert_record(&r, &raw).unwrap();
+            db.derive(&r, &|_| true, machine).unwrap();
+            if seq == 3 {
+                assert!(db.approvals(state).unwrap().is_empty());
+            }
+        }
+        assert_eq!(db.attestations(state, None).unwrap().len(), 4);
+        assert_eq!(db.approvals(state).unwrap(), vec![(0, 4)]);
+        assert_eq!(db.checks(state).unwrap()[0].0, "true");
+        // The original signed bytes are unchanged.
+        assert!(crate::oplog::parse_line(&db.record_line(machine, 2).unwrap().unwrap(), Some(&key.verifying_key())).is_ok());
+    }
+
+    #[test]
+    fn a_revoke_does_not_withdraw_another_signers_evidence() {
+        let db = memory();
+        let state = "01a12290-0000-7000-8000-000000000003";
+        let machine = "01a12290-0000-7000-8000-00000000aaaa";
+        let mut first = state_record(1, state, vec![]);
+        first.states.clear();
+        first.op = "approve".into();
+        first.data = serde_json::json!({"state":state});
+        db.derive(&first, &|_| true, machine).unwrap();
+        let mut other = first.clone();
+        other.id = "01a12290-0000-7000-8000-000000000002".into();
+        other.seq = 2;
+        other.op = "attest".into();
+        other.time = 2;
+        other.actor.uid = 99;
+        other.data = serde_json::json!({"attestation":Attestation {format:1,attestation_id:other.id.clone(),subject:Subject{kind:"state".into(),id:state.into()},change_id:None,kind:"revoke".into(),payload_digest:"0".repeat(64),payload_ref:None,signer:machine.into(),time:2},"revokes":[first.id]});
+        db.derive(&other, &|_| true, machine).unwrap();
+        assert_eq!(db.approvals(state).unwrap(), vec![(0, 1)]);
     }
 }

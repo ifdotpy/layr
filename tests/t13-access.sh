@@ -79,7 +79,7 @@ cd $P/u1 && as layr-u1 sh -c "$L rm -q broken.txt && $L commit -qm fixed" && cd 
 U1=$(in_line layr-u1 u1 rev-parse HEAD)
 ok "a passing check lets the merge through" in_line layr-u2 main merge -q u1 --expect $U1
 eq "main has the change" "u1" "$(l --project p show main:u1.txt)"
-has "the check is recorded on the merged state" "test ! -e broken.txt" "$(l --project p --line main checks HEAD)"
+has "the check is recorded on the merged state" "test ! -e broken.txt" "$(l --project p --line main attestations HEAD --kind check)"
 # A check runs code of the merged state: it does not see the caller's environment.
 l --project p config check.env 'test -z "$SECRET_OF_CALLER"'
 l --project p protect main --check unit,env
@@ -93,7 +93,7 @@ cd $P/u1 && as layr-u1 sh -c "echo u2 > u2.txt && $L add u2.txt && $L commit -qm
 ok "first merge" in_line layr-u2 main merge -q bot --expect $(in_line layr-u3 bot rev-parse HEAD)
 ok "a second merge makes a merge state and checks it" in_line layr-u2 main merge -q u1 --expect $(in_line layr-u1 u1 rev-parse HEAD)
 eq "it is a merge" "2" "$(l --project p --line main log -1 --format=%p | wc -w)"
-has "checked" "test ! -e broken.txt" "$(l --project p --line main checks HEAD)"
+has "checked" "test ! -e broken.txt" "$(l --project p --line main attestations HEAD --kind check)"
 
 # Path rules: a change of CI configuration needs the admin, even through a maintainer's merge.
 l --project p protect main --path .github=admin
@@ -118,7 +118,7 @@ in_line layr-u1 u1 approve -q $R
 in_line layr-u2 main approve -q $R
 has "approvals of the author and of a non-member do not count" "it has 0" "$(in_line layr-u2 main merge -q u1 --expect $R 2>&1)"
 as layr-admin env LAYR_PROJECT=p LAYR_LINE=main $T/layr approve -q $R
-eq "approvals are listed" "layr-admin layr-u1 layr-u2" "$(l --project p --line main approvals $R | awk '{print $1}' | sort | xargs)"
+eq "approvals are listed" "3" "$(l --project p --line main attestations $R --kind approval --json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')"
 as layr-admin env LAYR_PROJECT=p LAYR_LINE=main $T/layr approve -q --withdraw $R
 has "a withdrawn approval does not count" "it has 0" "$(in_line layr-u2 main merge -q u1 --expect $R 2>&1)"
 as layr-admin env LAYR_PROJECT=p LAYR_LINE=main $T/layr approve -q $R

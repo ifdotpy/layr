@@ -38,12 +38,28 @@ pub enum StateKind {
     Stash,
     /// A state made from a git commit of the remote.
     Import,
+    /// Reusable data outside source history.
+    Cache,
+    /// Output of a computation outside source history.
+    Derived,
+}
+
+impl StateKind {
+    pub fn auxiliary(self) -> bool {
+        matches!(self, Self::Cache | Self::Derived)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateRec {
     pub id: String,
     pub kind: StateKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derived_from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
     #[serde(default)]
     pub parents: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -79,6 +95,51 @@ pub struct StateRec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(rename = "layer_platform", alias = "cache_platform")]
     pub cache_platform: Option<String>,
+}
+
+pub const RESERVED_PREFIXES: &[&str] =
+    &["env/", "release/", "pins/", "holds/", "leases/", "caches/", "derived/", "changes/", "views/", "attestations/"];
+
+pub fn reserved_revision(name: &str) -> bool {
+    RESERVED_PREFIXES.iter().any(|p| name.starts_with(p))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RefState {
+    pub name: String,
+    pub target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RefChange {
+    pub name: String,
+    pub before: Option<RefState>,
+    pub after: Option<RefState>,
+}
+
+pub const ATTESTATION_KINDS: &[&str] = &["check", "approval", "origin", "import", "quarantine", "revoke"];
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Attestation {
+    pub format: u32,
+    pub attestation_id: String,
+    pub subject: Subject,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_id: Option<String>,
+    pub kind: String,
+    pub payload_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_ref: Option<String>,
+    pub signer: String,
+    pub time: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Subject {
+    pub kind: String,
+    pub id: String,
 }
 
 /// The pointers of a line at one time.
@@ -189,10 +250,12 @@ pub fn is_cache_name(s: &str, state: &str) -> bool {
     }
 }
 
-fn is_ref(s: &str) -> bool {
+pub fn is_ref(s: &str) -> bool {
     !s.is_empty()
         && !s.contains("..")
         && !s.starts_with('/')
+        && !s.ends_with('/')
+        && !s.contains("//")
         && s.chars().all(|c| c.is_ascii_alphanumeric() || "._/-".contains(c))
 }
 
@@ -214,8 +277,20 @@ pub fn validate(r: &Record) -> anyhow::Result<()> {
     }
     for s in &r.states {
         uuid("state", &s.id)?;
+        if let Some(id) = &s.change_id {
+            uuid("change", id)?;
+        }
+        if let Some(id) = &s.derived_from {
+            uuid("derived source", id)?;
+        }
+        if s.kind.auxiliary() && (s.line.is_some() || !s.parents.is_empty() || s.change_id.is_some()) {
+            bail!("cache and derived states must be outside line history");
+        }
         for p in &s.parents {
             uuid("parent", p)?;
+            if r.states.iter().any(|state| &state.id == p && state.kind.auxiliary()) {
+                bail!("source history cannot have a cache or derived parent");
+            }
         }
         if let Some(l) = &s.line {
             uuid("line", l)?;
@@ -240,6 +315,9 @@ pub fn validate(r: &Record) -> anyhow::Result<()> {
                 bail!("record {}: bad line name {:?}", r.seq, st.name);
             }
             uuid("head", &st.head)?;
+            if r.states.iter().any(|s| s.id == st.head && s.kind.auxiliary()) {
+                bail!("line head cannot be a cache or derived state");
+            }
             uuid("line machine", &st.machine)?;
         }
         for x in [&ch.working_before, &ch.working_after].into_iter().flatten() {
@@ -247,6 +325,52 @@ pub fn validate(r: &Record) -> anyhow::Result<()> {
         }
     }
     let d = &r.data;
+    if let Some(v) = d.get("ref_change") {
+        let ch: RefChange = serde_json::from_value(v.clone())?;
+        if !is_ref(&ch.name) {
+            bail!("invalid ref name {:?}", ch.name);
+        }
+        for value in [&ch.before, &ch.after].into_iter().flatten() {
+            if value.name != ch.name {
+                bail!("ref change names differ");
+            }
+            uuid("ref target", &value.target)?;
+        }
+    }
+    if let Some(v) = d.get("attestation") {
+        let a: Attestation = serde_json::from_value(v.clone())?;
+        uuid("attestation", &a.attestation_id)?;
+        if a.attestation_id != r.id {
+            bail!("attestation id must match its signed record");
+        }
+        uuid("subject", &a.subject.id)?;
+        if let Some(id) = &a.change_id {
+            uuid("change", id)?;
+        }
+        if a.format != 1 || a.subject.kind != "state" || !ATTESTATION_KINDS.contains(&a.kind.as_str()) {
+            bail!("unsupported attestation format, subject or kind");
+        }
+        if a.signer != r.machine || a.time != r.time {
+            bail!("attestation signer and time must match its signed record");
+        }
+        if a.payload_digest.len() != 64 || !a.payload_digest.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()) {
+            bail!("invalid attestation payload digest");
+        }
+        if let Some(id) = &a.payload_ref {
+            uuid("payload reference", id)?;
+        }
+        if let Some(result) = d.get("check") {
+            use sha2::{Digest, Sha256};
+            if a.kind != "check" || a.payload_digest != hex::encode(Sha256::digest(serde_json::to_vec(result)?)) {
+                bail!("check payload digest does not match its signed result");
+            }
+        }
+    }
+    if let Some(v) = d.get("revokes") {
+        for id in v.as_array().ok_or_else(|| anyhow::anyhow!("invalid revocations"))? {
+            uuid("revoked attestation", id.as_str().unwrap_or(""))?;
+        }
+    }
     for k in ["state", "line", "start", "final_state", "undo", "base", "theirs", "onto", "upstream", "source", "export", "id"] {
         if let Some(v) = d.get(k).and_then(|v| v.as_str()) {
             uuid(k, v)?;
@@ -332,6 +456,9 @@ mod tests {
         StateRec {
             id: id.into(),
             kind: StateKind::Commit,
+            change_id: None,
+            derived_from: None,
+            context: None,
             parents: vec![],
             line: None,
             subvol: String::new(),
@@ -432,5 +559,54 @@ mod tests {
         let mut r = rec();
         r.data = serde_json::json!({"state": "01A12290-0000-7000-8000-000000000003"});
         assert!(validate(&r).is_err(), "ids must be canonical (lower case)");
+    }
+    #[test]
+    fn optional_state_fields_preserve_legacy_bytes() {
+        let old = state("01a12290-0000-7000-8000-000000000003");
+        let raw = serde_json::to_value(&old).unwrap();
+        for field in ["change_id", "derived_from", "context"] {
+            assert!(raw.get(field).is_none());
+        }
+        let decoded: StateRec = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), raw);
+    }
+
+    #[test]
+    fn auxiliary_states_cannot_join_source_history() {
+        let mut r = rec();
+        let mut s = state("01a12290-0000-7000-8000-000000000003");
+        s.kind = StateKind::Derived;
+        s.derived_from = Some("01a12290-0000-7000-8000-000000000004".into());
+        s.context = Some("oci-layer-v1".into());
+        r.states.push(s);
+        assert!(validate(&r).is_ok());
+        r.states[0].parents.push("01a12290-0000-7000-8000-000000000004".into());
+        assert!(validate(&r).is_err());
+        r.states[0].parents.clear();
+        r.states[0].line = Some("01a12290-0000-7000-8000-000000000005".into());
+        assert!(validate(&r).is_err());
+    }
+
+    #[test]
+    fn new_records_validate_ref_and_attestation_boundaries() {
+        let mut r = rec();
+        r.data =
+            serde_json::json!({"ref_change":{"name":"env/prod","before":null,"after":{"name":"env/prod","target":"../escape"}}});
+        assert!(validate(&r).is_err());
+        let a = Attestation {
+            format: 1,
+            attestation_id: r.id.clone(),
+            subject: Subject { kind: "state".into(), id: "01a12290-0000-7000-8000-000000000003".into() },
+            change_id: None,
+            kind: "approval".into(),
+            payload_digest: "0".repeat(64),
+            payload_ref: None,
+            signer: r.machine.clone(),
+            time: r.time,
+        };
+        r.data = serde_json::json!({"attestation":a});
+        assert!(validate(&r).is_ok());
+        r.data["attestation"]["signer"] = serde_json::json!("01a12290-0000-7000-8000-000000000004");
+        assert!(validate(&r).is_err());
     }
 }

@@ -14,7 +14,14 @@ pub fn resolve(repo: &Repo, line: Option<&Line>, rev: &str) -> Result<String> {
     };
     let mut id = if let Some(n) = at {
         let n: usize = n.parse().map_err(|_| anyhow::anyhow!("bad revision {rev}"))?;
-        if name == "stash" {
+        let history = repo.p.db.ref_log(name)?;
+        if !history.is_empty() {
+            let positions: Vec<_> = history.into_iter().filter_map(|ch| ch.after).collect();
+            positions
+                .get(n)
+                .map(|r| r.target.clone())
+                .ok_or_else(|| anyhow::anyhow!("{rev}: ref has only {} positions", positions.len()))?
+        } else if name == "stash" {
             let l = need_line(line, rev)?;
             let v = repo.p.db.line_states(&l.id, StateKind::Stash)?;
             match v.get(n) {
@@ -96,6 +103,30 @@ fn base_state(repo: &Repo, line: Option<&Line>, name: &str) -> Result<String> {
             Some(s) => Ok(s.id.clone()),
             None => bail!("no stash entries"),
         };
+    }
+    if let Some(rest) = name.strip_prefix("changes/") {
+        let (id, version) = match rest.split_once('/') {
+            Some((id, v)) => (id, Some(crate::cmd::change::version(v)?)),
+            None => (rest, None),
+        };
+        let id = crate::cmd::change::find(repo, id)?;
+        let states = repo.p.db.change_versions(&id)?;
+        return states
+            .get(version.unwrap_or(states.len().saturating_sub(1)))
+            .map(|s| s.id.clone())
+            .ok_or_else(|| anyhow::anyhow!("unknown change version '{name}'"));
+    }
+    if name.starts_with("views/") {
+        bail!("views are not implemented; use a state revision");
+    }
+    if let Some(id) = name.strip_prefix("attestations/") {
+        return repo.p.db.attestation(id)?.map(|a| a.subject.id).ok_or_else(|| anyhow::anyhow!("unknown attestation '{id}'"));
+    }
+    if let Some(r) = repo.p.db.ref_value(name, crate::ids::now_ms())? {
+        return Ok(r.target);
+    }
+    if crate::model::reserved_revision(name) {
+        bail!("unknown or expired ref '{name}'");
     }
     if let Some(l) = repo.p.db.line_by_name(name)? {
         return Ok(repo.localize(l)?.head);

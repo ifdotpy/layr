@@ -1,10 +1,13 @@
 //! Command dispatch and helpers shared by commands.
 
 pub mod admin;
+pub mod attest;
 pub mod branch;
+pub mod change;
 pub mod history;
 pub mod mergecmd;
 pub mod overlaycmd;
+pub mod refs;
 pub mod remote;
 pub mod replicate;
 pub mod transfer;
@@ -180,7 +183,8 @@ Read history:
    log, show, blame, grep, ls-files, rev-parse, merge-base
 Lines and states:
    branch, switch, checkout, tag, merge, cherry-pick, revert, rebase
-   save, undo, op, try, checks, adopt
+   save, undo, op, try, adopt
+   ref set/list/log/delete, attest, attestations, change list/show/log/diff
 Remote (git bridge):
    remote, fetch, pull, push, clone, git-sync
 Overlays (files with their own readers and history, shown in lines):
@@ -255,8 +259,11 @@ pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
         "access" => admin::access(ctx, &rest),
         "protect" => admin::protect(ctx, &rest),
         "approve" => admin::approve(ctx, &rest),
-        "approvals" => admin::approvals(ctx, &rest),
-        "checks" => admin::checks(ctx, &rest),
+        "approvals" | "checks" => Err(exit(1, "this command was removed; use 'layr attestations <rev> [--kind <kind>]'")),
+        "ref" => refs::refs(ctx, &rest),
+        "attest" => attest::attest(ctx, &rest),
+        "attestations" => attest::attestations(ctx, &rest),
+        "change" => change::change(ctx, &rest),
         "gc" => admin::gc(ctx, &rest),
         "fsck" => admin::fsck(ctx, &rest),
         "reindex" => admin::reindex(ctx, &rest),
@@ -265,7 +272,8 @@ pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
         "machines" => admin::machines(ctx, &rest),
         "debug" => admin::debug(ctx, &rest),
         "config" => admin::config(ctx, &rest),
-        "cache" | "layer" => admin::cache(ctx, &rest),
+        "cache" => admin::cache(ctx, &rest),
+        "layer" => Err(exit(1, "this command was removed; use 'layr cache'")),
         "remote" => remote::remote(ctx, &rest),
         "fetch" => remote::fetch(ctx, &rest),
         "pull" => remote::pull(ctx, &rest),

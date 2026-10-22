@@ -670,6 +670,7 @@ fn pick(ctx: &Ctx, args: &[String], revert: bool) -> Result<i32> {
             merge_states(ctx, repo, &line, &base, &line.head, &theirs, &label, vec![line.head.clone()], &message)?;
         if !revert {
             state.author = c.author.clone();
+            state.change_id = c.change_id.clone();
         }
         let sid = state.id.clone();
         let n = out.conflicts.len();
@@ -763,6 +764,7 @@ pub fn rebase(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let parent = c.parents[0].clone();
         let (mut s, out) = merge_states(ctx, repo, &line, &parent, &cur, p, &ids::short(p), vec![cur.clone()], &c.message)?;
         s.author = c.author.clone();
+        s.change_id = c.change_id.clone();
         conflicts += out.conflicts.len();
         for m in &out.messages {
             outln!(ctx, "{m}");
