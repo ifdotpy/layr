@@ -613,7 +613,7 @@ Person identity / device public keys
 ### 7.4. Ротация с S3 Versioning и E2EE
 
 - Публиковать новый epoch manifest; immutable старые объекты не перезаписывать.
-- Для strict revocation: reencrypt affected content, убедиться в reachability, удалить/expire старые S3 object versions с учётом Object Lock, retention, backup, replication и legal hold.
+- Для strict revocation: reencrypt affected content, убедиться в reachability, удалить/expire старые S3 object versions с учётом Object Lock, retention, копий, replication и legal hold.
 - Существующие clients проверяют monotonic trust generation. Иначе злоумышленник сможет показать старый, всё ещё подписанный manifest.
 - В S3 Versioning простое `DELETE` может создать delete marker, **не уничтожив старые версии**. Политика удаления должна явным образом учитывать `VersionId` и допустимые retention ограничения.
 
