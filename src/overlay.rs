@@ -648,6 +648,9 @@ pub fn next_state(
     Ok(StateRec {
         id,
         kind: StateKind::Commit,
+        change_id: Some(ids::new_id()),
+        derived_from: None,
+        context: None,
         parents,
         line: line.map(|s| s.to_string()),
         subvol: info.uuid,

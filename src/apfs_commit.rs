@@ -234,6 +234,9 @@ mod tests {
         r.states.push(StateRec {
             id: prepared.id.clone(),
             kind: StateKind::Commit,
+            change_id: None,
+            derived_from: None,
+            context: None,
             parents: vec![],
             line: Some(line.into()),
             subvol: storage::subvol_info(&p.state_path(&prepared.id))?.uuid,

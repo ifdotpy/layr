@@ -196,12 +196,14 @@ without a checkout.
 | work          | `status`, `diff`, `add`, `rm`, `mv`, `apply [--cached]`, `commit [-a] [--amend]`, `restore`, `reset`, `stash`, `clean` |
 | history       | `log`, `show`, `blame`, `grep`, `ls-files`, `rev-parse`, `merge-base`                        |
 | lines         | `branch`, `tag`, `merge [--expect]`, `cherry-pick`, `revert`, `rebase`, `adopt`; `switch`/`checkout <line>` explain that lines are folders |
-| access        | `access [list|grant [--until <30m|2h|1d>]|revoke|deny|allow|check]`, `protect [<pattern> --update <role> --check <names> --path <path>=<role> --approvals <n> --approvers <principals> --direct --rewrite <role> --no-expect | --remove]`, `approve [--withdraw] <state>`, `approvals <state>` |
-| safety        | `undo`, `op log`, `save`, `try <state> -- <cmd>`, `checks`, `gc`, `fsck`, `reindex`           |
+| access        | `access [list|grant [--until <30m|2h|1d>]|revoke|deny|allow|check]`, `protect [<pattern> --update <role> --check <names> --path <path>=<role> --approvals <n> --approvers <principals> --direct --rewrite <role> --no-expect | --remove]`, `approve [--withdraw] <state>`, `attest <kind> <rev> [--payload <file>]`, `attestations <rev> [--kind <kind>] [--json]` |
+| safety        | `undo`, `op log`, `save`, `try <state> -- <cmd>`, `gc`, `fsck`, `reindex`           |
 | remote (git)  | `remote`, `fetch`, `pull`, `push [--squash]`, `clone`, `git-sync`                             |
 | machines      | `sync -- <cmd>` / `serve-peer`, `machines [trust]`, `op export` / `op import` (JSONL), `backup` / `backup restore` / `backup verify` |
 | copies        | `export <folder>`                                                                              |
 | overlays      | `overlay create <name> [--readers <principals>] [--mode shared\|follow]`, `overlay list`, `overlay readers`, `overlay use [--add\|--remove\|--none] <names>`, `overlay move [--purge] <name> <paths>`, `overlay log\|show\|diff\|grep\|ls-files <name>` |
+| refs          | `ref set <name> <rev> [--expect <rev>] [--ttl <dur>]`, `ref list [<prefix>]`, `ref log <name>`, `ref delete <name> [--expect <rev>]` |
+| changes       | `change list`, `change show <id>`, `change log <id>`, `change diff <id> [--from vN] [--to vM]` |
 | setup         | `init`, `projects`, `config`, `cache add|remove|list|repair`, `daemon`                        |
 
 Revisions: `HEAD`, `@`, `HEAD~2`, `HEAD^2`, line names, `line@machine`, tags, `origin/main`,
@@ -214,6 +216,63 @@ content are the same on every machine and in git. `layr rev-parse <rev>^{tree}` 
 <rev>:<path>` prints the id of one path in that commit, as `git rev-parse` does: a tree for a
 folder, a blob for a file, the root tree for `<rev>:`. `./` and `../` resolve against the current
 folder. A path that the exported commit does not have fails with exit 128.
+
+
+## Refs, changes, and attestations
+
+Refs name states without a work folder. A ref can contain `/`, for example `env/prod` or `pins/build`.
+`ref set` refuses line names. Use `commit`, `merge`, or `reset` to change a line.
+`--expect` compares the current state before the update. A mismatch changes nothing and returns an error.
+`--ttl` accepts positive durations such as `30s`, `5m`, `2h`, and `1d`.
+All ref and change commands accept `--json`.
+
+```sh
+layr ref set env/prod HEAD
+layr ref set env/prod HEAD~1 --expect HEAD
+layr rev-parse 'env/prod@{1}'
+layr ref list env/ --json
+layr ref log env/prod
+layr undo
+```
+
+`<ref>@{0}` selects the current position. Higher numbers select earlier positions.
+`ref log` retains positions after delete. `undo` restores a ref if no later update changes it.
+Garbage collection (GC) keeps live ref targets and their dependencies.
+Expired refs stop resolving. GC records their removal. The normal undo window can retain earlier positions.
+
+These revision prefixes are reserved: `env/`, `release/`, `pins/`, `holds/`, `leases/`, `caches/`, `derived/`,
+`changes/`, `views/`, and `attestations/`. Line names cannot start with these prefixes.
+`views/<id>` returns an explicit error because views do not exist yet.
+
+Each new source commit has a `change_id`. Amend, rebase, and cherry-pick preserve it.
+A merge commit has a new identifier. Old states without `change_id` remain readable.
+`changes/<id>` selects the latest version. `changes/<id>/v1` selects the first version.
+`change show` lists versions and their attestations. `change log` lists their operations.
+`change diff` compares each version's patch against its own parent, so unrelated base changes do not enter the interdiff.
+
+Attestation kinds: `check`, `approval`, `origin`, `import`, `quarantine`, and `revoke`.
+Each attestation is part of an immutable operation record with a machine signature.
+It records the exact subject state, optional ChangeId, payload digest, signer, and time.
+`--payload` reads a file as the caller and records its SHA-256 digest. It does not store the file contents.
+The optional payload reference field is reserved for an object in an allowed layer.
+
+`approve` writes an approval attestation. `approve --withdraw` appends a revoke attestation for the caller's approvals.
+`attest revoke` revokes the caller's earlier attestations of the subject on this machine.
+The original evidence remains in the log. A revoke cannot withdraw another caller's evidence.
+`try` records a check attestation and its command result. Protected-line rules continue to use approvals and checks.
+The old `approvals` and `checks` commands fail and name `layr attestations` as their replacement.
+Existing signed approval and check records populate the new attestation table without changes to their signatures.
+Attestations do not keep a subject alive. Their records remain available while the subject lives.
+
+State kinds `cache` and `derived` have optional `derived_from` and `context` fields.
+They have no source parents, line, or ChangeId. Lines, source diffs, merges, and Git exports reject them.
+A live ref can keep an auxiliary state and its source alive.
+Existing cache snapshots keep their attachment to source states and their wire format for older clients.
+They remain cache data outside source diffs. This change does not convert those snapshots into separate StateIds.
+The new kinds support separate cache and derived states through the store API.
+
+The database schema version stays at 6. New tables are additive. Optional fields are absent from old state records.
+
 
 ## Workflow
 
@@ -273,7 +332,7 @@ layr try HEAD~1 -- sh -c 'git log -1 && make check'  # an older state of your ow
   the state id and `LAYR_PROJECT` the project.
 - The caller's line does not change. The copy is deleted afterwards (`--keep` keeps it and prints
   its path); the exit code is the command's, and the result is recorded as a check of the state
-  (`layr checks <state>`).
+  (`layr attestations <state> --kind check`).
 - It needs the `try` action (the reader role, or a line of your own), not write access.
 
 ## Git in a line

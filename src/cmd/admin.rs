@@ -1,4 +1,4 @@
-//! save, undo, op log, try, checks, gc, fsck, reindex, init, projects, config, cache.
+//! save, undo, op log, try, gc, fsck, reindex, init, projects, config, cache.
 
 use super::{exit, here};
 use crate::args::{parse, Spec};
@@ -147,6 +147,7 @@ const NOT_UNDOABLE: &[&str] = &[
     "save.caches",
     "save.layers",
     "check",
+    "attest",
     "gc",
     "machine",
     "project",
@@ -183,7 +184,11 @@ pub fn undo(ctx: &Ctx, args: &[String]) -> Result<i32> {
                     repo.p.db.line_by_id(lid).ok().flatten().map(|l| repo.p.line_path(&l.name).exists()).unwrap_or(false)
                         || r.op == "line.delete"
                 });
-                if r.actor.uid == ctx.caller.uid && r.actor.session == session && local && !NOT_UNDOABLE.contains(&r.op.as_str())
+                if r.actor.uid == ctx.caller.uid
+                    && r.actor.session == session
+                    && local
+                    && !NOT_UNDOABLE.contains(&r.op.as_str())
+                    && !repo.p.db.undone(&r.id)?
                 {
                     found = Some(r.id.clone());
                     break;
@@ -245,6 +250,18 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
     let _lock = repo.p.lock()?;
     let mut rec = Record::new("undo");
     rec.data = serde_json::json!({"undo": r.id, "op": r.op});
+    if let Some(value) = r.data.get("ref_change") {
+        let ch: crate::model::RefChange = serde_json::from_value(value.clone())?;
+        let current = repo.p.db.ref_value(&ch.name, ids::now_ms())?;
+        if !force && current != ch.after {
+            bail!("ref '{}' changed after this operation; undo the later operations first", ch.name);
+        }
+        if let Some(before) = &ch.before {
+            repo.state_root(&before.target)?;
+        }
+        let inverse = crate::model::RefChange { name: ch.name, before: current, after: ch.before };
+        rec.data["ref_change"] = serde_json::to_value(inverse)?;
+    }
     // A commit that changed overlays: their lines move back and the line shows their earlier
     // states again; the changes stay in the working folder, as for the shared set. The overlay
     // lines move only after every check of the undo passed.
@@ -578,9 +595,9 @@ fn run_check_in(
             c.status().map_err(|e| exit(127, format!("layr try: cannot run '{}' as user {}: {e}", argv[0], ctx.caller.user)))?;
         let code = st.code().unwrap_or(128);
         let _lock = repo.p.lock()?;
-        let mut rec = Record::new("check");
-        rec.data =
-            serde_json::json!({"state": state, "command": command, "exit": code, "seconds": started.elapsed().as_secs_f64()});
+        let result = serde_json::json!({"command":command,"exit":code,"seconds":started.elapsed().as_secs_f64()});
+        let mut rec = super::attest::record(repo, state, "check", &serde_json::to_vec(&result)?)?;
+        rec.data["check"] = result;
         repo.commit_record(ctx, rec)?;
         Ok(code)
     })();
@@ -594,20 +611,6 @@ fn run_check_in(
         eprintln!("layr: state {} exit {code}", ids::short(state));
     }
     Ok(code)
-}
-
-pub fn checks(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let h = here(ctx)?;
-    let state = revs::resolve(&h.repo, h.line.as_ref(), args.first().map(|s| s.as_str()).unwrap_or("HEAD"))?;
-    let v = h.repo.p.db.checks(&state)?;
-    if v.is_empty() {
-        outln!(ctx, "no checks for {}", ids::short(&state));
-        return Ok(1);
-    }
-    for (cmd, exitc, time, actor) in v {
-        outln!(ctx, "{} {} {} exit {exitc}: {cmd}", ids::short(&state), fmt_time(time), actor);
-    }
-    Ok(0)
 }
 
 /// Retention. Kept: line heads and their history, tags, remote refs, stashes, the newest
@@ -639,6 +642,9 @@ pub fn retention_plan(repo: &Repo) -> Result<(BTreeSet<String>, Vec<String>)> {
             roots.push(s.id);
         }
     }
+    for r in db.refs("", now)? {
+        roots.push(r.target);
+    }
     for (_, s, _) in db.tags()? {
         roots.push(s);
     }
@@ -651,6 +657,14 @@ pub fn retention_plan(repo: &Repo) -> Result<(BTreeSet<String>, Vec<String>)> {
     }
     roots.extend(newest_export.into_values());
     for r in db.records_since(now - undo_days * 86400 * 1000)? {
+        if let Some(v) = r.data.get("ref_change") {
+            let ch: crate::model::RefChange = serde_json::from_value(v.clone())?;
+            for position in [ch.before, ch.after].into_iter().flatten() {
+                if position.expires_at.map(|t| t > now).unwrap_or(true) {
+                    keep.insert(position.target);
+                }
+            }
+        }
         for s in &r.states {
             keep.insert(s.id.clone());
         }
@@ -675,7 +689,7 @@ pub fn retention_plan(repo: &Repo) -> Result<(BTreeSet<String>, Vec<String>)> {
             // Already kept: its parents were or will be visited from the first insert.
         }
         if let Some(s) = db.state(&x)? {
-            for p in &s.parents {
+            for p in s.parents.iter().chain(s.derived_from.iter()) {
                 if !keep.contains(p) {
                     stack.push(p.clone());
                 }
@@ -691,11 +705,12 @@ pub fn retention_plan(repo: &Repo) -> Result<(BTreeSet<String>, Vec<String>)> {
     let kept: Vec<String> = keep.iter().cloned().collect();
     for k in kept {
         if let Some(s) = db.state(&k)? {
-            let mut stack: Vec<String> = s.parents.clone();
+            let mut stack: Vec<String> = s.parents.iter().chain(s.derived_from.iter()).cloned().collect();
             while let Some(p) = stack.pop() {
                 if keep.insert(p.clone()) {
                     if let Some(ps) = db.state(&p)? {
                         stack.extend(ps.parents);
+                        stack.extend(ps.derived_from);
                     }
                 }
             }
@@ -715,6 +730,11 @@ pub fn run_gc(ctx: &Ctx, repo: &Repo, dry: bool) -> Result<Vec<String>> {
     let (_keep, delete) = retention_plan(repo)?;
     if dry {
         return Ok(delete);
+    }
+    for expired in repo.p.db.expired_refs(ids::now_ms())? {
+        let mut rec = Record::new("ref.expire");
+        rec.data = serde_json::json!({"ref_change": crate::model::RefChange { name:expired.name.clone(),before:Some(expired),after:None }});
+        repo.commit_record(ctx, rec)?;
     }
     let mut deleted = Vec::new();
     for id in &delete {
@@ -762,7 +782,8 @@ pub fn run_gc(ctx: &Ctx, repo: &Repo, dry: bool) -> Result<Vec<String>> {
 /// states themselves stay; only their cache snapshots go.
 fn prune_caches(repo: &Repo) -> Result<Vec<String>> {
     let keep_n = repo.p.config_u64("retention.caches", 5) as usize;
-    let heads: BTreeSet<String> = repo.p.db.lines()?.into_iter().map(|l| l.head).collect();
+    let mut heads: BTreeSet<String> = repo.p.db.lines()?.into_iter().map(|l| l.head).collect();
+    heads.extend(repo.p.db.refs("", ids::now_ms())?.into_iter().map(|r| r.target));
     let mut with_caches: Vec<(i64, String, Vec<String>)> = Vec::new();
     for (id, _) in repo.p.db.present_states()? {
         if let Some(s) = repo.p.db.state(&id)? {
@@ -1367,25 +1388,17 @@ pub fn approve(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let s = repo.state(&state)?;
     let _lock = repo.p.lock()?;
     let withdraw = a.has("--withdraw");
-    let mut rec = Record::new(if withdraw { "approve.withdraw" } else { "approve" });
-    rec.data = serde_json::json!({"state": state});
+    let mut rec = super::attest::record(repo, &state, if withdraw { "revoke" } else { "approval" }, b"")?;
+    if withdraw {
+        rec.data["revokes"] =
+            serde_json::json!(repo.p.db.own_attestations(&state, &repo.p.store.machine.id, ctx.caller.uid, Some("approval"))?);
+    }
     repo.commit_record(ctx, rec)?;
     if !a.has("-q") {
         let what = if withdraw { "Withdrew the approval of" } else { "Approved" };
         outln!(ctx, "{what} state {} {}", ids::short(&state), s.message.lines().next().unwrap_or(""));
     }
     Ok(0)
-}
-
-/// `layr approvals [<rev>]`: who approved exactly this state.
-pub fn approvals(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let h = here(ctx)?;
-    let state = revs::resolve(&h.repo, h.line.as_ref(), args.first().map(|s| s.as_str()).unwrap_or("HEAD"))?;
-    let v = h.repo.p.db.approvals(&state)?;
-    for (uid, time) in &v {
-        outln!(ctx, "{}\t{}", crate::ctx::Caller::from_uid(*uid).user, fmt_time(*time));
-    }
-    Ok(if v.is_empty() { 1 } else { 0 })
 }
 
 /// A duration: `90s`, `30m`, `2h`, `1d`.

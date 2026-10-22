@@ -45,7 +45,7 @@ no "the user cannot run gc" as layr-u1 $L gc
 S=$(as layr-u1 $L rev-parse HEAD)
 cd $P/main
 eq "try runs in a copy of the exact state" "0" "$(as layr-admin $L try -q $S -- sh -c 'test -f a1.txt && grep -q three notes.txt'; echo $?)"
-has "the check is recorded" "exit 0" "$(as layr-admin $L checks $S)"
+has "the check is recorded" "exit 0" "$(as layr-admin $L attestations $S --kind check)"
 eq "a failing check is recorded too" "1" "$(as layr-admin $L try -q $S -- false; echo $?)"
 as layr-admin $L merge -q w1 --expect $S
 eq "merge of the reviewed state" "a1" "$(as layr-admin cat a1.txt)"

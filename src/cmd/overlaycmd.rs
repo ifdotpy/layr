@@ -96,6 +96,9 @@ fn create(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let st = StateRec {
             id: id.clone(),
             kind: StateKind::Commit,
+            change_id: Some(ids::new_id()),
+            derived_from: None,
+            context: None,
             parents: Vec::new(),
             line: None,
             subvol: info.uuid,

@@ -789,6 +789,9 @@ pub fn commit(ctx: &Ctx, args: &[String]) -> Result<i32> {
     };
     #[cfg(not(target_os = "macos"))]
     let mut state = h.repo.new_state(ctx, &src, StateKind::Commit, parents, &message, Some(&line))?;
+    if a.has("--amend") {
+        state.change_id = head.change_id.clone();
+    }
     let staged: Vec<Change> = match changes::file_changes(&head_root, &h.repo.p.state_path(&state.id)) {
         Ok(v) => v.into_iter().filter(|c| !skip_path(&c.path)).collect(),
         Err(e) => {
