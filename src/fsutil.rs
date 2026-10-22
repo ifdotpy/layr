@@ -256,7 +256,13 @@ fn read_full(f: &mut File, buf: &mut [u8]) -> Result<usize> {
 
 /// Compare two entries. With `ranges`, only those byte ranges of two regular files can differ
 /// (the rest share extents), so only they are read.
-pub fn same_entry(ra: &(impl Src + ?Sized), pa: &str, rb: &(impl Src + ?Sized), pb: &str, ranges: Option<&[(u64, u64)]>) -> Result<bool> {
+pub fn same_entry(
+    ra: &(impl Src + ?Sized),
+    pa: &str,
+    rb: &(impl Src + ?Sized),
+    pb: &str,
+    ranges: Option<&[(u64, u64)]>,
+) -> Result<bool> {
     let (ma, mb) = match (lmeta(ra, pa), lmeta(rb, pb)) {
         (Some(a), Some(b)) => (a, b),
         (None, None) => return Ok(true),
@@ -335,12 +341,24 @@ fn fchown(f: &File, own: Option<(u32, u32)>) -> Result<()> {
 /// Copy one entry from `src_root/src_rel` (a snapshot or a private folder) to
 /// `dst_root/dst_rel`: a reflink copy for a file (in place when a file is there, so the inode
 /// stays), the same target for a link, a folder for a folder.
-pub fn copy_entry(src_root: &(impl Src + ?Sized), src_rel: &str, dst_root: &Path, dst_rel: &str, own: Option<(u32, u32)>) -> Result<()> {
+pub fn copy_entry(
+    src_root: &(impl Src + ?Sized),
+    src_rel: &str,
+    dst_root: &Path,
+    dst_rel: &str,
+    own: Option<(u32, u32)>,
+) -> Result<()> {
     copy_entry_impl(src_root, src_rel, dst_root, dst_rel, own, false)
 }
 
 /// Copy into a private index. APFS can replace a single-link inode with a new clone.
-pub fn copy_index_entry(src_root: &(impl Src + ?Sized), src_rel: &str, dst_root: &Path, dst_rel: &str, own: Option<(u32, u32)>) -> Result<()> {
+pub fn copy_index_entry(
+    src_root: &(impl Src + ?Sized),
+    src_rel: &str,
+    dst_root: &Path,
+    dst_rel: &str,
+    own: Option<(u32, u32)>,
+) -> Result<()> {
     copy_entry_impl(src_root, src_rel, dst_root, dst_rel, own, true)
 }
 

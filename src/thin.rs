@@ -12,8 +12,8 @@
 //!
 //! `states/<id>` of a thin state is a view: a complete tree made when a command needs one.
 //! `layr gc` removes views that were not used recently.
-use crate::storage::{self as apfs, ScanEntry, SubvolInfo};
 use crate::fsutil::FType;
+use crate::storage::{self as apfs, ScanEntry, SubvolInfo};
 use crate::store::Project;
 use anyhow::{bail, Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
@@ -183,11 +183,7 @@ impl Layered {
     pub fn entries(&self, rel: &str) -> Result<Vec<(String, crate::fsutil::Meta)>> {
         let map = self.scan(false)?;
         let prefix = if rel.is_empty() { String::new() } else { format!("{rel}/") };
-        Ok(map
-            .into_iter()
-            .filter(|(k, _)| !k.is_empty() && k.starts_with(&prefix))
-            .map(|(k, v)| (k, v.meta))
-            .collect())
+        Ok(map.into_iter().filter(|(k, _)| !k.is_empty() && k.starts_with(&prefix)).map(|(k, v)| (k, v.meta)).collect())
     }
 
     /// Make a complete tree at `dst`, which must not exist. A read-only tree keeps the
@@ -534,7 +530,7 @@ pub fn stage_entries(index: &Layered, src: &Path, paths: &BTreeSet<String>, own:
             open_parent(&stage, p)?;
             apfs::delete_tree(&at)?;
         }
-        let old = below.find(p)?.map(|b| fs::symlink_metadata(b)).transpose()?;
+        let old = below.find(p)?.map(fs::symlink_metadata).transpose()?;
         let Some(m) = new else {
             if old.is_some() {
                 removed.insert(p.clone());

@@ -206,6 +206,7 @@ impl<'a> Project<'a> {
             self.dir.join("deltas").join(".invalid-id")
         }
     }
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub fn deltas_dir(&self) -> PathBuf {
         self.dir.join("deltas")
     }

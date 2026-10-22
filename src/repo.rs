@@ -4,7 +4,9 @@ use crate::access::{Policy, Role, Rule, Who};
 use crate::changes::{self, Change};
 use crate::ctx::Ctx;
 use crate::db::need;
-use crate::fsutil::{self, Src};
+use crate::fsutil;
+#[cfg(target_os = "macos")]
+use crate::fsutil::Src;
 use crate::ids;
 use crate::ignore_rules::Rules;
 use crate::model::{Conflict, Line, LineChange, LineState, Record, StateKind, StateRec};
@@ -452,6 +454,7 @@ impl<'a> Repo<'a> {
 
     /// A new state with the content of `base`: on APFS an empty thin layer over it, elsewhere a
     /// snapshot. The record is not written yet.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub fn same_state(
         &self,
         ctx: &Ctx,
@@ -849,6 +852,7 @@ impl<'a> Repo<'a> {
         }
     }
     #[cfg(not(target_os = "macos"))]
+    #[allow(dead_code)]
     fn stage_tree(&self, _line: &Line, stage: &Path) -> Result<Snap> {
         Ok(stage.to_path_buf())
     }
@@ -885,6 +889,7 @@ impl<'a> Repo<'a> {
 
     /// The index to read and the staging folder when there is one. The caller must hold the
     /// project lock while it reads a mutable index.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub fn index_source(&self, line: &Line) -> Result<(Snap, Option<PathBuf>)> {
         match self.current_stage(line)? {
             Some(s) => Ok((self.stage_tree(line, &s)?, Some(s))),
