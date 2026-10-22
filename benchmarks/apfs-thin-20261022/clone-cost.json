@@ -1,0 +1,62 @@
+{
+ "0:clone_dir": {
+  "entries": 10101,
+  "bytes_per_copy": 2837504.0,
+  "bytes_per_entry": 280.9131769131769,
+  "seconds": 0.3055000409949571
+ },
+ "0:clone_dir+xattr": {
+  "entries": 10101,
+  "bytes_per_copy": 4909056.0,
+  "bytes_per_entry": 485.99702999703,
+  "seconds": 0.8624444168526679
+ },
+ "0:clone_dir+seal": {
+  "entries": 10101,
+  "bytes_per_copy": 2841600.0,
+  "bytes_per_entry": 281.31868131868134,
+  "seconds": 0.9267857088707387
+ },
+ "0:clone_per_file": {
+  "entries": 10101,
+  "bytes_per_copy": 2586624.0,
+  "bytes_per_entry": 256.07603207603205,
+  "seconds": 2.086745041888207
+ },
+ "0:hardlink_farm": {
+  "entries": 10101,
+  "bytes_per_copy": 2542592.0,
+  "bytes_per_entry": 251.71685971685972,
+  "seconds": 5.7445326671004295
+ },
+ "4096:clone_dir": {
+  "entries": 10101,
+  "bytes_per_copy": 3303424.0,
+  "bytes_per_entry": 327.03930303930304,
+  "seconds": 0.7379640419967473
+ },
+ "4096:clone_dir+xattr": {
+  "entries": 10101,
+  "bytes_per_copy": 5828608.0,
+  "bytes_per_entry": 577.032769032769,
+  "seconds": 1.4797545420005918
+ },
+ "4096:clone_dir+seal": {
+  "entries": 10101,
+  "bytes_per_copy": 3310592.0,
+  "bytes_per_entry": 327.74893574893576,
+  "seconds": 1.701973290881142
+ },
+ "4096:clone_per_file": {
+  "entries": 10101,
+  "bytes_per_copy": 3135488.0,
+  "bytes_per_entry": 310.4136224136224,
+  "seconds": 2.7270782499108464
+ },
+ "4096:hardlink_farm": {
+  "entries": 10101,
+  "bytes_per_copy": 2058240.0,
+  "bytes_per_entry": 203.76596376596376,
+  "seconds": 4.648927999893203
+ }
+}
