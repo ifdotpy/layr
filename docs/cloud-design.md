@@ -84,6 +84,17 @@ btrfs, a project store or root.
 - Config keys of the Layr service used by the executor profile: `queue.run` (workstream core-2)
   and `registry.listen`, `registry.user` (workstream oci).
 
+## Client credentials for the gateway
+
+- Read: no stored credential. A client that holds a slot (machine slot or paper key) gets a
+  10-minute bearer token through the challenge (decision 4).
+- Write and gc: the client reads the token from the file named by the environment variable
+  `LAYR_GATEWAY_TOKEN_FILE` (mode 0600, owner = caller; refused otherwise). The token is never
+  taken from a command-line argument, never stored in project config, records or the op log.
+- Executor: `/etc/layr-executor/write-token` (0600), and the systemd unit sets
+  `Environment=LAYR_GATEWAY_TOKEN_FILE=/etc/layr-executor/write-token`. A first `clone` may use
+  a transient file such as `/run/layr-gateway-token`.
+
 ## Work split
 
 | Task | Owner | Depends on |
