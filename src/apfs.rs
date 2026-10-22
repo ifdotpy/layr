@@ -170,16 +170,16 @@ pub fn copy_selected(src: &Path, dst: &Path, paths: &std::collections::BTreeSet<
                     None => {
                         let mut file = target.create(rel, 0o600)?;
                         io::copy(&mut input, &mut file)?;
+                        keep_birthtime(&metadata, &dst.join(rel))?;
                         file
                     }
                 };
-                crate::sys::apfs_attribute(&dst.join(rel), c"com.layr.origin", Some(&file_identity(&src.join(rel))?))?;
                 output.set_permissions(fs::Permissions::from_mode(m.mode & 0o7777))?;
                 crate::fsutil::set_mtime(&output, metadata.mtime(), metadata.mtime_nsec())?;
             }
             crate::fsutil::FType::Symlink => {
                 target.symlink(rel, &source.read_link(rel)?)?;
-                crate::sys::apfs_attribute(&dst.join(rel), c"com.layr.origin", Some(&file_identity(&src.join(rel))?))?;
+                keep_birthtime(&fs::symlink_metadata(src.join(rel))?, &dst.join(rel))?;
             }
             crate::fsutil::FType::Dir => target.mkdirs(rel, None)?,
             crate::fsutil::FType::Special => bail!("cannot snapshot special file {}", src.join(rel).display()),
@@ -187,16 +187,17 @@ pub fn copy_selected(src: &Path, dst: &Path, paths: &std::collections::BTreeSet<
     }
     Ok(())
 }
+/// Identity used to find moves. APFS clones, writes, and renames keep the creation time.
+/// A new inode, such as a safe save, has a new identity, as with btrfs inode numbers.
 pub fn file_identity(path: &Path) -> Result<Vec<u8>> {
-    match crate::sys::apfs_attribute(path, c"com.layr.origin", None) {
-        Ok(v) => Ok(v),
-        Err(e) if e.raw_os_error() == Some(libc::ENOATTR) => {
-            use std::os::macos::fs::MetadataExt as MacMetadataExt;
-            let m = fs::symlink_metadata(path)?;
-            Ok(format!("{}:{}:{}:{}", m.dev(), m.ino(), m.st_birthtime(), m.st_birthtime_nsec()).into_bytes())
-        }
-        Err(e) => Err(e.into()),
-    }
+    use std::os::macos::fs::MetadataExt as MacMetadataExt;
+    let m = fs::symlink_metadata(path)?;
+    Ok(format!("{}:{}", m.st_birthtime(), m.st_birthtime_nsec()).into_bytes())
+}
+fn keep_birthtime(src: &fs::Metadata, dst: &Path) -> Result<()> {
+    use std::os::macos::fs::MetadataExt as MacMetadataExt;
+    crate::sys::apfs_set_birthtime(dst, src.st_birthtime(), src.st_birthtime_nsec())
+        .with_context(|| format!("set creation time {}", dst.display()))
 }
 fn copy_tree(src: &Path, dst: &Path, root: bool, links: &mut BTreeMap<(u64, u64), std::path::PathBuf>) -> Result<()> {
     let m = fs::symlink_metadata(src)?;
@@ -212,6 +213,7 @@ fn copy_tree(src: &Path, dst: &Path, root: bool, links: &mut BTreeMap<(u64, u64)
             crate::sys::apfs_copy_metadata(src, dst).with_context(|| format!("copy metadata {}", dst.display()))?;
             crate::sys::apfs_immutable(dst, false).with_context(|| format!("unseal {}", dst.display()))?;
         }
+        keep_birthtime(&m, dst)?;
         fs::set_permissions(dst, fs::Permissions::from_mode(m.mode() & 0o7777))?;
         crate::fsutil::set_mtime(&File::open(dst)?, m.mtime(), m.mtime_nsec())
             .with_context(|| format!("set directory time {}", dst.display()))?;
@@ -219,6 +221,7 @@ fn copy_tree(src: &Path, dst: &Path, root: bool, links: &mut BTreeMap<(u64, u64)
         std::os::unix::fs::symlink(fs::read_link(src)?, dst)?;
         crate::sys::apfs_copy_metadata(src, dst).with_context(|| format!("copy metadata {}", dst.display()))?;
         crate::sys::apfs_immutable(dst, false).with_context(|| format!("unseal {}", dst.display()))?;
+        keep_birthtime(&m, dst)?;
     } else if m.is_file() {
         let key = (m.dev(), m.ino());
         if let Some(first) = links.get(&key) {
@@ -230,16 +233,6 @@ fn copy_tree(src: &Path, dst: &Path, root: bool, links: &mut BTreeMap<(u64, u64)
         }
     } else {
         bail!("cannot snapshot special file {}", src.display());
-    }
-    // macOS requires write access for setxattr, including on an owned read-only file.
-    let needs_write = !m.file_type().is_symlink() && m.mode() & 0o200 == 0;
-    if needs_write {
-        fs::set_permissions(dst, fs::Permissions::from_mode((m.mode() & 0o7777) | 0o200))?;
-    }
-    crate::sys::apfs_attribute(dst, c"com.layr.origin", Some(&file_identity(src)?))
-        .with_context(|| format!("set file identity on {}", dst.display()))?;
-    if needs_write {
-        fs::set_permissions(dst, fs::Permissions::from_mode(m.mode() & 0o7777))?;
     }
     Ok(())
 }
@@ -285,18 +278,13 @@ pub fn snapshot(src: &Path, dst: &Path, readonly: bool) -> Result<()> {
             });
             if native {
                 // Clone the tree at once when no entry needs file-by-file handling.
+                // The clone keeps flags, attributes, and creation times. A sealed source
+                // stays sealed in an immutable snapshot; only its root must change.
                 crate::sys::apfs_clone(src, &temp)?;
-                seal(&temp, false, false)?;
-                for (p, entry) in &before {
-                    let dst = temp.join(p);
-                    let writable = !entry.meta.ftype.eq(&crate::fsutil::FType::Symlink) && entry.meta.mode & 0o200 == 0;
-                    if writable {
-                        fs::set_permissions(&dst, fs::Permissions::from_mode(entry.meta.mode | 0o200))?;
-                    }
-                    crate::sys::apfs_attribute(&dst, c"com.layr.origin", Some(&file_identity(&src.join(p))?))?;
-                    if writable {
-                        fs::set_permissions(&dst, fs::Permissions::from_mode(entry.meta.mode))?;
-                    }
+                if readonly {
+                    crate::sys::apfs_immutable(&temp, false)?;
+                } else {
+                    seal(&temp, false, false)?;
                 }
             } else {
                 copy_tree(src, &temp, true, &mut BTreeMap::new())?;
@@ -536,6 +524,10 @@ mod tests {
         fs::set_permissions(&src, fs::Permissions::from_mode(0o555))?;
         let dst = s.0.join("state");
         snapshot(&src, &dst, true).context("snapshot original tree")?;
+        for p in ["a", "dir", "link", "readonly-dir", "readonly-dir/file"] {
+            assert_eq!(file_identity(&src.join(p))?, file_identity(&dst.join(p))?, "identity of {p}");
+        }
+        assert_ne!(file_identity(&src.join("a"))?, file_identity(&src.join("A"))?);
         assert_eq!(fs::symlink_metadata(&dst)?.mode() & 0o777, 0o555);
         assert_eq!(fs::read(dst.join("a"))?, b"lower");
         assert_eq!(fs::read(dst.join("A"))?, b"upper");

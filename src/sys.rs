@@ -643,6 +643,36 @@ pub fn apfs_mtime(path: &std::path::Path, sec: i64, nsec: i64) -> io::Result<()>
     Ok(())
 }
 
+/// Set the creation time of the entry itself. APFS clones keep it; new entries need it set.
+#[cfg(target_os = "macos")]
+pub fn apfs_set_birthtime(path: &std::path::Path, sec: i64, nsec: i64) -> io::Result<()> {
+    let path = cpath(path)?;
+    let mut attrs = libc::attrlist {
+        bitmapcount: libc::ATTR_BIT_MAP_COUNT,
+        reserved: 0,
+        commonattr: libc::ATTR_CMN_CRTIME,
+        volattr: 0,
+        dirattr: 0,
+        fileattr: 0,
+        forkattr: 0,
+    };
+    let mut time = libc::timespec { tv_sec: sec, tv_nsec: nsec };
+    // SAFETY: attrs and the timespec stay live for the call; the path is NUL-terminated.
+    if unsafe {
+        libc::setattrlist(
+            path.as_ptr(),
+            (&mut attrs as *mut libc::attrlist).cast(),
+            (&mut time as *mut libc::timespec).cast(),
+            std::mem::size_of::<libc::timespec>(),
+            libc::FSOPT_NOFOLLOW,
+        )
+    } != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "macos")]
 pub fn peer_credentials(sock: &std::os::unix::net::UnixStream) -> io::Result<(u32, u32)> {
     use std::os::fd::AsRawFd;
