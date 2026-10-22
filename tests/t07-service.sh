@@ -110,7 +110,10 @@ done
 ok "the daemon completes its first comparison cycle" test "$first" -ge "$expected"
 sleep 1.2
 eq "idle lines are not compared again before the interval" "$first" "$(grep -c 'send --no-data' $T/daemon2.log)"
-sleep 2.5
+for i in $(seq 1 100); do
+    [ "$(grep -c 'send --no-data' "$T/daemon2.log")" -gt "$first" ] && break
+    sleep 0.1
+done
 ok "they are compared again after the interval" test "$(grep -c 'send --no-data' $T/daemon2.log)" -gt "$first"
 fi
 finish
