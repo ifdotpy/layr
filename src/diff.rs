@@ -4,7 +4,6 @@ use crate::changes::Change;
 use crate::fsutil::{self, FType, Meta};
 use anyhow::Result;
 use similar::{capture_diff_slices, get_diff_ratio, group_diff_ops, Algorithm, DiffOp};
-use std::path::Path;
 
 /// One side of a file in a diff.
 #[derive(Clone)]
@@ -99,7 +98,7 @@ impl FileDiff {
     }
 }
 
-pub fn side_of(root: &Path, path: &str, meta: &Meta) -> Result<Side> {
+pub fn side_of(root: &(impl fsutil::Src + ?Sized), path: &str, meta: &Meta) -> Result<Side> {
     let big = (meta.ftype == FType::File && meta.size > fsutil::MAX_TEXT).then_some(meta.size);
     let data = match meta.ftype {
         _ if big.is_some() => Vec::new(),
@@ -110,7 +109,7 @@ pub fn side_of(root: &Path, path: &str, meta: &Meta) -> Result<Side> {
 }
 
 /// Build file diffs for a change list between two roots.
-pub fn file_diffs(old_root: &Path, new_root: &Path, changes: &[Change]) -> Result<Vec<FileDiff>> {
+pub fn file_diffs(old_root: &(impl fsutil::Src + ?Sized), new_root: &(impl fsutil::Src + ?Sized), changes: &[Change]) -> Result<Vec<FileDiff>> {
     let mut v = Vec::new();
     for c in changes {
         let old = match &c.old {

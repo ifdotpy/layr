@@ -321,7 +321,7 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
         }
         // Required states must still exist (retention can delete old automatic states).
         for s in [ch.before.as_ref().map(|b| b.head.clone()), ch.working_before.clone()].into_iter().flatten() {
-            if !repo.p.state_path(&s).exists() {
+            if !repo.p.has_state(&s) {
                 return Err(exit(
                     1,
                     format!(
@@ -344,7 +344,7 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
                 l2.name = b.name.clone();
                 match (&ch.working_before, &ch.working_after) {
                     // Revert only what the operation changed; later work stays.
-                    (Some(before), Some(after)) if repo.p.state_path(after).exists() => {
+                    (Some(before), Some(after)) if repo.p.has_state(after) => {
                         let cur = repo.scan(&l2)?;
                         let later: BTreeSet<String> = changes::file_changes(&repo.state_root(after)?, &cur.path)?
                             .into_iter()
@@ -671,7 +671,7 @@ pub fn retention_plan(repo: &Repo) -> Result<(BTreeSet<String>, Vec<String>)> {
     // History of every root.
     let mut stack = roots;
     while let Some(x) = stack.pop() {
-        if !keep.insert(x.clone()) && repo.p.state_path(&x).exists() {
+        if !keep.insert(x.clone()) && repo.p.has_state(&x) {
             // Already kept: its parents were or will be visited from the first insert.
         }
         if let Some(s) = db.state(&x)? {
@@ -724,11 +724,22 @@ pub fn run_gc(ctx: &Ctx, repo: &Repo, dry: bool) -> Result<Vec<String>> {
                 let _ = btrfs::delete_tree(&repo.p.cache_path(id, snap));
             }
         }
-        if btrfs::delete_tree(&repo.p.state_path(id)).is_ok() {
+        if repo.p.delete_state(id).is_ok() {
             deleted.push(id.clone());
         }
     }
     let caches = prune_caches(repo)?;
+    #[cfg(target_os = "macos")]
+    {
+        let heads: BTreeSet<String> = repo.lines()?.into_iter().map(|l| l.head).collect();
+        let done = crate::thin::upkeep(&repo.p, &heads)?;
+        if done.views + done.keyframes + done.deleted > 0 {
+            eprintln!(
+                "thin states: {} view(s) removed, {} complete tree(s) made, {} kept base(s) deleted",
+                done.views, done.keyframes, done.deleted
+            );
+        }
+    }
     repo.prune_all_bases()?;
     if crate::gitbridge::has_store(repo) {
         crate::gitbridge::prune_indexes(repo)?;
@@ -845,7 +856,7 @@ pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let ids_v: Vec<String> = st.query_map([], |r| r.get(0))?.collect::<Result<Vec<_>, _>>()?;
     drop(st);
     for id in ids_v {
-        if !repo.p.state_path(&id).exists() {
+        if !repo.p.has_state(&id) {
             problems += 1;
             outln!(ctx, "state {} is marked present but missing", ids::short(&id));
             if a.has("--repair") {
@@ -902,7 +913,7 @@ fn fsck_overlays(ctx: &Ctx, repo: &Repo, repair: bool) -> Result<usize> {
             }
         }
         for l in o.lines()? {
-            if !o.p.state_path(&l.head).exists() {
+            if !o.p.has_state(&l.head) {
                 problems += 1;
                 outln!(ctx, "overlay {name}: the head of line {} is missing", l.name);
             }
@@ -915,7 +926,7 @@ fn fsck_overlays(ctx: &Ctx, repo: &Repo, repair: bool) -> Result<usize> {
         }
         let mut ok = true;
         for x in &layers {
-            if repo.overlay_repo(&x.overlay).map(|o| o.p.state_path(&x.state).exists()).unwrap_or(false) {
+            if repo.overlay_repo(&x.overlay).map(|o| o.p.has_state(&x.state)).unwrap_or(false) {
                 continue;
             }
             ok = false;
@@ -1079,7 +1090,7 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
                     parents.push(st.clone());
                     // The folder content on top (uncommitted changes, if any).
                     btrfs::delete_tree(&work)?;
-                    btrfs::snapshot(&repo.state_root(&st)?, &work, false)?;
+                    repo.snapshot_state(&st, &work, false)?;
                     let tmp = repo.p.work_dir().join(ids::new_id());
                     btrfs::create_subvolume(&tmp)?;
                     let _t2 = crate::repo::Temp { path: tmp.clone() };

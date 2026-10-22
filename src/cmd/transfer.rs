@@ -201,7 +201,7 @@ pub fn export(ctx: &Ctx, args: &[String]) -> Result<i32> {
         .as_ref()
         .filter(|m| m["project"].as_str() == Some(h.repo.p.id.as_str()))
         .and_then(|m| m["state"].as_str().map(|s| s.to_string()))
-        .filter(|s| h.repo.p.state_path(s).exists());
+        .filter(|s| h.repo.p.has_state(s));
     let empty = as_caller_fs(ctx, || Ok(std::fs::read_dir(&dst)?.next().is_none()))?;
     if prev.is_none() && !empty && !a.has("-f") {
         return Err(exit(
@@ -209,7 +209,7 @@ pub fn export(ctx: &Ctx, args: &[String]) -> Result<i32> {
             format!("error: {} is not empty and was not exported by layr; use --force to write into it", dst.display()),
         ));
     }
-    let from = prev.as_ref().map(|p| h.repo.p.state_path(p));
+    let from = prev.as_ref().map(|p| h.repo.state_root(p)).transpose()?;
     // Ignored files (build output, local secrets) stay out unless --all.
     let (n, bad) = sync_folder(ctx, from.as_deref(), &to, &dst, &[], !a.has("--all"))?;
     let m = serde_json::json!({"project": h.repo.p.id, "project_name": h.repo.p.name, "state": state, "time": ids::now_ms()});
@@ -487,7 +487,7 @@ pub fn run_backup(ctx: &Ctx, repo: &Repo, root: &Path, full: bool, writer: (u32,
     let mut count = 0;
     let mut last_sent: Option<String> = m.items.iter().rev().find_map(|i| i.state.clone());
     for (_, id) in order {
-        if sent.contains(&id) || !repo.p.state_path(&id).exists() {
+        if sent.contains(&id) || !repo.p.has_state(&id) {
             continue;
         }
         let s = repo.state(&id)?;
@@ -495,7 +495,7 @@ pub fn run_backup(ctx: &Ctx, repo: &Repo, root: &Path, full: bool, writer: (u32,
         let seq = next_seq(&m);
         let file = unique_name(&dir, &m, seq, &format!("{}.stream.zst", ids::short(&id)));
         let pp = parent.as_ref().map(|p| repo.p.state_path(p));
-        let (sha, bytes) = compress_to(btrfs::send_command(pp.as_deref(), &repo.p.state_path(&id))?, &dir.join(&file), writer)?;
+        let (sha, bytes) = compress_to(btrfs::send_command(pp.as_deref(), &repo.state_root(&id)?)?, &dir.join(&file), writer)?;
         m.items.push(Item {
             seq,
             kind: "state".into(),
@@ -795,7 +795,7 @@ fn restore_item(p: &Project, d: &File, i: &Item) -> Result<bool> {
             let e = crate::recv::Expect { name: &id, uuid: &rec.subvol, parent: &parent, clones: &[] };
             let ((), (sha, _)) = decompress(f, |r| crate::recv::receive(r, &p.states_dir(), &e))?;
             if sha != i.sha256 {
-                let _ = btrfs::delete_tree(&p.state_path(&id));
+                let _ = p.delete_state(&id);
                 bail!("{}: checksum mismatch", i.file);
             }
             Ok(true)
@@ -929,7 +929,7 @@ fn restore(ctx: &Ctx, root: &Path, as_name: Option<&str>, chain: Option<u32>, qu
     let mut adopted = Vec::new();
     for l in repo.lines()? {
         let mut args = vec![l.name.clone()];
-        let has_auto = repo.p.db.line_states(&l.id, StateKind::Auto)?.iter().any(|s| repo.p.state_path(&s.id).exists());
+        let has_auto = repo.p.db.line_states(&l.id, StateKind::Auto)?.iter().any(|s| repo.p.has_state(&s.id));
         if !has_auto {
             args.push("--head".into());
         }

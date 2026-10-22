@@ -1,5 +1,6 @@
 //! APFS local-user backend. Clones data extents, scans directories, and rejects source changes.
 //! Snapshots use verified directory clones; transport uses the compatible btrfs stream format.
+use crate::fsutil::Src;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -17,6 +18,9 @@ pub struct SubvolInfo {
     pub received_uuid: Option<String>,
     pub parent_uuid: Option<String>,
     pub readonly: bool,
+    /// The base state of a thin layer (`deltas/<id>`). A complete tree has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
 }
 pub fn is_supported(path: &Path) -> bool {
     crate::sys::apfs_supported(path)
@@ -28,7 +32,10 @@ pub fn subvol_info(path: &Path) -> Result<SubvolInfo> {
     Ok(serde_json::from_slice(&crate::sys::apfs_marker(path, None)?)?)
 }
 fn mark(path: &Path, parent: Option<String>, readonly: bool) -> Result<()> {
-    let info = SubvolInfo { uuid: crate::ids::new_id(), received_uuid: None, parent_uuid: parent, readonly };
+    write_info(path, &SubvolInfo { uuid: crate::ids::new_id(), received_uuid: None, parent_uuid: parent, readonly, base: None })
+}
+/// Write the marker of a tree root. The root may be read-only for its owner.
+pub fn write_info(path: &Path, info: &SubvolInfo) -> Result<()> {
     let mode = fs::symlink_metadata(path)?.mode() & 0o7777;
     if mode & 0o200 == 0 {
         fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o200))?;
@@ -78,11 +85,12 @@ pub fn create_subvolume(path: &Path) -> Result<()> {
 }
 // Compare inode, device, permissions, size, mtime and ctime before and after cloning.
 // Do not use atime: reading the source can change it.
-type Fingerprint = (u64, u64, u32, u64, i64, i64, i64, i64);
-struct ScanEntry {
-    fingerprint: Fingerprint,
-    meta: crate::fsutil::Meta,
-    data: Option<crate::sys::ApfsDataIdentity>,
+pub(crate) type Fingerprint = (u64, u64, u32, u64, i64, i64, i64, i64);
+#[derive(Clone)]
+pub(crate) struct ScanEntry {
+    pub(crate) fingerprint: Fingerprint,
+    pub(crate) meta: crate::fsutil::Meta,
+    pub(crate) data: Option<crate::sys::ApfsDataIdentity>,
 }
 impl PartialEq for ScanEntry {
     fn eq(&self, other: &Self) -> bool {
@@ -93,7 +101,7 @@ fn scan(root: &Path) -> Result<BTreeMap<String, ScanEntry>> {
     scan_with_data(root, false)
 }
 
-fn scan_with_data(root: &Path, data: bool) -> Result<BTreeMap<String, ScanEntry>> {
+pub(crate) fn scan_with_data(root: &Path, data: bool) -> Result<BTreeMap<String, ScanEntry>> {
     fn visit(root: &Path, rel: &str, data: bool, out: &mut BTreeMap<String, ScanEntry>) -> Result<()> {
         let path = root.join(rel);
         let m = fs::symlink_metadata(&path)?;
@@ -194,7 +202,7 @@ pub fn file_identity(path: &Path) -> Result<Vec<u8>> {
     let m = fs::symlink_metadata(path)?;
     Ok(format!("{}:{}", m.st_birthtime(), m.st_birthtime_nsec()).into_bytes())
 }
-fn keep_birthtime(src: &fs::Metadata, dst: &Path) -> Result<()> {
+pub(crate) fn keep_birthtime(src: &fs::Metadata, dst: &Path) -> Result<()> {
     use std::os::macos::fs::MetadataExt as MacMetadataExt;
     crate::sys::apfs_set_birthtime(dst, src.st_birthtime(), src.st_birthtime_nsec())
         .with_context(|| format!("set creation time {}", dst.display()))
@@ -236,7 +244,7 @@ fn copy_tree(src: &Path, dst: &Path, root: bool, links: &mut BTreeMap<(u64, u64)
     }
     Ok(())
 }
-fn seal(path: &Path, readonly: bool, for_delete: bool) -> Result<()> {
+pub(crate) fn seal(path: &Path, readonly: bool, for_delete: bool) -> Result<()> {
     let m = fs::symlink_metadata(path)?;
     if !readonly {
         crate::sys::apfs_immutable(path, false)?;
@@ -375,9 +383,16 @@ pub fn clone_identity(path: &Path) -> Result<(String, Option<u64>)> {
     // UUID/transaction lookup. Its data therefore do not depend on a btrfs transaction.
     Ok((info.received_uuid.unwrap_or(info.uuid), None))
 }
-pub fn candidates(parent: &Path, child: &Path) -> Result<Vec<crate::changes::Change>> {
+/// All entries of a folder or a layered tree, with data identities.
+pub(crate) fn scan_src(s: &(impl Src + ?Sized)) -> Result<BTreeMap<String, ScanEntry>> {
+    match s.layered() {
+        Some(l) if !l.is_complete() => l.scan(true),
+        _ => scan_with_data(s.folder().context("missing tree folder")?, true),
+    }
+}
+pub fn candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<crate::changes::Change>> {
     let _t = crate::trace::span("APFS candidates");
-    let (a, b) = (scan_with_data(parent, true)?, scan_with_data(child, true)?);
+    let (a, b) = (scan_src(parent)?, scan_src(child)?);
     let names: std::collections::BTreeSet<_> = a.keys().chain(b.keys()).filter(|s| !s.is_empty()).collect();
     let mut changes: BTreeMap<_, _> = names
         .into_iter()
@@ -398,10 +413,10 @@ pub fn candidates(parent: &Path, child: &Path) -> Result<Vec<crate::changes::Cha
     let mut added: BTreeMap<Vec<u8>, Vec<String>> = BTreeMap::new();
     for (p, c) in &changes {
         if c.new.is_none() {
-            removed.entry(file_identity(&parent.join(p))?).or_default().push(p.clone());
+            removed.entry(file_identity(&parent.at(p)?)?).or_default().push(p.clone());
         }
         if c.old.is_none() {
-            added.entry(file_identity(&child.join(p))?).or_default().push(p.clone());
+            added.entry(file_identity(&child.at(p)?)?).or_default().push(p.clone());
         }
     }
     for (id, srcs) in removed {
@@ -437,9 +452,14 @@ pub fn candidates(parent: &Path, child: &Path) -> Result<Vec<crate::changes::Cha
 }
 
 // Compare fixed blocks when APFS cannot report changed extents. Adjacent blocks coalesce.
-fn changed_ranges(parent: &Path, child: &Path, rel: &str) -> Result<Vec<(u64, u64)>> {
+fn changed_ranges(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), rel: &str) -> Result<Vec<(u64, u64)>> {
     use std::io::Read;
-    let (mut a, mut b) = (crate::tree::Tree::open(parent)?.open_read(rel)?, crate::tree::Tree::open(child)?.open_read(rel)?);
+    let open = |s: &(dyn Fn(&str) -> Result<PathBuf>)| -> Result<File> {
+        use std::os::unix::fs::OpenOptionsExt;
+        let p = s(rel)?;
+        Ok(fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(&p).with_context(|| format!("open {}", p.display()))?)
+    };
+    let (mut a, mut b) = (open(&|r| parent.at(r))?, open(&|r| child.at(r))?);
     let (alen, blen) = (a.metadata()?.len(), b.metadata()?.len());
     let mut ranges: Vec<(u64, u64)> = Vec::new();
     let (mut ab, mut bb) = ([0u8; 4096], [0u8; 4096]);

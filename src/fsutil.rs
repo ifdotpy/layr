@@ -97,14 +97,55 @@ pub fn safe_join(root: &Path, rel: &str) -> Result<PathBuf> {
     Ok(cur)
 }
 
+/// A tree to read: a folder, or on APFS a thin state over its base (`thin::Layered`).
+pub trait Src {
+    /// The path to read `rel` from; it may not exist. Fails for a path through a link.
+    fn at(&self, rel: &str) -> Result<PathBuf>;
+    /// The folder, when the tree is one complete folder.
+    fn folder(&self) -> Option<&Path>;
+    /// The layers, when the tree is not one folder.
+    #[cfg(target_os = "macos")]
+    fn layered(&self) -> Option<&crate::thin::Layered> {
+        None
+    }
+}
+impl Src for Path {
+    fn at(&self, rel: &str) -> Result<PathBuf> {
+        safe_join(self, rel)
+    }
+    fn folder(&self) -> Option<&Path> {
+        Some(self)
+    }
+}
+impl Src for PathBuf {
+    fn at(&self, rel: &str) -> Result<PathBuf> {
+        safe_join(self, rel)
+    }
+    fn folder(&self) -> Option<&Path> {
+        Some(self)
+    }
+}
+#[cfg(target_os = "macos")]
+impl Src for crate::thin::Layered {
+    fn at(&self, rel: &str) -> Result<PathBuf> {
+        self.path(rel)
+    }
+    fn folder(&self) -> Option<&Path> {
+        self.is_complete().then(|| self.bottom())
+    }
+    fn layered(&self) -> Option<&crate::thin::Layered> {
+        Some(self)
+    }
+}
+
 /// Metadata of `rel` below `root` without following a final link. `None` if absent.
-pub fn lmeta(root: &Path, rel: &str) -> Option<Meta> {
-    let p = safe_join(root, rel).ok()?;
+pub fn lmeta(root: &(impl Src + ?Sized), rel: &str) -> Option<Meta> {
+    let p = root.at(rel).ok()?;
     fs::symlink_metadata(p).ok().map(|m| meta_of(&m))
 }
 
-pub fn read_link(root: &Path, rel: &str) -> Result<String> {
-    let p = safe_join(root, rel)?;
+pub fn read_link(root: &(impl Src + ?Sized), rel: &str) -> Result<String> {
+    let p = root.at(rel)?;
     Ok(fs::read_link(&p).with_context(|| format!("readlink {}", p.display()))?.to_string_lossy().into_owned())
 }
 
@@ -125,8 +166,8 @@ fn open_regular(p: &Path) -> Result<File> {
 }
 
 /// Read a regular file (not following links) of at most `MAX_TEXT` bytes.
-pub fn read_file(root: &Path, rel: &str) -> Result<Vec<u8>> {
-    let p = safe_join(root, rel)?;
+pub fn read_file(root: &(impl Src + ?Sized), rel: &str) -> Result<Vec<u8>> {
+    let p = root.at(rel)?;
     let f = open_regular(&p)?;
     let len = f.metadata()?.len();
     let mut v = Vec::with_capacity(len.min(MAX_TEXT) as usize);
@@ -139,8 +180,8 @@ pub fn read_file(root: &Path, rel: &str) -> Result<Vec<u8>> {
 
 /// Binary by the git rule (a NUL byte in the first 8000 bytes), or larger than `MAX_TEXT`.
 /// Reads at most 8000 bytes. Not a regular file: false.
-pub fn is_binary_file(root: &Path, rel: &str) -> bool {
-    let f = match safe_join(root, rel).and_then(|p| open_regular(&p)) {
+pub fn is_binary_file(root: &(impl Src + ?Sized), rel: &str) -> bool {
+    let f = match root.at(rel).and_then(|p| open_regular(&p)) {
         Ok(f) => f,
         Err(_) => return false,
     };
@@ -160,14 +201,14 @@ pub fn copy_regular(src: &Path, dst: &Path) -> Result<()> {
 }
 
 /// Copy a regular file in pieces to `out`.
-pub fn copy_file_to(root: &Path, rel: &str, out: &mut dyn std::io::Write) -> Result<()> {
-    let mut f = open_regular(&safe_join(root, rel)?)?;
+pub fn copy_file_to(root: &(impl Src + ?Sized), rel: &str, out: &mut dyn std::io::Write) -> Result<()> {
+    let mut f = open_regular(&root.at(rel)?)?;
     std::io::copy(&mut f, out)?;
     Ok(())
 }
 
 /// The bytes of an entry for diffs: file content, or the link target for a symbolic link.
-pub fn entry_bytes(root: &Path, rel: &str) -> Result<Vec<u8>> {
+pub fn entry_bytes(root: &(impl Src + ?Sized), rel: &str) -> Result<Vec<u8>> {
     match lmeta(root, rel) {
         Some(m) if m.ftype == FType::Symlink => Ok(read_link(root, rel)?.into_bytes()),
         Some(m) if m.ftype == FType::File => read_file(root, rel),
@@ -215,7 +256,7 @@ fn read_full(f: &mut File, buf: &mut [u8]) -> Result<usize> {
 
 /// Compare two entries. With `ranges`, only those byte ranges of two regular files can differ
 /// (the rest share extents), so only they are read.
-pub fn same_entry(ra: &Path, pa: &str, rb: &Path, pb: &str, ranges: Option<&[(u64, u64)]>) -> Result<bool> {
+pub fn same_entry(ra: &(impl Src + ?Sized), pa: &str, rb: &(impl Src + ?Sized), pb: &str, ranges: Option<&[(u64, u64)]>) -> Result<bool> {
     let (ma, mb) = match (lmeta(ra, pa), lmeta(rb, pb)) {
         (Some(a), Some(b)) => (a, b),
         (None, None) => return Ok(true),
@@ -231,8 +272,8 @@ pub fn same_entry(ra: &Path, pa: &str, rb: &Path, pb: &str, ranges: Option<&[(u6
             if ma.size != mb.size {
                 return Ok(false);
             }
-            let mut a = open_ro(&safe_join(ra, pa)?)?;
-            let mut b = open_ro(&safe_join(rb, pb)?)?;
+            let mut a = open_ro(&ra.at(pa)?)?;
+            let mut b = open_ro(&rb.at(pb)?)?;
             match ranges {
                 Some(rs) => {
                     for (off, len) in rs {
@@ -294,24 +335,24 @@ fn fchown(f: &File, own: Option<(u32, u32)>) -> Result<()> {
 /// Copy one entry from `src_root/src_rel` (a snapshot or a private folder) to
 /// `dst_root/dst_rel`: a reflink copy for a file (in place when a file is there, so the inode
 /// stays), the same target for a link, a folder for a folder.
-pub fn copy_entry(src_root: &Path, src_rel: &str, dst_root: &Path, dst_rel: &str, own: Option<(u32, u32)>) -> Result<()> {
+pub fn copy_entry(src_root: &(impl Src + ?Sized), src_rel: &str, dst_root: &Path, dst_rel: &str, own: Option<(u32, u32)>) -> Result<()> {
     copy_entry_impl(src_root, src_rel, dst_root, dst_rel, own, false)
 }
 
 /// Copy into a private index. APFS can replace a single-link inode with a new clone.
-pub fn copy_index_entry(src_root: &Path, src_rel: &str, dst_root: &Path, dst_rel: &str, own: Option<(u32, u32)>) -> Result<()> {
+pub fn copy_index_entry(src_root: &(impl Src + ?Sized), src_rel: &str, dst_root: &Path, dst_rel: &str, own: Option<(u32, u32)>) -> Result<()> {
     copy_entry_impl(src_root, src_rel, dst_root, dst_rel, own, true)
 }
 
 fn copy_entry_impl(
-    src_root: &Path,
+    src_root: &(impl Src + ?Sized),
     src_rel: &str,
     dst_root: &Path,
     dst_rel: &str,
     own: Option<(u32, u32)>,
     _replace_index: bool,
 ) -> Result<()> {
-    let src = safe_join(src_root, src_rel)?;
+    let src = src_root.at(src_rel)?;
     let m = fs::symlink_metadata(&src).with_context(|| format!("stat {}", src.display()))?;
     let t = crate::tree::Tree::open(dst_root)?;
     t.mkdirs_for(dst_rel, own)?;
@@ -399,7 +440,31 @@ pub fn set_mode(root: &Path, rel: &str, mode: u32) -> Result<()> {
 
 /// Walk all entries below `root/rel` (not following links, not entering nested subvolumes).
 /// Paths are relative to `root`. Folders are reported before their content.
-pub fn walk(root: &Path, rel: &str, f: &mut dyn FnMut(&str, &Meta) -> Result<bool>) -> Result<()> {
+pub fn walk(root: &(impl Src + ?Sized), rel: &str, f: &mut dyn FnMut(&str, &Meta) -> Result<bool>) -> Result<()> {
+    match root.folder() {
+        Some(dir) => walk_folder(dir, rel, f),
+        #[cfg(target_os = "macos")]
+        None => {
+            let layered = root.layered().expect("a tree that is not a folder has layers");
+            // Entries come sorted by path, so the content of a folder follows it.
+            let mut skip: Option<String> = None;
+            for (path, m) in layered.entries(rel)? {
+                if skip.as_ref().is_some_and(|s| path.starts_with(s.as_str())) {
+                    continue;
+                }
+                skip = None;
+                if !f(&path, &m)? && m.is_dir() {
+                    skip = Some(format!("{path}/"));
+                }
+            }
+            Ok(())
+        }
+        #[cfg(not(target_os = "macos"))]
+        None => unreachable!("only APFS has layered trees"),
+    }
+}
+
+fn walk_folder(root: &Path, rel: &str, f: &mut dyn FnMut(&str, &Meta) -> Result<bool>) -> Result<()> {
     let start = safe_join(root, rel)?;
     let dev = match fs::symlink_metadata(&start) {
         Ok(m) => m.dev(),
@@ -472,9 +537,9 @@ pub fn git_blob_id(data: &[u8]) -> String {
 }
 
 /// The git blob id of a regular file, read in pieces (any size).
-pub fn git_blob_id_file(root: &Path, rel: &str) -> Result<String> {
+pub fn git_blob_id_file(root: &(impl Src + ?Sized), rel: &str) -> Result<String> {
     use sha1::{Digest, Sha1};
-    let mut f = open_regular(&safe_join(root, rel)?)?;
+    let mut f = open_regular(&root.at(rel)?)?;
     let len = f.metadata()?.len();
     let mut h = Sha1::new();
     h.update(format!("blob {len}\0").as_bytes());

@@ -339,15 +339,17 @@ fn move_cmd(ctx: &Ctx, args: &[String]) -> Result<i32> {
     // working folder, ignored files included), and every reader of the project reads them.
     let mut holding = Vec::new();
     for st in repo.p.db.line_states(&line.id, StateKind::Auto)? {
-        let root = repo.p.state_path(&st.id);
-        if root.exists() && paths.iter().any(|p| crate::fsutil::lmeta(&root, p).is_some()) {
+        let Ok(root) = repo.state_src(&st.id) else {
+            continue;
+        };
+        if paths.iter().any(|p| crate::fsutil::lmeta(&root, p).is_some()) {
             holding.push(st.id);
         }
     }
     if a.has("--purge") && !holding.is_empty() {
         let mut deleted = Vec::new();
         for id in &holding {
-            if btrfs::delete_tree(&repo.p.state_path(id)).is_ok() {
+            if repo.p.delete_state(id).is_ok() {
                 deleted.push(id.clone());
             }
         }

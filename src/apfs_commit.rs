@@ -19,6 +19,9 @@ struct Journal {
     device: u64,
     inode: u64,
     mode: u32,
+    /// The index is a thin layer: the state goes to `deltas/<id>`.
+    #[serde(default)]
+    thin: bool,
 }
 
 fn journal_path(p: &Project) -> PathBuf {
@@ -60,6 +63,14 @@ pub fn preserves(p: &Project, state: &str) -> Result<bool> {
     Ok(read(p)?.is_some_and(|j| j.state == state))
 }
 
+fn target(p: &Project, j: &Journal) -> PathBuf {
+    if j.thin {
+        p.delta_path(&j.state)
+    } else {
+        p.state_path(&j.state)
+    }
+}
+
 fn verify_tree(path: &Path, j: &Journal) -> Result<()> {
     let m = fs::symlink_metadata(path)?;
     if !m.is_dir() || m.dev() != j.device || m.ino() != j.inode || storage::subvol_info(path)?.uuid != j.subvol {
@@ -99,7 +110,7 @@ pub fn recover(p: &Project) -> Result<()> {
         return Ok(());
     };
     let stage = p.stage_path(&j.line);
-    let state = p.state_path(&j.state);
+    let state = target(p, &j);
     if let Some(rec) = p.db.state(&j.state)? {
         if rec.subvol != j.subvol || rec.line.as_deref() != Some(&j.line) || exists(&stage)? {
             bail!("APFS index commit record does not match its journal");
@@ -158,10 +169,12 @@ impl<'p, 's> IndexCommit<'p, 's> {
             device: m.dev(),
             inode: m.ino(),
             mode: m.mode() & 0o7777,
+            thin: info.base.is_some(),
         };
         fsutil::atomic_write(&journal_path(project), &serde_json::to_vec(&j)?, 0o600)?;
         let prepared = Self { project, id: j.state.clone(), active: true };
-        let state = project.state_path(&j.state);
+        let state = target(project, &j);
+        crate::thin::ensure_parent(&state)?;
         move_tree(&stage, &state, j.mode)?;
         storage::set_readonly(&state)?;
         File::open(&state)?.sync_all()?;
@@ -308,6 +321,7 @@ mod tests {
                         device: m.dev(),
                         inode,
                         mode: m.mode() & 0o7777,
+                        thin: false,
                     };
                     fsutil::atomic_write(&journal_path(&p), &serde_json::to_vec(&j)?, 0o600)?;
                     if phase > 0 {

@@ -487,7 +487,7 @@ impl<'a> Repo<'a> {
     pub fn assemble(&self, line: &Line, head: &str, layers: &[Layer]) -> Result<Temp> {
         let _t = crate::trace::span("assemble");
         let t = Temp { path: self.p.work_dir().join(ids::new_id()) };
-        btrfs::snapshot(&self.state_root(head)?, &t.path, false)?;
+        self.snapshot_state(head, &t.path, false)?;
         self.put_layers(&t.path, layers, self.own(line))?;
         btrfs::set_readonly(&t.path)?;
         Ok(t)
@@ -636,7 +636,7 @@ pub fn next_state(
     let _t = crate::trace::span("layer state");
     let id = ids::new_id();
     let dst = repo.p.state_path(&id);
-    btrfs::snapshot(&repo.state_root(prev)?, &dst, false)?;
+    repo.snapshot_state(prev, &dst, false)?;
     let made = ops.apply(&dst, src, own).and_then(|_| btrfs::set_readonly(&dst)).and_then(|_| btrfs::subvol_info(&dst));
     let info = match made {
         Ok(i) => i,

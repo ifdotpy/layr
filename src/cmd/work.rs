@@ -9,7 +9,7 @@ use crate::diff;
 use crate::fsutil;
 use crate::ids;
 use crate::model::{Line, Record, StateKind};
-use crate::repo::{conflict_open, skip_path, Repo, Status};
+use crate::repo::{conflict_open, skip_path, snap, Repo, Snap, Status, Temp};
 use crate::revs;
 use anyhow::Result;
 use std::collections::{BTreeMap, BTreeSet};
@@ -247,6 +247,11 @@ pub fn begin(ctx: &Ctx, repo: &Repo, line: &Line, op: crate::repo::LineOp) -> Re
 /// the inode and btrfs reports the move.
 pub fn stage_paths(repo: &Repo, line: &Line, scan: &Path, paths: &BTreeSet<String>) -> Result<()> {
     let stage = repo.ensure_stage(line)?;
+    #[cfg(target_os = "macos")]
+    if crate::thin::is_thin(&stage) {
+        let (index, _) = repo.index_source(line)?;
+        return crate::thin::stage_entries(&index, scan, paths, repo.own(line));
+    }
     stage_into(repo, line, &stage, scan, paths)
 }
 
@@ -306,7 +311,7 @@ fn select_add(
     specs: &[String],
     st: &Status,
     scan: &Path,
-    index: &Path,
+    index: &(impl fsutil::Src + ?Sized),
 ) -> Result<(BTreeSet<String>, Vec<String>)> {
     let mut paths: BTreeSet<String> = BTreeSet::new();
     for c in &st.unstaged {
@@ -380,8 +385,12 @@ pub fn add(ctx: &Ctx, args: &[String]) -> Result<i32> {
     #[cfg(target_os = "macos")]
     let prepared = {
         let work = h.repo.working(&line);
-        let index = h.repo.current_stage(&line)?.unwrap_or(h.repo.head_tree(&line)?);
-        crate::storage::stable_read(&[&work, &index], || {
+        let (index, stage) = h.repo.index_source(&line)?;
+        let mut roots = vec![work.as_path()];
+        if let Some(s) = &stage {
+            roots.push(s.as_path());
+        }
+        crate::storage::stable_read(&roots, || {
             let st = h.repo.status_for_add(&line, &work, &index)?;
             let (paths, ignored) = select_add(&h, &a, &specs, &st, &work, &index)?;
             let scan = crate::repo::Temp { path: h.repo.p.scan_dir().join(ids::new_id()) };
@@ -436,7 +445,7 @@ pub fn rm(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let (_lock, _w) = begin_change(ctx, &h.repo, &line)?;
     let line = h.repo.line(&line.id)?;
-    let stage = h.repo.ensure_stage(&line)?;
+    let stage = h.repo.ensure_full_stage(&line)?;
     let w = h.repo.working(&line);
     let mut removed = Vec::new();
     for s in &specs {
@@ -545,7 +554,7 @@ pub fn mv(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 })?;
             }
         }
-        let stage = h.repo.ensure_stage(&line)?;
+        let stage = h.repo.ensure_full_stage(&line)?;
         if fsutil::lmeta(&stage, s).map(|m| m.is_dir()).unwrap_or(false) {
             fsutil::remove_entry(&stage, s)?;
         }
@@ -631,7 +640,7 @@ pub fn apply(ctx: &Ctx, args: &[String]) -> Result<i32> {
     // the working folder belongs to the owner, so the patch is applied there as the owner.
     let mut targets: Vec<(std::path::PathBuf, u32)> = Vec::new();
     if to_stage {
-        targets.push((h.repo.ensure_stage(&line)?, rustix::process::geteuid().as_raw()));
+        targets.push((h.repo.ensure_full_stage(&line)?, rustix::process::geteuid().as_raw()));
     }
     if to_work {
         targets.push((h.repo.working(&line), line.owner));
@@ -769,27 +778,33 @@ pub fn commit(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     // The new state is a snapshot of the staging line (or the head when nothing is staged);
     // its changes against the head say whether there is anything to commit.
-    let head_root = h.repo.state_root(&line.head)?;
+    let head_root = h.repo.state_src(&line.head)?;
     let parents = if a.has("--amend") { head.parents.clone() } else { vec![line.head.clone()] };
-    let src = match h.repo.current_stage(&line)? {
-        Some(s) => s,
-        None => head_root.clone(),
-    };
+    let stage = h.repo.current_stage(&line)?;
     #[cfg(target_os = "macos")]
-    let mut promotion = if src == h.repo.p.stage_path(&line.id) {
-        Some(crate::apfs_commit::IndexCommit::prepare(&h.repo.p, &line.id)?)
-    } else {
-        None
+    let mut promotion = match &stage {
+        Some(_) => Some(crate::apfs_commit::IndexCommit::prepare(&h.repo.p, &line.id)?),
+        None => None,
     };
     #[cfg(target_os = "macos")]
     let mut state = if let Some(p) = &promotion {
         h.repo.describe_state(ctx, p.id.clone(), StateKind::Commit, parents, &message, Some(&line))?
     } else {
-        h.repo.new_state(ctx, &src, StateKind::Commit, parents, &message, Some(&line))?
+        h.repo.same_state(ctx, &line.head, StateKind::Commit, parents, &message, Some(&line))?
     };
     #[cfg(not(target_os = "macos"))]
-    let mut state = h.repo.new_state(ctx, &src, StateKind::Commit, parents, &message, Some(&line))?;
-    let staged: Vec<Change> = match changes::file_changes(&head_root, &h.repo.p.state_path(&state.id)) {
+    let mut state = {
+        let src = stage.clone().unwrap_or(head_root.clone());
+        h.repo.new_state(ctx, &src, StateKind::Commit, parents, &message, Some(&line))?
+    };
+    let new_root = match h.repo.state_src(&state.id) {
+        Ok(r) => r,
+        Err(e) => {
+            h.repo.discard_states(std::slice::from_ref(&state));
+            return Err(e);
+        }
+    };
+    let staged: Vec<Change> = match changes::file_changes(&head_root, &new_root) {
         Ok(v) => v.into_iter().filter(|c| !skip_path(&c.path)).collect(),
         Err(e) => {
             h.repo.discard_states(std::slice::from_ref(&state));
@@ -810,7 +825,6 @@ pub fn commit(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     // Content conflicts stay listed while the committed file has markers; the commit clears
     // the other kinds.
-    let new_root = h.repo.p.state_path(&state.id);
     let mut cleared = Vec::new();
     for c in &head.conflicts {
         if (c.kind == "content" || c.kind == "add/add") && conflict_open(&new_root, c)? {
@@ -842,7 +856,7 @@ pub fn commit(ctx: &Ctx, args: &[String]) -> Result<i32> {
 }
 
 /// The summary of a commit: the short statistics and the created, deleted and moved files.
-fn print_summary(ctx: &Ctx, old: &Path, new: &Path, list: &[Change]) -> Result<()> {
+fn print_summary(ctx: &Ctx, old: &Snap, new: &Snap, list: &[Change]) -> Result<()> {
     print_fds(ctx, &diff::file_diffs(old, new, list)?);
     Ok(())
 }
@@ -933,11 +947,11 @@ fn parents_empty(s: &crate::model::StateRec) -> bool {
 fn restore_paths(
     repo: &Repo,
     line: &Line,
-    source: &Path,
+    source: &Snap,
     target_view: &Path,
     target: &Path,
     specs: &[String],
-    known: Option<&Path>,
+    known: Option<&Snap>,
 ) -> Result<Vec<String>> {
     let own = repo.own(line);
     let mut done = Vec::new();
@@ -1033,7 +1047,7 @@ pub fn restore_impl(
         return Ok(0);
     }
     let (index, _it) = repo.index_view(&line)?;
-    let head_root = repo.head_tree(&line)?;
+    let head_root = repo.head_src(&line)?;
     let src_id = match source {
         Some(r) => Some(revs::resolve(repo, Some(&line), r)?),
         None => None,
@@ -1045,8 +1059,8 @@ pub fn restore_impl(
         _ => None,
     };
     let src_root = match &src_id {
-        Some(_) if src_view.is_some() => src_view.as_ref().unwrap().path.clone(),
-        Some(id) => repo.state_root(id)?,
+        Some(_) if src_view.is_some() => snap(&src_view.as_ref().unwrap().path),
+        Some(id) => repo.state_src(id)?,
         None => {
             if staged {
                 head_root.clone()
@@ -1057,7 +1071,7 @@ pub fn restore_impl(
     };
     let mut matched = false;
     if staged {
-        let stage = repo.ensure_stage(&line)?;
+        let stage = repo.ensure_full_stage(&line)?;
         let view = repo.temp_snapshot(&stage, true)?;
         let d = restore_paths(repo, &line, &src_root, &view.path, &stage, specs, None)?;
         matched |= !d.is_empty();
@@ -1142,6 +1156,8 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
     match mode {
         "soft" => {
             // Keep the index content, now based on the new head.
+            let mut temps: Vec<Temp> = Vec::new();
+            let index = repo.complete(index, &mut temps)?;
             let keep = repo.temp_snapshot(&index, true)?;
             repo.drop_stage(&line)?;
             let mut l2 = line.clone();
@@ -1327,8 +1343,9 @@ pub fn stash(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 return Ok(0);
             }
             let head = repo.state(&line.head)?;
-            let head_root = repo.state_root(&line.head)?;
-            let work = repo.temp_work(&head_root)?;
+            let head_root = repo.head_src(&line)?;
+            let work = Temp { path: repo.p.work_dir().join(ids::new_id()) };
+            repo.snapshot_state(&line.head, &work.path, false)?;
             let own = repo.own(&line);
             let mut paths: BTreeSet<String> = BTreeSet::new();
             for c in st.staged.iter().chain(st.unstaged.iter()) {
@@ -1358,7 +1375,7 @@ pub fn stash(ctx: &Ctx, args: &[String]) -> Result<i32> {
             // Back to the head content, or with --keep-index to the index content (the index
             // stays). New files that went into the stash leave the working folder.
             let keep_index = a.has("-k");
-            let target: &Path = if keep_index { &index } else { &head_root };
+            let target: &Snap = if keep_index { &index } else { &head_root };
             let wdir = repo.working(&line);
             let wtree = crate::tree::Tree::open(&wdir)?;
             for p in &paths {
@@ -1436,7 +1453,7 @@ pub fn clean(ctx: &Ctx, args: &[String]) -> Result<i32> {
 /// index and everything in it is of the kinds being removed: with `-X` an ignored folder, with
 /// `-x` any new folder, without them a new folder that holds no ignored files. Otherwise the
 /// files go one by one. Without `-d`, files in new folders stay.
-fn clean_targets(st: &Status, scan: &Path, index: &Path, dirs: bool, with_ignored: bool, only_ignored: bool) -> BTreeSet<String> {
+fn clean_targets(st: &Status, scan: &Path, index: &Snap, dirs: bool, with_ignored: bool, only_ignored: bool) -> BTreeSet<String> {
     let rules = crate::ignore_rules::Rules::new(scan);
     let in_index = |d: &str| fsutil::lmeta(index, d).is_some();
     let folders = |p: &str| -> Vec<String> {

@@ -4,7 +4,7 @@ use crate::access::{Policy, Role, Rule, Who};
 use crate::changes::{self, Change};
 use crate::ctx::Ctx;
 use crate::db::need;
-use crate::fsutil;
+use crate::fsutil::{self, Src};
 use crate::ids;
 use crate::ignore_rules::Rules;
 use crate::model::{Conflict, Line, LineChange, LineState, Record, StateKind, StateRec};
@@ -16,8 +16,34 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+/// A tree that hot paths read: on APFS the layers of a state, elsewhere its folder.
+#[cfg(target_os = "macos")]
+pub type Snap = crate::thin::Layered;
+#[cfg(not(target_os = "macos"))]
+pub type Snap = PathBuf;
+
 pub struct Repo<'a> {
     pub p: Project<'a>,
+}
+
+/// A complete folder as a tree to read.
+#[cfg(target_os = "macos")]
+pub fn snap(p: &Path) -> Snap {
+    crate::thin::Layered::complete(p)
+}
+#[cfg(not(target_os = "macos"))]
+pub fn snap(p: &Path) -> Snap {
+    p.to_path_buf()
+}
+
+/// True when two trees are the same tree (not only equal content).
+#[cfg(target_os = "macos")]
+pub fn same_tree(a: &Snap, b: &Snap) -> bool {
+    a.top() == b.top()
+}
+#[cfg(not(target_os = "macos"))]
+pub fn same_tree(a: &Snap, b: &Snap) -> bool {
+    a == b
 }
 
 /// A temporary read-only or writable snapshot, deleted on drop.
@@ -288,16 +314,105 @@ impl<'a> Repo<'a> {
     }
 
     /// Path of a state snapshot on this machine.
+    /// The complete tree of a state. On APFS a thin state gets a view (`thin::complete_tree`);
+    /// commands that read few paths use `state_src` instead.
     pub fn state_root(&self, id: &str) -> Result<PathBuf> {
-        let p = self.p.state_path(id);
-        if !p.exists() {
+        self.check_state(id)?;
+        #[cfg(target_os = "macos")]
+        return crate::thin::complete_tree(&self.p, id);
+        #[cfg(not(target_os = "macos"))]
+        Ok(self.p.state_path(id))
+    }
+
+    fn check_state(&self, id: &str) -> Result<()> {
+        if !self.p.has_state(id) {
             match self.p.db.state_flags(id)? {
                 Some((_, true)) => bail!("state {} was deleted by retention", ids::short(id)),
                 Some(_) => bail!("state {} is not on this machine (run layr sync)", ids::short(id)),
                 None => bail!("unknown state {}", ids::short(id)),
             }
         }
-        Ok(p)
+        Ok(())
+    }
+
+    /// A state to read without a complete copy: on APFS its layers, elsewhere its folder.
+    pub fn state_src(&self, id: &str) -> Result<Snap> {
+        self.check_state(id)?;
+        #[cfg(target_os = "macos")]
+        return crate::thin::Layered::of_state(&self.p, id);
+        #[cfg(not(target_os = "macos"))]
+        Ok(self.p.state_path(id))
+    }
+
+    /// The head of a line to read (`state_src`). A line with overlays reads its base.
+    pub fn head_src(&self, line: &Line) -> Result<Snap> {
+        let layers = if self.p.is_overlay() { Vec::new() } else { self.layers(line)? };
+        if layers.is_empty() {
+            return self.state_src(&line.head);
+        }
+        let base = self.head_tree(line)?;
+        #[cfg(target_os = "macos")]
+        return Ok(crate::thin::Layered::complete(&base));
+        #[cfg(not(target_os = "macos"))]
+        Ok(base)
+    }
+
+    /// A complete folder of a tree. A layered tree gets a temporary read-only copy in `keep`.
+    pub fn complete(&self, tree: Snap, keep: &mut Vec<Temp>) -> Result<PathBuf> {
+        #[cfg(target_os = "macos")]
+        {
+            if tree.is_complete() {
+                return Ok(tree.bottom().to_path_buf());
+            }
+            let t = Temp { path: self.p.scan_dir().join(ids::new_id()) };
+            tree.materialize(&t.path, true)?;
+            btrfs::write_info(
+                &t.path,
+                &btrfs::SubvolInfo { uuid: ids::new_id(), received_uuid: None, parent_uuid: None, readonly: true, base: None },
+            )?;
+            btrfs::seal(&t.path, true, false)?;
+            let p = t.path.clone();
+            keep.push(t);
+            Ok(p)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = keep;
+            Ok(tree)
+        }
+    }
+
+    /// Copy a state to `dst`: a writable folder, or a read-only snapshot.
+    pub fn snapshot_state(&self, id: &str, dst: &Path, readonly: bool) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        {
+            let src = self.state_src(id)?;
+            if src.is_complete() {
+                return btrfs::snapshot(src.bottom(), dst, readonly);
+            }
+            let parent = btrfs::subvol_info(src.top())?.uuid;
+            src.materialize(dst, readonly)?;
+            let marked = (|| -> Result<()> {
+                let info = btrfs::SubvolInfo {
+                    uuid: ids::new_id(),
+                    received_uuid: None,
+                    parent_uuid: Some(parent),
+                    readonly,
+                    base: None,
+                };
+                btrfs::write_info(dst, &info)?;
+                if readonly {
+                    btrfs::seal(dst, true, false)?;
+                }
+                Ok(())
+            })();
+            if marked.is_err() {
+                let _ = btrfs::delete_tree(dst);
+            }
+            marked
+        }
+        #[cfg(not(target_os = "macos"))]
+        btrfs::snapshot(&self.state_root(id)?, dst, readonly)
     }
 
     pub fn working(&self, line: &Line) -> PathBuf {
@@ -335,6 +450,29 @@ impl<'a> Repo<'a> {
         self.describe_state(ctx, id, kind, parents, message, line)
     }
 
+    /// A new state with the content of `base`: on APFS an empty thin layer over it, elsewhere a
+    /// snapshot. The record is not written yet.
+    pub fn same_state(
+        &self,
+        ctx: &Ctx,
+        base: &str,
+        kind: StateKind,
+        parents: Vec<String>,
+        message: &str,
+        line: Option<&Line>,
+    ) -> Result<StateRec> {
+        #[cfg(target_os = "macos")]
+        {
+            let id = ids::new_id();
+            let src = self.state_src(base)?;
+            let dst = self.p.delta_path(&id);
+            crate::thin::write_layer(&src.at("")?, &dst, &crate::thin::Diff::default(), base, false)?;
+            self.describe_state(ctx, id, kind, parents, message, line)
+        }
+        #[cfg(not(target_os = "macos"))]
+        self.new_state(ctx, &self.state_root(base)?, kind, parents, message, line)
+    }
+
     /// Describe an already prepared immutable tree. No record is written here.
     pub fn describe_state(
         &self,
@@ -345,7 +483,10 @@ impl<'a> Repo<'a> {
         message: &str,
         line: Option<&Line>,
     ) -> Result<StateRec> {
-        let dst = self.p.state_path(&id);
+        let mut dst = self.p.state_path(&id);
+        if !dst.exists() && self.p.delta_path(&id).exists() {
+            dst = self.p.delta_path(&id);
+        }
         let info = btrfs::subvol_info(&dst)?;
         Ok(StateRec {
             id,
@@ -371,6 +512,17 @@ impl<'a> Repo<'a> {
     pub fn working_snapshot(&self, ctx: &Ctx, line: &Line, parents: Vec<String>, message: &str) -> Result<StateRec> {
         let w = self.working(line);
         let private = self.private_paths(line)?;
+        #[cfg(target_os = "macos")]
+        if private.is_empty() && self.thin_line(line)? {
+            // A thin layer over the head: only the entries that changed are copied.
+            let id = ids::new_id();
+            let head = self.state_src(&line.head)?;
+            let dst = self.p.delta_path(&id);
+            if crate::thin::snapshot_over(&head, &line.head, &w, &dst, false)?.is_none() {
+                crate::thin::write_layer(&head.at("")?, &dst, &crate::thin::Diff::default(), &line.head, false)?;
+            }
+            return self.describe_state(ctx, id, StateKind::Auto, parents, message, Some(line));
+        }
         if private.is_empty() {
             return self.new_state(ctx, &w, StateKind::Auto, parents, message, Some(line));
         }
@@ -425,6 +577,12 @@ impl<'a> Repo<'a> {
         })
     }
 
+    /// True when the states of a line can be thin layers: APFS, no overlays.
+    #[cfg(target_os = "macos")]
+    fn thin_line(&self, line: &Line) -> Result<bool> {
+        Ok(!self.p.is_overlay() && self.layers(line)?.is_empty())
+    }
+
     /// Files of a snapshot of the working folder that hold an overlay file under another name:
     /// moved from a path in `private`, or new with the same content as one of them.
     fn private_copies(&self, line: &Line, snap: &Path, private: &BTreeSet<String>) -> Result<Vec<String>> {
@@ -465,7 +623,7 @@ impl<'a> Repo<'a> {
                 // The journal owns rollback of the only staged copy.
                 continue;
             }
-            let _ = btrfs::delete_tree(&self.p.state_path(&s.id));
+            let _ = self.p.delete_state(&s.id);
         }
     }
 
@@ -505,7 +663,7 @@ impl<'a> Repo<'a> {
 
     /// The newest automatic state of a line, if any.
     pub fn last_auto(&self, line: &Line) -> Result<Option<StateRec>> {
-        Ok(self.p.db.line_states(&line.id, StateKind::Auto)?.into_iter().find(|s| self.p.state_path(&s.id).exists()))
+        Ok(self.p.db.line_states(&line.id, StateKind::Auto)?.into_iter().find(|s| self.p.has_state(&s.id)))
     }
 
     /// The id of a state equal to the working content: a new automatic state, or the previous
@@ -527,13 +685,34 @@ impl<'a> Repo<'a> {
         if !w.exists() {
             return Ok(None);
         }
+        #[cfg(target_os = "macos")]
+        if !force && self.private_paths(line)?.is_empty() && self.thin_line(line)? {
+            // Compare before any copy: an unchanged folder makes no state.
+            let prev = self.last_auto(line)?.map(|s| s.id).unwrap_or(line.head.clone());
+            if self.p.has_state(&prev) {
+                let base = self.state_src(&prev)?;
+                let old = base.scan(true)?;
+                let new = btrfs::scan_with_data(&w, true)?;
+                let d = crate::thin::diff(&old, &|k| base.path(k), &new, &w)?;
+                if !d.write.iter().chain(d.removed.iter()).any(|p| !skip_path(p)) {
+                    return Ok(None);
+                }
+            }
+            let mut st = self.working_snapshot(ctx, line, vec![line.head.clone()], message)?;
+            st.running = running;
+            let mut rec = Record::new("save");
+            rec.states.push(st.clone());
+            rec.data = serde_json::json!({"line": line.id});
+            self.commit_record(ctx, rec)?;
+            return Ok(Some(st));
+        }
         let mut st = self.working_snapshot(ctx, line, vec![line.head.clone()], message)?;
         st.running = running;
         if !force {
             let prev = self.last_auto(line)?.map(|s| s.id).unwrap_or(line.head.clone());
-            let base = self.p.state_path(&prev);
-            if base.exists() {
-                let changed = changes::candidates(&base, &self.p.state_path(&st.id))?.into_iter().any(|c| !skip_path(&c.path));
+            if self.p.has_state(&prev) {
+                let base = self.state_src(&prev)?;
+                let changed = changes::candidates(&base, &self.state_src(&st.id)?)?.into_iter().any(|c| !skip_path(&c.path));
                 if !changed {
                     self.discard_states(std::slice::from_ref(&st));
                     return Ok(None);
@@ -558,14 +737,15 @@ impl<'a> Repo<'a> {
         }
         let mut st = self.working_snapshot(ctx, line, vec![line.head.clone()], message)?;
         if let Some(head) = self.p.db.state(&line.head)? {
-            let base = self.p.state_path(&head.id);
-            if self.policy().rule_for(&line.name).is_some() && base.exists() {
+            if self.policy().rule_for(&line.name).is_some() && self.p.has_state(&head.id) {
+                let base = self.state_src(&head.id)?;
                 // Changes as git would see them: a cache is an empty folder in a snapshot, a
                 // merge leaves new owners and times on unchanged files, and ignored files (such
                 // as other build output) are not changes.
                 let in_cache = |path: &str| caches.iter().any(|c| path == c || path.starts_with(&format!("{c}/")));
-                let rules = Rules::new(&self.p.state_path(&st.id));
-                let changed = changes::file_changes(&base, &self.p.state_path(&st.id))?
+                let made = self.state_root(&st.id)?;
+                let rules = Rules::new(&made);
+                let changed = changes::file_changes(&base, &self.state_src(&st.id)?)?
                     .into_iter()
                     .any(|c| !skip_path(&c.path) && !in_cache(&c.path) && !rules.ignored(&c.path, false));
                 if !changed {
@@ -598,7 +778,8 @@ impl<'a> Repo<'a> {
     }
 
     /// The staging line, created from the head (the full tree of a line with overlays) if
-    /// missing or based on an older head or stack.
+    /// missing or based on an older head or stack. On APFS it is a thin layer over the head
+    /// when the line has no overlays; `ensure_full_stage` gives commands a complete tree.
     pub fn ensure_stage(&self, line: &Line) -> Result<PathBuf> {
         let p = self.p.stage_path(&line.id);
         let basef = self.stage_base_file(line);
@@ -610,9 +791,66 @@ impl<'a> Repo<'a> {
             }
             self.drop_stage(line)?;
         }
-        btrfs::snapshot(&self.head_tree(line)?, &p, false)?;
+        #[cfg(target_os = "macos")]
+        let thin = !self.p.is_overlay() && self.layers(line)?.is_empty();
+        #[cfg(not(target_os = "macos"))]
+        let thin = false;
+        if thin {
+            #[cfg(target_os = "macos")]
+            {
+                let head = self.head_src(line)?;
+                crate::thin::empty_layer(&p, &line.head, &head.at("")?)?;
+            }
+        } else {
+            btrfs::snapshot(&self.head_tree(line)?, &p, false)?;
+        }
         crate::fsutil::atomic_write(&basef, key.as_bytes(), 0o600)?;
         Ok(p)
+    }
+
+    /// The staging line as a complete writable tree, for commands that change it in ways a
+    /// thin layer does not support (a patch, a move, a removal, a restore).
+    pub fn ensure_full_stage(&self, line: &Line) -> Result<PathBuf> {
+        let p = self.ensure_stage(line)?;
+        #[cfg(target_os = "macos")]
+        if crate::thin::is_thin(&p) {
+            let tree = self.stage_tree(line, &p)?;
+            let tmp = self.p.work_dir().join(ids::new_id());
+            tree.materialize(&tmp, false)?;
+            let done = (|| -> Result<()> {
+                let info = btrfs::SubvolInfo {
+                    uuid: ids::new_id(),
+                    received_uuid: None,
+                    parent_uuid: None,
+                    readonly: false,
+                    base: None,
+                };
+                btrfs::write_info(&tmp, &info)?;
+                let old = self.p.work_dir().join(ids::new_id());
+                std::fs::rename(&p, &old)?;
+                std::fs::rename(&tmp, &p)?;
+                btrfs::delete_tree(&old)
+            })();
+            if done.is_err() {
+                let _ = btrfs::delete_tree(&tmp);
+            }
+            done?;
+        }
+        Ok(p)
+    }
+
+    /// The tree of a staging line: a thin layer over the head, or a complete tree.
+    #[cfg(target_os = "macos")]
+    fn stage_tree(&self, line: &Line, stage: &Path) -> Result<Snap> {
+        if crate::thin::is_thin(stage) {
+            crate::thin::Layered::over(stage, self.head_src(line)?)
+        } else {
+            Ok(crate::thin::Layered::complete(stage))
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    fn stage_tree(&self, _line: &Line, stage: &Path) -> Result<Snap> {
+        Ok(stage.to_path_buf())
     }
 
     /// Write the key of a staging line made for `line` (a soft reset keeps the index for a new head).
@@ -645,22 +883,31 @@ impl<'a> Repo<'a> {
         Ok(())
     }
 
-    /// The caller must hold the project lock while it reads a mutable index.
-    fn index_source(&self, line: &Line) -> Result<(PathBuf, bool)> {
+    /// The index to read and the staging folder when there is one. The caller must hold the
+    /// project lock while it reads a mutable index.
+    pub fn index_source(&self, line: &Line) -> Result<(Snap, Option<PathBuf>)> {
         match self.current_stage(line)? {
-            Some(s) => Ok((s, true)),
-            None => Ok((self.head_tree(line)?, false)),
+            Some(s) => Ok((self.stage_tree(line, &s)?, Some(s))),
+            None => Ok((self.head_src(line)?, None)),
         }
     }
 
     /// The staging content as a read-only snapshot, or the head state when nothing is staged.
-    pub fn index_view(&self, line: &Line) -> Result<(PathBuf, Option<Temp>)> {
-        let (source, mutable) = self.index_source(line)?;
-        if mutable {
-            let t = self.temp_snapshot(&source, true)?;
-            Ok((t.path.clone(), Some(t)))
-        } else {
-            Ok((source, None))
+    pub fn index_view(&self, line: &Line) -> Result<(Snap, Option<Temp>)> {
+        match self.current_stage(line)? {
+            Some(s) => {
+                let t = self.temp_snapshot(&s, true)?;
+                #[cfg(target_os = "macos")]
+                let tree = if crate::thin::is_thin(&s) {
+                    crate::thin::Layered::over(&t.path, self.head_src(line)?)?
+                } else {
+                    crate::thin::Layered::complete(&t.path)
+                };
+                #[cfg(not(target_os = "macos"))]
+                let tree = t.path.clone();
+                Ok((tree, Some(t)))
+            }
+            None => Ok((self.head_src(line)?, None)),
         }
     }
 
@@ -668,21 +915,21 @@ impl<'a> Repo<'a> {
 
     /// Changes of the working content: staged (head to index), unstaged (index to working),
     /// untracked and ignored paths, and conflicts left by a merge.
-    pub fn status_of(&self, line: &Line, scan: &Path, index: &Path) -> Result<Status> {
+    pub fn status_of(&self, line: &Line, scan: &Path, index: &Snap) -> Result<Status> {
         self.status_of_inner(line, scan, index, true)
     }
 
     /// Add only needs paths that differ between the index and the working tree.
     #[cfg(target_os = "macos")]
-    pub fn status_for_add(&self, line: &Line, scan: &Path, index: &Path) -> Result<Status> {
+    pub fn status_for_add(&self, line: &Line, scan: &Path, index: &Snap) -> Result<Status> {
         self.status_of_inner(line, scan, index, false)
     }
 
-    fn status_of_inner(&self, line: &Line, scan: &Path, index: &Path, full: bool) -> Result<Status> {
+    fn status_of_inner(&self, line: &Line, scan: &Path, index: &Snap, full: bool) -> Result<Status> {
         let mut st = Status::default();
         if full {
-            let head = self.head_tree(line)?;
-            if index != head.as_path() {
+            let head = self.head_src(line)?;
+            if !same_tree(index, &head) {
                 let staged: Vec<Change> =
                     changes::file_changes(&head, index)?.into_iter().filter(|c| !skip_path(&c.path)).collect();
                 st.staged = changes::with_renames(&head, index, staged);
@@ -746,7 +993,7 @@ impl<'a> Repo<'a> {
         Ok(st)
     }
 
-    pub fn status(&self, line: &Line) -> Result<(Status, Temp, Option<Temp>, PathBuf)> {
+    pub fn status(&self, line: &Line) -> Result<(Status, Temp, Option<Temp>, Snap)> {
         let scan = self.scan(line)?;
         let (index, itemp) = self.index_view(line)?;
         let st = self.status_of(line, &scan.path, &index)?;
@@ -758,11 +1005,11 @@ impl<'a> Repo<'a> {
     #[cfg(target_os = "macos")]
     pub fn status_report(&self, line: &Line) -> Result<Status> {
         let work = self.working(line);
-        let (index, _) = self.index_source(line)?;
-        let head = self.head_tree(line)?;
-        let mut roots = vec![head.as_path(), work.as_path()];
-        if index != head {
-            roots.push(index.as_path());
+        let (index, stage) = self.index_source(line)?;
+        // States are immutable; the lock keeps the index still. Only the working folder moves.
+        let mut roots = vec![work.as_path()];
+        if let Some(s) = &stage {
+            roots.push(s.as_path());
         }
         if let Some(st) = crate::storage::stable_read(&roots, || self.status_of(line, &work, &index))? {
             return Ok(st);
@@ -922,7 +1169,7 @@ impl<'a> Repo<'a> {
             bail!("{} already exists", dst.display());
         }
         let tmp = self.p.work_dir().join(ids::new_id());
-        btrfs::snapshot(&self.state_root(state)?, &tmp, false)?;
+        self.snapshot_state(state, &tmp, false)?;
         let r = self
             .put_layers(&tmp, layers, self.own(line))
             .and_then(|_| self.prepare_at(line, state, &tmp))
@@ -1200,7 +1447,7 @@ impl<'a> Repo<'a> {
 /// conflict markers (a merge writes markers only into files of at most `MAX_TEXT` bytes, so a
 /// larger file has none). Other kinds (moves, deletes, types, binary files) stay open until the
 /// next commit of the line, which is the admin's decision.
-pub fn conflict_open(root: &Path, c: &Conflict) -> Result<bool> {
+pub fn conflict_open(root: &(impl fsutil::Src + ?Sized), c: &Conflict) -> Result<bool> {
     if c.kind == "content" || c.kind == "add/add" {
         return Ok(match fsutil::lmeta(root, &c.path) {
             Some(m) if m.is_file() && m.size <= fsutil::MAX_TEXT => has_markers(&fsutil::read_file(root, &c.path)?),

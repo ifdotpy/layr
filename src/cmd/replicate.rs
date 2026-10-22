@@ -222,7 +222,7 @@ fn present_caches(p: &Project) -> Result<BTreeSet<String>> {
 }
 
 fn present(p: &Project) -> Result<BTreeSet<String>> {
-    Ok(p.db.present_states()?.into_iter().filter(|(_, d)| !d).map(|(id, _)| id).filter(|id| p.state_path(id).exists()).collect())
+    Ok(p.db.present_states()?.into_iter().filter(|(_, d)| !d).map(|(id, _)| id).filter(|id| p.has_state(id)).collect())
 }
 
 /// Records this side has beyond the peer's sequence numbers, as stored lines.
@@ -357,7 +357,7 @@ fn send_states<R: Read, W: Write>(
         w.json(&json!({"op": "state", "id": id, "parent": parent, "clones": clones}))?;
         let pp = parent.as_ref().map(|p| repo.p.state_path(p));
         let sources: Vec<_> = clones.iter().map(|id| repo.p.state_path(id)).collect();
-        let child = btrfs::send_optimized(pp.as_deref(), &repo.p.state_path(id), &sources, features.compressed)?
+        let child = btrfs::send_optimized(pp.as_deref(), &repo.state_root(id)?, &sources, features.compressed)?
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
@@ -440,7 +440,7 @@ fn recv_states<R: Read, W: Write>(w: &mut Wire<R, W>, p: &Project) -> Result<usi
                     Some(r) if crate::model::is_uuid(&id) => r,
                     _ => bail!("no record for state {id:?}"),
                 };
-                if p.state_path(&id).exists() {
+                if p.has_state(&id) {
                     bail!("state {} exists here already", ids::short(&id));
                 }
                 let ids: Vec<String> = match v.get("clones") {
@@ -461,7 +461,7 @@ fn recv_states<R: Read, W: Write>(w: &mut Wire<R, W>, p: &Project) -> Result<usi
                 }
                 receive_one(w, p, &id, &rec.subvol, true, &clones).and_then(|_| {
                     if let Err(e) = p.db.set_present(&id, true) {
-                        let _ = btrfs::delete_tree(&p.state_path(&id));
+                        let _ = p.delete_state(&id);
                         return Err(e);
                     }
                     n += 1;

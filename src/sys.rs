@@ -504,13 +504,24 @@ pub fn apfs_attribute(path: &std::path::Path, name: &CStr, value: Option<&[u8]>)
             }
             return Ok(Vec::new());
         }
-        let mut v = vec![0u8; 4096];
-        let n = libc::getxattr(path.as_ptr(), name.as_ptr(), v.as_mut_ptr().cast(), v.len(), 0, libc::XATTR_NOFOLLOW);
-        if n < 0 {
-            return Err(io::Error::last_os_error());
+        // Ask for the size first: the removed paths of a thin layer can be large.
+        loop {
+            let size = libc::getxattr(path.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0, 0, libc::XATTR_NOFOLLOW);
+            if size < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let mut v = vec![0u8; size as usize + 1];
+            let n = libc::getxattr(path.as_ptr(), name.as_ptr(), v.as_mut_ptr().cast(), v.len(), 0, libc::XATTR_NOFOLLOW);
+            if n < 0 {
+                let e = io::Error::last_os_error();
+                if e.raw_os_error() == Some(libc::ERANGE) {
+                    continue;
+                }
+                return Err(e);
+            }
+            v.truncate(n as usize);
+            return Ok(v);
         }
-        v.truncate(n as usize);
-        Ok(v)
     }
 }
 #[cfg(target_os = "macos")]
