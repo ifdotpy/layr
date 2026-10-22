@@ -960,7 +960,7 @@ impl<'a> Repo<'a> {
         r
     }
 
-    fn prepare_at(&self, line: &Line, state: &str, w: &Path) -> Result<()> {
+    pub(crate) fn prepare_at(&self, line: &Line, state: &str, w: &Path) -> Result<()> {
         let (uid, gid) = self.owner_ids(line);
         let root_meta = std::fs::symlink_metadata(w)?;
         if root_meta.uid() != uid {

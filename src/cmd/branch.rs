@@ -25,6 +25,11 @@ fn owner_arg(ctx: &Ctx, v: Option<&str>) -> Result<u32> {
     }
 }
 
+fn line_json(repo: &crate::repo::Repo, line: &crate::model::Line) -> serde_json::Value {
+    serde_json::json!({"id": line.id, "name": line.name, "head": line.head, "owner": line.owner,
+        "machine": line.machine, "path": repo.working(line)})
+}
+
 pub fn branch(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let spec = Spec::new()
         .flag("-l|--list")
@@ -39,10 +44,23 @@ pub fn branch(ctx: &Ctx, args: &[String]) -> Result<i32> {
         .flag("--show-current")
         .flag("--path")
         .value("--owner")
+        .value("--count")
+        .flag("--json")
         .optional("--format")
         .value("--contains")
         .flag("-q|--quiet");
     let a = parse(&spec, args)?;
+    if a.has("--count")
+        && (a.pos.len() != 2
+            || a.has("-d")
+            || a.has("-D")
+            || a.has("-m")
+            || a.has("-M")
+            || a.has("-l")
+            || a.has("--show-current"))
+    {
+        return Err(exit(128, "usage: layr branch <prefix> <rev> --count <N>"));
+    }
     let h = here(ctx)?;
     let repo = &h.repo;
     let current = h.line.clone();
@@ -178,7 +196,27 @@ pub fn branch(ctx: &Ctx, args: &[String]) -> Result<i32> {
             return Err(exit(128, "fatal: only root can create a line owned by root"));
         }
         let _lock = repo.p.lock()?;
+        if let Some(count) = a.get("--count") {
+            let count = count.parse::<usize>().map_err(|_| exit(128, "--count must be a positive integer"))?;
+            let lines = repo.create_lines(ctx, name, &start, owner, source.as_ref(), count)?;
+            if a.has("--json") {
+                outln!(ctx, "{}", serde_json::to_string(&lines.iter().map(|line| line_json(repo, line)).collect::<Vec<_>>())?);
+            } else {
+                for l in lines {
+                    if a.has("--path") {
+                        outln!(ctx, "{}", repo.working(&l).display());
+                    } else if !a.has("-q") {
+                        outln!(ctx, "Created line {} at {} from {}", l.name, repo.working(&l).display(), ids::short(&start));
+                    }
+                }
+            }
+            return Ok(0);
+        }
         let l = repo.create_line_from(ctx, name, &start, owner, source.as_ref())?;
+        if a.has("--json") {
+            outln!(ctx, "{}", line_json(repo, &l));
+            return Ok(0);
+        }
         if a.has("--path") {
             outln!(ctx, "{}", repo.working(&l).display());
         } else if !a.has("-q") {
