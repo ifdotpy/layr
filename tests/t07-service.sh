@@ -100,8 +100,14 @@ kill $DPID; wait $DPID 2>/dev/null
 sleep 3.5
 LAYR_TRACE=1 $T/layr daemon --socket $LAYR_SOCKET --tick 1 > $T/daemon2.log 2>&1 &
 DPID=$!
-sleep 1.6
-first=$(grep -c "send --no-data" $T/daemon2.log)
+expected=$(find "$P" -mindepth 1 -maxdepth 1 -type d | wc -l)
+first=0
+for i in $(seq 1 100); do
+    first=$(grep -c "send --no-data" "$T/daemon2.log")
+    [ "$first" -ge "$expected" ] && break
+    sleep 0.1
+done
+ok "the daemon completes its first comparison cycle" test "$first" -ge "$expected"
 sleep 1.2
 eq "idle lines are not compared again before the interval" "$first" "$(grep -c 'send --no-data' $T/daemon2.log)"
 sleep 2.5

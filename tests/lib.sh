@@ -39,10 +39,19 @@ new_fs() { # new_fs <mountpoint> <size>
         mkdir -p "$mp"
         return
     fi
-    truncate -s "$size" "$mp.img"
-    mkfs.btrfs -q -f "$mp.img"
-    mkdir -p "$mp"
-    mount -o loop,user_subvol_rm_allowed "$mp.img" "$mp"
+    truncate -s "$size" "$mp.img" || exit 1
+    mkfs.btrfs -q -f "$mp.img" || exit 1
+    mkdir -p "$mp" || exit 1
+    for attempt in $(seq 1 50); do
+        if mount -o loop,user_subvol_rm_allowed "$mp.img" "$mp" 2> "$mp.mount-error"; then
+            rm "$mp.mount-error"
+            return
+        fi
+        sleep 0.1
+    done
+    cat "$mp.mount-error" >&2
+    echo "FATAL: cannot mount the test filesystem at $mp" >&2
+    exit 1
 }
 
 # A failed cd must stop the test file: a later relative command (rm -rf ./*, layr commands)
@@ -66,6 +75,9 @@ cleanup() {
         return
     fi
     for mp in $(findmnt -rn -o TARGET | grep "^$T" | sort -r); do umount -l "$mp" 2>/dev/null; done
+    while read -r device image; do
+        case "$image" in "$T/"*) losetup -d "$device" 2>/dev/null || true ;; esac
+    done < <(losetup --list --noheadings --output NAME,BACK-FILE)
     rm -rf "$T"
 }
 trap cleanup EXIT
