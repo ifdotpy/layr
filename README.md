@@ -519,17 +519,25 @@ layr change show CHANGE_ID
 
 Only `probe run` executes commands.
 A diff or `change show` reads stored results and reports `not run` when a result is absent.
-The Behavior section compares the newest change version with its merge base against the source line's upstream, or `main`.
+The Behavior section compares state-subject results for the newest version and its merge base against the upstream, or `main`.
+It does not select a view implicitly.
+If only view results exist, it lists their IDs and shows the explicit `probe diff views/<a> views/<b>` command.
 
 Probe commands are code from the revision's author.
 They use the existing `try` copy and run as the caller with a clean environment.
 The command's standard output goes to standard error, which keeps JSON command output valid.
 The caller's working files do not change.
+Probe outputs from a view require every project reader to have permanent read access to each overlay.
+A private overlay causes refusal, with its name in the error.
 This uses the existing `try` isolation; it does not add a network or system-call sandbox.
 
 Each result has a check attestation with the probe name, exact arguments, exit code, and output state.
 The output state has kind `derived`, context `probe-v1/<name>`, and `derived_from` set to the exact subject.
-The ref `derived/probe-v1/<name>/<subject>` retains this state through garbage collection.
+The ref `derived/probe-v1/<name>/<subject>` retains this output state through garbage collection.
+A ViewId in `derived_from` records provenance and does not retain the view's source states.
+The diff can use the definitions and output states from stored checks after source collection.
+It reports `source collected` when source files are no longer available.
+A missing result cannot run again without its source files.
 The same subject and arguments reuse a stored result, including a failed result, while its attestation and outputs remain available.
 A probe command failure makes `probe run` return a nonzero status.
 

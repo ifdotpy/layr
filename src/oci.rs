@@ -513,6 +513,9 @@ pub fn export(
     let mut text = String::new();
     tree.open_read("layr.toml").context("the revision has no readable layr.toml")?.read_to_string(&mut text)?;
     let file = parse(&text)?;
+    if file.runnable.is_empty() {
+        bail!("the revision has no runnable; define [runnable.<name>] in layr.toml");
+    }
     let name = match name {
         Some(n) => n.to_string(),
         None if file.runnable.len() == 1 => file.runnable.keys().next().unwrap().clone(),

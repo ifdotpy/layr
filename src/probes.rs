@@ -73,6 +73,36 @@ pub fn resolve(repo: &Repo, line: Option<&Line>, rev: &str) -> Result<Input> {
     }
     Ok(Input { subject: Subject { kind: "state".into(), id: state.clone() }, state, layers: vec![] })
 }
+fn readers_cover(project: &crate::access::Policy, overlay: &crate::access::Policy) -> bool {
+    use crate::access::Role;
+    let denies_read = |actions: &[String]| actions.iter().any(|a| a == "read" || a == "*");
+    if overlay.deny.iter().any(|(principal, actions)| {
+        denies_read(actions)
+            && !project.deny.get(principal).map(|a| denies_read(a)).unwrap_or(false)
+            && !project.deny.get("*").map(|a| denies_read(a)).unwrap_or(false)
+    }) {
+        return false;
+    }
+    let everyone = overlay.access.get("*").copied().unwrap_or(Role::None) >= Role::Reader;
+    project
+        .access
+        .iter()
+        .map(|(p, r)| (p, *r))
+        .chain(project.grants.iter().map(|(p, (r, _))| (p, *r)))
+        .filter(|(p, role)| p.as_str() != "user:0" && *role >= Role::Reader)
+        .all(|(principal, _)| everyone || overlay.access.get(principal).copied().unwrap_or(Role::None) >= Role::Reader)
+}
+fn shared_outputs(repo: &Repo, layers: &[crate::overlay::Layer]) -> Result<()> {
+    let project = crate::access::Policy::load(&repo.p);
+    for layer in layers {
+        let overlay = repo.overlay_project(&layer.overlay)?;
+        if !readers_cover(&project, &crate::access::Policy::load(&overlay)) {
+            bail!("probe outputs refuse private overlay '{}'; every project reader must be an overlay reader", layer.overlay);
+        }
+    }
+    Ok(())
+}
+
 pub fn definitions(repo: &Repo, input: &Input) -> Result<BTreeMap<String, Probe>> {
     let tree = Tree::open(&repo.state_root(&input.state)?)?;
     let mut file = match tree.open_read("layr.toml") {
@@ -101,15 +131,12 @@ fn reference(name: &str, subject: &str) -> String {
     format!("derived/probe-v1/{name}/{subject}")
 }
 
-/// Keep this call at one boundary. TODO(core-2): use its identical Db::check_exit implementation at integration.
+/// Core matches the exact argv; probe output and active attestation are checked separately.
 fn check_exit(repo: &Repo, subject: &str, argv: &[String]) -> Result<Option<i64>> {
     repo.p.db.check_exit(subject, argv, None)
 }
 
-fn stored(repo: &Repo, input: &Input, name: &str, probe: &Probe) -> Result<Option<RunResult>> {
-    if check_exit(repo, &input.subject.id, &probe.run)?.is_none() {
-        return Ok(None);
-    }
+fn active_checks(repo: &Repo, input: &Input) -> Result<BTreeMap<String, (crate::model::Attestation, Record)>> {
     let mut active = BTreeMap::new();
     // Attestation order and signer/actor checks match Core's revocation rule.
     for a in repo.p.db.attestations(&input.subject.id, None)? {
@@ -128,6 +155,64 @@ fn stored(repo: &Repo, input: &Input, name: &str, probe: &Probe) -> Result<Optio
             }
         }
     }
+    Ok(active)
+}
+
+pub fn source_status(repo: &Repo, input: &Input) -> &'static str {
+    let missing = |repo: &Repo, id: &str| {
+        if repo.p.state_path(id).exists() {
+            "available"
+        } else if repo.p.db.state_flags(id).ok().flatten().map(|(_, deleted)| deleted).unwrap_or(false) {
+            "source collected"
+        } else {
+            "source unavailable"
+        }
+    };
+    let shared = missing(repo, &input.state);
+    if shared != "available" {
+        return shared;
+    }
+    for layer in &input.layers {
+        match repo.overlay_repo(&layer.overlay) {
+            Ok(r) => {
+                let status = missing(&r, &layer.state);
+                if status != "available" {
+                    return status;
+                }
+            }
+            Err(_) => return "source unavailable",
+        }
+    }
+    "available"
+}
+fn comparison_definitions(repo: &Repo, input: &Input) -> Result<BTreeMap<String, Probe>> {
+    if source_status(repo, input) == "available" {
+        return definitions(repo, input);
+    }
+    let mut definitions = BTreeMap::new();
+    for (_, record) in active_checks(repo, input)?.into_values() {
+        let check = &record.data["check"];
+        if let Ok(manifest) = serde_json::from_value::<BTreeMap<String, Probe>>(check["probes"].clone()) {
+            for (name, probe) in manifest {
+                if probe.validate(&name).is_ok() {
+                    definitions.insert(name, probe);
+                }
+            }
+        }
+        let Some(name) = check["probe"].as_str() else { continue };
+        let Ok(probe) = serde_json::from_value::<Probe>(check["definition"].clone()) else { continue };
+        if probe.validate(name).is_ok() {
+            definitions.insert(name.into(), probe);
+        }
+    }
+    Ok(definitions)
+}
+
+fn stored(repo: &Repo, input: &Input, name: &str, probe: &Probe) -> Result<Option<RunResult>> {
+    if check_exit(repo, &input.subject.id, &probe.run)?.is_none() {
+        return Ok(None);
+    }
+    let active = active_checks(repo, input)?;
     let root = repo.p.db.ref_value(&reference(name, &input.subject.id), crate::ids::now_ms())?;
     let mut latest = None;
     for (_, rec) in active.values() {
@@ -136,7 +221,7 @@ fn stored(repo: &Repo, input: &Input, name: &str, probe: &Probe) -> Result<Optio
             continue;
         }
         let Ok(mut r) = serde_json::from_value::<RunResult>(c.clone()) else { continue };
-        if root.as_ref().map(|v| &v.target) != Some(&r.output_state) {
+        if r.subject != input.subject || r.argv != probe.run || root.as_ref().map(|v| &v.target) != Some(&r.output_state) {
             continue;
         }
         let state = match repo.state(&r.output_state) {
@@ -158,12 +243,20 @@ fn stored(repo: &Repo, input: &Input, name: &str, probe: &Probe) -> Result<Optio
 
 pub fn run(ctx: &Ctx, repo: &Repo, input: &Input, selected: Option<&str>) -> Result<Vec<RunResult>> {
     repo.require(ctx, "try")?;
-    let definitions = definitions(repo, input)?;
+    shared_outputs(repo, &input.layers)?;
+    let definitions = comparison_definitions(repo, input)?;
+    if definitions.is_empty() && source_status(repo, input) != "available" {
+        bail!("{}; probe definitions are unavailable", source_status(repo, input));
+    }
     if let Some(name) = selected {
         if !definitions.contains_key(name) {
+            if source_status(repo, input) != "available" {
+                bail!("{}; probe '{name}' has no retained definition", source_status(repo, input));
+            }
             bail!("unknown probe '{name}' in the exact revision");
         }
     }
+    let manifest = serde_json::to_value(&definitions)?;
     let mut results = Vec::new();
     for (name, probe) in definitions {
         if selected.is_some() && selected != Some(&name) {
@@ -177,6 +270,9 @@ pub fn run(ctx: &Ctx, repo: &Repo, input: &Input, selected: Option<&str>) -> Res
         if let Some(r) = stored(repo, input, &name, &probe)? {
             results.push(r);
             continue;
+        }
+        if source_status(repo, input) != "available" {
+            bail!("{}; probe '{name}' has no retained result", source_status(repo, input));
         }
         let result = crate::cmd::admin::with_try_copy(ctx, repo, &input.state, &input.layers, false, |dir| {
             let code = crate::cmd::admin::try_command(ctx, repo, &input.state, &probe.run, dir, &[], true)?;
@@ -203,6 +299,7 @@ pub fn run(ctx: &Ctx, repo: &Repo, input: &Input, selected: Option<&str>) -> Res
             let mut check = serde_json::to_value(&result)?;
             check["command"] = json!(probe.run.join(" "));
             check["definition"] = serde_json::to_value(&probe)?;
+            check["probes"] = manifest.clone();
             let mut rec = crate::cmd::attest::record(repo, &input.state, "check", &serde_json::to_vec(&check)?)?;
             rec.states.push(state.clone());
             rec.data["check"] = check;
@@ -322,11 +419,19 @@ fn metrics(value: &Value) -> Result<BTreeMap<String, f64>> {
 pub struct Behavior {
     pub base: String,
     pub head: String,
+    pub base_source: String,
+    pub head_source: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub base_views: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub head_views: Vec<String>,
     pub probes: Vec<Value>,
 }
 pub fn diff(repo: &Repo, base: &Input, head: &Input) -> Result<Behavior> {
-    let old = definitions(repo, base)?;
-    let new = definitions(repo, head)?;
+    shared_outputs(repo, &base.layers)?;
+    shared_outputs(repo, &head.layers)?;
+    let old = comparison_definitions(repo, base)?;
+    let new = comparison_definitions(repo, head)?;
     let names: BTreeSet<_> = old.keys().chain(new.keys()).collect();
     let mut probes = Vec::new();
     for name in names {
@@ -346,7 +451,15 @@ pub fn diff(repo: &Repo, base: &Input, head: &Input) -> Result<Behavior> {
             json!({"probe":name,"status":if changes.is_empty() && a.exit == b.exit {"unchanged"}else{"changed"},"base":a,"head":b,"exit_changed":a.exit != b.exit,"changes":changes}),
         );
     }
-    Ok(Behavior { base: base.subject.id.clone(), head: head.subject.id.clone(), probes })
+    Ok(Behavior {
+        base: base.subject.id.clone(),
+        head: head.subject.id.clone(),
+        base_source: source_status(repo, base).into(),
+        head_source: source_status(repo, head).into(),
+        base_views: vec![],
+        head_views: vec![],
+        probes,
+    })
 }
 fn compare(old: &BTreeMap<String, FileData>, new: &BTreeMap<String, FileData>, probe: &Probe) -> Result<Vec<Value>> {
     let paths: BTreeSet<_> = old.keys().chain(new.keys()).collect();
@@ -432,6 +545,20 @@ fn number_changes(a: Option<&Value>, b: Option<&Value>, noise: f64) -> Result<Ve
     Ok(out)
 }
 pub fn print(ctx: &Ctx, behavior: &Behavior) {
+    let views: BTreeSet<_> = behavior.base_views.iter().chain(&behavior.head_views).collect();
+    if !views.is_empty() {
+        outln!(
+            ctx,
+            "  results exist for views: {}; use layr probe diff views/<a> views/<b>",
+            views.into_iter().cloned().collect::<Vec<_>>().join(", ")
+        );
+    }
+    if behavior.base_source != "available" {
+        outln!(ctx, "  base: {}", behavior.base_source);
+    }
+    if behavior.head_source != "available" {
+        outln!(ctx, "  head: {}", behavior.head_source);
+    }
     for p in &behavior.probes {
         outln!(ctx, "  {}: {}", p["probe"].as_str().unwrap_or(""), p["status"].as_str().unwrap_or(""));
         if p["exit_changed"] == true {
@@ -462,7 +589,41 @@ pub fn change_behavior(repo: &Repo, state: &crate::model::StateRec) -> Result<Be
     };
     let target = repo.line(target)?;
     let base = repo.merge_base(&target.head, &state.id)?.context("change and target have no common ancestor")?;
-    diff(repo, &resolve(repo, None, &base)?, &resolve(repo, None, &state.id)?)
+    let base = resolve(repo, None, &base)?;
+    let head = resolve(repo, None, &state.id)?;
+    let mut behavior = diff(repo, &base, &head)?;
+    let has_base = behavior.probes.iter().any(|p| p["base_run"] == true || p["base"].is_object());
+    let has_head = behavior.probes.iter().any(|p| p["head_run"] == true || p["head"].is_object());
+    if !has_base {
+        behavior.base_views = view_results(repo, &base.state)?;
+    }
+    if !has_head {
+        behavior.head_views = view_results(repo, &head.state)?;
+    }
+    Ok(behavior)
+}
+
+fn view_results(repo: &Repo, shared: &str) -> Result<Vec<String>> {
+    let mut views = BTreeSet::new();
+    for record in repo.p.db.records(usize::MAX >> 1)? {
+        if record.op != "view.save" || record.data["view"]["shared"].as_str() != Some(shared) {
+            continue;
+        }
+        let Some(id) = record.data["view_id"].as_str() else { continue };
+        let Ok(layers) = serde_json::from_value::<Vec<crate::overlay::Layer>>(record.data["view"]["layers"].clone()) else {
+            continue;
+        };
+        let input = Input { subject: Subject { kind: "view".into(), id: id.into() }, state: shared.into(), layers };
+        for (_, check) in active_checks(repo, &input)?.into_values() {
+            let Some(name) = check.data["check"]["probe"].as_str() else { continue };
+            let Ok(probe) = serde_json::from_value::<Probe>(check.data["check"]["definition"].clone()) else { continue };
+            if probe.validate(name).is_ok() && stored(repo, &input, name, &probe)?.is_some() {
+                views.insert(id.into());
+                break;
+            }
+        }
+    }
+    Ok(views.into_iter().collect())
 }
 
 #[cfg(test)]
@@ -471,6 +632,21 @@ mod tests {
     fn definition(kind: Kind) -> Probe {
         Probe { run: vec!["/bin/true".into()], outputs: vec!["out".into()], kind, noise: 0.05 }
     }
+    #[test]
+    fn private_layer_outputs_require_all_project_readers() {
+        use crate::access::{Policy, Role};
+        let project = Policy { access: BTreeMap::from([("group:10".into(), Role::Reader)]), ..Default::default() };
+        let mut overlay = Policy { access: BTreeMap::from([("user:42".into(), Role::Admin)]), ..Default::default() };
+        assert!(!readers_cover(&project, &overlay));
+        overlay.access.insert("group:10".into(), Role::Reader);
+        assert!(readers_cover(&project, &overlay));
+        overlay.deny.insert("user:50".into(), vec!["read".into()]);
+        assert!(!readers_cover(&project, &overlay));
+        overlay.deny.clear();
+        overlay.access.insert("*".into(), Role::Reader);
+        assert!(readers_cover(&project, &overlay));
+    }
+
     #[test]
     fn schema_requires_safe_outputs_and_argv() {
         let text = "[probe.test]\nrun=['echo','hello']\noutputs=['result']\n";
