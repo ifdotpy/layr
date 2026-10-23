@@ -20,7 +20,7 @@ chmod 755 executable
 l add -A
 l save -q
 auto=$(l rev-parse 'HEAD@{0}')
-l ref set pins/remote-auto "$auto" >/dev/null
+l ref set holds/remote-auto "$auto" >/dev/null
 l attest origin "$auto" >/dev/null
 l commit -m second -q
 second=$(l rev-parse HEAD)
@@ -45,8 +45,8 @@ has "restored file content" 'second state' "$(cat notes.txt)"
 eq "restored symlink" notes.txt "$(readlink link.txt)"
 ok "restored executable mode" test -x executable
 ok "first state remains readable" l show "$first:notes.txt"
-has "a live ref restores its Auto target without --auto" 'second state' "$(l show pins/remote-auto:notes.txt)"
-eq "attestations cross the store with their signed records" 1 "$(l attestations pins/remote-auto --kind origin --json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')"
+has "a live ref restores its Auto target without --auto" 'second state' "$(l show holds/remote-auto:notes.txt)"
+eq "attestations cross the store with their signed records" 1 "$(l attestations holds/remote-auto --kind origin --json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')"
 ok "local record verification after clone" l fsck
 ok "clone has a machine slot" l fsck --remote origin --files
 unset LAYR_PAPER_KEY_FILE
