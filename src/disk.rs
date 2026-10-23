@@ -346,7 +346,7 @@ pub fn run(args: &[String]) -> Result<i32> {
             .flag("--paper-key-stdin")
             .flag("--install")
             .flag("--remove")
-            .flag("-h|--help"),
+            .flag("--help|-h"),
         args,
     )?;
     if a.has("--help") {

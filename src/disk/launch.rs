@@ -22,7 +22,8 @@ pub(super) fn plist(exe: &Path, url: &str, listen: &str, cache: &Path, limit: u6
     ];
     let args = args.iter().map(|arg| format!("<string>{}</string>", super::webdav::xml(arg))).collect::<String>();
     let log = super::webdav::xml(&home.join("Library/Logs/layr-mount.log").display().to_string());
-    format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>Label</key><string>{LABEL}</string><key>ProgramArguments</key><array>{args}</array><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>StandardOutPath</key><string>{log}</string><key>StandardErrorPath</key><string>{log}</string></dict></plist>\n")
+    let home = super::webdav::xml(&home.display().to_string());
+    format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>Label</key><string>{LABEL}</string><key>ProgramArguments</key><array>{args}</array><key>EnvironmentVariables</key><dict><key>HOME</key><string>{home}</string></dict><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>StandardOutPath</key><string>{log}</string><key>StandardErrorPath</key><string>{log}</string></dict></plist>\n")
 }
 
 pub(super) fn install(url: &str, listen: &str, cache: &Path, limit: u64, home: &Path) -> Result<()> {
