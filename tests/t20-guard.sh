@@ -154,7 +154,7 @@ export LAYR_SOCKET="$T/layr.sock"
 DPID=$!
 trap 'kill $DPID 2>/dev/null; cleanup' EXIT
 for i in $(seq 1 50); do [ -S "$LAYR_SOCKET" ] && break; sleep 0.1; done
-as_writer() { runuser -u layr-guard -- env LAYR_SOCKET="$LAYR_SOCKET" LAYR_PROJECT=p LAYR_LINE=writer PATH=/usr/bin:/bin "$T/layr" "$@"; }
+as_writer() { (cd /tmp && runuser -u layr-guard -- env LAYR_SOCKET="$LAYR_SOCKET" LAYR_PROJECT=p LAYR_LINE=writer PATH=/usr/bin:/bin "$T/layr" "$@"); }
 ok 'the writer stages a file through the service' as_writer add public.txt
 OUT=$(as_writer commit -qm leak 2>&1)
 has 'the service checks the writer sources' 'public.txt:1' "$OUT"
