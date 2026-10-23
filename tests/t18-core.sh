@@ -33,7 +33,7 @@ eq 'prefix list' env/prod "$(l ref list env/ --json | python3 -c 'import json,sy
 for prefix in env release pins holds leases caches derived changes views attestations; do
     no "reserved line prefix $prefix" l branch "$prefix/name"
 done
-has 'views have an explicit error' 'views are not implemented' "$(l rev-parse views/unknown 2>&1)"
+has 'views reject malformed identifiers' 'invalid view id' "$(l rev-parse views/unknown 2>&1)"
 no 'synthetic revisions cannot be mutable refs' l ref set changes/other HEAD
 l ref set pins/cas "$S2" >/dev/null
 (l ref set pins/cas "$S1" --expect "$S2" >/dev/null 2>&1; echo $? > "$T/cas1") &

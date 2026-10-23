@@ -74,9 +74,22 @@ impl Repo<'_> {
         owner: u32,
         source: Option<&Line>,
         count: usize,
+        view: Option<&crate::overlay::View>,
     ) -> Result<Vec<Line>> {
-        let names = batch_names(prefix, count)?;
+        self.create_named_lines(ctx, batch_names(prefix, count)?, start, owner, source, view)
+    }
+
+    pub(crate) fn create_named_lines(
+        &self,
+        ctx: &Ctx,
+        names: Vec<String>,
+        start: &str,
+        owner: u32,
+        source: Option<&Line>,
+        view: Option<&crate::overlay::View>,
+    ) -> Result<Vec<Line>> {
         for name in &names {
+            crate::store::check_name("line", name)?;
             if self.p.db.line_by_name(name)?.is_some() || self.p.line_path(name).symlink_metadata().is_ok() {
                 bail!("a line named '{name}' already exists");
             }
@@ -95,9 +108,14 @@ impl Repo<'_> {
         let result = (|| -> Result<()> {
             snapshots(&self.state_root(start)?, &destinations)?;
             for (line, tmp) in lines.iter().zip(&destinations) {
-                let layers = match source {
-                    Some(s) if !self.p.is_overlay() => self.inherit_layers(ctx, s, &line.id, owner)?,
-                    _ => Vec::new(),
+                let layers = if let Some(view) = view {
+                    self.prepare_view_layers(ctx, line, view)?;
+                    view.layers.clone()
+                } else {
+                    match source {
+                        Some(s) if !self.p.is_overlay() => self.inherit_layers(ctx, s, &line.id, owner)?,
+                        _ => Vec::new(),
+                    }
                 };
                 self.put_layers(tmp, &layers, self.own(line))?;
                 self.prepare_at(line, start, tmp)?;

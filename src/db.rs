@@ -1311,3 +1311,57 @@ mod tests {
         assert_eq!(db.check_exit(state, &["true".into()], Some(0)).unwrap(), Some(0));
     }
 }
+
+// Addressable view descriptors stay in their signed records; no derived schema is needed.
+impl Db {
+    pub fn saved_view(&self, id: &str) -> Result<Option<crate::overlay::View>> {
+        let raw: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT json_extract(raw,'$.r.data.view') FROM records WHERE op='view.save'
+             AND json_extract(raw,'$.r.data.view_id')=?1 ORDER BY time,seq LIMIT 1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        raw.map(|raw| Ok(serde_json::from_str(&raw)?)).transpose()
+    }
+}
+
+#[cfg(test)]
+mod view_tests {
+    use super::*;
+
+    #[test]
+    fn saved_descriptors_and_checks_accept_view_subjects() -> Result<()> {
+        let path = std::env::temp_dir().join(format!("layr-view-db-{}", crate::ids::new_id()));
+        std::fs::create_dir(&path)?;
+        let db = Db::open(&path.join("test.sqlite"))?;
+        let view = crate::overlay::View::new("01a12290-0000-7000-8000-000000000003".into(), Vec::new());
+        let subject = view.id()?;
+        let raw = serde_json::json!({"r":{"data":{"view_id":subject,"view":view}}});
+        db.conn.execute("INSERT INTO records(id,op,raw,time,seq) VALUES('view','view.save',?1,1,1)", params![raw.to_string()])?;
+        assert_eq!(db.saved_view(&subject)?, Some(view));
+        let argv = vec!["sh".to_string(), "-c".into(), "check argument".into()];
+        for (id, code, ord) in [("first", 7, "1"), ("second", 0, "2")] {
+            let raw = serde_json::json!({"r":{"data":{"check":{"argv":argv,"command":"sh -c check argument","exit":code}}}});
+            db.conn.execute("INSERT INTO records(id,op,raw) VALUES(?1,'attest',?2)", params![id, raw.to_string()])?;
+            db.conn.execute(
+                "INSERT INTO attestations(id,subject,kind,machine,uid,ord) VALUES(?1,?2,'check','machine',1,?3)",
+                params![id, subject, ord],
+            )?;
+        }
+        assert_eq!(db.check_exit(&subject, &argv, None)?, Some(0));
+        assert_eq!(db.check_exit(&subject, &argv, Some(7))?, Some(7));
+        assert_eq!(db.check_exit(&subject, &["sh -c check argument".into()], None)?, None);
+        assert_eq!(db.check_exit(&"0".repeat(64), &argv, None)?, None);
+        db.conn.execute(
+            "INSERT INTO attestation_revocations(id,target,machine,uid,ord) VALUES('revoke','second','machine',1,'3')",
+            [],
+        )?;
+        assert_eq!(db.check_exit(&subject, &argv, None)?, Some(7));
+        drop(db);
+        std::fs::remove_dir_all(path)?;
+        Ok(())
+    }
+}
