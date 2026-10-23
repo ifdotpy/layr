@@ -824,7 +824,7 @@ mod tests {
             ids.push(id);
         }
         drop(repo);
-        let peer_root = base.join("b");
+        let peer_root = std::path::PathBuf::from(std::env::var_os("LAYR_TEST_AUX_PEER_ROOT").expect("LAYR_TEST_AUX_PEER_ROOT"));
         let command = vec![
             "env".into(),
             format!("LAYR_ROOT={}", peer_root.display()),
