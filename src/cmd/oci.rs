@@ -4,7 +4,7 @@ use super::{exit, here};
 use crate::args::{parse, Spec};
 use crate::ctx::Ctx;
 use crate::oci::{self, client::Registry};
-use anyhow::Result;
+use anyhow::{bail, Result};
 use serde_json::json;
 
 /// Temporary dispatch hook until the remote workstream integrates OCI transport selection.
@@ -79,6 +79,8 @@ fn push_report(ctx: &Ctx, url: &str, rev: &str, runnable: Option<&str>, remote: 
     h.repo.require(ctx, "export")?;
     let _lock = h.repo.p.lock()?;
     let e = oci::export(ctx, &h.repo, rev, h.line.as_ref(), runnable)?;
+    // An image carries the selected tree only, so check its whole contents.
+    crate::secrets::check_contents(ctx, &h.repo, &e.state)?;
     let cfg = |key: &str| -> Result<Option<String>> {
         Ok(match remote {
             Some(n) => h
@@ -97,8 +99,15 @@ fn push_report(ctx: &Ctx, url: &str, rev: &str, runnable: Option<&str>, remote: 
                 .config_bool(&format!("cloud.remote.{n}.insecure"), h.repo.p.config_bool(&format!("remote.{n}.insecure"), false))
         })
         .unwrap_or(false);
-    let username = ctx.env("LAYR_OCI_USERNAME").map(str::to_owned).or(cfg("username")?);
-    let password = ctx.env("LAYR_OCI_PASSWORD").map(str::to_owned).or(cfg("password")?);
+    // Credentials come only from the caller's environment: project settings are signed records
+    // that every machine and every store remote receives.
+    for key in ["username", "password"] {
+        if cfg(key)?.is_some() {
+            bail!("remote setting '{key}' is not used: set LAYR_OCI_USERNAME and LAYR_OCI_PASSWORD in the environment and remove the setting");
+        }
+    }
+    let username = ctx.env("LAYR_OCI_USERNAME").map(str::to_owned);
+    let password = ctx.env("LAYR_OCI_PASSWORD").map(str::to_owned);
     let mut registry = Registry::new(url, insecure, username, password)?;
     let repo = registry.repository.clone();
     let tag = oci::revision_tag(&h.repo, rev, &e.state)?;

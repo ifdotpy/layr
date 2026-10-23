@@ -54,8 +54,11 @@ l init oci --from "$T/src" -q >/dev/null
 cd "$LAYR_ROOT/projects/oci/lines/main"
 l remote add external "oci://127.0.0.1:$REGPORT/oci/app"
 l config remote.external.insecure true
-l config remote.external.username test
 l config remote.external.password test
+no "a registry password in project settings is refused" l push external main --runnable app
+has "the refusal names the environment variables" 'LAYR_OCI_PASSWORD' "$(l push external main --runnable app 2>&1)"
+l config --unset remote.external.password
+export LAYR_OCI_USERNAME=test LAYR_OCI_PASSWORD=test
 FIRST=$(l push external main --runnable app --json)
 IMAGE=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["image"])' "$FIRST")
 CHART=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["chart"])' "$FIRST")
@@ -82,8 +85,6 @@ VALUES=$(tar -xzOf "$T/app-1.2.3.tgz" app/values.yaml)
 has "the chart uses the same image digest" "$IMAGE" "$VALUES"
 l remote add bearer "oci://127.0.0.1:$PROXYPORT/oci/app"
 l config remote.bearer.insecure true
-l config remote.bearer.username test
-l config remote.bearer.password test
 BEARER=$(l push bearer main --runnable app --json)
 eq "Bearer auth exports the same digest" "$IMAGE" "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["image"])' "$BEARER")"
 l config registry.listen "127.0.0.1:$LAYRPORT"

@@ -335,7 +335,8 @@ layr push images main --runnable app --json
 The remote URL names the image repository.
 With one runnable, `--runnable` is optional.
 For credentials, set `LAYR_OCI_USERNAME` and `LAYR_OCI_PASSWORD` in the command environment.
-The client also reads `remote.<name>.username` and `remote.<name>.password`.
+Credentials come only from these variables. Project settings are signed records that every machine and store remote receives, so the settings `remote.<name>.username` and `remote.<name>.password` are refused.
+A push checks the whole exported tree with the secret detector before any upload.
 The client supports Basic and Bearer authentication through the [OCI Distribution API](https://github.com/opencontainers/distribution-spec/blob/v1.1.1/spec.md).
 HTTPS is the default.
 For a local test registry, set `remote.<name>.insecure` to `true` to use HTTP.
