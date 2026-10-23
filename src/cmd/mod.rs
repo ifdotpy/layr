@@ -9,6 +9,7 @@ pub mod history;
 pub mod mergecmd;
 pub mod oci;
 pub mod overlaycmd;
+pub mod queue;
 pub mod refs;
 pub mod remote;
 pub mod replicate;
@@ -191,6 +192,7 @@ Remotes:
    remote add, list, self, remove, trust; sync, fetch, pull, push, clone
 Git bridge:
    git remote, fetch, pull, push, clone, sync
+   queue add/list/remove/run
 Overlays (files with their own readers and history, shown in lines):
    overlay create, list, readers, use, move, log, show, diff, grep, ls-files
 Projects and machines:
@@ -266,6 +268,7 @@ pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
         "approve" => admin::approve(ctx, &rest),
         "approvals" | "checks" => Err(exit(1, "this command was removed; use 'layr attestations <rev> [--kind <kind>]'")),
         "ref" => refs::refs(ctx, &rest),
+        "queue" => queue::queue(ctx, &rest),
         "attest" => attest::attest(ctx, &rest),
         "attestations" => attest::attestations(ctx, &rest),
         "change" => change::change(ctx, &rest),

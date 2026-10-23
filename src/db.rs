@@ -4,7 +4,7 @@
 //! derived tables can be rebuilt from the records at any time.
 
 use crate::ids;
-use crate::model::{Attestation, Line, Record, RefChange, RefState, StateKind, StateRec, Subject};
+use crate::model::{Attestation, Line, QueueChange, QueueEntry, Record, RefChange, RefState, StateKind, StateRec, Subject};
 use anyhow::{anyhow, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS ref_history (id TEXT PRIMARY KEY, name TEXT, rec TEXT
 CREATE INDEX IF NOT EXISTS ref_history_name ON ref_history(name, ord);
 CREATE TABLE IF NOT EXISTS attestations (id TEXT PRIMARY KEY, subject TEXT, kind TEXT, rec TEXT, machine TEXT, uid INTEGER, local INTEGER DEFAULT 0, ord TEXT);
 CREATE INDEX IF NOT EXISTS attestations_subject ON attestations(subject, kind, ord);
+CREATE TABLE IF NOT EXISTS queue_entries (id TEXT PRIMARY KEY, rec TEXT, deleted INTEGER DEFAULT 0, ord TEXT);
 CREATE TABLE IF NOT EXISTS attestation_revocations (id TEXT, target TEXT, machine TEXT, uid INTEGER, ord TEXT, PRIMARY KEY(id,target));
 "#;
 
@@ -66,6 +67,7 @@ const DERIVED: &[&str] = &[
     "ref_history",
     "attestations",
     "attestation_revocations",
+    "queue_entries",
 ];
 
 /// Derived tables of older versions, dropped on migration.
@@ -168,7 +170,7 @@ impl Db {
              DELETE FROM tags; DELETE FROM remote_refs; DELETE FROM git_map; DELETE FROM exports; DELETE FROM checks;
              DELETE FROM machines; DELETE FROM config;
              DELETE FROM trusted; DELETE FROM approvals; DELETE FROM refs; DELETE FROM ref_history;
-             DELETE FROM attestations; DELETE FROM attestation_revocations;",
+             DELETE FROM attestations; DELETE FROM attestation_revocations; DELETE FROM queue_entries;",
         )?;
         Ok(())
     }
@@ -294,6 +296,19 @@ impl Db {
                 }
             }
         }
+        if let Some(value) = rec.data.get("queue_change") {
+            let change: QueueChange = serde_json::from_value(value.clone())?;
+            tx.execute(
+                "INSERT INTO queue_entries(id,rec,deleted,ord) VALUES(?1,?2,?3,?4)
+                ON CONFLICT(id) DO UPDATE SET rec=?2,deleted=?3,ord=?4 WHERE excluded.ord>queue_entries.ord",
+                params![
+                    change.id,
+                    change.after.as_ref().map(serde_json::to_string).transpose()?,
+                    change.after.is_none() as i64,
+                    ord
+                ],
+            )?;
+        }
         self.derive_attestation(rec, !foreign)?;
         if !foreign {
             if let Some(a) = rec.data.get("attestation") {
@@ -302,7 +317,7 @@ impl Db {
                         tx.execute("UPDATE approvals SET withdrawn=1 WHERE id=?1 AND uid=?2", params![id, rec.actor.uid as i64])?;
                     }
                 }
-                if a["kind"] == "approval" {
+                if a["kind"] == "approval" && rec.data.get("declassify").is_none() {
                     tx.execute(
                         "INSERT OR IGNORE INTO approvals(id,state,uid,time) VALUES(?1,?2,?3,?4)",
                         params![rec.id, a["subject"]["id"].as_str(), rec.actor.uid as i64, rec.time],
@@ -554,7 +569,8 @@ impl Db {
     pub fn approvals(&self, state: &str) -> Result<Vec<(u32, i64)>> {
         let mut st = self.conn.prepare(
             "SELECT a.uid,MAX(json_extract(a.rec,'$.time')) FROM attestations a
-            WHERE (a.local=1 OR EXISTS (SELECT 1 FROM approvals p WHERE p.id=a.id)) AND a.subject=?1 AND a.kind='approval' AND NOT EXISTS
+            WHERE (a.local=1 OR EXISTS (SELECT 1 FROM approvals p WHERE p.id=a.id)) AND a.subject=?1 AND a.kind='approval'
+            AND NOT EXISTS (SELECT 1 FROM records scoped WHERE scoped.id=a.id AND json_type(scoped.raw,'$.r.data.declassify') IS NOT NULL) AND NOT EXISTS
             (SELECT 1 FROM attestation_revocations r WHERE r.target=a.id AND r.machine=a.machine AND r.uid=a.uid AND r.ord>a.ord)
             GROUP BY a.machine,a.uid ORDER BY a.uid",
         )?;
@@ -690,6 +706,7 @@ impl Db {
         Ok(v)
     }
 
+    /// Match command arguments, not their display text. With no requested exit, use the newest result.
     pub fn check_exit(&self, state: &str, argv: &[String], wanted_exit: Option<i64>) -> Result<Option<i64>> {
         let mut statement=self.conn.prepare("SELECT COALESCE(json_extract(r.raw,'$.r.data.check'),json_extract(r.raw,'$.r.data'))
             FROM attestations a JOIN records r ON r.id=a.id WHERE a.subject=?1 AND a.kind='check'
@@ -820,6 +837,20 @@ impl Db {
         let mut st = self.conn.prepare("SELECT rec FROM ref_history WHERE name=?1 ORDER BY ord DESC,id DESC")?;
         let raw = st.query_map(params![name], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
         raw.into_iter().map(|r| Ok(serde_json::from_str(&r)?)).collect()
+    }
+
+    pub fn queue_entries(&self, target: Option<&str>) -> Result<Vec<QueueEntry>> {
+        let mut st=self.conn.prepare("SELECT rec FROM queue_entries WHERE deleted=0 AND (?1 IS NULL OR json_extract(rec,'$.target_line')=?1) ORDER BY json_extract(rec,'$.time'),id")?;
+        let rows = st.query_map(params![target], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter().map(|raw| Ok(serde_json::from_str(&raw)?)).collect()
+    }
+
+    pub fn queue_entry(&self, id: &str) -> Result<Option<QueueEntry>> {
+        let raw: Option<String> = self
+            .conn
+            .query_row("SELECT rec FROM queue_entries WHERE id=?1 AND deleted=0", params![id], |r| r.get(0))
+            .optional()?;
+        raw.map(|raw| Ok(serde_json::from_str(&raw)?)).transpose()
     }
 
     pub fn change_versions(&self, id: &str) -> Result<Vec<StateRec>> {
@@ -1197,5 +1228,86 @@ mod tests {
         other.data = serde_json::json!({"attestation":Attestation {format:1,attestation_id:other.id.clone(),subject:Subject{kind:"state".into(),id:state.into()},change_id:None,kind:"revoke".into(),payload_digest:"0".repeat(64),payload_ref:None,signer:machine.into(),time:2},"revokes":[first.id]});
         db.derive(&other, &|_| true, machine).unwrap();
         assert_eq!(db.approvals(state).unwrap(), vec![(0, 1)]);
+    }
+    #[test]
+    fn scoped_declassification_does_not_count_as_subject_approval() {
+        let db = memory();
+        let state = "01a12290-0000-7000-8000-000000000003";
+        let machine = "01a12290-0000-7000-8000-00000000aaaa";
+        let key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+        let mut rec = state_record(1, state, vec![]);
+        rec.states.clear();
+        rec.op = "attest".into();
+        rec.data = serde_json::json!({"attestation":Attestation {format:1,attestation_id:rec.id.clone(),subject:Subject{kind:"state".into(),id:state.into()},change_id:None,kind:"approval".into(),payload_digest:"0".repeat(64),payload_ref:None,signer:machine.into(),time:1},"declassify":{"path":"a:1","hmac":"digest"}});
+        let raw = crate::oplog::sign_line(&rec, &key).unwrap();
+        db.insert_record(&rec, &raw).unwrap();
+        db.derive(&rec, &|_| true, machine).unwrap();
+        assert!(db.approvals(state).unwrap().is_empty());
+        assert_eq!(db.conn.query_row("SELECT COUNT(*) FROM approvals", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        assert_eq!(db.attestations(state, Some("approval")).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn queue_status_replay_is_order_independent() {
+        let db = memory();
+        let id = "01a12290-0000-7000-8000-000000000003";
+        let entry = QueueEntry {
+            id: id.into(),
+            into: "main".into(),
+            target_line: "01a12290-0000-7000-8000-000000000004".into(),
+            state: "01a12290-0000-7000-8000-000000000005".into(),
+            change_id: None,
+            added_by: 0,
+            time: 1,
+            status: "pending".into(),
+            attempts: 0,
+            result: None,
+            reason: None,
+        };
+        let event = |seq, status: Option<&str>| {
+            let mut rec = state_record(seq, id, vec![]);
+            rec.states.clear();
+            rec.op = "queue.result".into();
+            let after = status.map(|status| {
+                let mut entry = entry.clone();
+                entry.status = status.into();
+                entry
+            });
+            rec.data = serde_json::json!({"queue_change":QueueChange{id:id.into(),before:None,after}});
+            rec
+        };
+        db.derive(&event(3, Some("done")), &|_| true, "local").unwrap();
+        db.derive(&event(1, Some("pending")), &|_| true, "local").unwrap();
+        assert_eq!(db.queue_entry(id).unwrap().unwrap().status, "done");
+        db.derive(&event(4, None), &|_| true, "local").unwrap();
+        assert!(db.queue_entry(id).unwrap().is_none());
+        db.derive(&event(5, Some("pending")), &|_| true, "local").unwrap();
+        assert_eq!(db.queue_entries(Some(&entry.target_line)).unwrap().len(), 1);
+    }
+    #[test]
+    fn check_reuse_preserves_argument_boundaries() {
+        let db = memory();
+        let state = "01a12290-0000-7000-8000-000000000003";
+        let machine = "01a12290-0000-7000-8000-00000000aaaa";
+        let key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+        let insert = |seq, data: serde_json::Value| {
+            let mut rec = state_record(seq, state, vec![]);
+            rec.states.clear();
+            rec.op = "check".into();
+            rec.data = data;
+            let raw = crate::oplog::sign_line(&rec, &key).unwrap();
+            db.insert_record(&rec, &raw).unwrap();
+            db.derive(&rec, &|_| true, machine).unwrap();
+        };
+        insert(1, serde_json::json!({"state":state,"command":"sh -c exit 1","argv":["sh","-c","exit 1"],"exit":1}));
+        assert_eq!(db.check_exit(state, &["sh".into(), "-c".into(), "exit 1".into()], None).unwrap(), Some(1));
+        assert_eq!(db.check_exit(state, &["sh".into(), "-c".into(), "exit".into(), "1".into()], None).unwrap(), None);
+        insert(2, serde_json::json!({"state":state,"command":"sh -c true","exit":0}));
+        assert_eq!(db.check_exit(state, &["sh".into(), "-c".into(), "true".into()], None).unwrap(), None);
+        insert(3, serde_json::json!({"state":state,"command":"true","exit":0}));
+        assert_eq!(db.check_exit(state, &["true".into()], None).unwrap(), Some(0));
+        insert(4, serde_json::json!({"state":state,"command":"true","argv":["true"],"exit":1}));
+        assert_eq!(db.check_exit(state, &["true".into()], None).unwrap(), Some(1));
+        assert_eq!(db.check_exit(state, &["true".into()], Some(0)).unwrap(), Some(0));
     }
 }

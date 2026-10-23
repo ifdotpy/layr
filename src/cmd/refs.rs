@@ -48,11 +48,9 @@ pub fn refs(ctx: &Ctx, args: &[String]) -> Result<i32> {
             if !set && a.has("--ttl") {
                 bail!("--ttl is only valid for ref set");
             }
-            repo.require(ctx, "line.manage")?;
             let name = &a.pos[1];
-            const PREFIXES: &[&str] = &["env/", "release/", "pins/", "holds/", "leases/", "caches/", "derived/"];
-            if !PREFIXES.iter().any(|p| name.starts_with(p)) {
-                bail!("mutable ref names must start with one of: {}", PREFIXES.join(", "));
+            if !crate::model::ref_namespace(name) {
+                bail!("mutable ref names must start with one of: {}", crate::model::REF_PREFIXES.join(", "));
             }
             if !crate::model::is_ref(name) {
                 bail!("invalid ref name '{name}'");
@@ -84,6 +82,7 @@ pub fn refs(ctx: &Ctx, args: &[String]) -> Result<i32> {
             } else {
                 None
             };
+            authorize_update(ctx, repo, name, before.as_ref(), after.as_ref(), a.has("--expect"))?;
             let change = RefChange { name: name.clone(), before, after };
             let mut rec = Record::new(if set { "ref.set" } else { "ref.delete" });
             rec.data = serde_json::json!({"ref_change": change});
@@ -127,4 +126,56 @@ mod tests {
             assert!(ttl_ms(value).is_err(), "{value}");
         }
     }
+}
+
+/// Ref checks consume signed evidence. They never execute a configured command.
+pub fn authorize_update(
+    ctx: &Ctx,
+    repo: &crate::repo::Repo,
+    name: &str,
+    before: Option<&RefState>,
+    after: Option<&RefState>,
+    expect: bool,
+) -> Result<()> {
+    let policy = repo.policy();
+    let rule = match policy.rule_for(name) {
+        Some(rule) => rule,
+        None => return repo.require(ctx, "line.manage"),
+    };
+    let who = crate::repo::Repo::who(ctx);
+    if let Some(principal) = policy.denied_by(&who, "line.manage") {
+        bail!("permission denied: a deny rule for {} takes ref updates away", crate::access::show_principal(&principal));
+    }
+    let role = policy.role(&who);
+    if role < rule.update {
+        bail!("ref '{name}' needs the update role {}; you are {}", rule.update.name(), role.name());
+    }
+    if rule.expect && !expect {
+        bail!("ref '{name}' is protected: add --expect <state>");
+    }
+    let target = after.or(before).ok_or_else(|| anyhow::anyhow!("ref '{name}' has no target"))?;
+    if rule.approvals > 0 {
+        let count = crate::access::approval_count(repo, &policy, &rule, before.map(|r| r.target.as_str()), &target.target)?;
+        if count < (rule.approvals as usize) {
+            bail!(
+                "ref '{name}' needs {} approval(s) of exactly state {} from allowed users other than its authors; it has {count}",
+                rule.approvals,
+                ids::short(&target.target)
+            );
+        }
+    }
+    for check in &rule.check {
+        let command =
+            repo.p.config_value(&format!("check.{check}"))?.and_then(|v| v.as_str().map(String::from)).ok_or_else(|| {
+                anyhow::anyhow!("check '{check}' of ref '{name}' is not defined (layr config check.{check} '<command>')")
+            })?;
+        let argv = vec!["sh".into(), "-c".into(), command.clone()];
+        if repo.p.db.check_exit(&target.target, &argv, Some(0))?.is_none() {
+            bail!(
+                "ref '{name}' needs a passing check '{check}' for exactly state {} and command '{command}'; run layr try first",
+                ids::short(&target.target)
+            );
+        }
+    }
+    Ok(())
 }

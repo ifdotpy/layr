@@ -292,6 +292,9 @@ fn periodic(root: &Path, hourly: bool) {
                 let _ = crate::fsutil::atomic_write(&checks_path, &data, 0o600);
             }
         }
+        if let Err(error) = crate::cmd::queue::run_configured(&ctx, &repo, None) {
+            eprintln!("layr queue ({name}): {error:#}");
+        }
         if hourly {
             // Also repairs the git store of a project from an earlier layr, soon after a start.
             if let Ok(_lock) = repo.p.lock() {

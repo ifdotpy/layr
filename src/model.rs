@@ -97,6 +97,12 @@ pub struct StateRec {
     pub cache_platform: Option<String>,
 }
 
+pub const REF_PREFIXES: &[&str] = &["env/", "release/", "pins/", "holds/", "leases/", "caches/", "derived/"];
+
+pub fn ref_namespace(name: &str) -> bool {
+    REF_PREFIXES.iter().any(|p| name.starts_with(p))
+}
+
 pub const RESERVED_PREFIXES: &[&str] =
     &["env/", "release/", "pins/", "holds/", "leases/", "caches/", "derived/", "changes/", "views/", "attestations/"];
 
@@ -117,6 +123,32 @@ pub struct RefChange {
     pub name: String,
     pub before: Option<RefState>,
     pub after: Option<RefState>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QueueEntry {
+    pub id: String,
+    pub into: String,
+    pub target_line: String,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_id: Option<String>,
+    pub added_by: u32,
+    pub time: i64,
+    pub status: String,
+    #[serde(default)]
+    pub attempts: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QueueChange {
+    pub id: String,
+    pub before: Option<QueueEntry>,
+    pub after: Option<QueueEntry>,
 }
 
 pub const ATTESTATION_KINDS: &[&str] = &["check", "approval", "origin", "import", "quarantine", "revoke"];
@@ -325,6 +357,23 @@ pub fn validate(r: &Record) -> anyhow::Result<()> {
         }
     }
     let d = &r.data;
+    if let Some(value) = d.get("queue_change") {
+        let change: QueueChange = serde_json::from_value(value.clone())?;
+        uuid("queue entry", &change.id)?;
+        for entry in [&change.before, &change.after].into_iter().flatten() {
+            if entry.id != change.id || !is_name(&entry.into) || !["pending", "done", "failed"].contains(&entry.status.as_str()) {
+                bail!("invalid queue entry");
+            }
+            uuid("queued state", &entry.state)?;
+            uuid("queue target line", &entry.target_line)?;
+            if let Some(id) = &entry.change_id {
+                uuid("queue change", id)?;
+            }
+            if let Some(id) = &entry.result {
+                uuid("queue result", id)?;
+            }
+        }
+    }
     if let Some(v) = d.get("ref_change") {
         let ch: RefChange = serde_json::from_value(v.clone())?;
         if !is_ref(&ch.name) {
