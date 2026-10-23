@@ -21,6 +21,10 @@ the programs that use it. Programs built on top of it use only its public comman
 - Linux with btrfs for the store (a loop file is fine), `btrfs-progs`, `git`, `zstd`.
 - Root for the service: snapshots into protected folders and `btrfs send` need it.
 
+## AWS deployment
+
+Use the [AWS runbook](infra/aws/README.md) to deploy a store, gateway, and executor.
+
 ## Build and test
 
 ```sh
