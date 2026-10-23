@@ -247,6 +247,7 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
     if r.lines.is_empty() && !repo.is_admin(ctx) && r.actor.uid != ctx.caller.uid {
         return Err(exit(1, "permission denied: only the project admin or the user who made it can undo this operation"));
     }
+    let _queue_lock = if r.data.get("queue_change").is_some() { Some(super::queue::require_lock(repo)?) } else { None };
     let _lock = repo.p.lock()?;
     let mut rec = Record::new("undo");
     rec.data = serde_json::json!({"undo": r.id, "op": r.op});
@@ -259,8 +260,23 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
         if let Some(before) = &ch.before {
             repo.state_root(&before.target)?;
         }
+        if r.data.get("queue_change").is_none() {
+            super::refs::authorize_update(ctx, repo, &ch.name, current.as_ref(), ch.before.as_ref(), true)?;
+        }
         let inverse = crate::model::RefChange { name: ch.name, before: current, after: ch.before };
         rec.data["ref_change"] = serde_json::to_value(inverse)?;
+    }
+    if let Some(value) = r.data.get("queue_change") {
+        let change: crate::model::QueueChange = serde_json::from_value(value.clone())?;
+        let current = repo.p.db.queue_entry(&change.id)?;
+        if !force && current != change.after {
+            bail!("queue entry '{}' changed after this operation", change.id);
+        }
+        if let Some(before) = &change.before {
+            repo.state_root(&before.state)?;
+        }
+        rec.data["queue_change"] =
+            serde_json::to_value(crate::model::QueueChange { id: change.id, before: current, after: change.before })?;
     }
     // A commit that changed overlays: their lines move back and the line shows their earlier
     // states again; the changes stay in the working folder, as for the shared set. The overlay
@@ -595,7 +611,7 @@ fn run_check_in(
             c.status().map_err(|e| exit(127, format!("layr try: cannot run '{}' as user {}: {e}", argv[0], ctx.caller.user)))?;
         let code = st.code().unwrap_or(128);
         let _lock = repo.p.lock()?;
-        let result = serde_json::json!({"command":command,"exit":code,"seconds":started.elapsed().as_secs_f64()});
+        let result = serde_json::json!({"command":command,"exit":code,"seconds":started.elapsed().as_secs_f64(),"argv":argv});
         let mut rec = super::attest::record(repo, state, "check", &serde_json::to_vec(&result)?)?;
         rec.data["check"] = result;
         repo.commit_record(ctx, rec)?;
@@ -1248,6 +1264,12 @@ pub fn config(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let (k, v) = (&a.pos[0], a.pos[1..].join(" "));
     let val: serde_json::Value = serde_json::from_str(&v).unwrap_or(serde_json::Value::String(v.clone()));
+    if k == "queue.run" && !val.is_null() {
+        let value = val.as_str().ok_or_else(|| exit(128, "queue.run must be a comma-separated list of line names"))?;
+        for name in value.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            crate::store::check_name("line", name)?;
+        }
+    }
     set_config(ctx, repo, k, val)?;
     if k == "backup.dir" {
         // The service writes its own backups into this folder as the user who named it.
@@ -1441,6 +1463,20 @@ pub fn protect(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 let checks = r.check.join(",");
                 match rule {
                     Some(x) => {
+                        if crate::model::ref_namespace(p) {
+                            let from =
+                                x.approvers.iter().map(|key| crate::access::show_principal(key)).collect::<Vec<_>>().join(",");
+                            outln!(
+                                ctx,
+                                "{p}\tupdate {}\texpect {}\tcheck {}\tapprovals {} from {}",
+                                x.update.name(),
+                                x.expect,
+                                if checks.is_empty() { "-" } else { &checks },
+                                x.approvals,
+                                if from.is_empty() { "maintainers" } else { &from }
+                            );
+                            continue;
+                        }
                         let paths: Vec<String> = x.paths.iter().map(|(p, r)| format!("{p}={}", r.name())).collect();
                         outln!(
                             ctx,
@@ -1470,6 +1506,10 @@ pub fn protect(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         Some(p) => p.clone(),
     };
+    if crate::model::ref_namespace(&pattern) && ["--direct", "--no-direct", "--rewrite", "--path"].iter().any(|flag| a.has(flag))
+    {
+        bail!("ref protection does not accept --direct, --no-direct, --rewrite or --path");
+    }
     repo.require(ctx, "access")?;
     let _lock = repo.p.lock()?;
     let mut all = repo.policy().protect;

@@ -7,6 +7,7 @@ pub mod change;
 pub mod history;
 pub mod mergecmd;
 pub mod overlaycmd;
+pub mod queue;
 pub mod refs;
 pub mod remote;
 pub mod replicate;
@@ -185,6 +186,7 @@ Lines and states:
    branch, switch, checkout, tag, merge, cherry-pick, revert, rebase
    save, undo, op, try, adopt
    ref set/list/log/delete, attest, attestations, change list/show/log/diff
+   queue add/list/remove/run
 Remote (git bridge):
    remote, fetch, pull, push, clone, git-sync
 Overlays (files with their own readers and history, shown in lines):
@@ -261,6 +263,7 @@ pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
         "approve" => admin::approve(ctx, &rest),
         "approvals" | "checks" => Err(exit(1, "this command was removed; use 'layr attestations <rev> [--kind <kind>]'")),
         "ref" => refs::refs(ctx, &rest),
+        "queue" => queue::queue(ctx, &rest),
         "attest" => attest::attest(ctx, &rest),
         "attestations" => attest::attestations(ctx, &rest),
         "change" => change::change(ctx, &rest),

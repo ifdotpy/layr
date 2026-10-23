@@ -203,6 +203,7 @@ without a checkout.
 | copies        | `export <folder>`                                                                              |
 | overlays      | `overlay create <name> [--readers <principals>] [--mode shared\|follow]`, `overlay list`, `overlay readers`, `overlay use [--add\|--remove\|--none] <names>`, `overlay move [--purge] <name> <paths>`, `overlay log\|show\|diff\|grep\|ls-files <name>` |
 | refs          | `ref set <name> <rev> [--expect <rev>] [--ttl <dur>]`, `ref list [<prefix>]`, `ref log <name>`, `ref delete <name> [--expect <rev>]` |
+| queue         | `queue add <rev> [--into <line>]`, `queue list [--into <line>] [--json]`, `queue remove <entry>`, `queue run [--into <line>]` |
 | changes       | `change list`, `change show <id>`, `change log <id>`, `change diff <id> [--from vN] [--to vM]` |
 | setup         | `init`, `projects`, `config`, `cache add|remove|list|repair`, `daemon`                        |
 
@@ -273,6 +274,49 @@ They remain cache data outside source diffs. This change does not convert those 
 The new kinds support separate cache and derived states through the store API.
 
 The database schema version stays at 6. New tables are additive. Optional fields are absent from old state records.
+
+
+## Ref protection and the merge queue
+
+`protect` accepts ref patterns such as `env/prod` and `release/*`.
+Ref rules accept `--update`, `--expect`, `--no-expect`, `--approvals`, `--approvers`, and `--check`.
+They refuse `--direct`, `--no-direct`, `--rewrite`, and `--path`, which apply to lines.
+
+A protected ref requires its update role and, by default, `--expect`.
+Create a ref before you enable its default protection rule, or use `--no-expect` for its first update.
+The new target needs the required approvals from allowed users other than its authors.
+A delete requires evidence for the current target. A scoped declassification approval does not count as a subject approval.
+Each named check needs a passing attestation for that exact state and the configured command.
+`ref set` and `ref delete` run no check commands. Use `try` or the queue to produce the evidence first.
+
+```sh
+layr protect env/prod --update maintainer --approvals 1 --check unit
+layr ref set env/prod topic --expect env/prod
+layr queue add topic --into main
+layr queue list --json
+layr queue run --into main
+```
+
+The queue stores the exact source state and its ChangeId. Later source edits do not change an entry.
+The default target is `line.<name>.upstream` when that setting exists, else `main`.
+`queue run` processes pending entries in order. An entry becomes `done` or `failed`, with its result or reason.
+A failure does not stop later entries. A conflict leaves the target head and files unchanged.
+A target head change causes one retry. A second head change fails the entry.
+The public `merge --expect` syntax still pins the source. The queue also checks the target head under the merge lock.
+The queue uses the existing line rules, approvals, merge drivers, and checks.
+A passing check for the exact result state and equal `argv` is reused.
+Legacy records without `argv` are reused only for a single word without spaces. Other legacy results run again.
+A caller who cannot update a target cannot process its queue.
+
+Queue entries, removals, and results have signed records. Successful line moves and queue completion share one record.
+`undo` can restore an entry or reverse a completed move and its status together.
+Pending and failed entries hold their source through `holds/queue/<entry>` refs. Remove an entry to release its hold.
+All queue commands accept `--json`. Queue list includes pending, done, and failed entries.
+
+Set `queue.run` to a comma-separated list of local line names to enable automatic passes.
+A new entry triggers a pass for its configured target. The daemon also runs a pass on each tick.
+Automatic passes use the target line owner and the normal line policy. Configured commands run as that owner.
+Without `queue.run`, only `queue run` processes entries. Queue runners on one machine use one project lock of their own.
 
 
 ## Workflow
