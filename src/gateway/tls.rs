@@ -101,6 +101,8 @@ mod tests {
     fn pair(home: &Path, name: &str) -> (PathBuf, PathBuf) {
         let cert = home.join(format!("{name}.crt"));
         let key = home.join(format!("{name}.key"));
+        let config = home.join(format!("{name}.cnf"));
+        fs::write(&config, "[req]\ndistinguished_name=dn\n[dn]\n[server]\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:localhost\n").unwrap();
         let status = Command::new("openssl")
             .args([
                 "req",
@@ -119,6 +121,9 @@ mod tests {
                 "-keyout",
             ])
             .arg(&key)
+            .arg("-config")
+            .arg(&config)
+            .args(["-extensions", "server"])
             .arg("-out")
             .arg(&cert)
             .stdout(std::process::Stdio::null())
