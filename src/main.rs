@@ -5,9 +5,9 @@
 
 #[macro_use]
 mod ctx;
+mod access;
 #[cfg(target_os = "macos")]
 mod apfs_commit;
-mod access;
 #[cfg(any(target_os = "macos", feature = "overlayfs"))]
 mod apfs_stream;
 #[cfg(any(target_os = "macos", feature = "overlayfs"))]
@@ -25,8 +25,8 @@ mod ids;
 mod ignore_rules;
 mod merge;
 mod model;
-mod oplog;
 mod oci;
+mod oplog;
 mod overlay;
 mod privs;
 mod recv;
@@ -55,6 +55,19 @@ use std::collections::HashMap;
 
 fn main() {
     let mut argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.first().map(String::as_str) == Some("__registry-http") {
+        let result = (|| -> anyhow::Result<()> {
+            anyhow::ensure!(argv.len() == 3, "invalid internal registry arguments");
+            anyhow::ensure!(!rustix::process::geteuid().is_root(), "registry HTTP process must not run as root");
+            let fd = rustix::io::dup(std::io::stdin())?;
+            crate::oci::registry::handle(std::net::TcpStream::from(fd), std::path::Path::new(&argv[1]), &argv[2])
+        })();
+        if let Err(e) = result {
+            eprintln!("layr registry HTTP: {e:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
     #[cfg(any(target_os = "macos", feature = "overlayfs"))]
     if argv.first().map(String::as_str) == Some("__apfs-send") {
         let result = (|| -> anyhow::Result<()> {

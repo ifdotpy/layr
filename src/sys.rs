@@ -819,3 +819,22 @@ pub fn overlay_mtime(path: &std::path::Path, sec: i64, nano: i64) -> io::Result<
         Err(io::Error::last_os_error())
     }
 }
+
+/// Permanently drop all user and group privileges in a single-threaded service child.
+pub fn drop_to_user(uid: u32, gid: u32) -> Result<()> {
+    if uid == 0 {
+        anyhow::bail!("registry.user must be unprivileged");
+    }
+    if gid == 0 {
+        anyhow::bail!("registry.user must use an unprivileged primary group");
+    }
+    set_groups(&[])?;
+    // SAFETY: the caller is a dedicated child, before it reads any network data.
+    if unsafe { libc::setgid(gid) } != 0 || unsafe { libc::setuid(uid) } != 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    if rustix::process::getuid().as_raw() != uid || rustix::process::geteuid().as_raw() != uid {
+        anyhow::bail!("cannot drop registry privileges");
+    }
+    Ok(())
+}

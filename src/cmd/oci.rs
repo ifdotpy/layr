@@ -78,7 +78,7 @@ fn push_report(ctx: &Ctx, url: &str, rev: &str, runnable: Option<&str>, remote: 
     h.repo.require(ctx, "push")?;
     h.repo.require(ctx, "export")?;
     let _lock = h.repo.p.lock()?;
-    let e = oci::export(&h.repo, rev, h.line.as_ref(), runnable)?;
+    let e = oci::export(ctx, &h.repo, rev, h.line.as_ref(), runnable)?;
     let cfg = |key: &str| -> Result<Option<String>> {
         Ok(match remote {
             Some(n) => h
@@ -148,7 +148,11 @@ pub fn token(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         return Ok(0);
     }
-    let duration = super::admin::duration_ms(a.get("--until").unwrap_or("1d"))?;
+    let value = a.get("--until").unwrap_or("1d");
+    if !value.is_ascii() {
+        return Err(exit(128, "invalid token duration; use 30m, 2h or 1d"));
+    }
+    let duration = super::admin::duration_ms(value)?;
     if duration <= 0 {
         return Err(exit(128, "token duration must be positive"));
     }

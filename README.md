@@ -317,6 +317,7 @@ OCI export rejects a layer when `private` or `secret` is true.
 Export also rejects overlay projects, states from lines with attached overlays, and paths in the project setting `secret.paths`.
 The setting `oci.secret_paths` adds OCI-specific exclusions.
 Special files and OCI whiteout names (`.wh.*`) are rejected.
+File names and symbolic-link targets must use UTF-8.
 Symbolic links are archived without access to their targets.
 
 ```sh
@@ -335,8 +336,11 @@ For a local test registry, set `remote.<name>.insecure` to `true` to use HTTP.
 A layer uses sorted tar entries, timestamp zero, owner and group zero, and fixed gzip settings.
 File modes, link targets, paths, and file bytes determine its identity.
 Symbolic-link modes are fixed at `0777` because host systems report different modes for identical links.
-The cache in `meta/oci` uses content hashes.
-This temporary cache stores blobs outside Core derived states until the Core workstream supplies that integration.
+The cache uses content hashes.
+Compressed layers live in detached Core states with `kind = "derived"`, `context = "oci-layer-v1"`, and `derived_from` set to the source state.
+Refs named `derived/oci-layer-v1/<blob-hash>` keep these states through garbage collection.
+Identical layer content reuses the same derived state, including across source revisions.
+The cache metadata, image configs, and manifests live in `meta/oci`.
 A repeated export reuses compressed blobs.
 A push checks each blob in the registry before upload.
 The default output shows the runnable, destination, digests, and blob counts.
@@ -355,9 +359,10 @@ To enable the read-only registry in the Layr service:
 
 ```sh
 layr config registry.listen 127.0.0.1:5080
+layr config registry.user nobody
 layr config registry.public_url https://layr.example
 layr access token alice --until 1d
-# Restart the Layr daemon after a registry.listen change.
+# Restart the Layr daemon after a registry.listen or registry.user change.
 ```
 
 The token command prints one opaque token and records only its SHA256 hash.
@@ -369,6 +374,21 @@ The token belongs to one user and one Layr machine.
 Use a TLS reverse proxy for access outside the local machine.
 Set `registry.public_url` to the public origin so Bearer challenges use the correct token endpoint.
 The listener itself speaks HTTP.
+The root daemon accepts the connection without reading it.
+The HTTP child permanently drops its user, group, and supplementary groups before it reads a request.
+It then starts a clean process to remove the daemon's memory and unrelated file descriptors.
+`registry.user` selects this user and defaults to `nobody` with its primary group.
+The daemon refuses user ID zero or a privilege-drop failure.
+Projects on the same listener must use the same user.
+Use a dedicated service account.
+This account can use only the registry protocol on the service socket, which prevents access through the ordinary CLI protocol.
+The executable and the Unix socket's parent folders must allow this user to traverse them.
+
+The HTTP child sends a typed request over the existing service Unix socket.
+The root backend checks the socket peer, token, and ACL before it returns manifest or blob bytes.
+The backend accepts no file paths or network descriptors.
+The HTTP child permits a 4096-byte request line and 16384-byte headers.
+It permits one request per connection, with a ten-second read timeout and a sixty-second write timeout.
 
 The service accepts a Bearer token on each request.
 It also offers `/token` for the Basic credential exchange that Helm and skopeo use.
@@ -393,7 +413,8 @@ Chart paths use `<project>/charts/<runnable>`.
 | `change-<id>` | `changes/<id>` |
 | `view-<id>` | `views/<id>` |
 
-Ref and change tags use the Core revision resolver.
+Environment, release, and change tags use the Core revision resolver.
+Tag lists include lines, environment refs, release refs, and changes.
 An unavailable exact view returns `MANIFEST_UNKNOWN`.
 A manifest digest remains readable after the service has generated or exported that manifest.
 
@@ -403,7 +424,8 @@ helm pull oci://layr.example/project/charts/app@sha256:DIGEST --username alice -
 ```
 
 The test file `tests/t30-oci.sh` needs Linux, Btrfs, `docker-registry`, `skopeo`, `helm`, `htpasswd`, `curl`, and Python 3.
-It checks external image and chart pulls, Basic and Bearer push, service pulls, token revocation, and secret rejection.
+It checks external pulls, Basic and Bearer push, service pulls, token revocation, and secret rejection.
+It also checks privilege separation, Core tags, and derived-state reuse.
 
 ## Workflow
 

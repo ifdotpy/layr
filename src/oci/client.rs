@@ -5,7 +5,6 @@ use anyhow::{anyhow, bail, Context, Result};
 use reqwest::blocking::{Client, Response};
 use reqwest::{Method, StatusCode, Url};
 use std::collections::BTreeMap;
-use std::fs::File;
 use std::path::Path;
 use std::time::Duration;
 
@@ -64,12 +63,13 @@ impl Registry {
                 req = req.basic_auth(u, self.password.as_ref());
             }
             if let Some(p) = body {
-                req = req.body(File::open(p)?);
+                let tree = crate::tree::Tree::open(p.parent().context("upload path has no parent")?)?;
+                req = req.body(tree.open_read(p.file_name().and_then(|s| s.to_str()).context("invalid upload filename")?)?);
             }
             if let Some(m) = media {
                 req = req.header("Content-Type", m);
             }
-            let response = req.send().context("registry request failed")?;
+            let response = req.send().map_err(|e| e.without_url()).context("registry request failed")?;
             if response.status() != StatusCode::UNAUTHORIZED || attempt == 1 {
                 return Ok(response);
             }
@@ -104,7 +104,7 @@ impl Registry {
         if let Some(u) = &self.username {
             req = req.basic_auth(u, self.password.as_ref());
         }
-        let response = req.send().context("registry token request failed")?;
+        let response = req.send().map_err(|e| e.without_url()).context("registry token request failed")?;
         require(&response, &[200], "token request")?;
         let value: serde_json::Value = response.json().context("invalid registry token response")?;
         self.token = Some(

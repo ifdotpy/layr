@@ -15,26 +15,79 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::time::Duration;
 
-/// Configuration is read at daemon start. Several projects can share a listener.
-pub fn listeners(root: &Path) -> Result<Vec<(String, TcpListener)>> {
+#[derive(Clone, Copy)]
+pub struct Identity {
+    pub uid: u32,
+    pub gid: u32,
+}
+
+fn identity(p: &Project) -> Result<Identity> {
+    let name = p.config_value("registry.user")?.and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_else(|| "nobody".into());
+    let user = crate::sys::user_by_name(&name).ok_or_else(|| anyhow!("registry.user '{name}' does not exist"))?;
+    if user.uid == 0 {
+        bail!("registry.user must be unprivileged");
+    }
+    if user.gid == 0 {
+        bail!("registry.user must use an unprivileged primary group");
+    }
+    Ok(Identity { uid: user.uid, gid: user.gid })
+}
+
+/// Configuration is read at daemon start. Projects on one listener share its unprivileged user.
+pub fn listeners(root: &Path) -> Result<Vec<(String, TcpListener, Identity)>> {
     let store = Store::open(root)?;
-    let mut names = BTreeSet::new();
+    let mut names = BTreeMap::new();
     for name in store.project_names()? {
         let p = Project::open(&store, &name)?;
         if let Some(v) = p.config_value("registry.listen")? {
             let addr = v.as_str().ok_or_else(|| anyhow!("registry.listen must be a socket address"))?;
             addr.parse::<SocketAddr>().context("registry.listen needs an IP address and port")?;
-            names.insert(addr.to_string());
+            let user = identity(&p)?;
+            if let Some(old) = names.insert(addr.to_string(), user) {
+                if old.uid != user.uid || old.gid != user.gid {
+                    bail!("projects on registry.listen {addr} must use the same registry.user");
+                }
+            }
         }
     }
     let mut out = Vec::new();
-    for name in names {
+    for (name, user) in names {
+        match crate::sys::fork()? {
+            crate::sys::Fork::Child => {
+                std::process::exit(if crate::sys::drop_to_user(user.uid, user.gid).is_ok() { 0 } else { 1 })
+            }
+            crate::sys::Fork::Parent(pid) => {
+                let (_, status) =
+                    rustix::process::waitpid(rustix::process::Pid::from_raw(pid), rustix::process::WaitOptions::empty())?
+                        .context("registry privilege check failed")?;
+                if status.exit_status() != Some(0) {
+                    bail!("cannot drop registry privileges");
+                }
+            }
+        }
         let l = TcpListener::bind(&name).with_context(|| format!("registry.listen {name}"))?;
         l.set_nonblocking(true)?;
-        eprintln!("layr registry: listening on {}", l.local_addr()?);
-        out.push((name, l));
+        eprintln!("layr registry: listening on {} (uid {})", l.local_addr()?, user.uid);
+        out.push((name, l, user));
     }
     Ok(out)
+}
+
+/// Exec clears the daemon's memory and closes its descriptors before HTTP parsing starts.
+pub fn exec_http(stream: TcpStream, socket: &Path, listen: &str, user: Identity) -> Result<()> {
+    use std::os::unix::process::CommandExt;
+    crate::sys::drop_to_user(user.uid, user.gid)?;
+    let fd: std::os::fd::OwnedFd = stream.into();
+    let error = std::process::Command::new(std::env::current_exe()?)
+        .arg("__registry-http")
+        .arg(socket)
+        .arg(listen)
+        .stdin(std::process::Stdio::from(fd))
+        .stdout(std::process::Stdio::null())
+        .env_clear()
+        .current_dir("/")
+        .exec();
+    Err(error).context("cannot execute registry HTTP worker; registry.user needs access to the executable and its parent folders")
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -93,6 +146,9 @@ fn request(stream: &TcpStream) -> Result<Request> {
     let parts: Vec<_> = line.split_whitespace().collect();
     if parts.len() != 3 || !["HTTP/1.1", "HTTP/1.0"].contains(&parts[2]) {
         bail!("invalid request line");
+    }
+    if line.len() > 4096 {
+        bail!("request line too long");
     }
     let (method, target) = (parts[0].into(), parts[1].into());
     let mut authorization = None;
@@ -155,90 +211,78 @@ fn anonymous(p: &Project) -> bool {
         && policy.check(&crate::access::Who { uid: u32::MAX, groups: vec![] }, "read").is_ok()
 }
 
-fn principal(p: &Project, req: &Request, basic: bool) -> Result<Option<u32>> {
-    match token(req.authorization.as_deref(), basic) {
-        Some(t) => token_uid(p, &t),
+fn principal(p: &Project, credential: Option<&str>) -> Result<Option<u32>> {
+    match credential {
+        Some(t) => token_uid(p, t),
         None if anonymous(p) => Ok(Some(u32::MAX)),
         None => Ok(None),
     }
 }
 
-fn response(
-    stream: &mut TcpStream,
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Query {
+    pub listen: String,
+    pub head: bool,
+    pub token: Option<String>,
+    pub operation: Operation,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum Operation {
+    Probe,
+    Exchange {
+        project: Option<String>,
+    },
+    Read {
+        project: String,
+        runnable: String,
+        chart: bool,
+        endpoint: Endpoint,
+        reference: String,
+        last: Option<String>,
+        n: Option<usize>,
+    },
+}
+#[derive(Serialize, Deserialize)]
+pub enum Endpoint {
+    Manifest,
+    Blob,
+    Tags,
+}
+#[derive(Serialize, Deserialize)]
+struct Metadata {
     code: u16,
-    body: &[u8],
-    media: &str,
-    digest: Option<&str>,
-    extra: &[(&str, String)],
-    head: bool,
-) -> Result<()> {
-    headers(stream, code, body.len() as u64, media, digest, extra)?;
-    if !head {
-        stream.write_all(body)?;
-    }
-    Ok(())
+    media: String,
+    digest: Option<String>,
+    extra: Vec<(String, String)>,
+    length: u64,
 }
-
-fn headers(
-    stream: &mut TcpStream,
-    code: u16,
-    len: u64,
-    media: &str,
-    digest: Option<&str>,
-    extra: &[(&str, String)],
-) -> Result<()> {
-    let reason = match code {
-        200 => "OK",
-        206 => "Partial Content",
-        400 => "Bad Request",
-        401 => "Unauthorized",
-        403 => "Forbidden",
-        404 => "Not Found",
-        405 => "Method Not Allowed",
-        416 => "Range Not Satisfiable",
-        503 => "Service Unavailable",
-        _ => "Internal Server Error",
-    };
-    write!(stream, "HTTP/1.1 {code} {reason}\r\nContent-Length: {len}\r\nContent-Type: {media}\r\nDocker-Distribution-Api-Version: registry/2.0\r\nConnection: close\r\n")?;
-    if let Some(d) = digest {
-        write!(stream, "Docker-Content-Digest: {d}\r\n")?;
-    }
-    for (k, v) in extra {
-        if v.contains(['\r', '\n']) {
-            bail!("invalid response header");
-        }
-        write!(stream, "{k}: {v}\r\n")?;
-    }
-    stream.write_all(b"\r\n")?;
-    Ok(())
+enum Body {
+    Bytes(Vec<u8>),
+    File(File),
 }
-
-fn error(stream: &mut TcpStream, code: u16, name: &str, head: bool) -> Result<()> {
-    response(
-        stream,
-        code,
-        &serde_json::to_vec(&json!({"errors": [{"code": name, "message": name}]}))?,
-        "application/json",
-        None,
-        &[],
-        head,
-    )
+struct Reply {
+    metadata: Metadata,
+    body: Body,
 }
-
-fn challenge(stream: &mut TcpStream, realm: &str, repository: Option<&str>, head: bool) -> Result<()> {
+fn reply(code: u16, data: Vec<u8>, media: &str, digest: Option<String>) -> Reply {
+    Reply {
+        metadata: Metadata { code, media: media.into(), digest, extra: vec![], length: data.len() as u64 },
+        body: Body::Bytes(data),
+    }
+}
+fn failure(code: u16, name: &str) -> Reply {
+    reply(code, serde_json::to_vec(&json!({"errors": [{"code": name, "message": name}]})).unwrap(), "application/json", None)
+}
+fn challenge(realm: &str, repository: Option<&str>) -> Reply {
     let mut value = format!("Bearer realm=\"{realm}\",service=\"layr\"");
     if let Some(r) = repository {
         value.push_str(&format!(",scope=\"repository:{r}:pull\""));
     }
-    response(
-        stream,
-        401,
-        b"{\"errors\":[{\"code\":\"UNAUTHORIZED\"}]}",
-        "application/json",
-        None,
-        &[("WWW-Authenticate", value)],
-        head,
-    )
+    let mut r = failure(401, "UNAUTHORIZED");
+    r.metadata.extra.push(("WWW-Authenticate".into(), value));
+    r
 }
 
 fn realm(p: Option<&Project>, address: SocketAddr) -> Result<String> {
@@ -266,7 +310,6 @@ fn authorize_ref(repo: &Repo, ctx: &Ctx, _revision: &str) -> Result<()> {
     repo.can_read(ctx)
 }
 
-/// Core integration hook: append env/release refs when Db::refs lands.
 fn tags(repo: &Repo) -> Result<Vec<String>> {
     let mut names = BTreeSet::new();
     for l in repo.lines()? {
@@ -276,31 +319,58 @@ fn tags(repo: &Repo) -> Result<Vec<String>> {
         }
         names.insert(format!("state-{}", l.head));
     }
+    for r in repo.p.db.refs("", crate::ids::now_ms())? {
+        if let Some(tag) = r.name.strip_prefix("env/") {
+            if super::valid_tag(tag) {
+                names.insert(tag.into());
+            }
+        }
+        if let Some(v) = r.name.strip_prefix("release/") {
+            if super::semver(v) {
+                names.insert(v.replace('+', "_"));
+            }
+        }
+    }
+    for id in repo.p.db.changes()? {
+        names.insert(format!("change-{id}"));
+    }
     Ok(names.into_iter().collect())
 }
 
-pub fn handle(mut stream: TcpStream, root: &Path, listen: &str) {
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(60)));
-    let result = (|| -> Result<()> {
-        let req = match request(&stream) {
-            Ok(r) => r,
-            Err(_) => return error(&mut stream, 400, "DENIED", false),
-        };
-        let head = req.method == "HEAD";
-        if req.method != "GET" && !head {
-            return error(&mut stream, 405, "UNSUPPORTED", false);
-        }
-        let target = reqwest::Url::parse(&format!("http://registry{}", req.target))?;
-        let address = stream.local_addr()?;
-        let store = Store::open(root)?;
-        if target.path() == "/token" || target.path().trim_end_matches('/') == "/v2" {
-            let scope = target.query_pairs().find(|(k, _)| k == "scope").map(|(_, v)| v.into_owned());
-            let project = scope
-                .as_deref()
-                .and_then(|s| s.strip_prefix("repository:"))
-                .and_then(|s| s.split(':').next())
-                .and_then(|s| s.split('/').next());
+fn has_runnable(repo: &Repo, tag: &str, runnable: &str, chart: bool) -> bool {
+    (|| -> Result<bool> {
+        let id = super::resolve_tag(repo, tag)?;
+        let tree = crate::tree::Tree::open(&repo.state_root(&id)?)?;
+        let mut text = String::new();
+        tree.open_read("layr.toml")?.take(1 << 20).read_to_string(&mut text)?;
+        Ok(super::parse(&text)?.runnable.get(runnable).map(|r| !chart || r.chart.is_some()).unwrap_or(false))
+    })()
+    .unwrap_or(false)
+}
+
+fn backend(root: &Path, peer: u32, query: Query) -> Result<Reply> {
+    let store = Store::open(root)?;
+    let allowed = store.project_names()?.into_iter().any(|name| {
+        Project::open(&store, &name)
+            .ok()
+            .filter(|p| enabled(p, &query.listen).unwrap_or(false))
+            .and_then(|p| identity(&p).ok())
+            .map(|i| i.uid == peer)
+            .unwrap_or(false)
+    });
+    if peer == 0 || !allowed {
+        return Ok(failure(403, "DENIED"));
+    }
+    let address: SocketAddr = query.listen.parse()?;
+    let credential = query.token.as_deref();
+    let listen = &query.listen;
+    let (project, runnable, chart, endpoint, reference, last, n) = match query.operation {
+        Operation::Probe | Operation::Exchange { .. } => {
+            let project = match &query.operation {
+                Operation::Exchange { project } => project.as_deref(),
+                _ => None,
+            };
+            let exchange = matches!(query.operation, Operation::Exchange { .. });
             let mut token_realm = realm(None, address)?;
             for name in store.project_names()? {
                 if project.is_some() && project != Some(name.as_str()) {
@@ -311,139 +381,120 @@ pub fn handle(mut stream: TcpStream, root: &Path, listen: &str) {
                     continue;
                 }
                 token_realm = realm(Some(&p), address)?;
-                if let Some(uid) = principal(&p, &req, true)? {
+                if let Some(uid) = principal(&p, credential)? {
                     let ctx = context(root, uid)?;
                     if Repo::open(&ctx, &name).is_err() {
                         continue;
                     }
-                    let body = if target.path() == "/token" {
-                        json!({"token": token(req.authorization.as_deref(), true).unwrap_or_default(), "expires_in": 60})
-                    } else {
-                        json!({})
-                    };
-                    return response(&mut stream, 200, &serde_json::to_vec(&body)?, "application/json", None, &[], head);
+                    let body = if exchange { json!({"token": credential.unwrap_or(""), "expires_in": 60}) } else { json!({}) };
+                    return Ok(reply(200, serde_json::to_vec(&body)?, "application/json", None));
                 }
             }
-            return challenge(&mut stream, &token_realm, None, head);
+            return Ok(challenge(&token_realm, None));
         }
-        let path = match target.path().strip_prefix("/v2/") {
-            Some(p) => p,
-            None => return error(&mut stream, 404, "NAME_UNKNOWN", head),
-        };
-        let parts: Vec<_> = path.split('/').collect();
-        let (project, runnable, chart, endpoint, reference) = match parts.as_slice() {
-            [p, r, e, v] => (*p, *r, false, *e, *v),
-            [p, "charts", r, e, v] => (*p, *r, true, *e, *v),
-            _ => return error(&mut stream, 404, "NAME_UNKNOWN", head),
-        };
-        if super::valid_component(project).is_err() || super::valid_component(runnable).is_err() {
-            return error(&mut stream, 404, "NAME_UNKNOWN", head);
+        Operation::Read { project, runnable, chart, endpoint, reference, last, n } => {
+            (project, runnable, chart, endpoint, reference, last, n)
         }
-        let p = match Project::open(&store, project) {
-            Ok(p) if enabled(&p, listen)? => p,
-            _ => return error(&mut stream, 404, "NAME_UNKNOWN", head),
-        };
-        let repo_path = if chart { format!("{project}/charts/{runnable}") } else { format!("{project}/{runnable}") };
-        let uid = match principal(&p, &req, false)? {
-            Some(u) => u,
-            None => return challenge(&mut stream, &realm(Some(&p), address)?, Some(&repo_path), head),
-        };
-        let ctx = context(root, uid)?;
-        let repo = match Repo::open(&ctx, project) {
-            Ok(r) => r,
-            Err(_) => return error(&mut stream, 403, "DENIED", head),
-        };
-        let cache = Cache::open(&repo.p.meta_dir().join("oci"))?;
-        if endpoint == "tags" && reference == "list" {
+    };
+    if super::valid_component(&project).is_err() || super::valid_component(&runnable).is_err() {
+        return Ok(failure(404, "NAME_UNKNOWN"));
+    }
+    let p = match Project::open(&store, &project) {
+        Ok(p) if enabled(&p, listen)? => p,
+        _ => return Ok(failure(404, "NAME_UNKNOWN")),
+    };
+    let repo_path = if chart { format!("{project}/charts/{runnable}") } else { format!("{project}/{runnable}") };
+    let uid = match principal(&p, credential)? {
+        Some(u) => u,
+        None => return Ok(challenge(&realm(Some(&p), address)?, Some(&repo_path))),
+    };
+    let ctx = context(root, uid)?;
+    let repo = match Repo::open(&ctx, &project) {
+        Ok(r) => r,
+        Err(_) => return Ok(failure(403, "DENIED")),
+    };
+    let cache = Cache::for_repo(&repo)?;
+    match endpoint {
+        Endpoint::Tags => {
             let mut list = tags(&repo)?;
+            list.retain(|t| has_runnable(&repo, t, &runnable, chart));
             list.retain(|t| super::tag_revision(t).map(|r| authorize_ref(&repo, &ctx, &r).is_ok()).unwrap_or(false));
-            // OCI pagination uses lexical order and excludes the last returned tag.
-            if let Some(last) = target.query_pairs().find(|(k, _)| k == "last").map(|(_, v)| v.into_owned()) {
+            if let Some(last) = last {
                 list.retain(|s| s > &last);
             }
-            let n = target.query_pairs().find(|(k, _)| k == "n").and_then(|(_, v)| v.parse::<usize>().ok());
             let mut extra = Vec::new();
-            if let Some(n) = n {
-                if n > 0 && list.len() > n {
+            if let Some(n) = n.filter(|n| *n > 0) {
+                if list.len() > n {
                     list.truncate(n);
-                    extra
-                        .push(("Link", format!("</v2/{repo_path}/tags/list?n={n}&last={}>; rel=\"next\"", list.last().unwrap())));
+                    extra.push((
+                        "Link".into(),
+                        format!("</v2/{repo_path}/tags/list?n={n}&last={}>; rel=\"next\"", list.last().unwrap()),
+                    ));
                 }
             }
-            return response(
-                &mut stream,
-                200,
-                &serde_json::to_vec(&json!({"name": repo_path, "tags": list}))?,
-                "application/json",
-                None,
-                &extra,
-                head,
-            );
+            let mut r = reply(200, serde_json::to_vec(&json!({"name": repo_path, "tags": list}))?, "application/json", None);
+            r.metadata.extra = extra;
+            Ok(r)
         }
-        if endpoint == "manifests" {
+        Endpoint::Manifest => {
             let a = if reference.starts_with("sha256:") {
-                let path = match super::digest_hex(reference) {
-                    Ok(h) => index(&cache, runnable, chart).join(h),
-                    Err(_) => return error(&mut stream, 404, "MANIFEST_UNKNOWN", head),
+                let path = match super::digest_hex(&reference) {
+                    Ok(h) => index(&cache, &runnable, chart).join(h),
+                    Err(_) => return Ok(failure(404, "MANIFEST_UNKNOWN")),
                 };
                 let st: Stored = match fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()) {
                     Some(s) => s,
-                    None => return error(&mut stream, 404, "MANIFEST_UNKNOWN", head),
+                    None => return Ok(failure(404, "MANIFEST_UNKNOWN")),
                 };
-                if authorize_ref(&repo, &ctx, &st.revision).is_err()
-                    || super::restriction_key(&repo, &st.state).map(|key| st.restrictions != key).unwrap_or(true)
-                {
-                    return error(&mut stream, 403, "DENIED", head);
+                if !stored_allowed(&repo, &ctx, &st) {
+                    return Ok(failure(403, "DENIED"));
                 }
                 st.artifact
             } else {
-                let revision = match super::tag_revision(reference) {
+                let revision = match super::tag_revision(&reference) {
                     Ok(r) => r,
-                    Err(_) => return error(&mut stream, 404, "MANIFEST_UNKNOWN", head),
+                    Err(_) => return Ok(failure(404, "MANIFEST_UNKNOWN")),
                 };
                 if authorize_ref(&repo, &ctx, &revision).is_err() {
-                    return error(&mut stream, 403, "DENIED", head);
+                    return Ok(failure(403, "DENIED"));
                 }
-                let state = match super::resolve_tag(&repo, reference) {
+                let state = match super::resolve_tag(&repo, &reference) {
                     Ok(s) => s,
-                    Err(_) => return error(&mut stream, 404, "MANIFEST_UNKNOWN", head),
+                    Err(_) => return Ok(failure(404, "MANIFEST_UNKNOWN")),
                 };
                 let source_line = repo.p.db.line_by_name(&revision)?;
-                let e = match super::export(&repo, &state, source_line.as_ref(), Some(runnable)) {
+                let _lock = repo.p.lock()?;
+                let e = match super::export(&ctx, &repo, &state, source_line.as_ref(), Some(&runnable)) {
                     Ok(e) => e,
                     Err(e) => {
                         eprintln!("layr registry: export failed: {e:#}");
-                        return error(&mut stream, 404, "MANIFEST_UNKNOWN", head);
+                        return Ok(failure(404, "MANIFEST_UNKNOWN"));
                     }
                 };
                 remember(&e, &revision)?;
                 if chart {
                     match e.chart {
                         Some(c) => c,
-                        None => return error(&mut stream, 404, "MANIFEST_UNKNOWN", head),
+                        None => return Ok(failure(404, "MANIFEST_UNKNOWN")),
                     }
                 } else {
                     e.image
                 }
             };
-            return response(&mut stream, 200, &cache.read(&a.manifest)?, MANIFEST, Some(&a.manifest.digest), &[], head);
+            Ok(reply(200, cache.read(&a.manifest)?, MANIFEST, Some(a.manifest.digest)))
         }
-        if endpoint == "blobs" {
-            let hex = match super::digest_hex(reference) {
-                Ok(h) => h,
-                Err(_) => return error(&mut stream, 404, "BLOB_UNKNOWN", head),
-            };
-            // A global blob cache is never an authorization source. Require a manifest in this repository.
+        Endpoint::Blob => {
+            if super::digest_hex(&reference).is_err() {
+                return Ok(failure(404, "BLOB_UNKNOWN"));
+            }
             let mut descriptor = None;
-            if let Ok(files) = fs::read_dir(index(&cache, runnable, chart)) {
+            if let Ok(files) = fs::read_dir(index(&cache, &runnable, chart)) {
                 for file in files.flatten() {
                     let st: Stored = match fs::read(file.path()).ok().and_then(|b| serde_json::from_slice(&b).ok()) {
                         Some(s) => s,
                         None => continue,
                     };
-                    if authorize_ref(&repo, &ctx, &st.revision).is_err()
-                        || super::restriction_key(&repo, &st.state).map(|key| st.restrictions != key).unwrap_or(true)
-                    {
+                    if !stored_allowed(&repo, &ctx, &st) {
                         continue;
                     }
                     for d in st.artifact.layers.iter().chain(std::iter::once(&st.artifact.config)) {
@@ -459,21 +510,165 @@ pub fn handle(mut stream: TcpStream, root: &Path, listen: &str) {
             }
             let d = match descriptor {
                 Some(d) => d,
-                None => return error(&mut stream, 404, "BLOB_UNKNOWN", head),
+                None => return Ok(failure(404, "BLOB_UNKNOWN")),
             };
-            let mut f = match File::open(cache.root.join("blobs").join(hex)) {
+            let f = match cache.open_blob(&reference) {
                 Ok(f) => f,
-                Err(_) => return error(&mut stream, 404, "BLOB_UNKNOWN", head),
+                Err(_) => return Ok(failure(404, "BLOB_UNKNOWN")),
             };
-            headers(&mut stream, 200, f.metadata()?.len(), &d.media_type, Some(reference), &[])?;
-            if !head {
-                std::io::copy(&mut f, &mut stream)?;
+            Ok(Reply {
+                metadata: Metadata {
+                    code: 200,
+                    media: d.media_type,
+                    digest: Some(reference),
+                    extra: vec![],
+                    length: f.metadata()?.len(),
+                },
+                body: Body::File(f),
+            })
+        }
+    }
+}
+
+fn stored_allowed(repo: &Repo, ctx: &Ctx, st: &Stored) -> bool {
+    authorize_ref(repo, ctx, &st.revision).is_ok()
+        && super::restriction_key(repo, &st.state).map(|k| k == st.restrictions).unwrap_or(false)
+}
+
+/// Root-side narrow RPC. No network descriptor or HTTP parser reaches this function.
+pub fn serve_backend(mut sock: std::os::unix::net::UnixStream, root: &Path, peer: u32, value: serde_json::Value) -> Result<()> {
+    let query: Query = serde_json::from_value(value)?;
+    let head = query.head;
+    let r = backend(root, peer, query).unwrap_or_else(|e| {
+        eprintln!("layr registry backend: {e:#}");
+        failure(500, "UNKNOWN")
+    });
+    let meta = serde_json::to_vec(&r.metadata)?;
+    sock.set_write_timeout(Some(Duration::from_secs(60)))?;
+    sock.write_all(&(meta.len() as u32).to_be_bytes())?;
+    sock.write_all(&meta)?;
+    if head {
+        return Ok(());
+    }
+    match r.body {
+        Body::Bytes(data) => sock.write_all(&data)?,
+        Body::File(mut f) => {
+            std::io::copy(&mut f, &mut sock)?;
+        }
+    }
+    Ok(())
+}
+
+fn query(req: &Request, listen: &str) -> Result<Query> {
+    let target = reqwest::Url::parse(&format!("http://registry{}", req.target))?;
+    let operation = if target.path() == "/token" {
+        let project = target
+            .query_pairs()
+            .find(|(k, _)| k == "scope")
+            .map(|(_, v)| v.into_owned())
+            .and_then(|s| s.strip_prefix("repository:").map(str::to_owned))
+            .and_then(|s| s.split(':').next().map(str::to_owned))
+            .and_then(|s| s.split('/').next().map(str::to_owned));
+        Operation::Exchange { project }
+    } else if target.path().trim_end_matches('/') == "/v2" {
+        Operation::Probe
+    } else {
+        let path = target.path().strip_prefix("/v2/").context("unknown endpoint")?;
+        let parts: Vec<_> = path.split('/').collect();
+        let (project, runnable, chart, endpoint, reference) = match parts.as_slice() {
+            [p, r, e, v] => (*p, *r, false, *e, *v),
+            [p, "charts", r, e, v] => (*p, *r, true, *e, *v),
+            _ => bail!("unknown endpoint"),
+        };
+        let endpoint = match (endpoint, reference) {
+            ("manifests", _) => Endpoint::Manifest,
+            ("blobs", _) => Endpoint::Blob,
+            ("tags", "list") => Endpoint::Tags,
+            _ => bail!("unknown endpoint"),
+        };
+        Operation::Read {
+            project: project.into(),
+            runnable: runnable.into(),
+            chart,
+            endpoint,
+            reference: reference.into(),
+            last: target.query_pairs().find(|(k, _)| k == "last").map(|(_, v)| v.into_owned()),
+            n: target.query_pairs().find(|(k, _)| k == "n").and_then(|(_, v)| v.parse().ok()),
+        }
+    };
+    let basic = matches!(operation, Operation::Probe | Operation::Exchange { .. });
+    Ok(Query { listen: listen.into(), head: req.method == "HEAD", token: token(req.authorization.as_deref(), basic), operation })
+}
+
+fn write_headers(stream: &mut TcpStream, m: &Metadata) -> Result<()> {
+    use std::fmt::Write as _;
+    let mut out = format!("HTTP/1.1 {} Response\r\nContent-Length: {}\r\nContent-Type: {}\r\nDocker-Distribution-Api-Version: registry/2.0\r\nConnection: close\r\n", m.code, m.length, m.media);
+    if let Some(d) = &m.digest {
+        write!(out, "Docker-Content-Digest: {d}\r\n")?;
+    }
+    for (k, v) in &m.extra {
+        if k.contains(['\r', '\n']) || v.contains(['\r', '\n']) {
+            bail!("invalid response header");
+        }
+        write!(out, "{k}: {v}\r\n")?;
+    }
+    out.push_str("\r\n");
+    stream.write_all(out.as_bytes())?;
+    Ok(())
+}
+
+/// Unprivileged HTTP process. One bounded request, one response, then exit.
+pub fn handle(mut stream: TcpStream, socket: &Path, listen: &str) -> Result<()> {
+    if rustix::process::geteuid().is_root() {
+        bail!("registry HTTP process must not run as root");
+    }
+    stream.set_nonblocking(false)?;
+    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(60)))?;
+    let req = match request(&stream) {
+        Ok(r) => r,
+        Err(_) => {
+            let r = failure(400, "DENIED");
+            write_headers(&mut stream, &r.metadata)?;
+            if let Body::Bytes(data) = r.body {
+                stream.write_all(&data)?;
             }
             return Ok(());
         }
-        error(&mut stream, 404, "NAME_UNKNOWN", head)
-    })();
-    if let Err(e) = result {
-        eprintln!("layr registry: request failed: {e:#}");
+    };
+    let head = req.method == "HEAD";
+    let local_error = if req.method != "GET" && !head { Some(failure(405, "UNSUPPORTED")) } else { None };
+    let q = query(&req, listen);
+    if let Some(r) = local_error.or_else(|| if q.is_err() { Some(failure(404, "NAME_UNKNOWN")) } else { None }) {
+        write_headers(&mut stream, &r.metadata)?;
+        if !head {
+            if let Body::Bytes(data) = r.body {
+                stream.write_all(&data)?;
+            }
+        }
+        return Ok(());
     }
+    let data = serde_json::to_vec(&json!({"registry": q?}))?;
+    if data.len() > 32768 {
+        bail!("registry request too large");
+    }
+    let mut sock = std::os::unix::net::UnixStream::connect(socket)?;
+    sock.set_read_timeout(Some(Duration::from_secs(300)))?;
+    sock.set_write_timeout(Some(Duration::from_secs(10)))?;
+    sock.write_all(&(data.len() as u32).to_be_bytes())?;
+    sock.write_all(&data)?;
+    let mut size = [0u8; 4];
+    sock.read_exact(&mut size)?;
+    let size = u32::from_be_bytes(size) as usize;
+    if size > 16384 {
+        bail!("registry response metadata too large");
+    }
+    let mut data = vec![0; size];
+    sock.read_exact(&mut data)?;
+    let metadata: Metadata = serde_json::from_slice(&data)?;
+    write_headers(&mut stream, &metadata)?;
+    if !head && std::io::copy(&mut sock.take(metadata.length), &mut stream)? != metadata.length {
+        bail!("short registry response");
+    }
+    Ok(())
 }

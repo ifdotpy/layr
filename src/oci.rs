@@ -198,17 +198,34 @@ pub struct Artifact {
 #[derive(Clone)]
 pub struct Cache {
     pub root: PathBuf,
+    states: Option<PathBuf>,
 }
 
 impl Cache {
     pub fn open(root: &Path) -> Result<Self> {
-        for d in ["blobs", "layers", "manifests"] {
+        for d in ["blobs", "layers", "manifests", "derived"] {
             fs::create_dir_all(root.join(d))?;
         }
-        Ok(Self { root: root.to_owned() })
+        Ok(Self { root: root.to_owned(), states: None })
+    }
+    pub fn for_repo(repo: &Repo) -> Result<Self> {
+        let mut c = Self::open(&repo.p.meta_dir().join("oci"))?;
+        c.states = Some(repo.p.states_dir());
+        Ok(c)
     }
     pub fn blob_path(&self, hash: &str) -> Result<PathBuf> {
-        Ok(self.root.join("blobs").join(digest_hex(hash)?))
+        let key = digest_hex(hash)?;
+        if let Some(states) = &self.states {
+            if let Ok(id) = fs::read_to_string(self.root.join("derived").join(key)) {
+                if uuid::Uuid::parse_str(&id).is_ok() {
+                    let p = states.join(id).join("blob");
+                    if fs::symlink_metadata(&p).map(|m| m.is_file()).unwrap_or(false) {
+                        return Ok(p);
+                    }
+                }
+            }
+        }
+        Ok(self.root.join("blobs").join(key))
     }
     pub fn put(&self, media: &str, bytes: &[u8]) -> Result<Descriptor> {
         let d = Descriptor { media_type: media.into(), digest: digest(bytes), size: bytes.len() as u64 };
@@ -218,8 +235,15 @@ impl Cache {
         }
         Ok(d)
     }
+    pub fn open_blob(&self, hash: &str) -> Result<File> {
+        let p = self.blob_path(hash)?;
+        Tree::open(p.parent().context("blob has no parent")?)?
+            .open_read(p.file_name().and_then(|s| s.to_str()).context("invalid blob filename")?)
+    }
     pub fn read(&self, d: &Descriptor) -> Result<Vec<u8>> {
-        Ok(fs::read(self.blob_path(&d.digest)?)?)
+        let mut bytes = Vec::new();
+        self.open_blob(&d.digest)?.read_to_end(&mut bytes)?;
+        Ok(bytes)
     }
 }
 
@@ -235,7 +259,10 @@ struct Entry {
 
 fn entries(tree: &Tree) -> Result<Vec<Entry>> {
     fn visit(tree: &Tree, at: &str, out: &mut Vec<Entry>) -> Result<()> {
-        let mut names = tree.list(at)?;
+        let dir = fsutil::safe_join(&tree.path, at)?;
+        let mut names = fs::read_dir(dir)?
+            .map(|entry| entry?.file_name().into_string().map_err(|_| anyhow!("OCI export requires UTF-8 file names")))
+            .collect::<Result<Vec<_>>>()?;
         names.sort();
         for name in names {
             let p = if at.is_empty() { name } else { format!("{at}/{name}") };
@@ -245,7 +272,14 @@ fn entries(tree: &Tree) -> Result<Vec<Entry>> {
             let m = fsutil::lmeta(&tree.path, &p).ok_or_else(|| anyhow!("cannot read snapshot entry '{p}'"))?;
             let (kind, size, content) = match m.ftype {
                 FType::Dir => (b'5', 0, String::new()),
-                FType::Symlink => (b'2', 0, tree.read_link(&p)?),
+                FType::Symlink => (
+                    b'2',
+                    0,
+                    fs::read_link(fsutil::safe_join(&tree.path, &p)?)?
+                        .into_os_string()
+                        .into_string()
+                        .map_err(|_| anyhow!("OCI export requires UTF-8 symbolic-link targets"))?,
+                ),
                 FType::File => {
                     let mut h = Sha256::new();
                     std::io::copy(&mut tree.open_read(&p)?, &mut HashSink(&mut h))?;
@@ -444,7 +478,13 @@ pub struct Export {
 }
 
 /// Only this boundary translates a revision into an exportable shared snapshot.
-pub fn export(repo: &Repo, rev: &str, line: Option<&crate::model::Line>, name: Option<&str>) -> Result<Export> {
+pub fn export(
+    ctx: &crate::ctx::Ctx,
+    repo: &Repo,
+    rev: &str,
+    line: Option<&crate::model::Line>,
+    name: Option<&str>,
+) -> Result<Export> {
     if repo.p.is_overlay() {
         bail!("OCI export refuses private overlays");
     }
@@ -477,7 +517,7 @@ pub fn export(repo: &Repo, rev: &str, line: Option<&crate::model::Line>, name: O
         None => bail!("the revision has multiple runnables; select one with --runnable <name>"),
     };
     let r = file.runnable.get(&name).ok_or_else(|| anyhow!("unknown runnable '{name}' in layr.toml"))?;
-    let cache = Cache::open(&repo.p.meta_dir().join("oci"))?;
+    let cache = Cache::for_repo(repo)?;
     let mut forbidden = repo.p.config_strings("secret.paths");
     forbidden.extend(repo.p.config_strings("oci.secret_paths"));
     let img = image(&root, r, &cache, &forbidden)?;
@@ -488,10 +528,63 @@ pub fn export(repo: &Repo, rev: &str, line: Option<&crate::model::Line>, name: O
         }
         None => (None, None),
     };
+    for layer in img.layers.iter().chain(chart.iter().flat_map(|c| c.layers.iter())) {
+        register_layer(ctx, repo, &cache, &id, layer)?;
+    }
     let restrictions = restriction_key(repo, &id)?;
     let e = Export { image: img, chart, chart_version, cache, state: id, runnable: name, restrictions };
     registry::remember(&e, rev)?;
     Ok(e)
+}
+
+/// The Core ref is the cache root. A local locator only avoids a database lookup for blob reads.
+fn register_layer(ctx: &crate::ctx::Ctx, repo: &Repo, cache: &Cache, source: &str, layer: &Descriptor) -> Result<()> {
+    use crate::model::{Record, RefChange, RefState, StateKind};
+    let key = digest_hex(&layer.digest)?;
+    let name = format!("derived/oci-layer-v1/{key}");
+    let before = repo.p.db.ref_value(&name, crate::ids::now_ms())?;
+    let id = if let Some(r) = &before {
+        let state = repo.state(&r.target)?;
+        if state.kind != StateKind::Derived || state.context.as_deref() != Some("oci-layer-v1") {
+            bail!("OCI cache ref '{name}' does not name an OCI derived state");
+        }
+        let tree = Tree::open(&repo.state_root(&state.id)?)?;
+        let blob = tree.open_read("blob").context("OCI derived state needs a regular layer blob")?;
+        let stored: Descriptor = serde_json::from_reader(tree.open_read("descriptor.json")?)?;
+        if stored.digest != layer.digest || blob.metadata()?.len() != layer.size {
+            bail!("OCI derived cache descriptor does not match its content key");
+        }
+        state.id
+    } else {
+        let src = cache.blob_path(&layer.digest)?;
+        let work = repo.p.work_dir().join(crate::ids::new_id());
+        crate::storage::create_subvolume(&work)?;
+        let cleanup = crate::repo::Temp { path: work.clone() };
+        fsutil::copy_entry(
+            src.parent().context("layer path has no parent")?,
+            src.file_name().and_then(|s| s.to_str()).context("invalid layer filename")?,
+            &work,
+            "blob",
+            None,
+        )?;
+        fsutil::atomic_write(&work.join("descriptor.json"), &serde_json::to_vec(layer)?, 0o600)?;
+        let mut state = repo.new_state(ctx, &work, StateKind::Derived, vec![source.into()], "OCI layer", None)?;
+        state.context = Some("oci-layer-v1".into());
+        let id = state.id.clone();
+        let mut rec = Record::new("derive");
+        rec.states.push(state);
+        rec.data = json!({"ref_change": RefChange { name: name.clone(), before, after: Some(RefState { name, target: id.clone(), expires_at: None }) }});
+        repo.commit_record(ctx, rec)?;
+        drop(cleanup);
+        id
+    };
+    fsutil::atomic_write(&cache.root.join("derived").join(key), id.as_bytes(), 0o600)?;
+    // The immutable Core state now owns the blob. Keep no second compressed copy in meta/oci.
+    let staging = cache.root.join("blobs").join(key);
+    if staging.is_file() {
+        fs::remove_file(staging)?;
+    }
+    Ok(())
 }
 
 /// Cached exports lose access when the source view or secret policy becomes more restrictive.
@@ -590,6 +683,9 @@ pub fn tag_revision(tag: &str) -> Result<String> {
     }
     if let Some(id) = tag.strip_prefix("change-") {
         return Ok(format!("changes/{id}"));
+    }
+    if tag.contains('_') && semver(&tag.replace('_', "+")) {
+        return Ok(format!("release/{}", tag.replace('_', "+")));
     }
     if semver(tag) {
         return Ok(format!("release/{tag}"));
@@ -797,6 +893,24 @@ platform = { os = "linux", arch = "amd64" }
         let mut r = r;
         r.layers = vec![LayerSpec::Paths(vec!["bin/escape/secret".into()])];
         assert!(image(&t.0, &r, &cache, &[]).is_err());
+    }
+
+    // APFS rejects this filename before export; Linux permits it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn non_utf8_paths_are_rejected_without_lossy_conversion() {
+        use std::os::unix::ffi::OsStringExt;
+        let t = Tmp::new();
+        fixture(&t.0, false);
+        let r = parse(RUNNABLE).unwrap().runnable.remove("app").unwrap();
+        let cache = Cache::open(&t.0.join("cache")).unwrap();
+        let invalid = t.0.join("bin").join(std::ffi::OsString::from_vec(vec![0xff]));
+        fs::write(&invalid, "must not be omitted").unwrap();
+        assert!(image(&t.0, &r, &cache, &[]).unwrap_err().to_string().contains("UTF-8 file names"));
+        fs::remove_file(invalid).unwrap();
+        let target = std::ffi::OsString::from_vec(vec![0xff]);
+        std::os::unix::fs::symlink(target, t.0.join("bin/invalid-link")).unwrap();
+        assert!(image(&t.0, &r, &cache, &[]).unwrap_err().to_string().contains("UTF-8 symbolic-link targets"));
     }
 
     #[test]

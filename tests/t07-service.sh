@@ -100,6 +100,9 @@ kill $DPID; wait $DPID 2>/dev/null
 sleep 3.5
 LAYR_TRACE=1 $T/layr daemon --socket $LAYR_SOCKET --tick 1 > $T/daemon2.log 2>&1 &
 DPID=$!
+# Measure from service readiness. Registry config checks can delay startup.
+for i in $(seq 1 100); do grep -q 'layr service: listening on' "$T/daemon2.log" && break; sleep 0.1; done
+grep -q 'layr service: listening on' "$T/daemon2.log" || { echo "FATAL: daemon did not start"; exit 1; }
 sleep 1.6
 first=$(grep -c "send --no-data" $T/daemon2.log)
 sleep 1.2
