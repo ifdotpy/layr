@@ -1,8 +1,9 @@
 #!/bin/bash
 # Standalone cache and derived states have no CLI creation command.
+# Set CARGO to its absolute path when sudo removes Cargo from PATH.
 . "$(dirname "$0")/lib.sh"
 if LAYR_TEST_AUX_ROOT="$LAYR_ROOT" LAYR_TEST_BINARY="$LAYR" \
-    cargo test --locked auxiliary_states_cross_the_peer_protocol -- --ignored > "$T/auxiliary.log" 2>&1; then
+    "${CARGO:-cargo}" test --locked auxiliary_states_cross_the_peer_protocol -- --ignored > "$T/auxiliary.log" 2>&1; then
     PASS=$((PASS + 1))
     echo "PASS cache and derived states cross the peer protocol"
 else
