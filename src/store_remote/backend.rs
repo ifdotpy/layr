@@ -15,6 +15,7 @@ pub struct Object {
 pub enum Backend {
     File(PathBuf, u32, u32),
     S3(super::s3::S3),
+    Gateway(super::gateway::Gateway),
 }
 
 impl Backend {
@@ -29,6 +30,9 @@ impl Backend {
     }
 
     pub fn open(url: &str) -> Result<Self> {
+        if url.starts_with("layr+https://") {
+            return Ok(Self::Gateway(super::gateway::Gateway::open(url)?));
+        }
         if url.starts_with("file://") {
             let parsed = reqwest::Url::parse(url).context("invalid file remote URL")?;
             if parsed.query().is_some() || parsed.fragment().is_some() {
@@ -44,13 +48,14 @@ impl Backend {
             }
             return Ok(Self::S3(super::s3::S3::with_env(bucket, prefix, &std::collections::HashMap::new())?));
         }
-        bail!("store URL must start with file:// or s3://")
+        bail!("store URL must start with file://, s3:// or layr+https://")
     }
 
     pub fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
         check_key(key)?;
         match self {
             Self::S3(s) => s.get(key),
+            Self::Gateway(g) => g.get(key),
             Self::File(root, uid, gid) => crate::privs::as_user_fs(*uid, *gid, || {
                 let path = crate::fsutil::safe_join(root, key)?;
                 let mut f = match OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(&path) {
@@ -73,6 +78,7 @@ impl Backend {
         check_key(key)?;
         match self {
             Self::S3(s) => s.put_new(key, body),
+            Self::Gateway(g) => g.put_new(key, body),
             Self::File(root, uid, gid) => crate::privs::as_user_fs(*uid, *gid, || {
                 fs::create_dir_all(root)?;
                 let path = crate::fsutil::safe_join(root, key)?;
@@ -105,6 +111,7 @@ impl Backend {
         }
         match self {
             Self::S3(s) => s.list(prefix),
+            Self::Gateway(g) => g.list(prefix),
             Self::File(root, uid, gid) => crate::privs::as_user_fs(*uid, *gid, || {
                 let mut out = Vec::new();
                 if root.exists() {
@@ -120,6 +127,7 @@ impl Backend {
         check_key(key)?;
         match self {
             Self::S3(s) => s.delete(key),
+            Self::Gateway(g) => g.delete(key),
             Self::File(root, uid, gid) => crate::privs::as_user_fs(*uid, *gid, || {
                 let path = crate::fsutil::safe_join(root, key)?;
                 match fs::remove_file(path) {
@@ -153,7 +161,7 @@ fn walk(root: &Path, dir: &Path, prefix: &str, out: &mut Vec<Object>) -> Result<
     Ok(())
 }
 
-fn check_key(key: &str) -> Result<()> {
+pub(super) fn check_key(key: &str) -> Result<()> {
     if key.is_empty() || key.split('/').any(|p| p.is_empty() || p == "." || p == "..") || key.contains(['\\', '\0']) {
         bail!("invalid remote object key: {key:?}");
     }

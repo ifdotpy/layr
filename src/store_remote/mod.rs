@@ -4,6 +4,7 @@ pub(crate) mod aws;
 pub(crate) mod backend;
 mod canonical;
 pub(crate) mod format;
+mod gateway;
 pub(crate) mod keys;
 mod legacy;
 pub(crate) mod reader;
@@ -83,6 +84,7 @@ pub fn open(url: &str, repo: &Repo) -> Result<Store> {
 impl Store {
     fn connect(&mut self, ctx: &Ctx) -> Result<()> {
         self.backend.as_caller(ctx);
+        if let Backend::Gateway(gateway) = &mut self.backend { gateway.connect(ctx)?; }
         self.paper_key_text = ctx
             .env("LAYR_PAPER_KEY_FILE")
             .map(|path| {
@@ -152,6 +154,7 @@ impl Store {
             if keys::recipient_of(&identity)? != descriptor.recipient {
                 bail!("machine slot does not match store recipient");
             }
+            if let Backend::Gateway(gateway) = &self.backend { gateway.set_identity(&identity)?; }
             return Ok(identity);
         }
         let paper = paper.map(str::to_string).or_else(|| self.paper_key_text.clone());
@@ -162,6 +165,7 @@ impl Store {
             if keys::recipient_of(&identity)? != descriptor.recipient {
                 bail!("paper slot does not match store recipient");
             }
+            if let Backend::Gateway(gateway) = &self.backend { gateway.set_identity(&identity)?; }
             return Ok(identity);
         }
         bail!("this machine has no remote slot; set LAYR_PAPER_KEY_FILE or use layr remote trust")
@@ -359,4 +363,9 @@ pub fn command(ctx: &Ctx, operation: &str, args: &[String]) -> Result<i32> {
         _ => bail!("unknown remote store operation"),
     }
     Ok(0)
+}
+
+/// Validate the gateway URL before a remote is written to project configuration.
+pub(crate) fn validate_gateway_url(url: &str) -> Result<()> {
+    gateway::Gateway::open(url).map(|_| ())
 }

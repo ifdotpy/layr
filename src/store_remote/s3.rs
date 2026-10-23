@@ -44,6 +44,11 @@ impl S3 {
             .connect_timeout(Duration::from_secs(30))
             .tcp_keepalive(Duration::from_secs(60))
             .build()?;
+        Self::new_with_client(bucket, region, credentials, endpoint, http)
+    }
+
+    /// Use a caller-owned client with its connection policy and time limits.
+    pub(crate) fn new_with_client(bucket: &str, region: &str, credentials: Credentials, endpoint: Option<&str>, http: Client) -> Result<Self> {
         Ok(S3 {
             http,
             credentials,
@@ -54,8 +59,8 @@ impl S3 {
         })
     }
 
-    /// The status and body of one signed call.
-    fn call(&self, method: Method, key: &str, query: &[(&str, &str)], headers: &[(&str, &str)], body: Vec<u8>) -> Result<Reply> {
+    /// Return a signed response without consuming its body. The caller must bound reads.
+    pub(crate) fn request(&self, method: Method, key: &str, query: &[(&str, &str)], headers: &[(&str, &str)], body: Vec<u8>, limit: Duration) -> Result<reqwest::blocking::Response> {
         if self.credentials.key_id.is_empty() || self.credentials.secret.is_empty() {
             bail!("set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY");
         }
@@ -82,7 +87,6 @@ impl S3 {
         }
         // A time limit for the whole call: reqwest's read timeout would end an upload that
         // takes longer than the limit, however steadily it goes.
-        let limit = LIMIT + Duration::from_secs(body.len() as u64 / SLOWEST);
         let has_body = method == Method::PUT || method == Method::POST;
         let mut request = self.http.request(method, target).timeout(limit);
         for (name, value) in headers.iter().copied() {
@@ -94,7 +98,13 @@ impl S3 {
         if has_body {
             request = request.body(body);
         }
-        let response = request.send().map_err(reqwest::Error::without_url)?;
+        request.send().map_err(reqwest::Error::without_url).map_err(Into::into)
+    }
+
+    /// The status and body of one signed call.
+    fn call(&self, method: Method, key: &str, query: &[(&str, &str)], headers: &[(&str, &str)], body: Vec<u8>) -> Result<Reply> {
+        let limit = LIMIT + Duration::from_secs(body.len() as u64 / SLOWEST);
+        let response = self.request(method, key, query, headers, body, limit)?;
         let status = response.status().as_u16();
         let headers = response.headers().clone();
         Ok(Reply { status, headers, body: response.bytes().map_err(reqwest::Error::without_url)?.to_vec() })

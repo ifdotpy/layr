@@ -65,6 +65,12 @@ Resources:
                   - !Sub '${Bucket.Arn}/${Prefix}/records/*'
                   - !Sub '${Bucket.Arn}/${Prefix}/states/*'
                   - !Sub '${Bucket.Arn}/${Prefix}/slots/*'
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt Bucket.Arn
+                Condition:
+                  StringLike:
+                    s3:prefix: [!Sub '${Prefix}/records/*', !Sub '${Prefix}/states/*']
   Reader:
     Type: AWS::IAM::Role
     Properties:
