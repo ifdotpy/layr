@@ -7,7 +7,7 @@ mod legacy;
 pub(crate) mod reader;
 mod writer;
 
-pub(crate) use layr_store::{aws, canonical, format, keys, s3, zst};
+pub(crate) use layr_store::{canonical, format, keys, s3, zst};
 
 use crate::ctx::Ctx;
 use crate::repo::Repo;

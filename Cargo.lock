@@ -1424,7 +1424,6 @@ dependencies = [
  "reqwest",
  "rusqlite",
  "rustix",
- "rustls",
  "security-framework",
  "serde",
  "serde_json",
