@@ -162,6 +162,28 @@ peer_public_key=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])
 eq "trust accepts the same public key in uppercase" 0 "$(l remote trust peer "$(cat "$BR/machine/id")" --public-key "$(echo "$peer_public_key" | tr 'a-f' 'A-F')" >/dev/null; echo $?)"
 ok "remote trust records the known key" l remote list --json
 
+# Live refs make automatic states explicit transfer roots without --auto.
+echo pinned-push > ref-auto.txt
+l save -q
+auto_push=$(l rev-parse 'HEAD@{0}')
+l ref set pins/peer-push "$auto_push" >/dev/null
+l push peer --command -- "${transport[@]}" >/dev/null
+eq "push includes a live ref to an automatic state" pinned-push "$(B show "$auto_push:ref-auto.txt")"
+cd "$BR/projects/x/lines/main"
+echo pinned-fetch > ref-auto.txt
+B save -q
+auto_fetch=$(B rev-parse 'HEAD@{0}')
+B ref set pins/peer-fetch "$auto_fetch" >/dev/null
+cd "$A/lines/main"
+l fetch peer --command -- "${transport[@]}" >/dev/null
+eq "fetch includes a live ref to an automatic state" pinned-fetch "$(l show "$auto_fetch:ref-auto.txt")"
+echo pinned-sync > ref-auto.txt
+l save -q
+auto_sync=$(l rev-parse 'HEAD@{0}')
+l ref set pins/peer-sync "$auto_sync" >/dev/null
+l sync peer --command -- "${transport[@]}" >/dev/null
+eq "sync includes a live ref to an automatic state" pinned-sync "$(B show "$auto_sync:ref-auto.txt")"
+
 has "old command transport names sync remote" "layr sync <remote>" "$(l sync -- false 2>&1 || true)"
 has "old machines form names remote list" "layr remote list" "$(l machines 2>&1 || true)"
 has "old Git sync form names git sync" "layr git sync" "$(l git-sync 2>&1 || true)"
