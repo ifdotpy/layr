@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import fcntl
 import io
 import json
 import os
@@ -178,19 +179,22 @@ class Sync:
                 raise ValueError("enable MagicDNS for the tailnet")
         remote_digest = hashlib.sha256(json.dumps(
             {"gateway": remote_gateway, "projects": projects}, sort_keys=True).encode()).hexdigest()
-        marker = self.home / ".remote-config-sha256"
-        path = self.home / "config.json"
-        # Keep locally issued hashes while the remote config is unchanged.
-        if marker.exists() and marker.read_text() == remote_digest and path.exists():
-            old_projects = json.loads(path.read_text()).get("projects", {})
-            for name, project in projects.items():
-                for field in ("writeTokenHashes", "gcTokenHashes"):
-                    if field in old_projects.get(name, {}):
-                        project[field] = old_projects[name][field]
-        config = {"host": gateway["host"], "listen": f"{listen}:443", "projects": projects}
-        if write_if_changed(path, json.dumps(config, indent=2, sort_keys=True) + "\n"):
-            self.restart = True
-        write_if_changed(marker, remote_digest)
+        descriptor = os.open(self.home / ".config.json.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(descriptor, "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            marker = self.home / ".remote-config-sha256"
+            path = self.home / "config.json"
+            # Keep locally issued hashes while the remote config is unchanged.
+            if marker.exists() and marker.read_text() == remote_digest and path.exists():
+                old_projects = json.loads(path.read_text()).get("projects", {})
+                for name, project in projects.items():
+                    for field in ("writeTokenHashes", "gcTokenHashes"):
+                        if field in old_projects.get(name, {}):
+                            project[field] = old_projects[name][field]
+            config = {"host": gateway["host"], "listen": f"{listen}:443", "projects": projects}
+            if write_if_changed(path, json.dumps(config, indent=2, sort_keys=True) + "\n"):
+                self.restart = True
+            write_if_changed(marker, remote_digest)
         return gateway
 
     def tailscale_certificate(self, host: str) -> tuple[str, str]:

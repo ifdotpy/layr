@@ -25,6 +25,74 @@ the programs that use it. Programs built on top of it use only its public comman
 
 Use the [AWS runbook](infra/aws/README.md) to deploy a store, gateway, and executor.
 
+## Store gateway
+
+`layr gateway` serves encrypted store objects over HTTPS without a local project or snapshot filesystem.
+The server refuses to run as root.
+Use the [AWS runbook](infra/aws/README.md) for the host, certificates, and public-key enrollment.
+The [gateway design](docs/cloud-design.md) defines the config fields.
+
+```sh
+layr gateway --config /etc/layr-gateway/config.json
+layr gateway --config ./gateway.json --tls files --cert ./tls.crt --key ./tls.key
+layr gateway --config ./gateway.json --tls tailscale --tls-dir /etc/layr-gateway/tls
+```
+
+The listen address must belong to the tailnet or loopback.
+`--tls none` permits loopback only, for local tests.
+The default TLS mode reads the systemd credentials `tls.crt` and `tls.key`.
+The `tailscale` mode reads `<host>.crt` and `<host>.key` from the TLS folder.
+A renewed certificate replaces the previous certificate after the new pair loads successfully.
+The host script runs `tailscale cert` or Certbot to renew those files.
+
+The server reads config changes on each request.
+A new listen address requires a service restart.
+An invalid config fails closed.
+The config file must not permit group or public writes.
+
+Issue write and GC tokens on the gateway host:
+
+```sh
+layr gateway token example --write --until 24h --config /etc/layr-gateway/config.json
+layr gateway token example --gc --until 1h --config /etc/layr-gateway/config.json
+```
+
+The token command can run as root.
+It prints the new token once and atomically adds its SHA-256 hash to the config.
+Token updates and the host script use the same file lock.
+The default token duration is 24 hours.
+Duration units are `s`, `m`, `h`, and `d`.
+Read requests use a slot challenge and a bearer token that lasts at most ten minutes.
+Write tokens cannot read objects or add slots.
+A slot write requires proof of the store identity.
+GC tokens can delete only `states/<state>/<part>.data.age` objects.
+The gateway requires conditional creation in S3 and returns HTTP 412 when an object already exists.
+
+The server accepts four connections at a time and closes each connection after one request.
+Limits: 4 KiB request line, 64 headers, 16 KiB header bytes, 32 MiB object body, and 16 KiB slots.
+It refuses chunked requests, duplicate headers, folded headers, unsafe paths, and multiple byte ranges.
+Header, body, and response time limits are 15, 120, and 60 seconds.
+A TLS handshake has a ten-second time limit.
+A list returns at most 10,000 objects; the slots endpoint returns at most 1,024 slots.
+The gateway never opens or decrypts state data.
+
+The MinIO integration test uses a separate temporary bucket and a server that runs as `nobody`.
+It verifies conditional writes, pagination, ranges, slot grants, GC grants, malformed requests, and config revocation.
+It does not create AWS resources.
+Use test credentials for a local MinIO server:
+
+```sh
+cargo build
+sudo env LAYR_MINIO_ENDPOINT=http://127.0.0.1:19000 \
+  LAYR_MINIO_ACCESS_KEY=layrtest LAYR_MINIO_SECRET_KEY=layrtestsecret \
+  tests/run.sh t27-gateway
+```
+
+Debug builds expose `--test-static-credentials` for this test only.
+It requires `--tls none`, a loopback listener, and a loopback HTTP S3 endpoint.
+Release builds exclude this credential path.
+Production uses IMDSv2 and STS role sessions.
+
 ## Build and test
 
 ```sh
