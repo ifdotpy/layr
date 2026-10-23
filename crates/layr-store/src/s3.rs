@@ -1,5 +1,10 @@
 use super::aws::{self, Credentials, EMPTY_SHA256};
-pub(crate) use super::backend::Object;
+#[derive(Clone, Debug)]
+pub struct Object {
+    pub key: String,
+    pub modified: i64,
+}
+
 use anyhow::{anyhow, bail, Context, Result};
 use reqwest::blocking::Client;
 use reqwest::Method;
@@ -48,7 +53,7 @@ impl S3 {
     }
 
     /// Use a caller-owned client with its connection policy and time limits.
-    pub(crate) fn new_with_client(bucket: &str, region: &str, credentials: Credentials, endpoint: Option<&str>, http: Client) -> Result<Self> {
+    pub fn new_with_client(bucket: &str, region: &str, credentials: Credentials, endpoint: Option<&str>, http: Client) -> Result<Self> {
         Ok(S3 {
             http,
             credentials,
@@ -60,7 +65,7 @@ impl S3 {
     }
 
     /// Return a signed response without consuming its body. The caller must bound reads.
-    pub(crate) fn request(&self, method: Method, key: &str, query: &[(&str, &str)], headers: &[(&str, &str)], body: Vec<u8>, limit: Duration) -> Result<reqwest::blocking::Response> {
+    pub fn request(&self, method: Method, key: &str, query: &[(&str, &str)], headers: &[(&str, &str)], body: Vec<u8>, limit: Duration) -> Result<reqwest::blocking::Response> {
         if self.credentials.key_id.is_empty() || self.credentials.secret.is_empty() {
             bail!("set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY");
         }
@@ -278,7 +283,7 @@ impl S3 {
         let mut s = Self::new(bucket, &region, credentials, endpoint.as_deref())?;
         let prefix = prefix.trim_matches('/');
         if !prefix.is_empty() {
-            crate::fsutil::check_rel(prefix)?;
+            crate::paths::check_rel(prefix)?;
             s.prefix = format!("{prefix}/");
         }
         Ok(s)
@@ -323,7 +328,7 @@ mod tests {
     fn conditional_multipart_encrypted_round_trip() {
         let env: std::collections::HashMap<String, String> = std::env::vars().collect();
         let bucket = env.get("LAYR_TEST_S3_BUCKET").expect("test bucket");
-        let prefix = format!("unit-{}", crate::ids::new_id());
+        let prefix = format!("unit-{}", uuid::Uuid::now_v7());
         let s3 = S3::with_env(bucket, &prefix, &env).unwrap();
         let create = s3.call(Method::PUT, "", &[], &[], Vec::new()).unwrap();
         assert!(matches!(create.status, 200 | 409));

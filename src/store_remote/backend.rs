@@ -6,11 +6,7 @@ use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-#[derive(Clone, Debug)]
-pub struct Object {
-    pub key: String,
-    pub modified: i64,
-}
+pub use layr_store::s3::Object;
 
 pub enum Backend {
     File(PathBuf, u32, u32),

@@ -3,6 +3,8 @@
 //! secret.
 
 use anyhow::{anyhow, bail, Context, Result};
+use base64::Engine;
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use bip39::{Language, Mnemonic};
 use std::str::FromStr;
 
@@ -52,7 +54,7 @@ pub fn decrypt(identity: &str, data: &[u8]) -> Result<Vec<u8>> {
     decrypt_with(&parse(identity)?, data)
 }
 
-pub(crate) fn decrypt_with(identity: &age::x25519::Identity, data: &[u8]) -> Result<Vec<u8>> {
+pub fn decrypt_with(identity: &age::x25519::Identity, data: &[u8]) -> Result<Vec<u8>> {
     Ok(age::decrypt(identity, data)?)
 }
 
@@ -164,4 +166,15 @@ mod tests {
         let other = ed25519_dalek::SigningKey::from_bytes(&[8; 32]);
         assert!(open_machine_slot(&slot, &other).is_err());
     }
+}
+
+/// Sign arbitrary bytes with the machine key.
+pub fn sign_bytes(data: &[u8], key: &SigningKey) -> String {
+    base64::engine::general_purpose::STANDARD.encode(key.sign(data).to_bytes())
+}
+
+pub fn verify_bytes(data: &[u8], signature: &str, key: &VerifyingKey) -> Result<()> {
+    let sig = base64::engine::general_purpose::STANDARD.decode(signature)?;
+    let sig = Signature::from_slice(&sig).map_err(|e| anyhow::anyhow!("bad signature: {e}"))?;
+    key.verify(data, &sig).map_err(|_| anyhow::anyhow!("signature does not verify"))
 }

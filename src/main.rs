@@ -23,7 +23,7 @@ mod disk;
 mod fsutil;
 mod gitbridge;
 mod ids;
-mod http;
+use layr_store::http;
 mod gateway;
 mod ignore_rules;
 mod lineops;

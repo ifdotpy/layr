@@ -6,6 +6,18 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// Public store metadata. The recipient identifies the vault encryption key.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Descriptor {
+    pub format: u32,
+    pub project: String,
+    pub recipient: String,
+}
+
+pub fn is_uuid(s: &str) -> bool {
+    s.len() == 36 && uuid::Uuid::parse_str(s).map(|u| u.hyphenated().to_string() == s).unwrap_or(false)
+}
+
 pub const PART_LIMIT: usize = 16 << 20;
 pub const FULL_TREE_EVERY: usize = 32;
 pub const MAX_FILE_DELTAS: usize = 16;
@@ -76,7 +88,7 @@ impl Tree {
                 bail!("invalid file chain length");
             }
             for (i, link) in entry.3.iter().enumerate() {
-                if !crate::model::is_uuid(&link.0) || !valid_attempt(&link.1) || link.2 >= MAX_PARTS || link.4 == 0 {
+                if !is_uuid(&link.0) || !valid_attempt(&link.1) || link.2 >= MAX_PARTS || link.4 == 0 {
                     bail!("invalid frame address");
                 }
                 let expected = if i + 1 == entry.3.len() { "full" } else { "delta" };
@@ -102,7 +114,7 @@ pub fn safe_path(path: &str) -> bool {
     !path.is_empty()
         && !path.contains(['\\', '\0'])
         && !path.split('/').any(|s| s.is_empty() || s == "." || s == "..")
-        && crate::fsutil::check_rel(path).is_ok()
+        && crate::paths::check_rel(path).is_ok()
 }
 
 pub fn valid_attempt(attempt: &str) -> bool {
@@ -119,13 +131,13 @@ pub fn data_name(state: &str, attempt: &str, part: u32) -> String {
 pub fn parse_tree_name(key: &str) -> Option<(String, String)> {
     let (state, rest) = key.strip_prefix("states/")?.split_once('/')?;
     let attempt = rest.strip_suffix(".tree.age")?;
-    (crate::model::is_uuid(state) && valid_attempt(attempt)).then(|| (state.to_string(), attempt.to_string()))
+    (is_uuid(state) && valid_attempt(attempt)).then(|| (state.to_string(), attempt.to_string()))
 }
 
 pub fn parse_data_name(key: &str) -> Option<(String, String, u32)> {
     let (state, rest) = key.strip_prefix("states/")?.split_once('/')?;
     let (attempt, part) = rest.strip_suffix(".data.age")?.split_once('.')?;
-    if !crate::model::is_uuid(state) || !valid_attempt(attempt) || part.len() != 4 || !part.bytes().all(|b| b.is_ascii_digit()) {
+    if !is_uuid(state) || !valid_attempt(attempt) || part.len() != 4 || !part.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
     Some((state.to_string(), attempt.to_string(), part.parse().ok()?))
@@ -138,7 +150,7 @@ pub fn segment_name(machine: &str, first: u64, last: u64) -> String {
 pub fn parse_segment_name(key: &str) -> Option<(String, u64, u64)> {
     let (machine, range) = key.strip_prefix("records/")?.split_once('/')?;
     let (first, last) = range.strip_suffix(".age")?.split_once('-')?;
-    if !crate::model::is_uuid(machine)
+    if !is_uuid(machine)
         || first.len() != 20
         || last.len() != 20
         || !first.bytes().all(|b| b.is_ascii_digit())
@@ -162,29 +174,29 @@ fn signed_bytes(header: &Header, tree: &[u8]) -> Result<Vec<u8>> {
 
 impl Header {
     pub fn sign(&mut self, tree: &[u8], key: &SigningKey) -> Result<()> {
-        self.sig = crate::oplog::sign_bytes(&signed_bytes(self, tree)?, key);
+        self.sig = crate::keys::sign_bytes(&signed_bytes(self, tree)?, key);
         Ok(())
     }
     pub fn verify(&self, tree: &[u8], key: &VerifyingKey) -> Result<()> {
         if self.v != 2 {
             bail!("unsupported tree format {}", self.v);
         }
-        if !crate::model::is_uuid(&self.state)
-            || !crate::model::is_uuid(&self.machine)
+        if !is_uuid(&self.state)
+            || !is_uuid(&self.machine)
             || !valid_attempt(&self.attempt)
             || self.parts > MAX_PARTS
         {
             bail!("invalid tree header");
         }
-        if self.btrfs.as_ref().is_some_and(|i| !crate::model::is_uuid(&i.uuid) || i.transid == 0) {
+        if self.btrfs.as_ref().is_some_and(|i| !is_uuid(&i.uuid) || i.transid == 0) {
             bail!("invalid btrfs tree identity");
         }
         match (self.tree.as_str(), &self.base) {
             ("full", None) => {}
-            ("delta", Some((state, attempt))) if crate::model::is_uuid(state) && valid_attempt(attempt) => {}
+            ("delta", Some((state, attempt))) if is_uuid(state) && valid_attempt(attempt) => {}
             _ => bail!("invalid tree base"),
         }
-        crate::oplog::verify_bytes(&signed_bytes(self, tree)?, &self.sig, key)
+        crate::keys::verify_bytes(&signed_bytes(self, tree)?, &self.sig, key)
     }
 }
 
