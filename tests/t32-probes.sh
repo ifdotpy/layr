@@ -112,6 +112,8 @@ l probe run "$QUIET" --probe metric >/dev/null
 NOISE=$(l probe diff "$BASE" "$QUIET" --json)
 ok "the noise threshold suppresses a four-percent metric change" python3 -c 'import json,sys; r=next(r for r in json.loads(sys.argv[1])["probes"] if r["probe"]=="metric"); assert r["status"]=="unchanged" and not r["changes"]' "$NOISE"
 # Exact shared views are valid probe inputs; private layers cannot enter shared outputs.
+# The project must have a reader other than root, which can read every overlay.
+l access grant '*' reader
 l restore value.txt
 l overlay create private -q
 l overlay use private -q

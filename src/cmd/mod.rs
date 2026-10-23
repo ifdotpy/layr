@@ -15,8 +15,8 @@ pub mod refs;
 pub mod remote;
 pub mod replicate;
 pub mod transfer;
-pub mod work;
 pub mod view;
+pub mod work;
 
 use crate::ctx::{Ctx, Loc};
 use crate::model::Line;
