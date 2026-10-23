@@ -140,24 +140,24 @@ fn limit(var: &str, default: usize) -> usize {
 }
 
 /// Child process: serve one request, then exit.
-fn handle(sock: UnixStream, root: &Path) -> i32 {
+fn handle(sock: UnixStream, root: &Path, registry_uids: &[u32]) -> i32 {
     let res = (|| -> Result<i32> {
         let (uid, _gid, _pid) = peer_uid(&sock)?;
         // A client that does not send its request in time does not hold a process.
         sock.set_read_timeout(Some(std::time::Duration::from_secs(10)))?;
         let mut first = vec![0u8; 65536];
         let (n, fds) = recv_with_fds(&sock, &mut first)?;
-        if fds.len() != 4 {
-            bail!("bad request: expected 4 descriptors");
-        }
         if n < 4 {
             bail!("bad request");
         }
         let len = u32::from_be_bytes([first[0], first[1], first[2], first[3]]) as usize;
-        if len > MAX_REQ {
+        if len > MAX_REQ || (fds.is_empty() && len > 32768) {
             bail!("request too large");
         }
         let mut req = first[4..n].to_vec();
+        if req.len() > len {
+            bail!("request exceeds its declared size");
+        }
         while req.len() < len {
             let mut more = vec![0u8; len - req.len()];
             let k = (&sock).read(&mut more)?;
@@ -167,6 +167,19 @@ fn handle(sock: UnixStream, root: &Path) -> i32 {
             req.extend_from_slice(&more[..k]);
         }
         let v: serde_json::Value = serde_json::from_slice(&req)?;
+        if let Some(query) = v.get("registry") {
+            if !fds.is_empty() {
+                bail!("registry request must not contain descriptors");
+            }
+            crate::oci::registry::serve_backend(sock.try_clone()?, root, uid, query.clone())?;
+            return Ok(0);
+        }
+        if registry_uids.contains(&uid) {
+            bail!("registry user may use only registry read requests");
+        }
+        if fds.len() != 4 {
+            bail!("bad request: expected 4 descriptors");
+        }
         let argv: Vec<String> = serde_json::from_value(v["argv"].clone())?;
         let env: HashMap<String, String> = serde_json::from_value(v["env"].clone()).unwrap_or_default();
         rustix::stdio::dup2_stdin(&fds[0])?;
@@ -223,7 +236,7 @@ pub fn run_as(argv: Vec<String>, caller: Caller, cwd: PathBuf, env: HashMap<Stri
 /// folder. It is local to this machine and is never sent to other machines.
 const PERIODIC_CHECKS: &str = "periodic-checks.json";
 
-/// Periodic work: automatic states of busy lines, access to the git store, retention, backups.
+/// Periodic work: automatic states of busy lines, access to the git store, retention.
 fn periodic(root: &Path, hourly: bool) {
     let now = crate::ids::now_ms();
     let store = match Store::open(root) {
@@ -279,18 +292,15 @@ fn periodic(root: &Path, hourly: bool) {
                 let _ = crate::fsutil::atomic_write(&checks_path, &data, 0o600);
             }
         }
+        if let Err(error) = crate::cmd::queue::run_configured(&ctx, &repo, None) {
+            eprintln!("layr queue ({name}): {error:#}");
+        }
         if hourly {
             // Also repairs the git store of a project from an earlier layr, soon after a start.
             if let Ok(_lock) = repo.p.lock() {
                 let _ = crate::gitbridge::sync_store_access(&repo);
             }
             let _ = crate::cmd::admin::run_gc(&ctx, &repo, false);
-            if let Ok(Some(dir)) = repo.p.config_value("backup.dir") {
-                if let Some(d) = dir.as_str() {
-                    // Written as the admin of this machine, who configured the folder.
-                    let _ = crate::cmd::transfer::run_backup(&ctx, &repo, Path::new(d), false, repo.backup_writer());
-                }
-            }
         }
     }
 }
@@ -347,6 +357,8 @@ pub fn daemon(args: &[String]) -> Result<i32> {
         }
         std::fs::remove_file(&sock)?;
     }
+    let registry_listeners = crate::oci::registry::listeners(&root)?;
+    let registry_uids: Vec<u32> = registry_listeners.iter().map(|(_, _, user)| user.uid).collect();
     let listener = UnixListener::bind(&sock)?;
     {
         use std::os::unix::fs::PermissionsExt;
@@ -371,7 +383,10 @@ pub fn daemon(args: &[String]) -> Result<i32> {
         }
         let wait = next.saturating_duration_since(std::time::Instant::now()).min(std::time::Duration::from_secs(1));
         let timeout = rustix::event::Timespec { tv_sec: wait.as_secs() as _, tv_nsec: wait.subsec_nanos() as _ };
-        let mut pfd = [rustix::event::PollFd::new(&listener, rustix::event::PollFlags::IN)];
+        let mut pfd = vec![rustix::event::PollFd::new(&listener, rustix::event::PollFlags::IN)];
+        for (_, l, _) in &registry_listeners {
+            pfd.push(rustix::event::PollFd::new(l, rustix::event::PollFlags::IN));
+        }
         let ready = rustix::event::poll(&mut pfd, Some(&timeout)).unwrap_or(0);
         if ready > 0 && pfd[0].revents().contains(rustix::event::PollFlags::IN) {
             if let Ok((conn, _)) = listener.accept() {
@@ -385,7 +400,7 @@ pub fn daemon(args: &[String]) -> Result<i32> {
                 match crate::sys::fork() {
                     Ok(crate::sys::Fork::Child) => {
                         drop(listener);
-                        let code = handle(conn, &root);
+                        let code = handle(conn, &root, &registry_uids);
                         std::process::exit(if code >= 0 { 0 } else { 1 });
                     }
                     Err(e) => eprintln!("layr service: fork failed: {e}"),
@@ -393,6 +408,30 @@ pub fn daemon(args: &[String]) -> Result<i32> {
                         children.insert(pid, uid);
                         drop(conn);
                     }
+                }
+            }
+        }
+        for (i, (name, registry, user)) in registry_listeners.iter().enumerate() {
+            if !pfd[i + 1].revents().contains(rustix::event::PollFlags::IN) {
+                continue;
+            }
+            if let Ok((conn, _)) = registry.accept() {
+                if children.len() >= max_total {
+                    drop(conn);
+                    continue;
+                }
+                match crate::sys::fork() {
+                    Ok(crate::sys::Fork::Child) => {
+                        drop(listener);
+                        if let Err(e) = crate::oci::registry::exec_http(conn, &sock, name, *user) {
+                            eprintln!("layr registry: {e:#}");
+                        }
+                        std::process::exit(1);
+                    }
+                    Ok(crate::sys::Fork::Parent(pid)) => {
+                        children.insert(pid, u32::MAX);
+                    }
+                    Err(e) => eprintln!("layr registry: fork failed: {e}"),
                 }
             }
         }

@@ -49,8 +49,8 @@ snapshots in constant time and change lists in O(changes), so the working folder
 without a cost for each file. It adds two things that these systems leave to the host: rules
 that the machine itself enforces, and regenerable caches.
 
-The cost is the reason git stays at the edge. layr has its own store, so it runs only on Linux
-with btrfs, while editors, hosts and CI systems read git. layr imports from git, pushes states as
+The cost is the reason git stays at the edge. layr has its own store: the backends are btrfs on Linux,
+APFS on macOS and OverlayFS on ext4 or XFS, while editors, hosts and CI systems read git. layr imports from git, pushes states as
 git commits, and exports plain folders; it does not try to be git on disk.
 
 ## 2. Why a root service
@@ -85,7 +85,7 @@ do everything, and every record names who acted.
 | reader | read history (`log`, `show`, `diff`, `grep`, `blame`, `ls-files`, `rev-parse`), `try`, `export` |
 | writer | create own lines |
 | maintainer | update protected lines (per their rules), tags, push, create lines for other users, delete or adopt other users' lines |
-| admin | roles, deny rules, protection rules, checks, remotes, configuration, caches, replication and machine trust, backups, gc, record import and export, fsck |
+| admin | roles, deny rules, protection rules, checks, remotes, configuration, caches, replication and machine trust, gc, record import and export, fsck |
 
 A user's role is the highest role of the user, the user's groups and `*`. Owning a line in a
 project includes reading the project.
@@ -101,7 +101,7 @@ after that.
 **Deny rules.** `layr access deny <principal> <action>...` takes actions away from a user, a
 group or everyone, whatever the role. The actions are `read`, `try`, `export`, `line.create`,
 `merge` (merges into protected lines), `line.manage`, `tag`, `push`, `access`, `config`,
-`remote`, `sync`, `backup`, `gc`, `records` and `fsck`. This is how a program on top limits its users, for
+`remote`, `sync`, `gc`, `records` and `fsck`. This is how a program on top limits its users, for
 example: the group of AI agents may not push, sync or trust machines.
 `access` covers the roles, deny rules, protection rules and the commands of named checks
 (`check.<name>`), so a user without it cannot weaken a protected line by any setting.
@@ -127,15 +127,15 @@ line only takes states whose exact content passed its checks.
 
 ## 4. History on the remote
 
-`layr push` exports every state of the line's history that the remote does not have as its own
+`layr git push` exports every state of the line's history that the remote does not have as its own
 git commit, with the same parents (merges stay merges). The same state always gives the same
-commit. `layr push --squash` exports the pushed state as one commit on top of the last exported
+commit. `layr git push --squash` exports the pushed state as one commit on top of the last exported
 one; a program on top that wants one commit per task uses it.
 
 ## 5. Warm caches
 
 A cache is a folder of regenerable content, such as a Rust `target` folder, kept as a nested
-subvolume, outside states, diffs and backups. Every working folder would otherwise build from
+subvolume, outside states and diffs. Every working folder would otherwise build from
 nothing, and the same build output would be on disk once per folder.
 
 layr keeps caches as storage and knows nothing about builds. It cannot tell whether build output

@@ -4,7 +4,7 @@
 //! An overlay is the internal project `<project>%<overlay>` below the project's private `meta`
 //! folder, with its own states, signed records and access policy (its owner is its admin, its
 //! readers have the reader role). History, permissions and fsck work as for any project, and
-//! backups, pushes and replication of the project never see it. Its lines are pointers without
+//! remote copies, pushes and replication of the project never see it. Its lines are pointers without
 //! working folders: `user-<uid>` (shared mode: one for all lines of a user) and `line-<line id>`
 //! (follow mode: one per line of the project, branched and merged with it).
 //!
@@ -41,6 +41,46 @@ use std::path::{Path, PathBuf};
 pub struct Layer {
     pub overlay: String,
     pub state: String,
+}
+
+/// An addressable stack. Field order defines the canonical JSON used for its identity.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct View {
+    pub format: u32,
+    pub shared: String,
+    pub layers: Vec<Layer>,
+}
+
+impl View {
+    pub fn new(shared: String, layers: Vec<Layer>) -> Self {
+        Self { format: 1, shared, layers }
+    }
+
+    pub fn id(&self) -> Result<String> {
+        use sha2::{Digest, Sha256};
+        Ok(hex::encode(Sha256::digest(serde_json::to_vec(self)?)))
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.format != 1 {
+            bail!("unsupported view format {}", self.format);
+        }
+        if !crate::model::is_uuid(&self.shared) {
+            bail!("invalid shared state in view");
+        }
+        for layer in &self.layers {
+            crate::store::check_name("overlay", &layer.overlay)?;
+            if !crate::model::is_uuid(&layer.state) {
+                bail!("invalid state of overlay '{}'", layer.overlay);
+            }
+        }
+        Ok(())
+    }
+}
+
+pub fn is_view_id(id: &str) -> bool {
+    id.len() == 64 && id.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,7 +127,7 @@ pub fn stack_data(line_id: &str, layers: &[Layer]) -> serde_json::Value {
 }
 
 /// The files (not folders) of a tree, without `.git`.
-pub fn files_of(root: &Path) -> Result<Vec<String>> {
+pub fn files_of(root: &(impl fsutil::Src + ?Sized)) -> Result<Vec<String>> {
     let mut v = Vec::new();
     fsutil::walk(root, "", &mut |rel, m| {
         if skip_path(rel) {
@@ -263,6 +303,94 @@ fn base_key(head: &str, layers: &[Layer]) -> String {
 }
 
 impl<'a> Repo<'a> {
+    pub fn view_of(&self, line: &Line) -> Result<View> {
+        let view = View::new(line.head.clone(), self.layers(line)?);
+        view.validate()?;
+        Ok(view)
+    }
+
+    pub fn saved_view(&self, id: &str) -> Result<View> {
+        if !is_view_id(id) {
+            bail!("invalid view id '{id}'");
+        }
+        let view = self.p.db.saved_view(id)?.ok_or_else(|| anyhow!("unknown view '{id}'"))?;
+        view.validate()?;
+        if view.id()? != id {
+            bail!("view descriptor does not match its id");
+        }
+        Ok(view)
+    }
+
+    /// The caller holds the project lock. Saving a descriptor never captures working files.
+    pub fn save_view(&self, ctx: &Ctx, view: &View) -> Result<String> {
+        self.can_read(ctx)?;
+        view.validate()?;
+        let id = view.id()?;
+        if self.p.db.saved_view(&id)?.is_none() {
+            let mut rec = Record::new("view.save");
+            rec.data = serde_json::json!({"view_id": id, "view": view});
+            self.commit_record(ctx, rec)?;
+        }
+        Ok(id)
+    }
+
+    pub fn check_view_collected(&self, view: &View) -> Result<()> {
+        let id = view.id()?;
+        let collected = |repo: &Repo, state: &str| -> Result<()> {
+            if repo.p.db.state_flags(state)?.is_some_and(|(_, deleted)| deleted) {
+                bail!("view {id} refers to a collected state {state}");
+            }
+            Ok(())
+        };
+        collected(self, &view.shared)?;
+        for layer in &view.layers {
+            if let Ok(repo) = self.overlay_repo(&layer.overlay) {
+                collected(&repo, &layer.state)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn prepare_view_layers(&self, ctx: &Ctx, line: &Line, view: &View) -> Result<()> {
+        self.check_view_read(ctx, view)?;
+        self.check_stack(line, &view.layers)?;
+        for layer in &view.layers {
+            let info = self.need_overlay(&layer.overlay)?;
+            let repo = self.overlay_repo(&layer.overlay)?;
+            let _lock = repo.p.lock()?;
+            repo.ensure_overlay_line(ctx, &Self::overlay_line_name(&info, &line.id, line.owner), &layer.state, line.owner)?;
+        }
+        Ok(())
+    }
+
+    pub fn create_line_view(&self, ctx: &Ctx, name: &str, view: &View, owner: u32) -> Result<Line> {
+        Ok(self.create_named_lines(ctx, vec![name.to_string()], &view.shared, owner, None, Some(view))?.remove(0))
+    }
+
+    pub fn materialize_view(&self, ctx: &Ctx, line: &Line, view: &View, dst: &Path) -> Result<()> {
+        self.check_view_read(ctx, view)?;
+        let assembled = self.assemble(line, &view.shared, &view.layers)?;
+        let work = self.temp_work(&assembled.path)?;
+        self.prepare_at(line, &view.shared, &work.path)?;
+        crate::fsutil::rename_tree(&work.path, dst)
+    }
+
+    /// A descriptor may be read without its overlays; materialization checks every layer.
+    pub fn check_view_read(&self, ctx: &Ctx, view: &View) -> Result<()> {
+        self.can_read(ctx)?;
+        view.validate()?;
+        for layer in &view.layers {
+            if !self.reads_overlay(&layer.overlay, ctx.caller.uid, ctx.caller.gid).unwrap_or(false) {
+                bail!("permission denied: you do not read overlay '{}'", layer.overlay);
+            }
+            if self.layer_root(layer).is_none() {
+                bail!("overlay '{}' state {} is not on this machine", layer.overlay, layer.state);
+            }
+        }
+        self.state_root(&view.shared)?;
+        Ok(())
+    }
+
     // ----- overlays of the project -----
 
     pub fn overlay_info(&self, name: &str) -> Result<Option<Info>> {
@@ -648,6 +776,9 @@ pub fn next_state(
     Ok(StateRec {
         id,
         kind: StateKind::Commit,
+        change_id: Some(ids::new_id()),
+        derived_from: None,
+        context: None,
         parents,
         line: line.map(|s| s.to_string()),
         subvol: info.uuid,
@@ -807,6 +938,13 @@ pub fn commit_layers(
             }
         }
     };
+    if let Some(state) = &shared {
+        if let Err(e) = crate::secrets::check_between(ctx, repo, &crate::repo::snap(&shared_root), &repo.state_src(&state.id)?, &line.head) {
+            repo.discard_states(std::slice::from_ref(state));
+            discard(&made, &orepos);
+            return Err(e);
+        }
+    }
     // The overlays first: a lost main record leaves an overlay line ahead of the stack, which the
     // next commit reports, never a stack that names a missing state.
     let mut new_layers = layers.to_vec();
@@ -892,5 +1030,46 @@ mod tests {
         assert_eq!(std::fs::read_to_string(dst.join("keep.txt")).unwrap(), "keep");
         assert!(!dst.join("a").exists(), "empty folders go, as in git trees");
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod view_tests {
+    use super::*;
+    const SHARED: &str = "01a12290-0000-7000-8000-000000000003";
+    const OVERLAY: &str = "01a12290-0000-7000-8000-000000000004";
+
+    #[test]
+    fn view_identity_uses_exact_canonical_bytes_and_stack_order() {
+        use sha2::{Digest, Sha256};
+        let view = View::new(SHARED.into(), vec![Layer { overlay: "keys".into(), state: OVERLAY.into() }]);
+        let expected =
+            format!("{{\"format\":1,\"shared\":\"{SHARED}\",\"layers\":[{{\"overlay\":\"keys\",\"state\":\"{OVERLAY}\"}}]}}");
+        assert_eq!(serde_json::to_string(&view).unwrap(), expected);
+        assert_eq!(view.id().unwrap(), hex::encode(Sha256::digest(expected.as_bytes())));
+        assert_eq!(view.id().unwrap().len(), 64);
+        let mut two = view.clone();
+        two.layers.push(Layer { overlay: "config".into(), state: SHARED.into() });
+        let mut reversed = two.clone();
+        reversed.layers.reverse();
+        assert_ne!(two.id().unwrap(), reversed.id().unwrap());
+        assert_ne!(view.id().unwrap(), View::new(SHARED.into(), Vec::new()).id().unwrap());
+    }
+
+    #[test]
+    fn malformed_descriptors_and_ids_fail() {
+        let mut view = View::new(SHARED.into(), Vec::new());
+        assert!(view.validate().is_ok());
+        view.format = 2;
+        assert!(view.validate().is_err());
+        view.format = 1;
+        view.shared = "../escape".into();
+        assert!(view.validate().is_err());
+        view.shared = SHARED.into();
+        view.layers.push(Layer { overlay: "../private".into(), state: OVERLAY.into() });
+        assert!(view.validate().is_err());
+        assert!(!is_view_id(&"A".repeat(64)));
+        assert!(!is_view_id("abc"));
+        assert!(is_view_id(&"a".repeat(64)));
     }
 }

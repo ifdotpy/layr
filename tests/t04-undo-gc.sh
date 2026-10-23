@@ -62,7 +62,7 @@ has "an undone operation is marked" "(undone)" "$(l op log -n 50)"
 
 # A push cannot be undone (the commit is on the remote).
 git init -q --bare $T/r.git
-l remote add origin $T/r.git; l push -q origin t1
+l git remote add origin $T/r.git; l git push -q origin t1
 has "undo of a push is refused" "cannot be undone" "$(l undo "$(l op log --all -n 1 | awk '{print $1}')" 2>&1)"
 
 # Retention: keep 3 automatic states per line, then gc.

@@ -14,7 +14,14 @@ pub fn resolve(repo: &Repo, line: Option<&Line>, rev: &str) -> Result<String> {
     };
     let mut id = if let Some(n) = at {
         let n: usize = n.parse().map_err(|_| anyhow::anyhow!("bad revision {rev}"))?;
-        if name == "stash" {
+        let history = repo.p.db.ref_log(name)?;
+        if !history.is_empty() {
+            let positions: Vec<_> = history.into_iter().filter_map(|ch| ch.after).collect();
+            positions
+                .get(n)
+                .map(|r| r.target.clone())
+                .ok_or_else(|| anyhow::anyhow!("{rev}: ref has only {} positions", positions.len()))?
+        } else if name == "stash" {
             let l = need_line(line, rev)?;
             let v = repo.p.db.line_states(&l.id, StateKind::Stash)?;
             match v.get(n) {
@@ -64,6 +71,28 @@ pub fn resolve(repo: &Repo, line: Option<&Line>, rev: &str) -> Result<String> {
     Ok(id)
 }
 
+/// Resolve the complete stack for an exact view or line, and a layer-free view for a state.
+pub fn resolve_view(repo: &Repo, line: Option<&Line>, rev: &str) -> Result<crate::overlay::View> {
+    let view = if let Some(id) = rev.strip_prefix("views/") {
+        repo.saved_view(id)?
+    } else if let Some(id) = rev.strip_prefix("attestations/") {
+        let a = repo.p.db.attestation(id)?.ok_or_else(|| anyhow::anyhow!("unknown attestation '{id}'"))?;
+        if a.subject.kind == "view" {
+            repo.saved_view(&a.subject.id)?
+        } else {
+            crate::overlay::View::new(resolve(repo, line, rev)?, Vec::new())
+        }
+    } else if matches!(rev, "" | "HEAD" | "@") {
+        repo.view_of(need_line(line, rev)?)?
+    } else if let Some(line) = repo.p.db.line_by_name(rev)? {
+        repo.view_of(&repo.localize(line)?)?
+    } else {
+        crate::overlay::View::new(resolve(repo, line, rev)?, Vec::new())
+    };
+    repo.check_view_collected(&view)?;
+    Ok(view)
+}
+
 fn need_line<'a>(line: Option<&'a Line>, rev: &str) -> Result<&'a Line> {
     match line {
         Some(l) => Ok(l),
@@ -96,6 +125,31 @@ fn base_state(repo: &Repo, line: Option<&Line>, name: &str) -> Result<String> {
             Some(s) => Ok(s.id.clone()),
             None => bail!("no stash entries"),
         };
+    }
+    if let Some(rest) = name.strip_prefix("changes/") {
+        let (id, version) = match rest.split_once('/') {
+            Some((id, v)) => (id, Some(crate::cmd::change::version(v)?)),
+            None => (rest, None),
+        };
+        let id = crate::cmd::change::find(repo, id)?;
+        let states = repo.p.db.change_versions(&id)?;
+        return states
+            .get(version.unwrap_or(states.len().saturating_sub(1)))
+            .map(|s| s.id.clone())
+            .ok_or_else(|| anyhow::anyhow!("unknown change version '{name}'"));
+    }
+    if let Some(id) = name.strip_prefix("views/") {
+        return Ok(repo.saved_view(id)?.shared);
+    }
+    if let Some(id) = name.strip_prefix("attestations/") {
+        let a = repo.p.db.attestation(id)?.ok_or_else(|| anyhow::anyhow!("unknown attestation '{id}'"))?;
+        return if a.subject.kind == "view" { Ok(repo.saved_view(&a.subject.id)?.shared) } else { Ok(a.subject.id) };
+    }
+    if let Some(r) = repo.p.db.ref_value(name, crate::ids::now_ms())? {
+        return Ok(r.target);
+    }
+    if crate::model::reserved_revision(name) {
+        bail!("unknown or expired ref '{name}'");
     }
     if let Some(l) = repo.p.db.line_by_name(name)? {
         return Ok(repo.localize(l)?.head);

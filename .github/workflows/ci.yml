@@ -7,7 +7,6 @@ on:
 
 jobs:
   test:
-    needs: macos
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -23,16 +22,6 @@ jobs:
         run: |
           sudo modprobe btrfs || true
           sudo -E env "PATH=$PATH" LAYR="$PWD/target/debug/layr" tests/run.sh
-      - uses: actions/download-artifact@v4
-        with:
-          name: apfs-backup
-          path: ${{ runner.temp }}/apfs-backup
-      - name: Restore APFS backup and produce Linux backup
-        run: sudo env LAYR="$PWD/target/debug/layr" bash tests/cross-backup.sh extend "$RUNNER_TEMP/apfs-backup" "$RUNNER_TEMP/linux-backup"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: linux-backup
-          path: ${{ runner.temp }}/linux-backup
   macos:
     runs-on: macos-14
     steps:
@@ -65,31 +54,6 @@ jobs:
           if [ -f "$RUNNER_TEMP/apfs-tests.log" ]; then
             python3 -c 'import os,pathlib; s=pathlib.Path(os.environ["RUNNER_TEMP"],"apfs-tests.log").read_text(); print("::error::"+s[-3500:].replace("%","%25").replace("\r","%0D").replace("\n","%0A"))'
           fi
-      - name: Produce APFS backup
-        run: LAYR_APFS_TEST_ROOT=/Volumes/LayrCI LAYR="$PWD/target/debug/layr" bash tests/cross-backup.sh create "$RUNNER_TEMP/apfs-backup"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: apfs-backup
-          path: ${{ runner.temp }}/apfs-backup
       - name: Detach the test volume
         if: always()
         run: hdiutil detach /Volumes/LayrCI || true
-  cross-return:
-    needs: test
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: linux-backup
-          path: ${{ runner.temp }}/linux-backup
-      - name: Restore Linux backup on APFS
-        run: |
-          brew install zstd
-          hdiutil create -size 4g -fs 'Case-sensitive APFS' -volname LayrReturn -type SPARSE -o "$RUNNER_TEMP/return.sparseimage"
-          hdiutil attach "$RUNNER_TEMP/return.sparseimage" -nobrowse
-          cargo build --locked
-          LAYR_APFS_TEST_ROOT=/Volumes/LayrReturn LAYR="$PWD/target/debug/layr" bash tests/cross-backup.sh check "$RUNNER_TEMP/linux-backup"
-      - name: Detach the test volume
-        if: always()
-        run: hdiutil detach /Volumes/LayrReturn || true

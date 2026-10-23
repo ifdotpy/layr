@@ -59,7 +59,6 @@ pub const ACTIONS: &[(&str, Role)] = &[
     ("config", Role::Admin),
     ("remote", Role::Admin),
     ("sync", Role::Admin),
-    ("backup", Role::Admin),
     ("gc", Role::Admin),
     ("records", Role::Admin),
     ("fsck", Role::Admin),
@@ -69,7 +68,7 @@ pub fn action_role(action: &str) -> Option<Role> {
     ACTIONS.iter().find(|(a, _)| *a == action).map(|(_, r)| *r)
 }
 
-/// A protection rule of a line name pattern (as stored).
+/// A protection rule of a line or ref name pattern (as stored).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct RuleSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -93,7 +92,7 @@ pub struct RuleSpec {
     pub approvers: Vec<String>,
 }
 
-/// The rule that applies to a line: every matching pattern combined, the most restrictive value
+/// The rule that applies to a line or ref: every matching pattern combined, the most restrictive value
 /// of each setting.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Rule {
@@ -255,7 +254,7 @@ impl Policy {
         Ok(())
     }
 
-    /// The rule of a line: all matching patterns, the most restrictive value of each setting.
+    /// The rule of a line or ref: all matching patterns, with the most restrictive values.
     pub fn rule_for(&self, line: &str) -> Option<Rule> {
         let mut out: Option<Rule> = None;
         for (pat, spec) in &self.protect {
@@ -452,4 +451,44 @@ mod tests {
         p.protect.insert("x".into(), RuleSpec { update: Some("bogus".into()), ..Default::default() });
         assert_eq!(p.rule_for("x").unwrap().update, Role::Admin);
     }
+}
+
+/// Count exact-state approvals from allowed users other than the incoming states' authors.
+pub fn approval_count(
+    repo: &crate::repo::Repo,
+    policy: &Policy,
+    rule: &Rule,
+    base: Option<&str>,
+    subject: &str,
+) -> anyhow::Result<usize> {
+    fn ancestry(repo: &crate::repo::Repo, state: &str) -> anyhow::Result<std::collections::BTreeSet<String>> {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut stack = vec![state.to_string()];
+        while let Some(id) = stack.pop() {
+            if seen.insert(id.clone()) {
+                if let Some(s) = repo.p.db.state(&id)? {
+                    stack.extend(s.parents);
+                    stack.extend(s.derived_from);
+                }
+            }
+        }
+        Ok(seen)
+    }
+    let have = base.map(|s| ancestry(repo, s)).transpose()?.unwrap_or_default();
+    let mut authors = std::collections::BTreeSet::new();
+    for id in ancestry(repo, subject)? {
+        if id == subject || !have.contains(&id) {
+            if let Some(s) = repo.p.db.state(&id)? {
+                authors.insert(s.author.uid);
+            }
+        }
+    }
+    Ok(repo
+        .p
+        .db
+        .approvals(subject)?
+        .into_iter()
+        .filter(|(uid, _)| !authors.contains(uid))
+        .filter(|(uid, _)| policy.may_approve(rule, &Who::of(*uid, crate::ctx::Caller::from_uid(*uid).gid)))
+        .count())
 }

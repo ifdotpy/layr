@@ -273,12 +273,6 @@ impl<'a> Repo<'a> {
         self.authorize_line(ctx, line, LineOp::Rewrite).map(|_| ())
     }
 
-    /// The user that the service's own backups are written as: the one who set `backup.dir`.
-    pub fn backup_writer(&self) -> (u32, u32) {
-        let uid = self.p.config_u64("backup.writer", self.p.legacy_admin() as u64) as u32;
-        (uid, crate::ctx::Caller::from_uid(uid).gid)
-    }
-
     // ----- lookups -----
 
     pub fn line(&self, name: &str) -> Result<Line> {
@@ -315,6 +309,19 @@ impl<'a> Repo<'a> {
         need(self.p.db.state(id)?, &format!("state {}", ids::short(id)))
     }
 
+    /// Source history cannot contain cache or derived states.
+    pub fn source_state(&self, id: &str) -> Result<StateRec> {
+        let state = self.state(id)?;
+        if state.kind.auxiliary() {
+            bail!(
+                "state {} is {}; cache and derived states are outside source history, diff, merge and Git export",
+                ids::short(id),
+                crate::db::kind_str(state.kind)
+            );
+        }
+        Ok(state)
+    }
+
     /// The complete tree of a state. On APFS a thin state gets a view (`thin::complete_tree`);
     /// commands that read few paths use `state_src` instead.
     pub fn state_root(&self, id: &str) -> Result<PathBuf> {
@@ -329,7 +336,7 @@ impl<'a> Repo<'a> {
         if !self.p.has_state(id) {
             match self.p.db.state_flags(id)? {
                 Some((_, true)) => bail!("state {} was deleted by retention", ids::short(id)),
-                Some(_) => bail!("state {} is not on this machine (run layr sync)", ids::short(id)),
+                Some(_) => bail!("state {} is not on this machine (run layr fetch <remote>)", ids::short(id)),
                 None => bail!("unknown state {}", ids::short(id)),
             }
         }
@@ -493,8 +500,11 @@ impl<'a> Repo<'a> {
         Ok(StateRec {
             id,
             kind,
-            parents,
-            line: line.map(|l| l.id.clone()),
+            change_id: (kind == StateKind::Commit).then(ids::new_id),
+            derived_from: if kind.auxiliary() { parents.first().cloned() } else { None },
+            context: None,
+            parents: if kind.auxiliary() { Vec::new() } else { parents },
+            line: if kind.auxiliary() { None } else { line.map(|l| l.id.clone()) },
             subvol: info.uuid,
             author: ctx.author(),
             message: message.to_string(),
@@ -547,7 +557,7 @@ impl<'a> Repo<'a> {
             drop(t);
             btrfs::set_readonly(&dst)?;
             // An overlay file under another name leaves too: moved from an overlay path, or a
-            // new file with the content of an overlay file (a copy, an editor's backup).
+            // new file with the content of an overlay file (a copy, an editor's extra copy).
             let copies = self.private_copies(line, &dst, &private)?;
             if !copies.is_empty() {
                 btrfs::set_writable(&dst)?;
@@ -570,6 +580,9 @@ impl<'a> Repo<'a> {
         Ok(StateRec {
             id,
             kind: StateKind::Auto,
+            change_id: None,
+            derived_from: None,
+            context: None,
             parents,
             line: Some(line.id.clone()),
             subvol: info.uuid,
@@ -1253,6 +1266,7 @@ impl<'a> Repo<'a> {
     /// that its owner reads (docs/overlays.md).
     pub fn create_line_from(&self, ctx: &Ctx, name: &str, start: &str, owner: u32, source: Option<&Line>) -> Result<Line> {
         check_name("line", name)?;
+        self.source_state(start)?;
         if self.p.db.line_by_name(name)?.is_some() {
             bail!("a line named '{name}' already exists");
         }
@@ -1340,7 +1354,7 @@ impl<'a> Repo<'a> {
         r
     }
 
-    fn prepare_at(&self, line: &Line, state: &str, w: &Path) -> Result<()> {
+    pub(crate) fn prepare_at(&self, line: &Line, state: &str, w: &Path) -> Result<()> {
         let (uid, gid) = self.owner_ids(line);
         let root_meta = std::fs::symlink_metadata(w)?;
         if root_meta.uid() != uid {
@@ -1535,7 +1549,7 @@ impl<'a> Repo<'a> {
     // ----- ancestry -----
 
     pub fn parents(&self, id: &str) -> Result<Vec<String>> {
-        Ok(self.state(id)?.parents)
+        Ok(self.source_state(id)?.parents)
     }
 
     /// All ancestors of `id` (including itself), breadth first.
@@ -1549,6 +1563,9 @@ impl<'a> Repo<'a> {
             }
             order.push(x.clone());
             if let Some(s) = self.p.db.state(&x)? {
+                if s.kind.auxiliary() {
+                    self.source_state(&x)?;
+                }
                 for p in s.parents {
                     q.push_back(p);
                 }
@@ -2007,5 +2024,73 @@ mod cache_platform_tests {
         // An older record names no platform: only a cache saved on this machine.
         assert!(cache_fits(None, "linux-aarch64", true));
         assert!(!cache_fits(None, "linux-aarch64", false));
+    }
+    #[test]
+    fn auxiliary_states_resolve_but_source_commands_refuse_them() {
+        use super::*;
+        use crate::ctx::Caller;
+        use crate::model::{Actor, Author};
+        use crate::store::{Project, Store};
+        let dir = std::env::temp_dir().join(format!("layr-auxiliary-{}", ids::new_id()));
+        let ctx = Ctx {
+            store: Store::open(&dir).unwrap(),
+            caller: Caller::from_uid(0),
+            cwd: dir.clone(),
+            env: std::collections::HashMap::from([("LAYR_PROJECT".into(), "p".into())]),
+            out: std::cell::RefCell::new(Box::new(std::io::sink())),
+        };
+        let project_dir = ctx.store.projects_dir().join("p");
+        std::fs::create_dir_all(project_dir.join("meta/db")).unwrap();
+        std::fs::create_dir(project_dir.join("states")).unwrap();
+        let id = ids::new_id();
+        let p = Project {
+            store: &ctx.store,
+            name: "p".into(),
+            dir: project_dir.clone(),
+            id: id.clone(),
+            db: crate::db::Db::open(&project_dir.join("meta/db/layr.sqlite")).unwrap(),
+        };
+        let mut rec = Record::new("project");
+        rec.data = serde_json::json!({"id":id,"name":"p","config":{}});
+        p.append(rec, &Actor { uid: 0, name: "root".into(), session: None }).unwrap();
+        for kind in [StateKind::Cache, StateKind::Derived] {
+            let id = ids::new_id();
+            std::fs::create_dir(p.state_path(&id)).unwrap();
+            let mut rec = Record::new("state");
+            rec.states.push(StateRec {
+                id: id.clone(),
+                kind,
+                change_id: None,
+                derived_from: None,
+                context: Some("test-v1".into()),
+                parents: vec![],
+                line: None,
+                subvol: String::new(),
+                author: Author::default(),
+                message: String::new(),
+                time: ids::now_ms(),
+                running: false,
+                conflicts: vec![],
+                caches: Default::default(),
+                cache_by: None,
+                cache_shared: false,
+                cache_platform: None,
+            });
+            p.append(rec, &ctx.actor()).unwrap();
+            let repo = Repo::open(&ctx, "p").unwrap();
+            assert!(repo.state_root(&id).is_ok());
+            assert_eq!(crate::revs::resolve(&repo, None, &id).unwrap(), id);
+            for args in [vec!["branch", "rejected", &id], vec!["diff", &id, &id], vec!["log", &id], vec!["show", &id]] {
+                let args: Vec<String> = args.into_iter().map(String::from).collect();
+                let error = crate::cmd::run(&ctx, &args).unwrap_err().to_string();
+                assert!(error.contains("outside source history"), "{args:?}: {error}");
+            }
+            assert!(crate::gitbridge::export_history(&repo, &id).unwrap_err().to_string().contains("outside source history"));
+            assert!(repo.merge_base(&id, &id).unwrap_err().to_string().contains("outside source history"));
+            let args = vec!["ref".into(), "set".into(), format!("caches/{}", crate::db::kind_str(kind)), id.clone()];
+            assert_eq!(crate::cmd::run(&ctx, &args).unwrap(), 0);
+        }
+        drop(p);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

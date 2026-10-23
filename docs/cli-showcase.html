@@ -1,0 +1,396 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Layr: что умеет CLI</title>
+<style>
+  :root {
+    --bg: #0b0d10;
+    --panel: #12161b;
+    --term: #0d1014;
+    --line: #232a33;
+    --text: #d7dde4;
+    --muted: #8a96a3;
+    --green: #5fd38d;
+    --red: #ff6b6b;
+    --amber: #f2b84b;
+    --blue: #6cb6ff;
+    --violet: #b392f0;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 56px 24px 24px;
+  }
+  h1 { font-size: 40px; line-height: 1.15; margin: 0 0 12px; letter-spacing: -0.02em; }
+  header p { color: var(--muted); font-size: 18px; margin: 0; max-width: 760px; }
+  .legend { display: flex; gap: 16px; margin-top: 20px; flex-wrap: wrap; font-size: 14px; color: var(--muted); }
+  main {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 8px 24px 64px;
+    display: grid;
+    gap: 28px;
+  }
+  .case {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 22px;
+    display: grid;
+    grid-template-columns: 320px 1fr;
+    gap: 22px;
+  }
+  @media (max-width: 860px) { .case { grid-template-columns: 1fr; } }
+  .case h2 { font-size: 21px; margin: 4px 0 10px; line-height: 1.25; }
+  .case .num { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+  .case p { margin: 0 0 10px; color: var(--muted); font-size: 15px; }
+  .case p b { color: var(--text); font-weight: 600; }
+  .badge {
+    display: inline-block;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 3px 9px;
+    border-radius: 999px;
+    border: 1px solid;
+    margin-top: 6px;
+  }
+  .badge.now { color: var(--green); border-color: #2c6b47; background: #10261a; }
+  .badge.rfc { color: var(--amber); border-color: #6b5326; background: #2a2010; }
+  .term {
+    background: var(--term);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    overflow: hidden;
+    min-height: 260px;
+    display: flex;
+    flex-direction: column;
+  }
+  .bar {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 9px 12px;
+    border-bottom: 1px solid var(--line);
+    background: #151a20;
+  }
+  .dot { width: 11px; height: 11px; border-radius: 50%; }
+  .dot:nth-child(1) { background: #ff5f57; }
+  .dot:nth-child(2) { background: #febc2e; }
+  .dot:nth-child(3) { background: #28c840; }
+  .bar .title { margin-left: 8px; color: var(--muted); font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; flex: 1; }
+  .replay {
+    background: none;
+    border: 1px solid var(--line);
+    color: var(--muted);
+    border-radius: 6px;
+    font-size: 12px;
+    padding: 2px 8px;
+    cursor: pointer;
+  }
+  .replay:hover { color: var(--text); border-color: var(--muted); }
+  pre {
+    margin: 0;
+    padding: 14px 16px 18px;
+    font: 13.5px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    white-space: pre-wrap;
+    word-break: break-word;
+    flex: 1;
+  }
+  .p { color: var(--green); }
+  .c { color: var(--text); }
+  .o { color: #aab4bf; }
+  .ok { color: var(--green); }
+  .bad { color: var(--red); }
+  .warn { color: var(--amber); }
+  .hi { color: var(--blue); }
+  .dim { color: #5f6b77; }
+  .vio { color: var(--violet); }
+  .cursor {
+    display: inline-block;
+    width: 8px;
+    height: 1.1em;
+    background: var(--text);
+    vertical-align: text-bottom;
+    animation: blink 1s steps(1) infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+  footer {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 0 24px 56px;
+    color: var(--muted);
+    font-size: 14px;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Layr: 10 вещей, которые git не умеет</h1>
+  <p>Каждая карточка является записью терминала. Нажмите «Повтор», чтобы проиграть её снова.</p>
+  <div class="legend">
+    <span><span class="badge now">Есть сейчас</span> команды уже есть в Layr</span>
+    <span><span class="badge rfc">Предложение</span> описано в RFC, ещё не сделано</span>
+  </div>
+</header>
+
+<main id="cases"></main>
+
+<footer>
+  Вывод команд является макетом для объяснения идеи. Реальные числа взяты только там, где они есть в README Layr: branch 180–280 ms на 200 000 файлов, 16 веток с caches 153 MiB против 2508 MiB у Git. Имена команд соответствуют решениям RFC §12.6.
+</footer>
+
+<script>
+// Each step: [kind, text]. kind: "cmd" is typed after a prompt; others print as output lines.
+// Output text may contain simple markup: {ok}…{/}, {bad}…{/}, {warn}…{/}, {hi}…{/}, {dim}…{/}, {vio}…{/}.
+const CASES = [
+  {
+    title: "Агент стёр папки через shell. Вернуть за секунду",
+    pain: "<b>Боль:</b> checkpoints агентов не видят команды shell. Docs Claude Code: «Checkpointing does not track files modified by bash commands».",
+    gain: "<b>Layr:</b> видит файловую систему, а не инструмент. Каждый tool call является снимком.",
+    badge: ["now", "Есть основа · hook: RFC §5.5"],
+    term: "agent-7 · ~/shop",
+    steps: [
+      ["cmd", "rm -rf src/ tests/            # агент, через shell"],
+      ["cmd", "ls src"],
+      ["out", "{bad}ls: src: No such file or directory{/}"],
+      ["cmd", "layr op log -n 3"],
+      ["out", "14:02:11  save    agent-7  auto 018f…a2  {warn}tool call 47 (bash){/}"],
+      ["out", "14:02:09  save    agent-7  auto 018f…9c  tool call 46 (edit)"],
+      ["out", "13:58:40  commit  agent-7  \"Add discount field\""],
+      ["cmd", "layr diff 018f…9c 018f…a2 --stat"],
+      ["out", "{bad}D src/   412 files{/}"],
+      ["out", "{bad}D tests/  88 files{/}"],
+      ["cmd", "layr restore --source 018f…9c ."],
+      ["out", "{ok}restored 500 files from tool call 46{/}"],
+    ],
+  },
+  {
+    title: "Любой ref сразу является образом контейнера",
+    pain: "<b>Боль:</b> Dockerfile, сборка образа, push в registry, commit с новым tag. Для каждого preview.",
+    gain: "<b>Layr:</b> сам отвечает как OCI registry. Tag равен ref. Сборки образа нет.",
+    badge: ["rfc", "Предложение · RFC §31"],
+    term: "laptop · ~",
+    steps: [
+      ["cmd", "docker pull layr.example/shop/app:change-812"],
+      ["out", "change-812: Pulling from shop/app"],
+      ["out", "{dim}runtime  python 3.12   already exists{/}"],
+      ["out", "{dim}deps     site-packages already exists{/}"],
+      ["out", "{hi}code     2.1 MB        pull complete{/}"],
+      ["out", "Digest: sha256:9c1e4f…"],
+      ["cmd", "helm upgrade shop oci://layr.example/shop/charts/app@sha256:51aa…"],
+      ["out", "{ok}Release \"shop\" upgraded. image digest taken from the same view{/}"],
+    ],
+  },
+  {
+    title: "16 агентов с тёплым кэшем за долю секунды",
+    pain: "<b>Боль:</b> каждый git worktree ставит node_modules и собирает target заново. Пример с форума Cursor: 9.82 GB за 20 минут.",
+    gain: "<b>Layr:</b> копия через CoW. Кэш тот же, места почти не нужно.",
+    badge: ["rfc", "branch есть · --count: RFC §4.10"],
+    term: "studio-vm · ~/shop",
+    steps: [
+      ["cmd", "layr branch --count 16 agent main"],
+      ["out", "created agent-1 … agent-16 from main@4f2a  {dim}(1 transaction){/}"],
+      ["out", "caches: target/ 8.2 GB reflinked ×16  {ok}extra disk ≈ 0 (copy-on-write){/}"],
+      ["cmd", "cd agent-3 && cargo build"],
+      ["out", "{ok}   Finished `dev` profile in 1.9s{/}   {dim}# cache already warm{/}"],
+      ["out", "{dim}README: 16 lines with caches 153 MiB, Git full copies 2508 MiB{/}"],
+    ],
+  },
+  {
+    title: "Ревью показывает, что изменилось в работе программы",
+    pain: "<b>Боль:</b> ревьюер читает строки кода и угадывает, что сломается.",
+    gain: "<b>Layr:</b> запускает одни и те же сценарии на base и на change и показывает разницу.",
+    badge: ["rfc", "Предложение · Change вместо PR"],
+    term: "reviewer · ~/shop",
+    steps: [
+      ["cmd", "layr change show 812"],
+      ["out", "Change 812 · \"Add discount field to checkout\"   {hi}v3{/} (vs v2: 4 lines)"],
+      ["out", "Code      +120 −15 in 6 files   {dim}lockfile regenerated, hidden{/}"],
+      ["out", "Behavior"],
+      ["out", "  UI      {warn}1 of 20 pages changed: /checkout{/}   [before | after | diff]"],
+      ["out", "  API     {warn}POST /orders adds \"discount\"{/}   49 of 50 same"],
+      ["out", "  Speed   {ok}no change beyond noise{/}"],
+      ["out", "  Size    +2 KB"],
+      ["out", "  DB      {ok}no plan changes{/}"],
+      ["out", "Checks    {ok}all passed{/}  {dim}(12 reused from cache, 3 new){/}"],
+    ],
+  },
+  {
+    title: "Найти tool call, который сломал сборку",
+    pain: "<b>Боль:</b> агент сделал 400 шагов, тесты красные. Какой шаг виноват?",
+    gain: "<b>Layr:</b> bisect по снимкам каждого шага, в тёплых копиях, с кэшем результатов.",
+    badge: ["rfc", "Предложение · RFC §4.9"],
+    term: "agent-7 · ~/shop",
+    steps: [
+      ["cmd", "layr bisect run --auto -- cargo test -q"],
+      ["out", "412 auto states in session s-91, testing about 9"],
+      ["out", "{ok}✓ call 206{/}  {bad}✗ call 309{/}  {ok}✓ call 257{/}  {ok}✓ call 283{/}  {bad}✗ call 296{/}"],
+      ["out", "{ok}✓ call 289{/}  {bad}✗ call 292{/}  {ok}✓ call 290{/}  {bad}✗ call 291{/}"],
+      ["out", "first bad: {bad}call 291{/}  bash: sed -i 's/u32/u16/' src/ids.rs"],
+      ["out", "{dim}2 checks reused from cache{/}"],
+    ],
+  },
+  {
+    title: "Lockfile без конфликтов: он перегенерируется",
+    pain: "<b>Боль:</b> конфликты в package-lock.json. Хуже: merge без конфликта, но lockfile не совпадает с package.json.",
+    gain: "<b>Layr:</b> производный файл не сливается. Он строится заново из слитого дерева.",
+    badge: ["rfc", "Предложение · RFC §4.6"],
+    term: "main · ~/shop",
+    steps: [
+      ["cmd", "cat .layrattributes"],
+      ["out", "package-lock.json  derive=npm"],
+      ["cmd", "layr config derive.command.npm"],
+      ["out", "npm install --package-lock-only"],
+      ["cmd", "layr merge feature-a"],
+      ["out", "src/cart.ts         merged (text)"],
+      ["out", "package.json        merged (text)"],
+      ["out", "package-lock.json   {hi}derived: npm install --package-lock-only{/}  {ok}✓ 2.1 s{/}"],
+      ["out", "{ok}0 conflicts{/}"],
+    ],
+  },
+  {
+    title: "В prod идёт ровно то, что проверили. Откат одной командой",
+    pain: "<b>Боль:</b> для prod собирают заново, и вторая сборка может отличаться от проверенной.",
+    gain: "<b>Layr:</b> prod является меткой на тот же view. Правила проверяет машина.",
+    badge: ["rfc", "Предложение · RFC §29.3–29.4"],
+    term: "release · ~/shop",
+    steps: [
+      ["cmd", "layr ref set env/prod views/7d3e"],
+      ["out", "required for env/prod:"],
+      ["out", "  check by ci        {ok}✓{/}"],
+      ["out", "  approval by owner  {ok}✓{/}"],
+      ["out", "env/prod: views/51aa → {hi}views/7d3e{/}  {dim}(same digest as staging, no rebuild){/}"],
+      ["cmd", "layr ref set env/prod env/prod@{1}"],
+      ["out", "env/prod: views/7d3e → {hi}views/51aa{/}"],
+    ],
+  },
+  {
+    title: "Секрет не уйдёт в код: Layr знает его точное значение",
+    pain: "<b>Боль:</b> GitGuardian 2026: 28.65 млн новых секретов в публичных commits за год.",
+    gain: "<b>Layr:</b> секреты лежат в private layer. Commit с их значением отклоняется.",
+    badge: ["rfc", "Предложение · RFC §4.7"],
+    term: "agent-7 · ~/shop",
+    steps: [
+      ["cmd", "layr commit -am \"Add Stripe client\""],
+      ["out", "{bad}refused: src/pay.rs:14 contains the value of a secret{/}"],
+      ["out", "{bad}         from private layer secrets-dev (.env:3){/}"],
+      ["out", "{dim}the value is not shown{/}"],
+      ["cmd", "layr status"],
+      ["out", "nothing committed, 1 file changed"],
+    ],
+  },
+  {
+    title: "Открыть упавшую проверку CI у себя, точь-в-точь",
+    pain: "<b>Боль:</b> «в CI падает, у меня работает».",
+    gain: "<b>Layr:</b> новая папка из точного view проверки: код, окружение, caches.",
+    badge: ["rfc", "Предложение · RFC §4.11"],
+    term: "laptop · ~/shop",
+    steps: [
+      ["cmd", "layr branch repro-5521 attestations/5521"],
+      ["out", "line repro-5521 from views/7d3e   {ok}caches warm{/}"],
+      ["cmd", "layr show attestations/5521"],
+      ["out", "check by ci, 14:20: {bad}cargo test checkout::discount  exit 101{/}"],
+      ["cmd", "cd ../repro-5521 && cargo test checkout::discount"],
+      ["out", "{bad}test checkout::discount ... FAILED{/}  {dim}# same failure, locally{/}"],
+    ],
+  },
+  {
+    title: "Конфликт виден сразу, а не при merge",
+    pain: "<b>Боль:</b> 10 агентов правят один файл. Узнаём при merge, когда работа уже сделана.",
+    gain: "<b>Layr:</b> все lines на одной машине. Пересечение видно после каждого save.",
+    badge: ["rfc", "Предложение · RFC §4.8"],
+    term: "agent-3 · ~/shop",
+    steps: [
+      ["cmd", "layr status"],
+      ["out", "line agent-3, 4 files changed"],
+      ["out", "{warn}⚠ src/checkout.rs is also changed in agent-9 (2 min ago){/}"],
+      ["out", "{warn}⚠ src/cart.ts     is also changed in agent-12 (now){/}"],
+    ],
+  },
+];
+
+const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const markup = (s) =>
+  esc(s).replace(/\{(ok|bad|warn|hi|dim|vio)\}/g, '<span class="$1">').replace(/\{\/\}/g, "</span>");
+
+const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function render(c, i) {
+  const el = document.createElement("section");
+  el.className = "case";
+  el.innerHTML = `
+    <div>
+      <div class="num">${String(i + 1).padStart(2, "0")}</div>
+      <h2>${esc(c.title)}</h2>
+      <p>${c.pain}</p>
+      <p>${c.gain}</p>
+      <span class="badge ${c.badge[0]}">${esc(c.badge[1])}</span>
+    </div>
+    <div class="term">
+      <div class="bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span>
+        <span class="title">${esc(c.term)}</span><button class="replay" type="button">Повтор</button></div>
+      <pre></pre>
+    </div>`;
+  const pre = el.querySelector("pre");
+  let run = 0;
+  async function play() {
+    const id = ++run;
+    pre.innerHTML = "";
+    for (const [kind, text] of c.steps) {
+      if (id !== run) return;
+      const line = document.createElement("div");
+      pre.appendChild(line);
+      if (kind === "cmd") {
+        line.innerHTML = '<span class="p">$ </span><span class="c"></span><span class="cursor"></span>';
+        const t = line.querySelector(".c");
+        if (reduced) { t.textContent = text; }
+        else {
+          for (const ch of text) {
+            if (id !== run) return;
+            t.textContent += ch;
+            await sleep(ch === " " ? 18 : 28 + Math.random() * 30);
+          }
+          await sleep(320);
+        }
+        line.querySelector(".cursor").remove();
+      } else {
+        line.className = "o";
+        line.innerHTML = markup(text);
+        if (!reduced) await sleep(140);
+      }
+    }
+    const end = document.createElement("div");
+    end.innerHTML = '<span class="p">$ </span><span class="cursor"></span>';
+    pre.appendChild(end);
+  }
+  el.querySelector(".replay").addEventListener("click", play);
+  return { el, play };
+}
+
+const root = document.getElementById("cases");
+const items = CASES.map(render);
+items.forEach((it) => root.appendChild(it.el));
+
+const seen = new WeakSet();
+const io = new IntersectionObserver((entries) => {
+  for (const e of entries) {
+    if (e.isIntersecting && !seen.has(e.target)) {
+      seen.add(e.target);
+      items.find((it) => it.el === e.target).play();
+    }
+  }
+}, { threshold: 0.35 });
+items.forEach((it) => io.observe(it.el));
+</script>
+</body>
+</html>

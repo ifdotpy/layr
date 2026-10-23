@@ -8,7 +8,7 @@ seq 1 30 | sed 's/^/line /' > a.txt; printf 'no newline' > nonl.txt; printf 'x\0
 mkdir -p d; echo keep > d/keep.txt; echo gone > gone.txt; echo mv > move-me.txt; printf '#!/bin/sh\n' > run.sh
 printf 'fn main() {\n    let x = 1;\n    println!("{}", x);\n}\n' > code.rs
 git add -A; git commit -qm base; git push -q origin main
-l clone $R c -q >/dev/null
+l git clone $R c -q >/dev/null
 Lw=$LAYR_ROOT/projects/c/lines/main
 
 edit() { # the same edits in both trees

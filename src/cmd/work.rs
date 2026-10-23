@@ -45,7 +45,8 @@ pub fn status(ctx: &Ctx, args: &[String]) -> Result<i32> {
         .flag("-z")
         .flag("--long")
         .flag("-v|--verbose")
-        .flag("--no-renames");
+        .flag("--no-renames")
+        .flag("--json");
     let a = parse(&spec, args)?;
     let h = here(ctx)?;
     #[cfg(target_os = "macos")]
@@ -59,6 +60,28 @@ pub fn status(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let st = h.repo.status_report(&line)?;
     #[cfg(not(target_os = "macos"))]
     let (st, _scan, _itemp, _index) = h.repo.status(&line)?;
+    let overlaps = if a.has("--json") || (!a.has("-s") && !a.has("--porcelain")) {
+        h.repo.overlaps(ctx, &line)?.into_iter().filter(|o| matches(&specs, &o.path)).collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    if a.has("--json") {
+        let row = |c: &Change| serde_json::json!({"path": c.path, "old_path": c.old_path, "status": xy(c).to_string()});
+        outln!(
+            ctx,
+            "{}",
+            serde_json::json!({
+                "line": line.name, "head": line.head,
+                "staged": st.staged.iter().filter(|c| matches(&specs, &c.path)).map(row).collect::<Vec<_>>(),
+                "unstaged": st.unstaged.iter().filter(|c| matches(&specs, &c.path)).map(row).collect::<Vec<_>>(),
+                "untracked": st.untracked.iter().filter(|p| matches(&specs, p)).collect::<Vec<_>>(),
+                "ignored": st.ignored.iter().filter(|p| matches(&specs, p)).collect::<Vec<_>>(),
+                "conflicts": st.conflicts.iter().filter(|c| matches(&specs, &c.path)).collect::<Vec<_>>(),
+                "overlaps": overlaps,
+            })
+        );
+        return Ok(0);
+    }
     let porcelain = a.has("--porcelain");
     let short = a.has("-s") || porcelain;
     let untracked_mode = a.get("-u").map(|s| if s.is_empty() { "all" } else { s }).unwrap_or("normal").to_string();
@@ -125,6 +148,20 @@ pub fn status(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
 
     outln!(ctx, "On line {}", line.name);
+    if !overlaps.is_empty() {
+        outln!(ctx, "Overlaps with other live lines:");
+        for overlap in &overlaps {
+            outln!(
+                ctx,
+                "\t{} ({}, owner {}, changed_at {})",
+                h.rel(&overlap.path),
+                overlap.line,
+                overlap.owner,
+                overlap.changed_at
+            );
+        }
+        outln!(ctx);
+    }
     let head = h.repo.state(&line.head)?;
     if !head.conflicts.is_empty() && !st.conflicts.is_empty() {
         outln!(ctx, "You have unmerged paths.\n  (fix conflicts and run \"layr commit\")\n");
@@ -802,6 +839,9 @@ pub fn commit(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let src = stage.clone().unwrap_or(head_root.clone());
         h.repo.new_state(ctx, &src, StateKind::Commit, parents, &message, Some(&line))?
     };
+    if a.has("--amend") {
+        state.change_id = head.change_id.clone();
+    }
     let new_root = match h.repo.state_src(&state.id) {
         Ok(r) => r,
         Err(e) => {
@@ -837,6 +877,10 @@ pub fn commit(ctx: &Ctx, args: &[String]) -> Result<i32> {
         } else {
             cleared.push(c.clone());
         }
+    }
+    if let Err(e) = crate::secrets::check_between(ctx, &h.repo, &head_root, &new_root, &line.head) {
+        h.repo.discard_states(std::slice::from_ref(&state));
+        return Err(e);
     }
     let rec = h.repo.move_head(ctx, "commit", &line, &state.id, vec![state.clone()], None, serde_json::json!({"line": line.id}));
     rec?;
@@ -1174,21 +1218,23 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
         "mixed" => repo.drop_stage(&line)?,
         "hard" => {
             repo.drop_stage(&line)?;
-            let scan = repo.scan(&line)?;
-            let wdir = repo.working(&line);
-            // Revert every tracked path; untracked and ignored files stay.
-            let own = repo.own(&line);
-            for c in changes::without_moves(changes::file_changes(&scan.path, &target_root)?) {
-                if skip_path(&c.path) {
-                    continue;
-                }
-                if c.new.is_none() {
-                    if fsutil::lmeta(&index, &c.path).is_none() {
+            if !repo.reset_snapshot(ctx, &line, &target)? {
+                let scan = repo.scan(&line)?;
+                let wdir = repo.working(&line);
+                // Revert every tracked path; untracked and ignored files stay.
+                let own = repo.own(&line);
+                for c in changes::without_moves(changes::file_changes(&scan.path, &target_root)?) {
+                    if skip_path(&c.path) {
                         continue;
                     }
-                    fsutil::remove_entry(&wdir, &c.path)?;
-                } else {
-                    fsutil::copy_entry(&target_root, &c.path, &wdir, &c.path, own)?;
+                    if c.new.is_none() {
+                        if fsutil::lmeta(&index, &c.path).is_none() {
+                            continue;
+                        }
+                        fsutil::remove_entry(&wdir, &c.path)?;
+                    } else {
+                        fsutil::copy_entry(&target_root, &c.path, &wdir, &c.path, own)?;
+                    }
                 }
             }
         }

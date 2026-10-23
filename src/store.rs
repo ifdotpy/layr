@@ -18,7 +18,7 @@
 //!
 //! Write order of an operation: snapshots first, then one database transaction with the record
 //! and its derived rows. After a crash only a snapshot without a record can exist; `layr fsck`
-//! deletes it. Records leave the database as JSONL lines (replication, backups, export).
+//! deletes it. Records leave the database as JSONL lines (replication, remote copies, export).
 
 use crate::db::Db;
 use crate::ids;
@@ -140,6 +140,9 @@ pub fn db_file(project_dir: &Path) -> PathBuf {
 }
 
 pub fn check_name(kind: &str, name: &str) -> Result<()> {
+    if kind == "line" && crate::model::reserved_revision(name) {
+        bail!("reserved revision prefix in line name '{name}'");
+    }
     let ok = !name.is_empty()
         && name.len() <= 200
         && name.chars().next().map(|c| c.is_ascii_alphanumeric()).unwrap_or(false)
@@ -447,6 +450,11 @@ impl<'a> Project<'a> {
             rec.time = ids::now_ms();
             rec.project = project.clone();
             rec.actor = actor.clone();
+            if let Some(a) = rec.data.get_mut("attestation").and_then(|v| v.as_object_mut()) {
+                a.insert("attestation_id".into(), serde_json::json!(rec.id));
+                a.insert("signer".into(), serde_json::json!(m.id));
+                a.insert("time".into(), serde_json::json!(rec.time));
+            }
             crate::model::validate(&rec)?;
             let line = oplog::sign_line(&rec, &m.key)?;
             self.db.insert_record(&rec, &line)?;
@@ -613,7 +621,7 @@ impl<'a> Project<'a> {
         v
     }
 
-    /// All records as JSONL (by machine and sequence number): the exchange and backup format.
+    /// All records as JSONL (by machine and sequence number): the exchange and remote copy format.
     pub fn export_jsonl(&self) -> Result<String> {
         let mut out = String::new();
         for m in self.db.record_machines()? {

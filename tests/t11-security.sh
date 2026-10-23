@@ -1,6 +1,6 @@
 #!/bin/bash
 # Regressions from the security review (2026-10-09): commands as root through merge drivers,
-# links inside lines, backup files, child process environment, peer trust, record order,
+# links inside lines, child process environment, peer trust, record order,
 # limits of the service.
 . "$(dirname "$0")/lib.sh"
 
@@ -55,12 +55,6 @@ eq "restore works when the folder is real again" "v1" "$(cat docs/a.txt)"
 as layr-u1 sh -c "ln -s /etc linked-etc"
 no "grep does not read through a link in the line" sh -c "as layr-u1 $L grep -l root 2>/dev/null | grep -q shadow"
 
-# 3. Backups are written as the writer.
-mkdir -p $T/bk && chown layr-admin $T/bk
-cd $P/main && as layr-admin $L backup -q $T/bk
-eq "backup files belong to the admin" "layr-admin" "$(stat -c %U $(ls -d $T/bk/*/chain-0001/* | head -1))"
-no "a backup into a folder the caller cannot write is refused" as layr-admin $L backup -q /root
-
 # 4. Child processes get the user's environment and groups, not the service's.
 cd $P/main
 no "try does not see the service environment" as layr-admin $L try -q HEAD -- sh -c 'test -n "$SECRET_OF_SERVICE"'
@@ -73,16 +67,16 @@ LAYR_ROOT=$BR l init other --from $T/src -q >/dev/null
 LAYR_ROOT=$BR l --project other op export > $T/other.jsonl
 has "records of another project are refused" "another project" "$(l --project s op import $T/other.jsonl 2>&1)"
 cd $P/main
-l sync -q -- env LAYR_ROOT=$BR $LAYR serve-peer s
+peer_exchange sync s -q -- env LAYR_ROOT=$BR $LAYR serve-peer s
 LAYR_ROOT=$BR l --project s config merge.driver.who 'touch /tmp/pwned-by-peer; true'
 LAYR_ROOT=$BR l --project s config remote.origin.url /tmp/evil.git
-cd $P/main && l sync -q -- env LAYR_ROOT=$BR $LAYR serve-peer s
+cd $P/main && peer_exchange sync s -q -- env LAYR_ROOT=$BR $LAYR serve-peer s
 eq "a peer does not change local merge commands" "id -u > %A" "$(l config merge.driver.who)"
 eq "a peer does not set local remotes" "" "$(l config remote.origin.url)"
 # A third machine that nobody trusts.
 new_fs $T/c 3G
 CR=$T/c/store
-LAYR_ROOT=$BR l --project s sync -q -- env LAYR_ROOT=$CR $LAYR serve-peer s
+LAYR_ROOT=$BR peer_exchange sync s -q -- env LAYR_ROOT=$CR $LAYR serve-peer s
 LAYR_ROOT=$CR l --project s config retention.auto 7
 # Only C's own records: nobody that A trusts vouched for C in them.
 CID=$(cat $CR/machine/id)
@@ -91,8 +85,8 @@ import json, sys
 for l in sys.stdin:
     if json.loads(l)['r']['machine'] == '$CID': sys.stdout.write(l)" > $T/c.jsonl
 has "records of an untrusted machine are refused" "untrusted" "$(l --project s op import $T/c.jsonl 2>&1)"
-key=$(LAYR_ROOT=$CR l --project s machines | sed -n 's/^\* .* key \([0-9a-f]*\)$/\1/p')
-l --project s machines trust $CID --key $key >/dev/null
+key=$(LAYR_ROOT=$CR l --project s remote list | sed -n 's/^\* .* key \([0-9a-f]*\)$/\1/p')
+l --project s remote trust test-peer $CID --public-key $key >/dev/null
 has "an explicit trust takes them" "imported" "$(l --project s op import $T/c.jsonl 2>&1)"
 
 # 7. The result does not depend on the order of records.
@@ -104,14 +98,11 @@ eq "settings after a rebuild equal the incremental result" "$before" "$(l --proj
 # Settings of a peer never act here.
 LAYR_ROOT=$BR l --project s config retention.auto 1
 LAYR_ROOT=$BR l --project s config push.require_check true
-cd $P/main && l sync -q -- env LAYR_ROOT=$BR $LAYR serve-peer s
+cd $P/main && peer_exchange sync s -q -- env LAYR_ROOT=$BR $LAYR serve-peer s
 eq "a peer does not change retention here" "" "$(l --project s config retention.auto)"
 eq "a peer does not change the push policy here" "" "$(l --project s config push.require_check)"
 # Frames from the network have a size limit.
 has "a huge frame is refused without allocating it" "frame" "$(printf 'J\377\377\377\377' | timeout 10 $LAYR serve-peer s 2>&1)"
-# A manifest is read without links and with a size limit.
-mkdir -p $T/bkx/s-x/chain-0001 && ln -s /dev/zero $T/bkx/s-x/chain-0001/manifest.json
-has "a manifest link is refused" "manifest.json" "$(timeout 20 $LAYR backup list $T/bkx 2>&1)"
 # The schema version: an old database is upgraded from its records, a newer one is refused.
 before=$(l --project s --line main log --format=%H | md5sum)
 python3 -c "import sqlite3; c=sqlite3.connect('$LAYR_ROOT/projects/s/meta/db/layr.sqlite'); c.execute('PRAGMA user_version=1'); c.execute('DROP TABLE tags'); c.commit()"
@@ -120,7 +111,7 @@ python3 -c "import sqlite3; c=sqlite3.connect('$LAYR_ROOT/projects/s/meta/db/lay
 has "a newer schema is refused" "newer layr" "$(l --project s --line main log 2>&1)"
 python3 -c "import sqlite3; c=sqlite3.connect('$LAYR_ROOT/projects/s/meta/db/layr.sqlite'); c.execute('PRAGMA user_version=6'); c.commit()"
 # Git objects follow the roles.
-git init -q --bare $T/gr.git; cd $P/main; l --project s remote add origin $T/gr.git >/dev/null 2>&1; l --project s --line main push -q origin t >/dev/null 2>&1
+git init -q --bare $T/gr.git; cd $P/main; l --project s git remote add origin $T/gr.git >/dev/null 2>&1; l --project s --line main git push -q origin t >/dev/null 2>&1
 l --project s access revoke '*'
 eq "the git store is closed to others" "750" "$(stat -c %a $LAYR_ROOT/projects/s/git)"
 no "another user cannot read git objects" runuser -u layr-u2 -- ls $LAYR_ROOT/projects/s/git/objects

@@ -1,6 +1,6 @@
 # OverlayFS backend for a Linux VM
 
-This backend is experimental. It uses OverlayFS mounts on a local filesystem.
+This backend uses OverlayFS mounts on a local filesystem.
 It requires root and permission to create mounts. It does not support a container without mount permission.
 
 ## Build and start
@@ -68,11 +68,11 @@ On ext4, these copies require additional space. XFS can use reflinks.
 The backend converts old cache mounts when it opens the store.
 It first makes the old cache read-only, saves a durable copy, and records the conversion before it removes the mount.
 Close open files if the conversion reports a busy mount. The next open resumes an incomplete conversion.
-Do not use an older OverlayFS binary after this conversion. Use backup and restore to transfer to another backend.
+Do not use an older OverlayFS binary after this conversion. Use peer sync to transfer to another backend.
 
 ## Transfer
 
-Use backup and restore, or sync, to transfer projects between backends.
+Use peer sync to transfer projects between backends.
 Do not open a btrfs store with the OverlayFS binary.
 Do not remove the private directory or edit its registry.
 

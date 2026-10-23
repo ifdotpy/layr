@@ -177,6 +177,12 @@ pub fn diff(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let repo = &h.repo;
     let line = h.line.clone();
     let (revs_v, paths) = split_revs(repo, line.as_ref(), &a);
+    for rev in &revs_v {
+        for part in rev.split("...").flat_map(|s| s.split("..")) {
+            let id = revs::resolve(repo, line.as_ref(), if part.is_empty() { "HEAD" } else { part })?;
+            repo.source_state(&id)?;
+        }
+    }
     let specs = h.specs(&paths)?;
     let cached = a.has("--cached");
     let opts = DiffOpts::from(&a, true)?;
@@ -482,6 +488,8 @@ fn medium(s: &StateRec, decor: &Decor, date_style: &str, kind_note: bool) -> Str
             StateKind::Stash => "stash",
             StateKind::Import => "imported from git",
             StateKind::Commit => "",
+            StateKind::Cache => "cache",
+            StateKind::Derived => "derived",
         };
         o.push_str(&format!("Kind:   {k}\n"));
     }
@@ -505,6 +513,7 @@ fn medium(s: &StateRec, decor: &Decor, date_style: &str, kind_note: bool) -> Str
 
 /// Changes of a state against its first parent (all files for a root state).
 fn state_changes(repo: &Repo, s: &StateRec) -> Result<(Snap, Option<Temp>, Snap, Vec<Change>)> {
+    repo.source_state(&s.id)?;
     let root = repo.state_src(&s.id)?;
     match s.parents.first() {
         Some(p) => {
@@ -736,6 +745,9 @@ fn parse_since(s: &str) -> Option<i64> {
 }
 
 pub fn log(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    if args.iter().any(|v| v == "--remote" || v.starts_with("--remote=")) {
+        return crate::store_remote::command(ctx, "log", args);
+    }
     let a = parse(&log_spec(), args)?;
     let h = here(ctx)?;
     let repo = &h.repo;
@@ -798,6 +810,12 @@ pub fn log(ctx: &Ctx, args: &[String]) -> Result<i32> {
     for i in include {
         if !exclude.contains(&i) {
             if let Some(s) = repo.p.db.state(&i)? {
+                if s.kind.auxiliary() {
+                    if !a.has("--all") {
+                        repo.source_state(&i)?;
+                    }
+                    continue;
+                }
                 heap.push((s.time, i));
             }
         }

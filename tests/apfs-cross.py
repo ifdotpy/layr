@@ -51,8 +51,9 @@ try:
     (work / 'file').write_text('on mac\n')
     m('commit', '-qam', 'mac commit')
     head = m('rev-parse', 'HEAD')
+    m('remote', 'add', 'linux', 'ssh://linux/cross')
     peer = bridge + ['env', 'LAYR_ROOT=' + remote + '/store', a.linux_binary, 'serve-peer', 'cross']
-    m('sync', '-q', '--', *peer)
+    m('sync', 'linux', '-q', '--command', '--', *peer)
     assert b('--project', 'cross', '--line', 'main', 'rev-parse', 'HEAD') == head
     b('--project', 'cross', 'adopt', 'main')
     line = remote + '/store/projects/cross/lines/main'
@@ -60,28 +61,10 @@ try:
     linux(['sh', '-c', 'printf "on linux\\n" > ' + shlex.quote(line + '/file')])
     b('-C', line, 'commit', '-qam', 'linux commit')
     linux_head = b('-C', line, 'rev-parse', 'HEAD')
-    m('sync', '-q', '--', *peer)
+    m('sync', 'linux', '-q', '--command', '--', *peer)
     assert m('show', linux_head + ':file') == 'on linux'
     assert '0 problem(s)' in m('fsck')
     print('PASS APFS sends to Linux and receives a native incremental stream', flush=True)
-    # Restore a macOS backup with the unchanged Linux binary.
-    backup = root / 'backup'
-    m('backup', '-q', str(backup))
-    translated = '/mnt/mac' + str(backup)
-    linux(['env', 'LAYR_ROOT=' + remote + '/restored', a.linux_binary, 'backup', 'restore', '-q', translated])
-    restored = ['env', 'LAYR_ROOT=' + remote + '/restored', a.linux_binary, '--project', 'cross', '--line', 'main']
-    assert linux(restored + ['show', head + ':file']) == 'on mac'
-    assert linux(restored + ['show', linux_head + ':file']) == 'on linux'
-    assert '0 problem(s)' in linux(restored + ['fsck'])
-    print('PASS Linux restores the APFS backup with the same state identifiers', flush=True)
-    native_backup = str(root / 'linux-backup')
-    b('-C', line, 'backup', '-q', '/mnt/mac' + native_backup)
-    restored_env = dict(env, LAYR_ROOT=str(root / 'from-linux'))
-    run([mac, 'backup', 'restore', '-q', native_backup], env=restored_env)
-    assert run([mac, '--project', 'cross', '--line', 'main', 'show', head + ':file'], env=restored_env) == 'on mac'
-    assert run([mac, '--project', 'cross', '--line', 'main', 'show', linux_head + ':file'], env=restored_env) == 'on linux'
-    assert '0 problem(s)' in run([mac, '--project', 'cross', '--line', 'main', 'fsck'], env=restored_env)
-    print('PASS APFS restores the native Linux backup and verifies signatures', flush=True)
 finally:
     os.chdir('/')
     subprocess.run(['chflags', '-R', 'nouchg', str(root)], check=False)

@@ -190,7 +190,7 @@ pub fn remote_url(repo: &Repo, remote: &str) -> Result<String> {
             return Ok(s.to_string());
         }
     }
-    bail!("remote '{remote}' is not configured (layr remote add {remote} <url>)")
+    bail!("remote '{remote}' is not configured (layr git remote add {remote} <url>)")
 }
 
 fn fetched_refs(ctx: &Ctx, tmp: &Path, remote: &str) -> Result<Vec<(String, String)>> {
@@ -636,6 +636,7 @@ pub fn mapped_ancestor(repo: &Repo, state: &str) -> Result<Option<(String, Strin
 /// One commit for a state on top of the nearest exported ancestor (`push --squash`): the tree of
 /// the state, one parent. The same state gives the same commit.
 pub fn make_commit(repo: &Repo, state: &StateRec, message: Option<&str>) -> Result<(String, Option<String>)> {
+    repo.source_state(&state.id)?;
     let anc = mapped_ancestor(repo, &state.id)?;
     if let Some((ast, ac)) = &anc {
         if ast == &state.id {
@@ -734,6 +735,7 @@ pub fn state_of_history_commit(repo: &Repo, name: &str) -> Result<Option<String>
 /// parents as its state (a merge stays a merge). The same states give the same commits. Returns
 /// the commit of `state` and the new (state, commit) pairs.
 pub fn export_history(repo: &Repo, state: &str) -> Result<(String, Vec<(String, String)>)> {
+    repo.source_state(state)?;
     let mut known: BTreeMap<String, String> = BTreeMap::new();
     let mut order: Vec<String> = Vec::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
@@ -950,7 +952,7 @@ pub fn prune_indexes(repo: &Repo) -> Result<usize> {
     Ok(n)
 }
 
-/// The commit that the `.git` folder of a line shows for `state`: the commit that `layr push`
+/// The commit that the `.git` folder of a line shows for `state`: the commit that `layr git push`
 /// would send for exactly this state (made in the git store when it has none, without a record),
 /// and a kept index of that state whose stat data matches files copied from it.
 pub fn line_commit(repo: &Repo, state: &str) -> Result<String> {
@@ -992,7 +994,7 @@ pub fn push(ctx: &Ctx, repo: &Repo, url: &str, commit: &str, branch: &str, force
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         if err.contains("non-fast-forward") || err.contains("fetch first") || err.contains("rejected") {
-            bail!("push rejected: the remote branch '{branch}' has commits that this state does not contain.\nRun 'layr pull' (fetch and merge), then push again.\n{}", err.trim());
+            bail!("push rejected: the remote branch '{branch}' has commits that this state does not contain.\nRun 'layr git pull' (fetch and merge), then push again.\n{}", err.trim());
         }
         bail!("git push failed: {}", err.trim());
     }
@@ -1072,7 +1074,7 @@ pub fn make_git_folder(repo: &Repo, line: &Line, state: &str, w: &Path) -> Resul
 
 /// Point the `.git` folder of a line at the commit of its head (`line_commit`) after every move
 /// of the head: commit, amend, merge, reset, undo, pull, push. So `git rev-parse HEAD` in a line
-/// is the commit of the line's head, the same id that `layr push` sends. When the commit cannot
+/// is the commit of the line's head, the same id that `layr git push` sends. When the commit cannot
 /// be made, `HEAD` stays as it was and the error is returned.
 /// The folder belongs to the line owner, so all access goes through descriptors of the `.git`
 /// folder and never follows a link the owner made.

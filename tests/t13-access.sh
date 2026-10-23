@@ -79,7 +79,7 @@ cd $P/u1 && as layr-u1 sh -c "$L rm -q broken.txt && $L commit -qm fixed" && cd 
 U1=$(in_line layr-u1 u1 rev-parse HEAD)
 ok "a passing check lets the merge through" in_line layr-u2 main merge -q u1 --expect $U1
 eq "main has the change" "u1" "$(l --project p show main:u1.txt)"
-has "the check is recorded on the merged state" "test ! -e broken.txt" "$(l --project p --line main checks HEAD)"
+has "the check is recorded on the merged state" "test ! -e broken.txt" "$(l --project p --line main attestations HEAD --kind check)"
 # A check runs code of the merged state: it does not see the caller's environment.
 l --project p config check.env 'test -z "$SECRET_OF_CALLER"'
 l --project p protect main --check unit,env
@@ -93,7 +93,7 @@ cd $P/u1 && as layr-u1 sh -c "echo u2 > u2.txt && $L add u2.txt && $L commit -qm
 ok "first merge" in_line layr-u2 main merge -q bot --expect $(in_line layr-u3 bot rev-parse HEAD)
 ok "a second merge makes a merge state and checks it" in_line layr-u2 main merge -q u1 --expect $(in_line layr-u1 u1 rev-parse HEAD)
 eq "it is a merge" "2" "$(l --project p --line main log -1 --format=%p | wc -w)"
-has "checked" "test ! -e broken.txt" "$(l --project p --line main checks HEAD)"
+has "checked" "test ! -e broken.txt" "$(l --project p --line main attestations HEAD --kind check)"
 
 # Path rules: a change of CI configuration needs the admin, even through a maintainer's merge.
 l --project p protect main --path .github=admin
@@ -118,7 +118,7 @@ in_line layr-u1 u1 approve -q $R
 in_line layr-u2 main approve -q $R
 has "approvals of the author and of a non-member do not count" "it has 0" "$(in_line layr-u2 main merge -q u1 --expect $R 2>&1)"
 as layr-admin env LAYR_PROJECT=p LAYR_LINE=main $T/layr approve -q $R
-eq "approvals are listed" "layr-admin layr-u1 layr-u2" "$(l --project p --line main approvals $R | awk '{print $1}' | sort | xargs)"
+eq "approvals are listed" "3" "$(l --project p --line main attestations $R --kind approval --json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')"
 as layr-admin env LAYR_PROJECT=p LAYR_LINE=main $T/layr approve -q --withdraw $R
 has "a withdrawn approval does not count" "it has 0" "$(in_line layr-u2 main merge -q u1 --expect $R 2>&1)"
 as layr-admin env LAYR_PROJECT=p LAYR_LINE=main $T/layr approve -q $R
@@ -138,7 +138,7 @@ ok "and forward again" in_line layr-u2 main merge -q u1 --expect $(in_line layr-
 
 # 6. A deny rule wins over any role.
 as layr-admin $L --project p access grant layr-u3 maintainer
-has "a maintainer in a denied group cannot push" "deny rule for @layr-bots" "$(in_line layr-u3 main push origin main 2>&1)"
+has "a maintainer in a denied group cannot push" "deny rule for @layr-bots" "$(in_line layr-u3 main git push origin main 2>&1)"
 as layr-admin $L --project p access grant layr-u3 admin
 as layr-admin $L --project p access deny @layr-bots access
 no "an admin denied 'access' cannot change a check command" as layr-u3 $L --project p config check.unit true
@@ -156,13 +156,13 @@ eq "the driver ran as the caller of the merge" "layr-u1" "$(cat $T/who.txt)"
 
 # 8. push keeps the history of the line; --squash makes one commit.
 git init -q --bare $T/r.git
-l --project p remote add origin $T/r.git
-l --project p --line main push -q origin main
+l --project p git remote add origin $T/r.git
+l --project p --line main git push -q origin main
 eq "every state of main is a commit" "$(l --project p --line main log --format=%s | wc -l)" "$(git --git-dir=$T/r.git rev-list --count main)"
 ok "merges stay merges" test "$(git --git-dir=$T/r.git rev-list --merges --count main)" -ge 1
 eq "the subject of each commit is the state's message" "$(l --project p --line main log --format=%s | head -3)" "$(git --git-dir=$T/r.git log --format=%s -3 main)"
 cd $P/u1 && as layr-u1 sh -c "echo a > a.txt && $L add a.txt && $L commit -qm a && echo b > b.txt && $L add b.txt && $L commit -qm b" && cd /tmp
-l --project p --line u1 push -q --squash -m "task" origin task
+l --project p --line u1 git push -q --squash -m "task" origin task
 eq "--squash pushes one commit" "1" "$(git --git-dir=$T/r.git rev-list --count main..task)"
 eq "with the given message" "task" "$(git --git-dir=$T/r.git log -1 --format=%s task)"
 # The git objects are history too: readable by the roles, a group's members included.
