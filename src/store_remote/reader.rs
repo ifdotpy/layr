@@ -62,7 +62,13 @@ fn records_with_local(backend: &Backend, identity: &str, project: &str, local: &
             bail!("local records belong to another project");
         }
         let by_seq = machines.entry(record.machine.clone()).or_default();
-        if by_seq.get(&record.seq).is_some_and(|existing| existing != line) {
+        if let Some(existing) = by_seq.get(&record.seq).filter(|existing| *existing != line) {
+            if record.seq == 1 {
+                let remote = oplog::parse_line(existing, None)?.record;
+                if oplog::machine_key(&remote)? != oplog::machine_key(&record)? {
+                    bail!("remote machine {}: first-record key does not match the known public key", record.machine);
+                }
+            }
             bail!("conflicting history of machine {}, record {}", record.machine, record.seq);
         }
         by_seq.entry(record.seq).or_insert_with(|| line.clone());
@@ -498,6 +504,17 @@ mod tests {
         assert!(complete.gaps.is_empty());
         std::fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn a_changed_machine_key_is_reported_before_local_history_merge() {
+        let (backend, identity, key, root) = fixture();
+        let local = vec![line(1, &key)];
+        let other = ed25519_dalek::SigningKey::from_bytes(&[8; 32]);
+        segment(&backend, &identity, 1, 1, &[line(1, &other)]);
+        let error = records_with_local(&backend, &identity, PROJECT, &local).unwrap_err().to_string();
+        assert!(error.contains("first-record key does not match"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn signed_tree_and_file_hash_detect_mutation() {
         let (backend, identity, key, root) = fixture();

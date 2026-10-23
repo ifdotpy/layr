@@ -60,12 +60,12 @@ impl S3 {
             bail!("set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY");
         }
         let (base, path) = aws::s3_location(&self.bucket, &self.region, self.endpoint.as_deref(), key);
-        let url = reqwest::Url::parse(&base)?;
+        let url = reqwest::Url::parse(&base).map_err(|_| anyhow!("invalid S3 endpoint"))?;
         // The Host header that reqwest sends: the port only when it is not the default one.
         let host = match (url.host_str(), url.port()) {
             (Some(h), Some(p)) => format!("{h}:{p}"),
             (Some(h), None) => h.to_string(),
-            _ => bail!("no host in {base}"),
+            _ => bail!("S3 endpoint has no host"),
         };
         let payload = if body.is_empty() { EMPTY_SHA256.to_string() } else { hex::encode(Sha256::digest(&body)) };
         let unix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
@@ -94,10 +94,10 @@ impl S3 {
         if has_body {
             request = request.body(body);
         }
-        let response = request.send()?;
+        let response = request.send().map_err(reqwest::Error::without_url)?;
         let status = response.status().as_u16();
         let headers = response.headers().clone();
-        Ok(Reply { status, headers, body: response.bytes()?.to_vec() })
+        Ok(Reply { status, headers, body: response.bytes().map_err(reqwest::Error::without_url)?.to_vec() })
     }
 
     fn abort(&self, key: &str, id: &str) -> Result<()> {
@@ -194,12 +194,9 @@ impl S3 {
     }
 }
 
-/// What a failed call says: S3's code and message, which hold no secret.
-fn failure(what: &str, status: u16, reply: &[u8]) -> anyhow::Error {
-    let reply = String::from_utf8_lossy(reply);
-    let code = aws::xml_text(&reply, "Code").unwrap_or_default();
-    let message = aws::xml_text(&reply, "Message").unwrap_or_default();
-    anyhow!("{what}: HTTP {status} {code} {message}")
+/// The service can echo credentials in XML. Keep response bodies out of errors.
+fn failure(what: &str, status: u16, _reply: &[u8]) -> anyhow::Error {
+    anyhow!("{what}: HTTP {status}")
 }
 
 impl S3 {
@@ -302,6 +299,13 @@ impl S3 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn server_errors_do_not_repeat_response_secrets() {
+        let response = b"<Error><Code>private-access-key</Code><Message>private-token</Message></Error>";
+        let error = failure("S3 put", 403, response).to_string();
+        assert_eq!(error, "S3 put: HTTP 403");
+    }
 
     /// Run against a disposable MinIO endpoint in the Linux integration VM.
     #[test]

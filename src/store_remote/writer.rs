@@ -196,6 +196,7 @@ pub(super) fn push(store: &Store, repo: &Repo, opts: &Options) -> Result<Report>
             .position(|s| !s.parents.iter().any(|p| states.iter().any(|other| &other.id == p)))
             .context("local state ancestry has a cycle")?;
         let state = states.remove(position);
+        // secrets::check_state for every outgoing state
         let base = repo.ancestors(&state.id)?.into_iter().skip(1).find_map(|id| index.get(&id).cloned().map(|p| (id, p)));
         let mut hashes = BTreeMap::new();
         for pushed in index.values() {

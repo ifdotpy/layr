@@ -39,7 +39,7 @@ impl Backend {
         }
         if let Some(path) = url.strip_prefix("s3://") {
             let (bucket, prefix) = path.split_once('/').unwrap_or((path, ""));
-            if bucket.is_empty() || bucket.contains(['@', '?', '#']) {
+            if bucket.is_empty() || bucket.contains(['@', ':', '?', '#']) || prefix.contains(['?', '#']) {
                 bail!("invalid S3 bucket");
             }
             return Ok(Self::S3(super::s3::S3::with_env(bucket, prefix, &std::collections::HashMap::new())?));

@@ -126,7 +126,10 @@ impl Store {
     }
 
     fn descriptor(&self) -> Result<Descriptor> {
-        let data = self.backend.get("store.json")?.context("remote store has no store.json; push first")?;
+        let data = self
+            .backend
+            .get("store.json")?
+            .context("remote store is not initialized; use layr remote add with --paper-key-out")?;
         let descriptor: Descriptor = serde_json::from_slice(&data)?;
         if descriptor.format != 2 {
             bail!("unsupported store format {}", descriptor.format);

@@ -53,15 +53,31 @@ export LAYR_PROJECT=project
 export LAYR_LINE=main
 cd "$original_root/projects/project/lines/main"
 l branch temporary
+l push archive -q
+export LAYR_ROOT=$T/replica LAYR_PROJECT=replica
+cd "$LAYR_ROOT/projects/replica/lines/main"
+l fetch origin -q
+l adopt temporary >/dev/null
+export LAYR_ROOT=$original_root LAYR_PROJECT=project
 cd "$original_root/projects/project/lines/temporary"
 printf 'unfinished work\n' >> notes.txt
 cd "$original_root/projects/project/lines/main"
 l branch -D temporary
+l op export > "$T/deletion-records"
+final=$(python3 - "$T/deletion-records" <<'PYCODE'
+import json,sys
+records=[json.loads(line)['r'] for line in open(sys.argv[1])]
+r=next(r for r in reversed(records) if r['op']=='line.delete')
+print(r['data']['final_state'])
+PYCODE
+)
 ok "store includes the deletion undo state by default" l push archive -q
 export LAYR_ROOT=$T/replica
 export LAYR_PROJECT=replica
 export LAYR_LINE=main
 cd "$LAYR_ROOT/projects/replica/lines/main"
 ok "fetch after a source line deletion" l fetch origin -q
+ok "a source deletion preserves the adopted local line" test -d "$LAYR_ROOT/projects/replica/lines/temporary"
+has "deletion undo bytes restore without --auto" 'unfinished work' "$(l show "$final:notes.txt")"
 ok "complete remote history still verifies" l fsck --remote origin --files
 finish

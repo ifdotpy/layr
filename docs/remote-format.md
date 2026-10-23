@@ -96,7 +96,8 @@ The local index records only attempts whose tree publication completed.
 
 Collection removes only data parts of incomplete attempts older than 24 hours.
 Collection checks again for the attempt's tree immediately before deletion.
-Writers refresh their attempt if an upload takes 24 hours. Complete attempts and their delta bases remain.
+An upload that reaches 24 hours stops before tree publication. A retry uses a new attempt.
+Complete attempts and their delta bases remain.
 The store keeps all record segments and complete states by default.
 
 ## Errors
@@ -106,7 +107,8 @@ The store keeps all record segments and complete states by default.
 | Unsupported store or tree version | Stop before an import or write |
 | Desk v1 write | Reject; import into a new local project |
 | No readable slot | Reject reads; allow an upload with the public recipient |
-| Record sequence gap or conflicting bytes | Reject the segment set |
+| Record sequence gap | Import the contiguous prefix; report the gap |
+| Conflicting record bytes | Reject the machine's segment set |
 | Invalid record or tree signature | Reject the object |
 | Wrong project ID | Reject before importing records |
 | Unsafe path, frame range, or excessive chain | Reject the tree |

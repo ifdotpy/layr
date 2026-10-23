@@ -17,7 +17,7 @@ pub struct Credentials {
 
 impl std::fmt::Debug for Credentials {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Credentials").field("key_id", &self.key_id).finish_non_exhaustive()
+        f.debug_struct("Credentials").finish_non_exhaustive()
     }
 }
 

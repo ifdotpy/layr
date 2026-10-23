@@ -1039,6 +1039,7 @@ Copy the words to paper. Check the copy. Delete the file.
 
 A machine slot uses the existing machine Ed25519 key. A machine without a slot can push but cannot fetch.
 Use `layr remote trust <remote> <machine>` from a machine with a slot to grant read access.
+For a new machine, get its `layr remote self --json` output. Give its key with `--public-key <key>` when you grant access.
 A machine that retains the vault identity can read future objects. Full revocation requires a new vault identity.
 
 S3 reads the caller's `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, and `AWS_REGION` environment variables.
@@ -1049,7 +1050,7 @@ The part target is 16 MiB. A larger frame has a separate part, same as Desk v1.
 The store keeps complete states and records. Remote garbage collection removes only incomplete data attempts older than 24 hours.
 A retry uses a new state attempt. Record retries preserve the signed bytes.
 Private overlay files stay local. Legacy cache layer snapshots require a peer remote.
-The `--caches` option sends ordinary cache states after Core adds that state kind.
+The `--caches` option sends states of kind `cache`.
 
 To import a Desk v1 vault, set `LAYR_PAPER_KEY_FILE` to the Desk paper file. Then use `layr clone <vault URL> <project>`.
 The import creates line `main`, preserves history order, and verifies each file's SHA-256.
