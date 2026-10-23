@@ -447,8 +447,12 @@ pub fn kind(url: &str) -> Result<Kind> {
         }
         "file" if rest.starts_with('/') => Ok(Kind::Store),
         "s3" if !rest.starts_with('/') && !rest.contains(['?', '#', '@', ':']) => Ok(Kind::Store),
+        "layr+https" => {
+            crate::store_remote::validate_gateway_url(url)?;
+            Ok(Kind::Store)
+        }
         "oci" if !rest.starts_with('/') && rest.contains('/') => Ok(Kind::Registry),
-        _ => bail!("unsupported remote URL; use ssh://, file:///, s3:// or oci://"),
+        _ => bail!("unsupported remote URL; use ssh://, file:///, s3://, layr+https:// or oci://"),
     }
 }
 
@@ -772,7 +776,7 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
         .map_err(|e| exit(128, format!("{e}; Git forms use layr git clone")))?;
     let url = a.pos.first().ok_or_else(|| exit(128, "usage: layr clone <url> [<project>]; Git uses layr git clone"))?;
     if kind(url).map_err(|e| exit(128, format!("{e}; use layr git clone for Git URLs")))? != Kind::Store {
-        bail!("clone requires a file:// or s3:// store; Git uses layr git clone");
+        bail!("clone requires a file://, s3:// or layr+https:// store; Git uses layr git clone");
     }
     if a.pos.len() > 2 {
         bail!("usage: layr clone <url> [<project>]");
@@ -814,6 +818,7 @@ mod tests {
         assert_eq!(kind("ssh://user@host/project").unwrap(), Kind::Peer { host: "user@host".into(), project: "project".into() });
         assert_eq!(kind("file:///tmp/store").unwrap(), Kind::Store);
         assert_eq!(kind("s3://bucket/path").unwrap(), Kind::Store);
+        assert_eq!(kind("layr+https://gateway.example/project").unwrap(), Kind::Store);
         assert_eq!(kind("oci://host/project").unwrap(), Kind::Registry);
         for url in [
             "/tmp/repo.git",

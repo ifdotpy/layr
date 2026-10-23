@@ -63,7 +63,8 @@ Token updates and the host script use the same file lock.
 The default token duration is 24 hours.
 Duration units are `s`, `m`, `h`, and `d`.
 Read requests use a slot challenge and a bearer token that lasts at most ten minutes.
-Write tokens cannot read objects or add slots.
+Write tokens can list names under `records/` and `states/`.
+Write tokens cannot read object bodies or add slots.
 A slot write requires proof of the store identity.
 GC tokens can delete only `states/<state>/<part>.data.age` objects.
 The gateway requires conditional creation in S3 and returns HTTP 412 when an object already exists.
@@ -76,8 +77,26 @@ A TLS handshake has a ten-second time limit.
 A list returns at most 10,000 objects; the slots endpoint returns at most 1,024 slots.
 The gateway never opens or decrypts state data.
 
+Add the gateway URL to an existing project:
+
+```sh
+export LAYR_GATEWAY_TOKEN_FILE=/private/path/write-token
+chmod 600 "$LAYR_GATEWAY_TOKEN_FILE"
+layr remote add cloud layr+https://gateway.example.com/project
+layr push cloud
+layr fetch cloud
+```
+
+The token file must be a regular file with mode `0600`, owned by the caller.
+The client refuses symbolic links and does not save the token in project data.
+For a private certificate authority, set `LAYR_GATEWAY_CA_FILE` to its PEM certificate file.
+The client adds these roots and keeps certificate and hostname checks enabled.
+Read commands use the machine slot or `LAYR_PAPER_KEY_FILE` to answer a fresh challenge.
+A gateway remote cannot initialize an empty store. Create it first with the owner's S3 credentials.
+Enroll an executor with its public key as the AWS runbook describes.
+
 The MinIO integration test uses a separate temporary bucket and a server that runs as `nobody`.
-It verifies conditional writes, pagination, ranges, slot grants, GC grants, malformed requests, and config revocation.
+It verifies conditional writes, pagination, ranges, grants, malformed requests, config revocation, and real CLI push, clone, fetch, and GC.
 It does not create AWS resources.
 Use test credentials for a local MinIO server:
 
@@ -89,7 +108,8 @@ sudo env LAYR_MINIO_ENDPOINT=http://127.0.0.1:19000 \
 ```
 
 Debug builds expose `--test-static-credentials` for this test only.
-It requires `--tls none`, a loopback listener, and a loopback HTTP S3 endpoint.
+It requires a loopback listener and a loopback HTTP S3 endpoint.
+The test uses verified TLS with a temporary certificate authority.
 Release builds exclude this credential path.
 Production uses IMDSv2 and STS role sessions.
 

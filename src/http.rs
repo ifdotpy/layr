@@ -39,9 +39,13 @@ impl Socket {
         self.read_until = Instant::now() + total;
         self.read_wait = wait;
     }
-    pub fn begin_write(&mut self, timeout: Duration) { self.write_until = Instant::now() + timeout; }
+    pub fn begin_write(&mut self, timeout: Duration) {
+        self.write_until = Instant::now() + timeout;
+    }
     fn left(until: Instant) -> io::Result<Duration> {
-        until.checked_duration_since(Instant::now()).filter(|v| !v.is_zero())
+        until
+            .checked_duration_since(Instant::now())
+            .filter(|v| !v.is_zero())
             .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "HTTP deadline reached"))
     }
 }
@@ -61,7 +65,10 @@ impl Write for Socket {
         Self::left(self.write_until)?;
         Ok(count)
     }
-    fn flush(&mut self) -> io::Result<()> { Self::left(self.write_until)?; self.stream.flush() }
+    fn flush(&mut self) -> io::Result<()> {
+        Self::left(self.write_until)?;
+        self.stream.flush()
+    }
 }
 
 #[derive(Debug)]
@@ -100,7 +107,9 @@ fn line<R: BufRead>(reader: &mut R, limit: usize, deadline: Instant) -> Result<V
             return Err(bad(408, "request timed out"));
         }
         let bytes = reader.fill_buf().map_err(io_error)?;
-        if Instant::now() >= deadline { return Err(bad(408, "request timed out")); }
+        if Instant::now() >= deadline {
+            return Err(bad(408, "request timed out"));
+        }
         if bytes.is_empty() {
             return Err(bad(400, "incomplete HTTP headers"));
         }
@@ -144,8 +153,11 @@ pub fn request<R: Read>(stream: &mut R, limits: &Limits) -> Result<Request, Erro
     }
     let first = std::str::from_utf8(&first).map_err(|_| bad(400, "invalid request line"))?;
     let parts: Vec<_> = first.split(' ').collect();
-    if parts.len() != 3 || parts[0].is_empty() || !parts[0].bytes().all(token)
-        || !parts[1].starts_with('/') || parts[1].contains('#')
+    if parts.len() != 3
+        || parts[0].is_empty()
+        || !parts[0].bytes().all(token)
+        || !parts[1].starts_with('/')
+        || parts[1].contains('#')
         || !matches!(parts[2], "HTTP/1.0" | "HTTP/1.1")
     {
         return Err(bad(400, "invalid request line"));
@@ -167,11 +179,8 @@ pub fn request<R: Read>(stream: &mut R, limits: &Limits) -> Result<Request, Erro
         if raw[0] == b' ' || raw[0] == b'\t' {
             return Err(bad(400, "folded headers are refused"));
         }
-        let at = raw.iter().position(|b| *b == b':').filter(|at| *at > 0)
-            .ok_or_else(|| bad(400, "invalid HTTP header"))?;
-        if !raw[..at].iter().copied().all(token)
-            || !raw[at + 1..].iter().all(|b| (0x20..=0x7e).contains(b) || *b == b'\t')
-        {
+        let at = raw.iter().position(|b| *b == b':').filter(|at| *at > 0).ok_or_else(|| bad(400, "invalid HTTP header"))?;
+        if !raw[..at].iter().copied().all(token) || !raw[at + 1..].iter().all(|b| (0x20..=0x7e).contains(b) || *b == b'\t') {
             return Err(bad(400, "invalid HTTP header"));
         }
         let name = String::from_utf8(raw[..at].to_vec()).expect("ASCII").to_ascii_lowercase();
@@ -208,7 +217,9 @@ pub fn request<R: Read>(stream: &mut R, limits: &Limits) -> Result<Request, Erro
         }
         let end = body.len().min(offset + 64 * 1024);
         let count = reader.read(&mut body[offset..end]).map_err(io_error)?;
-        if Instant::now() >= deadline { return Err(bad(408, "request timed out")); }
+        if Instant::now() >= deadline {
+            return Err(bad(408, "request timed out"));
+        }
         if count == 0 {
             return Err(bad(400, "incomplete HTTP body"));
         }
@@ -226,8 +237,8 @@ pub enum Range {
 
 impl Range {
     pub fn parse(value: &str) -> Result<Self, Error> {
-        let (start, end) = value.strip_prefix("bytes=").and_then(|s| s.split_once('-'))
-            .ok_or_else(|| bad(416, "invalid byte range"))?;
+        let (start, end) =
+            value.strip_prefix("bytes=").and_then(|s| s.split_once('-')).ok_or_else(|| bad(416, "invalid byte range"))?;
         let number = |s: &str| -> Result<u64, Error> {
             if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
                 return Err(bad(416, "invalid byte range"));
@@ -237,13 +248,17 @@ impl Range {
         match (start.is_empty(), end.is_empty()) {
             (true, false) => {
                 let count = number(end)?;
-                if count == 0 { return Err(bad(416, "invalid byte range")); }
+                if count == 0 {
+                    return Err(bad(416, "invalid byte range"));
+                }
                 Ok(Self::Suffix(count))
             }
             (false, true) => Ok(Self::From(number(start)?)),
             (false, false) => {
                 let (start, end) = (number(start)?, number(end)?);
-                if start > end { return Err(bad(416, "invalid byte range")); }
+                if start > end {
+                    return Err(bad(416, "invalid byte range"));
+                }
                 Ok(Self::Closed(start, end))
             }
             _ => Err(bad(416, "invalid byte range")),
@@ -251,7 +266,9 @@ impl Range {
     }
 
     pub fn resolve(self, length: u64) -> Option<(u64, u64)> {
-        if length == 0 { return None; }
+        if length == 0 {
+            return None;
+        }
         match self {
             Self::Closed(start, end) if start < length => Some((start, end.min(length - 1))),
             Self::From(start) if start < length => Some((start, length - 1)),
@@ -270,42 +287,72 @@ impl Range {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ContentRange { pub start: u64, pub end: u64, pub total: u64 }
+pub struct ContentRange {
+    pub start: u64,
+    pub end: u64,
+    pub total: u64,
+}
 impl ContentRange {
     pub fn parse(value: &str) -> Result<Self, Error> {
-        let (range, total) = value.strip_prefix("bytes ").and_then(|s| s.split_once('/'))
-            .ok_or_else(|| bad(502, "invalid Content-Range"))?;
-        if total.is_empty() || !total.bytes().all(|b| b.is_ascii_digit()) { return Err(bad(502, "invalid Content-Range")); }
+        let (range, total) =
+            value.strip_prefix("bytes ").and_then(|s| s.split_once('/')).ok_or_else(|| bad(502, "invalid Content-Range"))?;
+        if total.is_empty() || !total.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(bad(502, "invalid Content-Range"));
+        }
         let total = total.parse::<u64>().map_err(|_| bad(502, "invalid Content-Range"))?;
         match Range::parse(&format!("bytes={range}")).map_err(|_| bad(502, "invalid Content-Range"))? {
             Range::Closed(start, end) if start <= end && end < total => Ok(Self { start, end, total }),
             _ => Err(bad(502, "invalid Content-Range")),
         }
     }
-    pub fn header(self) -> String { format!("bytes {}-{}/{}", self.start, self.end, self.total) }
+    pub fn header(self) -> String {
+        format!("bytes {}-{}/{}", self.start, self.end, self.total)
+    }
 }
 
 pub fn headers<W: Write>(stream: &mut W, status: u16, length: u64, headers: &[(String, String)]) -> io::Result<()> {
-    if !(100..600).contains(&status) { return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid response status")); }
+    if !(100..600).contains(&status) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid response status"));
+    }
     let mut names = std::collections::BTreeSet::new();
     for (name, value) in headers {
         let lower = name.to_ascii_lowercase();
-        if name.is_empty() || !name.bytes().all(token) || !value.bytes().all(|b| (0x20..=0x7e).contains(&b))
-            || matches!(lower.as_str(), "content-length" | "connection" | "transfer-encoding") || !names.insert(lower)
+        if name.is_empty()
+            || !name.bytes().all(token)
+            || !value.bytes().all(|b| (0x20..=0x7e).contains(&b))
+            || matches!(lower.as_str(), "content-length" | "connection" | "transfer-encoding")
+            || !names.insert(lower)
         {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid response header"));
         }
     }
     let reason = match status {
-        200 => "OK", 201 => "Created", 204 => "No Content", 206 => "Partial Content",
-        400 => "Bad Request", 401 => "Unauthorized", 403 => "Forbidden", 404 => "Not Found",
-        405 => "Method Not Allowed", 408 => "Request Timeout", 411 => "Length Required",
-        412 => "Precondition Failed", 413 => "Content Too Large", 416 => "Range Not Satisfiable",
-        417 => "Expectation Failed", 421 => "Misdirected Request", 431 => "Request Header Fields Too Large",
-        500 => "Internal Server Error", 502 => "Bad Gateway", 503 => "Service Unavailable", _ => "Error",
+        200 => "OK",
+        201 => "Created",
+        204 => "No Content",
+        206 => "Partial Content",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        408 => "Request Timeout",
+        411 => "Length Required",
+        412 => "Precondition Failed",
+        413 => "Content Too Large",
+        416 => "Range Not Satisfiable",
+        417 => "Expectation Failed",
+        421 => "Misdirected Request",
+        431 => "Request Header Fields Too Large",
+        500 => "Internal Server Error",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        _ => "Error",
     };
     write!(stream, "HTTP/1.1 {status} {reason}\r\nContent-Length: {length}\r\nConnection: close\r\n")?;
-    for (name, value) in headers { write!(stream, "{name}: {value}\r\n")?; }
+    for (name, value) in headers {
+        write!(stream, "{name}: {value}\r\n")?;
+    }
     stream.write_all(b"\r\n")
 }
 
@@ -319,10 +366,19 @@ pub fn response<W: Write>(stream: &mut W, status: u16, headers: &[(String, Strin
 mod tests {
     use super::*;
     fn limits() -> Limits {
-        Limits { request_line: 128, header_count: 4, header_bytes: 128, body_bytes: 8,
-            header_timeout: Duration::from_secs(1), body_timeout: Duration::from_secs(1), write_timeout: Duration::from_secs(1) }
+        Limits {
+            request_line: 128,
+            header_count: 4,
+            header_bytes: 128,
+            body_bytes: 8,
+            header_timeout: Duration::from_secs(1),
+            body_timeout: Duration::from_secs(1),
+            write_timeout: Duration::from_secs(1),
+        }
     }
-    fn parse(text: &str) -> Result<Request, Error> { request(&mut text.as_bytes(), &limits()) }
+    fn parse(text: &str) -> Result<Request, Error> {
+        request(&mut text.as_bytes(), &limits())
+    }
     #[test]
     fn valid_request_and_body() {
         let found = parse("PUT /objects/a HTTP/1.1\r\nHost: localhost\r\nContent-Length: 3\r\n\r\nabc").unwrap();
@@ -332,7 +388,8 @@ mod tests {
     #[test]
     fn malformed_requests_are_refused() {
         for text in [
-            "GET / HTTP/1.1\nHost: x\n\n", "GET / HTTP/1.1\r\nHost : x\r\n\r\n",
+            "GET / HTTP/1.1\nHost: x\n\n",
+            "GET / HTTP/1.1\r\nHost : x\r\n\r\n",
             "GET / HTTP/1.1\r\nHost: x\r\n folded\r\n\r\n",
             "GET / HTTP/1.1\r\nHost: x\r\nX: a\rb\r\n\r\n",
             "GET / HTTP/1.1\r\nHost: x\r\nContent-Length: -1\r\n\r\n",
@@ -340,9 +397,12 @@ mod tests {
             "GET / HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nContent-Length: 0\r\n\r\n",
             "GET / HTTP/1.1\r\nHost: x\r\nContent-Length: 1,1\r\n\r\n",
             "GET / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
-            "GET / HTTP/1.1\r\n\r\n", "GET http://other/ HTTP/1.1\r\nHost: x\r\n\r\n",
+            "GET / HTTP/1.1\r\n\r\n",
+            "GET http://other/ HTTP/1.1\r\nHost: x\r\n\r\n",
             "GET / HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\n\r\na",
-        ] { assert!(parse(text).is_err(), "{text:?}"); }
+        ] {
+            assert!(parse(text).is_err(), "{text:?}");
+        }
     }
     #[test]
     fn size_limits_are_enforced() {

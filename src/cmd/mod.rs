@@ -190,6 +190,7 @@ Lines and states:
    ref set/list/log/delete, attest, attestations, change list/show/log/diff
 Remotes:
    remote add, list, self, remove, trust; sync, fetch, pull, push, clone
+   gateway [--config <file>], gateway token <project> --write|--gc
 Git bridge:
    git remote, fetch, pull, push, clone, sync
    queue add/list/remove/run

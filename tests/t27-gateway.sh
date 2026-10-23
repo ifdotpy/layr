@@ -10,6 +10,7 @@ fi
 : "${LAYR_MINIO_ACCESS_KEY:?Set the local MinIO test access key}"
 : "${LAYR_MINIO_SECRET_KEY:?Set the local MinIO test secret key}"
 export LAYR_GATEWAY_BINARY="$LAYR"
+export LAYR_GATEWAY_TEST_STORE="$LAYR_ROOT"
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 LOG="$T/gateway-minio.log"
 if (cd "$REPO" && cargo test --locked gateway::minio::actual_cli_minio_round_trip -- --exact --ignored --nocapture) > "$LOG" 2>&1; then

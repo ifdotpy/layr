@@ -25,10 +25,7 @@ pub struct Reloading {
 
 impl std::fmt::Debug for Reloading {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Reloading")
-            .field("cert", &self.cert)
-            .field("key", &self.key)
-            .finish()
+        f.debug_struct("Reloading").field("cert", &self.cert).field("key", &self.key).finish()
     }
 }
 
@@ -49,22 +46,15 @@ fn load(cert: &Path, key: &Path, provider: &CryptoProvider) -> Result<CertifiedK
     if chain.is_empty() {
         bail!("{} has no certificate", cert.display());
     }
-    let key_der = PrivateKeyDer::from_pem_file(key)
-        .with_context(|| format!("reading the key {}", key.display()))?;
-    CertifiedKey::from_der(chain, key_der, provider)
-        .map_err(|e| anyhow!("{} and {}: {e}", cert.display(), key.display()))
+    let key_der = PrivateKeyDer::from_pem_file(key).with_context(|| format!("reading the key {}", key.display()))?;
+    CertifiedKey::from_der(chain, key_der, provider).map_err(|e| anyhow!("{} and {}: {e}", cert.display(), key.display()))
 }
 
 impl Reloading {
     pub fn new(cert: PathBuf, key: PathBuf, provider: Arc<CryptoProvider>) -> Result<Self> {
         let at = stamp(&cert, &key);
         let loaded = load(&cert, &key, &provider)?;
-        Ok(Reloading {
-            cert,
-            key,
-            provider,
-            state: Mutex::new((Arc::new(loaded), at)),
-        })
+        Ok(Reloading { cert, key, provider, state: Mutex::new((Arc::new(loaded), at)) })
     }
 
     /// The current key, read again when a file changed. A pair that does not load (one file
@@ -77,10 +67,7 @@ impl Reloading {
             match load(&self.cert, &self.key, &self.provider) {
                 Ok(loaded) => {
                     state.0 = Arc::new(loaded);
-                    eprintln!(
-                        "layr gateway: loaded the certificate {}",
-                        self.cert.display()
-                    );
+                    eprintln!("layr gateway: loaded the certificate {}", self.cert.display());
                 }
                 Err(e) => eprintln!("layr gateway: kept the old certificate: {e:#}"),
             }
@@ -114,9 +101,28 @@ mod tests {
     fn pair(home: &Path, name: &str) -> (PathBuf, PathBuf) {
         let cert = home.join(format!("{name}.crt"));
         let key = home.join(format!("{name}.key"));
-        let status = Command::new("openssl").args(["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256",
-            "-nodes", "-days", "1", "-subj", "/CN=localhost", "-keyout"]).arg(&key).arg("-out").arg(&cert)
-            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().unwrap();
+        let status = Command::new("openssl")
+            .args([
+                "req",
+                "-x509",
+                "-newkey",
+                "ec",
+                "-pkeyopt",
+                "ec_paramgen_curve:P-256",
+                "-nodes",
+                "-days",
+                "1",
+                "-subj",
+                "/CN=localhost",
+                "-keyout",
+            ])
+            .arg(&key)
+            .arg("-out")
+            .arg(&cert)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
         assert!(status.success());
         (cert, key)
     }

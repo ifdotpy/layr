@@ -9,7 +9,9 @@ use sha2::{Digest, Sha256};
 
 pub const READ_LIFE_MS: u64 = 10 * 60 * 1000;
 
-pub fn now() -> u64 { crate::ids::now_ms().max(0) as u64 }
+pub fn now() -> u64 {
+    crate::ids::now_ms().max(0) as u64
+}
 
 fn random() -> String {
     let mut bytes = [0u8; 32];
@@ -17,14 +19,23 @@ fn random() -> String {
     hex::encode(bytes)
 }
 
-pub fn hash(token: &str) -> String { hex::encode(Sha256::digest(token.as_bytes())) }
+pub fn hash(token: &str) -> String {
+    hex::encode(Sha256::digest(token.as_bytes()))
+}
 
 pub fn duration(text: &str) -> Result<u64> {
     let at = text.find(|c: char| !c.is_ascii_digit()).unwrap_or(text.len());
-    if at == 0 { bail!("--until needs a positive duration, such as 1h or 30d"); }
+    if at == 0 {
+        bail!("--until needs a positive duration, such as 1h or 30d");
+    }
     let number: u64 = text[..at].parse()?;
-    let unit: u64 = match &text[at..] { "s" => 1000, "m" => 60_000, "h" => 3_600_000, "d" => 86_400_000,
-        _ => bail!("--until needs s, m, h or d") };
+    let unit: u64 = match &text[at..] {
+        "s" => 1000,
+        "m" => 60_000,
+        "h" => 3_600_000,
+        "d" => 86_400_000,
+        _ => bail!("--until needs s, m, h or d"),
+    };
     number.checked_mul(unit).filter(|v| *v > 0).ok_or_else(|| anyhow!("invalid token duration"))
 }
 
@@ -34,12 +45,19 @@ pub fn issue(gc: bool, until_ms: u64, at: u64) -> Result<String> {
 }
 
 pub fn grant(token: &str, project: &Project, gc: bool, at: u64) -> bool {
-    if token.len() > 128 { return false; }
+    if token.len() > 128 {
+        return false;
+    }
     let parts: Vec<_> = token.split('.').collect();
-    if parts.len() != 4 || parts[0] != "v1" || parts[1] != if gc { "gc" } else { "write" }
+    if parts.len() != 4
+        || parts[0] != "v1"
+        || parts[1] != if gc { "gc" } else { "write" }
         || parts[2].parse::<u64>().ok().is_none_or(|expiry| expiry <= at)
-        || parts[3].len() != 64 || hex::decode(parts[3]).is_err()
-    { return false; }
+        || parts[3].len() != 64
+        || hex::decode(parts[3]).is_err()
+    {
+        return false;
+    }
     let digest = hash(token);
     let hashes = if gc { &project.gc_token_hashes } else { &project.write_token_hashes };
     hashes.iter().any(|found| found == &digest)
@@ -67,13 +85,25 @@ impl Proof {
         format!("{text}.{}", hex::encode(self.mac(binding, &text).finalize().into_bytes()))
     }
     pub fn valid(&self, kind: &str, binding: &str, token: &str, at: u64) -> bool {
-        if token.len() > 180 { return false; }
+        if token.len() > 180 {
+            return false;
+        }
         let parts: Vec<_> = token.split('.').collect();
-        if parts.len() != 4 || parts[0] != kind || parts[2].len() != 64 || hex::decode(parts[2]).is_err() { return false; }
-        let Some(expiry) = parts[1].parse::<u64>().ok() else { return false; };
-        if expiry <= at || expiry - at > READ_LIFE_MS { return false; }
-        let Some((text, signature)) = token.rsplit_once('.') else { return false; };
-        let Ok(signature) = hex::decode(signature) else { return false; };
+        if parts.len() != 4 || parts[0] != kind || parts[2].len() != 64 || hex::decode(parts[2]).is_err() {
+            return false;
+        }
+        let Some(expiry) = parts[1].parse::<u64>().ok() else {
+            return false;
+        };
+        if expiry <= at || expiry - at > READ_LIFE_MS {
+            return false;
+        }
+        let Some((text, signature)) = token.rsplit_once('.') else {
+            return false;
+        };
+        let Ok(signature) = hex::decode(signature) else {
+            return false;
+        };
         self.mac(binding, text).verify_slice(&signature).is_ok()
     }
     pub fn challenge(&self, binding: &str, recipient: &str, at: u64) -> Result<String> {
@@ -83,7 +113,9 @@ impl Proof {
         Ok(base64::engine::general_purpose::STANDARD.encode(data))
     }
     pub fn exchange(&self, binding: &str, token: &str, at: u64) -> Option<(String, u64)> {
-        if !self.valid("challenge", binding, token, at) { return None; }
+        if !self.valid("challenge", binding, token, at) {
+            return None;
+        }
         let expiry = token.split('.').nth(1)?.parse::<u64>().ok()?;
         Some((self.sign("read", binding, expiry, &random()), expiry))
     }

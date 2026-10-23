@@ -1,9 +1,12 @@
 //! Tailnet object gateway. It runs independently of the local Layr service and store.
 
 mod auth;
+mod aws;
 mod config;
-mod tls;
+#[cfg(test)]
+mod minio;
 mod server;
+mod tls;
 
 use anyhow::{anyhow, bail, Context, Result};
 use std::path::PathBuf;
@@ -18,8 +21,14 @@ struct Options {
 }
 
 pub fn command(args: &[String]) -> Result<()> {
-    let mut options = Options { config: "/etc/layr-gateway/config.json".into(), tls: "files".into(),
-        cert: None, key: None, tls_dir: "/etc/layr-gateway/tls".into(), test_static: false };
+    let mut options = Options {
+        config: "/etc/layr-gateway/config.json".into(),
+        tls: "files".into(),
+        cert: None,
+        key: None,
+        tls_dir: "/etc/layr-gateway/tls".into(),
+        test_static: false,
+    };
     let mut positional = Vec::new();
     let mut write = false;
     let mut gc = false;
@@ -35,9 +44,13 @@ pub fn command(args: &[String]) -> Result<()> {
                 index += 1;
                 let value = args.get(index).ok_or_else(|| anyhow!("{arg} needs a value"))?;
                 match arg.as_str() {
-                    "--config" => options.config = value.into(), "--tls" => options.tls = value.clone(),
-                    "--cert" => options.cert = Some(value.into()), "--key" => options.key = Some(value.into()),
-                    "--tls-dir" => options.tls_dir = value.into(), "--until" => until = value.clone(), _ => unreachable!(),
+                    "--config" => options.config = value.into(),
+                    "--tls" => options.tls = value.clone(),
+                    "--cert" => options.cert = Some(value.into()),
+                    "--key" => options.key = Some(value.into()),
+                    "--tls-dir" => options.tls_dir = value.into(),
+                    "--until" => until = value.clone(),
+                    _ => unreachable!(),
                 }
             }
             "--help" | "-h" => {
@@ -54,29 +67,41 @@ pub fn command(args: &[String]) -> Result<()> {
             bail!("usage: layr gateway token <project> --write|--gc [--until <duration>] [--config <file>]");
         }
         let project = &positional[1];
-        if !config::project_name(project) { bail!("invalid gateway project name"); }
+        if !config::project_name(project) {
+            bail!("invalid gateway project name");
+        }
         let token = auth::issue(gc, auth::duration(&until)?, auth::now())?;
         config::add_hash(&options.config, project, auth::hash(&token), gc)?;
         println!("{token}");
         return Ok(());
     }
-    if !positional.is_empty() || write || gc || until != "24h" { bail!("invalid gateway server arguments"); }
-    if rustix::process::geteuid().is_root() { bail!("layr gateway refuses to run as root; use a dedicated service user"); }
+    if !positional.is_empty() || write || gc || until != "24h" {
+        bail!("invalid gateway server arguments");
+    }
+    if rustix::process::geteuid().is_root() {
+        bail!("layr gateway refuses to run as root; use a dedicated service user");
+    }
     run(options)
 }
 
-fn run(_options: Options) -> Result<()> {
-    bail!("gateway server transport is under construction")
+fn run(options: Options) -> Result<()> {
+    let _ = tls::provider().as_ref().clone().install_default();
+    let storage = std::sync::Arc::new(aws::Aws::new(options.test_static)?);
+    serve(options, storage)
 }
 
 fn tls_config(options: &Options, config: &config::Config) -> Result<Option<std::sync::Arc<rustls::ServerConfig>>> {
     let (cert, key) = match options.tls.as_str() {
         "none" => {
-            if !config.listen.ip().is_loopback() { bail!("--tls none requires a loopback listen address"); }
+            if !config.listen.ip().is_loopback() {
+                bail!("--tls none requires a loopback listen address");
+            }
             return Ok(None);
         }
         "tailscale" => {
-            if !config.host.ends_with(".ts.net") { bail!("--tls tailscale requires a ts.net host"); }
+            if !config.host.ends_with(".ts.net") {
+                bail!("--tls tailscale requires a ts.net host");
+            }
             (options.tls_dir.join(format!("{}.crt", config.host)), options.tls_dir.join(format!("{}.key", config.host)))
         }
         "files" => {
@@ -91,17 +116,30 @@ fn tls_config(options: &Options, config: &config::Config) -> Result<Option<std::
 }
 
 fn allowed_address(ip: std::net::IpAddr) -> bool {
-    if ip.is_loopback() { return true; }
+    if ip.is_loopback() {
+        return true;
+    }
     match ip {
-        std::net::IpAddr::V4(ip) => { let b = ip.octets(); b[0] == 100 && (64..128).contains(&b[1]) }
+        std::net::IpAddr::V4(ip) => {
+            let b = ip.octets();
+            b[0] == 100 && (64..128).contains(&b[1])
+        }
         std::net::IpAddr::V6(ip) => ip.segments()[..3] == [0xfd7a, 0x115c, 0xa1e0],
     }
 }
 
-trait Wire: std::io::Read + std::io::Write { fn begin_response(&mut self, timeout: std::time::Duration); }
-impl Wire for crate::http::Socket { fn begin_response(&mut self, timeout: std::time::Duration) { self.begin_write(timeout); } }
+trait Wire: std::io::Read + std::io::Write {
+    fn begin_response(&mut self, timeout: std::time::Duration);
+}
+impl Wire for crate::http::Socket {
+    fn begin_response(&mut self, timeout: std::time::Duration) {
+        self.begin_write(timeout);
+    }
+}
 impl Wire for rustls::StreamOwned<rustls::ServerConnection, crate::http::Socket> {
-    fn begin_response(&mut self, timeout: std::time::Duration) { self.sock.begin_write(timeout); }
+    fn begin_response(&mut self, timeout: std::time::Duration) {
+        self.sock.begin_write(timeout);
+    }
 }
 
 fn answer<W: Wire>(stream: &mut W, gateway: &server::Gateway, limits: &crate::http::Limits) -> Result<()> {
@@ -115,38 +153,66 @@ fn answer<W: Wire>(stream: &mut W, gateway: &server::Gateway, limits: &crate::ht
 }
 
 fn serve(options: Options, storage: std::sync::Arc<dyn server::Storage>) -> Result<()> {
-    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
     use std::time::Duration;
     let file = Arc::new(config::ConfigFile::new(options.config.clone()));
     let config = file.get()?;
-    if !allowed_address(config.listen.ip()) { bail!("gateway listen must use a tailnet or loopback address"); }
+    if !allowed_address(config.listen.ip()) {
+        bail!("gateway listen must use a tailnet or loopback address");
+    }
     let tls = tls_config(&options, &config)?;
-    if options.test_static && (tls.is_some() || !config.listen.ip().is_loopback()) {
-        bail!("test credentials require --tls none on loopback");
+    if options.test_static && !config.listen.ip().is_loopback() {
+        bail!("test credentials require loopback");
     }
     let listener = std::net::TcpListener::bind(config.listen).context("bind gateway listen address")?;
-    let limits = crate::http::Limits { request_line: 4096, header_count: 64, header_bytes: 16 * 1024,
-        body_bytes: server::OBJECT_LIMIT, header_timeout: Duration::from_secs(15),
-        body_timeout: Duration::from_secs(120), write_timeout: Duration::from_secs(60) };
+    let limits = crate::http::Limits {
+        request_line: 4096,
+        header_count: 64,
+        header_bytes: 16 * 1024,
+        body_bytes: server::OBJECT_LIMIT,
+        header_timeout: Duration::from_secs(15),
+        body_timeout: Duration::from_secs(120),
+        write_timeout: Duration::from_secs(60),
+    };
     let gateway = Arc::new(server::Gateway { config: file, listen: config.listen, proof: auth::Proof::new(), storage });
     let active = Arc::new(AtomicUsize::new(0));
     eprintln!("layr gateway: listening on {}", config.listen);
     for incoming in listener.incoming() {
-        let stream = match incoming { Ok(stream) => stream, Err(error) => { eprintln!("layr gateway: accept failed: {error}"); continue; } };
-        if active.load(Ordering::Acquire) >= 4 { continue; }
-        limits.configure(&stream)?;
+        let stream = match incoming {
+            Ok(stream) => stream,
+            Err(error) => {
+                eprintln!("layr gateway: accept failed: {error}");
+                continue;
+            }
+        };
+        if active.load(Ordering::Acquire) >= 4 {
+            continue;
+        }
+        if let Err(error) = limits.configure(&stream) {
+            eprintln!("layr gateway: socket setup failed: {error}");
+            continue;
+        }
         active.fetch_add(1, Ordering::AcqRel);
         let (active, gateway, tls) = (active.clone(), gateway.clone(), tls.clone());
         std::thread::spawn(move || {
             struct Slot(Arc<AtomicUsize>);
-            impl Drop for Slot { fn drop(&mut self) { self.0.fetch_sub(1, Ordering::AcqRel); } }
+            impl Drop for Slot {
+                fn drop(&mut self) {
+                    self.0.fetch_sub(1, Ordering::AcqRel);
+                }
+            }
             let _slot = Slot(active);
             let _ = (|| -> Result<()> {
                 let mut socket = crate::http::Socket::new(stream, Duration::from_secs(10));
                 match tls {
                     Some(tls) => {
                         let mut connection = rustls::ServerConnection::new(tls)?;
-                        while connection.is_handshaking() { connection.complete_io(&mut socket)?; }
+                        while connection.is_handshaking() {
+                            connection.complete_io(&mut socket)?;
+                        }
                         socket.begin_read(limits.header_timeout + limits.body_timeout, limits.header_timeout);
                         let mut stream = rustls::StreamOwned::new(connection, socket);
                         answer(&mut stream, &gateway, &limits)
@@ -175,7 +241,14 @@ mod tests {
         }
         let mut config = config::sample();
         config.listen = "100.64.0.1:443".parse().unwrap();
-        let options = Options { config: "unused".into(), tls: "none".into(), cert: None, key: None, tls_dir: "unused".into(), test_static: false };
+        let options = Options {
+            config: "unused".into(),
+            tls: "none".into(),
+            cert: None,
+            key: None,
+            tls_dir: "unused".into(),
+            test_static: false,
+        };
         assert!(tls_config(&options, &config).is_err());
     }
 }
