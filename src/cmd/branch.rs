@@ -390,7 +390,7 @@ pub fn adopt(ctx: &Ctx, args: &[String]) -> Result<i32> {
             .db
             .line_states(&l.id, StateKind::Auto)?
             .into_iter()
-            .find(|s| repo.p.state_path(&s.id).exists())
+            .find(|s| repo.p.has_state(&s.id))
             .map(|s| s.id)
             .unwrap_or(l.head.clone()),
     };

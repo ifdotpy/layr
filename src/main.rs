@@ -56,6 +56,8 @@ mod store_remote;
 mod stream;
 #[allow(unsafe_code)]
 mod sys;
+#[cfg(target_os = "macos")]
+mod thin;
 mod trace;
 mod tree;
 

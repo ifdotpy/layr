@@ -209,7 +209,7 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options) -> Res
             }
         }
         let root = repo.state_root(&state.id)?;
-        let base_root = base.as_ref().map(|(id, _)| repo.p.state_path(id));
+        let base_root = base.as_ref().map(|(id, _)| repo.state_root(id)).transpose()?;
         let (pushed, files, bytes) = upload_state(
             store,
             &descriptor,

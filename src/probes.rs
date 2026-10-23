@@ -212,7 +212,7 @@ fn active_checks(repo: &Repo, input: &Input) -> Result<BTreeMap<String, (crate::
 
 pub fn source_status(repo: &Repo, input: &Input) -> &'static str {
     let missing = |repo: &Repo, id: &str| {
-        if repo.p.state_path(id).exists() {
+        if repo.p.has_state(id) {
             "available"
         } else if repo.p.db.state_flags(id).ok().flatten().map(|(_, deleted)| deleted).unwrap_or(false) {
             "source collected"

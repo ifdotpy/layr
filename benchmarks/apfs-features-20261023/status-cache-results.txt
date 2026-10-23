@@ -1,0 +1,7 @@
+/Volumes/layrt/wb-1792790711/store/projects/p/lines/main
+fast:  real 0.22 cpu 0.22  trace      0.0 ms  saved status used for 1 paths
+full:  real 1.32 cpu 1.28
+fast:  real 0.25 cpu 0.24  trace      0.0 ms  saved status used for 2 paths
+full:  real 1.39 cpu 1.35
+fast:  real 0.25 cpu 0.24  trace      0.0 ms  saved status used for 2 paths
+full:  real 1.31 cpu 1.29

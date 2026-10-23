@@ -334,7 +334,7 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
         if !wanted(&state, opts) && !required.contains(&id) {
             continue;
         }
-        if repo.p.state_path(&id).exists() {
+        if repo.p.has_state(&id) {
             repo.p.db.set_present(&id, true)?;
             continue;
         }

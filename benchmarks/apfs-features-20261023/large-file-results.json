@@ -1,0 +1,16 @@
+{
+ "before": {
+  "status --porcelain": 0.905,
+  "diff --stat": 0.633,
+  "add -A": 0.631,
+  "commit -qm c": 0.65,
+  "diff --stat HEAD~1 HEAD": 0.601
+ },
+ "after": {
+  "status --porcelain": 0.025,
+  "diff --stat": 0.025,
+  "add -A": 0.029,
+  "commit -qm c": 0.024,
+  "diff --stat HEAD~1 HEAD": 0.019
+ }
+}

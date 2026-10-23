@@ -1,0 +1,783 @@
+{
+  "backend": "apfs",
+  "platform": "macOS-27.2-arm64-arm-64bit-Mach-O",
+  "binary_sha256": "831a21dba2d18a8f96a8f290c36238ffb40de8f0950bb66db21d34863551b211",
+  "branches": 16,
+  "cases": [
+    {
+      "case": "empty-files",
+      "trial": 0,
+      "files": 10000,
+      "file_bytes": 0,
+      "large_bytes": 0,
+      "source_sha256": "daeaa5716fbada555f86195d19c2341919daee06a13cd9485e86a083df80487d",
+      "large_sha256": null,
+      "samples": [
+        {
+          "phase": "main",
+          "branches": 0,
+          "used_bytes": 32309248,
+          "samples": [
+            32309248,
+            32309248,
+            32309248
+          ],
+          "raw": [],
+          "above_empty_bytes": 5910528
+        },
+        {
+          "phase": "branches",
+          "branches": 1,
+          "used_bytes": 35155968,
+          "samples": [
+            35155968,
+            35155968,
+            35155968
+          ],
+          "raw": [],
+          "above_empty_bytes": 8757248
+        },
+        {
+          "phase": "branches",
+          "branches": 4,
+          "used_bytes": 43692032,
+          "samples": [
+            43692032,
+            43692032,
+            43692032
+          ],
+          "raw": [],
+          "above_empty_bytes": 17293312
+        },
+        {
+          "phase": "branches",
+          "branches": 8,
+          "used_bytes": 55070720,
+          "samples": [
+            55070720,
+            55070720,
+            55070720
+          ],
+          "raw": [],
+          "above_empty_bytes": 28672000
+        },
+        {
+          "phase": "branches",
+          "branches": 16,
+          "used_bytes": 77819904,
+          "samples": [
+            77815808,
+            77819904,
+            77856768
+          ],
+          "raw": [],
+          "above_empty_bytes": 51421184
+        },
+        {
+          "phase": "commits",
+          "branches": 1,
+          "used_bytes": 77897728,
+          "samples": [
+            77881344,
+            77901824,
+            77897728
+          ],
+          "raw": [],
+          "above_empty_bytes": 51499008
+        },
+        {
+          "phase": "commits",
+          "branches": 4,
+          "used_bytes": 78069760,
+          "samples": [
+            78069760,
+            78069760,
+            78069760
+          ],
+          "raw": [],
+          "above_empty_bytes": 51671040
+        },
+        {
+          "phase": "commits",
+          "branches": 8,
+          "used_bytes": 78331904,
+          "samples": [
+            78319616,
+            78721024,
+            78331904
+          ],
+          "raw": [],
+          "above_empty_bytes": 51933184
+        },
+        {
+          "phase": "commits",
+          "branches": 16,
+          "used_bytes": 78843904,
+          "samples": [
+            78917632,
+            78843904,
+            78843904
+          ],
+          "raw": [],
+          "above_empty_bytes": 52445184
+        }
+      ],
+      "verified": true,
+      "empty": {
+        "used_bytes": 26398720,
+        "samples": [
+          26398720,
+          26398720,
+          26398720
+        ],
+        "raw": []
+      }
+    },
+    {
+      "case": "empty-files",
+      "trial": 1,
+      "files": 10000,
+      "file_bytes": 0,
+      "large_bytes": 0,
+      "source_sha256": "daeaa5716fbada555f86195d19c2341919daee06a13cd9485e86a083df80487d",
+      "large_sha256": null,
+      "samples": [
+        {
+          "phase": "main",
+          "branches": 0,
+          "used_bytes": 32317440,
+          "samples": [
+            32317440,
+            32317440,
+            32317440
+          ],
+          "raw": [],
+          "above_empty_bytes": 5918720
+        },
+        {
+          "phase": "branches",
+          "branches": 1,
+          "used_bytes": 35160064,
+          "samples": [
+            35160064,
+            35160064,
+            35160064
+          ],
+          "raw": [],
+          "above_empty_bytes": 8761344
+        },
+        {
+          "phase": "branches",
+          "branches": 4,
+          "used_bytes": 43700224,
+          "samples": [
+            43700224,
+            43700224,
+            43700224
+          ],
+          "raw": [],
+          "above_empty_bytes": 17301504
+        },
+        {
+          "phase": "branches",
+          "branches": 8,
+          "used_bytes": 55074816,
+          "samples": [
+            55074816,
+            55074816,
+            55074816
+          ],
+          "raw": [],
+          "above_empty_bytes": 28676096
+        },
+        {
+          "phase": "branches",
+          "branches": 16,
+          "used_bytes": 77844480,
+          "samples": [
+            77819904,
+            77844480,
+            77946880
+          ],
+          "raw": [],
+          "above_empty_bytes": 51445760
+        },
+        {
+          "phase": "commits",
+          "branches": 1,
+          "used_bytes": 77991936,
+          "samples": [
+            78065664,
+            77914112,
+            77991936
+          ],
+          "raw": [],
+          "above_empty_bytes": 51593216
+        },
+        {
+          "phase": "commits",
+          "branches": 4,
+          "used_bytes": 78073856,
+          "samples": [
+            78069760,
+            78073856,
+            78123008
+          ],
+          "raw": [],
+          "above_empty_bytes": 51675136
+        },
+        {
+          "phase": "commits",
+          "branches": 8,
+          "used_bytes": 78327808,
+          "samples": [
+            78323712,
+            78475264,
+            78327808
+          ],
+          "raw": [],
+          "above_empty_bytes": 51929088
+        },
+        {
+          "phase": "commits",
+          "branches": 16,
+          "used_bytes": 78823424,
+          "samples": [
+            78823424,
+            78823424,
+            78823424
+          ],
+          "raw": [],
+          "above_empty_bytes": 52424704
+        }
+      ],
+      "verified": true,
+      "empty": {
+        "used_bytes": 26398720,
+        "samples": [
+          26398720,
+          26398720,
+          26398720
+        ],
+        "raw": []
+      }
+    },
+    {
+      "case": "small-files",
+      "trial": 0,
+      "files": 10000,
+      "file_bytes": 4096,
+      "large_bytes": 0,
+      "source_sha256": "9ea0eefad42eb4b003697b7230aca6875c57159c93e73939e5b1c4fd3c9ea670",
+      "large_sha256": null,
+      "samples": [
+        {
+          "phase": "main",
+          "branches": 0,
+          "used_bytes": 75661312,
+          "samples": [
+            75661312,
+            75661312,
+            75661312
+          ],
+          "raw": [],
+          "above_empty_bytes": 49262592
+        },
+        {
+          "phase": "branches",
+          "branches": 1,
+          "used_bytes": 78970880,
+          "samples": [
+            78970880,
+            78970880,
+            78970880
+          ],
+          "raw": [],
+          "above_empty_bytes": 52572160
+        },
+        {
+          "phase": "branches",
+          "branches": 4,
+          "used_bytes": 88911872,
+          "samples": [
+            88911872,
+            88911872,
+            88911872
+          ],
+          "raw": [],
+          "above_empty_bytes": 62513152
+        },
+        {
+          "phase": "branches",
+          "branches": 8,
+          "used_bytes": 102166528,
+          "samples": [
+            102166528,
+            102166528,
+            102166528
+          ],
+          "raw": [],
+          "above_empty_bytes": 75767808
+        },
+        {
+          "phase": "branches",
+          "branches": 16,
+          "used_bytes": 128679936,
+          "samples": [
+            128679936,
+            128679936,
+            128679936
+          ],
+          "raw": [],
+          "above_empty_bytes": 102281216
+        },
+        {
+          "phase": "commits",
+          "branches": 1,
+          "used_bytes": 128724992,
+          "samples": [
+            128724992,
+            128724992,
+            128724992
+          ],
+          "raw": [],
+          "above_empty_bytes": 102326272
+        },
+        {
+          "phase": "commits",
+          "branches": 4,
+          "used_bytes": 128872448,
+          "samples": [
+            128880640,
+            128872448,
+            128872448
+          ],
+          "raw": [],
+          "above_empty_bytes": 102473728
+        },
+        {
+          "phase": "commits",
+          "branches": 8,
+          "used_bytes": 129052672,
+          "samples": [
+            129052672,
+            129052672,
+            129052672
+          ],
+          "raw": [],
+          "above_empty_bytes": 102653952
+        },
+        {
+          "phase": "commits",
+          "branches": 16,
+          "used_bytes": 129437696,
+          "samples": [
+            129437696,
+            129437696,
+            129437696
+          ],
+          "raw": [],
+          "above_empty_bytes": 103038976
+        }
+      ],
+      "verified": true,
+      "empty": {
+        "used_bytes": 26398720,
+        "samples": [
+          26398720,
+          26398720,
+          26398720
+        ],
+        "raw": []
+      }
+    },
+    {
+      "case": "small-files",
+      "trial": 1,
+      "files": 10000,
+      "file_bytes": 4096,
+      "large_bytes": 0,
+      "source_sha256": "9ea0eefad42eb4b003697b7230aca6875c57159c93e73939e5b1c4fd3c9ea670",
+      "large_sha256": null,
+      "samples": [
+        {
+          "phase": "main",
+          "branches": 0,
+          "used_bytes": 75653120,
+          "samples": [
+            75653120,
+            75653120,
+            75653120
+          ],
+          "raw": [],
+          "above_empty_bytes": 49254400
+        },
+        {
+          "phase": "branches",
+          "branches": 1,
+          "used_bytes": 78962688,
+          "samples": [
+            78962688,
+            78962688,
+            78962688
+          ],
+          "raw": [],
+          "above_empty_bytes": 52563968
+        },
+        {
+          "phase": "branches",
+          "branches": 4,
+          "used_bytes": 88903680,
+          "samples": [
+            88903680,
+            88903680,
+            88903680
+          ],
+          "raw": [],
+          "above_empty_bytes": 62504960
+        },
+        {
+          "phase": "branches",
+          "branches": 8,
+          "used_bytes": 102150144,
+          "samples": [
+            102150144,
+            102150144,
+            102150144
+          ],
+          "raw": [],
+          "above_empty_bytes": 75751424
+        },
+        {
+          "phase": "branches",
+          "branches": 16,
+          "used_bytes": 128667648,
+          "samples": [
+            128667648,
+            128667648,
+            128667648
+          ],
+          "raw": [],
+          "above_empty_bytes": 102268928
+        },
+        {
+          "phase": "commits",
+          "branches": 1,
+          "used_bytes": 128720896,
+          "samples": [
+            128720896,
+            128720896,
+            128720896
+          ],
+          "raw": [],
+          "above_empty_bytes": 102322176
+        },
+        {
+          "phase": "commits",
+          "branches": 4,
+          "used_bytes": 128876544,
+          "samples": [
+            128876544,
+            128876544,
+            128876544
+          ],
+          "raw": [],
+          "above_empty_bytes": 102477824
+        },
+        {
+          "phase": "commits",
+          "branches": 8,
+          "used_bytes": 129064960,
+          "samples": [
+            129064960,
+            129064960,
+            129064960
+          ],
+          "raw": [],
+          "above_empty_bytes": 102666240
+        },
+        {
+          "phase": "commits",
+          "branches": 16,
+          "used_bytes": 129445888,
+          "samples": [
+            129441792,
+            129462272,
+            129445888
+          ],
+          "raw": [],
+          "above_empty_bytes": 103047168
+        }
+      ],
+      "verified": true,
+      "empty": {
+        "used_bytes": 26398720,
+        "samples": [
+          26398720,
+          26398720,
+          26398720
+        ],
+        "raw": []
+      }
+    },
+    {
+      "case": "large-file",
+      "trial": 0,
+      "files": 1000,
+      "file_bytes": 4096,
+      "large_bytes": 1073741824,
+      "source_sha256": "5e0c9785f0cba85411764d4b10c8e62945ee4e0bc3bdb1f1a883efe3d5a43386",
+      "large_sha256": "dfe471633d4098eedbcb608601a0b1585a237513f30e789004d2db908f8c01b3",
+      "samples": [
+        {
+          "phase": "main",
+          "branches": 0,
+          "used_bytes": 1119969280,
+          "samples": [
+            1119969280,
+            1119969280,
+            1119969280
+          ],
+          "raw": [],
+          "above_empty_bytes": 1093570560
+        },
+        {
+          "phase": "branches",
+          "branches": 1,
+          "used_bytes": 1120301056,
+          "samples": [
+            1120301056,
+            1120301056,
+            1120301056
+          ],
+          "raw": [],
+          "above_empty_bytes": 1093902336
+        },
+        {
+          "phase": "branches",
+          "branches": 4,
+          "used_bytes": 1121300480,
+          "samples": [
+            1121300480,
+            1121300480,
+            1121300480
+          ],
+          "raw": [],
+          "above_empty_bytes": 1094901760
+        },
+        {
+          "phase": "branches",
+          "branches": 8,
+          "used_bytes": 1122635776,
+          "samples": [
+            1122635776,
+            1122635776,
+            1122635776
+          ],
+          "raw": [],
+          "above_empty_bytes": 1096237056
+        },
+        {
+          "phase": "branches",
+          "branches": 16,
+          "used_bytes": 1125306368,
+          "samples": [
+            1125306368,
+            1125306368,
+            1125306368
+          ],
+          "raw": [],
+          "above_empty_bytes": 1098907648
+        },
+        {
+          "phase": "commits",
+          "branches": 1,
+          "used_bytes": 1125367808,
+          "samples": [
+            1125367808,
+            1125367808,
+            1125367808
+          ],
+          "raw": [],
+          "above_empty_bytes": 1098969088
+        },
+        {
+          "phase": "commits",
+          "branches": 4,
+          "used_bytes": 1125564416,
+          "samples": [
+            1125564416,
+            1125564416,
+            1125564416
+          ],
+          "raw": [],
+          "above_empty_bytes": 1099165696
+        },
+        {
+          "phase": "commits",
+          "branches": 8,
+          "used_bytes": 1125826560,
+          "samples": [
+            1125826560,
+            1125826560,
+            1125826560
+          ],
+          "raw": [],
+          "above_empty_bytes": 1099427840
+        },
+        {
+          "phase": "commits",
+          "branches": 16,
+          "used_bytes": 1126354944,
+          "samples": [
+            1126354944,
+            1126354944,
+            1126354944
+          ],
+          "raw": [],
+          "above_empty_bytes": 1099956224
+        }
+      ],
+      "verified": true,
+      "empty": {
+        "used_bytes": 26398720,
+        "samples": [
+          26398720,
+          26398720,
+          26398720
+        ],
+        "raw": []
+      }
+    },
+    {
+      "case": "large-file",
+      "trial": 1,
+      "files": 1000,
+      "file_bytes": 4096,
+      "large_bytes": 1073741824,
+      "source_sha256": "5e0c9785f0cba85411764d4b10c8e62945ee4e0bc3bdb1f1a883efe3d5a43386",
+      "large_sha256": "dfe471633d4098eedbcb608601a0b1585a237513f30e789004d2db908f8c01b3",
+      "samples": [
+        {
+          "phase": "main",
+          "branches": 0,
+          "used_bytes": 1117913088,
+          "samples": [
+            1117913088,
+            1117913088,
+            1117913088
+          ],
+          "raw": [],
+          "above_empty_bytes": 1091514368
+        },
+        {
+          "phase": "branches",
+          "branches": 1,
+          "used_bytes": 1118244864,
+          "samples": [
+            1118244864,
+            1118244864,
+            1118244864
+          ],
+          "raw": [],
+          "above_empty_bytes": 1091846144
+        },
+        {
+          "phase": "branches",
+          "branches": 4,
+          "used_bytes": 1119244288,
+          "samples": [
+            1119244288,
+            1119244288,
+            1119244288
+          ],
+          "raw": [],
+          "above_empty_bytes": 1092845568
+        },
+        {
+          "phase": "branches",
+          "branches": 8,
+          "used_bytes": 1120579584,
+          "samples": [
+            1120579584,
+            1120579584,
+            1120579584
+          ],
+          "raw": [],
+          "above_empty_bytes": 1094180864
+        },
+        {
+          "phase": "branches",
+          "branches": 16,
+          "used_bytes": 1123250176,
+          "samples": [
+            1123250176,
+            1123250176,
+            1123250176
+          ],
+          "raw": [],
+          "above_empty_bytes": 1096851456
+        },
+        {
+          "phase": "commits",
+          "branches": 1,
+          "used_bytes": 1123307520,
+          "samples": [
+            1123307520,
+            1123307520,
+            1123307520
+          ],
+          "raw": [],
+          "above_empty_bytes": 1096908800
+        },
+        {
+          "phase": "commits",
+          "branches": 4,
+          "used_bytes": 1123508224,
+          "samples": [
+            1123508224,
+            1123508224,
+            1123508224
+          ],
+          "raw": [],
+          "above_empty_bytes": 1097109504
+        },
+        {
+          "phase": "commits",
+          "branches": 8,
+          "used_bytes": 1123770368,
+          "samples": [
+            1123770368,
+            1123770368,
+            1123770368
+          ],
+          "raw": [],
+          "above_empty_bytes": 1097371648
+        },
+        {
+          "phase": "commits",
+          "branches": 16,
+          "used_bytes": 1124298752,
+          "samples": [
+            1124298752,
+            1124298752,
+            1124298752
+          ],
+          "raw": [],
+          "above_empty_bytes": 1097900032
+        }
+      ],
+      "verified": true,
+      "empty": {
+        "used_bytes": 26398720,
+        "samples": [
+          26398720,
+          26398720,
+          26398720
+        ],
+        "raw": []
+      }
+    }
+  ],
+  "complete": true
+}
