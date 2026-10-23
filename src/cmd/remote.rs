@@ -690,6 +690,10 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
             store.configure(ctx, &store_remote::ConfigureOptions::default())?;
             let report =
                 if op == "push" { store.push(ctx, &mut h.repo, &opts)? } else { store.fetch(ctx, &mut h.repo, &opts)? };
+            if !report.missing_lines.is_empty() {
+                print_store_report(ctx, &report, op, a.has("--json"), a.has("-q"))?;
+                return Ok(2);
+            }
             if op != "pull" || !a.has("--json") {
                 print_store_report(ctx, &report, op, a.has("--json"), a.has("-q"))?;
             }
@@ -750,6 +754,11 @@ fn print_store_report(ctx: &Ctx, report: &store_remote::Report, op: &str, json_o
             outln!(ctx, "overlapping record segments: {}", report.overlaps);
         }
     }
+    if !json_output {
+        for line in &report.missing_lines {
+            outln!(ctx, "{line}");
+        }
+    }
     Ok(())
 }
 
@@ -781,7 +790,7 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
     // Remove a new project if store open or clone fails.
     let p = crate::store::Project::create_empty(&ctx.store, &name)?;
     let mut repo = Repo { p };
-    let result = (|| -> Result<()> {
+    let result = (|| -> Result<i32> {
         let mut store = store_remote::open(url, &repo)?;
         store.configure(ctx, &store_remote::ConfigureOptions::default())?;
         let opts = store_remote::Options {
@@ -793,15 +802,14 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let _lock = repo.p.lock()?;
         set_config(ctx, &repo, "cloud.remote.origin.url", json!(url))?;
         print_store_report(ctx, &report, "clone", a.has("--json"), a.has("-q"))?;
-        Ok(())
+        Ok(if report.missing_lines.is_empty() { 0 } else { 2 })
     })();
     if result.is_err() {
         let dir = repo.p.dir.clone();
         drop(repo);
         let _ = crate::storage::delete_tree(&dir);
     }
-    result?;
-    Ok(0)
+    result
 }
 
 use crate::store_remote;

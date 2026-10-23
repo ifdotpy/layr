@@ -55,7 +55,7 @@ UTF8("layr/store/v2/tree") || 0x00 || canonical(header without sig) || 0x0a || c
 The machine key comes from its first signed record, as in peer replication.
 Records retain their existing signatures over their exact record bytes. Segments do not rewrite records.
 New record fields, refs, and attestations travel inside these records without a separate store format.
-Live refs require their target states and ancestors, including Auto states without `--auto`.
+Live line heads and live refs require their target states and ancestors, including Auto states without `--auto`.
 Cache states require `--caches`, even when a live ref targets them. An omitted target is named in the report.
 Derived states travel as ordinary states.
 Readers validate the contiguous sequence prefix, project identity, signatures, and local trust before they import records.
@@ -65,6 +65,11 @@ State IDs are existing canonical UUIDs. They are not ciphertext hashes.
 The design removes RFC HMAC object names, HKDF naming keys, manifests, and CAS refs.
 The signed record log carries parents, changes, refs, and attestations.
 The immutable tree header authenticates each state representation.
+
+A clone creates working folders only for available line heads. Missing heads appear in `missing_lines`.
+The clone retains its project and returns status 2 when some heads are absent.
+A later fetch creates the pending working folders when their verified state trees become available.
+It preserves existing working folders and their edits.
 
 ## Keys and recovery
 

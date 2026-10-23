@@ -35,6 +35,7 @@ pub struct Report {
     pub omitted: Vec<String>,
     pub overlaps: usize,
     pub gaps: Vec<String>,
+    pub missing_lines: Vec<String>,
 }
 
 #[derive(Default)]
@@ -193,7 +194,13 @@ impl Store {
         if self.backend.get("vault.json")?.is_some() && self.backend.get("store.json")?.is_none() {
             bail!("Desk v1 is read only; use layr clone with LAYR_PAPER_KEY_FILE");
         }
-        reader::fetch(self, ctx, repo, opts)
+        let mut report = reader::fetch(self, ctx, repo, opts)?;
+        let pending = self.dir.join("pending-lines.json");
+        if pending.exists() {
+            let ids: std::collections::BTreeSet<String> = serde_json::from_slice(&std::fs::read(pending)?)?;
+            report.missing_lines = self.materialize_clone_lines(ctx, repo, Some(&ids))?;
+        }
+        Ok(report)
     }
 
     pub fn clone_into(&mut self, ctx: &Ctx, repo: &mut Repo, opts: &Options) -> Result<Report> {
@@ -201,14 +208,36 @@ impl Store {
         if !repo.p.id.is_empty() {
             bail!("clone needs an empty project");
         }
-        let report = if self.backend.get("store.json")?.is_none() && self.backend.get("vault.json")?.is_some() {
+        let mut report = if self.backend.get("store.json")?.is_none() && self.backend.get("vault.json")?.is_some() {
             legacy::import(self, ctx, repo, opts)?
         } else {
             reader::fetch(self, ctx, repo, opts)?
         };
+        report.missing_lines = self.materialize_clone_lines(ctx, repo, None)?;
+        Ok(report)
+    }
+
+    fn materialize_clone_lines(
+        &self,
+        ctx: &Ctx,
+        repo: &mut Repo,
+        only: Option<&std::collections::BTreeSet<String>>,
+    ) -> Result<Vec<String>> {
+        self.private_dir()?;
+        let _lock = repo.p.lock()?;
         let lines = repo.p.db.lines()?;
+        let mut pending = Vec::new();
+        let mut missing = Vec::new();
         for line in lines {
+            if only.is_some_and(|ids| !ids.contains(&line.id)) {
+                continue;
+            }
             if !repo.p.state_path(&line.head).exists() {
+                pending.push(line.id.clone());
+                missing.push(format!(
+                    "line {}: head state {} is not in the store yet; run `layr fetch <remote>` later",
+                    line.name, line.head
+                ));
                 continue;
             }
             let local = crate::model::Line { machine: repo.p.store.machine.id.clone(), owner: ctx.caller.uid, ..line.clone() };
@@ -227,7 +256,8 @@ impl Store {
                 repo.commit_record(ctx, record)?;
             }
         }
-        Ok(report)
+        crate::fsutil::atomic_write(&self.dir.join("pending-lines.json"), &serde_json::to_vec(&pending)?, 0o600)?;
+        Ok(missing)
     }
 
     pub fn verify(&self, files: bool) -> Result<Report> {

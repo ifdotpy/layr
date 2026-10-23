@@ -1049,6 +1049,8 @@ The part target is 16 MiB. A larger frame has a separate part, same as Desk v1.
 
 The store keeps complete states and records. Remote garbage collection removes only incomplete data attempts older than 24 hours.
 A retry uses a new state attempt. Record retries preserve the signed bytes.
+If a push stops before a line head is complete, clone reports the missing line and returns status 2.
+The project keeps its available lines. Run `layr fetch origin` later to create the missing working folders.
 Private overlay files stay local. Legacy cache layer snapshots require a peer remote.
 The `--caches` option sends states of kind `cache`.
 

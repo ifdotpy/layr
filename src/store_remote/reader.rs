@@ -269,6 +269,9 @@ pub(super) fn state_ancestry(repo: &Repo, id: &str) -> Result<Vec<String>> {
 
 pub(super) fn required_states(repo: &Repo, lines: &[String], opts: &Options) -> Result<BTreeSet<String>> {
     let mut required = deletion_dependencies(lines)?;
+    for line in repo.p.db.lines()? {
+        required.extend(state_ancestry(repo, &line.head)?);
+    }
     for reference in repo.p.db.refs("", crate::ids::now_ms())? {
         let state = repo.state(&reference.target)?;
         if state.kind == crate::model::StateKind::Cache && !opts.caches {
