@@ -111,6 +111,50 @@ QUIET=$(l rev-parse HEAD)
 l probe run "$QUIET" --probe metric >/dev/null
 NOISE=$(l probe diff "$BASE" "$QUIET" --json)
 ok "the noise threshold suppresses a four-percent metric change" python3 -c 'import json,sys; r=next(r for r in json.loads(sys.argv[1])["probes"] if r["probe"]=="metric"); assert r["status"]=="unchanged" and not r["changes"]' "$NOISE"
+# Exact shared views are valid probe inputs; private layers cannot enter shared outputs.
+l restore value.txt
+l overlay create private -q
+l overlay use private -q
+PRIVATE_VIEW=$(l view save --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["view_id"])')
+PRIVATE_ERROR=$(l probe run "views/$PRIVATE_VIEW" --probe files 2>&1 || true)
+has "private view output refusal names the overlay" "private overlay 'private'" "$PRIVATE_ERROR"
+l overlay create public --readers '*' -q
+l overlay use public -q
+printf 'view\n' > value.txt
+l overlay move public value.txt
+l add -A
+l commit -qm view-config
+VIEW_STATE=$(l rev-parse HEAD)
+VIEW_CHANGE=$(l change list --json | python3 -c 'import json,sys; print(next(r["change_id"] for r in json.load(sys.stdin) if r["message"]=="view-config"))')
+VIEW=$(l view save --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["view_id"])')
+VIEW_RUN=$(l probe run "views/$VIEW" --probe files --json)
+VIEW_OUTPUT=$(python3 -c 'import json,sys; r=json.loads(sys.argv[1])[0]; assert r["subject"]=={"kind":"view","id":sys.argv[2]}; print(r["output_state"])' "$VIEW_RUN" "$VIEW")
+eq "the probe sees files from the exact overlay state" 'view' "$(cat "$LAYR_ROOT/projects/probes/states/$VIEW_OUTPUT/out/files/text")"
+ok "view output provenance contains the exact ViewId" python3 -c 'import json,sqlite3,sys; d=sqlite3.connect(sys.argv[1]); s=json.loads(d.execute("select rec from states where id=?",(sys.argv[2],)).fetchone()[0]); assert s["derived_from"]==sys.argv[3] and s["kind"]=="derived"' "$LAYR_ROOT/projects/probes/meta/db/layr.sqlite" "$VIEW_OUTPUT" "$VIEW"
+printf 'later\n' > value.txt
+l probe run "views/$VIEW" --probe structured --json >/dev/null
+VIEW_DIFF=$(l probe diff "views/$VIEW" "views/$VIEW" --json)
+ok "an exact view remains independent of working overlay edits" python3 -c 'import json,sys; r=next(r for r in json.loads(sys.argv[1])["probes"] if r["probe"]=="files"); assert r["status"]=="unchanged"' "$VIEW_DIFF"
+VIEW_SHOW=$(l change show "$VIEW_CHANGE" --json)
+ok "change show lists view results instead of selecting a view" python3 -c 'import json,sys; b=json.loads(sys.argv[1])["behavior"]; assert sys.argv[2] in b["head_views"]' "$VIEW_SHOW" "$VIEW"
+has "human change show gives the explicit view diff command" 'use layr probe diff views/<a> views/<b>' "$(l change show "$VIEW_CHANGE")"
+# A ViewId is provenance, not a source retention root.
+l config retention.auto 0
+l config retention.hours 0
+l config undo.days 0
+printf 'collect me\n' > source-only.txt
+l save -q
+AUTO=$(l rev-parse 'HEAD@{0}')
+l reset --hard "$AUTO" >/dev/null
+COLLECT_VIEW=$(l view save --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["view_id"])')
+l probe run "views/$COLLECT_VIEW" --probe files --json >/dev/null
+l reset --hard "$VIEW_STATE" >/dev/null
+l gc -q
+no "probe ViewId provenance does not retain source snapshots" l show "$AUTO":source-only.txt
+COLLECTED=$(l probe diff "views/$COLLECT_VIEW" "views/$COLLECT_VIEW" --json)
+ok "stored outputs still compare after source collection" python3 -c 'import json,sys; b=json.loads(sys.argv[1]); assert b["base_source"]==b["head_source"]=="source collected"; assert next(r for r in b["probes"] if r["probe"]=="files")["status"]=="unchanged"; assert next(r for r in b["probes"] if r["probe"]=="identity")["status"]=="not run"' "$COLLECTED"
+COLLECT_ERROR=$(l probe run "views/$COLLECT_VIEW" --probe identity 2>&1 || true)
+has "an absent result reports its collected source" 'source collected' "$COLLECT_ERROR"
 # The daemon runs repository code with the requesting user's identity.
 id layr-probe-user >/dev/null 2>&1 || useradd -m layr-probe-user
 l access grant layr-probe-user reader
@@ -122,9 +166,10 @@ export LAYR_SOCKET="$T/layr.sock"
 DPID=$!
 trap 'kill ${DPID:-} 2>/dev/null || true; cleanup' EXIT
 for i in $(seq 1 100); do [ -S "$LAYR_SOCKET" ] && break; sleep .1; done
-IDENTITY=$(runuser -u layr-probe-user -- env LAYR_SOCKET="$LAYR_SOCKET" PROBE_TOKEN=must-not-leak "$T/layr" --project probes --line main probe run main --probe identity --json)
+as_probe_reader() { (cd / && runuser -u layr-probe-user -- env LAYR_SOCKET="$LAYR_SOCKET" PROBE_TOKEN=must-not-leak "$T/layr" --project probes --line main "$@"); }
+IDENTITY=$(as_probe_reader probe run main --probe identity --json)
 OUTPUT=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])[0]["output_state"])' "$IDENTITY")
 eq "the probe runs as the requesting reader" "$(id -u layr-probe-user)" "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["uid"])' "$LAYR_ROOT/projects/probes/states/$OUTPUT/out/uid.json")"
 l access deny layr-probe-user try
-no "the try access rule also applies to stored probe reuse" runuser -u layr-probe-user -- env LAYR_SOCKET="$LAYR_SOCKET" "$T/layr" --project probes --line main probe run main --probe identity --json
+no "the try access rule also applies to stored probe reuse" as_probe_reader probe run main --probe identity --json
 finish

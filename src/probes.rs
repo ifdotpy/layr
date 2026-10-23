@@ -93,7 +93,15 @@ fn readers_cover(project: &crate::access::Policy, overlay: &crate::access::Polic
         .all(|(principal, _)| everyone || overlay.access.get(principal).copied().unwrap_or(Role::None) >= Role::Reader)
 }
 fn shared_outputs(repo: &Repo, layers: &[crate::overlay::Layer]) -> Result<()> {
-    let project = crate::access::Policy::load(&repo.p);
+    let mut project = crate::access::Policy::load(&repo.p);
+    // Repo::can_read also permits line owners, even without a reader role.
+    for line in repo.p.db.lines()? {
+        project
+            .access
+            .entry(format!("user:{}", line.owner))
+            .and_modify(|role| *role = (*role).max(crate::access::Role::Reader))
+            .or_insert(crate::access::Role::Reader);
+    }
     for layer in layers {
         let overlay = repo.overlay_project(&layer.overlay)?;
         if !readers_cover(&project, &crate::access::Policy::load(&overlay)) {
