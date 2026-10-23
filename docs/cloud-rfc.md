@@ -902,7 +902,21 @@ Execution и approval не являются отдельными вызовам�
 
 **Первый шаг перед удалением старой команды копии:** проверить в коде Layr, что `sync` не распространяет удаление линий и что `gc` не удаляет states на других машинах. Если это не так, сначала исправить, а потом удалять её.
 
-**Не переименовывать:** `status`, `diff`, `add`, `commit`, `branch`, `switch`, `merge`, `log`, `stash` и другие git-глаголы с тем же смыслом. `branch` не становится `line`, хотя в Layr это линия.
+**Решение 23.10.2026 (заменяет прежнее правило «git-глаголы остаются»): жаргон git не используется.** Общие слова остаются: `status`, `diff`, `log`, `merge`, `remote`, `push`, `pull`, `fetch`, `clone`, `add`, `rm`, `mv`, `tag`. Жаргон git переименован:
+
+| Было | Стало |
+|---|---|
+| `branch` | `line` (`layr line new <name> [<rev>] [--count N]`, `line list`, `line delete`, `line rename`) |
+| `commit` (команда) | `save -m <message>` (`-a`, `--amend` как раньше); `save` без `-m` делает auto state, как раньше |
+| commit (слово в выводе и docs) | state |
+| `HEAD` | `head` (`head~1`, `head^2`) |
+| `checkout`, `switch` | удалены: line является папкой; ошибка объясняет это |
+| `stash` | `park` (`park list/show/pop/apply/drop/clear`, `park@{n}`) |
+| `cherry-pick` | `pick` |
+| `rebase` | `replay` |
+| `revert` | `invert` |
+
+Git bridge (`layr git …`) сохраняет слова git. Старые имена отвечают ошибкой с новым именем, алиасов нет (правило выше).
 
 **Затронутые вызовы:** layr-agent в Studio, инструменты Attar, документация Layr и Desk, скрипты внешних участников. Перед изменением составить полный список вызовов и обновить их в том же изменении.
 
