@@ -924,6 +924,9 @@ fn prune_caches(repo: &Repo) -> Result<Vec<String>> {
 }
 
 pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    if args.iter().any(|v| v == "--remote" || v.starts_with("--remote=")) {
+        return crate::store_remote::command(ctx, "gc", args);
+    }
     let spec = Spec::new().flag("-n|--dry-run").flag("-q|--quiet");
     let a = parse(&spec, args)?;
     let h = here(ctx)?;
@@ -940,6 +943,9 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
 }
 
 pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    if args.iter().any(|v| v == "--remote" || v.starts_with("--remote=")) {
+        return crate::store_remote::command(ctx, "fsck", args);
+    }
     let spec = Spec::new().flag("--repair");
     let a = parse(&spec, args)?;
     let h = here(ctx)?;

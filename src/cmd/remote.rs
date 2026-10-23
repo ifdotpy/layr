@@ -690,6 +690,10 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
             store.configure(ctx, &store_remote::ConfigureOptions::default())?;
             let report =
                 if op == "push" { store.push(ctx, &mut h.repo, &opts)? } else { store.fetch(ctx, &mut h.repo, &opts)? };
+            if !report.missing_lines.is_empty() {
+                print_store_report(ctx, &report, op, a.has("--json"), a.has("-q"))?;
+                return Ok(2);
+            }
             if op != "pull" || !a.has("--json") {
                 print_store_report(ctx, &report, op, a.has("--json"), a.has("-q"))?;
             }
@@ -750,6 +754,11 @@ fn print_store_report(ctx: &Ctx, report: &store_remote::Report, op: &str, json_o
             outln!(ctx, "overlapping record segments: {}", report.overlaps);
         }
     }
+    if !json_output {
+        for line in &report.missing_lines {
+            outln!(ctx, "{line}");
+        }
+    }
     Ok(())
 }
 
@@ -781,7 +790,7 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
     // Remove a new project if store open or clone fails.
     let p = crate::store::Project::create_empty(&ctx.store, &name)?;
     let mut repo = Repo { p };
-    let result = (|| -> Result<()> {
+    let result = (|| -> Result<i32> {
         let mut store = store_remote::open(url, &repo)?;
         store.configure(ctx, &store_remote::ConfigureOptions::default())?;
         let opts = store_remote::Options {
@@ -793,79 +802,18 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let _lock = repo.p.lock()?;
         set_config(ctx, &repo, "cloud.remote.origin.url", json!(url))?;
         print_store_report(ctx, &report, "clone", a.has("--json"), a.has("-q"))?;
-        Ok(())
+        Ok(if report.missing_lines.is_empty() { 0 } else { 2 })
     })();
     if result.is_err() {
         let dir = repo.p.dir.clone();
         drop(repo);
         let _ = crate::storage::delete_tree(&dir);
     }
-    result?;
-    Ok(0)
+    result
 }
 
-// TEMPORARY INTEGRATION BOUNDARY: replace this module with `use crate::store_remote;`
-// when workstream remote-store lands. All operations fail explicitly.
-#[allow(dead_code)]
-mod store_remote {
-    use super::*;
-    #[derive(Default)]
-    pub struct Options {
-        pub auto: bool,
-        pub caches: bool,
-        pub paper_key: Option<String>,
-    }
-    #[derive(serde::Serialize)]
-    pub struct Report {
-        pub records: usize,
-        pub states: usize,
-        pub files: usize,
-        pub bytes: u64,
-        pub omitted: Vec<String>,
-        pub overlaps: usize,
-        pub gaps: Vec<String>,
-    }
-    #[derive(Default)]
-    pub struct ConfigureOptions {
-        pub paper_key_out: Option<std::path::PathBuf>,
-    }
-    pub struct Configured {
-        pub created: bool,
-        pub recovery_key_file: Option<String>,
-    }
-    pub struct Store;
-    pub fn open(_url: &str, _repo: &Repo) -> Result<Store> {
-        bail!("store remote: not implemented until remote-store integration")
-    }
-    impl Store {
-        pub fn configure(&mut self, _ctx: &Ctx, _opts: &ConfigureOptions) -> Result<Configured> {
-            bail!("store remote: not implemented")
-        }
-        pub fn push(&mut self, _ctx: &Ctx, _repo: &mut Repo, _opts: &Options) -> Result<Report> {
-            bail!("store remote: not implemented")
-        }
-        pub fn fetch(&mut self, _ctx: &Ctx, _repo: &mut Repo, _opts: &Options) -> Result<Report> {
-            bail!("store remote: not implemented")
-        }
-        pub fn clone_into(&mut self, _ctx: &Ctx, _repo: &mut Repo, _opts: &Options) -> Result<Report> {
-            bail!("store remote: not implemented")
-        }
-        pub fn verify(&self, _files: bool) -> Result<Report> {
-            bail!("store remote: not implemented")
-        }
-        pub fn log(&self) -> Result<Vec<String>> {
-            bail!("store remote: not implemented")
-        }
-        pub fn gc(&self, _dry_run: bool) -> Result<Vec<String>> {
-            bail!("store remote: not implemented")
-        }
-        pub fn trust(&self, _repo: &Repo, _machine: &str, _public_key: Option<&str>) -> Result<()> {
-            bail!("store remote: not implemented")
-        }
-    }
-}
+use crate::store_remote;
 
-// TEMPORARY INTEGRATION BOUNDARY: replace this module with `use crate::oci;`.
 #[cfg(test)]
 mod tests {
     use super::*;

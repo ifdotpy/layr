@@ -1071,3 +1071,42 @@ sudo env LAYR_APFS_TEST_ROOT=/Volumes/YourCaseSensitiveVolume \
 
 The test uses the current user and `nobody`. It creates no system accounts.
 Use `tests/apfs-cross.py` to test peer sync compatibility with a Linux binary in an OrbStack VM.
+
+### Encrypted store remotes
+
+A `file://` or `s3://` remote keeps signed records and encrypted state files.
+It can restore a project after the loss of every machine.
+The [store format](docs/remote-format.md) describes the objects and key slots.
+
+```sh
+layr remote add archive file:///srv/layr/project --paper-key-out /secure/project-paper.txt
+layr push archive
+layr fsck --remote archive --files
+layr log --remote archive --json
+layr gc --remote archive --dry-run
+```
+
+The paper file must be outside the stores and line folders. A new file has mode 0600.
+The command prints its path. It never prints the words.
+Copy the words to paper. Check the copy. Delete the file.
+
+A machine slot uses the existing machine Ed25519 key. A machine without a slot can push but cannot fetch.
+Use `layr remote trust <remote> <machine>` from a machine with a slot to grant read access.
+For a new machine, get its `layr remote self --json` output. Give its key with `--public-key <key>` when you grant access.
+A machine that retains the vault identity can read future objects. Full revocation requires a new vault identity.
+
+S3 reads the caller's `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, and `AWS_REGION` environment variables.
+For MinIO, set `AWS_ENDPOINT_URL_S3`. Credentials stay out of the project records and local index.
+Writes use conditional S3 puts. Large objects use multipart upload.
+The part target is 16 MiB. A larger frame has a separate part, same as Desk v1.
+
+The store keeps complete states and records. Remote garbage collection removes only incomplete data attempts older than 24 hours.
+A retry uses a new state attempt. Record retries preserve the signed bytes.
+If a push stops before a line head is complete, clone reports the missing line and returns status 2.
+The project keeps its available lines. Run `layr fetch origin` later to create the missing working folders.
+Private overlay files stay local. Legacy cache layer snapshots require a peer remote.
+The `--caches` option sends states of kind `cache`.
+
+To import a Desk v1 vault, set `LAYR_PAPER_KEY_FILE` to the Desk paper file. Then use `layr clone <vault URL> <project>`.
+The import creates line `main`, preserves history order, and verifies each file's SHA-256.
+The source vault stays read only. Add a new v2 remote to save the imported history.

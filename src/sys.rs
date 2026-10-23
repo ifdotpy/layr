@@ -137,6 +137,26 @@ pub fn subvol_set_flags(fd: BorrowedFd, flags: u64) -> io::Result<()> {
     ioctl_ptr(fd, SUBVOL_SETFLAGS, &mut f)
 }
 
+/// Set the identity of a verified file restore, as btrfs receive does before sealing it.
+#[cfg(target_os = "linux")]
+pub fn subvol_set_received(fd: BorrowedFd, uuid: [u8; 16], transid: u64) -> io::Result<()> {
+    #[repr(C)]
+    struct ReceivedSubvolArgs {
+        uuid: [u8; 16],
+        stransid: u64,
+        rtransid: u64,
+        stime: Timespec,
+        rtime: Timespec,
+        flags: u64,
+        reserved: [u64; 16],
+    }
+    let zero_time = Timespec { sec: 0, nsec: 0 };
+    let mut args = ReceivedSubvolArgs {
+        uuid, stransid: transid, rtransid: 0, stime: zero_time, rtime: zero_time, flags: 0, reserved: [0; 16],
+    };
+    ioctl_ptr(fd, 0xc0c8_9425, &mut args)
+}
+
 pub struct RawSubvolInfo {
     pub tree_id: u64,
     pub generation: u64,
