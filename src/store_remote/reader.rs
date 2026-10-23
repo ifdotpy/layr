@@ -238,6 +238,30 @@ pub(super) fn deletion_dependencies(lines: &[String]) -> Result<BTreeSet<String>
     Ok(ids)
 }
 
+pub(super) fn omitted_cache_refs(repo: &Repo, opts: &Options) -> Result<Vec<String>> {
+    let mut omitted = Vec::new();
+    if !opts.caches {
+        for reference in repo.p.db.refs("", crate::ids::now_ms())? {
+            if repo.state(&reference.target)?.kind == crate::model::StateKind::Cache {
+                omitted.push(format!("cache state {} of ref {}: use --caches", reference.target, reference.name));
+            }
+        }
+    }
+    Ok(omitted)
+}
+
+pub(super) fn required_states(repo: &Repo, lines: &[String], opts: &Options) -> Result<BTreeSet<String>> {
+    let mut required = deletion_dependencies(lines)?;
+    for reference in repo.p.db.refs("", crate::ids::now_ms())? {
+        let state = repo.state(&reference.target)?;
+        if state.kind == crate::model::StateKind::Cache && !opts.caches {
+            continue;
+        }
+        required.extend(repo.ancestors(&reference.target)?);
+    }
+    Ok(required)
+}
+
 pub(super) fn wanted(state: &crate::model::StateRec, opts: &Options) -> bool {
     let kind = serde_json::to_value(state.kind).unwrap_or_default();
     match kind.as_str() {
@@ -273,8 +297,14 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
     if repo.p.id != descriptor.project {
         bail!("the records do not belong to store.json's project");
     }
-    let mut report = Report { records: count, overlaps: records.overlaps, gaps: records.gaps.clone(), ..Default::default() };
-    let required = deletion_dependencies(&records.lines)?;
+    let mut report = Report {
+        records: count,
+        overlaps: records.overlaps,
+        gaps: records.gaps.clone(),
+        omitted: omitted_cache_refs(repo, opts)?,
+        ..Default::default()
+    };
+    let required = required_states(repo, &records.lines, opts)?;
     let states = attempts(&store.backend)?;
     let mut reader = Reader::new(&store.backend, &identity, &records.keys);
     for (id, attempt) in states {

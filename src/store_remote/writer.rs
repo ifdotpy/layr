@@ -121,7 +121,7 @@ pub(super) fn push(store: &Store, repo: &Repo, opts: &Options) -> Result<Report>
     }
     store.private_dir()?;
     let descriptor = store.descriptor()?;
-    let mut report = Report::default();
+    let mut report = Report { omitted: reader::omitted_cache_refs(repo, opts)?, ..Default::default() };
     repo.p.verify_records()?;
     // A list is enough for a writer without permission to read encrypted objects.
     for machine in repo.p.db.record_machines()? {
@@ -175,7 +175,7 @@ pub(super) fn push(store: &Store, repo: &Repo, opts: &Options) -> Result<Report>
             index.insert(id.clone(), Pushed { attempt: attempt.clone(), tree, depth });
         }
     }
-    let required = reader::deletion_dependencies(&repo.p.export_jsonl()?.lines().map(str::to_string).collect::<Vec<_>>())?;
+    let required = reader::required_states(repo, &repo.p.export_jsonl()?.lines().map(str::to_string).collect::<Vec<_>>(), opts)?;
     let mut states = Vec::new();
     for (id, deleted) in repo.p.db.present_states()? {
         if deleted || present.contains_key(&id) {
