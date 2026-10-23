@@ -43,6 +43,8 @@ An original snapshot uses its UUID and ctransid. A received snapshot uses its re
 The uploader includes this field only when its UUID equals the signed state's subvolume UUID.
 Other snapshot backends omit it. The field is covered by the tree signature.
 After file verification, a btrfs restore sets this received identity before it becomes read only and visible.
+Without `btrfs`, the restore sets the received UUID from the signed state's subvolume UUID and sets stransid to zero.
+Zero identifies a state from another snapshot backend. Its first peer transfer uses a full stream.
 `sig` is the standard Base64 Ed25519 signature with padding.
 The signed bytes are:
 

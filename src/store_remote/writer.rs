@@ -614,4 +614,73 @@ mod tests {
         assert!(store.backend.get(&complete).unwrap().is_some());
         std::fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    #[ignore = "portable-state fixture invoked by t23-store-portable-peer"]
+    fn emit_portable_v2_fixture() {
+        use crate::model::{LineChange, LineState, Record, StateRec};
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let destination = std::env::var("LAYR_TEST_PORTABLE_DIR").expect("fixture directory");
+        let paper_file = std::env::var("LAYR_TEST_PORTABLE_KEY").expect("fixture key path");
+        let local = std::env::temp_dir().join(crate::ids::new_id());
+        std::fs::create_dir(&local).unwrap();
+        let ctx = context(&local);
+        let mut store = remote(&local, &ctx);
+        store.backend = super::super::backend::Backend::file(destination.into());
+        let identity = keys::generate_identity();
+        let paper = keys::generate_identity();
+        let descriptor =
+            Descriptor { format: 2, project: store.project.clone(), recipient: keys::recipient_of(&identity).unwrap() };
+        let mut output = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(paper_file).unwrap();
+        writeln!(output, "{}", keys::words_of_identity(&paper).unwrap()).unwrap();
+        store
+            .backend
+            .put_new("slots/paper.age", keys::seal_slot(&identity, &keys::recipient_of(&paper).unwrap()).unwrap())
+            .unwrap();
+        store.backend.put_new("store.json", serde_json::to_vec(&descriptor).unwrap()).unwrap();
+        let state_id = crate::ids::new_id();
+        let line_id = crate::ids::new_id();
+        let state:StateRec=serde_json::from_value(serde_json::json!({"id":state_id,"kind":"commit","parents":[],"line":line_id,
+            "subvol":crate::ids::new_id(),"author":{"name":"Fixture","email":"fixture@example.test"},"message":"portable source","time":1})).unwrap();
+        let mut first = Record::new("machine");
+        first.data = serde_json::json!({"name":"portable","public_key":hex::encode(store.key.verifying_key().to_bytes())});
+        let mut project = Record::new("project");
+        project.data = serde_json::json!({"id":store.project,"name":"project","config":{}});
+        let mut commit = Record::new("commit");
+        commit.states.push(state);
+        commit.lines.insert(
+            line_id,
+            LineChange {
+                before: None,
+                after: Some(LineState {
+                    name: "main".into(),
+                    head: state_id.clone(),
+                    owner: ctx.caller.uid,
+                    machine: store.machine.clone(),
+                }),
+                working_before: None,
+                working_after: None,
+            },
+        );
+        let mut lines = Vec::new();
+        for (index, mut record) in [first, project, commit].into_iter().enumerate() {
+            record.id = crate::ids::new_id();
+            record.machine = store.machine.clone();
+            record.project = store.project.clone();
+            record.seq = index as u64 + 1;
+            lines.push(crate::oplog::sign_line(&record, &store.key).unwrap());
+        }
+        store
+            .backend
+            .put_new(
+                &format::segment_name(&store.machine, 1, 3),
+                keys::encrypt(&descriptor.recipient, format!("{}\n", lines.join("\n")).as_bytes()).unwrap(),
+            )
+            .unwrap();
+        let source = local.join("files");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("notes.txt"), b"portable file bytes\n").unwrap();
+        upload_state(&store, &descriptor, &state_id, &source, None, &BTreeMap::new(), None, None).unwrap();
+        std::fs::remove_dir_all(local).unwrap();
+    }
 }

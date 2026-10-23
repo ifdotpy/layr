@@ -1,5 +1,5 @@
 use super::aws::{self, Credentials, EMPTY_SHA256};
-use super::backend::Object;
+pub(crate) use super::backend::Object;
 use anyhow::{anyhow, bail, Context, Result};
 use reqwest::blocking::Client;
 use reqwest::Method;

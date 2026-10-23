@@ -20,6 +20,10 @@ pub(super) struct Records {
 }
 
 pub(super) fn records(backend: &Backend, identity: &str, project: &str) -> Result<Records> {
+    records_with_local(backend, identity, project, &[])
+}
+
+fn records_with_local(backend: &Backend, identity: &str, project: &str, local: &[String]) -> Result<Records> {
     let mut machines: BTreeMap<String, BTreeMap<u64, String>> = BTreeMap::new();
     let mut overlaps = 0;
     for object in backend.list("records/")? {
@@ -50,6 +54,18 @@ pub(super) fn records(backend: &Backend, identity: &str, project: &str) -> Resul
         if expected.checked_sub(1) != Some(last) {
             bail!("segment {} is incomplete", object.key);
         }
+    }
+    // A fetch can continue from the reader's verified prefix when old remote segments are absent.
+    for line in local {
+        let record = oplog::parse_line(line, None)?.record;
+        if record.project != project {
+            bail!("local records belong to another project");
+        }
+        let by_seq = machines.entry(record.machine.clone()).or_default();
+        if by_seq.get(&record.seq).is_some_and(|existing| existing != line) {
+            bail!("conflicting history of machine {}, record {}", record.machine, record.seq);
+        }
+        by_seq.entry(record.seq).or_insert_with(|| line.clone());
     }
     let mut keys = BTreeMap::new();
     let mut lines = Vec::new();
@@ -228,7 +244,8 @@ pub(super) fn wanted(state: &crate::model::StateRec, opts: &Options) -> bool {
 pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Options) -> Result<Report> {
     let descriptor = store.descriptor()?;
     let identity = store.identity(&descriptor, opts.paper_key.as_deref())?;
-    let records = records(&store.backend, &identity, &descriptor.project)?;
+    let local: Vec<String> = repo.p.export_jsonl()?.lines().map(str::to_string).collect();
+    let records = records_with_local(&store.backend, &identity, &descriptor.project, &local)?;
     let bootstrap = repo.p.id.is_empty();
     if !bootstrap {
         for (machine, key) in &records.keys {
@@ -283,14 +300,12 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
             crate::fsutil::rename_tree(&stage, &destination)?;
             let publish = (|| -> Result<()> {
                 #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
-                if let Some(identity) = &header.btrfs {
+                {
                     use std::os::fd::AsFd;
+                    let (uuid, transid) =
+                        header.btrfs.as_ref().map(|i| (i.uuid.as_str(), i.transid)).unwrap_or((&state.subvol, 0));
                     let file = std::fs::File::open(&destination)?;
-                    crate::sys::subvol_set_received(
-                        file.as_fd(),
-                        *uuid::Uuid::parse_str(&identity.uuid)?.as_bytes(),
-                        identity.transid,
-                    )?;
+                    crate::sys::subvol_set_received(file.as_fd(), *uuid::Uuid::parse_str(uuid)?.as_bytes(), transid)?;
                 }
                 crate::storage::set_readonly(&destination)?;
                 repo.p.db.set_present(&id, true)?;
@@ -521,6 +536,18 @@ mod tests {
         let mut wrong = entry;
         wrong.2 = "00".repeat(32);
         assert!(reader.read(&wrong).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn fetch_continues_from_an_existing_verified_prefix() {
+        let (backend, identity, key, root) = fixture();
+        let lines: Vec<String> = (1..=5).map(|seq| line(seq, &key)).collect();
+        segment(&backend, &identity, 3, 5, &lines[2..]);
+        let fetched = records_with_local(&backend, &identity, PROJECT, &lines[..2]).unwrap();
+        assert_eq!(fetched.lines.len(), 5);
+        assert!(fetched.gaps.is_empty());
+        assert_eq!(fetched.overlaps, 0);
+        assert_eq!(records(&backend, &identity, PROJECT).unwrap().gaps.len(), 1);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

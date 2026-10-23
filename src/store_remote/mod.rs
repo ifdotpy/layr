@@ -1,13 +1,13 @@
 //! Encrypted immutable remotes, independent of the local snapshot backend.
 
-mod aws;
+pub(crate) mod aws;
 mod backend;
 mod canonical;
 mod format;
 mod keys;
 mod legacy;
 mod reader;
-mod s3;
+pub(crate) mod s3;
 mod writer;
 mod zst;
 
@@ -88,7 +88,7 @@ impl Store {
                 crate::privs::as_caller_fs(ctx, || {
                     use std::io::Read;
                     let mut text = String::new();
-                    std::fs::File::open(path)?.take(4097).read_to_string(&mut text)?;
+                    std::fs::File::open(ctx.cwd.join(path))?.take(4097).read_to_string(&mut text)?;
                     if text.len() > 4096 {
                         bail!("invalid paper key file");
                     }
