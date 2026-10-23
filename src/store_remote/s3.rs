@@ -44,6 +44,11 @@ impl S3 {
             .connect_timeout(Duration::from_secs(30))
             .tcp_keepalive(Duration::from_secs(60))
             .build()?;
+        Self::new_with_client(bucket, region, credentials, endpoint, http)
+    }
+
+    /// Use a caller-owned client with its connection policy and time limits.
+    pub(crate) fn new_with_client(bucket: &str, region: &str, credentials: Credentials, endpoint: Option<&str>, http: Client) -> Result<Self> {
         Ok(S3 {
             http,
             credentials,
