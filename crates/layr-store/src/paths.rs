@@ -17,4 +17,3 @@ pub fn check_rel(path: &str) -> Result<()> {
     }
     Ok(())
 }
-

@@ -163,7 +163,7 @@ pub fn request<R: Read>(stream: &mut R, limits: &Limits) -> Result<Request, Erro
         return Err(bad(400, "invalid request line"));
     }
     let (method, target) = (parts[0].to_string(), parts[1].to_string());
-    let mut headers = BTreeMap::new();
+    let mut headers: BTreeMap<String, String> = BTreeMap::new();
     let mut bytes_left = limits.header_bytes;
     let mut count = 0;
     loop {
@@ -185,8 +185,14 @@ pub fn request<R: Read>(stream: &mut R, limits: &Limits) -> Result<Request, Erro
         }
         let name = String::from_utf8(raw[..at].to_vec()).expect("ASCII").to_ascii_lowercase();
         let value = String::from_utf8(raw[at + 1..].to_vec()).expect("ASCII").trim_matches([' ', '\t']).to_string();
-        if headers.insert(name, value).is_some() {
-            return Err(bad(400, "duplicate HTTP header"));
+        if let Some(previous) = headers.get_mut(&name) {
+            if !matches!(name.as_str(), "accept" | "accept-encoding" | "accept-language") {
+                return Err(bad(400, "duplicate HTTP header"));
+            }
+            previous.push_str(", ");
+            previous.push_str(&value);
+        } else {
+            headers.insert(name, value);
         }
     }
     if parts[2] == "HTTP/1.1" && headers.get("host").is_none_or(|value| value.is_empty()) {
@@ -402,6 +408,34 @@ mod tests {
             "GET / HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\n\r\na",
         ] {
             assert!(parse(text).is_err(), "{text:?}");
+        }
+    }
+    #[test]
+    fn repeated_list_fields_combine_in_order_with_raw_line_limits() {
+        let mut limits = limits();
+        limits.header_bytes = 1024;
+        limits.header_count = 8;
+        for name in ["Accept", "Accept-Encoding", "Accept-Language"] {
+            let mut text = "GET / HTTP/1.1\r\nHost: x\r\n".to_string();
+            for value in 1..=6 {
+                text.push_str(&format!("{name}: type{value}\r\n"));
+            }
+            text.push_str("\r\n");
+            let found = request(&mut text.as_bytes(), &limits).unwrap();
+            assert_eq!(found.header(&name.to_ascii_lowercase()), Some("type1, type2, type3, type4, type5, type6"));
+            let mut bounded = limits;
+            bounded.header_count = 6;
+            assert_eq!(request(&mut text.as_bytes(), &bounded).unwrap_err().status, 431);
+            bounded = limits;
+            bounded.header_bytes = 32;
+            assert_eq!(request(&mut text.as_bytes(), &bounded).unwrap_err().status, 431);
+        }
+    }
+    #[test]
+    fn other_duplicate_fields_are_refused() {
+        for name in ["Host", "Authorization", "Content-Length", "Transfer-Encoding", "Range", "Origin", "Cookie", "X-Other"] {
+            let text = format!("GET / HTTP/1.1\r\nHost: x\r\n{name}: 0\r\n{name}: 0\r\n\r\n");
+            assert_eq!(request(&mut text.as_bytes(), &limits()).unwrap_err().message, "duplicate HTTP header");
         }
     }
     #[test]
