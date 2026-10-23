@@ -9,7 +9,7 @@
 <p align="center">
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue">
   <img alt="Status: alpha" src="https://img.shields.io/badge/status-alpha-orange">
-  <img alt="Platform: Linux btrfs" src="https://img.shields.io/badge/platform-Linux%20btrfs-lightgrey">
+  <img alt="Platforms: Linux and macOS" src="https://img.shields.io/badge/platforms-Linux%20%7C%20macOS-lightgrey">
 </p>
 
 ```console
@@ -62,15 +62,18 @@ signs a record for it. The [design document](docs/design.md) explains each choic
 
 ## Install
 
-Requirements: Linux with btrfs (a loop file works), `btrfs-progs`, `git` and `zstd`.
-
 ```sh
 cargo install --git https://github.com/ifdotpy/layr layr
-sudo layr daemon &          # the service; users talk to it through /run/layr/layr.sock
 ```
 
-macOS ([APFS](docs/apfs.md)) and other Linux file systems ([OverlayFS](docs/overlayfs-backend.md))
-have experimental backends.
+| Platform | Store on | Notes |
+|---|---|---|
+| Linux | btrfs (a loop file works) | Needs `btrfs-progs`, `git`, `zstd`. Run the service as root: `sudo layr daemon &` |
+| macOS | a case-sensitive APFS volume | Set `LAYR_ROOT` to a folder on that volume. Commands run as you; the root service is optional ([details](docs/apfs.md)) |
+| Linux | ext4 or XFS, through OverlayFS | Build with `--features overlayfs`; needs root mount permission ([details](docs/overlayfs-backend.md)) |
+
+All three keep the same store and record formats, so machines on different platforms sync with
+each other.
 
 ## Quick start
 
@@ -118,7 +121,7 @@ editors and tools that read Git output keep working.
 ## Status
 
 Layr is **alpha**. The btrfs backend is the supported one and has an integration suite of more
-than a thousand checks that runs on real btrfs file systems. APFS and OverlayFS are experimental.
+than a thousand checks that runs on real btrfs file systems; the core commands also run on APFS.
 The store format and command names may still change. There has been no external security audit.
 See [what this version does not do](docs/limits.md).
 

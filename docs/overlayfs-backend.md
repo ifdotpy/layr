@@ -1,8 +1,6 @@
-# The experimental OverlayFS backend
+# The OverlayFS backend (ext4 and XFS)
 
 This page is part of the [Layr documentation](../README.md#documentation).
-
-## Experimental OverlayFS backend
 
 The Linux `overlayfs` feature adds a backend for a VM with ext4 or XFS and root mount permission.
 See [the setup, transfer rules and limits](overlayfs.md).

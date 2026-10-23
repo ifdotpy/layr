@@ -51,7 +51,7 @@ while dirty data is being written). The database lives in its own subvolume: an 
 after a snapshot takes about 6 ms, against about 100 ms in the subvolume that holds the
 snapshot folders.
 
-### Experimental APFS comparison (provisional)
+### APFS comparison (provisional)
 
 Measured on 2026-10-14 with the implementation in `ada0cef`.
 Each fixture contains 1,000 or 10,000 files of 4 KiB. Ten files receive an extra line.

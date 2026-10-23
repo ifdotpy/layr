@@ -1,8 +1,6 @@
-# The experimental APFS backend
+# The APFS backend (macOS)
 
 This page is part of the [Layr documentation](../README.md#documentation).
-
-## Experimental APFS backend
 
 APFS uses whole-directory clones automatically. There is no mode flag.
 Trees with hard links or nested layers use file-by-file clones to preserve their behavior.
