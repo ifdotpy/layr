@@ -1,6 +1,6 @@
 # OverlayFS backend for a Linux VM
 
-This backend is experimental. It uses OverlayFS mounts on a local filesystem.
+This backend uses OverlayFS mounts on a local filesystem.
 It requires root and permission to create mounts. It does not support a container without mount permission.
 
 ## Build and start

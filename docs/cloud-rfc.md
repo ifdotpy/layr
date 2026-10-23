@@ -59,7 +59,7 @@
 - Version control на Btrfs: `line` — writable snapshot, `state` — read-only snapshot плюс подписанная запись, diff/status основаны на metadata-send; merge использует reflinks. Есть Git bridge, операции с ролями, защита веток, auto states, копия проекта в папку с восстановлением, peer sync.
 - Оверлеи: отдельные истории файлов с собственными readers; `shared` видим всем читателям проекта, другие слои видимы их readers. Рабочая директория остаётся **обычным writable Btrfs subvolume**, слои физически собираются при смене stack; это **не OverlayFS**.
 - Кэши (`regenerable`): nested subvolumes вне основной истории и diff. Новая линия может получить reflink-копию прогретого кэша ближайшего предка. Явное сохранение через `layr save --caches`.
-- Backends: btrfs на Linux поддерживается; OverlayFS (ext4/XFS) и APFS (macOS) экспериментальные. Форматы store и signed record совместимы между backends (`README.md`). Полного паритета у экспериментальных backends нет. Поэтому формат remote не должен зависеть от backend.
+- Backends: btrfs на Linux, APFS на macOS, OverlayFS на ext4/XFS; все равноправны (решение пользователя 23.10.2026). Форматы store и signed record совместимы между backends (`README.md`). Полного паритета у экспериментальных backends нет. Поэтому формат remote не должен зависеть от backend.
 - Signed record сейчас подписывает ключ машины. `Author.session` является свободным текстом из `LAYR_SESSION`: Layr его показывает, но не проверяет (`src/model.rs`).
 - Текущие ограничения overlays: нет полной реализации route-patterns, полноценного составного идентификатора stack для approvals, encryption/replication приватных overlays и некоторых режимов из дизайн-документа. Нужно сверять статус с конкретным коммитом перед разработкой.
 
@@ -97,9 +97,8 @@
 
 Основной путь: Btrfs внутри Linux VM на Mac. Это та же модель, что у облачных workers, и Layr там уже работает. Studio уже так работает.
 
-APFS используется только для сборок, которым нужен Mac (Xcode, Swift, codesign, симуляторы). Они идут через Studio `host_exec` и стабильные build slots. APFS backend Layr остаётся экспериментальным. Полного паритета с Btrfs для него не требуется, пока такой сборке не нужна история или overlays на стороне Mac.
+APFS используется только для сборок, которым нужен Mac (Xcode, Swift, codesign, симуляторы). Они идут через Studio `host_exec` и стабильные build slots. **Решение 23.10.2026:** backends btrfs, APFS и OverlayFS равноправны; отдельной пометки «экспериментальный» нет, весь Layr в статусе alpha.
 
-**Открытый вопрос (0.3):** текущая работа в Layr идёт в APFS backend. С `dea8205` до `ef7b637` 13 из 37 commits относятся к APFS (ветка `perf/apfs-features`). Нужно решить одно из двух: изменить это решение или ограничить работу над APFS сборками для Mac. См. 14.1.
 
 ---
 
@@ -413,7 +412,7 @@ Cloud может быть только metadata + S3 remote. Пользоват�
 - Привязка идёт по времени, а не по процессу. Изменения фонового процесса (сборка, dev server) в том же окне попадут в тот же save. Каталоги `regenerable` в diff не входят; остальной вывод сборки нужно исключать через ignore rules.
 - Число auto states. Сессия даёт тысячи saves. Retention по коду (`retention_plan`, `src/cmd/admin.rs:612`): 50 новейших auto states на line (`retention.auto`), одна в час за 24 часа (`retention.hours`) и states, которые называют records внутри окна undo (`undo.days`, 7 дней). Не проверено, держит ли каждый record `save` свою auto state 7 дней. Если держит, хранение может расти; нужен замер.
 - Время save растёт при тяжёлой записи (status после тяжёлой записи: ~800 ms на 200 000 файлов, 10.1). Hook не должен блокировать агента дольше порога; при превышении save выполняется асинхронно, а граница вызова отмечается по времени.
-- Backend: в Btrfs VM работает сейчас; APFS backend экспериментальный (1.6).
+- Backend: btrfs, APFS и OverlayFS.
 
 **Готово, когда:** в реальной сессии агента каждое изменение файла, включая изменения из Python и shell, видно в diff своего tool call; отмена одного вызова возвращает только его изменения или явно сообщает о конфликте.
 
@@ -1278,7 +1277,7 @@ Checkpoints Studio (2A) не зависят от имён команд CLI и о
 | Модель ядра? | Пять сущностей: State, Ref, Attestation, View, Remote (3.0) |
 | Отдельная команда копии в CLI? | Нет; копию вне машины даёт cloud remote; инварианты remote защищают историю; git bridge в `layr git …` (12.4) |
 | Горячая копия на Mac? | Btrfs в Linux VM; APFS только для сборок, которым нужен Mac (1.6) |
-| Объём работы над APFS backend? | **Открыт.** Текущая работа идёт в APFS (1.6). Решить: изменить 1.6 или ограничить APFS сборками для Mac |
+| Статус backends? | Равноправны: btrfs, APFS, OverlayFS (решение 23.10.2026) |
 | Control plane в Stage 1? | Нет для одного владельца: S3 + IAM + conditional writes. Нужен для reviews и чужих writers |
 | E2EE или server-side search? | Два режима/явный user consent на раскрытие индекса/данных |
 | Один bucket на проект? | BYO — возможно; hosted — regional multi-tenant bucket |

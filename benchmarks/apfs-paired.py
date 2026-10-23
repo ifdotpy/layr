@@ -4,7 +4,7 @@ import argparse,hashlib,json,os,pathlib,resource,subprocess,time
 p=argparse.ArgumentParser();p.add_argument('--before',required=True);p.add_argument('--after',required=True);p.add_argument('--store',required=True);p.add_argument('--output',required=True);p.add_argument('--repeats',type=int,default=2);a=p.parse_args()
 store=pathlib.Path(a.store).resolve();main=store/'projects/p0/lines/main';rows=[]
 variants=[('baseline',a.before,False),('metadata',a.after,False),('native_tree',a.after,True)]
-report={'binaries':{k:hashlib.sha256(pathlib.Path(v).read_bytes()).hexdigest() for k,v,_ in variants},'rows':rows,'note':'Native tree mode is experimental; no claim of production compatibility.'}
+report={'binaries':{k:hashlib.sha256(pathlib.Path(v).read_bytes()).hexdigest() for k,v,_ in variants},'rows':rows,'note':'Native tree mode measurement; no claim of production compatibility.'}
 def run(binary,env,cwd,args,trial,label,operation=None):
  start=time.perf_counter();before=resource.getrusage(resource.RUSAGE_CHILDREN)
  r=subprocess.run([binary,*args],cwd=cwd,env=env,capture_output=True,text=True)
