@@ -418,7 +418,7 @@ use crate::args::{parse, Spec};
 use crate::ctx::Ctx;
 use crate::oci;
 use crate::repo::Repo;
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use serde_json::json;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -470,7 +470,7 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if args.iter().any(|s| matches!(s.as_str(), "-v" | "--verbose")) {
         return Err(exit(128, "use layr git remote -v"));
     }
-    let a = parse(&Spec::new().flag("--json").value("--public-key").value("--paper-key-out"), args)?;
+    let a = parse(&Spec::new().flag("--json").value("--public-key").value("--paper-key-out").value("--recipient"), args)?;
     let sub = a.pos.first().map(String::as_str).unwrap_or("list");
     if sub == "self" {
         if a.pos.len() != 1 {
@@ -544,7 +544,9 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let recovery_key_file = if remote_kind == Kind::Store {
                 let mut store = store_remote::open(url, repo)?;
                 let opts = store_remote::ConfigureOptions { paper_key_out: a.get("--paper-key-out").map(|p| ctx.cwd.join(p)) };
-                store.configure(ctx, &opts)?.recovery_key_file
+                let configured = store.configure(ctx, &opts)?;
+                store.save_pin(ctx, repo, name)?;
+                configured.recovery_key_file
             } else { None };
             set_config(ctx, repo, &key, json!(url))?;
             if a.has("--json") {
@@ -558,9 +560,22 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let _lock = repo.p.lock()?;
             remote_url(repo, &a.pos[1])?;
             set_config(ctx, repo, &format!("cloud.remote.{}.url", a.pos[1]), serde_json::Value::Null)?;
+            set_config(ctx, repo, &format!("cloud.remote.{}.store", a.pos[1]), serde_json::Value::Null)?;
             if a.has("--json") {
                 outln!(ctx, "{}", json!({"removed": a.pos[1]}));
             }
+        }
+        "trust-store" if a.pos.len() == 2 => {
+            repo.require(ctx, "remote")?;
+            let name = &a.pos[1];
+            let recipient = a.get("--recipient").context("trust-store requires --recipient <age1…>")?;
+            let url = remote_url(repo, name)?;
+            if kind(&url)? != Kind::Store { bail!("trust-store requires a store remote"); }
+            let _lock = repo.p.lock()?;
+            let mut store = store_remote::open_named(&a.pos[1], repo)?;
+            store.trust_store(ctx, repo, name, recipient)?;
+            if a.has("--json") { outln!(ctx, "{}", json!({"name":name,"recipient":recipient})); }
+            else { outln!(ctx, "trusted store recipient {recipient}"); }
         }
         "trust" if a.pos.len() == 3 => {
             repo.require(ctx, "remote")?;
@@ -581,10 +596,11 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let key = hex::encode(raw);
             match remote_kind {
                 Kind::Store => {
-                    let mut store = store_remote::open(&url, repo)?;
+                    let mut store = store_remote::open_named(&a.pos[1], repo)?;
                     store.configure(ctx, &store_remote::ConfigureOptions::default())?;
                     {
                         let _lock = repo.p.lock()?;
+                        store.save_pin(ctx, repo, &a.pos[1])?;
                         replicate::trust(ctx, &repo.p, &full, &key)?;
                     }
                     store.trust(repo, &full, Some(&key))?;
@@ -604,7 +620,7 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
         _ => {
             return Err(exit(
                 128,
-                "usage: layr remote add <name> <url> [--paper-key-out <path>] | list | self | remove <name> | trust <name> <machine> [--public-key <ed25519>]",
+                "usage: layr remote add <name> <url> [--paper-key-out <path>] | list | self | remove <name> | trust <name> <machine> [--public-key <ed25519>] | trust-store <name> --recipient <age1…>",
             ))
         }
     }
@@ -689,9 +705,14 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
                 auto: a.has("--auto"),
                 caches: a.has("--caches"),
                 paper_key: a.get("--paper-key").map(str::to_owned),
+                desk_prefix: None,
             };
-            let mut store = store_remote::open(&url, &h.repo)?;
+            let mut store = store_remote::open_named(&a.pos[0], &h.repo)?;
             store.configure(ctx, &store_remote::ConfigureOptions::default())?;
+            {
+                let _lock = h.repo.p.lock()?;
+                store.save_pin(ctx, &h.repo, &a.pos[0])?;
+            }
             let report =
                 if op == "push" { store.push(ctx, &mut h.repo, &opts)? } else { store.fetch(ctx, &mut h.repo, &opts)? };
             if !report.missing_lines.is_empty() {
@@ -781,8 +802,17 @@ fn args_for_merge(a: &crate::args::Parsed) -> Vec<String> {
 }
 
 pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let a = parse(&Spec::new().value("--paper-key").flag("--auto").flag("--caches").flag("--json").flag("-q|--quiet"), args)
-        .map_err(|e| exit(128, format!("{e}; Git forms use layr git clone")))?;
+    let a = parse(
+        &Spec::new()
+            .value("--paper-key")
+            .value("--desk-prefix")
+            .flag("--auto")
+            .flag("--caches")
+            .flag("--json")
+            .flag("-q|--quiet"),
+        args,
+    )
+    .map_err(|e| exit(128, format!("{e}; Git forms use layr git clone")))?;
     let url = a.pos.first().ok_or_else(|| exit(128, "usage: layr clone <url> [<project>]; Git uses layr git clone"))?;
     if kind(url).map_err(|e| exit(128, format!("{e}; use layr git clone for Git URLs")))? != Kind::Store {
         bail!("clone requires a file://, s3:// or layr+https:// store; Git uses layr git clone");
@@ -801,10 +831,12 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
             auto: a.has("--auto"),
             caches: a.has("--caches"),
             paper_key: a.get("--paper-key").map(str::to_owned),
+            desk_prefix: a.get("--desk-prefix").map(str::to_owned),
         };
         let report = store.clone_into(ctx, &mut repo, &opts)?;
         let _lock = repo.p.lock()?;
         set_config(ctx, &repo, "cloud.remote.origin.url", json!(url))?;
+        store.save_pin(ctx, &repo, "origin")?;
         print_store_report(ctx, &report, "clone", a.has("--json"), a.has("-q"))?;
         Ok(if report.missing_lines.is_empty() { 0 } else { 2 })
     })();

@@ -26,6 +26,7 @@ pub struct Options {
     pub auto: bool,
     pub caches: bool,
     pub paper_key: Option<String>,
+    pub desk_prefix: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -58,6 +59,28 @@ struct Descriptor {
     recipient: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct StorePin {
+    pub project: String,
+    pub recipient: String,
+}
+
+impl StorePin {
+    fn check(&self, descriptor: &Descriptor) -> Result<()> {
+        if self.project != descriptor.project {
+            bail!("store project changed: pinned {}, store.json {}", self.project, descriptor.project);
+        }
+        if self.recipient != descriptor.recipient {
+            bail!(
+                "store recipient changed: pinned {}, store.json {}; use layr remote trust-store <name> --recipient <age1…>",
+                self.recipient,
+                descriptor.recipient
+            );
+        }
+        Ok(())
+    }
+}
+
 pub struct Store {
     backend: Backend,
     url: String,
@@ -66,10 +89,40 @@ pub struct Store {
     key: ed25519_dalek::SigningKey,
     dir: PathBuf,
     paper_key_text: Option<String>,
+    pin: Option<StorePin>,
 }
 
 /// Opening a store performs no remote I/O. Configure it with the caller's environment next.
 pub fn open(url: &str, repo: &Repo) -> Result<Store> {
+    let mut pin: Option<StorePin> = None;
+    for (key, _) in repo.p.db.config_all()? {
+        let Some(name) = key.strip_prefix("cloud.remote.").and_then(|k| k.strip_suffix(".url")) else { continue };
+        if repo.p.config_value(&key)?.and_then(|v| v.as_str().map(str::to_owned)).as_deref() != Some(url) {
+            continue;
+        }
+        if let Some(value) = repo.p.config_value(&format!("cloud.remote.{name}.store"))? {
+            let stored: StorePin = serde_json::from_value(value).context("invalid store pin")?;
+            if pin.as_ref().is_some_and(|pin| pin != &stored) {
+                bail!("conflicting local pins for store {url}");
+            }
+            pin = Some(stored);
+        }
+    }
+    open_with_pin(url, repo, pin)
+}
+
+pub fn open_named(name: &str, repo: &Repo) -> Result<Store> {
+    let url = crate::cmd::remote::remote_url(repo, name)?;
+    let pin = repo
+        .p
+        .config_value(&format!("cloud.remote.{name}.store"))?
+        .map(serde_json::from_value)
+        .transpose()
+        .context("invalid store pin")?;
+    open_with_pin(&url, repo, pin)
+}
+
+fn open_with_pin(url: &str, repo: &Repo, pin: Option<StorePin>) -> Result<Store> {
     let hash = hex::encode(Sha256::digest(url.as_bytes()));
     Ok(Store {
         backend: Backend::open(url)?,
@@ -79,13 +132,16 @@ pub fn open(url: &str, repo: &Repo) -> Result<Store> {
         key: repo.p.store.machine.key.clone(),
         dir: repo.p.meta_dir().join("remote-stores").join(hash),
         paper_key_text: None,
+        pin,
     })
 }
 
 impl Store {
     fn connect(&mut self, ctx: &Ctx) -> Result<()> {
         self.backend.as_caller(ctx);
-        if let Backend::Gateway(gateway) = &mut self.backend { gateway.connect(ctx)?; }
+        if let Backend::Gateway(gateway) = &mut self.backend {
+            gateway.connect(ctx)?;
+        }
         self.paper_key_text = ctx
             .env("LAYR_PAPER_KEY_FILE")
             .map(|path| {
@@ -110,7 +166,7 @@ impl Store {
     pub fn configure(&mut self, ctx: &Ctx, opts: &ConfigureOptions) -> Result<Configured> {
         self.connect(ctx)?;
         if self.backend.get("store.json")?.is_some() {
-            self.descriptor()?;
+            self.pin_descriptor()?;
             return Ok(Configured { created: false, recovery_key_file: None });
         }
         if self.backend.get("vault.json")?.is_some() {
@@ -126,7 +182,45 @@ impl Store {
         }
         let path = opts.paper_key_out.as_ref().context("a new store requires --paper-key-out <path>")?;
         let file = writer::initialize(self, ctx, path)?;
+        self.pin_descriptor()?;
         Ok(Configured { created: true, recovery_key_file: Some(file) })
+    }
+
+    fn pin_descriptor(&mut self) -> Result<()> {
+        let descriptor = self.descriptor()?;
+        self.pin = Some(StorePin { project: descriptor.project, recipient: descriptor.recipient });
+        Ok(())
+    }
+
+    /// Caller holds the project lock. Config records carry the machine signature.
+    pub fn save_pin(&self, ctx: &Ctx, repo: &Repo, name: &str) -> Result<()> {
+        if let Some(pin) = &self.pin {
+            let key = format!("cloud.remote.{name}.store");
+            let value = serde_json::to_value(pin)?;
+            if repo.p.config_value(&key)?.as_ref() != Some(&value) {
+                crate::cmd::admin::set_config(ctx, repo, &key, value)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn trust_store(&mut self, ctx: &Ctx, repo: &Repo, name: &str, recipient: &str) -> Result<()> {
+        recipient.parse::<age::x25519::Recipient>().map_err(|e| anyhow::anyhow!("invalid store recipient: {e}"))?;
+        self.connect(ctx)?;
+        let previous = self.pin.take();
+        let descriptor = self.descriptor();
+        self.pin = previous;
+        let descriptor = descriptor?;
+        if let Some(pin) = &self.pin {
+            if pin.project != descriptor.project {
+                bail!("store project changed: pinned {}, store.json {}", pin.project, descriptor.project);
+            }
+        }
+        if descriptor.recipient != recipient {
+            bail!("store recipient differs: requested {}, store.json {}", recipient, descriptor.recipient);
+        }
+        self.pin = Some(StorePin { project: descriptor.project, recipient: descriptor.recipient });
+        self.save_pin(ctx, repo, name)
     }
 
     fn descriptor(&self) -> Result<Descriptor> {
@@ -141,8 +235,11 @@ impl Store {
         if !crate::model::is_uuid(&descriptor.project) {
             bail!("store has an invalid project id");
         }
+        if let Some(pin) = &self.pin {
+            pin.check(&descriptor)?;
+        }
         if !self.project.is_empty() && descriptor.project != self.project {
-            bail!("the remote holds another project ({})", descriptor.project);
+            bail!("store project differs: local {}, store.json {}", self.project, descriptor.project);
         }
         descriptor.recipient.parse::<age::x25519::Recipient>().map_err(|e| anyhow::anyhow!("invalid store recipient: {e}"))?;
         Ok(descriptor)
@@ -155,7 +252,9 @@ impl Store {
             if keys::recipient_of(&identity)? != descriptor.recipient {
                 bail!("machine slot does not match store recipient");
             }
-            if let Backend::Gateway(gateway) = &self.backend { gateway.set_identity(&identity)?; }
+            if let Backend::Gateway(gateway) = &self.backend {
+                gateway.set_identity(&identity)?;
+            }
             return Ok(identity);
         }
         let paper = paper.map(str::to_string).or_else(|| self.paper_key_text.clone());
@@ -166,7 +265,9 @@ impl Store {
             if keys::recipient_of(&identity)? != descriptor.recipient {
                 bail!("paper slot does not match store recipient");
             }
-            if let Backend::Gateway(gateway) = &self.backend { gateway.set_identity(&identity)?; }
+            if let Backend::Gateway(gateway) = &self.backend {
+                gateway.set_identity(&identity)?;
+            }
             return Ok(identity);
         }
         bail!("this machine has no remote slot; set LAYR_PAPER_KEY_FILE or use layr remote trust")
@@ -311,13 +412,7 @@ pub fn command(ctx: &Ctx, operation: &str, args: &[String]) -> Result<i32> {
     let name = a.get("--remote").context("name a remote with --remote <name>")?;
     let h = crate::cmd::here(ctx)?;
     h.repo.require(ctx, if operation == "gc" { "gc" } else { "fsck" })?;
-    let url = h
-        .repo
-        .p
-        .config_value(&format!("cloud.remote.{name}.url"))?
-        .and_then(|v| v.as_str().map(str::to_string))
-        .context("unknown store remote")?;
-    let mut store = open(&url, &h.repo)?;
+    let mut store = open_named(name, &h.repo)?;
     store.connect(ctx)?;
     match operation {
         "fsck" => {
@@ -369,4 +464,80 @@ pub fn command(ctx: &Ctx, operation: &str, args: &[String]) -> Result<i32> {
 /// Validate the gateway URL before a remote is written to project configuration.
 pub(crate) fn validate_gateway_url(url: &str) -> Result<()> {
     gateway::Gateway::open(url).map(|_| ())
+}
+
+#[cfg(test)]
+mod pin_tests {
+    use super::*;
+    use crate::ctx::{Caller, Ctx};
+    use crate::model::Record;
+
+    #[test]
+    fn changed_file_descriptor_stops_writer_fetch_clone_and_mount_before_encryption_or_decryption() {
+        let root = std::env::temp_dir().join(crate::ids::new_id());
+        std::fs::create_dir_all(&root).unwrap();
+        let ctx = Ctx {
+            store: crate::store::Store::open(&root.join("local")).unwrap(),
+            caller: Caller::from_uid(rustix::process::geteuid().as_raw()),
+            cwd: root.clone(),
+            env: Default::default(),
+            out: std::cell::RefCell::new(Box::new(Vec::<u8>::new())),
+        };
+        let dir = ctx.store.projects_dir().join("p");
+        std::fs::create_dir_all(dir.join("meta/db")).unwrap();
+        let project_id = crate::ids::new_id();
+        let mut repo = Repo {
+            p: crate::store::Project {
+                store: &ctx.store,
+                name: "p".into(),
+                dir: dir.clone(),
+                id: project_id.clone(),
+                db: crate::db::Db::open(&dir.join("meta/db/layr.sqlite")).unwrap(),
+            },
+        };
+        let mut record = Record::new("project");
+        record.data = serde_json::json!({"id":project_id,"name":"p","config":{}});
+        repo.p.append(record, &ctx.actor()).unwrap();
+        let url = format!("file://{}", root.join("remote").display());
+        let mut store = open(&url, &repo).unwrap();
+        store.configure(&ctx, &ConfigureOptions { paper_key_out: Some(root.join("paper")) }).unwrap();
+        crate::cmd::admin::set_config(&ctx, &repo, "cloud.remote.archive.url", serde_json::json!(url)).unwrap();
+        store.save_pin(&ctx, &repo, "archive").unwrap();
+        let mut store = open(&url, &repo).unwrap();
+        let pin = store.pin.clone().unwrap();
+        let attacker = keys::generate_identity();
+        let recipient = keys::recipient_of(&attacker).unwrap();
+        std::fs::write(
+            root.join("remote/store.json"),
+            serde_json::to_vec(&Descriptor { format: 2, project: project_id.clone(), recipient: recipient.clone() }).unwrap(),
+        )
+        .unwrap();
+        // No slot: this machine can only write to the public recipient.
+        std::fs::remove_dir_all(root.join("remote/slots")).unwrap();
+        let before = store.backend.list("").unwrap().len();
+        let error = writer::push(&store, &ctx, &repo, &Options::default()).unwrap_err().to_string();
+        assert!(error.contains(&pin.recipient) && error.contains(&recipient), "{error}");
+        assert_eq!(store.backend.list("").unwrap().len(), before);
+        let error = reader::fetch(&mut store, &ctx, &mut repo, &Options::default()).unwrap_err().to_string();
+        assert!(error.contains(&pin.recipient) && error.contains(&recipient), "{error}");
+        // The descriptor must win over the missing slot error in clone and mount too.
+        repo.p.id.clear();
+        store.project.clear();
+        let error = store.clone_into(&ctx, &mut repo, &Options::default()).unwrap_err().to_string();
+        assert!(error.contains(&pin.recipient) && error.contains(&recipient), "{error}");
+        let access = browse::Access { pin: Some(pin.clone()), ..Default::default() };
+        let error = browse::Browse::open(&url, &Default::default(), &access).err().unwrap().to_string();
+        assert!(error.contains(&pin.recipient) && error.contains(&recipient), "{error}");
+        let other_project = crate::ids::new_id();
+        std::fs::write(
+            root.join("remote/store.json"),
+            serde_json::to_vec(&Descriptor { format: 2, project: other_project.clone(), recipient: pin.recipient.clone() })
+                .unwrap(),
+        )
+        .unwrap();
+        let error = store.descriptor().err().unwrap().to_string();
+        assert!(error.contains(&project_id) && error.contains(&other_project), "{error}");
+        drop(repo);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

@@ -1,7 +1,7 @@
 //! Read store trees without a local project or snapshot backend.
 
 pub(crate) use super::format::Entry;
-use super::{backend::Backend, keys, reader, Descriptor};
+use super::{backend::Backend, keys, reader, Descriptor, StorePin};
 use anyhow::{bail, Context, Result};
 use ed25519_dalek::SigningKey;
 use std::collections::{BTreeMap, HashMap};
@@ -11,6 +11,7 @@ pub struct Access {
     pub machine: Option<(String, SigningKey)>,
     pub paper: Option<String>,
     pub identity: Option<String>,
+    pub pin: Option<StorePin>,
 }
 
 pub struct Line {
@@ -27,6 +28,7 @@ pub struct Browse {
     identity: String,
     keys: BTreeMap<String, ed25519_dalek::VerifyingKey>,
     pub lines: Vec<Line>,
+    pub pin: StorePin,
 }
 
 impl Browse {
@@ -37,6 +39,10 @@ impl Browse {
         if descriptor.format != 2 || !crate::model::is_uuid(&descriptor.project) {
             bail!("invalid store descriptor");
         }
+        if let Some(pin) = &access.pin {
+            pin.check(&descriptor)?;
+        }
+        let pin = StorePin { project: descriptor.project.clone(), recipient: descriptor.recipient.clone() };
         drop(stage);
         let stage = crate::trace::span("disk slot");
         let identity = if let Some(identity) = &access.identity {
@@ -91,7 +97,7 @@ impl Browse {
         }
         drop(decoder);
         drop(stage);
-        Ok(Self { backend, identity, keys: records.keys, lines })
+        Ok(Self { backend, identity, keys: records.keys, lines, pin })
     }
 
     pub fn identity(&self) -> &str {
@@ -99,6 +105,11 @@ impl Browse {
     }
 
     pub fn read(&mut self, entry: &Entry) -> Result<Vec<u8>> {
+        let descriptor: Descriptor = serde_json::from_slice(&self.backend.get("store.json")?.context("store.json is missing")?)?;
+        if descriptor.format != 2 {
+            bail!("unsupported store format {}", descriptor.format);
+        }
+        self.pin.check(&descriptor)?;
         reader::Reader::new(&self.backend, &self.identity, &self.keys).read(entry)
     }
 }

@@ -443,6 +443,7 @@ mod tests {
             key: ctx.store.machine.key.clone(),
             dir: root.join("local/meta"),
             paper_key_text: None,
+            pin: None,
         }
     }
     #[test]
