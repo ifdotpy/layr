@@ -2,6 +2,7 @@
 
 pub mod admin;
 pub mod attest;
+pub mod bisect;
 pub mod branch;
 pub mod change;
 pub mod history;
@@ -184,7 +185,7 @@ Read history:
    log, show, blame, grep, ls-files, rev-parse, merge-base
 Lines and states:
    branch, switch, checkout, tag, merge, cherry-pick, revert, rebase
-   save, undo, op, try, adopt
+   save, undo, op, try, bisect run, adopt
    ref set/list/log/delete, attest, attestations, change list/show/log/diff
 Remotes:
    remote add, list, self, remove, trust; sync, fetch, pull, push, clone
@@ -259,6 +260,7 @@ pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
         "undo" => admin::undo(ctx, &rest),
         "op" => admin::op(ctx, &rest),
         "try" => admin::try_cmd(ctx, &rest),
+        "bisect" => bisect::run(ctx, &rest),
         "access" => admin::access(ctx, &rest),
         "protect" => admin::protect(ctx, &rest),
         "approve" => admin::approve(ctx, &rest),

@@ -810,6 +810,13 @@ pub fn commit_layers(
             }
         }
     };
+    if let Some(state) = &shared {
+        if let Err(e) = crate::secrets::check_between(ctx, repo, &shared_root, &repo.p.state_path(&state.id), &line.head) {
+            repo.discard_states(std::slice::from_ref(state));
+            discard(&made, &orepos);
+            return Err(e);
+        }
+    }
     // The overlays first: a lost main record leaves an overlay line ahead of the stack, which the
     // next commit reports, never a stack that names a missing state.
     let mut new_layers = layers.to_vec();

@@ -859,6 +859,10 @@ pub fn commit(ctx: &Ctx, args: &[String]) -> Result<i32> {
             cleared.push(c.clone());
         }
     }
+    if let Err(e) = crate::secrets::check_between(ctx, &h.repo, &head_root, &new_root, &line.head) {
+        h.repo.discard_states(std::slice::from_ref(&state));
+        return Err(e);
+    }
     let rec = h.repo.move_head(ctx, "commit", &line, &state.id, vec![state.clone()], None, serde_json::json!({"line": line.id}));
     rec?;
     #[cfg(target_os = "macos")]

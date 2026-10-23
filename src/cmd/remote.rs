@@ -275,6 +275,7 @@ pub mod git {
         };
         repo.require(ctx, "push").map_err(|e| exit(1, e.to_string()))?;
         let state_id = revs::resolve(repo, line.as_ref(), &rev)?;
+        crate::secrets::check_history(ctx, repo, &state_id)?;
         let state = repo.state(&state_id)?;
         if !state.conflicts.is_empty() {
             return Err(exit(
