@@ -88,7 +88,10 @@ eq "rm -rf of the line is restored" "a1" "$(head -1 a1.txt)"
 
 # Automatic states while a process writes (snapshot.interval 3 s, service tick 2 s).
 as layr-u1 sh -c 'echo bg > bg.txt'
-sleep 7
+for i in $(seq 1 100); do
+    [ -n "$(find "$LAYR_ROOT/projects/perm/states" -name bg.txt -print -quit)" ] && break
+    sleep 0.2
+done
 has "the service saved the line" "periodic" "$(as layr-u1 $L log --auto --format=%s -n 3)"
 has "and marked it as taken while processes ran" "taken while processes ran" "$(as layr-u1 $L show -s HEAD@{0})"
 
