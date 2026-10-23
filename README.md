@@ -33,12 +33,15 @@ commands that change files behind the editor's back. Layr is built for that.
   code generator did. Every operation is a signed record, and `layr undo` reverses it.
 - **You ship what you checked.** Checks, approvals and deploys name one exact state. Change one
   byte and the approval no longer applies. A merge queue keeps `main` green.
-- **Secrets are versioned, privately.** `.env` files and keys live in private overlays: they have
-  their own history, and only their readers see them, even inside a shared line. Pushes and
-  exports carry the shared files only, and Layr refuses any save, push or export that would
-  copy a secret's value into shared files.
-- **Copies are encrypted and yours.** Push to a peer, a folder or your own S3 bucket. Data is
-  encrypted with `age` before it leaves the machine.
+- **Secrets are versioned and pushed securely.** `.env` files and keys live in private overlays:
+  their own history, their own readers, their own encryption key. They travel with every push,
+  and only the people and machines you allow can open them. Layr refuses any save or push that
+  would copy a secret's value into shared files.
+- **Copies are encrypted and yours.** Push to a peer, a folder, your own S3 bucket or Layr Cloud.
+  Data is encrypted end to end with `age` before it leaves the machine: storage and cloud see
+  ciphertext only.
+- **Sharing is per person.** One person key opens every project that person may read. Grant it
+  with one command; nobody else, the cloud included, ever holds the key.
 
 ## How it works
 
@@ -110,14 +113,24 @@ editors and tools that read Git output keep working.
 
 | | |
 |---|---|
-| **Undo what an agent did** | `layr op log`, `layr restore --source <state> .` ([review](docs/review.md)) |
-| **Find the step that broke it** | `layr bisect run --auto -- cargo test` searches every saved step, not only states with messages |
+| **Undo what an agent did** | `layr op log`, `layr undo`, `layr restore --source <state> .` ([review](docs/review.md)) |
+| **Run many agents at once** | `layr line new agent main --count 16`: separate folders, shared warm caches |
+| **See conflicts before merging** | `layr status` lists files that other live lines change too |
 | **Merge lockfiles by rebuilding them** | `package-lock.json derive=npm` in `.layrattributes` ([merge](docs/merge.md)) |
-| **Review behavior** | `layr probe run`, `layr change show` compare API answers, metrics and files between exact states |
-| **Protect production** | `layr protect env/prod --check unit --approvals 1`, `layr queue run` |
-| **Run any ref as a container** | images and Helm charts from `layr.toml`, served by the daemon ([OCI](docs/oci.md)) |
-| **Keep encrypted copies** | `layr remote add vault s3://bucket/app`, `layr push vault`, `layr mount vault` ([remotes](docs/remotes.md)) |
-| **Share files with some readers only** | overlays: private files in a shared line ([overlays](docs/overlays.md)) |
+| **Find the step that broke it** | `layr bisect run --auto -- cargo test` searches every saved step, not only states with messages |
+| **Review versions of one change** | `layr change show`, `layr change diff --from v2 --to v3`: a change keeps its id through amends and replays |
+| **Review behavior** | `layr probe run`, `layr probe diff` compare API answers, metrics and files between exact states |
+| **Sign what happened** | `layr attest`, `layr approve`, `layr try`: signed checks and approvals bound to exact states |
+| **Keep `main` green** | `layr queue add`, `layr queue run`: merges only after checks pass on the exact result |
+| **Protect production** | `layr protect env/prod --check unit --approvals 1`, `layr ref set env/prod … --expect`, rollback with `env/prod@{1}` |
+| **Run any ref as a container** | images and Helm charts from `layr.toml`, served by the daemon: `docker pull <host>/shop/app:prod` ([OCI](docs/oci.md)) |
+| **Version secrets** | private overlays with their own readers and keys; a detector stops secret values in shared files ([overlays](docs/overlays.md)) |
+| **Stack layers into views** | `layr view`: shared files plus overlays as one addressable stack, `views/<id>` |
+| **Keep encrypted copies** | `layr remote add vault s3://bucket/app`, `layr push vault`, `layr clone`, `layr mount vault` ([remotes](docs/remotes.md)) |
+| **Share with people** | `layr person keys`, `layr remote grant vault --person alice --recipient age1…` |
+| **Sync your own machines** | `layr remote add laptop ssh://laptop/app`, `layr sync laptop` |
+| **Move from Layr Desk** | `layr clone s3://desk-bucket/project` imports a Desk vault with its signatures checked |
+| **Mirror to Git** | `layr git push origin main`: every state becomes a Git commit with the same parents |
 
 ## Status
 
@@ -128,9 +141,15 @@ See [what this version does not do](docs/limits.md).
 
 ## Layr Cloud
 
-[Layr Cloud](https://github.com/ifdotpy/layr-cloud) runs Layr in your own AWS account: an
-encrypted S3 store per project, a gateway for machines without AWS credentials, and a host that
-runs the merge queue and the registry. Layr talks to it as an ordinary remote (`layr+https://`).
+[Layr Cloud](https://github.com/ifdotpy/layr-cloud) runs Layr in your own AWS account:
+
+- an end-to-end encrypted S3 store per project, in an account you own;
+- a gateway, so machines and people reach stores without AWS credentials (`layr+https://`);
+- person keys, invites and pins, so one key opens every project a person may read;
+- an executor host that runs the merge queue, the checks and the container registry;
+- CloudFormation templates and a runbook; no operator ever holds your keys.
+
+Layr talks to it as an ordinary remote.
 
 ## Documentation
 
