@@ -33,8 +33,10 @@ commands that change files behind the editor's back. Layr is built for that.
   code generator did. Every operation is a signed record, and `layr undo` reverses it.
 - **You ship what you checked.** Checks, approvals and deploys name one exact state. Change one
   byte and the approval no longer applies. A merge queue keeps `main` green.
-- **Secrets stay out.** Private files live in overlays that other readers never see, and Layr
-  refuses any save, push or export that contains the value of a known secret.
+- **Secrets are versioned, privately.** `.env` files and keys live in private overlays: they have
+  their own history, and only their readers see them, even inside a shared line. Pushes and
+  exports carry the shared files only, and Layr refuses any save, push or export that would
+  copy a secret's value into shared files.
 - **Copies are encrypted and yours.** Push to a peer, a folder or your own S3 bucket. Data is
   encrypted with `age` before it leaves the machine.
 
