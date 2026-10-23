@@ -13,12 +13,11 @@
 </p>
 
 ```console
-$ layr line new agent main --count 16     # 16 working folders, build caches included
-$ cd agent-3 && cargo build               # warm: target/ is a copy-on-write clone
-$ layr save -m "Add discount field"       # freeze the folder as a state
-$ layr queue add agent-3 --into main      # merges only after checks pass on the exact result
-$ layr ref set env/prod main --expect env/prod
-$ docker pull layr.local:5080/shop/app:prod   # any ref is also a container image
+$ layr line new fix                # a new working folder, ready in milliseconds
+$ cd ../fix && vim src/parser.rs
+$ layr save -am "Fix the parser"   # freeze the folder as a state
+$ rm -rf src                       # a mistake: yours, or an AI agent's
+$ layr restore .                   # and it is back
 ```
 
 ## Why Layr
