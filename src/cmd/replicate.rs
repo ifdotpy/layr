@@ -282,19 +282,50 @@ fn undo_dependencies(p: &Project) -> Result<BTreeSet<String>> {
     Ok(required)
 }
 
-fn wanted(p: &Project, id: &str, auto: bool, required: &BTreeSet<String>) -> bool {
+// Transport also accepts auxiliary states, which source-history traversal rejects.
+fn transfer_ancestors(p: &Project, id: &str) -> Result<Vec<String>> {
+    let mut seen = BTreeSet::new();
+    let mut order = Vec::new();
+    let mut pending = std::collections::VecDeque::from([id.to_owned()]);
+    while let Some(id) = pending.pop_front() {
+        if seen.insert(id.clone()) {
+            if let Some(state) = p.db.state(&id)? {
+                pending.extend(state.parents);
+            }
+            order.push(id);
+        }
+    }
+    Ok(order)
+}
+
+fn required_states(p: &Project) -> Result<BTreeSet<String>> {
+    let mut required = undo_dependencies(p)?;
+    for reference in p.db.refs("", ids::now_ms())? {
+        required.extend(transfer_ancestors(p, &reference.target)?);
+    }
+    Ok(required)
+}
+
+fn wanted(p: &Project, id: &str, auto: bool, caches: bool, required: &BTreeSet<String>) -> bool {
     match p.db.state(id).ok().flatten() {
+        Some(s) if s.kind == StateKind::Cache => caches,
         Some(s) => auto || s.kind != StateKind::Auto || required.contains(id),
         None => false,
     }
 }
 
 /// States to send, parents first, each with the best parent the peer has.
-fn plan(repo: &Repo, mine: &BTreeSet<String>, theirs: &BTreeSet<String>, auto: bool) -> Result<Vec<(String, Option<String>)>> {
-    let required = undo_dependencies(&repo.p)?;
+fn plan(
+    repo: &Repo,
+    mine: &BTreeSet<String>,
+    theirs: &BTreeSet<String>,
+    auto: bool,
+    caches: bool,
+) -> Result<Vec<(String, Option<String>)>> {
+    let required = required_states(&repo.p)?;
     let mut todo: Vec<(i64, String)> = mine
         .iter()
-        .filter(|id| !theirs.contains(*id) && wanted(&repo.p, id, auto, &required))
+        .filter(|id| !theirs.contains(*id) && wanted(&repo.p, id, auto, caches, &required))
         .filter_map(|id| repo.p.db.state(id).ok().flatten().map(|s| (s.time, id.clone())))
         .collect();
     todo.sort();
@@ -302,7 +333,7 @@ fn plan(repo: &Repo, mine: &BTreeSet<String>, theirs: &BTreeSet<String>, auto: b
     let mut out = Vec::new();
     for (_, id) in todo {
         let mut parent = None;
-        for a in repo.ancestors(&id)?.into_iter().skip(1) {
+        for a in transfer_ancestors(&repo.p, &id)?.into_iter().skip(1) {
             if have.contains(&a) {
                 parent = Some(a);
                 break;
@@ -532,7 +563,7 @@ pub fn exchange(
     let mut child = c.spawn().context("start the peer command")?;
     let mut w = Wire { r: child.stdout.take().unwrap(), w: std::io::BufWriter::new(child.stdin.take().unwrap()) };
     let started = std::time::Instant::now();
-    let result = (|| -> Result<(usize, usize, usize, usize, u64)> {
+    let result = (|| -> Result<(usize, usize, usize, usize, u64, Vec<String>)> {
         let mine = present(&repo.p)?;
         w.json(&json!({"op": "hello", "direction_v1": true, "direction": direction, "compressed_send_v2": btrfs::supports_compressed_receive(), "clone_sources_v1": true, "clone_identities_v1": clone_identities(&repo.p)?, "project": repo.p.name, "project_id": repo.p.id, "machine": repo.p.store.machine.id, "public_key": own_key(&repo.p), "seqs": seqs(&repo.p)?, "present": mine, "caches": present_caches(&repo.p)?, "layers": present_caches(&repo.p)?}))?;
         let hello = w.recv_json()?;
@@ -572,8 +603,9 @@ pub fn exchange(
         // States to the peer.
         let (mut sent, mut bytes) = (0, 0);
         if direction != "fetch" {
-            let list = plan(repo, &mine, &peer_present, auto)?;
-            let (n, b) = send_states(ctx, &mut w, repo, &list, caches, &peer_caches, &peer_present, SendFeatures::from_hello(&hello))?;
+            let list = plan(repo, &mine, &peer_present, auto, caches)?;
+            let (n, b) =
+                send_states(ctx, &mut w, repo, &list, caches, &peer_caches, &peer_present, SendFeatures::from_hello(&hello))?;
             sent = n;
             bytes = b;
         } else {
@@ -581,23 +613,37 @@ pub fn exchange(
         }
         // States from the peer.
         let mine_now = present(&repo.p)?;
-        let required = undo_dependencies(&repo.p)?;
+        let required = required_states(&repo.p)?;
         let want: Vec<String> = if direction == "push" {
             vec![]
         } else {
-            peer_present.iter().filter(|id| !mine_now.contains(*id) && wanted(&repo.p, id, auto, &required)).cloned().collect()
+            peer_present
+                .iter()
+                .filter(|id| !mine_now.contains(*id) && wanted(&repo.p, id, auto, caches, &required))
+                .cloned()
+                .collect()
         };
         w.json(&json!({"op": "want", "clone_identities_v1": clone_identities(&repo.p)?, "ids": want, "have": mine_now, "caches": caches, "have_caches": present_caches(&repo.p)?, "have_layers": present_caches(&repo.p)?, "layers": caches}))?;
         let got = recv_states(&mut w, &repo.p, direction != "push")?;
         w.json(&json!({"op": "bye"}))?;
-        Ok((sent_records, got_records, sent, got, bytes))
+        let mut omitted = BTreeSet::new();
+        if !caches {
+            let outgoing = mine.difference(&peer_present).filter(|_| direction != "fetch");
+            let incoming = peer_present.difference(&mine).filter(|_| direction != "push");
+            for id in outgoing.chain(incoming) {
+                if repo.p.db.state(id)?.is_some_and(|s| s.kind == StateKind::Cache) {
+                    omitted.insert(format!("cache state {id}: use --caches"));
+                }
+            }
+        }
+        Ok((sent_records, got_records, sent, got, bytes, omitted.into_iter().collect()))
     })();
     drop(w);
     if result.is_err() {
         let _ = child.kill();
     }
     let status = child.wait()?;
-    let (sr, gr, ss, gs, bytes) = result?;
+    let (sr, gr, ss, gs, bytes, omitted) = result?;
     if !status.success() {
         bail!("the peer command failed: {status}");
     }
@@ -605,7 +651,7 @@ pub fn exchange(
         outln!(
             ctx,
             "{}",
-            json!({"direction": direction, "records_sent": sr, "records_received": gr, "states_sent": ss, "states_received": gs, "bytes_sent": bytes})
+            json!({"direction": direction, "records_sent": sr, "records_received": gr, "states_sent": ss, "states_received": gs, "bytes_sent": bytes, "omitted": omitted})
         );
     } else if !quiet {
         outln!(
@@ -615,6 +661,9 @@ pub fn exchange(
             bytes as f64 / 1048576.0,
             started.elapsed().as_secs_f64()
         );
+        for reason in omitted {
+            outln!(ctx, "omitted {reason}");
+        }
     }
     Ok(0)
 }
@@ -710,7 +759,7 @@ pub fn serve(ctx: &Ctx, args: &[String]) -> Result<i32> {
     todo.sort();
     for (_, id) in todo {
         let mut parent = None;
-        for a in repo.ancestors(&id)?.into_iter().skip(1) {
+        for a in transfer_ancestors(&repo.p, &id)?.into_iter().skip(1) {
             if have2.contains(&a) && mine_set.contains(&a) {
                 parent = Some(a);
                 break;
@@ -742,6 +791,123 @@ pub fn serve(ctx: &Ctx, args: &[String]) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "requires a root Btrfs fixture and a built peer binary"]
+    fn auxiliary_states_cross_the_peer_protocol() {
+        use crate::ctx::Caller;
+        use crate::model::Record;
+        let base = std::path::PathBuf::from(std::env::var_os("LAYR_TEST_AUX_ROOT").expect("LAYR_TEST_AUX_ROOT"));
+        let binary = std::env::var("LAYR_TEST_BINARY").expect("LAYR_TEST_BINARY");
+        let source = base.join("source");
+        btrfs::create_subvolume(&source).unwrap();
+        std::fs::write(source.join("payload"), "auxiliary payload").unwrap();
+        let ctx = Ctx {
+            store: crate::store::Store::open(&base.join("a")).unwrap(),
+            caller: Caller::from_uid(0),
+            cwd: base.clone(),
+            env: std::collections::HashMap::from([("LAYR_PROJECT".into(), "p".into())]),
+            out: std::cell::RefCell::new(Box::new(std::fs::File::create(base.join("report.json")).unwrap())),
+        };
+        let repo = Repo { p: Project::create(&ctx.store, "p", &ctx.actor(), json!({})).unwrap() };
+        let mut ids = Vec::new();
+        for (kind, name) in [(StateKind::Cache, "caches/peer"), (StateKind::Derived, "derived/peer")] {
+            let _lock = repo.p.lock().unwrap();
+            let mut state = repo.new_state(&ctx, &source, kind, vec![], "peer fixture", None).unwrap();
+            state.context = Some("peer-fixture-v1".into());
+            let id = state.id.clone();
+            let mut rec = Record::new("fixture");
+            rec.states.push(state);
+            repo.commit_record(&ctx, rec).unwrap();
+            let mut rec = Record::new("ref.set");
+            rec.data = json!({"ref_change":{"name":name,"before":null,"after":{"name":name,"target":id,"expires_at":null}}});
+            repo.commit_record(&ctx, rec).unwrap();
+            ids.push(id);
+        }
+        drop(repo);
+        let peer_root = std::path::PathBuf::from(std::env::var_os("LAYR_TEST_AUX_PEER_ROOT").expect("LAYR_TEST_AUX_PEER_ROOT"));
+        let command = vec![
+            "env".into(),
+            format!("LAYR_ROOT={}", peer_root.display()),
+            "LAYR_DIRECT=1".into(),
+            binary,
+            "serve-peer".into(),
+            "p".into(),
+        ];
+        exchange(&ctx, &command, "push", false, false, false, true).unwrap();
+        let report: Value = serde_json::from_slice(&std::fs::read(base.join("report.json")).unwrap()).unwrap();
+        assert!(report["omitted"].as_array().unwrap().iter().any(|v| v.as_str().unwrap().contains(&ids[0])));
+        let peer_state = |id: &str| peer_root.join("projects/p/states").join(id);
+        assert!(!peer_state(&ids[0]).exists());
+        assert_eq!(std::fs::read_to_string(peer_state(&ids[1]).join("payload")).unwrap(), "auxiliary payload");
+        exchange(&ctx, &command, "push", false, true, true, false).unwrap();
+        assert_eq!(std::fs::read_to_string(peer_state(&ids[0]).join("payload")).unwrap(), "auxiliary payload");
+        // Fetch must use the same policy, and the server must traverse auxiliary states.
+        for id in &ids {
+            btrfs::delete_tree(&ctx.store.projects_dir().join("p/states").join(id)).unwrap();
+        }
+        exchange(&ctx, &command, "fetch", false, false, true, false).unwrap();
+        assert!(!ctx.store.projects_dir().join("p/states").join(&ids[0]).exists());
+        assert!(ctx.store.projects_dir().join("p/states").join(&ids[1]).join("payload").exists());
+        exchange(&ctx, &command, "fetch", false, true, true, false).unwrap();
+        assert!(ctx.store.projects_dir().join("p/states").join(&ids[0]).join("payload").exists());
+    }
+
+    #[test]
+    fn live_refs_include_auto_ancestry_and_gate_only_cache_states() {
+        use crate::model::{Author, Record};
+        let dir = std::env::temp_dir().join(format!("layr-peer-refs-{}", ids::new_id()));
+        let store = crate::store::Store::open(&dir).unwrap();
+        let project_dir = store.projects_dir().join("p");
+        std::fs::create_dir_all(project_dir.join("meta/db")).unwrap();
+        std::fs::create_dir(project_dir.join("states")).unwrap();
+        let p = Project {
+            store: &store,
+            name: "p".into(),
+            dir: project_dir.clone(),
+            id: ids::new_id(),
+            db: crate::db::Db::open(&project_dir.join("meta/db/layr.sqlite")).unwrap(),
+        };
+        let actor = crate::model::Actor { uid: 0, name: "root".into(), session: None };
+        let mut rec = Record::new("project");
+        rec.data = json!({"id":p.id,"name":"p","config":{}});
+        p.append(rec, &actor).unwrap();
+        let mut all: Vec<String> = Vec::new();
+        for (index, kind) in
+            [StateKind::Auto, StateKind::Auto, StateKind::Auto, StateKind::Cache, StateKind::Derived].into_iter().enumerate()
+        {
+            let id = ids::new_id();
+            let parents = if index == 1 { vec![all[0].clone()] } else { vec![] };
+            let mut rec = Record::new("fixture");
+            rec.states.push(
+                serde_json::from_value(json!({"id":id,"kind":kind,"parents":parents,
+                "subvol":"","author":Author::default(),"time":index as i64,"context":"peer-fixture-v1"}))
+                .unwrap(),
+            );
+            p.append(rec, &actor).unwrap();
+            all.push(id);
+        }
+        for (name, index, expires_at) in
+            [("pins/auto", 1, None), ("pins/expired", 2, Some(1)), ("caches/test", 3, None), ("derived/test", 4, None)]
+        {
+            let mut rec = Record::new("ref.set");
+            rec.data = json!({"ref_change":{"name":name,"before":null,"after":{"name":name,"target":all[index],"expires_at":expires_at}}});
+            p.append(rec, &actor).unwrap();
+        }
+        let required = required_states(&p).unwrap();
+        assert!(required.contains(&all[0]) && required.contains(&all[1]));
+        assert!(!required.contains(&all[2]));
+        let repo = Repo { p };
+        let mine = all.iter().cloned().collect();
+        let selected: Vec<_> =
+            plan(&repo, &mine, &BTreeSet::new(), false, false).unwrap().into_iter().map(|(id, _)| id).collect();
+        assert_eq!(selected, vec![all[0].clone(), all[1].clone(), all[4].clone()]);
+        let selected: Vec<_> = plan(&repo, &mine, &BTreeSet::new(), false, true).unwrap().into_iter().map(|(id, _)| id).collect();
+        assert_eq!(selected, vec![all[0].clone(), all[1].clone(), all[3].clone(), all[4].clone()]);
+        drop(repo);
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn deleted_line_snapshots_are_undo_dependencies() {
         let mut rec = crate::model::Record::new("line.delete");
