@@ -24,7 +24,9 @@ chmod 755 "$T"
 id layr-disk-test >/dev/null 2>&1 || useradd -m layr-disk-test
 cp "$LAYR" "$T/layr"
 chmod 755 "$T/layr"
-mkdir "$T/home"
+mkdir "$T/home" "$T/reader-machine"
+cp -R "$LAYR_ROOT/machine" "$T/reader-machine/machine"
+chown -R layr-disk-test "$T/reader-machine"
 chown -R layr-disk-test "$T/home" "$T/remote" "$T/paper"
 export DISK_TEST_T=$T DISK_TEST_STORE=$LAYR_ROOT
 python3 - <<'CHECK'
@@ -93,6 +95,7 @@ try:
  (working/'a.txt').write_text('new')
  for args in [['add','a.txt'],['commit','-qm','disk-refresh'],['push','origin']]:
   subprocess.run([binary,*args],cwd=working,env=writer,check=True,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
+ subprocess.run(['chown','-R','layr-disk-test',str(root/'remote')],check=True)
  check(request('GET','/main/a.txt')[2]==b'abc','old view stays consistent until refresh')
  deadline=time.monotonic()+150
  while time.monotonic()<deadline:
@@ -105,6 +108,25 @@ finally:
  os.killpg(process.pid,signal.SIGTERM)
  process.wait(timeout=10)
  log.close()
+# A separate reader uses only the copied machine identity, with no paper input.
+slot_log=open(root/'slot.log','w+')
+slot_command=command[:-2]
+slot_command[slot_command.index('LAYR_ROOT='+str(root/'no-project-store'))]='LAYR_ROOT='+str(root/'reader-machine')
+slot_process=subprocess.Popen(slot_command,stdout=slot_log,stderr=slot_log,start_new_session=True)
+try:
+ deadline=time.monotonic()+30
+ while time.monotonic()<deadline:
+  slot_log.flush();slot_log.seek(0);match=re.search(r'http://127\.0\.0\.1:(\d+)/',slot_log.read())
+  if match: break
+  if slot_process.poll() is not None: raise AssertionError('machine slot reader stopped')
+  time.sleep(.1)
+ else: raise AssertionError('machine slot reader did not start')
+ port=int(match[1])
+ assert request('GET','/main/a.txt')[2]==b'new', 'machine slot read differs'
+ assert not (root/'reader-machine/projects').exists(), 'machine reader created a project'
+ print('PASS standalone machine slot')
+finally:
+ os.killpg(slot_process.pid,signal.SIGTERM);slot_process.wait(timeout=10);slot_log.close()
 CHECK
 PASS=$((PASS + 1))
 finish

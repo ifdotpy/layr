@@ -383,6 +383,56 @@ fn cli_store_round_trip(
     let url = format!("layr+https://localhost:{}/cli", address.port());
     run(&store, &line, &["remote", "add", "gateway", &url], Some(&write_file));
     run(&store, &line, &["push", "gateway", "-q"], Some(&write_file));
+    // Standalone WebDAV readers open the gateway and S3 without a local project.
+    for (mount_url, with_aws) in [(&url, false), (&owner_url, true)] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mount_address = listener.local_addr().unwrap();
+        drop(listener);
+        let mount_home = home.join(if with_aws { "mount-s3-home" } else { "mount-gateway-home" });
+        fs::create_dir(&mount_home).unwrap();
+        let mount_root = mount_home.join("no-project-store");
+        let mount_log = fs::File::create(mount_home.join("mount.log")).unwrap();
+        let mut command = Command::new(binary);
+        command
+            .args(["mount", mount_url, "--listen", &mount_address.to_string(), "--paper-key-file"])
+            .arg(&paper)
+            .env("HOME", &mount_home)
+            .env("LAYR_ROOT", &mount_root)
+            .env("LAYR_GATEWAY_CA_FILE", ca)
+            .env("LAYR_GATEWAY_TOKEN_FILE", home.join("absent-write-grant"))
+            .env_remove("AWS_ACCESS_KEY_ID")
+            .env_remove("AWS_SECRET_ACCESS_KEY")
+            .env_remove("AWS_SESSION_TOKEN")
+            .stdout(Stdio::from(mount_log.try_clone().unwrap()))
+            .stderr(Stdio::from(mount_log));
+        if with_aws {
+            command
+                .env("AWS_ACCESS_KEY_ID", std::env::var("LAYR_MINIO_ACCESS_KEY").unwrap())
+                .env("AWS_SECRET_ACCESS_KEY", std::env::var("LAYR_MINIO_SECRET_KEY").unwrap())
+                .env("AWS_ENDPOINT_URL_S3", endpoint);
+        }
+        let mount = command.spawn().unwrap();
+        let mount = Server(mount);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let reader = Client::builder()
+            .no_proxy()
+            .connect_timeout(Duration::from_millis(200))
+            .timeout(Duration::from_secs(3))
+            .build()
+            .unwrap();
+        let payload = loop {
+            if let Ok(response) = reader.get(format!("http://{mount_address}/main/notes.txt")).send() {
+                if response.status().as_u16() == 200 {
+                    break response.bytes().unwrap();
+                }
+            }
+            assert!(Instant::now() < deadline, "standalone store mount did not serve its state");
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        assert_eq!(payload.as_ref(), b"first state\n");
+        assert!(!mount_root.exists(), "mount created a local project store");
+        drop(mount);
+    }
     let replica = store.join("gateway-replica");
     let own: serde_json::Value = serde_json::from_str(&run(&replica, home, &["remote", "self", "--json"], None)).unwrap();
     run(

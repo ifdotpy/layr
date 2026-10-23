@@ -1,7 +1,7 @@
 //! Start the disk at login and mount it with the macOS WebDAV client.
 
 use anyhow::{bail, Context, Result};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 const LABEL: &str = "ws.layr.mount";

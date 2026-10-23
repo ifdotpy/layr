@@ -106,7 +106,9 @@ fn resolve(path: &str, entry: &Entry, files: &BTreeMap<String, Entry>, reader: &
 
 impl Disk {
     fn load(url: &str, env: &HashMap<String, String>, access: &Access) -> Result<(Snapshot, String)> {
+        let span = crate::trace::span("disk store read");
         let mut reader = Browse::open(url, env, access)?;
+        drop(span);
         let identity = reader.identity().to_owned();
         let lines = std::mem::take(&mut reader.lines);
         let reader = Arc::new(Mutex::new(reader));
@@ -398,7 +400,9 @@ pub fn run(args: &[String]) -> Result<i32> {
     let access = Access { machine: machine_access(), paper, identity: cached };
     let env = std::env::vars().collect();
     let (disk, identity) = Disk::open(url.clone(), env, access, cache.clone(), limit)?;
+    let span = crate::trace::span("disk Keychain save");
     keystore::set(&account, &identity)?;
+    drop(span);
     let prefs = preferences_file(&home);
     std::fs::create_dir_all(prefs.parent().unwrap())?;
     crate::fsutil::atomic_write(
@@ -461,12 +465,18 @@ fn connection(disk: &Disk, stream: std::net::TcpStream) -> Result<()> {
     let request = match crate::http::request(&mut stream, &limits) {
         Ok(request) => request,
         Err(error) => {
+            if std::env::var_os("LAYR_TRACE").is_some() {
+                eprintln!("disk HTTP parse: {} {}", error.status, error.message);
+            }
             stream.begin_write(limits.write_timeout);
             crate::http::response(&mut stream, error.status, &[], b"")?;
             return Ok(());
         }
     };
     stream.begin_write(limits.write_timeout);
+    if std::env::var_os("LAYR_TRACE").is_some() {
+        eprintln!("disk HTTP {}", request.method);
+    }
     let host = request.header("host").unwrap_or("");
     let host = reqwest::Url::parse(&format!("http://{host}/")).ok();
     let local_host = host

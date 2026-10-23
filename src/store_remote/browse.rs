@@ -31,15 +31,14 @@ pub struct Browse {
 
 impl Browse {
     pub fn open(url: &str, env: &HashMap<String, String>, access: &Access) -> Result<Self> {
-        let mut backend = Backend::open(url)?;
-        if let Some(path) = url.strip_prefix("s3://") {
-            let (bucket, prefix) = path.split_once('/').unwrap_or((path, ""));
-            backend = Backend::S3(super::s3::S3::with_env(bucket, prefix, env)?);
-        }
+        let stage = crate::trace::span("disk descriptor");
+        let backend = Backend::for_reader(url, env)?;
         let descriptor: Descriptor = serde_json::from_slice(&backend.get("store.json")?.context("store.json is missing")?)?;
         if descriptor.format != 2 || !crate::model::is_uuid(&descriptor.project) {
             bail!("invalid store descriptor");
         }
+        drop(stage);
+        let stage = crate::trace::span("disk slot");
         let identity = if let Some(identity) = &access.identity {
             identity.clone()
         } else if let Some((machine, key)) = &access.machine {
@@ -54,15 +53,22 @@ impl Browse {
         if keys::recipient_of(&identity)? != descriptor.recipient {
             bail!("the disk key does not match the store recipient");
         }
+        drop(stage);
+        let stage = crate::trace::span("disk records");
+        backend.unlock_reader(&identity)?;
         let records = reader::records(&backend, &identity, &descriptor.project)?;
         if !records.gaps.is_empty() {
             bail!("the store has record gaps; fetch the complete record history before mounting");
         }
+        drop(stage);
+        let stage = crate::trace::span("disk metadata");
         // Derived tables exist only in memory. No local project is created.
         let db = crate::db::Db::open(std::path::Path::new(":memory:"))?;
         for line in &records.lines {
             db.derive(&crate::oplog::parse_line(line, None)?.record, &|_| false, "")?;
         }
+        drop(stage);
+        let stage = crate::trace::span("disk trees");
         let attempts = reader::attempts(&backend)?;
         let mut decoder = reader::Reader::new(&backend, &identity, &records.keys);
         let mut lines = Vec::new();
@@ -84,6 +90,7 @@ impl Browse {
             lines.push(Line { name: line.name, head: state.id, kind: kind.into(), machine, time: state.time, files: tree.files });
         }
         drop(decoder);
+        drop(stage);
         Ok(Self { backend, identity, keys: records.keys, lines })
     }
 
