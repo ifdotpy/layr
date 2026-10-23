@@ -6,6 +6,7 @@ pub mod branch;
 pub mod change;
 pub mod history;
 pub mod mergecmd;
+pub mod oci;
 pub mod overlaycmd;
 pub mod refs;
 pub mod remote;

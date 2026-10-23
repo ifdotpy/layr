@@ -238,6 +238,10 @@ pub fn git_sync(ctx: &Ctx, args: &[String]) -> Result<i32> {
 }
 
 pub fn push(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    // OCI transport hook; remote workstream owns the final dispatch.
+    if let Some(code) = super::oci::dispatch(ctx, args)? {
+        return Ok(code);
+    }
     let spec = Spec::new()
         .flag("-f|--force")
         .flag("--force-with-lease")

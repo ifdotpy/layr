@@ -1264,11 +1264,14 @@ const POLICY_KEYS: &[&str] = &["access", "grants", "deny", "protect", "members",
 
 /// A named check's command belongs to the protection rules that name it (`check.<name>`).
 fn policy_key(key: &str) -> bool {
-    POLICY_KEYS.contains(&key) || key.starts_with("check.")
+    POLICY_KEYS.contains(&key) || key.starts_with("check.") || key == "registry.tokens"
 }
 
 /// `layr access`: roles and deny rules (docs/design.md, section 3).
 pub fn access(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    if args.first().map(String::as_str) == Some("token") {
+        return super::oci::token(ctx, &args[1..]);
+    }
     use crate::access::{action_role, parse_principal, show_principal, Role, ACTIONS};
     let h = here(ctx)?;
     let repo = &h.repo;
@@ -1402,7 +1405,7 @@ pub fn approve(ctx: &Ctx, args: &[String]) -> Result<i32> {
 }
 
 /// A duration: `90s`, `30m`, `2h`, `1d`.
-fn duration_ms(s: &str) -> Result<i64> {
+pub(crate) fn duration_ms(s: &str) -> Result<i64> {
     let (n, unit) = s.split_at(s.len().saturating_sub(1));
     let n: i64 = n.parse().map_err(|_| exit(128, format!("fatal: bad duration '{s}' (for example 30m, 2h, 1d)")))?;
     let k = match unit {
