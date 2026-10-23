@@ -46,8 +46,8 @@ def same_status(label, *, fallback=False):
     before = run(0, works[0], 'status', '--porcelain', '--ignored')
     after = run(1, works[1], 'status', '--porcelain', '--ignored')
     assert before.stdout == after.stdout, (label, before.stdout, after.stdout)
-    # On a volume with an FSEvents log, status can come from the saved status instead.
-    if 'FSEvents status used' not in after.stderr:
+    # A status can come from the saved status of the previous one instead.
+    if 'saved status used' not in after.stderr:
         assert 'APFS validated read' in after.stderr, (label, after.stderr)
         assert ('APFS clone ' in after.stderr) == fallback, (label, after.stderr)
     checks += 1
@@ -118,9 +118,6 @@ try:
         assert (mains[i] / 'readonly').read_text() == 'old\n'
         run(i, works[i], 'fsck')
 
-    # A write through a memory mapping gives no FSEvents event: this check is about the
-    # snapshot fallback, so the saved status is off (see tests/apfs-watch.py for its limit).
-    run(1, works[1], 'config', 'watch.full_seconds', '0')
     with (works[0] / 'file').open('r+b') as f0, (works[1] / 'file').open('r+b') as f1:
         with mmap.mmap(f0.fileno(), 0) as m0, mmap.mmap(f1.fileno(), 0) as m1:
             for mapped in (m0, m1):

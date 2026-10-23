@@ -731,8 +731,18 @@ pub fn run_gc(ctx: &Ctx, repo: &Repo, dry: bool) -> Result<Vec<String>> {
     let caches = prune_caches(repo)?;
     #[cfg(target_os = "macos")]
     {
-        let heads: BTreeSet<String> = repo.lines()?.into_iter().map(|l| l.head).collect();
+        let lines = repo.lines()?;
+        let heads: BTreeSet<String> = lines.iter().map(|l| l.head.clone()).collect();
         let done = crate::thin::upkeep(&repo.p, &heads)?;
+        // Saved statuses of lines that are gone.
+        let ids: BTreeSet<String> = lines.iter().map(|l| format!("{}.cache", l.id)).collect();
+        if let Ok(rd) = std::fs::read_dir(repo.p.meta_dir().join("status")) {
+            for e in rd.flatten() {
+                if !ids.contains(&e.file_name().to_string_lossy().into_owned()) {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
         if done.views + done.keyframes + done.deleted > 0 {
             eprintln!(
                 "thin states: {} view(s) removed, {} complete tree(s) made, {} kept base(s) deleted",

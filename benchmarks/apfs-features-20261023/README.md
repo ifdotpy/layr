@@ -1,6 +1,6 @@
 # APFS features, 2026-10-23
 
-Baseline: `2ea2727` (thin APFS states). Candidate: `2a271ef`.
+Baseline: `2ea2727` (thin APFS states). Candidate: `2a271ef`; the saved status was measured later on the final branch.
 See [the feature review](../../docs/apfs-features.md). CPU is user and system time of the command.
 The host ran other work, so wall times vary; CPU values are more stable.
 
@@ -33,17 +33,20 @@ Space does not change.
 
 With a cold cache the old method also reads 2 GiB from disk.
 
-## FSEvents status, 100,000 files
+## Saved status, 100,000 files
 
-`fsevents.sh` on a browsable case-sensitive image (it has an FSEvents log), one changed file per step.
-`full` sets `LAYR_NO_WATCH=1`.
+`status-cache.sh` on a case-sensitive image, one or two changed files per step.
+`full` sets `LAYR_NO_STATUS_CACHE=1`. Results: `status-cache-results.txt`.
 
 | Run | CPU, s | Wall, s |
 | --- | ---: | ---: |
-| FSEvents | 0.00 to 0.01 | 0.10 to 0.24 |
-| Full read | 3.12 to 3.46 | 8.97 to 10.79 |
+| Saved status | 0.22 to 0.24 | 0.22 to 0.25 |
+| Full comparison | 1.28 to 1.35 | 1.31 to 1.39 |
 
-Most of the FSEvents wall time is the wait for the cookie event (20 to 480 ms in these runs).
+The one folder scan takes about 0.22 s of the saved status.
+
+An earlier version answered `status` from FSEvents in 0.01 s CPU (`fsevents.sh`, `fsevents-results.txt`).
+It was removed: a write through a memory mapping gives no event, so that status could be out of date.
 
 ## Probes
 

@@ -1,26 +1,17 @@
 #!/usr/bin/env python3
-"""Compare status from FSEvents with status from a full read, after many kinds of changes.
-
-The test makes and attaches its own small case-sensitive APFS image without -nobrowse: macOS
-keeps an FSEvents log only on such volumes. It removes the image at the end.
-"""
-import argparse, mmap, os, shutil, subprocess, tempfile, time
+"""Compare status from the saved status with status from a full comparison, after many kinds
+of change, including writes through a memory mapping and through a hard link outside the line."""
+import argparse, mmap, os, shutil, subprocess, tempfile
 from pathlib import Path
 
 p = argparse.ArgumentParser()
 p.add_argument('--binary', required=True)
-p.add_argument('--root', required=True, help='an empty folder for the image (any volume)')
+p.add_argument('--root', required=True, help='a folder on a case-sensitive APFS volume')
 a = p.parse_args()
 binary = str(Path(a.binary).resolve())
-work_root = Path(tempfile.mkdtemp(prefix='apfs-watch-', dir=Path(a.root).resolve()))
-image = work_root / 'watch.sparseimage'
-mount = work_root / 'mnt'
-mount.mkdir()
-subprocess.run(['hdiutil', 'create', '-size', '1g', '-type', 'SPARSE', '-fs', 'Case-sensitive APFS',
-                '-volname', 'LayrWatch', str(image)], check=True, capture_output=True)
-subprocess.run(['hdiutil', 'attach', '-mountpoint', str(mount), str(image)], check=True, capture_output=True)
-env = dict(os.environ, LAYR_ROOT=str(mount / 'store'), LAYR_AUTHOR_NAME='Test', LAYR_AUTHOR_EMAIL='test@example.invalid')
-for key in ('LAYR_SOCKET', 'LAYR_PROJECT', 'LAYR_LINE', 'LAYR_TRACE', 'LAYR_NO_WATCH'):
+work_root = Path(tempfile.mkdtemp(prefix='apfs-status-cache-', dir=Path(a.root).resolve()))
+env = dict(os.environ, LAYR_ROOT=str(work_root / 'store'), LAYR_AUTHOR_NAME='Test', LAYR_AUTHOR_EMAIL='test@example.invalid')
+for key in ('LAYR_SOCKET', 'LAYR_PROJECT', 'LAYR_LINE', 'LAYR_TRACE', 'LAYR_NO_STATUS_CACHE'):
     env.pop(key, None)
 
 
@@ -34,13 +25,13 @@ checks = 0
 
 
 def same(label, fast=True):
-    """The FSEvents status equals the full status; `fast` says the FSEvents path answered."""
+    """The saved status equals the full status; `fast` says the saved status answered."""
     global checks
     quick = run(work, 'status', '--porcelain', '--ignored', extra={'LAYR_TRACE': '1'})
-    full = run(work, 'status', '--porcelain', '--ignored', extra={'LAYR_NO_WATCH': '1'})
+    full = run(work, 'status', '--porcelain', '--ignored', extra={'LAYR_NO_STATUS_CACHE': '1'})
     assert quick.stdout == full.stdout, (label, quick.stdout, full.stdout)
-    used = 'FSEvents status used' in quick.stderr
-    assert used == fast, (label, 'FSEvents path used' if used else 'full read', quick.stderr)
+    used = 'saved status used' in quick.stderr
+    assert used == fast, (label, 'saved status used' if used else 'full comparison', quick.stderr)
     checks += 1
     print('PASS', label, flush=True)
 
@@ -55,11 +46,11 @@ try:
     (src / 'tool.sh').write_text('#!/bin/sh\n')
     os.symlink('d0/sub0/f0', src / 'link')
     run(work_root, 'init', 'p', '--from', src, '-q')
-    main = mount / 'store/projects/p/lines/main'
+    main = work_root / 'store/projects/p/lines/main'
     run(main, 'protect', 'main', '--remove')
     run(main, 'branch', '-q', 'topic')
     work = main.parent / 'topic'
-    same('first status reads all', fast=False)
+    same('first status compares all', fast=False)
     same('nothing changed')
 
     (work / 'd0/sub0/f0').write_text('changed\n')
@@ -91,37 +82,53 @@ try:
     os.utime(work / 'd0/sub0/f15', ns=(0, 10**18))
     same('only a new time')
     run(work, 'add', 'new.txt', 'd0/sub0/f0')
-    same('status after add reads all', fast=False)
+    same('status after add compares all', fast=False)
     (work / 'new.txt').write_text('new and changed\n')
     same('a staged and changed file')
     (work / '.gitignore').write_text('build/\n')
-    same('a changed .gitignore reads all', fast=False)
+    same('a changed .gitignore compares all', fast=False)
     run(work, 'add', '-A')
     run(work, 'commit', '-qm', 'all')
-    same('status after commit reads all', fast=False)
+    same('status after commit compares all', fast=False)
     same('clean after commit')
-    os.link(work / 'd0/sub0/f15', work / 'second-name')
-    same('a new hard link reads all', fast=False)
-    same('a folder with hard links keeps reading all', fast=False)
+    # Two names of one file inside the line: a write through one name changes both.
+    os.link(work / 'd0/sub1/f10', work / 'second-name')
+    same('a new hard link in the line')
+    with open(work / 'second-name', 'ab') as f:
+        f.write(b'through the second name\n')
+    same('a write through the second name')
     (work / 'second-name').unlink()
-    same('the link is gone: one full read', fast=False)
-    same('then FSEvents again')
+    same('the second name is gone')
+    # A write through a name outside the line changes the shared inode.
+    outside = work_root / 'outside-name'
+    os.link(work / 'd0/sub0/f15', outside)
+    same('a hard link outside the line')
+    with open(outside, 'r+b') as f:
+        f.write(b'X')
+    same('a write through the outside name')
+    os.unlink(outside)
     for i in range(40):
         (work / f'd1/sub{i % 3}/many{i}').write_text(f'again {i}\n')
     same('many changed files')
-    # A write through a memory mapping gives no event. The saved status serves only for
-    # watch.full_seconds after a full read; then a full read shows the write.
-    run(work, 'config', 'watch.full_seconds', '2')
-    time.sleep(2.2)
-    same('a saved status older than watch.full_seconds reads all', fast=False)
+    # A write through a memory mapping changes the change counter. While a file is mapped it
+    # has no counter, so status compares all.
     with (work / 'd1/sub1/f16').open('r+b') as f:
         with mmap.mmap(f.fileno(), 0) as m:
             m[0:1] = b'Z'
             m.flush()
-    time.sleep(2.2)
-    same('a mapped write shows after watch.full_seconds', fast=False)
+            # A mapped file has no change counter: it is compared every time.
+            same('a mapped file is compared each time')
+            m[2:3] = b'W'
+            m.flush()
+            same('a second write through the mapping')
+    same('after the mapping ends')
+    with (work / 'd1/sub1/f16').open('r+b') as f:
+        with mmap.mmap(f.fileno(), 0) as m:
+            m[1:2] = b'Y'
+            m.flush()
+    same('a write through a closed mapping')
     assert 'd1/sub1/f16' in run(work, 'status', '--porcelain').stdout
     print(f'{checks} status comparisons passed', flush=True)
 finally:
-    subprocess.run(['hdiutil', 'detach', '-force', str(mount)], capture_output=True)
+    subprocess.run(['chflags', '-R', 'nouchg', str(work_root)], check=False)
     shutil.rmtree(work_root, ignore_errors=True)

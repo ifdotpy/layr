@@ -107,9 +107,9 @@ The store and signed record formats remain compatible with the Linux backend.
   Other files require a content comparison to find changed blocks.
 - `status` checks kernel change counters before and after a live read. It uses a temporary snapshot if validation fails.
   Files with an active memory mapping or an unavailable counter also use the snapshot path.
-- On a volume with an FSEvents log, `status` brings its saved result up to date for the changed paths only.
-  A saved result serves for `watch.full_seconds` (60) after a full read; a write through a memory mapping gives no event.
-  `LAYR_NO_WATCH=1` reads all. See [APFS features](docs/apfs-features.md).
+- `status` saves its result with the stat data of each entry, as git's index does. The next `status` compares only
+  entries whose metadata, change counter, or clone ID differ. `LAYR_NO_STATUS_CACHE=1` compares all.
+  See [APFS features](docs/apfs-features.md).
 - Scans read each folder with one `getattrlistbulk` call. Changed ranges of large clones skip blocks at the same physical address.
 - A copy of a folder that changes during the copy copies the changed entries again. After 6 rounds it keeps the last copy
   with a warning: each file is one complete version from that time.

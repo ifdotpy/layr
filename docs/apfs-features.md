@@ -15,7 +15,7 @@ Measurements: [benchmarks/apfs-features-20261023](../benchmarks/apfs-features-20
 | Feature | Decision | Reason |
 | --- | --- | --- |
 | 1. `getattrlistbulk` | Used | One call per folder instead of two per entry. `status`, `add`, `save`, `commit` and `diff` use 30 to 40 percent less CPU. |
-| 2. FSEvents | Used for `status` | A saved status is brought up to date for the changed paths only. 100,000 files: 0.01 s CPU instead of 3.5 to 4.1 s. |
+| 2. FSEvents | Not used | A write through a memory mapping gives no event, so a status from events can be out of date. A saved status with stat data replaces it: about 5.5 times less CPU for `status` at 100,000 files (below). |
 | 3. `F_LOG2PHYS_EXT` | Used | Blocks of two clones at one physical address need no read. A 4 KiB change in a 1 GiB file: 0.62 s to 0.03 s per command. |
 | 4. Volume snapshots | Not used | `fs_snapshot_create` needs root and an Apple entitlement (`man fs_snapshot_create`). A normal user gets EPERM. |
 | 5. One APFS volume per project | Not used | It needs an administrator. Clones cannot cross volumes. Its main use, snapshots, needs item 4. |
@@ -30,18 +30,28 @@ Measurements: [benchmarks/apfs-features-20261023](../benchmarks/apfs-features-20
 - The folder group of attributes comes only for folders, the file group only for other objects.
 - A unit test compares the bulk scan with the previous `lstat` scan for files, links, hard links, read-only and setuid files, Unicode names and nested layers.
 
-### 2. FSEvents status
+### 2. FSEvents, and the saved status that replaces it
 
-A short-lived stream replays the volume event log since the saved event ID. No daemon runs.
+FSEvents can replay the volume event log since a stored ID, and a first version used it for `status`
+(100,000 files: 0.01 s CPU instead of 3.5 s). It was removed before release, because:
 
-- The log can be off: images attached with `-nobrowse` have no `.fseventsd`. Such volumes read all at once.
-- Each saved status writes its own marker file. The marker must come from the replayed history, before `HistoryDone`.
-  A young event can arrive live without any log, so a live marker proves nothing.
-- A cookie written after the stream starts must arrive. Events come in ID order, so every earlier change is in.
-- Dropped events, hard links, a changed `.gitignore` or `.layrignore`, a new head or index, or more than 20,000 paths read all.
-- A write through a memory mapping gives no event. A full read that finds a mapped file saves no status.
-  A saved status serves for `watch.full_seconds` (default 60) after a full read. So a mapped write that starts after a full read can be missing from `status` for that time. `watch.full_seconds 0` turns the saved status off.
-- `LAYR_NO_WATCH=1` reads all for one command.
+- A write through a memory mapping gives no event at all. A status from events could miss it.
+- Volumes without an event log (images attached with `-nobrowse`) need a full comparison anyway.
+
+An out-of-date status is not acceptable, so `status` uses a saved status with stat data instead, as git's index does:
+
+- Each status saves its result and, for each entry of the working folder, the inode, mode, size, times,
+  kernel change counter, and clone ID, from a scan made before the read.
+- The next status scans the folder once with `getattrlistbulk` and compares only the entries that differ
+  with the index. A write changes the change counter, also through a memory mapping or through a hard link outside the folder.
+- A mapped file has no change counter while it is mapped: it is compared again at each status.
+- A new head or index, a changed `.gitignore` or `.layrignore`, or more than 20,000 changed paths compare all.
+- After few changes the saved baseline stays; the same paths are compared again next time. From 256 changed paths on, the baseline is saved again.
+- `LAYR_NO_STATUS_CACHE=1` compares all for one command.
+- Limit, shared with the full comparison: bytes written through a mapping that is unmapped without `msync` and not yet written back
+  do not change the change counter or the clone ID, so neither method reads them until the kernel writes them.
+
+100,000 files, one or two changed files: 0.22 to 0.24 s CPU instead of 1.28 to 1.35 s. The single folder scan is most of it.
 
 ### 3. Physical extents
 

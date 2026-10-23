@@ -14,7 +14,7 @@ See [thin APFS states](apfs-thin-states.md) and the [measurements](../benchmarks
 2. **Work grows with the number of files.** A btrfs branch costs the same for any tree.
    An APFS branch is one complete tree copy: about 1 s CPU for 10,000 files and about 20 s for 100,000.
    `add` and automatic states scan the complete tree; btrfs gets changed paths from `send --no-data`.
-   `status` uses FSEvents on volumes with an event log, with the limits in [APFS features](apfs-features.md).
+   `status` scans once and compares only entries whose stat data changed ([APFS features](apfs-features.md)).
 3. **Weaker protection of history.** btrfs read-only subvolumes are kernel-enforced.
    APFS uses `UF_IMMUTABLE` on each file. The store owner can remove these flags, and setting them costs CPU per file.
    Real protection needs the root service on a volume with ownership enabled.

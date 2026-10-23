@@ -1023,21 +1023,24 @@ impl<'a> Repo<'a> {
     pub fn status_report(&self, line: &Line) -> Result<Status> {
         let work = self.working(line);
         let (index, stage) = self.index_source(line)?;
-        // LAYR_NO_WATCH=1 reads the whole folder every time (for comparisons).
-        let key = match std::env::var_os("LAYR_NO_WATCH") {
+        // LAYR_NO_STATUS_CACHE=1 compares the whole folder every time (for comparisons).
+        let key = match std::env::var_os("LAYR_NO_STATUS_CACHE") {
             Some(_) => None,
-            None => self.watch_key(line, &work, &stage)?,
+            None => self.status_key(line, &work, &stage)?,
         };
-        if let Some(key) = &key {
-            match self.watched_status(line, &work, &index, key) {
+        // One scan of the working folder: it finds the changed paths for the saved status, and
+        // it is the baseline of the next saved status.
+        let now = match &key {
+            Some(_) => Some(btrfs::scan_with_data(&work, true)?),
+            None => None,
+        };
+        if let (Some(key), Some(now)) = (&key, &now) {
+            match self.cached_status(line, &work, &index, key, now) {
                 Ok(Some(st)) => return Ok(st),
                 Ok(None) => {}
-                Err(e) => eprintln!("warning: FSEvents status failed, reading the whole folder: {e:#}"),
+                Err(e) => eprintln!("warning: saved status failed, comparing the whole folder: {e:#}"),
             }
         }
-        // The event ID before the read: changes during the read are in the next answer.
-        let (dir, _) = crate::sys::watch::files(&self.p.meta_dir(), &line.id);
-        let mark = key.as_ref().and_then(|_| crate::sys::watch::mark(&dir, &line.id).ok());
         // States are immutable; the lock keeps the index still. Only the working folder moves.
         let mut roots = vec![work.as_path()];
         if let Some(s) = &stage {
@@ -1047,42 +1050,40 @@ impl<'a> Repo<'a> {
             Some(st) => st,
             None => self.status(line)?.0,
         };
-        if let (Some(key), Some(event)) = (key, mark) {
-            // A change through a name outside the folder gives no event below it, and a write
-            // through a memory mapping gives none at all: a folder with hard links or mapped
-            // files reads all.
-            let unsafe_files = btrfs::scan_with_data(&work, true)?
-                .values()
-                .any(|e| e.meta.is_file() && (e.nlink > 1 || e.data.and_then(|d| d.generation).is_none()));
-            if !unsafe_files {
-                let cache = WatchCache { version: 1, event, key, full_at: crate::ids::now_ms(), status: st.clone() };
-                if self.save_watch(line, &cache).is_ok() {
-                    crate::sys::watch::forget(&dir, &line.id, event);
-                }
-            } else {
-                let _ = std::fs::remove_file(self.watch_cache_path(line));
-            }
+        if let (Some(key), Some(now)) = (key, now) {
+            // `now` comes before the read: a change during the read differs from it next time.
+            let _ = self.save_status_cache(line, &StatusCache::new(key, &now, st.clone()));
         }
         Ok(st)
     }
 
     #[cfg(target_os = "macos")]
-    fn watch_cache_path(&self, line: &Line) -> PathBuf {
-        self.p.meta_dir().join("watch").join(format!("{}.json", line.id))
+    fn status_cache_path(&self, line: &Line) -> PathBuf {
+        self.p.meta_dir().join("status").join(format!("{}.cache", line.id))
     }
 
     #[cfg(target_os = "macos")]
-    fn save_watch(&self, line: &Line, cache: &WatchCache) -> Result<()> {
-        crate::fsutil::atomic_write(&self.watch_cache_path(line), &serde_json::to_vec(cache)?, 0o600)
+    fn save_status_cache(&self, line: &Line, cache: &StatusCache) -> Result<()> {
+        // A lost cache costs only time: no fsync, but never a partial file.
+        let path = self.status_cache_path(line);
+        let dir = path.parent().context("status cache folder")?;
+        std::fs::create_dir_all(dir)?;
+        let tmp = dir.join(format!(".{}.tmp", ids::new_id()));
+        std::fs::write(&tmp, cache.encode()?)?;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::rename(&tmp, &path).inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp);
+        })?;
+        Ok(())
     }
 
     /// What a saved status depends on besides the working folder: the head, the index layer,
     /// and the working folder itself. `None` when a saved status cannot be used: a line with
     /// overlays, or a complete index.
     #[cfg(target_os = "macos")]
-    fn watch_key(&self, line: &Line, work: &Path, stage: &Option<PathBuf>) -> Result<Option<String>> {
+    fn status_key(&self, line: &Line, work: &Path, stage: &Option<PathBuf>) -> Result<Option<String>> {
         use sha1::{Digest, Sha1};
-        if self.p.is_overlay() || !self.layers(line)?.is_empty() || !crate::sys::watch::logged(work) {
+        if self.p.is_overlay() || !self.layers(line)?.is_empty() {
             return Ok(None);
         }
         let mut h = Sha1::new();
@@ -1102,69 +1103,56 @@ impl<'a> Repo<'a> {
         Ok(Some(hex::encode(h.finalize())))
     }
 
-    /// The saved status, brought up to date for the paths that FSEvents reports as changed
-    /// since it was saved. `None` when that answer is not proven: then the caller reads all.
+    /// The saved status, brought up to date for the entries of the working folder whose
+    /// metadata, change counter, or clone ID differ from the saved scan (as git's index does
+    /// with stat data). `now` is a scan of the working folder made before this read. `None`
+    /// when the saved status cannot answer: then the caller compares the whole folder.
     #[cfg(target_os = "macos")]
-    fn watched_status(&self, line: &Line, work: &Path, index: &Snap, key: &str) -> Result<Option<Status>> {
-        use crate::sys::watch;
-        let Ok(raw) = std::fs::read(self.watch_cache_path(line)) else {
+    fn cached_status(
+        &self,
+        line: &Line,
+        work: &Path,
+        index: &Snap,
+        key: &str,
+        now: &BTreeMap<String, btrfs::ScanEntry>,
+    ) -> Result<Option<Status>> {
+        let Ok(raw) = std::fs::read(self.status_cache_path(line)) else {
             return Ok(None);
         };
-        let Ok(cache) = serde_json::from_slice::<WatchCache>(&raw) else {
+        let Some(cache) = StatusCache::decode(&raw) else {
             return Ok(None);
         };
-        // A write through a memory mapping that starts after the full read gives no event: the
-        // saved status serves only for `watch.full_seconds` after that read.
-        let limit = self.p.config_u64("watch.full_seconds", WATCH_FULL_SECONDS) as i64 * 1000;
-        if cache.version != 1 || cache.key != key || crate::ids::now_ms() - cache.full_at >= limit {
+        if cache.version != STATUS_CACHE_VERSION || cache.key != key {
             return Ok(None);
         }
-        let (dir, cookie) = watch::files(&self.p.meta_dir(), &line.id);
-        // The next baseline comes before this read: a change after the read's end is then in
-        // the next answer. Its marker has its own name, so it proves nothing for this read.
-        let event = watch::mark(&dir, &line.id)?;
-        let Some(events) = watch::changes(work, &watch::marker(&dir, &line.id, cache.event), &cookie, cache.event) else {
+        let _t = crate::trace::span("saved status");
+        let paths = cache.changed(now);
+        if paths.len() > STATUS_CACHE_MAX_PATHS {
             return Ok(None);
-        };
-        let _t = crate::trace::span(format!("FSEvents read of {} paths", events.len()));
-        let mut paths: BTreeSet<String> = BTreeSet::new();
-        for (rel, flags) in events {
-            let name = rel.rsplit('/').next().unwrap_or("");
+        }
+        for p in &paths {
+            let name = p.rsplit('/').next().unwrap_or("");
             if name == ".gitignore" || name == ".layrignore" {
-                // Ignore rules decide the state of paths without events.
+                // Ignore rules decide the state of unchanged paths too.
                 return Ok(None);
             }
-            if flags & watch::ITEM_IS_HARDLINK != 0 {
-                // Another name of the same file may have changed without an event of its own.
-                return Ok(None);
-            }
-            let tree_change = flags & (watch::ITEM_CREATED | watch::ITEM_REMOVED | watch::ITEM_RENAMED) != 0;
-            if rel.is_empty() {
-                if tree_change {
-                    return Ok(None);
-                }
-                continue;
-            }
-            // A folder that only changed its time needs no new read; a new, removed, or
-            // renamed folder is read with its content.
-            if flags & watch::ITEM_IS_DIR != 0 && !tree_change {
-                continue;
-            }
-            paths.insert(rel);
         }
-        if paths.len() > WATCH_MAX_PATHS {
-            return Ok(None);
-        }
-        let before = btrfs::scan_paths(work, &paths)?;
-        let list = changes::file_changes_of(
-            index,
-            work,
-            btrfs::candidates_scanned(index, work, btrfs::scan_paths(index, &paths)?, before.clone())?,
-        )?;
-        if btrfs::scan_paths(work, &paths)? != before {
-            return Ok(None);
+        if paths.is_empty() {
+            let _used = crate::trace::span("saved status used for 0 paths");
+            let mut st = cache.status;
+            self.finish_status(line, work, index, true, &mut st)?;
+            return Ok(Some(st));
         }
         let below = |p: &str| paths.contains(p) || p.match_indices('/').any(|(i, _)| paths.contains(&p[..i]));
+        let w: BTreeMap<String, btrfs::ScanEntry> =
+            now.iter().filter(|(k, _)| below(k)).map(|(k, v)| (k.clone(), v.clone())).collect();
+        let list =
+            changes::file_changes_of(index, work, btrfs::candidates_scanned(index, work, btrfs::scan_paths(index, &paths)?, w)?)?;
+        // The content read must see the entries of the scan.
+        let again = btrfs::scan_paths(work, &paths)?;
+        if paths.iter().any(|p| again.get(p) != now.get(p)) {
+            return Ok(None);
+        }
         let mut st = cache.status;
         st.unstaged.retain(|c| !below(&c.path) && !c.old_path.as_deref().is_some_and(below));
         st.untracked.retain(|p| !below(p));
@@ -1174,12 +1162,12 @@ impl<'a> Repo<'a> {
         st.untracked.sort();
         st.ignored.sort();
         self.finish_status(line, work, index, true, &mut st)?;
-        self.save_watch(
-            line,
-            &WatchCache { version: 1, event, key: key.to_string(), full_at: cache.full_at, status: st.clone() },
-        )?;
-        watch::forget(&dir, &line.id, event);
-        let _done = crate::trace::span("FSEvents status used");
+        // A new baseline saves work when many paths changed. With few, the old baseline and
+        // its status stay valid: the same paths are compared again next time.
+        if paths.len() >= STATUS_CACHE_RESAVE {
+            let _ = self.save_status_cache(line, &StatusCache::new(key.to_string(), now, st.clone()));
+        }
+        let _used = crate::trace::span(format!("saved status used for {} paths", paths.len()));
         Ok(Some(st))
     }
 
@@ -1608,25 +1596,147 @@ impl<'a> Repo<'a> {
     }
 }
 
-/// The saved status of a line and the FSEvents ID it was read at (`Repo::status_report`).
+/// A saved status of a line and the scan of its working folder that it matches
+/// (`Repo::status_report`). Each entry keeps its type, inode, mode, size, times, change counter,
+/// and clone ID: a write changes the change counter, as with git's stat data.
 #[cfg(target_os = "macos")]
-#[derive(serde::Serialize, serde::Deserialize)]
-struct WatchCache {
+struct StatusCache {
     version: u32,
-    event: u64,
     key: String,
-    /// When the last full read ran, in milliseconds since the epoch.
-    full_at: i64,
+    /// Path, then fingerprint and data identity of each entry, in path order.
+    entries: Vec<(String, [i64; 10])>,
     status: Status,
 }
 
-/// A saved status serves for this many seconds after a full read (setting `watch.full_seconds`).
 #[cfg(target_os = "macos")]
-const WATCH_FULL_SECONDS: u64 = 60;
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StatusHead {
+    version: u32,
+    key: String,
+    status: Status,
+}
 
-/// More changed paths than this read the whole folder.
 #[cfg(target_os = "macos")]
-const WATCH_MAX_PATHS: usize = 20_000;
+const STATUS_CACHE_VERSION: u32 = 2;
+#[cfg(target_os = "macos")]
+const STATUS_CACHE_MAGIC: &[u8] = b"layr status cache\n";
+
+/// More changed paths than this compare the whole folder.
+#[cfg(target_os = "macos")]
+const STATUS_CACHE_MAX_PATHS: usize = 20_000;
+
+/// From this many changed paths on, a saved status gets a new baseline.
+#[cfg(target_os = "macos")]
+const STATUS_CACHE_RESAVE: usize = 256;
+
+#[cfg(target_os = "macos")]
+fn entry_key(e: &btrfs::ScanEntry) -> [i64; 10] {
+    let f = e.fingerprint;
+    let d = e.data.unwrap_or_default();
+    [
+        f.0 as i64,
+        f.1 as i64,
+        f.2 as i64,
+        f.3 as i64,
+        f.4,
+        f.5,
+        f.6,
+        f.7,
+        d.generation.map(|g| g as i64).unwrap_or(-1),
+        d.clone_id.map(|c| c as i64).unwrap_or(-1),
+    ]
+}
+
+#[cfg(target_os = "macos")]
+impl StatusCache {
+    fn new(key: String, scan: &BTreeMap<String, btrfs::ScanEntry>, status: Status) -> Self {
+        StatusCache {
+            version: STATUS_CACHE_VERSION,
+            key,
+            entries: scan.iter().map(|(k, e)| (k.clone(), entry_key(e))).collect(),
+            status,
+        }
+    }
+
+    /// A header in JSON, then each entry as a path length, the path, and ten numbers.
+    fn encode(&self) -> Result<Vec<u8>> {
+        let head = serde_json::to_vec(&StatusHead { version: self.version, key: self.key.clone(), status: self.status.clone() })?;
+        let mut out = Vec::with_capacity(head.len() + self.entries.len() * 120);
+        out.extend_from_slice(STATUS_CACHE_MAGIC);
+        out.extend_from_slice(&(head.len() as u64).to_le_bytes());
+        out.extend_from_slice(&head);
+        out.extend_from_slice(&(self.entries.len() as u64).to_le_bytes());
+        for (k, v) in &self.entries {
+            out.extend_from_slice(&(k.len() as u32).to_le_bytes());
+            out.extend_from_slice(k.as_bytes());
+            for n in v {
+                out.extend_from_slice(&n.to_le_bytes());
+            }
+        }
+        Ok(out)
+    }
+
+    fn decode(raw: &[u8]) -> Option<Self> {
+        let mut r = raw.strip_prefix(STATUS_CACHE_MAGIC)?;
+        let mut take = |n: usize| -> Option<&[u8]> {
+            let (a, b) = (r.get(..n)?, r.get(n..)?);
+            r = b;
+            Some(a)
+        };
+        let head_len = u64::from_le_bytes(take(8)?.try_into().ok()?) as usize;
+        let head: StatusHead = serde_json::from_slice(take(head_len)?).ok()?;
+        let count = u64::from_le_bytes(take(8)?.try_into().ok()?) as usize;
+        let mut entries = Vec::with_capacity(count.min(10_000_000));
+        for _ in 0..count {
+            let len = u32::from_le_bytes(take(4)?.try_into().ok()?) as usize;
+            let path = String::from_utf8(take(len)?.to_vec()).ok()?;
+            let mut v = [0i64; 10];
+            for n in v.iter_mut() {
+                *n = i64::from_le_bytes(take(8)?.try_into().ok()?);
+            }
+            entries.push((path, v));
+        }
+        Some(StatusCache { version: head.version, key: head.key, entries, status: head.status })
+    }
+
+    /// Paths whose entries differ from the saved scan, and files without a change counter (a
+    /// file that a process maps can change without a visible sign). A folder that only changed
+    /// its times is left out: each changed entry inside it is in the list itself.
+    fn changed(&self, now: &BTreeMap<String, btrfs::ScanEntry>) -> BTreeSet<String> {
+        let kind = |v: &[i64; 10]| v[2] & libc::S_IFMT as i64;
+        const DIR: i64 = libc::S_IFDIR as i64;
+        const FILE: i64 = libc::S_IFREG as i64;
+        let mut out = BTreeSet::new();
+        // Both lists are in path order: one walk over both.
+        let mut old = self.entries.iter().peekable();
+        for (k, e) in now {
+            while let Some((ok, _)) = old.peek() {
+                if ok.as_str() < k.as_str() {
+                    out.insert(ok.clone());
+                    old.next();
+                } else {
+                    break;
+                }
+            }
+            let new = entry_key(e);
+            let same = match old.peek() {
+                Some((ok, ov)) if ok == k => {
+                    let same = *ov == new || (kind(ov) == DIR && kind(&new) == DIR);
+                    old.next();
+                    same
+                }
+                _ => false,
+            };
+            let no_counter = kind(&new) == FILE && new[8] < 0;
+            if !k.is_empty() && (!same || no_counter) {
+                out.insert(k.clone());
+            }
+        }
+        out.extend(old.map(|(k, _)| k.clone()));
+        out.remove("");
+        out
+    }
+}
 
 /// Sort index-to-working changes into unstaged, untracked, and ignored paths.
 fn classify(scan: &Path, list: Vec<Change>, st: &mut Status) {
