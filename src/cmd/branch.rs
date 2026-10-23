@@ -187,6 +187,14 @@ pub fn branch(ctx: &Ctx, args: &[String]) -> Result<i32> {
             },
         }
         .filter(|l| l.head == start);
+        let explicit_view = match a.pos.get(1) {
+            Some(rev) if rev.starts_with("views/") => Some(revs::resolve_view(repo, current.as_ref(), rev)?),
+            Some(rev) if rev.starts_with("attestations/") => {
+                let view = revs::resolve_view(repo, current.as_ref(), rev)?;
+                (!view.layers.is_empty()).then_some(view)
+            }
+            _ => None,
+        };
         let owner = owner_arg(ctx, a.get("--owner"))?;
         repo.require(ctx, "line.create").map_err(|e| exit(128, format!("fatal: {e}")))?;
         if owner != ctx.caller.uid {
@@ -198,7 +206,7 @@ pub fn branch(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let _lock = repo.p.lock()?;
         if let Some(count) = a.get("--count") {
             let count = count.parse::<usize>().map_err(|_| exit(128, "--count must be a positive integer"))?;
-            let lines = repo.create_lines(ctx, name, &start, owner, source.as_ref(), count)?;
+            let lines = repo.create_lines(ctx, name, &start, owner, source.as_ref(), count, explicit_view.as_ref())?;
             if a.has("--json") {
                 outln!(ctx, "{}", serde_json::to_string(&lines.iter().map(|line| line_json(repo, line)).collect::<Vec<_>>())?);
             } else {
@@ -212,7 +220,10 @@ pub fn branch(ctx: &Ctx, args: &[String]) -> Result<i32> {
             }
             return Ok(0);
         }
-        let l = repo.create_line_from(ctx, name, &start, owner, source.as_ref())?;
+        let l = match &explicit_view {
+            Some(view) => repo.create_line_view(ctx, name, view, owner)?,
+            None => repo.create_line_from(ctx, name, &start, owner, source.as_ref())?,
+        };
         if a.has("--json") {
             outln!(ctx, "{}", line_json(repo, &l));
             return Ok(0);

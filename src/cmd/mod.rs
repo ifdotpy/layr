@@ -15,6 +15,7 @@ pub mod remote;
 pub mod replicate;
 pub mod transfer;
 pub mod work;
+pub mod view;
 
 use crate::ctx::{Ctx, Loc};
 use crate::model::Line;
@@ -188,6 +189,7 @@ Lines and states:
    branch, switch, checkout, tag, merge, cherry-pick, revert, rebase
    save, undo, op, try, bisect run, adopt
    ref set/list/log/delete, attest, attestations, change list/show/log/diff
+   view [<rev or line>] [--json], view save [<line>], view show <id>
 Remotes:
    remote add, list, self, remove, trust; sync, fetch, pull, push, clone
 Git bridge:
@@ -269,6 +271,7 @@ pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
         "approvals" | "checks" => Err(exit(1, "this command was removed; use 'layr attestations <rev> [--kind <kind>]'")),
         "ref" => refs::refs(ctx, &rest),
         "queue" => queue::queue(ctx, &rest),
+        "view" => view::view(ctx, &rest),
         "attest" => attest::attest(ctx, &rest),
         "attestations" => attest::attestations(ctx, &rest),
         "change" => change::change(ctx, &rest),

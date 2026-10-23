@@ -550,8 +550,34 @@ pub fn try_cmd(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if a.paths.is_empty() {
         return Err(exit(128, USAGE));
     }
-    let state = revs::resolve(repo, h.line.as_ref(), rev).map_err(|e| exit(128, format!("layr try: {e:#}")))?;
-    try_state_in(ctx, repo, &state, &a.paths, a.has("-q"), a.has("--keep"), false)
+    let view = {
+        let _lock = repo.p.lock()?;
+        let current = h.line.as_ref().map(|line| repo.line(&line.id)).transpose()?;
+        let view = revs::resolve_view(repo, current.as_ref(), rev).map_err(|e| exit(128, format!("layr try: {e:#}")))?;
+        repo.check_view_read(ctx, &view)?;
+        if !view.layers.is_empty() {
+            repo.save_view(ctx, &view)?;
+        }
+        view
+    };
+    // `try` is the caller's own command: it gets the caller's environment, except the variables
+    // that would point git or layr at the caller's own folder instead of the copy.
+    const TO_COPY: &[&str] =
+        &["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR", "LAYR_LINE"];
+    let env: Vec<(String, String)> =
+        ctx.env.iter().filter(|(k, _)| !TO_COPY.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect();
+    run_check_in(
+        ctx,
+        repo,
+        &view.shared,
+        &a.paths,
+        &a.paths.join(" "),
+        &env,
+        a.has("-q"),
+        a.has("--keep"),
+        false,
+        (!view.layers.is_empty()).then_some(&view),
+    )
 }
 
 /// Use the `try` copy and environment. JSON output sends child output to standard error.
@@ -564,7 +590,7 @@ fn try_state_in(ctx: &Ctx, repo: &Repo, state: &str, argv: &[String], quiet: boo
         &["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR", "LAYR_LINE"];
     let env: Vec<(String, String)> =
         ctx.env.iter().filter(|(k, _)| !TO_COPY.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect();
-    run_check_in(ctx, repo, state, argv, &argv.join(" "), &env, quiet, keep, json)
+    run_check_in(ctx, repo, state, argv, &argv.join(" "), &env, quiet, keep, json, None)
 }
 
 /// Run a configured check as the caller in a temporary copy of `state` and record its exit code
@@ -575,7 +601,29 @@ fn try_state_in(ctx: &Ctx, repo: &Repo, state: &str, argv: &[String], quiet: boo
 /// The copy starts with the warm caches of the state, but its build output is never kept: layr
 /// cannot tell whether build output is valid for a state (docs/design.md, section 5).
 pub fn run_check(ctx: &Ctx, repo: &Repo, state: &str, argv: &[String], command: &str, quiet: bool) -> Result<i32> {
-    run_check_in(ctx, repo, state, argv, command, &[], quiet, false, false)
+    run_check_in(ctx, repo, state, argv, command, &[], quiet, false, false, None)
+}
+
+/// Run a configured check in an exact view, with the same clean environment as `run_check`.
+/// This function takes the project lock itself; the caller must not hold it.
+pub fn run_check_view(
+    ctx: &Ctx,
+    repo: &Repo,
+    view: &crate::overlay::View,
+    argv: &[String],
+    command: &str,
+    quiet: bool,
+) -> Result<i32> {
+    {
+        let _lock = repo.p.lock()?;
+        repo.require(ctx, "try")?;
+        repo.check_view_collected(view)?;
+        repo.check_view_read(ctx, view)?;
+        if !view.layers.is_empty() {
+            repo.save_view(ctx, view)?;
+        }
+    }
+    run_check_in(ctx, repo, &view.shared, argv, command, &[], quiet, false, false, (!view.layers.is_empty()).then_some(view))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -589,54 +637,95 @@ fn run_check_in(
     quiet: bool,
     keep: bool,
     json: bool,
+    view: Option<&crate::overlay::View>,
 ) -> Result<i32> {
-    let name = format!(".try-{:016x}", rand::random::<u64>());
-    let dir = repo.p.line_path(&name);
-    let tmp_line = Line {
-        id: format!("try-{name}"),
-        name: name.clone(),
-        head: state.to_string(),
-        owner: ctx.caller.uid,
-        machine: repo.p.store.machine.id.clone(),
-    };
-    repo.materialize(&tmp_line, state, &dir)?;
-    let res = (|| -> Result<i32> {
+    let layers = view.map(|v| v.layers.as_slice()).unwrap_or(&[]);
+    with_try_copy(ctx, repo, state, layers, keep, |dir| {
         if !quiet {
             eprintln!("layr: running '{command}' in {} (state {})", dir.display(), ids::short(state));
         }
         let started = std::time::Instant::now();
-        let mut c = std::process::Command::new(&argv[0]);
-        c.args(&argv[1..]).current_dir(&dir);
-        if json {
-            c.stdout(std::process::Stdio::from(std::io::stderr()));
-        }
-        // The caller's identity (uid, groups), never the service's.
         let mut env = env.to_vec();
-        env.push(("LAYR_TRY_STATE".into(), ids::display(state)));
-        // layr commands in the copy read the project; the copy is no line of it.
-        env.retain(|(k, _)| k != "LAYR_PROJECT");
-        env.push(("LAYR_PROJECT".into(), repo.p.name.clone()));
-        crate::privs::command_as(&mut c, ctx.caller.uid, &env)?;
-        let st =
-            c.status().map_err(|e| exit(127, format!("layr try: cannot run '{}' as user {}: {e}", argv[0], ctx.caller.user)))?;
-        let code = st.code().unwrap_or(128);
+        env.retain(|(k, _)| k != "LAYR_TRY_VIEW");
+        if let Some(view) = view {
+            env.push(("LAYR_TRY_VIEW".into(), view.id()?));
+        }
+        let code = try_command(ctx, repo, state, argv, dir, &env, json)?;
         let _lock = repo.p.lock()?;
-        let result = serde_json::json!({"command":command,"exit":code,"seconds":started.elapsed().as_secs_f64(),"argv":argv});
-        let mut rec = super::attest::record(repo, state, "check", &serde_json::to_vec(&result)?)?;
+        let result = serde_json::json!({"command":command,"argv":argv,"exit":code,"seconds":started.elapsed().as_secs_f64()});
+        let mut rec = match view {
+            Some(view) => super::attest::record_view(repo, view, "check", &serde_json::to_vec(&result)?)?,
+            None => super::attest::record(repo, state, "check", &serde_json::to_vec(&result)?)?,
+        };
         rec.data["check"] = result;
         repo.commit_record(ctx, rec)?;
+        if !quiet {
+            eprintln!("layr: state {} exit {code}", ids::short(state));
+        }
         Ok(code)
-    })();
+    })
+}
+
+/// Create a private try copy, run the callback, then remove the copy unless requested otherwise.
+pub fn with_try_copy<T>(
+    ctx: &Ctx,
+    repo: &Repo,
+    state: &str,
+    layers: &[crate::overlay::Layer],
+    keep: bool,
+    run: impl FnOnce(&Path) -> Result<T>,
+) -> Result<T> {
+    let name = format!(".try-{:016x}", rand::random::<u64>());
+    let dir = repo.p.line_path(&name);
+    let tmp_line = Line {
+        id: format!("try-{name}"),
+        name,
+        head: state.into(),
+        owner: ctx.caller.uid,
+        machine: repo.p.store.machine.id.clone(),
+    };
+    if layers.is_empty() {
+        repo.materialize(&tmp_line, state, &dir)?;
+    } else {
+        let view = crate::overlay::View::new(state.to_string(), layers.to_vec());
+        repo.materialize_view(ctx, &tmp_line, &view, &dir)?;
+    }
+    let result = run(&dir);
     if keep {
         eprintln!("layr try: kept {}", dir.display());
     } else {
         let _ = btrfs::delete_tree(&dir);
     }
-    let code = res?;
-    if !quiet {
-        eprintln!("layr: state {} exit {code}", ids::short(state));
+    result
+}
+
+/// Use the try identity and environment rules for commands from an exact tree.
+pub fn try_command(
+    ctx: &Ctx,
+    repo: &Repo,
+    state: &str,
+    argv: &[String],
+    dir: &Path,
+    env: &[(String, String)],
+    json: bool,
+) -> Result<i32> {
+    if argv.is_empty() || argv[0].is_empty() {
+        anyhow::bail!("a command needs a nonempty argv");
     }
-    Ok(code)
+    let mut command = std::process::Command::new(&argv[0]);
+    command.args(&argv[1..]).current_dir(dir);
+    if json {
+        command.stdout(std::process::Stdio::from(rustix::io::dup(std::io::stderr())?));
+    }
+    let mut env = env.to_vec();
+    env.push(("LAYR_TRY_STATE".into(), ids::display(state)));
+    env.retain(|(k, _)| k != "LAYR_PROJECT");
+    env.push(("LAYR_PROJECT".into(), repo.p.name.clone()));
+    crate::privs::command_as(&mut command, ctx.caller.uid, &env)?;
+    let status = command
+        .status()
+        .map_err(|e| exit(127, format!("layr try: cannot run '{}' as user {}: {e}", argv[0], ctx.caller.user)))?;
+    Ok(status.code().unwrap_or(128))
 }
 
 /// Retention. Kept: line heads and their history, tags, remote refs, stashes, the newest

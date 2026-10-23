@@ -207,6 +207,7 @@ without a checkout.
 | OCI           | `push <oci-remote> <rev> [--runnable <name>] [--json]`, `access token <principal> [--until <duration>]`, `access token --revoke <principal>` |
 | records       | `op export`, `op import` (JSONL) |
 | copies        | `export <folder>`                                                                              |
+| views         | `view [<rev or line>] [--json]`, `view save [<line>] [--json]`, `view show <id> [--json]` |
 | overlays      | `overlay create <name> [--readers <principals>] [--mode shared\|follow]`, `overlay list`, `overlay readers`, `overlay use [--add\|--remove\|--none] <names>`, `overlay move [--purge] <name> <paths>`, `overlay log\|show\|diff\|grep\|ls-files <name>` |
 | refs          | `ref set <name> <rev> [--expect <rev>] [--ttl <dur>]`, `ref list [<prefix>]`, `ref log <name>`, `ref delete <name> [--expect <rev>]` |
 | queue         | `queue add <rev> [--into <line>]`, `queue list [--into <line>] [--json]`, `queue remove <entry>`, `queue run [--into <line>]` |
@@ -250,7 +251,7 @@ Expired refs stop resolving. GC records their removal. The normal undo window ca
 
 These revision prefixes are reserved: `env/`, `release/`, `pins/`, `holds/`, `leases/`, `caches/`, `derived/`,
 `changes/`, `views/`, and `attestations/`. Line names cannot start with these prefixes.
-`views/<id>` returns an explicit error because views do not exist yet.
+`views/<id>` resolves a saved view to its shared state. Branch and try also use its overlay stack.
 
 Each new source commit has a `change_id`. Amend, rebase, and cherry-pick preserve it.
 A merge commit has a new identifier. Old states without `change_id` remain readable.
@@ -611,6 +612,57 @@ such a commit. The commit is made in the local git store only; nothing leaves th
 a push. A push with `--squash` sends another commit for the same state; `HEAD` then shows that
 commit. `layr git sync` also records the commits of the head and its ancestors, as a push does.
 A `.git` folder that the line owner made instead is left alone.
+
+## Views
+
+A view identifies a shared state and an ordered stack of overlay states.
+Its ViewId is the full SHA-256 digest of this canonical JSON, without spaces:
+
+```json
+{"format":1,"shared":"<state>","layers":[{"overlay":"<name>","state":"<state>"}]}
+```
+
+Field order follows the example. Layer order follows the stack.
+Access policy stays outside the identity. Changes to reader rights do not change the ViewId.
+A state without overlays has an empty `layers` array.
+Working edits do not change the descriptor until a state changes.
+
+```sh
+layr view main --json
+layr view save main --json
+layr view show <id> --json
+layr branch reproduce views/<id>
+layr try views/<id> -- ./test.sh
+layr attest approval views/<id>
+layr attestations views/<id> --kind check --json
+```
+
+`view save` writes a signed `view.save` record. Repeated saves of the same descriptor write no extra record.
+`views/<id>` resolves after that record reaches the local machine.
+Commands that need a state use the shared state. Branch and try use the complete stack.
+`try main` and `try HEAD` also use the line's current stack.
+An explicit state revision has no layers.
+
+A branch from a view preserves its exact layer states, including older states of shared-mode overlays.
+It initializes missing overlay lines. It does not move an existing overlay line.
+A later private commit can fail the existing stack check if that overlay line has advanced.
+Use `layr overlay use` to take its newest state before the commit.
+
+The caller must read every layer before branch or try can materialize a view.
+A different branch owner must also read every layer. A refusal names the overlay.
+Descriptors contain overlay names and state ids. Project readers may read descriptors without access to the private files.
+A descriptor can travel to another machine while its private layers stay local.
+
+Try checks with layers name the view as their attestation subject.
+Checks without layers retain the state subject. Check payloads include the exact argument array.
+`LAYR_TRY_STATE` names the shared state. `LAYR_TRY_VIEW` also names the view when it has layers.
+A check of one view does not certify a different stack with the same shared state.
+
+Saved descriptors and attestations do not keep states from garbage collection.
+`view show` can still print a descriptor after a state is collected.
+Full-view resolution reports `view <id> refers to a collected state <state>`.
+Before collection, pin the shared state with `layr ref set pins/<name> views/<id>`.
+Overlay states stay through their own live line history.
 
 ## Merge engine
 

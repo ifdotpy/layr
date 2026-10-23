@@ -374,6 +374,15 @@ pub fn validate(r: &Record) -> anyhow::Result<()> {
             }
         }
     }
+    if r.op == "view.save" {
+        let view: crate::overlay::View =
+            serde_json::from_value(d.get("view").cloned().ok_or_else(|| anyhow::anyhow!("view.save has no descriptor"))?)?;
+        view.validate()?;
+        let id = d.get("view_id").and_then(|v| v.as_str()).unwrap_or("");
+        if !crate::overlay::is_view_id(id) || view.id()? != id {
+            bail!("view descriptor does not match its id");
+        }
+    }
     if let Some(v) = d.get("ref_change") {
         let ch: RefChange = serde_json::from_value(v.clone())?;
         if !is_ref(&ch.name) {
@@ -392,11 +401,15 @@ pub fn validate(r: &Record) -> anyhow::Result<()> {
         if a.attestation_id != r.id {
             bail!("attestation id must match its signed record");
         }
-        uuid("subject", &a.subject.id)?;
+        match a.subject.kind.as_str() {
+            "state" => uuid("subject", &a.subject.id)?,
+            "view" if crate::overlay::is_view_id(&a.subject.id) => {}
+            _ => bail!("unsupported attestation subject"),
+        }
         if let Some(id) = &a.change_id {
             uuid("change", id)?;
         }
-        if a.format != 1 || a.subject.kind != "state" || !ATTESTATION_KINDS.contains(&a.kind.as_str()) {
+        if a.format != 1 || !ATTESTATION_KINDS.contains(&a.kind.as_str()) {
             bail!("unsupported attestation format, subject or kind");
         }
         if a.signer != r.machine || a.time != r.time {
@@ -656,6 +669,27 @@ mod tests {
         r.data = serde_json::json!({"attestation":a});
         assert!(validate(&r).is_ok());
         r.data["attestation"]["signer"] = serde_json::json!("01a12290-0000-7000-8000-000000000004");
+        assert!(validate(&r).is_err());
+    }
+    #[test]
+    fn saved_views_and_view_subjects_validate_their_identity() {
+        let mut r = rec();
+        let view = crate::overlay::View::new("01a12290-0000-7000-8000-000000000003".into(), Vec::new());
+        r.op = "view.save".into();
+        r.data = serde_json::json!({"view_id": view.id().unwrap(), "view":view});
+        assert!(validate(&r).is_ok());
+        r.data["view_id"] = serde_json::json!("0".repeat(64));
+        assert!(validate(&r).is_err());
+        r.op = "attest".into();
+        r.data = serde_json::json!({"attestation":Attestation {
+            format:1, attestation_id:r.id.clone(), subject:Subject{kind:"view".into(),id:view.id().unwrap()},
+            change_id:None,kind:"check".into(),payload_digest:"0".repeat(64),payload_ref:None,
+            signer:r.machine.clone(),time:r.time,
+        }});
+        assert!(validate(&r).is_ok());
+        r.data["attestation"]["subject"]["id"] = serde_json::json!("A".repeat(64));
+        assert!(validate(&r).is_err());
+        r.data["attestation"]["subject"]["kind"] = serde_json::json!("state");
         assert!(validate(&r).is_err());
     }
 }

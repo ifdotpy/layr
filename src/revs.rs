@@ -71,6 +71,28 @@ pub fn resolve(repo: &Repo, line: Option<&Line>, rev: &str) -> Result<String> {
     Ok(id)
 }
 
+/// Resolve the complete stack for an exact view or line, and a layer-free view for a state.
+pub fn resolve_view(repo: &Repo, line: Option<&Line>, rev: &str) -> Result<crate::overlay::View> {
+    let view = if let Some(id) = rev.strip_prefix("views/") {
+        repo.saved_view(id)?
+    } else if let Some(id) = rev.strip_prefix("attestations/") {
+        let a = repo.p.db.attestation(id)?.ok_or_else(|| anyhow::anyhow!("unknown attestation '{id}'"))?;
+        if a.subject.kind == "view" {
+            repo.saved_view(&a.subject.id)?
+        } else {
+            crate::overlay::View::new(resolve(repo, line, rev)?, Vec::new())
+        }
+    } else if matches!(rev, "" | "HEAD" | "@") {
+        repo.view_of(need_line(line, rev)?)?
+    } else if let Some(line) = repo.p.db.line_by_name(rev)? {
+        repo.view_of(&repo.localize(line)?)?
+    } else {
+        crate::overlay::View::new(resolve(repo, line, rev)?, Vec::new())
+    };
+    repo.check_view_collected(&view)?;
+    Ok(view)
+}
+
 fn need_line<'a>(line: Option<&'a Line>, rev: &str) -> Result<&'a Line> {
     match line {
         Some(l) => Ok(l),
@@ -116,11 +138,12 @@ fn base_state(repo: &Repo, line: Option<&Line>, name: &str) -> Result<String> {
             .map(|s| s.id.clone())
             .ok_or_else(|| anyhow::anyhow!("unknown change version '{name}'"));
     }
-    if name.starts_with("views/") {
-        bail!("views are not implemented; use a state revision");
+    if let Some(id) = name.strip_prefix("views/") {
+        return Ok(repo.saved_view(id)?.shared);
     }
     if let Some(id) = name.strip_prefix("attestations/") {
-        return repo.p.db.attestation(id)?.map(|a| a.subject.id).ok_or_else(|| anyhow::anyhow!("unknown attestation '{id}'"));
+        let a = repo.p.db.attestation(id)?.ok_or_else(|| anyhow::anyhow!("unknown attestation '{id}'"))?;
+        return if a.subject.kind == "view" { Ok(repo.saved_view(&a.subject.id)?.shared) } else { Ok(a.subject.id) };
     }
     if let Some(r) = repo.p.db.ref_value(name, crate::ids::now_ms())? {
         return Ok(r.target);

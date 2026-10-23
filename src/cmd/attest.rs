@@ -11,17 +11,39 @@ use sha2::{Digest, Sha256};
 
 /// The project appender stamps the signer, record id and time before it signs the record.
 pub fn record(repo: &Repo, state: &str, kind: &str, payload: &[u8]) -> Result<Record> {
+    record_subject(repo, Subject { kind: "state".into(), id: state.into() }, kind, payload)
+}
+
+pub fn record_view(repo: &Repo, view: &crate::overlay::View, kind: &str, payload: &[u8]) -> Result<Record> {
+    record_subject(repo, Subject { kind: "view".into(), id: view.id()? }, kind, payload)
+}
+
+fn record_subject(repo: &Repo, subject: Subject, kind: &str, payload: &[u8]) -> Result<Record> {
     if !ATTESTATION_KINDS.contains(&kind) {
         bail!("unknown attestation kind '{kind}'");
     }
-    let s = repo.state(state)?;
+    let change_id = if subject.kind == "state" {
+        repo.state(&subject.id)?.change_id
+    } else {
+        repo.saved_view(&subject.id)?;
+        None
+    };
     let mut rec = Record::new("attest");
     rec.data = serde_json::json!({"attestation": Attestation {
-        format: 1, attestation_id: ids::new_id(), subject: Subject { kind: "state".into(), id: state.into() },
-        change_id: s.change_id, kind: kind.into(), payload_digest: hex::encode(Sha256::digest(payload)),
+        format: 1, attestation_id: ids::new_id(), subject, change_id,
+        kind: kind.into(), payload_digest: hex::encode(Sha256::digest(payload)),
         payload_ref: None, signer: String::new(), time: 0,
     }});
     Ok(rec)
+}
+
+fn subject(repo: &Repo, line: Option<&crate::model::Line>, rev: &str) -> Result<Subject> {
+    if let Some(id) = rev.strip_prefix("views/") {
+        repo.saved_view(id)?;
+        Ok(Subject { kind: "view".into(), id: id.into() })
+    } else {
+        Ok(Subject { kind: "state".into(), id: crate::revs::resolve(repo, line, rev)? })
+    }
 }
 
 pub fn attest(ctx: &Ctx, args: &[String]) -> Result<i32> {
@@ -36,22 +58,22 @@ pub fn attest(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if kind == "quarantine" {
         h.repo.require(ctx, "gc")?;
     }
-    let state = crate::revs::resolve(&h.repo, h.line.as_ref(), &a.pos[1])?;
+    let subject = subject(&h.repo, h.line.as_ref(), &a.pos[1])?;
     let payload = match a.get("--payload") {
         Some(file) => super::work::read_caller_file(ctx, file, 8 << 20)?,
         None => Vec::new(),
     };
     let _lock = h.repo.p.lock()?;
-    let mut rec = record(&h.repo, &state, kind, &payload)?;
+    let mut rec = record_subject(&h.repo, subject.clone(), kind, &payload)?;
     if kind == "revoke" {
-        let ids = h.repo.p.db.own_attestations(&state, &h.repo.p.store.machine.id, ctx.caller.uid, None)?;
+        let ids = h.repo.p.db.own_attestations(&subject.id, &h.repo.p.store.machine.id, ctx.caller.uid, None)?;
         rec.data["revokes"] = serde_json::json!(ids);
     }
     let rec = h.repo.commit_record(ctx, rec)?;
     if a.has("--json") {
         outln!(ctx, "{}", rec.data["attestation"]);
     } else {
-        outln!(ctx, "{}\t{}\t{}", rec.data["attestation"]["attestation_id"].as_str().unwrap_or(""), kind, state);
+        outln!(ctx, "{}\t{}\t{}", rec.data["attestation"]["attestation_id"].as_str().unwrap_or(""), kind, subject.id);
     }
     Ok(0)
 }
@@ -67,8 +89,8 @@ pub fn attestations(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
     }
     let h = here(ctx)?;
-    let state = crate::revs::resolve(&h.repo, h.line.as_ref(), &a.pos[0])?;
-    let v = h.repo.p.db.attestations(&state, a.get("--kind"))?;
+    let subject = subject(&h.repo, h.line.as_ref(), &a.pos[0])?;
+    let v = h.repo.p.db.attestations(&subject.id, a.get("--kind"))?;
     if a.has("--json") {
         outln!(ctx, "{}", serde_json::to_string(&v)?);
     } else {
