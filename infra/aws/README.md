@@ -24,7 +24,8 @@ Identity and Access Management (IAM) separates the project grants.
 The garbage collection (GC) role handles remote data deletion.
 The writer can create records, states, and slots, and abort multipart uploads.
 Only the owner creates `store.json` with their own credentials.
-The writer cannot initialize a store.
+The writer can list object names only under `records/` and `states/`.
+The writer cannot read object bodies or initialize a store.
 It cannot read or delete objects.
 The bucket requires `If-None-Match: *` for each object commit, including multipart completion.
 Multipart setup and part uploads do not require that header.

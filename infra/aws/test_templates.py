@@ -49,7 +49,7 @@ def actions(resource):
 class TemplateTests(unittest.TestCase):
     def test_project_iam(self):
         resources = template("template.yaml")["Resources"]
-        self.assertEqual(actions(resources["Writer"]), {"s3:PutObject", "s3:AbortMultipartUpload"})
+        self.assertEqual(actions(resources["Writer"]), {"s3:PutObject", "s3:AbortMultipartUpload", "s3:ListBucket"})
         writer_resources = statements(resources["Writer"])[0]["Resource"]
         self.assertEqual(writer_resources, [
             {"Fn::Sub": "${Bucket.Arn}/${Prefix}/records/*"},
@@ -57,6 +57,12 @@ class TemplateTests(unittest.TestCase):
             {"Fn::Sub": "${Bucket.Arn}/${Prefix}/slots/*"},
         ])
         self.assertNotIn({"Fn::Sub": "${Bucket.Arn}/${Prefix}/store.json"}, writer_resources)
+        writer_list = statements(resources["Writer"])[1]
+        self.assertEqual(writer_list["Action"], "s3:ListBucket")
+        self.assertEqual(writer_list["Resource"], {"Fn::GetAtt": "Bucket.Arn"})
+        self.assertEqual(writer_list["Condition"], {"StringLike": {"s3:prefix": [
+            {"Fn::Sub": "${Prefix}/records/*"}, {"Fn::Sub": "${Prefix}/states/*"},
+        ]}})
         self.assertEqual(actions(resources["Reader"]), {"s3:GetObject", "s3:ListBucket"})
         self.assertEqual(actions(resources["Gc"]), {"s3:DeleteObject"})
         self.assertEqual(statements(resources["Gc"])[0]["Resource"],
