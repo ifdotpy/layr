@@ -197,7 +197,8 @@ pub(super) fn push(store: &Store, repo: &Repo, opts: &Options) -> Result<Report>
             .context("local state ancestry has a cycle")?;
         let state = states.remove(position);
         // secrets::check_state for every outgoing state
-        let base = repo.ancestors(&state.id)?.into_iter().skip(1).find_map(|id| index.get(&id).cloned().map(|p| (id, p)));
+        let base =
+            reader::state_ancestry(repo, &state.id)?.into_iter().skip(1).find_map(|id| index.get(&id).cloned().map(|p| (id, p)));
         let mut hashes = BTreeMap::new();
         for pushed in index.values() {
             for entry in pushed.tree.files.values() {
@@ -469,6 +470,76 @@ mod tests {
             std::fs::remove_dir_all(root).unwrap();
         }
     }
+    #[test]
+    fn live_refs_keep_auto_states_and_auxiliary_states_obey_the_cache_option() {
+        use crate::model::{Record, StateRec};
+        let root = std::env::temp_dir().join(crate::ids::new_id());
+        std::fs::create_dir_all(&root).unwrap();
+        let ctx = context(&root);
+        let mut store = remote(&root, &ctx);
+        store.configure(&ctx, &super::super::ConfigureOptions { paper_key_out: Some(root.join("paper")) }).unwrap();
+        let dir = ctx.store.projects_dir().join("p");
+        std::fs::create_dir_all(dir.join("meta/db")).unwrap();
+        std::fs::create_dir_all(dir.join("states")).unwrap();
+        let project = crate::store::Project {
+            store: &ctx.store,
+            name: "p".into(),
+            dir: dir.clone(),
+            id: store.project.clone(),
+            db: crate::db::Db::open(&dir.join("meta/db/layr.sqlite")).unwrap(),
+        };
+        let mut record = Record::new("project");
+        record.data = serde_json::json!({"id":store.project,"name":"p","config":{}});
+        project.append(record, &ctx.actor()).unwrap();
+        let mut source = None;
+        let mut cache = String::new();
+        for kind in ["commit", "auto", "derived", "cache"] {
+            let id = crate::ids::new_id();
+            std::fs::create_dir(project.state_path(&id)).unwrap();
+            std::fs::write(project.state_path(&id).join("content"), kind).unwrap();
+            let state: StateRec = serde_json::from_value(serde_json::json!({"id":id,"kind":kind,
+                "subvol":crate::ids::new_id(),"author":{"name":"Test","email":"test@example.test"},
+                "derived_from":if kind=="derived"||kind=="cache" {source.clone()}else{None},
+                "parents":if kind=="auto" {source.clone().into_iter().collect::<Vec<_>>()}else{vec![]},
+                "time":crate::ids::now_ms()}))
+            .unwrap();
+            let mut record = Record::new("state");
+            record.states.push(state);
+            project.append(record, &ctx.actor()).unwrap();
+            if kind == "commit" {
+                source = Some(id);
+                continue;
+            }
+            let name = format!(
+                "{}/test",
+                if kind == "auto" {
+                    "pins"
+                } else if kind == "cache" {
+                    "caches"
+                } else {
+                    "derived"
+                }
+            );
+            let mut record = Record::new("ref.set");
+            record.data = serde_json::json!({"ref_change":{"name":name,"before":null,"after":{"name":name,"target":id}}});
+            project.append(record, &ctx.actor()).unwrap();
+            if kind == "cache" {
+                cache = id;
+            }
+        }
+        let repo = Repo { p: project };
+        let report = push(&store, &repo, &Options::default()).unwrap();
+        assert_eq!(report.states, 3);
+        assert!(report.omitted.contains(&format!("cache state {cache} of ref caches/test: use --caches")));
+        assert!(!reader::attempts(&store.backend).unwrap().contains_key(&cache));
+        let report = push(&store, &repo, &Options { caches: true, ..Default::default() }).unwrap();
+        assert_eq!(report.states, 1);
+        assert!(reader::attempts(&store.backend).unwrap().contains_key(&cache));
+        store.verify(true).unwrap();
+        drop(repo);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn an_existing_key_file_is_not_reused_without_an_openable_unfinished_slot() {
         let root = std::env::temp_dir().join(crate::ids::new_id());

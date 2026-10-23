@@ -250,6 +250,23 @@ pub(super) fn omitted_cache_refs(repo: &Repo, opts: &Options) -> Result<Vec<Stri
     Ok(omitted)
 }
 
+pub(super) fn state_ancestry(repo: &Repo, id: &str) -> Result<Vec<String>> {
+    let mut queue = std::collections::VecDeque::from([id.to_string()]);
+    let mut seen = BTreeSet::new();
+    let mut order = Vec::new();
+    while let Some(id) = queue.pop_front() {
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        if let Some(state) = repo.p.db.state(&id)? {
+            queue.extend(state.parents);
+            queue.extend(state.derived_from);
+        }
+        order.push(id);
+    }
+    Ok(order)
+}
+
 pub(super) fn required_states(repo: &Repo, lines: &[String], opts: &Options) -> Result<BTreeSet<String>> {
     let mut required = deletion_dependencies(lines)?;
     for reference in repo.p.db.refs("", crate::ids::now_ms())? {
@@ -257,7 +274,7 @@ pub(super) fn required_states(repo: &Repo, lines: &[String], opts: &Options) -> 
         if state.kind == crate::model::StateKind::Cache && !opts.caches {
             continue;
         }
-        required.extend(repo.ancestors(&reference.target)?);
+        required.extend(state_ancestry(repo, &reference.target)?);
     }
     Ok(required)
 }
