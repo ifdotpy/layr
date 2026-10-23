@@ -55,6 +55,9 @@ UTF8("layr/store/v2/tree") || 0x00 || canonical(header without sig) || 0x0a || c
 The machine key comes from its first signed record, as in peer replication.
 Records retain their existing signatures over their exact record bytes. Segments do not rewrite records.
 New record fields, refs, and attestations travel inside these records without a separate store format.
+Live refs require their target states and ancestors, including Auto states without `--auto`.
+Cache states require `--caches`, even when a live ref targets them. An omitted target is named in the report.
+Derived states travel as ordinary states.
 Readers validate the contiguous sequence prefix, project identity, signatures, and local trust before they import records.
 Readers validate tree signatures and each restored file's size and SHA-256.
 

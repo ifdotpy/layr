@@ -804,68 +804,8 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
     Ok(0)
 }
 
-// TEMPORARY INTEGRATION BOUNDARY: replace this module with `use crate::store_remote;`
-// when workstream remote-store lands. All operations fail explicitly.
-#[allow(dead_code)]
-mod store_remote {
-    use super::*;
-    #[derive(Default)]
-    pub struct Options {
-        pub auto: bool,
-        pub caches: bool,
-        pub paper_key: Option<String>,
-    }
-    #[derive(serde::Serialize)]
-    pub struct Report {
-        pub records: usize,
-        pub states: usize,
-        pub files: usize,
-        pub bytes: u64,
-        pub omitted: Vec<String>,
-        pub overlaps: usize,
-        pub gaps: Vec<String>,
-    }
-    #[derive(Default)]
-    pub struct ConfigureOptions {
-        pub paper_key_out: Option<std::path::PathBuf>,
-    }
-    pub struct Configured {
-        pub created: bool,
-        pub recovery_key_file: Option<String>,
-    }
-    pub struct Store;
-    pub fn open(_url: &str, _repo: &Repo) -> Result<Store> {
-        bail!("store remote: not implemented until remote-store integration")
-    }
-    impl Store {
-        pub fn configure(&mut self, _ctx: &Ctx, _opts: &ConfigureOptions) -> Result<Configured> {
-            bail!("store remote: not implemented")
-        }
-        pub fn push(&mut self, _ctx: &Ctx, _repo: &mut Repo, _opts: &Options) -> Result<Report> {
-            bail!("store remote: not implemented")
-        }
-        pub fn fetch(&mut self, _ctx: &Ctx, _repo: &mut Repo, _opts: &Options) -> Result<Report> {
-            bail!("store remote: not implemented")
-        }
-        pub fn clone_into(&mut self, _ctx: &Ctx, _repo: &mut Repo, _opts: &Options) -> Result<Report> {
-            bail!("store remote: not implemented")
-        }
-        pub fn verify(&self, _files: bool) -> Result<Report> {
-            bail!("store remote: not implemented")
-        }
-        pub fn log(&self) -> Result<Vec<String>> {
-            bail!("store remote: not implemented")
-        }
-        pub fn gc(&self, _dry_run: bool) -> Result<Vec<String>> {
-            bail!("store remote: not implemented")
-        }
-        pub fn trust(&self, _repo: &Repo, _machine: &str, _public_key: Option<&str>) -> Result<()> {
-            bail!("store remote: not implemented")
-        }
-    }
-}
+use crate::store_remote;
 
-// TEMPORARY INTEGRATION BOUNDARY: replace this module with `use crate::oci;`.
 #[cfg(test)]
 mod tests {
     use super::*;
