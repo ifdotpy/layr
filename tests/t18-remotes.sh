@@ -159,7 +159,7 @@ eq "reindex keeps the recovered snapshot readable" retained "$(l show "$retained
 ok "sync can repeat after reindex of recovered states" l sync peer --command -- "${transport[@]}"
 B remote self --json > "$T/peer-self.json"
 peer_public_key=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["public_key"])' "$T/peer-self.json")
-l remote trust peer "$(cat "$BR/machine/id")" --public-key "$peer_public_key" >/dev/null
+eq "trust accepts the same public key in uppercase" 0 "$(l remote trust peer "$(cat "$BR/machine/id")" --public-key "$(echo "$peer_public_key" | tr 'a-f' 'A-F')" >/dev/null; echo $?)"
 ok "remote trust records the known key" l remote list --json
 
 has "old command transport names sync remote" "layr sync <remote>" "$(l sync -- false 2>&1 || true)"

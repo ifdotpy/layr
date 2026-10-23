@@ -570,7 +570,9 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let key = a.get("--public-key").map(str::to_owned).or(repo.p.db.machine_key(&full)?)
                 .ok_or_else(|| exit(128, "unknown machine key; give --public-key <ed25519>"))?;
             let bytes = hex::decode(&key)?;
-            if bytes.len() != 32 { bail!("invalid machine key"); }
+            let raw: [u8; 32] = bytes.try_into().map_err(|_| exit(128, "invalid machine key"))?;
+            ed25519_dalek::VerifyingKey::from_bytes(&raw).map_err(|_| exit(128, "invalid machine key"))?;
+            let key = hex::encode(raw);
             match remote_kind {
                 Kind::Store => {
                     let mut store = store_remote::open(&url, repo)?;
