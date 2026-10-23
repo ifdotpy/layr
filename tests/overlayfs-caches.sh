@@ -29,7 +29,7 @@ printf '\nnew build input\n' >> notes.txt
 l commit -qam "new build input"
 l save -q --caches
 new_fs "$T/peer" 2G
-ok "sync transfers saved caches" l sync -q --caches -- env LAYR_ROOT="$T/peer/store" "$LAYR" serve-peer cachetest
+ok "sync transfers saved caches" peer_exchange sync cachetest -q --caches -- env LAYR_ROOT="$T/peer/store" "$LAYR" serve-peer cachetest
 env LAYR_ROOT="$T/peer/store" "$LAYR" --project cachetest adopt main >/dev/null
 eq "the peer restores the saved cache" rebuilt "$(cat "$T/peer/store/projects/cachetest/lines/main/target/output")"
 no "the peer cache is not mounted" mountpoint -q "$T/peer/store/projects/cachetest/lines/main/target"

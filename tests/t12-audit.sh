@@ -1,6 +1,5 @@
 #!/bin/bash
-# Regressions from the fifth review (2026-10-10): signed backups and checked restore, streams
-# that reach outside their project, big files, tags, sync trust, globs, the service client.
+# Regressions: streams outside their project, big files, tags, sync trust and the service client.
 . "$(dirname "$0")/lib.sh"
 
 chmod 755 $T $LAYR_ROOT
@@ -20,45 +19,6 @@ echo two >> notes.txt; l commit -qam two
 # The state folder of a revision (rev-parse prints the display form of the id).
 state_dir() { ls -d $LAYR_ROOT/projects/$1/states/*-$(l --project $1 --line main rev-parse $2 | cut -c1-12); }
 S1=$(basename $(state_dir s HEAD~1))
-
-# 1. Backups are signed by the machine: a stream replaced together with its checksum is refused.
-mkdir -p $T/bk; l backup -q $T/bk
-ok "a fresh backup verifies" l backup verify $T/bk
-cp -a $T/bk $T/bk-evil
-chain=$(ls -d $T/bk-evil/*/chain-0001)
-btrfs -q subvolume create $LAYR_ROOT/evil; echo EVIL > $LAYR_ROOT/evil/notes.txt
-mkdir $LAYR_ROOT/evil-ro; btrfs -q subvolume snapshot -r $LAYR_ROOT/evil $LAYR_ROOT/evil-ro/$S1
-python3 - "$chain/manifest.json" "$S1" > $T/first-file <<'PY'
-import json, sys
-d = json.load(open(sys.argv[1]))
-m = d.get("manifest", d)
-print([i["file"] for i in m["items"] if i.get("state") == sys.argv[2]][0])
-PY
-btrfs send -q $LAYR_ROOT/evil-ro/$S1 | zstd -q -c > "$chain/$(cat $T/first-file)"
-python3 - "$chain/manifest.json" "$chain/$(cat $T/first-file)" <<'PY'
-import hashlib, json, os, sys
-d = json.load(open(sys.argv[1]))
-m = d.get("manifest", d)
-for i in m["items"]:
-    if i["file"] == os.path.basename(sys.argv[2]):
-        i["sha256"] = hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest()
-        i["bytes"] = os.path.getsize(sys.argv[2])
-json.dump(d, open(sys.argv[1], "w"))
-PY
-out=$(l backup restore $(dirname $chain) --as r1 2>&1); rc=$?
-eq "a replaced stream with a new checksum is refused" "128" "$rc"
-has "because the manifest signature fails" "signature" "$out"
-no "no state with the replaced content" sh -c "$LAYR --project r1 --line main show HEAD~1:notes.txt 2>/dev/null | grep -q EVIL"
-
-# 2. Special files in a backup: a pipe instead of a file does not block the service.
-cp -a $T/bk $T/bk-pipe
-chain=$(ls -d $T/bk-pipe/*/chain-0001)
-records=$(ls $chain | grep records)
-rm -f "$chain/$records"; mkfifo "$chain/$records"
-eq "verify does not wait on a pipe" "1" "$(timeout 20 $LAYR backup verify $T/bk-pipe >/dev/null 2>&1; echo $?)"
-has "and names it" "not a regular file" "$(timeout 20 $LAYR backup verify $T/bk-pipe 2>&1)"
-ok "a good backup still restores" l backup restore $T/bk --as r2 -q
-eq "with its history" "$(l log --format=%s)" "$(l --project r2 --line main log --format=%s)"
 
 # 3. A stream cannot take its parent from another project.
 mkdir -p $T/vsrc; echo TOPSECRET > $T/vsrc/key.txt
@@ -118,7 +78,7 @@ while recv().get("more"):
 send({"op": "records", "lines": ["{\"r\": {}, \"s\": \"\"}"], "more": False})
 r.read()
 PY
-no "a sync whose peer records fail" l sync -q -- python3 $T/fake-peer.py
+no "a sync whose peer records fail" peer_exchange sync s -q -- python3 $T/fake-peer.py
 eq "leaves the peer untrusted" "0" "$(python3 -c "import sqlite3; print(sqlite3.connect('$LAYR_ROOT/projects/s/meta/db/layr.sqlite').execute(\"SELECT count(*) FROM trusted WHERE machine LIKE '%f00d'\").fetchone()[0])")"
 
 # 7. The client reports a request it could not send. The fake service never reads it and

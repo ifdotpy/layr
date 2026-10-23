@@ -191,6 +191,13 @@ fn finish(
     if let Err(e) = repo.check_move(ctx, line, new_head) {
         return Err(fail(e));
     }
+    if op == "merge" && new_head != line.head {
+        if let Err(e) =
+            crate::secrets::check_between(ctx, repo, &repo.state_root(&line.head)?, &repo.state_root(new_head)?, &line.head)
+        {
+            return Err(fail(e));
+        }
+    }
     // A line with overlays: the full trees of the old and the new head, with the overlays in
     // place, so the update never touches an overlay file it does not change.
     let layers = match ovl {
@@ -238,6 +245,7 @@ fn finish(
 /// Path rules of a protected line: every path that the merge changes needs the role of its
 /// rule (`layr protect <line> --path <path>=<role>`).
 fn check_paths(ctx: &Ctx, repo: &Repo, line: &Line, rule: Option<&crate::access::Rule>, head: &str, result: &str) -> Result<()> {
+    crate::secrets::check_between(ctx, repo, &repo.state_root(head)?, &repo.state_root(result)?, head)?;
     let rule = match rule {
         Some(r) if !r.paths.is_empty() && !ctx.caller.is_root() => r,
         _ => return Ok(()),
@@ -337,10 +345,10 @@ fn run_line_checks(
                     ),
                 )
             })?;
-        if repo.p.db.checks(candidate)?.iter().any(|c| c.0 == cmd && c.1 == 0) {
+        let argv = vec!["sh".to_string(), "-c".to_string(), cmd.clone()];
+        if repo.p.db.check_exit(candidate, &argv, Some(0))?.is_some() {
             continue;
         }
-        let argv = vec!["sh".to_string(), "-c".to_string(), cmd.clone()];
         let code = super::admin::run_check(ctx, repo, candidate, &argv, &cmd, quiet)?;
         if code != 0 {
             return Err(exit(
@@ -357,7 +365,7 @@ fn run_line_checks(
     let lock = repo.p.lock()?;
     let now = repo.line(&line.id)?;
     if now.head != head {
-        return Err(exit(1, format!("error: line '{}' moved while its checks ran; merge again", line.name)));
+        return Err(target_moved(&line.name));
     }
     let (st, _scan, _it, _idx) = repo.status(&now)?;
     Ok((lock, local_paths(repo, &now, &st)?))
@@ -419,11 +427,108 @@ pub fn merge(ctx: &Ctx, args: &[String]) -> Result<i32> {
     merge_rev(ctx, &h.repo, &line, &rev, &a)
 }
 
+#[derive(Debug)]
+pub struct TargetMoved;
+impl std::fmt::Display for TargetMoved {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("target head changed")
+    }
+}
+impl std::error::Error for TargetMoved {}
+
+fn target_moved(name: &str) -> anyhow::Error {
+    exit(1, format!("error: line '{name}' moved while its merge ran; merge again")).context(TargetMoved)
+}
+
+struct QueuedMerge<'a> {
+    entry: &'a crate::model::QueueEntry,
+    expected_head: &'a str,
+    attempts: u32,
+}
+
+/// A queue entry pins its source and compares the target under the merge's project lock.
+pub fn merge_queued(
+    ctx: &Ctx,
+    repo: &Repo,
+    line: &Line,
+    entry: &crate::model::QueueEntry,
+    expected_head: &str,
+    attempts: u32,
+) -> Result<i32> {
+    let source = repo.source_state(&entry.state)?;
+    if !source.conflicts.is_empty() {
+        return Err(exit(
+            1,
+            format!(
+                "queued state has conflicts: {}",
+                source.conflicts.iter().map(|c| c.path.as_str()).collect::<Vec<_>>().join(", ")
+            ),
+        ));
+    }
+    let mut args = crate::args::Parsed::default();
+    args.values.insert("--expect".into(), vec![entry.state.clone()]);
+    args.flags.insert("-q".into(), 1);
+    merge_rev_inner(ctx, repo, line, &entry.state, &args, Some(&QueuedMerge { entry, expected_head, attempts }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_queued(
+    ctx: &Ctx,
+    repo: &Repo,
+    line: &Line,
+    new_head: &str,
+    states: Vec<StateRec>,
+    working_before: Option<String>,
+    local: &std::collections::BTreeSet<String>,
+    data: serde_json::Value,
+    ovl: Option<&OverlayMerge>,
+    queue: Option<&QueuedMerge<'_>>,
+) -> Result<Vec<changes::Change>> {
+    let data = match queue {
+        Some(q) => match super::queue::complete_data(repo, q.entry, new_head, q.attempts, data) {
+            Ok(data) => data,
+            Err(error) => {
+                repo.discard_states(&states);
+                if let Some(ovl) = ovl {
+                    ovl.discard(repo);
+                }
+                return Err(error);
+            }
+        },
+        None => data,
+    };
+    finish(
+        ctx,
+        repo,
+        line,
+        if queue.is_some() { "queue.result" } else { "merge" },
+        new_head,
+        states,
+        working_before,
+        local,
+        data,
+        ovl,
+    )
+}
+
 pub fn merge_rev(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str, a: &crate::args::Parsed) -> Result<i32> {
-    let theirs = revs::resolve(repo, Some(line), rev)?;
-    let theirs_line = repo.p.db.line_by_name(rev)?;
+    merge_rev_inner(ctx, repo, line, rev, a, None)
+}
+
+fn merge_rev_inner(
+    ctx: &Ctx,
+    repo: &Repo,
+    line: &Line,
+    rev: &str,
+    a: &crate::args::Parsed,
+    queue: Option<&QueuedMerge<'_>>,
+) -> Result<i32> {
+    let (theirs, theirs_line) = match queue {
+        Some(q) => (q.entry.state.clone(), None),
+        None => (revs::resolve(repo, Some(line), rev)?, repo.p.db.line_by_name(rev)?),
+    };
     if let Some(e) = a.get("--expect") {
-        let want = revs::resolve(repo, Some(line), e)?;
+        let want = if queue.is_some() { e.to_string() } else { revs::resolve(repo, Some(line), e)? };
         if want != theirs {
             return Err(exit(
                 1,
@@ -436,7 +541,21 @@ pub fn merge_rev(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str, a: &crate::args
         }
     }
     let expect = a.get("--expect").is_some();
-    let (lock, w) = work::begin(ctx, repo, line, crate::repo::LineOp::Merge { expect })?;
+    let (lock, w) = if let Some(q) = queue {
+        repo.authorize_line(ctx, line, crate::repo::LineOp::Merge { expect })?;
+        let lock = repo.p.lock()?;
+        let now = repo.line(&line.id)?;
+        if now.head != q.expected_head {
+            return Err(target_moved(&line.name));
+        }
+        if repo.p.db.queue_entry(&q.entry.id)?.as_ref() != Some(q.entry) {
+            return Err(exit(1, "queue entry changed before the merge"));
+        }
+        let working = repo.working_state(ctx, &now, "before a queued merge")?;
+        (lock, working)
+    } else {
+        work::begin(ctx, repo, line, crate::repo::LineOp::Merge { expect })?
+    };
     let rule = repo.policy().rule_for(&line.name);
     let line = repo.line(&line.id)?;
     let head = line.head.clone();
@@ -454,7 +573,23 @@ pub fn merge_rev(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str, a: &crate::args
     };
     let up_to_date = theirs == head || repo.is_ancestor(&theirs, &head)?;
     if up_to_date && theirs_line.as_ref().map(|t| repo.layers(t).map(|v| v.is_empty())).transpose()?.unwrap_or(true) {
-        outln!(ctx, "Already up to date.");
+        if queue.is_some() {
+            finish_queued(
+                ctx,
+                repo,
+                &line,
+                &head,
+                vec![],
+                w,
+                &std::collections::BTreeSet::new(),
+                serde_json::json!({"theirs":theirs,"up_to_date":true}),
+                None,
+                queue,
+            )?;
+        }
+        if !a.has("-q") {
+            outln!(ctx, "Already up to date.");
+        }
         return Ok(0);
     }
     let (st, _scan, _it, _idx) = repo.status(&line)?;
@@ -466,6 +601,16 @@ pub fn merge_rev(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str, a: &crate::args
     let checks = rule.as_ref().map(|r| r.check.clone()).unwrap_or_default();
     // The follow overlays merge with the line: all of them or none.
     let ovl = plan_overlays(ctx, repo, &line, theirs_line.as_ref(), &label, &message)?;
+    if queue.is_some() && ovl.conflicts > 0 {
+        let paths: Vec<_> = ovl
+            .moves
+            .iter()
+            .filter_map(|(_, _, _, s)| s.as_ref())
+            .flat_map(|s| s.conflicts.iter().map(|c| c.path.as_str()))
+            .collect();
+        ovl.discard(repo);
+        return Err(exit(1, format!("queued merge has overlay conflicts: {}", paths.join(", "))));
+    }
     if !checks.is_empty() && ovl.conflicts > 0 {
         ovl.discard(repo);
         return Err(exit(
@@ -490,17 +635,17 @@ pub fn merge_rev(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str, a: &crate::args
             return Ok(0);
         }
         // Only the overlays changed: the shared set stays.
-        finish(
+        finish_queued(
             ctx,
             repo,
             &line,
-            "merge",
             &head,
             vec![],
             w,
             &local,
             serde_json::json!({"theirs": theirs, "overlays_only": true}),
             Some(&ovl),
+            queue,
         )?;
         report(ctx);
         return Ok(if ovl.conflicts > 0 { 1 } else { 0 });
@@ -516,17 +661,17 @@ pub fn merge_rev(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str, a: &crate::args
             _relock = Some(l);
             local = paths;
         }
-        finish(
+        finish_queued(
             ctx,
             repo,
             &line,
-            "merge",
             &theirs,
             vec![],
             w,
             &local,
             serde_json::json!({"theirs": theirs, "fast_forward": true}),
             Some(&ovl),
+            queue,
         )?;
         if !quiet {
             outln!(ctx, "Updating {}..{}\nFast-forward", ids::short(&head), ids::short(&theirs));
@@ -550,6 +695,12 @@ pub fn merge_rev(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str, a: &crate::args
     let (state, out) = merge_states(ctx, repo, &line, &base, &head, &theirs, &label, parents, &message)?;
     let sid = state.id.clone();
     let nconf = out.conflicts.len();
+    if queue.is_some() && nconf > 0 {
+        let paths = out.conflicts.iter().map(|c| c.path.as_str()).collect::<Vec<_>>().join(", ");
+        repo.discard_states(std::slice::from_ref(&state));
+        ovl.discard(repo);
+        return Err(exit(1, format!("queued merge has conflicts: {paths}")));
+    }
     let mut states = vec![state];
     if let Err(e) = check_paths(ctx, repo, &line, rule.as_ref(), &head, &sid)
         .and_then(|_| check_approvals(ctx, repo, &line, rule.as_ref(), &head, &theirs))
@@ -578,17 +729,17 @@ pub fn merge_rev(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str, a: &crate::args
         _relock = Some(l);
         local = paths;
     }
-    finish(
+    finish_queued(
         ctx,
         repo,
         &line,
-        "merge",
         &sid,
         states,
         w,
         &local,
         serde_json::json!({"theirs": theirs, "base": base, "squash": a.has("--squash"), "conflicts": nconf}),
         Some(&ovl),
+        queue,
     )?;
     for m in &out.messages {
         outln!(ctx, "{m}");

@@ -123,3 +123,31 @@ hash of exactly that (`base_key`). A view is that stack made addressable.
   needs overlay reader rights.
 
 Owner: worker `merge` (continues), branch `cloud/views`.
+
+## 6. Probes and the behavior diff (RFC 29, "Change instead of PR")
+
+A probe is a named command that writes outputs; the behavior diff compares the outputs of two
+exact states or views.
+
+- `layr.toml`: `[probe.<name>]` with `run` (argv array, run from the tree root), `outputs`
+  (folder or file paths relative to the root), `kind` = `files` (default: per-file text diff,
+  binary by size and hash), `json` (structural diff by key path) or `number` (a JSON file
+  `{"<metric>": <number>}`; relative change, with `noise` threshold, default 0.05).
+- `layr probe run <rev> [--probe <name>]`: runs each probe with the existing `try` mechanism in
+  the exact state or view (as the caller, clean environment, private copy), stores the outputs
+  as a state of kind `derived` with `context = "probe-v1/<name>"` and `derived_from = <subject>`,
+  pins it with ref `derived/probe-v1/<name>/<subject>`, and writes a `check` attestation whose
+  payload holds the probe name, argv, exit code and the output state. A result with equal argv
+  for the same subject is reused (`Db::check_exit`).
+- `layr probe diff <base> <head> [--json]`: compares stored results; probes without a result
+  are listed as "not run" (it never runs them).
+- `layr change show <id>` adds a "Behavior" section from stored results of the change's base
+  (merge base with its target) and its newest version. It never runs anything.
+- Security: probe commands come from the repository, so they are code of the change's author.
+  Nothing runs them implicitly. Only an explicit `layr probe run` by the caller, or the merge
+  queue / executor configured with `queue.probes = true`, runs them, always in the `try`
+  sandbox as the caller or the line owner.
+- Not in this step: screenshots and image diff (a probe may write images; they compare by hash
+  and size).
+
+Owner: worker `oci` (continues), branch `cloud/probes`.

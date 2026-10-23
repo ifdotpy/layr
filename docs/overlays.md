@@ -25,7 +25,7 @@ Short result:
 
 - An **overlay** is its own file tree. It has an owner, readers and its own history of states.
 - The **shared set** is also an overlay. Its readers are everyone who reads the project. It is
-  the only overlay that `layr push` sends to the git remote.
+  the only overlay that `layr git push` sends to the git remote.
 - A **line is a stack**: the shared set at the bottom, overlays above it. For the same path the
   upper overlay wins, as in overlayfs. The same path (for example `.env`) can be in many
   overlays.
@@ -44,7 +44,7 @@ Short result:
   The owner of the overlay sets the default mode. A line can override it.
 - **A merge is atomic across the follow overlays.** The user who merges must be a reader of
   all of them. The checks run on the full result, with all layers in place.
-- **Encryption.** In backups and in remote vaults, an overlay can be stored encrypted for its
+- **Encryption.** In remote copies and in remote vaults, an overlay can be stored encrypted for its
   readers with age.
 
 In this file a **layer** is the shared set or an overlay of a stack.
@@ -124,13 +124,12 @@ So:
 This took 7 to 8 ms for split or assembly, for a folder of 185 files and for one of 8,117
 files. The cost is at the edge of the folder: section 6.
 
-### 3.5 Push, backups and replication
+### 3.5 Push, remote copies and replication
 
-- `layr push` exports only the states of the shared set. A commit that changed only overlays
+- `layr git push` exports only the states of the shared set. A commit that changed only overlays
   makes no shared state, so git gets no commit for it.
-- `layr backup` already writes one btrfs stream per state. The stream of an overlay state can
-  be encrypted with age for the overlay's readers. The manifest then holds the SHA-256 of the
-  encrypted bytes, and the signature covers them as today.
+- A future store format can encrypt overlay states for their readers.
+  The current CLI sends only the shared set.
 - `layr sync` sends states to trusted machines. Which overlays go to which machine is open
   (section 7).
 
@@ -298,14 +297,14 @@ extent (`filefrag -v`).
 10. **Moves across the edge of a folder overlay.** `rename()` gives EXDEV: `git mv` fails, GNU
     `mv` copies with reflinks, uutils `mv` copies all data. A file overlay has no such edge. Are
     folder overlays worth it, or only for large private folders where O(1) assembly matters?
-11. **Programs that stay on one file system.** `find -xdev` stops at a nested subvolume. Backup
+11. **Programs that stay on one file system.** `find -xdev` stops at a nested subvolume. Remote copy
     and copy programs with a one-file-system option probably skip folder overlays too (not
     tested).
 12. **A file that was pushed.** `layr overlay move` of a file that is in a pushed shared state
     does not remove it from git: the old commits keep it. Should the command warn, or refuse
     without a flag?
 13. **age keys.** Where do the public keys of readers live (records in the project database?).
-    A reader who is removed can still read old encrypted backups.
+    A reader who is removed can still read old encrypted remote copies.
 14. **Replication.** Readers are users of a machine, as roles are. Which overlays does
     `layr sync` send to a peer: none, all encrypted, or only to machines with the same readers?
 15. **Checks and private files.** A check runs on the full result as the caller, who reads all
@@ -326,7 +325,7 @@ stack record of question 4, ephemeral mode, encryption and folder overlays are n
 2. **Merge across follow overlays**, with the stack record for `--expect`, approvals and checks.
 3. **Assembly** for lines with another stack (a line of another user, `overlay use`).
 4. **Ephemeral mode**, then **shared mode** after question 7 is decided.
-5. **Encrypted backups** with age.
+5. **Encrypted remote copies** with age.
 6. **Folder overlays** last, and only for large private folders. They need the subvolume check
    of question 9.
 
@@ -427,7 +426,7 @@ owner changes by commits and a user who merges into the line changes by the merg
   shows none.
 - Automatic states of a line with overlays leave the overlay files out, the paths of pending
   moves, and copies of overlay files under other names (moved, or the same content). So no state
-  of the project holds an overlay file, and `push`, `export`, `backup`, `sync` and `show`/`grep`
+  of the project holds an overlay file, and `push`, `export`, `sync` and `show`/`grep`
   of any state give the shared set only.
 - Automatic states made before a file moved into an overlay hold it (an automatic state holds the
   whole working folder, ignored files too), and every reader of the project reads them. `overlay
@@ -467,7 +466,7 @@ shared set only, which is safe but not a decision), 9 to 11 (folder overlays), 1
 ### 9.7 Limits and what is left
 
 - Not built: routing patterns (`overlay route`), ephemeral mode, folder overlays, encrypted
-  backups, replication of overlays (`sync` and `backup` carry the shared set; a restored project
+  remote copies, replication of overlays (`sync` carries the shared set; a restored project
   shows no overlay files, and `fsck` reports the missing overlays), `--expect` of a stack
   (question 4: `--expect` names the shared state; the follow overlays are merged as they are).
 - `commit --amend` and `stash` refuse in a line with overlays.
@@ -488,7 +487,7 @@ shared set only, which is safe but not a decision), 9 to 11 (folder overlays), 1
   lines. A key that changes is changed in each reader's lines.
 - Overlay files have no automatic states: their history is their commits. Automatic states also
   leave out a file that moved from an overlay path and a new file with the same content as an
-  overlay file (a copy, an editor's backup); a changed copy under another name (a swap file) goes
+  overlay file (a copy, an editor's extra copy); a changed copy under another name (a swap file) goes
   in.
 - `export` of the working content (no revision) and `try` give the shared set only.
 - If the owner of a line stops reading an overlay of its stack, the line refuses commits until

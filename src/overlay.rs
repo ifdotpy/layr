@@ -4,7 +4,7 @@
 //! An overlay is the internal project `<project>%<overlay>` below the project's private `meta`
 //! folder, with its own states, signed records and access policy (its owner is its admin, its
 //! readers have the reader role). History, permissions and fsck work as for any project, and
-//! backups, pushes and replication of the project never see it. Its lines are pointers without
+//! remote copies, pushes and replication of the project never see it. Its lines are pointers without
 //! working folders: `user-<uid>` (shared mode: one for all lines of a user) and `line-<line id>`
 //! (follow mode: one per line of the project, branched and merged with it).
 //!
@@ -810,6 +810,13 @@ pub fn commit_layers(
             }
         }
     };
+    if let Some(state) = &shared {
+        if let Err(e) = crate::secrets::check_between(ctx, repo, &shared_root, &repo.p.state_path(&state.id), &line.head) {
+            repo.discard_states(std::slice::from_ref(state));
+            discard(&made, &orepos);
+            return Err(e);
+        }
+    }
     // The overlays first: a lost main record leaves an overlay line ahead of the stack, which the
     // next commit reports, never a stack that names a missing state.
     let mut new_layers = layers.to_vec();

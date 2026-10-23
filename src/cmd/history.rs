@@ -727,6 +727,9 @@ fn parse_since(s: &str) -> Option<i64> {
 }
 
 pub fn log(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    if args.iter().any(|v| v == "--remote" || v.starts_with("--remote=")) {
+        return crate::store_remote::command(ctx, "log", args);
+    }
     let a = parse(&log_spec(), args)?;
     let h = here(ctx)?;
     let repo = &h.repo;

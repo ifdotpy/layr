@@ -38,7 +38,6 @@ check_identity() {
 }
 ok 'a check runs with the caller identity' check_identity
 cat "$T/check.log"
-eq 'a client cannot restore through the root service' '1' "$(as "$LAYR_APFS_TEST_USER" "$L" backup restore /private/tmp/nonexistent-layr-backup >/dev/null 2>&1; echo $?)"
 eq 'a client cannot serve peers through the root service' '1' "$(as "$LAYR_APFS_TEST_USER" "$L" serve-peer service </dev/null >/dev/null 2>&1; echo $?)"
 ok 'service snapshots pass fsck' as "$LAYR_APFS_TEST_USER" "$L" fsck
 finish

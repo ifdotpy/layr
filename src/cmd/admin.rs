@@ -142,7 +142,6 @@ pub fn undo_last_of(ctx: &Ctx, repo: &Repo, line: &Line, ops: &[&str]) -> Result
 const NOT_UNDOABLE: &[&str] = &[
     "line.adopt",
     "machine.trust",
-    "backup",
     "save",
     "save.caches",
     "save.layers",
@@ -225,7 +224,7 @@ fn fmt_time(ms: i64) -> String {
 pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32> {
     let r = repo.p.db.record(id)?.ok_or_else(|| exit(128, "fatal: unknown operation"))?;
     if r.op == "export" {
-        return Err(exit(1, "error: a push cannot be undone here: the commit is on the remote. Push a revert ('layr revert <state>' then 'layr push')."));
+        return Err(exit(1, "error: a push cannot be undone here: the commit is on the remote. Push a revert ('layr revert <state>' then 'layr git push')."));
     }
     if NOT_UNDOABLE.contains(&r.op.as_str()) {
         return Err(exit(1, format!("error: operation '{}' has nothing to undo", r.op)));
@@ -247,6 +246,7 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
     if r.lines.is_empty() && !repo.is_admin(ctx) && r.actor.uid != ctx.caller.uid {
         return Err(exit(1, "permission denied: only the project admin or the user who made it can undo this operation"));
     }
+    let _queue_lock = if r.data.get("queue_change").is_some() { Some(super::queue::require_lock(repo)?) } else { None };
     let _lock = repo.p.lock()?;
     let mut rec = Record::new("undo");
     rec.data = serde_json::json!({"undo": r.id, "op": r.op});
@@ -259,8 +259,23 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
         if let Some(before) = &ch.before {
             repo.state_root(&before.target)?;
         }
+        if r.data.get("queue_change").is_none() {
+            super::refs::authorize_update(ctx, repo, &ch.name, current.as_ref(), ch.before.as_ref(), true)?;
+        }
         let inverse = crate::model::RefChange { name: ch.name, before: current, after: ch.before };
         rec.data["ref_change"] = serde_json::to_value(inverse)?;
+    }
+    if let Some(value) = r.data.get("queue_change") {
+        let change: crate::model::QueueChange = serde_json::from_value(value.clone())?;
+        let current = repo.p.db.queue_entry(&change.id)?;
+        if !force && current != change.after {
+            bail!("queue entry '{}' changed after this operation", change.id);
+        }
+        if let Some(before) = &change.before {
+            repo.state_root(&before.state)?;
+        }
+        rec.data["queue_change"] =
+            serde_json::to_value(crate::model::QueueChange { id: change.id, before: current, after: change.before })?;
     }
     // A commit that changed overlays: their lines move back and the line shows their earlier
     // states again; the changes stay in the working folder, as for the shared set. The overlay
@@ -536,13 +551,20 @@ pub fn try_cmd(ctx: &Ctx, args: &[String]) -> Result<i32> {
         return Err(exit(128, USAGE));
     }
     let state = revs::resolve(repo, h.line.as_ref(), rev).map_err(|e| exit(128, format!("layr try: {e:#}")))?;
-    // `try` is the caller's own command: it gets the caller's environment, except the variables
-    // that would point git or layr at the caller's own folder instead of the copy.
+    try_state_in(ctx, repo, &state, &a.paths, a.has("-q"), a.has("--keep"), false)
+}
+
+/// Use the `try` copy and environment. JSON output sends child output to standard error.
+pub fn try_state(ctx: &Ctx, repo: &Repo, state: &str, argv: &[String], quiet: bool, json: bool) -> Result<i32> {
+    try_state_in(ctx, repo, state, argv, quiet, false, json)
+}
+
+fn try_state_in(ctx: &Ctx, repo: &Repo, state: &str, argv: &[String], quiet: bool, keep: bool, json: bool) -> Result<i32> {
     const TO_COPY: &[&str] =
         &["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR", "LAYR_LINE"];
     let env: Vec<(String, String)> =
         ctx.env.iter().filter(|(k, _)| !TO_COPY.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect();
-    run_check_in(ctx, repo, &state, &a.paths, &a.paths.join(" "), &env, a.has("-q"), a.has("--keep"))
+    run_check_in(ctx, repo, state, argv, &argv.join(" "), &env, quiet, keep, json)
 }
 
 /// Run a configured check as the caller in a temporary copy of `state` and record its exit code
@@ -553,7 +575,7 @@ pub fn try_cmd(ctx: &Ctx, args: &[String]) -> Result<i32> {
 /// The copy starts with the warm caches of the state, but its build output is never kept: layr
 /// cannot tell whether build output is valid for a state (docs/design.md, section 5).
 pub fn run_check(ctx: &Ctx, repo: &Repo, state: &str, argv: &[String], command: &str, quiet: bool) -> Result<i32> {
-    run_check_in(ctx, repo, state, argv, command, &[], quiet, false)
+    run_check_in(ctx, repo, state, argv, command, &[], quiet, false, false)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -566,6 +588,7 @@ fn run_check_in(
     env: &[(String, String)],
     quiet: bool,
     keep: bool,
+    json: bool,
 ) -> Result<i32> {
     let name = format!(".try-{:016x}", rand::random::<u64>());
     let dir = repo.p.line_path(&name);
@@ -584,6 +607,9 @@ fn run_check_in(
         let started = std::time::Instant::now();
         let mut c = std::process::Command::new(&argv[0]);
         c.args(&argv[1..]).current_dir(&dir);
+        if json {
+            c.stdout(std::process::Stdio::from(std::io::stderr()));
+        }
         // The caller's identity (uid, groups), never the service's.
         let mut env = env.to_vec();
         env.push(("LAYR_TRY_STATE".into(), ids::display(state)));
@@ -595,7 +621,7 @@ fn run_check_in(
             c.status().map_err(|e| exit(127, format!("layr try: cannot run '{}' as user {}: {e}", argv[0], ctx.caller.user)))?;
         let code = st.code().unwrap_or(128);
         let _lock = repo.p.lock()?;
-        let result = serde_json::json!({"command":command,"exit":code,"seconds":started.elapsed().as_secs_f64()});
+        let result = serde_json::json!({"command":command,"exit":code,"seconds":started.elapsed().as_secs_f64(),"argv":argv});
         let mut rec = super::attest::record(repo, state, "check", &serde_json::to_vec(&result)?)?;
         rec.data["check"] = result;
         repo.commit_record(ctx, rec)?;
@@ -809,6 +835,9 @@ fn prune_caches(repo: &Repo) -> Result<Vec<String>> {
 }
 
 pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    if args.iter().any(|v| v == "--remote" || v.starts_with("--remote=")) {
+        return crate::store_remote::command(ctx, "gc", args);
+    }
     let spec = Spec::new().flag("-n|--dry-run").flag("-q|--quiet");
     let a = parse(&spec, args)?;
     let h = here(ctx)?;
@@ -825,6 +854,9 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
 }
 
 pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    if args.iter().any(|v| v == "--remote" || v.starts_with("--remote=")) {
+        return crate::store_remote::command(ctx, "fsck", args);
+    }
     let spec = Spec::new().flag("--repair");
     let a = parse(&spec, args)?;
     let h = here(ctx)?;
@@ -1248,11 +1280,13 @@ pub fn config(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let (k, v) = (&a.pos[0], a.pos[1..].join(" "));
     let val: serde_json::Value = serde_json::from_str(&v).unwrap_or(serde_json::Value::String(v.clone()));
-    set_config(ctx, repo, k, val)?;
-    if k == "backup.dir" {
-        // The service writes its own backups into this folder as the user who named it.
-        set_config(ctx, repo, "backup.writer", serde_json::json!(ctx.caller.uid))?;
+    if k == "queue.run" && !val.is_null() {
+        let value = val.as_str().ok_or_else(|| exit(128, "queue.run must be a comma-separated list of line names"))?;
+        for name in value.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            crate::store::check_name("line", name)?;
+        }
     }
+    set_config(ctx, repo, k, val)?;
     if POLICY_KEYS.contains(&k.as_str()) {
         crate::gitbridge::sync_store_access(repo)?;
     }
@@ -1264,11 +1298,14 @@ const POLICY_KEYS: &[&str] = &["access", "grants", "deny", "protect", "members",
 
 /// A named check's command belongs to the protection rules that name it (`check.<name>`).
 fn policy_key(key: &str) -> bool {
-    POLICY_KEYS.contains(&key) || key.starts_with("check.")
+    POLICY_KEYS.contains(&key) || key.starts_with("check.") || key == "registry.tokens"
 }
 
 /// `layr access`: roles and deny rules (docs/design.md, section 3).
 pub fn access(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    if args.first().map(String::as_str) == Some("token") {
+        return super::oci::token(ctx, &args[1..]);
+    }
     use crate::access::{action_role, parse_principal, show_principal, Role, ACTIONS};
     let h = here(ctx)?;
     let repo = &h.repo;
@@ -1380,21 +1417,32 @@ pub fn access(ctx: &Ctx, args: &[String]) -> Result<i32> {
 /// `layr approve [<rev>] [--withdraw]`: approve an exact state (or withdraw the approval). A
 /// protection rule can require approvals of the state a merge takes (`--approvals`).
 pub fn approve(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let spec = Spec::new().flag("--withdraw").flag("-q|--quiet");
+    let spec = Spec::new().flag("--withdraw").flag("-q|--quiet").value("--declassify").flag("--json");
     let a = parse(&spec, args)?;
     let h = here(ctx)?;
     let repo = &h.repo;
     let state = revs::resolve(repo, h.line.as_ref(), a.pos.first().map(|s| s.as_str()).unwrap_or("HEAD"))?;
+    if a.pos.len() > 1 {
+        bail!("usage: layr approve [--declassify <path>@<id>] <rev>");
+    }
+    if a.has("--withdraw") && a.has("--declassify") {
+        bail!("--withdraw and --declassify cannot be combined");
+    }
     let s = repo.state(&state)?;
     let _lock = repo.p.lock()?;
     let withdraw = a.has("--withdraw");
-    let mut rec = super::attest::record(repo, &state, if withdraw { "revoke" } else { "approval" }, b"")?;
+    let mut rec = match a.get("--declassify") {
+        Some(scope) => crate::secrets::declassify(ctx, repo, scope, &state)?,
+        None => super::attest::record(repo, &state, if withdraw { "revoke" } else { "approval" }, b"")?,
+    };
     if withdraw {
         rec.data["revokes"] =
             serde_json::json!(repo.p.db.own_attestations(&state, &repo.p.store.machine.id, ctx.caller.uid, Some("approval"))?);
     }
-    repo.commit_record(ctx, rec)?;
-    if !a.has("-q") {
+    let rec = repo.commit_record(ctx, rec)?;
+    if a.has("--json") {
+        outln!(ctx, "{}", rec.data);
+    } else if !a.has("-q") {
         let what = if withdraw { "Withdrew the approval of" } else { "Approved" };
         outln!(ctx, "{what} state {} {}", ids::short(&state), s.message.lines().next().unwrap_or(""));
     }
@@ -1402,7 +1450,7 @@ pub fn approve(ctx: &Ctx, args: &[String]) -> Result<i32> {
 }
 
 /// A duration: `90s`, `30m`, `2h`, `1d`.
-fn duration_ms(s: &str) -> Result<i64> {
+pub(crate) fn duration_ms(s: &str) -> Result<i64> {
     let (n, unit) = s.split_at(s.len().saturating_sub(1));
     let n: i64 = n.parse().map_err(|_| exit(128, format!("fatal: bad duration '{s}' (for example 30m, 2h, 1d)")))?;
     let k = match unit {
@@ -1441,6 +1489,20 @@ pub fn protect(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 let checks = r.check.join(",");
                 match rule {
                     Some(x) => {
+                        if crate::model::ref_namespace(p) {
+                            let from =
+                                x.approvers.iter().map(|key| crate::access::show_principal(key)).collect::<Vec<_>>().join(",");
+                            outln!(
+                                ctx,
+                                "{p}\tupdate {}\texpect {}\tcheck {}\tapprovals {} from {}",
+                                x.update.name(),
+                                x.expect,
+                                if checks.is_empty() { "-" } else { &checks },
+                                x.approvals,
+                                if from.is_empty() { "maintainers" } else { &from }
+                            );
+                            continue;
+                        }
                         let paths: Vec<String> = x.paths.iter().map(|(p, r)| format!("{p}={}", r.name())).collect();
                         outln!(
                             ctx,
@@ -1470,6 +1532,10 @@ pub fn protect(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         Some(p) => p.clone(),
     };
+    if crate::model::ref_namespace(&pattern) && ["--direct", "--no-direct", "--rewrite", "--path"].iter().any(|flag| a.has(flag))
+    {
+        bail!("ref protection does not accept --direct, --no-direct, --rewrite or --path");
+    }
     repo.require(ctx, "access")?;
     let _lock = repo.p.lock()?;
     let mut all = repo.policy().protect;
@@ -1614,43 +1680,6 @@ pub fn cache(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         _ => Err(exit(128, "usage: layr cache (list|add|remove|repair) [<path>]")),
     }
-}
-
-pub fn machines(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let h = here(ctx)?;
-    if args.first().map(|s| s.as_str()) == Some("trust") {
-        let spec = Spec::new().value("--key");
-        let a = parse(&spec, &args[1..])?;
-        h.repo.require(ctx, "sync")?;
-        let id = a.pos.first().ok_or_else(|| exit(128, "usage: layr machines trust <id> --key <public key>"))?;
-        let key = a.get("--key").ok_or_else(|| exit(128, "usage: layr machines trust <id> --key <public key>"))?;
-        let full = if id.len() == 36 {
-            id.clone()
-        } else {
-            h.repo.p.db.machine_by_name(id)?.ok_or_else(|| exit(128, format!("unknown machine {id}: give its full id")))?
-        };
-        let _lock = h.repo.p.lock()?;
-        super::replicate::trust(ctx, &h.repo.p, &full, key)?;
-        outln!(ctx, "trusted machine {}", &ids::display(&full)[..8]);
-        return Ok(0);
-    }
-    let me = &h.repo.p.store.machine.id;
-    for (id, name) in h.repo.p.db.machines()? {
-        let key = h.repo.p.db.machine_key(&id)?.unwrap_or_default();
-        let trusted =
-            if &id == me || h.repo.p.db.trusted(&id)?.as_deref() == Some(key.as_str()) { "trusted" } else { "untrusted" };
-        outln!(
-            ctx,
-            "{}{} {:<16} {:<9} id {} key {}",
-            if &id == me { "* " } else { "  " },
-            &ids::display(&id)[..8],
-            name,
-            trusted,
-            id,
-            key
-        );
-    }
-    Ok(0)
 }
 
 /// Hidden helpers for tests: `layr debug changes <a> <b>` prints the raw change list.
