@@ -42,6 +42,23 @@ fn json<T: serde::de::DeserializeOwned>(response: Response, limit: usize) -> Res
     serde_json::from_slice(&bytes(response, limit)?).map_err(|_| anyhow!("invalid gateway JSON response"))
 }
 
+fn ca_file(path: &std::path::Path) -> Result<Vec<u8>> {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .context("open gateway CA file")?;
+    if !file.metadata()?.is_file() {
+        bail!("gateway CA must be a regular file");
+    }
+    let mut bytes = Vec::new();
+    file.take(1_048_577).read_to_end(&mut bytes)?;
+    if bytes.len() > 1_048_576 {
+        bail!("gateway CA file is too large");
+    }
+    Ok(bytes)
+}
+
 impl Gateway {
     pub fn open(url: &str) -> Result<Self> {
         let address = url.strip_prefix("layr+https://").context("invalid gateway URL scheme")?;
@@ -79,29 +96,35 @@ impl Gateway {
             .map(|path| crate::privs::as_caller_fs(ctx, || token_file(&ctx.cwd.join(path), ctx.caller.uid)))
             .transpose()?;
         if let Some(path) = ctx.env("LAYR_GATEWAY_CA_FILE") {
-            let pem = crate::privs::as_caller_fs(ctx, || -> Result<Vec<u8>> {
-                let file = std::fs::File::open(ctx.cwd.join(path)).context("open gateway CA file")?;
-                let mut bytes = Vec::new();
-                file.take(1_048_577).read_to_end(&mut bytes)?;
-                if bytes.len() > 1_048_576 {
-                    bail!("gateway CA file is too large");
-                }
-                Ok(bytes)
-            })?;
-            let certificates = reqwest::Certificate::from_pem_bundle(&pem).context("invalid gateway CA file")?;
-            if certificates.is_empty() {
-                bail!("gateway CA file has no certificates");
-            }
-            let mut builder = Client::builder()
-                .no_proxy()
-                .redirect(reqwest::redirect::Policy::none())
-                .connect_timeout(Duration::from_secs(5))
-                .timeout(Duration::from_secs(150));
-            for certificate in certificates {
-                builder = builder.add_root_certificate(certificate);
-            }
-            self.http = builder.build()?;
+            let pem = crate::privs::as_caller_fs(ctx, || ca_file(&ctx.cwd.join(path)))?;
+            self.configure_ca(&pem)?;
         }
+        Ok(())
+    }
+
+    /// A standalone reader never loads a write or GC token.
+    pub fn connect_reader(&mut self, env: &std::collections::HashMap<String, String>) -> Result<()> {
+        self.token = None;
+        if let Some(path) = env.get("LAYR_GATEWAY_CA_FILE") {
+            self.configure_ca(&ca_file(std::path::Path::new(path))?)?;
+        }
+        Ok(())
+    }
+
+    fn configure_ca(&mut self, pem: &[u8]) -> Result<()> {
+        let certificates = reqwest::Certificate::from_pem_bundle(pem).context("invalid gateway CA file")?;
+        if certificates.is_empty() {
+            bail!("gateway CA file has no certificates");
+        }
+        let mut builder = Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(150));
+        for certificate in certificates {
+            builder = builder.add_root_certificate(certificate);
+        }
+        self.http = builder.build()?;
         Ok(())
     }
 
@@ -321,6 +344,19 @@ fn token_file(path: &std::path::Path, uid: u32) -> Result<String> {
 mod tests {
     use super::*;
     use std::os::unix::fs::{symlink, PermissionsExt};
+    #[test]
+    fn reader_hooks_ignore_write_grants_set_identity_and_check_the_ca_file() {
+        use super::super::backend::Backend;
+        let mut env = std::collections::HashMap::from([("LAYR_GATEWAY_TOKEN_FILE".into(), "/missing/write-token".into())]);
+        let backend = Backend::for_reader("layr+https://localhost/example", &env).unwrap();
+        backend.unlock_reader("reader-test-identity").unwrap();
+        let Backend::Gateway(gateway) = backend else { unreachable!() };
+        assert!(gateway.token.is_none());
+        assert!(gateway.identity.lock().unwrap().as_deref() == Some("reader-test-identity"));
+        env.insert("LAYR_GATEWAY_CA_FILE".into(), "/missing/reader-ca".into());
+        assert!(Backend::for_reader("layr+https://localhost/example", &env).is_err());
+    }
+
     #[test]
     fn urls_refuse_credentials_queries_and_path_escapes() {
         assert!(Gateway::open("layr+https://cloud.example/project").is_ok());

@@ -51,6 +51,28 @@ impl Backend {
         bail!("store URL must start with file://, s3:// or layr+https://")
     }
 
+    /// Read-only clients use caller environment without a local project or service context.
+    pub fn for_reader(url: &str, env: &std::collections::HashMap<String, String>) -> Result<Self> {
+        let mut backend = Self::open(url)?;
+        match &mut backend {
+            Self::S3(s3) => {
+                let path = url.strip_prefix("s3://").expect("S3 URL checked");
+                let (bucket, prefix) = path.split_once('/').unwrap_or((path, ""));
+                *s3 = super::s3::S3::with_env(bucket, prefix, env)?;
+            }
+            Self::Gateway(gateway) => gateway.connect_reader(env)?,
+            Self::File(..) => {}
+        }
+        Ok(backend)
+    }
+
+    pub fn unlock_reader(&self, identity: &str) -> Result<()> {
+        match self {
+            Self::Gateway(gateway) => gateway.set_identity(identity),
+            Self::File(..) | Self::S3(_) => Ok(()),
+        }
+    }
+
     pub fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
         check_key(key)?;
         match self {
@@ -171,6 +193,57 @@ pub(super) fn check_key(key: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn reader_hooks_use_s3_caller_credentials_and_leave_file_reads_local() {
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline {
+                if let Ok((mut stream, _)) = listener.accept() {
+                    stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                    let mut bytes = Vec::new();
+                    let mut byte = [0];
+                    while !bytes.ends_with(b"\r\n\r\n") && bytes.len() < 8192 {
+                        if stream.read_exact(&mut byte).is_err() {
+                            break;
+                        }
+                        bytes.push(byte[0]);
+                    }
+                    let request = String::from_utf8_lossy(&bytes).to_ascii_lowercase();
+                    let valid = request.contains("credential=disk-reader-test/")
+                        && request.contains("x-amz-security-token: reader-session-marker");
+                    let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    let _ = tx.send(valid);
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let env = std::collections::HashMap::from([
+            ("AWS_ACCESS_KEY_ID".into(), "disk-reader-test".into()),
+            ("AWS_SECRET_ACCESS_KEY".into(), "reader-secret-marker".into()),
+            ("AWS_SESSION_TOKEN".into(), "reader-session-marker".into()),
+            ("AWS_ENDPOINT_URL_S3".into(), endpoint),
+        ]);
+        let backend = Backend::for_reader("s3://reader-test/prefix", &env).unwrap();
+        backend.unlock_reader("file and S3 need no reader identity").unwrap();
+        assert!(backend.get("store.json").unwrap().is_none());
+        assert!(rx.recv_timeout(Duration::from_secs(5)).unwrap());
+        let dir = std::env::temp_dir().join(crate::ids::new_id());
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("store.json"), b"local").unwrap();
+        let backend = Backend::for_reader(&format!("file://{}", dir.display()), &env).unwrap();
+        backend.unlock_reader("not used").unwrap();
+        assert_eq!(backend.get("store.json").unwrap().unwrap(), b"local");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn publication_is_exclusive_and_never_changes_bytes() {
         let root = std::env::temp_dir().join(crate::ids::new_id());
