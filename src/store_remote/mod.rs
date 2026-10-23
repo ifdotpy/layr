@@ -1,12 +1,12 @@
 //! Encrypted immutable remotes, independent of the local snapshot backend.
 
 pub(crate) mod aws;
-mod backend;
+pub(crate) mod backend;
 mod canonical;
-mod format;
-mod keys;
+pub(crate) mod format;
+pub(crate) mod keys;
 mod legacy;
-mod reader;
+pub(crate) mod reader;
 pub(crate) mod s3;
 mod writer;
 mod zst;
