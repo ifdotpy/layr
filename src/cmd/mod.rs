@@ -186,12 +186,14 @@ Lines and states:
    branch, switch, checkout, tag, merge, cherry-pick, revert, rebase
    save, undo, op, try, adopt
    ref set/list/log/delete, attest, attestations, change list/show/log/diff
-Remote (git bridge):
-   remote, fetch, pull, push, clone, git-sync
+Remotes:
+   remote add, list, self, remove, trust; sync, fetch, pull, push, clone
+Git bridge:
+   git remote, fetch, pull, push, clone, sync
 Overlays (files with their own readers and history, shown in lines):
    overlay create, list, readers, use, move, log, show, diff, grep, ls-files
 Projects and machines:
-   init, projects, config, cache, export, backup, sync, serve-peer, gc, fsck, reindex, daemon
+   init, projects, config, cache, export, gc, fsck, reindex, daemon
 
 Lines are folders: <root>/projects/<project>/lines/<line>. Run commands inside a line folder.
 ";
@@ -270,7 +272,7 @@ pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
         "reindex" => admin::reindex(ctx, &rest),
         "init" => admin::init(ctx, &rest),
         "projects" => admin::projects(ctx, &rest),
-        "machines" => admin::machines(ctx, &rest),
+        "machines" => Err(exit(128, "use layr remote list or layr remote trust <name> <machine>")),
         "debug" => admin::debug(ctx, &rest),
         "config" => admin::config(ctx, &rest),
         "cache" => admin::cache(ctx, &rest),
@@ -279,12 +281,12 @@ pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
         "fetch" => remote::fetch(ctx, &rest),
         "pull" => remote::pull(ctx, &rest),
         "push" => remote::push(ctx, &rest),
-        "git-sync" => remote::git_sync(ctx, &rest),
+        "git-sync" => Err(exit(128, "use layr git sync")),
+        "git" => remote::git::run(ctx, &rest),
         "clone" => remote::clone(ctx, &rest),
         "overlay" => overlaycmd::overlay(ctx, &rest),
         "export" => transfer::export(ctx, &rest),
-        "backup" => transfer::backup(ctx, &rest),
-        "sync" => replicate::sync(ctx, &rest),
+        "sync" => remote::sync(ctx, &rest),
         "serve-peer" => replicate::serve(ctx, &rest),
         "worktree" => {
             Err(exit(1, "layr has no worktrees: each line is a folder. Create one with 'layr branch <name> [<start>]'."))

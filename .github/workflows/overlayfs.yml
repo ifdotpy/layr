@@ -51,12 +51,6 @@ jobs:
           sudo env LAYR_OVERLAYFS_TEST_ROOT="$LAYR_OVERLAYFS_TEST_ROOT" LAYR="$LAYR" bash tests/overlayfs-local.sh
           sudo env LAYR_OVERLAYFS_TEST_ROOT="$LAYR_OVERLAYFS_TEST_ROOT" LAYR="$LAYR" bash tests/overlayfs-caches.sh
           sudo env LAYR_OVERLAYFS_TEST_ROOT="$LAYR_OVERLAYFS_TEST_ROOT" LAYR="$LAYR" bash tests/run.sh t01-basic t02-merge t03-git t05-transfer t06-sync t07-service t08-gitcompat t11-security t13-access t16-overlays
-      - name: Exchange backups with btrfs
-        run: |
-          cargo build --locked
-          sudo env LAYR_OVERLAYFS_TEST_ROOT="/var/tmp/layr-overlayfs-ci" LAYR="$RUNNER_TEMP/layr-overlayfs" bash tests/cross-backup.sh create "$RUNNER_TEMP/overlay-backup"
-          sudo env LAYR="$PWD/target/debug/layr" bash tests/cross-backup.sh extend "$RUNNER_TEMP/overlay-backup" "$RUNNER_TEMP/btrfs-backup"
-          sudo env LAYR_OVERLAYFS_TEST_ROOT="/var/tmp/layr-overlayfs-ci" LAYR="$RUNNER_TEMP/layr-overlayfs" bash tests/cross-backup.sh check "$RUNNER_TEMP/btrfs-backup"
       - name: Unmount the test filesystem
         if: always()
         run: sudo umount -R "/var/tmp/layr-overlayfs-ci" || true

@@ -120,7 +120,7 @@ The store and signed record formats remain compatible with the Linux backend.
 - File modes, symbolic links, hard links and file identity survive snapshots. Nested layers stay outside history.
 - Immutable flags prevent ordinary writes to states. The store owner can remove these flags.
   Use the root service for separate users and root-owned state storage.
-- Overlays, `sync`, `serve-peer`, backup and restore are available.
+- Overlays and peer sync are available.
 - APFS sends full btrfs version 1 streams. Existing Linux peers can receive them without an update.
 - APFS receives full and incremental streams. It copies clone ranges when APFS cannot share those ranges.
 - APFS does not request compressed version 2 streams. Transfers between Linux peers retain their existing optimizations.
@@ -169,7 +169,7 @@ layr branch topic-1 main                             # (bob) a new line: O(1), i
 cd /var/lib/layr/projects/app/lines/topic-1          # a line is a folder
 layr status; layr diff; layr add -A; layr commit -m "change"
 layr merge topic-1 --expect <state alice reviewed>   # (alice, in main) exactly the reviewed state
-layr push origin main                                # every state of main becomes a git commit
+layr git push origin main                                # every state of main becomes a git commit
 ```
 
 The store lives under `$LAYR_ROOT` (default `/var/lib/layr`). To work on a line from another
@@ -183,12 +183,12 @@ service; root can run every command directly.
 | state     | read-only snapshot + signed record (id, parents, author, message, conflicts). A commit.    |
 | line      | writable snapshot at `projects/<p>/lines/<name>` with an owner and a head state             |
 | auto state| a snapshot of the working content: before every changing command, on `layr save`, and every 10 minutes when the content changed (the service) |
-| cache     | a folder of regenerable content (such as a Rust `target`) kept as a nested subvolume: outside states, diffs and backups. A new line starts with a reflink copy of the nearest ancestor's cache (another user's only from a protected line; only one saved on the same platform, `<os>-<arch>`). Caches come only from `layr save --caches`; layr never keeps build output by itself. Cache folders: `layr cache add` and the folders that `.layrattributes` files mark `regenerable`; a folder with files in the head state is no cache |
+| cache     | a folder of regenerable content (such as a Rust `target`) kept as a nested subvolume: outside states and diffs. A new line starts with a reflink copy of the nearest ancestor's cache (another user's only from a protected line; only one saved on the same platform, `<os>-<arch>`). Caches come only from `layr save --caches`; layr never keeps build output by itself. Cache folders: `layr cache add` and the folders that `.layrattributes` files mark `regenerable`; a folder with files in the head state is no cache |
 | session   | a free-text label of the program that runs layr (`LAYR_SESSION`): shown in `op log` and used by `undo` to find "my last operation"; layr never decides permissions by it |
 | record    | one signed operation (Ed25519, UUIDv7 ids) in the project database; undo restores pointers |
 | role      | reader, writer, maintainer or admin of a user, a Unix group or everyone, per project and machine |
 | protected line | a line (pattern) that changes only through merges of reviewed states, after its checks pass on the merge result |
-| overlay   | files with their own owner, readers and history, shown in the lines of their readers above the shared set; `push`, exports, backups and every state of the project hold the shared set only (`docs/overlays.md`) |
+| overlay   | files with their own owner, readers and history, shown in the lines of their readers above the shared set; `push`, exports, remote copies and every state of the project hold the shared set only (`docs/overlays.md`) |
 
 States are folders: `layr show <state>:<path>` and `layr grep <pattern> <state>` read them
 without a checkout.
@@ -202,9 +202,10 @@ without a checkout.
 | lines         | `branch [<prefix> <rev> --count N] [--json]`, `tag`, `merge [--expect]`, `cherry-pick`, `revert`, `rebase`, `adopt`; `switch`/`checkout <line>` explain that lines are folders |
 | access        | `access [list|grant [--until <30m|2h|1d>]|revoke|deny|allow|check]`, `protect [<pattern> --update <role> --check <names> --path <path>=<role> --approvals <n> --approvers <principals> --direct --rewrite <role> --no-expect | --remove]`, `approve [--withdraw] <state>`, `attest <kind> <rev> [--payload <file>]`, `attestations <rev> [--kind <kind>] [--json]` |
 | safety        | `undo`, `op log`, `save`, `try <state> -- <cmd>`, `gc`, `fsck`, `reindex`           |
-| OCI | `push <remote> <rev> [--runnable <name>] [--json]`, `access token <principal> [--until <duration>]`, `access token --revoke <principal>` |
-| remote (git)  | `remote`, `fetch`, `pull`, `push [--squash]`, `clone`, `git-sync`                             |
-| machines      | `sync -- <cmd>` / `serve-peer`, `machines [trust]`, `op export` / `op import` (JSONL), `backup` / `backup restore` / `backup verify` |
+| Git bridge    | `git remote`, `git fetch`, `git pull`, `git push [--squash]`, `git clone`, `git sync`                             |
+| remotes       | `remote add\|list\|self\|remove\|trust`, `sync <remote>`, `push <remote>`, `fetch <remote>`, `pull <remote>`, `clone <url>` |
+| OCI           | `push <oci-remote> <rev> [--runnable <name>] [--json]`, `access token <principal> [--until <duration>]`, `access token --revoke <principal>` |
+| records       | `op export`, `op import` (JSONL) |
 | copies        | `export <folder>`                                                                              |
 | overlays      | `overlay create <name> [--readers <principals>] [--mode shared\|follow]`, `overlay list`, `overlay readers`, `overlay use [--add\|--remove\|--none] <names>`, `overlay move [--purge] <name> <paths>`, `overlay log\|show\|diff\|grep\|ls-files <name>` |
 | refs          | `ref set <name> <rev> [--expect <rev>] [--ttl <dur>]`, `ref list [<prefix>]`, `ref log <name>`, `ref delete <name> [--expect <rev>]` |
@@ -217,7 +218,7 @@ state id prefixes, git commit ids of imported or pushed states, `stash@{n}`, `HE
 
 Content ids: a state ID is the same only in copies that share its record, but the git ids of its
 content are the same on every machine and in git. `layr rev-parse <rev>^{tree}` (and `%T`/`%t` in
-`--format`) prints the tree of the commit that `layr push` exports for the state. `layr rev-parse
+`--format`) prints the tree of the commit that `layr git push` exports for the state. `layr rev-parse
 <rev>:<path>` prints the id of one path in that commit, as `git rev-parse` does: a tree for a
 folder, a blob for a file, the root tree for `<rev>:`. `./` and `../` resolve against the current
 folder. A path that the exported commit does not have fails with exit 128.
@@ -448,7 +449,7 @@ It also checks privilege separation, Core tags, and derived-state reuse.
    main did not move in the meantime. A merge never stops on a conflict: the new state lists the
    conflicts, text files get markers, and `layr status` shows them. A line with checks takes no
    result with conflicts: they are resolved in a line first.
-5. `layr push origin <branch>` exports the line's history: each state the remote lacks becomes
+5. `layr git push origin <branch>` exports the line's history: each state the remote lacks becomes
    a git commit with the same parents. `--squash [-m <message>]` exports one commit on top of the
    last exported state. The exact commit id is recorded before the push; after a lost response,
    a repeated push reads the remote ref first. With `push.require_check true`, a push needs a
@@ -497,12 +498,12 @@ layr try HEAD~1 -- sh -c 'git log -1 && make check'  # an older state of your ow
 In a project with a git store (a clone, or a project with a remote), each line has a `.git`
 folder for tools that call git. Its objects come from the project store. After every move of the
 line's head (commit, amend, merge, reset, undo, pull, push), `HEAD` is the commit of the new head:
-the commit that `layr push` sends for that state, with the commit of the previous state as its
+the commit that `layr git push` sends for that state, with the commit of the previous state as its
 parent, and the index of that state. So `git rev-parse HEAD` changes only when the head moves,
 `git status` shows only the uncommitted changes, and `layr rev-parse <commit>` finds the state of
 such a commit. The commit is made in the local git store only; nothing leaves the machine before
 a push. A push with `--squash` sends another commit for the same state; `HEAD` then shows that
-commit. `layr git-sync` also records the commits of the head and its ancestors, as a push does.
+commit. `layr git sync` also records the commits of the head and its ancestors, as a push does.
 A `.git` folder that the line owner made instead is left alone.
 
 ## Merge engine
@@ -639,7 +640,7 @@ its record and the derived rows. After a crash only a snapshot without a record 
   root write. New working folders are prepared in a private folder and appear when ready.
 - Commands for users (git network access, `try`, checks, `sync`, merge drivers, `apply` in a
   line) run with that user's uid, groups and a clean environment: a command never runs as
-  another user. Paths named by a user outside the store (export, backups, patch files) are accessed with the user's file permissions, and so
+  another user. Paths named by a user outside the store (export, remote copies, patch files) are accessed with the user's file permissions, and so
   is a file such a command leaves for the service (the result of a merge driver).
 - Overlays (docs/overlays.md): an overlay is read only through its own project, by its readers;
   the working content of a line with overlays is open to its owner and to readers of all its
@@ -650,11 +651,11 @@ its record and the derived rows. After a crash only a snapshot without a record 
   older versions keep their `admin` (or `lead`) and `members` settings as roles until `access`
   is set. Root may do everything, and every record names who acted.
 - Replication takes records only from trusted machines (`layr sync` trusts the peer the admin
-  chose once its records passed the checks; `layr machines trust`), checks the project id,
+  chose once its records passed the checks; `layr remote trust <name> <machine>`), checks the project id,
   signatures and sequence numbers, and refuses a changed copy of a known record. Roles, deny
-  and protection rules, merge commands, remotes and the backup folder are per machine; other
+  and protection rules, merge commands and remotes are per machine; other
   machines' records never change a local line.
-- A btrfs stream from a peer or a backup passes a check on its way to `btrfs receive`, which
+- A btrfs stream from a peer passes a check on its way to `btrfs receive`, which
   would otherwise find snapshot and clone sources by UUID anywhere on the file system: one
   subvolume with the name and UUID its signed record names, a parent only from the same
   project, and clone sources limited to that parent, the new subvolume, or explicitly verified states of the same project.
@@ -665,21 +666,59 @@ its record and the derived rows. After a crash only a snapshot without a record 
 - The service limits running requests per user and in total, and drops a client that does not
   send its request within 10 seconds.
 
-## Backups and replication
+## Remotes and replication
 
-`layr backup <folder>` writes the whole project: one btrfs stream per state (incremental),
-git bundles, and all records as JSONL, written as the calling user. The manifest lists the
-SHA-256 of the bytes the service produced and is signed with the machine key, so a changed
-file or manifest fails the check (a chain that no longer verifies is not continued; the next
-backup starts a new chain). `layr backup restore` checks the signature with the key that the
-backup's records give for the machine that wrote it (this machine's own key when it names this
-machine), imports the records, receives each stream through the stream check, compares each
-file with its SHA-256 while reading it once (no links, pipes or devices), and gives the lines
-working folders on the new machine. A restore trusts the machine that signed the backup: a
-backup made entirely by another machine identity restores as that machine's project.
+Add a peer with `layr remote add work ssh://host/project`.
+Run `layr sync work` to exchange signed records and missing states in both directions.
+Layr starts `ssh host layr serve-peer project`.
+The internal peer command does not appear in help.
+Use `--auto --caches` to include automatic states and saved caches.
+The final snapshot of a deleted line always travels, because `undo` needs it.
 
-`layr sync -- ssh host layr serve-peer <p>` exchanges records both ways and sends missing states with `btrfs send -p <common state>`;
-`--auto --caches` also carries working content and build output for a live move.
+- `layr push work` sends records and states to the peer.
+- `layr fetch work` receives records and states from the peer.
+- `layr pull work` fetches, then merges the newest head of the current line from another machine.
+  The merge can fast-forward. Conflicts remain in the new state.
+- `layr remote list` shows remotes and known machines.
+- `layr remote trust work <machine>` trusts a known peer key.
+  An unknown key requires `--public-key <ed25519>`.
+  A new host gets its identity with `layr remote self --json`, outside any project.
+  The result contains `id` (the machine UUID) and `public_key` (64 hexadecimal characters).
+  For a store remote, trust records the machine key and adds its encrypted machine slot.
+- `layr remote remove work` removes the remote configuration.
+
+Remote configuration uses signed `config` records in the project database.
+Layr remotes use `cloud.remote.<name>.url`. Git remotes keep `remote.<name>.url`.
+Configuration remains local to each machine, as other project settings do.
+A peer cannot replace the local transport URL through sync.
+The list command supports `--json`.
+
+Create a new store with `layr remote add archive file:///path --paper-key-out /private/path/key.txt`.
+The output file must not exist. It must be outside the store and all line folders.
+Layr creates the file as the caller with mode `0600`.
+Write the words on paper. Delete the file after you check the paper copy.
+Layr never prints the words or puts them in project records or configuration.
+S3 credentials come only from the caller's environment in `Ctx.env`.
+Layr does not store these credentials in the project database or local index.
+
+Peer sync does not delete state snapshots. A local garbage collection does not delete snapshots on another machine.
+The operation log keeps earlier line positions for `layr undo <operation>` within the local retention window.
+
+The URL scheme selects the remote type:
+
+| URL | Type | Operations |
+| --- | --- | --- |
+| `ssh://host/project` | Peer | `sync`, `push`, `fetch`, `pull` |
+| `file:///path`, `s3://bucket/prefix` | Store | `push`, `fetch`, `pull`, `clone`, `remote trust` |
+| `oci://host/project` | Registry | `push <remote> <rev> --runnable <name>` |
+
+The store and registry hooks return explicit errors until their workstreams are integrated.
+Store remotes require no Layr process at the destination.
+
+Use `layr git remote`, `layr git fetch`, `layr git pull`, `layr git push`, `layr git clone`, and `layr git sync` for Git.
+The previous Git forms fail with the new command name.
+The previous command transport form fails with `layr sync <remote>` in the message.
+Tests can use `layr sync work --command -- <command> [<arguments>]` with an explicit peer remote.
 
 ## Btrfs execution and sync
 
@@ -689,7 +728,7 @@ The cache holds at most 256 entries and 32 MiB of file data per project.
 Each entry contains at most 8 MiB, including its checksum.
 New snapshots and temporary scans do not enter this cache during the command that creates them.
 A missing or damaged entry causes a fresh kernel comparison. Cache writes do not require an fsync.
-The cache is disposable and is not part of records or backups.
+The cache is disposable and is not part of records or remote copies.
 
 Sync peers exchange capability fields in their initial message:
 
@@ -702,7 +741,7 @@ Sync peers exchange capability fields in their initial message:
 - Peers with compatible btrfs tools can exchange compressed extents with stream protocol 2.
   The sender also checks kernel support. This preserves existing compression; it does not compress uncompressed files.
 - A peer without these capabilities gets the previous stream and clone rules.
-  Backups retain protocol 1 and the previous manifest format.
+  Remote copies retain protocol 1 and the previous manifest format.
 
 Working content still requires an atomic snapshot before comparison.
 The optimization does not replace this snapshot with an unsafe check of a writable tree.
@@ -720,7 +759,7 @@ bash benchmarks/sync-storage.sh /path/to/old/layr target/release/layr /tmp/sync-
 OLD_LAYR=/path/to/old/layr LAYR=$PWD/target/release/layr bash tests/compat-btrfs.sh
 ```
 
-The compatibility test covers state IDs, signatures, backups in both directions, and both sync roles with an older binary.
+The compatibility test covers state IDs, signatures and both sync roles with an older binary.
 It also checks saved cache content across old and new clients.
 The CLI uses `cache` and `--caches`; `layer` and `--layers` remain aliases.
 Cache records retain the legacy `save.layers` name and `layers` fields on disk.
@@ -825,7 +864,7 @@ Raw data includes the binary hash and source content hash:
 and [interleaved status](benchmarks/results/paired-status-10000.json).
 
 At the benchmark revision, the previous btrfs binary (`c6063e4`) and the candidate passed thirteen compatibility checks.
-Both binaries read each other's states, verify signatures and restore each other's backups without changing state identifiers.
+Both binaries read each other's states and verify signatures without changing state identifiers.
 Run those checks with `OLD_LAYR=/path/to/old/layr LAYR=/path/to/new/layr bash tests/compat-btrfs.sh` on Linux as root.
 
 A later APFS run includes overlays and the compatible transfer implementation.
@@ -849,7 +888,7 @@ and [10,000 files](benchmarks/results/apfs-complete-10000.json).
 
 - APFS volume snapshots and incremental APFS sends. Current snapshots use verified directory clones; APFS sends use full streams.
 - Overlays beyond the first slice: routing patterns, ephemeral mode, folder overlays, encrypted
-  backups and replication of overlays (`docs/overlays.md`, section 9.7).
+  remote copies and replication of overlays (`docs/overlays.md`, section 9.7).
 - Structured (AST) merge; format drivers can be plugged in through `merge.driver.<name>`.
 - `layrhub`: records, ids and stream transport are ready for it; the protocol is not.
 - Content checks of replicated states: a received state must be the subvolume its signed record
@@ -872,4 +911,4 @@ sudo env LAYR_APFS_TEST_ROOT=/Volumes/YourCaseSensitiveVolume \
 ```
 
 The test uses the current user and `nobody`. It creates no system accounts.
-Use `tests/apfs-cross.py` to test sync and backup compatibility with a Linux binary in an OrbStack VM.
+Use `tests/apfs-cross.py` to test peer sync compatibility with a Linux binary in an OrbStack VM.

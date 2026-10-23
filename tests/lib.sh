@@ -25,7 +25,7 @@ l() {
     # permits direct updates for these command tests. Access tests use their own policy.
     if [ "$rc" -eq 0 ] && [ "${LAYR_TEST_DIRECT_MAIN:-}" = 1 ]; then
         local project=""
-        case "${1:-}" in init) project=$2 ;; clone) project=$3 ;; esac
+        case "${1:-}" in init) project=$2 ;; git) [ "${2:-}" = clone ] && project=${4:-} ;; esac
         if [ -n "$project" ]; then
             (cd "$LAYR_ROOT/projects/$project/lines/main" && "$LAYR" protect main --remove) || return $?
         fi
@@ -39,10 +39,19 @@ new_fs() { # new_fs <mountpoint> <size>
         mkdir -p "$mp"
         return
     fi
-    truncate -s "$size" "$mp.img"
-    mkfs.btrfs -q -f "$mp.img"
-    mkdir -p "$mp"
-    mount -o loop,user_subvol_rm_allowed "$mp.img" "$mp"
+    truncate -s "$size" "$mp.img" || exit 1
+    mkfs.btrfs -q -f "$mp.img" || exit 1
+    mkdir -p "$mp" || exit 1
+    for attempt in $(seq 1 50); do
+        if mount -o loop,user_subvol_rm_allowed "$mp.img" "$mp" 2> "$mp.mount-error"; then
+            rm "$mp.mount-error"
+            return
+        fi
+        sleep 0.1
+    done
+    cat "$mp.mount-error" >&2
+    echo "FATAL: cannot mount the test filesystem at $mp" >&2
+    exit 1
 }
 
 # A failed cd must stop the test file: a later relative command (rm -rf ./*, layr commands)
@@ -66,6 +75,9 @@ cleanup() {
         return
     fi
     for mp in $(findmnt -rn -o TARGET | grep "^$T" | sort -r); do umount -l "$mp" 2>/dev/null; done
+    while read -r device image; do
+        case "$image" in "$T/"*) losetup -d "$device" 2>/dev/null || true ;; esac
+    done < <(losetup --list --noheadings --output NAME,BACK-FILE)
     rm -rf "$T"
 }
 trap cleanup EXIT
@@ -102,4 +114,11 @@ sample() { # sample <dir>
     seq 1 20 | sed 's/^/line /' > "$1/notes.txt"
     printf 'target/\n*.log\n' > "$1/.gitignore"
     echo bin > "$1/target/out.bin"; echo x > "$1/debug.log"
+}
+
+# Run a peer command through a named remote with an explicit transport for tests.
+peer_exchange() {
+    local op=$1 project=$2; shift 2
+    l --project "$project" remote add test-peer "ssh://test/$project" >/dev/null 2>&1 || true
+    l --project "$project" "$op" test-peer --command "$@"
 }

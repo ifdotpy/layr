@@ -1,5 +1,5 @@
 #!/bin/bash
-# Regenerable caches: folders kept as nested subvolumes, outside automatic states and backups;
+# Regenerable caches: folders kept as nested subvolumes, outside automatic states and remote copies;
 # carried for a live move with --caches.
 . "$(dirname "$0")/lib.sh"
 
@@ -26,12 +26,9 @@ eq "and keeps its content" "rebuilt" "$(cat target/out)"
 new_fs $T/b 4G
 head -c 1000000 /dev/urandom > target/warm.bin
 l save -q --caches
-l sync -q --auto -- env LAYR_ROOT=$T/b/store $LAYR serve-peer g
-l sync -q --auto --caches -- env LAYR_ROOT=$T/b/store $LAYR serve-peer g
+peer_exchange sync g -q --auto -- env LAYR_ROOT=$T/b/store $LAYR serve-peer g
+peer_exchange sync g -q --auto --caches -- env LAYR_ROOT=$T/b/store $LAYR serve-peer g
 env LAYR_ROOT=$T/b/store $LAYR --project g adopt w >/dev/null
 eq "the moved line has the build output" "$(md5sum < target/warm.bin)" "$(md5sum < $T/b/store/projects/g/lines/w/target/warm.bin)"
 ok "and it is a cache there" sh -c "btrfs subvolume show $T/b/store/projects/g/lines/w/target >/dev/null"
-# Backups leave caches out.
-l backup -q $T/bk
-eq "backups hold no cache streams" "0" "$(ls $T/bk/*/chain-0001 | grep -c '@')"
 finish

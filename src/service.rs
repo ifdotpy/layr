@@ -236,7 +236,7 @@ pub fn run_as(argv: Vec<String>, caller: Caller, cwd: PathBuf, env: HashMap<Stri
 /// folder. It is local to this machine and is never sent to other machines.
 const PERIODIC_CHECKS: &str = "periodic-checks.json";
 
-/// Periodic work: automatic states of busy lines, access to the git store, retention, backups.
+/// Periodic work: automatic states of busy lines, access to the git store, retention.
 fn periodic(root: &Path, hourly: bool) {
     let now = crate::ids::now_ms();
     let store = match Store::open(root) {
@@ -298,12 +298,6 @@ fn periodic(root: &Path, hourly: bool) {
                 let _ = crate::gitbridge::sync_store_access(&repo);
             }
             let _ = crate::cmd::admin::run_gc(&ctx, &repo, false);
-            if let Ok(Some(dir)) = repo.p.config_value("backup.dir") {
-                if let Some(d) = dir.as_str() {
-                    // Written as the admin of this machine, who configured the folder.
-                    let _ = crate::cmd::transfer::run_backup(&ctx, &repo, Path::new(d), false, repo.backup_writer());
-                }
-            }
         }
     }
 }

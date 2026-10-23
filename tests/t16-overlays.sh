@@ -78,7 +78,7 @@ no "a project name with % is refused" l init 'sap%keychain' --from $T/src -q
 in_line layr-o1 main save -q --force
 no "main's automatic state lacks the file" in_line layr-o1 main show HEAD@{0}:.codex-keychain.envrc
 no "for other users too" in_line layr-o3 t3 show main@{0}:.codex-keychain.envrc
-# A copy of the file under another name (an editor's backup) stays out of them too.
+# A copy of the file under another name (an editor's extra copy) stays out of them too.
 sh_in layr-o1 main "cp .codex-keychain.envrc .codex-keychain.envrc~ && echo other > other.txt"
 in_line layr-o1 main save -q
 no "a copy of the file is not in the automatic state" in_line layr-o1 main show HEAD@{0}:.codex-keychain.envrc~
@@ -95,24 +95,12 @@ has "overlay show -p shows the change" "+export KEYCHAIN2=$SECRET-2" "$(in_line 
 eq "main still has one commit" "1" "$(in_line layr-o1 main log --oneline | wc -l)"
 eq "no state of the shared set has the path" "0" "$(in_line layr-o1 main log -p --format= | grep -c keychain)"
 
-# 4. Push, backups: the shared set only.
+# 4. Git push carries the shared set only.
 git init -q --bare -b main $T/r.git; chown -R layr-o1 $T/r.git
-l --project sap remote add origin $T/r.git
-ok "push main" in_line layr-o1 main push -q origin main
+l --project sap git remote add origin $T/r.git
+ok "push main" in_line layr-o1 main git push -q origin main
 eq "the git remote has no trace of the path" "0" "$(git --git-dir=$T/r.git log --all -p --format=%B | grep -c 'keychain\|KEYCHAIN')"
 eq "nor of the secret" "0" "$(git --git-dir=$T/r.git log --all -p | grep -c $SECRET)"
-l --project sap backup -q $T/bk
-n=0; for f in $(find $T/bk -type f); do if (zstd -dcq $f 2>/dev/null || cat $f) | grep -qa "$SECRET"; then n=$((n + 1)); fi; done
-eq "the backup has no trace of the secret" "0" "$n"
-eq "nor of the path" "0" "$(for f in $(find $T/bk -type f); do zstd -dcq $f 2>/dev/null || cat $f; done | grep -ca codex-keychain)"
-new_fs $T/b 4G
-ok "the backup restores" env LAYR_ROOT=$T/b/store $LAYR backup restore -q $T/bk
-no "the restored main has no private file" test -e $T/b/store/projects/sap/lines/main/.codex-keychain.envrc
-eq "and is clean" "" "$(env LAYR_ROOT=$T/b/store $LAYR --project sap --line main status --porcelain)"
-eq "the restored store has no trace of the secret" "" "$(grep -rla $SECRET $T/b/store 2>/dev/null)"
-ok "a new line from the restored main" env LAYR_ROOT=$T/b/store $LAYR --project sap branch -q rb main
-umount $T/b
-
 # 5. The owner's other lines show it (shared mode: one overlay line for all lines of a user).
 ok "the owner makes a line from main" in_line layr-o1 main branch -q o1t main
 eq "it has the file" "export KEYCHAIN=$SECRET" "$(sh_in layr-o1 o1t head -1 .codex-keychain.envrc)"

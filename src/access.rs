@@ -59,7 +59,6 @@ pub const ACTIONS: &[(&str, Role)] = &[
     ("config", Role::Admin),
     ("remote", Role::Admin),
     ("sync", Role::Admin),
-    ("backup", Role::Admin),
     ("gc", Role::Admin),
     ("records", Role::Admin),
     ("fsck", Role::Admin),

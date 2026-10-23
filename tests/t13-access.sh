@@ -138,7 +138,7 @@ ok "and forward again" in_line layr-u2 main merge -q u1 --expect $(in_line layr-
 
 # 6. A deny rule wins over any role.
 as layr-admin $L --project p access grant layr-u3 maintainer
-has "a maintainer in a denied group cannot push" "deny rule for @layr-bots" "$(in_line layr-u3 main push origin main 2>&1)"
+has "a maintainer in a denied group cannot push" "deny rule for @layr-bots" "$(in_line layr-u3 main git push origin main 2>&1)"
 as layr-admin $L --project p access grant layr-u3 admin
 as layr-admin $L --project p access deny @layr-bots access
 no "an admin denied 'access' cannot change a check command" as layr-u3 $L --project p config check.unit true
@@ -156,13 +156,13 @@ eq "the driver ran as the caller of the merge" "layr-u1" "$(cat $T/who.txt)"
 
 # 8. push keeps the history of the line; --squash makes one commit.
 git init -q --bare $T/r.git
-l --project p remote add origin $T/r.git
-l --project p --line main push -q origin main
+l --project p git remote add origin $T/r.git
+l --project p --line main git push -q origin main
 eq "every state of main is a commit" "$(l --project p --line main log --format=%s | wc -l)" "$(git --git-dir=$T/r.git rev-list --count main)"
 ok "merges stay merges" test "$(git --git-dir=$T/r.git rev-list --merges --count main)" -ge 1
 eq "the subject of each commit is the state's message" "$(l --project p --line main log --format=%s | head -3)" "$(git --git-dir=$T/r.git log --format=%s -3 main)"
 cd $P/u1 && as layr-u1 sh -c "echo a > a.txt && $L add a.txt && $L commit -qm a && echo b > b.txt && $L add b.txt && $L commit -qm b" && cd /tmp
-l --project p --line u1 push -q --squash -m "task" origin task
+l --project p --line u1 git push -q --squash -m "task" origin task
 eq "--squash pushes one commit" "1" "$(git --git-dir=$T/r.git rev-list --count main..task)"
 eq "with the given message" "task" "$(git --git-dir=$T/r.git log -1 --format=%s task)"
 # The git objects are history too: readable by the roles, a group's members included.
