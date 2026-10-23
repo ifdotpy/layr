@@ -97,6 +97,11 @@ mkdir "$T/git-remote"
 git init --bare -q "$T/git-remote"
 l git remote add origin "$T/git-remote"
 no 'Git push refuses the secret' l git push origin HEAD:main
+l remote add store "file://$T/store" --paper-key-out "$T/store-paper" >/dev/null
+OUT=$(l push store 2>&1); RC=$?
+eq 'store push refuses the secret' 128 "$RC"
+has 'store refusal gives path and line' 'leak.txt:2' "$OUT"
+no 'store push uploads no state with the secret' sh -c 'ls "$1"/states 2>/dev/null | grep -q .' sh "$T/store"
 # The private index contains hashes only.
 META="$LAYR_ROOT/projects/p/meta"
 eq 'the key is private' 600 "$(stat -c %a "$META/secrets.key")"

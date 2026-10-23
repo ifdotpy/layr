@@ -183,7 +183,7 @@ impl Store {
         if self.backend.get("store.json")?.is_none() && self.backend.get("vault.json")?.is_some() {
             bail!("Desk v1 stores are read only; clone into a local project and add a new v2 remote");
         }
-        writer::push(self, repo, opts)
+        writer::push(self, ctx, repo, opts)
     }
 
     pub fn fetch(&mut self, ctx: &Ctx, repo: &mut Repo, opts: &Options) -> Result<Report> {

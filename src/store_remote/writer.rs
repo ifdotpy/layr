@@ -5,7 +5,7 @@ use super::{
     format::{self, Entry, Header, Link, Tree},
     keys, reader, zst, Descriptor, Options, Report, Store,
 };
-use crate::{fsutil, oplog, repo::Repo};
+use crate::{ctx::Ctx, fsutil, oplog, repo::Repo};
 use anyhow::{bail, Context, Result};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -114,7 +114,7 @@ fn initialization_failpoint(point: &str) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn push(store: &Store, repo: &Repo, opts: &Options) -> Result<Report> {
+pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options) -> Result<Report> {
     let _lock = repo.p.lock()?;
     if opts.caches && serde_json::from_value::<crate::model::StateKind>(serde_json::json!("cache")).is_err() {
         bail!("store --caches is not available until cache states exist");
@@ -189,6 +189,10 @@ pub(super) fn push(store: &Store, repo: &Repo, opts: &Options) -> Result<Report>
         states.push(state);
     }
     states.sort_by(|a, b| (a.time, &a.id).cmp(&(b.time, &b.id)));
+    // Every state that leaves the machine passes the secret detector before any upload.
+    for state in &states {
+        crate::secrets::check_state(ctx, repo, &state.id)?;
+    }
     // Parents first, including a parent whose time is newer than its child.
     while !states.is_empty() {
         let position = states
@@ -196,7 +200,6 @@ pub(super) fn push(store: &Store, repo: &Repo, opts: &Options) -> Result<Report>
             .position(|s| !s.parents.iter().any(|p| states.iter().any(|other| &other.id == p)))
             .context("local state ancestry has a cycle")?;
         let state = states.remove(position);
-        // secrets::check_state for every outgoing state
         let base =
             reader::state_ancestry(repo, &state.id)?.into_iter().skip(1).find_map(|id| index.get(&id).cloned().map(|p| (id, p)));
         let mut hashes = BTreeMap::new();
