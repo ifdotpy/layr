@@ -193,6 +193,7 @@ Lines and states:
    view [<rev or line>] [--json], view save [<line>], view show <id>
 Remotes:
    remote add, list, self, remove, trust; sync, fetch, pull, push, clone
+   mount <remote> [--listen 127.0.0.1:8095]
    gateway [--config <file>], gateway token <project> --write|--gc
 Git bridge:
    git remote, fetch, pull, push, clone, sync

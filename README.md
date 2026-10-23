@@ -1262,3 +1262,34 @@ The `--caches` option sends states of kind `cache`.
 To import a Desk v1 vault, set `LAYR_PAPER_KEY_FILE` to the Desk paper file. Then use `layr clone <vault URL> <project>`.
 The import creates line `main`, preserves history order, and verifies each file's SHA-256.
 The source vault stays read only. Add a new v2 remote to save the imported history.
+
+### Read a store as a disk
+
+`layr mount <remote>` reads store format v2 and serves a read-only WebDAV disk at `http://127.0.0.1:8095/`.
+Use a named project remote or a store URL (`file://`, `s3://`, or `layr+https://`).
+A URL works without a local project, a snapshot filesystem, root, or the Layr service.
+S3 credentials come from the process environment.
+
+Each top-level folder shows one live line. The disk selects the newest available signed
+head across machines. It shows a newer automatic state when that state is available.
+The folder name replaces `/` with `%2F` and `%` with `%25`.
+State information is in `/.layr/<encoded-line>.json`. The source tree has no added files.
+The view refreshes every 120 seconds. An unsuccessful refresh keeps the previous view.
+
+A machine slot opens the store with the local machine key. Without a machine slot, use
+`layr mount <url> --paper-key-file <path>`. The file must belong to the current user and
+have mode `0600`. You can instead pipe the words with `--paper-key-stdin`.
+The command never prints the key. On macOS it saves the unlocked store identity in the
+login Keychain, so later starts need no paper file. On Linux the identity stays in memory.
+
+The plaintext cache uses SHA-256 file names in `~/Library/Caches/layr/mount` on macOS,
+or `$XDG_CACHE_HOME/layr/mount` (`~/.cache/layr/mount` by default) on Linux.
+The folder has mode `0700`. Cache files have mode `0600`.
+The default limit is 1 GiB. Use `--cache-size <bytes>` to change it, or `0` to disable it.
+The command verifies cached bytes before it serves them.
+
+On macOS, run `layr mount --install <url>` to start the disk at login and mount it at
+`~/Layr`. After one successful start, `layr mount --install` uses the saved remote.
+`layr mount --remove` stops the agent and removes it.
+The agent stores no AWS credentials or paper key in its arguments or property list.
+Use `--listen <loopback-IP>:<port>` for another local port. Remote listen addresses are refused.

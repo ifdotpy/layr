@@ -2,6 +2,7 @@
 
 pub(crate) mod aws;
 pub(crate) mod backend;
+pub(crate) mod browse;
 mod canonical;
 pub(crate) mod format;
 mod gateway;

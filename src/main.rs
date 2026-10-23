@@ -19,6 +19,7 @@ mod changes;
 mod cmd;
 mod db;
 mod diff;
+mod disk;
 mod fsutil;
 mod gitbridge;
 mod ids;
@@ -126,6 +127,12 @@ fn main() {
             std::process::exit(1);
         }
         return;
+    }
+    if argv.first().map(String::as_str) == Some("mount") {
+        match disk::run(&argv[1..]) {
+            Ok(code) => std::process::exit(code),
+            Err(error) => { eprintln!("layr mount: {error:#}"); std::process::exit(1); }
+        }
     }
     if argv.first().map(|s| s.as_str()) == Some("daemon") {
         match service::daemon(&argv[1..]) {
