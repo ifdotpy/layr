@@ -684,6 +684,24 @@ mod tests {
         assert!(store.backend.get(&orphan).unwrap().is_none());
         assert!(store.backend.get(&young).unwrap().is_some());
         assert!(store.backend.get(&complete).unwrap().is_some());
+        let barrier = std::sync::Barrier::new(2);
+        let concurrent = crate::ids::new_id();
+        let pushed = std::thread::scope(|scope| {
+            let upload = scope.spawn(|| {
+                barrier.wait();
+                upload_state(&store, &descriptor, &concurrent, &source, None, &BTreeMap::new(), None, None).unwrap().0
+            });
+            barrier.wait();
+            for _ in 0..10 {
+                store.gc(false).unwrap();
+            }
+            upload.join().unwrap()
+        });
+        let identity = store.identity(&descriptor, None).unwrap();
+        let machine_keys = BTreeMap::from([(store.machine.clone(), store.key.verifying_key())]);
+        let mut reader = reader::Reader::new(&store.backend, &identity, &machine_keys);
+        let (_, _, restored) = reader.tree(&concurrent, &pushed.attempt).unwrap();
+        assert_eq!(reader.read(&restored.files["a"]).unwrap(), b"live bytes");
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
