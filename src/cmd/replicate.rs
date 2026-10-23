@@ -792,6 +792,67 @@ pub fn serve(ctx: &Ctx, args: &[String]) -> Result<i32> {
 mod tests {
     use super::*;
     #[test]
+    #[ignore = "requires a root Btrfs fixture and a built peer binary"]
+    fn auxiliary_states_cross_the_peer_protocol() {
+        use crate::ctx::Caller;
+        use crate::model::Record;
+        let base = std::path::PathBuf::from(std::env::var_os("LAYR_TEST_AUX_ROOT").expect("LAYR_TEST_AUX_ROOT"));
+        let binary = std::env::var("LAYR_TEST_BINARY").expect("LAYR_TEST_BINARY");
+        let source = base.join("source");
+        btrfs::create_subvolume(&source).unwrap();
+        std::fs::write(source.join("payload"), "auxiliary payload").unwrap();
+        let ctx = Ctx {
+            store: crate::store::Store::open(&base.join("a")).unwrap(),
+            caller: Caller::from_uid(0),
+            cwd: base.clone(),
+            env: std::collections::HashMap::from([("LAYR_PROJECT".into(), "p".into())]),
+            out: std::cell::RefCell::new(Box::new(std::fs::File::create(base.join("report.json")).unwrap())),
+        };
+        let repo = Repo { p: Project::create(&ctx.store, "p", &ctx.actor(), json!({})).unwrap() };
+        let mut ids = Vec::new();
+        for (kind, name) in [(StateKind::Cache, "caches/peer"), (StateKind::Derived, "derived/peer")] {
+            let _lock = repo.p.lock().unwrap();
+            let mut state = repo.new_state(&ctx, &source, kind, vec![], "peer fixture", None).unwrap();
+            state.context = Some("peer-fixture-v1".into());
+            let id = state.id.clone();
+            let mut rec = Record::new("fixture");
+            rec.states.push(state);
+            repo.commit_record(&ctx, rec).unwrap();
+            let mut rec = Record::new("ref.set");
+            rec.data = json!({"ref_change":{"name":name,"before":null,"after":{"name":name,"target":id,"expires_at":null}}});
+            repo.commit_record(&ctx, rec).unwrap();
+            ids.push(id);
+        }
+        drop(repo);
+        let peer_root = base.join("b");
+        let command = vec![
+            "env".into(),
+            format!("LAYR_ROOT={}", peer_root.display()),
+            "LAYR_DIRECT=1".into(),
+            binary,
+            "serve-peer".into(),
+            "p".into(),
+        ];
+        exchange(&ctx, &command, "push", false, false, false, true).unwrap();
+        let report: Value = serde_json::from_slice(&std::fs::read(base.join("report.json")).unwrap()).unwrap();
+        assert!(report["omitted"].as_array().unwrap().iter().any(|v| v.as_str().unwrap().contains(&ids[0])));
+        let peer_state = |id: &str| peer_root.join("projects/p/states").join(id);
+        assert!(!peer_state(&ids[0]).exists());
+        assert_eq!(std::fs::read_to_string(peer_state(&ids[1]).join("payload")).unwrap(), "auxiliary payload");
+        exchange(&ctx, &command, "push", false, true, true, false).unwrap();
+        assert_eq!(std::fs::read_to_string(peer_state(&ids[0]).join("payload")).unwrap(), "auxiliary payload");
+        // Fetch must use the same policy, and the server must traverse auxiliary states.
+        for id in &ids {
+            btrfs::delete_tree(&ctx.store.projects_dir().join("p/states").join(id)).unwrap();
+        }
+        exchange(&ctx, &command, "fetch", false, false, true, false).unwrap();
+        assert!(!ctx.store.projects_dir().join("p/states").join(&ids[0]).exists());
+        assert!(ctx.store.projects_dir().join("p/states").join(&ids[1]).join("payload").exists());
+        exchange(&ctx, &command, "fetch", false, true, true, false).unwrap();
+        assert!(ctx.store.projects_dir().join("p/states").join(&ids[0]).join("payload").exists());
+    }
+
+    #[test]
     fn live_refs_include_auto_ancestry_and_gate_only_cache_states() {
         use crate::model::{Author, Record};
         let dir = std::env::temp_dir().join(format!("layr-peer-refs-{}", ids::new_id()));
