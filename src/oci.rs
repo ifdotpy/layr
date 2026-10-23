@@ -36,9 +36,8 @@ pub const HELM_LAYER: &str = "application/vnd.cncf.helm.chart.content.v1.tar+gzi
 pub struct ProjectFile {
     #[serde(default)]
     pub runnable: BTreeMap<String, Runnable>,
-    // Probes are owned by the worker that executes them. Packaging does not execute commands.
-    #[serde(default, rename = "probe")]
-    pub _probe: BTreeMap<String, toml::Value>,
+    #[serde(default)]
+    pub probe: BTreeMap<String, crate::probes::Probe>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -101,8 +100,8 @@ impl LayerSpec {
 
 pub fn parse(text: &str) -> Result<ProjectFile> {
     let v: ProjectFile = toml::from_str(text).context("invalid layr.toml")?;
-    if v.runnable.is_empty() {
-        bail!("layr.toml: define at least one [runnable.<name>]");
+    if v.runnable.is_empty() && v.probe.is_empty() {
+        bail!("layr.toml: define at least one [runnable.<name>] or [probe.<name>]");
     }
     for (name, r) in &v.runnable {
         valid_component(name).with_context(|| format!("runnable '{name}'"))?;
@@ -145,6 +144,9 @@ pub fn parse(text: &str) -> Result<ProjectFile> {
         if let Some(p) = &r.chart {
             validate_path(p).with_context(|| format!("runnable '{name}' chart"))?;
         }
+    }
+    for (name, probe) in &v.probe {
+        probe.validate(name)?;
     }
     Ok(v)
 }
@@ -511,6 +513,9 @@ pub fn export(
     let mut text = String::new();
     tree.open_read("layr.toml").context("the revision has no readable layr.toml")?.read_to_string(&mut text)?;
     let file = parse(&text)?;
+    if file.runnable.is_empty() {
+        bail!("the revision has no runnable; define [runnable.<name>] in layr.toml");
+    }
     let name = match name {
         Some(n) => n.to_string(),
         None if file.runnable.len() == 1 => file.runnable.keys().next().unwrap().clone(),

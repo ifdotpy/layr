@@ -32,6 +32,7 @@ mod oci;
 mod oplog;
 mod overlay;
 mod privs;
+mod probes;
 mod radar;
 mod recv;
 mod repo;

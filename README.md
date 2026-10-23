@@ -299,6 +299,7 @@ without a checkout.
 | overlays      | `overlay create <name> [--readers <principals>] [--mode shared\|follow]`, `overlay list`, `overlay readers`, `overlay use [--add\|--remove\|--none] <names>`, `overlay move [--purge] <name> <paths>`, `overlay log\|show\|diff\|grep\|ls-files <name>` |
 | refs          | `ref set <name> <rev> [--expect <rev>] [--ttl <dur>]`, `ref list [<prefix>]`, `ref log <name>`, `ref delete <name> [--expect <rev>]` |
 | queue         | `queue add <rev> [--into <line>]`, `queue list [--into <line>] [--json]`, `queue remove <entry>`, `queue run [--into <line>]` |
+| probes        | `probe run <rev> [--probe <name>] [--json]`, `probe diff <base> <head> [--json]` |
 | changes       | `change list`, `change show <id>`, `change log <id>`, `change diff <id> [--from vN] [--to vM]` |
 | setup         | `init`, `projects`, `config`, `cache add|remove|list|repair`, `daemon`                        |
 
@@ -565,6 +566,69 @@ A new entry triggers a pass for its configured target. The daemon also runs a pa
 Automatic passes use the target line owner and the normal line policy. Configured commands run as that owner.
 Without `queue.run`, only `queue run` processes entries. Queue runners on one machine use one project lock of their own.
 
+## Probes and behavior differences
+
+A probe is an explicit command from the exact revision's `layr.toml`.
+A project can define probes without runnables.
+
+```toml
+[probe.api]
+run = ["python3", "tests/probe.py"]
+outputs = ["results/api.json"]
+kind = "json"
+
+[probe.performance]
+run = ["./measure", "--json", "results/timing.json"]
+outputs = ["results/timing.json"]
+kind = "number"
+noise = 0.05
+```
+
+`run` is a nonempty argument array.
+The command starts at the tree root.
+`outputs` lists relative file or folder paths without `..` or `.git`.
+Output links and special files are refused.
+
+| Kind | Comparison |
+| --- | --- |
+| `files` (default) | Text patches for each file. Binary files use their size and SHA-256 hash. |
+| `json` | Structural changes by JSON Pointer, including array indexes. |
+| `number` | Each JSON file contains an object of numeric metrics. Changes use `(head - base) / abs(base)`. |
+
+The number kind ignores changes whose absolute relative value is at most `noise` (default `0.05`).
+A zero baseline has no relative ratio; a new nonzero value still appears.
+Files with JSON output must fit the existing text size limit.
+
+```sh
+layr probe run main --probe api
+layr probe run changes/CHANGE_ID --json
+layr probe diff main feature --json
+layr change show CHANGE_ID
+```
+
+Only `probe run` executes commands.
+A diff or `change show` reads stored results and reports `not run` when a result is absent.
+The Behavior section compares state-subject results for the newest version and its merge base against the upstream, or `main`.
+It does not select a view implicitly.
+If only view results exist, it lists their IDs and shows the explicit `probe diff views/<a> views/<b>` command.
+
+Probe commands are code from the revision's author.
+They use the existing `try` copy and run as the caller with a clean environment.
+The command's standard output goes to standard error, which keeps JSON command output valid.
+The caller's working files do not change.
+Probe outputs from a view require every project reader to have permanent read access to each overlay.
+A private overlay causes refusal, with its name in the error.
+This uses the existing `try` isolation; it does not add a network or system-call sandbox.
+
+Each result has a check attestation with the probe name, exact arguments, exit code, and output state.
+The output state has kind `derived`, context `probe-v1/<name>`, and `derived_from` set to the exact subject.
+The ref `derived/probe-v1/<name>/<subject>` retains this output state through garbage collection.
+A ViewId in `derived_from` records provenance and does not retain the view's source states.
+The diff can use the definitions and output states from stored checks after source collection.
+It reports `source collected` when source files are no longer available.
+A missing result cannot run again without its source files.
+The same subject and arguments reuse a stored result, including a failed result, while its attestation and outputs remain available.
+A probe command failure makes `probe run` return a nonzero status.
 
 ## Workflow
 
