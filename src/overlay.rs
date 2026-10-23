@@ -939,7 +939,9 @@ pub fn commit_layers(
         }
     };
     if let Some(state) = &shared {
-        if let Err(e) = crate::secrets::check_between(ctx, repo, &crate::repo::snap(&shared_root), &repo.state_src(&state.id)?, &line.head) {
+        if let Err(e) =
+            crate::secrets::check_between(ctx, repo, &crate::repo::snap(&shared_root), &repo.state_src(&state.id)?, &line.head)
+        {
             repo.discard_states(std::slice::from_ref(state));
             discard(&made, &orepos);
             return Err(e);
