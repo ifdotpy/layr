@@ -1,0 +1,522 @@
+//! Explicit probes and comparisons of their stored outputs.
+
+use crate::ctx::Ctx;
+use crate::fsutil::FType;
+use crate::model::{Line, Record, RefChange, RefState, StateKind, Subject};
+use crate::repo::{Repo, Temp};
+use crate::tree::Tree;
+use anyhow::{anyhow, bail, Context, Result};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read;
+use std::path::Path;
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Probe {
+    pub run: Vec<String>,
+    pub outputs: Vec<String>,
+    #[serde(default)]
+    pub kind: Kind,
+    #[serde(default = "default_noise")]
+    pub noise: f64,
+}
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    #[default]
+    Files,
+    Json,
+    Number,
+}
+fn default_noise() -> f64 {
+    0.05
+}
+impl Probe {
+    pub fn validate(&self, name: &str) -> Result<()> {
+        crate::oci::valid_component(name).with_context(|| format!("probe '{name}'"))?;
+        if self.run.is_empty() || self.run[0].is_empty() || self.run.iter().any(|s| s.contains('\0')) {
+            bail!("probe '{name}': run must be a nonempty argv array without NUL");
+        }
+        if self.outputs.is_empty() {
+            bail!("probe '{name}': outputs must contain a file or folder path");
+        }
+        for p in &self.outputs {
+            crate::fsutil::check_rel(p).with_context(|| format!("probe '{name}' output"))?;
+            if p.is_empty() || p.contains('\0') || p.split('/').any(|s| s.is_empty() || s == ".git" || s == ".") {
+                bail!("probe '{name}': invalid output path '{p}'");
+            }
+        }
+        if !self.noise.is_finite() || self.noise < 0.0 {
+            bail!("probe '{name}': noise must be a finite nonnegative relative threshold");
+        }
+        Ok(())
+    }
+}
+
+/// The sole subject boundary to adapt to revs::resolve_view when Views lands.
+pub struct Input {
+    pub subject: Subject,
+    pub state: String,
+    pub layers: Vec<crate::overlay::Layer>,
+}
+pub fn resolve(repo: &Repo, line: Option<&Line>, rev: &str) -> Result<Input> {
+    let state = crate::revs::resolve(repo, line, rev)?;
+    repo.source_state(&state)?;
+    let selected = repo.p.db.line_by_name(rev)?.or_else(|| if ["HEAD", "@", ""].contains(&rev) { line.cloned() } else { None });
+    if let Some(line) = selected {
+        if !repo.layers(&line)?.is_empty() {
+            bail!("probe views require the Views resolver integration");
+        }
+    }
+    Ok(Input { subject: Subject { kind: "state".into(), id: state.clone() }, state, layers: vec![] })
+}
+pub fn definitions(repo: &Repo, input: &Input) -> Result<BTreeMap<String, Probe>> {
+    let tree = Tree::open(&repo.state_root(&input.state)?)?;
+    let mut file = match tree.open_read("layr.toml") {
+        Ok(f) => f.take((1 << 20) + 1),
+        Err(_) if tree.stat("layr.toml").is_none() => return Ok(BTreeMap::new()),
+        Err(e) => return Err(e),
+    };
+    let mut text = String::new();
+    file.read_to_string(&mut text)?;
+    if text.len() > 1 << 20 {
+        bail!("layr.toml exceeds 1 MiB");
+    }
+    Ok(crate::oci::parse(&text)?.probe)
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RunResult {
+    pub probe: String,
+    pub subject: Subject,
+    pub argv: Vec<String>,
+    pub exit: i32,
+    pub output_state: String,
+    pub reused: bool,
+}
+fn reference(name: &str, subject: &str) -> String {
+    format!("derived/probe-v1/{name}/{subject}")
+}
+
+/// Keep this call at one boundary. TODO(core-2): use its identical Db::check_exit implementation at integration.
+fn check_exit(repo: &Repo, subject: &str, argv: &[String]) -> Result<Option<i64>> {
+    repo.p.db.check_exit(subject, argv, None)
+}
+
+fn stored(repo: &Repo, input: &Input, name: &str, probe: &Probe) -> Result<Option<RunResult>> {
+    if check_exit(repo, &input.subject.id, &probe.run)?.is_none() {
+        return Ok(None);
+    }
+    let mut active = BTreeMap::new();
+    // Attestation order and signer/actor checks match Core's revocation rule.
+    for a in repo.p.db.attestations(&input.subject.id, None)? {
+        let Some(rec) = repo.p.db.record(&a.attestation_id)? else { continue };
+        if a.kind == "check" && a.subject == input.subject {
+            active.insert(a.attestation_id.clone(), (a, rec));
+        } else if a.kind == "revoke" {
+            for id in rec.data["revokes"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+                let remove = active
+                    .get(id)
+                    .map(|(old, r): &(crate::model::Attestation, Record)| old.signer == a.signer && r.actor.uid == rec.actor.uid)
+                    .unwrap_or(false);
+                if remove {
+                    active.remove(id);
+                }
+            }
+        }
+    }
+    let root = repo.p.db.ref_value(&reference(name, &input.subject.id), crate::ids::now_ms())?;
+    let mut latest = None;
+    for (_, rec) in active.values() {
+        let c = &rec.data["check"];
+        if c["probe"].as_str() != Some(name) || c["definition"] != serde_json::to_value(probe)? {
+            continue;
+        }
+        let Ok(mut r) = serde_json::from_value::<RunResult>(c.clone()) else { continue };
+        if root.as_ref().map(|v| &v.target) != Some(&r.output_state) {
+            continue;
+        }
+        let state = match repo.state(&r.output_state) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        if state.kind != StateKind::Derived
+            || state.context.as_deref() != Some(&format!("probe-v1/{name}"))
+            || state.derived_from.as_deref() != Some(&input.subject.id)
+            || repo.state_root(&r.output_state).is_err()
+        {
+            continue;
+        }
+        r.reused = true;
+        latest = Some(r);
+    }
+    Ok(latest)
+}
+
+pub fn run(ctx: &Ctx, repo: &Repo, input: &Input, selected: Option<&str>) -> Result<Vec<RunResult>> {
+    repo.require(ctx, "try")?;
+    let definitions = definitions(repo, input)?;
+    if let Some(name) = selected {
+        if !definitions.contains_key(name) {
+            bail!("unknown probe '{name}' in the exact revision");
+        }
+    }
+    let mut results = Vec::new();
+    for (name, probe) in definitions {
+        if selected.is_some() && selected != Some(&name) {
+            continue;
+        }
+        let lock_dir = repo.p.meta_dir().join("probe-locks").join(&name);
+        std::fs::create_dir_all(&lock_dir)?;
+        let execution_lock =
+            std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(lock_dir.join(&input.subject.id))?;
+        rustix::fs::flock(&execution_lock, rustix::fs::FlockOperation::LockExclusive)?;
+        if let Some(r) = stored(repo, input, &name, &probe)? {
+            results.push(r);
+            continue;
+        }
+        let result = crate::cmd::admin::with_try_copy(ctx, repo, &input.state, &input.layers, false, |dir| {
+            let code = crate::cmd::admin::try_command(ctx, repo, &input.state, &probe.run, dir, &[], true)?;
+            // Freeze outputs before root reads them; the command may have left a child process.
+            let snapshot = repo.temp_snapshot(dir, true)?;
+            let work = repo.p.work_dir().join(crate::ids::new_id());
+            crate::storage::create_subvolume(&work)?;
+            let cleanup = Temp { path: work.clone() };
+            collect(&Tree::open(&snapshot.path)?, &Tree::open(&work)?, &probe.outputs, code != 0)?;
+            validate_outputs(&work, probe.kind)?;
+            let _lock = repo.p.lock()?;
+            let mut state =
+                repo.new_state(ctx, &work, StateKind::Derived, vec![input.state.clone()], &format!("probe {name}"), None)?;
+            state.derived_from = Some(input.subject.id.clone());
+            state.context = Some(format!("probe-v1/{name}"));
+            let result = RunResult {
+                probe: name.clone(),
+                subject: input.subject.clone(),
+                argv: probe.run.clone(),
+                exit: code,
+                output_state: state.id.clone(),
+                reused: false,
+            };
+            let mut check = serde_json::to_value(&result)?;
+            check["command"] = json!(probe.run.join(" "));
+            check["definition"] = serde_json::to_value(&probe)?;
+            let mut rec = crate::cmd::attest::record(repo, &input.state, "check", &serde_json::to_vec(&check)?)?;
+            rec.states.push(state.clone());
+            rec.data["check"] = check;
+            let key = reference(&name, &input.subject.id);
+            rec.data["ref_change"] = serde_json::to_value(RefChange {
+                name: key.clone(),
+                before: repo.p.db.ref_value(&key, crate::ids::now_ms())?,
+                after: Some(RefState { name: key, target: state.id, expires_at: None }),
+            })?;
+            repo.commit_record(ctx, rec)?;
+            drop(cleanup);
+            Ok(result)
+        })?;
+        results.push(result);
+    }
+    Ok(results)
+}
+
+fn collect(source: &Tree, dest: &Tree, paths: &[String], missing_ok: bool) -> Result<()> {
+    fn copy(source: &Tree, dest: &Tree, path: &str) -> Result<()> {
+        let meta = source.stat(path).ok_or_else(|| anyhow!("missing probe output '{path}'"))?;
+        match meta.ftype {
+            FType::Dir => {
+                dest.mkdirs(path, None)?;
+                for name in source.list(path)? {
+                    copy(source, dest, &format!("{path}/{name}"))?;
+                }
+            }
+            FType::File => {
+                std::io::copy(&mut source.open_read(path)?, &mut dest.create(path, 0o600)?)?;
+            }
+            _ => bail!("probe output '{path}' must be a regular file or folder; links and special files are refused"),
+        }
+        Ok(())
+    }
+    for path in paths {
+        if missing_ok && source.stat(path).is_none() {
+            continue;
+        }
+        copy(source, dest, path)?;
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct FileData {
+    size: u64,
+    sha256: String,
+    #[serde(skip)]
+    text: Option<String>,
+}
+fn files(root: &Path) -> Result<BTreeMap<String, FileData>> {
+    fn visit(tree: &Tree, path: &str, out: &mut BTreeMap<String, FileData>) -> Result<()> {
+        let m = tree.stat(path).ok_or_else(|| anyhow!("missing probe output '{path}'"))?;
+        if m.ftype == FType::Dir {
+            for name in tree.list(path)? {
+                visit(tree, &if path.is_empty() { name } else { format!("{path}/{name}") }, out)?;
+            }
+        } else if m.ftype == FType::File {
+            let mut file = tree.open_read(path)?;
+            let mut hash = Sha256::new();
+            let mut bytes = Vec::new();
+            let mut buf = [0; 65536];
+            loop {
+                let n = file.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                hash.update(&buf[..n]);
+                if m.size <= crate::fsutil::MAX_TEXT {
+                    bytes.extend_from_slice(&buf[..n]);
+                }
+            }
+            let text = if m.size <= crate::fsutil::MAX_TEXT && !crate::fsutil::is_binary(&bytes) {
+                String::from_utf8(bytes).ok()
+            } else {
+                None
+            };
+            out.insert(path.into(), FileData { size: m.size, sha256: hex::encode(hash.finalize()), text });
+        } else {
+            bail!("invalid stored probe output '{path}'");
+        }
+        Ok(())
+    }
+    let mut out = BTreeMap::new();
+    visit(&Tree::open(root)?, "", &mut out)?;
+    Ok(out)
+}
+fn validate_outputs(root: &Path, kind: Kind) -> Result<()> {
+    if kind == Kind::Files {
+        return Ok(());
+    }
+    for (path, file) in files(root)? {
+        let text =
+            file.text.as_deref().ok_or_else(|| anyhow!("probe output '{path}' needs JSON text within the text size limit"))?;
+        let v: Value = serde_json::from_str(text).with_context(|| format!("invalid JSON probe output '{path}'"))?;
+        if kind == Kind::Number {
+            metrics(&v).with_context(|| format!("invalid number probe output '{path}'"))?;
+        }
+    }
+    Ok(())
+}
+fn metrics(value: &Value) -> Result<BTreeMap<String, f64>> {
+    let object = value.as_object().context("expected an object of numeric metrics")?;
+    object
+        .iter()
+        .map(|(key, value)| {
+            Ok((
+                key.clone(),
+                value.as_f64().filter(|n| n.is_finite()).with_context(|| format!("metric '{key}' must be a finite number"))?,
+            ))
+        })
+        .collect()
+}
+
+#[derive(Debug, Serialize)]
+pub struct Behavior {
+    pub base: String,
+    pub head: String,
+    pub probes: Vec<Value>,
+}
+pub fn diff(repo: &Repo, base: &Input, head: &Input) -> Result<Behavior> {
+    let old = definitions(repo, base)?;
+    let new = definitions(repo, head)?;
+    let names: BTreeSet<_> = old.keys().chain(new.keys()).collect();
+    let mut probes = Vec::new();
+    for name in names {
+        let a = old.get(name).map(|p| stored(repo, base, name, p)).transpose()?.flatten();
+        let b = new.get(name).map(|p| stored(repo, head, name, p)).transpose()?.flatten();
+        let (Some(a), Some(b)) = (&a, &b) else {
+            probes.push(json!({"probe":name,"status":"not run","base_run":a.is_some(),"head_run":b.is_some()}));
+            continue;
+        };
+        let p = &new[name];
+        if old[name].kind != p.kind {
+            probes.push(json!({"probe":name,"status":"kind changed","base":a,"head":b}));
+            continue;
+        }
+        let changes = compare(&files(&repo.state_root(&a.output_state)?)?, &files(&repo.state_root(&b.output_state)?)?, p)?;
+        probes.push(
+            json!({"probe":name,"status":if changes.is_empty() && a.exit == b.exit {"unchanged"}else{"changed"},"base":a,"head":b,"exit_changed":a.exit != b.exit,"changes":changes}),
+        );
+    }
+    Ok(Behavior { base: base.subject.id.clone(), head: head.subject.id.clone(), probes })
+}
+fn compare(old: &BTreeMap<String, FileData>, new: &BTreeMap<String, FileData>, probe: &Probe) -> Result<Vec<Value>> {
+    let paths: BTreeSet<_> = old.keys().chain(new.keys()).collect();
+    let mut out = Vec::new();
+    for path in paths {
+        let (a, b) = (old.get(path), new.get(path));
+        if a.zip(b).map(|(a, b)| a.sha256 == b.sha256).unwrap_or(false) {
+            continue;
+        }
+        match probe.kind {
+            Kind::Files => {
+                let text = a.map(|f| f.text.as_deref().unwrap_or("")).unwrap_or("");
+                let next = b.map(|f| f.text.as_deref().unwrap_or("")).unwrap_or("");
+                if a.into_iter().chain(b).all(|f| f.text.is_some()) {
+                    let patch = similar::TextDiff::from_lines(text, next)
+                        .unified_diff()
+                        .header(&format!("a/{path}"), &format!("b/{path}"))
+                        .to_string();
+                    out.push(json!({"path":path,"kind":"text","change":if a.is_none(){"add"}else if b.is_none(){"remove"}else{"modify"},"diff":patch}));
+                } else {
+                    out.push(json!({"path":path,"kind":"binary","before":a,"after":b}));
+                }
+            }
+            Kind::Json | Kind::Number => {
+                let parse = |f: Option<&FileData>| -> Result<Option<Value>> {
+                    f.map(|f| {
+                        serde_json::from_str(f.text.as_deref().context("stored JSON probe is not text")?).map_err(Into::into)
+                    })
+                    .transpose()
+                };
+                let (a, b) = (parse(a)?, parse(b)?);
+                let changes = if probe.kind == Kind::Json {
+                    let mut rows = Vec::new();
+                    json_changes(a.as_ref(), b.as_ref(), "", &mut rows);
+                    rows
+                } else {
+                    number_changes(a.as_ref(), b.as_ref(), probe.noise)?
+                };
+                if !changes.is_empty() {
+                    out.push(json!({"path":path,"changes":changes}));
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+fn json_changes(a: Option<&Value>, b: Option<&Value>, path: &str, out: &mut Vec<Value>) {
+    if a == b {
+        return;
+    }
+    match (a, b) {
+        (Some(Value::Object(a)), Some(Value::Object(b))) => {
+            for key in a.keys().chain(b.keys()).collect::<BTreeSet<_>>() {
+                let escaped = key.replace('~', "~0").replace('/', "~1");
+                json_changes(a.get(key), b.get(key), &format!("{path}/{escaped}"), out);
+            }
+        }
+        (Some(Value::Array(a)), Some(Value::Array(b))) => {
+            for i in 0..a.len().max(b.len()) {
+                json_changes(a.get(i), b.get(i), &format!("{path}/{i}"), out);
+            }
+        }
+        _ => out.push(
+            json!({"key":path,"change":if a.is_none(){"add"}else if b.is_none(){"remove"}else{"modify"},"before":a,"after":b}),
+        ),
+    }
+}
+fn number_changes(a: Option<&Value>, b: Option<&Value>, noise: f64) -> Result<Vec<Value>> {
+    let a = a.map(metrics).transpose()?.unwrap_or_default();
+    let b = b.map(metrics).transpose()?.unwrap_or_default();
+    let mut out = Vec::new();
+    for metric in a.keys().chain(b.keys()).collect::<BTreeSet<_>>() {
+        let (old, new) = (a.get(metric), b.get(metric));
+        if old == new {
+            continue;
+        }
+        let relative = old.zip(new).and_then(|(a, b)| if *a == 0.0 { None } else { Some((b - a) / a.abs()) });
+        if relative.map(|r| r.abs() <= noise).unwrap_or(false) {
+            continue;
+        }
+        out.push(json!({"metric":metric,"before":old,"after":new,"relative_change":relative,"noise":noise}));
+    }
+    Ok(out)
+}
+pub fn print(ctx: &Ctx, behavior: &Behavior) {
+    for p in &behavior.probes {
+        outln!(ctx, "  {}: {}", p["probe"].as_str().unwrap_or(""), p["status"].as_str().unwrap_or(""));
+        if p["exit_changed"] == true {
+            outln!(ctx, "    exit {} -> {}", p["base"]["exit"], p["head"]["exit"]);
+        }
+        if let Some(changes) = p["changes"].as_array() {
+            for c in changes {
+                outln!(ctx, "    {}", c["path"].as_str().unwrap_or(""));
+                if let Some(patch) = c["diff"].as_str() {
+                    ctx.print(patch);
+                } else {
+                    outln!(ctx, "    {c}");
+                }
+            }
+        }
+    }
+}
+
+/// Compare the latest change version with its merge base against the target line.
+pub fn change_behavior(repo: &Repo, state: &crate::model::StateRec) -> Result<Behavior> {
+    let source = state.line.as_deref().map(|id| repo.line(id)).transpose()?;
+    let upstream =
+        source.as_ref().map(|line| repo.p.config_value(&format!("line.{}.upstream", line.name))).transpose()?.flatten();
+    let target = match &upstream {
+        None | Some(Value::Null) => "main",
+        Some(Value::String(name)) => name,
+        _ => bail!("the line upstream must be a line name"),
+    };
+    let target = repo.line(target)?;
+    let base = repo.merge_base(&target.head, &state.id)?.context("change and target have no common ancestor")?;
+    diff(repo, &resolve(repo, None, &base)?, &resolve(repo, None, &state.id)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn definition(kind: Kind) -> Probe {
+        Probe { run: vec!["/bin/true".into()], outputs: vec!["out".into()], kind, noise: 0.05 }
+    }
+    #[test]
+    fn schema_requires_safe_outputs_and_argv() {
+        let text = "[probe.test]\nrun=['echo','hello']\noutputs=['result']\n";
+        assert_eq!(crate::oci::parse(text).unwrap().probe["test"].kind, Kind::Files);
+        for tail in [
+            "run=[]\noutputs=['out']",
+            "run=['sh']\noutputs=['../escape']",
+            "run=['sh']\noutputs=['.git/config']",
+            "run=['sh']\noutputs=[]",
+            "run=['sh']\noutputs=['out']\nkind='number'\nnoise=-1",
+            "run=['sh']\noutputs=['out']\nunknown=true",
+        ] {
+            assert!(crate::oci::parse(&format!("[probe.test]\n{tail}")).is_err(), "{tail}");
+        }
+    }
+    #[test]
+    fn structural_json_diff_tracks_keys_arrays_and_null() {
+        let a = json!({"a/b":{"~key":[1,null]},"removed":null});
+        let b = json!({"a/b":{"~key":[2,null,3]},"added":null});
+        let mut changes = Vec::new();
+        json_changes(Some(&a), Some(&b), "", &mut changes);
+        assert_eq!(changes.len(), 4);
+        assert!(changes.iter().any(|c| c["key"] == "/a~1b/~0key/0" && c["after"] == 2));
+        assert!(changes.iter().any(|c| c["key"] == "/removed" && c["change"] == "remove"));
+        assert!(changes.iter().any(|c| c["key"] == "/added" && c["change"] == "add"));
+    }
+    #[test]
+    fn metric_diff_applies_noise_and_handles_zero_baselines() {
+        let a = json!({"quiet":100,"slow":100,"zero":0,"negative":-100,"gone":2});
+        let b = json!({"quiet":104,"slow":110,"zero":1,"negative":-110,"new":4});
+        let rows = number_changes(Some(&a), Some(&b), 0.05).unwrap();
+        assert_eq!(rows.len(), 5);
+        assert!(!rows.iter().any(|c| c["metric"] == "quiet"));
+        assert_eq!(rows.iter().find(|c| c["metric"] == "slow").unwrap()["relative_change"], 0.1);
+        assert_eq!(rows.iter().find(|c| c["metric"] == "negative").unwrap()["relative_change"], -0.1);
+        assert!(rows.iter().find(|c| c["metric"] == "zero").unwrap()["relative_change"].is_null());
+        assert!(metrics(&json!({"bad":"1"})).is_err());
+    }
+    #[test]
+    fn file_diff_reports_hashes_for_binary_and_patches_for_text() {
+        let file = |text: Option<&str>, hash: &str| FileData { size: 3, sha256: hash.into(), text: text.map(str::to_owned) };
+        let old = BTreeMap::from([("text".into(), file(Some("old\n"), "a")), ("binary".into(), file(None, "b"))]);
+        let new = BTreeMap::from([("text".into(), file(Some("new\n"), "c")), ("binary".into(), file(None, "d"))]);
+        let changes = compare(&old, &new, &definition(Kind::Files)).unwrap();
+        assert_eq!(changes[0]["kind"], "binary");
+        assert_eq!(changes[0]["before"]["sha256"], "b");
+        assert!(changes[1]["diff"].as_str().unwrap().contains("+new"));
+    }
+}

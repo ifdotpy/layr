@@ -74,8 +74,14 @@ pub fn change(ctx: &Ctx, args: &[String]) -> Result<i32> {
             for (n, s) in versions.iter().enumerate() {
                 rows.push(serde_json::json!({"version":format!("v{}",n+1),"state":s,"attestations":repo.p.db.attestations(&s.id,None)?}));
             }
+            let behavior = versions.last().map(|state| crate::probes::change_behavior(repo, state)).transpose();
+            let behavior_json = match &behavior {
+                Ok(Some(value)) => serde_json::to_value(value)?,
+                Ok(None) => serde_json::json!({"probes": []}),
+                Err(e) => serde_json::json!({"status":"unavailable","reason":format!("{e:#}")}),
+            };
             if a.has("--json") {
-                outln!(ctx, "{}", serde_json::json!({"change_id":id,"versions":rows}));
+                outln!(ctx, "{}", serde_json::json!({"change_id":id,"versions":rows,"behavior":behavior_json}));
             } else {
                 outln!(ctx, "change {id}");
                 for r in rows {
@@ -89,6 +95,12 @@ pub fn change(ctx: &Ctx, args: &[String]) -> Result<i32> {
                     for a in r["attestations"].as_array().into_iter().flatten() {
                         outln!(ctx, "  {}\t{}", a["kind"].as_str().unwrap_or(""), a["attestation_id"].as_str().unwrap_or(""));
                     }
+                }
+                outln!(ctx, "Behavior");
+                match behavior {
+                    Ok(Some(value)) => crate::probes::print(ctx, &value),
+                    Ok(None) => outln!(ctx, "  No probes."),
+                    Err(e) => outln!(ctx, "  unavailable: {e:#}"),
                 }
             }
         }

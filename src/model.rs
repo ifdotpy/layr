@@ -313,7 +313,12 @@ pub fn validate(r: &Record) -> anyhow::Result<()> {
             uuid("change", id)?;
         }
         if let Some(id) = &s.derived_from {
-            uuid("derived source", id)?;
+            let view = s.kind == StateKind::Derived
+                && id.len() == 64
+                && id.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c));
+            if !view {
+                uuid("derived source", id)?;
+            }
         }
         if s.kind.auxiliary() && (s.line.is_some() || !s.parents.is_empty() || s.change_id.is_some()) {
             bail!("cache and derived states must be outside line history");
@@ -647,6 +652,27 @@ mod tests {
         r.states[0].parents.clear();
         r.states[0].line = Some("01a12290-0000-7000-8000-000000000005".into());
         assert!(validate(&r).is_err());
+    }
+
+    #[test]
+    fn derived_sources_allow_exact_views_but_cache_sources_remain_states() {
+        let mut r = rec();
+        let mut s = state("01a12290-0000-7000-8000-000000000003");
+        s.kind = StateKind::Derived;
+        s.derived_from = Some("a".repeat(64));
+        r.states.push(s);
+        assert!(validate(&r).is_ok());
+        for invalid in ["A".repeat(64), "a".repeat(63), "g".repeat(64)] {
+            r.states[0].derived_from = Some(invalid);
+            assert!(validate(&r).is_err());
+        }
+        r.states[0].derived_from = Some("a".repeat(64));
+        r.states[0].kind = StateKind::Cache;
+        assert!(validate(&r).is_err());
+        r.states[0].derived_from = Some("01a12290-0000-7000-8000-000000000004".into());
+        assert!(validate(&r).is_ok());
+        r.states[0].kind = StateKind::Derived;
+        assert!(validate(&r).is_ok());
     }
 
     #[test]

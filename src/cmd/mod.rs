@@ -9,6 +9,7 @@ pub mod history;
 pub mod mergecmd;
 pub mod oci;
 pub mod overlaycmd;
+pub mod probe;
 pub mod queue;
 pub mod refs;
 pub mod remote;
@@ -275,6 +276,7 @@ pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
         "attest" => attest::attest(ctx, &rest),
         "attestations" => attest::attestations(ctx, &rest),
         "change" => change::change(ctx, &rest),
+        "probe" => probe::probe(ctx, &rest),
         "gc" => admin::gc(ctx, &rest),
         "fsck" => admin::fsck(ctx, &rest),
         "reindex" => admin::reindex(ctx, &rest),
