@@ -531,11 +531,11 @@ mod tests {
             }
         }
         let repo = Repo { p: project };
-        let report = push(&store, &repo, &Options::default()).unwrap();
+        let report = push(&store, &ctx, &repo, &Options::default()).unwrap();
         assert_eq!(report.states, 3);
         assert!(report.omitted.contains(&format!("cache state {cache} of ref caches/test: use --caches")));
         assert!(!reader::attempts(&store.backend).unwrap().contains_key(&cache));
-        let report = push(&store, &repo, &Options { caches: true, ..Default::default() }).unwrap();
+        let report = push(&store, &ctx, &repo, &Options { caches: true, ..Default::default() }).unwrap();
         assert_eq!(report.states, 1);
         assert!(reader::attempts(&store.backend).unwrap().contains_key(&cache));
         store.verify(true).unwrap();
