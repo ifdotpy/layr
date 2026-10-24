@@ -331,31 +331,45 @@ fn show_to_project(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let _parent = h.repo.p.lock()?;
     let _lock = orepo.p.lock()?;
-    let authority = crate::overlay_managers::of(&h.repo, name)?;
-    authority.require(&ctx.store.machine.id)?;
-    if !info.hidden && h.repo.p.db.overlay_config(&format!("overlay.{name}"))?.is_some() {
+    let own_lines: Vec<_> = orepo.p.export_jsonl()?.lines().map(str::to_owned).collect();
+    let creator = own_lines.iter().find(|line| {
+        crate::oplog::parse_line(line, None).is_ok_and(|s| {
+            s.record.op == "overlay.create" && s.record.data["config"][format!("overlay.{name}")]["hidden"] == true
+        })
+    });
+    let Some(creator) = creator else {
         return Ok(0);
-    }
+    };
+    let authority = layr_model::authority::from_overlay_lines(
+        &h.repo.p.id,
+        &orepo.p.id,
+        &own_lines,
+        &crate::store_remote::overlays::trusted_keys(&h.repo)?,
+    )?
+    .1;
+    authority.require(&ctx.store.machine.id)?;
     let mut metadata = orepo.p.db.overlay_config("overlay")?.ok_or_else(|| exit(1, "overlay metadata is missing"))?;
-    metadata["hidden"] = serde_json::json!(false);
     let mut public =
         orepo.p.db.overlay_config(&format!("overlay.{name}"))?.ok_or_else(|| exit(1, "overlay creation is missing"))?;
     public["hidden"] = serde_json::json!(false);
-    let mut show = Record::new("overlay.show-to-project");
-    show.data = serde_json::json!({"name":name,"config":{"overlay":metadata,format!("overlay.{name}"):public}});
-    orepo.commit_record(ctx, show)?;
-    let mut create = Record::new("overlay.create");
-    create.data = serde_json::json!({"name":name,"config":{format!("overlay.{name}"):public}});
-    // Keep the original creator and manager chain as the authority for the public overlay.
-    let own_lines: Vec<_> = orepo.p.export_jsonl()?.lines().map(str::to_owned).collect();
-    let creator = own_lines
-        .iter()
-        .find(|line| crate::oplog::parse_line(line, None).is_ok_and(|s| s.record.op == "overlay.create"))
-        .ok_or_else(|| exit(1, "overlay creator record is missing"))?;
-    create.data["hidden_origin"] = serde_json::json!(creator);
-    h.repo.commit_record(ctx, create)?;
+    if metadata["hidden"] != false {
+        metadata["hidden"] = serde_json::json!(false);
+        let mut show = Record::new("overlay.show-to-project");
+        show.data = serde_json::json!({"name":name,"config":{"overlay":metadata,format!("overlay.{name}"):public}});
+        orepo.commit_record(ctx, show)?;
+    }
+    let parent_lines: Vec<_> = h.repo.p.export_jsonl()?.lines().map(str::to_owned).collect();
+    let parent_records: Vec<_> =
+        parent_lines.iter().map(|line| crate::oplog::parse_line(line, None).map(|s| s.record)).collect::<Result<_>>()?;
+    if !parent_records.iter().any(|r| r.op == "overlay.create" && r.data["name"] == *name) {
+        let mut create = Record::new("overlay.create");
+        create.data = serde_json::json!({"name":name,"config":{format!("overlay.{name}"):public},"hidden_origin":creator});
+        h.repo.commit_record(ctx, create)?;
+    }
     for line in &own_lines {
-        if crate::oplog::parse_line(line, None)?.record.op == "overlay.managers" {
+        if crate::oplog::parse_line(line, None)?.record.op == "overlay.managers"
+            && !parent_records.iter().any(|r| r.op == "overlay.authority" && r.data["authority"] == *line)
+        {
             let mut proof = Record::new("overlay.authority");
             proof.data = serde_json::json!({"name":name,"authority":line});
             h.repo.commit_record(ctx, proof)?;
@@ -363,7 +377,10 @@ fn show_to_project(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     for (key, value) in orepo.p.db.config_all()? {
         if key.starts_with(&format!("overlay.{name}.")) {
-            super::admin::set_config(ctx, &h.repo, &key, serde_json::from_str(&value)?)?;
+            let value: serde_json::Value = serde_json::from_str(&value)?;
+            if h.repo.p.db.overlay_config(&key)?.as_ref() != Some(&value) {
+                super::admin::set_config(ctx, &h.repo, &key, value)?;
+            }
         }
     }
     // Public stacks start naming the overlay only after the show operation.
@@ -374,11 +391,17 @@ fn show_to_project(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let mut layers = h.repo.layers(&line)?;
             if !layers.iter().any(|l| l.overlay == *name) {
                 let ol = orepo.p.db.line_by_name(&Repo::overlay_line_name(&info, &line.id, line.owner))?.unwrap();
-                layers.push(Layer { overlay: name.clone(), state: ol.head });
+                let position = orepo
+                    .p
+                    .db
+                    .overlay_config(&format!("hidden.stack.{}", line.id))?
+                    .and_then(|v| v["position"].as_u64())
+                    .unwrap_or(u64::MAX);
+                layers.insert((position as usize).min(layers.len()), Layer { overlay: name.clone(), state: ol.head });
+                let mut record = Record::new("overlay.use");
+                record.data = serde_json::json!({"stack":h.repo.public_stack_data(&line.id, &layers)?});
+                h.repo.commit_record(ctx, record)?;
             }
-            let mut record = Record::new("overlay.use");
-            record.data = serde_json::json!({"stack":h.repo.public_stack_data(&line.id, &layers)?});
-            h.repo.commit_record(ctx, record)?;
         }
     }
     outln!(ctx, "Overlay {name} is visible to the project");

@@ -6,7 +6,7 @@ for machine_root in reader other peer; do new_fs "$T/$machine_root" 2G; done
 for user in layr-hidden-reader layr-hidden-other; do id "$user" >/dev/null 2>&1 || useradd -m "$user"; done
 export HIDDEN_TEST_ROOT="$T" HIDDEN_TEST_BINARY="$LAYR"
 python3 - <<'PY'
-import hashlib,json,os,pathlib,shutil,sqlite3,subprocess,time
+import http.client,json,os,pathlib,re,shutil,sqlite3,subprocess,time
 root=pathlib.Path(os.environ['HIDDEN_TEST_ROOT'])
 binary=os.environ['HIDDEN_TEST_BINARY']
 base=os.environ.copy()
@@ -98,6 +98,24 @@ check(absent(report.stdout,ids),'the non-reader clone report has no hidden trace
 nproject=pathlib.Path(N['LAYR_ROOT'])/'projects/project'
 check(not (nproject/'meta/overlays'/name).exists(),'the non-reader gets no hidden project')
 check(not (nproject/'lines/main/hidden.txt').exists(),'the non-reader gets shared files only')
+def mount_read(env):
+ logfile=open(root/('mount-'+pathlib.Path(env['LAYR_ROOT']).parent.name+'.log'),'w+')
+ process=subprocess.Popen([binary,'mount','file://'+str(root/'archive'),'--listen','127.0.0.1:0'],env=env,cwd=root,stdout=logfile,stderr=logfile)
+ try:
+  for _ in range(400):
+   logfile.seek(0);text=logfile.read();match=re.search(r'http://127\.0\.0\.1:(\d+)/',text)
+   if match: break
+   assert process.poll() is None,text
+   time.sleep(.025)
+  else: raise AssertionError('mount did not start')
+  connection=http.client.HTTPConnection('127.0.0.1',int(match[1]),timeout=10)
+  connection.request('GET','/main/hidden.txt');response=connection.getresponse();data=response.read();connection.close()
+  return response.status,data
+ finally:
+  process.terminate();process.wait(timeout=10);logfile.close()
+check(mount_read(R)==(200,b'hidden test bytes\n'),'the reader mount follows the hidden overlay')
+check(mount_read(N)[0]==404,'the non-reader mount has no hidden file')
+
 for args in [['overlay','list'],['overlay','list','--json'],['--line','main','overlay','use'],['config','--list','--json'],['op','log','--all','-n','100000','--json'],['--line','main','log','--json'],['fsck'],['push','origin','--json']]:
  result=run(['--project','project',*args],N)
  check(absent(result.stdout+result.stderr,ids),'the non-reader output has no hidden trace: '+' '.join(args))
@@ -114,6 +132,9 @@ run(['sync','allowed','--command','--','env','LAYR_ROOT='+P['LAYR_ROOT'],binary,
 check((pathlib.Path(P['LAYR_ROOT'])/'projects/project/meta/overlays'/name/'meta/db/layr.sqlite').exists(),'an explicitly allowed peer receives the hidden project')
 # Two local people on a service, including an admin who is not an overlay reader.
 shutil.copy2(binary,root/'layr');os.chmod(root/'layr',0o755);os.chmod(root,0o755)
+# Both people have store access. The reader slot controls hidden overlay discovery.
+for path in [root/'archive',*(root/'archive').rglob('*')]:
+ os.chmod(path,0o777 if path.is_dir() else 0o644)
 socket=root/'daemon.sock';log=open(root/'daemon.log','w')
 daemon=subprocess.Popen([binary,'daemon','--socket',str(socket),'--tick','3600'],env=A,cwd=root,stdout=log,stderr=log)
 def person(user,args,success=True):
@@ -140,6 +161,9 @@ try:
  check((nproject/'meta/overlays'/name/'meta/db/layr.sqlite').exists(),'a new person reader discovers the overlay after push')
  run(['overlay','show-to-project',name])
  check(any(row['op']=='overlay.show-to-project' for row in records(overlay)),'unhide is recorded in the overlay log')
+ before=(len(records(project)),len(records(overlay)))
+ run(['overlay','show-to-project',name])
+ check(before==(len(records(project)),len(records(overlay))),'a repeated unhide adds no duplicate operation')
  check(any(row['op']=='overlay.create' and row['data']['name']==name for row in records(project)),'unhide publishes the normal public creation')
  check(name in person('layr-hidden-other',['overlay','list']).stdout,'the non-reader sees the overlay after unhide')
  check(not json.loads(person('layr-hidden-other',['overlay','list','--json']).stdout)[0]['hidden'],'unhide removes the hidden badge')
