@@ -2,6 +2,7 @@
 # Private overlays cross stores and peers, with separate read keys and service access.
 . "$(dirname "$0")/lib.sh"
 set -e
+for machine_root in b c d e f; do new_fs "$T/$machine_root" 2G; done
 for u in layr-ov-reader layr-ov-other; do id "$u" >/dev/null 2>&1 || useradd -m "$u"; done
 export OVERLAY_TEST_ROOT="$T" OVERLAY_TEST_BINARY="$LAYR"
 python3 - <<'PY'
@@ -14,10 +15,11 @@ base.pop('LAYR_PROJECT',None)
 base.pop('LAYR_LINE',None)
 checks=0
 A=dict(base,LAYR_PROJECT='project')
-B=dict(base,LAYR_ROOT=str(root/'store/b-root'))
-C=dict(base,LAYR_ROOT=str(root/'store/c-root'))
-D=dict(base,LAYR_ROOT=str(root/'store/d-root'))
-E=dict(base,LAYR_ROOT=str(root/'store/e-root'),LAYR_PERSON_DIR=str(root/'reader-person'),LAYR_PERSON_LOGIN='reader@example.com')
+B=dict(base,LAYR_ROOT=str(root/'b/store'))
+C=dict(base,LAYR_ROOT=str(root/'c/store'))
+D=dict(base,LAYR_ROOT=str(root/'d/store'))
+E=dict(base,LAYR_ROOT=str(root/'e/store'),LAYR_PERSON_DIR=str(root/'reader-person'),LAYR_PERSON_LOGIN='reader@example.com')
+F=dict(base,LAYR_ROOT=str(root/'f/store'),LAYR_PAPER_KEY_FILE=str(root/'paper'))
 def run(args,env=A,success=True):
  p=subprocess.run([binary,*args],env=env,cwd=root,text=True,capture_output=True,timeout=90)
  if success: assert p.returncode==0,(args,p.returncode,p.stdout,p.stderr)
@@ -48,7 +50,14 @@ run(['--line','main','overlay','create','secrets','--readers',f"layr-ov-reader,m
 (line/'.env').write_text('PRIVATE_TEST_VALUE=private-epoch-one\n')
 run(['--line','main','overlay','move','secrets','.env','--purge','-q'])
 run(['--line','main','save','-m','Private file','-q'])
+# An older pin lacks the public paper recipient. Push still carries the overlay.
+pin=json.loads(run(['config','cloud.remote.archive.store']).stdout)
+pin.pop('paper_recipient')
+run(['config','cloud.remote.archive.store',json.dumps(pin)])
 report=json.loads(run(['push','archive','--json']).stdout)
+check('overlay secrets: no paper slot; run once with LAYR_PAPER_KEY_FILE to add it' in report['omitted'],'an older store reports the missing paper slot and continues')
+run(['push','archive','-q'],dict(A,LAYR_PAPER_KEY_FILE=str(root/'paper')))
+check(json.loads(run(['config','cloud.remote.archive.store']).stdout)['paper_recipient'].startswith('age1'),'one paper-key run records only the public recipient')
 check(not any('private overlay files' in x for x in report['omitted']),'push includes overlay files')
 keyfiles=sorted((root/'archive/overlays').glob('*/keys/*.json'))
 check(len(keyfiles)==1,'push publishes one signed layer key')
@@ -66,6 +75,8 @@ run(['clone','file://'+str(root/'archive'),'project','-q'],B)
 check((pathlib.Path(B['LAYR_ROOT'])/'projects/project/lines/main/.env').read_text().endswith('private-epoch-one\n'),'B clones the private overlay with its machine slot')
 run(['clone','file://'+str(root/'archive'),'project','-q'],E)
 check((pathlib.Path(E['LAYR_ROOT'])/'projects/project/lines/main/.env').read_text().endswith('private-epoch-one\n'),'a person reader clones the overlay with its person key')
+run(['clone','file://'+str(root/'archive'),'project','-q'],F)
+check((pathlib.Path(F['LAYR_ROOT'])/'projects/project/lines/main/.env').read_text().endswith('private-epoch-one\n'),'the owner paper key opens both shared files and the overlay')
 report=json.loads(run(['clone','file://'+str(root/'archive'),'project','--json'],C).stdout)
 check('overlay secrets: no key on this machine' in report['omitted'],'C receives the no-key report')
 cline=pathlib.Path(C['LAYR_ROOT'])/'projects/project/lines/main'

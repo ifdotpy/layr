@@ -475,7 +475,7 @@ pub fn run(args: &[String]) -> Result<i32> {
     };
     let account = keystore::account(&url);
     let cached = if paper.is_none() { keystore::get(&account)? } else { None };
-    let access = Access { machine: machine_access(), paper, identity: cached, pin };
+    let access = Access { machine: machine_access(), paper, identity: cached, pin, ..Default::default() };
     let env = std::env::vars().collect();
     let (disk, identity) = Disk::open(url.clone(), env, access, cache.clone(), limit)?;
     let pin = disk.access.pin.as_ref().context("disk has no store pin")?;

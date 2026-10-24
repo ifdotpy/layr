@@ -389,7 +389,7 @@ mod tests {
                 hex::decode(std::fs::read_to_string(root.join("machine/key")).unwrap().trim()).unwrap().try_into().unwrap();
             ed25519_dalek::SigningKey::from_bytes(&bytes)
         };
-        let backend = Backend::file(root);
+        let backend = Backend::file(root.clone());
         let a = signing(&aroot);
         let c = signing(&croot);
         let aid = std::fs::read_to_string(aroot.join("machine/id")).unwrap();
@@ -406,6 +406,18 @@ mod tests {
             count += 1;
         }
         assert!(count >= 4, "no overlay ciphertexts checked");
+        // The mount drops the paper opener after its first read. Layer identities stay in memory.
+        let mut access = super::super::browse::Access {
+            paper: Some(std::fs::read_to_string(root.parent().unwrap().join("paper")).unwrap()),
+            ..Default::default()
+        };
+        let url = format!("file://{}", root.display());
+        let browse = super::super::browse::Browse::open(&url, &Default::default(), &access).unwrap();
+        access.identity = Some(browse.identity().to_string());
+        access.paper = None;
+        let mut refreshed = super::super::browse::Browse::open(&url, &Default::default(), &access).unwrap();
+        let entry = refreshed.lines.iter().find(|line| line.name == "main").unwrap().files[".env"].clone();
+        assert!(refreshed.read(&entry).unwrap().ends_with(b"private-epoch-one\n"));
     }
 
     #[test]

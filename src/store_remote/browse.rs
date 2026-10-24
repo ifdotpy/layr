@@ -28,6 +28,7 @@ pub struct Access {
     pub paper: Option<String>,
     pub identity: Option<String>,
     pub pin: Option<StorePin>,
+    pub layers: std::sync::Arc<std::sync::Mutex<BTreeMap<String, String>>>,
 }
 
 pub struct Line {
@@ -126,11 +127,16 @@ impl Browse {
         {
             let scoped = backend.scoped(&published.prefix())?;
             let machine = access.machine.as_ref().map(|(id, key)| (id.as_str(), key));
-            let Some(identity) =
-                super::overlays::open_identity(&scoped, &published.key, machine, person.as_ref(), access.paper.as_deref())?
-            else {
+            let cache_key = format!("{}/{}/{}", descriptor.project, descriptor.recipient, published.prefix());
+            let opened =
+                super::overlays::open_identity(&scoped, &published.key, machine, person.as_ref(), access.paper.as_deref())?;
+            let identity = opened.or_else(|| access.layers.lock().ok()?.get(&cache_key).cloned());
+            let Some(identity) = identity else {
                 continue;
             };
+            if keys::recipient_of(&identity)? != published.key.recipient {
+                bail!("cached layer identity differs from its signed recipient");
+            }
             let overlay_records = reader::records(&scoped, &identity, &published.key.overlay)?;
             if !overlay_records.lines.contains(&published.line) {
                 bail!("published overlay key is absent from the overlay log");
@@ -141,6 +147,11 @@ impl Browse {
                 }
             }
             layer_names.insert(name, layers.len());
+            access
+                .layers
+                .lock()
+                .map_err(|_| anyhow::anyhow!("overlay key cache lock failed"))?
+                .insert(cache_key, identity.clone());
             let attempts = reader::attempts(&scoped)?;
             layers.push(LayerReader { backend: scoped, identity, keys: overlay_records.keys, attempts });
         }
