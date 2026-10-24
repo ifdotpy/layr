@@ -56,6 +56,16 @@ cmp_out "rev-parse HEAD:a.txt (a blob)" rev-parse HEAD:a.txt
 cmp_out "rev-parse HEAD: (the root tree)" rev-parse HEAD:
 cmp_out "rev-parse HEAD~1:gone.txt (a path of an older state)" rev-parse HEAD~1:gone.txt
 eq "rev-parse HEAD:gone.txt (a missing path) fails like git" "$(cd $G && git rev-parse HEAD:gone.txt 2>&1 >/dev/null)" "$(cd $Lw && l rev-parse HEAD:gone.txt 2>&1 >/dev/null)"
+# An edit of the same size in the same second still reaches the exported tree: the exported
+# index of the parent state has stat data for the file. Each round tries to stay in one second.
+cd $Lw; stale=0
+for i in $(seq 1 20); do
+    printf "a$i" > racy.txt; l add racy.txt; l commit -qm "racy a$i"; l rev-parse 'HEAD^{tree}' >/dev/null
+    printf "b$i" > racy.txt; l commit -qam "racy b$i"
+    [ "$(l rev-parse HEAD:racy.txt)" = "$(printf "b$i" | git hash-object --stdin)" ] || stale=$((stale + 1))
+done
+eq "same-size edits in the same second are exported" 0 $stale
+l reset --hard HEAD~40 >/dev/null
 for root in $G $Lw; do cd $root; printf 'trailing   \n' >> a.txt; done
 cmp_out "diff --check" diff --check
 finish
