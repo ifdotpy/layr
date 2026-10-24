@@ -20,7 +20,7 @@ pub fn refs(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 outln!(ctx, "{}", serde_json::to_string(&refs)?);
             } else {
                 for r in refs {
-                    outln!(ctx, "{}\t{}{}", r.name, r.target, r.expires_at.map(|t| format!("\texpires {t}")).unwrap_or_default());
+                    outln!(ctx, "{}\t{}{}", r.name, shown(&r.target), r.expires_at.map(|t| format!("\texpires {t}")).unwrap_or_default());
                 }
             }
         }
@@ -32,7 +32,7 @@ pub fn refs(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 let mut n = 0;
                 for e in entries {
                     if let Some(value) = e.after {
-                        outln!(ctx, "{}@{{{n}}}\t{}", e.name, value.target);
+                        outln!(ctx, "{}@{{{n}}}\t{}", e.name, shown(&value.target));
                         n += 1;
                     } else {
                         outln!(ctx, "{}\tdeleted", e.name);
@@ -93,7 +93,7 @@ pub fn refs(ctx: &Ctx, args: &[String]) -> Result<i32> {
             if a.has("--json") {
                 outln!(ctx, "{}", serde_json::to_string(&change)?);
             } else if let Some(r) = change.after {
-                outln!(ctx, "{}\t{}", r.name, r.target);
+                outln!(ctx, "{}\t{}", r.name, shown(&r.target));
             } else {
                 outln!(ctx, "deleted {name}");
             }
@@ -182,4 +182,10 @@ pub fn authorize_update(
         }
     }
     Ok(())
+}
+
+/// A state id as people read it (the short form); other targets as they are. --json keeps full ids.
+fn shown(target: &str) -> String {
+    let d = ids::display(target);
+    if d.len() > 7 && d != target { d[..7].to_string() } else { target.to_string() }
 }
