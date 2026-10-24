@@ -53,6 +53,7 @@ l try -q "$V1" --check smoke
 l approve -q "$V1"
 printf 'version two\n' >> feature.txt
 l save -qam feature-v2 --amend
+V2=$(state_id head)
 
 cd ../main
 printf 'main only\n' > main.txt
@@ -66,9 +67,10 @@ eq 'the change has exactly three versions' 3 "$(l change show "$CHANGE" --json |
 l try -q "$V3" --check smoke
 l approve -q "$V3"
 
-# Retention gap: push omits earlier change versions. The records task will send all versions.
-# Export each version and its own parent directly from real CLI-created state snapshots.
-# These are file inputs (modes and bytes), never CLI diff answers. No ref pins are added.
+# Push sends all present commit states, so v1 and v2 are in the pushed store.
+# The local snapshot export is an independent second input for the CLI JSON twin.
+# Export each version and its own parent from real CLI-created snapshots (modes and bytes).
+# These are file inputs, never CLI diff answers. No ref pins are added.
 l change show "$CHANGE" --json > "$T/versions.json"
 python3 - "$LAYR_ROOT/projects/model-golden/states" "$T/versions.json" "$T/model/interdiff-input.json" <<'PYTREES'
 import json, os, stat, sys
@@ -199,6 +201,13 @@ printf '{"merge":%s,"ref":%s}\n' "$MERGE_ALLOWED" "$REF_ALLOWED" > "$T/cli/merge
 
 l remote add store "file://$T/archive" --paper-key-out "$T/paper" >/dev/null
 l push store -q
+ok 'the pushed store has encrypted trees for v1 and v2' python3 - "$T/archive" "$V1" "$V2" <<'PYPRIOR'
+import sys
+from pathlib import Path
+store = Path(sys.argv[1])
+for state in sys.argv[2:]:
+    assert any((store / 'states' / state).glob('*.tree.age')), state
+PYPRIOR
 
 # Only selectors cross into the model example. No CLI answers enter its input.
 python3 - "$T/model/request.json" "$CHANGE" "$V3" "$PROBE_BASE" "$PROBE_HEAD" "$MERGE_SOURCE" "$MERGE_CANDIDATE" <<'PY'
