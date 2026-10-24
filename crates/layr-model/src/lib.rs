@@ -7,8 +7,11 @@
 #![forbid(unsafe_code)]
 
 pub mod authority;
+pub mod diff;
+pub mod interdiff;
 pub mod policy;
 pub mod probes;
+pub mod protection;
 pub mod types;
 pub mod validation;
 

@@ -1448,6 +1448,7 @@ dependencies = [
  "layr-store",
  "serde",
  "serde_json",
+ "sha1",
  "sha2 0.10.9",
  "similar",
  "toml 0.8.23",

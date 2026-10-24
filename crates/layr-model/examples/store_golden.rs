@@ -20,6 +20,8 @@ struct Request {
     attestation_state: String,
     probe_base: String,
     probe_head: String,
+    merge_source: String,
+    merge_candidate: String,
 }
 
 type Objects = BTreeMap<String, Vec<u8>>;
@@ -261,6 +263,32 @@ fn overlays(
             }
             let paths: BTreeSet<_> =
                 overlay.line_list().iter().filter_map(|l| files.get(&l.head)).flat_map(|f| f.keys().cloned()).collect();
+            row["history"] = json!(records);
+            row["epochs"] = json!(records
+                .iter()
+                .filter(|r| r.op == "overlay.key")
+                .map(|r| {
+                    let mut epoch = json!({"id":r.data["epoch"],"time":r.time,"machine":r.machine});
+                    if let Some(reason) = r.data.get("reason") {
+                        epoch["reason"] = reason.clone();
+                    }
+                    epoch
+                })
+                .collect::<Vec<_>>());
+            row["reader_details"] = json!(readers.iter().map(|principal| json!({"principal":principal})).collect::<Vec<_>>());
+            row["files"] = json!(overlay
+                .line_list()
+                .iter()
+                .flat_map(|line| files.get(&line.head).into_iter().flat_map(move |files| files.iter().map(
+                    move |(path, bytes)| {
+                        let mut value = json!({"state":line.head,"path":path,"size":bytes.len()});
+                        if let Some(text) = text(bytes, 64 << 10) {
+                            value["text"] = json!(text);
+                        }
+                        value
+                    }
+                )))
+                .collect::<Vec<_>>());
             row["paths"] = json!(paths);
         }
         result.push(row);
@@ -373,24 +401,23 @@ fn page_outputs(
     write(out, "bisect", Vec::<Value>::new())?;
     let mut trees = Vec::new();
     let mut contents = Vec::new();
-    for line in &lines {
-        let tree = metadata.get(&line.head).context("line head has no verified tree")?;
+    for (state, tree) in metadata {
         let mut directories = BTreeMap::<String, BTreeMap<String, Value>>::from([(String::new(), BTreeMap::new())]);
         for (path, entry) in &tree.files {
             let components: Vec<_> = path.split('/').collect();
             for i in 1..components.len() {
                 let parent = components[..i - 1].join("/");
                 let directory = components[..i].join("/");
-                directories.entry(parent).or_default().insert(
-                    directory.clone(),
-                    json!({"path":directory,"name":components[i-1],"kind":"directory","state":line.head}),
-                );
+                directories
+                    .entry(parent)
+                    .or_default()
+                    .insert(directory.clone(), json!({"path":directory,"name":components[i-1],"kind":"directory","state":state}));
                 directories.entry(directory).or_default();
             }
             let parent = components[..components.len() - 1].join("/");
-            let mut item = json!({"path":path,"name":components.last(),"kind":if entry.0 == "120000" { "symlink" } else { "file" },"size":entry.1,"mode":entry.0,"state":line.head});
-            let bytes = &files[&line.head][path];
-            let mut file = json!({"state":line.head,"path":path,"size":entry.1});
+            let mut item = json!({"path":path,"name":components.last(),"kind":if entry.0 == "120000" { "symlink" } else { "file" },"size":entry.1,"mode":entry.0,"state":state});
+            let bytes = &files[state][path];
+            let mut file = json!({"state":state,"path":path,"size":entry.1});
             if let Some(text) = text(bytes, 64 << 10) {
                 item["text"] = json!(text);
                 file["text"] = json!(text);
@@ -399,9 +426,7 @@ fn page_outputs(
             contents.push(file);
         }
         for (path, entries) in directories {
-            trees.push(
-                json!({"state":line.head,"line":line.name,"path":path,"entries":entries.into_values().collect::<Vec<_>>()}),
-            );
+            trees.push(json!({"state":state,"path":path,"entries":entries.into_values().collect::<Vec<_>>()}));
         }
     }
     write(out, "trees", trees)?;
@@ -547,6 +572,56 @@ fn main() -> Result<()> {
     write(&args[2], "attestations", project.attestations(&request.attestation_state, None))?;
     write(&args[2], "operations", project.op_log(Some(&line.id), 30))?;
     write(&args[2], "probe-diff", probes::diff(project, &subject(request.probe_base), &subject(request.probe_head), &context)?)?;
+    let mut merge_context = layr_model::protection::Context {
+        now,
+        actor: Some(layr_model::policy::Who { uid: 0, groups: vec![] }),
+        approver_groups: BTreeMap::new(),
+        changed_paths: vec![],
+        candidate: None,
+    };
+    let change_head = project.change_versions(&request.change).last().context("change has no head")?.id.clone();
+    write(&args[2], "merge_status", project.merge_status(&change_head, "main", &merge_context)?)?;
+    let mut browser_context = merge_context.clone();
+    browser_context.actor = None;
+    let paths = |base: &str, head: &str| -> Vec<String> {
+        let before = source.metadata.get(base);
+        let after = source.metadata.get(head);
+        let names: BTreeSet<_> =
+            before.into_iter().flat_map(|t| t.files.keys()).chain(after.into_iter().flat_map(|t| t.files.keys())).collect();
+        names
+            .into_iter()
+            .filter(|path| before.and_then(|t| t.files.get(*path)) != after.and_then(|t| t.files.get(*path)))
+            .cloned()
+            .collect()
+    };
+    let browser: Vec<_> = project
+        .changes()
+        .iter()
+        .filter_map(|id| project.change_versions(id).last().cloned())
+        .map(|state| {
+            browser_context.changed_paths = paths(&line.head, &state.id);
+            project.merge_status(&state.id, "main", &browser_context)
+        })
+        .collect::<Result<_>>()?;
+    write(&args[2], "merge_status_browser", &browser)?;
+    write(&args[2], "merge-status", &browser)?;
+    let input: Vec<layr_model::interdiff::Version> = serde_json::from_slice(&fs::read(args[2].join("interdiff-input.json"))?)?;
+    ensure!(input.len() == 3, "interdiff requires three real change versions");
+    for version in &input {
+        ensure!(
+            serde_json::to_value(project.state(&version.state.id))? == serde_json::to_value(&version.state)?,
+            "interdiff state differs from its signed record"
+        );
+    }
+    write(&args[2], "interdiff", layr_model::interdiff::from_trees(&request.change, "v1", "v2", &input[0], &input[1]))?;
+    write(&args[2], "interdiff-replay", layr_model::interdiff::from_trees(&request.change, "v2", "v3", &input[1], &input[2]))?;
+    merge_context.candidate = Some(request.merge_candidate.clone());
+    merge_context.changed_paths = paths(&line.head, &request.merge_candidate);
+    let merge = project.merge_status(&request.merge_source, "main", &merge_context)?;
+    merge_context.candidate = None;
+    let reference = project.merge_status(&request.attestation_state, &request.reference, &merge_context)?;
+    write(&args[2], "merge-refusals", json!({"merge":merge.allowed,"ref":reference.allowed}))?;
+    write(&args[2], "merge-refusal-details", json!({"merge":merge,"ref":reference}))?;
     page_outputs(&args[2], &model, project, &source.metadata, &files, &overlay_files, &request.change, &context, &authorities)?;
     if project.line_list().len() != 2 {
         bail!("fixture must have two lines");

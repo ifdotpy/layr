@@ -193,3 +193,74 @@ fn legacy_evidence_keeps_the_change_id_at_its_first_derivation() {
     // Db::derive_attestation updates only the local flag on a duplicate attestation.
     assert_eq!(p.attestations("s1", Some("approval"))[0].change_id, None);
 }
+
+#[test]
+fn protection_preserves_distinct_ref_and_merge_author_rules() {
+    let mut save = record(1, "commit");
+    let mut s = state("s", StateKind::Commit, &[]);
+    s.author.uid = 10;
+    save.states.push(s.clone());
+    let lookup = |id: &str| -> anyhow::Result<Option<StateRec>> { Ok((id == "s").then(|| s.clone())) };
+    assert!(protection::approvals("s", Some("s"), protection::ApprovalMode::Ref, &[(10, 1)], lookup, |_| true)
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        protection::approvals("s", Some("s"), protection::ApprovalMode::Merge, &[(10, 1)], lookup, |_| true).unwrap().len(),
+        1
+    );
+    assert!(protection::approvals("s", None, protection::ApprovalMode::Merge, &[(11, 1)], lookup, |_| false).unwrap().is_empty());
+}
+#[test]
+fn protection_checks_and_paths_use_exact_requirements() {
+    assert_eq!(protection::check_argv("true"), ["sh", "-c", "true"]);
+    assert_eq!(protection::required_check("gate", Some("true"), true, Some(9)).result, protection::CheckResult::Passed);
+    assert_eq!(protection::required_check("gate", Some("true"), false, Some(9)).result, protection::CheckResult::Failed);
+    assert_eq!(protection::required_check("gate", None, false, None).result, protection::CheckResult::Undefined);
+    let requirements = protection::path_requirements(["a", "b"], policy::Role::Writer, |path| {
+        if path == "a" {
+            policy::Role::Maintainer
+        } else {
+            policy::Role::Writer
+        }
+    });
+    assert_eq!(requirements[0].met, Some(false));
+    assert_eq!(requirements[1].met, Some(true));
+}
+
+#[test]
+fn merge_status_selects_target_machine_and_keeps_unknown_actor_and_groups_undecided() {
+    let mut init = record(1, "project");
+    init.states = vec![state("root", StateKind::Commit, &[]), state("source", StateKind::Commit, &["root"])];
+    for s in &mut init.states {
+        s.author.uid = 10;
+    }
+    init.lines.insert("line".into(), line("root", "a"));
+    init.data = json!({"config":{"access":{"user:0":"admin","user:11":"reader"},"protect":{"main":{"update":"writer","check":["gate"],"approvals":1,"approvers":["group:20"],"paths":{"secret":"admin"}}},"check.gate":"true"}});
+    let mut approve = record(2, "approve");
+    approve.actor.uid = 11;
+    approve.data = json!({"state":"source"});
+    let mut check = record(3, "check");
+    check.data = json!({"state":"source","argv":["sh","-c","true"],"exit":0});
+    let project = Project::from_records("project", vec![init, approve, check], "").unwrap();
+    let mut context = protection::Context {
+        now: 10,
+        actor: None,
+        approver_groups: BTreeMap::new(),
+        changed_paths: vec!["secret".into()],
+        candidate: None,
+    };
+    let summary = project.merge_status("source", "main", &context).unwrap();
+    assert_eq!(summary.target_machine.as_deref(), Some("a"));
+    assert_eq!(summary.allowed, None);
+    assert_eq!(summary.status, "not_decided");
+    assert_eq!(summary.path_requirements[0].met, None);
+    assert_eq!(summary.approvals[0].met, None);
+    assert_eq!(summary.checks[0].result, protection::CheckResult::Passed);
+    assert!(summary.undecided_reasons.iter().any(|s| s.contains("membership not known here")));
+    context.actor = Some(policy::Who { uid: 0, groups: vec![] });
+    context.approver_groups.insert(11, vec![20]);
+    assert_eq!(project.merge_status("source", "main", &context).unwrap().allowed, Some(true));
+    let unknown = project.merge_status("source", "absent", &context).unwrap();
+    assert_eq!(unknown.status, "unavailable");
+    assert_eq!(unknown.allowed, None);
+}

@@ -151,3 +151,7 @@ A `.git` folder that the line owner made instead is left alone.
 
 `layr line list --json` writes an array of local lines. Each line includes its ID, name, head, owner, machine, and local path.
 A name pattern filters the array. JSON output does not support `--all` or `--remotes`.
+
+`layr change diff <id> --from vN --to vM --json` writes the change ID, version labels, and interdiff text.
+The `files` array gives each changed file patch, its status, and added and removed line counts.
+Each version is compared with its own first parent. Changes to the base stay out of the interdiff.

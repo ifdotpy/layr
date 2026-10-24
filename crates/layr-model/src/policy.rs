@@ -117,7 +117,7 @@ fn role_or(s: &Option<String>, default: Role) -> Role {
 }
 
 impl RuleSpec {
-    fn rule(&self) -> Rule {
+    pub fn rule(&self) -> Rule {
         Rule {
             update: role_or(&self.update, Role::Maintainer),
             expect: self.expect.unwrap_or(true),

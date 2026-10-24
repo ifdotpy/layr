@@ -66,6 +66,42 @@ eq 'the change has exactly three versions' 3 "$(l change show "$CHANGE" --json |
 l try -q "$V3" --check smoke
 l approve -q "$V3"
 
+# Retention gap: push omits earlier change versions. The records task will send all versions.
+# Export each version and its own parent directly from real CLI-created state snapshots.
+# These are file inputs (modes and bytes), never CLI diff answers. No ref pins are added.
+l change show "$CHANGE" --json > "$T/versions.json"
+python3 - "$LAYR_ROOT/projects/model-golden/states" "$T/versions.json" "$T/model/interdiff-input.json" <<'PYTREES'
+import json, os, stat, sys
+from pathlib import Path
+root, versions, output = map(Path, sys.argv[1:])
+def tree(state):
+    if state is None:
+        return {}
+    source = root / state
+    assert source.is_dir(), source
+    result = {}
+    for folder, dirs, files in os.walk(source, followlinks=False):
+        for name in sorted(dirs + files):
+            path = Path(folder) / name
+            meta = path.lstat()
+            if stat.S_ISLNK(meta.st_mode):
+                data, mode = os.fsencode(os.readlink(path)), 0o120000
+            elif stat.S_ISREG(meta.st_mode):
+                data = path.read_bytes()
+                mode = 0o100755 if meta.st_mode & 0o111 else 0o100644
+            else:
+                continue
+            result[str(path.relative_to(source))] = {'mode': mode, 'bytes': list(data)}
+    return result
+rows = []
+for version in json.loads(versions.read_text())['versions']:
+    state = version['state']
+    rows.append({'state': state, 'parent': tree(next(iter(state['parents']), None)), 'tree': tree(state['id'])})
+output.write_text(json.dumps(rows))
+PYTREES
+l change diff "$CHANGE" --from v1 --to v2 --json > "$T/cli/interdiff.json"
+l change diff "$CHANGE" --from v2 --to v3 --json > "$T/cli/interdiff-replay.json"
+
 cd ../main
 printf 'main after replay\n' > divergence.txt
 l add divergence.txt
@@ -139,16 +175,39 @@ l overlay move secrets private.txt -q
 l save -qm overlay-state
 has 'the overlay has its reader' nobody "$(l overlay readers secrets)"
 
+# Stored policy evidence must predict the same refusals as the CLI.
+l config check.smoke '"false"'
+if l ref set env/prod "$V3" --expect "$V3" > "$T/ref-refusal.log" 2>&1; then
+    REF_ALLOWED=true
+else
+    REF_ALLOWED=false
+fi
+has 'the ref refusal requires the exact configured check' "needs a passing check 'smoke'" "$(cat "$T/ref-refusal.log")"
+l config check.denymerge '"false"'
+l protect main --check denymerge --path feature.txt=maintainer
+MERGE_SOURCE=$(state_id feature)
+MERGE_BEFORE=$(state_id head)
+if l merge feature -q > "$T/merge-refusal.log" 2>&1; then
+    MERGE_ALLOWED=true
+else
+    MERGE_ALLOWED=false
+fi
+has 'the merge refusal reports its required check' "check 'denymerge' failed" "$(cat "$T/merge-refusal.log")"
+eq 'a refused merge keeps the target head' "$MERGE_BEFORE" "$(state_id head)"
+MERGE_CANDIDATE=$(l op log --all -n 100000 --json | python3 -c 'import json,sys; rows=[json.loads(line) for line in sys.stdin]; print(next(r["states"][0]["id"] for r in rows if r["op"]=="merge.candidate" and r["data"]["theirs"]==sys.argv[1]))' "$MERGE_SOURCE")
+printf '{"merge":%s,"ref":%s}\n' "$MERGE_ALLOWED" "$REF_ALLOWED" > "$T/cli/merge-refusals.json"
+
 l remote add store "file://$T/archive" --paper-key-out "$T/paper" >/dev/null
 l push store -q
 
 # Only selectors cross into the model example. No CLI answers enter its input.
-python3 - "$T/model/request.json" "$CHANGE" "$V3" "$PROBE_BASE" "$PROBE_HEAD" <<'PY'
+python3 - "$T/model/request.json" "$CHANGE" "$V3" "$PROBE_BASE" "$PROBE_HEAD" "$MERGE_SOURCE" "$MERGE_CANDIDATE" <<'PY'
 import json, sys
 from pathlib import Path
 Path(sys.argv[1]).write_text(json.dumps({
     'line': 'main', 'change': sys.argv[2], 'ref': 'env/prod',
     'attestation_state': sys.argv[3], 'probe_base': sys.argv[4], 'probe_head': sys.argv[5],
+    'merge_source': sys.argv[6], 'merge_candidate': sys.argv[7],
 }))
 PY
 l line list --json > "$T/cli/lines.json"
@@ -219,6 +278,14 @@ assert 'time' not in copy and 'machines' not in copy
 machine = load('machines')[0]
 assert machine['trusted'] and machine['fingerprint'].startswith('sha256:') and len(machine['fingerprint']) == 71
 assert load('bisect') == []
+assert load('merge_status')['state'] and load('merge_status')['already_in_target']
+browser = load('merge_status_browser')
+assert browser and all(row['target_machine'] and row['allowed'] is None and row['status'] == 'not_decided' for row in browser)
+assert all(row['undecided_reasons'] for row in browser)
+assert load('merge-status') == browser
+assert load('interdiff')['files'] and '+version two' in load('interdiff')['diff']
+assert load('interdiff-replay')['diff'] == '' and load('interdiff-replay')['files'] == []
+assert load('merge-refusals') == {'merge': False, 'ref': False}
 assert len(load('changes')) == project['counts']['changes']
 assert len(load('operations-all')) == project['counts']['operations']
 PYPAGES
@@ -241,7 +308,7 @@ import difflib, json, sys
 from pathlib import Path
 
 cli, model, counts = map(Path, sys.argv[1:])
-names = ('lines', 'log', 'log-auto', 'change', 'refs', 'ref-log', 'queue', 'attestations', 'operations', 'probe-diff')
+names = ('lines', 'log', 'log-auto', 'change', 'refs', 'ref-log', 'queue', 'attestations', 'operations', 'probe-diff', 'merge-refusals', 'interdiff', 'interdiff-replay')
 passed = failed = 0
 for name in names:
     try:

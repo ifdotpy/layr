@@ -253,8 +253,10 @@ fn check_paths(ctx: &Ctx, repo: &Repo, line: &Line, rule: Option<&crate::access:
     let role = repo.policy().role(&Repo::who(ctx));
     for c in changes::file_changes(&repo.state_root(head)?, &repo.state_root(result)?)? {
         for p in [Some(c.path.clone()), c.old_path.clone()].into_iter().flatten() {
-            let need = rule.role_for_path(&p);
-            if role < need {
+            let requirement =
+                layr_model::protection::path_requirements([p.as_str()], role, |path| rule.role_for_path(path)).remove(0);
+            let need = requirement.role;
+            if requirement.met != Some(true) {
                 return Err(exit(
                     1,
                     format!(
@@ -286,24 +288,14 @@ fn check_approvals(
         _ => return Ok(()),
     };
     let pol = repo.policy();
-    let have: std::collections::BTreeSet<String> = repo.ancestors(head)?.into_iter().collect();
-    let mut authors = std::collections::BTreeSet::new();
-    for s in repo.ancestors(theirs)? {
-        if !have.contains(&s) {
-            if let Some(r) = repo.p.db.state(&s)? {
-                authors.insert(r.author.uid);
-            }
-        }
-    }
-    let counted: Vec<u32> = repo
-        .p
-        .db
-        .approvals(theirs)?
-        .into_iter()
-        .map(|(u, _)| u)
-        .filter(|u| !authors.contains(u))
-        .filter(|u| pol.may_approve(rule, &crate::access::Who::of(*u, crate::ctx::Caller::from_uid(*u).gid)))
-        .collect();
+    let counted = layr_model::protection::approvals(
+        theirs,
+        Some(head),
+        layr_model::protection::ApprovalMode::Merge,
+        &repo.p.db.approvals(theirs)?,
+        |id| repo.p.db.state(id),
+        |uid| pol.may_approve(rule, &crate::access::Who::of(uid, crate::ctx::Caller::from_uid(uid).gid)),
+    )?;
     if (counted.len() as u32) < rule.approvals {
         let from: Vec<String> = rule.approvers.iter().map(|k| crate::access::show_principal(k)).collect();
         return Err(exit(
@@ -347,8 +339,14 @@ fn run_line_checks(
                     ),
                 )
             })?;
-        let argv = vec!["sh".to_string(), "-c".to_string(), cmd.clone()];
-        if repo.p.db.check_exit(candidate, &argv, Some(0))?.is_some() {
+        let argv = layr_model::protection::check_argv(&cmd);
+        let evidence = layr_model::protection::required_check(
+            name,
+            Some(&cmd),
+            repo.p.db.check_exit(candidate, &argv, Some(0))?.is_some(),
+            None,
+        );
+        if evidence.result == layr_model::protection::CheckResult::Passed {
             continue;
         }
         let code = super::admin::run_check(ctx, repo, candidate, &argv, &cmd, quiet)?;
