@@ -162,8 +162,9 @@ impl Browse {
             let kind = if state.kind == crate::model::StateKind::Auto { "auto" } else { "state" };
             let mut files: BTreeMap<_, _> =
                 tree.files.into_iter().map(|(path, inner)| (path, Entry { inner, layer: None })).collect();
-            // Stack settings are per machine. Use the stack of the selected line head's machine.
-            let stack = db.config(&format!("stack.{}@{}", line.id, machine))?.or(db.config(&format!("stack.{}", line.id))?);
+            // An overlay-only save can move the stack without making a new shared state.
+            let stack_machine = if state.id == line.head { &line.machine } else { &machine };
+            let stack = db.config(&format!("stack.{}@{}", line.id, stack_machine))?.or(db.config(&format!("stack.{}", line.id))?);
             let stack: Vec<crate::overlay::Layer> = stack.map(serde_json::from_value).transpose()?.unwrap_or_default();
             for layer in stack {
                 let Some(&index) = layer_names.get(&layer.overlay) else { continue };

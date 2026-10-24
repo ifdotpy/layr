@@ -315,9 +315,9 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
                 report.omitted.push(format!("overlay {name}: no paper slot; run once with LAYR_PAPER_KEY_FILE to add it"));
             }
         }
-        // The public object contains the exact signed record, never an identity.
-        store.backend.put_new(&published.object(), published.line.as_bytes().to_vec())?;
         merge(report, writer::push_locked(&scoped, ctx, &orepo, opts)?, &name);
+        // Publish the key after its epoch is complete. It contains the exact signed record, never an identity.
+        store.backend.put_new(&published.object(), published.line.as_bytes().to_vec())?;
     }
     Ok(())
 }

@@ -176,6 +176,7 @@ The optional `revocation` UUID forces a new epoch after removal, even if a reade
 The reader verifies the record against a trusted parent machine key.
 The encrypted overlay log must contain the same key record.
 Each epoch contains the complete record log and selected states, with no reference to objects in earlier epochs.
+The writer publishes slots first, epoch objects next and the public key record last.
 Reader removal creates a new epoch. Every object uses conditional create.
 Person slot fingerprints use the existing v2 person rule.
 The optional `paper_recipient` in the local store pin is public. It contains no secret.

@@ -136,6 +136,7 @@ run(['--project','project','remote','add','archive','file://'+str(root/'archive'
 run(['--project','project','push','archive','-q'],D)
 check(not (epoch/f"slots/machine-{d['id']}.age").exists(),'a write-only push adds no slot for its own machine')
 check(len(list((epoch/'states').glob('*/*.tree.age')))>=3,'a write-only machine publishes encrypted overlay states')
+check(mount_read(B,'/main/.env')==(200,b'PRIVATE_TEST_VALUE=write-only-machine\n'),'mount uses the newest overlay-only line update')
 # Removal produces a new key, fresh objects and slots for the remaining readers only.
 old=hashes()
 run(['--line','main','overlay','readers','secrets',f"machine:{a['id']}"])
