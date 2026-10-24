@@ -19,6 +19,12 @@ B() { env LAYR_ROOT="$BR" "$LAYR" --project x --line main "$@"; }
 transport=(env LAYR_ROOT="$BR" "$LAYR" serve-peer x)
 
 ok "add a named peer" l remote add peer ssh://test/x
+l remote list --json > "$T/before-transfer.json"
+ok "a configured remote has no completed transfer" python3 - "$T/before-transfer.json" <<'CHECK'
+import json,sys
+copy=json.load(open(sys.argv[1]))['copies'][0]
+assert 'last' not in copy and 'time' not in copy
+CHECK
 no "reject a duplicate remote" l remote add peer ssh://test/x
 has "Git URL needs the Git command" "layr git remote" "$(l remote add bad /tmp/repo.git 2>&1 || true)"
 no "reject a host that starts with an option" l remote add bad ssh://-oCommand/x
@@ -53,6 +59,29 @@ ok "push receives no records or states" python3 - "$T/push.json" <<'PY'
 import json,sys
 d=json.load(open(sys.argv[1])); assert d['records_received']==0 and d['states_received']==0
 PY
+l op log --json > "$T/push-ops.jsonl"
+ok "the normal op log shows the completed push" python3 - "$T/push-ops.jsonl" "$T/push.json" <<'CHECK'
+import json,sys
+r=next(r for r in map(json.loads,open(sys.argv[1])) if r['op']=='push')
+d=r['data']; actual=json.load(open(sys.argv[2]))
+assert d['remote']=='peer' and d['url']=='ssh://test/x' and d['result']=='success'
+assert d['states_sent']==len(d['state_ids_sent'])==actual['states_sent']
+assert d['records_sent']==actual['records_sent'] and d['bytes_sent']==actual['bytes_sent']
+assert d['states_received']==d['bytes_received']==0
+assert r['actor']['name'] and r['machine'] and r['time']
+CHECK
+l remote list --json > "$T/push-copies.json"
+ok "the remote copy reports its completed push" python3 - "$T/push-copies.json" <<'CHECK'
+import json,sys
+copy=next(c for c in json.load(open(sys.argv[1]))['copies'] if c['name']=='peer')
+assert copy['last']['direction']=='push' and copy['machine']==copy['last']['machine']
+CHECK
+no "a failed peer command is refused" l push peer --command -- false
+l op log --all -n 100000 --json > "$T/failed-ops.jsonl"
+ok "a failed push creates no success record" python3 - "$T/failed-ops.jsonl" <<'CHECK'
+import json,sys
+assert len([r for r in map(json.loads,open(sys.argv[1])) if r['op']=='push'])==1
+CHECK
 B adopt main >/dev/null
 cd "$BR/projects/x/lines/main"
 echo peer > peer.txt
@@ -153,6 +182,15 @@ l sync peer --json --command -- "${transport[@]}" > "$T/repeat-sync.json"
 ok "sync after recovery succeeds and transfers no states" python3 - "$T/repeat-sync.json" <<'CHECK'
 import json,sys
 d=json.load(open(sys.argv[1])); assert d['states_sent']==0 and d['states_received']==0
+CHECK
+l op log --json > "$T/sync-ops.jsonl"
+ok "the normal op log shows completed sync results" python3 - "$T/sync-ops.jsonl" <<'CHECK'
+import json,sys
+rows=[r for r in map(json.loads,open(sys.argv[1])) if r['op']=='sync']
+assert rows and all(r['data']['result']=='success' for r in rows)
+assert all(r['data']['states_received']==len(r['data']['state_ids_received']) for r in rows)
+assert all(r['data']['states_sent']==len(r['data']['state_ids_sent']) for r in rows)
+assert any(r['data']['bytes_received']>0 for r in rows)
 CHECK
 l reindex >/dev/null
 eq "reindex keeps the recovered snapshot readable" retained "$(l show "$retained:retained.txt")"

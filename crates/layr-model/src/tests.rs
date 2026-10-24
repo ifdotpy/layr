@@ -1,7 +1,7 @@
 use super::*;
 use serde_json::json;
 
-fn record(seq: u64, op: &str) -> Record {
+pub(super) fn record(seq: u64, op: &str) -> Record {
     let mut r = Record::new(op);
     r.id = format!("record-{seq}");
     r.project = "project".into();
@@ -11,7 +11,7 @@ fn record(seq: u64, op: &str) -> Record {
     r.actor.uid = 10;
     r
 }
-fn state(id: &str, kind: StateKind, parents: &[&str]) -> StateRec {
+pub(super) fn state(id: &str, kind: StateKind, parents: &[&str]) -> StateRec {
     StateRec {
         id: id.into(),
         kind,
@@ -40,7 +40,7 @@ fn line(head: &str, machine: &str) -> LineChange {
         working_after: None,
     }
 }
-fn fold(records: Vec<Record>) -> Project {
+pub(super) fn fold(records: Vec<Record>) -> Project {
     Project::from_records("project", records, "a").unwrap()
 }
 

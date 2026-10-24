@@ -192,6 +192,57 @@ pub fn validate(r: &Record) -> anyhow::Result<()> {
             }
         }
     }
+    if matches!(r.op.as_str(), "push" | "sync") {
+        let transfer: crate::operations::Transfer = serde_json::from_value(d.clone())?;
+        if d["result"] != "success" || transfer.direction != r.op {
+            bail!("invalid completed transfer result or direction");
+        }
+        let url = d["url"].as_str().ok_or_else(|| anyhow::anyhow!("transfer URL missing"))?;
+        if url.is_empty() || crate::operations::public_url(url) != url || url.chars().any(char::is_control) {
+            bail!("transfer URL must omit credentials, query and fragment");
+        }
+        check_name("remote", d["remote"].as_str().unwrap_or(""))?;
+        for (ids, count) in
+            [(&transfer.state_ids_sent, transfer.states_sent), (&transfer.state_ids_received, transfer.states_received)]
+        {
+            if ids.len() != count || ids.iter().collect::<std::collections::BTreeSet<_>>().len() != count {
+                bail!("transfer state count differs from its state ids");
+            }
+            for id in ids {
+                uuid("transferred state", id)?;
+            }
+        }
+        if r.op == "push" && (transfer.records_received != 0 || transfer.states_received != 0 || transfer.bytes_received != 0) {
+            bail!("push cannot receive data");
+        }
+    }
+    if let Some(version) = d.get("version") {
+        let version: crate::operations::VersionOperation = serde_json::from_value(version.clone())?;
+        uuid("version state", &version.state)?;
+        uuid("version source", &version.source)?;
+        uuid("version target head", &version.target_head)?;
+        if let Some(line) = &version.target_line {
+            uuid("version target line", line)?;
+        }
+        if !matches!(version.kind.as_str(), "amend" | "replay" | "pick") || !r.states.iter().any(|s| s.id == version.state) {
+            bail!("invalid version kind or state");
+        }
+    }
+    if r.op == "bisect.run" {
+        for key in ["good", "bad", "first_bad"] {
+            uuid(key, d[key].as_str().unwrap_or(""))?;
+        }
+        let argv: Vec<String> = serde_json::from_value(d["argv"].clone())?;
+        if argv.is_empty() || d["first_bad"] != d["state"] || d["good"] == d["bad"] {
+            bail!("invalid bisect command or bounds");
+        }
+        for step in d["steps"].as_array().ok_or_else(|| anyhow::anyhow!("bisect steps missing"))? {
+            uuid("bisect step", step["state"].as_str().unwrap_or(""))?;
+            if step["exit"].as_i64().and_then(|v| i32::try_from(v).ok()).is_none() || !step["reused"].is_boolean() {
+                bail!("invalid bisect check result");
+            }
+        }
+    }
     if r.op == "view.save" {
         let view: View =
             serde_json::from_value(d.get("view").cloned().ok_or_else(|| anyhow::anyhow!("view.save has no descriptor"))?)?;

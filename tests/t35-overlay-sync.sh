@@ -6,7 +6,7 @@ for machine_root in b c d e f; do new_fs "$T/$machine_root" 2G; done
 for u in layr-ov-reader layr-ov-other; do id "$u" >/dev/null 2>&1 || useradd -m "$u"; done
 export OVERLAY_TEST_ROOT="$T" OVERLAY_TEST_BINARY="$LAYR"
 python3 - <<'PY'
-import hashlib,http.client,json,os,pathlib,re,subprocess,time
+import hashlib,http.client,json,os,pathlib,re,sqlite3,subprocess,time
 root=pathlib.Path(os.environ['OVERLAY_TEST_ROOT'])
 binary=os.environ['OVERLAY_TEST_BINARY']
 base=os.environ.copy()
@@ -32,6 +32,15 @@ def check(value,label):
 def hashes():
  return {str(p.relative_to(root/'archive')):hashlib.sha256(p.read_bytes()).hexdigest()
   for p in (root/'archive').rglob('*') if p.is_file()}
+def transfer_records(op,remote):
+ project=pathlib.Path(A['LAYR_ROOT'])/'projects/project'
+ result=[]
+ for folder in [project,project/'meta/overlays/secrets']:
+  db=sqlite3.connect(folder/'meta/db/layr.sqlite')
+  rows=[json.loads(raw)['r'] for raw, in db.execute('select raw from records where op=? order by time desc,seq desc',(op,))]
+  result.append(next(r['data'] for r in rows if r['data']['remote']==remote))
+  db.close()
+ return result
 def machine(env): return json.loads(run(['remote','self','--json'],env).stdout)
 a=machine(A);b=machine(B);c=machine(C);d=machine(D)
 run(['init','project','-q'])
@@ -56,6 +65,9 @@ pin.pop('paper_recipient')
 run(['config','cloud.remote.archive.store',json.dumps(pin)])
 report=json.loads(run(['push','archive','--json']).stdout)
 check('overlay secrets: no paper slot; run once with LAYR_PAPER_KEY_FILE to add it' in report['omitted'],'an older store reports the missing paper slot and continues')
+parent_transfer,overlay_transfer=transfer_records('push','archive')
+check(bool(overlay_transfer['state_ids_sent']) and not set(parent_transfer['state_ids_sent']) & set(overlay_transfer['state_ids_sent']),'store push keeps overlay state IDs in its own operation log')
+check(report['states']==parent_transfer['states_sent']+overlay_transfer['states_sent'],'store push reports parent and overlay state counts separately in their logs')
 run(['push','archive','-q'],dict(A,LAYR_PAPER_KEY_FILE=str(root/'paper')))
 check(json.loads(run(['config','cloud.remote.archive.store']).stdout)['paper_recipient'].startswith('age1'),'one paper-key run records only the public recipient')
 check(not any('private overlay files' in x for x in report['omitted']),'push includes overlay files')
@@ -70,7 +82,9 @@ check((epoch/'slots/paper.age').exists(),'the overlay owner gets a paper slot')
 fp=hashlib.sha256(person['recipient'].encode()).hexdigest()[:16]
 check((epoch/f'slots/person-reader@example.com-{fp}.age').exists(),'the person layer slot uses the v2 fingerprint name')
 before=hashes();run(['push','archive','-q'])
-check(hashes()==before,'a repeated push preserves every existing object')
+after=hashes()
+check(all(after.get(path)==digest for path,digest in before.items()),'a repeated push preserves every existing object')
+check({p for p in after if p.endswith('.tree.age')}=={p for p in before if p.endswith('.tree.age')},'a repeated push adds records without another state tree')
 run(['clone','file://'+str(root/'archive'),'project','-q'],B)
 check((pathlib.Path(B['LAYR_ROOT'])/'projects/project/lines/main/.env').read_text().endswith('private-epoch-one\n'),'B clones the private overlay with its machine slot')
 run(['clone','file://'+str(root/'archive'),'project','-q'],E)
@@ -126,6 +140,9 @@ for who,env in [(b,B),(c,C)]:
  run(['remote','add',name,'ssh://test/project'])
  if who==c: run(['config','overlay.secrets.peers',json.dumps([b['id'],c['id']])])
  run(['sync',name,'--command','--','env','LAYR_ROOT='+env['LAYR_ROOT'],binary,'serve-peer','project'])
+ parent_transfer,overlay_transfer=transfer_records('sync',name)
+ check(not set(parent_transfer['state_ids_sent']+parent_transfer['state_ids_received']) & set(overlay_transfer['state_ids_sent']+overlay_transfer['state_ids_received']),'peer sync keeps overlay state IDs in its own operation log')
+ check(parent_transfer['overlays']==['secrets'] and overlay_transfer['overlay']=='secrets','peer sync records only the overlay name in the parent log')
  check((pathlib.Path(env['LAYR_ROOT'])/'projects/project/meta/overlays/secrets/meta/db/layr.sqlite').exists(),'peer '+who['id'][-8:]+' receives the overlay project')
 # A service on C must refuse the non-reader and permit the local user who reads the overlay.
 import shutil

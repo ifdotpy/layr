@@ -29,3 +29,33 @@ pub fn parse_line(line: &str, key: Option<&VerifyingKey>) -> Result<Signed> {
 pub fn machine_key(rec: &Record) -> Result<VerifyingKey> {
     layr_store::record::machine_key(&serde_json::value::to_raw_value(rec)?)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn operation_payloads_use_the_existing_signature_envelope() {
+        let key = SigningKey::from_bytes(&[19; 32]);
+        for (op, payload) in [
+            ("push", json!({"remote":"store","url":"file:///store","states_sent":2})),
+            ("sync", json!({"remote":"peer","direction":"sync","state_ids_received":["state"]})),
+            (
+                "bisect.run",
+                json!({"good":"good","bad":"bad","first_bad":"middle","steps":[{"state":"middle","exit":1,"reused":true}]}),
+            ),
+            ("rebase.step", json!({"version":{"kind":"replay","target_head":"main-head"}})),
+        ] {
+            let mut record = Record::new(op);
+            record.data = payload;
+            let line = sign_line(&record, &key).unwrap();
+            let parsed = parse_line(&line, Some(&key.verifying_key())).unwrap();
+            assert_eq!(parsed.record.data, record.data);
+            let raw: serde_json::Value = serde_json::from_str(&line).unwrap();
+            let mut changed = raw.clone();
+            changed["r"]["data"]["result"] = json!("changed");
+            assert!(parse_line(&serde_json::to_string(&changed).unwrap(), Some(&key.verifying_key())).is_err());
+        }
+    }
+}

@@ -882,7 +882,17 @@ pub fn commit(ctx: &Ctx, args: &[String]) -> Result<i32> {
         h.repo.discard_states(std::slice::from_ref(&state));
         return Err(e);
     }
-    let rec = h.repo.move_head(ctx, "commit", &line, &state.id, vec![state.clone()], None, serde_json::json!({"line": line.id}));
+    let mut data = serde_json::json!({"line": line.id});
+    if a.has("--amend") {
+        data["version"] = serde_json::to_value(crate::model::VersionOperation {
+            state: state.id.clone(),
+            kind: "amend".into(),
+            source: head.id.clone(),
+            target_line: Some(line.id.clone()),
+            target_head: line.head.clone(),
+        })?;
+    }
+    let rec = h.repo.move_head(ctx, "commit", &line, &state.id, vec![state.clone()], None, data);
     rec?;
     #[cfg(target_os = "macos")]
     if let Some(p) = promotion.take() {

@@ -296,23 +296,6 @@ fn overlays(
     result
 }
 
-fn copies(project: &Project) -> Vec<Value> {
-    let mut result = Vec::new();
-    for (key, url) in &project.config {
-        let Some(url) = url.as_str() else { continue };
-        let (key, scope) = key.rsplit_once('@').unwrap_or((key, &project.machine));
-        let remote = key
-            .strip_prefix("cloud.remote.")
-            .and_then(|v| v.strip_suffix(".url"))
-            .map(|name| (name, if url.starts_with("ssh://") { "peer" } else { "store" }))
-            .or_else(|| key.strip_prefix("remote.").and_then(|v| v.strip_suffix(".url")).map(|name| (name, "git")));
-        let Some((name, kind)) = remote else { continue };
-        // Configuration proves an address. It does not prove a completed push or sync.
-        result.push(json!({"id":format!("{scope}:{name}"),"name":name,"kind":kind,"address":url}));
-    }
-    result
-}
-
 /// Export the optional page data without changing the CLI comparison files.
 fn page_outputs(
     out: &Path,
@@ -386,7 +369,7 @@ fn page_outputs(
         json!({"project":project.id,"machine":project.machine,"values":project.config,"policy":policy,"path_rules":path_rules,"line_owners":lines.iter().map(|l|json!({"id":l.id,"name":l.name,"owner":l.owner})).collect::<Vec<_>>()}),
     )?;
     write(out, "overlays", overlays)?;
-    write(out, "copies", copies(project))?;
+    write(out, "copies", project.copies())?;
     let mut machines = Vec::new();
     for (id, data) in &project.machines {
         let public = data["public_key"].as_str().context("machine record has no public key")?;
@@ -397,8 +380,7 @@ fn page_outputs(
         machines.push(row);
     }
     write(out, "machines", machines)?;
-    // Current Layr records individual checks, but does not store a bisect session result.
-    write(out, "bisect", Vec::<Value>::new())?;
+    write(out, "bisect", project.bisect_results())?;
     let mut trees = Vec::new();
     let mut contents = Vec::new();
     for (state, tree) in metadata {

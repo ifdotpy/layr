@@ -52,6 +52,8 @@ impl SendFeatures {
 struct Wire<R: Read, W: Write> {
     r: R,
     w: W,
+    transfer: crate::model::Transfer,
+    overlay_transfers: Vec<(String, crate::model::Transfer)>,
 }
 
 impl<R: Read, W: Write> Wire<R, W> {
@@ -59,6 +61,9 @@ impl<R: Read, W: Write> Wire<R, W> {
         self.w.write_all(&[kind])?;
         self.w.write_all(&(data.len() as u32).to_be_bytes())?;
         self.w.write_all(data)?;
+        if kind == b'D' {
+            self.transfer.bytes_sent += data.len() as u64;
+        }
         Ok(())
     }
     fn json(&mut self, v: &Value) -> Result<()> {
@@ -76,6 +81,9 @@ impl<R: Read, W: Write> Wire<R, W> {
         }
         let mut d = vec![0u8; n];
         self.r.read_exact(&mut d)?;
+        if h[0] == b'D' {
+            self.transfer.bytes_received += d.len() as u64;
+        }
         Ok((h[0], d))
     }
     fn recv_json(&mut self) -> Result<Value> {
@@ -163,6 +171,7 @@ impl<R: Read, W: Write> Frames<'_, R, W> {
 }
 
 fn send_records<R: Read, W: Write>(w: &mut Wire<R, W>, lines: &[String]) -> Result<()> {
+    w.transfer.records_sent += lines.len();
     for chunk in lines.chunks(RECORDS_PER_MESSAGE) {
         w.json(&json!({"op": "records", "lines": chunk, "more": true}))?;
     }
@@ -187,6 +196,7 @@ fn recv_records<R: Read, W: Write>(w: &mut Wire<R, W>) -> Result<Vec<String>> {
         }
         all.extend(lines);
         if !v["more"].as_bool().unwrap_or(false) {
+            w.transfer.records_received += all.len();
             return Ok(all);
         }
     }
@@ -424,6 +434,8 @@ fn send_states<R: Read, W: Write>(
         if v["op"] != "ok" {
             bail!("peer did not store state {}", ids::short(id));
         }
+        w.transfer.states_sent += 1;
+        w.transfer.state_ids_sent.push(id.clone());
         have.insert(id.clone());
         if let Ok((uuid, transid)) = btrfs::send_clone_identity(&repo.p.state_path(id)) {
             identities.insert(id.clone(), (uuid, Some(transid)));
@@ -526,6 +538,8 @@ fn recv_states<R: Read, W: Write>(w: &mut Wire<R, W>, p: &Project, allow: bool) 
                         return Err(e);
                     }
                     n += 1;
+                    w.transfer.states_received += 1;
+                    w.transfer.state_ids_received.push(id.clone());
                     Ok(())
                 })
             }
@@ -542,6 +556,11 @@ fn recv_states<R: Read, W: Write>(w: &mut Wire<R, W>, p: &Project, allow: bool) 
     Ok(n)
 }
 
+pub struct Exchange {
+    pub transfer: crate::model::Transfer,
+    pub overlays: Vec<(String, crate::model::Transfer)>,
+}
+
 pub fn exchange(
     ctx: &Ctx,
     command: &[String],
@@ -550,7 +569,7 @@ pub fn exchange(
     caches: bool,
     quiet: bool,
     json_output: bool,
-) -> Result<i32> {
+) -> Result<Exchange> {
     let h = here(ctx)?;
     let repo = &h.repo;
     let mut c = Command::new(&command[0]);
@@ -561,7 +580,12 @@ pub fn exchange(
         &crate::privs::pick_env(ctx, &["SSH_AUTH_SOCK", "PATH", "LAYR_ROOT", "LAYR_SOCKET"]),
     )?;
     let mut child = c.spawn().context("start the peer command")?;
-    let mut w = Wire { r: child.stdout.take().unwrap(), w: std::io::BufWriter::new(child.stdin.take().unwrap()) };
+    let mut w = Wire {
+        r: child.stdout.take().unwrap(),
+        w: std::io::BufWriter::new(child.stdin.take().unwrap()),
+        transfer: Default::default(),
+        overlay_transfers: Vec::new(),
+    };
     let started = std::time::Instant::now();
     let result = (|| -> Result<(usize, usize, usize, usize, u64, Vec<String>)> {
         let mine = present(&repo.p)?;
@@ -643,6 +667,23 @@ pub fn exchange(
         }
         Ok((sent_records, got_records, sent, got, bytes, omitted.into_iter().collect()))
     })();
+    let mut transfer = w.transfer.clone();
+    transfer.direction = direction.into();
+    let mut overlays = BTreeMap::<String, crate::model::Transfer>::new();
+    for (name, part) in std::mem::take(&mut w.overlay_transfers) {
+        let total = overlays.entry(name).or_default();
+        total.direction = direction.into();
+        total.records_sent += part.records_sent;
+        total.records_received += part.records_received;
+        total.states_sent += part.states_sent;
+        total.states_received += part.states_received;
+        total.bytes_sent += part.bytes_sent;
+        total.bytes_received += part.bytes_received;
+        total.state_ids_sent.extend(part.state_ids_sent);
+        total.state_ids_received.extend(part.state_ids_received);
+    }
+    transfer.overlays.sort();
+    transfer.overlays.dedup();
     drop(w);
     if result.is_err() {
         let _ = child.kill();
@@ -670,7 +711,7 @@ pub fn exchange(
             outln!(ctx, "omitted {reason}");
         }
     }
-    Ok(0)
+    Ok(Exchange { transfer, overlays: overlays.into_iter().collect() })
 }
 
 /// The peer side of `layr sync`, on stdin and stdout.
@@ -683,7 +724,12 @@ pub fn serve(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
-    let mut w = Wire { r: stdin.lock(), w: std::io::BufWriter::new(stdout.lock()) };
+    let mut w = Wire {
+        r: stdin.lock(),
+        w: std::io::BufWriter::new(stdout.lock()),
+        transfer: Default::default(),
+        overlay_transfers: Vec::new(),
+    };
     let hello = w.recv_json()?;
     let direction = hello["direction"].as_str().unwrap_or("sync");
     if !["sync", "push", "fetch"].contains(&direction) {
@@ -851,6 +897,7 @@ fn exchange_overlays<R: Read, W: Write>(
             }
             w.json(&json!({"op":"overlays", "names":names, "omitted":skipped}))?;
             for name in names {
+                let parent_transfer = std::mem::take(&mut w.transfer);
                 let orepo = repo.overlay_repo(&name)?;
                 w.json(&json!({"op":"overlay", "name":name, "id":orepo.p.id}))?;
                 let hello = w.recv_json()?;
@@ -864,6 +911,12 @@ fn exchange_overlays<R: Read, W: Write>(
                 let _ = w.recv_json()?;
                 let list = plan(&orepo, &present(&orepo.p)?, &have, auto, caches)?;
                 send_states(ctx, w, &orepo, &list, caches, &have_caches, &have, SendFeatures::from_hello(&hello))?;
+                let mut overlay_transfer = std::mem::replace(&mut w.transfer, parent_transfer);
+                overlay_transfer.direction = direction.into();
+                if overlay_transfer.records_sent > 0 || overlay_transfer.states_sent > 0 {
+                    w.transfer.overlays.push(name.clone());
+                    w.overlay_transfers.push((name, overlay_transfer));
+                }
             }
         } else {
             let offer = w.recv_json()?;
@@ -903,6 +956,7 @@ fn exchange_overlays<R: Read, W: Write>(
                 w.json(&json!({"op":"overlay.hello","seqs":seqs(&project)?,"present":present(&project)?,
                     "caches":present_caches(&project)?,"clone_identities_v1":clone_identities(&project)?,
                     "compressed_send_v2":btrfs::supports_compressed_receive(),"clone_sources_v1":true}))?;
+                let parent_transfer = std::mem::take(&mut w.transfer);
                 let lines = recv_records(w)?;
                 let trusted = crate::store_remote::overlays::trusted_keys(repo)?;
                 for line in &lines {
@@ -930,6 +984,12 @@ fn exchange_overlays<R: Read, W: Write>(
                 drop(_lock);
                 w.json(&json!({"op":"overlay.ready"}))?;
                 recv_states(w, &project, true)?;
+                let mut overlay_transfer = std::mem::replace(&mut w.transfer, parent_transfer);
+                overlay_transfer.direction = direction.into();
+                if overlay_transfer.records_received > 0 || overlay_transfer.states_received > 0 {
+                    w.transfer.overlays.push(name.clone());
+                    w.overlay_transfers.push((name, overlay_transfer));
+                }
             }
         }
     }

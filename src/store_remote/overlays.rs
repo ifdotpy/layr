@@ -189,12 +189,25 @@ fn layer(store: &Store, published: &Published, identity: Option<String>) -> Resu
     })
 }
 
-fn merge(report: &mut Report, next: Report, name: &str) {
+fn merge(report: &mut Report, next: Report, name: &str, direction: &str) {
     if next.records > 0 || next.states > 0 {
         report.overlays.push(format!("{name}: {} records, {} states", next.records, next.states));
     }
     report.records += next.records;
     report.states += next.states;
+    if direction == "push" {
+        report.overlay_transfers.push((
+            name.into(),
+            crate::model::Transfer {
+                direction: direction.into(),
+                records_sent: next.records,
+                states_sent: next.states,
+                bytes_sent: next.bytes,
+                state_ids_sent: next.state_ids,
+                ..Default::default()
+            },
+        ));
+    }
     report.files += next.files;
     report.bytes += next.bytes;
     report.overlaps += next.overlaps;
@@ -344,7 +357,7 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
                 report.omitted.push(format!("overlay {name}: no paper slot; run once with LAYR_PAPER_KEY_FILE to add it"));
             }
         }
-        merge(report, writer::push_locked(&scoped, ctx, &orepo, opts)?, &name);
+        merge(report, writer::push_locked(&scoped, ctx, &orepo, opts)?, &name, "push");
         // Publish the key after its epoch is complete. It contains the exact signed record, never an identity.
         store.backend.put_new(&published.object(), published.line.as_bytes().to_vec())?;
     }
@@ -409,7 +422,7 @@ pub(super) fn fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, repor
             crate::cmd::replicate::trust(ctx, &orepo.p, machine, &hex::encode(key.to_bytes()))?;
         }
         let mut scoped = layer(store, &published, Some(identity))?;
-        merge(report, reader::fetch(&mut scoped, ctx, &mut orepo, opts)?, &name);
+        merge(report, reader::fetch(&mut scoped, ctx, &mut orepo, opts)?, &name, "fetch");
     }
     Ok(())
 }

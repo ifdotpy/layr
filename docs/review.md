@@ -32,7 +32,10 @@ These revision prefixes are reserved: `env/`, `release/`, `pins/`, `holds/`, `le
 Each new source state has a `change_id`. Amend, replay, and pick preserve it.
 A merge state has a new identifier. Old states without `change_id` remain readable.
 `changes/<id>` selects the latest version. `changes/<id>/v1` selects the first version.
-`change show` lists versions and their attestations. `change log` lists their operations.
+`change show` lists versions and their attestations.
+Its JSON includes an `operation` for each new amend, replay, or pick version.
+The operation gives the actor, machine, time, kind, source state, target line, and target head.
+Versions from older records omit this field. `change log` lists their operations.
 `change diff` compares each version's patch against its own parent, so unrelated base changes do not enter the interdiff.
 
 Attestation kinds: `check`, `approval`, `origin`, `import`, `quarantine`, and `revoke`.
@@ -349,6 +352,9 @@ Use `--good` when no such check exists.
 `--auto` includes the line's auto states between the bounds, in time order.
 The result includes the first bad state, its message, its kind, and origin payload digests.
 `--json` includes every test step and whether bisect reused its result.
+A completed run writes a signed `bisect.run` record with its good, bad, and first bad states.
+The record also includes the command, each step, its exit code, and reuse status.
+Use `layr bisect list [--json]` to read completed runs.
 Test output goes to standard error with `--json`.
 
 `--ref-log` searches the positions of that ref.

@@ -71,8 +71,13 @@ pub fn change(ctx: &Ctx, args: &[String]) -> Result<i32> {
     match command {
         "show" => {
             let mut rows = Vec::new();
+            let model = repo.read_model()?;
             for (n, s) in versions.iter().enumerate() {
-                rows.push(serde_json::json!({"version":format!("v{}",n+1),"state":s,"attestations":repo.p.db.attestations(&s.id,None)?}));
+                let mut row = serde_json::json!({"version":format!("v{}",n+1),"state":s,"attestations":repo.p.db.attestations(&s.id,None)?});
+                if let Some(version) = model.version_info(&s.id) {
+                    row["operation"] = version;
+                }
+                rows.push(row);
             }
             let behavior = versions.last().map(|state| crate::probes::change_behavior(repo, state)).transpose();
             let behavior_json = match &behavior {
