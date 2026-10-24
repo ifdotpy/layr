@@ -492,6 +492,8 @@ pub struct Behavior {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub head_views: Vec<String>,
     pub probes: Vec<Value>,
+    #[serde(skip)]
+    quiet_noise: BTreeMap<String, f64>,
 }
 pub fn diff(repo: &Repo, base: &Input, head: &Input) -> Result<Behavior> {
     shared_outputs(repo, &base.layers)?;
@@ -500,6 +502,7 @@ pub fn diff(repo: &Repo, base: &Input, head: &Input) -> Result<Behavior> {
     let new = comparison_definitions(repo, head)?;
     let names: BTreeSet<_> = old.keys().chain(new.keys()).collect();
     let mut probes = Vec::new();
+    let mut quiet_noise = BTreeMap::new();
     for name in names {
         let a = old.get(name).map(|p| stored(repo, base, name, p)).transpose()?.flatten();
         let b = new.get(name).map(|p| stored(repo, head, name, p)).transpose()?.flatten();
@@ -512,7 +515,15 @@ pub fn diff(repo: &Repo, base: &Input, head: &Input) -> Result<Behavior> {
             probes.push(json!({"probe":name,"status":"kind changed","base":a,"head":b}));
             continue;
         }
-        let changes = compare(&files(&repo.state_root(&a.output_state)?)?, &files(&repo.state_root(&b.output_state)?)?, p)?;
+        let before = files(&repo.state_root(&a.output_state)?)?;
+        let after = files(&repo.state_root(&b.output_state)?)?;
+        let changes = compare(&before, &after, p)?;
+        if p.kind == Kind::Number
+            && changes.is_empty()
+            && before.iter().map(|(path, f)| (path, &f.sha256)).ne(after.iter().map(|(path, f)| (path, &f.sha256)))
+        {
+            quiet_noise.insert(name.clone(), p.noise);
+        }
         probes.push(
             json!({"probe":name,"status":if changes.is_empty() && a.exit == b.exit {"unchanged"}else{"changed"},"base":a,"head":b,"exit_changed":a.exit != b.exit,"changes":changes}),
         );
@@ -525,6 +536,7 @@ pub fn diff(repo: &Repo, base: &Input, head: &Input) -> Result<Behavior> {
         base_views: vec![],
         head_views: vec![],
         probes,
+        quiet_noise,
     })
 }
 fn compare(old: &BTreeMap<String, FileData>, new: &BTreeMap<String, FileData>, probe: &Probe) -> Result<Vec<Value>> {
@@ -626,21 +638,58 @@ pub fn print(ctx: &Ctx, behavior: &Behavior) {
         outln!(ctx, "  head: {}", behavior.head_source);
     }
     for p in &behavior.probes {
-        outln!(ctx, "  {}: {}", p["probe"].as_str().unwrap_or(""), p["status"].as_str().unwrap_or(""));
+        let name = p["probe"].as_str().unwrap_or("");
+        outln!(ctx, "  {}: {}", name, p["status"].as_str().unwrap_or(""));
         if p["exit_changed"] == true {
-            outln!(ctx, "    exit {} -> {}", p["base"]["exit"], p["head"]["exit"]);
+            outln!(ctx, "    exit {} → {}", p["base"]["exit"], p["head"]["exit"]);
         }
-        if let Some(changes) = p["changes"].as_array() {
-            for c in changes {
-                outln!(ctx, "    {}", c["path"].as_str().unwrap_or(""));
-                if let Some(patch) = c["diff"].as_str() {
-                    ctx.print(patch);
-                } else {
-                    outln!(ctx, "    {c}");
+        if let Some(noise) = behavior.quiet_noise.get(name) {
+            outln!(ctx, "    no change beyond noise ({}%)", noise * 100.0);
+        }
+        let mut json_rows = 0;
+        for c in p["changes"].as_array().into_iter().flatten() {
+            let path = c["path"].as_str().unwrap_or("");
+            if let Some(patch) = c["diff"].as_str() {
+                let (mut added, mut removed) = (0, 0);
+                for line in patch.lines().skip(2) {
+                    if line.starts_with('+') {
+                        added += 1;
+                    } else if line.starts_with('-') {
+                        removed += 1;
+                    }
+                }
+                outln!(ctx, "    {path}   +{added} −{removed} lines");
+            } else if c["kind"] == "binary" {
+                let size = |v: &Value| v["size"].as_u64().map(|n| n.to_string()).unwrap_or_else(|| "(absent)".into());
+                outln!(ctx, "    {path}   binary, {} → {}", size(&c["before"]), size(&c["after"]));
+            } else {
+                for row in c["changes"].as_array().into_iter().flatten() {
+                    if let Some(metric) = row["metric"].as_str() {
+                        let before = number_value(&row["before"]);
+                        let after = number_value(&row["after"]);
+                        let relative =
+                            row["relative_change"].as_f64().map(|n| format!(" ({:+.0}%)", n * 100.0)).unwrap_or_default();
+                        outln!(ctx, "    {path}   {metric} {before} → {after}{relative}");
+                    } else {
+                        json_rows += 1;
+                        if json_rows <= 20 {
+                            let key = row["key"].as_str().unwrap_or("");
+                            let before = if row["change"] == "add" { "(absent)".into() } else { row["before"].to_string() };
+                            let after = if row["change"] == "remove" { "(absent)".into() } else { row["after"].to_string() };
+                            outln!(ctx, "    {path}   {key}: {before} → {after}");
+                        }
+                    }
                 }
             }
         }
+        if json_rows > 20 {
+            outln!(ctx, "    … {} more", json_rows - 20);
+        }
     }
+}
+
+fn number_value(value: &Value) -> String {
+    value.as_f64().map(|n| n.to_string()).unwrap_or_else(|| "(absent)".into())
 }
 
 /// Compare the latest change version with its merge base against the target line.

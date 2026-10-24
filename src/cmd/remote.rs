@@ -769,7 +769,7 @@ fn print_store_report(ctx: &Ctx, report: &store_remote::Report, op: &str, json_o
         outln!(ctx, "{}", serde_json::to_string(report)?);
     } else if !quiet {
         outln!(ctx, "{op}: {} records, {} states, {} bytes", report.records, report.states, report.bytes);
-        for item in &report.omitted {
+        for item in omitted_summaries(&report.omitted) {
             outln!(ctx, "omitted: {item}");
         }
         for gap in &report.gaps {
@@ -785,6 +785,36 @@ fn print_store_report(ctx: &Ctx, report: &store_remote::Report, op: &str, json_o
         }
     }
     Ok(())
+}
+
+fn omitted_summaries(omitted: &[String]) -> Vec<String> {
+    let mut summaries = Vec::new();
+    let mut states: std::collections::BTreeMap<&str, std::collections::BTreeSet<&str>> = Default::default();
+    let mut other = std::collections::BTreeSet::new();
+    for item in omitted {
+        let fields: Vec<_> = item.split_whitespace().collect();
+        if fields.len() == 2 && crate::model::is_uuid(fields[0]) {
+            states.entry(fields[1].trim_matches('"')).or_default().insert(fields[0]);
+        } else if fields.len() >= 3 && fields[0] == "cache" && fields[1] == "state" && crate::model::is_uuid(fields[2]) {
+            states.entry("cache").or_default().insert(fields[2]);
+        } else {
+            other.insert(item);
+        }
+    }
+    for (kind, ids) in states {
+        let flag = match kind {
+            "cache" => "--caches",
+            "auto" => "--auto",
+            _ => "",
+        };
+        let hint = if flag.is_empty() { String::new() } else { format!(" (use {flag})") };
+        let noun = if ids.len() == 1 { "state" } else { "states" };
+        summaries.push(format!("{} {kind} {noun}{hint}", ids.len()));
+    }
+    for item in other {
+        summaries.push(item.clone());
+    }
+    summaries
 }
 
 fn args_for_merge(a: &crate::args::Parsed) -> Vec<String> {
@@ -853,6 +883,24 @@ use crate::store_remote;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn omitted_state_summary_counts_each_state_once() {
+        let auto = "01a12290-0000-7000-8000-000000000001";
+        let cache = "01a12290-0000-7000-8000-000000000002";
+        let other = "01a12290-0000-7000-8000-000000000003";
+        let omitted = vec![
+            format!("{auto} \"auto\""),
+            format!("{cache} \"cache\""),
+            format!("{other} \"cache\""),
+            format!("cache state {cache} of ref caches/one: use --caches"),
+            format!("cache state {cache} of ref caches/two: use --caches"),
+            "private overlay files".into(),
+        ];
+        assert_eq!(
+            omitted_summaries(&omitted),
+            vec!["1 auto state (use --auto)", "2 cache states (use --caches)", "private overlay files"]
+        );
+    }
     #[test]
     fn remote_url_dispatch() {
         assert_eq!(kind("ssh://user@host/project").unwrap(), Kind::Peer { host: "user@host".into(), project: "project".into() });

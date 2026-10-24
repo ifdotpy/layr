@@ -99,7 +99,7 @@ ok "JSON output reports a structural key path" python3 -c 'import json,sys; r=ne
 ok "numeric output reports relative change" python3 -c 'import json,sys; r=next(r for r in json.loads(sys.argv[1])["probes"] if r["probe"]=="metric"); assert r["changes"][0]["changes"][0]["relative_change"]==0.1' "$DELTA"
 SHOW=$(l change show "$CHANGE")
 has "the change includes a Behavior section" 'Behavior' "$SHOW"
-has "the change includes its stored text diff" '+new' "$SHOW"
+has "the change includes its stored text summary" 'out/files/text   +1 −1 lines' "$SHOW"
 UNTOUCHED=$(l ref list derived/probe-v1/ --json)
 l change show "$CHANGE" --json >/dev/null
 l probe diff "$BASE" "$HEAD" >/dev/null
