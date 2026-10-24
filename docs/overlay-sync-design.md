@@ -77,3 +77,36 @@ A manager transition retains hashes of previously authorized key and readers rec
 Those exact historical records remain valid after their manager is removed.
 If every manager machine is lost, create a new overlay and move the files.
 Use two manager machines.
+
+## Hidden overlays (decided 2026-10-24)
+
+Two levels of privacy:
+
+- **Private** (today's default): everybody who reads the project sees that the overlay exists,
+  its name, readers and routed patterns; only readers get its files.
+- **Hidden** (`layr overlay create <name> --hidden`): people and machines that are not readers do
+  not learn that the overlay exists. No list, count, name, reader, pattern or operation of it is
+  visible to them.
+
+Rules for a hidden overlay:
+
+1. Nothing about it is in the parent project's shared records or config: no `overlay.<name>`
+   setting, no routed patterns, no readers, no `overlay.authority` record, no operation in the
+   parent's op log. All of these live in the overlay's own records, which only readers can open.
+2. Parent states do not name its layers. A reader's machine builds the line view from the
+   overlay's own records ("follow" mode), so shared states are identical for readers and
+   non-readers.
+3. Readers find it through their key: the overlay's records hold the parent project id, and a
+   reader's machine or person slot opens them. A new reader gets a slot at the next push and then
+   discovers the overlay.
+4. Stores still hold its encrypted objects under `overlays/<random id>/`. Someone with store access
+   can see that encrypted overlay objects exist and their sizes, never names or contents. The
+   documentation says so.
+5. Peers receive it only when the peer is allowed (`overlay.<name>.peers`, stored in the overlay).
+6. The secret detector of a non-reader does not know its values; a value that only a hidden
+   overlay holds is caught on readers' machines (their saves and pushes), not on others.
+7. A visible overlay cannot become hidden (its name is already known); a hidden one can become
+   visible (`layr overlay show-to-project <name>`).
+
+UI: a hidden overlay appears only to its readers, with a "hidden" badge; non-readers see no row,
+no count and no badge on files.
