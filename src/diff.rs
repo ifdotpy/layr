@@ -6,7 +6,7 @@ use anyhow::Result;
 use similar::{capture_diff_slices, Algorithm, DiffOp};
 
 use layr_model::diff::split_lines;
-pub use layr_model::diff::{hunks, patch, FileDiff, Side};
+pub use layr_model::diff::{patch, FileDiff, Side};
 
 pub fn side_of(root: &(impl fsutil::Src + ?Sized), path: &str, meta: &Meta) -> Result<Side> {
     let big = (meta.ftype == FType::File && meta.size > fsutil::MAX_TEXT).then_some(meta.size);
