@@ -1,0 +1,3 @@
+time layr line new agent main --count 16 | tail -2
+layr line list | wc -l
+ls -C -T0 ..
