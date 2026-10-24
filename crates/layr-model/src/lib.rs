@@ -10,6 +10,7 @@ pub mod authority;
 pub mod diff;
 pub mod interdiff;
 pub mod operations;
+pub mod overlays;
 pub mod policy;
 pub mod probes;
 pub mod protection;

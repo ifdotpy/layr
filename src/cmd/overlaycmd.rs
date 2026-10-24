@@ -338,21 +338,6 @@ fn reader_detail(principal: &str) -> serde_json::Value {
     serde_json::json!({"principal":principal,"kind":kind})
 }
 
-fn epoch_details(records: &[Record]) -> Vec<serde_json::Value> {
-    records
-        .iter()
-        .filter(|r| r.op == "overlay.key")
-        .enumerate()
-        .map(|(index, r)| {
-            let mut row = serde_json::json!({"number":index + 1,"id":r.data["epoch"],"time":r.time,"machine":r.machine});
-            if let Some(reason) = r.data.get("reason") {
-                row["reason"] = reason.clone();
-            }
-            row
-        })
-        .collect()
-}
-
 fn operation_detail(r: &Record) -> serde_json::Value {
     serde_json::json!({"id":r.id,"op":super::admin::operation_name(&r.op),"actor":r.actor,"time":r.time})
 }
@@ -391,7 +376,7 @@ fn show_json(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let value = serde_json::json!({
         "name":name,"hidden":info.hidden,"readers":readers,
         "managers":crate::overlay_managers::of(&h.repo, name)?.machines,
-        "epochs":epoch_details(&records),
+        "epochs":layr_model::overlays::epochs(&records),
         "patterns":setting("patterns")?.unwrap_or_else(|| serde_json::json!([])),
         "peers":setting("peers")?,"state":state,
     });
@@ -792,29 +777,6 @@ fn read(ctx: &Ctx, cmd: &str, args: &[String]) -> Result<i32> {
 mod tests {
     use super::*;
     use serde_json::json;
-
-    #[test]
-    fn epoch_numbers_follow_signed_key_records_and_reasons_are_not_invented() {
-        let mut first = Record::new("overlay.key");
-        first.time = 100;
-        first.machine = "manager".into();
-        first.data = json!({"epoch":"z-first","recipient":"key material"});
-        let mut second = first.clone();
-        second.time = 200;
-        second.data = json!({"epoch":"a-second","reason":"reader removed","identity":"secret"});
-        let mut refresh = second.clone();
-        refresh.time = 300;
-        refresh.data = json!({"epoch":"a-second"});
-        let records = [Record::new("project"), first, Record::new("config"), second, refresh];
-        assert_eq!(
-            epoch_details(&records),
-            vec![
-                json!({"number":1,"id":"z-first","time":100,"machine":"manager"}),
-                json!({"number":2,"id":"a-second","time":200,"machine":"manager","reason":"reader removed"}),
-                json!({"number":3,"id":"a-second","time":300,"machine":"manager"}),
-            ]
-        );
-    }
 
     #[test]
     fn operation_output_only_contains_public_fields_and_cli_names() {
