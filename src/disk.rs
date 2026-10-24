@@ -556,7 +556,7 @@ pub fn run(args: &[String]) -> Result<i32> {
     };
     let account = keystore::account(&url);
     let cached = if paper.is_none() { keystore::get(&account)? } else { None };
-    let access = Access { machine: machine_access(), paper, identity: cached, pin };
+    let access = Access { machine: machine_access(), paper, identity: cached, pin, ..Default::default() };
     let mut env = std::env::vars().collect();
     catalog::profile_env(&remote, &url, &home, &mut env)?;
     let (disk, identity) = Disk::open(url.clone(), env, access, cache.clone(), limit)?;
@@ -759,8 +759,8 @@ mod tests {
     fn url_pin_updates_preserve_other_urls_and_refuse_a_conflicting_first_use() {
         let root = std::env::temp_dir().join(crate::ids::new_id());
         let path = root.join("mount-pins.json");
-        let first = StorePin { project: crate::ids::new_id(), recipient: "age1first".into() };
-        let second = StorePin { project: crate::ids::new_id(), recipient: "age1second".into() };
+        let first = StorePin { project: crate::ids::new_id(), recipient: "age1first".into(), paper_recipient: None };
+        let second = StorePin { project: crate::ids::new_id(), recipient: "age1second".into(), paper_recipient: None };
         assert!(record_pin(&path, "file:///one", &first).unwrap());
         assert!(record_pin(&path, "file:///two", &second).unwrap());
         assert!(!record_pin(&path, "file:///one", &first).unwrap());

@@ -20,7 +20,7 @@ struct Pushed {
     depth: usize,
 }
 
-pub(super) fn initialize(store: &Store, ctx: &crate::ctx::Ctx, output: &Path) -> Result<String> {
+pub(super) fn initialize(store: &Store, ctx: &crate::ctx::Ctx, output: &Path) -> Result<(String, String)> {
     use std::io::{Read, Write};
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let path = std::path::absolute(if output.is_absolute() { output.to_path_buf() } else { ctx.cwd.join(output) })?;
@@ -99,7 +99,7 @@ pub(super) fn initialize(store: &Store, ctx: &crate::ctx::Ctx, output: &Path) ->
         }
     }
     initialization_failpoint("store")?;
-    Ok(path.to_string_lossy().into_owned())
+    Ok((path.to_string_lossy().into_owned(), keys::recipient_of(&paper)?))
 }
 
 // Unit tests inject interruption after each immutable publication.
@@ -116,17 +116,22 @@ fn initialization_failpoint(point: &str) -> Result<()> {
 
 pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options) -> Result<Report> {
     let _lock = repo.p.lock()?;
+    push_locked(store, ctx, repo, opts)
+}
+
+pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options) -> Result<Report> {
     if opts.caches && serde_json::from_value::<crate::model::StateKind>(serde_json::json!("cache")).is_err() {
         bail!("store --caches is not available until cache states exist");
     }
     store.private_dir()?;
     let descriptor = store.descriptor()?;
+    let blind_layer = store.layer.is_some() && !store.backend.can_read();
     let mut report = Report { omitted: reader::omitted_cache_refs(repo, opts)?, ..Default::default() };
     repo.p.verify_records()?;
     // A list is enough for a writer without permission to read encrypted objects.
     for machine in repo.p.db.record_machines()? {
         let mut last = 0;
-        for object in store.backend.list(&format!("records/{machine}/"))? {
+        for object in if blind_layer { Vec::new() } else { store.backend.list(&format!("records/{machine}/"))? } {
             let (m, _, end) = format::parse_segment_name(&object.key).context("invalid remote segment name")?;
             if m != machine {
                 bail!("segment is outside its machine prefix");
@@ -146,7 +151,7 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options) -> Res
         store.backend.put_new(&key, keys::encrypt(&descriptor.recipient, &bytes)?)?;
         report.records += lines.len();
     }
-    let present = reader::attempts(&store.backend)?;
+    let mut present = if blind_layer { BTreeMap::new() } else { reader::attempts(&store.backend)? };
     let index_file = store.dir.join("pushed.json");
     let mut index: BTreeMap<String, Pushed> = if index_file.exists() {
         serde_json::from_slice(&std::fs::read(&index_file)?).context("invalid local pushed index")?
@@ -154,8 +159,13 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options) -> Res
         BTreeMap::new()
     };
     // Only committed remote trees can be reused as delta bases.
-    let committed: std::collections::BTreeSet<String> = store.backend.list("states/")?.into_iter().map(|o| o.key).collect();
-    index.retain(|id, pushed| committed.contains(&format::tree_name(id, &pushed.attempt)));
+    if blind_layer {
+        // A write token cannot list epoch records or states. The local index contains only committed uploads.
+        present.extend(index.iter().map(|(id, pushed)| (id.clone(), pushed.attempt.clone())));
+    } else {
+        let committed: std::collections::BTreeSet<String> = store.backend.list("states/")?.into_iter().map(|o| o.key).collect();
+        index.retain(|id, pushed| committed.contains(&format::tree_name(id, &pushed.attempt)));
+    }
     for (state, pushed) in &index {
         if !crate::model::is_uuid(state) || !format::valid_attempt(&pushed.attempt) || pushed.depth >= format::FULL_TREE_EVERY {
             bail!("invalid local pushed index metadata");
@@ -163,7 +173,7 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options) -> Res
         Tree::parse(&pushed.tree.canonical()?)?;
     }
     // Other writers' states are usable bases only if this writer has a readable slot.
-    if let Ok(identity) = store.identity(&descriptor, opts.paper_key.as_deref()) {
+    if let Some(identity) = store.identity(&descriptor, opts.paper_key.as_deref()).ok().filter(|_| store.backend.can_read()) {
         let records = reader::records(&store.backend, &identity, &descriptor.project)?;
         let mut source = reader::Reader::new(&store.backend, &identity, &records.keys);
         for (id, attempt) in &present {
@@ -189,7 +199,6 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options) -> Res
         states.push(state);
     }
     states.sort_by(|a, b| (a.time, &a.id).cmp(&(b.time, &b.id)));
-    let private_overlays = omitted_private_files(repo, &states)?;
     // Every state that leaves the machine passes the secret detector before any upload.
     for state in &states {
         crate::secrets::check_state(ctx, repo, &state.id)?;
@@ -232,63 +241,7 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options) -> Res
             report.omitted.push(format!("cache snapshot {name}: legacy cache, use a peer remote or save it as a cache state"));
         }
     }
-    if private_overlays {
-        report.omitted.push("private overlay files".into());
-    }
     Ok(report)
-}
-
-/// Associate overlay stacks with the shared states in this push, including older line heads.
-fn omitted_private_files(repo: &Repo, states: &[crate::model::StateRec]) -> Result<bool> {
-    let wanted: std::collections::BTreeSet<_> = states.iter().map(|s| s.id.as_str()).collect();
-    if wanted.is_empty() {
-        return Ok(false);
-    }
-    let mut stacks: BTreeMap<(String, String), Vec<crate::overlay::Layer>> = BTreeMap::new();
-    let mut heads = BTreeMap::new();
-    let mut layers = std::collections::BTreeSet::new();
-    for record in repo.p.db.records(usize::MAX >> 1)?.into_iter().rev() {
-        if let Some(line) = record.data["stack"]["line"].as_str() {
-            let stack: Vec<crate::overlay::Layer> = serde_json::from_value(record.data["stack"]["layers"].clone())?;
-            let key = (record.machine.clone(), line.to_string());
-            if heads.get(&key).is_some_and(|head: &String| wanted.contains(head.as_str())) {
-                layers.extend(stack.iter().map(|l| (l.overlay.clone(), l.state.clone())));
-            }
-            stacks.insert(key, stack);
-        }
-        for state in &record.states {
-            if wanted.contains(state.id.as_str()) {
-                if let Some(stack) = state.line.as_ref().and_then(|line| stacks.get(&(record.machine.clone(), line.clone()))) {
-                    layers.extend(stack.iter().map(|l| (l.overlay.clone(), l.state.clone())));
-                }
-            }
-        }
-        for (line, change) in &record.lines {
-            let key = (record.machine.clone(), line.clone());
-            if let Some(after) = &change.after {
-                if wanted.contains(after.head.as_str()) {
-                    if let Some(stack) = stacks.get(&key) {
-                        layers.extend(stack.iter().map(|l| (l.overlay.clone(), l.state.clone())));
-                    }
-                }
-                heads.insert(key, after.head.clone());
-            } else {
-                heads.remove(&key);
-            }
-        }
-        if record.data["view"]["shared"].as_str().is_some_and(|id| wanted.contains(id)) {
-            let stack: Vec<crate::overlay::Layer> = serde_json::from_value(record.data["view"]["layers"].clone())?;
-            layers.extend(stack.into_iter().map(|l| (l.overlay, l.state)));
-        }
-    }
-    for (overlay, state) in layers {
-        if let Some(root) = repo.layer_root(&crate::overlay::Layer { overlay, state }) {
-            if !crate::overlay::files_of(&root)?.is_empty() {
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
 }
 
 fn content(root: &Path, path: &str, mode: &str) -> Result<Vec<u8>> {
@@ -502,6 +455,7 @@ mod tests {
             person: None,
             pin: None,
             aws_profile: None,
+            layer: None,
         }
     }
     #[test]

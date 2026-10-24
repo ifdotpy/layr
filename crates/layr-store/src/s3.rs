@@ -32,11 +32,13 @@ fn xml_escape(value: &str) -> String {
     value.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&apos;")
 }
 
+#[derive(Clone)]
 pub struct S3 {
     http: Client,
     credentials: Credentials,
     profile: Option<aws::profile::Profile>,
-    refreshed: std::sync::Mutex<Option<(Credentials, std::time::Instant)>>,
+    // Shared by clones, so one refresh serves every copy of the client.
+    refreshed: std::sync::Arc<std::sync::Mutex<Option<(Credentials, std::time::Instant)>>>,
     bucket: String,
     region: String,
     endpoint: Option<String>,
@@ -67,7 +69,7 @@ impl S3 {
             http,
             credentials,
             profile: None,
-            refreshed: std::sync::Mutex::new(None),
+            refreshed: std::sync::Arc::new(std::sync::Mutex::new(None)),
             bucket: bucket.to_string(),
             region: region.to_string(),
             endpoint: endpoint.map(str::to_string),

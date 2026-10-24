@@ -306,3 +306,27 @@ Status prints `no address` and the command to accept that pin again with `--remo
 A person pin without a named remote uses `<project>-<short project id>` as its folder name.
 The service keeps the person key file path and login, when set, for index access after login.
 It stores no person key text.
+
+## Private overlays
+
+Push and sync include the project's overlays.
+A store encrypts each overlay with its own age layer key.
+A machine reader needs its machine slot. A person reader needs its person slot.
+The person slot name includes the recipient fingerprint, as store person slots do.
+Local user and group readers remain service policy only.
+
+Fetch and clone report `overlay <name>: no key on this machine` when no slot opens.
+The shared files still import.
+Mount shows an overlay in the line view only when a slot opens.
+A machine without a layer slot can push to the public, signed layer recipient.
+
+Reader removal starts a new epoch on the next push.
+Earlier objects remain unchanged. A removed reader retains access to data already copied.
+Peer sync sends an overlay only to a permitted peer machine.
+The receiving service enforces the overlay readers.
+See [overlays](overlays.md#10-overlays-in-stores-and-peer-sync) for principals, peer settings and the paper slot.
+
+The overlay creator machine is its first key manager.
+Only key managers can change readers or layer keys.
+Use `layr overlay managers <name> machine:<id>...` to add a second manager.
+Other trusted machines can upload to the published layer recipient.

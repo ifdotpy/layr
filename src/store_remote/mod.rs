@@ -4,6 +4,7 @@ pub(crate) mod backend;
 pub(crate) mod browse;
 pub(crate) mod gateway;
 mod legacy;
+pub(crate) mod overlays;
 pub(crate) mod reader;
 mod writer;
 
@@ -53,6 +54,8 @@ pub struct Configured {
 pub(crate) struct StorePin {
     pub project: String,
     pub recipient: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paper_recipient: Option<String>,
 }
 
 impl StorePin {
@@ -82,6 +85,7 @@ pub struct Store {
     person: Option<crate::person::Access>,
     pin: Option<StorePin>,
     aws_profile: Option<String>,
+    layer: Option<overlays::LayerAccess>,
 }
 
 /// Opening a store performs no remote I/O. Configure it with the caller's environment next.
@@ -94,7 +98,7 @@ pub fn open(url: &str, repo: &Repo) -> Result<Store> {
         }
         if let Some(value) = repo.p.config_value(&format!("cloud.remote.{name}.store"))? {
             let stored: StorePin = serde_json::from_value(value).context("invalid store pin")?;
-            if pin.as_ref().is_some_and(|pin| pin != &stored) {
+            if pin.as_ref().is_some_and(|pin| pin.project != stored.project || pin.recipient != stored.recipient) {
                 bail!("conflicting local pins for store {url}");
             }
             pin = Some(stored);
@@ -138,6 +142,7 @@ fn open_with_pin(url: &str, repo: &Repo, pin: Option<StorePin>) -> Result<Store>
         person: None,
         pin,
         aws_profile: None,
+        layer: None,
     })
 }
 
@@ -215,22 +220,34 @@ impl Store {
             bail!("the remote store is empty");
         }
         let path = opts.paper_key_out.as_ref().context("a new store requires --paper-key-out <path>")?;
-        let file = writer::initialize(self, ctx, path)?;
+        let (file, paper_recipient) = writer::initialize(self, ctx, path)?;
         self.pin_descriptor()?;
+        self.pin.as_mut().expect("initialized store pin").paper_recipient = Some(paper_recipient);
         Ok(Configured { created: true, recovery_key_file: Some(file) })
     }
 
     fn pin_descriptor(&mut self) -> Result<()> {
         let descriptor = self.descriptor()?;
-        self.pin = Some(StorePin { project: descriptor.project, recipient: descriptor.recipient });
+        let paper_recipient = self.pin.as_ref().and_then(|pin| pin.paper_recipient.clone());
+        self.pin = Some(StorePin { project: descriptor.project, recipient: descriptor.recipient, paper_recipient });
         Ok(())
     }
 
     /// Caller holds the project lock. Config records carry the machine signature.
     pub fn save_pin(&self, ctx: &Ctx, repo: &Repo, name: &str) -> Result<()> {
         if let Some(pin) = &self.pin {
+            let mut pin = pin.clone();
+            if let Some(paper) = &self.paper_key_text {
+                let opener = keys::identity_from_paper(paper).map_err(|_| anyhow::anyhow!("invalid paper key"))?;
+                let slot = self.backend.get("slots/paper.age")?.context("remote has no paper slot")?;
+                let identity = keys::open_slot(&slot, &opener)?;
+                if keys::recipient_of(&identity)? != pin.recipient {
+                    bail!("paper slot does not match store recipient");
+                }
+                pin.paper_recipient = Some(keys::recipient_of(&opener)?);
+            }
             let key = format!("cloud.remote.{name}.store");
-            let value = serde_json::to_value(pin)?;
+            let value = serde_json::to_value(&pin)?;
             if repo.p.config_value(&key)?.as_ref() != Some(&value) {
                 crate::cmd::admin::set_config(ctx, repo, &key, value)?;
             }
@@ -253,11 +270,14 @@ impl Store {
         if descriptor.recipient != recipient {
             bail!("store recipient differs: requested {}, store.json {}", recipient, descriptor.recipient);
         }
-        self.pin = Some(StorePin { project: descriptor.project, recipient: descriptor.recipient });
+        self.pin = Some(StorePin { project: descriptor.project, recipient: descriptor.recipient, paper_recipient: None });
         self.save_pin(ctx, repo, name)
     }
 
     fn descriptor(&self) -> Result<Descriptor> {
+        if let Some(layer) = &self.layer {
+            return Ok(Descriptor { format: 2, project: self.project.clone(), recipient: layer.recipient.clone() });
+        }
         let data = self
             .backend
             .get("store.json")?
@@ -285,6 +305,9 @@ impl Store {
     }
 
     fn identity(&self, descriptor: &Descriptor, paper: Option<&str>) -> Result<String> {
+        if let Some(layer) = &self.layer {
+            return layer.identity.clone().context("this machine has no overlay slot");
+        }
         let machine = format!("slots/machine-{}.age", self.machine);
         if let Some(slot) = self.backend.get(&machine)? {
             let identity = keys::open_machine_slot(&slot, &self.key)?;
@@ -333,7 +356,9 @@ impl Store {
         if self.backend.get("store.json")?.is_none() && self.backend.get("vault.json")?.is_some() {
             bail!("Desk v1 stores are read only; clone into a local project and add a new v2 remote");
         }
-        writer::push(self, ctx, repo, opts)
+        let mut report = writer::push(self, ctx, repo, opts)?;
+        overlays::push(self, ctx, repo, opts, &mut report)?;
+        Ok(report)
     }
 
     pub fn fetch(&mut self, ctx: &Ctx, repo: &mut Repo, opts: &Options) -> Result<Report> {
@@ -345,6 +370,7 @@ impl Store {
             bail!("Desk v1 is read only; use layr clone with LAYR_PAPER_KEY_FILE");
         }
         let mut report = reader::fetch(self, ctx, repo, opts)?;
+        overlays::fetch(self, ctx, repo, opts, &mut report)?;
         let pending = self.dir.join("pending-lines.json");
         if pending.exists() {
             let ids: std::collections::BTreeSet<String> = serde_json::from_slice(&std::fs::read(pending)?)?;
@@ -363,6 +389,9 @@ impl Store {
         } else {
             reader::fetch(self, ctx, repo, opts)?
         };
+        if self.backend.get("store.json")?.is_some() {
+            overlays::fetch(self, ctx, repo, opts, &mut report)?;
+        }
         report.missing_lines = self.materialize_clone_lines(ctx, repo, None)?;
         Ok(report)
     }
@@ -403,6 +432,7 @@ impl Store {
                         working_after: None,
                     },
                 );
+                record.data = serde_json::json!({"stack":crate::overlay::stack_data(&local.id, &repo.readable_layers(&local)?)});
                 repo.commit_record(ctx, record)?;
             }
         }

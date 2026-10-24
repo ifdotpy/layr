@@ -379,6 +379,7 @@ mod tests {
             person: None,
             pin: None,
             aws_profile: None,
+            layer: None,
         };
         (store, identity, root)
     }

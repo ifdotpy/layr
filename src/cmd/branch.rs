@@ -365,7 +365,7 @@ pub fn adopt(ctx: &Ctx, args: &[String]) -> Result<i32> {
             working_after: Some(start.clone()),
         },
     );
-    rec.data = serde_json::json!({"name": l.name, "from_state": start});
+    rec.data = serde_json::json!({"name": l.name, "from_state": start, "stack":crate::overlay::stack_data(&l.id, &repo.readable_layers(&moved)?)});
     repo.commit_record(ctx, rec)?;
     outln!(ctx, "Line {} now has a working folder here: {} (content of {})", l.name, w.display(), ids::short(&start));
     Ok(0)

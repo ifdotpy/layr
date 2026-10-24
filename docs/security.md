@@ -110,3 +110,41 @@ Old person keys retain access to data that they could already read.
 Desk v1 import reads `slots/person-<login>.age`.
 
 An old person slot stays in the store. It opens the store for the old key until the store key changes (a new store recipient).
+
+## Overlay remote keys
+
+Each overlay has a separate age layer identity for each store remote and epoch.
+The store identity cannot decrypt overlay records or file objects.
+The signed `overlay.key` record binds the layer recipient to the overlay ID, parent project ID and store recipient.
+Readers verify the signature with a trusted parent machine key before they use the recipient.
+The same exact record remains in the encrypted overlay log.
+
+Machine slots use keys from the project's trust records.
+Person readers explicitly bind their login to their age recipient in the signed readers record.
+Their slot is `overlays/<id>/epochs/<epoch>/slots/person-<login>-<fp>.age`.
+The fingerprint follows the v2 person slot rule in this document.
+Local user and group readers do not get store slots.
+The owner paper slot uses the public opener recipient from the local store pin.
+No pin, record or log holds a private identity, paper key or credential.
+The local layer key cache contains only a machine-encrypted identity.
+
+Reader removal causes the next push to create a new epoch and identity.
+The new epoch contains slots for the remaining readers only.
+Earlier objects remain unchanged. A removed reader can still read data copied earlier.
+A fetch without a slot leaves that overlay local and imports the shared files.
+A peer service applies signed overlay reader policy across machines.
+Other project policy remains local to each machine.
+Root on a peer can read its disk, so `overlay.<name>.peers` limits which machines receive plaintext overlays.
+
+Only key managers can sign layer key and readers records.
+The creator machine is the first manager.
+Use `layr overlay managers <name> machine:<id>...` to select the manager machines.
+A remaining manager must sign removal of another manager.
+The parent project carries exact signed manager proofs so machines without a layer key can verify authority.
+Transitions preserve hashes of already authorized key and readers records.
+A removed manager cannot replace those records or authorize a new recipient.
+A trusted project writer that is not a manager can upload encrypted data but cannot change overlay key authority.
+
+Use two manager machines.
+If every manager machine is lost, the overlay key cannot change.
+Create a new overlay and move the files in that case.
