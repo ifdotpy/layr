@@ -13,7 +13,26 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq btrfs-progs zstd git python3
+          sudo apt-get install -y -qq btrfs-progs zstd git python3 docker-registry skopeo apache2-utils
+          # t30-oci also uses helm, which the runner image has.
+          command -v helm
+      # t36-aws-profile uses MinIO. Its project stopped publishing binaries and images, so CI
+      # builds a pinned release from source once and keeps it in the cache.
+      - name: Cache MinIO
+        id: minio
+        uses: actions/cache@v4
+        with:
+          path: ~/minio
+          key: minio-RELEASE.2025-10-15T17-29-55Z-${{ runner.os }}-${{ runner.arch }}
+      - uses: actions/setup-go@v5
+        if: steps.minio.outputs.cache-hit != 'true'
+        with:
+          go-version: stable
+          cache: false
+      - name: Build MinIO
+        if: steps.minio.outputs.cache-hit != 'true'
+        run: |
+          CGO_ENABLED=0 GOBIN="$HOME/minio" go install github.com/minio/minio@RELEASE.2025-10-15T17-29-55Z
       - name: Build
         run: cargo build --locked
       - name: Unit tests
@@ -21,7 +40,7 @@ jobs:
       - name: Integration tests (root, btrfs on loop files)
         run: |
           sudo modprobe btrfs || true
-          sudo -E env "PATH=$PATH" LAYR="$PWD/target/debug/layr" tests/run.sh
+          sudo -E env "PATH=$PATH" LAYR="$PWD/target/debug/layr" LAYR_MINIO_BIN="$HOME/minio/minio" tests/run.sh
   macos:
     runs-on: macos-14
     steps:
