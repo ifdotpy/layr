@@ -196,8 +196,13 @@ fn readers(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let list = principals(&a.pos[1..])?;
     let _lock = orepo.p.lock()?;
+    let access = access_map(info.owner, &list);
+    let removed = orepo.policy().access.iter().any(|(principal, role)| *role >= Role::Reader && access.get(principal).is_none());
     let mut record = Record::new("overlay.readers");
-    record.data = serde_json::json!({"config":{"access":access_map(info.owner, &list)}});
+    record.data = serde_json::json!({"config":{"access":access}});
+    if removed {
+        record.data["config"]["overlay.revocation"] = serde_json::json!(ids::new_id());
+    }
     orepo.commit_record(ctx, record)?;
     Ok(0)
 }

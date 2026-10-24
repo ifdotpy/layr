@@ -17,6 +17,7 @@ A=dict(base,LAYR_PROJECT='project')
 B=dict(base,LAYR_ROOT=str(root/'store/b-root'))
 C=dict(base,LAYR_ROOT=str(root/'store/c-root'))
 D=dict(base,LAYR_ROOT=str(root/'store/d-root'))
+E=dict(base,LAYR_ROOT=str(root/'store/e-root'),LAYR_PERSON_DIR=str(root/'reader-person'),LAYR_PERSON_LOGIN='reader@example.com')
 def run(args,env=A,success=True):
  p=subprocess.run([binary,*args],env=env,cwd=root,text=True,capture_output=True,timeout=90)
  if success: assert p.returncode==0,(args,p.returncode,p.stdout,p.stderr)
@@ -38,7 +39,12 @@ run(['--line','main','add','public.txt'])
 run(['--line','main','save','-m','Shared file','-q'])
 run(['remote','add','archive','file://'+str(root/'archive'),'--paper-key-out',str(root/'paper')])
 for who in [b,c,d]: run(['remote','trust','archive',who['id'],'--public-key',who['public_key']])
-run(['--line','main','overlay','create','secrets','--readers',f"layr-ov-reader,machine:{a['id']},machine:{b['id']}",'-q'])
+run(['person','keys','--paper-key-out',str(root/'person-paper')],E)
+E['LAYR_PERSON_KEY_FILE']=str(root/'person-paper')
+person=json.loads(run(['person','show','--json'],E).stdout)
+run(['remote','grant','archive','--person','reader@example.com','--recipient',person['recipient'],'--invite-out',str(root/'reader-invite.age')],dict(A,LAYR_PERSON_LOGIN='reader@example.com'))
+run(['person','accept','--invite-file',str(root/'reader-invite.age')],E)
+run(['--line','main','overlay','create','secrets','--readers',f"layr-ov-reader,machine:{a['id']},machine:{b['id']},person:reader@example.com={person['recipient']}",'-q'])
 (line/'.env').write_text('PRIVATE_TEST_VALUE=private-epoch-one\n')
 run(['--line','main','overlay','move','secrets','.env','--purge','-q'])
 run(['--line','main','save','-m','Private file','-q'])
@@ -52,10 +58,14 @@ k=key['r']['data'];epoch=root/f"archive/overlays/{k['overlay']}/epochs/{k['epoch
 check((epoch/f"slots/machine-{b['id']}.age").exists(),'the reader machine gets an epoch slot')
 check(not (epoch/f"slots/machine-{c['id']}.age").exists(),'the non-reader has no layer slot')
 check((epoch/'slots/paper.age').exists(),'the overlay owner gets a paper slot')
+fp=hashlib.sha256(person['recipient'].encode()).hexdigest()[:16]
+check((epoch/f'slots/person-reader@example.com-{fp}.age').exists(),'the person layer slot uses the v2 fingerprint name')
 before=hashes();run(['push','archive','-q'])
 check(hashes()==before,'a repeated push preserves every existing object')
 run(['clone','file://'+str(root/'archive'),'project','-q'],B)
 check((pathlib.Path(B['LAYR_ROOT'])/'projects/project/lines/main/.env').read_text().endswith('private-epoch-one\n'),'B clones the private overlay with its machine slot')
+run(['clone','file://'+str(root/'archive'),'project','-q'],E)
+check((pathlib.Path(E['LAYR_ROOT'])/'projects/project/lines/main/.env').read_text().endswith('private-epoch-one\n'),'a person reader clones the overlay with its person key')
 report=json.loads(run(['clone','file://'+str(root/'archive'),'project','--json'],C).stdout)
 check('overlay secrets: no key on this machine' in report['omitted'],'C receives the no-key report')
 cline=pathlib.Path(C['LAYR_ROOT'])/'projects/project/lines/main'
@@ -85,6 +95,12 @@ def mount_read(env,path):
   process.terminate();process.wait(timeout=10);log.close()
 check(mount_read(B,'/main/.env')==(200,b'PRIVATE_TEST_VALUE=private-epoch-one\n'),'B reads the overlay through mount')
 check(mount_read(C,'/main/.env')[0]==404,'mount hides the overlay from C')
+check(mount_read(E,'/main/.env')==(200,b'PRIVATE_TEST_VALUE=private-epoch-one\n'),'a person reader mounts the overlay with its person slot')
+# A peer outside the default machine reader set receives shared files only.
+run(['remote','add','nonreader','ssh://test/project'])
+blocked=json.loads(run(['sync','nonreader','--json','--command','--','env','LAYR_ROOT='+C['LAYR_ROOT'],binary,'serve-peer','project']).stdout)
+check('overlay secrets: peer is not allowed to hold it' in blocked['omitted'],'default peers exclude C')
+check(not (pathlib.Path(C['LAYR_ROOT'])/'projects/project/meta/overlays/secrets').exists(),'an excluded peer receives no overlay project')
 # Peer B receives overlay states. C is explicitly allowed to hold them, but its service enforces readers.
 for who,env in [(b,B),(c,C)]:
  name='peer-'+who['id'][:8]
@@ -108,6 +124,18 @@ try:
   check((p.returncode==0)==allowed,'C service enforces overlay readers for '+user)
 finally:
  daemon.terminate();daemon.wait(timeout=10);daemonlog.close()
+# A machine that holds peer plaintext but has no layer slot can push to the signed recipient.
+run(['remote','add','writer','ssh://test/project'])
+run(['config','overlay.secrets.peers',json.dumps([b['id'],c['id'],d['id']])])
+run(['sync','writer','--command','--','env','LAYR_ROOT='+D['LAYR_ROOT'],binary,'serve-peer','project'])
+run(['--project','project','adopt','main'],D)
+dline=pathlib.Path(D['LAYR_ROOT'])/'projects/project/lines/main'
+(dline/'.env').write_text('PRIVATE_TEST_VALUE=write-only-machine\n')
+run(['--project','project','--line','main','save','-am','Write-only overlay update','-q'],D)
+run(['--project','project','remote','add','archive','file://'+str(root/'archive')],D)
+run(['--project','project','push','archive','-q'],D)
+check(not (epoch/f"slots/machine-{d['id']}.age").exists(),'a write-only push adds no slot for its own machine')
+check(len(list((epoch/'states').glob('*/*.tree.age')))>=3,'a write-only machine publishes encrypted overlay states')
 # Removal produces a new key, fresh objects and slots for the remaining readers only.
 old=hashes()
 run(['--line','main','overlay','readers','secrets',f"machine:{a['id']}"])

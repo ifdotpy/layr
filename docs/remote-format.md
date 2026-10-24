@@ -172,6 +172,7 @@ Its data binds `overlay`, `name`, `epoch`, `parent`, `store`, `recipient` and `r
 `overlay` is the internal overlay project UUID. `parent` is the parent project UUID.
 `store` is the pinned store recipient. `recipient` is the age layer recipient.
 `readers` binds machine and person principals to the signed reader set.
+The optional `revocation` UUID forces a new epoch after removal, even if a reader is added again before push.
 The reader verifies the record against a trusted parent machine key.
 The encrypted overlay log must contain the same key record.
 Each epoch contains the complete record log and selected states, with no reference to objects in earlier epochs.

@@ -20,6 +20,8 @@ pub(crate) struct Key {
     pub store: String,
     pub recipient: String,
     pub readers: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revocation: Option<String>,
 }
 
 #[derive(Clone)]
@@ -231,7 +233,10 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
                 }
             }
         }
-        let rotate = previous.as_ref().is_none_or(|old| old.key.readers.keys().any(|reader| !readers.contains_key(reader)));
+        let revocation = orepo.p.db.overlay_config("overlay.revocation")?.and_then(|value| value.as_str().map(str::to_owned));
+        let rotate = previous.as_ref().is_none_or(|old| {
+            old.key.revocation != revocation || old.key.readers.keys().any(|reader| !readers.contains_key(reader))
+        });
         let published = if rotate {
             let identity = keys::generate_identity();
             let epoch = crate::ids::new_id();
@@ -246,6 +251,7 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
                 store: descriptor.recipient.clone(),
                 recipient: keys::recipient_of(&identity)?,
                 readers: readers.clone(),
+                revocation,
             };
             let mut record = Record::new("overlay.key");
             record.data = serde_json::to_value(&key)?;
@@ -311,8 +317,7 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
         }
         // The public object contains the exact signed record, never an identity.
         store.backend.put_new(&published.object(), published.line.as_bytes().to_vec())?;
-        drop(_lock);
-        merge(report, writer::push(&scoped, ctx, &orepo, opts)?, &name);
+        merge(report, writer::push_locked(&scoped, ctx, &orepo, opts)?, &name);
     }
     Ok(())
 }
@@ -424,6 +429,7 @@ mod tests {
             store: store.clone(),
             recipient: keys::recipient_of(&keys::generate_identity()).unwrap(),
             readers: BTreeMap::new(),
+            revocation: None,
         })
         .unwrap();
         let line = oplog::sign_line(&rec, &signer).unwrap();

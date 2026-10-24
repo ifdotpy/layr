@@ -116,17 +116,22 @@ fn initialization_failpoint(point: &str) -> Result<()> {
 
 pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options) -> Result<Report> {
     let _lock = repo.p.lock()?;
+    push_locked(store, ctx, repo, opts)
+}
+
+pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options) -> Result<Report> {
     if opts.caches && serde_json::from_value::<crate::model::StateKind>(serde_json::json!("cache")).is_err() {
         bail!("store --caches is not available until cache states exist");
     }
     store.private_dir()?;
     let descriptor = store.descriptor()?;
+    let blind_layer = store.layer.is_some() && !store.backend.can_read();
     let mut report = Report { omitted: reader::omitted_cache_refs(repo, opts)?, ..Default::default() };
     repo.p.verify_records()?;
     // A list is enough for a writer without permission to read encrypted objects.
     for machine in repo.p.db.record_machines()? {
         let mut last = 0;
-        for object in store.backend.list(&format!("records/{machine}/"))? {
+        for object in if blind_layer { Vec::new() } else { store.backend.list(&format!("records/{machine}/"))? } {
             let (m, _, end) = format::parse_segment_name(&object.key).context("invalid remote segment name")?;
             if m != machine {
                 bail!("segment is outside its machine prefix");
@@ -146,7 +151,7 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options) -> Res
         store.backend.put_new(&key, keys::encrypt(&descriptor.recipient, &bytes)?)?;
         report.records += lines.len();
     }
-    let present = reader::attempts(&store.backend)?;
+    let mut present = if blind_layer { BTreeMap::new() } else { reader::attempts(&store.backend)? };
     let index_file = store.dir.join("pushed.json");
     let mut index: BTreeMap<String, Pushed> = if index_file.exists() {
         serde_json::from_slice(&std::fs::read(&index_file)?).context("invalid local pushed index")?
@@ -154,8 +159,13 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options) -> Res
         BTreeMap::new()
     };
     // Only committed remote trees can be reused as delta bases.
-    let committed: std::collections::BTreeSet<String> = store.backend.list("states/")?.into_iter().map(|o| o.key).collect();
-    index.retain(|id, pushed| committed.contains(&format::tree_name(id, &pushed.attempt)));
+    if blind_layer {
+        // A write token cannot list epoch records or states. The local index contains only committed uploads.
+        present.extend(index.iter().map(|(id, pushed)| (id.clone(), pushed.attempt.clone())));
+    } else {
+        let committed: std::collections::BTreeSet<String> = store.backend.list("states/")?.into_iter().map(|o| o.key).collect();
+        index.retain(|id, pushed| committed.contains(&format::tree_name(id, &pushed.attempt)));
+    }
     for (state, pushed) in &index {
         if !crate::model::is_uuid(state) || !format::valid_attempt(&pushed.attempt) || pushed.depth >= format::FULL_TREE_EVERY {
             bail!("invalid local pushed index metadata");

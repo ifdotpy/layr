@@ -336,7 +336,7 @@ impl Gateway {
         }
         let has_identity = self.identity.lock().map_err(|_| anyhow!("gateway identity lock failed"))?.is_some();
         let response = if !has_identity
-            && (prefix.starts_with("records/") || prefix.starts_with("states/") || prefix.starts_with("overlays/"))
+            && (prefix.starts_with("records/") || prefix.starts_with("states/") || overlay_keys_prefix(prefix))
         {
             self.send(Method::GET, "objects", self.token.as_deref(), Some(("prefix", prefix)), None)?
         } else {
@@ -386,6 +386,11 @@ impl Gateway {
             status => bail!("gateway delete: HTTP {status}"),
         }
     }
+}
+
+fn overlay_keys_prefix(prefix: &str) -> bool {
+    let parts: Vec<_> = prefix.split('/').collect();
+    parts.len() == 4 && parts[0] == "overlays" && crate::model::is_uuid(parts[1]) && parts[2] == "keys" && parts[3].is_empty()
 }
 
 fn overlay_keys_path(key: &str) -> bool {

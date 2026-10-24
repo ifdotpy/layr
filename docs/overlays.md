@@ -1,6 +1,6 @@
 # Overlays
 
-Status: the first slice is built (section 9): file overlays in shared and follow mode. Sections 1
+Status: file overlays support shared and follow mode (section 9), store encryption and peer sync (section 10). Sections 1
 to 8 are the design and the experiments of 2026-10-11; section 9 says what the slice does, where
 it differs from the design, and what is left.
 

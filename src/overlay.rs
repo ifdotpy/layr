@@ -4,7 +4,7 @@
 //! An overlay is the internal project `<project>%<overlay>` below the project's private `meta`
 //! folder, with its own states, signed records and access policy (its owner is its admin, its
 //! readers have the reader role). History, permissions and fsck work as for any project, and
-//! remote copies, pushes and replication of the project never see it. Its lines are pointers without
+//! store pushes and peer sync carry it under its own reader rules. Its lines are pointers without
 //! working folders: `user-<uid>` (shared mode: one for all lines of a user) and `line-<line id>`
 //! (follow mode: one per line of the project, branched and merged with it).
 //!
