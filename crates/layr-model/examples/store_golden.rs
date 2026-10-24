@@ -220,7 +220,13 @@ fn file_diff(base: &str, head: &str, metadata: &BTreeMap<String, format::Tree>, 
     Ok(json!({"base":base,"head":head,"files":rows}))
 }
 
-fn overlays(model: &Model, project: &Project, now: i64, files: &StateFiles) -> Vec<Value> {
+fn overlays(
+    model: &Model,
+    project: &Project,
+    now: i64,
+    files: &StateFiles,
+    authorities: &BTreeMap<String, layr_model::authority::Authority>,
+) -> Vec<Value> {
     let records = project.op_log(None, usize::MAX);
     let mut result = Vec::new();
     for creation in records.iter().rev().filter(|r| r.op == "overlay.create") {
@@ -230,6 +236,9 @@ fn overlays(model: &Model, project: &Project, now: i64, files: &StateFiles) -> V
         let overlay = model.projects.get(id);
         let mut row =
             json!({"id":id,"name":name,"patterns":[],"readers":[],"managers":[creation.machine],"readable":overlay.is_some()});
+        if let Some(authority) = authorities.get(name) {
+            row["managers"] = json!(authority.machines);
+        }
         if let Some(owner) = info.get("owner") {
             row["owner"] = owner.clone();
         }
@@ -249,13 +258,6 @@ fn overlays(model: &Model, project: &Project, now: i64, files: &StateFiles) -> V
             let records = overlay.op_log(None, usize::MAX);
             if let Some(record) = records.iter().find(|r| r.op == "overlay.key") {
                 row["epoch"] = record.data["epoch"].clone();
-            }
-            let mut previous: Option<String> = None;
-            let mut changes: Vec<_> = records.iter().filter(|r| r.op == "overlay.managers").collect();
-            while let Some(index) = changes.iter().position(|r| r.data["previous"].as_str() == previous.as_deref()) {
-                let change = changes.remove(index);
-                row["managers"] = change.data["machines"].clone();
-                previous = Some(change.id.clone());
             }
             let paths: BTreeSet<_> =
                 overlay.line_list().iter().filter_map(|l| files.get(&l.head)).flat_map(|f| f.keys().cloned()).collect();
@@ -293,11 +295,12 @@ fn page_outputs(
     overlay_files: &StateFiles,
     change: &str,
     context: &probes::Context,
+    authorities: &BTreeMap<String, layr_model::authority::Authority>,
 ) -> Result<()> {
     let lines = project.line_list();
     let records = project.op_log(None, usize::MAX);
     let policy = project.access_policy(context.now, false);
-    let overlays = overlays(model, project, context.now, overlay_files);
+    let overlays = overlays(model, project, context.now, overlay_files, authorities);
     let mut summary = json!({"id":project.id,"name":project.name.as_ref().context("project has no name record")?,"config":project.config,"overlays":overlays,
         "counts":{"lines":lines.len(),"states":project.states.len(),"changes":project.changes().len(),"refs":project.ref_list("",context.now).len(),"queue":project.queue_list(None).len(),"operations":records.len(),"attestations":records.iter().filter(|r|r.data.get("attestation").is_some() || matches!(r.op.as_str(),"approve"|"approve.withdraw"|"check")).count()}});
     if let Some(initial) =
@@ -340,6 +343,8 @@ fn page_outputs(
         .chain(records.iter().filter_map(|r| r.data["attestation"]["subject"]["id"].as_str()))
         .collect();
     write(out, "attestations-all", subjects.into_iter().flat_map(|id| project.attestations(id, None)).collect::<Vec<_>>())?;
+    summary["policy"] = serde_json::to_value(&policy)?;
+    write(out, "policy", &policy)?;
     write(out, "projects", vec![summary])?;
     let path_rules: BTreeMap<_, _> = policy
         .protect
@@ -422,6 +427,7 @@ fn main() -> Result<()> {
     ensure!(public_keys.len() == 1, "the golden fixture must use one machine");
     let machine = public_keys.keys().next().context("no machine")?.clone();
 
+    let authorities = layr_model::authority::from_lines(&descriptor.project, &lines, &public_keys)?;
     // The fixture has one overlay epoch and one creator. Verify that creator's key.
     let overlay_keys: Vec<_> = objects
         .keys()
@@ -466,6 +472,8 @@ fn main() -> Result<()> {
                     && rec.data["config"][format!("overlay.{layer_name}")]["id"] == overlay
             });
         ensure!(created, "overlay key signer does not match its creator");
+        let authority = authorities.get(layer_name).context("overlay has no verified parent authority")?;
+        ensure!(authority.permits(&key_record, key_line), "overlay key signer is not a current manager");
         let prefix = format!("overlays/{overlay}/epochs/{epoch}/");
         let scoped: Objects = objects
             .iter()
@@ -478,6 +486,7 @@ fn main() -> Result<()> {
         );
         let (layer_lines, layer_keys) = records(&scoped, &layer_identity, overlay, Some(&public_keys))?;
         ensure!(layer_lines.iter().any(|line| line == key_line), "overlay log does not contain its key");
+        authority.validate(&layer_lines, overlay, &public_keys)?;
         overlay_files = store(scoped, layer_identity, layer_keys).states()?;
         overlay_project = overlay.into();
         lines.extend(layer_lines);
@@ -538,7 +547,7 @@ fn main() -> Result<()> {
     write(&args[2], "attestations", project.attestations(&request.attestation_state, None))?;
     write(&args[2], "operations", project.op_log(Some(&line.id), 30))?;
     write(&args[2], "probe-diff", probes::diff(project, &subject(request.probe_base), &subject(request.probe_head), &context)?)?;
-    page_outputs(&args[2], &model, project, &source.metadata, &files, &overlay_files, &request.change, &context)?;
+    page_outputs(&args[2], &model, project, &source.metadata, &files, &overlay_files, &request.change, &context, &authorities)?;
     if project.line_list().len() != 2 {
         bail!("fixture must have two lines");
     }

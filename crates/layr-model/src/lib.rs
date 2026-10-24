@@ -6,9 +6,11 @@
 //! Large file contents stay outside the model. Probe comparisons accept bytes on demand.
 #![forbid(unsafe_code)]
 
+pub mod authority;
 pub mod policy;
 pub mod probes;
 pub mod types;
+pub mod validation;
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -33,7 +35,9 @@ impl Model {
         }
         let mut records = Vec::new();
         for line in lines {
-            records.push(serde_json::from_str::<Envelope>(line).context("parse verified record line")?.r);
+            let record = serde_json::from_str::<Envelope>(line).context("parse verified record line")?.r;
+            validation::validate(&record)?;
+            records.push(record);
         }
         Self::from_records(records, machine)
     }
