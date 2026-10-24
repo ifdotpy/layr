@@ -233,6 +233,7 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
         index.insert(state.id.clone(), pushed);
         fsutil::atomic_write(&index_file, &serde_json::to_vec(&index)?, 0o600)?;
         report.states += 1;
+        report.state_ids.push(state.id.clone());
         report.files += files;
         report.bytes += bytes;
     }

@@ -1,7 +1,7 @@
 use super::*;
 use serde_json::json;
 
-fn record(seq: u64, op: &str) -> Record {
+pub(super) fn record(seq: u64, op: &str) -> Record {
     let mut r = Record::new(op);
     r.id = format!("record-{seq}");
     r.project = "project".into();
@@ -11,7 +11,7 @@ fn record(seq: u64, op: &str) -> Record {
     r.actor.uid = 10;
     r
 }
-fn state(id: &str, kind: StateKind, parents: &[&str]) -> StateRec {
+pub(super) fn state(id: &str, kind: StateKind, parents: &[&str]) -> StateRec {
     StateRec {
         id: id.into(),
         kind,
@@ -40,7 +40,7 @@ fn line(head: &str, machine: &str) -> LineChange {
         working_after: None,
     }
 }
-fn fold(records: Vec<Record>) -> Project {
+pub(super) fn fold(records: Vec<Record>) -> Project {
     Project::from_records("project", records, "a").unwrap()
 }
 
@@ -263,4 +263,30 @@ fn merge_status_selects_target_machine_and_keeps_unknown_actor_and_groups_undeci
     let unknown = project.merge_status("source", "absent", &context).unwrap();
     assert_eq!(unknown.status, "unavailable");
     assert_eq!(unknown.allowed, None);
+}
+
+#[test]
+fn hidden_layers_come_only_from_their_own_records() {
+    let mut parent = record(1, "project");
+    parent.lines.insert("line".into(), line("shared", "a"));
+    parent.data = json!({"config":{}});
+    let mut own = record(1, "project");
+    own.project = "overlay-project".into();
+    own.data = json!({"config":{"overlay":{"project":"project","name":"hidden","hidden":true,"mode":"follow"}}});
+    let mut head = record(2, "line.create");
+    head.project = "overlay-project".into();
+    let mut change = line("hidden-state", "a");
+    change.after.as_mut().unwrap().name = "line-line".into();
+    head.lines.insert("overlay-line".into(), change);
+    let reader = Model::from_records([parent.clone(), own, head], "a").unwrap();
+    let other = Model::from_records([parent], "a").unwrap();
+    let line = other.projects["project"].line_list().remove(0);
+    assert_eq!(reader.layers("project", &line).unwrap()[0].overlay, "hidden");
+    assert!(other.layers("project", &line).unwrap().is_empty());
+    assert!(other.overlay_projects("project").is_empty());
+    assert_eq!(
+        serde_json::to_value(&reader.projects["project"]).unwrap(),
+        serde_json::to_value(&other.projects["project"]).unwrap()
+    );
+    assert!(!serde_json::to_string(&other).unwrap().contains("hidden"));
 }

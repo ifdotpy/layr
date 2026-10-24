@@ -226,9 +226,13 @@ fn finish(
         if let Err(e) = o.record(ctx, repo) {
             return Err(fail(e));
         }
-        data["stack"] = crate::overlay::stack_data(&line.id, &layers);
+        data["stack"] = repo.public_stack_data(&line.id, &layers)?;
         data["line"] = serde_json::json!(line.id);
-        data["overlays"] = serde_json::json!(o.names());
+        data["overlays"] = serde_json::json!(o
+            .names()
+            .into_iter()
+            .filter(|n| !repo.need_overlay(n).map(|i| i.hidden).unwrap_or(true))
+            .collect::<Vec<_>>());
     }
     repo.move_head(ctx, op, line, new_head, states, working_before, data)?;
     if let Some(v) = view {
@@ -874,7 +878,14 @@ fn pick(ctx: &Ctx, args: &[String], revert: bool) -> Result<i32> {
             vec![state],
             first_w.take(),
             &local,
-            serde_json::json!({"source": p}),
+            if revert {
+                serde_json::json!({"source": p})
+            } else {
+                serde_json::json!({"source":p,"version":crate::model::VersionOperation {
+                    state: sid.clone(), kind: "pick".into(), source: p.clone(),
+                    target_line: Some(line.id.clone()), target_head: line.head.clone(),
+                }})
+            },
             None,
         )?;
         line = repo.line(&line.id)?;
@@ -945,6 +956,7 @@ pub fn rebase(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let mut chain = repo.first_parent_chain(&line.head, Some(&base))?;
     chain.reverse();
+    let target_line = repo.p.db.line_by_name(a.get("--onto").unwrap_or(up))?.map(|l| l.id).or(repo.state(&onto)?.line);
     let mut cur = onto.clone();
     let mut states = Vec::new();
     let mut conflicts = 0;
@@ -965,6 +977,10 @@ pub fn rebase(ctx: &Ctx, args: &[String]) -> Result<i32> {
         // Later picks read this state: write its record now, as part of the rebase.
         let mut rec = Record::new("rebase.step");
         rec.states.push(s.clone());
+        rec.data = serde_json::json!({"line":line.id,"version":crate::model::VersionOperation {
+            state: s.id.clone(), kind: "replay".into(), source: p.clone(),
+            target_line: target_line.clone(), target_head: onto.clone(),
+        }});
         repo.commit_record(ctx, rec)?;
         states.push(s);
     }

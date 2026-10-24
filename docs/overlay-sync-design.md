@@ -107,6 +107,10 @@ Rules for a hidden overlay:
    overlay holds is caught on readers' machines (their saves and pushes), not on others.
 7. A visible overlay cannot become hidden (its name is already known); a hidden one can become
    visible (`layr overlay show-to-project <name>`).
+8. Read-only commands on another user's line (`status`, `diff`, `grep`, `ls-files`, and `show`)
+   use the shared snapshot and only layers the caller can read when hidden layers are filtered.
+   Filtering gives no notice. Output and exit status match a line without the hidden overlay.
+   An unread visible private overlay keeps the existing access refusal.
 
 UI: a hidden overlay appears only to its readers, with a "hidden" badge; non-readers see no row,
 no count and no badge on files.

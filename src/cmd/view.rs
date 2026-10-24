@@ -16,7 +16,7 @@ pub fn view(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let _lock = h.repo.p.lock()?;
     let current = h.line.as_ref().map(|line| h.repo.line(&line.id)).transpose()?;
-    let view = if show {
+    let mut view = if show {
         let id = rest.first().ok_or_else(|| anyhow::anyhow!("usage: layr view show <id> [--json]"))?;
         h.repo.saved_view(id.strip_prefix("views/").unwrap_or(id))?
     } else if save {
@@ -28,6 +28,18 @@ pub fn view(ctx: &Ctx, args: &[String]) -> Result<i32> {
     } else {
         crate::revs::resolve_view(&h.repo, current.as_ref(), rest.first().map(String::as_str).unwrap_or("head"))?
     };
+    if show
+        && view.layers.iter().any(|layer| {
+            h.repo.need_overlay(&layer.overlay).is_ok_and(|i| i.hidden)
+                && !h.repo.reads_overlay(&layer.overlay, ctx.caller.uid, ctx.caller.gid).unwrap_or(false)
+        })
+    {
+        bail!("unknown view");
+    }
+    view.layers.retain(|layer| {
+        !h.repo.need_overlay(&layer.overlay).is_ok_and(|i| i.hidden)
+            || h.repo.reads_overlay(&layer.overlay, ctx.caller.uid, ctx.caller.gid).unwrap_or(false)
+    });
     let id = if save { h.repo.save_view(ctx, &view)? } else { view.id()? };
     if a.has("--json") {
         outln!(ctx, "{}", serde_json::json!({"view_id":id,"view":view}));

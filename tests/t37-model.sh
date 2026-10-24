@@ -30,6 +30,11 @@ outputs = ["out/metric.json"]
 kind = "number"
 noise = 0.01
 fail_over = 0.2
+[probe.screens]
+run = ["python3", "screens.py"]
+outputs = ["out/screens"]
+kind = "screenshots"
+fail_over = 0.5
 TOML
 cat > "$T/src/probe.py" <<'PY'
 import json
@@ -37,6 +42,25 @@ from pathlib import Path
 Path('out').mkdir(exist_ok=True)
 Path('out/metric.json').write_text(json.dumps({'value': int(Path('metric.txt').read_text())}))
 PY
+
+cat > "$T/src/screens.py" <<'PYSCREENS'
+import json, struct, zlib
+from pathlib import Path
+value = int(Path('metric.txt').read_text())
+out = Path('out/screens')
+out.mkdir(parents=True, exist_ok=True)
+def chunk(tag, data):
+    return struct.pack('>I', len(data)) + tag + data + struct.pack('>I', zlib.crc32(tag + data))
+header = struct.pack('>IIBBBBB', 2, 2, 8, 6, 0, 0, 0)
+pixels = bytes([value, 0, 0, 255] + [0, 0, 0, 255] * 3)
+rows = b'\0' + pixels[:8] + b'\0' + pixels[8:]
+(out / 'Home@Phone.png').write_bytes(b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', header) + chunk(b'IDAT', zlib.compress(rows)) + chunk(b'IEND', b''))
+(out / 'Home@Phone.html').write_text(f'<main nonce="{value}"><p>{value}</p></main>')
+(out / 'Native@Phone.xml').write_text(f'<node bounds="[1,2][4,6]" text="{value}"/>')
+(out / 'Tree@Phone.json').write_text(json.dumps({'label': str(value), 'frame': [1, 2, 3, 4]}))
+(out / 'Text@Phone.txt').write_text(f'{value}\n')
+(out / 'Stable@Phone.txt').write_text('Same\n')
+PYSCREENS
 
 l init model-golden --from "$T/src" -q >/dev/null
 cd "$LAYR_ROOT/projects/model-golden/lines/main"
@@ -118,6 +142,16 @@ l save -qm pick-source
 PICK=$(state_id head)
 cd ../main
 l pick -q "$PICK" >/dev/null
+PICK_CHANGE=$(l log head -n 1 --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["change_id"])')
+l change show "$PICK_CHANGE" --json > "$T/pick-version.json"
+ok 'pick records its actor and exact target head' python3 - "$T/pick-version.json" "$PICK" <<'PYPICK'
+import json,sys
+row=json.load(open(sys.argv[1]))['versions'][-1]
+operation=row['operation']
+assert operation['kind']=='pick' and operation['source']==sys.argv[2]
+assert operation['target_head']==row['state']['parents'][0]
+assert operation['actor']['name'] and operation['target_line']
+PYPICK
 l invert head >/dev/null
 
 # Retain an auto state without moving the named head.
@@ -199,15 +233,80 @@ eq 'a refused merge keeps the target head' "$MERGE_BEFORE" "$(state_id head)"
 MERGE_CANDIDATE=$(l op log --all -n 100000 --json | python3 -c 'import json,sys; rows=[json.loads(line) for line in sys.stdin]; print(next(r["states"][0]["id"] for r in rows if r["op"]=="merge.candidate" and r["data"]["theirs"]==sys.argv[1]))' "$MERGE_SOURCE")
 printf '{"merge":%s,"ref":%s}\n' "$MERGE_ALLOWED" "$REF_ALLOWED" > "$T/cli/merge-refusals.json"
 
+# Bisect stores both executed checks and later reuse without changing the line head.
+l bisect run --good "$BASE" --bad "$V3" --json -- sh -c 'test ! -f feature.txt' > "$T/bisect-first.json"
+l bisect run --good "$BASE" --bad "$V3" --json -- sh -c 'test ! -f feature.txt' > "$T/bisect-reused.json"
+ok 'bisect reuse preserves every check result' python3 - "$T/bisect-first.json" "$T/bisect-reused.json" <<'PYBISECT'
+import json, sys
+first, second = [json.load(open(path)) for path in sys.argv[1:]]
+assert first['first_bad'] == second['first_bad']
+assert all(step['reused'] for step in second['steps'])
+assert [(s['state'], s['exit']) for s in first['steps']] == [(s['state'], s['exit']) for s in second['steps']]
+PYBISECT
+no 'invalid bisect bounds are refused' l bisect run --good "$V3" --bad "$BASE" --json -- sh -c 'test ! -f feature.txt'
+l bisect list --json > "$T/bisect-history.json"
+eq 'invalid bounds add no bisect result' 2 "$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "$T/bisect-history.json")"
+
+# The peer transport requires Btrfs. Store and version checks also run on macOS.
+if [ "$(uname -s)" = Linux ] && [ -z "${LAYR_OVERLAYFS_TEST_ROOT:-}" ]; then
+    new_fs "$T/peer" 4G
+    l remote add peer ssh://fixture/model-golden
+    l sync peer --command -q -- env LAYR_ROOT="$T/peer/store" "$LAYR" serve-peer model-golden
+fi
+
 l remote add store "file://$T/archive" --paper-key-out "$T/paper" >/dev/null
-l push store -q
-ok 'the pushed store has encrypted trees for v1 and v2' python3 - "$T/archive" "$V1" "$V2" <<'PYPRIOR'
+l overlay create hidden-golden --hidden --readers nobody -q
+printf 'hidden golden bytes\n' > hidden.txt
+l overlay move hidden-golden hidden.txt -q
+l save -qm hidden-golden-state
+l overlay list --json | python3 -c 'import json,sys; rows=json.load(sys.stdin); print(json.dumps([{"name":r["name"],"hidden":r["hidden"]} for r in rows if r["hidden"]]))' > "$T/cli/hidden-reader.json"
+# A parent-only reader has no hidden creation or hidden layer descriptor.
+l op log --all -n 100000 --json | python3 -c 'import json,sys; rows=[json.loads(l) for l in sys.stdin]; assert not any("hidden-golden" in json.dumps(r) for r in rows); print("[]")' > "$T/cli/hidden-nonreader.json"
+l push store --json > "$T/store-push.json"
+ok 'one push sends all three version trees' python3 - "$T/archive" "$V1" "$V2" "$V3" <<'PYPRIOR'
 import sys
 from pathlib import Path
 store = Path(sys.argv[1])
 for state in sys.argv[2:]:
     assert any((store / 'states' / state).glob('*.tree.age')), state
 PYPRIOR
+ok 'overlay state IDs stay in the overlay transfer record' python3 - "$LAYR_ROOT/projects/model-golden" "$T/store-push.json" <<'PYPRIVATE'
+import json, sqlite3, sys
+from pathlib import Path
+project=Path(sys.argv[1])
+parent_db=sqlite3.connect((project/'meta/db/layr.sqlite').as_uri()+'?mode=ro',uri=True)
+overlay_dbs=[sqlite3.connect((project/'meta/overlays'/name/'meta/db/layr.sqlite').as_uri()+'?mode=ro',uri=True) for name in ['secrets','hidden-golden']]
+def push(db):
+    return json.loads(db.execute("select raw from records where op='push' order by time desc, seq desc limit 1").fetchone()[0])['r']
+parent=push(parent_db)
+overlays=[push(db) for db in overlay_dbs]
+parent_ids=set(parent['data']['state_ids_sent'])
+for name,db,overlay in zip(['secrets','hidden-golden'],overlay_dbs,overlays):
+    heads={row[0] for row in db.execute('select head from lines where deleted=0')}
+    overlay_ids=set(overlay['data']['state_ids_sent'])
+    assert heads and heads <= overlay_ids
+    assert not parent_ids & overlay_ids
+    assert not heads & parent_ids
+    assert parent['project'] != overlay['project'] and overlay['data']['overlay']==name
+    assert overlay['data']['states_sent']==len(overlay_ids)
+    db.close()
+assert parent['data']['overlays']==['secrets']
+assert parent['data']['states_sent']==len(parent_ids)
+assert 'hidden-golden' not in json.dumps(parent)
+report=json.load(open(sys.argv[2]))
+assert report['states']==parent['data']['states_sent']+sum(r['data']['states_sent'] for r in overlays)
+assert report['records']==parent['data']['records_sent']+sum(r['data']['records_sent'] for r in overlays)
+assert report['bytes']==parent['data']['bytes_sent']+sum(r['data']['bytes_sent'] for r in overlays)
+parent_db.close()
+PYPRIVATE
+l gc --remote store --json > "$T/remote-gc.json"
+ok 'remote GC keeps all three version trees' python3 - "$T/archive" "$V1" "$V2" "$V3" <<'PYGC'
+import sys
+from pathlib import Path
+for state in sys.argv[2:]:
+    assert any((Path(sys.argv[1]) / 'states' / state).glob('*.tree.age')), state
+PYGC
+ok 'all version trees remain readable after remote GC' l fsck --remote store --files
 
 # Only selectors cross into the model example. No CLI answers enter its input.
 python3 - "$T/model/request.json" "$CHANGE" "$V3" "$PROBE_BASE" "$PROBE_HEAD" "$MERGE_SOURCE" "$MERGE_CANDIDATE" <<'PY'
@@ -239,6 +338,18 @@ assert any(s['id'] == sys.argv[3] and len(s['parents']) == 2 for s in rows), 'th
 Path(sys.argv[2]).write_text(json.dumps(rows))
 PY
 l change show "$CHANGE" --json > "$T/cli/change.json"
+l bisect list --json > "$T/cli/bisect.json"
+l remote list --json | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["copies"]))' > "$T/cli/copies.json"
+ok 'change versions retain explicit amend and replay actors and targets' python3 - "$T/cli/change.json" <<'PYVERSION'
+import json, sys
+rows = json.load(open(sys.argv[1]))['versions']
+assert 'operation' not in rows[0]
+assert [row['operation']['kind'] for row in rows[1:]] == ['amend', 'replay']
+assert all(row['operation']['actor']['name'] and row['operation']['machine'] and row['operation']['time'] for row in rows[1:])
+assert all(row['operation']['target_line'] and row['operation']['target_head'] for row in rows[1:])
+assert rows[1]['operation']['source'] == rows[0]['state']['id']
+assert rows[2]['operation']['source'] == rows[1]['state']['id']
+PYVERSION
 l ref list --json > "$T/cli/refs.json"
 l ref log env/prod --json > "$T/cli/ref-log.json"
 l queue list --json > "$T/cli/queue.json"
@@ -252,7 +363,12 @@ rows = [json.loads(line) for line in Path(sys.argv[1]).read_text().splitlines() 
 Path(sys.argv[2]).write_text(json.dumps(rows))
 PY
 l probe diff "$PROBE_BASE" "$PROBE_HEAD" --json > "$T/cli/probe-diff.json"
+l probe diff "$PROBE_HEAD" "$PROBE_HEAD" --json > "$T/cli/probe-same.json"
 eq 'the fixture has exactly two lines' 2 "$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "$T/cli/lines.json")"
+
+# A transfer result is appended after success and travels in the next exchange.
+# Capture CLI answers first, then publish exactly that record set for the model.
+l push store -q
 
 (cd "$REPO" && cargo run -q -p layr-model --example store_golden -- "$T/archive" "$T/paper" "$T/model")
 
@@ -265,6 +381,22 @@ project = load('projects')[0]
 assert project['name'] == 'model-golden' and project['default_line'] == 'main'
 assert project['counts']['lines'] == 2 and project['counts']['changes'] >= 3
 assert any(p['name'] == 'metric' for p in project['probes'])
+screens = next(p for p in load('probe-diff')['probes'] if p['probe'] == 'screens')
+assert screens['status'] == 'changed' and screens['limit_reasons'] == []
+rows = {row['screen']: row for row in screens['changes']}
+assert set(rows) == {'Home@Phone', 'Native@Phone', 'Tree@Phone', 'Text@Phone', 'Stable@Phone'}
+assert rows['Home@Phone']['changed_pixels'] == 1 and rows['Home@Phone']['total_pixels'] == 4
+assert rows['Home@Phone']['changed_share'] == 0.25
+assert rows['Home@Phone']['regions'] == [{'x': 0, 'y': 0, 'width': 1, 'height': 1}]
+assert rows['Home@Phone']['text_changes'] == 1 and '+110' in rows['Home@Phone']['structure_diff']
+assert all(rows[name]['text_changes'] == 1 for name in ('Native@Phone', 'Tree@Phone', 'Text@Phone'))
+assert rows['Native@Phone']['structure_regions'] == rows['Tree@Phone']['structure_regions'] == [
+    {'x': 1.0, 'y': 2.0, 'width': 3.0, 'height': 4.0, 'change': 'text'}]
+assert rows['Text@Phone']['changed_share'] is None
+assert rows['Stable@Phone']['structure_diff'] == '' and rows['Stable@Phone']['text_changes'] == 0
+same = next(p for p in load('probe-same')['probes'] if p['probe'] == 'screens')
+assert same['status'] == 'unchanged' and same['limit_reasons'] == [] and len(same['changes']) == 5
+assert all(row['changed_share'] in (0, None) and not row['structure_diff'] for row in same['changes'])
 trees = load('trees')
 assert any(t['path'] == 'docs' and t['entries'][0]['text'].startswith('Guide') for t in trees)
 entries = [e for tree in trees for e in tree['entries']]
@@ -278,15 +410,18 @@ assert any(f['path'] == 'feature.txt' and f['status'] == 'add' and f['added'] ==
 config = load('config')
 assert config['policy']['access']['user:0'] == 'admin'
 assert config['path_rules']['main']['feature.txt'] == 'maintainer'
-overlay = load('overlays')[0]
+overlay = next(o for o in load('overlays') if o['name'] == 'secrets')
 assert overlay['name'] == 'secrets' and overlay['readable'] and overlay['readers'] and len(overlay['managers']) == 1
 assert 'private.txt' in overlay['paths']
-copy = load('copies')[0]
+copy = next(row for row in load('copies') if row['name'] == 'store')
 assert copy['name'] == 'store' and copy['address'].startswith('file://')
-assert 'time' not in copy and 'machines' not in copy
+assert copy['time'] > 0 and copy['machine']
+assert copy['last']['result'] == 'success' and copy['last']['states_sent'] == len(copy['last']['state_ids_sent'])
+assert copy['last']['overlays']
 machine = load('machines')[0]
 assert machine['trusted'] and machine['fingerprint'].startswith('sha256:') and len(machine['fingerprint']) == 71
-assert load('bisect') == []
+assert len(load('bisect')) == 2
+assert all(step['reused'] for step in load('bisect')[0]['steps'])
 assert load('merge_status')['state'] and load('merge_status')['already_in_target']
 browser = load('merge_status_browser')
 assert browser and all(row['target_machine'] and row['allowed'] is None and row['status'] == 'not_decided' for row in browser)
@@ -317,7 +452,7 @@ import difflib, json, sys
 from pathlib import Path
 
 cli, model, counts = map(Path, sys.argv[1:])
-names = ('lines', 'log', 'log-auto', 'change', 'refs', 'ref-log', 'queue', 'attestations', 'operations', 'probe-diff', 'merge-refusals', 'interdiff', 'interdiff-replay')
+names = ('lines', 'log', 'log-auto', 'change', 'refs', 'ref-log', 'queue', 'attestations', 'operations', 'probe-diff', 'probe-same', 'merge-refusals', 'interdiff', 'interdiff-replay', 'copies', 'bisect', 'hidden-reader', 'hidden-nonreader')
 passed = failed = 0
 for name in names:
     try:

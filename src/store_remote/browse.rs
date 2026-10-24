@@ -123,19 +123,40 @@ impl Browse {
         let mut decoder = reader::Reader::new(&backend, &identity, &records.keys);
         let mut layers = Vec::new();
         let mut layer_names = BTreeMap::new();
-        let authorities = crate::overlay_managers::from_lines(&descriptor.project, &records.lines, &records.keys)?;
-        let (published, refused) =
+        let mut authorities = crate::overlay_managers::from_lines(&descriptor.project, &records.lines, &records.keys)?;
+        let (mut published, refused) =
             super::overlays::published(&backend, &descriptor.project, &descriptor.recipient, &records.keys, &authorities)?;
         for reason in refused {
             eprintln!("layr mount: {reason}");
         }
+        let hidden = super::overlays::discover_hidden(
+            &backend,
+            &descriptor.project,
+            &descriptor.recipient,
+            &records.keys,
+            access.machine.as_ref().map(|(id, key)| (id.as_str(), key)),
+            person.as_ref(),
+            access.paper.as_deref(),
+            &access.layers.lock().map_err(|_| anyhow::anyhow!("overlay key cache lock failed"))?.clone(),
+        )?;
+        let mut identities = BTreeMap::new();
+        for (name, (key, identity, authority)) in hidden {
+            if published.contains_key(&name) {
+                continue;
+            }
+            identities.insert(name.clone(), identity);
+            authorities.insert(name.clone(), authority);
+            published.insert(name, key);
+        }
+        let mut hidden_stacks: Vec<(String, usize, crate::db::Db)> = Vec::new();
         for (name, published) in published {
             let scoped = backend.scoped(&published.prefix())?;
             let machine = access.machine.as_ref().map(|(id, key)| (id.as_str(), key));
             let cache_key = format!("{}/{}/{}", descriptor.project, descriptor.recipient, published.prefix());
             let opened =
                 super::overlays::open_identity(&scoped, &published.key, machine, person.as_ref(), access.paper.as_deref())?;
-            let identity = opened.or_else(|| access.layers.lock().ok()?.get(&cache_key).cloned());
+            let identity =
+                opened.or_else(|| identities.remove(&name)).or_else(|| access.layers.lock().ok()?.get(&cache_key).cloned());
             let Some(identity) = identity else {
                 continue;
             };
@@ -156,6 +177,13 @@ impl Browse {
                 &published.key.overlay,
                 &records.keys,
             )?;
+            if published.key.hidden {
+                let overlay_db = crate::db::Db::open(std::path::Path::new(":memory:"))?;
+                for line in &overlay_records.lines {
+                    overlay_db.derive(&crate::oplog::parse_line(line, None)?.record, &|_| false, "")?;
+                }
+                hidden_stacks.push((name.clone(), layers.len(), overlay_db));
+            }
             layer_names.insert(name, layers.len());
             access
                 .layers
@@ -186,7 +214,22 @@ impl Browse {
             // An overlay-only save can move the stack without making a new shared state.
             let stack_machine = if state.id == line.head { &line.machine } else { &machine };
             let stack = db.config(&format!("stack.{}@{}", line.id, stack_machine))?.or(db.config(&format!("stack.{}", line.id))?);
-            let stack: Vec<crate::overlay::Layer> = stack.map(serde_json::from_value).transpose()?.unwrap_or_default();
+            let mut stack: Vec<crate::overlay::Layer> = stack.map(serde_json::from_value).transpose()?.unwrap_or_default();
+            let mut hidden = Vec::new();
+            for (name, _, overlay) in &hidden_stacks {
+                let selection = overlay.overlay_config(&format!("hidden.stack.{}", line.id))?;
+                if selection.as_ref().is_some_and(|v| v["enabled"] == false) {
+                    continue;
+                }
+                if let Some(ol) = overlay.line_by_name(&format!("line-{}", line.id))? {
+                    let position = selection.as_ref().and_then(|v| v["position"].as_u64()).unwrap_or(u64::MAX);
+                    hidden.push((position, crate::overlay::Layer { overlay: name.clone(), state: ol.head }));
+                }
+            }
+            hidden.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.overlay.cmp(&b.1.overlay)));
+            for (position, layer) in hidden {
+                stack.insert((position as usize).min(stack.len()), layer);
+            }
             for layer in stack {
                 let Some(&index) = layer_names.get(&layer.overlay) else { continue };
                 let source = &layers[index];

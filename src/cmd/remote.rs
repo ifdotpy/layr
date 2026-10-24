@@ -543,7 +543,7 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 machines.push(json!({"id": id, "name": name, "key": key, "current": current, "trusted": trusted}));
             }
             if a.has("--json") {
-                outln!(ctx, "{}", json!({"remotes": remotes, "machines": machines}));
+                outln!(ctx, "{}", json!({"remotes": remotes, "machines": machines, "copies":repo.read_model()?.copies()}));
             } else {
                 for r in remotes {
                     outln!(ctx, "remote\t{}\t{}", r["name"].as_str().unwrap(), r["url"].as_str().unwrap());
@@ -730,7 +730,7 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
                 // ssh passes these arguments to a remote shell. Project names need quoting too.
                 vec!["ssh".into(), "--".into(), host, format!("layr serve-peer '{}'", project.replace('\'', "'\\''"))]
             };
-            replicate::exchange(
+            let transfer = replicate::exchange(
                 ctx,
                 &command,
                 if op == "pull" { "fetch" } else { op },
@@ -739,6 +739,12 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
                 a.has("-q") || (op == "pull" && a.has("--json")),
                 a.has("--json") && op != "pull",
             )?;
+            if matches!(op, "push" | "sync") {
+                for (overlay, data) in &transfer.overlays {
+                    h.repo.overlay_repo(overlay)?.record_transfer(ctx, op, name, &url, data)?;
+                }
+                h.repo.record_transfer(ctx, op, name, &url, &transfer.transfer)?;
+            }
         }
         Kind::Store => {
             if a.has("--command") {
@@ -764,6 +770,35 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
             if !report.missing_lines.is_empty() {
                 print_store_report(ctx, &report, op, a.has("--json"), a.has("-q"))?;
                 return Ok(2);
+            }
+            if op == "push" {
+                for (overlay, data) in &report.overlay_transfers {
+                    h.repo.overlay_repo(overlay)?.record_transfer(ctx, op, name, &url, data)?;
+                }
+                h.repo.record_transfer(
+                    ctx,
+                    op,
+                    name,
+                    &url,
+                    &crate::model::Transfer {
+                        direction: "push".into(),
+                        records_sent: report.records
+                            - report.overlay_transfers.iter().map(|(_, t)| t.records_sent).sum::<usize>(),
+                        states_sent: report.state_ids.len(),
+                        bytes_sent: report.bytes - report.overlay_transfers.iter().map(|(_, t)| t.bytes_sent).sum::<u64>(),
+                        state_ids_sent: report.state_ids.clone(),
+                        overlays: report
+                            .overlay_transfers
+                            .iter()
+                            .filter(|(name, t)| {
+                                (t.records_sent > 0 || t.states_sent > 0)
+                                    && h.repo.overlay_info(name).ok().flatten().is_some_and(|info| !info.hidden)
+                            })
+                            .map(|(name, _)| name.clone())
+                            .collect(),
+                        ..Default::default()
+                    },
+                )?;
             }
             if op != "pull" || !a.has("--json") {
                 print_store_report(ctx, &report, op, a.has("--json"), a.has("-q"))?;

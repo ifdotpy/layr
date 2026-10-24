@@ -13,6 +13,8 @@ pub(super) struct LayerAccess {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct Key {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
     pub overlay: String,
     pub name: String,
     pub epoch: String,
@@ -36,7 +38,13 @@ impl Published {
         format!("overlays/{}/epochs/{}", self.key.overlay, self.key.epoch)
     }
     fn object(&self) -> String {
-        format!("overlays/{}/keys/{}-{}.json", self.key.overlay, self.key.epoch, self.record.id)
+        format!(
+            "overlays/{}/keys/{}-{}.{}",
+            self.key.overlay,
+            self.key.epoch,
+            self.record.id,
+            if self.key.hidden { "age" } else { "json" }
+        )
     }
     fn order(&self) -> (i64, &str, u64) {
         (self.record.time, &self.record.machine, self.record.seq)
@@ -105,6 +113,9 @@ fn published_objects(
         let bytes = backend.get(&object.key)?.context("overlay key disappeared")?;
         let line = std::str::from_utf8(&bytes)?.trim_end_matches('\n');
         let next = parse(line, parent, recipient, trusted)?;
+        if next.key.hidden {
+            bail!("hidden overlay key was published without encryption");
+        }
         if next.object() != object.key {
             bail!("overlay key differs from its object name");
         }
@@ -127,6 +138,83 @@ fn published_objects(
         found.insert(next.key.name.clone(), next);
     }
     Ok((found, refused))
+}
+
+/// Discover encrypted manifests only after a caller's reader slot opens.
+/// No name or count is returned for objects the caller cannot open.
+pub(crate) fn discover_hidden(
+    backend: &Backend,
+    parent: &str,
+    recipient: &str,
+    trusted: &BTreeMap<String, VerifyingKey>,
+    machine: Option<(&str, &ed25519_dalek::SigningKey)>,
+    person: Option<&crate::person::Access>,
+    paper: Option<&str>,
+    cached: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, (Published, String, crate::overlay_managers::Authority)>> {
+    let mut found: BTreeMap<String, (Published, String, crate::overlay_managers::Authority)> = BTreeMap::new();
+    let objects = backend.list("overlays/")?;
+    for object in objects {
+        let parts: Vec<_> = object.key.split('/').collect();
+        if parts.len() != 4 || parts[2] != "keys" || !parts[3].ends_with(".age") {
+            continue;
+        }
+        let Some(epoch) = parts[3].get(..36).filter(|_| parts[3].as_bytes().get(36) == Some(&b'-')) else {
+            continue;
+        };
+        if !crate::model::is_uuid(parts[1]) || !crate::model::is_uuid(epoch) {
+            continue;
+        }
+        let prefix = format!("overlays/{}/epochs/{epoch}", parts[1]);
+        let scoped = backend.scoped(&prefix)?;
+        let mut identity = None;
+        if let Some((machine, key)) = machine {
+            if let Some(slot) = scoped.get(&format!("slots/machine-{machine}.age"))? {
+                identity = keys::open_machine_slot(&slot, key).ok();
+            }
+        }
+        if identity.is_none() {
+            if let Some(person) = person {
+                let slot_name = layr_store::person::slot_name(&person.login, &keys::recipient_of(&person.identity)?)?;
+                if let Some(slot) = scoped.get(&format!("slots/{slot_name}"))? {
+                    identity = keys::open_slot(&slot, &person.identity).ok();
+                }
+            }
+        }
+        if identity.is_none() {
+            if let Some(paper) = paper {
+                if let Some(slot) = scoped.get("slots/paper.age")? {
+                    let opener = keys::identity_from_paper(paper).map_err(|_| anyhow::anyhow!("invalid paper key"))?;
+                    identity = keys::open_slot(&slot, &opener).ok();
+                }
+            }
+        }
+        let cache_key = format!("{parent}/{recipient}/{prefix}");
+        let Some(identity) = identity.or_else(|| cached.get(&cache_key).cloned()) else {
+            continue;
+        };
+        let body = backend.get(&object.key)?.context("hidden overlay manifest disappeared")?;
+        let line = String::from_utf8(keys::decrypt(&identity, &body)?)?;
+        let published = parse(&line, parent, recipient, trusted)?;
+        if !published.key.hidden || published.object() != object.key || keys::recipient_of(&identity)? != published.key.recipient
+        {
+            bail!("hidden overlay manifest differs from its slot or object");
+        }
+        let records = reader::records(&scoped, &identity, &published.key.overlay)?;
+        if !records.lines.contains(&line) {
+            bail!("hidden overlay key is absent from its own log");
+        }
+        let (name, authority) =
+            layr_model::authority::from_overlay_lines(parent, &published.key.overlay, &records.lines, trusted)?;
+        if name != published.key.name || !authority.permits(&published.record, &line) {
+            bail!("hidden overlay key has no creator authority");
+        }
+        if found.get(&name).is_some_and(|(old, _, _)| old.order() >= published.order()) {
+            continue;
+        }
+        found.insert(name, (published, identity, authority));
+    }
+    Ok(found)
 }
 
 pub(crate) fn open_identity(
@@ -189,12 +277,25 @@ fn layer(store: &Store, published: &Published, identity: Option<String>) -> Resu
     })
 }
 
-fn merge(report: &mut Report, next: Report, name: &str) {
+fn merge(report: &mut Report, next: Report, name: &str, direction: &str) {
     if next.records > 0 || next.states > 0 {
         report.overlays.push(format!("{name}: {} records, {} states", next.records, next.states));
     }
     report.records += next.records;
     report.states += next.states;
+    if direction == "push" {
+        report.overlay_transfers.push((
+            name.into(),
+            crate::model::Transfer {
+                direction: direction.into(),
+                records_sent: next.records,
+                states_sent: next.states,
+                bytes_sent: next.bytes,
+                state_ids_sent: next.state_ids,
+                ..Default::default()
+            },
+        ));
+    }
     report.files += next.files;
     report.bytes += next.bytes;
     report.overlaps += next.overlaps;
@@ -210,13 +311,13 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
     let descriptor = store.descriptor()?;
     let trusted = trusted_keys(repo)?;
     let mut objects = Vec::new();
-    for name in repo.overlay_names()? {
+    for name in repo.visible_overlay_names(ctx)? {
         if let Ok(overlay) = repo.overlay_repo(&name) {
             objects.extend(store.backend.list(&format!("overlays/{}/keys/", overlay.p.id))?);
         }
     }
     let parent_lines: Vec<_> = repo.p.export_jsonl()?.lines().map(str::to_owned).collect();
-    let authorities = crate::overlay_managers::from_lines(&repo.p.id, &parent_lines, &trusted)?;
+    let mut authorities = crate::overlay_managers::from_lines(&repo.p.id, &parent_lines, &trusted)?;
     let (remote, refused) =
         published_objects(&store.backend, &repo.p.id, &descriptor.recipient, &trusted, &authorities, objects)?;
     report.omitted.extend(refused);
@@ -225,7 +326,7 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
     } else {
         store.pin.as_ref().and_then(|pin| pin.paper_recipient.clone())
     };
-    for name in repo.overlay_names()? {
+    for name in repo.visible_overlay_names(ctx)? {
         let orepo = match repo.overlay_repo(&name) {
             Ok(orepo) => orepo,
             Err(_) => {
@@ -234,6 +335,10 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
             }
         };
         let _lock = orepo.p.lock()?;
+        let hidden = repo.need_overlay(&name)?.hidden;
+        if !authorities.contains_key(&name) {
+            authorities.insert(name.clone(), crate::overlay_managers::of(repo, &name)?);
+        }
         let authority = authorities.get(&name).context("overlay has no creator authority")?;
         let overlay_lines: Vec<_> = orepo.p.export_jsonl()?.lines().map(str::to_owned).collect();
         authority.validate(&overlay_lines, &orepo.p.id, &trusted)?;
@@ -273,6 +378,7 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
             std::fs::create_dir_all(path.parent().context("overlay key parent")?)?;
             crate::fsutil::atomic_write(&path, &keys::machine_slot(&identity, &store.key.verifying_key())?, 0o600)?;
             let key = Key {
+                hidden,
                 overlay: orepo.p.id.clone(),
                 name: name.clone(),
                 epoch,
@@ -290,8 +396,9 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
         } else {
             let mut published = previous.context("overlay has no key record")?;
             // Adding a reader does not change the recipient, but its signed reader set must travel.
-            if published.key.readers != readers {
+            if published.key.readers != readers || published.key.hidden != hidden {
                 published.key.readers = readers.clone();
+                published.key.hidden = hidden;
                 let mut record = Record::new("overlay.key");
                 record.data = serde_json::to_value(&published.key)?;
                 published.record = orepo.p.append(record, &ctx.actor())?;
@@ -344,9 +451,14 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
                 report.omitted.push(format!("overlay {name}: no paper slot; run once with LAYR_PAPER_KEY_FILE to add it"));
             }
         }
-        merge(report, writer::push_locked(&scoped, ctx, &orepo, opts)?, &name);
+        merge(report, writer::push_locked(&scoped, ctx, &orepo, opts)?, &name, "push");
         // Publish the key after its epoch is complete. It contains the exact signed record, never an identity.
-        store.backend.put_new(&published.object(), published.line.as_bytes().to_vec())?;
+        let body = if hidden {
+            keys::encrypt(&published.key.recipient, published.line.as_bytes())?
+        } else {
+            published.line.as_bytes().to_vec()
+        };
+        store.backend.put_new(&published.object(), body)?;
     }
     Ok(())
 }
@@ -355,23 +467,45 @@ pub(super) fn fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, repor
     let descriptor = store.descriptor()?;
     let trusted = trusted_keys(repo)?;
     let parent_lines: Vec<_> = repo.p.export_jsonl()?.lines().map(str::to_owned).collect();
-    let authorities = crate::overlay_managers::from_lines(&repo.p.id, &parent_lines, &trusted)?;
-    let (published, refused) = published(&store.backend, &repo.p.id, &descriptor.recipient, &trusted, &authorities)?;
+    let mut authorities = crate::overlay_managers::from_lines(&repo.p.id, &parent_lines, &trusted)?;
+    let (mut published, refused) = published(&store.backend, &repo.p.id, &descriptor.recipient, &trusted, &authorities)?;
     report.omitted.extend(refused);
+    let hidden = discover_hidden(
+        &store.backend,
+        &repo.p.id,
+        &descriptor.recipient,
+        &trusted,
+        Some((&store.machine, &store.key)),
+        store.person.as_ref(),
+        opts.paper_key.as_deref().or(store.paper_key_text.as_deref()),
+        &BTreeMap::new(),
+    )?;
+    let mut identities = BTreeMap::new();
+    for (name, (key, identity, authority)) in hidden {
+        if published.contains_key(&name) {
+            continue;
+        }
+        identities.insert(name.clone(), identity);
+        authorities.insert(name.clone(), authority);
+        published.insert(name, key);
+    }
     for (name, published) in published {
-        if repo.overlay_info(&name)?.is_none() {
+        if !published.key.hidden && repo.overlay_info(&name)?.is_none() {
             bail!("overlay key names an unknown overlay {name}");
         }
         let backend = store.backend.scoped(&published.prefix())?;
-        let Some(identity) = open_identity(
+        let identity = open_identity(
             &backend,
             &published.key,
             Some((&store.machine, &store.key)),
             store.person.as_ref(),
             opts.paper_key.as_deref().or(store.paper_key_text.as_deref()),
         )?
-        else {
-            report.omitted.push(format!("overlay {name}: no key on this machine"));
+        .or_else(|| identities.remove(&name));
+        let Some(identity) = identity else {
+            if !published.key.hidden {
+                report.omitted.push(format!("overlay {name}: no key on this machine"));
+            }
             continue;
         };
         let pname = format!("{}%{name}", repo.p.name);
@@ -409,7 +543,7 @@ pub(super) fn fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, repor
             crate::cmd::replicate::trust(ctx, &orepo.p, machine, &hex::encode(key.to_bytes()))?;
         }
         let mut scoped = layer(store, &published, Some(identity))?;
-        merge(report, reader::fetch(&mut scoped, ctx, &mut orepo, opts)?, &name);
+        merge(report, reader::fetch(&mut scoped, ctx, &mut orepo, opts)?, &name, "fetch");
     }
     Ok(())
 }
@@ -542,6 +676,7 @@ mod tests {
         rec.seq = 2;
         rec.time = 1;
         rec.data = serde_json::to_value(Key {
+            hidden: false,
             overlay,
             name: "private".into(),
             epoch: crate::ids::new_id(),

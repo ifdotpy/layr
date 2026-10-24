@@ -530,7 +530,7 @@ A reader adds an overlay to an older line with `layr overlay use --add zulip` in
 
 ## 10. Overlays in stores and peer sync
 
-Every push includes every overlay of the project.
+Every push includes the overlays the caller can discover.
 Each store remote uses a separate age layer identity for each overlay.
 Shared files still use the store identity.
 Only readers with a slot can decrypt an overlay.
@@ -556,10 +556,10 @@ The removed reader can still read data copied during an earlier epoch.
 
 Each epoch holds its records, states and slots under `overlays/<id>/epochs/<epoch>/`.
 The epoch is a UUID.
-The public `overlay.key` object contains an exact signed record with the recipient and its project and store bindings.
+For a visible overlay, the public `overlay.key` object contains the signed recipient and its project and store bindings.
 All remote objects use conditional create. No object is replaced.
 Fetch and clone import an overlay only when a slot opens.
-Without a slot, they report `overlay <name>: no key on this machine` and import shared files.
+Without a slot for a visible overlay, they report `overlay <name>: no key on this machine` and import shared files.
 Mount merges the overlay files into the line view when a slot opens.
 
 The owner paper slot uses the store's paper opener.
@@ -572,7 +572,8 @@ The receiving service enforces the signed overlay readers.
 The default peers are trusted machine readers of the overlay.
 Set `overlay.<name>.peers` to an array of machine UUIDs to select other peers.
 For example, use `layr config overlay.secrets.peers '["<machine UUID>"]'`.
-A peer that is not permitted receives the shared set and a report of the omitted overlay.
+A peer that is not permitted receives the shared set.
+For a visible overlay, the peer also receives a report of the omitted overlay.
 Root on a peer can read its disk. Service readers do not restrict root.
 
 The creator machine is the first key manager.
@@ -583,3 +584,48 @@ Only these machines can change readers or publish layer keys.
 Other trusted machines can push to the published recipient.
 The report names an unauthorized key signer.
 Use two managers. If both are lost, create a new overlay and move the files.
+
+## 11. Hidden overlays
+
+A private overlay is visible to all project readers. Its files are visible only to its readers.
+A hidden overlay is visible only to its readers. Other project readers see no name, count, reader, pattern, or operation for it.
+
+```sh
+layr overlay create secrets --hidden --readers alice
+layr overlay move secrets .env
+layr save -m 'Save credentials'
+```
+
+Hidden overlays use `follow` mode. Each line uses the overlay's own line history.
+Parent states contain no hidden layer identifiers.
+The overlay's own signed records hold its parent project identifier, readers, peer settings, and selection for each line.
+Parent records and configuration contain no hidden metadata.
+Read-only commands on another user's line use the shared snapshot and layers the caller can read.
+They silently exclude unread hidden layers. Unread visible private overlays keep their access refusal.
+Working folders retain the existing owner-only permissions.
+A reader sees the `hidden` badge in `layr overlay list`.
+Use `--json` for the same visibility rules in structured output.
+
+A store encrypts hidden key records to the overlay recipient.
+A new reader opens its machine or person slot and then discovers the overlay.
+The next push creates the new reader's slot.
+A non-reader receives no omission row or count for a hidden overlay.
+Store access reveals encrypted objects under random overlay identifiers and their sizes.
+It does not reveal overlay names or contents.
+
+Use `layr config overlay.secrets.peers '["<machine UUID>"]'` to permit a peer.
+The hidden overlay stores this setting in its own log.
+A peer without permission receives no hidden name or record.
+Root on a permitted peer can read its disk.
+
+The secret detector checks hidden values only on readers' machines.
+A machine without the reader key cannot check those values.
+
+```sh
+layr overlay show-to-project secrets
+```
+
+This command records `overlay.show-to-project` in the overlay log.
+It then publishes the normal overlay metadata and authority to the parent project.
+Project readers can now see that the overlay exists. Its files still require overlay read access.
+A visible overlay cannot become hidden. Configuration cannot reverse this change.

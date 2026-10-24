@@ -124,7 +124,9 @@ impl Repo<'_> {
                 if !layers.is_empty() {
                     let base = self.temp_snapshot(tmp, true)?;
                     self.install_base(line, base, start, &layers)?;
-                    rec.data["stack"] = crate::overlay::stack_data(&line.id, &layers);
+                    if !self.public_layers(&layers)?.is_empty() {
+                        rec.data["stack"] = self.public_stack_data(&line.id, &layers)?;
+                    }
                 }
                 crate::fsutil::rename_tree(tmp, self.working(line))?;
                 rec.lines.insert(

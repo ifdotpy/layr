@@ -9,9 +9,11 @@
 pub mod authority;
 pub mod diff;
 pub mod interdiff;
+pub mod operations;
 pub mod policy;
 pub mod probes;
 pub mod protection;
+pub mod screenshots;
 pub mod types;
 pub mod validation;
 
@@ -43,6 +45,48 @@ impl Model {
             records.push(record);
         }
         Self::from_records(records, machine)
+    }
+
+    /// Readable overlay projects are discovered only from their own records.
+    /// A parent-only model contains no hidden name, count, or layer identifier.
+    pub fn overlay_projects(&self, parent: &str) -> Vec<&Project> {
+        self.projects
+            .values()
+            .filter(|project| project.overlay_setting("overlay").is_some_and(|v| v["project"] == parent))
+            .collect()
+    }
+
+    /// Follow hidden overlay lines without adding metadata to the parent project.
+    pub fn layers(&self, parent: &str, line: &Line) -> Result<Vec<validation::Layer>> {
+        let project = self.projects.get(parent).context("unknown parent project")?;
+        let key = format!("stack.{}", line.id);
+        let value = project.setting(&format!("{key}@{}", line.machine)).or_else(|| project.setting(&key));
+        let mut layers: Vec<validation::Layer> = value.cloned().map(serde_json::from_value).transpose()?.unwrap_or_default();
+        let mut hidden = Vec::new();
+        for overlay in self.overlay_projects(parent) {
+            let Some(info) = overlay.overlay_setting("overlay") else {
+                continue;
+            };
+            if info["hidden"] != true {
+                continue;
+            }
+            let name = info["name"].as_str().context("hidden overlay has no name")?;
+            let selection = overlay.overlay_setting(&format!("hidden.stack.{}", line.id));
+            if selection.is_some_and(|v| v["enabled"] == false) {
+                continue;
+            }
+            if let Some(ol) = overlay.line_list().into_iter().find(|l| l.name == format!("line-{}", line.id)) {
+                hidden.push((
+                    selection.and_then(|v| v["position"].as_u64()).unwrap_or(u64::MAX),
+                    validation::Layer { overlay: name.into(), state: ol.head },
+                ));
+            }
+        }
+        hidden.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.overlay.cmp(&b.1.overlay)));
+        for (position, layer) in hidden {
+            layers.insert((position as usize).min(layers.len()), layer);
+        }
+        Ok(layers)
     }
 
     /// Fold verified records, including any readable overlay projects.
@@ -245,7 +289,7 @@ impl Project {
             "machine.trust" => {
                 self.trusted.entry(str_at("machine")).or_insert(d.clone());
             }
-            "project" | "config" | "overlay.create" | "overlay.readers" => {
+            "project" | "config" | "overlay.create" | "overlay.readers" | "overlay.use" | "overlay.show-to-project" => {
                 if r.op == "project" {
                     self.name = d["name"].as_str().map(String::from);
                 }
@@ -404,7 +448,11 @@ impl Project {
         let mut records: Vec<_> = self
             .records
             .iter()
-            .filter(|r| line.is_none_or(|l| r.lines.contains_key(l) || r.data["line"].as_str() == Some(l)))
+            .filter(|r| {
+                line.is_none_or(|l| {
+                    matches!(r.op.as_str(), "push" | "sync") || r.lines.contains_key(l) || r.data["line"].as_str() == Some(l)
+                })
+            })
             .cloned()
             .collect();
         records.sort_by(|a, b| (b.time, b.seq).cmp(&(a.time, a.seq)));
@@ -433,7 +481,12 @@ impl Project {
         self.records
             .iter()
             .rev()
-            .filter(|r| matches!(r.op.as_str(), "project" | "config" | "overlay.create" | "overlay.readers"))
+            .filter(|r| {
+                matches!(
+                    r.op.as_str(),
+                    "project" | "config" | "overlay.create" | "overlay.readers" | "overlay.use" | "overlay.show-to-project"
+                )
+            })
             .find_map(|r| r.data["config"].get(key))
             .filter(|v| !v.is_null())
     }
@@ -498,9 +551,14 @@ impl Project {
         let rows: Vec<_> = versions
             .iter()
             .enumerate()
-            .map(
-                |(i, s)| serde_json::json!({"version":format!("v{}",i+1),"state":s,"attestations":self.attestations(&s.id,None)}),
-            )
+            .map(|(i, s)| {
+                let mut row =
+                    serde_json::json!({"version":format!("v{}",i+1),"state":s,"attestations":self.attestations(&s.id,None)});
+                if let Some(version) = self.version_info(&s.id) {
+                    row["operation"] = version;
+                }
+                row
+            })
             .collect();
         let behavior = match versions.last().map(|s| self.change_behavior(s, context)).transpose() {
             Ok(Some(value)) => value,

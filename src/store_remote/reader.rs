@@ -379,6 +379,7 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
         }
         report.files += result?;
         report.states += 1;
+        report.state_ids.push(id.clone());
     }
     // Trust the chosen store's machines only during the initial clone, as peer bootstrap does.
     if bootstrap {

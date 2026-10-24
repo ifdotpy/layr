@@ -360,7 +360,7 @@ mod tests {
     }
     #[test]
     fn xml_frames_survive_ignored_coordinates_and_attribute_changes() {
-        let ignore = super::super::super::default_ignore_attributes();
+        let ignore = crate::probes::default_ignore_attributes();
         let a = normalize("<node bounds='[10,20][30,40]' role='label' text='Old'/>", "xml", &ignore).unwrap();
         let b = normalize("<node text='New' role='button' bounds='[10,20][30,40]'/>", "xml", &ignore).unwrap();
         let delta = compare(&a, &b, "a", "b");
@@ -382,7 +382,7 @@ mod tests {
     }
     #[test]
     fn json_is_canonical_valid_json_and_keeps_native_frames() {
-        let ignore = super::super::super::default_ignore_attributes();
+        let ignore = crate::probes::default_ignore_attributes();
         let a =
             normalize(r#"{"label":"Old","frame":{"x":1,"y":2,"width":3,"height":4},"role":"label"}"#, "json", &ignore).unwrap();
         let b = normalize(

@@ -1,4 +1,5 @@
 //! Shared record types and validation, plus the native build platform.
+pub use layr_model::operations::{Transfer, VersionOperation};
 pub use layr_model::types::*;
 pub use layr_model::validation::{is_cache_name, is_name, is_ref, is_uuid, validate};
 

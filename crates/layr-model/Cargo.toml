@@ -6,6 +6,9 @@ description = "Pure project read model for signed Layr records"
 license = "MIT"
 
 [dependencies]
+html5gum = { version = "0.8", default-features = false }
+image = { version = "0.25", default-features = false, features = ["png"] }
+quick-xml = "0.42"
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }

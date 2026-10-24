@@ -354,7 +354,7 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
             l.state = parent;
         }
         rec.data["line"] = serde_json::json!(lid);
-        rec.data["stack"] = crate::overlay::stack_data(&lid, &before);
+        rec.data["stack"] = repo.public_stack_data(&lid, &before)?;
     }
     // Tags.
     match r.op.as_str() {
@@ -556,7 +556,10 @@ pub fn op(ctx: &Ctx, args: &[String]) -> Result<i32> {
     for r in repo.p.db.records(100000)? {
         if !a.has("--all") {
             if let Some(l) = &line {
-                if !r.lines.contains_key(&l.id) && r.data.get("line").and_then(|v| v.as_str()) != Some(&l.id) {
+                if !matches!(r.op.as_str(), "push" | "sync")
+                    && !r.lines.contains_key(&l.id)
+                    && r.data.get("line").and_then(|v| v.as_str()) != Some(&l.id)
+                {
                     continue;
                 }
             }
@@ -565,11 +568,19 @@ pub fn op(ctx: &Ctx, args: &[String]) -> Result<i32> {
             outln!(ctx, "{}", serde_json::to_string(&r)?);
         } else {
             let undone = if repo.p.db.undone(&r.id)? { " (undone)" } else { "" };
-            let what = r
-                .states
-                .first()
-                .map(|s| format!(" {} {}", ids::short(&s.id), s.message.lines().next().unwrap_or("")))
-                .unwrap_or_default();
+            let what = if matches!(r.op.as_str(), "push" | "sync") {
+                format!(
+                    " {}: states sent {}, received {}",
+                    r.data["remote"].as_str().unwrap_or(""),
+                    r.data["states_sent"],
+                    r.data["states_received"]
+                )
+            } else {
+                r.states
+                    .first()
+                    .map(|s| format!(" {} {}", ids::short(&s.id), s.message.lines().next().unwrap_or("")))
+                    .unwrap_or_default()
+            };
             let session = r.actor.session.as_ref().map(|a| format!(" [{a}]")).unwrap_or_default();
             outln!(
                 ctx,
@@ -609,9 +620,11 @@ pub fn try_cmd(ctx: &Ctx, args: &[String]) -> Result<i32> {
             if !a.paths.is_empty() {
                 return Err(exit(128, USAGE));
             }
-            let command = repo.p.config_value(&format!("check.{name}"))?.and_then(|v| v.as_str().map(String::from)).ok_or_else(
-                || exit(128, format!("check '{name}' is not defined (layr config check.{name} '<command>')")),
-            )?;
+            let command = repo
+                .p
+                .config_value(&format!("check.{name}"))?
+                .and_then(|v| v.as_str().map(String::from))
+                .ok_or_else(|| exit(128, format!("check '{name}' is not defined (layr config check.{name} '<command>')")))?;
             vec!["sh".into(), "-c".into(), command]
         }
         None => {
@@ -1104,7 +1117,7 @@ pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
 /// (each layer exists; a kept base equals its layers).
 fn fsck_overlays(ctx: &Ctx, repo: &Repo, repair: bool) -> Result<usize> {
     let mut problems = 0;
-    for name in repo.overlay_names()? {
+    for name in repo.visible_overlay_names(ctx)? {
         // A machine that is not a reader of an overlay never receives its project.
         if !repo.p.store.project_dir(&format!("{}%{name}", repo.p.name))?.exists() {
             outln!(ctx, "overlay {name}: not on this machine (no key)");
@@ -1149,6 +1162,12 @@ fn fsck_overlays(ctx: &Ctx, repo: &Repo, repair: bool) -> Result<usize> {
     }
     for l in repo.lines()? {
         let layers = repo.layers(&l)?;
+        if layers.iter().any(|layer| {
+            repo.need_overlay(&layer.overlay).is_ok_and(|info| info.hidden)
+                && !repo.reads_overlay(&layer.overlay, ctx.caller.uid, ctx.caller.gid).unwrap_or(false)
+        }) {
+            continue;
+        }
         if layers.is_empty() || l.machine != repo.p.store.machine.id {
             continue;
         }
@@ -1194,7 +1213,7 @@ pub fn reindex(ctx: &Ctx, _args: &[String]) -> Result<i32> {
     let n: i64 = h.repo.p.db.conn.query_row("SELECT COUNT(*) FROM records", [], |r| r.get(0))?;
     outln!(ctx, "index rebuilt from {n} records");
     if !h.repo.p.is_overlay() {
-        for name in h.repo.overlay_names()? {
+        for name in h.repo.visible_overlay_names(ctx)? {
             // An overlay without a key on this machine has no local project to index.
             let Ok(o) = h.repo.overlay_project(&name) else { continue };
             let _l = o.lock()?;
@@ -1416,6 +1435,22 @@ fn default_branch(repo: &Repo) -> Option<String> {
 }
 
 pub fn set_config(ctx: &Ctx, repo: &Repo, key: &str, value: serde_json::Value) -> Result<()> {
+    if !repo.p.is_overlay() {
+        if let Some(rest) = key.strip_prefix("overlay.") {
+            let name = rest.split('.').next().unwrap_or("");
+            if let Some(info) = repo.overlay_info(name)? {
+                if rest == name || rest == format!("{name}.hidden") {
+                    return Err(exit(1, "overlay visibility changes only through overlay show-to-project"));
+                }
+                if info.hidden {
+                    let orepo = repo.overlay_repo(name)?;
+                    orepo.require(ctx, "access")?;
+                    let _lock = orepo.p.lock()?;
+                    return set_config(ctx, &orepo, key, value);
+                }
+            }
+        }
+    }
     let mut rec = Record::new("config");
     let mut m = serde_json::Map::new();
     m.insert(key.to_string(), value);
@@ -1449,7 +1484,18 @@ pub fn config(ctx: &Ctx, args: &[String]) -> Result<i32> {
         return Ok(0);
     }
     if let Some(k) = a.get("--get").or(if a.pos.len() == 1 { Some(a.pos[0].as_str()) } else { None }) {
-        return match repo.p.config_value(k)? {
+        let mut value = repo.p.config_value(k)?;
+        if let Some(rest) = k.strip_prefix("overlay.") {
+            let name = rest.split('.').next().unwrap_or("");
+            if repo.overlay_info(name)?.is_some_and(|i| i.hidden) {
+                value = if repo.reads_overlay(name, ctx.caller.uid, ctx.caller.gid)? {
+                    repo.overlay_project(name)?.db.overlay_config(k)?
+                } else {
+                    None
+                };
+            }
+        }
+        return match value {
             Some(v) => {
                 match v.as_str() {
                     Some(s) => outln!(ctx, "{s}"),

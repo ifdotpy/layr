@@ -14,7 +14,8 @@ use crate::store::{check_name, Project};
 use anyhow::Result;
 use std::collections::{BTreeMap, BTreeSet};
 
-const USAGE: &str = "usage: layr overlay create <name> [--readers <principal>,...] [--mode shared|follow]
+const USAGE: &str = "usage: layr overlay create <name> [--readers <principal>,...] [--mode shared|follow] [--hidden]
+       layr overlay show-to-project <name>
        layr overlay list
        layr overlay readers <name> [<principal>...]
        layr overlay managers <name> [machine:<id>...]
@@ -28,6 +29,7 @@ pub fn overlay(ctx: &Ctx, args: &[String]) -> Result<i32> {
     match sub {
         "create" => create(ctx, &rest),
         "list" => list(ctx, &rest),
+        "show-to-project" => show_to_project(ctx, &rest),
         "readers" => readers(ctx, &rest),
         "managers" => managers(ctx, &rest),
         "use" => use_cmd(ctx, &rest),
@@ -75,7 +77,7 @@ fn access_map(owner: u32, readers: &[String]) -> serde_json::Value {
 }
 
 fn create(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let spec = Spec::new().value("--readers|-r").value("--mode").flag("-q|--quiet");
+    let spec = Spec::new().value("--readers|-r").value("--mode").flag("--hidden").flag("-q|--quiet");
     let a = parse(&spec, args)?;
     let h = here(ctx)?;
     let repo = &h.repo;
@@ -85,10 +87,15 @@ fn create(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let name = a.pos.first().ok_or_else(|| exit(128, USAGE))?.clone();
     check_name("overlay", &name)?;
     repo.require(ctx, "line.create")?;
+    let hidden = a.has("--hidden");
     let mode = match a.get("--mode") {
         Some(m) => Mode::parse(m).ok_or_else(|| exit(128, format!("fatal: unknown mode '{m}' (shared or follow)")))?,
+        None if hidden => Mode::Follow,
         None => Mode::Shared,
     };
+    if hidden && mode != Mode::Follow {
+        return Err(exit(128, "hidden overlays require follow mode"));
+    }
     let readers = principals(&a.all("--readers"))?;
     let _lock = repo.p.lock()?;
     if repo.overlay_info(&name)?.is_some() {
@@ -100,7 +107,7 @@ fn create(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let made = (|| -> Result<String> {
         let config = serde_json::json!({
             "access": access_map(owner, &readers),
-            "overlay": {"project": repo.p.id, "name": name, "mode": mode.name()},
+            "overlay": {"project": repo.p.id, "name": name, "mode": mode.name(), "hidden": hidden},
         });
         let op = Project::create_overlay(&ctx.store, &pname, &ctx.actor(), config)?;
         let orepo = Repo { p: op };
@@ -136,10 +143,14 @@ fn create(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let mut cfg = serde_json::Map::new();
         cfg.insert(
             format!("overlay.{name}"),
-            serde_json::json!({"id":orepo.p.id,"owner": owner, "mode": mode.name(), "root": id}),
+            serde_json::json!({"id":orepo.p.id,"owner": owner, "mode": mode.name(), "root": id, "hidden": hidden}),
         );
-        rec.data = serde_json::json!({"name": name, "config": cfg});
-        repo.commit_record(ctx, rec)?;
+        rec.data = serde_json::json!({"name": name, "parent":repo.p.id, "config": cfg});
+        if hidden {
+            orepo.commit_record(ctx, rec)?;
+        } else {
+            repo.commit_record(ctx, rec)?;
+        }
         Ok(id)
     })();
     if let Err(e) = made {
@@ -164,14 +175,16 @@ fn reader_list(p: &Project) -> Vec<String> {
     pol.access.iter().filter(|(_, r)| **r >= Role::Reader).map(|(k, _)| show_principal(k)).collect()
 }
 
-fn list(ctx: &Ctx, _args: &[String]) -> Result<i32> {
+fn list(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    let a = parse(&Spec::new().flag("--json"), args)?;
+    let mut rows = Vec::new();
     let h = here(ctx)?;
     let repo = &h.repo;
     let shown: BTreeSet<String> = match &h.line {
         Some(l) => repo.layers(l)?.into_iter().map(|x| x.overlay).collect(),
         None => BTreeSet::new(),
     };
-    for name in repo.overlay_names()? {
+    for name in repo.visible_overlay_names(ctx)? {
         let info = match repo.overlay_info(&name)? {
             Some(i) => i,
             None => continue,
@@ -179,7 +192,20 @@ fn list(ctx: &Ctx, _args: &[String]) -> Result<i32> {
         let readers = repo.overlay_project(&name).map(|p| reader_list(&p)).unwrap_or_default();
         let mark = if shown.contains(&name) { "* " } else { "  " };
         let owner = crate::ctx::Caller::from_uid(info.owner).user;
-        outln!(ctx, "{mark}{name}\t{}\towner {owner}\treaders {}", info.mode.name(), readers.join(","));
+        if a.has("--json") {
+            rows.push(serde_json::json!({"name":name,"mode":info.mode.name(),"hidden":info.hidden,"owner":info.owner,"readers":readers,"shown":shown.contains(&name)}));
+        } else {
+            outln!(
+                ctx,
+                "{mark}{name}\t{}{}\towner {owner}\treaders {}",
+                info.mode.name(),
+                if info.hidden { " hidden" } else { "" },
+                readers.join(",")
+            );
+        }
+    }
+    if a.has("--json") {
+        outln!(ctx, "{}", serde_json::to_string(&rows)?);
     }
     Ok(0)
 }
@@ -188,7 +214,7 @@ fn readers(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let a = parse(&Spec::new(), args)?;
     let h = here(ctx)?;
     let name = a.pos.first().ok_or_else(|| exit(128, USAGE))?.clone();
-    let info = h.repo.need_overlay(&name)?;
+    let info = visible_info(ctx, &h.repo, &name)?;
     let orepo = h.repo.overlay_repo(&name)?;
     if a.pos.len() == 1 {
         for r in reader_list(&orepo.p) {
@@ -218,7 +244,7 @@ fn managers(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let a = parse(&Spec::new(), args)?;
     let h = here(ctx)?;
     let name = a.pos.first().ok_or_else(|| exit(128, USAGE))?;
-    h.repo.need_overlay(name)?;
+    visible_info(ctx, &h.repo, name)?;
     let orepo = h.repo.overlay_repo(name)?;
     let _parent_lock = h.repo.p.lock()?;
     let _lock = orepo.p.lock()?;
@@ -277,9 +303,108 @@ fn managers(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let record = orepo.p.append(record, &ctx.actor())?;
         orepo.p.db.record_line(&record.machine, record.seq)?.ok_or_else(|| exit(1, "manager record is missing"))?
     };
+    if h.repo.need_overlay(name)?.hidden {
+        return Ok(0);
+    }
     let mut parent = Record::new("overlay.authority");
     parent.data = serde_json::json!({"name":name,"authority":signed});
     h.repo.commit_record(ctx, parent)?;
+    Ok(0)
+}
+
+fn visible_info(ctx: &Ctx, repo: &Repo, name: &str) -> Result<crate::overlay::Info> {
+    let info = repo.need_overlay(name)?;
+    if info.hidden && !repo.reads_overlay(name, ctx.caller.uid, ctx.caller.gid)? {
+        return Err(exit(1, format!("error: no overlay '{name}' in project {}", repo.p.name)));
+    }
+    Ok(info)
+}
+
+fn show_to_project(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    let a = parse(&Spec::new(), args)?;
+    let h = here(ctx)?;
+    let name = a.pos.first().ok_or_else(|| exit(128, USAGE))?;
+    let info = visible_info(ctx, &h.repo, name)?;
+    let orepo = h.repo.overlay_repo(name)?;
+    if !orepo.is_admin(ctx) {
+        return Err(exit(1, "only the overlay owner can show it to the project"));
+    }
+    let _parent = h.repo.p.lock()?;
+    let _lock = orepo.p.lock()?;
+    let own_lines: Vec<_> = orepo.p.export_jsonl()?.lines().map(str::to_owned).collect();
+    let creator = own_lines.iter().find(|line| {
+        crate::oplog::parse_line(line, None).is_ok_and(|s| {
+            s.record.op == "overlay.create" && s.record.data["config"][format!("overlay.{name}")]["hidden"] == true
+        })
+    });
+    let Some(creator) = creator else {
+        return Ok(0);
+    };
+    let authority = layr_model::authority::from_overlay_lines(
+        &h.repo.p.id,
+        &orepo.p.id,
+        &own_lines,
+        &crate::store_remote::overlays::trusted_keys(&h.repo)?,
+    )?
+    .1;
+    authority.require(&ctx.store.machine.id)?;
+    let mut metadata = orepo.p.db.overlay_config("overlay")?.ok_or_else(|| exit(1, "overlay metadata is missing"))?;
+    let mut public =
+        orepo.p.db.overlay_config(&format!("overlay.{name}"))?.ok_or_else(|| exit(1, "overlay creation is missing"))?;
+    public["hidden"] = serde_json::json!(false);
+    if metadata["hidden"] != false {
+        metadata["hidden"] = serde_json::json!(false);
+        let mut show = Record::new("overlay.show-to-project");
+        show.data = serde_json::json!({"name":name,"config":{"overlay":metadata,format!("overlay.{name}"):public}});
+        orepo.commit_record(ctx, show)?;
+    }
+    let parent_lines: Vec<_> = h.repo.p.export_jsonl()?.lines().map(str::to_owned).collect();
+    let parent_records: Vec<_> =
+        parent_lines.iter().map(|line| crate::oplog::parse_line(line, None).map(|s| s.record)).collect::<Result<_>>()?;
+    if !parent_records.iter().any(|r| r.op == "overlay.create" && r.data["name"] == *name) {
+        let mut create = Record::new("overlay.create");
+        create.data = serde_json::json!({"name":name,"config":{format!("overlay.{name}"):public},"hidden_origin":creator});
+        h.repo.commit_record(ctx, create)?;
+    }
+    for line in &own_lines {
+        if crate::oplog::parse_line(line, None)?.record.op == "overlay.managers"
+            && !parent_records.iter().any(|r| r.op == "overlay.authority" && r.data["authority"] == *line)
+        {
+            let mut proof = Record::new("overlay.authority");
+            proof.data = serde_json::json!({"name":name,"authority":line});
+            h.repo.commit_record(ctx, proof)?;
+        }
+    }
+    for (key, value) in orepo.p.db.config_all()? {
+        if key.starts_with(&format!("overlay.{name}.")) {
+            let value: serde_json::Value = serde_json::from_str(&value)?;
+            if h.repo.p.db.overlay_config(&key)?.as_ref() != Some(&value) {
+                super::admin::set_config(ctx, &h.repo, &key, value)?;
+            }
+        }
+    }
+    // Public stacks start naming the overlay only after the show operation.
+    for line in h.repo.lines()? {
+        if orepo.p.db.line_by_name(&Repo::overlay_line_name(&info, &line.id, line.owner))?.is_some()
+            && !orepo.p.db.overlay_config(&format!("hidden.stack.{}", line.id))?.is_some_and(|v| v["enabled"] == false)
+        {
+            let mut layers = h.repo.layers(&line)?;
+            if !layers.iter().any(|l| l.overlay == *name) {
+                let ol = orepo.p.db.line_by_name(&Repo::overlay_line_name(&info, &line.id, line.owner))?.unwrap();
+                let position = orepo
+                    .p
+                    .db
+                    .overlay_config(&format!("hidden.stack.{}", line.id))?
+                    .and_then(|v| v["position"].as_u64())
+                    .unwrap_or(u64::MAX);
+                layers.insert((position as usize).min(layers.len()), Layer { overlay: name.clone(), state: ol.head });
+                let mut record = Record::new("overlay.use");
+                record.data = serde_json::json!({"stack":h.repo.public_stack_data(&line.id, &layers)?});
+                h.repo.commit_record(ctx, record)?;
+            }
+        }
+    }
+    outln!(ctx, "Overlay {name} is visible to the project");
     Ok(0)
 }
 
@@ -309,7 +434,14 @@ fn use_cmd(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let repo = &h.repo;
     let line = h.line()?.clone();
     if a.pos.is_empty() && !a.has("--none") {
-        let layers = repo.layers(&line)?;
+        let layers: Vec<_> = repo
+            .layers(&line)?
+            .into_iter()
+            .filter(|l| {
+                !repo.need_overlay(&l.overlay).map(|i| i.hidden).unwrap_or(true)
+                    || repo.reads_overlay(&l.overlay, ctx.caller.uid, ctx.caller.gid).unwrap_or(false)
+            })
+            .collect();
         if layers.is_empty() {
             outln!(ctx, "line {} shows no overlays", line.name);
         }
@@ -497,12 +629,17 @@ fn move_cmd(ctx: &Ctx, args: &[String]) -> Result<i32> {
 fn read(ctx: &Ctx, cmd: &str, args: &[String]) -> Result<i32> {
     let name = args.first().ok_or_else(|| exit(128, USAGE))?.clone();
     let h = here(ctx)?;
-    let info = h.repo.need_overlay(&name)?;
+    let info = visible_info(ctx, &h.repo, &name)?;
     // The overlay line of the current line; else the caller's own line, else the owner's.
     let mut names = Vec::new();
     if let Some(l) = &h.line {
         if h.repo.layers(l)?.iter().any(|x| x.overlay == name) {
             names.push(Repo::overlay_line_name(&info, &l.id, l.owner));
+        }
+    }
+    if info.hidden {
+        for line in h.repo.overlay_repo(&name)?.lines()? {
+            names.push(line.name);
         }
     }
     names.push(format!("user-{}", ctx.caller.uid));

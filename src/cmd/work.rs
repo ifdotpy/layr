@@ -54,13 +54,13 @@ pub fn status(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let line = h.line()?.clone();
     #[cfg(target_os = "macos")]
     let line = h.repo.line(&line.id)?;
-    h.repo.check_view(ctx, &line)?;
+    let filtered = h.repo.filtered_view(ctx, &line)?;
     let specs = h.specs(&a.rest())?;
     #[cfg(target_os = "macos")]
-    let st = h.repo.status_report(&line)?;
+    let st = if filtered.is_some() { h.repo.snapshot_status(ctx, &line)? } else { h.repo.status_report(&line)? };
     #[cfg(not(target_os = "macos"))]
-    let (st, _scan, _itemp, _index) = h.repo.status(&line)?;
-    let overlaps = if a.has("--json") || (!a.has("-s") && !a.has("--porcelain")) {
+    let st = if filtered.is_some() { h.repo.snapshot_status(ctx, &line)? } else { h.repo.status(&line)?.0 };
+    let overlaps = if filtered.is_none() && (a.has("--json") || (!a.has("-s") && !a.has("--porcelain"))) {
         h.repo.overlaps(ctx, &line)?.into_iter().filter(|o| matches(&specs, &o.path)).collect::<Vec<_>>()
     } else {
         Vec::new()
@@ -882,7 +882,17 @@ pub fn commit(ctx: &Ctx, args: &[String]) -> Result<i32> {
         h.repo.discard_states(std::slice::from_ref(&state));
         return Err(e);
     }
-    let rec = h.repo.move_head(ctx, "commit", &line, &state.id, vec![state.clone()], None, serde_json::json!({"line": line.id}));
+    let mut data = serde_json::json!({"line": line.id});
+    if a.has("--amend") {
+        data["version"] = serde_json::to_value(crate::model::VersionOperation {
+            state: state.id.clone(),
+            kind: "amend".into(),
+            source: head.id.clone(),
+            target_line: Some(line.id.clone()),
+            target_head: line.head.clone(),
+        })?;
+    }
+    let rec = h.repo.move_head(ctx, "commit", &line, &state.id, vec![state.clone()], None, data);
     rec?;
     #[cfg(target_os = "macos")]
     if let Some(p) = promotion.take() {
