@@ -201,6 +201,33 @@ impl<'a> Project<'a> {
             self.states_dir().join(".invalid-id")
         }
     }
+    /// The thin layer of a state: the entries that differ from its base state (APFS).
+    pub fn delta_path(&self, id: &str) -> PathBuf {
+        if crate::model::is_uuid(id) {
+            self.dir.join("deltas").join(id)
+        } else {
+            self.dir.join("deltas").join(".invalid-id")
+        }
+    }
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn deltas_dir(&self) -> PathBuf {
+        self.dir.join("deltas")
+    }
+    /// Delete the trees of a state. On APFS a state that another thin state uses as its base
+    /// stays until that state goes (`thin::delete_state`); this returns false then.
+    pub fn delete_state(&self, id: &str) -> Result<bool> {
+        #[cfg(target_os = "macos")]
+        return crate::thin::delete_state(self, id);
+        #[cfg(not(target_os = "macos"))]
+        {
+            crate::storage::delete_tree(&self.state_path(id))?;
+            Ok(true)
+        }
+    }
+    /// True when the content of a state is on this machine: a complete tree or a thin layer.
+    pub fn has_state(&self, id: &str) -> bool {
+        self.state_path(id).exists() || self.delta_path(id).exists()
+    }
     pub fn line_path(&self, name: &str) -> PathBuf {
         if check_name("line", name).is_ok() || (name.starts_with(".try-") && name[5..].chars().all(|c| c.is_ascii_hexdigit())) {
             self.lines_dir().join(name)
@@ -262,6 +289,7 @@ impl<'a> Project<'a> {
         }
         mkdir_mode(&dir, 0o755)?;
         mkdir_mode(&dir.join("states"), 0o700)?;
+        mkdir_mode(&dir.join("deltas"), 0o700)?;
         mkdir_mode(&dir.join("lines"), 0o711)?;
         mkdir_mode(&dir.join("meta"), 0o700)?;
         for d in ["stage", "scan", "work"] {
@@ -367,8 +395,7 @@ impl<'a> Project<'a> {
     }
 
     fn state_present(&self) -> impl Fn(&str) -> bool + '_ {
-        let sd = self.states_dir();
-        move |id: &str| sd.join(id).exists()
+        move |id: &str| self.has_state(id)
     }
 
     /// Rebuild the derived tables from the records.
@@ -383,7 +410,7 @@ impl<'a> Project<'a> {
             Ok(())
         })?;
         for (id, deleted) in self.db.present_states()? {
-            if deleted || !self.state_path(&id).exists() {
+            if deleted || !self.has_state(&id) {
                 self.db.set_present(&id, false)?;
             }
         }

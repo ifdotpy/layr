@@ -8,11 +8,11 @@ use crate::diff::{self, FileDiff};
 use crate::fsutil;
 use crate::ids;
 use crate::model::{Line, StateKind, StateRec};
-use crate::repo::{skip_path, Repo, Temp};
+use crate::repo::{skip_path, snap, Repo, Snap, Temp};
 use crate::revs;
 use anyhow::{bail, Result};
 use std::collections::{BTreeSet, HashMap};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 fn diff_spec() -> Spec {
     Spec::new()
@@ -55,7 +55,7 @@ fn empty_root() -> Result<Temp> {
 }
 
 /// All files of a root as additions.
-fn all_files(root: &Path) -> Result<Vec<Change>> {
+fn all_files(root: &(impl fsutil::Src + ?Sized)) -> Result<Vec<Change>> {
     let mut v = Vec::new();
     fsutil::walk(root, "", &mut |rel, m| {
         if skip_path(rel) {
@@ -187,13 +187,13 @@ pub fn diff(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let cached = a.has("--cached");
     let opts = DiffOpts::from(&a, true)?;
     let mut keep: Vec<Temp> = Vec::new();
-    let resolve = |r: &str| -> Result<PathBuf> {
+    let resolve = |r: &str| -> Result<Snap> {
         let id = revs::resolve(repo, line.as_ref(), if r.is_empty() { "HEAD" } else { r })?;
-        repo.state_root(&id)
+        repo.state_src(&id)
     };
     // (old root, new root, new side is the working content, index for tracked check)
-    let mut index_root: Option<PathBuf> = None;
-    let (old, new, working): (PathBuf, PathBuf, bool) = match revs_v.len() {
+    let mut index_root: Option<Snap> = None;
+    let (old, new, working): (Snap, Snap, bool) = match revs_v.len() {
         0 => {
             let l = h.line()?;
             repo.check_view(ctx, l)?;
@@ -202,13 +202,10 @@ pub fn diff(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 keep.push(t);
             }
             if cached {
-                (repo.head_tree(l)?, idx, false)
+                (repo.head_src(l)?, idx, false)
             } else {
-                let scan = repo.scan(l)?;
-                let p = scan.path.clone();
-                keep.push(scan);
                 index_root = Some(idx.clone());
-                (idx, p, true)
+                (idx, snap(&repo.working(l)), true)
             }
         }
         1 => {
@@ -217,7 +214,7 @@ pub fn diff(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 let xi = revs::resolve(repo, line.as_ref(), if x.is_empty() { "HEAD" } else { x })?;
                 let yi = revs::resolve(repo, line.as_ref(), if y.is_empty() { "HEAD" } else { y })?;
                 let b = repo.merge_base(&xi, &yi)?.ok_or_else(|| anyhow::anyhow!("no merge base"))?;
-                (repo.state_root(&b)?, repo.state_root(&yi)?, false)
+                (repo.state_src(&b)?, repo.state_src(&yi)?, false)
             } else if let Some((x, y)) = r.split_once("..") {
                 (resolve(x)?, resolve(y)?, false)
             } else {
@@ -228,12 +225,12 @@ pub fn diff(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 let id = revs::resolve(repo, line.as_ref(), r)?;
                 let layers = repo.layers(l)?;
                 let old = if layers.is_empty() {
-                    repo.state_root(&id)?
+                    repo.state_src(&id)?
                 } else if id == l.head {
-                    repo.head_tree(l)?
+                    repo.head_src(l)?
                 } else {
                     let v = repo.assemble(l, &id, &layers)?;
-                    let p = v.path.clone();
+                    let p = snap(&v.path);
                     keep.push(v);
                     p
                 };
@@ -244,32 +241,53 @@ pub fn diff(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 if cached {
                     (old, idx, false)
                 } else {
-                    let scan = repo.scan(l)?;
-                    let p = scan.path.clone();
-                    keep.push(scan);
                     index_root = Some(idx);
-                    (old, p, true)
+                    (old, snap(&repo.working(l)), true)
                 }
             }
         }
         _ => (resolve(&revs_v[0])?, resolve(&revs_v[1])?, false),
     };
-    let (old, new) = if a.has("-R") { (new, old) } else { (old, new) };
-    let mut list: Vec<Change> = changes::file_changes(&old, &new)?
-        .into_iter()
-        .filter(|c| {
-            !skip_path(&c.path)
-                && (matches(&specs, &c.path) || c.old_path.as_deref().map(|o| matches(&specs, o)).unwrap_or(false))
-        })
-        .collect();
-    if working {
-        // Untracked files are not part of a working tree diff.
-        let idx = index_root.clone().unwrap();
-        list = changes::without_moves(list);
-        list.retain(|c| !(c.old.is_none() && fsutil::lmeta(&idx, &c.path).is_none()));
-    }
-    let list = if a.has("--no-renames") { list } else { changes::with_renames(&old, &new, list) };
-    let fds = diff::file_diffs(&old, &new, &list)?;
+    let reverse = a.has("-R");
+    let renames = !a.has("--no-renames");
+    let compute = |old: &Snap, new: &Snap| -> Result<Vec<FileDiff>> {
+        let (old, new) = if reverse { (new, old) } else { (old, new) };
+        let mut list: Vec<Change> = changes::file_changes(old, new)?
+            .into_iter()
+            .filter(|c| {
+                !skip_path(&c.path)
+                    && (matches(&specs, &c.path) || c.old_path.as_deref().map(|o| matches(&specs, o)).unwrap_or(false))
+            })
+            .collect();
+        if working {
+            // Untracked files are not part of a working tree diff.
+            let idx = index_root.as_ref().unwrap();
+            list = changes::without_moves(list);
+            list.retain(|c| !(c.old.is_none() && fsutil::lmeta(idx, &c.path).is_none()));
+        }
+        let list = if renames { changes::with_renames(old, new, list) } else { list };
+        diff::file_diffs(old, new, &list)
+    };
+    let fds = if working {
+        // The live working folder, validated by kernel change counters as `status` does; a
+        // read-only snapshot when validation fails.
+        let l = h.line()?;
+        #[cfg(target_os = "macos")]
+        let fast = crate::storage::stable_read(&[repo.working(l).as_path()], || compute(&old, &new))?;
+        #[cfg(not(target_os = "macos"))]
+        let fast: Option<Vec<FileDiff>> = None;
+        match fast {
+            Some(v) => v,
+            None => {
+                let scan = repo.scan(l)?;
+                let v = compute(&old, &snap(&scan.path))?;
+                keep.push(scan);
+                v
+            }
+        }
+    } else {
+        compute(&old, &new)?
+    };
     let quiet = a.has("--quiet");
     let problems = if quiet { false } else { print_diffs(ctx, &fds, &opts) };
     drop(keep);
@@ -494,12 +512,12 @@ fn medium(s: &StateRec, decor: &Decor, date_style: &str, kind_note: bool) -> Str
 }
 
 /// Changes of a state against its first parent (all files for a root state).
-fn state_changes(repo: &Repo, s: &StateRec) -> Result<(PathBuf, Option<Temp>, PathBuf, Vec<Change>)> {
+fn state_changes(repo: &Repo, s: &StateRec) -> Result<(Snap, Option<Temp>, Snap, Vec<Change>)> {
     repo.source_state(&s.id)?;
-    let root = repo.state_root(&s.id)?;
+    let root = repo.state_src(&s.id)?;
     match s.parents.first() {
         Some(p) => {
-            let pr = repo.state_root(p)?;
+            let pr = repo.state_src(p)?;
             let v = changes::file_changes(&pr, &root)?.into_iter().filter(|c| !skip_path(&c.path)).collect();
             let v = changes::with_renames(&pr, &root, v);
             Ok((pr, None, root, v))
@@ -507,7 +525,7 @@ fn state_changes(repo: &Repo, s: &StateRec) -> Result<(PathBuf, Option<Temp>, Pa
         None => {
             let e = empty_root()?;
             let v = all_files(&root)?;
-            Ok((e.path.clone(), Some(e), root, v))
+            Ok((snap(&e.path), Some(e), root, v))
         }
     }
 }
@@ -615,13 +633,13 @@ pub fn show(ctx: &Ctx, args: &[String]) -> Result<i32> {
         // <rev>:<path> and :<path> (index).
         if let Some((rv, path)) = r.split_once(':') {
             let root_path: PathBuf;
-            let mut _keep = None;
+            let mut _keep = Vec::new();
             if rv.is_empty() {
                 let l = h.line()?;
                 repo.check_view(ctx, l)?;
                 let (idx, t) = repo.index_view(l)?;
-                _keep = t;
-                root_path = idx;
+                _keep.extend(t);
+                root_path = repo.complete(idx, &mut _keep)?;
             } else {
                 let id = revs::resolve(repo, line.as_ref(), rv)?;
                 root_path = repo.state_root(&id)?;
@@ -846,7 +864,7 @@ pub fn log(ctx: &Ctx, args: &[String]) -> Result<i32> {
             }
         }
         if !specs.is_empty() {
-            if !repo.p.state_path(&s.id).exists() {
+            if !repo.p.has_state(&s.id) {
                 continue;
             }
             let (_o, _t, _n, list) = state_changes(repo, &s)?;
@@ -885,7 +903,7 @@ pub fn log(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let blank =
             print_state(ctx, s, fmt.as_deref(), &decor, &date_style, first, &|id| crate::gitbridge::tree_of(repo, id).ok())?;
         first = false;
-        if want_diff && repo.p.state_path(&s.id).exists() {
+        if want_diff && repo.p.has_state(&s.id) {
             let (old, _t, new, list) = state_changes(repo, s)?;
             let list: Vec<Change> = list.into_iter().filter(|c| matches(&specs, &c.path)).collect();
             if !list.is_empty() {
@@ -1224,6 +1242,7 @@ fn search_root(repo: &Repo, line: Option<&Line>, rev: Option<&str>) -> Result<(P
             let root = scan.path.clone();
             let mut keep = vec![scan];
             keep.extend(it);
+            let idx = repo.complete(idx, &mut keep)?;
             Ok((root, keep, Some(idx)))
         }
     }
@@ -1297,7 +1316,9 @@ pub fn grep(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let (root, _t, index) = if a.has("--cached") {
         let l = h.line()?;
         let (idx, t) = repo.index_view(l)?;
-        (idx, t.into_iter().collect(), None)
+        let mut keep: Vec<Temp> = t.into_iter().collect();
+        let idx = repo.complete(idx, &mut keep)?;
+        (idx, keep, None)
     } else {
         search_root(repo, line.as_ref(), rev.as_deref())?
     };

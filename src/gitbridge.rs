@@ -461,7 +461,7 @@ fn materialize(s: &Path, commit: &str, dst: &Path, paths: Option<&[String]>, own
 pub fn import_commit(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str, author_uid: u32) -> Result<(String, bool)> {
     let s = init_store(repo)?;
     let mapped = repo.p.db.state_of_commit(commit)?;
-    if let Some(st) = mapped.iter().find(|x| repo.p.state_path(x).exists()) {
+    if let Some(st) = mapped.iter().find(|x| repo.p.has_state(x)) {
         let _ = author_uid;
         return Ok((st.clone(), false));
     }
@@ -470,7 +470,7 @@ pub fn import_commit(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str, author
         let mut found = None;
         let revs = git_out(&s, &["rev-list", "--first-parent", "--max-count=10000", commit])?;
         for c in revs.lines().skip(1) {
-            if let Some(st) = repo.p.db.state_of_commit(c)?.into_iter().find(|x| repo.p.state_path(x).exists()) {
+            if let Some(st) = repo.p.db.state_of_commit(c)?.into_iter().find(|x| repo.p.has_state(x)) {
                 found = Some((st, c.to_string()));
                 break;
             }
@@ -482,7 +482,7 @@ pub fn import_commit(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str, author
         let mut parents = Vec::new();
         match &prev {
             Some((pst, pc)) => {
-                crate::storage::snapshot(&repo.state_root(pst)?, &work, false)?;
+                repo.snapshot_state(pst, &work, false)?;
                 let out = base_cmd(&s).args(["diff", "--name-only", "-z", "--no-renames", pc, commit]).output()?;
                 let paths: Vec<String> = out
                     .stdout
@@ -531,6 +531,38 @@ pub fn import_commit(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str, author
 /// also gives the index a new mtime, which turns off git's own check for such racy entries.
 const FORGET_CHANGED: [&str; 4] = ["update-index", "--force-remove", "-z", "--stdin"];
 
+/// The folder that git reads `paths` of a state from: its complete tree, or on APFS a private
+/// copy of only those paths when the state is a thin layer.
+fn work_tree(repo: &Repo, src: &crate::repo::Snap, paths: &[String], keep: &mut Vec<crate::repo::Temp>) -> Result<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        if src.is_complete() {
+            return Ok(src.bottom().to_path_buf());
+        }
+        let t = crate::repo::Temp { path: repo.p.scan_dir().join(ids::new_id()) };
+        crate::thin::extract(src, paths.iter().map(|p| p.as_str()), &t.path)?;
+        let p = t.path.clone();
+        keep.push(t);
+        Ok(p)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (repo, paths, keep);
+        Ok(src.clone())
+    }
+}
+
+/// True when the state is a thin layer: git reads only changed paths of it.
+fn is_thin(repo: &Repo, state: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    return repo.state_src(state).map(|s| !s.is_complete()).unwrap_or(false);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (repo, state);
+        false
+    }
+}
+
 fn index_path(repo: &Repo, state: &str) -> PathBuf {
     store(repo).join("layr-index").join(state)
 }
@@ -539,12 +571,13 @@ fn index_path(repo: &Repo, state: &str) -> PathBuf {
 pub fn build_index(repo: &Repo, state: &str, commit: &str, prev_state: Option<&str>) -> Result<()> {
     let s = store(repo);
     let idx = index_path(repo, state);
-    let root = repo.state_root(state)?;
+    let src = repo.state_src(state)?;
     let prev_idx = prev_state.map(|p| index_path(repo, p)).filter(|p| p.exists());
-    let run = |args: &[&str], input: Option<&[u8]>| -> Result<()> {
+    let mut keep: Vec<crate::repo::Temp> = Vec::new();
+    let run = |root: &Path, args: &[&str], input: Option<&[u8]>| -> Result<()> {
         let mut c = base_cmd(&s);
         c.env("GIT_INDEX_FILE", &idx)
-            .env("GIT_WORK_TREE", &root)
+            .env("GIT_WORK_TREE", root)
             .args(["-c", "core.checkStat=minimal", "-c", "core.trustctime=false"])
             .args(args);
         c.stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::null()).stderr(Stdio::piped());
@@ -561,24 +594,34 @@ pub fn build_index(repo: &Repo, state: &str, commit: &str, prev_state: Option<&s
     match (prev_idx, prev_state) {
         (Some(pi), Some(ps)) => {
             std::fs::copy(&pi, &idx)?;
-            let prev_root = repo.state_root(ps)?;
-            let mut input = Vec::new();
-            for c in changes::file_changes(&prev_root, &root)? {
+            let prev_src = repo.state_src(ps)?;
+            let mut paths = Vec::new();
+            for c in changes::file_changes(&prev_src, &src)? {
                 for p in [Some(c.path.clone()), c.old_path.clone()].into_iter().flatten() {
                     if !skip_path(&p) {
-                        input.extend_from_slice(p.as_bytes());
-                        input.push(0);
+                        paths.push(p);
                     }
                 }
             }
+            let mut input = Vec::new();
+            for p in &paths {
+                input.extend_from_slice(p.as_bytes());
+                input.push(0);
+            }
+            let root = work_tree(repo, &src, &paths, &mut keep)?;
             // Changed paths are hashed again: see FORGET_CHANGED.
-            run(&FORGET_CHANGED, Some(&input))?;
-            run(&["update-index", "--add", "--remove", "-z", "--stdin"], Some(&input))?;
-            run(&["update-index", "-q", "--refresh"], None)?;
+            run(&root, &FORGET_CHANGED, Some(&input))?;
+            run(&root, &["update-index", "--add", "--remove", "-z", "--stdin"], Some(&input))?;
+            // Unchanged files share size and time with the previous state: their stat data stay
+            // valid. A thin state has no complete folder to refresh against.
+            if !is_thin(repo, state) {
+                run(&root, &["update-index", "-q", "--refresh"], None)?;
+            }
         }
         _ => {
-            run(&["read-tree", commit], None)?;
-            run(&["update-index", "-q", "--refresh"], None)?;
+            let root = repo.complete(src, &mut keep)?;
+            run(&root, &["read-tree", commit], None)?;
+            run(&root, &["update-index", "-q", "--refresh"], None)?;
         }
     }
     Ok(())
@@ -758,10 +801,12 @@ fn commit_tree(
     refname: &str,
 ) -> Result<String> {
     let s = init_store(repo)?;
-    let root = repo.state_root(&state.id)?;
+    let src = repo.state_src(&state.id)?;
     let tmp_idx = std::env::temp_dir().join(format!("layr-index-{}", ids::new_id()));
+    let mut keep: Vec<crate::repo::Temp> = Vec::new();
     let res = (|| -> Result<String> {
         let mut paths: Vec<String> = Vec::new();
+        let mut full: Option<PathBuf> = None;
         match base {
             Some((ast, ac)) => {
                 let ai = index_path(repo, ast);
@@ -772,9 +817,9 @@ fn commit_tree(
                         bail!("git read-tree failed");
                     }
                 }
-                let aroot = repo.state_root(ast)?;
-                let rules = crate::ignore_rules::Rules::new(&root);
-                for c in changes::file_changes(&aroot, &root)? {
+                let aroot = repo.state_src(ast)?;
+                let rules = crate::ignore_rules::Rules::of(&src);
+                for c in changes::file_changes(&aroot, &src)? {
                     for p in [Some(c.path.clone()), c.old_path.clone()].into_iter().flatten() {
                         if skip_path(&p) {
                             continue;
@@ -788,6 +833,8 @@ fn commit_tree(
                 }
             }
             None => {
+                let root = repo.complete(src.clone(), &mut keep)?;
+                full = Some(root.clone());
                 let rules = crate::ignore_rules::Rules::new(&root);
                 fsutil::walk(&root, "", &mut |rel, m| {
                     if skip_path(rel) || rules.ignored(rel, m.is_dir()) {
@@ -805,6 +852,10 @@ fn commit_tree(
             input.extend_from_slice(p.as_bytes());
             input.push(0);
         }
+        let root = match full {
+            Some(root) => root,
+            None => work_tree(repo, &src, &paths, &mut keep)?,
+        };
         // Changed paths are hashed again: see FORGET_CHANGED.
         for args in [&FORGET_CHANGED[..], &["update-index", "--add", "--remove", "-z", "--stdin"]] {
             let mut c = base_cmd(&s);
@@ -912,12 +963,18 @@ pub fn prune_indexes(repo: &Repo) -> Result<usize> {
 pub fn line_commit(repo: &Repo, state: &str) -> Result<String> {
     let (c, _) = export_history(repo, state)?;
     if !index_path(repo, state).exists() {
-        build_index(repo, state, &c, None)?;
+        let prev = repo.state(state)?.parents.first().cloned().filter(|p| index_path(repo, p).exists());
+        build_index(repo, state, &c, prev.as_deref())?;
     }
     Ok(c)
 }
 
 fn refresh_index(repo: &Repo, state: &str) -> Result<()> {
+    // An index made from the previous index and the changed paths of a thin state has valid
+    // stat data already; a refresh would need a complete tree.
+    if is_thin(repo, state) {
+        return Ok(());
+    }
     let s = store(repo);
     let root = repo.state_root(state)?;
     base_cmd(&s)

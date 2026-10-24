@@ -193,7 +193,7 @@ fn finish(
     }
     if op == "merge" && new_head != line.head {
         if let Err(e) =
-            crate::secrets::check_between(ctx, repo, &repo.state_root(&line.head)?, &repo.state_root(new_head)?, &line.head)
+            crate::secrets::check_between(ctx, repo, &repo.state_src(&line.head)?, &repo.state_src(new_head)?, &line.head)
         {
             return Err(fail(e));
         }
@@ -245,7 +245,7 @@ fn finish(
 /// Path rules of a protected line: every path that the merge changes needs the role of its
 /// rule (`layr protect <line> --path <path>=<role>`).
 fn check_paths(ctx: &Ctx, repo: &Repo, line: &Line, rule: Option<&crate::access::Rule>, head: &str, result: &str) -> Result<()> {
-    crate::secrets::check_between(ctx, repo, &repo.state_root(head)?, &repo.state_root(result)?, head)?;
+    crate::secrets::check_between(ctx, repo, &repo.state_src(head)?, &repo.state_src(result)?, head)?;
     let rule = match rule {
         Some(r) if !r.paths.is_empty() && !ctx.caller.is_root() => r,
         _ => return Ok(()),

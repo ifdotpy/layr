@@ -2,7 +2,7 @@
 
 use crate::ctx::Ctx;
 use crate::fsutil;
-use crate::repo::Repo;
+use crate::repo::{Repo, Snap};
 use anyhow::{bail, Context, Result};
 use hmac::{Hmac, Mac};
 use rand::RngCore;
@@ -224,14 +224,14 @@ fn token_byte(b: u8) -> bool {
 /// Keep the token suffix across chunk boundaries, bounded by the longest indexed value.
 /// One extra byte prevents a suffix of a longer token from matching a whole value.
 fn scan_large(
-    root: &Path,
+    root: &(impl fsutil::Src + ?Sized),
     path: &str,
     key: &[u8],
     index: &Index,
     approvals: &BTreeSet<(String, String)>,
     rev: &str,
 ) -> Result<()> {
-    let mut file = crate::tree::Tree::open(root)?.open_read(path)?;
+    let mut file = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(root.at(path)?)?;
     let mut chunk = vec![0u8; 1 << 20];
     let mut token = VecDeque::new();
     let mut offset = 0u64;
@@ -275,7 +275,7 @@ fn scan_large(
     Ok(())
 }
 
-fn check_tree(ctx: &Ctx, repo: &Repo, old: Option<&Path>, new: &Path, rev: &str) -> Result<()> {
+fn check_tree(ctx: &Ctx, repo: &Repo, old: Option<&Snap>, new: &Snap, rev: &str) -> Result<()> {
     if repo.p.is_overlay() {
         return Ok(());
     }
@@ -316,7 +316,7 @@ fn check_tree(ctx: &Ctx, repo: &Repo, old: Option<&Path>, new: &Path, rev: &str)
     Ok(())
 }
 
-pub fn check_between(ctx: &Ctx, repo: &Repo, old: &Path, new: &Path, rev: &str) -> Result<()> {
+pub fn check_between(ctx: &Ctx, repo: &Repo, old: &Snap, new: &Snap, rev: &str) -> Result<()> {
     check_tree(ctx, repo, Some(old), new, rev)
 }
 
@@ -325,16 +325,16 @@ pub fn check_state(ctx: &Ctx, repo: &Repo, state: &str) -> Result<()> {
         return Ok(());
     }
     let s = repo.state(state)?;
-    let root = repo.state_root(state)?;
+    let root = repo.state_src(state)?;
     match s.parents.first() {
-        Some(parent) => check_between(ctx, repo, &repo.state_root(parent)?, &root, state),
+        Some(parent) => check_between(ctx, repo, &repo.state_src(parent)?, &root, state),
         None => check_tree(ctx, repo, None, &root, state),
     }
 }
 
 /// A folder export sends only the selected tree, including unchanged files.
 pub fn check_contents(ctx: &Ctx, repo: &Repo, state: &str) -> Result<()> {
-    check_tree(ctx, repo, None, &repo.state_root(state)?, state)
+    check_tree(ctx, repo, None, &repo.state_src(state)?, state)
 }
 
 /// Exports include history, so inspect every state that can leave the machine.

@@ -328,7 +328,7 @@ impl Store {
             if only.is_some_and(|ids| !ids.contains(&line.id)) {
                 continue;
             }
-            if !repo.p.state_path(&line.head).exists() {
+            if !repo.p.has_state(&line.head) {
                 pending.push(line.id.clone());
                 missing.push(format!(
                     "line {}: head state {} is not in the store yet; run `layr fetch <remote>` later",

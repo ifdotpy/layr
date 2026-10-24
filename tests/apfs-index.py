@@ -36,7 +36,7 @@ try:
   while time.monotonic()<deadline and proc.poll() is None:
    if journal.exists():
     j=json.loads(journal.read_text())
-    if (project/'states'/j['state']).exists():
+    if (project/('deltas' if j.get('thin') else 'states')/j['state']).exists():
      os.kill(proc.pid,signal.SIGSTOP);stopped=True;break
    time.sleep(.001)
   assert stopped,'commit finished before the test could stop it'
@@ -52,7 +52,8 @@ try:
  committed=run(work,'commit','-qm','success')
  assert 'APFS promote index' in committed.stderr and 'APFS clone ' not in committed.stderr,committed.stderr
  with sqlite3.connect(db) as c:head=c.execute("SELECT head FROM lines WHERE name='topic'").fetchone()[0]
- state=project/'states'/head
+ state=project/'deltas'/head
+ assert not (project/'states'/head).exists(),'a thin commit needs no complete tree'
  assert state.stat().st_ino==ino and (state/'d0/f0').read_bytes()==b'staged\n'
  assert not index.exists() and not journal.exists();assert not run(work,'status','--porcelain').stdout
  assert (main/'d0/f0').read_bytes()==b'original\n';run(work,'fsck')

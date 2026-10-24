@@ -1,0 +1,50 @@
+{
+ "0:x:clone": {
+  "bytes_per_entry": 360.39204039204037,
+  "seconds": 1.5954727500211447
+ },
+ "0:x:clone+rewrite": {
+  "bytes_per_entry": 361.000297000297,
+  "seconds": 2.498925333842635
+ },
+ "0:x:clone+seal": {
+  "bytes_per_entry": 361.1016731016731,
+  "seconds": 1.8390784999355674
+ },
+ "0:xsealed:clone": {
+  "bytes_per_entry": 360.18928818928816,
+  "seconds": 0.8691362920217216
+ },
+ "0:xsealed:clone+unseal": {
+  "bytes_per_entry": 360.8989208989209,
+  "seconds": 2.1284968750551343
+ },
+ "0:xsealed:clone+unseal+rewrite": {
+  "bytes_per_entry": 361.000297000297,
+  "seconds": 3.572233417071402
+ },
+ "4096:x:clone": {
+  "bytes_per_entry": 402.97000297000295,
+  "seconds": 1.1425891660619527
+ },
+ "4096:x:clone+rewrite": {
+  "bytes_per_entry": 403.5782595782596,
+  "seconds": 2.018689166987315
+ },
+ "4096:x:clone+seal": {
+  "bytes_per_entry": 403.6796356796357,
+  "seconds": 2.0730532500892878
+ },
+ "4096:xsealed:clone": {
+  "bytes_per_entry": 402.97000297000295,
+  "seconds": 1.064257208025083
+ },
+ "4096:xsealed:clone+unseal": {
+  "bytes_per_entry": 403.6796356796357,
+  "seconds": 1.7168795000761747
+ },
+ "4096:xsealed:clone+unseal+rewrite": {
+  "bytes_per_entry": 403.6796356796357,
+  "seconds": 2.0232320830691606
+ }
+}

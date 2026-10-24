@@ -127,7 +127,7 @@ pub fn stack_data(line_id: &str, layers: &[Layer]) -> serde_json::Value {
 }
 
 /// The files (not folders) of a tree, without `.git`.
-pub fn files_of(root: &Path) -> Result<Vec<String>> {
+pub fn files_of(root: &(impl fsutil::Src + ?Sized)) -> Result<Vec<String>> {
     let mut v = Vec::new();
     fsutil::walk(root, "", &mut |rel, m| {
         if skip_path(rel) {
@@ -615,7 +615,7 @@ impl<'a> Repo<'a> {
     pub fn assemble(&self, line: &Line, head: &str, layers: &[Layer]) -> Result<Temp> {
         let _t = crate::trace::span("assemble");
         let t = Temp { path: self.p.work_dir().join(ids::new_id()) };
-        btrfs::snapshot(&self.state_root(head)?, &t.path, false)?;
+        self.snapshot_state(head, &t.path, false)?;
         self.put_layers(&t.path, layers, self.own(line))?;
         btrfs::set_readonly(&t.path)?;
         Ok(t)
@@ -764,7 +764,7 @@ pub fn next_state(
     let _t = crate::trace::span("layer state");
     let id = ids::new_id();
     let dst = repo.p.state_path(&id);
-    btrfs::snapshot(&repo.state_root(prev)?, &dst, false)?;
+    repo.snapshot_state(prev, &dst, false)?;
     let made = ops.apply(&dst, src, own).and_then(|_| btrfs::set_readonly(&dst)).and_then(|_| btrfs::subvol_info(&dst));
     let info = match made {
         Ok(i) => i,
@@ -939,7 +939,9 @@ pub fn commit_layers(
         }
     };
     if let Some(state) = &shared {
-        if let Err(e) = crate::secrets::check_between(ctx, repo, &shared_root, &repo.p.state_path(&state.id), &line.head) {
+        if let Err(e) =
+            crate::secrets::check_between(ctx, repo, &crate::repo::snap(&shared_root), &repo.state_src(&state.id)?, &line.head)
+        {
             repo.discard_states(std::slice::from_ref(state));
             discard(&made, &orepos);
             return Err(e);

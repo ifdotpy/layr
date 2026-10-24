@@ -199,7 +199,7 @@ pub fn export(ctx: &Ctx, args: &[String]) -> Result<i32> {
         .as_ref()
         .filter(|m| m["project"].as_str() == Some(h.repo.p.id.as_str()))
         .and_then(|m| m["state"].as_str().map(|s| s.to_string()))
-        .filter(|s| h.repo.p.state_path(s).exists());
+        .filter(|s| h.repo.p.has_state(s));
     let empty = as_caller_fs(ctx, || Ok(std::fs::read_dir(&dst)?.next().is_none()))?;
     if prev.is_none() && !empty && !a.has("-f") {
         return Err(exit(
@@ -207,7 +207,7 @@ pub fn export(ctx: &Ctx, args: &[String]) -> Result<i32> {
             format!("error: {} is not empty and was not exported by layr; use --force to write into it", dst.display()),
         ));
     }
-    let from = prev.as_ref().map(|p| h.repo.p.state_path(p));
+    let from = prev.as_ref().map(|p| h.repo.state_root(p)).transpose()?;
     // Ignored files (build output, local secrets) stay out unless --all.
     let (n, bad) = sync_folder(ctx, from.as_deref(), &to, &dst, &[], !a.has("--all"))?;
     let m = serde_json::json!({"project": h.repo.p.id, "project_name": h.repo.p.name, "state": state, "time": ids::now_ms()});
