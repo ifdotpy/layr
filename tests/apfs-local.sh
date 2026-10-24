@@ -19,7 +19,7 @@ l add -A && l commit -qm attributes
 mkdir -p node_modules/pkg
 printf 'cache\n' > node_modules/pkg/data
 ok "save converts a regenerable folder" l save -q --layers
-has "the folder is a layer" "node_modules" "$(l layer list)"
+has "the folder is a layer" "node_modules" "$(l cache list)"
 no "layer data is absent from history" l show HEAD:node_modules/pkg/data
 l branch -q warm 'HEAD@{0}'
 eq "new line receives the saved layer" "cache" "$(cat "$P/warm/node_modules/pkg/data")"
