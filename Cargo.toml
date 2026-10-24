@@ -27,6 +27,9 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 hex = "0.4"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 hmac = "0.12"
+html5gum = { version = "0.8", default-features = false }
+image = { version = "0.25", default-features = false, features = ["png"] }
+quick-xml = "0.42"
 ignore = "0.4"
 libc = "0.2"
 rand = "0.8"
