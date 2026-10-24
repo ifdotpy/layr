@@ -28,6 +28,7 @@ Successful peer `push` and `sync`, and store `push`, append a signed operation r
 The record includes the remote name and URL, direction, state IDs, counts, bytes, overlays, and result.
 The URL excludes credentials, query parameters, and fragments.
 The record stays local until the next exchange sends it.
+OCI push exports an artifact and writes no transfer record.
 `op log` shows these project operations from any line.
 `remote list --json` includes `copies` with the last success time, machine, and transfer details.
 
