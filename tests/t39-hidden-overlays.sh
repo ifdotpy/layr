@@ -149,6 +149,24 @@ try:
  for args in [['overlay','list'],['overlay','list','--json'],['overlay','use'],['config','--list','--json'],['op','log','--all','-n','100000','--json'],['log','--json'],['fsck'],['push','archive','--json']]:
   result=person('layr-hidden-other',args)
   check(absent(result.stdout+result.stderr,ids),'a non-reader admin has no hidden trace: '+' '.join(args))
+
+ # Compare the same line with and without its hidden overlay, including exit status and errors.
+ commands=[['status'],['status','--json'],['diff'],['diff','--cached'],['diff','head'],
+  ['grep','shared'],['grep','hidden'],['grep','--cached','hidden'],['ls-files'],['ls-files','--stage'],
+  ['ls-files','--others'],['show',':public.txt'],['show',':hidden.txt'],['view','--json']]
+ run(['--line','main','overlay','use','--none','-q'])
+ baseline=[]
+ for args in commands:
+  output=person('layr-hidden-other',args,False)
+  baseline.append((output.returncode,output.stdout,output.stderr))
+ run(['--line','main','overlay','use',name,'-q'])
+ for args,expected in zip(commands,baseline):
+  output=person('layr-hidden-other',args,False)
+  check((output.returncode,output.stdout,output.stderr)==expected,'non-reader output matches no hidden overlay byte for byte: '+' '.join(args))
+ direct=subprocess.run(['runuser','-u','layr-hidden-other','--','cat',str(line/'hidden.txt')],cwd='/',capture_output=True)
+ check((line.stat().st_mode & 0o777)==0o700,'the working folder uses the existing owner-only permission mode')
+ check(direct.returncode!=0 and b'hidden test bytes' not in direct.stdout,'the non-reader cannot read the owner working file through its path')
+ check((line/'hidden.txt').read_text()=='hidden test bytes\n','the owner working folder still holds the hidden file')
  check(name in person('layr-hidden-reader',['overlay','list']).stdout,'the reader person sees the hidden row')
  check('hidden' in person('layr-hidden-reader',['overlay','list']).stdout,'the reader row has the hidden badge')
  check('Hidden state' in person('layr-hidden-reader',['overlay','log',name]).stdout,'the reader person sees overlay history')

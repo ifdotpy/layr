@@ -600,6 +600,9 @@ Hidden overlays use `follow` mode. Each line uses the overlay's own line history
 Parent states contain no hidden layer identifiers.
 The overlay's own signed records hold its parent project identifier, readers, peer settings, and selection for each line.
 Parent records and configuration contain no hidden metadata.
+Read-only commands on another user's line use the shared snapshot and layers the caller can read.
+They silently exclude unread hidden layers. Unread visible private overlays keep their access refusal.
+Working folders retain the existing owner-only permissions.
 A reader sees the `hidden` badge in `layr overlay list`.
 Use `--json` for the same visibility rules in structured output.
 

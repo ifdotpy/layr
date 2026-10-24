@@ -613,7 +613,7 @@ impl<'a> Repo<'a> {
             return Ok(());
         }
         for l in self.layers(line)? {
-            if !self.reads_overlay(&l.overlay, ctx.caller.uid, ctx.caller.gid)? {
+            if !self.need_overlay(&l.overlay)?.hidden && !self.reads_overlay(&l.overlay, ctx.caller.uid, ctx.caller.gid)? {
                 return Err(crate::cmd::exit(
                     1,
                     format!("permission denied: line '{}' shows overlays that you do not read", line.name),
@@ -621,6 +621,42 @@ impl<'a> Repo<'a> {
             }
         }
         Ok(())
+    }
+
+    /// A non-reader sees a saved view without any unread hidden layers.
+    /// Visible private overlays keep their existing access refusal.
+    pub fn caller_layers(&self, ctx: &Ctx, line: &Line) -> Result<Vec<Layer>> {
+        self.check_view(ctx, line)?;
+        let mut layers = Vec::new();
+        for layer in self.layers(line)? {
+            if !self.need_overlay(&layer.overlay)?.hidden || self.reads_overlay(&layer.overlay, ctx.caller.uid, ctx.caller.gid)? {
+                layers.push(layer);
+            }
+        }
+        Ok(layers)
+    }
+
+    pub fn filtered_view(&self, ctx: &Ctx, line: &Line) -> Result<Option<Temp>> {
+        self.check_view(ctx, line)?;
+        if ctx.caller.is_root() || ctx.caller.uid == line.owner || self.p.is_overlay() {
+            return Ok(None);
+        }
+        let layers = self.caller_layers(ctx, line)?;
+        if layers.len() == self.layers(line)?.len() {
+            return Ok(None);
+        }
+        Ok(Some(self.assemble(line, &line.head, &layers)?))
+    }
+
+    pub fn snapshot_status(&self, ctx: &Ctx, line: &Line) -> Result<crate::repo::Status> {
+        let mut status = crate::repo::Status::default();
+        status.conflicts = self.state(&line.head)?.conflicts;
+        for layer in self.caller_layers(ctx, line)? {
+            if let Some(state) = self.overlay_project(&layer.overlay)?.db.state(&layer.state)? {
+                status.conflicts.extend(state.conflicts);
+            }
+        }
+        Ok(status)
     }
 
     /// The paths that `layr overlay move` sends to an overlay at the next commit. They stay until

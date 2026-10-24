@@ -198,7 +198,14 @@ pub fn diff(ctx: &Ctx, args: &[String]) -> Result<i32> {
     };
     // (old root, new root, new side is the working content, index for tracked check)
     let mut index_root: Option<Snap> = None;
+    let needs_working_view = revs_v.is_empty() || (revs_v.len() == 1 && !revs_v[0].contains(".."));
+    let filtered =
+        if needs_working_view { line.as_ref().map(|l| repo.filtered_view(ctx, l)).transpose()?.flatten() } else { None };
     let (old, new, working): (Snap, Snap, bool) = match revs_v.len() {
+        0 if filtered.is_some() => {
+            let root = snap(&filtered.as_ref().unwrap().path);
+            (root.clone(), root, false)
+        }
         0 => {
             let l = h.line()?;
             repo.check_view(ctx, l)?;
@@ -222,6 +229,14 @@ pub fn diff(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 (repo.state_src(&b)?, repo.state_src(&yi)?, false)
             } else if let Some((x, y)) = r.split_once("..") {
                 (resolve(x)?, resolve(y)?, false)
+            } else if let Some(filtered) = &filtered {
+                let l = h.line()?;
+                let id = revs::resolve(repo, line.as_ref(), r)?;
+                let layers = repo.caller_layers(ctx, l)?;
+                let old = repo.assemble(l, &id, &layers)?;
+                let root = snap(&old.path);
+                keep.push(old);
+                (root, snap(&filtered.path), false)
             } else {
                 let l = h.line()?;
                 repo.check_view(ctx, l)?;
@@ -651,9 +666,14 @@ pub fn show(ctx: &Ctx, args: &[String]) -> Result<i32> {
             if rv.is_empty() {
                 let l = h.line()?;
                 repo.check_view(ctx, l)?;
-                let (idx, t) = repo.index_view(l)?;
-                _keep.extend(t);
-                root_path = repo.complete(idx, &mut _keep)?;
+                if let Some(filtered) = repo.filtered_view(ctx, l)? {
+                    root_path = filtered.path.clone();
+                    _keep.push(filtered);
+                } else {
+                    let (idx, t) = repo.index_view(l)?;
+                    _keep.extend(t);
+                    root_path = repo.complete(idx, &mut _keep)?;
+                }
             } else {
                 let id = revs::resolve(repo, line.as_ref(), rv)?;
                 root_path = repo.state_root(&id)?;
@@ -1130,7 +1150,10 @@ pub fn blame(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if rev.is_none() {
         if let Some(l) = &line {
             repo.check_view(ctx, l)?;
-            let scan = repo.scan(l)?;
+            let scan = match repo.filtered_view(ctx, l)? {
+                Some(view) => view,
+                None => repo.scan(l)?,
+            };
             if fsutil::lmeta(&scan.path, &path).map(|m| m.size > fsutil::MAX_TEXT).unwrap_or(false) {
                 return Err(too_large());
             }
@@ -1351,7 +1374,15 @@ pub fn grep(ctx: &Ctx, args: &[String]) -> Result<i32> {
             repo.check_view(ctx, l)?;
         }
     }
-    let (root, _t, index) = if a.has("--cached") {
+    let filtered = if a.has("--cached") || rev.is_none() {
+        line.as_ref().map(|l| repo.filtered_view(ctx, l)).transpose()?.flatten()
+    } else {
+        None
+    };
+    let (root, _t, index) = if let Some(filtered) = filtered {
+        let root = filtered.path.clone();
+        (root.clone(), vec![filtered], Some(root))
+    } else if a.has("--cached") {
         let l = h.line()?;
         let (idx, t) = repo.index_view(l)?;
         let mut keep: Vec<Temp> = t.into_iter().collect();
@@ -1479,13 +1510,16 @@ pub fn ls_files(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let a = parse(&spec, args)?;
     let h = here(ctx)?;
     let line = h.line()?.clone();
-    h.repo.check_view(ctx, &line)?;
+    let filtered = h.repo.filtered_view(ctx, &line)?;
     let specs = h.specs(&a.rest())?;
     let end = if a.has("-z") { "\0" } else { "\n" };
     let show = |p: &str| if a.has("--full-name") { p.to_string() } else { h.rel(p) };
     let want_cached = a.has("-c") || !(a.has("-o") || a.has("-m") || a.has("-d") || a.has("-i"));
     if want_cached || a.has("-s") {
-        let (idx, _t) = h.repo.index_view(&line)?;
+        let (idx, _t) = match &filtered {
+            Some(view) => (snap(&view.path), None),
+            None => h.repo.index_view(&line)?,
+        };
         let mut v = Vec::new();
         fsutil::walk(&idx, "", &mut |rel, m| {
             if skip_path(rel) {
@@ -1509,7 +1543,7 @@ pub fn ls_files(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
     }
     if a.has("-o") || a.has("-m") || a.has("-d") || a.has("-i") {
-        let (st, _scan, _it, _idx) = h.repo.status(&line)?;
+        let st = if filtered.is_some() { h.repo.snapshot_status(ctx, &line)? } else { h.repo.status(&line)?.0 };
         if a.has("-m") || a.has("-d") {
             for c in &st.unstaged {
                 if (a.has("-m") || c.new.is_none()) && matches(&specs, &c.path) {

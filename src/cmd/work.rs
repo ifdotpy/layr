@@ -54,13 +54,13 @@ pub fn status(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let line = h.line()?.clone();
     #[cfg(target_os = "macos")]
     let line = h.repo.line(&line.id)?;
-    h.repo.check_view(ctx, &line)?;
+    let filtered = h.repo.filtered_view(ctx, &line)?;
     let specs = h.specs(&a.rest())?;
     #[cfg(target_os = "macos")]
-    let st = h.repo.status_report(&line)?;
+    let st = if filtered.is_some() { h.repo.snapshot_status(ctx, &line)? } else { h.repo.status_report(&line)? };
     #[cfg(not(target_os = "macos"))]
-    let (st, _scan, _itemp, _index) = h.repo.status(&line)?;
-    let overlaps = if a.has("--json") || (!a.has("-s") && !a.has("--porcelain")) {
+    let st = if filtered.is_some() { h.repo.snapshot_status(ctx, &line)? } else { h.repo.status(&line)?.0 };
+    let overlaps = if filtered.is_none() && (a.has("--json") || (!a.has("-s") && !a.has("--porcelain"))) {
         h.repo.overlaps(ctx, &line)?.into_iter().filter(|o| matches(&specs, &o.path)).collect::<Vec<_>>()
     } else {
         Vec::new()
