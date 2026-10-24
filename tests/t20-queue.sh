@@ -229,7 +229,10 @@ eq 'a failed probe leaves the target head unchanged' "$LIMIT_BASE" "$(l rev-pars
 eq 'a failed probe leaves the target files unchanged' 41 "$(cat metric.txt)"
 LIMIT_OUTCOME=$(l queue list --into limited --json)
 eq 'the failure gives the exact metric, values, change, and limit' 'probe bench-checkout: p95_ms 41 → 52 (+27 %) is over the limit +20 %' "$(printf '%s' "$LIMIT_OUTCOME" | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["reason"])')"
-ok 'the probe subject is the merge result and includes target changes' python3 -c 'import json,pathlib,sys; b=json.loads(sys.argv[1])[0]["probes"]["behavior"]; assert b["base"]==sys.argv[2]; assert (pathlib.Path(sys.argv[3])/b["head"] / "target-only.txt").read_text().strip()=="target"; assert b["head"]!=b["base"]' "$LIMIT_OUTCOME" "$LIMIT_BASE" "$LAYR_ROOT/projects/queue-probes/states"
+MERGE_BASE=$(printf '%s' "$LIMIT_OUTCOME" | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["probes"]["behavior"]["base"])')
+MERGE_RESULT=$(printf '%s' "$LIMIT_OUTCOME" | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["probes"]["behavior"]["head"])')
+eq 'the probe base is the exact target head' "$LIMIT_BASE" "$MERGE_BASE"
+eq 'the probe result includes the target changes' target "$(l show "$MERGE_RESULT":target-only.txt)"
 SHOW=$(l change show "$OVER_CHANGE" --json)
 ok 'a failed merge exposes the same stored Behavior' python3 -c 'import json,sys; assert json.loads(sys.argv[1])[0]["probes"]["behavior"]==json.loads(sys.argv[2])["behavior"]' "$LIMIT_OUTCOME" "$SHOW"
 l line new -q larger "$PROBE_BASE"

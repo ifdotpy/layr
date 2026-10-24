@@ -492,9 +492,9 @@ pub struct Behavior {
     pub head: String,
     pub base_source: String,
     pub head_source: String,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub base_views: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub head_views: Vec<String>,
     pub probes: Vec<Value>,
     #[serde(skip)]
