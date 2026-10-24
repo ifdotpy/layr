@@ -112,6 +112,9 @@ run(['remote','add','nonreader','ssh://test/project'])
 blocked=json.loads(run(['sync','nonreader','--json','--command','--','env','LAYR_ROOT='+C['LAYR_ROOT'],binary,'serve-peer','project']).stdout)
 check('overlay secrets: peer is not allowed to hold it' in blocked['omitted'],'default peers exclude C')
 check(not (pathlib.Path(C['LAYR_ROOT'])/'projects/project/meta/overlays/secrets').exists(),'an excluded peer receives no overlay project')
+run(['--project','project','remote','add','source','ssh://test/project'],C)
+fetched=json.loads(run(['--project','project','fetch','source','--json','--command','--','env','LAYR_ROOT='+A['LAYR_ROOT'],binary,'serve-peer','project'],C).stdout)
+check('overlay secrets: peer is not allowed to hold it' in fetched['omitted'],'fetch reports an overlay that the source keeps local')
 # Peer B receives overlay states. C is explicitly allowed to hold them, but its service enforces readers.
 for who,env in [(b,B),(c,C)]:
  name='peer-'+who['id'][-8:]

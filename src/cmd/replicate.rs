@@ -835,6 +835,7 @@ fn exchange_overlays<R: Read, W: Write>(
         let enabled = if initiator { direction != "fetch" } else { direction != "push" };
         if sending {
             let mut names = Vec::new();
+            let mut skipped = Vec::new();
             if enabled {
                 for name in repo.overlay_names()? {
                     if repo.overlay_repo(&name).is_err() {
@@ -844,10 +845,11 @@ fn exchange_overlays<R: Read, W: Write>(
                         names.push(name);
                     } else {
                         omitted.push(format!("overlay {name}: peer is not allowed to hold it"));
+                        skipped.push(name);
                     }
                 }
             }
-            w.json(&json!({"op":"overlays", "names":names}))?;
+            w.json(&json!({"op":"overlays", "names":names, "omitted":skipped}))?;
             for name in names {
                 let orepo = repo.overlay_repo(&name)?;
                 w.json(&json!({"op":"overlay", "name":name, "id":orepo.p.id}))?;
@@ -869,6 +871,11 @@ fn exchange_overlays<R: Read, W: Write>(
                 bail!("protocol error: expected overlays");
             }
             let names: Vec<String> = serde_json::from_value(offer["names"].clone())?;
+            let skipped: Vec<String> = serde_json::from_value(offer["omitted"].clone()).unwrap_or_default();
+            for name in skipped {
+                crate::store::check_name("overlay", &name)?;
+                omitted.push(format!("overlay {name}: peer is not allowed to hold it"));
+            }
             if (initiator && direction == "push" || !initiator && direction == "fetch") && !names.is_empty() {
                 bail!("peer sends overlays against the exchange direction");
             }
