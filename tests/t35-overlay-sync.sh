@@ -81,6 +81,11 @@ report=json.loads(run(['clone','file://'+str(root/'archive'),'project','--json']
 check('overlay secrets: no key on this machine' in report['omitted'],'C receives the no-key report')
 cline=pathlib.Path(C['LAYR_ROOT'])/'projects/project/lines/main'
 check((cline/'public.txt').read_text()=='shared bytes\n' and not (cline/'.env').exists(),'C clones shared files only')
+(cline/'public.txt').write_text('shared bytes from C\n')
+saved=subprocess.run([binary,'save','-qam','C edits a shared file'],env=C,cwd=cline,text=True,capture_output=True,timeout=90)
+check(saved.returncode==0,'a non-reader clone saves shared files: '+saved.stderr.strip())
+fsck=subprocess.run([binary,'fsck'],env=C,cwd=cline,text=True,capture_output=True,timeout=90)
+check(fsck.returncode==0 and 'not on this machine (no key)' in fsck.stdout,'fsck on a non-reader clone reports the overlay as absent, not as a problem')
 # C has the vault paper key for this check, but no overlay slot for its machine.
 # Neither the vault identity nor C's machine identity opens any overlay object.
 fixture=dict(A,LAYR_TEST_OVERLAY_DIR=str(root/'archive'),LAYR_TEST_OVERLAY_C_ROOT=C['LAYR_ROOT'],LAYR_TEST_OVERLAY_A_ROOT=A['LAYR_ROOT'])

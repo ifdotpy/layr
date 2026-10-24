@@ -122,10 +122,11 @@ fn index(ctx: &Ctx, repo: &Repo, key: &[u8]) -> Result<Index> {
     let mut hashes = Index::default();
     let mut overlay_paths = BTreeSet::new();
     for name in repo.overlay_names()? {
+        // A machine without the overlay key has no overlay project and no values to protect.
+        let Ok(overlay) = repo.overlay_repo(&name) else { continue };
         if !repo.reads_overlay(&name, ctx.caller.uid, ctx.caller.gid)? {
             continue;
         }
-        let overlay = repo.overlay_repo(&name)?;
         for line in overlay.lines()? {
             let root = overlay.state_root(&line.head)?;
             for path in crate::overlay::files_of(&root)? {

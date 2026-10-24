@@ -1107,6 +1107,11 @@ pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
 fn fsck_overlays(ctx: &Ctx, repo: &Repo, repair: bool) -> Result<usize> {
     let mut problems = 0;
     for name in repo.overlay_names()? {
+        // A machine that is not a reader of an overlay never receives its project.
+        if !repo.p.store.project_dir(&format!("{}%{name}", repo.p.name))?.exists() {
+            outln!(ctx, "overlay {name}: not on this machine (no key)");
+            continue;
+        }
         let o = match repo.overlay_repo(&name) {
             Ok(o) => o,
             Err(e) => {
@@ -1192,7 +1197,8 @@ pub fn reindex(ctx: &Ctx, _args: &[String]) -> Result<i32> {
     outln!(ctx, "index rebuilt from {n} records");
     if !h.repo.p.is_overlay() {
         for name in h.repo.overlay_names()? {
-            let o = h.repo.overlay_project(&name)?;
+            // An overlay without a key on this machine has no local project to index.
+            let Ok(o) = h.repo.overlay_project(&name) else { continue };
             let _l = o.lock()?;
             o.rebuild_index()?;
             let n: i64 = o.db.conn.query_row("SELECT COUNT(*) FROM records", [], |r| r.get(0))?;
