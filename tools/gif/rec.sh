@@ -3,6 +3,9 @@
 # its real output between markers. Usage: rec.sh <steps-file>. Lines starting with "#" are
 # hidden setup; other lines are shown as typed commands.
 set -u
+# It deletes and remounts /srv/layr and deletes /srv/vault and /srv/src: run it only as root in a
+# throwaway VM, never on a machine with data there.
+[ "${LAYR_GIF_VM:-}" = 1 ] || { echo "set LAYR_GIF_VM=1 to confirm this is a throwaway VM" >&2; exit 2; }
 export PATH=${LAYR_BIN_DIR:?set LAYR_BIN_DIR to the folder with the layr binary}:$PATH
 export LAYR_ROOT=/srv/layr LAYR_AUTHOR_NAME=alice LAYR_AUTHOR_EMAIL=alice@acme.dev
 export GIT_AUTHOR_NAME=alice GIT_AUTHOR_EMAIL=alice@acme.dev GIT_COMMITTER_NAME=alice GIT_COMMITTER_EMAIL=alice@acme.dev
