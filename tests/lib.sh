@@ -108,6 +108,12 @@ finish() {
 }
 
 # A small project folder.
+case_sensitive() { # true when the test folder tells README and readme apart
+    touch "$T/.CaseProbe"
+    if [ -e "$T/.caseprobe" ]; then rm -f "$T/.CaseProbe"; return 1; fi
+    rm -f "$T/.CaseProbe"
+}
+
 sample() { # sample <dir>
     rm -rf "$1"; mkdir -p "$1/src" "$1/target"
     printf 'fn main() {\n    println!("hi");\n}\n' > "$1/src/main.rs"

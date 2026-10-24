@@ -10,7 +10,13 @@ See the [10,000-file measurements](../benchmarks/apfs-performance-20261015.md) f
 The macOS build uses APFS. The Linux build continues to use btrfs with the existing store and record formats.
 The store and signed record formats remain compatible with the Linux backend.
 
-- The store requires a case-sensitive APFS volume.
+- The store can be any folder on APFS, also on the default volume, which ignores case.
+  On such a volume `README` and `Readme` cannot exist together. Layr refuses them where they could arrive:
+  `init --from`, `git clone` and git fetches, peer sync, remote stores, and merges.
+  The error names the paths; nothing is half written. A store on a case-sensitive APFS volume accepts them.
+  Path lookups compare exact names, so a rename that changes only case (`readme` to `README`) works like any rename.
+  Layr does not compare Unicode normal forms. APFS also treats `é` as one code point and as `e` plus an accent
+  as the same name, on both kinds of volume. Two such names in one folder give the same result as on any APFS store.
 - Commands run as the current user by default. Set `LAYR_SOCKET` to use the root service.
 - The service requires a volume with ownership enabled and a separate root-owned store.
   It refuses volumes mounted with `noowners` and store folders that other users can change.
@@ -59,11 +65,11 @@ The store and signed record formats remain compatible with the Linux backend.
 - Device nodes, sockets and named pipes are not supported by the APFS backend.
 - APFS copies directory metadata, including access control lists and extended attributes.
 
-Use a separate test store on an existing case-sensitive APFS volume:
+Use a separate test store, for example in your home folder:
 
 ```sh
 cargo build --release
-export LAYR_ROOT=/Volumes/YourCaseSensitiveVolume/layr-test-store
+export LAYR_ROOT=~/layr-test-store
 ./target/release/layr init app --from ~/src/app
 ./target/release/layr --project app --line main branch topic
 ```
@@ -73,7 +79,7 @@ The core command tests also run on macOS. They require GNU coreutils and GNU sed
 The Linux tests use root and already bypass that policy. This option does not test access control.
 
 ```sh
-export LAYR_APFS_TEST_ROOT=/Volumes/YourCaseSensitiveVolume
+export LAYR_APFS_TEST_ROOT=~/layr-test-store
 LAYR_TEST_DIRECT_MAIN=1 tests/run.sh t01-basic t02-merge t03-git t08-gitcompat
 cargo test -- --ignored
 ```
@@ -82,6 +88,6 @@ The benchmark creates a new test directory and keeps its data and `results.json`
 
 ```sh
 python3 benchmarks/backends.py --binary target/release/layr \
-  --root /Volumes/YourCaseSensitiveVolume/layr-bench-1000 --files 1000 --repeats 3
+  --root ~/layr-bench-1000 --files 1000 --repeats 3
 ```
 

@@ -74,7 +74,7 @@ pub fn set_writable(path: &Path) -> Result<()> {
 }
 pub fn create_subvolume(path: &Path) -> Result<()> {
     if !is_supported(path.parent().context("missing parent")?) {
-        bail!("layr requires case-sensitive APFS on macOS");
+        bail!("layr requires APFS on macOS");
     }
     fs::create_dir(path)?;
     if let Err(e) = mark(path, None, false) {
@@ -266,7 +266,9 @@ pub fn copy_selected(src: &Path, dst: &Path, paths: &std::collections::BTreeSet<
             Ok(path) => path,
             Err(_) => continue,
         };
-        let m = match fs::symlink_metadata(path) {
+        let m = match fs::symlink_metadata(&path) {
+            // On a volume that ignores case, `readme` also finds `README`: another path.
+            Ok(_) if crate::fsutil::exact_metadata(&path, rel).is_none() => continue,
             Ok(metadata) => crate::fsutil::meta_of(&metadata),
             Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory) => continue,
             Err(e) => return Err(e.into()),
@@ -818,9 +820,11 @@ mod tests {
     fn check_snapshot_files(with_layer: bool, with_hard_link: bool) -> Result<()> {
         let s = Sandbox::new();
         let src = s.0.join("work");
+        // On a volume that ignores case, "a" and "A" are one entry.
+        let upper = if crate::sys::case_sensitive(&s.0) { "A" } else { "B" };
         create_subvolume(&src)?;
         fs::write(src.join("a"), b"lower")?;
-        fs::write(src.join("A"), b"upper")?;
+        fs::write(src.join(upper), b"upper")?;
         fs::write(src.join("readonly"), b"read only")?;
         fs::set_permissions(src.join("readonly"), fs::Permissions::from_mode(0o444))?;
         fs::create_dir(src.join("dir"))?;
@@ -829,7 +833,7 @@ mod tests {
             fs::hard_link(src.join("a"), src.join("hard"))?;
         }
         std::os::unix::fs::symlink("a", src.join("link"))?;
-        fs::set_permissions(src.join("A"), fs::Permissions::from_mode(0o755))?;
+        fs::set_permissions(src.join(upper), fs::Permissions::from_mode(0o755))?;
         if with_layer {
             create_subvolume(&src.join("layer"))?;
             fs::write(src.join("layer/cache"), b"not in history")?;
@@ -843,12 +847,12 @@ mod tests {
         for p in ["a", "dir", "link", "readonly-dir", "readonly-dir/file"] {
             assert_eq!(file_identity(&src.join(p))?, file_identity(&dst.join(p))?, "identity of {p}");
         }
-        assert_ne!(file_identity(&src.join("a"))?, file_identity(&src.join("A"))?);
+        assert_ne!(file_identity(&src.join("a"))?, file_identity(&src.join(upper))?);
         assert_eq!(fs::symlink_metadata(&dst)?.mode() & 0o777, 0o555);
         assert_eq!(fs::read(dst.join("a"))?, b"lower");
-        assert_eq!(fs::read(dst.join("A"))?, b"upper");
+        assert_eq!(fs::read(dst.join(upper))?, b"upper");
         assert_eq!(crate::sys::apfs_attribute(&dst.join("dir"), c"com.layr.test", None)?, b"directory metadata");
-        assert_eq!(fs::symlink_metadata(dst.join("A"))?.mode() & 0o777, 0o755);
+        assert_eq!(fs::symlink_metadata(dst.join(upper))?.mode() & 0o777, 0o755);
         assert_eq!(fs::read_link(dst.join("link"))?, Path::new("a"));
         if with_hard_link {
             assert_eq!(fs::symlink_metadata(dst.join("a"))?.ino(), fs::symlink_metadata(dst.join("hard"))?.ino());

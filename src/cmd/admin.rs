@@ -454,16 +454,25 @@ fn restore_working(repo: &Repo, line: &Line, state: &str) -> Result<()> {
     let own = repo.own(line);
     // Automatic states leave the overlay files out: those files stay as they are.
     let private = repo.private_paths(line)?;
-    for c in changes::file_changes(&scan.path, &target)? {
-        if skip_path(&c.path) || private.contains(&c.path) || c.old_path.as_ref().map(|o| private.contains(o)).unwrap_or(false) {
-            continue;
-        }
+    let list: Vec<_> = changes::file_changes(&scan.path, &target)?
+        .into_iter()
+        .filter(|c| {
+            !(skip_path(&c.path)
+                || private.contains(&c.path)
+                || c.old_path.as_ref().map(|o| private.contains(o)).unwrap_or(false))
+        })
+        .collect();
+    // Removals first: on a volume that ignores case, `readme` must go before `README` comes.
+    for c in &list {
         if let Some(src) = &c.old_path {
             fsutil::remove_entry(&w, src)?;
         }
         if c.new.is_none() {
             fsutil::remove_entry(&w, &c.path)?;
-        } else {
+        }
+    }
+    for c in &list {
+        if c.new.is_some() {
             fsutil::copy_entry(&target, &c.path, &w, &c.path, own)?;
         }
     }
@@ -1145,6 +1154,8 @@ fn copy_folder(ctx: &Ctx, src: &std::path::Path, dst: &std::path::Path, include_
             Ok(true)
         })
     })?;
+    // On a store volume that ignores case, README and Readme would become one file.
+    fsutil::refuse_case_collisions(dst, entries.iter().map(|(rel, _)| rel.as_str()))?;
     for (rel, m) in entries {
         if m.is_dir() {
             fsutil::make_parents(dst, &format!("{rel}/x"), None)?;
@@ -1254,16 +1265,11 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
                     let _ = diffs;
                     let mut changed = false;
                     let mut seen = BTreeSet::new();
+                    let mut files = Vec::new();
                     fsutil::walk(&snap.path, "", &mut |rel, m| {
-                        if m.is_dir() {
-                            return Ok(true);
-                        }
-                        seen.insert(rel.to_string());
-                        if !fsutil::same_entry(&imported, rel, &snap.path, rel, None)?
-                            || fsutil::lmeta(&imported, rel).map(|x| x.mode != m.mode).unwrap_or(true)
-                        {
-                            fsutil::copy_entry(&snap.path, rel, &work, rel, None)?;
-                            changed = true;
+                        if !m.is_dir() {
+                            seen.insert(rel.to_string());
+                            files.push((rel.to_string(), m.mode));
                         }
                         Ok(true)
                     })?;
@@ -1274,10 +1280,23 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
                         }
                         Ok(true)
                     })?;
-                    for g in gone {
-                        fsutil::remove_entry(&work, &g)?;
-                        changed = true;
+                    let mut copies = Vec::new();
+                    for (rel, mode) in &files {
+                        if !fsutil::same_entry(&imported, rel, &snap.path, rel, None)?
+                            || fsutil::lmeta(&imported, rel).map(|x| x.mode != *mode).unwrap_or(true)
+                        {
+                            copies.push(rel.clone());
+                        }
                     }
+                    // Removals first: on a volume that ignores case, `readme` must go before
+                    // `README` comes.
+                    for g in &gone {
+                        fsutil::remove_entry(&work, g)?;
+                    }
+                    for rel in &copies {
+                        fsutil::copy_entry(&snap.path, rel, &work, rel, None)?;
+                    }
+                    changed |= !copies.is_empty() || !gone.is_empty();
                     if !changed {
                         drop(cleanup);
                         return Ok((st, branch));

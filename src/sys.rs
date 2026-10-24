@@ -152,7 +152,13 @@ pub fn subvol_set_received(fd: BorrowedFd, uuid: [u8; 16], transid: u64) -> io::
     }
     let zero_time = Timespec { sec: 0, nsec: 0 };
     let mut args = ReceivedSubvolArgs {
-        uuid, stransid: transid, rtransid: 0, stime: zero_time, rtime: zero_time, flags: 0, reserved: [0; 16],
+        uuid,
+        stransid: transid,
+        rtransid: 0,
+        stime: zero_time,
+        rtime: zero_time,
+        flags: 0,
+        reserved: [0; 16],
     };
     ioctl_ptr(fd, 0xc0c8_9425, &mut args)
 }
@@ -417,10 +423,112 @@ pub fn apfs_supported(path: &std::path::Path) -> bool {
     // SAFETY: statfs initializes a valid native structure; path is NUL-terminated.
     unsafe {
         let mut stat: libc::statfs = std::mem::zeroed();
-        libc::statfs(path.as_ptr(), &mut stat) == 0
-            && CStr::from_ptr(stat.f_fstypename.as_ptr()).to_bytes() == b"apfs"
-            && libc::pathconf(path.as_ptr(), libc::_PC_CASE_SENSITIVE) == 1
+        libc::statfs(path.as_ptr(), &mut stat) == 0 && CStr::from_ptr(stat.f_fstypename.as_ptr()).to_bytes() == b"apfs"
     }
+}
+
+/// The name of the entry at `path` as the volume stores it. On a volume that ignores case,
+/// `readme` can find an entry stored as `README`. `None` when nothing is there.
+#[cfg(target_os = "macos")]
+pub fn stored_name(path: &std::path::Path) -> Option<std::ffi::OsString> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = cpath(path).ok()?;
+    let mut attrs = libc::attrlist {
+        bitmapcount: libc::ATTR_BIT_MAP_COUNT,
+        reserved: 0,
+        commonattr: libc::ATTR_CMN_NAME,
+        volattr: 0,
+        dirattr: 0,
+        fileattr: 0,
+        forkattr: 0,
+    };
+    let mut buf = [0u8; 4 + 8 + 1024];
+    // SAFETY: attrs and buf are valid for their sizes; the path is NUL-terminated.
+    if unsafe {
+        libc::getattrlist(
+            c.as_ptr(),
+            (&mut attrs as *mut libc::attrlist).cast(),
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+            libc::FSOPT_NOFOLLOW,
+        )
+    } != 0
+    {
+        return None;
+    }
+    let off = 4 + i32::from_ne_bytes(buf[4..8].try_into().ok()?) as usize;
+    let len = u32::from_ne_bytes(buf[8..12].try_into().ok()?) as usize;
+    let raw = buf.get(off..off + len)?;
+    Some(std::ffi::OsStr::from_bytes(raw.strip_suffix(&[0]).unwrap_or(raw)).to_os_string())
+}
+
+/// The full path of the entry at `path` with the names as the volume stores them.
+#[cfg(target_os = "macos")]
+pub fn stored_path(path: &std::path::Path) -> Option<std::ffi::OsString> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = cpath(path).ok()?;
+    let mut attrs = libc::attrlist {
+        bitmapcount: libc::ATTR_BIT_MAP_COUNT,
+        reserved: 0,
+        commonattr: libc::ATTR_CMN_FULLPATH,
+        volattr: 0,
+        dirattr: 0,
+        fileattr: 0,
+        forkattr: 0,
+    };
+    // Paths below a deep store can be longer than PATH_MAX.
+    let mut buf = vec![0u8; 4 + 8 + 64 * 1024];
+    // SAFETY: attrs and buf are valid for their sizes; the path is NUL-terminated.
+    if unsafe {
+        libc::getattrlist(
+            c.as_ptr(),
+            (&mut attrs as *mut libc::attrlist).cast(),
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+            libc::FSOPT_NOFOLLOW,
+        )
+    } != 0
+    {
+        return None;
+    }
+    let off = 4 + i32::from_ne_bytes(buf[4..8].try_into().ok()?) as usize;
+    let len = u32::from_ne_bytes(buf[8..12].try_into().ok()?) as usize;
+    let raw = buf.get(off..off + len)?;
+    Some(std::ffi::OsStr::from_bytes(raw.strip_suffix(&[0]).unwrap_or(raw)).to_os_string())
+}
+
+/// `case_sensitive` for a device, remembered per process.
+#[cfg(target_os = "macos")]
+pub fn case_sensitive_dev(dev: u64, path: &std::path::Path) -> bool {
+    use std::sync::{Mutex, OnceLock};
+    static SEEN: OnceLock<Mutex<std::collections::HashMap<u64, bool>>> = OnceLock::new();
+    let map = SEEN.get_or_init(Default::default);
+    if let Some(v) = map.lock().unwrap().get(&dev) {
+        return *v;
+    }
+    let v = case_sensitive(path);
+    map.lock().unwrap().insert(dev, v);
+    v
+}
+
+/// True when names that differ only in case are different entries on the volume of `path`.
+#[cfg(target_os = "macos")]
+/// A path that cannot be checked counts as case-sensitive: Layr then refuses nothing and keeps
+/// its earlier behavior.
+pub fn case_sensitive(path: &std::path::Path) -> bool {
+    // The nearest folder that exists answers for a path that is not made yet.
+    let mut at = Some(path);
+    while let Some(p) = at {
+        if p.exists() {
+            let Ok(c) = cpath(p) else {
+                return true;
+            };
+            // SAFETY: the path is NUL-terminated.
+            return unsafe { libc::pathconf(c.as_ptr(), libc::_PC_CASE_SENSITIVE) } != 0;
+        }
+        at = p.parent();
+    }
+    true
 }
 #[cfg(target_os = "macos")]
 pub fn apfs_clone(src: &std::path::Path, dst: &std::path::Path) -> io::Result<()> {
