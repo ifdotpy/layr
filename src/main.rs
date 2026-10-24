@@ -31,6 +31,7 @@ mod model;
 mod oci;
 mod oplog;
 mod overlay;
+mod overlay_managers;
 mod person;
 mod privs;
 mod probes;

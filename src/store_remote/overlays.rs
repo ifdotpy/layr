@@ -83,17 +83,20 @@ pub(crate) fn published(
     parent: &str,
     recipient: &str,
     trusted: &BTreeMap<String, VerifyingKey>,
-) -> Result<BTreeMap<String, Published>> {
-    published_objects(backend, parent, recipient, trusted, backend.list("overlays/")?)
+    authorities: &BTreeMap<String, crate::overlay_managers::Authority>,
+) -> Result<(BTreeMap<String, Published>, Vec<String>)> {
+    published_objects(backend, parent, recipient, trusted, authorities, backend.list("overlays/")?)
 }
 fn published_objects(
     backend: &Backend,
     parent: &str,
     recipient: &str,
     trusted: &BTreeMap<String, VerifyingKey>,
+    authorities: &BTreeMap<String, crate::overlay_managers::Authority>,
     objects: Vec<super::backend::Object>,
-) -> Result<BTreeMap<String, Published>> {
+) -> Result<(BTreeMap<String, Published>, Vec<String>)> {
     let mut found: BTreeMap<String, Published> = BTreeMap::new();
+    let mut refused = Vec::new();
     for object in objects {
         let parts: Vec<_> = object.key.split('/').collect();
         if parts.len() != 4 || parts[2] != "keys" || !parts[3].ends_with(".json") {
@@ -105,6 +108,14 @@ fn published_objects(
         if next.object() != object.key {
             bail!("overlay key differs from its object name");
         }
+        let authority = authorities.get(&next.key.name).context("overlay key has no creator authority")?;
+        if !authority.permits(&next.record, &next.line) {
+            refused.push(format!(
+                "overlay {}: refused overlay.key signer {} (not a key manager)",
+                next.key.name, next.record.machine
+            ));
+            continue;
+        }
         if let Some(old) = found.get(&next.key.name) {
             if old.key.overlay != next.key.overlay {
                 bail!("conflicting overlay identities for {}", next.key.name);
@@ -115,7 +126,7 @@ fn published_objects(
         }
         found.insert(next.key.name.clone(), next);
     }
-    Ok(found)
+    Ok((found, refused))
 }
 
 pub(crate) fn open_identity(
@@ -200,7 +211,11 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
             objects.extend(store.backend.list(&format!("overlays/{}/keys/", overlay.p.id))?);
         }
     }
-    let remote = published_objects(&store.backend, &repo.p.id, &descriptor.recipient, &trusted, objects)?;
+    let parent_lines: Vec<_> = repo.p.export_jsonl()?.lines().map(str::to_owned).collect();
+    let authorities = crate::overlay_managers::from_lines(&repo.p.id, &parent_lines, &trusted)?;
+    let (remote, refused) =
+        published_objects(&store.backend, &repo.p.id, &descriptor.recipient, &trusted, &authorities, objects)?;
+    report.omitted.extend(refused);
     let paper_recipient = if let Some(paper) = &store.paper_key_text {
         Some(keys::recipient_of(&keys::identity_from_paper(paper).map_err(|_| anyhow::anyhow!("invalid paper key"))?)?)
     } else {
@@ -215,6 +230,9 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
             }
         };
         let _lock = orepo.p.lock()?;
+        let authority = authorities.get(&name).context("overlay has no creator authority")?;
+        let overlay_lines: Vec<_> = orepo.p.export_jsonl()?.lines().map(str::to_owned).collect();
+        authority.validate(&overlay_lines, &orepo.p.id, &trusted)?;
         let readers: BTreeMap<String, String> = orepo
             .policy()
             .access
@@ -237,6 +255,13 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
         let rotate = previous.as_ref().is_none_or(|old| {
             old.key.revocation != revocation || old.key.readers.keys().any(|reader| !readers.contains_key(reader))
         });
+        let reader_change = previous.as_ref().is_none_or(|old| old.key.readers != readers);
+        if (rotate || reader_change) && !authority.machines.contains(&store.machine) {
+            report
+                .omitted
+                .push(format!("overlay {name}: key change requires a key manager; signer {} is not a manager", store.machine));
+            continue;
+        }
         let published = if rotate {
             let identity = keys::generate_identity();
             let epoch = crate::ids::new_id();
@@ -324,7 +349,12 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
 
 pub(super) fn fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report: &mut Report) -> Result<()> {
     let descriptor = store.descriptor()?;
-    for (name, published) in published(&store.backend, &repo.p.id, &descriptor.recipient, &trusted_keys(repo)?)? {
+    let trusted = trusted_keys(repo)?;
+    let parent_lines: Vec<_> = repo.p.export_jsonl()?.lines().map(str::to_owned).collect();
+    let authorities = crate::overlay_managers::from_lines(&repo.p.id, &parent_lines, &trusted)?;
+    let (published, refused) = published(&store.backend, &repo.p.id, &descriptor.recipient, &trusted, &authorities)?;
+    report.omitted.extend(refused);
+    for (name, published) in published {
         if repo.overlay_info(&name)?.is_none() {
             bail!("overlay key names an unknown overlay {name}");
         }
@@ -360,6 +390,11 @@ pub(super) fn fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, repor
         if !records.lines.contains(&published.line) {
             bail!("overlay {name}: published key is absent from the overlay log");
         }
+        authorities.get(&name).context("overlay has no creator authority")?.validate(
+            &records.lines,
+            &published.key.overlay,
+            &trusted,
+        )?;
         // An epoch includes the complete log, so a new reader needs no older layer identity.
         if op.id.is_empty() {
             op.import_lines(&records.lines, crate::store::Trust::All)?;
@@ -418,6 +453,73 @@ mod tests {
         let mut refreshed = super::super::browse::Browse::open(&url, &Default::default(), &access).unwrap();
         let entry = refreshed.lines.iter().find(|line| line.name == "main").unwrap().files[".env"].clone();
         assert!(refreshed.read(&entry).unwrap().ends_with(b"private-epoch-one\n"));
+    }
+
+    #[test]
+    #[ignore = "invoked by t35 after it removes reader B"]
+    fn a_removed_reader_cannot_substitute_the_layer_recipient() {
+        let root = std::path::PathBuf::from(std::env::var("LAYR_TEST_OVERLAY_DIR").unwrap());
+        let aroot = std::path::PathBuf::from(std::env::var("LAYR_TEST_OVERLAY_A_ROOT").unwrap());
+        let broot = std::path::PathBuf::from(std::env::var("LAYR_TEST_OVERLAY_B_ROOT").unwrap());
+        let signing = |root: &std::path::Path| {
+            let bytes: [u8; 32] =
+                hex::decode(std::fs::read_to_string(root.join("machine/key")).unwrap().trim()).unwrap().try_into().unwrap();
+            ed25519_dalek::SigningKey::from_bytes(&bytes)
+        };
+        let backend = Backend::file(root.clone());
+        let mut published: Vec<_> = backend
+            .list("overlays/")
+            .unwrap()
+            .into_iter()
+            .filter(|o| o.key.contains("/keys/"))
+            .map(|o| {
+                let line = String::from_utf8(backend.get(&o.key).unwrap().unwrap()).unwrap();
+                oplog::parse_line(&line, None).unwrap().record
+            })
+            .collect();
+        published.sort_by(|a, b| (a.time, &a.machine, a.seq).cmp(&(b.time, &b.machine, b.seq)));
+        let original = published.last().unwrap();
+        let key: Key = serde_json::from_value(original.data.clone()).unwrap();
+        let aid = std::fs::read_to_string(aroot.join("machine/id")).unwrap();
+        let bid = std::fs::read_to_string(broot.join("machine/id")).unwrap().trim().to_string();
+        let scoped = backend.scoped(&format!("overlays/{}/epochs/{}", key.overlay, key.epoch)).unwrap();
+        let identity = keys::open_machine_slot(
+            &scoped.get(&format!("slots/machine-{}.age", aid.trim())).unwrap().unwrap(),
+            &signing(&aroot),
+        )
+        .unwrap();
+        let malicious_identity = keys::generate_identity();
+        let mut forged = original.clone();
+        forged.id = crate::ids::new_id();
+        forged.machine = bid.clone();
+        forged.seq = 1000000;
+        forged.time = crate::ids::now_ms() + 1;
+        forged.data["recipient"] = serde_json::json!(keys::recipient_of(&malicious_identity).unwrap());
+        forged.data["epoch"] = serde_json::json!(crate::ids::new_id());
+        let forged_line = oplog::sign_line(&forged, &signing(&broot)).unwrap();
+        let path = format!("overlays/{}/keys/{}-{}.json", key.overlay, forged.data["epoch"].as_str().unwrap(), forged.id);
+        assert!(backend.put_new(&path, forged_line.into_bytes()).unwrap());
+        let output = std::process::Command::new(std::env::var("LAYR_TEST_BINARY").unwrap())
+            .args(["--project", "project", "push", "archive", "--json"])
+            .env("LAYR_ROOT", &aroot)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(report["omitted"].as_array().unwrap().iter().any(|v| v.as_str().unwrap().contains(&bid)), "{report}");
+        let records = reader::records(&scoped, &identity, &key.overlay).unwrap();
+        let mut source = reader::Reader::new(&scoped, &identity, &records.keys);
+        let mut found = false;
+        for (state, attempt) in reader::attempts(&scoped).unwrap() {
+            let (_, _, tree) = source.tree(&state, &attempt).unwrap();
+            if let Some(entry) = tree.files.get(".env") {
+                found |= source.read(entry).unwrap().ends_with(b"private-after-forgery\n");
+            }
+        }
+        assert!(found, "A did not encrypt its new state to the manager's key");
+        for object in scoped.list("states/").unwrap() {
+            assert!(keys::decrypt(&malicious_identity, &scoped.get(&object.key).unwrap().unwrap()).is_err());
+        }
     }
 
     #[test]

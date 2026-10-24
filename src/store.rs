@@ -484,6 +484,7 @@ impl<'a> Project<'a> {
     ///
     /// Only records of trusted machines are taken (see `Trust`).
     pub fn import_lines(&self, lines: &[String], trust: Trust) -> Result<usize> {
+        crate::overlay_managers::validate_import(self, lines)?;
         use std::collections::{BTreeMap, BTreeSet};
         let mut parsed: Vec<oplog::Signed> = Vec::new();
         for l in lines {

@@ -123,8 +123,13 @@ impl Browse {
         let mut decoder = reader::Reader::new(&backend, &identity, &records.keys);
         let mut layers = Vec::new();
         let mut layer_names = BTreeMap::new();
-        for (name, published) in super::overlays::published(&backend, &descriptor.project, &descriptor.recipient, &records.keys)?
-        {
+        let authorities = crate::overlay_managers::from_lines(&descriptor.project, &records.lines, &records.keys)?;
+        let (published, refused) =
+            super::overlays::published(&backend, &descriptor.project, &descriptor.recipient, &records.keys, &authorities)?;
+        for reason in refused {
+            eprintln!("layr mount: {reason}");
+        }
+        for (name, published) in published {
             let scoped = backend.scoped(&published.prefix())?;
             let machine = access.machine.as_ref().map(|(id, key)| (id.as_str(), key));
             let cache_key = format!("{}/{}/{}", descriptor.project, descriptor.recipient, published.prefix());
@@ -146,6 +151,11 @@ impl Browse {
                     bail!("overlay tree signer is not trusted");
                 }
             }
+            authorities.get(&name).context("overlay has no creator authority")?.validate(
+                &overlay_records.lines,
+                &published.key.overlay,
+                &records.keys,
+            )?;
             layer_names.insert(name, layers.len());
             access
                 .layers

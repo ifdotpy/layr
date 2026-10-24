@@ -168,6 +168,30 @@ check(all(hashes().get(path)==digest for path,digest in old.items()),'rotation p
 report=json.loads(run(['--project','project','fetch','origin','--json'],B).stdout)
 check('overlay secrets: no key on this machine' in report['omitted'],'B cannot fetch the new epoch')
 check(run(['--project','project','overlay','show','secrets','user-0:.env'],B).stdout.endswith('private-epoch-one\n'),'B retains only data from its earlier epoch')
+# A removed reader can still sign project writes, but it cannot replace the layer recipient.
+(line/'.env').write_text('PRIVATE_TEST_VALUE=private-after-forgery\n')
+run(['--line','main','save','-am','Data after the removed reader','-q'])
+fixture_b=dict(A,LAYR_TEST_OVERLAY_DIR=str(root/'archive'),LAYR_TEST_OVERLAY_A_ROOT=A['LAYR_ROOT'],LAYR_TEST_OVERLAY_B_ROOT=B['LAYR_ROOT'],LAYR_TEST_BINARY=binary)
+subprocess.run(['cargo','test','--bin','layr','store_remote::overlays::tests::a_removed_reader_cannot_substitute_the_layer_recipient','--','--ignored','--exact'],env=fixture_b,cwd=pathlib.Path(binary).parents[2],check=True,stdout=subprocess.DEVNULL)
+check(True,'A refuses B key substitution and encrypts new data to the manager key')
+refused=run(['--project','project','overlay','readers','secrets',f"machine:{b['id']}"],B,False)
+check(refused.returncode!=0 and b['id'] in refused.stderr,'a non-manager cannot change the readers record')
+# Add D as a second manager. D removes A, then rotates without A's private machine key.
+run(['overlay','managers','secrets',f"machine:{a['id']}",f"machine:{d['id']}"])
+run(['sync','writer','--command','--','env','LAYR_ROOT='+D['LAYR_ROOT'],binary,'serve-peer','project'])
+run(['--project','project','overlay','managers','secrets',f"machine:{d['id']}"],D)
+check(run(['--project','project','overlay','managers','secrets'],D).stdout.strip()==f"machine:{d['id']}",'the remaining manager removes the first manager')
+run(['--project','project','--line','main','overlay','use','secrets','-q'],D)
+run(['--project','project','overlay','readers','secrets',f"machine:{d['id']}"],D)
+(dline/'.env').write_text('PRIVATE_TEST_VALUE=private-manager-two\n')
+run(['--project','project','--line','main','save','-am','Rotate with the second manager','-q'],D)
+run(['--project','project','push','archive','-q'],dict(D,LAYR_PAPER_KEY_FILE=str(root/'paper')))
+manager_keys=[json.loads(p.read_text())['r'] for p in (root/'archive/overlays').glob('*/keys/*.json')]
+manager_keys=[r for r in manager_keys if r['machine']==d['id']]
+check(bool(manager_keys) and manager_keys[-1]['data']['recipient']!=latest['recipient'],'the second manager rotates after the first manager is removed')
+run(['fetch','archive','-q'])
+refused=run(['overlay','readers','secrets',f"machine:{a['id']}"],A,False)
+check(refused.returncode!=0 and a['id'] in refused.stderr,'the removed manager cannot change readers')
 (root/'check-count').write_text(str(checks))
 print(f'overlay checks: {checks}')
 PY

@@ -238,3 +238,8 @@ Earlier objects remain unchanged. A removed reader retains access to data alread
 Peer sync sends an overlay only to a permitted peer machine.
 The receiving service enforces the overlay readers.
 See [overlays](overlays.md#10-overlays-in-stores-and-peer-sync) for principals, peer settings and the paper slot.
+
+The overlay creator machine is its first key manager.
+Only key managers can change readers or layer keys.
+Use `layr overlay managers <name> machine:<id>...` to add a second manager.
+Other trusted machines can upload to the published layer recipient.

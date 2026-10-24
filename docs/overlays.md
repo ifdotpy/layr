@@ -574,3 +574,12 @@ Set `overlay.<name>.peers` to an array of machine UUIDs to select other peers.
 For example, use `layr config overlay.secrets.peers '["<machine UUID>"]'`.
 A peer that is not permitted receives the shared set and a report of the omitted overlay.
 Root on a peer can read its disk. Service readers do not restrict root.
+
+The creator machine is the first key manager.
+Use `layr overlay managers secrets machine:<first UUID> machine:<second UUID>` to add a second manager.
+The command replaces the manager set, so include the existing manager.
+A manager that remains in the set must sign removal of another manager.
+Only these machines can change readers or publish layer keys.
+Other trusted machines can push to the published recipient.
+The report names an unauthorized key signer.
+Use two managers. If both are lost, create a new overlay and move the files.

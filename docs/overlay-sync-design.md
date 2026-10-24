@@ -60,3 +60,20 @@ the files; C (project reader, not overlay reader) fetches and sees the shared fi
 object under `overlays/` opens with C's keys. Remove B as reader, A pushes again: B cannot open
 the new epoch. Peer sync A→B carries the overlay; A→C carries it, and C's service refuses to
 show it.
+
+## Key managers
+
+The creator machine, which signs `overlay.create`, is the first key manager.
+A manager sets the manager machines with `layr overlay managers <name> machine:<id>...`.
+A remaining manager must sign removal of another manager.
+Only a key manager can sign `overlay.key` or change the readers record.
+Other trusted machines can push data to the published recipient.
+Readers refuse unauthorized key and readers records and name their signer.
+
+Signed `overlay.managers` records remain in the overlay log.
+The parent project carries each exact record inside an `overlay.authority` record.
+This proof lets a reader verify key authority before an epoch slot opens.
+A manager transition retains hashes of previously authorized key and readers records.
+Those exact historical records remain valid after their manager is removed.
+If every manager machine is lost, create a new overlay and move the files.
+Use two manager machines.

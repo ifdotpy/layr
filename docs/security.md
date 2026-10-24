@@ -135,3 +135,16 @@ A fetch without a slot leaves that overlay local and imports the shared files.
 A peer service applies signed overlay reader policy across machines.
 Other project policy remains local to each machine.
 Root on a peer can read its disk, so `overlay.<name>.peers` limits which machines receive plaintext overlays.
+
+Only key managers can sign layer key and readers records.
+The creator machine is the first manager.
+Use `layr overlay managers <name> machine:<id>...` to select the manager machines.
+A remaining manager must sign removal of another manager.
+The parent project carries exact signed manager proofs so machines without a layer key can verify authority.
+Transitions preserve hashes of already authorized key and readers records.
+A removed manager cannot replace those records or authorize a new recipient.
+A trusted project writer that is not a manager can upload encrypted data but cannot change overlay key authority.
+
+Use two manager machines.
+If every manager machine is lost, the overlay key cannot change.
+Create a new overlay and move the files in that case.
