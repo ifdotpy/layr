@@ -29,8 +29,9 @@ def check(value,label):
  print('PASS',label,flush=True)
 def machine(env): return json.loads(run(['remote','self','--json'],env).stdout)
 def records(path):
- with sqlite3.connect(path/'meta/db/layr.sqlite') as db:
-  return [json.loads(line)['r'] for (line,) in db.execute('SELECT raw FROM records')]
+ db=sqlite3.connect(path/'meta/db/layr.sqlite')
+ try: return [json.loads(line)['r'] for (line,) in db.execute('SELECT raw FROM records')]
+ finally: db.close()
 def absent(text,ids=()): return name not in text and all(value not in text for value in ids)
 a=machine(A);r=machine(R);n=machine(N);p=machine(P)
 run(['init','project','-q'])

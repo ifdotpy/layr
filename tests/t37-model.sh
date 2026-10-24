@@ -423,7 +423,7 @@ assert browser and all(row['target_machine'] and row['allowed'] is None and row[
 assert all(row['undecided_reasons'] for row in browser)
 assert load('merge-status') == browser
 assert load('interdiff')['files'] and '+version two' in load('interdiff')['diff']
-assert load('interdiff-replay', 'hidden-reader', 'hidden-nonreader')['diff'] == '' and load('interdiff-replay', 'hidden-reader', 'hidden-nonreader')['files'] == []
+assert load('interdiff-replay')['diff'] == '' and load('interdiff-replay')['files'] == []
 assert load('merge-refusals') == {'merge': False, 'ref': False}
 assert len(load('changes')) == project['counts']['changes']
 assert len(load('operations-all')) == project['counts']['operations']
