@@ -166,11 +166,56 @@ fn save_index(dir: &Path, identity: &str, index: &Index) -> Result<()> {
     crate::fsutil::atomic_write(&dir.join("index.age"), &data, 0o600)
 }
 
+/// Local addresses are hints. The accepted pin still authenticates each store descriptor.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct StoreAddress {
+    pub pin: Pin,
+    pub url: String,
+    pub name: String,
+}
+pub fn addresses(dir: &Path, uid: u32) -> Result<std::collections::BTreeMap<String, StoreAddress>> {
+    match read(&dir.join("addresses.json"), 49152, uid) {
+        Ok(bytes) => Ok(serde_json::from_slice(&bytes).context("invalid person store addresses")?),
+        Err(e) if e.downcast_ref::<std::io::Error>().is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) => {
+            Ok(Default::default())
+        }
+        Err(e) => Err(e),
+    }
+}
+fn save_address(dir: &Path, uid: u32, pin: &Pin, url: &str, name: &str) -> Result<()> {
+    let mut addresses = addresses(dir, uid)?;
+    addresses.insert(pin.project.clone(), StoreAddress { pin: pin.clone(), url: url.into(), name: name.into() });
+    let bytes = serde_json::to_vec(&addresses)?;
+    if bytes.len() > 49152 {
+        bail!("person store addresses exceed 48 KiB");
+    }
+    crate::fsutil::atomic_write(&dir.join("addresses.json"), &bytes, 0o600)
+}
+fn check_remote_invite(url: &str, env: &HashMap<String, String>, access: &Access, pin: &Pin) -> Result<String> {
+    let backend = Backend::for_reader(url, env)?;
+    let descriptor: Descriptor = serde_json::from_slice(&backend.get("store.json")?.context("store.json is missing")?)?;
+    if descriptor.format != 2 {
+        bail!("unsupported store format");
+    }
+    pin.check_store(&descriptor)?;
+    let mut accepted = access.clone();
+    accepted.index.set(pin.clone());
+    accepted.open(&backend, &descriptor)?;
+    let parsed = reqwest::Url::parse(url)?;
+    Ok(parsed.path().trim_end_matches('/').rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or("project").to_owned())
+}
+
 pub fn run(args: &[String]) -> Result<i32> {
     use crate::args::{parse, Spec};
     use std::io::IsTerminal;
     let a = parse(
-        &Spec::new().value("--paper-key-out").value("--site").value("--invite-file").value("--invite").flag("--json"),
+        &Spec::new()
+            .value("--paper-key-out")
+            .value("--site")
+            .value("--invite-file")
+            .value("--invite")
+            .value("--remote")
+            .flag("--json"),
         args,
     )?;
     let env: HashMap<String, String> = std::env::vars().collect();
@@ -287,12 +332,22 @@ pub fn run(args: &[String]) -> Result<i32> {
                         load(&env, &home, &cwd, uid, None)?.context("set LAYR_PERSON_KEY_FILE to open your person key")?;
                     let sealed = read(&cwd.join(a.get("--invite-file").unwrap()), 4096, uid)?;
                     let pin = person::open_invite(&access.identity, &sealed)?;
+                    let address = a
+                        .get("--remote")
+                        .map(|url| check_remote_invite(url, &env, &access, &pin).map(|name| (url, name)))
+                        .transpose()?;
                     access.index.set(pin.clone());
                     save_index(&dir, &access.identity, &access.index)?;
+                    if let Some((url, name)) = address {
+                        save_address(&dir, uid, &pin, url, &name)?;
+                    }
                     println!("accepted store {} recipient {}", pin.project, pin.recipient);
                     Ok(())
                 })?;
             } else {
+                if a.has("--remote") {
+                    bail!("--remote requires --invite-file");
+                }
                 let gateway =
                     site(a.get("--site").context("accept needs --invite-file <path> or --site <url> --invite <id>")?, &env)?;
                 let id = a.get("--invite").context("name an invite with --invite <id>")?;
@@ -312,7 +367,10 @@ pub fn run(args: &[String]) -> Result<i32> {
                         &access.identity,
                         &B64.decode(invite["data"].as_str().context("invite has no data")?)?,
                     )?;
-                    check_gateway_invite(&gateway, login, &access.identity, &pin)?;
+                    let name = check_gateway_invite(&gateway, login, &access.identity, &pin)?;
+                    let mut url = reqwest::Url::parse(a.get("--site").unwrap())?;
+                    url.set_path(&format!("/{name}"));
+                    let store_url = format!("layr+{url}");
                     let mut index = match record["index"].as_str() {
                         Some(data) => person::open_index(&access.identity, &B64.decode(data)?)?,
                         None => Index::default(),
@@ -334,6 +392,7 @@ pub fn run(args: &[String]) -> Result<i32> {
                         Some(&json!({"data":B64.encode(person::seal_index(&access.identity,&index)?),"previous":previous})),
                     )?;
                     save_index(&dir, &access.identity, &index)?;
+                    save_address(&dir, uid, &pin, &store_url, &name)?;
                     gateway.person_call(Method::DELETE, &format!("/api/person/inbox/{id}"), Some(&token), None)?;
                     println!("accepted store {} recipient {}", pin.project, pin.recipient);
                     Ok(())
@@ -344,7 +403,7 @@ pub fn run(args: &[String]) -> Result<i32> {
     }
     Ok(0)
 }
-fn check_gateway_invite(gateway: &Gateway, login: &str, identity: &str, pin: &Pin) -> Result<()> {
+fn check_gateway_invite(gateway: &Gateway, login: &str, identity: &str, pin: &Pin) -> Result<String> {
     let projects = gateway.person_call(Method::GET, "/api/projects", None, None)?;
     for name in projects["projects"].as_array().context("gateway projects have no list")? {
         let name = name.as_str().filter(|name| person::project_name(name)).context("invalid gateway project name")?;
@@ -359,7 +418,7 @@ fn check_gateway_invite(gateway: &Gateway, login: &str, identity: &str, pin: &Pi
         if keys::recipient_of(&opened)? != pin.recipient {
             bail!("person slot does not match store recipient");
         }
-        return Ok(());
+        return Ok(name.into());
     }
     bail!("the gateway has no store for this invite")
 }

@@ -4,19 +4,31 @@ use anyhow::{bail, Context, Result};
 use std::io::Read;
 use std::path::Path;
 
+#[cfg(all(test, target_os = "macos"))]
+pub(super) fn test_service() {
+    std::env::set_var("LAYR_TEST_KEYCHAIN_SERVICE", format!("ws.layr.mount.test.{}", std::process::id()));
+}
+
 pub fn account(url: &str) -> String {
     use sha2::{Digest, Sha256};
     hex::encode(Sha256::digest(url.as_bytes()))
 }
 
 #[cfg(target_os = "macos")]
-const SERVICE: &str = "ws.layr.mount";
+fn service() -> String {
+    #[cfg(test)]
+    if let Ok(service) = std::env::var("LAYR_TEST_KEYCHAIN_SERVICE") {
+        assert!(service.starts_with("ws.layr.mount.test."));
+        return service;
+    }
+    "ws.layr.mount".into()
+}
 
 pub fn get(account: &str) -> Result<Option<String>> {
     #[cfg(target_os = "macos")]
     {
         use security_framework::passwords::{generic_password, PasswordOptions};
-        return match generic_password(PasswordOptions::new_generic_password(SERVICE, account)) {
+        return match generic_password(PasswordOptions::new_generic_password(&service(), account)) {
             Ok(bytes) => Ok(Some(String::from_utf8(bytes).context("invalid disk key in Keychain")?)),
             Err(e) if e.code() == -25300 => Ok(None),
             Err(_) => bail!("cannot read the disk key from the login Keychain"),
@@ -32,13 +44,29 @@ pub fn get(account: &str) -> Result<Option<String>> {
 pub fn set(account: &str, identity: &str) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
-        security_framework::passwords::set_generic_password(SERVICE, account, identity.as_bytes())
+        security_framework::passwords::set_generic_password(&service(), account, identity.as_bytes())
             .map_err(|_| anyhow::anyhow!("cannot save the disk key in the login Keychain"))?;
     }
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (account, identity);
     }
+    Ok(())
+}
+
+pub fn remove(account: &str) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    match security_framework::passwords::delete_generic_password(&service(), account) {
+        Ok(()) => {}
+        Err(e) if e.code() == -25300 => {}
+        Err(_) => bail!("cannot remove the disk key from the login Keychain"),
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = account;
+        bail!("the Keychain is macOS only");
+    }
+    #[cfg(target_os = "macos")]
     Ok(())
 }
 
@@ -70,14 +98,16 @@ mod tests {
     use super::*;
     #[cfg(target_os = "macos")]
     #[test]
-    #[ignore = "uses the macOS login Keychain"]
     fn login_keychain_roundtrip() {
+        test_service();
         let account = format!("layr-mount-test-{}", crate::ids::new_id());
         let value = format!("test-marker-{}", crate::ids::new_id());
         set(&account, &value).unwrap();
         let found = get(&account).unwrap();
-        let removed = security_framework::passwords::delete_generic_password(SERVICE, &account);
+        let removed = remove(&account);
         assert!(removed.is_ok(), "cannot remove the test Keychain item");
+        assert!(get(&account).unwrap().is_none(), "the key remains after lock");
+        remove(&account).unwrap();
         assert!(found.as_deref() == Some(value.as_str()), "Keychain roundtrip differs");
     }
     #[test]

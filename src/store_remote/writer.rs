@@ -501,6 +501,7 @@ mod tests {
             paper_key_text: None,
             person: None,
             pin: None,
+            aws_profile: None,
         }
     }
     #[test]

@@ -507,6 +507,25 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let h = here(ctx)?;
     let repo = &h.repo;
     match sub {
+        "login" if a.pos.len() == 2 => {
+            let name = &a.pos[1];
+            let url = remote_url(repo, name)?;
+            if !url.starts_with("s3://") { bail!("remote login requires an s3:// remote"); }
+            let profile = ctx.env("AWS_PROFILE").map(str::to_owned)
+                .or(repo.p.config_value(&format!("remote.{name}.aws-profile"))?.and_then(|v| v.as_str().map(str::to_owned)))
+                .unwrap_or_else(|| "default".into());
+            let mut env = ctx.env.clone();
+            env.entry("HOME".into()).or_insert_with(|| ctx.caller.home.to_string_lossy().into_owned());
+            crate::privs::as_caller_fs(ctx, || {
+                let profile = layr_store::aws::profile::Profile::load_with_env(&profile, &env)?;
+                let http=reqwest::blocking::Client::builder().redirect(reqwest::redirect::Policy::none()).build()?;
+                profile.login(&http, |url, code| {
+                    // Device authorization must be visible before the command waits.
+                    eprintln!("Open: {url}\nCode: {code}");
+                })
+            })?;
+            outln!(ctx, "AWS login complete");
+        }
         "list" if a.pos.len() <= 1 => {
             let mut remotes = Vec::new();
             for (k, _) in repo.p.db.config_all()? {
@@ -559,6 +578,7 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
             }
             let recovery_key_file = if remote_kind == Kind::Store {
                 let mut store = store_remote::open(url, repo)?;
+                store.use_aws_profile(repo.p.config_value(&format!("remote.{name}.aws-profile"))?.and_then(|v|v.as_str().map(str::to_owned)));
                 let opts = store_remote::ConfigureOptions { paper_key_out: a.get("--paper-key-out").map(|p| ctx.cwd.join(p)) };
                 let configured = store.configure(ctx, &opts)?;
                 store.save_pin(ctx, repo, name)?;
@@ -646,7 +666,7 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
         _ => {
             return Err(exit(
                 128,
-                "usage: layr remote add <name> <url> [--paper-key-out <path>] | list | self | remove <name> | trust <name> <machine> [--public-key <ed25519>] | trust-store <name> --recipient <age1…> | grant <name> --person <login> --recipient <age1…> [--invite-out <path>]",
+                "usage: layr remote add <name> <url> [--paper-key-out <path>] | list | self | login <name> | remove <name> | trust <name> <machine> [--public-key <ed25519>] | trust-store <name> --recipient <age1…> | grant <name> --person <login> --recipient <age1…> [--invite-out <path>]",
             ))
         }
     }

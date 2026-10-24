@@ -349,6 +349,7 @@ pub fn headers<W: Write>(stream: &mut W, status: u16, length: u64, headers: &[(S
         416 => "Range Not Satisfiable",
         417 => "Expectation Failed",
         421 => "Misdirected Request",
+        423 => "Locked",
         431 => "Request Header Fields Too Large",
         500 => "Internal Server Error",
         502 => "Bad Gateway",

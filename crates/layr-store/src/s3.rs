@@ -35,6 +35,8 @@ fn xml_escape(value: &str) -> String {
 pub struct S3 {
     http: Client,
     credentials: Credentials,
+    profile: Option<aws::profile::Profile>,
+    refreshed: std::sync::Mutex<Option<(Credentials, std::time::Instant)>>,
     bucket: String,
     region: String,
     endpoint: Option<String>,
@@ -46,6 +48,7 @@ impl S3 {
     pub fn new(bucket: &str, region: &str, credentials: Credentials, endpoint: Option<&str>) -> Result<Self> {
         let http = Client::builder()
             .user_agent("layr")
+            .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(30))
             .tcp_keepalive(Duration::from_secs(60))
             .build()?;
@@ -53,10 +56,18 @@ impl S3 {
     }
 
     /// Use a caller-owned client with its connection policy and time limits.
-    pub fn new_with_client(bucket: &str, region: &str, credentials: Credentials, endpoint: Option<&str>, http: Client) -> Result<Self> {
+    pub fn new_with_client(
+        bucket: &str,
+        region: &str,
+        credentials: Credentials,
+        endpoint: Option<&str>,
+        http: Client,
+    ) -> Result<Self> {
         Ok(S3 {
             http,
             credentials,
+            profile: None,
+            refreshed: std::sync::Mutex::new(None),
             bucket: bucket.to_string(),
             region: region.to_string(),
             endpoint: endpoint.map(str::to_string),
@@ -65,8 +76,25 @@ impl S3 {
     }
 
     /// Return a signed response without consuming its body. The caller must bound reads.
-    pub fn request(&self, method: Method, key: &str, query: &[(&str, &str)], headers: &[(&str, &str)], body: Vec<u8>, limit: Duration) -> Result<reqwest::blocking::Response> {
-        if self.credentials.key_id.is_empty() || self.credentials.secret.is_empty() {
+    pub fn request(
+        &self,
+        method: Method,
+        key: &str,
+        query: &[(&str, &str)],
+        headers: &[(&str, &str)],
+        body: Vec<u8>,
+        limit: Duration,
+    ) -> Result<reqwest::blocking::Response> {
+        let credentials = if let Some(profile) = &self.profile {
+            let mut cached = self.refreshed.lock().unwrap();
+            if cached.as_ref().is_none_or(|(_, at)| at.elapsed() >= Duration::from_secs(300)) {
+                *cached = Some((profile.credentials(&self.http)?, std::time::Instant::now()));
+            }
+            cached.as_ref().unwrap().0.clone()
+        } else {
+            self.credentials.clone()
+        };
+        if credentials.key_id.is_empty() || credentials.secret.is_empty() {
             bail!("set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY");
         }
         let (base, path) = aws::s3_location(&self.bucket, &self.region, self.endpoint.as_deref(), key);
@@ -81,7 +109,7 @@ impl S3 {
         let unix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
         let signed = aws::sign(
             &aws::Request { method: method.as_str(), host: &host, path: &path, query, headers, payload_sha256: &payload },
-            &self.credentials,
+            &credentials,
             &self.region,
             "s3",
             unix,
@@ -271,16 +299,49 @@ impl S3 {
 }
 
 impl S3 {
+    /// Resolve a short-lived command's credentials inside the caller's filesystem context.
+    /// Read-only mounts retain their profile so later requests can refresh it.
+    pub fn resolve_credentials(&mut self) -> Result<()> {
+        if let Some(profile) = &self.profile {
+            self.credentials = profile.credentials(&self.http)?;
+            self.profile = None;
+        }
+        Ok(())
+    }
+
+    /// Parse the target without reading credentials or contacting AWS.
+    pub fn unconnected(bucket: &str, prefix: &str) -> Result<Self> {
+        let mut s =
+            Self::new(bucket, "us-east-1", Credentials { key_id: String::new(), secret: String::new(), token: None }, None)?;
+        let prefix = prefix.trim_matches('/');
+        if !prefix.is_empty() {
+            crate::paths::check_rel(prefix)?;
+            s.prefix = format!("{prefix}/");
+        }
+        Ok(s)
+    }
+
     pub fn with_env(bucket: &str, prefix: &str, env: &std::collections::HashMap<String, String>) -> Result<Self> {
         let credentials = Credentials {
             key_id: env.get("AWS_ACCESS_KEY_ID").cloned().unwrap_or_default(),
             secret: env.get("AWS_SECRET_ACCESS_KEY").cloned().unwrap_or_default(),
             token: env.get("AWS_SESSION_TOKEN").cloned(),
         };
-        let region =
-            env.get("AWS_REGION").or_else(|| env.get("AWS_DEFAULT_REGION")).cloned().unwrap_or_else(|| "us-east-1".into());
+        let profile = if credentials.key_id.is_empty() && credentials.secret.is_empty() {
+            let name = env.get("AWS_PROFILE").map(String::as_str).filter(|s| !s.is_empty()).unwrap_or("default");
+            Some(aws::profile::Profile::load_with_env(name, env)?)
+        } else {
+            None
+        };
+        let region = env
+            .get("AWS_REGION")
+            .or_else(|| env.get("AWS_DEFAULT_REGION"))
+            .cloned()
+            .or_else(|| profile.as_ref().and_then(|p| p.region.clone()))
+            .unwrap_or_else(|| "us-east-1".into());
         let endpoint = env.get("AWS_ENDPOINT_URL_S3").or_else(|| env.get("AWS_ENDPOINT_URL")).cloned();
         let mut s = Self::new(bucket, &region, credentials, endpoint.as_deref())?;
+        s.profile = profile;
         let prefix = prefix.trim_matches('/');
         if !prefix.is_empty() {
             crate::paths::check_rel(prefix)?;
