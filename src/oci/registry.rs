@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::time::Duration;
@@ -140,38 +140,20 @@ struct Request {
 }
 
 fn request(stream: &TcpStream) -> Result<Request> {
-    let mut reader = BufReader::new(stream.take(16 * 1024));
-    let mut line = String::new();
-    reader.read_line(&mut line)?;
-    let parts: Vec<_> = line.split_whitespace().collect();
-    if parts.len() != 3 || !["HTTP/1.1", "HTTP/1.0"].contains(&parts[2]) {
-        bail!("invalid request line");
-    }
-    if line.len() > 4096 {
-        bail!("request line too long");
-    }
-    let (method, target) = (parts[0].into(), parts[1].into());
-    let mut authorization = None;
-    loop {
-        line.clear();
-        if reader.read_line(&mut line)? == 0 {
-            bail!("incomplete HTTP headers");
-        }
-        if line == "\r\n" || line == "\n" {
-            break;
-        }
-        if let Some((key, value)) = line.split_once(':') {
-            if key.eq_ignore_ascii_case("authorization") {
-                if authorization.is_some() {
-                    bail!("duplicate authorization header");
-                }
-                authorization = Some(value.trim().into());
-            }
-        } else {
-            bail!("invalid HTTP header");
-        }
-    }
-    Ok(Request { method, target, authorization })
+    let limits = layr_store::http::Limits {
+        request_line: 4096,
+        header_count: 64,
+        header_bytes: 16 * 1024,
+        body_bytes: 0,
+        header_timeout: Duration::from_secs(10),
+        body_timeout: Duration::from_secs(10),
+        write_timeout: Duration::from_secs(60),
+    };
+    limits.configure(stream)?;
+    let mut stream = layr_store::http::Socket::new(stream.try_clone()?, limits.header_timeout);
+    let parsed = layr_store::http::request(&mut stream, &limits)?;
+    let authorization = parsed.header("authorization").map(str::to_string);
+    Ok(Request { method: parsed.method, target: parsed.target, authorization })
 }
 
 fn token(header: Option<&str>, basic: bool) -> Option<String> {
@@ -601,19 +583,15 @@ fn query(req: &Request, listen: &str) -> Result<Query> {
 }
 
 fn write_headers(stream: &mut TcpStream, m: &Metadata) -> Result<()> {
-    use std::fmt::Write as _;
-    let mut out = format!("HTTP/1.1 {} Response\r\nContent-Length: {}\r\nContent-Type: {}\r\nDocker-Distribution-Api-Version: registry/2.0\r\nConnection: close\r\n", m.code, m.length, m.media);
-    if let Some(d) = &m.digest {
-        write!(out, "Docker-Content-Digest: {d}\r\n")?;
+    let mut headers = vec![
+        ("Content-Type".into(), m.media.clone()),
+        ("Docker-Distribution-Api-Version".into(), "registry/2.0".into()),
+    ];
+    if let Some(digest) = &m.digest {
+        headers.push(("Docker-Content-Digest".into(), digest.clone()));
     }
-    for (k, v) in &m.extra {
-        if k.contains(['\r', '\n']) || v.contains(['\r', '\n']) {
-            bail!("invalid response header");
-        }
-        write!(out, "{k}: {v}\r\n")?;
-    }
-    out.push_str("\r\n");
-    stream.write_all(out.as_bytes())?;
+    headers.extend(m.extra.iter().cloned());
+    layr_store::http::headers(stream, m.code, m.length, &headers)?;
     Ok(())
 }
 

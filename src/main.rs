@@ -23,8 +23,7 @@ mod disk;
 mod fsutil;
 mod gitbridge;
 mod ids;
-mod http;
-mod gateway;
+use layr_store::http;
 mod ignore_rules;
 mod lineops;
 mod merge;
@@ -120,13 +119,6 @@ fn main() {
             }
             _ => break,
         }
-    }
-    if argv.first().map(|s| s.as_str()) == Some("gateway") {
-        if let Err(error) = gateway::command(&argv[1..]) {
-            eprintln!("fatal: {error:#}");
-            std::process::exit(1);
-        }
-        return;
     }
     if argv.first().map(String::as_str) == Some("mount") {
         match disk::run(&argv[1..]) {

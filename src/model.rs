@@ -251,7 +251,7 @@ pub struct Line {
 // ----- checks of records that come from other machines -----
 
 pub fn is_uuid(s: &str) -> bool {
-    s.len() == 36 && uuid::Uuid::parse_str(s).map(|u| u.hyphenated().to_string() == s).unwrap_or(false)
+    layr_store::format::is_uuid(s)
 }
 
 pub fn is_name(s: &str) -> bool {

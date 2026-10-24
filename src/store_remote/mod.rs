@@ -1,23 +1,20 @@
 //! Encrypted immutable remotes, independent of the local snapshot backend.
 
-pub(crate) mod aws;
 pub(crate) mod backend;
 pub(crate) mod browse;
-mod canonical;
-pub(crate) mod format;
 mod gateway;
-pub(crate) mod keys;
 mod legacy;
 pub(crate) mod reader;
-pub(crate) mod s3;
 mod writer;
-mod zst;
+
+pub(crate) use layr_store::{canonical, format, keys, s3, zst};
 
 use crate::ctx::Ctx;
 use crate::repo::Repo;
 use anyhow::{bail, Context, Result};
 use backend::Backend;
-use serde::{Deserialize, Serialize};
+use format::Descriptor;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
@@ -49,13 +46,6 @@ pub struct ConfigureOptions {
 pub struct Configured {
     pub created: bool,
     pub recovery_key_file: Option<String>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct Descriptor {
-    format: u32,
-    project: String,
-    recipient: String,
 }
 
 pub struct Store {
