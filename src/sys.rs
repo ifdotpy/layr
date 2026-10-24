@@ -94,7 +94,7 @@ fn ioctl_ptr<T>(fd: BorrowedFd, req: libc::c_ulong, arg: &mut T) -> io::Result<(
 
 /// True when the folder `path`, or the nearest folder above it that exists, ignores case
 /// (ext4 `casefold`, set with `chattr +F`). New folders take this flag from their parent.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "overlayfs"))]
 pub fn casefold(path: &std::path::Path) -> bool {
     use rustix::fs::{open, Mode, OFlags};
     const FS_CASEFOLD_FL: libc::c_long = 0x4000_0000;
@@ -448,70 +448,51 @@ pub fn apfs_supported(path: &std::path::Path) -> bool {
 /// `readme` can find an entry stored as `README`. `None` when nothing is there.
 #[cfg(target_os = "macos")]
 pub fn stored_name(path: &std::path::Path) -> Option<std::ffi::OsString> {
-    use std::os::unix::ffi::OsStrExt;
-    let c = cpath(path).ok()?;
-    let mut attrs = libc::attrlist {
-        bitmapcount: libc::ATTR_BIT_MAP_COUNT,
-        reserved: 0,
-        commonattr: libc::ATTR_CMN_NAME,
-        volattr: 0,
-        dirattr: 0,
-        fileattr: 0,
-        forkattr: 0,
-    };
-    let mut buf = [0u8; 4 + 8 + 1024];
-    // SAFETY: attrs and buf are valid for their sizes; the path is NUL-terminated.
-    if unsafe {
-        libc::getattrlist(
-            c.as_ptr(),
-            (&mut attrs as *mut libc::attrlist).cast(),
-            buf.as_mut_ptr().cast(),
-            buf.len(),
-            libc::FSOPT_NOFOLLOW,
-        )
-    } != 0
-    {
-        return None;
-    }
-    let off = 4 + i32::from_ne_bytes(buf[4..8].try_into().ok()?) as usize;
-    let len = u32::from_ne_bytes(buf[8..12].try_into().ok()?) as usize;
-    let raw = buf.get(off..off + len)?;
-    Some(std::ffi::OsStr::from_bytes(raw.strip_suffix(&[0]).unwrap_or(raw)).to_os_string())
+    name_attribute(path, libc::ATTR_CMN_NAME)
 }
 
 /// The full path of the entry at `path` with the names as the volume stores them.
 #[cfg(target_os = "macos")]
 pub fn stored_path(path: &std::path::Path) -> Option<std::ffi::OsString> {
+    name_attribute(path, libc::ATTR_CMN_FULLPATH)
+}
+
+/// One name attribute (`ATTR_CMN_NAME` or `ATTR_CMN_FULLPATH`) of the entry at `path`.
+#[cfg(target_os = "macos")]
+fn name_attribute(path: &std::path::Path, attr: libc::attrgroup_t) -> Option<std::ffi::OsString> {
     use std::os::unix::ffi::OsStrExt;
+    // Paths below a deep store can be longer than PATH_MAX. Status asks for each file: one
+    // buffer per thread instead of an allocation per call.
+    thread_local!(static BUF: std::cell::RefCell<Vec<u8>> = std::cell::RefCell::new(vec![0u8; 4 + 8 + 64 * 1024]));
     let c = cpath(path).ok()?;
     let mut attrs = libc::attrlist {
         bitmapcount: libc::ATTR_BIT_MAP_COUNT,
         reserved: 0,
-        commonattr: libc::ATTR_CMN_FULLPATH,
+        commonattr: attr,
         volattr: 0,
         dirattr: 0,
         fileattr: 0,
         forkattr: 0,
     };
-    // Paths below a deep store can be longer than PATH_MAX.
-    let mut buf = vec![0u8; 4 + 8 + 64 * 1024];
-    // SAFETY: attrs and buf are valid for their sizes; the path is NUL-terminated.
-    if unsafe {
-        libc::getattrlist(
-            c.as_ptr(),
-            (&mut attrs as *mut libc::attrlist).cast(),
-            buf.as_mut_ptr().cast(),
-            buf.len(),
-            libc::FSOPT_NOFOLLOW,
-        )
-    } != 0
-    {
-        return None;
-    }
-    let off = 4 + i32::from_ne_bytes(buf[4..8].try_into().ok()?) as usize;
-    let len = u32::from_ne_bytes(buf[8..12].try_into().ok()?) as usize;
-    let raw = buf.get(off..off + len)?;
-    Some(std::ffi::OsStr::from_bytes(raw.strip_suffix(&[0]).unwrap_or(raw)).to_os_string())
+    BUF.with_borrow_mut(|buf| {
+        // SAFETY: attrs and buf are valid for their sizes; the path is NUL-terminated.
+        if unsafe {
+            libc::getattrlist(
+                c.as_ptr(),
+                (&mut attrs as *mut libc::attrlist).cast(),
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+                libc::FSOPT_NOFOLLOW,
+            )
+        } != 0
+        {
+            return None;
+        }
+        let off = 4 + i32::from_ne_bytes(buf[4..8].try_into().ok()?) as usize;
+        let len = u32::from_ne_bytes(buf[8..12].try_into().ok()?) as usize;
+        let raw = buf.get(off..off + len)?;
+        Some(std::ffi::OsStr::from_bytes(raw.strip_suffix(&[0]).unwrap_or(raw)).to_os_string())
+    })
 }
 
 /// `case_sensitive` for a device, remembered per process.

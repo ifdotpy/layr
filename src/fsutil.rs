@@ -144,7 +144,7 @@ pub fn case_clash(path: &Path) -> Option<String> {
                 if n == name {
                     return None;
                 }
-                if n.to_string_lossy().to_lowercase() == name.to_string_lossy().to_lowercase() {
+                if case_key(&n.to_string_lossy()) == case_key(&name.to_string_lossy()) {
                     other = Some(n.to_string_lossy().into_owned());
                 }
             }
@@ -186,11 +186,11 @@ fn refuse_case_clash_apfs(root: &Path, rel: &str) -> Result<()> {
         }
         done.push_str(part);
         if let Some(stored) = case_clash(&path) {
-            // An empty folder with another case holds nothing: it leaves.
+            // A folder with another case that holds no files (removals can leave empty
+            // folders) holds nothing: it leaves.
             let other = path.with_file_name(&stored);
-            if fs::symlink_metadata(&other).map(|m| m.is_dir()).unwrap_or(false) && fs::read_dir(&other)?.next().is_none() {
-                crate::sys::apfs_immutable(&other, false)?;
-                fs::remove_dir(&other)?;
+            if holds_no_files(&other) {
+                remove_empty_folders(&other)?;
                 continue;
             }
             let parent = done.rsplit_once('/').map(|(p, _)| format!("{p}/")).unwrap_or_default();
@@ -200,6 +200,91 @@ fn refuse_case_clash_apfs(root: &Path, rel: &str) -> Result<()> {
         }
         if fs::symlink_metadata(&path).is_err() {
             break;
+        }
+    }
+    Ok(())
+}
+
+/// The form of a name that a volume that ignores case compares. Each character is folded alone:
+/// `str::to_lowercase` maps a final sigma by its position, but APFS folds `ς` and `σ` the same.
+#[cfg(target_os = "macos")]
+pub fn case_key(name: &str) -> String {
+    name.chars().flat_map(char::to_lowercase).map(|c| if c == 'ς' { 'σ' } else { c }).collect()
+}
+
+/// True when `path` is a folder with no entries other than folders that hold no files.
+#[cfg(target_os = "macos")]
+fn holds_no_files(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|m| m.is_dir())
+        && fs::read_dir(path).is_ok_and(|rd| rd.into_iter().all(|e| e.is_ok_and(|e| holds_no_files(&e.path()))))
+}
+
+#[cfg(target_os = "macos")]
+fn remove_empty_folders(path: &Path) -> Result<()> {
+    crate::sys::apfs_immutable(path, false)?;
+    for e in fs::read_dir(path)? {
+        remove_empty_folders(&e?.path())?;
+    }
+    fs::remove_dir(path)?;
+    Ok(())
+}
+
+/// Remove `gone` from `dst`, then copy `write` from `src` to the same paths.
+/// Removals go first: on a volume that ignores case, `readme` must leave before `README` comes.
+/// A clash that the removals do not clear (an untracked `dir/x` where `Dir/x` comes) is refused
+/// before anything changes.
+pub fn replace_entries(src: &Path, dst: &Path, gone: &[&str], write: &[&str], own: Option<(u32, u32)>) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    refuse_remaining_clashes(dst, gone, write)?;
+    for g in gone {
+        remove_entry(dst, g)?;
+    }
+    for w in write {
+        copy_entry(src, w, dst, w, own)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn refuse_remaining_clashes(dst: &Path, gone: &[&str], write: &[&str]) -> Result<()> {
+    if fs::symlink_metadata(dst).map(|m| crate::sys::case_sensitive_dev(m.dev(), dst)).unwrap_or(true) {
+        return Ok(());
+    }
+    let gone: std::collections::BTreeSet<&str> = gone.iter().copied().collect();
+    let leaves = |rel: &str| rel.match_indices('/').map(|(i, _)| &rel[..i]).chain([rel]).any(|a| gone.contains(a));
+    // True when nothing but empty folders stays at `rel` after the removals.
+    fn clears(dst: &Path, rel: &str, leaves: &dyn Fn(&str) -> bool) -> bool {
+        if leaves(rel) {
+            return true;
+        }
+        let p = dst.join(rel);
+        fs::symlink_metadata(&p).is_ok_and(|m| m.is_dir())
+            && fs::read_dir(&p).is_ok_and(|rd| {
+                rd.into_iter()
+                    .all(|e| e.is_ok_and(|e| clears(dst, &format!("{rel}/{}", e.file_name().to_string_lossy()), leaves)))
+            })
+    }
+    for w in write {
+        let mut done = String::new();
+        for part in w.split('/').filter(|c| !c.is_empty()) {
+            let parent = done.clone();
+            if !done.is_empty() {
+                done.push('/');
+            }
+            done.push_str(part);
+            let path = dst.join(&done);
+            if let Some(stored) = case_clash(&path) {
+                let other = if parent.is_empty() { stored } else { format!("{parent}/{stored}") };
+                if !clears(dst, &other, &leaves) {
+                    bail!(
+                        "{done} and {other} differ only in case, and the volume of this store does not tell them apart.\nRename one of them, or use a store on a case-sensitive APFS volume."
+                    );
+                }
+                break;
+            }
+            if fs::symlink_metadata(&path).is_err() {
+                break;
+            }
         }
     }
     Ok(())
@@ -221,7 +306,7 @@ pub fn refuse_case_collisions<'a>(dst: &Path, paths: impl Iterator<Item = &'a st
                     prefix.push('/');
                 }
                 prefix.push_str(part);
-                seen.entry(prefix.to_lowercase()).or_default().insert(prefix.clone());
+                seen.entry(case_key(&prefix)).or_default().insert(prefix.clone());
             }
         }
         let groups: Vec<String> =
@@ -263,6 +348,30 @@ pub fn exact_metadata(path: &Path, rel: &str) -> Option<fs::Metadata> {
     Some(m)
 }
 
+/// True when the listing of folder `dir` has exactly `name`. The last listing is kept per
+/// thread while the folder stays the same: status checks each hard-linked file of a folder.
+#[cfg(target_os = "macos")]
+fn listed(dir: &Path, name: &std::ffi::OsStr) -> bool {
+    use std::cell::RefCell;
+    use std::collections::HashSet;
+    type Listing = (PathBuf, (u64, u64, i64, i64), HashSet<std::ffi::OsString>);
+    thread_local!(static LAST: RefCell<Option<Listing>> = const { RefCell::new(None) });
+    let Ok(m) = fs::symlink_metadata(dir) else {
+        return false;
+    };
+    // A new, removed or renamed entry changes the mtime of the folder.
+    let key = (m.dev(), m.ino(), m.mtime(), m.mtime_nsec());
+    LAST.with_borrow_mut(|last| {
+        if !last.as_ref().is_some_and(|(d, k, _)| d == dir && *k == key) {
+            let Ok(rd) = fs::read_dir(dir) else {
+                return false;
+            };
+            *last = Some((dir.to_path_buf(), key, rd.flatten().map(|e| e.file_name()).collect()));
+        }
+        last.as_ref().is_some_and(|(_, _, names)| names.contains(name))
+    })
+}
+
 /// True when the volume stores the last `rel` components of `path` with exactly these names.
 #[cfg(target_os = "macos")]
 fn stored_exactly(path: &Path, rel: &str, m: &fs::Metadata) -> bool {
@@ -272,8 +381,7 @@ fn stored_exactly(path: &Path, rel: &str, m: &fs::Metadata) -> bool {
         let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
             return false;
         };
-        let listed = fs::read_dir(parent).map(|rd| rd.flatten().any(|e| e.file_name() == name)).unwrap_or(false);
-        return listed
+        return listed(parent, name)
             && rel.rsplit_once('/').is_none_or(|(dir, _)| {
                 stored_exactly(parent, dir, &fs::symlink_metadata(parent).ok().unwrap_or_else(|| m.clone()))
             });

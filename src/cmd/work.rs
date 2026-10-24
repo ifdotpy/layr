@@ -1227,16 +1227,13 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
                     .into_iter()
                     .filter(|c| !skip_path(&c.path))
                     .collect();
-                // Removals first: on a volume that ignores case, `readme` must go before
-                // `README` comes.
-                for c in list.iter().filter(|c| c.new.is_none()) {
-                    if fsutil::lmeta(&index, &c.path).is_some() {
-                        fsutil::remove_entry(&wdir, &c.path)?;
-                    }
-                }
-                for c in list.iter().filter(|c| c.new.is_some()) {
-                    fsutil::copy_entry(&target_root, &c.path, &wdir, &c.path, own)?;
-                }
+                let gone: Vec<&str> = list
+                    .iter()
+                    .filter(|c| c.new.is_none() && fsutil::lmeta(&index, &c.path).is_some())
+                    .map(|c| c.path.as_str())
+                    .collect();
+                let write: Vec<&str> = list.iter().filter(|c| c.new.is_some()).map(|c| c.path.as_str()).collect();
+                fsutil::replace_entries(&target_root, &wdir, &gone, &write, own)?;
             }
         }
         _ => {

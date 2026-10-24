@@ -509,21 +509,10 @@ fn restore_working(repo: &Repo, line: &Line, state: &str) -> Result<()> {
                 || c.old_path.as_ref().map(|o| private.contains(o)).unwrap_or(false))
         })
         .collect();
-    // Removals first: on a volume that ignores case, `readme` must go before `README` comes.
-    for c in &list {
-        if let Some(src) = &c.old_path {
-            fsutil::remove_entry(&w, src)?;
-        }
-        if c.new.is_none() {
-            fsutil::remove_entry(&w, &c.path)?;
-        }
-    }
-    for c in &list {
-        if c.new.is_some() {
-            fsutil::copy_entry(&target, &c.path, &w, &c.path, own)?;
-        }
-    }
-    Ok(())
+    let gone: Vec<&str> =
+        list.iter().flat_map(|c| c.old_path.as_deref().into_iter().chain(c.new.is_none().then_some(c.path.as_str()))).collect();
+    let write: Vec<&str> = list.iter().filter(|c| c.new.is_some()).map(|c| c.path.as_str()).collect();
+    fsutil::replace_entries(&target, &w, &gone, &write, own)
 }
 
 pub fn op(ctx: &Ctx, args: &[String]) -> Result<i32> {
@@ -1367,14 +1356,9 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
                             copies.push(rel.clone());
                         }
                     }
-                    // Removals first: on a volume that ignores case, `readme` must go before
-                    // `README` comes.
-                    for g in &gone {
-                        fsutil::remove_entry(&work, g)?;
-                    }
-                    for rel in &copies {
-                        fsutil::copy_entry(&snap.path, rel, &work, rel, None)?;
-                    }
+                    let gone_paths: Vec<&str> = gone.iter().map(String::as_str).collect();
+                    let copy_paths: Vec<&str> = copies.iter().map(String::as_str).collect();
+                    fsutil::replace_entries(&snap.path, &work, &gone_paths, &copy_paths, None)?;
                     changed |= !copies.is_empty() || !gone.is_empty();
                     if !changed {
                         drop(cleanup);

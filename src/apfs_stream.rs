@@ -262,11 +262,11 @@ pub fn receive(src: &mut dyn Read, dir: &Path, expected: &crate::recv::Expect) -
                 9 => {
                     let to = path(&root, value(&at, 16)?, false)?;
                     // A rename of an entry to another case of its own name is no clash.
-                    // Two links of one inode are two entries.
+                    // Two links of one file are two entries; a folder has no second link.
                     let same = fs::symlink_metadata(&to)
                         .ok()
                         .zip(fs::symlink_metadata(&p).ok())
-                        .is_some_and(|(a, b)| a.ino() == b.ino() && b.nlink() == 1);
+                        .is_some_and(|(a, b)| a.ino() == b.ino() && (b.is_dir() || b.nlink() == 1));
                     if !same {
                         clash(&to)?;
                     }

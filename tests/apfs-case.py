@@ -72,6 +72,21 @@ try:
     assert 'differ only in case' in r.stderr, r.stderr
     print('PASS git clone refuses README and Readme', flush=True)
 
+    # 2b. A later commit adds Readme next to README: the check of added paths finds it.
+    hist = cs / 'hist'
+    subprocess.run(['git', 'init', '-q', str(hist)], check=True)
+    git = ['git', '-C', str(hist), '-c', 'user.name=T', '-c', 'user.email=t@x']
+    (hist / 'docs').mkdir()
+    (hist / 'docs/README').write_text('upper\n')
+    subprocess.run([*git, 'add', '-A'], check=True)
+    subprocess.run([*git, 'commit', '-qm', 'one'], check=True)
+    (hist / 'docs/Readme').write_text('lower\n')
+    subprocess.run([*git, 'add', '-A'], check=True)
+    subprocess.run([*git, 'commit', '-qm', 'two'], check=True)
+    r = run(ci, ci / 'store-hist', 'git', 'clone', hist, 'h', '-q', ok=False)
+    assert 'differ only in case' in r.stderr and 'docs/README, docs/Readme' in r.stderr, r.stderr
+    print('PASS git clone refuses Readme that a later commit adds', flush=True)
+
     # 3. A peer that sends such names is refused.
     peer = cs / 'store-peer'
     run(cs, peer, 'init', 'p', '--from', src, '-q')
@@ -80,6 +95,26 @@ try:
     r = run(peer_main, peer, 'sync', 'other', '--command', '--', 'env', f'LAYR_ROOT={ci / "store-sync"}', binary, 'serve-peer', 'p', ok=False)
     assert 'differ only in case' in r.stderr, r.stderr
     print('PASS a peer sync refuses README and Readme', flush=True)
+
+    # 3b. A peer renames a folder to another case: the sync applies the rename.
+    psrc = cs / 'psrc'
+    (psrc / 'dir').mkdir(parents=True)
+    (psrc / 'dir/a').write_text('a\n')
+    peer2 = cs / 'store-peer2'
+    run(cs, peer2, 'init', 'f', '--from', psrc, '-q')
+    p2 = peer2 / 'projects/f/lines/main'
+    run(p2, peer2, 'protect', 'main', '--remove')
+    run(p2, peer2, 'remote', 'add', 'other', 'ssh://test/f')
+    sync = ['sync', 'other', '--command', '--', 'env', f'LAYR_ROOT={ci / "store-sync2"}', binary, 'serve-peer', 'f']
+    run(p2, peer2, *sync)
+    os.rename(p2 / 'dir', p2 / 'Dir')
+    run(p2, peer2, 'save', '-qam', 'folder case')
+    run(p2, peer2, *sync)
+    got = ci / 'store-sync2/projects/f/lines/main'
+    if got.exists():
+        assert 'Dir' in names(got) and 'dir' not in names(got), names(got)
+    assert run(p2, peer2, 'rev-parse', 'head').stdout == run(ci, ci / 'store-sync2', '--project', 'f', 'rev-parse', 'main').stdout
+    print('PASS a peer sync applies a folder renamed to another case', flush=True)
 
     # 4. A normal project works; renames that change only case keep the new names.
     plain = ci / 'plain'
@@ -133,6 +168,21 @@ try:
     assert 'Dir' in names(work) and 'dir' not in names(work), names(work)
     assert not run(work, store, 'status', '--porcelain').stdout
     print('PASS reset --hard across a change of case', flush=True)
+
+    # 7b. reset --hard refuses before any change when an untracked file blocks a case change.
+    run(work, store, 'line', 'new', '-q', 'blocked')
+    blocked = main.parent / 'blocked'
+    os.rename(blocked / 'Dir', blocked / 'dir.tmp')
+    os.rename(blocked / 'dir.tmp', blocked / 'dir')
+    run(blocked, store, 'add', '-A')
+    run(blocked, store, 'save', '-qm', 'lower dir')
+    (blocked / 'dir/untracked').write_text('keep\n')
+    before = sorted(os.listdir(blocked / 'dir'))
+    r = run(blocked, store, 'reset', '-q', '--hard', 'head~1', ok=False)
+    assert 'differ only in case' in r.stderr, r.stderr
+    assert 'dir' in names(blocked) and sorted(os.listdir(blocked / 'dir')) == before, names(blocked)
+    assert run(blocked, store, 'status', '--porcelain').stdout.split() == ['??', 'dir/untracked']
+    print('PASS reset --hard refuses a blocked case change and changes nothing', flush=True)
 
     # 8. Hard links on a volume that ignores case.
     os.link(work / 'README', work / 'second')

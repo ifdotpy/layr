@@ -480,12 +480,37 @@ pub fn import_commit(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str, author
     // On a store volume that ignores case, README and Readme would become one file.
     #[cfg(target_os = "macos")]
     if !crate::sys::case_sensitive(&repo.p.work_dir()) {
-        let out = base_cmd(&s).args(["ls-tree", "-r", "-t", "-z", "--name-only", commit]).output()?;
-        if !out.status.success() {
-            bail!("git ls-tree failed: {}", String::from_utf8_lossy(&out.stderr));
-        }
-        let names: Vec<String> =
-            out.stdout.split(|b| *b == 0).filter(|x| !x.is_empty()).map(|x| String::from_utf8_lossy(x).into_owned()).collect();
+        let lines = |args: &[&str]| -> Result<Vec<String>> {
+            let out = base_cmd(&s).args(args).output()?;
+            if !out.status.success() {
+                bail!("git {} failed: {}", args[0], String::from_utf8_lossy(&out.stderr));
+            }
+            Ok(out.stdout.split(|b| *b == 0).filter(|x| !x.is_empty()).map(|x| String::from_utf8_lossy(x).into_owned()).collect())
+        };
+        let names = match &prev {
+            // The earlier state passed this check: only an added path can collide, with an
+            // entry of its own folder or of a folder above it.
+            Some((_, pc)) => {
+                let added = lines(&["diff", "--name-only", "-z", "--no-renames", "--diff-filter=A", pc, commit])?;
+                let mut dirs: std::collections::BTreeSet<String> = Default::default();
+                for a in &added {
+                    let mut d = a.as_str();
+                    while let Some((up, _)) = d.rsplit_once('/') {
+                        dirs.insert(format!("{up}/"));
+                        d = up;
+                    }
+                }
+                let mut names = if added.is_empty() { Vec::new() } else { lines(&["ls-tree", "-z", "--name-only", commit])? };
+                let dirs: Vec<&str> = dirs.iter().map(String::as_str).collect();
+                for chunk in dirs.chunks(500) {
+                    let mut args = vec!["ls-tree", "-z", "--name-only", commit.as_ref(), "--"];
+                    args.extend_from_slice(chunk);
+                    names.extend(lines(&args)?);
+                }
+                names
+            }
+            None => lines(&["ls-tree", "-r", "-t", "-z", "--name-only", commit])?,
+        };
         fsutil::refuse_case_collisions(&repo.p.work_dir(), names.iter().map(|n| n.as_str()))?;
     }
     let work = repo.p.work_dir().join(ids::new_id());

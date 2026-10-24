@@ -450,6 +450,8 @@ pub fn add_entries<'a>(
 ) -> Result<()> {
     let mut dirs: BTreeSet<String> = BTreeSet::new();
     // The ancestors of written and removed paths are folders of the layer (layer rule 5).
+    // `diff` compares exact names, so a removed path and a written path never need the same
+    // folder in two cases: a folder renamed to another case is removed as a whole.
     let container = |dirs: &mut BTreeSet<String>, rel: &str| -> Result<()> {
         for a in ancestors(rel) {
             if dirs.insert(a.to_string()) || fs::symlink_metadata(dst.join(a)).is_err() {
@@ -618,8 +620,10 @@ fn containers(stage: &Path, rel: &str, own: Option<(u32, u32)>, dirs: &mut BTree
         if crate::fsutil::exact_metadata(&d, a).is_none() {
             if fs::symlink_metadata(&d).is_ok() {
                 // On a volume that ignores case the layer holds another case of this folder
-                // (`Dir` for `dir`). For a removal, its mark alone hides the old content. For a
-                // write, the other folder must be empty: then it goes.
+                // (`Dir` for `dir`). For a removal, its mark alone hides the old content
+                // (`hides` reads only the marks), and a folder made below `Dir` would become
+                // part of the new tree: the removal gets no folders, an exception to the layer
+                // rule. For a write, the other folder must be empty: then it goes.
                 if !write {
                     return Ok(());
                 }
@@ -655,8 +659,8 @@ pub fn stage_entries(index: &Layered, src: &Path, paths: &BTreeSet<String>, own:
     let mut gone: Vec<String> = Vec::new();
     // Removals first: on a volume that ignores case, `dir` must leave before `Dir` comes.
     let present = |p: &String| crate::fsutil::safe_join(src, p).ok().and_then(|f| crate::fsutil::exact_metadata(&f, p)).is_some();
-    let ordered: Vec<&String> = paths.iter().filter(|p| !present(p)).chain(paths.iter().filter(|p| present(p))).collect();
-    for p in ordered {
+    let (gone_first, written): (Vec<&String>, Vec<&String>) = paths.iter().partition(|p| !present(p));
+    for p in gone_first.into_iter().chain(written) {
         if p.is_empty() {
             continue;
         }
@@ -798,7 +802,11 @@ pub(crate) fn changed_paths(before: &BTreeMap<String, ScanEntry>, after: &BTreeM
 pub(crate) fn resync(src: &Path, dst: &Path, paths: &BTreeSet<String>) -> Result<()> {
     let mut dirs: BTreeSet<String> = BTreeSet::new();
     let mut whole: Vec<String> = Vec::new();
-    for p in paths {
+    let source =
+        |p: &str| crate::fsutil::safe_join(src, p).ok().and_then(|f| crate::fsutil::exact_metadata(&f, p).map(|m| (f, m)));
+    // Removals first: on a volume that ignores case, `readme` must go before `README` comes.
+    let (gone, kept): (Vec<&String>, Vec<&String>) = paths.iter().partition(|p| !p.is_empty() && source(p).is_none());
+    for p in gone.into_iter().chain(kept) {
         if p.is_empty() {
             dirs.insert(String::new());
             continue;
@@ -810,7 +818,7 @@ pub(crate) fn resync(src: &Path, dst: &Path, paths: &BTreeSet<String>) -> Result
         let Ok(at) = crate::fsutil::safe_join(dst, p) else {
             continue;
         };
-        let from = crate::fsutil::safe_join(src, p).ok().and_then(|f| fs::symlink_metadata(&f).ok().map(|m| (f, m)));
+        let from = source(p);
         let old = crate::fsutil::exact_metadata(&at, p);
         if let (Some((_, m)), Some(o)) = (&from, &old) {
             if m.is_dir() && o.is_dir() {
@@ -818,7 +826,7 @@ pub(crate) fn resync(src: &Path, dst: &Path, paths: &BTreeSet<String>) -> Result
                 continue;
             }
         }
-        if !fs::symlink_metadata(dst.join(parent_of(p))).map(|m| m.is_dir()).unwrap_or(false) {
+        if !crate::fsutil::exact_metadata(&dst.join(parent_of(p)), parent_of(p)).is_some_and(|m| m.is_dir()) {
             continue;
         }
         open_parent(dst, p)?;
@@ -841,8 +849,8 @@ pub(crate) fn resync(src: &Path, dst: &Path, paths: &BTreeSet<String>) -> Result
         let (Ok(f), Ok(t)) = (crate::fsutil::safe_join(src, d), crate::fsutil::safe_join(dst, d)) else {
             continue;
         };
-        if fs::symlink_metadata(&f).map(|m| m.is_dir()).unwrap_or(false)
-            && fs::symlink_metadata(&t).map(|m| m.is_dir()).unwrap_or(false)
+        if crate::fsutil::exact_metadata(&f, d).is_some_and(|m| m.is_dir())
+            && crate::fsutil::exact_metadata(&t, d).is_some_and(|m| m.is_dir())
         {
             copy_dir_meta(&f, &t, d.is_empty())?;
         }
