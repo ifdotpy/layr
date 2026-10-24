@@ -15,8 +15,8 @@ The store and signed record formats remain compatible with the Linux backend.
   `init --from`, `git clone` and git fetches, peer sync, remote stores, and merges.
   The error names the paths; nothing is half written. A store on a case-sensitive APFS volume accepts them.
   Path lookups compare exact names, so a rename that changes only case (`readme` to `README`) works like any rename.
-  Layr does not compare Unicode normal forms. APFS also treats `é` as one code point and as `e` plus an accent
-  as the same name, on both kinds of volume. Two such names in one folder give the same result as on any APFS store.
+  APFS also treats `é` as one code point and as `e` plus an accent as the same name. On a store that ignores case,
+  Layr refuses such pairs too. On a case-sensitive APFS store, Layr does not check them.
 - Commands run as the current user by default. Set `LAYR_SOCKET` to use the root service.
 - The service requires a volume with ownership enabled and a separate root-owned store.
   It refuses volumes mounted with `noowners` and store folders that other users can change.

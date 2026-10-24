@@ -87,6 +87,21 @@ try:
     assert 'differ only in case' in r.stderr and 'docs/README, docs/Readme' in r.stderr, r.stderr
     print('PASS git clone refuses Readme that a later commit adds', flush=True)
 
+    # 2c. café in NFC and in NFD: APFS also ignores the normal form. No volume holds both, so
+    # the commit is made in the index only.
+    uni = cs / 'uni'
+    subprocess.run(['git', 'init', '-q', str(uni)], check=True)
+    blob = subprocess.run(['git', '-C', str(uni), 'hash-object', '-w', '--stdin'], input='x\n', capture_output=True,
+                          text=True, check=True).stdout.strip()
+    for name in ('caf\u00e9', 'cafe\u0301'):
+        # Git on macOS turns NFD names into NFC unless this is off.
+        subprocess.run(['git', '-C', str(uni), '-c', 'core.precomposeunicode=false', 'update-index', '--add', '--cacheinfo',
+                        f'100644,{blob},{name}'], check=True)
+    subprocess.run(['git', '-C', str(uni), '-c', 'user.name=T', '-c', 'user.email=t@x', 'commit', '-qm', 'forms'], check=True)
+    r = run(ci, ci / 'store-uni', 'git', 'clone', uni, 'u', '-q', ok=False)
+    assert 'differ only in case' in r.stderr, r.stderr
+    print('PASS git clone refuses one name in two Unicode forms', flush=True)
+
     # 3. A peer that sends such names is refused.
     peer = cs / 'store-peer'
     run(cs, peer, 'init', 'p', '--from', src, '-q')
@@ -108,11 +123,12 @@ try:
     sync = ['sync', 'other', '--command', '--', 'env', f'LAYR_ROOT={ci / "store-sync2"}', binary, 'serve-peer', 'f']
     run(p2, peer2, *sync)
     os.rename(p2 / 'dir', p2 / 'Dir')
-    run(p2, peer2, 'save', '-qam', 'folder case')
+    run(p2, peer2, 'add', '-A')
+    run(p2, peer2, 'save', '-qm', 'folder case')
     run(p2, peer2, *sync)
-    got = ci / 'store-sync2/projects/f/lines/main'
-    if got.exists():
-        assert 'Dir' in names(got) and 'dir' not in names(got), names(got)
+    synced = subprocess.run([binary, 'show', '--name-only', '--format=', 'main'], cwd=ci, capture_output=True, text=True,
+                            env=dict(env, LAYR_ROOT=str(ci / 'store-sync2'), LAYR_PROJECT='f')).stdout.split()
+    assert synced == ['Dir/a'], synced
     assert run(p2, peer2, 'rev-parse', 'head').stdout == run(ci, ci / 'store-sync2', '--project', 'f', 'rev-parse', 'main').stdout
     print('PASS a peer sync applies a folder renamed to another case', flush=True)
 

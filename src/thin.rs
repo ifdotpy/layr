@@ -805,8 +805,8 @@ pub(crate) fn resync(src: &Path, dst: &Path, paths: &BTreeSet<String>) -> Result
     let source =
         |p: &str| crate::fsutil::safe_join(src, p).ok().and_then(|f| crate::fsutil::exact_metadata(&f, p).map(|m| (f, m)));
     // Removals first: on a volume that ignores case, `readme` must go before `README` comes.
-    let (gone, kept): (Vec<&String>, Vec<&String>) = paths.iter().partition(|p| !p.is_empty() && source(p).is_none());
-    for p in gone.into_iter().chain(kept) {
+    let (gone, kept): (Vec<_>, Vec<_>) = paths.iter().map(|p| (p, source(p))).partition(|(p, f)| !p.is_empty() && f.is_none());
+    for (p, from) in gone.into_iter().chain(kept) {
         if p.is_empty() {
             dirs.insert(String::new());
             continue;
@@ -818,7 +818,6 @@ pub(crate) fn resync(src: &Path, dst: &Path, paths: &BTreeSet<String>) -> Result
         let Ok(at) = crate::fsutil::safe_join(dst, p) else {
             continue;
         };
-        let from = source(p);
         let old = crate::fsutil::exact_metadata(&at, p);
         if let (Some((_, m)), Some(o)) = (&from, &old) {
             if m.is_dir() && o.is_dir() {
