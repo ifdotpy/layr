@@ -11,15 +11,15 @@ printf nested > "$T/source/dir/file"
 ln -s file "$T/source/link"
 "$LAYR" init check --from "$T/source" -q
 cd "$LAYR_ROOT/projects/check/lines/main"
-"$LAYR" branch -q topic
+"$LAYR" line new -q topic
 cd ../topic
 printf changed > file
 rm dir/file
 "$LAYR" add -A
-"$LAYR" commit -qm changed
+"$LAYR" save -qm changed
 [ "$(cat ../main/file)" = base ]
 [ "$(cat ../main/dir/file)" = nested ]
-"$LAYR" branch -m topic renamed
+"$LAYR" line rename topic renamed
 cd ../renamed
 [ "$(cat file)" = changed ]
 [ ! -e dir/file ]

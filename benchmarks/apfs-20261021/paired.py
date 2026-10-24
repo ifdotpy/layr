@@ -44,7 +44,7 @@ for kind,n in [('files',10000),('files',100000),('large',1000)]:
   for trial in range(3):
    order=['baseline','candidate'] if trial%2==0 else ['candidate','baseline']
    for variant in order:
-    name=f'{variant}-{trial}';run(variant,main,['branch','-q',name],'branch',trial);work=main.parent/name
+    name=f'{variant}-{trial}';run(variant,main,['line', 'new','-q',name],'branch',trial);work=main.parent/name
     if kind=='files':
      assert not run(variant,work,['status','--porcelain'],'status_clean',trial).strip()
      path=work/'d00000/f0000000.txt'
@@ -60,13 +60,13 @@ for kind,n in [('files',10000),('files',100000),('large',1000)]:
      rows.append({'kind':kind,'files':n,'variant':variant,'trial':trial,'operation':'add_allocation','bytes':after-before});save()
      staged=run(variant,work,['status','--porcelain'],'status_staged',trial)
      assert staged.startswith('M  ') and len(staged.splitlines())==1,staged
-     run(variant,work,['commit','-qm','benchmark'],'commit',trial)
+     run(variant,work,['save','-qm','benchmark'],'commit',trial)
      run(variant,work,['fsck'],'fsck',trial)
      assert not run(variant,work,['status','--porcelain']).strip()
      if kind=='large':
       with (main/'large.bin').open('rb') as f:f.seek(8192);assert f.read(4096)==block[8192:12288]
       with path.open('rb') as f:f.seek(8192);assert f.read(4096)==b'x'*4096
-    run(variant,main,['branch','-q','-D',name])
+    run(variant,main,['line', 'delete','-q','-D',name])
   report.setdefault('verified',[]).append([kind,n]);save()
  finally:call(['hdiutil','detach',mount])
  image.unlink()

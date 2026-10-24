@@ -7,7 +7,7 @@ echo shared > "$T/src/code"
 l init viewtest --from "$T/src" -q >/dev/null
 P=$LAYR_ROOT/projects/viewtest/lines
 cd "$P/main"
-SHARED=$(l rev-parse HEAD)
+SHARED=$(l rev-parse head)
 EMPTY=$(l view --json)
 E=$(printf '%s' "$EMPTY" | python3 -c 'import json,sys; print(json.load(sys.stdin)["view_id"])')
 eq "view ids use full SHA-256" 64 "${#E}"
@@ -28,7 +28,7 @@ no "an unknown view id fails" l rev-parse "views/$(printf '%064d' 0)"
 echo private-alpha > .private.env
 l overlay create private --mode shared -q
 l overlay move private .private.env >/dev/null
-l commit -qm add-private-file
+l save -qm add-private-file
 V=$(l view save --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["view_id"])')
 no "a stack has a different identity from its shared state" test "$V" = "$E"
 STATE_VIEW=$(l view "$SHARED" --json)
@@ -37,19 +37,19 @@ echo uncommitted >> .private.env
 eq "working edits do not change a view id" "$V" "$(l view --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["view_id"])')"
 l restore .private.env
 echo private-beta > .private.env
-l commit -qam update-private-file
+l save -qam update-private-file
 V2=$(l view save --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["view_id"])')
 no "a changed overlay state changes the view id" test "$V" = "$V2"
-ok "branch accepts a saved view" l branch -q exact "views/$V"
+ok "branch accepts a saved view" l line new -q exact "views/$V"
 eq "the new line has the exact old private content" private-alpha "$(cat "$P/exact/.private.env")"
-eq "the new line keeps the shared head" "$SHARED" "$(l --project viewtest --line exact rev-parse HEAD)"
+eq "the new line keeps the shared head" "$SHARED" "$(l --project viewtest --line exact rev-parse head)"
 eq "the new line has the exact saved stack" "$V" "$(l --project viewtest --line exact view --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["view_id"])')"
 eq "the existing shared overlay line stays unchanged" private-beta "$(l overlay show private user-0:.private.env)"
 cd "$P/exact"; echo edit >> .private.env
-has "a stale stack keeps the existing commit guard" 'changed in another line' "$(l commit -qam stale 2>&1)"
+has "a stale stack keeps the existing commit guard" 'changed in another line' "$(l save -qam stale 2>&1)"
 l restore .private.env
 cd "$P/main"
-ok "batch branch accepts a view" l branch batch "views/$V" --count 2 -q
+ok "batch branch accepts a view" l line new batch "views/$V" --count 2 -q
 eq "a batch line preserves the exact stack" "$V" "$(l --project viewtest --line batch-2 view --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["view_id"])')"
 
 # Full-view try records evidence against the view, not only the shared state.
@@ -64,7 +64,7 @@ eq "a state-only check retains its state subject" state "$(l attestations "$SHAR
 A=$(l attest origin "views/$V" --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["attestation_id"])')
 eq "a view attestation revision resolves its shared state" "$SHARED" "$(l rev-parse "attestations/$A")"
 ok "a view attestation can reproduce its stack" l try -q "attestations/$A" -- sh -c 'test "$(cat .private.env)" = private-alpha'
-ok "branch from a view attestation preserves layers" l branch -q from-attestation "attestations/$A"
+ok "branch from a view attestation preserves layers" l line new -q from-attestation "attestations/$A"
 eq "attestation branch content" private-alpha "$(cat "$P/from-attestation/.private.env")"
 l attest revoke "views/$V" >/dev/null
 eq "a view revoke is recorded" 1 "$(l attestations "views/$V" --kind revoke --json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')"
@@ -98,12 +98,12 @@ l access grant layr-view-reader writer
 l access grant layr-view-blocked writer
 ok "a non-reader can read a view descriptor" as_user layr-view-blocked view show "$V" --json
 has "a non-reader cannot run a private view" "overlay 'private'" "$(as_user layr-view-blocked try -q "views/$V" -- true 2>&1)"
-no "a non-reader cannot branch from a private view" as_user layr-view-blocked branch refused "views/$V" -q
+no "a non-reader cannot branch from a private view" as_user layr-view-blocked line new refused "views/$V" -q
 no "a refused view branch leaves no folder" test -e "$P/refused"
-no "a readable view cannot expose files to a non-reader owner" l branch expose "views/$V" --owner layr-view-blocked -q
+no "a readable view cannot expose files to a non-reader owner" l line new expose "views/$V" --owner layr-view-blocked -q
 l overlay readers private layr-view-reader
 ok "an overlay reader can run a view" as_user layr-view-reader try -q "views/$V" -- sh -c 'test "$(cat .private.env)" = private-alpha'
-ok "an overlay reader can branch from a view" as_user layr-view-reader branch reader-line "views/$V" -q
+ok "an overlay reader can branch from a view" as_user layr-view-reader line new reader-line "views/$V" -q
 eq "a reader branch has exact private content" private-alpha "$(cat "$P/reader-line/.private.env")"
 l overlay readers private root
 no "revoked overlay access blocks an existing line's try" as_user layr-view-reader try -q reader-line -- true
@@ -119,22 +119,22 @@ cd "$G/main"
 l config retention.auto 0; l config retention.hours 0; l config undo.days 0
 echo temporary > code
 l save -q
-AUTO=$(l rev-parse 'HEAD@{0}')
-l branch -q temporary "$AUTO"
+AUTO=$(l rev-parse 'head@{0}')
+l line new -q temporary "$AUTO"
 cd "$G/temporary"
 OLD=$(l view save --json)
 OLD_ID=$(printf '%s' "$OLD" | python3 -c 'import json,sys; print(json.load(sys.stdin)["view_id"])')
 OLD_STATE=$(printf '%s' "$OLD" | python3 -c 'import json,sys; print(json.load(sys.stdin)["view"]["shared"])')
 cd "$G/main"
-l branch -D temporary -q >/dev/null
-l reset -q --hard HEAD
+l line delete -D temporary -q >/dev/null
+l reset -q --hard head
 l ref set pins/view-old "views/$OLD_ID" >/dev/null
 l gc -q
 ok "a pin preserves the shared state of a view" l view "views/$OLD_ID" --json
 l ref delete pins/view-old >/dev/null
 l gc -q
 has "full resolution names a collected shared state" "view $OLD_ID refers to a collected state $OLD_STATE" "$(l view "views/$OLD_ID" 2>&1)"
-no "branch refuses a collected view" l branch gone "views/$OLD_ID" -q
+no "branch refuses a collected view" l line new gone "views/$OLD_ID" -q
 no "try refuses a collected view" l try -q "views/$OLD_ID" -- true
 ok "view show keeps the descriptor after collection" l view show "$OLD_ID" --json
 

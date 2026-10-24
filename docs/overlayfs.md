@@ -29,7 +29,7 @@ Start the service with the store on ext4 or XFS:
 sudo env LAYR_ROOT=/var/lib/layr-overlayfs ./target/release/layr daemon
 ```
 
-Use the same CLI commands for projects, lines, commits, overlays, caches and sync.
+Use the same CLI commands for projects, lines, states, overlays, caches and sync.
 The default Linux build still uses btrfs. The macOS build still uses APFS.
 
 ## Store and snapshots
@@ -46,8 +46,8 @@ The live mount does not change. Open files and current directories continue to r
 Later writes cannot change the saved copy.
 
 The upper layer contains all changes since the line's base. Later snapshots can copy those changed files again.
-The backend does not rotate the live upper layer after each commit.
-An ownership change can also copy a lower file into the upper layer. A service branch with a different owner can therefore copy many files.
+The backend does not rotate the live upper layer after each state.
+An ownership change can also copy a lower file into the upper layer. A service line with a different owner can therefore copy many files.
 XFS reflinks can share copied data. On ext4, the backend copies allocated data and preserves sparse holes.
 The backend flushes new data before it publishes the snapshot in the registry.
 Concurrent source changes cause the snapshot to fail when the two metadata scans differ.

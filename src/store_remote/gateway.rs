@@ -24,6 +24,18 @@ pub struct Gateway {
     read: Mutex<Option<(String, i64)>>,
 }
 
+impl Clone for Gateway {
+    fn clone(&self) -> Self {
+        Self {
+            http: self.http.clone(),
+            base: self.base.clone(),
+            token: self.token.clone(),
+            identity: Mutex::new(self.identity.lock().expect("gateway identity lock").clone()),
+            read: Mutex::new(self.read.lock().expect("gateway read lock").clone()),
+        }
+    }
+}
+
 fn bytes(response: Response, limit: usize) -> Result<Vec<u8>> {
     if response.content_length().is_some_and(|n| n > limit as u64) {
         bail!("gateway response is too large");
@@ -128,6 +140,43 @@ impl Gateway {
         Ok(())
     }
 
+    /// Desk person API on the same authenticated HTTPS origin.
+    pub fn person_call(
+        &self,
+        method: Method,
+        path: &str,
+        token: Option<&str>,
+        body: Option<&serde_json::Value>,
+    ) -> Result<serde_json::Value> {
+        let url = self.base.join(path)?;
+        let mut request = self.http.request(method.clone(), url).header("content-type", "application/json");
+        if let Some(token) = token {
+            request = request.bearer_auth(token);
+        }
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        let response = request.send().map_err(reqwest::Error::without_url)?;
+        json(response, 512 << 10)
+    }
+
+    pub fn person_slot_at(&self, project: &str, login: &str, recipient: &str) -> Result<Vec<u8>> {
+        if !layr_store::person::project_name(project) {
+            bail!("invalid gateway project name");
+        }
+        let slot = layr_store::person::slot_name(login, recipient)?;
+        let url = self.base.join(&format!("/v1/p/{project}/slots/{slot}"))?;
+        let response = self.http.get(url).send().map_err(reqwest::Error::without_url)?;
+        if !response.status().is_success() {
+            bail!("gateway person slot: HTTP {}", response.status().as_u16());
+        }
+        bytes(response, 4096)
+    }
+
+    pub fn person_view(&self) -> Result<serde_json::Value> {
+        self.person_call(Method::GET, "/api/person", None, None)
+    }
+
     pub fn set_identity(&self, identity: &str) -> Result<()> {
         *self.identity.lock().map_err(|_| anyhow!("gateway identity lock failed"))? = Some(identity.into());
         Ok(())
@@ -151,7 +200,9 @@ impl Gateway {
             request = request.bearer_auth(token);
         }
         if let Some(data) = data {
-            request = request.body(data);
+            request = request
+                .header("content-type", if action == "token" { "application/json" } else { "application/octet-stream" })
+                .body(data);
         }
         request.send().map_err(reqwest::Error::without_url).map_err(Into::into)
     }
@@ -211,9 +262,21 @@ impl Gateway {
         self.send(Method::GET, action, Some(&token), query, None)
     }
 
+    pub fn has_read_identity(&self) -> bool {
+        self.identity.lock().map(|identity| identity.is_some()).unwrap_or(false)
+    }
+
     pub fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
         if key == "vault.json" {
             return Ok(None);
+        }
+        if key.strip_prefix("slots/").is_some_and(|name| layr_store::person::slot_login(name).is_some()) {
+            let response = self.send(Method::GET, key, None, None, None)?;
+            return match response.status().as_u16() {
+                200 => Ok(Some(bytes(response, 4096)?)),
+                404 => Ok(None),
+                status => bail!("gateway person slot: HTTP {status}"),
+            };
         }
         if key.starts_with("slots/") {
             #[derive(Deserialize)]
@@ -247,7 +310,9 @@ impl Gateway {
             }
             return Ok(found);
         }
-        let response = if key == "store.json" {
+        let response = if overlay_keys_path(key) && !self.has_read_identity() {
+            self.send(Method::GET, &format!("objects/{key}"), self.token.as_deref(), None, None)?
+        } else if key == "store.json" {
             self.send(Method::GET, "store.json", None, None, None)?
         } else {
             self.read_request(&format!("objects/{key}"), None)?
@@ -270,7 +335,9 @@ impl Gateway {
             objects: Vec<Entry>,
         }
         let has_identity = self.identity.lock().map_err(|_| anyhow!("gateway identity lock failed"))?.is_some();
-        let response = if !has_identity && (prefix.starts_with("records/") || prefix.starts_with("states/")) {
+        let response = if !has_identity
+            && (prefix.starts_with("records/") || prefix.starts_with("states/") || overlay_keys_prefix(prefix))
+        {
             self.send(Method::GET, "objects", self.token.as_deref(), Some(("prefix", prefix)), None)?
         } else {
             self.read_request("objects", Some(("prefix", prefix)))?
@@ -319,6 +386,20 @@ impl Gateway {
             status => bail!("gateway delete: HTTP {status}"),
         }
     }
+}
+
+fn overlay_keys_prefix(prefix: &str) -> bool {
+    let parts: Vec<_> = prefix.split('/').collect();
+    parts.len() == 4 && parts[0] == "overlays" && crate::model::is_uuid(parts[1]) && parts[2] == "keys" && parts[3].is_empty()
+}
+
+fn overlay_keys_path(key: &str) -> bool {
+    let mut parts = key.split('/');
+    parts.next() == Some("overlays")
+        && parts.next().is_some_and(crate::model::is_uuid)
+        && parts.next() == Some("keys")
+        && parts.next().is_some_and(|name| name.ends_with(".json"))
+        && parts.next().is_none()
 }
 
 fn token_file(path: &std::path::Path, uid: u32) -> Result<String> {

@@ -40,7 +40,7 @@ pub fn merge_states(
         base_id: base,
         ours_id: ours,
         theirs_id: theirs,
-        ours_label: "HEAD",
+        ours_label: "head",
         theirs_label,
         config: &cfg,
         run_as: ctx.caller.driver_ids(),
@@ -325,6 +325,7 @@ fn check_approvals(
 /// without the project lock; a passing check of the same state and command is reused. Then the
 /// lock is taken again and the line must still be at `head`. Returns the lock (held until the
 /// merge finishes) and the paths with local changes in the line's folder now.
+#[allow(clippy::too_many_arguments)]
 fn run_line_checks(
     ctx: &Ctx,
     repo: &Repo,
@@ -333,6 +334,7 @@ fn run_line_checks(
     candidate: &str,
     checks: &[String],
     quiet: bool,
+    queue: Option<&QueuedMerge<'_>>,
 ) -> Result<(crate::store::Lock, std::collections::BTreeSet<String>)> {
     for name in checks {
         let cmd =
@@ -360,6 +362,21 @@ fn run_line_checks(
                     ids::short(head)
                 ),
             ));
+        }
+    }
+    if let Some(q) = queue.filter(|q| q.run_probes) {
+        let outcome = crate::probes::queue_run(ctx, repo, head, candidate)?;
+        let reason = outcome["probes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|probe| probe["reasons"].as_array().into_iter().flatten())
+            .filter_map(serde_json::Value::as_str)
+            .next()
+            .map(str::to_owned);
+        *q.probes.borrow_mut() = Some(outcome);
+        if let Some(reason) = reason {
+            anyhow::bail!("{reason}");
         }
     }
     let lock = repo.p.lock()?;
@@ -408,7 +425,8 @@ pub fn merge(ctx: &Ctx, args: &[String]) -> Result<i32> {
         .flag("--abort")
         .flag("--continue")
         .flag("--no-edit")
-        .flag("--no-commit")
+        .flag("--no-save")
+        .removed("--no-commit", "--no-save")
         .flag("-q|--quiet")
         .flag("--stat")
         .flag("--no-stat")
@@ -421,7 +439,7 @@ pub fn merge(ctx: &Ctx, args: &[String]) -> Result<i32> {
         return super::admin::undo_last_of(ctx, &h.repo, &line, &["merge", "pull"]);
     }
     if a.has("--continue") {
-        return Err(exit(1, "layr merges never stop on a conflict: fix the files and run 'layr commit'."));
+        return Err(exit(1, "layr merges never stop on a conflict: fix the files and run 'layr save -m <message>'."));
     }
     let rev = a.pos.first().ok_or_else(|| exit(128, "usage: layr merge <rev> [--expect <state>]"))?.clone();
     merge_rev(ctx, &h.repo, &line, &rev, &a)
@@ -444,6 +462,8 @@ struct QueuedMerge<'a> {
     entry: &'a crate::model::QueueEntry,
     expected_head: &'a str,
     attempts: u32,
+    run_probes: bool,
+    probes: std::cell::RefCell<Option<serde_json::Value>>,
 }
 
 /// A queue entry pins its source and compares the target under the merge's project lock.
@@ -454,21 +474,29 @@ pub fn merge_queued(
     entry: &crate::model::QueueEntry,
     expected_head: &str,
     attempts: u32,
-) -> Result<i32> {
-    let source = repo.source_state(&entry.state)?;
-    if !source.conflicts.is_empty() {
-        return Err(exit(
-            1,
-            format!(
-                "queued state has conflicts: {}",
-                source.conflicts.iter().map(|c| c.path.as_str()).collect::<Vec<_>>().join(", ")
-            ),
-        ));
-    }
-    let mut args = crate::args::Parsed::default();
-    args.values.insert("--expect".into(), vec![entry.state.clone()]);
-    args.flags.insert("-q".into(), 1);
-    merge_rev_inner(ctx, repo, line, &entry.state, &args, Some(&QueuedMerge { entry, expected_head, attempts }))
+) -> (Result<i32>, Option<serde_json::Value>) {
+    let run_probes = match crate::probes::queue_enabled(repo) {
+        Ok(enabled) => enabled,
+        Err(error) => return (Err(error), None),
+    };
+    let queue = QueuedMerge { entry, expected_head, attempts, run_probes, probes: Default::default() };
+    let result = (|| {
+        let source = repo.source_state(&entry.state)?;
+        if !source.conflicts.is_empty() {
+            return Err(exit(
+                1,
+                format!(
+                    "queued state has conflicts: {}",
+                    source.conflicts.iter().map(|c| c.path.as_str()).collect::<Vec<_>>().join(", ")
+                ),
+            ));
+        }
+        let mut args = crate::args::Parsed::default();
+        args.values.insert("--expect".into(), vec![entry.state.clone()]);
+        args.flags.insert("-q".into(), 1);
+        merge_rev_inner(ctx, repo, line, &entry.state, &args, Some(&queue))
+    })();
+    (result, queue.probes.into_inner())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -485,7 +513,7 @@ fn finish_queued(
     queue: Option<&QueuedMerge<'_>>,
 ) -> Result<Vec<changes::Change>> {
     let data = match queue {
-        Some(q) => match super::queue::complete_data(repo, q.entry, new_head, q.attempts, data) {
+        Some(q) => match super::queue::complete_data(repo, q.entry, new_head, q.attempts, q.probes.borrow().clone(), data) {
             Ok(data) => data,
             Err(error) => {
                 repo.discard_states(&states);
@@ -574,6 +602,12 @@ fn merge_rev_inner(
     let up_to_date = theirs == head || repo.is_ancestor(&theirs, &head)?;
     if up_to_date && theirs_line.as_ref().map(|t| repo.layers(t).map(|v| v.is_empty())).transpose()?.unwrap_or(true) {
         if queue.is_some() {
+            let _relock = if queue.is_some_and(|q| q.run_probes) {
+                drop(lock);
+                Some(run_line_checks(ctx, repo, &line, &head, &head, &[], true, queue)?.0)
+            } else {
+                None
+            };
             finish_queued(
                 ctx,
                 repo,
@@ -594,7 +628,7 @@ fn merge_rev_inner(
     }
     let (st, _scan, _it, _idx) = repo.status(&line)?;
     if !st.staged.is_empty() {
-        return Err(exit(1, "error: you have staged changes; commit or stash them before merging."));
+        return Err(exit(1, "error: you have staged changes; save or park them before merging."));
     }
     let mut local = local_paths(repo, &line, &st)?;
     let quiet = a.has("-q");
@@ -652,12 +686,13 @@ fn merge_rev_inner(
     }
     let ff = repo.is_ancestor(&head, &theirs)?;
     let mut _relock = None;
+    let run_probes = queue.is_some_and(|q| q.run_probes);
     if ff && !a.has("--no-ff") && !a.has("--squash") {
         check_paths(ctx, repo, &line, rule.as_ref(), &head, &theirs)?;
         check_approvals(ctx, repo, &line, rule.as_ref(), &head, &theirs)?;
-        if !checks.is_empty() {
+        if !checks.is_empty() || run_probes {
             drop(lock);
-            let (l, paths) = run_line_checks(ctx, repo, &line, &head, &theirs, &checks, quiet)?;
+            let (l, paths) = run_line_checks(ctx, repo, &line, &head, &theirs, &checks, quiet, queue)?;
             _relock = Some(l);
             local = paths;
         }
@@ -709,7 +744,7 @@ fn merge_rev_inner(
         ovl.discard(repo);
         return Err(e);
     }
-    if !checks.is_empty() {
+    if !checks.is_empty() || run_probes {
         if nconf > 0 {
             repo.discard_states(&states);
             ovl.discard(repo);
@@ -725,7 +760,7 @@ fn merge_rev_inner(
         rec.data = serde_json::json!({"line": line.id, "theirs": theirs});
         repo.commit_record(ctx, rec)?;
         drop(lock);
-        let (l, paths) = run_line_checks(ctx, repo, &line, &head, &sid, &checks, quiet)?;
+        let (l, paths) = run_line_checks(ctx, repo, &line, &head, &sid, &checks, quiet, queue)?;
         _relock = Some(l);
         local = paths;
     }
@@ -748,7 +783,7 @@ fn merge_rev_inner(
     if nconf > 0 {
         outln!(
             ctx,
-            "Automatic merge left {nconf} conflict(s) in state {}: fix them, then 'layr add' and 'layr commit'.",
+            "Automatic merge left {nconf} conflict(s) in state {}: fix them, then 'layr add' and 'layr save -m <message>'.",
             ids::short(&sid)
         );
         return Ok(1);
@@ -762,7 +797,8 @@ fn merge_rev_inner(
 
 fn pick(ctx: &Ctx, args: &[String], revert: bool) -> Result<i32> {
     let spec = Spec::new()
-        .flag("-n|--no-commit")
+        .flag("-n|--no-save")
+        .removed("--no-commit", "--no-save")
         .flag("-x")
         .flag("--no-edit")
         .flag("--abort")
@@ -778,7 +814,7 @@ fn pick(ctx: &Ctx, args: &[String], revert: bool) -> Result<i32> {
         return super::admin::undo_last_of(ctx, repo, &line, &[if revert { "revert" } else { "cherry-pick" }]);
     }
     if a.pos.is_empty() {
-        return Err(exit(128, "usage: layr cherry-pick <rev>..."));
+        return Err(exit(128, if revert { "usage: layr invert <rev>..." } else { "usage: layr pick <rev>..." }));
     }
     let mut picks = Vec::new();
     for r in &a.pos {
@@ -796,7 +832,7 @@ fn pick(ctx: &Ctx, args: &[String], revert: bool) -> Result<i32> {
     let mut line = repo.line(&line.id)?;
     let (st, _scan, _it, _idx) = repo.status(&line)?;
     if !st.staged.is_empty() {
-        return Err(exit(1, "error: you have staged changes; commit or stash them first."));
+        return Err(exit(1, "error: you have staged changes; save or park them first."));
     }
     let local = st.local_paths();
     let mut code = 0;
@@ -810,9 +846,9 @@ fn pick(ctx: &Ctx, args: &[String], revert: bool) -> Result<i32> {
         let (base, theirs) = if revert { (p.clone(), parent.clone()) } else { (parent.clone(), p.clone()) };
         let subject = c.message.lines().next().unwrap_or("").to_string();
         let message = if revert {
-            format!("Revert \"{subject}\"\n\nThis reverts state {}.", ids::display(&p))
+            format!("Invert \"{subject}\"\n\nThis inverts state {}.", ids::display(&p))
         } else if a.has("-x") {
-            format!("{}\n\n(cherry picked from state {})", c.message, ids::display(&p))
+            format!("{}\n\n(picked from state {})", c.message, ids::display(&p))
         } else {
             c.message.clone()
         };
@@ -844,8 +880,8 @@ fn pick(ctx: &Ctx, args: &[String], revert: bool) -> Result<i32> {
         if n > 0 {
             outln!(
                 ctx,
-                "{} {label} left {n} conflict(s) in state {}: fix them and commit.",
-                if revert { "Revert of" } else { "Cherry-pick of" },
+                "{} {label} left {n} conflict(s) in state {}: fix them and save.",
+                if revert { "Invert of" } else { "Pick of" },
                 ids::short(&sid)
             );
             code = 1;
@@ -871,10 +907,11 @@ pub fn rebase(ctx: &Ctx, args: &[String]) -> Result<i32> {
         .flag("--continue")
         .flag("-i|--interactive")
         .flag("-q|--quiet")
-        .flag("--autostash");
+        .flag("--autopark")
+        .removed("--autostash", "--autopark");
     let a = parse(&spec, args)?;
     if a.has("-i") {
-        return Err(exit(1, "interactive rebase is not supported"));
+        return Err(exit(1, "interactive replay is not supported"));
     }
     let h = here(ctx)?;
     let line = h.line()?.clone();
@@ -883,9 +920,9 @@ pub fn rebase(ctx: &Ctx, args: &[String]) -> Result<i32> {
         return super::admin::undo_last_of(ctx, repo, &line, &["rebase"]);
     }
     if a.has("--continue") {
-        return Err(exit(1, "layr rebase never stops on a conflict: fix the files and run 'layr commit'."));
+        return Err(exit(1, "layr replay never stops on a conflict: fix the files and run 'layr save -m <message>'."));
     }
-    let up = a.pos.first().ok_or_else(|| exit(128, "usage: layr rebase [--onto <newbase>] <upstream>"))?;
+    let up = a.pos.first().ok_or_else(|| exit(128, "usage: layr replay [--onto <newbase>] <upstream>"))?;
     let upstream = revs::resolve(repo, Some(&line), up)?;
     let onto = match a.get("--onto") {
         Some(o) => revs::resolve(repo, Some(&line), o)?,
@@ -895,7 +932,7 @@ pub fn rebase(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let line = repo.line(&line.id)?;
     let (st, _scan, _it, _idx) = repo.status(&line)?;
     if !st.clean() {
-        return Err(exit(1, "error: cannot rebase: you have unstaged or staged changes.\nPlease commit or stash them."));
+        return Err(exit(1, "error: cannot replay: you have unstaged or staged changes.\nPlease save or park them."));
     }
     let base = repo.merge_base(&line.head, &upstream)?.ok_or_else(|| exit(128, "fatal: no common ancestor"))?;
     if repo.is_ancestor(&upstream, &line.head)? && onto == upstream {
@@ -943,12 +980,12 @@ pub fn rebase(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if conflicts > 0 {
         outln!(
             ctx,
-            "Rebased {} state(s) onto {} with {conflicts} conflict(s): fix them and commit.",
+            "Replayed {} state(s) onto {} with {conflicts} conflict(s): fix them and save.",
             states.len(),
             ids::short(&onto)
         );
         return Ok(1);
     }
-    outln!(ctx, "Successfully rebased {} onto {}.", line.name, ids::short(&onto));
+    outln!(ctx, "Successfully replayed {} onto {}.", line.name, ids::short(&onto));
     Ok(0)
 }

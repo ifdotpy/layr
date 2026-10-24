@@ -45,7 +45,7 @@ fn read(p: &Project) -> Result<Option<Journal>> {
         return Ok(None);
     }
     let file = crate::tree::Tree::open(&p.meta_dir())?.open_read("apfs-index-commit.json")?;
-    let j: Journal = serde_json::from_reader(file.take(65536)).context("read APFS index commit journal")?;
+    let j: Journal = serde_json::from_reader(file.take(65536)).context("read APFS index state journal")?;
     if j.version != 1
         || j.project != p.id
         || !model::is_uuid(&j.line)
@@ -53,7 +53,7 @@ fn read(p: &Project) -> Result<Option<Journal>> {
         || !model::is_uuid(&j.subvol)
         || j.mode & !0o7777 != 0
     {
-        bail!("invalid APFS index commit journal");
+        bail!("invalid APFS index state journal");
     }
     Ok(Some(j))
 }
@@ -74,7 +74,7 @@ fn target(p: &Project, j: &Journal) -> PathBuf {
 fn verify_tree(path: &Path, j: &Journal) -> Result<()> {
     let m = fs::symlink_metadata(path)?;
     if !m.is_dir() || m.dev() != j.device || m.ino() != j.inode || storage::subvol_info(path)?.uuid != j.subvol {
-        bail!("APFS index commit tree changed: {}", path.display());
+        bail!("APFS index state tree changed: {}", path.display());
     }
     Ok(())
 }
@@ -113,11 +113,11 @@ pub fn recover(p: &Project) -> Result<()> {
     let state = target(p, &j);
     if let Some(rec) = p.db.state(&j.state)? {
         if rec.subvol != j.subvol || rec.line.as_deref() != Some(&j.line) || exists(&stage)? {
-            bail!("APFS index commit record does not match its journal");
+            bail!("APFS index state record does not match its journal");
         }
         verify_tree(&state, &j)?;
         if !storage::subvol_info(&state)?.readonly {
-            bail!("committed APFS index is not immutable");
+            bail!("saved APFS index is not immutable");
         }
         remove_if_present(&stage.with_extension("base"))?;
         sync_parent(&stage)?;
@@ -129,7 +129,7 @@ pub fn recover(p: &Project) -> Result<()> {
                 storage::set_writable(&state)?;
                 move_tree(&state, &stage, j.mode)?;
             }
-            _ => bail!("cannot recover APFS index commit: expected exactly one copy of the index"),
+            _ => bail!("cannot recover APFS index state: expected exactly one copy of the index"),
         }
         // This also handles interruption while sealing or restoring the index.
         storage::set_writable(&stage)?;
@@ -152,7 +152,7 @@ impl<'p, 's> IndexCommit<'p, 's> {
     pub fn prepare(project: &'p Project<'s>, line: &str) -> Result<Self> {
         let _t = crate::trace::span("APFS promote index");
         if !model::is_uuid(line) || pending(project)? {
-            bail!("APFS index commit requires a valid line and no pending journal");
+            bail!("APFS index state requires a valid line and no pending journal");
         }
         let stage = project.stage_path(line);
         let m = fs::symlink_metadata(&stage)?;
@@ -184,7 +184,7 @@ impl<'p, 's> IndexCommit<'p, 's> {
 
     pub fn finish(mut self) -> Result<()> {
         if self.project.db.state(&self.id)?.is_none() {
-            bail!("APFS index commit has no committed record");
+            bail!("APFS index state has no saved record");
         }
         recover(self.project)?;
         self.active = false;

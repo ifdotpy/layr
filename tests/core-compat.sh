@@ -16,10 +16,10 @@ c=sqlite3.connect(sys.argv[1])
 print(hashlib.sha256(''.join(x[0] for x in c.execute("select raw from records order by machine,seq")).encode()).hexdigest())
 PY
 )
-eq 'old states resolve without ChangeId' "$STATE" "$(l rev-parse HEAD)"
-eq 'old approvals migrate' 1 "$(l attestations HEAD --kind approval --json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')"
-eq 'old checks migrate' 1 "$(l attestations HEAD --kind check --json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')"
-eq 'old withdrawals migrate' 1 "$(l attestations HEAD --kind revoke --json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')"
+eq 'old states resolve without ChangeId' "$STATE" "$(l rev-parse head)"
+eq 'old approvals migrate' 1 "$(l attestations head --kind approval --json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')"
+eq 'old checks migrate' 1 "$(l attestations head --kind check --json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')"
+eq 'old withdrawals migrate' 1 "$(l attestations head --kind revoke --json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')"
 NEW_SIG=$(python3 - "$DB" <<'PY'
 import hashlib,sqlite3,sys
 c=sqlite3.connect(sys.argv[1])
@@ -28,14 +28,14 @@ PY
 )
 eq 'migration preserves every signed byte' "$OLD_SIG" "$NEW_SIG"
 "$OLD_LAYR" approve -q HEAD
-eq 'later legacy records also migrate' 2 "$(l attestations HEAD --kind approval --json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')"
-l approve -q --withdraw HEAD
+eq 'later legacy records also migrate' 2 "$(l attestations head --kind approval --json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')"
+l approve -q --withdraw head
 no 'the old binary sees new withdrawals' "$OLD_LAYR" approvals HEAD
-l approve -q HEAD
+l approve -q head
 ok 'the old binary reads new approvals' "$OLD_LAYR" approvals HEAD
 ok 'the old binary verifies new records' "$OLD_LAYR" fsck
-l commit --allow-empty -qm new
-NEW=$(l rev-parse HEAD)
+l save --allow-empty -qm new
+NEW=$(l rev-parse head)
 eq 'the old binary reads a new ordinary state' "$NEW" "$("$OLD_LAYR" rev-parse HEAD)"
 "$OLD_LAYR" commit --allow-empty -qm old
 ok 'the new binary accepts a later legacy state' l fsck

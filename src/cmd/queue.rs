@@ -52,12 +52,36 @@ fn target(repo: &Repo, entry: &QueueEntry) -> Result<crate::model::Line> {
 fn print_entry(ctx: &Ctx, entry: &QueueEntry) {
     outln!(
         ctx,
-        "{}\t{}\t{}\t{}{}",
+        "{}\t{}\t{}\t{}{}{}",
         entry.id,
         entry.status,
         entry.into,
         entry.state,
-        entry.reason.as_ref().map(|r| format!("\t{r}")).unwrap_or_default()
+        entry.reason.as_ref().map(|r| format!("\t{r}")).unwrap_or_default(),
+        entry
+            .probes
+            .as_ref()
+            .map(|outcome| {
+                let rows = outcome["probes"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|probe| {
+                        let errors = probe["errors"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .map(|error| {
+                                format!("; {}: {}", error["side"].as_str().unwrap_or(""), error["error"].as_str().unwrap_or(""))
+                            })
+                            .collect::<String>();
+                        format!("{}: {}{errors}", probe["probe"].as_str().unwrap_or(""), probe["status"].as_str().unwrap_or(""))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("\tprobes: {rows}")
+            })
+            .unwrap_or_default()
     );
 }
 
@@ -101,6 +125,7 @@ pub fn queue(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 attempts: 0,
                 result: None,
                 reason: None,
+                probes: None,
             };
             {
                 let _lock = repo.p.lock()?;
@@ -180,6 +205,7 @@ pub fn complete_data(
     entry: &QueueEntry,
     head: &str,
     attempts: u32,
+    probes: Option<serde_json::Value>,
     mut data: serde_json::Value,
 ) -> Result<serde_json::Value> {
     if repo.p.db.queue_entry(&entry.id)?.as_ref() != Some(entry) {
@@ -190,6 +216,7 @@ pub fn complete_data(
     after.result = Some(head.into());
     after.reason = None;
     after.attempts = attempts;
+    after.probes = probes;
     data["queue_change"] =
         serde_json::to_value(QueueChange { id: entry.id.clone(), before: Some(entry.clone()), after: Some(after) })?;
     release_hold(repo, entry, &mut data)?;
@@ -220,11 +247,15 @@ fn run_entries(ctx: &Ctx, repo: &Repo, into: Option<&str>, skip_busy: bool) -> R
         let outcome = loop {
             attempts += 1;
             let line = target(&merge_repo, &entry)?;
-            match super::mergecmd::merge_queued(&merge_ctx, &merge_repo, &line, &entry, &line.head, attempts) {
-                Err(error) if attempts == 1 && error.downcast_ref::<super::mergecmd::TargetMoved>().is_some() => continue,
-                result => break result,
+            let (result, probes) = super::mergecmd::merge_queued(&merge_ctx, &merge_repo, &line, &entry, &line.head, attempts);
+            if attempts == 1
+                && result.as_ref().err().is_some_and(|error| error.downcast_ref::<super::mergecmd::TargetMoved>().is_some())
+            {
+                continue;
             }
+            break (result, probes);
         };
+        let (outcome, probes) = outcome;
         match outcome {
             Ok(0) => {}
             result => {
@@ -240,6 +271,7 @@ fn run_entries(ctx: &Ctx, repo: &Repo, into: Option<&str>, skip_busy: bool) -> R
                 after.status = "failed".into();
                 after.reason = Some(reason);
                 after.attempts = attempts;
+                after.probes = probes;
                 let mut rec = Record::new("queue.result");
                 rec.data = serde_json::json!({"queue_change":QueueChange{id:entry.id.clone(),before:Some(entry.clone()),after:Some(after)}});
                 repo.commit_record(ctx, rec)?;

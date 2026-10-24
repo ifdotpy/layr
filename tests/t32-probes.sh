@@ -81,13 +81,13 @@ FAILED=$(l probe run main --probe failure --json || true)
 ok "failed results retain their exit code and are reused" python3 -c 'import json,sys; r=json.loads(sys.argv[1])[0]; assert r["exit"]==7 and r["reused"]' "$FAILED"
 no "output links cannot read a root-only path" l probe run main --probe link
 no "unknown probes fail clearly" l probe run main --probe absent
-l branch feature main >/dev/null
+l line new feature main >/dev/null
 cd ../feature
 printf 'new\n' > value.txt
 printf '110\n' > metric.txt
 l add -A
-l commit -qm feature
-HEAD=$(l rev-parse HEAD)
+l save -qm feature
+HEAD=$(l rev-parse head)
 CHANGE=$(l change list --json | python3 -c 'import json,sys; v=json.load(sys.stdin); print(next(r["change_id"] for r in v if r["message"]=="feature"))')
 SHOW=$(l change show "$CHANGE" --json)
 has "change show has stored behavior without execution" 'not run' "$SHOW"
@@ -99,15 +99,15 @@ ok "JSON output reports a structural key path" python3 -c 'import json,sys; r=ne
 ok "numeric output reports relative change" python3 -c 'import json,sys; r=next(r for r in json.loads(sys.argv[1])["probes"] if r["probe"]=="metric"); assert r["changes"][0]["changes"][0]["relative_change"]==0.1' "$DELTA"
 SHOW=$(l change show "$CHANGE")
 has "the change includes a Behavior section" 'Behavior' "$SHOW"
-has "the change includes its stored text diff" '+new' "$SHOW"
+has "the change includes its stored text summary" 'out/files/text   +1 −1 lines' "$SHOW"
 UNTOUCHED=$(l ref list derived/probe-v1/ --json)
 l change show "$CHANGE" --json >/dev/null
 l probe diff "$BASE" "$HEAD" >/dev/null
 eq "behavior reads never create probe results" "$UNTOUCHED" "$(l ref list derived/probe-v1/ --json)"
 printf '104\n' > metric.txt
 l add metric.txt
-l commit -qm noise
-QUIET=$(l rev-parse HEAD)
+l save -qm noise
+QUIET=$(l rev-parse head)
 l probe run "$QUIET" --probe metric >/dev/null
 NOISE=$(l probe diff "$BASE" "$QUIET" --json)
 ok "the noise threshold suppresses a four-percent metric change" python3 -c 'import json,sys; r=next(r for r in json.loads(sys.argv[1])["probes"] if r["probe"]=="metric"); assert r["status"]=="unchanged" and not r["changes"]' "$NOISE"
@@ -125,8 +125,8 @@ l overlay use public -q
 printf 'view\n' > value.txt
 l overlay move public value.txt
 l add -A
-l commit -qm view-config
-VIEW_STATE=$(l rev-parse HEAD)
+l save -qm view-config
+VIEW_STATE=$(l rev-parse head)
 VIEW_CHANGE=$(l change list --json | python3 -c 'import json,sys; print(next(r["change_id"] for r in json.load(sys.stdin) if r["message"]=="view-config"))')
 VIEW=$(l view save --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["view_id"])')
 VIEW_RUN=$(l probe run "views/$VIEW" --probe files --json)
@@ -146,7 +146,7 @@ l config retention.hours 0
 l config undo.days 0
 printf 'collect me\n' > source-only.txt
 l save -q
-AUTO=$(l rev-parse 'HEAD@{0}')
+AUTO=$(l rev-parse 'head@{0}')
 l reset --hard "$AUTO" >/dev/null
 COLLECT_VIEW=$(l view save --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["view_id"])')
 l probe run "views/$COLLECT_VIEW" --probe files --json >/dev/null

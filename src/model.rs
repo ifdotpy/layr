@@ -30,11 +30,11 @@ pub struct Conflict {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum StateKind {
-    /// A commit: a named state with a message.
+    /// A named state with a message.
     Commit,
     /// An automatic snapshot of a line's working content (an undo point).
     Auto,
-    /// Saved work of `layr stash`.
+    /// Saved work of `layr park`.
     Stash,
     /// A state made from a git commit of the remote.
     Import,
@@ -142,6 +142,8 @@ pub struct QueueEntry {
     pub result: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probes: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -251,7 +253,7 @@ pub struct Line {
 // ----- checks of records that come from other machines -----
 
 pub fn is_uuid(s: &str) -> bool {
-    s.len() == 36 && uuid::Uuid::parse_str(s).map(|u| u.hyphenated().to_string() == s).unwrap_or(false)
+    layr_store::format::is_uuid(s)
 }
 
 pub fn is_name(s: &str) -> bool {

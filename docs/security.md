@@ -69,3 +69,82 @@ its record and the derived rows. After a crash only a snapshot without a record 
 `layr fsck --repair` deletes it. Derived rows keep the order key of their record, so a rebuild
 (`layr reindex`) gives the same result as incremental imports.
 
+
+## Person keys
+
+A person identity is an age X25519 identity.
+A paper key contains 24 BIP39 words and opens the encrypted person slot.
+BIP39 means Bitcoin Improvement Proposal 39.
+The local files contain the public recipient and encrypted slots.
+The store slot `slots/person-<login>-<fp>.age` contains the store identity encrypted to the person's recipient.
+The store identity must match the recipient in the store descriptor.
+
+The person index uses the Desk v1 format and message authentication code (MAC).
+Its first line is `layr-desk person index v1`.
+The next line contains the MAC in lowercase hexadecimal form.
+The remaining bytes contain the JSON body.
+The MAC key is HMAC-SHA256 of the header, with the person's X25519 secret as its key.
+HMAC means hash-based message authentication code.
+The outer MAC covers the exact JSON bytes.
+Age encryption alone cannot prove who wrote an index because anyone can encrypt to a public recipient.
+
+Invites contain encrypted pins.
+A pin identifies the project and store recipient.
+An invite must not grant access by itself.
+The person must accept it before the index changes.
+The gateway can serve an older index or hide an invite.
+The MAC detects changes but does not prevent such rollback.
+
+The gateway gets the caller's login from tailscaled whois.
+Client login headers do not grant access.
+A store with person slots returns HTTP 404 to logins without a slot.
+A valid store read token still proves the store identity until it expires.
+Writes from pages of other sites are refused.
+Keys and credentials come from files or the environment.
+Paper keys must never go to executor machines.
+
+For v2 stores, `fp` is the first 16 hexadecimal characters of SHA-256 of the person recipient string.
+The opener computes this value and reads its exact slot.
+The store creates every slot conditionally and never replaces an object.
+Old person keys retain access to data that they could already read.
+Desk v1 import reads `slots/person-<login>.age`.
+
+An old person slot stays in the store. It opens the store for the old key until the store key changes (a new store recipient).
+
+## Overlay remote keys
+
+Each overlay has a separate age layer identity for each store remote and epoch.
+The store identity cannot decrypt overlay records or file objects.
+The signed `overlay.key` record binds the layer recipient to the overlay ID, parent project ID and store recipient.
+Readers verify the signature with a trusted parent machine key before they use the recipient.
+The same exact record remains in the encrypted overlay log.
+
+Machine slots use keys from the project's trust records.
+Person readers explicitly bind their login to their age recipient in the signed readers record.
+Their slot is `overlays/<id>/epochs/<epoch>/slots/person-<login>-<fp>.age`.
+The fingerprint follows the v2 person slot rule in this document.
+Local user and group readers do not get store slots.
+The owner paper slot uses the public opener recipient from the local store pin.
+No pin, record or log holds a private identity, paper key or credential.
+The local layer key cache contains only a machine-encrypted identity.
+
+Reader removal causes the next push to create a new epoch and identity.
+The new epoch contains slots for the remaining readers only.
+Earlier objects remain unchanged. A removed reader can still read data copied earlier.
+A fetch without a slot leaves that overlay local and imports the shared files.
+A peer service applies signed overlay reader policy across machines.
+Other project policy remains local to each machine.
+Root on a peer can read its disk, so `overlay.<name>.peers` limits which machines receive plaintext overlays.
+
+Only key managers can sign layer key and readers records.
+The creator machine is the first manager.
+Use `layr overlay managers <name> machine:<id>...` to select the manager machines.
+A remaining manager must sign removal of another manager.
+The parent project carries exact signed manager proofs so machines without a layer key can verify authority.
+Transitions preserve hashes of already authorized key and readers records.
+A removed manager cannot replace those records or authorize a new recipient.
+A trusted project writer that is not a manager can upload encrypted data but cannot change overlay key authority.
+
+Use two manager machines.
+If every manager machine is lost, the overlay key cannot change.
+Create a new overlay and move the files in that case.

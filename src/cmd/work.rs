@@ -164,7 +164,7 @@ pub fn status(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let head = h.repo.state(&line.head)?;
     if !head.conflicts.is_empty() && !st.conflicts.is_empty() {
-        outln!(ctx, "You have unmerged paths.\n  (fix conflicts and run \"layr commit\")\n");
+        outln!(ctx, "You have unmerged paths.\n  (fix conflicts and run \"layr save -m <message>\")\n");
     }
     let staged: Vec<&Change> = st.staged.iter().filter(|c| matches(&specs, &c.path) && !conflicted.contains(&c.path)).collect();
     let unstaged: Vec<&Change> =
@@ -184,7 +184,7 @@ pub fn status(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
     };
     if !staged.is_empty() {
-        outln!(ctx, "Changes to be committed:\n  (use \"layr restore --staged <file>...\" to unstage)");
+        outln!(ctx, "Changes to be saved:\n  (use \"layr restore --staged <file>...\" to unstage)");
         for c in &staged {
             outln!(ctx, "\t{}", label(c));
         }
@@ -192,14 +192,14 @@ pub fn status(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let moves: Vec<(String, String)> = h.repo.pending_moves(&line).into_iter().filter(|(p, _)| matches(&specs, p)).collect();
     if !moves.is_empty() {
-        outln!(ctx, "Moves to overlays (the next commit):");
+        outln!(ctx, "Moves to overlays (the next state):");
         for (p, o) in &moves {
             outln!(ctx, "\t{o}: {}", h.rel(p));
         }
         outln!(ctx);
     }
     if !st.conflicts.is_empty() {
-        outln!(ctx, "Unmerged paths:\n  (fix the files, then \"layr add <file>...\" and \"layr commit\")");
+        outln!(ctx, "Unmerged paths:\n  (fix the files, then \"layr add <file>...\" and \"layr save -m <message>\")");
         for c in &st.conflicts {
             if matches(&specs, &c.path) {
                 let what = match c.kind.as_str() {
@@ -215,14 +215,14 @@ pub fn status(ctx: &Ctx, args: &[String]) -> Result<i32> {
         outln!(ctx);
     }
     if !unstaged.is_empty() {
-        outln!(ctx, "Changes not staged for commit:\n  (use \"layr add <file>...\" to update what will be committed)\n  (use \"layr restore <file>...\" to discard changes in working directory)");
+        outln!(ctx, "Changes not staged for a state:\n  (use \"layr add <file>...\" to update what will be saved)\n  (use \"layr restore <file>...\" to discard changes in working directory)");
         for c in &unstaged {
             outln!(ctx, "\t{}", label(c));
         }
         outln!(ctx);
     }
     if !untracked.is_empty() {
-        outln!(ctx, "Untracked files:\n  (use \"layr add <file>...\" to include in what will be committed)");
+        outln!(ctx, "Untracked files:\n  (use \"layr add <file>...\" to include in what will be saved)");
         for u in &untracked {
             outln!(ctx, "\t{}", h.rel(u));
         }
@@ -237,11 +237,11 @@ pub fn status(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     if staged.is_empty() {
         if !unstaged.is_empty() {
-            outln!(ctx, "no changes added to commit (use \"layr add\" and/or \"layr commit -a\")");
+            outln!(ctx, "no changes added to a state (use \"layr add\" and/or \"layr save -a -m <message>\")");
         } else if !untracked.is_empty() {
-            outln!(ctx, "nothing added to commit but untracked files present (use \"layr add\" to track)");
+            outln!(ctx, "nothing added to a state but untracked files present (use \"layr add\" to track)");
         } else if st.conflicts.is_empty() {
-            outln!(ctx, "nothing to commit, working tree clean");
+            outln!(ctx, "nothing to save, working tree clean");
         }
     }
     Ok(0)
@@ -771,7 +771,7 @@ pub fn commit(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let stacked = h.repo.is_stacked(&line)?;
     if a.has("--amend") {
         if stacked {
-            return Err(exit(1, "error: --amend is not available in a line with overlays yet; make a new commit"));
+            return Err(exit(1, "error: --amend is not available in a line with overlays yet; make a new state"));
         }
         // The amended state replaces the head: the line's history changes.
         h.repo.authorize_line(ctx, &line, crate::repo::LineOp::Rewrite)?;
@@ -781,7 +781,7 @@ pub fn commit(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let message = message.trim_end().to_string();
     if message.is_empty() {
-        return Err(exit(1, "Aborting commit due to empty commit message (use -m <message>)."));
+        return Err(exit(1, "Cannot save a state with an empty message (use -m <message>)."));
     }
     // In a line with overlays the owner commits; a change of the shared set also needs the line's
     // rule (commit_layers checks it), so a protected line takes commits of its overlays only.
@@ -800,15 +800,15 @@ pub fn commit(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let (st2, _s2, _i2, _x2) = h.repo.status(line)?;
         outln!(ctx, "On line {}", line.name);
         if !st2.unstaged.is_empty() {
-            outln!(ctx, "Changes not staged for commit:");
+            outln!(ctx, "Changes not staged for a state:");
             for c in &st2.unstaged {
                 outln!(ctx, "\tmodified:   {}", h.rel(&c.path));
             }
-            outln!(ctx, "\nno changes added to commit (use \"layr add\" and/or \"layr commit -a\")");
+            outln!(ctx, "\nno changes added to a state (use \"layr add\" and/or \"layr save -a -m <message>\")");
         } else if !st2.untracked.is_empty() {
-            outln!(ctx, "nothing added to commit but untracked files present (use \"layr add\" to track)");
+            outln!(ctx, "nothing added to a state but untracked files present (use \"layr add\" to track)");
         } else {
-            outln!(ctx, "nothing to commit, working tree clean");
+            outln!(ctx, "nothing to save, working tree clean");
         }
         Ok(1)
     };
@@ -890,7 +890,7 @@ pub fn commit(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     h.repo.drop_stage(&line)?;
     if !a.has("-q") {
-        let root = if parents_empty(&state) { " (root-commit)" } else { "" };
+        let root = if parents_empty(&state) { " (root-state)" } else { "" };
         outln!(ctx, "[{}{} {}] {}", line.name, root, ids::short(&state.id), message.lines().next().unwrap_or(""));
         let staged = changes::with_renames(&head_root, &new_root, staged);
         print_summary(ctx, &head_root, &new_root, &staged)?;
@@ -1177,10 +1177,10 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     if !paths.is_empty() {
         let specs = h.specs(&paths)?;
-        let src = pos.first().map(|s| s.as_str()).unwrap_or("HEAD");
+        let src = pos.first().map(|s| s.as_str()).unwrap_or("head");
         return restore_impl(ctx, &h, &line, &specs, true, false, Some(src), false, false);
     }
-    let target = revs::resolve(&h.repo, Some(&line), pos.first().map(|s| s.as_str()).unwrap_or("HEAD"))?;
+    let target = revs::resolve(&h.repo, Some(&line), pos.first().map(|s| s.as_str()).unwrap_or("head"))?;
     let (_lock, w) = begin_change(ctx, &h.repo, &line)?;
     let line = h.repo.line(&line.id)?;
     let repo = &h.repo;
@@ -1252,7 +1252,7 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     if mode == "hard" && !a.has("-q") {
         let s = repo.state(&target)?;
-        outln!(ctx, "HEAD is now at {} {}", ids::short(&target), s.message.lines().next().unwrap_or(""));
+        outln!(ctx, "head is now at {} {}", ids::short(&target), s.message.lines().next().unwrap_or(""));
     }
     Ok(0)
 }
@@ -1269,20 +1269,20 @@ pub fn stash(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if repo.is_stacked(&line)? && !matches!(sub, "list" | "show" | "drop" | "clear") {
         return Err(exit(
             1,
-            "error: layr stash is not available in a line with overlays yet; commit the changes or use 'layr save'",
+            "error: layr park is not available in a line with overlays yet; save the changes or use 'layr save'",
         ));
     }
     match sub {
         "list" => {
             for (i, s) in repo.p.db.line_states(&line.id, StateKind::Stash)?.iter().enumerate() {
-                outln!(ctx, "stash@{{{i}}}: {}", s.message);
+                outln!(ctx, "park@{{{i}}}: {}", s.message);
             }
             Ok(0)
         }
         "show" => {
             let spec = Spec::new().flag("-p|--patch").flag("--stat").flag("-u|--include-untracked");
             let a = parse(&spec, &rest)?;
-            let rev = a.pos.first().cloned().unwrap_or_else(|| "stash@{0}".into());
+            let rev = a.pos.first().cloned().unwrap_or_else(|| "park@{0}".into());
             let id = revs::resolve(repo, Some(&line), &rev)?;
             let s = repo.state(&id)?;
             let parent = repo.state_root(&s.parents[0])?;
@@ -1305,7 +1305,7 @@ pub fn stash(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let targets: Vec<(usize, String)> = if sub == "clear" {
                 list.iter().enumerate().map(|(i, s)| (i, s.id.clone())).collect()
             } else {
-                let rev = rest.first().cloned().unwrap_or_else(|| "stash@{0}".into());
+                let rev = rest.first().cloned().unwrap_or_else(|| "park@{0}".into());
                 let id = revs::resolve(repo, Some(&line), &rev)?;
                 let i = list.iter().position(|s| s.id == id).unwrap_or(0);
                 vec![(i, id)]
@@ -1315,13 +1315,13 @@ pub fn stash(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 rec.data = serde_json::json!({"state": id, "line": line.id});
                 repo.commit_record(ctx, rec)?;
                 if sub == "drop" {
-                    outln!(ctx, "Dropped stash@{{{i}}} ({})", ids::short(&id));
+                    outln!(ctx, "Dropped park@{{{i}}} ({})", ids::short(&id));
                 }
             }
             Ok(0)
         }
         "pop" | "apply" => {
-            let rev = rest.iter().find(|r| !r.starts_with('-')).cloned().unwrap_or_else(|| "stash@{0}".into());
+            let rev = rest.iter().find(|r| !r.starts_with('-')).cloned().unwrap_or_else(|| "park@{0}".into());
             let id = revs::resolve(repo, Some(&line), &rev)?;
             let s = repo.state(&id)?;
             let (_lock, w) = begin_change(ctx, repo, &line)?;
@@ -1340,7 +1340,7 @@ pub fn stash(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 ours_id: &line.head,
                 theirs_id: &id,
                 ours_label: "Updated upstream",
-                theirs_label: "Stashed changes",
+                theirs_label: "Parked changes",
                 config: &cfg,
                 run_as: ctx.caller.driver_ids(),
                 allow_root: ctx.caller.is_root(),
@@ -1366,7 +1366,7 @@ pub fn stash(ctx: &Ctx, args: &[String]) -> Result<i32> {
             }
             record_working(ctx, repo, &line, &format!("stash.{sub}"), w)?;
             if !out.conflicts.is_empty() {
-                outln!(ctx, "The stash entry is kept in case you need it again.");
+                outln!(ctx, "The park entry is kept in case you need it again.");
                 return Ok(1);
             }
             if sub == "pop" {

@@ -15,15 +15,15 @@ sample $T/src
 l init s --from $T/src --owner layr-admin -q >/dev/null
 P=$LAYR_ROOT/projects/s/lines
 cd $P/main || exit 1
-echo two >> notes.txt; l commit -qam two
+echo two >> notes.txt; l save -qam two
 # The state folder of a revision (rev-parse prints the display form of the id).
 state_dir() { ls -d $LAYR_ROOT/projects/$1/states/*-$(l --project $1 --line main rev-parse $2 | cut -c1-12); }
-S1=$(basename $(state_dir s HEAD~1))
+S1=$(basename $(state_dir s head~1))
 
 # 3. A stream cannot take its parent from another project.
 mkdir -p $T/vsrc; echo TOPSECRET > $T/vsrc/key.txt
 l init v --from $T/vsrc -q >/dev/null
-V=$(state_dir v HEAD)
+V=$(state_dir v head)
 btrfs -q subvolume snapshot $V $LAYR_ROOT/x-work; echo x > $LAYR_ROOT/x-work/x.txt
 mkdir $LAYR_ROOT/x-ro; btrfs -q subvolume snapshot -r $LAYR_ROOT/x-work $LAYR_ROOT/x-ro/X
 btrfs send -q -p $V $LAYR_ROOT/x-ro/X > $T/foreign.stream
@@ -37,21 +37,21 @@ has "a stream named for another subvolume is refused" "not the subvolume its rec
     "$(l debug receive X 00000000-0000-0000-0000-000000000000 < $T/full.stream 2>&1)"
 
 # 4. Big files are never read whole: diff, show, merge, grep and blame stay within 1 GB of memory.
-truncate -s 2G big.bin; l add big.bin; l commit -qm big
-l branch -q b1
-cd $P/b1 && printf 'theirs' | dd of=big.bin bs=1 seek=100 conv=notrunc 2>/dev/null && l commit -qam b1 && cd $P/main
-printf 'ours' | dd of=big.bin bs=1 seek=5000 conv=notrunc 2>/dev/null; l commit -qam ours
+truncate -s 2G big.bin; l add big.bin; l save -qm big
+l line new -q b1
+cd $P/b1 && printf 'theirs' | dd of=big.bin bs=1 seek=100 conv=notrunc 2>/dev/null && l save -qam b1 && cd $P/main
+printf 'ours' | dd of=big.bin bs=1 seek=5000 conv=notrunc 2>/dev/null; l save -qam ours
 mem() { ( ulimit -v 1000000; "$@" ); }
-eq "diff --stat of a 2 GiB file" " big.bin | Bin 0 -> 2147483648 bytes" "$(mem $LAYR diff --stat HEAD~2 HEAD~1 | head -1)"
-has "diff says binary" "Binary files /dev/null and b/big.bin differ" "$(mem $LAYR diff HEAD~2 HEAD~1)"
-eq "show streams the file" "2147483648" "$(mem $LAYR show HEAD:big.bin | wc -c)"
+eq "diff --stat of a 2 GiB file" " big.bin | Bin 0 -> 2147483648 bytes" "$(mem $LAYR diff --stat head~2 head~1 | head -1)"
+has "diff says binary" "Binary files /dev/null and b/big.bin differ" "$(mem $LAYR diff head~2 head~1)"
+eq "show streams the file" "2147483648" "$(mem $LAYR show head:big.bin | wc -c)"
 eq "merge of a big file is a binary conflict" "1" "$(mem $LAYR merge -q b1 >/dev/null 2>&1; echo $?)"
 has "listed as a conflict" "big.bin" "$(l status -s)"
 eq "grep skips it" "1" "$(mem $LAYR grep -q theirs; echo $?)"
 has "blame refuses it" "larger than 64 MiB" "$(mem $LAYR blame big.bin 2>&1)"
 
 # 5. Tags are set by the admin.
-l branch -q t1 --owner layr-u1
+l line new -q t1 --owner layr-u1
 out=$(cd $P/t1 && as layr-u1 $T/layr tag v-member 2>&1); rc=$?
 eq "a member cannot create a tag" "128" "$rc"
 has "with the reason" "needs the role maintainer" "$out"

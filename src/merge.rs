@@ -179,12 +179,12 @@ impl<'a, 'b> Ctx<'a, 'b> {
             "content" => format!("CONFLICT (content): Merge conflict in {path}"),
             "add/add" => format!("CONFLICT (add/add): Merge conflict in {path}"),
             "modify/delete" => {
-                format!("CONFLICT (modify/delete): {path} deleted in {} and modified in HEAD.", self.i.theirs_label)
+                format!("CONFLICT (modify/delete): {path} deleted in {} and modified in head.", self.i.theirs_label)
             }
             "delete/modify" => {
-                format!("CONFLICT (modify/delete): {path} deleted in HEAD and modified in {}.", self.i.theirs_label)
+                format!("CONFLICT (modify/delete): {path} deleted in head and modified in {}.", self.i.theirs_label)
             }
-            "binary" => format!("CONFLICT (binary): {path} changed on both sides; kept HEAD"),
+            "binary" => format!("CONFLICT (binary): {path} changed on both sides; kept head"),
             k => format!("CONFLICT ({k}): {path}"),
         };
         self.out.messages.push(label);

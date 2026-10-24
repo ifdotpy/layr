@@ -12,6 +12,10 @@ try:
  (src/'.gitignore').write_text('ignored\n');(src/'readonly').chmod(0o444)
  envs=[];works=[]
  def run(i,*args,ok=True):
+  # The baseline binary uses the previous command names.
+  if i == 0:
+   if args[:2] == ('line', 'new'):args = ('branch', *args[2:])
+   elif args[0] == 'save':args = ('commit', *args[1:])
   r=subprocess.run([binaries[i],*args],cwd=works[i],env=envs[i],capture_output=True,text=True)
   assert (r.returncode==0)==ok,(i,args,r.returncode,r.stdout,r.stderr)
   return r
@@ -19,7 +23,7 @@ try:
   envs.append(dict(os.environ,LAYR_ROOT=str(root/f'store{i}'),LAYR_TRACE='1',LAYR_AUTHOR_NAME='Test',LAYR_AUTHOR_EMAIL='test@example.invalid'))
   for key in ('LAYR_SOCKET','LAYR_PROJECT','LAYR_LINE'):envs[i].pop(key,None)
   works.append(root);run(i,'init','test','--from',str(src),'-q');works[i]=root/f'store{i}/projects/test/lines/main'
-  run(i,'branch','-q','topic');works[i]=works[i].parent/'topic'
+  run(i,'line','new','-q','topic');works[i]=works[i].parent/'topic'
  def same(label,*args,ok=True,fallback=False):
   before=run(0,*args,ok=ok);after=run(1,*args,ok=ok)
   assert before.stdout==after.stdout,(label,before.stdout,after.stdout)
@@ -46,7 +50,7 @@ try:
  for w in works:
   (w/'dir').unlink();(w/'dir').mkdir();(w/'dir/new').write_bytes(b'new directory\n')
  same('link to directory','add','-A')
- for i in range(2):run(i,'commit','-qm','selected')
+ for i in range(2):run(i,'save','-qm','selected')
  # A live mmap has no generation proof and must retain the snapshot path.
  handles=[];maps=[]
  try:
@@ -56,7 +60,7 @@ try:
  finally:
   for m in maps:m.close()
   for f in handles:f.close()
- for i in range(2):run(i,'commit','-qm','mapped');run(i,'fsck')
+ for i in range(2):run(i,'save','-qm','mapped');run(i,'fsck')
  print('PASS both histories pass fsck',flush=True)
 finally:
  subprocess.run(['chflags','-R','nouchg',str(root)],check=True);shutil.rmtree(root)

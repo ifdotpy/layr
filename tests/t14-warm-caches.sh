@@ -26,15 +26,15 @@ l --project w access grant layr-u2 maintainer
 l --project w config check.build 'n=$(cat target/count 2>/dev/null || echo 0); echo $((n+1)) > target/count; echo built > target/out; head -c 1048576 /dev/zero > target/big.bin'
 l --project w protect main --check build
 cd /tmp || exit 1
-tip() { in_line $1 $2 rev-parse HEAD; }
+tip() { in_line $1 $2 rev-parse head; }
 
 # 1. Before any build a new line has an empty cache.
-as layr-u1 $L --project w branch -q a1 main
+as layr-u1 $L --project w line new -q a1 main
 eq "an empty cache before any build" "" "$(ls -A $P/a1/target)"
 ok "the cache is a subvolume" sh -c "btrfs subvolume show $P/a1/target >/dev/null"
 
 # 2. The check of a merge into main builds in its copy, but layr does not keep that output.
-cd $P/a1 && as layr-u1 sh -c "echo a > a.txt && $L add a.txt && $L commit -qm a" && cd /tmp
+cd $P/a1 && as layr-u1 sh -c "echo a > a.txt && $L add a.txt && $L save -qm a" && cd /tmp
 ok "merge with its check" in_line layr-u2 main merge -q a1 --expect $(tip layr-u1 a1)
 no "a passing check keeps no build output" sh -c "ls $LAYR_ROOT/projects/w/states | grep -q @target"
 
@@ -46,38 +46,38 @@ eq "the head of main did not move" "$head_before" "$(tip layr-admin main)"
 has "the head of main keeps the build output" "@target" "$(ls $LAYR_ROOT/projects/w/states)"
 
 # 4. A new line from main starts warm, owns its copy, and shares the blocks.
-as layr-u1 $L --project w branch -q a2 main
+as layr-u1 $L --project w line new -q a2 main
 eq "a new line starts warm" "built" "$(cat $P/a2/target/out)"
 eq "its build output belongs to the line owner" "layr-u1" "$(stat -c %U $P/a2/target/big.bin)"
 eq "the copy has no blocks of its own" "0" "$(btrfs filesystem du --raw $P/a2/target/big.bin | awk 'NR==2{print $2}')"
 ok "the owner can change it" as layr-u1 sh -c "echo more >> $P/a2/target/out"
 
 # 5. The next check starts warm, and its output again is not kept.
-cd $P/a2 && as layr-u1 sh -c "echo b > b.txt && $L add b.txt && $L commit -qm b" && cd /tmp
+cd $P/a2 && as layr-u1 sh -c "echo b > b.txt && $L add b.txt && $L save -qm b" && cd /tmp
 ok "second merge" in_line layr-u2 main merge -q a2 --expect $(tip layr-u1 a2)
-as layr-u1 $L --project w branch -q a3 main
+as layr-u1 $L --project w line new -q a3 main
 eq "a new line gets the saved output, not the check's" "1" "$(cat $P/a3/target/count)"
 
 # 6. A user's own build output goes to that user's lines only; a line that is not protected
 #    saves a new state for it, so the head it shares with main gets nothing.
 cd $P/a3 && as layr-u1 sh -c "echo mine > target/mine && $L save -q --caches" && cd /tmp
-as layr-u1 $L --project w branch -q c1 main
+as layr-u1 $L --project w line new -q c1 main
 no "the head of main does not take the caches of another line" test -e $P/c1/target/mine
-in_line layr-u1 a3 branch -q b1 'HEAD@{0}'
+in_line layr-u1 a3 line new -q b1 'head@{0}'
 eq "to the same user it goes" "mine" "$(cat $P/b1/target/mine)"
-in_line layr-u2 a3 branch -q b2 'HEAD@{0}'
+in_line layr-u2 a3 line new -q b2 'head@{0}'
 no "to another user it does not" test -e $P/b2/target/mine
 eq "who gets the shared output of the nearest ancestor instead" "1" "$(cat $P/b2/target/count)"
 
 # 7. gc keeps the caches of line heads and of the newest states only.
 ok "main keeps its build output at its new head" in_line layr-admin main save -q --caches
-as layr-u2 $L --project w branch -q -D a1
+as layr-u2 $L --project w line delete -D -q a1
 l --project w config retention.caches 0
 n_before=$(ls $LAYR_ROOT/projects/w/states | grep -c @)
 l --project w gc -q
 n_after=$(ls $LAYR_ROOT/projects/w/states | grep -c @)
 ok "gc deletes the caches of old states" test "$n_after" -lt "$n_before"
-as layr-u1 $L --project w branch -q a4 main
+as layr-u1 $L --project w line new -q a4 main
 eq "the head of main keeps its cache" "1" "$(cat $P/a4/target/count)"
 
 # 8. Each save --caches on the same head keeps the caches that earlier saves gave it: here a
@@ -113,7 +113,7 @@ eq "the head names both caches, the earlier with its first snapshot" "gen=$(snap
 db drop $head target
 ok "save --caches on a head that an older layr left with fewer caches" in_line layr-admin main save -q --caches
 eq "names the lost cache again" "gen=$(snap_uuid $id@gen) target=$target_uuid" "$(db caches $head)"
-as layr-u1 $L --project w branch -q a5 main
+as layr-u1 $L --project w line new -q a5 main
 eq "a new line from that head takes the earlier cache" "1" "$(cat $P/a5/target/count)"
 eq "and the later one" "g" "$(cat $P/a5/gen/out)"
 finish

@@ -17,6 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 const USAGE: &str = "usage: layr overlay create <name> [--readers <principal>,...] [--mode shared|follow]
        layr overlay list
        layr overlay readers <name> [<principal>...]
+       layr overlay managers <name> [machine:<id>...]
        layr overlay use [--add|--remove] <name>... | --none
        layr overlay move [--purge] <name> <path>... | --cancel [<path>...]
        layr overlay log|show|diff|grep|ls-files|blame <name> [<args>]";
@@ -28,6 +29,7 @@ pub fn overlay(ctx: &Ctx, args: &[String]) -> Result<i32> {
         "create" => create(ctx, &rest),
         "list" => list(ctx, &rest),
         "readers" => readers(ctx, &rest),
+        "managers" => managers(ctx, &rest),
         "use" => use_cmd(ctx, &rest),
         "move" => move_cmd(ctx, &rest),
         "log" | "show" | "diff" | "grep" | "ls-files" | "blame" | "rev-parse" => read(ctx, sub, &rest),
@@ -39,6 +41,21 @@ pub fn overlay(ctx: &Ctx, args: &[String]) -> Result<i32> {
 fn principals(list: &[String]) -> Result<Vec<String>> {
     let mut out = Vec::new();
     for item in list.iter().flat_map(|s| s.split(',')).map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        if let Some(machine) = item.strip_prefix("machine:") {
+            if !crate::model::is_uuid(machine) {
+                return Err(exit(128, "a machine reader needs its UUID"));
+            }
+            out.push(item.to_string());
+            continue;
+        }
+        if let Some(person) = item.strip_prefix("person:") {
+            let (login, recipient) = person.split_once('=').ok_or_else(|| exit(128, "use person:<login>=<age recipient>"))?;
+            if !layr_store::person::login_name(login) || !layr_store::keys::valid_recipient(recipient) {
+                return Err(exit(128, "invalid person reader or recipient"));
+            }
+            out.push(item.to_string());
+            continue;
+        }
         match parse_principal(item) {
             Some(p) => out.push(p),
             None => return Err(exit(128, format!("fatal: unknown user or group '{item}'"))),
@@ -117,7 +134,10 @@ fn create(ctx: &Ctx, args: &[String]) -> Result<i32> {
         orepo.commit_record(ctx, rec)?;
         let mut rec = Record::new("overlay.create");
         let mut cfg = serde_json::Map::new();
-        cfg.insert(format!("overlay.{name}"), serde_json::json!({"owner": owner, "mode": mode.name(), "root": id}));
+        cfg.insert(
+            format!("overlay.{name}"),
+            serde_json::json!({"id":orepo.p.id,"owner": owner, "mode": mode.name(), "root": id}),
+        );
         rec.data = serde_json::json!({"name": name, "config": cfg});
         repo.commit_record(ctx, rec)?;
         Ok(id)
@@ -180,8 +200,86 @@ fn readers(ctx: &Ctx, args: &[String]) -> Result<i32> {
         return Err(exit(1, format!("permission denied: only the owner of overlay '{name}' sets its readers")));
     }
     let list = principals(&a.pos[1..])?;
+    let _parent_lock = h.repo.p.lock()?;
     let _lock = orepo.p.lock()?;
-    crate::cmd::admin::set_config(ctx, &orepo, "access", access_map(info.owner, &list))?;
+    crate::overlay_managers::of(&h.repo, &name)?.require(&ctx.store.machine.id)?;
+    let access = access_map(info.owner, &list);
+    let removed = orepo.policy().access.iter().any(|(principal, role)| *role >= Role::Reader && access.get(principal).is_none());
+    let mut record = Record::new("overlay.readers");
+    record.data = serde_json::json!({"config":{"access":access}});
+    if removed {
+        record.data["config"]["overlay.revocation"] = serde_json::json!(ids::new_id());
+    }
+    orepo.commit_record(ctx, record)?;
+    Ok(0)
+}
+
+fn managers(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    let a = parse(&Spec::new(), args)?;
+    let h = here(ctx)?;
+    let name = a.pos.first().ok_or_else(|| exit(128, USAGE))?;
+    h.repo.need_overlay(name)?;
+    let orepo = h.repo.overlay_repo(name)?;
+    let _parent_lock = h.repo.p.lock()?;
+    let _lock = orepo.p.lock()?;
+    let authority = crate::overlay_managers::of(&h.repo, name)?;
+    if a.pos.len() == 1 {
+        for machine in authority.machines {
+            outln!(ctx, "machine:{machine}");
+        }
+        return Ok(0);
+    }
+    if !orepo.is_admin(ctx) {
+        return Err(exit(1, "only the overlay owner can change key managers"));
+    }
+    authority.require(&ctx.store.machine.id)?;
+    let mut machines = BTreeSet::new();
+    for principal in &a.pos[1..] {
+        let machine = principal
+            .strip_prefix("machine:")
+            .filter(|id| crate::model::is_uuid(id))
+            .ok_or_else(|| exit(128, "use machine:<UUID> for each key manager"))?;
+        if !crate::store_remote::overlays::trusted_keys(&h.repo)?.contains_key(machine) {
+            return Err(exit(1, format!("key manager machine {machine} is not trusted")));
+        }
+        machines.insert(machine.to_string());
+    }
+    if !machines.contains(&ctx.store.machine.id) {
+        return Err(exit(1, "a remaining key manager must sign manager removal"));
+    }
+    let change = crate::overlay_managers::Change {
+        parent: h.repo.p.id.clone(),
+        overlay: orepo.p.id.clone(),
+        name: name.clone(),
+        machines,
+        previous: authority.previous.clone(),
+        retained: crate::overlay_managers::retained(&authority, &orepo)?,
+    };
+    let data = serde_json::to_value(change)?;
+    let mut pending = None;
+    for line in orepo.p.export_jsonl()?.lines() {
+        let record = crate::oplog::parse_line(line, None)?.record;
+        if record.op == "overlay.managers"
+            && record.machine == ctx.store.machine.id
+            && record.data["previous"] == data["previous"]
+        {
+            if record.data["machines"] != data["machines"] {
+                return Err(exit(1, "retry the pending manager change before another change"));
+            }
+            pending = Some(line.to_string());
+        }
+    }
+    let signed = if let Some(signed) = pending {
+        signed
+    } else {
+        let mut record = Record::new("overlay.managers");
+        record.data = data;
+        let record = orepo.p.append(record, &ctx.actor())?;
+        orepo.p.db.record_line(&record.machine, record.seq)?.ok_or_else(|| exit(1, "manager record is missing"))?
+    };
+    let mut parent = Record::new("overlay.authority");
+    parent.data = serde_json::json!({"name":name,"authority":signed});
+    h.repo.commit_record(ctx, parent)?;
     Ok(0)
 }
 
@@ -264,13 +362,15 @@ fn change_stack(ctx: &Ctx, repo: &Repo, line: &crate::model::Line, layers: &[Lay
     }
     let (st, _scan, _it, _idx) = repo.status(line)?;
     if !st.staged.is_empty() {
-        return Err(exit(1, "error: the line has staged changes; commit them or unstage them ('layr restore --staged') first"));
+        return Err(exit(1, "error: the line has staged changes; save them or unstage them ('layr restore --staged') first"));
     }
     for (p, o) in repo.pending_moves(line) {
         if !layers.iter().any(|l| l.overlay == o) {
             return Err(exit(
                 1,
-                format!("error: '{p}' is to move to overlay '{o}' at the next commit; commit first, or 'layr overlay move --cancel {p}'"),
+                format!(
+                    "error: '{p}' is to move to overlay '{o}' at the next state; save first, or 'layr overlay move --cancel {p}'"
+                ),
             ));
         }
     }
@@ -378,7 +478,7 @@ fn move_cmd(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let shared = repo.state_root(&line.head)?;
         let pushed = !repo.p.db.remote_refs()?.is_empty();
         for p in &paths {
-            outln!(ctx, "move to overlay {name} at the next commit: {}", h.rel(p));
+            outln!(ctx, "move to overlay {name} at the next state: {}", h.rel(p));
             if crate::fsutil::lmeta(&shared, p).is_some() {
                 outln!(
                     ctx,

@@ -146,11 +146,16 @@ pub fn print_diffs(ctx: &Ctx, fds: &[FileDiff], o: &DiffOpts) -> bool {
 }
 
 /// Split diff arguments into revisions and paths, as git does without `--`.
-fn split_revs(repo: &Repo, line: Option<&Line>, a: &crate::args::Parsed) -> (Vec<String>, Vec<String>) {
+fn split_revs(repo: &Repo, line: Option<&Line>, a: &crate::args::Parsed) -> Result<(Vec<String>, Vec<String>)> {
     let mut revs = Vec::new();
     let mut paths = a.paths.clone();
     let mut in_paths = false;
     for p in &a.pos {
+        if !in_paths {
+            for part in p.split("..").filter(|part| !part.is_empty()) {
+                revs::reject_old(part.trim_start_matches('.'))?;
+            }
+        }
         if !in_paths && is_rev(repo, line, p) {
             revs.push(p.clone());
         } else {
@@ -158,7 +163,7 @@ fn split_revs(repo: &Repo, line: Option<&Line>, a: &crate::args::Parsed) -> (Vec
             paths.push(p.clone());
         }
     }
-    (revs, paths)
+    Ok((revs, paths))
 }
 
 fn is_rev(repo: &Repo, line: Option<&Line>, s: &str) -> bool {
@@ -176,10 +181,10 @@ pub fn diff(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let h = here(ctx)?;
     let repo = &h.repo;
     let line = h.line.clone();
-    let (revs_v, paths) = split_revs(repo, line.as_ref(), &a);
+    let (revs_v, paths) = split_revs(repo, line.as_ref(), &a)?;
     for rev in &revs_v {
         for part in rev.split("...").flat_map(|s| s.split("..")) {
-            let id = revs::resolve(repo, line.as_ref(), if part.is_empty() { "HEAD" } else { part })?;
+            let id = revs::resolve(repo, line.as_ref(), if part.is_empty() { "head" } else { part })?;
             repo.source_state(&id)?;
         }
     }
@@ -188,7 +193,7 @@ pub fn diff(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let opts = DiffOpts::from(&a, true)?;
     let mut keep: Vec<Temp> = Vec::new();
     let resolve = |r: &str| -> Result<Snap> {
-        let id = revs::resolve(repo, line.as_ref(), if r.is_empty() { "HEAD" } else { r })?;
+        let id = revs::resolve(repo, line.as_ref(), if r.is_empty() { "head" } else { r })?;
         repo.state_src(&id)
     };
     // (old root, new root, new side is the working content, index for tracked check)
@@ -211,8 +216,8 @@ pub fn diff(ctx: &Ctx, args: &[String]) -> Result<i32> {
         1 => {
             let r = &revs_v[0];
             if let Some((x, y)) = r.split_once("...") {
-                let xi = revs::resolve(repo, line.as_ref(), if x.is_empty() { "HEAD" } else { x })?;
-                let yi = revs::resolve(repo, line.as_ref(), if y.is_empty() { "HEAD" } else { y })?;
+                let xi = revs::resolve(repo, line.as_ref(), if x.is_empty() { "head" } else { x })?;
+                let yi = revs::resolve(repo, line.as_ref(), if y.is_empty() { "head" } else { y })?;
                 let b = repo.merge_base(&xi, &yi)?.ok_or_else(|| anyhow::anyhow!("no merge base"))?;
                 (repo.state_src(&b)?, repo.state_src(&yi)?, false)
             } else if let Some((x, y)) = r.split_once("..") {
@@ -340,11 +345,11 @@ pub struct Decor {
 }
 
 impl Decor {
-    pub fn load(repo: &Repo, current: Option<&Line>) -> Result<Decor> {
+    fn load_with_head(repo: &Repo, current: Option<&Line>, head: &str) -> Result<Decor> {
         let mut map: HashMap<String, Vec<String>> = HashMap::new();
         for l in repo.lines()? {
             let name =
-                if current.map(|c| c.id == l.id).unwrap_or(false) { format!("HEAD -> {}", l.name) } else { l.name.clone() };
+                if current.map(|c| c.id == l.id).unwrap_or(false) { format!("{head} -> {}", l.name) } else { l.name.clone() };
             map.entry(l.head.clone()).or_default().push(name);
         }
         for (t, s, _) in repo.p.db.tags()? {
@@ -354,7 +359,7 @@ impl Decor {
             map.entry(s).or_default().push(r);
         }
         for v in map.values_mut() {
-            v.sort_by_key(|x| (!x.starts_with("HEAD"), x.starts_with("tag:"), x.clone()));
+            v.sort_by_key(|x| (!x.starts_with(head), x.starts_with("tag:"), x.clone()));
         }
         Ok(Decor { map })
     }
@@ -469,8 +474,9 @@ pub fn format_state(f: &str, s: &StateRec, decor: &Decor, date_style: &str, tree
     out
 }
 
-fn medium(s: &StateRec, decor: &Decor, date_style: &str, kind_note: bool) -> String {
-    let mut o = format!("commit {}{}\n", ids::display(&s.id), decor.of(&s.id));
+fn medium(s: &StateRec, decor: &Decor, date_style: &str, kind_note: bool, human: bool) -> String {
+    let label = if human { "state" } else { "commit" };
+    let mut o = format!("{label} {}{}\n", ids::display(&s.id), decor.of(&s.id));
     if s.parents.len() > 1 {
         o.push_str(&format!("Merge: {}\n", s.parents.iter().map(|p| ids::short(p)).collect::<Vec<_>>().join(" ")));
     }
@@ -485,7 +491,13 @@ fn medium(s: &StateRec, decor: &Decor, date_style: &str, kind_note: bool) -> Str
                     "automatic state"
                 }
             }
-            StateKind::Stash => "stash",
+            StateKind::Stash => {
+                if human {
+                    "park"
+                } else {
+                    "stash"
+                }
+            }
             StateKind::Import => "imported from git",
             StateKind::Commit => "",
             StateKind::Cache => "cache",
@@ -546,6 +558,7 @@ fn print_state(
     date_style: &str,
     first: bool,
     tree: TreeOf,
+    human: bool,
 ) -> Result<bool> {
     match fmt {
         Some("oneline") => {
@@ -556,9 +569,10 @@ fn print_state(
             if !first {
                 outln!(ctx);
             }
+            let label = if human { "state" } else { "commit" };
             out!(
                 ctx,
-                "commit {}{}\nAuthor: {} <{}>\n\n    {}\n",
+                "{label} {}{}\nAuthor: {} <{}>\n\n    {}\n",
                 ids::display(&s.id),
                 decor.of(&s.id),
                 s.author.name,
@@ -571,14 +585,14 @@ fn print_state(
             if !first {
                 outln!(ctx);
             }
-            ctx.print(&medium(s, decor, date_style, true));
+            ctx.print(&medium(s, decor, date_style, true, human));
             Ok(true)
         }
         Some("raw") => {
             if !first {
                 outln!(ctx);
             }
-            ctx.print(&medium(s, decor, "unix", true));
+            ctx.print(&medium(s, decor, "unix", true, human));
             Ok(true)
         }
         Some(f) => {
@@ -621,10 +635,10 @@ pub fn show(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let line = h.line.clone();
     let mut revs_v: Vec<String> = a.pos.clone();
     if revs_v.is_empty() {
-        revs_v.push("HEAD".into());
+        revs_v.push("head".into());
     }
     let specs = h.specs(&a.paths)?;
-    let decor = Decor::load(repo, line.as_ref())?;
+    let decor = Decor::load_with_head(repo, line.as_ref(), "HEAD")?;
     let date_style = a.get("--date").unwrap_or("default").to_string();
     let fmt = pretty_format(&a);
     let opts = DiffOpts::from(&a, true)?;
@@ -681,8 +695,16 @@ pub fn show(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         let id = revs::resolve(repo, line.as_ref(), &r)?;
         let s = repo.state(&id)?;
-        let header_ends_blank =
-            print_state(ctx, &s, fmt.as_deref(), &decor, &date_style, first, &|id| crate::gitbridge::tree_of(repo, id).ok())?;
+        let header_ends_blank = print_state(
+            ctx,
+            &s,
+            fmt.as_deref(),
+            &decor,
+            &date_style,
+            first,
+            &|id| crate::gitbridge::tree_of(repo, id).ok(),
+            false,
+        )?;
         first = false;
         if a.has("-s") {
             continue;
@@ -752,7 +774,7 @@ pub fn log(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let h = here(ctx)?;
     let repo = &h.repo;
     let line = h.line.clone();
-    let (revs_v, paths) = split_revs(repo, line.as_ref(), &a);
+    let (revs_v, paths) = split_revs(repo, line.as_ref(), &a)?;
     let specs = h.specs(&paths)?;
     let mut include: Vec<String> = Vec::new();
     let mut exclude: BTreeSet<String> = BTreeSet::new();
@@ -764,16 +786,16 @@ pub fn log(ctx: &Ctx, args: &[String]) -> Result<i32> {
     };
     for r in &revs_v {
         if let Some((x, y)) = r.split_once("...") {
-            let xi = revs::resolve(repo, line.as_ref(), if x.is_empty() { "HEAD" } else { x })?;
-            let yi = revs::resolve(repo, line.as_ref(), if y.is_empty() { "HEAD" } else { y })?;
+            let xi = revs::resolve(repo, line.as_ref(), if x.is_empty() { "head" } else { x })?;
+            let yi = revs::resolve(repo, line.as_ref(), if y.is_empty() { "head" } else { y })?;
             include.push(xi.clone());
             include.push(yi.clone());
             if let Some(b) = repo.merge_base(&xi, &yi)? {
                 add_excl(&b)?;
             }
         } else if let Some((x, y)) = r.split_once("..") {
-            let xi = revs::resolve(repo, line.as_ref(), if x.is_empty() { "HEAD" } else { x })?;
-            let yi = revs::resolve(repo, line.as_ref(), if y.is_empty() { "HEAD" } else { y })?;
+            let xi = revs::resolve(repo, line.as_ref(), if x.is_empty() { "head" } else { x })?;
+            let yi = revs::resolve(repo, line.as_ref(), if y.is_empty() { "head" } else { y })?;
             add_excl(&xi)?;
             include.push(yi);
         } else if let Some(x) = r.strip_prefix('^') {
@@ -888,7 +910,7 @@ pub fn log(ctx: &Ctx, args: &[String]) -> Result<i32> {
         picked.truncate(max);
         picked.reverse();
     }
-    let decor = Decor::load(repo, line.as_ref())?;
+    let decor = Decor::load_with_head(repo, line.as_ref(), if a.has("--format") { "HEAD" } else { "head" })?;
     let decor = if a.has("--decorate") || a.get("--format").map(|f| f.contains("%d") || f.contains("%D")).unwrap_or(false) {
         decor
     } else {
@@ -900,8 +922,16 @@ pub fn log(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let want_diff = opts.patch || opts.stat || opts.numstat || opts.name_only || opts.name_status || opts.shortstat;
     let mut first = true;
     for s in &picked {
-        let blank =
-            print_state(ctx, s, fmt.as_deref(), &decor, &date_style, first, &|id| crate::gitbridge::tree_of(repo, id).ok())?;
+        let blank = print_state(
+            ctx,
+            s,
+            fmt.as_deref(),
+            &decor,
+            &date_style,
+            first,
+            &|id| crate::gitbridge::tree_of(repo, id).ok(),
+            !a.has("--format"),
+        )?;
         first = false;
         if want_diff && repo.p.has_state(&s.id) {
             let (old, _t, new, list) = state_changes(repo, s)?;
@@ -967,8 +997,9 @@ pub fn rev_parse(ctx: &Ctx, args: &[String]) -> Result<i32> {
         None => None,
     };
     for r in &a.pos {
+        revs::reject_old(r)?;
         if a.has("--abbrev-ref") || a.has("--symbolic-full-name") {
-            if r == "HEAD" || r == "@" {
+            if r == "head" || r == "@" {
                 let n = h.line()?.name.clone();
                 outln!(ctx, "{}", if a.has("--symbolic-full-name") { format!("refs/heads/{n}") } else { n });
                 continue;
@@ -1082,7 +1113,7 @@ pub fn blame(ctx: &Ctx, args: &[String]) -> Result<i32> {
     };
     let path = h.specs(&[path])?.remove(0);
     // Versions of the file along first parents; the working content when no revision is given.
-    let start = revs::resolve(repo, line.as_ref(), rev.as_deref().unwrap_or("HEAD"))?;
+    let start = revs::resolve(repo, line.as_ref(), rev.as_deref().unwrap_or("head"))?;
     let mut versions: Vec<(Option<StateRec>, Vec<u8>)> = Vec::new();
     // Versions are held in memory: files of at most MAX_TEXT bytes, at most 4 * MAX_TEXT bytes in
     // all. Older history is cut there, and its lines belong to the oldest version read.

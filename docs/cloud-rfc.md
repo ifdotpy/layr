@@ -137,13 +137,13 @@ APFS используется только для сборок, которым �
 - prepared environments и гарантии восстановления;
 - enterprise governance / approvals / SSO / audit / BYO AWS.
 
-Ключевой KPI — **стоимость полученного и проверенного изменения**, а не только число tokens или время операции `branch`.
+Ключевой KPI: **стоимость полученного и проверенного изменения**, а не только число tokens или время операции `line new`.
 
 ### 2.5. Где Layr может дать больше всего пользы [ГИПОТЕЗА]
 
 Метка «основа есть» значит, что нужные примитивы уже есть в Layr. Это не значит, что сценарий готов.
 
-1. **Среды для оценки и обучения (RL) coding-агентов.** Тысячи запусков агента от одного точного состояния, каждый с чистой копией и тёплыми caches; результат каждого запуска является state для diff и сравнения. Сейчас для этого используют `git clean`, Docker layers или копирование. Основа есть: `branch` (180–280 ms на 200 000 files, 10.1), caches, `diff`.
+1. **Среды для оценки и обучения (RL) coding-агентов.** Тысячи запусков агента от одного точного состояния, каждый с чистой копией и тёплыми caches; результат каждого запуска является state для diff и сравнения. Сейчас для этого используют `git clean`, Docker layers или копирование. Основа есть: `line new` (180 to 280 ms на 200 000 files, 10.1), caches, `diff`.
 2. **Best-of-N.** N агентов решают одну задачу от одного state, checks выбирают лучший результат, merge queue (фаза 2D) вливает его. Замер: 16 веток с приватными caches занимают 153 MiB против 2508 MiB у Git с полными копиями (10.1). Основа есть; выбор результата делает Studio.
 3. **Машина времени для сессии агента.** Каждый tool call является state (5.5). `bisect` по auto states находит вызов, который сломал сборку; сессию можно повторить с любого шага. Основа есть: `save`, `diff`, `undo`. Команды `bisect` нет.
 4. **Безопасный запуск опасных команд.** Миграции, `npm install`, codemods и удаление файлов агент выполняет в `layr try`; результат применяется только после checks. Основа есть: `try <state> -- <cmd>`.
@@ -167,7 +167,7 @@ APFS используется только для сборок, которым �
 | Сломанный `main` | Семантический конфликт: два PR проходят CI по отдельности и ломают `main` вместе; «branch up to date» даёт бесконечные rebase | Merge queue на точном view, повтор checks по `ExecutionKey` (фаза 2D) | Нет |
 | Кэш CI | GitHub Actions: 10 GB на репозиторий, 7 дней, LRU раз в час, предупреждение о cache thrashing; 98.5% организаций используют checkout по умолчанию (Depot) | CI берёт state с тёплыми caches вместо checkout и install | Remote (этап 1) |
 | Flaky tests | Atlassian: около 150 000 часов в год; Google: 84% переходов pass→fail связаны с flaky tests | Точный state сбоя для повтора | Flakiness Layr не лечит |
-| Монорепозитории | TikTok: clone 23 минуты, `status` 7 секунд до Sparo | Локально `status` около 20 ms на 200 000 файлов, branch 180–280 ms (10.1) | Первый clone платит за передачу |
+| Монорепозитории | TikTok: clone 23 минуты, `status` 7 секунд до Sparo | Локально `status` около 20 ms на 200 000 файлов, line new 180 to 280 ms (10.1) | Первый clone платит за передачу |
 | Большие бинарные файлы | Git плохо подходит для assets; сильных данных о переходе с Perforce не найдено | CoW для больших файлов | File locking, формат remote для больших файлов |
 | Sandboxes и RL environments | E2B: fork до 20 копий за вызов; Morph продаёт snapshot и branch. TechCrunch: руководители Anthropic обсуждали более $1 млрд на RL environments | Fork ФС с тёплыми caches дешевле snapshot VM | Память процессов не сохраняется: Layr дополняет sandbox |
 
@@ -219,7 +219,7 @@ View = compose(ordered_states)
 
 Важно различать:
 - `StateId`: immutable snapshot одного слоя/дерева (или идентификатор записанной операции в существующем Layr). `kind` различает commit, auto, stash, import, cache и derived.
-- `ChangeId`: стабильный идентификатор логического изменения. Он не меняется после `commit --amend`, rebase и merge с новым `main`; новая версия изменения получает новый `StateId` с тем же `ChangeId`. Так ревью, обсуждения и attestations связывают версии одного изменения. Пример: Jujutsu и Gerrit Change-Id. `ChangeId` записан в manifest state (6.4), но не заменяет точный `ViewId` в approval.
+- `ChangeId`: стабильный идентификатор логического изменения. Он не меняется после `save --amend`, replay и merge с новым `main`; новая версия изменения получает новый `StateId` с тем же `ChangeId`. Так ревью, обсуждения и attestations связывают версии одного изменения. Пример: Jujutsu и Gerrit Change-Id. `ChangeId` записан в manifest state (6.4), но не заменяет точный `ViewId` в approval.
 - `ViewId`: комбинация версий, порядка слоёв и правил разрешения конфликтов.
 - Line: mutable рабочая папка, привязанная к одному view и имеющая собственные изменения (прежнее имя в RFC: `WorkspaceId`).
 - `ExecutionKey`: хеш входов запуска (input ViewId, toolchain image digest, commands, declared inputs). Это ключ кэша результатов, как action key в Bazel. Он не доказывает повторяемость.
@@ -254,7 +254,7 @@ View = compose(ordered_states)
 Опубликованный state должен иметь:
 - immutable inputs и signed manifest;
 - snapshot isolation для читающего/тестирующего процесса;
-- optimistic concurrency и CAS для обновления branch refs;
+- optimistic concurrency и CAS для обновления line refs;
 - атомарную публикацию **логического manifest** набора слоёв;
 - декларацию write/read sets по возможности и explicit conflict resolution;
 - повторяемость операций после crash с idempotency keys.
@@ -303,7 +303,7 @@ Base state ──┬── Agent A → State A ──┐
 - Layr запускает команду в слитом дереве, если на любой стороне изменился вход или сам производный файл. Построчный merge производного файла не выполняется.
 - Команда работает как вызывающий пользователь, в приватной копии, по тем же правилам, что command drivers и `merge-verify`.
 - Если команда завершилась ошибкой: конфликт в state, производный файл остаётся версии ours (как при ошибке `merge-verify`).
-- То же правило работает в rebase, cherry-pick и merge queue (фаза 2D).
+- То же правило работает в replay, pick и merge queue (фаза 2D).
 
 **Открытые вопросы:**
 - Сеть: `npm install --package-lock-only` обращается к registry. Нужно правило для сети и кэша registry.
@@ -312,13 +312,13 @@ Base state ──┬── Agent A → State A ──┐
 
 ### 4.7. Детектор утечки секретов по точному значению [ПРЕДЛ]
 
-**Идея.** Layr знает реальные значения секретов: они лежат в private layers (7.1). При commit в shared layer и при Git export Layr ищет эти значения в добавленных строках diff. Сканеры по шаблонам (gitleaks, GitGuardian) не знают значений проекта; Layr ищет только реальные секреты этого проекта.
+**Идея.** Layr знает реальные значения секретов: они лежат в private layers (7.1). При создании state в shared layer и при Git export Layr ищет эти значения в добавленных строках diff. Сканеры по шаблонам (gitleaks, GitGuardian) не знают значений проекта; Layr ищет только реальные секреты этого проекта.
 
 **Дизайн:**
 - Root service выделяет из файлов private layers значения-кандидаты (например, значения строк `.env`) длиной не меньше порога, чтобы не ловить `true` и `8080`.
 - Индекс хранит только `HMAC(K_index, значение)`, а не сами значения. Вторая копия секретов не появляется.
 - Добавленные строки diff режутся на токены; HMAC токена сравнивается с индексом.
-- Совпадение: commit в shared layer и Git export отклоняются с указанием файла и строки, без показа значения. Для явного declassification нужна attestation `approval` (12.5).
+- Совпадение: создание state в shared layer и Git export отклоняются с указанием файла и строки, без показа значения. Для явного declassification нужна attestation `approval` (12.5).
 
 **Ограничения:** закодированный или разрезанный секрет (атака GhostCommit записала секрет числами) поиск не находит. Это дополнительная защита, не замена изоляции private layers (2.5, пункт 6).
 
@@ -334,7 +334,7 @@ Base state ──┬── Agent A → State A ──┐
 
 ### 4.9. `bisect` по auto states [ПРЕДЛ]
 
-**Идея.** `layr bisect run --auto -- <test>` (12.6) ищет среди auto states line первый state, на котором тест падает. С save после каждого tool call (5.5) ответ звучит как «сборку сломал вызов 47», а не «сломал commit».
+**Идея.** `layr bisect run --auto -- <test>` (12.6) ищет среди auto states line первый state, на котором тест падает. С save после каждого tool call (5.5) ответ звучит как «сборку сломал вызов 47», а не «сломал state».
 
 **Дизайн:**
 - Каждый шаг запускается в `try <state> -- <test>` с тёплыми caches; рабочая папка line не меняется.
@@ -348,17 +348,17 @@ Base state ──┬── Agent A → State A ──┐
 **Идея.** Для RL environments и best-of-N (2.5) нужно сразу много lines от одного state и быстрый возврат line к исходному state после эпизода.
 
 **Дизайн:**
-- `layr branch --count N <state>` создаёт N lines одной операцией: N snapshots в одной транзакции Btrfs, один record в `op log`.
+- `layr line new <prefix> <state> --count N` создаёт N lines одной операцией: N snapshots в одной транзакции Btrfs, один record в `op log`.
 - Возврат line к state заменяет subvolume line новым snapshot state; файлы не копируются.
 
-**Гипотеза:** задержку branch часто задаёт завершение транзакции Btrfs (10.1). Тогда одна транзакция на N lines даёт почти постоянное время вместо N транзакций. Это не измерено; нужен замер для N = 10, 100, 1000.
+**Гипотеза:** задержку line new часто задаёт завершение транзакции Btrfs (10.1). Тогда одна транзакция на N lines даёт почти постоянное время вместо N транзакций. Это не измерено; нужен замер для N = 10, 100, 1000.
 
 ### 4.11. Воспроизведение из упавшего check [ПРЕДЛ]
 
-**Идея.** `layr branch <name> attestations/<id>` (12.6) открывает новую line с точным view упавшей проверки: код, окружение и caches. Разработчик или агент получает именно ту папку, в которой тест упал.
+**Идея.** `layr line new <name> attestations/<id>` (12.6) открывает новую line с точным view упавшей проверки: код, окружение и caches. Разработчик или агент получает именно ту папку, в которой тест упал.
 
 **Дизайн:**
-- Attestation `check` хранит `ViewId` и `ExecutionKey` (5.4, 12.5). Branch от адреса attestation делает `fork(view)`; `layr show attestations/<id>` печатает команду проверки из payload.
+- Attestation `check` хранит `ViewId` и `ExecutionKey` (5.4, 12.5). `line new` от адреса attestation делает `fork(view)`; `layr show attestations/<id>` печатает команду проверки из payload.
 - Caches view нужны для точного повтора. Merge queue и CI держат states упавших проверок через ref с TTL (3.0), пока сбой не разобран.
 - Ограничение: состояние вне ФС (сеть, время, внешние базы) не воспроизводится (5.4).
 
@@ -368,7 +368,7 @@ Base state ──┬── Agent A → State A ──┐
 
 ### 5.1. Минимальный платформенный набор [ПРЕДЛ]
 
-- **Repo/State API**: branches/refs/states, staged uploads, immutable manifests.
+- **Repo/State API**: lines/refs/states, staged uploads, immutable manifests.
 - **Browse API**: дерево, file read, diff, blame/search без Btrfs worker.
 - **Review API**: approvals/checks pinned к **ViewId**, exact-state merge.
 - **Sync API**: signed state delta sync, idempotent reconnect и checkpoints.
@@ -499,7 +499,7 @@ s3://layr-cloud-{region}/
 
 ```text
 Client/Writer
-  1. Read branch ref + generation/ETag.
+  1. Read line ref + generation/ETag.
   2. Capture consistent local StateId and overlay selection.
   3. Produce file/tree deltas; encrypt; sign immutable manifest.
   4. Upload immutable packs under object_id = HMAC(K_name, plaintext)
@@ -750,12 +750,12 @@ COGS = hot_EC2_hours
 | Assemble different overlay stack | 10 файлов overlay | 19.5 ms |
 | Assemble different overlay stack | 1 000 | 48.0 ms |
 | Assemble different overlay stack | 10 000 | 144.3 ms |
-| Apply commit для overlay, 10 changed files | Overlay 10–10 000 files | ~9.5–12.5 ms на один слой в микроэксперименте |
+| Apply state для overlay, 10 changed files | Overlay 10 to 10 000 files | ~9.5 to 12.5 ms на один слой в микроэксперименте |
 | Clean status | 200 000 files, quiet | ~20 ms |
 | Status, 101 edits | 200 000, quiet/after heavy write | ~50 ms / 800 ms |
-| Commit | 200 000, quiet | 350–500 ms |
-| Commit | 200 000, после тяжёлой записи | 1 480 ms |
-| Branch | 200 000, в опубликованных прогонах | 180–280 ms |
+| Named save | 200 000, quiet | 350 to 500 ms |
+| Named save | 200 000, после тяжёлой записи | 1 480 ms |
+| Line new | 200 000, в опубликованных прогонах | 180 to 280 ms |
 | Merge (50+50 changed files) | 200 000, после записи | 1 350 ms |
 | 16 веток с приватными caches | Layr / Git full cache copy / Git reflink cache copy | 153 / 2508 / 455 MiB |
 
@@ -783,7 +783,7 @@ FUSE passthrough может уменьшить overhead данных, но не 
 | 1M files, редкие compose и многократные full scans | Native Btrfs может быть лучше |
 | Сильно доминирует commit/fsync snapshot | Исследовать batching/transaction layout до новой ФС |
 
-**Критерий сравнения:** end-to-end `create/fork → hydrate → run/edit → build/test → commit → review → merge`, плюс COGS, p50/p95/p99 и memory/disk amplification.
+**Критерий сравнения:** end-to-end `create/fork → hydrate → run/edit → build/test → state → review → merge`, плюс COGS, p50/p95/p99 и memory/disk amplification.
 
 ---
 
@@ -799,7 +799,7 @@ FUSE passthrough может уменьшить overhead данных, но не 
 
 - fork/compose как запись ссылок: O(1) относительно числа файлов, но дальнейшие lookup могут быть O(depth × layer count) без индексов/кэша;
 - update одного файла: O(log N) метаданных + записанные bytes;
-- commit: пропорционально изменённым узлам, плюс durability costs;
+- state: пропорционально изменённым узлам, плюс durability costs;
 - readdir: неизбежно O(visible entries) в выдаче;
 - merge: минимум proportional to affected subtree/conflicts; семантическая корректность требует проверок.
 
@@ -830,7 +830,7 @@ fn changes(a: StateId, b: StateId) -> Result<ChangeStream>;
 fn compose(states: &[StateId]) -> Result<ViewId>;
 fn fork(view: ViewId) -> Result<Line>;
 
-// Ref: one CAS for branches, caches, derived keys, pins
+// Ref: one CAS for lines, caches, derived keys, pins
 fn get(ref_name: &RefName) -> Result<RefState>;
 fn cas(ref_name: &RefName, expected: Option<StateId>, next: StateId, ttl: Option<Duration>) -> Result<RefState>;
 
@@ -850,7 +850,7 @@ Execution и approval не являются отдельными вызовам�
 ### 12.2. Ключевые инварианты
 
 1. **State immutability:** после публикации immutable object не меняет значения.
-2. **One ref CAS:** ожидаемый head должен совпасть; иначе reject/rebase/merge.
+2. **One ref CAS:** ожидаемый head должен совпасть; иначе reject/replay/merge.
 3. **Published durability:** ref никогда не указывает на отсутствующие immutable objects (за исключением внешней катастрофы storage/provider).
 4. **Exact review:** approval/check привязан к полному ViewId; окружение входит в него как state-слой (3.0). Версия policy записана в approval отдельно и не входит в ViewId.
 5. **Least privilege:** код, caches, private/production secrets отдельно; explicit export/declassification.
@@ -860,7 +860,7 @@ Execution и approval не являются отдельными вызовам�
 9. **No implicit global dedup of secret plaintext:** конфиденциальность важнее экономии нескольких процентов диска.
 10. **Transparent performance claims:** физические bytes, bytes uploaded, S3 requests, p95 hydrate и wall clock отдельно.
 11. **Attestations outside identity:** attestation не входит в `StateId` и `ViewId`. Добавление attestation не меняет state.
-12. **Stable change identity:** amend и rebase сохраняют `ChangeId`. Два разных изменения не получают один `ChangeId` без явной операции (например, squash).
+12. **Stable change identity:** amend и replay сохраняют `ChangeId`. Два разных изменения не получают один `ChangeId` без явной операции (например, squash).
 13. **One root kind:** GC держит state только через живой ref, tag, in-flight upload или историю другого живого state. Других видов защиты от GC нет.
 14. **Derived outside history:** state `kind = cache` или `kind = derived` не входит в историю line, diff, merge и Git export.
 
@@ -870,7 +870,7 @@ Execution и approval не являются отдельными вызовам�
 
 ### 12.4. Имена команд CLI [ПРЕДЛ]
 
-**Принцип.** Один объект для всех других мест хранения: `remote`. Глагол называет направление, а гарантии хранения задаёт свойство remote, а не отдельная команда. Git-глаголы с тем же смыслом остаются, потому что агенты знают их по git. Совместимость со старыми именами не сохраняется: старая команда завершается ошибкой с новым именем, алиасов нет.
+**Принцип.** Один объект для всех других мест хранения: `remote`. Глагол называет направление, а гарантии хранения задаёт свойство remote, а не отдельная команда. Общие слова остаются. Жаргон git заменяют имена из решения 23.10.2026 ниже. Совместимость со старыми именами не сохраняется: старая команда завершается ошибкой с новым именем, алиасов нет.
 
 **Сейчас (layr `ef7b637`, проверено 22.10.2026; в 0.2 был `dea8205`):**
 - `remote`, `fetch`, `pull`, `push`, `clone` работают с git bridge.
@@ -917,11 +917,22 @@ Execution и approval не являются отдельными вызовам�
 
 Git bridge (`layr git …`) сохраняет слова git. Старые имена отвечают ошибкой с новым именем, алиасов нет (правило выше).
 
+**Уточнение CLI:** named state создают `save -m <message>` и `save -F <file>`. `save --amend` заменяет текущий head state. Без нового сообщения сохраняется прежнее.
+Опции named save: `-a`/`--all` (изменённые tracked files), `--no-edit`, `--author`, `--signoff`, `--allow-empty`, `--no-verify`, `-v`, `-q`.
+`save` без `-m`, `-F` и `--amend` создаёт auto state. Опция `--note <text>` задаёт необязательное сообщение auto state.
+Остальные опции auto save: `--running`, `--force`, `--caches`, `-q`, `--all-lines`. `--note` нельзя сочетать с named save.
+`--all` относится к named save; `--all-lines` сохраняет auto states всех lines.
+Ревизии: `head`, `head~1`, `head^2`, `head@{n}`, `park@{n}`.
+Для конфликтов используются `restore --theirs` и `restore --ours`. Новые опции: `--no-save` вместо `--no-commit`, `--autopark` вместо `--autostash`.
+Для caches используются `cache` и `--caches`. Имена `layer` и `--layers` удалены.
+Значения `commit` и `stash` в формате хранения не меняются. Это имена kinds, а не команды CLI.
+
+
 **Затронутые вызовы:** layr-agent в Studio, инструменты Attar, документация Layr и Desk, скрипты внешних участников. Перед изменением составить полный список вызовов и обновить их в том же изменении.
 
 ### 12.5. Attestations [ПРЕДЛ]
 
-**Задача.** Сейчас record state подписывает ключ машины, а `Author.session` является непроверенным текстом (1.1). Результат CI или approval приходит после commit, но record state неизменяемый. Attestation решает обе задачи.
+**Задача.** Сейчас record state подписывает ключ машины, а `Author.session` является непроверенным текстом (1.1). Результат CI или approval приходит после state, но record state неизменяемый. Attestation решает обе задачи.
 
 **Attestation** является отдельным подписанным immutable record:
 
@@ -965,7 +976,7 @@ Git bridge (`layr git …`) сохраняет слова git. Старые им
 ### 12.6. Имена новых команд [РЕШЕНО]
 
 **Правила** (продолжение 12.4):
-1. Git-имя остаётся, если смысл тот же (`bisect run`, `reset --hard`, `branch`).
+1. Общие слова остаются, если смысл тот же (`bisect run`, `reset --hard`). Жаргон git заменяют имена из решения 23.10.2026 (12.4).
 2. Одно понятие, одно имя. Алиасов нет.
 3. Новую возможность сначала выражать через существующую команду или через адрес (revision). Новая команда только для нового понятия.
 4. Layr Core не знает слов deploy, review, agent (1.5). Имена команд Core общие.
@@ -984,7 +995,7 @@ Git bridge (`layr git …`) сохраняет слова git. Старые им
 
 | Возможность | Имя | Почему так |
 |---|---|---|
-| Двигать ref (deploy, promotion, pin) | `layr ref set <name> <rev> [--expect <rev>] [--ttl <срок>]` | Новое понятие ref без working folder (3.0). `set`, потому что `move` уже значит перенос файлов (`overlay move`). Lines `ref set` не двигает: для них `commit`, `merge`, `reset` |
+| Двигать ref (deploy, promotion, pin) | `layr ref set <name> <rev> [--expect <rev>] [--ttl <срок>]` | Новое понятие ref без working folder (3.0). `set`, потому что `move` уже значит перенос файлов (`overlay move`). Lines `ref set` не двигает: для них `save -m <message>`, `merge`, `reset` |
 | Откат ref | `layr ref set env/prod env/prod@{1}` | Отдельной команды нет; синтаксис reflog знают люди и агенты |
 | Список и история refs | `layr ref list [<prefix>]`, `layr ref log <name>` | По образцу `op log` |
 | Удалить ref | `layr ref delete <name> [--expect <rev>]` | |
@@ -992,9 +1003,9 @@ Git bridge (`layr git …`) сохраняет слова git. Старые им
 | Утвердить | `layr approve <rev>` (есть) | Частое действие человека; пишет attestation `approval` |
 | Список attestations | `layr attestations <rev> [--kind <kind>]` | **Заменяет `approvals` и `checks`**: это одно понятие. Старые имена дают ошибку с новым именем (12.4) |
 | Change | `layr change list`, `layr change show <id>`, `layr change log <id>`, `layr change diff <id> [--from v2] [--to v3]` | Новое понятие `ChangeId`. «Review» является именем продукта Cloud, а не команды Core. `change show` выводит карточку: версии, interdiff, attestations, diff поведения |
-| Repro упавшей проверки | `layr branch <name> attestations/<id>` | Новой команды нет: branch от адреса attestation. Команду проверки показывает `layr show attestations/<id>` |
+| Repro упавшей проверки | `layr line new <name> attestations/<id>` | Новой команды нет: `line new` от адреса attestation. Команду проверки показывает `layr show attestations/<id>` |
 | Bisect | `layr bisect run [--good <rev>] [--bad <rev>] [--auto] [--ref-log <ref>] -- <cmd>` | Git-имя `bisect run`. `--auto` добавляет auto states (tool calls, 5.5). `--ref-log` ищет по истории ref, например `env/prod` |
-| Много lines сразу | `layr branch <prefix> <rev> --count <N>` | Lines `<prefix>-1` … `<prefix>-N` |
+| Много lines сразу | `layr line new <prefix> <rev> --count <N>` | Lines `<prefix>-1` … `<prefix>-N` |
 | Вернуть line к state | `layr reset --hard <rev>` (есть) | Git-имя; быстрый путь через замену snapshot (4.10) |
 | Производные файлы | атрибут `derive=<name>`; config `derive.command.<name>`, `derive.inputs.<name>` | Тот же порядок ключей, что у `merge.driver.<name>` и `merge.verify.<name>` |
 | Declassify секрета | `layr approve --declassify <path> <rev>` | Это approval с областью (4.7) |
@@ -1082,10 +1093,10 @@ Checkpoints Studio (2A) не зависят от имён команд CLI и о
 - Зафиксировать минимальную модель ключей и доверенных устройств, проверку доступа и защиту от rollback для V1.
 - Разделить совместимость данных и изменение CLI. Старые данные читаются или мигрируют; старые имена команд следуют правилам 12.4.
 - Определить разрешённый состав V1 view. Неподдерживаемые private layers и секреты отклонять, а не включать в shared.
-- Определить `ChangeId`: создание, сохранение при amend, rebase и merge, поведение при squash и split. Добавить его в manifest (6.4) и в существующий record state.
+- Определить `ChangeId`: создание, сохранение при amend, replay и merge, поведение при squash и split. Добавить его в manifest (6.4) и в существующий record state.
 - Определить схему attestation (12.5), типы подписантов и правило «attestation не входит в identity». Существующий record state остаётся первой attestation типа `origin` с ключом машины.
 
-**Готово, когда:** есть схемы, тестовые векторы и таблица ошибок. Reader и writer одинаково определяют identity, подписи и результат повторного запроса. Amend и rebase в тестах сохраняют `ChangeId`; добавление attestation не меняет `StateId`.
+**Готово, когда:** есть схемы, тестовые векторы и таблица ошибок. Reader и writer одинаково определяют identity, подписи и результат повторного запроса. Amend и replay в тестах сохраняют `ChangeId`; добавление attestation не меняет `StateId`.
 
 ### Этап 1. Storage/Remote MVP
 
@@ -1248,8 +1259,8 @@ Checkpoints Studio (2A) не зависят от имён команд CLI и о
 
 | Метрика | Что мерить |
 |---|---|
-| `compose/branch` | p50/p95, CPU, disk ops, bytes reflinked |
-| `status/diff/commit/merge` | quiet и under writes, with/without overlays |
+| `compose/line new` | p50/p95, CPU, disk ops, bytes reflinked |
+| `status/diff/save/merge` | quiet и under writes, with/without overlays |
 | `file workload` | stat/open/readdir/lookups, cold/warm cache |
 | `CI workflow` | checkout/hydrate/install/build/test/review total |
 | `restore` | cold/hot, chain depth, S3 bytes/GET, success rate |
@@ -1269,7 +1280,7 @@ Checkpoints Studio (2A) не зависят от имён команд CLI и о
 | Нужна ли новая FS? | Нет, пока Layer assembly не доказан как bottleneck |
 | Какой cold format? | Desk file/tree deltas как baseline, Btrfs send для горячего peer sync |
 | Где истина? | Immutable S3 objects + signed manifests + CAS refs |
-| Стабильная identity изменения? | Да: `ChangeId` в формате 0B; amend и rebase его сохраняют |
+| Стабильная identity изменения? | Да: `ChangeId` в формате 0B; amend и replay его сохраняют |
 | Provenance? | Attestations отдельно от identity, append-only, формат совместим с in-toto (12.5) |
 | Merge queue? | Да, фаза 2D; `main` двигается только после проверки точного view |
 | Multi-ref commit? | Отдельный CAS на каждый ref; `refs/head.json` только для атомарной публикации защищённых веток |
@@ -1577,6 +1588,8 @@ struct State {
 
 Имена команд сверены с `src/cmd/mod.rs` на `070653e` (22.10.2026). Флаги не сверены. Переименования `machines`, удаление старой команды копии, `serve-peer` и git bridge предложены в 12.4.
 
+**Текущие имена CLI:** решение 23.10.2026 и уточнение в 12.4. Таблица выше сохраняет прежние имена для истории.
+
 **Примечание:** таблица — карта обсуждённого функционала, а не автоматически сгенерированная проверка покрытия всех CLI flags. Существующие команды не следует перепроектировать только ради нового SDK.
 
 Семантический контракт API следует пяти сущностям (3.0, 12.1). Ниже фасады по сущностям.
@@ -1601,7 +1614,7 @@ Pin выполняется через ref с TTL (20.3).
 
 ```rust
 ref.get(name) -> RefState
-ref.cas(name, expected, next, ttl) -> RefState    // branches, caches, derived keys, pins, leases
+ref.cas(name, expected, next, ttl) -> RefState    // lines, caches, derived keys, pins, leases
 ref.list(prefix) -> Vec<RefState>
 ref.history(name) -> Vec<RefState>                // прежние позиции, для отката
 ```
@@ -1732,7 +1745,7 @@ Layr Cloud ------------- remote, scheduler, tenant billing, worker pool
 | Программа/система | Реальная возможность | Подход | Приоритет |
 |---|---|---|---|
 | Chromium GN/Ninja/Siso | Совместить CoW warm trees с Action Cache результатов разных агентов | REAPI/cache adapter + Layr metadata | **P0** |
-| clangd (Chromium) | Наследовать индексы и избегать повторного индексирования всей ветки | Index shards + branch-aware validation | **P1** |
+| clangd (Chromium) | Наследовать индексы и избегать повторного индексирования всей ветки | Index shards + line-aware validation | **P1** |
 | Cargo/rustc | Переиспользование прогретых `target/`, позднее — нескольких независимых incremental caches | Сначала без изменения rustc | **P1/P2** |
 | PostgreSQL | Быстро ветвить консистентные тестовые базы, связанные со state исходников | DB adapter, WAL-aware snapshots | **P1** |
 | RocksDB | Версионировать checkpoints c общими SST | Native checkpoints + state refs | P1 |
@@ -1801,13 +1814,13 @@ fork(source_state, db_checkpoint)
 
 | Тест | Baseline | Эксперимент | Что измерять |
 |---|---|---|---|
-| 1. Create workspace | Полный worktree | Layr CoW branch | Время, disk, metadata |
+| 1. Create workspace | Полный worktree | Layr CoW line | Время, disk, metadata |
 | 2. Warm build | Кэш последней ветки | CoW whole-tree cache | Сборочное время и cache misses |
 | 3. Two-agent merge | Независимые output dirs | Layr + общий Siso Action Cache | Повторные action executions |
 | 4. Cache promotion | Ручное копирование `out/` | Indexed immutable promotion | Restore time, correctness |
 | 5. Header fan-out | Один `.cc` | Популярный `.h` | Число инвалидируемых actions |
 | 6. GN configuration change | Одинаковый args | Разные GN args/toolchain | Доля реально reusable artifacts |
-| 7. clangd | Отдельный полный индекс | Shared index + branch shards | CPU, indexing latency, freshness |
+| 7. clangd | Отдельный полный индекс | Shared index + line shards | CPU, indexing latency, freshness |
 | 8. Parallel agents | 1 агент | 10 / 50 / 100 агентов | p50/p95 build, disk, SSD IO |
 | 9. Crash consistency | Graceful exit | kill/power loss during promotion | Correct head, intact objects |
 | 10. Security | Trusted producer | Malicious/corrupt result | Detection and quarantine |
@@ -1852,7 +1865,7 @@ fork(source_state, db_checkpoint)
 ### P2 — исследовательские улучшения
 
 1. Composite views с быстрым exact identity и структурированными conflict reports.
-2. Merge-совместимое переиспользование compiler incremental caches из нескольких независимых branches.
+2. Merge-совместимое переиспользование compiler incremental caches из нескольких независимых lines.
 3. Partial/lazy hydration крупных derived artifacts из Layr Cloud S3.
 4. Возможно, нативная виртуальная MVCC-ФС — только после убедительных цифр.
 
@@ -1906,7 +1919,7 @@ layr-cloud/
 4. Какие кэши можно продвигать автоматически, а какие требуют review / attestation?
 5. Не попадут ли секреты, credentials, test fixtures или персональные данные в общий cache?
 6. Как связать `source_state` с `build_config` при GN reconfigure и изменении generated sources?
-7. Как обеспечить stable workspace paths при использовании CoW branches без ненадёжной подмены compiler fingerprint?
+7. Как обеспечить stable workspace paths при использовании CoW lines без ненадёжной подмены compiler fingerprint?
 8. Нужно ли атомарно публиковать несколько связанных baseline refs? Если да, использовать `refs/head.json` (6.5).
 9. ~~Может ли provenance быть подписанным независимым attestation, не меняющим identity самого артефакта?~~ Решено: да, 12.5 и инвариант 11.
 10. Как отслеживать эффективность promotion и вовремя отключать его, когда он только тратит ресурсы?
@@ -1995,7 +2008,7 @@ flowchart LR
 
 ### 29.7. Repro инцидента
 
-Каждый log, trace и crash помечен `ViewId` prod. `layr branch <name> attestations/<id>` (4.11) даёт копию того же view: код, config, caches и при необходимости снимок данных. `layr bisect run --ref-log env/prod` (4.9) находит деплой, после которого всё сломалось.
+Каждый log, trace и crash помечен `ViewId` prod. `layr line new <name> attestations/<id>` (4.11) даёт копию того же view: код, config, caches и при необходимости снимок данных. `layr bisect run --ref-log env/prod` (4.9) находит деплой, после которого всё сломалось.
 
 ### 29.8. Миграция базы: сначала на копии
 
@@ -2128,7 +2141,7 @@ Tag является ref (`app:prod` = `refs/env/prod`). Layr отвечает �
 
 Helm хранит charts в OCI registry: config `application/vnd.cncf.helm.config.v1+json`, chart `application/vnd.cncf.helm.chart.content.v1.tar+gzip`. Установка по digest поддерживается (`oci://…/chart@sha256:...`), docs Helm называют её более безопасной, чем по tag.
 
-**Идея.** Из одного `ViewId` Layr отдаёт и образ `app`, и chart `charts/app`. В `values` chart Layr подставляет digest образа из того же view. Commit «поменять tag образа в `values.yaml`» не нужен: chart и образ всегда совпадают, потому что строятся из одного state. Chart является derived state (`helm package` в детерминированном режиме).
+**Идея.** Из одного `ViewId` Layr отдаёт и образ `app`, и chart `charts/app`. В `values` chart Layr подставляет digest образа из того же view. State «поменять tag образа в `values.yaml`» не нужен: chart и образ всегда совпадают, потому что строятся из одного state. Chart является derived state (`helm package` в детерминированном режиме).
 
 **Ограничение: semver.** Docs Helm: tag выводится из semver-версии chart, это «strict requirement» для `helm push`. Примет ли `helm install` tag вида `:prod` при чтении, не проверено (в issue Helm #8332 tag в ссылке имеет приоритет над version). Схема без этого риска:
 1. `refs/release/1.4.2` даёт chart версии `1.4.2`.

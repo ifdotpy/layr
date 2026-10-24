@@ -85,14 +85,14 @@ init_mib = (f0 - f1) / 2**20
 main = os.path.join(root, "store/projects/p/lines/main")
 rows = []
 for k in range(4):
-    row = {"branch_cpu": run([layr, "branch", "-q", f"b{k}"], main, lenv)}
+    row = {"branch_cpu": run([layr, 'line', 'new', "-q", f"b{k}"], main, lenv)}
     f2 = free()
     row["branch_mib"] = (f1 - f2) / 2**20
     w = os.path.join(root, f"store/projects/p/lines/b{k}")
     edit(w, k)
     row["status_cpu"] = run([layr, "status", "--porcelain"], w, lenv)
     row["add_cpu"] = run([layr, "add", "-A"], w, lenv)
-    row["commit_cpu"] = run([layr, "commit", "-qm", "c"], w, lenv)
+    row["commit_cpu"] = run([layr, 'save', "-qm", "c"], w, lenv)
     f1 = free()
     row["commit_mib"] = (f2 - f1) / 2**20
     rows.append(row)

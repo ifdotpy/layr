@@ -43,6 +43,27 @@ commands that change files behind the editor's back. Layr is built for that.
 - **Sharing is per person.** One person key opens every project that person may read. Grant it
   with one command; nobody else, the cloud included, ever holds the key.
 
+## See it
+
+Real commands and their real output, recorded on Linux with btrfs.
+
+**A mistake is one command away from undone.** Delete a folder, then bring it back:
+
+![layr line new, save, rm -rf, restore](docs/assets/undo.gif)
+
+**Sixteen agents, sixteen folders, a fraction of a second.**
+
+![layr line new agent main --count 16](docs/assets/agents.gif)
+
+**Production takes only what passed.** The ref refuses until the exact state has a passing check:
+
+![layr protect, ref set refused, try --check, ref set](docs/assets/ship.gif)
+
+**Secrets stay private, and still travel.** The token lives in an overlay. Copying its value into
+shared code is refused, and the push stores the overlay encrypted:
+
+![secret refused in shared code, overlay pushed encrypted](docs/assets/secrets.gif)
+
 ## How it works
 
 Layr has five ideas. Everything else is built from them.

@@ -48,6 +48,7 @@ Out of scope for now:
   them. Workstream core owns the resolver; others call `revs::resolve`.
 - Attestation kinds (RFC 12.5): `check`, `approval`, `origin`, `import`, `quarantine`, `revoke`.
 - State kinds (RFC 3.0): existing `commit`, `auto`, `stash`, `import`, plus `cache`, `derived`
+  (storage values stay unchanged; the CLI calls them named states and parked states)
   with `derived_from` and `context`.
 - `ChangeId`: field `change_id` of the state record (RFC 3.1, 12.2 invariant 12).
 
@@ -56,7 +57,7 @@ Out of scope for now:
 | Id | Branch | Owns | RFC |
 |---|---|---|---|
 | core | `cloud/core` | refs, attestations, ChangeId, state kinds, `change` commands, GC roots, `model.rs`, `db.rs`, `revs.rs`, new `cmd/refs.rs` | 3.0, 3.1, 6.9, 12.2, 12.5, 12.6 |
-| merge | `cloud/merge` | `derive` rules, `branch --count`, conflict radar in `status`, fast `reset --hard` | 4.6, 4.8, 4.10 |
+| merge | `cloud/merge` | `derive` rules, `line new --count`, conflict radar in `status`, fast `reset --hard` | 4.6, 4.8, 4.10 |
 | remote-store | `cloud/remote-store` | store format v2, `file://` and `s3://`, slots, push/fetch/clone of stores, `fsck/log/gc --remote`, Desk v1 import | `docs/remote-design.md` |
 | remote-cli | `cloud/remote-cli` | `remote add/list/remove/trust`, peer `ssh://` push/fetch/pull/sync, `layr git …`, removal of `machines` and of the old copy command, invariant tests | `docs/remote-design.md` |
 | oci | `cloud/oci` | `layr.toml` runnables, deterministic OCI export, `oci://` remote push, registry in the service (`registry.listen`), Helm chart | 30, 31 |

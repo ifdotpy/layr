@@ -1,3 +1,7 @@
+[workspace]
+members = ["crates/layr-store"]
+resolver = "2"
+
 [package]
 name = "layr"
 version = "0.1.0"
@@ -14,13 +18,9 @@ path = "src/main.rs"
 overlayfs = []
 
 [dependencies]
+layr-store = { path = "crates/layr-store" }
 anyhow = "1"
 age = { version = "0.11", features = ["ssh"] }
-rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"] }
-bech32 = "0.11"
-bip39 = "2"
-ssh-key = { version = "0.6", features = ["ed25519"] }
-zstd-safe = { version = "7", features = ["std"] }
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }

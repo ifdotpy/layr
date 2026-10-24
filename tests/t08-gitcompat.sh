@@ -21,8 +21,15 @@ edit $G; edit $Lw
 
 cmp_out() { # cmp_out <description> <args...>: git and layr print the same
     local d=$1; shift
-    local g w
-    g=$(cd $G && git -c core.abbrev=7 "$@" 2>&1); w=$(cd $Lw && l "$@" 2>&1)
+    local g w arg
+    local -a layr_args=()
+    for arg in "$@"; do
+        case "$arg" in
+            HEAD|HEAD[~^:@]*) layr_args+=("head${arg#HEAD}") ;;
+            *) layr_args+=("$arg") ;;
+        esac
+    done
+    g=$(cd $G && git -c core.abbrev=7 "$@" 2>&1); w=$(cd $Lw && l "${layr_args[@]}" 2>&1)
     if [ "$g" = "$w" ]; then PASS=$((PASS + 1)); echo "PASS $d"; else FAIL=$((FAIL + 1)); echo "FAIL $d"; diff <(echo "$g") <(echo "$w") | head -20; fi
 }
 cmp_out "diff (patch)" diff
@@ -40,7 +47,7 @@ cmp_out "diff --cached (patch with add, delete, rename, mode, binary)" diff --ca
 cmp_out "diff --cached --name-status" diff --cached --name-status
 cmp_out "diff --cached --stat" diff --cached --stat
 cmp_out "status --porcelain with a rename" status --porcelain
-cd $G; git commit -qm "second"; cd $Lw; l commit -qm "second"
+cd $G; git commit -qm "second"; cd $Lw; l save -qm "second"
 cmp_out "show HEAD:a.txt" show HEAD:a.txt
 cmp_out "log --format=%s" log --format=%s
 cmp_out "show --name-status --format=" show --name-status --format= HEAD
@@ -55,7 +62,18 @@ cmp_out "rev-parse HEAD:d (a tree)" rev-parse HEAD:d
 cmp_out "rev-parse HEAD:a.txt (a blob)" rev-parse HEAD:a.txt
 cmp_out "rev-parse HEAD: (the root tree)" rev-parse HEAD:
 cmp_out "rev-parse HEAD~1:gone.txt (a path of an older state)" rev-parse HEAD~1:gone.txt
-eq "rev-parse HEAD:gone.txt (a missing path) fails like git" "$(cd $G && git rev-parse HEAD:gone.txt 2>&1 >/dev/null)" "$(cd $Lw && l rev-parse HEAD:gone.txt 2>&1 >/dev/null)"
+git_missing=$(cd $G && git rev-parse HEAD:gone.txt 2>&1 >/dev/null)
+eq "rev-parse head:gone.txt (a missing path) fails like git" "${git_missing//\'HEAD\'/\'head\'}" "$(cd $Lw && l rev-parse head:gone.txt 2>&1 >/dev/null)"
+# An edit of the same size in the same second still reaches the exported tree: the exported
+# index of the parent state has stat data for the file. Each round tries to stay in one second.
+cd $Lw; stale=0
+for i in $(seq 1 20); do
+    printf "a$i" > racy.txt; l add racy.txt; l save -qm "racy a$i"; l rev-parse 'head^{tree}' >/dev/null
+    printf "b$i" > racy.txt; l save -qam "racy b$i"
+    [ "$(l rev-parse head:racy.txt)" = "$(printf "b$i" | git hash-object --stdin)" ] || stale=$((stale + 1))
+done
+eq "same-size edits in the same second are exported" 0 $stale
+l reset --hard head~40 >/dev/null
 for root in $G $Lw; do cd $root; printf 'trailing   \n' >> a.txt; done
 cmp_out "diff --check" diff --check
 finish

@@ -10,7 +10,7 @@ sample $T/src
 l init x --from $T/src -q >/dev/null
 A=$LAYR_ROOT/projects/x/lines
 cd $A/main
-echo 1 >> notes.txt; l commit -qam a1
+echo 1 >> notes.txt; l save -qam a1
 peer_exchange sync x -q -- $(peer)
 B() { env LAYR_ROOT=$BR $LAYR "$@"; }
 eq "peer has the history" "$(l log --format=%H)" "$(B --project x --line main log --format=%H)"
@@ -23,8 +23,8 @@ B --project x adopt main >/dev/null
 eq "the moved line has the uncommitted work" "not committed" "$(cat $BR/projects/x/lines/main/moving.txt)"
 
 # Both machines continue the line: two heads.
-cd $BR/projects/x/lines/main && B add moving.txt && B commit -qm "on B"
-cd $A/main && echo 2 >> notes.txt && l commit -qam "on A"
+cd $BR/projects/x/lines/main && B add moving.txt && B save -qm "on B"
+cd $A/main && echo 2 >> notes.txt && l save -qam "on A"
 peer_exchange sync x -q -- $(peer)
 eq "both machines are known" "2" "$(l remote list | grep -v '^remote' | wc -l)"
 MB=$(l remote list | grep -v -e '^\*' -e '^remote' | awk '{print $1}')
@@ -32,14 +32,14 @@ eq "the local head stays local" "on A" "$(l log -1 --format=%s)"
 eq "the other head is line@machine" "on B" "$(l log -1 --format=%s main@$MB)"
 rm moving.txt
 l merge -q main@$MB
-eq "the heads are joined by a merge" "2" "$(l show -s --format=%p HEAD | wc -w)"
+eq "the heads are joined by a merge" "2" "$(l show -s --format=%p head | wc -w)"
 ok "with the work of B" test -f moving.txt
 cd $BR/projects/x/lines/main
 eq "B sees A's head as main@A" "on A" "$(B log -1 --format=%s main@$(l --project x remote list | grep '^\*' | awk '{print $2}'))"
 cd $A/main
 
 # A changed record is refused.
-cd $BR/projects/x/lines/main && echo t >> notes.txt && B commit -qam "later on B" && cd $A/main
+cd $BR/projects/x/lines/main && echo t >> notes.txt && B save -qam "later on B" && cd $A/main
 python3 - $BR/projects/x/meta/db/layr.sqlite <<'PY'
 import sqlite3, sys
 c = sqlite3.connect(sys.argv[1])

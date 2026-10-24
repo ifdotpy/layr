@@ -274,7 +274,14 @@ pub mod git {
             None => ("HEAD".to_string(), h.line()?.name.clone()),
         };
         repo.require(ctx, "push").map_err(|e| exit(1, e.to_string()))?;
-        let state_id = revs::resolve(repo, line.as_ref(), &rev)?;
+        // The Git bridge keeps Git revision spelling at its public boundary.
+        let source = match rev.strip_prefix("HEAD") {
+            Some(suffix) if suffix.is_empty() || suffix.starts_with(['~', '^']) || suffix.starts_with("@{") => {
+                format!("head{suffix}")
+            }
+            _ => rev.clone(),
+        };
+        let state_id = revs::resolve(repo, line.as_ref(), &source)?;
         crate::secrets::check_history(ctx, repo, &state_id)?;
         let state = repo.state(&state_id)?;
         if !state.conflicts.is_empty() {
@@ -418,7 +425,7 @@ use crate::args::{parse, Spec};
 use crate::ctx::Ctx;
 use crate::oci;
 use crate::repo::Repo;
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use serde_json::json;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -470,7 +477,16 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if args.iter().any(|s| matches!(s.as_str(), "-v" | "--verbose")) {
         return Err(exit(128, "use layr git remote -v"));
     }
-    let a = parse(&Spec::new().flag("--json").value("--public-key").value("--paper-key-out"), args)?;
+    let a = parse(
+        &Spec::new()
+            .flag("--json")
+            .value("--public-key")
+            .value("--paper-key-out")
+            .value("--recipient")
+            .value("--person")
+            .value("--invite-out"),
+        args,
+    )?;
     let sub = a.pos.first().map(String::as_str).unwrap_or("list");
     if sub == "self" {
         if a.pos.len() != 1 {
@@ -491,6 +507,25 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let h = here(ctx)?;
     let repo = &h.repo;
     match sub {
+        "login" if a.pos.len() == 2 => {
+            let name = &a.pos[1];
+            let url = remote_url(repo, name)?;
+            if !url.starts_with("s3://") { bail!("remote login requires an s3:// remote"); }
+            let profile = ctx.env("AWS_PROFILE").map(str::to_owned)
+                .or(repo.p.config_value(&format!("remote.{name}.aws-profile"))?.and_then(|v| v.as_str().map(str::to_owned)))
+                .unwrap_or_else(|| "default".into());
+            let mut env = ctx.env.clone();
+            env.entry("HOME".into()).or_insert_with(|| ctx.caller.home.to_string_lossy().into_owned());
+            crate::privs::as_caller_fs(ctx, || {
+                let profile = layr_store::aws::profile::Profile::load_with_env(&profile, &env)?;
+                let http=reqwest::blocking::Client::builder().redirect(reqwest::redirect::Policy::none()).build()?;
+                profile.login(&http, |url, code| {
+                    // Device authorization must be visible before the command waits.
+                    eprintln!("Open: {url}\nCode: {code}");
+                })
+            })?;
+            outln!(ctx, "AWS login complete");
+        }
         "list" if a.pos.len() <= 1 => {
             let mut remotes = Vec::new();
             for (k, _) in repo.p.db.config_all()? {
@@ -543,8 +578,11 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
             }
             let recovery_key_file = if remote_kind == Kind::Store {
                 let mut store = store_remote::open(url, repo)?;
+                store.use_aws_profile(repo.p.config_value(&format!("remote.{name}.aws-profile"))?.and_then(|v|v.as_str().map(str::to_owned)));
                 let opts = store_remote::ConfigureOptions { paper_key_out: a.get("--paper-key-out").map(|p| ctx.cwd.join(p)) };
-                store.configure(ctx, &opts)?.recovery_key_file
+                let configured = store.configure(ctx, &opts)?;
+                store.save_pin(ctx, repo, name)?;
+                configured.recovery_key_file
             } else { None };
             set_config(ctx, repo, &key, json!(url))?;
             if a.has("--json") {
@@ -558,9 +596,32 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let _lock = repo.p.lock()?;
             remote_url(repo, &a.pos[1])?;
             set_config(ctx, repo, &format!("cloud.remote.{}.url", a.pos[1]), serde_json::Value::Null)?;
+            set_config(ctx, repo, &format!("cloud.remote.{}.store", a.pos[1]), serde_json::Value::Null)?;
             if a.has("--json") {
                 outln!(ctx, "{}", json!({"removed": a.pos[1]}));
             }
+        }
+        "grant" if a.pos.len() == 2 => {
+            repo.require(ctx,"remote")?;
+            let person = a.get("--person").context("grant requires --person <login>")?;
+            let recipient = a.get("--recipient").context("grant requires --recipient <age1…>")?;
+            let mut store = store_remote::open_named(&a.pos[1],repo)?;
+            let output = a.get("--invite-out").map(|path|ctx.cwd.join(path));
+            let created = store.grant(ctx,person,recipient,output.as_deref())?;
+            if a.has("--json") {outln!(ctx,"{}",json!({"person":person,"recipient":recipient,"status":if created {"granted"} else {"already granted"}}));}
+            else {outln!(ctx,"{} store to {person}",if created {"granted"} else {"already granted"});}
+        }
+        "trust-store" if a.pos.len() == 2 => {
+            repo.require(ctx, "remote")?;
+            let name = &a.pos[1];
+            let recipient = a.get("--recipient").context("trust-store requires --recipient <age1…>")?;
+            let url = remote_url(repo, name)?;
+            if kind(&url)? != Kind::Store { bail!("trust-store requires a store remote"); }
+            let _lock = repo.p.lock()?;
+            let mut store = store_remote::open_named(&a.pos[1], repo)?;
+            store.trust_store(ctx, repo, name, recipient)?;
+            if a.has("--json") { outln!(ctx, "{}", json!({"name":name,"recipient":recipient})); }
+            else { outln!(ctx, "trusted store recipient {recipient}"); }
         }
         "trust" if a.pos.len() == 3 => {
             repo.require(ctx, "remote")?;
@@ -581,10 +642,11 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let key = hex::encode(raw);
             match remote_kind {
                 Kind::Store => {
-                    let mut store = store_remote::open(&url, repo)?;
+                    let mut store = store_remote::open_named(&a.pos[1], repo)?;
                     store.configure(ctx, &store_remote::ConfigureOptions::default())?;
                     {
                         let _lock = repo.p.lock()?;
+                        store.save_pin(ctx, repo, &a.pos[1])?;
                         replicate::trust(ctx, &repo.p, &full, &key)?;
                     }
                     store.trust(repo, &full, Some(&key))?;
@@ -604,7 +666,7 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
         _ => {
             return Err(exit(
                 128,
-                "usage: layr remote add <name> <url> [--paper-key-out <path>] | list | self | remove <name> | trust <name> <machine> [--public-key <ed25519>]",
+                "usage: layr remote add <name> <url> [--paper-key-out <path>] | list | self | login <name> | remove <name> | trust <name> <machine> [--public-key <ed25519>] | trust-store <name> --recipient <age1…> | grant <name> --person <login> --recipient <age1…> [--invite-out <path>]",
             ))
         }
     }
@@ -689,9 +751,14 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
                 auto: a.has("--auto"),
                 caches: a.has("--caches"),
                 paper_key: a.get("--paper-key").map(str::to_owned),
+                desk_prefix: None,
             };
-            let mut store = store_remote::open(&url, &h.repo)?;
+            let mut store = store_remote::open_named(&a.pos[0], &h.repo)?;
             store.configure(ctx, &store_remote::ConfigureOptions::default())?;
+            {
+                let _lock = h.repo.p.lock()?;
+                store.save_pin(ctx, &h.repo, &a.pos[0])?;
+            }
             let report =
                 if op == "push" { store.push(ctx, &mut h.repo, &opts)? } else { store.fetch(ctx, &mut h.repo, &opts)? };
             if !report.missing_lines.is_empty() {
@@ -706,7 +773,7 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
             if op != "push" {
                 bail!("OCI remotes support only layr push <remote> <rev> --runnable <name>");
             }
-            let rev = a.pos.get(1).map(String::as_str).unwrap_or("HEAD");
+            let rev = a.pos.get(1).map(String::as_str).unwrap_or("head");
             return if a.has("--json") {
                 oci::push_json(ctx, &url, rev, a.get("--runnable"))
             } else {
@@ -748,7 +815,10 @@ fn print_store_report(ctx: &Ctx, report: &store_remote::Report, op: &str, json_o
         outln!(ctx, "{}", serde_json::to_string(report)?);
     } else if !quiet {
         outln!(ctx, "{op}: {} records, {} states, {} bytes", report.records, report.states, report.bytes);
-        for item in &report.omitted {
+        for line in &report.overlays {
+            outln!(ctx, "  overlay {line}");
+        }
+        for item in omitted_summaries(&report.omitted) {
             outln!(ctx, "omitted: {item}");
         }
         for gap in &report.gaps {
@@ -766,6 +836,36 @@ fn print_store_report(ctx: &Ctx, report: &store_remote::Report, op: &str, json_o
     Ok(())
 }
 
+fn omitted_summaries(omitted: &[String]) -> Vec<String> {
+    let mut summaries = Vec::new();
+    let mut states: std::collections::BTreeMap<&str, std::collections::BTreeSet<&str>> = Default::default();
+    let mut other = std::collections::BTreeSet::new();
+    for item in omitted {
+        let fields: Vec<_> = item.split_whitespace().collect();
+        if fields.len() == 2 && crate::model::is_uuid(fields[0]) {
+            states.entry(fields[1].trim_matches('"')).or_default().insert(fields[0]);
+        } else if fields.len() >= 3 && fields[0] == "cache" && fields[1] == "state" && crate::model::is_uuid(fields[2]) {
+            states.entry("cache").or_default().insert(fields[2]);
+        } else {
+            other.insert(item);
+        }
+    }
+    for (kind, ids) in states {
+        let flag = match kind {
+            "cache" => "--caches",
+            "auto" => "--auto",
+            _ => "",
+        };
+        let hint = if flag.is_empty() { String::new() } else { format!(" (use {flag})") };
+        let noun = if ids.len() == 1 { "state" } else { "states" };
+        summaries.push(format!("{} {kind} {noun}{hint}", ids.len()));
+    }
+    for item in other {
+        summaries.push(item.clone());
+    }
+    summaries
+}
+
 fn args_for_merge(a: &crate::args::Parsed) -> Vec<String> {
     let mut args = Vec::new();
     if a.has("--ff-only") {
@@ -781,8 +881,17 @@ fn args_for_merge(a: &crate::args::Parsed) -> Vec<String> {
 }
 
 pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let a = parse(&Spec::new().value("--paper-key").flag("--auto").flag("--caches").flag("--json").flag("-q|--quiet"), args)
-        .map_err(|e| exit(128, format!("{e}; Git forms use layr git clone")))?;
+    let a = parse(
+        &Spec::new()
+            .value("--paper-key")
+            .value("--desk-prefix")
+            .flag("--auto")
+            .flag("--caches")
+            .flag("--json")
+            .flag("-q|--quiet"),
+        args,
+    )
+    .map_err(|e| exit(128, format!("{e}; Git forms use layr git clone")))?;
     let url = a.pos.first().ok_or_else(|| exit(128, "usage: layr clone <url> [<project>]; Git uses layr git clone"))?;
     if kind(url).map_err(|e| exit(128, format!("{e}; use layr git clone for Git URLs")))? != Kind::Store {
         bail!("clone requires a file://, s3:// or layr+https:// store; Git uses layr git clone");
@@ -801,10 +910,12 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
             auto: a.has("--auto"),
             caches: a.has("--caches"),
             paper_key: a.get("--paper-key").map(str::to_owned),
+            desk_prefix: a.get("--desk-prefix").map(str::to_owned),
         };
         let report = store.clone_into(ctx, &mut repo, &opts)?;
         let _lock = repo.p.lock()?;
         set_config(ctx, &repo, "cloud.remote.origin.url", json!(url))?;
+        store.save_pin(ctx, &repo, "origin")?;
         print_store_report(ctx, &report, "clone", a.has("--json"), a.has("-q"))?;
         Ok(if report.missing_lines.is_empty() { 0 } else { 2 })
     })();
@@ -821,6 +932,24 @@ use crate::store_remote;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn omitted_state_summary_counts_each_state_once() {
+        let auto = "01a12290-0000-7000-8000-000000000001";
+        let cache = "01a12290-0000-7000-8000-000000000002";
+        let other = "01a12290-0000-7000-8000-000000000003";
+        let omitted = vec![
+            format!("{auto} \"auto\""),
+            format!("{cache} \"cache\""),
+            format!("{other} \"cache\""),
+            format!("cache state {cache} of ref caches/one: use --caches"),
+            format!("cache state {cache} of ref caches/two: use --caches"),
+            "private overlay files".into(),
+        ];
+        assert_eq!(
+            omitted_summaries(&omitted),
+            vec!["1 auto state (use --auto)", "2 cache states (use --caches)", "private overlay files"]
+        );
+    }
     #[test]
     fn remote_url_dispatch() {
         assert_eq!(kind("ssh://user@host/project").unwrap(), Kind::Peer { host: "user@host".into(), project: "project".into() });

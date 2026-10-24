@@ -60,7 +60,7 @@ try:
     project = root / 'store/projects/p'
     main = project / 'lines/main'
     run(main, 'protect', 'main', '--remove')
-    run(main, 'branch', '-q', 'topic')
+    run(main, 'line', 'new', '-q', 'topic')
     work = main.parent / 'topic'
 
     # A commit stores only the changed entries.
@@ -77,7 +77,7 @@ try:
     run(work, 'add', '-A')
     status = run(work, 'status', '--porcelain').stdout
     assert 'R  d2/f200 -> d2/moved' in status and 'D  d1/f100' in status, status
-    run(work, 'commit', '-qm', 'thin commit')
+    run(work, 'save', '-qm', 'thin commit')
     h1 = head(work)
     layer = project / 'deltas' / h1
     assert layer.is_dir() and not (project / 'states' / h1).exists(), (h1, sorted(os.listdir(project / 'deltas')), sorted(os.listdir(project / 'states')))
@@ -85,8 +85,8 @@ try:
     assert stored <= 6, f'the layer holds {stored} files'
     left = run(work, 'status', '--porcelain').stdout
     assert not left, left
-    assert run(work, 'show', 'HEAD:d0/f1').stdout == 'changed\n'
-    diff = run(work, 'diff', '--stat', 'HEAD~1', 'HEAD').stdout
+    assert run(work, 'show', 'head:d0/f1').stdout == 'changed\n'
+    diff = run(work, 'diff', '--stat', 'head~1', 'head').stdout
     assert 'd1/f100' in diff and 'new/deep/file' in diff, diff
     views = set(os.listdir(project / 'states'))
     log = run(work, 'log', '-p', '--', 'd0/f1').stdout
@@ -99,20 +99,20 @@ try:
     run(work, 'mv', 'd6/f600', 'd6/renamed')
     status = run(work, 'status', '--porcelain').stdout
     assert 'M  d6/f601' in status and 'R  d6/f600 -> d6/renamed' in status, status
-    run(work, 'commit', '-qm', 'complete index')
-    assert run(work, 'show', 'HEAD:d6/f601').stdout == 'staged first\n'
-    assert run(work, 'show', 'HEAD:d6/renamed').stdout == 'file 600\n'
+    run(work, 'save', '-qm', 'complete index')
+    assert run(work, 'show', 'head:d6/f601').stdout == 'staged first\n'
+    assert run(work, 'show', 'head:d6/renamed').stdout == 'file 600\n'
     assert not run(work, 'status', '--porcelain').stdout
     print('PASS mv after a thin add keeps the staged change', flush=True)
 
     # A staged removal in a folder keeps the folder and its other files.
     (work / 'd7/f700').unlink()
     run(work, 'add', '-A')
-    run(work, 'commit', '-qm', 'remove one file of a folder')
-    assert run(work, 'show', 'HEAD:d7/f701').stdout == 'file 701\n'
+    run(work, 'save', '-qm', 'remove one file of a folder')
+    assert run(work, 'show', 'head:d7/f701').stdout == 'file 701\n'
 
     # A line made from a thin head has the complete content.
-    run(work, 'branch', '-q', 'second')
+    run(work, 'line', 'new', '-q', 'second')
     assert tree(main.parent / 'second') == tree(work)
     print('PASS a line made from a thin head has the complete content', flush=True)
 
@@ -130,18 +130,18 @@ try:
     # gc removes unused views and gives a long chain a complete tree.
     run(work, 'config', 'thin.view_seconds', '0')
     run(work, 'config', 'thin.chain', '3')
-    run(work, 'show', 'HEAD')
-    run(work, 'diff', 'HEAD~1', 'HEAD', '--', 'd0/f1')
+    run(work, 'show', 'head')
+    run(work, 'diff', 'head~1', 'head', '--', 'd0/f1')
     for n in range(4):
         (work / 'd5' / f'f{500 + n}').write_bytes(f'commit {n}\n'.encode())
-        run(work, 'commit', '-qam', f'step {n}')
+        run(work, 'save', '-qam', f'step {n}')
     before = tree(work)
     run(work, 'gc')
     h = head(work)
     assert (project / 'states' / h).is_dir() and not (project / 'deltas' / h).exists()
     assert not (project / 'states' / h1).exists(), 'gc keeps an unused view'
     assert tree(work) == before and not run(work, 'status', '--porcelain').stdout
-    assert run(work, 'show', 'HEAD~3:d5/f500').stdout == 'commit 0\n'
+    assert run(work, 'show', 'head~3:d5/f500').stdout == 'commit 0\n'
     print('PASS gc removes unused views and shortens long chains', flush=True)
 
     # A changed file with two names makes a complete automatic state, which keeps both names.
@@ -155,7 +155,7 @@ try:
     auto = project / 'states' / made[0]
     assert os.lstat(auto / 'hard').st_ino == os.lstat(auto / 'd9/f900').st_ino
     os.unlink(work / 'hard')
-    run(work, 'commit', '-qam', 'after a linked change')
+    run(work, 'save', '-qam', 'after a linked change')
     print('PASS a changed file with two names makes a complete state', flush=True)
 
     # Commands that copy the working folder succeed while a process writes in it.
@@ -176,15 +176,15 @@ try:
     try:
         run(work, 'save', '-q')
         run(work, 'add', '-A')
-        run(work, 'commit', '-qm', 'during writes')
-        run(work, 'branch', '-q', 'busy-copy')
+        run(work, 'save', '-qm', 'during writes')
+        run(work, 'line', 'new', '-q', 'busy-copy')
     finally:
         stop.set()
         t.join()
     for n in range(5):
         (work / f'busy{n}').unlink(missing_ok=True)
     run(work, 'add', '-A')
-    run(work, 'commit', '-qm', 'after writes')
+    run(work, 'save', '-qm', 'after writes')
     print('PASS copies succeed while files change', flush=True)
 
     # A merge reads thin states and its result matches the line.

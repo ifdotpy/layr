@@ -23,8 +23,7 @@ mod disk;
 mod fsutil;
 mod gitbridge;
 mod ids;
-mod http;
-mod gateway;
+use layr_store::http;
 mod ignore_rules;
 mod lineops;
 mod merge;
@@ -32,6 +31,8 @@ mod model;
 mod oci;
 mod oplog;
 mod overlay;
+mod overlay_managers;
+mod person;
 mod privs;
 mod probes;
 mod radar;
@@ -123,17 +124,22 @@ fn main() {
             _ => break,
         }
     }
-    if argv.first().map(|s| s.as_str()) == Some("gateway") {
-        if let Err(error) = gateway::command(&argv[1..]) {
-            eprintln!("fatal: {error:#}");
-            std::process::exit(1);
+    if argv.first().map(String::as_str) == Some("person") {
+        match person::run(&argv[1..]) {
+            Ok(code) => std::process::exit(code),
+            Err(error) => {
+                eprintln!("layr person: {error:#}");
+                std::process::exit(1);
+            }
         }
-        return;
     }
     if argv.first().map(String::as_str) == Some("mount") {
         match disk::run(&argv[1..]) {
             Ok(code) => std::process::exit(code),
-            Err(error) => { eprintln!("layr mount: {error:#}"); std::process::exit(1); }
+            Err(error) => {
+                eprintln!("layr mount: {error:#}");
+                std::process::exit(1);
+            }
         }
     }
     if argv.first().map(|s| s.as_str()) == Some("daemon") {

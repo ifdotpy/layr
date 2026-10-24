@@ -1,7 +1,23 @@
 //! Read store trees without a local project or snapshot backend.
 
-pub(crate) use super::format::Entry;
-use super::{backend::Backend, keys, reader, Descriptor};
+#[derive(Clone)]
+pub struct Entry {
+    inner: super::format::Entry,
+    layer: Option<usize>,
+}
+impl std::ops::Deref for Entry {
+    type Target = super::format::Entry;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+struct LayerReader {
+    backend: Backend,
+    identity: String,
+    keys: BTreeMap<String, ed25519_dalek::VerifyingKey>,
+    attempts: BTreeMap<String, String>,
+}
+use super::{backend::Backend, keys, reader, Descriptor, StorePin};
 use anyhow::{bail, Context, Result};
 use ed25519_dalek::SigningKey;
 use std::collections::{BTreeMap, HashMap};
@@ -11,6 +27,8 @@ pub struct Access {
     pub machine: Option<(String, SigningKey)>,
     pub paper: Option<String>,
     pub identity: Option<String>,
+    pub pin: Option<StorePin>,
+    pub layers: std::sync::Arc<std::sync::Mutex<BTreeMap<String, String>>>,
 }
 
 pub struct Line {
@@ -27,6 +45,8 @@ pub struct Browse {
     identity: String,
     keys: BTreeMap<String, ed25519_dalek::VerifyingKey>,
     pub lines: Vec<Line>,
+    pub pin: StorePin,
+    layers: Vec<LayerReader>,
 }
 
 impl Browse {
@@ -37,6 +57,28 @@ impl Browse {
         if descriptor.format != 2 || !crate::model::is_uuid(&descriptor.project) {
             bail!("invalid store descriptor");
         }
+        if let Some(pin) = &access.pin {
+            pin.check(&descriptor)?;
+        }
+        let login = if env.contains_key("LAYR_PERSON_KEY_FILE") {
+            match &backend {
+                Backend::Gateway(g) => Some(crate::person::gateway_login(g)?),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let uid = rustix::process::getuid().as_raw();
+        let mut person =
+            crate::person::load(env, &crate::ctx::Caller::from_uid(uid).home, &std::env::current_dir()?, uid, login.as_deref())?;
+        if let (Backend::Gateway(gateway), Some(person)) = (&backend, &mut person) {
+            crate::person::gateway_access(gateway, person)?;
+        }
+        if let Some(person) = &person {
+            person.check(&descriptor)?;
+        }
+        let pin =
+            StorePin { project: descriptor.project.clone(), recipient: descriptor.recipient.clone(), paper_recipient: None };
         drop(stage);
         let stage = crate::trace::span("disk slot");
         let identity = if let Some(identity) = &access.identity {
@@ -45,10 +87,18 @@ impl Browse {
             if let Some(slot) = backend.get(&format!("slots/machine-{machine}.age"))? {
                 keys::open_machine_slot(&slot, key)?
             } else {
-                paper_identity(&backend, access.paper.as_deref())?
+                if let Some(person) = &person {
+                    person.open(&backend, &descriptor)?
+                } else {
+                    paper_identity(&backend, access.paper.as_deref())?
+                }
             }
         } else {
-            paper_identity(&backend, access.paper.as_deref())?
+            if let Some(person) = &person {
+                person.open(&backend, &descriptor)?
+            } else {
+                paper_identity(&backend, access.paper.as_deref())?
+            }
         };
         if keys::recipient_of(&identity)? != descriptor.recipient {
             bail!("the disk key does not match the store recipient");
@@ -71,6 +121,50 @@ impl Browse {
         let stage = crate::trace::span("disk trees");
         let attempts = reader::attempts(&backend)?;
         let mut decoder = reader::Reader::new(&backend, &identity, &records.keys);
+        let mut layers = Vec::new();
+        let mut layer_names = BTreeMap::new();
+        let authorities = crate::overlay_managers::from_lines(&descriptor.project, &records.lines, &records.keys)?;
+        let (published, refused) =
+            super::overlays::published(&backend, &descriptor.project, &descriptor.recipient, &records.keys, &authorities)?;
+        for reason in refused {
+            eprintln!("layr mount: {reason}");
+        }
+        for (name, published) in published {
+            let scoped = backend.scoped(&published.prefix())?;
+            let machine = access.machine.as_ref().map(|(id, key)| (id.as_str(), key));
+            let cache_key = format!("{}/{}/{}", descriptor.project, descriptor.recipient, published.prefix());
+            let opened =
+                super::overlays::open_identity(&scoped, &published.key, machine, person.as_ref(), access.paper.as_deref())?;
+            let identity = opened.or_else(|| access.layers.lock().ok()?.get(&cache_key).cloned());
+            let Some(identity) = identity else {
+                continue;
+            };
+            if keys::recipient_of(&identity)? != published.key.recipient {
+                bail!("cached layer identity differs from its signed recipient");
+            }
+            let overlay_records = reader::records(&scoped, &identity, &published.key.overlay)?;
+            if !overlay_records.lines.contains(&published.line) {
+                bail!("published overlay key is absent from the overlay log");
+            }
+            for (machine, key) in &overlay_records.keys {
+                if records.keys.get(machine) != Some(key) {
+                    bail!("overlay tree signer is not trusted");
+                }
+            }
+            authorities.get(&name).context("overlay has no creator authority")?.validate(
+                &overlay_records.lines,
+                &published.key.overlay,
+                &records.keys,
+            )?;
+            layer_names.insert(name, layers.len());
+            access
+                .layers
+                .lock()
+                .map_err(|_| anyhow::anyhow!("overlay key cache lock failed"))?
+                .insert(cache_key, identity.clone());
+            let attempts = reader::attempts(&scoped)?;
+            layers.push(LayerReader { backend: scoped, identity, keys: overlay_records.keys, attempts });
+        }
         let mut lines = Vec::new();
         for line in db.lines()? {
             let mut candidates = Vec::new();
@@ -86,12 +180,30 @@ impl Browse {
             };
             let (_, _, tree) = decoder.tree(&state.id, &attempts[&state.id])?;
             let machine = db.state_machine(&state.id)?.context("state signer is missing")?;
-            let kind = if state.kind == crate::model::StateKind::Auto { "auto" } else { "commit" };
-            lines.push(Line { name: line.name, head: state.id, kind: kind.into(), machine, time: state.time, files: tree.files });
+            let kind = if state.kind == crate::model::StateKind::Auto { "auto" } else { "state" };
+            let mut files: BTreeMap<_, _> =
+                tree.files.into_iter().map(|(path, inner)| (path, Entry { inner, layer: None })).collect();
+            // An overlay-only save can move the stack without making a new shared state.
+            let stack_machine = if state.id == line.head { &line.machine } else { &machine };
+            let stack = db.config(&format!("stack.{}@{}", line.id, stack_machine))?.or(db.config(&format!("stack.{}", line.id))?);
+            let stack: Vec<crate::overlay::Layer> = stack.map(serde_json::from_value).transpose()?.unwrap_or_default();
+            for layer in stack {
+                let Some(&index) = layer_names.get(&layer.overlay) else { continue };
+                let source = &layers[index];
+                let Some(attempt) = source.attempts.get(&layer.state) else { continue };
+                let (_, _, tree) =
+                    reader::Reader::new(&source.backend, &source.identity, &source.keys).tree(&layer.state, attempt)?;
+                for (path, inner) in tree.files {
+                    // A higher layer replaces a lower file or directory at the same path.
+                    files.retain(|old, _| !old.starts_with(&format!("{path}/")) && !path.starts_with(&format!("{old}/")));
+                    files.insert(path, Entry { inner, layer: Some(index) });
+                }
+            }
+            lines.push(Line { name: line.name, head: state.id, kind: kind.into(), machine, time: state.time, files });
         }
         drop(decoder);
         drop(stage);
-        Ok(Self { backend, identity, keys: records.keys, lines })
+        Ok(Self { backend, identity, keys: records.keys, lines, pin, layers })
     }
 
     pub fn identity(&self) -> &str {
@@ -99,7 +211,17 @@ impl Browse {
     }
 
     pub fn read(&mut self, entry: &Entry) -> Result<Vec<u8>> {
-        reader::Reader::new(&self.backend, &self.identity, &self.keys).read(entry)
+        let descriptor: Descriptor = serde_json::from_slice(&self.backend.get("store.json")?.context("store.json is missing")?)?;
+        if descriptor.format != 2 {
+            bail!("unsupported store format {}", descriptor.format);
+        }
+        self.pin.check(&descriptor)?;
+        if let Some(index) = entry.layer {
+            let layer = self.layers.get(index).context("unknown overlay source")?;
+            reader::Reader::new(&layer.backend, &layer.identity, &layer.keys).read(&entry.inner)
+        } else {
+            reader::Reader::new(&self.backend, &self.identity, &self.keys).read(&entry.inner)
+        }
     }
 }
 

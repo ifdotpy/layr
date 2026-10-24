@@ -11,12 +11,12 @@ printf '<xml>&\n' > 'space ü.txt'
 ln -s a.txt inside
 ln -s /etc/shadow outside
 l add -A
-l commit -qm disk-start
+l save -qm disk-start
 l remote add origin "file://$T/remote" --paper-key-out "$T/paper" >/dev/null
 l push origin >/dev/null
-l branch empty -q
-l branch -d empty -q
-l branch other -q
+l line new empty -q
+l line delete empty -q
+l line new other -q
 echo saved > autosaved.txt
 l save -q
 l push origin --auto >/dev/null
@@ -93,7 +93,7 @@ try:
  writer=os.environ.copy(); writer['LAYR_ROOT']=os.environ['DISK_TEST_STORE']; writer.pop('LAYR_SOCKET',None)
  working=pathlib.Path(writer['LAYR_ROOT'])/'projects/disk/lines/main'
  (working/'a.txt').write_text('new')
- for args in [['add','a.txt'],['commit','-qm','disk-refresh'],['push','origin']]:
+ for args in [['add','a.txt'],['save','-qm','disk-refresh'],['push','origin']]:
   subprocess.run([binary,*args],cwd=working,env=writer,check=True,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
  subprocess.run(['chown','-R','layr-disk-test',str(root/'remote')],check=True)
  check(request('GET','/main/a.txt')[2]==b'abc','old view stays consistent until refresh')
@@ -127,6 +127,28 @@ try:
  print('PASS standalone machine slot')
 finally:
  os.killpg(slot_process.pid,signal.SIGTERM);slot_process.wait(timeout=10);slot_log.close()
+# The real all-store CLI lists locked stores without opening their slots.
+all_log=open(root/'all.log','w+')
+all_env=dict(os.environ,HOME=str(root/'home'),LAYR_ROOT=os.environ['DISK_TEST_STORE'],XDG_CONFIG_HOME=str(root/'all-config'))
+all_process=subprocess.Popen([binary,'mount','--all','--listen','127.0.0.1:0'],env=all_env,stdout=all_log,stderr=all_log,start_new_session=True)
+try:
+ deadline=time.monotonic()+30
+ while time.monotonic()<deadline:
+  all_log.flush();all_log.seek(0);text=all_log.read();match=re.search(r'http://127\.0\.0\.1:(\d+)/',text)
+  if match: break
+  if all_process.poll() is not None: raise AssertionError(text)
+  time.sleep(.1)
+ else: raise AssertionError('all-store disk did not start')
+ port=int(match[1])
+ status,_,body=request('PROPFIND','/',{'Depth':'1'})
+ assert status==207 and b'/origin/' in body, 'all-store root misses the named remote'
+ status,_,body=request('PROPFIND','/origin/',{'Depth':'1'})
+ assert status==207 and b'LOCKED.txt' in body and b'/main/' not in body, 'locked store exposes files'
+ assert request('GET','/origin/LOCKED.txt')[2]==b'Run: layr mount --unlock origin\n', 'locked note command differs'
+ assert request('GET','/origin/main/a.txt')[0]==423, 'locked file read is not refused'
+ print('PASS all-store WebDAV (4 checks)')
+finally:
+ os.killpg(all_process.pid,signal.SIGTERM);all_process.wait(timeout=10);all_log.close()
 CHECK
 PASS=$((PASS + 1))
 finish

@@ -1,0 +1,8 @@
+#layr ref set env/prod main >/dev/null
+layr config check.unit 'make test'
+layr protect env/prod --check unit
+echo '// faster' >> src/parser.rs && layr save -qam "Speed up the parser"
+layr ref set env/prod main --expect env/prod
+layr try main --check unit
+layr ref set env/prod main --expect env/prod
+layr ref log env/prod

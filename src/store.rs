@@ -140,6 +140,9 @@ pub fn db_file(project_dir: &Path) -> PathBuf {
 }
 
 pub fn check_name(kind: &str, name: &str) -> Result<()> {
+    if matches!(kind, "line" | "tag" | "ref") && matches!(name, "HEAD" | "head") {
+        bail!("reserved revision name: {name}");
+    }
     if kind == "line" && crate::model::reserved_revision(name) {
         bail!("reserved revision prefix in line name '{name}'");
     }
@@ -311,6 +314,17 @@ impl<'a> Project<'a> {
     /// Folders of a project without records (for a restore or a replica).
     pub fn create_empty(store: &'a Store, name: &str) -> Result<Project<'a>> {
         check_name("project", name)?;
+        Self::create_empty_in(store, name)
+    }
+
+    pub fn create_empty_overlay(store: &'a Store, name: &str) -> Result<Project<'a>> {
+        if !name.contains('%') {
+            bail!("not an overlay name: {name}");
+        }
+        Self::create_empty_in(store, name)
+    }
+
+    fn create_empty_in(store: &'a Store, name: &str) -> Result<Project<'a>> {
         let dir = store.project_dir(name)?;
         if db_file(&dir).exists() {
             bail!("project '{name}' already exists");
@@ -470,6 +484,7 @@ impl<'a> Project<'a> {
     ///
     /// Only records of trusted machines are taken (see `Trust`).
     pub fn import_lines(&self, lines: &[String], trust: Trust) -> Result<usize> {
+        crate::overlay_managers::validate_import(self, lines)?;
         use std::collections::{BTreeMap, BTreeSet};
         let mut parsed: Vec<oplog::Signed> = Vec::new();
         for l in lines {

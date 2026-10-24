@@ -8,7 +8,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FType {
@@ -65,20 +65,7 @@ pub fn meta_of(m: &fs::Metadata) -> Meta {
     Meta { ftype, mode: m.mode() & 0o7777, size: m.len(), ino: m.ino(), uid: m.uid(), gid: m.gid(), mtime: m.mtime() }
 }
 
-/// Check a relative path: no absolute paths, no `..`, no empty components.
-pub fn check_rel(path: &str) -> Result<()> {
-    if path.is_empty() {
-        return Ok(());
-    }
-    let p = Path::new(path);
-    for c in p.components() {
-        match c {
-            Component::Normal(_) => {}
-            _ => bail!("invalid path: {path}"),
-        }
-    }
-    Ok(())
-}
+pub use layr_store::paths::check_rel;
 
 /// Join `rel` to `root` after checking that every parent folder is a real folder (not a link).
 pub fn safe_join(root: &Path, rel: &str) -> Result<PathBuf> {

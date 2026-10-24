@@ -6,19 +6,21 @@ use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-#[derive(Clone, Debug)]
-pub struct Object {
-    pub key: String,
-    pub modified: i64,
-}
+pub use layr_store::s3::Object;
 
+#[derive(Clone)]
 pub enum Backend {
     File(PathBuf, u32, u32),
     S3(super::s3::S3),
     Gateway(super::gateway::Gateway),
+    Prefix(Box<Backend>, String),
 }
 
 impl Backend {
+    pub fn scoped(&self, prefix: &str) -> Result<Self> {
+        check_key(prefix)?;
+        Ok(Self::Prefix(Box::new(self.clone()), format!("{prefix}/")))
+    }
     pub fn file(root: PathBuf) -> Self {
         Self::File(root, rustix::process::geteuid().as_raw(), rustix::process::getegid().as_raw())
     }
@@ -46,7 +48,7 @@ impl Backend {
             if bucket.is_empty() || bucket.contains(['@', ':', '?', '#']) || prefix.contains(['?', '#']) {
                 bail!("invalid S3 bucket");
             }
-            return Ok(Self::S3(super::s3::S3::with_env(bucket, prefix, &std::collections::HashMap::new())?));
+            return Ok(Self::S3(super::s3::S3::unconnected(bucket, prefix)?));
         }
         bail!("store URL must start with file://, s3:// or layr+https://")
     }
@@ -61,21 +63,31 @@ impl Backend {
                 *s3 = super::s3::S3::with_env(bucket, prefix, env)?;
             }
             Self::Gateway(gateway) => gateway.connect_reader(env)?,
-            Self::File(..) => {}
+            Self::File(..) | Self::Prefix(..) => {}
         }
         Ok(backend)
     }
 
     pub fn unlock_reader(&self, identity: &str) -> Result<()> {
         match self {
+            Self::Prefix(base, _) => base.unlock_reader(identity),
             Self::Gateway(gateway) => gateway.set_identity(identity),
             Self::File(..) | Self::S3(_) => Ok(()),
+        }
+    }
+
+    pub fn can_read(&self) -> bool {
+        match self {
+            Self::Gateway(gateway) => gateway.has_read_identity(),
+            Self::Prefix(base, _) => base.can_read(),
+            _ => true,
         }
     }
 
     pub fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
         check_key(key)?;
         match self {
+            Self::Prefix(base, prefix) => base.get(&format!("{prefix}{key}")),
             Self::S3(s) => s.get(key),
             Self::Gateway(g) => g.get(key),
             Self::File(root, uid, gid) => crate::privs::as_user_fs(*uid, *gid, || {
@@ -99,6 +111,7 @@ impl Backend {
     pub fn put_new(&self, key: &str, body: Vec<u8>) -> Result<bool> {
         check_key(key)?;
         match self {
+            Self::Prefix(base, prefix) => base.put_new(&format!("{prefix}{key}"), body),
             Self::S3(s) => s.put_new(key, body),
             Self::Gateway(g) => g.put_new(key, body),
             Self::File(root, uid, gid) => crate::privs::as_user_fs(*uid, *gid, || {
@@ -132,6 +145,14 @@ impl Backend {
             check_key(prefix.trim_end_matches('/'))?;
         }
         match self {
+            Self::Prefix(base, scope) => base
+                .list(&format!("{scope}{prefix}"))?
+                .into_iter()
+                .map(|mut object| {
+                    object.key = object.key.strip_prefix(scope).context("object is outside its namespace")?.to_string();
+                    Ok(object)
+                })
+                .collect(),
             Self::S3(s) => s.list(prefix),
             Self::Gateway(g) => g.list(prefix),
             Self::File(root, uid, gid) => crate::privs::as_user_fs(*uid, *gid, || {
@@ -148,6 +169,7 @@ impl Backend {
     pub fn delete(&self, key: &str) -> Result<()> {
         check_key(key)?;
         match self {
+            Self::Prefix(base, prefix) => base.delete(&format!("{prefix}{key}")),
             Self::S3(s) => s.delete(key),
             Self::Gateway(g) => g.delete(key),
             Self::File(root, uid, gid) => crate::privs::as_user_fs(*uid, *gid, || {
@@ -242,6 +264,22 @@ mod tests {
         backend.unlock_reader("not used").unwrap();
         assert_eq!(backend.get("store.json").unwrap().unwrap(), b"local");
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn scoped_objects_use_the_same_exclusive_publication_and_stay_in_their_namespace() {
+        let root = std::env::temp_dir().join(crate::ids::new_id());
+        let backend = Backend::file(root.clone());
+        let overlay = backend.scoped("overlays/one").unwrap();
+        assert!(overlay.put_new("states/a", b"overlay".to_vec()).unwrap());
+        assert!(!overlay.put_new("states/a", b"replacement".to_vec()).unwrap());
+        assert!(backend.put_new("states/a", b"shared".to_vec()).unwrap());
+        assert_eq!(overlay.get("states/a").unwrap().unwrap(), b"overlay");
+        assert_eq!(backend.get("states/a").unwrap().unwrap(), b"shared");
+        assert_eq!(overlay.list("states/").unwrap()[0].key, "states/a");
+        assert_eq!(overlay.list("").unwrap().len(), 1);
+        assert!(backend.scoped("../bad").is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

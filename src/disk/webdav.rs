@@ -1,6 +1,6 @@
 //! Read-only WebDAV. Adapted from Layr Desk, using the shared HTTP parser.
 
-use super::{Disk, Node};
+use super::{Node, View};
 use crate::http::{self, Request};
 use anyhow::Result;
 use std::io::Write;
@@ -60,7 +60,7 @@ fn properties(path: &str, node: &Node) -> String {
     format!("<D:response><D:href>{}</D:href><D:propstat><D:prop><D:displayname>{}</D:displayname>{rest}<D:getlastmodified>{}</D:getlastmodified><D:creationdate>{created}</D:creationdate></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>", xml(&href(path, folder)), xml(name), date(time))
 }
 
-pub(super) fn serve(disk: &Disk, request: &Request, stream: &mut impl Write) -> Result<()> {
+pub(super) fn serve(disk: &dyn View, request: &Request, stream: &mut impl Write) -> Result<()> {
     let headers = vec![("Allow".into(), ALLOW.into()), ("DAV".into(), "1".into()), ("MS-Author-Via".into(), "DAV".into())];
     if request.method == "OPTIONS" {
         http::response(stream, 200, &headers, b"")?;
@@ -75,7 +75,7 @@ pub(super) fn serve(disk: &Disk, request: &Request, stream: &mut impl Write) -> 
         return Ok(());
     };
     let Some((node, children)) = disk.lookup(&path) else {
-        http::response(stream, 404, &[], b"")?;
+        http::response(stream, if disk.locked(&path) { 423 } else { 404 }, &[], b"")?;
         return Ok(());
     };
     if request.method == "PROPFIND" {
@@ -99,6 +99,10 @@ pub(super) fn serve(disk: &Disk, request: &Request, stream: &mut impl Write) -> 
         http::response(stream, 405, &headers, b"")?;
         return Ok(());
     };
+    if disk.locked(&path) {
+        http::response(stream, 423, &[], b"")?;
+        return Ok(());
+    }
     let etag = format!("\"{etag}\"");
     let mut headers = vec![
         ("Accept-Ranges".into(), "bytes".into()),
@@ -134,7 +138,14 @@ pub(super) fn serve(disk: &Disk, request: &Request, stream: &mut impl Write) -> 
         stream.flush()?;
         return Ok(());
     }
-    let bytes = disk.read(&content)?;
+    let bytes = match disk.read(&path, &content) {
+        Ok(bytes) => bytes,
+        Err(_) if disk.locked(&path) => {
+            http::response(stream, 423, &[], b"")?;
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    };
     let payload = &bytes[usize::try_from(start)?..usize::try_from(end)?];
     http::response(stream, status, &headers, payload)?;
     Ok(())

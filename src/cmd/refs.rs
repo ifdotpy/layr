@@ -20,7 +20,7 @@ pub fn refs(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 outln!(ctx, "{}", serde_json::to_string(&refs)?);
             } else {
                 for r in refs {
-                    outln!(ctx, "{}\t{}{}", r.name, r.target, r.expires_at.map(|t| format!("\texpires {t}")).unwrap_or_default());
+                    outln!(ctx, "{}\t{}{}", r.name, shown(&r.target), r.expires_at.map(|t| format!("\texpires {t}")).unwrap_or_default());
                 }
             }
         }
@@ -32,7 +32,7 @@ pub fn refs(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 let mut n = 0;
                 for e in entries {
                     if let Some(value) = e.after {
-                        outln!(ctx, "{}@{{{n}}}\t{}", e.name, value.target);
+                        outln!(ctx, "{}@{{{n}}}\t{}", e.name, shown(&value.target));
                         n += 1;
                     } else {
                         outln!(ctx, "{}\tdeleted", e.name);
@@ -49,6 +49,9 @@ pub fn refs(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 bail!("--ttl is only valid for ref set");
             }
             let name = &a.pos[1];
+            if matches!(name.as_str(), "HEAD" | "head") {
+                bail!("reserved revision name: {name}");
+            }
             if !crate::model::ref_namespace(name) {
                 bail!("mutable ref names must start with one of: {}", crate::model::REF_PREFIXES.join(", "));
             }
@@ -57,7 +60,7 @@ pub fn refs(ctx: &Ctx, args: &[String]) -> Result<i32> {
             }
             let _lock = repo.p.lock()?;
             if repo.p.db.line_by_name(name)?.is_some() || repo.p.db.line_by_id(name)?.is_some() {
-                bail!("'{name}' is a line; use commit, merge or reset");
+                bail!("'{name}' is a line; use save, merge or reset");
             }
             let before = repo.p.db.ref_value(name, ids::now_ms())?;
             if let Some(expect) = a.get("--expect") {
@@ -90,7 +93,7 @@ pub fn refs(ctx: &Ctx, args: &[String]) -> Result<i32> {
             if a.has("--json") {
                 outln!(ctx, "{}", serde_json::to_string(&change)?);
             } else if let Some(r) = change.after {
-                outln!(ctx, "{}\t{}", r.name, r.target);
+                outln!(ctx, "{}\t{}", r.name, shown(&r.target));
             } else {
                 outln!(ctx, "deleted {name}");
             }
@@ -172,10 +175,17 @@ pub fn authorize_update(
         let argv = vec!["sh".into(), "-c".into(), command.clone()];
         if repo.p.db.check_exit(&target.target, &argv, Some(0))?.is_none() {
             bail!(
-                "ref '{name}' needs a passing check '{check}' for exactly state {} and command '{command}'; run layr try first",
+                "ref '{name}' needs a passing check '{check}' for exactly state {} and command '{command}'; run 'layr try {} --check {check}' first",
+                ids::short(&target.target),
                 ids::short(&target.target)
             );
         }
     }
     Ok(())
+}
+
+/// A state id as people read it (the short form); other targets as they are. --json keeps full ids.
+fn shown(target: &str) -> String {
+    let d = ids::display(target);
+    if d.len() > 7 && d != target { d[..7].to_string() } else { target.to_string() }
 }

@@ -151,3 +151,66 @@ Changes to the header, btrfs identity, or tree content must fail verification.
 Legacy cache layer snapshots do not use this format. The writer reports their names as omitted.
 After Core adds cache states, `--caches` carries these ordinary states under `states/<UUID>/`.
 Before that, a store push with `--caches` fails with a clear error.
+
+## Overlay objects and gateway access
+
+An overlay uses a separate layer identity for each store remote and epoch.
+The epoch is a UUID. Its objects use the v2 record and state formats:
+
+```text
+overlays/<overlay UUID>/keys/<epoch>-<record UUID>.json
+overlays/<overlay UUID>/epochs/<epoch>/records/<machine>/<first>-<last>.age
+overlays/<overlay UUID>/epochs/<epoch>/states/<state>/<attempt>.tree.age
+overlays/<overlay UUID>/epochs/<epoch>/states/<state>/<attempt>.<part>.data.age
+overlays/<overlay UUID>/epochs/<epoch>/slots/machine-<machine UUID>.age
+overlays/<overlay UUID>/epochs/<epoch>/slots/person-<login>-<fp>.age
+overlays/<overlay UUID>/epochs/<epoch>/slots/paper.age
+```
+
+The key object contains the exact signed `overlay.key` record from the overlay log.
+Its data binds `overlay`, `name`, `epoch`, `parent`, `store`, `recipient` and `readers`.
+`overlay` is the internal overlay project UUID. `parent` is the parent project UUID.
+`store` is the pinned store recipient. `recipient` is the age layer recipient.
+`readers` binds machine and person principals to the signed reader set.
+The optional `revocation` UUID forces a new epoch after removal, even if a reader is added again before push.
+The reader verifies the record against a trusted parent machine key.
+The encrypted overlay log must contain the same key record.
+Each epoch contains the complete record log and selected states, with no reference to objects in earlier epochs.
+The writer publishes slots first, epoch objects next and the public key record last.
+Reader removal creates a new epoch. Every object uses conditional create.
+Person slot fingerprints use the existing v2 person rule.
+The optional `paper_recipient` in the local store pin is public. It contains no secret.
+
+The gateway must apply these access rules:
+
+1. With a write token, permit GET and list only for `overlays/<id>/keys/` objects, which contain public signed key records.
+2. With a write token, permit conditional PUT under `overlays/<id>/keys/` and `overlays/<id>/epochs/<epoch>/`.
+3. Permit records, states and slots under the epoch for these conditional writes.
+4. Require the vault read proof for every other overlay read.
+
+The Layr client implements this contract. The separate `layr-gateway` server must implement the same rules.
+
+### Overlay manager authority
+
+The machine that signs `overlay.create` is the initial key manager.
+The creation metadata binds the overlay name and internal project UUID.
+`overlay.managers` changes the machine set in the overlay log.
+Its data contains `parent`, `overlay`, `name`, `machines`, `previous` and `retained`.
+`previous` links to the prior manager record, or is null for the first change.
+A current manager must sign the change and remain in its new machine set.
+
+The parent project carries the exact signed manager record in `overlay.authority.data.authority`.
+`overlay.authority.data.name` identifies the overlay.
+Readers verify the inner signature against a trusted parent machine key.
+They apply manager changes through the signed previous-record links, independent of machine clocks.
+A missing link or fork stops the authority check.
+
+`retained` maps previously authorized key and readers record IDs to SHA-256 digests of their exact signed line bytes.
+It also includes initial overlay access records.
+A later manager change preserves all prior retained digests.
+This preserves historical records after manager removal and prevents a removed signer from replacing them.
+A record from a current manager is authorized. An older record must match its retained digest.
+An unauthorized public key object stays unused. The report names its signer.
+An unauthorized readers record stops import before it changes the local policy.
+Other trusted machines still publish data to the manager's layer recipient.
+No additional gateway object path is required.

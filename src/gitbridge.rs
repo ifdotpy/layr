@@ -536,6 +536,12 @@ pub fn import_commit(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str, author
     Ok((st.id, true))
 }
 
+/// Removes the given paths from an index before they are added again. A copied index keeps the
+/// stat data of the base state, and git takes a listed path as unchanged when its size and mtime
+/// second match. An edit of the same size in the same second then kept the old blob. The copy
+/// also gives the index a new mtime, which turns off git's own check for such racy entries.
+const FORGET_CHANGED: [&str; 4] = ["update-index", "--force-remove", "-z", "--stdin"];
+
 /// The folder that git reads `paths` of a state from: its complete tree, or on APFS a private
 /// copy of only those paths when the state is a thin layer.
 fn work_tree(repo: &Repo, src: &crate::repo::Snap, paths: &[String], keep: &mut Vec<crate::repo::Temp>) -> Result<PathBuf> {
@@ -614,6 +620,8 @@ pub fn build_index(repo: &Repo, state: &str, commit: &str, prev_state: Option<&s
                 input.push(0);
             }
             let root = work_tree(repo, &src, &paths, &mut keep)?;
+            // Changed paths are hashed again: see FORGET_CHANGED.
+            run(&root, &FORGET_CHANGED, Some(&input))?;
             run(&root, &["update-index", "--add", "--remove", "-z", "--stdin"], Some(&input))?;
             // Unchanged files share size and time with the previous state: their stat data stay
             // valid. A thin state has no complete folder to refresh against.
@@ -859,20 +867,17 @@ fn commit_tree(
             Some(root) => root,
             None => work_tree(repo, &src, &paths, &mut keep)?,
         };
-        let mut c = base_cmd(&s);
-        c.env("GIT_INDEX_FILE", &tmp_idx).env("GIT_WORK_TREE", &root).args([
-            "update-index",
-            "--add",
-            "--remove",
-            "-z",
-            "--stdin",
-        ]);
-        c.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped());
-        let mut ch = c.spawn()?;
-        ch.stdin.take().unwrap().write_all(&input)?;
-        let out = ch.wait_with_output()?;
-        if !out.status.success() {
-            bail!("git update-index failed: {}", String::from_utf8_lossy(&out.stderr));
+        // Changed paths are hashed again: see FORGET_CHANGED.
+        for args in [&FORGET_CHANGED[..], &["update-index", "--add", "--remove", "-z", "--stdin"]] {
+            let mut c = base_cmd(&s);
+            c.env("GIT_INDEX_FILE", &tmp_idx).env("GIT_WORK_TREE", &root).args(args);
+            c.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped());
+            let mut ch = c.spawn()?;
+            ch.stdin.take().unwrap().write_all(&input)?;
+            let out = ch.wait_with_output()?;
+            if !out.status.success() {
+                bail!("git update-index failed: {}", String::from_utf8_lossy(&out.stderr));
+            }
         }
         let tree = String::from_utf8_lossy(&base_cmd(&s).env("GIT_INDEX_FILE", &tmp_idx).args(["write-tree"]).output()?.stdout)
             .trim()

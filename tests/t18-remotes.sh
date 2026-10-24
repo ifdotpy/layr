@@ -57,30 +57,30 @@ B adopt main >/dev/null
 cd "$BR/projects/x/lines/main"
 echo peer > peer.txt
 B add peer.txt
-B commit -qm peer-first
-bhead=$(B rev-parse HEAD)
+B save -qm peer-first
+bhead=$(B rev-parse head)
 cd "$A/lines/main"
-ahead=$(l rev-parse HEAD)
+ahead=$(l rev-parse head)
 l fetch peer --command -- "${transport[@]}"
-eq "fetch leaves the local head" "$ahead" "$(l rev-parse HEAD)"
+eq "fetch leaves the local head" "$ahead" "$(l rev-parse head)"
 eq "fetch receives the peer state" peer "$(l show "$bhead:peer.txt")"
 l pull peer --ff-only --json --command -- "${transport[@]}" > "$T/pull.json"
 ok "pull prints one JSON result" python3 - "$T/pull.json" <<'CHECK'
 import json,sys
 d=json.load(open(sys.argv[1])); assert d['operation']=='pull' and d['conflicts']==0 and d['exit']==0
 CHECK
-eq "pull fast-forwards" "$bhead" "$(l rev-parse HEAD)"
+eq "pull fast-forwards" "$bhead" "$(l rev-parse head)"
 
 # Each direction also limits records, including metadata, rather than only stream payloads.
 echo local > local.txt
 l add local.txt
-l commit -qm local-only
-local_head=$(l rev-parse HEAD)
+l save -qm local-only
+local_head=$(l rev-parse head)
 cd "$BR/projects/x/lines/main"
 echo second > second.txt
 B add second.txt
-B commit -qm peer-second
-peer_head=$(B rev-parse HEAD)
+B save -qm peer-second
+peer_head=$(B rev-parse head)
 cd "$A/lines/main"
 l fetch peer --json --command -- "${transport[@]}" > "$T/fetch.json"
 no "fetch does not send the local state record" B show "$local_head:local.txt"
@@ -94,46 +94,46 @@ eq "push sends the local state" local "$(B show "$local_head:local.txt")"
 cd "$BR/projects/x/lines/main"
 echo third > third.txt
 B add third.txt
-B commit -qm peer-third
-third=$(B rev-parse HEAD)
+B save -qm peer-third
+third=$(B rev-parse head)
 cd "$A/lines/main"
 l push peer --command -- "${transport[@]}"
 no "push does not receive the peer state record" l show "$third:third.txt"
 l pull peer --command -- "${transport[@]}"
-eq "divergent pull makes a merge" 2 "$(l show -s --format=%p HEAD | wc -w | xargs)"
+eq "divergent pull makes a merge" 2 "$(l show -s --format=%p head | wc -w | xargs)"
 ok "the merge keeps both sides" test -f local.txt -a -f third.txt
 
 # A conflicting pull uses the existing merge engine and keeps its conflict state.
 cd "$BR/projects/x/lines/main"
 echo theirs > notes.txt
-B commit -qam peer-conflict
+B save -qam peer-conflict
 cd "$A/lines/main"
 echo ours > notes.txt
-l commit -qam local-conflict
+l save -qam local-conflict
 no "a conflict makes pull fail" l pull peer --command -- "${transport[@]}"
 has "the conflict remains in the line" "UU notes.txt" "$(l status -s)"
 echo resolved > notes.txt
 l add notes.txt
-l commit -qm resolve
+l save -qm resolve
 
 # Retention invariants use an unadopted line on B, so its deletion can be undone there.
-l branch -q doomed
+l line new -q doomed
 cd "$A/lines/doomed"
 echo retained > retained.txt
 l add retained.txt
-l commit -qm retained
-retained=$(l rev-parse HEAD)
+l save -qm retained
+retained=$(l rev-parse head)
 retained_dir=$(ls -d "$A/states/"*"-${retained:0:12}")
 cd "$A/lines/main"
 l sync peer --command -- "${transport[@]}"
 ls "$BR/projects/x/states" | sort > "$T/before-states"
 echo uncommitted > "$A/lines/doomed/uncommitted.txt"
-l branch -D doomed >/dev/null
+l line delete -D doomed >/dev/null
 deleted=$(l op log --all -n 1 --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 l sync peer --command -- "${transport[@]}"
 ls "$BR/projects/x/states" | sort > "$T/after-states"
 eq "sync never removes a peer state" "" "$(comm -23 "$T/before-states" "$T/after-states")"
-eq "the deleted line is absent on B" "" "$(B branch | grep doomed || true)"
+eq "the deleted line is absent on B" "" "$(B line list | grep doomed || true)"
 l config undo.days 0
 l config retention.auto 0
 l config retention.hours 0
@@ -165,21 +165,21 @@ ok "remote trust records the known key" l remote list --json
 # Live refs make automatic states explicit transfer roots without --auto.
 echo pinned-push > ref-auto.txt
 l save -q
-auto_push=$(l rev-parse 'HEAD@{0}')
+auto_push=$(l rev-parse 'head@{0}')
 l ref set pins/peer-push "$auto_push" >/dev/null
 l push peer --command -- "${transport[@]}" >/dev/null
 eq "push includes a live ref to an automatic state" pinned-push "$(B show "$auto_push:ref-auto.txt")"
 cd "$BR/projects/x/lines/main"
 echo pinned-fetch > ref-auto.txt
 B save -q
-auto_fetch=$(B rev-parse 'HEAD@{0}')
+auto_fetch=$(B rev-parse 'head@{0}')
 B ref set pins/peer-fetch "$auto_fetch" >/dev/null
 cd "$A/lines/main"
 l fetch peer --command -- "${transport[@]}" >/dev/null
 eq "fetch includes a live ref to an automatic state" pinned-fetch "$(l show "$auto_fetch:ref-auto.txt")"
 echo pinned-sync > ref-auto.txt
 l save -q
-auto_sync=$(l rev-parse 'HEAD@{0}')
+auto_sync=$(l rev-parse 'head@{0}')
 l ref set pins/peer-sync "$auto_sync" >/dev/null
 l sync peer --command -- "${transport[@]}" >/dev/null
 eq "sync includes a live ref to an automatic state" pinned-sync "$(B show "$auto_sync:ref-auto.txt")"

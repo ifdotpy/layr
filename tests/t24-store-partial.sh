@@ -7,10 +7,10 @@ l init project --from "$T/source" -q >/dev/null
 AR=$LAYR_ROOT
 cd "$AR/projects/project/lines/main"
 l remote add archive "file://$T/archive" --paper-key-out "$T/paper" >/dev/null
-l branch -q delayed
+l line new -q delayed
 cd ../delayed
 printf 'delayed bytes\n' >> notes.txt
-l commit -qam delayed
+l save -qam delayed
 l push archive -q
 l op export > "$T/records"
 state=$(python3 - "$T/records" <<'PY'

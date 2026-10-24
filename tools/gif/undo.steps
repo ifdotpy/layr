@@ -1,0 +1,8 @@
+layr line new fix
+cd ../fix
+echo '// handle empty input' >> src/parser.rs
+layr save -am "Fix the parser"
+rm -rf src
+ls src
+layr restore .
+ls src

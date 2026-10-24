@@ -1,5 +1,5 @@
-//! Revision names: `HEAD`, `@`, line names, `line@machine`, tags, remote refs (`origin/main`),
-//! state ids and their prefixes, git commit ids, `stash@{n}`, `HEAD@{n}` (automatic states,
+//! Revision names: `head`, `@`, line names, `line@machine`, tags, remote refs (`origin/main`),
+//! state ids and their prefixes, git commit ids, `park@{n}`, `head@{n}` (automatic states,
 //! newest first) and the suffixes `~n`, `^` and `^n`.
 
 use crate::model::{Line, StateKind};
@@ -7,6 +7,7 @@ use crate::repo::Repo;
 use anyhow::{bail, Result};
 
 pub fn resolve(repo: &Repo, line: Option<&Line>, rev: &str) -> Result<String> {
+    reject_old(rev)?;
     let (base, suffix) = split_suffix(rev);
     let (name, at) = match base.find("@{") {
         Some(i) if base.ends_with('}') => (&base[..i], Some(&base[i + 2..base.len() - 1])),
@@ -21,16 +22,16 @@ pub fn resolve(repo: &Repo, line: Option<&Line>, rev: &str) -> Result<String> {
                 .get(n)
                 .map(|r| r.target.clone())
                 .ok_or_else(|| anyhow::anyhow!("{rev}: ref has only {} positions", positions.len()))?
-        } else if name == "stash" {
+        } else if name == "park" {
             let l = need_line(line, rev)?;
             let v = repo.p.db.line_states(&l.id, StateKind::Stash)?;
             match v.get(n) {
                 Some(s) => s.id.clone(),
-                None => bail!("stash@{{{n}}} does not exist"),
+                None => bail!("park@{{{n}}} does not exist"),
             }
         } else {
             let l =
-                if name.is_empty() || name == "HEAD" || name == "@" { need_line(line, rev)?.clone() } else { repo.line(name)? };
+                if name.is_empty() || name == "head" || name == "@" { need_line(line, rev)?.clone() } else { repo.line(name)? };
             let v = repo.p.db.line_states(&l.id, StateKind::Auto)?;
             match v.get(n) {
                 Some(s) => s.id.clone(),
@@ -73,6 +74,7 @@ pub fn resolve(repo: &Repo, line: Option<&Line>, rev: &str) -> Result<String> {
 
 /// Resolve the complete stack for an exact view or line, and a layer-free view for a state.
 pub fn resolve_view(repo: &Repo, line: Option<&Line>, rev: &str) -> Result<crate::overlay::View> {
+    reject_old(rev)?;
     let view = if let Some(id) = rev.strip_prefix("views/") {
         repo.saved_view(id)?
     } else if let Some(id) = rev.strip_prefix("attestations/") {
@@ -82,7 +84,7 @@ pub fn resolve_view(repo: &Repo, line: Option<&Line>, rev: &str) -> Result<crate
         } else {
             crate::overlay::View::new(resolve(repo, line, rev)?, Vec::new())
         }
-    } else if matches!(rev, "" | "HEAD" | "@") {
+    } else if matches!(rev, "" | "head" | "@") {
         repo.view_of(need_line(line, rev)?)?
     } else if let Some(line) = repo.p.db.line_by_name(rev)? {
         repo.view_of(&repo.localize(line)?)?
@@ -91,6 +93,19 @@ pub fn resolve_view(repo: &Repo, line: Option<&Line>, rev: &str) -> Result<crate
     };
     repo.check_view_collected(&view)?;
     Ok(view)
+}
+
+/// Reject old revision tokens before a caller can reinterpret them as paths or refs.
+pub fn reject_old(rev: &str) -> Result<()> {
+    let rev = rev.trim_start_matches('^');
+    let base = rev.split(['~', '^', ':']).next().unwrap_or(rev);
+    if base == "HEAD" || base.starts_with("HEAD@{") {
+        return Err(crate::cmd::exit(2, "HEAD was removed. Use head."));
+    }
+    if base == "stash" || base.starts_with("stash@{") {
+        return Err(crate::cmd::exit(2, "stash revisions were removed. Use park@{n}."));
+    }
+    Ok(())
 }
 
 fn need_line<'a>(line: Option<&'a Line>, rev: &str) -> Result<&'a Line> {
@@ -116,14 +131,14 @@ fn split_suffix(rev: &str) -> (&str, &str) {
 }
 
 fn base_state(repo: &Repo, line: Option<&Line>, name: &str) -> Result<String> {
-    if name.is_empty() || name == "HEAD" || name == "@" {
-        return Ok(need_line(line, "HEAD")?.head.clone());
+    if name.is_empty() || name == "head" || name == "@" {
+        return Ok(need_line(line, "head")?.head.clone());
     }
-    if name == "stash" {
+    if name == "park" {
         let l = need_line(line, name)?;
         return match repo.p.db.line_states(&l.id, StateKind::Stash)?.first() {
             Some(s) => Ok(s.id.clone()),
-            None => bail!("no stash entries"),
+            None => bail!("no park entries"),
         };
     }
     if let Some(rest) = name.strip_prefix("changes/") {

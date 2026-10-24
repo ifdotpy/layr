@@ -5,7 +5,7 @@ This page is part of the [Layr documentation](../README.md#documentation).
 ## Runnable snapshots and OCI registries
 
 Open Container Initiative (OCI) images come from immutable snapshot files.
-A push never reads uncommitted files and never executes a build command.
+A push never reads unsaved files and never executes a build command.
 Put the runnable definitions in `layr.toml` at the project root:
 
 ```toml
