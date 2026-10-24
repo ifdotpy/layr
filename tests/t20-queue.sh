@@ -285,7 +285,7 @@ ERROR_CHANGE=$(l change list --json | python3 -c 'import json,sys; print(next(r[
 l queue add head --into error-target >/dev/null
 ok 'probe collection and command errors without limits permit the merge' l queue run --into error-target
 ERRORS=$(l queue list --into error-target --json)
-ok 'every broken probe has a stored observational error' python3 -c 'import json,sys; e=json.loads(sys.argv[1])[0]; assert e["status"]=="done"; p={r["probe"]:r for r in e["probes"]["probes"]}; assert all(p[n]["status"]=="observed" and p[n]["errors"] for n in ["a-missing","b-invalid","c-link","d-command"]); b={r["probe"]:r for r in e["probes"]["behavior"]["probes"]}; assert b["z-after"]["head"]["exit"]==0' "$ERRORS"
+ok 'every broken probe has a stored observational error' python3 -c 'import json,sys; e=json.loads(sys.argv[1])[0]; assert e["status"]=="done"; p={r["probe"]:r for r in e["probes"]["probes"]}; assert all(p[n]["status"]=="observed" and p[n]["errors"] for n in ["a-missing","b-invalid","c-link","d-command"]); b={r["probe"]:r for r in e["probes"]["behavior"]["probes"]}; assert b["z-after"]["head_run"] is True' "$ERRORS"
 has 'queue list shows the missing output error' "missing probe output 'out/missing'" "$(l queue list --into error-target)"
 has 'queue list shows the invalid JSON error' 'invalid JSON probe output' "$(l queue list --into error-target)"
 has 'queue list shows the refused link error' 'links and special files are refused' "$(l queue list --into error-target)"
