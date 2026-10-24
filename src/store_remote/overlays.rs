@@ -190,6 +190,9 @@ fn layer(store: &Store, published: &Published, identity: Option<String>) -> Resu
 }
 
 fn merge(report: &mut Report, next: Report, name: &str) {
+    if next.records > 0 || next.states > 0 {
+        report.overlays.push(format!("{name}: {} records, {} states", next.records, next.states));
+    }
     report.records += next.records;
     report.states += next.states;
     report.files += next.files;

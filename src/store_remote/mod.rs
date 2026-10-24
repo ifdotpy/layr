@@ -37,6 +37,8 @@ pub struct Report {
     pub overlaps: usize,
     pub gaps: Vec<String>,
     pub missing_lines: Vec<String>,
+    /// One line per overlay that moved: "<name>: N records, M states".
+    pub overlays: Vec<String>,
 }
 
 #[derive(Default)]

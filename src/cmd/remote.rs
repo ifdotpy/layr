@@ -815,6 +815,9 @@ fn print_store_report(ctx: &Ctx, report: &store_remote::Report, op: &str, json_o
         outln!(ctx, "{}", serde_json::to_string(report)?);
     } else if !quiet {
         outln!(ctx, "{op}: {} records, {} states, {} bytes", report.records, report.states, report.bytes);
+        for line in &report.overlays {
+            outln!(ctx, "  overlay {line}");
+        }
         for item in omitted_summaries(&report.omitted) {
             outln!(ctx, "omitted: {item}");
         }
