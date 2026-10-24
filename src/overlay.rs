@@ -32,56 +32,10 @@ use crate::storage as btrfs;
 use crate::store::Project;
 use crate::tree::Tree;
 use anyhow::{anyhow, bail, Result};
-use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-/// One overlay of a line's stack: its name and the overlay state the line shows.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Layer {
-    pub overlay: String,
-    pub state: String,
-}
-
-/// An addressable stack. Field order defines the canonical JSON used for its identity.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct View {
-    pub format: u32,
-    pub shared: String,
-    pub layers: Vec<Layer>,
-}
-
-impl View {
-    pub fn new(shared: String, layers: Vec<Layer>) -> Self {
-        Self { format: 1, shared, layers }
-    }
-
-    pub fn id(&self) -> Result<String> {
-        use sha2::{Digest, Sha256};
-        Ok(hex::encode(Sha256::digest(serde_json::to_vec(self)?)))
-    }
-
-    pub fn validate(&self) -> Result<()> {
-        if self.format != 1 {
-            bail!("unsupported view format {}", self.format);
-        }
-        if !crate::model::is_uuid(&self.shared) {
-            bail!("invalid shared state in view");
-        }
-        for layer in &self.layers {
-            crate::store::check_name("overlay", &layer.overlay)?;
-            if !crate::model::is_uuid(&layer.state) {
-                bail!("invalid state of overlay '{}'", layer.overlay);
-            }
-        }
-        Ok(())
-    }
-}
-
-pub fn is_view_id(id: &str) -> bool {
-    id.len() == 64 && id.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
-}
+pub use layr_model::validation::{is_view_id, Layer, View};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {

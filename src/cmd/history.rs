@@ -726,6 +726,7 @@ pub fn show(ctx: &Ctx, args: &[String]) -> Result<i32> {
 
 fn log_spec() -> Spec {
     show_spec()
+        .flag("--json")
         .value("-n|--max-count")
         .flag("--all")
         .flag("--reverse")
@@ -909,6 +910,12 @@ pub fn log(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if a.has("--reverse") {
         picked.truncate(max);
         picked.reverse();
+    }
+    if a.has("--json") {
+        for state in &picked {
+            outln!(ctx, "{}", serde_json::to_string(state)?);
+        }
+        return Ok(0);
     }
     let decor = Decor::load_with_head(repo, line.as_ref(), if a.has("--format") { "HEAD" } else { "head" })?;
     let decor = if a.has("--decorate") || a.get("--format").map(|f| f.contains("%d") || f.contains("%D")).unwrap_or(false) {

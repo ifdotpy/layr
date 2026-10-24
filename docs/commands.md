@@ -7,8 +7,8 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | Group         | Commands                                                                                     |
 | ------------- | -------------------------------------------------------------------------------------------- |
 | work          | `status [--json]`, `diff`, `add`, `rm`, `mv`, `apply [--cached]`, `save -m <message> [-a] [--amend]`, `restore`, `reset`, `park`, `clean` |
-| history       | `log`, `show`, `blame`, `grep`, `ls-files`, `rev-parse`, `merge-base`                        |
-| lines         | `line new <name> [<rev>] [--count N] [--json]`, `line list`, `line delete`, `line rename`, `tag`, `merge [--expect]`, `pick`, `invert`, `replay`, `adopt` |
+| history       | `log [--json]`, `show`, `blame`, `grep`, `ls-files`, `rev-parse`, `merge-base`                        |
+| lines         | `line new <name> [<rev>] [--count N] [--json]`, `line list [--json]`, `line delete`, `line rename`, `tag`, `merge [--expect]`, `pick`, `invert`, `replay`, `adopt` |
 | access        | `access [list|grant [--until <30m|2h|1d>]|revoke|deny|allow|check]`, `protect [<pattern> --update <role> --check <names> --path <path>=<role> --approvals <n> --approvers <principals> --direct --rewrite <role> --no-expect | --remove]`, `approve [--withdraw] <state>`, `attest <kind> <rev> [--payload <file>]`, `attestations <rev> [--kind <kind>] [--json]` |
 | safety        | `undo`, `op log`, `save`, `try <state> -- <cmd>`, `try <state> --check <name>`, `bisect run [--good <rev>] [--bad <rev>] [--auto] [--ref-log <ref>] [--json] -- <cmd>`, `gc`, `fsck`, `reindex` |
 | Git bridge    | `git remote`, `git fetch`, `git pull`, `git push [--squash]`, `git clone`, `git sync`                             |
@@ -147,3 +147,11 @@ a push. A push with `--squash` sends another commit for the same state; `HEAD` t
 commit. `layr git sync` also records the commits of the head and its ancestors, as a push does.
 A `.git` folder that the line owner made instead is left alone.
 
+`layr log --json` writes one state JSON object per line. History filters and `--auto` apply before output.
+
+`layr line list --json` writes an array of local lines. Each line includes its ID, name, head, owner, machine, and local path.
+A name pattern filters the array. JSON output does not support `--all` or `--remotes`.
+
+`layr change diff <id> --from vN --to vM --json` writes the change ID, version labels, and interdiff text.
+The `files` array gives each changed file patch, its status, and added and removed line counts.
+Each version is compared with its own first parent. Changes to the base stay out of the interdiff.

@@ -267,6 +267,18 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
     // List.
     let lines = repo.lines()?;
     let pat = a.pos.first().cloned();
+    if a.has("--json") {
+        if a.has("-a") || a.has("-r") {
+            return Err(exit(2, "line list --json supports local lines; omit --all and --remotes"));
+        }
+        let rows: Vec<_> = lines
+            .iter()
+            .filter(|line| pat.as_ref().map(|p| super::glob(p, &line.name)).unwrap_or(true))
+            .map(|line| line_json(repo, line))
+            .collect();
+        outln!(ctx, "{}", serde_json::to_string(&rows)?);
+        return Ok(0);
+    }
     let show_local = !a.has("-r");
     if show_local {
         for l in &lines {

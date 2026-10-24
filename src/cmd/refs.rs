@@ -20,7 +20,13 @@ pub fn refs(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 outln!(ctx, "{}", serde_json::to_string(&refs)?);
             } else {
                 for r in refs {
-                    outln!(ctx, "{}\t{}{}", r.name, shown(&r.target), r.expires_at.map(|t| format!("\texpires {t}")).unwrap_or_default());
+                    outln!(
+                        ctx,
+                        "{}\t{}{}",
+                        r.name,
+                        shown(&r.target),
+                        r.expires_at.map(|t| format!("\texpires {t}")).unwrap_or_default()
+                    );
                 }
             }
         }
@@ -172,8 +178,14 @@ pub fn authorize_update(
             repo.p.config_value(&format!("check.{check}"))?.and_then(|v| v.as_str().map(String::from)).ok_or_else(|| {
                 anyhow::anyhow!("check '{check}' of ref '{name}' is not defined (layr config check.{check} '<command>')")
             })?;
-        let argv = vec!["sh".into(), "-c".into(), command.clone()];
-        if repo.p.db.check_exit(&target.target, &argv, Some(0))?.is_none() {
+        let argv = layr_model::protection::check_argv(&command);
+        let evidence = layr_model::protection::required_check(
+            check,
+            Some(&command),
+            repo.p.db.check_exit(&target.target, &argv, Some(0))?.is_some(),
+            None,
+        );
+        if evidence.result != layr_model::protection::CheckResult::Passed {
             bail!(
                 "ref '{name}' needs a passing check '{check}' for exactly state {} and command '{command}'; run 'layr try {} --check {check}' first",
                 ids::short(&target.target),
@@ -187,5 +199,9 @@ pub fn authorize_update(
 /// A state id as people read it (the short form); other targets as they are. --json keeps full ids.
 fn shown(target: &str) -> String {
     let d = ids::display(target);
-    if d.len() > 7 && d != target { d[..7].to_string() } else { target.to_string() }
+    if d.len() > 7 && d != target {
+        d[..7].to_string()
+    } else {
+        target.to_string()
+    }
 }

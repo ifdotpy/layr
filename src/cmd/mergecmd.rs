@@ -253,8 +253,10 @@ fn check_paths(ctx: &Ctx, repo: &Repo, line: &Line, rule: Option<&crate::access:
     let role = repo.policy().role(&Repo::who(ctx));
     for c in changes::file_changes(&repo.state_root(head)?, &repo.state_root(result)?)? {
         for p in [Some(c.path.clone()), c.old_path.clone()].into_iter().flatten() {
-            let need = rule.role_for_path(&p);
-            if role < need {
+            let requirement =
+                layr_model::protection::path_requirements([p.as_str()], role, |path| rule.role_for_path(path)).remove(0);
+            let need = requirement.role;
+            if requirement.met != Some(true) {
                 return Err(exit(
                     1,
                     format!(
@@ -286,24 +288,20 @@ fn check_approvals(
         _ => return Ok(()),
     };
     let pol = repo.policy();
-    let have: std::collections::BTreeSet<String> = repo.ancestors(head)?.into_iter().collect();
-    let mut authors = std::collections::BTreeSet::new();
-    for s in repo.ancestors(theirs)? {
-        if !have.contains(&s) {
-            if let Some(r) = repo.p.db.state(&s)? {
-                authors.insert(r.author.uid);
+    let counted = layr_model::protection::approvals(
+        theirs,
+        Some(head),
+        layr_model::protection::ApprovalMode::Merge,
+        &repo.p.db.approvals(theirs)?,
+        |id| {
+            let state = repo.p.db.state(id)?;
+            if state.as_ref().is_some_and(|state| state.kind.auxiliary()) {
+                repo.source_state(id)?;
             }
-        }
-    }
-    let counted: Vec<u32> = repo
-        .p
-        .db
-        .approvals(theirs)?
-        .into_iter()
-        .map(|(u, _)| u)
-        .filter(|u| !authors.contains(u))
-        .filter(|u| pol.may_approve(rule, &crate::access::Who::of(*u, crate::ctx::Caller::from_uid(*u).gid)))
-        .collect();
+            Ok(state)
+        },
+        |uid| pol.may_approve(rule, &crate::access::Who::of(uid, crate::ctx::Caller::from_uid(uid).gid)),
+    )?;
     if (counted.len() as u32) < rule.approvals {
         let from: Vec<String> = rule.approvers.iter().map(|k| crate::access::show_principal(k)).collect();
         return Err(exit(
@@ -347,8 +345,14 @@ fn run_line_checks(
                     ),
                 )
             })?;
-        let argv = vec!["sh".to_string(), "-c".to_string(), cmd.clone()];
-        if repo.p.db.check_exit(candidate, &argv, Some(0))?.is_some() {
+        let argv = layr_model::protection::check_argv(&cmd);
+        let evidence = layr_model::protection::required_check(
+            name,
+            Some(&cmd),
+            repo.p.db.check_exit(candidate, &argv, Some(0))?.is_some(),
+            None,
+        );
+        if evidence.result == layr_model::protection::CheckResult::Passed {
             continue;
         }
         let code = super::admin::run_check(ctx, repo, candidate, &argv, &cmd, quiet)?;
@@ -988,4 +992,87 @@ pub fn rebase(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     outln!(ctx, "Successfully replayed {} onto {}.", line.name, ids::short(&onto));
     Ok(0)
+}
+
+#[cfg(test)]
+mod approval_tests {
+    use super::*;
+    use crate::{
+        ctx::Caller,
+        model::{Author, Record, StateKind, StateRec},
+        store::{Project, Store},
+    };
+
+    #[test]
+    fn merge_approval_guard_refuses_derived_source_ancestry() {
+        let dir = std::env::temp_dir().join(format!("layr-merge-ancestry-{}", crate::ids::new_id()));
+        let ctx = Ctx {
+            store: Store::open(&dir).unwrap(),
+            caller: Caller::from_uid(1001),
+            cwd: dir.clone(),
+            env: std::collections::HashMap::new(),
+            out: std::cell::RefCell::new(Box::new(std::io::sink())),
+        };
+        let project_dir = ctx.store.projects_dir().join("p");
+        std::fs::create_dir_all(project_dir.join("meta/db")).unwrap();
+        let project_id = crate::ids::new_id();
+        let p = Project {
+            store: &ctx.store,
+            name: "p".into(),
+            dir: project_dir.clone(),
+            id: project_id.clone(),
+            db: crate::db::Db::open(&project_dir.join("meta/db/layr.sqlite")).unwrap(),
+        };
+        let mut creation = Record::new("project");
+        creation.data = serde_json::json!({"id":project_id,"name":"p","config":{}});
+        p.append(creation, &ctx.actor()).unwrap();
+        let state = |kind, parents| StateRec {
+            id: crate::ids::new_id(),
+            kind,
+            change_id: None,
+            derived_from: None,
+            context: Some("test-v1".into()),
+            parents,
+            line: None,
+            subvol: String::new(),
+            author: Author::default(),
+            message: String::new(),
+            time: crate::ids::now_ms(),
+            running: false,
+            conflicts: vec![],
+            caches: Default::default(),
+            cache_by: None,
+            cache_shared: false,
+            cache_platform: None,
+        };
+        let base = state(StateKind::Commit, vec![]);
+        let derived = state(StateKind::Derived, vec![]);
+        let source = state(StateKind::Commit, vec![derived.id.clone()]);
+        let mut record = Record::new("state");
+        // A forward parent reference can arrive before the parent's record during import.
+        record.states = vec![base.clone(), source.clone()];
+        p.append(record, &ctx.actor()).unwrap();
+        let mut record = Record::new("state");
+        record.states = vec![derived.clone()];
+        p.append(record, &ctx.actor()).unwrap();
+        let repo = Repo { p };
+        let line = Line {
+            id: crate::ids::new_id(),
+            name: "main".into(),
+            head: base.id.clone(),
+            owner: 1001,
+            machine: ctx.store.machine.id.clone(),
+        };
+        let mut rule = crate::access::RuleSpec::default().rule();
+        rule.approvals = 1;
+        // Exercise the merge's approval guard even if an earlier ancestry check also rejects it.
+        let error = check_approvals(&ctx, &repo, &line, Some(&rule), &base.id, &source.id).unwrap_err().to_string();
+        let expected = repo.source_state(&derived.id).unwrap_err().to_string();
+        assert_eq!(error, expected);
+        assert_eq!(repo.is_ancestor(&base.id, &source.id).unwrap_err().to_string(), expected);
+        assert!(error.contains("is derived; cache and derived states are outside source history"));
+        drop(repo);
+        drop(ctx);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
