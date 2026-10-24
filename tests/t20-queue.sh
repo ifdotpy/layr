@@ -231,7 +231,7 @@ LIMIT_OUTCOME=$(l queue list --into limited --json)
 eq 'the failure gives the exact metric, values, change, and limit' 'probe bench-checkout: p95_ms 41 → 52 (+27 %) is over the limit +20 %' "$(printf '%s' "$LIMIT_OUTCOME" | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["reason"])')"
 MERGE_BASE=$(printf '%s' "$LIMIT_OUTCOME" | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["probes"]["behavior"]["base"])')
 MERGE_RESULT=$(printf '%s' "$LIMIT_OUTCOME" | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["probes"]["behavior"]["head"])')
-eq 'the probe base is the exact target head' "$LIMIT_BASE" "$MERGE_BASE"
+eq 'the probe base is the exact target head' "$LIMIT_BASE" "$(l rev-parse "$MERGE_BASE")"
 eq 'the probe result includes the target changes' target "$(l show "$MERGE_RESULT":target-only.txt)"
 SHOW=$(l change show "$OVER_CHANGE" --json)
 ok 'a failed merge exposes the same stored Behavior' python3 -c 'import json,sys; assert json.loads(sys.argv[1])[0]["probes"]["behavior"]==json.loads(sys.argv[2])["behavior"]' "$LIMIT_OUTCOME" "$SHOW"
