@@ -32,11 +32,11 @@ The store and signed record formats remain compatible with the Linux backend.
 - The index is a thin layer over the head. `add` clones only the selected entries into it.
   `add` validates the working tree before and after it copies them. Active `mmap` files use the snapshot path.
   `rm`, `mv`, `apply --cached` and `restore --staged` first make the index a complete tree.
-- A regular `commit` moves the index into `deltas/<id>` and makes it immutable. Its cost depends on the changed files.
+- A regular `save -m <message>` moves the index into `deltas/<id>` and makes it immutable. Its cost depends on the changed files.
   A journal restores the index after a process stops before the database transaction completes.
-  Commits with overlays retain the existing path.
+  Named saves with overlays retain the existing path.
 - An automatic state copies only the entries that changed since the line head. An unchanged folder makes no state.
-- `status`, `add`, `commit`, `diff` and the git export read the layers directly.
+- `status`, `add`, `save -m <message>`, `diff` and the git export read the layers directly.
   Other commands that need a folder make a view in `states/<id>`.
   `layr gc` removes views that no command used for 10 minutes (setting `thin.view_seconds`).
   It also gives a line head with more than 32 layers a complete tree (setting `thin.chain`).
@@ -65,7 +65,7 @@ Use a separate test store on an existing case-sensitive APFS volume:
 cargo build --release
 export LAYR_ROOT=/Volumes/YourCaseSensitiveVolume/layr-test-store
 ./target/release/layr init app --from ~/src/app
-./target/release/layr --project app --line main branch topic
+./target/release/layr --project app --line main line new topic
 ```
 
 The core command tests also run on macOS. They require GNU coreutils and GNU sed in `PATH`.

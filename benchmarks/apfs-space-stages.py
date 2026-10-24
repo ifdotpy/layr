@@ -18,8 +18,8 @@ for name,binary in [('baseline','/tmp/layr-perf-baseline-76623f1'),('native','/t
    d=plistlib.loads(call(['diskutil','info','-plist',str(mount)]))
    row=dict(variant=name,phase=phase,used_bytes=d['APFSContainerSize']-d['APFSContainerFree']);rows.append(row);print(row,flush=True)
    (root/'stages.json').write_text(json.dumps(rows,indent=2))
-  measure('start');run(main,'branch','-q','isolate');measure('branch')
+  measure('start');run(main,'line', 'new','-q','isolate');measure('branch')
   work=main.parent/'isolate'
   with (work/'large.bin').open('r+b') as f:f.write(b'Z'*4096)
-  measure('write_4k');run(work,'add','large.bin');measure('add');run(work,'commit','-qm','isolate');measure('commit');run(main,'fsck')
+  measure('write_4k');run(work,'add','large.bin');measure('add');run(work,'save','-qm','isolate');measure('commit');run(main,'fsck')
  finally:call(['hdiutil','detach',str(mount)])

@@ -8,7 +8,7 @@ but it writes a new inode, directory record and attributes for every entry.
 
 On a test volume, one clone of 10,000 entries costs about 280 bytes per entry for empty files
 and about 330 bytes per entry for 4 KiB files.
-Before this change, each branch, index, commit and automatic state of a 10,000-file project
+Before this change, each line, index, named state and automatic state of a 10,000-file project
 added about 3.2 to 3.9 MiB on APFS. On btrfs, each added less than 0.3 MiB.
 
 ## Format
@@ -35,8 +35,8 @@ counts prove equal data. Folder sizes are not compared, because they count one l
 
 | New state | Base |
 | --- | --- |
-| Commit from the index | The line head |
-| Commit without staged changes (`--allow-empty`, `--amend`) | The line head |
+| Named save from the index | The line head |
+| Named save without staged changes (`--allow-empty`, `--amend`) | The line head |
 | Automatic state | The line head |
 | Index | The line head |
 
@@ -53,7 +53,7 @@ This is also true when `gc` deletes its record. A later `gc` deletes it.
 `fsutil::Src` is a tree to read: a folder or a `thin::Layered`.
 These paths read layers without a complete copy:
 
-- `status`, `add`, `commit`, `diff`, `restore`, `stash` and `clean`.
+- `status`, `add`, `save -m <message>`, `diff`, `restore`, `park` and `clean`.
 - Change lists (`changes::file_changes`), diffs, rename detection and ignore rules.
 - The git export. Git reads only the changed paths, from a small private copy.
 
@@ -86,7 +86,7 @@ Many unrelated files then share one creation time, usually with zero nanoseconds
 
 ## Limits
 
-- Each line still has one complete working folder. A branch costs one tree clone.
+- Each line still has one complete working folder. A new line costs one tree clone.
 - A command that needs a view of a thin state costs one clone of the keyframe until `gc` removes the view.
 - Long chains make reads slower until `gc` makes a keyframe.
 - Sends to peers use complete trees. The receiver stores complete trees.

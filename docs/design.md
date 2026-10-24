@@ -90,7 +90,7 @@ do everything, and every record names who acted.
 A user's role is the highest role of the user, the user's groups and `*`. Owning a line in a
 project includes reading the project.
 
-**Lines.** A line belongs to one user. Only that user changes it (commit, reset, stash and the
+**Lines.** A line belongs to one user. Only that user changes it (`save -m`, reset, park and the
 other work commands). Nobody else writes into it, the admin included. To change another user's
 line, make a line from it and merge, or delete it (maintainer). Root can do everything.
 
@@ -113,7 +113,7 @@ example: the group of AI agents may not push, sync or trust machines.
 | `update` | maintainer | lowest role that may merge into the line |
 | `expect` | true | a merge must name the exact reviewed state (`--expect`) |
 | `check` | none | named checks (`layr config check.<name> '<command>'`) that must pass on the merge result before the line moves; the command runs as the caller in a temporary copy of the result with a clean environment (it runs code that may come from another user): only HOME, USER, LOGNAME and `PATH=/usr/local/bin:/usr/bin:/bin`, so the command sets what else it needs, for example `PATH=$HOME/.cargo/bin:$PATH cargo test`. A passing check of the same state and command is reused |
-| `direct` | false | the owner may also commit, reset or apply in the line directly |
+| `direct` | false | the owner may also save a named state, reset or apply in the line directly |
 | `rewrite` | admin | lowest role that may move the line to a state that is not a descendant (reset, undo of a merge) |
 | `paths` | none | paths (a folder, a file or a glob) whose change needs a higher role than `update`, for example `.github=admin`: a merge that changes such a path needs that role (`layr protect main --path .github=admin`) |
 | `approvals`, `approvers` | 0, maintainers | approvals the reviewed state needs (`layr approve <state>`, a signed record of exactly that state). An approval counts when its user is not an author of the states the merge brings in and matches every listed approver principal (with none listed: has the maintainer role). A program on top that wants "a person must approve" lists a group of people, for example `--approvals 1 --approvers @humans` (SLSA source level 4 asks for two persons: the author and an approver) |

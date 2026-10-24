@@ -30,11 +30,11 @@ pub struct Conflict {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum StateKind {
-    /// A commit: a named state with a message.
+    /// A named state with a message.
     Commit,
     /// An automatic snapshot of a line's working content (an undo point).
     Auto,
-    /// Saved work of `layr stash`.
+    /// Saved work of `layr park`.
     Stash,
     /// A state made from a git commit of the remote.
     Import,

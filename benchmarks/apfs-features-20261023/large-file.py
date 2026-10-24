@@ -14,11 +14,11 @@ for who, b in bins.items():
     env = dict(os.environ, LAYR_ROOT=os.path.join(root, "store-" + who), LAYR_AUTHOR_NAME="B", LAYR_AUTHOR_EMAIL="b@example.invalid")
     for k in ["LAYR_SOCKET", "LAYR_PROJECT", "LAYR_LINE", "LAYR_TRACE"]: env.pop(k, None)
     run(b, env, root, "init", "p", "--from", src, "-q")
-    main = os.path.join(env["LAYR_ROOT"], "projects/p/lines/main"); run(b, env, main, "branch", "-q", "t")
+    main = os.path.join(env["LAYR_ROOT"], "projects/p/lines/main"); run(b, env, main, "line", "new", "-q", "t")
     w = os.path.join(env["LAYR_ROOT"], "projects/p/lines/t")
     with open(os.path.join(w, "large.bin"), "r+b") as f: f.seek(512 << 20); f.write(b"x" * 4096)
     row = {}
-    for op in [("status", "--porcelain"), ("diff", "--stat"), ("add", "-A"), ("commit", "-qm", "c"), ("diff", "--stat", "HEAD~1", "HEAD")]:
+    for op in [("status", "--porcelain"), ("diff", "--stat"), ("add", "-A"), ("save", "-qm", "c"), ("diff", "--stat", "head~1", "head")]:
         row[" ".join(op)], text = run(b, env, w, *op)
     out[who] = row
 print(json.dumps(out, indent=1))

@@ -69,7 +69,7 @@ Decisions:
    file deltas per chain; zstd level 3; parts up to 16 MiB; multipart for large objects (port
    Desk's S3 code).
 4. **What a push sends:** records the store lacks (from every machine the local log has), then
-   the states those records need and the store lacks: commits, imports, stashes, merges; auto
+   the states those records need and the store lacks: named states, imports, parked states, merges; auto
    states with `--auto`; cache states with `--caches`. Files of private overlays are never sent
    in V1 (separate layer keys come later, RFC 7); the push reports what it left out.
 5. **Delta bases and dedup.** The writer keeps, per store remote, a local index of what it has

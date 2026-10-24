@@ -4,10 +4,10 @@
 sample "$T/src"
 l init perf --from "$T/src" -q
 cd "$LAYR_ROOT/projects/perf/lines/main" || exit 1
-base=$(l rev-parse HEAD)
+base=$(l rev-parse head)
 echo cache-check >> notes.txt
-l commit -qam change
-head=$(l rev-parse HEAD)
+l save -qam change
+head=$(l rev-parse head)
 cache=$LAYR_ROOT/projects/perf/meta/diff-cache
 first=$(l diff "$base" "$head")
 second=$(l diff "$base" "$head")
@@ -24,6 +24,6 @@ has "status sees a later write" 'notes.txt' "$(l status --porcelain)"
 l status --porcelain >/dev/null
 eq "temporary snapshots do not fill the cache" "$count" "$(find "$cache" -type f | wc -l)"
 # A stale state UUID path must not select the old cached stream.
-l commit -qam later
-has "a new state changes the cache identity" '+unsaved' "$(l diff "$base" HEAD)"
+l save -qam later
+has "a new state changes the cache identity" '+unsaved' "$(l diff "$base" head)"
 finish

@@ -29,6 +29,12 @@ executables = [baseline, binary]
 
 
 def run(i, cwd, *args):
+    # The baseline binary uses the previous command names.
+    if i == 0:
+        if args[:2] == ('line', 'new'):
+            args = ('branch', *args[2:])
+        elif args[0] == 'save':
+            args = ('commit', *args[1:])
     r = subprocess.run([executables[i], *args], cwd=cwd, env=envs[i], capture_output=True, text=True)
     assert r.returncode == 0, (i, args, r.returncode, r.stdout, r.stderr)
     return r
@@ -70,7 +76,7 @@ try:
     for i in range(2):
         run(i, root, 'init', 'test', '--from', str(source), '-q')
         mains.append(root / f'store{i}/projects/test/lines/main')
-        run(i, mains[i], 'branch', '-q', 'topic')
+        run(i, mains[i], 'line', 'new', '-q', 'topic')
         works.append(mains[i].parent / 'topic')
     assert not same_status('clean status')
 
@@ -111,7 +117,7 @@ try:
         (work / 'readonly').chmod(0o444)
     both('add', '-A')
     same_status('index replacement of read-only files')
-    both('commit', '-qm', 'changes')
+    both('save', '-qm', 'changes')
     for i in range(2):
         assert not run(i, works[i], 'status', '--porcelain').stdout.strip()
         assert (works[i] / 'readonly').stat().st_mode & 0o777 == 0o444

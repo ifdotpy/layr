@@ -6,7 +6,7 @@ mkdir "$T/src"
 echo initial > "$T/src/f"
 l init perf --from "$T/src" -q
 P=$LAYR_ROOT/projects/perf
-head_id() { l rev-parse HEAD | python3 -c 'import sys, uuid; s=sys.stdin.read().strip(); print(uuid.UUID(hex=s[20:]+s[12:20]+s[:12]))'; }
+head_id() { l rev-parse head | python3 -c 'import sys, uuid; s=sys.stdin.read().strip(); print(uuid.UUID(hex=s[20:]+s[12:20]+s[:12]))'; }
 cd "$P/lines/main" || exit 1
 python3 - <<'PY'
 import random
@@ -16,13 +16,13 @@ with open('blob', 'wb') as f:
         f.write(r.randbytes(128 * 1024))
 PY
 l add blob
-l commit -qm blob
+l save -qm blob
 first=$(head_id)
 rm blob
-l commit -qam remove
+l save -qam remove
 cp --reflink=always "$P/states/$first/blob" blob
 l add blob
-l commit -qm return
+l save -qm return
 last=$(head_id)
 new_fs "$T/peer" 2G
 BR=$T/peer/store
@@ -45,7 +45,7 @@ with open('compressed', 'wb') as f:
         f.write(b'source text\n' * 12000)
 PY
 l add compressed
-l commit -qm compressed
+l save -qm compressed
 last=$(head_id)
 ok "sync transfers compressed extents" peer_exchange sync perf -q -- bash -c "tee '$T/compressed.wire' | env LAYR_ROOT='$BR' '$LAYR' serve-peer perf"
 ok "compressed content restores exactly" cmp compressed "$BR/projects/perf/states/$last/compressed"
@@ -90,10 +90,10 @@ return_from_replica() (
     l --project perf adopt main >/dev/null
     cd "$BR/projects/perf/lines/main" || exit 1
     rm blob
-    l commit -qam replica-remove
+    l save -qam replica-remove
     cp --reflink=always "$BR/projects/perf/states/$first/blob" blob
     l add blob
-    l commit -qm replica-return
+    l save -qm replica-return
     head_id > "$T/return-head"
     peer_exchange push perf -q -- env LAYR_ROOT="$AR" "$LAYR" serve-peer perf
 ) >"$T/return.log" 2>&1

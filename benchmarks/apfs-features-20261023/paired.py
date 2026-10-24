@@ -42,17 +42,17 @@ for trial in range(trials):
         row = {"who": who, "trial": trial}
         f = free(); row["init"] = run(b, env, root, "init", "p", "--from", src, "-q"); row["init"]["bytes"] = f - (f := free())
         main = os.path.join(store, "projects/p/lines/main")
-        row["branch"] = run(b, env, main, "branch", "-q", "b1"); row["branch"]["bytes"] = f - (f := free())
+        row["branch"] = run(b, env, main, 'line', 'new', "-q", "b1"); row["branch"]["bytes"] = f - (f := free())
         work = os.path.join(store, "projects/p/lines/b1")
         for k in range(10):
             with open(os.path.join(work, f"d00000/f{k:07}"), "r+b") as out:
                 out.write(bytes([trial + 1]) * 4096)
         row["save"] = run(b, env, work, "save", "-q"); row["save"]["bytes"] = f - (f := free())
         row["add"] = run(b, env, work, "add", "-A"); row["add"]["bytes"] = f - (f := free())
-        row["commit"] = run(b, env, work, "commit", "-q", "-m", "c"); row["commit"]["bytes"] = f - (f := free())
+        row["commit"] = run(b, env, work, 'save', "-q", "-m", "c"); row["commit"]["bytes"] = f - (f := free())
         row["status"] = run(b, env, work, "status", "--porcelain")
-        row["diff"] = run(b, env, work, "diff", "--stat", "HEAD~1")
-        row["branch2"] = run(b, env, work, "branch", "-q", "b2"); row["branch2"]["bytes"] = f - (f := free())
+        row["diff"] = run(b, env, work, "diff", "--stat", 'head~1')
+        row["branch2"] = run(b, env, work, 'line', 'new', "-q", "b2"); row["branch2"]["bytes"] = f - (f := free())
         run(b, env, work, "fsck")
         results.append(row)
         print(json.dumps({k: (v if not isinstance(v, dict) else {x: round(y, 3) for x, y in v.items()}) for k, v in row.items()}), flush=True)

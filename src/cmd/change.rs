@@ -120,7 +120,7 @@ pub fn change(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 outln!(ctx, "{}", serde_json::to_string(&records)?);
             } else {
                 for r in records {
-                    outln!(ctx, "{}\t{}\t{}", r.id, history::fmt_date(r.time, "iso"), r.op);
+                    outln!(ctx, "{}\t{}\t{}", r.id, history::fmt_date(r.time, "iso"), super::admin::operation_name(&r.op));
                 }
             }
         }

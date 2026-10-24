@@ -153,7 +153,16 @@ pub fn run(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if json {
         outln!(ctx, "{}", result);
     } else {
-        outln!(ctx, "First bad state: {} ({})", first.id, crate::db::kind_str(first.kind));
+        outln!(
+            ctx,
+            "First bad state: {} ({})",
+            first.id,
+            match first.kind {
+                StateKind::Commit => "state",
+                StateKind::Stash => "park",
+                kind => crate::db::kind_str(kind),
+            }
+        );
         outln!(ctx, "{}", first.message);
         for origin in origins {
             outln!(ctx, "origin {origin}");

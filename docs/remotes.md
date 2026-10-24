@@ -97,7 +97,7 @@ OLD_LAYR=/path/to/old/layr LAYR=$PWD/target/release/layr bash tests/compat-btrfs
 
 The compatibility test covers state IDs, signatures and both sync roles with an older binary.
 It also checks saved cache content across old and new clients.
-The CLI uses `cache` and `--caches`; `layer` and `--layers` remain aliases.
+The CLI uses `cache` and `--caches`. The old `layer` and `--layers` names fail and show the new names.
 Cache records retain the legacy `save.layers` name and `layers` fields on disk.
 The reader also accepts the intermediate `save.caches` format.
 Sync selects the cache message name from the peer capabilities.

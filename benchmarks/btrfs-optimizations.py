@@ -46,12 +46,12 @@ def run(which, args, cwd=source):
 
 run('before', ['init', 'bench', '--from', str(source), '-q'])
 work = root / 'store/projects/bench/lines/main'
-base = run('before', ['rev-parse', 'HEAD'], work)[1].decode().strip()
+base = run('before', ['rev-parse', 'head'], work)[1].decode().strip()
 for i in range(10):
     with (work / f'd{i // 100}' / f'f{i:06d}.txt').open('a') as f:
         f.write('change\n')
-run('before', ['commit', '-qam', 'change'], work)
-head = run('before', ['rev-parse', 'HEAD'], work)[1].decode().strip()
+run('before', ['save', '-qam', 'change'], work)
+head = run('before', ['rev-parse', 'head'], work)[1].decode().strip()
 commands = {'status_clean': ['status', '--porcelain'], 'diff_states': ['diff', base, head], 'save_clean': ['save', '-q']}
 results = {'files': a.files, 'fixture_sha256': fixture.hexdigest(), 'binaries': {}, 'samples': []}
 for which, binary in binaries.items():

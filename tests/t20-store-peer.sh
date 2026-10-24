@@ -46,16 +46,16 @@ check_sync "restored replica sends full states to a new peer" sync project -q --
 export LAYR_ROOT=$AR
 cd "$A"
 echo from-A >> notes.txt
-l commit -qam from-A
-from_a=$(l rev-parse HEAD)
+l save -qam from-A
+from_a=$(l rev-parse head)
 export LAYR_ROOT=$CR
 cd "$C"
 check_sync "restored parent receives an incremental child from A" sync project -q -- env LAYR_ROOT="$AR" "$LAYR" serve-peer project
 has "received state contains A's bytes" from-A "$(l show "$from_a:notes.txt")"
 # C adds a different child from the same restored parent.
 echo from-C >> notes.txt
-l commit -qam from-C
-from_c=$(l rev-parse HEAD)
+l save -qam from-C
+from_c=$(l rev-parse head)
 check_sync "C sends its child back to A" sync project -q -- env LAYR_ROOT="$AR" "$LAYR" serve-peer project
 check_sync "C sends an incremental child to B" sync project -q -- env LAYR_ROOT="$BR" "$LAYR" serve-peer project
 has "B receives C's exact state" from-C "$(env LAYR_ROOT="$BR" "$LAYR" --project project show "$from_c:notes.txt")"
@@ -64,8 +64,8 @@ env LAYR_ROOT="$BR" "$LAYR" --project project adopt main >/dev/null
 export LAYR_ROOT=$BR
 cd "$BR/projects/project/lines/main"
 echo from-B >> notes.txt
-l commit -qam from-B
-from_b=$(l rev-parse HEAD)
+l save -qam from-B
+from_b=$(l rev-parse head)
 export LAYR_ROOT=$CR
 cd "$C"
 check_sync "C receives B's child of a received parent" sync project -q -- env LAYR_ROOT="$BR" "$LAYR" serve-peer project

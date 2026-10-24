@@ -49,6 +49,9 @@ pub fn refs(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 bail!("--ttl is only valid for ref set");
             }
             let name = &a.pos[1];
+            if matches!(name.as_str(), "HEAD" | "head") {
+                bail!("reserved revision name: {name}");
+            }
             if !crate::model::ref_namespace(name) {
                 bail!("mutable ref names must start with one of: {}", crate::model::REF_PREFIXES.join(", "));
             }
@@ -57,7 +60,7 @@ pub fn refs(ctx: &Ctx, args: &[String]) -> Result<i32> {
             }
             let _lock = repo.p.lock()?;
             if repo.p.db.line_by_name(name)?.is_some() || repo.p.db.line_by_id(name)?.is_some() {
-                bail!("'{name}' is a line; use commit, merge or reset");
+                bail!("'{name}' is a line; use save, merge or reset");
             }
             let before = repo.p.db.ref_value(name, ids::now_ms())?;
             if let Some(expect) = a.get("--expect") {

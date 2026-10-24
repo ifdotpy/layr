@@ -9,12 +9,12 @@ P=$LAYR_ROOT/projects/g/lines
 cd $P/main
 l cache add target
 ok "the cache folder is a subvolume" sh -c "btrfs subvolume show $P/main/target >/dev/null"
-l branch -q w
+l line new -q w
 cd $P/w
 ok "a new line gets the cache as a subvolume" sh -c "btrfs subvolume show $P/w/target >/dev/null"
 head -c 20000000 /dev/urandom > target/big.bin; echo src >> notes.txt
 l save -q
-eq "automatic states do not hold the cache content" "" "$(l show HEAD@{0}:target | tail -n +3)"
+eq "automatic states do not hold the cache content" "" "$(l show head@{0}:target | tail -n +3)"
 eq "status ignores the cache" " M notes.txt" "$(l status -s)"
 rm -rf target; mkdir target; echo rebuilt > target/out
 eq "a tool replaced the cache with a plain folder" "plain" "$(l cache list | awk '{print $2}')"

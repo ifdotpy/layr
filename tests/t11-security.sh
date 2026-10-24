@@ -23,21 +23,21 @@ P=$LAYR_ROOT/projects/s/lines
 cd $P/main
 
 # 1. Merge drivers never run as root for a non-root caller.
-no "the admin cannot make a root-owned line" as layr-admin $L branch -q r0 --owner 0
+no "the admin cannot make a root-owned line" as layr-admin $L line new -q r0 --owner 0
 no "the admin cannot change the admin" as layr-admin $L config admin 0
-as layr-admin sh -c "printf 'u.txt merge=who\n' > .layrattributes && echo 0 > u.txt && $L add -A && $L commit -qm attrs"
+as layr-admin sh -c "printf 'u.txt merge=who\n' > .layrattributes && echo 0 > u.txt && $L add -A && $L save -qm attrs"
 as layr-admin $L config merge.driver.who 'id -u > %A'
-as layr-admin $L branch -q d1 --owner layr-u1
-cd $P/d1 && as layr-u1 sh -c "echo 1 > u.txt && $L commit -qam d1" && cd $P/main
-as layr-admin sh -c "echo 2 > u.txt && $L commit -qam main"
+as layr-admin $L line new -q d1 --owner layr-u1
+cd $P/d1 && as layr-u1 sh -c "echo 1 > u.txt && $L save -qam d1" && cd $P/main
+as layr-admin sh -c "echo 2 > u.txt && $L save -qam main"
 as layr-admin $L merge -q d1 >/dev/null 2>&1
 eq "the driver ran as the admin" "$(id -u layr-admin)" "$(cat u.txt)"
 # A driver that leaves a link instead of its result does not make the service read the target.
-as layr-admin sh -c "printf 'u.txt merge=who\nk.txt merge=leak\n' > .layrattributes && echo 0 > k.txt && $L add -A && $L commit -qm leak"
+as layr-admin sh -c "printf 'u.txt merge=who\nk.txt merge=leak\n' > .layrattributes && echo 0 > k.txt && $L add -A && $L save -qm leak"
 as layr-admin $L config merge.driver.leak 'rm -f %A && ln -s /etc/shadow %A'
-as layr-admin $L branch -q d2 --owner layr-u1
-cd $P/d2 && as layr-u1 sh -c "echo 1 > k.txt && $L commit -qam d2" && cd $P/main
-as layr-admin sh -c "echo 2 > k.txt && $L commit -qam main2"
+as layr-admin $L line new -q d2 --owner layr-u1
+cd $P/d2 && as layr-u1 sh -c "echo 1 > k.txt && $L save -qam d2" && cd $P/main
+as layr-admin sh -c "echo 2 > k.txt && $L save -qam main2"
 eq "a driver result that is a link is a conflict" "1" "$(as layr-admin $L merge -q d2 >/dev/null 2>&1; echo $?)"
 no "the merge result has no root file" grep -q root: k.txt
 eq "the result keeps ours" "2" "$(cat k.txt)"
@@ -45,7 +45,7 @@ eq "the result keeps ours" "2" "$(cat k.txt)"
 # 2. A link inside a line never redirects a write of the service.
 cd $P/d1
 mkdir -p $T/outside && chmod 777 $T/outside
-as layr-u1 sh -c "mkdir -p docs && echo v1 > docs/a.txt && $L add -A && $L commit -qm docs"
+as layr-u1 sh -c "mkdir -p docs && echo v1 > docs/a.txt && $L add -A && $L save -qm docs"
 as layr-u1 sh -c "rm -rf docs && ln -s $T/outside docs"
 as layr-u1 $L restore docs/a.txt >/dev/null 2>&1
 no "restore did not write through the link" test -e $T/outside/a.txt
@@ -57,8 +57,8 @@ no "grep does not read through a link in the line" sh -c "as layr-u1 $L grep -l 
 
 # 4. Child processes get the user's environment and groups, not the service's.
 cd $P/main
-no "try does not see the service environment" as layr-admin $L try -q HEAD -- sh -c 'test -n "$SECRET_OF_SERVICE"'
-eq "try runs with the user's groups" "$(id -G layr-admin)" "$(as layr-admin $L try -q HEAD -- id -G)"
+no "try does not see the service environment" as layr-admin $L try -q head -- sh -c 'test -n "$SECRET_OF_SERVICE"'
+eq "try runs with the user's groups" "$(id -G layr-admin)" "$(as layr-admin $L try -q head -- id -G)"
 
 # 5. Peer records: trust and local settings.
 new_fs $T/b 3G
@@ -116,9 +116,9 @@ l --project s access revoke '*'
 eq "the git store is closed to others" "750" "$(stat -c %a $LAYR_ROOT/projects/s/git)"
 no "another user cannot read git objects" runuser -u layr-u2 -- ls $LAYR_ROOT/projects/s/git/objects
 ok "the admin can" runuser -u layr-admin -- ls $LAYR_ROOT/projects/s/git/objects
-l --project s --line main branch -q acl1 --owner layr-u2
+l --project s --line main line new -q acl1 --owner layr-u2
 ok "a line owner can read git objects" runuser -u layr-u2 -- ls $LAYR_ROOT/projects/s/git/objects
-l --project s --line main branch -D acl1 >/dev/null
+l --project s --line main line delete -D acl1 >/dev/null
 no "after the line is deleted it cannot" runuser -u layr-u2 -- ls $LAYR_ROOT/projects/s/git/objects
 l --project s access grant '*' reader
 eq "with a role for everyone it is open again" "755" "$(stat -c %a $LAYR_ROOT/projects/s/git)"

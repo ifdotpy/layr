@@ -49,18 +49,18 @@ try:
     os.chdir(work)
     m('protect', 'main', '--remove')
     (work / 'file').write_text('on mac\n')
-    m('commit', '-qam', 'mac commit')
-    head = m('rev-parse', 'HEAD')
+    m('save', '-qam', 'mac commit')
+    head = m('rev-parse', 'head')
     m('remote', 'add', 'linux', 'ssh://linux/cross')
     peer = bridge + ['env', 'LAYR_ROOT=' + remote + '/store', a.linux_binary, 'serve-peer', 'cross']
     m('sync', 'linux', '-q', '--command', '--', *peer)
-    assert b('--project', 'cross', '--line', 'main', 'rev-parse', 'HEAD') == head
+    assert b('--project', 'cross', '--line', 'main', 'rev-parse', 'head') == head
     b('--project', 'cross', 'adopt', 'main')
     line = remote + '/store/projects/cross/lines/main'
     assert linux(['cat', line + '/file']) == 'on mac'
     linux(['sh', '-c', 'printf "on linux\\n" > ' + shlex.quote(line + '/file')])
-    b('-C', line, 'commit', '-qam', 'linux commit')
-    linux_head = b('-C', line, 'rev-parse', 'HEAD')
+    b('-C', line, 'save', '-qam', 'linux commit')
+    linux_head = b('-C', line, 'rev-parse', 'head')
     m('sync', 'linux', '-q', '--command', '--', *peer)
     assert m('show', linux_head + ':file') == 'on linux'
     assert '0 problem(s)' in m('fsck')

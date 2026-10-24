@@ -883,7 +883,7 @@ pub fn commit_layers(
             return Err(crate::cmd::exit(
                 1,
                 format!(
-                    "error: overlay '{}' changed in another line since this line took it; run 'layr overlay use {}' to take its newest state, then commit",
+                    "error: overlay '{}' changed in another line since this line took it; run 'layr overlay use {}' to take its newest state, then save",
                     l.overlay,
                     layers.iter().map(|x| x.overlay.as_str()).collect::<Vec<_>>().join(" ")
                 ),

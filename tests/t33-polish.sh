@@ -41,13 +41,13 @@ else:
 PY
 l init polish --from "$T/src" -q >/dev/null
 cd "$LAYR_ROOT/projects/polish/lines/main"
-BASE=$(l rev-parse HEAD)
+BASE=$(l rev-parse head)
 for name in metrics data files; do l probe run "$BASE" --probe "$name" >/dev/null; done
-l branch topic -q
+l line new topic -q
 cd ../topic
 echo 1 > version
-l commit -qam changed
-HEAD=$(l rev-parse HEAD)
+l save -qam changed
+HEAD=$(l rev-parse head)
 for name in metrics data files; do l probe run "$HEAD" --probe "$name" >/dev/null; done
 HUMAN=$(l probe diff "$BASE" "$HEAD")
 has "metric values omit decimal zeros and show a signed rounded percent" 'out/number.json   time 100 → 126 (+26%)' "$HUMAN"
@@ -68,8 +68,8 @@ CHANGE=$(l change list --json | python3 -c 'import json,sys; print(next(r["chang
 SHOW=$(l change show "$CHANGE")
 has "change show uses the human behavior report" "$HUMAN" "$SHOW"
 echo 2 > version
-l commit -qam noise
-QUIET=$(l rev-parse HEAD)
+l save -qam noise
+QUIET=$(l rev-parse head)
 l probe run "$QUIET" --probe metrics >/dev/null
 NOISE=$(l probe diff "$BASE" "$QUIET")
 has "all numeric changes within noise explain the threshold" '    no change beyond noise (5%)' "$NOISE"
@@ -95,7 +95,7 @@ PY
 cd ../main
 l protect main --check unit
 ok "a check command literally true executes during merge" l merge topic --expect "$QUIET" -q
-has "the passing true check is recorded" 'true' "$(l attestations HEAD --kind check)"
+has "the passing true check is recorded" 'true' "$(l attestations head --kind check)"
 # Omitted Auto states are not ancestry dependencies of a line head.
 l remote add archive "file://$T/archive" --paper-key-out "$T/paper" >/dev/null
 for n in 1 2 3; do echo "$n" > unsaved; l save -q; done
@@ -109,15 +109,15 @@ l overlay create private -q
 l overlay use private -q
 echo shared > shared
 l add shared
-l commit -qm empty-overlay
+l save -qm empty-overlay
 EMPTY=$(l push archive)
 no "an empty overlay has no private-file notice" grep -q 'private overlay files' <<< "$EMPTY"
 echo confidential > private.txt
 l overlay move private private.txt
 l add private.txt
-l commit -qm private-only
+l save -qm private-only
 echo next > shared
-l commit -qam with-private
+l save -qam with-private
 PRIVATE=$(l push archive)
 has "pushed states with private overlay files have a notice" 'omitted: private overlay files' "$PRIVATE"
 REPEAT=$(l push archive)

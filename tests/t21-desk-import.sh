@@ -11,7 +11,7 @@ l clone "file://$T/desk-vault" imported -q
 cd "$LAYR_ROOT/projects/imported/lines/main"
 eq "latest Desk content restores" 'Desk final state' "$(cat notes.txt)"
 eq "Desk history has two import states" 2 "$(l log --format=%s | wc -l)"
-has "oldest Desk state remains readable" 'Desk first state' "$(l show 'HEAD~1:notes.txt')"
+has "oldest Desk state remains readable" 'Desk first state' "$(l show 'head~1:notes.txt')"
 l op export > "$T/import.jsonl"
 ok "signed import records preserve Desk sequence order" python3 - "$T/import.jsonl" <<'PY'
 import json,sys

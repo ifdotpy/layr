@@ -32,7 +32,7 @@ layr config derive.command.npm 'npm install --package-lock-only'
 layr config derive.inputs.npm 'package.json packages/*/package.json'
 ```
 
-- Derive runs when a merge makes a new tree, including cherry-pick and rebase.
+- Derive runs when a merge makes a new tree, including pick and replay.
 - A fast-forward keeps the exact target state, including its derived files.
 - A changed input or output on either side starts the rule.
 - Inputs use whitespace-separated path patterns with Git ignore syntax.
@@ -48,11 +48,11 @@ layr config derive.inputs.npm 'package.json packages/*/package.json'
 ### Batch lines and hard reset
 
 ```sh
-layr branch trial HEAD --count 10 --json
+layr line new trial head --count 10 --json
 layr --project app --line trial-1 reset --hard main
 ```
 
-The branch command creates `trial-1` through `trial-10` after validation of all names.
+The `line new` command creates `trial-1` through `trial-10` after validation of all names.
 Each line has one ordinary `line.create` record. Existing log readers need no format change.
 If a later line fails, completed lines stay valid. The error names those lines.
 The command removes incomplete line folders and temporary snapshots.
@@ -65,7 +65,7 @@ Measured on 2026-10-22 UTC in OrbStack `layr-dev`, Linux `7.2.9-orbstack-00391-g
 The debug binary runs as root without the service on a fresh btrfs loop filesystem with 100 source files.
 The table shows medians of three trials. The order alternates between batch and single commands.
 
-| Lines | Separate branch commands | One `branch --count` command | Less time |
+| Lines | Separate `line new` commands | One `line new --count` command | Less time |
 | ---: | ---: | ---: | ---: |
 | 10 | 1.585 s | 1.192 s | 24.8% |
 | 100 | 19.324 s | 6.572 s | 66.0% |

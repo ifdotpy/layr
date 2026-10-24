@@ -1220,7 +1220,7 @@ impl<'a> Repo<'a> {
                 return Err(crate::cmd::exit(
                     1,
                     format!(
-                        "error: Your local changes to the following files would be overwritten:\n{}\nPlease commit your changes or stash them.",
+                        "error: Your local changes to the following files would be overwritten:\n{}\nPlease save your changes or park them.",
                         names.join("\n")
                     ),
                 ));
@@ -2080,7 +2080,7 @@ mod cache_platform_tests {
             let repo = Repo::open(&ctx, "p").unwrap();
             assert!(repo.state_root(&id).is_ok());
             assert_eq!(crate::revs::resolve(&repo, None, &id).unwrap(), id);
-            for args in [vec!["branch", "rejected", &id], vec!["diff", &id, &id], vec!["log", &id], vec!["show", &id]] {
+            for args in [vec!["line", "new", "rejected", &id], vec!["diff", &id, &id], vec!["log", &id], vec!["show", &id]] {
                 let args: Vec<String> = args.into_iter().map(String::from).collect();
                 let error = crate::cmd::run(&ctx, &args).unwrap_err().to_string();
                 assert!(error.contains("outside source history"), "{args:?}: {error}");

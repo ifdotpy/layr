@@ -22,19 +22,19 @@ P=$LAYR_ROOT/projects/service/lines
 cd "$P/main"
 ok 'the owner reads through the service' as "$LAYR_APFS_TEST_USER" "$L" status -s
 as "$LAYR_APFS_TEST_USER" /bin/chmod +a "everyone allow list,search,readattr" "$P/main"
-ok 'the owner creates a line' as "$LAYR_APFS_TEST_USER" "$L" branch -q work
+ok 'the owner creates a line' as "$LAYR_APFS_TEST_USER" "$L" line new -q work
 cd "$P/work"
 as "$LAYR_APFS_TEST_USER" sh -c 'echo changed > file.txt'
 ok 'the owner stages a file' as "$LAYR_APFS_TEST_USER" "$L" add file.txt
-ok 'the owner commits through the service' as "$LAYR_APFS_TEST_USER" "$L" commit -qm service
+ok 'the owner commits through the service' as "$LAYR_APFS_TEST_USER" "$L" save -qm service
 no 'the owner cannot read stored states directly' as "$LAYR_APFS_TEST_USER" ls "$LAYR_ROOT/projects/service/states"
 no 'another user cannot read the line' as nobody cat "$P/work/file.txt"
 cd /private/tmp
-no 'another user cannot read private history through the service' as nobody env LAYR_PROJECT=service LAYR_LINE=work "$L" show HEAD:file.txt
+no 'another user cannot read private history through the service' as nobody env LAYR_PROJECT=service LAYR_LINE=work "$L" show head:file.txt
 cd "$P/work"
 /usr/bin/id "$LAYR_APFS_TEST_USER"
 check_identity() {
-    as "$LAYR_APFS_TEST_USER" "$L" try HEAD -- /bin/sh -c "test \"\$(/usr/bin/id -u)\" = $(id -u "$LAYR_APFS_TEST_USER")" > "$T/check.log" 2>&1
+    as "$LAYR_APFS_TEST_USER" "$L" try head -- /bin/sh -c "test \"\$(/usr/bin/id -u)\" = $(id -u "$LAYR_APFS_TEST_USER")" > "$T/check.log" 2>&1
 }
 ok 'a check runs with the caller identity' check_identity
 cat "$T/check.log"

@@ -23,11 +23,11 @@ P=$LAYR_ROOT/projects/perm/lines
 cd $P/main
 eq "the admin works through the service" "" "$(as layr-admin $L status -s)"
 as layr-admin $L config snapshot.interval 3
-as layr-admin $L branch -q w1 --owner layr-u1
+as layr-admin $L line new -q w1 --owner layr-u1
 eq "the line folder belongs to the user" "layr-u1 700" "$(stat -c '%U %a' $P/w1)"
 
 cd $P/w1
-as layr-u1 sh -c "echo a1 > a1.txt && sed -i 's/line 3/line three/' notes.txt && $L add -A && $L commit -qm 'a1 work'"
+as layr-u1 sh -c "echo a1 > a1.txt && sed -i 's/line 3/line three/' notes.txt && $L add -A && $L save -qm 'a1 work'"
 eq "the user commits" "a1 work" "$(as layr-u1 $L log -1 --format=%s)"
 no "the user cannot list states" as layr-u1 ls $LAYR_ROOT/projects/perm/states
 no "the user cannot read the log" as layr-u1 cat $LAYR_ROOT/projects/perm/meta/log
@@ -35,27 +35,27 @@ no "the user cannot remove states" as layr-u1 rm -rf $LAYR_ROOT/projects/perm/st
 no "the user cannot enter the main line" as layr-u1 ls $P/main
 no "the user cannot merge into the main line" as layr-u1 env LAYR_PROJECT=perm LAYR_LINE=main $L merge w1
 cd /
-no "another user cannot change the line" as layr-u2 env LAYR_PROJECT=perm LAYR_LINE=w1 $L reset --hard HEAD~1
+no "another user cannot change the line" as layr-u2 env LAYR_PROJECT=perm LAYR_LINE=w1 $L reset --hard head~1
 cd $P/w1
-has "the user reads history through layr" "a1.txt" "$(as layr-u1 $L show --stat HEAD)"
+has "the user reads history through layr" "a1.txt" "$(as layr-u1 $L show --stat head)"
 no "the user cannot change the project configuration" as layr-u1 $L config x 1
 no "the user cannot run gc" as layr-u1 $L gc
 
 # Review of an exact state, then a merge of that state.
-S=$(as layr-u1 $L rev-parse HEAD)
+S=$(as layr-u1 $L rev-parse head)
 cd $P/main
 eq "try runs in a copy of the exact state" "0" "$(as layr-admin $L try -q $S -- sh -c 'test -f a1.txt && grep -q three notes.txt'; echo $?)"
 has "the check is recorded" "exit 0" "$(as layr-admin $L attestations $S --kind check)"
 eq "a failing check is recorded too" "1" "$(as layr-admin $L try -q $S -- false; echo $?)"
 as layr-admin $L merge -q w1 --expect $S
 eq "merge of the reviewed state" "a1" "$(as layr-admin cat a1.txt)"
-cd $P/w1 && as layr-u1 sh -c "echo more >> a1.txt && $L commit -qam more" && cd $P/main
+cd $P/w1 && as layr-u1 sh -c "echo more >> a1.txt && $L save -qam more" && cd $P/main
 eq "--expect refuses a newer state" "1" "$(as layr-admin $L merge w1 --expect $S >/dev/null 2>&1; echo $?)"
 as layr-admin $L config push.require_check true
 git init -q --bare $T/r.git; chown -R layr-admin $T/r.git; as layr-admin $L git remote add origin $T/r.git
-as layr-admin sh -c "echo admin > admin.txt && $L add admin.txt && $L commit -qm admin"
+as layr-admin sh -c "echo admin > admin.txt && $L add admin.txt && $L save -qm admin"
 has "push needs a passing check" "no passing check" "$(as layr-admin $L git push origin t 2>&1)"
-as layr-admin $L try -q HEAD -- true
+as layr-admin $L try -q head -- true
 eq "push after a check" "0" "$(as layr-admin $L git push -q origin t >/dev/null 2>&1; echo $?)"
 
 # Review findings 2026-10-09: undo and other operations respect line owners.
@@ -68,13 +68,13 @@ no "a user cannot delete a tag" sh -c "as layr-admin env LAYR_PROJECT=perm LAYR_
 
 # A merge driver never reads the target of a link in the merged trees.
 cd $P/main
-as layr-admin sh -c "printf 'x merge=keep\n' > .layrattributes && echo base > x && $L add -A && $L commit -qm attrs"
+as layr-admin sh -c "printf 'x merge=keep\n' > .layrattributes && echo base > x && $L add -A && $L save -qm attrs"
 as layr-admin $L config merge.driver.keep 'cat %O > %A'
-as layr-admin $L branch -q d1 --owner layr-u1
-cd $P/d1 && as layr-u1 sh -c "rm x && ln -s /etc/shadow x && $L add -A && $L commit -qm link" && cd $P/main
+as layr-admin $L line new -q d1 --owner layr-u1
+cd $P/d1 && as layr-u1 sh -c "rm x && ln -s /etc/shadow x && $L add -A && $L save -qm link" && cd $P/main
 as layr-admin $L merge -q d1 >/dev/null 2>&1
-as layr-admin sh -c "echo ours > x && $L commit -qam ours"
-cd $P/d1 && as layr-u1 sh -c "rm x && echo theirs > x && $L add -A && $L commit -qm theirs" && cd $P/main
+as layr-admin sh -c "echo ours > x && $L save -qam ours"
+cd $P/d1 && as layr-u1 sh -c "rm x && echo theirs > x && $L add -A && $L save -qm theirs" && cd $P/main
 as layr-admin $L merge -q d1 >/dev/null 2>&1
 no "no secret content reaches the merged file" grep -q 'root:' x
 
@@ -93,7 +93,7 @@ for i in $(seq 1 100); do
     sleep 0.2
 done
 has "the service saved the line" "periodic" "$(as layr-u1 $L log --auto --format=%s -n 3)"
-has "and marked it as taken while processes ran" "taken while processes ran" "$(as layr-u1 $L show -s HEAD@{0})"
+has "and marked it as taken while processes ran" "taken while processes ran" "$(as layr-u1 $L show -s head@{0})"
 
 # An idle line is compared once per snapshot.interval, not on every tick: a check that found
 # no change counts as the line's last automatic state (tick 1 s, interval 3 s).

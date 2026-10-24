@@ -727,7 +727,7 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
             if op != "push" {
                 bail!("OCI remotes support only layr push <remote> <rev> --runnable <name>");
             }
-            let rev = a.pos.get(1).map(String::as_str).unwrap_or("HEAD");
+            let rev = a.pos.get(1).map(String::as_str).unwrap_or("head");
             return if a.has("--json") {
                 oci::push_json(ctx, &url, rev, a.get("--runnable"))
             } else {

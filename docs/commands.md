@@ -6,9 +6,9 @@ This page is part of the [Layr documentation](../README.md#documentation).
 
 | Group         | Commands                                                                                     |
 | ------------- | -------------------------------------------------------------------------------------------- |
-| work          | `status [--json]`, `diff`, `add`, `rm`, `mv`, `apply [--cached]`, `commit [-a] [--amend]`, `restore`, `reset`, `stash`, `clean` |
+| work          | `status [--json]`, `diff`, `add`, `rm`, `mv`, `apply [--cached]`, `save -m <message> [-a] [--amend]`, `restore`, `reset`, `park`, `clean` |
 | history       | `log`, `show`, `blame`, `grep`, `ls-files`, `rev-parse`, `merge-base`                        |
-| lines         | `branch [<prefix> <rev> --count N] [--json]`, `tag`, `merge [--expect]`, `cherry-pick`, `revert`, `rebase`, `adopt`; `switch`/`checkout <line>` explain that lines are folders |
+| lines         | `line new <name> [<rev>] [--count N] [--json]`, `line list`, `line delete`, `line rename`, `tag`, `merge [--expect]`, `pick`, `invert`, `replay`, `adopt` |
 | access        | `access [list|grant [--until <30m|2h|1d>]|revoke|deny|allow|check]`, `protect [<pattern> --update <role> --check <names> --path <path>=<role> --approvals <n> --approvers <principals> --direct --rewrite <role> --no-expect | --remove]`, `approve [--withdraw] <state>`, `attest <kind> <rev> [--payload <file>]`, `attestations <rev> [--kind <kind>] [--json]` |
 | safety        | `undo`, `op log`, `save`, `try <state> -- <cmd>`, `bisect run [--good <rev>] [--bad <rev>] [--auto] [--ref-log <ref>] [--json] -- <cmd>`, `gc`, `fsck`, `reindex` |
 | Git bridge    | `git remote`, `git fetch`, `git pull`, `git push [--squash]`, `git clone`, `git sync`                             |
@@ -24,9 +24,43 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | changes       | `change list`, `change show <id>`, `change log <id>`, `change diff <id> [--from vN] [--to vM]` |
 | setup         | `init`, `projects`, `config`, `cache add|remove|list|repair`, `daemon`                        |
 
-Revisions: `HEAD`, `@`, `HEAD~2`, `HEAD^2`, line names, `line@machine`, tags, `origin/main`,
-state id prefixes, git commit ids of imported or pushed states, `stash@{n}`, `HEAD@{n}`
-(automatic states, newest first).
+`line new <name> [<rev>] [--count N]` creates lines. Use `line list`, `line delete <name>`, or `line rename [<old>] <new>` to manage them.
+A line is a folder. Use `cd` to enter it.
+
+`save -m <message>` makes a named state. `--message` is the long form of `-m`.
+`save -F <file>` reads the message from a file. `--file` is the long form of `-F`.
+`save --amend` replaces the current head state. Without a new message, it keeps the current message.
+
+Named saves also accept these options:
+
+- `-a` or `--all` includes changes to tracked files.
+- `--author <author>` sets the author.
+- `--allow-empty` permits a state without file changes.
+- `-q` or `--quiet` hides the usual output.
+- Other accepted options: `--no-edit`, `-s` or `--signoff`, `--no-verify`, `-v` or `--verbose`.
+
+`save` without `-m`, `-F`, or `--amend` makes an auto state.
+Use `--note <text>` to add an optional note to the auto state.
+Use `--running`, `--force`, `--caches`, or `-q` with an auto save.
+Use `--all-lines` to save auto states for all lines. `--all` applies only to named saves.
+`--note` cannot be combined with `-m`, `-F`, or `--amend`.
+
+`park` keeps unfinished work. It has `list`, `show`, `pop`, `apply`, `drop`, and `clear` subcommands.
+`pick` applies a state. `replay` applies states on a new base. `invert` reverses a state.
+Use `restore --ours` or `restore --theirs` for conflicts.
+Use `--no-save` with `merge`, `pick`, or `invert`. Use `--autopark` with `replay`.
+
+Removed command names fail and show their replacements. They are not aliases.
+`branch`, `commit`, `stash`, `cherry-pick`, `rebase`, and `revert` use the new names above.
+`checkout` and `switch` are removed because a line is a folder.
+The old `--no-commit`, `--autostash`, and `--layers` options fail and name `--no-save`, `--autopark`, and `--caches`.
+Git commands under `layr git` keep Git words.
+
+Revisions: `head`, `@`, `head~2`, `head^2`, line names, `line@machine`, tags, `origin/main`,
+state id prefixes, git commit ids of imported or pushed states, `park@{n}`, `head@{n}`
+(auto states, newest first).
+`HEAD` and `stash@{n}` fail. Use `head` and `park@{n}`.
+The names `head` and `HEAD` are reserved for lines, tags, and refs.
 
 Content ids: a state ID is the same only in copies that share its record, but the git ids of its
 content are the same on every machine and in git. `layr rev-parse <rev>^{tree}` (and `%T`/`%t` in
@@ -37,9 +71,9 @@ folder. A path that the exported commit does not have fails with exit 128.
 
 ## Workflow
 
-1. A writer makes a line (`layr branch topic-1 main`), or a maintainer makes one for a user
+1. A writer makes a line (`layr line new topic-1 main`), or a maintainer makes one for a user
    (`--owner bob`). Only the owner changes a line.
-2. The user works and commits in that folder. A program that drives the user can call
+2. The user works and saves named states in that folder. A program that drives the user can call
    `layr save` at quiet points, and `layr cache repair` when a build tool made a cache folder
    again.
 3. Review takes an exact state: `layr diff main...topic-1`, `layr try <state> -- <tests>` runs the
@@ -81,7 +115,7 @@ read, for example tests of another user's line:
 
 ```sh
 layr --project app try topic-1 -- cargo test          # the head of bob's line topic-1
-layr try HEAD~1 -- sh -c 'git log -1 && make check'  # an older state of your own line
+layr try head~1 -- sh -c 'git log -1 && make check'  # an older state of your own line
 ```
 
 - The copy is a new folder `lines/.try-<random>` that belongs to the caller. It holds the full
@@ -100,7 +134,7 @@ layr try HEAD~1 -- sh -c 'git log -1 && make check'  # an older state of your ow
 
 In a project with a git store (a clone, or a project with a remote), each line has a `.git`
 folder for tools that call git. Its objects come from the project store. After every move of the
-line's head (commit, amend, merge, reset, undo, pull, push), `HEAD` is the commit of the new head:
+line's head (save, amend, merge, reset, undo, pull, push), `HEAD` is the commit of the new head:
 the commit that `layr git push` sends for that state, with the commit of the previous state as its
 parent, and the index of that state. So `git rev-parse HEAD` changes only when the head moves,
 `git status` shows only the uncommitted changes, and `layr rev-parse <commit>` finds the state of
