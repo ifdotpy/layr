@@ -119,7 +119,10 @@ l save -qm private-only
 echo next > shared
 l save -qam with-private
 PRIVATE=$(l push archive)
-has "pushed states with private overlay files have a notice" 'omitted: private overlay files' "$PRIVATE"
+# Private overlays travel encrypted (docs/overlay-sync-design.md), so nothing is left out.
+no "pushed private overlay files are not left out" grep -q 'private overlay files' <<< "$PRIVATE"
+ok "the store holds the encrypted overlay" test -d "$T/archive/overlays"
+no "the store holds no plaintext of the private file" grep -rq confidential "$T/archive"
 REPEAT=$(l push archive)
 no "a repeat push with no states has no private-file notice" grep -q 'private overlay files' <<< "$REPEAT"
 finish
