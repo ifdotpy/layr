@@ -66,7 +66,17 @@ fn print_entry(ctx: &Ctx, entry: &QueueEntry) {
                     .as_array()
                     .into_iter()
                     .flatten()
-                    .map(|probe| format!("{}: {}", probe["probe"].as_str().unwrap_or(""), probe["status"].as_str().unwrap_or("")))
+                    .map(|probe| {
+                        let errors = probe["errors"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .map(|error| {
+                                format!("; {}: {}", error["side"].as_str().unwrap_or(""), error["error"].as_str().unwrap_or(""))
+                            })
+                            .collect::<String>();
+                        format!("{}: {}{errors}", probe["probe"].as_str().unwrap_or(""), probe["status"].as_str().unwrap_or(""))
+                    })
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("\tprobes: {rows}")

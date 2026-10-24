@@ -645,6 +645,9 @@ pub fn print(ctx: &Ctx, behavior: &Behavior) {
     for p in &behavior.probes {
         let name = p["probe"].as_str().unwrap_or("");
         outln!(ctx, "  {}: {}", name, p["status"].as_str().unwrap_or(""));
+        for error in p["errors"].as_array().into_iter().flatten() {
+            outln!(ctx, "    {}: {}", error["side"].as_str().unwrap_or(""), error["error"].as_str().unwrap_or(""));
+        }
         if p["exit_changed"] == true {
             outln!(ctx, "    exit {} → {}", p["base"]["exit"], p["head"]["exit"]);
         }
@@ -712,52 +715,86 @@ pub fn queue_run(ctx: &Ctx, repo: &Repo, base: &str, head: &str) -> Result<Value
         |state: &str| Input { subject: Subject { kind: "state".into(), id: state.into() }, state: state.into(), layers: vec![] };
     let base = input(base);
     let head = input(head);
-    run(ctx, repo, &base, None)?;
-    run(ctx, repo, &head, None)?;
-    let behavior = diff(repo, &base, &head)?;
-    let definitions = definitions(repo, &head)?;
+    let old = definitions(repo, &base)?;
+    let new = definitions(repo, &head)?;
+    let mut errors: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+    // Run probes separately so one broken probe cannot hide the remaining outcomes.
+    for (side, input, definitions) in [("base", &base, &old), ("head", &head, &new)] {
+        for name in definitions.keys() {
+            let error = match run(ctx, repo, input, Some(name)) {
+                Ok(results) => results.first().filter(|r| r.exit != 0).map(|r| format!("exit {}", r.exit)),
+                Err(error) => Some(format!("{error:#}")),
+            };
+            if let Some(error) = error {
+                errors.entry(name.clone()).or_default().push(json!({"side":side,"subject":input.subject,"error":error}));
+            }
+        }
+    }
+    let mut behavior = diff(repo, &base, &head)?;
     let mut outcomes = Vec::new();
-    for row in &behavior.probes {
-        let name = row["probe"].as_str().context("probe comparison has no name")?;
-        let limit = definitions.get(name).and_then(|probe| probe.fail_over);
+    for row in &mut behavior.probes {
+        let name = row["probe"].as_str().context("probe comparison has no name")?.to_owned();
+        let probe = new.get(&name).or_else(|| old.get(&name)).context("missing probe definition")?;
+        let failures = errors.entry(name.clone()).or_default();
         let mut reasons = Vec::new();
-        if let (Some(limit), Some(a), Some(b)) = (limit, row.get("base"), row.get("head")) {
-            let before = files(&repo.state_root(a["output_state"].as_str().context("missing base output")?)?)?;
-            let after = files(&repo.state_root(b["output_state"].as_str().context("missing head output")?)?)?;
-            // Limits ignore display noise. Check metrics before file sizes for a useful reason.
-            if definitions[name].kind == Kind::Number {
-                for (path, file) in &after {
-                    let read = |file: &FileData| -> Result<BTreeMap<String, f64>> {
-                        metrics(&serde_json::from_str(file.text.as_deref().context("stored metric is not text")?)?)
-                    };
-                    let old = before.get(path).map(read).transpose()?.unwrap_or_default();
-                    for (metric, value) in read(file)? {
-                        if let Some(reason) = over_limit(name, &metric, old.get(&metric).copied().unwrap_or(0.0), value, limit) {
-                            reasons.push(reason);
-                        }
-                    }
-                }
+        if let Some(limit) = probe.fail_over {
+            match queue_limit_reasons(repo, &name, probe, row, limit) {
+                Ok(growth) => reasons = growth,
+                Err(error) => failures.push(json!({"side":"comparison","error":format!("{error:#}")})),
             }
-            for (path, file) in &after {
-                let old = before.get(path).map(|file| file.size).unwrap_or(0);
-                if let Some(reason) = over_limit(name, path, old as f64, file.size as f64, limit) {
-                    reasons.push(reason);
-                }
+            for failure in failures.iter() {
+                reasons.push(format!(
+                    "probe {name}: {}: {}",
+                    failure["side"].as_str().unwrap_or(""),
+                    failure["error"].as_str().unwrap_or("")
+                ));
             }
+        }
+        if !failures.is_empty() {
+            row["errors"] = json!(failures);
+            row["status"] = json!("error");
         }
         let status = if !reasons.is_empty() {
             "failed"
-        } else if limit.is_none() {
+        } else if probe.fail_over.is_none() {
             "observed"
         } else if row["status"] == "not run" || row["status"] == "kind changed" {
             "not compared"
         } else {
             "passed"
         };
-        outcomes.push(json!({"probe":name,"status":status,"reasons":reasons}));
+        outcomes.push(json!({"probe":name,"status":status,"reasons":reasons,"errors":failures}));
     }
     let failed = outcomes.iter().any(|p| p["status"] == "failed");
     Ok(json!({"status":if failed {"failed"}else{"passed"},"probes":outcomes,"behavior":behavior}))
+}
+
+fn queue_limit_reasons(repo: &Repo, name: &str, probe: &Probe, row: &Value, limit: f64) -> Result<Vec<String>> {
+    let mut reasons = Vec::new();
+    let (Some(a), Some(b)) = (row.get("base"), row.get("head")) else { return Ok(reasons) };
+    let before = files(&repo.state_root(a["output_state"].as_str().context("missing base output")?)?)?;
+    let after = files(&repo.state_root(b["output_state"].as_str().context("missing head output")?)?)?;
+    // Limits ignore display noise. Check metrics before file sizes for a useful reason.
+    if probe.kind == Kind::Number && row["status"] != "kind changed" {
+        for (path, file) in &after {
+            let read = |file: &FileData| -> Result<BTreeMap<String, f64>> {
+                metrics(&serde_json::from_str(file.text.as_deref().context("stored metric is not text")?)?)
+            };
+            let old = before.get(path).map(read).transpose()?.unwrap_or_default();
+            for (metric, value) in read(file)? {
+                if let Some(reason) = over_limit(name, &metric, old.get(&metric).copied().unwrap_or(0.0), value, limit) {
+                    reasons.push(reason);
+                }
+            }
+        }
+    }
+    for (path, file) in &after {
+        let old = before.get(path).map(|file| file.size).unwrap_or(0);
+        if let Some(reason) = over_limit(name, path, old as f64, file.size as f64, limit) {
+            reasons.push(reason);
+        }
+    }
+    Ok(reasons)
 }
 
 fn over_limit(probe: &str, name: &str, before: f64, after: f64, limit: f64) -> Option<String> {

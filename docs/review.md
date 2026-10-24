@@ -109,7 +109,10 @@ The change's Behavior section reads that same comparison, including failed merge
 A probe's `fail_over = 0.20` fails an entry when any metric or output file size grows by more than 20 %.
 The limit applies independently of `noise`. A decrease or equal value passes.
 A zero or absent baseline with a positive result exceeds every finite relative limit.
-Without `fail_over`, a probe result never fails an entry, including a nonzero command exit.
+Without `fail_over`, probe errors never fail an entry.
+This includes command exits, sandbox errors, missing outputs, invalid JSON, and refused links.
+The queue stores each error and shows it in `queue list` and Behavior.
+With `fail_over`, these errors fail the entry because the limit cannot be checked.
 A refusal names the probe, metric or file, both values, relative growth, and limit:
 
 ```text

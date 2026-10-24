@@ -109,6 +109,8 @@ The queue runs each probe on the target head and the exact merge result before t
 Commands use the existing `try` sandbox. Equal arguments and exact states reuse stored results.
 A probe can set `fail_over` in `layr.toml`, for example `fail_over = 0.30` for 30 % growth.
 Any metric or output file size above that relative limit fails the entry and leaves the target unchanged.
-Without a limit, a probe result never fails the entry.
+Without a limit, probe errors never fail the entry.
+The queue stores command, sandbox, and output errors for `queue list` and Behavior.
+With a limit, these errors fail the entry and name the probe.
 Queue records store the outcome and comparison. `queue list` and the change's Behavior section read those results.
 Ordinary merges do not run probes. See [probes and behavior differences](review.md#probes-and-behavior-differences).

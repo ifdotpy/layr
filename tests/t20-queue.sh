@@ -256,4 +256,57 @@ eq 'an up-to-date entry reuses its stored outputs' "$STORED" "$(l ref list deriv
 ok 'queue probe outcomes survive a database rebuild' l reindex -q
 has 'the rebuilt queue retains probe outcomes' 'bench-checkout: failed' "$(l queue list --into limited)"
 has 'queue probe records have valid signatures' 'signatures ok' "$(l fsck)"
+# Broken probes without a limit remain observational and do not stop later probes.
+cd ../main
+l line new -q error-source
+l line new -q error-target
+l line new -q limit-error-target
+cd ../error-source
+cat >> layr.toml <<'TOML'
+[probe.a-missing]
+run = ["true"]
+outputs = ["out/missing"]
+[probe.b-invalid]
+run = ["sh", "-c", "mkdir -p out; echo invalid > out/invalid.json"]
+outputs = ["out/invalid.json"]
+kind = "json"
+[probe.c-link]
+run = ["sh", "-c", "mkdir -p out; ln -s /etc/passwd out/link"]
+outputs = ["out/link"]
+[probe.d-command]
+run = ["/no-such-probe-command"]
+outputs = ["out/missing-command"]
+[probe.z-after]
+run = ["sh", "-c", "mkdir -p out; echo ok > out/after"]
+outputs = ["out/after"]
+TOML
+l save -qam errors-observed
+ERROR_CHANGE=$(l change list --json | python3 -c 'import json,sys; print(next(r["change_id"] for r in json.load(sys.stdin) if r["message"]=="errors-observed"))')
+l queue add head --into error-target >/dev/null
+ok 'probe collection and command errors without limits permit the merge' l queue run --into error-target
+ERRORS=$(l queue list --into error-target --json)
+ok 'every broken probe has a stored observational error' python3 -c 'import json,sys; e=json.loads(sys.argv[1])[0]; assert e["status"]=="done"; p={r["probe"]:r for r in e["probes"]["probes"]}; assert all(p[n]["status"]=="observed" and p[n]["errors"] for n in ["a-missing","b-invalid","c-link","d-command"]); b={r["probe"]:r for r in e["probes"]["behavior"]["probes"]}; assert b["z-after"]["head"]["exit"]==0' "$ERRORS"
+has 'queue list shows the missing output error' "missing probe output 'out/missing'" "$(l queue list --into error-target)"
+has 'queue list shows the invalid JSON error' 'invalid JSON probe output' "$(l queue list --into error-target)"
+has 'queue list shows the refused link error' 'links and special files are refused' "$(l queue list --into error-target)"
+SHOW=$(l change show "$ERROR_CHANGE" --json)
+ok 'Behavior reads the same stored probe errors' python3 -c 'import json,sys; assert json.loads(sys.argv[1])[0]["probes"]["behavior"]==json.loads(sys.argv[2])["behavior"]' "$ERRORS" "$SHOW"
+has 'human Behavior shows the stored collection error' "missing probe output 'out/missing'" "$(l change show "$ERROR_CHANGE")"
+# The same broken output with a limit fails because its growth cannot be checked.
+python3 - <<'PYLIMIT'
+from pathlib import Path
+p = Path('layr.toml')
+p.write_text(p.read_text().replace('[probe.a-missing]\n', '[probe.a-missing]\nfail_over = 0.2\n').replace('[probe.observe]\n', '[probe.observe]\nfail_over = 0.2\n'))
+PYLIMIT
+l save -qam errors-limited
+LIMIT_ERROR_CHANGE=$(l change list --json | python3 -c 'import json,sys; print(next(r["change_id"] for r in json.load(sys.stdin) if r["message"]=="errors-limited"))')
+l queue add head --into limit-error-target >/dev/null
+BEFORE=$(l --line limit-error-target rev-parse head)
+no 'a collection error with a limit fails the entry' l queue run --into limit-error-target
+eq 'a limited probe error leaves the target head' "$BEFORE" "$(l --line limit-error-target rev-parse head)"
+LIMIT_ERRORS=$(l queue list --into limit-error-target --json)
+has 'a limited probe error names the probe and the error' "probe a-missing: head: missing probe output 'out/missing'" "$LIMIT_ERRORS"
+ok 'a command exit with a limit also fails the probe' python3 -c 'import json,sys; p=next(r for r in json.loads(sys.argv[1])[0]["probes"]["probes"] if r["probe"]=="observe"); assert p["status"]=="failed"; assert any(e["error"]=="exit 7" for e in p["errors"])' "$LIMIT_ERRORS"
+SHOW=$(l change show "$LIMIT_ERROR_CHANGE" --json)
+ok 'a failed entry keeps the collection error in Behavior' python3 -c 'import json,sys; b=json.loads(sys.argv[1])[0]["probes"]["behavior"]; assert b==json.loads(sys.argv[2])["behavior"]; assert next(r for r in b["probes"] if r["probe"]=="a-missing")["errors"]' "$LIMIT_ERRORS" "$SHOW"
 finish
