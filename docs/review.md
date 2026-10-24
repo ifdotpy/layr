@@ -100,6 +100,25 @@ A new entry triggers a pass for its configured target. The daemon also runs a pa
 Automatic passes use the target line owner and the normal line policy. Configured commands run as that owner.
 Without `queue.run`, only `queue run` processes entries. Queue runners on one machine use one project lock of their own.
 
+Set `queue.probes` to `true` to run every probe on the target head and the merge result before the target moves.
+The queue uses the same `try` sandbox and stored results as `probe run`.
+Equal arguments and exact states reuse their results, including command failures.
+`queue list` shows each probe outcome. `--json` includes the stored comparison.
+The change's Behavior section reads that same comparison, including failed merge results.
+
+A probe's `fail_over = 0.20` fails an entry when any metric or output file size grows by more than 20 %.
+The limit applies independently of `noise`. A decrease or equal value passes.
+A zero or absent baseline with a positive result exceeds every finite relative limit.
+Without `fail_over`, a probe result never fails an entry, including a nonzero command exit.
+A refusal names the probe, metric or file, both values, relative growth, and limit:
+
+```text
+probe bench-checkout: p95_ms 41 → 52 (+27 %) is over the limit +20 %
+```
+
+Probes run implicitly only in a queue with `queue.probes = true`.
+Ordinary merges, diffs, and `change show` execute no probe commands.
+
 ## Probes and behavior differences
 
 A probe is an explicit command from the exact revision's `layr.toml`.
@@ -116,6 +135,7 @@ run = ["./measure", "--json", "results/timing.json"]
 outputs = ["results/timing.json"]
 kind = "number"
 noise = 0.05
+fail_over = 0.20
 ```
 
 `run` is a nonempty argument array.
@@ -140,9 +160,9 @@ layr probe diff main feature --json
 layr change show CHANGE_ID
 ```
 
-Only `probe run` executes commands.
+`probe run` executes commands. The queue also runs probes when `queue.probes` is `true`.
 A diff or `change show` reads stored results and reports `not run` when a result is absent.
-The Behavior section compares state-subject results for the newest version and its merge base against the upstream, or `main`.
+Outside the queue, Behavior compares stored results for the newest version and its merge base against the upstream, or `main`.
 It does not select a view implicitly.
 If only view results exist, it lists their IDs and shows the explicit `probe diff views/<a> views/<b>` command.
 

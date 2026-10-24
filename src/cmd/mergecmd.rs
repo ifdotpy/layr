@@ -325,6 +325,7 @@ fn check_approvals(
 /// without the project lock; a passing check of the same state and command is reused. Then the
 /// lock is taken again and the line must still be at `head`. Returns the lock (held until the
 /// merge finishes) and the paths with local changes in the line's folder now.
+#[allow(clippy::too_many_arguments)]
 fn run_line_checks(
     ctx: &Ctx,
     repo: &Repo,
@@ -333,6 +334,7 @@ fn run_line_checks(
     candidate: &str,
     checks: &[String],
     quiet: bool,
+    queue: Option<&QueuedMerge<'_>>,
 ) -> Result<(crate::store::Lock, std::collections::BTreeSet<String>)> {
     for name in checks {
         let cmd =
@@ -360,6 +362,21 @@ fn run_line_checks(
                     ids::short(head)
                 ),
             ));
+        }
+    }
+    if let Some(q) = queue.filter(|q| q.run_probes) {
+        let outcome = crate::probes::queue_run(ctx, repo, head, candidate)?;
+        let reason = outcome["probes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|probe| probe["reasons"].as_array().into_iter().flatten())
+            .filter_map(serde_json::Value::as_str)
+            .next()
+            .map(str::to_owned);
+        *q.probes.borrow_mut() = Some(outcome);
+        if let Some(reason) = reason {
+            anyhow::bail!("{reason}");
         }
     }
     let lock = repo.p.lock()?;
@@ -445,6 +462,8 @@ struct QueuedMerge<'a> {
     entry: &'a crate::model::QueueEntry,
     expected_head: &'a str,
     attempts: u32,
+    run_probes: bool,
+    probes: std::cell::RefCell<Option<serde_json::Value>>,
 }
 
 /// A queue entry pins its source and compares the target under the merge's project lock.
@@ -455,21 +474,29 @@ pub fn merge_queued(
     entry: &crate::model::QueueEntry,
     expected_head: &str,
     attempts: u32,
-) -> Result<i32> {
-    let source = repo.source_state(&entry.state)?;
-    if !source.conflicts.is_empty() {
-        return Err(exit(
-            1,
-            format!(
-                "queued state has conflicts: {}",
-                source.conflicts.iter().map(|c| c.path.as_str()).collect::<Vec<_>>().join(", ")
-            ),
-        ));
-    }
-    let mut args = crate::args::Parsed::default();
-    args.values.insert("--expect".into(), vec![entry.state.clone()]);
-    args.flags.insert("-q".into(), 1);
-    merge_rev_inner(ctx, repo, line, &entry.state, &args, Some(&QueuedMerge { entry, expected_head, attempts }))
+) -> (Result<i32>, Option<serde_json::Value>) {
+    let run_probes = match crate::probes::queue_enabled(repo) {
+        Ok(enabled) => enabled,
+        Err(error) => return (Err(error), None),
+    };
+    let queue = QueuedMerge { entry, expected_head, attempts, run_probes, probes: Default::default() };
+    let result = (|| {
+        let source = repo.source_state(&entry.state)?;
+        if !source.conflicts.is_empty() {
+            return Err(exit(
+                1,
+                format!(
+                    "queued state has conflicts: {}",
+                    source.conflicts.iter().map(|c| c.path.as_str()).collect::<Vec<_>>().join(", ")
+                ),
+            ));
+        }
+        let mut args = crate::args::Parsed::default();
+        args.values.insert("--expect".into(), vec![entry.state.clone()]);
+        args.flags.insert("-q".into(), 1);
+        merge_rev_inner(ctx, repo, line, &entry.state, &args, Some(&queue))
+    })();
+    (result, queue.probes.into_inner())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -486,7 +513,7 @@ fn finish_queued(
     queue: Option<&QueuedMerge<'_>>,
 ) -> Result<Vec<changes::Change>> {
     let data = match queue {
-        Some(q) => match super::queue::complete_data(repo, q.entry, new_head, q.attempts, data) {
+        Some(q) => match super::queue::complete_data(repo, q.entry, new_head, q.attempts, q.probes.borrow().clone(), data) {
             Ok(data) => data,
             Err(error) => {
                 repo.discard_states(&states);
@@ -575,6 +602,12 @@ fn merge_rev_inner(
     let up_to_date = theirs == head || repo.is_ancestor(&theirs, &head)?;
     if up_to_date && theirs_line.as_ref().map(|t| repo.layers(t).map(|v| v.is_empty())).transpose()?.unwrap_or(true) {
         if queue.is_some() {
+            let _relock = if queue.is_some_and(|q| q.run_probes) {
+                drop(lock);
+                Some(run_line_checks(ctx, repo, &line, &head, &head, &[], true, queue)?.0)
+            } else {
+                None
+            };
             finish_queued(
                 ctx,
                 repo,
@@ -653,12 +686,13 @@ fn merge_rev_inner(
     }
     let ff = repo.is_ancestor(&head, &theirs)?;
     let mut _relock = None;
+    let run_probes = queue.is_some_and(|q| q.run_probes);
     if ff && !a.has("--no-ff") && !a.has("--squash") {
         check_paths(ctx, repo, &line, rule.as_ref(), &head, &theirs)?;
         check_approvals(ctx, repo, &line, rule.as_ref(), &head, &theirs)?;
-        if !checks.is_empty() {
+        if !checks.is_empty() || run_probes {
             drop(lock);
-            let (l, paths) = run_line_checks(ctx, repo, &line, &head, &theirs, &checks, quiet)?;
+            let (l, paths) = run_line_checks(ctx, repo, &line, &head, &theirs, &checks, quiet, queue)?;
             _relock = Some(l);
             local = paths;
         }
@@ -710,7 +744,7 @@ fn merge_rev_inner(
         ovl.discard(repo);
         return Err(e);
     }
-    if !checks.is_empty() {
+    if !checks.is_empty() || run_probes {
         if nconf > 0 {
             repo.discard_states(&states);
             ovl.discard(repo);
@@ -726,7 +760,7 @@ fn merge_rev_inner(
         rec.data = serde_json::json!({"line": line.id, "theirs": theirs});
         repo.commit_record(ctx, rec)?;
         drop(lock);
-        let (l, paths) = run_line_checks(ctx, repo, &line, &head, &sid, &checks, quiet)?;
+        let (l, paths) = run_line_checks(ctx, repo, &line, &head, &sid, &checks, quiet, queue)?;
         _relock = Some(l);
         local = paths;
     }

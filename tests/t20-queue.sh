@@ -149,4 +149,108 @@ for i in $(seq 1 150); do [ "$(l --line automatic rev-parse head)" = "$TICK" ] &
 eq 'a daemon tick processes the pending entry' "$TICK" "$(l --line automatic rev-parse head)"
 ok 'the queue index rebuilds' l reindex -q
 has 'queue records have valid signatures' 'signatures ok' "$(l fsck)"
+# Probe limits compare the target base with the exact merge result before the move.
+mkdir -p "$T/probe-src"
+printf '41\n' > "$T/probe-src/metric.txt"
+printf '10\n' > "$T/probe-src/size.txt"
+printf '1\n' > "$T/probe-src/observe.txt"
+printf 'out/\n' > "$T/probe-src/.gitignore"
+cat > "$T/probe-src/layr.toml" <<'TOML'
+[probe.bench-checkout]
+run = ["python3", "probe.py", "metric"]
+outputs = ["out/number.json"]
+kind = "number"
+noise = 0.9
+fail_over = 0.2
+[probe.files]
+run = ["python3", "probe.py", "files"]
+outputs = ["out/blob"]
+fail_over = 0.2
+[probe.observe]
+run = ["python3", "probe.py", "observe"]
+outputs = ["out/observed.json"]
+kind = "number"
+TOML
+cat > "$T/probe-src/probe.py" <<'PYPROBE'
+import json, pathlib, sys
+out = pathlib.Path('out'); out.mkdir(exist_ok=True)
+kind = sys.argv[1]
+if kind == 'metric':
+    (out/'number.json').write_text(json.dumps({'p95_ms': int(pathlib.Path('metric.txt').read_text())}))
+elif kind == 'files':
+    (out/'blob').write_bytes(b'\0' * int(pathlib.Path('size.txt').read_text()))
+else:
+    (out/'observed.json').write_text(json.dumps({'value': int(pathlib.Path('observe.txt').read_text())}))
+    sys.exit(7)
+PYPROBE
+l init queue-probes --from "$T/probe-src" -q >/dev/null
+cd "$LAYR_ROOT/projects/queue-probes/lines/main"
+PROBE_BASE=$(l rev-parse head)
+l line new -q under
+cd ../under
+printf '49\n' > metric.txt
+printf '1000000\n' > observe.txt
+l save -qam under
+UNDER=$(l rev-parse head)
+UNDER_CHANGE=$(l change list --json | python3 -c 'import json,sys; print(next(r["change_id"] for r in json.load(sys.stdin) if r["message"]=="under"))')
+cd ../main
+l line new -q disabled
+l queue add under --into disabled >/dev/null
+ok 'queue probes default to disabled' l queue run --into disabled
+eq 'a disabled queue writes no probe outputs' '[]' "$(l ref list derived/probe-v1/ --json)"
+no 'queue.probes rejects a non-boolean value' l config queue.probes yes
+l config queue.probes true
+# Precompute both exact inputs. Nonzero observational results are also reusable.
+l probe run "$PROBE_BASE" --json >/dev/null || true
+l probe run "$UNDER" --json >/dev/null || true
+STORED=$(l ref list derived/probe-v1/ --json)
+l queue add under >/dev/null
+ok 'probe growth below the limit permits the queue move' l queue run --into main
+eq 'the queue moves to the exact checked state' "$UNDER" "$(l rev-parse head)"
+eq 'the queue reuses every stored probe output' "$STORED" "$(l ref list derived/probe-v1/ --json)"
+OUTCOMES=$(l queue list --into main --json)
+ok 'an unlimited probe remains observational despite growth and exit 7' python3 -c 'import json,sys; e=json.loads(sys.argv[1])[0]; p=e["probes"]; assert p["status"]=="passed"; assert next(r for r in p["probes"] if r["probe"]=="observe")["status"]=="observed"; assert all(r["base"]["reused"] and r["head"]["reused"] for r in p["behavior"]["probes"])' "$OUTCOMES"
+has 'queue list shows each probe outcome' 'bench-checkout: passed' "$(l queue list --into main)"
+SHOW=$(l change show "$UNDER_CHANGE" --json)
+ok 'change Behavior reads the exact queue comparison' python3 -c 'import json,sys; assert json.loads(sys.argv[1])[0]["probes"]["behavior"]==json.loads(sys.argv[2])["behavior"]' "$OUTCOMES" "$SHOW"
+# A true merge must compare against the target head, not the source parent.
+l line new -q limited "$PROBE_BASE"
+l line new -q over "$PROBE_BASE"
+cd ../over
+printf '52\n' > metric.txt
+l save -qam over
+OVER_CHANGE=$(l change list --json | python3 -c 'import json,sys; print(next(r["change_id"] for r in json.load(sys.stdin) if r["message"]=="over"))')
+cd ../limited
+echo target > target-only.txt; l add target-only.txt; l save -qm target-only
+LIMIT_BASE=$(l rev-parse head)
+l queue add over --into limited >/dev/null
+no 'probe growth above the limit fails the queue entry' l queue run --into limited
+eq 'a failed probe leaves the target head unchanged' "$LIMIT_BASE" "$(l rev-parse head)"
+eq 'a failed probe leaves the target files unchanged' 41 "$(cat metric.txt)"
+LIMIT_OUTCOME=$(l queue list --into limited --json)
+eq 'the failure gives the exact metric, values, change, and limit' 'probe bench-checkout: p95_ms 41 → 52 (+27 %) is over the limit +20 %' "$(printf '%s' "$LIMIT_OUTCOME" | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["reason"])')"
+ok 'the probe subject is the merge result and includes target changes' python3 -c 'import json,pathlib,sys; b=json.loads(sys.argv[1])[0]["probes"]["behavior"]; assert b["base"]==sys.argv[2]; assert (pathlib.Path(sys.argv[3])/b["head"] / "target-only.txt").read_text().strip()=="target"; assert b["head"]!=b["base"]' "$LIMIT_OUTCOME" "$LIMIT_BASE" "$LAYR_ROOT/projects/queue-probes/states"
+SHOW=$(l change show "$OVER_CHANGE" --json)
+ok 'a failed merge exposes the same stored Behavior' python3 -c 'import json,sys; assert json.loads(sys.argv[1])[0]["probes"]["behavior"]==json.loads(sys.argv[2])["behavior"]' "$LIMIT_OUTCOME" "$SHOW"
+l line new -q larger "$PROBE_BASE"
+cd ../larger
+printf '13\n' > size.txt
+l save -qam larger
+l queue add head --into limited >/dev/null
+no 'output file size growth also fails an entry' l queue run --into limited
+has 'the size failure gives the file and values' 'probe files: out/blob 10 → 13 (+30 %) is over the limit +20 %' "$(l queue list --into limited)"
+# Queue configuration does not make ordinary merges execute probes.
+l line new -q ordinary "$PROBE_BASE"
+STORED=$(l ref list derived/probe-v1/ --json)
+cd ../ordinary
+ok 'an ordinary merge ignores queue.probes' l merge over -q
+eq 'an ordinary merge writes no probe results' "$STORED" "$(l ref list derived/probe-v1/ --json)"
+# Up-to-date queue entries still report stored probes, without extra output states.
+l queue add main --into main >/dev/null
+STORED=$(l ref list derived/probe-v1/ --json)
+ok 'an up-to-date queue entry still compares probes' l queue run --into main
+eq 'an up-to-date entry reuses its stored outputs' "$STORED" "$(l ref list derived/probe-v1/ --json)"
+ok 'queue probe outcomes survive a database rebuild' l reindex -q
+has 'the rebuilt queue retains probe outcomes' 'bench-checkout: failed' "$(l queue list --into limited)"
+has 'queue probe records have valid signatures' 'signatures ok' "$(l fsck)"
 finish
