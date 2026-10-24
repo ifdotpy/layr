@@ -175,7 +175,8 @@ pub fn authorize_update(
         let argv = vec!["sh".into(), "-c".into(), command.clone()];
         if repo.p.db.check_exit(&target.target, &argv, Some(0))?.is_none() {
             bail!(
-                "ref '{name}' needs a passing check '{check}' for exactly state {} and command '{command}'; run layr try first",
+                "ref '{name}' needs a passing check '{check}' for exactly state {} and command '{command}'; run 'layr try {} --check {check}' first",
+                ids::short(&target.target),
                 ids::short(&target.target)
             );
         }

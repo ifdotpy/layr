@@ -37,6 +37,7 @@ has 'an undefined check is named' "check 'smoke'" "$(l --project p ref set env/p
 CMD="echo checked >> $T/check-count"
 l --project p config check.smoke "$CMD"
 has 'a missing check is named' "passing check 'smoke'" "$(l --project p ref set env/prod "$SUBJECT" --expect "$BASE" 2>&1)"
+has 'the error names the try command' "--check smoke" "$(l --project p ref set env/prod "$SUBJECT" --expect "$BASE" 2>&1)"
 no 'ref set never runs a check command' test -e "$T/check-count"
 l --project p try -q "$BASE" -- sh -c "$CMD"
 no 'a check on another state does not count' l --project p ref set env/prod "$SUBJECT" --expect "$BASE"
@@ -46,7 +47,7 @@ l --project p config check.smoke '"false"'
 no 'a failed matching check is recorded' l --project p try -q "$SUBJECT" -- sh -c false
 no 'a failed matching check does not count' l --project p ref set env/prod "$SUBJECT" --expect "$BASE"
 l --project p config check.smoke "$CMD"
-l --project p try -q "$SUBJECT" -- sh -c "$CMD"
+l --project p try -q "$SUBJECT" --check smoke
 ok 'all required evidence permits an update' as layr-admin "$L" --project p ref set env/prod "$SUBJECT" --expect "$BASE"
 COUNT=$(wc -l < "$T/check-count" | xargs)
 ok 'a protected delete uses evidence of its current subject' as layr-admin "$L" --project p ref delete env/prod --expect "$SUBJECT"

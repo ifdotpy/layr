@@ -595,18 +595,34 @@ pub fn op(ctx: &Ctx, args: &[String]) -> Result<i32> {
 
 /// Run a command in a temporary writable copy of an exact state and record the result.
 pub fn try_cmd(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let spec = Spec::new().flag("--keep").flag("-q|--quiet");
+    let spec = Spec::new().flag("--keep").flag("-q|--quiet").value("--check");
     let a = parse(&spec, args)?;
     let h = here(ctx)?;
     let repo = &h.repo;
     repo.require(ctx, "try")?;
     const USAGE: &str = "usage: layr try [--keep] [-q] <rev> -- <command>...\n\
+        \x20      layr try [--keep] [-q] <rev> --check <name>\n\
         Runs the command in a temporary copy of the state <rev> (with a .git folder at its commit) \
-        and deletes the copy afterwards; your line does not change.";
+        and deletes the copy afterwards; your line does not change. --check runs the command of \
+        'layr config check.<name>', as protected refs, merges and the queue run it.";
     let rev = a.pos.first().ok_or_else(|| exit(128, USAGE))?;
-    if a.paths.is_empty() {
-        return Err(exit(128, USAGE));
-    }
+    let argv: Vec<String> = match a.get("--check") {
+        Some(name) => {
+            if !a.paths.is_empty() {
+                return Err(exit(128, USAGE));
+            }
+            let command = repo.p.config_value(&format!("check.{name}"))?.and_then(|v| v.as_str().map(String::from)).ok_or_else(
+                || exit(128, format!("check '{name}' is not defined (layr config check.{name} '<command>')")),
+            )?;
+            vec!["sh".into(), "-c".into(), command]
+        }
+        None => {
+            if a.paths.is_empty() {
+                return Err(exit(128, USAGE));
+            }
+            a.paths.clone()
+        }
+    };
     let view = {
         let _lock = repo.p.lock()?;
         let current = h.line.as_ref().map(|line| repo.line(&line.id)).transpose()?;
@@ -627,8 +643,8 @@ pub fn try_cmd(ctx: &Ctx, args: &[String]) -> Result<i32> {
         ctx,
         repo,
         &view.shared,
-        &a.paths,
-        &a.paths.join(" "),
+        &argv,
+        &argv.join(" "),
         &env,
         a.has("-q"),
         a.has("--keep"),

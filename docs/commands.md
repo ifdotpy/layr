@@ -10,7 +10,7 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | history       | `log`, `show`, `blame`, `grep`, `ls-files`, `rev-parse`, `merge-base`                        |
 | lines         | `line new <name> [<rev>] [--count N] [--json]`, `line list`, `line delete`, `line rename`, `tag`, `merge [--expect]`, `pick`, `invert`, `replay`, `adopt` |
 | access        | `access [list|grant [--until <30m|2h|1d>]|revoke|deny|allow|check]`, `protect [<pattern> --update <role> --check <names> --path <path>=<role> --approvals <n> --approvers <principals> --direct --rewrite <role> --no-expect | --remove]`, `approve [--withdraw] <state>`, `attest <kind> <rev> [--payload <file>]`, `attestations <rev> [--kind <kind>] [--json]` |
-| safety        | `undo`, `op log`, `save`, `try <state> -- <cmd>`, `bisect run [--good <rev>] [--bad <rev>] [--auto] [--ref-log <ref>] [--json] -- <cmd>`, `gc`, `fsck`, `reindex` |
+| safety        | `undo`, `op log`, `save`, `try <state> -- <cmd>`, `try <state> --check <name>`, `bisect run [--good <rev>] [--bad <rev>] [--auto] [--ref-log <ref>] [--json] -- <cmd>`, `gc`, `fsck`, `reindex` |
 | Git bridge    | `git remote`, `git fetch`, `git pull`, `git push [--squash]`, `git clone`, `git sync`                             |
 | remotes       | `remote add\|list\|self\|remove\|trust`, `sync <remote>`, `push <remote>`, `fetch <remote>`, `pull <remote>`, `clone <url>` |
 | OCI           | `push <oci-remote> <rev> [--runnable <name>] [--json]`, `access token <principal> [--until <duration>]`, `access token --revoke <principal>` |
@@ -117,6 +117,10 @@ read, for example tests of another user's line:
 layr --project app try topic-1 -- cargo test          # the head of bob's line topic-1
 layr try head~1 -- sh -c 'git log -1 && make check'  # an older state of your own line
 ```
+
+`layr try <state> --check <name>` runs the command of `layr config check.<name>` exactly as protected
+refs, merges and the queue run it (`sh -c '<command>'`). Its passing result is the check those rules
+want.
 
 - The copy is a new folder `lines/.try-<random>` that belongs to the caller. It holds the full
   content of the state, a `.git` folder whose `HEAD` is the state's commit (see "Git in a line"),
