@@ -1,5 +1,7 @@
 //! Read-only store views and a bounded cache. Adapted from Layr Desk's disk module.
 
+mod all;
+mod catalog;
 pub mod keystore;
 mod launch;
 mod webdav;
@@ -36,6 +38,7 @@ pub struct Disk {
     access: Access,
     cache: Cache,
     snapshot: RwLock<Arc<Snapshot>>,
+    keychain: std::sync::atomic::AtomicBool,
 }
 
 pub fn line_folder(name: &str) -> String {
@@ -150,8 +153,14 @@ impl Disk {
         access.pin = Some(pin);
         access.paper = None;
         access.identity = Some(identity.clone());
-        let disk =
-            Arc::new(Self { url, env, access, cache: Cache::open(cache, limit)?, snapshot: RwLock::new(Arc::new(snapshot)) });
+        let disk = Arc::new(Self {
+            url,
+            env,
+            access,
+            cache: Cache::open(cache, limit)?,
+            snapshot: RwLock::new(Arc::new(snapshot)),
+            keychain: std::sync::atomic::AtomicBool::new(false),
+        });
         Ok((disk, identity))
     }
 
@@ -174,16 +183,35 @@ impl Disk {
         });
     }
 
+    fn locked(&self) -> bool {
+        self.keychain.load(std::sync::atomic::Ordering::SeqCst)
+            && !keystore::get(&keystore::account(&self.url)).is_ok_and(|key| key.is_some())
+    }
+
     pub fn lookup(&self, path: &str) -> Option<(Node, Vec<(String, Node)>)> {
+        let locked = self.locked();
         let view = self.snapshot.read().unwrap().clone();
         let node = |path: &str| view.nodes.get(path).cloned().unwrap_or(Node::Folder { time: 0 });
         if let Some(children) = view.folders.get(path) {
-            return Some((node(path), children.iter().map(|path| (path.clone(), node(path))).collect()));
+            return Some((
+                node(path),
+                children
+                    .iter()
+                    .filter(|path| !locked || view.folders.contains_key(*path))
+                    .map(|path| (path.clone(), node(path)))
+                    .collect(),
+            ));
+        }
+        if locked {
+            return None;
         }
         view.nodes.get(path).cloned().map(|node| (node, vec![]))
     }
 
     pub fn read(&self, content: &Content) -> Result<Arc<Vec<u8>>> {
+        if self.locked() {
+            bail!("the store is locked");
+        }
         match content {
             Content::Text(bytes) => Ok(bytes.clone()),
             Content::Stored { entry, reader } => {
@@ -371,8 +399,14 @@ fn resolve_remote(remote: &str) -> Result<(String, Option<StorePin>)> {
     if let Some(project) = project {
         let path = root.join("projects").join(project);
         let db = rusqlite::Connection::open_with_flags(crate::store::db_file(&path), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        let value: String =
-            db.query_row("SELECT value FROM config WHERE key=?1", [format!("cloud.remote.{remote}.url")], |row| row.get(0))?;
+        use rusqlite::OptionalExtension;
+        let value: Option<String> = db
+            .query_row("SELECT value FROM config WHERE key=?1", [format!("cloud.remote.{remote}.url")], |row| row.get(0))
+            .optional()?;
+        let Some(value) = value else {
+            let store = catalog::known(&user_home()?)?.into_iter().find(|s| s.name == remote).context("unknown store remote")?;
+            return Ok((store.url, store.pin));
+        };
         let pin: String = db
             .query_row("SELECT value FROM config WHERE key=?1", [format!("cloud.remote.{remote}.store")], |row| row.get(0))
             .context("named remote has no store pin; run layr fetch <remote> first")?;
@@ -380,6 +414,9 @@ fn resolve_remote(remote: &str) -> Result<(String, Option<StorePin>)> {
             serde_json::from_str(&value).context("invalid named remote URL")?,
             Some(serde_json::from_str(&pin).context("invalid named remote store pin")?),
         ));
+    }
+    if let Some(store) = catalog::known(&user_home()?)?.into_iter().find(|s| s.name == remote) {
+        return Ok((store.url, store.pin));
     }
     bail!("use a store URL outside a project, such as file:///path, s3://bucket/prefix or layr+https://host/project")
 }
@@ -407,19 +444,56 @@ pub fn run(args: &[String]) -> Result<i32> {
             .value("--paper-key-file")
             .value("--forget-pin")
             .flag("--paper-key-stdin")
+            .flag("--keychain-only")
+            .flag("--all")
+            .flag("--unlock")
+            .flag("--lock")
+            .flag("--status")
+            .flag("--json")
             .flag("--install")
             .flag("--remove")
             .flag("--help|-h"),
         args,
     )?;
     if a.has("--help") {
-        println!("Usage: layr mount <remote> [--listen 127.0.0.1:8095] [--cache-size <bytes>]\n       layr mount --install [<remote>] | --remove\n       layr mount --forget-pin <url>\nUse --paper-key-file <0600-file> or --paper-key-stdin once to unlock the disk.");
+        println!("Usage: layr mount <remote> [--listen 127.0.0.1:8095] [--cache-size <bytes>]\n       layr mount --unlock <remote> | --lock <remote> | --status [--json]\n       layr mount --all [--listen 127.0.0.1:8095]\n       layr mount --install [<remote> | --all] | --remove [--all]\n       layr mount --forget-pin <url>\nUse --paper-key-file <0600-file> or --paper-key-stdin once to unlock the disk.");
         return Ok(0);
     }
     if !cfg!(target_os = "macos") && (a.has("--install") || a.has("--remove") || a.has("--at")) {
         bail!("mount --install, --remove and --at require macOS");
     }
+    if !cfg!(target_os = "macos") && (a.has("--unlock") || a.has("--lock") || a.has("--status")) {
+        eprintln!("the Keychain is macOS only");
+        return Ok(2);
+    }
+    let actions = ["--unlock", "--lock", "--status", "--install", "--remove"].iter().filter(|flag| a.has(flag)).count();
+    if actions > 1 {
+        bail!("choose one mount action");
+    }
+    if a.has("--all") && (!a.pos.is_empty() || a.has("--unlock") || a.has("--lock") || a.has("--status")) {
+        bail!("--all takes no remote or Keychain action");
+    }
     let home = user_home()?;
+    if a.has("--status") {
+        if !a.pos.is_empty() {
+            bail!("mount --status takes no remote");
+        }
+        catalog::status(&home, a.has("--json"))?;
+        return Ok(0);
+    }
+    if a.has("--all") {
+        return all::run(&a, &home);
+    }
+    if a.has("--lock") {
+        let remote = a.pos.first().context("mount --lock needs a remote")?;
+        if a.pos.len() != 1 {
+            bail!("mount --lock takes one remote");
+        }
+        let (url, _) = resolve_remote(remote)?;
+        keystore::remove(&keystore::account(&url))?;
+        println!("locked {url}");
+        return Ok(0);
+    }
     if let Some(url) = a.get("--forget-pin") {
         if !a.pos.is_empty() {
             bail!("mount --forget-pin takes only a URL");
@@ -463,6 +537,14 @@ pub fn run(args: &[String]) -> Result<i32> {
     let limit =
         a.get("--cache-size").map(str::parse).transpose()?.or_else(|| saved.as_ref().map(|s| s.cache_size)).unwrap_or(1 << 30);
     let cache = a.get("--cache").map(PathBuf::from).unwrap_or_else(|| cache_folder(&home));
+    if a.has("--keychain-only") {
+        if a.has("--paper-key-file") || a.has("--paper-key-stdin") || actions > 0 {
+            bail!("the installed agent uses only the Keychain");
+        }
+        let mut env = std::env::vars().collect();
+        catalog::profile_env(&remote, &url, &home, &mut env)?;
+        return serve(all::keychain_only(url, env, pin, cache, limit), address, a.get("--at"));
+    }
     let paper = if let Some(path) = a.get("--paper-key-file") {
         Some(keystore::paper_file(Path::new(path))?)
     } else if a.has("--paper-key-stdin") {
@@ -476,7 +558,8 @@ pub fn run(args: &[String]) -> Result<i32> {
     let account = keystore::account(&url);
     let cached = if paper.is_none() { keystore::get(&account)? } else { None };
     let access = Access { machine: machine_access(), paper, identity: cached, pin };
-    let env = std::env::vars().collect();
+    let mut env = std::env::vars().collect();
+    catalog::profile_env(&remote, &url, &home, &mut env)?;
     let (disk, identity) = Disk::open(url.clone(), env, access, cache.clone(), limit)?;
     let pin = disk.access.pin.as_ref().context("disk has no store pin")?;
     if project_pin.is_none() && record_pin(&pins_file(&home), &url, pin)? {
@@ -485,6 +568,11 @@ pub fn run(args: &[String]) -> Result<i32> {
     let span = crate::trace::span("disk Keychain save");
     keystore::set(&account, &identity)?;
     drop(span);
+    disk.keychain.store(cfg!(target_os = "macos"), std::sync::atomic::Ordering::SeqCst);
+    if a.has("--unlock") {
+        println!("unlocked {url}");
+        return Ok(0);
+    }
     let prefs = preferences_file(&home);
     std::fs::create_dir_all(prefs.parent().unwrap())?;
     crate::fsutil::atomic_write(
@@ -499,12 +587,38 @@ pub fn run(args: &[String]) -> Result<i32> {
     if a.has("--at") && !cfg!(target_os = "macos") {
         bail!("--at requires macOS");
     }
+    disk.background(Duration::from_secs(120));
+    serve(disk, address, a.get("--at"))
+}
+
+pub(super) trait View: Send + Sync {
+    fn lookup(&self, path: &str) -> Option<(Node, Vec<(String, Node)>)>;
+    fn read(&self, path: &str, content: &Content) -> Result<Arc<Vec<u8>>>;
+    fn locked(&self, path: &str) -> bool;
+    fn served_urls(&self) -> Vec<String>;
+}
+impl View for Disk {
+    fn lookup(&self, path: &str) -> Option<(Node, Vec<(String, Node)>)> {
+        Disk::lookup(self, path)
+    }
+    fn read(&self, _path: &str, content: &Content) -> Result<Arc<Vec<u8>>> {
+        Disk::read(self, content)
+    }
+    fn locked(&self, _path: &str) -> bool {
+        Disk::locked(self)
+    }
+    fn served_urls(&self) -> Vec<String> {
+        vec![self.url.clone()]
+    }
+}
+
+fn serve(disk: Arc<dyn View>, address: std::net::SocketAddr, at: Option<&str>) -> Result<i32> {
     let listener = std::net::TcpListener::bind(address)?;
     let local = listener.local_addr()?;
     let server_url = format!("http://{local}/");
+    let _serving = catalog::serving(&user_home()?, disk.served_urls(), server_url.clone())?;
     eprintln!("layr mount: {server_url} (read only)");
-    disk.background(Duration::from_secs(120));
-    if let Some(at) = a.get("--at") {
+    if let Some(at) = at {
         let at = PathBuf::from(at);
         let url = server_url.clone();
         std::thread::spawn(move || {
@@ -525,14 +639,14 @@ pub fn run(args: &[String]) -> Result<i32> {
         let disk = disk.clone();
         let active = active.clone();
         std::thread::spawn(move || {
-            let _ = connection(&disk, stream);
+            let _ = connection(disk.as_ref(), stream);
             active.fetch_sub(1, Ordering::SeqCst);
         });
     }
     Ok(0)
 }
 
-fn connection(disk: &Disk, stream: std::net::TcpStream) -> Result<()> {
+fn connection(disk: &dyn View, stream: std::net::TcpStream) -> Result<()> {
     let limits = crate::http::Limits {
         request_line: 8192,
         header_count: 64,
@@ -579,6 +693,69 @@ fn connection(disk: &Disk, stream: std::net::TcpStream) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn keychain_lock_hides_files_and_blocks_webdav_until_unlock() {
+        keystore::test_service();
+        let root = std::env::temp_dir().join(crate::ids::new_id());
+        let url = format!("file://{}", root.join("remote").display());
+        let backend = crate::store_remote::backend::Backend::open(&url).unwrap();
+        let identity = crate::store_remote::keys::generate_identity();
+        let recipient = crate::store_remote::keys::recipient_of(&identity).unwrap();
+        backend
+            .put_new(
+                "store.json",
+                serde_json::to_vec(&serde_json::json!({"format":2,"project":crate::ids::new_id(),"recipient":recipient}))
+                    .unwrap(),
+            )
+            .unwrap();
+        let (disk, _) = Disk::open(
+            url.clone(),
+            HashMap::new(),
+            Access { identity: Some(identity.clone()), ..Default::default() },
+            root.join("cache"),
+            0,
+        )
+        .unwrap();
+        let nodes =
+            BTreeMap::from([("main".into(), Node::Folder { time: 0 }), ("main/file".into(), text(b"private".to_vec(), 0))]);
+        *disk.snapshot.write().unwrap() = Arc::new(Snapshot { folders: folders(&nodes), nodes });
+        let account = keystore::account(&url);
+        keystore::set(&account, &identity).unwrap();
+        disk.keychain.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(!disk.locked());
+        let request = |method: &str, path: &str| {
+            let raw = format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\nDepth: 1\r\n\r\n");
+            let limits = crate::http::Limits {
+                request_line: 8192,
+                header_count: 64,
+                header_bytes: 32768,
+                body_bytes: 65536,
+                header_timeout: Duration::from_secs(1),
+                body_timeout: Duration::from_secs(1),
+                write_timeout: Duration::from_secs(1),
+            };
+            crate::http::request(&mut std::io::BufReader::new(raw.as_bytes()), &limits).unwrap()
+        };
+        let get = request("GET", "/main/file");
+        let mut response = Vec::new();
+        webdav::serve(disk.as_ref(), &get, &mut response).unwrap();
+        assert!(response.ends_with(b"private"));
+        keystore::remove(&account).unwrap();
+        assert!(disk.locked());
+        assert!(disk.lookup("main").unwrap().1.is_empty());
+        response.clear();
+        webdav::serve(disk.as_ref(), &get, &mut response).unwrap();
+        assert!(response.starts_with(b"HTTP/1.1 423 Locked"));
+        assert!(!response.ends_with(b"private"));
+        keystore::set(&account, &identity).unwrap();
+        response.clear();
+        webdav::serve(disk.as_ref(), &get, &mut response).unwrap();
+        assert!(response.ends_with(b"private"));
+        keystore::remove(&account).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn url_pin_updates_preserve_other_urls_and_refuse_a_conflicting_first_use() {
         let root = std::env::temp_dir().join(crate::ids::new_id());

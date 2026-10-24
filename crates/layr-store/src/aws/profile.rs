@@ -531,7 +531,15 @@ mod unit {
                 let mut body = vec![0; len];
                 stream.read_exact(&mut body).unwrap();
                 if path == "/token" {
-                    assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["grantType"], "refresh_token");
+                    let request = serde_json::from_slice::<Value>(&body).unwrap();
+                    assert_eq!(
+                        request["grantType"],
+                        if request["deviceCode"].is_string() {
+                            "urn:ietf:params:oauth:grant-type:device_code"
+                        } else {
+                            "refresh_token"
+                        }
+                    );
                 }
                 if path == "/federation/credentials" {
                     assert!(header.to_ascii_lowercase().contains("x-amz-sso_bearer_token: fresh-token"));
@@ -584,6 +592,39 @@ mod unit {
         assert!(profile.credentials(&http).unwrap_err().is::<SignInNeeded>());
         sso.write_cache(&json!({"accessToken":"expired","expiresAt":"2000-01-01T00:00:00Z"})).unwrap();
         assert!(profile.credentials(&http).unwrap_err().is::<SignInNeeded>());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn device_login_shows_the_url_and_code_and_saves_a_private_cache() {
+        use std::os::unix::fs::PermissionsExt;
+        let (root, mut env) = fixture();
+        std::fs::write(root.join("config"),"[profile work]\nsso_session=team\nsso_account_id=123\nsso_role_name=Reader\n[sso-session team]\nsso_start_url=https://example.com/start\nsso_region=eu-west-1\n").unwrap();
+        let (endpoint, worker) = fake(vec![
+            (
+                "/client/register",
+                json!({"clientId":"client","clientSecret":"secret","clientSecretExpiresAt":now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs()+3600}),
+            ),
+            (
+                "/device_authorization",
+                json!({"verificationUriComplete":"https://example.com/device","userCode":"TEST-CODE","deviceCode":"device","interval":1,"expiresIn":30}),
+            ),
+            ("/token", json!({"accessToken":"fresh-token","refreshToken":"refresh","expiresIn":3600})),
+        ]);
+        env.insert("AWS_ENDPOINT_URL_SSO_OIDC".into(), endpoint);
+        let profile = Profile::load_with_env("work", &env).unwrap();
+        let mut shown = false;
+        profile
+            .login(&reqwest::blocking::Client::new(), |page, code| {
+                assert_eq!(page, "https://example.com/device");
+                assert_eq!(code, "TEST-CODE");
+                shown = true;
+            })
+            .unwrap();
+        assert!(shown);
+        worker.join().unwrap();
+        let Kind::Sso(sso) = &profile.kind else { panic!("expected SSO") };
+        assert_eq!(sso.cached().unwrap()["accessToken"], "fresh-token");
+        assert_eq!(std::fs::metadata(sso.cache_path().unwrap()).unwrap().permissions().mode() & 0o777, 0o600);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

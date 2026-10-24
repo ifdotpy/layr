@@ -39,6 +39,9 @@ unset AWS_PROFILE
 l config remote.cloud.aws-profile test
 ok 'the remote profile supplies S3 credentials' l fetch cloud -q
 export AWS_PROFILE=refuse
+export AWS_ACCESS_KEY_ID=$MINIO_ROOT_USER AWS_SECRET_ACCESS_KEY=$MINIO_ROOT_PASSWORD
+ok 'environment keys have priority over the profile' l fetch cloud -q
+unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
 if l fetch cloud -q > "$T/refuse.out" 2> "$T/refuse.err"; then
     eq 'credential_process is refused' refused accepted
 else

@@ -219,3 +219,85 @@ The opener computes this value and reads its exact slot.
 The store creates every slot conditionally and never replaces an object.
 Old person keys retain access to data that they could already read.
 Desk v1 import reads `slots/person-<login>.age`.
+
+## Store disks
+
+`layr mount` serves a read-only WebDAV disk on the loopback address.
+Each line has a folder. The `.layr` folder contains state metadata.
+On macOS, the login Keychain keeps each store identity after its first mount.
+The Keychain account is the SHA-256 of the store URL.
+
+```sh
+layr mount --unlock cloud --paper-key-file /private/path/store-words
+layr mount --status --json
+layr mount cloud --listen 127.0.0.1:8095
+layr mount --lock cloud
+```
+
+Unlock checks the store pin and saves the identity without a network server.
+It can use the machine slot, a paper key, or `LAYR_PERSON_KEY_FILE`.
+Use `--paper-key-stdin` for a pipe instead of a file.
+A paper key file must have mode `0600` and belong to the caller.
+Lock removes the Keychain item. File requests return HTTP 423 until the next unlock.
+The single-store disk lists only folders while locked.
+Status prints the URL, lock state, service state, and active server address.
+These three Keychain flags exit with code 2 on Linux.
+
+```sh
+layr mount --all
+layr mount --install --all
+layr mount --remove --all
+```
+
+The all-store disk has one folder per known store.
+Remote names identify the folders. Duplicate names get a number suffix.
+A locked store contains `LOCKED.txt` with its unlock command.
+The macOS service starts one Finder disk named `Layr` at login.
+Single-store `--install` and `--remove` retain their existing use.
+Installed agents use only the Keychain to open store data.
+A lock remains in effect after a restart or reboot until `layr mount --unlock`.
+A direct `layr mount <remote>` retains its automatic slot access and saves the Keychain item.
+The server refuses a listen address outside the loopback interface.
+
+## AWS profiles and login
+
+S3 credentials first use `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`.
+Temporary credentials also use `AWS_SESSION_TOKEN`.
+Without these keys, Layr uses `AWS_PROFILE`, then the remote profile setting, then `default`.
+
+```sh
+layr config remote.cloud.aws-profile work
+layr remote login cloud
+layr push cloud
+```
+
+The profile name can be in Layr config. Credentials cannot.
+Profiles support static keys and IAM Identity Center (SSO).
+Layr reads `~/.aws/config` and `~/.aws/credentials`.
+`AWS_CONFIG_FILE` and `AWS_SHARED_CREDENTIALS_FILE` select other files.
+`AWS_REGION` or `AWS_DEFAULT_REGION` overrides the profile region.
+Layr refuses `credential_process` because it starts a program.
+
+SSO profiles can use `sso_session` or the older `sso_start_url` fields.
+`remote login` prints the device authorization URL and code, then waits for approval.
+The token goes to the standard AWS SSO cache with mode `0600`.
+Layr refreshes a token near its expiry and requests the selected role credentials.
+`AWS_ENDPOINT_URL_SSO` and `AWS_ENDPOINT_URL_SSO_OIDC` select test endpoints.
+Layr never writes AWS keys or tokens to its config, records, or logs.
+
+Give a store address when you accept a file invite:
+
+```sh
+layr person accept --invite-file /private/path/invite.age --remote s3://bucket/project
+```
+
+Layr checks the descriptor and person slot before it saves the address.
+Gateway acceptance saves its store address automatically.
+The local `addresses.json` file has mode `0600` beside the encrypted person index.
+The Desk index and its message authentication code (MAC) stay unchanged.
+Set `LAYR_PERSON_KEY_FILE` so mount can read accepted person pins.
+A pin without a known address stays off the disk.
+Status prints `no address` and the command to accept that pin again with `--remote`.
+A person pin without a named remote uses `<project>-<short project id>` as its folder name.
+The service keeps the person key file path and login, when set, for index access after login.
+It stores no person key text.
