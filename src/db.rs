@@ -1263,6 +1263,7 @@ mod tests {
             attempts: 0,
             result: None,
             reason: None,
+            probes: None,
         };
         let event = |seq, status: Option<&str>| {
             let mut rec = state_record(seq, id, vec![]);

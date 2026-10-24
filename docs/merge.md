@@ -95,3 +95,22 @@ Project read access and overlay reader rules apply. Unreadable private paths sta
 Short and porcelain status output keeps its existing format.
 Radar writes no permanent records. A later event API can expose these results.
 
+
+### Queue probe limits
+
+```sh
+layr config queue.probes true
+layr queue add topic --into main
+layr queue run --into main
+layr queue list --into main
+```
+
+The queue runs each probe on the target head and the exact merge result before the target moves.
+Commands use the existing `try` sandbox. Equal arguments and exact states reuse stored results.
+A probe can set `fail_over` in `layr.toml`, for example `fail_over = 0.30` for 30 % growth.
+Any metric or output file size above that relative limit fails the entry and leaves the target unchanged.
+Without a limit, probe errors never fail the entry.
+The queue stores command, sandbox, and output errors for `queue list` and Behavior.
+With a limit, these errors fail the entry and name the probe.
+Queue records store the outcome and comparison. `queue list` and the change's Behavior section read those results.
+Ordinary merges do not run probes. See [probes and behavior differences](review.md#probes-and-behavior-differences).

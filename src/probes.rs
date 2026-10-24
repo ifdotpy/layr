@@ -22,6 +22,8 @@ pub struct Probe {
     pub kind: Kind,
     #[serde(default = "default_noise")]
     pub noise: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fail_over: Option<f64>,
 }
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -51,6 +53,9 @@ impl Probe {
         }
         if !self.noise.is_finite() || self.noise < 0.0 {
             bail!("probe '{name}': noise must be a finite nonnegative relative threshold");
+        }
+        if self.fail_over.is_some_and(|limit| !limit.is_finite() || limit < 0.0) {
+            bail!("probe '{name}': fail_over must be a finite nonnegative relative limit");
         }
         Ok(())
     }
@@ -481,15 +486,15 @@ fn metrics(value: &Value) -> Result<BTreeMap<String, f64>> {
         .collect()
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Behavior {
     pub base: String,
     pub head: String,
     pub base_source: String,
     pub head_source: String,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub base_views: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub head_views: Vec<String>,
     pub probes: Vec<Value>,
     #[serde(skip)]
@@ -640,6 +645,9 @@ pub fn print(ctx: &Ctx, behavior: &Behavior) {
     for p in &behavior.probes {
         let name = p["probe"].as_str().unwrap_or("");
         outln!(ctx, "  {}: {}", name, p["status"].as_str().unwrap_or(""));
+        for error in p["errors"].as_array().into_iter().flatten() {
+            outln!(ctx, "    {}: {}", error["side"].as_str().unwrap_or(""), error["error"].as_str().unwrap_or(""));
+        }
         if p["exit_changed"] == true {
             outln!(ctx, "    exit {} → {}", p["base"]["exit"], p["head"]["exit"]);
         }
@@ -692,8 +700,125 @@ fn number_value(value: &Value) -> String {
     value.as_f64().map(|n| n.to_string()).unwrap_or_else(|| "(absent)".into())
 }
 
+/// Queue execution uses the same sandbox, attestations and output refs as explicit runs.
+pub fn queue_enabled(repo: &Repo) -> Result<bool> {
+    match repo.p.config_value("queue.probes")? {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::Bool(enabled)) => Ok(enabled),
+        Some(_) => bail!("queue.probes must be true or false"),
+    }
+}
+
+pub fn queue_run(ctx: &Ctx, repo: &Repo, base: &str, head: &str) -> Result<Value> {
+    // These are exact shared states, even if a line name equals the state id.
+    let input =
+        |state: &str| Input { subject: Subject { kind: "state".into(), id: state.into() }, state: state.into(), layers: vec![] };
+    let base = input(base);
+    let head = input(head);
+    let old = definitions(repo, &base)?;
+    let new = definitions(repo, &head)?;
+    let mut errors: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+    // Run probes separately so one broken probe cannot hide the remaining outcomes.
+    for (side, input, definitions) in [("base", &base, &old), ("head", &head, &new)] {
+        for name in definitions.keys() {
+            let error = match run(ctx, repo, input, Some(name)) {
+                Ok(results) => results.first().filter(|r| r.exit != 0).map(|r| format!("exit {}", r.exit)),
+                Err(error) => Some(format!("{error:#}")),
+            };
+            if let Some(error) = error {
+                errors.entry(name.clone()).or_default().push(json!({"side":side,"subject":input.subject,"error":error}));
+            }
+        }
+    }
+    let mut behavior = diff(repo, &base, &head)?;
+    let mut outcomes = Vec::new();
+    for row in &mut behavior.probes {
+        let name = row["probe"].as_str().context("probe comparison has no name")?.to_owned();
+        let probe = new.get(&name).or_else(|| old.get(&name)).context("missing probe definition")?;
+        let failures = errors.entry(name.clone()).or_default();
+        let mut reasons = Vec::new();
+        if let Some(limit) = probe.fail_over {
+            match queue_limit_reasons(repo, &name, probe, row, limit) {
+                Ok(growth) => reasons = growth,
+                Err(error) => failures.push(json!({"side":"comparison","error":format!("{error:#}")})),
+            }
+            for failure in failures.iter() {
+                reasons.push(format!(
+                    "probe {name}: {}: {}",
+                    failure["side"].as_str().unwrap_or(""),
+                    failure["error"].as_str().unwrap_or("")
+                ));
+            }
+        }
+        if !failures.is_empty() {
+            row["errors"] = json!(failures);
+            row["status"] = json!("error");
+        }
+        let status = if !reasons.is_empty() {
+            "failed"
+        } else if probe.fail_over.is_none() {
+            "observed"
+        } else if row["status"] == "not run" || row["status"] == "kind changed" {
+            "not compared"
+        } else {
+            "passed"
+        };
+        outcomes.push(json!({"probe":name,"status":status,"reasons":reasons,"errors":failures}));
+    }
+    let failed = outcomes.iter().any(|p| p["status"] == "failed");
+    Ok(json!({"status":if failed {"failed"}else{"passed"},"probes":outcomes,"behavior":behavior}))
+}
+
+fn queue_limit_reasons(repo: &Repo, name: &str, probe: &Probe, row: &Value, limit: f64) -> Result<Vec<String>> {
+    let mut reasons = Vec::new();
+    let (Some(a), Some(b)) = (row.get("base"), row.get("head")) else { return Ok(reasons) };
+    let before = files(&repo.state_root(a["output_state"].as_str().context("missing base output")?)?)?;
+    let after = files(&repo.state_root(b["output_state"].as_str().context("missing head output")?)?)?;
+    // Limits ignore display noise. Check metrics before file sizes for a useful reason.
+    if probe.kind == Kind::Number && row["status"] != "kind changed" {
+        for (path, file) in &after {
+            let read = |file: &FileData| -> Result<BTreeMap<String, f64>> {
+                metrics(&serde_json::from_str(file.text.as_deref().context("stored metric is not text")?)?)
+            };
+            let old = before.get(path).map(read).transpose()?.unwrap_or_default();
+            for (metric, value) in read(file)? {
+                if let Some(reason) = over_limit(name, &metric, old.get(&metric).copied().unwrap_or(0.0), value, limit) {
+                    reasons.push(reason);
+                }
+            }
+        }
+    }
+    for (path, file) in &after {
+        let old = before.get(path).map(|file| file.size).unwrap_or(0);
+        if let Some(reason) = over_limit(name, path, old as f64, file.size as f64, limit) {
+            reasons.push(reason);
+        }
+    }
+    Ok(reasons)
+}
+
+fn over_limit(probe: &str, name: &str, before: f64, after: f64, limit: f64) -> Option<String> {
+    if after <= before {
+        return None;
+    }
+    let relative = if before == 0.0 { f64::INFINITY } else { (after - before) / before.abs() };
+    if relative <= limit {
+        return None;
+    }
+    let percent = if relative.is_infinite() { "+∞".into() } else { format!("{:+.0}", relative * 100.0) };
+    Some(format!("probe {probe}: {name} {before} → {after} ({percent} %) is over the limit +{} %", limit * 100.0))
+}
+
 /// Compare the latest change version with its merge base against the target line.
 pub fn change_behavior(repo: &Repo, state: &crate::model::StateRec) -> Result<Behavior> {
+    // A queue compares the target head with the actual merge result, including target changes.
+    for entry in repo.p.db.queue_entries(None)?.into_iter().rev() {
+        if entry.state == state.id {
+            if let Some(outcome) = entry.probes {
+                return Ok(serde_json::from_value(outcome["behavior"].clone())?);
+            }
+        }
+    }
     let source = state.line.as_deref().map(|id| repo.line(id)).transpose()?;
     let upstream =
         source.as_ref().map(|line| repo.p.config_value(&format!("line.{}.upstream", line.name))).transpose()?.flatten();
@@ -745,7 +870,7 @@ fn view_results(repo: &Repo, shared: &str) -> Result<Vec<String>> {
 mod tests {
     use super::*;
     fn definition(kind: Kind) -> Probe {
-        Probe { run: vec!["/bin/true".into()], outputs: vec!["out".into()], kind, noise: 0.05 }
+        Probe { run: vec!["/bin/true".into()], outputs: vec!["out".into()], kind, noise: 0.05, fail_over: None }
     }
     #[test]
     fn private_layer_outputs_require_all_project_readers() {
@@ -766,6 +891,7 @@ mod tests {
     fn schema_requires_safe_outputs_and_argv() {
         let text = "[probe.test]\nrun=['echo','hello']\noutputs=['result']\n";
         assert_eq!(crate::oci::parse(text).unwrap().probe["test"].kind, Kind::Files);
+        assert_eq!(crate::oci::parse(&format!("{text}fail_over=0.30\n")).unwrap().probe["test"].fail_over, Some(0.30));
         for tail in [
             "run=[]\noutputs=['out']",
             "run=['sh']\noutputs=['../escape']",
@@ -773,10 +899,27 @@ mod tests {
             "run=['sh']\noutputs=[]",
             "run=['sh']\noutputs=['out']\nkind='number'\nnoise=-1",
             "run=['sh']\noutputs=['out']\nunknown=true",
+            "run=['sh']\noutputs=['out']\nfail_over=-0.1",
+            "run=['sh']\noutputs=['out']\nfail_over=nan",
+            "run=['sh']\noutputs=['out']\nfail_over=inf",
         ] {
             assert!(crate::oci::parse(&format!("[probe.test]\n{tail}")).is_err(), "{tail}");
         }
     }
+    #[test]
+    fn queue_limits_reject_only_growth_strictly_over_the_limit() {
+        assert_eq!(
+            over_limit("bench-checkout", "p95_ms", 41.0, 52.0, 0.2).unwrap(),
+            "probe bench-checkout: p95_ms 41 → 52 (+27 %) is over the limit +20 %"
+        );
+        assert!(over_limit("p", "m", 100.0, 120.0, 0.2).is_none());
+        assert!(over_limit("p", "m", 100.0, 99.0, 0.0).is_none());
+        assert!(over_limit("p", "m", 0.0, 0.0, 0.2).is_none());
+        assert!(over_limit("p", "m", 0.0, 1.0, 0.2).unwrap().contains("+∞ %"));
+        assert!(over_limit("p", "m", -100.0, -79.0, 0.2).is_some());
+        assert!(over_limit("p", "m", -100.0, -121.0, 0.2).is_none());
+    }
+
     #[test]
     fn structural_json_diff_tracks_keys_arrays_and_null() {
         let a = json!({"a/b":{"~key":[1,null]},"removed":null});

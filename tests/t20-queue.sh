@@ -149,4 +149,164 @@ for i in $(seq 1 150); do [ "$(l --line automatic rev-parse head)" = "$TICK" ] &
 eq 'a daemon tick processes the pending entry' "$TICK" "$(l --line automatic rev-parse head)"
 ok 'the queue index rebuilds' l reindex -q
 has 'queue records have valid signatures' 'signatures ok' "$(l fsck)"
+# Probe limits compare the target base with the exact merge result before the move.
+mkdir -p "$T/probe-src"
+printf '41\n' > "$T/probe-src/metric.txt"
+printf '10\n' > "$T/probe-src/size.txt"
+printf '1\n' > "$T/probe-src/observe.txt"
+printf 'out/\n' > "$T/probe-src/.gitignore"
+cat > "$T/probe-src/layr.toml" <<'TOML'
+[probe.bench-checkout]
+run = ["python3", "probe.py", "metric"]
+outputs = ["out/number.json"]
+kind = "number"
+noise = 0.9
+fail_over = 0.2
+[probe.files]
+run = ["python3", "probe.py", "files"]
+outputs = ["out/blob"]
+fail_over = 0.2
+[probe.observe]
+run = ["python3", "probe.py", "observe"]
+outputs = ["out/observed.json"]
+kind = "number"
+TOML
+cat > "$T/probe-src/probe.py" <<'PYPROBE'
+import json, pathlib, sys
+out = pathlib.Path('out'); out.mkdir(exist_ok=True)
+kind = sys.argv[1]
+if kind == 'metric':
+    (out/'number.json').write_text(json.dumps({'p95_ms': int(pathlib.Path('metric.txt').read_text())}))
+elif kind == 'files':
+    (out/'blob').write_bytes(b'\0' * int(pathlib.Path('size.txt').read_text()))
+else:
+    (out/'observed.json').write_text(json.dumps({'value': int(pathlib.Path('observe.txt').read_text())}))
+    sys.exit(7)
+PYPROBE
+l init queue-probes --from "$T/probe-src" -q >/dev/null
+cd "$LAYR_ROOT/projects/queue-probes/lines/main"
+PROBE_BASE=$(l rev-parse head)
+l line new -q under
+cd ../under
+printf '49\n' > metric.txt
+printf '1000000\n' > observe.txt
+l save -qam under
+UNDER=$(l rev-parse head)
+UNDER_CHANGE=$(l change list --json | python3 -c 'import json,sys; print(next(r["change_id"] for r in json.load(sys.stdin) if r["message"]=="under"))')
+cd ../main
+l line new -q disabled
+l queue add under --into disabled >/dev/null
+ok 'queue probes default to disabled' l queue run --into disabled
+eq 'a disabled queue writes no probe outputs' '[]' "$(l ref list derived/probe-v1/ --json)"
+no 'queue.probes rejects a non-boolean value' l config queue.probes yes
+l config queue.probes true
+# Precompute both exact inputs. Nonzero observational results are also reusable.
+l probe run "$PROBE_BASE" --json >/dev/null || true
+l probe run "$UNDER" --json >/dev/null || true
+STORED=$(l ref list derived/probe-v1/ --json)
+l queue add under >/dev/null
+ok 'probe growth below the limit permits the queue move' l queue run --into main
+eq 'the queue moves to the exact checked state' "$UNDER" "$(l rev-parse head)"
+eq 'the queue reuses every stored probe output' "$STORED" "$(l ref list derived/probe-v1/ --json)"
+OUTCOMES=$(l queue list --into main --json)
+ok 'an unlimited probe remains observational despite growth and exit 7' python3 -c 'import json,sys; e=json.loads(sys.argv[1])[0]; p=e["probes"]; assert p["status"]=="passed"; assert next(r for r in p["probes"] if r["probe"]=="observe")["status"]=="observed"; assert all(r["base"]["reused"] and r["head"]["reused"] for r in p["behavior"]["probes"])' "$OUTCOMES"
+has 'queue list shows each probe outcome' 'bench-checkout: passed' "$(l queue list --into main)"
+SHOW=$(l change show "$UNDER_CHANGE" --json)
+ok 'change Behavior reads the exact queue comparison' python3 -c 'import json,sys; assert json.loads(sys.argv[1])[0]["probes"]["behavior"]==json.loads(sys.argv[2])["behavior"]' "$OUTCOMES" "$SHOW"
+# A true merge must compare against the target head, not the source parent.
+l line new -q limited "$PROBE_BASE"
+l line new -q over "$PROBE_BASE"
+cd ../over
+printf '52\n' > metric.txt
+l save -qam over
+OVER_CHANGE=$(l change list --json | python3 -c 'import json,sys; print(next(r["change_id"] for r in json.load(sys.stdin) if r["message"]=="over"))')
+cd ../limited
+echo target > target-only.txt; l add target-only.txt; l save -qm target-only
+LIMIT_BASE=$(l rev-parse head)
+l queue add over --into limited >/dev/null
+no 'probe growth above the limit fails the queue entry' l queue run --into limited
+eq 'a failed probe leaves the target head unchanged' "$LIMIT_BASE" "$(l rev-parse head)"
+eq 'a failed probe leaves the target files unchanged' 41 "$(cat metric.txt)"
+LIMIT_OUTCOME=$(l queue list --into limited --json)
+eq 'the failure gives the exact metric, values, change, and limit' 'probe bench-checkout: p95_ms 41 → 52 (+27 %) is over the limit +20 %' "$(printf '%s' "$LIMIT_OUTCOME" | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["reason"])')"
+MERGE_BASE=$(printf '%s' "$LIMIT_OUTCOME" | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["probes"]["behavior"]["base"])')
+MERGE_RESULT=$(printf '%s' "$LIMIT_OUTCOME" | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["probes"]["behavior"]["head"])')
+eq 'the probe base is the exact target head' "$LIMIT_BASE" "$(l rev-parse "$MERGE_BASE")"
+eq 'the probe result includes the target changes' target "$(l show "$MERGE_RESULT":target-only.txt)"
+SHOW=$(l change show "$OVER_CHANGE" --json)
+ok 'a failed merge exposes the same stored Behavior' python3 -c 'import json,sys; assert json.loads(sys.argv[1])[0]["probes"]["behavior"]==json.loads(sys.argv[2])["behavior"]' "$LIMIT_OUTCOME" "$SHOW"
+l line new -q larger "$PROBE_BASE"
+cd ../larger
+printf '13\n' > size.txt
+l save -qam larger
+l queue add head --into limited >/dev/null
+no 'output file size growth also fails an entry' l queue run --into limited
+has 'the size failure gives the file and values' 'probe files: out/blob 10 → 13 (+30 %) is over the limit +20 %' "$(l queue list --into limited)"
+# Queue configuration does not make ordinary merges execute probes.
+l line new -q ordinary "$PROBE_BASE"
+STORED=$(l ref list derived/probe-v1/ --json)
+cd ../ordinary
+ok 'an ordinary merge ignores queue.probes' l merge over -q
+eq 'an ordinary merge writes no probe results' "$STORED" "$(l ref list derived/probe-v1/ --json)"
+# Up-to-date queue entries still report stored probes, without extra output states.
+l queue add main --into main >/dev/null
+STORED=$(l ref list derived/probe-v1/ --json)
+ok 'an up-to-date queue entry still compares probes' l queue run --into main
+eq 'an up-to-date entry reuses its stored outputs' "$STORED" "$(l ref list derived/probe-v1/ --json)"
+ok 'queue probe outcomes survive a database rebuild' l reindex -q
+has 'the rebuilt queue retains probe outcomes' 'bench-checkout: failed' "$(l queue list --into limited)"
+has 'queue probe records have valid signatures' 'signatures ok' "$(l fsck)"
+# Broken probes without a limit remain observational and do not stop later probes.
+cd ../main
+l line new -q error-source
+l line new -q error-target
+l line new -q limit-error-target
+cd ../error-source
+cat >> layr.toml <<'TOML'
+[probe.a-missing]
+run = ["true"]
+outputs = ["out/missing"]
+[probe.b-invalid]
+run = ["sh", "-c", "mkdir -p out; echo invalid > out/invalid.json"]
+outputs = ["out/invalid.json"]
+kind = "json"
+[probe.c-link]
+run = ["sh", "-c", "mkdir -p out; ln -s /etc/passwd out/link"]
+outputs = ["out/link"]
+[probe.d-command]
+run = ["/no-such-probe-command"]
+outputs = ["out/missing-command"]
+[probe.z-after]
+run = ["sh", "-c", "mkdir -p out; echo ok > out/after"]
+outputs = ["out/after"]
+TOML
+l save -qam errors-observed
+ERROR_CHANGE=$(l change list --json | python3 -c 'import json,sys; print(next(r["change_id"] for r in json.load(sys.stdin) if r["message"]=="errors-observed"))')
+l queue add head --into error-target >/dev/null
+ok 'probe collection and command errors without limits permit the merge' l queue run --into error-target
+ERRORS=$(l queue list --into error-target --json)
+ok 'every broken probe has a stored observational error' python3 -c 'import json,sys; e=json.loads(sys.argv[1])[0]; assert e["status"]=="done"; p={r["probe"]:r for r in e["probes"]["probes"]}; assert all(p[n]["status"]=="observed" and p[n]["errors"] for n in ["a-missing","b-invalid","c-link","d-command"]); b={r["probe"]:r for r in e["probes"]["behavior"]["probes"]}; assert b["z-after"]["head_run"] is True' "$ERRORS"
+has 'queue list shows the missing output error' "missing probe output 'out/missing'" "$(l queue list --into error-target)"
+has 'queue list shows the invalid JSON error' 'invalid JSON probe output' "$(l queue list --into error-target)"
+has 'queue list shows the refused link error' 'links and special files are refused' "$(l queue list --into error-target)"
+SHOW=$(l change show "$ERROR_CHANGE" --json)
+ok 'Behavior reads the same stored probe errors' python3 -c 'import json,sys; assert json.loads(sys.argv[1])[0]["probes"]["behavior"]==json.loads(sys.argv[2])["behavior"]' "$ERRORS" "$SHOW"
+has 'human Behavior shows the stored collection error' "missing probe output 'out/missing'" "$(l change show "$ERROR_CHANGE")"
+# The same broken output with a limit fails because its growth cannot be checked.
+python3 - <<'PYLIMIT'
+from pathlib import Path
+p = Path('layr.toml')
+p.write_text(p.read_text().replace('[probe.a-missing]\n', '[probe.a-missing]\nfail_over = 0.2\n').replace('[probe.observe]\n', '[probe.observe]\nfail_over = 0.2\n'))
+PYLIMIT
+l save -qam errors-limited
+LIMIT_ERROR_CHANGE=$(l change list --json | python3 -c 'import json,sys; print(next(r["change_id"] for r in json.load(sys.stdin) if r["message"]=="errors-limited"))')
+l queue add head --into limit-error-target >/dev/null
+BEFORE=$(l --line limit-error-target rev-parse head)
+no 'a collection error with a limit fails the entry' l queue run --into limit-error-target
+eq 'a limited probe error leaves the target head' "$BEFORE" "$(l --line limit-error-target rev-parse head)"
+LIMIT_ERRORS=$(l queue list --into limit-error-target --json)
+has 'a limited probe error names the probe and the error' "probe a-missing: head: missing probe output 'out/missing'" "$LIMIT_ERRORS"
+ok 'a command exit with a limit also fails the probe' python3 -c 'import json,sys; p=next(r for r in json.loads(sys.argv[1])[0]["probes"]["probes"] if r["probe"]=="observe"); assert p["status"]=="failed"; assert any(e["error"]=="exit 7" for e in p["errors"])' "$LIMIT_ERRORS"
+SHOW=$(l change show "$LIMIT_ERROR_CHANGE" --json)
+ok 'a failed entry keeps the collection error in Behavior' python3 -c 'import json,sys; b=json.loads(sys.argv[1])[0]["probes"]["behavior"]; assert b==json.loads(sys.argv[2])["behavior"]; assert next(r for r in b["probes"] if r["probe"]=="a-missing")["errors"]' "$LIMIT_ERRORS" "$SHOW"
 finish
