@@ -143,6 +143,7 @@ run(['remote','add','writer','ssh://test/project'])
 run(['config','overlay.secrets.peers',json.dumps([b['id'],c['id'],d['id']])])
 run(['sync','writer','--command','--','env','LAYR_ROOT='+D['LAYR_ROOT'],binary,'serve-peer','project'])
 run(['--project','project','adopt','main'],D)
+run(['--project','project','--line','main','overlay','use','secrets','-q'],D)
 dline=pathlib.Path(D['LAYR_ROOT'])/'projects/project/lines/main'
 (dline/'.env').write_text('PRIVATE_TEST_VALUE=write-only-machine\n')
 run(['--project','project','--line','main','save','-am','Write-only overlay update','-q'],D)
