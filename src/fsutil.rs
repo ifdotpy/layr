@@ -140,7 +140,7 @@ impl Src for crate::thin::Layered {
 
 /// On a volume that ignores case: the stored name of another entry that `path` finds, such as
 /// `README` for `readme`. `None` when `path` is free or names exactly that entry.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", feature = "overlayfs"))]
 pub fn case_clash(path: &Path) -> Option<String> {
     #[cfg(target_os = "macos")]
     {
