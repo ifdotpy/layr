@@ -133,18 +133,11 @@ pub fn change(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let old = versions.get(from).ok_or_else(|| anyhow::anyhow!("change {id} has no version v{}", from + 1))?;
             let new = versions.get(to).ok_or_else(|| anyhow::anyhow!("change {id} has no version v{}", to + 1))?;
             let (old, new) = (patch(repo, old)?, patch(repo, new)?);
-            let delta = similar::TextDiff::from_lines(&old, &new)
-                .unified_diff()
-                .header(&format!("v{}", from + 1), &format!("v{}", to + 1))
-                .to_string();
+            let delta = layr_model::interdiff::from_changes(&id, &format!("v{}", from + 1), &format!("v{}", to + 1), &old, &new);
             if a.has("--json") {
-                outln!(
-                    ctx,
-                    "{}",
-                    serde_json::json!({"change_id":id,"from":format!("v{}",from+1),"to":format!("v{}",to+1),"diff":delta})
-                );
+                outln!(ctx, "{}", serde_json::to_string(&delta)?);
             } else {
-                ctx.print(&delta);
+                ctx.print(&delta.diff);
             }
         }
         _ => bail!("{usage}"),
@@ -152,7 +145,7 @@ pub fn change(ctx: &Ctx, args: &[String]) -> Result<i32> {
     Ok(0)
 }
 
-fn patch(repo: &Repo, state: &StateRec) -> Result<String> {
+fn patch(repo: &Repo, state: &StateRec) -> Result<Vec<diff::FileDiff>> {
     repo.source_state(&state.id)?;
     let new = repo.state_root(&state.id)?;
     let empty = if state.parents.is_empty() {
@@ -167,5 +160,5 @@ fn patch(repo: &Repo, state: &StateRec) -> Result<String> {
         None => empty.as_ref().unwrap().path.clone(),
     };
     let changes: Vec<_> = crate::changes::file_changes(&old, &new)?.into_iter().filter(|c| !skip_path(&c.path)).collect();
-    Ok(diff::file_diffs(&old, &new, &changes)?.iter().map(|d| diff::patch(d, 3)).collect())
+    diff::file_diffs(&old, &new, &changes)
 }

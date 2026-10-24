@@ -140,22 +140,7 @@ pub fn db_file(project_dir: &Path) -> PathBuf {
 }
 
 pub fn check_name(kind: &str, name: &str) -> Result<()> {
-    if matches!(kind, "line" | "tag" | "ref") && matches!(name, "HEAD" | "head") {
-        bail!("reserved revision name: {name}");
-    }
-    if kind == "line" && crate::model::reserved_revision(name) {
-        bail!("reserved revision prefix in line name '{name}'");
-    }
-    let ok = !name.is_empty()
-        && name.len() <= 200
-        && name.chars().next().map(|c| c.is_ascii_alphanumeric()).unwrap_or(false)
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
-        && !name.ends_with(".lock")
-        && !name.contains("..");
-    if !ok {
-        bail!("invalid {kind} name '{name}': use letters, digits, '-', '_' and '.'; start with a letter or digit");
-    }
-    Ok(())
+    layr_model::validation::check_name(kind, name)
 }
 
 /// Which machines an import takes records from: this machine, machines this project trusts,
