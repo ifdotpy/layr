@@ -282,6 +282,8 @@ Layr reads `~/.aws/config` and `~/.aws/credentials`.
 `AWS_CONFIG_FILE` and `AWS_SHARED_CREDENTIALS_FILE` select other files.
 `AWS_REGION` or `AWS_DEFAULT_REGION` overrides the profile region.
 Layr refuses `credential_process` because it starts a program.
+Layr also refuses a profile that assumes a role (`role_arn`, `source_profile`, `credential_source`,
+`web_identity_token_file`): its keys would act as another identity without saying so.
 
 SSO profiles can use `sso_session` or the older `sso_start_url` fields.
 `remote login` prints the device authorization URL and code, then waits for approval.

@@ -153,6 +153,12 @@ impl Profile {
         {
             bail!("AWS credential_process is not supported; use static keys or IAM Identity Center (SSO)");
         }
+        // A profile with a role means "assume this role". Using its keys directly would act as
+        // another identity without saying so, and Layr does not assume roles.
+        const ROLE_KEYS: [&str; 4] = ["role_arn", "source_profile", "credential_source", "web_identity_token_file"];
+        if ROLE_KEYS.iter().any(|k| section.contains_key(*k) || credentials.get(name).is_some_and(|s| s.contains_key(*k))) {
+            bail!("AWS profile {name} assumes a role, which Layr does not support; use static keys or IAM Identity Center (SSO)");
+        }
         let kind = if let Some(found) = credentials.get(name).and_then(keys).or_else(|| keys(section)) {
             Kind::Keys(found)
         } else if let Some(session) = section.get("sso_session") {
@@ -504,6 +510,26 @@ mod unit {
             .to_string()
             .contains("credential_process is not supported"));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn role_profiles_are_refused() {
+        let root = std::env::temp_dir().join(format!("layr-profile-role-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("config"),
+            "[profile admin]\nrole_arn=arn:aws:iam::1:role/x\nsource_profile=base\n[profile base]\nregion=eu-central-1\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("credentials"), "[admin]\naws_access_key_id=AKIA0000\naws_secret_access_key=secret\n").unwrap();
+        let env: HashMap<String, String> = [
+            ("AWS_CONFIG_FILE".to_string(), root.join("config").display().to_string()),
+            ("AWS_SHARED_CREDENTIALS_FILE".to_string(), root.join("credentials").display().to_string()),
+        ]
+        .into();
+        let error = Profile::load_with_env("admin", &env).err().expect("a role profile is refused").to_string();
+        assert!(error.contains("assumes a role"), "{error}");
+        std::fs::remove_dir_all(&root).ok();
     }
 
     fn fake(replies: Vec<(&'static str, Value)>) -> (String, std::thread::JoinHandle<()>) {
