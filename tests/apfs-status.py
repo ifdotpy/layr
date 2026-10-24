@@ -29,12 +29,6 @@ executables = [baseline, binary]
 
 
 def run(i, cwd, *args):
-    # The baseline binary uses the previous command names.
-    if i == 0:
-        if args[:2] == ('line', 'new'):
-            args = ('branch', *args[2:])
-        elif args[0] == 'save':
-            args = ('commit', *args[1:])
     r = subprocess.run([executables[i], *args], cwd=cwd, env=envs[i], capture_output=True, text=True)
     assert r.returncode == 0, (i, args, r.returncode, r.stdout, r.stderr)
     return r

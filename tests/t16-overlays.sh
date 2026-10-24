@@ -270,7 +270,8 @@ tp=$(ms as layr-o1 $L --project big --line plain save -qam ten)
 tsx=$(ms as layr-o1 $L --project big --line stacked save -qam ten)
 echo "INFO commit of 10 changed files in a tree of 10,000: ${tp} ms without overlays, ${tsx} ms with an overlay of 1,000 files (both layers changed)"
 eq "the stacked commit changed both layers" "1" "$(as layr-o1 $L --project big --line stacked log --oneline | grep -c ten)"
-ok "the commit stays under 5 s" test "$tsx" -lt 5000
+# A fixed limit depends on the machine and the build; compare with the same commit without overlays.
+ok "the overlay commit takes less than twice the plain commit" test "$tsx" -lt $((tp * 2))
 tst=$(ms as layr-o1 $L --project big --line stacked status --porcelain)
 echo "INFO status of the clean stacked line: ${tst} ms"
 eq "fsck of the large project" "0 problem(s)" "$(l --project big fsck | tail -1)"

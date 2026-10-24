@@ -34,7 +34,7 @@ import http.client,json,os,pathlib,re,signal,subprocess,time
 root=pathlib.Path(os.environ['DISK_TEST_T'])
 binary=str(root/'layr'); remote='file://'+str(root/'remote')
 command=['runuser','-u','layr-disk-test','--','env','HOME='+str(root/'home'),
- 'XDG_CACHE_HOME='+str(root/'home/cache'),'LAYR_ROOT='+str(root/'no-project-store'),
+ 'XDG_CACHE_HOME='+str(root/'home/cache'),'XDG_CONFIG_HOME='+str(root/'home/.config'),'LAYR_ROOT='+str(root/'no-project-store'),
  'LAYR_SOCKET='+str(root/'no-service'),'LAYR_DIRECT=0',binary,'mount',remote,
  '--listen','127.0.0.1:0','--cache-size','5','--paper-key-file',str(root/'paper')]
 log=open(root/'disk.log','w+')

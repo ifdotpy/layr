@@ -12,10 +12,6 @@ try:
  (src/'.gitignore').write_text('ignored\n');(src/'readonly').chmod(0o444)
  envs=[];works=[]
  def run(i,*args,ok=True):
-  # The baseline binary uses the previous command names.
-  if i == 0:
-   if args[:2] == ('line', 'new'):args = ('branch', *args[2:])
-   elif args[0] == 'save':args = ('commit', *args[1:])
   r=subprocess.run([binaries[i],*args],cwd=works[i],env=envs[i],capture_output=True,text=True)
   assert (r.returncode==0)==ok,(i,args,r.returncode,r.stdout,r.stderr)
   return r
