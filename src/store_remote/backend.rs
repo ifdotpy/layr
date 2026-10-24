@@ -42,7 +42,7 @@ impl Backend {
             if bucket.is_empty() || bucket.contains(['@', ':', '?', '#']) || prefix.contains(['?', '#']) {
                 bail!("invalid S3 bucket");
             }
-            return Ok(Self::S3(super::s3::S3::with_env(bucket, prefix, &std::collections::HashMap::new())?));
+            return Ok(Self::S3(super::s3::S3::unconnected(bucket, prefix)?));
         }
         bail!("store URL must start with file://, s3:// or layr+https://")
     }

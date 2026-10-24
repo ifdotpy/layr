@@ -81,6 +81,7 @@ pub struct Store {
     paper_key_text: Option<String>,
     person: Option<crate::person::Access>,
     pin: Option<StorePin>,
+    aws_profile: Option<String>,
 }
 
 /// Opening a store performs no remote I/O. Configure it with the caller's environment next.
@@ -99,7 +100,16 @@ pub fn open(url: &str, repo: &Repo) -> Result<Store> {
             pin = Some(stored);
         }
     }
-    open_with_pin(url, repo, pin)
+    let mut store = open_with_pin(url, repo, pin)?;
+    for (key, _) in repo.p.db.config_all()? {
+        let Some(name) = key.strip_prefix("cloud.remote.").and_then(|k| k.strip_suffix(".url")) else { continue };
+        if repo.p.config_value(&key)?.and_then(|v| v.as_str().map(str::to_owned)).as_deref() == Some(url) {
+            store.aws_profile =
+                repo.p.config_value(&format!("remote.{name}.aws-profile"))?.and_then(|v| v.as_str().map(str::to_owned));
+            break;
+        }
+    }
+    Ok(store)
 }
 
 pub fn open_named(name: &str, repo: &Repo) -> Result<Store> {
@@ -110,7 +120,9 @@ pub fn open_named(name: &str, repo: &Repo) -> Result<Store> {
         .map(serde_json::from_value)
         .transpose()
         .context("invalid store pin")?;
-    open_with_pin(&url, repo, pin)
+    let mut store = open_with_pin(&url, repo, pin)?;
+    store.aws_profile = repo.p.config_value(&format!("remote.{name}.aws-profile"))?.and_then(|v| v.as_str().map(str::to_owned));
+    Ok(store)
 }
 
 fn open_with_pin(url: &str, repo: &Repo, pin: Option<StorePin>) -> Result<Store> {
@@ -125,6 +137,7 @@ fn open_with_pin(url: &str, repo: &Repo, pin: Option<StorePin>) -> Result<Store>
         paper_key_text: None,
         person: None,
         pin,
+        aws_profile: None,
     })
 }
 
@@ -164,9 +177,24 @@ impl Store {
             .transpose()?;
         if let Some(path) = self.url.strip_prefix("s3://") {
             let (bucket, prefix) = path.split_once('/').unwrap_or((path, ""));
-            self.backend = Backend::S3(s3::S3::with_env(bucket, prefix, &ctx.env)?);
+            let mut env = ctx.env.clone();
+            if !env.get("AWS_PROFILE").is_some_and(|v| !v.is_empty()) {
+                if let Some(profile) = &self.aws_profile {
+                    env.insert("AWS_PROFILE".into(), profile.clone());
+                }
+            }
+            env.entry("HOME".into()).or_insert_with(|| ctx.caller.home.to_string_lossy().into_owned());
+            self.backend = crate::privs::as_caller_fs(ctx, || {
+                let mut s3 = s3::S3::with_env(bucket, prefix, &env)?;
+                s3.resolve_credentials()?;
+                Ok(Backend::S3(s3))
+            })?;
         }
         Ok(())
+    }
+
+    pub fn use_aws_profile(&mut self, profile: Option<String>) {
+        self.aws_profile = profile;
     }
 
     pub fn configure(&mut self, ctx: &Ctx, opts: &ConfigureOptions) -> Result<Configured> {

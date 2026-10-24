@@ -1,6 +1,8 @@
 //! AWS Signature Version 4 and the XML of S3 and STS replies: the pure part of a small AWS client
 //! (no SDK, no I/O), for the gateway and the writer.
 
+pub mod profile;
+
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 
