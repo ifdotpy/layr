@@ -9,3 +9,5 @@ pub mod keys;
 pub mod paths;
 pub mod s3;
 pub mod zst;
+
+pub mod person;

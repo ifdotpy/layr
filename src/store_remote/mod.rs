@@ -2,7 +2,7 @@
 
 pub(crate) mod backend;
 pub(crate) mod browse;
-mod gateway;
+pub(crate) mod gateway;
 mod legacy;
 pub(crate) mod reader;
 mod writer;
@@ -79,6 +79,7 @@ pub struct Store {
     key: ed25519_dalek::SigningKey,
     dir: PathBuf,
     paper_key_text: Option<String>,
+    person: Option<crate::person::Access>,
     pin: Option<StorePin>,
 }
 
@@ -122,6 +123,7 @@ fn open_with_pin(url: &str, repo: &Repo, pin: Option<StorePin>) -> Result<Store>
         key: repo.p.store.machine.key.clone(),
         dir: repo.p.meta_dir().join("remote-stores").join(hash),
         paper_key_text: None,
+        person: None,
         pin,
     })
 }
@@ -131,6 +133,20 @@ impl Store {
         self.backend.as_caller(ctx);
         if let Backend::Gateway(gateway) = &mut self.backend {
             gateway.connect(ctx)?;
+        }
+        self.person = if ctx.env("LAYR_PERSON_KEY_FILE").is_some() {
+            let login = match &self.backend {
+                Backend::Gateway(g) => Some(crate::person::gateway_login(g)?),
+                _ => None,
+            };
+            crate::privs::as_caller_fs(ctx, || {
+                crate::person::load(&ctx.env, &ctx.caller.home, &ctx.cwd, ctx.caller.uid, login.as_deref())
+            })?
+        } else {
+            None
+        };
+        if let (Backend::Gateway(gateway), Some(person)) = (&self.backend, &mut self.person) {
+            crate::person::gateway_access(gateway, person)?;
         }
         self.paper_key_text = ctx
             .env("LAYR_PAPER_KEY_FILE")
@@ -228,6 +244,11 @@ impl Store {
         if let Some(pin) = &self.pin {
             pin.check(&descriptor)?;
         }
+        if let Some(person) = &self.person {
+            if let Some(pin) = person.index.pin(&descriptor.project) {
+                pin.check_store(&descriptor)?;
+            }
+        }
         if !self.project.is_empty() && descriptor.project != self.project {
             bail!("store project differs: local {}, store.json {}", self.project, descriptor.project);
         }
@@ -245,6 +266,11 @@ impl Store {
             if let Backend::Gateway(gateway) = &self.backend {
                 gateway.set_identity(&identity)?;
             }
+            return Ok(identity);
+        }
+        if let Some(person) = &self.person {
+            let identity = person.open(&self.backend, descriptor)?;
+            self.backend.unlock_reader(&identity)?;
             return Ok(identity);
         }
         let paper = paper.map(str::to_string).or_else(|| self.paper_key_text.clone());
@@ -364,6 +390,48 @@ impl Store {
     }
     pub fn gc(&self, dry_run: bool) -> Result<Vec<String>> {
         reader::gc(self, dry_run)
+    }
+
+    pub fn grant(&mut self, ctx: &Ctx, login: &str, recipient: &str, invite_out: Option<&std::path::Path>) -> Result<bool> {
+        use base64::Engine;
+        use layr_store::person;
+        if !person::login_name(login) {
+            bail!("invalid person login; use a tailnet login such as ann@example.com");
+        }
+        if !keys::valid_recipient(recipient) {
+            bail!("the recipient is not an age recipient");
+        }
+        self.connect(ctx)?;
+        let own = match &self.backend {
+            Backend::Gateway(g) => crate::person::gateway_login(g)?,
+            _ => {
+                let own = ctx.env("LAYR_PERSON_LOGIN").context("set LAYR_PERSON_LOGIN for a file:// or s3:// person grant")?;
+                if !person::login_name(own) {
+                    bail!("invalid LAYR_PERSON_LOGIN");
+                }
+                own.into()
+            }
+        };
+        let descriptor = self.descriptor()?;
+        let identity = self.identity(&descriptor, None)?;
+        let granted = self.backend.list("slots/")?;
+        let first = !granted.iter().any(|slot| slot.key.strip_prefix("slots/").and_then(person::slot_login).is_some());
+        if first && own != login {
+            bail!("grant yourself first: the first person slot must name your login {own}; nothing is written");
+        }
+        let slot = format!("slots/{}", person::slot_name(login, recipient)?);
+        let existing = granted.iter().any(|object| object.key == slot);
+        let invite = person::seal_invite(recipient, &person::Pin::of_store(&descriptor))?;
+        // Refuse an occupied output path before publishing a grant.
+        if let Some(path) = invite_out {
+            crate::privs::as_caller_fs(ctx, || crate::person::create(path, &invite))?;
+        }
+        let created = !existing && self.backend.put_new(&slot, keys::seal_slot(&identity, recipient)?)?;
+        if let Backend::Gateway(g) = &self.backend {
+            g.person_call(reqwest::Method::POST,&format!("/api/people/{login}/inbox"),None,Some(&serde_json::json!({"data":base64::engine::general_purpose::STANDARD.encode(invite)})))
+                .context("the person slot is in place, but the invite did not reach the inbox; register the person key and run grant again")?;
+        }
+        Ok(created)
     }
 
     pub fn trust(&self, repo: &Repo, machine: &str, public_key: Option<&str>) -> Result<()> {

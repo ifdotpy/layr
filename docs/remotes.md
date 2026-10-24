@@ -137,3 +137,85 @@ Raw results contain binary hashes and individual samples:
 and [shared filesystem CPU measurements](../benchmarks/results/btrfs-opt-shared-cpu-10000.json).
 The earlier runs use intermediate builds; their hashes identify each build.
 
+
+## Person keys and store access
+
+A person key opens every store that has a slot for that person.
+Run these commands on your own machine.
+The person files live in `~/.config/layr/person/`.
+Set `LAYR_PERSON_DIR` to select another folder.
+The files contain a public recipient, encrypted paper slot, and encrypted index.
+Secret files have mode `0600`.
+
+```sh
+export LAYR_PERSON_LOGIN=ann@example.com
+layr person keys --paper-key-out /private/path/person-words
+export LAYR_PERSON_KEY_FILE=/private/path/person-words
+layr person show
+```
+
+The output file contains 24 words and must not exist before the command.
+Without `--paper-key-out`, a private terminal shows the words once.
+Write the words on paper and remove the file after you check them.
+The command never stores the words in the person folder unless you explicitly name that output path.
+`LAYR_PERSON_KEY_FILE` can contain the words or the person age identity.
+It must be a regular file with mode `0600`, owned by the caller.
+The person identity stays in memory after the paper slot opens.
+Paper keys must never go to executor machines.
+
+The owner grants their own login first.
+The first person slot hides the store from gateway logins without a slot.
+File and S3 grants require `LAYR_PERSON_LOGIN`.
+A gateway URL uses only the login that the gateway gets from tailscaled.
+
+```sh
+layr remote grant cloud --person ann@example.com --recipient age1... --invite-out /private/path/ann.age
+layr person accept --invite-file /private/path/ann.age
+layr remote grant cloud --person carol@example.com --recipient age1... --invite-out /private/path/carol.age
+```
+
+Use each person's actual recipient from `layr person show`.
+Give Carol the encrypted invite through a channel that you trust.
+Carol runs the following commands with her own person files and key:
+
+```sh
+export LAYR_PERSON_LOGIN=carol@example.com
+export LAYR_PERSON_KEY_FILE=/private/path/carol-words
+layr person accept --invite-file /private/path/carol.age
+layr clone file:///path/to/store copy
+layr person show
+layr mount file:///path/to/store
+```
+
+An invite does not change the index until the person accepts it.
+For an invite file, check the project and recipient with the owner before acceptance.
+The owner needs a machine slot, the store paper key, or their own accepted person slot to grant another person.
+For the store paper key, set `LAYR_PAPER_KEY_FILE`.
+A new person key gets a new slot. An existing slot returns `already granted` without replacement.
+The command sends the invite again to the gateway inbox or the new `--invite-out` path.
+
+For a gateway, register the same person key and use its inbox:
+
+```sh
+layr person keys --site https://gateway.example.com
+layr person accept --site https://gateway.example.com --invite 1792825920000-0123abcd
+```
+
+A later `person keys --site` registers the existing recipient and encrypted paper slot without new words.
+Gateway grants send the invite to the recipient's inbox.
+Gateway acceptance checks the store descriptor and person slot before it writes the index.
+A concurrent index change returns HTTP 409 and requires another read.
+`person show --site` prints the gateway login.
+
+The index preserves the Desk JSON and MAC format.
+For a v2 store, each pin contains its project UUID and recipient.
+`writer` and `signedFrom` are null because v2 tree signatures use machine keys.
+Clone, fetch, and mount refuse a changed pin before the person slot opens.
+The error names the pinned value and the value in `store.json`.
+`person show` lists accepted stores when `LAYR_PERSON_KEY_FILE` opens the index.
+
+For v2 stores, `fp` is the first 16 hexadecimal characters of SHA-256 of the person recipient string.
+The opener computes this value and reads its exact slot.
+The store creates every slot conditionally and never replaces an object.
+Old person keys retain access to data that they could already read.
+Desk v1 import reads `slots/person-<login>.age`.

@@ -141,14 +141,27 @@ pub(super) fn import(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Optio
     if vault.format != 1 {
         bail!("unsupported Desk vault format");
     }
-    let paper = opts
-        .paper_key
-        .clone()
-        .or_else(|| store.paper_key_text.clone())
-        .context("set LAYR_PAPER_KEY_FILE to import a Desk v1 vault")?;
-    let opener = keys::identity_from_paper(&paper).map_err(|_| anyhow::anyhow!("invalid paper key"))?;
-    let slot = store.backend.get("slots/paper.age")?.context("Desk vault has no paper slot")?;
-    let identity = keys::open_slot(&slot, &opener)?;
+    let identity = if let Some(person) = &store.person {
+        let project = prefix(store, opts);
+        let pin = person.index.pin(&project).context("Desk vault has no accepted person pin")?;
+        pin.check(&layr_store::person::VaultInfo {
+            recipient: vault.recipient.clone(),
+            writer: vault.writer.clone(),
+            signed_from: vault.signed_from,
+        })?;
+        let slot =
+            store.backend.get(&format!("slots/person-{}.age", person.login))?.context("this login has no Desk person slot")?;
+        keys::open_slot(&slot, &person.identity)?
+    } else {
+        let paper = opts
+            .paper_key
+            .clone()
+            .or_else(|| store.paper_key_text.clone())
+            .context("set LAYR_PAPER_KEY_FILE to import a Desk v1 vault")?;
+        let opener = keys::identity_from_paper(&paper).map_err(|_| anyhow::anyhow!("invalid paper key"))?;
+        let slot = store.backend.get("slots/paper.age")?.context("Desk vault has no paper slot")?;
+        keys::open_slot(&slot, &opener)?
+    };
     let policy = Policy::new(&prefix(store, opts), &vault)?;
     policy.check_identity(&identity)?;
     // create_empty has no records; create the normal project record before its imported history.
@@ -363,6 +376,7 @@ mod tests {
             key: ed25519_dalek::SigningKey::from_bytes(&[7; 32]),
             dir: root.join("index"),
             paper_key_text: None,
+            person: None,
             pin: None,
         };
         (store, identity, root)

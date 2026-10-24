@@ -69,3 +69,44 @@ its record and the derived rows. After a crash only a snapshot without a record 
 `layr fsck --repair` deletes it. Derived rows keep the order key of their record, so a rebuild
 (`layr reindex`) gives the same result as incremental imports.
 
+
+## Person keys
+
+A person identity is an age X25519 identity.
+A paper key contains 24 BIP39 words and opens the encrypted person slot.
+BIP39 means Bitcoin Improvement Proposal 39.
+The local files contain the public recipient and encrypted slots.
+The store slot `slots/person-<login>-<fp>.age` contains the store identity encrypted to the person's recipient.
+The store identity must match the recipient in the store descriptor.
+
+The person index uses the Desk v1 format and message authentication code (MAC).
+Its first line is `layr-desk person index v1`.
+The next line contains the MAC in lowercase hexadecimal form.
+The remaining bytes contain the JSON body.
+The MAC key is HMAC-SHA256 of the header, with the person's X25519 secret as its key.
+HMAC means hash-based message authentication code.
+The outer MAC covers the exact JSON bytes.
+Age encryption alone cannot prove who wrote an index because anyone can encrypt to a public recipient.
+
+Invites contain encrypted pins.
+A pin identifies the project and store recipient.
+An invite must not grant access by itself.
+The person must accept it before the index changes.
+The gateway can serve an older index or hide an invite.
+The MAC detects changes but does not prevent such rollback.
+
+The gateway gets the caller's login from tailscaled whois.
+Client login headers do not grant access.
+A store with person slots returns HTTP 404 to logins without a slot.
+A valid store read token still proves the store identity until it expires.
+Writes from pages of other sites are refused.
+Keys and credentials come from files or the environment.
+Paper keys must never go to executor machines.
+
+For v2 stores, `fp` is the first 16 hexadecimal characters of SHA-256 of the person recipient string.
+The opener computes this value and reads its exact slot.
+The store creates every slot conditionally and never replaces an object.
+Old person keys retain access to data that they could already read.
+Desk v1 import reads `slots/person-<login>.age`.
+
+An old person slot stays in the store. It opens the store for the old key until the store key changes (a new store recipient).

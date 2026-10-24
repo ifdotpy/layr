@@ -477,7 +477,16 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if args.iter().any(|s| matches!(s.as_str(), "-v" | "--verbose")) {
         return Err(exit(128, "use layr git remote -v"));
     }
-    let a = parse(&Spec::new().flag("--json").value("--public-key").value("--paper-key-out").value("--recipient"), args)?;
+    let a = parse(
+        &Spec::new()
+            .flag("--json")
+            .value("--public-key")
+            .value("--paper-key-out")
+            .value("--recipient")
+            .value("--person")
+            .value("--invite-out"),
+        args,
+    )?;
     let sub = a.pos.first().map(String::as_str).unwrap_or("list");
     if sub == "self" {
         if a.pos.len() != 1 {
@@ -572,6 +581,16 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 outln!(ctx, "{}", json!({"removed": a.pos[1]}));
             }
         }
+        "grant" if a.pos.len() == 2 => {
+            repo.require(ctx,"remote")?;
+            let person = a.get("--person").context("grant requires --person <login>")?;
+            let recipient = a.get("--recipient").context("grant requires --recipient <age1…>")?;
+            let mut store = store_remote::open_named(&a.pos[1],repo)?;
+            let output = a.get("--invite-out").map(|path|ctx.cwd.join(path));
+            let created = store.grant(ctx,person,recipient,output.as_deref())?;
+            if a.has("--json") {outln!(ctx,"{}",json!({"person":person,"recipient":recipient,"status":if created {"granted"} else {"already granted"}}));}
+            else {outln!(ctx,"{} store to {person}",if created {"granted"} else {"already granted"});}
+        }
         "trust-store" if a.pos.len() == 2 => {
             repo.require(ctx, "remote")?;
             let name = &a.pos[1];
@@ -627,7 +646,7 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
         _ => {
             return Err(exit(
                 128,
-                "usage: layr remote add <name> <url> [--paper-key-out <path>] | list | self | remove <name> | trust <name> <machine> [--public-key <ed25519>] | trust-store <name> --recipient <age1…>",
+                "usage: layr remote add <name> <url> [--paper-key-out <path>] | list | self | remove <name> | trust <name> <machine> [--public-key <ed25519>] | trust-store <name> --recipient <age1…> | grant <name> --person <login> --recipient <age1…> [--invite-out <path>]",
             ))
         }
     }

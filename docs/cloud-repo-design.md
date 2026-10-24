@@ -43,7 +43,7 @@ The earlier port read Desk at f4cb324. These later Desk features must exist in L
    (`vault.json` `writer`, `signedFrom`, message `layr-desk tree v1` …) and refuses invalid ones;
    unsigned states before `signedFrom` import with an `import` attestation marked unsigned.
 3. **Person keys.** One age identity per person opens every store the person may read:
-   - store slot `slots/person-<login>.age` (vault identity sealed to the person recipient);
+   - store slot `slots/person-<login>-<fp>.age` (`fp`: first 16 SHA-256 hex characters of the person recipient; conditional create);
    - `layr person keys [--paper-key-out <path>]`, `layr person show`;
    - `layr remote grant <remote> --person <login> --recipient <age1…>` (needs the vault identity:
      machine slot, paper key or the owner's person slot);
@@ -76,3 +76,7 @@ removed, so each one becomes a Layr or Layr Cloud task after the person task:
 7. **AWS login:** use an AWS profile or SSO login for `s3://` stores, as Desk did.
 8. **Deploy with one command:** one command that creates or updates the CloudFormation stacks
    of Layr Cloud from the release archives.
+
+## Open items
+
+- Collection of old person slots. Old slots stay until this has a separate design.

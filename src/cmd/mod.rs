@@ -195,7 +195,8 @@ Lines and states:
    ref set/list/log/delete, attest, attestations, change list/show/log/diff
    view [<rev or line>] [--json], view save [<line>], view show <id>
 Remotes:
-   remote add, list, self, remove, trust; sync, fetch, pull, push, clone
+   person keys, show, accept
+   remote add, list, self, remove, trust, grant; sync, fetch, pull, push, clone
    mount <remote> [--listen 127.0.0.1:8095]
 Git bridge:
    git remote, fetch, pull, push, clone, sync

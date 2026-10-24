@@ -128,6 +128,43 @@ impl Gateway {
         Ok(())
     }
 
+    /// Desk person API on the same authenticated HTTPS origin.
+    pub fn person_call(
+        &self,
+        method: Method,
+        path: &str,
+        token: Option<&str>,
+        body: Option<&serde_json::Value>,
+    ) -> Result<serde_json::Value> {
+        let url = self.base.join(path)?;
+        let mut request = self.http.request(method.clone(), url).header("content-type", "application/json");
+        if let Some(token) = token {
+            request = request.bearer_auth(token);
+        }
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        let response = request.send().map_err(reqwest::Error::without_url)?;
+        json(response, 512 << 10)
+    }
+
+    pub fn person_slot_at(&self, project: &str, login: &str, recipient: &str) -> Result<Vec<u8>> {
+        if !layr_store::person::project_name(project) {
+            bail!("invalid gateway project name");
+        }
+        let slot = layr_store::person::slot_name(login, recipient)?;
+        let url = self.base.join(&format!("/v1/p/{project}/slots/{slot}"))?;
+        let response = self.http.get(url).send().map_err(reqwest::Error::without_url)?;
+        if !response.status().is_success() {
+            bail!("gateway person slot: HTTP {}", response.status().as_u16());
+        }
+        bytes(response, 4096)
+    }
+
+    pub fn person_view(&self) -> Result<serde_json::Value> {
+        self.person_call(Method::GET, "/api/person", None, None)
+    }
+
     pub fn set_identity(&self, identity: &str) -> Result<()> {
         *self.identity.lock().map_err(|_| anyhow!("gateway identity lock failed"))? = Some(identity.into());
         Ok(())
@@ -151,7 +188,9 @@ impl Gateway {
             request = request.bearer_auth(token);
         }
         if let Some(data) = data {
-            request = request.body(data);
+            request = request
+                .header("content-type", if action == "token" { "application/json" } else { "application/octet-stream" })
+                .body(data);
         }
         request.send().map_err(reqwest::Error::without_url).map_err(Into::into)
     }
@@ -214,6 +253,14 @@ impl Gateway {
     pub fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
         if key == "vault.json" {
             return Ok(None);
+        }
+        if key.strip_prefix("slots/").is_some_and(|name| layr_store::person::slot_login(name).is_some()) {
+            let response = self.send(Method::GET, key, None, None, None)?;
+            return match response.status().as_u16() {
+                200 => Ok(Some(bytes(response, 4096)?)),
+                404 => Ok(None),
+                status => bail!("gateway person slot: HTTP {status}"),
+            };
         }
         if key.starts_with("slots/") {
             #[derive(Deserialize)]

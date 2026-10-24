@@ -4,8 +4,8 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use bip39::{Language, Mnemonic};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use std::str::FromStr;
 
 const SECRET_HRP: &str = "age-secret-key-";
@@ -177,4 +177,9 @@ pub fn verify_bytes(data: &[u8], signature: &str, key: &VerifyingKey) -> Result<
     let sig = base64::engine::general_purpose::STANDARD.decode(signature)?;
     let sig = Signature::from_slice(&sig).map_err(|e| anyhow::anyhow!("bad signature: {e}"))?;
     key.verify(data, &sig).map_err(|_| anyhow::anyhow!("signature does not verify"))
+}
+
+/// Whether this is an age X25519 recipient.
+pub fn valid_recipient(recipient: &str) -> bool {
+    age::x25519::Recipient::from_str(recipient).is_ok()
 }

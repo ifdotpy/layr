@@ -42,6 +42,23 @@ impl Browse {
         if let Some(pin) = &access.pin {
             pin.check(&descriptor)?;
         }
+        let login = if env.contains_key("LAYR_PERSON_KEY_FILE") {
+            match &backend {
+                Backend::Gateway(g) => Some(crate::person::gateway_login(g)?),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let uid = rustix::process::getuid().as_raw();
+        let mut person =
+            crate::person::load(env, &crate::ctx::Caller::from_uid(uid).home, &std::env::current_dir()?, uid, login.as_deref())?;
+        if let (Backend::Gateway(gateway), Some(person)) = (&backend, &mut person) {
+            crate::person::gateway_access(gateway, person)?;
+        }
+        if let Some(person) = &person {
+            person.check(&descriptor)?;
+        }
         let pin = StorePin { project: descriptor.project.clone(), recipient: descriptor.recipient.clone() };
         drop(stage);
         let stage = crate::trace::span("disk slot");
@@ -51,10 +68,18 @@ impl Browse {
             if let Some(slot) = backend.get(&format!("slots/machine-{machine}.age"))? {
                 keys::open_machine_slot(&slot, key)?
             } else {
-                paper_identity(&backend, access.paper.as_deref())?
+                if let Some(person) = &person {
+                    person.open(&backend, &descriptor)?
+                } else {
+                    paper_identity(&backend, access.paper.as_deref())?
+                }
             }
         } else {
-            paper_identity(&backend, access.paper.as_deref())?
+            if let Some(person) = &person {
+                person.open(&backend, &descriptor)?
+            } else {
+                paper_identity(&backend, access.paper.as_deref())?
+            }
         };
         if keys::recipient_of(&identity)? != descriptor.recipient {
             bail!("the disk key does not match the store recipient");
