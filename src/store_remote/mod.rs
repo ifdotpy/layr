@@ -31,7 +31,10 @@ pub struct Options {
 pub struct Report {
     pub records: usize,
     pub states: usize,
+    #[serde(skip)]
     pub state_ids: Vec<String>,
+    #[serde(skip)]
+    pub overlay_transfers: Vec<(String, crate::model::Transfer)>,
     pub files: usize,
     pub bytes: u64,
     pub omitted: Vec<String>,

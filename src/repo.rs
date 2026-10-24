@@ -668,6 +668,11 @@ impl<'a> Repo<'a> {
         rec.data["remote"] = serde_json::json!(remote);
         rec.data["url"] = serde_json::json!(layr_model::operations::public_url(url));
         rec.data["result"] = serde_json::json!("success");
+        if let Some((_, overlay)) = self.p.name.split_once('%') {
+            rec.data["overlay"] = serde_json::json!(overlay);
+        } else {
+            // TODO(hidden-overlays): exclude hidden overlay names from the parent transfer record.
+        }
         self.commit_record(ctx, rec)?;
         Ok(())
     }

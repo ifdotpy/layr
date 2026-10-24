@@ -740,7 +740,10 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
                 a.has("--json") && op != "pull",
             )?;
             if matches!(op, "push" | "sync") {
-                h.repo.record_transfer(ctx, op, name, &url, &transfer)?;
+                for (overlay, data) in &transfer.overlays {
+                    h.repo.overlay_repo(overlay)?.record_transfer(ctx, op, name, &url, data)?;
+                }
+                h.repo.record_transfer(ctx, op, name, &url, &transfer.transfer)?;
             }
         }
         Kind::Store => {
@@ -769,6 +772,9 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
                 return Ok(2);
             }
             if op == "push" {
+                for (overlay, data) in &report.overlay_transfers {
+                    h.repo.overlay_repo(overlay)?.record_transfer(ctx, op, name, &url, data)?;
+                }
                 h.repo.record_transfer(
                     ctx,
                     op,
@@ -776,11 +782,17 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
                     &url,
                     &crate::model::Transfer {
                         direction: "push".into(),
-                        records_sent: report.records,
-                        states_sent: report.states,
-                        bytes_sent: report.bytes,
+                        records_sent: report.records
+                            - report.overlay_transfers.iter().map(|(_, t)| t.records_sent).sum::<usize>(),
+                        states_sent: report.state_ids.len(),
+                        bytes_sent: report.bytes - report.overlay_transfers.iter().map(|(_, t)| t.bytes_sent).sum::<u64>(),
                         state_ids_sent: report.state_ids.clone(),
-                        overlays: report.overlays.clone(),
+                        overlays: report
+                            .overlay_transfers
+                            .iter()
+                            .filter(|(_, t)| t.records_sent > 0 || t.states_sent > 0)
+                            .map(|(name, _)| name.clone())
+                            .collect(),
                         ..Default::default()
                     },
                 )?;

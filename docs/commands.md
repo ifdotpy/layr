@@ -26,6 +26,8 @@ This page is part of the [Layr documentation](../README.md#documentation).
 
 Successful peer `push` and `sync`, and store `push`, append a signed operation record.
 The record includes the remote name and URL, direction, state IDs, counts, bytes, overlays, and result.
+The parent record contains only parent state IDs and counts.
+Each overlay has a separate transfer record in its own log.
 The URL excludes credentials, query parameters, and fragments.
 The record stays local until the next exchange sends it.
 OCI push exports an artifact and writes no transfer record.

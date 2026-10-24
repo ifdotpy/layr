@@ -231,7 +231,7 @@ if [ "$(uname -s)" = Linux ] && [ -z "${LAYR_OVERLAYFS_TEST_ROOT:-}" ]; then
 fi
 
 l remote add store "file://$T/archive" --paper-key-out "$T/paper" >/dev/null
-l push store -q
+l push store --json > "$T/store-push.json"
 ok 'one push sends all three version trees' python3 - "$T/archive" "$V1" "$V2" "$V3" <<'PYPRIOR'
 import sys
 from pathlib import Path
@@ -239,6 +239,30 @@ store = Path(sys.argv[1])
 for state in sys.argv[2:]:
     assert any((store / 'states' / state).glob('*.tree.age')), state
 PYPRIOR
+ok 'overlay state IDs stay in the overlay transfer record' python3 - "$LAYR_ROOT/projects/model-golden" "$T/store-push.json" <<'PYPRIVATE'
+import json, sqlite3, sys
+from pathlib import Path
+project=Path(sys.argv[1])
+parent_db=sqlite3.connect(project/'meta/db/layr.sqlite')
+overlay_db=sqlite3.connect(project/'meta/overlays/secrets/meta/db/layr.sqlite')
+def push(db):
+    return json.loads(db.execute("select raw from records where op='push' order by time desc, seq desc limit 1").fetchone()[0])['r']
+parent, overlay=push(parent_db), push(overlay_db)
+heads={row[0] for row in overlay_db.execute('select head from lines where deleted=0')}
+parent_ids=set(parent['data']['state_ids_sent'])
+overlay_ids=set(overlay['data']['state_ids_sent'])
+assert heads and heads <= overlay_ids
+assert not parent_ids & overlay_ids
+assert not heads & parent_ids
+assert parent['project'] != overlay['project'] and overlay['data']['overlay']=='secrets'
+assert parent['data']['overlays']==['secrets']
+assert parent['data']['states_sent']==len(parent_ids)
+assert overlay['data']['states_sent']==len(overlay_ids)
+report=json.load(open(sys.argv[2]))
+assert report['states']==parent['data']['states_sent']+overlay['data']['states_sent']
+assert report['records']==parent['data']['records_sent']+overlay['data']['records_sent']
+assert report['bytes']==parent['data']['bytes_sent']+overlay['data']['bytes_sent']
+PYPRIVATE
 l gc --remote store --json > "$T/remote-gc.json"
 ok 'remote GC keeps all three version trees' python3 - "$T/archive" "$V1" "$V2" "$V3" <<'PYGC'
 import sys
