@@ -29,7 +29,7 @@ def check(value,label):
  print('PASS',label,flush=True)
 def machine(env): return json.loads(run(['remote','self','--json'],env).stdout)
 def records(path):
- db=sqlite3.connect(path/'meta/db/layr.sqlite')
+ db=sqlite3.connect((path/'meta/db/layr.sqlite').as_uri()+'?mode=ro',uri=True)
  try: return [json.loads(line)['r'] for (line,) in db.execute('SELECT raw FROM records')]
  finally: db.close()
 def absent(text,ids=()): return name not in text and all(value not in text for value in ids)
