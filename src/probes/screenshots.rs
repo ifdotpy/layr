@@ -153,6 +153,9 @@ fn pixels(a: Option<&RgbaImage>, b: Option<&RgbaImage>, tolerance: u8) -> Result
     let (bw, bh) = b.map(RgbaImage::dimensions).unwrap_or_default();
     let (w, h) = (aw.max(bw), ah.max(bh));
     let len = (w as usize).checked_mul(h as usize).context("screen dimensions overflow")?;
+    if image::Limits::default().max_alloc.is_some_and(|limit| len as u64 > limit) {
+        bail!("screen comparison canvas exceeds the image allocation limit");
+    }
     let mut mask = Vec::new();
     mask.try_reserve_exact(len).context("screen comparison is too large")?;
     mask.resize(len, false);
@@ -333,6 +336,12 @@ mod tests {
         assert_eq!(boxes, vec![Region { x: 0, y: 0, width: 20, height: 2 }]);
         insert_region(&mut boxes, Region { x: 28, y: 0, width: 1, height: 1 });
         assert_eq!(boxes.len(), 2);
+    }
+    #[test]
+    fn mismatched_narrow_images_cannot_allocate_an_unbounded_canvas() {
+        let a = RgbaImage::new(1, 40000);
+        let b = RgbaImage::new(40000, 1);
+        assert!(pixels(Some(&a), Some(&b), 8).unwrap_err().to_string().contains("allocation limit"));
     }
     #[test]
     fn limits_use_the_unrounded_share_and_ignore_structure_only_rows() {

@@ -176,7 +176,11 @@ fn xml(text: &str, ignore: &[String]) -> Result<Document> {
                     .collect::<Result<BTreeMap<String, String>>>()?;
                 let frame = xml_frame(&attrs);
                 let mut line = format!("<{name}");
-                let text_values = attrs.iter().filter(|(key, _)| is_text_key(key)).map(|(k, v)| (k.clone(), v.clone())).collect();
+                let text_values = attrs
+                    .iter()
+                    .filter(|(key, _)| is_text_key(key) && !ignore.contains(key))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
                 let attribute_values = attrs
                     .iter()
                     .filter(|(key, _)| !is_text_key(key) && !ignore.contains(key))
@@ -366,6 +370,15 @@ mod tests {
         let moved = normalize("<node text='Old' role='label' bounds='[0,0][5,5]'/>", "xml", &ignore).unwrap();
         assert_eq!(a.text(), moved.text());
         assert_ne!(a.text(), normalize("<node bounds='[10,20][30,40]' role='label' text='Old'/>", "xml", &[]).unwrap().text());
+    }
+    #[test]
+    fn ignored_xml_text_attributes_cannot_inflate_change_counts() {
+        let ignore = vec!["text".to_owned()];
+        let a = normalize("<node text='Old' role='label'/>", "xml", &ignore).unwrap();
+        let b = normalize("<node text='New' role='button'/>", "xml", &ignore).unwrap();
+        let delta = compare(&a, &b, "a", "b");
+        assert_eq!(delta["text_changes"], 0);
+        assert!(!delta["structure_diff"].as_str().unwrap().contains("text="));
     }
     #[test]
     fn json_is_canonical_valid_json_and_keeps_native_frames() {
