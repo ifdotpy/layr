@@ -1368,7 +1368,9 @@ pub fn config(ctx: &Ctx, args: &[String]) -> Result<i32> {
         return Ok(0);
     }
     let (k, v) = (&a.pos[0], a.pos[1..].join(" "));
-    let val: serde_json::Value = serde_json::from_str(&v).unwrap_or(serde_json::Value::String(v.clone()));
+    let command = ["check.", "derive.command.", "merge.driver.", "merge.verify."].iter().any(|prefix| k.starts_with(prefix));
+    let val =
+        if command { serde_json::Value::String(v) } else { serde_json::from_str(&v).unwrap_or(serde_json::Value::String(v)) };
     if k == "queue.run" && !val.is_null() {
         let value = val.as_str().ok_or_else(|| exit(128, "queue.run must be a comma-separated list of line names"))?;
         for name in value.split(',').map(str::trim).filter(|s| !s.is_empty()) {
