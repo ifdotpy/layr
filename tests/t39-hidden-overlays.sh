@@ -81,9 +81,18 @@ check(absent(config,ids),'parent config contains no hidden name or layer IDs')
 for path in (project/'meta/db').iterdir():
  if path.is_file():
   check(all(value.encode() not in path.read_bytes() for value in [name,*ids]),'raw shared database excludes hidden metadata: '+path.name)
+shared_before_push=records(project)
+shared_states={state['id'] for rec in shared_before_push for state in rec.get('states',[]) if state['kind'] in ['commit','import','derived']}
 report=json.loads(run(['push','archive','--json']).stdout)
 check(any(name in row for row in report['overlays']),'the reader push report names its hidden overlay')
 check(absent(json.dumps(records(project)),ids),'parent push and sync records contain no hidden name, count or layer ID')
+parent_push=next(rec for rec in reversed(records(project)) if rec['op']=='push')
+layer_push=next(rec for rec in reversed(records(overlay)) if rec['op']=='push')
+check(parent_push['data']['overlays']==[],'the parent push record has no hidden overlay count or name')
+check(set(parent_push['data']['state_ids_sent'])==shared_states and parent_push['data']['states_sent']==len(shared_states),'the parent push states and count contain only shared states')
+check(parent_push['data']['records_sent']==len(shared_before_push),'the parent push record count excludes all hidden records')
+check(parent_push['data']['bytes_sent']+layer_push['data']['bytes_sent']==report['bytes'],'the parent push byte count excludes hidden bytes')
+check(layer_push['data']['overlay']==name and bool(set(layer_push['data']['state_ids_sent']) & ids),'the hidden push records its layer IDs only in its own log')
 check(not any((root/'archive').glob('overlays/*/keys/*.json')),'hidden key manifests have no plaintext key record')
 check(any((root/'archive').glob('overlays/*/keys/*.age')),'hidden key manifests use overlay encryption')
 check(all(name.encode() not in file.read_bytes() for file in (root/'archive').rglob('*') if file.is_file()),'grep finds no hidden name anywhere in the remote store')
@@ -131,6 +140,11 @@ check(absent(result.stdout+result.stderr,ids),'an excluded peer receives no hidd
 run(['remote','add','allowed','ssh://test/project'])
 run(['sync','allowed','--command','--','env','LAYR_ROOT='+P['LAYR_ROOT'],binary,'serve-peer','project'])
 check((pathlib.Path(P['LAYR_ROOT'])/'projects/project/meta/overlays'/name/'meta/db/layr.sqlite').exists(),'an explicitly allowed peer receives the hidden project')
+parent_sync=next(rec for rec in reversed(records(project)) if rec['op']=='sync' and rec['data']['remote']=='allowed')
+layer_sync=next(rec for rec in reversed(records(overlay)) if rec['op']=='sync' and rec['data']['remote']=='allowed')
+check(absent(json.dumps(parent_sync),ids) and parent_sync['data']['overlays']==[],'the parent sync record has no hidden name, overlay count or layer ID')
+check(not (set(parent_sync['data']['state_ids_sent']) | set(parent_sync['data']['state_ids_received'])) & ids,'the parent sync state lists contain no hidden layer ID')
+check(layer_sync['data']['overlay']==name and bool(set(layer_sync['data']['state_ids_sent']) & ids),'the hidden sync stores its layer IDs only in its own log')
 # Two local people on a service, including an admin who is not an overlay reader.
 shutil.copy2(binary,root/'layr');os.chmod(root/'layr',0o755);os.chmod(root,0o755)
 # Both people have store access. The reader slot controls hidden overlay discovery.

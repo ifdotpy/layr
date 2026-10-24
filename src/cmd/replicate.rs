@@ -925,7 +925,9 @@ fn exchange_overlays<R: Read, W: Write>(
                 let mut overlay_transfer = std::mem::replace(&mut w.transfer, parent_transfer);
                 overlay_transfer.direction = direction.into();
                 if overlay_transfer.records_sent > 0 || overlay_transfer.states_sent > 0 {
-                    w.transfer.overlays.push(name.clone());
+                    if !repo.need_overlay(&name)?.hidden {
+                        w.transfer.overlays.push(name.clone());
+                    }
                     w.overlay_transfers.push((name, overlay_transfer));
                 }
             }
@@ -997,7 +999,9 @@ fn exchange_overlays<R: Read, W: Write>(
                 let mut overlay_transfer = std::mem::replace(&mut w.transfer, parent_transfer);
                 overlay_transfer.direction = direction.into();
                 if overlay_transfer.records_received > 0 || overlay_transfer.states_received > 0 {
-                    w.transfer.overlays.push(name.clone());
+                    if !repo.need_overlay(&name)?.hidden {
+                        w.transfer.overlays.push(name.clone());
+                    }
                     w.overlay_transfers.push((name, overlay_transfer));
                 }
             }

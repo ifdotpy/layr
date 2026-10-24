@@ -790,7 +790,10 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
                         overlays: report
                             .overlay_transfers
                             .iter()
-                            .filter(|(_, t)| t.records_sent > 0 || t.states_sent > 0)
+                            .filter(|(name, t)| {
+                                (t.records_sent > 0 || t.states_sent > 0)
+                                    && h.repo.overlay_info(name).ok().flatten().is_some_and(|info| !info.hidden)
+                            })
                             .map(|(name, _)| name.clone())
                             .collect(),
                         ..Default::default()

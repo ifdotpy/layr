@@ -664,14 +664,20 @@ impl<'a> Repo<'a> {
     pub fn record_transfer(&self, ctx: &Ctx, op: &str, remote: &str, url: &str, transfer: &crate::model::Transfer) -> Result<()> {
         let _lock = self.p.lock()?;
         let mut rec = Record::new(op);
+        let mut transfer = transfer.clone();
+        if !self.p.is_overlay() {
+            transfer.overlays = transfer
+                .overlays
+                .into_iter()
+                .filter(|name| self.overlay_info(name).ok().flatten().is_some_and(|info| !info.hidden))
+                .collect();
+        }
         rec.data = serde_json::to_value(transfer)?;
         rec.data["remote"] = serde_json::json!(remote);
         rec.data["url"] = serde_json::json!(layr_model::operations::public_url(url));
         rec.data["result"] = serde_json::json!("success");
         if let Some((_, overlay)) = self.p.name.split_once('%') {
             rec.data["overlay"] = serde_json::json!(overlay);
-        } else {
-            // TODO(hidden-overlays): exclude hidden overlay names from the parent transfer record.
         }
         self.commit_record(ctx, rec)?;
         Ok(())
