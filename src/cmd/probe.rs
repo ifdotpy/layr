@@ -39,7 +39,11 @@ pub fn probe(ctx: &Ctx, args: &[String]) -> Result<i32> {
             } else {
                 crate::probes::print(ctx, &diff);
             }
-            Ok(0)
+            Ok(if diff.probes.iter().any(|p| p["limit_reasons"].as_array().is_some_and(|reasons| !reasons.is_empty())) {
+                1
+            } else {
+                0
+            })
         }
         _ => bail!("usage: layr probe run <rev> [--probe <name>] [--json] | layr probe diff <base> <head> [--json]"),
     }

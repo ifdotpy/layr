@@ -113,6 +113,8 @@ Without `fail_over`, probe errors never fail an entry.
 This includes command exits, sandbox errors, missing outputs, invalid JSON, and refused links.
 The queue stores each error and shows it in `queue list` and Behavior.
 With `fail_over`, these errors fail the entry because the limit cannot be checked.
+For screenshots, the limit applies to each screen's changed pixel share, including added or removed images.
+Structure changes do not affect this limit. PNG file size does not affect it.
 A refusal names the probe, metric or file, both values, relative growth, and limit:
 
 ```text
@@ -151,6 +153,7 @@ Output links and special files are refused.
 | `files` (default) | Text patches for each file. Binary files use their size and SHA-256 hash. |
 | `json` | Structural changes by JSON Pointer, including array indexes. |
 | `number` | Each JSON file contains an object of numeric metrics. Changes use `(head - base) / abs(base)`. |
+| `screenshots` | PNG pixels and optional HTML, XML, JSON, or text structure snapshots for each screen. |
 
 The number kind ignores changes whose absolute relative value is at most `noise` (default `0.05`).
 A zero baseline has no relative ratio; a new nonzero value still appears.
@@ -186,6 +189,94 @@ It reports `source collected` when source files are no longer available.
 A missing result cannot run again without its source files.
 The same subject and arguments reuse a stored result, including a failed result, while its attestation and outputs remain available.
 A probe command failure makes `probe run` return a nonzero status.
+
+## Screen probes
+
+A screen probe writes files named `<screen>@<device>.<extension>` in its output folder.
+For web routes, replace `/` with `_`, for example `_checkout@1280.png`.
+Native names can use a device, for example `Checkout@iPhone-15.png`.
+Each screen can have one PNG and one structure file.
+A structure file can also exist without a PNG.
+Files match by their relative path and screen name.
+
+```toml
+[probe.storefront-screens]
+run = ["node", "screens.mjs"]
+outputs = ["out/screens"]
+kind = "screenshots"
+tolerance = 8
+fail_over = 0.05
+```
+
+Each red, green, blue, or alpha channel must differ by more than `tolerance` to change a pixel.
+The default tolerance is 8 on the 0 to 255 scale.
+JSON output includes every screen, its status (`added`, `removed`, or `compared`), dimensions, changed share, percent, and regions.
+`changed_share` is a ratio. `changed_percent` rounds that ratio to one decimal percent.
+The denominator includes every pixel present in either image. New or absent pixels count as changed.
+Added and removed images have a changed share of 1.
+Images with different dimensions report `size_changed` and both dimensions.
+Up to 16 boxes cover the changed pixels. Nearby boxes merge when their gap is less than 8 pixels.
+If more than 16 boxes remain, the nearest boxes combine until at most 16 remain.
+Box coordinates start at the top left. Width and height count pixels.
+PNGs stay in the derived state beside the structure files. Existing result reuse and garbage collection rules apply.
+The JSON paths and output state IDs locate these files.
+
+A screenshot `fail_over = 0.05` fails `probe diff` or a queue entry if any screen changes by more than 5 %.
+The limit uses the exact share before display rounding.
+Structure-only screens have a null pixel share and do not trigger this limit.
+A plain diff reads stored results. It executes no commands.
+
+Each structure file uses the same name as its PNG, with one of these extensions:
+
+| Extension | Normalization |
+| --- | --- |
+| `.html` | One tag or text node per line, sorted attributes, no blank text nodes. Remove `nonce` and attributes that match `^data-.*id$`. |
+| `.xml` | One tag or text node per line, sorted attributes, no blank text nodes. Remove coordinate attributes by default. |
+| `.json` | Sorted object keys, one field per line, stable indentation. Remove coordinate fields by default. |
+| `.txt` | Compare text lines without normalization. |
+
+XML and JSON omit these coordinate names by default: `bounds`, `frame`, `x`, `y`, `width`, `height`, `left`, `top`, `right`, `bottom`.
+Set `ignore_attributes` to replace this list. An empty list retains every attribute or field.
+XML and JSON retain frames as metadata for node outlines.
+Accepted frames include Android bounds (`[x1,y1][x2,y2]`), frame strings, and JSON objects with `x`, `y`, `width`, and `height`.
+JSON also accepts nested `origin` and `size` objects.
+The probe must supply coordinates in PNG pixels. Convert native point coordinates before export when necessary.
+
+Each screen reports `elements_added`, `elements_removed`, `text_changes`, and a unified `structure_diff` in JSON.
+A tag attribute edit keeps the element count. Changed text nodes count as text changes.
+XML text attributes and JSON fields named `text`, `label`, `value`, `title`, `content-desc`, or `name` count as text.
+Other JSON scalar fields count as attributes. JSON objects and arrays count as elements.
+Text added or removed with a node also counts as a text change.
+`structure_regions` contains the boxes of changed native nodes with `change` values `text`, `added`, `removed`, or `attribute`.
+HTML has no frame metadata, so its `structure_regions` list is empty.
+A frame change alone does not change the normalized structure text.
+
+A web probe can use Playwright to save the PNG and the DOM with CSS inlined by the probe:
+
+```javascript
+await page.setViewportSize({ width: 1280, height: 900 });
+await page.goto("http://localhost:3000/checkout");
+await page.screenshot({ path: "out/screens/_checkout@1280.png" });
+// Inline the page's styles before this export.
+await fs.writeFile("out/screens/_checkout@1280.html", await page.content());
+```
+
+Web screens can be rendered again from HTML with inlined CSS.
+Native view trees cannot be rendered again. Capture a PNG for each native device.
+An XCUITest can save a screenshot and a text snapshot:
+
+```swift
+let app = XCUIApplication()
+app.launch()
+let folder = URL(fileURLWithPath: "out/screens", isDirectory: true)
+try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+try app.screenshot().pngRepresentation.write(to: folder.appendingPathComponent("Checkout@iPhone-15.png"))
+try app.debugDescription.write(to: folder.appendingPathComponent("Checkout@iPhone-15.txt"),
+                              atomically: true, encoding: .utf8)
+```
+
+A JSON accessibility export can replace the text file when node boxes are needed.
+The probe command must copy the XCUITest artifacts into its output folder.
 
 ## Views
 

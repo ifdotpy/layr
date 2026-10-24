@@ -13,6 +13,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::Path;
 
+mod screenshots;
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Probe {
@@ -24,6 +26,10 @@ pub struct Probe {
     pub noise: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fail_over: Option<f64>,
+    #[serde(default = "default_tolerance", skip_serializing_if = "is_default_tolerance")]
+    pub tolerance: u8,
+    #[serde(default = "default_ignore_attributes", skip_serializing_if = "is_default_ignore_attributes")]
+    pub ignore_attributes: Vec<String>,
 }
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -32,6 +38,19 @@ pub enum Kind {
     Files,
     Json,
     Number,
+    Screenshots,
+}
+fn default_tolerance() -> u8 {
+    8
+}
+fn is_default_tolerance(value: &u8) -> bool {
+    *value == default_tolerance()
+}
+fn default_ignore_attributes() -> Vec<String> {
+    ["bounds", "frame", "x", "y", "width", "height", "left", "top", "right", "bottom"].map(str::to_owned).to_vec()
+}
+fn is_default_ignore_attributes(value: &Vec<String>) -> bool {
+    *value == default_ignore_attributes()
 }
 fn default_noise() -> f64 {
     0.05
@@ -348,7 +367,7 @@ pub fn run(ctx: &Ctx, repo: &Repo, input: &Input, selected: Option<&str>) -> Res
             crate::storage::create_subvolume(&work)?;
             let cleanup = Temp { path: work.clone() };
             collect(&Tree::open(&snapshot.path)?, &Tree::open(&work)?, &probe.outputs, code != 0)?;
-            validate_outputs(&work, probe.kind)?;
+            validate_outputs(&work, &probe)?;
             let _lock = repo.p.lock()?;
             let mut state =
                 repo.new_state(ctx, &work, StateKind::Derived, vec![input.state.clone()], &format!("probe {name}"), None)?;
@@ -459,9 +478,13 @@ fn files(root: &Path) -> Result<BTreeMap<String, FileData>> {
     visit(&Tree::open(root)?, "", &mut out)?;
     Ok(out)
 }
-fn validate_outputs(root: &Path, kind: Kind) -> Result<()> {
+fn validate_outputs(root: &Path, probe: &Probe) -> Result<()> {
+    let kind = probe.kind;
     if kind == Kind::Files {
         return Ok(());
+    }
+    if kind == Kind::Screenshots {
+        return screenshots::validate(root, &files(root)?, probe);
     }
     for (path, file) in files(root)? {
         let text =
@@ -520,18 +543,28 @@ pub fn diff(repo: &Repo, base: &Input, head: &Input) -> Result<Behavior> {
             probes.push(json!({"probe":name,"status":"kind changed","base":a,"head":b}));
             continue;
         }
-        let before = files(&repo.state_root(&a.output_state)?)?;
-        let after = files(&repo.state_root(&b.output_state)?)?;
-        let changes = compare(&before, &after, p)?;
+        let base_root = repo.state_root(&a.output_state)?;
+        let head_root = repo.state_root(&b.output_state)?;
+        let before = files(&base_root)?;
+        let after = files(&head_root)?;
+        let changes = if p.kind == Kind::Screenshots {
+            screenshots::compare(&base_root, &before, &head_root, &after, p)?
+        } else {
+            compare(&before, &after, p)?
+        };
         if p.kind == Kind::Number
             && changes.is_empty()
             && before.iter().map(|(path, f)| (path, &f.sha256)).ne(after.iter().map(|(path, f)| (path, &f.sha256)))
         {
             quiet_noise.insert(name.clone(), p.noise);
         }
-        probes.push(
-            json!({"probe":name,"status":if changes.is_empty() && a.exit == b.exit {"unchanged"}else{"changed"},"base":a,"head":b,"exit_changed":a.exit != b.exit,"changes":changes}),
-        );
+        let changed = if p.kind == Kind::Screenshots { changes.iter().any(screenshots::changed) } else { !changes.is_empty() };
+        let mut row = json!({"probe":name,"status":if !changed && a.exit == b.exit {"unchanged"}else{"changed"},"base":a,"head":b,"exit_changed":a.exit != b.exit,"changes":changes});
+        if p.kind == Kind::Screenshots {
+            row["limit_reasons"] =
+                json!(p.fail_over.map(|limit| screenshots::limit_reasons(name, &row, limit)).unwrap_or_default());
+        }
+        probes.push(row);
     }
     Ok(Behavior {
         base: base.subject.id.clone(),
@@ -553,6 +586,7 @@ fn compare(old: &BTreeMap<String, FileData>, new: &BTreeMap<String, FileData>, p
             continue;
         }
         match probe.kind {
+            Kind::Screenshots => unreachable!("screenshots compare decoded outputs"),
             Kind::Files => {
                 let text = a.map(|f| f.text.as_deref().unwrap_or("")).unwrap_or("");
                 let next = b.map(|f| f.text.as_deref().unwrap_or("")).unwrap_or("");
@@ -656,6 +690,10 @@ pub fn print(ctx: &Ctx, behavior: &Behavior) {
         }
         let mut json_rows = 0;
         for c in p["changes"].as_array().into_iter().flatten() {
+            if c["kind"] == "screenshots" {
+                outln!(ctx, "    {}: {}", name, screenshots::summary(c));
+                continue;
+            }
             let path = c["path"].as_str().unwrap_or("");
             if let Some(patch) = c["diff"].as_str() {
                 let (mut added, mut removed) = (0, 0);
@@ -692,6 +730,9 @@ pub fn print(ctx: &Ctx, behavior: &Behavior) {
         }
         if json_rows > 20 {
             outln!(ctx, "    … {} more", json_rows - 20);
+        }
+        for reason in p["limit_reasons"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+            outln!(ctx, "    {reason}");
         }
     }
 }
@@ -770,6 +811,9 @@ pub fn queue_run(ctx: &Ctx, repo: &Repo, base: &str, head: &str) -> Result<Value
 }
 
 fn queue_limit_reasons(repo: &Repo, name: &str, probe: &Probe, row: &Value, limit: f64) -> Result<Vec<String>> {
+    if probe.kind == Kind::Screenshots && row["status"] != "kind changed" {
+        return Ok(screenshots::limit_reasons(name, row, limit));
+    }
     let mut reasons = Vec::new();
     let (Some(a), Some(b)) = (row.get("base"), row.get("head")) else { return Ok(reasons) };
     let before = files(&repo.state_root(a["output_state"].as_str().context("missing base output")?)?)?;
@@ -870,7 +914,15 @@ fn view_results(repo: &Repo, shared: &str) -> Result<Vec<String>> {
 mod tests {
     use super::*;
     fn definition(kind: Kind) -> Probe {
-        Probe { run: vec!["/bin/true".into()], outputs: vec!["out".into()], kind, noise: 0.05, fail_over: None }
+        Probe {
+            run: vec!["/bin/true".into()],
+            outputs: vec!["out".into()],
+            kind,
+            noise: 0.05,
+            fail_over: None,
+            tolerance: default_tolerance(),
+            ignore_attributes: default_ignore_attributes(),
+        }
     }
     #[test]
     fn private_layer_outputs_require_all_project_readers() {
@@ -905,6 +957,28 @@ mod tests {
         ] {
             assert!(crate::oci::parse(&format!("[probe.test]\n{tail}")).is_err(), "{tail}");
         }
+    }
+    #[test]
+    fn screenshot_settings_keep_existing_definition_identity() {
+        let old = json!({"run":["true"],"outputs":["out"],"kind":"files","noise":0.05});
+        let probe: Probe = serde_json::from_value(old.clone()).unwrap();
+        assert_eq!(probe.tolerance, 8);
+        assert_eq!(serde_json::to_value(&probe).unwrap(), old);
+        for tolerance in ["-1", "256", "1.5"] {
+            assert!(crate::oci::parse(&format!(
+                "[probe.screen]\nrun=['true']\noutputs=['out']\nkind='screenshots'\ntolerance={tolerance}"
+            ))
+            .is_err());
+        }
+        let probe = crate::oci::parse(
+            "[probe.screen]\nrun=['true']\noutputs=['out']\nkind='screenshots'\ntolerance=0\nignore_attributes=[]",
+        )
+        .unwrap()
+        .probe
+        .remove("screen")
+        .unwrap();
+        assert_eq!(probe.tolerance, 0);
+        assert!(probe.ignore_attributes.is_empty());
     }
     #[test]
     fn queue_limits_reject_only_growth_strictly_over_the_limit() {
