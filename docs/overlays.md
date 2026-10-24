@@ -369,6 +369,20 @@ are in `tests/t16-overlays.sh`; the model is in `src/overlay.rs`.
 | `layr overlay use [<name>...]`                              | Without names: the stack of the current line. With names: the stack, bottom first; each overlay takes its newest state for this line. `--add` and `--remove` change one overlay and keep the others; `--none` clears the stack. The owner of the line only, who must read each overlay. The overlay files come into the folder or leave it; a local change in the way refuses (`-f` overwrites). |
 | `layr overlay move [--purge] <name> <paths>...`             | The files (a folder: all files below it) go to the overlay at the next named save, which takes them from the working folder as they are then. The move waits for that named save whatever happens to the index; `--cancel [<paths>]` drops it. The line shows the overlay first if it did not. `--purge` deletes the automatic states of the line that hold the files. |
 | `layr overlay log\|show\|diff\|grep\|ls-files\|blame <name> [<args>]` | The command on the overlay's own history, as a reader: at the overlay line of the current line, else the caller's, else the owner's. `layr --project <project>%<name>` names an overlay too; it takes only reading commands. |
+| `layr overlay show <name> --json` | Metadata for a reader: name, hidden flag, readers with principal and kind, key manager machine UUIDs, signed epochs, patterns, peers, and current state ID. Person principals omit their age recipient. |
+| `layr overlay log <name> --ops [--json]` | All operations from the overlay's own signed records, newest first. JSON is an array with the CLI operation name, actor, time and record ID. Payloads and key material are omitted. |
+
+The metadata JSON fields are `name`, `hidden`, `readers`, `managers`, `epochs`, `patterns`,
+`peers`, and `state`. Readers use canonical principals and kinds `user`, `group`, `everyone`,
+`machine`, or `person`. Each epoch has `number`, `id`, `time` in milliseconds and `machine`.
+Numbers start at 1 in signed key record application order (time, machine, sequence), rather
+than UUID order. A later signed record for the same epoch ID gets its own number. `reason`
+appears only if the signed record contains it. Routing patterns are not built, so `patterns`
+defaults to `[]`. `peers` is the configured machine array, or null for the default peer policy.
+`state` uses the same overlay line selection as the history commands and falls back to the
+empty root state when there is no overlay line. Hidden settings come from the overlay's
+own records. A non-reader gets the same bytes and exit code as for an overlay that never
+existed. The ordinary human history output stays unchanged.
 
 The other commands work on the line as a whole, as in section 2: `status`, `diff`, `add`, `rm`,
 `mv`, `restore`, `reset`, `save -m <message>`, `merge`, `log` of the line's shared history.

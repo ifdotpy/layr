@@ -171,3 +171,21 @@ Each version is compared with its own first parent. Changes to the base stay out
 Hidden overlays use follow mode. Only their readers see them in lists and reports.
 Use `layr overlay show-to-project <name>` to make one visible to project readers.
 This change is recorded and cannot be reversed.
+
+`layr overlay show <name> --json` writes an object with `name`, `hidden`, `readers`,
+`managers`, `epochs`, `patterns`, `peers`, and `state`. Each reader has a canonical
+`principal` and a `kind` (`user`, `group`, `everyone`, `machine`, or `person`). Person
+principals contain the login without the age recipient. Managers are machine UUIDs.
+Epochs have `number`, `id`, `time` (milliseconds), and `machine`; `reason` appears only
+when the signed key record contains it. Numbers start at 1 in signed key record application
+order (time, machine, sequence), including repeated records for the same epoch ID.
+`patterns` defaults to an empty array; routing patterns are not built. `peers` is the
+configured machine array, or null for the default peer policy. `state` is the head selected
+by the ordinary overlay history command, or the overlay's empty root state when it has no line.
+
+`layr overlay log <name> --ops [--json]` reads all signed operations from the overlay's
+own log, newest first. JSON writes an array of `op`, `actor`, `time` (milliseconds), and
+`id` (record UUID). Operation names use CLI words such as `state`, `park`, and `replay`.
+Both commands require overlay read access. A hidden overlay is indistinguishable from an
+absent overlay to a non-reader, including errors and exit status. Neither command prints
+key material or operation payloads. Without these flags, the existing state history output applies.

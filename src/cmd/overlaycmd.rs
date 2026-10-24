@@ -21,6 +21,8 @@ const USAGE: &str = "usage: layr overlay create <name> [--readers <principal>,..
        layr overlay managers <name> [machine:<id>...]
        layr overlay use [--add|--remove] <name>... | --none
        layr overlay move [--purge] <name> <path>... | --cancel [<path>...]
+       layr overlay show <name> --json
+       layr overlay log <name> --ops [--json]
        layr overlay log|show|diff|grep|ls-files|blame <name> [<args>]";
 
 pub fn overlay(ctx: &Ctx, args: &[String]) -> Result<i32> {
@@ -34,6 +36,8 @@ pub fn overlay(ctx: &Ctx, args: &[String]) -> Result<i32> {
         "managers" => managers(ctx, &rest),
         "use" => use_cmd(ctx, &rest),
         "move" => move_cmd(ctx, &rest),
+        "show" if rest.iter().take_while(|s| s.as_str() != "--").any(|s| s == "--json") => show_json(ctx, &rest),
+        "log" if rest.iter().take_while(|s| s.as_str() != "--").any(|s| s == "--ops") => operations(ctx, &rest),
         "log" | "show" | "diff" | "grep" | "ls-files" | "blame" | "rev-parse" => read(ctx, sub, &rest),
         _ => Err(exit(128, USAGE)),
     }
@@ -318,6 +322,109 @@ fn visible_info(ctx: &Ctx, repo: &Repo, name: &str) -> Result<crate::overlay::In
         return Err(exit(1, format!("error: no overlay '{name}' in project {}", repo.p.name)));
     }
     Ok(info)
+}
+
+/// Public metadata only: never serialize a complete key or operation payload.
+fn reader_detail(principal: &str) -> serde_json::Value {
+    let kind = match principal.split_once(':').map(|(kind, _)| kind) {
+        Some("user") => "user",
+        Some("group") => "group",
+        Some("machine") => "machine",
+        Some("person") => "person",
+        _ => "everyone",
+    };
+    // Person policy entries include an age recipient; the login alone identifies the reader.
+    let principal = if kind == "person" { principal.split('=').next().unwrap_or(principal) } else { principal };
+    serde_json::json!({"principal":principal,"kind":kind})
+}
+
+fn epoch_details(records: &[Record]) -> Vec<serde_json::Value> {
+    records
+        .iter()
+        .filter(|r| r.op == "overlay.key")
+        .enumerate()
+        .map(|(index, r)| {
+            let mut row = serde_json::json!({"number":index + 1,"id":r.data["epoch"],"time":r.time,"machine":r.machine});
+            if let Some(reason) = r.data.get("reason") {
+                row["reason"] = reason.clone();
+            }
+            row
+        })
+        .collect()
+}
+
+fn operation_detail(r: &Record) -> serde_json::Value {
+    serde_json::json!({"id":r.id,"op":super::admin::operation_name(&r.op),"actor":r.actor,"time":r.time})
+}
+
+/// Signed records in their application order, independent of UUID spelling and machine export order.
+fn own_records(repo: &Repo) -> Result<Vec<Record>> {
+    repo.p.db.all_lines()?.iter().map(|line| Ok(crate::oplog::parse_line(line, None)?.record)).collect()
+}
+
+fn show_json(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    let a = parse(&Spec::new().flag("--json"), args)?;
+    if a.pos.len() != 1 || !a.paths.is_empty() {
+        return Err(exit(128, USAGE));
+    }
+    let name = &a.pos[0];
+    let h = here(ctx)?;
+    let info = visible_info(ctx, &h.repo, name)?;
+    let orepo = Repo::open(ctx, &format!("{}%{name}", h.repo.p.name))?;
+    let records = own_records(&orepo)?;
+    let readers: Vec<_> = orepo
+        .policy()
+        .access
+        .iter()
+        .filter(|(_, role)| **role >= Role::Reader)
+        .map(|(principal, _)| reader_detail(principal))
+        .collect();
+    let setting = |suffix: &str| -> Result<Option<serde_json::Value>> {
+        let key = format!("overlay.{name}.{suffix}");
+        if info.hidden {
+            orepo.p.db.overlay_config(&key)
+        } else {
+            h.repo.p.config_value(&key)
+        }
+    };
+    let state = overlay_line(ctx, &h.repo, h.line.as_ref(), &info, name, &orepo)?.map(|l| l.head).unwrap_or(info.root);
+    let value = serde_json::json!({
+        "name":name,"hidden":info.hidden,"readers":readers,
+        "managers":crate::overlay_managers::of(&h.repo, name)?.machines,
+        "epochs":epoch_details(&records),
+        "patterns":setting("patterns")?.unwrap_or_else(|| serde_json::json!([])),
+        "peers":setting("peers")?,"state":state,
+    });
+    outln!(ctx, "{}", serde_json::to_string(&value)?);
+    Ok(0)
+}
+
+fn operations(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    let a = parse(&Spec::new().flag("--ops").flag("--json"), args)?;
+    if a.pos.len() != 1 || !a.paths.is_empty() {
+        return Err(exit(128, USAGE));
+    }
+    let name = &a.pos[0];
+    let h = here(ctx)?;
+    visible_info(ctx, &h.repo, name)?;
+    let orepo = Repo::open(ctx, &format!("{}%{name}", h.repo.p.name))?;
+    let records = own_records(&orepo)?;
+    if a.has("--json") {
+        let rows: Vec<_> = records.iter().rev().map(operation_detail).collect();
+        outln!(ctx, "{}", serde_json::to_string(&rows)?);
+    } else {
+        for r in records.iter().rev() {
+            outln!(
+                ctx,
+                "{} {} {} {}",
+                r.id,
+                super::history::fmt_date(r.time, "iso"),
+                r.actor.name,
+                super::admin::operation_name(&r.op)
+            );
+        }
+    }
+    Ok(0)
 }
 
 fn show_to_project(ctx: &Ctx, args: &[String]) -> Result<i32> {
@@ -624,30 +731,41 @@ fn move_cmd(ctx: &Ctx, args: &[String]) -> Result<i32> {
     Ok(0)
 }
 
+fn overlay_line(
+    ctx: &Ctx,
+    repo: &Repo,
+    line: Option<&crate::model::Line>,
+    info: &crate::overlay::Info,
+    name: &str,
+    orepo: &Repo,
+) -> Result<Option<crate::model::Line>> {
+    // The overlay line of the current line; else the caller's own line, else the owner's.
+    let mut names = Vec::new();
+    if let Some(l) = line {
+        if repo.layers(l)?.iter().any(|x| x.overlay == name) {
+            names.push(Repo::overlay_line_name(info, &l.id, l.owner));
+        }
+    }
+    if info.hidden {
+        for line in orepo.lines()? {
+            names.push(line.name);
+        }
+    }
+    names.push(format!("user-{}", ctx.caller.uid));
+    names.push(format!("user-{}", info.owner));
+    Ok(names.into_iter().find_map(|n| orepo.p.db.line_by_name(&n).ok().flatten()))
+}
+
 /// A reading command on an overlay's history, as a reader of the overlay: `layr <cmd>` in the
 /// overlay's own project, at the overlay line of the current line (or of the caller).
 fn read(ctx: &Ctx, cmd: &str, args: &[String]) -> Result<i32> {
     let name = args.first().ok_or_else(|| exit(128, USAGE))?.clone();
     let h = here(ctx)?;
     let info = visible_info(ctx, &h.repo, &name)?;
-    // The overlay line of the current line; else the caller's own line, else the owner's.
-    let mut names = Vec::new();
-    if let Some(l) = &h.line {
-        if h.repo.layers(l)?.iter().any(|x| x.overlay == name) {
-            names.push(Repo::overlay_line_name(&info, &l.id, l.owner));
-        }
-    }
-    if info.hidden {
-        for line in h.repo.overlay_repo(&name)?.lines()? {
-            names.push(line.name);
-        }
-    }
-    names.push(format!("user-{}", ctx.caller.uid));
-    names.push(format!("user-{}", info.owner));
     let pname = format!("{}%{name}", h.repo.p.name);
     // The overlay's own policy decides: a user who does not read it is refused here.
     let orepo = Repo::open(ctx, &pname)?;
-    let olname = names.into_iter().find(|n| orepo.p.db.line_by_name(n).ok().flatten().is_some());
+    let olname = overlay_line(ctx, &h.repo, h.line.as_ref(), &info, &name, &orepo)?.map(|l| l.name);
     let mut env = ctx.env.clone();
     env.insert("LAYR_PROJECT".into(), pname);
     match olname {
@@ -668,4 +786,53 @@ fn read(ctx: &Ctx, cmd: &str, args: &[String]) -> Result<i32> {
     let r = super::run(&sub, &argv);
     let _ = sub.out.borrow_mut().flush();
     r
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn epoch_numbers_follow_signed_key_records_and_reasons_are_not_invented() {
+        let mut first = Record::new("overlay.key");
+        first.time = 100;
+        first.machine = "manager".into();
+        first.data = json!({"epoch":"z-first","recipient":"key material"});
+        let mut second = first.clone();
+        second.time = 200;
+        second.data = json!({"epoch":"a-second","reason":"reader removed","identity":"secret"});
+        let mut refresh = second.clone();
+        refresh.time = 300;
+        refresh.data = json!({"epoch":"a-second"});
+        let records = [Record::new("project"), first, Record::new("config"), second, refresh];
+        assert_eq!(
+            epoch_details(&records),
+            vec![
+                json!({"number":1,"id":"z-first","time":100,"machine":"manager"}),
+                json!({"number":2,"id":"a-second","time":200,"machine":"manager","reason":"reader removed"}),
+                json!({"number":3,"id":"a-second","time":300,"machine":"manager"}),
+            ]
+        );
+    }
+
+    #[test]
+    fn operation_output_only_contains_public_fields_and_cli_names() {
+        for (signed, plain) in [("commit", "state"), ("rebase.step", "replay.step"), ("overlay.key", "overlay.key")] {
+            let mut r = Record::new(signed);
+            r.data = json!({"identity":"secret","recipient":"key material"});
+            assert_eq!(operation_detail(&r), json!({"id":r.id,"op":plain,"actor":r.actor,"time":r.time}));
+        }
+    }
+
+    #[test]
+    fn reader_details_identify_principals_without_key_material() {
+        for (principal, kind) in [("user:1000", "user"), ("group:1000", "group"), ("*", "everyone"), ("machine:id", "machine")] {
+            assert_eq!(reader_detail(principal), json!({"principal":principal,"kind":kind}));
+        }
+        assert_eq!(
+            reader_detail("person:reader@example.com=age1recipient"),
+            json!({"principal":"person:reader@example.com","kind":"person"})
+        );
+    }
 }

@@ -37,6 +37,9 @@ cd /tmp || exit 1
 # only its owner reads. main is protected; a commit that changes only overlays is the owner's.
 sh_in layr-o1 main "echo 'export KEYCHAIN=$SECRET' > .codex-keychain.envrc"
 ok "the owner makes an overlay" in_line layr-o1 main overlay create keychain -q
+root_state=$(l --project sap config overlay.keychain | python3 -c 'import json,sys; print(json.load(sys.stdin)["root"])')
+details=$(in_line layr-o1 main overlay show keychain --json)
+ok "an unused overlay reports its root state and no epochs" python3 -c 'import json,sys; row=json.loads(sys.argv[1]); assert row["state"]==sys.argv[2] and row["epochs"]==[] and len(row["managers"])==1 and not row["hidden"]' "$details" "$root_state"
 eq "it lists with its mode and reader" "keychain	shared	owner layr-o1	readers layr-o1" "$(in_line layr-o1 main overlay list | sed 's/^ *//')"
 out=$(in_line layr-o1 main overlay move keychain .codex-keychain.envrc)
 has "move names the next commit" "move to overlay keychain at the next state: .codex-keychain.envrc" "$out"
@@ -48,6 +51,7 @@ eq "main did not move" "1" "$(in_line layr-o1 main log --oneline | wc -l)"
 eq "the owner's folder keeps the file" "export KEYCHAIN=$SECRET" "$(sh_in layr-o1 main cat .codex-keychain.envrc)"
 eq "and its status is clean" "" "$(in_line layr-o1 main status --porcelain)"
 eq "the overlay has the file" "export KEYCHAIN=$SECRET" "$(in_line layr-o1 main overlay show keychain head:.codex-keychain.envrc)"
+eq "overlay metadata reports the current history head" "$(in_line layr-o1 main overlay log keychain -n 1 --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')" "$(in_line layr-o1 main overlay show keychain --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["state"])')"
 no "the shared set does not" in_line layr-o1 main show head:.codex-keychain.envrc
 
 # 2. Another user's line from main has no trace of it.
@@ -68,6 +72,8 @@ has "a non-reader cannot read main's working content" "shows overlays that you d
 no "nor its index" in_line layr-o3 main diff --cached
 # The overlay's history: readers only, paths included.
 has "a non-reader cannot read the overlay's log" "may not read project sap%keychain" "$(in_line layr-o3 t3 overlay log keychain 2>&1)"
+no "a visible overlay still refuses metadata to a non-reader" in_line layr-o3 t3 overlay show keychain --json
+no "a visible overlay still refuses operations to a non-reader" in_line layr-o3 t3 overlay log keychain --ops --json
 no "nor show its files" in_line layr-o3 t3 overlay show keychain user-$(id -u layr-o1):.codex-keychain.envrc
 no "nor list its paths" in_line layr-o3 t3 overlay ls-files keychain
 no "nor through its project name" as layr-o3 $L --project sap%keychain --line user-$(id -u layr-o1) log

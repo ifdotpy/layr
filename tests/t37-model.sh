@@ -368,6 +368,46 @@ eq 'the fixture has exactly two lines' 2 "$(python3 -c 'import json,sys; print(l
 
 # A transfer result is appended after success and travels in the next exchange.
 # Capture CLI answers first, then publish exactly that record set for the model.
+for entry in secrets:visible hidden-golden:hidden-reader; do
+    name=${entry%:*}
+    label=${entry#*:}
+    l overlay show "$name" --json > "$T/cli/overlay-show-$label.json"
+    l overlay log "$name" --ops --json > "$T/cli/overlay-ops-$label.json"
+    l overlay log "$name" --ops > "$T/cli/overlay-ops-$label.txt"
+done
+ok 'overlay CLI goldens match the overlays own signed records for visible and hidden readers' python3 - "$LAYR_ROOT/projects/model-golden" "$T/cli" <<'PYOVERLAYS'
+import json, sqlite3, sys
+from pathlib import Path
+project, cli = map(Path, sys.argv[1:])
+for name, label in [('secrets', 'visible'), ('hidden-golden', 'hidden-reader')]:
+    db = sqlite3.connect((project / 'meta/overlays' / name / 'meta/db/layr.sqlite').as_uri() + '?mode=ro', uri=True)
+    records = [json.loads(line)['r'] for line, in db.execute('select raw from records order by time, machine, seq')]
+    show = json.loads((cli / f'overlay-show-{label}.json').read_text())
+    ops = json.loads((cli / f'overlay-ops-{label}.json').read_text())
+    assert set(show) == {'name', 'hidden', 'readers', 'managers', 'epochs', 'patterns', 'peers', 'state'}
+    assert show['name'] == name and show['hidden'] == (label == 'hidden-reader')
+    access = next(r['data']['config']['access'] for r in reversed(records) if 'access' in r.get('data', {}).get('config', {}))
+    assert show['readers'] == [{'principal': p.split('=')[0] if p.startswith('person:') else p,
+        'kind': p.split(':')[0] if ':' in p else 'everyone'} for p, role in sorted(access.items()) if role in ['reader', 'writer', 'maintainer', 'admin']]
+    assert len(show['managers']) == 1 and show['managers'][0] == records[0]['machine']
+    keys = [r for r in records if r['op'] == 'overlay.key']
+    assert keys and show['epochs'] == [dict(number=i, id=r['data']['epoch'], time=r['time'], machine=r['machine'],
+        **({'reason': r['data']['reason']} if 'reason' in r['data'] else {})) for i, r in enumerate(keys, 1)]
+    assert show['patterns'] == [] and show['peers'] is None
+    assert show['state'] in {head for head, in db.execute('select head from lines where deleted=0')}
+    names = {'commit': 'state', 'stash': 'park', 'cherry-pick': 'pick', 'rebase': 'replay', 'revert': 'invert'}
+    def plain(op):
+        head, dot, tail = op.partition('.')
+        return names.get(head, head) + dot + tail
+    assert ops == [dict(op=plain(r['op']), actor=r['actor'], time=r['time'], id=r['id']) for r in reversed(records)]
+    human = (cli / f'overlay-ops-{label}.txt').read_text().splitlines()
+    assert len(human) == len(ops)
+    assert all(line.startswith(op['id'] + ' ') and line.endswith(' ' + op['op']) for line, op in zip(human, ops))
+    # Recipient strings and key payloads must not cross the command boundary.
+    output = json.dumps(show) + json.dumps(ops) + '\n'.join(human)
+    assert all(r['data']['recipient'] not in output for r in keys)
+    db.close()
+PYOVERLAYS
 l push store -q
 
 (cd "$REPO" && cargo run -q -p layr-model --example store_golden -- "$T/archive" "$T/paper" "$T/model")
@@ -438,6 +478,9 @@ PYPAGES
 if [ -n "${LAYR_MODEL_FIXTURE_OUT:-}" ]; then
     mkdir -p "$LAYR_MODEL_FIXTURE_OUT"
     cp "$T/model/"*.json "$LAYR_MODEL_FIXTURE_OUT/"
+    # CLI contracts for the browser Session comparison, retained beside model fixtures.
+    cp "$T/cli/"overlay-{show,ops}-{visible,hidden-reader}.json "$LAYR_MODEL_FIXTURE_OUT/"
+    cp "$T/cli/"overlay-ops-{visible,hidden-reader}.txt "$LAYR_MODEL_FIXTURE_OUT/"
 fi
 if [ -n "${LAYR_MODEL_STORE_OUT:-}" ]; then
     mkdir -m 700 -p "$LAYR_MODEL_STORE_OUT"

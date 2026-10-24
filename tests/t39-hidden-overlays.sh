@@ -18,8 +18,8 @@ N=dict(base,LAYR_ROOT=str(root/'other/store'),LAYR_PERSON_DIR=str(root/'other-pe
 P=dict(base,LAYR_ROOT=str(root/'peer/store'))
 name='hidden-cobalt-731'
 checks=0
-def run(args,env=A,success=True):
- p=subprocess.run([binary,*args],env=env,cwd=root,text=True,capture_output=True,timeout=120)
+def run(args,env=A,success=True,raw=False):
+ p=subprocess.run([binary,*args],env=env,cwd=root,text=not raw,capture_output=True,timeout=120)
  if success: assert p.returncode==0,(args,p.returncode,p.stdout,p.stderr)
  return p
 def check(value,label):
@@ -152,8 +152,8 @@ for path in [root/'archive',*(root/'archive').rglob('*')]:
  os.chmod(path,0o777 if path.is_dir() else 0o644)
 socket=root/'daemon.sock';log=open(root/'daemon.log','w')
 daemon=subprocess.Popen([binary,'daemon','--socket',str(socket),'--tick','3600'],env=A,cwd=root,stdout=log,stderr=log)
-def person(user,args,success=True):
- out=subprocess.run(['runuser','-u',user,'--','env','LAYR_SOCKET='+str(socket),'LAYR_PROJECT=project','LAYR_LINE=main',str(root/'layr'),*args],cwd='/',capture_output=True,text=True,timeout=120)
+def person(user,args,success=True,raw=False):
+ out=subprocess.run(['runuser','-u',user,'--','env','LAYR_SOCKET='+str(socket),'LAYR_PROJECT=project','LAYR_LINE=main',str(root/'layr'),*args],cwd='/',capture_output=True,text=not raw,timeout=120)
  if success: assert out.returncode==0,(user,args,out.stdout,out.stderr)
  return out
 try:
@@ -164,6 +164,21 @@ try:
  for args in [['overlay','list'],['overlay','list','--json'],['overlay','use'],['config','--list','--json'],['op','log','--all','-n','100000','--json'],['log','--json'],['fsck'],['push','archive','--json']]:
   result=person('layr-hidden-other',args)
   check(absent(result.stdout+result.stderr,ids),'a non-reader admin has no hidden trace: '+' '.join(args))
+
+ # This name has never existed in N's project. Compare actual bytes, without text decoding.
+ for args in [['overlay','show',name,'--json'],['overlay','log',name,'--ops'],['overlay','log',name,'--ops','--json']]:
+  missing=run(['--project','project',*args],N,False,raw=True)
+  denied=person('layr-hidden-other',args,False,raw=True)
+  check(missing.returncode!=0 and (denied.returncode,denied.stdout,denied.stderr)==(missing.returncode,missing.stdout,missing.stderr),
+   'hidden non-reader matches an overlay that never existed byte for byte: '+' '.join(args))
+ details=json.loads(person('layr-hidden-reader',['overlay','show',name,'--json']).stdout)
+ check(details['name']==name and details['hidden'] and details['epochs'] and details['state'] in ids,
+  'the hidden reader sees metadata, signed epochs and the current state')
+ check({'principal':'person:'+R['LAYR_PERSON_LOGIN'],'kind':'person'} in details['readers'] and people[0]['recipient'] not in json.dumps(details),
+  'reader details identify a person without printing key material')
+ operations=json.loads(person('layr-hidden-reader',['overlay','log',name,'--ops','--json']).stdout)
+ check(any(row['op']=='overlay.key' for row in operations) and all(set(row)=={'op','actor','time','id'} for row in operations),
+  'the hidden reader sees operation metadata without signed payloads')
 
  # Compare the same line with and without its hidden overlay, including exit status and errors.
  commands=[['status'],['status','--json'],['diff'],['diff','--cached'],['diff','head'],
