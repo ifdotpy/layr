@@ -103,11 +103,11 @@ check('overlay secrets: peer is not allowed to hold it' in blocked['omitted'],'d
 check(not (pathlib.Path(C['LAYR_ROOT'])/'projects/project/meta/overlays/secrets').exists(),'an excluded peer receives no overlay project')
 # Peer B receives overlay states. C is explicitly allowed to hold them, but its service enforces readers.
 for who,env in [(b,B),(c,C)]:
- name='peer-'+who['id'][:8]
+ name='peer-'+who['id'][-8:]
  run(['remote','add',name,'ssh://test/project'])
  if who==c: run(['config','overlay.secrets.peers',json.dumps([b['id'],c['id']])])
  run(['sync',name,'--command','--','env','LAYR_ROOT='+env['LAYR_ROOT'],binary,'serve-peer','project'])
- check((pathlib.Path(env['LAYR_ROOT'])/'projects/project/meta/overlays/secrets/meta/db/layr.sqlite').exists(),'peer '+who['id'][:8]+' receives the overlay project')
+ check((pathlib.Path(env['LAYR_ROOT'])/'projects/project/meta/overlays/secrets/meta/db/layr.sqlite').exists(),'peer '+who['id'][-8:]+' receives the overlay project')
 # A service on C must refuse the non-reader and permit the local user who reads the overlay.
 import shutil
 shutil.copy2(binary,root/'layr');os.chmod(root/'layr',0o755)
