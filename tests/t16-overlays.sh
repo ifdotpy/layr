@@ -232,7 +232,7 @@ no "not in the shared set" in_line layr-o1 f1 show head:private/draft.md
 # A line with uncommitted changes of overlay files is deleted only with -f.
 in_line layr-o1 f1 line new -q f3 f1
 sh_in layr-o1 f3 "echo x >> private/notes.md"
-has "a delete refuses" "uncommitted changes of overlay files" "$(in_line layr-o1 f1 line delete -D f3 2>&1)"
+has "a delete refuses" "unsaved changes of overlay files" "$(in_line layr-o1 f1 line delete -D f3 2>&1)"
 ok "with -f it deletes" in_line layr-o1 f1 line delete -D -f f3
 
 # 10. A file of the shared set moves into an overlay: the next commit takes it out of the shared

@@ -1,4 +1,4 @@
-//! Lines (branch, switch, checkout, adopt) and tags.
+//! Lines, adoption, removed folder-switch commands, and tags.
 
 use super::{exit, here};
 use crate::args::{parse, Spec};
@@ -32,30 +32,13 @@ fn line_json(repo: &crate::repo::Repo, line: &crate::model::Line) -> serde_json:
 
 pub fn line(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let (sub, rest) = args.split_first().ok_or_else(|| exit(2, "usage: layr line new/list/delete/rename"))?;
-    let flag = match sub.as_str() {
-        "new" => None,
-        "list" => Some("--list"),
-        "delete" if rest.iter().any(|a| a == "-D") => Some("-D"),
-        "delete" => Some("--delete"),
-        "rename" if rest.iter().any(|a| a == "-M") => Some("-M"),
-        "rename" => Some("--move"),
-        _ => return Err(exit(2, "usage: layr line new/list/delete/rename")),
-    };
-    let mut argv = rest.to_vec();
-    if let Some(flag) = flag {
-        argv.insert(0, flag.to_string());
-    } else {
-        let spec =
-            Spec::new().value("--owner").value("--count").flag("--json").flag("--path").flag("-q|--quiet").flag("-f|--force");
-        let a = parse(&spec, rest)?;
-        if !(1..=2).contains(&a.pos.len()) {
-            return Err(exit(2, "usage: layr line new <name> [<rev>] [--count N]"));
-        }
+    if !matches!(sub.as_str(), "new" | "list" | "delete" | "rename") {
+        return Err(exit(2, "usage: layr line new/list/delete/rename"));
     }
-    branch(ctx, &argv)
+    line_command(ctx, rest, sub)
 }
 
-fn branch(ctx: &Ctx, args: &[String]) -> Result<i32> {
+fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
     let spec = Spec::new()
         .flag("-l|--list")
         .flag("-v|--verbose")
@@ -74,7 +57,28 @@ fn branch(ctx: &Ctx, args: &[String]) -> Result<i32> {
         .optional("--format")
         .value("--contains")
         .flag("-q|--quiet");
-    let a = parse(&spec, args)?;
+    let mut a = parse(&spec, args)?;
+    let delete = a.has("-d") || a.has("-D");
+    let rename = a.has("-m") || a.has("-M");
+    let list = a.has("-l") || a.has("--show-current");
+    if (delete && sub != "delete") || (rename && sub != "rename") || (list && sub != "list") {
+        return Err(exit(2, "Use 'layr line new', 'layr line list', 'layr line delete', or 'layr line rename'."));
+    }
+    match sub {
+        "new" if !(1..=2).contains(&a.pos.len()) => {
+            return Err(exit(2, "usage: layr line new <name> [<rev>] [--count N]"));
+        }
+        "list" => {
+            a.flags.insert("-l".into(), 1);
+        }
+        "delete" if !a.has("-D") => {
+            a.flags.insert("-d".into(), 1);
+        }
+        "rename" if !a.has("-M") => {
+            a.flags.insert("-m".into(), 1);
+        }
+        _ => {}
+    }
     if a.has("--count")
         && (!(1..=2).contains(&a.pos.len())
             || a.has("-d")

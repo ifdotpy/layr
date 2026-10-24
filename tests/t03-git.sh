@@ -115,6 +115,8 @@ h3=$(git rev-parse HEAD)
 l git push -q origin head-3
 eq "a push sends the commit that .git HEAD shows" "$h3" "$(git -C $R rev-parse head-3)"
 eq "and HEAD stays" "$h3" "$(git rev-parse HEAD)"
+ok "the Git bridge accepts HEAD as a push source" l git push -q origin HEAD:head-alias
+eq "the HEAD push publishes the current commit" "$h3" "$(git -C $R rev-parse head-alias)"
 
 # try: a temporary copy of a state, with that state's commit in its .git folder.
 l try -q head~1 -- sh -c 'git rev-parse HEAD; git status --porcelain; cat head.txt' > $T/try.out

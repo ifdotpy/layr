@@ -38,8 +38,11 @@ for reserved in HEAD head; do
     has "a ref cannot use $reserved" 'reserved revision name' "$(l ref set "$reserved" head 2>&1)"
 done
 BATCH=$(l line new batch-default --count 2 --json)
-eq 'batch creation uses the current head without a revision' "$S1" "$(printf '%s' "$BATCH" | python3 -c 'import json,sys; x=json.load(sys.stdin); assert len(x)==2; print(x[0]["head"]); assert x[0]["head"]==x[1]["head"]')"
-l line delete -D batch-default-1 batch-default-2 >/dev/null
+eq 'batch creation uses the current head without a revision' "$S1" "$(printf '%s' "$BATCH" | python3 -c 'import json,sys,uuid; x=json.load(sys.stdin); assert len(x)==2; h=uuid.UUID(x[0]["head"]).bytes; print((h[10:]+h[6:10]+h[:6]).hex()); assert x[0]["head"]==x[1]["head"]')"
+no 'line list cannot delete a line' l line list -D batch-default-1
+ok 'the list rejection keeps the line folder' test -d ../batch-default-1
+(cd ../batch-default-1 && echo grouped > grouped.txt && l add grouped.txt && l save -qm grouped)
+ok 'grouped -D deletes an unmerged line' l line delete -qD batch-default-1 batch-default-2
 echo first >> notes.txt
 l save -qam first
 S2=$(l rev-parse head)
@@ -159,14 +162,14 @@ echo local-auto >> notes.txt
 (cd ../auto-peer && echo peer-auto >> notes.txt)
 ok 'save --all-lines saves every line' l save -q --all-lines --note 'all line note'
 eq 'auto save keeps the named head' "$NAMED_HEAD" "$(l rev-parse head)"
-eq 'the peer keeps its named head' "$NAMED_HEAD" "$(l --line auto-peer rev-parse head)"
+eq 'the peer keeps its named head' "$NAMED_HEAD" "$(cd ../auto-peer && l rev-parse head)"
 eq 'the current auto state has its note' 'all line note' "$(l show -s --format=%s 'head@{0}')"
-eq 'the peer auto state has its note' 'all line note' "$(l --line auto-peer show -s --format=%s 'head@{0}')"
+eq 'the peer auto state has its note' 'all line note' "$(cd ../auto-peer && l show -s --format=%s 'head@{0}')"
 eq 'the current auto state has its bytes' local-auto "$(l show 'head@{0}:notes.txt' | tail -1)"
-eq 'the peer auto state has its bytes' peer-auto "$(l --line auto-peer show 'head@{0}:notes.txt' | tail -1)"
+eq 'the peer auto state has its bytes' peer-auto "$(cd ../auto-peer && l show 'head@{0}:notes.txt' | tail -1)"
 echo single-auto >> notes.txt
 ok 'save --note creates an auto state' l save -q --note 'single line note'
 eq 'a note does not move the named head' "$NAMED_HEAD" "$(l rev-parse head)"
 eq 'the new auto state has its note' 'single line note' "$(l show -s --format=%s 'head@{0}')"
-eq 'the other line keeps its auto state' 'all line note' "$(l --line auto-peer show -s --format=%s 'head@{0}')"
+eq 'the other line keeps its auto state' 'all line note' "$(cd ../auto-peer && l show -s --format=%s 'head@{0}')"
 finish

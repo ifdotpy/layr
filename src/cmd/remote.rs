@@ -274,7 +274,14 @@ pub mod git {
             None => ("HEAD".to_string(), h.line()?.name.clone()),
         };
         repo.require(ctx, "push").map_err(|e| exit(1, e.to_string()))?;
-        let state_id = revs::resolve(repo, line.as_ref(), &rev)?;
+        // The Git bridge keeps Git revision spelling at its public boundary.
+        let source = match rev.strip_prefix("HEAD") {
+            Some(suffix) if suffix.is_empty() || suffix.starts_with(['~', '^']) || suffix.starts_with("@{") => {
+                format!("head{suffix}")
+            }
+            _ => rev.clone(),
+        };
+        let state_id = revs::resolve(repo, line.as_ref(), &source)?;
         crate::secrets::check_history(ctx, repo, &state_id)?;
         let state = repo.state(&state_id)?;
         if !state.conflicts.is_empty() {
