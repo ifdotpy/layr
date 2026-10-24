@@ -154,7 +154,9 @@ impl Layered {
                 return Ok(None);
             };
             match fs::symlink_metadata(&p) {
-                Ok(_) => return Ok(Some(p)),
+                // On a volume that ignores case, `readme` also finds `README`: another path.
+                Ok(_) if crate::fsutil::exact_metadata(&p, rel).is_some() => return Ok(Some(p)),
+                Ok(_) => continue,
                 Err(e) if not_found(&e) => continue,
                 Err(e) => return Err(e.into()),
             }
@@ -280,7 +282,7 @@ fn clone_entry(from: &Path, to: &Path, m: &fs::Metadata) -> Result<()> {
 fn apply(layer: &Layer, dst: &Path) -> Result<()> {
     for r in &layer.removed {
         let p = dst.join(r);
-        if fs::symlink_metadata(&p).is_ok() {
+        if crate::fsutil::exact_metadata(&p, r).is_some() {
             open_parent(dst, r)?;
             apfs::delete_tree(&p)?;
         }
@@ -294,7 +296,7 @@ fn apply(layer: &Layer, dst: &Path) -> Result<()> {
             let child = if rel.is_empty() { n } else { format!("{rel}/{n}") };
             let lm = fs::symlink_metadata(layer.join(&child))?;
             let target = dst.join(&child);
-            match fs::symlink_metadata(&target) {
+            match crate::fsutil::exact_metadata(&target, &child).ok_or(()) {
                 Ok(dm) if lm.is_dir() && dm.is_dir() => {
                     dirs.push(child.clone());
                     visit(layer, dst, &child, dirs)?;
@@ -448,7 +450,9 @@ pub fn add_entries<'a>(
 ) -> Result<()> {
     let mut dirs: BTreeSet<String> = BTreeSet::new();
     // The ancestors of written and removed paths are folders of the layer (layer rule 5).
-    let mut container = |dirs: &mut BTreeSet<String>, rel: &str| -> Result<()> {
+    // `diff` compares exact names, so a removed path and a written path never need the same
+    // folder in two cases: a folder renamed to another case is removed as a whole.
+    let container = |dirs: &mut BTreeSet<String>, rel: &str| -> Result<()> {
         for a in ancestors(rel) {
             if dirs.insert(a.to_string()) || fs::symlink_metadata(dst.join(a)).is_err() {
                 match fs::create_dir(dst.join(a)) {
@@ -475,7 +479,7 @@ pub fn add_entries<'a>(
         let copied = (|| -> Result<()> {
             let from = crate::fsutil::safe_join(src, k)?;
             let m = fs::symlink_metadata(&from)?;
-            if fs::symlink_metadata(&to).is_ok() {
+            if crate::fsutil::exact_metadata(&to, k).is_some() {
                 open_parent(dst, k)?;
                 apfs::delete_tree(&to)?;
             }
@@ -583,6 +587,10 @@ impl Layered {
                 break;
             }
             let dir = crate::fsutil::safe_join(&l.root, rel)?;
+            if !rel.is_empty() && fs::symlink_metadata(&dir).is_ok() && crate::fsutil::exact_metadata(&dir, rel).is_none() {
+                // Another case of this folder in this layer: another path.
+                continue;
+            }
             let rd = match fs::read_dir(&dir) {
                 Ok(r) => r,
                 Err(e) if not_found(&e) => continue,
@@ -606,10 +614,28 @@ impl Layered {
 }
 
 /// Make the ancestors of `rel` folders of a writable layer. New folders get owner `own`.
-fn containers(stage: &Path, rel: &str, own: Option<(u32, u32)>, dirs: &mut BTreeSet<String>) -> Result<()> {
+fn containers(stage: &Path, rel: &str, own: Option<(u32, u32)>, dirs: &mut BTreeSet<String>, write: bool) -> Result<()> {
     for a in ancestors(rel) {
         let d = crate::fsutil::safe_join(stage, a)?;
-        if fs::symlink_metadata(&d).is_err() {
+        if crate::fsutil::exact_metadata(&d, a).is_none() {
+            if fs::symlink_metadata(&d).is_ok() {
+                // On a volume that ignores case the layer holds another case of this folder
+                // (`Dir` for `dir`). For a removal, its mark alone hides the old content
+                // (`hides` reads only the marks), and a folder made below `Dir` would become
+                // part of the new tree: the removal gets no folders, an exception to the layer
+                // rule. For a write, the other folder must be empty: then it goes.
+                if !write {
+                    return Ok(());
+                }
+                let other = crate::fsutil::case_clash(&d).unwrap_or_default();
+                if fs::read_dir(&d)?.next().is_some() {
+                    bail!(
+                        "{a} and {other} differ only in case, and the volume of this store does not tell them apart.\nStage all paths of both folders together (layr add -A), or use a store on a case-sensitive APFS volume."
+                    );
+                }
+                open_parent(stage, a)?;
+                fs::remove_dir(&d)?;
+            }
             open_parent(stage, a)?;
             fs::create_dir(&d)?;
             if let Some((u, g)) = own {
@@ -631,18 +657,21 @@ pub fn stage_entries(index: &Layered, src: &Path, paths: &BTreeSet<String>, own:
     let mut removed = index.layers[0].removed.clone();
     let mut dirs: BTreeSet<String> = BTreeSet::new();
     let mut gone: Vec<String> = Vec::new();
-    for p in paths {
+    // Removals first: on a volume that ignores case, `dir` must leave before `Dir` comes.
+    let present = |p: &String| crate::fsutil::safe_join(src, p).ok().and_then(|f| crate::fsutil::exact_metadata(&f, p)).is_some();
+    let (gone_first, written): (Vec<&String>, Vec<&String>) = paths.iter().partition(|p| !present(p));
+    for p in gone_first.into_iter().chain(written) {
         if p.is_empty() {
             continue;
         }
         // A path below a folder that became a link is a deletion (`copy_selected`).
         let from = crate::fsutil::safe_join(src, p).ok();
-        let new = from.as_ref().and_then(|f| fs::symlink_metadata(f).ok());
+        let new = from.as_ref().and_then(|f| crate::fsutil::exact_metadata(f, p));
         // Never follow a link of the index: a path below one is already gone.
         let Ok(at) = crate::fsutil::safe_join(&stage, p) else {
             continue;
         };
-        if fs::symlink_metadata(&at).is_ok() {
+        if crate::fsutil::exact_metadata(&at, p).is_some() {
             open_parent(&stage, p)?;
             apfs::delete_tree(&at)?;
         }
@@ -650,7 +679,7 @@ pub fn stage_entries(index: &Layered, src: &Path, paths: &BTreeSet<String>, own:
         let (Some(m), Some(from)) = (new, from) else {
             if old.is_some() {
                 removed.insert(p.clone());
-                containers(&stage, p, own, &mut dirs)?;
+                containers(&stage, p, own, &mut dirs, false)?;
             }
             gone.push(p.clone());
             continue;
@@ -658,7 +687,7 @@ pub fn stage_entries(index: &Layered, src: &Path, paths: &BTreeSet<String>, own:
         if old.as_ref().is_some_and(|o| o.is_dir() != m.is_dir() || o.file_type().is_symlink() != m.file_type().is_symlink()) {
             removed.insert(p.clone());
         }
-        containers(&stage, p, own, &mut dirs)?;
+        containers(&stage, p, own, &mut dirs, true)?;
         if m.is_dir() {
             fs::create_dir(&at)?;
             dirs.insert(p.clone());
@@ -681,7 +710,7 @@ pub fn stage_entries(index: &Layered, src: &Path, paths: &BTreeSet<String>, own:
                 break;
             }
             let d = crate::fsutil::safe_join(&stage, a)?;
-            if fs::symlink_metadata(&d).is_ok() {
+            if crate::fsutil::exact_metadata(&d, a).is_some() {
                 open_parent(&stage, a)?;
                 apfs::delete_tree(&d)?;
             }
@@ -697,7 +726,7 @@ pub fn stage_entries(index: &Layered, src: &Path, paths: &BTreeSet<String>, own:
         let Ok(at) = crate::fsutil::safe_join(&stage, d) else {
             continue;
         };
-        if !fs::symlink_metadata(&at).map(|m| m.is_dir()).unwrap_or(false) {
+        if !crate::fsutil::exact_metadata(&at, d).map(|m| m.is_dir()).unwrap_or(false) {
             continue;
         }
         if let Some(b) = below.find(d).ok().flatten().filter(|b| fs::symlink_metadata(b).map(|m| m.is_dir()).unwrap_or(false)) {
@@ -722,7 +751,7 @@ pub fn extract<'a>(src: &Layered, paths: impl Iterator<Item = &'a str>, dst: &Pa
                 continue;
             }
             let to = dst.join(p);
-            if fs::symlink_metadata(&to).is_ok() {
+            if crate::fsutil::exact_metadata(&to, p).is_some() {
                 continue;
             }
             if let Some(parent) = to.parent() {
@@ -773,7 +802,11 @@ pub(crate) fn changed_paths(before: &BTreeMap<String, ScanEntry>, after: &BTreeM
 pub(crate) fn resync(src: &Path, dst: &Path, paths: &BTreeSet<String>) -> Result<()> {
     let mut dirs: BTreeSet<String> = BTreeSet::new();
     let mut whole: Vec<String> = Vec::new();
-    for p in paths {
+    let source =
+        |p: &str| crate::fsutil::safe_join(src, p).ok().and_then(|f| crate::fsutil::exact_metadata(&f, p).map(|m| (f, m)));
+    // Removals first: on a volume that ignores case, `readme` must go before `README` comes.
+    let (gone, kept): (Vec<_>, Vec<_>) = paths.iter().map(|p| (p, source(p))).partition(|(p, f)| !p.is_empty() && f.is_none());
+    for (p, from) in gone.into_iter().chain(kept) {
         if p.is_empty() {
             dirs.insert(String::new());
             continue;
@@ -785,15 +818,14 @@ pub(crate) fn resync(src: &Path, dst: &Path, paths: &BTreeSet<String>) -> Result
         let Ok(at) = crate::fsutil::safe_join(dst, p) else {
             continue;
         };
-        let from = crate::fsutil::safe_join(src, p).ok().and_then(|f| fs::symlink_metadata(&f).ok().map(|m| (f, m)));
-        let old = fs::symlink_metadata(&at).ok();
+        let old = crate::fsutil::exact_metadata(&at, p);
         if let (Some((_, m)), Some(o)) = (&from, &old) {
             if m.is_dir() && o.is_dir() {
                 dirs.insert(p.clone());
                 continue;
             }
         }
-        if !fs::symlink_metadata(dst.join(parent_of(p))).map(|m| m.is_dir()).unwrap_or(false) {
+        if !crate::fsutil::exact_metadata(&dst.join(parent_of(p)), parent_of(p)).is_some_and(|m| m.is_dir()) {
             continue;
         }
         open_parent(dst, p)?;
@@ -816,8 +848,8 @@ pub(crate) fn resync(src: &Path, dst: &Path, paths: &BTreeSet<String>) -> Result
         let (Ok(f), Ok(t)) = (crate::fsutil::safe_join(src, d), crate::fsutil::safe_join(dst, d)) else {
             continue;
         };
-        if fs::symlink_metadata(&f).map(|m| m.is_dir()).unwrap_or(false)
-            && fs::symlink_metadata(&t).map(|m| m.is_dir()).unwrap_or(false)
+        if crate::fsutil::exact_metadata(&f, d).is_some_and(|m| m.is_dir())
+            && crate::fsutil::exact_metadata(&t, d).is_some_and(|m| m.is_dir())
         {
             copy_dir_meta(&f, &t, d.is_empty())?;
         }

@@ -271,7 +271,7 @@ impl<'a> Project<'a> {
             #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
             bail!("{} is not on btrfs", store.projects_dir().display());
             #[cfg(target_os = "macos")]
-            bail!("{} is not on case-sensitive APFS", store.projects_dir().display());
+            bail!("{} is not on APFS", store.projects_dir().display());
             #[cfg(feature = "overlayfs")]
             bail!("OverlayFS requires a local store and mount permission");
         }
@@ -318,7 +318,7 @@ impl<'a> Project<'a> {
             #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
             bail!("{} is not on btrfs", store.projects_dir().display());
             #[cfg(target_os = "macos")]
-            bail!("{} is not on case-sensitive APFS", store.projects_dir().display());
+            bail!("{} is not on APFS", store.projects_dir().display());
             #[cfg(feature = "overlayfs")]
             bail!("OverlayFS requires a local store and mount permission");
         }

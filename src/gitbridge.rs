@@ -477,6 +477,46 @@ pub fn import_commit(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str, author
         }
         found
     };
+    // On a store volume that ignores case, README and Readme would become one file.
+    #[cfg(target_os = "macos")]
+    if !crate::sys::case_sensitive(&repo.p.work_dir()) {
+        use std::ffi::{OsStr, OsString};
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+        // Names stay bytes up to the check: a folder name that is not UTF-8 must still list.
+        let lines = |args: &[OsString]| -> Result<Vec<Vec<u8>>> {
+            let out = base_cmd(&s).args(args).output()?;
+            if !out.status.success() {
+                bail!("git {} failed: {}", args[0].to_string_lossy(), String::from_utf8_lossy(&out.stderr));
+            }
+            Ok(out.stdout.split(|b| *b == 0).filter(|x| !x.is_empty()).map(<[u8]>::to_vec).collect())
+        };
+        let args = |a: &[&str]| -> Vec<OsString> { a.iter().map(OsString::from).collect() };
+        let names = match &prev {
+            // The earlier state passed this check: only an added path can collide, with an
+            // entry of its own folder or of a folder above it.
+            Some((_, pc)) => {
+                let added = lines(&args(&["diff", "--name-only", "-z", "--no-renames", "--diff-filter=A", pc, commit]))?;
+                let mut dirs: std::collections::BTreeSet<Vec<u8>> = Default::default();
+                for a in &added {
+                    for (i, _) in a.iter().enumerate().filter(|(_, b)| **b == b'/') {
+                        dirs.insert(a[..=i].to_vec());
+                    }
+                }
+                let mut names =
+                    if added.is_empty() { Vec::new() } else { lines(&args(&["ls-tree", "-z", "--name-only", commit]))? };
+                let dirs: Vec<&Vec<u8>> = dirs.iter().collect();
+                for chunk in dirs.chunks(500) {
+                    let mut a = args(&["ls-tree", "-z", "--name-only", commit, "--"]);
+                    a.extend(chunk.iter().map(|d| OsStr::from_bytes(d).to_os_string()));
+                    names.extend(lines(&a)?);
+                }
+                names
+            }
+            None => lines(&args(&["ls-tree", "-r", "-t", "-z", "--name-only", commit]))?,
+        };
+        let names: Vec<String> = names.into_iter().map(|n| OsString::from_vec(n).to_string_lossy().into_owned()).collect();
+        fsutil::refuse_case_collisions(&repo.p.work_dir(), names.iter().map(|n| n.as_str()))?;
+    }
     let work = repo.p.work_dir().join(ids::new_id());
     let res = (|| -> Result<StateRec> {
         let mut parents = Vec::new();

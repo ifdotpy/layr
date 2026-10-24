@@ -63,7 +63,7 @@ cmp_out "rev-parse HEAD:a.txt (a blob)" rev-parse HEAD:a.txt
 cmp_out "rev-parse HEAD: (the root tree)" rev-parse HEAD:
 cmp_out "rev-parse HEAD~1:gone.txt (a path of an older state)" rev-parse HEAD~1:gone.txt
 git_missing=$(cd $G && git rev-parse HEAD:gone.txt 2>&1 >/dev/null)
-eq "rev-parse head:gone.txt (a missing path) fails like git" "${git_missing//\'HEAD\'/\'head\'}" "$(cd $Lw && l rev-parse head:gone.txt 2>&1 >/dev/null)"
+eq "rev-parse head:gone.txt (a missing path) fails like git" "${git_missing/HEAD/head}" "$(cd $Lw && l rev-parse head:gone.txt 2>&1 >/dev/null)"
 # An edit of the same size in the same second still reaches the exported tree: the exported
 # index of the parent state has stat data for the file. Each round tries to stay in one second.
 cd $Lw; stale=0

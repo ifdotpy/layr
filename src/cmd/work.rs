@@ -1233,19 +1233,17 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 let wdir = repo.working(&line);
                 // Revert every tracked path; untracked and ignored files stay.
                 let own = repo.own(&line);
-                for c in changes::without_moves(changes::file_changes(&scan.path, &target_root)?) {
-                    if skip_path(&c.path) {
-                        continue;
-                    }
-                    if c.new.is_none() {
-                        if fsutil::lmeta(&index, &c.path).is_none() {
-                            continue;
-                        }
-                        fsutil::remove_entry(&wdir, &c.path)?;
-                    } else {
-                        fsutil::copy_entry(&target_root, &c.path, &wdir, &c.path, own)?;
-                    }
-                }
+                let list: Vec<_> = changes::without_moves(changes::file_changes(&scan.path, &target_root)?)
+                    .into_iter()
+                    .filter(|c| !skip_path(&c.path))
+                    .collect();
+                let gone: Vec<&str> = list
+                    .iter()
+                    .filter(|c| c.new.is_none() && fsutil::lmeta(&index, &c.path).is_some())
+                    .map(|c| c.path.as_str())
+                    .collect();
+                let write: Vec<&str> = list.iter().filter(|c| c.new.is_some()).map(|c| c.path.as_str()).collect();
+                fsutil::replace_entries(&target_root, &wdir, &gone, &write, own)?;
             }
         }
         _ => {

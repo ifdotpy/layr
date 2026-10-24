@@ -78,10 +78,10 @@ cd ..
 out=$(l rev-parse head:nope 2>&1 >/dev/null); rc=$?
 eq "rev-parse <rev>:<missing> exits 128" 128 "$rc"
 git_missing=$(git rev-parse HEAD:nope 2>&1 >/dev/null)
-eq "rev-parse <rev>:<missing> fails like git" "${git_missing//\'HEAD\'/\'head\'}" "$out"
+eq "rev-parse <rev>:<missing> fails like git" "${git_missing/HEAD/head}" "$out"
 cd src
 git_missing=$(git rev-parse HEAD:./nope 2>&1 >/dev/null)
-eq "rev-parse <rev>:./<missing> names the full path like git" "${git_missing//\'HEAD\'/\'head\'}" "$(l rev-parse head:./nope 2>&1 >/dev/null)"
+eq "rev-parse <rev>:./<missing> names the full path like git" "${git_missing/HEAD/head}" "$(l rev-parse head:./nope 2>&1 >/dev/null)"
 cd ..
 l rev-parse -q head:nope >/dev/null 2>&1; rc=$?
 eq "rev-parse -q <rev>:<missing> exits 1 quietly" 1 "$rc"

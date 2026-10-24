@@ -211,6 +211,7 @@ pub(super) fn import(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Optio
                     parent = p.parent();
                 }
             }
+            crate::fsutil::refuse_case_collisions(&stage, tree.files.keys().map(|k| k.as_str()))?;
             for (path, entry) in &tree.files {
                 let data = read(store, &identity, entry)?;
                 target.mkdirs_for(path, None)?;
@@ -493,7 +494,8 @@ mod tests {
     fn emit_desk_v1_fixture() {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
-        let output = std::env::var("LAYR_TEST_DESK_FIXTURE_DIR").expect("fixture directory");
+        // The fixture writer runs only from t21, which sets its folders.
+        let Ok(output) = std::env::var("LAYR_TEST_DESK_FIXTURE_DIR") else { return };
         let paper_file = std::env::var("LAYR_TEST_DESK_KEY_FILE").expect("fixture key path");
         let backend = super::super::backend::Backend::open(&format!("file://{output}")).unwrap();
         let identity = keys::generate_identity();

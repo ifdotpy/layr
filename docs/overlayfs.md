@@ -12,6 +12,7 @@ cargo build --release --locked --features overlayfs
 ```
 
 The store must be below a private mount. A shared parent mount prevents Linux from moving received trees into place.
+The store folder must not ignore case. OverlayFS does not accept folders with ext4 `casefold` (`chattr +F`), so Layr refuses them.
 The backend rejects that setup before it changes the store. Prepare a private bind mount for the store:
 
 ```sh

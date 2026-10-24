@@ -47,9 +47,22 @@ jobs:
         run: |
           export LAYR_OVERLAYFS_TEST_ROOT="/var/tmp/layr-overlayfs-ci"
           export LAYR="$RUNNER_TEMP/layr-overlayfs"
-          sudo env LAYR_OVERLAYFS_TEST_ROOT="$LAYR_OVERLAYFS_TEST_ROOT" "$UNIT_TESTS" --include-ignored
+          # Unit tests make stores below the temporary folder; /tmp is on a shared mount.
+          sudo env LAYR_OVERLAYFS_TEST_ROOT="$LAYR_OVERLAYFS_TEST_ROOT" TMPDIR="$LAYR_OVERLAYFS_TEST_ROOT" "$UNIT_TESTS" --include-ignored
           sudo env LAYR_OVERLAYFS_TEST_ROOT="$LAYR_OVERLAYFS_TEST_ROOT" LAYR="$LAYR" bash tests/overlayfs-local.sh
           sudo env LAYR_OVERLAYFS_TEST_ROOT="$LAYR_OVERLAYFS_TEST_ROOT" LAYR="$LAYR" bash tests/overlayfs-caches.sh
+          if [ "${{ matrix.filesystem }}" = ext4 ]; then
+            # A store in a folder that ignores case (ext4 casefold) is refused with a clear message.
+            truncate -s 64M "$RUNNER_TEMP/fold.img" && mkfs.ext4 -q -F -O casefold "$RUNNER_TEMP/fold.img"
+            sudo mkdir /var/tmp/layr-fold && sudo mount -o loop "$RUNNER_TEMP/fold.img" /var/tmp/layr-fold
+            sudo mount --make-private /var/tmp/layr-fold
+            sudo mkdir /var/tmp/layr-fold/f /var/tmp/layr-fold-src && sudo chattr +F /var/tmp/layr-fold/f
+            echo x | sudo tee /var/tmp/layr-fold-src/a >/dev/null
+            ! sudo env LAYR_ROOT=/var/tmp/layr-fold/f/store LAYR_AUTHOR_NAME=T LAYR_AUTHOR_EMAIL=t@x.invalid \
+              "$LAYR" init p --from /var/tmp/layr-fold-src -q 2> "$RUNNER_TEMP/fold.err"
+            grep "ignores case" "$RUNNER_TEMP/fold.err"
+            sudo umount /var/tmp/layr-fold
+          fi
           sudo env LAYR_OVERLAYFS_TEST_ROOT="$LAYR_OVERLAYFS_TEST_ROOT" LAYR="$LAYR" bash tests/run.sh t01-basic t02-merge t03-git t05-transfer t06-sync t07-service t08-gitcompat t11-security t13-access t16-overlays
       - name: Unmount the test filesystem
         if: always()

@@ -125,10 +125,309 @@ impl Src for crate::thin::Layered {
     }
 }
 
+/// On a volume that ignores case: the stored name of another entry that `path` finds, such as
+/// `README` for `readme`. `None` when `path` is free or names exactly that entry.
+#[cfg(any(target_os = "macos", feature = "overlayfs"))]
+pub fn case_clash(path: &Path) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let name = path.file_name()?;
+        let m = fs::symlink_metadata(path).ok()?;
+        if crate::sys::case_sensitive_dev(m.dev(), path) {
+            return None;
+        }
+        // A file with several links: the folder listing names the entries reliably.
+        if !m.is_dir() && m.nlink() > 1 {
+            let mut other = None;
+            for e in fs::read_dir(path.parent()?).ok()?.flatten() {
+                let n = e.file_name();
+                if n == name {
+                    return None;
+                }
+                if case_key(&n.to_string_lossy()) == case_key(&name.to_string_lossy()) {
+                    other = Some(n.to_string_lossy().into_owned());
+                }
+            }
+            return other;
+        }
+        let stored = crate::sys::stored_name(path)?;
+        (stored != name).then(|| stored.to_string_lossy().into_owned())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+/// Refuse to write `rel` below `root` when the volume ignores case and another entry (or a
+/// folder on the way) has the same name in another case: one would replace the other.
+pub fn refuse_case_clash(root: &Path, rel: &str) -> Result<()> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (root, rel);
+        Ok(())
+    }
+    #[cfg(target_os = "macos")]
+    refuse_case_clash_apfs(root, rel)
+}
+
+#[cfg(target_os = "macos")]
+fn refuse_case_clash_apfs(root: &Path, rel: &str) -> Result<()> {
+    if fs::symlink_metadata(root).map(|m| crate::sys::case_sensitive_dev(m.dev(), root)).unwrap_or(true) {
+        return Ok(());
+    }
+    let mut path = root.to_path_buf();
+    let mut done = String::new();
+    for part in rel.split('/').filter(|c| !c.is_empty()) {
+        path.push(part);
+        if !done.is_empty() {
+            done.push('/');
+        }
+        done.push_str(part);
+        if let Some(stored) = case_clash(&path) {
+            // A folder with another case that holds no files (removals can leave empty
+            // folders) holds nothing: it leaves.
+            let other = path.with_file_name(&stored);
+            if holds_no_files(&other, "", &|_| false) {
+                remove_empty_folders(&other)?;
+                continue;
+            }
+            let parent = done.rsplit_once('/').map(|(p, _)| format!("{p}/")).unwrap_or_default();
+            bail!(
+                "{done} and {parent}{stored} differ only in case, and the volume of this store does not tell them apart.\nRename one of them, or use a store on a case-sensitive APFS volume."
+            );
+        }
+        if fs::symlink_metadata(&path).is_err() {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// The form of a name that a volume that ignores case compares: APFS also ignores the Unicode
+/// normal form (NFC or NFD). Each character is folded alone, as Unicode case folding does;
+/// `str::to_lowercase` maps a final sigma by its position. A key that is too coarse only
+/// refuses more names; a key that is too fine would lose a file.
+#[cfg(target_os = "macos")]
+pub fn case_key(name: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    let fold = |c: char| match c {
+        'ς' => 'σ',
+        'ſ' => 's',
+        'ϐ' => 'β',
+        'ϑ' => 'θ',
+        'ϕ' => 'φ',
+        'ϖ' => 'π',
+        'ϰ' => 'κ',
+        'ϱ' => 'ρ',
+        'ϵ' => 'ε',
+        c => c,
+    };
+    name.nfd().flat_map(char::to_lowercase).map(fold).nfd().collect()
+}
+
+/// True when the entry `rel` below `root` holds no files: it leaves (`leaves(rel)`), or it is a
+/// folder whose entries all hold no files.
+#[cfg(target_os = "macos")]
+fn holds_no_files(root: &Path, rel: &str, leaves: &dyn Fn(&str) -> bool) -> bool {
+    if leaves(rel) {
+        return true;
+    }
+    let p = root.join(rel);
+    fs::symlink_metadata(&p).is_ok_and(|m| m.is_dir())
+        && fs::read_dir(&p).is_ok_and(|rd| {
+            rd.into_iter().all(|e| {
+                e.is_ok_and(|e| {
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    holds_no_files(root, &if rel.is_empty() { name } else { format!("{rel}/{name}") }, leaves)
+                })
+            })
+        })
+}
+
+#[cfg(target_os = "macos")]
+fn remove_empty_folders(path: &Path) -> Result<()> {
+    crate::sys::apfs_immutable(path, false)?;
+    for e in fs::read_dir(path)? {
+        remove_empty_folders(&e?.path())?;
+    }
+    fs::remove_dir(path)?;
+    Ok(())
+}
+
+/// Remove `gone` from `dst`, then copy `write` from `src` to the same paths.
+/// Removals go first: on a volume that ignores case, `readme` must leave before `README` comes.
+/// A clash that the removals do not clear (an untracked `dir/x` where `Dir/x` comes) is refused
+/// before anything changes.
+pub fn replace_entries(src: &Path, dst: &Path, gone: &[&str], write: &[&str], own: Option<(u32, u32)>) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    refuse_remaining_clashes(dst, gone, write)?;
+    for g in gone {
+        remove_entry(dst, g)?;
+    }
+    for w in write {
+        copy_entry(src, w, dst, w, own)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn refuse_remaining_clashes(dst: &Path, gone: &[&str], write: &[&str]) -> Result<()> {
+    if fs::symlink_metadata(dst).map(|m| crate::sys::case_sensitive_dev(m.dev(), dst)).unwrap_or(true) {
+        return Ok(());
+    }
+    let gone: std::collections::BTreeSet<&str> = gone.iter().copied().collect();
+    let leaves = |rel: &str| rel.match_indices('/').map(|(i, _)| &rel[..i]).chain([rel]).any(|a| gone.contains(a));
+    // Writes below one folder share its ancestors: check each once.
+    let mut checked: std::collections::HashSet<String> = Default::default();
+    for w in write {
+        let mut done = String::new();
+        for part in w.split('/').filter(|c| !c.is_empty()) {
+            let parent = done.clone();
+            if !done.is_empty() {
+                done.push('/');
+            }
+            done.push_str(part);
+            if !checked.insert(done.clone()) {
+                continue;
+            }
+            let path = dst.join(&done);
+            if let Some(stored) = case_clash(&path) {
+                let other = if parent.is_empty() { stored } else { format!("{parent}/{stored}") };
+                // After the removals, nothing but empty folders may stay there.
+                if !holds_no_files(dst, &other, &leaves) {
+                    bail!(
+                        "{done} and {other} differ only in case, and the volume of this store does not tell them apart.\nRename one of them, or use a store on a case-sensitive APFS volume."
+                    );
+                }
+                break;
+            }
+            if fs::symlink_metadata(&path).is_err() {
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Refuse a set of paths that a volume that ignores case would store as fewer entries, such
+/// as `README` and `Readme`, when `dst` is on such a volume. Ancestors count too.
+pub fn refuse_case_collisions<'a>(dst: &Path, paths: impl Iterator<Item = &'a str>) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        if crate::sys::case_sensitive(dst) {
+            return Ok(());
+        }
+        let mut seen: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> = Default::default();
+        for p in paths {
+            let mut prefix = String::new();
+            for part in p.split('/').filter(|c| !c.is_empty()) {
+                if !prefix.is_empty() {
+                    prefix.push('/');
+                }
+                prefix.push_str(part);
+                seen.entry(case_key(&prefix)).or_default().insert(prefix.clone());
+            }
+        }
+        let groups: Vec<String> =
+            seen.into_values().filter(|v| v.len() > 1).map(|v| v.into_iter().collect::<Vec<_>>().join(", ")).collect();
+        if !groups.is_empty() {
+            let shown: Vec<String> = groups.iter().take(10).map(|g| format!("  {g}")).collect();
+            bail!(
+                "these names differ only in case, and the volume of this store does not tell them apart:\n{}{}\nRename all but one of each group, or use a store on a case-sensitive APFS volume.",
+                shown.join("\n"),
+                if groups.len() > 10 { format!("\n  and {} more", groups.len() - 10) } else { String::new() }
+            );
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (dst, paths.count());
+        Ok(())
+    }
+}
+
 /// Metadata of `rel` below `root` without following a final link. `None` if absent.
 pub fn lmeta(root: &(impl Src + ?Sized), rel: &str) -> Option<Meta> {
     let p = root.at(rel).ok()?;
-    fs::symlink_metadata(p).ok().map(|m| meta_of(&m))
+    exact_metadata(&p, rel).map(|m| meta_of(&m))
+}
+
+/// Metadata of the entry at `path`, which is `rel` below some root, only when the volume
+/// stores exactly that name. On a volume that ignores case, `readme` also finds `README`;
+/// for Layr these are two paths.
+pub fn exact_metadata(path: &Path, rel: &str) -> Option<fs::Metadata> {
+    let m = fs::symlink_metadata(path).ok()?;
+    #[cfg(target_os = "macos")]
+    if !rel.is_empty() && !crate::sys::case_sensitive_dev(m.dev(), path) && !stored_exactly(path, rel, &m) {
+        return None;
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = rel;
+    Some(m)
+}
+
+/// True when the listing of folder `dir` has exactly `name`. The last listing is kept per
+/// thread while the folder stays the same: status checks each hard-linked file of a folder.
+#[cfg(target_os = "macos")]
+fn listed(dir: &Path, name: &std::ffi::OsStr) -> bool {
+    use std::cell::RefCell;
+    use std::collections::HashSet;
+    type Listing = (PathBuf, (u64, u64, i64, i64), HashSet<std::ffi::OsString>);
+    thread_local!(static LAST: RefCell<Option<Listing>> = const { RefCell::new(None) });
+    let Ok(m) = fs::symlink_metadata(dir) else {
+        return false;
+    };
+    // A new, removed or renamed entry changes the ctime of the folder; tools can set its mtime
+    // back, but not its ctime.
+    let key = (m.dev(), m.ino(), m.ctime(), m.ctime_nsec());
+    LAST.with_borrow_mut(|last| {
+        if !last.as_ref().is_some_and(|(d, k, _)| d == dir && *k == key) {
+            *last = None;
+            // A listing with an error is not kept.
+            let names = fs::read_dir(dir).and_then(|rd| rd.map(|e| e.map(|e| e.file_name())).collect::<std::io::Result<_>>());
+            let Ok(names) = names else {
+                return false;
+            };
+            *last = Some((dir.to_path_buf(), key, names));
+        }
+        last.as_ref().is_some_and(|(_, _, names)| names.contains(name))
+    })
+}
+
+/// True when the volume stores the last `rel` components of `path` with exactly these names.
+#[cfg(target_os = "macos")]
+fn stored_exactly(path: &Path, rel: &str, m: &fs::Metadata) -> bool {
+    // The kernel names a file with several links by one of them, maybe another one: check the
+    // name in the listing of its folder, and the folder by its own stored path.
+    if !m.is_dir() && m.nlink() > 1 {
+        let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+            return false;
+        };
+        return listed(parent, name)
+            && rel.rsplit_once('/').is_none_or(|(dir, _)| {
+                stored_exactly(parent, dir, &fs::symlink_metadata(parent).ok().unwrap_or_else(|| m.clone()))
+            });
+    }
+    match crate::sys::stored_path(path) {
+        Some(stored) => {
+            let stored = stored.to_string_lossy();
+            stored.ends_with(&format!("/{rel}")) || *stored == *rel
+        }
+        // Without the full path: compare each name.
+        None => {
+            let mut at = path.to_path_buf();
+            for part in rel.rsplit('/') {
+                if crate::sys::stored_name(&at).is_none_or(|n| n != part) {
+                    return false;
+                }
+                at.pop();
+            }
+            true
+        }
+    }
 }
 
 pub fn read_link(root: &(impl Src + ?Sized), rel: &str) -> Result<String> {
@@ -315,6 +614,12 @@ pub fn remove_entry(root: &Path, rel: &str) -> Result<()> {
     if rel.is_empty() {
         bail!("refusing to remove the root of {}", root.display());
     }
+    // On a volume that ignores case, `readme` also finds `README`: remove only this name.
+    if let Ok(p) = safe_join(root, rel) {
+        if fs::symlink_metadata(&p).is_ok() && exact_metadata(&p, rel).is_none() {
+            return Ok(());
+        }
+    }
     crate::tree::Tree::open(root)?.remove(rel)
 }
 
@@ -359,6 +664,7 @@ fn copy_entry_impl(
 ) -> Result<()> {
     let src = src_root.at(src_rel)?;
     let m = fs::symlink_metadata(&src).with_context(|| format!("stat {}", src.display()))?;
+    refuse_case_clash(dst_root, dst_rel)?;
     let t = crate::tree::Tree::open(dst_root)?;
     t.mkdirs_for(dst_rel, own)?;
     let ft = m.file_type();

@@ -19,7 +19,7 @@ l add -A && l save -qm ours
 cd $P/topic
 mv A.txt A2.txt; mkdir -p X; echo new > X/new.txt; rm M; ln -s t3 M; rm N; ln -s t3 N; chmod 755 S.sh
 rm F.txt; mkdir F.txt; echo inner > F.txt/inner; echo same > Same.txt; echo theirs > Diff.txt; mv Q.txt Qt.txt
-mv c.txt C.txt; rm -rf Y; sed -i 's/^z 1$/z 1 THEIRS/' Z.txt; echo w-theirs > W.txt
+mv c.txt c.tmp; mv c.tmp C.txt; rm -rf Y; sed -i 's/^z 1$/z 1 THEIRS/' Z.txt; echo w-theirs > W.txt
 l add -A && l save -qm theirs
 cd $P/main
 out=$(l merge topic 2>&1); rc=$?
@@ -37,7 +37,8 @@ has "5 file to folder vs modify: conflict" "F.txt (type change" "$C"
 no "6a both add the same file: no conflict" sh -c "echo '$C' | grep -q 'Same.txt'"
 has "6b both add different files: conflict" "Diff.txt (add/add)" "$C"
 has "7 rename/rename: conflict" "Q.txt (rename/rename" "$C"
-ok "8 case-only rename: applied" sh -c 'test -f C.txt && ! test -e c.txt'
+# Exact names: on a volume that ignores case, test -e c.txt also finds C.txt.
+ok "8 case-only rename: applied" sh -c 'ls | grep -qx C.txt && ! ls | grep -qx c.txt'
 no "9 folder deleted by theirs: removed" test -e Y
 ok "10 edits of different lines: merged" sh -c "grep -q 'z 1 THEIRS' Z.txt && grep -q 'z 9 OURS' Z.txt"
 has "11 ours deleted, theirs modified: conflict" "W.txt" "$C"

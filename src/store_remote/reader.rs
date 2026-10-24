@@ -192,6 +192,7 @@ impl<'a> Reader<'a> {
         Ok(data)
     }
     pub fn restore(&mut self, tree: &Tree, root: &std::path::Path) -> Result<usize> {
+        crate::fsutil::refuse_case_collisions(root, tree.files.keys().map(|k| k.as_str()))?;
         let target = crate::tree::Tree::open(root)?;
         for (path, entry) in &tree.files {
             let data = self.read(entry)?;
