@@ -307,10 +307,8 @@ impl<'a> Repo<'a> {
 
     /// The caller holds the project lock. Saving a descriptor never captures working files.
     pub fn save_view(&self, ctx: &Ctx, view: &View) -> Result<String> {
-        self.can_read(ctx)?;
-        view.validate()?;
+        self.check_view_access(ctx, view)?;
         let id = view.id()?;
-        self.check_view_read(ctx, view)?;
         let public = self.public_layers(&view.layers)?;
         if public.len() != view.layers.len() {
             for (position, layer) in view.layers.iter().enumerate() {
@@ -379,14 +377,22 @@ impl<'a> Repo<'a> {
         crate::fsutil::rename_tree(&work.path, dst)
     }
 
-    /// A descriptor may be read without its overlays; materialization checks every layer.
-    pub fn check_view_read(&self, ctx: &Ctx, view: &View) -> Result<()> {
+    /// Descriptor metadata remains usable after its source snapshots are collected.
+    fn check_view_access(&self, ctx: &Ctx, view: &View) -> Result<()> {
         self.can_read(ctx)?;
         view.validate()?;
         for layer in &view.layers {
             if !self.reads_overlay(&layer.overlay, ctx.caller.uid, ctx.caller.gid).unwrap_or(false) {
                 bail!("permission denied: you do not read overlay '{}'", layer.overlay);
             }
+        }
+        Ok(())
+    }
+
+    /// Materialization also requires every source snapshot to remain available.
+    pub fn check_view_read(&self, ctx: &Ctx, view: &View) -> Result<()> {
+        self.check_view_access(ctx, view)?;
+        for layer in &view.layers {
             if self.layer_root(layer).is_none() {
                 bail!("overlay '{}' state {} is not on this machine", layer.overlay, layer.state);
             }
