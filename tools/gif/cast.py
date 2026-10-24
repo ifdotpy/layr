@@ -31,7 +31,7 @@ for cmd, lines in steps:
         lines.pop()
     for l in lines:
         l = l.replace("\t", "    ")
-        if l.startswith("fatal:") or "No such file" in l:
+        if l.startswith("fatal:") or "No such file" in l or l.startswith("keep the value"):
             l = f"\x1b[31m{l}\x1b[0m"
         out(l + "\r\n", 0.03)
     rows += 1 + (len(cmd) + 8) // W + sum(1 + len(l.replace('\t','    ')) // W for l in lines)

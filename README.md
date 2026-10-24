@@ -59,6 +59,11 @@ Real commands and their real output, recorded on Linux with btrfs.
 
 ![layr protect, ref set refused, try --check, ref set](docs/assets/ship.gif)
 
+**Secrets stay private, and still travel.** The token lives in an overlay. Copying its value into
+shared code is refused, and the push stores the overlay encrypted:
+
+![secret refused in shared code, overlay pushed encrypted](docs/assets/secrets.gif)
+
 ## How it works
 
 Layr has five ideas. Everything else is built from them.
