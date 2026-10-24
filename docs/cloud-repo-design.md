@@ -63,3 +63,16 @@ The earlier port read Desk at f4cb324. These later Desk features must exist in L
 | cloud-repo: clean `layr-cloud`, add `layr-gateway` crate and infra, t27 green against `layr` | `layr-cloud` | split |
 | pin + desk-sig: recipient pin and Desk v1 signature checks | `layr` | split |
 | person: person keys, grant, index and pins in `layr`; people API in `layr-gateway` | both | split, cloud-repo |
+
+## More Desk features for Layr Cloud (found 2026-10-24)
+
+The `cloud-repo` port found these Desk features that Layr Cloud does not have yet. Desk is
+removed, so each one becomes a Layr or Layr Cloud task after the person task:
+
+5. **Keychain on macOS:** `layr mount` keeps the store identity in the Keychain; `unlock`,
+   `lock` and `status` commands for it.
+6. **One disk for all stores:** one Finder disk that shows every store the person may read,
+   with an installer for the background service.
+7. **AWS login:** use an AWS profile or SSO login for `s3://` stores, as Desk did.
+8. **Deploy with one command:** one command that creates or updates the CloudFormation stacks
+   of Layr Cloud from the release archives.
