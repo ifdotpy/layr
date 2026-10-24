@@ -229,15 +229,25 @@ fn overlays(
     files: &StateFiles,
     authorities: &BTreeMap<String, layr_model::authority::Authority>,
 ) -> Vec<Value> {
-    let records = project.op_log(None, usize::MAX);
+    let mut records = project.op_log(None, usize::MAX);
+    for overlay in model.overlay_projects(&project.id) {
+        if overlay.overlay_setting("overlay").is_some_and(|v| v["hidden"] == true) {
+            records.extend(overlay.op_log(None, usize::MAX).into_iter().filter(|r| r.op == "overlay.create"));
+        }
+    }
     let mut result = Vec::new();
     for creation in records.iter().rev().filter(|r| r.op == "overlay.create") {
         let Some(name) = creation.data["name"].as_str() else { continue };
-        let Some(info) = project.overlay_setting(&format!("overlay.{name}")) else { continue };
+        let own = model.projects.get(&creation.project);
+        let Some(info) = project
+            .overlay_setting(&format!("overlay.{name}"))
+            .or_else(|| own.and_then(|p| p.overlay_setting(&format!("overlay.{name}"))))
+        else {
+            continue;
+        };
         let Some(id) = info["id"].as_str() else { continue };
         let overlay = model.projects.get(id);
-        let mut row =
-            json!({"id":id,"name":name,"patterns":[],"readers":[],"managers":[creation.machine],"readable":overlay.is_some()});
+        let mut row = json!({"id":id,"name":name,"hidden":info["hidden"].as_bool().unwrap_or(false),"patterns":[],"readers":[],"managers":[creation.machine],"readable":overlay.is_some()});
         if let Some(authority) = authorities.get(name) {
             row["managers"] = json!(authority.machines);
         }
@@ -499,8 +509,76 @@ fn main() -> Result<()> {
         lines.extend(layer_lines);
     }
 
+    // Hidden records enter the model only through a reader slot.
+    let nonreader = Model::from_verified_lines(lines.iter().map(String::as_str), &machine)?;
+    write(
+        &args[2],
+        "hidden-nonreader",
+        nonreader
+            .overlay_projects(&descriptor.project)
+            .into_iter()
+            .filter_map(|p| p.overlay_setting("overlay"))
+            .filter(|v| v["hidden"] == true)
+            .map(|v| json!({"name":v["name"],"hidden":true}))
+            .collect::<Vec<_>>(),
+    )?;
+    let parent_before = serde_json::to_value(&nonreader.projects[&descriptor.project])?;
+    let mut hidden_files = BTreeMap::new();
+    for object in objects.keys().filter(|name| {
+        let parts: Vec<_> = name.split('/').collect();
+        parts.len() == 4 && parts[0] == "overlays" && parts[2] == "keys" && name.ends_with(".age")
+    }) {
+        let parts: Vec<_> = object.split('/').collect();
+        let epoch = parts[3].get(..36).context("invalid hidden epoch")?;
+        let prefix = format!("overlays/{}/epochs/{epoch}/", parts[1]);
+        let scoped: Objects = objects
+            .iter()
+            .filter_map(|(name, bytes)| name.strip_prefix(&prefix).map(|name| (name.to_string(), bytes.clone())))
+            .collect();
+        let identity = keys::open_slot(get(&scoped, "slots/paper.age")?, &paper)?;
+        let manifest = String::from_utf8(keys::decrypt(&identity, get(&objects, object)?)?)?;
+        let raw = record::parse_line(&manifest, None)?;
+        let key_record: Record = serde_json::from_str(raw.get())?;
+        let key = public_keys.get(&key_record.machine).context("unknown hidden manifest signer")?;
+        record::parse_line(&manifest, Some(key))?;
+        let data = &key_record.data;
+        ensure!(
+            data["hidden"] == true && data["parent"] == descriptor.project && data["store"] == descriptor.recipient,
+            "hidden manifest has wrong bindings"
+        );
+        ensure!(
+            data["overlay"] == parts[1] && data["epoch"] == epoch && data["recipient"] == keys::recipient_of(&identity)?,
+            "hidden manifest differs from its slot"
+        );
+        let (own, own_keys) = records(&scoped, &identity, parts[1], Some(&public_keys))?;
+        layr_model::authority::from_overlay_lines(&descriptor.project, parts[1], &own, &public_keys)?;
+        ensure!(own.contains(&manifest), "hidden manifest is absent from its own log");
+        hidden_files.extend(store(scoped, identity, own_keys).states()?);
+        lines.extend(own);
+    }
+    overlay_files.extend(hidden_files.clone());
     let model = Model::from_verified_lines(lines.iter().map(String::as_str), &machine)?;
     let project = model.projects.get(&descriptor.project).context("store project is absent from the model")?;
+    ensure!(serde_json::to_value(project)? == parent_before, "hidden records changed the parent model");
+    let hidden: Vec<_> = model
+        .overlay_projects(&descriptor.project)
+        .into_iter()
+        .filter_map(|p| p.overlay_setting("overlay"))
+        .filter(|v| v["hidden"] == true)
+        .map(|v| json!({"name":v["name"],"hidden":true}))
+        .collect();
+    ensure!(hidden.len() == 1, "the reader must discover one hidden overlay");
+    write(&args[2], "hidden-reader", hidden)?;
+    let main = project.line_list().into_iter().find(|l| l.name == "main").context("no main line")?;
+    let hidden_layers = model.layers(&descriptor.project, &main)?;
+    ensure!(
+        hidden_layers.iter().any(|l| l.overlay == "hidden-golden" && hidden_files.contains_key(&l.state)),
+        "the reader model does not follow the hidden overlay"
+    );
+    ensure!(
+        !nonreader.layers(&descriptor.project, &main)?.iter().any(|l| l.overlay == "hidden-golden"),
+        "the parent-only model exposes a hidden layer"
+    );
     let overlay = model.projects.get(&overlay_project).context("overlay is absent from the model")?;
     ensure!(
         overlay

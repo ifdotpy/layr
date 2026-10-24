@@ -652,7 +652,10 @@ pub fn exchange(
         let overlay_omitted = if hello["overlay_sync_v1"] == true {
             exchange_overlays(ctx, &mut w, repo, direction, auto, caches, &peer.0, &peer.1, true)?
         } else {
-            repo.overlay_names()?.into_iter().map(|name| format!("overlay {name}: peer does not support overlays")).collect()
+            repo.visible_overlay_names(ctx)?
+                .into_iter()
+                .map(|name| format!("overlay {name}: peer does not support overlays"))
+                .collect()
         };
         w.json(&json!({"op": "bye"}))?;
         let mut omitted: BTreeSet<String> = overlay_omitted.into_iter().collect();
@@ -854,7 +857,13 @@ pub fn serve(ctx: &Ctx, args: &[String]) -> Result<i32> {
 
 /// Plaintext overlays only go to an explicitly permitted machine.
 fn overlay_peer_allowed(repo: &Repo, name: &str, machine: &str, public: &str) -> Result<bool> {
-    if let Some(peers) = repo.p.config_value(&format!("overlay.{name}.peers"))? {
+    let info = repo.need_overlay(name)?;
+    let peers = if info.hidden {
+        repo.overlay_project(name)?.db.overlay_config(&format!("overlay.{name}.peers"))?
+    } else {
+        repo.p.config_value(&format!("overlay.{name}.peers"))?
+    };
+    if let Some(peers) = peers {
         let peers = peers.as_array().context("overlay peers must be an array of machine IDs")?;
         return Ok(peers.iter().any(|peer| peer.as_str() == Some(machine)));
     }
@@ -883,7 +892,7 @@ fn exchange_overlays<R: Read, W: Write>(
             let mut names = Vec::new();
             let mut skipped = Vec::new();
             if enabled {
-                for name in repo.overlay_names()? {
+                for name in repo.visible_overlay_names(ctx)? {
                     if repo.overlay_repo(&name).is_err() {
                         continue;
                     }
@@ -891,7 +900,9 @@ fn exchange_overlays<R: Read, W: Write>(
                         names.push(name);
                     } else {
                         omitted.push(format!("overlay {name}: peer is not allowed to hold it"));
-                        skipped.push(name);
+                        if !repo.need_overlay(&name)?.hidden {
+                            skipped.push(name);
+                        }
                     }
                 }
             }
@@ -943,7 +954,6 @@ fn exchange_overlays<R: Read, W: Write>(
                     bail!("invalid overlay offer");
                 }
                 let id = offer["id"].as_str().filter(|id| crate::model::is_uuid(id)).context("invalid overlay project id")?;
-                repo.need_overlay(&name)?;
                 let pname = format!("{}%{name}", repo.p.name);
                 let mut project = if crate::store::db_file(&ctx.store.project_dir(&pname)?).exists() {
                     Project::open_partial(&ctx.store, &pname)?

@@ -47,6 +47,48 @@ impl Model {
         Self::from_records(records, machine)
     }
 
+    /// Readable overlay projects are discovered only from their own records.
+    /// A parent-only model contains no hidden name, count, or layer identifier.
+    pub fn overlay_projects(&self, parent: &str) -> Vec<&Project> {
+        self.projects
+            .values()
+            .filter(|project| project.overlay_setting("overlay").is_some_and(|v| v["project"] == parent))
+            .collect()
+    }
+
+    /// Follow hidden overlay lines without adding metadata to the parent project.
+    pub fn layers(&self, parent: &str, line: &Line) -> Result<Vec<validation::Layer>> {
+        let project = self.projects.get(parent).context("unknown parent project")?;
+        let key = format!("stack.{}", line.id);
+        let value = project.setting(&format!("{key}@{}", line.machine)).or_else(|| project.setting(&key));
+        let mut layers: Vec<validation::Layer> = value.cloned().map(serde_json::from_value).transpose()?.unwrap_or_default();
+        let mut hidden = Vec::new();
+        for overlay in self.overlay_projects(parent) {
+            let Some(info) = overlay.overlay_setting("overlay") else {
+                continue;
+            };
+            if info["hidden"] != true {
+                continue;
+            }
+            let name = info["name"].as_str().context("hidden overlay has no name")?;
+            let selection = overlay.overlay_setting(&format!("hidden.stack.{}", line.id));
+            if selection.is_some_and(|v| v["enabled"] == false) {
+                continue;
+            }
+            if let Some(ol) = overlay.line_list().into_iter().find(|l| l.name == format!("line-{}", line.id)) {
+                hidden.push((
+                    selection.and_then(|v| v["position"].as_u64()).unwrap_or(u64::MAX),
+                    validation::Layer { overlay: name.into(), state: ol.head },
+                ));
+            }
+        }
+        hidden.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.overlay.cmp(&b.1.overlay)));
+        for (position, layer) in hidden {
+            layers.insert((position as usize).min(layers.len()), layer);
+        }
+        Ok(layers)
+    }
+
     /// Fold verified records, including any readable overlay projects.
     pub fn from_records(records: impl IntoIterator<Item = Record>, machine: &str) -> Result<Self> {
         let mut grouped: BTreeMap<String, Vec<Record>> = BTreeMap::new();
@@ -247,7 +289,7 @@ impl Project {
             "machine.trust" => {
                 self.trusted.entry(str_at("machine")).or_insert(d.clone());
             }
-            "project" | "config" | "overlay.create" | "overlay.readers" => {
+            "project" | "config" | "overlay.create" | "overlay.readers" | "overlay.use" | "overlay.show-to-project" => {
                 if r.op == "project" {
                     self.name = d["name"].as_str().map(String::from);
                 }
@@ -439,7 +481,12 @@ impl Project {
         self.records
             .iter()
             .rev()
-            .filter(|r| matches!(r.op.as_str(), "project" | "config" | "overlay.create" | "overlay.readers"))
+            .filter(|r| {
+                matches!(
+                    r.op.as_str(),
+                    "project" | "config" | "overlay.create" | "overlay.readers" | "overlay.use" | "overlay.show-to-project"
+                )
+            })
             .find_map(|r| r.data["config"].get(key))
             .filter(|v| !v.is_null())
     }

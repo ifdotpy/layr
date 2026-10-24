@@ -17,7 +17,7 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | records       | `op export`, `op import` (JSONL) |
 | copies        | `export <folder>`                                                                              |
 | views         | `view [<rev or line>] [--json]`, `view save [<line>] [--json]`, `view show <id> [--json]` |
-| overlays      | `overlay create <name> [--readers <principals>] [--mode shared\|follow]`, `overlay list`, `overlay readers`, `overlay use [--add\|--remove\|--none] <names>`, `overlay move [--purge] <name> <paths>`, `overlay log\|show\|diff\|grep\|ls-files <name>` |
+| overlays      | `overlay create <name> [--readers <principals>] [--mode shared\|follow] [--hidden]`, `overlay list [--json]`, `overlay show-to-project <name>`, `overlay readers`, `overlay use [--add\|--remove\|--none] <names>`, `overlay move [--purge] <name> <paths>`, `overlay log\|show\|diff\|grep\|ls-files <name>` |
 | refs          | `ref set <name> <rev> [--expect <rev>] [--ttl <dur>]`, `ref list [<prefix>]`, `ref log <name>`, `ref delete <name> [--expect <rev>]` |
 | queue         | `queue add <rev> [--into <line>]`, `queue list [--into <line>] [--json]`, `queue remove <entry>`, `queue run [--into <line>]` |
 | probes        | `probe run <rev> [--probe <name>] [--json]`, `probe diff <base> <head> [--json]` |
@@ -167,3 +167,7 @@ A name pattern filters the array. JSON output does not support `--all` or `--rem
 `layr change diff <id> --from vN --to vM --json` writes the change ID, version labels, and interdiff text.
 The `files` array gives each changed file patch, its status, and added and removed line counts.
 Each version is compared with its own first parent. Changes to the base stay out of the interdiff.
+
+Hidden overlays use follow mode. Only their readers see them in lists and reports.
+Use `layr overlay show-to-project <name>` to make one visible to project readers.
+This change is recorded and cannot be reversed.

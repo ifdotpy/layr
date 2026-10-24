@@ -443,7 +443,7 @@ impl Store {
                         working_after: None,
                     },
                 );
-                record.data = serde_json::json!({"stack":crate::overlay::stack_data(&local.id, &repo.readable_layers(&local)?)});
+                record.data = serde_json::json!({"stack":repo.public_stack_data(&local.id, &repo.readable_layers(&local)?)?});
                 repo.commit_record(ctx, record)?;
             }
         }

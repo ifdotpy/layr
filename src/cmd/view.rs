@@ -28,6 +28,11 @@ pub fn view(ctx: &Ctx, args: &[String]) -> Result<i32> {
     } else {
         crate::revs::resolve_view(&h.repo, current.as_ref(), rest.first().map(String::as_str).unwrap_or("head"))?
     };
+    for layer in &view.layers {
+        if h.repo.need_overlay(&layer.overlay)?.hidden && !h.repo.reads_overlay(&layer.overlay, ctx.caller.uid, ctx.caller.gid)? {
+            bail!("permission denied: this view has overlays that you do not read");
+        }
+    }
     let id = if save { h.repo.save_view(ctx, &view)? } else { view.id()? };
     if a.has("--json") {
         outln!(ctx, "{}", serde_json::json!({"view_id":id,"view":view}));

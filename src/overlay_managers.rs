@@ -1,20 +1,23 @@
 //! Native repository adapters for the shared overlay authority checks.
 use crate::{oplog, repo::Repo};
-use anyhow::{Context, Result};
-pub use layr_model::authority::{digest, from_lines, protected, Authority, Change};
+use anyhow::Result;
+pub use layr_model::authority::{from_lines, Authority, Change};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub fn of(repo: &Repo, name: &str) -> Result<Authority> {
     let lines: Vec<_> = repo.p.export_jsonl()?.lines().map(str::to_owned).collect();
-    from_lines(&repo.p.id, &lines, &crate::store_remote::overlays::trusted_keys(repo)?)?
-        .remove(name)
-        .context("overlay has no creator authority")
+    let keys = crate::store_remote::overlays::trusted_keys(repo)?;
+    if let Some(authority) = from_lines(&repo.p.id, &lines, &keys)?.remove(name) {
+        return Ok(authority);
+    }
+    let orepo = repo.overlay_repo(name)?;
+    let lines: Vec<_> = orepo.p.export_jsonl()?.lines().map(str::to_owned).collect();
+    Ok(layr_model::authority::from_overlay_lines(&repo.p.id, &orepo.p.id, &lines, &keys)?.1)
 }
 
 pub fn validate_import(project: &crate::store::Project, incoming: &[String]) -> Result<()> {
     let Some((parent, name)) = project.name.split_once('%') else { return Ok(()) };
     let repo = Repo { p: crate::store::Project::open(project.store, parent)? };
-    let authority = of(&repo, name)?;
     let mut lines: BTreeSet<String> = project.export_jsonl()?.lines().map(str::to_owned).collect();
     lines.extend(incoming.iter().cloned());
     let id = if project.id.is_empty() {
@@ -26,7 +29,16 @@ pub fn validate_import(project: &crate::store::Project, incoming: &[String]) -> 
     } else {
         project.id.clone()
     };
-    authority.validate(&lines.into_iter().collect::<Vec<_>>(), &id, &crate::store_remote::overlays::trusted_keys(&repo)?)
+    let lines: Vec<_> = lines.into_iter().collect();
+    let keys = crate::store_remote::overlays::trusted_keys(&repo)?;
+    let parent_lines: Vec<_> = repo.p.export_jsonl()?.lines().map(str::to_owned).collect();
+    if let Some(authority) = from_lines(&repo.p.id, &parent_lines, &keys)?.remove(name) {
+        authority.validate(&lines, &id, &keys)
+    } else {
+        let (found, _) = layr_model::authority::from_overlay_lines(&repo.p.id, &id, &lines, &keys)?;
+        anyhow::ensure!(found == name, "hidden overlay name differs from its project");
+        Ok(())
+    }
 }
 
 pub fn retained(authority: &Authority, repo: &Repo) -> Result<BTreeMap<String, String>> {

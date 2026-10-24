@@ -226,9 +226,13 @@ fn finish(
         if let Err(e) = o.record(ctx, repo) {
             return Err(fail(e));
         }
-        data["stack"] = crate::overlay::stack_data(&line.id, &layers);
+        data["stack"] = repo.public_stack_data(&line.id, &layers)?;
         data["line"] = serde_json::json!(line.id);
-        data["overlays"] = serde_json::json!(o.names());
+        data["overlays"] = serde_json::json!(o
+            .names()
+            .into_iter()
+            .filter(|n| !repo.need_overlay(n).map(|i| i.hidden).unwrap_or(true))
+            .collect::<Vec<_>>());
     }
     repo.move_head(ctx, op, line, new_head, states, working_before, data)?;
     if let Some(v) = view {

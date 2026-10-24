@@ -67,11 +67,13 @@ impl Authority {
 }
 
 pub fn protected(record: &Record) -> bool {
-    record.op == "overlay.key"
+    record.op == "overlay.show-to-project"
+        || record.op == "overlay.key"
         || record.op == "overlay.readers"
         || record.data["config"].get("access").is_some()
         || record.data["config"].get("deny").is_some()
         || record.data["config"].get("overlay.revocation").is_some()
+        || record.data["config"].get("overlay").is_some()
 }
 
 /// Derive authority from the parent project's signed creation and nested manager proofs.
@@ -89,6 +91,10 @@ pub fn from_lines(parent: &str, lines: &[String], keys: &BTreeMap<String, Verify
             records.push(record);
         }
     }
+    fold(parent, records, keys)
+}
+
+fn fold(parent: &str, mut records: Vec<Record>, keys: &BTreeMap<String, VerifyingKey>) -> Result<BTreeMap<String, Authority>> {
     records.sort_by(|a, b| (a.time, &a.machine, a.seq).cmp(&(b.time, &b.machine, b.seq)));
     let mut authorities = BTreeMap::new();
     let mut ids = BTreeMap::new();
@@ -101,11 +107,28 @@ pub fn from_lines(parent: &str, lines: &[String], keys: &BTreeMap<String, Verify
                 bail!("conflicting overlay creator for {name}");
             }
             let id = record.data["config"][format!("overlay.{name}")]["id"].as_str().map(str::to_owned);
+            let creator = if let Some(origin) = record.data["hidden_origin"].as_str() {
+                let origin_record = parse(origin, None)?;
+                let key = keys.get(&origin_record.machine).context("overlay origin signer is not trusted")?;
+                let origin_record = parse(origin, Some(key))?;
+                crate::validation::validate(&origin_record)?;
+                if origin_record.op != "overlay.create"
+                    || Some(&origin_record.project) != id.as_ref()
+                    || origin_record.data["parent"] != parent
+                    || origin_record.data["name"] != name
+                    || origin_record.data["config"][format!("overlay.{name}")]["hidden"] != true
+                {
+                    bail!("invalid hidden overlay origin");
+                }
+                origin_record.machine
+            } else {
+                record.machine.clone()
+            };
             ids.insert(name.to_string(), id);
             authorities.insert(
                 name.to_string(),
                 Authority {
-                    machines: BTreeSet::from([record.machine]),
+                    machines: BTreeSet::from([creator]),
                     previous: None,
                     retained: BTreeMap::new(),
                     changes: BTreeMap::new(),
@@ -164,6 +187,63 @@ pub fn from_lines(parent: &str, lines: &[String], keys: &BTreeMap<String, Verify
     Ok(authorities)
 }
 
+/// Hidden authority comes from the overlay's own authenticated creation and manager chain.
+/// The caller opens a reader slot before it supplies these records.
+pub fn from_overlay_lines(
+    parent: &str,
+    overlay: &str,
+    lines: &[String],
+    keys: &BTreeMap<String, VerifyingKey>,
+) -> Result<(String, Authority)> {
+    let mut records = Vec::new();
+    let mut name = None;
+    let mut creator = None;
+    for line in lines {
+        let record = parse(line, None)?;
+        let key = keys.get(&record.machine).context("hidden overlay signer is not trusted")?;
+        let mut record = parse(line, Some(key))?;
+        crate::validation::validate(&record)?;
+        if record.project != overlay {
+            bail!("hidden overlay record belongs to another project");
+        }
+        if record.op == "project" {
+            let metadata = &record.data["config"]["overlay"];
+            if metadata["project"] != parent || metadata["hidden"] != true || metadata["mode"] != "follow" {
+                bail!("hidden overlay has invalid parent or mode");
+            }
+            name = metadata["name"].as_str().map(str::to_owned);
+            creator = Some(record.machine.clone());
+        }
+        if record.op == "overlay.create" {
+            record.project = parent.to_string();
+            records.push(record);
+        } else if record.op == "overlay.managers" {
+            let name = record.data["name"].clone();
+            record.op = "overlay.authority".into();
+            record.project = parent.to_string();
+            record.data = serde_json::json!({"name":name,"authority":line});
+            records.push(record);
+        }
+    }
+    let name = name.context("hidden overlay has no project record")?;
+    let created = records.iter().find(|r| r.op == "overlay.create").context("hidden overlay has no creation record")?;
+    if created.data["parent"] != parent
+        || created.data["name"] != name
+        || created.data["config"][format!("overlay.{name}")]["id"] != overlay
+        || created.data["config"][format!("overlay.{name}")]["hidden"] != true
+        || Some(&created.machine) != creator.as_ref()
+    {
+        bail!("hidden overlay creation differs from its project");
+    }
+    let mut authorities = fold(parent, records, keys)?;
+    if authorities.len() != 1 {
+        bail!("hidden overlay has conflicting creations");
+    }
+    let authority = authorities.remove(&name).context("hidden overlay name differs from creation")?;
+    authority.validate(lines, overlay, keys)?;
+    Ok((name, authority))
+}
+
 /// Retain the exact protected records that the current authority accepts.
 pub fn retained(authority: &Authority, lines: &[String]) -> Result<BTreeMap<String, String>> {
     let mut retained = authority.retained.clone();
@@ -203,6 +283,37 @@ mod tests {
         r.data = data;
         r
     }
+    #[test]
+    fn hidden_authority_uses_own_creation_and_rejects_another_parent_or_nonmanager() {
+        let (parent, overlay, a, b) = (id(), id(), id(), id());
+        let ka = ed25519_dalek::SigningKey::from_bytes(&[1; 32]);
+        let kb = ed25519_dalek::SigningKey::from_bytes(&[2; 32]);
+        let keys = BTreeMap::from([(a.clone(), ka.verifying_key()), (b.clone(), kb.verifying_key())]);
+        let project = record(
+            "project",
+            &overlay,
+            &a,
+            serde_json::json!({"config":{"overlay":{"project":parent,"name":"hidden","hidden":true,"mode":"follow"}}}),
+            1,
+        );
+        let create = record(
+            "overlay.create",
+            &overlay,
+            &a,
+            serde_json::json!({"name":"hidden","parent":parent,"config":{"overlay.hidden":{"id":overlay,"hidden":true}}}),
+            2,
+        );
+        let mut own = vec![sign(&project, &ka).unwrap(), sign(&create, &ka).unwrap()];
+        let (name, authority) = from_overlay_lines(&parent, &overlay, &own, &keys).unwrap();
+        assert_eq!(name, "hidden");
+        assert_eq!(authority.machines, BTreeSet::from([a]));
+        assert!(from_lines(&parent, &[], &keys).unwrap().is_empty());
+        assert!(from_overlay_lines(&id(), &overlay, &own, &keys).is_err());
+        let forged = record("overlay.readers", &overlay, &b, serde_json::json!({"config":{"access":{}}}), 1);
+        own.push(sign(&forged, &kb).unwrap());
+        assert!(from_overlay_lines(&parent, &overlay, &own, &keys).is_err());
+    }
+
     #[test]
     fn manager_removal_keeps_exact_old_records_and_refuses_new_records_from_that_signer() {
         let (a, b, d) = (id(), id(), id());

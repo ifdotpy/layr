@@ -255,6 +255,13 @@ if [ "$(uname -s)" = Linux ] && [ -z "${LAYR_OVERLAYFS_TEST_ROOT:-}" ]; then
 fi
 
 l remote add store "file://$T/archive" --paper-key-out "$T/paper" >/dev/null
+l overlay create hidden-golden --hidden --readers nobody -q
+printf 'hidden golden bytes\n' > hidden.txt
+l overlay move hidden-golden hidden.txt -q
+l save -qm hidden-golden-state
+l overlay list --json | python3 -c 'import json,sys; rows=json.load(sys.stdin); print(json.dumps([{"name":r["name"],"hidden":r["hidden"]} for r in rows if r["hidden"]]))' > "$T/cli/hidden-reader.json"
+# A parent-only reader has no hidden creation or hidden layer descriptor.
+l op log --all -n 100000 --json | python3 -c 'import json,sys; rows=[json.loads(l) for l in sys.stdin]; assert not any("hidden-golden" in json.dumps(r) for r in rows); print("[]")' > "$T/cli/hidden-nonreader.json"
 l push store --json > "$T/store-push.json"
 ok 'one push sends all three version trees' python3 - "$T/archive" "$V1" "$V2" "$V3" <<'PYPRIOR'
 import sys
@@ -398,7 +405,7 @@ assert any(f['path'] == 'feature.txt' and f['status'] == 'add' and f['added'] ==
 config = load('config')
 assert config['policy']['access']['user:0'] == 'admin'
 assert config['path_rules']['main']['feature.txt'] == 'maintainer'
-overlay = load('overlays')[0]
+overlay = next(o for o in load('overlays') if o['name'] == 'secrets')
 assert overlay['name'] == 'secrets' and overlay['readable'] and overlay['readers'] and len(overlay['managers']) == 1
 assert 'private.txt' in overlay['paths']
 copy = next(row for row in load('copies') if row['name'] == 'store')
@@ -416,7 +423,7 @@ assert browser and all(row['target_machine'] and row['allowed'] is None and row[
 assert all(row['undecided_reasons'] for row in browser)
 assert load('merge-status') == browser
 assert load('interdiff')['files'] and '+version two' in load('interdiff')['diff']
-assert load('interdiff-replay')['diff'] == '' and load('interdiff-replay')['files'] == []
+assert load('interdiff-replay', 'hidden-reader', 'hidden-nonreader')['diff'] == '' and load('interdiff-replay', 'hidden-reader', 'hidden-nonreader')['files'] == []
 assert load('merge-refusals') == {'merge': False, 'ref': False}
 assert len(load('changes')) == project['counts']['changes']
 assert len(load('operations-all')) == project['counts']['operations']
@@ -440,7 +447,7 @@ import difflib, json, sys
 from pathlib import Path
 
 cli, model, counts = map(Path, sys.argv[1:])
-names = ('lines', 'log', 'log-auto', 'change', 'refs', 'ref-log', 'queue', 'attestations', 'operations', 'probe-diff', 'probe-same', 'merge-refusals', 'interdiff', 'interdiff-replay', 'copies', 'bisect')
+names = ('lines', 'log', 'log-auto', 'change', 'refs', 'ref-log', 'queue', 'attestations', 'operations', 'probe-diff', 'probe-same', 'merge-refusals', 'interdiff', 'interdiff-replay', 'copies', 'bisect', 'hidden-reader', 'hidden-nonreader')
 passed = failed = 0
 for name in names:
     try:

@@ -1328,7 +1328,9 @@ impl<'a> Repo<'a> {
             );
             rec.data = serde_json::json!({"name": name, "start": start});
             if !layers.is_empty() {
-                rec.data["stack"] = crate::overlay::stack_data(&line.id, &layers);
+                if !self.public_layers(&layers)?.is_empty() {
+                    rec.data["stack"] = self.public_stack_data(&line.id, &layers)?;
+                }
             }
             self.p.append(rec, &ctx.actor())
         })();

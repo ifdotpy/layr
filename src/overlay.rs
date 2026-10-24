@@ -64,6 +64,7 @@ impl Mode {
 /// An overlay as the project knows it (setting `overlay.<name>`).
 #[derive(Clone, Debug)]
 pub struct Info {
+    pub hidden: bool,
     pub owner: u32,
     pub mode: Mode,
     /// The empty first state of the overlay.
@@ -267,7 +268,36 @@ impl<'a> Repo<'a> {
         if !is_view_id(id) {
             bail!("invalid view id '{id}'");
         }
-        let view = self.p.db.saved_view(id)?.ok_or_else(|| anyhow!("unknown view '{id}'"))?;
+        let mut view = self.p.db.saved_view(id)?;
+        if view.is_none() {
+            let mut components = BTreeMap::new();
+            let mut shared = None;
+            let mut public = Vec::new();
+            for name in self.overlay_names()? {
+                let op = self.overlay_project(&name)?;
+                for line in op.export_jsonl()?.lines() {
+                    let record = crate::oplog::parse_line(line, None)?.record;
+                    if record.op != "view.hidden" || record.data["view_id"] != id {
+                        continue;
+                    }
+                    let layer: Layer = serde_json::from_value(record.data["layer"].clone())?;
+                    if layer.overlay != name {
+                        bail!("hidden view component belongs to another overlay");
+                    }
+                    let position = record.data["position"].as_u64().ok_or_else(|| anyhow!("hidden view has no position"))?;
+                    components.insert(position, layer);
+                    shared = record.data["shared"].as_str().map(str::to_owned);
+                    public = serde_json::from_value(record.data["public"].clone())?;
+                }
+            }
+            if let Some(shared) = shared {
+                for (position, layer) in components {
+                    public.insert((position as usize).min(public.len()), layer);
+                }
+                view = Some(View::new(shared, public));
+            }
+        }
+        let view = view.ok_or_else(|| anyhow!("unknown view '{id}'"))?;
         view.validate()?;
         if view.id()? != id {
             bail!("view descriptor does not match its id");
@@ -280,10 +310,30 @@ impl<'a> Repo<'a> {
         self.can_read(ctx)?;
         view.validate()?;
         let id = view.id()?;
-        if self.p.db.saved_view(&id)?.is_none() {
-            let mut rec = Record::new("view.save");
-            rec.data = serde_json::json!({"view_id": id, "view": view});
-            self.commit_record(ctx, rec)?;
+        self.check_view_read(ctx, view)?;
+        let public = self.public_layers(&view.layers)?;
+        if public.len() != view.layers.len() {
+            for (position, layer) in view.layers.iter().enumerate() {
+                if !self.need_overlay(&layer.overlay)?.hidden {
+                    continue;
+                }
+                let orepo = self.overlay_repo(&layer.overlay)?;
+                let _lock = orepo.p.lock()?;
+                if orepo.p.export_jsonl()?.lines().any(|line| {
+                    crate::oplog::parse_line(line, None)
+                        .is_ok_and(|s| s.record.op == "view.hidden" && s.record.data["view_id"] == id)
+                }) {
+                    continue;
+                }
+                let mut record = Record::new("view.hidden");
+                record.data =
+                    serde_json::json!({"view_id":id,"shared":view.shared,"public":public,"position":position,"layer":layer});
+                orepo.commit_record(ctx, record)?;
+            }
+        } else if self.p.db.saved_view(&id)?.is_none() {
+            let mut record = Record::new("view.save");
+            record.data = serde_json::json!({"view_id":id,"view":view});
+            self.commit_record(ctx, record)?;
         }
         Ok(id)
     }
@@ -351,11 +401,20 @@ impl<'a> Repo<'a> {
         if crate::store::check_name("overlay", name).is_err() {
             return Ok(None);
         }
-        let v = match self.p.db.overlay_config(&format!("overlay.{name}"))? {
+        let mut value = self.p.db.overlay_config(&format!("overlay.{name}"))?;
+        if value.is_none() {
+            if let Ok(op) = self.overlay_project(name) {
+                if op.db.overlay_config("overlay")?.is_some_and(|v| v["project"] == self.p.id && v["name"] == name) {
+                    value = op.db.overlay_config(&format!("overlay.{name}"))?;
+                }
+            }
+        }
+        let v = match value {
             Some(v) if v.is_object() => v,
             _ => return Ok(None),
         };
         Ok(Some(Info {
+            hidden: v["hidden"].as_bool().unwrap_or(false),
             owner: v["owner"].as_u64().unwrap_or(0) as u32,
             mode: v["mode"].as_str().and_then(Mode::parse).unwrap_or(Mode::Shared),
             root: v["root"].as_str().unwrap_or("").to_string(),
@@ -369,17 +428,67 @@ impl<'a> Repo<'a> {
 
     /// Names of the overlays of this project on this machine.
     pub fn overlay_names(&self) -> Result<Vec<String>> {
-        Ok(self
+        if self.p.is_overlay() {
+            return Ok(Vec::new());
+        }
+        let mut names: BTreeSet<String> = self
             .p
             .db
             .config_all()?
             .into_iter()
             .filter_map(|(k, _)| k.strip_prefix("overlay.").map(|s| s.split('@').next().unwrap_or("").to_string()))
-            .filter(|n| crate::store::check_name("overlay", n).is_ok())
-            .filter(|n| self.overlay_info(n).ok().flatten().is_some())
-            .collect::<BTreeSet<_>>()
+            .collect();
+        for entry in std::fs::read_dir(self.p.dir.join("meta/overlays")).into_iter().flatten().flatten() {
+            names.insert(entry.file_name().to_string_lossy().into_owned());
+        }
+        Ok(names.into_iter().filter(|n| self.overlay_info(n).ok().flatten().is_some()).collect())
+    }
+
+    pub fn visible_overlay_names(&self, ctx: &Ctx) -> Result<Vec<String>> {
+        Ok(self
+            .overlay_names()?
             .into_iter()
+            .filter(|name| {
+                !self.overlay_info(name).ok().flatten().is_some_and(|i| i.hidden)
+                    || self.reads_overlay(name, ctx.caller.uid, ctx.caller.gid).unwrap_or(false)
+            })
             .collect())
+    }
+
+    /// Only public layers may appear in a parent record.
+    pub fn public_layers(&self, layers: &[Layer]) -> Result<Vec<Layer>> {
+        let mut public = Vec::new();
+        for layer in layers {
+            if !self.need_overlay(&layer.overlay)?.hidden {
+                public.push(layer.clone());
+            }
+        }
+        Ok(public)
+    }
+
+    pub fn public_stack_data(&self, line: &str, layers: &[Layer]) -> Result<serde_json::Value> {
+        Ok(stack_data(line, &self.public_layers(layers)?))
+    }
+
+    /// Hidden selection and order travel only with that overlay.
+    pub fn record_hidden_selection(&self, ctx: &Ctx, line: &str, layers: &[Layer]) -> Result<()> {
+        for name in self.overlay_names()? {
+            if !self.need_overlay(&name)?.hidden || !self.reads_overlay(&name, ctx.caller.uid, ctx.caller.gid)? {
+                continue;
+            }
+            let orepo = self.overlay_repo(&name)?;
+            let position = layers.iter().position(|l| l.overlay == name);
+            let value = serde_json::json!({"enabled":position.is_some(),"position":position});
+            let key = format!("hidden.stack.{line}");
+            if orepo.p.db.overlay_config(&key)?.as_ref() == Some(&value) {
+                continue;
+            }
+            let _lock = orepo.p.lock()?;
+            let mut record = Record::new("overlay.use");
+            record.data = serde_json::json!({"config":{key:value}});
+            orepo.commit_record(ctx, record)?;
+        }
+        Ok(())
     }
 
     /// The internal project of an overlay.
@@ -427,10 +536,30 @@ impl<'a> Repo<'a> {
             Some(value) => Some(value),
             None => self.p.db.overlay_config(&key)?,
         };
-        Ok(match value {
-            Some(v) => serde_json::from_value(v).unwrap_or_default(),
-            None => Vec::new(),
-        })
+        let mut layers: Vec<Layer> = value.map(serde_json::from_value).transpose()?.unwrap_or_default();
+        if !self.p.is_overlay() {
+            let mut hidden = Vec::new();
+            for name in self.overlay_names()? {
+                let info = self.need_overlay(&name)?;
+                if !info.hidden || !self.owner_reads(&name, line.owner)? {
+                    continue;
+                }
+                let op = self.overlay_project(&name)?;
+                let selection = op.db.overlay_config(&format!("hidden.stack.{}", line.id))?;
+                if selection.as_ref().is_some_and(|s| s["enabled"] == false) {
+                    continue;
+                }
+                if let Some(ol) = op.db.line_by_name(&Self::overlay_line_name(&info, &line.id, line.owner))? {
+                    let position = selection.as_ref().and_then(|s| s["position"].as_u64()).unwrap_or(u64::MAX);
+                    hidden.push((position, Layer { overlay: name, state: ol.head }));
+                }
+            }
+            hidden.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.overlay.cmp(&b.1.overlay)));
+            for (position, layer) in hidden {
+                layers.insert((position as usize).min(layers.len()), layer);
+            }
+        }
+        Ok(layers)
     }
 
     pub fn readable_layers(&self, line: &Line) -> Result<Vec<Layer>> {
@@ -724,6 +853,7 @@ impl<'a> Repo<'a> {
             let ol = orepo.ensure_overlay_line(ctx, &Self::overlay_line_name(&info, line_id, owner), &l.state, owner)?;
             out.push(Layer { overlay: l.overlay.clone(), state: ol.head });
         }
+        self.record_hidden_selection(ctx, line_id, &out)?;
         Ok(out)
     }
 }
@@ -940,13 +1070,20 @@ pub fn commit_layers(
         overlays.push((layers[i].overlay.clone(), st));
     }
     let new_head = shared.as_ref().map(|s| s.id.clone()).unwrap_or(line.head.clone());
-    let data = serde_json::json!({
-        "line": line.id,
-        "stack": stack_data(&line.id, &new_layers),
-        "overlays": overlays.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>(),
-    });
+    let public = repo.public_layers(&new_layers)?;
+    let mut data = serde_json::json!({"line":line.id});
+    if !public.is_empty() {
+        data["stack"] = stack_data(&line.id, &public);
+        data["overlays"] = serde_json::json!(overlays
+            .iter()
+            .filter(|(n, _)| !repo.need_overlay(n).map(|i| i.hidden).unwrap_or(true))
+            .map(|(n, _)| n.clone())
+            .collect::<Vec<_>>());
+    }
     let states: Vec<StateRec> = shared.iter().cloned().collect();
-    repo.move_head(ctx, "commit", line, &new_head, states, None, data)?;
+    if shared.is_some() || overlays.iter().any(|(n, _)| !repo.need_overlay(n).map(|i| i.hidden).unwrap_or(true)) {
+        repo.move_head(ctx, "commit", line, &new_head, states, None, data)?;
+    }
     let fds = if summary { crate::diff::file_diffs(&base, &new_tree.path, &s.list)? } else { Vec::new() };
     repo.install_base(line, new_tree, &new_head, &new_layers)?;
     Ok(Some(Committed { shared, overlays, fds }))
@@ -965,8 +1102,11 @@ pub fn set_layers(ctx: &Ctx, repo: &Repo, line: &Line, layers: &[Layer], force: 
     local.extend(st.ignored.iter().cloned());
     let applied = repo.apply_delta(&old, &view.path, &wdir, repo.own(line), &local, force)?;
     let mut rec = Record::new(op);
-    rec.data = serde_json::json!({"line": line.id, "stack": stack_data(&line.id, layers)});
-    repo.commit_record(ctx, rec)?;
+    rec.data = serde_json::json!({"line": line.id, "stack": repo.public_stack_data(&line.id, layers)?});
+    repo.record_hidden_selection(ctx, &line.id, layers)?;
+    if repo.public_layers(&repo.layers(line)?)? != repo.public_layers(layers)? {
+        repo.commit_record(ctx, rec)?;
+    }
     repo.drop_stage(line)?;
     repo.install_base(line, view, &line.head, layers)?;
     Ok(applied)
