@@ -5,6 +5,7 @@ mod launch;
 mod webdav;
 
 use crate::store_remote::browse::{Access, Browse, Entry};
+use crate::store_remote::StorePin;
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -105,11 +106,12 @@ fn resolve(path: &str, entry: &Entry, files: &BTreeMap<String, Entry>, reader: &
 }
 
 impl Disk {
-    fn load(url: &str, env: &HashMap<String, String>, access: &Access) -> Result<(Snapshot, String)> {
+    fn load(url: &str, env: &HashMap<String, String>, access: &Access) -> Result<(Snapshot, String, StorePin)> {
         let span = crate::trace::span("disk store read");
         let mut reader = Browse::open(url, env, access)?;
         drop(span);
         let identity = reader.identity().to_owned();
+        let pin = reader.pin.clone();
         let lines = std::mem::take(&mut reader.lines);
         let reader = Arc::new(Mutex::new(reader));
         let mut nodes = BTreeMap::new();
@@ -134,7 +136,7 @@ impl Disk {
                 );
             }
         }
-        Ok((Snapshot { folders: folders(&nodes), nodes }, identity))
+        Ok((Snapshot { folders: folders(&nodes), nodes }, identity, pin))
     }
 
     pub fn open(
@@ -144,7 +146,8 @@ impl Disk {
         cache: PathBuf,
         limit: u64,
     ) -> Result<(Arc<Self>, String)> {
-        let (snapshot, identity) = Self::load(&url, &env, &access)?;
+        let (snapshot, identity, pin) = Self::load(&url, &env, &access)?;
+        access.pin = Some(pin);
         access.paper = None;
         access.identity = Some(identity.clone());
         let disk =
@@ -153,7 +156,7 @@ impl Disk {
     }
 
     fn refresh(&self) -> Result<()> {
-        let (snapshot, _) = Self::load(&self.url, &self.env, &self.access)?;
+        let (snapshot, _, _) = Self::load(&self.url, &self.env, &self.access)?;
         *self.snapshot.write().unwrap() = Arc::new(snapshot);
         Ok(())
     }
@@ -302,9 +305,60 @@ fn preferences_file(home: &Path) -> PathBuf {
     std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".config")).join("layr/mount.json")
 }
 
-fn resolve_remote(remote: &str) -> Result<String> {
+fn pins_file(home: &Path) -> PathBuf {
+    preferences_file(home).with_file_name("mount-pins.json")
+}
+
+fn load_pins(path: &Path) -> Result<BTreeMap<String, StorePin>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(serde_json::from_slice(&bytes).context("invalid mount pins file")?),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn save_pins(path: &Path, pins: &BTreeMap<String, StorePin>) -> Result<()> {
+    std::fs::create_dir_all(path.parent().context("mount pins file has no parent")?)?;
+    crate::fsutil::atomic_write(path, &serde_json::to_vec(pins)?, 0o600)
+}
+
+fn lock_pins(path: &Path) -> Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::create_dir_all(path.parent().context("mount pins file has no parent")?)?;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path.with_extension("lock"))?;
+    rustix::fs::flock(&lock, rustix::fs::FlockOperation::LockExclusive)?;
+    Ok(lock)
+}
+
+fn record_pin(path: &Path, url: &str, pin: &StorePin) -> Result<bool> {
+    let _lock = lock_pins(path)?;
+    let mut pins = load_pins(path)?;
+    if let Some(previous) = pins.get(url) {
+        if previous != pin {
+            bail!(
+                "store pin changed during mount: pinned recipient {} project {}, store.json recipient {} project {}",
+                previous.recipient,
+                previous.project,
+                pin.recipient,
+                pin.project
+            );
+        }
+        return Ok(false);
+    }
+    pins.insert(url.into(), pin.clone());
+    save_pins(path, &pins)?;
+    Ok(true)
+}
+
+fn resolve_remote(remote: &str) -> Result<(String, Option<StorePin>)> {
     if remote.contains("://") {
-        return Ok(remote.into());
+        return Ok((remote.into(), None));
     }
     let root = crate::store::default_root();
     let mut project = std::env::var("LAYR_PROJECT").ok();
@@ -319,7 +373,13 @@ fn resolve_remote(remote: &str) -> Result<String> {
         let db = rusqlite::Connection::open_with_flags(crate::store::db_file(&path), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         let value: String =
             db.query_row("SELECT value FROM config WHERE key=?1", [format!("cloud.remote.{remote}.url")], |row| row.get(0))?;
-        return serde_json::from_str(&value).context("invalid named remote URL");
+        let pin: String = db
+            .query_row("SELECT value FROM config WHERE key=?1", [format!("cloud.remote.{remote}.store")], |row| row.get(0))
+            .context("named remote has no store pin; run layr fetch <remote> first")?;
+        return Ok((
+            serde_json::from_str(&value).context("invalid named remote URL")?,
+            Some(serde_json::from_str(&pin).context("invalid named remote store pin")?),
+        ));
     }
     bail!("use a store URL outside a project, such as file:///path, s3://bucket/prefix or layr+https://host/project")
 }
@@ -345,6 +405,7 @@ pub fn run(args: &[String]) -> Result<i32> {
             .value("--cache-size")
             .value("--at")
             .value("--paper-key-file")
+            .value("--forget-pin")
             .flag("--paper-key-stdin")
             .flag("--install")
             .flag("--remove")
@@ -352,13 +413,28 @@ pub fn run(args: &[String]) -> Result<i32> {
         args,
     )?;
     if a.has("--help") {
-        println!("Usage: layr mount <remote> [--listen 127.0.0.1:8095] [--cache-size <bytes>]\n       layr mount --install [<remote>] | --remove\nUse --paper-key-file <0600-file> or --paper-key-stdin once to unlock the disk.");
+        println!("Usage: layr mount <remote> [--listen 127.0.0.1:8095] [--cache-size <bytes>]\n       layr mount --install [<remote>] | --remove\n       layr mount --forget-pin <url>\nUse --paper-key-file <0600-file> or --paper-key-stdin once to unlock the disk.");
         return Ok(0);
     }
     if !cfg!(target_os = "macos") && (a.has("--install") || a.has("--remove") || a.has("--at")) {
         bail!("mount --install, --remove and --at require macOS");
     }
     let home = user_home()?;
+    if let Some(url) = a.get("--forget-pin") {
+        if !a.pos.is_empty() {
+            bail!("mount --forget-pin takes only a URL");
+        }
+        if !url.contains("://") {
+            bail!("--forget-pin requires a store URL; named remotes use layr remote trust-store");
+        }
+        let path = pins_file(&home);
+        let _lock = lock_pins(&path)?;
+        let mut pins = load_pins(&path)?;
+        pins.remove(url);
+        save_pins(&path, &pins)?;
+        println!("removed mount pin for {url}");
+        return Ok(0);
+    }
     if a.has("--remove") {
         if a.has("--install") || !a.pos.is_empty() {
             bail!("mount --remove takes no remote");
@@ -376,7 +452,9 @@ pub fn run(args: &[String]) -> Result<i32> {
         std::fs::read(preferences_file(&home)).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok());
     let remote =
         a.pos.first().cloned().or_else(|| saved.as_ref().map(|s| s.remote.clone())).context("mount needs a store remote URL")?;
-    let url = resolve_remote(&remote)?;
+    let (url, project_pin) = resolve_remote(&remote)?;
+    let pins = load_pins(&pins_file(&home))?;
+    let pin = project_pin.clone().or_else(|| pins.get(&url).cloned());
     let listen = a.get("--listen").or_else(|| saved.as_ref().map(|s| s.listen.as_str())).unwrap_or("127.0.0.1:8095");
     let address: std::net::SocketAddr = listen.parse().context("--listen needs an IP address and port")?;
     if !address.ip().is_loopback() {
@@ -397,9 +475,13 @@ pub fn run(args: &[String]) -> Result<i32> {
     };
     let account = keystore::account(&url);
     let cached = if paper.is_none() { keystore::get(&account)? } else { None };
-    let access = Access { machine: machine_access(), paper, identity: cached };
+    let access = Access { machine: machine_access(), paper, identity: cached, pin };
     let env = std::env::vars().collect();
     let (disk, identity) = Disk::open(url.clone(), env, access, cache.clone(), limit)?;
+    let pin = disk.access.pin.as_ref().context("disk has no store pin")?;
+    if project_pin.is_none() && record_pin(&pins_file(&home), &url, pin)? {
+        eprintln!("pinned store recipient {} project {}", pin.recipient, pin.project);
+    }
     let span = crate::trace::span("disk Keychain save");
     keystore::set(&account, &identity)?;
     drop(span);
@@ -497,6 +579,57 @@ fn connection(disk: &Disk, stream: std::net::TcpStream) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn url_pin_updates_preserve_other_urls_and_refuse_a_conflicting_first_use() {
+        let root = std::env::temp_dir().join(crate::ids::new_id());
+        let path = root.join("mount-pins.json");
+        let first = StorePin { project: crate::ids::new_id(), recipient: "age1first".into() };
+        let second = StorePin { project: crate::ids::new_id(), recipient: "age1second".into() };
+        assert!(record_pin(&path, "file:///one", &first).unwrap());
+        assert!(record_pin(&path, "file:///two", &second).unwrap());
+        assert!(!record_pin(&path, "file:///one", &first).unwrap());
+        let error = record_pin(&path, "file:///one", &second).unwrap_err().to_string();
+        assert!(error.contains(&first.project) && error.contains(&second.project));
+        assert!(error.contains(&first.recipient) && error.contains(&second.recipient));
+        assert_eq!(load_pins(&path).unwrap().len(), 2);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_refresh_rejects_another_project_and_keeps_the_previous_view() {
+        use crate::store_remote::{backend::Backend, keys};
+        let root = std::env::temp_dir().join(crate::ids::new_id());
+        let url = format!("file://{}", root.join("remote").display());
+        let backend = Backend::open(&url).unwrap();
+        let identity = keys::generate_identity();
+        let recipient = keys::recipient_of(&identity).unwrap();
+        let project = crate::ids::new_id();
+        backend
+            .put_new(
+                "store.json",
+                serde_json::to_vec(&serde_json::json!({
+            "format":2,"project":project,"recipient":recipient}))
+                .unwrap(),
+            )
+            .unwrap();
+        let (disk, _) =
+            Disk::open(url, HashMap::new(), Access { identity: Some(identity), ..Default::default() }, root.join("cache"), 0)
+                .unwrap();
+        let before = disk.snapshot.read().unwrap().clone();
+        let other = crate::ids::new_id();
+        std::fs::write(
+            root.join("remote/store.json"),
+            serde_json::to_vec(&serde_json::json!({
+            "format":2,"project":other,"recipient":recipient}))
+            .unwrap(),
+        )
+        .unwrap();
+        let error = disk.refresh().unwrap_err().to_string();
+        assert!(error.contains(&project) && error.contains(&other), "{error}");
+        assert!(Arc::ptr_eq(&before, &disk.snapshot.read().unwrap()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn names_and_links_stay_inside_each_line() {
         assert_eq!(line_folder("feature/a%b"), "feature%2Fa%25b");
