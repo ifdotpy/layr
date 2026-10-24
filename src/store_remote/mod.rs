@@ -237,14 +237,19 @@ impl Store {
     pub fn save_pin(&self, ctx: &Ctx, repo: &Repo, name: &str) -> Result<()> {
         if let Some(pin) = &self.pin {
             let mut pin = pin.clone();
-            if let Some(paper) = &self.paper_key_text {
+            // Learn the public paper recipient once. LAYR_PAPER_KEY_FILE may hold the paper key of
+            // another store (a Desk source, for example): a key that does not open this store's
+            // paper slot is not this store's paper key, so nothing is recorded.
+            if let (None, Some(paper)) = (&pin.paper_recipient, &self.paper_key_text) {
                 let opener = keys::identity_from_paper(paper).map_err(|_| anyhow::anyhow!("invalid paper key"))?;
-                let slot = self.backend.get("slots/paper.age")?.context("remote has no paper slot")?;
-                let identity = keys::open_slot(&slot, &opener)?;
-                if keys::recipient_of(&identity)? != pin.recipient {
-                    bail!("paper slot does not match store recipient");
+                if let Some(slot) = self.backend.get("slots/paper.age")? {
+                    if let Ok(identity) = keys::open_slot(&slot, &opener) {
+                        if keys::recipient_of(&identity)? != pin.recipient {
+                            bail!("paper slot does not match store recipient");
+                        }
+                        pin.paper_recipient = Some(keys::recipient_of(&opener)?);
+                    }
                 }
-                pin.paper_recipient = Some(keys::recipient_of(&opener)?);
             }
             let key = format!("cloud.remote.{name}.store");
             let value = serde_json::to_value(&pin)?;
