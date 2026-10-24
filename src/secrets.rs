@@ -212,8 +212,11 @@ fn matches_line(key: &[u8], index: &Index, line: &str) -> BTreeSet<String> {
 fn refusal(path: &str, location: &str, hash: &str, rev: &str) -> anyhow::Error {
     let scope = format!("{path}@{}", &hash[..16]);
     let quoted = format!("'{}'", scope.replace('\'', "'\"'\"'"));
+    let display = crate::ids::display(rev);
+    let rev = if display != rev && display.len() > 7 { display[..7].to_string() } else { rev.to_string() };
     anyhow::anyhow!(
-        "secret detected at {path}:{location}; declassify id {scope}; admin: layr approve --declassify {quoted} {rev}"
+        "secret detected at {path}:{location}; declassify id {scope};\n\
+         keep the value in an overlay, or an admin marks it as not secret: layr approve --declassify {quoted} {rev}"
     )
 }
 
