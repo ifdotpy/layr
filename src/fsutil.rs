@@ -138,10 +138,176 @@ impl Src for crate::thin::Layered {
     }
 }
 
+/// On a volume that ignores case: the stored name of another entry that `path` finds, such as
+/// `README` for `readme`. `None` when `path` is free or names exactly that entry.
+#[cfg(target_os = "macos")]
+pub fn case_clash(path: &Path) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let name = path.file_name()?;
+        let m = fs::symlink_metadata(path).ok()?;
+        if crate::sys::case_sensitive_dev(m.dev(), path) {
+            return None;
+        }
+        // A file with several links: the folder listing names the entries reliably.
+        if !m.is_dir() && m.nlink() > 1 {
+            let mut other = None;
+            for e in fs::read_dir(path.parent()?).ok()?.flatten() {
+                let n = e.file_name();
+                if n == name {
+                    return None;
+                }
+                if n.to_string_lossy().to_lowercase() == name.to_string_lossy().to_lowercase() {
+                    other = Some(n.to_string_lossy().into_owned());
+                }
+            }
+            return other;
+        }
+        let stored = crate::sys::stored_name(path)?;
+        (stored != name).then(|| stored.to_string_lossy().into_owned())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+/// Refuse to write `rel` below `root` when the volume ignores case and another entry (or a
+/// folder on the way) has the same name in another case: one would replace the other.
+pub fn refuse_case_clash(root: &Path, rel: &str) -> Result<()> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (root, rel);
+        Ok(())
+    }
+    #[cfg(target_os = "macos")]
+    refuse_case_clash_apfs(root, rel)
+}
+
+#[cfg(target_os = "macos")]
+fn refuse_case_clash_apfs(root: &Path, rel: &str) -> Result<()> {
+    if fs::symlink_metadata(root).map(|m| crate::sys::case_sensitive_dev(m.dev(), root)).unwrap_or(true) {
+        return Ok(());
+    }
+    let mut path = root.to_path_buf();
+    let mut done = String::new();
+    for part in rel.split('/').filter(|c| !c.is_empty()) {
+        path.push(part);
+        if !done.is_empty() {
+            done.push('/');
+        }
+        done.push_str(part);
+        if let Some(stored) = case_clash(&path) {
+            // An empty folder with another case holds nothing: it leaves.
+            let other = path.with_file_name(&stored);
+            if fs::symlink_metadata(&other).map(|m| m.is_dir()).unwrap_or(false) && fs::read_dir(&other)?.next().is_none() {
+                crate::sys::apfs_immutable(&other, false)?;
+                fs::remove_dir(&other)?;
+                continue;
+            }
+            let parent = done.rsplit_once('/').map(|(p, _)| format!("{p}/")).unwrap_or_default();
+            bail!(
+                "{done} and {parent}{stored} differ only in case, and the volume of this store does not tell them apart.\nRename one of them, or use a store on a case-sensitive APFS volume."
+            );
+        }
+        if fs::symlink_metadata(&path).is_err() {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// Refuse a set of paths that a volume that ignores case would store as fewer entries, such
+/// as `README` and `Readme`, when `dst` is on such a volume. Ancestors count too.
+pub fn refuse_case_collisions<'a>(dst: &Path, paths: impl Iterator<Item = &'a str>) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        if crate::sys::case_sensitive(dst) {
+            return Ok(());
+        }
+        let mut seen: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> = Default::default();
+        for p in paths {
+            let mut prefix = String::new();
+            for part in p.split('/').filter(|c| !c.is_empty()) {
+                if !prefix.is_empty() {
+                    prefix.push('/');
+                }
+                prefix.push_str(part);
+                seen.entry(prefix.to_lowercase()).or_default().insert(prefix.clone());
+            }
+        }
+        let groups: Vec<String> =
+            seen.into_values().filter(|v| v.len() > 1).map(|v| v.into_iter().collect::<Vec<_>>().join(", ")).collect();
+        if !groups.is_empty() {
+            let shown: Vec<String> = groups.iter().take(10).map(|g| format!("  {g}")).collect();
+            bail!(
+                "these names differ only in case, and the volume of this store does not tell them apart:\n{}{}\nRename all but one of each group, or use a store on a case-sensitive APFS volume.",
+                shown.join("\n"),
+                if groups.len() > 10 { format!("\n  and {} more", groups.len() - 10) } else { String::new() }
+            );
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (dst, paths.count());
+        Ok(())
+    }
+}
+
 /// Metadata of `rel` below `root` without following a final link. `None` if absent.
 pub fn lmeta(root: &(impl Src + ?Sized), rel: &str) -> Option<Meta> {
     let p = root.at(rel).ok()?;
-    fs::symlink_metadata(p).ok().map(|m| meta_of(&m))
+    exact_metadata(&p, rel).map(|m| meta_of(&m))
+}
+
+/// Metadata of the entry at `path`, which is `rel` below some root, only when the volume
+/// stores exactly that name. On a volume that ignores case, `readme` also finds `README`;
+/// for Layr these are two paths.
+pub fn exact_metadata(path: &Path, rel: &str) -> Option<fs::Metadata> {
+    let m = fs::symlink_metadata(path).ok()?;
+    #[cfg(target_os = "macos")]
+    if !rel.is_empty() && !crate::sys::case_sensitive_dev(m.dev(), path) && !stored_exactly(path, rel, &m) {
+        return None;
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = rel;
+    Some(m)
+}
+
+/// True when the volume stores the last `rel` components of `path` with exactly these names.
+#[cfg(target_os = "macos")]
+fn stored_exactly(path: &Path, rel: &str, m: &fs::Metadata) -> bool {
+    // The kernel names a file with several links by one of them, maybe another one: check the
+    // name in the listing of its folder, and the folder by its own stored path.
+    if !m.is_dir() && m.nlink() > 1 {
+        let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+            return false;
+        };
+        let listed = fs::read_dir(parent).map(|rd| rd.flatten().any(|e| e.file_name() == name)).unwrap_or(false);
+        return listed
+            && rel.rsplit_once('/').is_none_or(|(dir, _)| {
+                stored_exactly(parent, dir, &fs::symlink_metadata(parent).ok().unwrap_or_else(|| m.clone()))
+            });
+    }
+    match crate::sys::stored_path(path) {
+        Some(stored) => {
+            let stored = stored.to_string_lossy();
+            stored.ends_with(&format!("/{rel}")) || *stored == *rel
+        }
+        // Without the full path: compare each name.
+        None => {
+            let mut at = path.to_path_buf();
+            for part in rel.rsplit('/') {
+                if crate::sys::stored_name(&at).is_none_or(|n| n != part) {
+                    return false;
+                }
+                at.pop();
+            }
+            true
+        }
+    }
 }
 
 pub fn read_link(root: &(impl Src + ?Sized), rel: &str) -> Result<String> {
@@ -328,6 +494,12 @@ pub fn remove_entry(root: &Path, rel: &str) -> Result<()> {
     if rel.is_empty() {
         bail!("refusing to remove the root of {}", root.display());
     }
+    // On a volume that ignores case, `readme` also finds `README`: remove only this name.
+    if let Ok(p) = safe_join(root, rel) {
+        if fs::symlink_metadata(&p).is_ok() && exact_metadata(&p, rel).is_none() {
+            return Ok(());
+        }
+    }
     crate::tree::Tree::open(root)?.remove(rel)
 }
 
@@ -372,6 +544,7 @@ fn copy_entry_impl(
 ) -> Result<()> {
     let src = src_root.at(src_rel)?;
     let m = fs::symlink_metadata(&src).with_context(|| format!("stat {}", src.display()))?;
+    refuse_case_clash(dst_root, dst_rel)?;
     let t = crate::tree::Tree::open(dst_root)?;
     t.mkdirs_for(dst_rel, own)?;
     let ft = m.file_type();

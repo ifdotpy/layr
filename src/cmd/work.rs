@@ -1223,18 +1223,19 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 let wdir = repo.working(&line);
                 // Revert every tracked path; untracked and ignored files stay.
                 let own = repo.own(&line);
-                for c in changes::without_moves(changes::file_changes(&scan.path, &target_root)?) {
-                    if skip_path(&c.path) {
-                        continue;
-                    }
-                    if c.new.is_none() {
-                        if fsutil::lmeta(&index, &c.path).is_none() {
-                            continue;
-                        }
+                let list: Vec<_> = changes::without_moves(changes::file_changes(&scan.path, &target_root)?)
+                    .into_iter()
+                    .filter(|c| !skip_path(&c.path))
+                    .collect();
+                // Removals first: on a volume that ignores case, `readme` must go before
+                // `README` comes.
+                for c in list.iter().filter(|c| c.new.is_none()) {
+                    if fsutil::lmeta(&index, &c.path).is_some() {
                         fsutil::remove_entry(&wdir, &c.path)?;
-                    } else {
-                        fsutil::copy_entry(&target_root, &c.path, &wdir, &c.path, own)?;
                     }
+                }
+                for c in list.iter().filter(|c| c.new.is_some()) {
+                    fsutil::copy_entry(&target_root, &c.path, &wdir, &c.path, own)?;
                 }
             }
         }

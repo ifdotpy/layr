@@ -101,6 +101,7 @@ pub(super) fn import(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Optio
                     parent = p.parent();
                 }
             }
+            crate::fsutil::refuse_case_collisions(&stage, tree.files.keys().map(|k| k.as_str()))?;
             for (path, entry) in &tree.files {
                 let data = read(store, &identity, entry)?;
                 target.mkdirs_for(path, None)?;

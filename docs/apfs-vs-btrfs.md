@@ -23,7 +23,8 @@ See [thin APFS states](apfs-thin-states.md) and the [measurements](../benchmarks
 5. **Move detection is a heuristic.** btrfs keeps inode numbers between snapshots.
    APFS uses the creation time. A tool that sets old times (tar, npm, zip) disables move detection for those files.
    A false match is unlikely, but possible.
-6. **File system limits.** The store needs a case-sensitive APFS volume.
+6. **File system limits.** On the default macOS volume, which ignores case, names that differ only in case
+   (`README` and `Readme`) cannot exist together; Layr refuses them with an error. A store on a case-sensitive APFS volume accepts them.
    Device nodes, sockets and named pipes are not supported.
    Transfers refuse macOS access control lists and Linux security attributes.
    `init --from` loses hard links (a known defect).

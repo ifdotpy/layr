@@ -45,8 +45,14 @@ jobs:
           python3 tests/apfs-index.py --binary "$LAYR" --root "$LAYR_APFS_TEST_ROOT"
           python3 tests/apfs-thin.py --binary "$LAYR" --root "$LAYR_APFS_TEST_ROOT"
           python3 tests/apfs-status-cache.py --binary "$LAYR" --root "$LAYR_APFS_TEST_ROOT"
+          mkdir -p "$RUNNER_TEMP/case" && python3 tests/apfs-case.py --binary "$LAYR" --root "$RUNNER_TEMP/case"
           bash tests/apfs-local.sh
           LAYR_TEST_DIRECT_MAIN=1 bash tests/run.sh t01-basic t02-merge t03-git t05-transfer t06-sync t08-gitcompat
+          # The default macOS volume ignores case: run the core commands on such a store too.
+          hdiutil create -size 2g -fs APFS -volname LayrCase -type SPARSE -o "$RUNNER_TEMP/case.sparseimage"
+          hdiutil attach "$RUNNER_TEMP/case.sparseimage" -nobrowse
+          LAYR_APFS_TEST_ROOT=/Volumes/LayrCase LAYR_TEST_DIRECT_MAIN=1 bash tests/run.sh t01-basic t02-merge t03-git
+          LAYR_APFS_TEST_ROOT=/Volumes/LayrCase python3 tests/apfs-thin.py --binary "$LAYR" --root /Volumes/LayrCase
           sudo env LAYR="$LAYR" LAYR_APFS_TEST_ROOT="$LAYR_APFS_TEST_ROOT" LAYR_APFS_TEST_USER="$(whoami)" bash tests/apfs-service.sh
       - name: Report APFS test failures
         if: failure()

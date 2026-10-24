@@ -477,6 +477,17 @@ pub fn import_commit(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str, author
         }
         found
     };
+    // On a store volume that ignores case, README and Readme would become one file.
+    #[cfg(target_os = "macos")]
+    if !crate::sys::case_sensitive(&repo.p.work_dir()) {
+        let out = base_cmd(&s).args(["ls-tree", "-r", "-t", "-z", "--name-only", commit]).output()?;
+        if !out.status.success() {
+            bail!("git ls-tree failed: {}", String::from_utf8_lossy(&out.stderr));
+        }
+        let names: Vec<String> =
+            out.stdout.split(|b| *b == 0).filter(|x| !x.is_empty()).map(|x| String::from_utf8_lossy(x).into_owned()).collect();
+        fsutil::refuse_case_collisions(&repo.p.work_dir(), names.iter().map(|n| n.as_str()))?;
+    }
     let work = repo.p.work_dir().join(ids::new_id());
     let res = (|| -> Result<StateRec> {
         let mut parents = Vec::new();

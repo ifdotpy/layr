@@ -25,11 +25,14 @@ ok "export --all writes ignored files" test -f $T/expall/local.log
 rm local.log local2.log
 mkdir -p $T/busy; echo keep > $T/busy/x
 eq "export refuses a foreign folder" "1" "$(l export $T/busy >/dev/null 2>&1; echo $?)"
+# Readme and README can exist together only on a volume that tells them apart.
+if case_sensitive; then
 echo A > Readme; echo B > README
 eq "export reports names that collide on APFS" "1" "$(l export $T/exp2 >/dev/null 2>&1; echo $?)"
 has "the colliding names are listed" "README" "$(l export $T/exp3 2>&1)"
 no "colliding names are not written" test -e $T/exp3/README
 rm Readme README
+fi
 
 echo q >> notes.txt
 
