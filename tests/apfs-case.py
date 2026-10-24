@@ -90,17 +90,17 @@ try:
     run(ci, store, 'init', 'p', '--from', plain, '-q')
     main = store / 'projects/p/lines/main'
     run(main, store, 'protect', 'main', '--remove')
-    run(main, store, 'branch', '-q', 't')
+    run(main, store, 'line', 'new', '-q', 't')
     work = main.parent / 't'
     os.rename(work / 'readme', work / 'README')
     os.rename(work / 'dir', work / 'Dir')
     run(work, store, 'add', '-A')
     status = run(work, store, 'status', '--porcelain').stdout
     assert 'R  readme -> README' in status and 'R  dir/a -> Dir/a' in status, status
-    run(work, store, 'commit', '-qm', 'case only')
+    run(work, store, 'save', '-qm', 'case only')
     assert not run(work, store, 'status', '--porcelain').stdout
     assert run(work, store, 'ls-files').stdout.split() == ['Dir/a', 'Makefile', 'README']
-    run(work, store, 'branch', '-q', 't2')
+    run(work, store, 'line', 'new', '-q', 't2')
     assert names(main.parent / 't2') == ['.git', 'Dir', 'Makefile', 'README'] or names(main.parent / 't2') == ['Dir', 'Makefile', 'README']
     run(main, store, 'merge', '-q', 't')
     assert 'README' in names(main) and 'readme' not in names(main) and 'Dir' in names(main)
@@ -111,7 +111,7 @@ try:
     run(work, store, 'mv', 'Makefile', 'makefile')
     status = run(work, store, 'status', '--porcelain').stdout
     assert 'R  Makefile -> makefile' in status, status
-    run(work, store, 'commit', '-qm', 'mv case')
+    run(work, store, 'save', '-qm', 'mv case')
     assert 'makefile' in names(work) and 'Makefile' not in names(work)
     assert 'makefile' in run(work, store, 'ls-files').stdout.split()
     print('PASS mv with a change of case', flush=True)
@@ -122,14 +122,14 @@ try:
     os.rename(work / 'Dir', work / 'dir.tmp')
     os.rename(work / 'dir.tmp', work / 'dir')
     run(work, store, 'add', '-A')
-    run(work, store, 'commit', '-qm', 'folder back to lower case')
+    run(work, store, 'save', '-qm', 'folder back to lower case')
     files = run(work, store, 'ls-files').stdout.split()
     assert 'dir/a' in files and 'dir/b' in files and not any(f.startswith('Dir/') for f in files), files
     assert not run(work, store, 'status', '--porcelain').stdout
     print('PASS a folder staged with one case and renamed back', flush=True)
 
     # 7. reset --hard to a state with the other case of a name.
-    run(work, store, 'reset', '-q', '--hard', 'HEAD~1')
+    run(work, store, 'reset', '-q', '--hard', 'head~1')
     assert 'Dir' in names(work) and 'dir' not in names(work), names(work)
     assert not run(work, store, 'status', '--porcelain').stdout
     print('PASS reset --hard across a change of case', flush=True)
@@ -137,29 +137,29 @@ try:
     # 8. Hard links on a volume that ignores case.
     os.link(work / 'README', work / 'second')
     run(work, store, 'add', '-A')
-    run(work, store, 'commit', '-qm', 'second name')
+    run(work, store, 'save', '-qm', 'second name')
     assert not run(work, store, 'status', '--porcelain').stdout
     assert 'second' in run(work, store, 'ls-files').stdout.split()
     (work / 'second').unlink()
     run(work, store, 'add', '-A')
-    run(work, store, 'commit', '-qm', 'one name')
+    run(work, store, 'save', '-qm', 'one name')
     assert 'README' in names(work) and 'README' in run(work, store, 'ls-files').stdout.split()
     print('PASS hard links', flush=True)
 
     # 9. Two lines that add NOTES and notes: the merge refuses and changes nothing.
-    run(main, store, 'branch', '-q', 'u')
+    run(main, store, 'line', 'new', '-q', 'u')
     (main / 'NOTES').write_text('upper\n')
     run(main, store, 'add', '-A')
-    run(main, store, 'commit', '-qm', 'upper')
-    head = run(main, store, 'rev-parse', 'HEAD').stdout
+    run(main, store, 'save', '-qm', 'upper')
+    head = run(main, store, 'rev-parse', 'head').stdout
     u = main.parent / 'u'
     (u / 'notes').write_text('lower\n')
     run(u, store, 'add', '-A')
-    run(u, store, 'commit', '-qm', 'lower')
+    run(u, store, 'save', '-qm', 'lower')
     r = run(main, store, 'merge', 'u', ok=False)
     assert 'differ only in case' in r.stderr, r.stdout + r.stderr
     assert (main / 'NOTES').read_text() == 'upper\n' and names(main).count('NOTES') == 1 and 'notes' not in names(main)
-    assert run(main, store, 'rev-parse', 'HEAD').stdout == head
+    assert run(main, store, 'rev-parse', 'head').stdout == head
     assert not run(main, store, 'status', '--porcelain').stdout
     print('PASS a merge of NOTES and notes refuses and changes nothing', flush=True)
 

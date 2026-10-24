@@ -46,7 +46,7 @@ try:
   log.flush(); log.seek(0); text=log.read()
   match=re.search(r'http://127\.0\.0\.1:(\d+)/',text)
   if match: port=int(match[1]); break
-  if process.poll() is not None: raise AssertionError('rootless disk stopped before startup')
+  if process.poll() is not None: raise AssertionError('rootless disk stopped before startup: '+text[-2000:])
   time.sleep(.1)
  assert port is not None,'rootless disk did not start'
  def request(method,path='/',headers=None):

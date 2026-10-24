@@ -944,7 +944,8 @@ mod tests {
     fn auxiliary_states_cross_the_peer_protocol() {
         use crate::ctx::Caller;
         use crate::model::Record;
-        let base = std::path::PathBuf::from(std::env::var_os("LAYR_TEST_AUX_ROOT").expect("LAYR_TEST_AUX_ROOT"));
+        // Only a root Btrfs fixture sets this folder.
+        let Some(base) = std::env::var_os("LAYR_TEST_AUX_ROOT").map(std::path::PathBuf::from) else { return };
         let binary = std::env::var("LAYR_TEST_BINARY").expect("LAYR_TEST_BINARY");
         let source = base.join("source");
         btrfs::create_subvolume(&source).unwrap();

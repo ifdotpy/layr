@@ -92,6 +92,23 @@ fn ioctl_ptr<T>(fd: BorrowedFd, req: libc::c_ulong, arg: &mut T) -> io::Result<(
     Ok(())
 }
 
+/// True when the folder `path`, or the nearest folder above it that exists, ignores case
+/// (ext4 `casefold`, set with `chattr +F`). New folders take this flag from their parent.
+#[cfg(target_os = "linux")]
+pub fn casefold(path: &std::path::Path) -> bool {
+    use rustix::fs::{open, Mode, OFlags};
+    const FS_CASEFOLD_FL: libc::c_long = 0x4000_0000;
+    let Some(dir) = path.ancestors().find(|p| p.is_dir()) else {
+        return false;
+    };
+    let Ok(fd) = open(dir, OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC, Mode::empty()) else {
+        return false;
+    };
+    let mut flags: libc::c_long = 0;
+    // File systems without inode flags, such as some network ones, answer with an error: no casefold.
+    ioctl_ptr(fd.as_fd(), libc::FS_IOC_GETFLAGS as _, &mut flags).is_ok() && flags & FS_CASEFOLD_FL != 0
+}
+
 /// Create the subvolume `name` in the folder `dir`.
 pub fn subvol_create(dir: BorrowedFd, name: &str) -> Result<()> {
     let mut a = vol_args(0, 0, name)?;
@@ -512,9 +529,9 @@ pub fn case_sensitive_dev(dev: u64, path: &std::path::Path) -> bool {
 }
 
 /// True when names that differ only in case are different entries on the volume of `path`.
-#[cfg(target_os = "macos")]
 /// A path that cannot be checked counts as case-sensitive: Layr then refuses nothing and keeps
 /// its earlier behavior.
+#[cfg(target_os = "macos")]
 pub fn case_sensitive(path: &std::path::Path) -> bool {
     // The nearest folder that exists answers for a path that is not made yet.
     let mut at = Some(path);

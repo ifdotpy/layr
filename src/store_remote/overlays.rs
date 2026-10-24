@@ -420,7 +420,8 @@ mod tests {
     #[test]
     #[ignore = "invoked by t35 with its actual store and machine keys"]
     fn overlay_ciphertexts_reject_nonreader_keys() {
-        let root = std::path::PathBuf::from(std::env::var("LAYR_TEST_OVERLAY_DIR").unwrap());
+        // Only t35 sets these folders and keys.
+        let Some(root) = std::env::var_os("LAYR_TEST_OVERLAY_DIR").map(std::path::PathBuf::from) else { return };
         let croot = std::path::PathBuf::from(std::env::var("LAYR_TEST_OVERLAY_C_ROOT").unwrap());
         let aroot = std::path::PathBuf::from(std::env::var("LAYR_TEST_OVERLAY_A_ROOT").unwrap());
         let signing = |root: &std::path::Path| {
@@ -462,7 +463,8 @@ mod tests {
     #[test]
     #[ignore = "invoked by t35 after it removes reader B"]
     fn a_removed_reader_cannot_substitute_the_layer_recipient() {
-        let root = std::path::PathBuf::from(std::env::var("LAYR_TEST_OVERLAY_DIR").unwrap());
+        // Only t35 sets these folders and keys.
+        let Some(root) = std::env::var_os("LAYR_TEST_OVERLAY_DIR").map(std::path::PathBuf::from) else { return };
         let aroot = std::path::PathBuf::from(std::env::var("LAYR_TEST_OVERLAY_A_ROOT").unwrap());
         let broot = std::path::PathBuf::from(std::env::var("LAYR_TEST_OVERLAY_B_ROOT").unwrap());
         let signing = |root: &std::path::Path| {

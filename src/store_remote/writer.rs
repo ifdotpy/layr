@@ -726,7 +726,8 @@ mod tests {
         use crate::model::{LineChange, LineState, Record, StateRec};
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
-        let destination = std::env::var("LAYR_TEST_PORTABLE_DIR").expect("fixture directory");
+        // The fixture writer runs only from t23, which sets its folders.
+        let Ok(destination) = std::env::var("LAYR_TEST_PORTABLE_DIR") else { return };
         let paper_file = std::env::var("LAYR_TEST_PORTABLE_KEY").expect("fixture key path");
         let local = std::env::temp_dir().join(crate::ids::new_id());
         std::fs::create_dir(&local).unwrap();
