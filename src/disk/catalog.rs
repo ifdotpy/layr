@@ -106,6 +106,9 @@ fn person_stores(home: &Path) -> Result<(Option<crate::person::Access>, BTreeMap
 }
 
 pub(super) fn profile_env(remote: &str, url: &str, home: &Path, env: &mut HashMap<String, String>) -> Result<()> {
+    if !url.starts_with("s3://") {
+        return Ok(());
+    }
     if !env.get("AWS_PROFILE").is_some_and(|v| !v.is_empty()) {
         let project = std::env::var("LAYR_PROJECT").ok().or_else(|| {
             std::env::current_dir()
@@ -150,19 +153,26 @@ pub(super) fn status(home: &Path, json: bool) -> Result<()> {
                 continue;
             }
             let message = "no address: run layr person accept again with --remote <url>";
-            rows.push(serde_json::json!({"name":format!("project-{}",crate::ids::short(&pin.project)),"project":pin.project,"url":null,"status":message,"installed":false,"address":null}));
+            rows.push(serde_json::json!({"name":format!("project-{}",crate::ids::short(&pin.project)),"project":pin.project,"url":null,"status":message,"installed":false,"installed_mode":launch::mode_label(installed.first().map(|(url,_)|url.as_str())),"address":null}));
         }
     }
     if json {
-        println!("{}", serde_json::to_string(&rows)?);
+        println!(
+            "{}",
+            serde_json::json!({"installed_mode":launch::mode_label(installed.first().map(|(url,_)|url.as_str())),"stores":rows})
+        );
     } else {
+        if rows.is_empty() {
+            println!("installed mount mode: {}", launch::mode_label(installed.first().map(|(url, _)| url.as_str())));
+        }
         for row in rows {
             println!(
-                "{}\t{}\t{}\t{}",
+                "{}\t{}\t{}\t{}\t{}",
                 row["url"].as_str().or_else(|| row["project"].as_str()).unwrap_or(""),
                 row["status"].as_str().unwrap(),
                 if row["installed"] == true { "installed" } else { "not installed" },
-                row["address"].as_str().unwrap_or("")
+                row["address"].as_str().unwrap_or(""),
+                row["installed_mode"].as_str().unwrap_or("")
             );
         }
     }
@@ -175,12 +185,14 @@ fn status_rows(
     active: &[(Vec<String>, String)],
 ) -> Result<Vec<serde_json::Value>> {
     let mut rows = Vec::new();
+    let installed_mode = installed.first().map(|(url, _)| url.as_str());
     for store in stores {
         let unlocked = keystore::get(&keystore::account(&store.url))?.is_some();
         let installed = installed.iter().any(|(url, _)| url == "--all" || url == &store.url);
         let address =
             active.iter().find(|(urls, _)| urls.iter().any(|url| url == "--all" || url == &store.url)).map(|(_, addr)| addr);
-        rows.push(serde_json::json!({"name":store.name,"url":store.url,"status":if unlocked {"unlocked"} else {"locked"},"installed":installed,"address":address}));
+        let mode = launch::mode_label(installed_mode);
+        rows.push(serde_json::json!({"name":store.name,"url":store.url,"status":if unlocked {"unlocked"} else {"locked"},"installed":installed,"installed_mode":mode,"address":address}));
     }
     Ok(rows)
 }
@@ -246,6 +258,7 @@ mod tests {
         .unwrap();
         assert_eq!(rows[0]["status"], "unlocked");
         assert_eq!(rows[0]["installed"], true);
+        assert_eq!(rows[0]["installed_mode"], "all stores");
         assert_eq!(rows[0]["address"], "http://127.0.0.1:8095/");
         assert!(!serde_json::to_string(&rows).unwrap().contains(&identity));
         keystore::remove(&account).unwrap();

@@ -48,6 +48,7 @@ impl S3 {
     pub fn new(bucket: &str, region: &str, credentials: Credentials, endpoint: Option<&str>) -> Result<Self> {
         let http = Client::builder()
             .user_agent("layr")
+            .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(30))
             .tcp_keepalive(Duration::from_secs(60))
             .build()?;

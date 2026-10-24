@@ -252,7 +252,12 @@ layr mount --remove --all
 The all-store disk has one folder per known store.
 Remote names identify the folders. Duplicate names get a number suffix.
 A locked store contains `LOCKED.txt` with its unlock command.
-The macOS service starts one Finder disk named `Layr` at login.
+The macOS service `ws.layr.mount` starts one Finder disk named `Layr` at login.
+`--install --all` replaces a single-store install.
+`--install <remote>` replaces an all-store install.
+Each command prints the mode that it replaces.
+`--remove --all` exits with code 2 if the installed mode is not all stores.
+Status includes the installed mode. Its JSON object contains `installed_mode` and `stores`.
 Single-store `--install` and `--remove` retain their existing use.
 Installed agents use only the Keychain to open store data.
 A lock remains in effect after a restart or reboot until `layr mount --unlock`.

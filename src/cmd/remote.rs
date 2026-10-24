@@ -518,7 +518,8 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
             env.entry("HOME".into()).or_insert_with(|| ctx.caller.home.to_string_lossy().into_owned());
             crate::privs::as_caller_fs(ctx, || {
                 let profile = layr_store::aws::profile::Profile::load_with_env(&profile, &env)?;
-                profile.login(&reqwest::blocking::Client::new(), |url, code| {
+                let http=reqwest::blocking::Client::builder().redirect(reqwest::redirect::Policy::none()).build()?;
+                profile.login(&http, |url, code| {
                     // Device authorization must be visible before the command waits.
                     eprintln!("Open: {url}\nCode: {code}");
                 })

@@ -103,8 +103,7 @@ impl View for All {
 
 pub(super) fn run(a: &crate::args::Parsed, home: &Path) -> Result<i32> {
     if a.has("--remove") {
-        launch::remove_all(home)?;
-        return Ok(0);
+        return launch::remove_all(home);
     }
     if a.has("--paper-key-file") || a.has("--paper-key-stdin") {
         bail!("unlock each store with layr mount --unlock <remote> first");

@@ -513,8 +513,7 @@ pub fn run(args: &[String]) -> Result<i32> {
         if a.has("--install") || !a.pos.is_empty() {
             bail!("mount --remove takes no remote");
         }
-        launch::remove(&home)?;
-        return Ok(0);
+        return launch::remove(&home);
     }
     if a.pos.len() > 1 {
         bail!("mount takes one remote");
