@@ -31,6 +31,7 @@ pub struct Options {
 pub struct Report {
     pub records: usize,
     pub states: usize,
+    pub state_ids: Vec<String>,
     pub files: usize,
     pub bytes: u64,
     pub omitted: Vec<String>,

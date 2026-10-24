@@ -558,7 +558,10 @@ pub fn op(ctx: &Ctx, args: &[String]) -> Result<i32> {
     for r in repo.p.db.records(100000)? {
         if !a.has("--all") {
             if let Some(l) = &line {
-                if !r.lines.contains_key(&l.id) && r.data.get("line").and_then(|v| v.as_str()) != Some(&l.id) {
+                if !matches!(r.op.as_str(), "push" | "sync")
+                    && !r.lines.contains_key(&l.id)
+                    && r.data.get("line").and_then(|v| v.as_str()) != Some(&l.id)
+                {
                     continue;
                 }
             }
@@ -567,11 +570,19 @@ pub fn op(ctx: &Ctx, args: &[String]) -> Result<i32> {
             outln!(ctx, "{}", serde_json::to_string(&r)?);
         } else {
             let undone = if repo.p.db.undone(&r.id)? { " (undone)" } else { "" };
-            let what = r
-                .states
-                .first()
-                .map(|s| format!(" {} {}", ids::short(&s.id), s.message.lines().next().unwrap_or("")))
-                .unwrap_or_default();
+            let what = if matches!(r.op.as_str(), "push" | "sync") {
+                format!(
+                    " {}: states sent {}, received {}",
+                    r.data["remote"].as_str().unwrap_or(""),
+                    r.data["states_sent"],
+                    r.data["states_received"]
+                )
+            } else {
+                r.states
+                    .first()
+                    .map(|s| format!(" {} {}", ids::short(&s.id), s.message.lines().next().unwrap_or("")))
+                    .unwrap_or_default()
+            };
             let session = r.actor.session.as_ref().map(|a| format!(" [{a}]")).unwrap_or_default();
             outln!(
                 ctx,
@@ -611,9 +622,11 @@ pub fn try_cmd(ctx: &Ctx, args: &[String]) -> Result<i32> {
             if !a.paths.is_empty() {
                 return Err(exit(128, USAGE));
             }
-            let command = repo.p.config_value(&format!("check.{name}"))?.and_then(|v| v.as_str().map(String::from)).ok_or_else(
-                || exit(128, format!("check '{name}' is not defined (layr config check.{name} '<command>')")),
-            )?;
+            let command = repo
+                .p
+                .config_value(&format!("check.{name}"))?
+                .and_then(|v| v.as_str().map(String::from))
+                .ok_or_else(|| exit(128, format!("check '{name}' is not defined (layr config check.{name} '<command>')")))?;
             vec!["sh".into(), "-c".into(), command]
         }
         None => {

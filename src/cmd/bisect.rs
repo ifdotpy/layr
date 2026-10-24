@@ -55,6 +55,18 @@ fn first_parent(repo: &Repo, good: &str, bad: &str) -> Result<Vec<StateRec>> {
 
 pub fn run(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let a = parse(&Spec::new().value("--good").value("--bad").flag("--auto").value("--ref-log").flag("--json"), args)?;
+    if a.pos == ["list"] && a.paths.is_empty() {
+        let h = here(ctx)?;
+        let rows = h.repo.read_model()?.bisect_results();
+        if a.has("--json") {
+            outln!(ctx, "{}", serde_json::to_string(&rows)?);
+        } else {
+            for row in rows {
+                outln!(ctx, "{} {}", row["id"].as_str().unwrap_or(""), row["first_bad"].as_str().unwrap_or(""));
+            }
+        }
+        return Ok(0);
+    }
     if a.pos != ["run"] || a.paths.is_empty() {
         bail!("usage: layr bisect run [--good <rev>] [--bad <rev>] [--auto] [--ref-log <ref>] [--json] -- <cmd>");
     }
@@ -149,7 +161,16 @@ pub fn run(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let first = &states[hi];
     let origins: Vec<String> = repo.p.db.attestations(&first.id, Some("origin"))?.into_iter().map(|a| a.payload_digest).collect();
-    let result = serde_json::json!({"state":first.id,"message":first.message,"kind":crate::db::kind_str(first.kind),"origin":origins,"steps":steps});
+    let result = serde_json::json!({"good":good,"bad":bad,"first_bad":first.id,"argv":a.paths,"state":first.id,"message":first.message,"kind":crate::db::kind_str(first.kind),"origin":origins,"steps":steps});
+    {
+        let _lock = repo.p.lock()?;
+        let mut rec = crate::model::Record::new("bisect.run");
+        rec.data = result.clone();
+        if let Some(line) = &h.line {
+            rec.data["line"] = serde_json::json!(line.id);
+        }
+        repo.commit_record(ctx, rec)?;
+    }
     if json {
         outln!(ctx, "{}", result);
     } else {

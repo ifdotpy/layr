@@ -118,6 +118,16 @@ l save -qm pick-source
 PICK=$(state_id head)
 cd ../main
 l pick -q "$PICK" >/dev/null
+PICK_CHANGE=$(l log head -n 1 --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["change_id"])')
+l change show "$PICK_CHANGE" --json > "$T/pick-version.json"
+ok 'pick records its actor and exact target head' python3 - "$T/pick-version.json" "$PICK" <<'PYPICK'
+import json,sys
+row=json.load(open(sys.argv[1]))['versions'][-1]
+operation=row['operation']
+assert operation['kind']=='pick' and operation['source']==sys.argv[2]
+assert operation['target_head']==row['state']['parents'][0]
+assert operation['actor']['name'] and operation['target_line']
+PYPICK
 l invert head >/dev/null
 
 # Retain an auto state without moving the named head.
@@ -199,15 +209,44 @@ eq 'a refused merge keeps the target head' "$MERGE_BEFORE" "$(state_id head)"
 MERGE_CANDIDATE=$(l op log --all -n 100000 --json | python3 -c 'import json,sys; rows=[json.loads(line) for line in sys.stdin]; print(next(r["states"][0]["id"] for r in rows if r["op"]=="merge.candidate" and r["data"]["theirs"]==sys.argv[1]))' "$MERGE_SOURCE")
 printf '{"merge":%s,"ref":%s}\n' "$MERGE_ALLOWED" "$REF_ALLOWED" > "$T/cli/merge-refusals.json"
 
+# Bisect stores both executed checks and later reuse without changing the line head.
+l bisect run --good "$BASE" --bad "$V3" --json -- sh -c 'test ! -f feature.txt' > "$T/bisect-first.json"
+l bisect run --good "$BASE" --bad "$V3" --json -- sh -c 'test ! -f feature.txt' > "$T/bisect-reused.json"
+ok 'bisect reuse preserves every check result' python3 - "$T/bisect-first.json" "$T/bisect-reused.json" <<'PYBISECT'
+import json, sys
+first, second = [json.load(open(path)) for path in sys.argv[1:]]
+assert first['first_bad'] == second['first_bad']
+assert all(step['reused'] for step in second['steps'])
+assert [(s['state'], s['exit']) for s in first['steps']] == [(s['state'], s['exit']) for s in second['steps']]
+PYBISECT
+no 'invalid bisect bounds are refused' l bisect run --good "$V3" --bad "$BASE" --json -- sh -c 'test ! -f feature.txt'
+l bisect list --json > "$T/bisect-history.json"
+eq 'invalid bounds add no bisect result' 2 "$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "$T/bisect-history.json")"
+
+# The peer transport requires Btrfs. Store and version checks also run on macOS.
+if [ "$(uname -s)" = Linux ] && [ -z "${LAYR_OVERLAYFS_TEST_ROOT:-}" ]; then
+    new_fs "$T/peer" 4G
+    l remote add peer ssh://fixture/model-golden
+    l sync peer --command -q -- env LAYR_ROOT="$T/peer/store" "$LAYR" serve-peer model-golden
+fi
+
 l remote add store "file://$T/archive" --paper-key-out "$T/paper" >/dev/null
 l push store -q
-ok 'the pushed store has encrypted trees for v1 and v2' python3 - "$T/archive" "$V1" "$V2" <<'PYPRIOR'
+ok 'one push sends all three version trees' python3 - "$T/archive" "$V1" "$V2" "$V3" <<'PYPRIOR'
 import sys
 from pathlib import Path
 store = Path(sys.argv[1])
 for state in sys.argv[2:]:
     assert any((store / 'states' / state).glob('*.tree.age')), state
 PYPRIOR
+l gc --remote store --json > "$T/remote-gc.json"
+ok 'remote GC keeps all three version trees' python3 - "$T/archive" "$V1" "$V2" "$V3" <<'PYGC'
+import sys
+from pathlib import Path
+for state in sys.argv[2:]:
+    assert any((Path(sys.argv[1]) / 'states' / state).glob('*.tree.age')), state
+PYGC
+ok 'all version trees remain readable after remote GC' l fsck --remote store --files
 
 # Only selectors cross into the model example. No CLI answers enter its input.
 python3 - "$T/model/request.json" "$CHANGE" "$V3" "$PROBE_BASE" "$PROBE_HEAD" "$MERGE_SOURCE" "$MERGE_CANDIDATE" <<'PY'
@@ -239,6 +278,18 @@ assert any(s['id'] == sys.argv[3] and len(s['parents']) == 2 for s in rows), 'th
 Path(sys.argv[2]).write_text(json.dumps(rows))
 PY
 l change show "$CHANGE" --json > "$T/cli/change.json"
+l bisect list --json > "$T/cli/bisect.json"
+l remote list --json | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["copies"]))' > "$T/cli/copies.json"
+ok 'change versions retain explicit amend and replay actors and targets' python3 - "$T/cli/change.json" <<'PYVERSION'
+import json, sys
+rows = json.load(open(sys.argv[1]))['versions']
+assert 'operation' not in rows[0]
+assert [row['operation']['kind'] for row in rows[1:]] == ['amend', 'replay']
+assert all(row['operation']['actor']['name'] and row['operation']['machine'] and row['operation']['time'] for row in rows[1:])
+assert all(row['operation']['target_line'] and row['operation']['target_head'] for row in rows[1:])
+assert rows[1]['operation']['source'] == rows[0]['state']['id']
+assert rows[2]['operation']['source'] == rows[1]['state']['id']
+PYVERSION
 l ref list --json > "$T/cli/refs.json"
 l ref log env/prod --json > "$T/cli/ref-log.json"
 l queue list --json > "$T/cli/queue.json"
@@ -253,6 +304,10 @@ Path(sys.argv[2]).write_text(json.dumps(rows))
 PY
 l probe diff "$PROBE_BASE" "$PROBE_HEAD" --json > "$T/cli/probe-diff.json"
 eq 'the fixture has exactly two lines' 2 "$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "$T/cli/lines.json")"
+
+# A transfer result is appended after success and travels in the next exchange.
+# Capture CLI answers first, then publish exactly that record set for the model.
+l push store -q
 
 (cd "$REPO" && cargo run -q -p layr-model --example store_golden -- "$T/archive" "$T/paper" "$T/model")
 
@@ -281,12 +336,15 @@ assert config['path_rules']['main']['feature.txt'] == 'maintainer'
 overlay = load('overlays')[0]
 assert overlay['name'] == 'secrets' and overlay['readable'] and overlay['readers'] and len(overlay['managers']) == 1
 assert 'private.txt' in overlay['paths']
-copy = load('copies')[0]
+copy = next(row for row in load('copies') if row['name'] == 'store')
 assert copy['name'] == 'store' and copy['address'].startswith('file://')
-assert 'time' not in copy and 'machines' not in copy
+assert copy['time'] > 0 and copy['machine']
+assert copy['last']['result'] == 'success' and copy['last']['states_sent'] == len(copy['last']['state_ids_sent'])
+assert copy['last']['overlays']
 machine = load('machines')[0]
 assert machine['trusted'] and machine['fingerprint'].startswith('sha256:') and len(machine['fingerprint']) == 71
-assert load('bisect') == []
+assert len(load('bisect')) == 2
+assert all(step['reused'] for step in load('bisect')[0]['steps'])
 assert load('merge_status')['state'] and load('merge_status')['already_in_target']
 browser = load('merge_status_browser')
 assert browser and all(row['target_machine'] and row['allowed'] is None and row['status'] == 'not_decided' for row in browser)
@@ -317,7 +375,7 @@ import difflib, json, sys
 from pathlib import Path
 
 cli, model, counts = map(Path, sys.argv[1:])
-names = ('lines', 'log', 'log-auto', 'change', 'refs', 'ref-log', 'queue', 'attestations', 'operations', 'probe-diff', 'merge-refusals', 'interdiff', 'interdiff-replay')
+names = ('lines', 'log', 'log-auto', 'change', 'refs', 'ref-log', 'queue', 'attestations', 'operations', 'probe-diff', 'merge-refusals', 'interdiff', 'interdiff-replay', 'copies', 'bisect')
 passed = failed = 0
 for name in names:
     try:

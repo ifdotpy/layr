@@ -10,7 +10,7 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | history       | `log [--json]`, `show`, `blame`, `grep`, `ls-files`, `rev-parse`, `merge-base`                        |
 | lines         | `line new <name> [<rev>] [--count N] [--json]`, `line list [--json]`, `line delete`, `line rename`, `tag`, `merge [--expect]`, `pick`, `invert`, `replay`, `adopt` |
 | access        | `access [list|grant [--until <30m|2h|1d>]|revoke|deny|allow|check]`, `protect [<pattern> --update <role> --check <names> --path <path>=<role> --approvals <n> --approvers <principals> --direct --rewrite <role> --no-expect | --remove]`, `approve [--withdraw] <state>`, `attest <kind> <rev> [--payload <file>]`, `attestations <rev> [--kind <kind>] [--json]` |
-| safety        | `undo`, `op log`, `save`, `try <state> -- <cmd>`, `try <state> --check <name>`, `bisect run [--good <rev>] [--bad <rev>] [--auto] [--ref-log <ref>] [--json] -- <cmd>`, `gc`, `fsck`, `reindex` |
+| safety        | `undo`, `op log`, `save`, `try <state> -- <cmd>`, `try <state> --check <name>`, `bisect list [--json]`, `bisect run [--good <rev>] [--bad <rev>] [--auto] [--ref-log <ref>] [--json] -- <cmd>`, `gc`, `fsck`, `reindex` |
 | Git bridge    | `git remote`, `git fetch`, `git pull`, `git push [--squash]`, `git clone`, `git sync`                             |
 | remotes       | `remote add\|list\|self\|remove\|trust`, `sync <remote>`, `push <remote>`, `fetch <remote>`, `pull <remote>`, `clone <url>` |
 | OCI           | `push <oci-remote> <rev> [--runnable <name>] [--json]`, `access token <principal> [--until <duration>]`, `access token --revoke <principal>` |
@@ -24,12 +24,21 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | changes       | `change list`, `change show <id>`, `change log <id>`, `change diff <id> [--from vN] [--to vM]` |
 | setup         | `init`, `projects`, `config`, `cache add|remove|list|repair`, `daemon`                        |
 
+Successful peer `push` and `sync`, and store `push`, append a signed operation record.
+The record includes the remote name and URL, direction, state IDs, counts, bytes, overlays, and result.
+The URL excludes credentials, query parameters, and fragments.
+The record stays local until the next exchange sends it.
+`op log` shows these project operations from any line.
+`remote list --json` includes `copies` with the last success time, machine, and transfer details.
+
 `line new <name> [<rev>] [--count N]` creates lines. Use `line list`, `line delete <name>`, or `line rename [<old>] <new>` to manage them.
 A line is a folder. Use `cd` to enter it.
 
 `save -m <message>` makes a named state. `--message` is the long form of `-m`.
 `save -F <file>` reads the message from a file. `--file` is the long form of `-F`.
 `save --amend` replaces the current head state. Without a new message, it keeps the current message.
+The signed operation records its actor, version kind, source state, target line, and target head.
+`replay` and `pick` record the same version fields. Old states need no migration.
 
 Named saves also accept these options:
 

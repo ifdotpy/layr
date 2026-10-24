@@ -648,7 +648,31 @@ impl<'a> Repo<'a> {
         }
     }
 
-    /// Write a record. On failure, the states it names are deleted (no snapshot without record).
+    /// Read authenticated records already accepted into the local database.
+    pub fn read_model(&self) -> Result<layr_model::Project> {
+        let records = self
+            .p
+            .db
+            .all_lines()?
+            .iter()
+            .map(|line| crate::oplog::parse_line(line, None).map(|s| s.record))
+            .collect::<Result<Vec<_>>>()?;
+        layr_model::Project::from_records(&self.p.id, records, &self.p.store.machine.id)
+    }
+
+    /// Append a completed named transfer through the normal signed record path.
+    pub fn record_transfer(&self, ctx: &Ctx, op: &str, remote: &str, url: &str, transfer: &crate::model::Transfer) -> Result<()> {
+        let _lock = self.p.lock()?;
+        let mut rec = Record::new(op);
+        rec.data = serde_json::to_value(transfer)?;
+        rec.data["remote"] = serde_json::json!(remote);
+        rec.data["url"] = serde_json::json!(layr_model::operations::public_url(url));
+        rec.data["result"] = serde_json::json!("success");
+        self.commit_record(ctx, rec)?;
+        Ok(())
+    }
+
+    /// Write a record. On failure, delete the states it names.
     pub fn commit_record(&self, ctx: &Ctx, rec: Record) -> Result<Record> {
         let states = rec.states.clone();
         match self.p.append(rec, &ctx.actor()) {

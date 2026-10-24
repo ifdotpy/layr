@@ -195,6 +195,7 @@ fn merge(report: &mut Report, next: Report, name: &str) {
     }
     report.records += next.records;
     report.states += next.states;
+    report.state_ids.extend(next.state_ids);
     report.files += next.files;
     report.bytes += next.bytes;
     report.overlaps += next.overlaps;

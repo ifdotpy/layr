@@ -543,7 +543,7 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 machines.push(json!({"id": id, "name": name, "key": key, "current": current, "trusted": trusted}));
             }
             if a.has("--json") {
-                outln!(ctx, "{}", json!({"remotes": remotes, "machines": machines}));
+                outln!(ctx, "{}", json!({"remotes": remotes, "machines": machines, "copies":repo.read_model()?.copies()}));
             } else {
                 for r in remotes {
                     outln!(ctx, "remote\t{}\t{}", r["name"].as_str().unwrap(), r["url"].as_str().unwrap());
@@ -730,7 +730,7 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
                 // ssh passes these arguments to a remote shell. Project names need quoting too.
                 vec!["ssh".into(), "--".into(), host, format!("layr serve-peer '{}'", project.replace('\'', "'\\''"))]
             };
-            replicate::exchange(
+            let transfer = replicate::exchange(
                 ctx,
                 &command,
                 if op == "pull" { "fetch" } else { op },
@@ -739,6 +739,9 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
                 a.has("-q") || (op == "pull" && a.has("--json")),
                 a.has("--json") && op != "pull",
             )?;
+            if matches!(op, "push" | "sync") {
+                h.repo.record_transfer(ctx, op, name, &url, &transfer)?;
+            }
         }
         Kind::Store => {
             if a.has("--command") {
@@ -764,6 +767,23 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
             if !report.missing_lines.is_empty() {
                 print_store_report(ctx, &report, op, a.has("--json"), a.has("-q"))?;
                 return Ok(2);
+            }
+            if op == "push" {
+                h.repo.record_transfer(
+                    ctx,
+                    op,
+                    name,
+                    &url,
+                    &crate::model::Transfer {
+                        direction: "push".into(),
+                        records_sent: report.records,
+                        states_sent: report.states,
+                        bytes_sent: report.bytes,
+                        state_ids_sent: report.state_ids.clone(),
+                        overlays: report.overlays.clone(),
+                        ..Default::default()
+                    },
+                )?;
             }
             if op != "pull" || !a.has("--json") {
                 print_store_report(ctx, &report, op, a.has("--json"), a.has("-q"))?;

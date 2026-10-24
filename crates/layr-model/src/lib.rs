@@ -9,6 +9,7 @@
 pub mod authority;
 pub mod diff;
 pub mod interdiff;
+pub mod operations;
 pub mod policy;
 pub mod probes;
 pub mod protection;
@@ -404,7 +405,11 @@ impl Project {
         let mut records: Vec<_> = self
             .records
             .iter()
-            .filter(|r| line.is_none_or(|l| r.lines.contains_key(l) || r.data["line"].as_str() == Some(l)))
+            .filter(|r| {
+                line.is_none_or(|l| {
+                    matches!(r.op.as_str(), "push" | "sync") || r.lines.contains_key(l) || r.data["line"].as_str() == Some(l)
+                })
+            })
             .cloned()
             .collect();
         records.sort_by(|a, b| (b.time, b.seq).cmp(&(a.time, a.seq)));
@@ -498,9 +503,14 @@ impl Project {
         let rows: Vec<_> = versions
             .iter()
             .enumerate()
-            .map(
-                |(i, s)| serde_json::json!({"version":format!("v{}",i+1),"state":s,"attestations":self.attestations(&s.id,None)}),
-            )
+            .map(|(i, s)| {
+                let mut row =
+                    serde_json::json!({"version":format!("v{}",i+1),"state":s,"attestations":self.attestations(&s.id,None)});
+                if let Some(version) = self.version_info(&s.id) {
+                    row["operation"] = version;
+                }
+                row
+            })
             .collect();
         let behavior = match versions.last().map(|s| self.change_behavior(s, context)).transpose() {
             Ok(Some(value)) => value,
