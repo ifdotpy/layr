@@ -39,6 +39,21 @@ pub fn overlay(ctx: &Ctx, args: &[String]) -> Result<i32> {
 fn principals(list: &[String]) -> Result<Vec<String>> {
     let mut out = Vec::new();
     for item in list.iter().flat_map(|s| s.split(',')).map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        if let Some(machine) = item.strip_prefix("machine:") {
+            if !crate::model::is_uuid(machine) {
+                return Err(exit(128, "a machine reader needs its UUID"));
+            }
+            out.push(item.to_string());
+            continue;
+        }
+        if let Some(person) = item.strip_prefix("person:") {
+            let (login, recipient) = person.split_once('=').ok_or_else(|| exit(128, "use person:<login>=<age recipient>"))?;
+            if !layr_store::person::login_name(login) || !layr_store::keys::valid_recipient(recipient) {
+                return Err(exit(128, "invalid person reader or recipient"));
+            }
+            out.push(item.to_string());
+            continue;
+        }
         match parse_principal(item) {
             Some(p) => out.push(p),
             None => return Err(exit(128, format!("fatal: unknown user or group '{item}'"))),
@@ -181,7 +196,9 @@ fn readers(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let list = principals(&a.pos[1..])?;
     let _lock = orepo.p.lock()?;
-    crate::cmd::admin::set_config(ctx, &orepo, "access", access_map(info.owner, &list))?;
+    let mut record = Record::new("overlay.readers");
+    record.data = serde_json::json!({"config":{"access":access_map(info.owner, &list)}});
+    orepo.commit_record(ctx, record)?;
     Ok(0)
 }
 

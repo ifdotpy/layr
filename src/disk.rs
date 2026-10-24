@@ -583,8 +583,8 @@ mod tests {
     fn url_pin_updates_preserve_other_urls_and_refuse_a_conflicting_first_use() {
         let root = std::env::temp_dir().join(crate::ids::new_id());
         let path = root.join("mount-pins.json");
-        let first = StorePin { project: crate::ids::new_id(), recipient: "age1first".into() };
-        let second = StorePin { project: crate::ids::new_id(), recipient: "age1second".into() };
+        let first = StorePin { project: crate::ids::new_id(), recipient: "age1first".into(), paper_recipient: None };
+        let second = StorePin { project: crate::ids::new_id(), recipient: "age1second".into(), paper_recipient: None };
         assert!(record_pin(&path, "file:///one", &first).unwrap());
         assert!(record_pin(&path, "file:///two", &second).unwrap());
         assert!(!record_pin(&path, "file:///one", &first).unwrap());

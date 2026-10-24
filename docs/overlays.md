@@ -128,10 +128,8 @@ files. The cost is at the edge of the folder: section 6.
 
 - `layr git push` exports only the states of the shared set. A state that changed only overlays
   makes no shared state, so git gets no commit for it.
-- A future store format can encrypt overlay states for their readers.
-  The current CLI sends only the shared set.
-- `layr sync` sends states to trusted machines. Which overlays go to which machine is open
-  (section 7).
+- Store pushes include every overlay. Each overlay has a separate age key for each store remote.
+- Peer sync includes each overlay that permits the peer machine. Section 10 defines these rules.
 
 ## 4. Who sees what
 
@@ -427,7 +425,7 @@ owner changes with named saves and a user who merges into the line changes by th
 - Automatic states of a line with overlays leave the overlay files out, the paths of pending
   moves, and copies of overlay files under other names (moved, or the same content). So no state
   of the project holds an overlay file, and `push`, `export`, `sync` and `show`/`grep`
-  of any state give the shared set only.
+  of a shared state give the shared set only. Push and sync also carry the separate overlay projects.
 - Automatic states made before a file moved into an overlay hold it (an automatic state holds the
   whole working folder, ignored files too), and every reader of the project reads them. `overlay
   move --purge` deletes those states of the line. States of the shared set that held a file keep
@@ -465,9 +463,7 @@ shared set only, which is safe but not a decision), 9 to 11 (folder overlays), 1
 
 ### 9.7 Limits and what is left
 
-- Not built: routing patterns (`overlay route`), ephemeral mode, folder overlays, encrypted
-  remote copies, replication of overlays (`sync` carries the shared set; a restored project
-  shows no overlay files, and `fsck` reports the missing overlays), `--expect` of a stack
+- Not built: routing patterns (`overlay route`), ephemeral mode, folder overlays, `--expect` of a stack
   (question 4: `--expect` names the shared state; the follow overlays are merged as they are).
 - `save --amend` and `park` refuse in a line with overlays.
 - `line delete` and `line delete -D` of a line with unsaved changes of overlay files (or a pending move)
@@ -531,3 +527,50 @@ Both states change only overlays, so a protected `main` takes them. A new line f
 the overlays its owner reads: a member of `sapdev` gets `.zulip.env`, other users get neither file.
 A reader adds an overlay to an older line with `layr overlay use --add zulip` in that line.
 
+
+## 10. Overlays in stores and peer sync
+
+Every push includes every overlay of the project.
+Each store remote uses a separate age layer identity for each overlay.
+Shared files still use the store identity.
+Only readers with a slot can decrypt an overlay.
+A machine without a slot can encrypt uploads to the signed layer recipient.
+
+Local users and groups remain readers through the service.
+They do not get store slots.
+Add a machine reader with `machine:<UUID>`.
+Its public key must be in the project's trust records before push can create its slot.
+Add a person reader with `person:<login>=<age recipient>`.
+The signed readers record binds the login to that recipient.
+For example:
+
+```sh
+layr overlay readers secrets alice machine:01234567-1234-7123-8123-0123456789ab person:ann@example.com=age1...
+```
+
+Use the actual machine UUID and person recipient.
+The owner remains a local reader.
+Reader removal starts a new epoch at the next push.
+The new epoch has a new identity and slots for the remaining readers.
+The removed reader can still read data copied during an earlier epoch.
+
+Each epoch holds its records, states and slots under `overlays/<id>/epochs/<epoch>/`.
+The epoch is a UUID.
+The public `overlay.key` object contains an exact signed record with the recipient and its project and store bindings.
+All remote objects use conditional create. No object is replaced.
+Fetch and clone import an overlay only when a slot opens.
+Without a slot, they report `overlay <name>: no key on this machine` and import shared files.
+Mount merges the overlay files into the line view when a slot opens.
+
+The owner paper slot uses the store's paper opener.
+The local store pin retains its public recipient, never the paper key.
+For an older store, run push once with `LAYR_PAPER_KEY_FILE` to add the paper slot.
+Without that public recipient, push reports the missing paper slot and continues.
+
+Peer transfers use the existing signed records and snapshot streams.
+The receiving service enforces the signed overlay readers.
+The default peers are trusted machine readers of the overlay.
+Set `overlay.<name>.peers` to an array of machine UUIDs to select other peers.
+For example, use `layr config overlay.secrets.peers '["<machine UUID>"]'`.
+A peer that is not permitted receives the shared set and a report of the omitted overlay.
+Root on a peer can read its disk. Service readers do not restrict root.

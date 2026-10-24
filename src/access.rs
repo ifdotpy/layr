@@ -175,7 +175,13 @@ pub struct Policy {
 
 impl Policy {
     pub fn load(p: &Project) -> Policy {
-        let cfg = |k: &str| p.config_value(k).ok().flatten();
+        let cfg = |k: &str| {
+            if p.is_overlay() && matches!(k, "access" | "deny" | "overlay") {
+                p.db.overlay_config(k).ok().flatten()
+            } else {
+                p.config_value(k).ok().flatten()
+            }
+        };
         let mut access = BTreeMap::new();
         let mut grants = BTreeMap::new();
         let now = crate::ids::now_ms();
@@ -193,6 +199,7 @@ impl Policy {
                     access.insert(k, v.as_str().and_then(Role::parse).unwrap_or(Role::None));
                 }
             }
+            None if p.is_overlay() => {}
             None => {
                 // Stores of older versions: one admin (`admin`, before that `lead`) and the
                 // members list (`*` or uids), who were writers.
@@ -404,6 +411,33 @@ mod tests {
 
     fn who(uid: u32, groups: &[u32]) -> Who {
         Who { uid, groups: groups.to_vec() }
+    }
+
+    #[test]
+    fn overlay_readers_follow_signed_foreign_policy_without_changing_project_policy() {
+        let root = std::env::temp_dir().join(crate::ids::new_id());
+        let store = crate::store::Store::open(&root).unwrap();
+        let db = crate::db::Db::open(std::path::Path::new(":memory:")).unwrap();
+        let mut record = crate::model::Record::new("project");
+        record.machine = crate::ids::new_id();
+        record.seq = 1;
+        record.time = 1;
+        record.data = serde_json::json!({"config":{"access":{"user:1001":"admin","user:1002":"reader"}}});
+        db.derive(&record, &|_| false, &store.machine.id).unwrap();
+        let mut project =
+            crate::store::Project { store: &store, name: "p%private".into(), dir: root.clone(), id: crate::ids::new_id(), db };
+        assert!(Policy::load(&project).check(&who(1002, &[]), "read").is_ok());
+        assert!(Policy::load(&project).check(&who(1003, &[]), "read").is_err());
+        record.op = "config".into();
+        record.seq = 2;
+        record.time = 2;
+        record.data = serde_json::json!({"config":{"access":{"user:1001":"admin"}}});
+        project.db.derive(&record, &|_| false, &store.machine.id).unwrap();
+        assert!(Policy::load(&project).check(&who(1002, &[]), "read").is_err());
+        project.name = "p".into();
+        assert!(project.db.config("access").unwrap().is_none());
+        drop(project);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

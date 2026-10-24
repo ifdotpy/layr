@@ -151,3 +151,39 @@ Changes to the header, btrfs identity, or tree content must fail verification.
 Legacy cache layer snapshots do not use this format. The writer reports their names as omitted.
 After Core adds cache states, `--caches` carries these ordinary states under `states/<UUID>/`.
 Before that, a store push with `--caches` fails with a clear error.
+
+## Overlay objects and gateway access
+
+An overlay uses a separate layer identity for each store remote and epoch.
+The epoch is a UUID. Its objects use the v2 record and state formats:
+
+```text
+overlays/<overlay UUID>/keys/<epoch>-<record UUID>.json
+overlays/<overlay UUID>/epochs/<epoch>/records/<machine>/<first>-<last>.age
+overlays/<overlay UUID>/epochs/<epoch>/states/<state>/<attempt>.tree.age
+overlays/<overlay UUID>/epochs/<epoch>/states/<state>/<attempt>.<part>.data.age
+overlays/<overlay UUID>/epochs/<epoch>/slots/machine-<machine UUID>.age
+overlays/<overlay UUID>/epochs/<epoch>/slots/person-<login>-<fp>.age
+overlays/<overlay UUID>/epochs/<epoch>/slots/paper.age
+```
+
+The key object contains the exact signed `overlay.key` record from the overlay log.
+Its data binds `overlay`, `name`, `epoch`, `parent`, `store`, `recipient` and `readers`.
+`overlay` is the internal overlay project UUID. `parent` is the parent project UUID.
+`store` is the pinned store recipient. `recipient` is the age layer recipient.
+`readers` binds machine and person principals to the signed reader set.
+The reader verifies the record against a trusted parent machine key.
+The encrypted overlay log must contain the same key record.
+Each epoch contains the complete record log and selected states, with no reference to objects in earlier epochs.
+Reader removal creates a new epoch. Every object uses conditional create.
+Person slot fingerprints use the existing v2 person rule.
+The optional `paper_recipient` in the local store pin is public. It contains no secret.
+
+The gateway must apply these access rules:
+
+1. With a write token, permit GET and list only for `overlays/<id>/keys/` objects, which contain public signed key records.
+2. With a write token, permit conditional PUT under `overlays/<id>/keys/` and `overlays/<id>/epochs/<epoch>/`.
+3. Permit records, states and slots under the epoch for these conditional writes.
+4. Require the vault read proof for every other overlay read.
+
+The Layr client implements this contract. The separate `layr-gateway` server must implement the same rules.

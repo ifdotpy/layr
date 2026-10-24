@@ -32,6 +32,7 @@ fn xml_escape(value: &str) -> String {
     value.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&apos;")
 }
 
+#[derive(Clone)]
 pub struct S3 {
     http: Client,
     credentials: Credentials,

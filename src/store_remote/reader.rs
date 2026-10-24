@@ -388,9 +388,11 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
                 repo.commit_record(ctx, record)?;
             }
         }
-        let slot = keys::machine_slot(&identity, &store.key.verifying_key())?;
-        // A read-only credential can still clone. Adding its slot is optional.
-        let _ = store.backend.put_new(&format!("slots/machine-{}.age", store.machine), slot);
+        if store.layer.is_none() {
+            let slot = keys::machine_slot(&identity, &store.key.verifying_key())?;
+            // A read-only credential can still clone. Adding its slot is optional.
+            let _ = store.backend.put_new(&format!("slots/machine-{}.age", store.machine), slot);
+        }
     }
     Ok(report)
 }

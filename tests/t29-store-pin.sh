@@ -36,11 +36,11 @@ def hashes():
   for p in (root/'archive').rglob('*') if p.is_file()}
 
 pin=json.loads(run(['config','cloud.remote.archive.store']).stdout)
-check(pin=={k:good[k] for k in ['project','recipient']},'remote add saves both pins')
+check({k:pin[k] for k in ['project','recipient']}=={k:good[k] for k in ['project','recipient']} and pin['paper_recipient'].startswith('age1'),'remote add saves both pins and the public paper recipient')
 run(['remote','add','alias','file://'+str(root/'archive')])
 run(['clone','file://'+str(root/'archive'),'copy','-q'])
 clone_pin=json.loads(run(['--project','copy','config','cloud.remote.origin.store']).stdout)
-check(clone_pin==pin,'clone saves both pins')
+check({k:clone_pin[k] for k in ['project','recipient']}=={k:pin[k] for k in ['project','recipient']},'clone saves both pins')
 # The writer has no readable slot. It still must reject the changed recipient.
 for p in (root/'archive/slots').iterdir(): p.unlink()
 (root/'archive/store.json').write_text(json.dumps(bad))

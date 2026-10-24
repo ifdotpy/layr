@@ -378,6 +378,7 @@ mod tests {
             paper_key_text: None,
             person: None,
             pin: None,
+            layer: None,
         };
         (store, identity, root)
     }

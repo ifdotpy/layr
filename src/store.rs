@@ -314,6 +314,17 @@ impl<'a> Project<'a> {
     /// Folders of a project without records (for a restore or a replica).
     pub fn create_empty(store: &'a Store, name: &str) -> Result<Project<'a>> {
         check_name("project", name)?;
+        Self::create_empty_in(store, name)
+    }
+
+    pub fn create_empty_overlay(store: &'a Store, name: &str) -> Result<Project<'a>> {
+        if !name.contains('%') {
+            bail!("not an overlay name: {name}");
+        }
+        Self::create_empty_in(store, name)
+    }
+
+    fn create_empty_in(store: &'a Store, name: &str) -> Result<Project<'a>> {
         let dir = store.project_dir(name)?;
         if db_file(&dir).exists() {
             bail!("project '{name}' already exists");

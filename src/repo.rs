@@ -1317,8 +1317,8 @@ impl<'a> Repo<'a> {
     /// service's private work folder (owner, mode, .git folder, caches) and appears at `dst` only
     /// when it is ready, so no other user can change it while root works on it.
     pub fn materialize(&self, line: &Line, state: &str, dst: &Path) -> Result<()> {
-        // A line with overlays gets their files too; its base is made when first needed.
-        let layers = if self.p.is_overlay() { Vec::new() } else { self.layers(line)? };
+        // Only available layers that the line owner reads enter its working folder.
+        let layers = self.readable_layers(line)?;
         self.materialize_with(line, state, dst, &layers, false)
     }
 

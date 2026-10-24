@@ -397,7 +397,7 @@ impl<'a> Repo<'a> {
         if crate::store::check_name("overlay", name).is_err() {
             return Ok(None);
         }
-        let v = match self.p.config_value(&format!("overlay.{name}"))? {
+        let v = match self.p.db.overlay_config(&format!("overlay.{name}"))? {
             Some(v) if v.is_object() => v,
             _ => return Ok(None),
         };
@@ -420,8 +420,11 @@ impl<'a> Repo<'a> {
             .db
             .config_all()?
             .into_iter()
-            .filter_map(|(k, _)| k.strip_prefix("overlay.").map(|s| s.to_string()))
-            .filter(|n| !n.contains('@') && crate::store::check_name("overlay", n).is_ok())
+            .filter_map(|(k, _)| k.strip_prefix("overlay.").map(|s| s.split('@').next().unwrap_or("").to_string()))
+            .filter(|n| crate::store::check_name("overlay", n).is_ok())
+            .filter(|n| self.overlay_info(n).ok().flatten().is_some())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
             .collect())
     }
 
@@ -460,10 +463,34 @@ impl<'a> Repo<'a> {
 
     /// The overlays a line shows, bottom first.
     pub fn layers(&self, line: &Line) -> Result<Vec<Layer>> {
-        Ok(match self.p.config_value(&stack_key(&line.id))? {
+        let key = stack_key(&line.id);
+        let value = if line.machine == self.p.store.machine.id {
+            self.p.config_value(&key)?
+        } else {
+            self.p.config_value(&format!("{key}@{}", line.machine))?
+        };
+        let value = match value {
+            Some(value) => Some(value),
+            None => self.p.db.overlay_config(&key)?,
+        };
+        Ok(match value {
             Some(v) => serde_json::from_value(v).unwrap_or_default(),
             None => Vec::new(),
         })
+    }
+
+    pub fn readable_layers(&self, line: &Line) -> Result<Vec<Layer>> {
+        if self.p.is_overlay() {
+            return Ok(Vec::new());
+        }
+        let gid = crate::ctx::Caller::from_uid(line.owner).gid;
+        Ok(self
+            .layers(line)?
+            .into_iter()
+            .filter(|layer| {
+                self.layer_root(layer).is_some() && self.reads_overlay(&layer.overlay, line.owner, gid).unwrap_or(false)
+            })
+            .collect())
     }
 
     pub fn is_stacked(&self, line: &Line) -> Result<bool> {

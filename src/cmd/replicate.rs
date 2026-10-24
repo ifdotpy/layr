@@ -565,7 +565,7 @@ pub fn exchange(
     let started = std::time::Instant::now();
     let result = (|| -> Result<(usize, usize, usize, usize, u64, Vec<String>)> {
         let mine = present(&repo.p)?;
-        w.json(&json!({"op": "hello", "direction_v1": true, "direction": direction, "compressed_send_v2": btrfs::supports_compressed_receive(), "clone_sources_v1": true, "clone_identities_v1": clone_identities(&repo.p)?, "project": repo.p.name, "project_id": repo.p.id, "machine": repo.p.store.machine.id, "public_key": own_key(&repo.p), "seqs": seqs(&repo.p)?, "present": mine, "caches": present_caches(&repo.p)?, "layers": present_caches(&repo.p)?}))?;
+        w.json(&json!({"op": "hello", "direction_v1": true, "overlay_sync_v1": true, "include_auto": auto, "include_caches": caches, "direction": direction, "compressed_send_v2": btrfs::supports_compressed_receive(), "clone_sources_v1": true, "clone_identities_v1": clone_identities(&repo.p)?, "project": repo.p.name, "project_id": repo.p.id, "machine": repo.p.store.machine.id, "public_key": own_key(&repo.p), "seqs": seqs(&repo.p)?, "present": mine, "caches": present_caches(&repo.p)?, "layers": present_caches(&repo.p)?}))?;
         let hello = w.recv_json()?;
         if direction != "sync" && hello["direction_v1"] != true {
             bail!("the peer does not support one-way exchange; update it or use layr sync <remote>");
@@ -625,8 +625,13 @@ pub fn exchange(
         };
         w.json(&json!({"op": "want", "clone_identities_v1": clone_identities(&repo.p)?, "ids": want, "have": mine_now, "caches": caches, "have_caches": present_caches(&repo.p)?, "have_layers": present_caches(&repo.p)?, "layers": caches}))?;
         let got = recv_states(&mut w, &repo.p, direction != "push")?;
+        let overlay_omitted = if hello["overlay_sync_v1"] == true {
+            exchange_overlays(ctx, &mut w, repo, direction, auto, caches, &peer.0, &peer.1, true)?
+        } else {
+            repo.overlay_names()?.into_iter().map(|name| format!("overlay {name}: peer does not support overlays")).collect()
+        };
         w.json(&json!({"op": "bye"}))?;
-        let mut omitted = BTreeSet::new();
+        let mut omitted: BTreeSet<String> = overlay_omitted.into_iter().collect();
         if !caches {
             let outgoing = mine.difference(&peer_present).filter(|_| direction != "fetch");
             let incoming = peer_present.difference(&mine).filter(|_| direction != "push");
@@ -703,7 +708,7 @@ pub fn serve(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let mut repo = Repo { p };
     let peer_seqs: BTreeMap<String, u64> = serde_json::from_value(hello["seqs"].clone())?;
-    w.json(&json!({"op": "hello", "direction_v1": true, "compressed_send_v2": btrfs::supports_compressed_receive(), "clone_sources_v1": true, "clone_identities_v1": clone_identities(&repo.p)?, "project_id": repo.p.id, "machine": repo.p.store.machine.id, "public_key": own_key(&repo.p), "seqs": seqs(&repo.p)?, "present": present(&repo.p)?, "caches": present_caches(&repo.p)?, "layers": present_caches(&repo.p)?}))?;
+    w.json(&json!({"op": "hello", "direction_v1": true, "overlay_sync_v1": true, "compressed_send_v2": btrfs::supports_compressed_receive(), "clone_sources_v1": true, "clone_identities_v1": clone_identities(&repo.p)?, "project_id": repo.p.id, "machine": repo.p.store.machine.id, "public_key": own_key(&repo.p), "seqs": seqs(&repo.p)?, "present": present(&repo.p)?, "caches": present_caches(&repo.p)?, "layers": present_caches(&repo.p)?}))?;
     let lines = recv_records(&mut w)?;
     if direction == "fetch" && !lines.is_empty() {
         bail!("the client sent records during fetch");
@@ -783,9 +788,145 @@ pub fn serve(ctx: &Ctx, args: &[String]) -> Result<i32> {
         &have,
         features,
     )?;
+    if hello["overlay_sync_v1"] == true {
+        exchange_overlays(
+            ctx,
+            &mut w,
+            &repo,
+            direction,
+            hello["include_auto"].as_bool().unwrap_or(false),
+            hello["include_caches"].as_bool().unwrap_or(false),
+            hello["machine"].as_str().unwrap_or(""),
+            hello["public_key"].as_str().unwrap_or(""),
+            false,
+        )?;
+    }
     let _ = w.recv_json();
     let _ = ctx;
     Ok(0)
+}
+
+/// Plaintext overlays only go to an explicitly permitted machine.
+fn overlay_peer_allowed(repo: &Repo, name: &str, machine: &str, public: &str) -> Result<bool> {
+    if let Some(peers) = repo.p.config_value(&format!("overlay.{name}.peers"))? {
+        let peers = peers.as_array().context("overlay peers must be an array of machine IDs")?;
+        return Ok(peers.iter().any(|peer| peer.as_str() == Some(machine)));
+    }
+    let orepo = repo.overlay_repo(name)?;
+    Ok(orepo.policy().access.get(&format!("machine:{machine}")).is_some_and(|role| *role >= crate::access::Role::Reader)
+        && repo.p.db.trusted(machine)?.as_deref() == Some(public))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn exchange_overlays<R: Read, W: Write>(
+    ctx: &Ctx,
+    w: &mut Wire<R, W>,
+    repo: &Repo,
+    direction: &str,
+    auto: bool,
+    caches: bool,
+    peer: &str,
+    public: &str,
+    initiator: bool,
+) -> Result<Vec<String>> {
+    let mut omitted = Vec::new();
+    for send_first in [true, false] {
+        let sending = initiator == send_first;
+        let enabled = if initiator { direction != "fetch" } else { direction != "push" };
+        if sending {
+            let mut names = Vec::new();
+            if enabled {
+                for name in repo.overlay_names()? {
+                    if repo.overlay_repo(&name).is_err() {
+                        continue;
+                    }
+                    if overlay_peer_allowed(repo, &name, peer, public)? {
+                        names.push(name);
+                    } else {
+                        omitted.push(format!("overlay {name}: peer is not allowed to hold it"));
+                    }
+                }
+            }
+            w.json(&json!({"op":"overlays", "names":names}))?;
+            for name in names {
+                let orepo = repo.overlay_repo(&name)?;
+                w.json(&json!({"op":"overlay", "name":name, "id":orepo.p.id}))?;
+                let hello = w.recv_json()?;
+                if hello["op"] != "overlay.hello" {
+                    bail!("protocol error: expected overlay hello");
+                }
+                let seqs: BTreeMap<String, u64> = serde_json::from_value(hello["seqs"].clone())?;
+                let have: BTreeSet<String> = serde_json::from_value(hello["present"].clone())?;
+                let have_caches: BTreeSet<String> = serde_json::from_value(hello["caches"].clone())?;
+                send_records(w, &missing_lines(&orepo.p, &seqs)?)?;
+                let _ = w.recv_json()?;
+                let list = plan(&orepo, &present(&orepo.p)?, &have, auto, caches)?;
+                send_states(ctx, w, &orepo, &list, caches, &have_caches, &have, SendFeatures::from_hello(&hello))?;
+            }
+        } else {
+            let offer = w.recv_json()?;
+            if offer["op"] != "overlays" {
+                bail!("protocol error: expected overlays");
+            }
+            let names: Vec<String> = serde_json::from_value(offer["names"].clone())?;
+            if (initiator && direction == "push" || !initiator && direction == "fetch") && !names.is_empty() {
+                bail!("peer sends overlays against the exchange direction");
+            }
+            let mut seen = BTreeSet::new();
+            for name in names {
+                crate::store::check_name("overlay", &name)?;
+                if !seen.insert(name.clone()) {
+                    bail!("duplicate overlay offer");
+                }
+                let offer = w.recv_json()?;
+                if offer["op"] != "overlay" || offer["name"].as_str() != Some(&name) {
+                    bail!("invalid overlay offer");
+                }
+                let id = offer["id"].as_str().filter(|id| crate::model::is_uuid(id)).context("invalid overlay project id")?;
+                repo.need_overlay(&name)?;
+                let pname = format!("{}%{name}", repo.p.name);
+                let mut project = if crate::store::db_file(&ctx.store.project_dir(&pname)?).exists() {
+                    Project::open_partial(&ctx.store, &pname)?
+                } else {
+                    Project::create_empty_overlay(&ctx.store, &pname)?
+                };
+                if !project.id.is_empty() && project.id != id {
+                    bail!("overlay project id differs");
+                }
+                w.json(&json!({"op":"overlay.hello","seqs":seqs(&project)?,"present":present(&project)?,
+                    "caches":present_caches(&project)?,"clone_identities_v1":clone_identities(&project)?,
+                    "compressed_send_v2":btrfs::supports_compressed_receive(),"clone_sources_v1":true}))?;
+                let lines = recv_records(w)?;
+                let trusted = crate::store_remote::overlays::trusted_keys(repo)?;
+                for line in &lines {
+                    let signed = crate::oplog::parse_line(line, None)?;
+                    let key =
+                        trusted.get(&signed.record.machine).context("overlay record signer is not trusted by the parent")?;
+                    crate::oplog::parse_line(line, Some(key))?;
+                    if signed.record.project != id {
+                        bail!("overlay record belongs to another project");
+                    }
+                }
+                let _lock = project.lock()?;
+                let bootstrap = project.id.is_empty();
+                // Parent trust is checked above, before the overlay's first project record exists.
+                project.import_lines(&lines, Trust::All)?;
+                if bootstrap {
+                    project.reload_id()?;
+                }
+                if project.id != id {
+                    bail!("overlay project id differs");
+                }
+                for (machine, key) in &trusted {
+                    trust(ctx, &project, machine, &hex::encode(key.to_bytes()))?;
+                }
+                drop(_lock);
+                w.json(&json!({"op":"overlay.ready"}))?;
+                recv_states(w, &project, true)?;
+            }
+        }
+    }
+    Ok(omitted)
 }
 
 #[cfg(test)]

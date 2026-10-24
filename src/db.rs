@@ -364,7 +364,7 @@ impl Db {
                     params![s("machine"), s("public_key"), rec.machine],
                 )?;
             }
-            "project" | "config" | "overlay.create" => {
+            "project" | "config" | "overlay.create" | "overlay.readers" => {
                 if let Some(obj) = d.get("config").and_then(|v| v.as_object()) {
                     for (k, v) in obj {
                         let key = if foreign && local_key(k) { format!("{k}@{}", rec.machine) } else { k.clone() };
@@ -881,6 +881,19 @@ impl Db {
         let mut st = self.conn.prepare("SELECT key, value FROM config WHERE value IS NOT NULL ORDER BY key")?;
         let v = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<Vec<_>, _>>()?;
         Ok(v)
+    }
+
+    /// Overlay policy and metadata follow their signed records across machines.
+    pub fn overlay_config(&self, key: &str) -> Result<Option<serde_json::Value>> {
+        let value: Option<Option<String>> = self
+            .conn
+            .query_row(
+                "SELECT value FROM config WHERE key=?1 OR substr(key,1,length(?1)+1)=?1||'@' ORDER BY ord DESC LIMIT 1",
+                params![key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        value.flatten().map(|value| serde_json::from_str(&value).map_err(Into::into)).transpose()
     }
 
     pub fn machine_key(&self, id: &str) -> Result<Option<String>> {

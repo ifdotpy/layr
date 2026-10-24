@@ -24,6 +24,18 @@ pub struct Gateway {
     read: Mutex<Option<(String, i64)>>,
 }
 
+impl Clone for Gateway {
+    fn clone(&self) -> Self {
+        Self {
+            http: self.http.clone(),
+            base: self.base.clone(),
+            token: self.token.clone(),
+            identity: Mutex::new(self.identity.lock().expect("gateway identity lock").clone()),
+            read: Mutex::new(self.read.lock().expect("gateway read lock").clone()),
+        }
+    }
+}
+
 fn bytes(response: Response, limit: usize) -> Result<Vec<u8>> {
     if response.content_length().is_some_and(|n| n > limit as u64) {
         bail!("gateway response is too large");
@@ -250,6 +262,10 @@ impl Gateway {
         self.send(Method::GET, action, Some(&token), query, None)
     }
 
+    pub fn has_read_identity(&self) -> bool {
+        self.identity.lock().map(|identity| identity.is_some()).unwrap_or(false)
+    }
+
     pub fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
         if key == "vault.json" {
             return Ok(None);
@@ -294,7 +310,9 @@ impl Gateway {
             }
             return Ok(found);
         }
-        let response = if key == "store.json" {
+        let response = if overlay_keys_path(key) && !self.has_read_identity() {
+            self.send(Method::GET, &format!("objects/{key}"), self.token.as_deref(), None, None)?
+        } else if key == "store.json" {
             self.send(Method::GET, "store.json", None, None, None)?
         } else {
             self.read_request(&format!("objects/{key}"), None)?
@@ -317,7 +335,9 @@ impl Gateway {
             objects: Vec<Entry>,
         }
         let has_identity = self.identity.lock().map_err(|_| anyhow!("gateway identity lock failed"))?.is_some();
-        let response = if !has_identity && (prefix.starts_with("records/") || prefix.starts_with("states/")) {
+        let response = if !has_identity
+            && (prefix.starts_with("records/") || prefix.starts_with("states/") || prefix.starts_with("overlays/"))
+        {
             self.send(Method::GET, "objects", self.token.as_deref(), Some(("prefix", prefix)), None)?
         } else {
             self.read_request("objects", Some(("prefix", prefix)))?
@@ -366,6 +386,15 @@ impl Gateway {
             status => bail!("gateway delete: HTTP {status}"),
         }
     }
+}
+
+fn overlay_keys_path(key: &str) -> bool {
+    let mut parts = key.split('/');
+    parts.next() == Some("overlays")
+        && parts.next().is_some_and(crate::model::is_uuid)
+        && parts.next() == Some("keys")
+        && parts.next().is_some_and(|name| name.ends_with(".json"))
+        && parts.next().is_none()
 }
 
 fn token_file(path: &std::path::Path, uid: u32) -> Result<String> {

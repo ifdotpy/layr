@@ -1,6 +1,22 @@
 //! Read store trees without a local project or snapshot backend.
 
-pub(crate) use super::format::Entry;
+#[derive(Clone)]
+pub struct Entry {
+    inner: super::format::Entry,
+    layer: Option<usize>,
+}
+impl std::ops::Deref for Entry {
+    type Target = super::format::Entry;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+struct LayerReader {
+    backend: Backend,
+    identity: String,
+    keys: BTreeMap<String, ed25519_dalek::VerifyingKey>,
+    attempts: BTreeMap<String, String>,
+}
 use super::{backend::Backend, keys, reader, Descriptor, StorePin};
 use anyhow::{bail, Context, Result};
 use ed25519_dalek::SigningKey;
@@ -29,6 +45,7 @@ pub struct Browse {
     keys: BTreeMap<String, ed25519_dalek::VerifyingKey>,
     pub lines: Vec<Line>,
     pub pin: StorePin,
+    layers: Vec<LayerReader>,
 }
 
 impl Browse {
@@ -59,7 +76,8 @@ impl Browse {
         if let Some(person) = &person {
             person.check(&descriptor)?;
         }
-        let pin = StorePin { project: descriptor.project.clone(), recipient: descriptor.recipient.clone() };
+        let pin =
+            StorePin { project: descriptor.project.clone(), recipient: descriptor.recipient.clone(), paper_recipient: None };
         drop(stage);
         let stage = crate::trace::span("disk slot");
         let identity = if let Some(identity) = &access.identity {
@@ -102,6 +120,30 @@ impl Browse {
         let stage = crate::trace::span("disk trees");
         let attempts = reader::attempts(&backend)?;
         let mut decoder = reader::Reader::new(&backend, &identity, &records.keys);
+        let mut layers = Vec::new();
+        let mut layer_names = BTreeMap::new();
+        for (name, published) in super::overlays::published(&backend, &descriptor.project, &descriptor.recipient, &records.keys)?
+        {
+            let scoped = backend.scoped(&published.prefix())?;
+            let machine = access.machine.as_ref().map(|(id, key)| (id.as_str(), key));
+            let Some(identity) =
+                super::overlays::open_identity(&scoped, &published.key, machine, person.as_ref(), access.paper.as_deref())?
+            else {
+                continue;
+            };
+            let overlay_records = reader::records(&scoped, &identity, &published.key.overlay)?;
+            if !overlay_records.lines.contains(&published.line) {
+                bail!("published overlay key is absent from the overlay log");
+            }
+            for (machine, key) in &overlay_records.keys {
+                if records.keys.get(machine) != Some(key) {
+                    bail!("overlay tree signer is not trusted");
+                }
+            }
+            layer_names.insert(name, layers.len());
+            let attempts = reader::attempts(&scoped)?;
+            layers.push(LayerReader { backend: scoped, identity, keys: overlay_records.keys, attempts });
+        }
         let mut lines = Vec::new();
         for line in db.lines()? {
             let mut candidates = Vec::new();
@@ -118,11 +160,28 @@ impl Browse {
             let (_, _, tree) = decoder.tree(&state.id, &attempts[&state.id])?;
             let machine = db.state_machine(&state.id)?.context("state signer is missing")?;
             let kind = if state.kind == crate::model::StateKind::Auto { "auto" } else { "state" };
-            lines.push(Line { name: line.name, head: state.id, kind: kind.into(), machine, time: state.time, files: tree.files });
+            let mut files: BTreeMap<_, _> =
+                tree.files.into_iter().map(|(path, inner)| (path, Entry { inner, layer: None })).collect();
+            // Stack settings are per machine. Use the stack of the selected line head's machine.
+            let stack = db.config(&format!("stack.{}@{}", line.id, machine))?.or(db.config(&format!("stack.{}", line.id))?);
+            let stack: Vec<crate::overlay::Layer> = stack.map(serde_json::from_value).transpose()?.unwrap_or_default();
+            for layer in stack {
+                let Some(&index) = layer_names.get(&layer.overlay) else { continue };
+                let source = &layers[index];
+                let Some(attempt) = source.attempts.get(&layer.state) else { continue };
+                let (_, _, tree) =
+                    reader::Reader::new(&source.backend, &source.identity, &source.keys).tree(&layer.state, attempt)?;
+                for (path, inner) in tree.files {
+                    // A higher layer replaces a lower file or directory at the same path.
+                    files.retain(|old, _| !old.starts_with(&format!("{path}/")) && !path.starts_with(&format!("{old}/")));
+                    files.insert(path, Entry { inner, layer: Some(index) });
+                }
+            }
+            lines.push(Line { name: line.name, head: state.id, kind: kind.into(), machine, time: state.time, files });
         }
         drop(decoder);
         drop(stage);
-        Ok(Self { backend, identity, keys: records.keys, lines, pin })
+        Ok(Self { backend, identity, keys: records.keys, lines, pin, layers })
     }
 
     pub fn identity(&self) -> &str {
@@ -135,7 +194,12 @@ impl Browse {
             bail!("unsupported store format {}", descriptor.format);
         }
         self.pin.check(&descriptor)?;
-        reader::Reader::new(&self.backend, &self.identity, &self.keys).read(entry)
+        if let Some(index) = entry.layer {
+            let layer = self.layers.get(index).context("unknown overlay source")?;
+            reader::Reader::new(&layer.backend, &layer.identity, &layer.keys).read(&entry.inner)
+        } else {
+            reader::Reader::new(&self.backend, &self.identity, &self.keys).read(&entry.inner)
+        }
     }
 }
 
