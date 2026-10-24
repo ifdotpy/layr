@@ -10,7 +10,17 @@ state_id() {
     l log "$1" -n 1 --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])'
 }
 
-mkdir -p "$T/src" "$T/cli" "$T/model"
+mkdir -p "$T/src/docs" "$T/cli" "$T/model"
+printf 'Guide from the encrypted store.\n' > "$T/src/docs/guide.txt"
+printf '#!/bin/sh\nexit 0\n' > "$T/src/tool.sh"
+chmod +x "$T/src/tool.sh"
+printf '\000binary\n' > "$T/src/data.bin"
+python3 - "$T/src/large.txt" <<'PYTEXT'
+from pathlib import Path
+import sys
+Path(sys.argv[1]).write_text('x' * (65536 + 1))
+PYTEXT
+ln -s metric.txt "$T/src/metric-link"
 printf '100\n' > "$T/src/metric.txt"
 printf 'out/\n' > "$T/src/.gitignore"
 cat > "$T/src/layr.toml" <<'TOML'
@@ -120,6 +130,8 @@ no 'a probe over its limit fails the queue entry' l queue run --into main
 eq 'a failed queue probe keeps the target head' "$PROBE_HEAD" "$(state_id head)"
 ok 'the queue stores both probe outcomes' python3 -c 'import json,subprocess,sys; rows=json.loads(subprocess.check_output([sys.argv[1],"queue","list","--json"])); assert [r["status"] for r in rows]==["done","failed"]; assert rows[1]["probes"]["status"]=="failed"' "$LAYR"
 
+l access grant nobody reader
+l protect main --path feature.txt=maintainer
 l overlay create secrets --readers nobody -q
 l overlay use secrets -q
 printf 'private bytes\n' > private.txt
@@ -175,6 +187,54 @@ l probe diff "$PROBE_BASE" "$PROBE_HEAD" --json > "$T/cli/probe-diff.json"
 eq 'the fixture has exactly two lines' 2 "$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "$T/cli/lines.json")"
 
 (cd "$REPO" && cargo run -q -p layr-model --example store_golden -- "$T/archive" "$T/paper" "$T/model")
+
+ok 'page outputs contain verified metadata and text bounds' python3 - "$T/model" <<'PYPAGES'
+import json, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+load = lambda name: json.loads((root / (name + '.json')).read_text())
+project = load('projects')[0]
+assert project['name'] == 'model-golden' and project['default_line'] == 'main'
+assert project['counts']['lines'] == 2 and project['counts']['changes'] >= 3
+assert any(p['name'] == 'metric' for p in project['probes'])
+trees = load('trees')
+assert any(t['path'] == 'docs' and t['entries'][0]['text'].startswith('Guide') for t in trees)
+entries = [e for tree in trees for e in tree['entries']]
+assert any(e['path'] == 'tool.sh' and e['mode'] == '100755' for e in entries)
+assert any(e['path'] == 'metric-link' and e['kind'] == 'symlink' for e in entries)
+assert all('text' not in e for e in entries if e['path'] in ('large.txt', 'data.bin'))
+assert any(f['path'] == 'docs/guide.txt' and f['text'].startswith('Guide') for f in load('files'))
+diff = load('diff')
+assert diff['base'] != diff['head']
+assert any(f['path'] == 'feature.txt' and f['status'] == 'add' and f['added'] == 2 and '+version one' in f['unified'] for f in diff['files'])
+config = load('config')
+assert config['policy']['access']['user:0'] == 'admin'
+assert config['path_rules']['main']['feature.txt'] == 'maintainer'
+overlay = load('overlays')[0]
+assert overlay['name'] == 'secrets' and overlay['readable'] and overlay['readers'] and len(overlay['managers']) == 1
+assert 'private.txt' in overlay['paths']
+copy = load('copies')[0]
+assert copy['name'] == 'store' and copy['address'].startswith('file://')
+assert 'time' not in copy and 'machines' not in copy
+machine = load('machines')[0]
+assert machine['trusted'] and machine['fingerprint'].startswith('sha256:') and len(machine['fingerprint']) == 71
+assert load('bisect') == []
+assert len(load('changes')) == project['counts']['changes']
+assert len(load('operations-all')) == project['counts']['operations']
+PYPAGES
+
+# Export generated test data only when the caller supplies an output folder.
+if [ -n "${LAYR_MODEL_FIXTURE_OUT:-}" ]; then
+    mkdir -p "$LAYR_MODEL_FIXTURE_OUT"
+    cp "$T/model/"*.json "$LAYR_MODEL_FIXTURE_OUT/"
+fi
+if [ -n "${LAYR_MODEL_STORE_OUT:-}" ]; then
+    mkdir -m 700 -p "$LAYR_MODEL_STORE_OUT"
+    test ! -e "$LAYR_MODEL_STORE_OUT/store"
+    test ! -e "$LAYR_MODEL_STORE_OUT/paper"
+    cp -R "$T/archive" "$LAYR_MODEL_STORE_OUT/store"
+    install -m 600 "$T/paper" "$LAYR_MODEL_STORE_OUT/paper"
+fi
 
 if python3 - "$T/cli" "$T/model" "$T/counts" <<'PY'
 import difflib, json, sys

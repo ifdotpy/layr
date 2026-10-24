@@ -1,10 +1,11 @@
 //! Read the golden fixture through the shared store reader and the pure model.
 use anyhow::{bail, ensure, Context, Result};
 use ed25519_dalek::VerifyingKey;
-use layr_model::{probes, Model, Record, StateKind, Subject};
+use layr_model::{probes, Model, Project, Record, StateKind, Subject};
 use layr_store::{format, keys, reader, record};
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -102,6 +103,7 @@ struct Store {
     keys: BTreeMap<String, VerifyingKey>,
     trees: BTreeMap<(String, String), DecodedTree>,
     pending: BTreeSet<(String, String)>,
+    metadata: BTreeMap<String, format::Tree>,
 }
 
 impl Store {
@@ -136,6 +138,7 @@ impl Store {
         let mut states = BTreeMap::new();
         for (state, attempt) in attempts {
             let (_, tree) = self.tree(&state, &attempt)?;
+            self.metadata.insert(state.clone(), tree.clone());
             let mut files = BTreeMap::new();
             for (path, entry) in tree.files {
                 files.insert(path, reader::file(&self.identity, &entry, &self.objects)?);
@@ -147,11 +150,261 @@ impl Store {
 }
 
 fn store(objects: Objects, identity: String, keys: BTreeMap<String, VerifyingKey>) -> Store {
-    Store { objects, identity, keys, trees: BTreeMap::new(), pending: BTreeSet::new() }
+    Store { objects, identity, keys, trees: BTreeMap::new(), pending: BTreeSet::new(), metadata: BTreeMap::new() }
 }
 
 fn write(out: &Path, name: &str, value: impl serde::Serialize) -> Result<()> {
     fs::write(out.join(format!("{name}.json")), serde_json::to_vec_pretty(&value)?)?;
+    Ok(())
+}
+
+type StateFiles = BTreeMap<String, BTreeMap<String, Vec<u8>>>;
+
+fn text(bytes: &[u8], limit: usize) -> Option<&str> {
+    if bytes.len() <= limit && !bytes[..bytes.len().min(8000)].contains(&0) {
+        std::str::from_utf8(bytes).ok()
+    } else {
+        None
+    }
+}
+
+fn file_diff(base: &str, head: &str, metadata: &BTreeMap<String, format::Tree>, files: &StateFiles) -> Result<Value> {
+    let old = metadata.get(base).context("change base tree is unavailable")?;
+    let new = metadata.get(head).context("change head tree is unavailable")?;
+    let mut rows = Vec::new();
+    for path in old.files.keys().chain(new.files.keys()).collect::<BTreeSet<_>>() {
+        let a = old.files.get(path);
+        let b = new.files.get(path);
+        if a.zip(b).is_some_and(|(a, b)| a.0 == b.0 && a.1 == b.1 && a.2 == b.2) {
+            continue;
+        }
+        let before = a.map(|_| files.get(base).and_then(|f| f.get(path)).context("missing verified base file")).transpose()?;
+        let after = b.map(|_| files.get(head).and_then(|f| f.get(path)).context("missing verified head file")).transpose()?;
+        let status = if a.is_none() {
+            "add"
+        } else if b.is_none() {
+            "remove"
+        } else {
+            "modify"
+        };
+        let mut row = json!({"path":path,"status":status,"added":0,"removed":0});
+        let old_text = before.map(|v| text(v, 64 << 20));
+        let new_text = after.map(|v| text(v, 64 << 20));
+        if old_text.into_iter().chain(new_text).all(|v| v.is_some()) {
+            let (before, after) = (old_text.flatten().unwrap_or(""), new_text.flatten().unwrap_or(""));
+            let delta = similar::TextDiff::from_lines(before, after);
+            let added = delta.iter_all_changes().filter(|c| c.tag() == similar::ChangeTag::Insert).count();
+            let removed = delta.iter_all_changes().filter(|c| c.tag() == similar::ChangeTag::Delete).count();
+            let from = if a.is_none() { "/dev/null".into() } else { format!("a/{path}") };
+            let to = if b.is_none() { "/dev/null".into() } else { format!("b/{path}") };
+            row["added"] = json!(added);
+            row["removed"] = json!(removed);
+            row["unified"] = json!(delta.unified_diff().header(&from, &to).to_string());
+            if a.is_some() {
+                row["before"] = json!(before);
+            }
+            if b.is_some() {
+                row["after"] = json!(after);
+            }
+        } else {
+            row["binary"] = json!(true);
+        }
+        if let Some(entry) = a {
+            row["before_mode"] = json!(entry.0);
+        }
+        if let Some(entry) = b {
+            row["after_mode"] = json!(entry.0);
+        }
+        rows.push(row);
+    }
+    Ok(json!({"base":base,"head":head,"files":rows}))
+}
+
+fn overlays(model: &Model, project: &Project, now: i64, files: &StateFiles) -> Vec<Value> {
+    let records = project.op_log(None, usize::MAX);
+    let mut result = Vec::new();
+    for creation in records.iter().rev().filter(|r| r.op == "overlay.create") {
+        let Some(name) = creation.data["name"].as_str() else { continue };
+        let Some(info) = project.overlay_setting(&format!("overlay.{name}")) else { continue };
+        let Some(id) = info["id"].as_str() else { continue };
+        let overlay = model.projects.get(id);
+        let mut row =
+            json!({"id":id,"name":name,"patterns":[],"readers":[],"managers":[creation.machine],"readable":overlay.is_some()});
+        if let Some(owner) = info.get("owner") {
+            row["owner"] = owner.clone();
+        }
+        if let Some(mode) = info.get("mode") {
+            row["mode"] = mode.clone();
+        }
+        if let Some(overlay) = overlay {
+            let policy = overlay.access_policy(now, true);
+            let readers: Vec<_> = policy
+                .access
+                .iter()
+                .filter(|(_, role)| **role >= layr_model::policy::Role::Reader)
+                .map(|(p, _)| p.clone())
+                .collect();
+            row["readers"] = json!(readers);
+            row["policy"] = serde_json::to_value(policy).unwrap();
+            let records = overlay.op_log(None, usize::MAX);
+            if let Some(record) = records.iter().find(|r| r.op == "overlay.key") {
+                row["epoch"] = record.data["epoch"].clone();
+            }
+            let mut previous: Option<String> = None;
+            let mut changes: Vec<_> = records.iter().filter(|r| r.op == "overlay.managers").collect();
+            while let Some(index) = changes.iter().position(|r| r.data["previous"].as_str() == previous.as_deref()) {
+                let change = changes.remove(index);
+                row["managers"] = change.data["machines"].clone();
+                previous = Some(change.id.clone());
+            }
+            let paths: BTreeSet<_> =
+                overlay.line_list().iter().filter_map(|l| files.get(&l.head)).flat_map(|f| f.keys().cloned()).collect();
+            row["paths"] = json!(paths);
+        }
+        result.push(row);
+    }
+    result
+}
+
+fn copies(project: &Project) -> Vec<Value> {
+    let mut result = Vec::new();
+    for (key, url) in &project.config {
+        let Some(url) = url.as_str() else { continue };
+        let (key, scope) = key.rsplit_once('@').unwrap_or((key, &project.machine));
+        let remote = key
+            .strip_prefix("cloud.remote.")
+            .and_then(|v| v.strip_suffix(".url"))
+            .map(|name| (name, if url.starts_with("ssh://") { "peer" } else { "store" }))
+            .or_else(|| key.strip_prefix("remote.").and_then(|v| v.strip_suffix(".url")).map(|name| (name, "git")));
+        let Some((name, kind)) = remote else { continue };
+        // Configuration proves an address. It does not prove a completed push or sync.
+        result.push(json!({"id":format!("{scope}:{name}"),"name":name,"kind":kind,"address":url}));
+    }
+    result
+}
+
+/// Export the optional page data without changing the CLI comparison files.
+fn page_outputs(
+    out: &Path,
+    model: &Model,
+    project: &Project,
+    metadata: &BTreeMap<String, format::Tree>,
+    files: &StateFiles,
+    overlay_files: &StateFiles,
+    change: &str,
+    context: &probes::Context,
+) -> Result<()> {
+    let lines = project.line_list();
+    let records = project.op_log(None, usize::MAX);
+    let policy = project.access_policy(context.now, false);
+    let overlays = overlays(model, project, context.now, overlay_files);
+    let mut summary = json!({"id":project.id,"name":project.name.as_ref().context("project has no name record")?,"config":project.config,"overlays":overlays,
+        "counts":{"lines":lines.len(),"states":project.states.len(),"changes":project.changes().len(),"refs":project.ref_list("",context.now).len(),"queue":project.queue_list(None).len(),"operations":records.len(),"attestations":records.iter().filter(|r|r.data.get("attestation").is_some() || matches!(r.op.as_str(),"approve"|"approve.withdraw"|"check")).count()}});
+    if let Some(initial) =
+        records.iter().rev().flat_map(|r| r.lines.iter()).find(|(_, c)| c.before.is_none() && c.after.is_some())
+    {
+        if let Some(line) = lines.iter().find(|l| l.id == *initial.0) {
+            summary["default_line"] = json!(line.name);
+        }
+    }
+    if let Some(line) = lines.iter().find(|l| Some(l.name.as_str()) == summary["default_line"].as_str()) {
+        if let Some(probes) = context.definitions.get(&line.head) {
+            summary["probes"] = json!(probes
+                .iter()
+                .map(|(name, p)| {
+                    let mut p = serde_json::to_value(p).unwrap();
+                    p["name"] = json!(name);
+                    p
+                })
+                .collect::<Vec<_>>());
+        }
+    }
+    summary["checks"] = json!(records
+        .iter()
+        .filter_map(|r| {
+            let a = r.data.get("attestation")?;
+            if a["kind"] != "check" {
+                return None;
+            }
+            let c = r.data.get("check")?;
+            Some(json!({"name":c["command"],"argv":c["argv"],"state":a["subject"]["id"],"exit":c["exit"],"machine":r.machine}))
+        })
+        .collect::<Vec<_>>());
+    write(out, "states", project.states.values().map(|state| &state.state).collect::<Vec<_>>())?;
+    write(out, "changes", project.changes().iter().map(|id| project.change_show(id, context)).collect::<Result<Vec<_>>>()?)?;
+    write(out, "operations-all", &records)?;
+    let subjects: BTreeSet<_> = project
+        .states
+        .keys()
+        .map(String::as_str)
+        .chain(records.iter().filter_map(|r| r.data["attestation"]["subject"]["id"].as_str()))
+        .collect();
+    write(out, "attestations-all", subjects.into_iter().flat_map(|id| project.attestations(id, None)).collect::<Vec<_>>())?;
+    write(out, "projects", vec![summary])?;
+    let path_rules: BTreeMap<_, _> = policy
+        .protect
+        .iter()
+        .filter(|(_, rule)| !rule.paths.is_empty())
+        .map(|(pattern, rule)| (pattern, rule.paths.clone()))
+        .collect();
+    write(
+        out,
+        "config",
+        json!({"project":project.id,"machine":project.machine,"values":project.config,"policy":policy,"path_rules":path_rules,"line_owners":lines.iter().map(|l|json!({"id":l.id,"name":l.name,"owner":l.owner})).collect::<Vec<_>>()}),
+    )?;
+    write(out, "overlays", overlays)?;
+    write(out, "copies", copies(project))?;
+    let mut machines = Vec::new();
+    for (id, data) in &project.machines {
+        let public = data["public_key"].as_str().context("machine record has no public key")?;
+        let mut row = json!({"id":id,"fingerprint":format!("sha256:{}",hex::encode(Sha256::digest(hex::decode(public)?))),"trusted":project.trusted.contains_key(id)});
+        if let Some(name) = data.get("name") {
+            row["name"] = name.clone();
+        }
+        machines.push(row);
+    }
+    write(out, "machines", machines)?;
+    // Current Layr records individual checks, but does not store a bisect session result.
+    write(out, "bisect", Vec::<Value>::new())?;
+    let mut trees = Vec::new();
+    let mut contents = Vec::new();
+    for line in &lines {
+        let tree = metadata.get(&line.head).context("line head has no verified tree")?;
+        let mut directories = BTreeMap::<String, BTreeMap<String, Value>>::from([(String::new(), BTreeMap::new())]);
+        for (path, entry) in &tree.files {
+            let components: Vec<_> = path.split('/').collect();
+            for i in 1..components.len() {
+                let parent = components[..i - 1].join("/");
+                let directory = components[..i].join("/");
+                directories.entry(parent).or_default().insert(
+                    directory.clone(),
+                    json!({"path":directory,"name":components[i-1],"kind":"directory","state":line.head}),
+                );
+                directories.entry(directory).or_default();
+            }
+            let parent = components[..components.len() - 1].join("/");
+            let mut item = json!({"path":path,"name":components.last(),"kind":if entry.0 == "120000" { "symlink" } else { "file" },"size":entry.1,"mode":entry.0,"state":line.head});
+            let bytes = &files[&line.head][path];
+            let mut file = json!({"state":line.head,"path":path,"size":entry.1});
+            if let Some(text) = text(bytes, 64 << 10) {
+                item["text"] = json!(text);
+                file["text"] = json!(text);
+            }
+            directories.entry(parent).or_default().insert(path.clone(), item);
+            contents.push(file);
+        }
+        for (path, entries) in directories {
+            trees.push(
+                json!({"state":line.head,"line":line.name,"path":path,"entries":entries.into_values().collect::<Vec<_>>()}),
+            );
+        }
+    }
+    write(out, "trees", trees)?;
+    write(out, "files", contents)?;
+    let versions = project.change_versions(change);
+    let head = versions.last().context("change has no head")?;
+    let base = head.parents.first().context("change head has no parent")?;
+    write(out, "diff", file_diff(base, &head.id, metadata, files)?)?;
     Ok(())
 }
 
@@ -245,7 +498,8 @@ fn main() -> Result<()> {
         "overlay file was not decrypted"
     );
 
-    let files = store(objects, identity, public_keys).states()?;
+    let mut source = store(objects, identity, public_keys);
+    let files = source.states()?;
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis().try_into()?;
     let mut context = probes::Context { now, ..Default::default() };
     #[derive(Deserialize)]
@@ -284,6 +538,7 @@ fn main() -> Result<()> {
     write(&args[2], "attestations", project.attestations(&request.attestation_state, None))?;
     write(&args[2], "operations", project.op_log(Some(&line.id), 30))?;
     write(&args[2], "probe-diff", probes::diff(project, &subject(request.probe_base), &subject(request.probe_head), &context)?)?;
+    page_outputs(&args[2], &model, project, &source.metadata, &files, &overlay_files, &request.change, &context)?;
     if project.line_list().len() != 2 {
         bail!("fixture must have two lines");
     }
