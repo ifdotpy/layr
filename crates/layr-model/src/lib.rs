@@ -12,6 +12,7 @@ pub mod interdiff;
 pub mod policy;
 pub mod probes;
 pub mod protection;
+pub mod screenshots;
 pub mod types;
 pub mod validation;
 

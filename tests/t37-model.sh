@@ -30,6 +30,11 @@ outputs = ["out/metric.json"]
 kind = "number"
 noise = 0.01
 fail_over = 0.2
+[probe.screens]
+run = ["python3", "screens.py"]
+outputs = ["out/screens"]
+kind = "screenshots"
+fail_over = 0.5
 TOML
 cat > "$T/src/probe.py" <<'PY'
 import json
@@ -37,6 +42,25 @@ from pathlib import Path
 Path('out').mkdir(exist_ok=True)
 Path('out/metric.json').write_text(json.dumps({'value': int(Path('metric.txt').read_text())}))
 PY
+
+cat > "$T/src/screens.py" <<'PYSCREENS'
+import json, struct, zlib
+from pathlib import Path
+value = int(Path('metric.txt').read_text())
+out = Path('out/screens')
+out.mkdir(parents=True, exist_ok=True)
+def chunk(tag, data):
+    return struct.pack('>I', len(data)) + tag + data + struct.pack('>I', zlib.crc32(tag + data))
+header = struct.pack('>IIBBBBB', 2, 2, 8, 6, 0, 0, 0)
+pixels = bytes([value, 0, 0, 255] + [0, 0, 0, 255] * 3)
+rows = b'\0' + pixels[:8] + b'\0' + pixels[8:]
+(out / 'Home@Phone.png').write_bytes(b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', header) + chunk(b'IDAT', zlib.compress(rows)) + chunk(b'IEND', b''))
+(out / 'Home@Phone.html').write_text(f'<main nonce="{value}"><p>{value}</p></main>')
+(out / 'Native@Phone.xml').write_text(f'<node bounds="[1,2][4,6]" text="{value}"/>')
+(out / 'Tree@Phone.json').write_text(json.dumps({'label': str(value), 'frame': [1, 2, 3, 4]}))
+(out / 'Text@Phone.txt').write_text(f'{value}\n')
+(out / 'Stable@Phone.txt').write_text('Same\n')
+PYSCREENS
 
 l init model-golden --from "$T/src" -q >/dev/null
 cd "$LAYR_ROOT/projects/model-golden/lines/main"
@@ -252,6 +276,7 @@ rows = [json.loads(line) for line in Path(sys.argv[1]).read_text().splitlines() 
 Path(sys.argv[2]).write_text(json.dumps(rows))
 PY
 l probe diff "$PROBE_BASE" "$PROBE_HEAD" --json > "$T/cli/probe-diff.json"
+l probe diff "$PROBE_HEAD" "$PROBE_HEAD" --json > "$T/cli/probe-same.json"
 eq 'the fixture has exactly two lines' 2 "$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "$T/cli/lines.json")"
 
 (cd "$REPO" && cargo run -q -p layr-model --example store_golden -- "$T/archive" "$T/paper" "$T/model")
@@ -265,6 +290,22 @@ project = load('projects')[0]
 assert project['name'] == 'model-golden' and project['default_line'] == 'main'
 assert project['counts']['lines'] == 2 and project['counts']['changes'] >= 3
 assert any(p['name'] == 'metric' for p in project['probes'])
+screens = next(p for p in load('probe-diff')['probes'] if p['probe'] == 'screens')
+assert screens['status'] == 'changed' and screens['limit_reasons'] == []
+rows = {row['screen']: row for row in screens['changes']}
+assert set(rows) == {'Home@Phone', 'Native@Phone', 'Tree@Phone', 'Text@Phone', 'Stable@Phone'}
+assert rows['Home@Phone']['changed_pixels'] == 1 and rows['Home@Phone']['total_pixels'] == 4
+assert rows['Home@Phone']['changed_share'] == 0.25
+assert rows['Home@Phone']['regions'] == [{'x': 0, 'y': 0, 'width': 1, 'height': 1}]
+assert rows['Home@Phone']['text_changes'] == 1 and '+110' in rows['Home@Phone']['structure_diff']
+assert all(rows[name]['text_changes'] == 1 for name in ('Native@Phone', 'Tree@Phone', 'Text@Phone'))
+assert rows['Native@Phone']['structure_regions'] == rows['Tree@Phone']['structure_regions'] == [
+    {'x': 1.0, 'y': 2.0, 'width': 3.0, 'height': 4.0, 'change': 'text'}]
+assert rows['Text@Phone']['changed_share'] is None
+assert rows['Stable@Phone']['structure_diff'] == '' and rows['Stable@Phone']['text_changes'] == 0
+same = next(p for p in load('probe-same')['probes'] if p['probe'] == 'screens')
+assert same['status'] == 'unchanged' and same['limit_reasons'] == [] and len(same['changes']) == 5
+assert all(row['changed_share'] in (0, None) and not row['structure_diff'] for row in same['changes'])
 trees = load('trees')
 assert any(t['path'] == 'docs' and t['entries'][0]['text'].startswith('Guide') for t in trees)
 entries = [e for tree in trees for e in tree['entries']]
@@ -317,7 +358,7 @@ import difflib, json, sys
 from pathlib import Path
 
 cli, model, counts = map(Path, sys.argv[1:])
-names = ('lines', 'log', 'log-auto', 'change', 'refs', 'ref-log', 'queue', 'attestations', 'operations', 'probe-diff', 'merge-refusals', 'interdiff', 'interdiff-replay')
+names = ('lines', 'log', 'log-auto', 'change', 'refs', 'ref-log', 'queue', 'attestations', 'operations', 'probe-diff', 'probe-same', 'merge-refusals', 'interdiff', 'interdiff-replay')
 passed = failed = 0
 for name in names:
     try:

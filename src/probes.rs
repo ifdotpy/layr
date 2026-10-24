@@ -40,18 +40,7 @@ pub enum Kind {
     Number,
     Screenshots,
 }
-fn default_tolerance() -> u8 {
-    8
-}
-fn is_default_tolerance(value: &u8) -> bool {
-    *value == default_tolerance()
-}
-fn default_ignore_attributes() -> Vec<String> {
-    ["bounds", "frame", "x", "y", "width", "height", "left", "top", "right", "bottom"].map(str::to_owned).to_vec()
-}
-fn is_default_ignore_attributes(value: &Vec<String>) -> bool {
-    *value == default_ignore_attributes()
-}
+use layr_model::probes::{default_ignore_attributes, default_tolerance, is_default_ignore_attributes, is_default_tolerance};
 fn default_noise() -> f64 {
     0.05
 }

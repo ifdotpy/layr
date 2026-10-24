@@ -571,7 +571,10 @@ fn main() -> Result<()> {
     write(&args[2], "queue", project.queue_list(None))?;
     write(&args[2], "attestations", project.attestations(&request.attestation_state, None))?;
     write(&args[2], "operations", project.op_log(Some(&line.id), 30))?;
-    write(&args[2], "probe-diff", probes::diff(project, &subject(request.probe_base), &subject(request.probe_head), &context)?)?;
+    let probe_base = subject(request.probe_base);
+    let probe_head = subject(request.probe_head);
+    write(&args[2], "probe-diff", probes::diff(project, &probe_base, &probe_head, &context)?)?;
+    write(&args[2], "probe-same", probes::diff(project, &probe_head, &probe_head, &context)?)?;
     let mut merge_context = layr_model::protection::Context {
         now,
         actor: Some(layr_model::policy::Who { uid: 0, groups: vec![] }),

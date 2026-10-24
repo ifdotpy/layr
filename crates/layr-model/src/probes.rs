@@ -1,5 +1,5 @@
 //! Pure comparisons of stored probe results. The caller supplies decrypted file bytes.
-use crate::{Project, StateKind, Subject};
+use crate::{screenshots, Project, StateKind, Subject};
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -17,6 +17,10 @@ pub struct Probe {
     pub noise: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fail_over: Option<f64>,
+    #[serde(default = "default_tolerance", skip_serializing_if = "is_default_tolerance")]
+    pub tolerance: u8,
+    #[serde(default = "default_ignore_attributes", skip_serializing_if = "is_default_ignore_attributes")]
+    pub ignore_attributes: Vec<String>,
 }
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -25,7 +29,21 @@ pub enum Kind {
     Files,
     Json,
     Number,
+    Screenshots,
 }
+pub fn default_tolerance() -> u8 {
+    8
+}
+pub fn is_default_tolerance(value: &u8) -> bool {
+    *value == default_tolerance()
+}
+pub fn default_ignore_attributes() -> Vec<String> {
+    ["bounds", "frame", "x", "y", "width", "height", "left", "top", "right", "bottom"].map(str::to_owned).to_vec()
+}
+pub fn is_default_ignore_attributes(value: &Vec<String>) -> bool {
+    *value == default_ignore_attributes()
+}
+
 impl Probe {
     /// Validate the same definition constraints as the CLI.
     pub fn validate(&self, name: &str) -> Result<()> {
@@ -222,16 +240,29 @@ pub fn diff(project: &Project, base: &Subject, head: &Subject, context: &Context
             probes.push(json!({"probe":name,"status":"kind changed","base":a,"head":b}));
             continue;
         }
-        let before = files(&context.outputs[&a.output_state]);
-        let after = files(&context.outputs[&b.output_state]);
-        let changes = compare(&before, &after, p)?;
+        let (before, after) = if p.kind == Kind::Screenshots {
+            (BTreeMap::new(), BTreeMap::new())
+        } else {
+            (files(&context.outputs[&a.output_state]), files(&context.outputs[&b.output_state]))
+        };
+        let changes = if p.kind == Kind::Screenshots {
+            screenshots::compare(&context.outputs[&a.output_state], &context.outputs[&b.output_state], p)?
+        } else {
+            compare(&before, &after, p)?
+        };
         if p.kind == Kind::Number
             && changes.is_empty()
             && before.iter().map(|(p, f)| (p, &f.sha256)).ne(after.iter().map(|(p, f)| (p, &f.sha256)))
         {
             quiet_noise.insert(name.clone(), p.noise);
         }
-        probes.push(json!({"probe":name,"status":if changes.is_empty() && a.exit == b.exit {"unchanged"} else {"changed"},"base":a,"head":b,"exit_changed":a.exit != b.exit,"changes":changes}));
+        let changed = if p.kind == Kind::Screenshots { changes.iter().any(screenshots::changed) } else { !changes.is_empty() };
+        let mut row = json!({"probe":name,"status":if !changed && a.exit == b.exit {"unchanged"}else{"changed"},"base":a,"head":b,"exit_changed":a.exit != b.exit,"changes":changes});
+        if p.kind == Kind::Screenshots {
+            row["limit_reasons"] =
+                json!(p.fail_over.map(|limit| screenshots::limit_reasons(name, &row, limit)).unwrap_or_default());
+        }
+        probes.push(row);
     }
     Ok(Behavior {
         base: base.id.clone(),
@@ -254,6 +285,7 @@ fn compare(old: &BTreeMap<String, FileData>, new: &BTreeMap<String, FileData>, p
             continue;
         }
         match probe.kind {
+            Kind::Screenshots => unreachable!("screenshots compare decoded outputs"),
             Kind::Files => {
                 let text = a.map(|f| f.text.as_deref().unwrap_or("")).unwrap_or("");
                 let next = b.map(|f| f.text.as_deref().unwrap_or("")).unwrap_or("");
@@ -333,7 +365,15 @@ fn number_changes(a: Option<&Value>, b: Option<&Value>, noise: f64) -> Result<Ve
 mod tests {
     use super::*;
     fn definition(kind: Kind) -> Probe {
-        Probe { run: vec!["true".into()], outputs: vec!["out".into()], kind, noise: 0.05, fail_over: None }
+        Probe {
+            run: vec!["true".into()],
+            outputs: vec!["out".into()],
+            kind,
+            noise: 0.05,
+            fail_over: None,
+            tolerance: default_tolerance(),
+            ignore_attributes: default_ignore_attributes(),
+        }
     }
     fn compare_bytes(kind: Kind, a: &[u8], b: &[u8]) -> Vec<Value> {
         compare(
