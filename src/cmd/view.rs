@@ -26,7 +26,7 @@ pub fn view(ctx: &Ctx, args: &[String]) -> Result<i32> {
         };
         h.repo.view_of(&line)?
     } else {
-        crate::revs::resolve_view(&h.repo, current.as_ref(), rest.first().map(String::as_str).unwrap_or("HEAD"))?
+        crate::revs::resolve_view(&h.repo, current.as_ref(), rest.first().map(String::as_str).unwrap_or("head"))?
     };
     let id = if save { h.repo.save_view(ctx, &view)? } else { view.id()? };
     if a.has("--json") {

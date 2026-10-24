@@ -11,12 +11,12 @@ printf '<xml>&\n' > 'space ü.txt'
 ln -s a.txt inside
 ln -s /etc/shadow outside
 l add -A
-l commit -qm disk-start
+l save -qm disk-start
 l remote add origin "file://$T/remote" --paper-key-out "$T/paper" >/dev/null
 l push origin >/dev/null
-l branch empty -q
-l branch -d empty -q
-l branch other -q
+l line new empty -q
+l line delete empty -q
+l line new other -q
 echo saved > autosaved.txt
 l save -q
 l push origin --auto >/dev/null
@@ -93,7 +93,7 @@ try:
  writer=os.environ.copy(); writer['LAYR_ROOT']=os.environ['DISK_TEST_STORE']; writer.pop('LAYR_SOCKET',None)
  working=pathlib.Path(writer['LAYR_ROOT'])/'projects/disk/lines/main'
  (working/'a.txt').write_text('new')
- for args in [['add','a.txt'],['commit','-qm','disk-refresh'],['push','origin']]:
+ for args in [['add','a.txt'],['save','-qm','disk-refresh'],['push','origin']]:
   subprocess.run([binary,*args],cwd=working,env=writer,check=True,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
  subprocess.run(['chown','-R','layr-disk-test',str(root/'remote')],check=True)
  check(request('GET','/main/a.txt')[2]==b'abc','old view stays consistent until refresh')

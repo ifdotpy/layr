@@ -11,8 +11,8 @@ See [thin APFS states](apfs-thin-states.md) and the [measurements](../benchmarks
    Under constant writes it keeps the last copy after 6 rounds, with a warning:
    each file is then one complete version from some moment of the copy, not one moment for all files.
    Files with an active `mmap` have no change counter, so status uses a slower complete copy.
-2. **Work grows with the number of files.** A btrfs branch costs the same for any tree.
-   An APFS branch is one complete tree copy: about 1 s CPU for 10,000 files and about 20 s for 100,000.
+2. **Work grows with the number of files.** A btrfs line costs the same for any tree.
+   An APFS line is one complete tree copy: about 1 s CPU for 10,000 files and about 20 s for 100,000.
    `add` and automatic states scan the complete tree; btrfs gets changed paths from `send --no-data`.
    `status` scans once and compares only entries whose stat data changed ([APFS features](apfs-features.md)).
 3. **Weaker protection of history.** btrfs read-only subvolumes are kernel-enforced.
@@ -34,17 +34,17 @@ See [thin APFS states](apfs-thin-states.md) and the [measurements](../benchmarks
    - Merges, imports, received states and lines with overlays keep complete trees.
    - Commands that need a folder (`show`, `merge`, `push`) make a view. It uses space until `gc` removes it.
    - A long chain of layers makes reads slower until `gc` makes a complete tree.
-8. **Recovery.** A journal protects a stopped commit. Other partial states wait for `gc`.
+8. **Recovery.** A journal protects a stopped save. Other partial states wait for `gc`.
    It removes a layer without a record only after one hour. On btrfs an incomplete snapshot never appears.
 
-The two main limits are the non-atomic snapshot and the cost per file of each branch.
+The two main limits are the non-atomic snapshot and the cost per file of each line.
 See [APFS features](apfs-features.md) for the features that were reviewed to reduce them.
 Both need APFS volume snapshots, which need root and an Apple entitlement.
 
 ## Layr lines and git worktrees on APFS
 
 `benchmarks/apfs-thin-20261022/worktree.py` runs on one APFS volume with git 2.54.0 and Layr `916a59d`.
-It makes 4 worktrees or lines, changes 10 files in each, and runs status, add and commit.
+It makes 4 worktrees or lines, changes 10 files in each, and runs status, add and a named save (a commit in git).
 Values are medians of the 4 lines. CPU is user and system time. Single run on a loaded host.
 
 | 10,000 files of 4 KiB | git worktree | Layr line |
@@ -53,8 +53,8 @@ Values are medians of the 4 lines. CPU is user and system time. Single run on a 
 | New worktree or line, CPU | 1.03 s | 0.63 s |
 | First status after the change, CPU | 0.33 s | 0.17 s |
 | add, CPU | 0.12 s | 0.17 s |
-| commit, CPU | 0.13 s | 0.10 s |
-| commit, space | 0.02 MiB | 0.20 MiB |
+| Named save (git commit), CPU | 0.13 s | 0.10 s |
+| Named save (git commit), space | 0.02 MiB | 0.20 MiB |
 
 | Same, plus one file of 1 GiB | git worktree | Layr line |
 | --- | ---: | ---: |
@@ -70,7 +70,7 @@ Values are medians of the 4 lines. CPU is user and system time. Single run on a 
 
 ### What a worktree does not have
 
-- Automatic states of uncommitted work, `undo`, and retention.
+- Automatic states of unsaved work, `undo`, and retention.
 - Warm caches for new lines (build output as clones), overlays, access rules, and the root service.
 - Isolation: Layr keeps states in a store that line owners cannot change through the service.
 
@@ -81,5 +81,5 @@ Values are medians of the 4 lines. CPU is user and system time. Single run on a 
 - Wide tool support: every editor and tool knows git worktrees.
 - Many lines of a large tree cost CPU per line in Layr (one clone). A worktree costs more space and more time per line.
 
-On APFS, Layr is better than a worktree for space and branch time, and much better with large files.
-It is equal or a little slower for `add`, and its commits use more space.
+On APFS, Layr is better than a worktree for space and line creation time, and much better with large files.
+It is equal or a little slower for `add`, and its states use more space.

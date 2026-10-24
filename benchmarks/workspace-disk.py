@@ -134,7 +134,7 @@ for tool, fs, copy_mode in cases:
                         (branch / 'target').mkdir()
                         run(['cp', '-a', f'--reflink={copy_mode}', str(main / 'target') + '/.', branch / 'target'])
                 else:
-                    layr(main, 'branch', '-q', f'topic{n}')
+                    layr(main, 'line', 'new', '-q', f'topic{n}')
                     branch = main.parent / f'topic{n}'
                 with (branch / 'f00000.txt').open('ab') as f:
                     f.write(f'branch {n}\n'.encode())
@@ -147,7 +147,7 @@ for tool, fs, copy_mode in cases:
                 if tool == 'git':
                     run(['git', 'commit', '-qam', f'edit {n}'], branch, env)
                 else:
-                    layr(branch, 'commit', '-qam', f'edit {n}')
+                    layr(branch, 'save', '-qam', f'edit {n}')
                 assert (main / 'f00000.txt').read_bytes() == (source / 'f00000.txt').read_bytes()
                 if n in {1, 4, 8, a.branches}:
                     sample = used(mount, fs)

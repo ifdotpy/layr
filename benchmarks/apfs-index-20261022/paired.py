@@ -26,7 +26,7 @@ try:
   paths=[f'd{i//100:05}/f{i:07}' for i in range(changed)]
   for trial in range(3):
    for variant in (['baseline','candidate'] if trial%2==0 else ['candidate','baseline']):
-    name=f'{variant}-{trial}';run(variant,main,'branch','-q',name);work=main.parent/name
+    name=f'{variant}-{trial}';run(variant,main,'line', 'new','-q',name);work=main.parent/name
     def measure(op,*args):
      start=time.perf_counter();r=run(variant,work,*args);wall=time.perf_counter()-start
      row={'files':n,'changed':changed,'trial':trial,'variant':variant,'operation':op,'wall':wall,'load':os.getloadavg(),'trace':r.stderr}
@@ -42,14 +42,14 @@ try:
       assert added.stderr.count('APFS clone ')==(1 if phase==1 else 0),added.stderr
      status=run(variant,work,'status','--porcelain').stdout
      assert len(status.splitlines())==changed and all(line.startswith('M  ') for line in status.splitlines()),status
-    committed=measure('commit','commit','-qm','measured')
+    committed=measure('commit','save','-qm','measured')
     if variant=='candidate':assert 'APFS promote index' in committed.stderr and 'APFS clone ' not in committed.stderr,committed.stderr
     assert not run(variant,work,'status','--porcelain').stdout;run(variant,work,'fsck')
     for rel in paths:
      assert (work/rel).read_bytes()==b'B'*4096
      assert (main/rel).read_bytes()==(src/rel).read_bytes()
     report['verified'].append({'files':n,'changed':changed,'trial':trial,'variant':variant});save()
-    run(variant,main,'branch','-q','-D',name)
+    run(variant,main,'line', 'delete','-q','-D',name)
   erase(case)
  report['complete']=True;save()
 finally:

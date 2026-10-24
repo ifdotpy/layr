@@ -9,7 +9,7 @@ url=${REMOTE_URL:-file://$T/archive}
 l remote add archive "$url" --paper-key-out "$T/paper" >/dev/null
 ok "first store push" l push archive --json
 ok "remote signatures and file hashes" l fsck --remote archive --files
-first=$(l rev-parse HEAD)
+first=$(l rev-parse head)
 count_before=$(find "$T/archive/states" -name '*.tree.age' 2>/dev/null | wc -l)
 ok "repeat push" l push archive -q
 if [ -d "$T/archive/states" ]; then eq "repeat push publishes no second attempt" "$count_before" "$(find "$T/archive/states" -name '*.tree.age' | wc -l)"; fi
@@ -19,11 +19,11 @@ printf '#!/bin/sh\nexit 0\n' > executable
 chmod 755 executable
 l add -A
 l save -q
-auto=$(l rev-parse 'HEAD@{0}')
+auto=$(l rev-parse 'head@{0}')
 l ref set holds/remote-auto "$auto" >/dev/null
 l attest origin "$auto" >/dev/null
-l commit -m second -q
-second=$(l rev-parse HEAD)
+l save -m second -q
+second=$(l rev-parse head)
 ok "incremental store push" l push archive -q
 ok "all remote frames verify" l fsck --remote archive --files --json
 has "remote history includes message" second "$(l log --remote archive)"
@@ -40,7 +40,7 @@ else
     exit 1
 fi
 cd "$LAYR_ROOT/projects/replica/lines/main"
-eq "clone selects the newest line head" "$second" "$(l rev-parse HEAD)"
+eq "clone selects the newest line head" "$second" "$(l rev-parse head)"
 has "restored file content" 'second state' "$(cat notes.txt)"
 eq "restored symlink" notes.txt "$(readlink link.txt)"
 ok "restored executable mode" test -x executable
@@ -58,7 +58,7 @@ export LAYR_ROOT=$original_root
 export LAYR_PROJECT=project
 export LAYR_LINE=main
 cd "$original_root/projects/project/lines/main"
-l branch temporary
+l line new temporary
 l push archive -q
 export LAYR_ROOT=$T/replica LAYR_PROJECT=replica
 cd "$LAYR_ROOT/projects/replica/lines/main"
@@ -68,7 +68,7 @@ export LAYR_ROOT=$original_root LAYR_PROJECT=project
 cd "$original_root/projects/project/lines/temporary"
 printf 'unfinished work\n' >> notes.txt
 cd "$original_root/projects/project/lines/main"
-l branch -D temporary
+l line delete -D temporary
 l op export > "$T/deletion-records"
 final=$(python3 - "$T/deletion-records" <<'PYCODE'
 import json,sys

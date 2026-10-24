@@ -48,7 +48,7 @@ try:
     run(work_root, 'init', 'p', '--from', src, '-q')
     main = work_root / 'store/projects/p/lines/main'
     run(main, 'protect', 'main', '--remove')
-    run(main, 'branch', '-q', 'topic')
+    run(main, 'line', 'new', '-q', 'topic')
     work = main.parent / 'topic'
     same('first status compares all', fast=False)
     same('nothing changed')
@@ -88,7 +88,7 @@ try:
     (work / '.gitignore').write_text('build/\n')
     same('a changed .gitignore compares all', fast=False)
     run(work, 'add', '-A')
-    run(work, 'commit', '-qm', 'all')
+    run(work, 'save', '-qm', 'all')
     same('status after commit compares all', fast=False)
     same('clean after commit')
     # Two names of one file inside the line: a write through one name changes both.

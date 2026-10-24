@@ -54,7 +54,7 @@ for trial in range(a.repeats):
     row['init'], _ = run(root, 'init', project, '--from', str(src), '-q')
     main = root / 'store' / 'projects' / project / 'lines' / 'main'
     run(main, 'protect', 'main', '--remove')
-    row['branch'], _ = run(main, 'branch', '-q', 'topic')
+    row['branch'], _ = run(main, 'line', 'new', '-q', 'topic')
     topic = main.parent / 'topic'
     row['status_clean'], status = run(topic, 'status', '--porcelain')
     assert not status.strip(), status
@@ -64,7 +64,7 @@ for trial in range(a.repeats):
             f.write(b'changed\n')
     row['diff_changed'], _ = run(topic, 'diff', '--stat')
     row['add'], _ = run(topic, 'add', '-A')
-    row['commit'], _ = run(topic, 'commit', '-qm', 'ten files')
+    row['commit'], _ = run(topic, 'save', '-qm', 'ten files')
     row['merge'], _ = run(main, 'merge', '-q', 'topic')
     _, status = run(main, 'status', '--porcelain')
     assert not status.strip(), status

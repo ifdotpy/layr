@@ -197,7 +197,7 @@ const CASES = [
     badge: ["rfc", "branch есть · --count: RFC §4.10"],
     term: "studio-vm · ~/shop",
     steps: [
-      ["cmd", "layr branch --count 16 agent main"],
+      ["cmd", "layr line new agent main --count 16"],
       ["out", "created agent-1 … agent-16 from main@4f2a  {dim}(1 transaction){/}"],
       ["out", "caches: target/ 8.2 GB reflinked ×16  {ok}extra disk ≈ 0 (copy-on-write){/}"],
       ["cmd", "cd agent-3 && cargo build"],
@@ -280,7 +280,7 @@ const CASES = [
     badge: ["rfc", "Предложение · RFC §4.7"],
     term: "agent-7 · ~/shop",
     steps: [
-      ["cmd", "layr commit -am \"Add Stripe client\""],
+      ["cmd", "layr save -am \"Add Stripe client\""],
       ["out", "{bad}refused: src/pay.rs:14 contains the value of a secret{/}"],
       ["out", "{bad}         from private layer secrets-dev (.env:3){/}"],
       ["out", "{dim}the value is not shown{/}"],
@@ -295,7 +295,7 @@ const CASES = [
     badge: ["rfc", "Предложение · RFC §4.11"],
     term: "laptop · ~/shop",
     steps: [
-      ["cmd", "layr branch repro-5521 attestations/5521"],
+      ["cmd", "layr line new repro-5521 attestations/5521"],
       ["out", "line repro-5521 from views/7d3e   {ok}caches warm{/}"],
       ["cmd", "layr show attestations/5521"],
       ["out", "check by ci, 14:20: {bad}cargo test checkout::discount  exit 101{/}"],

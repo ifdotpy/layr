@@ -264,13 +264,15 @@ fn change_stack(ctx: &Ctx, repo: &Repo, line: &crate::model::Line, layers: &[Lay
     }
     let (st, _scan, _it, _idx) = repo.status(line)?;
     if !st.staged.is_empty() {
-        return Err(exit(1, "error: the line has staged changes; commit them or unstage them ('layr restore --staged') first"));
+        return Err(exit(1, "error: the line has staged changes; save them or unstage them ('layr restore --staged') first"));
     }
     for (p, o) in repo.pending_moves(line) {
         if !layers.iter().any(|l| l.overlay == o) {
             return Err(exit(
                 1,
-                format!("error: '{p}' is to move to overlay '{o}' at the next commit; commit first, or 'layr overlay move --cancel {p}'"),
+                format!(
+                    "error: '{p}' is to move to overlay '{o}' at the next state; save first, or 'layr overlay move --cancel {p}'"
+                ),
             ));
         }
     }
@@ -378,7 +380,7 @@ fn move_cmd(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let shared = repo.state_root(&line.head)?;
         let pushed = !repo.p.db.remote_refs()?.is_empty();
         for p in &paths {
-            outln!(ctx, "move to overlay {name} at the next commit: {}", h.rel(p));
+            outln!(ctx, "move to overlay {name} at the next state: {}", h.rel(p));
             if crate::fsutil::lmeta(&shared, p).is_some() {
                 outln!(
                     ctx,

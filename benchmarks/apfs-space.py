@@ -63,7 +63,7 @@ for trial in range(a.repeats):
             layr(mount, 'init', 'space', '--from', str(src), '-q')
             main = mount/'store/projects/space/lines/main'
             record(mount, trial, variant, 'init')
-            for n in range(5): layr(main, 'branch', '-q', f'b{n}')
+            for n in range(5): layr(main, 'line', 'new', '-q', f'b{n}')
             record(mount, trial, variant, 'five_branches')
             for n in range(5):
                 work = main.parent/f'b{n}'
@@ -74,7 +74,7 @@ for trial in range(a.repeats):
                     out.seek(n*1024*1024)
                     out.write(bytes([65+n])*4096)
                 layr(work, 'add', '-A')
-                layr(work, 'commit', '-qm', 'space measurement')
+                layr(work, 'save', '-qm', 'space measurement')
             record(mount, trial, variant, 'five_commits')
             layr(main, 'fsck')
             assert (main/'large.bin').read_bytes() == (src/'large.bin').read_bytes()

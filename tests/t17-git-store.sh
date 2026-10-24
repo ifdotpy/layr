@@ -27,7 +27,7 @@ P=$LAYR_ROOT/projects/p/lines
 G=$LAYR_ROOT/projects/p/git
 cd /tmp || exit 1
 
-as layr-u1 $L --project p branch -q a1 main
+as layr-u1 $L --project p line new -q a1 main
 ok "a line owner reads the history with git" as layr-u1 git -C $P/a1 log --oneline
 echo later > $T/blob
 oid=$(git --git-dir=$G hash-object -w $T/blob)
@@ -38,7 +38,7 @@ no "a user without a role does not get into the store" as layr-u2 cat $G/HEAD
 earlier() { chmod -R go-rwx $G/* && git --git-dir=$G config --unset core.sharedRepository; }
 earlier
 no "the store of an earlier layr is closed to the line owner" as layr-u1 git -C $P/a1 log --oneline
-ok "a new line" as layr-u1 $L --project p branch -q a2 main
+ok "a new line" as layr-u1 $L --project p line new -q a2 main
 ok "repairs it" as layr-u1 git -C $P/a1 log --oneline
 no "a user without a role still does not get in" as layr-u2 cat $G/HEAD
 earlier

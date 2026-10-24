@@ -16,9 +16,9 @@ for count in [10, 100]:
             prefix = f"{mode}-{count}-{trial}"
             start = time.perf_counter()
             if mode == "batch":
-                subprocess.run([binary, "branch", prefix, "HEAD", "--count", str(count), "-q"], check=True)
+                subprocess.run([binary, "line", "new", prefix, "head", "--count", str(count), "-q"], check=True)
             else:
                 for index in range(1, count + 1):
-                    subprocess.run([binary, "branch", f"{prefix}-{index}", "HEAD", "-q"], check=True)
+                    subprocess.run([binary, "line", "new", f"{prefix}-{index}", "head", "-q"], check=True)
             print(json.dumps(dict(count=count, trial=trial + 1, mode=mode, milliseconds=round((time.perf_counter()-start)*1000, 3))), flush=True)
 PY

@@ -11,7 +11,7 @@ mkdir "$T/src"
 echo initial > "$T/src/f"
 l init perf --from "$T/src" -q
 P=$LAYR_ROOT/projects/perf
-head_id() { l rev-parse HEAD | python3 -c 'import sys, uuid; s=sys.stdin.read().strip(); print(uuid.UUID(hex=s[20:]+s[12:20]+s[:12]))'; }
+head_id() { l rev-parse head | python3 -c 'import sys, uuid; s=sys.stdin.read().strip(); print(uuid.UUID(hex=s[20:]+s[12:20]+s[:12]))'; }
 cd "$P/lines/main"
 python3 - <<'PY'
 import random
@@ -21,13 +21,13 @@ with open('blob', 'wb') as f:
         f.write(r.randbytes(128 * 1024))
 PY
 l add blob
-l commit -qm blob
+l save -qm blob
 first=$(head_id)
 rm blob
-l commit -qam remove
+l save -qam remove
 cp --reflink=always "$P/states/$first/blob" blob
 l add blob
-l commit -qm return
+l save -qm return
 last=$(head_id)
 new_fs "$T/before" 2G
 new_fs "$T/after" 2G
@@ -46,7 +46,7 @@ with open('compressed', 'wb') as f:
         f.write(b'source text\n' * 12000)
 PY
 l add compressed
-l commit -qm compressed
+l save -qm compressed
 last=$(head_id)
 for name in before after; do
     binary=$BEFORE

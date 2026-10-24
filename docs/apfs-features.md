@@ -14,7 +14,7 @@ Measurements: [benchmarks/apfs-features-20261023](../benchmarks/apfs-features-20
 
 | Feature | Decision | Reason |
 | --- | --- | --- |
-| 1. `getattrlistbulk` | Used | One call per folder instead of two per entry. `status`, `add`, `save`, `commit` and `diff` use 30 to 40 percent less CPU. |
+| 1. `getattrlistbulk` | Used | One call per folder instead of two per entry. `status`, `add`, `save`, `save -m <message>` and `diff` use 30 to 40 percent less CPU. |
 | 2. FSEvents | Not used | A write through a memory mapping gives no event, so a status from events can be out of date. A saved status with stat data replaces it: about 5.5 times less CPU for `status` at 100,000 files (below). |
 | 3. `F_LOG2PHYS_EXT` | Used | Blocks of two clones at one physical address need no read. A 4 KiB change in a 1 GiB file: 0.62 s to 0.03 s per command. |
 | 4. Volume snapshots | Not used | `fs_snapshot_create` needs root and an Apple entitlement (`man fs_snapshot_create`). A normal user gets EPERM. |

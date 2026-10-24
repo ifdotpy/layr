@@ -50,7 +50,7 @@ for case,n,size,large in [('empty-files',10000,0,0),('small-files',10000,4096,0)
    def run(cwd,*args):return call([binary,*args],cwd=cwd,env=env)
    run(root,'init','space','--from',src,'-q');main=mount/'store/projects/space/lines/main';record(row,'main',0,mount)
    for i in range(1,a.branches+1):
-    run(main,'branch','-q',f'b{i}')
+    run(main,'line', 'new','-q',f'b{i}')
     if i in {1,4,8,a.branches}:record(row,'branches',i,mount)
    for i in range(1,a.branches+1):
     work=main.parent/f'b{i}'
@@ -59,7 +59,7 @@ for case,n,size,large in [('empty-files',10000,0,0),('small-files',10000,4096,0)
      with f.open('r+b') as out:out.write(bytes([i])*4096 if size else bytes([i]))
     if large:
      with (work/'large.bin').open('r+b') as out:out.seek(i*1024**2);out.write(bytes([i])*4096)
-    run(work,'add','-A');run(work,'commit','-qm',f'edit {i}')
+    run(work,'add','-A');run(work,'save','-qm',f'edit {i}')
     assert not run(work,'status','--porcelain').strip()
     for k in range(10):assert (work/f'd00000/f{k:07}').read_bytes()==(bytes([i])*4096 if size else bytes([i]))
     if large:

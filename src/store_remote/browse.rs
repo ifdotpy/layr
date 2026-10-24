@@ -92,7 +92,7 @@ impl Browse {
             };
             let (_, _, tree) = decoder.tree(&state.id, &attempts[&state.id])?;
             let machine = db.state_machine(&state.id)?.context("state signer is missing")?;
-            let kind = if state.kind == crate::model::StateKind::Auto { "auto" } else { "commit" };
+            let kind = if state.kind == crate::model::StateKind::Auto { "auto" } else { "state" };
             lines.push(Line { name: line.name, head: state.id, kind: kind.into(), machine, time: state.time, files: tree.files });
         }
         drop(decoder);

@@ -8,7 +8,7 @@ ask the lead before changing a decision.
 - Protected lines already exist (`src/access.rs` `Rule`, `rule_for`): `expect` (merge only
   with `--expect <state>`), named checks that the merge runs on the merge result before the line
   moves, approvals of the exact state from allowed approvers who are not its authors
-  (`src/cmd/mergecmd.rs` `check_approvals`), direct-commit and rewrite rules, per-path roles.
+  (`src/cmd/mergecmd.rs` `check_approvals`), rules for direct saves and history changes, per-path roles.
 - Core now stores approvals and check results as attestations, and has refs with CAS
   (`src/cmd/refs.rs`), `changes/<id>` and `attestations/<id>` revisions.
 
@@ -71,13 +71,13 @@ New command group `layr queue` (new concept, RFC 12.6 rule 3):
 ## 4. Secret detector (RFC 4.7)
 
 - Source of secret values: files in overlays that are not shared (private overlays) visible to
-  the committing user, plus files matched by the project config `secrets.paths` (patterns).
+  the user who saves the state, plus files matched by the project config `secrets.paths` (patterns).
   Candidates: values of `KEY=VALUE` lines and whole file contents for files of at most 4 KiB,
   each of at least 12 characters, ignoring values that are only letters or only digits shorter
   than 20.
 - Index: `HMAC-SHA256(k, value)` with a per-project random key kept in the root-only project
   folder; never the values. Rebuilt when a source file changes.
-- Check points: `commit` and `merge` that produce a state of the shared set, `layr git push`
+- Check points: `save -m <message>` and `merge` that produce a state of the shared set, `layr git push`
   and Git export, and `push` to any remote. Added lines of the diff are split into tokens
   (`[A-Za-z0-9_+/=.-]{12,}`) and compared by HMAC.
 - A match refuses the operation with path, line and a declassify id `<path>@<first 16 hex of the
@@ -95,7 +95,7 @@ New command group `layr queue` (new concept, RFC 12.6 rule 3):
 | Task | Worker | Files |
 |---|---|---|
 | 1 and 2 | core (continues) | access.rs, cmd/admin.rs protect, cmd/refs.rs, new cmd/queue.rs, mergecmd.rs entry points only |
-| 3 and 4 | new worker `guard` | new cmd/bisect.rs, new src/secrets.rs, hooks in commit/merge/push paths (one call each) |
+| 3 and 4 | new worker `guard` | new cmd/bisect.rs, new src/secrets.rs, hooks in named save, merge and push paths (one call each) |
 
 ## 5. Views (RFC 3.0, 3.1)
 
@@ -113,7 +113,7 @@ hash of exactly that (`base_key`). A view is that stack made addressable.
   `views/<id>` resolves on every machine that has the record. Saving is idempotent.
 - `revs::resolve("views/<id>")` returns the shared state, so every command that takes a state
   works. Commands that need the whole view use a new resolver `revs::resolve_view`:
-  `layr branch <name> views/<id>` (new line with head = shared and the same stack, only if the
+  `layr line new <name> views/<id>` (new line with head = shared and the same stack, only if the
   caller may read every overlay layer; otherwise refused naming the overlay),
   `layr try views/<id> -- <cmd>` (runs in the assembled view, using the existing `assemble`).
 - Attestations accept subject kind `view` (`layr attest <kind> views/<id>`). `try` on a line

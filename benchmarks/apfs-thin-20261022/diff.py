@@ -16,7 +16,7 @@ for who, b in (("base", base), ("cand", cand)):
     env = dict(os.environ, LAYR_ROOT=store, LAYR_AUTHOR_NAME="B", LAYR_AUTHOR_EMAIL="b@example.invalid")
     for k in ["LAYR_SOCKET", "LAYR_PROJECT", "LAYR_LINE", "LAYR_TRACE"]: env.pop(k, None)
     run(b, env, root, "init", "p", "--from", src, "-q")
-    main = os.path.join(store, "projects/p/lines/main"); run(b, env, main, "branch", "-q", "t")
+    main = os.path.join(store, "projects/p/lines/main"); run(b, env, main, 'line', 'new', "-q", "t")
     work = os.path.join(store, "projects/p/lines/t")
     for k in range(10):
         open(os.path.join(work, f"d00000/f{k:07}"), "r+b").write(b"x" * 4096)

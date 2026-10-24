@@ -15,21 +15,21 @@ try:
  for i in range(10000):
   f=src/f'd{i//100}'/f'f{i}';f.parent.mkdir(exist_ok=True);f.write_bytes(b'original\n')
  run(root,'init','test','--from',src,'-q');project=root/'store/projects/test';main=project/'lines/main'
- run(main,'branch','-q','topic');work=main.parent/'topic';path=work/'d0/f0'
+ run(main,'line','new','-q','topic');work=main.parent/'topic';path=work/'d0/f0'
  db=project/'meta/db/layr.sqlite';journal=project/'meta/apfs-index-commit.json'
  def stage():
   paths=[p for p in (project/'meta/stage').iterdir() if p.is_dir()];assert len(paths)==1,paths;return paths[0]
- old_head=run(work,'rev-parse','HEAD').stdout.strip();path.write_bytes(b'staged\n');run(work,'add','d0/f0')
+ old_head=run(work,'rev-parse','head').stdout.strip();path.write_bytes(b'staged\n');run(work,'add','d0/f0')
  index=stage();ino=index.stat().st_ino
  with sqlite3.connect(db) as c:
   c.execute("CREATE TRIGGER fail_commit BEFORE INSERT ON records WHEN NEW.op='commit' BEGIN SELECT RAISE(ABORT, 'forced commit failure'); END")
- failed=run(work,'commit','-qm','must fail',ok=False);assert 'forced commit failure' in failed.stderr,failed.stderr
+ failed=run(work,'save','-qm','must fail',ok=False);assert 'forced commit failure' in failed.stderr,failed.stderr
  assert stage().stat().st_ino==ino and (stage()/'d0/f0').read_bytes()==b'staged\n'
- assert run(work,'rev-parse','HEAD').stdout.strip()==old_head and not journal.exists()
+ assert run(work,'rev-parse','head').stdout.strip()==old_head and not journal.exists()
  run(work,'fsck');print('PASS database failure restores the same staged tree',flush=True)
  with sqlite3.connect(db) as c:c.execute('DROP TRIGGER fail_commit')
  # Kill after the rename and before the record. No test hook changes product behavior.
- proc=subprocess.Popen([binary,'commit','-qm','interrupted'],cwd=work,env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+ proc=subprocess.Popen([binary,'save','-qm','interrupted'],cwd=work,env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
  stopped=False
  try:
   deadline=time.monotonic()+20
@@ -47,9 +47,9 @@ try:
  assert journal.exists()
  st=run(work,'status','--porcelain');assert st.stdout=='M  d0/f0\n',st.stdout
  assert stage().stat().st_ino==ino and (stage()/'d0/f0').read_bytes()==b'staged\n'
- assert run(work,'rev-parse','HEAD').stdout.strip()==old_head and not journal.exists()
+ assert run(work,'rev-parse','head').stdout.strip()==old_head and not journal.exists()
  run(work,'fsck');print('PASS process death restores the index on the next command',flush=True)
- committed=run(work,'commit','-qm','success')
+ committed=run(work,'save','-qm','success')
  assert 'APFS promote index' in committed.stderr and 'APFS clone ' not in committed.stderr,committed.stderr
  with sqlite3.connect(db) as c:head=c.execute("SELECT head FROM lines WHERE name='topic'").fetchone()[0]
  state=project/'deltas'/head
@@ -60,7 +60,7 @@ try:
  print('PASS commit publishes the original index inode without a tree clone',flush=True)
  # A staged tree equal to HEAD must survive a refused empty commit.
  path.write_bytes(b'other\n');run(work,'add','d0/f0');path.write_bytes(b'staged\n');run(work,'add','d0/f0')
- ino=stage().stat().st_ino;run(work,'commit','-qm','empty',ok=False)
+ ino=stage().stat().st_ino;run(work,'save','-qm','empty',ok=False)
  assert stage().stat().st_ino==ino and not journal.exists();assert not run(work,'status','--porcelain').stdout
  run(work,'fsck');print('PASS empty commit keeps the original index',flush=True)
 finally:

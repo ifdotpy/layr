@@ -6,14 +6,14 @@ This page is part of the [Layr documentation](../README.md#documentation).
 
 Refs name states without a work folder, for example `env/prod` or `pins/build`.
 Mutable ref names must start with `env/`, `release/`, `pins/`, `holds/`, `leases/`, `caches/`, or `derived/`.
-`ref set` refuses line names. Use `commit`, `merge`, or `reset` to change a line.
+`ref set` refuses line names. Use `save -m <message>`, `merge`, or `reset` to change a line.
 `--expect` compares the current state before the update. A mismatch changes nothing and returns an error.
 `--ttl` accepts positive durations such as `30s`, `5m`, `2h`, and `1d`.
 All ref and change commands accept `--json`.
 
 ```sh
-layr ref set env/prod HEAD
-layr ref set env/prod HEAD~1 --expect HEAD
+layr ref set env/prod head
+layr ref set env/prod head~1 --expect head
 layr rev-parse 'env/prod@{1}'
 layr ref list env/ --json
 layr ref log env/prod
@@ -27,10 +27,10 @@ Expired refs stop resolving. GC records their removal. The normal undo window ca
 
 These revision prefixes are reserved: `env/`, `release/`, `pins/`, `holds/`, `leases/`, `caches/`, `derived/`,
 `changes/`, `views/`, and `attestations/`. Line names cannot start with these prefixes.
-`views/<id>` resolves a saved view to its shared state. Branch and try also use its overlay stack.
+`views/<id>` resolves a saved view to its shared state. `line new` and `try` also use its overlay stack.
 
-Each new source commit has a `change_id`. Amend, rebase, and cherry-pick preserve it.
-A merge commit has a new identifier. Old states without `change_id` remain readable.
+Each new source state has a `change_id`. Amend, replay, and pick preserve it.
+A merge state has a new identifier. Old states without `change_id` remain readable.
 `changes/<id>` selects the latest version. `changes/<id>/v1` selects the first version.
 `change show` lists versions and their attestations. `change log` lists their operations.
 `change diff` compares each version's patch against its own parent, so unrelated base changes do not enter the interdiff.
@@ -182,7 +182,7 @@ Working edits do not change the descriptor until a state changes.
 layr view main --json
 layr view save main --json
 layr view show <id> --json
-layr branch reproduce views/<id>
+layr line new reproduce views/<id>
 layr try views/<id> -- ./test.sh
 layr attest approval views/<id>
 layr attestations views/<id> --kind check --json
@@ -190,17 +190,17 @@ layr attestations views/<id> --kind check --json
 
 `view save` writes a signed `view.save` record. Repeated saves of the same descriptor write no extra record.
 `views/<id>` resolves after that record reaches the local machine.
-Commands that need a state use the shared state. Branch and try use the complete stack.
-`try main` and `try HEAD` also use the line's current stack.
+Commands that need a state use the shared state. `line new` and `try` use the complete stack.
+`try main` and `try head` also use the line's current stack.
 An explicit state revision has no layers.
 
-A branch from a view preserves its exact layer states, including older states of shared-mode overlays.
+A line from a view preserves its exact layer states, including older states of shared-mode overlays.
 It initializes missing overlay lines. It does not move an existing overlay line.
-A later private commit can fail the existing stack check if that overlay line has advanced.
-Use `layr overlay use` to take its newest state before the commit.
+A later private save can fail the existing stack check if that overlay line has advanced.
+Use `layr overlay use` to take its newest state before the named save.
 
-The caller must read every layer before branch or try can materialize a view.
-A different branch owner must also read every layer. A refusal names the overlay.
+The caller must read every layer before `line new` or `try` can create a view.
+A different line owner must also read every layer. A refusal names the overlay.
 Descriptors contain overlay names and state ids. Project readers may read descriptors without access to the private files.
 A descriptor can travel to another machine while its private layers stay local.
 
@@ -218,8 +218,8 @@ Overlay states stay through their own live line history.
 ## Find the first bad state
 
 ```sh
-layr bisect run --good HEAD~10 --bad HEAD -- sh -c 'make test'
-layr bisect run --auto --good HEAD --json -- sh -c 'make test'
+layr bisect run --good head~10 --bad head -- sh -c 'make test'
+layr bisect run --auto --good head --json -- sh -c 'make test'
 layr bisect run --ref-log env/prod -- sh -c 'make test'
 ```
 
@@ -244,14 +244,14 @@ Explicit bounds must be positions of that ref.
 
 ## Secret checks
 
-Layr checks added lines before a shared commit or merge and before an export or push.
+Layr checks added lines before a shared named save or merge and before an export or push.
 It uses exact values from overlays that the caller can read and from files that match `secrets.paths`.
 
 ```sh
 layr config secrets.paths '[".env", "private/*.key"]'
 ```
 
-The sources include uncommitted files in the caller's lines.
+The sources include unsaved files in the caller's lines.
 Candidates include `KEY=VALUE` values and whole files of at most 4 KiB.
 Each candidate needs at least 12 characters.
 Values with only letters or only digits need at least 20 characters.
@@ -266,7 +266,7 @@ It never prints the value.
 An admin can permit that value at that path:
 
 ```sh
-layr approve --declassify 'src/config.rs@<id-from-refusal>' HEAD
+layr approve --declassify 'src/config.rs@<id-from-refusal>' head
 ```
 
 This writes an approval attestation with the full hash and path.

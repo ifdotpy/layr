@@ -40,7 +40,7 @@ pub fn merge_states(
         base_id: base,
         ours_id: ours,
         theirs_id: theirs,
-        ours_label: "HEAD",
+        ours_label: "head",
         theirs_label,
         config: &cfg,
         run_as: ctx.caller.driver_ids(),
@@ -408,7 +408,8 @@ pub fn merge(ctx: &Ctx, args: &[String]) -> Result<i32> {
         .flag("--abort")
         .flag("--continue")
         .flag("--no-edit")
-        .flag("--no-commit")
+        .flag("--no-save")
+        .removed("--no-commit", "--no-save")
         .flag("-q|--quiet")
         .flag("--stat")
         .flag("--no-stat")
@@ -421,7 +422,7 @@ pub fn merge(ctx: &Ctx, args: &[String]) -> Result<i32> {
         return super::admin::undo_last_of(ctx, &h.repo, &line, &["merge", "pull"]);
     }
     if a.has("--continue") {
-        return Err(exit(1, "layr merges never stop on a conflict: fix the files and run 'layr commit'."));
+        return Err(exit(1, "layr merges never stop on a conflict: fix the files and run 'layr save -m <message>'."));
     }
     let rev = a.pos.first().ok_or_else(|| exit(128, "usage: layr merge <rev> [--expect <state>]"))?.clone();
     merge_rev(ctx, &h.repo, &line, &rev, &a)
@@ -594,7 +595,7 @@ fn merge_rev_inner(
     }
     let (st, _scan, _it, _idx) = repo.status(&line)?;
     if !st.staged.is_empty() {
-        return Err(exit(1, "error: you have staged changes; commit or stash them before merging."));
+        return Err(exit(1, "error: you have staged changes; save or park them before merging."));
     }
     let mut local = local_paths(repo, &line, &st)?;
     let quiet = a.has("-q");
@@ -748,7 +749,7 @@ fn merge_rev_inner(
     if nconf > 0 {
         outln!(
             ctx,
-            "Automatic merge left {nconf} conflict(s) in state {}: fix them, then 'layr add' and 'layr commit'.",
+            "Automatic merge left {nconf} conflict(s) in state {}: fix them, then 'layr add' and 'layr save -m <message>'.",
             ids::short(&sid)
         );
         return Ok(1);
@@ -762,7 +763,8 @@ fn merge_rev_inner(
 
 fn pick(ctx: &Ctx, args: &[String], revert: bool) -> Result<i32> {
     let spec = Spec::new()
-        .flag("-n|--no-commit")
+        .flag("-n|--no-save")
+        .removed("--no-commit", "--no-save")
         .flag("-x")
         .flag("--no-edit")
         .flag("--abort")
@@ -778,7 +780,7 @@ fn pick(ctx: &Ctx, args: &[String], revert: bool) -> Result<i32> {
         return super::admin::undo_last_of(ctx, repo, &line, &[if revert { "revert" } else { "cherry-pick" }]);
     }
     if a.pos.is_empty() {
-        return Err(exit(128, "usage: layr cherry-pick <rev>..."));
+        return Err(exit(128, if revert { "usage: layr invert <rev>..." } else { "usage: layr pick <rev>..." }));
     }
     let mut picks = Vec::new();
     for r in &a.pos {
@@ -796,7 +798,7 @@ fn pick(ctx: &Ctx, args: &[String], revert: bool) -> Result<i32> {
     let mut line = repo.line(&line.id)?;
     let (st, _scan, _it, _idx) = repo.status(&line)?;
     if !st.staged.is_empty() {
-        return Err(exit(1, "error: you have staged changes; commit or stash them first."));
+        return Err(exit(1, "error: you have staged changes; save or park them first."));
     }
     let local = st.local_paths();
     let mut code = 0;
@@ -810,9 +812,9 @@ fn pick(ctx: &Ctx, args: &[String], revert: bool) -> Result<i32> {
         let (base, theirs) = if revert { (p.clone(), parent.clone()) } else { (parent.clone(), p.clone()) };
         let subject = c.message.lines().next().unwrap_or("").to_string();
         let message = if revert {
-            format!("Revert \"{subject}\"\n\nThis reverts state {}.", ids::display(&p))
+            format!("Invert \"{subject}\"\n\nThis inverts state {}.", ids::display(&p))
         } else if a.has("-x") {
-            format!("{}\n\n(cherry picked from state {})", c.message, ids::display(&p))
+            format!("{}\n\n(picked from state {})", c.message, ids::display(&p))
         } else {
             c.message.clone()
         };
@@ -844,8 +846,8 @@ fn pick(ctx: &Ctx, args: &[String], revert: bool) -> Result<i32> {
         if n > 0 {
             outln!(
                 ctx,
-                "{} {label} left {n} conflict(s) in state {}: fix them and commit.",
-                if revert { "Revert of" } else { "Cherry-pick of" },
+                "{} {label} left {n} conflict(s) in state {}: fix them and save.",
+                if revert { "Invert of" } else { "Pick of" },
                 ids::short(&sid)
             );
             code = 1;
@@ -871,10 +873,11 @@ pub fn rebase(ctx: &Ctx, args: &[String]) -> Result<i32> {
         .flag("--continue")
         .flag("-i|--interactive")
         .flag("-q|--quiet")
-        .flag("--autostash");
+        .flag("--autopark")
+        .removed("--autostash", "--autopark");
     let a = parse(&spec, args)?;
     if a.has("-i") {
-        return Err(exit(1, "interactive rebase is not supported"));
+        return Err(exit(1, "interactive replay is not supported"));
     }
     let h = here(ctx)?;
     let line = h.line()?.clone();
@@ -883,9 +886,9 @@ pub fn rebase(ctx: &Ctx, args: &[String]) -> Result<i32> {
         return super::admin::undo_last_of(ctx, repo, &line, &["rebase"]);
     }
     if a.has("--continue") {
-        return Err(exit(1, "layr rebase never stops on a conflict: fix the files and run 'layr commit'."));
+        return Err(exit(1, "layr replay never stops on a conflict: fix the files and run 'layr save -m <message>'."));
     }
-    let up = a.pos.first().ok_or_else(|| exit(128, "usage: layr rebase [--onto <newbase>] <upstream>"))?;
+    let up = a.pos.first().ok_or_else(|| exit(128, "usage: layr replay [--onto <newbase>] <upstream>"))?;
     let upstream = revs::resolve(repo, Some(&line), up)?;
     let onto = match a.get("--onto") {
         Some(o) => revs::resolve(repo, Some(&line), o)?,
@@ -895,7 +898,7 @@ pub fn rebase(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let line = repo.line(&line.id)?;
     let (st, _scan, _it, _idx) = repo.status(&line)?;
     if !st.clean() {
-        return Err(exit(1, "error: cannot rebase: you have unstaged or staged changes.\nPlease commit or stash them."));
+        return Err(exit(1, "error: cannot replay: you have unstaged or staged changes.\nPlease save or park them."));
     }
     let base = repo.merge_base(&line.head, &upstream)?.ok_or_else(|| exit(128, "fatal: no common ancestor"))?;
     if repo.is_ancestor(&upstream, &line.head)? && onto == upstream {
@@ -943,12 +946,12 @@ pub fn rebase(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if conflicts > 0 {
         outln!(
             ctx,
-            "Rebased {} state(s) onto {} with {conflicts} conflict(s): fix them and commit.",
+            "Replayed {} state(s) onto {} with {conflicts} conflict(s): fix them and save.",
             states.len(),
             ids::short(&onto)
         );
         return Ok(1);
     }
-    outln!(ctx, "Successfully rebased {} onto {}.", line.name, ids::short(&onto));
+    outln!(ctx, "Successfully replayed {} onto {}.", line.name, ids::short(&onto));
     Ok(0)
 }

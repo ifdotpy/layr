@@ -8,7 +8,7 @@ for i in range(n):
   d=f'{s}/d{i//500:04}/e{i//50%10}'; os.makedirs(d,exist_ok=True); open(f'{d}/f{i:06}','wb').write(b'x'*100)
 " $R/src $N
 export LAYR_ROOT=$R/store LAYR_AUTHOR_NAME=B LAYR_AUTHOR_EMAIL=b@example.invalid; unset LAYR_SOCKET LAYR_PROJECT LAYR_LINE
-cd $R && $B init p --from $R/src -q; cd $R/store/projects/p/lines/main && $B protect main --remove >/dev/null; $B branch -q t; cd ../t
+cd $R && $B init p --from $R/src -q; cd $R/store/projects/p/lines/main && $B protect main --remove >/dev/null; $B line new -q t; cd ../t
 $B status --porcelain >/dev/null   # first: full, saves the cache
 cpu(){ /usr/bin/time -p "$@" 2>&1 >/dev/null | awk '/real/{r=$2}/user/{u=$2}/sys/{s=$2}END{printf "real %.2f cpu %.2f\n", r, u+s}'; }
 for k in 1 2 3; do

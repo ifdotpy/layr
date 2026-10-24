@@ -59,7 +59,7 @@ try:
   for changed in counts:
    paths=[f'd{i//100:05}/f{i:07}.txt' for i in range(changed)]
    for trial in ([2,3] if a.resume else range(3)):
-    name=f'c{changed}-t{trial}';run(main,'branch','-q',name);work=main.parent/name
+    name=f'c{changed}-t{trial}';run(main,'line', 'new','-q',name);work=main.parent/name
     for phase in [1,2]:
      for rel in paths:
       f=work/rel;old=f.stat()
@@ -71,7 +71,7 @@ try:
      measure('add_first' if phase==1 else 'add_existing_index',lambda:run(work,*args))
      staged=run(work,'status','--porcelain').stdout
      assert len(staged.splitlines())==changed and all(x.startswith('M  ') for x in staged.splitlines())
-    measure('commit',lambda:run(work,'commit','-qm','measured'))
+    measure('commit',lambda:run(work,'save','-qm','measured'))
     assert not run(work,'status','--porcelain').stdout.strip();run(work,'fsck')
     for rel in paths:
      assert (work/rel).read_bytes()==b'B'*4096
@@ -106,7 +106,7 @@ try:
      assert sum(len(fs) for _,_,fs in os.walk(scratch/'state'))==n
      for rel in paths:assert (scratch/'state'/rel).read_bytes()==b'B'*4096
      erase(scratch/'state')
-    erase(scratch);run(main,'branch','-q','-D',name)
+    erase(scratch);run(main,'line', 'delete','-q','-D',name)
    report.setdefault('verified',[]).append({'files':n,'changed':changed});save()
   erase(case)
  report['complete']=True;save()

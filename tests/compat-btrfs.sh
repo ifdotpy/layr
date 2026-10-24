@@ -7,11 +7,11 @@ sample "$T/src"
 P=$LAYR_ROOT/projects/compat/lines/main
 cd "$P" || exit 1
 old_head=$("$OLD_LAYR" rev-parse HEAD)
-eq "candidate keeps the old state identifier" "$old_head" "$(l rev-parse HEAD)"
+eq "candidate keeps the old state identifier" "$old_head" "$(l rev-parse head)"
 ok "candidate validates old signatures and snapshots" l fsck
 printf 'candidate change\n' >> notes.txt
-l commit -qam candidate
-new_head=$(l rev-parse HEAD)
+l save -qam candidate
+new_head=$(l rev-parse head)
 eq "old binary reads the new state identifier" "$new_head" "$("$OLD_LAYR" rev-parse HEAD)"
 ok "old binary validates new signatures and snapshots" "$OLD_LAYR" fsck
 "$OLD_LAYR" commit --allow-empty -qm previous
@@ -20,15 +20,15 @@ ok "candidate accepts a later old-binary commit" l fsck
 new_fs "$T/peer-old" 2G
 ok "new client sends to old peer" peer_exchange sync compat -q -- env LAYR_ROOT=$T/peer-old/store "$OLD_LAYR" serve-peer compat
 no "a one-way push refuses a peer without direction support" peer_exchange push compat -q -- env LAYR_ROOT=$T/peer-old/store "$OLD_LAYR" serve-peer compat
-eq "old peer has the same head" "$(l rev-parse HEAD)" "$(LAYR_ROOT=$T/peer-old/store "$OLD_LAYR" --project compat --line main rev-parse HEAD)"
+eq "old peer has the same head" "$(l rev-parse head)" "$(LAYR_ROOT=$T/peer-old/store "$OLD_LAYR" --project compat --line main rev-parse HEAD)"
 new_fs "$T/peer-new" 2G
 ok "old client sends to new peer" "$OLD_LAYR" sync -q -- env LAYR_ROOT=$T/peer-new/store "$LAYR" serve-peer compat
-eq "new peer has the same head" "$(l rev-parse HEAD)" "$(LAYR_ROOT=$T/peer-new/store "$LAYR" --project compat --line main rev-parse HEAD)"
+eq "new peer has the same head" "$(l rev-parse head)" "$(LAYR_ROOT=$T/peer-new/store "$LAYR" --project compat --line main rev-parse head)"
 # The CLI name changes to cache, but older stores and peers must keep warm data.
 "$OLD_LAYR" layer add target
 printf 'old build output\n' > target/old
 "$OLD_LAYR" save -q --layers
-l branch -q read-old-cache
+l line new -q read-old-cache
 ok "new client restores an old saved cache" cmp target/old ../read-old-cache/target/old
 l cache add generated
 printf 'new build output\n' > generated/new

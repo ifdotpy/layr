@@ -140,6 +140,9 @@ pub fn db_file(project_dir: &Path) -> PathBuf {
 }
 
 pub fn check_name(kind: &str, name: &str) -> Result<()> {
+    if matches!(kind, "line" | "tag" | "ref") && matches!(name, "HEAD" | "head") {
+        bail!("reserved revision name: {name}");
+    }
     if kind == "line" && crate::model::reserved_revision(name) {
         bail!("reserved revision prefix in line name '{name}'");
     }

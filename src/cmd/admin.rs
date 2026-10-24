@@ -15,24 +15,61 @@ use anyhow::{bail, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+pub(super) fn operation_name(op: &str) -> String {
+    let (name, suffix) = op.split_once('.').unwrap_or((op, ""));
+    let name = match name {
+        "commit" => "state",
+        "stash" => "park",
+        "cherry-pick" => "pick",
+        "rebase" => "replay",
+        "revert" => "invert",
+        _ => name,
+    };
+    if suffix.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name}.{suffix}")
+    }
+}
+
 pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let spec = Spec::new()
         .value("-m|--message")
+        .value("--note")
+        .value("-F|--file")
+        .flag("-a|--all")
+        .flag("--amend")
+        .flag("--allow-empty")
+        .flag("--no-verify|-n")
+        .flag("-v|--verbose")
+        .flag("--no-edit")
+        .value("--author")
+        .flag("-s|--signoff")
         .flag("--running")
         .flag("--force")
-        .flag("--caches|--layers")
-        .flag("--all")
+        .flag("--caches")
+        .removed("--layers", "--caches")
+        .flag("--all-lines")
         .flag("-q|--quiet");
     let a = parse(&spec, args)?;
+    if a.has("-m") || a.has("-F") || a.has("--amend") {
+        return super::work::commit(ctx, args);
+    }
+    if a.has("-a") {
+        return Err(exit(2, "Use --all-lines to save automatic states of all lines, or use -a with layr save -m <message>."));
+    }
+    if ["--allow-empty", "--no-verify", "-v", "--no-edit", "--author", "-s"].iter().any(|flag| a.has(flag)) {
+        return Err(exit(2, "These options require a named state. Use 'layr save -m <message>'."));
+    }
     let h = here(ctx)?;
     let repo = &h.repo;
-    let lines: Vec<Line> = if a.has("--all") {
+    let lines: Vec<Line> = if a.has("--all-lines") {
         repo.require(ctx, "line.manage")?;
         repo.lines()?.into_iter().filter(|l| repo.working(l).exists()).collect()
     } else {
         vec![h.line()?.clone()]
     };
-    let msg = a.get("-m").unwrap_or("").to_string();
+    let msg = a.get("--note").unwrap_or("").to_string();
     for l in lines {
         repo.authorize_line(ctx, &l, crate::repo::LineOp::Save)?;
         let _lock = repo.p.lock()?;
@@ -198,7 +235,7 @@ pub fn undo(ctx: &Ctx, args: &[String]) -> Result<i32> {
     };
     if a.has("-n") {
         let r = repo.p.db.record(&id)?.unwrap();
-        outln!(ctx, "would undo {} {} ({})", short_op(&r.id), r.op, fmt_time(r.time));
+        outln!(ctx, "would undo {} {} ({})", short_op(&r.id), operation_name(&r.op), fmt_time(r.time));
         return Ok(0);
     }
     undo_record(ctx, repo, &id, a.has("-f"))
@@ -224,10 +261,10 @@ fn fmt_time(ms: i64) -> String {
 pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32> {
     let r = repo.p.db.record(id)?.ok_or_else(|| exit(128, "fatal: unknown operation"))?;
     if r.op == "export" {
-        return Err(exit(1, "error: a push cannot be undone here: the commit is on the remote. Push a revert ('layr revert <state>' then 'layr git push')."));
+        return Err(exit(1, "error: a push cannot be undone here: the state is on the remote. Run invert ('layr invert <state>' then 'layr git push')."));
     }
     if NOT_UNDOABLE.contains(&r.op.as_str()) {
-        return Err(exit(1, format!("error: operation '{}' has nothing to undo", r.op)));
+        return Err(exit(1, format!("error: operation '{}' has nothing to undo", operation_name(&r.op))));
     }
     // Permissions: undo changes every line the operation changed, so the caller must be allowed
     // to change each of them. An operation without lines (tags, groups) needs the admin or the
@@ -289,7 +326,10 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
         .unwrap_or_default();
     if !changed.is_empty() {
         if r.op != "commit" {
-            return Err(exit(1, format!("error: undo of a {} that changed overlays is not available yet", r.op)));
+            return Err(exit(
+                1,
+                format!("error: undo of a {} that changed overlays is not available yet", operation_name(&r.op)),
+            ));
         }
         let lid = r.data["line"].as_str().unwrap_or("").to_string();
         let line = repo.line(&lid)?;
@@ -297,7 +337,7 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
         if repo.layers(&line)? != after && !force {
             return Err(exit(
                 1,
-                "error: the overlays of the line changed after this commit; undo the later operations first, or use --force",
+                "error: the overlays of the line changed after this state; undo the later operations first, or use --force",
             ));
         }
         let mut before = after.clone();
@@ -328,7 +368,7 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
         }
         "stash.drop" => {
             bail!(
-                "a dropped stash can be applied again with 'layr stash apply {}'",
+                "a dropped park entry can be applied again with 'layr park apply {}'",
                 r.data["state"].as_str().map(ids::short).unwrap_or_default()
             );
         }
@@ -442,7 +482,14 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
     }
     let done = repo.commit_record(ctx, rec)?;
     crate::gitbridge::sync_store_access(repo)?;
-    outln!(ctx, "Undid {} {} ({}); undo it with 'layr undo {}'", short_op(&r.id), r.op, fmt_time(r.time), short_op(&done.id));
+    outln!(
+        ctx,
+        "Undid {} {} ({}); undo it with 'layr undo {}'",
+        short_op(&r.id),
+        operation_name(&r.op),
+        fmt_time(r.time),
+        short_op(&done.id)
+    );
     Ok(0)
 }
 
@@ -526,7 +573,17 @@ pub fn op(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 .map(|s| format!(" {} {}", ids::short(&s.id), s.message.lines().next().unwrap_or("")))
                 .unwrap_or_default();
             let session = r.actor.session.as_ref().map(|a| format!(" [{a}]")).unwrap_or_default();
-            outln!(ctx, "{} {} {}{} {}{}{}", short_op(&r.id), fmt_time(r.time), r.actor.name, session, r.op, what, undone);
+            outln!(
+                ctx,
+                "{} {} {}{} {}{}{}",
+                short_op(&r.id),
+                fmt_time(r.time),
+                r.actor.name,
+                session,
+                operation_name(&r.op),
+                what,
+                undone
+            );
         }
         shown += 1;
         if shown >= n {
@@ -728,7 +785,7 @@ pub fn try_command(
     Ok(status.code().unwrap_or(128))
 }
 
-/// Retention. Kept: line heads and their history, tags, remote refs, stashes, the newest
+/// Retention. Kept: line heads and their history, tags, remote refs, park entries, the newest
 /// export per branch, conflict sources, automatic states (the newest N per line and
 /// one per hour for a day), and every state that a record inside the undo window names.
 pub fn retention_plan(repo: &Repo) -> Result<(BTreeSet<String>, Vec<String>)> {
@@ -816,7 +873,7 @@ pub fn retention_plan(repo: &Repo) -> Result<(BTreeSet<String>, Vec<String>)> {
             }
         }
     }
-    // Commits reachable from kept states (an automatic state's parent is a commit).
+    // States reachable from kept states (an automatic state's parent is a state).
     let kept: Vec<String> = keep.iter().cloned().collect();
     for k in kept {
         if let Some(s) = db.state(&k)? {
@@ -1208,12 +1265,12 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
             set_config(ctx, &repo, "remote.origin.url", serde_json::json!(url))?;
             let refs = crate::gitbridge::fetch(ctx, &repo, "origin")?;
             let branch = a.get("-b").map(|s| s.to_string()).or_else(|| default_branch(&repo)).unwrap_or_else(|| "main".into());
-            let commit = refs
+            let state = refs
                 .iter()
                 .find(|(b, _)| b == &format!("origin/{branch}") || b.ends_with(&format!("/{branch}")))
                 .map(|x| x.1.clone());
-            let commit = commit.ok_or_else(|| exit(128, format!("fatal: remote has no branch '{branch}'")))?;
-            let (st, _) = crate::gitbridge::import_commit(ctx, &repo, &commit, &format!("origin/{branch}"), owner)?;
+            let state = state.ok_or_else(|| exit(128, format!("fatal: remote has no branch '{branch}'")))?;
+            let (st, _) = crate::gitbridge::import_commit(ctx, &repo, &state, &format!("origin/{branch}"), owner)?;
             drop(cleanup);
             return Ok((st, branch));
         }
@@ -1240,7 +1297,7 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 if !head.is_empty() && head != "HEAD" {
                     let (st, _) = crate::gitbridge::import_commit(ctx, &repo, &head, &format!("local/{branch}"), owner)?;
                     parents.push(st.clone());
-                    // The folder content on top (uncommitted changes, if any).
+                    // The folder content on top (unsaved changes, if any).
                     btrfs::delete_tree(&work)?;
                     repo.snapshot_state(&st, &work, false)?;
                     let tmp = repo.p.work_dir().join(ids::new_id());
@@ -1282,7 +1339,7 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
                         drop(cleanup);
                         return Ok((st, branch));
                     }
-                    msg = "uncommitted changes of the imported folder".into();
+                    msg = "unsaved changes of the imported folder".into();
                 } else {
                     copy_folder(ctx, &src, &work, a.has("--include-ignored"))?;
                 }
@@ -1533,7 +1590,7 @@ pub fn approve(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let a = parse(&spec, args)?;
     let h = here(ctx)?;
     let repo = &h.repo;
-    let state = revs::resolve(repo, h.line.as_ref(), a.pos.first().map(|s| s.as_str()).unwrap_or("HEAD"))?;
+    let state = revs::resolve(repo, h.line.as_ref(), a.pos.first().map(|s| s.as_str()).unwrap_or("head"))?;
     if a.pos.len() > 1 {
         bail!("usage: layr approve [--declassify <path>@<id>] <rev>");
     }

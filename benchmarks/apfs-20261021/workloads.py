@@ -33,7 +33,7 @@ for kind,param in [('density',0),('density',10),('density',1000),('density',1000
     for _ in range(param//len(block)):f.write(block)
   run(mount,['init','work','--from',str(src),'-q'],0,False);main=mount/'store/projects/work/lines/main'
   for trial in range(3):
-   name=f'trial{trial}';run(main,['branch','-q',name],trial);work=main.parent/name
+   name=f'trial{trial}';run(main,['line', 'new','-q',name],trial);work=main.parent/name
    if kind=='hardlink':assert (work/'alias').stat().st_ino==(work/'d00000/f0000000.txt').stat().st_ino
    if kind=='density':
     for i in range(param):
@@ -46,7 +46,7 @@ for kind,param in [('density',0),('density',10),('density',1000),('density',1000
    else:continue
    before=used();run(work,['add','-A'],trial);after=used()
    rows.append({'kind':kind,'parameter':param,'trial':trial,'operation':'add_allocation','bytes':after-before});save()
-   run(work,['commit','-qm','benchmark'],trial);run(work,['fsck'],trial)
+   run(work,['save','-qm','benchmark'],trial);run(work,['fsck'],trial)
    assert not run(work,['status','--porcelain'],trial,False).strip()
    if kind=='large':
     with (main/'large.bin').open('rb') as f:f.seek(8192);assert f.read(4096)==block[8192:12288]
