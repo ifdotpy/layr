@@ -141,15 +141,6 @@ impl Project {
         for (index, rec) in records.iter().enumerate() {
             p.derive(index, rec)?;
         }
-        // Legacy evidence is also imported when a native database opens. Resolve change IDs
-        // after all states exist, including states received after a legacy approval.
-        for (index, a) in &mut p.attestations {
-            if records[*index].data.get("attestation").is_none() && a.change_id.is_none() {
-                if let Some(s) = p.states.get(&a.subject.id) {
-                    a.change_id = s.state.change_id.clone();
-                }
-            }
-        }
         p.records = records;
         Ok(p)
     }

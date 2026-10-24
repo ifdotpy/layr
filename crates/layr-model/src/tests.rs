@@ -182,3 +182,14 @@ fn overlays_stay_separate_and_unknown_records_stay_in_log() {
     assert_eq!(m.projects["project"].op_log(None, 10)[0].op, "future.op");
     assert_eq!(m.projects["overlay"].name.as_deref(), Some("p%keys"));
 }
+
+#[test]
+fn legacy_evidence_keeps_the_change_id_at_its_first_derivation() {
+    let mut approval = record(1, "approve");
+    approval.data = json!({"state":"s1"});
+    let mut save = record(2, "commit");
+    save.states.push(state("s1", StateKind::Commit, &[]));
+    let p = fold(vec![save, approval]);
+    // Db::derive_attestation updates only the local flag on a duplicate attestation.
+    assert_eq!(p.attestations("s1", Some("approval"))[0].change_id, None);
+}
