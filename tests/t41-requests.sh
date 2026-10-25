@@ -68,6 +68,9 @@ def records():
 def outcome(id):
     return next(r for r in records() if r['data'].get('request_id') == id)
 
+before_keys = (root / 'archive' / 'people' / 'ann@example.com' / 'signing.age').read_bytes()
+run(['person', 'keys', '--store', 'file://' + str(root / 'archive')], ann)
+check((root / 'archive' / 'people' / 'ann@example.com' / 'signing.age').read_bytes() == before_keys, 'repeated person publication keeps the same encrypted signing identity')
 approval = submit('approve', state)
 request_path = root / 'archive' / 'requests' / (approval + '.json')
 body = json.loads(request_path.read_text())['r']

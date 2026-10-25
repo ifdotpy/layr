@@ -208,6 +208,11 @@ impl Store {
         self.aws_profile = profile;
     }
 
+    pub fn request_person(&mut self, ctx: &Ctx) -> Result<Option<crate::person::Access>> {
+        self.connect(ctx)?;
+        Ok(self.person.clone())
+    }
+
     /// Authenticated immutable-object access for person requests and executor claims.
     pub fn request_backend(&mut self, ctx: &Ctx) -> Result<&Backend> {
         self.connect(ctx)?;

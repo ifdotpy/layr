@@ -31,9 +31,9 @@ pub fn request(ctx: &Ctx, args: &[String]) -> Result<i32> {
         bail!("requests need --person and LAYR_PERSON_KEY_FILE");
     }
     let h = here(ctx)?;
-    let access = crate::person::load(&ctx.env, &ctx.caller.home, &ctx.cwd, ctx.caller.uid, None)?
-        .context("set LAYR_PERSON_KEY_FILE to sign a request")?;
-    let key = crate::person::signing_key(ctx, &access)?;
+    let mut store = crate::store_remote::open_named(a.get("--remote").unwrap_or("origin"), &h.repo)?;
+    let access = store.request_person(ctx)?.context("set LAYR_PERSON_KEY_FILE to sign a request")?;
+    let key = crate::privs::as_caller_fs(ctx, || crate::person::signing_key(ctx, &access))?;
     let kind = a.pos.first().map(String::as_str).unwrap_or("");
     let pos = &a.pos[1.min(a.pos.len())..];
     let resolve = |rev: &str| crate::revs::resolve(&h.repo, h.line.as_ref(), rev);
@@ -73,7 +73,6 @@ pub fn request(ctx: &Ctx, args: &[String]) -> Result<i32> {
         request.expires = expires.parse().context("--expires must be epoch milliseconds")?;
     }
     let signed = request.sign(&key)?;
-    let mut store = crate::store_remote::open_named(a.get("--remote").unwrap_or("origin"), &h.repo)?;
     let backend = store.request_backend(ctx)?;
     let name = format!("requests/{}.json", request.id);
     if !backend.put_new(&name, signed.to_bytes()?)? {
@@ -118,6 +117,7 @@ pub fn requests(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let backend = store.request_backend(ctx)?;
     let _queue_lock = super::queue::require_lock(&h.repo)?;
     let mut results = Vec::new();
+    let mut queue_targets = std::collections::BTreeSet::new();
     for object in backend.list("requests/")? {
         let Some(id) = object
             .key
@@ -164,7 +164,18 @@ pub fn requests(ctx: &Ctx, args: &[String]) -> Result<i32> {
         };
         let status = if record.op == "request.refused" { "refused" } else { "applied" };
         let record = h.repo.p.append(record, &actor)?;
+        if record.op == "queue.add" {
+            if let Some(target) = record.data["queue_change"]["after"]["target_line"].as_str() {
+                queue_targets.insert(target.to_owned());
+            }
+        }
         results.push(json!({"id":id,"status":status,"record":record.id,"reason":record.data.get("reason")}));
+    }
+    drop(_queue_lock);
+    for target in queue_targets {
+        if let Err(error) = super::queue::run_configured(ctx, &h.repo, Some(&target)) {
+            eprintln!("layr queue: {error:#}");
+        }
     }
     if a.has("--json") {
         outln!(ctx, "{}", serde_json::to_string(&results)?);
@@ -230,6 +241,9 @@ fn effect(ctx: &Ctx, repo: &Repo, request: &Request) -> Result<Record> {
             let source = repo.source_state(state)?;
             repo.state_root(state)?;
             let target = repo.line(into)?;
+            if !repo.working(&target).exists() {
+                bail!("queue target line has no local work folder");
+            }
             let entry = QueueEntry {
                 id: request.id.clone(),
                 into: target.name,

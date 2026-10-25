@@ -328,3 +328,43 @@ fn person_approvals_survive_executor_scope_and_keep_revocations_separate() {
     policy.deny.insert("person:ann@example.com".into(), vec!["*".into()]);
     assert!(project.allowed_person_approvals("reviewed", None, protection::ApprovalMode::Ref, &policy, &rule).is_empty());
 }
+
+#[test]
+fn a_person_proof_cannot_be_reused_for_another_effect() {
+    use layr_store::request::{Action, Request};
+    let key = ed25519_dalek::SigningKey::from_bytes(&[11; 32]);
+    let id = "01a12290-0000-7000-8000-000000000001";
+    let project = "01a12290-0000-7000-8000-000000000002";
+    let subject = "01a12290-0000-7000-8000-000000000003";
+    let request = Request::new(
+        id.into(),
+        project.into(),
+        "ann@example.com".into(),
+        1,
+        Action::Approve { state: subject.into(), into: "main".into() },
+    )
+    .unwrap();
+    let signed = request.sign(&key).unwrap();
+    let text = String::from_utf8(signed.to_bytes().unwrap()).unwrap();
+    let mut r = record(2, "attest");
+    r.id = "01a12290-0000-7000-8000-000000000004".into();
+    r.project = project.into();
+    r.machine = "01a12290-0000-7000-8000-000000000005".into();
+    r.actor.uid = u32::MAX;
+    r.actor.name = "person:ann@example.com".into();
+    r.data = json!({"request":text,"request_id":id,"request_digest":hex::encode(Sha256::digest(text.as_bytes())),"person_key":hex::encode(key.verifying_key().to_bytes()),"attestation":Attestation { format:1,attestation_id:r.id.clone(),subject:Subject{kind:"state".into(),id:subject.into()},change_id:None,kind:"approval".into(),payload_digest:hex::encode(Sha256::digest(signed.r.get().as_bytes())),payload_ref:None,signer:r.actor.name.clone(),time:r.time }});
+    validation::validate(&r).unwrap();
+    let mut changed = r.clone();
+    changed.data["attestation"]["subject"]["id"] = json!(r.id);
+    assert!(validation::validate(&changed).is_err());
+    changed = r.clone();
+    changed.actor.name = "person:bob@example.com".into();
+    assert!(validation::validate(&changed).is_err());
+    changed = r.clone();
+    changed.data["person_key"] = json!(hex::encode(ed25519_dalek::SigningKey::from_bytes(&[12; 32]).verifying_key().to_bytes()));
+    assert!(validation::validate(&changed).is_err());
+    changed = r.clone();
+    changed.time = request.expires;
+    changed.data["attestation"]["time"] = json!(changed.time);
+    assert!(validation::validate(&changed).is_err());
+}

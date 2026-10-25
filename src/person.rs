@@ -245,7 +245,7 @@ pub fn run(args: &[String]) -> Result<i32> {
                 bail!("invalid person login");
             }
             if dir.join("recipient.txt").exists() {
-                if gateway.is_none() && !a.has("--store") {
+                if gateway.is_none() && !a.has("--store") && dir.join("signing-public.txt").exists() {
                     bail!("this person key already exists; use layr person show");
                 }
                 if a.has("--paper-key-out") {
@@ -352,12 +352,24 @@ pub fn run(args: &[String]) -> Result<i32> {
                 gateway_access(gateway, access)?;
             }
 
-            let signing_key = String::from_utf8(read(&dir.join("signing-public.txt"), 256, uid)?)?;
+            let signing_key = match read(&dir.join("signing-public.txt"), 256, uid) {
+                Ok(bytes) => Some(String::from_utf8(bytes)?),
+                Err(error)
+                    if error.downcast_ref::<std::io::Error>().is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+                {
+                    None
+                }
+                Err(error) => return Err(error),
+            };
             let stores = access.as_ref().map(|access| &access.index.vaults);
             if a.has("--json") {
                 println!("{}", json!({"login":login,"recipient":recipient,"signing_key":signing_key,"stores":stores}));
             } else {
-                println!("login: {}\nrecipient: {recipient}\nsigning key: {signing_key}", login.as_deref().unwrap_or("unknown"));
+                println!(
+                    "login: {}\nrecipient: {recipient}\nsigning key: {}",
+                    login.as_deref().unwrap_or("unknown"),
+                    signing_key.as_deref().unwrap_or("not created; use person keys")
+                );
                 if let Some(stores) = stores {
                     for pin in stores {
                         println!("store: {} {}", pin.project, pin.recipient);

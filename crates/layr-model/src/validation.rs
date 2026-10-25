@@ -327,7 +327,17 @@ pub fn validate(r: &Record) -> anyhow::Result<()> {
                         && a["subject"]["id"] == *state
                         && a["signer"] == format!("person:{}", request.person)
                         && a["payload_digest"] == hex::encode(Sha256::digest(signed.r.get().as_bytes()))
-                        && (matches!(request.action, Action::Declassify { .. }) == d.get("declassify").is_some())
+                        && match &request.action {
+                            Action::Declassify { scope, .. } => scope.rsplit_once('@').is_some_and(|(path, prefix)| {
+                                d["declassify"]["path"] == path
+                                    && d["declassify"]["hmac"].as_str().is_some_and(|hash| {
+                                        hash.len() == 64
+                                            && hash.starts_with(prefix)
+                                            && hash.bytes().all(|b| b.is_ascii_hexdigit())
+                                    })
+                            }),
+                            _ => d.get("declassify").is_none(),
+                        }
                 }
                 Action::Comment { change_id, version, path, line, text, reply_to } => {
                     let comment: crate::types::Comment = serde_json::from_value(d["comment"].clone())?;

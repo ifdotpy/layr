@@ -188,6 +188,24 @@ mod tests {
         assert!(signed.verify(&SigningKey::from_bytes(&[8; 32]).verifying_key()).is_err());
     }
     #[test]
+    fn claims_bind_the_executor_and_ref_moves_require_an_expected_value() {
+        let key = SigningKey::from_bytes(&[7; 32]);
+        let claim = Claim {
+            format: 1,
+            project: sample().project,
+            request: sample().id,
+            machine: "01a12290-0000-7000-8000-000000000005".into(),
+        };
+        let bytes = claim.sign(&key).unwrap().to_bytes().unwrap();
+        assert_eq!(Claim::verify(&bytes, &key.verifying_key()).unwrap(), claim);
+        assert!(Claim::verify(&bytes, &SigningKey::from_bytes(&[8; 32]).verifying_key()).is_err());
+        let missing = r#"{"kind":"ref_move","name":"release/v1","target":"01a12290-0000-7000-8000-000000000003"}"#;
+        assert!(serde_json::from_str::<Action>(missing).is_err());
+        let explicit = missing.replace("}", ",\"expected\":null}");
+        assert!(serde_json::from_str::<Action>(&explicit).is_ok());
+    }
+
+    #[test]
     fn request_boundaries_reject_ambiguous_or_unbounded_inputs() {
         let mut request = sample();
         request.id = "01a12290-0000-4000-8000-000000000001".into();
