@@ -29,18 +29,15 @@ pub fn heads(project: &Project, watermark: BTreeMap<String, Watermark>, seq: u64
         .map(|l| Line { name: l.name, id: l.id, owner: l.owner, machine: l.machine, head: l.head })
         .collect::<Vec<_>>();
     let refs = project.ref_list("", i64::MIN).into_iter().map(|r| Ref { name: r.name, target: r.target }).collect();
-    let integrated: BTreeSet<_> = lines.iter().filter(|l| l.name == "main").flat_map(|l| project.ancestors(&l.head)).collect();
     let mut changes = Vec::new();
-    for id in project.changes() {
-        if let Some(s) = project.change_versions(&id).last().filter(|s| !integrated.contains(&s.id)) {
-            changes.push(Change {
-                id,
-                state: s.id.clone(),
-                title: s.message.lines().next().unwrap_or("").into(),
-                author: serde_json::to_value(&s.author)?,
-                time: s.time,
-            });
-        }
+    for s in project.open_changes() {
+        changes.push(Change {
+            id: s.change_id.clone().expect("open change has an identity"),
+            state: s.id.clone(),
+            title: s.message.lines().next().unwrap_or("").into(),
+            author: serde_json::to_value(&s.author)?,
+            time: s.time,
+        });
     }
     let overlays = project.config.keys().filter(|k| k.starts_with("overlay.") && !k.contains('@')).count() as u64;
     Ok(Heads {

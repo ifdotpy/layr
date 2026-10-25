@@ -415,6 +415,22 @@ impl Project {
     pub fn changes(&self) -> Vec<String> {
         self.states.values().filter_map(|s| s.state.change_id.clone()).collect::<BTreeSet<_>>().into_iter().collect()
     }
+    /// Latest change versions outside every main line's ancestry. This is the shared
+    /// open-change rule for the index and site; queued execution remains separate metadata.
+    pub fn open_changes(&self) -> Vec<StateRec> {
+        let integrated: BTreeSet<_> =
+            self.line_list().iter().filter(|l| l.name == "main").flat_map(|l| self.ancestors(&l.head)).collect();
+        let mut latest = BTreeMap::<&str, &StateRec>::new();
+        for state in self.states.values().map(|s| &s.state) {
+            if let Some(change) = &state.change_id {
+                let current = latest.entry(change).or_insert(state);
+                if (state.time, &state.id) > (current.time, &current.id) {
+                    *current = state;
+                }
+            }
+        }
+        latest.into_values().filter(|s| !integrated.contains(&s.id)).cloned().collect()
+    }
     pub fn change_versions(&self, id: &str) -> Vec<StateRec> {
         let mut out: Vec<_> =
             self.states.values().filter(|s| s.state.change_id.as_deref() == Some(id)).map(|s| s.state.clone()).collect();

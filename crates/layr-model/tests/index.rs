@@ -173,3 +173,42 @@ fn first_parent_and_all_parent_history_share_order_filtering_and_boundaries() ->
     assert_eq!(history::blame(&[history::FileVersion { state: None, bytes: vec![] }])?, vec![]);
     Ok(())
 }
+
+#[test]
+fn open_changes_share_latest_version_and_main_ancestry_rule() -> Result<()> {
+    let (_, project, _) = fixture();
+    assert!(project.open_changes().is_empty());
+    let mut records = project.op_log(None, usize::MAX);
+    let add = |records: &mut Vec<Record>, n: usize, parents: Vec<String>, feature: bool, change: usize| {
+        let mut r = Record::new("commit");
+        r.id = id(300 + n);
+        r.project = PROJECT.into();
+        r.machine = MACHINE.into();
+        r.seq = n as u64;
+        r.time = n as i64;
+        let mut s = state(n, None);
+        s.parents = parents;
+        s.change_id = Some(id(change));
+        let line = if feature { id(500) } else { LINE.into() };
+        s.line = Some(line.clone());
+        r.states.push(s);
+        r.lines.insert(
+            line,
+            serde_json::from_value(json!({"before":null,"after":{
+            "name":if feature {"feature"}else{"main"},"head":id(n),"owner":0,"machine":MACHINE}}))
+            .unwrap(),
+        );
+        records.push(r);
+    };
+    add(&mut records, 5, vec![id(4)], true, 105);
+    let p = layr_model::Project::from_records(PROJECT, records.clone(), "")?;
+    assert_eq!(p.open_changes().iter().map(|s| s.id.clone()).collect::<Vec<_>>(), vec![id(5)]);
+    add(&mut records, 6, vec![id(4), id(5)], false, 106);
+    assert!(layr_model::Project::from_records(PROJECT, records.clone(), "")?.open_changes().is_empty());
+    add(&mut records, 7, vec![id(4)], true, 105);
+    assert_eq!(
+        layr_model::Project::from_records(PROJECT, records, "")?.open_changes().iter().map(|s| s.id.clone()).collect::<Vec<_>>(),
+        vec![id(7)]
+    );
+    Ok(())
+}
