@@ -162,7 +162,7 @@ impl Gateway {
 
     /// Existing person registrations must prove their age identity before adding signing authority.
     pub fn person_registration_proof(&self, identity: &str) -> Result<Option<String>> {
-        let response = self.send(Method::GET, "/api/person/challenge", None, None, None)?;
+        let response = self.http.get(self.base.join("/api/person/challenge")?).send().map_err(reqwest::Error::without_url)?;
         if response.status().as_u16() == 404 {
             return Ok(None);
         }
