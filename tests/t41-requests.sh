@@ -181,7 +181,7 @@ check(len(data(['change', 'show', change, '--json'])['comments']) == 2, 'reindex
 for login in ['ann@example.com', 'bob@example.com']:
     published = root / 'archive' / 'people' / login
     public = json.loads((published / 'person.json').read_text())
-    check(public['signingKey'] and (published / 'signing.age').read_bytes().startswith(b'age-encryption.org/'), 'published person signing identity is encrypted')
+    check(public['signing_key'] and (published / 'signing.age').read_bytes().startswith(b'age-encryption.org/'), 'published person signing identity is encrypted')
 (root / 'request-counts').write_text(str(checks))
 print(f'request checks: {checks}', flush=True)
 PY
