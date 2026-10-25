@@ -5,6 +5,7 @@ pub mod attest;
 pub mod bisect;
 pub mod branch;
 pub mod change;
+pub mod checks;
 pub mod history;
 pub mod mergecmd;
 pub mod oci;
@@ -285,7 +286,8 @@ pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
         "access" => admin::access(ctx, &rest),
         "protect" => admin::protect(ctx, &rest),
         "approve" => admin::approve(ctx, &rest),
-        "approvals" | "checks" => Err(exit(1, "this command was removed; use 'layr attestations <rev> [--kind <kind>]'")),
+        "approvals" => Err(exit(1, "this command was removed; use 'layr attestations <rev> [--kind <kind>]'")),
+        "checks" => checks::checks(ctx, &rest),
         "ref" => refs::refs(ctx, &rest),
         "queue" => queue::queue(ctx, &rest),
         "view" => view::view(ctx, &rest),
