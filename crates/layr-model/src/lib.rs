@@ -27,6 +27,31 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 pub use types::*;
 
+/// Select the creator's policy perspective from authenticated records for one project.
+/// The caller must verify and authorize the signed records first. Unlike the CLI's
+/// local machine perspective, this gives person and public readers one stable root.
+/// Missing or multiple creation records cannot establish a policy perspective.
+pub fn project_perspective<'a>(project: &str, records: impl IntoIterator<Item = &'a Record>) -> Result<String> {
+    let mut creator: Option<&Record> = None;
+    for record in records {
+        if record.project != project {
+            bail!("policy records belong to another project");
+        }
+        if record.op != "project" { continue; }
+        if record.data["id"].as_str() != Some(project) || record.machine.is_empty() {
+            bail!("invalid project creator record");
+        }
+        if let Some(previous) = creator {
+            if serde_json::to_value(previous)? != serde_json::to_value(record)? {
+                bail!("ambiguous project creator");
+            }
+        } else {
+            creator = Some(record);
+        }
+    }
+    Ok(creator.context("project creator record is missing")?.machine.clone())
+}
+
 /// A collection of projects. Overlay records retain their separate project identity.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Model {
