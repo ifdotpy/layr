@@ -18,7 +18,10 @@ def run(args,env,success=True):
  if success: assert p.returncode==0,(args,p.stderr)
  return p
 def openssl(args): subprocess.run(['openssl',*args],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-openssl(['req','-x509','-newkey','rsa:2048','-nodes','-keyout',str(root/'tls-key.pem'),'-out',str(root/'tls-cert.pem'),'-days','1','-subj','/CN=localhost','-addext','subjectAltName=DNS:localhost,IP:127.0.0.1','-addext','basicConstraints=critical,CA:TRUE'])
+openssl(['req','-x509','-newkey','rsa:2048','-nodes','-keyout',str(root/'tls-ca-key.pem'),'-out',str(root/'tls-ca.pem'),'-days','1','-subj','/CN=Signin test CA','-addext','basicConstraints=critical,CA:TRUE','-addext','keyUsage=critical,keyCertSign,cRLSign'])
+openssl(['req','-new','-newkey','rsa:2048','-nodes','-keyout',str(root/'tls-key.pem'),'-out',str(root/'tls.csr'),'-subj','/CN=localhost'])
+(root/'tls-ext.cnf').write_text('basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:localhost,IP:127.0.0.1\n')
+openssl(['x509','-req','-in',str(root/'tls.csr'),'-CA',str(root/'tls-ca.pem'),'-CAkey',str(root/'tls-ca-key.pem'),'-CAcreateserial','-out',str(root/'tls-cert.pem'),'-days','1','-extfile',str(root/'tls-ext.cnf')])
 people={}; challenges={}; sessions={}; invites={'registration-invite':'ann@example.com','fresh-invite':'fresh@example.com'}; stats={'challenge':0,'session':0,'registration':0,'renew':0,'requests':0,'index':0,'inbox':0,'slots':0,'request_attempts':0}; faults={}; errors=[]
 class Handler(http.server.BaseHTTPRequestHandler):
  def log_message(self,*args): pass
@@ -86,10 +89,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
 server=http.server.HTTPServer(('127.0.0.1',0),Handler)
 context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.load_cert_chain(root/'tls-cert.pem',root/'tls-key.pem');server.socket=context.wrap_socket(server.socket,server_side=True)
 thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start();site='https://localhost:'+str(server.server_port)
-ann=dict(base,LAYR_PERSON_DIR=str(root/'ann'),LAYR_PERSON_LOGIN='ann@example.com',LAYR_GATEWAY_CA_FILE=str(root/'tls-cert.pem'))
+ann=dict(base,LAYR_PERSON_DIR=str(root/'ann'),LAYR_PERSON_LOGIN='ann@example.com',LAYR_GATEWAY_CA_FILE=str(root/'tls-ca.pem'))
 try:
  p=run(['person','keys','--site',site,'--invite','invalid-invite','--paper-key-out',str(root/'ann.paper')],ann,False)
- check(p.returncode!=0 and '401' in p.stderr and stats['registration']==0,'invalid invite refuses first registration')
+ check(p.returncode!=0 and '401' in p.stderr and stats['registration']==0,('invalid invite refuses first registration',p.returncode,p.stderr))
  ann['LAYR_PERSON_KEY_FILE']=str(root/'ann.paper')
  p=run(['person','keys','--site',site,'--invite','registration-invite'],ann)
  check(stats['registration']==1 and stats['session']==1,'invite registration signs in with the new person key')
@@ -114,7 +117,7 @@ try:
  check(p.returncode!=0 and stats['session']==before,'expired challenge fails before signature exchange')
  bob=dict(base,LAYR_PERSON_DIR=str(root/'bob'),LAYR_PERSON_LOGIN='bob@example.com')
  run(['person','keys','--paper-key-out',str(root/'bob.paper')],bob)
- bob.update(LAYR_PERSON_KEY_FILE=str(root/'bob.paper'),LAYR_PERSON_LOGIN='ann@example.com',LAYR_GATEWAY_CA_FILE=str(root/'tls-cert.pem'))
+ bob.update(LAYR_PERSON_KEY_FILE=str(root/'bob.paper'),LAYR_PERSON_LOGIN='ann@example.com',LAYR_GATEWAY_CA_FILE=str(root/'tls-ca.pem'))
  p=run(['person','show','--site',site],bob,False)
  check(p.returncode!=0 and '401' in p.stderr,'wrong signing key cannot sign in as another login')
  p=run(['person','keys','--site',site,'--invite','registration-invite'],ann,False)
@@ -137,7 +140,7 @@ try:
  request=json.loads(run(['request','approve','head','--person','--remote','web','--json'],actor).stdout)
  check(stats['requests']==before+1 and stats['request_attempts']==2 and request['request']['v']==2,'real person request uploads an encrypted v2 envelope with a session bearer')
  check(stats['registration']==1,'person request never re-registers or overwrites the person key')
- fresh=dict(base,LAYR_PERSON_DIR=str(root/'fresh'),LAYR_PERSON_LOGIN='fresh@example.com',LAYR_GATEWAY_CA_FILE=str(root/'tls-cert.pem'))
+ fresh=dict(base,LAYR_PERSON_DIR=str(root/'fresh'),LAYR_PERSON_LOGIN='fresh@example.com',LAYR_GATEWAY_CA_FILE=str(root/'tls-ca.pem'))
  before=stats['session']
  run(['person','keys','--site',site,'--invite','fresh-invite','--paper-key-out',str(root/'fresh.paper')],fresh)
  check(stats['registration']==2 and stats['session']==before+1,'fresh invite registration signs in directly from generated in-memory keys')
