@@ -155,6 +155,16 @@ fn index(ctx: &Ctx, repo: &Repo, key: &[u8]) -> Result<Index> {
         if !root.exists() {
             continue;
         }
+        // Without patterns only the overlay paths count: no walk of the whole folder.
+        if patterns.is_empty() {
+            for path in &overlay_paths {
+                let skipped = path.match_indices('/').map(|(i, _)| &path[..i]).chain([path.as_str()]).any(crate::repo::skip_path);
+                if !skipped {
+                    source_file(&root, path, key, &mut hashes)?;
+                }
+            }
+            continue;
+        }
         let mut matcher = ignore::gitignore::GitignoreBuilder::new(&root);
         for pattern in &patterns {
             matcher.add_line(None, pattern)?;

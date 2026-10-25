@@ -878,7 +878,10 @@ pub fn commit(ctx: &Ctx, args: &[String]) -> Result<i32> {
             cleared.push(c.clone());
         }
     }
-    if let Err(e) = crate::secrets::check_between(ctx, &h.repo, &head_root, &new_root, &line.head) {
+    let secrets = crate::trace::span("secret check");
+    let checked = crate::secrets::check_between(ctx, &h.repo, &head_root, &new_root, &line.head);
+    drop(secrets);
+    if let Err(e) = checked {
         h.repo.discard_states(std::slice::from_ref(&state));
         return Err(e);
     }
@@ -892,13 +895,19 @@ pub fn commit(ctx: &Ctx, args: &[String]) -> Result<i32> {
             target_head: line.head.clone(),
         })?;
     }
-    let rec = h.repo.move_head(ctx, "commit", &line, &state.id, vec![state.clone()], None, data);
+    let rec = {
+        let _t = crate::trace::span("move head");
+        h.repo.move_head(ctx, "commit", &line, &state.id, vec![state.clone()], None, data)
+    };
     rec?;
     #[cfg(target_os = "macos")]
     if let Some(p) = promotion.take() {
         p.finish()?;
     }
-    h.repo.drop_stage(&line)?;
+    {
+        let _t = crate::trace::span("drop stage");
+        h.repo.drop_stage(&line)?;
+    }
     if !a.has("-q") {
         let root = if parents_empty(&state) { " (root-state)" } else { "" };
         outln!(ctx, "[{}{} {}] {}", line.name, root, ids::short(&state.id), message.lines().next().unwrap_or(""));
