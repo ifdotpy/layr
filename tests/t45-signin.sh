@@ -64,7 +64,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
    invites.pop(bearer);people[login]=body;stats['registration']+=1;self.reply(200,{'login':login,'new':True});return
   login=sessions.get(bearer)
   # Project data keeps its read/write capability; person exchanges use the session.
-  if path.startswith('/v1/p/project/objects') and bearer in ['v1.read.signinTest','v1.write.signin-test']:
+  if path.startswith('/v1/p/project/objects') and bearer in ['v1.read.signinTest','v1.write.signinTest']:
    login='ann@example.com'
   if not login: self.reply(401,{});return
   if faults.pop('reject_session',False):
@@ -115,7 +115,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     self.reply(200,target.read_bytes()) if target.is_file() else self.reply(404,{})
     return
    if self.command=='PUT' and logical.startswith('claims/'):
-    assert bearer=='v1.write.signin-test' and body['sig']
+    assert bearer=='v1.write.signinTest' and body['sig']
     if target.exists(): self.reply(412,{});return
     target.parent.mkdir(parents=True,exist_ok=True);target.write_text(json.dumps(body));stats['epoch_claims']+=1;self.reply(201,{});return
   self.reply(404,{})
@@ -180,7 +180,7 @@ try:
  rotated=json.loads(run(['request','approve','head','--person','--remote','web','--json'],actor).stdout)
  check(stats['epoch_requests']==1 and stats['request_attempts']==before+2 and rotated['request']['epoch']==epoch,'epoch request uses a session bearer and renews once after rejection')
  check((root/'archive/project/epochs'/epoch/'requests'/f"{rotated['request']['id']}.json").is_file(),'session request stores its envelope only in the current epoch namespace')
- token=root/'writer.token';token.write_text('v1.write.signin-test');token.chmod(0o600)
+ token=root/'writer.token';token.write_text('v1.write.signinTest');token.chmod(0o600)
  executor=dict(actor,LAYR_GATEWAY_TOKEN_FILE=str(token))
  run(['requests','apply','--remote','web','--json'],executor)
  check(stats['epoch_claims']==1 and (root/'archive/project/epochs'/epoch/'claims'/f"{rotated['request']['id']}.json").is_file(),'executor claims the epoch request with its machine write bearer')
