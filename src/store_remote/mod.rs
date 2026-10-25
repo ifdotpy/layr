@@ -515,7 +515,9 @@ impl Store {
         // Recheck the descriptor pin before discovery or any write-related request.
         let descriptor = self.descriptor()?;
         // Check before the writer can publish any object, even when the caller is local root.
-        if let Some(bytes) = self.backend.get("public.json")? {
+        let public_manifest = self.backend.get("public.json")?;
+        let public = public_manifest.is_some();
+        if let Some(bytes) = public_manifest {
             let manifest = layr_store::public::Manifest::parse(&bytes, &descriptor)?;
             let identity = self.identity(&descriptor, opts.paper_key.as_deref())?;
             self.require_private_access()?;
@@ -531,7 +533,7 @@ impl Store {
                 self.identity(&descriptor, opts.paper_key.as_deref())?;
             }
         }
-        let mode = self.access_mode()?;
+        let mode = if public {layr_store::epochs::Mode::Public} else if self.backend.get("slots/service.age")?.is_some() {layr_store::epochs::Mode::Service} else {layr_store::epochs::Mode::Private};
         for name in repo.visible_overlay_names(ctx)? {
             if let Ok(overlay) = repo.overlay_repo(&name) {
                 if epochs::overlay_mode(&overlay)? > mode {

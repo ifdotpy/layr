@@ -294,15 +294,6 @@ fn write_slots(backend: &Backend, identity: &str, readers: &BTreeMap<String, Str
     Ok(())
 }
 impl Store {
-    pub(super) fn access_mode(&self) -> Result<Mode> {
-        Ok(if self.backend.get("public.json")?.is_some() {
-            Mode::Public
-        } else if self.backend.get("slots/service.age")?.is_some() {
-            Mode::Service
-        } else {
-            Mode::Private
-        })
-    }
     pub(super) fn service_recipient(&self, repo: &Repo) -> Result<Option<String>> {
         for (key, _) in repo.p.db.config_all()? {
             let Some(name) = key.strip_prefix("cloud.remote.").and_then(|k| k.strip_suffix(".url")) else { continue };
