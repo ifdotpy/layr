@@ -18,11 +18,15 @@ minio_pid=$!
 stop_profile_test() { kill "$minio_pid" 2>/dev/null || true; wait "$minio_pid" 2>/dev/null || true; cleanup; }
 trap stop_profile_test EXIT
 endpoint=http://127.0.0.1:$port
-for attempt in $(seq 1 100); do
+# MinIO can take more than ten seconds to start on a loaded machine; wait up to a minute.
+for attempt in $(seq 1 600); do
     if curl -fsS "$endpoint/minio/health/live" >/dev/null 2>&1; then break; fi
     sleep .1
 done
-curl -fsS --aws-sigv4 aws:amz:us-east-1:s3 --user "$MINIO_ROOT_USER:$MINIO_ROOT_PASSWORD" -X PUT "$endpoint/layr-profile" >/dev/null
+for attempt in $(seq 1 60); do
+    if curl -fsS --aws-sigv4 aws:amz:us-east-1:s3 --user "$MINIO_ROOT_USER:$MINIO_ROOT_PASSWORD" -X PUT "$endpoint/layr-profile" >/dev/null 2>&1; then break; fi
+    sleep 1
+done
 export AWS_CONFIG_FILE=$T/aws-config AWS_SHARED_CREDENTIALS_FILE=$T/aws-credentials
 printf '[profile test]\nregion=us-east-1\n[profile refuse]\ncredential_process=echo never\n' > "$AWS_CONFIG_FILE"
 printf '[test]\naws_access_key_id=%s\naws_secret_access_key=%s\n' "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" > "$AWS_SHARED_CREDENTIALS_FILE"
