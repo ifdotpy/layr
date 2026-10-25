@@ -291,42 +291,87 @@ fn hidden_layers_come_only_from_their_own_records() {
     assert!(!serde_json::to_string(&other).unwrap().contains("hidden"));
 }
 
+fn person_evidence(seq: u64, login: &str, key: &ed25519_dalek::SigningKey, withdraw: bool) -> Record {
+    use layr_store::request::{Action, Request};
+    let mut record = Record::new("attest");
+    record.id = format!("01a12290-0000-7000-8000-{:012x}", 100 + seq);
+    record.project = "01a12290-0000-7000-8000-000000000002".into();
+    record.machine = "01a12290-0000-7000-8000-000000000005".into();
+    record.seq = seq;
+    record.time = seq as i64;
+    record.actor = Actor { uid: u32::MAX, name: format!("person:{login}"), session: None };
+    let subject = "01a12290-0000-7000-8000-000000000003";
+    let action = if withdraw {
+        Action::Withdraw { state: subject.into(), into: "main".into() }
+    } else {
+        Action::Approve { state: subject.into(), into: "main".into() }
+    };
+    let request =
+        Request::new(format!("01a12290-0000-7000-8000-{:012x}", 200 + seq), record.project.clone(), login.into(), 0, action)
+            .unwrap();
+    let signed = request.sign(key).unwrap();
+    let text = String::from_utf8(signed.to_bytes().unwrap()).unwrap();
+    record.data = json!({"request":text,"request_id":request.id,"request_digest":hex::encode(Sha256::digest(text.as_bytes())),"person_key":hex::encode(key.verifying_key().to_bytes()),"attestation":Attestation {format:1,attestation_id:record.id.clone(),subject:Subject{kind:"state".into(),id:subject.into()},change_id:None,kind:if withdraw {"revoke".into()}else{"approval".into()},payload_digest:hex::encode(Sha256::digest(signed.r.get().as_bytes())),payload_ref:None,signer:record.actor.name.clone(),time:record.time}});
+    validation::validate(&record).unwrap();
+    record
+}
+
 #[test]
 fn person_approvals_survive_executor_scope_and_keep_revocations_separate() {
-    let mut source = record(1, "save");
-    source.states.push(state("reviewed", StateKind::Commit, &[]));
+    let key = ed25519_dalek::SigningKey::from_bytes(&[11; 32]);
+    let bob_key = ed25519_dalek::SigningKey::from_bytes(&[13; 32]);
+    let attacker_key = ed25519_dalek::SigningKey::from_bytes(&[12; 32]);
+    let ann = person_evidence(3, "ann@example.com", &key, false);
+    let bob = person_evidence(4, "bob@example.com", &bob_key, false);
+    let mut source = Record::new("save");
+    source.id = "01a12290-0000-7000-8000-000000000001".into();
+    source.project = ann.project.clone();
+    source.machine = ann.machine.clone();
+    source.seq = 2;
+    source.time = 2;
+    source.states.push(state(&ann.data["attestation"]["subject"]["id"].as_str().unwrap(), StateKind::Commit, &[]));
     source.states[0].author.email = "author@example.com".into();
-    let mut ann = record(2, "attest");
-    ann.actor.uid = u32::MAX;
-    ann.actor.name = "person:ann@example.com".into();
-    ann.data = json!({"attestation":Attestation {format:1,attestation_id:ann.id.clone(),subject:Subject{kind:"state".into(),id:"reviewed".into()},change_id:None,kind:"approval".into(),payload_digest:"0".repeat(64),payload_ref:None,signer:ann.actor.name.clone(),time:ann.time}});
-    let mut bob = ann.clone();
-    bob.id = "bob".into();
-    bob.seq = 3;
-    bob.time = 3;
-    bob.actor.name = "person:bob@example.com".into();
-    bob.data["attestation"]["attestation_id"] = json!(bob.id);
-    bob.data["attestation"]["signer"] = json!(bob.actor.name);
-    bob.data["attestation"]["time"] = json!(3);
-    let mut revoke = bob.clone();
-    revoke.id = "revoke".into();
-    revoke.seq = 4;
-    revoke.time = 4;
-    revoke.machine = "another-executor".into();
-    revoke.data["attestation"]["attestation_id"] = json!(revoke.id);
-    revoke.data["attestation"]["kind"] = json!("revoke");
+    let mut pin = source.clone();
+    pin.id = "01a12290-0000-7000-8000-000000000009".into();
+    pin.seq = 1;
+    pin.time = 1;
+    pin.states.clear();
+    pin.op = "config".into();
+    pin.data = json!({"config":{"person.keys":{"ann@example.com":hex::encode(key.verifying_key().to_bytes()),"bob@example.com":hex::encode(bob_key.verifying_key().to_bytes())}}});
+    let mut revoke = person_evidence(5, "bob@example.com", &bob_key, true);
+    revoke.machine = "01a12290-0000-7000-8000-000000000006".into();
     revoke.data["revokes"] = json!([ann.id, bob.id]);
-    let project = fold(vec![source, ann.clone(), bob.clone(), revoke]);
+    let mut fake = person_evidence(6, "ann@example.com", &attacker_key, false);
+    fake.machine = revoke.machine.clone();
+    let mut fake_revoke = person_evidence(7, "ann@example.com", &attacker_key, true);
+    fake_revoke.machine = revoke.machine.clone();
+    fake_revoke.data["revokes"] = json!([ann.id]);
+    let mut foreign_pin = pin.clone();
+    foreign_pin.id = "01a12290-0000-7000-8000-000000000099".into();
+    foreign_pin.machine = revoke.machine.clone();
+    foreign_pin.seq = 8;
+    foreign_pin.time = 8;
+    foreign_pin.data = json!({"config":{"person.keys":{"ann@example.com":hex::encode(attacker_key.verifying_key().to_bytes())}}});
+    let project = Project::from_records(
+        &ann.project,
+        vec![pin, source, ann.clone(), bob.clone(), revoke, fake.clone(), fake_revoke, foreign_pin],
+        &ann.machine,
+    )
+    .unwrap();
+    let subject = ann.data["attestation"]["subject"]["id"].as_str().unwrap();
     assert!(!project.is_revoked(&ann.id));
     assert!(project.is_revoked(&bob.id));
-    assert!(project.approvals("reviewed").is_empty());
-    assert_eq!(project.person_approvals("reviewed"), vec![("ann@example.com".into(), 2)]);
+    assert!(project.approvals(subject).is_empty());
+    assert_eq!(project.person_approvals(subject), vec![("ann@example.com".into(), 3)]);
+    assert_eq!(project.person_attestations(subject, "ann@example.com"), vec![ann.id.clone()]);
     let mut policy = policy::Policy::default();
     policy.access.insert("person:ann@example.com".into(), policy::Role::Maintainer);
     let rule = policy::RuleSpec::default().rule();
-    assert_eq!(project.allowed_person_approvals("reviewed", None, protection::ApprovalMode::Ref, &policy, &rule).len(), 1);
+    assert_eq!(project.allowed_person_approvals(subject, None, protection::ApprovalMode::Ref, &policy, &rule).len(), 1);
     policy.deny.insert("person:ann@example.com".into(), vec!["*".into()]);
-    assert!(project.allowed_person_approvals("reviewed", None, protection::ApprovalMode::Ref, &policy, &rule).is_empty());
+    assert!(project.allowed_person_approvals(subject, None, protection::ApprovalMode::Ref, &policy, &rule).is_empty());
+    let no_pin = Project::from_records(&ann.project, vec![fake.clone()], &ann.machine).unwrap();
+    assert!(no_pin.person_approvals(subject).is_empty());
 }
 
 #[test]

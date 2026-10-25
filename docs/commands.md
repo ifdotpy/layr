@@ -26,6 +26,9 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | person        | `person keys [--paper-key-out <path>] [--site <url>] [--store <url>]`, `person show [--json]`, `person accept`, `access person-key <login> <public-key>` |
 | setup         | `init`, `projects`, `config`, `cache add|remove|list|repair`, `daemon`                        |
 
+Person signing-key pins are machine-local: enrollment pins them on the executor, and an admin can later run `layr access person-key <login> <public-key>` there.
+Pins do not replicate because a trusted writer machine must not replace a person's key and impersonate their approvals.
+
 Successful peer `push` and `sync`, and store `push`, append a signed operation record.
 The record includes the remote name and URL, direction, state IDs, counts, bytes, overlays, and result.
 The parent record contains only parent state IDs and counts.

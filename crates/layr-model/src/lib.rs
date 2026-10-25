@@ -438,7 +438,7 @@ impl Project {
                 return false;
             }
             let rec = &self.records[*i];
-            ((a.signer.starts_with("person:") && r.signer == a.signer)
+            ((a.signer.starts_with("person:") && r.signer == a.signer && self.person_record_pinned(rec))
                 || (!a.signer.starts_with("person:") && rec.machine == owner.machine && rec.actor.uid == owner.actor.uid))
                 && (rec.data["revokes"].as_array().is_some_and(|v| v.iter().any(|v| v.as_str() == Some(id)))
                     || (rec.op == "approve.withdraw" && a.kind == "approval"))
@@ -661,12 +661,24 @@ impl Project {
         out.sort_by_key(|(uid, _)| *uid);
         out
     }
+    /// Imported machine records cannot supply a different key for a local person principal.
+    fn person_record_pinned(&self, record: &Record) -> bool {
+        let Some(login) = record.actor.name.strip_prefix("person:") else {
+            return false;
+        };
+        let Some(public) = self.setting("person.keys").and_then(|keys| keys[login].as_str()) else {
+            return false;
+        };
+        record.data["person_key"].as_str() == Some(public) && validation::validate(record).is_ok()
+    }
+
     /// Evidence signed by one person, including scoped approvals, that is still active.
     pub fn person_attestations(&self, subject: &str, login: &str) -> Vec<String> {
         self.attestations
             .iter()
-            .filter(|(_, a)| {
-                a.subject.id == subject
+            .filter(|(index, a)| {
+                self.person_record_pinned(&self.records[*index])
+                    && a.subject.id == subject
                     && a.signer == format!("person:{login}")
                     && a.kind == "approval"
                     && !self.is_revoked(&a.attestation_id)
@@ -685,6 +697,7 @@ impl Project {
             if a.subject.id == subject
                 && a.kind == "approval"
                 && !self.is_revoked(&a.attestation_id)
+                && self.person_record_pinned(&self.records[*index])
                 && self.records[*index].data.get("declassify").is_none()
             {
                 people.entry(login.into()).and_modify(|time| *time = (*time).max(a.time)).or_insert(a.time);
