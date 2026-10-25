@@ -38,7 +38,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
    errors.append(type(e).__name__);self.reply(500,{})
  def api(self):
   parsed=urllib.parse.urlsplit(self.path); path=parsed.path; login=urllib.parse.parse_qs(parsed.query).get('login',[''])[0]
-  body=json.loads(self.rfile.read(int(self.headers.get('Content-Length','0'))) or b'{}')
+  raw=self.rfile.read(int(self.headers.get('Content-Length','0')));body=json.loads(raw or b'{}')
   bearer=self.headers.get('Authorization','').removeprefix('Bearer ')
   if path=='/api/session/challenge' and self.command=='GET':
    assert not bearer
@@ -103,7 +103,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
    assert body['v']==2 and body['person']==login and body['sig']
    if object_key.startswith('project/epochs/'):
     assert body['epoch']==object_key.split('/')[2]
-    target=root/'archive'/object_key;target.parent.mkdir(parents=True,exist_ok=True);target.write_text(json.dumps(body))
+    target=root/'archive'/object_key;target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(raw)
     stats['epoch_requests']+=1
    stats['requests']+=1;self.reply(201,{});return
   if path=='/v1/p/project/objects':
@@ -115,9 +115,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
     self.reply(200,target.read_bytes()) if target.is_file() else self.reply(404,{})
     return
    if self.command=='PUT' and logical.startswith('claims/'):
-    assert bearer=='v1.write.signinTest' and body['sig']
+    assert bearer=='v1.write.signinTest' and body['s'] and body['r']['request']==logical.removeprefix('claims/').removesuffix('.json')
     if target.exists(): self.reply(412,{});return
-    target.parent.mkdir(parents=True,exist_ok=True);target.write_text(json.dumps(body));stats['epoch_claims']+=1;self.reply(201,{});return
+    target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(raw);stats['epoch_claims']+=1;self.reply(201,{});return
   self.reply(404,{})
 server=http.server.HTTPServer(('127.0.0.1',0),Handler)
 context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.load_cert_chain(root/'tls-cert.pem',root/'tls-key.pem');server.socket=context.wrap_socket(server.socket,server_side=True)
@@ -185,6 +185,8 @@ try:
  run(['requests','apply','--remote','web','--json'],executor)
  check(stats['epoch_claims']==1 and (root/'archive/project/epochs'/epoch/'claims'/f"{rotated['request']['id']}.json").is_file(),'executor claims the epoch request with its machine write bearer')
  check(stats['epoch_proofs']>0,'epoch read proof exchanges retain the person session bearer')
+ run(['requests','apply','--remote','web','--json'],executor)
+ check(stats['epoch_claims']==1,'repeating the session-authenticated executor creates no duplicate epoch claim')
  fresh=dict(base,LAYR_PERSON_DIR=str(root/'fresh'),LAYR_PERSON_LOGIN='fresh@example.com',LAYR_GATEWAY_CA_FILE=str(root/'tls-ca.pem'))
  before=stats['session']
  run(['person','keys','--site',site,'--invite','fresh-invite','--paper-key-out',str(root/'fresh.paper')],fresh)
