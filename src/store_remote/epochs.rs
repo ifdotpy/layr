@@ -204,7 +204,7 @@ pub(crate) fn project_mode(repo: &Repo) -> Result<Mode> {
 pub(crate) fn overlay_mode(repo: &Repo) -> Result<Mode> {
     Ok(repo.p.db.overlay_config("overlay.access-mode")?.map(serde_json::from_value).transpose()?.unwrap_or_default())
 }
-fn readers(store: &Store, repo: &Repo) -> Result<BTreeMap<String, String>> {
+fn readers(store: &Store, repo: &Repo, remove: &[String]) -> Result<BTreeMap<String, String>> {
     let mut map = BTreeMap::new();
     let anchor = store.root_descriptor()?.recipient;
     for line in repo.p.export_jsonl()?.lines() {
@@ -225,25 +225,42 @@ fn readers(store: &Store, repo: &Repo) -> Result<BTreeMap<String, String>> {
     let remote = reader::records(&store.backend, &identity, &descriptor.project)?;
     for slot in store.backend.list("slots/")? {
         let name = slot.key.strip_prefix("slots/").context("invalid slot")?;
-        if name.ends_with(".key.age") { continue; }
+        if name.ends_with(".key.age") {
+            continue;
+        }
         if let Some(id) = name.strip_prefix("machine-").and_then(|s| s.strip_suffix(".age")) {
-            if !super::format::is_uuid(id) { bail!("invalid machine slot name"); }
-            let mut public = repo.p.db.machine_key(id)?
+            if !super::format::is_uuid(id) {
+                bail!("invalid machine slot name");
+            }
+            if remove.iter().any(|p| p == &format!("machine:{id}") || p == id) {
+                map.insert(format!("machine:{id}"), String::new());
+                continue;
+            }
+            let mut public = repo
+                .p
+                .db
+                .machine_key(id)?
                 .or_else(|| map.get(&format!("machine:{id}")).cloned())
-                .or_else(|| known.get(id).or(remote.keys.get(id)).map(|k|hex::encode(k.to_bytes())));
+                .or_else(|| known.get(id).or(remote.keys.get(id)).map(|k| hex::encode(k.to_bytes())));
             if public.is_none() {
-                if let Some(bytes)=store.backend.get(&format!("slots/machine-{id}.key.age"))? {
-                    let line=String::from_utf8(keys::decrypt(&identity,&bytes)?)?;
-                    let record=oplog::parse_line(&line,None)?.record;
-                    if record.op!="machine" || record.seq!=1 || record.machine!=id || record.project!=descriptor.project {bail!("reader key metadata has invalid machine or project binding");}
-                    let key=oplog::machine_key(&record)?;
-                    oplog::parse_line(&line,Some(&key))?;
-                    public=Some(hex::encode(key.to_bytes()));
+                if let Some(bytes) = store.backend.get(&format!("slots/machine-{id}.key.age"))? {
+                    let line = String::from_utf8(keys::decrypt(&identity, &bytes)?)?;
+                    let record = oplog::parse_line(&line, None)?.record;
+                    if record.op != "machine" || record.seq != 1 || record.machine != id || record.project != descriptor.project {
+                        bail!("reader key metadata has invalid machine or project binding");
+                    }
+                    let key = oplog::machine_key(&record)?;
+                    oplog::parse_line(&line, Some(&key))?;
+                    public = Some(hex::encode(key.to_bytes()));
                 }
             }
-            let public=public.with_context(||format!("cannot rotate: no public key for machine {id}"))?;
+            let public = public.with_context(|| format!("cannot rotate: no public key for machine {id}"))?;
             map.insert(format!("machine:{id}"), public);
         } else if let Some(login) = layr_store::person::slot_login(name) {
+            if remove.iter().any(|p| p == &format!("person:{login}")) {
+                map.insert(format!("person:{login}"), String::new());
+                continue;
+            }
             if !map.keys().any(|p| p == &format!("person:{login}")) {
                 bail!("cannot rotate: re-run remote grant for person {login} to record their public recipient");
             }
@@ -277,16 +294,26 @@ fn write_slots(backend: &Backend, identity: &str, readers: &BTreeMap<String, Str
 }
 impl Store {
     pub(super) fn access_mode(&self) -> Result<Mode> {
-        Ok(if self.backend.get("public.json")?.is_some() {Mode::Public} else if self.backend.get("slots/service.age")?.is_some() {Mode::Service} else {Mode::Private})
+        Ok(if self.backend.get("public.json")?.is_some() {
+            Mode::Public
+        } else if self.backend.get("slots/service.age")?.is_some() {
+            Mode::Service
+        } else {
+            Mode::Private
+        })
     }
-    pub(super) fn service_recipient(&self, repo:&Repo) -> Result<Option<String>> {
-        for (key,_) in repo.p.db.config_all()? {
-            let Some(name)=key.strip_prefix("cloud.remote.").and_then(|k|k.strip_suffix(".url")) else {continue};
-            if repo.p.config_value(&key)?.and_then(|v|v.as_str().map(str::to_owned)).as_deref()==Some(self.url.as_str()) {
-                if let Some(recipient)=repo.p.config_value(&format!("remote.{name}.service-recipient"))?.and_then(|v|v.as_str().map(str::to_owned)) {return Ok(Some(recipient));}
+    pub(super) fn service_recipient(&self, repo: &Repo) -> Result<Option<String>> {
+        for (key, _) in repo.p.db.config_all()? {
+            let Some(name) = key.strip_prefix("cloud.remote.").and_then(|k| k.strip_suffix(".url")) else { continue };
+            if repo.p.config_value(&key)?.and_then(|v| v.as_str().map(str::to_owned)).as_deref() == Some(self.url.as_str()) {
+                if let Some(recipient) =
+                    repo.p.config_value(&format!("remote.{name}.service-recipient"))?.and_then(|v| v.as_str().map(str::to_owned))
+                {
+                    return Ok(Some(recipient));
+                }
             }
         }
-        Ok(repo.p.config_value("service.recipient")?.and_then(|v|v.as_str().map(str::to_owned)))
+        Ok(repo.p.config_value("service.recipient")?.and_then(|v| v.as_str().map(str::to_owned)))
     }
 }
 
@@ -342,7 +369,7 @@ impl Store {
         }
         let _lock = repo.p.lock()?;
         if rotated {
-            let mut readers = readers(self, repo)?;
+            let mut readers = readers(self, repo, remove)?;
             for principal in remove {
                 let canonical = if crate::model::is_uuid(principal) { format!("machine:{principal}") } else { principal.clone() };
                 if canonical == format!("machine:{}", self.machine) {
@@ -509,13 +536,17 @@ pub(super) fn check_current(store: &Store) -> Result<()> {
 
 /// Invite pins bind the immutable root, while newly granted people open the current slot.
 pub(crate) fn accept_person(backend: &Backend, descriptor: &Descriptor, person: &crate::person::Access) -> Result<()> {
-    let current=resolve(backend,descriptor,|scoped,next| {
-        let name=layr_store::person::slot_name(&person.login,&keys::recipient_of(&person.identity)?)?;
-        let slot=scoped.get(&format!("slots/{name}"))?.context("this login has no current person slot")?;
-        let identity=keys::open_slot(&slot,&person.identity)?;
-        if keys::recipient_of(&identity)?!=next.recipient {bail!("person slot recipient differs");}
-        Ok((identity,false))
+    let current = resolve(backend, descriptor, |scoped, next| {
+        let name = layr_store::person::slot_name(&person.login, &keys::recipient_of(&person.identity)?)?;
+        let slot = scoped.get(&format!("slots/{name}"))?.context("this login has no current person slot")?;
+        let identity = keys::open_slot(&slot, &person.identity)?;
+        if keys::recipient_of(&identity)? != next.recipient {
+            bail!("person slot recipient differs");
+        }
+        Ok((identity, false))
     })?;
-    if current.is_none() {person.open(backend,descriptor)?;}
+    if current.is_none() {
+        person.open(backend, descriptor)?;
+    }
     Ok(())
 }

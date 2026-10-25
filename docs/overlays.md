@@ -372,7 +372,7 @@ are in `tests/t16-overlays.sh`; the model is in `src/overlay.rs`.
 | `layr overlay show <name> --json` | Metadata for a reader: name, hidden flag, readers with principal and kind, key manager machine UUIDs, signed epochs, patterns, peers, and current state ID. Person principals omit their age recipient. |
 | `layr overlay log <name> --ops [--json]` | All operations from the overlay's own signed records, newest first. JSON is an array with the CLI operation name, actor, time and record ID. Payloads and key material are omitted. |
 
-The metadata JSON fields are `name`, `hidden`, `readers`, `managers`, `epochs`, `patterns`,
+The metadata JSON fields are `name`, `hidden`, `access_mode`, `readers`, `managers`, `epochs`, `patterns`,
 `peers`, and `state`. Readers use canonical principals and kinds `user`, `group`, `everyone`,
 `machine`, or `person`. Each epoch has `number`, `id`, `time` in milliseconds and `machine`.
 Numbers start at 1 in signed key record application order (time, machine, sequence), rather

@@ -73,7 +73,7 @@ pub fn request(ctx: &Ctx, args: &[String]) -> Result<i32> {
         request.expires = expires.parse().context("--expires must be epoch milliseconds")?;
     }
     let signed = request.sign(&key)?;
-    let (epoch,recipient)=store.request_epoch(ctx)?;
+    let (epoch, recipient) = store.request_epoch(ctx)?;
     let sealed = request::seal_for_epoch(&signed.to_bytes()?, &epoch, &recipient, &key)?;
     let backend = store.request_backend(ctx)?;
     let name = format!("requests/{}.json", request.id);
@@ -153,7 +153,7 @@ pub fn requests(ctx: &Ctx, args: &[String]) -> Result<i32> {
             continue;
         };
         let _lock = h.repo.p.lock()?;
-        let (bytes,epoch,identity) = backend.request_object(&object.key,&identity)?;
+        let (bytes, epoch, identity) = backend.request_object(&object.key, &identity)?;
         let hash = digest(&bytes);
         if let Some(old) = h.repo.p.db.records(usize::MAX >> 1)?.into_iter().find(|r| r.data["request_id"] == id) {
             if old.data["request_digest"] != hash {
@@ -444,8 +444,10 @@ mod tests {
         assert!(verify_request(&repo, &request.id, &serde_json::to_vec(&sealed).unwrap(), "root", &identity).is_err());
         sealed = Sealed::parse(&bytes).unwrap();
         sealed.epoch = ids::new_id();
-        let reason =
-            verify_request(&repo, &request.id, &serde_json::to_vec(&sealed).unwrap(), "root", &identity).err().unwrap().to_string();
+        let reason = verify_request(&repo, &request.id, &serde_json::to_vec(&sealed).unwrap(), "root", &identity)
+            .err()
+            .unwrap()
+            .to_string();
         assert_eq!(reason, "request epoch does not match its object namespace");
         drop(repo);
         std::fs::remove_dir_all(root).unwrap();

@@ -52,22 +52,28 @@ impl Backend {
         }
     }
     fn namespace_epoch(&self) -> &str {
-        if let Self::Prefix(_,scope)=self {
-            if let Some((epoch,_))=scope.strip_prefix("project/epochs/").and_then(|s|s.split_once('/')) { return epoch; }
+        if let Self::Prefix(_, scope) = self {
+            if let Some((epoch, _)) = scope.strip_prefix("project/epochs/").and_then(|s| s.split_once('/')) {
+                return epoch;
+            }
         }
         "root"
     }
     /// Return the object's actual namespace and its key, binding unsigned outer routing
     /// fields to authenticated epoch discovery before the request parser runs.
-    pub fn request_object(&self,key:&str,identity:&str) -> Result<(Vec<u8>,String,String)> {
-        if let Self::Epoch(epoch)=self {
-            if let Some(bytes)=epoch.current.get(key)? {return Ok((bytes,epoch.current.namespace_epoch().into(),identity.into()));}
-            for (backend,old_identity) in &epoch.history {
-                if let Some(bytes)=backend.get(key)? {return Ok((bytes,backend.namespace_epoch().into(),old_identity.clone()));}
+    pub fn request_object(&self, key: &str, identity: &str) -> Result<(Vec<u8>, String, String)> {
+        if let Self::Epoch(epoch) = self {
+            if let Some(bytes) = epoch.current.get(key)? {
+                return Ok((bytes, epoch.current.namespace_epoch().into(), identity.into()));
+            }
+            for (backend, old_identity) in &epoch.history {
+                if let Some(bytes) = backend.get(key)? {
+                    return Ok((bytes, backend.namespace_epoch().into(), old_identity.clone()));
+                }
             }
             bail!("request disappeared");
         }
-        Ok((self.get(key)?.context("request disappeared")?,self.namespace_epoch().into(),identity.into()))
+        Ok((self.get(key)?.context("request disappeared")?, self.namespace_epoch().into(), identity.into()))
     }
     pub fn decrypted(&self, key: &str, identity: &str) -> Result<Vec<u8>> {
         if let Self::Epoch(epoch) = self {

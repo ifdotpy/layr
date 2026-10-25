@@ -394,10 +394,15 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
             // Optional enrollment keeps key metadata outside shared history: it supplies
             // a public key for resealing this existing reader slot, never writer trust.
             let enroll = || -> Result<()> {
-                if let Some(line)=repo.p.db.record_line(&store.machine,1)? {
-                    let record=oplog::parse_line(&line,None)?.record;
-                    if record.op != "machine" { bail!("local machine announcement missing"); }
-                    store.backend.put_new(&format!("slots/machine-{}.key.age",store.machine),keys::encrypt(&descriptor.recipient,line.as_bytes())?)?;
+                if let Some(line) = repo.p.db.record_line(&store.machine, 1)? {
+                    let record = oplog::parse_line(&line, None)?.record;
+                    if record.op != "machine" {
+                        bail!("local machine announcement missing");
+                    }
+                    store.backend.put_new(
+                        &format!("slots/machine-{}.key.age", store.machine),
+                        keys::encrypt(&descriptor.recipient, line.as_bytes())?,
+                    )?;
                     store.backend.put_new(&format!("slots/machine-{}.age", store.machine), slot)?;
                 }
                 Ok(())

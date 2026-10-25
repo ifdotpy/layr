@@ -468,3 +468,23 @@ fn project_policy_perspective_requires_one_creator_and_keeps_foreign_config_name
     other_creator.data["id"] = json!("wrong");
     assert!(project_perspective("project",[&other_creator]).is_err());
 }
+
+#[test]
+fn project_access_mode_and_epoch_metadata_follow_signed_order_without_keys() {
+    use layr_store::epochs::Mode;
+    let mut first = record(1, "project.key");
+    first.data = json!({"epoch":"first","mode":"private","readers_hash":"a".repeat(64),"recipient":"never-emit-recipient","readers":{"person":"never-emit-reader"},"identity":"never-emit-identity"});
+    let mut opened = record(2, "project.mode");
+    opened.data = json!({"mode":"public"});
+    let mut second = record(3, "project.key");
+    second.data = json!({"epoch":"second","mode":"private","readers_hash":"b".repeat(64)});
+    let mut closed = record(4, "project.mode");
+    closed.data = json!({"mode":"private","epoch":"second","reason":"audience closed"});
+    let project = fold(vec![closed, opened, second, first]);
+    assert_eq!(project.access_mode(), Mode::Private);
+    let epochs = project.key_epochs();
+    assert_eq!(epochs[0]["id"], "first");
+    assert_eq!(epochs[1]["number"], 2);
+    assert_eq!(epochs[1]["reason"], "audience closed");
+    assert!(!serde_json::to_string(&epochs).unwrap().contains("never-emit"));
+}

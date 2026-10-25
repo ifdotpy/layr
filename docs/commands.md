@@ -225,7 +225,7 @@ Hidden overlays use follow mode. Only their readers see them in lists and report
 Use `layr overlay show-to-project <name>` to make one visible to project readers.
 This change is recorded and cannot be reversed.
 
-`layr overlay show <name> --json` writes an object with `name`, `hidden`, `readers`,
+`layr overlay show <name> --json` writes an object with `name`, `hidden`, `access_mode`, `readers`,
 `managers`, `epochs`, `patterns`, `peers`, and `state`. Each reader has a canonical
 `principal` and a `kind` (`user`, `group`, `everyone`, `machine`, or `person`). Person
 principals contain the login without the age recipient. Managers are machine UUIDs.

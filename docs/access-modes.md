@@ -96,5 +96,10 @@ Anonymous readers discover the latest epoch before requesting its public opener;
 an old root `public.json` never authorizes a later private epoch. A gateway must
 allow current public records, states, sealed history and discovery through its
 read-only public routes, and enforce the audience of each explicitly public overlay.
+Person requests use `seal_for_epoch` with the current namespace and recipient. The
+executor selects a historical identity from the object namespace, then requires the
+outer epoch to match that namespace before decrypting and verifying the inner request.
+Claims use the current `claims/` namespace (legacy root claims remain readable).
+
 The epoch-aware server deployment is coordinated separately from this native
 change. A server that lacks epoch routes fails closed for rotated stores.
