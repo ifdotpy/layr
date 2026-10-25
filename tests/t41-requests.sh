@@ -142,6 +142,9 @@ denied = submit('queue-add', state, env=bob)
 result = apply(denied, 'refused')
 check('deny rule' in result['reason'], 'person deny rule overrides executor permissions')
 
+replica = dict(base, LAYR_ROOT=str(root / 'store' / 'replica-root'), LAYR_PAPER_KEY_FILE=str(root / 'store-paper'))
+run(['clone', 'file://' + str(root / 'archive'), 'replica', '-q'], replica)
+
 bad_claim = submit('comment', change, 'Invalid claim must not apply.')
 body = json.loads((root / 'archive' / 'requests' / (bad_claim + '.json')).read_text())['r']
 (root / 'archive' / 'requests' / 'claims' / (bad_claim + '.json')).write_text(json.dumps({'r': {'format': 1, 'project': body['project'], 'request': bad_claim, 'machine': record['machine']}, 's': 'invalid-signature'}))
@@ -151,7 +154,10 @@ check(result['reason'] == 'request claim signature does not verify', 'a forged c
 untrusted = submit('comment', change, 'Untrusted claim must not apply.')
 body = json.loads((root / 'archive' / 'requests' / (untrusted + '.json')).read_text())['r']
 claim_path = root / 'archive' / 'requests' / 'claims' / (untrusted + '.json')
-claim_path.write_text(json.dumps({'r': {'format': 1, 'project': body['project'], 'request': untrusted, 'machine': '01a12290-0000-7000-8000-000000000099'}, 's': 'invalid-untrusted-signature'}))
+# The fresh executor makes a real, valid claim with its own key. The original project
+# has not trusted that machine. Its missing person pin prevents any comment there too.
+data(['--project', 'replica', 'requests', 'apply', '--json'], replica)
+check(json.loads(claim_path.read_text())['r']['machine'] != record['machine'], 'untrusted claim is signed by a separate real machine')
 result = apply(untrusted, 'refused')
 check(result['reason'] == 'claimed by an untrusted machine' and outcome(untrusted)['op'] == 'request.refused', 'untrusted claim gets a signed terminal refusal')
 check(not any(c['text'] == 'Untrusted claim must not apply.' for c in data(['change', 'show', change, '--json'])['comments']), 'untrusted claim never applies its request')
@@ -162,10 +168,8 @@ check((root / 'archive' / 'requests' / 'claims' / (entry + '.json')).exists(), '
 claim = json.loads((root / 'archive' / 'requests' / 'claims' / (entry + '.json')).read_text())
 check(claim['r']['request'] == entry and claim['s'], 'claim binds machine, project and request with a signature')
 
-replica = dict(base, LAYR_ROOT=str(root / 'store' / 'replica-root'), LAYR_PAPER_KEY_FILE=str(root / 'store-paper'))
-run(['clone', 'file://' + str(root / 'archive'), 'replica', '-q'], replica)
 other = data(['--project', 'replica', 'requests', 'apply', '--json'], replica)
-check(other and all(row['status'] == 'claimed' or (row['id'] in (untrusted, bad_claim) and row['status'] == 'refused') for row in other), 'a second trusted machine cannot apply claimed requests')
+check(other and all(row['status'] == 'claimed' or (row['id'] in (untrusted, bad_claim) and row['status'] in ('refused', 'ignored')) for row in other), 'a second trusted machine cannot apply claimed requests')
 check(not data(['--project', 'replica', 'queue', 'list', '--json'], replica), 'second machine creates no duplicate queue effects')
 
 run(['reindex', '-q'])
