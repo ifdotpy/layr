@@ -12,7 +12,7 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | access        | `access [list|grant [--until <30m|2h|1d>]|revoke|deny|allow|check]`, `protect [<pattern> --update <role> --check <names> --path <path>=<role> --approvals <n> --approvers <principals> --direct --rewrite <role> --no-expect | --remove]`, `approve [--withdraw] <state>`, `attest <kind> <rev> [--payload <file>]`, `attestations <rev> [--kind <kind>] [--json]` |
 | safety        | `undo`, `op log`, `save`, `try <state> -- <cmd>`, `try <state> --check <name>`, `bisect list [--json]`, `bisect run [--good <rev>] [--bad <rev>] [--auto] [--ref-log <ref>] [--json] -- <cmd>`, `gc`, `fsck`, `reindex` |
 | Git bridge    | `git remote`, `git fetch`, `git pull`, `git push [--squash]`, `git clone`, `git sync`                             |
-| remotes       | `remote add\|list\|self\|remove\|trust`, `sync <remote>`, `push <remote>`, `fetch <remote>`, `pull <remote>`, `clone <url>` |
+| remotes       | `remote add\|list\|self\|remove\|trust`, `remote public <remote> on\|off`, `sync <remote>`, `push <remote>`, `fetch <remote>`, `pull <remote>`, `clone <url>` |
 | OCI           | `push <oci-remote> <rev> [--runnable <name>] [--json]`, `access token <principal> [--until <duration>]`, `access token --revoke <principal>` |
 | records       | `op export`, `op import` (JSONL) |
 | copies        | `export <folder>`                                                                              |
@@ -33,6 +33,50 @@ The record stays local until the next exchange sends it.
 OCI push exports an artifact and writes no transfer record.
 `op log` shows these project operations from any line.
 `remote list --json` includes `copies` with the last success time, machine, and transfer details.
+
+Public store projects use the same encrypted objects and reader slots as private stores:
+
+```sh
+layr remote public archive on
+layr clone file:///path/to/store copy --public
+```
+
+`remote public <remote> on` requires a current project admin and this machine's existing
+writer slot. The signed project records in the store must trust the machine's key.
+Push the project before publishing it. Type the local project name at the confirmation prompt.
+All current and future project data becomes readable to anyone with access to the store objects.
+The command creates `public.json`, signed by the writer machine, and `slots/public.age` once.
+The manifest publishes a public opener identity. The vault identity stays inside sealed slots
+and in reader memory. Repeating the command preserves both published objects.
+An interrupted publication can be completed by running the command again.
+
+`remote public <remote> off` refuses: project key rotation is not implemented.
+It changes nothing, the project stays public, and copied data remains readable.
+
+`clone --public` uses only public access. Without the flag, clone, fetch and mount use public
+access when no personal, machine or paper slot opens. Public clones create no machine slot.
+Their local `cloud.remote.<name>.public` setting permits fetch with normal project read access.
+Granting the machine its own valid slot clears that setting at the next fetch; subsequent
+operations use the ordinary remote policy. Private remotes and all pushes keep their policy.
+A public-only reader can inspect lines, states and files, diff them and build a local copy.
+Push and remote key grants require private writer access and are refused for public-only readers.
+A public mount does not save the decrypted vault identity to the Keychain.
+Overlays keep their own reader slots; publication creates no public overlay slot.
+A hidden overlay leaves no trace in the public reader's project or command output.
+
+Anonymous gateway reads for `layr+https://host/project` use these GET routes:
+
+- `/p/project/store.json`, `/p/project/public.json`, `/p/project/slots/public.age`.
+- `/p/project/records/<machine>/<first>-<last>.age` and `/p/project/states/<state>/<attempt>.tree.age` or `.../<attempt>.<part>.data.age`
+  (the existing record and state object names).
+- `/p/project/objects?prefix=records/` and `/p/project/objects?prefix=states/`.
+  Listings return `{"objects":[{"key":"<relative object name>","modified":<epoch milliseconds>}]}`.
+  More specific prefixes below `records/` or `states/` use the same route.
+
+These requests carry no token or read proof. Only record and state prefixes can be listed.
+Overlay and people prefixes are excluded. Public requests never use the authenticated
+`/v1/p/project/objects/` routes for object reads and cannot write, collect, or issue tokens.
+The gateway must expose the routes only when a signed public manifest is present.
 
 `line new <name> [<rev>] [--count N]` creates lines. Use `line list`, `line delete <name>`, or `line rename [<old>] <new>` to manage them.
 A line is a folder. Use `cd` to enter it.

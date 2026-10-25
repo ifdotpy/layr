@@ -457,6 +457,9 @@ mod tests {
             pin: None,
             aws_profile: None,
             layer: None,
+            force_public: false,
+        public_clone: false,
+            public_reader: std::sync::atomic::AtomicBool::new(false),
         }
     }
     #[test]

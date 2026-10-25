@@ -24,6 +24,7 @@ use std::collections::{BTreeMap, HashMap};
 
 #[derive(Default, Clone)]
 pub struct Access {
+    pub public: bool,
     pub machine: Option<(String, SigningKey)>,
     pub paper: Option<String>,
     pub identity: Option<String>,
@@ -46,6 +47,7 @@ pub struct Browse {
     keys: BTreeMap<String, ed25519_dalek::VerifyingKey>,
     pub lines: Vec<Line>,
     pub pin: StorePin,
+    pub public_reader: bool,
     layers: Vec<LayerReader>,
 }
 
@@ -81,23 +83,37 @@ impl Browse {
             StorePin { project: descriptor.project.clone(), recipient: descriptor.recipient.clone(), paper_recipient: None };
         drop(stage);
         let stage = crate::trace::span("disk slot");
-        let identity = if let Some(identity) = &access.identity {
-            identity.clone()
-        } else if let Some((machine, key)) = &access.machine {
-            if let Some(slot) = backend.get(&format!("slots/machine-{machine}.age"))? {
-                keys::open_machine_slot(&slot, key)?
+        let own = (|| -> Result<String> {
+            let identity = if let Some(identity) = &access.identity {
+                identity.clone()
+            } else if let Some((machine, key)) = &access.machine {
+                if let Some(slot) = backend.get(&format!("slots/machine-{machine}.age"))? {
+                    keys::open_machine_slot(&slot, key)?
+                } else {
+                    if let Some(person) = &person {
+                        person.open(&backend, &descriptor)?
+                    } else {
+                        paper_identity(&backend, access.paper.as_deref())?
+                    }
+                }
             } else {
                 if let Some(person) = &person {
                     person.open(&backend, &descriptor)?
                 } else {
                     paper_identity(&backend, access.paper.as_deref())?
                 }
-            }
+            };
+            Ok(identity)
+        })();
+        let (identity, public_reader) = if access.public {
+            (super::public::identity(&backend, &descriptor)?.context("the store is not public")?, true)
         } else {
-            if let Some(person) = &person {
-                person.open(&backend, &descriptor)?
-            } else {
-                paper_identity(&backend, access.paper.as_deref())?
+            match own {
+                Ok(identity) => (identity, false),
+                Err(error) => match super::public::identity(&backend, &descriptor)? {
+                    Some(identity) => (identity, true),
+                    None => return Err(error),
+                },
             }
         };
         if keys::recipient_of(&identity)? != descriptor.recipient {
@@ -129,16 +145,20 @@ impl Browse {
         for reason in refused {
             eprintln!("layr mount: {reason}");
         }
-        let hidden = super::overlays::discover_hidden(
-            &backend,
-            &descriptor.project,
-            &descriptor.recipient,
-            &records.keys,
-            access.machine.as_ref().map(|(id, key)| (id.as_str(), key)),
-            person.as_ref(),
-            access.paper.as_deref(),
-            &access.layers.lock().map_err(|_| anyhow::anyhow!("overlay key cache lock failed"))?.clone(),
-        )?;
+        let hidden = if public_reader {
+            BTreeMap::new()
+        } else {
+            super::overlays::discover_hidden(
+                &backend,
+                &descriptor.project,
+                &descriptor.recipient,
+                &records.keys,
+                access.machine.as_ref().map(|(id, key)| (id.as_str(), key)),
+                person.as_ref(),
+                access.paper.as_deref(),
+                &access.layers.lock().map_err(|_| anyhow::anyhow!("overlay key cache lock failed"))?.clone(),
+            )?
+        };
         let mut identities = BTreeMap::new();
         for (name, (key, identity, authority)) in hidden {
             if published.contains_key(&name) {
@@ -147,6 +167,9 @@ impl Browse {
             identities.insert(name.clone(), identity);
             authorities.insert(name.clone(), authority);
             published.insert(name, key);
+        }
+        if public_reader {
+            published.clear();
         }
         let mut hidden_stacks: Vec<(String, usize, crate::db::Db)> = Vec::new();
         for (name, published) in published {
@@ -246,7 +269,7 @@ impl Browse {
         }
         drop(decoder);
         drop(stage);
-        Ok(Self { backend, identity, keys: records.keys, lines, pin, layers })
+        Ok(Self { backend, identity, keys: records.keys, lines, pin, layers, public_reader })
     }
 
     pub fn identity(&self) -> &str {

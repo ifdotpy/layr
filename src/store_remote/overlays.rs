@@ -273,6 +273,9 @@ fn layer(store: &Store, published: &Published, identity: Option<String>) -> Resu
         person: None,
         pin: None,
         aws_profile: store.aws_profile.clone(),
+        force_public: false,
+        public_clone: false,
+        public_reader: std::sync::atomic::AtomicBool::new(false),
         layer: Some(LayerAccess { recipient: published.key.recipient.clone(), identity }),
     })
 }
@@ -464,6 +467,7 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
 }
 
 pub(super) fn fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report: &mut Report) -> Result<()> {
+    if store.is_public_reader() { return Ok(()); }
     let descriptor = store.descriptor()?;
     let trusted = trusted_keys(repo)?;
     let parent_lines: Vec<_> = repo.p.export_jsonl()?.lines().map(str::to_owned).collect();

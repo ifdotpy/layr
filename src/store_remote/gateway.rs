@@ -22,6 +22,7 @@ pub struct Gateway {
     token: Option<String>,
     identity: Mutex<Option<String>>,
     read: Mutex<Option<(String, i64)>>,
+    public: std::sync::atomic::AtomicBool,
 }
 
 impl Clone for Gateway {
@@ -32,6 +33,7 @@ impl Clone for Gateway {
             token: self.token.clone(),
             identity: Mutex::new(self.identity.lock().expect("gateway identity lock").clone()),
             read: Mutex::new(self.read.lock().expect("gateway read lock").clone()),
+            public: std::sync::atomic::AtomicBool::new(self.is_public()),
         }
     }
 }
@@ -99,7 +101,14 @@ impl Gateway {
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(150))
             .build()?;
-        Ok(Self { http, base, token: None, identity: Mutex::new(None), read: Mutex::new(None) })
+        Ok(Self {
+            http,
+            base,
+            token: None,
+            identity: Mutex::new(None),
+            read: Mutex::new(None),
+            public: std::sync::atomic::AtomicBool::new(false),
+        })
     }
 
     pub fn connect(&mut self, ctx: &crate::ctx::Ctx) -> Result<()> {
@@ -266,9 +275,55 @@ impl Gateway {
         self.identity.lock().map(|identity| identity.is_some()).unwrap_or(false)
     }
 
+    fn is_public(&self) -> bool {
+        self.public.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn public_request(&self, action: &str, prefix: Option<&str>) -> Result<Response> {
+        let mut url = self.base.clone();
+        let path = self.base.path().strip_prefix("/v1").context("invalid gateway base")?;
+        url.set_path(&format!("{path}{action}"));
+        if let Some(prefix) = prefix {
+            url.query_pairs_mut().append_pair("prefix", prefix);
+        }
+        // Anonymous routes are GET only and never carry a token or private read proof.
+        self.http.get(url).send().map_err(reqwest::Error::without_url).map_err(Into::into)
+    }
+
+    pub(super) fn public_get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        if !matches!(key, "store.json" | "public.json" | "slots/public.age")
+            && super::format::parse_segment_name(key).is_none()
+            && super::format::parse_tree_name(key).is_none()
+            && super::format::parse_data_name(key).is_none()
+        {
+            return Ok(None);
+        }
+        let response = self.public_request(key, None)?;
+        match response.status().as_u16() {
+            200 => {
+                let body = bytes(
+                    response,
+                    if matches!(key, "store.json" | "public.json" | "slots/public.age") { 16 << 10 } else { OBJECT_LIMIT },
+                )?;
+                if key == "public.json" {
+                    self.public.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                Ok(Some(body))
+            }
+            404 => Ok(None),
+            status => bail!("gateway public object: HTTP {status}"),
+        }
+    }
+
     pub fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
         if key == "vault.json" {
             return Ok(None);
+        }
+        if self.is_public() || (key == "public.json" && self.token.is_none()) {
+            return self.public_get(key);
+        }
+        if key == "store.json" && self.token.is_none() && !self.has_read_identity() && self.public_get("public.json")?.is_some() {
+            return self.public_get("store.json");
         }
         if key.strip_prefix("slots/").is_some_and(|name| layr_store::person::slot_login(name).is_some()) {
             let response = self.send(Method::GET, key, None, None, None)?;
@@ -317,6 +372,13 @@ impl Gateway {
         } else {
             self.read_request(&format!("objects/{key}"), None)?
         };
+        if key == "store.json"
+            && !response.status().is_success()
+            && self.token.is_none()
+            && self.public_get("public.json")?.is_some()
+        {
+            return self.public_get("store.json");
+        }
         match response.status().as_u16() {
             404 => Ok(None),
             200 => Ok(Some(bytes(response, if key == "store.json" { 16 << 10 } else { OBJECT_LIMIT })?)),
@@ -335,7 +397,12 @@ impl Gateway {
             objects: Vec<Entry>,
         }
         let has_identity = self.identity.lock().map_err(|_| anyhow!("gateway identity lock failed"))?.is_some();
-        let response = if !has_identity
+        let response = if self.is_public() {
+            if !prefix.starts_with("records/") && !prefix.starts_with("states/") {
+                return Ok(Vec::new());
+            }
+            self.public_request("objects", Some(prefix))?
+        } else if !has_identity
             && (prefix.starts_with("records/") || prefix.starts_with("states/") || overlay_keys_prefix(prefix))
         {
             self.send(Method::GET, "objects", self.token.as_deref(), Some(("prefix", prefix)), None)?
@@ -360,6 +427,9 @@ impl Gateway {
     }
 
     pub fn put_new(&self, key: &str, data: Vec<u8>) -> Result<bool> {
+        if self.is_public() {
+            bail!("public gateway access is read only");
+        }
         if key == "store.json" {
             bail!("create the store with owner credentials before adding a gateway remote");
         }
@@ -379,6 +449,9 @@ impl Gateway {
         }
     }
     pub fn delete(&self, key: &str) -> Result<()> {
+        if self.is_public() {
+            bail!("public gateway access is read only");
+        }
         let token = self.token.as_deref().context("set LAYR_GATEWAY_TOKEN_FILE to a private gc token file")?;
         let response = self.send(Method::DELETE, &format!("objects/{key}"), Some(token), None, None)?;
         match response.status().as_u16() {

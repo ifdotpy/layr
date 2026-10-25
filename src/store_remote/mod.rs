@@ -5,6 +5,7 @@ pub(crate) mod browse;
 pub(crate) mod gateway;
 mod legacy;
 pub(crate) mod overlays;
+mod public;
 pub(crate) mod reader;
 mod writer;
 
@@ -21,6 +22,7 @@ use std::path::PathBuf;
 
 #[derive(Clone, Default)]
 pub struct Options {
+    pub public: bool,
     pub auto: bool,
     pub caches: bool,
     pub paper_key: Option<String>,
@@ -92,6 +94,9 @@ pub struct Store {
     pin: Option<StorePin>,
     aws_profile: Option<String>,
     layer: Option<overlays::LayerAccess>,
+    force_public: bool,
+    public_clone: bool,
+    public_reader: std::sync::atomic::AtomicBool,
 }
 
 /// Opening a store performs no remote I/O. Configure it with the caller's environment next.
@@ -116,6 +121,7 @@ pub fn open(url: &str, repo: &Repo) -> Result<Store> {
         if repo.p.config_value(&key)?.and_then(|v| v.as_str().map(str::to_owned)).as_deref() == Some(url) {
             store.aws_profile =
                 repo.p.config_value(&format!("remote.{name}.aws-profile"))?.and_then(|v| v.as_str().map(str::to_owned));
+            store.public_clone = repo.p.config_value(&format!("cloud.remote.{name}.public"))? == Some(serde_json::json!(true));
             break;
         }
     }
@@ -132,6 +138,7 @@ pub fn open_named(name: &str, repo: &Repo) -> Result<Store> {
         .context("invalid store pin")?;
     let mut store = open_with_pin(&url, repo, pin)?;
     store.aws_profile = repo.p.config_value(&format!("remote.{name}.aws-profile"))?.and_then(|v| v.as_str().map(str::to_owned));
+    store.public_clone = repo.p.config_value(&format!("cloud.remote.{name}.public"))? == Some(serde_json::json!(true));
     Ok(store)
 }
 
@@ -149,6 +156,9 @@ fn open_with_pin(url: &str, repo: &Repo, pin: Option<StorePin>) -> Result<Store>
         pin,
         aws_profile: None,
         layer: None,
+        force_public: false,
+        public_clone: false,
+        public_reader: std::sync::atomic::AtomicBool::new(false),
     })
 }
 
@@ -156,36 +166,45 @@ impl Store {
     fn connect(&mut self, ctx: &Ctx) -> Result<()> {
         self.backend.as_caller(ctx);
         if let Backend::Gateway(gateway) = &mut self.backend {
-            gateway.connect(ctx)?;
+            if self.force_public {
+                gateway.connect_reader(&ctx.env)?;
+            } else {
+                gateway.connect(ctx)?;
+            }
         }
-        self.person = if ctx.env("LAYR_PERSON_KEY_FILE").is_some() {
-            let login = match &self.backend {
-                Backend::Gateway(g) => Some(crate::person::gateway_login(g)?),
-                _ => None,
-            };
-            crate::privs::as_caller_fs(ctx, || {
-                crate::person::load(&ctx.env, &ctx.caller.home, &ctx.cwd, ctx.caller.uid, login.as_deref())
-            })?
+        if self.force_public {
+            self.person = None;
+            self.paper_key_text = None;
         } else {
-            None
-        };
-        if let (Backend::Gateway(gateway), Some(person)) = (&self.backend, &mut self.person) {
-            crate::person::gateway_access(gateway, person)?;
-        }
-        self.paper_key_text = ctx
-            .env("LAYR_PAPER_KEY_FILE")
-            .map(|path| {
+            self.person = if ctx.env("LAYR_PERSON_KEY_FILE").is_some() {
+                let login = match &self.backend {
+                    Backend::Gateway(g) => Some(crate::person::gateway_login(g)?),
+                    _ => None,
+                };
                 crate::privs::as_caller_fs(ctx, || {
-                    use std::io::Read;
-                    let mut text = String::new();
-                    std::fs::File::open(ctx.cwd.join(path))?.take(4097).read_to_string(&mut text)?;
-                    if text.len() > 4096 {
-                        bail!("invalid paper key file");
-                    }
-                    Ok(text)
+                    crate::person::load(&ctx.env, &ctx.caller.home, &ctx.cwd, ctx.caller.uid, login.as_deref())
+                })?
+            } else {
+                None
+            };
+            if let (Backend::Gateway(gateway), Some(person)) = (&self.backend, &mut self.person) {
+                crate::person::gateway_access(gateway, person)?;
+            }
+            self.paper_key_text = ctx
+                .env("LAYR_PAPER_KEY_FILE")
+                .map(|path| {
+                    crate::privs::as_caller_fs(ctx, || {
+                        use std::io::Read;
+                        let mut text = String::new();
+                        std::fs::File::open(ctx.cwd.join(path))?.take(4097).read_to_string(&mut text)?;
+                        if text.len() > 4096 {
+                            bail!("invalid paper key file");
+                        }
+                        Ok(text)
+                    })
                 })
-            })
-            .transpose()?;
+                .transpose()?;
+        }
         if let Some(path) = self.url.strip_prefix("s3://") {
             let (bucket, prefix) = path.split_once('/').unwrap_or((path, ""));
             let mut env = ctx.env.clone();
@@ -202,6 +221,10 @@ impl Store {
             })?;
         }
         Ok(())
+    }
+
+    pub fn use_public_access(&mut self, public: bool) {
+        self.force_public = public;
     }
 
     pub fn use_aws_profile(&mut self, profile: Option<String>) {
@@ -254,6 +277,23 @@ impl Store {
                             bail!("paper slot does not match store recipient");
                         }
                         pin.paper_recipient = Some(keys::recipient_of(&opener)?);
+                    }
+                }
+            }
+            // A public clone becomes an ordinary remote once the owner grants this
+            // machine its own slot. Never create a slot to perform this transition.
+            if repo.p.config_value(&format!("cloud.remote.{name}.public"))? == Some(serde_json::json!(true)) {
+                if let Some(slot) = self.backend.get(&format!("slots/machine-{}.age", self.machine))? {
+                    if keys::open_machine_slot(&slot, &self.key)
+                        .ok()
+                        .is_some_and(|identity| keys::recipient_of(&identity).ok().as_deref() == Some(pin.recipient.as_str()))
+                    {
+                        crate::cmd::admin::set_config(
+                            ctx,
+                            repo,
+                            &format!("cloud.remote.{name}.public"),
+                            serde_json::json!(false),
+                        )?;
                     }
                 }
             }
@@ -316,6 +356,39 @@ impl Store {
     }
 
     fn identity(&self, descriptor: &Descriptor, paper: Option<&str>) -> Result<String> {
+        self.public_reader.store(false, std::sync::atomic::Ordering::SeqCst);
+        if !self.force_public || self.layer.is_some() {
+            match self.own_identity(descriptor, paper) {
+                Ok(identity) => return Ok(identity),
+                Err(error) => {
+                    if self.layer.is_some() {
+                        return Err(error);
+                    }
+                    if let Some(identity) = public::identity(&self.backend, descriptor)? {
+                        self.public_reader.store(true, std::sync::atomic::Ordering::SeqCst);
+                        return Ok(identity);
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        let identity = public::identity(&self.backend, descriptor)?.context("the store is not public")?;
+        self.public_reader.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(identity)
+    }
+
+    pub fn is_public_reader(&self) -> bool {
+        self.public_reader.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn require_private_access(&self) -> Result<()> {
+        if self.force_public || self.public_reader.load(std::sync::atomic::Ordering::SeqCst) {
+            bail!("public store access is read only; a trusted writer slot is required to write");
+        }
+        Ok(())
+    }
+
+    fn own_identity(&self, descriptor: &Descriptor, paper: Option<&str>) -> Result<String> {
         if let Some(layer) = &self.layer {
             return layer.identity.clone().context("this machine has no overlay slot");
         }
@@ -367,6 +440,12 @@ impl Store {
         if self.backend.get("store.json")?.is_none() && self.backend.get("vault.json")?.is_some() {
             bail!("Desk v1 stores are read only; clone into a local project and add a new v2 remote");
         }
+        // Check before the writer can publish any object, even when the caller is local root.
+        if self.force_public || self.backend.get("public.json")?.is_some() {
+            let descriptor = self.descriptor()?;
+            self.identity(&descriptor, opts.paper_key.as_deref())?;
+            self.require_private_access()?;
+        }
         let mut report = writer::push(self, ctx, repo, opts)?;
         overlays::push(self, ctx, repo, opts, &mut report)?;
         Ok(report)
@@ -375,7 +454,7 @@ impl Store {
     pub fn fetch(&mut self, ctx: &Ctx, repo: &mut Repo, opts: &Options) -> Result<Report> {
         self.connect(ctx)?;
         if !repo.p.id.is_empty() {
-            repo.require(ctx, "sync")?;
+            repo.require(ctx, if self.public_clone { "read" } else { "sync" })?;
         }
         if self.backend.get("vault.json")?.is_some() && self.backend.get("store.json")?.is_none() {
             bail!("Desk v1 is read only; use layr clone with LAYR_PAPER_KEY_FILE");
@@ -391,6 +470,7 @@ impl Store {
     }
 
     pub fn clone_into(&mut self, ctx: &Ctx, repo: &mut Repo, opts: &Options) -> Result<Report> {
+        self.force_public = opts.public;
         self.connect(ctx)?;
         if !repo.p.id.is_empty() {
             bail!("clone needs an empty project");
@@ -483,6 +563,7 @@ impl Store {
         };
         let descriptor = self.descriptor()?;
         let identity = self.identity(&descriptor, None)?;
+        self.require_private_access()?;
         let granted = self.backend.list("slots/")?;
         let first = !granted.iter().any(|slot| slot.key.strip_prefix("slots/").and_then(person::slot_login).is_some());
         if first && own != login {
@@ -506,6 +587,7 @@ impl Store {
     pub fn trust(&self, repo: &Repo, machine: &str, public_key: Option<&str>) -> Result<()> {
         let descriptor = self.descriptor()?;
         let identity = self.identity(&descriptor, None)?;
+        self.require_private_access()?;
         let id = if crate::model::is_uuid(machine) {
             machine.to_string()
         } else {
