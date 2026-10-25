@@ -13,7 +13,7 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq btrfs-progs zstd git python3 docker-registry skopeo apache2-utils
+          sudo apt-get install -y -qq btrfs-progs zstd git python3 docker-registry skopeo apache2-utils bubblewrap
           # t30-oci also uses helm, which the runner image has.
           command -v helm
       # t36-aws-profile uses MinIO. Its project stopped publishing binaries and images, so CI
@@ -40,6 +40,9 @@ jobs:
       - name: Integration tests (root, btrfs on loop files)
         run: |
           sudo modprobe btrfs || true
+          # Automatic checks run in bubblewrap as the caller; Ubuntu 24.04 blocks the user
+          # namespaces that it needs for users without privileges.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           sudo -E env "PATH=$PATH" LAYR="$PWD/target/debug/layr" LAYR_MINIO_BIN="$HOME/minio/minio" tests/run.sh
   macos:
     runs-on: macos-14
