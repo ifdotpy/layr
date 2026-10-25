@@ -23,6 +23,9 @@ pub struct EpochBackend {
     pub current: Backend,
     pub history: Vec<(Backend, String)>,
 }
+fn epoch_key(key: &str) -> std::borrow::Cow<'_, str> {
+    if let Some(id)=key.strip_prefix("requests/claims/") { format!("claims/{id}").into() } else { key.into() }
+}
 fn epoch_object(key: &str) -> bool {
     key == "store.json"
         || key == "public.json"
@@ -148,7 +151,7 @@ impl Backend {
                 if !epoch_object(key) {
                     return epoch.root.get(key);
                 }
-                let data = epoch.current.get(key)?;
+                let data = epoch.current.get(&epoch_key(key))?;
                 if data.is_some() || !(key.starts_with("states/") || key.starts_with("requests/") || key.starts_with("claims/")) {
                     return Ok(data);
                 }
@@ -185,7 +188,7 @@ impl Backend {
         match self {
             Self::Epoch(epoch) => {
                 if epoch_object(key) {
-                    epoch.current.put_new(key, body)
+                    epoch.current.put_new(&epoch_key(key), body)
                 } else {
                     epoch.root.put_new(key, body)
                 }
@@ -267,7 +270,7 @@ impl Backend {
         match self {
             Self::Epoch(epoch) => {
                 if epoch_object(key) {
-                    epoch.current.delete(key)
+                    epoch.current.delete(&epoch_key(key))
                 } else {
                     epoch.root.delete(key)
                 }

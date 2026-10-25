@@ -77,6 +77,7 @@ pub(super) fn resolve(
     if keys::recipient_of(&identity)? != next.recipient {
         bail!("epoch slot recipient differs");
     }
+    scoped.unlock_reader(&identity)?;
     let mut history = Vec::new();
     let mut recipients = BTreeMap::from([("root".to_string(), descriptor.recipient.clone())]);
     for p in &chain[..chain.len() - 1] {
@@ -211,6 +212,9 @@ fn readers(store: &Store, repo: &Repo) -> Result<BTreeMap<String, String>> {
         }
     }
     let known = super::overlays::trusted_keys(repo)?;
+    let descriptor=store.descriptor()?;
+    let identity=store.identity(&descriptor,None)?;
+    let remote=reader::records(&store.backend,&identity,&descriptor.project)?;
     for slot in store.backend.list("slots/")? {
         let name = slot.key.strip_prefix("slots/").context("invalid slot")?;
         if let Some(id) = name.strip_prefix("machine-").and_then(|s| s.strip_suffix(".age")) {
@@ -218,7 +222,7 @@ fn readers(store: &Store, repo: &Repo) -> Result<BTreeMap<String, String>> {
                 .p
                 .db
                 .machine_key(id)?
-                .or_else(|| known.get(id).map(|k| hex::encode(k.to_bytes())))
+                .or_else(|| known.get(id).or(remote.keys.get(id)).map(|k| hex::encode(k.to_bytes())))
                 .with_context(|| format!("cannot rotate: no public key for machine {id}"))?;
             map.insert(format!("machine:{id}"), public);
         } else if let Some(login) = layr_store::person::slot_login(name) {

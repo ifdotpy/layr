@@ -391,8 +391,18 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
         }
         if store.layer.is_none() && !store.is_public_reader() {
             let slot = keys::machine_slot(&identity, &store.key.verifying_key())?;
-            // A read-only credential can still clone. Adding its slot is optional.
-            let _ = store.backend.put_new(&format!("slots/machine-{}.age", store.machine), slot);
+            // A read-only credential can still clone. Optional machine enrollment publishes
+            // its signed announcement first, so a later rotation can retain its public key.
+            let enroll = || -> Result<()> {
+                if let Some(line)=repo.p.db.record_line(&store.machine,1)? {
+                    let record=oplog::parse_line(&line,None)?.record;
+                    if record.op != "machine" { bail!("local machine announcement missing"); }
+                    store.backend.put_new(&format::segment_name(&store.machine,1,1),keys::encrypt(&descriptor.recipient,format!("{line}\n").as_bytes())?)?;
+                    store.backend.put_new(&format!("slots/machine-{}.age", store.machine), slot)?;
+                }
+                Ok(())
+            };
+            let _ = enroll();
         }
     }
     Ok(report)

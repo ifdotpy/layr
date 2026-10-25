@@ -11,6 +11,13 @@ fn main() -> Result<()> {
             file.write_all(identity.as_bytes())?;
             println!("{}",keys::recipient_of(&identity)?);
         }
+        Some("person") => {
+            let paper=keys::identity_from_paper(fs::read_to_string(&args[1])?.trim())?;
+            let person=keys::open_slot(&fs::read(&args[2])?,&paper)?;
+            let vault=keys::open_slot(&fs::read(&args[3])?,&person)?;
+            if args.len()>4 { keys::decrypt(&vault,&fs::read(&args[4])?)?; }
+            println!("opened");
+        }
         Some("opens") => {
             let identity=fs::read_to_string(&args[1])?;
             let slot=fs::read(&args[2])?;

@@ -55,8 +55,11 @@ The manifest publishes a public opener identity. The vault identity stays inside
 and in reader memory. Repeating the command preserves both published objects.
 An interrupted publication can be completed by running the command again.
 
-`remote public <remote> off` refuses: project key rotation is not implemented.
-It changes nothing, the project stays public, and copied data remains readable.
+`remote public <remote> off` rotates to a private epoch. Earlier data remains readable
+to anyone who already had access. `remote mode <remote> private|service|public` selects
+an access mode; closing access rotates, and opening access adds an ordinary reader slot.
+`remote rotate <remote> [--remove <principal>...] [--reason <text>]` starts a new epoch
+for the remaining readers. See [access modes and epochs](access-modes.md).
 
 `clone --public` uses only public access. Without the flag, clone, fetch and mount use public
 access when no personal, machine or paper slot opens. Public clones create no machine slot.
@@ -66,7 +69,8 @@ operations use the ordinary remote policy. Private remotes and all pushes keep t
 A public-only reader can inspect lines, states and files, diff them and build a local copy.
 Push and remote key grants require private writer access and are refused for public-only readers.
 A public mount does not save the decrypted vault identity to the Keychain.
-Overlays keep their own reader slots; publication creates no public overlay slot.
+Overlays keep their own reader slots and default to private. Only an explicit
+`overlay mode <name> service|public` opens a visible overlay, within the project mode.
 A hidden overlay leaves no trace in the public reader's project or command output.
 
 Anonymous gateway reads for `layr+https://host/project` use these GET routes:

@@ -2,7 +2,7 @@
 # Project epochs, access modes, audience closure and overlay privacy through the CLI.
 . "$(dirname "$0")/lib.sh"
 set -e
-for machine in owner removed reader fresh anonymous; do new_fs "$T/$machine" 2G; done
+for machine in owner removed reader fresh anonymous person; do new_fs "$T/$machine" 2G; done
 export ROT_TEST_ROOT="$T" ROT_TEST_BINARY="$LAYR"
 export ROT_TEST_PROBE="$(dirname "$LAYR")/examples/epoch_probe"
 python3 - <<'PY'
@@ -10,7 +10,7 @@ import hashlib,json,os,pathlib,sqlite3,subprocess
 root=pathlib.Path(os.environ['ROT_TEST_ROOT']);binary=os.environ['ROT_TEST_BINARY'];probe=os.environ['ROT_TEST_PROBE'];checks=0
 base=os.environ.copy()
 for key in ['LAYR_SOCKET','LAYR_PROJECT','LAYR_LINE','LAYR_PERSON_KEY_FILE','LAYR_PAPER_KEY_FILE','LAYR_GATEWAY_TOKEN_FILE']:base.pop(key,None)
-envs={n:dict(base,LAYR_ROOT=str(root/n/'store')) for n in ['owner','removed','reader','fresh','anonymous']}
+envs={n:dict(base,LAYR_ROOT=str(root/n/'store')) for n in ['owner','removed','reader','fresh','anonymous','person']}
 A=envs['owner'];B=envs['removed'];C=envs['reader'];D=envs['fresh'];P=envs['anonymous']
 def run(args,env=A,ok=True,input=None):
  p=subprocess.run([binary,*args],cwd=root,env=env,text=True,capture_output=True,input=input,timeout=120)
@@ -41,19 +41,34 @@ run(['remote','add','archive','file://'+str(root/'archive'),'--paper-key-out',st
 for machine in [b,c]:run(['remote','trust','archive',machine['id'],'--public-key',machine['public_key']])
 for env in [B,C]:run(['clone','file://'+str(root/'archive'),'project','-q'],env);env['LAYR_PROJECT']='project'
 run(['push','archive','-q'])
+E=dict(envs['person'],LAYR_PERSON_DIR=str(root/'person-identity'),LAYR_PERSON_LOGIN='removed@example.com')
+run(['person','keys','--paper-key-out',str(root/'person-paper')],E)
+E['LAYR_PERSON_KEY_FILE']=str(root/'person-paper')
+person=json.loads(run(['person','show','--json'],E).stdout)
+run(['remote','grant','archive','--person','removed@example.com','--recipient',person['recipient'],'--invite-out',str(root/'person-invite.age')],dict(A,LAYR_PERSON_LOGIN='removed@example.com'))
+run(['person','accept','--invite-file',str(root/'person-invite.age')],E)
+run(['push','archive','-q'])
+person_slot=next((root/'archive/slots').glob('person-removed@example.com-*.age'))
+old_object=next((root/'archive/records').rglob('*.age'))
+check(subprocess.run([probe,'person',str(root/'person-paper'),str(root/'person-identity/paper.age'),str(person_slot),str(old_object)],capture_output=True).returncode==0,'person opener reads epoch-zero objects')
 root_descriptor=(root/'archive/store.json').read_bytes();old_hashes=hashes()
 # New overlays are private independently of parent opening.
 run(['--line','main','overlay','create','visible','--readers','machine:'+a['id'],'-q'])
 run(['--line','main','overlay','create','hidden-rotation-731','--hidden','--readers','machine:'+a['id'],'-q'])
 refuse(['overlay','mode','visible','public'],'private project refuses more-open overlay',words=['project mode private'])
 check(json.loads(run(['overlay','show','visible','--json']).stdout)['access_mode']=='private','overlay defaults to private')
-run(['push','archive','-q']);run(['remote','rotate','archive','--remove','machine:'+b['id'],'--reason','reader removed'])
+run(['push','archive','-q']);run(['remote','rotate','archive','--remove','machine:'+b['id'],'--remove','person:removed@example.com','--reason','reader removed'])
 epoch=latest();prefix=root/'archive/project/epochs'/epoch['data']['epoch']
 check(epoch['data']['parent']=='root' and epoch['op']=='project.key','rotation publishes signed child of epoch zero')
 check(set(epoch['data'])=={'project','parent','parent_recipient','epoch','recipient','mode','readers_hash'},'discovery exposes only approved fields and reader hash')
 check((root/'archive/store.json').read_bytes()==root_descriptor,'root trust anchor stays byte-identical')
 check((prefix/'history/root.age').is_file(),'old identity is sealed into the current epoch')
 check(not (prefix/f"slots/machine-{b['id']}.age").exists(),'removed machine has no current slot')
+check(not list((prefix/'slots').glob('person-removed@example.com-*.age')),'removed person has no current slot')
+new_object=next((prefix/'records').rglob('*.age'))
+check(subprocess.run([probe,'person',str(root/'person-paper'),str(root/'person-identity/paper.age'),str(person_slot),str(old_object)],capture_output=True).returncode==0,'removed person still decrypts earlier epoch')
+check(subprocess.run([probe,'person',str(root/'person-paper'),str(root/'person-identity/paper.age'),str(person_slot),str(new_object)],capture_output=True).returncode!=0,'removed person cannot decrypt current epoch with old vault identity')
+refuse(['clone','file://'+str(root/'archive'),'denied','-q'],'removed person cannot clone current epoch',E,words=['current project epoch'])
 check((prefix/f"slots/machine-{c['id']}.age").is_file(),'remaining machine receives current slot')
 second=save('after.txt','after removal\n');run(['push','archive','-q'])
 check('epoch zero' in run(['--line','main','show',first+':shared.txt'],B).stdout,'removed reader retains earlier data')

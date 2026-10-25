@@ -647,9 +647,11 @@ A visible overlay cannot become hidden. Configuration cannot reverse this change
 ## 12. Public projects
 
 `layr remote public <remote> on` publishes only the parent project's reader slot.
-No overlay or overlay epoch receives a public slot or public manifest.
+Overlay access defaults to private. An explicit `layr overlay mode <name> public`
+can publish that visible overlay with its own identity and public slot, only in a public
+project. `service` is also supported within the project mode. See [access modes](access-modes.md).
 Visible private overlays keep their names in shared metadata, but their files stay with
 their readers. Hidden overlays keep their names, counts, state identifiers and history
 out of the public reader's records and output, under the same rule 8.
-A public-only clone or mount reads the shared project files without any overlay files.
+A public-only clone or mount reads shared project files and explicitly public overlays.
 Changing the parent project's visibility does not change an overlay's readers.
