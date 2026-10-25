@@ -861,6 +861,9 @@ pub fn log(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let until = a.get("--until").and_then(parse_since);
     let author = a.get("--author").map(|s| regex::RegexBuilder::new(s).case_insensitive(a.has("-i")).build()).transpose()?;
     let grep = a.get("--grep").map(|s| regex::RegexBuilder::new(s).case_insensitive(a.has("-i")).build()).transpose()?;
+    if max == 0 {
+        return Ok(0);
+    }
     let mut picked: Vec<StateRec> = Vec::new();
     let mut skipped = 0;
     layr_model::history::file_history(
@@ -869,6 +872,22 @@ pub fn log(ctx: &Ctx, args: &[String]) -> Result<i32> {
         first_parent,
         |id| repo.p.db.state(id),
         |s| {
+            if a.has("--no-merges") && s.parents.len() > 1 || a.has("--merges") && s.parents.len() < 2 {
+                return Ok(Vec::new());
+            }
+            if since.map(|t| s.time < t).unwrap_or(false) || until.map(|t| s.time > t).unwrap_or(false) {
+                return Ok(Vec::new());
+            }
+            if let Some(r) = &author {
+                if !r.is_match(&format!("{} <{}>", s.author.name, s.author.email)) {
+                    return Ok(Vec::new());
+                }
+            }
+            if let Some(r) = &grep {
+                if !r.is_match(&s.message) {
+                    return Ok(Vec::new());
+                }
+            }
             if specs.is_empty() {
                 return Ok(vec![String::new()]);
             }
@@ -882,22 +901,6 @@ pub fn log(ctx: &Ctx, args: &[String]) -> Result<i32> {
         |s| {
             if picked.len() >= max && !a.has("--reverse") {
                 return Ok(false);
-            }
-            if a.has("--no-merges") && s.parents.len() > 1 || a.has("--merges") && s.parents.len() < 2 {
-                return Ok(true);
-            }
-            if since.map(|t| s.time < t).unwrap_or(false) || until.map(|t| s.time > t).unwrap_or(false) {
-                return Ok(true);
-            }
-            if let Some(r) = &author {
-                if !r.is_match(&format!("{} <{}>", s.author.name, s.author.email)) {
-                    return Ok(true);
-                }
-            }
-            if let Some(r) = &grep {
-                if !r.is_match(&s.message) {
-                    return Ok(true);
-                }
             }
             if skipped < skip {
                 skipped += 1;

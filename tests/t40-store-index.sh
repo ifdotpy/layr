@@ -82,4 +82,11 @@ ok 'blame skips the unrelated state blob' python3 - "$T/unchanged/blob-reads.jso
 import json,sys
 assert sys.argv[2] not in json.load(open(sys.argv[1]))
 PY
+PARENT=$(state_id "$MERGE~1")
+STATES=$LAYR_ROOT/projects/indexed/states
+mv "$STATES/$PARENT" "$STATES/$PARENT.index-test" || exit 1
+no 'unfiltered path history detects its missing parent tree' l log "$MERGE" --json -- file.txt
+ok 'message-filtered path history skips unavailable trees' l log "$MERGE" --grep '^absent-fixture-message$' --json -- file.txt
+ok 'zero-row path history skips unavailable trees' l log "$MERGE" -n 0 --json -- file.txt
+mv "$STATES/$PARENT.index-test" "$STATES/$PARENT" || exit 1
 finish
