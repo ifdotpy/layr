@@ -226,7 +226,7 @@ fn check_remote_invite(url: &str, env: &HashMap<String, String>, access: &Access
     pin.check_store(&descriptor)?;
     let mut accepted = access.clone();
     accepted.index.set(pin.clone());
-    accepted.open(&backend, &descriptor)?;
+    crate::store_remote::epochs::accept_person(&backend, &descriptor, &accepted)?;
     let parsed = reqwest::Url::parse(url)?;
     Ok(parsed.path().trim_end_matches('/').rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or("project").to_owned())
 }

@@ -479,11 +479,7 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
         merge(report, writer::push_locked(&scoped, ctx, &orepo, opts)?, &name, "push");
         if let Some(identity) = &identity {
             if access_mode == layr_store::epochs::Mode::Service {
-                let recipient = repo
-                    .p
-                    .config_value("service.recipient")?
-                    .and_then(|v| v.as_str().map(str::to_owned))
-                    .context("service overlay requires service.recipient")?;
+                let recipient = store.service_recipient(repo)?.context("service overlay requires a configured service recipient")?;
                 scoped.backend.put_new("slots/service.age", keys::seal_slot(identity, &recipient)?)?;
             }
             if access_mode == layr_store::epochs::Mode::Public {

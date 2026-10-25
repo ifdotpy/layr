@@ -527,6 +527,13 @@ impl Store {
                 self.identity(&descriptor, opts.paper_key.as_deref())?;
             }
         }
+        let mode = self.access_mode()?;
+        for name in repo.visible_overlay_names(ctx)? {
+            let overlay = repo.overlay_repo(&name)?;
+            if epochs::overlay_mode(&overlay)? > mode {
+                bail!("overlay {name} is more open than remote project mode {}; change the remote mode before pushing", mode.name());
+            }
+        }
         let mut report = writer::push(self, ctx, repo, opts)?;
         overlays::push(self, ctx, repo, opts, &mut report)?;
         Ok(report)

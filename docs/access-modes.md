@@ -44,6 +44,7 @@ uses these relative object paths:
 | Signed discovery commit | `keys/<epoch UUID>-<record UUID>.json` |
 | Epoch descriptor | `project/epochs/<epoch>/store.json` |
 | Reader slots | `project/epochs/<epoch>/slots/{machine-<UUID>,person-<login>-<fingerprint>,paper,service,public}.age` |
+| Optional encrypted clone public-key metadata | `project/epochs/<epoch>/slots/machine-<UUID>.key.age` |
 | Public opener | `project/epochs/<epoch>/public.json` |
 | Sealed earlier identity | `project/epochs/<epoch>/history/{root,<earlier epoch UUID>}.age` |
 | Signed encrypted logs | `project/epochs/<epoch>/records/<machine>/<first>-<last>.age` |
@@ -70,6 +71,11 @@ record and a local machine-sealed identity. Conflicting epoch children are
 ambiguous and refuse reads and writes. Current clients discover the latest epoch
 before writing; an old executable with raw bucket write access cannot be
 revoked by changing reader slots. Storage authorization must also restrict writers.
+
+Optional clone enrollment writes its exact self-signed sequence-one announcement into
+`slots/machine-<UUID>.key.age`, encrypted to the current epoch. Rotation uses this
+only to retain an existing machine reader slot; it never imports or trusts that
+machine as a writer. Public clones write neither slots nor metadata.
 
 Overlay namespaces stay at `overlays/<overlay>/...`, bound to the immutable root
 recipient. Private overlay slots and hidden metadata are independent of project

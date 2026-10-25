@@ -6,7 +6,7 @@ for machine in owner removed reader fresh anonymous person; do new_fs "$T/$machi
 export ROT_TEST_ROOT="$T" ROT_TEST_BINARY="$LAYR"
 export ROT_TEST_PROBE="$(dirname "$LAYR")/examples/epoch_probe"
 python3 - <<'PY'
-import hashlib,json,os,pathlib,sqlite3,subprocess
+import hashlib,http.client,json,os,pathlib,re,sqlite3,subprocess,time,uuid
 root=pathlib.Path(os.environ['ROT_TEST_ROOT']);binary=os.environ['ROT_TEST_BINARY'];probe=os.environ['ROT_TEST_PROBE'];checks=0
 base=os.environ.copy()
 for key in ['LAYR_SOCKET','LAYR_PROJECT','LAYR_LINE','LAYR_PERSON_KEY_FILE','LAYR_PAPER_KEY_FILE','LAYR_GATEWAY_TOKEN_FILE']:base.pop(key,None)
@@ -52,6 +52,10 @@ person_slot=next((root/'archive/slots').glob('person-removed@example.com-*.age')
 old_object=next((root/'archive/records').rglob('*.age'))
 check(subprocess.run([probe,'person',str(root/'person-paper'),str(root/'person-identity/paper.age'),str(person_slot),str(old_object)],capture_output=True).returncode==0,'person opener reads epoch-zero objects')
 root_descriptor=(root/'archive/store.json').read_bytes();old_hashes=hashes()
+refuse(['remote','mode','archive','invalid'],'invalid project mode is refused')
+check(hashes()==old_hashes,'invalid project mode changes no objects')
+refuse(['remote','mode','archive','service'],'service mode requires a configured recipient',words=['service-recipient'])
+check(hashes()==old_hashes,'missing service configuration changes no objects')
 # New overlays are private independently of parent opening.
 run(['--line','main','overlay','create','visible','--readers','machine:'+a['id'],'-q'])
 run(['--line','main','overlay','create','hidden-rotation-731','--hidden','--readers','machine:'+a['id'],'-q'])
@@ -77,16 +81,35 @@ check((prefix/f"slots/machine-{c['id']}.age").is_file(),'remaining machine recei
 second=save('after.txt','after removal\n');run(['push','archive','-q'])
 check('epoch zero' in run(['--line','main','show',first+':shared.txt'],B).stdout,'removed reader retains earlier data')
 refuse(['fetch','origin','-q'],'removed reader cannot fetch current epoch',B,words=['current project epoch'])
+before=hashes();refuse(['push','origin','-q'],'stale removed writer cannot publish to epoch zero',B,words=['current project epoch'])
+check(before==hashes(),'stale removed writer changes no remote objects')
 run(['fetch','origin','-q'],C)
 check('after removal' in run(['--line','main','show',second+':after.txt'],C).stdout,'remaining reader fetches the new epoch')
 # Paper slot starts a new machine and opens all old objects without rekeying them.
 D['LAYR_PAPER_KEY_FILE']=str(root/'paper');run(['clone','file://'+str(root/'archive'),'project','-q'],D);D['LAYR_PROJECT']='project'
+d=json.loads(run(['remote','self','--json'],D).stdout)
+check(not (prefix/('records/'+d['id'])).exists() and (prefix/f"slots/machine-{d['id']}.key.age").is_file(),'fresh paper clone stores encrypted key metadata without publishing shared records')
 check('epoch zero' in run(['--line','main','show',first+':shared.txt'],D).stdout,'fresh reader reads sealed earlier history')
 check('after removal' in run(['--line','main','show',second+':after.txt'],D).stdout,'fresh reader reads current history')
 check(all(hashes().get(k)==v for k,v in old_hashes.items()),'rotation never rewrites old objects')
 run(['remote','rotate','archive','--reason','second rotation']);new=latest();newprefix=root/'archive/project/epochs'/new['data']['epoch']
 check((newprefix/'history/root.age').is_file() and (newprefix/('history/'+epoch['data']['epoch']+'.age')).is_file(),'second rotation seals every earlier identity')
 run(['fetch','origin','-q'],C);check(True,'remaining reader follows two rotations')
+D.pop('LAYR_PAPER_KEY_FILE');run(['fetch','origin','-q'],D)
+check('after removal' in run(['--line','main','show',second+':after.txt'],D).stdout,'never-pushed paper clone keeps machine read access after owner rotation')
+check(not any(r['op']=='machine.trust' and r['data'].get('machine')==d['id'] for r in records(project)),'clone enrollment never grants writer trust')
+# Discovery tampering and a sealed-history substitution fail through the real fetch caller.
+keypath=root/'archive/keys'/(new['data']['epoch']+'-'+new['id']+'.json');original=keypath.read_bytes()
+for field,value in [('mode','public'),('readers_hash','0'*64)]:
+ changed=json.loads(original);changed['r']['data'][field]=value;keypath.write_text(json.dumps(changed))
+ try:refuse(['fetch','origin','-q'],'fetch refuses tampered signed epoch '+field,C)
+ finally:keypath.write_bytes(original)
+changed=json.loads(original);changed['r']['data']['readers']={'person:leaked@example.com':'recipient'};keypath.write_text(json.dumps(changed))
+try:refuse(['fetch','origin','-q'],'discovery refuses a plaintext reader map',C)
+finally:keypath.write_bytes(original)
+history=newprefix/'history/root.age';sealed=history.read_bytes();history.write_bytes((root/'archive/slots/paper.age').read_bytes())
+try:refuse(['fetch','origin','-q'],'fetch refuses substituted historical identity',C)
+finally:history.write_bytes(sealed)
 # The service audience uses the same sealed reader-slot mechanism.
 service=subprocess.check_output([probe,'new',str(root/'service-key')],text=True).strip()
 run(['config','service.recipient',service]);before=len(list((root/'archive/keys').glob('*.json')))
@@ -116,6 +139,19 @@ third=save('private.txt','private after closing\n');run(['push','archive','-q'])
 refuse(['fetch','origin','-q'],'anonymous reader receives nothing after closing',P,words=['current project epoch'])
 check('after removal' in run(['--line','main','show',second+':after.txt'],P).stdout,'former public reader retains earlier data')
 run(['fetch','origin','-q'],C);check('private after closing' in run(['--line','main','show',third+':private.txt'],C).stdout,'remaining reader reads post-closure state')
+# Browse the rotated store through its actual WebDAV caller.
+log=open(root/'mount.log','w+')
+process=subprocess.Popen([binary,'mount','file://'+str(root/'archive'),'--listen','127.0.0.1:0'],env=dict(C,XDG_CONFIG_HOME=str(root/'mount-config'),XDG_CACHE_HOME=str(root/'mount-cache')),cwd=root,stdout=log,stderr=log)
+try:
+ for _ in range(400):
+  log.seek(0);text=log.read();match=re.search(r'http://127\.0\.0\.1:(\d+)/',text)
+  if match:break
+  assert process.poll() is None,text
+  time.sleep(.025)
+ else:raise AssertionError('rotated mount did not start')
+ connection=http.client.HTTPConnection('127.0.0.1',int(match[1]),timeout=10);connection.request('GET','/main/private.txt');response=connection.getresponse();data=response.read();connection.close()
+ check(response.status==200 and data==b'private after closing\n','browse reads current files through rotated epochs')
+finally:process.terminate();process.wait(timeout=10);log.close()
 check(not any('hidden-rotation-731' in json.dumps(r) for r in records(project)),'parent records contain no hidden mode metadata')
 refuse(['remote','rotate','archive','--remove','machine:'+a['id']],'rotation cannot remove its own remaining signer')
 print(f'{checks} passed, 0 failed',flush=True)

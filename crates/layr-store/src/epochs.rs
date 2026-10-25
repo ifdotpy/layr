@@ -66,3 +66,23 @@ impl Key {
 pub fn readers_hash(readers: &BTreeMap<String, String>) -> Result<String> {
     Ok(hex::encode(Sha256::digest(crate::canonical::canonical(&serde_json::to_value(readers)?)?)))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn audiences_are_strictly_ordered_and_invalid_modes_fail() {
+        assert!(Mode::Private < Mode::Service && Mode::Service < Mode::Public);
+        assert!(Mode::parse("everyone").is_err());
+        for mode in [Mode::Private, Mode::Service, Mode::Public] {
+            assert_eq!(Mode::parse(mode.name()).unwrap(), mode);
+        }
+    }
+    #[test]
+    fn discovery_rejects_reader_maps_and_hashes_canonical_sets() {
+        let readers = BTreeMap::from([("person:ann@example.com".into(), "public recipient".into())]);
+        assert_ne!(readers_hash(&readers).unwrap(), readers_hash(&BTreeMap::new()).unwrap());
+        let value = serde_json::json!({"project":"project","parent":"root","parent_recipient":"old","epoch":"epoch","recipient":"new","mode":"private","readers_hash":"0".repeat(64),"readers":readers});
+        assert!(serde_json::from_value::<Key>(value).is_err());
+    }
+}

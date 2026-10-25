@@ -611,8 +611,8 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
             }
             if mode == "off" {
                 let mut store = store_remote::open_named(name, repo)?;
-                let tightened = store.change_mode(ctx,repo,name,layr_store::epochs::Mode::Private,&[],Some("public off"),false)?;
-                if a.has("--json") { outln!(ctx,"{}",json!({"name":name,"public":false,"mode":"private","tightened":tightened})); }
+                let change = store.change_mode(ctx,repo,name,layr_store::epochs::Mode::Private,&[],Some("public off"),false)?;
+                if a.has("--json") { outln!(ctx,"{}",json!({"name":name,"public":false,"mode":"private","tightened":change.tightened})); }
                 else { outln!(ctx,"project {} is private; earlier epochs remain readable to anyone who already had access",repo.p.name); }
                 return Ok(0);
             }
@@ -638,13 +638,14 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let force=sub=="rotate";
             let mode=if force { store_remote::epochs::project_mode(repo)? } else { layr_store::epochs::Mode::parse(&a.pos[2])? };
             let mut store=store_remote::open_named(name,repo)?;
-            let tightened=store.change_mode(ctx,repo,name,mode,&a.all("--remove"),a.get("--reason"),force)?;
-            if a.has("--json") { outln!(ctx,"{}",json!({"name":name,"mode":mode,"rotated":force||a.has("--remove"),"tightened":tightened})); }
+            let change=store.change_mode(ctx,repo,name,mode,&a.all("--remove"),a.get("--reason"),force)?;
+            let mode=change.mode;
+            if a.has("--json") { outln!(ctx,"{}",json!({"name":name,"mode":mode,"rotated":change.rotated,"tightened":change.tightened})); }
             else {
                 outln!(ctx,"project {} mode {}",repo.p.name,mode.name());
-                for overlay in tightened { outln!(ctx,"overlay {overlay}: tightened to {}",mode.name()); }
-                if force || mode!=layr_store::epochs::Mode::Public { outln!(ctx,"earlier epochs remain readable to anyone who already had access"); }
-                else { outln!(ctx,"all existing and future project data is readable to the new audience"); }
+                for overlay in change.tightened { outln!(ctx,"overlay {overlay}: tightened to {}",mode.name()); }
+                if change.rotated { outln!(ctx,"earlier epochs remain readable to anyone who already had access"); }
+                else if change.opened { outln!(ctx,"all existing and future project data is readable to the new audience"); }
             }
         }
         "grant" if a.pos.len() == 2 => {

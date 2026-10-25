@@ -317,6 +317,7 @@ impl Gateway {
         let mut current = self.epoch.lock().map_err(|_| anyhow!("gateway epoch lock failed"))?;
         if current.as_deref() != epoch {
             *current = epoch.map(str::to_owned);
+            drop(current);
             *self.read.lock().map_err(|_| anyhow!("gateway read token lock failed"))? = None;
         }
         Ok(())
@@ -561,8 +562,8 @@ impl Gateway {
             return Ok(found);
         }
         let response =
-            if (overlay_keys_path(key) || key.starts_with("keys/") || epoch_path(key).is_some_and(|(_, k)| k == "store.json"))
-                && !self.has_read_identity()
+            if key.starts_with("keys/") || epoch_path(key).is_some_and(|(_, k)| k == "store.json")
+                || (overlay_keys_path(key) && !self.has_read_identity())
             {
                 self.send(Method::GET, &format!("objects/{key}"), self.token.as_deref(), None, None)?
             } else if key == "store.json" {
@@ -640,8 +641,9 @@ impl Gateway {
         if data.len() > OBJECT_LIMIT {
             bail!("gateway object exceeds 32 MiB");
         }
+        let logical=epoch_path(key).map(|(_,key)|key).unwrap_or(key);
         let person_request =
-            key.strip_prefix("requests/").and_then(|s| s.strip_suffix(".json")).is_some_and(layr_store::request::request_id);
+            logical.strip_prefix("requests/").and_then(|s| s.strip_suffix(".json")).is_some_and(layr_store::request::request_id);
         if person_request {
             let action = format!("objects/{key}");
             let response = self.send(Method::PUT, &action, Some(&self.session_token(false)?), None, Some(data.clone()))?;
@@ -656,7 +658,7 @@ impl Gateway {
                 status => bail!("gateway put: HTTP {status}"),
             };
         }
-        let token = if key.starts_with("slots/") {
+        let token = if logical.starts_with("slots/") {
             self.proof()?
         } else {
             self.token.clone().context("set LAYR_GATEWAY_TOKEN_FILE to a private write token file")?

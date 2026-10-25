@@ -24,7 +24,11 @@ pub struct EpochBackend {
     pub history: Vec<(Backend, String)>,
 }
 fn epoch_key(key: &str) -> std::borrow::Cow<'_, str> {
-    if let Some(id)=key.strip_prefix("requests/claims/") { format!("claims/{id}").into() } else { key.into() }
+    if let Some(id) = key.strip_prefix("requests/claims/") {
+        format!("claims/{id}").into()
+    } else {
+        key.into()
+    }
 }
 fn epoch_object(key: &str) -> bool {
     key == "store.json"
@@ -398,5 +402,37 @@ mod tests {
         assert_eq!(s.list("states/").unwrap().len(), 1);
         assert!(s.put_new("../bad", vec![]).is_err());
         fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod epoch_tests {
+    use super::*;
+    #[test]
+    fn historical_states_use_sealed_history_keys_but_slots_never_fall_back() {
+        let path = std::env::temp_dir().join(crate::ids::new_id());
+        let root = Backend::file(path.clone());
+        let current = root.scoped("project/epochs/new").unwrap();
+        let old = super::super::keys::generate_identity();
+        let new = super::super::keys::generate_identity();
+        root.put_new(
+            "states/old",
+            super::super::keys::encrypt(&super::super::keys::recipient_of(&old).unwrap(), b"old bytes").unwrap(),
+        )
+        .unwrap();
+        root.put_new("slots/removed.age", b"old slot".to_vec()).unwrap();
+        let backend = Backend::Epoch(Box::new(EpochBackend {
+            root: root.clone(),
+            current: current.clone(),
+            history: vec![(root.clone(), old)],
+        }));
+        assert_eq!(backend.decrypted("states/old", &new).unwrap(), b"old bytes");
+        assert!(backend.get("slots/removed.age").unwrap().is_none());
+        backend.put_new("requests/one.json", b"sealed request".to_vec()).unwrap();
+        backend.put_new("requests/claims/one.json", b"claim".to_vec()).unwrap();
+        assert_eq!(current.get("requests/one.json").unwrap().unwrap(), b"sealed request");
+        assert_eq!(current.get("claims/one.json").unwrap().unwrap(), b"claim");
+        assert!(root.get("requests/one.json").unwrap().is_none());
+        std::fs::remove_dir_all(path).unwrap();
     }
 }
