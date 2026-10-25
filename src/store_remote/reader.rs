@@ -121,8 +121,7 @@ impl<'a> Reader<'a> {
         Self { backend, identity, keys, trees: BTreeMap::new(), parts: BTreeMap::new(), part_bytes: 0 }
     }
     fn decrypted(&self, key: &str) -> Result<Vec<u8>> {
-        let body = self.backend.get(key)?.with_context(|| format!("missing remote object {key}"))?;
-        keys::decrypt(self.identity, &body).with_context(|| format!("decrypt {key}"))
+        self.backend.decrypted(key, self.identity).with_context(|| format!("decrypt {key}"))
     }
     pub fn tree(&mut self, state: &str, attempt: &str) -> Result<(Header, Vec<u8>, Tree)> {
         let wanted = (state.to_string(), attempt.to_string());

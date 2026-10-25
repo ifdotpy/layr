@@ -22,6 +22,9 @@ impl Store {
             bail!("overlays cannot be made public");
         }
         self.connect(ctx)?;
+        self.publish_public(ctx, repo)
+    }
+    pub(super) fn publish_public(&mut self, _ctx: &crate::ctx::Ctx, _repo: &crate::repo::Repo) -> Result<bool> {
         let descriptor = self.descriptor()?;
         let slot = self
             .backend

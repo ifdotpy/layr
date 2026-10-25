@@ -367,7 +367,13 @@ impl Db {
                     params![s("machine"), s("public_key"), rec.machine],
                 )?;
             }
-            "project" | "config" | "overlay.create" | "overlay.readers" | "overlay.use" | "overlay.show-to-project" => {
+            "project"
+            | "config"
+            | "overlay.create"
+            | "overlay.readers"
+            | "overlay.mode"
+            | "overlay.use"
+            | "overlay.show-to-project" => {
                 if let Some(obj) = d.get("config").and_then(|v| v.as_object()) {
                     for (k, v) in obj {
                         let key = if foreign && local_key(k) { format!("{k}@{}", rec.machine) } else { k.clone() };

@@ -39,6 +39,7 @@ pub struct Gateway {
     token: Option<String>,
     machine: Option<String>,
     identity: Mutex<Option<String>>,
+    epoch: Mutex<Option<String>>,
     read: Mutex<Option<(String, i64)>>,
     public: std::sync::atomic::AtomicBool,
     person: Arc<Mutex<Option<PersonSession>>>,
@@ -52,6 +53,7 @@ impl Clone for Gateway {
             token: self.token.clone(),
             machine: self.machine.clone(),
             identity: Mutex::new(self.identity.lock().expect("gateway identity lock").clone()),
+            epoch: Mutex::new(self.epoch.lock().expect("gateway epoch lock").clone()),
             read: Mutex::new(self.read.lock().expect("gateway read lock").clone()),
             public: std::sync::atomic::AtomicBool::new(self.is_public()),
             person: self.person.clone(),
@@ -128,6 +130,7 @@ impl Gateway {
             token: None,
             machine: None,
             identity: Mutex::new(None),
+            epoch: Mutex::new(None),
             read: Mutex::new(None),
             public: std::sync::atomic::AtomicBool::new(false),
             person: Arc::new(Mutex::new(None)),
@@ -310,6 +313,14 @@ impl Gateway {
         Ok(record)
     }
 
+    pub fn set_epoch(&self, epoch: Option<&str>) -> Result<()> {
+        let mut current = self.epoch.lock().map_err(|_| anyhow!("gateway epoch lock failed"))?;
+        if current.as_deref() != epoch {
+            *current = epoch.map(str::to_owned);
+            *self.read.lock().map_err(|_| anyhow!("gateway read token lock failed"))? = None;
+        }
+        Ok(())
+    }
     pub fn set_identity(&self, identity: &str) -> Result<()> {
         *self.identity.lock().map_err(|_| anyhow!("gateway identity lock failed"))? = Some(identity.into());
         Ok(())
@@ -382,7 +393,9 @@ impl Gateway {
         struct Challenge {
             challenge: String,
         }
-        let challenge: Challenge = json(self.send(Method::GET, "challenge", None, None, None)?, 16 << 10)?;
+        let epoch = self.epoch.lock().map_err(|_| anyhow!("gateway epoch lock failed"))?.clone();
+        let query = epoch.as_deref().map(|e| ("epoch", e));
+        let challenge: Challenge = json(self.send(Method::GET, "challenge", None, query, None)?, 16 << 10)?;
         let sealed = base64::engine::general_purpose::STANDARD
             .decode(challenge.challenge)
             .map_err(|_| anyhow!("invalid gateway challenge encoding"))?;
@@ -395,7 +408,7 @@ impl Gateway {
             expires: i64,
         }
         let token: Token = json(
-            self.send(Method::POST, "token", None, None, Some(serde_json::to_vec(&serde_json::json!({"challenge":proof}))?))?,
+            self.send(Method::POST, "token", None, query, Some(serde_json::to_vec(&serde_json::json!({"challenge":proof}))?))?,
             16 << 10,
         )?;
         let now = crate::ids::now_ms();
@@ -454,10 +467,13 @@ impl Gateway {
     }
 
     fn public_object(&self, key: &str, reader: bool) -> Result<Option<Vec<u8>>> {
-        if !matches!(key, "store.json" | "public.json" | "slots/public.age")
-            && super::format::parse_segment_name(key).is_none()
-            && super::format::parse_tree_name(key).is_none()
-            && super::format::parse_data_name(key).is_none()
+        let logical = epoch_path(key).map(|(_, k)| k).unwrap_or(key);
+        if !key.starts_with("keys/")
+            && !logical.starts_with("history/")
+            && !matches!(logical, "store.json" | "public.json" | "slots/public.age")
+            && super::format::parse_segment_name(logical).is_none()
+            && super::format::parse_tree_name(logical).is_none()
+            && super::format::parse_data_name(logical).is_none()
         {
             return Ok(None);
         }
@@ -485,11 +501,15 @@ impl Gateway {
         if key == "public.json" {
             return self.public_metadata();
         }
+        if epoch_path(key).is_some_and(|(_, k)| k == "public.json") {
+            return self.public_object(key, false);
+        }
         if self.is_public() {
             return self.public_get(key);
         }
-        if key.starts_with("slots/") && self.person.lock().map_err(|_| anyhow!("gateway session lock failed"))?.is_none() {
-            let response = if self.machine_slot().as_deref() == Some(key) {
+        let (slot_key, slot_epoch) = if let Some((epoch, inner)) = epoch_path(key) { (inner, Some(epoch)) } else { (key, None) };
+        if slot_key.starts_with("slots/") && self.person.lock().map_err(|_| anyhow!("gateway session lock failed"))?.is_none() {
+            let response = if self.machine_slot().as_deref() == Some(slot_key) {
                 self.send(Method::GET, key, None, None, None)?
             } else {
                 self.read_request(&format!("objects/{key}"), None)?
@@ -500,7 +520,7 @@ impl Gateway {
                 status => bail!("gateway machine slot: HTTP {status}"),
             };
         }
-        if key.strip_prefix("slots/").is_some_and(|name| layr_store::person::slot_login(name).is_some()) {
+        if slot_key.strip_prefix("slots/").is_some_and(|name| layr_store::person::slot_login(name).is_some()) {
             let response = self.send(Method::GET, key, None, None, None)?;
             return match response.status().as_u16() {
                 200 => Ok(Some(bytes(response, 4096)?)),
@@ -508,7 +528,7 @@ impl Gateway {
                 status => bail!("gateway person slot: HTTP {status}"),
             };
         }
-        if key.starts_with("slots/") {
+        if slot_key.starts_with("slots/") {
             #[derive(Deserialize)]
             struct Slot {
                 name: String,
@@ -518,11 +538,11 @@ impl Gateway {
             struct Slots {
                 slots: Vec<Slot>,
             }
-            let slots: Slots = json(self.send(Method::GET, "slots", None, None, None)?, SLOTS_LIMIT)?;
+            let slots: Slots = json(self.send(Method::GET, "slots", None, slot_epoch.map(|e| ("epoch", e)), None)?, SLOTS_LIMIT)?;
             if slots.slots.len() > 1024 {
                 bail!("too many gateway slots");
             }
-            let name = key.strip_prefix("slots/").unwrap().strip_suffix(".age").context("invalid slot name")?;
+            let name = slot_key.strip_prefix("slots/").unwrap().strip_suffix(".age").context("invalid slot name")?;
             let mut found = None;
             for slot in slots.slots {
                 if slot.name == name {
@@ -540,13 +560,16 @@ impl Gateway {
             }
             return Ok(found);
         }
-        let response = if overlay_keys_path(key) && !self.has_read_identity() {
-            self.send(Method::GET, &format!("objects/{key}"), self.token.as_deref(), None, None)?
-        } else if key == "store.json" {
-            self.send(Method::GET, "store.json", None, None, None)?
-        } else {
-            self.read_request(&format!("objects/{key}"), None)?
-        };
+        let response =
+            if (overlay_keys_path(key) || key.starts_with("keys/") || epoch_path(key).is_some_and(|(_, k)| k == "store.json"))
+                && !self.has_read_identity()
+            {
+                self.send(Method::GET, &format!("objects/{key}"), self.token.as_deref(), None, None)?
+            } else if key == "store.json" {
+                self.send(Method::GET, "store.json", None, None, None)?
+            } else {
+                self.read_request(&format!("objects/{key}"), None)?
+            };
         if key == "store.json"
             && matches!(response.status().as_u16(), 401 | 403 | 404)
             && self.token.is_none()
@@ -575,12 +598,16 @@ impl Gateway {
         }
         let has_identity = self.identity.lock().map_err(|_| anyhow!("gateway identity lock failed"))?.is_some();
         let response = if self.is_public() {
-            if !prefix.starts_with("records/") && !prefix.starts_with("states/") {
+            let logical = epoch_path(prefix).map(|(_, k)| k).unwrap_or(prefix);
+            if !prefix.starts_with("keys/") && !logical.starts_with("records/") && !logical.starts_with("states/") {
                 return Ok(Vec::new());
             }
             self.public_request("objects", Some(prefix))?
         } else if !has_identity
-            && (prefix.starts_with("records/") || prefix.starts_with("states/") || overlay_keys_prefix(prefix))
+            && (prefix.starts_with("records/")
+                || prefix.starts_with("states/")
+                || prefix == "keys/"
+                || overlay_keys_prefix(prefix))
         {
             self.send(Method::GET, "objects", self.token.as_deref(), Some(("prefix", prefix)), None)?
         } else {
@@ -820,4 +847,9 @@ mod tests {
         assert!(token_file(&dir, uid).is_err());
         std::fs::remove_dir_all(dir).unwrap();
     }
+}
+
+fn epoch_path(key: &str) -> Option<(&str, &str)> {
+    let (epoch, inner) = key.strip_prefix("project/epochs/")?.split_once('/')?;
+    super::format::is_uuid(epoch).then_some((epoch, inner))
 }

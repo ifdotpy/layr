@@ -177,6 +177,23 @@ fn order(r: &Record) -> (i64, &str, u64) {
 }
 
 impl Project {
+    /// Access mode and epochs are folded only from authenticated project records.
+    pub fn access_mode(&self) -> layr_store::epochs::Mode {
+        self.records
+            .iter()
+            .rev()
+            .find(|r| r.op == "project.mode")
+            .and_then(|r| serde_json::from_value(r.data["mode"].clone()).ok())
+            .unwrap_or_default()
+    }
+    pub fn key_epochs(&self) -> Vec<Value> {
+        self.records.iter().filter(|r|r.op=="project.key").enumerate().map(|(i,r)| {
+            let mut row=serde_json::json!({"number":i+1,"id":r.data["epoch"],"time":r.time,"machine":r.machine,"mode":r.data["mode"],"readers_hash":r.data["readers_hash"]});
+            if let Some(reason)=self.records.iter().find(|m|m.op=="project.mode" && m.data["epoch"]==r.data["epoch"]).and_then(|m|m.data.get("reason")).filter(|v|!v.is_null()) {row["reason"]=reason.clone();}
+            row
+        }).collect()
+    }
+
     /// Build one project from verified records. `machine` selects the CLI policy perspective.
     /// Empty `machine` selects a store view with no preferred local machine.
     /// Exact duplicate records are accepted. Conflicting identities or sequences fail.
@@ -317,7 +334,13 @@ impl Project {
             "machine.trust" => {
                 self.trusted.entry(str_at("machine")).or_insert(d.clone());
             }
-            "project" | "config" | "overlay.create" | "overlay.readers" | "overlay.use" | "overlay.show-to-project" => {
+            "project"
+            | "config"
+            | "overlay.create"
+            | "overlay.readers"
+            | "overlay.mode"
+            | "overlay.use"
+            | "overlay.show-to-project" => {
                 if r.op == "project" {
                     self.name = d["name"].as_str().map(String::from);
                 }
@@ -528,7 +551,13 @@ impl Project {
             .filter(|r| {
                 matches!(
                     r.op.as_str(),
-                    "project" | "config" | "overlay.create" | "overlay.readers" | "overlay.use" | "overlay.show-to-project"
+                    "project"
+                        | "config"
+                        | "overlay.create"
+                        | "overlay.readers"
+                        | "overlay.mode"
+                        | "overlay.use"
+                        | "overlay.show-to-project"
                 )
             })
             .find_map(|r| r.data["config"].get(key))

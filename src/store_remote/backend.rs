@@ -14,9 +14,50 @@ pub enum Backend {
     S3(super::s3::S3),
     Gateway(super::gateway::Gateway),
     Prefix(Box<Backend>, String),
+    Epoch(Box<EpochBackend>),
 }
 
+#[derive(Clone)]
+pub struct EpochBackend {
+    pub root: Backend,
+    pub current: Backend,
+    pub history: Vec<(Backend, String)>,
+}
+fn epoch_object(key: &str) -> bool {
+    key == "store.json"
+        || key == "public.json"
+        || ["records/", "states/", "slots/", "history/", "index/", "requests/", "claims/"].iter().any(|p| key.starts_with(p))
+}
 impl Backend {
+    pub fn set_epoch(&self, epoch: Option<&str>) -> Result<()> {
+        match self {
+            Self::Gateway(g) => g.set_epoch(epoch),
+            Self::Prefix(base, _) => base.set_epoch(epoch),
+            Self::Epoch(e) => e.root.set_epoch(epoch),
+            _ => Ok(()),
+        }
+    }
+    pub fn root(&self) -> &Backend {
+        if let Self::Epoch(epoch) = self {
+            &epoch.root
+        } else {
+            self
+        }
+    }
+    pub fn decrypted(&self, key: &str, identity: &str) -> Result<Vec<u8>> {
+        if let Self::Epoch(epoch) = self {
+            if key.starts_with("states/") && epoch.current.get(key)?.is_none() {
+                for (backend, old_identity) in &epoch.history {
+                    if let Some(bytes) = backend.get(key)? {
+                        return super::keys::decrypt(old_identity, &bytes);
+                    }
+                }
+            }
+        }
+        let bytes = self.get(key)?.with_context(|| format!("missing remote object {key}"))?;
+        super::keys::decrypt(identity, &bytes)
+    }
+
     pub fn scoped(&self, prefix: &str) -> Result<Self> {
         check_key(prefix)?;
         Ok(Self::Prefix(Box::new(self.clone()), format!("{prefix}/")))
@@ -63,13 +104,21 @@ impl Backend {
                 *s3 = super::s3::S3::with_env(bucket, prefix, env)?;
             }
             Self::Gateway(gateway) => gateway.connect_reader(env)?,
-            Self::File(..) | Self::Prefix(..) => {}
+            Self::File(..) | Self::Prefix(..) | Self::Epoch(..) => {}
         }
         Ok(backend)
     }
 
     pub fn unlock_reader(&self, identity: &str) -> Result<()> {
         match self {
+            Self::Epoch(epoch) => {
+                epoch.root.unlock_reader(identity)?;
+                epoch.current.unlock_reader(identity)?;
+                for (backend, _) in &epoch.history {
+                    backend.unlock_reader(identity)?;
+                }
+                Ok(())
+            }
             Self::Prefix(base, _) => base.unlock_reader(identity),
             Self::Gateway(gateway) => gateway.set_identity(identity),
             Self::File(..) | Self::S3(_) => Ok(()),
@@ -79,6 +128,7 @@ impl Backend {
     pub fn can_read(&self) -> bool {
         match self {
             Self::Gateway(gateway) => gateway.has_read_identity(),
+            Self::Epoch(epoch) => epoch.root.can_read(),
             Self::Prefix(base, _) => base.can_read(),
             _ => true,
         }
@@ -94,6 +144,21 @@ impl Backend {
     pub fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
         check_key(key)?;
         match self {
+            Self::Epoch(epoch) => {
+                if !epoch_object(key) {
+                    return epoch.root.get(key);
+                }
+                let data = epoch.current.get(key)?;
+                if data.is_some() || !(key.starts_with("states/") || key.starts_with("requests/") || key.starts_with("claims/")) {
+                    return Ok(data);
+                }
+                for (backend, _) in &epoch.history {
+                    if let Some(bytes) = backend.get(key)? {
+                        return Ok(Some(bytes));
+                    }
+                }
+                Ok(None)
+            }
             Self::Prefix(base, prefix) => base.get(&format!("{prefix}{key}")),
             Self::S3(s) => s.get(key),
             Self::Gateway(g) => g.get(key),
@@ -118,6 +183,13 @@ impl Backend {
     pub fn put_new(&self, key: &str, body: Vec<u8>) -> Result<bool> {
         check_key(key)?;
         match self {
+            Self::Epoch(epoch) => {
+                if epoch_object(key) {
+                    epoch.current.put_new(key, body)
+                } else {
+                    epoch.root.put_new(key, body)
+                }
+            }
             Self::Prefix(base, prefix) => base.put_new(&format!("{prefix}{key}"), body),
             Self::S3(s) => s.put_new(key, body),
             Self::Gateway(g) => g.put_new(key, body),
@@ -152,6 +224,23 @@ impl Backend {
             check_key(prefix.trim_end_matches('/'))?;
         }
         match self {
+            Self::Epoch(epoch) => {
+                if !epoch_object(prefix) {
+                    return epoch.root.list(prefix);
+                }
+                let mut objects: std::collections::BTreeMap<String, Object> = std::collections::BTreeMap::new();
+                if prefix.starts_with("states/") || prefix.starts_with("requests/") || prefix.starts_with("claims/") {
+                    for (backend, _) in epoch.history.iter().rev() {
+                        for object in backend.list(prefix)? {
+                            objects.insert(object.key.clone(), object);
+                        }
+                    }
+                }
+                for object in epoch.current.list(prefix)? {
+                    objects.insert(object.key.clone(), object);
+                }
+                Ok(objects.into_values().collect())
+            }
             Self::Prefix(base, scope) => base
                 .list(&format!("{scope}{prefix}"))?
                 .into_iter()
@@ -176,6 +265,13 @@ impl Backend {
     pub fn delete(&self, key: &str) -> Result<()> {
         check_key(key)?;
         match self {
+            Self::Epoch(epoch) => {
+                if epoch_object(key) {
+                    epoch.current.delete(key)
+                } else {
+                    epoch.root.delete(key)
+                }
+            }
             Self::Prefix(base, prefix) => base.delete(&format!("{prefix}{key}")),
             Self::S3(s) => s.delete(key),
             Self::Gateway(g) => g.delete(key),

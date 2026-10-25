@@ -2,6 +2,7 @@
 
 pub(crate) mod backend;
 pub(crate) mod browse;
+pub(crate) mod epochs;
 pub(crate) mod gateway;
 mod index;
 mod legacy;
@@ -95,6 +96,9 @@ pub struct Store {
     pin: Option<StorePin>,
     aws_profile: Option<String>,
     layer: Option<overlays::LayerAccess>,
+    epoch: Option<epochs::Current>,
+    epoch_public: bool,
+    publishing_epoch: bool,
     force_public: bool,
     public_clone: bool,
     public_reader: std::sync::atomic::AtomicBool,
@@ -157,6 +161,9 @@ fn open_with_pin(url: &str, repo: &Repo, pin: Option<StorePin>) -> Result<Store>
         pin,
         aws_profile: None,
         layer: None,
+        epoch: None,
+        epoch_public: false,
+        publishing_epoch: false,
         force_public: false,
         public_clone: false,
         public_reader: std::sync::atomic::AtomicBool::new(false),
@@ -171,6 +178,9 @@ impl Store {
         index::write(self, repo)
     }
     fn connect(&mut self, ctx: &Ctx) -> Result<()> {
+        self.backend = self.backend.root().clone();
+        self.epoch = None;
+        self.epoch_public = false;
         self.backend.as_caller(ctx);
         if let Backend::Gateway(gateway) = &mut self.backend {
             if self.force_public
@@ -233,6 +243,7 @@ impl Store {
                 Ok(Backend::S3(s3))
             })?;
         }
+        epochs::connect(self)?;
         Ok(())
     }
 
@@ -247,6 +258,12 @@ impl Store {
     pub fn request_person(&mut self, ctx: &Ctx) -> Result<Option<crate::person::Access>> {
         self.connect(ctx)?;
         Ok(self.person.clone())
+    }
+
+    /// Current request encryption target; the root epoch retains the legacy trust anchor.
+    pub fn request_epoch(&mut self, ctx: &Ctx) -> Result<(String, String)> {
+        self.connect(ctx)?;
+        Ok((self.epoch.as_ref().map(|e| e.key.epoch.clone()).unwrap_or_else(|| "root".into()), self.descriptor()?.recipient))
     }
 
     /// Authenticated immutable-object access for person requests and executor claims.
@@ -295,7 +312,8 @@ impl Store {
     }
 
     fn pin_descriptor(&mut self) -> Result<()> {
-        let descriptor = self.descriptor()?;
+        let descriptor: Descriptor =
+            serde_json::from_slice(&self.backend.root().get("store.json")?.context("missing store descriptor")?)?;
         let paper_recipient = self.pin.as_ref().and_then(|pin| pin.paper_recipient.clone());
         self.pin = Some(StorePin { project: descriptor.project, recipient: descriptor.recipient, paper_recipient });
         Ok(())
@@ -310,7 +328,7 @@ impl Store {
             // paper slot is not this store's paper key, so nothing is recorded.
             if let (None, Some(paper)) = (&pin.paper_recipient, &self.paper_key_text) {
                 let opener = keys::identity_from_paper(paper).map_err(|_| anyhow::anyhow!("invalid paper key"))?;
-                if let Some(slot) = self.backend.get("slots/paper.age")? {
+                if let Some(slot) = self.backend.root().get("slots/paper.age")? {
                     if let Ok(identity) = keys::open_slot(&slot, &opener) {
                         if keys::recipient_of(&identity)? != pin.recipient {
                             bail!("paper slot does not match store recipient");
@@ -364,7 +382,14 @@ impl Store {
         self.save_pin(ctx, repo, name)
     }
 
+    fn root_descriptor(&self) -> Result<Descriptor> {
+        Ok(serde_json::from_slice(&self.backend.root().get("store.json")?.context("missing root descriptor")?)?)
+    }
+
     fn descriptor(&self) -> Result<Descriptor> {
+        if let Some(epoch) = &self.epoch {
+            return Ok(Descriptor { format: 2, project: epoch.key.project.clone(), recipient: epoch.key.recipient.clone() });
+        }
         if let Some(layer) = &self.layer {
             return Ok(Descriptor { format: 2, project: self.project.clone(), recipient: layer.recipient.clone() });
         }
@@ -395,6 +420,10 @@ impl Store {
     }
 
     fn identity(&self, descriptor: &Descriptor, paper: Option<&str>) -> Result<String> {
+        if let Some(epoch) = &self.epoch {
+            self.public_reader.store(self.epoch_public, std::sync::atomic::Ordering::SeqCst);
+            return Ok(epoch.identity.clone());
+        }
         self.public_reader.store(false, std::sync::atomic::Ordering::SeqCst);
         if !self.force_public || self.layer.is_some() {
             match self.own_identity(descriptor, paper) {
@@ -593,7 +622,14 @@ impl Store {
         reader::gc(self, dry_run)
     }
 
-    pub fn grant(&mut self, ctx: &Ctx, login: &str, recipient: &str, invite_out: Option<&std::path::Path>) -> Result<bool> {
+    pub fn grant(
+        &mut self,
+        ctx: &Ctx,
+        repo: &Repo,
+        login: &str,
+        recipient: &str,
+        invite_out: Option<&std::path::Path>,
+    ) -> Result<bool> {
         use base64::Engine;
         use layr_store::person;
         if !person::login_name(login) {
@@ -623,12 +659,18 @@ impl Store {
         }
         let slot = format!("slots/{}", person::slot_name(login, recipient)?);
         let existing = granted.iter().any(|object| object.key == slot);
-        let invite = person::seal_invite(recipient, &person::Pin::of_store(&descriptor))?;
+        let anchor: Descriptor =
+            serde_json::from_slice(&self.backend.root().get("store.json")?.context("missing root descriptor")?)?;
+        let invite = person::seal_invite(recipient, &person::Pin::of_store(&anchor))?;
         // Refuse an occupied output path before publishing a grant.
         if let Some(path) = invite_out {
             crate::privs::as_caller_fs(ctx, || crate::person::create(path, &invite))?;
         }
         let created = !existing && self.backend.put_new(&slot, keys::seal_slot(&identity, recipient)?)?;
+        let _lock = repo.p.lock()?;
+        let mut record = crate::model::Record::new("project.reader");
+        record.data = serde_json::json!({"principal":format!("person:{login}"),"recipient":recipient,"store":anchor.recipient});
+        repo.commit_record(ctx, record)?;
         if let Backend::Gateway(g) = &self.backend {
             g.person_call(reqwest::Method::POST,&format!("/api/people/{login}/inbox"),None,Some(&serde_json::json!({"data":base64::engine::general_purpose::STANDARD.encode(invite)})))
                 .context("the person slot is in place, but the invite did not reach the inbox; register the person key and run grant again")?;

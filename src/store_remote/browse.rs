@@ -105,16 +105,48 @@ impl Browse {
             };
             Ok(identity)
         })();
-        let (identity, public_reader) = if access.public {
-            (super::public::identity(&backend, &descriptor)?.context("the store is not public")?, true)
-        } else {
-            match own {
-                Ok(identity) => (identity, false),
-                Err(error) => match super::public::identity(&backend, &descriptor)? {
-                    Some(identity) => (identity, true),
-                    None => return Err(error),
-                },
+        let resolved = super::epochs::resolve(&backend, &descriptor, |scoped, next| {
+            let own = || -> Result<String> {
+                if let Some((machine, key)) = &access.machine {
+                    if let Some(slot) = scoped.get(&format!("slots/machine-{machine}.age"))? {
+                        return keys::open_machine_slot(&slot, key);
+                    }
+                }
+                if let Some(person) = &person {
+                    let name = layr_store::person::slot_name(&person.login, &keys::recipient_of(&person.identity)?)?;
+                    return keys::open_slot(&scoped.get(&format!("slots/{name}"))?.context("no person slot")?, &person.identity);
+                }
+                if let Some(identity) = &access.identity {
+                    if keys::recipient_of(identity)? == next.recipient {
+                        return Ok(identity.clone());
+                    }
+                }
+                paper_identity(scoped, access.paper.as_deref())
+            };
+            if !access.public {
+                if let Ok(identity) = own() {
+                    return Ok((identity, false));
+                }
             }
+            Ok((super::public::identity(scoped, next)?.context("the store is not public")?, true))
+        })?;
+        let root_descriptor = descriptor.clone();
+        let (backend, descriptor, identity, public_reader) = if let Some((backend, current, public)) = resolved {
+            let descriptor = Descriptor { format: 2, project: current.key.project, recipient: current.key.recipient };
+            (backend, descriptor, current.identity, public)
+        } else {
+            let (identity, public_reader) = if access.public {
+                (super::public::identity(&backend, &descriptor)?.context("the store is not public")?, true)
+            } else {
+                match own {
+                    Ok(identity) => (identity, false),
+                    Err(error) => match super::public::identity(&backend, &descriptor)? {
+                        Some(identity) => (identity, true),
+                        None => return Err(error),
+                    },
+                }
+            };
+            (backend, descriptor, identity, public_reader)
         };
         if keys::recipient_of(&identity)? != descriptor.recipient {
             bail!("the disk key does not match the store recipient");
@@ -141,7 +173,7 @@ impl Browse {
         let mut layer_names = BTreeMap::new();
         let mut authorities = crate::overlay_managers::from_lines(&descriptor.project, &records.lines, &records.keys)?;
         let (mut published, refused) =
-            super::overlays::published(&backend, &descriptor.project, &descriptor.recipient, &records.keys, &authorities)?;
+            super::overlays::published(&backend, &descriptor.project, &root_descriptor.recipient, &records.keys, &authorities)?;
         for reason in refused {
             eprintln!("layr mount: {reason}");
         }
@@ -151,7 +183,7 @@ impl Browse {
             super::overlays::discover_hidden(
                 &backend,
                 &descriptor.project,
-                &descriptor.recipient,
+                &root_descriptor.recipient,
                 &records.keys,
                 access.machine.as_ref().map(|(id, key)| (id.as_str(), key)),
                 person.as_ref(),
@@ -169,7 +201,7 @@ impl Browse {
             published.insert(name, key);
         }
         if public_reader {
-            published.clear();
+            published.retain(|_, p| !p.key.hidden && p.key.access_mode == layr_store::epochs::Mode::Public);
         }
         let mut hidden_stacks: Vec<(String, usize, crate::db::Db)> = Vec::new();
         for (name, published) in published {

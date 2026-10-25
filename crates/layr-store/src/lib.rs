@@ -4,6 +4,7 @@
 #[cfg(feature = "native")]
 pub mod aws;
 pub mod canonical;
+pub mod epochs;
 pub mod format;
 #[cfg(feature = "native")]
 pub mod http;
