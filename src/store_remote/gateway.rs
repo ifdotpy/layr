@@ -484,6 +484,7 @@ impl Gateway {
             && super::format::parse_segment_name(logical).is_none()
             && super::format::parse_tree_name(logical).is_none()
             && super::format::parse_data_name(logical).is_none()
+            && !super::format::release_file(logical)
         {
             return Ok(None);
         }
@@ -570,16 +571,16 @@ impl Gateway {
             }
             return Ok(found);
         }
-        let response =
-            if key.starts_with("keys/") || epoch_path(key).is_some_and(|(_, k)| k == "store.json")
-                || (overlay_keys_path(key) && !self.has_read_identity())
-            {
-                self.send(Method::GET, &format!("objects/{key}"), self.token.as_deref(), None, None)?
-            } else if key == "store.json" {
-                self.send(Method::GET, "store.json", None, None, None)?
-            } else {
-                self.read_request(&format!("objects/{key}"), None)?
-            };
+        let response = if key.starts_with("keys/")
+            || epoch_path(key).is_some_and(|(_, k)| k == "store.json")
+            || (overlay_keys_path(key) && !self.has_read_identity())
+        {
+            self.send(Method::GET, &format!("objects/{key}"), self.token.as_deref(), None, None)?
+        } else if key == "store.json" {
+            self.send(Method::GET, "store.json", None, None, None)?
+        } else {
+            self.read_request(&format!("objects/{key}"), None)?
+        };
         if key == "store.json"
             && matches!(response.status().as_u16(), 401 | 403 | 404)
             && self.token.is_none()
@@ -609,7 +610,11 @@ impl Gateway {
         let has_identity = self.identity.lock().map_err(|_| anyhow!("gateway identity lock failed"))?.is_some();
         let response = if self.is_public() {
             let logical = epoch_path(prefix).map(|(_, k)| k).unwrap_or(prefix);
-            if !prefix.starts_with("keys/") && !logical.starts_with("records/") && !logical.starts_with("states/") {
+            if !prefix.starts_with("keys/")
+                && !logical.starts_with("records/")
+                && !logical.starts_with("states/")
+                && !logical.starts_with("files/")
+            {
                 return Ok(Vec::new());
             }
             self.public_request("objects", Some(prefix))?
@@ -640,6 +645,51 @@ impl Gateway {
         Ok(objects)
     }
 
+    pub fn release_stream(&self, key: &str) -> Result<Option<Response>> {
+        let logical = epoch_path(key).map(|(_, key)| key).unwrap_or(key);
+        if !super::format::release_file(logical) {
+            bail!("invalid release object");
+        }
+        let response =
+            if self.is_public() { self.public_request(key, None)? } else { self.read_request(&format!("objects/{key}"), None)? };
+        match response.status().as_u16() {
+            200 => {
+                if response.content_length().is_some_and(|n| n > super::format::RELEASE_OBJECT_LIMIT) {
+                    bail!("release object is too large");
+                }
+                Ok(Some(response))
+            }
+            404 => Ok(None),
+            status => bail!("gateway get: HTTP {status}"),
+        }
+    }
+
+    pub fn put_file_new(&self, key: &str, file: std::fs::File) -> Result<bool> {
+        let logical = epoch_path(key).map(|(_, key)| key).unwrap_or(key);
+        if self.is_public() || !super::format::release_file(logical) {
+            bail!("invalid release write");
+        }
+        let length = file.metadata()?.len();
+        if length > super::format::RELEASE_OBJECT_LIMIT {
+            bail!("release object is too large");
+        }
+        let token = self.token.as_deref().context("set LAYR_GATEWAY_TOKEN_FILE to a private write token file")?;
+        let response = self
+            .http
+            .put(self.base.join(&format!("objects/{key}"))?)
+            .bearer_auth(token)
+            .timeout(Duration::from_secs(7200))
+            .header("content-type", "application/octet-stream")
+            .body(reqwest::blocking::Body::sized(file, length))
+            .send()
+            .map_err(reqwest::Error::without_url)?;
+        match response.status().as_u16() {
+            201 => Ok(true),
+            412 => Ok(false),
+            status => bail!("gateway put: HTTP {status}"),
+        }
+    }
+
     pub fn put_new(&self, key: &str, data: Vec<u8>) -> Result<bool> {
         if self.is_public() {
             bail!("public gateway access is read only");
@@ -650,7 +700,7 @@ impl Gateway {
         if data.len() > OBJECT_LIMIT {
             bail!("gateway object exceeds 32 MiB");
         }
-        let logical=epoch_path(key).map(|(_,key)|key).unwrap_or(key);
+        let logical = epoch_path(key).map(|(_, key)| key).unwrap_or(key);
         let person_request =
             logical.strip_prefix("requests/").and_then(|s| s.strip_suffix(".json")).is_some_and(layr_store::request::request_id);
         if person_request {
