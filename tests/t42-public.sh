@@ -203,6 +203,11 @@ try:
  check(not any('/overlays/' in path or '/people/' in path or '/token' in path for _,path,_ in requests),'HTTP public reads request no overlays, people or tokens')
  machine=(pathlib.Path(network['LAYR_ROOT'])/'machine/id').read_text().strip()
  check(not (root/f'archive/slots/machine-{machine}.age').exists(),'HTTP public clone creates no machine slot')
+ requests.clear()
+ output=run(['clone',url,'network-auto','--json'],network)
+ check(clean(output.stdout+output.stderr,ids) and (pathlib.Path(network['LAYR_ROOT'])/'projects/network-auto/lines/main/future.txt').read_text()=='future public bytes\n','automatic HTTP clone discovers a public store after its private descriptor is unavailable')
+ check([path for _,path,_ in requests if not path.startswith('/p/project/')]==['/v1/p/project/store.json'],'automatic HTTP discovery probes only the private descriptor before switching to /p/')
+ check(all(method=='GET' and auth is None for method,_,auth in requests),'automatic HTTP discovery sends no credential, read proof or write')
 finally: server.shutdown();server.server_close();thread.join(timeout=10)
 # Current admin and writer roles are checked using the real daemon caller identity.
 for path in [root/'archive',*(root/'archive').rglob('*')]:
