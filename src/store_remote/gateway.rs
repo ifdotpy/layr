@@ -10,11 +10,23 @@ use reqwest::{
 use serde::Deserialize;
 use std::io::Read;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const OBJECT_LIMIT: usize = 32 << 20;
 const SLOTS_LIMIT: usize = 8 << 20;
+
+struct PersonSession {
+    login: String,
+    key: ed25519_dalek::SigningKey,
+    token: Option<SessionToken>,
+}
+#[derive(Deserialize)]
+struct SessionToken {
+    token: String,
+    expires: i64,
+    login: String,
+}
 
 pub struct Gateway {
     http: Client,
@@ -23,6 +35,7 @@ pub struct Gateway {
     identity: Mutex<Option<String>>,
     read: Mutex<Option<(String, i64)>>,
     public: std::sync::atomic::AtomicBool,
+    person: Arc<Mutex<Option<PersonSession>>>,
 }
 
 impl Clone for Gateway {
@@ -34,6 +47,7 @@ impl Clone for Gateway {
             identity: Mutex::new(self.identity.lock().expect("gateway identity lock").clone()),
             read: Mutex::new(self.read.lock().expect("gateway read lock").clone()),
             public: std::sync::atomic::AtomicBool::new(self.is_public()),
+            person: self.person.clone(),
         }
     }
 }
@@ -108,6 +122,7 @@ impl Gateway {
             identity: Mutex::new(None),
             read: Mutex::new(None),
             public: std::sync::atomic::AtomicBool::new(false),
+            person: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -120,6 +135,7 @@ impl Gateway {
             let pem = crate::privs::as_caller_fs(ctx, || ca_file(&ctx.cwd.join(path)))?;
             self.configure_ca(&pem)?;
         }
+        crate::privs::as_caller_fs(ctx, || self.connect_person(&ctx.env, &ctx.caller.home, &ctx.cwd, ctx.caller.uid))?;
         Ok(())
     }
 
@@ -129,7 +145,78 @@ impl Gateway {
         if let Some(path) = env.get("LAYR_GATEWAY_CA_FILE") {
             self.configure_ca(&ca_file(std::path::Path::new(path))?)?;
         }
+        let uid = rustix::process::getuid().as_raw();
+        self.connect_person(env, &crate::ctx::Caller::from_uid(uid).home, &std::env::current_dir()?, uid)?;
         Ok(())
+    }
+
+    fn connect_person(
+        &self,
+        env: &std::collections::HashMap<String, String>,
+        home: &std::path::Path,
+        cwd: &std::path::Path,
+        uid: u32,
+    ) -> Result<()> {
+        if let Some(access) = crate::person::load(env, home, cwd, uid, None)? {
+            let key = crate::person::signing_key_at(env, home, uid, &access)?;
+            self.set_person(&access.login, key)?;
+        }
+        Ok(())
+    }
+
+    pub fn set_person(&self, login: &str, key: ed25519_dalek::SigningKey) -> Result<()> {
+        if !layr_store::person::login_name(login) {
+            bail!("invalid person login");
+        }
+        let mut person = self.person.lock().map_err(|_| anyhow!("gateway session lock failed"))?;
+        if !person.as_ref().is_some_and(|p| p.login == login && p.key == key) {
+            *person = Some(PersonSession { login: login.into(), key, token: None });
+        }
+        Ok(())
+    }
+
+    fn session_token(&self, renew: bool) -> Result<String> {
+        let mut person = self.person.lock().map_err(|_| anyhow!("gateway session lock failed"))?;
+        let person = person.as_mut().context("set LAYR_PERSON_KEY_FILE to sign in to the gateway")?;
+        if !renew {
+            if let Some(token) = person.token.as_ref().filter(|t| t.expires > crate::ids::now_ms() + 10_000) {
+                return Ok(token.token.clone());
+            }
+        }
+        person.token = None;
+        let mut url = self.base.join("/api/session/challenge")?;
+        url.query_pairs_mut().append_pair("login", &person.login);
+        #[derive(Deserialize)]
+        struct Challenge {
+            challenge: String,
+            expires: i64,
+        }
+        let challenge: Challenge = json(self.http.get(url).send().map_err(reqwest::Error::without_url)?, 4096)?;
+        let now = crate::ids::now_ms();
+        if challenge.expires <= now || challenge.expires > now + 60_000 {
+            bail!("invalid or expired gateway session challenge");
+        }
+        let signature = layr_store::session::sign(&person.login, &challenge.challenge, &person.key)?;
+        let response = self
+            .http
+            .post(self.base.join("/api/session")?)
+            .json(&serde_json::json!({"login":person.login,"challenge":challenge.challenge,"signature":signature}))
+            .send()
+            .map_err(reqwest::Error::without_url)?;
+        let token: SessionToken = json(response, 4096)?;
+        let now = crate::ids::now_ms();
+        if token.login != person.login
+            || token.token.is_empty()
+            || token.token.len() > 256
+            || !token.token.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+            || token.expires <= now
+            || token.expires > now + 43_200_000
+        {
+            bail!("invalid gateway person session");
+        }
+        let result = token.token.clone();
+        person.token = Some(token);
+        Ok(result)
     }
 
     fn configure_ca(&mut self, pem: &[u8]) -> Result<()> {
@@ -157,28 +244,26 @@ impl Gateway {
         token: Option<&str>,
         body: Option<&serde_json::Value>,
     ) -> Result<serde_json::Value> {
-        let url = self.base.join(path)?;
-        let mut request = self.http.request(method.clone(), url).header("content-type", "application/json");
+        let send = |bearer: &str| -> Result<Response> {
+            let mut request = self
+                .http
+                .request(method.clone(), self.base.join(path)?)
+                .header("content-type", "application/json")
+                .bearer_auth(bearer);
+            if let Some(body) = body {
+                request = request.json(body);
+            }
+            request.send().map_err(reqwest::Error::without_url).map_err(Into::into)
+        };
         if let Some(token) = token {
-            request = request.bearer_auth(token);
+            return json(send(token)?, 512 << 10);
         }
-        if let Some(body) = body {
-            request = request.json(body);
+        let response = send(&self.session_token(false)?)?;
+        if response.status().as_u16() != 401 {
+            return json(response, 512 << 10);
         }
-        let response = request.send().map_err(reqwest::Error::without_url)?;
-        json(response, 512 << 10)
-    }
-
-    /// Existing person registrations must prove their age identity before adding signing authority.
-    pub fn person_registration_proof(&self, identity: &str) -> Result<Option<String>> {
-        let response = self.http.get(self.base.join("/api/person/challenge")?).send().map_err(reqwest::Error::without_url)?;
-        if response.status().as_u16() == 404 {
-            return Ok(None);
-        }
-        let challenge: serde_json::Value = json(response, 4096)?;
-        let sealed = challenge["challenge"].as_str().context("missing person challenge")?;
-        let sealed = base64::engine::general_purpose::STANDARD.decode(sealed)?;
-        Ok(Some(String::from_utf8(keys::decrypt(identity, &sealed)?)?))
+        // A rejected session has not authorized the operation. Renew once, including after restart.
+        json(send(&self.session_token(true)?)?, 512 << 10)
     }
 
     pub fn person_slot_at(&self, project: &str, login: &str, recipient: &str) -> Result<Vec<u8>> {
@@ -187,7 +272,13 @@ impl Gateway {
         }
         let slot = layr_store::person::slot_name(login, recipient)?;
         let url = self.base.join(&format!("/v1/p/{project}/slots/{slot}"))?;
-        let response = self.http.get(url).send().map_err(reqwest::Error::without_url)?;
+        let response =
+            self.http.get(url.clone()).bearer_auth(self.session_token(false)?).send().map_err(reqwest::Error::without_url)?;
+        let response = if response.status().as_u16() == 401 {
+            self.http.get(url).bearer_auth(self.session_token(true)?).send().map_err(reqwest::Error::without_url)?
+        } else {
+            response
+        };
         if !response.status().is_success() {
             bail!("gateway person slot: HTTP {}", response.status().as_u16());
         }
@@ -216,16 +307,28 @@ impl Gateway {
         if let Some((key, value)) = query {
             url.query_pairs_mut().append_pair(key, value);
         }
-        let mut request = self.http.request(method, url);
-        if let Some(token) = bearer {
-            request = request.bearer_auth(token);
+        let person = bearer.is_none() && self.person.lock().map_err(|_| anyhow!("gateway session lock failed"))?.is_some();
+        let send = |token: Option<&str>| -> Result<Response> {
+            let mut request = self.http.request(method.clone(), url.clone());
+            if let Some(token) = token {
+                request = request.bearer_auth(token);
+            }
+            if let Some(data) = &data {
+                request = request
+                    .header("content-type", if action == "token" { "application/json" } else { "application/octet-stream" })
+                    .body(data.clone());
+            }
+            request.send().map_err(reqwest::Error::without_url).map_err(Into::into)
+        };
+        if person {
+            let response = send(Some(&self.session_token(false)?))?;
+            if response.status().as_u16() == 401 {
+                return send(Some(&self.session_token(true)?));
+            }
+            Ok(response)
+        } else {
+            send(bearer)
         }
-        if let Some(data) = data {
-            request = request
-                .header("content-type", if action == "token" { "application/json" } else { "application/octet-stream" })
-                .body(data);
-        }
-        request.send().map_err(reqwest::Error::without_url).map_err(Into::into)
     }
 
     fn proof(&self) -> Result<String> {
@@ -463,9 +566,21 @@ impl Gateway {
         }
         let person_request =
             key.strip_prefix("requests/").and_then(|s| s.strip_suffix(".json")).is_some_and(layr_store::request::request_id);
-        let token = if person_request {
-            String::new() // The person signature and authenticated tailnet login authorize this object.
-        } else if key.starts_with("slots/") {
+        if person_request {
+            let action = format!("objects/{key}");
+            let response = self.send(Method::PUT, &action, Some(&self.session_token(false)?), None, Some(data.clone()))?;
+            let response = if response.status().as_u16() == 401 {
+                self.send(Method::PUT, &action, Some(&self.session_token(true)?), None, Some(data))?
+            } else {
+                response
+            };
+            return match response.status().as_u16() {
+                201 => Ok(true),
+                412 => Ok(false),
+                status => bail!("gateway put: HTTP {status}"),
+            };
+        }
+        let token = if key.starts_with("slots/") {
             self.proof()?
         } else {
             self.token.clone().context("set LAYR_GATEWAY_TOKEN_FILE to a private write token file")?
@@ -528,36 +643,6 @@ fn token_file(path: &std::path::Path, uid: u32) -> Result<String> {
 mod tests {
     use super::*;
     use std::os::unix::fs::{symlink, PermissionsExt};
-    #[test]
-    fn person_registration_proof_opens_a_challenge_and_only_404_is_optional() {
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
-        let identity = keys::generate_identity();
-        for status in [200, 404, 403] {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            let address = listener.local_addr().unwrap();
-            let sealed = keys::encrypt(&keys::recipient_of(&identity).unwrap(), b"test-person-proof").unwrap();
-            let body = serde_json::json!({"challenge":base64::engine::general_purpose::STANDARD.encode(sealed)}).to_string();
-            let server = std::thread::spawn(move || {
-                let (mut stream, _) = listener.accept().unwrap();
-                let mut request = [0; 2048];
-                let n = stream.read(&mut request).unwrap();
-                assert!(std::str::from_utf8(&request[..n]).unwrap().starts_with("GET /api/person/challenge "));
-                write!(stream, "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
-                    .unwrap();
-            });
-            let mut gateway = Gateway::open("layr+https://example.com/project").unwrap();
-            gateway.base = reqwest::Url::parse(&format!("http://{address}/v1/p/project/")).unwrap();
-            let result = gateway.person_registration_proof(&identity);
-            match status {
-                200 => assert_eq!(result.unwrap().as_deref(), Some("test-person-proof")),
-                404 => assert!(result.unwrap().is_none()),
-                _ => assert!(result.is_err()),
-            }
-            server.join().unwrap();
-        }
-    }
-
     #[test]
     fn reader_hooks_ignore_write_grants_set_identity_and_check_the_ca_file() {
         use super::super::backend::Backend;

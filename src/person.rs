@@ -42,7 +42,7 @@ pub fn create(path: &Path, data: &[u8]) -> Result<()> {
 fn local_login(env: &HashMap<String, String>) -> Result<String> {
     let login = env.get("LAYR_PERSON_LOGIN").context("set LAYR_PERSON_LOGIN for a file:// or s3:// person grant or accept")?;
     if !person::login_name(login) {
-        bail!("LAYR_PERSON_LOGIN must be a tailnet login such as ann@example.com");
+        bail!("LAYR_PERSON_LOGIN must be a login such as ann@example.com");
     }
     Ok(login.clone())
 }
@@ -126,14 +126,33 @@ pub fn load(env: &HashMap<String, String>, home: &Path, cwd: &Path, uid: u32, lo
     };
     let login = match login {
         Some(login) => login.into(),
-        None => local_login(env)?,
+        None => match env.get("LAYR_PERSON_LOGIN") {
+            Some(_) => local_login(env)?,
+            None => {
+                let login = String::from_utf8(
+                    read(&dir.join("login.txt"), 256, uid).context("set LAYR_PERSON_LOGIN to sign in with your person key")?,
+                )?;
+                if !person::login_name(&login) {
+                    bail!("invalid saved person login");
+                }
+                login
+            }
+        },
     };
     Ok(Some(Access { login, identity, index }))
 }
 pub fn signing_key(ctx: &crate::ctx::Ctx, access: &Access) -> Result<ed25519_dalek::SigningKey> {
-    let dir = folder(&ctx.env, &ctx.caller.home);
-    let sealed = read(&dir.join("signing.age"), 4096, ctx.caller.uid)?;
-    let public = String::from_utf8(read(&dir.join("signing-public.txt"), 256, ctx.caller.uid)?)?;
+    signing_key_at(&ctx.env, &ctx.caller.home, ctx.caller.uid, access)
+}
+pub fn signing_key_at(
+    env: &HashMap<String, String>,
+    home: &Path,
+    uid: u32,
+    access: &Access,
+) -> Result<ed25519_dalek::SigningKey> {
+    let dir = folder(env, home);
+    let sealed = read(&dir.join("signing.age"), 4096, uid)?;
+    let public = String::from_utf8(read(&dir.join("signing-public.txt"), 256, uid)?)?;
     person::open_signing_key(&access.identity, &sealed, &public)
 }
 
@@ -236,11 +255,18 @@ pub fn run(args: &[String]) -> Result<i32> {
     }
     match a.pos[0].as_str() {
         "keys" => {
+            if a.has("--invite") && !a.has("--site") {
+                bail!("--invite requires --site");
+            }
+            let mut fresh_signing = None;
             let gateway = a.get("--site").map(|s| site(s, &env)).transpose()?;
-            let login = match &gateway {
-                Some(gateway) => Some(gateway_login(gateway)?),
-                None => env.get("LAYR_PERSON_LOGIN").cloned(),
-            };
+            let login = env
+                .get("LAYR_PERSON_LOGIN")
+                .cloned()
+                .or_else(|| read(&dir.join("login.txt"), 256, uid).ok().and_then(|b| String::from_utf8(b).ok()));
+            if gateway.is_some() && login.is_none() {
+                bail!("set LAYR_PERSON_LOGIN to register your person key");
+            }
             if login.as_ref().is_some_and(|login| !person::login_name(login)) {
                 bail!("invalid person login");
             }
@@ -281,6 +307,7 @@ pub fn run(args: &[String]) -> Result<i32> {
                     )?;
                     save_index(&dir, &identity, &Index::default())?;
                     let signing = person::make_signing_keys(&keys::recipient_of(&identity)?)?;
+                    fresh_signing = Some(person::open_signing_key(&identity, &signing.sealed, &signing.public_key)?);
                     create(&dir.join("signing.age"), &signing.sealed)?;
                     create(&dir.join("signing-public.txt"), signing.public_key.as_bytes())?;
                     create(&dir.join("recipient.txt"), format!("{}\n", keys::recipient_of(&identity)?).as_bytes())?;
@@ -325,19 +352,27 @@ pub fn run(args: &[String]) -> Result<i32> {
                 }
             }
             if let Some(gateway) = &gateway {
-                let proof = if env.contains_key("LAYR_PERSON_KEY_FILE") {
-                    let access = load(&env, &home, &cwd, uid, login.as_deref())?
-                        .context("set LAYR_PERSON_KEY_FILE to prove the existing person identity")?;
-                    gateway.person_registration_proof(&access.identity)?
-                } else {
-                    None
-                };
-                gateway.person_call(
+                let login = login.as_deref().context("set LAYR_PERSON_LOGIN to register your person key")?;
+                if let Some(key) = fresh_signing {
+                    gateway.set_person(login, key)?;
+                }
+                if let Some(invite) = a.get("--invite") {
+                    let mut path = reqwest::Url::parse("https://gateway.invalid/api/person")?;
+                    path.query_pairs_mut().append_pair("login", login);
+                    gateway.person_call(
                     Method::PUT,
-                    "/api/person",
-                    proof.as_deref(),
+                    &format!("{}?{}", path.path(), path.query().unwrap()),
+                    Some(invite),
                     Some(&json!({"recipient":recipient,"paper":B64.encode(read(&dir.join("paper.age"),4096,uid)?),"signing_key":signing_key,"signing":B64.encode(signing)})),
                 )?;
+                }
+                let record = gateway.person_view()?;
+                if record["login"].as_str() != Some(login)
+                    || record["recipient"].as_str() != Some(recipient.as_str())
+                    || record["signing_key"].as_str() != Some(signing_key.as_str())
+                {
+                    bail!("gateway person record differs from your person key");
+                }
             }
             if let Some(login) = login {
                 crate::fsutil::atomic_write(&dir.join("login.txt"), login.as_bytes(), 0o600)?;
@@ -441,11 +476,6 @@ pub fn run(args: &[String]) -> Result<i32> {
                         None => Index::default(),
                     };
                     index.set(pin.clone());
-                    let challenge = gateway.person_call(Method::GET, "/api/person/challenge", None, None)?;
-                    let token = String::from_utf8(keys::decrypt(
-                        &access.identity,
-                        &B64.decode(challenge["challenge"].as_str().context("missing person challenge")?)?,
-                    )?)?;
                     let previous = record["index"].as_str().map(|data| B64.decode(data)).transpose()?.map(|data| {
                         use sha2::Digest;
                         hex::encode(sha2::Sha256::digest(data))
@@ -453,12 +483,12 @@ pub fn run(args: &[String]) -> Result<i32> {
                     gateway.person_call(
                         Method::PUT,
                         "/api/person/index",
-                        Some(&token),
+                        None,
                         Some(&json!({"data":B64.encode(person::seal_index(&access.identity,&index)?),"previous":previous})),
                     )?;
                     save_index(&dir, &access.identity, &index)?;
                     save_address(&dir, uid, &pin, &store_url, &name)?;
-                    gateway.person_call(Method::DELETE, &format!("/api/person/inbox/{id}"), Some(&token), None)?;
+                    gateway.person_call(Method::DELETE, &format!("/api/person/inbox/{id}"), None, None)?;
                     println!("accepted store {} recipient {}", pin.project, pin.recipient);
                     Ok(())
                 })?;
