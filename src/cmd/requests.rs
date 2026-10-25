@@ -358,3 +358,95 @@ fn effect(ctx: &Ctx, repo: &Repo, request: &Request) -> Result<Record> {
     }
     Ok(record)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use ed25519_dalek::SigningKey;
+
+    #[test]
+    fn executor_verifies_encrypted_inner_signature_and_person_binding() {
+        let root = std::env::temp_dir().join(format!("layr-request-verifier-{}", ids::new_id()));
+        let ctx = Ctx {
+            store: crate::store::Store::open(&root).unwrap(),
+            caller: crate::ctx::Caller::from_uid(rustix::process::geteuid().as_raw()),
+            cwd: root.clone(),
+            env: Default::default(),
+            out: std::cell::RefCell::new(Box::new(std::io::sink())),
+        };
+        let dir = ctx.store.projects_dir().join("p");
+        std::fs::create_dir_all(dir.join("meta/db")).unwrap();
+        let repo = Repo {
+            p: crate::store::Project {
+                store: &ctx.store,
+                name: "p".into(),
+                dir: dir.clone(),
+                id: ids::new_id(),
+                db: crate::db::Db::open(&dir.join("meta/db/layr.sqlite")).unwrap(),
+            },
+        };
+        let key = SigningKey::from_bytes(&[7; 32]);
+        let mut record = Record::new("project");
+        record.data = json!({"id":repo.p.id,"name":"p","config":{
+            "person.keys":{"ann@example.com":hex::encode(key.verifying_key().to_bytes())}
+        }});
+        repo.p.append(record, &ctx.actor()).unwrap();
+        let identity = layr_store::keys::generate_identity();
+        let recipient = layr_store::keys::recipient_of(&identity).unwrap();
+        let request = Request::new(
+            ids::new_id(),
+            repo.p.id.clone(),
+            "ann@example.com".into(),
+            ids::now_ms(),
+            Action::Comment {
+                change_id: ids::new_id(),
+                version: ids::new_id(),
+                path: None,
+                line: None,
+                text: "private comment".into(),
+                reply_to: None,
+            },
+        )
+        .unwrap();
+        let inner = request.sign(&key).unwrap().to_bytes().unwrap();
+        let bytes = request::seal(&inner, &recipient, &key).unwrap();
+        assert!(verify_request(&repo, &request.id, &bytes, &identity).is_ok());
+        let reason = verify_request(&repo, &request.id, &inner, &identity).err().unwrap().to_string();
+        assert_eq!(reason, "plaintext requests are not accepted");
+        assert!(verify_request(&repo, &ids::new_id(), &bytes, &identity).is_err());
+        // Construct hostile envelopes directly: seal intentionally refuses an invalid
+        // inner signature, so normal submissions cannot construct these cases.
+        let wrap = |inner: &[u8]| {
+            let ct = layr_store::keys::encrypt(&recipient, inner).unwrap();
+            let mut sealed = Sealed::parse(&bytes).unwrap();
+            sealed.ct = STANDARD.encode(&ct);
+            sealed.sig = hex::encode(
+                STANDARD
+                    .decode(layr_store::keys::sign_bytes(&[b"layr/request/v2\0".as_slice(), ct.as_slice()].concat(), &key))
+                    .unwrap(),
+            );
+            serde_json::to_vec(&sealed).unwrap()
+        };
+        let mut bad = request.sign(&key).unwrap();
+        bad.s = STANDARD.encode([0; 64]);
+        let malicious = wrap(&bad.to_bytes().unwrap());
+        let reason = verify_request(&repo, &request.id, &malicious, &identity).err().unwrap().to_string();
+        assert_eq!(reason, "person request signature does not verify");
+        let mut other = request.clone();
+        other.person = "bob@example.com".into();
+        let malicious = wrap(&other.sign(&key).unwrap().to_bytes().unwrap());
+        let reason = verify_request(&repo, &request.id, &malicious, &identity).err().unwrap().to_string();
+        assert!(reason.contains("outer and inner"));
+        let mut sealed = Sealed::parse(&bytes).unwrap();
+        sealed.sig = "0".repeat(128);
+        assert!(verify_request(&repo, &request.id, &serde_json::to_vec(&sealed).unwrap(), &identity).is_err());
+        sealed = Sealed::parse(&bytes).unwrap();
+        sealed.epoch = ids::new_id();
+        let reason =
+            verify_request(&repo, &request.id, &serde_json::to_vec(&sealed).unwrap(), &identity).err().unwrap().to_string();
+        assert_eq!(reason, "unsupported request epoch");
+        drop(repo);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
