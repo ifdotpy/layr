@@ -9,6 +9,7 @@ mod legacy;
 pub(crate) mod overlays;
 mod public;
 pub(crate) mod reader;
+mod release;
 mod writer;
 
 pub(crate) use layr_store::{canonical, format, keys, s3, zst};

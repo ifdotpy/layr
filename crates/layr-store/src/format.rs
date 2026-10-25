@@ -18,6 +18,14 @@ pub fn is_uuid(s: &str) -> bool {
     s.len() == 36 && uuid::Uuid::parse_str(s).map(|u| u.hyphenated().to_string() == s).unwrap_or(false)
 }
 
+/// One immutable encrypted release file, without any user-controlled path components.
+pub fn release_file(key: &str) -> bool {
+    key.strip_prefix("files/").and_then(|s| s.strip_suffix(".age")).is_some_and(is_uuid)
+}
+
+pub const RELEASE_FILE_LIMIT: u64 = 512 << 20;
+pub const RELEASE_OBJECT_LIMIT: u64 = RELEASE_FILE_LIMIT + (RELEASE_FILE_LIMIT / 65536 + 1) * 16 + 4096;
+
 pub const PART_LIMIT: usize = 16 << 20;
 pub const FULL_TREE_EVERY: usize = 32;
 pub const MAX_FILE_DELTAS: usize = 16;

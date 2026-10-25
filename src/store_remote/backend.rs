@@ -33,7 +33,9 @@ fn epoch_key(key: &str) -> std::borrow::Cow<'_, str> {
 fn epoch_object(key: &str) -> bool {
     key == "store.json"
         || key == "public.json"
-        || ["records/", "states/", "slots/", "history/", "index/", "requests/", "claims/"].iter().any(|p| key.starts_with(p))
+        || ["records/", "states/", "files/", "slots/", "history/", "index/", "requests/", "claims/"]
+            .iter()
+            .any(|p| key.starts_with(p))
 }
 impl Backend {
     pub fn set_epoch(&self, epoch: Option<&str>) -> Result<()> {
@@ -87,6 +89,81 @@ impl Backend {
         }
         let bytes = self.get(key)?.with_context(|| format!("missing remote object {key}"))?;
         super::keys::decrypt(identity, &bytes)
+    }
+
+    /// Stream a release object and select the authenticated identity of its epoch.
+    pub fn release_stream(&self, key: &str, identity: &str) -> Result<(Box<dyn Read>, String)> {
+        if !super::format::release_file(key) {
+            bail!("invalid release object");
+        }
+        if let Self::Epoch(epoch) = self {
+            if let Some(stream) = epoch.current.get_stream(key)? {
+                return Ok((stream, identity.into()));
+            }
+            for (backend, old_identity) in &epoch.history {
+                if let Some(stream) = backend.get_stream(key)? {
+                    return Ok((stream, old_identity.clone()));
+                }
+            }
+            bail!("missing release object {key}");
+        }
+        Ok((self.get_stream(key)?.with_context(|| format!("missing release object {key}"))?, identity.into()))
+    }
+
+    fn get_stream(&self, key: &str) -> Result<Option<Box<dyn Read>>> {
+        check_key(key)?;
+        match self {
+            Self::Epoch(_) => bail!("select an epoch before streaming"),
+            Self::Prefix(base, prefix) => base.get_stream(&format!("{prefix}{key}")),
+            Self::S3(s) => Ok(s.get_stream(key)?.map(|r| Box::new(r) as Box<dyn Read>)),
+            Self::Gateway(g) => Ok(g.release_stream(key)?.map(|r| Box::new(r) as Box<dyn Read>)),
+            Self::File(root, uid, gid) => crate::privs::as_user_fs(*uid, *gid, || {
+                let path = crate::fsutil::safe_join(root, key)?;
+                match OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path) {
+                    Ok(file) => {
+                        if !file.metadata()?.is_file() {
+                            bail!("remote object is not a file");
+                        }
+                        Ok(Some(Box::new(file) as Box<dyn Read>))
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                    Err(e) => Err(e.into()),
+                }
+            }),
+        }
+    }
+
+    pub fn put_file_new(&self, key: &str, mut source: fs::File) -> Result<bool> {
+        check_key(key)?;
+        match self {
+            Self::Epoch(epoch) => epoch.current.put_file_new(key, source),
+            Self::Prefix(base, prefix) => base.put_file_new(&format!("{prefix}{key}"), source),
+            Self::S3(s) => s.put_file_new(key, source),
+            Self::Gateway(g) => g.put_file_new(key, source),
+            Self::File(root, uid, gid) => crate::privs::as_user_fs(*uid, *gid, || {
+                fs::create_dir_all(root)?;
+                let path = crate::fsutil::safe_join(root, key)?;
+                let parent = path.parent().context("object parent")?;
+                fs::create_dir_all(parent)?;
+                crate::fsutil::safe_join(root, key)?;
+                let temporary = parent.join(format!(".put-{}", crate::ids::new_id()));
+                let result = (|| {
+                    let mut out = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temporary)?;
+                    std::io::copy(&mut source, &mut out)?;
+                    out.sync_all()?;
+                    match fs::hard_link(&temporary, &path) {
+                        Ok(()) => {
+                            fs::File::open(parent)?.sync_all()?;
+                            Ok(true)
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+                        Err(e) => Err(e.into()),
+                    }
+                })();
+                let _ = fs::remove_file(temporary);
+                result
+            }),
+        }
     }
 
     pub fn scoped(&self, prefix: &str) -> Result<Self> {
@@ -180,7 +257,12 @@ impl Backend {
                     return epoch.root.get(key);
                 }
                 let data = epoch.current.get(&epoch_key(key))?;
-                if data.is_some() || !(key.starts_with("states/") || key.starts_with("requests/") || key.starts_with("claims/")) {
+                if data.is_some()
+                    || !(key.starts_with("states/")
+                        || key.starts_with("files/")
+                        || key.starts_with("requests/")
+                        || key.starts_with("claims/"))
+                {
                     return Ok(data);
                 }
                 for (backend, _) in &epoch.history {
@@ -260,7 +342,11 @@ impl Backend {
                     return epoch.root.list(prefix);
                 }
                 let mut objects: std::collections::BTreeMap<String, Object> = std::collections::BTreeMap::new();
-                if prefix.starts_with("states/") || prefix.starts_with("requests/") || prefix.starts_with("claims/") {
+                if prefix.starts_with("states/")
+                    || prefix.starts_with("files/")
+                    || prefix.starts_with("requests/")
+                    || prefix.starts_with("claims/")
+                {
                     for (backend, _) in epoch.history.iter().rev() {
                         for object in backend.list(prefix)? {
                             objects.insert(object.key.clone(), object);
@@ -297,7 +383,13 @@ impl Backend {
         check_key(key)?;
         match self {
             Self::Epoch(epoch) => {
-                if epoch_object(key) {
+                if key.starts_with("files/") {
+                    epoch.current.delete(key)?;
+                    for (backend, _) in &epoch.history {
+                        backend.delete(key)?;
+                    }
+                    Ok(())
+                } else if epoch_object(key) {
                     epoch.current.delete(&epoch_key(key))
                 } else {
                     epoch.root.delete(key)

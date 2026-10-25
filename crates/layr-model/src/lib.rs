@@ -16,6 +16,7 @@ pub mod overlays;
 pub mod policy;
 pub mod probes;
 pub mod protection;
+pub mod release;
 pub mod screenshots;
 pub mod types;
 pub mod validation;
@@ -201,6 +202,7 @@ impl Project {
         let mut unique = BTreeMap::<String, Record>::new();
         let mut sequences = BTreeMap::new();
         for record in records {
+            if record.op == "release.files" { serde_json::from_value::<release::Files>(record.data.clone())?.validate()?; }
             if !record.project.is_empty() && record.project != id {
                 bail!("record belongs to another project");
             }

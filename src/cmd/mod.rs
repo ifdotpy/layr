@@ -13,6 +13,7 @@ pub mod overlaycmd;
 pub mod probe;
 pub mod queue;
 pub mod refs;
+pub mod release;
 pub mod remote;
 pub mod replicate;
 pub mod requests;
@@ -194,7 +195,7 @@ Lines and states:
    save [--note <text>] [--all-lines] [--running] [--force] [--caches]
    park [list/show/pop/apply/drop/clear]
    tag, merge, pick, invert, replay, undo, op, try, bisect run, adopt
-   ref set/list/log/delete, attest, attestations, change list/show/log/diff
+   ref set/list/log/delete, release attach/files/get, attest, attestations, change list/show/log/diff
    view [<rev or line>] [--json], view save [<line>], view show <id>
 Remotes:
    person keys, show, accept
@@ -292,6 +293,7 @@ pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
         "approvals" => Err(exit(1, "this command was removed; use 'layr attestations <rev> [--kind <kind>]'")),
         "checks" => checks::checks(ctx, &rest),
         "ref" => refs::refs(ctx, &rest),
+        "release" => release::release(ctx, &rest),
         "queue" => queue::queue(ctx, &rest),
         "request" => requests::request(ctx, &rest),
         "requests" => requests::requests(ctx, &rest),

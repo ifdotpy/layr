@@ -109,6 +109,9 @@ pub fn is_ref(s: &str) -> bool {
 /// machine can then never name a path outside the project.
 pub fn validate(r: &Record) -> anyhow::Result<()> {
     use anyhow::bail;
+    if r.op == "release.files" {
+        serde_json::from_value::<crate::release::Files>(r.data.clone())?.validate()?;
+    }
     let uuid = |what: &str, v: &str| -> anyhow::Result<()> {
         if !is_uuid(v) {
             bail!("record {}: {what} is not an id: {v:?}", r.seq);

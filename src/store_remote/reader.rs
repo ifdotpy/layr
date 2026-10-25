@@ -482,6 +482,25 @@ pub(super) fn gc(store: &Store, dry_run: bool) -> Result<Vec<String>> {
     }
     let cutoff = chrono::Utc::now().timestamp() - 86400;
     let mut deleted = Vec::new();
+    let release_objects = store.backend.list("files/")?;
+    if !release_objects.is_empty() {
+        let model = super::release::model(&descriptor.project, &records, &store.machine)?;
+        let (live, known) = model.release_objects(crate::ids::now_ms())?;
+        for object in release_objects {
+            if !layr_model::release::object(&object.key) {
+                bail!("invalid release object in store");
+            }
+            // A recent unattached upload may still be in progress. Published files become
+            // collectible immediately after their release ref is deleted.
+            if live.contains(&object.key) || (!known.contains(&object.key) && object.modified >= cutoff) {
+                continue;
+            }
+            if !dry_run {
+                store.backend.delete(&object.key)?;
+            }
+            deleted.push(object.key);
+        }
+    }
     for object in objects {
         let Some((state, attempt, _)) = format::parse_data_name(&object.key) else {
             continue;
