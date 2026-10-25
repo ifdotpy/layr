@@ -1354,8 +1354,9 @@ mod tests {
         let w = writer(src.clone(), stop.clone());
         let results = (|| -> Result<()> {
             for n in 0..2 {
-                apfs::snapshot(&src, &s.0.join(format!("full{n}")), n % 2 == 0)?;
-                snapshot_over(&Layered::complete(&base), "base", &src, &s.0.join(format!("thin{n}")), false)?;
+                apfs::snapshot(&src, &s.0.join(format!("full{n}")), n % 2 == 0).with_context(|| format!("full copy {n}"))?;
+                snapshot_over(&Layered::complete(&base), "base", &src, &s.0.join(format!("thin{n}")), false)
+                    .with_context(|| format!("thin copy {n}"))?;
             }
             Ok(())
         })();
@@ -1374,7 +1375,9 @@ mod tests {
             let thin = Layered::over(&s.0.join(format!("thin{n}")), Layered::complete(&base))?;
             for i in 0..2000 {
                 let rel = format!("d{}/f{i}", i % 10);
-                for bytes in [fs::read(full.join(&rel))?, fs::read(thin.path(&rel)?)?] {
+                let full_bytes = fs::read(full.join(&rel)).with_context(|| format!("full copy {n}: {rel}"))?;
+                let thin_bytes = fs::read(thin.path(&rel)?).with_context(|| format!("thin copy {n}: {rel}"))?;
+                for bytes in [full_bytes, thin_bytes] {
                     // The writer truncates before it writes: an empty file is one of its versions.
                     assert!(bytes.is_empty() || bytes == b"first" || bytes.starts_with(b"version "), "{rel}: {bytes:?}");
                 }
