@@ -438,8 +438,8 @@ impl Project {
                 return false;
             }
             let rec = &self.records[*i];
-            rec.machine == owner.machine
-                && rec.actor.uid == owner.actor.uid
+            ((a.signer.starts_with("person:") && r.signer == a.signer)
+                || (!a.signer.starts_with("person:") && rec.machine == owner.machine && rec.actor.uid == owner.actor.uid))
                 && (rec.data["revokes"].as_array().is_some_and(|v| v.iter().any(|v| v.as_str() == Some(id)))
                     || (rec.op == "approve.withdraw" && a.kind == "approval"))
         })
@@ -542,6 +542,22 @@ impl Project {
         let common: Vec<_> = self.ancestors(a).into_iter().filter(|id| right.contains(id)).collect();
         common.iter().find(|c| !common.iter().any(|d| d != *c && self.ancestors(d).contains(c))).cloned()
     }
+    /// Signed discussion records, in stable record order, with actor and timestamp.
+    pub fn comments(&self, change: &str) -> Vec<Value> {
+        self.records
+            .iter()
+            .filter_map(|record| {
+                let mut comment = record.data.get("comment")?.clone();
+                if comment["change_id"].as_str() != Some(change) {
+                    return None;
+                }
+                comment["actor"] = serde_json::to_value(&record.actor).ok()?;
+                comment["time"] = serde_json::json!(record.time);
+                Some(comment)
+            })
+            .collect()
+    }
+
     /// CLI `change show --json`, including versions, all evidence, and stored queue behavior.
     /// Other behavior uses the supplied source definitions and probe output bytes.
     pub fn change_show(&self, id: &str, context: &probes::Context) -> Result<Value> {
@@ -566,7 +582,7 @@ impl Project {
             Ok(None) => serde_json::json!({"probes":[]}),
             Err(error) => serde_json::json!({"status":"unavailable","reason":format!("{error:#}")}),
         };
-        Ok(serde_json::json!({"change_id":id,"versions":rows,"behavior":behavior}))
+        Ok(serde_json::json!({"change_id":id,"versions":rows,"behavior":behavior,"comments":self.comments(id)}))
     }
     fn change_behavior(&self, state: &StateRec, context: &probes::Context) -> Result<Value> {
         for entry in self.queue_list(None).iter().rev() {
@@ -631,6 +647,7 @@ impl Project {
                 || a.kind != "approval"
                 || self.is_revoked(&a.attestation_id)
                 || record.data.get("declassify").is_some()
+                || a.signer.starts_with("person:")
                 || record.machine != self.machine
             {
                 continue;
@@ -644,6 +661,38 @@ impl Project {
         out.sort_by_key(|(uid, _)| *uid);
         out
     }
+    /// Evidence signed by one person, including scoped approvals, that is still active.
+    pub fn person_attestations(&self, subject: &str, login: &str) -> Vec<String> {
+        self.attestations
+            .iter()
+            .filter(|(_, a)| {
+                a.subject.id == subject
+                    && a.signer == format!("person:{login}")
+                    && a.kind == "approval"
+                    && !self.is_revoked(&a.attestation_id)
+            })
+            .map(|(_, a)| a.attestation_id.clone())
+            .collect()
+    }
+
+    /// Active exact-state person approvals. They remain attributable across executor machines.
+    pub fn person_approvals(&self, subject: &str) -> Vec<(String, i64)> {
+        let mut people = BTreeMap::<String, i64>::new();
+        for (index, a) in &self.attestations {
+            let Some(login) = a.signer.strip_prefix("person:") else {
+                continue;
+            };
+            if a.subject.id == subject
+                && a.kind == "approval"
+                && !self.is_revoked(&a.attestation_id)
+                && self.records[*index].data.get("declassify").is_none()
+            {
+                people.entry(login.into()).and_modify(|time| *time = (*time).max(a.time)).or_insert(a.time);
+            }
+        }
+        people.into_iter().collect()
+    }
+
     /// Active check details in record order, including failed checks.
     pub fn checks(&self, subject: &str) -> Vec<Value> {
         self.attestations(subject, Some("check"))

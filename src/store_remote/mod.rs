@@ -208,6 +208,14 @@ impl Store {
         self.aws_profile = profile;
     }
 
+    /// Authenticated immutable-object access for person requests and executor claims.
+    pub fn request_backend(&mut self, ctx: &Ctx) -> Result<&Backend> {
+        self.connect(ctx)?;
+        let descriptor = self.descriptor()?;
+        self.identity(&descriptor, self.paper_key_text.as_deref())?;
+        Ok(&self.backend)
+    }
+
     pub fn configure(&mut self, ctx: &Ctx, opts: &ConfigureOptions) -> Result<Configured> {
         self.connect(ctx)?;
         if self.backend.get("store.json")?.is_some() {

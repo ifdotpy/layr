@@ -1561,6 +1561,20 @@ pub fn access(ctx: &Ctx, args: &[String]) -> Result<i32> {
     };
     let pol = repo.policy();
     match sub {
+        "person-key" if rest.len() == 2 => {
+            repo.require(ctx, "access")?;
+            let login = &rest[0];
+            if !layr_store::person::login_name(login) {
+                bail!("invalid person login");
+            }
+            layr_store::person::verifying_key(&rest[1])?;
+            let _lock = repo.p.lock()?;
+            let mut pins = repo.p.config_value("person.keys")?.unwrap_or_else(|| serde_json::json!({}));
+            pins[login] = serde_json::json!(rest[1]);
+            set_config(ctx, repo, "person.keys", pins)?;
+            outln!(ctx, "pinned person {login}");
+            Ok(0)
+        }
         "list" => {
             for (k, r) in &pol.access {
                 outln!(ctx, "{}\t{}", show_principal(k), r.name());

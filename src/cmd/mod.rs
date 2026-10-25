@@ -12,6 +12,7 @@ pub mod overlaycmd;
 pub mod probe;
 pub mod queue;
 pub mod refs;
+pub mod requests;
 pub mod remote;
 pub mod replicate;
 pub mod transfer;
@@ -288,10 +289,13 @@ pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
         "approvals" | "checks" => Err(exit(1, "this command was removed; use 'layr attestations <rev> [--kind <kind>]'")),
         "ref" => refs::refs(ctx, &rest),
         "queue" => queue::queue(ctx, &rest),
+        "request" => requests::request(ctx, &rest),
+        "requests" => requests::requests(ctx, &rest),
         "view" => view::view(ctx, &rest),
         "attest" => attest::attest(ctx, &rest),
         "attestations" => attest::attestations(ctx, &rest),
         "change" => change::change(ctx, &rest),
+        "comment" => change::comment(ctx, &rest),
         "probe" => probe::probe(ctx, &rest),
         "gc" => admin::gc(ctx, &rest),
         "fsck" => admin::fsck(ctx, &rest),

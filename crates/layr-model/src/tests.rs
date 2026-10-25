@@ -290,3 +290,41 @@ fn hidden_layers_come_only_from_their_own_records() {
     );
     assert!(!serde_json::to_string(&other).unwrap().contains("hidden"));
 }
+
+#[test]
+fn person_approvals_survive_executor_scope_and_keep_revocations_separate() {
+    let mut source = record(1, "save");
+    source.states.push(state("reviewed", StateKind::Commit, &[]));
+    source.states[0].author.email = "author@example.com".into();
+    let mut ann = record(2, "attest");
+    ann.actor.uid = u32::MAX;
+    ann.actor.name = "person:ann@example.com".into();
+    ann.data = json!({"attestation":Attestation {format:1,attestation_id:ann.id.clone(),subject:Subject{kind:"state".into(),id:"reviewed".into()},change_id:None,kind:"approval".into(),payload_digest:"0".repeat(64),payload_ref:None,signer:ann.actor.name.clone(),time:ann.time}});
+    let mut bob = ann.clone();
+    bob.id = "bob".into();
+    bob.seq = 3;
+    bob.time = 3;
+    bob.actor.name = "person:bob@example.com".into();
+    bob.data["attestation"]["attestation_id"] = json!(bob.id);
+    bob.data["attestation"]["signer"] = json!(bob.actor.name);
+    bob.data["attestation"]["time"] = json!(3);
+    let mut revoke = bob.clone();
+    revoke.id = "revoke".into();
+    revoke.seq = 4;
+    revoke.time = 4;
+    revoke.machine = "another-executor".into();
+    revoke.data["attestation"]["attestation_id"] = json!(revoke.id);
+    revoke.data["attestation"]["kind"] = json!("revoke");
+    revoke.data["revokes"] = json!([ann.id, bob.id]);
+    let project = fold(vec![source, ann.clone(), bob.clone(), revoke]);
+    assert!(!project.is_revoked(&ann.id));
+    assert!(project.is_revoked(&bob.id));
+    assert!(project.approvals("reviewed").is_empty());
+    assert_eq!(project.person_approvals("reviewed"), vec![("ann@example.com".into(), 2)]);
+    let mut policy = policy::Policy::default();
+    policy.access.insert("person:ann@example.com".into(), policy::Role::Maintainer);
+    let rule = policy::RuleSpec::default().rule();
+    assert_eq!(project.allowed_person_approvals("reviewed", None, protection::ApprovalMode::Ref, &policy, &rule).len(), 1);
+    policy.deny.insert("person:ann@example.com".into(), vec!["*".into()]);
+    assert!(project.allowed_person_approvals("reviewed", None, protection::ApprovalMode::Ref, &policy, &rule).is_empty());
+}

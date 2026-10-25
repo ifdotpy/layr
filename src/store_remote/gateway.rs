@@ -366,12 +366,17 @@ impl Gateway {
         if data.len() > OBJECT_LIMIT {
             bail!("gateway object exceeds 32 MiB");
         }
-        let token = if key.starts_with("slots/") {
+        let person_request =
+            key.strip_prefix("requests/").and_then(|s| s.strip_suffix(".json")).is_some_and(layr_store::request::request_id);
+        let token = if person_request {
+            String::new() // The person signature and authenticated tailnet login authorize this object.
+        } else if key.starts_with("slots/") {
             self.proof()?
         } else {
             self.token.clone().context("set LAYR_GATEWAY_TOKEN_FILE to a private write token file")?
         };
-        let response = self.send(Method::PUT, &format!("objects/{key}"), Some(&token), None, Some(data))?;
+        let response =
+            self.send(Method::PUT, &format!("objects/{key}"), (!token.is_empty()).then_some(token.as_str()), None, Some(data))?;
         match response.status().as_u16() {
             201 => Ok(true),
             412 => Ok(false),
