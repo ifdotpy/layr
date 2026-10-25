@@ -309,7 +309,7 @@ impl Browse {
     }
 
     pub fn read(&mut self, entry: &Entry) -> Result<Vec<u8>> {
-        let descriptor: Descriptor = serde_json::from_slice(&self.backend.get("store.json")?.context("store.json is missing")?)?;
+        let descriptor: Descriptor = serde_json::from_slice(&self.backend.root().get("store.json")?.context("store.json is missing")?)?;
         if descriptor.format != 2 {
             bail!("unsupported store format {}", descriptor.format);
         }

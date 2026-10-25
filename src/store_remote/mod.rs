@@ -341,9 +341,10 @@ impl Store {
             // machine its own slot. Never create a slot to perform this transition.
             if repo.p.config_value(&format!("cloud.remote.{name}.public"))? == Some(serde_json::json!(true)) {
                 if let Some(slot) = self.backend.get(&format!("slots/machine-{}.age", self.machine))? {
+                    let current_recipient=self.descriptor()?.recipient;
                     if keys::open_machine_slot(&slot, &self.key)
                         .ok()
-                        .is_some_and(|identity| keys::recipient_of(&identity).ok().as_deref() == Some(pin.recipient.as_str()))
+                        .is_some_and(|identity| keys::recipient_of(&identity).ok().as_deref() == Some(current_recipient.as_str()))
                     {
                         crate::cmd::admin::set_config(
                             ctx,
@@ -365,9 +366,8 @@ impl Store {
 
     pub fn trust_store(&mut self, ctx: &Ctx, repo: &Repo, name: &str, recipient: &str) -> Result<()> {
         recipient.parse::<age::x25519::Recipient>().map_err(|e| anyhow::anyhow!("invalid store recipient: {e}"))?;
-        self.connect(ctx)?;
         let previous = self.pin.take();
-        let descriptor = self.descriptor();
+        let descriptor = self.connect(ctx).and_then(|_|self.root_descriptor());
         self.pin = previous;
         let descriptor = descriptor?;
         if let Some(pin) = &self.pin {
@@ -383,7 +383,11 @@ impl Store {
     }
 
     fn root_descriptor(&self) -> Result<Descriptor> {
-        Ok(serde_json::from_slice(&self.backend.root().get("store.json")?.context("missing root descriptor")?)?)
+        let descriptor:Descriptor=serde_json::from_slice(&self.backend.root().get("store.json")?.context("missing root descriptor")?)?;
+        if descriptor.format!=2 || !crate::model::is_uuid(&descriptor.project) {bail!("invalid root store descriptor");}
+        descriptor.recipient.parse::<age::x25519::Recipient>().map_err(|_|anyhow::anyhow!("invalid root store recipient"))?;
+        if !self.project.is_empty() && self.project!=descriptor.project {bail!("store project differs from local project");}
+        Ok(descriptor)
     }
 
     fn descriptor(&self) -> Result<Descriptor> {
@@ -529,9 +533,10 @@ impl Store {
         }
         let mode = self.access_mode()?;
         for name in repo.visible_overlay_names(ctx)? {
-            let overlay = repo.overlay_repo(&name)?;
-            if epochs::overlay_mode(&overlay)? > mode {
-                bail!("overlay {name} is more open than remote project mode {}; change the remote mode before pushing", mode.name());
+            if let Ok(overlay) = repo.overlay_repo(&name) {
+                if epochs::overlay_mode(&overlay)? > mode {
+                    bail!("overlay {name} is more open than remote project mode {}; change the remote mode before pushing", mode.name());
+                }
             }
         }
         let mut report = writer::push(self, ctx, repo, opts)?;

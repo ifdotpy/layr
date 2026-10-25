@@ -2,7 +2,7 @@
 # Project epochs, access modes, audience closure and overlay privacy through the CLI.
 . "$(dirname "$0")/lib.sh"
 set -e
-for machine in owner removed reader fresh anonymous person; do new_fs "$T/$machine" 2G; done
+for machine in owner removed reader fresh anonymous person upgrade; do new_fs "$T/$machine" 2G; done
 export ROT_TEST_ROOT="$T" ROT_TEST_BINARY="$LAYR"
 export ROT_TEST_PROBE="$(dirname "$LAYR")/examples/epoch_probe"
 python3 - <<'PY'
@@ -10,7 +10,7 @@ import hashlib,http.client,json,os,pathlib,re,sqlite3,subprocess,time,uuid
 root=pathlib.Path(os.environ['ROT_TEST_ROOT']);binary=os.environ['ROT_TEST_BINARY'];probe=os.environ['ROT_TEST_PROBE'];checks=0
 base=os.environ.copy()
 for key in ['LAYR_SOCKET','LAYR_PROJECT','LAYR_LINE','LAYR_PERSON_KEY_FILE','LAYR_PAPER_KEY_FILE','LAYR_GATEWAY_TOKEN_FILE']:base.pop(key,None)
-envs={n:dict(base,LAYR_ROOT=str(root/n/'store')) for n in ['owner','removed','reader','fresh','anonymous','person']}
+envs={n:dict(base,LAYR_ROOT=str(root/n/'store')) for n in ['owner','removed','reader','fresh','anonymous','person','upgrade']}
 A=envs['owner'];B=envs['removed'];C=envs['reader'];D=envs['fresh'];P=envs['anonymous']
 def run(args,env=A,ok=True,input=None):
  p=subprocess.run([binary,*args],cwd=root,env=env,text=True,capture_output=True,input=input,timeout=120)
@@ -142,6 +142,10 @@ check(json.loads(run(['overlay','show','visible','--json'],P).stdout)['access_mo
 public_line=root/'anonymous/store/projects/project/lines/main'
 check((public_line/'visible-layer.txt').read_text()=='explicit public overlay bytes\n' and not (public_line/'hidden-layer.txt').exists(),'explicit public overlay files materialize while hidden files stay absent')
 check('hidden-rotation-731' not in json.dumps(records(root/'anonymous/store/projects/project')),'public records contain no hidden overlay name')
+Q=envs['upgrade'];run(['clone','file://'+str(root/'archive'),'project','--public','-q'],Q);Q['LAYR_PROJECT']='project'
+q=json.loads(run(['remote','self','--json'],Q).stdout)
+run(['remote','trust','archive',q['id'],'--public-key',q['public_key']]);run(['push','archive','-q']);run(['fetch','origin','-q'],Q)
+check(run(['config','cloud.remote.origin.public'],Q).stdout.strip()=='false','a current-epoch machine slot upgrades a public clone without changing the root pin')
 run(['remote','mode','archive','service']);service_epoch=latest();service_prefix=root/'archive/project/epochs'/service_epoch['data']['epoch']
 check(service_epoch['data']['mode']=='service' and not (service_prefix/'public.json').exists(),'closing public to service rotates without a public opener')
 check(json.loads(run(['overlay','show','visible','--json']).stdout)['access_mode']=='service','project closing tightens visible overlay in the same operation')
@@ -167,7 +171,7 @@ try:
   time.sleep(.025)
  else:raise AssertionError('rotated mount did not start')
  connection=http.client.HTTPConnection('127.0.0.1',int(match[1]),timeout=10);connection.request('GET','/main/private.txt');response=connection.getresponse();data=response.read();connection.close()
- check(response.status==200 and data==b'private after closing\n','browse reads current files through rotated epochs')
+ check(response.status==200 and data==b'private after closing\n',f'browse reads current files through rotated epochs (HTTP {response.status}, {data!r})')
 finally:process.terminate();process.wait(timeout=10);log.close()
 check(not any('hidden-rotation-731' in json.dumps(r) for r in records(project)),'parent records contain no hidden mode metadata')
 refuse(['remote','rotate','archive','--remove','machine:'+a['id']],'rotation cannot remove its own remaining signer')

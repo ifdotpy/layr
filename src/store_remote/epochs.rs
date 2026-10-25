@@ -174,8 +174,8 @@ pub(super) fn connect(store: &mut Store) -> Result<()> {
     if store.layer.is_some() {
         return Ok(());
     }
-    let Some(bytes) = store.backend.get("store.json")? else { return Ok(()) };
-    let root: Descriptor = serde_json::from_slice(&bytes)?;
+    if store.backend.get("store.json")?.is_none() {return Ok(());}
+    let root=store.root_descriptor()?;
     if let Some(pin) = &store.pin {
         pin.check(&root)?;
     }
