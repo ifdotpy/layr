@@ -24,7 +24,7 @@ def openssl(args): subprocess.run(['openssl',*args],check=True,stdout=subprocess
 executor=dict(base,LAYR_ROOT=str(root/'executor/store'))
 machine=json.loads(run(['remote','self','--json'],executor).stdout)
 run(['init','project','-q'],base)
-owner=dict(base,LAYR_PROJECT='project')
+owner=dict(base,LAYR_PROJECT='project',LAYR_LINE='main')
 line=pathlib.Path(base['LAYR_ROOT'])/'projects/project/lines/main';(line/'hello.txt').write_text('private machine bootstrap\n')
 run(['add','hello.txt'],owner);run(['save','-qm','Private gateway project'],owner)
 run(['remote','add','archive','file://'+str(root/'archive'),'--paper-key-out',str(root/'paper')],owner)
