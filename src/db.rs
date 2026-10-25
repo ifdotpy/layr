@@ -317,7 +317,10 @@ impl Db {
                         tx.execute("UPDATE approvals SET withdrawn=1 WHERE id=?1 AND uid=?2", params![id, rec.actor.uid as i64])?;
                     }
                 }
-                if a["kind"] == "approval" && rec.data.get("declassify").is_none() {
+                if a["kind"] == "approval"
+                    && rec.data.get("declassify").is_none()
+                    && !a["signer"].as_str().is_some_and(|s| s.starts_with("person:"))
+                {
                     tx.execute(
                         "INSERT OR IGNORE INTO approvals(id,state,uid,time) VALUES(?1,?2,?3,?4)",
                         params![rec.id, a["subject"]["id"].as_str(), rec.actor.uid as i64, rec.time],
@@ -569,7 +572,7 @@ impl Db {
     pub fn approvals(&self, state: &str) -> Result<Vec<(u32, i64)>> {
         let mut st = self.conn.prepare(
             "SELECT a.uid,MAX(json_extract(a.rec,'$.time')) FROM attestations a
-            WHERE (a.local=1 OR EXISTS (SELECT 1 FROM approvals p WHERE p.id=a.id)) AND a.subject=?1 AND a.kind='approval'
+            WHERE (a.local=1 OR EXISTS (SELECT 1 FROM approvals p WHERE p.id=a.id)) AND a.subject=?1 AND a.kind='approval' AND json_extract(a.rec,'$.signer') NOT LIKE 'person:%'
             AND NOT EXISTS (SELECT 1 FROM records scoped WHERE scoped.id=a.id AND json_type(scoped.raw,'$.r.data.declassify') IS NOT NULL) AND NOT EXISTS
             (SELECT 1 FROM attestation_revocations r WHERE r.target=a.id AND r.machine=a.machine AND r.uid=a.uid AND r.ord>a.ord)
             GROUP BY a.machine,a.uid ORDER BY a.uid",
@@ -762,6 +765,7 @@ impl Db {
             None
         };
         if let Some(a) = a {
+            let signer = if a.signer.starts_with("person:") { &a.signer } else { &rec.machine };
             self.conn.execute(
                 "INSERT INTO attestations(id,subject,kind,rec,machine,uid,ord,local) VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(id) DO UPDATE SET local=MAX(attestations.local,excluded.local)",
                 params![
@@ -769,7 +773,7 @@ impl Db {
                     a.subject.id,
                     a.kind,
                     serde_json::to_string(&a)?,
-                    rec.machine,
+                    signer,
                     rec.actor.uid as i64,
                     ord,
                     local as i64
@@ -785,7 +789,7 @@ impl Db {
                     self.conn.execute(
                         "INSERT OR IGNORE INTO attestation_revocations(id,target,machine,uid,ord)
                          SELECT ?1,?2,?3,?4,?5 FROM attestations WHERE id=?2 AND subject=?6",
-                        params![a.attestation_id, id, rec.machine, rec.actor.uid as i64, ord, a.subject.id],
+                        params![a.attestation_id, id, signer, rec.actor.uid as i64, ord, a.subject.id],
                     )?;
                 }
             }

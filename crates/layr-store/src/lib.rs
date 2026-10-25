@@ -17,6 +17,7 @@ pub mod zst;
 
 pub mod person;
 pub mod public;
+pub mod request;
 
 #[cfg(any(feature = "native", feature = "wasm"))]
 pub mod reader;

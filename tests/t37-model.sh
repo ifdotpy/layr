@@ -90,6 +90,7 @@ eq 'replay creates the third change version' "$V3" "$(state_id "changes/$CHANGE/
 eq 'the change has exactly three versions' 3 "$(l change show "$CHANGE" --json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["versions"]))')"
 l try -q "$V3" --check smoke
 l approve -q "$V3"
+l comment "$CHANGE" "Review the exact third version." --version v3 --path feature.txt --line 1 --json > "$T/comment.json"
 
 # Push sends all present commit states, so v1 and v2 are in the pushed store.
 # The local snapshot export is an independent second input for the CLI JSON twin.
@@ -470,6 +471,8 @@ assert load('merge-status') == browser
 assert load('interdiff')['files'] and '+version two' in load('interdiff')['diff']
 assert load('interdiff-replay')['diff'] == '' and load('interdiff-replay')['files'] == []
 assert load('merge-refusals') == {'merge': False, 'ref': False}
+assert load('change')['comments'][0]['text'] == 'Review the exact third version.'
+assert load('change')['comments'][0]['path'] == 'feature.txt' and load('change')['comments'][0]['line'] == 1
 assert len(load('changes')) == project['counts']['changes']
 assert len(load('operations-all')) == project['counts']['operations']
 PYPAGES

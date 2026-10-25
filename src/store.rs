@@ -451,7 +451,9 @@ impl<'a> Project<'a> {
             rec.actor = actor.clone();
             if let Some(a) = rec.data.get_mut("attestation").and_then(|v| v.as_object_mut()) {
                 a.insert("attestation_id".into(), serde_json::json!(rec.id));
-                a.insert("signer".into(), serde_json::json!(m.id));
+                if a.get("signer").and_then(|v| v.as_str()).is_none_or(|s| !s.starts_with("person:")) {
+                    a.insert("signer".into(), serde_json::json!(m.id));
+                }
                 a.insert("time".into(), serde_json::json!(rec.time));
             }
             crate::model::validate(&rec)?;
