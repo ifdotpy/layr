@@ -19,7 +19,7 @@ def run(args,env,success=True):
  return p
 def openssl(args): subprocess.run(['openssl',*args],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 openssl(['req','-x509','-newkey','rsa:2048','-nodes','-keyout',str(root/'tls-key.pem'),'-out',str(root/'tls-cert.pem'),'-days','1','-subj','/CN=localhost','-addext','subjectAltName=DNS:localhost,IP:127.0.0.1','-addext','basicConstraints=critical,CA:TRUE'])
-people={}; challenges={}; sessions={}; stats={'challenge':0,'session':0,'registration':0,'renew':0,'requests':0,'index':0,'inbox':0,'slots':0}; faults={}; errors=[]
+people={}; challenges={}; sessions={}; invites={'registration-invite':'ann@example.com','fresh-invite':'fresh@example.com'}; stats={'challenge':0,'session':0,'registration':0,'renew':0,'requests':0,'index':0,'inbox':0,'slots':0,'request_attempts':0}; faults={}; errors=[]
 class Handler(http.server.BaseHTTPRequestHandler):
  def log_message(self,*args): pass
  def reply(self,status,body):
@@ -54,10 +54,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
    token=secrets.token_urlsafe(32);sessions[token]=login
    self.reply(200,{'token':token,'expires':int(time.time()*1000)+(1000 if faults.pop('short_session',False) else 43200000),'login':login});return
   if path=='/api/person' and self.command=='PUT':
-   if bearer!='registration-invite' or login!='ann@example.com': self.reply(401,{});return
+   if invites.get(bearer)!=login: self.reply(401,{});return
    if login in people: self.reply(409,{});return
    assert all(body.get(k) for k in ['recipient','paper','signing_key','signing'])
-   people[login]=body;stats['registration']+=1;self.reply(200,{'login':login,'new':True});return
+   invites.pop(bearer);people[login]=body;stats['registration']+=1;self.reply(200,{'login':login,'new':True});return
   login=sessions.get(bearer)
   if not login: self.reply(401,{});return
   if faults.pop('reject_session',False):
@@ -77,6 +77,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
    name=path.rsplit('/',1)[1];assert name.startswith('person-'+login+'-');stats['slots']+=1
    self.reply(200,(root/'archive/slots'/name).read_bytes());return
   if path.startswith('/v1/p/project/objects/requests/') and self.command=='PUT':
+   stats['request_attempts']+=1
+   if faults.pop('reject_request_session',False):
+    sessions.pop(bearer);self.reply(401,{});return
    assert body['v']==2 and body['person']==login and body['sig']
    stats['requests']+=1;self.reply(201,{});return
   self.reply(404,{})
@@ -115,7 +118,7 @@ try:
  p=run(['person','show','--site',site],bob,False)
  check(p.returncode!=0 and '401' in p.stderr,'wrong signing key cannot sign in as another login')
  p=run(['person','keys','--site',site,'--invite','registration-invite'],ann,False)
- check(p.returncode!=0 and '409' in p.stderr and stats['registration']==1,'used invite cannot overwrite existing person keys')
+ check(p.returncode!=0 and '401' in p.stderr and stats['registration']==1,'used invite cannot overwrite existing person keys')
  # Create a real project, sealed person invite and person slot, then accept over HTTPS.
  run(['init','session-project','-q'],base)
  project=dict(base,LAYR_PROJECT='session-project',LAYR_LINE='main')
@@ -130,10 +133,14 @@ try:
  run(['person','accept','--site',site,'--invite','1-test'],ann)
  check(stats['index']==1 and stats['inbox']==1 and stats['slots']==1,'gateway invite acceptance authenticates person slot, index update and inbox deletion')
  run(['remote','add','web','layr+'+site+'/project'],actor)
- before=stats['requests'];faults['reject_session']=True
+ before=stats['requests'];faults['reject_request_session']=True
  request=json.loads(run(['request','approve','head','--person','--remote','web','--json'],actor).stdout)
- check(stats['requests']==before+1 and request['request']['v']==2,'real person request uploads an encrypted v2 envelope with a session bearer')
+ check(stats['requests']==before+1 and stats['request_attempts']==2 and request['request']['v']==2,'real person request uploads an encrypted v2 envelope with a session bearer')
  check(stats['registration']==1,'person request never re-registers or overwrites the person key')
+ fresh=dict(base,LAYR_PERSON_DIR=str(root/'fresh'),LAYR_PERSON_LOGIN='fresh@example.com',LAYR_GATEWAY_CA_FILE=str(root/'tls-cert.pem'))
+ before=stats['session']
+ run(['person','keys','--site',site,'--invite','fresh-invite','--paper-key-out',str(root/'fresh.paper')],fresh)
+ check(stats['registration']==2 and stats['session']==before+1,'fresh invite registration signs in directly from generated in-memory keys')
  check(not errors,'stand-in observed only valid HTTP requests')
  # Token strings never reach captured command output or local person files.
  files=b''.join(p.read_bytes() for p in (root/'ann').iterdir() if p.is_file())

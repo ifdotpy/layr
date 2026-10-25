@@ -179,7 +179,7 @@ impl Store {
                     && ctx.env("LAYR_PERSON_KEY_FILE").is_none()
                     && ctx.env("LAYR_PAPER_KEY_FILE").is_none())
             {
-                gateway.connect_reader(&ctx.env)?;
+                gateway.connect_public(&ctx.env)?;
                 gateway.use_public_access();
             } else {
                 gateway.connect(ctx)?;

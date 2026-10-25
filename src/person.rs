@@ -278,6 +278,9 @@ pub fn run(args: &[String]) -> Result<i32> {
                     bail!("the existing paper key cannot be printed again");
                 }
             } else {
+                if gateway.is_some() && !a.has("--invite") {
+                    bail!("first gateway registration needs --invite <token>");
+                }
                 if !a.has("--paper-key-out") && !std::io::stdout().is_terminal() {
                     bail!("use --paper-key-out <path> outside a private terminal");
                 }
@@ -359,12 +362,18 @@ pub fn run(args: &[String]) -> Result<i32> {
                 if let Some(invite) = a.get("--invite") {
                     let mut path = reqwest::Url::parse("https://gateway.invalid/api/person")?;
                     path.query_pairs_mut().append_pair("login", login);
+                    let registration = json!({
+                        "recipient": recipient,
+                        "paper": B64.encode(read(&dir.join("paper.age"), 4096, uid)?),
+                        "signing_key": signing_key,
+                        "signing": B64.encode(signing),
+                    });
                     gateway.person_call(
-                    Method::PUT,
-                    &format!("{}?{}", path.path(), path.query().unwrap()),
-                    Some(invite),
-                    Some(&json!({"recipient":recipient,"paper":B64.encode(read(&dir.join("paper.age"),4096,uid)?),"signing_key":signing_key,"signing":B64.encode(signing)})),
-                )?;
+                        Method::PUT,
+                        &format!("{}?{}", path.path(), path.query().unwrap()),
+                        Some(invite),
+                        Some(&registration),
+                    )?;
                 }
                 let record = gateway.person_view()?;
                 if record["login"].as_str() != Some(login)

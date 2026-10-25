@@ -141,12 +141,19 @@ impl Gateway {
 
     /// A standalone reader never loads a write or GC token.
     pub fn connect_reader(&mut self, env: &std::collections::HashMap<String, String>) -> Result<()> {
+        self.connect_public(env)?;
+        let uid = rustix::process::getuid().as_raw();
+        self.connect_person(env, &crate::ctx::Caller::from_uid(uid).home, &std::env::current_dir()?, uid)?;
+        Ok(())
+    }
+
+    /// Explicit anonymous access must not open person keys or exchange a session.
+    pub fn connect_public(&mut self, env: &std::collections::HashMap<String, String>) -> Result<()> {
         self.token = None;
+        *self.person.lock().map_err(|_| anyhow!("gateway session lock failed"))? = None;
         if let Some(path) = env.get("LAYR_GATEWAY_CA_FILE") {
             self.configure_ca(&ca_file(std::path::Path::new(path))?)?;
         }
-        let uid = rustix::process::getuid().as_raw();
-        self.connect_person(env, &crate::ctx::Caller::from_uid(uid).home, &std::env::current_dir()?, uid)?;
         Ok(())
     }
 
@@ -286,7 +293,12 @@ impl Gateway {
     }
 
     pub fn person_view(&self) -> Result<serde_json::Value> {
-        self.person_call(Method::GET, "/api/person", None, None)
+        let record = self.person_call(Method::GET, "/api/person", None, None)?;
+        let person = self.person.lock().map_err(|_| anyhow!("gateway session lock failed"))?;
+        if record["login"].as_str() != person.as_ref().map(|p| p.login.as_str()) {
+            bail!("gateway person record differs from the session login");
+        }
+        Ok(record)
     }
 
     pub fn set_identity(&self, identity: &str) -> Result<()> {
@@ -585,8 +597,7 @@ impl Gateway {
         } else {
             self.token.clone().context("set LAYR_GATEWAY_TOKEN_FILE to a private write token file")?
         };
-        let response =
-            self.send(Method::PUT, &format!("objects/{key}"), (!token.is_empty()).then_some(token.as_str()), None, Some(data))?;
+        let response = self.send(Method::PUT, &format!("objects/{key}"), Some(&token), None, Some(data))?;
         match response.status().as_u16() {
             201 => Ok(true),
             412 => Ok(false),
@@ -643,6 +654,15 @@ fn token_file(path: &std::path::Path, uid: u32) -> Result<String> {
 mod tests {
     use super::*;
     use std::os::unix::fs::{symlink, PermissionsExt};
+    #[test]
+    fn explicit_public_access_never_opens_person_keys() {
+        let mut gateway = Gateway::open("layr+https://localhost/project").unwrap();
+        let env = std::collections::HashMap::from([("LAYR_PERSON_KEY_FILE".into(), "/missing/person-key".into())]);
+        gateway.set_person("ann@example.com", ed25519_dalek::SigningKey::from_bytes(&[7; 32])).unwrap();
+        gateway.connect_public(&env).unwrap();
+        assert!(gateway.person.lock().unwrap().is_none());
+    }
+
     #[test]
     fn reader_hooks_ignore_write_grants_set_identity_and_check_the_ca_file() {
         use super::super::backend::Backend;
