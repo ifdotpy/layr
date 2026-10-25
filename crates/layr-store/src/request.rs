@@ -241,10 +241,14 @@ pub struct Claim {
     pub machine: String,
 }
 impl Claim {
-    pub fn sign(&self, key: &SigningKey) -> Result<Signed> {
+    pub fn validate(&self) -> Result<()> {
         if self.format != 1 || !uuid(&self.project) || !request_id(&self.request) || !uuid(&self.machine) {
             bail!("invalid request claim");
         }
+        Ok(())
+    }
+    pub fn sign(&self, key: &SigningKey) -> Result<Signed> {
+        self.validate()?;
         let r = serde_json::value::to_raw_value(self)?;
         let s = crate::keys::sign_bytes(r.get().as_bytes(), key);
         Ok(Signed { r, s })
@@ -253,9 +257,7 @@ impl Claim {
         let signed = Signed::parse(bytes)?;
         crate::keys::verify_bytes(signed.r.get().as_bytes(), &signed.s, key)?;
         let claim: Self = serde_json::from_str(signed.r.get())?;
-        if claim.format != 1 || !uuid(&claim.project) || !request_id(&claim.request) || !uuid(&claim.machine) {
-            bail!("invalid request claim");
-        }
+        claim.validate()?;
         Ok(claim)
     }
 }

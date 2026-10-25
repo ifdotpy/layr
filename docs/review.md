@@ -479,7 +479,9 @@ Comments appear in `change show` and the shared model.
 
 The executor claims each id at `requests/claims/<id>.json` with a machine signature.
 Each claim is create-only and binds the project, request, and executor machine.
-Another machine skips a claimed request.
+Another trusted machine skips a valid claim.
+An untrusted claimant causes a signed refusal: `claimed by an untrusted machine`.
+Invalid claims and invalid claim signatures also cause signed refusals.
 After a crash, the owning machine resumes from its atomic local result record.
 Claims never expire or transfer automatically.
 Keep the owning machine's local records until its results reach the store.

@@ -90,20 +90,42 @@ fn digest(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
-/// Claiming an id is create-only too. Another machine never takes over a claim:
-/// after a crash the owning machine resumes from its atomic operation record.
-fn claim(ctx: &Ctx, repo: &Repo, backend: &crate::store_remote::backend::Backend, id: &str) -> Result<bool> {
+enum ClaimState {
+    Owned,
+    Other,
+    Refused(&'static str),
+}
+
+/// Another trusted machine owns its claim until it publishes the result.
+/// Untrusted or invalid claims cause a terminal signed refusal.
+fn claim(ctx: &Ctx, repo: &Repo, backend: &crate::store_remote::backend::Backend, id: &str) -> Result<ClaimState> {
+    use layr_store::request::Claim;
     let machine = &ctx.store.machine;
-    let claim =
-        layr_store::request::Claim { format: 1, project: repo.p.id.clone(), request: id.into(), machine: machine.id.clone() };
+    let own = Claim { format: 1, project: repo.p.id.clone(), request: id.into(), machine: machine.id.clone() };
     let name = format!("requests/claims/{id}.json");
-    let bytes = claim.sign(&machine.key)?.to_bytes()?;
-    if backend.put_new(&name, bytes.clone())? {
-        return Ok(true);
+    if backend.put_new(&name, own.sign(&machine.key)?.to_bytes()?)? {
+        return Ok(ClaimState::Owned);
     }
     let prior = backend.get(&name)?.context("request claim disappeared")?;
-    // Only our exact authenticated claim can resume. An unknown claim fails closed.
-    Ok(prior == bytes)
+    let parsed = Signed::parse(&prior).and_then(|s| Ok(serde_json::from_str::<Claim>(s.r.get())?));
+    let Ok(claim) = parsed else {
+        return Ok(ClaimState::Refused("invalid request claim"));
+    };
+    if claim.validate().is_err() || claim.project != repo.p.id || claim.request != id {
+        return Ok(ClaimState::Refused("invalid request claim"));
+    }
+    let public = if claim.machine == machine.id {
+        machine.key.verifying_key()
+    } else {
+        let Some(public) = repo.p.db.trusted(&claim.machine)? else {
+            return Ok(ClaimState::Refused("claimed by an untrusted machine"));
+        };
+        layr_store::person::verifying_key(&public)?
+    };
+    if Claim::verify(&prior, &public).is_err() {
+        return Ok(ClaimState::Refused("request claim signature does not verify"));
+    }
+    Ok(if claim.machine == machine.id { ClaimState::Owned } else { ClaimState::Other })
 }
 
 pub fn requests(ctx: &Ctx, args: &[String]) -> Result<i32> {
@@ -137,17 +159,19 @@ pub fn requests(ctx: &Ctx, args: &[String]) -> Result<i32> {
             results.push(json!({"id":id,"status":"ignored"}));
             continue;
         }
-        if !claim(ctx, &h.repo, backend, id)? {
+        let claim = claim(ctx, &h.repo, backend, id)?;
+        if matches!(claim, ClaimState::Other) {
             results.push(json!({"id":id,"status":"claimed"}));
             continue;
         }
         let verified = verify_request(&h.repo, id, &bytes);
-        let mut record = match &verified {
-            Ok((request, _)) => match effect(ctx, &h.repo, request) {
+        let mut record = match (&claim, &verified) {
+            (ClaimState::Refused(reason), _) => refusal(reason),
+            (_, Ok((request, _))) => match effect(ctx, &h.repo, request) {
                 Ok(record) => record,
                 Err(error) => refusal(&error.to_string()),
             },
-            Err(error) => refusal(&error.to_string()),
+            (_, Err(error)) => refusal(&error.to_string()),
         };
         record.data["request_id"] = json!(id);
         record.data["request_digest"] = json!(hash);

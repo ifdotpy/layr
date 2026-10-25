@@ -66,7 +66,7 @@ def records():
     return [json.loads(line)['r'] for line in run(['op', 'export']).stdout.splitlines()]
 
 def outcome(id):
-    return next(r for r in records() if r['data'].get('request_id') == id)
+    return next(r for r in records() if r.get('data', {}).get('request_id') == id)
 
 before_keys = (root / 'archive' / 'people' / 'ann@example.com' / 'signing.age').read_bytes()
 run(['person', 'keys', '--store', 'file://' + str(root / 'archive')], ann)
@@ -102,6 +102,7 @@ remove = submit('queue-remove', entry)
 apply(remove)
 check(not any(e['id'] == entry for e in data(['queue', 'list', '--json'])), 'the person can remove their own queued state')
 
+run(['protect', 'release/test', '--approvers', 'person:ann@example.com', '--approvals', '1', '--update', 'maintainer'])
 move = submit('ref-move', 'release/test', state, '--expect', 'none')
 apply(move)
 check(next(r['target'] for r in data(['ref', 'list', '--json']) if r['name'] == 'release/test') == state, 'ref request creates the expected absent ref')
@@ -112,6 +113,9 @@ check('expected value does not match' in result['reason'], 'stale compare-and-se
 withdraw = submit('withdraw', state)
 apply(withdraw)
 check(outcome(withdraw)['data']['revokes'] == [record['data']['attestation']['attestation_id']], 'withdrawal names only the person approval')
+after_withdraw = submit('ref-move', 'release/test', state, '--expect', state)
+result = apply(after_withdraw, 'refused')
+check('approval' in result['reason'], 'withdrawn person approval no longer satisfies protected ref checks')
 # Two people share one executor uid; Bob must never revoke Ann's evidence.
 run(['protect', 'main', '--approvers', 'person:bob@example.com', '--approvals', '1'])
 bob_withdraw = submit('withdraw', state, env=bob)
@@ -138,6 +142,21 @@ denied = submit('queue-add', state, env=bob)
 result = apply(denied, 'refused')
 check('deny rule' in result['reason'], 'person deny rule overrides executor permissions')
 
+bad_claim = submit('comment', change, 'Invalid claim must not apply.')
+body = json.loads((root / 'archive' / 'requests' / (bad_claim + '.json')).read_text())['r']
+(root / 'archive' / 'requests' / 'claims' / (bad_claim + '.json')).write_text(json.dumps({'r': {'format': 1, 'project': body['project'], 'request': bad_claim, 'machine': record['machine']}, 's': 'invalid-signature'}))
+result = apply(bad_claim, 'refused')
+check(result['reason'] == 'request claim signature does not verify', 'a forged claim by a trusted machine gets a signed refusal')
+
+untrusted = submit('comment', change, 'Untrusted claim must not apply.')
+body = json.loads((root / 'archive' / 'requests' / (untrusted + '.json')).read_text())['r']
+claim_path = root / 'archive' / 'requests' / 'claims' / (untrusted + '.json')
+claim_path.write_text(json.dumps({'r': {'format': 1, 'project': body['project'], 'request': untrusted, 'machine': '01a12290-0000-7000-8000-000000000099'}, 's': 'invalid-untrusted-signature'}))
+result = apply(untrusted, 'refused')
+check(result['reason'] == 'claimed by an untrusted machine' and outcome(untrusted)['op'] == 'request.refused', 'untrusted claim gets a signed terminal refusal')
+check(not any(c['text'] == 'Untrusted claim must not apply.' for c in data(['change', 'show', change, '--json'])['comments']), 'untrusted claim never applies its request')
+apply(untrusted, 'ignored')
+
 # Claims survive local retries and prevent a different machine from applying again.
 check((root / 'archive' / 'requests' / 'claims' / (entry + '.json')).exists(), 'executor claims each request with an immutable object')
 claim = json.loads((root / 'archive' / 'requests' / 'claims' / (entry + '.json')).read_text())
@@ -146,7 +165,7 @@ check(claim['r']['request'] == entry and claim['s'], 'claim binds machine, proje
 replica = dict(base, LAYR_ROOT=str(root / 'store' / 'replica-root'), LAYR_PAPER_KEY_FILE=str(root / 'store-paper'))
 run(['clone', 'file://' + str(root / 'archive'), 'replica', '-q'], replica)
 other = data(['--project', 'replica', 'requests', 'apply', '--json'], replica)
-check(other and all(row['status'] == 'claimed' for row in other), 'a second trusted machine cannot apply claimed requests')
+check(other and all(row['status'] == 'claimed' or (row['id'] in (untrusted, bad_claim) and row['status'] == 'refused') for row in other), 'a second trusted machine cannot apply claimed requests')
 check(not data(['--project', 'replica', 'queue', 'list', '--json'], replica), 'second machine creates no duplicate queue effects')
 
 run(['reindex', '-q'])
