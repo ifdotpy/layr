@@ -73,7 +73,8 @@ pub fn request(ctx: &Ctx, args: &[String]) -> Result<i32> {
         request.expires = expires.parse().context("--expires must be epoch milliseconds")?;
     }
     let signed = request.sign(&key)?;
-    let sealed = request::seal(&signed.to_bytes()?, &store.request_recipient(ctx)?, &key)?;
+    let (epoch, recipient) = store.request_epoch(ctx)?;
+    let sealed = request::seal_for_epoch(&signed.to_bytes()?, &epoch, &recipient, &key)?;
     let backend = store.request_backend(ctx)?;
     let name = format!("requests/{}.json", request.id);
     if !backend.put_new(&name, sealed.clone())? {
@@ -152,7 +153,7 @@ pub fn requests(ctx: &Ctx, args: &[String]) -> Result<i32> {
             continue;
         };
         let _lock = h.repo.p.lock()?;
-        let bytes = backend.get(&object.key)?.context("request disappeared")?;
+        let (bytes, epoch, identity) = backend.request_object(&object.key, &identity)?;
         let hash = digest(&bytes);
         if let Some(old) = h.repo.p.db.records(usize::MAX >> 1)?.into_iter().find(|r| r.data["request_id"] == id) {
             if old.data["request_digest"] != hash {
@@ -166,7 +167,7 @@ pub fn requests(ctx: &Ctx, args: &[String]) -> Result<i32> {
             results.push(json!({"id":id,"status":"claimed"}));
             continue;
         }
-        let verified = verify_request(&h.repo, id, &bytes, &identity);
+        let verified = verify_request(&h.repo, id, &bytes, &epoch, &identity);
         let mut record = match (&claim, &verified) {
             (ClaimState::Refused(reason), _) => refusal(reason),
             (_, Ok((request, _, _))) => match effect(ctx, &h.repo, request) {
@@ -224,7 +225,7 @@ fn refusal(reason: &str) -> Record {
     record.data = json!({"reason":reason});
     record
 }
-fn verify_request(repo: &Repo, id: &str, bytes: &[u8], identity: &str) -> Result<(Request, String, Vec<u8>)> {
+fn verify_request(repo: &Repo, id: &str, bytes: &[u8], epoch: &str, identity: &str) -> Result<(Request, String, Vec<u8>)> {
     if Signed::parse(bytes).is_ok() {
         bail!("plaintext requests are not accepted");
     }
@@ -232,8 +233,8 @@ fn verify_request(repo: &Repo, id: &str, bytes: &[u8], identity: &str) -> Result
     if sealed.id != id || sealed.project != repo.p.id {
         bail!("request id or project does not match");
     }
-    if sealed.epoch != "root" {
-        bail!("unsupported request epoch");
+    if sealed.epoch != epoch {
+        bail!("request epoch does not match its object namespace");
     }
     let public = repo
         .p
@@ -411,10 +412,10 @@ mod tests {
         .unwrap();
         let inner = request.sign(&key).unwrap().to_bytes().unwrap();
         let bytes = request::seal(&inner, &recipient, &key).unwrap();
-        assert!(verify_request(&repo, &request.id, &bytes, &identity).is_ok());
-        let reason = verify_request(&repo, &request.id, &inner, &identity).err().unwrap().to_string();
+        assert!(verify_request(&repo, &request.id, &bytes, "root", &identity).is_ok());
+        let reason = verify_request(&repo, &request.id, &inner, "root", &identity).err().unwrap().to_string();
         assert_eq!(reason, "plaintext requests are not accepted");
-        assert!(verify_request(&repo, &ids::new_id(), &bytes, &identity).is_err());
+        assert!(verify_request(&repo, &ids::new_id(), &bytes, "root", &identity).is_err());
         // Construct hostile envelopes directly: seal intentionally refuses an invalid
         // inner signature, so normal submissions cannot construct these cases.
         let wrap = |inner: &[u8]| {
@@ -431,21 +432,23 @@ mod tests {
         let mut bad = request.sign(&key).unwrap();
         bad.s = STANDARD.encode([0; 64]);
         let malicious = wrap(&bad.to_bytes().unwrap());
-        let reason = verify_request(&repo, &request.id, &malicious, &identity).err().unwrap().to_string();
+        let reason = verify_request(&repo, &request.id, &malicious, "root", &identity).err().unwrap().to_string();
         assert_eq!(reason, "person request signature does not verify");
         let mut other = request.clone();
         other.person = "bob@example.com".into();
         let malicious = wrap(&other.sign(&key).unwrap().to_bytes().unwrap());
-        let reason = verify_request(&repo, &request.id, &malicious, &identity).err().unwrap().to_string();
+        let reason = verify_request(&repo, &request.id, &malicious, "root", &identity).err().unwrap().to_string();
         assert!(reason.contains("outer and inner"));
         let mut sealed = Sealed::parse(&bytes).unwrap();
         sealed.sig = "0".repeat(128);
-        assert!(verify_request(&repo, &request.id, &serde_json::to_vec(&sealed).unwrap(), &identity).is_err());
+        assert!(verify_request(&repo, &request.id, &serde_json::to_vec(&sealed).unwrap(), "root", &identity).is_err());
         sealed = Sealed::parse(&bytes).unwrap();
         sealed.epoch = ids::new_id();
-        let reason =
-            verify_request(&repo, &request.id, &serde_json::to_vec(&sealed).unwrap(), &identity).err().unwrap().to_string();
-        assert_eq!(reason, "unsupported request epoch");
+        let reason = verify_request(&repo, &request.id, &serde_json::to_vec(&sealed).unwrap(), "root", &identity)
+            .err()
+            .unwrap()
+            .to_string();
+        assert_eq!(reason, "request epoch does not match its object namespace");
         drop(repo);
         std::fs::remove_dir_all(root).unwrap();
     }

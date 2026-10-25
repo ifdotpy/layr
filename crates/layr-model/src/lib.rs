@@ -27,6 +27,31 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 pub use types::*;
 
+/// Select the creator's policy perspective from authenticated records for one project.
+/// The caller must verify and authorize the signed records first. Unlike the CLI's
+/// local machine perspective, this gives person and public readers one stable root.
+/// Missing or multiple creation records cannot establish a policy perspective.
+pub fn project_perspective<'a>(project: &str, records: impl IntoIterator<Item = &'a Record>) -> Result<String> {
+    let mut creator: Option<&Record> = None;
+    for record in records {
+        if record.project != project {
+            bail!("policy records belong to another project");
+        }
+        if record.op != "project" { continue; }
+        if record.data["id"].as_str() != Some(project) || record.machine.is_empty() {
+            bail!("invalid project creator record");
+        }
+        if let Some(previous) = creator {
+            if serde_json::to_value(previous)? != serde_json::to_value(record)? {
+                bail!("ambiguous project creator");
+            }
+        } else {
+            creator = Some(record);
+        }
+    }
+    Ok(creator.context("project creator record is missing")?.machine.clone())
+}
+
 /// A collection of projects. Overlay records retain their separate project identity.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Model {
@@ -152,6 +177,23 @@ fn order(r: &Record) -> (i64, &str, u64) {
 }
 
 impl Project {
+    /// Access mode and epochs are folded only from authenticated project records.
+    pub fn access_mode(&self) -> layr_store::epochs::Mode {
+        self.records
+            .iter()
+            .rev()
+            .find(|r| r.op == "project.mode")
+            .and_then(|r| serde_json::from_value(r.data["mode"].clone()).ok())
+            .unwrap_or_default()
+    }
+    pub fn key_epochs(&self) -> Vec<Value> {
+        self.records.iter().filter(|r|r.op=="project.key").enumerate().map(|(i,r)| {
+            let mut row=serde_json::json!({"number":i+1,"id":r.data["epoch"],"time":r.time,"machine":r.machine,"mode":r.data["mode"],"readers_hash":r.data["readers_hash"]});
+            if let Some(reason)=self.records.iter().find(|m|m.op=="project.mode" && m.data["epoch"]==r.data["epoch"]).and_then(|m|m.data.get("reason")).filter(|v|!v.is_null()) {row["reason"]=reason.clone();}
+            row
+        }).collect()
+    }
+
     /// Build one project from verified records. `machine` selects the CLI policy perspective.
     /// Empty `machine` selects a store view with no preferred local machine.
     /// Exact duplicate records are accepted. Conflicting identities or sequences fail.
@@ -292,7 +334,13 @@ impl Project {
             "machine.trust" => {
                 self.trusted.entry(str_at("machine")).or_insert(d.clone());
             }
-            "project" | "config" | "overlay.create" | "overlay.readers" | "overlay.use" | "overlay.show-to-project" => {
+            "project"
+            | "config"
+            | "overlay.create"
+            | "overlay.readers"
+            | "overlay.mode"
+            | "overlay.use"
+            | "overlay.show-to-project" => {
                 if r.op == "project" {
                     self.name = d["name"].as_str().map(String::from);
                 }
@@ -503,7 +551,13 @@ impl Project {
             .filter(|r| {
                 matches!(
                     r.op.as_str(),
-                    "project" | "config" | "overlay.create" | "overlay.readers" | "overlay.use" | "overlay.show-to-project"
+                    "project"
+                        | "config"
+                        | "overlay.create"
+                        | "overlay.readers"
+                        | "overlay.mode"
+                        | "overlay.use"
+                        | "overlay.show-to-project"
                 )
             })
             .find_map(|r| r.data["config"].get(key))

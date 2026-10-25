@@ -14,9 +14,81 @@ pub enum Backend {
     S3(super::s3::S3),
     Gateway(super::gateway::Gateway),
     Prefix(Box<Backend>, String),
+    Epoch(Box<EpochBackend>),
 }
 
+#[derive(Clone)]
+pub struct EpochBackend {
+    pub root: Backend,
+    pub current: Backend,
+    pub history: Vec<(Backend, String)>,
+}
+fn epoch_key(key: &str) -> std::borrow::Cow<'_, str> {
+    if let Some(id) = key.strip_prefix("requests/claims/") {
+        format!("claims/{id}").into()
+    } else {
+        key.into()
+    }
+}
+fn epoch_object(key: &str) -> bool {
+    key == "store.json"
+        || key == "public.json"
+        || ["records/", "states/", "slots/", "history/", "index/", "requests/", "claims/"].iter().any(|p| key.starts_with(p))
+}
 impl Backend {
+    pub fn set_epoch(&self, epoch: Option<&str>) -> Result<()> {
+        match self {
+            Self::Gateway(g) => g.set_epoch(epoch),
+            Self::Prefix(base, _) => base.set_epoch(epoch),
+            Self::Epoch(e) => e.root.set_epoch(epoch),
+            _ => Ok(()),
+        }
+    }
+    pub fn root(&self) -> &Backend {
+        if let Self::Epoch(epoch) = self {
+            &epoch.root
+        } else {
+            self
+        }
+    }
+    fn namespace_epoch(&self) -> &str {
+        if let Self::Prefix(_, scope) = self {
+            if let Some((epoch, _)) = scope.strip_prefix("project/epochs/").and_then(|s| s.split_once('/')) {
+                return epoch;
+            }
+        }
+        "root"
+    }
+    /// Return the object's actual namespace and its key, binding unsigned outer routing
+    /// fields to authenticated epoch discovery before the request parser runs.
+    pub fn request_object(&self, key: &str, identity: &str) -> Result<(Vec<u8>, String, String)> {
+        if let Self::Epoch(epoch) = self {
+            if let Some(bytes) = epoch.current.get(key)? {
+                return Ok((bytes, epoch.current.namespace_epoch().into(), identity.into()));
+            }
+            for (backend, old_identity) in &epoch.history {
+                if let Some(bytes) = backend.get(key)? {
+                    return Ok((bytes, backend.namespace_epoch().into(), old_identity.clone()));
+                }
+            }
+            bail!("request disappeared");
+        }
+        Ok((self.get(key)?.context("request disappeared")?, self.namespace_epoch().into(), identity.into()))
+    }
+    pub fn decrypted(&self, key: &str, identity: &str) -> Result<Vec<u8>> {
+        if let Self::Epoch(epoch) = self {
+            if key.starts_with("states/") && epoch.current.get(key)?.is_none() {
+                for (backend, old_identity) in &epoch.history {
+                    if let Some(bytes) = backend.get(key)? {
+                        return super::keys::decrypt(old_identity, &bytes);
+                    }
+                }
+            }
+        }
+        let bytes = self.get(key)?.with_context(|| format!("missing remote object {key}"))?;
+        super::keys::decrypt(identity, &bytes)
+    }
+
     pub fn scoped(&self, prefix: &str) -> Result<Self> {
         check_key(prefix)?;
         Ok(Self::Prefix(Box::new(self.clone()), format!("{prefix}/")))
@@ -63,13 +135,21 @@ impl Backend {
                 *s3 = super::s3::S3::with_env(bucket, prefix, env)?;
             }
             Self::Gateway(gateway) => gateway.connect_reader(env)?,
-            Self::File(..) | Self::Prefix(..) => {}
+            Self::File(..) | Self::Prefix(..) | Self::Epoch(..) => {}
         }
         Ok(backend)
     }
 
     pub fn unlock_reader(&self, identity: &str) -> Result<()> {
         match self {
+            Self::Epoch(epoch) => {
+                epoch.root.unlock_reader(identity)?;
+                epoch.current.unlock_reader(identity)?;
+                for (backend, _) in &epoch.history {
+                    backend.unlock_reader(identity)?;
+                }
+                Ok(())
+            }
             Self::Prefix(base, _) => base.unlock_reader(identity),
             Self::Gateway(gateway) => gateway.set_identity(identity),
             Self::File(..) | Self::S3(_) => Ok(()),
@@ -79,6 +159,7 @@ impl Backend {
     pub fn can_read(&self) -> bool {
         match self {
             Self::Gateway(gateway) => gateway.has_read_identity(),
+            Self::Epoch(epoch) => epoch.root.can_read(),
             Self::Prefix(base, _) => base.can_read(),
             _ => true,
         }
@@ -94,6 +175,21 @@ impl Backend {
     pub fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
         check_key(key)?;
         match self {
+            Self::Epoch(epoch) => {
+                if !epoch_object(key) {
+                    return epoch.root.get(key);
+                }
+                let data = epoch.current.get(&epoch_key(key))?;
+                if data.is_some() || !(key.starts_with("states/") || key.starts_with("requests/") || key.starts_with("claims/")) {
+                    return Ok(data);
+                }
+                for (backend, _) in &epoch.history {
+                    if let Some(bytes) = backend.get(key)? {
+                        return Ok(Some(bytes));
+                    }
+                }
+                Ok(None)
+            }
             Self::Prefix(base, prefix) => base.get(&format!("{prefix}{key}")),
             Self::S3(s) => s.get(key),
             Self::Gateway(g) => g.get(key),
@@ -118,6 +214,13 @@ impl Backend {
     pub fn put_new(&self, key: &str, body: Vec<u8>) -> Result<bool> {
         check_key(key)?;
         match self {
+            Self::Epoch(epoch) => {
+                if epoch_object(key) {
+                    epoch.current.put_new(&epoch_key(key), body)
+                } else {
+                    epoch.root.put_new(key, body)
+                }
+            }
             Self::Prefix(base, prefix) => base.put_new(&format!("{prefix}{key}"), body),
             Self::S3(s) => s.put_new(key, body),
             Self::Gateway(g) => g.put_new(key, body),
@@ -152,6 +255,23 @@ impl Backend {
             check_key(prefix.trim_end_matches('/'))?;
         }
         match self {
+            Self::Epoch(epoch) => {
+                if !epoch_object(prefix) {
+                    return epoch.root.list(prefix);
+                }
+                let mut objects: std::collections::BTreeMap<String, Object> = std::collections::BTreeMap::new();
+                if prefix.starts_with("states/") || prefix.starts_with("requests/") || prefix.starts_with("claims/") {
+                    for (backend, _) in epoch.history.iter().rev() {
+                        for object in backend.list(prefix)? {
+                            objects.insert(object.key.clone(), object);
+                        }
+                    }
+                }
+                for object in epoch.current.list(prefix)? {
+                    objects.insert(object.key.clone(), object);
+                }
+                Ok(objects.into_values().collect())
+            }
             Self::Prefix(base, scope) => base
                 .list(&format!("{scope}{prefix}"))?
                 .into_iter()
@@ -176,6 +296,13 @@ impl Backend {
     pub fn delete(&self, key: &str) -> Result<()> {
         check_key(key)?;
         match self {
+            Self::Epoch(epoch) => {
+                if epoch_object(key) {
+                    epoch.current.delete(&epoch_key(key))
+                } else {
+                    epoch.root.delete(key)
+                }
+            }
             Self::Prefix(base, prefix) => base.delete(&format!("{prefix}{key}")),
             Self::S3(s) => s.delete(key),
             Self::Gateway(g) => g.delete(key),
@@ -299,5 +426,37 @@ mod tests {
         assert_eq!(s.list("states/").unwrap().len(), 1);
         assert!(s.put_new("../bad", vec![]).is_err());
         fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod epoch_tests {
+    use super::*;
+    #[test]
+    fn historical_states_use_sealed_history_keys_but_slots_never_fall_back() {
+        let path = std::env::temp_dir().join(crate::ids::new_id());
+        let root = Backend::file(path.clone());
+        let current = root.scoped("project/epochs/new").unwrap();
+        let old = super::super::keys::generate_identity();
+        let new = super::super::keys::generate_identity();
+        root.put_new(
+            "states/old",
+            super::super::keys::encrypt(&super::super::keys::recipient_of(&old).unwrap(), b"old bytes").unwrap(),
+        )
+        .unwrap();
+        root.put_new("slots/removed.age", b"old slot".to_vec()).unwrap();
+        let backend = Backend::Epoch(Box::new(EpochBackend {
+            root: root.clone(),
+            current: current.clone(),
+            history: vec![(root.clone(), old)],
+        }));
+        assert_eq!(backend.decrypted("states/old", &new).unwrap(), b"old bytes");
+        assert!(backend.get("slots/removed.age").unwrap().is_none());
+        backend.put_new("requests/one.json", b"sealed request".to_vec()).unwrap();
+        backend.put_new("requests/claims/one.json", b"claim".to_vec()).unwrap();
+        assert_eq!(current.get("requests/one.json").unwrap().unwrap(), b"sealed request");
+        assert_eq!(current.get("claims/one.json").unwrap().unwrap(), b"claim");
+        assert!(root.get("requests/one.json").unwrap().is_none());
+        std::fs::remove_dir_all(path).unwrap();
     }
 }

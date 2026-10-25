@@ -484,7 +484,9 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
             .value("--paper-key-out")
             .value("--recipient")
             .value("--person")
-            .value("--invite-out"),
+            .value("--invite-out")
+            .value("--remove")
+            .value("--reason"),
         args,
     )?;
     let sub = a.pos.first().map(String::as_str).unwrap_or("list");
@@ -608,7 +610,11 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 bail!("remote public requires a store remote");
             }
             if mode == "off" {
-                bail!("public off is unavailable: project key rotation is not implemented; the project stays public and copied data remains readable");
+                let mut store = store_remote::open_named(name, repo)?;
+                let change = store.change_mode(ctx,repo,name,layr_store::epochs::Mode::Private,&[],Some("public off"),false)?;
+                if a.has("--json") { outln!(ctx,"{}",json!({"name":name,"public":false,"mode":"private","tightened":change.tightened})); }
+                else { outln!(ctx,"project {} is private; earlier epochs remain readable to anyone who already had access",repo.p.name); }
+                return Ok(0);
             }
             if mode != "on" { bail!("usage: layr remote public <remote> on|off"); }
             if repo.p.is_overlay() { bail!("overlays cannot be made public"); }
@@ -620,11 +626,27 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
             if confirmation.len() > 4096 || confirmation.trim_end_matches(['\r', '\n']) != repo.p.name {
                 bail!("project name did not match; nothing was changed");
             }
-            let _lock = repo.p.lock()?;
             let mut store = store_remote::open_named(name, repo)?;
             let created = store.make_public(ctx, repo)?;
+            store.change_mode(ctx,repo,name,layr_store::epochs::Mode::Public,&[],None,false)?;
             if a.has("--json") { outln!(ctx, "{}", json!({"name":name,"public":true,"created":created})); }
             else { outln!(ctx, "project {} is public; all current and future project data is readable", repo.p.name); }
+        }
+        "mode" | "rotate" if a.pos.len() == if sub == "mode" {3} else {2} => {
+            let name=&a.pos[1]; repo.require(ctx,"remote")?;
+            if kind(&remote_url(repo,name)?)? != Kind::Store { bail!("access modes require a store remote"); }
+            let force=sub=="rotate";
+            let mode=if force { store_remote::epochs::project_mode(repo)? } else { layr_store::epochs::Mode::parse(&a.pos[2])? };
+            let mut store=store_remote::open_named(name,repo)?;
+            let change=store.change_mode(ctx,repo,name,mode,&a.all("--remove"),a.get("--reason"),force)?;
+            let mode=change.mode;
+            if a.has("--json") { outln!(ctx,"{}",json!({"name":name,"mode":mode,"rotated":change.rotated,"tightened":change.tightened})); }
+            else {
+                outln!(ctx,"project {} mode {}",repo.p.name,mode.name());
+                for overlay in change.tightened { outln!(ctx,"overlay {overlay}: tightened to {}",mode.name()); }
+                if change.rotated { outln!(ctx,"earlier epochs remain readable to anyone who already had access"); }
+                else if change.opened { outln!(ctx,"all existing and future project data is readable to the new audience"); }
+            }
         }
         "grant" if a.pos.len() == 2 => {
             repo.require(ctx,"remote")?;
@@ -632,7 +654,7 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let recipient = a.get("--recipient").context("grant requires --recipient <age1…>")?;
             let mut store = store_remote::open_named(&a.pos[1],repo)?;
             let output = a.get("--invite-out").map(|path|ctx.cwd.join(path));
-            let created = store.grant(ctx,person,recipient,output.as_deref())?;
+            let created = store.grant(ctx,repo,person,recipient,output.as_deref())?;
             if a.has("--json") {outln!(ctx,"{}",json!({"person":person,"recipient":recipient,"status":if created {"granted"} else {"already granted"}}));}
             else {outln!(ctx,"{} store to {person}",if created {"granted"} else {"already granted"});}
         }
@@ -790,9 +812,19 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
     if a.pos.len() > if op == "push" && remote_kind == Kind::Registry { 2 } else { 1 } {
         return Err(exit(128, format!("use layr {op} <remote>; Git forms use layr git {op}")));
     }
-    let public_fetch = op == "fetch" && remote_kind == Kind::Store
+    let public_fetch = op == "fetch"
+        && remote_kind == Kind::Store
         && h.repo.p.config_value(&format!("cloud.remote.{name}.public"))? == Some(json!(true));
-    h.repo.require(ctx, if op == "push" { "push" } else if public_fetch { "read" } else { "sync" })?;
+    h.repo.require(
+        ctx,
+        if op == "push" {
+            "push"
+        } else if public_fetch {
+            "read"
+        } else {
+            "sync"
+        },
+    )?;
     match remote_kind {
         Kind::Peer { host, project } => {
             let command = if a.has("--command") {

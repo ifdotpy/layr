@@ -10,19 +10,39 @@ use reqwest::{
 use serde::Deserialize;
 use std::io::Read;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const OBJECT_LIMIT: usize = 32 << 20;
 const SLOTS_LIMIT: usize = 8 << 20;
+const CLOCK_SKEW_MS: i64 = 5 * 60 * 1000;
+
+fn valid_token_expiry(expires: i64, now: i64, lifetime: i64) -> bool {
+    expires > now && expires <= now + lifetime + CLOCK_SKEW_MS
+}
+
+struct PersonSession {
+    login: String,
+    key: ed25519_dalek::SigningKey,
+    token: Option<SessionToken>,
+}
+#[derive(Deserialize)]
+struct SessionToken {
+    token: String,
+    expires: i64,
+    login: String,
+}
 
 pub struct Gateway {
     http: Client,
     base: reqwest::Url,
     token: Option<String>,
+    machine: Option<String>,
     identity: Mutex<Option<String>>,
+    epoch: Mutex<Option<String>>,
     read: Mutex<Option<(String, i64)>>,
     public: std::sync::atomic::AtomicBool,
+    person: Arc<Mutex<Option<PersonSession>>>,
 }
 
 impl Clone for Gateway {
@@ -31,9 +51,12 @@ impl Clone for Gateway {
             http: self.http.clone(),
             base: self.base.clone(),
             token: self.token.clone(),
+            machine: self.machine.clone(),
             identity: Mutex::new(self.identity.lock().expect("gateway identity lock").clone()),
+            epoch: Mutex::new(self.epoch.lock().expect("gateway epoch lock").clone()),
             read: Mutex::new(self.read.lock().expect("gateway read lock").clone()),
             public: std::sync::atomic::AtomicBool::new(self.is_public()),
+            person: self.person.clone(),
         }
     }
 }
@@ -105,13 +128,17 @@ impl Gateway {
             http,
             base,
             token: None,
+            machine: None,
             identity: Mutex::new(None),
+            epoch: Mutex::new(None),
             read: Mutex::new(None),
             public: std::sync::atomic::AtomicBool::new(false),
+            person: Arc::new(Mutex::new(None)),
         })
     }
 
     pub fn connect(&mut self, ctx: &crate::ctx::Ctx) -> Result<()> {
+        self.machine = Some(ctx.store.machine.id.clone());
         self.token = ctx
             .env("LAYR_GATEWAY_TOKEN_FILE")
             .map(|path| crate::privs::as_caller_fs(ctx, || token_file(&ctx.cwd.join(path), ctx.caller.uid)))
@@ -120,16 +147,95 @@ impl Gateway {
             let pem = crate::privs::as_caller_fs(ctx, || ca_file(&ctx.cwd.join(path)))?;
             self.configure_ca(&pem)?;
         }
+        crate::privs::as_caller_fs(ctx, || self.connect_person(&ctx.env, &ctx.caller.home, &ctx.cwd, ctx.caller.uid))?;
         Ok(())
     }
 
     /// A standalone reader never loads a write or GC token.
     pub fn connect_reader(&mut self, env: &std::collections::HashMap<String, String>) -> Result<()> {
+        self.connect_public(env)?;
+        let uid = rustix::process::getuid().as_raw();
+        self.connect_person(env, &crate::ctx::Caller::from_uid(uid).home, &std::env::current_dir()?, uid)?;
+        Ok(())
+    }
+
+    /// Explicit anonymous access must not open person keys or exchange a session.
+    pub fn connect_public(&mut self, env: &std::collections::HashMap<String, String>) -> Result<()> {
         self.token = None;
+        self.machine = None;
+        *self.person.lock().map_err(|_| anyhow!("gateway session lock failed"))? = None;
         if let Some(path) = env.get("LAYR_GATEWAY_CA_FILE") {
             self.configure_ca(&ca_file(std::path::Path::new(path))?)?;
         }
         Ok(())
+    }
+
+    fn connect_person(
+        &self,
+        env: &std::collections::HashMap<String, String>,
+        home: &std::path::Path,
+        cwd: &std::path::Path,
+        uid: u32,
+    ) -> Result<()> {
+        if let Some(access) = crate::person::load(env, home, cwd, uid, None)? {
+            let key = crate::person::signing_key_at(env, home, uid, &access)?;
+            self.set_person(&access.login, key)?;
+        }
+        Ok(())
+    }
+
+    pub fn set_person(&self, login: &str, key: ed25519_dalek::SigningKey) -> Result<()> {
+        if !layr_store::person::login_name(login) {
+            bail!("invalid person login");
+        }
+        let mut person = self.person.lock().map_err(|_| anyhow!("gateway session lock failed"))?;
+        if !person.as_ref().is_some_and(|p| p.login == login && p.key == key) {
+            *person = Some(PersonSession { login: login.into(), key, token: None });
+        }
+        Ok(())
+    }
+
+    fn session_token(&self, renew: bool) -> Result<String> {
+        let mut person = self.person.lock().map_err(|_| anyhow!("gateway session lock failed"))?;
+        let person = person.as_mut().context("set LAYR_PERSON_KEY_FILE to sign in to the gateway")?;
+        if !renew {
+            if let Some(token) = person.token.as_ref().filter(|t| t.expires > crate::ids::now_ms() + 10_000) {
+                return Ok(token.token.clone());
+            }
+        }
+        person.token = None;
+        let mut url = self.base.join("/api/session/challenge")?;
+        url.query_pairs_mut().append_pair("login", &person.login);
+        #[derive(Deserialize)]
+        struct Challenge {
+            challenge: String,
+            expires: i64,
+        }
+        let challenge: Challenge = json(self.http.get(url).send().map_err(reqwest::Error::without_url)?, 4096)?;
+        let now = crate::ids::now_ms();
+        if challenge.expires <= now || challenge.expires > now + 60_000 {
+            bail!("invalid or expired gateway session challenge");
+        }
+        let signature = layr_store::session::sign(&person.login, &challenge.challenge, &person.key)?;
+        let response = self
+            .http
+            .post(self.base.join("/api/session")?)
+            .json(&serde_json::json!({"login":person.login,"challenge":challenge.challenge,"signature":signature}))
+            .send()
+            .map_err(reqwest::Error::without_url)?;
+        let token: SessionToken = json(response, 4096)?;
+        let now = crate::ids::now_ms();
+        if token.login != person.login
+            || token.token.is_empty()
+            || token.token.len() > 256
+            || !token.token.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'+' | b'/' | b'='))
+            || !valid_token_expiry(token.expires, now, 43_200_000)
+        {
+            bail!("invalid gateway person session");
+        }
+        let result = token.token.clone();
+        person.token = Some(token);
+        Ok(result)
     }
 
     fn configure_ca(&mut self, pem: &[u8]) -> Result<()> {
@@ -157,28 +263,26 @@ impl Gateway {
         token: Option<&str>,
         body: Option<&serde_json::Value>,
     ) -> Result<serde_json::Value> {
-        let url = self.base.join(path)?;
-        let mut request = self.http.request(method.clone(), url).header("content-type", "application/json");
+        let send = |bearer: &str| -> Result<Response> {
+            let mut request = self
+                .http
+                .request(method.clone(), self.base.join(path)?)
+                .header("content-type", "application/json")
+                .bearer_auth(bearer);
+            if let Some(body) = body {
+                request = request.json(body);
+            }
+            request.send().map_err(reqwest::Error::without_url).map_err(Into::into)
+        };
         if let Some(token) = token {
-            request = request.bearer_auth(token);
+            return json(send(token)?, 512 << 10);
         }
-        if let Some(body) = body {
-            request = request.json(body);
+        let response = send(&self.session_token(false)?)?;
+        if response.status().as_u16() != 401 {
+            return json(response, 512 << 10);
         }
-        let response = request.send().map_err(reqwest::Error::without_url)?;
-        json(response, 512 << 10)
-    }
-
-    /// Existing person registrations must prove their age identity before adding signing authority.
-    pub fn person_registration_proof(&self, identity: &str) -> Result<Option<String>> {
-        let response = self.http.get(self.base.join("/api/person/challenge")?).send().map_err(reqwest::Error::without_url)?;
-        if response.status().as_u16() == 404 {
-            return Ok(None);
-        }
-        let challenge: serde_json::Value = json(response, 4096)?;
-        let sealed = challenge["challenge"].as_str().context("missing person challenge")?;
-        let sealed = base64::engine::general_purpose::STANDARD.decode(sealed)?;
-        Ok(Some(String::from_utf8(keys::decrypt(identity, &sealed)?)?))
+        // A rejected session has not authorized the operation. Renew once, including after restart.
+        json(send(&self.session_token(true)?)?, 512 << 10)
     }
 
     pub fn person_slot_at(&self, project: &str, login: &str, recipient: &str) -> Result<Vec<u8>> {
@@ -187,7 +291,13 @@ impl Gateway {
         }
         let slot = layr_store::person::slot_name(login, recipient)?;
         let url = self.base.join(&format!("/v1/p/{project}/slots/{slot}"))?;
-        let response = self.http.get(url).send().map_err(reqwest::Error::without_url)?;
+        let response =
+            self.http.get(url.clone()).bearer_auth(self.session_token(false)?).send().map_err(reqwest::Error::without_url)?;
+        let response = if response.status().as_u16() == 401 {
+            self.http.get(url).bearer_auth(self.session_token(true)?).send().map_err(reqwest::Error::without_url)?
+        } else {
+            response
+        };
         if !response.status().is_success() {
             bail!("gateway person slot: HTTP {}", response.status().as_u16());
         }
@@ -195,9 +305,23 @@ impl Gateway {
     }
 
     pub fn person_view(&self) -> Result<serde_json::Value> {
-        self.person_call(Method::GET, "/api/person", None, None)
+        let record = self.person_call(Method::GET, "/api/person", None, None)?;
+        let person = self.person.lock().map_err(|_| anyhow!("gateway session lock failed"))?;
+        if record["login"].as_str() != person.as_ref().map(|p| p.login.as_str()) {
+            bail!("gateway person record differs from the session login");
+        }
+        Ok(record)
     }
 
+    pub fn set_epoch(&self, epoch: Option<&str>) -> Result<()> {
+        let mut current = self.epoch.lock().map_err(|_| anyhow!("gateway epoch lock failed"))?;
+        if current.as_deref() != epoch {
+            *current = epoch.map(str::to_owned);
+            drop(current);
+            *self.read.lock().map_err(|_| anyhow!("gateway read token lock failed"))? = None;
+        }
+        Ok(())
+    }
     pub fn set_identity(&self, identity: &str) -> Result<()> {
         *self.identity.lock().map_err(|_| anyhow!("gateway identity lock failed"))? = Some(identity.into());
         Ok(())
@@ -216,16 +340,48 @@ impl Gateway {
         if let Some((key, value)) = query {
             url.query_pairs_mut().append_pair(key, value);
         }
-        let mut request = self.http.request(method, url);
-        if let Some(token) = bearer {
-            request = request.bearer_auth(token);
+        let person = bearer.is_none() && self.person.lock().map_err(|_| anyhow!("gateway session lock failed"))?.is_some();
+        let send = |token: Option<&str>| -> Result<Response> {
+            let mut request = self.http.request(method.clone(), url.clone());
+            if let Some(token) = token {
+                request = request.bearer_auth(token);
+            }
+            if let Some(data) = &data {
+                request = request
+                    .header("content-type", if action == "token" { "application/json" } else { "application/octet-stream" })
+                    .body(data.clone());
+            }
+            request.send().map_err(reqwest::Error::without_url).map_err(Into::into)
+        };
+        if person {
+            let response = send(Some(&self.session_token(false)?))?;
+            if response.status().as_u16() == 401 {
+                return send(Some(&self.session_token(true)?));
+            }
+            Ok(response)
+        } else {
+            let bootstrap = self.bootstrap_action(&method, action)
+                && (query.is_none()
+                    || query.is_some_and(|(name, epoch)| {
+                        name == "epoch" && super::format::is_uuid(epoch) && matches!(action, "challenge" | "token")
+                    }));
+            let response = send(bearer.or_else(|| if bootstrap { self.token.as_deref() } else { None }))?;
+            if bootstrap && response.status().as_u16() == 404 && (action != "store.json" || self.token.is_some()) {
+                bail!("gateway bootstrap: HTTP 404 (no such project or machine slot); check the project name and a missing or wrong LAYR_GATEWAY_TOKEN_FILE grant");
+            }
+            Ok(response)
         }
-        if let Some(data) = data {
-            request = request
-                .header("content-type", if action == "token" { "application/json" } else { "application/octet-stream" })
-                .body(data);
-        }
-        request.send().map_err(reqwest::Error::without_url).map_err(Into::into)
+    }
+
+    fn machine_slot(&self) -> Option<String> {
+        self.machine.as_ref().map(|id| format!("slots/machine-{id}.age"))
+    }
+
+    fn bootstrap_action(&self, method: &Method, action: &str) -> bool {
+        let logical = epoch_path(action).map(|(_, key)| key).unwrap_or(action);
+        (*method == Method::GET
+            && (matches!(action, "store.json" | "challenge") || self.machine_slot().as_deref() == Some(logical)))
+            || (*method == Method::POST && action == "token")
     }
 
     fn proof(&self) -> Result<String> {
@@ -243,7 +399,9 @@ impl Gateway {
         struct Challenge {
             challenge: String,
         }
-        let challenge: Challenge = json(self.send(Method::GET, "challenge", None, None, None)?, 16 << 10)?;
+        let epoch = self.epoch.lock().map_err(|_| anyhow!("gateway epoch lock failed"))?.clone();
+        let query = epoch.as_deref().map(|e| ("epoch", e));
+        let challenge: Challenge = json(self.send(Method::GET, "challenge", None, query, None)?, 16 << 10)?;
         let sealed = base64::engine::general_purpose::STANDARD
             .decode(challenge.challenge)
             .map_err(|_| anyhow!("invalid gateway challenge encoding"))?;
@@ -256,13 +414,12 @@ impl Gateway {
             expires: i64,
         }
         let token: Token = json(
-            self.send(Method::POST, "token", None, None, Some(serde_json::to_vec(&serde_json::json!({"challenge":proof}))?))?,
+            self.send(Method::POST, "token", None, query, Some(serde_json::to_vec(&serde_json::json!({"challenge":proof}))?))?,
             16 << 10,
         )?;
         let now = crate::ids::now_ms();
         if token.token.len() > 256
-            || token.expires <= now
-            || token.expires > now + 600_000
+            || !valid_token_expiry(token.expires, now, 600_000)
             || !token.token.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.')
         {
             bail!("invalid gateway read token");
@@ -316,10 +473,13 @@ impl Gateway {
     }
 
     fn public_object(&self, key: &str, reader: bool) -> Result<Option<Vec<u8>>> {
-        if !matches!(key, "store.json" | "public.json" | "slots/public.age")
-            && super::format::parse_segment_name(key).is_none()
-            && super::format::parse_tree_name(key).is_none()
-            && super::format::parse_data_name(key).is_none()
+        let logical = epoch_path(key).map(|(_, k)| k).unwrap_or(key);
+        if !key.starts_with("keys/")
+            && !logical.starts_with("history/")
+            && !matches!(logical, "store.json" | "public.json" | "slots/public.age")
+            && super::format::parse_segment_name(logical).is_none()
+            && super::format::parse_tree_name(logical).is_none()
+            && super::format::parse_data_name(logical).is_none()
         {
             return Ok(None);
         }
@@ -347,10 +507,26 @@ impl Gateway {
         if key == "public.json" {
             return self.public_metadata();
         }
+        if epoch_path(key).is_some_and(|(_, k)| k == "public.json") {
+            return self.public_object(key, false);
+        }
         if self.is_public() {
             return self.public_get(key);
         }
-        if key.strip_prefix("slots/").is_some_and(|name| layr_store::person::slot_login(name).is_some()) {
+        let (slot_key, slot_epoch) = if let Some((epoch, inner)) = epoch_path(key) { (inner, Some(epoch)) } else { (key, None) };
+        if slot_key.starts_with("slots/") && self.person.lock().map_err(|_| anyhow!("gateway session lock failed"))?.is_none() {
+            let response = if self.machine_slot().as_deref() == Some(slot_key) {
+                self.send(Method::GET, key, None, None, None)?
+            } else {
+                self.read_request(&format!("objects/{key}"), None)?
+            };
+            return match response.status().as_u16() {
+                200 => Ok(Some(bytes(response, 16 << 10)?)),
+                404 => Ok(None),
+                status => bail!("gateway machine slot: HTTP {status}"),
+            };
+        }
+        if slot_key.strip_prefix("slots/").is_some_and(|name| layr_store::person::slot_login(name).is_some()) {
             let response = self.send(Method::GET, key, None, None, None)?;
             return match response.status().as_u16() {
                 200 => Ok(Some(bytes(response, 4096)?)),
@@ -358,7 +534,7 @@ impl Gateway {
                 status => bail!("gateway person slot: HTTP {status}"),
             };
         }
-        if key.starts_with("slots/") {
+        if slot_key.starts_with("slots/") {
             #[derive(Deserialize)]
             struct Slot {
                 name: String,
@@ -368,11 +544,11 @@ impl Gateway {
             struct Slots {
                 slots: Vec<Slot>,
             }
-            let slots: Slots = json(self.send(Method::GET, "slots", None, None, None)?, SLOTS_LIMIT)?;
+            let slots: Slots = json(self.send(Method::GET, "slots", None, slot_epoch.map(|e| ("epoch", e)), None)?, SLOTS_LIMIT)?;
             if slots.slots.len() > 1024 {
                 bail!("too many gateway slots");
             }
-            let name = key.strip_prefix("slots/").unwrap().strip_suffix(".age").context("invalid slot name")?;
+            let name = slot_key.strip_prefix("slots/").unwrap().strip_suffix(".age").context("invalid slot name")?;
             let mut found = None;
             for slot in slots.slots {
                 if slot.name == name {
@@ -390,13 +566,16 @@ impl Gateway {
             }
             return Ok(found);
         }
-        let response = if overlay_keys_path(key) && !self.has_read_identity() {
-            self.send(Method::GET, &format!("objects/{key}"), self.token.as_deref(), None, None)?
-        } else if key == "store.json" {
-            self.send(Method::GET, "store.json", None, None, None)?
-        } else {
-            self.read_request(&format!("objects/{key}"), None)?
-        };
+        let response =
+            if key.starts_with("keys/") || epoch_path(key).is_some_and(|(_, k)| k == "store.json")
+                || (overlay_keys_path(key) && !self.has_read_identity())
+            {
+                self.send(Method::GET, &format!("objects/{key}"), self.token.as_deref(), None, None)?
+            } else if key == "store.json" {
+                self.send(Method::GET, "store.json", None, None, None)?
+            } else {
+                self.read_request(&format!("objects/{key}"), None)?
+            };
         if key == "store.json"
             && matches!(response.status().as_u16(), 401 | 403 | 404)
             && self.token.is_none()
@@ -405,6 +584,8 @@ impl Gateway {
             return self.public_get("store.json");
         }
         match response.status().as_u16() {
+            404 if key == "store.json" && self.machine.is_some()
+                && self.person.lock().map_err(|_| anyhow!("gateway session lock failed"))?.is_none() => bail!("gateway bootstrap: HTTP 404 (no such project); check the project name and a missing or wrong LAYR_GATEWAY_TOKEN_FILE grant"),
             404 => Ok(None),
             200 => Ok(Some(bytes(response, if key == "store.json" { 16 << 10 } else { OBJECT_LIMIT })?)),
             status => bail!("gateway get: HTTP {status}"),
@@ -423,12 +604,16 @@ impl Gateway {
         }
         let has_identity = self.identity.lock().map_err(|_| anyhow!("gateway identity lock failed"))?.is_some();
         let response = if self.is_public() {
-            if !prefix.starts_with("records/") && !prefix.starts_with("states/") {
+            let logical = epoch_path(prefix).map(|(_, k)| k).unwrap_or(prefix);
+            if !prefix.starts_with("keys/") && !logical.starts_with("records/") && !logical.starts_with("states/") {
                 return Ok(Vec::new());
             }
             self.public_request("objects", Some(prefix))?
         } else if !has_identity
-            && (prefix.starts_with("records/") || prefix.starts_with("states/") || overlay_keys_prefix(prefix))
+            && (prefix.starts_with("records/")
+                || prefix.starts_with("states/")
+                || prefix == "keys/"
+                || overlay_keys_prefix(prefix))
         {
             self.send(Method::GET, "objects", self.token.as_deref(), Some(("prefix", prefix)), None)?
         } else {
@@ -461,17 +646,29 @@ impl Gateway {
         if data.len() > OBJECT_LIMIT {
             bail!("gateway object exceeds 32 MiB");
         }
+        let logical=epoch_path(key).map(|(_,key)|key).unwrap_or(key);
         let person_request =
-            key.strip_prefix("requests/").and_then(|s| s.strip_suffix(".json")).is_some_and(layr_store::request::request_id);
-        let token = if person_request {
-            String::new() // The person signature and authenticated tailnet login authorize this object.
-        } else if key.starts_with("slots/") {
+            logical.strip_prefix("requests/").and_then(|s| s.strip_suffix(".json")).is_some_and(layr_store::request::request_id);
+        if person_request {
+            let action = format!("objects/{key}");
+            let response = self.send(Method::PUT, &action, Some(&self.session_token(false)?), None, Some(data.clone()))?;
+            let response = if response.status().as_u16() == 401 {
+                self.send(Method::PUT, &action, Some(&self.session_token(true)?), None, Some(data))?
+            } else {
+                response
+            };
+            return match response.status().as_u16() {
+                201 => Ok(true),
+                412 => Ok(false),
+                status => bail!("gateway put: HTTP {status}"),
+            };
+        }
+        let token = if logical.starts_with("slots/") {
             self.proof()?
         } else {
             self.token.clone().context("set LAYR_GATEWAY_TOKEN_FILE to a private write token file")?
         };
-        let response =
-            self.send(Method::PUT, &format!("objects/{key}"), (!token.is_empty()).then_some(token.as_str()), None, Some(data))?;
+        let response = self.send(Method::PUT, &format!("objects/{key}"), Some(&token), None, Some(data))?;
         match response.status().as_u16() {
             201 => Ok(true),
             412 => Ok(false),
@@ -529,33 +726,87 @@ mod tests {
     use super::*;
     use std::os::unix::fs::{symlink, PermissionsExt};
     #[test]
-    fn person_registration_proof_opens_a_challenge_and_only_404_is_optional() {
+    fn token_expiry_tolerates_a_client_clock_behind_the_gateway() {
+        let gateway_now = 1_792_951_000_000;
+        let client_now = gateway_now - 30_000;
+        for lifetime in [600_000, 43_200_000] {
+            assert!(valid_token_expiry(gateway_now + lifetime, client_now, lifetime));
+            assert!(valid_token_expiry(client_now + lifetime + 300_000, client_now, lifetime));
+            assert!(!valid_token_expiry(client_now + lifetime + 300_001, client_now, lifetime));
+            assert!(!valid_token_expiry(client_now, client_now, lifetime));
+            assert!(!valid_token_expiry(client_now - 1, client_now, lifetime));
+        }
+    }
+
+    #[test]
+    fn missing_descriptor_keeps_optional_person_reads_and_hints_machine_grants() {
         use std::io::{Read, Write};
         use std::net::TcpListener;
-        let identity = keys::generate_identity();
-        for status in [200, 404, 403] {
+        for mode in ["reader", "person", "machine", "grant"] {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let address = listener.local_addr().unwrap();
-            let sealed = keys::encrypt(&keys::recipient_of(&identity).unwrap(), b"test-person-proof").unwrap();
-            let body = serde_json::json!({"challenge":base64::engine::general_purpose::STANDARD.encode(sealed)}).to_string();
             let server = std::thread::spawn(move || {
-                let (mut stream, _) = listener.accept().unwrap();
-                let mut request = [0; 2048];
-                let n = stream.read(&mut request).unwrap();
-                assert!(std::str::from_utf8(&request[..n]).unwrap().starts_with("GET /api/person/challenge "));
-                write!(stream, "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
-                    .unwrap();
+                // Without a grant, automatic public discovery still probes public.json anonymously.
+                for n in 0..if mode == "grant" { 1 } else { 2 } {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                    let mut request = Vec::new();
+                    let mut part = [0; 2048];
+                    while !request.windows(4).any(|p| p == b"\r\n\r\n") {
+                        let n = stream.read(&mut part).unwrap();
+                        assert!(n > 0);
+                        request.extend_from_slice(&part[..n]);
+                    }
+                    let request = String::from_utf8(request).unwrap().to_ascii_lowercase();
+                    if n == 0 {
+                        assert!(request.starts_with("get /v1/p/project/store.json "));
+                        assert_eq!(request.contains("authorization: bearer person.fixture"), mode == "person");
+                        assert_eq!(request.contains("authorization: bearer grant.fixture"), mode == "grant");
+                    } else {
+                        assert!(request.starts_with("get /p/project/public.json "));
+                        assert!(!request.contains("authorization:"));
+                    }
+                    write!(stream, "HTTP/1.1 404 Not Found\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}").unwrap();
+                }
             });
-            let mut gateway = Gateway::open("layr+https://example.com/project").unwrap();
+            let mut gateway = Gateway::open("layr+https://localhost/project").unwrap();
             gateway.base = reqwest::Url::parse(&format!("http://{address}/v1/p/project/")).unwrap();
-            let result = gateway.person_registration_proof(&identity);
-            match status {
-                200 => assert_eq!(result.unwrap().as_deref(), Some("test-person-proof")),
-                404 => assert!(result.unwrap().is_none()),
-                _ => assert!(result.is_err()),
+            if mode != "reader" {
+                gateway.machine = Some("test-machine".into());
+            }
+            if mode == "person" {
+                *gateway.person.lock().unwrap() = Some(PersonSession {
+                    login: "ann@example.com".into(),
+                    key: ed25519_dalek::SigningKey::from_bytes(&[7; 32]),
+                    token: Some(SessionToken {
+                        token: "person.fixture".into(),
+                        expires: crate::ids::now_ms() + 60_000,
+                        login: "ann@example.com".into(),
+                    }),
+                });
+            }
+            if mode == "grant" {
+                gateway.token = Some("grant.fixture".into());
+            }
+            let result = gateway.get("store.json");
+            if matches!(mode, "reader" | "person") {
+                assert!(result.unwrap().is_none());
+            } else {
+                let error = result.unwrap_err().to_string();
+                assert!(error.contains("404") && error.contains("missing or wrong"));
+                assert!(!error.contains("grant.fixture"));
             }
             server.join().unwrap();
         }
+    }
+
+    #[test]
+    fn explicit_public_access_never_opens_person_keys() {
+        let mut gateway = Gateway::open("layr+https://localhost/project").unwrap();
+        let env = std::collections::HashMap::from([("LAYR_PERSON_KEY_FILE".into(), "/missing/person-key".into())]);
+        gateway.set_person("ann@example.com", ed25519_dalek::SigningKey::from_bytes(&[7; 32])).unwrap();
+        gateway.connect_public(&env).unwrap();
+        assert!(gateway.person.lock().unwrap().is_none());
     }
 
     #[test]
@@ -603,4 +854,9 @@ mod tests {
         assert!(token_file(&dir, uid).is_err());
         std::fs::remove_dir_all(dir).unwrap();
     }
+}
+
+fn epoch_path(key: &str) -> Option<(&str, &str)> {
+    let (epoch, inner) = key.strip_prefix("project/epochs/")?.split_once('/')?;
+    super::format::is_uuid(epoch).then_some((epoch, inner))
 }

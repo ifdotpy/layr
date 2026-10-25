@@ -88,9 +88,6 @@ slot_path.unlink()
 run(['remote','public','origin','on'],W,input='project\n')
 check(manifest_path.read_bytes()==manifest_bytes and slot_path.read_bytes().startswith(b'age-encryption.org/v1'),'publication resumes from the existing signed opener')
 slot_bytes=slot_path.read_bytes()
-before=hashes()
-refused(['remote','public','origin','off'],W,'off names missing key rotation and says the project stays public',['key rotation','stays public'])
-check(before==hashes(),'off changes no remote object')
 for env,name,flags in [(P,'project',['--public']),(Q,'project',[])]:
  result=run(['clone','file://'+str(root/'archive'),name,*flags,'--json'],env)
  check(clean(result.stdout+result.stderr,ids),'public clone report has no hidden trace: '+('explicit' if flags else 'automatic'))
@@ -120,13 +117,13 @@ for args in [['line','list','--json'],['--line','main','log','--json'],['--line'
 for args in [['overlay','show',hidden,'--json'],['overlay','log',hidden,'--ops'],['overlay','log',hidden,'--ops','--json']]:
  output=run(args,P,False);missing=run(args,W,False)
  check(output.returncode!=0 and (output.returncode,output.stdout,output.stderr)==(missing.returncode,missing.stdout,missing.stderr),'public hidden query matches an overlay that never existed byte for byte: '+' '.join(args[:-1]))
-# Changes after refused off still reach the public reader through ordinary fetch.
+# Later public changes still reach the public reader through ordinary fetch.
 wline=pathlib.Path(W['LAYR_ROOT'])/'projects/project/lines/main'
 (wline/'future.txt').write_text('future public bytes\n')
 run(['--line','main','add','future.txt'],W);run(['--line','main','save','-qm','Shared future'],W);run(['push','origin','-q'],W)
 future=run(['--line','main','rev-parse','head'],W).stdout.strip()
 run(['fetch','origin','-q'],P)
-check('Shared future' in run(['--line','main','log',future],P).stdout,'public fetch reads future signed states after off refuses')
+check('Shared future' in run(['--line','main','log',future],P).stdout,'public fetch reads future signed states before closing')
 check('future public bytes' in run(['--line','main','show',future+':future.txt'],P).stdout,'public fetch reads future file contents')
 # Signed descriptor binding and age-slot checks fail closed through the clone caller.
 for field,value in [('v',2),('project',a['id']),('recipient','invalid'),('identity','invalid'),('machine',a['id']),('public_key',a['public_key']),('sig','AAAA')]:
@@ -171,9 +168,9 @@ class PublicFiles(http.server.BaseHTTPRequestHandler):
   name=parsed.path[len(prefix):]
   if name=='objects':
    query=urllib.parse.parse_qs(parsed.query);wanted=query.get('prefix',[''])[0]
-   if not wanted.startswith(('records/','states/')): self.send_error(404);return
+   if not wanted.startswith(('records/','states/','keys/')): self.send_error(404);return
    body=json.dumps({'objects':[{'key':str(p.relative_to(root/'archive')),'modified':int(p.stat().st_mtime*1000)} for p in (root/'archive').rglob('*') if p.is_file() and str(p.relative_to(root/'archive')).startswith(wanted)]}).encode()
-  elif name in ['store.json','public.json','slots/public.age'] or name.startswith(('records/','states/')):
+  elif name in ['store.json','public.json','slots/public.age'] or name.startswith(('records/','states/','keys/')):
    path=root/'archive'/name
    if '..' in pathlib.PurePosixPath(name).parts or not path.is_file(): self.send_error(404);return
    body=path.read_bytes()
@@ -230,8 +227,11 @@ class WriterGateway(PublicFiles):
   if not parsed.path.startswith(prefix): self.send_error(404);return
   action=parsed.path[len(prefix):];auth=self.headers.get('Authorization')
   if action=='store.json': return self.answer((root/'archive/store.json').read_bytes())
-  if action=='slots':
-   return self.answer({'slots':[{'name':p.stem,'data':base64.b64encode(p.read_bytes()).decode()} for p in (root/'archive/slots').glob('machine-*.age')]})
+  if action.startswith('slots/machine-'):
+   path=root/'archive'/action
+   if not path.is_file(): self.send_error(404);return
+   return self.answer(path.read_bytes())
+  if action=='slots': self.send_error(500);return
   if action=='challenge': return self.answer({'challenge':base64.b64encode(challenge_segment).decode()})
   if action=='objects':
    if auth not in ['Bearer '+write_token,'Bearer '+read_token]: self.send_error(401);return
@@ -282,7 +282,7 @@ try:
  check(True,'a trusted writer pushes a public project through the gateway with its own slot and token')
  check([(method,path,auth) for method,path,auth in requests if path.startswith('/p/')]==[('GET','/p/project/public.json',None)],'writer uses exactly one anonymous public manifest side request')
  check(not any('/v1/p/project/objects/public.json' in path for _,path,_ in requests),'writer never requests an authenticated public manifest route')
- check(any(path=='/v1/p/project/slots' for _,path,_ in requests) and any(path=='/v1/p/project/challenge' for _,path,_ in requests) and any(method=='POST' and path=='/v1/p/project/token' for method,path,_ in requests),'writer opens its private machine slot and completes its private read proof')
+ check(any(path.startswith('/v1/p/project/slots/machine-') for _,path,_ in requests) and not any(path=='/v1/p/project/slots' for _,path,_ in requests) and any(path=='/v1/p/project/challenge' for _,path,_ in requests) and any(method=='POST' and path=='/v1/p/project/token' for method,path,_ in requests),'writer opens its private machine slot and completes its private read proof')
  check(any(method=='PUT' and '/objects/records/' in path for method,path,_ in requests) and any(method=='PUT' and '/objects/states/' in path for method,path,_ in requests),'writer publishes signed record segments and encrypted state objects')
  check(all(path.startswith('/v1/p/project/objects/') and auth=='Bearer '+write_token for method,path,auth in requests if method=='PUT'),'writer PUTs keep the private gateway route and write bearer')
  run(['fetch','origin','-q'],P)
@@ -344,6 +344,14 @@ try:
  run(['push','origin','-q'],P)
  check(True,'the newly trusted machine can push under its normal local policy')
 finally: daemon.terminate();daemon.wait(timeout=10);daemon_log.close()
+# Closing is tested last so the publication fixtures above remain on epoch zero.
+closing=dict(W,LAYR_PAPER_KEY_FILE=str(root/'paper'))
+old_objects=hashes()
+run(['remote','public','origin','off'],closing)
+epochs=[json.loads(p.read_text())['r'] for p in (root/'archive/keys').glob('*.json')]
+check(len(epochs)==1 and epochs[0]['data']['mode']=='private','off rotates the project to a private epoch')
+current=root/'archive/project/epochs'/epochs[0]['data']['epoch']
+check(not (current/'public.json').exists() and all(hashes().get(k)==v for k,v in old_objects.items()),'off publishes no current public opener and preserves every old object')
 (root/'check-count').write_text(str(checks));print('public project checks:',checks)
 PY
 PASS=$(cat "$T/check-count")

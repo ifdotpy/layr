@@ -123,6 +123,7 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
     if opts.caches && serde_json::from_value::<crate::model::StateKind>(serde_json::json!("cache")).is_err() {
         bail!("store --caches is not available until cache states exist");
     }
+    super::epochs::check_current(store)?;
     store.private_dir()?;
     let descriptor = store.descriptor()?;
     let blind_layer = store.layer.is_some() && !store.backend.can_read();
@@ -457,8 +458,11 @@ mod tests {
             pin: None,
             aws_profile: None,
             layer: None,
+            epoch: None,
+            epoch_public: false,
+            publishing_epoch: false,
             force_public: false,
-        public_clone: false,
+            public_clone: false,
             public_reader: std::sync::atomic::AtomicBool::new(false),
         }
     }
