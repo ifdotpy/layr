@@ -23,7 +23,7 @@ openssl(['req','-x509','-newkey','rsa:2048','-nodes','-keyout',str(root/'tls-ca-
 openssl(['req','-new','-newkey','rsa:2048','-nodes','-keyout',str(root/'tls-key.pem'),'-out',str(root/'tls.csr'),'-subj','/CN=localhost'])
 (root/'tls-ext.cnf').write_text('basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:localhost,IP:127.0.0.1\n')
 openssl(['x509','-req','-in',str(root/'tls.csr'),'-CA',str(root/'tls-ca.pem'),'-CAkey',str(root/'tls-ca-key.pem'),'-CAcreateserial','-out',str(root/'tls-cert.pem'),'-days','1','-extfile',str(root/'tls-ext.cnf')])
-people={}; challenges={}; sessions={}; invites={'registration-invite':'ann@example.com','fresh-invite':'fresh@example.com'}; stats={'challenge':0,'session':0,'registration':0,'renew':0,'requests':0,'index':0,'inbox':0,'slots':0,'request_attempts':0}; faults={}; errors=[]
+people={}; challenges={}; sessions={}; invites={'registration-invite':'ann@example.com','fresh-invite':'fresh@example.com'}; stats={'challenge':0,'session':0,'registration':0,'renew':0,'requests':0,'index':0,'inbox':0,'slots':0,'request_attempts':0,'epoch_requests':0,'epoch_claims':0,'epoch_proofs':0}; faults={}; errors=[]
 class Handler(http.server.BaseHTTPRequestHandler):
  def log_message(self,*args): pass
  def reply(self,status,body):
@@ -63,6 +63,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
    assert all(body.get(k) for k in ['recipient','paper','signing_key','signing'])
    invites.pop(bearer);people[login]=body;stats['registration']+=1;self.reply(200,{'login':login,'new':True});return
   login=sessions.get(bearer)
+  # Project data keeps its read/write capability; person exchanges use the session.
+  if path.startswith('/v1/p/project/objects') and bearer in ['v1.read.signin-test','v1.write.signin-test']:
+   login='ann@example.com'
   if not login: self.reply(401,{});return
   if faults.pop('reject_session',False):
    sessions.pop(bearer);stats['renew']+=1;self.reply(401,{});return
@@ -75,17 +78,46 @@ class Handler(http.server.BaseHTTPRequestHandler):
   if path=='/api/person/inbox/1-test' and self.command=='DELETE':
    people[login]['inbox']=[];stats['inbox']+=1;self.reply(200,{});return
   if path=='/v1/p/project/store.json': self.reply(200,(root/'archive/store.json').read_bytes());return
+  scope=root/'archive'
+  epoch=urllib.parse.parse_qs(parsed.query).get('epoch',['root'])[0]
+  if epoch!='root': scope=scope/'project/epochs'/epoch
+  if path=='/v1/p/project/challenge':
+   assert bearer in sessions
+   stats['epoch_proofs']+=int(epoch!='root')
+   self.reply(200,{'challenge':base64.b64encode(next((scope/'records').rglob('*.age')).read_bytes()).decode()});return
+  if path=='/v1/p/project/token':
+   assert bearer in sessions and '"machine"' in body['challenge']
+   self.reply(200,{'token':'v1.read.signin-test','expires':int(time.time()*1000)+60000});return
   if path=='/v1/p/project/slots':
-   self.reply(200,{'slots':[{'name':p.stem,'data':base64.b64encode(p.read_bytes()).decode()} for p in (root/'archive/slots').glob('*.age')]});return
+   self.reply(200,{'slots':[{'name':p.stem,'data':base64.b64encode(p.read_bytes()).decode()} for p in (scope/'slots').glob('*.age')]});return
   if path.startswith('/v1/p/project/slots/'):
    name=path.rsplit('/',1)[1];assert name.startswith('person-'+login+'-');stats['slots']+=1
    self.reply(200,(root/'archive/slots'/name).read_bytes());return
-  if path.startswith('/v1/p/project/objects/requests/') and self.command=='PUT':
+  object_key=path.removeprefix('/v1/p/project/objects/')
+  logical=object_key.split('/',3)[3] if object_key.startswith('project/epochs/') else object_key
+  if path.startswith('/v1/p/project/objects/') and logical.startswith('requests/') and self.command=='PUT':
+   assert bearer in sessions
    stats['request_attempts']+=1
    if faults.pop('reject_request_session',False):
     sessions.pop(bearer);self.reply(401,{});return
    assert body['v']==2 and body['person']==login and body['sig']
+   if object_key.startswith('project/epochs/'):
+    assert body['epoch']==object_key.split('/')[2]
+    target=root/'archive'/object_key;target.parent.mkdir(parents=True,exist_ok=True);target.write_text(json.dumps(body))
+    stats['epoch_requests']+=1
    stats['requests']+=1;self.reply(201,{});return
+  if path=='/v1/p/project/objects':
+   prefix=urllib.parse.parse_qs(parsed.query).get('prefix',[''])[0]
+   self.reply(200,{'objects':[{'key':str(p.relative_to(root/'archive')),'modified':int(p.stat().st_mtime*1000)} for p in (root/'archive').rglob('*') if p.is_file() and str(p.relative_to(root/'archive')).startswith(prefix)]});return
+  if path.startswith('/v1/p/project/objects/'):
+   target=root/'archive'/object_key
+   if self.command=='GET':
+    self.reply(200,target.read_bytes()) if target.is_file() else self.reply(404,{})
+    return
+   if self.command=='PUT' and logical.startswith('claims/'):
+    assert bearer=='v1.write.signin-test' and body['sig']
+    if target.exists(): self.reply(412,{});return
+    target.parent.mkdir(parents=True,exist_ok=True);target.write_text(json.dumps(body));stats['epoch_claims']+=1;self.reply(201,{});return
   self.reply(404,{})
 server=http.server.HTTPServer(('127.0.0.1',0),Handler)
 context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.load_cert_chain(root/'tls-cert.pem',root/'tls-key.pem');server.socket=context.wrap_socket(server.socket,server_side=True)
@@ -141,6 +173,18 @@ try:
  request=json.loads(run(['request','approve','head','--person','--remote','web','--json'],actor).stdout)
  check(stats['requests']==before+1 and stats['request_attempts']==2 and request['request']['v']==2,'real person request uploads an encrypted v2 envelope with a session bearer')
  check(stats['registration']==1,'person request never re-registers or overwrites the person key')
+ # Repeat through an actual project epoch, including the executor's claim write.
+ run(['remote','rotate','archive','--reason','session integration'],project)
+ epoch=json.loads(next((root/'archive/keys').glob('*.json')).read_text())['r']['data']['epoch']
+ before=stats['request_attempts'];faults['reject_request_session']=True
+ rotated=json.loads(run(['request','approve','head','--person','--remote','web','--json'],actor).stdout)
+ check(stats['epoch_requests']==1 and stats['request_attempts']==before+2 and rotated['request']['epoch']==epoch,'epoch request uses a session bearer and renews once after rejection')
+ check((root/'archive/project/epochs'/epoch/'requests'/f"{rotated['request']['id']}.json").is_file(),'session request stores its envelope only in the current epoch namespace')
+ token=root/'writer.token';token.write_text('v1.write.signin-test');token.chmod(0o600)
+ executor=dict(actor,LAYR_GATEWAY_TOKEN_FILE=str(token))
+ run(['requests','apply','--remote','web','--json'],executor)
+ check(stats['epoch_claims']==1 and (root/'archive/project/epochs'/epoch/'claims'/f"{rotated['request']['id']}.json").is_file(),'executor claims the epoch request with its machine write bearer')
+ check(stats['epoch_proofs']>0,'epoch read proof exchanges retain the person session bearer')
  fresh=dict(base,LAYR_PERSON_DIR=str(root/'fresh'),LAYR_PERSON_LOGIN='fresh@example.com',LAYR_GATEWAY_CA_FILE=str(root/'tls-ca.pem'))
  before=stats['session']
  run(['person','keys','--site',site,'--invite','fresh-invite','--paper-key-out',str(root/'fresh.paper')],fresh)
