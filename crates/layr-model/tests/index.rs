@@ -125,6 +125,7 @@ fn paths_cover_mode_changes_deletion_and_recreation_without_unrelated_blobs() ->
     ]);
     let indexed = model_index::History { project: &project, paths: &paths, graphs: &graphs };
     assert_eq!(indexed.ancestor(&id(4), 2)?, id(2));
+    assert_eq!(indexed.file_history_from(&id(4), "file", 2)?.iter().map(|s| s.id.clone()).collect::<Vec<_>>(), vec![id(2)]);
     assert_eq!(indexed.file_history(&id(4), "file")?.iter().map(|s| s.id.clone()).collect::<Vec<_>>(), vec![id(4), id(3), id(2)]);
     indexed.check_paths(&id(3), &t2, &t3)?;
     assert!(indexed.check_paths(&id(3), &t2, &t4).is_err());

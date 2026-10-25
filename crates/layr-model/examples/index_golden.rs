@@ -51,6 +51,10 @@ fn main() -> Result<()> {
     }
     let history = model_index::History { project, paths: &paths, graphs: &graphs };
     let states = history.file_history(&args[3], &args[4])?;
+    if !project.state(&args[3]).context("missing starting state")?.parents.is_empty() {
+        let older = history.file_history_from(&args[3], &args[4], 1)?;
+        fs::write(out.join("history-older.json"), serde_json::to_vec(&older)?)?;
+    }
     // Compare every path-cache answer to the authenticated tree before displaying it.
     for state in project.states.values().map(|s| &s.state) {
         if let Some(attempt) = attempts.get(&state.id) {

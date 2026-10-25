@@ -174,6 +174,7 @@ impl History<'_> {
     }
     /// Locate an ancestor in O(log distance) object lookups. Call after graph reconciliation.
     pub fn ancestor(&self, start: &str, mut distance: u64) -> Result<String> {
+        self.checked_graph(start)?;
         let mut at = start.to_string();
         while distance > 0 {
             let bit = 63 - distance.leading_zeros() as usize;
@@ -183,9 +184,15 @@ impl History<'_> {
         Ok(at)
     }
     pub fn file_history(&self, start: &str, path: &str) -> Result<Vec<StateRec>> {
+        self.file_history_from(start, path, 0)
+    }
+    /// Select an older first-parent range with graph skip pointers before reading its
+    /// path objects. Offset counts source states, including states that kept the file.
+    pub fn file_history_from(&self, start: &str, path: &str, offset: u64) -> Result<Vec<StateRec>> {
+        let start = self.ancestor(start, offset)?;
         let mut out = Vec::new();
         history::file_history(
-            &[start.into()],
+            &[start],
             &BTreeSet::new(),
             true,
             |id| Ok(self.project.state(id).cloned()),

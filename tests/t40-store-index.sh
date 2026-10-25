@@ -55,6 +55,7 @@ for ENTRY in "edit:$EDIT" "unchanged:$UNCHANGED" "recreated:$RECREATED" "merge:$
     LABEL=${ENTRY%%:*}; STATE=${ENTRY#*:}
     mkdir -p "$T/$LABEL"
     l log "$STATE" --first-parent --json -- file.txt > "$T/$LABEL/cli-history.jsonl"
+    l log "$STATE~1" --first-parent --json -- file.txt > "$T/$LABEL/cli-history-older.jsonl"
     l blame -s "$STATE" -- file.txt > "$T/$LABEL/cli-blame.txt"
     ok "$LABEL native index reader verifies the real store" bash -c 'cd "$1" && cargo run --locked -q -p layr-model --example index_golden -- "$2" "$3" "$4" "$5" file.txt' _ "$REPO" "$T/archive" "$T/paper" "$T/$LABEL" "$STATE"
     ok "$LABEL indexed file history equals the CLI" python3 - "$T/$LABEL" <<'PY'
@@ -62,6 +63,8 @@ from pathlib import Path
 import sys,json
 p=Path(sys.argv[1]); expected=[json.loads(line) for line in (p/'cli-history.jsonl').read_text().splitlines()]
 assert expected==json.loads((p/'history.json').read_text())
+older=[json.loads(line) for line in (p/'cli-history-older.jsonl').read_text().splitlines()]
+assert older==json.loads((p/'history-older.json').read_text())
 PY
     ok "$LABEL indexed blame equals the CLI" python3 - "$T/$LABEL" <<'PY'
 from pathlib import Path
