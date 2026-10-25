@@ -112,18 +112,8 @@ pub(crate) fn scan_with_data(root: &Path, data: bool) -> Result<BTreeMap<String,
     }
     let m = fs::symlink_metadata(root)?;
     let saved = sealed_scan_file(root, &m);
-    // A command often reads one sealed tree more than once (a parent and its child share
-    // their base): the decoded scan stays in memory for the process.
-    static DECODED: std::sync::Mutex<Vec<(std::path::PathBuf, std::sync::Arc<BTreeMap<String, ScanEntry>>)>> =
-        std::sync::Mutex::new(Vec::new());
-    if let Some(f) = &saved {
-        if let Some((_, scan)) = DECODED.lock().unwrap().iter().find(|(p, _)| p == f) {
-            return Ok((**scan).clone());
-        }
-        if let Some(scan) = fs::read(f).ok().and_then(|raw| decode_scan(&raw)) {
-            DECODED.lock().unwrap().push((f.clone(), std::sync::Arc::new(scan.clone())));
-            return Ok(scan);
-        }
+    if let Some(scan) = saved.as_ref().and_then(|f| decoded(f)) {
+        return Ok((*scan).clone());
     }
     let _t = crate::trace::span("APFS bulk scan");
     let mut out = BTreeMap::new();
@@ -141,6 +131,32 @@ pub(crate) fn scan_with_data(root: &Path, data: bool) -> Result<BTreeMap<String,
     Ok(out)
 }
 
+/// A command often reads one sealed tree more than once (a parent and its child share their
+/// base): the decoded scan stays in memory for the process, by the name of its file.
+static DECODED: std::sync::Mutex<Vec<(std::path::PathBuf, std::sync::Arc<BTreeMap<String, ScanEntry>>)>> =
+    std::sync::Mutex::new(Vec::new());
+
+fn decoded(file: &Path) -> Option<std::sync::Arc<BTreeMap<String, ScanEntry>>> {
+    if let Some((_, scan)) = DECODED.lock().unwrap().iter().find(|(p, _)| p == file) {
+        return Some(scan.clone());
+    }
+    let scan = std::sync::Arc::new(decode_scan(&fs::read(file).ok()?)?);
+    DECODED.lock().unwrap().push((file.to_path_buf(), scan.clone()));
+    Some(scan)
+}
+
+/// The entries of a sealed state or layer, from its saved scan (made now when it is missing).
+/// `None` for a tree that can change. Its paths are the names that the volume stores.
+pub(crate) fn sealed_entries(root: &Path) -> Option<std::sync::Arc<BTreeMap<String, ScanEntry>>> {
+    let m = fs::symlink_metadata(root).ok()?;
+    let file = sealed_scan_file(root, &m)?;
+    if let Some(scan) = decoded(&file) {
+        return Some(scan);
+    }
+    scan_with_data(root, true).ok()?;
+    decoded(&file)
+}
+
 thread_local! {
     /// The scans that `stable_read` validates, used by the read instead of new scans.
     static MEMO: std::cell::RefCell<Vec<(std::path::PathBuf, BTreeMap<String, ScanEntry>)>> =
@@ -148,6 +164,15 @@ thread_local! {
     /// The paths below those roots whose content the read may use (`note_read`).
     static TOUCHED: std::cell::RefCell<Vec<(std::path::PathBuf, std::collections::BTreeSet<String>)>> =
         const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Run `f` with a scan of `root` that the caller already has: scans of `root` inside `f`
+/// (`stable_read` too) use it instead of reading the folder again.
+pub fn with_known_scan<T>(root: &Path, scan: &BTreeMap<String, ScanEntry>, f: impl FnOnce() -> T) -> T {
+    MEMO.with_borrow_mut(|memo| *memo = vec![(root.to_path_buf(), scan.clone())]);
+    let out = f();
+    MEMO.with_borrow_mut(Vec::clear);
+    out
 }
 
 /// Note that a read inside `stable_read` uses the content of `paths` below `root`: the
@@ -544,6 +569,7 @@ pub fn copy_selected(src: &Path, dst: &Path, paths: &std::collections::BTreeSet<
     note_read(src, paths);
     let source = crate::tree::Tree::open(src)?;
     let target = crate::tree::Tree::open(dst)?;
+    let mut entries = Vec::new();
     for rel in paths {
         // Descendants of a directory replaced by a symlink are deletions.
         let path = match crate::fsutil::safe_join(src, rel) {
@@ -559,30 +585,31 @@ pub fn copy_selected(src: &Path, dst: &Path, paths: &std::collections::BTreeSet<
         };
         target.mkdirs_for(rel, None)?;
         match m.ftype {
-            crate::fsutil::FType::File => {
-                let mut input = source.open_read(rel)?;
-                let metadata = input.metadata()?;
-                let output = match target.clone_new_file(&input, rel)? {
-                    Some(file) => file,
-                    None => {
-                        let mut file = target.create(rel, 0o600)?;
-                        io::copy(&mut input, &mut file)?;
-                        keep_birthtime(&metadata, &dst.join(rel))?;
-                        file
-                    }
-                };
-                output.set_permissions(fs::Permissions::from_mode(m.mode & 0o7777))?;
-                crate::fsutil::set_mtime(&output, metadata.mtime(), metadata.mtime_nsec())?;
-            }
-            crate::fsutil::FType::Symlink => {
-                target.symlink(rel, &source.read_link(rel)?)?;
-                keep_birthtime(&fs::symlink_metadata(src.join(rel))?, &dst.join(rel))?;
-            }
+            crate::fsutil::FType::File | crate::fsutil::FType::Symlink => entries.push((rel, m)),
             crate::fsutil::FType::Dir => target.mkdirs(rel, None)?,
             crate::fsutil::FType::Special => bail!("cannot snapshot special file {}", src.join(rel).display()),
         }
     }
-    Ok(())
+    // The folders exist: the files copy with several threads.
+    each_parallel(&entries, |(rel, m)| {
+        if m.ftype == crate::fsutil::FType::Symlink {
+            target.symlink(rel, &source.read_link(rel)?)?;
+            return keep_birthtime(&fs::symlink_metadata(src.join(rel))?, &dst.join(rel));
+        }
+        let mut input = source.open_read(rel)?;
+        let metadata = input.metadata()?;
+        let output = match target.clone_new_file(&input, rel)? {
+            Some(file) => file,
+            None => {
+                let mut file = target.create(rel, 0o600)?;
+                io::copy(&mut input, &mut file)?;
+                keep_birthtime(&metadata, &dst.join(rel))?;
+                file
+            }
+        };
+        output.set_permissions(fs::Permissions::from_mode(m.mode & 0o7777))?;
+        crate::fsutil::set_mtime(&output, metadata.mtime(), metadata.mtime_nsec())
+    })
 }
 /// Identity used to find moves. APFS clones, writes, and renames keep the creation time.
 /// A new inode, such as a safe save, has a new identity, as with btrfs inode numbers.
@@ -712,7 +739,7 @@ pub(crate) fn seal(path: &Path, readonly: bool, for_delete: bool) -> Result<()> 
 }
 
 /// Run `f` for each item with up to four threads; the first error wins.
-fn each_parallel(items: &[std::path::PathBuf], f: impl Fn(&Path) -> Result<()> + Sync) -> Result<()> {
+fn each_parallel<T: Sync>(items: &[T], f: impl Fn(&T) -> Result<()> + Sync) -> Result<()> {
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 4);
     if items.len() < 64 || threads == 1 {
         return items.iter().try_for_each(|p| f(p));
@@ -964,7 +991,25 @@ pub(crate) fn candidates_scanned(
     a: BTreeMap<String, ScanEntry>,
     b: BTreeMap<String, ScanEntry>,
 ) -> Result<Vec<crate::changes::Change>> {
-    let names: std::collections::BTreeSet<_> = a.keys().chain(b.keys()).filter(|s| !s.is_empty()).collect();
+    // An entry that both trees have with the same metadata and shared data is no candidate, as
+    // the btrfs stream would not name it: no `Change` for it.
+    let same_meta = |x: &ScanEntry, y: &ScanEntry| {
+        let (m, n) = (&x.meta, &y.meta);
+        m.ftype == n.ftype && m.mode == n.mode && m.uid == n.uid && m.gid == n.gid
+    };
+    let unchanged = |p: &String| match (a.get(p), b.get(p)) {
+        (Some(x), Some(y)) if same_meta(x, y) && x.meta.is_dir() => true,
+        (Some(x), Some(y)) if same_meta(x, y) && x.meta.is_file() => {
+            x.meta.size == y.meta.size
+                && x.meta.mtime == y.meta.mtime
+                && x.fingerprint.0 == y.fingerprint.0
+                && x.data.zip(y.data).is_some_and(|(d, e)| {
+                    d.generation.is_some() && e.generation.is_some() && d.clone_id.is_some() && d.clone_id == e.clone_id
+                })
+        }
+        _ => false,
+    };
+    let names: std::collections::BTreeSet<_> = a.keys().chain(b.keys()).filter(|s| !s.is_empty() && !unchanged(s)).collect();
     let mut changes: BTreeMap<_, _> = names
         .into_iter()
         .map(|p| {

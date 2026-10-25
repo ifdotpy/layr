@@ -279,7 +279,8 @@ pub fn begin(ctx: &Ctx, repo: &Repo, line: &Line, op: crate::repo::LineOp) -> Re
     Ok((lock, w))
 }
 
-/// Stage paths: copy them from the working snapshot into the staging line. A file that moved
+/// Stage paths: move them from the working snapshot (a private copy of this command) into the
+/// staging line. A file that moved
 /// in the working folder (same inode number) is moved in the staging line too, so states keep
 /// the inode and btrfs reports the move.
 pub fn stage_paths(repo: &Repo, line: &Line, scan: &Path, paths: &BTreeSet<String>) -> Result<()> {
@@ -458,12 +459,15 @@ pub fn add(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         return Ok(0);
     }
+    // Staging moves the entries out of the copy: name them first.
+    let verbose: Vec<(&str, &String)> = if a.has("-v") {
+        paths.iter().map(|p| (if fsutil::lmeta(&scan.path, p).is_some() { "add" } else { "remove" }, p)).collect()
+    } else {
+        Vec::new()
+    };
     stage_paths(&h.repo, &line, &scan.path, &paths)?;
-    if a.has("-v") {
-        for p in &paths {
-            let what = if fsutil::lmeta(&scan.path, p).is_some() { "add" } else { "remove" };
-            outln!(ctx, "{what} '{}'", h.rel(p));
-        }
+    for (what, p) in verbose {
+        outln!(ctx, "{what} '{}'", h.rel(p));
     }
     if !ignored_named.is_empty() {
         let mut m = String::from("The following paths are ignored by one of your .gitignore files:\n");
