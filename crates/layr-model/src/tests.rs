@@ -290,3 +290,156 @@ fn hidden_layers_come_only_from_their_own_records() {
     );
     assert!(!serde_json::to_string(&other).unwrap().contains("hidden"));
 }
+
+fn person_evidence(seq: u64, login: &str, key: &ed25519_dalek::SigningKey, withdraw: bool) -> Record {
+    use layr_store::request::{Action, Request};
+    let mut record = Record::new("attest");
+    record.id = format!("01a12290-0000-7000-8000-{:012x}", 100 + seq);
+    record.project = "01a12290-0000-7000-8000-000000000002".into();
+    record.machine = "01a12290-0000-7000-8000-000000000005".into();
+    record.seq = seq;
+    record.time = seq as i64;
+    record.actor = Actor { uid: u32::MAX, name: format!("person:{login}"), session: None };
+    let subject = "01a12290-0000-7000-8000-000000000003";
+    let action = if withdraw {
+        Action::Withdraw { state: subject.into(), into: "main".into() }
+    } else {
+        Action::Approve { state: subject.into(), into: "main".into() }
+    };
+    let request =
+        Request::new(format!("01a12290-0000-7000-8000-{:012x}", 200 + seq), record.project.clone(), login.into(), 0, action)
+            .unwrap();
+    let signed = request.sign(key).unwrap();
+    let text = String::from_utf8(signed.to_bytes().unwrap()).unwrap();
+    record.data = json!({"request":text,"request_id":request.id,"request_digest":hex::encode(Sha256::digest(text.as_bytes())),"person_key":hex::encode(key.verifying_key().to_bytes()),"attestation":Attestation {format:1,attestation_id:record.id.clone(),subject:Subject{kind:"state".into(),id:subject.into()},change_id:None,kind:if withdraw {"revoke".into()}else{"approval".into()},payload_digest:hex::encode(Sha256::digest(signed.r.get().as_bytes())),payload_ref:None,signer:record.actor.name.clone(),time:record.time}});
+    validation::validate(&record).unwrap();
+    record
+}
+
+#[test]
+fn person_approvals_survive_executor_scope_and_keep_revocations_separate() {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[11; 32]);
+    let bob_key = ed25519_dalek::SigningKey::from_bytes(&[13; 32]);
+    let attacker_key = ed25519_dalek::SigningKey::from_bytes(&[12; 32]);
+    let ann = person_evidence(3, "ann@example.com", &key, false);
+    let bob = person_evidence(4, "bob@example.com", &bob_key, false);
+    let mut source = Record::new("save");
+    source.id = "01a12290-0000-7000-8000-000000000001".into();
+    source.project = ann.project.clone();
+    source.machine = ann.machine.clone();
+    source.seq = 2;
+    source.time = 2;
+    source.states.push(state(&ann.data["attestation"]["subject"]["id"].as_str().unwrap(), StateKind::Commit, &[]));
+    source.states[0].author.email = "author@example.com".into();
+    let mut pin = source.clone();
+    pin.id = "01a12290-0000-7000-8000-000000000009".into();
+    pin.seq = 1;
+    pin.time = 1;
+    pin.states.clear();
+    pin.op = "config".into();
+    pin.data = json!({"config":{"person.keys":{"ann@example.com":hex::encode(key.verifying_key().to_bytes()),"bob@example.com":hex::encode(bob_key.verifying_key().to_bytes())}}});
+    let mut revoke = person_evidence(5, "bob@example.com", &bob_key, true);
+    revoke.machine = "01a12290-0000-7000-8000-000000000006".into();
+    revoke.data["revokes"] = json!([ann.id, bob.id]);
+    let mut fake = person_evidence(6, "ann@example.com", &attacker_key, false);
+    fake.machine = revoke.machine.clone();
+    let mut fake_revoke = person_evidence(7, "ann@example.com", &attacker_key, true);
+    fake_revoke.machine = revoke.machine.clone();
+    fake_revoke.data["revokes"] = json!([ann.id]);
+    let mut foreign_pin = pin.clone();
+    foreign_pin.id = "01a12290-0000-7000-8000-000000000099".into();
+    foreign_pin.machine = revoke.machine.clone();
+    foreign_pin.seq = 8;
+    foreign_pin.time = 8;
+    foreign_pin.data = json!({"config":{"person.keys":{"ann@example.com":hex::encode(attacker_key.verifying_key().to_bytes())}}});
+    let project = Project::from_records(
+        &ann.project,
+        vec![pin, source, ann.clone(), bob.clone(), revoke, fake.clone(), fake_revoke, foreign_pin],
+        &ann.machine,
+    )
+    .unwrap();
+    let subject = ann.data["attestation"]["subject"]["id"].as_str().unwrap();
+    assert!(!project.is_revoked(&ann.id));
+    assert!(project.is_revoked(&bob.id));
+    assert!(project.approvals(subject).is_empty());
+    assert_eq!(project.person_approvals(subject), vec![("ann@example.com".into(), 3)]);
+    assert_eq!(project.person_attestations(subject, "ann@example.com"), vec![ann.id.clone()]);
+    let mut policy = policy::Policy::default();
+    policy.access.insert("person:ann@example.com".into(), policy::Role::Maintainer);
+    let rule = policy::RuleSpec::default().rule();
+    assert_eq!(project.allowed_person_approvals(subject, None, protection::ApprovalMode::Ref, &policy, &rule).len(), 1);
+    policy.deny.insert("person:ann@example.com".into(), vec!["*".into()]);
+    assert!(project.allowed_person_approvals(subject, None, protection::ApprovalMode::Ref, &policy, &rule).is_empty());
+    let no_pin = Project::from_records(&ann.project, vec![fake.clone()], &ann.machine).unwrap();
+    assert!(no_pin.person_approvals(subject).is_empty());
+}
+
+#[test]
+fn encrypted_person_proof_binds_ciphertext_digest_and_inner_routing() {
+    use sha2::{Digest, Sha256};
+    let key = ed25519_dalek::SigningKey::from_bytes(&[11; 32]);
+    let identity = layr_store::keys::generate_identity();
+    let recipient = layr_store::keys::recipient_of(&identity).unwrap();
+    let mut record = person_evidence(3, "ann@example.com", &key, false);
+    let inner = record.data["request"].as_str().unwrap();
+    let bytes = layr_store::request::seal(inner.as_bytes(), &recipient, &key).unwrap();
+    record.data["encrypted_request"] = json!(String::from_utf8(bytes.clone()).unwrap());
+    record.data["request_digest"] = json!(hex::encode(Sha256::digest(&bytes)));
+    validation::validate(&record).unwrap();
+    let mut changed = record.clone();
+    changed.data["request_digest"] = json!("0".repeat(64));
+    assert!(validation::validate(&changed).is_err());
+    let mut envelope: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    envelope["person"] = json!("bob@example.com");
+    changed = record.clone();
+    let text = envelope.to_string();
+    changed.data["request_digest"] = json!(hex::encode(Sha256::digest(text.as_bytes())));
+    changed.data["encrypted_request"] = json!(text);
+    assert!(validation::validate(&changed).is_err());
+    envelope["person"] = json!("ann@example.com");
+    envelope["sig"] = json!("0".repeat(128));
+    let text = envelope.to_string();
+    changed.data["request_digest"] = json!(hex::encode(Sha256::digest(text.as_bytes())));
+    changed.data["encrypted_request"] = json!(text);
+    assert!(validation::validate(&changed).is_err());
+}
+
+#[test]
+fn a_person_proof_cannot_be_reused_for_another_effect() {
+    use layr_store::request::{Action, Request};
+    let key = ed25519_dalek::SigningKey::from_bytes(&[11; 32]);
+    let id = "01a12290-0000-7000-8000-000000000001";
+    let project = "01a12290-0000-7000-8000-000000000002";
+    let subject = "01a12290-0000-7000-8000-000000000003";
+    let request = Request::new(
+        id.into(),
+        project.into(),
+        "ann@example.com".into(),
+        1,
+        Action::Approve { state: subject.into(), into: "main".into() },
+    )
+    .unwrap();
+    let signed = request.sign(&key).unwrap();
+    let text = String::from_utf8(signed.to_bytes().unwrap()).unwrap();
+    let mut r = record(2, "attest");
+    r.id = "01a12290-0000-7000-8000-000000000004".into();
+    r.project = project.into();
+    r.machine = "01a12290-0000-7000-8000-000000000005".into();
+    r.actor.uid = u32::MAX;
+    r.actor.name = "person:ann@example.com".into();
+    r.data = json!({"request":text,"request_id":id,"request_digest":hex::encode(Sha256::digest(text.as_bytes())),"person_key":hex::encode(key.verifying_key().to_bytes()),"attestation":Attestation { format:1,attestation_id:r.id.clone(),subject:Subject{kind:"state".into(),id:subject.into()},change_id:None,kind:"approval".into(),payload_digest:hex::encode(Sha256::digest(signed.r.get().as_bytes())),payload_ref:None,signer:r.actor.name.clone(),time:r.time }});
+    validation::validate(&r).unwrap();
+    let mut changed = r.clone();
+    changed.data["attestation"]["subject"]["id"] = json!(r.id);
+    assert!(validation::validate(&changed).is_err());
+    changed = r.clone();
+    changed.actor.name = "person:bob@example.com".into();
+    assert!(validation::validate(&changed).is_err());
+    changed = r.clone();
+    changed.data["person_key"] = json!(hex::encode(ed25519_dalek::SigningKey::from_bytes(&[12; 32]).verifying_key().to_bytes()));
+    assert!(validation::validate(&changed).is_err());
+    changed = r.clone();
+    changed.time = request.expires;
+    changed.data["attestation"]["time"] = json!(changed.time);
+    assert!(validation::validate(&changed).is_err());
+}

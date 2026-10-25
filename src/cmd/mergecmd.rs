@@ -306,7 +306,16 @@ fn check_approvals(
         },
         |uid| pol.may_approve(rule, &crate::access::Who::of(uid, crate::ctx::Caller::from_uid(uid).gid)),
     )?;
-    if (counted.len() as u32) < rule.approvals {
+    let count = counted.len()
+        + crate::access::person_approval_count(
+            repo,
+            &pol,
+            rule,
+            Some(head),
+            theirs,
+            layr_model::protection::ApprovalMode::Merge,
+        )?;
+    if (count as u32) < rule.approvals {
         let from: Vec<String> = rule.approvers.iter().map(|k| crate::access::show_principal(k)).collect();
         return Err(exit(
             1,
@@ -316,7 +325,7 @@ fn check_approvals(
                 ids::short(theirs),
                 rule.approvals,
                 if from.is_empty() { "maintainers".to_string() } else { from.join(" and ") },
-                counted.len()
+                count
             ),
         ));
     }

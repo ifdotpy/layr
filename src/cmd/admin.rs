@@ -1473,10 +1473,13 @@ pub fn projects(ctx: &Ctx, _args: &[String]) -> Result<i32> {
 }
 
 pub fn config(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let spec = Spec::new().flag("-l|--list").value("--get").value("--unset").flag("--json");
+    let spec = Spec::new().flag("-l|--list").value("--get").value("--unset").flag("--json").flag("--local");
     let a = parse(&spec, args)?;
     let h = here(ctx)?;
     let repo = &h.repo;
+    if a.has("--local") {
+        return super::checks::local_config(ctx, repo, &a);
+    }
     if a.has("-l") || (a.pos.is_empty() && !a.has("--get") && !a.has("--unset")) {
         for (k, v) in repo.p.db.config_all()? {
             outln!(ctx, "{k}={v}");
@@ -1507,6 +1510,9 @@ pub fn config(ctx: &Ctx, args: &[String]) -> Result<i32> {
         };
     }
     let key = a.get("--unset").unwrap_or_else(|| a.pos.first().map(|s| s.as_str()).unwrap_or(""));
+    if matches!(key, "checks.runner" | "checks.privileged-runner") {
+        return Err(exit(128, format!("{key} is machine-local; use config --local")));
+    }
     repo.require(ctx, if policy_key(key) { "access" } else { "config" })?;
     if (key == "admin" || key == "lead") && !ctx.caller.is_root() {
         return Err(exit(1, format!("permission denied: only root changes '{key}'")));
@@ -1520,6 +1526,7 @@ pub fn config(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let command = ["check.", "derive.command.", "merge.driver.", "merge.verify."].iter().any(|prefix| k.starts_with(prefix));
     let val =
         if command { serde_json::Value::String(v) } else { serde_json::from_str(&v).unwrap_or(serde_json::Value::String(v)) };
+    super::checks::validate_config(k, &val)?;
     if k == "queue.probes" && !val.is_null() && !val.is_boolean() {
         return Err(exit(128, "queue.probes must be true or false"));
     }
@@ -1541,7 +1548,7 @@ const POLICY_KEYS: &[&str] = &["access", "grants", "deny", "protect", "members",
 
 /// A named check's command belongs to the protection rules that name it (`check.<name>`).
 fn policy_key(key: &str) -> bool {
-    POLICY_KEYS.contains(&key) || key.starts_with("check.") || key == "registry.tokens"
+    POLICY_KEYS.contains(&key) || key.starts_with("check.") || key.starts_with("checks.") || key == "registry.tokens"
 }
 
 /// `layr access`: roles and deny rules (docs/design.md, section 3).
@@ -1561,6 +1568,20 @@ pub fn access(ctx: &Ctx, args: &[String]) -> Result<i32> {
     };
     let pol = repo.policy();
     match sub {
+        "person-key" if rest.len() == 2 => {
+            repo.require(ctx, "access")?;
+            let login = &rest[0];
+            if !layr_store::person::login_name(login) {
+                bail!("invalid person login");
+            }
+            layr_store::person::verifying_key(&rest[1])?;
+            let _lock = repo.p.lock()?;
+            let mut pins = repo.p.config_value("person.keys")?.unwrap_or_else(|| serde_json::json!({}));
+            pins[login] = serde_json::json!(rest[1]);
+            set_config(ctx, repo, "person.keys", pins)?;
+            outln!(ctx, "pinned person {login}");
+            Ok(0)
+        }
         "list" => {
             for (k, r) in &pol.access {
                 outln!(ctx, "{}\t{}", show_principal(k), r.name());

@@ -1,0 +1,252 @@
+{
+  "date": "2026-10-25",
+  "base_revision": "05941d77335b8e04ab0efcef1e4292aa865453d6",
+  "source_revision": "21a933b939ea075b48b94b2047b56c3dc1896391",
+  "platform": {
+    "host": "OrbStack layr-dev",
+    "user": "root",
+    "architecture": "aarch64",
+    "kernel": "7.2.12-orbstack-00394-gbecdd6130068"
+  },
+  "linux_workspace_tests": {
+    "passed": 190,
+    "failed": 0,
+    "ignored": 7,
+    "revision": "21a933b939ea075b48b94b2047b56c3dc1896391",
+    "command": "cargo test --workspace --locked",
+    "ignored_tests": [
+      "cmd::replicate::tests::auxiliary_states_cross_the_peer_protocol",
+      "store_remote::legacy::tests::emit_desk_v1_fixture",
+      "store_remote::overlays::tests::a_removed_reader_cannot_substitute_the_layer_recipient",
+      "store_remote::overlays::tests::overlay_ciphertexts_reject_nonreader_keys",
+      "store_remote::writer::tests::emit_portable_v2_fixture",
+      "s3::tests::conditional_multipart_encrypted_round_trip",
+      "zst::tests::authenticated_file_above_four_gib_restores"
+    ],
+    "ignored_note": "The two overlay fixture tests were also run explicitly and passed within t35."
+  },
+  "latest_native_model_index_tests": {
+    "passed": 6,
+    "failed": 0,
+    "revision": "799a1d28eb6d",
+    "note": "Also included in the final full Linux workspace run."
+  },
+  "wasm_builds": [
+    {
+      "package": "layr-store",
+      "command": "cargo build --locked -p layr-store --no-default-features --features wasm --target wasm32-unknown-unknown",
+      "passed": true,
+      "revision": "799a1d28eb6d",
+      "note": "The final source revision changes only native CLI history and its shell test; shared store/model sources are byte-identical."
+    },
+    {
+      "package": "layr-model",
+      "command": "cargo build --locked -p layr-model --target wasm32-unknown-unknown",
+      "passed": true,
+      "revision": "799a1d28eb6d",
+      "note": "The final source revision changes only native CLI history and its shell test; shared store/model sources are byte-identical."
+    }
+  ],
+  "integration_suites": {
+    "t40-store-index": {
+      "passed": 24,
+      "failed": 0,
+      "revision": "21a933b939ea075b48b94b2047b56c3dc1896391"
+    },
+    "t18-core": {
+      "passed": 135,
+      "failed": 0,
+      "revision": "21a933b939ea075b48b94b2047b56c3dc1896391"
+    },
+    "t18-remotes": {
+      "passed": 52,
+      "failed": 0,
+      "revision": "21a933b939ea075b48b94b2047b56c3dc1896391"
+    },
+    "t19-remote-store": {
+      "passed": 25,
+      "failed": 0,
+      "revision": "21a933b939ea075b48b94b2047b56c3dc1896391"
+    },
+    "t24-store-partial": {
+      "passed": 11,
+      "failed": 0,
+      "revision": "21a933b939ea075b48b94b2047b56c3dc1896391"
+    },
+    "t35-overlay-sync": {
+      "passed": 49,
+      "failed": 0,
+      "revision": "21a933b939ea075b48b94b2047b56c3dc1896391"
+    },
+    "t37-model": {
+      "passed": 47,
+      "failed": 0,
+      "revision": "21a933b939ea075b48b94b2047b56c3dc1896391"
+    },
+    "t39-hidden-overlays": {
+      "passed": 88,
+      "failed": 0,
+      "revision": "21a933b939ea075b48b94b2047b56c3dc1896391"
+    },
+    "t01-basic": {
+      "passed": 75,
+      "failed": 0,
+      "revision": "21a933b939ea075b48b94b2047b56c3dc1896391"
+    },
+    "t04-undo-gc": {
+      "passed": 31,
+      "failed": 0,
+      "revision": "21a933b939ea075b48b94b2047b56c3dc1896391"
+    },
+    "t08-gitcompat": {
+      "passed": 28,
+      "failed": 0,
+      "revision": "21a933b939ea075b48b94b2047b56c3dc1896391"
+    },
+    "t12-audit": {
+      "passed": 19,
+      "failed": 0,
+      "revision": "21a933b939ea075b48b94b2047b56c3dc1896391"
+    }
+  },
+  "integration_total": 584,
+  "verification_layout": "Final full Linux run used a copied binary in the archive target/debug/layr, allowing t35 to locate its Cargo.toml. Task-owned layr/model/store package artifacts were cleaned before rebuilding; this avoids stale artifact reuse across git archives with older source timestamps.",
+  "benchmark": {
+    "command": "cargo run --release --locked -p layr-model --example index_bench",
+    "before_samples": 3,
+    "after_samples": 21,
+    "statistic": "median",
+    "inputs": "One machine, one line, one state, two initial metadata records, then signed note records; encrypted segments of 1000 records. No network or disk reads in measured intervals.",
+    "before": "Decrypt all record segments, verify every record signature, fold the complete model, derive first-page heads.",
+    "after": "Decrypt and authenticate a trusted-machine heads snapshot and validate its schema/address. Record reconciliation is deferred background work.",
+    "generation_timed": false,
+    "samples": [
+      {
+        "after_ms": 0.14133400000000002,
+        "after_samples_ms": [
+          0.13050099999999998,
+          0.131417,
+          0.131418,
+          0.13170900000000002,
+          0.132125,
+          0.133542,
+          0.13741799999999998,
+          0.139042,
+          0.139668,
+          0.139751,
+          0.14133400000000002,
+          0.141376,
+          0.14179199999999997,
+          0.143543,
+          0.144084,
+          0.150585,
+          0.15529199999999999,
+          0.162001,
+          0.163209,
+          0.16821,
+          0.177959
+        ],
+        "before_ms": 77.17020500000001,
+        "before_samples_ms": [
+          73.647182,
+          77.17020500000001,
+          95.15736199999999
+        ],
+        "measurement": "in-memory encrypted objects, release native reader, authenticated snapshot before background reconciliation",
+        "record_bytes": 315705,
+        "records": 1000,
+        "snapshot_bytes": 864,
+        "speedup": 546.0130258819534
+      },
+      {
+        "after_ms": 0.131543,
+        "after_samples_ms": [
+          0.130168,
+          0.13037500000000002,
+          0.130875,
+          0.13087600000000002,
+          0.130918,
+          0.130918,
+          0.131,
+          0.131334,
+          0.131459,
+          0.1315,
+          0.131543,
+          0.132709,
+          0.133168,
+          0.134334,
+          0.13571,
+          0.136375,
+          0.14454299999999998,
+          0.146334,
+          0.154917,
+          0.15879300000000002,
+          0.222001
+        ],
+        "before_ms": 7896.803726,
+        "before_samples_ms": [
+          7384.8458519999995,
+          7896.803726,
+          8187.367718999999
+        ],
+        "measurement": "in-memory encrypted objects, release native reader, authenticated snapshot before background reconciliation",
+        "record_bytes": 31913702,
+        "records": 100000,
+        "snapshot_bytes": 960,
+        "speedup": 60032.109089803336
+      },
+      {
+        "after_ms": 0.133251,
+        "after_samples_ms": [
+          0.12212599999999998,
+          0.123001,
+          0.125917,
+          0.130376,
+          0.130376,
+          0.13045900000000002,
+          0.130751,
+          0.13166799999999998,
+          0.131959,
+          0.133251,
+          0.133251,
+          0.135501,
+          0.137126,
+          0.13750099999999998,
+          0.140709,
+          0.141043,
+          0.16312600000000002,
+          0.16596,
+          0.192418,
+          0.32425200000000004,
+          0.47787799999999997
+        ],
+        "before_ms": 77638.61893000001,
+        "before_samples_ms": [
+          73458.514346,
+          77638.61893000001,
+          77651.799409
+        ],
+        "measurement": "in-memory encrypted objects, release native reader, authenticated snapshot before background reconciliation",
+        "record_bytes": 321135136,
+        "records": 1000000,
+        "snapshot_bytes": 903,
+        "speedup": 582649.427996788
+      }
+    ],
+    "revision_note": "Measured at af6931f. Later source changes preserve the benchmark input/output: undeleted refs are now read directly (the fixture has no refs), indexed blame stops at symlinks, and native log metadata filters run before tree I/O. Snapshot authentication/decoding and the signed-record baseline are unchanged."
+  },
+  "scope_note": "Browser UI and executor hook follow in layr-cloud, as approved by the lead. README.md unchanged. No push or merge.",
+  "linux_suite_revision": "21a933b939ea075b48b94b2047b56c3dc1896391",
+  "linux_suite_archive": "/root/work/index-21a933b939ea",
+  "benchmark_revision": "af6931fb711802cd3c2e62bc854986c01ea01739",
+  "source_commits": [
+    "75450674129a3675ebe70effe2d1a07e8ea9eba3",
+    "fe1ad6349865874c8b0843ba0da274454489dad2",
+    "d7e7448df20d297b5460c0c8f3f78e46624b4aa6",
+    "180008be46528b798efc1be9cf2c0b38fd0d9c8b",
+    "af6931fb711802cd3c2e62bc854986c01ea01739",
+    "7e8e7f9a413bad9a5b468a4acb56a1be2fe565cc",
+    "799a1d28eb6dbe01369364302d243d1993c8dadf",
+    "21a933b939ea075b48b94b2047b56c3dc1896391"
+  ]
+}

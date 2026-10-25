@@ -390,7 +390,7 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
                 repo.commit_record(ctx, record)?;
             }
         }
-        if store.layer.is_none() {
+        if store.layer.is_none() && !store.is_public_reader() {
             let slot = keys::machine_slot(&identity, &store.key.verifying_key())?;
             // A read-only credential can still clone. Adding its slot is optional.
             let _ = store.backend.put_new(&format!("slots/machine-{}.age", store.machine), slot);
@@ -447,6 +447,7 @@ pub(super) fn log(store: &Store) -> Result<Vec<String>> {
 pub(super) fn gc(store: &Store, dry_run: bool) -> Result<Vec<String>> {
     let descriptor = store.descriptor()?;
     let identity = store.identity(&descriptor, None)?;
+    store.require_private_access()?;
     let records = records(&store.backend, &identity, &descriptor.project)?;
     if !records.gaps.is_empty() {
         bail!("remote record gaps prevent collection");

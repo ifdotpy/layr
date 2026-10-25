@@ -643,3 +643,13 @@ This command records `overlay.show-to-project` in the overlay log.
 It then publishes the normal overlay metadata and authority to the parent project.
 Project readers can now see that the overlay exists. Its files still require overlay read access.
 A visible overlay cannot become hidden. Configuration cannot reverse this change.
+
+## 12. Public projects
+
+`layr remote public <remote> on` publishes only the parent project's reader slot.
+No overlay or overlay epoch receives a public slot or public manifest.
+Visible private overlays keep their names in shared metadata, but their files stay with
+their readers. Hidden overlays keep their names, counts, state identifiers and history
+out of the public reader's records and output, under the same rule 8.
+A public-only clone or mount reads the shared project files without any overlay files.
+Changing the parent project's visibility does not change an overlay's readers.

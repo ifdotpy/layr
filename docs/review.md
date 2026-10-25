@@ -397,3 +397,123 @@ A different value or path needs another approval.
 Encoded or split secrets are not detected.
 This check adds protection to private overlays and does not replace them.
 
+
+## Comments on changes
+
+A comment belongs to a change and one exact version of that change.
+A comment can also name a file, a positive line number, and an earlier comment to reply to.
+The signed record includes the author and the time.
+
+```sh
+layr comment <change-id> 'Explain this condition.' --version v2 --path src/main.rs --line 42
+layr comment <change-id> 'The condition prevents a repeated write.' --reply-to <comment-id>
+layr change show <change-id> --json
+```
+
+Without `--version`, `comment` uses the newest version of the change.
+`change show` lists all comments, including comments on older versions.
+The shared model returns the same comments as the CLI.
+
+## Person signing keys
+
+`layr person keys` creates an Ed25519 signing key with the person age identity.
+Only the encrypted signing key is stored in `signing.age`.
+`person show --json` includes the public `signing_key`.
+The person identity opens the signing key in memory.
+
+For a file or S3 store, publish the public record and encrypted signing key with `--store`:
+
+```sh
+LAYR_PERSON_LOGIN=ann@example.com layr person keys --paper-key-out /private/ann-paper --store file:///path/to/store
+layr access person-key ann@example.com <public-signing-key>
+layr access grant person:ann@example.com maintainer
+layr protect main --approvers person:ann@example.com --approvals 1
+```
+
+The store objects are `people/<login>/person.json` and `people/<login>/signing.age`.
+An owner pins the public signing key in a signed access record.
+Person principals use `person:<login>` in access, deny, and protection rules.
+They receive no permissions from the executor's operating-system account.
+
+## Person requests
+
+A person submits a signed action to an immutable object at `requests/<id>.json`.
+The requester creates a UUIDv7 id.
+The shared `layr-store::request` builder and signer also build for wasm32.
+The v2 object contains `v: 2`, `id`, `person`, `project`, `epoch`, `ct`, and `sig`.
+`epoch` is `root` for the current project vault recipient from `store.json`.
+`ct` is standard base64 with padding of age-encrypted exact signed v1 envelope bytes.
+`sig` is the lowercase hex Ed25519 signature of `b"layr/request/v2\0"` followed by
+the decoded age ciphertext bytes, not the base64 text.
+The gateway verifies this outer signature and binds the person, project and object path.
+It does not decrypt the action.
+Inside the encryption, the v1 envelope contains `r`, the exact JSON body, and `s`,
+its Ed25519 signature. The body includes the project, person, creation time, expiry
+and action. Action payloads and comment text are encrypted.
+The default expiry is 24 hours after creation.
+Times use epoch milliseconds.
+
+```sh
+layr request approve <state> --into main --person --remote origin
+layr request withdraw <state> --into main --person
+layr request queue-add <state> --into main --person
+layr request queue-remove <entry> --person
+layr request ref-move release/v1 <state> --expect <old-state> --person
+layr request ref-move release/v1 <state> --expect none --person
+layr request comment <change> 'Please explain this line.' --path src/main.rs --line 42 --person
+layr request declassify <state> 'src/config.rs@<id-from-refusal>' --person
+layr requests apply --remote origin --json
+```
+
+Set `LAYR_PERSON_KEY_FILE` to the private person opener before submission.
+`--remote` defaults to `origin`.
+Approval and queue requests use `main` unless `--into` names another line.
+`--expires` sets an explicit expiry in epoch milliseconds.
+A ref request always compares its expected value with the current ref.
+`--expect none` requires the ref to be absent.
+
+A trusted executor verifies the outer signature against the pinned person key,
+decrypts with the project identity, binds the inner and outer id, project and person,
+and verifies the inner signature against that same pinned key.
+It refuses legacy plaintext objects with `plaintext requests are not accepted`.
+It checks the current access and protection rules as that person.
+It refuses expired requests, unknown keys, stale ref values, and unauthorized actions.
+Each refusal is a signed `request.refused` record with a plain reason.
+Unverified request bytes are not copied into refusal records.
+
+The normal operation and the original person proof share one signed record.
+The inner proof is a string in `data.request` to preserve its exact bytes.
+`data.encrypted_request` retains the exact v2 object, and `data.request_digest`
+hashes that object for replay detection. Both proofs are in the normal encrypted
+record stream. The shared model verifies their signatures and routing bindings.
+Person approval attestations retain that signature and identify `person:<login>` as the signer.
+Person approvals count in merge and ref protection checks.
+A withdrawal can revoke only that person's evidence.
+Comments appear in `change show` and the shared model.
+
+Browser callers use these wasm-compatible shared Rust APIs:
+
+```rust,ignore
+layr_store::request::seal(signed_v1: &[u8], epoch_recipient: &str, person_key: &SigningKey) -> Result<Vec<u8>>;
+layr_store::request::open(v2: &[u8], identity: &str) -> Result<Vec<u8>>;
+```
+
+`seal` verifies the inner signature and emits a v2 object with epoch `root`.
+`Sealed::parse(bytes)` and `Sealed::verify(&VerifyingKey)` verify the outer envelope
+without decryption. The caller binds its public routing fields to the authenticated
+login, project and path. `open` returns exact signed v1 bytes and checks inner/outer
+routing equality; callers must verify the outer signature before opening and verify
+the returned `Signed` against the pinned person key before applying an action.
+`seal_for_epoch(signed_v1, epoch, epoch_recipient, person_key)` supports a caller-selected
+project epoch for rotation; the current CLI submits and accepts epoch `root`.
+
+The executor claims each id at `requests/claims/<id>.json` with a machine signature.
+Each claim is create-only and binds the project, request, and executor machine.
+Another trusted machine skips a valid claim.
+An untrusted claimant causes a signed refusal: `claimed by an untrusted machine`.
+Invalid claims and invalid claim signatures also cause signed refusals.
+After a crash, the owning machine resumes from its atomic local result record.
+Claims never expire or transfer automatically.
+Keep the owning machine's local records until its results reach the store.
+A replayed id is ignored, including after reindex.
+An existing id with changed content fails closed.

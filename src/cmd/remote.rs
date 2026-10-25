@@ -601,6 +601,31 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 outln!(ctx, "{}", json!({"removed": a.pos[1]}));
             }
         }
+        "public" if a.pos.len() == 3 => {
+            let (name, mode) = (&a.pos[1], a.pos[2].as_str());
+            repo.require(ctx, "remote")?;
+            if kind(&remote_url(repo, name)?)? != Kind::Store {
+                bail!("remote public requires a store remote");
+            }
+            if mode == "off" {
+                bail!("public off is unavailable: project key rotation is not implemented; the project stays public and copied data remains readable");
+            }
+            if mode != "on" { bail!("usage: layr remote public <remote> on|off"); }
+            if repo.p.is_overlay() { bail!("overlays cannot be made public"); }
+            eprintln!("All current and future project data will be publicly readable; overlays keep their own readers.");
+            eprintln!("Type the project name '{}' to confirm:", repo.p.name);
+            use std::io::{BufRead, Read};
+            let mut confirmation = String::new();
+            std::io::stdin().lock().take(4097).read_line(&mut confirmation)?;
+            if confirmation.len() > 4096 || confirmation.trim_end_matches(['\r', '\n']) != repo.p.name {
+                bail!("project name did not match; nothing was changed");
+            }
+            let _lock = repo.p.lock()?;
+            let mut store = store_remote::open_named(name, repo)?;
+            let created = store.make_public(ctx, repo)?;
+            if a.has("--json") { outln!(ctx, "{}", json!({"name":name,"public":true,"created":created})); }
+            else { outln!(ctx, "project {} is public; all current and future project data is readable", repo.p.name); }
+        }
         "grant" if a.pos.len() == 2 => {
             repo.require(ctx,"remote")?;
             let person = a.get("--person").context("grant requires --person <login>")?;
@@ -679,6 +704,49 @@ pub fn sync(ctx: &Ctx, args: &[String]) -> Result<i32> {
 pub fn push(ctx: &Ctx, args: &[String]) -> Result<i32> {
     exchange(ctx, args, "push")
 }
+pub fn index(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    let a = parse(&Spec::new().flag("--json").flag("-q|--quiet").value("--remote"), args)?;
+    if a.pos.first().map(String::as_str) != Some("write") || a.pos.len() > 2 || !a.paths.is_empty() {
+        bail!("usage: layr index write [<remote>] [--remote <remote>] [--json] [-q]");
+    }
+    let h = here(ctx)?;
+    let configured;
+    let name = match a.pos.get(1).map(String::as_str).or(a.get("--remote")) {
+        Some(name) => name,
+        None => {
+            configured = h
+                .repo
+                .p
+                .db
+                .config_all()?
+                .into_iter()
+                .filter_map(|(key, _)| key.strip_prefix("cloud.remote.").and_then(|s| s.strip_suffix(".url")).map(str::to_string))
+                .collect::<Vec<_>>();
+            if configured.len() != 1 {
+                bail!("name one store remote: layr index write <remote>");
+            }
+            &configured[0]
+        }
+    };
+    if kind(&remote_url(&h.repo, name)?)? != Kind::Store {
+        bail!("index write requires a store remote");
+    }
+    let mut store = store_remote::open_named(name, &h.repo)?;
+    let report = store.write_index(ctx, &h.repo)?;
+    if a.has("--json") {
+        outln!(ctx, "{}", serde_json::to_string(&report)?);
+    } else if !a.has("-q") {
+        outln!(
+            ctx,
+            "index: {} heads, {} paths, {} graphs; {} paths unavailable",
+            report.heads,
+            report.paths,
+            report.graphs,
+            report.unavailable_paths.len()
+        );
+    }
+    Ok(0)
+}
 pub fn fetch(ctx: &Ctx, args: &[String]) -> Result<i32> {
     exchange(ctx, args, "fetch")
 }
@@ -693,6 +761,7 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
     }
     let a = parse(
         &Spec::new()
+            .flag("--index")
             .flag("--auto")
             .flag("--caches")
             .flag("-q|--quiet")
@@ -709,6 +778,9 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
     let mut h = here(ctx)?;
     let url = remote_url(&h.repo, name).map_err(|e| exit(128, format!("{e}; Git forms use layr git {op}")))?;
     let remote_kind = kind(&url)?;
+    if a.has("--index") && (op != "push" || remote_kind != Kind::Store) {
+        bail!("--index requires layr push to a store remote");
+    }
     if a.has("--runnable") && remote_kind != Kind::Registry {
         bail!("--runnable requires an OCI remote");
     }
@@ -718,7 +790,9 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
     if a.pos.len() > if op == "push" && remote_kind == Kind::Registry { 2 } else { 1 } {
         return Err(exit(128, format!("use layr {op} <remote>; Git forms use layr git {op}")));
     }
-    h.repo.require(ctx, if op == "push" { "push" } else { "sync" })?;
+    let public_fetch = op == "fetch" && remote_kind == Kind::Store
+        && h.repo.p.config_value(&format!("cloud.remote.{name}.public"))? == Some(json!(true));
+    h.repo.require(ctx, if op == "push" { "push" } else if public_fetch { "read" } else { "sync" })?;
     match remote_kind {
         Kind::Peer { host, project } => {
             let command = if a.has("--command") {
@@ -758,6 +832,7 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
                 caches: a.has("--caches"),
                 paper_key: a.get("--paper-key").map(str::to_owned),
                 desk_prefix: None,
+                public: false,
             };
             let mut store = store_remote::open_named(&a.pos[0], &h.repo)?;
             store.configure(ctx, &store_remote::ConfigureOptions::default())?;
@@ -767,6 +842,9 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
             }
             let report =
                 if op == "push" { store.push(ctx, &mut h.repo, &opts)? } else { store.fetch(ctx, &mut h.repo, &opts)? };
+            if a.has("--index") {
+                store.write_index(ctx, &h.repo)?;
+            }
             if !report.missing_lines.is_empty() {
                 print_store_report(ctx, &report, op, a.has("--json"), a.has("-q"))?;
                 return Ok(2);
@@ -920,6 +998,7 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
         &Spec::new()
             .value("--paper-key")
             .value("--desk-prefix")
+            .flag("--public")
             .flag("--auto")
             .flag("--caches")
             .flag("--json")
@@ -940,8 +1019,10 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let mut repo = Repo { p };
     let result = (|| -> Result<i32> {
         let mut store = store_remote::open(url, &repo)?;
+        store.use_public_access(a.has("--public"));
         store.configure(ctx, &store_remote::ConfigureOptions::default())?;
         let opts = store_remote::Options {
+            public: a.has("--public"),
             auto: a.has("--auto"),
             caches: a.has("--caches"),
             paper_key: a.get("--paper-key").map(str::to_owned),
@@ -951,6 +1032,9 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let _lock = repo.p.lock()?;
         set_config(ctx, &repo, "cloud.remote.origin.url", json!(url))?;
         store.save_pin(ctx, &repo, "origin")?;
+        if store.is_public_reader() {
+            set_config(ctx, &repo, "cloud.remote.origin.public", json!(true))?;
+        }
         print_store_report(ctx, &report, "clone", a.has("--json"), a.has("-q"))?;
         Ok(if report.missing_lines.is_empty() { 0 } else { 2 })
     })();

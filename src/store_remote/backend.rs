@@ -84,6 +84,13 @@ impl Backend {
         }
     }
 
+    pub(super) fn public_manifest(&self) -> Result<Option<Vec<u8>>> {
+        match self {
+            Self::Gateway(gateway) => gateway.public_get("public.json"),
+            _ => self.get("public.json"),
+        }
+    }
+
     pub fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
         check_key(key)?;
         match self {

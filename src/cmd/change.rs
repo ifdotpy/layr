@@ -86,7 +86,11 @@ pub fn change(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 Err(e) => serde_json::json!({"status":"unavailable","reason":format!("{e:#}")}),
             };
             if a.has("--json") {
-                outln!(ctx, "{}", serde_json::json!({"change_id":id,"versions":rows,"behavior":behavior_json}));
+                outln!(
+                    ctx,
+                    "{}",
+                    serde_json::json!({"change_id":id,"versions":rows,"behavior":behavior_json,"comments":model.comments(&id)})
+                );
             } else {
                 outln!(ctx, "change {id}");
                 for r in rows {
@@ -100,6 +104,15 @@ pub fn change(ctx: &Ctx, args: &[String]) -> Result<i32> {
                     for a in r["attestations"].as_array().into_iter().flatten() {
                         outln!(ctx, "  {}\t{}", a["kind"].as_str().unwrap_or(""), a["attestation_id"].as_str().unwrap_or(""));
                     }
+                }
+                for c in model.comments(&id) {
+                    outln!(
+                        ctx,
+                        "comment {} by {}: {}",
+                        c["id"].as_str().unwrap_or(""),
+                        c["actor"]["name"].as_str().unwrap_or(""),
+                        c["text"].as_str().unwrap_or("")
+                    );
                 }
                 outln!(ctx, "Behavior");
                 match behavior {
@@ -166,4 +179,51 @@ fn patch(repo: &Repo, state: &StateRec) -> Result<Vec<diff::FileDiff>> {
     };
     let changes: Vec<_> = crate::changes::file_changes(&old, &new)?.into_iter().filter(|c| !skip_path(&c.path)).collect();
     diff::file_diffs(&old, &new, &changes)
+}
+
+/// Append a normal machine-signed discussion record. Person comments use requests.
+pub fn comment(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    let a = parse(&Spec::new().value("--version").value("--path").value("--line").value("--reply-to").flag("--json"), args)?;
+    if a.pos.len() != 2 {
+        bail!("usage: layr comment <change> <text> [--version vN] [--path <path> --line N] [--reply-to <id>] [--json]");
+    }
+    let h = here(ctx)?;
+    h.repo.require(ctx, "try")?;
+    let _lock = h.repo.p.lock()?;
+    let id = find(&h.repo, &a.pos[0])?;
+    let versions = h.repo.p.db.change_versions(&id)?;
+    let n = a.get("--version").map(version).transpose()?.unwrap_or(versions.len().saturating_sub(1));
+    let state = versions.get(n).ok_or_else(|| anyhow::anyhow!("unknown change version"))?;
+    let comment = crate::model::Comment {
+        id: crate::ids::new_id(),
+        change_id: id,
+        version: state.id.clone(),
+        path: a.get("--path").map(str::to_owned),
+        line: a.get("--line").map(str::parse).transpose()?,
+        text: a.pos[1].clone(),
+        reply_to: a.get("--reply-to").map(str::to_owned),
+    };
+    validate_comment(&h.repo, &comment)?;
+    let mut rec = crate::model::Record::new("comment");
+    rec.data = serde_json::json!({"comment":comment});
+    let rec = h.repo.commit_record(ctx, rec)?;
+    if a.has("--json") {
+        outln!(ctx, "{}", rec.data["comment"]);
+    } else {
+        outln!(ctx, "comment {}", comment.id);
+    }
+    Ok(0)
+}
+
+pub fn validate_comment(repo: &Repo, comment: &crate::model::Comment) -> Result<()> {
+    let state = repo.source_state(&comment.version)?;
+    if state.change_id.as_deref() != Some(&comment.change_id) {
+        bail!("comment version does not belong to this change");
+    }
+    if let Some(reply) = &comment.reply_to {
+        if !repo.read_model()?.comments(&comment.change_id).iter().any(|c| c["id"].as_str() == Some(reply)) {
+            bail!("reply target does not belong to this change");
+        }
+    }
+    Ok(())
 }
