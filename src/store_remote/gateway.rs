@@ -294,7 +294,16 @@ impl Gateway {
         self.http.get(url).send().map_err(reqwest::Error::without_url).map_err(Into::into)
     }
 
+    /// A side metadata request must not turn a writer into a public-only reader.
+    pub(super) fn public_metadata(&self) -> Result<Option<Vec<u8>>> {
+        self.public_object("public.json", false)
+    }
+
     pub(super) fn public_get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        self.public_object(key, true)
+    }
+
+    fn public_object(&self, key: &str, reader: bool) -> Result<Option<Vec<u8>>> {
         if !matches!(key, "store.json" | "public.json" | "slots/public.age")
             && super::format::parse_segment_name(key).is_none()
             && super::format::parse_tree_name(key).is_none()
@@ -309,7 +318,7 @@ impl Gateway {
                     response,
                     if matches!(key, "store.json" | "public.json" | "slots/public.age") { 16 << 10 } else { OBJECT_LIMIT },
                 )?;
-                if key == "public.json" {
+                if reader && key == "public.json" {
                     self.public.store(true, std::sync::atomic::Ordering::SeqCst);
                 }
                 Ok(Some(body))
@@ -323,7 +332,10 @@ impl Gateway {
         if key == "vault.json" {
             return Ok(None);
         }
-        if self.is_public() || (key == "public.json" && self.token.is_none()) {
+        if key == "public.json" {
+            return self.public_metadata();
+        }
+        if self.is_public() {
             return self.public_get(key);
         }
         if key.strip_prefix("slots/").is_some_and(|name| layr_store::person::slot_login(name).is_some()) {
