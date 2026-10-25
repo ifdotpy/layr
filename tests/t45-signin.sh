@@ -14,7 +14,8 @@ def check(value,label):
  assert value,label
  checks+=1; print('PASS',label,flush=True)
 def run(args,env,success=True):
- p=subprocess.run([binary,*args],env=env,cwd=root,text=True,capture_output=True,timeout=45)
+ cwd=pathlib.Path(env['LAYR_ROOT'])/'projects'/env['LAYR_PROJECT']/'lines'/env.get('LAYR_LINE','main') if env.get('LAYR_PROJECT') else root
+ p=subprocess.run([binary,*args],env=env,cwd=cwd,text=True,capture_output=True,timeout=45)
  if success: assert p.returncode==0,(args,p.stderr)
  return p
 def openssl(args): subprocess.run(['openssl',*args],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
@@ -127,7 +128,7 @@ try:
  project=dict(base,LAYR_PROJECT='session-project',LAYR_LINE='main')
  line=pathlib.Path(base['LAYR_ROOT'])/'projects/session-project/lines/main'
  (line/'hello.txt').write_text('session request test\n')
- run(['add',str(line/'hello.txt')],project);run(['save','-qm','Session test'],project)
+ run(['add','hello.txt'],project);run(['save','-qm','Session test'],project)
  run(['remote','add','archive','file://'+str(root/'archive'),'--paper-key-out',str(root/'store.paper')],project)
  run(['push','archive','-q'],project)
  actor=dict(ann,LAYR_PROJECT='session-project',LAYR_LINE='main')
