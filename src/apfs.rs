@@ -123,10 +123,12 @@ pub(crate) fn scan_with_data(root: &Path, data: bool) -> Result<BTreeMap<String,
         scan_parallel(dir, root, &mut out)?;
     }
     if let Some(f) = saved {
-        // A cache that cannot be written only costs the next scan.
+        // A file that cannot be written only costs the next process a scan; this process keeps
+        // the scan in memory either way.
         let _ = fs::create_dir_all(f.parent().unwrap())
             .map_err(anyhow::Error::from)
             .and_then(|_| crate::fsutil::atomic_write(&f, &encode_scan(&out), 0o600));
+        DECODED.lock().unwrap().push((f, std::sync::Arc::new(out.clone())));
     }
     Ok(out)
 }
@@ -153,8 +155,7 @@ pub(crate) fn sealed_entries(root: &Path) -> Option<std::sync::Arc<BTreeMap<Stri
     if let Some(scan) = decoded(&file) {
         return Some(scan);
     }
-    scan_with_data(root, true).ok()?;
-    decoded(&file)
+    Some(std::sync::Arc::new(scan_with_data(root, true).ok()?))
 }
 
 thread_local! {
@@ -169,9 +170,14 @@ thread_local! {
 /// Run `f` with a scan of `root` that the caller already has: scans of `root` inside `f`
 /// (`stable_read` too) use it instead of reading the folder again.
 pub fn with_known_scan<T>(root: &Path, scan: &BTreeMap<String, ScanEntry>, f: impl FnOnce() -> T) -> T {
-    MEMO.with_borrow_mut(|memo| *memo = vec![(root.to_path_buf(), scan.clone())]);
+    let outer = MEMO.with_borrow_mut(|memo| {
+        let outer = memo.clone();
+        memo.retain(|(r, _)| r != root);
+        memo.push((root.to_path_buf(), scan.clone()));
+        outer
+    });
     let out = f();
-    MEMO.with_borrow_mut(Vec::clear);
+    MEMO.with_borrow_mut(|memo| *memo = outer);
     out
 }
 
@@ -191,6 +197,8 @@ fn entry_at(root: &Path, rel: &str) -> Result<Option<ScanEntry>> {
         return Ok(None);
     };
     match fs::symlink_metadata(&path) {
+        // On a volume that ignores case, `README` also finds `readme`: another entry.
+        Ok(_) if crate::fsutil::exact_metadata(&path, rel).is_none() => Ok(None),
         Ok(m) => Ok(Some(entry_of_metadata(&m, &path, true)?)),
         Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory) => Ok(None),
         Err(e) => Err(e.into()),
@@ -213,7 +221,33 @@ fn sealed_scan_file(root: &Path, m: &fs::Metadata) -> Option<std::path::PathBuf>
     if !crate::model::is_uuid(id) {
         return None;
     }
-    Some(parent.parent()?.join("meta/scans").join(format!("{id}-{}-{}-{}.scan", m.ino(), m.ctime(), m.ctime_nsec())))
+    // The device number is part of each entry: a new mount gives a new file.
+    let name = format!("{id}-{}-{}-{}-{}.scan", m.dev(), m.ino(), m.ctime(), m.ctime_nsec());
+    Some(parent.parent()?.join("meta/scans").join(name))
+}
+
+/// Remove saved scans of trees that no longer exist or changed, below the project folder `dir`.
+pub(crate) fn prune_saved_scans(dir: &Path) -> Result<usize> {
+    let Ok(rd) = fs::read_dir(dir.join("meta/scans")) else {
+        return Ok(0);
+    };
+    let mut removed = 0;
+    for e in rd {
+        let e = e?;
+        let name = e.file_name().to_string_lossy().into_owned();
+        let id = name.split('-').take(5).collect::<Vec<_>>().join("-");
+        let current = ["states", "deltas"].iter().any(|kind| {
+            let root = dir.join(kind).join(&id);
+            fs::symlink_metadata(&root)
+                .ok()
+                .and_then(|m| sealed_scan_file(&root, &m))
+                .is_some_and(|f| f.file_name() == Some(e.file_name().as_os_str()))
+        });
+        if !current && fs::remove_file(e.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    Ok(removed)
 }
 
 const SCAN_MAGIC: &[u8] = b"layr scan 1\n";
@@ -544,11 +578,22 @@ pub fn stable_read<T>(roots: &[&Path], read: impl FnOnce() -> Result<T>) -> Resu
     // The read uses these scans instead of new ones. Its content comes only from paths that
     // differ between the compared trees (`candidates`), copied paths (`copy_selected`) and
     // ignore files; each notes them, and only they are checked again after the read.
-    MEMO.with_borrow_mut(|memo| *memo = roots.iter().map(|r| r.to_path_buf()).zip(before.iter().cloned()).collect());
-    TOUCHED.with_borrow_mut(|t| *t = roots.iter().map(|r| (r.to_path_buf(), Default::default())).collect());
+    // An outer `with_known_scan` or `stable_read` keeps its scans and notes for after this one.
+    let outer_memo = MEMO.with_borrow_mut(|memo| {
+        let outer = memo.clone();
+        memo.retain(|(r, _)| !roots.contains(&r.as_path()));
+        memo.extend(roots.iter().map(|r| r.to_path_buf()).zip(before.iter().cloned()));
+        outer
+    });
+    let outer_touched =
+        TOUCHED.with_borrow_mut(|t| std::mem::replace(t, roots.iter().map(|r| (r.to_path_buf(), Default::default())).collect()));
     let result = read();
-    MEMO.with_borrow_mut(Vec::clear);
-    let touched = TOUCHED.with_borrow_mut(std::mem::take);
+    MEMO.with_borrow_mut(|memo| *memo = outer_memo);
+    let touched = TOUCHED.with_borrow_mut(|t| std::mem::replace(t, outer_touched));
+    // The paths that this read used count for an outer read of the same root too.
+    for (root, paths) in &touched {
+        note_read(root, paths);
+    }
     for ((root, expected), (_, paths)) in roots.iter().zip(&before).zip(touched) {
         for p in &paths {
             // A deleted or replaced path can make either the read or this check fail.

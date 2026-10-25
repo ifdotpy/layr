@@ -670,6 +670,8 @@ pub fn stage_entries(index: &Layered, src: &Path, paths: &BTreeSet<String>, own:
     // Removals first: on a volume that ignores case, `dir` must leave before `Dir` comes.
     let present = |p: &String| crate::fsutil::safe_join(src, p).ok().and_then(|f| crate::fsutil::exact_metadata(&f, p)).is_some();
     let (gone_first, written): (Vec<&String>, Vec<&String>) = paths.iter().partition(|p| !present(p));
+    // A sealed snapshot refuses the first move; then each entry is cloned.
+    let mut movable = true;
     for p in gone_first.into_iter().chain(written) {
         if p.is_empty() {
             continue;
@@ -702,18 +704,21 @@ pub fn stage_entries(index: &Layered, src: &Path, paths: &BTreeSet<String>, own:
             fs::create_dir(&at)?;
             dirs.insert(p.clone());
         } else if m.is_file() || m.file_type().is_symlink() {
-            // `src` is a private copy of this command: its entry moves into the index, which
-            // costs less than a second clone.
-            match fs::rename(&from, &at) {
-                Ok(()) => {}
-                // Another volume, or a sealed snapshot: clone as before.
-                Err(e) if matches!(e.raw_os_error(), Some(libc::EXDEV | libc::EPERM | libc::EACCES)) => {
-                    clone_entry(&from, &at, &m)?;
-                    crate::sys::apfs_immutable(&at, false)?;
-                }
-                Err(e) => return Err(e.into()),
+            // A writable private copy (`add`) gives its entry to the index, which costs less
+            // than a second clone. A sealed snapshot (`mv`, `save -a`) is cloned from.
+            let moved = movable
+                && match fs::rename(&from, &at) {
+                    Ok(()) => true,
+                    Err(e) if matches!(e.raw_os_error(), Some(libc::EXDEV | libc::EPERM | libc::EACCES)) => {
+                        movable = false;
+                        false
+                    }
+                    Err(e) => return Err(e.into()),
+                };
+            if !moved {
+                clone_entry(&from, &at, &m)?;
             }
-            if std::os::macos::fs::MetadataExt::st_flags(&m) & libc::UF_IMMUTABLE != 0 {
+            if !moved || std::os::macos::fs::MetadataExt::st_flags(&m) & libc::UF_IMMUTABLE != 0 {
                 crate::sys::apfs_immutable(&at, false)?;
             }
         } else {

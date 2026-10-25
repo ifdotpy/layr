@@ -1037,6 +1037,11 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let h = here(ctx)?;
     h.repo.require(ctx, "gc")?;
     let v = run_gc(ctx, &h.repo, a.has("-n"))?;
+    // Saved scans of removed or changed trees go too.
+    #[cfg(target_os = "macos")]
+    if !a.has("-n") {
+        crate::storage::prune_saved_scans(&h.repo.p.dir)?;
+    }
     if !a.has("-q") {
         let verb = if a.has("-n") { "would delete" } else { "deleted" };
         outln!(ctx, "{verb} {} state(s)", v.len());
