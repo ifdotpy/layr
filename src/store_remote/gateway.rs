@@ -550,7 +550,8 @@ impl Gateway {
             return self.public_get("store.json");
         }
         match response.status().as_u16() {
-            404 if key == "store.json" => bail!("gateway bootstrap: HTTP 404 (no such project); check the project name and a missing or wrong LAYR_GATEWAY_TOKEN_FILE grant"),
+            404 if key == "store.json" && self.machine.is_some()
+                && self.person.lock().map_err(|_| anyhow!("gateway session lock failed"))?.is_none() => bail!("gateway bootstrap: HTTP 404 (no such project); check the project name and a missing or wrong LAYR_GATEWAY_TOKEN_FILE grant"),
             404 => Ok(None),
             200 => Ok(Some(bytes(response, if key == "store.json" { 16 << 10 } else { OBJECT_LIMIT })?)),
             status => bail!("gateway get: HTTP {status}"),
@@ -685,6 +686,68 @@ fn token_file(path: &std::path::Path, uid: u32) -> Result<String> {
 mod tests {
     use super::*;
     use std::os::unix::fs::{symlink, PermissionsExt};
+    #[test]
+    fn missing_descriptor_keeps_optional_person_reads_and_hints_machine_grants() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        for mode in ["reader", "person", "machine", "grant"] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                // Without a grant, automatic public discovery still probes public.json anonymously.
+                for n in 0..if mode == "grant" { 1 } else { 2 } {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                    let mut request = Vec::new();
+                    let mut part = [0; 2048];
+                    while !request.windows(4).any(|p| p == b"\r\n\r\n") {
+                        let n = stream.read(&mut part).unwrap();
+                        assert!(n > 0);
+                        request.extend_from_slice(&part[..n]);
+                    }
+                    let request = String::from_utf8(request).unwrap().to_ascii_lowercase();
+                    if n == 0 {
+                        assert!(request.starts_with("get /v1/p/project/store.json "));
+                        assert_eq!(request.contains("authorization: bearer person.fixture"), mode == "person");
+                        assert_eq!(request.contains("authorization: bearer grant.fixture"), mode == "grant");
+                    } else {
+                        assert!(request.starts_with("get /p/project/public.json "));
+                        assert!(!request.contains("authorization:"));
+                    }
+                    write!(stream, "HTTP/1.1 404 Not Found\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}").unwrap();
+                }
+            });
+            let mut gateway = Gateway::open("layr+https://localhost/project").unwrap();
+            gateway.base = reqwest::Url::parse(&format!("http://{address}/v1/p/project/")).unwrap();
+            if mode != "reader" {
+                gateway.machine = Some("test-machine".into());
+            }
+            if mode == "person" {
+                *gateway.person.lock().unwrap() = Some(PersonSession {
+                    login: "ann@example.com".into(),
+                    key: ed25519_dalek::SigningKey::from_bytes(&[7; 32]),
+                    token: Some(SessionToken {
+                        token: "person.fixture".into(),
+                        expires: crate::ids::now_ms() + 60_000,
+                        login: "ann@example.com".into(),
+                    }),
+                });
+            }
+            if mode == "grant" {
+                gateway.token = Some("grant.fixture".into());
+            }
+            let result = gateway.get("store.json");
+            if matches!(mode, "reader" | "person") {
+                assert!(result.unwrap().is_none());
+            } else {
+                let error = result.unwrap_err().to_string();
+                assert!(error.contains("404") && error.contains("missing or wrong"));
+                assert!(!error.contains("grant.fixture"));
+            }
+            server.join().unwrap();
+        }
+    }
+
     #[test]
     fn explicit_public_access_never_opens_person_keys() {
         let mut gateway = Gateway::open("layr+https://localhost/project").unwrap();
