@@ -209,6 +209,92 @@ try:
  check([path for _,path,_ in requests if not path.startswith('/p/project/')]==['/v1/p/project/store.json'],'automatic HTTP discovery probes only the private descriptor before switching to /p/')
  check(all(method=='GET' and auth is None for method,_,auth in requests),'automatic HTTP discovery sends no credential, read proof or write')
 finally: server.shutdown();server.server_close();thread.join(timeout=10)
+# A writer uses one anonymous metadata lookup while encrypted reads, proof and PUTs
+# retain the private gateway routes and bearer credentials.
+import base64
+challenge_segment=next((root/'archive/records').rglob('*.age')).read_bytes()
+write_token='v1.write.fixture';read_token='v1.read.fixture'
+token_file=root/'gateway-write-token';token_file.write_text(write_token);os.chmod(token_file,0o600)
+class WriterGateway(PublicFiles):
+ def answer(self,body,status=200):
+  if not isinstance(body,bytes): body=json.dumps(body).encode()
+  self.send_response(status);self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
+ def do_GET(self):
+  if self.path.startswith('/p/'):
+   # Deliberately expose public.json only; other writer objects cannot use /p/.
+   if self.path!='/p/project/public.json':
+    requests.append((self.command,self.path,self.headers.get('Authorization')));self.send_error(404);return
+   return super().do_GET()
+  requests.append((self.command,self.path,self.headers.get('Authorization')))
+  parsed=urllib.parse.urlsplit(self.path);prefix='/v1/p/project/'
+  if not parsed.path.startswith(prefix): self.send_error(404);return
+  action=parsed.path[len(prefix):];auth=self.headers.get('Authorization')
+  if action=='store.json': return self.answer((root/'archive/store.json').read_bytes())
+  if action=='slots':
+   return self.answer({'slots':[{'name':p.stem,'data':base64.b64encode(p.read_bytes()).decode()} for p in (root/'archive/slots').glob('machine-*.age')]})
+  if action=='challenge': return self.answer({'challenge':base64.b64encode(challenge_segment).decode()})
+  if action=='objects':
+   if auth not in ['Bearer '+write_token,'Bearer '+read_token]: self.send_error(401);return
+   wanted=urllib.parse.parse_qs(parsed.query).get('prefix',[''])[0]
+   return self.answer({'objects':[{'key':str(p.relative_to(root/'archive')),'modified':int(p.stat().st_mtime*1000)} for p in (root/'archive').rglob('*') if p.is_file() and str(p.relative_to(root/'archive')).startswith(wanted)]})
+  if action.startswith('objects/'):
+   if auth!='Bearer '+read_token: self.send_error(401);return
+   name=action[len('objects/'):]
+   if name=='public.json': self.send_error(404);return
+   path=root/'archive'/name
+   if '..' in pathlib.PurePosixPath(name).parts or not path.is_file(): self.send_error(404);return
+   return self.answer(path.read_bytes())
+  self.send_error(404)
+ def do_POST(self):
+  requests.append((self.command,self.path,self.headers.get('Authorization')))
+  if self.path!='/v1/p/project/token': self.send_error(404);return
+  body=json.loads(self.rfile.read(int(self.headers.get('Content-Length','0'))))
+  # The age challenge is an existing encrypted parent record segment. Its plaintext
+  # contains signed records, never a vault identity, and is never printed or persisted.
+  if not isinstance(body.get('challenge'),str) or '"machine"' not in body['challenge']: self.send_error(403);return
+  return self.answer({'token':read_token,'expires':int(time.time()*1000)+300000})
+ def do_PUT(self):
+  requests.append((self.command,self.path,self.headers.get('Authorization')))
+  prefix='/v1/p/project/objects/'
+  if not self.path.startswith(prefix): self.send_error(404);return
+  name=self.path[len(prefix):]
+  expected=read_token if name.startswith('slots/') else write_token
+  if self.headers.get('Authorization')!='Bearer '+expected: self.send_error(403);return
+  if '..' in pathlib.PurePosixPath(name).parts: self.send_error(404);return
+  body=self.rfile.read(int(self.headers.get('Content-Length','0')))
+  path=root/'archive'/name
+  if path.exists(): return self.answer(b'',412)
+  path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(body)
+  return self.answer(b'',201)
+server=http.server.ThreadingHTTPServer(('127.0.0.1',0),WriterGateway)
+server.socket=context.wrap_socket(server.socket,server_side=True)
+thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+writer_env=dict(W,LAYR_GATEWAY_CA_FILE=str(root/'tls-ca.pem'),LAYR_GATEWAY_TOKEN_FILE=str(token_file))
+writer_url='layr+https://localhost:'+str(server.server_port)+'/project'
+try:
+ run(['remote','add','gateway-write',writer_url],writer_env)
+ (wline/'gateway-write.txt').write_text('authenticated gateway writer bytes\n')
+ run(['--line','main','add','gateway-write.txt'],W);run(['--line','main','save','-qm','Gateway writer state'],W)
+ gateway_state=run(['--line','main','rev-parse','head'],W).stdout.strip()
+ requests.clear()
+ result=run(['push','gateway-write','-q'],writer_env,False)
+ if result.returncode!=0: raise AssertionError(('trusted gateway writer push',result.returncode,result.stderr,[(method,path) for method,path,_ in requests]))
+ check(True,'a trusted writer pushes a public project through the gateway with its own slot and token')
+ check([(method,path,auth) for method,path,auth in requests if path.startswith('/p/')]==[('GET','/p/project/public.json',None)],'writer uses exactly one anonymous public manifest side request')
+ check(not any('/v1/p/project/objects/public.json' in path for _,path,_ in requests),'writer never requests an authenticated public manifest route')
+ check(any(path=='/v1/p/project/slots' for _,path,_ in requests) and any(path=='/v1/p/project/challenge' for _,path,_ in requests) and any(method=='POST' and path=='/v1/p/project/token' for method,path,_ in requests),'writer opens its private machine slot and completes its private read proof')
+ check(any(method=='PUT' and '/objects/records/' in path for method,path,_ in requests) and any(method=='PUT' and '/objects/states/' in path for method,path,_ in requests),'writer publishes signed record segments and encrypted state objects')
+ check(all(path.startswith('/v1/p/project/objects/') and auth=='Bearer '+write_token for method,path,auth in requests if method=='PUT'),'writer PUTs keep the private gateway route and write bearer')
+ run(['fetch','origin','-q'],P)
+ check(run(['--line','main','show',gateway_state+':gateway-write.txt'],P).stdout=='authenticated gateway writer bytes\n','a public reader restores the gateway writer new state and bytes')
+ requests.clear()
+ changed=dict(manifest);changed['sig']='AAAA';manifest_path.write_text(json.dumps(changed))
+ try:
+  refused(['push','gateway-write','-q'],writer_env,'gateway writer refuses a tampered public manifest',['signature'])
+  check(not any(method!='GET' or path.endswith(('/slots','/challenge')) for method,path,_ in requests),'writer verifies public manifest signature before slots, proof or upload')
+ finally: manifest_path.write_bytes(manifest_bytes)
+finally: server.shutdown();server.server_close();thread.join(timeout=10)
+
 # Current admin and writer roles are checked using the real daemon caller identity.
 for path in [root/'archive',*(root/'archive').rglob('*')]:
  os.chmod(path,0o755 if path.is_dir() else 0o644)

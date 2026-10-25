@@ -469,8 +469,13 @@ impl Store {
         // Recheck the descriptor pin before discovery or any write-related request.
         let descriptor = self.descriptor()?;
         // Check before the writer can publish any object, even when the caller is local root.
-        if self.force_public || self.backend.get("public.json")?.is_some() {
-            self.identity(&descriptor, opts.paper_key.as_deref())?;
+        if let Some(bytes) = self.backend.get("public.json")? {
+            let manifest = layr_store::public::Manifest::parse(&bytes, &descriptor)?;
+            let identity = self.identity(&descriptor, opts.paper_key.as_deref())?;
+            self.require_private_access()?;
+            let records = reader::records(&self.backend, &identity, &descriptor.project)?;
+            manifest.verify_signer(&layr_store::public::trusted_writers(&descriptor.project, &records.lines)?)?;
+        } else if self.force_public {
             self.require_private_access()?;
         }
         let mut report = writer::push(self, ctx, repo, opts)?;
