@@ -55,7 +55,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
    (root/'verify.message').write_bytes(b'layr/session/v1\0'+login.encode()+b'\0'+base64.b64decode(challenge))
    verified=subprocess.run(['openssl','pkeyutl','-verify','-pubin','-inkey',str(root/'verify.der'),'-keyform','DER','-rawin','-in',str(root/'verify.message'),'-sigfile',str(root/'verify.sig')],capture_output=True).returncode==0
    if not verified: self.reply(401,{});return
-   token=secrets.token_urlsafe(32);sessions[token]=login
+   token=base64.b64encode(os.urandom(32)).decode();sessions[token]=login
    self.reply(200,{'token':token,'expires':int(time.time()*1000)+(1000 if faults.pop('short_session',False) else 43200000),'login':login});return
   if path=='/api/person' and self.command=='PUT':
    if invites.get(bearer)!=login: self.reply(401,{});return

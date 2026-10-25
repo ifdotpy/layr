@@ -215,7 +215,7 @@ impl Gateway {
         if token.login != person.login
             || token.token.is_empty()
             || token.token.len() > 256
-            || !token.token.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+            || !token.token.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'+' | b'/' | b'='))
             || token.expires <= now
             || token.expires > now + 43_200_000
         {
