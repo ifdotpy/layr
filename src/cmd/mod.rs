@@ -197,6 +197,7 @@ Lines and states:
 Remotes:
    person keys, show, accept
    remote add, list, self, remove, trust, grant; sync, fetch, pull, push, clone
+   index write [<remote>] [--json]; push <remote> --index
    mount <remote> [--listen 127.0.0.1:8095]
 Git bridge:
    git remote, fetch, pull, push, clone, sync
@@ -260,6 +261,7 @@ pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
         "rev-parse" => history::rev_parse(ctx, &rest),
         "merge-base" => history::merge_base(ctx, &rest),
         "blame" => history::blame(ctx, &rest),
+        "index" => remote::index(ctx, &rest),
         "grep" => history::grep(ctx, &rest),
         "ls-files" => history::ls_files(ctx, &rest),
         "add" => work::add(ctx, &rest),
