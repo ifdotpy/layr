@@ -28,7 +28,7 @@ pub fn heads(project: &Project, watermark: BTreeMap<String, Watermark>, seq: u64
         .into_iter()
         .map(|l| Line { name: l.name, id: l.id, owner: l.owner, machine: l.machine, head: l.head })
         .collect::<Vec<_>>();
-    let refs = project.ref_list("", i64::MIN).into_iter().map(|r| Ref { name: r.name, target: r.target }).collect();
+    let refs = project.refs.values().map(|r| Ref { name: r.name.clone(), target: r.target.clone() }).collect();
     let mut changes = Vec::new();
     for s in project.open_changes() {
         changes.push(Change {

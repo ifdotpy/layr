@@ -212,3 +212,29 @@ fn open_changes_share_latest_version_and_main_ancestry_rule() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn heads_keep_all_undeleted_refs_even_when_expired() -> Result<()> {
+    let (mut lines, _, key) = fixture();
+    for (seq, name, after) in [
+        (5, "leases/expired", json!({"name":"leases/expired","target":id(2),"expires_at":i64::MIN})),
+        (6, "env/deleted", json!({"name":"env/deleted","target":id(2)})),
+        (7, "env/deleted", serde_json::Value::Null),
+    ] {
+        let mut record = Record::new("ref.set");
+        record.id = id(300 + seq);
+        record.machine = MACHINE.into();
+        record.project = PROJECT.into();
+        record.seq = seq as u64;
+        record.time = seq as i64;
+        record.data = json!({"ref_change":{"name":name,"before":null,"after":after}});
+        let body = serde_json::to_string(&record)?;
+        lines.push(format!(r#"{{"r":{body},"s":"{}"}}"#, keys::sign_bytes(body.as_bytes(), &key)));
+    }
+    let model = Model::from_verified_lines(lines.iter().map(String::as_str), "")?;
+    let p = &model.projects[PROJECT];
+    assert!(p.ref_list("", i64::MIN).is_empty());
+    let snapshot = model_index::heads(p, model_index::watermark(&lines)?, 1)?;
+    assert_eq!(snapshot.refs, vec![Ref { name: "leases/expired".into(), target: id(2) }]);
+    Ok(())
+}
