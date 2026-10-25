@@ -55,6 +55,10 @@ root_descriptor=(root/'archive/store.json').read_bytes();old_hashes=hashes()
 # New overlays are private independently of parent opening.
 run(['--line','main','overlay','create','visible','--readers','machine:'+a['id'],'-q'])
 run(['--line','main','overlay','create','hidden-rotation-731','--hidden','--readers','machine:'+a['id'],'-q'])
+(line/'visible-layer.txt').write_text('explicit public overlay bytes\n')
+run(['--line','main','overlay','move','visible','visible-layer.txt','-q']);run(['--line','main','save','-qm','Visible overlay state'])
+(line/'hidden-layer.txt').write_text('hidden layer bytes\n')
+run(['--line','main','overlay','move','hidden-rotation-731','hidden-layer.txt','-q']);run(['--line','main','save','-qm','Hidden layer state'])
 refuse(['overlay','mode','visible','public'],'private project refuses more-open overlay',words=['project mode private'])
 check(json.loads(run(['overlay','show','visible','--json']).stdout)['access_mode']=='private','overlay defaults to private')
 run(['push','archive','-q']);run(['remote','rotate','archive','--remove','machine:'+b['id'],'--remove','person:removed@example.com','--reason','reader removed'])
@@ -98,6 +102,9 @@ run(['overlay','mode','visible','public']);run(['push','archive','-q'])
 run(['clone','file://'+str(root/'archive'),'project','--public','-q'],P);P['LAYR_PROJECT']='project'
 check('after removal' in run(['--line','main','show',second+':after.txt'],P).stdout,'public current epoch clone reads project history')
 check(json.loads(run(['overlay','show','visible','--json'],P).stdout)['access_mode']=='public','public overlay is imported only after explicit opening')
+public_line=root/'anonymous/store/projects/project/lines/main'
+check((public_line/'visible-layer.txt').read_text()=='explicit public overlay bytes\n' and not (public_line/'hidden-layer.txt').exists(),'explicit public overlay files materialize while hidden files stay absent')
+check('hidden-rotation-731' not in json.dumps(records(root/'anonymous/store/projects/project')),'public records contain no hidden overlay name')
 run(['remote','mode','archive','service']);service_epoch=latest();service_prefix=root/'archive/project/epochs'/service_epoch['data']['epoch']
 check(service_epoch['data']['mode']=='service' and not (service_prefix/'public.json').exists(),'closing public to service rotates without a public opener')
 check(json.loads(run(['overlay','show','visible','--json']).stdout)['access_mode']=='service','project closing tightens visible overlay in the same operation')

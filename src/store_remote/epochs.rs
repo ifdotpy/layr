@@ -274,6 +274,7 @@ impl Store {
         let identity = self.identity(&descriptor, None)?;
         self.require_private_access()?;
         let remote = reader::records(&self.backend, &identity, &descriptor.project)?;
+        if !remote.gaps.is_empty() { bail!("complete the remote record history before rotating"); }
         let trusted = layr_store::public::trusted_writers(&descriptor.project, &remote.lines)?;
         if trusted.get(&self.machine) != Some(&self.key.verifying_key()) {
             bail!("rotation requires a trusted writer machine");
@@ -338,6 +339,7 @@ impl Store {
                 }
                 let path = self.dir.join("project-keys").join(format!("{}.age", key.epoch));
                 let identity = keys::open_machine_slot(&std::fs::read(path)?, &self.key)?;
+                if keys::recipient_of(&identity)? != key.recipient { bail!("pending epoch identity differs from its signed recipient"); }
                 (key, record, line, identity)
             } else {
                 let next_identity = keys::generate_identity();
@@ -396,6 +398,16 @@ impl Store {
             event.data = serde_json::json!({"mode":mode,"epoch":key.epoch,"reason":reason});
             repo.commit_record(ctx, event)?;
             // A new epoch carries the complete signed log; states stay in their original epochs.
+            // Carry remote-only reader announcements and signed history forward too.
+            // The writer then appends the local suffix after these exact prefixes.
+            let mut by_machine:BTreeMap<String,Vec<String>>=BTreeMap::new();
+            for line in &remote.lines { let r=oplog::parse_line(line,None)?.record; by_machine.entry(r.machine).or_default().push(line.clone()); }
+            for (machine,mut lines) in by_machine {
+                lines.sort_by_key(|l|oplog::parse_line(l,None).expect("verified record").record.seq);
+                let last=oplog::parse_line(lines.last().context("empty machine history")?,None)?.record.seq;
+                let bytes=format!("{}\n",lines.join("\n"));
+                self.backend.put_new(&super::format::segment_name(&machine,1,last),keys::encrypt(&key.recipient,bytes.as_bytes())?)?;
+            }
             self.publishing_epoch = true;
             writer::push_locked(self, ctx, repo, &Options::default())?;
             if mode == Mode::Public {
