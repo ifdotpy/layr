@@ -8,6 +8,8 @@
 
 pub mod authority;
 pub mod diff;
+pub mod history;
+pub mod index;
 pub mod interdiff;
 pub mod operations;
 pub mod overlays;

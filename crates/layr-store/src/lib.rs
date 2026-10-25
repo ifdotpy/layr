@@ -7,6 +7,7 @@ pub mod canonical;
 pub mod format;
 #[cfg(feature = "native")]
 pub mod http;
+pub mod index;
 pub mod keys;
 pub mod paths;
 #[cfg(feature = "native")]

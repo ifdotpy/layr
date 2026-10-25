@@ -3,6 +3,7 @@
 pub(crate) mod backend;
 pub(crate) mod browse;
 pub(crate) mod gateway;
+mod index;
 mod legacy;
 pub(crate) mod overlays;
 pub(crate) mod reader;
@@ -153,6 +154,12 @@ fn open_with_pin(url: &str, repo: &Repo, pin: Option<StorePin>) -> Result<Store>
 }
 
 impl Store {
+    pub fn write_index(&mut self, ctx: &Ctx, repo: &Repo) -> Result<index::Report> {
+        self.connect(ctx)?;
+        repo.require(ctx, "sync")?;
+        let _lock = repo.p.lock()?;
+        index::write(self, repo)
+    }
     fn connect(&mut self, ctx: &Ctx) -> Result<()> {
         self.backend.as_caller(ctx);
         if let Backend::Gateway(gateway) = &mut self.backend {

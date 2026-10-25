@@ -679,6 +679,49 @@ pub fn sync(ctx: &Ctx, args: &[String]) -> Result<i32> {
 pub fn push(ctx: &Ctx, args: &[String]) -> Result<i32> {
     exchange(ctx, args, "push")
 }
+pub fn index(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    let a = parse(&Spec::new().flag("--json").flag("-q|--quiet").value("--remote"), args)?;
+    if a.pos.first().map(String::as_str) != Some("write") || a.pos.len() > 2 || !a.paths.is_empty() {
+        bail!("usage: layr index write [<remote>] [--remote <remote>] [--json] [-q]");
+    }
+    let h = here(ctx)?;
+    let configured;
+    let name = match a.pos.get(1).map(String::as_str).or(a.get("--remote")) {
+        Some(name) => name,
+        None => {
+            configured = h
+                .repo
+                .p
+                .db
+                .config_all()?
+                .into_iter()
+                .filter_map(|(key, _)| key.strip_prefix("cloud.remote.").and_then(|s| s.strip_suffix(".url")).map(str::to_string))
+                .collect::<Vec<_>>();
+            if configured.len() != 1 {
+                bail!("name one store remote: layr index write <remote>");
+            }
+            &configured[0]
+        }
+    };
+    if kind(&remote_url(&h.repo, name)?)? != Kind::Store {
+        bail!("index write requires a store remote");
+    }
+    let mut store = store_remote::open_named(name, &h.repo)?;
+    let report = store.write_index(ctx, &h.repo)?;
+    if a.has("--json") {
+        outln!(ctx, "{}", serde_json::to_string(&report)?);
+    } else if !a.has("-q") {
+        outln!(
+            ctx,
+            "index: {} heads, {} paths, {} graphs; {} paths unavailable",
+            report.heads,
+            report.paths,
+            report.graphs,
+            report.unavailable_paths.len()
+        );
+    }
+    Ok(0)
+}
 pub fn fetch(ctx: &Ctx, args: &[String]) -> Result<i32> {
     exchange(ctx, args, "fetch")
 }
@@ -693,6 +736,7 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
     }
     let a = parse(
         &Spec::new()
+            .flag("--index")
             .flag("--auto")
             .flag("--caches")
             .flag("-q|--quiet")
@@ -709,6 +753,9 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
     let mut h = here(ctx)?;
     let url = remote_url(&h.repo, name).map_err(|e| exit(128, format!("{e}; Git forms use layr git {op}")))?;
     let remote_kind = kind(&url)?;
+    if a.has("--index") && (op != "push" || remote_kind != Kind::Store) {
+        bail!("--index requires layr push to a store remote");
+    }
     if a.has("--runnable") && remote_kind != Kind::Registry {
         bail!("--runnable requires an OCI remote");
     }
@@ -767,6 +814,9 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
             }
             let report =
                 if op == "push" { store.push(ctx, &mut h.repo, &opts)? } else { store.fetch(ctx, &mut h.repo, &opts)? };
+            if a.has("--index") {
+                store.write_index(ctx, &h.repo)?;
+            }
             if !report.missing_lines.is_empty() {
                 print_store_report(ctx, &report, op, a.has("--json"), a.has("-q"))?;
                 return Ok(2);
