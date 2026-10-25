@@ -2,6 +2,9 @@
 # Project epochs, access modes, audience closure and overlay privacy through the CLI.
 . "$(dirname "$0")/lib.sh"
 set -e
+repo_root=$(cd "$(dirname "$0")/.." && pwd)
+"${CARGO:-$HOME/.cargo/bin/cargo}" build --locked -p layr-store --example epoch_probe \
+    --manifest-path "$repo_root/Cargo.toml" --target-dir "$(dirname "$(dirname "$LAYR")")"
 for machine in owner removed reader fresh anonymous person upgrade; do new_fs "$T/$machine" 2G; done
 export ROT_TEST_ROOT="$T" ROT_TEST_BINARY="$LAYR"
 export ROT_TEST_PROBE="$(dirname "$LAYR")/examples/epoch_probe"

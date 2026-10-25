@@ -386,7 +386,9 @@ impl Store {
         let descriptor:Descriptor=serde_json::from_slice(&self.backend.root().get("store.json")?.context("missing root descriptor")?)?;
         if descriptor.format!=2 || !crate::model::is_uuid(&descriptor.project) {bail!("invalid root store descriptor");}
         descriptor.recipient.parse::<age::x25519::Recipient>().map_err(|_|anyhow::anyhow!("invalid root store recipient"))?;
-        if !self.project.is_empty() && self.project!=descriptor.project {bail!("store project differs from local project");}
+        if !self.project.is_empty() && self.project!=descriptor.project {
+            bail!("store project differs: local {}, store.json {}", self.project, descriptor.project);
+        }
         Ok(descriptor)
     }
 
