@@ -488,22 +488,24 @@ impl Gateway {
         if self.is_public() {
             return self.public_get(key);
         }
+        if key.starts_with("slots/") && self.person.lock().map_err(|_| anyhow!("gateway session lock failed"))?.is_none() {
+            let response = if self.machine_slot().as_deref() == Some(key) {
+                self.send(Method::GET, key, None, None, None)?
+            } else {
+                self.read_request(&format!("objects/{key}"), None)?
+            };
+            return match response.status().as_u16() {
+                200 => Ok(Some(bytes(response, 16 << 10)?)),
+                404 => Ok(None),
+                status => bail!("gateway machine slot: HTTP {status}"),
+            };
+        }
         if key.strip_prefix("slots/").is_some_and(|name| layr_store::person::slot_login(name).is_some()) {
             let response = self.send(Method::GET, key, None, None, None)?;
             return match response.status().as_u16() {
                 200 => Ok(Some(bytes(response, 4096)?)),
                 404 => Ok(None),
                 status => bail!("gateway person slot: HTTP {status}"),
-            };
-        }
-        if self.machine_slot().as_deref() == Some(key)
-            && self.person.lock().map_err(|_| anyhow!("gateway session lock failed"))?.is_none()
-        {
-            let response = self.send(Method::GET, key, None, None, None)?;
-            return match response.status().as_u16() {
-                200 => Ok(Some(bytes(response, 16 << 10)?)),
-                404 => Ok(None),
-                status => bail!("gateway machine slot: HTTP {status}"),
             };
         }
         if key.starts_with("slots/") {

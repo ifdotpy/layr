@@ -491,6 +491,13 @@ impl Store {
         } else if self.force_public {
             self.require_private_access()?;
         }
+        // Private gateway listings require the machine read proof, including before
+        // the writer's first discovery request when there is no public manifest.
+        if let Backend::Gateway(gateway) = &self.backend {
+            if !gateway.has_read_identity() {
+                self.identity(&descriptor, opts.paper_key.as_deref())?;
+            }
+        }
         let mut report = writer::push(self, ctx, repo, opts)?;
         overlays::push(self, ctx, repo, opts, &mut report)?;
         Ok(report)

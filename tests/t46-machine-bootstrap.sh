@@ -18,7 +18,7 @@ def run(args,env,success=True):
  cwd=pathlib.Path(env['LAYR_ROOT'])/'projects'/env['LAYR_PROJECT']/'lines/main' if env.get('LAYR_PROJECT') else root
  p=subprocess.run([binary,*args],env=env,cwd=cwd,text=True,capture_output=True,timeout=90)
  outputs.append(p.stdout+p.stderr)
- if success: assert p.returncode==0,(args,p.stderr)
+ if success: assert p.returncode==0,(args,p.stderr,globals().get('requests',[])[-4:])
  return p
 def openssl(args): subprocess.run(['openssl',*args],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 executor=dict(base,LAYR_ROOT=str(root/'executor/store'))
@@ -74,6 +74,12 @@ class Gateway(http.server.BaseHTTPRequestHandler):
    body=json.loads(self.rfile.read(int(self.headers.get('Content-Length','0'))))
    assert isinstance(body.get('challenge'),str) and '"machine"' in body['challenge']
    self.reply(200,{'token':read_token,'expires':int(time.time()*1000)+300000});return
+  if self.command=='PUT' and action.startswith('objects/') and kind=='P-grant':
+   name=action[len('objects/'):];assert '..' not in pathlib.PurePosixPath(name).parts
+   assert name.startswith(('records/','states/','index/'))
+   body=self.rfile.read(int(self.headers.get('Content-Length','0')));file=root/'archive'/name
+   if file.exists(): self.reply(412,b'');return
+   file.parent.mkdir(parents=True,exist_ok=True);file.write_bytes(body);self.reply(201,b'');return
   # Possession of the grant is not substituted for the normal encrypted read proof.
   assert kind not in ['P-grant','Q-grant']
   if kind!='read': self.reply(401,{});return
@@ -92,7 +98,7 @@ server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Gateway)
 context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.load_cert_chain(root/'tls-cert.pem',root/'tls-key.pem');server.socket=context.wrap_socket(server.socket,server_side=True)
 thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
 site='https://localhost:'+str(server.server_port);url='layr+'+site+'/project'
-valid=dict(executor,LAYR_GATEWAY_CA_FILE=str(root/'ca.pem'),LAYR_GATEWAY_TOKEN_FILE=str(root/'grant-p'))
+valid=dict(executor,LAYR_GATEWAY_CA_FILE=str(root/'ca.pem'),LAYR_GATEWAY_TOKEN_FILE=str(root/'grant-p'),LAYR_PAPER_KEY_FILE=str(root/'paper'))
 try:
  p=run(['clone',url,'copy','-q'],valid)
  restored=pathlib.Path(valid['LAYR_ROOT'])/'projects/copy/lines/main/hello.txt'
@@ -101,8 +107,14 @@ try:
  check(any(method=='POST' and path=='/v1/p/project/token' and kind=='P-grant' for method,path,kind in requests),'the proof exchange token route carries the project grant')
  check(any(path=='/v1/p/project/challenge' and kind=='P-grant' for _,path,kind in requests),'the challenge route carries the project grant')
  check(any(path.startswith('/v1/p/project/objects?') and kind=='read' for _,path,kind in requests),'normal object reads use the read proof after bootstrap')
+ check(any(path=='/v1/p/project/objects/slots/paper.age' and kind=='read' for _,path,kind in requests),'machine reads the exact paper slot only through the read proof')
  sync=dict(valid,LAYR_PROJECT='copy');run(['fetch','origin','-q'],sync)
  check(restored.read_text()=='private machine bootstrap\n','the same machine synchronizes the hidden project with its grant')
+ before_push=len(requests)
+ run(['push','origin','-q'],sync)
+ push_requests=requests[before_push:]
+ check(any(path=='/v1/p/project/challenge' for _,path,_ in push_requests) and all(kind=='read' for method,path,kind in push_requests if method=='GET' and path.startswith('/v1/p/project/objects?')),'a separate private push obtains its read proof before listing data')
+ check(any(method=='PUT' and '/objects/records/' in path and kind=='P-grant' for method,path,kind in requests),'the machine pushes its signed records after cloning the private project')
  wrong=dict(valid,LAYR_GATEWAY_TOKEN_FILE=str(root/'grant-q'))
  p=run(['clone',url,'wrong','-q'],wrong,False)
  check(p.returncode!=0 and '404' in p.stderr and 'missing or wrong' in p.stderr,'a grant for another project is refused with a plain grant hint')
@@ -111,7 +123,7 @@ try:
  check(p.returncode!=0 and '404' in p.stderr and 'missing or wrong' in p.stderr,'a missing grant is refused with a plain grant hint')
  check(not any(path=='/v1/p/project/slots' for _,path,_ in requests),'machine bootstrap never calls the aggregate slots route')
  allowed={'/v1/p/project/store.json','/v1/p/project/'+own_slot,'/v1/p/project/challenge','/v1/p/project/token'}
- check(all(path in allowed for _,path,kind in requests if kind=='P-grant'),'the project grant is attached only to that project bootstrap routes')
+ check(all(path in allowed or (method=='PUT' and path.startswith('/v1/p/project/objects/')) for method,path,kind in requests if kind=='P-grant'),'the project grant is attached only to scoped bootstrap routes and authorized writes')
  check(not errors,'stand-in accepted only permitted routes and credentials')
  project=pathlib.Path(valid['LAYR_ROOT'])/'projects/copy'
  content=''.join(outputs).encode()+b''.join(p.read_bytes() for p in project.rglob('*') if p.is_file() and not p.is_symlink())
