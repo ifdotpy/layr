@@ -64,7 +64,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
    invites.pop(bearer);people[login]=body;stats['registration']+=1;self.reply(200,{'login':login,'new':True});return
   login=sessions.get(bearer)
   # Project data keeps its read/write capability; person exchanges use the session.
-  if path.startswith('/v1/p/project/objects') and bearer in ['v1.read.signin-test','v1.write.signin-test']:
+  if path.startswith('/v1/p/project/objects') and bearer in ['v1.read.signinTest','v1.write.signin-test']:
    login='ann@example.com'
   if not login: self.reply(401,{});return
   if faults.pop('reject_session',False):
@@ -87,7 +87,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
    self.reply(200,{'challenge':base64.b64encode(next((scope/'records').rglob('*.age')).read_bytes()).decode()});return
   if path=='/v1/p/project/token':
    assert bearer in sessions and '"machine"' in body['challenge']
-   self.reply(200,{'token':'v1.read.signin-test','expires':int(time.time()*1000)+60000});return
+   self.reply(200,{'token':'v1.read.signinTest','expires':int(time.time()*1000)+60000});return
   if path=='/v1/p/project/slots':
    self.reply(200,{'slots':[{'name':p.stem,'data':base64.b64encode(p.read_bytes()).decode()} for p in (scope/'slots').glob('*.age')]});return
   if path.startswith('/v1/p/project/slots/'):

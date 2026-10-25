@@ -178,6 +178,11 @@ impl Store {
         index::write(self, repo)
     }
     fn connect(&mut self, ctx: &Ctx) -> Result<()> {
+        self.connect_transport(ctx)?;
+        epochs::connect(self)
+    }
+
+    fn connect_transport(&mut self, ctx: &Ctx) -> Result<()> {
         self.backend = self.backend.root().clone();
         self.epoch = None;
         self.epoch_public = false;
@@ -243,7 +248,6 @@ impl Store {
                 Ok(Backend::S3(s3))
             })?;
         }
-        epochs::connect(self)?;
         Ok(())
     }
 
@@ -288,7 +292,9 @@ impl Store {
     }
 
     pub fn configure(&mut self, ctx: &Ctx, opts: &ConfigureOptions) -> Result<Configured> {
-        self.connect(ctx)?;
+        // Establish and verify the immutable root pin before epoch discovery.
+        // The actual operation resolves current epochs after configuration.
+        self.connect_transport(ctx)?;
         if self.backend.get("store.json")?.is_some() {
             self.pin_descriptor()?;
             return Ok(Configured { created: false, recovery_key_file: None });
@@ -312,8 +318,13 @@ impl Store {
     }
 
     fn pin_descriptor(&mut self) -> Result<()> {
-        let descriptor: Descriptor =
-            serde_json::from_slice(&self.backend.root().get("store.json")?.context("missing store descriptor")?)?;
+        let descriptor = self.root_descriptor()?;
+        if let Some(pin) = &self.pin {
+            pin.check(&descriptor)?;
+        }
+        if let Some(pin) = self.person.as_ref().and_then(|person|person.index.pin(&descriptor.project)) {
+            pin.check_store(&descriptor)?;
+        }
         let paper_recipient = self.pin.as_ref().and_then(|pin| pin.paper_recipient.clone());
         self.pin = Some(StorePin { project: descriptor.project, recipient: descriptor.recipient, paper_recipient });
         Ok(())
