@@ -32,6 +32,7 @@ pub struct Gateway {
     http: Client,
     base: reqwest::Url,
     token: Option<String>,
+    machine: Option<String>,
     identity: Mutex<Option<String>>,
     read: Mutex<Option<(String, i64)>>,
     public: std::sync::atomic::AtomicBool,
@@ -44,6 +45,7 @@ impl Clone for Gateway {
             http: self.http.clone(),
             base: self.base.clone(),
             token: self.token.clone(),
+            machine: self.machine.clone(),
             identity: Mutex::new(self.identity.lock().expect("gateway identity lock").clone()),
             read: Mutex::new(self.read.lock().expect("gateway read lock").clone()),
             public: std::sync::atomic::AtomicBool::new(self.is_public()),
@@ -119,6 +121,7 @@ impl Gateway {
             http,
             base,
             token: None,
+            machine: None,
             identity: Mutex::new(None),
             read: Mutex::new(None),
             public: std::sync::atomic::AtomicBool::new(false),
@@ -127,6 +130,7 @@ impl Gateway {
     }
 
     pub fn connect(&mut self, ctx: &crate::ctx::Ctx) -> Result<()> {
+        self.machine = Some(ctx.store.machine.id.clone());
         self.token = ctx
             .env("LAYR_GATEWAY_TOKEN_FILE")
             .map(|path| crate::privs::as_caller_fs(ctx, || token_file(&ctx.cwd.join(path), ctx.caller.uid)))
@@ -150,6 +154,7 @@ impl Gateway {
     /// Explicit anonymous access must not open person keys or exchange a session.
     pub fn connect_public(&mut self, env: &std::collections::HashMap<String, String>) -> Result<()> {
         self.token = None;
+        self.machine = None;
         *self.person.lock().map_err(|_| anyhow!("gateway session lock failed"))? = None;
         if let Some(path) = env.get("LAYR_GATEWAY_CA_FILE") {
             self.configure_ca(&ca_file(std::path::Path::new(path))?)?;
@@ -339,8 +344,23 @@ impl Gateway {
             }
             Ok(response)
         } else {
-            send(bearer)
+            let bootstrap = query.is_none() && self.bootstrap_action(&method, action);
+            let response = send(bearer.or_else(|| if bootstrap { self.token.as_deref() } else { None }))?;
+            if bootstrap && response.status().as_u16() == 404 && (action != "store.json" || self.token.is_some()) {
+                bail!("gateway bootstrap: HTTP 404 (no such project or machine slot); check the project name and a missing or wrong LAYR_GATEWAY_TOKEN_FILE grant");
+            }
+            Ok(response)
         }
+    }
+
+    fn machine_slot(&self) -> Option<String> {
+        self.machine.as_ref().map(|id| format!("slots/machine-{id}.age"))
+    }
+
+    fn bootstrap_action(&self, method: &Method, action: &str) -> bool {
+        (*method == Method::GET
+            && (matches!(action, "store.json" | "challenge") || self.machine_slot().as_deref() == Some(action)))
+            || (*method == Method::POST && action == "token")
     }
 
     fn proof(&self) -> Result<String> {
@@ -473,6 +493,16 @@ impl Gateway {
                 status => bail!("gateway person slot: HTTP {status}"),
             };
         }
+        if self.machine_slot().as_deref() == Some(key)
+            && self.person.lock().map_err(|_| anyhow!("gateway session lock failed"))?.is_none()
+        {
+            let response = self.send(Method::GET, key, None, None, None)?;
+            return match response.status().as_u16() {
+                200 => Ok(Some(bytes(response, 16 << 10)?)),
+                404 => Ok(None),
+                status => bail!("gateway machine slot: HTTP {status}"),
+            };
+        }
         if key.starts_with("slots/") {
             #[derive(Deserialize)]
             struct Slot {
@@ -520,6 +550,7 @@ impl Gateway {
             return self.public_get("store.json");
         }
         match response.status().as_u16() {
+            404 if key == "store.json" => bail!("gateway bootstrap: HTTP 404 (no such project); check the project name and a missing or wrong LAYR_GATEWAY_TOKEN_FILE grant"),
             404 => Ok(None),
             200 => Ok(Some(bytes(response, if key == "store.json" { 16 << 10 } else { OBJECT_LIMIT })?)),
             status => bail!("gateway get: HTTP {status}"),

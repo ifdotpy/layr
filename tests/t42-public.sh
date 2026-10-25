@@ -230,8 +230,11 @@ class WriterGateway(PublicFiles):
   if not parsed.path.startswith(prefix): self.send_error(404);return
   action=parsed.path[len(prefix):];auth=self.headers.get('Authorization')
   if action=='store.json': return self.answer((root/'archive/store.json').read_bytes())
-  if action=='slots':
-   return self.answer({'slots':[{'name':p.stem,'data':base64.b64encode(p.read_bytes()).decode()} for p in (root/'archive/slots').glob('machine-*.age')]})
+  if action.startswith('slots/machine-'):
+   path=root/'archive'/action
+   if not path.is_file(): self.send_error(404);return
+   return self.answer(path.read_bytes())
+  if action=='slots': self.send_error(500);return
   if action=='challenge': return self.answer({'challenge':base64.b64encode(challenge_segment).decode()})
   if action=='objects':
    if auth not in ['Bearer '+write_token,'Bearer '+read_token]: self.send_error(401);return
@@ -282,7 +285,7 @@ try:
  check(True,'a trusted writer pushes a public project through the gateway with its own slot and token')
  check([(method,path,auth) for method,path,auth in requests if path.startswith('/p/')]==[('GET','/p/project/public.json',None)],'writer uses exactly one anonymous public manifest side request')
  check(not any('/v1/p/project/objects/public.json' in path for _,path,_ in requests),'writer never requests an authenticated public manifest route')
- check(any(path=='/v1/p/project/slots' for _,path,_ in requests) and any(path=='/v1/p/project/challenge' for _,path,_ in requests) and any(method=='POST' and path=='/v1/p/project/token' for method,path,_ in requests),'writer opens its private machine slot and completes its private read proof')
+ check(any(path.startswith('/v1/p/project/slots/machine-') for _,path,_ in requests) and not any(path=='/v1/p/project/slots' for _,path,_ in requests) and any(path=='/v1/p/project/challenge' for _,path,_ in requests) and any(method=='POST' and path=='/v1/p/project/token' for method,path,_ in requests),'writer opens its private machine slot and completes its private read proof')
  check(any(method=='PUT' and '/objects/records/' in path for method,path,_ in requests) and any(method=='PUT' and '/objects/states/' in path for method,path,_ in requests),'writer publishes signed record segments and encrypted state objects')
  check(all(path.startswith('/v1/p/project/objects/') and auth=='Bearer '+write_token for method,path,auth in requests if method=='PUT'),'writer PUTs keep the private gateway route and write bearer')
  run(['fetch','origin','-q'],P)
