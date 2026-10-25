@@ -8,7 +8,7 @@ use crate::{
     repo::Repo,
 };
 use anyhow::{bail, Context, Result};
-use layr_store::request::{Action, Request, Signed};
+use layr_store::request::{self, Action, Request, Sealed, Signed};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
@@ -73,13 +73,14 @@ pub fn request(ctx: &Ctx, args: &[String]) -> Result<i32> {
         request.expires = expires.parse().context("--expires must be epoch milliseconds")?;
     }
     let signed = request.sign(&key)?;
+    let sealed = request::seal(&signed.to_bytes()?, &store.request_recipient(ctx)?, &key)?;
     let backend = store.request_backend(ctx)?;
     let name = format!("requests/{}.json", request.id);
-    if !backend.put_new(&name, signed.to_bytes()?)? {
+    if !backend.put_new(&name, sealed.clone())? {
         bail!("request id already exists");
     }
     if a.has("--json") {
-        outln!(ctx, "{}", json!({"id":request.id,"request":signed}));
+        outln!(ctx, "{}", json!({"id":request.id,"request":serde_json::from_slice::<serde_json::Value>(&sealed)?}));
     } else {
         outln!(ctx, "request {}", request.id);
     }
@@ -136,6 +137,7 @@ pub fn requests(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let h = here(ctx)?;
     h.repo.require(ctx, "sync")?;
     let mut store = crate::store_remote::open_named(a.get("--remote").unwrap_or("origin"), &h.repo)?;
+    let identity = store.request_identity(ctx)?;
     let backend = store.request_backend(ctx)?;
     let _queue_lock = super::queue::require_lock(&h.repo)?;
     let mut results = Vec::new();
@@ -164,10 +166,10 @@ pub fn requests(ctx: &Ctx, args: &[String]) -> Result<i32> {
             results.push(json!({"id":id,"status":"claimed"}));
             continue;
         }
-        let verified = verify_request(&h.repo, id, &bytes);
+        let verified = verify_request(&h.repo, id, &bytes, &identity);
         let mut record = match (&claim, &verified) {
             (ClaimState::Refused(reason), _) => refusal(reason),
-            (_, Ok((request, _))) => match effect(ctx, &h.repo, request) {
+            (_, Ok((request, _, _))) => match effect(ctx, &h.repo, request) {
                 Ok(record) => record,
                 Err(error) => refusal(&error.to_string()),
             },
@@ -176,11 +178,12 @@ pub fn requests(ctx: &Ctx, args: &[String]) -> Result<i32> {
         record.data["request_id"] = json!(id);
         record.data["request_digest"] = json!(hash);
         let actor = match verified {
-            Ok((request, public)) => {
-                record.data["request"] = json!(std::str::from_utf8(&bytes)?);
+            Ok((request, public, inner)) => {
+                record.data["request"] = json!(std::str::from_utf8(&inner)?);
+                record.data["encrypted_request"] = json!(std::str::from_utf8(&bytes)?);
                 record.data["person_key"] = json!(public);
                 if let Some(a) = record.data.get_mut("attestation") {
-                    a["payload_digest"] = json!(digest(Signed::parse(&bytes)?.r.get().as_bytes()));
+                    a["payload_digest"] = json!(digest(Signed::parse(&inner)?.r.get().as_bytes()));
                 }
                 Actor { uid: u32::MAX, name: format!("person:{}", request.person), session: None }
             }
@@ -221,20 +224,29 @@ fn refusal(reason: &str) -> Record {
     record.data = json!({"reason":reason});
     record
 }
-fn verify_request(repo: &Repo, id: &str, bytes: &[u8]) -> Result<(Request, String)> {
-    let signed = Signed::parse(bytes)?;
-    let request = signed.request()?;
-    if request.id != id || request.project != repo.p.id {
+fn verify_request(repo: &Repo, id: &str, bytes: &[u8], identity: &str) -> Result<(Request, String, Vec<u8>)> {
+    if Signed::parse(bytes).is_ok() {
+        bail!("plaintext requests are not accepted");
+    }
+    let sealed = Sealed::parse(bytes)?;
+    if sealed.id != id || sealed.project != repo.p.id {
         bail!("request id or project does not match");
+    }
+    if sealed.epoch != "root" {
+        bail!("unsupported request epoch");
     }
     let public = repo
         .p
         .config_value("person.keys")?
-        .and_then(|v| v[&request.person].as_str().map(str::to_owned))
+        .and_then(|v| v[&sealed.person].as_str().map(str::to_owned))
         .context("person signing key is not pinned")?;
-    signed.verify(&layr_store::person::verifying_key(&public)?)?;
-    Ok((request, public))
+    let key = layr_store::person::verifying_key(&public)?;
+    sealed.verify(&key)?;
+    let inner = request::open(bytes, identity)?;
+    let request = Signed::parse(&inner)?.verify(&key)?;
+    Ok((request, public, inner))
 }
+
 fn effect(ctx: &Ctx, repo: &Repo, request: &Request) -> Result<Record> {
     if ids::now_ms() >= request.expires {
         bail!("request has expired");

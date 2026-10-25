@@ -73,10 +73,13 @@ run(['person', 'keys', '--store', 'file://' + str(root / 'archive')], ann)
 check((root / 'archive' / 'people' / 'ann@example.com' / 'signing.age').read_bytes() == before_keys, 'repeated person publication keeps the same encrypted signing identity')
 approval = submit('approve', state)
 request_path = root / 'archive' / 'requests' / (approval + '.json')
-body = json.loads(request_path.read_text())['r']
-check(uuid.UUID(approval).version == 7 and body['expires'] - body['created'] == 86400000, 'UUIDv7 id and default 24 hour expiry')
+body = json.loads(request_path.read_text())
+check(uuid.UUID(approval).version == 7 and body['v'] == 2 and body['epoch'] == 'root' and body['id'] == approval, 'UUIDv7 id and encrypted root epoch envelope')
 apply(approval)
 record = outcome(approval)
+inner = json.loads(record['data']['request'])['r']
+check(inner['expires'] - inner['created'] == 86400000, 'default 24 hour expiry is retained inside encryption')
+check(record['data']['encrypted_request'] == request_path.read_text() and record['data']['request_digest'] == hashlib.sha256(request_path.read_bytes()).hexdigest(), 'executor retains exact ciphertext proof and replay digest')
 check(record['actor']['name'] == 'person:ann@example.com' and record['actor']['uid'] == 4294967295, 'executor records the person rather than root')
 check(record['data']['attestation']['signer'] == 'person:ann@example.com' and json.loads(record['data']['request'])['s'], 'approval retains person signature proof')
 refused = submit('approve', state, env=bob)
@@ -88,6 +91,7 @@ entry = submit('queue-add', state)
 apply(entry)
 check(any(e['id'] == entry and e['state'] == state for e in data(['queue', 'list', '--json'])), 'queue request keeps exact state and request identity')
 comment = submit('comment', change, 'Review this line.', '--version', 'v1', '--path', 'feature.txt', '--line', '1')
+check(b'Review this line.' not in (root / 'archive' / 'requests' / (comment + '.json')).read_bytes(), 'stored encrypted object contains no comment text')
 apply(comment)
 rows = data(['change', 'show', change, '--json'])['comments']
 check(len(rows) == 1 and rows[0]['id'] == comment and rows[0]['path'] == 'feature.txt' and rows[0]['line'] == 1 and rows[0]['actor']['name'] == 'person:ann@example.com', 'change show folds a signed inline person comment')
@@ -129,13 +133,32 @@ result = apply(expired, 'refused')
 check(result['reason'] == 'request has expired', 'expiry refusal is plain and deterministic')
 check(not any(c['text'] == 'Expired text must not appear.' for c in data(['change', 'show', change, '--json'])['comments']), 'expired request has no side effect')
 
-# A valid envelope whose signed bytes are changed must fail before any operation.
+# A changed outer signature must fail before any operation.
 tampered = submit('comment', change, 'Original text.')
 path = root / 'archive' / 'requests' / (tampered + '.json')
-path.write_text(path.read_text().replace('Original text.', 'Changed text.'))
+sealed = json.loads(path.read_text())
+sealed['sig'] = ('01' if sealed['sig'].startswith('00') else '00') + sealed['sig'][2:]
+path.write_text(json.dumps(sealed))
 result = apply(tampered, 'refused')
 check('signature' in result['reason'] and outcome(tampered)['op'] == 'request.refused', 'a changed signature gets a signed refusal')
 check('request' not in outcome(tampered)['data'], 'unverified input is not copied into the refusal record')
+
+# Even a signed legacy plaintext request must never be applied.
+plaintext = submit('comment', change, 'Legacy plaintext must not apply.')
+path = root / 'archive' / 'requests' / (plaintext + '.json')
+path.write_text(record['data']['request'])
+result = apply(plaintext, 'refused')
+check(result['reason'] == 'plaintext requests are not accepted', 'legacy plaintext gets a signed deterministic refusal')
+check('request' not in outcome(plaintext)['data'], 'legacy plaintext is not retained in refusal evidence')
+
+# Changing public person metadata cannot impersonate another pinned person.
+mismatch = submit('comment', change, 'Wrong person must not apply.')
+path = root / 'archive' / 'requests' / (mismatch + '.json')
+sealed = json.loads(path.read_text())
+sealed['person'] = 'bob@example.com'
+path.write_text(json.dumps(sealed))
+result = apply(mismatch, 'refused')
+check('signature' in result['reason'], 'outer person selects its own pinned signing key')
 
 run(['access', 'deny', 'person:bob@example.com', 'merge'])
 denied = submit('queue-add', state, env=bob)
@@ -146,13 +169,13 @@ replica = dict(base, LAYR_ROOT=str(root / 'store' / 'replica-root'), LAYR_PAPER_
 run(['clone', 'file://' + str(root / 'archive'), 'replica', '-q'], replica)
 
 bad_claim = submit('comment', change, 'Invalid claim must not apply.')
-body = json.loads((root / 'archive' / 'requests' / (bad_claim + '.json')).read_text())['r']
+body = json.loads((root / 'archive' / 'requests' / (bad_claim + '.json')).read_text())
 (root / 'archive' / 'requests' / 'claims' / (bad_claim + '.json')).write_text(json.dumps({'r': {'format': 1, 'project': body['project'], 'request': bad_claim, 'machine': record['machine']}, 's': 'invalid-signature'}))
 result = apply(bad_claim, 'refused')
 check(result['reason'] == 'request claim signature does not verify', 'a forged claim by a trusted machine gets a signed refusal')
 
 untrusted = submit('comment', change, 'Untrusted claim must not apply.')
-body = json.loads((root / 'archive' / 'requests' / (untrusted + '.json')).read_text())['r']
+body = json.loads((root / 'archive' / 'requests' / (untrusted + '.json')).read_text())
 claim_path = root / 'archive' / 'requests' / 'claims' / (untrusted + '.json')
 # The fresh executor makes a real, valid claim with its own key. The original project
 # has not trusted that machine. Its missing person pin prevents any comment there too.

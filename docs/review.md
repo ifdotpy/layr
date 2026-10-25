@@ -440,8 +440,16 @@ They receive no permissions from the executor's operating-system account.
 A person submits a signed action to an immutable object at `requests/<id>.json`.
 The requester creates a UUIDv7 id.
 The shared `layr-store::request` builder and signer also build for wasm32.
-The envelope contains `r`, the exact JSON body, and `s`, its Ed25519 signature.
-The body includes the project, person, creation time, expiry time, and action.
+The v2 object contains `v: 2`, `id`, `person`, `project`, `epoch`, `ct`, and `sig`.
+`epoch` is `root` for the current project vault recipient from `store.json`.
+`ct` is standard base64 with padding of age-encrypted exact signed v1 envelope bytes.
+`sig` is the lowercase hex Ed25519 signature of `b"layr/request/v2\0"` followed by
+the decoded age ciphertext bytes, not the base64 text.
+The gateway verifies this outer signature and binds the person, project and object path.
+It does not decrypt the action.
+Inside the encryption, the v1 envelope contains `r`, the exact JSON body, and `s`,
+its Ed25519 signature. The body includes the project, person, creation time, expiry
+and action. Action payloads and comment text are encrypted.
 The default expiry is 24 hours after creation.
 Times use epoch milliseconds.
 
@@ -464,18 +472,40 @@ Approval and queue requests use `main` unless `--into` names another line.
 A ref request always compares its expected value with the current ref.
 `--expect none` requires the ref to be absent.
 
-A trusted executor verifies the person signature and the pinned public key.
+A trusted executor verifies the outer signature against the pinned person key,
+decrypts with the project identity, binds the inner and outer id, project and person,
+and verifies the inner signature against that same pinned key.
+It refuses legacy plaintext objects with `plaintext requests are not accepted`.
 It checks the current access and protection rules as that person.
 It refuses expired requests, unknown keys, stale ref values, and unauthorized actions.
 Each refusal is a signed `request.refused` record with a plain reason.
 Unverified request bytes are not copied into refusal records.
 
 The normal operation and the original person proof share one signed record.
-The proof is a string in `data.request` to preserve its exact bytes.
+The inner proof is a string in `data.request` to preserve its exact bytes.
+`data.encrypted_request` retains the exact v2 object, and `data.request_digest`
+hashes that object for replay detection. Both proofs are in the normal encrypted
+record stream. The shared model verifies their signatures and routing bindings.
 Person approval attestations retain that signature and identify `person:<login>` as the signer.
 Person approvals count in merge and ref protection checks.
 A withdrawal can revoke only that person's evidence.
 Comments appear in `change show` and the shared model.
+
+Browser callers use these wasm-compatible shared Rust APIs:
+
+```rust,ignore
+layr_store::request::seal(signed_v1: &[u8], epoch_recipient: &str, person_key: &SigningKey) -> Result<Vec<u8>>;
+layr_store::request::open(v2: &[u8], identity: &str) -> Result<Vec<u8>>;
+```
+
+`seal` verifies the inner signature and emits a v2 object with epoch `root`.
+`Sealed::parse(bytes)` and `Sealed::verify(&VerifyingKey)` verify the outer envelope
+without decryption. The caller binds its public routing fields to the authenticated
+login, project and path. `open` returns exact signed v1 bytes and checks inner/outer
+routing equality; callers must verify the outer signature before opening and verify
+the returned `Signed` against the pinned person key before applying an action.
+`seal_for_epoch(signed_v1, epoch, epoch_recipient, person_key)` supports a caller-selected
+project epoch for rotation; the current CLI submits and accepts epoch `root`.
 
 The executor claims each id at `requests/claims/<id>.json` with a machine signature.
 Each claim is create-only and binds the project, request, and executor machine.

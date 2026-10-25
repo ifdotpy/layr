@@ -305,11 +305,22 @@ pub fn validate(r: &Record) -> anyhow::Result<()> {
         let signed = Signed::parse(text.as_bytes())?;
         let public = d["person_key"].as_str().ok_or_else(|| anyhow::anyhow!("request proof has no public key"))?;
         let request = signed.verify(&layr_store::person::verifying_key(public)?)?;
+        let object = if let Some(encrypted) = d.get("encrypted_request") {
+            let text = encrypted
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("encrypted request proof must preserve exact envelope bytes"))?;
+            let sealed = layr_store::request::Sealed::parse(text.as_bytes())?;
+            sealed.verify(&layr_store::person::verifying_key(public)?)?;
+            sealed.matches(&request)?;
+            text
+        } else {
+            text // Previously recorded v1 evidence remains verifiable.
+        };
         if request.project != r.project
             || d["request_id"] != request.id
             || r.actor.name != format!("person:{}", request.person)
             || r.actor.uid != u32::MAX
-            || d["request_digest"] != hex::encode(Sha256::digest(text.as_bytes()))
+            || d["request_digest"] != hex::encode(Sha256::digest(object.as_bytes()))
         {
             bail!("request proof does not match its operation record");
         }

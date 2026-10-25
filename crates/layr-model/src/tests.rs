@@ -375,6 +375,36 @@ fn person_approvals_survive_executor_scope_and_keep_revocations_separate() {
 }
 
 #[test]
+fn encrypted_person_proof_binds_ciphertext_digest_and_inner_routing() {
+    use sha2::{Digest, Sha256};
+    let key = ed25519_dalek::SigningKey::from_bytes(&[11; 32]);
+    let identity = layr_store::keys::generate_identity();
+    let recipient = layr_store::keys::recipient_of(&identity).unwrap();
+    let mut record = person_evidence(3, "ann@example.com", &key, false);
+    let inner = record.data["request"].as_str().unwrap();
+    let bytes = layr_store::request::seal(inner.as_bytes(), &recipient, &key).unwrap();
+    record.data["encrypted_request"] = json!(String::from_utf8(bytes.clone()).unwrap());
+    record.data["request_digest"] = json!(hex::encode(Sha256::digest(&bytes)));
+    validation::validate(&record).unwrap();
+    let mut changed = record.clone();
+    changed.data["request_digest"] = json!("0".repeat(64));
+    assert!(validation::validate(&changed).is_err());
+    let mut envelope: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    envelope["person"] = json!("bob@example.com");
+    changed = record.clone();
+    let text = envelope.to_string();
+    changed.data["request_digest"] = json!(hex::encode(Sha256::digest(text.as_bytes())));
+    changed.data["encrypted_request"] = json!(text);
+    assert!(validation::validate(&changed).is_err());
+    envelope["person"] = json!("ann@example.com");
+    envelope["sig"] = json!("0".repeat(128));
+    let text = envelope.to_string();
+    changed.data["request_digest"] = json!(hex::encode(Sha256::digest(text.as_bytes())));
+    changed.data["encrypted_request"] = json!(text);
+    assert!(validation::validate(&changed).is_err());
+}
+
+#[test]
 fn a_person_proof_cannot_be_reused_for_another_effect() {
     use layr_store::request::{Action, Request};
     let key = ed25519_dalek::SigningKey::from_bytes(&[11; 32]);

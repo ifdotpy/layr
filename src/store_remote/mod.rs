@@ -257,6 +257,19 @@ impl Store {
         Ok(&self.backend)
     }
 
+    /// Current project vault recipient, pinned by the same descriptor as sync.
+    pub fn request_recipient(&mut self, ctx: &Ctx) -> Result<String> {
+        self.connect(ctx)?;
+        Ok(self.descriptor()?.recipient)
+    }
+
+    /// Project vault identity for opening person requests on the trusted executor.
+    pub fn request_identity(&mut self, ctx: &Ctx) -> Result<String> {
+        self.connect(ctx)?;
+        let descriptor = self.descriptor()?;
+        self.identity(&descriptor, self.paper_key_text.as_deref())
+    }
+
     pub fn configure(&mut self, ctx: &Ctx, opts: &ConfigureOptions) -> Result<Configured> {
         self.connect(ctx)?;
         if self.backend.get("store.json")?.is_some() {

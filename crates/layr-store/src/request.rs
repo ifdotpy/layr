@@ -1,6 +1,7 @@
 //! Person requests. The envelope signs the exact JSON bytes of `r`, like operation records.
 //! The caller supplies UUIDv7 ids and times, so this module also builds for wasm32.
 use anyhow::{bail, Context, Result};
+use base64::{engine::general_purpose::STANDARD, Engine};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
@@ -160,6 +161,111 @@ impl Signed {
     }
 }
 
+/// Maximum v2 wire size, including age and base64 overhead around a bounded v1 request.
+pub const MAX_SEALED_BYTES: usize = 144 * 1024;
+const DOMAIN: &[u8] = b"layr/request/v2\0";
+
+/// Public routing metadata and encrypted exact signed v1 envelope bytes.
+/// `ct` uses standard base64 with padding. The lowercase hex `sig` signs
+/// b"layr/request/v2\0" || the decoded age ciphertext bytes, not the base64 text.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Sealed {
+    pub v: u32,
+    pub id: String,
+    pub person: String,
+    pub project: String,
+    pub epoch: String,
+    pub ct: String,
+    pub sig: String,
+}
+
+impl Sealed {
+    pub fn parse(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() > MAX_SEALED_BYTES {
+            bail!("encrypted request exceeds 144 KiB");
+        }
+        let sealed: Self = serde_json::from_slice(bytes).context("invalid encrypted request envelope")?;
+        sealed.validate()?;
+        Ok(sealed)
+    }
+    fn validate(&self) -> Result<()> {
+        if self.v != 2
+            || !request_id(&self.id)
+            || !uuid(&self.project)
+            || !crate::person::login_name(&self.person)
+            || !(self.epoch == "root" || uuid(&self.epoch))
+        {
+            bail!("invalid encrypted request routing metadata");
+        }
+        Ok(())
+    }
+    fn ciphertext(&self) -> Result<Vec<u8>> {
+        let ct = STANDARD.decode(&self.ct).context("invalid request ciphertext encoding")?;
+        if STANDARD.encode(&ct) != self.ct || ct.len() > MAX_BYTES + 4096 {
+            bail!("invalid request ciphertext encoding or size");
+        }
+        Ok(ct)
+    }
+    /// Verify without opening the request. Also bind id, person and project to the
+    /// authenticated gateway login, project and object path at the call site.
+    pub fn verify(&self, key: &VerifyingKey) -> Result<()> {
+        self.validate()?;
+        let ct = self.ciphertext()?;
+        let signature = hex::decode(&self.sig).context("invalid outer request signature")?;
+        if signature.len() != 64 || hex::encode(&signature) != self.sig {
+            bail!("invalid outer request signature");
+        }
+        let message = [DOMAIN, ct.as_slice()].concat();
+        crate::keys::verify_bytes(&message, &STANDARD.encode(signature), key).context("outer request signature does not verify")
+    }
+    /// Bind the decrypted request to every public routing field it contains.
+    pub fn matches(&self, request: &Request) -> Result<()> {
+        if self.id != request.id || self.person != request.person || self.project != request.project {
+            bail!("outer and inner request id, person or project does not match");
+        }
+        Ok(())
+    }
+}
+
+/// Encrypt exact signed v1 bytes to the current project vault recipient (root epoch).
+/// The person key verifies the inner envelope and signs the outer ciphertext.
+/// No clock, filesystem or native-only API is used; this also builds for wasm32.
+pub fn seal(signed_v1: &[u8], epoch_recipient: &str, person_key: &SigningKey) -> Result<Vec<u8>> {
+    seal_for_epoch(signed_v1, "root", epoch_recipient, person_key)
+}
+
+/// Epoch-aware builder for project rotation. `seal` uses epoch "root".
+/// Epoch is routing metadata: the executor must bind it to the selected project identity.
+pub fn seal_for_epoch(signed_v1: &[u8], epoch: &str, epoch_recipient: &str, person_key: &SigningKey) -> Result<Vec<u8>> {
+    if epoch != "root" && !uuid(epoch) {
+        bail!("invalid request epoch");
+    }
+    let request = Signed::parse(signed_v1)?.verify(&person_key.verifying_key())?;
+    let ct = crate::keys::encrypt(epoch_recipient, signed_v1)?;
+    let message = [DOMAIN, ct.as_slice()].concat();
+    let sig = hex::encode(STANDARD.decode(crate::keys::sign_bytes(&message, person_key))?);
+    Ok(serde_json::to_vec(&Sealed {
+        v: 2,
+        id: request.id,
+        person: request.person,
+        project: request.project,
+        epoch: epoch.into(),
+        ct: STANDARD.encode(ct),
+        sig,
+    })?)
+}
+
+/// Decrypt and return the exact original signed v1 envelope bytes, checking routing
+/// bindings. Callers must verify the outer signature before opening and verify the
+/// returned inner signature against the pinned person key before applying an action.
+pub fn open(v2: &[u8], identity: &str) -> Result<Vec<u8>> {
+    let sealed = Sealed::parse(v2)?;
+    let bytes = crate::keys::decrypt(identity, &sealed.ciphertext()?).context("cannot decrypt person request")?;
+    sealed.matches(&Signed::parse(&bytes)?.request()?)?;
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,6 +293,95 @@ mod tests {
         assert!(changed.verify(&key.verifying_key()).is_err());
         assert!(signed.verify(&SigningKey::from_bytes(&[8; 32]).verifying_key()).is_err());
     }
+    fn wrap(inner: &[u8], request: &Request, recipient: &str, key: &SigningKey) -> Vec<u8> {
+        let ct = crate::keys::encrypt(recipient, inner).unwrap();
+        serde_json::to_vec(&Sealed {
+            v: 2,
+            id: request.id.clone(),
+            person: request.person.clone(),
+            project: request.project.clone(),
+            epoch: "root".into(),
+            ct: STANDARD.encode(&ct),
+            sig: hex::encode(STANDARD.decode(crate::keys::sign_bytes(&[DOMAIN, ct.as_slice()].concat(), key)).unwrap()),
+        })
+        .unwrap()
+    }
+    #[test]
+    fn encryption_preserves_exact_signed_bytes_and_hides_comments() {
+        let key = SigningKey::from_bytes(&[7; 32]);
+        let identity = crate::keys::generate_identity();
+        let recipient = crate::keys::recipient_of(&identity).unwrap();
+        let mut request = sample();
+        request.action = Action::Comment {
+            change_id: request.project.clone(),
+            version: request.project.clone(),
+            path: None,
+            line: None,
+            text: "Only the project may read this comment.".into(),
+            reply_to: None,
+        };
+        let signed = request.sign(&key).unwrap();
+        // Include envelope whitespace to ensure seal/open do not reserialize signed bytes.
+        let inner = format!(" {} \n", String::from_utf8(signed.to_bytes().unwrap()).unwrap()).into_bytes();
+        let bytes = seal(&inner, &recipient, &key).unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("Only the project"));
+        let sealed = Sealed::parse(&bytes).unwrap();
+        assert_eq!(sealed.epoch, "root");
+        sealed.verify(&key.verifying_key()).unwrap();
+        assert_eq!(open(&bytes, &identity).unwrap(), inner);
+        assert_eq!(Signed::parse(&open(&bytes, &identity).unwrap()).unwrap().verify(&key.verifying_key()).unwrap(), request);
+        assert!(open(&bytes, &crate::keys::generate_identity()).is_err());
+        assert!(seal(&inner, &recipient, &SigningKey::from_bytes(&[8; 32])).is_err());
+    }
+    #[test]
+    fn encrypted_requests_verify_both_signatures_and_bind_routing() {
+        let key = SigningKey::from_bytes(&[7; 32]);
+        let identity = crate::keys::generate_identity();
+        let recipient = crate::keys::recipient_of(&identity).unwrap();
+        let request = sample();
+        let inner = request.sign(&key).unwrap().to_bytes().unwrap();
+        let bytes = seal(&inner, &recipient, &key).unwrap();
+        let mut sealed = Sealed::parse(&bytes).unwrap();
+        sealed.sig.replace_range(..2, if sealed.sig.starts_with("00") { "01" } else { "00" });
+        assert!(sealed.verify(&key.verifying_key()).is_err());
+        sealed = Sealed::parse(&bytes).unwrap();
+        sealed.ct = STANDARD.encode(b"changed ciphertext");
+        assert!(sealed.verify(&key.verifying_key()).is_err());
+        sealed = Sealed::parse(&bytes).unwrap();
+        sealed.person = "bob@example.com".into();
+        // Metadata is bound to the authenticated login at the gateway and to the
+        // signed inner request at the executor; it cannot change the actor.
+        sealed.verify(&key.verifying_key()).unwrap();
+        assert!(open(&serde_json::to_vec(&sealed).unwrap(), &identity).is_err());
+        sealed = Sealed::parse(&bytes).unwrap();
+        sealed.id = "01a12290-0000-7000-8000-000000000009".into();
+        assert!(open(&serde_json::to_vec(&sealed).unwrap(), &identity).is_err());
+        sealed = Sealed::parse(&bytes).unwrap();
+        sealed.project = sealed.id.clone();
+        assert!(open(&serde_json::to_vec(&sealed).unwrap(), &identity).is_err());
+        let mut bad_inner = request.sign(&key).unwrap();
+        bad_inner.r = RawValue::from_string(bad_inner.r.get().replace("main", "other")).unwrap();
+        let malicious = wrap(&bad_inner.to_bytes().unwrap(), &request, &recipient, &key);
+        Sealed::parse(&malicious).unwrap().verify(&key.verifying_key()).unwrap();
+        assert!(Signed::parse(&open(&malicious, &identity).unwrap()).unwrap().verify(&key.verifying_key()).is_err());
+        assert!(Sealed::parse(&inner).is_err());
+        assert!(Sealed::parse(&vec![0; MAX_SEALED_BYTES + 1]).is_err());
+        assert!(Sealed::parse(br#"{"v":2,"v":2}"#).is_err());
+        // A maximum-size comment fits the encrypted wire bound.
+        let mut large = sample();
+        large.action = Action::Comment {
+            change_id: large.project.clone(),
+            version: large.project.clone(),
+            path: None,
+            line: None,
+            text: "x".repeat(65536),
+            reply_to: None,
+        };
+        let large = seal(&large.sign(&key).unwrap().to_bytes().unwrap(), &recipient, &key).unwrap();
+        assert!(large.len() <= MAX_SEALED_BYTES);
+        Sealed::parse(&large).unwrap().verify(&key.verifying_key()).unwrap();
+    }
+
     #[test]
     fn claims_bind_the_executor_and_ref_moves_require_an_expected_value() {
         let key = SigningKey::from_bytes(&[7; 32]);
