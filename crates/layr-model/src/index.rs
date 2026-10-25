@@ -217,6 +217,16 @@ impl History<'_> {
         let mut versions: Vec<history::FileVersion> = Vec::new();
         let mut held = 0usize;
         for s in self.file_history(start, path)? {
+            let change = self
+                .paths
+                .get(&s.id)
+                .and_then(|p| p.paths.iter().find(|p| p.path == path))
+                .context("missing file path change")?;
+            // CLI blame reads regular files without following symlinks. A deletion or
+            // symlink bounds that file's regular-file history in either caller.
+            if change.new.is_none() || change.mode == "120000" {
+                break;
+            }
             let Some(bytes) = blob(&s.id, path)? else { break };
             ensure!(bytes.len() <= 64 << 20, "file is larger than 64 MiB");
             if let Some(previous) = versions.last_mut().filter(|v| v.bytes == bytes) {

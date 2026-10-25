@@ -238,3 +238,30 @@ fn heads_keep_all_undeleted_refs_even_when_expired() -> Result<()> {
     assert_eq!(snapshot.refs, vec![Ref { name: "leases/expired".into(), target: id(2) }]);
     Ok(())
 }
+
+#[test]
+fn indexed_blame_stops_at_symlinks_like_cli_regular_file_reads() -> Result<()> {
+    let (_, project, _) = fixture();
+    let empty = format::Tree::default();
+    let before = tree(b"old\n", "100644");
+    let link = tree(b"other-file", "120000");
+    let after = tree(b"new\n", "100644");
+    let paths = BTreeMap::from([
+        (id(2), model_index::paths(&id(2), &empty, &before)),
+        (id(3), model_index::paths(&id(3), &before, &link)),
+        (id(4), model_index::paths(&id(4), &link, &after)),
+    ]);
+    let graphs = BTreeMap::from([
+        (id(2), Graph { state: id(2), ancestors: vec![] }),
+        (id(3), Graph { state: id(3), ancestors: vec![id(2)] }),
+        (id(4), Graph { state: id(4), ancestors: vec![id(3), id(2)] }),
+    ]);
+    let history = model_index::History { project: &project, paths: &paths, graphs: &graphs };
+    assert!(history.blame(&id(3), "file", |_, _| panic!("symlink blob must not be loaded")).is_err());
+    let lines = history.blame(&id(4), "file", |state, _| {
+        assert_eq!(state, id(4));
+        Ok(Some(b"new\n".to_vec()))
+    })?;
+    assert_eq!(lines[0].state, Some(id(4)));
+    Ok(())
+}
