@@ -152,6 +152,7 @@ fn opener(store: &Store, backend: &Backend, descriptor: &Descriptor) -> Result<(
             return keys::open_machine_slot(&slot, &store.key);
         }
         if let Some(person) = &store.person {
+            person.check(&store.root_descriptor()?)?;
             let slot = backend
                 .get(&format!("slots/{}", layr_store::person::slot_name(&person.login, &keys::recipient_of(&person.identity)?)?))?
                 .context("no person slot")?;
@@ -179,8 +180,8 @@ pub(super) fn connect(store: &mut Store) -> Result<()> {
     if let Some(pin) = &store.pin {
         pin.check(&root)?;
     }
-    if let Some(person) = &store.person {
-        person.check(&root)?;
+    if let Some(pin) = store.person.as_ref().and_then(|person|person.index.pin(&root.project)) {
+        pin.check_store(&root)?;
     }
     if let Some((backend, current, public)) = resolve(&store.backend, &root, |b, d| opener(store, b, d))? {
         store.backend = backend;
@@ -360,8 +361,24 @@ impl Store {
         }
         // Validate the complete tightening before any write, including manager authority.
         let mut tightened = Vec::new();
+        let mut remote_overlays=None;
         for overlay in repo.visible_overlay_names(ctx)? {
-            let orepo = repo.overlay_repo(&overlay)?;
+            let orepo = match repo.overlay_repo(&overlay) {
+                Ok(repo)=>repo,
+                Err(_) => {
+                    if mode>=old_mode {continue;}
+                    if remote_overlays.is_none() {
+                        let authorities=crate::overlay_managers::from_lines(&descriptor.project,&remote.lines,&trusted)?;
+                        let (published,refused)=super::overlays::published(&self.backend,&descriptor.project,&self.root_descriptor()?.recipient,&trusted,&authorities)?;
+                        if !refused.is_empty() {bail!("cannot verify overlay access before closing: {}",refused.join("; "));}
+                        remote_overlays=Some(published);
+                    }
+                    if remote_overlays.as_ref().and_then(|overlays|overlays.get(&overlay)).is_some_and(|p|p.key.access_mode>mode) {
+                        bail!("cannot tighten overlay {overlay}: its key manager needs reader access on this machine");
+                    }
+                    continue;
+                }
+            };
             if overlay_mode(&orepo)? > mode {
                 crate::overlay_managers::of(repo, &overlay)?.require(&self.machine)?;
                 tightened.push(overlay);
