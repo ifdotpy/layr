@@ -210,11 +210,15 @@ impl History<'_> {
         path: &str,
         mut blob: impl FnMut(&str, &str) -> Result<Option<Vec<u8>>>,
     ) -> Result<Vec<history::BlameLine>> {
-        let mut versions = Vec::new();
+        let mut versions: Vec<history::FileVersion> = Vec::new();
         let mut held = 0usize;
         for s in self.file_history(start, path)? {
             let Some(bytes) = blob(&s.id, path)? else { break };
             ensure!(bytes.len() <= 64 << 20, "file is larger than 64 MiB");
+            if let Some(previous) = versions.last_mut().filter(|v| v.bytes == bytes) {
+                previous.state = Some(s);
+                continue;
+            }
             held += bytes.len();
             if held > 256 << 20 && !versions.is_empty() {
                 break;

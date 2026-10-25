@@ -24,6 +24,10 @@ pub(super) fn write(store: &Store, repo: &Repo) -> Result<Report> {
     );
     let records = reader::records(&store.backend, &identity, &descriptor.project)?;
     ensure!(records.gaps.is_empty(), "cannot index store records with gaps: {}", records.gaps.join(", "));
+    ensure!(
+        records.keys.get(&store.machine) == Some(&store.key.verifying_key()),
+        "push this machine's signed records before writing its index"
+    );
     let mut trusted = BTreeMap::new();
     for (machine, key) in &records.keys {
         ensure!(
@@ -88,13 +92,20 @@ pub(super) fn write(store: &Store, repo: &Repo) -> Result<Report> {
     let watermark = layr_model::index::watermark(&records.lines)?;
     let mut seq = 0;
     let mut snapshots = Vec::new();
+    let mut latest = BTreeMap::<String, (u64, String)>::new();
     for object in store.backend.list("index/heads/")? {
         let (machine, number) = index::parse_heads_name(&object.key).context("invalid heads index name")?;
         if machine == store.machine {
             seq = seq.max(number);
         }
-        let body = store.backend.get(&object.key)?.context("heads index disappeared")?;
-        let snapshot = index::open(&identity, &body, &object.key, &descriptor.project, &trusted)?;
+        let entry = latest.entry(machine).or_insert((number, object.key.clone()));
+        if number > entry.0 {
+            *entry = (number, object.key);
+        }
+    }
+    for (_, name) in latest.values() {
+        let body = store.backend.get(name)?.context("heads index disappeared")?;
+        let snapshot = index::open(&identity, &body, name, &descriptor.project, &trusted)?;
         // Do not reuse even a correctly signed snapshot with an incorrect derived head.
         layr_model::index::reconcile(&snapshot, &records.lines)?;
         snapshots.push(snapshot);

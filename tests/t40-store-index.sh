@@ -33,7 +33,7 @@ l save -qm main-side
 l merge --no-ff -q feature >/dev/null
 MERGE=$(state_id head)
 l remote add archive "file://$T/archive" --paper-key-out "$T/paper" -q
-ok 'push publishes the index after records and trees' l push archive --index -q
+ok 'push publishes the index after records and trees' l push archive --auto --index -q
 ok 'the store contains all three encrypted index kinds' python3 - "$T/archive" <<'PY'
 from pathlib import Path
 import sys
