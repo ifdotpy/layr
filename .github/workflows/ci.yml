@@ -40,6 +40,9 @@ jobs:
       - name: Integration tests (root, btrfs on loop files)
         run: |
           sudo modprobe btrfs || true
+          # Automatic checks run in bubblewrap as the caller; Ubuntu 24.04 blocks the user
+          # namespaces that it needs for users without privileges.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           sudo -E env "PATH=$PATH" LAYR="$PWD/target/debug/layr" LAYR_MINIO_BIN="$HOME/minio/minio" tests/run.sh
   macos:
     runs-on: macos-14
