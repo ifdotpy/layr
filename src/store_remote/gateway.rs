@@ -15,6 +15,11 @@ use std::time::Duration;
 
 const OBJECT_LIMIT: usize = 32 << 20;
 const SLOTS_LIMIT: usize = 8 << 20;
+const CLOCK_SKEW_MS: i64 = 5 * 60 * 1000;
+
+fn valid_token_expiry(expires: i64, now: i64, lifetime: i64) -> bool {
+    expires > now && expires <= now + lifetime + CLOCK_SKEW_MS
+}
 
 struct PersonSession {
     login: String,
@@ -221,8 +226,7 @@ impl Gateway {
             || token.token.is_empty()
             || token.token.len() > 256
             || !token.token.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'+' | b'/' | b'='))
-            || token.expires <= now
-            || token.expires > now + 43_200_000
+            || !valid_token_expiry(token.expires, now, 43_200_000)
         {
             bail!("invalid gateway person session");
         }
@@ -396,8 +400,7 @@ impl Gateway {
         )?;
         let now = crate::ids::now_ms();
         if token.token.len() > 256
-            || token.expires <= now
-            || token.expires > now + 600_000
+            || !valid_token_expiry(token.expires, now, 600_000)
             || !token.token.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.')
         {
             bail!("invalid gateway read token");
@@ -686,6 +689,19 @@ fn token_file(path: &std::path::Path, uid: u32) -> Result<String> {
 mod tests {
     use super::*;
     use std::os::unix::fs::{symlink, PermissionsExt};
+    #[test]
+    fn token_expiry_tolerates_a_client_clock_behind_the_gateway() {
+        let gateway_now = 1_792_951_000_000;
+        let client_now = gateway_now - 30_000;
+        for lifetime in [600_000, 43_200_000] {
+            assert!(valid_token_expiry(gateway_now + lifetime, client_now, lifetime));
+            assert!(valid_token_expiry(client_now + lifetime + 300_000, client_now, lifetime));
+            assert!(!valid_token_expiry(client_now + lifetime + 300_001, client_now, lifetime));
+            assert!(!valid_token_expiry(client_now, client_now, lifetime));
+            assert!(!valid_token_expiry(client_now - 1, client_now, lifetime));
+        }
+    }
+
     #[test]
     fn missing_descriptor_keeps_optional_person_reads_and_hints_machine_grants() {
         use std::io::{Read, Write};
