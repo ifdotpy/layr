@@ -123,7 +123,7 @@ pub fn local_config(ctx: &Ctx, repo: &Repo, a: &Parsed) -> Result<i32> {
 pub fn checks(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let a = parse(&Spec::new().flag("--once").flag("--json").flag("--privileged-only").value("--interval"), args)?;
     if a.pos != ["watch"] || !a.paths.is_empty() {
-        return Err(exit(128, "usage: layr checks watch [--once] [--privileged-only] [--interval <seconds>] [--json]"));
+        return Err(exit(128, "usage: layr checks watch [--once] [--privileged-only] [--interval <seconds>] [--json]\nTo list check results, use layr attestations."));
     }
     if !cfg!(target_os = "linux") {
         bail!("automatic checks require Linux");
