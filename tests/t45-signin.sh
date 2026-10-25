@@ -23,7 +23,7 @@ openssl(['req','-x509','-newkey','rsa:2048','-nodes','-keyout',str(root/'tls-ca-
 openssl(['req','-new','-newkey','rsa:2048','-nodes','-keyout',str(root/'tls-key.pem'),'-out',str(root/'tls.csr'),'-subj','/CN=localhost'])
 (root/'tls-ext.cnf').write_text('basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:localhost,IP:127.0.0.1\n')
 openssl(['x509','-req','-in',str(root/'tls.csr'),'-CA',str(root/'tls-ca.pem'),'-CAkey',str(root/'tls-ca-key.pem'),'-CAcreateserial','-out',str(root/'tls-cert.pem'),'-days','1','-extfile',str(root/'tls-ext.cnf')])
-people={}; challenges={}; sessions={}; invites={'registration-invite':'ann@example.com','fresh-invite':'fresh@example.com'}; stats={'challenge':0,'session':0,'registration':0,'renew':0,'requests':0,'index':0,'inbox':0,'slots':0,'request_attempts':0,'epoch_requests':0,'epoch_claims':0,'epoch_proofs':0}; faults={}; errors=[]
+people={}; challenges={}; sessions={}; invites={'registration-invite':'ann@example.com','fresh-invite':'fresh@example.com'}; stats={'challenge':0,'session':0,'registration':0,'renew':0,'requests':0,'index':0,'inbox':0,'slots':0,'request_attempts':0,'epoch_requests':0,'epoch_claims':0,'epoch_proofs':0}; faults={}; errors=[];project_requests=[]
 class Handler(http.server.BaseHTTPRequestHandler):
  def log_message(self,*args): pass
  def reply(self,status,body):
@@ -38,7 +38,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
    errors.append(type(e).__name__);self.reply(500,{})
  def api(self):
   parsed=urllib.parse.urlsplit(self.path); path=parsed.path; login=urllib.parse.parse_qs(parsed.query).get('login',[''])[0]
-  raw=self.rfile.read(int(self.headers.get('Content-Length','0')));body=json.loads(raw or b'{}')
+  raw=self.rfile.read(int(self.headers.get('Content-Length','0')));body=json.loads(raw) if raw.startswith(b'{') else {}
   bearer=self.headers.get('Authorization','').removeprefix('Bearer ')
   if path=='/api/session/challenge' and self.command=='GET':
    assert not bearer
@@ -62,9 +62,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
    if login in people: self.reply(409,{});return
    assert all(body.get(k) for k in ['recipient','paper','signing_key','signing'])
    invites.pop(bearer);people[login]=body;stats['registration']+=1;self.reply(200,{'login':login,'new':True});return
+  if path.startswith('/v1/p/project/'):
+   project_requests.append((self.command,path,parsed.query,bearer=='v1.write.signinTest',bearer in sessions))
   login=sessions.get(bearer)
   # Project data keeps its read/write capability; person exchanges use the session.
-  if path.startswith('/v1/p/project/objects') and bearer in ['v1.read.signinTest','v1.write.signinTest']:
+  if path.startswith('/v1/p/project/') and (bearer=='v1.write.signinTest' or (path.startswith('/v1/p/project/objects') and bearer=='v1.read.signinTest')):
    login='ann@example.com'
   if not login: self.reply(401,{});return
   if faults.pop('reject_session',False):
@@ -82,14 +84,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
   epoch=urllib.parse.parse_qs(parsed.query).get('epoch',['root'])[0]
   if epoch!='root': scope=scope/'project/epochs'/epoch
   if path=='/v1/p/project/challenge':
-   assert bearer in sessions
+   assert bearer in sessions or bearer=='v1.write.signinTest'
    stats['epoch_proofs']+=int(epoch!='root')
    self.reply(200,{'challenge':base64.b64encode(next((scope/'records').rglob('*.age')).read_bytes()).decode()});return
   if path=='/v1/p/project/token':
-   assert bearer in sessions and '"machine"' in body['challenge']
+   assert (bearer in sessions or bearer=='v1.write.signinTest') and '"machine"' in body['challenge']
    self.reply(200,{'token':'v1.read.signinTest','expires':int(time.time()*1000)+60000});return
   if path=='/v1/p/project/slots':
+   assert bearer in sessions  # Machine grants never enumerate aggregate slots.
    self.reply(200,{'slots':[{'name':p.stem,'data':base64.b64encode(p.read_bytes()).decode()} for p in (scope/'slots').glob('*.age')]});return
+  resource_key=path.removeprefix('/v1/p/project/')
+  slot_key=resource_key.split('/',3)[3] if resource_key.startswith('project/epochs/') else resource_key
+  if slot_key.startswith('slots/machine-'):
+   own=(pathlib.Path(base['LAYR_ROOT'])/'machine/id').read_text().strip()
+   assert slot_key==f'slots/machine-{own}.age' and bearer=='v1.write.signinTest'
+   target=root/'archive'/resource_key
+   self.reply(200,target.read_bytes()) if target.is_file() else self.reply(404,{})
+   return
   if path.startswith('/v1/p/project/slots/'):
    name=path.rsplit('/',1)[1];assert name.startswith('person-'+login+'-');stats['slots']+=1
    self.reply(200,(root/'archive/slots'/name).read_bytes());return
@@ -187,6 +198,17 @@ try:
  check(stats['epoch_proofs']>0,'epoch read proof exchanges retain the person session bearer')
  run(['requests','apply','--remote','web','--json'],executor)
  check(stats['epoch_claims']==1,'repeating the session-authenticated executor creates no duplicate epoch claim')
+ project_requests.clear();before=stats['session']
+ machine_only=dict(base,LAYR_GATEWAY_TOKEN_FILE=str(token),LAYR_GATEWAY_CA_FILE=str(root/'tls-ca.pem'))
+ run(['clone','layr+'+site+'/project','machine-epoch-copy','-q'],machine_only)
+ clone=pathlib.Path(base['LAYR_ROOT'])/'projects/machine-epoch-copy/lines/main'
+ check((clone/'hello.txt').read_text()=='session request test\n','machine-only gateway clone restores files after project rotation')
+ own=(pathlib.Path(base['LAYR_ROOT'])/'machine/id').read_text().strip()
+ direct=f'/v1/p/project/project/epochs/{epoch}/slots/machine-{own}.age'
+ check(any(method=='GET' and path==direct and grant for method,path,query,grant,session in project_requests),'machine bootstrap fetches its own current-epoch slot directly with the scoped grant')
+ check(not any(path.endswith('/slots') for method,path,query,grant,session in project_requests),'machine-only epoch clone never lists slots')
+ check(stats['session']==before and not any(session for method,path,query,grant,session in project_requests),'machine-only epoch clone uses no person session')
+ check(all(grant and urllib.parse.parse_qs(query)=={'epoch':[epoch]} for method,path,query,grant,session in project_requests if path.endswith(('/challenge','/token'))),'machine read-proof exchange keeps the grant and the current epoch')
  fresh=dict(base,LAYR_PERSON_DIR=str(root/'fresh'),LAYR_PERSON_LOGIN='fresh@example.com',LAYR_GATEWAY_CA_FILE=str(root/'tls-ca.pem'))
  before=stats['session']
  run(['person','keys','--site',site,'--invite','fresh-invite','--paper-key-out',str(root/'fresh.paper')],fresh)

@@ -360,7 +360,11 @@ impl Gateway {
             }
             Ok(response)
         } else {
-            let bootstrap = query.is_none() && self.bootstrap_action(&method, action);
+            let bootstrap = self.bootstrap_action(&method, action)
+                && (query.is_none()
+                    || query.is_some_and(|(name, epoch)| {
+                        name == "epoch" && super::format::is_uuid(epoch) && matches!(action, "challenge" | "token")
+                    }));
             let response = send(bearer.or_else(|| if bootstrap { self.token.as_deref() } else { None }))?;
             if bootstrap && response.status().as_u16() == 404 && (action != "store.json" || self.token.is_some()) {
                 bail!("gateway bootstrap: HTTP 404 (no such project or machine slot); check the project name and a missing or wrong LAYR_GATEWAY_TOKEN_FILE grant");
@@ -374,8 +378,9 @@ impl Gateway {
     }
 
     fn bootstrap_action(&self, method: &Method, action: &str) -> bool {
+        let logical = epoch_path(action).map(|(_, key)| key).unwrap_or(action);
         (*method == Method::GET
-            && (matches!(action, "store.json" | "challenge") || self.machine_slot().as_deref() == Some(action)))
+            && (matches!(action, "store.json" | "challenge") || self.machine_slot().as_deref() == Some(logical)))
             || (*method == Method::POST && action == "token")
     }
 
