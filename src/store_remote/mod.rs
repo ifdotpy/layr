@@ -173,8 +173,14 @@ impl Store {
     fn connect(&mut self, ctx: &Ctx) -> Result<()> {
         self.backend.as_caller(ctx);
         if let Backend::Gateway(gateway) = &mut self.backend {
-            if self.force_public {
+            if self.force_public
+                || (self.public_clone
+                    && ctx.env("LAYR_GATEWAY_TOKEN_FILE").is_none()
+                    && ctx.env("LAYR_PERSON_KEY_FILE").is_none()
+                    && ctx.env("LAYR_PAPER_KEY_FILE").is_none())
+            {
                 gateway.connect_reader(&ctx.env)?;
+                gateway.use_public_access();
             } else {
                 gateway.connect(ctx)?;
             }
@@ -460,9 +466,10 @@ impl Store {
         if self.backend.get("store.json")?.is_none() && self.backend.get("vault.json")?.is_some() {
             bail!("Desk v1 stores are read only; clone into a local project and add a new v2 remote");
         }
+        // Recheck the descriptor pin before discovery or any write-related request.
+        let descriptor = self.descriptor()?;
         // Check before the writer can publish any object, even when the caller is local root.
         if self.force_public || self.backend.get("public.json")?.is_some() {
-            let descriptor = self.descriptor()?;
             self.identity(&descriptor, opts.paper_key.as_deref())?;
             self.require_private_access()?;
         }

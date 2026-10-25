@@ -287,6 +287,10 @@ impl Gateway {
         self.identity.lock().map(|identity| identity.is_some()).unwrap_or(false)
     }
 
+    pub(super) fn use_public_access(&self) {
+        self.public.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
     fn is_public(&self) -> bool {
         self.public.load(std::sync::atomic::Ordering::SeqCst)
     }
@@ -333,9 +337,6 @@ impl Gateway {
         }
         if self.is_public() || (key == "public.json" && self.token.is_none()) {
             return self.public_get(key);
-        }
-        if key == "store.json" && self.token.is_none() && !self.has_read_identity() && self.public_get("public.json")?.is_some() {
-            return self.public_get("store.json");
         }
         if key.strip_prefix("slots/").is_some_and(|name| layr_store::person::slot_login(name).is_some()) {
             let response = self.send(Method::GET, key, None, None, None)?;
@@ -385,7 +386,7 @@ impl Gateway {
             self.read_request(&format!("objects/{key}"), None)?
         };
         if key == "store.json"
-            && !response.status().is_success()
+            && matches!(response.status().as_u16(), 401 | 403 | 404)
             && self.token.is_none()
             && self.public_get("public.json")?.is_some()
         {
