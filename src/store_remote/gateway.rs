@@ -160,6 +160,18 @@ impl Gateway {
         json(response, 512 << 10)
     }
 
+    /// Existing person registrations must prove their age identity before adding signing authority.
+    pub fn person_registration_proof(&self, identity: &str) -> Result<Option<String>> {
+        let response = self.send(Method::GET, "/api/person/challenge", None, None, None)?;
+        if response.status().as_u16() == 404 {
+            return Ok(None);
+        }
+        let challenge: serde_json::Value = json(response, 4096)?;
+        let sealed = challenge["challenge"].as_str().context("missing person challenge")?;
+        let sealed = base64::engine::general_purpose::STANDARD.decode(sealed)?;
+        Ok(Some(String::from_utf8(keys::decrypt(identity, &sealed)?)?))
+    }
+
     pub fn person_slot_at(&self, project: &str, login: &str, recipient: &str) -> Result<Vec<u8>> {
         if !layr_store::person::project_name(project) {
             bail!("invalid gateway project name");
@@ -430,6 +442,36 @@ fn token_file(path: &std::path::Path, uid: u32) -> Result<String> {
 mod tests {
     use super::*;
     use std::os::unix::fs::{symlink, PermissionsExt};
+    #[test]
+    fn person_registration_proof_opens_a_challenge_and_only_404_is_optional() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let identity = keys::generate_identity();
+        for status in [200, 404, 403] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let sealed = keys::encrypt(&keys::recipient_of(&identity).unwrap(), b"test-person-proof").unwrap();
+            let body = serde_json::json!({"challenge":base64::engine::general_purpose::STANDARD.encode(sealed)}).to_string();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0; 2048];
+                let n = stream.read(&mut request).unwrap();
+                assert!(std::str::from_utf8(&request[..n]).unwrap().starts_with("GET /api/person/challenge "));
+                write!(stream, "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+                    .unwrap();
+            });
+            let mut gateway = Gateway::open("layr+https://example.com/project").unwrap();
+            gateway.base = reqwest::Url::parse(&format!("http://{address}/v1/p/project/")).unwrap();
+            let result = gateway.person_registration_proof(&identity);
+            match status {
+                200 => assert_eq!(result.unwrap().as_deref(), Some("test-person-proof")),
+                404 => assert!(result.unwrap().is_none()),
+                _ => assert!(result.is_err()),
+            }
+            server.join().unwrap();
+        }
+    }
+
     #[test]
     fn reader_hooks_ignore_write_grants_set_identity_and_check_the_ca_file() {
         use super::super::backend::Backend;

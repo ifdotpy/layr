@@ -325,10 +325,17 @@ pub fn run(args: &[String]) -> Result<i32> {
                 }
             }
             if let Some(gateway) = &gateway {
+                let proof = if env.contains_key("LAYR_PERSON_KEY_FILE") {
+                    let access = load(&env, &home, &cwd, uid, login.as_deref())?
+                        .context("set LAYR_PERSON_KEY_FILE to prove the existing person identity")?;
+                    gateway.person_registration_proof(&access.identity)?
+                } else {
+                    None
+                };
                 gateway.person_call(
                     Method::PUT,
                     "/api/person",
-                    None,
+                    proof.as_deref(),
                     Some(&json!({"recipient":recipient,"paper":B64.encode(read(&dir.join("paper.age"),4096,uid)?),"signing_key":signing_key,"signing":B64.encode(signing)})),
                 )?;
             }
