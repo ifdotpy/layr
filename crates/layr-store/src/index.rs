@@ -214,6 +214,13 @@ impl Heads {
     pub fn dominates(&self, other: &Self) -> bool {
         other.watermark.iter().all(|(machine, mark)| self.watermark.get(machine).is_some_and(|v| v.seq > mark.seq || v == mark))
     }
+    fn same_view(&self, other: &Self) -> bool {
+        self.watermark == other.watermark
+            && self.lines == other.lines
+            && self.refs == other.refs
+            && self.changes == other.changes
+            && self.counts == other.counts
+    }
 }
 
 /// Select by watermark, never by machine clocks. Concurrent incomparable snapshots
@@ -225,6 +232,13 @@ pub fn newest(indexes: &[Index]) -> Result<Option<&Index>> {
     for candidate in indexes {
         let Data::Heads(heads) = &candidate.data else { bail!("expected heads snapshot") };
         if indexes.iter().all(|other| matches!(&other.data, Data::Heads(h) if heads.dominates(h))) {
+            for other in indexes {
+                let Data::Heads(h) = &other.data else { unreachable!() };
+                ensure!(candidate.project == other.project, "index snapshot projects differ");
+                if heads.watermark == h.watermark {
+                    ensure!(heads.same_view(h), "index snapshots disagree at the same watermark; load signed records");
+                }
+            }
             return Ok(Some(candidate));
         }
     }
@@ -279,6 +293,10 @@ mod tests {
         h.watermark.insert(PROJECT.into(), Watermark { seq: 1, hash: "b".repeat(64) });
         assert!(newest(&[values[1].clone(), fork]).is_err());
         assert!(newest(&[]).unwrap().is_none());
+        let mut wrong_view = snapshot(2, 4);
+        let Data::Heads(h) = &mut wrong_view.data else { unreachable!() };
+        h.counts.states = 1;
+        assert!(newest(&[values[1].clone(), wrong_view]).is_err());
     }
     #[test]
     fn malformed_paths_graphs_versions_and_addresses_are_refused() {
