@@ -61,7 +61,8 @@ impl Repo<'_> {
 
     pub fn overlaps(&self, ctx: &Ctx, line: &Line) -> Result<Vec<Overlap>> {
         self.can_read(ctx)?;
-        let ours = self.scan(line)?;
+        // Scanning the working folder copies its tree; do it only when another line needs it.
+        let mut ours = None;
         let our_hidden = self.radar_hidden(ctx, line)?;
         let our_private = self.private_paths(line)?;
         let mut ours_by_base = BTreeMap::new();
@@ -78,6 +79,10 @@ impl Repo<'_> {
                 Ok(root) => root,
                 Err(_) => continue,
             };
+            if ours.is_none() {
+                ours = Some(self.scan(line)?);
+            }
+            let ours = ours.as_ref().expect("scanned above");
             if !ours_by_base.contains_key(&base) {
                 ours_by_base.insert(base.clone(), changed_paths(&root, &ours.path, &our_private)?);
             }
