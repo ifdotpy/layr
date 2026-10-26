@@ -113,8 +113,13 @@ python3 tools/checks/install-macos-agent.py PROJECT \
 ```
 
 Use a stable installed binary path. The user LaunchAgents restart the watcher
-and fetch/push periodically, with logs under `~/Library/Logs/Layr`. Execution
-opt-in is a private machine-local file owned by the project metadata owner on
+and fetch/push periodically, with logs under `~/Library/Logs/Layr`.
+
+For a gateway remote, add `--gateway-token-file /private/path/to/token` to the
+installer command. The file must be owned by the runner user and mode 0600;
+only its path is written to the LaunchAgent environment. Refresh expiring grants
+in that file outside the automatic check process.
+Execution opt-in is a private machine-local file owned by the project metadata owner on
 macOS. Privileged opt-in is always refused on macOS. Linux retains its root-owned
 opt-in policy. Stop with `launchctl bootout gui/$(id -u)/ws.layr.checks.PROJECT`
 (and the matching `fetch` and `push` agents).
