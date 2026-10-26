@@ -1,0 +1,10 @@
+[Unit]
+Description=Sync Layr runner project %i
+
+[Timer]
+OnBootSec=15s
+OnUnitInactiveSec=15s
+Unit=layr-sync@%i.service
+
+[Install]
+WantedBy=timers.target

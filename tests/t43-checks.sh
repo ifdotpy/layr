@@ -29,7 +29,7 @@ l clone "file://$T/archive" p -q >/dev/null
 unset LAYR_PAPER_KEY_FILE
 BR=$LAYR_ROOT
 B=$BR/projects/p/lines/main
-# Project policy is intentionally machine-local. Provision it on the executor too.
+# Only the creator defines automatic check policy. The runner's local settings cannot replace it.
 cd "$B"
 l access grant layr-check-reader reader
 l protect main --no-direct
@@ -50,6 +50,10 @@ trap 'stop_watchers; kill ${DPID:-} ${WPID:-} 2>/dev/null || true; cleanup' EXIT
 for i in $(seq 1 100); do [ -S "$LAYR_SOCKET" ] && break; sleep .1; done
 as_reader() { (cd / && runuser -u layr-check-reader -- env LAYR_SOCKET="$LAYR_SOCKET" CHECK_SECRET=never-log-this-secret "$T/layr" --project p "$@"); }
 watch_checks() { as_reader checks watch "$@"; }
+project_config() {
+    (export LAYR_ROOT=$AR; cd "$A"; l config "$@"; l push archive -q)
+    l fetch origin -q
+}
 cd "$B"
 no 'root cannot invoke the watcher' l checks watch --once
 no 'zero polling interval is rejected' watch_checks --once --interval 0
@@ -82,6 +86,7 @@ l line new topic main -q
 cd ../topic
 echo pushed > value
 l save -qam pushed
+l approve head -q
 PUSHED=$(state_id head)
 l push archive -q
 export LAYR_ROOT=$BR
@@ -108,6 +113,7 @@ export LAYR_ROOT=$AR
 cd "$A/../topic"
 echo amended > value
 l save -qam amended --amend
+l approve head -q
 AMENDED=$(state_id head)
 l push archive -q
 export LAYR_ROOT=$BR
@@ -142,7 +148,7 @@ DB=$BR/projects/p/meta/db/layr.sqlite
 ok 'exact argv, version and retained log attestations are signed' python3 - "$DB" "$PUSHED" "$BR/projects/p/states" <<'PY'
 import json,pathlib,sqlite3,sys
 d=sqlite3.connect(sys.argv[1]); rows=[json.loads(r[0])['r'] for r in d.execute("select raw from records where op='attest'")]
-rows=[r for r in rows if r['data']['attestation']['subject']['id']==sys.argv[2]]
+rows=[r for r in rows if r['data']['attestation']['subject']['id']==sys.argv[2] and r['data']['attestation']['kind']=='check']
 assert len(rows)==2
 for r in rows:
  c=r['data']['check']; a=r['data']['attestation']; assert c['argv']==['sh','-c',c['command']] and a['kind']=='check'
@@ -158,8 +164,8 @@ rc=0; retried=$(watch_checks --once --json) || rc=$?
 eq 'a revoked failed check reruns and reports failure' 1 "$rc"
 ok 'revocation permits exactly the revoked version to rerun' python3 -c 'import json,sys; rows=json.loads(sys.argv[1])["checks"]; assert len(rows)==2 and all(r["state"]==sys.argv[2] for r in rows)' "$retried" "$PUSHED"
 # Multiple protected main heads arriving together must all be checked.
-l config checks.changes '[]'
-l config check.smoke 'echo checked-main'
+project_config checks.changes '[]'
+project_config check.smoke 'echo checked-main'
 export LAYR_ROOT=$AR
 cd "$A"
 echo main-one > value
@@ -175,10 +181,10 @@ l fetch origin -q
 main_results=$(watch_checks --once --json)
 ok 'both intermediate main heads run after one fetch' python3 -c 'import json,sys; rows=json.loads(sys.argv[1])["checks"]; assert all(any(r["state"]==s and r["exit"]==0 for r in rows) for s in sys.argv[2:])' "$main_results" "$MAIN1" "$MAIN2"
 # Exact argv changes cause a rerun; output is bounded even if the child keeps writing.
-l config checks.changes '[]'
-l config checks.lines '{"main":["smoke"]}'
-l config checks.log-bytes 128
-l config check.smoke 'python3 -c '\''print("x"*10000)'\'''
+project_config checks.changes '[]'
+project_config checks.lines '{"main":["smoke"]}'
+project_config checks.log-bytes 128
+project_config check.smoke 'python3 -c '\''print("x"*10000)'\'''
 bounded=$(watch_checks --once --json)
 ok 'a changed exact argv runs again and caps the log' python3 - "$bounded" "$BR/projects/p/states" <<'PY'
 import json,pathlib,sys
@@ -186,19 +192,22 @@ rows=json.loads(sys.argv[1])['checks']; assert rows
 for r in rows:
  assert r['truncated'] and len((pathlib.Path(sys.argv[2])/r['output_state']/'check.log').read_bytes())==128
 PY
-l config check.smoke 'sleep 30 & wait'
-l config checks.timeout 1
+project_config check.smoke 'sleep 30 & wait'
+project_config checks.timeout 1
 rc=0; timed=$(watch_checks --once --json) || rc=$?
 eq 'a timed out scan exits one' 1 "$rc"
 ok 'timeout records failure with a log reference' python3 -c 'import json,sys; r=json.loads(sys.argv[1]); assert r["work_done"] and all(c["exit"]==124 and c["log_ref"] for c in r["checks"])' "$timed"
 # Privileged checks require both independent configuration switches.
-l config checks.timeout 5
-l config checks.changes '["root"]'
-l config checks.lines '{}'
+project_config checks.timeout 5
+project_config checks.changes '["root"]'
+project_config checks.lines '{}'
 ok 'root opts this machine in locally' l config --local checks.privileged-runner true
 eq 'local opt-in is readable' true "$(l config --local --get checks.privileged-runner)"
 no 'local opt-in is absent from project config' l config --get checks.privileged-runner
+(export LAYR_ROOT=$AR; cd "$A/../topic"; echo unapproved > value; l save -qam unapproved; l push archive -q)
+l fetch origin -q
 priv=$(watch_checks --once --privileged-only --json)
+ok 'unapproved change versions remain pending on a privileged runner' python3 -c 'import json,sys; assert json.loads(sys.argv[1])["pending_privileged"]==1' "$priv"
 ok 'privileged checks record root execution in a fresh removed folder' python3 - "$priv" "$BR/projects/p/states" <<'PY'
 import json,pathlib,sys
 rows=json.loads(sys.argv[1])['checks']; assert rows
@@ -207,9 +216,13 @@ for r in rows:
  log=(pathlib.Path(sys.argv[2])/r['output_state']/'check.log').read_text().strip()
  assert log.startswith('root:/var/tmp/layr-check-') and not pathlib.Path(log[5:]).exists()
 PY
+(export LAYR_ROOT=$AR; cd "$A/../topic"; l approve head -q; l push archive -q)
+l fetch origin -q
+approved=$(watch_checks --once --privileged-only --json)
+ok 'a creator maintainer approval releases the exact privileged version' python3 -c 'import json,sys; r=json.loads(sys.argv[1]); assert r["count"]==1 and r["checks"][0]["exit"]==0 and r["pending_privileged"]==0' "$approved"
 ok 'privileged reruns are deduplicated' python3 -c 'import json,sys; r=json.loads(sys.argv[1]); assert not r["work_done"] and r["count"]==0 and r["pending_privileged"]==0' "$(watch_checks --once --privileged-only --json)"
-l config check.root 'set -e; mkdir m; mount -t tmpfs tmpfs m; printf "%s\n" "$PWD"; sleep 30'
-l config checks.timeout 1
+project_config check.root 'set -e; mkdir m; mount -t tmpfs tmpfs m; printf "%s\n" "$PWD"; sleep 30'
+project_config checks.timeout 1
 rc=0; mounted=$(watch_checks --once --privileged-only --json) || rc=$?
 eq 'privileged timeout reports a failed scan' 1 "$rc"
 ok 'timed out root checks release their mounts and work folders' python3 - "$mounted" "$BR/projects/p/states" <<'PY'
@@ -220,7 +233,7 @@ for r in rows:
  path=(pathlib.Path(sys.argv[2])/r['output_state']/'check.log').read_text().strip()
  assert path.startswith('/var/tmp/layr-check-') and not pathlib.Path(path).exists()
 PY
-l config checks.timeout 5
+project_config checks.timeout 5
 ok 'local config is not a signed project record' python3 -c 'import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); assert not d.execute("select 1 from config where key=?",("checks.privileged-runner",)).fetchone()' "$DB"
 l config --local checks.privileged-runner false
 ok 'completed privileged results suppress another wakeup' python3 -c 'import json,sys; r=json.loads(sys.argv[1]); assert r["pending_privileged"]==0' "$(watch_checks --once --json)"
