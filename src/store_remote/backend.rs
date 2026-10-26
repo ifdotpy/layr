@@ -40,11 +40,7 @@ fn epoch_object(key: &str) -> bool {
 impl Backend {
     fn replay_transport(&self, replay: &std::sync::Arc<super::cdn::Replay>) -> Self {
         match self {
-            Self::Gateway(gateway) => {
-                let mut gateway = gateway.clone();
-                gateway.replay = Some(replay.clone());
-                Self::Gateway(gateway)
-            }
+            Self::Gateway(gateway) => Self::Gateway(gateway.replay_transport(replay.clone())),
             Self::Prefix(base, prefix) => Self::Prefix(Box::new(base.replay_transport(replay)), prefix.clone()),
             Self::Epoch(epoch) => Self::Epoch(Box::new(EpochBackend {
                 root: epoch.root.replay_transport(replay),

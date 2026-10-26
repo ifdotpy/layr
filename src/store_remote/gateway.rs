@@ -86,7 +86,7 @@ pub struct Gateway {
     machine: Option<String>,
     identity: Mutex<Option<String>>,
     epoch: Mutex<Option<String>>,
-    read: Mutex<Option<(String, i64)>>,
+    read: Arc<Mutex<Option<(String, i64)>>>,
     public: std::sync::atomic::AtomicBool,
     person: Arc<Mutex<Option<PersonSession>>>,
 }
@@ -101,7 +101,7 @@ impl Clone for Gateway {
             machine: self.machine.clone(),
             identity: Mutex::new(self.identity.lock().expect("gateway identity lock").clone()),
             epoch: Mutex::new(self.epoch.lock().expect("gateway epoch lock").clone()),
-            read: Mutex::new(self.read.lock().expect("gateway read lock").clone()),
+            read: Arc::new(Mutex::new(self.read.lock().expect("gateway read lock").clone())),
             public: std::sync::atomic::AtomicBool::new(self.is_public()),
             person: self.person.clone(),
         }
@@ -179,10 +179,18 @@ impl Gateway {
             machine: None,
             identity: Mutex::new(None),
             epoch: Mutex::new(None),
-            read: Mutex::new(None),
+            read: Arc::new(Mutex::new(None)),
             public: std::sync::atomic::AtomicBool::new(false),
             person: Arc::new(Mutex::new(None)),
         })
+    }
+
+    /// Verification operations retain the same identity and epoch, so their proof cache is shared.
+    pub(super) fn replay_transport(&self, replay: Arc<super::cdn::Replay>) -> Self {
+        let mut transport = self.clone();
+        transport.replay = Some(replay);
+        transport.read = self.read.clone();
+        transport
     }
 
     pub fn connect(&mut self, ctx: &crate::ctx::Ctx) -> Result<()> {
@@ -1031,7 +1039,6 @@ mod tests {
         gateway.base = reqwest::Url::parse(&format!("https://localhost:{port}/v1/p/project/")).unwrap();
         gateway.configure_ca(&std::fs::read(fixture.root.join("ca.pem")).unwrap()).unwrap();
         gateway.set_identity(&identity).unwrap();
-        *gateway.read.lock().unwrap() = Some(("fixture.read".into(), crate::ids::now_ms() + 60000));
         let backend = super::super::backend::Backend::Gateway(gateway.clone());
         for mode in 1..=4 {
             let key = format!("files/01a177aa-a7a5-716c-8774-7f165724c16{mode}.age");
@@ -1047,6 +1054,8 @@ mod tests {
         }
         let response = gateway.http.get(format!("https://localhost:{port}/counts")).send().unwrap();
         let counts: std::collections::BTreeMap<String, u64> = response.json().unwrap();
+        assert_eq!(counts.get("challenge"), Some(&1));
+        assert_eq!(counts.get("token"), Some(&1));
         for mode in 1..=4 {
             assert_eq!(counts.get(&format!("{mode}.link")), Some(&1));
             assert_eq!(counts.get(&format!("{mode}.direct")), Some(&1));

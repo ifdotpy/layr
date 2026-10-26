@@ -1,5 +1,6 @@
 """Loopback TLS fixture for the real CLI object transport; all keys and bytes are synthetic."""
 import collections
+import base64
 import http.server
 import json
 import pathlib
@@ -29,6 +30,9 @@ class Fixture(http.server.BaseHTTPRequestHandler):
         self.wfile.write(data)
     def do_GET(self):
         parsed = urllib.parse.urlsplit(self.path)
+        if parsed.path == '/v1/p/project/challenge':
+            counts['challenge'] += 1
+            return self.answer({'challenge':base64.b64encode(valid).decode()},kind='application/json')
         if parsed.path == '/counts': return self.answer(dict(counts),kind='application/json')
         if parsed.path.startswith('/o/project/files/'):
             assert self.headers.get('Authorization') is None
@@ -49,6 +53,12 @@ class Fixture(http.server.BaseHTTPRequestHandler):
             return self.answer({'url':f'https://{host}/o/project/{key}?Expires={expires}&Signature=fixture&Key-Pair-Id=K123&Hash-Algorithm=SHA256','expires':expires,'bytes':len(valid)},kind='application/vnd.layr.cdn+json')
         counts[f'{mode}.direct'] += 1
         return self.answer(b'x'*len(valid) if mode == 4 else valid)
+    def do_POST(self):
+        assert self.path == '/v1/p/project/token'
+        body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        assert body == {'challenge':'verified ciphertext'}
+        counts['token'] += 1
+        return self.answer({'token':'fixture.read','expires':int(time.time()*1000)+300000},kind='application/json')
 server = http.server.ThreadingHTTPServer(('127.0.0.1',0),Fixture)
 context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 context.load_cert_chain(root/'cert.pem',root/'key.pem')
