@@ -26,10 +26,12 @@ struct Pushed {
 struct ContentHashes {
     entries: BTreeMap<String, Vec<Link>>,
     dirty: BTreeMap<String, Vec<Link>>,
+    tentative: BTreeMap<String, (Vec<Link>, i64)>,
+    pending: BTreeMap<String, Vec<Entry>>,
 }
 impl ContentHashes {
     fn get(&self, sha: &str) -> Option<&Vec<Link>> {
-        self.entries.get(sha)
+        self.entries.get(sha).or_else(|| self.tentative.get(sha).map(|value| &value.0))
     }
     fn insert(&mut self, sha: String, links: Vec<Link>) {
         self.dirty.insert(sha.clone(), links.clone());
@@ -40,6 +42,37 @@ impl ContentHashes {
             self.insert(sha, links);
         }
     }
+    fn pending_part(&mut self, object: String, modified: i64, entries: Vec<Entry>) {
+        for entry in &entries {
+            if !self.entries.contains_key(&entry.2) {
+                self.tentative.insert(entry.2.clone(), (entry.3.clone(), modified));
+            }
+        }
+        self.pending.insert(object, entries);
+    }
+    fn protect(&mut self, tree: &Tree) -> Vec<String> {
+        let objects: BTreeSet<_> = tree.files.values().flat_map(|entry| entry.3.iter().map(Link::object)).collect();
+        let protected: Vec<_> = self.pending.keys().filter(|object| objects.contains(*object)).cloned().collect();
+        for object in &protected {
+            for entry in self.pending.remove(object).unwrap() {
+                self.tentative.remove(&entry.2);
+                self.seed(entry.2, entry.3);
+            }
+        }
+        protected
+    }
+    fn deadline(&self, tree: &Tree, started: i64) -> i64 {
+        tree.files.values().filter_map(|entry| self.tentative.get(&entry.2).map(|value| value.1)).fold(started, i64::min)
+            + 23 * 3600
+    }
+}
+
+fn push_now() -> i64 {
+    #[cfg(test)]
+    if let Some(path) = std::env::var_os("LAYR_TEST_PUSH_CLOCK") {
+        return std::fs::read_to_string(path).unwrap().trim().parse().unwrap();
+    }
+    chrono::Utc::now().timestamp()
 }
 
 // Completed uploads are durable remotely; both local caches can be discarded.
@@ -415,7 +448,11 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
                 }
             }
             if let Some(attempt) = complete.remove(&id) {
-                recovered.push(id.clone());
+                // A fresh writer can discover another writer's completed history without
+                // having a reader slot. Only an existing transfer journal needs recovery.
+                if journal.resuming {
+                    recovered.push(id.clone());
+                }
                 present.insert(id.clone(), attempt.clone());
                 // No checkpoint authenticates a local root for this publication.
                 // Ignore every remaining local node and hydrate its signed remote tree.
@@ -432,7 +469,7 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
     crate::secrets::check_states(ctx, repo, states.iter().map(|state| state.id.as_str()))?;
     drop(stage);
     let stage = crate::trace::span("store collect hashes");
-    let mut hashes = ContentHashes { entries: journal.hashes()?, dirty: BTreeMap::new() };
+    let mut hashes = ContentHashes { entries: journal.hashes()?, ..Default::default() };
     let pending = journal.pending()?;
     if !pending.is_empty() || !recovered.is_empty() {
         let started = std::time::Instant::now();
@@ -445,23 +482,27 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
         let mut source = reader::Reader::new(&store.backend, &identity, &records.keys);
         for part in pending {
             journal.stats.seed_pending_parts += 1;
-            let valid =
-                crate::ids::now_ms() - part.created < 86400 * 1000 && part.entries.iter().all(|entry| source.read(entry).is_ok());
-            let recovered_hashes =
-                if valid { part.entries.into_iter().map(|entry| (entry.2, entry.3)).collect() } else { BTreeMap::new() };
-            journal.resolve_part(&part.object, &recovered_hashes)?;
-            for (sha, links) in recovered_hashes {
-                hashes.seed(sha, links);
+            journal.stats.seed_metadata_lists += 1;
+            let prefix = part.object.rsplit_once('/').unwrap().0.to_string() + "/";
+            let modified =
+                store.backend.list(&prefix)?.into_iter().find(|object| object.key == part.object).map(|object| object.modified);
+            let modified = modified.filter(|modified| push_now() - *modified < 12 * 3600);
+            if let Some(modified) = modified.filter(|_| part.entries.iter().all(|entry| source.read(entry).is_ok())) {
+                journal.validate_part(&part.object, modified)?;
+                hashes.pending_part(part.object, modified, part.entries);
+            } else {
+                journal.discard_part(&part.object)?;
             }
         }
         for id in recovered {
             let attempt = &present[&id];
             let (_, _, tree) = source.tree(&id, attempt)?;
             let depth = source.tree_depth(&id, attempt)?;
-            for entry in tree.files.into_values() {
-                hashes.seed(entry.2, entry.3);
+            let protected = hashes.protect(&tree);
+            for entry in tree.files.values() {
+                hashes.seed(entry.2.clone(), entry.3.clone());
             }
-            journal.checkpoint(&id, attempt, depth, &hashes.dirty)?;
+            journal.checkpoint(&id, attempt, depth, &hashes.dirty, &protected)?;
             hashes.dirty.clear();
             index.get_mut(&id).unwrap().depth = depth;
             journal.stats.seed_states += 1;
@@ -530,7 +571,8 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
         )?;
         drop(stage);
         let stage = crate::trace::span("store checkpoint");
-        journal.checkpoint(&state.id, &pushed.attempt, pushed.depth, &hashes.dirty)?;
+        let protected = hashes.protect(&pushed.tree);
+        journal.checkpoint(&state.id, &pushed.attempt, pushed.depth, &hashes.dirty, &protected)?;
         hashes.dirty.clear();
         present.insert(state.id.clone(), pushed.attempt.clone());
         index.insert(state.id.clone(), cache_tree(&mut tree_cache, &pushed, bytes));
@@ -615,6 +657,7 @@ fn upload_state_journal(
     mut journal: Option<&mut super::push_journal::Journal>,
 ) -> Result<(Pushed, usize, u64)> {
     let started = std::time::Instant::now();
+    let started_at = push_now();
     let mut random = [0u8; 4];
     rand::rngs::OsRng.fill_bytes(&mut random);
     let attempt = hex::encode(random);
@@ -758,9 +801,16 @@ fn upload_state_journal(
     let mut object = canonical(&serde_json::to_value(&header)?)?;
     object.push(b'\n');
     object.extend(&body);
-    // Never race collection of parts whose attempt is older than the grace period.
-    if started.elapsed().as_secs() >= 86400 {
-        bail!("state upload exceeded 24 hours; retry with a new attempt");
+    push_failpoint("before_publish", state);
+    #[cfg(test)]
+    if std::env::var("LAYR_TEST_GC_STATE").ok().as_deref() == Some(state) {
+        std::fs::write(std::env::var_os("LAYR_TEST_PUSH_CLOCK").unwrap(), chrono::Utc::now().timestamp().to_string()).unwrap();
+        store.gc(false).unwrap();
+    }
+    // GC may collect unpublished parts at server modified +24h. Pending links keep
+    // that server timestamp across crashes; publish at least one hour before it.
+    if started.elapsed().as_secs() >= 23 * 3600 || push_now() >= hashes.deadline(&tree, started_at) {
+        bail!("state upload or recovered part reached its safe publication deadline; retry with a new attempt");
     }
     drop(stage);
     let _publish = crate::trace::span("store tree publish");
@@ -783,7 +833,7 @@ fn upload_state(
     base_root: Option<&Path>,
     btrfs: Option<format::BtrfsIdentity>,
 ) -> Result<(Pushed, usize, u64)> {
-    let mut index = ContentHashes { entries: std::mem::take(hashes), dirty: BTreeMap::new() };
+    let mut index = ContentHashes { entries: std::mem::take(hashes), ..Default::default() };
     let result = upload_state_journal(store, descriptor, state, root, base, &mut index, base_root, btrfs, None);
     *hashes = index.entries;
     result
@@ -1239,6 +1289,101 @@ mod tests {
             if let Some(path) = std::env::var_os("LAYR_TEST_CRASH_REPORT") {
                 let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
                 writeln!(file, "{report}").unwrap();
+            }
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn pending_part_age_survives_double_crash_and_gc_before_publication() {
+        use std::{
+            os::unix::process::ExitStatusExt,
+            process::{Command, Stdio},
+        };
+        for mode in ["expired", "double_crash", "gc_before_publish"] {
+            let root = std::env::temp_dir().join(crate::ids::new_id());
+            std::fs::create_dir_all(&root).unwrap();
+            let ctx = context(&root);
+            let mut store = remote(&root, &ctx);
+            store
+                .configure(
+                    &ctx,
+                    &super::super::ConfigureOptions { paper_key_out: Some(root.join("paper")), ..Default::default() },
+                )
+                .unwrap();
+            let repo = branch_fixture(&ctx, &store);
+            let states =
+                parents_first(repo.p.db.present_states().unwrap().into_iter().map(|(id, _)| repo.state(&id).unwrap()).collect())
+                    .unwrap();
+            let target = states[2].id.clone();
+            drop(repo);
+            let puts = root.join("puts.jsonl");
+            let clock = root.join("clock");
+            let invoke = |point: Option<&str>, simulated_clock: bool, gc: bool, log: &str| {
+                let mut command = Command::new(std::env::current_exe().unwrap());
+                command
+                    .args(["--ignored", "--exact", "store_remote::writer::tests::crash_push_process", "--nocapture"])
+                    .env("LAYR_TEST_CRASH_ROOT", &root)
+                    .env("LAYR_TEST_PUT_LOG", &puts)
+                    .env_remove("LAYR_TEST_KILL_POINT")
+                    .env_remove("LAYR_TEST_KILL_STATE")
+                    .env_remove("LAYR_TEST_PUSH_CLOCK")
+                    .env_remove("LAYR_TEST_GC_STATE")
+                    .stdout(Stdio::null())
+                    .stderr(std::fs::File::create(root.join(log)).unwrap());
+                if let Some(point) = point {
+                    command.env("LAYR_TEST_KILL_POINT", point).env("LAYR_TEST_KILL_STATE", &target);
+                }
+                if simulated_clock {
+                    command.env("LAYR_TEST_PUSH_CLOCK", &clock);
+                }
+                if gc {
+                    command.env("LAYR_TEST_GC_STATE", &target);
+                }
+                command.status().unwrap()
+            };
+            assert_eq!(invoke(Some("after_part"), false, false, "first.log").signal(), Some(libc::SIGKILL));
+            let initial: Vec<serde_json::Value> =
+                std::fs::read_to_string(&puts).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+            let part = initial.last().unwrap()["object"].as_str().unwrap().to_string();
+            let sha = initial.last().unwrap()["hashes"][0].as_str().unwrap();
+            if mode == "double_crash" {
+                assert_eq!(invoke(Some("before_publish"), false, false, "second.log").signal(), Some(libc::SIGKILL));
+                let journal = super::super::push_journal::Journal::open(&store.dir).unwrap();
+                assert!(!journal.hashes().unwrap().contains_key(sha), "unpublished hash escaped its pending object");
+                assert!(journal.pending().unwrap().iter().any(|pending| pending.object == part));
+            }
+            let age = if mode == "expired" { 13 * 3600 } else { 25 * 3600 };
+            let old = std::time::SystemTime::now() - std::time::Duration::from_secs(age);
+            std::fs::File::options().write(true).open(root.join("remote").join(&part)).unwrap().set_modified(old).unwrap();
+            if mode == "gc_before_publish" {
+                std::fs::write(&clock, (chrono::Utc::now().timestamp() - 24 * 3600).to_string()).unwrap();
+                assert!(!invoke(None, true, true, "gc.log").success());
+                assert!(std::fs::read_to_string(root.join("gc.log")).unwrap().contains("safe publication deadline"));
+                assert!(store.backend.get(&part).unwrap().is_none());
+                assert!(!reader::attempts(&store.backend).unwrap().contains_key(&target));
+                store.verify(true).unwrap();
+            }
+            assert!(invoke(None, false, false, "final.log").success());
+            assert_eq!(reader::attempts(&store.backend).unwrap().len(), 4);
+            store.verify(true).unwrap();
+            let descriptor = store.descriptor().unwrap();
+            let identity = store.identity(&descriptor, None).unwrap();
+            let records = reader::records(&store.backend, &identity, &descriptor.project).unwrap();
+            let mut source = reader::Reader::new(&store.backend, &identity, &records.keys);
+            for (state, attempt) in reader::attempts(&store.backend).unwrap() {
+                for entry in source.tree(&state, &attempt).unwrap().2.files.values() {
+                    assert!(entry.3.iter().all(|link| link.object() != part), "{mode}: expired part reused");
+                }
+            }
+            if store.backend.get(&part).unwrap().is_some() {
+                std::fs::File::options()
+                    .write(true)
+                    .open(root.join("remote").join(&part))
+                    .unwrap()
+                    .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(25 * 3600))
+                    .unwrap();
+                assert_eq!(store.gc(false).unwrap(), vec![part]);
             }
             std::fs::remove_dir_all(root).unwrap();
         }
