@@ -40,6 +40,19 @@ Mac backing volume. A VM's reported free space does not measure this limit.
 
 Run `bash tools/checks/prepare-linux-store.sh`. It uses the existing btrfs root
 when present, or creates a persistent btrfs loop mount at `/var/lib/layr`.
+Start the VM from a user LaunchAgent so its host agent does not inherit a Studio
+command's lifecycle. At a safe point, stop this VM, then run on the Mac:
+
+```sh
+limactl stop layr-runner-vz
+python3 tools/checks/install-vm-agent.py
+```
+
+The agent runs `limactl start --foreground` at login. It refuses to replace a
+running VM. Stop it with `launchctl bootout gui/$(id -u)/ws.layr.runner-vm` before
+planned VM maintenance. After a manual stop, use
+`launchctl kickstart gui/$(id -u)/ws.layr.runner-vm` to start it again.
+
 Obtain this machine's public identity with `layr remote self --json`.
 On an existing project owner's machine, enroll it with:
 
