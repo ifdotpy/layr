@@ -644,8 +644,12 @@ impl Gateway {
         let mut cursors = std::collections::BTreeSet::new();
         let mut continuation: Option<String> = None;
         let mut objects = Vec::new();
+        let mut legacy = false;
         loop {
-            let mut query = vec![("prefix", prefix), ("limit", "1000")];
+            let mut query = vec![("prefix", prefix)];
+            if !legacy {
+                query.push(("limit", "1000"));
+            }
             if let Some(cursor) = &continuation {
                 query.push(("continuation", cursor));
             }
@@ -661,6 +665,12 @@ impl Gateway {
             } else {
                 self.read_request_query("objects", &query)?
             };
+            if response.status().as_u16() == 400 && continuation.is_none() && !legacy {
+                // Older servers may reject the opt-in pagination query. Retry only the first
+                // page with the legacy prefix query and the same authentication boundary.
+                legacy = true;
+                continue;
+            }
             // Older gateways may omit the cursor and return their bounded complete listing.
             // New gateways return at most 1,000 objects per page, each at most 8 MiB.
             let listing: Objects = json(response, 8 << 20)?;
@@ -864,6 +874,48 @@ mod tests {
                 "continuation": if page < 10 { Some(format!("page{page}")) } else { None }
             })).collect();
             assert_eq!(listing_pages(pages, public).unwrap().len(), 11_000);
+        }
+    }
+
+    #[test]
+    fn old_gateways_can_reject_pagination_and_return_a_bounded_legacy_listing() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        for public in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                for first in [true, false] {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                    let mut request = Vec::new();
+                    let mut byte = [0];
+                    while !request.ends_with(b"\r\n\r\n") {
+                        stream.read_exact(&mut byte).unwrap();
+                        request.push(byte[0]);
+                    }
+                    let request = String::from_utf8(request).unwrap().to_ascii_lowercase();
+                    assert!(request.starts_with(if public { "get /p/project/objects?" } else { "get /v1/p/project/objects?" }));
+                    assert_eq!(request.contains("limit="), first);
+                    assert_eq!(request.contains("authorization: bearer fixture.write"), !public);
+                    let (status, body) =
+                        if first { (400, "{}") } else { (200, "{\"objects\":[{\"key\":\"states/a\",\"modified\":1000}]}") };
+                    write!(
+                        stream,
+                        "HTTP/1.1 {status} response\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .unwrap();
+                }
+            });
+            let mut gateway = Gateway::open("layr+https://localhost/project").unwrap();
+            gateway.base = reqwest::Url::parse(&format!("http://{address}/v1/p/project/")).unwrap();
+            gateway.token = Some("fixture.write".into());
+            if public {
+                gateway.use_public_access();
+            }
+            assert_eq!(gateway.list("states/").unwrap().len(), 1);
+            server.join().unwrap();
         }
     }
 

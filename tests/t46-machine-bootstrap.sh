@@ -41,6 +41,16 @@ grant_p=secrets.token_hex(32);grant_q=secrets.token_hex(32);read_token='v1.read.
 for name,value in [('grant-p',grant_p),('grant-q',grant_q)]:
  path=root/name;path.write_text(value);os.chmod(path,0o600)
 own_slot='slots/machine-'+machine['id']+'.age'
+def discovery(method,path):
+ parsed=urllib.parse.urlsplit(path);query=urllib.parse.parse_qs(parsed.query)
+ return method=='GET' and parsed.path=='/v1/p/project/objects' and query.get('prefix')==['keys/'] and set(query)<= {'prefix','limit','continuation'} and query.get('limit',['1000'])==['1000']
+def object_page(wanted,query):
+ assert set(query)<= {'prefix','limit','continuation'} and query.get('limit',['1000'])==['1000']
+ files=sorted([{'key':str(p.relative_to(root/'archive')),'modified':int(p.stat().st_mtime*1000)} for p in (root/'archive').rglob('*') if p.is_file() and str(p.relative_to(root/'archive')).startswith(wanted)],key=lambda row:row['key'])
+ offset=int(query.get('continuation',['0'])[0]);assert offset>=0
+ # One entry exercises continuation even on this small bootstrap fixture.
+ page=files[offset:offset+1]
+ return {'objects':page,'continuation':str(offset+1) if offset+1<len(files) else None}
 class Gateway(http.server.BaseHTTPRequestHandler):
  def log_message(self,*args): pass
  def reply(self,status,body):
@@ -76,8 +86,8 @@ class Gateway(http.server.BaseHTTPRequestHandler):
    self.reply(200,{'token':read_token,'expires':int(time.time()*1000)+300000});return
   # Signed epoch discovery is visible before opening the current machine slot.
   # The grant permits only the exact discovery namespace, never encrypted data.
-  if self.command=='GET' and kind=='P-grant' and action=='objects' and urllib.parse.parse_qs(parsed.query)=={'prefix':['keys/']}:
-   self.reply(200,{'objects':[{'key':str(p.relative_to(root/'archive')),'modified':int(p.stat().st_mtime*1000)} for p in (root/'archive/keys').glob('*.json')]});return
+  if kind=='P-grant' and discovery(self.command,self.path):
+   self.reply(200,object_page('keys/',urllib.parse.parse_qs(parsed.query)));return
   if self.command=='PUT' and action.startswith('objects/') and kind=='P-grant':
    name=action[len('objects/'):];assert '..' not in pathlib.PurePosixPath(name).parts
    assert name.startswith(('records/','states/','index/'))
@@ -89,7 +99,7 @@ class Gateway(http.server.BaseHTTPRequestHandler):
   if kind!='read': self.reply(401,{});return
   if self.command=='GET' and action=='objects':
    wanted=urllib.parse.parse_qs(parsed.query).get('prefix',[''])[0]
-   self.reply(200,{'objects':[{'key':str(p.relative_to(root/'archive')),'modified':int(p.stat().st_mtime*1000)} for p in (root/'archive').rglob('*') if p.is_file() and str(p.relative_to(root/'archive')).startswith(wanted)]});return
+   self.reply(200,object_page(wanted,urllib.parse.parse_qs(parsed.query)));return
   if self.command=='GET' and action.startswith('objects/'):
    name=action[len('objects/'):];assert '..' not in pathlib.PurePosixPath(name).parts
    file=root/'archive'/name
@@ -117,7 +127,7 @@ try:
  before_push=len(requests)
  run(['push','origin','-q'],sync)
  push_requests=requests[before_push:]
- check(any(path=='/v1/p/project/challenge' for _,path,_ in push_requests) and all(kind=='read' for method,path,kind in push_requests if method=='GET' and path.startswith('/v1/p/project/objects?') and urllib.parse.parse_qs(urllib.parse.urlsplit(path).query)!={'prefix':['keys/']}),'a separate private push obtains its read proof before listing data')
+ check(any(path=='/v1/p/project/challenge' for _,path,_ in push_requests) and all(kind=='read' for method,path,kind in push_requests if method=='GET' and path.startswith('/v1/p/project/objects?') and not discovery(method,path)),'a separate private push obtains its read proof before listing data')
  check(any(method=='PUT' and '/objects/records/' in path and kind=='P-grant' for method,path,kind in requests),'the machine pushes its signed records after cloning the private project')
  wrong=dict(valid,LAYR_GATEWAY_TOKEN_FILE=str(root/'grant-q'))
  p=run(['clone',url,'wrong','-q'],wrong,False)
@@ -127,10 +137,10 @@ try:
  check(p.returncode!=0 and '404' in p.stderr and 'missing or wrong' in p.stderr,'a missing grant is refused with a plain grant hint')
  check(not any(path=='/v1/p/project/slots' for _,path,_ in requests),'machine bootstrap never calls the aggregate slots route')
  allowed={'/v1/p/project/store.json','/v1/p/project/'+own_slot,'/v1/p/project/challenge','/v1/p/project/token'}
- discovery=lambda method,path: method=='GET' and urllib.parse.urlsplit(path).path=='/v1/p/project/objects' and urllib.parse.parse_qs(urllib.parse.urlsplit(path).query)=={'prefix':['keys/']}
  check(all(path in allowed or discovery(method,path) or (method=='PUT' and path.startswith('/v1/p/project/objects/')) for method,path,kind in requests if kind=='P-grant'),'the project grant is attached only to scoped bootstrap, epoch discovery and authorized writes')
  check(any(discovery(method,path) and kind=='P-grant' for method,path,kind in requests),'machine discovers signed epochs with its project grant before opening the current slot')
  check(all(kind=='read' for method,path,kind in requests if method=='GET' and urllib.parse.urlsplit(path).path.startswith('/v1/p/project/objects') and not discovery(method,path)),'encrypted object reads still require the read proof')
+ check(any('continuation=' in path for _,path,_ in requests),'bootstrap follows object-listing continuation pages')
  check(not errors,'stand-in accepted only permitted routes and credentials')
  project=pathlib.Path(valid['LAYR_ROOT'])/'projects/copy'
  content=''.join(outputs).encode()+b''.join(p.read_bytes() for p in project.rglob('*') if p.is_file() and not p.is_symlink())

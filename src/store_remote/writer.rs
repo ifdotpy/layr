@@ -308,6 +308,20 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
     // Completed immutable trees are never collected. Cache metadata is written only after
     // publication, so a regular push need not enumerate every historical remote object.
     index.retain(|id, entry| cache_path(&store.dir, id, entry).is_ok());
+    if !blind_layer {
+        // A completed upload can be missing from a partial replica. Recheck advertised tips
+        // without scanning historical states, so a later push can complete that replica.
+        let mut tips: std::collections::BTreeSet<String> = repo.p.db.lines()?.into_iter().map(|line| line.head).collect();
+        tips.extend(repo.p.db.refs("", crate::ids::now_ms())?.into_iter().map(|reference| reference.target));
+        for tip in tips {
+            if let Some(cached) = index.get(&tip) {
+                let expected = format::tree_name(&tip, &cached.attempt);
+                if !store.backend.list(&format!("states/{tip}/"))?.iter().any(|object| object.key == expected) {
+                    index.remove(&tip);
+                }
+            }
+        }
+    }
     let mut present: BTreeMap<String, String> = index.iter().map(|(id, entry)| (id.clone(), entry.attempt.clone())).collect();
     // Authenticate another writer's records only if a missing local parent cache is needed.
     // An ordinary incremental push reuses its already verified local parent directly.
