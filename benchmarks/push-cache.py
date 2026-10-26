@@ -1,0 +1,147 @@
+import os,pathlib,subprocess,json,time,hashlib
+import argparse
+parser=argparse.ArgumentParser(description='Compare push caches against two pinned Git fixture copies on a Btrfs volume.')
+parser.add_argument('--workspace',type=pathlib.Path,default=pathlib.Path('/root/pc'))
+parser.add_argument('phase',choices=['before','after','daily'])
+args=parser.parse_args()
+base=args.workspace.resolve()
+fs=base/'bench'
+results=base/'push-cache-results.jsonl'
+
+def run(args,env=None,cwd=None,label=None):
+    started=time.monotonic()
+    with (base/(label+'.log' if label else 'command.log')).open('ab') as log:
+        subprocess.run([str(x) for x in args],env=env,cwd=cwd,check=True,stdout=log,stderr=subprocess.STDOUT)
+    return time.monotonic()-started
+
+def size(p):
+    paths=[x for x in p.rglob('*') if x.is_file()] if p.is_dir() else [p]
+    return sum(x.stat().st_size for x in paths)
+
+def measure(kind,phase,binary):
+    root=fs/(kind+'-local')
+    project=root/'projects'/kind
+    line=project/'lines/main'
+    archive=fs/(kind+'-'+phase+'-archive')
+    env=os.environ|{'LAYR_ROOT':str(root),'LAYR_AUTHOR_NAME':'Cache benchmark','LAYR_AUTHOR_EMAIL':'cache@example.test','LAYR_TRACE':'1'}
+    source=base/('layr-source' if kind=='layr' else 'studio-source')
+    if not project.exists():
+        root.mkdir(exist_ok=True)
+        seconds=run([base/'layr-before','git','clone',source,kind,'-q'],env,cwd=base,label=kind+'-import')
+        print(json.dumps({'phase':'import','fixture':kind,'seconds':seconds}),flush=True)
+    # Leave source snapshots unchanged; a second configured archive gets its own cache directory.
+    run([binary,'remote','add',phase,'file://'+str(archive),'--paper-key-out',base/(kind+'-'+phase+'-paper')],env,cwd=line)
+    seconds=run([binary,'push',phase,'-q'],env,cwd=line,label=kind+'-'+phase)
+    target=project/'meta/remote-stores'/hashlib.sha256(('file://'+str(archive)).encode()).hexdigest()
+    files=[p for p in target.rglob('*') if p.is_file() and (p.parent.name=='pushed' or p.name in ('pushed.json','pushed-v2.json.zst','push-cache.sqlite3'))]
+    result={'fixture':kind,'phase':phase,'seconds':seconds,'commits':int(subprocess.check_output(['git','-C',str(source),'rev-list','--count','HEAD'])),'cache_bytes':sum(p.stat().st_size for p in files),'cache_allocated_bytes':sum(p.stat().st_blocks*512 for p in files),'cache_files':len(files),'encrypted_store_bytes':size(archive),'cache_path':str(target),'source_tip':subprocess.check_output(['git','-C',str(source),'rev-parse','HEAD']).decode().strip(),'time_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())}
+    result['cache_percent']=100*result['cache_bytes']/result['encrypted_store_bytes']
+    with results.open('a') as out:out.write(json.dumps(result)+'\n')
+    print(json.dumps(result),flush=True)
+
+
+def daily():
+    # Serve the exact file-store objects through the private TLS routes. Reflink each
+    # corresponding warm cache to the URL alias, so the measured push starts with the
+    # same local state as its preceding complete push, without repeating bulk transfer.
+    import base64,collections,http.server,secrets,ssl,threading,urllib.parse
+    root=fs/'studio-local';project=root/'projects/studio';line=project/'lines/main'
+    tls=base/'tls';tls.mkdir(exist_ok=True)
+    def openssl(command):
+        subprocess.run(['openssl',*command],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    openssl(['req','-x509','-newkey','rsa:2048','-nodes','-keyout',str(tls/'ca-key.pem'),'-out',str(tls/'ca.pem'),'-days','1','-subj','/CN=Push cache benchmark CA','-addext','basicConstraints=critical,CA:TRUE','-addext','keyUsage=critical,keyCertSign,cRLSign'])
+    openssl(['req','-new','-newkey','rsa:2048','-nodes','-keyout',str(tls/'key.pem'),'-out',str(tls/'request.csr'),'-subj','/CN=localhost'])
+    (tls/'extensions.cnf').write_text('basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:localhost,IP:127.0.0.1\n')
+    openssl(['x509','-req','-in',str(tls/'request.csr'),'-CA',str(tls/'ca.pem'),'-CAkey',str(tls/'ca-key.pem'),'-CAcreateserial','-out',str(tls/'cert.pem'),'-days','1','-extfile',str(tls/'extensions.cnf')])
+    grant=secrets.token_hex(32);proof='v1.read.push-cache-fixture'
+    grant_path=tls/'grant';grant_path.write_text(grant);grant_path.chmod(0o600)
+    requests=[];errors=[]
+    class Gateway(http.server.BaseHTTPRequestHandler):
+        def log_message(self,*args): pass
+        def reply(self,status,body):
+            body=body if isinstance(body,bytes) else json.dumps(body).encode()
+            self.send_response(status);self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
+        def do_GET(self): self.dispatch()
+        def do_POST(self): self.dispatch()
+        def do_PUT(self): self.dispatch()
+        def dispatch(self):
+            try:self.api()
+            except Exception as error:
+                errors.append(type(error).__name__+': '+str(error));self.reply(500,{})
+        def api(self):
+            time.sleep(.005)
+            parsed=urllib.parse.urlsplit(self.path);parts=parsed.path.split('/')
+            assert parts[:3]==['','v1','p'] and parts[3] in ('before','after')
+            phase=parts[3];action='/'.join(parts[4:]);archive=fs/('studio-'+phase+'-archive')
+            auth=self.headers.get('Authorization');query=urllib.parse.parse_qs(parsed.query)
+            kind='grant' if auth=='Bearer '+grant else 'read' if auth=='Bearer '+proof else 'none'
+            requests.append({'method':self.command,'phase':phase,'path':self.path,'credential':kind})
+            if self.command=='GET' and (action=='store.json' or action.startswith('slots/machine-')):
+                assert kind=='grant';path=archive/action
+                self.reply(200,path.read_bytes()) if path.exists() else self.reply(404,{})
+                return
+            if self.command=='GET' and action=='challenge':
+                assert kind=='grant'
+                self.reply(200,{'challenge':base64.b64encode(next((archive/'records').rglob('*.age')).read_bytes()).decode()});return
+            if self.command=='POST' and action=='token':
+                assert kind=='grant'
+                body=json.loads(self.rfile.read(int(self.headers.get('Content-Length','0'))))
+                assert isinstance(body.get('challenge'),str) and '"machine"' in body['challenge']
+                self.reply(200,{'token':proof,'expires':int(time.time()*1000)+300000});return
+            if self.command=='GET' and action=='objects':
+                assert set(query)<= {'prefix','limit','continuation'}
+                prefix=query.get('prefix',[''])[0]
+                assert kind=='read' or (kind=='grant' and prefix=='keys/')
+                # Start at the requested prefix rather than traversing all history for
+                # every list call. This preserves the file backend's listing cost.
+                directory=archive/prefix
+                if not prefix.endswith('/'): directory=directory.parent
+                files=sorted([{'key':str(p.relative_to(archive)),'modified':int(p.stat().st_mtime*1000)} for p in directory.rglob('*') if p.is_file() and str(p.relative_to(archive)).startswith(prefix)],key=lambda row:row['key'])
+                offset=int(query.get('continuation',['0'])[0]);limit=int(query.get('limit',['1000'])[0])
+                assert offset>=0 and 0<limit<=1000
+                page=files[offset:offset+limit]
+                self.reply(200,{'objects':page,'continuation':str(offset+limit) if offset+limit<len(files) else None});return
+            if self.command=='GET' and action.startswith('objects/'):
+                assert kind=='read';name=action[len('objects/'):];assert '..' not in pathlib.PurePosixPath(name).parts
+                path=archive/name
+                self.reply(200,path.read_bytes()) if path.is_file() else self.reply(404,{})
+                return
+            if self.command=='PUT' and action.startswith('objects/'):
+                assert kind=='grant';name=action[len('objects/'):];assert '..' not in pathlib.PurePosixPath(name).parts
+                assert name.startswith(('records/','states/','index/','slots/','keys/'))
+                body=self.rfile.read(int(self.headers.get('Content-Length','0')));path=archive/name
+                if path.exists():self.reply(412,b'');return
+                path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(body);self.reply(201,b'');return
+            raise AssertionError((self.command,action,kind))
+    server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Gateway)
+    context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.load_cert_chain(tls/'cert.pem',tls/'key.pem')
+    server.socket=context.wrap_socket(server.socket,server_side=True)
+    thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+    env=os.environ|{'LAYR_ROOT':str(root),'LAYR_AUTHOR_NAME':'Cache benchmark','LAYR_AUTHOR_EMAIL':'cache@example.test','LAYR_GATEWAY_CA_FILE':str(tls/'ca.pem'),'LAYR_GATEWAY_TOKEN_FILE':str(grant_path),'LAYR_TRACE':'1'}
+    try:
+        for phase in ['before','after']:
+            url=f'layr+https://localhost:{server.server_port}/{phase}'
+            run([base/'layr-after','remote','add','gateway-'+phase,url],env,cwd=line,label='daily-setup')
+            source=project/'meta/remote-stores'/hashlib.sha256(('file://'+str(fs/('studio-'+phase+'-archive'))).encode()).hexdigest()
+            target=project/'meta/remote-stores'/hashlib.sha256(url.encode()).hexdigest()
+            target.mkdir(exist_ok=True)
+            subprocess.run(['cp','-a','--reflink=always',str(source)+'/.',str(target)],check=True)
+        (line/'push-cache-daily.txt').write_text('One daily push after 7,965 imported commits.\n')
+        run([base/'layr-after','add','push-cache-daily.txt'],env,cwd=line,label='daily-setup')
+        run([base/'layr-after','save','-qm','Push cache daily benchmark'],env,cwd=line,label='daily-setup')
+        for phase in ['before','after']:
+            requests.clear();started=time.monotonic()
+            seconds=run([base/('layr-'+phase),'push','gateway-'+phase,'-q'],env,cwd=line,label='daily-'+phase)
+            assert not errors,errors
+            counts=dict(collections.Counter(r['method'] for r in requests))
+            listing_prefixes=[urllib.parse.parse_qs(urllib.parse.urlsplit(r['path']).query).get('prefix',[''])[0] for r in requests if '/objects?' in r['path']]
+            result={'fixture':'studio','phase':'daily-'+phase,'seconds':seconds,'prior_commits':7965,'requests':counts,'request_count':len(requests),'listing_prefixes':listing_prefixes,'delay_ms':5,'cache_warmup':'same-object file-store cache reflinked to gateway URL alias','time_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())}
+            with results.open('a') as out:out.write(json.dumps(result)+'\n')
+            (base/('daily-'+phase+'-requests.json')).write_text(json.dumps(requests,indent=2)+'\n')
+            print(json.dumps(result),flush=True)
+    finally:
+        server.shutdown();server.server_close();thread.join(timeout=10)
+
+if args.phase=='daily':daily()
+else:
+    for fixture in ['layr','studio']:measure(fixture,args.phase,base/('layr-'+args.phase))
