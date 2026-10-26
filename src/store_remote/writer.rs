@@ -18,6 +18,47 @@ struct Pushed {
     attempt: String,
     tree: Tree,
     depth: usize,
+    #[serde(skip)]
+    canonical: Vec<u8>,
+}
+
+/// Exact store canonical JSON from typed, already validated entries. Avoid three intermediate
+/// JSON value trees for each snapshot; the output must match Tree::canonical byte for byte.
+fn tree_bytes(tree: &Tree) -> Vec<u8> {
+    use super::canonical::string;
+    let mut out = String::from("{\"files\":{");
+    for (number, (path, entry)) in tree.files.iter().enumerate() {
+        if number != 0 {
+            out.push(',');
+        }
+        string(path, &mut out);
+        out.push_str(":[");
+        string(&entry.0, &mut out);
+        out.push(',');
+        out.push_str(&entry.1.to_string());
+        out.push(',');
+        string(&entry.2, &mut out);
+        out.push_str(",[");
+        for (number, link) in entry.3.iter().enumerate() {
+            if number != 0 {
+                out.push(',');
+            }
+            out.push('[');
+            string(&link.0, &mut out);
+            out.push(',');
+            string(&link.1, &mut out);
+            for value in [link.2 as u64, link.3, link.4] {
+                out.push(',');
+                out.push_str(&value.to_string());
+            }
+            out.push(',');
+            string(&link.5, &mut out);
+            out.push(']');
+        }
+        out.push_str("]]");
+    }
+    out.push_str("}}");
+    out.into_bytes()
 }
 
 // Local metadata is small; full trees live in separate cache files and are loaded one at a time.
@@ -321,9 +362,9 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
             if index.contains_key(id) {
                 continue;
             }
-            let (header, _, tree) = source.tree(id, attempt)?;
+            let (header, canonical, tree) = source.tree(id, attempt)?;
             let depth = if header.tree == "full" { 0 } else { format::FULL_TREE_EVERY - 1 };
-            let pushed = Pushed { attempt: attempt.clone(), tree, depth };
+            let pushed = Pushed { attempt: attempt.clone(), tree, depth, canonical };
             index.insert(id.clone(), cache_tree(&store.dir, id, &pushed)?);
         }
     }
@@ -352,12 +393,15 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
     drop(stage);
     let stage = crate::trace::span("store collect hashes");
     let mut hashes = BTreeMap::new();
-    for (id, entry) in &index {
-        for entry in cached_tree(&store.dir, id, entry)?.tree.files.into_values() {
-            hashes.entry(entry.2).or_insert(entry.3);
+    if !states.is_empty() {
+        for (id, entry) in &index {
+            for entry in cached_tree(&store.dir, id, entry)?.tree.files.into_values() {
+                hashes.entry(entry.2).or_insert(entry.3);
+            }
         }
     }
     drop(stage);
+    let mut latest: Option<(String, Pushed)> = None;
     for state in parents_first(states)? {
         let stage = crate::trace::span("store select parent");
         let direct = state.parents.iter().chain(state.derived_from.iter()).find(|id| index.contains_key(*id)).cloned();
@@ -366,7 +410,11 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
         } else {
             reader::state_ancestry(repo, &state.id)?.into_iter().skip(1).find(|id| index.contains_key(id))
         };
-        let base = base_id.map(|id| -> Result<_> { Ok((id.clone(), cached_tree(&store.dir, &id, &index[&id])?)) }).transpose()?;
+        let base = match base_id {
+            Some(id) if latest.as_ref().is_some_and(|(last, _)| last == &id) => latest.take(),
+            Some(id) => Some((id.clone(), cached_tree(&store.dir, &id, &index[&id])?)),
+            None => None,
+        };
         drop(stage);
         let stage = crate::trace::span("store upload state");
         let root = repo.state_root(&state.id)?;
@@ -387,6 +435,7 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
         if (report.states + 1) % CHECKPOINT_STATES == 0 {
             checkpoint(&store.dir, &index)?;
         }
+        latest = Some((state.id.clone(), pushed));
         drop(stage);
         report.states += 1;
         report.state_ids.push(state.id.clone());
@@ -549,11 +598,20 @@ fn upload_state(
     drop(stage);
     let stage = crate::trace::span("store tree encode");
     let tree = Tree { files };
-    let canonical_tree = tree.canonical()?;
-    Tree::parse(&canonical_tree)?;
+    let canonical_tree = tree_bytes(&tree);
     let delta_base = base.filter(|(_, p)| p.depth + 1 < format::FULL_TREE_EVERY);
-    let base_bytes = delta_base.map(|(_, p)| p.tree.canonical()).transpose()?;
-    let body = zst::compress(&canonical_tree, base_bytes.as_deref())?;
+    let encoded_base;
+    let base_bytes = if let Some((_, parent)) = delta_base {
+        if parent.canonical.is_empty() {
+            encoded_base = tree_bytes(&parent.tree);
+            Some(encoded_base.as_slice())
+        } else {
+            Some(parent.canonical.as_slice())
+        }
+    } else {
+        None
+    };
+    let body = zst::compress(&canonical_tree, base_bytes)?;
     let mut header = Header {
         v: 2,
         state: state.into(),
@@ -579,7 +637,7 @@ fn upload_state(
         bail!("state attempt already exists; retry with a new attempt");
     }
     bytes += body.len() as u64;
-    Ok((Pushed { attempt, tree, depth: delta_base.map_or(0, |(_, p)| p.depth + 1) }, frames, bytes))
+    Ok((Pushed { attempt, tree, depth: delta_base.map_or(0, |(_, p)| p.depth + 1), canonical: canonical_tree }, frames, bytes))
 }
 
 fn btrfs_identity(root: &Path, signed_uuid: &str) -> Option<format::BtrfsIdentity> {
@@ -746,11 +804,33 @@ mod tests {
     }
 
     #[test]
+    fn typed_tree_encoding_matches_store_canonical_bytes() {
+        let state = crate::ids::new_id();
+        let entry = Entry(
+            "100644".into(),
+            123456789,
+            "ab".repeat(32),
+            vec![
+                Link(state.clone(), "0123abcd".into(), 0, 4096, 8192, "delta".into()),
+                Link(state, "0123abcd".into(), 2, 0, 65536, "full".into()),
+            ],
+        );
+        let tree = Tree {
+            files: BTreeMap::from([("plain".into(), entry.clone()), ("caf\u{e9}/\u{1f642}".into(), entry.clone())]),
+        };
+        assert_eq!(tree_bytes(&tree), tree.canonical().unwrap());
+        Tree::parse(&tree_bytes(&tree)).unwrap();
+        let escaped = Tree { files: BTreeMap::from([("\n\t\\\"".into(), entry)]) };
+        assert_eq!(tree_bytes(&escaped), escaped.canonical().unwrap());
+        assert_eq!(tree_bytes(&Tree::default()), Tree::default().canonical().unwrap());
+    }
+    #[test]
     fn legacy_pushed_cache_migrates_without_changing_attempt_or_tree() {
         let root = std::env::temp_dir().join(crate::ids::new_id());
         std::fs::create_dir_all(&root).unwrap();
         let id = crate::ids::new_id();
-        let pushed = Pushed { attempt: "0123abcd".into(), tree: Tree { files: BTreeMap::new() }, depth: 0 };
+        let pushed =
+            Pushed { attempt: "0123abcd".into(), tree: Tree { files: BTreeMap::new() }, depth: 0, canonical: Vec::new() };
         let legacy = BTreeMap::from([(id.clone(), pushed)]);
         std::fs::write(root.join("pushed.json"), serde_json::to_vec(&legacy).unwrap()).unwrap();
         let index = load_index(&root).unwrap();
