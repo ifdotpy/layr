@@ -557,3 +557,7 @@ mod tests {
         assert!(s3.list("").unwrap().is_empty());
     }
 }
+
+#[cfg(test)]
+#[path = "s3_stream_tests.rs"]
+mod stream_tests;
