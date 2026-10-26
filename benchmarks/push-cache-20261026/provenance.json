@@ -37,5 +37,8 @@
     "workspace_passed": 240,
     "workspace_ignored": 8
   },
-  "cleanup_revision": "3edd581"
+  "cleanup_revision": "3edd581",
+  "daily_final_state_count": 7967,
+  "minimum_observed_host_free_gib": 32.514244079589844,
+  "cleanup_tests_revision": "3edd581"
 }

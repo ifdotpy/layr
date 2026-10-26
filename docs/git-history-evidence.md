@@ -281,3 +281,19 @@ estimated 2 GiB peak writes and at least 20 GiB free before starting, and stops
 below 10 GiB. The uninterrupted large run started with 42.0 GiB free. Obsolete
 caches/stores and the inactive build target were removed and trimmed after the
 host ENOSPC diagnosis. No AWS operation or remote-format change was made.
+
+The daily TLS comparison adds the same saved child to the 7,966-state history
+(7,967 total states afterward). It took **3.068 seconds before and 2.570 seconds
+after**, with **21 requests in both cases: 17 GET, one POST and three PUT**.
+Both runs listed only `keys/`, their own writer record prefix and the new state
+prefix. Neither downloaded an old tree. The journal needed no restart seed.
+The stand-in adds 5 ms to every request and serves a short encrypted nonce for
+reader proof. The earlier harness attempts failed before publication because
+of an oversized challenge and invalid token syntax; their retry reused the same
+saved child rather than creating another state.
+[Before requests](../benchmarks/push-cache-20261026/daily-before-requests.json)
+and [after requests](../benchmarks/push-cache-20261026/daily-after-requests.json)
+contain sanitized route and credential-class traces. The historical git-history
+measurement was 3.584 seconds and the same 21 requests; the current before/after
+pair is the direct comparison. During the guarded runs, the minimum recorded
+Mac free space was 32.51 GiB; no disk abort or restart occurred.
