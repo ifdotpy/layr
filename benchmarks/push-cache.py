@@ -32,10 +32,8 @@ if pid_file:
     pathlib.Path(pid_file).write_text(str(os.getpid()))
     atexit.register(lambda:pathlib.Path(pid_file).unlink(missing_ok=True))
 def terminate(signum,frame):
-    if active_process is not None:
-        active_process.terminate()
-        try:active_process.wait(timeout=10)
-        except subprocess.TimeoutExpired:active_process.kill();active_process.wait()
+    # Unwind Popen.wait before waiting again: its waitpid lock is not reentrant.
+    if active_process is not None:active_process.terminate()
     raise SystemExit(128+signum)
 signal.signal(signal.SIGTERM,terminate)
 signal.signal(signal.SIGINT,terminate)
@@ -61,6 +59,11 @@ def run(args,env=None,cwd=None,label=None):
     with (base/(label+'.log' if label else 'command.log')).open('ab') as log:
         active_process=subprocess.Popen([str(x) for x in args],env=env,cwd=cwd,stdout=log,stderr=subprocess.STDOUT)
         try:status=active_process.wait()
+        except BaseException:
+            active_process.terminate()
+            try:active_process.wait(timeout=10)
+            except subprocess.TimeoutExpired:active_process.kill();active_process.wait()
+            raise
         finally:active_process=None
         if status:raise subprocess.CalledProcessError(status,args)
     return time.monotonic()-started
@@ -224,6 +227,7 @@ def daily():
         (base/'daily-last-errors.json').write_text(json.dumps(errors,indent=2)+'\n')
         server.shutdown();server.server_close();thread.join(timeout=10)
 
-if args.phase=='daily':daily()
-else:
-    for fixture in (['layr','studio'] if args.fixture=='all' else [args.fixture]):measure(fixture,args.phase,base/('layr-'+args.phase))
+if __name__=='__main__':
+    if args.phase=='daily':daily()
+    else:
+        for fixture in (['layr','studio'] if args.fixture=='all' else [args.fixture]):measure(fixture,args.phase,base/('layr-'+args.phase))
