@@ -20,21 +20,25 @@ layr config checks.lines '{"main":["unit"]}'
 
 `checks.lines` selects protected line names, each with its check names. It is
 independent of the line's required merge checks. All `checks.*` project settings,
-like `check.*`, require the existing `access` action. These are signed project
-settings but, as with existing protection and command settings, imported settings
-are machine-qualified and do not replace local policy. Provision the commands,
-selection and protection on each executor/runner with its local administrator.
+like `check.*`, require the existing `access` action. Automatic checks read commands, selection, resource limits and protection from
+the verified project creator's perspective: the machine that signed the unique
+`project` record. Set and push that policy on the creator's machine. Runner-local
+`check.*` and `checks.*` values never change what the watcher executes. Missing or
+ambiguous creator records refuse execution. Other CLI operations retain their
+local policy; a cloning OS user receives signed local admin access for that copy
+only. Fetch into an existing project never grants local access.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `checks.changes` | `[]` | Checks for every immutable logical change version |
 | `checks.lines` | `{}` | Protected line names mapped to check name arrays |
 | `checks.privileged` | `[]` | Explicit names permitted to execute as root |
+| `checks.platforms` | `{}` | Check names mapped to `linux` or `macos`; unset names run on either |
 | `checks.timeout` | `900` | Wall timeout and per-process CPU seconds; 1–86400 |
 | `checks.memory` | `4294967296` | Per-process hard address-space limit in bytes |
 | `checks.processes` | `256` | Hard process limit for the sandbox user |
 | `checks.log-bytes` | `1048576` | Retained combined output bytes; at most 16 MiB |
-| `checks.runner` | `false` | Machine-local opt-in to execute checks; root changes it with `config --local` |
+| `checks.runner` | `false` | Machine-local opt-in to execute checks; root on Linux, metadata owner on macOS, using `config --local` |
 | `checks.privileged-runner` | `false` | Additional machine-local opt-in to execute explicitly privileged checks |
 
 Each project has one watcher, protected by a local `flock`. Jobs run sequentially.
@@ -45,7 +49,7 @@ permits a retry. The privileged mode must also match. Manual `try` results lack
 the executor marker and cannot suppress executor work. Returned executor evidence
 from other trusted machines does count. The small executor reports pending work;
 an opted-in runner executes all checks. A Linux laptop VM can also be a runner.
-The lock is local, not a distributed lease: run one active runner per project.
+The lock is local, not a distributed lease: run one active runner per project and platform.
 
 Each result is the existing `check` attestation with state, command, argv, exit,
 `privileged`, and `log_ref`. The referenced derived state contains `check.log`.
@@ -96,6 +100,9 @@ in addition to `checks.runner true`. The two local settings default to false.
 They use a root-owned mode-600 file in project metadata; it is never
 a signed project setting and never syncs. It can be disabled or unset with the
 same `--local` option. Without privileged opt-in, those jobs remain pending.
+Privileged jobs additionally require a state that was a main head on the creator's
+machine, or an active exact-state approval from a current creator-side maintainer
+or a pinned maintainer person. A runner-local main movement cannot bypass this gate.
 The runner invokes `checks watch --once --json` to run all selected checks.
 The optional `--privileged-only` filter skips normal jobs and requires both opts.
 Run this caller
@@ -134,10 +141,11 @@ after sync. This count is advisory; it does not authorize execution.
 
 ## Layr's Linux workflow equivalents
 
-On each clone, provision the local service account's reader role and main protection
-before selecting its checks (for example, `layr access grant layr-checks reader`
-and `layr protect main --no-direct`, retaining any additional existing rules).
-Run `bash tools/checks/configure.sh` as the local project administrator. It defines:
+On the creator's machine, retain the required main protection and run
+`bash tools/checks/configure.sh`, then push. On Linux runner copies, provision the
+local service account's reader role (`layr access grant layr-checks reader`). The
+creator's platform map selects Linux or APFS checks without runner-local overrides.
+The configuration defines:
 
 | Check | Mode | GitHub workflow equivalent |
 | --- | --- | --- |
@@ -145,6 +153,7 @@ Run `bash tools/checks/configure.sh` as the local project administrator. It defi
 | `integration` | Privileged | `ci.yml`: build, unit tests, full btrfs integration suite |
 | `overlayfs-ext4` | Privileged | `overlayfs.yml`: ext4, unit/local/cache/selected integration tests and casefold rejection |
 | `overlayfs-xfs` | Privileged | Same OverlayFS tests on xfs |
+| `apfs` | macOS sandbox | `ci.yml` APFS suite, excluding the separate root service operator check |
 
 The scripts keep the filesystem matrix explicit and unmount loop files on exit.
 Provision btrfs-progs, xfsprogs, e2fsprogs, zstd, git, python3, bubblewrap,
@@ -162,5 +171,10 @@ of symlinking to host paths outside `/usr`, which the sandbox cannot see.
 The unit script sets one Cargo build job for small executors. Each machine may
 override `checks.memory` after configuring it; this is a hard address-space
 ceiling, and does not reserve that amount of host RAM.
-These definitions cover the two Linux filesystem workflows; APFS still requires
-a macOS executor.
+On macOS the creator's platform map selects `apfs`, the nonprivileged APFS workflow
+equivalent. Its watcher uses sandbox-exec and requires a current maintainer's
+exact-state approval for change versions; main heads can run without it. Its
+machine-local opt-in belongs to the user who owns the project's metadata.
+Privileged execution remains unavailable on macOS. The separate root-only service
+test is an operator check. See [laptop-runner.md](laptop-runner.md) for machine
+provisioning, volume setup, services, verification and residual host risk.

@@ -1,0 +1,156 @@
+# Laptop check runners
+
+The dedicated Lima VZ VM `layr-runner-vz` runs btrfs and OverlayFS checks. The Mac
+user runs APFS checks. Both receive immutable states, run `layr checks watch`,
+and publish signed check attestations and retained logs through ordinary fetch
+and push. AWS executes no test code. See [checks.md](checks.md) for result and
+deduplication semantics. Check policy comes only from the verified project creator; runner flags remain machine-local.
+
+## Linux VM
+
+The isolated OrbStack machine `layr-runner` was created first. Its device policy
+refused loop setup and even `mknod /dev/loop-control` with EPERM. Its watcher is
+stopped. Do not remove that isolation or enable Mac mounts. Use the full VM:
+
+```sh
+limactl create --yes --name=layr-runner-vz tools/checks/layr-runner-vz.yaml
+limactl start --yes layr-runner-vz
+git archive HEAD -o /tmp/layr-runner-source.tar
+limactl copy /tmp/layr-runner-source.tar layr-runner-vz:/tmp/source.tar
+limactl shell --workdir=/tmp layr-runner-vz sudo bash
+mkdir -p /opt/layr-runner /var/log/layr-runner
+tar -xf /tmp/source.tar -C /opt/layr-runner
+cd /opt/layr-runner
+setsid nohup bash tools/checks/install-linux.sh > /var/log/layr-runner/install.log 2>&1 </dev/null & disown
+```
+
+The tracked VZ config has `mounts: []` and disables SSH agent forwarding. Before
+allowing privileged checks, verify `/Users` and `/mnt/mac` do not exist inside,
+and attach/detach a disposable image with `losetup --find --show` / `losetup -d`.
+Never stop or restart the shared development machine or OrbStack itself.
+
+The installer prepares the pinned MinIO source release, Helm 3.19.0, filesystem
+tools, bubblewrap, and a credential-free Rust toolchain/cache under `/usr`.
+It enables unprivileged user namespaces for bubblewrap on Ubuntu 24.04.
+Inspect the install log before continuing. Keep one build target, remove the
+installer's `target/` after installing the binary, and remove Go build/download
+caches after MinIO builds. Checks compile in private copies deleted after each
+run; they share only the read-only toolchain. Keep at least 15 GiB free on the
+Mac backing volume. A VM's reported free space does not measure this limit.
+
+Run `bash tools/checks/prepare-linux-store.sh`. It uses the existing btrfs root
+when present, or creates a persistent btrfs loop mount at `/var/lib/layr`.
+Obtain this machine's public identity with `layr remote self --json`.
+On an existing project owner's machine, enroll it with:
+
+```sh
+layr remote trust origin RUNNER_MACHINE_ID --public-key RUNNER_PUBLIC_KEY
+layr push origin
+```
+
+On the creator's machine, configure the project with `tools/checks/configure.sh`
+and push that signed policy. Clone the existing remote on the runner using its own machine slot. Never put a
+real project's paper key on a runner. Give it only its own machine identity, an owner-issued project write grant with the maintainer role, and
+the transport credential needed for that project. Transport credentials come
+from the environment (`LAYR_GATEWAY_TOKEN_FILE` or the relevant storage variables),
+never project config or check commands. A root-owned `/etc/layr-runner.env` may
+provide those variable names/paths to the daemon; keep that file mode 0600.
+After cloning, as root in the project:
+
+```sh
+layr access grant layr-checks reader
+layr config --local checks.runner true
+layr config --local checks.privileged-runner true
+bash tools/checks/install-services.sh PROJECT
+```
+
+The daemon has cgroup memory/process ceilings. `layr-checks@PROJECT` runs the
+watcher as the non-root service user and restarts on failure or VM boot.
+`layr-sync@PROJECT.timer` fetches then pushes results and the site index every
+15 seconds. Stop this project's units before replacing its binary or policy.
+An executor elsewhere keeps both machine-local execution flags off.
+
+```sh
+systemctl status layr-runner-daemon layr-checks@PROJECT layr-sync@PROJECT.timer
+journalctl -u layr-checks@PROJECT -u layr-sync@PROJECT --since today
+limactl stop layr-runner-vz && limactl start layr-runner-vz  # Mac; verify the units again
+```
+
+## Mac user runner
+
+Install coreutils, gnu-sed and zstd through Homebrew. In a trusted checkout run
+`bash tools/checks/prepare-macos.sh` as the runner user. It prepares two dedicated
+sparse APFS disk images, mounts them at `/Volumes/LayrRunner` (case-sensitive)
+and `/Volumes/LayrRunnerCase` (case-insensitive), and prepares an APFS-cloned
+toolchain/cache seed without credentials. Keep these images mounted while the
+watcher runs. After a Mac restart, rerun the preparation command to attach them.
+Do not store personal data on these volumes. Refresh the seed after Cargo.lock
+changes. The seed lives in `~/Library/Application Support/Layr/checks`.
+
+There is one separate operator check, outside automatic execution. After building
+the binary, the owner runs this once from the trusted checkout:
+
+```sh
+sudo bash tools/checks/macos-operator.sh "$PWD/target/debug/layr" igor
+```
+
+This enables volume ownership and executes the root-only `tests/apfs-service.sh`.
+Its result is operator evidence, separate from the nonprivileged APFS attestation.
+Automatic commands never invoke sudo. Report the operator check as unverified
+until this command has completed successfully.
+
+Enroll the Mac's own public machine identity from the project owner's machine,
+then clone into a dedicated user-owned store. In that clone:
+
+```sh
+layr config --local checks.runner true
+python3 tools/checks/install-macos-agent.py PROJECT \
+  --binary /absolute/path/to/installed/layr --root /absolute/path/to/runner/store
+```
+
+Use a stable installed binary path. The user LaunchAgents restart the watcher
+and fetch/push periodically, with logs under `~/Library/Logs/Layr`. Execution
+opt-in is a private machine-local file owned by the project metadata owner on
+macOS. Privileged opt-in is always refused on macOS. Linux retains its root-owned
+opt-in policy. Stop with `launchctl bootout gui/$(id -u)/ws.layr.checks.PROJECT`
+(and the matching `fetch` and `push` agents).
+
+Mac execution permits main heads and exact change versions with an active approval
+from a current maintainer. Amending a change requires a new approval; withdrawing
+an approval blocks unexecuted work. Other states stay pending. Local uid approvals
+count only on their own machine; pinned person approvals survive transport.
+The watcher consumes only creator-side check policy and protection. Local admin
+access on a clone permits local operations and transport configuration; its own
+check definitions cannot select or replace automatic jobs.
+
+`sandbox-exec` denies network access and permits writes only in the private check
+folder and the two dedicated test volumes. The check gets a clean environment,
+private HOME, timeout, process limits and capped logs. Tools and the prepared
+cache are read-only. Darwin does not enforce the Linux address-space limit;
+`checks.memory` still bounds output files there. Missing or refused sandbox
+execution fails visibly.
+The Mac process limit counts all processes of the runner user, including desktop
+applications; its default is 4096. Linux uses a dedicated service account.
+Residual risk: approved repository code executes on the personal Mac with access
+to macOS system interfaces and read-only system/Homebrew tools. The sandbox is
+not a VM isolation boundary; kernel or system-service defects may escape it.
+Approval grants trust to run that exact version. Linux privileged code has full
+VM root access and must never share the personal Mac's files or credentials.
+
+## Verification
+
+Run `cargo test --locked --bin layr macos_tests -- --nocapture` for actual sandbox
+network/write refusal, and `LAYR="$PWD/target/debug/layr" bash tests/apfs-checks.sh`
+for main execution, approval/amend/withdrawal gates, failed checks and retained
+signed logs. Linux's `tests/t43-checks.sh` covers remote arrivals and attestation
+deduplication. The configured filesystem scripts run the workflow suites.
+
+For acceptance, push a new change version to a disposable file/MinIO project,
+fetch on each runner, and verify the btrfs, ext4, xfs and APFS results with
+`layr attestations STATE --kind check --json`. Read each result's retained log
+with `layr show LOG_REF:check.log`. Trigger one deliberate failure and verify its
+nonzero result/log. Restart the VM and verify the watcher resumes. Finally repeat
+against a disposable project on `cloud.layr.ws`, then inspect its change/main
+pages. A local run alone does not prove site delivery. A disposable test store's
+paper key stays only in its owner's temporary folder and is deleted with that
+store; it never enters the runner VM.

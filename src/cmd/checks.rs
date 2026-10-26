@@ -36,6 +36,14 @@ pub fn validate_config(key: &str, value: &Value) -> Result<()> {
                 names(key, checks)?;
             }
         }
+        "checks.platforms" => {
+            for (name, platform) in value.as_object().context("checks.platforms must be an object")? {
+                crate::oci::valid_component(name)?;
+                if !matches!(platform.as_str(), Some("linux" | "macos")) {
+                    bail!("check platform must be linux or macos");
+                }
+            }
+        }
         "checks.timeout" => {
             number(key, value, 1, 86400)?;
         }
@@ -81,8 +89,9 @@ fn local_settings(repo: &Repo) -> Result<Local> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Local::default()),
         Err(e) => return Err(e.into()),
     };
-    if !meta.is_file() || meta.uid() != 0 || meta.mode() & 0o077 != 0 || meta.len() > 1024 {
-        bail!("{} must be a root-owned private regular file", path.display());
+    let owner = if cfg!(target_os = "macos") { std::fs::metadata(repo.p.meta_dir())?.uid() } else { 0 };
+    if !meta.is_file() || meta.uid() != owner || meta.mode() & 0o077 != 0 || meta.len() > 1024 {
+        bail!("{} must be a private regular file owned by the machine administrator", path.display());
     }
     serde_json::from_slice(&std::fs::read(path)?).context("invalid local check runner settings")
 }
@@ -98,8 +107,9 @@ pub fn local_config(ctx: &Ctx, repo: &Repo, a: &Parsed) -> Result<i32> {
         outln!(ctx, "{}", if key == Some(RUNNER_KEY) { settings.runner } else { settings.privileged });
         return Ok(0);
     }
-    if !ctx.caller.is_root() {
-        bail!("only root may change machine-local check execution");
+    let owner = if cfg!(target_os = "macos") { std::fs::metadata(repo.p.meta_dir())?.uid() } else { 0 };
+    if ctx.caller.uid != owner {
+        bail!("only the machine administrator may change machine-local check execution");
     }
     let enabled = if a.has("--unset") {
         false
@@ -109,6 +119,9 @@ pub fn local_config(ctx: &Ctx, repo: &Repo, a: &Parsed) -> Result<i32> {
         }
         a.pos[1].parse::<bool>().context("privileged runner must be true or false")?
     };
+    if cfg!(target_os = "macos") && key == Some(LOCAL_KEY) && enabled {
+        bail!("privileged automatic checks are unavailable on macOS");
+    }
     let _lock = repo.p.lock()?;
     let mut settings = local_settings(repo)?;
     if key == Some(RUNNER_KEY) {
@@ -125,8 +138,8 @@ pub fn checks(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if a.pos != ["watch"] || !a.paths.is_empty() {
         return Err(exit(128, "usage: layr checks watch [--once] [--privileged-only] [--interval <seconds>] [--json]\nTo list check results, use layr attestations."));
     }
-    if !cfg!(target_os = "linux") {
-        bail!("automatic checks require Linux");
+    if !cfg!(any(target_os = "linux", target_os = "macos")) {
+        bail!("automatic checks require Linux or macOS");
     }
     if ctx.caller.is_root() {
         bail!("checks watch needs a non-root service user through the layr daemon");
@@ -175,8 +188,8 @@ pub fn checks(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
 }
 
-fn setting(repo: &Repo, key: &str, default: Value) -> Result<Value> {
-    let value = repo.p.config_value(key)?.unwrap_or(default);
+fn setting(policy: &layr_model::Project, key: &str, default: Value) -> Result<Value> {
+    let value = policy.setting(key).cloned().unwrap_or(default);
     validate_config(key, &value)?;
     Ok(value)
 }
@@ -188,10 +201,19 @@ struct Scan {
 }
 
 fn scan(ctx: &Ctx, repo: &Repo, privileged_only: bool) -> Result<Scan> {
-    let changes = names("checks.changes", &setting(repo, "checks.changes", json!([]))?)?;
-    let lines = setting(repo, "checks.lines", json!({}))?;
+    let records = repo
+        .p
+        .db
+        .all_lines()?
+        .iter()
+        .map(|line| crate::oplog::parse_line(line, None).map(|s| s.record))
+        .collect::<Result<Vec<_>>>()?;
+    let (policy, main_states) = creator_policy(&repo.p.id, records)?;
+    let changes = names("checks.changes", &setting(&policy, "checks.changes", json!([]))?)?;
+    let lines = setting(&policy, "checks.lines", json!({}))?;
+    let platforms = setting(&policy, "checks.platforms", json!({}))?;
     let privileged: BTreeSet<_> =
-        names("checks.privileged", &setting(repo, "checks.privileged", json!([]))?)?.into_iter().collect();
+        names("checks.privileged", &setting(&policy, "checks.privileged", json!([]))?)?.into_iter().collect();
     let mut jobs = BTreeSet::new();
     for change in repo.p.db.changes()? {
         for state in repo.p.db.change_versions(&change)? {
@@ -202,7 +224,7 @@ fn scan(ctx: &Ctx, repo: &Repo, privileged_only: bool) -> Result<Scan> {
     }
     let mut watched_lines = BTreeMap::new();
     for (line, checks) in lines.as_object().context("checks.lines must be an object")? {
-        if repo.policy().rule_for(line).is_none() {
+        if policy.access_policy(crate::ids::now_ms(), false).rule_for(line).is_none() {
             bail!("automatic line '{line}' must be protected");
         }
         let checks = names("checks.lines", checks)?;
@@ -227,21 +249,23 @@ fn scan(ctx: &Ctx, repo: &Repo, privileged_only: bool) -> Result<Scan> {
         }
     }
     let mut commands = BTreeMap::new();
+    jobs.retain(|(_, name)| platforms.get(name).and_then(Value::as_str).is_none_or(|platform| platform == std::env::consts::OS));
     for (_, name) in &jobs {
         if !commands.contains_key(name) {
-            let command = repo
-                .p
-                .config_value(&format!("check.{name}"))?
+            let command = policy
+                .setting(&format!("check.{name}"))
                 .and_then(|v| v.as_str().map(String::from))
                 .with_context(|| format!("check '{name}' is not defined (layr config check.{name} '<command>')"))?;
             commands.insert(name.clone(), command);
         }
     }
     let limits = Limits {
-        timeout: setting(repo, "checks.timeout", json!(900))?.as_u64().context("invalid checks.timeout")?,
-        memory: setting(repo, "checks.memory", json!(4_u64 << 30))?.as_u64().context("invalid checks.memory")?,
-        processes: setting(repo, "checks.processes", json!(256))?.as_u64().context("invalid checks.processes")?,
-        log_bytes: setting(repo, "checks.log-bytes", json!(1 << 20))?.as_u64().context("invalid checks.log-bytes")? as usize,
+        timeout: setting(&policy, "checks.timeout", json!(900))?.as_u64().context("invalid checks.timeout")?,
+        memory: setting(&policy, "checks.memory", json!(4_u64 << 30))?.as_u64().context("invalid checks.memory")?,
+        processes: setting(&policy, "checks.processes", json!(if cfg!(target_os = "macos") { 4096 } else { 256 }))?
+            .as_u64()
+            .context("invalid checks.processes")?,
+        log_bytes: setting(&policy, "checks.log-bytes", json!(1 << 20))?.as_u64().context("invalid checks.log-bytes")? as usize,
     };
     let local = local_settings(repo)?;
     if privileged_only && !(local.runner && local.privileged) {
@@ -274,7 +298,9 @@ fn scan(ctx: &Ctx, repo: &Repo, privileged_only: bool) -> Result<Scan> {
             continue;
         }
         repo.check_view_read(ctx, &crate::overlay::View::new(state.clone(), vec![]))?;
-        if !local.runner || (is_privileged && !local.privileged) {
+        let host_allowed = (!cfg!(target_os = "macos") || !is_privileged)
+            && (!(cfg!(target_os = "macos") || is_privileged) || approved(&policy, &state, &main_states));
+        if !local.runner || (is_privileged && !local.privileged) || !host_allowed {
             pending += 1;
             if is_privileged {
                 pending_privileged += 1;
@@ -283,9 +309,9 @@ fn scan(ctx: &Ctx, repo: &Repo, privileged_only: bool) -> Result<Scan> {
         }
         let result = super::admin::with_try_copy(ctx, repo, &state, &[], false, |dir| {
             let started = std::time::Instant::now();
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             let (code, log, truncated) = execute(ctx, repo, dir, &state, &argv, is_privileged, &limits)?;
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             let (code, log, truncated): (i32, Vec<u8>, bool) = {
                 bail!("automatic checks require Linux");
             };
@@ -320,6 +346,43 @@ fn scan(ctx: &Ctx, repo: &Repo, privileged_only: bool) -> Result<Scan> {
     Ok(Scan { checks: results, pending, pending_privileged })
 }
 
+fn creator_policy(project: &str, records: Vec<crate::model::Record>) -> Result<(layr_model::Project, BTreeSet<String>)> {
+    let creator = layr_model::project_perspective(project, &records)
+        .context("automatic checks refuse to run without an unambiguous verified project creator")?;
+    let mut states = BTreeSet::new();
+    for record in &records {
+        if record.machine == creator {
+            for movement in record.lines.values() {
+                if let Some(after) = &movement.after {
+                    if after.name == "main" {
+                        states.insert(after.head.clone());
+                    }
+                }
+            }
+        }
+    }
+    Ok((layr_model::Project::from_records(project, records, &creator)?, states))
+}
+
+/// Only exact-state, active approvals from current maintainers authorize host code.
+fn approved(project: &layr_model::Project, state: &str, main: &BTreeSet<String>) -> bool {
+    if main.contains(state) {
+        return true;
+    }
+    let policy = project.access_policy(crate::ids::now_ms(), false);
+    for (uid, _) in project.approvals(state) {
+        // Uids refer to the creator's machine, so do not infer groups from this host.
+        let who = layr_model::policy::Who { uid, groups: vec![] };
+        if policy.role(&who) >= crate::access::Role::Maintainer && policy.denied_by(&who, "approve").is_none() {
+            return true;
+        }
+    }
+    project
+        .person_approvals(state)
+        .iter()
+        .any(|(login, _)| policy.person_role(login) >= crate::access::Role::Maintainer && !policy.person_denied(login, "approve"))
+}
+
 struct Limits {
     timeout: u64,
     memory: u64,
@@ -337,13 +400,8 @@ fn execute(
     privileged: bool,
     limits: &Limits,
 ) -> Result<(i32, Vec<u8>, bool)> {
-    use std::io::Read;
-    use std::os::fd::OwnedFd;
     use std::os::unix::fs::DirBuilderExt;
-    use std::os::unix::net::UnixStream;
-    use std::os::unix::process::{CommandExt, ExitStatusExt};
-    use std::process::{Command, Stdio};
-    use std::time::{Duration, Instant};
+    use std::process::Command;
 
     let private = if privileged {
         if !rustix::process::geteuid().is_root() {
@@ -388,7 +446,7 @@ fn execute(
         }
         command = Command::new("/usr/bin/bwrap");
         command.args(["--unshare-all", "--die-with-parent", "--new-session", "--cap-drop", "ALL", "--clearenv"]);
-        for system in ["/usr", "/bin", "/sbin", "/lib", "/lib64"] {
+        for system in ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc/alternatives"] {
             if std::path::Path::new(system).exists() {
                 command.args(["--ro-bind", system, system]);
             }
@@ -426,6 +484,75 @@ fn execute(
             .current_dir("/");
         crate::privs::command_as(&mut command, ctx.caller.uid, &[])?;
     }
+    run_check(command, limits)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_profile(work: &std::path::Path, seed: &std::path::Path) -> Result<String> {
+    let quote = |path: &std::path::Path| serde_json::to_string(&path.to_string_lossy());
+    Ok(format!(
+        r#"(version 1)
+(deny default)
+(allow process*)
+(allow signal (target same-sandbox))
+(allow mach-lookup)
+(allow sysctl-read)
+(allow file-read-metadata)
+(allow file-read*
+    (literal "/")
+    (subpath "/System") (subpath "/usr") (subpath "/bin") (subpath "/sbin")
+    (subpath "/Library/Apple") (subpath "/Library/Developer")
+    (subpath "/Applications/Xcode.app/Contents")
+    (subpath "/opt/homebrew") (subpath "/private/etc")
+    (subpath "/private/var/db/dyld") (subpath "/dev")
+    (subpath {work}) (subpath {seed})
+    (subpath "/Volumes/LayrRunner") (subpath "/Volumes/LayrRunnerCase"))
+(allow file-write*
+    (subpath {work}) (literal "/dev/null")
+    (subpath "/Volumes/LayrRunner") (subpath "/Volumes/LayrRunnerCase"))
+"#,
+        work = quote(work)?,
+        seed = quote(seed)?
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn execute(
+    ctx: &Ctx,
+    _repo: &Repo,
+    dir: &std::path::Path,
+    state: &str,
+    argv: &[String],
+    privileged: bool,
+    limits: &Limits,
+) -> Result<(i32, Vec<u8>, bool)> {
+    if privileged {
+        bail!("privileged automatic checks are unavailable on macOS");
+    }
+    let dir = std::fs::canonicalize(dir)?;
+    let home = dir.join(format!(".check-home-{}", crate::ids::new_id()));
+    std::fs::create_dir(&home)?;
+    let seed = std::path::PathBuf::from(crate::privs::user(ctx.caller.uid)?.home).join("Library/Application Support/Layr/checks");
+    let mut command = std::process::Command::new("/usr/bin/sandbox-exec");
+    command.args(["-p", &macos_profile(&dir, &seed)?, "--"]).args(argv).current_dir(&dir);
+    crate::privs::command_as(&mut command, ctx.caller.uid, &[
+        ("HOME".into(), home.display().to_string()),
+        ("TMPDIR".into(), home.display().to_string()),
+        ("LAYR_TRY_STATE".into(), state.into()),
+        ("LAYR_CHECK_SEED".into(), seed.display().to_string()),
+        ("PATH".into(), "/opt/homebrew/opt/coreutils/libexec/gnubin:/opt/homebrew/opt/gnu-sed/libexec/gnubin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin".into()),
+    ])?;
+    run_check(command, limits)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn run_check(mut command: std::process::Command, limits: &Limits) -> Result<(i32, Vec<u8>, bool)> {
+    use std::io::Read;
+    use std::os::fd::OwnedFd;
+    use std::os::unix::net::UnixStream;
+    use std::os::unix::process::{CommandExt, ExitStatusExt};
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
     // Limits are hard limits inherited by descendants; the sandbox also has a PID namespace.
     crate::sys::check_limits_before_exec(&mut command, limits.memory, limits.processes, limits.timeout)?;
     command.process_group(0).stdin(Stdio::null());
@@ -475,6 +602,86 @@ fn execute(
     drain(&mut reader)?;
     drop(drain);
     let code = outcome?;
-    drop(private);
     Ok((code, log, truncated))
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_tests {
+    use super::*;
+    use std::process::Command;
+
+    #[test]
+    fn sandbox_refuses_network_and_writes_outside_work() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("layr-sandbox-test-{}", crate::ids::new_id()));
+        std::fs::create_dir(&root)?;
+        let cleanup = crate::repo::Temp { path: root.clone() };
+        let work = root.join("work");
+        std::fs::create_dir(&work)?;
+        let work = std::fs::canonicalize(work)?;
+        let profile = macos_profile(&work, &work)?;
+        let status = |args: &[&std::ffi::OsStr]| {
+            let result = Command::new("/usr/bin/sandbox-exec").env_clear().args(["-p", &profile, "--"]).args(args).status();
+            result
+        };
+        assert!(status(&["/usr/bin/touch".as_ref(), work.join("allowed").as_os_str()])?.success());
+        let outside = root.join("forbidden");
+        assert!(!status(&["/usr/bin/touch".as_ref(), outside.as_os_str()])?.success());
+        assert!(!outside.exists());
+        let server = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let port = server.local_addr()?.port().to_string();
+        // The same open local port succeeds without the sandbox, ruling out connection refusal.
+        assert!(Command::new("/usr/bin/nc").args(["-z", "-w", "1", "127.0.0.1", &port]).status()?.success());
+        assert!(!status(&[
+            "/usr/bin/nc".as_ref(),
+            "-z".as_ref(),
+            "-w".as_ref(),
+            "1".as_ref(),
+            "127.0.0.1".as_ref(),
+            port.as_ref()
+        ])?
+        .success());
+        drop(cleanup);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+
+    fn record(machine: &str, op: &str, data: Value) -> crate::model::Record {
+        let mut record = crate::model::Record::new(op);
+        record.id = crate::ids::new_id();
+        record.project = "project".into();
+        record.machine = machine.into();
+        record.seq = 1;
+        record.data = data;
+        record
+    }
+
+    #[test]
+    fn creator_commands_ignore_runner_overrides_and_require_creator() -> Result<()> {
+        let creator = record(
+            "owner",
+            "project",
+            json!({"id":"project","config":{
+                "check.unit":"echo creator", "checks.changes":["unit"], "protect":{"main":{}}
+            }}),
+        );
+        let runner = record(
+            "runner",
+            "config",
+            json!({"config":{
+                "check.unit":"echo local", "checks.changes":["local"], "protect":{}
+            }}),
+        );
+        let (policy, _) = creator_policy("project", vec![creator.clone(), runner.clone()])?;
+        assert_eq!(policy.setting("check.unit"), Some(&json!("echo creator")));
+        assert_eq!(policy.setting("checks.changes"), Some(&json!(["unit"])));
+        assert!(policy.access_policy(0, false).rule_for("main").is_some());
+        assert!(creator_policy("project", vec![runner]).is_err());
+        let conflicting = record("other", "project", json!({"id":"project","config":{}}));
+        assert!(creator_policy("project", vec![creator, conflicting]).is_err());
+        Ok(())
+    }
 }
