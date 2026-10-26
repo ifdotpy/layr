@@ -81,6 +81,8 @@ struct SessionToken {
 pub struct Gateway {
     pub(super) replay: Option<Arc<super::cdn::Replay>>,
     http: Client,
+    signing: Arc<super::cdn::Signing>,
+    prepared: Arc<Mutex<std::collections::BTreeMap<String, serde_json::Value>>>,
     base: reqwest::Url,
     token: Option<String>,
     machine: Option<String>,
@@ -96,6 +98,8 @@ impl Clone for Gateway {
         Self {
             replay: self.replay.clone(),
             http: self.http.clone(),
+            signing: self.signing.clone(),
+            prepared: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             base: self.base.clone(),
             token: self.token.clone(),
             machine: self.machine.clone(),
@@ -124,6 +128,20 @@ fn json<T: serde::de::DeserializeOwned>(response: Response, limit: usize) -> Res
         bail!("gateway: HTTP {}", response.status().as_u16());
     }
     serde_json::from_slice(&bytes(response, limit)?).map_err(|_| anyhow!("invalid gateway JSON response"))
+}
+
+fn busy_response(mut send: impl FnMut() -> Result<Response>) -> Result<Response> {
+            for attempt in 0..4 {
+                let response = send()?;
+                if response.status().as_u16() != 503 { return Ok(response); }
+                let delay = response.headers().get("retry-after").and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok()).filter(|n| *n <= 60);
+                let body: serde_json::Value = serde_json::from_slice(&bytes(response, 512)?).unwrap_or_default();
+                if body["error"] != "gateway is busy; retry later" || delay.is_none() || attempt == 3 {
+                    return Err(super::cdn::BusyFailure.into());
+                }
+                std::thread::sleep(Duration::from_millis(delay.unwrap() * 1000 + (rand::random::<u16>() as u64 % 251)));
+            }
+            unreachable!()
 }
 
 fn ca_file(path: &std::path::Path) -> Result<Vec<u8>> {
@@ -174,6 +192,8 @@ impl Gateway {
         Ok(Self {
             replay: None,
             http,
+            signing: Arc::new(super::cdn::Signing::default()),
+            prepared: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             base,
             token: None,
             machine: None,
@@ -190,6 +210,7 @@ impl Gateway {
         let mut transport = self.clone();
         transport.replay = Some(replay);
         transport.read = self.read.clone();
+        transport.prepared = self.prepared.clone();
         transport
     }
 
@@ -267,18 +288,18 @@ impl Gateway {
             challenge: String,
             expires: i64,
         }
-        let challenge: Challenge = json(self.http.get(url).send().map_err(reqwest::Error::without_url)?, 4096)?;
+        let challenge: Challenge = json(busy_response(|| self.http.get(url.clone()).send().map_err(reqwest::Error::without_url).map_err(Into::into))?, 4096)?;
         let now = crate::ids::now_ms();
         if challenge.expires <= now || challenge.expires > now + 60_000 {
             bail!("invalid or expired gateway session challenge");
         }
         let signature = layr_store::session::sign(&person.login, &challenge.challenge, &person.key)?;
-        let response = self
+        let response = busy_response(|| self
             .http
             .post(self.base.join("/api/session")?)
             .json(&serde_json::json!({"login":person.login,"challenge":challenge.challenge,"signature":signature}))
             .send()
-            .map_err(reqwest::Error::without_url)?;
+            .map_err(reqwest::Error::without_url).map_err(Into::into))?;
         let token: SessionToken = json(response, 4096)?;
         let now = crate::ids::now_ms();
         if token.login != person.login
@@ -379,6 +400,7 @@ impl Gateway {
         Ok(())
     }
     pub fn set_identity(&self, identity: &str) -> Result<()> {
+        self.prepared.lock().map_err(|_| anyhow!("gateway prepared link lock failed"))?.clear();
         *self.identity.lock().map_err(|_| anyhow!("gateway identity lock failed"))? = Some(identity.into());
         Ok(())
     }
@@ -420,7 +442,7 @@ impl Gateway {
             url.query_pairs_mut().append_pair(key, value);
         }
         let person = bearer.is_none() && self.person.lock().map_err(|_| anyhow!("gateway session lock failed"))?.is_some();
-        let send = |token: Option<&str>| -> Result<Response> {
+        let send_once = |token: Option<&str>| -> Result<Response> {
             let mut request = self.http.request(method.clone(), url.clone());
             if cdn {
                 request = request.header("x-layr-cdn", "1");
@@ -430,10 +452,14 @@ impl Gateway {
             }
             if let Some(data) = &data {
                 request = request
-                    .header("content-type", if action == "token" { "application/json" } else { "application/octet-stream" })
+                    .header("content-type", if matches!(action, "token" | "cdn") { "application/json" } else { "application/octet-stream" })
                     .body(data.clone());
             }
             request.send().map_err(reqwest::Error::without_url).map_err(Into::into)
+        };
+        let send = |token: Option<&str>| -> Result<Response> {
+            let _lease = (cdn || action == "cdn").then(|| self.signing.acquire());
+            busy_response(|| send_once(token))
         };
         if person {
             let response = send(Some(&self.session_token(false)?))?;
@@ -559,7 +585,7 @@ impl Gateway {
             url.query_pairs_mut().append_pair(key, value);
         }
         // Anonymous routes are GET only and never carry a token or private read proof.
-        self.http.get(url).send().map_err(reqwest::Error::without_url).map_err(Into::into)
+        busy_response(|| self.http.get(url.clone()).send().map_err(reqwest::Error::without_url).map_err(Into::into))
     }
 
     /// A side metadata request must not turn a writer into a public-only reader.
@@ -600,6 +626,46 @@ impl Gateway {
         }
     }
 
+    pub(super) fn prepare_batch(&self, keys: &[String]) -> Result<()> {
+        if self.replay.as_ref().is_some_and(|replay|replay.is_direct()) || !self.has_read_identity() || self.is_public() { return Ok(()); }
+        let mut groups = std::collections::BTreeMap::<String,Vec<(String,String)>>::new();
+        for key in keys {
+            if !super::cdn::cacheable(key) || self.replay.as_ref().is_some_and(|replay|replay.cached(&format!("{}{key}",self.base))) { continue; }
+            if self.prepared.lock().expect("prepared link lock").contains_key(&format!("{}{key}",self.base)) { continue; }
+            let (epoch, relative) = epoch_path(key).unwrap_or(("root",key.as_str()));
+            groups.entry(epoch.into()).or_default().push((key.clone(),relative.into()));
+        }
+        for (epoch, entries) in groups {
+            let body=serde_json::to_vec(&serde_json::json!({"epoch":epoch,"keys":entries.iter().map(|(_,key)|key).collect::<Vec<_>>()}))?;
+            let mut response=None;
+            for attempt in 0..2 {
+                let proof=self.proof()?;
+                let reply=self.send_query_inner(Method::POST,"cdn",Some(&proof),&[],Some(body.clone()),false)?;
+                if reply.status().as_u16()==401 && attempt==0 { *self.read.lock().expect("read proof lock")=None; continue; }
+                response=Some(reply); break;
+            }
+            let response=response.context("gateway batch proof refused")?;
+            if response.status().as_u16()==405 { return Ok(()); } // Older gateway: retain the single-key form.
+            let value:serde_json::Value=json(response,2<<20)?;
+            let objects=value["objects"].as_array().filter(|objects|objects.len()==entries.len()).context("invalid CDN batch reply")?;
+            let mut prepared=Vec::new();
+            for ((key,_), item) in entries.iter().zip(objects) {
+                let status=item["status"].as_u64().filter(|status|(100..=599).contains(status)).context("invalid CDN batch status")?;
+                if status==200 && item["direct"]!=true {
+                    let mut object=item.as_object().context("invalid CDN batch item")?.clone(); object.remove("status");
+                    let link:CdnLink=serde_json::from_value(serde_json::Value::Object(object))?;
+                    if checked_cdn_url(&self.base,key,&link,OBJECT_LIMIT as u64).is_err() {
+                        prepared.push((format!("{}{key}",self.base),serde_json::json!({"status":200,"direct":true}))); continue;
+                    }
+                }
+                prepared.push((format!("{}{key}",self.base),item.clone()));
+            }
+            let mut cache=self.prepared.lock().expect("prepared link lock");cache.extend(prepared);
+            while cache.len()>512 { cache.pop_first(); }
+        }
+        Ok(())
+    }
+
     pub fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
         if let Some(replay) = &self.replay {
             let name = format!("{}{key}", self.base);
@@ -610,6 +676,29 @@ impl Gateway {
 
     fn fetched(&self, key: &str, prefer_cdn: bool) -> Result<super::cdn::Download> {
         if prefer_cdn && super::cdn::cacheable(key) && self.has_read_identity() && !self.is_public() {
+            let prepared = self.prepared.lock().expect("prepared link lock").remove(&format!("{}{key}",self.base));
+            if let Some(entry) = prepared {
+                match entry["status"].as_u64() {
+                    Some(404) => return Ok(super::cdn::Download { bytes:None, cdn:false }),
+                    Some(200) if entry["direct"] == true => {
+                        #[cfg(debug_assertions)] eprintln!("layr: cacheable-key batch returned a direct object");
+                        return Ok(super::cdn::Download { bytes:self.get_direct(key)?, cdn:false });
+                    }
+                    Some(200) => {
+                        let mut object = entry.as_object().context("invalid CDN batch item")?.clone(); object.remove("status");
+                        let link: CdnLink = serde_json::from_value(serde_json::Value::Object(object))?;
+                        let fetched = (|| -> Result<Vec<u8>> {
+                            let (response, length)=self.cdn_link_response(key,link,OBJECT_LIMIT as u64)?;
+                            let body=bytes(response,usize::try_from(length)?)?;
+                            if body.len() as u64 != length { bail!("CDN object length differs"); } Ok(body)
+                        })();
+                        if let Ok(body)=fetched { return Ok(super::cdn::Download {bytes:Some(body),cdn:true}); }
+                        return Ok(super::cdn::Download {bytes:self.get_direct(key)?,cdn:false});
+                    }
+                    Some(status) => bail!("gateway batch object: HTTP {status}"),
+                    None => bail!("invalid CDN batch object status"),
+                }
+            }
             let response = self.read_request_inner(&format!("objects/{key}"), &[], true)?;
             if response.status().as_u16() == 404 {
                 return Ok(super::cdn::Download { bytes: None, cdn: false });
@@ -642,6 +731,9 @@ impl Gateway {
 
     fn cdn_response(&self, key: &str, response: Response, maximum: u64) -> Result<(Response, u64)> {
         let link: CdnLink = json(response, 4096)?;
+        self.cdn_link_response(key, link, maximum)
+    }
+    fn cdn_link_response(&self, key: &str, link: CdnLink, maximum: u64) -> Result<(Response, u64)> {
         let url = checked_cdn_url(&self.base, key, &link, maximum)?;
         // Never forward gateway credentials to the signed object request.
         let response = self.http.get(url).send().map_err(reqwest::Error::without_url)?;
@@ -1052,8 +1144,18 @@ mod tests {
                 assert_eq!(result.unwrap(), b"verified ciphertext");
             }
         }
+        let batch_keys:Vec<_> = (0..17).map(|index| format!("files/01a177aa-a7a5-716c-8774-{index:011x}5.age")).collect();
+        let batch = backend.verified(false, |backend, _| {
+            let bodies=backend.get_many(&batch_keys)?;
+            bodies.into_iter().map(|body| keys::decrypt(&identity,&body.context("missing batch object")?)).collect::<Result<Vec<_>>>()
+        }).unwrap();
+        assert_eq!(batch,vec![b"verified ciphertext".to_vec();17]);
         let response = gateway.http.get(format!("https://localhost:{port}/counts")).send().unwrap();
         let counts: std::collections::BTreeMap<String, u64> = response.json().unwrap();
+        assert_eq!(counts.get("batch"), Some(&2)); // First request was busy; bounded retry reused the same body.
+        assert_eq!(counts.get("batch.keys"), Some(&17));
+        assert!(counts.get("5.link").is_none());
+        assert!(counts.get("5.direct").is_none());
         assert_eq!(counts.get("challenge"), Some(&1));
         assert_eq!(counts.get("token"), Some(&1));
         for mode in 1..=4 {

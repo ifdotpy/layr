@@ -52,6 +52,7 @@ impl std::fmt::Display for DirectFailure {
 impl std::error::Error for DirectFailure {}
 
 impl Replay {
+    pub fn cached(&self, key:&str)->bool { self.entries.lock().expect("CDN replay lock").0.contains_key(key) }
     pub fn is_direct(&self) -> bool {
         self.direct.load(Ordering::SeqCst)
     }
@@ -133,3 +134,29 @@ mod tests {
         assert!(!replay.retry(true));
     }
 }
+
+#[derive(Default)]
+pub struct Signing {
+    active: Mutex<usize>,
+    changed: std::sync::Condvar,
+}
+pub struct SigningLease<'a>(&'a Signing);
+impl Signing {
+    pub fn acquire(&self) -> SigningLease<'_> {
+        let mut active = self.active.lock().expect("signing admission lock");
+        while *active >= 4 { active = self.changed.wait(active).expect("signing admission lock"); }
+        *active += 1; SigningLease(self)
+    }
+}
+impl Drop for SigningLease<'_> {
+    fn drop(&mut self) {
+        *self.0.active.lock().expect("signing admission lock") -= 1;
+        self.0.changed.notify_one();
+    }
+}
+#[derive(Debug)]
+pub struct BusyFailure;
+impl std::fmt::Display for BusyFailure {
+    fn fmt(&self, f:&mut std::fmt::Formatter<'_>)->std::fmt::Result { f.write_str("gateway is busy after bounded retries") }
+}
+impl std::error::Error for BusyFailure {}

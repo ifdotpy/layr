@@ -454,7 +454,12 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
             missing.push(state);
         }
     }
-    for state in super::writer::parents_first(missing)? {
+    let missing = super::writer::parents_first(missing)?;
+    for (position, state) in missing.iter().enumerate() {
+        if position % 128 == 0 {
+            let keys:Vec<_> = missing[position..].iter().take(128).map(|state|format::tree_name(&state.id,&states[&state.id])).collect();
+            store.backend.prepare_batch(&keys)?;
+        }
         let id = state.id.clone();
         let attempt = &states[&id];
         let (header, _, tree) = reader.tree(&id, &attempt)?;
