@@ -7,9 +7,10 @@ import sys
 
 binary = str(Path(sys.argv[1]).resolve())
 root = Path(sys.argv[2]).resolve()
-store = root / "store"
+store = root / "store/local"
+store.mkdir(parents=True, exist_ok=True)
 env = dict(os.environ, LAYR_ROOT=str(store))
-source = root / "source"
+source = store.parent / "source"
 source.mkdir()
 filesystem = (subprocess.check_output(["stat", "-f", "-c", "%T", str(store)]).strip()
               if sys.platform == "linux" else b"apfs")
@@ -72,12 +73,12 @@ if os.environ.get("LAYR_TEST_IMPORT_CASE") != "modified":
     assert (work / "blob").stat().st_size == fixture_mib * 1024 ** 2
     if can_clone:
         assert delta < fixture_mib * 1024 ** 2 // 8, f"init allocated {delta} bytes for an unchanged {fixture_label} file"
+with (source / "blob").open("r+b") as output:
+    output.write(b"edit")
+if os.environ.get("LAYR_TEST_IMPORT_CASE") != "modified":
     # A later source write must not change the clone.
     with (work / "blob").open("rb") as imported:
         assert imported.read(4) == chunk[:4]
-
-with (source / "blob").open("r+b") as output:
-    output.write(b"edit")
 
 # HEAD needs its own bytes for a modified file. The current bytes must stay shared.
 before = free_bytes()
