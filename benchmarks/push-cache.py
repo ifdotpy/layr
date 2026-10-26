@@ -26,6 +26,8 @@ args=parser.parse_args()
 base=args.workspace.resolve()
 fs=base/'bench'
 results=base/'push-cache-results.jsonl'
+assert os.path.ismount(fs), 'benchmark Btrfs mount is missing; remount the fixture volume before running'
+assert subprocess.check_output(['findmnt','-n','-o','FSTYPE',str(fs)],text=True).strip()=='btrfs', 'benchmark requires Btrfs'
 if args.phase in ('after','daily'):
     assert hashlib.sha256((base/'layr-before').read_bytes()).digest()!=hashlib.sha256((base/'layr-after').read_bytes()).digest(), 'before/after binaries are identical; force separate builds'
 def label_for(phase):return phase+('-'+args.run_id if phase=='after' and args.run_id else '')
@@ -52,6 +54,8 @@ def measure(kind,phase,binary):
     archive=archive_for(kind,phase)
     env=os.environ|{'LAYR_ROOT':str(root),'LAYR_AUTHOR_NAME':'Cache benchmark','LAYR_AUTHOR_EMAIL':'cache@example.test','LAYR_TRACE':'1'}
     source=base/('layr-source' if kind=='layr' else 'studio-source')
+    if phase=='after':
+        assert project.exists() and archive_for(kind,'before').exists(), 'original baseline fixture is missing'
     if not project.exists():
         root.mkdir(exist_ok=True)
         seconds=run([base/'layr-before','git','clone',source,kind,'-q'],env,cwd=base,label=kind+'-import')
