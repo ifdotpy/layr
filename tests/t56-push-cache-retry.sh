@@ -32,7 +32,14 @@ assert before
 PY
 printf 'second child\n' >> child
 l save -qam second
-ok 'push resumes with complete state caches but no index checkpoint' l push archive -q
+if l push archive -q > "$T/retry-output" 2>&1; then
+    echo 'PASS push resumes with complete state caches but no index checkpoint'
+    PASS=$((PASS+1))
+else
+    cat "$T/retry-output"
+    echo 'FAIL push resumes with complete state caches but no index checkpoint'
+    FAIL=$((FAIL+1))
+fi
 python3 - <<'PY'
 import hashlib,json,os,pathlib
 root=pathlib.Path(os.environ['RETRY_ARCHIVE'])
