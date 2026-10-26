@@ -3,7 +3,7 @@ use super::{
     format::{Entry, Link},
     zst,
 };
-use anyhow::Result;
+use anyhow::{bail, Result};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -50,6 +50,12 @@ impl Journal {
         use std::os::unix::fs::OpenOptionsExt;
         let path = dir.join("push-journal.sqlite3");
         let resuming = path.exists();
+        if !resuming {
+            for suffix in ["-wal", "-shm"] {
+                Self::remove_optional(&PathBuf::from(format!("{}{suffix}", path.display())))?;
+            }
+            std::fs::File::open(dir)?.sync_all()?;
+        }
         std::fs::OpenOptions::new().write(true).create(true).truncate(false).mode(0o600).open(&path)?;
         let db = Connection::open(&path)?;
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;
@@ -181,10 +187,24 @@ impl Journal {
     }
     pub fn finish(mut self) -> Result<Stats> {
         self.flush()?;
+        let busy: i64 = self.db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
+        if busy != 0 {
+            bail!("push journal is still in use; keeping its files for recovery");
+        }
         let Self { db, path, stats, .. } = self;
-        drop(db);
+        db.close().map_err(|(_, error)| error)?;
+        for suffix in ["-wal", "-shm"] {
+            Self::remove_optional(&PathBuf::from(format!("{}{suffix}", path.display())))?;
+        }
         std::fs::remove_file(&path)?;
         std::fs::File::open(path.parent().unwrap())?.sync_all()?;
         Ok(stats)
+    }
+    fn remove_optional(path: &Path) -> Result<()> {
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     }
 }

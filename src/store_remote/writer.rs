@@ -1472,6 +1472,46 @@ mod tests {
     }
 
     #[test]
+    fn fresh_push_discards_wal_sidecars_without_their_main_database() {
+        let root = std::env::temp_dir().join(crate::ids::new_id());
+        std::fs::create_dir_all(&root).unwrap();
+        let ctx = context(&root);
+        let mut store = remote(&root, &ctx);
+        store
+            .configure(&ctx, &super::super::ConfigureOptions { paper_key_out: Some(root.join("paper")), ..Default::default() })
+            .unwrap();
+        let repo = branch_fixture(&ctx, &store);
+        store.private_dir().unwrap();
+        let path = store.dir.join("push-journal.sqlite3");
+        {
+            let mut old = super::super::push_journal::Journal::open(&store.dir).unwrap();
+            old.checkpoint("old-state", "deadbeef", 0, &BTreeMap::new(), &[]).unwrap();
+            old.prepare_part("old-state", "deadbeef", 0, &[]).unwrap();
+            for suffix in ["-wal", "-shm"] {
+                std::fs::copy(format!("{}{suffix}", path.display()), root.join(format!("old{suffix}"))).unwrap();
+            }
+        }
+        std::fs::remove_file(&path).unwrap();
+        for suffix in ["-wal", "-shm"] {
+            std::fs::copy(root.join(format!("old{suffix}")), format!("{}{suffix}", path.display())).unwrap();
+        }
+        {
+            let fresh = super::super::push_journal::Journal::open(&store.dir).unwrap();
+            assert!(!fresh.resuming);
+            assert!(fresh.completed().unwrap().is_empty());
+            assert!(fresh.pending().unwrap().is_empty());
+            fresh.finish().unwrap();
+        }
+        assert_eq!(push(&store, &ctx, &repo, &Options::default()).unwrap().states, 4);
+        store.verify(true).unwrap();
+        for name in ["push-journal.sqlite3", "push-journal.sqlite3-wal", "push-journal.sqlite3-shm"] {
+            assert!(!store.dir.join(name).exists());
+        }
+        drop(repo);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn completion_metadata_is_bounded_and_invalid_metadata_rebuilds() {
         let root = std::env::temp_dir().join(crate::ids::new_id());
         std::fs::create_dir_all(&root).unwrap();
