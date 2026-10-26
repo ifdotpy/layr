@@ -50,4 +50,20 @@ print('PASS retry preserves every published immutable tree')
 PY
 PASS=$((PASS+1))
 ok 'retried store records and file objects verify' l fsck --remote archive --files
+# A syntactically valid local tree is not proof of the published remote tree.
+python3 - <<'PY'
+import json,os,pathlib
+for index in pathlib.Path(os.environ['RETRY_CACHE']).glob('*/pushed.json'):
+    for state,entry in json.loads(index.read_text())['states'].items():
+        path=index.parent/'pushed'/f"{state}.{entry['attempt']}.json"
+        if path.exists():
+            tree=json.loads(path.read_text())
+            tree['tree']['files'].pop('notes.txt',None)
+            path.write_text(json.dumps(tree))
+    index.unlink()
+PY
+printf 'third child\n' >> child
+l save -qam third
+ok 'retry rebuilds recovered cache trees through remote verification' l push archive -q
+ok 'recovery ignores a structurally valid but incomplete cached tree' l fsck --remote archive --files
 finish

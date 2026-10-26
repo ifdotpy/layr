@@ -58,16 +58,15 @@ fn cached_tree(dir: &Path, state: &str, entry: &Cached) -> Result<Pushed> {
     Ok(pushed)
 }
 fn recovered_cache(dir: &Path, state: &str, attempt: String) -> Result<Cached> {
-    let mut entry = Cached { attempt, depth: format::FULL_TREE_EVERY - 1 };
-    let bytes = match std::fs::read(cache_path(dir, state, &entry)?) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(entry),
+    let entry = Cached { attempt, depth: format::FULL_TREE_EVERY - 1 };
+    // With no checkpoint, the local cache is not an authenticated description of
+    // the published tree. Discard it and let the parent selection read that tree
+    // through the normal remote signature checks (or upload a full child).
+    match std::fs::remove_file(cache_path(dir, state, &entry)?) {
+        Ok(()) => {},
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
         Err(error) => return Err(error.into()),
-    };
-    // The individual tree can reach disk before the index checkpoint. Keep its
-    // actual depth, then apply the same identity and tree checks as a normal load.
-    entry.depth = serde_json::from_slice::<Pushed>(&bytes)?.depth;
-    cached_tree(dir, state, &entry)?;
+    }
     Ok(entry)
 }
 fn load_index(dir: &Path) -> Result<BTreeMap<String, Cached>> {
