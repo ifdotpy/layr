@@ -44,6 +44,3 @@ It does not assert local store format compatibility.
 
 Sources: `src/main.rs`, `src/cmd/{mod,admin,remote,change}.rs`, and `src/person.rs`.
 `src/args.rs` and `src/service.rs` do not change between the compared revisions.
-
-The separate format guard adds `store-version [--json] [--upgrade]`.
-Its contract is in [local-store-version.md](local-store-version.md).
