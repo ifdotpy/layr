@@ -950,9 +950,13 @@ pub fn clone_file(_src: &File, _dst: &File) -> io::Result<()> {
 pub fn clone_range(_src: &File, _off: u64, _len: u64, _dst: &File, _dst_off: u64) -> io::Result<()> {
     Err(io::Error::from_raw_os_error(libc::ENOTSUP))
 }
-pub fn send_command(_parent: Option<&Path>, child: &Path) -> Result<Command> {
+pub fn send_command(parent: Option<&Path>, child: &Path) -> Result<Command> {
     let mut cmd = Command::new(std::env::current_exe()?);
     cmd.arg("__apfs-send").arg(child);
+    // With a parent the stream holds only the differences (`apfs_stream::send`).
+    if let Some(p) = parent {
+        cmd.arg(p).arg(clone_identity(p)?.0);
+    }
     Ok(cmd)
 }
 

@@ -423,7 +423,12 @@ fn send_states<R: Read, W: Write>(
             Vec::new()
         };
         w.json(&json!({"op": "state", "id": id, "parent": parent, "clones": clones}))?;
-        let pp = parent.as_ref().map(|p| repo.p.state_path(p));
+        // The receiver finds the parent by the subvolume of its record: send against a parent
+        // tree only when that tree is the one the record names.
+        let pp = parent.as_ref().map(|p| repo.p.state_path(p)).filter(|path| {
+            let subvol = parent.as_ref().and_then(|p| repo.p.db.state(p).ok().flatten()).map(|s| s.subvol);
+            btrfs::send_clone_identity(path).ok().is_some_and(|(uuid, _)| Some(uuid) == subvol)
+        });
         let sources: Vec<_> = clones.iter().map(|id| repo.p.state_path(id)).collect();
         let child = btrfs::send_optimized(pp.as_deref(), &repo.state_root(id)?, &sources, features.compressed)?
             .stdout(Stdio::piped())
