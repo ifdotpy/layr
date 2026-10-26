@@ -62,8 +62,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
    if login in people: self.reply(409,{});return
    assert all(body.get(k) for k in ['recipient','paper','signing_key','signing'])
    invites.pop(bearer);people[login]=body;stats['registration']+=1;self.reply(200,{'login':login,'new':True});return
-  if path.startswith('/v1/p/project/'):
+  if path.startswith(('/v1/p/project/','/p/project/')):
    project_requests.append((self.command,path,parsed.query,bearer=='v1.write.signinTest',bearer in sessions))
+  if path.startswith('/p/project/'):
+   # The real gateway hides a private project's public routes, including its
+   # current-epoch manifest, before any private-route authentication.
+   assert self.command=='GET' and not self.headers.get('Authorization')
+   self.reply(404,{'error':'no such public project'});return
   login=sessions.get(bearer)
   # Project data keeps its read/write capability; person exchanges use the session.
   if path.startswith('/v1/p/project/') and (bearer=='v1.write.signinTest' or (path.startswith('/v1/p/project/objects') and bearer=='v1.read.signinTest')):
@@ -221,11 +226,15 @@ try:
  paper_path='/v1/p/project/objects/slots/paper.age'
  check(any(method=='GET' and path==paper_path and not grant and not session for method,path,query,grant,session in project_requests),'post-rotation push with a paper-key environment proves the root paper-slot read')
  check(stats['session']==before and not any(session for method,path,query,grant,session in project_requests),'paper-key push uses the machine identity without a person session')
+ check([path for method,path,query,grant,session in project_requests if path.startswith('/p/')]==[f'/p/project/project/epochs/{epoch}/public.json'],'post-rotation writer probes only the current public manifest anonymously')
  pin=json.loads(run(['config','--get','cloud.remote.web.store'],paper_writer).stdout)
  check(bool(pin.get('paper_recipient')),'paper-key push pins the verified paper recipient')
  project_requests.clear()
  run(['push','web','-q'],paper_writer)
  check(not any(path==paper_path for method,path,query,grant,session in project_requests),'a known paper recipient needs no repeated paper-slot read')
+ project_requests.clear()
+ run(['push','web','-q'],dict(machine_only,LAYR_PROJECT='session-project',LAYR_LINE='main'))
+ check(not any(path==paper_path or session for method,path,query,grant,session in project_requests) and stats['session']==before,'post-rotation machine-only push needs neither a paper-slot read nor a person session')
  fresh=dict(base,LAYR_PERSON_DIR=str(root/'fresh'),LAYR_PERSON_LOGIN='fresh@example.com',LAYR_GATEWAY_CA_FILE=str(root/'tls-ca.pem'))
  before=stats['session']
  run(['person','keys','--site',site,'--invite','fresh-invite','--paper-key-out',str(root/'fresh.paper')],fresh)
