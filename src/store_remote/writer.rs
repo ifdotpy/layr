@@ -746,6 +746,25 @@ mod tests {
     }
 
     #[test]
+    fn legacy_pushed_cache_migrates_without_changing_attempt_or_tree() {
+        let root = std::env::temp_dir().join(crate::ids::new_id());
+        std::fs::create_dir_all(&root).unwrap();
+        let id = crate::ids::new_id();
+        let pushed = Pushed { attempt: "0123abcd".into(), tree: Tree { files: BTreeMap::new() }, depth: 0 };
+        let legacy = BTreeMap::from([(id.clone(), pushed)]);
+        std::fs::write(root.join("pushed.json"), serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let index = load_index(&root).unwrap();
+        let restored = cached_tree(&root, &id, &index[&id]).unwrap();
+        assert_eq!(restored.attempt, "0123abcd");
+        assert!(restored.tree.files.is_empty());
+        checkpoint(&root, &index).unwrap();
+        assert_eq!(load_index(&root).unwrap()[&id].attempt, "0123abcd");
+        let json: serde_json::Value = serde_json::from_slice(&std::fs::read(root.join("pushed.json")).unwrap()).unwrap();
+        assert_eq!(json["format"], 1);
+        assert!(json["states"][&id].get("tree").is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn an_existing_key_file_is_not_reused_without_an_openable_unfinished_slot() {
         let root = std::env::temp_dir().join(crate::ids::new_id());
         std::fs::create_dir_all(&root).unwrap();

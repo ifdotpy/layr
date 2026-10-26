@@ -52,3 +52,8 @@ Fetch restores parents before children. It clones an available immutable parent
 snapshot and writes only files whose mode, size or content hash changed. Decoded
 tree caching is bounded to two delta chains, and a verified cached ancestor stops
 repeat decoding of its prefix. `LAYR_TRACE=1` reports transfer phase timings.
+
+Loose objects in the rebuildable Git cache publish with atomic renames, using
+Git's normal cache durability model. The signed records and state files remain
+the durable source. Rebuilding Git objects does not force a filesystem flush for
+every object.

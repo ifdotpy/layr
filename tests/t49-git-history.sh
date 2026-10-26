@@ -125,4 +125,27 @@ print('PASS killed push resumes without replacing or duplicating committed objec
 PYCODE
 PASS=$((PASS+1))
 ok 'resumed store has complete records and verified file objects' l fsck --remote archive --files
+# Incremental restore handles deletions and file/directory/symlink transitions.
+rm payload
+mkdir payload
+printf 'nested\n' > payload/nested
+ln -s payload/nested switched
+l add -A
+l save -qm 'directory and symlink'
+l push archive -q
+rm -r payload
+printf '#!/bin/sh\nexit 0\n' > payload
+chmod +x payload
+rm switched
+printf 'regular\n' > switched
+l add -A
+l save -qm 'executable and regular file'
+l push archive -q
+cd "$T"
+l clone "file://$T/retry-archive" retry-copy -q
+cd "$LAYR_ROOT/projects/retry-copy/lines/main"
+eq 'parent snapshot restores a directory replaced by a file' '#!/bin/sh' "$(head -1 payload)"
+ok 'parent snapshot restores executable mode' test -x payload
+eq 'parent snapshot replaces a symlink with regular bytes' regular "$(cat switched)"
+eq 'intermediate directory state remains readable' nested "$(l show head~1:payload/nested)"
 finish
