@@ -520,7 +520,7 @@ impl<'a> Repo<'a> {
 
     /// An automatic state of a line's working content. For a line with overlays the snapshot
     /// leaves the overlay files out (a writable snapshot, the files removed, read-only): no state
-    /// of the project holds a file of an overlay.
+    /// of the project holds a file of an overlay. The caller holds the project lock.
     pub fn working_snapshot(&self, ctx: &Ctx, line: &Line, parents: Vec<String>, message: &str) -> Result<StateRec> {
         let w = self.working(line);
         recover_cache_replacements(&w)?;
@@ -742,6 +742,7 @@ impl<'a> Repo<'a> {
         if !w.exists() {
             return Ok(None);
         }
+        recover_cache_replacements(&w)?;
         #[cfg(target_os = "macos")]
         if !force && self.private_paths(line)?.is_empty() && self.thin_line(line)? {
             // Compare before any copy: an unchanged folder makes no state. One scan of the
@@ -1476,7 +1477,6 @@ impl<'a> Repo<'a> {
     /// The cache paths of a line (`cache_paths`) in two lists: the caches, and the paths whose
     /// folder holds files in the head of the line. Such a folder is versioned: never a cache.
     pub fn line_cache_paths(&self, line: &Line) -> Result<(Vec<String>, Vec<String>)> {
-        recover_cache_replacements(&self.working(line))?;
         let head = self.state_root(&line.head)?;
         Ok(self.cache_paths(&self.working(line)).into_iter().partition(|p| !holds_files(&head, p)))
     }
@@ -2028,7 +2028,7 @@ struct CacheReplacement {
     path: String,
     root: crate::tree::DirectoryRecord,
     source: crate::tree::DirectoryRecord,
-    replacement: crate::tree::DirectoryRecord,
+    replacement: Option<crate::tree::DirectoryRecord>,
 }
 
 const CACHE_JOURNAL_PREFIX: &str = ".layr-cache-replace-";
@@ -2077,8 +2077,20 @@ fn recover_cache_replacement(t: &Tree, path: &str) -> Result<()> {
         record.path == path && root.device == record.root.device && root.inode == record.root.inode,
         "cache replacement journal belongs to another folder"
     );
-    if t.matches_directory(path, &record.replacement) {
-        t.restore_directory(path, &record.replacement)?;
+    let Some(replacement) = &record.replacement else {
+        anyhow::ensure!(
+            t.matches_directory(path, &record.source) && t.stat(&old).is_none(),
+            "cache source identity changed before the copy: {path}"
+        );
+        t.restore_directory(path, &record.source)?;
+        if t.stat(&temporary).is_some() {
+            t.remove(&temporary)?;
+        }
+        t.remove(&journal)?;
+        return t.sync_parent(&journal);
+    };
+    if t.matches_directory(path, replacement) {
+        t.restore_directory(path, replacement)?;
         if t.matches_directory(&old, &record.source) {
             t.restore_directory(&old, &record.source)?;
             t.remove(&old)?;
@@ -2094,8 +2106,8 @@ fn recover_cache_replacement(t: &Tree, path: &str) -> Result<()> {
             t.rename_directory_checked(&old, path, &record.source)?;
         }
         t.restore_directory(path, &record.source)?;
-        if t.matches_directory(&temporary, &record.replacement) {
-            t.restore_directory(&temporary, &record.replacement)?;
+        if t.matches_directory(&temporary, replacement) {
+            t.restore_directory(&temporary, replacement)?;
             t.remove(&temporary)?;
         } else if t.stat(&temporary).is_some_and(|metadata| metadata.ftype == fsutil::FType::Symlink) {
             t.remove(&temporary)?;
@@ -2107,6 +2119,7 @@ fn recover_cache_replacement(t: &Tree, path: &str) -> Result<()> {
     t.sync_parent(&journal)
 }
 
+/// The caller holds the project lock. Read-only commands must not call recovery.
 pub(crate) fn recover_cache_replacements(w: &Path) -> Result<()> {
     let t = Tree::open(w)?;
     for name in t.list("")? {
@@ -2128,6 +2141,14 @@ fn replace_folder(t: &Tree, path: &str, subvolume: bool, uid: u32, gid: u32) -> 
             t.remove(x)?;
         }
     }
+    let journal = cache_journal(path);
+    let mut record = CacheReplacement {
+        path: path.to_string(),
+        root: t.directory_record("")?,
+        source: t.directory_record(path)?,
+        replacement: None,
+    };
+    t.publish_private_file(&journal, &serde_json::to_vec(&record)?)?;
     let copy = (|| {
         if subvolume {
             t.create_subvolume(&tmp)?;
@@ -2135,25 +2156,23 @@ fn replace_folder(t: &Tree, path: &str, subvolume: bool, uid: u32, gid: u32) -> 
         } else {
             t.mkdir_private(&tmp, None)?;
         }
+        #[cfg(test)]
+        crate::tree::cache_test_fault("copy-incomplete");
         copy_tree(t, path, &tmp, Some((uid, gid)), &mut std::collections::HashMap::new())?;
         t.copy_directory_metadata(path, &tmp)
     })();
     if let Err(error) = copy {
-        t.remove(&tmp).with_context(|| format!("remove incomplete cache {tmp} after {error:#}"))?;
+        recover_cache_replacement(t, path).with_context(|| format!("remove incomplete cache {tmp} after {error:#}"))?;
         return Err(error);
     }
-    let journal = cache_journal(path);
-    let record = CacheReplacement {
-        path: path.to_string(),
-        root: t.directory_record("")?,
-        source: t.directory_record(path)?,
-        replacement: t.directory_record(&tmp)?,
-    };
+    record.replacement = Some(t.directory_record(&tmp)?);
     t.publish_private_file(&journal, &serde_json::to_vec(&record)?)?;
+    #[cfg(test)]
+    crate::tree::cache_test_pause();
     t.rename_directory_checked(path, &old, &record.source)?;
     #[cfg(test)]
     crate::tree::cache_test_fault("between-renames");
-    t.rename_directory_checked(&tmp, path, &record.replacement)?;
+    t.rename_directory_checked(&tmp, path, record.replacement.as_ref().unwrap())?;
     t.chown(path, uid, gid)?;
     recover_cache_replacement(t, path)?;
     Ok(())
@@ -2194,12 +2213,84 @@ mod cache_copy_tests {
     use super::*;
     use std::os::unix::{fs::PermissionsExt, net::UnixListener};
 
+    fn cache_command_context(root: &Path) -> Result<crate::ctx::Ctx> {
+        Ok(crate::ctx::Ctx {
+            store: crate::store::Store::open(&root.join("store"))?,
+            caller: crate::ctx::Caller::from_uid(rustix::process::geteuid().as_raw()),
+            cwd: root.join("store/projects/concurrent/lines/main"),
+            env: std::collections::HashMap::from([("LAYR_PROJECT".into(), "concurrent".into()), ("LAYR_LINE".into(), "main".into())]),
+            out: std::cell::RefCell::new(Box::new(std::io::sink())),
+        })
+    }
+
+    #[test]
+    fn cache_list_does_not_recover_an_active_replacement() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("layr-cache-list-{}", crate::ids::new_id()));
+        std::fs::create_dir(&root)?;
+        #[cfg(target_os = "linux")]
+        if !btrfs::is_supported(&root) {
+            std::fs::remove_dir(&root)?;
+            return Ok(());
+        }
+        let mut ctx = cache_command_context(&root)?;
+        ctx.cwd = root.clone();
+        let run =
+            |ctx: &crate::ctx::Ctx, args: &[&str]| crate::cmd::run(ctx, &args.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(run(&ctx, &["init", "concurrent", "-q"])?, 0);
+        ctx.cwd = root.join("store/projects/concurrent/lines/main");
+        std::fs::write(ctx.cwd.join(".layrattributes"), "cache regenerable\n")?;
+        std::fs::write(ctx.cwd.join(".gitignore"), "cache/\n")?;
+        std::fs::create_dir(ctx.cwd.join("cache"))?;
+        std::fs::write(ctx.cwd.join("cache/data"), "original")?;
+        std::fs::set_permissions(ctx.cwd.join("cache"), std::fs::Permissions::from_mode(0o555))?;
+        let mut child = std::process::Command::new(std::env::current_exe()?)
+            .args(["--exact", "repo::cache_copy_tests::cache_replacement_fault_child", "--nocapture"])
+            .env("LAYR_TEST_CACHE_ROOT", &root)
+            .env("LAYR_TEST_CACHE_PAUSE", &root)
+            .spawn()?;
+        let start = std::time::Instant::now();
+        while !root.join("ready").exists() {
+            assert!(child.try_wait()?.is_none(), "cache repair stopped before the pause");
+            assert!(start.elapsed() < std::time::Duration::from_secs(30));
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let journal = ctx.cwd.join(cache_journal("cache"));
+        let before = std::fs::read(&journal)?;
+        let staging = std::fs::symlink_metadata(ctx.cwd.join("cache.layr-new"))?;
+        let listed = run(&ctx, &["cache", "list"]);
+        let after = std::fs::read(&journal);
+        let same_staging = std::fs::symlink_metadata(ctx.cwd.join("cache.layr-new"))
+            .is_ok_and(|m| m.dev() == staging.dev() && m.ino() == staging.ino());
+        std::fs::write(root.join("resume"), "resume")?;
+        let repaired = child.wait()?;
+        assert_eq!(listed?, 0);
+        assert_eq!(after?, before);
+        assert!(same_staging);
+        assert!(repaired.success());
+        assert_eq!(run(&ctx, &["cache", "repair"])?, 0);
+        assert_eq!(std::fs::read_to_string(ctx.cwd.join("cache/data"))?, "original");
+        assert_eq!(std::fs::metadata(ctx.cwd.join("cache"))?.mode() & 0o777, 0o555);
+        drop(ctx);
+        btrfs::delete_tree(&root.join("store")).context("remove the concurrent cache test store")?;
+        let tree = Tree::open(&root)?;
+        for name in tree.list("")? {
+            tree.remove(&name)?;
+        }
+        std::fs::remove_dir(root)?;
+        Ok(())
+    }
+
     #[test]
     fn cache_replacement_fault_child() -> Result<()> {
         let Some(root) = std::env::var_os("LAYR_TEST_CACHE_ROOT") else {
             return Ok(());
         };
         let root = std::path::PathBuf::from(root);
+        if std::env::var_os("LAYR_TEST_CACHE_PAUSE").is_some() {
+            let ctx = cache_command_context(&root)?;
+            assert_eq!(crate::cmd::run(&ctx, &["cache".into(), "repair".into()])?, 0);
+            return Ok(());
+        }
         let tree = Tree::open(&root)?;
         let result =
             replace_folder(&tree, "cache", false, rustix::process::geteuid().as_raw(), rustix::process::getegid().as_raw());
@@ -2216,7 +2307,9 @@ mod cache_copy_tests {
     #[test]
     fn cache_replacement_recovers_process_crashes_and_refuses_name_swaps() -> Result<()> {
         use std::process::Command;
-        for phase in ["source-writable", "between-renames", "replacement-writable", "restore-error", "symlink-swap"] {
+        for phase in
+            ["copy-incomplete", "source-writable", "between-renames", "replacement-writable", "restore-error", "symlink-swap"]
+        {
             let root = std::env::temp_dir().join(format!("layr-cache-crash-{}", crate::ids::new_id()));
             std::fs::create_dir_all(root.join("cache/nested"))?;
             std::fs::create_dir(root.join("outside"))?;
@@ -2230,7 +2323,7 @@ mod cache_copy_tests {
                 .env("LAYR_TEST_CACHE_ROOT", &root)
                 .env("LAYR_TEST_CACHE_FAULT", phase)
                 .status()?;
-            if phase.ends_with("writable") || phase == "between-renames" {
+            if phase.ends_with("writable") || matches!(phase, "between-renames" | "copy-incomplete") {
                 assert_eq!(status.code(), Some(93), "{phase}");
             } else {
                 assert!(status.success(), "{phase}");
@@ -2266,7 +2359,7 @@ mod cache_copy_tests {
                 path: "cache".into(),
                 root: tree.directory_record("")?,
                 source: tree.directory_record("cache")?,
-                replacement: tree.directory_record("cache.layr-new")?,
+                replacement: Some(tree.directory_record("cache.layr-new")?),
             };
             tree.publish_private_file(&cache_journal("cache"), &serde_json::to_vec(&record)?)?;
             if phase != "prepared" {
