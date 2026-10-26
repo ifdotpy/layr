@@ -141,7 +141,7 @@ mod tests {
         let mut tree = Tree::default();
         for dir in 0..10 {
             for file in 0..10 {
-                let content = if dir == 0 && file == 0 { version } else { file };
+                let content = if dir == 0 && file == 0 { version } else { dir * 10 + file };
                 tree.files.insert(
                     format!("dir{dir}/file{file}"),
                     Entry(
@@ -187,7 +187,7 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         let mut cache = TreeCache::open(&dir).unwrap();
         let first = cache.put(&tree(0)).unwrap();
-        for version in 1..400 {
+        for version in 1..1000 {
             let root = cache.put(&tree(version)).unwrap();
             assert_eq!(cache.get(&root).unwrap(), tree(version));
             assert!(std::fs::metadata(dir.join("push-cache.sqlite3")).unwrap().len() <= MAX_BYTES as u64);
