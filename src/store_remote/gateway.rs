@@ -21,6 +21,51 @@ fn valid_token_expiry(expires: i64, now: i64, lifetime: i64) -> bool {
     expires > now && expires <= now + lifetime + CLOCK_SKEW_MS
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CdnLink {
+    url: String,
+    expires: u64,
+    bytes: u64,
+}
+
+fn checked_cdn_url(base: &reqwest::Url, key: &str, link: &CdnLink, maximum: u64) -> Result<reqwest::Url> {
+    let url = reqwest::Url::parse(&link.url).map_err(|_| anyhow!("invalid CDN URL"))?;
+    let project = base.path().strip_prefix("/v1/p/").and_then(|s| s.strip_suffix('/')).context("invalid gateway path")?;
+    if url.origin() != base.origin()
+        || url.scheme() != "https"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+        || url.path() != format!("/o/{project}/{key}")
+        || link.bytes > maximum
+    {
+        bail!("CDN URL binding differs");
+    }
+    let mut query = std::collections::BTreeMap::new();
+    for (name, value) in url.query_pairs() {
+        if query.insert(name.into_owned(), value.into_owned()).is_some() {
+            bail!("duplicate CDN URL parameter");
+        }
+    }
+    let now = crate::ids::now_ms().max(0) as u64 / 1000;
+    if query.len() != 4
+        || query.get("Hash-Algorithm").map(String::as_str) != Some("SHA256")
+        || query.get("Expires").and_then(|s| s.parse::<u64>().ok()) != Some(link.expires)
+        || link.expires <= now
+        || link.expires > now + 300 + CLOCK_SKEW_MS as u64 / 1000
+        || !query
+            .get("Key-Pair-Id")
+            .is_some_and(|s| !s.is_empty() && s.len() <= 128 && s.bytes().all(|b| b.is_ascii_alphanumeric()))
+        || !query.get("Signature").is_some_and(|s| {
+            !s.is_empty() && s.len() <= 1024 && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'~'))
+        })
+    {
+        bail!("invalid CDN URL parameters");
+    }
+    Ok(url)
+}
+
 struct PersonSession {
     login: String,
     key: ed25519_dalek::SigningKey,
@@ -34,6 +79,7 @@ struct SessionToken {
 }
 
 pub struct Gateway {
+    pub(super) replay: Option<Arc<super::cdn::Replay>>,
     http: Client,
     base: reqwest::Url,
     token: Option<String>,
@@ -48,6 +94,7 @@ pub struct Gateway {
 impl Clone for Gateway {
     fn clone(&self) -> Self {
         Self {
+            replay: self.replay.clone(),
             http: self.http.clone(),
             base: self.base.clone(),
             token: self.token.clone(),
@@ -125,6 +172,7 @@ impl Gateway {
             .timeout(Duration::from_secs(150))
             .build()?;
         Ok(Self {
+            replay: None,
             http,
             base,
             token: None,
@@ -346,6 +394,18 @@ impl Gateway {
         query: &[(&str, &str)],
         data: Option<Vec<u8>>,
     ) -> Result<Response> {
+        self.send_query_inner(method, action, bearer, query, data, false)
+    }
+
+    fn send_query_inner(
+        &self,
+        method: Method,
+        action: &str,
+        bearer: Option<&str>,
+        query: &[(&str, &str)],
+        data: Option<Vec<u8>>,
+        cdn: bool,
+    ) -> Result<Response> {
         let mut url = self.base.clone();
         url.set_path(&format!("{}{action}", self.base.path()));
         for (key, value) in query {
@@ -354,6 +414,9 @@ impl Gateway {
         let person = bearer.is_none() && self.person.lock().map_err(|_| anyhow!("gateway session lock failed"))?.is_some();
         let send = |token: Option<&str>| -> Result<Response> {
             let mut request = self.http.request(method.clone(), url.clone());
+            if cdn {
+                request = request.header("x-layr-cdn", "1");
+            }
             if let Some(token) = token {
                 request = request.bearer_auth(token);
             }
@@ -445,15 +508,19 @@ impl Gateway {
     }
 
     fn read_request_query(&self, action: &str, query: &[(&str, &str)]) -> Result<Response> {
+        self.read_request_inner(action, query, false)
+    }
+
+    fn read_request_inner(&self, action: &str, query: &[(&str, &str)], cdn: bool) -> Result<Response> {
         let token = self.proof().with_context(|| format!("gateway read {action}"))?;
-        let response = self.send_query(Method::GET, action, Some(&token), query, None)?;
+        let response = self.send_query_inner(Method::GET, action, Some(&token), query, None, cdn)?;
         if response.status().as_u16() != 401 {
             return Ok(response);
         }
         // A gateway restart discards its in-memory HMAC key. Exchange one new proof.
         *self.read.lock().map_err(|_| anyhow!("gateway read token lock failed"))? = None;
         let token = self.proof()?;
-        self.send_query(Method::GET, action, Some(&token), query, None)
+        self.send_query_inner(Method::GET, action, Some(&token), query, None, cdn)
     }
 
     pub fn prove_reader(&self) -> Result<()> {
@@ -526,6 +593,60 @@ impl Gateway {
     }
 
     pub fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        if let Some(replay) = &self.replay {
+            let name = format!("{}{key}", self.base);
+            return replay.get(&name, |direct| self.fetched(key, !direct));
+        }
+        self.get_direct(key)
+    }
+
+    fn fetched(&self, key: &str, prefer_cdn: bool) -> Result<super::cdn::Download> {
+        if prefer_cdn && super::cdn::cacheable(key) && self.has_read_identity() && !self.is_public() {
+            let response = self.read_request_inner(&format!("objects/{key}"), &[], true)?;
+            if response.status().as_u16() == 404 {
+                return Ok(super::cdn::Download { bytes: None, cdn: false });
+            }
+            if response.status().as_u16() != 200 {
+                bail!("gateway get: HTTP {}", response.status().as_u16());
+            }
+            let link = response
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| v.split(';').next() == Some("application/vnd.layr.cdn+json"));
+            if !link {
+                return Ok(super::cdn::Download { bytes: Some(bytes(response, OBJECT_LIMIT)?), cdn: false });
+            }
+            let fetched = (|| -> Result<Vec<u8>> {
+                let (response, length) = self.cdn_response(key, response, OBJECT_LIMIT as u64)?;
+                let body = bytes(response, usize::try_from(length)?)?;
+                if body.len() as u64 != length {
+                    bail!("CDN object length differs");
+                }
+                Ok(body)
+            })();
+            if let Ok(body) = fetched {
+                return Ok(super::cdn::Download { bytes: Some(body), cdn: true });
+            }
+        }
+        Ok(super::cdn::Download { bytes: self.get_direct(key)?, cdn: false })
+    }
+
+    fn cdn_response(&self, key: &str, response: Response, maximum: u64) -> Result<(Response, u64)> {
+        let link: CdnLink = json(response, 4096)?;
+        let url = checked_cdn_url(&self.base, key, &link, maximum)?;
+        // Never forward gateway credentials to the signed object request.
+        let response = self.http.get(url).send().map_err(reqwest::Error::without_url)?;
+        if response.status().as_u16() != 200 {
+            bail!("CDN object unavailable");
+        }
+        if response.content_length().is_some_and(|length| length != link.bytes) {
+            bail!("CDN object length differs");
+        }
+        Ok((response, link.bytes))
+    }
+
+    fn get_direct(&self, key: &str) -> Result<Option<Vec<u8>>> {
         if key == "vault.json" {
             return Ok(None);
         }
@@ -694,19 +815,36 @@ impl Gateway {
         Ok(objects)
     }
 
-    pub fn release_stream(&self, key: &str) -> Result<Option<Response>> {
+    pub fn release_stream(&self, key: &str, prefer_cdn: bool) -> Result<Option<(Response, bool)>> {
         let logical = epoch_path(key).map(|(_, key)| key).unwrap_or(key);
         if !super::format::release_file(logical) {
             bail!("invalid release object");
         }
-        let response =
-            if self.is_public() { self.public_request(key, None)? } else { self.read_request(&format!("objects/{key}"), None)? };
+        let response = if self.is_public() {
+            self.public_request(key, None)?
+        } else {
+            self.read_request_inner(&format!("objects/{key}"), &[], prefer_cdn)?
+        };
         match response.status().as_u16() {
             200 => {
+                let link = response
+                    .headers()
+                    .get("content-type")
+                    .and_then(|v| v.to_str().ok())
+                    .is_some_and(|v| v.split(';').next() == Some("application/vnd.layr.cdn+json"));
+                if prefer_cdn && link {
+                    return match self.cdn_response(key, response, super::format::RELEASE_OBJECT_LIMIT) {
+                        Ok((response, _)) => Ok(Some((response, true))),
+                        Err(_) => self.release_stream(key, false),
+                    };
+                }
+                if link {
+                    bail!("unexpected CDN reply to a direct request");
+                }
                 if response.content_length().is_some_and(|n| n > super::format::RELEASE_OBJECT_LIMIT) {
                     bail!("release object is too large");
                 }
-                Ok(Some(response))
+                Ok(Some((response, false)))
             }
             404 => Ok(None),
             status => bail!("gateway get: HTTP {status}"),
@@ -830,6 +968,39 @@ fn token_file(path: &std::path::Path, uid: u32) -> Result<String> {
 mod tests {
     use super::*;
     use std::os::unix::fs::{symlink, PermissionsExt};
+    #[test]
+    fn signed_links_are_same_origin_path_exact_bounded_and_short_lived() {
+        let base = reqwest::Url::parse("https://cloud.example/v1/p/project/").unwrap();
+        let key = "files/01a177aa-a7a5-716c-8774-7f165724c16b.age";
+        let expires = crate::ids::now_ms() as u64 / 1000 + 300;
+        let valid = format!(
+            "https://cloud.example/o/project/{key}?Expires={expires}&Signature=abc-_~&Key-Pair-Id=K123&Hash-Algorithm=SHA256"
+        );
+        let link = |url: String, expires, bytes| CdnLink { url, expires, bytes };
+        assert!(checked_cdn_url(&base, key, &link(valid.clone(), expires, 1024), 1024).is_ok());
+        for url in [
+            valid.replace("https:", "http:"),
+            valid.replace("cloud.example", "foreign.example"),
+            valid.replace("/o/project/", "/o/other/"),
+            valid.replace("files/", "states/"),
+            format!("{valid}#fragment"),
+            format!("{valid}&Expires={expires}"),
+            valid.replace("SHA256", "SHA1"),
+            valid.replace("https://", "https://user@"),
+            format!("{valid}&extra=1"),
+        ] {
+            assert!(checked_cdn_url(&base, key, &link(url, expires, 1024), 1024).is_err());
+        }
+        assert!(checked_cdn_url(&base, key, &link(valid.clone(), expires, 1025), 1024).is_err());
+        assert!(checked_cdn_url(&base, key, &link(valid, expires - 1, 1024), 1024).is_err());
+        for expiry in [1, expires + 601] {
+            let url = format!(
+                "https://cloud.example/o/project/{key}?Expires={expiry}&Signature=abc&Key-Pair-Id=K123&Hash-Algorithm=SHA256"
+            );
+            assert!(checked_cdn_url(&base, key, &link(url, expiry, 1), 1024).is_err());
+        }
+    }
+
     fn listing_pages(pages: Vec<serde_json::Value>, public: bool) -> Result<Vec<Object>> {
         use std::io::{Read, Write};
         use std::net::TcpListener;

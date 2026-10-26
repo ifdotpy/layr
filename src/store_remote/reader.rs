@@ -24,35 +24,44 @@ pub(super) fn records(backend: &Backend, identity: &str, project: &str) -> Resul
 }
 
 fn records_with_local(backend: &Backend, identity: &str, project: &str, local: &[String]) -> Result<Records> {
+    backend.verified(false, |backend, _| records_once(backend, identity, project, local))
+}
+
+fn records_once(backend: &Backend, identity: &str, project: &str, local: &[String]) -> Result<Records> {
     let mut machines: BTreeMap<String, BTreeMap<u64, String>> = BTreeMap::new();
     let mut overlaps = 0;
-    for object in backend.list("records/")? {
-        let (machine, first, last) = format::parse_segment_name(&object.key).context("invalid record segment name")?;
-        let body = backend.get(&object.key)?.context("record segment disappeared")?;
-        let body = String::from_utf8(keys::decrypt(identity, &body)?)?;
-        let mut expected = first;
-        for line in body.lines() {
-            let signed = oplog::parse_line(line, None)?;
-            if signed.record.machine != machine || signed.record.seq != expected || expected > last {
-                bail!("segment {} has an invalid sequence", object.key);
-            }
-            if signed.record.project != project {
-                bail!("segment {} belongs to another project", object.key);
-            }
-            crate::model::validate(&signed.record)?;
-            let by_seq = machines.entry(machine.clone()).or_default();
-            if let Some(previous) = by_seq.get(&expected) {
-                if previous != line {
-                    bail!("conflicting history of machine {machine}, record {expected}");
+    let objects = backend.list("records/")?;
+    for batch in objects.chunks(8) {
+        let keys: Vec<_> = batch.iter().map(|object| object.key.clone()).collect();
+        let bodies = backend.get_many(&keys)?;
+        for (object, body) in batch.iter().zip(bodies) {
+            let (machine, first, last) = format::parse_segment_name(&object.key).context("invalid record segment name")?;
+            let body = body.context("record segment disappeared")?;
+            let body = String::from_utf8(keys::decrypt(identity, &body)?)?;
+            let mut expected = first;
+            for line in body.lines() {
+                let signed = oplog::parse_line(line, None)?;
+                if signed.record.machine != machine || signed.record.seq != expected || expected > last {
+                    bail!("segment {} has an invalid sequence", object.key);
                 }
-                overlaps += 1;
-            } else {
-                by_seq.insert(expected, line.to_string());
+                if signed.record.project != project {
+                    bail!("segment {} belongs to another project", object.key);
+                }
+                crate::model::validate(&signed.record)?;
+                let by_seq = machines.entry(machine.clone()).or_default();
+                if let Some(previous) = by_seq.get(&expected) {
+                    if previous != line {
+                        bail!("conflicting history of machine {machine}, record {expected}");
+                    }
+                    overlaps += 1;
+                } else {
+                    by_seq.insert(expected, line.to_string());
+                }
+                expected = expected.checked_add(1).context("record sequence overflow")?;
             }
-            expected = expected.checked_add(1).context("record sequence overflow")?;
-        }
-        if expected.checked_sub(1) != Some(last) {
-            bail!("segment {} is incomplete", object.key);
+            if expected.checked_sub(1) != Some(last) {
+                bail!("segment {} is incomplete", object.key);
+            }
         }
     }
     // A fetch can continue from the reader's verified prefix when old remote segments are absent.
@@ -139,6 +148,20 @@ impl<'a> Reader<'a> {
         self.backend.decrypted(key, self.identity).with_context(|| format!("decrypt {key}"))
     }
     pub fn tree(&mut self, state: &str, attempt: &str) -> Result<(Header, Vec<u8>, Tree)> {
+        let identity = self.identity;
+        let keys = self.keys;
+        let mut trees = std::mem::take(&mut self.trees);
+        let result = self.backend.verified(false, |backend, _| {
+            let mut reader = Reader::new(backend, identity, keys);
+            reader.trees = std::mem::take(&mut trees);
+            let result = reader.tree_once(state, attempt);
+            trees = reader.trees;
+            result
+        });
+        self.trees = trees;
+        result
+    }
+    fn tree_once(&mut self, state: &str, attempt: &str) -> Result<(Header, Vec<u8>, Tree)> {
         let wanted = (state.to_string(), attempt.to_string());
         if let Some(tree) = self.trees.get(&wanted) {
             return Ok(tree.clone());
@@ -201,17 +224,51 @@ impl<'a> Reader<'a> {
         self.depths.get(&(state.to_string(), attempt.to_string())).copied().context("tree depth was not decoded")
     }
     pub fn read(&mut self, entry: &Entry) -> Result<Vec<u8>> {
+        let identity = self.identity;
+        let keys = self.keys;
+        let cached = !self.parts.is_empty();
+        let mut parts = std::mem::take(&mut self.parts);
+        let mut size = self.part_bytes;
+        let result = self.backend.verified(cached, |backend, retry| {
+            if retry {
+                parts.clear();
+                size = 0;
+            }
+            let mut reader = Reader::new(backend, identity, keys);
+            reader.parts = std::mem::take(&mut parts);
+            reader.part_bytes = size;
+            let result = reader.read_once(entry);
+            parts = reader.parts;
+            size = reader.part_bytes;
+            result
+        });
+        self.parts = parts;
+        self.part_bytes = size;
+        result
+    }
+    fn read_once(&mut self, entry: &Entry) -> Result<Vec<u8>> {
         let mut data = Vec::new();
         for (index, link) in entry.3.iter().enumerate().rev() {
             let key = link.object();
             if !self.parts.contains_key(&key) {
-                let bytes = self.decrypted(&key)?;
-                if self.part_bytes + bytes.len() > 64 << 20 {
-                    self.parts.clear();
-                    self.part_bytes = 0;
+                let mut unique = BTreeSet::new();
+                let upcoming: Vec<_> = entry.3[..=index]
+                    .iter()
+                    .rev()
+                    .map(|link| link.object())
+                    .filter(|key| !self.parts.contains_key(key) && unique.insert(key.clone()))
+                    .take(8)
+                    .collect();
+                let bytes = self.backend.decrypted_many(&upcoming, self.identity)?;
+                // Insert the immediately needed part last, so cache eviction cannot remove it.
+                for (key, bytes) in upcoming.into_iter().zip(bytes).rev() {
+                    if self.part_bytes + bytes.len() > 64 << 20 {
+                        self.parts.clear();
+                        self.part_bytes = 0;
+                    }
+                    self.part_bytes += bytes.len();
+                    self.parts.insert(key, bytes);
                 }
-                self.part_bytes += bytes.len();
-                self.parts.insert(key.clone(), bytes);
             }
             let part = self.parts.get(&key).expect("part loaded");
             let start = usize::try_from(link.3)?;

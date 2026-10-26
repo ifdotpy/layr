@@ -190,44 +190,61 @@ impl Store {
         self.connect(ctx)?;
         let descriptor = self.descriptor()?;
         let identity = self.identity(&descriptor, None)?;
-        let (stream, identity) = self.backend.release_stream(&file.object, &identity)?;
-        let identity = age::x25519::Identity::from_str(&identity).map_err(|_| anyhow::anyhow!("invalid release identity"))?;
-        let decryptor = age::Decryptor::new(stream.take(release::MAX_OBJECT_BYTES + 1))?;
-        let mut plain = decryptor.decrypt(std::iter::once(&identity as &dyn age::Identity))?;
-        crate::privs::as_caller_fs(ctx, || {
-            fs::create_dir_all(directory)?;
-            let directory = fs::canonicalize(directory)?;
-            let output = directory.join(&file.name);
-            let temporary = directory.join(format!(".layr-release-{}", ids::new_id()));
+        let mut prefer_cdn = true;
+        loop {
+            let (stream, selected_identity, from_cdn) = self.backend.release_stream(&file.object, &identity, prefer_cdn)?;
             let result = (|| -> Result<()> {
-                let mut out = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temporary)?;
-                let mut hash = Sha256::new();
-                let mut size = 0;
-                let mut buffer = [0u8; 65536];
-                loop {
-                    let n = plain.read(&mut buffer)?;
-                    if n == 0 {
-                        break;
-                    }
-                    size += n as u64;
-                    if size > file.size || size > release::MAX_FILE_BYTES {
-                        bail!("release file size mismatch");
-                    }
-                    hash.update(&buffer[..n]);
-                    out.write_all(&buffer[..n])?;
-                }
-                if size != file.size || hex::encode(hash.finalize()) != file.sha256 {
-                    bail!("release file SHA-256 or size mismatch");
-                }
-                out.sync_all()?;
-                fs::hard_link(&temporary, &output)
-                    .with_context(|| format!("save {} (existing files are preserved)", output.display()))?;
-                fs::File::open(&directory)?.sync_all()?;
-                Ok(())
+                let identity = age::x25519::Identity::from_str(&selected_identity)
+                    .map_err(|_| anyhow::anyhow!("invalid release identity"))?;
+                let decryptor = age::Decryptor::new(stream.take(release::MAX_OBJECT_BYTES + 1))?;
+                let mut plain = decryptor.decrypt(std::iter::once(&identity as &dyn age::Identity))?;
+                // Only failures before verification can trigger a CDN retry. Publication errors do not.
+                let mut verified = false;
+                let result = crate::privs::as_caller_fs(ctx, || {
+                    fs::create_dir_all(directory)?;
+                    let directory = fs::canonicalize(directory)?;
+                    let output = directory.join(&file.name);
+                    let temporary = directory.join(format!(".layr-release-{}", ids::new_id()));
+                    let result = (|| -> Result<()> {
+                        let mut out = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temporary)?;
+                        let mut hash = Sha256::new();
+                        let mut size = 0;
+                        let mut buffer = [0u8; 65536];
+                        loop {
+                            let n = plain.read(&mut buffer)?;
+                            if n == 0 {
+                                break;
+                            }
+                            size += n as u64;
+                            if size > file.size || size > release::MAX_FILE_BYTES {
+                                bail!("release file size mismatch");
+                            }
+                            hash.update(&buffer[..n]);
+                            out.write_all(&buffer[..n])?;
+                        }
+                        if size != file.size || hex::encode(hash.finalize()) != file.sha256 {
+                            bail!("release file SHA-256 or size mismatch");
+                        }
+                        verified = true;
+                        out.sync_all()?;
+                        fs::hard_link(&temporary, &output)
+                            .with_context(|| format!("save {} (existing files are preserved)", output.display()))?;
+                        fs::File::open(&directory)?.sync_all()?;
+                        Ok(())
+                    })();
+                    let _ = fs::remove_file(&temporary);
+                    result
+                });
+                // Preserve whether this was a verification failure when it crosses the closure.
+                result.map_err(|error| if verified { error.context(super::cdn::DirectFailure) } else { error })
             })();
-            let _ = fs::remove_file(&temporary);
-            result
-        })
+            match result {
+                Err(error) if prefer_cdn && from_cdn && !error.is::<super::cdn::DirectFailure>() => {
+                    prefer_cdn = false;
+                }
+                result => return result,
+            }
+        }
     }
 }
 

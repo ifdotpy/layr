@@ -38,6 +38,71 @@ fn epoch_object(key: &str) -> bool {
             .any(|p| key.starts_with(p))
 }
 impl Backend {
+    fn replay_transport(&self, replay: &std::sync::Arc<super::cdn::Replay>) -> Self {
+        match self {
+            Self::Gateway(gateway) => {
+                let mut gateway = gateway.clone();
+                gateway.replay = Some(replay.clone());
+                Self::Gateway(gateway)
+            }
+            Self::Prefix(base, prefix) => Self::Prefix(Box::new(base.replay_transport(replay)), prefix.clone()),
+            Self::Epoch(epoch) => Self::Epoch(Box::new(EpochBackend {
+                root: epoch.root.replay_transport(replay),
+                current: epoch.current.replay_transport(replay),
+                history: epoch.history.iter().map(|(base, key)| (base.replay_transport(replay), key.clone())).collect(),
+            })),
+            _ => self.clone(),
+        }
+    }
+    pub fn has_gateway(&self) -> bool {
+        match self {
+            Self::Gateway(_) => true,
+            Self::Prefix(base, _) => base.has_gateway(),
+            Self::Epoch(epoch) => {
+                epoch.root.has_gateway()
+                    || epoch.current.has_gateway()
+                    || epoch.history.iter().any(|(base, _)| base.has_gateway())
+            }
+            _ => false,
+        }
+    }
+    pub fn verified<T>(&self, cached_cdn: bool, mut verify: impl FnMut(&Backend, bool) -> Result<T>) -> Result<T> {
+        if !self.has_gateway() {
+            return verify(self, false);
+        }
+        let replay = std::sync::Arc::new(super::cdn::Replay::default());
+        let backend = self.replay_transport(&replay);
+        match verify(&backend, false) {
+            Err(error) if !error.is::<super::cdn::DirectFailure>() && replay.retry(cached_cdn) => {
+                verify(&backend, true).map_err(|error| error.context(super::cdn::DirectFailure))
+            }
+            result => result,
+        }
+    }
+    fn parallel<T: Send>(&self, keys: &[String], get: impl Fn(&Backend, &str) -> Result<T> + Sync) -> Result<Vec<T>> {
+        if !self.has_gateway() {
+            return keys.iter().map(|key| get(self, key)).collect();
+        }
+        let mut results = Vec::with_capacity(keys.len());
+        for chunk in keys.chunks(8) {
+            let batch = std::thread::scope(|scope| -> Result<Vec<T>> {
+                let get = &get;
+                let workers: Vec<_> = chunk.iter().map(|key| scope.spawn(move || get(self, key))).collect();
+                workers
+                    .into_iter()
+                    .map(|worker| worker.join().map_err(|_| anyhow::anyhow!("gateway fetch worker failed"))?)
+                    .collect()
+            })?;
+            results.extend(batch);
+        }
+        Ok(results)
+    }
+    pub fn get_many(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
+        self.parallel(keys, |backend, key| backend.get(key))
+    }
+    pub fn decrypted_many(&self, keys: &[String], identity: &str) -> Result<Vec<Vec<u8>>> {
+        self.parallel(keys, |backend, key| backend.decrypted(key, identity))
+    }
     pub fn set_epoch(&self, epoch: Option<&str>) -> Result<()> {
         match self {
             Self::Gateway(g) => g.set_epoch(epoch),
@@ -108,31 +173,32 @@ impl Backend {
     }
 
     /// Stream a release object and select the authenticated identity of its epoch.
-    pub fn release_stream(&self, key: &str, identity: &str) -> Result<(Box<dyn Read>, String)> {
+    pub fn release_stream(&self, key: &str, identity: &str, prefer_cdn: bool) -> Result<(Box<dyn Read>, String, bool)> {
         if !super::format::release_file(key) {
             bail!("invalid release object");
         }
         if let Self::Epoch(epoch) = self {
-            if let Some(stream) = epoch.current.get_stream(key)? {
-                return Ok((stream, identity.into()));
+            if let Some((stream, cdn)) = epoch.current.get_stream(key, prefer_cdn)? {
+                return Ok((stream, identity.into(), cdn));
             }
             for (backend, old_identity) in &epoch.history {
-                if let Some(stream) = backend.get_stream(key)? {
-                    return Ok((stream, old_identity.clone()));
+                if let Some((stream, cdn)) = backend.get_stream(key, prefer_cdn)? {
+                    return Ok((stream, old_identity.clone(), cdn));
                 }
             }
             bail!("missing release object {key}");
         }
-        Ok((self.get_stream(key)?.with_context(|| format!("missing release object {key}"))?, identity.into()))
+        let (stream, cdn) = self.get_stream(key, prefer_cdn)?.with_context(|| format!("missing release object {key}"))?;
+        Ok((stream, identity.into(), cdn))
     }
 
-    fn get_stream(&self, key: &str) -> Result<Option<Box<dyn Read>>> {
+    fn get_stream(&self, key: &str, prefer_cdn: bool) -> Result<Option<(Box<dyn Read>, bool)>> {
         check_key(key)?;
         match self {
             Self::Epoch(_) => bail!("select an epoch before streaming"),
-            Self::Prefix(base, prefix) => base.get_stream(&format!("{prefix}{key}")),
-            Self::S3(s) => Ok(s.get_stream(key)?.map(|r| Box::new(r) as Box<dyn Read>)),
-            Self::Gateway(g) => Ok(g.release_stream(key)?.map(|r| Box::new(r) as Box<dyn Read>)),
+            Self::Prefix(base, prefix) => base.get_stream(&format!("{prefix}{key}"), prefer_cdn),
+            Self::S3(s) => Ok(s.get_stream(key)?.map(|r| (Box::new(r) as Box<dyn Read>, false))),
+            Self::Gateway(g) => Ok(g.release_stream(key, prefer_cdn)?.map(|(r, cdn)| (Box::new(r) as Box<dyn Read>, cdn))),
             Self::File(root, uid, gid) => crate::privs::as_user_fs(*uid, *gid, || {
                 let path = crate::fsutil::safe_join(root, key)?;
                 match OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path) {
@@ -140,7 +206,7 @@ impl Backend {
                         if !file.metadata()?.is_file() {
                             bail!("remote object is not a file");
                         }
-                        Ok(Some(Box::new(file) as Box<dyn Read>))
+                        Ok(Some((Box::new(file) as Box<dyn Read>, false)))
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
                     Err(e) => Err(e.into()),

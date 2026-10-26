@@ -1,6 +1,7 @@
 //! Encrypted immutable remotes, independent of the local snapshot backend.
 
 pub(crate) mod backend;
+mod cdn;
 pub(crate) mod browse;
 pub(crate) mod epochs;
 pub(crate) mod gateway;
