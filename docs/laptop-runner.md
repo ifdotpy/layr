@@ -86,6 +86,8 @@ toolchain/cache seed without credentials. Keep these images mounted while the
 watcher runs. After a Mac restart, rerun the preparation command to attach them.
 Do not store personal data on these volumes. Refresh the seed after Cargo.lock
 changes. The seed lives in `~/Library/Application Support/Layr/checks`.
+The case suite uses private folders on these images and verifies both case modes;
+automatic jobs do not create or attach additional images through macOS disk services.
 
 There is one separate operator check, outside automatic execution. After building
 the binary, the owner runs this once from the trusted checkout:

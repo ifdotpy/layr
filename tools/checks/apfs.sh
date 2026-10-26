@@ -28,7 +28,8 @@ python3 tests/apfs-index.py --binary "$LAYR" --root "$LAYR_APFS_TEST_ROOT"
 python3 tests/apfs-thin.py --binary "$LAYR" --root "$LAYR_APFS_TEST_ROOT"
 python3 tests/apfs-status-cache.py --binary "$LAYR" --root "$LAYR_APFS_TEST_ROOT"
 mkdir -p "$TMPDIR/case"
-python3 tests/apfs-case.py --binary "$LAYR" --root "$TMPDIR/case"
+python3 tests/apfs-case.py --binary "$LAYR" --root "$TMPDIR/case" \
+    --case-sensitive-root "$LAYR_APFS_TEST_ROOT" --case-insensitive-root "$case_root"
 bash tests/apfs-local.sh
 LAYR_TEST_DIRECT_MAIN=1 bash tests/run.sh t01-basic t02-merge t03-git t05-transfer t06-sync t08-gitcompat
 LAYR_APFS_TEST_ROOT="$case_root" LAYR_TEST_DIRECT_MAIN=1 bash tests/run.sh t01-basic t02-merge t03-git

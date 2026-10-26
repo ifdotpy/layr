@@ -400,7 +400,7 @@ fn execute(
     privileged: bool,
     limits: &Limits,
 ) -> Result<(i32, Vec<u8>, bool)> {
-    use std::os::unix::fs::DirBuilderExt;
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     use std::process::Command;
 
     let private = if privileged {
@@ -428,6 +428,9 @@ fn execute(
         if !status.success() {
             bail!("cannot prepare private privileged check folder");
         }
+        // cp -a also copies the source root's mode over the prepared folder.
+        // Restore traversal for the suite's unprivileged service clients.
+        std::fs::set_permissions(&private.path, std::fs::Permissions::from_mode(0o711))?;
         home = private.path.join(format!(".check-home-{}", crate::ids::new_id()));
         std::fs::DirBuilder::new().mode(0o700).create(&home)?;
         // Keep test mounts private so killing a timed-out suite releases its mounts too.
