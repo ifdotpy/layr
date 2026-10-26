@@ -15,6 +15,7 @@ separate Cargo target directories for the two source trees; copying older source
 The harness checks distinct binary hashes and expected cache formats. It writes
 JSONL measurements and sanitized request traces, never keys or token values.
 The daily TLS stand-in follows tests/t46-machine-bootstrap.sh with 5 ms/request.
+It requires Python 3, OpenSSL and the age CLI to seal a short reader challenge.
 """
 import os,pathlib,subprocess,json,time,hashlib
 import argparse,atexit,signal
@@ -24,6 +25,7 @@ parser.add_argument('--run-id',default='',help='Suffix for fresh before/after ar
 parser.add_argument('--after-run-id',default='',help='Use a fresh after archive with an existing matching baseline run.')
 parser.add_argument('--fixture',choices=['all','layr','studio'],default='all')
 parser.add_argument('--resume',action='store_true',help='Resume an interrupted after push; report log timestamp estimate separately.')
+parser.add_argument('--daily-existing-state',action='store_true',help='Retry daily TLS measurement using its already saved child state.')
 parser.add_argument('phase',choices=['before','after','daily'])
 args=parser.parse_args()
 active_process=None
@@ -153,6 +155,10 @@ def daily():
     openssl(['x509','-req','-in',str(tls/'request.csr'),'-CA',str(tls/'ca.pem'),'-CAkey',str(tls/'ca-key.pem'),'-CAcreateserial','-out',str(tls/'cert.pem'),'-days','1','-extfile',str(tls/'extensions.cnf')])
     grant=secrets.token_hex(32);proof='v1.read.push-cache-fixture'
     grant_path=tls/'grant';grant_path.write_text(grant);grant_path.chmod(0o600)
+    # A production challenge is small. Full record segments exceed its 16 KiB
+    # response bound on a large history, so seal a short nonce with the age CLI.
+    challenge_plain={phase:json.dumps({'machine':'push-cache-benchmark','nonce':secrets.token_hex(16)}) for phase in ['before','after']}
+    challenges={phase:base64.b64encode(subprocess.check_output(['age','-r',json.loads((archive_for('studio',phase)/'store.json').read_text())['recipient']],input=challenge_plain[phase].encode())).decode() for phase in ['before','after']}
     requests=[];errors=[]
     class Gateway(http.server.BaseHTTPRequestHandler):
         def log_message(self,*args): pass
@@ -184,11 +190,11 @@ def daily():
                 return
             if self.command=='GET' and action=='challenge':
                 assert kind=='grant'
-                self.reply(200,{'challenge':base64.b64encode(next((archive/'records').rglob('*.age')).read_bytes()).decode()});return
+                self.reply(200,{'challenge':challenges[phase]});return
             if self.command=='POST' and action=='token':
                 assert kind=='grant'
                 body=json.loads(self.rfile.read(int(self.headers.get('Content-Length','0'))))
-                assert isinstance(body.get('challenge'),str) and '"machine"' in body['challenge']
+                assert body.get('challenge')==challenge_plain[phase]
                 self.reply(200,{'token':proof,'expires':int(time.time()*1000)+300000});return
             if self.command=='GET' and action=='objects':
                 assert set(query)<= {'prefix','limit','continuation'}
@@ -219,22 +225,26 @@ def daily():
     context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.load_cert_chain(tls/'cert.pem',tls/'key.pem')
     server.socket=context.wrap_socket(server.socket,server_side=True)
     thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+    gateway_names={phase:'gateway-'+label_for(phase)+'-'+str(server.server_port) for phase in ['before','after']}
     env=os.environ|{'LAYR_ROOT':str(root),'LAYR_AUTHOR_NAME':'Cache benchmark','LAYR_AUTHOR_EMAIL':'cache@example.test','LAYR_GATEWAY_CA_FILE':str(tls/'ca.pem'),'LAYR_GATEWAY_TOKEN_FILE':str(grant_path),'LAYR_TRACE':'1'}
     try:
         for phase in ['before','after']:
             url=f'layr+https://localhost:{server.server_port}/{phase}'
-            run([base/'layr-after','remote','add','gateway-'+label_for(phase),url],env,cwd=line,label='daily-setup')
+            run([base/'layr-after','remote','add',gateway_names[phase],url],env,cwd=line,label='daily-setup')
             source=project/'meta/remote-stores'/hashlib.sha256(('file://'+str(archive_for('studio',phase))).encode()).hexdigest()
             target=project/'meta/remote-stores'/hashlib.sha256(url.encode()).hexdigest()
             target.mkdir(exist_ok=True)
             subprocess.run(['cp','-a','--reflink=always',str(source)+'/.',str(target)],check=True)
-        prior_states=sum(1 for p in (project/'states').iterdir() if p.is_dir())
-        (line/'push-cache-daily.txt').write_text(f'Daily comparison {args.run_id} after {prior_states} snapshots.\n')
-        run([base/'layr-after','add','push-cache-daily.txt'],env,cwd=line,label='daily-setup')
-        run([base/'layr-after','save','-qm','Push cache daily benchmark'],env,cwd=line,label='daily-setup')
+        actual_states=sum(1 for p in (project/'states').iterdir() if p.is_dir())
+        prior_states=next(row['snapshot_states'] for row in reversed(rows) if row['fixture']=='studio' and row['phase']=='after' and row.get('after_run_id','')==args.after_run_id)
+        assert actual_states==prior_states+int(args.daily_existing_state), 'daily fixture changed unexpectedly'
+        if not args.daily_existing_state:
+            (line/'push-cache-daily.txt').write_text(f'Daily comparison {args.run_id} after {prior_states} snapshots.\n')
+            run([base/'layr-after','add','push-cache-daily.txt'],env,cwd=line,label='daily-setup')
+            run([base/'layr-after','save','-qm','Push cache daily benchmark'],env,cwd=line,label='daily-setup')
         for phase in ['before','after']:
             requests.clear();started=time.monotonic()
-            seconds=run([base/('layr-'+phase),'push','gateway-'+label_for(phase),'-q'],env,cwd=line,label='daily-'+phase)
+            seconds=run([base/('layr-'+phase),'push',gateway_names[phase],'-q'],env,cwd=line,label='daily-'+phase)
             assert not errors,errors
             counts=dict(collections.Counter(r['method'] for r in requests))
             listing_prefixes=[urllib.parse.parse_qs(urllib.parse.urlsplit(r['path']).query).get('prefix',[''])[0] for r in requests if '/objects?' in r['path']]
