@@ -202,3 +202,13 @@ against a disposable project on `cloud.layr.ws`, then inspect its change/main
 pages. A local run alone does not prove site delivery. A disposable test store's
 paper key stays only in its owner's temporary folder and is deleted with that
 store; it never enters the runner VM.
+
+The [measured acceptance evidence](laptop-runner-evidence.json) records the local
+and cloud runs, VM restart, isolation checks, installed binaries and cleanup.
+The cloud run on source `e74ceff` passed all five jobs and showed five green rows
+on the published site. The earlier APFS failure exposed a concurrent file-store
+publication defect; its signed result is retained with the five passing results
+in [the signed envelopes](laptop-runner-signed-checks.jsonl). Their original logs
+and SHA-256 manifest are in [the log archive](laptop-runner-check-logs.tar.gz).
+The root APFS service and three login Keychain fixtures remain unverified until
+Igor runs the separate operator steps above.
