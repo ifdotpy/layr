@@ -27,7 +27,10 @@ const CHECKPOINT_STATES: usize = 128;
 const RECORD_SEGMENT_BYTES: usize = 4 << 20;
 const INDEX_STATES: usize = 16_384;
 #[cfg(test)]
-thread_local! { static PUSH_STOP_AFTER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) }; }
+thread_local! {
+    static PUSH_STOP_AFTER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static PUSH_CACHE_DISABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 #[derive(Clone, Serialize, Deserialize)]
 struct Cached {
     attempt: String,
@@ -332,6 +335,10 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
         std::fs::remove_dir_all(store.dir.join("pushed"))?;
     }
     let mut tree_cache = super::push_cache::TreeCache::open(&store.dir).ok();
+    #[cfg(test)]
+    if PUSH_CACHE_DISABLED.with(|disabled| disabled.get()) {
+        tree_cache = None;
+    }
     // Completed immutable trees are never collected. Cache metadata is written only after
     // publication, so a regular push need not enumerate every historical remote object.
     index.retain(|id, entry| valid_cached(id, entry));
@@ -454,6 +461,7 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
         )?;
         drop(stage);
         let stage = crate::trace::span("store checkpoint");
+        present.insert(state.id.clone(), pushed.attempt.clone());
         index.insert(state.id.clone(), cache_tree(&mut tree_cache, &pushed));
         #[cfg(test)]
         PUSH_STOP_AFTER.with(|stop| -> Result<()> {
@@ -863,6 +871,7 @@ mod tests {
             record.data = serde_json::json!({"id":store.project,"name":"p","config":{}});
             project.append(record, &ctx.actor()).unwrap();
             let mut parents = Vec::<String>::new();
+            let mut first = None;
             for n in 0..4 {
                 let id = crate::ids::new_id();
                 std::fs::create_dir(project.state_path(&id)).unwrap();
@@ -874,12 +883,18 @@ mod tests {
                 let mut record = Record::new("state");
                 record.states.push(state);
                 project.append(record, &ctx.actor()).unwrap();
-                parents = vec![id];
+                if n == 0 {
+                    first = Some(id.clone());
+                }
+                parents = vec![if n == 1 { first.clone().unwrap() } else { id }];
             }
             let repo = Repo { p: project };
+            // With no cache, the third state must hydrate a parent uploaded in this same push.
+            PUSH_CACHE_DISABLED.with(|disabled| disabled.set(corrupt));
             PUSH_STOP_AFTER.with(|stop| stop.set(Some(3)));
             let error = push(&store, &ctx, &repo, &Options::default()).unwrap_err();
             PUSH_STOP_AFTER.with(|stop| stop.set(None));
+            PUSH_CACHE_DISABLED.with(|disabled| disabled.set(false));
             assert_eq!(error.downcast_ref::<std::io::Error>().unwrap().raw_os_error(), Some(libc::ENOSPC));
             assert!(!store.dir.join("pushed-v2.json.zst").exists());
             let before: BTreeMap<_, _> = store
