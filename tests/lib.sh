@@ -11,7 +11,7 @@ elif [ "$(uname -s)" = Darwin ]; then
     : "${LAYR_APFS_TEST_ROOT:?Set LAYR_APFS_TEST_ROOT to a case-sensitive APFS volume}"
     T=$(mktemp -d "$LAYR_APFS_TEST_ROOT/layr-test.XXXXXX")
 else
-    T=$(mktemp -d /var/tmp/layr-test.XXXXXX)
+    T=$(mktemp -d "${TMPDIR:-/var/tmp}/layr-test.XXXXXX")
 fi
 export LAYR_ROOT=$T/store
 export GIT_AUTHOR_NAME=Tester GIT_AUTHOR_EMAIL=tester@example.com GIT_COMMITTER_NAME=Tester GIT_COMMITTER_EMAIL=tester@example.com

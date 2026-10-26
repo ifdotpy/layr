@@ -70,11 +70,19 @@ fn publications(root: &Backend, descriptor: &Descriptor) -> Result<Vec<Published
 pub(super) fn resolve(
     root: &Backend,
     descriptor: &Descriptor,
-    mut open: impl FnMut(&Backend, &Descriptor) -> Result<(String, bool)>,
+    open: impl FnMut(&Backend, &Descriptor) -> Result<(String, bool)>,
 ) -> Result<Option<(Backend, Current, bool)>> {
     let chain = publications(root, descriptor)?;
+    resolve_chain(root, descriptor, chain, open)
+}
+fn resolve_chain(
+    root: &Backend,
+    descriptor: &Descriptor,
+    chain: Vec<Published>,
+    mut open: impl FnMut(&Backend, &Descriptor) -> Result<(String, bool)>,
+) -> Result<Option<(Backend, Current, bool)>> {
+    root.set_epoch(chain.last().map(|p| p.key.epoch.as_str()))?;
     let Some(latest) = chain.last() else { return Ok(None) };
-    root.set_epoch(Some(&latest.key.epoch))?;
     let scoped = root.scoped(&latest.key.prefix())?;
     let next: Descriptor = serde_json::from_slice(&scoped.get("store.json")?.context("project epoch has no descriptor")?)?;
     if next.format != 2 || next.project != descriptor.project || next.recipient != latest.key.recipient {
@@ -113,12 +121,12 @@ pub(super) fn resolve(
     let root_writers = layr_store::public::trusted_writers(&descriptor.project, &original.lines)?;
     root.unlock_reader(&identity)?;
     let current = reader::records(&scoped, &identity, &descriptor.project)?;
-    if !current.gaps.is_empty() {
-        bail!("project epoch has record gaps");
+    if current.lines.is_empty() || !current.gaps.is_empty() {
+        bail!("rotation in progress: current epoch record history is incomplete; retry after the writer resumes");
     }
     // The exact root log must survive, preventing a forged creator/trust graph in a new epoch.
     if original.lines.iter().any(|line| !current.lines.contains(line)) {
-        bail!("project epoch rewrites the root history");
+        bail!("rotation in progress: current epoch does not yet preserve the complete root history");
     }
     let trusted = layr_store::public::trusted_writers(&descriptor.project, &current.lines)?;
     if root_writers.iter().any(|(id, key)| trusted.get(id) != Some(key)) {
@@ -128,7 +136,7 @@ pub(super) fn resolve(
         let signer = trusted.get(&p.record.machine).context("project epoch signer is not a trusted writer")?;
         oplog::parse_line(&p.line, Some(signer))?;
         if !current.lines.contains(&p.line) {
-            bail!("project epoch discovery record is absent from its encrypted history");
+            bail!("rotation in progress: epoch discovery is not yet in its encrypted history");
         }
     }
     let readers = current
@@ -171,7 +179,8 @@ fn opener(store: &Store, backend: &Backend, descriptor: &Descriptor) -> Result<(
     }
     Ok((super::public::identity(backend, descriptor)?.context("the store is not public")?, true))
 }
-pub(super) fn connect(store: &mut Store) -> Result<()> {
+pub(super) fn connect(store: &mut Store) -> Result<()> { connect_before_pending(store, None) }
+fn connect_before_pending(store: &mut Store, pending: Option<&Published>) -> Result<()> {
     if store.layer.is_some() {
         return Ok(());
     }
@@ -183,13 +192,59 @@ pub(super) fn connect(store: &mut Store) -> Result<()> {
     if let Some(pin) = store.person.as_ref().and_then(|person|person.index.pin(&root.project)) {
         pin.check_store(&root)?;
     }
-    if let Some((backend, current, public)) = resolve(&store.backend, &root, |b, d| opener(store, b, d))? {
+    let mut chain = publications(&store.backend, &root)?;
+    if let Some(pending) = pending {
+        if chain.iter().any(|p| p.key.epoch == pending.key.epoch) {
+            let latest = chain.last().context("pending epoch disappeared")?;
+            if latest.line.trim_end() != pending.line.trim_end() { bail!("pending rotation discovery differs from this machine's signed record"); }
+            chain.pop();
+        }
+        let parent = chain.last().map_or("root", |p| p.key.epoch.as_str());
+        let recipient = chain.last().map_or(root.recipient.as_str(), |p| p.key.recipient.as_str());
+        if parent != pending.key.parent || recipient != pending.key.parent_recipient {
+            bail!("project epoch changed while a rotation was pending");
+        }
+    }
+    if let Some((backend, current, public)) = resolve_chain(&store.backend, &root, chain, |b, d| opener(store, b, d))? {
         store.backend = backend;
         store.epoch = Some(current);
         store.epoch_public = public;
         store.public_reader.store(public, std::sync::atomic::Ordering::SeqCst);
     }
     Ok(())
+}
+
+fn pending_rotation(store: &Store, repo: &Repo) -> Result<Option<Published>> {
+    let mut found = None;
+    for line in repo.p.export_jsonl()?.lines() {
+        let record = oplog::parse_line(line, None)?.record;
+        if record.op != "project.key" || record.machine != store.machine { continue; }
+        let key: Key = serde_json::from_value(record.data.clone())?;
+        key.validate()?;
+        let path = store.dir.join("project-keys").join(format!("{}.age", key.epoch));
+        if !path.exists() { continue; }
+        oplog::parse_line(line, Some(&store.key.verifying_key()))?;
+        let identity = keys::open_machine_slot(&std::fs::read(&path)?, &store.key)?;
+        if key.project != repo.p.id || keys::recipient_of(&identity)? != key.recipient {
+            bail!("pending rotation identity differs from its signed record");
+        }
+        if found.replace(Published { key, record, line:line.into() }).is_some() {
+            bail!("more than one local rotation is pending");
+        }
+    }
+    Ok(found)
+}
+fn pending_readers(repo: &Repo, key: &Key) -> Result<BTreeMap<String,String>> {
+    let mut readers = None;
+    for line in repo.p.export_jsonl()?.lines() {
+        let r = oplog::parse_line(line, None)?.record;
+        if r.op == "project.readers" && r.data["epoch"] == key.epoch {
+            readers = Some(serde_json::from_value(r.data["readers"].clone())?);
+        }
+    }
+    let readers = readers.context("pending rotation has no reader set")?;
+    if layr_store::epochs::readers_hash(&readers)? != key.readers_hash { bail!("pending rotation reader hash differs"); }
+    Ok(readers)
 }
 
 pub(crate) fn project_mode(repo: &Repo) -> Result<Mode> {
@@ -321,7 +376,10 @@ impl Store {
         force: bool,
     ) -> Result<ModeChange> {
         repo.require(ctx, "remote")?;
-        self.connect(ctx)?;
+        self.private_dir()?;
+        self.connect_transport(ctx)?;
+        let pending = pending_rotation(self, repo)?;
+        connect_before_pending(self, pending.as_ref())?;
         let descriptor = self.descriptor()?;
         let identity = self.identity(&descriptor, None)?;
         self.require_private_access()?;
@@ -340,8 +398,11 @@ impl Store {
         } else {
             Mode::Private
         };
-        let mode = if force { old_mode } else { mode };
-        let rotated = force || !remove.is_empty() || mode < old_mode;
+        let mode = if let Some(pending) = &pending {
+            if !force && mode != pending.key.mode { bail!("resume the pending rotation before changing its mode"); }
+            pending.key.mode
+        } else if force { old_mode } else { mode };
+        let rotated = pending.is_some() || force || !remove.is_empty() || mode < old_mode;
         let service = repo
             .p
             .config_value(&format!("remote.{name}.service-recipient"))?
@@ -377,13 +438,15 @@ impl Store {
         }
         let _lock = repo.p.lock()?;
         if rotated {
-            let mut readers = readers(self, repo, remove)?;
+            let mut readers = if let Some(pending) = &pending { pending_readers(repo, &pending.key)? } else { readers(self, repo, remove)? };
             for principal in remove {
                 let canonical = if crate::model::is_uuid(principal) { format!("machine:{principal}") } else { principal.clone() };
                 if canonical == format!("machine:{}", self.machine) {
                     bail!("the rotating machine must remain a reader");
                 }
-                if readers.remove(&canonical).is_none() {
+                if pending.is_some() {
+                    if readers.contains_key(&canonical) { bail!("resume the pending rotation before removing another reader"); }
+                } else if readers.remove(&canonical).is_none() {
                     bail!("unknown project reader {principal}");
                 }
             }
@@ -395,17 +458,8 @@ impl Store {
             let parent = self.epoch.as_ref().map(|e| e.key.epoch.as_str()).unwrap_or("root").to_string();
             let hash = layr_store::epochs::readers_hash(&readers)?;
             // A pending signed record and machine-sealed local identity are the retry source.
-            let pending = repo
-                .p
-                .export_jsonl()?
-                .lines()
-                .filter_map(|l| oplog::parse_line(l, None).ok().map(|s| (l.to_owned(), s.record)))
-                .filter(|(_, r)| {
-                    r.op == "project.key" && r.data["parent"] == parent && r.data["parent_recipient"] == descriptor.recipient
-                })
-                .last();
-            let (key, record, line, next_identity) = if let Some((line, record)) = pending {
-                let key: Key = serde_json::from_value(record.data.clone())?;
+            let (key, record, line, next_identity) = if let Some(pending) = pending {
+                let Published { key, record, line } = pending;
                 if key.mode != mode || key.readers_hash != hash {
                     bail!("retry the pending project rotation before changing its audience");
                 }
@@ -466,11 +520,24 @@ impl Store {
                     history.push((backend.clone(), old_identity.clone()));
                 }
             }
+            let recorded = repo.p.export_jsonl()?.lines().filter_map(|line|oplog::parse_line(line,None).ok())
+                .any(|r|r.record.op == "project.mode" && r.record.data["epoch"] == key.epoch);
+            if !recorded {
+                let mut event = Record::new("project.mode");
+                event.data = serde_json::json!({"mode":mode,"epoch":key.epoch,"reason":reason});
+                repo.commit_record(ctx, event)?;
+            }
+            // Publish routing only after slots, descriptor and sealed history exist.
+            // An older proof must never be used to list or read the new namespace.
+            if !root.put_new(&key.object(&record.id), line.as_bytes().to_vec())? {
+                let existing = root.get(&key.object(&record.id))?.context("pending discovery disappeared")?;
+                if std::str::from_utf8(&existing)?.trim_end() != line.trim_end() { bail!("pending epoch publication changed"); }
+            }
             self.backend = Backend::Epoch(Box::new(EpochBackend { root: root.clone(), current: current.clone(), history }));
+            self.backend.set_epoch(Some(&key.epoch))?;
+            self.backend.unlock_reader(&next_identity)?;
+            self.backend.prove_reader()?;
             self.epoch = Some(Current { key: key.clone(), identity: next_identity });
-            let mut event = Record::new("project.mode");
-            event.data = serde_json::json!({"mode":mode,"epoch":key.epoch,"reason":reason});
-            repo.commit_record(ctx, event)?;
             // A new epoch carries the complete signed log; states stay in their original epochs.
             // Carry remote-only reader announcements and signed history forward too.
             // The writer then appends the local suffix after these exact prefixes.
@@ -505,8 +572,9 @@ impl Store {
                     bail!("overlay tightening incomplete: {}", report.omitted.join("; "));
                 }
             }
-            root.put_new(&key.object(&record.id), line.into_bytes())?;
             self.publishing_epoch = false;
+            let pending_path = self.dir.join("project-keys").join(format!("{}.age", key.epoch));
+            std::fs::remove_file(&pending_path)?;
         } else {
             if mode == Mode::Service {
                 self.backend.put_new(
