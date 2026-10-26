@@ -69,7 +69,7 @@ jobs:
           python3 tests/apfs-status-cache.py --binary "$LAYR" --root "$LAYR_APFS_TEST_ROOT"
           mkdir -p "$RUNNER_TEMP/case" && python3 tests/apfs-case.py --binary "$LAYR" --root "$RUNNER_TEMP/case"
           bash tests/apfs-local.sh
-          bash tests/run.sh t50-upstream-fixes t51-git-init-space t52-git-init-metadata
+          bash tests/run.sh t50-upstream-fixes t51-git-init-space t52-git-init-metadata t55-machine-identity
           LAYR_TEST_DIRECT_MAIN=1 bash tests/run.sh t01-basic t02-merge t03-git t05-transfer t06-sync t08-gitcompat
           # The default macOS volume ignores case: run the core commands on such a store too.
           hdiutil create -size 2g -fs APFS -volname LayrCase -type SPARSE -o "$RUNNER_TEMP/case.sparseimage"
