@@ -9,11 +9,14 @@ test -d "$seed/cargo" && test -d "$seed/rustup" || {
 export CARGO_HOME="$HOME/.cargo" RUSTUP_HOME="$seed/rustup"
 mkdir -p "$CARGO_HOME"
 if [ "$(uname -s)" = Darwin ]; then
-    /bin/cp -cR "$seed/cargo/." "$CARGO_HOME/"
+    # The sandbox can read this prepared seed but cannot change it. Keep Cargo's
+    # locks in the private HOME without copying unrelated cached crate files.
+    ln -s "$seed/cargo/registry" "$CARGO_HOME/registry"
+    ln -s "$seed/cargo/bin" "$CARGO_HOME/bin"
 else
     cp -a --no-preserve=ownership "$seed/cargo/." "$CARGO_HOME/"
+    chmod -R u+rwX "$CARGO_HOME"
 fi
-chmod -R u+rwX "$CARGO_HOME"
 export PATH="$CARGO_HOME/bin:/usr/local/sbin:/usr/sbin:/sbin:$PATH" CARGO_NET_OFFLINE=true
 if [ "$(uname -s)" = Darwin ]; then
     toolchain=$(cat "$seed/toolchain")
