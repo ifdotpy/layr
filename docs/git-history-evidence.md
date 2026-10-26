@@ -297,3 +297,23 @@ contain sanitized route and credential-class traces. The historical git-history
 measurement was 3.584 seconds and the same 21 requests; the current before/after
 pair is the direct comparison. During the guarded runs, the minimum recorded
 Mac free space was 32.51 GiB; no disk abort or restart occurred.
+
+### Main rebase and retry regression
+
+The branch was rebased onto `cddd095` (PR #26). The production push path differs
+from the measured revision only by two explanatory comments; timings were not
+rerun. The recovered-cache rule from main is retained: lost checkpoint entries
+have `root: None`, journal completion rows do not carry roots, and parent cache
+misses read signed remote trees. Directory-node reads check their SHA-256 hashes.
+
+`t56-push-cache-retry.sh` now uses `pushed-v2.json.zst` and SQLite directory nodes.
+It keeps all five original PASS lines. It removes the index while leaving cache
+nodes, checks every previously published tree remains byte-for-byte unchanged,
+and leaves structurally valid wrong nodes at both an old address and a correct
+new hash before losing the checkpoint again. The retry ignores those nodes and
+`fsck --remote --files` passes. The second retry also preserves all prior trees.
+
+On the rebased source, `cargo test --workspace --locked` passed 240 tests with
+eight ignored. All ten requested suites passed: t49 (28), t19 (25), t22 (7),
+t23 portable (4), t23 views (55), t24 (11), t35 (49), t42 (99), t46 (18), and
+**t56 (5)**. The retained unit and shell logs are from this final run.
