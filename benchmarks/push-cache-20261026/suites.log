@@ -1,0 +1,9 @@
+t49-git-history.sh: 28 passed, 0 failed
+t19-remote-store.sh: 25 passed, 0 failed
+t22-store-trust.sh: 7 passed, 0 failed
+t23-store-portable-peer.sh: 4 passed, 0 failed
+t23-views.sh: 55 passed, 0 failed
+t24-store-partial.sh: 11 passed, 0 failed
+t35-overlay-sync.sh: 49 passed, 0 failed
+t42-public.sh: 99 passed, 0 failed
+t46-machine-bootstrap.sh: 18 passed, 0 failed

@@ -1,0 +1,40 @@
+{
+  "baseline_revision": "ec8ba0fb17389e5064045b07961be84c7e422ba0",
+  "after_revision": "affea03",
+  "baseline_binary_sha256": "6ac6b18f48a4352030ac76a3c94bb11b2874bda26133c7658b2e2ee851e2e341",
+  "after_binary_sha256": "9c534240b516ecc9611e5d608b0c786a9c7bc75066baaf8e74f8abb74172b7ad",
+  "after_build_target": "/root/pc/after/target",
+  "machine": "layr-pc",
+  "fixture_filesystem": "48 GiB Btrfs loop volume",
+  "fixtures": [
+    {
+      "name": "layr",
+      "source_tip": "c1d7229a30aa808fedc0274e961b2f38e7cc2f7d",
+      "git_commits": 392,
+      "local_children": 0,
+      "full_push_states": 392,
+      "bundle_sha256": "518d690ed1f5a0a900e54e96c74744cb3eaee354ebdf49eb5ffd8c546bf53ec5"
+    },
+    {
+      "name": "studio",
+      "source_tip": "eec4c6d136da146a5d3d659575c1baf2d93849f8",
+      "git_commits": 7965,
+      "local_children": 1,
+      "full_push_states": 7966,
+      "bundle_sha256": "a13850e20218fa49267d0b662c99657b6f620d12b9c501496e1cb747448edabf"
+    }
+  ],
+  "transfer": "Git bundles and source archives copied through /mnt/mac; SHA-256 verified at both ends",
+  "disk_guard": {
+    "peak_write_estimate_gib": 2,
+    "minimum_start_free_gib": 20,
+    "minimum_free_to_peak_ratio": 3,
+    "abort_free_gib": 10,
+    "interval_seconds": 30
+  },
+  "daily_gateway_request_delay_ms": 5,
+  "tests": {
+    "workspace_passed": 238,
+    "workspace_ignored": 8
+  }
+}
