@@ -25,6 +25,13 @@ if [ "$(uname -s)" = Darwin ]; then
     export CC="$(cat "$seed/clang")" SDKROOT="$(cat "$seed/sdk")"
     export CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER="$CC"
     export CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER="$CC"
+    # Git locates its helpers relative to its actual binary. A relocated symlink
+    # and Apple's /usr/bin shim both need paths outside this private environment.
+    export PATH="$(dirname "$(cat "$seed/git")"):$PATH"
+    # Layr's Git child switches to the caller's OS home. Its selected environment
+    # explicitly preserves this private config path instead of reading that home.
+    export GIT_CONFIG_GLOBAL="$HOME/.gitconfig"
+    : > "$GIT_CONFIG_GLOBAL"
 fi
 export TMPDIR="$PWD/.check-tmp"
 mkdir -p "$TMPDIR"
