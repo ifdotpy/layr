@@ -48,8 +48,10 @@ complete tree is checked. The index is rebuilt on the next command.
 
 The local push cache uses compressed, content-addressed directory nodes in
 `push-cache.sqlite3`. Unchanged subtrees share their SHA-256 node hash across
-states. The database has a 512 KiB page limit; when it fills, the writer evicts
-its nodes and caches the current tree again. A tree larger than the limit is
+states. The database page limit grows from 512 KiB to 1/32 of the compressed state
+payload uploaded by this writer, with a hard ceiling of 16 MiB. A persisted byte
+counter survives eviction. When the limit is reached, the writer evicts its nodes
+and caches the current tree again. A tree larger than the limit is
 left uncached. This database uses an in-memory rollback journal and can be
 removed or rebuilt after interruption or corruption.
 
@@ -59,7 +61,9 @@ and at successful completion. Older metadata and per-state JSON trees migrate
 on the next push; obsolete tree files are removed before uploading so migration
 can free disk space. Missing metadata is recovered from exact remote state
 prefixes, and missing parent trees are hydrated from authenticated store objects.
-A cache failure never changes whether a remote tree was committed. After a
+A cache failure never changes whether a remote tree was committed. Hydration
+recovers the exact authenticated delta-chain depth, so eviction preserves both
+content links and the cadence of full tree checkpoints. After a
 crash or disk-full failure, already published immutable objects are reused.
 
 Completed metadata avoids listing old remote states on each push; new states
