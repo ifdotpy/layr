@@ -24,6 +24,7 @@ xcrun --find clang > "$base/checks/clang"
 xcrun --show-sdk-path > "$base/checks/sdk"
 # /usr/bin/ar is an xcrun shim that writes outside the sandbox. Use the real tool.
 ln -sf "$(xcrun --find ar)" "$base/checks/cargo/bin/ar"
+ln -sf "$(xcrun --find git)" "$base/checks/cargo/bin/git"
 cp -cR "$source_cargo/registry" "$base/checks/cargo/"
 # Resolve and unpack every locked dependency before the sandbox makes the
 # registry read-only. Cargo's per-run lock files stay in the private HOME.

@@ -17,7 +17,7 @@ l config checks.privileged '["root"]'
 l config checks.timeout 5
 l config check.smoke 'python3 -c '\''import json,os,resource,socket; assert os.getuid()!=0; assert "CHECK_SECRET" not in os.environ; assert not os.path.exists("/root/.ssh"); assert not os.path.exists("/etc/shadow"); assert not os.path.exists("/home/layr-check-reader/.ssh"); assert not os.path.exists("/run/layr"); assert resource.getrlimit(resource.RLIMIT_AS)[1]==4294967296; assert resource.getrlimit(resource.RLIMIT_NPROC)[1]==256; assert not any(line.split()[1]=="00000000" for line in open("/proc/net/route").readlines()[1:]); print(json.dumps({"uid":os.getuid(),"state":os.environ["LAYR_TRY_STATE"],"value":open("value").read().strip()}))'\'''
 l config check.fail 'echo failed-check; exit 7'
-l config check.root 'test "$(id -u)" = 0 && test -z "${CHECK_SECRET:-}" && test "$(stat -c %a "$HOME")" = 700 && runuser -u layr-check-reader -- cat "$PWD/value" >/dev/null && printf "root:%s\n" "$PWD"'
+l config check.root 'test "$(id -u)" = 0 && test -z "${CHECK_SECRET:-}" && test "$(stat -c %a "$HOME")" = 700 && /usr/sbin/runuser -u layr-check-reader -- cat "$PWD/value" >/dev/null && printf "root:%s\n" "$PWD"'
 SMOKE=$(l config check.smoke)
 l remote add archive "file://$T/archive" --paper-key-out "$T/key" >/dev/null
 l push archive -q
@@ -39,7 +39,7 @@ l config checks.privileged '["root"]'
 l config checks.timeout 5
 l config check.smoke "$SMOKE"
 l config check.fail 'echo failed-check; exit 7'
-l config check.root 'test "$(id -u)" = 0 && test -z "${CHECK_SECRET:-}" && test "$(stat -c %a "$HOME")" = 700 && runuser -u layr-check-reader -- cat "$PWD/value" >/dev/null && printf "root:%s\n" "$PWD"'
+l config check.root 'test "$(id -u)" = 0 && test -z "${CHECK_SECRET:-}" && test "$(stat -c %a "$HOME")" = 700 && /usr/sbin/runuser -u layr-check-reader -- cat "$PWD/value" >/dev/null && printf "root:%s\n" "$PWD"'
 chmod 755 "$T"
 cp "$LAYR" "$T/layr"
 export LAYR_SOCKET=$T/layr.sock
