@@ -127,6 +127,20 @@ fn main() {
             _ => break,
         }
     }
+    // grep already uses -h to omit filenames. Its long help flag remains available.
+    let short_help = argv.first().map(String::as_str) != Some("grep");
+    if argv.iter().take_while(|arg| arg.as_str() != "--").any(|arg| arg == "--help" || (short_help && arg == "-h"))
+        || argv.first().map(String::as_str) == Some("help")
+    {
+        print!("{}", cmd::HELP);
+        return;
+    }
+    if let Some(command) = argv.first() {
+        if !cmd::COMMANDS.contains(&command.as_str()) {
+            eprintln!("layr: '{command}' is not a layr command. See 'layr help'.");
+            std::process::exit(1);
+        }
+    }
     if argv.first().map(String::as_str) == Some("person") {
         match person::run(&argv[1..]) {
             Ok(code) => std::process::exit(code),
