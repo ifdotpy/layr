@@ -429,7 +429,7 @@ impl Gateway {
     }
 
     fn read_request(&self, action: &str, query: Option<(&str, &str)>) -> Result<Response> {
-        let token = self.proof()?;
+        let token = self.proof().with_context(|| format!("gateway read {action}"))?;
         let response = self.send(Method::GET, action, Some(&token), query, None)?;
         if response.status().as_u16() != 401 {
             return Ok(response);
@@ -438,6 +438,10 @@ impl Gateway {
         *self.read.lock().map_err(|_| anyhow!("gateway read token lock failed"))? = None;
         let token = self.proof()?;
         self.send(Method::GET, action, Some(&token), query, None)
+    }
+
+    pub fn prove_reader(&self) -> Result<()> {
+        self.proof().map(|_| ())
     }
 
     pub fn has_read_identity(&self) -> bool {
@@ -663,7 +667,9 @@ impl Gateway {
                 status => bail!("gateway put: HTTP {status}"),
             };
         }
-        let token = if logical.starts_with("slots/") {
+        // Pending epoch slots are staged before discovery exists, so they cannot
+        // obtain a read proof yet. A project writer uses its grant for those PUTs.
+        let token = if logical.starts_with("slots/") && (epoch_path(key).is_none() || self.token.is_none()) {
             self.proof()?
         } else {
             self.token.clone().context("set LAYR_GATEWAY_TOKEN_FILE to a private write token file")?
@@ -798,6 +804,41 @@ mod tests {
             }
             server.join().unwrap();
         }
+    }
+
+    #[test]
+    fn epoch_slot_staging_uses_the_project_grant_before_a_new_proof_exists() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let epoch = "01a12290-0000-7000-8000-000000000008";
+        let server = std::thread::spawn(move || {
+            for (path, bearer) in [
+                (format!("project/epochs/{epoch}/slots/machine-test.age"), "project.grant"),
+                ("slots/machine-test.age".into(), "old.read.proof"),
+                (format!("project/epochs/{epoch}/history/root.age"), "project.grant"),
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let mut bytes = Vec::new(); let mut part = [0;2048];
+                while !bytes.windows(4).any(|p|p==b"\r\n\r\n") {
+                    let count=stream.read(&mut part).unwrap(); assert!(count>0);bytes.extend_from_slice(&part[..count]);
+                }
+                let request=String::from_utf8(bytes).unwrap().to_ascii_lowercase();
+                assert!(request.starts_with(&format!("put /v1/p/project/objects/{path} ")));
+                assert!(request.contains(&format!("authorization: bearer {bearer}\r\n")));
+                write!(stream,"HTTP/1.1 201 Created\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+            }
+        });
+        let mut gateway=Gateway::open("layr+https://localhost/project").unwrap();
+        gateway.base=reqwest::Url::parse(&format!("http://{address}/v1/p/project/")).unwrap();
+        gateway.token=Some("project.grant".into());
+        *gateway.read.lock().unwrap()=Some(("old.read.proof".into(),crate::ids::now_ms()+60_000));
+        for key in [format!("project/epochs/{epoch}/slots/machine-test.age"),"slots/machine-test.age".into(),format!("project/epochs/{epoch}/history/root.age")] {
+            assert!(gateway.put_new(&key,b"sealed object".to_vec()).unwrap());
+        }
+        server.join().unwrap();
     }
 
     #[test]

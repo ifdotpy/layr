@@ -40,10 +40,24 @@ impl Backend {
         match self {
             Self::Gateway(g) => g.set_epoch(epoch),
             Self::Prefix(base, _) => base.set_epoch(epoch),
-            Self::Epoch(e) => e.root.set_epoch(epoch),
+            Self::Epoch(e) => {
+                e.root.set_epoch(epoch)?;
+                e.current.set_epoch(epoch)?;
+                for (backend, _) in &e.history { backend.set_epoch(epoch)?; }
+                Ok(())
+            },
             _ => Ok(()),
         }
     }
+    pub fn prove_reader(&self) -> Result<()> {
+        match self {
+            Self::Gateway(g) => g.prove_reader(),
+            Self::Prefix(base, _) => base.prove_reader(),
+            Self::Epoch(epoch) => epoch.current.prove_reader(),
+            _ => Ok(()),
+        }
+    }
+
     pub fn root(&self) -> &Backend {
         if let Self::Epoch(epoch) = self {
             &epoch.root

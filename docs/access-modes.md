@@ -65,12 +65,22 @@ state objects across the current namespace and sealed history. They verify every
 historical identity against the recipient lineage, exact root history, signed
 discovery records, and the encrypted reader hash.
 
-The discovery commit is published last, after the new slots, sealed identities,
-complete log, and tightened overlays are present. A retry uses its pending signed
-record and a local machine-sealed identity. Conflicting epoch children are
-ambiguous and refuse reads and writes. Current clients discover the latest epoch
-before writing; an old executable with raw bucket write access cannot be
-revoked by changing reader slots. Storage authorization must also restrict writers.
+The writer stages the new slots, descriptor, and sealed history with its project
+write grant. It then publishes the signed discovery record and exchanges a read
+proof for the new epoch. Only then does it list or push epoch records and states.
+A proof for an earlier epoch cannot read objects in a later epoch.
+
+If publication stops before the complete log is present, readers fail closed with
+`rotation in progress`. Run `layr remote rotate <remote>` again on the same
+machine to resume the pending epoch. The retry preserves its signed record and
+reader set. The pending identity stays in a machine-sealed local file with mode
+0600, inside the protected store directory. That local file never enters records,
+logs, or the remote store. The writer removes it after the rotation completes.
+
+Conflicting epoch children are ambiguous and refuse reads and writes. Current
+clients discover the latest epoch before writing. An old executable with raw
+bucket write access cannot be revoked by changing reader slots. Storage
+authorization must also restrict writers.
 
 Optional clone enrollment writes its exact self-signed sequence-one announcement into
 `slots/machine-<UUID>.key.age`, encrypted to the current epoch. Rotation uses this
