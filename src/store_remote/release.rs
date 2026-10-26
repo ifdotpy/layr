@@ -90,10 +90,14 @@ impl Store {
         if rename.is_some() && paths.len() != 1 {
             bail!("--name needs exactly one file");
         }
-        repo.require(ctx, "sync")?;
         let before = repo.p.db.ref_value(name, ids::now_ms())?.context("release ref does not exist")?;
         if expect.is_some_and(|expected| expected != before.target) {
             bail!("release ref '{name}' changed: --expect does not match");
+        }
+        crate::cmd::refs::authorize_update(ctx, repo, name, Some(&before), Some(&before), true)?;
+        repo.require(ctx, "push")?;
+        if repo.p.is_overlay() {
+            bail!("release files belong to the parent project");
         }
         self.connect(ctx)?;
         self.require_private_access()?;
@@ -108,6 +112,17 @@ impl Store {
         let descriptor = self.descriptor()?;
         let identity = self.identity(&descriptor, None)?;
         let history = reader::records(&self.backend, &identity, &descriptor.project)?;
+        let local = repo.p.db.all_lines()?;
+        let trust_source =
+            if history.lines.iter().any(|l| crate::oplog::parse_line(l, None).is_ok_and(|r| r.record.op == "project")) {
+                &history.lines
+            } else {
+                &local
+            };
+        let trusted = layr_store::public::trusted_writers(&descriptor.project, trust_source)?;
+        if trusted.get(&self.machine) != Some(&self.key.verifying_key()) {
+            bail!("release attach requires a trusted writer machine");
+        }
         if history.lines.iter().any(|l| crate::oplog::parse_line(l, None).is_ok_and(|r| r.record.op == "project")) {
             check_ref(&model(&descriptor.project, &history, &self.machine)?, name, &before.target)?;
         } else if !history.gaps.is_empty()
@@ -137,7 +152,7 @@ impl Store {
         }
         let descriptor = self.descriptor()?;
         // Ensure the release ref and its state have a remote caller before publishing its files.
-        self.push(ctx, repo, &Options::default())?;
+        writer::push(self, ctx, repo, &Options::default())?;
         let recipient = self.descriptor()?.recipient;
         if descriptor.recipient != recipient {
             bail!("project epoch changed; retry attach");
