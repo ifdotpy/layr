@@ -204,3 +204,116 @@ Own `layr-gh` validation on 2026-10-26: `cargo test --workspace --locked` passed
 suites, t35, t42, t45 and t49 passed with zero failures. The earlier performance
 samples remain recorded at their measured revisions; no full benchmark was
 repeated for these corrections. The lead runs the full suite again.
+
+## Bounded push cache (2026-10-26)
+
+The comparison uses the same immutable snapshots before and after. The layr
+fixture has 392 imported commits. The Studio fixture has 7,965 imported commits
+plus one existing local child: **7,966 states in both full pushes**. No reimport
+or fixture copy was used between them. The baseline is `ec8ba0f`; the measured
+cache/journal implementation is `21152fc`. `3edd581` adds checked WAL cleanup
+and stale-sidecar recovery without changing the transfer algorithm. Binary and
+bundle hashes are in [provenance](../benchmarks/push-cache-20261026/provenance.json).
+
+| Fixture | Push seconds before / after | Cache bytes before / after | Cache files before / after | Encrypted store bytes before / after | Final cache / store |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| layr, 392 states | 47.61 / 20.32 | 33,204,851 / 546,889 | 393 / 2 | 6,135,146 / 6,185,575 | 8.84% |
+| Studio, 7,966 states | 1,069.22 / 1,088.98 | 7,911,211,058 / 4,576,303 | 7,967 / 2 | 368,102,258 / 368,563,073 | 1.24% |
+
+The large push was uninterrupted. Its elapsed time increased 1.85%; store bytes
+increased 0.125%. Both large stores contain exactly **15,005 objects**: 7,966
+state trees, 6,981 data parts, 55 record segments, a descriptor and two slots.
+The small stores each contain 392 trees and 361 parts, 757 objects in total.
+Random age envelopes and additional signed configuration records account for
+small wire-byte differences. The regression also compares exact decrypted
+compressed payloads with a warm tree cache and with tree caching disabled;
+object keys, counts and payload bytes match.
+
+The adaptive tree cache has a 512 KiB floor, grows to 1/32 of compressed uploaded
+payload, and stops at 16 MiB. Completion metadata is independently bounded to
+16,384 states. Missing nodes hydrate authenticated parent trees at their exact
+delta depth. Eviction preserves content reuse and full-tree checkpoint cadence.
+The active transfer journal is separate and disappears after success. Its peak
+size was 4,865,696 bytes for 392 states and 21,184,272 bytes for 7,966 states.
+WAL NORMAL commits took 0.144 seconds (0.71%) and 6.000 seconds (0.55%), respectively;
+state cursor work shares the next part's prepare commit. The earlier FULL-sync
+small sample spent 16.93 seconds in journal commits; its large attempt was
+stopped cleanly and classified **performance probe, not a result**.
+
+A real host ENOSPC interruption before the journal correction resumed all 7,966
+states and preserved the SHA-256 of all 7,588 previously published objects.
+That diagnostic run is **interrupted and resumed**, without a timing result.
+It exposed four duplicate committed parts, an orphan part and a private `.put`
+file; it is not evidence of zero duplicate uploads. The final journal regressions
+address that defect with separate process kills and assertions by content hash.
+
+The final crash regression kills before part PUT, after part PUT, and after tree
+publication before checkpoint. Each resume uploads zero frames whose content
+hash already exists, preserves previous ciphertext hashes, verifies all four
+branched test states, and leaves zero orphan parts. Seeding uses one metadata
+listing per pending part and 0, 1 and 3 reader object GETs, taking 11.28, 8.67 and
+12.42 ms. These are local file-backend measurements; GET counts exclude identity
+and signed-record discovery. Only the last case hydrates an uncheckpointed state.
+Restoring an older coherent journal copy after two later publications reseeds
+two authenticated trees with three reader GETs in 11.53 ms and uploads zero extra
+parts. Losing journal rows permits extra work, never unauthenticated links.
+
+Additional regressions reject corrupt pending ciphertext and collect it after
+the 24-hour grace period; reject old pending parts; refuse publication if GC
+runs after validation and the safe deadline expires; and survive a second crash
+followed by expiry. Pending hashes retain server modification times until a
+published tree protects their parts. The stale-WAL test removes an old main
+database, restores its real WAL/SHM sidecars, and verifies a fresh push sees no
+old rows. File-backend `.put` files are excluded from object listings. Unreferenced
+parts are collected after the existing grace period; referenced parts survive.
+
+Validation: 240 workspace tests passed, eight intentionally ignored (including
+subprocess helpers). Required suites t49, t19, t22, both t23 suites, t24, t35,
+t42 and t46 passed individually. Raw [results](../benchmarks/push-cache-20261026/results.jsonl),
+[crash measurements](../benchmarks/push-cache-20261026/crash.jsonl),
+[unit log](../benchmarks/push-cache-20261026/unit.log) and
+[shell log](../benchmarks/push-cache-20261026/suites.log) are retained.
+
+The committed [harness](../benchmarks/push-cache.py) uses a persistent fixture
+and independent binary builds. Its Mac [disk guard](../benchmarks/push-cache-guard.py)
+checks free host space every 30 seconds, requires at least three times the
+estimated 2 GiB peak writes and at least 20 GiB free before starting, and stops
+below 10 GiB. The uninterrupted large run started with 42.0 GiB free. Obsolete
+caches/stores and the inactive build target were removed and trimmed after the
+host ENOSPC diagnosis. No AWS operation or remote-format change was made.
+
+The daily TLS comparison adds the same saved child to the 7,966-state history
+(7,967 total states afterward). It took **3.068 seconds before and 2.570 seconds
+after**, with **21 requests in both cases: 17 GET, one POST and three PUT**.
+Both runs listed only `keys/`, their own writer record prefix and the new state
+prefix. Neither downloaded an old tree. The journal needed no restart seed.
+The stand-in adds 5 ms to every request and serves a short encrypted nonce for
+reader proof. The earlier harness attempts failed before publication because
+of an oversized challenge and invalid token syntax; their retry reused the same
+saved child rather than creating another state.
+[Before requests](../benchmarks/push-cache-20261026/daily-before-requests.json)
+and [after requests](../benchmarks/push-cache-20261026/daily-after-requests.json)
+contain sanitized route and credential-class traces. The historical git-history
+measurement was 3.584 seconds and the same 21 requests; the current before/after
+pair is the direct comparison. During the guarded runs, the minimum recorded
+Mac free space was 32.51 GiB; no disk abort or restart occurred.
+
+### Main rebase and retry regression
+
+The branch was rebased onto `cddd095` (PR #26). The production push path differs
+from the measured revision only by two explanatory comments; timings were not
+rerun. The recovered-cache rule from main is retained: lost checkpoint entries
+have `root: None`, journal completion rows do not carry roots, and parent cache
+misses read signed remote trees. Directory-node reads check their SHA-256 hashes.
+
+`t56-push-cache-retry.sh` now uses `pushed-v2.json.zst` and SQLite directory nodes.
+It keeps all five original PASS lines. It removes the index while leaving cache
+nodes, checks every previously published tree remains byte-for-byte unchanged,
+and leaves structurally valid wrong nodes at both an old address and a correct
+new hash before losing the checkpoint again. The retry ignores those nodes and
+`fsck --remote --files` passes. The second retry also preserves all prior trees.
+
+On the rebased source, `cargo test --workspace --locked` passed 240 tests with
+eight ignored. All ten requested suites passed: t49 (28), t19 (25), t22 (7),
+t23 portable (4), t23 views (55), t24 (11), t35 (49), t42 (99), t46 (18), and
+**t56 (5)**. The retained unit and shell logs are from this final run.
