@@ -1,8 +1,8 @@
 {
   "baseline_revision": "ec8ba0fb17389e5064045b07961be84c7e422ba0",
-  "after_revision": "affea03",
+  "after_revision": "21152fc",
   "baseline_binary_sha256": "6ac6b18f48a4352030ac76a3c94bb11b2874bda26133c7658b2e2ee851e2e341",
-  "after_binary_sha256": "9c534240b516ecc9611e5d608b0c786a9c7bc75066baaf8e74f8abb74172b7ad",
+  "after_binary_sha256": "05769e6c013d5d347e14f98edba97ab23d36e3e7cffe265b8180525bc44fefc4",
   "after_build_target": "/root/pc/after/target",
   "machine": "layr-pc",
   "fixture_filesystem": "48 GiB Btrfs loop volume",
@@ -34,7 +34,8 @@
   },
   "daily_gateway_request_delay_ms": 5,
   "tests": {
-    "workspace_passed": 238,
+    "workspace_passed": 240,
     "workspace_ignored": 8
-  }
+  },
+  "cleanup_revision": "3edd581"
 }
