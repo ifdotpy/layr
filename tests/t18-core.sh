@@ -90,6 +90,7 @@ eq 'revoke exists' 1 "$(l attestations head --kind revoke --json | python3 -c 'i
 ok 'try writes a passing check attestation' l try -q head -- sh -c 'test -f notes.txt'
 no 'try returns the failed command exit code' l try -q head -- sh -c 'exit 7'
 eq 'both checks are recorded' 2 "$(l attestations head --kind check --json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')"
+eq 'change JSON exposes passing and failed command outcomes' '0,7' "$(l change show "$C" --json | python3 -c 'import json,sys; print(",".join(str(c["exit"]) for c in json.load(sys.stdin)["versions"][0]["checks"]))')"
 for old in approvals checks; do
     has "$old names its replacement" 'layr attestations' "$(l "$old" head 2>&1)"
     no "$old fails" l "$old" head

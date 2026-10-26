@@ -33,6 +33,10 @@ Each new source state has a `change_id`. Amend, replay, and pick preserve it.
 A merge state has a new identifier. Old states without `change_id` remain readable.
 `changes/<id>` selects the latest version. `changes/<id>/v1` selects the first version.
 `change show` lists versions and their attestations.
+Each JSON version also includes `checks`: active signed command results, including
+failed results, from the same attestations. Read `exit` and `argv` for that exact
+version; an empty array does not mean that checks passed. Revoked checks stay in
+`attestations` but do not appear in `checks`.
 Its JSON includes an `operation` for each new amend, replay, or pick version.
 The operation gives the actor, machine, time, kind, source state, target line, and target head.
 Versions from older records omit this field. `change log` lists their operations.

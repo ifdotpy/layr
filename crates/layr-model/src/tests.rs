@@ -45,6 +45,26 @@ pub(super) fn fold(records: Vec<Record>) -> Project {
 }
 
 #[test]
+fn change_show_includes_active_check_results_for_each_exact_version() {
+    let mut first = record(1, "commit");
+    first.states.push(state("s1", StateKind::Commit, &[]));
+    let mut failed = record(2, "check");
+    failed.data = json!({"state":"s1","argv":["test","-f","fixed"],"command":"test -f fixed","exit":1});
+    let mut second = record(3, "commit");
+    second.states.push(state("s2", StateKind::Commit, &[]));
+    let mut passed = record(4, "check");
+    passed.data = json!({"state":"s2","argv":["true"],"command":"true","exit":0});
+    let mut revoked = record(5, "attest");
+    revoked.data = json!({"attestation":{"format":1,"attestation_id":"record-5","subject":{"kind":"state","id":"s2"},"kind":"revoke","payload_digest":"00","signer":"a","time":5},"revokes":["record-4"]});
+    let p = fold(vec![first, failed.clone(), second, passed, revoked]);
+    let show = p.change_show("change", &probes::Context::default()).unwrap();
+    assert_eq!(show["versions"][0]["checks"], json!([failed.data]));
+    assert_eq!(show["versions"][1]["checks"], json!([]));
+    assert_eq!(show["versions"][0]["checks"], json!(p.checks("s1")));
+    assert_eq!(show["versions"][1]["attestations"].as_array().unwrap().len(), 2);
+}
+
+#[test]
 fn record_order_duplicates_and_conflicts() {
     let mut first = record(1, "commit");
     first.states.push(state("s1", StateKind::Commit, &[]));
