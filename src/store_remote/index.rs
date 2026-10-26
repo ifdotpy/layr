@@ -47,12 +47,15 @@ pub(super) fn write(store: &Store, repo: &Repo) -> Result<Report> {
         } else {
             false
         };
-        let object = store.backend.get(&name)?.context("published index disappeared")?;
-        let existing = index::open(&identity, &object, &name, &descriptor.project, &trusted)?;
-        ensure!(
-            existing.data == index.data,
-            "immutable index {name} differs from signed source; remove the invalid cache object"
-        );
+        store.backend.verified(false, |backend, _| {
+            let object = backend.get(&name)?.context("published index disappeared")?;
+            let existing = index::open(&identity, &object, &name, &descriptor.project, &trusted)?;
+            ensure!(
+                existing.data == index.data,
+                "immutable index {name} differs from signed source; remove the invalid cache object"
+            );
+            Ok(())
+        })?;
         Ok(made)
     };
     let mut report = Report::default();

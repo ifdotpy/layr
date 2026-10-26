@@ -100,11 +100,12 @@ fn resolve_chain(
         recipients.insert(p.key.epoch.clone(), p.key.recipient.clone());
     }
     for (epoch, recipient) in &recipients {
-        let sealed = scoped.get(&format!("history/{epoch}.age"))?.context("epoch has no sealed history identity")?;
-        let old = keys::open_slot(&sealed, &identity)?;
-        if keys::recipient_of(&old)? != *recipient {
-            bail!("sealed history identity differs from the signed lineage");
-        }
+        let old = scoped.verified(false, |backend,_| {
+            let sealed=backend.get(&format!("history/{epoch}.age"))?.context("epoch has no sealed history identity")?;
+            let old=keys::open_slot(&sealed,&identity)?;
+            if keys::recipient_of(&old)? != *recipient { bail!("sealed history identity differs from the signed lineage"); }
+            Ok(old)
+        })?;
         let backend = if epoch == "root" { root.clone() } else { root.scoped(&format!("project/epochs/{epoch}"))? };
         history.push((backend, old));
     }
