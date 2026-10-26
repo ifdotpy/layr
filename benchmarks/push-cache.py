@@ -17,7 +17,7 @@ JSONL measurements and sanitized request traces, never keys or token values.
 The daily TLS stand-in follows tests/t46-machine-bootstrap.sh with 5 ms/request.
 """
 import os,pathlib,subprocess,json,time,hashlib
-import argparse
+import argparse,atexit,signal
 parser=argparse.ArgumentParser(description='Compare push caches against two pinned Git fixture copies on a Btrfs volume.')
 parser.add_argument('--workspace',type=pathlib.Path,default=pathlib.Path('/root/pc'))
 parser.add_argument('--run-id',default='',help='Suffix for fresh before/after archives when repeating the comparison.')
@@ -26,6 +26,19 @@ parser.add_argument('--fixture',choices=['all','layr','studio'],default='all')
 parser.add_argument('--resume',action='store_true',help='Resume an interrupted after push; report log timestamp estimate separately.')
 parser.add_argument('phase',choices=['before','after','daily'])
 args=parser.parse_args()
+active_process=None
+pid_file=os.environ.get('LAYR_PUSH_GUARD_PID_FILE')
+if pid_file:
+    pathlib.Path(pid_file).write_text(str(os.getpid()))
+    atexit.register(lambda:pathlib.Path(pid_file).unlink(missing_ok=True))
+def terminate(signum,frame):
+    if active_process is not None:
+        active_process.terminate()
+        try:active_process.wait(timeout=10)
+        except subprocess.TimeoutExpired:active_process.kill();active_process.wait()
+    raise SystemExit(128+signum)
+signal.signal(signal.SIGTERM,terminate)
+signal.signal(signal.SIGINT,terminate)
 base=args.workspace.resolve()
 fs=base/'bench'
 results=base/'push-cache-results.jsonl'
@@ -39,13 +52,17 @@ def label_for(phase):
 def archive_for(kind,phase):return fs/(kind+'-'+label_for(phase)+'-archive')
 
 def run(args,env=None,cwd=None,label=None):
+    global active_process
     if pathlib.Path(args[0])==base/'layr-after':
         binary=(base/'layr-after').read_bytes()
         assert b'pushed-v2.json.zst' in binary, 'new cache marker missing from after binary'
         assert hashlib.sha256(binary).digest()!=hashlib.sha256((base/'layr-before').read_bytes()).digest(), 'after binary matches baseline'
     started=time.monotonic()
     with (base/(label+'.log' if label else 'command.log')).open('ab') as log:
-        subprocess.run([str(x) for x in args],env=env,cwd=cwd,check=True,stdout=log,stderr=subprocess.STDOUT)
+        active_process=subprocess.Popen([str(x) for x in args],env=env,cwd=cwd,stdout=log,stderr=subprocess.STDOUT)
+        try:status=active_process.wait()
+        finally:active_process=None
+        if status:raise subprocess.CalledProcessError(status,args)
     return time.monotonic()-started
 
 def size(p):
