@@ -57,6 +57,19 @@ fn cached_tree(dir: &Path, state: &str, entry: &Cached) -> Result<Pushed> {
     Tree::parse(&pushed.tree.canonical()?)?;
     Ok(pushed)
 }
+fn recovered_cache(dir: &Path, state: &str, attempt: String) -> Result<Cached> {
+    let mut entry = Cached { attempt, depth: format::FULL_TREE_EVERY - 1 };
+    let bytes = match std::fs::read(cache_path(dir, state, &entry)?) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(entry),
+        Err(error) => return Err(error.into()),
+    };
+    // The individual tree can reach disk before the index checkpoint. Keep its
+    // actual depth, then apply the same identity and tree checks as a normal load.
+    entry.depth = serde_json::from_slice::<Pushed>(&bytes)?.depth;
+    cached_tree(dir, state, &entry)?;
+    Ok(entry)
+}
 fn load_index(dir: &Path) -> Result<BTreeMap<String, Cached>> {
     let path = dir.join("pushed.json");
     if !path.exists() {
@@ -352,7 +365,8 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
             }
             if let Some(attempt) = complete.remove(&id) {
                 present.insert(id.clone(), attempt.clone());
-                index.insert(id, Cached { attempt, depth: format::FULL_TREE_EVERY - 1 });
+                let cached = recovered_cache(&store.dir, &id, attempt)?;
+                index.insert(id, cached);
                 continue;
             }
         }
