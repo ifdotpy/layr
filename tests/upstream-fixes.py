@@ -209,6 +209,38 @@ def failed_cache_copy(repair, unreadable=False):
         assert stat.S_ISFIFO((target / "unsupported").lstat().st_mode)
 
 
+
+def cache_readonly(repair):
+    work = project("cache-readonly-" + str(repair).lower())
+    target = work / "target"
+    target.mkdir()
+    if repair:
+        run(work, "save", "--caches", "-q")
+        target.rmdir()
+        target.mkdir()
+    nested = target / "nested"
+    nested.mkdir()
+    data = nested / "data"
+    data.write_text("read-only cache output\n")
+    data.chmod(0o444)
+    nested.chmod(0o555)
+    target.chmod(0o555)
+    try:
+        run(work, *(["cache", "repair"] if repair else ["save", "--caches", "-q"]))
+        assert data.read_text() == "read-only cache output\n"
+        assert target.stat().st_mode & 0o777 == 0o555
+        assert nested.stat().st_mode & 0o777 == 0o555
+        assert data.stat().st_mode & 0o777 == 0o444
+        assert not (work / "target.layr-old").exists()
+        assert not (work / "target.layr-new").exists()
+    finally:
+        # Release only this fixture's directory modes so the test harness can remove it.
+        for folder in (target, work / "target.layr-old", work / "target.layr-new"):
+            if folder.exists():
+                for base, directories, files in os.walk(folder):
+                    os.chmod(base, os.stat(base).st_mode | 0o700)
+
+
 def cache_directory_metadata(repair, kind):
     work = project("cache-metadata-" + str(repair).lower() + "-" + kind)
     target = work / "target"
@@ -348,6 +380,7 @@ if os.getuid() != 0:
 for kind in ("protection", "command"):
     cases.append((f"merge refuses {kind} changed during checks", lambda kind=kind: merge_policy_changes(kind)))
 for repair in (False, True):
+    cases.append((f"read-only cache conversion keeps modes and removes old trees (repair={repair})", lambda repair=repair: cache_readonly(repair)))
     cases.append((f"pnpm cache preserves symlinks and shims (repair={repair})", lambda repair=repair: pnpm_cache(repair)))
     cases.append((f"cache preserves symlink xattrs (repair={repair})", lambda repair=repair: cache_symlink_xattrs(repair)))
     cases.append((f"failed cache copy preserves the source (repair={repair})", lambda repair=repair: failed_cache_copy(repair)))
