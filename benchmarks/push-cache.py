@@ -21,6 +21,8 @@ import argparse
 parser=argparse.ArgumentParser(description='Compare push caches against two pinned Git fixture copies on a Btrfs volume.')
 parser.add_argument('--workspace',type=pathlib.Path,default=pathlib.Path('/root/pc'))
 parser.add_argument('--run-id',default='',help='Suffix for fresh before/after archives when repeating the comparison.')
+parser.add_argument('--fixture',choices=['all','layr','studio'],default='all')
+parser.add_argument('--resume',action='store_true',help='Resume an interrupted after push; report log timestamp estimate separately.')
 parser.add_argument('phase',choices=['before','after','daily'])
 args=parser.parse_args()
 base=args.workspace.resolve()
@@ -61,13 +63,26 @@ def measure(kind,phase,binary):
         seconds=run([base/'layr-before','git','clone',source,kind,'-q'],env,cwd=base,label=kind+'-import')
         print(json.dumps({'phase':'import','fixture':kind,'seconds':seconds}),flush=True)
     # Leave source snapshots unchanged; a second configured archive gets its own cache directory.
-    run([binary,'remote','add',label_for(phase),'file://'+str(archive),'--paper-key-out',base/(kind+'-'+label_for(phase)+'-paper')],env,cwd=line)
+    before={}
+    prefix_seconds=None
+    if args.resume:
+        assert phase=='after' and archive.exists()
+        log=base/(kind+'-'+label_for(phase)+'.log')
+        birth=int(subprocess.check_output(['stat','-c','%W',str(log)]))
+        prefix_seconds=log.stat().st_mtime-birth
+        before={str(p.relative_to(archive)):hashlib.sha256(p.read_bytes()).hexdigest() for p in archive.rglob('*') if p.is_file()}
+    else:
+        run([binary,'remote','add',label_for(phase),'file://'+str(archive),'--paper-key-out',base/(kind+'-'+label_for(phase)+'-paper')],env,cwd=line)
     seconds=run([binary,'push',label_for(phase),'-q'],env,cwd=line,label=kind+'-'+label_for(phase))
     target=project/'meta/remote-stores'/hashlib.sha256(('file://'+str(archive)).encode()).hexdigest()
     files=[p for p in target.rglob('*') if p.is_file() and (p.parent.name=='pushed' or p.name in ('pushed.json','pushed-v2.json.zst','push-cache.sqlite3'))]
     assert (target/'pushed-v2.json.zst').is_file() if phase=='after' else (target/'pushed.json').is_file(), 'unexpected cache format'
     result={'run_id':args.run_id,'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),'fixture':kind,'phase':phase,'seconds':seconds,'snapshot_states':sum(1 for p in (project/'states').iterdir() if p.is_dir()),'commits':int(subprocess.check_output(['git','-C',str(source),'rev-list','--count','HEAD'])),'uploaded_states':sum(1 for p in (archive/'states').rglob('*.tree.age')),'cache_bytes':sum(p.stat().st_size for p in files),'cache_allocated_bytes':sum(p.stat().st_blocks*512 for p in files),'cache_files':len(files),'encrypted_store_bytes':size(archive),'cache_path':str(target),'source_tip':subprocess.check_output(['git','-C',str(source),'rev-parse','HEAD']).decode().strip(),'time_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())}
+    result['encrypted_store_objects']=sum(1 for p in archive.rglob('*') if p.is_file())
     result['cache_percent']=100*result['cache_bytes']/result['encrypted_store_bytes']
+    if args.resume:
+        for name,digest in before.items():assert hashlib.sha256((archive/name).read_bytes()).hexdigest()==digest,name
+        result.update(interrupted=True,resume_seconds=seconds,prefix_last_progress_seconds=prefix_seconds,seconds_estimated=prefix_seconds+seconds,seconds=None,preserved_objects=len(before))
     if phase=='after':
         references=[json.loads(line) for line in results.read_text().splitlines() if line]
         reference=next(row for row in reversed(references) if row['fixture']==kind and row['phase']=='before' and row.get('run_id','')==args.run_id)
@@ -189,4 +204,4 @@ def daily():
 
 if args.phase=='daily':daily()
 else:
-    for fixture in ['layr','studio']:measure(fixture,args.phase,base/('layr-'+args.phase))
+    for fixture in (['layr','studio'] if args.fixture=='all' else [args.fixture]):measure(fixture,args.phase,base/('layr-'+args.phase))
