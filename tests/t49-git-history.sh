@@ -85,4 +85,44 @@ has 'refusal names proposed ID' "$original_tip" "$out"
 eq 'refusal keeps mirror unchanged' "$new_tip" "$(git -C "$R" rev-parse main)"
 l git push --force -q github main
 eq 'explicit force permits rewind' "$original_tip" "$(git -C "$R" rev-parse main)"
+# Kill before the first 128-state index checkpoint, then recover from immutable remote trees.
+K=$T/retry-source
+mkdir -p "$K"
+git -C "$K" init -q -b main
+for n in $(seq 1 64); do
+    printf 'version %s\n' "$n" > "$K/payload"
+    git -C "$K" add payload
+    git -C "$K" commit -qm "version $n"
+done
+l git clone "$K" retry -q >/dev/null
+cd "$LAYR_ROOT/projects/retry/lines/main"
+l remote add archive "file://$T/retry-archive" --paper-key-out "$T/retry-paper" >/dev/null
+export RETRY_ARCHIVE=$T/retry-archive RETRY_BINARY=$LAYR RETRY_LOG=$T/retry-push.log
+python3 - <<'PYCODE'
+import hashlib,os,pathlib,subprocess,time
+root=pathlib.Path(os.environ['RETRY_ARCHIVE'])
+with open(os.environ['RETRY_LOG'],'wb') as log:
+ p=subprocess.Popen([os.environ['RETRY_BINARY'],'push','archive','-q'],stdout=log,stderr=log)
+ deadline=time.monotonic()+60
+ while p.poll() is None and time.monotonic()<deadline:
+  complete=list(root.glob('states/**/*.tree.age'))
+  if len(complete)>=4:
+   p.kill();p.wait();break
+  time.sleep(.002)
+ else:
+  p.kill();p.wait()
+  raise AssertionError('push did not reach the interruption point')
+complete=list(root.glob('states/**/*.tree.age'))
+assert 4<=len(complete)<64,len(complete)
+before={str(f.relative_to(root)):hashlib.sha256(f.read_bytes()).hexdigest() for f in root.rglob('*') if f.is_file()}
+subprocess.run([os.environ['RETRY_BINARY'],'push','archive','-q'],check=True)
+for path,digest in before.items():
+ assert hashlib.sha256((root/path).read_bytes()).hexdigest()==digest,path
+complete=list(root.glob('states/**/*.tree.age'))
+assert len(complete)==64,len(complete)
+assert len({f.parent.name for f in complete})==64,'a retry duplicated a committed state'
+print('PASS killed push resumes without replacing or duplicating committed objects')
+PYCODE
+PASS=$((PASS+1))
+ok 'resumed store has complete records and verified file objects' l fsck --remote archive --files
 finish

@@ -32,3 +32,23 @@ older binary cannot recover original commit bytes after its Git cache is lost.
 Run `sudo tests/run.sh t49-git-history` on a supported test filesystem to check a
 five-commit merge DAG through an encrypted store and fresh clone, exact object
 IDs, a new child commit, repeated import, and refused/forced rewinds.
+
+## Transfer cost and recovery
+
+The writer keeps a content hash index for the push and compares each snapshot
+with an available parent. Unchanged entries reuse the parent's authenticated
+file links. Record segments contain at most 4 MiB of signed JSONL, except for a
+single larger record. Segments publish in sequence so a retry can continue after
+the last complete segment.
+
+The local `pushed.json` cache contains attempt and depth metadata. Separate files
+hold complete cached trees, loaded one at a time. Metadata checkpoints occur
+every 128 states and at successful completion. An older complete-tree index is
+migrated when opened. After interruption, committed remote trees recover states
+that were uploaded after the last checkpoint. Cache files and metadata do not
+change the encrypted store format.
+
+Fetch restores parents before children. It clones an available immutable parent
+snapshot and writes only files whose mode, size or content hash changed. Decoded
+tree caching is bounded to two delta chains, and a verified cached ancestor stops
+repeat decoding of its prefix. `LAYR_TRACE=1` reports transfer phase timings.
