@@ -22,75 +22,84 @@ struct Pushed {
     canonical: Vec<u8>,
 }
 
-// Local metadata is small; full trees live in separate cache files and are loaded one at a time.
-// Remote state objects remain the source of truth after a lost checkpoint.
+// Completed uploads are durable remotely; both local caches can be discarded.
 const CHECKPOINT_STATES: usize = 128;
 const RECORD_SEGMENT_BYTES: usize = 4 << 20;
+const INDEX_STATES: usize = 16_384;
+#[cfg(test)]
+thread_local! { static PUSH_STOP_AFTER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) }; }
 #[derive(Clone, Serialize, Deserialize)]
 struct Cached {
     attempt: String,
     depth: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    root: Option<String>,
 }
 #[derive(Serialize, Deserialize)]
 struct PushIndex {
     format: u32,
     states: BTreeMap<String, Cached>,
 }
-fn cache_path(dir: &Path, state: &str, entry: &Cached) -> Result<std::path::PathBuf> {
-    if !crate::model::is_uuid(state) || !format::valid_attempt(&entry.attempt) || entry.depth >= format::FULL_TREE_EVERY {
-        bail!("invalid local pushed index metadata");
-    }
-    Ok(dir.join("pushed").join(format!("{state}.{}.json", entry.attempt)))
+fn valid_cached(state: &str, entry: &Cached) -> bool {
+    crate::model::is_uuid(state)
+        && format::valid_attempt(&entry.attempt)
+        && entry.depth < format::FULL_TREE_EVERY
+        && entry.root.as_ref().is_none_or(|root| root.len() == 64 && hex::decode(root).is_ok())
 }
-fn cache_tree(dir: &Path, state: &str, pushed: &Pushed) -> Result<Cached> {
-    let entry = Cached { attempt: pushed.attempt.clone(), depth: pushed.depth };
-    let path = cache_path(dir, state, &entry)?;
-    std::fs::create_dir_all(path.parent().unwrap())?;
-    fsutil::atomic_write(&path, &serde_json::to_vec(pushed)?, 0o600)?;
-    Ok(entry)
-}
-fn cached_tree(dir: &Path, state: &str, entry: &Cached) -> Result<Pushed> {
-    let pushed: Pushed = serde_json::from_slice(&std::fs::read(cache_path(dir, state, entry)?)?)?;
-    if pushed.attempt != entry.attempt || pushed.depth != entry.depth {
-        bail!("local pushed tree identity differs");
+fn cache_tree(cache: &mut Option<super::push_cache::TreeCache>, pushed: &Pushed) -> Cached {
+    Cached {
+        attempt: pushed.attempt.clone(),
+        depth: pushed.depth,
+        root: cache.as_mut().and_then(|cache| cache.put(&pushed.tree)),
     }
-    Tree::parse(&pushed.tree.canonical()?)?;
-    Ok(pushed)
 }
-fn recovered_cache(dir: &Path, state: &str, attempt: String) -> Result<Cached> {
-    let entry = Cached { attempt, depth: format::FULL_TREE_EVERY - 1 };
-    // With no checkpoint, the local cache is not an authenticated description of
-    // the published tree. Discard it and let the parent selection read that tree
-    // through the normal remote signature checks (or upload a full child).
-    match std::fs::remove_file(cache_path(dir, state, &entry)?) {
-        Ok(()) => {},
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
-        Err(error) => return Err(error.into()),
-    }
-    Ok(entry)
+fn cached_tree(cache: &Option<super::push_cache::TreeCache>, entry: &Cached) -> Option<Pushed> {
+    let tree = cache.as_ref()?.get(entry.root.as_deref()?).ok()?;
+    let canonical = tree.canonical().ok()?;
+    Some(Pushed { attempt: entry.attempt.clone(), tree, depth: entry.depth, canonical })
 }
 fn load_index(dir: &Path) -> Result<BTreeMap<String, Cached>> {
-    let path = dir.join("pushed.json");
-    if !path.exists() {
+    let path = dir.join("pushed-v2.json.zst");
+    let bytes = if path.exists() {
+        match std::fs::read(&path).ok().and_then(|bytes| zst::decompress_with_limit(&bytes, None, 8 << 20).ok()) {
+            Some(bytes) => bytes,
+            None => return Ok(BTreeMap::new()),
+        }
+    } else if dir.join("pushed.json").exists() {
+        std::fs::read(dir.join("pushed.json"))?
+    } else {
         return Ok(BTreeMap::new());
-    }
-    let bytes = std::fs::read(path)?;
-    let value: serde_json::Value = serde_json::from_slice(&bytes).context("invalid local pushed index")?;
-    if value.get("format").is_some() {
+    };
+    let value: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(value) => value,
+        Err(_) => return Ok(BTreeMap::new()),
+    };
+    let mut states = if value.get("format").is_some() {
         let index: PushIndex = serde_json::from_value(value)?;
-        if index.format != 1 {
-            bail!("unsupported local pushed index format {}", index.format);
+        if index.format != 1 && index.format != 2 {
+            return Ok(BTreeMap::new());
         }
-        for (id, entry) in &index.states {
-            cache_path(dir, id, entry)?;
-        }
-        return Ok(index.states);
-    }
-    let legacy: BTreeMap<String, Pushed> = serde_json::from_value(value)?;
-    legacy.into_iter().map(|(id, pushed)| Ok((id.clone(), cache_tree(dir, &id, &pushed)?))).collect()
+        index.states
+    } else {
+        let legacy: BTreeMap<String, Pushed> = serde_json::from_value(value)?;
+        legacy.into_iter().map(|(id, pushed)| (id, Cached { attempt: pushed.attempt, depth: pushed.depth, root: None })).collect()
+    };
+    states.retain(|id, entry| valid_cached(id, entry));
+    Ok(states)
 }
 fn checkpoint(dir: &Path, index: &BTreeMap<String, Cached>) -> Result<()> {
-    fsutil::atomic_write(&dir.join("pushed.json"), &serde_json::to_vec(&PushIndex { format: 1, states: index.clone() })?, 0o600)
+    // UUIDv7 sorting keeps recent completions. Evicted metadata is rediscovered by state prefix.
+    let states = index.iter().rev().take(INDEX_STATES).map(|(id, entry)| (id.clone(), entry.clone())).collect();
+    let bytes = serde_json::to_vec(&PushIndex { format: 2, states })?;
+    fsutil::atomic_write(&dir.join("pushed-v2.json.zst"), &zst::compress(&bytes, None)?, 0o600)?;
+    // Only retire old formats after the replacement metadata is safely published.
+    if dir.join("pushed.json").exists() {
+        std::fs::remove_file(dir.join("pushed.json"))?;
+    }
+    if dir.join("pushed").exists() {
+        std::fs::remove_dir_all(dir.join("pushed"))?;
+    }
+    Ok(())
 }
 pub(super) fn parents_first(states: Vec<crate::model::StateRec>) -> Result<Vec<crate::model::StateRec>> {
     let mut pending: BTreeMap<_, _> = states.into_iter().map(|s| (s.id.clone(), s)).collect();
@@ -196,11 +205,7 @@ pub(super) fn initialize_tty(store: &Store, ctx: &Ctx) -> Result<String> {
         bail!("--paper-key-tty requires terminal stdin and stdout; run it in your private terminal without redirection");
     }
     let mut terminal = crate::privs::as_caller_fs(ctx, || {
-        Ok(std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NOCTTY)
-            .open("/dev/tty")?)
+        Ok(std::fs::OpenOptions::new().read(true).write(true).custom_flags(libc::O_NOFOLLOW | libc::O_NOCTTY).open("/dev/tty")?)
     })
     .context("--paper-key-tty requires a controlling terminal; run it in your private terminal")?;
     if !terminal.is_terminal() {
@@ -317,9 +322,15 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
     drop(stage);
     let stage = crate::trace::span("store load index");
     let mut index = load_index(&store.dir)?;
+    // The old per-state tree files are unnecessary even before a new checkpoint. Free
+    // them first so upgrading a disk-full store does not need extra scratch space.
+    if store.dir.join("pushed").exists() {
+        std::fs::remove_dir_all(store.dir.join("pushed"))?;
+    }
+    let mut tree_cache = super::push_cache::TreeCache::open(&store.dir).ok();
     // Completed immutable trees are never collected. Cache metadata is written only after
     // publication, so a regular push need not enumerate every historical remote object.
-    index.retain(|id, entry| cache_path(&store.dir, id, entry).is_ok());
+    index.retain(|id, entry| valid_cached(id, entry));
     if !blind_layer {
         // A completed upload can be missing from a partial replica. Recheck advertised tips
         // without scanning historical states, so a later push can complete that replica.
@@ -364,8 +375,9 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
             }
             if let Some(attempt) = complete.remove(&id) {
                 present.insert(id.clone(), attempt.clone());
-                let cached = recovered_cache(&store.dir, &id, attempt)?;
-                index.insert(id, cached);
+                // No checkpoint authenticates a local root for this publication.
+                // Ignore every remaining local node and hydrate its signed remote tree.
+                index.insert(id, Cached { attempt, depth: format::FULL_TREE_EVERY - 1, root: None });
                 continue;
             }
         }
@@ -397,9 +409,8 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
         let base = match base_id {
             Some(id) if latest.as_ref().is_some_and(|(last, _)| last == &id) => latest.take(),
             Some(id) => {
-                if index.get(&id).map(|entry| cache_path(&store.dir, &id, entry).is_ok_and(|p| p.exists())) != Some(true)
-                    && store.backend.can_read()
-                {
+                let mut pushed = index.get(&id).and_then(|entry| cached_tree(&tree_cache, entry));
+                if pushed.is_none() && store.backend.can_read() {
                     if let Ok(identity) = store.identity(&descriptor, opts.paper_key.as_deref()) {
                         if remote_records.is_none() {
                             remote_records = Some(reader::records(&store.backend, &identity, &descriptor.project)?);
@@ -409,19 +420,17 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
                         let attempt = &present[&id];
                         let (header, canonical, tree) = source.tree(&id, attempt)?;
                         let depth = if header.tree == "full" { 0 } else { format::FULL_TREE_EVERY - 1 };
-                        let pushed = Pushed { attempt: attempt.clone(), tree, depth, canonical };
-                        index.insert(id.clone(), cache_tree(&store.dir, &id, &pushed)?);
+                        let restored = Pushed { attempt: attempt.clone(), tree, depth, canonical };
+                        index.insert(id.clone(), cache_tree(&mut tree_cache, &restored));
+                        pushed = Some(restored);
                     }
                 }
-                if let Some(entry) = index.get(&id).filter(|entry| cache_path(&store.dir, &id, entry).is_ok_and(|p| p.exists())) {
-                    let pushed = cached_tree(&store.dir, &id, entry)?;
+                pushed.map(|pushed| {
                     for entry in pushed.tree.files.values() {
                         hashes.entry(entry.2.clone()).or_insert_with(|| entry.3.clone());
                     }
-                    Some((id, pushed))
-                } else {
-                    None
-                }
+                    (id, pushed)
+                })
             }
             None => None,
         };
@@ -441,7 +450,14 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
         )?;
         drop(stage);
         let stage = crate::trace::span("store checkpoint");
-        index.insert(state.id.clone(), cache_tree(&store.dir, &state.id, &pushed)?);
+        index.insert(state.id.clone(), cache_tree(&mut tree_cache, &pushed));
+        #[cfg(test)]
+        PUSH_STOP_AFTER.with(|stop| -> Result<()> {
+            if stop.get() == Some(report.states + 1) {
+                return Err(std::io::Error::from_raw_os_error(libc::ENOSPC).into());
+            }
+            Ok(())
+        })?;
         if (report.states + 1) % CHECKPOINT_STATES == 0 {
             checkpoint(&store.dir, &index)?;
         }
@@ -750,7 +766,9 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let ctx = context(&root);
         let mut store = remote(&root, &ctx);
-        store.configure(&ctx, &super::super::ConfigureOptions { paper_key_out: Some(root.join("paper")), ..Default::default() }).unwrap();
+        store
+            .configure(&ctx, &super::super::ConfigureOptions { paper_key_out: Some(root.join("paper")), ..Default::default() })
+            .unwrap();
         let dir = ctx.store.projects_dir().join("p");
         std::fs::create_dir_all(dir.join("meta/db")).unwrap();
         std::fs::create_dir_all(dir.join("states")).unwrap();
@@ -814,7 +832,85 @@ mod tests {
     }
 
     #[test]
-    fn legacy_pushed_cache_migrates_without_changing_attempt_or_tree() {
+    fn enospc_after_publication_resumes_with_missing_or_corrupt_cache() {
+        use crate::model::{Record, StateRec};
+        for corrupt in [false, true] {
+            let root = std::env::temp_dir().join(crate::ids::new_id());
+            std::fs::create_dir_all(&root).unwrap();
+            let ctx = context(&root);
+            let mut store = remote(&root, &ctx);
+            store
+                .configure(
+                    &ctx,
+                    &super::super::ConfigureOptions { paper_key_out: Some(root.join("paper")), ..Default::default() },
+                )
+                .unwrap();
+            let dir = ctx.store.projects_dir().join("p");
+            std::fs::create_dir_all(dir.join("meta/db")).unwrap();
+            std::fs::create_dir_all(dir.join("states")).unwrap();
+            let project = crate::store::Project {
+                store: &ctx.store,
+                name: "p".into(),
+                dir: dir.clone(),
+                id: store.project.clone(),
+                db: crate::db::Db::open(&dir.join("meta/db/layr.sqlite")).unwrap(),
+            };
+            let mut record = Record::new("project");
+            record.data = serde_json::json!({"id":store.project,"name":"p","config":{}});
+            project.append(record, &ctx.actor()).unwrap();
+            let mut parents = Vec::<String>::new();
+            for n in 0..4 {
+                let id = crate::ids::new_id();
+                std::fs::create_dir(project.state_path(&id)).unwrap();
+                std::fs::write(project.state_path(&id).join("payload"), format!("version {n}\n")).unwrap();
+                let state: StateRec = serde_json::from_value(serde_json::json!({"id":id,"kind":"commit",
+                    "subvol":crate::ids::new_id(),"author":{"name":"Test","email":"test@example.test"},
+                    "parents":parents,"time":crate::ids::now_ms()}))
+                .unwrap();
+                let mut record = Record::new("state");
+                record.states.push(state);
+                project.append(record, &ctx.actor()).unwrap();
+                parents = vec![id];
+            }
+            let repo = Repo { p: project };
+            PUSH_STOP_AFTER.with(|stop| stop.set(Some(3)));
+            let error = push(&store, &ctx, &repo, &Options::default()).unwrap_err();
+            PUSH_STOP_AFTER.with(|stop| stop.set(None));
+            assert_eq!(error.downcast_ref::<std::io::Error>().unwrap().raw_os_error(), Some(libc::ENOSPC));
+            assert!(!store.dir.join("pushed-v2.json.zst").exists());
+            let before: BTreeMap<_, _> = store
+                .backend
+                .list("")
+                .unwrap()
+                .into_iter()
+                .map(|object| {
+                    let bytes = store.backend.get(&object.key).unwrap().unwrap();
+                    (object.key, Sha256::digest(bytes))
+                })
+                .collect();
+            assert_eq!(reader::attempts(&store.backend).unwrap().len(), 3);
+            if corrupt {
+                std::fs::write(store.dir.join("push-cache.sqlite3"), b"damaged cache").unwrap();
+            }
+            let report = push(&store, &ctx, &repo, &Options::default()).unwrap();
+            assert_eq!(report.states, 1);
+            assert_eq!(reader::attempts(&store.backend).unwrap().len(), 4);
+            assert_eq!(store.backend.list("states/").unwrap().iter().filter(|o| o.key.ends_with(".tree.age")).count(), 4);
+            for (key, digest) in before {
+                assert_eq!(Sha256::digest(store.backend.get(&key).unwrap().unwrap()), digest);
+            }
+            store.verify(true).unwrap();
+            // Losing both caches must only rediscover immutable uploads, never republish them.
+            std::fs::remove_file(store.dir.join("push-cache.sqlite3")).unwrap();
+            std::fs::remove_file(store.dir.join("pushed-v2.json.zst")).unwrap();
+            assert_eq!(push(&store, &ctx, &repo, &Options::default()).unwrap().states, 0);
+            drop(repo);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn legacy_pushed_cache_migrates_without_changing_completion() {
         let root = std::env::temp_dir().join(crate::ids::new_id());
         std::fs::create_dir_all(&root).unwrap();
         let id = crate::ids::new_id();
@@ -823,13 +919,16 @@ mod tests {
         let legacy = BTreeMap::from([(id.clone(), pushed)]);
         std::fs::write(root.join("pushed.json"), serde_json::to_vec(&legacy).unwrap()).unwrap();
         let index = load_index(&root).unwrap();
-        let restored = cached_tree(&root, &id, &index[&id]).unwrap();
-        assert_eq!(restored.attempt, "0123abcd");
-        assert!(restored.tree.files.is_empty());
+        assert_eq!(index[&id].attempt, "0123abcd");
+        assert_eq!(index[&id].depth, 0);
+        assert!(index[&id].root.is_none());
         checkpoint(&root, &index).unwrap();
         assert_eq!(load_index(&root).unwrap()[&id].attempt, "0123abcd");
-        let json: serde_json::Value = serde_json::from_slice(&std::fs::read(root.join("pushed.json")).unwrap()).unwrap();
-        assert_eq!(json["format"], 1);
+        let json: serde_json::Value =
+            serde_json::from_slice(&zst::decompress(&std::fs::read(root.join("pushed-v2.json.zst")).unwrap(), None).unwrap())
+                .unwrap();
+        assert_eq!(json["format"], 2);
+        assert!(!root.join("pushed.json").exists());
         assert!(json["states"][&id].get("tree").is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -841,11 +940,16 @@ mod tests {
         let mut store = remote(&root, &ctx);
         let path = root.join("keep.txt");
         fsutil::atomic_write(&path, b"do not replace", 0o600).unwrap();
-        assert!(store.configure(&ctx, &super::super::ConfigureOptions { paper_key_out: Some(path.clone()), ..Default::default() }).is_err());
+        assert!(store
+            .configure(&ctx, &super::super::ConfigureOptions { paper_key_out: Some(path.clone()), ..Default::default() })
+            .is_err());
         assert_eq!(std::fs::read(&path).unwrap(), b"do not replace");
         assert!(store.backend.get("store.json").unwrap().is_none());
         assert!(store
-            .configure(&ctx, &super::super::ConfigureOptions { paper_key_out: Some(ctx.store.root.join("bad.txt")), ..Default::default() })
+            .configure(
+                &ctx,
+                &super::super::ConfigureOptions { paper_key_out: Some(ctx.store.root.join("bad.txt")), ..Default::default() }
+            )
             .is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -864,8 +968,10 @@ mod tests {
                     let ctx = context(&own);
                     let mut store = remote(&root, &ctx);
                     barrier.wait();
-                    let result =
-                        store.configure(&ctx, &super::super::ConfigureOptions { paper_key_out: Some(own.join("paper.txt")), ..Default::default() });
+                    let result = store.configure(
+                        &ctx,
+                        &super::super::ConfigureOptions { paper_key_out: Some(own.join("paper.txt")), ..Default::default() },
+                    );
                     result.map(|r| r.created)
                 })
             })
@@ -891,7 +997,9 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let ctx = context(&root);
         let mut store = remote(&root, &ctx);
-        store.configure(&ctx, &super::super::ConfigureOptions { paper_key_out: Some(root.join("paper")), ..Default::default() }).unwrap();
+        store
+            .configure(&ctx, &super::super::ConfigureOptions { paper_key_out: Some(root.join("paper")), ..Default::default() })
+            .unwrap();
         let descriptor = store.descriptor().unwrap();
         let mut base = None;
         let mut base_root = None;
@@ -941,7 +1049,9 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let ctx = context(&root);
         let mut store = remote(&root, &ctx);
-        store.configure(&ctx, &super::super::ConfigureOptions { paper_key_out: Some(root.join("paper")), ..Default::default() }).unwrap();
+        store
+            .configure(&ctx, &super::super::ConfigureOptions { paper_key_out: Some(root.join("paper")), ..Default::default() })
+            .unwrap();
         let descriptor = store.descriptor().unwrap();
         let mut record = crate::model::Record::new("machine");
         record.id = crate::ids::new_id();

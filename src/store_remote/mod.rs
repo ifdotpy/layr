@@ -8,6 +8,7 @@ mod index;
 mod legacy;
 pub(crate) mod overlays;
 mod public;
+mod push_cache;
 pub(crate) mod reader;
 mod release;
 mod writer;
