@@ -122,6 +122,8 @@ pub(super) struct Reader<'a> {
     keys: &'a BTreeMap<String, VerifyingKey>,
     trees: BTreeMap<(String, String), (Header, Vec<u8>, Tree)>,
     depths: BTreeMap<(String, String), usize>,
+    frames: BTreeMap<(String, String), (Header, Vec<u8>)>,
+    frame_bytes: usize,
     parts: BTreeMap<String, Vec<u8>>,
     part_bytes: usize,
     gets: std::cell::Cell<usize>,
@@ -135,6 +137,8 @@ impl<'a> Reader<'a> {
             keys,
             trees: BTreeMap::new(),
             depths: BTreeMap::new(),
+            frames: BTreeMap::new(),
+            frame_bytes: 0,
             parts: BTreeMap::new(),
             part_bytes: 0,
             gets: std::cell::Cell::new(0),
@@ -151,14 +155,30 @@ impl<'a> Reader<'a> {
         let identity = self.identity;
         let keys = self.keys;
         let mut trees = std::mem::take(&mut self.trees);
+        let mut depths = std::mem::take(&mut self.depths);
+        let mut gets = self.gets.get();
+        let mut frames = std::mem::take(&mut self.frames);
+        let mut frame_bytes = self.frame_bytes;
         let result = self.backend.verified(false, |backend, _| {
             let mut reader = Reader::new(backend, identity, keys);
             reader.trees = std::mem::take(&mut trees);
+            reader.depths = std::mem::take(&mut depths);
+            reader.gets.set(gets);
+            reader.frames = std::mem::take(&mut frames);
+            reader.frame_bytes = frame_bytes;
             let result = reader.tree_once(state, attempt);
             trees = reader.trees;
+            depths = reader.depths;
+            gets = reader.gets.get();
+            frames = reader.frames;
+            frame_bytes = reader.frame_bytes;
             result
         });
         self.trees = trees;
+        self.depths = depths;
+        self.gets.set(gets);
+        self.frames = frames;
+        self.frame_bytes = frame_bytes;
         result
     }
     fn tree_once(&mut self, state: &str, attempt: &str) -> Result<(Header, Vec<u8>, Tree)> {
@@ -184,8 +204,13 @@ impl<'a> Reader<'a> {
                 depth = self.depths[&at];
                 break;
             }
-            let object = self.decrypted(&format::tree_name(&at.0, &at.1))?;
-            let (header, frame) = format::split_tree(&object)?;
+            let (header, frame) = if let Some(verified) = self.frames.get(&at) {
+                verified.clone()
+            } else {
+                let object = self.decrypted(&format::tree_name(&at.0, &at.1))?;
+                let (header, frame) = format::split_tree(&object)?;
+                (header, frame.to_vec())
+            };
             if header.v != 2 {
                 bail!("unsupported tree format {}", header.v);
             }
@@ -210,6 +235,20 @@ impl<'a> Reader<'a> {
             let key = self.keys.get(&header.machine).context("tree signer has no verified machine record")?;
             header.verify(&canonical, key)?;
             let tree = Tree::parse(&canonical)?;
+            // Keep only verified compressed frames across tree operations. Expanded
+            // trees stay bounded separately; revisiting a parent need not fetch it again.
+            let name = (header.state.clone(), header.attempt.clone());
+            if !self.frames.contains_key(&name) {
+                let size = frame.len() + 2048;
+                if self.frame_bytes + size > 64 << 20 {
+                    self.frames.clear();
+                    self.frame_bytes = 0;
+                }
+                if size <= 64 << 20 {
+                    self.frame_bytes += size;
+                    self.frames.insert(name, (header.clone(), frame));
+                }
+            }
             // At most two complete delta chains, rather than every tree in project history.
             if self.trees.len() >= format::FULL_TREE_EVERY * 2 {
                 self.trees.clear();
@@ -229,6 +268,7 @@ impl<'a> Reader<'a> {
         let cached = !self.parts.is_empty();
         let mut parts = std::mem::take(&mut self.parts);
         let mut size = self.part_bytes;
+        let mut gets = self.gets.get();
         let result = self.backend.verified(cached, |backend, retry| {
             if retry {
                 parts.clear();
@@ -237,13 +277,16 @@ impl<'a> Reader<'a> {
             let mut reader = Reader::new(backend, identity, keys);
             reader.parts = std::mem::take(&mut parts);
             reader.part_bytes = size;
+            reader.gets.set(gets);
             let result = reader.read_once(entry);
             parts = reader.parts;
             size = reader.part_bytes;
+            gets = reader.gets.get();
             result
         });
         self.parts = parts;
         self.part_bytes = size;
+        self.gets.set(gets);
         result
     }
     fn read_once(&mut self, entry: &Entry) -> Result<Vec<u8>> {
@@ -259,6 +302,7 @@ impl<'a> Reader<'a> {
                     .filter(|key| !self.parts.contains_key(key) && unique.insert(key.clone()))
                     .take(8)
                     .collect();
+                self.gets.set(self.gets.get() + upcoming.len());
                 let bytes = self.backend.decrypted_many(&upcoming, self.identity)?;
                 // Insert the immediately needed part last, so cache eviction cannot remove it.
                 for (key, bytes) in upcoming.into_iter().zip(bytes).rev() {
@@ -405,6 +449,30 @@ pub(super) fn wanted(state: &crate::model::StateRec, opts: &Options) -> bool {
     }
 }
 
+// Plan metadata from the listing already needed by fetch. Never download ahead of
+// verification, and keep one ordinary restore window within a 256-key request.
+fn restore_window(
+    states: &[crate::model::StateRec],
+    position: usize,
+    attempts: &BTreeMap<String, String>,
+    objects: &BTreeMap<(String, String), Vec<String>>,
+) -> (Vec<String>, usize) {
+    let mut keys = Vec::new();
+    let mut end = position;
+    for state in &states[position..] {
+        let names = &objects[&(state.id.clone(), attempts[&state.id].clone())];
+        if !keys.is_empty() && keys.len() + names.len() > 256 {
+            break;
+        }
+        keys.extend(names.iter().take(256 - keys.len()).cloned());
+        end += 1;
+        if keys.len() == 256 {
+            break;
+        }
+    }
+    (keys, end)
+}
+
 pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Options) -> Result<Report> {
     let _fetch = crate::trace::span("store fetch");
     let descriptor = store.descriptor()?;
@@ -440,7 +508,17 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
         ..Default::default()
     };
     let required = required_states(repo, &records.lines, opts)?;
-    let states = attempts(&store.backend)?;
+    let catalog = store.backend.list("states/")?;
+    let mut states = BTreeMap::new();
+    let mut objects = BTreeMap::<(String,String),Vec<String>>::new();
+    for object in catalog {
+        if let Some((state, attempt)) = format::parse_tree_name(&object.key) {
+            states.entry(state.clone()).or_insert(attempt.clone());
+            objects.entry((state,attempt)).or_default().push(object.key);
+        } else if let Some((state,attempt,_)) = format::parse_data_name(&object.key) {
+            objects.entry((state,attempt)).or_default().push(object.key);
+        }
+    }
     let mut reader = Reader::new(&store.backend, &identity, &records.keys);
     let mut missing = Vec::new();
     for id in states.keys() {
@@ -455,10 +533,14 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
         }
     }
     let missing = super::writer::parents_first(missing)?;
+    let mut window_end = 0;
+    let mut window_started = std::time::Instant::now();
     for (position, state) in missing.iter().enumerate() {
-        if position % 128 == 0 {
-            let keys:Vec<_> = missing[position..].iter().take(128).map(|state|format::tree_name(&state.id,&states[&state.id])).collect();
+        if position >= window_end || window_started.elapsed().as_secs() >= 240 {
+            let (keys,end) = restore_window(&missing,position,&states,&objects);
             store.backend.prepare_batch(&keys)?;
+            window_end = end;
+            window_started = std::time::Instant::now();
         }
         let id = state.id.clone();
         let attempt = &states[&id];

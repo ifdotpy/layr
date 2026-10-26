@@ -40,7 +40,7 @@ class Fixture(http.server.BaseHTTPRequestHandler):
             mode = int(parsed.path.split('.')[0][-1])
             counts[f'{mode}.cdn'] += 1
             if mode == 2: return self.answer(b'blocked',403)
-            return self.answer(valid if mode == 5 else b'x'*len(valid))
+            return self.answer(valid if mode in [5,6] else b'x'*len(valid))
         prefix = '/v1/p/project/objects/files/'
         assert parsed.path.startswith(prefix), parsed.path
         assert self.headers.get('Authorization') == 'Bearer fixture.read'
@@ -58,6 +58,10 @@ class Fixture(http.server.BaseHTTPRequestHandler):
             assert self.headers.get('Authorization') == 'Bearer fixture.read'
             body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
             assert body['epoch'] == 'root' and 0 < len(body['keys']) <= 256
+            if all(key.endswith('6.age') for key in body['keys']):
+                counts['renewal.batch'] += 1
+                expires=int(time.time())+300
+                return self.answer({'objects':[{'status':200,'url':f'https://localhost:{self.server.server_port}/o/project/{key}?Expires={expires}&Signature=fixture&Key-Pair-Id=K123&Hash-Algorithm=SHA256','expires':expires,'bytes':len(valid)} for key in body['keys']]},kind='application/json')
             counts['batch'] += 1
             counts[f"batch.size.{len(body['keys'])}"] += 1
             if counts['batch'] == 1:

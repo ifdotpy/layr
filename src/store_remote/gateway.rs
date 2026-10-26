@@ -628,6 +628,8 @@ impl Gateway {
 
     pub(super) fn prepare_batch(&self, keys: &[String]) -> Result<()> {
         if self.replay.as_ref().is_some_and(|replay|replay.is_direct()) || !self.has_read_identity() || self.is_public() { return Ok(()); }
+        let now = crate::ids::now_ms().max(0) as u64 / 1000;
+        self.prepared.lock().expect("prepared link lock").retain(|_,item| item["status"] != 200 || item["direct"] == true || item["expires"].as_u64().is_some_and(|expires|expires > now + 5));
         let mut groups = std::collections::BTreeMap::<String,Vec<(String,String)>>::new();
         for key in keys {
             if !super::cdn::cacheable(key) || self.replay.as_ref().is_some_and(|replay|replay.cached(&format!("{}{key}",self.base))) { continue; }
@@ -687,6 +689,7 @@ impl Gateway {
     fn fetched(&self, key: &str, prefer_cdn: bool) -> Result<super::cdn::Download> {
         if prefer_cdn && super::cdn::cacheable(key) && self.has_read_identity() && !self.is_public() {
             let prepared = self.prepared.lock().expect("prepared link lock").remove(&format!("{}{key}",self.base));
+            let prepared = prepared.filter(|entry|entry["status"] != 200 || entry["direct"] == true || entry["expires"].as_u64().is_some_and(|expires|expires > crate::ids::now_ms().max(0) as u64 / 1000));
             if let Some(entry) = prepared {
                 match entry["status"].as_u64() {
                     Some(404) => return Ok(super::cdn::Download { bytes:None, cdn:false }),
@@ -1160,12 +1163,23 @@ mod tests {
             bodies.into_iter().map(|body| keys::decrypt(&identity,&body.context("missing batch object")?)).collect::<Result<Vec<_>>>()
         }).unwrap();
         assert_eq!(batch,vec![b"verified ciphertext".to_vec();17]);
+        let expired_key="files/01a177aa-a7a5-716c-8774-7f165724c166.age".to_string();
+        gateway.prepared.lock().unwrap().insert(format!("{}{expired_key}",gateway.base),serde_json::json!({"status":200,"expires":1,"url":"expired"}));
+        backend.verified(false,|backend,_| {
+            backend.prepare_batch(&[expired_key.clone()])?;
+            assert_eq!(keys::decrypt(&identity,&backend.get(&expired_key)?.unwrap())?,b"verified ciphertext");
+            Ok(())
+        }).unwrap();
         let response = gateway.http.get(format!("https://localhost:{port}/counts")).send().unwrap();
         let counts: std::collections::BTreeMap<String, u64> = response.json().unwrap();
         assert_eq!(counts.get("batch"), Some(&6)); // Busy retries the same body; deadlines split 17 -> 9+8 -> 5+4+8.
         assert_eq!(counts.get("batch.size.17"),Some(&2));
         for size in [9,5,4,8] {assert_eq!(counts.get(&format!("batch.size.{size}")),Some(&1));}
         assert_eq!(counts.get("batch.keys"), Some(&17));
+        assert_eq!(counts.get("renewal.batch"),Some(&1));
+        assert_eq!(counts.get("6.cdn"),Some(&1));
+        assert!(counts.get("6.link").is_none());
+        assert!(counts.get("6.direct").is_none());
         assert!(counts.get("5.link").is_none());
         assert!(counts.get("5.direct").is_none());
         assert_eq!(counts.get("challenge"), Some(&1));
