@@ -13,9 +13,10 @@ use std::{
     path::Path,
 };
 
-// A small fixed ceiling also keeps the cache below 10% of the 392-commit store.
+// Grow with compressed uploaded payload while retaining a fixed upper bound.
 // The rollback journal is held in memory; this database is never authoritative.
-const MAX_BYTES: usize = 512 << 10;
+const BASE_BYTES: usize = 512 << 10;
+const MAX_BYTES: usize = 16 << 20;
 const PAGE_SIZE: usize = 4096;
 const NODE_LIMIT: usize = 64 << 20;
 
@@ -35,12 +36,16 @@ impl TreeCache {
             db.execute_batch(&format!(
                 "PRAGMA page_size={PAGE_SIZE}; PRAGMA max_page_count={};
                  PRAGMA journal_mode=MEMORY; PRAGMA synchronous=OFF;
-                 CREATE TABLE IF NOT EXISTS nodes (hash BLOB PRIMARY KEY, data BLOB NOT NULL) WITHOUT ROWID;",
+                 CREATE TABLE IF NOT EXISTS nodes (hash BLOB PRIMARY KEY, data BLOB NOT NULL) WITHOUT ROWID;
+                 CREATE TABLE IF NOT EXISTS usage (id INTEGER PRIMARY KEY, bytes INTEGER NOT NULL);
+                 INSERT OR IGNORE INTO usage VALUES (1, 0);",
                 MAX_BYTES / PAGE_SIZE
             ))?;
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-            Ok(Self(db))
+            let cache = Self(db);
+            cache.record_upload(0)?;
+            Ok(cache)
         };
         match open() {
             Ok(cache) => Ok(cache),
@@ -52,6 +57,15 @@ impl TreeCache {
                 open()
             }
         }
+    }
+
+    pub(super) fn record_upload(&self, bytes: u64) -> Result<()> {
+        let previous: u64 = self.0.query_row("SELECT bytes FROM usage WHERE id=1", [], |row| row.get(0))?;
+        let total = previous.saturating_add(bytes).min(i64::MAX as u64);
+        let limit = (total / 32).clamp(BASE_BYTES as u64, MAX_BYTES as u64) / PAGE_SIZE as u64;
+        self.0.pragma_update(None, "max_page_count", limit)?;
+        self.0.execute("UPDATE usage SET bytes=?1 WHERE id=1", [total])?;
+        Ok(())
     }
 
     pub(super) fn put(&mut self, tree: &Tree) -> Option<String> {
@@ -182,6 +196,32 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
+    fn budget_grows_with_payload_and_survives_eviction_and_reopen() {
+        let dir = std::env::temp_dir().join(crate::ids::new_id());
+        std::fs::create_dir(&dir).unwrap();
+        let cache = TreeCache::open(&dir).unwrap();
+        cache.record_upload(64 << 20).unwrap();
+        assert_eq!(
+            cache.0.pragma_query_value(None, "max_page_count", |row| row.get::<_, usize>(0)).unwrap(),
+            (2 << 20) / PAGE_SIZE
+        );
+        cache.0.execute("DELETE FROM nodes", []).unwrap();
+        drop(cache);
+        let cache = TreeCache::open(&dir).unwrap();
+        assert_eq!(
+            cache.0.pragma_query_value(None, "max_page_count", |row| row.get::<_, usize>(0)).unwrap(),
+            (2 << 20) / PAGE_SIZE
+        );
+        cache.record_upload(1 << 30).unwrap();
+        assert_eq!(
+            cache.0.pragma_query_value(None, "max_page_count", |row| row.get::<_, usize>(0)).unwrap(),
+            MAX_BYTES / PAGE_SIZE
+        );
+        drop(cache);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn cache_eviction_bounds_disk_and_keeps_the_current_tree() {
         let dir = std::env::temp_dir().join(crate::ids::new_id());
         std::fs::create_dir(&dir).unwrap();
@@ -190,7 +230,7 @@ mod tests {
         for version in 1..1000 {
             let root = cache.put(&tree(version)).unwrap();
             assert_eq!(cache.get(&root).unwrap(), tree(version));
-            assert!(std::fs::metadata(dir.join("push-cache.sqlite3")).unwrap().len() <= MAX_BYTES as u64);
+            assert!(std::fs::metadata(dir.join("push-cache.sqlite3")).unwrap().len() <= BASE_BYTES as u64);
         }
         assert!(cache.get(&first).is_err(), "old generation should have been evicted");
         drop(cache);

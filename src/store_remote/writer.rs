@@ -29,6 +29,7 @@ const INDEX_STATES: usize = 16_384;
 #[cfg(test)]
 thread_local! {
     static PUSH_STOP_AFTER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static PUSH_DETERMINISTIC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static PUSH_CACHE_DISABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 #[derive(Clone, Serialize, Deserialize)]
@@ -49,11 +50,14 @@ fn valid_cached(state: &str, entry: &Cached) -> bool {
         && entry.depth < format::FULL_TREE_EVERY
         && entry.root.as_ref().is_none_or(|root| root.len() == 64 && hex::decode(root).is_ok())
 }
-fn cache_tree(cache: &mut Option<super::push_cache::TreeCache>, pushed: &Pushed) -> Cached {
+fn cache_tree(cache: &mut Option<super::push_cache::TreeCache>, pushed: &Pushed, uploaded_bytes: u64) -> Cached {
     Cached {
         attempt: pushed.attempt.clone(),
         depth: pushed.depth,
-        root: cache.as_mut().and_then(|cache| cache.put(&pushed.tree)),
+        root: cache.as_mut().and_then(|cache| {
+            cache.record_upload(uploaded_bytes).ok()?;
+            cache.put(&pushed.tree)
+        }),
     }
 }
 fn cached_tree(cache: &Option<super::push_cache::TreeCache>, entry: &Cached) -> Option<Pushed> {
@@ -429,10 +433,10 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
                         let records = remote_records.as_ref().unwrap();
                         let mut source = reader::Reader::new(&store.backend, &identity, &records.keys);
                         let attempt = &present[&id];
-                        let (header, canonical, tree) = source.tree(&id, attempt)?;
-                        let depth = if header.tree == "full" { 0 } else { format::FULL_TREE_EVERY - 1 };
+                        let (_, canonical, tree) = source.tree(&id, attempt)?;
+                        let depth = source.tree_depth(&id, attempt)?;
                         let restored = Pushed { attempt: attempt.clone(), tree, depth, canonical };
-                        index.insert(id.clone(), cache_tree(&mut tree_cache, &restored));
+                        index.insert(id.clone(), cache_tree(&mut tree_cache, &restored, 0));
                         pushed = Some(restored);
                     }
                 }
@@ -462,7 +466,7 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
         drop(stage);
         let stage = crate::trace::span("store checkpoint");
         present.insert(state.id.clone(), pushed.attempt.clone());
-        index.insert(state.id.clone(), cache_tree(&mut tree_cache, &pushed));
+        index.insert(state.id.clone(), cache_tree(&mut tree_cache, &pushed, bytes));
         #[cfg(test)]
         PUSH_STOP_AFTER.with(|stop| -> Result<()> {
             if stop.get() == Some(report.states + 1) {
@@ -542,6 +546,12 @@ fn upload_state(
     let mut random = [0u8; 4];
     rand::rngs::OsRng.fill_bytes(&mut random);
     let attempt = hex::encode(random);
+    #[cfg(test)]
+    let attempt = if PUSH_DETERMINISTIC.with(|enabled| enabled.get()) {
+        hex::encode(Sha256::digest(state.as_bytes()))[..8].to_string()
+    } else {
+        attempt
+    };
     let delta_root = base_root.filter(|base| crate::storage::is_subvolume(base) && crate::storage::is_subvolume(root));
     let mut files =
         if delta_root.is_some() { base.map(|(_, p)| p.tree.files.clone()).unwrap_or_default() } else { BTreeMap::new() };
@@ -890,6 +900,7 @@ mod tests {
             }
             let repo = Repo { p: project };
             // With no cache, the third state must hydrate a parent uploaded in this same push.
+            PUSH_DETERMINISTIC.with(|enabled| enabled.set(true));
             PUSH_CACHE_DISABLED.with(|disabled| disabled.set(corrupt));
             PUSH_STOP_AFTER.with(|stop| stop.set(Some(3)));
             let error = push(&store, &ctx, &repo, &Options::default()).unwrap_err();
@@ -919,6 +930,34 @@ mod tests {
                 assert_eq!(Sha256::digest(store.backend.get(&key).unwrap().unwrap()), digest);
             }
             store.verify(true).unwrap();
+            // A zero-capacity cache must publish byte-for-byte the same object sizes as
+            // the warm-cache push, including the signed tree compression/checkpoint cadence.
+            let mut empty_cache = remote(&root, &ctx);
+            empty_cache.backend = super::super::backend::Backend::file(root.join("uncached-remote"));
+            empty_cache.dir = root.join("uncached-meta");
+            empty_cache
+                .configure(
+                    &ctx,
+                    &super::super::ConfigureOptions { paper_key_out: Some(root.join("uncached-paper")), ..Default::default() },
+                )
+                .unwrap();
+            PUSH_CACHE_DISABLED.with(|disabled| disabled.set(true));
+            assert_eq!(push(&empty_cache, &ctx, &repo, &Options::default()).unwrap().states, 4);
+            PUSH_CACHE_DISABLED.with(|disabled| disabled.set(false));
+            PUSH_DETERMINISTIC.with(|enabled| enabled.set(false));
+            let sizes = |store: &Store| -> BTreeMap<String, usize> {
+                store
+                    .backend
+                    .list("states/")
+                    .unwrap()
+                    .into_iter()
+                    .map(|object| {
+                        let size = store.backend.get(&object.key).unwrap().unwrap().len();
+                        (object.key, size)
+                    })
+                    .collect()
+            };
+            assert_eq!(sizes(&store), sizes(&empty_cache));
             // Losing both caches must only rediscover immutable uploads, never republish them.
             std::fs::remove_file(store.dir.join("push-cache.sqlite3")).unwrap();
             std::fs::remove_file(store.dir.join("pushed-v2.json.zst")).unwrap();
