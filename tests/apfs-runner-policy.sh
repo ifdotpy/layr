@@ -31,6 +31,7 @@ export LAYR_ROOT="$base/runner"
 cd "$base"
 "$L" clone "file://$base/remote" p -q
 cd "$LAYR_ROOT/projects/p/lines/main"
+"$L" config access | python3 -c 'import json,os,sys; a=json.load(sys.stdin); assert a["*"]=="writer" and a["user:"+str(os.getuid())]=="admin",a'
 "$L" fetch origin -q
 "$L" config check.smoke 'echo runner-override; exit 99'
 "$L" config check.local-only 'exit 98'
