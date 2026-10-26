@@ -12,14 +12,14 @@ P=$LAYR_ROOT/projects/m/lines
 cd $P/main && l line new -q topic
 # ours (main)
 cd $P/main
-sed -i 's/^a 2$/a 2 OURS/' A.txt; rm -rf X; rm L; ln -s t2 L; rm N; ln -s t2 N; printf 'echo hi\necho ours\n' > S.sh
-echo f-ours > F.txt; echo same > Same.txt; echo ours > Diff.txt; mv Q.txt Qo.txt; sed -i 's/^z 9$/z 9 OURS/' Z.txt; rm W.txt
+sed_inplace 's/^a 2$/a 2 OURS/' A.txt; rm -rf X; rm L; ln -s t2 L; rm N; ln -s t2 N; printf 'echo hi\necho ours\n' > S.sh
+echo f-ours > F.txt; echo same > Same.txt; echo ours > Diff.txt; mv Q.txt Qo.txt; sed_inplace 's/^z 9$/z 9 OURS/' Z.txt; rm W.txt
 l add -A && l save -qm ours
 # theirs (topic)
 cd $P/topic
 mv A.txt A2.txt; mkdir -p X; echo new > X/new.txt; rm M; ln -s t3 M; rm N; ln -s t3 N; chmod 755 S.sh
 rm F.txt; mkdir F.txt; echo inner > F.txt/inner; echo same > Same.txt; echo theirs > Diff.txt; mv Q.txt Qt.txt
-mv c.txt c.tmp; mv c.tmp C.txt; rm -rf Y; sed -i 's/^z 1$/z 1 THEIRS/' Z.txt; echo w-theirs > W.txt
+mv c.txt c.tmp; mv c.tmp C.txt; rm -rf Y; sed_inplace 's/^z 1$/z 1 THEIRS/' Z.txt; echo w-theirs > W.txt
 l add -A && l save -qm theirs
 cd $P/main
 out=$(l merge topic 2>&1); rc=$?
@@ -32,7 +32,7 @@ ok "2 the new file is kept" test -f X/new.txt
 eq "3a symlink changed by ours only: kept" "t2" "$(readlink L)"
 eq "3b symlink changed by theirs only: taken" "t3" "$(readlink M)"
 has "3c symlink changed by both: conflict" "N (symlink target)" "$C"
-ok "4 mode (theirs) and content (ours): both kept" sh -c 'grep -q ours S.sh && [ "$(stat -c %a S.sh)" = 755 ]'
+eq "4 mode (theirs) and content (ours): both kept" "755 ours" "$(stat_field mode S.sh) $(grep -q ours S.sh && echo ours)"
 has "5 file to folder vs modify: conflict" "F.txt (type change" "$C"
 no "6a both add the same file: no conflict" sh -c "echo '$C' | grep -q 'Same.txt'"
 has "6b both add different files: conflict" "Diff.txt (add/add)" "$C"
@@ -42,16 +42,16 @@ ok "8 case-only rename: applied" sh -c 'ls | grep -qx C.txt && ! ls | grep -qx c
 no "9 folder deleted by theirs: removed" test -e Y
 ok "10 edits of different lines: merged" sh -c "grep -q 'z 1 THEIRS' Z.txt && grep -q 'z 9 OURS' Z.txt"
 has "11 ours deleted, theirs modified: conflict" "W.txt" "$C"
-eq "merge state has two parents" "2" "$(l show -s --format=%p head | wc -w)"
+eq "merge state has two parents" "2" "$(l show -s --format=%p head | wc -w | tr -d ' ')"
 
 # text conflict and resolution
 l reset -q --hard head~1
-cd $P/topic && l reset -q --hard head~1 && sed -i 's/^z 5$/z 5 topic/' Z.txt && l save -qam w5
-cd $P/main && sed -i 's/^z 5$/z 5 main/' Z.txt && l save -qam m5
+cd $P/topic && l reset -q --hard head~1 && sed_inplace 's/^z 5$/z 5 topic/' Z.txt && l save -qam w5
+cd $P/main && sed_inplace 's/^z 5$/z 5 main/' Z.txt && l save -qam m5
 eq "text conflict exits 1" "1" "$(l merge -q topic >/dev/null 2>&1; echo $?)"
 ok "conflict markers written" grep -q '^<<<<<<< head' Z.txt
 eq "status shows the unmerged path" "UU Z.txt" "$(l status -s | grep Z.txt)"
-sed -i '/^<<<<<<<\|^=======\|^>>>>>>>/d; s/^z 5 topic$//' Z.txt; sed -i '/^$/d' Z.txt
+sed_inplace -E '/^<<<<<<<|^=======|^>>>>>>>/d; s/^z 5 topic$//' Z.txt; sed_inplace '/^$/d' Z.txt
 l add Z.txt && l save -qm resolved
 eq "resolved: no conflicts left" "" "$(l status -s)"
 eq "the resolution state lists no conflicts" "" "$(l show -s --format=%B head | grep -i conflict)"
@@ -64,7 +64,7 @@ eq "already up to date" "Already up to date." "$(l merge topic)"
 cd $P/topic && echo s1 > s1.txt && l add s1.txt && l save -qm s1 && echo s2 > s2.txt && l add s2.txt && l save -qm s2
 cd $P/main && echo m > mm.txt && l add mm.txt && l save -qm mm
 l merge -q --squash -m "task: s1 and s2" topic
-eq "squash: one parent" "1" "$(l show -s --format=%p head | wc -w)"
+eq "squash: one parent" "1" "$(l show -s --format=%p head | wc -w | tr -d ' ')"
 ok "squash brings the files" test -f s2.txt
 W=$(cd $P/topic && l rev-parse head)
 cd $P/topic && echo late > late.txt && l add late.txt && l save -qm late
@@ -102,8 +102,7 @@ printf 'list.txt merge=union\nkeep.txt merge=ours\n*.img merge=blocks merge-veri
 printf 'a\n' > list.txt; echo base > keep.txt; head -c 65536 /dev/zero > disk.img; echo 1 > num.txt
 l add -A && l save -qm "driver base"
 l config merge.driver.sum 'echo $(( $(cat %A) + $(cat %B) - $(cat %O) )) > %A'
-STAT=$(command -v stat)
-l config merge.verify.size "test \$($STAT -c %s %A) = 65536"
+l config merge.verify.size "test \$(wc -c < %A) = 65536"
 l line new -q d2
 printf 'a\nmain\n' > list.txt; echo main > keep.txt; printf 'MAIN' | dd of=disk.img bs=1 seek=0 conv=notrunc status=none; echo 3 > num.txt
 l save -qam "main side"
@@ -135,7 +134,7 @@ cd $P/main
 seq 1 100 > tarred.txt; touch -t 202001010000 tarred.txt; l add tarred.txt && l save -qm tarred
 l line new -q moved
 cd $P/moved && mv tarred.txt untarred.txt && l add -A && l save -qm move
-cd $P/main && sed -i 's/^50$/fifty/' tarred.txt && l save -qam edit
+cd $P/main && sed_inplace 's/^50$/fifty/' tarred.txt && l save -qam edit
 eq "a move meets an edit of the other line" "0" "$(l merge -q moved >/dev/null 2>&1; echo $?)"
 ok "the edit is in the moved file" grep -qx fifty untarred.txt
 no "the old name is gone" test -e tarred.txt
