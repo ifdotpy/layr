@@ -6,34 +6,42 @@ See [thin APFS states](apfs-thin-states.md) and the [measurements](../benchmarks
 
 ## Where APFS is weaker than btrfs
 
-1. **Snapshots are not atomic.** A btrfs subvolume snapshot is one kernel operation.
+1. **Snapshots are not atomic.** This limit stays: only an APFS volume snapshot is atomic, and it needs root and an
+   Apple entitlement. A btrfs subvolume snapshot is one kernel operation.
    On APFS, Layr scans the tree before and after a copy and copies again what changed.
    Under constant writes it keeps the last copy after 6 rounds, with a warning:
    each file is then one complete version from some moment of the copy, not one moment for all files.
    Files with an active `mmap` have no change counter, so status uses a slower complete copy.
-2. **Work grows with the number of files.** A btrfs line costs the same for any tree.
-   An APFS line is one complete tree copy: about 1 s CPU for 10,000 files and about 20 s for 100,000.
-   `add` and automatic states scan the complete tree; btrfs gets changed paths from `send --no-data`.
-   `status` scans once and compares only entries whose stat data changed ([APFS features](apfs-features.md)).
+2. **Work grows with the number of files.** This limit stays for new lines: a btrfs line costs the same for any tree,
+   and an APFS line is one folder clone, which the kernel does entry by entry.
+   With 10,000 files a new line is still about 2 times faster than `git worktree`.
+   `status`, `add` and automatic states scan the working folder once, with several threads; btrfs gets changed paths
+   from `send --no-data`. Sealed states keep their scan, and a folder clone keeps the times of its folders, so an
+   automatic state writes only the entries that changed.
 3. **Weaker protection of history.** btrfs read-only subvolumes are kernel-enforced.
    APFS uses `UF_IMMUTABLE` on each file. The store owner can remove these flags, and setting them costs CPU per file.
-   Real protection needs the root service on a volume with ownership enabled.
-4. **Weaker transfers.** APFS sends full streams only: no parent, no clone sources, no compressed version 2 streams.
-   The receiver stores complete trees. btrfs sends only the changes.
-5. **Move detection is a heuristic.** btrfs keeps inode numbers between snapshots.
-   APFS uses the creation time. A tool that sets old times (tar, npm, zip) disables move detection for those files.
-   A false match is unlikely, but possible.
+   Without the root service this limit stays. Real protection needs the root service on a volume with ownership
+   enabled: then root owns the states, and the line owner cannot change them.
+4. **Transfers.** A peer that has the parent state gets only the differences, as with btrfs.
+   A tree with hard links is still sent complete. APFS sends have no other clone sources and no compressed
+   version 2 streams.
+5. **Move detection.** btrfs keeps inode numbers between snapshots.
+   APFS first matches a file that moved without a change by its shared clone: an exact match.
+   A file that moved and changed matches by its creation time. A tool that sets old times (tar, npm, zip) disables
+   that second match for those files; `status` and `diff` then still find the move by content, as git does.
 6. **File system limits.** On the default macOS volume, which ignores case, names that differ only in case
    (`README` and `Readme`) cannot exist together; Layr refuses them with an error. A store on a case-sensitive APFS volume accepts them.
    Device nodes, sockets and named pipes are not supported.
    Transfers refuse macOS access control lists and Linux security attributes.
-   `init --from` loses hard links (a known defect).
    APFS volume snapshots (`fs_snapshot_create`) return EPERM for a normal user.
 7. **More code, more cases.** Thin states need views, keyframes in `gc`, delayed deletion of bases,
    and removal of layers without a record. btrfs gets all of this from the file system.
-   - `rm`, `mv`, `apply --cached` and `restore --staged` first make a complete index.
+   - `apply --cached` and `restore --staged` first make a complete index: they run `git apply` in a folder.
+     `rm` and `mv` change the thin index.
    - Merges, imports, received states and lines with overlays keep complete trees.
-   - Commands that need a folder (`show`, `merge`, `push`) make a view. It uses space until `gc` removes it.
+   - `status`, `diff`, `blame`, the conflict radar and change statistics read the layers.
+     Other commands that need a folder (`show <rev>:<path>`, `merge`, `push`) make a view. It uses space until
+     `gc` removes it.
    - A long chain of layers makes reads slower until `gc` makes a complete tree.
 8. **Recovery.** A journal protects a stopped save. Other partial states wait for `gc`.
    It removes a layer without a record only after one hour. On btrfs an incomplete snapshot never appears.
