@@ -129,4 +129,15 @@ l restore --theirs disk.img
 eq "checkout --theirs takes the other version" "THEM" "$(dd if=disk.img bs=1 skip=102 count=4 status=none)"
 l add disk.img && l save -qm "take theirs"
 
+# A move of a file whose creation time a tool set to whole seconds (tar, npm) still meets an
+# edit of the same file on the other line.
+cd $P/main
+seq 1 100 > tarred.txt; touch -t 202001010000 tarred.txt; l add tarred.txt && l save -qm tarred
+l line new -q moved
+cd $P/moved && mv tarred.txt untarred.txt && l add -A && l save -qm move
+cd $P/main && sed -i 's/^50$/fifty/' tarred.txt && l save -qam edit
+eq "a move meets an edit of the other line" "0" "$(l merge -q moved >/dev/null 2>&1; echo $?)"
+ok "the edit is in the moved file" grep -qx fifty untarred.txt
+no "the old name is gone" test -e tarred.txt
+
 finish
