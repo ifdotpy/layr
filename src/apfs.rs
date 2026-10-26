@@ -797,11 +797,12 @@ fn each_parallel<T: Sync>(items: &[T], f: impl Fn(&T) -> Result<()> + Sync) -> R
 }
 /// True when a scanned tree needs file-by-file copies: special files, nested layers, or hard
 /// links (a recursive clone copies hard links as separate files).
-pub(crate) fn needs_file_copies(_src: &Path, entries: &BTreeMap<String, ScanEntry>) -> bool {
+/// `keep_links`: hard links must stay links in the copy (history); a content scan does not need it.
+pub(crate) fn needs_file_copies(_src: &Path, entries: &BTreeMap<String, ScanEntry>, keep_links: bool) -> bool {
     let mut inodes = std::collections::HashSet::new();
     entries.iter().any(|(_, e)| {
         e.meta.ftype == crate::fsutil::FType::Special
-            || (e.meta.is_file() && !inodes.insert((e.fingerprint.0, e.fingerprint.1)))
+            || (keep_links && e.meta.is_file() && !inodes.insert((e.fingerprint.0, e.fingerprint.1)))
     })
 }
 
@@ -817,7 +818,17 @@ fn nested_layers<'a>(src: &Path, entries: &'a BTreeMap<String, ScanEntry>) -> Ve
 /// Copy the complete tree `src` (scanned as `entries`) to the new path `dst`. A read-only copy
 /// keeps the immutable flags of its entries except the root; a writable copy has none.
 pub(crate) fn clone_complete(src: &Path, dst: &Path, entries: &BTreeMap<String, ScanEntry>, readonly: bool) -> Result<()> {
-    if needs_file_copies(src, entries) {
+    clone_complete_with(src, dst, entries, readonly, true)
+}
+
+fn clone_complete_with(
+    src: &Path,
+    dst: &Path,
+    entries: &BTreeMap<String, ScanEntry>,
+    readonly: bool,
+    keep_links: bool,
+) -> Result<()> {
+    if needs_file_copies(src, entries, keep_links) {
         return copy_tree(src, dst, true, &mut BTreeMap::new());
     }
     // Clone the tree at once when no entry needs file-by-file handling. The clone keeps flags,
@@ -868,6 +879,16 @@ pub(crate) fn clone_complete(src: &Path, dst: &Path, entries: &BTreeMap<String, 
 }
 
 pub fn snapshot(src: &Path, dst: &Path, readonly: bool) -> Result<()> {
+    snapshot_with(src, dst, readonly, true)
+}
+
+/// A read-only snapshot for comparing content. Hard links become separate files, so a tree with
+/// hard links (for example pnpm's node_modules) is still cloned at once.
+pub fn scan_snapshot(src: &Path, dst: &Path) -> Result<()> {
+    snapshot_with(src, dst, true, false)
+}
+
+fn snapshot_with(src: &Path, dst: &Path, readonly: bool, keep_links: bool) -> Result<()> {
     let _t = crate::trace::span(format!("APFS clone {}", dst.display()));
     if fs::symlink_metadata(dst).is_ok() {
         bail!("snapshot destination already exists");
@@ -883,7 +904,7 @@ pub fn snapshot(src: &Path, dst: &Path, readonly: bool) -> Result<()> {
         let mut before = before;
         for round in 0.. {
             let _t = crate::trace::span("APFS copy tree");
-            match clone_complete(src, &temp, &before, readonly) {
+            match clone_complete_with(src, &temp, &before, readonly, keep_links) {
                 Ok(()) => break,
                 Err(e) => {
                     let now = scan(src)?;
@@ -916,14 +937,14 @@ pub fn snapshot(src: &Path, dst: &Path, readonly: bool) -> Result<()> {
             }
             let paths = crate::thin::changed_paths(&before, &after);
             let _t = crate::trace::span(format!("APFS copy {} changed entries again", paths.len()));
-            if needs_file_copies(src, &after) {
+            if needs_file_copies(src, &after, keep_links) {
                 // Hard links survive only a copy of the whole tree with its map of inodes.
                 let mut copied = false;
                 for _ in 0..crate::thin::COPY_ROUNDS {
                     crate::thin::settle(round);
                     let now = scan(src)?;
                     delete_tree(&temp)?;
-                    if clone_complete(src, &temp, &now, readonly).is_ok() {
+                    if clone_complete_with(src, &temp, &now, readonly, keep_links).is_ok() {
                         before = now;
                         copied = true;
                         break;
