@@ -1067,6 +1067,9 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
         if store.is_public_reader() {
             set_config(ctx, &repo, "cloud.remote.origin.public", json!(true))?;
         }
+        // This new copy belongs to the cloning OS user. Its local policy never
+        // selects automatic check commands, which use the verified creator.
+        set_config(ctx, &repo, "access", json!({format!("user:{}", ctx.caller.uid): "admin"}))?;
         print_store_report(ctx, &report, "clone", a.has("--json"), a.has("-q"))?;
         Ok(if report.missing_lines.is_empty() { 0 } else { 2 })
     })();
