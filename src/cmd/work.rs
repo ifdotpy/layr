@@ -720,7 +720,7 @@ pub fn apply(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     if a.has("--stat") || a.has("--numstat") {
         let mode = if a.has("--stat") { "--stat" } else { "--numstat" };
-        let out = run_git_apply(Path::new("/"), &patch, &[mode.to_string()], ctx.caller.uid)?;
+        let out = run_git_apply(ctx, Path::new("/"), &patch, &[mode.to_string()], ctx.caller.uid)?;
         ctx.print(&out);
         return Ok(0);
     }
@@ -742,14 +742,14 @@ pub fn apply(ctx: &Ctx, args: &[String]) -> Result<i32> {
     for (t, uid) in &targets {
         let mut f = flags.clone();
         f.push("--check".into());
-        run_git_apply(t, &patch, &f, *uid)?;
+        run_git_apply(ctx, t, &patch, &f, *uid)?;
     }
     if a.has("--check") {
         return Ok(0);
     }
     let touched = patch_paths(&patch);
     for (t, uid) in &targets {
-        run_git_apply(t, &patch, &flags, *uid)?;
+        run_git_apply(ctx, t, &patch, &flags, *uid)?;
         if *uid == 0 {
             if let Some((u, g)) = own {
                 for p in &touched {
@@ -779,14 +779,21 @@ fn patch_paths(patch: &[u8]) -> Vec<String> {
     v
 }
 
-fn run_git_apply(dir: &Path, patch: &[u8], flags: &[String], uid: u32) -> Result<String> {
+fn run_git_apply(ctx: &Ctx, dir: &Path, patch: &[u8], flags: &[String], uid: u32) -> Result<String> {
     use std::io::Write;
     let mut c = std::process::Command::new("git");
     c.arg("apply").args(flags).arg("-").current_dir(dir);
-    let env = vec![
+    // A service may apply the staging tree as root. Never take executable or
+    // config paths from a different caller when doing that privileged work.
+    let mut env = if uid == ctx.caller.uid && uid == rustix::process::geteuid().as_raw() {
+        crate::privs::pick_env(ctx, &["PATH", "GIT_CONFIG_GLOBAL"])
+    } else {
+        Vec::new()
+    };
+    env.extend([
         ("GIT_CEILING_DIRECTORIES".to_string(), dir.parent().unwrap_or(Path::new("/")).to_string_lossy().into_owned()),
         ("GIT_DIR".to_string(), "/nonexistent-layr".to_string()),
-    ];
+    ]);
     crate::privs::command_as(&mut c, uid, &env)?;
     c.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
     let mut ch = c.spawn()?;
