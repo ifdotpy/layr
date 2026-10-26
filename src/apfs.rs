@@ -797,13 +797,21 @@ fn each_parallel<T: Sync>(items: &[T], f: impl Fn(&T) -> Result<()> + Sync) -> R
 }
 /// True when a scanned tree needs file-by-file copies: special files, nested layers, or hard
 /// links (a recursive clone copies hard links as separate files).
-pub(crate) fn needs_file_copies(src: &Path, entries: &BTreeMap<String, ScanEntry>) -> bool {
+pub(crate) fn needs_file_copies(_src: &Path, entries: &BTreeMap<String, ScanEntry>) -> bool {
     let mut inodes = std::collections::HashSet::new();
-    entries.iter().any(|(p, e)| {
+    entries.iter().any(|(_, e)| {
         e.meta.ftype == crate::fsutil::FType::Special
-            || (!p.is_empty() && e.meta.is_dir() && is_subvolume(&src.join(p)))
             || (e.meta.is_file() && !inodes.insert((e.fingerprint.0, e.fingerprint.1)))
     })
+}
+
+/// Folders inside the tree that are trees of their own (nested layers).
+fn nested_layers<'a>(src: &Path, entries: &'a BTreeMap<String, ScanEntry>) -> Vec<&'a String> {
+    entries
+        .iter()
+        .filter(|(p, e)| !p.is_empty() && e.meta.is_dir() && is_subvolume(&src.join(p)))
+        .map(|(p, _)| p)
+        .collect()
 }
 
 /// Copy the complete tree `src` (scanned as `entries`) to the new path `dst`. A read-only copy
@@ -814,11 +822,32 @@ pub(crate) fn clone_complete(src: &Path, dst: &Path, entries: &BTreeMap<String, 
     }
     // Clone the tree at once when no entry needs file-by-file handling. The clone keeps flags,
     // attributes, and creation times.
+    let nested = nested_layers(src, entries);
     crate::sys::apfs_clone(src, dst)?;
     if readonly {
         crate::sys::apfs_immutable(dst, false)?;
     } else {
         seal(dst, false, false)?;
+    }
+    // A nested layer stays outside the tree: as in a file-by-file copy, its folder is empty and
+    // carries no marker. A line's `.git` is such a layer, so this keeps whole-tree clones for lines.
+    for rel in nested {
+        let (from, to) = (src.join(rel), dst.join(rel));
+        let m = fs::symlink_metadata(&from)?;
+        // A read-only clone keeps the flags of the parent; open it for this one change.
+        let parent = to.parent().expect("nested layer has a parent").to_path_buf();
+        use std::os::macos::fs::MetadataExt as MacMetadataExt;
+        let sealed = fs::symlink_metadata(&parent)?.st_flags() & libc::UF_IMMUTABLE != 0;
+        if sealed {
+            crate::sys::apfs_immutable(&parent, false)?;
+        }
+        delete_tree(&to)?;
+        fs::create_dir(&to)?;
+        keep_birthtime(&m, &to)?;
+        fs::set_permissions(&to, fs::Permissions::from_mode(m.mode() & 0o7777))?;
+        if sealed {
+            crate::sys::apfs_immutable(&parent, true)?;
+        }
     }
     // A folder clone gives the folders the time of the clone; a btrfs snapshot keeps them.
     // They get the times of the source, from its scan.
