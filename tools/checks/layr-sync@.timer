@@ -2,8 +2,9 @@
 Description=Sync Layr runner project %i
 
 [Timer]
-OnBootSec=15s
-OnUnitInactiveSec=15s
+OnBootSec=30s
+OnUnitInactiveSec=120s
+RandomizedDelaySec=30s
 Unit=layr-sync@%i.service
 
 [Install]

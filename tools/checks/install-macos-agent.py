@@ -45,7 +45,7 @@ for kind, command in (("checks", ["checks", "watch", "--json"]), ("fetch", ["fet
     if kind == "checks":
         config["KeepAlive"] = True
     else:
-        config["StartInterval"] = 15
+        config["StartInterval"] = 120
     path.write_bytes(plistlib.dumps(config))
     # Replacing this project's own agent is safe and makes installation repeatable.
     subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{label}"], capture_output=True)
