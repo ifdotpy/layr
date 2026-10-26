@@ -167,6 +167,8 @@ check('deny rule' in result['reason'], 'person deny rule overrides executor perm
 
 replica = dict(base, LAYR_ROOT=str(root / 'store' / 'replica-root'), LAYR_PAPER_KEY_FILE=str(root / 'store-paper'))
 run(['clone', 'file://' + str(root / 'archive'), 'replica', '-q'], replica)
+check(data(['--project', 'replica', 'config', '--get', 'access'], replica) == {f'user:{os.getuid()}': 'admin'},
+      'clone grants its caller local admin even when root would bypass the role check')
 
 bad_claim = submit('comment', change, 'Invalid claim must not apply.')
 body = json.loads((root / 'archive' / 'requests' / (bad_claim + '.json')).read_text())
