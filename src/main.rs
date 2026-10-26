@@ -54,6 +54,7 @@ mod storage;
 mod storage;
 mod store;
 mod store_remote;
+mod store_version;
 mod stream;
 #[allow(unsafe_code)]
 mod sys;
@@ -134,6 +135,24 @@ fn main() {
     {
         print!("{}", cmd::HELP);
         return;
+    }
+    match argv.first().map(String::as_str) {
+        Some("--version" | "version") => {
+            println!("layr version {}", env!("CARGO_PKG_VERSION"));
+            return;
+        }
+        None | Some("--help" | "-h" | "help") => {
+            print!("{}", cmd::HELP);
+            return;
+        }
+        Some("store-version") => match store_version::run(&store::default_root(), &argv[1..]) {
+            Ok(code) => std::process::exit(code),
+            Err(error) => {
+                eprintln!("layr store-version: {error:#}");
+                std::process::exit(128);
+            }
+        },
+        _ => {}
     }
     if let Some(command) = argv.first() {
         if !cmd::COMMANDS.contains(&command.as_str()) {
