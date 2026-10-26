@@ -968,9 +968,10 @@ pub fn clone_range(_src: &File, _off: u64, _len: u64, _dst: &File, _dst_off: u64
 pub fn send_command(parent: Option<&Path>, child: &Path) -> Result<Command> {
     let mut cmd = Command::new(std::env::current_exe()?);
     cmd.arg("__apfs-send").arg(child);
-    // With a parent the stream holds only the differences (`apfs_stream::send`).
-    if let Some(p) = parent {
-        cmd.arg(p).arg(clone_identity(p)?.0);
+    // With a parent the stream holds only the differences (`apfs_stream::send`). A parent that
+    // is no sealed tree gives a complete stream.
+    if let Some((p, id)) = parent.and_then(|p| clone_identity(p).ok().map(|(id, _)| (p, id))) {
+        cmd.arg(p).arg(id);
     }
     Ok(cmd)
 }
@@ -1100,17 +1101,18 @@ pub(crate) fn candidates_scanned(
         Some(if e.birth.1 == 0 { (1, e.fingerprint.0 as i64, e.fingerprint.1 as i64) } else { (0, e.birth.0, e.birth.1) })
     };
     let passes: [&dyn Fn(&ScanEntry) -> Option<(u8, i64, i64)>; 2] = [&by_clone, &by_birth];
-    for id_of in passes {
-        // An identity that more than one entry of either tree has is no evidence of a move:
-        // hard links, copies that keep the clone or the creation time, or equal times.
-        let mut count: std::collections::HashMap<(bool, (u8, i64, i64)), usize> = Default::default();
-        for (side, tree) in [(false, &a), (true, &b)] {
-            for (p, e) in tree.iter() {
-                if let Some(id) = id_of(e).filter(|_| !p.is_empty()) {
-                    *count.entry((side, id)).or_default() += 1;
-                }
+    // An identity that more than one entry of either tree has is no evidence of a move: hard
+    // links, copies that keep the clone or the creation time, or equal times. The kinds of the
+    // two keys differ, so one count serves both passes.
+    let mut count: std::collections::HashMap<(bool, (u8, i64, i64)), usize> = Default::default();
+    for (side, tree) in [(false, &a), (true, &b)] {
+        for e in tree.iter().filter(|(p, _)| !p.is_empty()).map(|(_, e)| e) {
+            for id in passes.iter().filter_map(|id_of| id_of(e)) {
+                *count.entry((side, id)).or_default() += 1;
             }
         }
+    }
+    for id_of in passes {
         let mut removed: BTreeMap<(u8, i64, i64), Vec<String>> = BTreeMap::new();
         let mut added: BTreeMap<(u8, i64, i64), Vec<String>> = BTreeMap::new();
         for (p, c) in &changes {

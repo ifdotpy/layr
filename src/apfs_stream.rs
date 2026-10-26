@@ -242,8 +242,27 @@ fn plan(parent: &Path, child: &Path) -> Result<Option<Plan>> {
         if x.meta.size != y.meta.size {
             return Ok(false);
         }
-        let shared = x.data.zip(y.data).is_some_and(|(d, e)| d.clone_id.is_some() && d.clone_id == e.clone_id);
-        Ok(shared || fs::read(parent.join(rel))? == fs::read(child.join(rel))?)
+        // A shared clone with valid change counters holds the same data, as in `candidates`.
+        let shared = x.fingerprint.0 == y.fingerprint.0
+            && x.data.zip(y.data).is_some_and(|(d, e)| {
+                d.generation.is_some() && e.generation.is_some() && d.clone_id.is_some() && d.clone_id == e.clone_id
+            });
+        if shared {
+            return Ok(true);
+        }
+        // Compare in blocks: a large file never sits in memory.
+        let (mut f, mut g) = (File::open(parent.join(rel))?, File::open(child.join(rel))?);
+        let (mut p, mut q) = (vec![0u8; 1 << 16], vec![0u8; 1 << 16]);
+        loop {
+            let n = f.read(&mut p)?;
+            if n == 0 {
+                return Ok(true);
+            }
+            g.read_exact(&mut q[..n])?;
+            if p[..n] != q[..n] {
+                return Ok(false);
+            }
+        }
     };
     let mut gone = Vec::new();
     let mut fresh = std::collections::BTreeSet::new();
@@ -273,21 +292,25 @@ fn plan(parent: &Path, child: &Path) -> Result<Option<Plan>> {
         remove.insert(g.clone());
         remove.extend(a.range(prefix.clone()..).map(|(k, _)| k).take_while(|k| k.starts_with(&prefix)).cloned());
     }
+    // The receiver removes and makes entries in their folders, which changes the folder times:
+    // those folders get their times again.
+    let touched: std::collections::BTreeSet<&str> =
+        remove.iter().chain(&fresh).map(|r| r.rsplit_once('/').map(|(d, _)| d).unwrap_or("")).collect();
     let mut meta = Vec::new();
     for (rel, y) in &b {
-        let full = child.join(rel);
-        let m = fs::symlink_metadata(&full)?;
-        let names =
-            |x: &Path, m: &fs::Metadata| -> Result<BTreeMap<Vec<u8>, Vec<u8>>> { Ok(stream_xattrs(x, m)?.into_iter().collect()) };
-        let new = names(&full, &m)?;
         if fresh.contains(rel) {
             meta.push((rel.clone(), Vec::new()));
             continue;
         }
         let Some(x) = a.get(rel) else { continue };
-        let pm = fs::symlink_metadata(parent.join(rel))?;
-        let old = names(&parent.join(rel), &pm)?;
-        let changed = x.meta.mode != y.meta.mode || (pm.mtime(), pm.mtime_nsec()) != (m.mtime(), m.mtime_nsec()) || old != new;
+        let names = |x: &Path| -> Result<BTreeMap<Vec<u8>, Vec<u8>>> {
+            Ok(stream_xattrs(x, &fs::symlink_metadata(x)?)?.into_iter().collect())
+        };
+        let (old, new) = (names(&parent.join(rel))?, names(&child.join(rel))?);
+        let changed = x.meta.mode != y.meta.mode
+            || (x.fingerprint.4, x.fingerprint.5) != (y.fingerprint.4, y.fingerprint.5)
+            || old != new
+            || touched.contains(rel.as_str());
         if changed {
             meta.push((rel.clone(), old.keys().filter(|k| !new.contains_key(*k)).cloned().collect()));
         }

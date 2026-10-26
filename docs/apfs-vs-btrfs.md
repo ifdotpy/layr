@@ -17,12 +17,14 @@ See [thin APFS states](apfs-thin-states.md) and the [measurements](../benchmarks
    With 10,000 files a new line is still about 2 times faster than `git worktree`.
    `status`, `add` and automatic states scan the working folder once, with several threads; btrfs gets changed paths
    from `send --no-data`. Sealed states keep their scan, and a folder clone keeps the times of its folders, so an
-   automatic state writes only the entries that changed.
+   automatic state writes only the entries that changed. Keeping the folder times costs a few calls per folder;
+   the clone itself already costs work per entry.
 3. **Weaker protection of history.** btrfs read-only subvolumes are kernel-enforced.
    APFS uses `UF_IMMUTABLE` on each file. The store owner can remove these flags, and setting them costs CPU per file.
    Without the root service this limit stays. Real protection needs the root service on a volume with ownership
    enabled: then root owns the states, and the line owner cannot change them.
 4. **Transfers.** A peer that has the parent state gets only the differences, as with btrfs.
+   A thin parent gets a view on both machines for the transfer.
    A tree with hard links is still sent complete. APFS sends have no other clone sources and no compressed
    version 2 streams.
 5. **Move detection.** btrfs keeps inode numbers between snapshots.
@@ -33,6 +35,8 @@ See [thin APFS states](apfs-thin-states.md) and the [measurements](../benchmarks
    (`README` and `Readme`) cannot exist together; Layr refuses them with an error. A store on a case-sensitive APFS volume accepts them.
    Device nodes, sockets and named pipes are not supported.
    Transfers refuse macOS access control lists and Linux security attributes.
+   A tree with hard links keeps them, as on btrfs, but each snapshot of it copies file by file and each send of it
+   is complete.
    APFS volume snapshots (`fs_snapshot_create`) return EPERM for a normal user.
 7. **More code, more cases.** Thin states need views, keyframes in `gc`, delayed deletion of bases,
    and removal of layers without a record. btrfs gets all of this from the file system.
