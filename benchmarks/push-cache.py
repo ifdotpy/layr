@@ -11,8 +11,7 @@ Run: python3 benchmarks/push-cache.py --workspace WORKSPACE before
      python3 benchmarks/push-cache.py --workspace WORKSPACE daily
 
 A fresh after comparison can use --run-id NAME for both after and daily. Keep
-separate Cargo target directories (or cargo clean -p layr --release between
-builds); copying older source mtimes can otherwise reuse a stale executable.
+separate Cargo target directories for the two source trees; copying older source mtimes can otherwise reuse a stale executable.
 The harness checks distinct binary hashes and expected cache formats. It writes
 JSONL measurements and sanitized request traces, never keys or token values.
 The daily TLS stand-in follows tests/t46-machine-bootstrap.sh with 5 ms/request.
@@ -33,6 +32,10 @@ def label_for(phase):return phase+('-'+args.run_id if phase=='after' and args.ru
 def archive_for(kind,phase):return fs/(kind+'-'+label_for(phase)+'-archive')
 
 def run(args,env=None,cwd=None,label=None):
+    if pathlib.Path(args[0])==base/'layr-after':
+        binary=(base/'layr-after').read_bytes()
+        assert b'pushed-v2.json.zst' in binary, 'new cache marker missing from after binary'
+        assert hashlib.sha256(binary).digest()!=hashlib.sha256((base/'layr-before').read_bytes()).digest(), 'after binary matches baseline'
     started=time.monotonic()
     with (base/(label+'.log' if label else 'command.log')).open('ab') as log:
         subprocess.run([str(x) for x in args],env=env,cwd=cwd,check=True,stdout=log,stderr=subprocess.STDOUT)
