@@ -16,7 +16,7 @@ def check(value,label):
 def run(args,env,success=True):
  cwd=pathlib.Path(env['LAYR_ROOT'])/'projects'/env['LAYR_PROJECT']/'lines'/env.get('LAYR_LINE','main') if env.get('LAYR_PROJECT') else root
  p=subprocess.run([binary,*args],env=env,cwd=cwd,text=True,capture_output=True,timeout=45)
- if success: assert p.returncode==0,(args,p.stderr)
+ if success: assert p.returncode==0,(args,p.stderr,project_requests[-12:],errors)
  return p
 def openssl(args): subprocess.run(['openssl',*args],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 openssl(['req','-x509','-newkey','rsa:2048','-nodes','-keyout',str(root/'tls-ca-key.pem'),'-out',str(root/'tls-ca.pem'),'-days','1','-subj','/CN=Signin test CA','-addext','basicConstraints=critical,CA:TRUE','-addext','keyUsage=critical,keyCertSign,cRLSign'])
@@ -123,8 +123,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
   if path.startswith('/v1/p/project/objects/'):
    target=root/'archive'/object_key
    if self.command=='GET':
+    if logical=='slots/paper.age': assert bearer=='v1.read.signinTest'
     self.reply(200,target.read_bytes()) if target.is_file() else self.reply(404,{})
     return
+   if self.command=='PUT' and logical.startswith(('records/','states/','index/')):
+    assert bearer=='v1.write.signinTest'
+    if target.exists(): self.reply(412,{});return
+    target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(raw);self.reply(201,{});return
    if self.command=='PUT' and logical.startswith('claims/'):
     assert bearer=='v1.write.signinTest' and body['s'] and body['r']['request']==logical.removeprefix('claims/').removesuffix('.json')
     if target.exists(): self.reply(412,{});return
@@ -209,6 +214,18 @@ try:
  check(not any(path.endswith('/slots') for method,path,query,grant,session in project_requests),'machine-only epoch clone never lists slots')
  check(stats['session']==before and not any(session for method,path,query,grant,session in project_requests),'machine-only epoch clone uses no person session')
  check(all(grant and urllib.parse.parse_qs(query)=={'epoch':[epoch]} for method,path,query,grant,session in project_requests if path.endswith(('/challenge','/token'))),'machine read-proof exchange keeps the grant and the current epoch')
+ # A new gateway pin can learn its paper recipient without substituting the write grant for a read proof.
+ paper_writer=dict(machine_only,LAYR_PROJECT='session-project',LAYR_LINE='main',LAYR_PAPER_KEY_FILE=str(root/'store.paper'))
+ project_requests.clear();before=stats['session']
+ run(['push','web','-q'],paper_writer)
+ paper_path='/v1/p/project/objects/slots/paper.age'
+ check(any(method=='GET' and path==paper_path and not grant and not session for method,path,query,grant,session in project_requests),'post-rotation push with a paper-key environment proves the root paper-slot read')
+ check(stats['session']==before and not any(session for method,path,query,grant,session in project_requests),'paper-key push uses the machine identity without a person session')
+ pin=json.loads(run(['config','--get','cloud.remote.web.store'],paper_writer).stdout)
+ check(bool(pin.get('paper_recipient')),'paper-key push pins the verified paper recipient')
+ project_requests.clear()
+ run(['push','web','-q'],paper_writer)
+ check(not any(path==paper_path for method,path,query,grant,session in project_requests),'a known paper recipient needs no repeated paper-slot read')
  fresh=dict(base,LAYR_PERSON_DIR=str(root/'fresh'),LAYR_PERSON_LOGIN='fresh@example.com',LAYR_GATEWAY_CA_FILE=str(root/'tls-ca.pem'))
  before=stats['session']
  run(['person','keys','--site',site,'--invite','fresh-invite','--paper-key-out',str(root/'fresh.paper')],fresh)
