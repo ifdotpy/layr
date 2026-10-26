@@ -2,7 +2,7 @@
 
 `layr checks watch` detects pending checks when sync introduces a change version
 or a head of a selected protected line. It executes them only on a machine that
-root has opted in with `layr config --local checks.runner true`. Otherwise it
+the machine administrator has opted in with `layr config --local checks.runner true`. Otherwise it
 only reports pending work. It scans the existing project database every
 five seconds; it does not fetch or push. Use the normal sync service to receive
 source states and publish attestations and logs. The first scan includes available
@@ -35,8 +35,8 @@ only. Fetch into an existing project never grants local access.
 | `checks.privileged` | `[]` | Explicit names permitted to execute as root |
 | `checks.platforms` | `{}` | Check names mapped to `linux` or `macos`; unset names run on either |
 | `checks.timeout` | `900` | Wall timeout and per-process CPU seconds; 1–86400 |
-| `checks.memory` | `4294967296` | Per-process hard address-space limit in bytes |
-| `checks.processes` | `256` | Hard process limit for the sandbox user |
+| `checks.memory` | `4294967296` | Linux per-process address-space limit; maximum file size on either platform |
+| `checks.processes` | `256` (Linux), `4096` (Mac) | Hard process limit for the sandbox user |
 | `checks.log-bytes` | `1048576` | Retained combined output bytes; at most 16 MiB |
 | `checks.runner` | `false` | Machine-local opt-in to execute checks; root on Linux, metadata owner on macOS, using `config --local` |
 | `checks.privileged-runner` | `false` | Additional machine-local opt-in to execute explicitly privileged checks |
