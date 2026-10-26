@@ -418,7 +418,7 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
                     // Revert only what the operation changed; later work stays.
                     (Some(before), Some(after)) if repo.p.has_state(after) => {
                         let cur = repo.scan(&l2)?;
-                        let later: BTreeSet<String> = changes::file_changes(&repo.state_root(after)?, &cur.path)?
+                        let later: BTreeSet<String> = changes::file_changes(&repo.state_src(after)?, &cur.path)?
                             .into_iter()
                             .flat_map(|c| [Some(c.path.clone()), c.old_path.clone()])
                             .flatten()
@@ -1978,8 +1978,8 @@ pub fn debug(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let h = here(ctx)?;
     match args.first().map(|s| s.as_str()) {
         Some("changes") if args.len() >= 3 => {
-            let a = h.repo.state_root(&revs::resolve(&h.repo, h.line.as_ref(), &args[1])?)?;
-            let b = h.repo.state_root(&revs::resolve(&h.repo, h.line.as_ref(), &args[2])?)?;
+            let a = h.repo.state_src(&revs::resolve(&h.repo, h.line.as_ref(), &args[1])?)?;
+            let b = h.repo.state_src(&revs::resolve(&h.repo, h.line.as_ref(), &args[2])?)?;
             for c in changes::candidates(&a, &b)? {
                 let k = |m: &Option<fsutil::Meta>| m.as_ref().map(|x| format!("{:?}", x.ftype)).unwrap_or("-".into());
                 outln!(
