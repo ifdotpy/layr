@@ -18,7 +18,7 @@ resumes it, and verifies that existing ciphertext objects are unchanged and all
 64 states are complete. It checks incremental file-type changes and corrupts a
 loose Git blob before exporting the original IDs again.
 
-`cargo test --workspace --locked`: 225 passed, 7 intentionally ignored.
+`cargo test --workspace --locked`: 228 passed, 7 intentionally ignored.
 The requested store suites pass: t19 (25), t22 (7), t23 (4), t35 (49), t42 (99).
 Git suites t03 (57), t08 (28), t17 (9) also pass. Counts are assertions, with zero
 failures. The lead owns the full-suite check after integration.
@@ -91,5 +91,48 @@ A tree-ID query using the final selective reader took 0.031 seconds and returned
 cache verification took 0.195 seconds in an earlier sample; full scans took
 9.35–13.01 seconds. These are wall-clock samples, not a controlled speedup claim.
 
-Final clone, incremental request counts, and real-size ID proof are recorded
-after the active benchmarks finish.
+## Real-size round-trip result
+
+The file-store round trip preserved every one of layr-studio's 7,965 original
+commit IDs. Both tips are `eec4c6d136da146a5d3d659575c1baf2d93849f8`; both final
+trees are `f73d8a3b174dae65889605159ff2e9d98657bb57`. Mirror `git fsck --full`
+passed. Clone took 1,808.32 seconds under the recorded host contention, with
+maximum RSS 1,414,556 KiB. Git mirror export took 99.59 seconds and fsck 7.09
+seconds. The encrypted store contains 15,005 objects totaling 367,301,433 bytes.
+The 392-commit store contains 759 objects totaling 6,099,639 bytes.
+
+[Raw file-store measurements](../benchmarks/git-history-20261026/file-results.jsonl)
+include counts, IDs, tree hashes, timings, sizes and peak process RSS.
+
+## Gateway and incremental requests
+
+The gateway benchmark uses a local TLS fixture matching the private object,
+proof and token routes, with 5 ms added to every request. It measures client
+transport behavior; it does not establish AWS or deployed-gateway performance.
+The 392 and 7,965 tests ran back to back. The full gateway pushes took 17.89 and
+974.48 seconds after preparing the secret detector once per push.
+
+The first 392-commit incremental push took 0.414 seconds: 18 GET, one POST and
+three PUT requests. Its fresh clone took 32.36 seconds and retained all original
+IDs plus the new commit with the expected parent and tree.
+
+The 7,965-commit fixture exposed the old 10,000-object listing limit after the
+full push published 15,000 objects. The client now requests pages of 1,000
+objects, bounds each response to 8 MiB and the aggregate to 100,000 objects, and
+rejects duplicate keys and repeated cursors. Public and private routes retain
+their authentication behavior. Server pagination is a separately owned change.
+
+A regular writer now trusts its metadata for previously completed immutable
+uploads and lists only new state prefixes. The collector never removes complete
+state trees. Missing parent caches are hydrated and verified when needed. The
+file backend starts listing in the requested prefix directory, which avoids
+scanning sibling states for every new state.
+
+Resuming the failed one-commit gateway push took 2.607 seconds: 17 GET, one POST,
+and two PUT requests. Its record segment had already published before the old
+limit failed, so the retry uploaded only the file part and state tree. Listing
+prefixes were `keys/`, the writer's own record prefix, and the single new state
+prefix. It did not list the complete state history.
+
+The fresh gateway clone and a clean additional incremental push are recorded
+when the active fixture finishes.
