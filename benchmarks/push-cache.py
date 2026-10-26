@@ -66,8 +66,14 @@ def measure(kind,phase,binary):
     target=project/'meta/remote-stores'/hashlib.sha256(('file://'+str(archive)).encode()).hexdigest()
     files=[p for p in target.rglob('*') if p.is_file() and (p.parent.name=='pushed' or p.name in ('pushed.json','pushed-v2.json.zst','push-cache.sqlite3'))]
     assert (target/'pushed-v2.json.zst').is_file() if phase=='after' else (target/'pushed.json').is_file(), 'unexpected cache format'
-    result={'run_id':args.run_id,'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),'fixture':kind,'phase':phase,'seconds':seconds,'snapshot_states':sum(1 for p in (project/'states').iterdir() if p.is_dir()),'commits':int(subprocess.check_output(['git','-C',str(source),'rev-list','--count','HEAD'])),'cache_bytes':sum(p.stat().st_size for p in files),'cache_allocated_bytes':sum(p.stat().st_blocks*512 for p in files),'cache_files':len(files),'encrypted_store_bytes':size(archive),'cache_path':str(target),'source_tip':subprocess.check_output(['git','-C',str(source),'rev-parse','HEAD']).decode().strip(),'time_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())}
+    result={'run_id':args.run_id,'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),'fixture':kind,'phase':phase,'seconds':seconds,'snapshot_states':sum(1 for p in (project/'states').iterdir() if p.is_dir()),'commits':int(subprocess.check_output(['git','-C',str(source),'rev-list','--count','HEAD'])),'uploaded_states':sum(1 for p in (archive/'states').rglob('*.tree.age')),'cache_bytes':sum(p.stat().st_size for p in files),'cache_allocated_bytes':sum(p.stat().st_blocks*512 for p in files),'cache_files':len(files),'encrypted_store_bytes':size(archive),'cache_path':str(target),'source_tip':subprocess.check_output(['git','-C',str(source),'rev-parse','HEAD']).decode().strip(),'time_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())}
     result['cache_percent']=100*result['cache_bytes']/result['encrypted_store_bytes']
+    if phase=='after':
+        references=[json.loads(line) for line in results.read_text().splitlines() if line]
+        reference=next(row for row in reversed(references) if row['fixture']==kind and row['phase']=='before' and row.get('run_id','')==args.run_id)
+        assert result['uploaded_states']==reference['uploaded_states'], result
+        assert result['encrypted_store_bytes']<=reference['encrypted_store_bytes']*1.03, result
+        assert result['cache_percent']<10, result
     with results.open('a') as out:out.write(json.dumps(result)+'\n')
     print(json.dumps(result),flush=True)
 
