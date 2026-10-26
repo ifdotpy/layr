@@ -1248,12 +1248,34 @@ fn copy_folder(ctx: &Ctx, src: &std::path::Path, dst: &std::path::Path, include_
     })?;
     // On a store volume that ignores case, README and Readme would become one file.
     fsutil::refuse_case_collisions(dst, entries.iter().map(|(rel, _)| rel.as_str()))?;
+    // Names of one file stay names of one file: the first is copied, the others link to it.
+    let mut first: std::collections::HashMap<(u64, u64), String> = Default::default();
     for (rel, m) in entries {
         if m.is_dir() {
             fsutil::make_parents(dst, &format!("{rel}/x"), None)?;
             continue;
         }
-        crate::privs::as_caller_fs(ctx, || fsutil::copy_entry(src, &rel, dst, &rel, None))?;
+        let link = if m.is_file() {
+            use std::os::unix::fs::MetadataExt;
+            let lm = crate::privs::as_caller_fs(ctx, || Ok(std::fs::symlink_metadata(fsutil::safe_join(src, &rel)?)?))?;
+            (lm.nlink() > 1).then(|| (lm.dev(), lm.ino()))
+        } else {
+            None
+        };
+        match link.and_then(|k| first.get(&k).map(|f| (k, f.clone()))) {
+            Some((_, f)) => {
+                fsutil::make_parents(dst, &rel, None)?;
+                crate::privs::as_caller_fs(ctx, || {
+                    Ok(std::fs::hard_link(fsutil::safe_join(dst, &f)?, fsutil::safe_join(dst, &rel)?)?)
+                })?;
+            }
+            None => {
+                crate::privs::as_caller_fs(ctx, || fsutil::copy_entry(src, &rel, dst, &rel, None))?;
+                if let Some(k) = link {
+                    first.insert(k, rel.clone());
+                }
+            }
+        }
         n += 1;
     }
     Ok(n)
