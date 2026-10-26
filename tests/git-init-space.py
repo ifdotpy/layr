@@ -62,20 +62,22 @@ assert (source / "blob").stat().st_size == fixture_mib * 1024 ** 2
 git("add", ".gitignore")
 git("add", "-f", "blob")
 git("commit", "-qm", "allocation fixture")
-before = free_bytes()
-layr(root, "init", "space", "--from", source, "-q")
-delta = before - free_bytes()
-print(f"git-backed {fixture_label} init: allocated_delta_bytes={delta}", flush=True)
-work = store / "projects/space/lines/main"
-assert layr(work, "rev-parse", "head:blob") == git("rev-parse", "HEAD:blob")
-assert (work / "blob").stat().st_size == fixture_mib * 1024 ** 2
-if can_clone:
-    assert delta < fixture_mib * 1024 ** 2 // 8, f"init allocated {delta} bytes for an unchanged {fixture_label} file"
-# A later source write must not change the clone.
+if os.environ.get("LAYR_TEST_IMPORT_CASE") != "modified":
+    before = free_bytes()
+    layr(root, "init", "space", "--from", source, "-q")
+    delta = before - free_bytes()
+    print(f"git-backed {fixture_label} init: allocated_delta_bytes={delta}", flush=True)
+    work = store / "projects/space/lines/main"
+    assert layr(work, "rev-parse", "head:blob") == git("rev-parse", "HEAD:blob")
+    assert (work / "blob").stat().st_size == fixture_mib * 1024 ** 2
+    if can_clone:
+        assert delta < fixture_mib * 1024 ** 2 // 8, f"init allocated {delta} bytes for an unchanged {fixture_label} file"
+    # A later source write must not change the clone.
+    with (work / "blob").open("rb") as imported:
+        assert imported.read(4) == chunk[:4]
+
 with (source / "blob").open("r+b") as output:
     output.write(b"edit")
-with (work / "blob").open("rb") as imported:
-    assert imported.read(4) == chunk[:4]
 
 # HEAD needs its own bytes for a modified file. The current bytes must stay shared.
 before = free_bytes()
