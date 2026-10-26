@@ -72,7 +72,14 @@ state. The cursor advances only after the state tree publishes. A restart reads
 authenticated trees only for publications beyond that cursor. Pending part
 entries are recorded before upload; recovery decrypts each part and verifies its
 file hashes through the normal reader before reusing it. Missing or corrupt
-parts are discarded from the journal. Old unreferenced parts are eligible for
+parts are discarded from the journal. Validated pending hashes retain their
+source object and server modification time until a published tree protects that
+object; they do not enter the durable published-content index earlier. Recovery
+reuses an unpublished part only while it is less than 12 hours old. A new tree
+must publish before the earliest of its attempt start and any reused unpublished
+part's server modification time, plus 23 hours. This preserves a one-hour margin
+before the 24-hour collection deadline, including across repeated crashes.
+Old unreferenced parts are eligible for
 the store's 24-hour garbage collection grace period; file-backend `.put-*`
 temporaries are private publication files and are excluded from object listings.
 

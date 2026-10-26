@@ -27,6 +27,7 @@ pub(super) struct Stats {
     pub state_commit_seconds: f64,
     pub seed_states: usize,
     pub seed_pending_parts: usize,
+    pub seed_metadata_lists: usize,
     pub seed_reader_gets: usize,
     pub seed_seconds: f64,
     pub seed_started_ms: i64,
@@ -35,26 +36,33 @@ pub(super) struct Stats {
 pub(super) struct Pending {
     pub object: String,
     pub entries: Vec<Entry>,
-    pub created: i64,
 }
 pub(super) struct Journal {
     db: Connection,
     path: PathBuf,
     pub stats: Stats,
+    pub resuming: bool,
     warned: bool,
 }
 impl Journal {
     pub fn open(dir: &Path) -> Result<Self> {
         use std::os::unix::fs::OpenOptionsExt;
         let path = dir.join("push-journal.sqlite3");
+        let resuming = path.exists();
         std::fs::OpenOptions::new().write(true).create(true).truncate(false).mode(0o600).open(&path)?;
         let db = Connection::open(&path)?;
         db.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;
             CREATE TABLE IF NOT EXISTS hashes (sha TEXT PRIMARY KEY, links BLOB NOT NULL) WITHOUT ROWID;
             CREATE TABLE IF NOT EXISTS completed (state TEXT PRIMARY KEY, attempt TEXT NOT NULL, depth INTEGER NOT NULL) WITHOUT ROWID;
-            CREATE TABLE IF NOT EXISTS pending (object TEXT PRIMARY KEY, state TEXT NOT NULL, attempt TEXT NOT NULL, entries BLOB NOT NULL, created INTEGER NOT NULL) WITHOUT ROWID;")?;
+            CREATE TABLE IF NOT EXISTS pending (object TEXT PRIMARY KEY, state TEXT NOT NULL, attempt TEXT NOT NULL, entries BLOB NOT NULL, modified INTEGER) WITHOUT ROWID;")?;
+        if db.query_row("SELECT count(*) FROM pragma_table_info('pending') WHERE name='modified'", [], |row| {
+            row.get::<_, usize>(0)
+        })? == 0
+        {
+            db.execute_batch("ALTER TABLE pending RENAME COLUMN created TO modified; UPDATE pending SET modified=NULL;")?;
+        }
         let peak_bytes = std::fs::metadata(&path)?.len();
-        Ok(Self { db, path, stats: Stats { peak_bytes, ..Stats::default() }, warned: false })
+        Ok(Self { db, path, stats: Stats { peak_bytes, ..Stats::default() }, resuming, warned: false })
     }
     pub fn hashes(&self) -> Result<BTreeMap<String, Vec<Link>>> {
         let mut result = BTreeMap::new();
@@ -75,15 +83,11 @@ impl Journal {
     }
     pub fn pending(&self) -> Result<Vec<Pending>> {
         let mut result = Vec::new();
-        let mut query = self.db.prepare("SELECT object, entries, created FROM pending ORDER BY object")?;
+        let mut query = self.db.prepare("SELECT object, entries FROM pending ORDER BY object")?;
         let mut rows = query.query([])?;
         while let Some(row) = rows.next()? {
             let bytes: Vec<u8> = row.get(1)?;
-            result.push(Pending {
-                object: row.get(0)?,
-                entries: serde_json::from_slice(&zst::decompress(&bytes, None)?)?,
-                created: row.get(2)?,
-            });
+            result.push(Pending { object: row.get(0)?, entries: serde_json::from_slice(&zst::decompress(&bytes, None)?)? });
         }
         Ok(result)
     }
@@ -119,25 +123,37 @@ impl Journal {
         let object = super::format::data_name(state, attempt, part);
         let bytes = zst::compress(&serde_json::to_vec(entries)?, None)?;
         self.transaction(false, |tx| {
-            tx.execute(
-                "INSERT OR REPLACE INTO pending VALUES (?1,?2,?3,?4,?5)",
-                params![object, state, attempt, bytes, crate::ids::now_ms()],
-            )?;
+            tx.execute("INSERT OR REPLACE INTO pending VALUES (?1,?2,?3,?4,NULL)", params![object, state, attempt, bytes])?;
             Ok(())
         })
     }
-    pub fn resolve_part(&mut self, object: &str, hashes: &BTreeMap<String, Vec<Link>>) -> Result<()> {
+    pub fn validate_part(&mut self, object: &str, modified: i64) -> Result<()> {
         self.transaction(false, |tx| {
-            Self::insert_hashes(tx, hashes)?;
+            tx.execute("UPDATE pending SET modified=?2 WHERE object=?1", params![object, modified])?;
+            Ok(())
+        })
+    }
+    pub fn discard_part(&mut self, object: &str) -> Result<()> {
+        self.transaction(false, |tx| {
             tx.execute("DELETE FROM pending WHERE object=?1", [object])?;
             Ok(())
         })
     }
-    pub fn checkpoint(&mut self, state: &str, attempt: &str, depth: usize, hashes: &BTreeMap<String, Vec<Link>>) -> Result<()> {
+    pub fn checkpoint(
+        &mut self,
+        state: &str,
+        attempt: &str,
+        depth: usize,
+        hashes: &BTreeMap<String, Vec<Link>>,
+        protected: &[String],
+    ) -> Result<()> {
         self.transaction(true, |tx| {
             Self::insert_hashes(tx, hashes)?;
             tx.execute("INSERT OR REPLACE INTO completed VALUES (?1,?2,?3)", params![state, attempt, depth])?;
             tx.execute("DELETE FROM pending WHERE state=?1 AND attempt=?2", params![state, attempt])?;
+            for object in protected {
+                tx.execute("DELETE FROM pending WHERE object=?1", [object])?;
+            }
             Ok(())
         })
     }

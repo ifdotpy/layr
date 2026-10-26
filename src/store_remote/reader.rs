@@ -581,7 +581,10 @@ pub(super) fn gc(store: &Store, dry_run: bool) -> Result<Vec<String>> {
         if object.modified >= cutoff || referenced.contains(&object.key) {
             continue;
         }
-        // Attempts cannot publish after 24 hours, so an old orphan cannot become complete now.
+        // Writers stop at +23h, using the earliest of the new attempt start and
+        // server modified times of reused unpublished parts. Pending hashes retain
+        // those times across crashes until a referencing tree publishes. Thus an
+        // unreferenced part older than 24h cannot acquire a new published reference.
         if store.backend.get(&format::tree_name(&state, &attempt))?.is_some() {
             continue;
         }
