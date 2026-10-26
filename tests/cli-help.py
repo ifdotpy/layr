@@ -48,7 +48,7 @@ for store in (root / "absent", existing):
     assert result.returncode == 1 and not result.stdout, result
     assert fingerprint(store) == before, "help after -- changed the store"
     checks += 1
-grep_root = root / "grep-store"
+grep_root = root / "store"
 grep_source = root / "grep-source"
 grep_source.mkdir()
 (grep_source / "file").write_text("needle\n")
