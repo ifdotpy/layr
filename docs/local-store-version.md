@@ -31,7 +31,8 @@ Example output:
   "binary": {"format":1,"version":"0.4.0","build":"<source identity>"},
   "store": {"format":1,"version":"0.4.0","build":"<creator identity>"},
   "compatible": true,
-  "state": "compatible"
+  "state": "compatible",
+  "upgrade": null
 }
 ```
 
@@ -50,6 +51,15 @@ A malformed or unreadable marker returns status 128.
 | `incompatible` | The format numbers differ. | No. |
 
 `store` is null for absent, empty, and legacy roots.
+Legacy roots and explicit format 0 markers report this supported upgrade:
+
+```json
+{"metadataOnly":true,"fromFormat":0,"toFormat":1}
+```
+
+Other states report `upgrade: null`.
+This classification describes changes to the version marker and its lock file.
+The explicit upgrade does not change machine identity files or project data.
 
 ## Upgrade explicitly
 
@@ -60,7 +70,9 @@ Then run:
 layr --root /path/to/store store-version --upgrade
 ```
 
-The command adopts an unversioned store as format 1.
+The command adopts a nonempty unversioned store as format 1.
+An absent or empty root refuses this command without a write.
+A normal command initializes an empty root.
 It also accepts an explicit format 0 marker.
 It preserves the existing store data and records the current binary identity.
 The project database retains its existing schema migration mechanism.
@@ -70,7 +82,11 @@ Every open store holds a shared lease on `.layr-version.lock`.
 The daemon holds this lease for its lifetime.
 An upgrade requires an exclusive lease and refuses an active store.
 The binary rechecks the marker after it acquires the lease.
-Store initialization holds an exclusive lease until the machine identity is complete.
+Store initialization also holds an exclusive `.layr-machine.lock` lease through the identity read.
+It applies even when a format marker already exists.
+Complete identity files publish once through an atomic hard link.
+An existing ID, name, or key is never replaced.
+A missing key with existing project data refuses access and requires identity restoration.
 
 The client and daemon exchange their format descriptors before a command uses the daemon.
 The exchange uses the same connection as the command.

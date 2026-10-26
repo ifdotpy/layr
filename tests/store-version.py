@@ -34,11 +34,17 @@ def tree(store):
 absent = root / "absent"
 report = inspect(absent)
 assert report["state"] == "absent" and report["compatible"] and report["store"] is None
-assert not absent.exists(), "inspection creates no root"
+assert report["upgrade"] is None
+run(absent, "store-version", "--upgrade", code=128)
+assert not absent.exists(), "inspection and a refused upgrade create no root"
 store = root / "store"
 store.mkdir(exist_ok=True)
 before = tree(store)
 assert inspect(store)["state"] == "empty"
+assert inspect(store)["upgrade"] is None
+result = run(store, "store-version", "--upgrade", code=128)
+assert "the store is empty" in result.stderr
+assert tree(store) == before, "an empty-root upgrade creates no marker or lock"
 assert tree(store) == before, "inspection creates no marker or lock"
 run(store, "--version")
 run(store, "--help")
@@ -74,6 +80,7 @@ for number in (0, 2, 999):
             assert text in result.stderr, (text, result.stderr)
         assert tree(store) == before, "incompatible access changed the store"
     assert not inspect(store)["compatible"]
+    assert inspect(store)["upgrade"] == ({"metadataOnly": True, "fromFormat": 0, "toFormat": 1} if number == 0 else None)
     assert tree(store) == before
     if number > 1:
         run(store, "store-version", "--upgrade", code=128)
@@ -85,6 +92,7 @@ legacy.mkdir()
 (legacy / "evidence").write_text("legacy bytes\n")
 before = tree(legacy)
 assert inspect(legacy)["state"] == "legacy"
+assert inspect(legacy)["upgrade"] == {"metadataOnly": True, "fromFormat": 0, "toFormat": 1}
 result = run(legacy, "projects", code=128)
 assert "format 0" in result.stderr and "--upgrade" in result.stderr
 assert tree(legacy) == before
