@@ -1,0 +1,1448 @@
+{
+  "measured_at": "2026-10-26T14:24:37.180317+00:00",
+  "status": "automatic_acceptance_complete",
+  "tested_code": "e74ceff3e74babd8bf24e2a06c25ec600deb64f9",
+  "branch_tip_at_measurement": "a9de38979db4fd79bff28abd623c0c0f2c68c29c",
+  "local": {
+    "git": "97bcb6a",
+    "source": "01a177b9-4099-73d7-9341-6f4bbf0d333d",
+    "disposable_main": "01a177b9-4099-73d7-9341-6f4bbf0d333d",
+    "checks": [
+      {
+        "id": "01a177be-6fb4-72a9-9c9e-3792d7cecfc2",
+        "machine": "01a17725-e2e4-72d8-9de9-95d6d32eb719",
+        "sha256": "d790628fa1b96b4320e07141ddddc165866c23f230025e2655cd45285bcfedda",
+        "check": {
+          "argv": [
+            "sh",
+            "-c",
+            "bash tools/checks/apfs.sh"
+          ],
+          "command": "bash tools/checks/apfs.sh",
+          "duration_ms": 294458,
+          "executor": true,
+          "exit": 0,
+          "limits": {
+            "log_bytes": 16777216,
+            "memory": 8589934592,
+            "processes": 4096,
+            "timeout": 7200
+          },
+          "log_ref": "derived/check-v1/01a177be-6f8a-76c4-b9ab-0b9fa8903197",
+          "name": "apfs",
+          "output_state": "01a177be-6f8a-76c4-b9ab-0b9fa8903197",
+          "privileged": false,
+          "state": "01a177b9-4099-73d7-9341-6f4bbf0d333d",
+          "truncated": false
+        },
+        "retained_log": {
+          "bytes": 44333,
+          "sha256": "65e4f3dde7f6d649ccdc1c23b2f65b0d9a91aa963dac9558a4ff7d9479b5dc73",
+          "summary": [
+            "test result: ok. 131 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 26.62s",
+            "apfs-local.sh: 26 passed, 0 failed",
+            "t01-basic.sh: 76 passed, 0 failed",
+            "t02-merge.sh: 50 passed, 0 failed",
+            "t03-git.sh: 57 passed, 0 failed",
+            "t05-transfer.sh: 10 passed, 0 failed",
+            "t06-sync.sh: 16 passed, 0 failed",
+            "t08-gitcompat.sh: 28 passed, 0 failed",
+            "t01-basic.sh: 76 passed, 0 failed",
+            "t02-merge.sh: 50 passed, 0 failed",
+            "t03-git.sh: 57 passed, 0 failed"
+          ]
+        }
+      },
+      {
+        "id": "01a177d0-a023-7113-b9fb-ab192649faa8",
+        "machine": "01a17736-70f4-744f-a59b-8685f3151eff",
+        "sha256": "9fc2461f47596979959dcd37ba4612a8e482d9c99ddb343538bbfd398246afeb",
+        "check": {
+          "argv": [
+            "sh",
+            "-c",
+            "bash tools/checks/integration.sh"
+          ],
+          "command": "bash tools/checks/integration.sh",
+          "duration_ms": 472130,
+          "executor": true,
+          "exit": 0,
+          "limits": {
+            "log_bytes": 16777216,
+            "memory": 8589934592,
+            "processes": 4096,
+            "timeout": 7200
+          },
+          "log_ref": "derived/check-v1/01a177d0-a010-70cc-a1e1-db4b7bf92ab1",
+          "name": "integration",
+          "output_state": "01a177d0-a010-70cc-a1e1-db4b7bf92ab1",
+          "privileged": true,
+          "state": "01a177b9-4099-73d7-9341-6f4bbf0d333d",
+          "truncated": false
+        },
+        "retained_log": {
+          "bytes": 23774,
+          "sha256": "dca3dd2950f2acd16302f6e8ce1e6bd68da380424f384f6a094cb24055866f0f",
+          "summary": [
+            "test result: ok. 101 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 1.33s",
+            "t01-basic.sh: 76 passed, 0 failed",
+            "t02-merge.sh: 50 passed, 0 failed",
+            "t03-git.sh: 57 passed, 0 failed",
+            "t04-undo-gc.sh: 31 passed, 0 failed",
+            "t05-transfer.sh: 10 passed, 0 failed",
+            "t06-sync.sh: 16 passed, 0 failed",
+            "t07-service.sh: 31 passed, 0 failed",
+            "t08-gitcompat.sh: 28 passed, 0 failed",
+            "t09-caches.sh: 9 passed, 0 failed",
+            "t10-review.sh: 11 passed, 0 failed",
+            "t11-security.sh: 31 passed, 0 failed",
+            "t12-audit.sh: 19 passed, 0 failed",
+            "t13-access.sh: 78 passed, 0 failed",
+            "t14-warm-caches.sh: 27 passed, 0 failed",
+            "t15-regenerable.sh: 41 passed, 0 failed",
+            "t16-overlays.sh: 148 passed, 0 failed",
+            "t16-performance.sh: 7 passed, 0 failed",
+            "t17-git-store.sh: 9 passed, 0 failed",
+            "t17-sync-storage.sh: 11 passed, 0 failed",
+            "t18-core.sh: 136 passed, 0 failed",
+            "t18-remotes.sh: 52 passed, 0 failed",
+            "t19-remote-store.sh: 25 passed, 0 failed",
+            "t20-guard.sh: 41 passed, 0 failed",
+            "t20-merge-cloud.sh: 56 passed, 0 failed",
+            "t20-queue.sh: 76 passed, 0 failed",
+            "t20-store-peer.sh: 10 passed, 0 failed",
+            "t21-desk-import.sh: 18 passed, 0 failed",
+            "t21-ref-protect.sh: 28 passed, 0 failed",
+            "t22-store-trust.sh: 7 passed, 0 failed",
+            "t23-store-portable-peer.sh: 4 passed, 0 failed",
+            "t23-views.sh: 55 passed, 0 failed",
+            "t24-store-partial.sh: 11 passed, 0 failed",
+            "t28-disk.sh: 1 passed, 0 failed",
+            "t29-store-pin.sh: 1 passed, 0 failed",
+            "t30-oci.sh: 44 passed, 0 failed",
+            "t32-probes.sh: 34 passed, 0 failed",
+            "t33-polish.sh: 49 passed, 0 failed",
+            "t34-person.sh: 1 passed, 0 failed",
+            "t35-overlay-sync.sh: 49 passed, 0 failed",
+            "t36-aws-profile.sh: 14 passed, 0 failed",
+            "t37-model.sh: 47 passed, 0 failed",
+            "t38-screens.sh: 31 passed, 0 failed",
+            "t39-hidden-overlays.sh: 88 passed, 0 failed",
+            "t40-store-index.sh: 24 passed, 0 failed",
+            "t41-requests.sh: 60 passed, 0 failed",
+            "t42-public.sh: 99 passed, 0 failed",
+            "t43-checks.sh: 44 passed, 0 failed",
+            "61 passed, 0 failed",
+            "t45-signin.sh: 34 passed, 0 failed",
+            "t46-machine-bootstrap.sh: 17 passed, 0 failed",
+            "t47-release-files: 37 passed, 0 failed"
+          ]
+        }
+      },
+      {
+        "id": "01a177d3-9904-70a2-b67b-8c7f8e47b6db",
+        "machine": "01a17736-70f4-744f-a59b-8685f3151eff",
+        "sha256": "e34a711750e9935026a3013dc6366c76c3406b835302177c35d83c8289f1eca0",
+        "check": {
+          "argv": [
+            "sh",
+            "-c",
+            "bash tools/checks/overlayfs.sh ext4"
+          ],
+          "command": "bash tools/checks/overlayfs.sh ext4",
+          "duration_ms": 194748,
+          "executor": true,
+          "exit": 0,
+          "limits": {
+            "log_bytes": 16777216,
+            "memory": 8589934592,
+            "processes": 4096,
+            "timeout": 7200
+          },
+          "log_ref": "derived/check-v1/01a177d3-98f4-746e-870c-2c8c947832df",
+          "name": "overlayfs-ext4",
+          "output_state": "01a177d3-98f4-746e-870c-2c8c947832df",
+          "privileged": true,
+          "state": "01a177b9-4099-73d7-9341-6f4bbf0d333d",
+          "truncated": false
+        },
+        "retained_log": {
+          "bytes": 32468,
+          "sha256": "7a1e57c6d22dd2db848a2b77d765f3c514ae8f518f08a485017b071055d48753",
+          "summary": [
+            "test result: ok. 116 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.78s",
+            "overlayfs-caches.sh: 12 passed, 0 failed",
+            "t01-basic.sh: 76 passed, 0 failed",
+            "t02-merge.sh: 50 passed, 0 failed",
+            "t03-git.sh: 57 passed, 0 failed",
+            "t05-transfer.sh: 10 passed, 0 failed",
+            "t06-sync.sh: 16 passed, 0 failed",
+            "t07-service.sh: 28 passed, 0 failed",
+            "t08-gitcompat.sh: 28 passed, 0 failed",
+            "t11-security.sh: 31 passed, 0 failed",
+            "t13-access.sh: 78 passed, 0 failed",
+            "t16-overlays.sh: 148 passed, 0 failed"
+          ]
+        }
+      },
+      {
+        "id": "01a177d5-afcf-71a9-b3c7-0d2e835a5b77",
+        "machine": "01a17736-70f4-744f-a59b-8685f3151eff",
+        "sha256": "82adb548cd702d32dd4a7eeded4cb0cda4acdbf109126e3638df1f0cb0fe3769",
+        "check": {
+          "argv": [
+            "sh",
+            "-c",
+            "bash tools/checks/overlayfs.sh xfs"
+          ],
+          "command": "bash tools/checks/overlayfs.sh xfs",
+          "duration_ms": 136550,
+          "executor": true,
+          "exit": 0,
+          "limits": {
+            "log_bytes": 16777216,
+            "memory": 8589934592,
+            "processes": 4096,
+            "timeout": 7200
+          },
+          "log_ref": "derived/check-v1/01a177d5-afc6-709f-9f00-2b10f58563a1",
+          "name": "overlayfs-xfs",
+          "output_state": "01a177d5-afc6-709f-9f00-2b10f58563a1",
+          "privileged": true,
+          "state": "01a177b9-4099-73d7-9341-6f4bbf0d333d",
+          "truncated": false
+        },
+        "retained_log": {
+          "bytes": 32182,
+          "sha256": "9b8d9022e1af8ba1e99340ea68464fad123a3ee88c2165d3e7a0ddb2c5e87589",
+          "summary": [
+            "test result: ok. 116 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.40s",
+            "overlayfs-caches.sh: 12 passed, 0 failed",
+            "t01-basic.sh: 76 passed, 0 failed",
+            "t02-merge.sh: 50 passed, 0 failed",
+            "t03-git.sh: 57 passed, 0 failed",
+            "t05-transfer.sh: 10 passed, 0 failed",
+            "t06-sync.sh: 16 passed, 0 failed",
+            "t07-service.sh: 28 passed, 0 failed",
+            "t08-gitcompat.sh: 28 passed, 0 failed",
+            "t11-security.sh: 31 passed, 0 failed",
+            "t13-access.sh: 78 passed, 0 failed",
+            "t16-overlays.sh: 148 passed, 0 failed"
+          ]
+        }
+      },
+      {
+        "id": "01a177d8-4600-7492-967d-614e29f4cd74",
+        "machine": "01a17736-70f4-744f-a59b-8685f3151eff",
+        "sha256": "f1e288850e07c044d7a583af20e98c64f0fe249c642b74fd0e803a3711f935d9",
+        "check": {
+          "argv": [
+            "sh",
+            "-c",
+            "bash tools/checks/unit.sh"
+          ],
+          "command": "bash tools/checks/unit.sh",
+          "duration_ms": 169473,
+          "executor": true,
+          "exit": 0,
+          "limits": {
+            "log_bytes": 16777216,
+            "memory": 8589934592,
+            "processes": 4096,
+            "timeout": 7200
+          },
+          "log_ref": "derived/check-v1/01a177d8-45b6-7222-96aa-4db1545aca39",
+          "name": "unit",
+          "output_state": "01a177d8-45b6-7222-96aa-4db1545aca39",
+          "privileged": false,
+          "state": "01a177b9-4099-73d7-9341-6f4bbf0d333d",
+          "truncated": false
+        },
+        "retained_log": {
+          "bytes": 31422,
+          "sha256": "a537fdf3045f80acdb150d71b351a3f5313dd530d964e51c16f850ab02b54765",
+          "summary": [
+            "test result: ok. 101 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 9.05s",
+            "test result: ok. 61 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s",
+            "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s",
+            "test result: ok. 54 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 2.58s",
+            "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+            "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+            "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+          ]
+        }
+      }
+    ]
+  },
+  "minimal_cloud_transport": {
+    "project": "m1-move",
+    "url": "layr+https://cloud.layr.ws/m1-move",
+    "identities": {
+      "mac": "01a17725-e2e4-72d8-9de9-95d6d32eb719",
+      "linux": "01a17736-70f4-744f-a59b-8685f3151eff"
+    },
+    "records": [
+      {
+        "machine": "01a17725-e2e4-72d8-9de9-95d6d32eb719",
+        "sequence": 8,
+        "record_id": "01a177da-b87a-779b-91bb-9e95a98f20d6",
+        "project": "01a177aa-a7a5-716c-8774-7f165724c16b",
+        "sha256": "07bfab1cac42593aa8a0e3db76c17be4e6ba2aef3f2478c991c83d0f56f55b7c",
+        "check": {
+          "argv": [
+            "sh",
+            "-c",
+            "true"
+          ],
+          "command": "true",
+          "duration_ms": 62,
+          "executor": true,
+          "exit": 0,
+          "limits": {
+            "log_bytes": 1048576,
+            "memory": 4294967296,
+            "processes": 4096,
+            "timeout": 900
+          },
+          "log_ref": "derived/check-v1/01a177da-b85d-71b4-bbc6-d4923d367c1a",
+          "name": "m1",
+          "output_state": "01a177da-b85d-71b4-bbc6-d4923d367c1a",
+          "privileged": false,
+          "state": "01a177aa-aa04-7598-a468-e38694df03f8",
+          "truncated": false
+        }
+      },
+      {
+        "machine": "01a17736-70f4-744f-a59b-8685f3151eff",
+        "sequence": 9,
+        "record_id": "01a177da-b8ff-7374-8a12-3c6ec3520af1",
+        "project": "01a177aa-a7a5-716c-8774-7f165724c16b",
+        "sha256": "be6a54d261f06d6a05328f1751d4df2c0017e89c1b97b03dc93ac9e92151732c",
+        "check": {
+          "argv": [
+            "sh",
+            "-c",
+            "true"
+          ],
+          "command": "true",
+          "duration_ms": 14,
+          "executor": true,
+          "exit": 0,
+          "limits": {
+            "log_bytes": 1048576,
+            "memory": 4294967296,
+            "processes": 256,
+            "timeout": 900
+          },
+          "log_ref": "derived/check-v1/01a177da-b8fc-71b6-b500-9624106347ac",
+          "name": "m1",
+          "output_state": "01a177da-b8fc-71b6-b500-9624106347ac",
+          "privileged": false,
+          "state": "01a177aa-aa04-7598-a468-e38694df03f8",
+          "truncated": false
+        }
+      },
+      {
+        "machine": "01a17736-70f4-744f-a59b-8685f3151eff",
+        "sequence": 10,
+        "record_id": "01a177da-b912-7550-beb9-3a85ccc5c164",
+        "project": "01a177aa-a7a5-716c-8774-7f165724c16b",
+        "sha256": "febc3923e89f8087e3a5f2db1cc18d14c4bcaacba8b2408d4a7485b410511f98",
+        "check": {
+          "argv": [
+            "sh",
+            "-c",
+            "true"
+          ],
+          "command": "true",
+          "duration_ms": 13,
+          "executor": true,
+          "exit": 0,
+          "limits": {
+            "log_bytes": 1048576,
+            "memory": 4294967296,
+            "processes": 256,
+            "timeout": 900
+          },
+          "log_ref": "derived/check-v1/01a177da-b90e-748a-bd34-e70447876819",
+          "name": "m1",
+          "output_state": "01a177da-b90e-748a-bd34-e70447876819",
+          "privileged": false,
+          "state": "01a177ae-1b11-7472-8a7c-d9281bf5fb4f",
+          "truncated": false
+        }
+      },
+      {
+        "machine": "01a17736-70f4-744f-a59b-8685f3151eff",
+        "sequence": 11,
+        "record_id": "01a177da-b924-77d2-8bb2-f51795ce8200",
+        "project": "01a177aa-a7a5-716c-8774-7f165724c16b",
+        "sha256": "9646530047d12819a95bc2ca92f3f40da86722e705b7394af82561eb58cfea18",
+        "check": {
+          "argv": [
+            "sh",
+            "-c",
+            "true"
+          ],
+          "command": "true",
+          "duration_ms": 14,
+          "executor": true,
+          "exit": 0,
+          "limits": {
+            "log_bytes": 1048576,
+            "memory": 4294967296,
+            "processes": 256,
+            "timeout": 900
+          },
+          "log_ref": "derived/check-v1/01a177da-b920-75f0-b253-f253864a1646",
+          "name": "m1",
+          "output_state": "01a177da-b920-75f0-b253-f253864a1646",
+          "privileged": false,
+          "state": "01a177bd-6195-7506-ab45-f30374565167",
+          "truncated": false
+        }
+      }
+    ],
+    "pushes": "both succeeded before signed records were fetched and verified",
+    "digest_convention": "SHA-256 of UTF-8 bytes of SQLite records.raw signed envelope, no added newline; not a canonicalized r body"
+  },
+  "pending": [],
+  "operator_checks": {
+    "root_apfs_service": {
+      "status": "unverified; Igor-only manual step",
+      "command": "sudo bash tools/checks/macos-operator.sh /Users/igor/.local/lib/layr-runner/layr igor"
+    },
+    "login_keychain_fixtures": {
+      "status": "three tests unverified; Igor-only manual step",
+      "command": "bash tools/checks/macos-operator.sh --keychain"
+    }
+  },
+  "regressions": {
+    "linux_t35": "49 passed, 0 failed",
+    "linux_t41": "60 passed, 0 failed",
+    "linux_t43": "44 passed, 0 failed",
+    "mac_creator_policy": "passed",
+    "mac_approval_gates_and_failed_log": "passed",
+    "mac_sandbox_network_and_external_write_refusal": "passed outside nested sandbox"
+  },
+  "record_digest_convention": "SHA-256 of exact UTF-8 signed records.raw JSON envelope, without an added newline",
+  "reboot": {
+    "time": "2026-10-26T11:21:50.987273+00:00",
+    "vm": "layr-runner-vz",
+    "before": {
+      "boot_id": "cb035e9e-484a-4ec0-ad4b-f0e8184aa30c",
+      "version": "layr version 0.4.0",
+      "creator_main": "01a177b9-4099-73d7-9341-6f4bbf0d333d",
+      "local_main": "01a17734-c0a1-772d-88b8-942ef32c407e",
+      "check_count": 5,
+      "flags": {
+        "checks.runner": "true",
+        "checks.privileged-runner": "true"
+      },
+      "host_paths_absent": true
+    },
+    "after": {
+      "boot_id": "604f960e-80e4-4925-a120-b97c8bafa87d",
+      "version": "layr version 0.4.0",
+      "creator_main": "01a177b9-4099-73d7-9341-6f4bbf0d333d",
+      "local_main": "01a17734-c0a1-772d-88b8-942ef32c407e",
+      "check_count": 5,
+      "flags": {
+        "checks.runner": "true",
+        "checks.privileged-runner": "true"
+      },
+      "host_paths_absent": true
+    },
+    "loop_attach_detach": true,
+    "services_resumed": true,
+    "no_duplicate_final_checks": true
+  },
+  "owner_fixture_cleanup": {
+    "time": "2026-10-26T11:24:43.063732+00:00",
+    "disposable_owner_stores_and_test_paper_keys_removed": [
+      "/private/tmp/layr-runner-m3-final",
+      "/private/tmp/layr-runner-m3-e2e"
+    ],
+    "old_local_fixture_agents_removed": true,
+    "old_linux_fixture_services_disabled": true,
+    "cloud_fixture_untouched": true
+  },
+  "first_cloud_apfs_failure": {
+    "records": [
+      {
+        "record_id": "01a177f5-92a2-7649-b68f-253f687d21ef",
+        "machine": "01a17725-e2e4-72d8-9de9-95d6d32eb719",
+        "sequence": 14,
+        "sha256": "b0fd6d27d06ae15d4ebad25535fc25cef544bbe18dea9f6084bf6cd6b19cb90d",
+        "check": {
+          "argv": [
+            "sh",
+            "-c",
+            "bash tools/checks/apfs.sh"
+          ],
+          "command": "bash tools/checks/apfs.sh",
+          "duration_ms": 154878,
+          "executor": true,
+          "exit": 101,
+          "limits": {
+            "log_bytes": 16777216,
+            "memory": 8589934592,
+            "processes": 4096,
+            "timeout": 7200
+          },
+          "log_ref": "derived/check-v1/01a177f5-9265-7636-979a-c97747f5a3eb",
+          "name": "apfs",
+          "output_state": "01a177f5-9265-7636-979a-c97747f5a3eb",
+          "privileged": false,
+          "state": "01a177f1-4ecb-70e3-97c8-7e563fe0b2ab",
+          "truncated": false
+        }
+      }
+    ],
+    "retained_log": {
+      "bytes": 41073,
+      "sha256": "7568367e18b9e9be16fd4f5263ab2a2708f09d49766df28c7e6b43bb4f06cb43"
+    },
+    "cause": "File backend listing raced removal of an internal .put-* publication temporary before stat",
+    "fix_commit": "e74ceff3e74babd8bf24e2a06c25ec600deb64f9",
+    "site_failure_row": "independently observed by cloudfront11:31UTC"
+  },
+  "gc_race_reproduction": {
+    "mac_first_standalone": {
+      "total": 1,
+      "failures": 1
+    },
+    "mac_baseline_loop": {
+      "time": "2026-10-26T11:30:02.778629+00:00",
+      "platform": "macos",
+      "total": 100,
+      "failures": 0,
+      "rate": 0.0,
+      "seconds": 24.092524542,
+      "examples": []
+    },
+    "mac_fixed_loop": {
+      "time": "2026-10-26T11:31:15.822961+00:00",
+      "platform": "macos-fixed",
+      "total": 100,
+      "failures": 0,
+      "rate": 0.0,
+      "seconds": 23.506659041,
+      "examples": []
+    },
+    "linux_baseline_loop": {
+      "time": "2026-10-26T11:30:08.997325+00:00",
+      "platform": "linux",
+      "total": 100,
+      "failures": 0,
+      "rate": 0.0,
+      "seconds": 11.00660634999997,
+      "examples": []
+    },
+    "deterministic_regression": "read_dir entry is removed before stat; only vanished .put temporary tolerated; vanished public object and symlinks still refused",
+    "linux_fixed_loop": {
+      "time": "2026-10-26T12:39:37.604776+00:00",
+      "platform": "linux-fixed",
+      "total": 100,
+      "failures": 0,
+      "rate": 0.0,
+      "seconds": 35.723119438999674,
+      "examples": []
+    },
+    "linux_deterministic_regression": "passed on actual e74 full-job test executable"
+  },
+  "first_cloud_run": {
+    "time": "2026-10-26T12:05:35.042336+00:00",
+    "records": [
+      {
+        "record_id": "01a177f5-92a2-7649-b68f-253f687d21ef",
+        "machine": "01a17725-e2e4-72d8-9de9-95d6d32eb719",
+        "sequence": 14,
+        "sha256": "b0fd6d27d06ae15d4ebad25535fc25cef544bbe18dea9f6084bf6cd6b19cb90d",
+        "check": {
+          "argv": [
+            "sh",
+            "-c",
+            "bash tools/checks/apfs.sh"
+          ],
+          "command": "bash tools/checks/apfs.sh",
+          "duration_ms": 154878,
+          "executor": true,
+          "exit": 101,
+          "limits": {
+            "log_bytes": 16777216,
+            "memory": 8589934592,
+            "processes": 4096,
+            "timeout": 7200
+          },
+          "log_ref": "derived/check-v1/01a177f5-9265-7636-979a-c97747f5a3eb",
+          "name": "apfs",
+          "output_state": "01a177f5-9265-7636-979a-c97747f5a3eb",
+          "privileged": false,
+          "state": "01a177f1-4ecb-70e3-97c8-7e563fe0b2ab",
+          "truncated": false
+        }
+      },
+      {
+        "record_id": "01a177fa-bd0e-758d-8635-96e4c6fed03a",
+        "machine": "01a17736-70f4-744f-a59b-8685f3151eff",
+        "sequence": 8,
+        "sha256": "f7f07b6a2ffb4cf2f43c7f60d8e4645a8a0008e7070e808165d098cb17441dcc",
+        "check": {
+          "argv": [
+            "sh",
+            "-c",
+            "bash tools/checks/integration.sh"
+          ],
+          "command": "bash tools/checks/integration.sh",
+          "duration_ms": 493556,
+          "executor": true,
+          "exit": 0,
+          "limits": {
+            "log_bytes": 16777216,
+            "memory": 8589934592,
+            "processes": 4096,
+            "timeout": 7200
+          },
+          "log_ref": "derived/check-v1/01a177fa-bcfd-76be-99c5-c41a60e9ca37",
+          "name": "integration",
+          "output_state": "01a177fa-bcfd-76be-99c5-c41a60e9ca37",
+          "privileged": true,
+          "state": "01a177f1-4ecb-70e3-97c8-7e563fe0b2ab",
+          "truncated": false
+        }
+      },
+      {
+        "record_id": "01a177fd-5f49-73bc-a9a1-c787aef7ace7",
+        "machine": "01a17736-70f4-744f-a59b-8685f3151eff",
+        "sequence": 9,
+        "sha256": "e5c1a3398f939083841e2dff387d2fe7e21d7268e050ab5dc6e50b9f54713252",
+        "check": {
+          "argv": [
+            "sh",
+            "-c",
+            "bash tools/checks/overlayfs.sh ext4"
+          ],
+          "command": "bash tools/checks/overlayfs.sh ext4",
+          "duration_ms": 172572,
+          "executor": true,
+          "exit": 0,
+          "limits": {
+            "log_bytes": 16777216,
+            "memory": 8589934592,
+            "processes": 4096,
+            "timeout": 7200
+          },
+          "log_ref": "derived/check-v1/01a177fd-5f38-7561-9852-c136ba7e355e",
+          "name": "overlayfs-ext4",
+          "output_state": "01a177fd-5f38-7561-9852-c136ba7e355e",
+          "privileged": true,
+          "state": "01a177f1-4ecb-70e3-97c8-7e563fe0b2ab",
+          "truncated": false
+        }
+      },
+      {
+        "record_id": "01a17800-6fa9-744a-bd2e-9786cf6b47a8",
+        "machine": "01a17736-70f4-744f-a59b-8685f3151eff",
+        "sequence": 10,
+        "sha256": "af84a07d94c37c43b2d917cc55e826696bc5a56cc5b6d1bfb44cab68aa42a381",
+        "check": {
+          "argv": [
+            "sh",
+            "-c",
+            "bash tools/checks/overlayfs.sh xfs"
+          ],
+          "command": "bash tools/checks/overlayfs.sh xfs",
+          "duration_ms": 200775,
+          "executor": true,
+          "exit": 0,
+          "limits": {
+            "log_bytes": 16777216,
+            "memory": 8589934592,
+            "processes": 4096,
+            "timeout": 7200
+          },
+          "log_ref": "derived/check-v1/01a17800-6f8a-727f-b828-9d3e04381941",
+          "name": "overlayfs-xfs",
+          "output_state": "01a17800-6f8a-727f-b828-9d3e04381941",
+          "privileged": true,
+          "state": "01a177f1-4ecb-70e3-97c8-7e563fe0b2ab",
+          "truncated": false
+        }
+      },
+      {
+        "record_id": "01a17803-ab94-70ec-932f-31f5384a6575",
+        "machine": "01a17736-70f4-744f-a59b-8685f3151eff",
+        "sequence": 11,
+        "sha256": "fa19567a6d750d50b8bffd65430f3604e39a5893fb89fa34462ce0c085367742",
+        "check": {
+          "argv": [
+            "sh",
+            "-c",
+            "bash tools/checks/unit.sh"
+          ],
+          "command": "bash tools/checks/unit.sh",
+          "duration_ms": 211916,
+          "executor": true,
+          "exit": 0,
+          "limits": {
+            "log_bytes": 16777216,
+            "memory": 8589934592,
+            "processes": 4096,
+            "timeout": 7200
+          },
+          "log_ref": "derived/check-v1/01a17803-ab87-764e-af8f-8d24a66281c5",
+          "name": "unit",
+          "output_state": "01a17803-ab87-764e-af8f-8d24a66281c5",
+          "privileged": false,
+          "state": "01a177f1-4ecb-70e3-97c8-7e563fe0b2ab",
+          "truncated": false
+        }
+      }
+    ],
+    "digest_convention": "exact signed raw JSON envelope UTF8, no added newline"
+  },
+  "first_cloud_linux_retained_logs": [
+    {
+      "record_id": "01a177fa-bd0e-758d-8635-96e4c6fed03a",
+      "machine": "01a17736-70f4-744f-a59b-8685f3151eff",
+      "sha256": "f7f07b6a2ffb4cf2f43c7f60d8e4645a8a0008e7070e808165d098cb17441dcc",
+      "check": {
+        "argv": [
+          "sh",
+          "-c",
+          "bash tools/checks/integration.sh"
+        ],
+        "command": "bash tools/checks/integration.sh",
+        "duration_ms": 493556,
+        "executor": true,
+        "exit": 0,
+        "limits": {
+          "log_bytes": 16777216,
+          "memory": 8589934592,
+          "processes": 4096,
+          "timeout": 7200
+        },
+        "log_ref": "derived/check-v1/01a177fa-bcfd-76be-99c5-c41a60e9ca37",
+        "name": "integration",
+        "output_state": "01a177fa-bcfd-76be-99c5-c41a60e9ca37",
+        "privileged": true,
+        "state": "01a177f1-4ecb-70e3-97c8-7e563fe0b2ab",
+        "truncated": false
+      },
+      "retained_log": {
+        "bytes": 23774,
+        "sha256": "492ac1f388fbfbfb86b61dcb5496922fd1dc34ff94e55f7d81205feb23c46bc9",
+        "summary": [
+          "test result: ok. 101 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 2.61s",
+          "t01-basic.sh: 76 passed, 0 failed",
+          "t02-merge.sh: 50 passed, 0 failed",
+          "t03-git.sh: 57 passed, 0 failed",
+          "t04-undo-gc.sh: 31 passed, 0 failed",
+          "t05-transfer.sh: 10 passed, 0 failed",
+          "t06-sync.sh: 16 passed, 0 failed",
+          "t07-service.sh: 31 passed, 0 failed",
+          "t08-gitcompat.sh: 28 passed, 0 failed",
+          "t09-caches.sh: 9 passed, 0 failed",
+          "t10-review.sh: 11 passed, 0 failed",
+          "t11-security.sh: 31 passed, 0 failed",
+          "t12-audit.sh: 19 passed, 0 failed",
+          "t13-access.sh: 78 passed, 0 failed",
+          "t14-warm-caches.sh: 27 passed, 0 failed",
+          "t15-regenerable.sh: 41 passed, 0 failed",
+          "t16-overlays.sh: 148 passed, 0 failed",
+          "t16-performance.sh: 7 passed, 0 failed",
+          "t17-git-store.sh: 9 passed, 0 failed",
+          "t17-sync-storage.sh: 11 passed, 0 failed",
+          "t18-core.sh: 136 passed, 0 failed",
+          "t18-remotes.sh: 52 passed, 0 failed",
+          "t19-remote-store.sh: 25 passed, 0 failed",
+          "t20-guard.sh: 41 passed, 0 failed",
+          "t20-merge-cloud.sh: 56 passed, 0 failed",
+          "t20-queue.sh: 76 passed, 0 failed",
+          "t20-store-peer.sh: 10 passed, 0 failed",
+          "t21-desk-import.sh: 18 passed, 0 failed",
+          "t21-ref-protect.sh: 28 passed, 0 failed",
+          "t22-store-trust.sh: 7 passed, 0 failed",
+          "t23-store-portable-peer.sh: 4 passed, 0 failed",
+          "t23-views.sh: 55 passed, 0 failed",
+          "t24-store-partial.sh: 11 passed, 0 failed",
+          "t28-disk.sh: 1 passed, 0 failed",
+          "t29-store-pin.sh: 1 passed, 0 failed",
+          "t30-oci.sh: 44 passed, 0 failed",
+          "t32-probes.sh: 34 passed, 0 failed",
+          "t33-polish.sh: 49 passed, 0 failed",
+          "t34-person.sh: 1 passed, 0 failed",
+          "t35-overlay-sync.sh: 49 passed, 0 failed",
+          "t36-aws-profile.sh: 14 passed, 0 failed",
+          "t37-model.sh: 47 passed, 0 failed",
+          "t38-screens.sh: 31 passed, 0 failed",
+          "t39-hidden-overlays.sh: 88 passed, 0 failed",
+          "t40-store-index.sh: 24 passed, 0 failed",
+          "t41-requests.sh: 60 passed, 0 failed",
+          "t42-public.sh: 99 passed, 0 failed",
+          "t43-checks.sh: 44 passed, 0 failed",
+          "61 passed, 0 failed",
+          "t45-signin.sh: 34 passed, 0 failed",
+          "t46-machine-bootstrap.sh: 17 passed, 0 failed",
+          "t47-release-files: 37 passed, 0 failed"
+        ]
+      }
+    },
+    {
+      "record_id": "01a177fd-5f49-73bc-a9a1-c787aef7ace7",
+      "machine": "01a17736-70f4-744f-a59b-8685f3151eff",
+      "sha256": "e5c1a3398f939083841e2dff387d2fe7e21d7268e050ab5dc6e50b9f54713252",
+      "check": {
+        "argv": [
+          "sh",
+          "-c",
+          "bash tools/checks/overlayfs.sh ext4"
+        ],
+        "command": "bash tools/checks/overlayfs.sh ext4",
+        "duration_ms": 172572,
+        "executor": true,
+        "exit": 0,
+        "limits": {
+          "log_bytes": 16777216,
+          "memory": 8589934592,
+          "processes": 4096,
+          "timeout": 7200
+        },
+        "log_ref": "derived/check-v1/01a177fd-5f38-7561-9852-c136ba7e355e",
+        "name": "overlayfs-ext4",
+        "output_state": "01a177fd-5f38-7561-9852-c136ba7e355e",
+        "privileged": true,
+        "state": "01a177f1-4ecb-70e3-97c8-7e563fe0b2ab",
+        "truncated": false
+      },
+      "retained_log": {
+        "bytes": 32468,
+        "sha256": "c12d10c6288de170ef53ee73820e92de8375ea10ec0398c719e9478458220056",
+        "summary": [
+          "test result: ok. 116 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.91s",
+          "overlayfs-caches.sh: 12 passed, 0 failed",
+          "t01-basic.sh: 76 passed, 0 failed",
+          "t02-merge.sh: 50 passed, 0 failed",
+          "t03-git.sh: 57 passed, 0 failed",
+          "t05-transfer.sh: 10 passed, 0 failed",
+          "t06-sync.sh: 16 passed, 0 failed",
+          "t07-service.sh: 28 passed, 0 failed",
+          "t08-gitcompat.sh: 28 passed, 0 failed",
+          "t11-security.sh: 31 passed, 0 failed",
+          "t13-access.sh: 78 passed, 0 failed",
+          "t16-overlays.sh: 148 passed, 0 failed"
+        ]
+      }
+    },
+    {
+      "record_id": "01a17800-6fa9-744a-bd2e-9786cf6b47a8",
+      "machine": "01a17736-70f4-744f-a59b-8685f3151eff",
+      "sha256": "af84a07d94c37c43b2d917cc55e826696bc5a56cc5b6d1bfb44cab68aa42a381",
+      "check": {
+        "argv": [
+          "sh",
+          "-c",
+          "bash tools/checks/overlayfs.sh xfs"
+        ],
+        "command": "bash tools/checks/overlayfs.sh xfs",
+        "duration_ms": 200775,
+        "executor": true,
+        "exit": 0,
+        "limits": {
+          "log_bytes": 16777216,
+          "memory": 8589934592,
+          "processes": 4096,
+          "timeout": 7200
+        },
+        "log_ref": "derived/check-v1/01a17800-6f8a-727f-b828-9d3e04381941",
+        "name": "overlayfs-xfs",
+        "output_state": "01a17800-6f8a-727f-b828-9d3e04381941",
+        "privileged": true,
+        "state": "01a177f1-4ecb-70e3-97c8-7e563fe0b2ab",
+        "truncated": false
+      },
+      "retained_log": {
+        "bytes": 32183,
+        "sha256": "9bc3a6e36eb4477e2043484efa91ead09550d0f6a1b3c007b94e27eb863eb703",
+        "summary": [
+          "test result: ok. 116 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.08s",
+          "overlayfs-caches.sh: 12 passed, 0 failed",
+          "t01-basic.sh: 76 passed, 0 failed",
+          "t02-merge.sh: 50 passed, 0 failed",
+          "t03-git.sh: 57 passed, 0 failed",
+          "t05-transfer.sh: 10 passed, 0 failed",
+          "t06-sync.sh: 16 passed, 0 failed",
+          "t07-service.sh: 28 passed, 0 failed",
+          "t08-gitcompat.sh: 28 passed, 0 failed",
+          "t11-security.sh: 31 passed, 0 failed",
+          "t13-access.sh: 78 passed, 0 failed",
+          "t16-overlays.sh: 148 passed, 0 failed"
+        ]
+      }
+    },
+    {
+      "record_id": "01a17803-ab94-70ec-932f-31f5384a6575",
+      "machine": "01a17736-70f4-744f-a59b-8685f3151eff",
+      "sha256": "fa19567a6d750d50b8bffd65430f3604e39a5893fb89fa34462ce0c085367742",
+      "check": {
+        "argv": [
+          "sh",
+          "-c",
+          "bash tools/checks/unit.sh"
+        ],
+        "command": "bash tools/checks/unit.sh",
+        "duration_ms": 211916,
+        "executor": true,
+        "exit": 0,
+        "limits": {
+          "log_bytes": 16777216,
+          "memory": 8589934592,
+          "processes": 4096,
+          "timeout": 7200
+        },
+        "log_ref": "derived/check-v1/01a17803-ab87-764e-af8f-8d24a66281c5",
+        "name": "unit",
+        "output_state": "01a17803-ab87-764e-af8f-8d24a66281c5",
+        "privileged": false,
+        "state": "01a177f1-4ecb-70e3-97c8-7e563fe0b2ab",
+        "truncated": false
+      },
+      "retained_log": {
+        "bytes": 31422,
+        "sha256": "2d0a2ab70d189d62e669e1883496f128344b560f3fdf31b58100d219f64fae27",
+        "summary": [
+          "test result: ok. 101 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 1.77s",
+          "test result: ok. 61 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s",
+          "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s",
+          "test result: ok. 54 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 1.01s",
+          "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+          "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+          "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+        ]
+      }
+    }
+  ],
+  "http_request_measurement": {
+    "time": "2026-10-26T12:36:11.601776+00:00",
+    "binary_size": 74957656,
+    "binary_sha256": "7ec2e329e5875fcf24943ed0e6353d588e66e6746597f20b70cb492e7c7334c7",
+    "operations": [
+      {
+        "operation": "fetch",
+        "requests": 102,
+        "counts": {
+          "{\"method\":\"GET\",\"route\":\"store.json\",\"status\":200}": 6,
+          "{\"method\":\"GET\",\"route\":\"objects:list:keys\",\"status\":200}": 1,
+          "{\"method\":\"GET\",\"route\":\"slots\",\"status\":200}": 1,
+          "{\"method\":\"GET\",\"route\":\"challenge\",\"status\":200}": 1,
+          "{\"method\":\"POST\",\"route\":\"token\",\"status\":200}": 1,
+          "{\"method\":\"GET\",\"route\":\"objects:list:records\",\"status\":200}": 1,
+          "{\"method\":\"GET\",\"route\":\"objects:records\",\"status\":200}": 88,
+          "{\"method\":\"GET\",\"route\":\"objects:list:states\",\"status\":200}": 1,
+          "{\"method\":\"GET\",\"route\":\"objects:list:other\",\"status\":200}": 2
+        }
+      },
+      {
+        "operation": "push",
+        "requests": 264,
+        "counts": {
+          "{\"method\":\"GET\",\"route\":\"store.json\",\"status\":200}": 12,
+          "{\"method\":\"GET\",\"route\":\"objects:list:keys\",\"status\":200}": 3,
+          "{\"method\":\"GET\",\"route\":\"other\",\"status\":404}": 1,
+          "{\"method\":\"GET\",\"route\":\"slots\",\"status\":200}": 3,
+          "{\"method\":\"GET\",\"route\":\"challenge\",\"status\":200}": 1,
+          "{\"method\":\"POST\",\"route\":\"token\",\"status\":200}": 1,
+          "{\"method\":\"GET\",\"route\":\"objects:slots\",\"status\":404}": 1,
+          "{\"method\":\"GET\",\"route\":\"objects:list:records\",\"status\":200}": 5,
+          "{\"method\":\"PUT\",\"route\":\"objects:records\",\"status\":201}": 1,
+          "{\"method\":\"GET\",\"route\":\"objects:list:states\",\"status\":200}": 3,
+          "{\"method\":\"GET\",\"route\":\"objects:records\",\"status\":200}": 178,
+          "{\"method\":\"GET\",\"route\":\"objects:states\",\"status\":200}": 23,
+          "{\"method\":\"GET\",\"route\":\"objects:other\",\"status\":200}": 30,
+          "{\"method\":\"GET\",\"route\":\"objects:list:other\",\"status\":200}": 1,
+          "{\"method\":\"PUT\",\"route\":\"objects:other\",\"status\":201}": 1
+        }
+      }
+    ],
+    "total_requests": 366,
+    "scope": "one real existing Mac runner fetch+push--index; check watcher unchanged; original120sservices resumed"
+  },
+  "operations_commit": "a9de38979db4fd79bff28abd623c0c0f2c68c29c",
+  "transport_recovery": {
+    "credential_location": "private root0700tmpfs directory outside daemon RuntimeDirectory; token0600",
+    "daemon_restart_preserves_transient_token": true,
+    "cadence": "Mac120seconds; Linux120seconds plus0..30secondsjitter",
+    "counted_cycle_success_after_gateway_rate_limit_fix": true
+  },
+  "mac_binary_upgrade": {
+    "time": "2026-10-26T13:10:11.899078+00:00",
+    "platform": "macos",
+    "code": "e74ceff; operations dfd5d08",
+    "binary": "/Users/igor/.local/lib/layr-runner/layr",
+    "size": 75038280,
+    "sha256": "62e3b30161ba29f0999048a4b7cfa22f6d36d62c7dc83c725995120b616eea5d",
+    "global_identity": "01a17725-e2e4-72d8-9de9-95d6d32eb719",
+    "watcher_restarted_after_apfs_pass": true,
+    "transport_agents_unchanged": true
+  },
+  "vm_launch_agent": {
+    "boot_id": "e70a5764-fcd0-423e-8811-bfa777388e34",
+    "orphan_folders_removed": [
+      "/var/tmp/layr-check-01a17871-b244-73c0-9999-5fb53db788f4"
+    ],
+    "global_identity": "01a17736-70f4-744f-a59b-8685f3151eff",
+    "host_paths_absent": true,
+    "retained_checks": [
+      {
+        "name": "integration",
+        "exit": 0,
+        "state": "01a17824-b887-7026-bd2f-ab273a0351f8"
+      },
+      {
+        "name": "apfs",
+        "exit": 0,
+        "state": "01a17824-b887-7026-bd2f-ab273a0351f8"
+      }
+    ],
+    "time": "2026-10-26T13:51:18.206837+00:00",
+    "launch_agent": "ws.layr.runner-vm",
+    "hostagent_pid": 40325,
+    "hostagent_parent": 1,
+    "hostagent_process_group": 40325,
+    "source_commit": "a9de38979db4fd79bff28abd623c0c0f2c68c29c",
+    "unexpected_stop": {
+      "time": "2026-10-26T13:02:50Z",
+      "observed": "Lima hostagent received SIGINT",
+      "cause": "unattributed; Studio ancestry hypothesis unproven"
+    },
+    "controlled_handoff": {
+      "stop_time": "2026-10-26T13:47:46Z",
+      "reason": "start foreground VM from user launchd"
+    }
+  },
+  "full_cloud_fixed_source": {
+    "time": "2026-10-26T14:07:45.384506+00:00",
+    "project": "m3-suite",
+    "project_id": "01a177f1-4bd0-7029-b488-6f00793f9798",
+    "url": "layr+https://cloud.layr.ws/m3-suite",
+    "state": "01a17824-b887-7026-bd2f-ab273a0351f8",
+    "source_git": "e74ceff3e74babd8bf24e2a06c25ec600deb64f9",
+    "source_tree": "8572e78f15a3377840578c028dbb7e9c15187a75",
+    "automatic_services": true,
+    "records": [
+      {
+        "record_id": "01a17843-79b1-716a-95b0-3ea54f8ce94a",
+        "machine": "01a17736-70f4-744f-a59b-8685f3151eff",
+        "sequence": 20,
+        "sha256": "99503cb80cb89208928b2ff7696dcaffc0b7dad34c1b996b6c3627acf6b52a18",
+        "check": {
+          "argv": [
+            "sh",
+            "-c",
+            "bash tools/checks/integration.sh"
+          ],
+          "command": "bash tools/checks/integration.sh",
+          "duration_ms": 1822794,
+          "executor": true,
+          "exit": 0,
+          "limits": {
+            "log_bytes": 16777216,
+            "memory": 8589934592,
+            "processes": 4096,
+            "timeout": 7200
+          },
+          "log_ref": "derived/check-v1/01a17843-796e-700c-8ead-4ee5f6c0a85d",
+          "name": "integration",
+          "output_state": "01a17843-796e-700c-8ead-4ee5f6c0a85d",
+          "privileged": true,
+          "state": "01a17824-b887-7026-bd2f-ab273a0351f8",
+          "truncated": false
+        },
+        "retained_log": {
+          "bytes": 23873,
+          "sha256": "875677d887d27472170b996ccc7c8e7b2a911f0d3a2775ca789142dad3e065b2",
+          "summary": [
+            "test result: ok. 102 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 3.07s",
+            "t01-basic.sh: 76 passed, 0 failed",
+            "t02-merge.sh: 50 passed, 0 failed",
+            "t03-git.sh: 57 passed, 0 failed",
+            "t04-undo-gc.sh: 31 passed, 0 failed",
+            "t05-transfer.sh: 10 passed, 0 failed",
+            "t06-sync.sh: 16 passed, 0 failed",
+            "t07-service.sh: 31 passed, 0 failed",
+            "t08-gitcompat.sh: 28 passed, 0 failed",
+            "t09-caches.sh: 9 passed, 0 failed",
+            "t10-review.sh: 11 passed, 0 failed",
+            "t11-security.sh: 31 passed, 0 failed",
+            "t12-audit.sh: 19 passed, 0 failed",
+            "t13-access.sh: 78 passed, 0 failed",
+            "t14-warm-caches.sh: 27 passed, 0 failed",
+            "t15-regenerable.sh: 41 passed, 0 failed",
+            "t16-overlays.sh: 148 passed, 0 failed",
+            "t16-performance.sh: 7 passed, 0 failed",
+            "t17-git-store.sh: 9 passed, 0 failed",
+            "t17-sync-storage.sh: 11 passed, 0 failed",
+            "t18-core.sh: 136 passed, 0 failed",
+            "t18-remotes.sh: 52 passed, 0 failed",
+            "t19-remote-store.sh: 25 passed, 0 failed",
+            "t20-guard.sh: 41 passed, 0 failed",
+            "t20-merge-cloud.sh: 56 passed, 0 failed",
+            "t20-queue.sh: 76 passed, 0 failed",
+            "t20-store-peer.sh: 10 passed, 0 failed",
+            "t21-desk-import.sh: 18 passed, 0 failed",
+            "t21-ref-protect.sh: 28 passed, 0 failed",
+            "t22-store-trust.sh: 7 passed, 0 failed",
+            "t23-store-portable-peer.sh: 4 passed, 0 failed",
+            "t23-views.sh: 55 passed, 0 failed",
+            "t24-store-partial.sh: 11 passed, 0 failed",
+            "t28-disk.sh: 1 passed, 0 failed",
+            "t29-store-pin.sh: 1 passed, 0 failed",
+            "t30-oci.sh: 44 passed, 0 failed",
+            "t32-probes.sh: 34 passed, 0 failed",
+            "t33-polish.sh: 49 passed, 0 failed",
+            "t34-person.sh: 1 passed, 0 failed",
+            "t35-overlay-sync.sh: 49 passed, 0 failed",
+            "t36-aws-profile.sh: 14 passed, 0 failed",
+            "t37-model.sh: 47 passed, 0 failed",
+            "t38-screens.sh: 31 passed, 0 failed",
+            "t39-hidden-overlays.sh: 88 passed, 0 failed",
+            "t40-store-index.sh: 24 passed, 0 failed",
+            "t41-requests.sh: 60 passed, 0 failed",
+            "t42-public.sh: 99 passed, 0 failed",
+            "t43-checks.sh: 44 passed, 0 failed",
+            "61 passed, 0 failed",
+            "t45-signin.sh: 34 passed, 0 failed",
+            "t46-machine-bootstrap.sh: 17 passed, 0 failed",
+            "t47-release-files: 37 passed, 0 failed"
+          ]
+        }
+      },
+      {
+        "record_id": "01a17852-a56f-7039-91a0-b1b57880fdf8",
+        "machine": "01a17725-e2e4-72d8-9de9-95d6d32eb719",
+        "sequence": 99,
+        "sha256": "f64e48d4a121868ae0d2d7785163338cbb9a0b9e666a64b014af10c5030a7d17",
+        "check": {
+          "argv": [
+            "sh",
+            "-c",
+            "bash tools/checks/apfs.sh"
+          ],
+          "command": "bash tools/checks/apfs.sh",
+          "duration_ms": 2757614,
+          "executor": true,
+          "exit": 0,
+          "limits": {
+            "log_bytes": 16777216,
+            "memory": 8589934592,
+            "processes": 4096,
+            "timeout": 7200
+          },
+          "log_ref": "derived/check-v1/01a17852-9e55-71cc-82e8-90a38e3639f9",
+          "name": "apfs",
+          "output_state": "01a17852-9e55-71cc-82e8-90a38e3639f9",
+          "privileged": false,
+          "state": "01a17824-b887-7026-bd2f-ab273a0351f8",
+          "truncated": false
+        },
+        "retained_log": {
+          "bytes": 44521,
+          "sha256": "0a27cb7de146cdc39f6cbd58f2d7baa0d7088db7f44842a33c08041c7428fedb",
+          "summary": [
+            "test result: ok. 132 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 65.29s",
+            "apfs-local.sh: 26 passed, 0 failed",
+            "t01-basic.sh: 76 passed, 0 failed",
+            "t02-merge.sh: 50 passed, 0 failed",
+            "t03-git.sh: 57 passed, 0 failed",
+            "t05-transfer.sh: 10 passed, 0 failed",
+            "t06-sync.sh: 16 passed, 0 failed",
+            "t08-gitcompat.sh: 28 passed, 0 failed",
+            "t01-basic.sh: 76 passed, 0 failed",
+            "t02-merge.sh: 50 passed, 0 failed",
+            "t03-git.sh: 57 passed, 0 failed"
+          ]
+        }
+      },
+      {
+        "record_id": "01a1787d-f4ed-765f-b19d-797229cb83e2",
+        "machine": "01a17736-70f4-744f-a59b-8685f3151eff",
+        "sequence": 27,
+        "sha256": "a22ae9d59a889ccaccb6a3a2731fedbf813b0396af9dbb1a589d7a9798d01434",
+        "check": {
+          "argv": [
+            "sh",
+            "-c",
+            "bash tools/checks/overlayfs.sh ext4"
+          ],
+          "command": "bash tools/checks/overlayfs.sh ext4",
+          "duration_ms": 390026,
+          "executor": true,
+          "exit": 0,
+          "limits": {
+            "log_bytes": 16777216,
+            "memory": 8589934592,
+            "processes": 4096,
+            "timeout": 7200
+          },
+          "log_ref": "derived/check-v1/01a1787d-f398-701c-b619-54342f24ad7c",
+          "name": "overlayfs-ext4",
+          "output_state": "01a1787d-f398-701c-b619-54342f24ad7c",
+          "privileged": true,
+          "state": "01a17824-b887-7026-bd2f-ab273a0351f8",
+          "truncated": false
+        },
+        "retained_log": {
+          "bytes": 32566,
+          "sha256": "f081dabedf4c7d9add2a4ea124eb346bf7c8742d00811d39ddfea3591d066aa7",
+          "summary": [
+            "test result: ok. 117 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.14s",
+            "overlayfs-caches.sh: 12 passed, 0 failed",
+            "t01-basic.sh: 76 passed, 0 failed",
+            "t02-merge.sh: 50 passed, 0 failed",
+            "t03-git.sh: 57 passed, 0 failed",
+            "t05-transfer.sh: 10 passed, 0 failed",
+            "t06-sync.sh: 16 passed, 0 failed",
+            "t07-service.sh: 28 passed, 0 failed",
+            "t08-gitcompat.sh: 28 passed, 0 failed",
+            "t11-security.sh: 31 passed, 0 failed",
+            "t13-access.sh: 78 passed, 0 failed",
+            "t16-overlays.sh: 148 passed, 0 failed"
+          ]
+        }
+      },
+      {
+        "record_id": "01a17882-b17f-77e4-b966-d0800abed69b",
+        "machine": "01a17736-70f4-744f-a59b-8685f3151eff",
+        "sequence": 29,
+        "sha256": "41f12ba42d4067756fb2ee60495c5138f587f5792dbffc7f97609a6f46b3d629",
+        "check": {
+          "argv": [
+            "sh",
+            "-c",
+            "bash tools/checks/overlayfs.sh xfs"
+          ],
+          "command": "bash tools/checks/overlayfs.sh xfs",
+          "duration_ms": 310049,
+          "executor": true,
+          "exit": 0,
+          "limits": {
+            "log_bytes": 16777216,
+            "memory": 8589934592,
+            "processes": 4096,
+            "timeout": 7200
+          },
+          "log_ref": "derived/check-v1/01a17882-b156-7628-8c48-270f9d5dab7d",
+          "name": "overlayfs-xfs",
+          "output_state": "01a17882-b156-7628-8c48-270f9d5dab7d",
+          "privileged": true,
+          "state": "01a17824-b887-7026-bd2f-ab273a0351f8",
+          "truncated": false
+        },
+        "retained_log": {
+          "bytes": 32281,
+          "sha256": "148b4ff4cf59d9e6afdcb875a58a4ff182d8368a1050dd406b53270a45489329",
+          "summary": [
+            "test result: ok. 117 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.20s",
+            "overlayfs-caches.sh: 12 passed, 0 failed",
+            "t01-basic.sh: 76 passed, 0 failed",
+            "t02-merge.sh: 50 passed, 0 failed",
+            "t03-git.sh: 57 passed, 0 failed",
+            "t05-transfer.sh: 10 passed, 0 failed",
+            "t06-sync.sh: 16 passed, 0 failed",
+            "t07-service.sh: 28 passed, 0 failed",
+            "t08-gitcompat.sh: 28 passed, 0 failed",
+            "t11-security.sh: 31 passed, 0 failed",
+            "t13-access.sh: 78 passed, 0 failed",
+            "t16-overlays.sh: 148 passed, 0 failed"
+          ]
+        }
+      },
+      {
+        "record_id": "01a17886-a336-747c-85bd-64a86e65a975",
+        "machine": "01a17736-70f4-744f-a59b-8685f3151eff",
+        "sequence": 31,
+        "sha256": "46164ed2c65d30875b017682644899b05755f0f90d0dbd58b5e9c5c721d3fe0c",
+        "check": {
+          "argv": [
+            "sh",
+            "-c",
+            "bash tools/checks/unit.sh"
+          ],
+          "command": "bash tools/checks/unit.sh",
+          "duration_ms": 258366,
+          "executor": true,
+          "exit": 0,
+          "limits": {
+            "log_bytes": 16777216,
+            "memory": 8589934592,
+            "processes": 4096,
+            "timeout": 7200
+          },
+          "log_ref": "derived/check-v1/01a17886-a2d2-7257-af9c-ef976a53bd85",
+          "name": "unit",
+          "output_state": "01a17886-a2d2-7257-af9c-ef976a53bd85",
+          "privileged": false,
+          "state": "01a17824-b887-7026-bd2f-ab273a0351f8",
+          "truncated": false
+        },
+        "retained_log": {
+          "bytes": 31520,
+          "sha256": "6444d98e902c9da689d2d01667cdf1052c1cf354dea17e2e3cac551918fd4884",
+          "summary": [
+            "test result: ok. 102 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 4.17s",
+            "test result: ok. 61 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s",
+            "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s",
+            "test result: ok. 54 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 1.02s",
+            "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s",
+            "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+            "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+          ]
+        }
+      }
+    ],
+    "fsck": "records of machine 95d6d32e: 118, signatures ok\nrecords of machine 8685f315: 31, signatures ok\nrecords of machine 93fae807: 36, signatures ok\n0 problem(s)\n",
+    "digest_convention": "SHA256 of exact UTF8 signed records.raw envelope without an added newline"
+  },
+  "source_scope": {
+    "final_cloud_job_source": "e74ceff3e74babd8bf24e2a06c25ec600deb64f9",
+    "final_cloud_git_tree": "8572e78f15a3377840578c028dbb7e9c15187a75",
+    "earlier_local_full_suite_source": "97bcb6a",
+    "later_commits": "transport cadence, credential lifetime documentation, VM LaunchAgent; job source unchanged"
+  },
+  "linux_binary_upgrade": {
+    "services": {
+      "layr-runner-daemon.service": "active",
+      "layr-checks@m3-suite.service": "active",
+      "layr-sync@m3-suite.timer": "active"
+    },
+    "global_identity": "01a17736-70f4-744f-a59b-8685f3151eff",
+    "exact_state_checks": 5,
+    "all_passed": true,
+    "host_paths_absent": true,
+    "binary_size": 251325456,
+    "binary_sha256": "4a1aad5388076fc545acac7468c75ab51fbf0c50f4e428c396aad4c07756e121",
+    "source_archive_sha256": "d9b4f10a1fc2d05e44e772a2db9409f5a290ff939b75abcebc88ba5f0e7eca06",
+    "time": "2026-10-26T14:10:18.558414+00:00",
+    "installed_source": "a9de38979db4fd79bff28abd623c0c0f2c68c29c",
+    "tested_rust_code": "e74ceff3e74babd8bf24e2a06c25ec600deb64f9",
+    "hostagent": "  PID  PPID  PGID COMMAND\n40325     1 40325 /opt/homebrew/bin/limactl hostagent --pidfile /Users/igor/.lima/layr-runner-vz/ha.pid --socket /Users/igor/.lima/layr-runner-vz/ha.sock --guestagent /opt/homebrew/share/lima/lima-guestagent.Linux-aarch64.gz layr-runner-vz\n"
+  },
+  "full_cloud_local_cleanup": {
+    "time": "2026-10-26T14:10:52.856667+00:00",
+    "project": "01a177f1-4bd0-7029-b488-6f00793f9798",
+    "mac_enrollment_removed": true,
+    "linux_enrollment_removed": true,
+    "project_agents_disabled": true,
+    "transport_files_removed": true,
+    "global_identities_preserved": {
+      "mac": "01a17725-e2e4-72d8-9de9-95d6d32eb719",
+      "linux": "01a17736-70f4-744f-a59b-8685f3151eff"
+    },
+    "vm_and_runner_daemon_preserved": true,
+    "public_signed_results_retained": "docs/laptop-runner-evidence.json"
+  },
+  "published_site": {
+    "time": "2026-10-26T14:09:00Z",
+    "reported_by": "cloudfront 7d619c2a",
+    "state": "01a17824-b887-7026-bd2f-ab273a0351f8",
+    "checks": "all5 green rows matched exact command and fixed state; original failed row preserved",
+    "session": "signature recovery decryption, source view, checks, lock, no browser persistence passed",
+    "owner_fetch": "18records/3states, three signer chains, fsck0problems",
+    "final_digest_comparison": "all5 signed envelope and log hashes matched"
+  },
+  "independent_verification": {
+    "reported_by": "cloudfront 7d619c2a",
+    "reported_at": "2026-10-26T14:14:51Z",
+    "signed_envelopes": "all5 final-state SHA256 match",
+    "retained_logs": "all5 final-state SHA256 match; original failedAPFS log also retained",
+    "fsck": "three verified signer chains,0problems",
+    "published_site": "all5 green rows matched exact fixed state; original failure remains history"
+  },
+  "retained_public_artifacts": {
+    "envelopes": "docs/laptop-runner-signed-checks.jsonl",
+    "logs": "docs/laptop-runner-check-logs.tar.gz",
+    "archive_sha256": "ae34af0e3672e66ea9bff2de3b321f3984af787b1eb5f793787e48bd0a6fd982",
+    "archive_bytes": 44142,
+    "manifest": [
+      {
+        "record": "01a177f5-92a2-7649-b68f-253f687d21ef",
+        "name": "apfs",
+        "exit": 101,
+        "file": "original-failed-apfs.log",
+        "bytes": 41073,
+        "sha256": "7568367e18b9e9be16fd4f5263ab2a2708f09d49766df28c7e6b43bb4f06cb43"
+      },
+      {
+        "record": "01a17843-79b1-716a-95b0-3ea54f8ce94a",
+        "name": "integration",
+        "exit": 0,
+        "file": "fixed-integration.log",
+        "bytes": 23873,
+        "sha256": "875677d887d27472170b996ccc7c8e7b2a911f0d3a2775ca789142dad3e065b2"
+      },
+      {
+        "record": "01a17852-a56f-7039-91a0-b1b57880fdf8",
+        "name": "apfs",
+        "exit": 0,
+        "file": "fixed-apfs.log",
+        "bytes": 44521,
+        "sha256": "0a27cb7de146cdc39f6cbd58f2d7baa0d7088db7f44842a33c08041c7428fedb"
+      },
+      {
+        "record": "01a1787d-f4ed-765f-b19d-797229cb83e2",
+        "name": "overlayfs-ext4",
+        "exit": 0,
+        "file": "fixed-overlayfs-ext4.log",
+        "bytes": 32566,
+        "sha256": "f081dabedf4c7d9add2a4ea124eb346bf7c8742d00811d39ddfea3591d066aa7"
+      },
+      {
+        "record": "01a17882-b17f-77e4-b966-d0800abed69b",
+        "name": "overlayfs-xfs",
+        "exit": 0,
+        "file": "fixed-overlayfs-xfs.log",
+        "bytes": 32281,
+        "sha256": "148b4ff4cf59d9e6afdcb875a58a4ff182d8368a1050dd406b53270a45489329"
+      },
+      {
+        "record": "01a17886-a336-747c-85bd-64a86e65a975",
+        "name": "unit",
+        "exit": 0,
+        "file": "fixed-unit.log",
+        "bytes": 31520,
+        "sha256": "6444d98e902c9da689d2d01667cdf1052c1cf354dea17e2e3cac551918fd4884"
+      }
+    ]
+  },
+  "cloud_fixture_cleanup": {
+    "time": "2026-10-26T14:15:37Z",
+    "reported_by": "lead; cloudfront performed retirement",
+    "evidence_repository": "layr-cloud",
+    "evidence_commit": "e5ee774",
+    "local_retirement_receipt": "2026-10-26T14:10:52.856667+00:00",
+    "fixture": "m3-suite; synthetic only"
+  },
+  "submission_rebase": {
+    "base": "879a228d58826cb5a260360bc201e8bfc537032c",
+    "cloud_job_source_unchanged": "e74ceff3e74babd8bf24e2a06c25ec600deb64f9",
+    "affected_checks": {
+      "status": "passed",
+      "checks": [
+        "cargo test --locked --bin layr policy_tests",
+        "cargo test --locked --bin layr macos_tests",
+        "cargo test --locked --bin layr store_remote::backend::tests",
+        "cargo build --locked",
+        "tests/apfs-runner-policy.sh",
+        "tests/apfs-checks.sh"
+      ],
+      "test_summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 138 filtered out; finished in 0.01s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 138 filtered out; finished in 0.08s",
+        "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 135 filtered out; finished in 0.04s",
+        "PASS: clone can fetch; creator checks and protection ignore runner-local overrides",
+        "PASS: macOS main, approval, exact version, withdrawal, failed attestation and retained log"
+      ]
+    }
+  }
+}
