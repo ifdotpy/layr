@@ -1,12 +1,36 @@
+#!/usr/bin/env python3
+"""Reproducible push-cache comparison (run as root in an owned Linux VM).
+
+Prepare WORKSPACE/bench as a Btrfs mount with at least 12 GiB free (48 GiB used
+for the recorded run). Put independent release executables in layr-before and
+layr-after, and Git source copies pinned to c1d7229 / eec4c6d on branch main in
+layr-source / studio-source. All paths are relative to WORKSPACE.
+
+Run: python3 benchmarks/push-cache.py --workspace WORKSPACE before
+     python3 benchmarks/push-cache.py --workspace WORKSPACE after
+     python3 benchmarks/push-cache.py --workspace WORKSPACE daily
+
+A fresh after comparison can use --run-id NAME for both after and daily. Keep
+separate Cargo target directories (or cargo clean -p layr --release between
+builds); copying older source mtimes can otherwise reuse a stale executable.
+The harness checks distinct binary hashes and expected cache formats. It writes
+JSONL measurements and sanitized request traces, never keys or token values.
+The daily TLS stand-in follows tests/t46-machine-bootstrap.sh with 5 ms/request.
+"""
 import os,pathlib,subprocess,json,time,hashlib
 import argparse
 parser=argparse.ArgumentParser(description='Compare push caches against two pinned Git fixture copies on a Btrfs volume.')
 parser.add_argument('--workspace',type=pathlib.Path,default=pathlib.Path('/root/pc'))
+parser.add_argument('--run-id',default='',help='Suffix for fresh after archives when repeating the comparison.')
 parser.add_argument('phase',choices=['before','after','daily'])
 args=parser.parse_args()
 base=args.workspace.resolve()
 fs=base/'bench'
 results=base/'push-cache-results.jsonl'
+if args.phase in ('after','daily'):
+    assert hashlib.sha256((base/'layr-before').read_bytes()).digest()!=hashlib.sha256((base/'layr-after').read_bytes()).digest(), 'before/after binaries are identical; force separate builds'
+def label_for(phase):return phase+('-'+args.run_id if phase=='after' and args.run_id else '')
+def archive_for(kind,phase):return fs/(kind+'-'+label_for(phase)+'-archive')
 
 def run(args,env=None,cwd=None,label=None):
     started=time.monotonic()
@@ -22,7 +46,7 @@ def measure(kind,phase,binary):
     root=fs/(kind+'-local')
     project=root/'projects'/kind
     line=project/'lines/main'
-    archive=fs/(kind+'-'+phase+'-archive')
+    archive=archive_for(kind,phase)
     env=os.environ|{'LAYR_ROOT':str(root),'LAYR_AUTHOR_NAME':'Cache benchmark','LAYR_AUTHOR_EMAIL':'cache@example.test','LAYR_TRACE':'1'}
     source=base/('layr-source' if kind=='layr' else 'studio-source')
     if not project.exists():
@@ -30,11 +54,12 @@ def measure(kind,phase,binary):
         seconds=run([base/'layr-before','git','clone',source,kind,'-q'],env,cwd=base,label=kind+'-import')
         print(json.dumps({'phase':'import','fixture':kind,'seconds':seconds}),flush=True)
     # Leave source snapshots unchanged; a second configured archive gets its own cache directory.
-    run([binary,'remote','add',phase,'file://'+str(archive),'--paper-key-out',base/(kind+'-'+phase+'-paper')],env,cwd=line)
-    seconds=run([binary,'push',phase,'-q'],env,cwd=line,label=kind+'-'+phase)
+    run([binary,'remote','add',label_for(phase),'file://'+str(archive),'--paper-key-out',base/(kind+'-'+label_for(phase)+'-paper')],env,cwd=line)
+    seconds=run([binary,'push',label_for(phase),'-q'],env,cwd=line,label=kind+'-'+label_for(phase))
     target=project/'meta/remote-stores'/hashlib.sha256(('file://'+str(archive)).encode()).hexdigest()
     files=[p for p in target.rglob('*') if p.is_file() and (p.parent.name=='pushed' or p.name in ('pushed.json','pushed-v2.json.zst','push-cache.sqlite3'))]
-    result={'fixture':kind,'phase':phase,'seconds':seconds,'commits':int(subprocess.check_output(['git','-C',str(source),'rev-list','--count','HEAD'])),'cache_bytes':sum(p.stat().st_size for p in files),'cache_allocated_bytes':sum(p.stat().st_blocks*512 for p in files),'cache_files':len(files),'encrypted_store_bytes':size(archive),'cache_path':str(target),'source_tip':subprocess.check_output(['git','-C',str(source),'rev-parse','HEAD']).decode().strip(),'time_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())}
+    assert (target/'pushed-v2.json.zst').is_file() if phase=='after' else (target/'pushed.json').is_file(), 'unexpected cache format'
+    result={'run_id':args.run_id,'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),'fixture':kind,'phase':phase,'seconds':seconds,'commits':int(subprocess.check_output(['git','-C',str(source),'rev-list','--count','HEAD'])),'cache_bytes':sum(p.stat().st_size for p in files),'cache_allocated_bytes':sum(p.stat().st_blocks*512 for p in files),'cache_files':len(files),'encrypted_store_bytes':size(archive),'cache_path':str(target),'source_tip':subprocess.check_output(['git','-C',str(source),'rev-parse','HEAD']).decode().strip(),'time_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())}
     result['cache_percent']=100*result['cache_bytes']/result['encrypted_store_bytes']
     with results.open('a') as out:out.write(json.dumps(result)+'\n')
     print(json.dumps(result),flush=True)
@@ -72,7 +97,7 @@ def daily():
             time.sleep(.005)
             parsed=urllib.parse.urlsplit(self.path);parts=parsed.path.split('/')
             assert parts[:3]==['','v1','p'] and parts[3] in ('before','after')
-            phase=parts[3];action='/'.join(parts[4:]);archive=fs/('studio-'+phase+'-archive')
+            phase=parts[3];action='/'.join(parts[4:]);archive=archive_for('studio',phase)
             auth=self.headers.get('Authorization');query=urllib.parse.parse_qs(parsed.query)
             kind='grant' if auth=='Bearer '+grant else 'read' if auth=='Bearer '+proof else 'none'
             requests.append({'method':self.command,'phase':phase,'path':self.path,'credential':kind})
@@ -122,7 +147,7 @@ def daily():
         for phase in ['before','after']:
             url=f'layr+https://localhost:{server.server_port}/{phase}'
             run([base/'layr-after','remote','add','gateway-'+phase,url],env,cwd=line,label='daily-setup')
-            source=project/'meta/remote-stores'/hashlib.sha256(('file://'+str(fs/('studio-'+phase+'-archive'))).encode()).hexdigest()
+            source=project/'meta/remote-stores'/hashlib.sha256(('file://'+str(archive_for('studio',phase))).encode()).hexdigest()
             target=project/'meta/remote-stores'/hashlib.sha256(url.encode()).hexdigest()
             target.mkdir(exist_ok=True)
             subprocess.run(['cp','-a','--reflink=always',str(source)+'/.',str(target)],check=True)
@@ -135,7 +160,7 @@ def daily():
             assert not errors,errors
             counts=dict(collections.Counter(r['method'] for r in requests))
             listing_prefixes=[urllib.parse.parse_qs(urllib.parse.urlsplit(r['path']).query).get('prefix',[''])[0] for r in requests if '/objects?' in r['path']]
-            result={'fixture':'studio','phase':'daily-'+phase,'seconds':seconds,'prior_commits':7965,'requests':counts,'request_count':len(requests),'listing_prefixes':listing_prefixes,'delay_ms':5,'cache_warmup':'same-object file-store cache reflinked to gateway URL alias','time_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())}
+            result={'run_id':args.run_id,'binary_sha256':hashlib.sha256((base/('layr-'+phase)).read_bytes()).hexdigest(),'fixture':'studio','phase':'daily-'+phase,'seconds':seconds,'prior_commits':7965,'requests':counts,'request_count':len(requests),'listing_prefixes':listing_prefixes,'delay_ms':5,'cache_warmup':'same-object file-store cache reflinked to gateway URL alias','time_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())}
             with results.open('a') as out:out.write(json.dumps(result)+'\n')
             (base/('daily-'+phase+'-requests.json')).write_text(json.dumps(requests,indent=2)+'\n')
             print(json.dumps(result),flush=True)
