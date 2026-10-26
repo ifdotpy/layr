@@ -279,7 +279,10 @@ fn import_fetched(ctx: &Ctx, store: &Path, tmp: &Path, refs: &[(String, String)]
 /// `git fetch` of a remote into the store. Network access runs as the caller, into a temporary
 /// repository that borrows the store objects; the service then imports a pack through a pipe.
 pub fn fetch(ctx: &Ctx, repo: &Repo, remote: &str) -> Result<Vec<(String, String)>> {
-    verify_cache(repo)?;
+    cache_retry(repo, || fetch_once(ctx, repo, remote))
+}
+
+fn fetch_once(ctx: &Ctx, repo: &Repo, remote: &str) -> Result<Vec<(String, String)>> {
     let s = init_store(repo)?;
     let url = remote_url(repo, remote)?;
     let tmp = std::env::temp_dir().join(format!("layr-fetch-{}", ids::new_id()));
@@ -367,13 +370,20 @@ impl CatFile {
         let mut header = String::new();
         self.output.read_line(&mut header)?;
         let fields: Vec<&str> = header.split_whitespace().collect();
-        if fields.len() != 3 || fields[0] != oid || fields[1] != kind {
+        if fields.len() != 3 || fields[0] != oid || (!kind.is_empty() && fields[1] != kind) {
             bail!("cannot read Git {kind} {oid}: {}", header.trim());
         }
         let mut data = vec![0; fields[2].parse()?];
         self.output.read_exact(&mut data)?;
         let mut newline = [0];
         self.output.read_exact(&mut newline)?;
+        use sha1::{Digest, Sha1};
+        let mut hash = Sha1::new();
+        hash.update(format!("{} {}\0", fields[1], data.len()).as_bytes());
+        hash.update(&data);
+        if hex::encode(hash.finalize()) != oid {
+            bail!("Git cache object {oid} has a hash mismatch");
+        }
         Ok(data)
     }
 }
@@ -499,7 +509,7 @@ fn materialize(s: &Path, commit: &str, dst: &Path, paths: Option<&[String]>, own
     });
     let mut stdout = std::io::BufReader::new(child.stdout.take().unwrap());
     use std::io::{BufRead, Read};
-    for (mode, _oid, path) in &entries {
+    for (mode, oid, path) in &entries {
         if mode == "160000" {
             fsutil::make_parents(dst, &format!("{path}/x"), own)?;
             continue;
@@ -515,6 +525,9 @@ fn materialize(s: &Path, commit: &str, dst: &Path, paths: Option<&[String]>, own
         stdout.read_exact(&mut data)?;
         let mut nl = [0u8; 1];
         stdout.read_exact(&mut nl)?;
+        if fsutil::git_blob_id(&data) != *oid {
+            bail!("Git cache blob {oid} has a hash mismatch");
+        }
         if fsutil::lmeta(dst, path).is_some() {
             fsutil::remove_entry(dst, path)?;
         }
@@ -538,7 +551,20 @@ fn materialize(s: &Path, commit: &str, dst: &Path, paths: Option<&[String]>, own
 
 /// Import the entire reachable DAG, parents first. A retry reuses completed imports.
 pub fn import_commit(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str, author_uid: u32) -> Result<(String, bool)> {
-    verify_cache(repo)?;
+    match import_commit_once(ctx, repo, commit, refname, author_uid) {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            if !repair_cache(repo)? {
+                return Err(error);
+            }
+            let remote = refname.split_once('/').context("import ref has no remote")?.0;
+            fetch(ctx, repo, remote)?;
+            import_commit_once(ctx, repo, commit, refname, author_uid)
+        }
+    }
+}
+
+fn import_commit_once(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str, author_uid: u32) -> Result<(String, bool)> {
     let s = init_store(repo)?;
     let revs = git_out(&s, &["rev-list", "--topo-order", "--reverse", "--parents", commit])?;
     let mut states = BTreeMap::new();
@@ -768,36 +794,73 @@ pub fn build_index(repo: &Repo, state: &str, commit: &str, prev_state: Option<&s
 
 // ----- export -----
 
-/// Hash-check the cache before reusing its objects. A crash can lose unflushed objects, but
-/// immutable states and signed records can rebuild them. Keep damaged caches private for
-/// diagnosis; they may also contain fetched refs not imported into source history yet.
+// Full scanning is reserved for a failed object read; normal commands hash only objects they use.
 thread_local! {
-    static VERIFIED_CACHES: std::cell::RefCell<BTreeSet<PathBuf>> = const { std::cell::RefCell::new(BTreeSet::new()) };
+    static VERIFIED_OBJECTS: std::cell::RefCell<BTreeSet<(PathBuf, String)>> = const { std::cell::RefCell::new(BTreeSet::new()) };
 }
-
-pub fn verify_cache(repo: &Repo) -> Result<()> {
+fn repair_cache(repo: &Repo) -> Result<bool> {
     if !has_store(repo) {
-        return Ok(());
+        return Ok(false);
     }
     let s = store(repo);
-    // Objects are immutable; verify once per command. New objects written by this command
-    // have their expected hash checked before publication. A crash ends this verification scope.
-    if VERIFIED_CACHES.with(|verified| verified.borrow().contains(&s)) {
-        return Ok(());
-    }
-    let check = base_cmd(&s)
+    if base_cmd(&s)
         .args(["fsck", "--full", "--no-reflogs", "--no-dangling"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()?;
-    if !check.success() {
-        let damaged = repo.p.dir.join(format!("git-damaged-{}", ids::new_id()));
-        std::fs::rename(&s, &damaged)?;
-        std::fs::set_permissions(&damaged, std::fs::Permissions::from_mode(0o700))?;
-        init_store(repo)?;
+        .status()?
+        .success()
+    {
+        return Ok(false);
     }
-    VERIFIED_CACHES.with(|verified| verified.borrow_mut().insert(s));
+    let damaged = repo.p.dir.join(format!("git-damaged-{}", ids::new_id()));
+    std::fs::rename(&s, &damaged)?;
+    std::fs::set_permissions(&damaged, std::fs::Permissions::from_mode(0o700))?;
+    VERIFIED_OBJECTS.with(|objects| objects.borrow_mut().retain(|(path, _)| path != &s));
+    init_store(repo)?;
+    Ok(true)
+}
+fn cache_retry<T>(repo: &Repo, mut read: impl FnMut() -> Result<T>) -> Result<T> {
+    match read() {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            if repair_cache(repo)? {
+                read()
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+fn check_object(s: &Path, cat: &mut CatFile, oid: &str, kind: &str) -> Result<()> {
+    let key = (s.to_path_buf(), oid.to_string());
+    if !VERIFIED_OBJECTS.with(|objects| objects.borrow().contains(&key)) {
+        cat.object(oid, kind)?;
+        VERIFIED_OBJECTS.with(|objects| objects.borrow_mut().insert(key));
+    }
+    Ok(())
+}
+fn check_commit(repo: &Repo, commit: &str) -> Result<()> {
+    let s = store(repo);
+    let mut cat = CatFile::new(&s)?;
+    let raw = cat.object(commit, "commit")?;
+    let tree = tree_id(&raw)?;
+    check_object(&s, &mut cat, tree, "tree")?;
+    for line in git_out(&s, &["ls-tree", "-r", "-t", "-d", tree])?.lines() {
+        let fields: Vec<_> = line.split_whitespace().take(3).collect();
+        if fields.get(1) == Some(&"tree") {
+            check_object(&s, &mut cat, fields[2], "tree")?;
+        }
+    }
+    Ok(())
+}
+fn check_reachable(repo: &Repo, commit: &str) -> Result<()> {
+    let s = store(repo);
+    let objects = git_out(&s, &["rev-list", "--objects", "--no-object-names", commit])?;
+    let mut cat = CatFile::new(&s)?;
+    for oid in objects.lines() {
+        check_object(&s, &mut cat, oid, "")?;
+    }
     Ok(())
 }
 
@@ -922,10 +985,14 @@ fn restore_import(repo: &Repo, state: &StateRec, parents: &[String], saved: serd
 
 /// The nearest ancestor state with a git commit.
 pub fn mapped_ancestor(repo: &Repo, state: &str) -> Result<Option<(String, String)>> {
-    verify_cache(repo)?;
+    cache_retry(repo, || mapped_ancestor_once(repo, state))
+}
+
+fn mapped_ancestor_once(repo: &Repo, state: &str) -> Result<Option<(String, String)>> {
     for a in repo.ancestors(state)? {
         if let Some(c) = repo.p.db.git_commit_of(&a)? {
             if git_out(&store(repo), &["cat-file", "-e", &format!("{c}^{{commit}}")]).is_ok() {
+                check_commit(repo, &c)?;
                 return Ok(Some((a, c)));
             }
             if repo.p.db.git_import(&a)?.is_some() {
@@ -940,6 +1007,10 @@ pub fn mapped_ancestor(repo: &Repo, state: &str) -> Result<Option<(String, Strin
 /// One commit for a state on top of the nearest exported ancestor (`push --squash`): the tree of
 /// the state, one parent. The same state gives the same commit.
 pub fn make_commit(repo: &Repo, state: &StateRec, message: Option<&str>) -> Result<(String, Option<String>)> {
+    cache_retry(repo, || make_commit_once(repo, state, message))
+}
+
+fn make_commit_once(repo: &Repo, state: &StateRec, message: Option<&str>) -> Result<(String, Option<String>)> {
     repo.source_state(&state.id)?;
     let anc = mapped_ancestor(repo, &state.id)?;
     if let Some((ast, ac)) = &anc {
@@ -963,7 +1034,10 @@ pub fn tree_of(repo: &Repo, state: &str) -> Result<String> {
 /// commit a push exports: a tree for a folder, a blob for a file, the root tree for an empty path.
 /// `None` when the exported tree has no such path (absent, or a path a push does not export).
 pub fn object_of(repo: &Repo, state: &str, path: &str) -> Result<Option<String>> {
-    verify_cache(repo)?;
+    cache_retry(repo, || object_of_once(repo, state, path))
+}
+
+fn object_of_once(repo: &Repo, state: &str, path: &str) -> Result<Option<String>> {
     let commit = match commit_of(repo, state)? {
         Some(c) => c,
         None => export_history(repo, state)?.0,
@@ -972,7 +1046,12 @@ pub fn object_of(repo: &Repo, state: &str, path: &str) -> Result<Option<String>>
     let out =
         base_cmd(&store(repo)).args(["rev-parse", "--verify", "-q", &spec]).stdin(Stdio::null()).output().context("run git")?;
     match out.status.code() {
-        Some(0) => Ok(Some(String::from_utf8_lossy(&out.stdout).trim().to_string())),
+        Some(0) => {
+            let oid = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            let s = store(repo);
+            check_object(&s, &mut CatFile::new(&s)?, &oid, "")?;
+            Ok(Some(oid))
+        }
         // --verify -q: exit 1 and no message when the name does not resolve.
         Some(1) if out.stderr.is_empty() => Ok(None),
         _ => bail!("git rev-parse {spec} failed: {}", String::from_utf8_lossy(&out.stderr).trim()),
@@ -993,6 +1072,7 @@ fn commit_of(repo: &Repo, state: &str) -> Result<Option<String>> {
 fn recorded_commit(repo: &Repo, state: &str) -> Result<Option<String>> {
     if let Some(c) = repo.p.db.git_commit_of(state)? {
         if git_out(&store(repo), &["cat-file", "-e", &format!("{c}^{{commit}}")]).is_ok() {
+            check_commit(repo, &c)?;
             return Ok(Some(c));
         }
     }
@@ -1009,10 +1089,14 @@ fn history_ref(state: &str) -> String {
 
 fn history_commit(repo: &Repo, state: &str) -> Result<Option<String>> {
     let spec = format!("{}^{{commit}}", history_ref(state));
-    Ok(git_out(&store(repo), &["rev-parse", "--verify", "-q", &spec])
+    let commit = git_out(&store(repo), &["rev-parse", "--verify", "-q", &spec])
         .ok()
         .map(|c| c.trim().to_string())
-        .filter(|c| !c.is_empty()))
+        .filter(|c| !c.is_empty());
+    if let Some(commit) = &commit {
+        check_commit(repo, commit)?;
+    }
+    Ok(commit)
 }
 
 /// The state of a git commit that layr made without a record (a history commit, for example the
@@ -1021,7 +1105,6 @@ pub fn state_of_history_commit(repo: &Repo, name: &str) -> Result<Option<String>
     if !has_store(repo) {
         return Ok(None);
     }
-    verify_cache(repo)?;
     let s = store(repo);
     let commit = match git_out(&s, &["rev-parse", "--verify", "-q", &format!("{name}^{{commit}}")]) {
         Ok(c) => c.trim().to_string(),
@@ -1041,7 +1124,10 @@ pub fn state_of_history_commit(repo: &Repo, name: &str) -> Result<Option<String>
 /// parents as its state (a merge stays a merge). The same states give the same commits. Returns
 /// the commit of `state` and the new (state, commit) pairs.
 pub fn export_history(repo: &Repo, state: &str) -> Result<(String, Vec<(String, String)>)> {
-    verify_cache(repo)?;
+    cache_retry(repo, || export_history_once(repo, state))
+}
+
+fn export_history_once(repo: &Repo, state: &str) -> Result<(String, Vec<(String, String)>)> {
     repo.source_state(state)?;
     let mut known: BTreeMap<String, String> = BTreeMap::new();
     let mut order: Vec<String> = Vec::new();
@@ -1292,6 +1378,22 @@ fn refresh_index(repo: &Repo, state: &str) -> Result<()> {
 
 /// Push a prepared commit to `refs/heads/<branch>` of the remote, as the caller.
 pub fn push(ctx: &Ctx, repo: &Repo, url: &str, commit: &str, branch: &str, force: bool) -> Result<()> {
+    if let Err(error) = check_reachable(repo, commit) {
+        if !repair_cache(repo)? {
+            return Err(error);
+        }
+        let mut rebuilt = false;
+        for state in repo.p.db.state_of_commit(commit)? {
+            if repo.p.has_state(&state) && export_history(repo, &state)?.0 == commit {
+                rebuilt = true;
+                break;
+            }
+        }
+        if !rebuilt {
+            bail!("cannot rebuild prepared Git commit {commit}; prepare the export again");
+        }
+        check_reachable(repo, commit)?;
+    }
     let s = store(repo);
     let before = ls_remote(ctx, repo, url, branch)?;
     if !force {
