@@ -2040,8 +2040,8 @@ fn replace_folder(t: &Tree, path: &str, subvolume: bool, uid: u32, gid: u32) -> 
         t.remove(&tmp).with_context(|| format!("remove incomplete cache {tmp} after {error:#}"))?;
         return Err(error);
     }
-    t.rename(path, &old)?;
-    t.rename(&tmp, path)?;
+    t.rename_directory(path, &old)?;
+    t.rename_directory(&tmp, path)?;
     t.chown(path, uid, gid)?;
     t.remove(&old)?;
     Ok(())
@@ -2081,6 +2081,22 @@ pub fn holds_files(root: &Path, path: &str) -> bool {
 mod cache_copy_tests {
     use super::*;
     use std::os::unix::{fs::PermissionsExt, net::UnixListener};
+
+    #[test]
+    fn cache_directory_rename_restores_readonly_modes() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("layr-cache-rename-{}", crate::ids::new_id()));
+        std::fs::create_dir_all(root.join("source"))?;
+        std::fs::create_dir_all(root.join("occupied/child"))?;
+        std::fs::set_permissions(root.join("source"), std::fs::Permissions::from_mode(0o555))?;
+        let tree = Tree::open(&root)?;
+        assert!(tree.rename_directory("source", "occupied").is_err());
+        assert_eq!(std::fs::metadata(root.join("source"))?.permissions().mode() & 0o777, 0o555);
+        tree.rename_directory("source", "destination")?;
+        assert_eq!(std::fs::metadata(root.join("destination"))?.permissions().mode() & 0o777, 0o555);
+        tree.remove("destination")?;
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
 
     #[test]
     fn incomplete_cache_directories_are_private() -> Result<()> {
