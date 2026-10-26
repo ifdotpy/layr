@@ -1001,6 +1001,59 @@ mod tests {
         }
     }
 
+    #[test]
+    fn actual_tls_cdn_corruption_blocking_and_wrong_origin_fall_back_once() {
+        use std::io::BufRead;
+        struct Fixture {
+            child: std::process::Child,
+            root: std::path::PathBuf,
+        }
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+                let _ = std::fs::remove_dir_all(&self.root);
+            }
+        }
+        let root = std::env::temp_dir().join(format!("layr-cdn-tls-{}", crate::ids::new_id()));
+        std::fs::create_dir(&root).unwrap();
+        let identity = keys::generate_identity();
+        let valid = keys::encrypt(&keys::recipient_of(&identity).unwrap(), b"verified ciphertext").unwrap();
+        std::fs::write(root.join("valid.age"), &valid).unwrap();
+        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/cdn_gateway.py");
+        let child =
+            std::process::Command::new("python3").arg(script).arg(&root).stdout(std::process::Stdio::piped()).spawn().unwrap();
+        let mut fixture = Fixture { child, root };
+        let mut port = String::new();
+        std::io::BufReader::new(fixture.child.stdout.take().unwrap()).read_line(&mut port).unwrap();
+        let port: u16 = port.trim().parse().expect("TLS fixture startup");
+        let mut gateway = Gateway::open("layr+https://localhost/project").unwrap();
+        gateway.base = reqwest::Url::parse(&format!("https://localhost:{port}/v1/p/project/")).unwrap();
+        gateway.configure_ca(&std::fs::read(fixture.root.join("ca.pem")).unwrap()).unwrap();
+        gateway.set_identity(&identity).unwrap();
+        *gateway.read.lock().unwrap() = Some(("fixture.read".into(), crate::ids::now_ms() + 60000));
+        let backend = super::super::backend::Backend::Gateway(gateway.clone());
+        for mode in 1..=4 {
+            let key = format!("files/01a177aa-a7a5-716c-8774-7f165724c16{mode}.age");
+            let result = backend.verified(false, |backend, _| {
+                let bytes = backend.get(&key)?.context("missing fixture object")?;
+                keys::decrypt(&identity, &bytes)
+            });
+            if mode == 4 {
+                assert!(result.is_err());
+            } else {
+                assert_eq!(result.unwrap(), b"verified ciphertext");
+            }
+        }
+        let response = gateway.http.get(format!("https://localhost:{port}/counts")).send().unwrap();
+        let counts: std::collections::BTreeMap<String, u64> = response.json().unwrap();
+        for mode in 1..=4 {
+            assert_eq!(counts.get(&format!("{mode}.link")), Some(&1));
+            assert_eq!(counts.get(&format!("{mode}.direct")), Some(&1));
+            assert_eq!(counts.get(&format!("{mode}.cdn")).copied().unwrap_or(0), if mode == 3 { 0 } else { 1 });
+        }
+    }
+
     fn listing_pages(pages: Vec<serde_json::Value>, public: bool) -> Result<Vec<Object>> {
         use std::io::{Read, Write};
         use std::net::TcpListener;
