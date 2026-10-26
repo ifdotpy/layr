@@ -644,7 +644,7 @@ impl Project {
             .enumerate()
             .map(|(i, s)| {
                 let mut row =
-                    serde_json::json!({"version":format!("v{}",i+1),"state":s,"attestations":self.attestations(&s.id,None)});
+                    serde_json::json!({"version":format!("v{}",i+1),"state":s,"attestations":self.attestations(&s.id,None),"checks":self.checks(&s.id)});
                 if let Some(version) = self.version_info(&s.id) {
                     row["operation"] = version;
                 }

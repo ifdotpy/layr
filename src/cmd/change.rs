@@ -73,7 +73,7 @@ pub fn change(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let mut rows = Vec::new();
             let model = repo.read_model()?;
             for (n, s) in versions.iter().enumerate() {
-                let mut row = serde_json::json!({"version":format!("v{}",n+1),"state":s,"attestations":repo.p.db.attestations(&s.id,None)?});
+                let mut row = serde_json::json!({"version":format!("v{}",n+1),"state":s,"attestations":repo.p.db.attestations(&s.id,None)?,"checks":model.checks(&s.id)});
                 if let Some(version) = model.version_info(&s.id) {
                     row["operation"] = version;
                 }
