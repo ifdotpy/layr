@@ -29,11 +29,30 @@ Configuration remains local to each machine, as other project settings do.
 A peer cannot replace the local transport URL through sync.
 The list command supports `--json`.
 
-Create a new store with `layr remote add archive file:///path --paper-key-out /private/path/key.txt`.
+Create a new store from your private terminal:
+
+```sh
+layr remote add archive file:///path --paper-key-tty
+```
+
+The command shows 24 paper words once on the controlling terminal (`/dev/tty`).
+Save the words privately. Type the final word at the confirmation prompt.
+Layr publishes the encrypted slots and store descriptor only after that confirmation.
+An incorrect answer cancels creation without publishing store objects.
+The words do not enter stdout, stderr, a key file, project records or configuration.
+Only the public paper recipient is pinned in configuration.
+Both stdin and stdout must be terminals. Stdin must use the controlling terminal.
+Pipes, output redirection and sessions without a controlling terminal are refused.
+Run this command locally. A background service without your controlling terminal cannot show the key.
+An existing store cannot show its paper key again.
+If publication fails after confirmation, retain the saved words for recovery.
+
+For file output, use `layr remote add archive file:///path --paper-key-out /private/path/key.txt`.
 The output file must not exist. It must be outside the store and all line folders.
 Layr creates the file as the caller with mode `0600`.
 Write the words on paper. Delete the file after you check the paper copy.
-Layr never prints the words or puts them in project records or configuration.
+File output does not print the words or put them in project records or configuration.
+Use either `--paper-key-tty` or `--paper-key-out` for a new store.
 S3 credentials come only from the caller's environment in `Ctx.env`.
 Layr does not store these credentials in the project database or local index.
 

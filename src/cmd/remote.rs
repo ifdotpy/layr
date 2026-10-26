@@ -482,6 +482,7 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
             .flag("--json")
             .value("--public-key")
             .value("--paper-key-out")
+            .flag("--paper-key-tty")
             .value("--recipient")
             .value("--person")
             .value("--invite-out")
@@ -490,6 +491,9 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
         args,
     )?;
     let sub = a.pos.first().map(String::as_str).unwrap_or("list");
+    if a.has("--paper-key-tty") && sub != "add" {
+        bail!("--paper-key-tty requires remote add");
+    }
     if sub == "self" {
         if a.pos.len() != 1 {
             bail!("usage: layr remote self [--json]");
@@ -571,6 +575,9 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
             if a.has("--paper-key-out") && remote_kind != Kind::Store {
                 bail!("--paper-key-out requires a store remote");
             }
+            if a.has("--paper-key-tty") && remote_kind != Kind::Store {
+                bail!("--paper-key-tty requires a store remote");
+            }
             crate::store::check_name("remote", name)?;
             repo.require(ctx, "remote")?;
             let _lock = repo.p.lock()?;
@@ -581,7 +588,10 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let recovery_key_file = if remote_kind == Kind::Store {
                 let mut store = store_remote::open(url, repo)?;
                 store.use_aws_profile(repo.p.config_value(&format!("remote.{name}.aws-profile"))?.and_then(|v|v.as_str().map(str::to_owned)));
-                let opts = store_remote::ConfigureOptions { paper_key_out: a.get("--paper-key-out").map(|p| ctx.cwd.join(p)) };
+                let opts = store_remote::ConfigureOptions {
+                    paper_key_out: a.get("--paper-key-out").map(|p| ctx.cwd.join(p)),
+                    paper_key_tty: a.has("--paper-key-tty"),
+                };
                 let configured = store.configure(ctx, &opts)?;
                 store.save_pin(ctx, repo, name)?;
                 configured.recovery_key_file
@@ -713,7 +723,7 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
         _ => {
             return Err(exit(
                 128,
-                "usage: layr remote add <name> <url> [--paper-key-out <path>] | list | self | login <name> | remove <name> | trust <name> <machine> [--public-key <ed25519>] | trust-store <name> --recipient <age1…> | grant <name> --person <login> --recipient <age1…> [--invite-out <path>]",
+                "usage: layr remote add <name> <url> [--paper-key-tty | --paper-key-out <path>] | list | self | login <name> | remove <name> | trust <name> <machine> [--public-key <ed25519>] | trust-store <name> --recipient <age1…> | grant <name> --person <login> --recipient <age1…> [--invite-out <path>]",
             ))
         }
     }

@@ -53,6 +53,7 @@ pub struct Report {
 #[derive(Default)]
 pub struct ConfigureOptions {
     pub paper_key_out: Option<PathBuf>,
+    pub paper_key_tty: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -293,10 +294,16 @@ impl Store {
     }
 
     pub fn configure(&mut self, ctx: &Ctx, opts: &ConfigureOptions) -> Result<Configured> {
+        if opts.paper_key_tty && opts.paper_key_out.is_some() {
+            bail!("use either --paper-key-tty or --paper-key-out, not both");
+        }
         // Establish and verify the immutable root pin before epoch discovery.
         // The actual operation resolves current epochs after configuration.
         self.connect_transport(ctx)?;
         if self.backend.get("store.json")?.is_some() {
+            if opts.paper_key_tty {
+                bail!("the store already exists; its paper key cannot be shown again");
+            }
             self.pin_descriptor()?;
             return Ok(Configured { created: false, recovery_key_file: None });
         }
@@ -311,11 +318,16 @@ impl Store {
         if self.project.is_empty() {
             bail!("the remote store is empty");
         }
-        let path = opts.paper_key_out.as_ref().context("a new store requires --paper-key-out <path>")?;
-        let (file, paper_recipient) = writer::initialize(self, ctx, path)?;
+        let (file, paper_recipient) = if opts.paper_key_tty {
+            (None, writer::initialize_tty(self, ctx)?)
+        } else {
+            let path = opts.paper_key_out.as_ref().context("a new store requires --paper-key-tty or --paper-key-out <path>")?;
+            let (file, recipient) = writer::initialize(self, ctx, path)?;
+            (Some(file), recipient)
+        };
         self.pin_descriptor()?;
         self.pin.as_mut().expect("initialized store pin").paper_recipient = Some(paper_recipient);
-        Ok(Configured { created: true, recovery_key_file: Some(file) })
+        Ok(Configured { created: true, recovery_key_file: file })
     }
 
     fn pin_descriptor(&mut self) -> Result<()> {
@@ -838,7 +850,7 @@ mod pin_tests {
         repo.p.append(record, &ctx.actor()).unwrap();
         let url = format!("file://{}", root.join("remote").display());
         let mut store = open(&url, &repo).unwrap();
-        store.configure(&ctx, &ConfigureOptions { paper_key_out: Some(root.join("paper")) }).unwrap();
+        store.configure(&ctx, &ConfigureOptions { paper_key_out: Some(root.join("paper")), ..Default::default() }).unwrap();
         crate::cmd::admin::set_config(&ctx, &repo, "cloud.remote.archive.url", serde_json::json!(url)).unwrap();
         store.save_pin(&ctx, &repo, "archive").unwrap();
         let mut store = open(&url, &repo).unwrap();

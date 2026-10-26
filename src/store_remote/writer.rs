@@ -56,7 +56,7 @@ pub(super) fn initialize(store: &Store, ctx: &crate::ctx::Ctx, output: &Path) ->
             Err(e) => Err(e.into()),
         }
     })?;
-    let (paper, mut vault) = if let Some(text) = existing_file {
+    let (paper, vault) = if let Some(text) = existing_file {
         let slot = existing_slot.as_ref().context("paper key file already exists; use a new --paper-key-out path")?;
         let paper = keys::identity_from_paper(&text).map_err(|_| anyhow::anyhow!("invalid paper key file"))?;
         let vault = keys::open_slot(slot, &paper).map_err(|_| anyhow::anyhow!("store is being created by another writer"))?;
@@ -78,10 +78,54 @@ pub(super) fn initialize(store: &Store, ctx: &crate::ctx::Ctx, output: &Path) ->
         })?;
         (paper, keys::generate_identity())
     };
-    let paper_slot = keys::seal_slot(&vault, &keys::recipient_of(&paper)?)?;
+    let recipient = publish_initial_slots(store, &paper, vault)?;
+    Ok((path.to_string_lossy().into_owned(), recipient))
+}
+
+pub(super) fn initialize_tty(store: &Store, ctx: &Ctx) -> Result<String> {
+    use std::io::{BufRead, IsTerminal, Read, Write};
+    use std::os::unix::fs::OpenOptionsExt;
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        bail!("--paper-key-tty requires terminal stdin and stdout; run it in your private terminal without redirection");
+    }
+    let mut terminal = crate::privs::as_caller_fs(ctx, || {
+        Ok(std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NOCTTY)
+            .open("/dev/tty")?)
+    })
+    .context("--paper-key-tty requires a controlling terminal; run it in your private terminal")?;
+    if !terminal.is_terminal() {
+        bail!("--paper-key-tty requires a controlling terminal");
+    }
+    // A service worker can inherit another session's controlling terminal.
+    // Never display a caller's key on that terminal.
+    let foreground = rustix::termios::tcgetpgrp(&terminal).context("cannot check the controlling terminal")?;
+    if rustix::termios::tcgetpgrp(std::io::stdin()).ok() != Some(foreground) {
+        bail!("--paper-key-tty requires stdin on your controlling terminal");
+    }
+    if store.backend.get("slots/paper.age")?.is_some() {
+        bail!("store creation already started; recover with the original paper key");
+    }
+    let paper = keys::generate_identity();
+    let words = keys::words_of_identity(&paper)?;
+    writeln!(terminal, "Paper key (24 words):\n{words}\n\nSave these words privately. They will not be shown again.")?;
+    write!(terminal, "Type the final word of the paper key to confirm: ")?;
+    terminal.flush()?;
+    let mut confirmation = String::new();
+    std::io::BufReader::new((&terminal).take(128)).read_line(&mut confirmation)?;
+    if confirmation.trim() != words.split_whitespace().last().expect("paper key has words") {
+        bail!("paper key confirmation did not match; no store objects were published");
+    }
+    publish_initial_slots(store, &paper, keys::generate_identity())
+}
+
+fn publish_initial_slots(store: &Store, paper: &str, mut vault: String) -> Result<String> {
+    let paper_slot = keys::seal_slot(&vault, &keys::recipient_of(paper)?)?;
     if !store.backend.put_new("slots/paper.age", paper_slot)? {
         let slot = store.backend.get("slots/paper.age")?.context("paper slot disappeared")?;
-        vault = keys::open_slot(&slot, &paper).map_err(|_| anyhow::anyhow!("store is being created by another writer"))?;
+        vault = keys::open_slot(&slot, paper).map_err(|_| anyhow::anyhow!("store is being created by another writer"))?;
     }
     initialization_failpoint("paper")?;
     let machine_slot = format!("slots/machine-{}.age", store.machine);
@@ -99,7 +143,7 @@ pub(super) fn initialize(store: &Store, ctx: &crate::ctx::Ctx, output: &Path) ->
         }
     }
     initialization_failpoint("store")?;
-    Ok((path.to_string_lossy().into_owned(), keys::recipient_of(&paper)?))
+    keys::recipient_of(paper)
 }
 
 // Unit tests inject interruption after each immutable publication.
@@ -474,7 +518,7 @@ mod tests {
             let ctx = context(&root);
             let mut store = remote(&root, &ctx);
             let path = root.join("recovery.txt");
-            let opts = super::super::ConfigureOptions { paper_key_out: Some(path.clone()) };
+            let opts = super::super::ConfigureOptions { paper_key_out: Some(path.clone()), ..Default::default() };
             INIT_STOP.with(|value| *value.borrow_mut() = Some(stop));
             assert!(store.configure(&ctx, &opts).is_err());
             INIT_STOP.with(|value| *value.borrow_mut() = None);
@@ -501,7 +545,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let ctx = context(&root);
         let mut store = remote(&root, &ctx);
-        store.configure(&ctx, &super::super::ConfigureOptions { paper_key_out: Some(root.join("paper")) }).unwrap();
+        store.configure(&ctx, &super::super::ConfigureOptions { paper_key_out: Some(root.join("paper")), ..Default::default() }).unwrap();
         let dir = ctx.store.projects_dir().join("p");
         std::fs::create_dir_all(dir.join("meta/db")).unwrap();
         std::fs::create_dir_all(dir.join("states")).unwrap();
@@ -572,11 +616,11 @@ mod tests {
         let mut store = remote(&root, &ctx);
         let path = root.join("keep.txt");
         fsutil::atomic_write(&path, b"do not replace", 0o600).unwrap();
-        assert!(store.configure(&ctx, &super::super::ConfigureOptions { paper_key_out: Some(path.clone()) }).is_err());
+        assert!(store.configure(&ctx, &super::super::ConfigureOptions { paper_key_out: Some(path.clone()), ..Default::default() }).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), b"do not replace");
         assert!(store.backend.get("store.json").unwrap().is_none());
         assert!(store
-            .configure(&ctx, &super::super::ConfigureOptions { paper_key_out: Some(ctx.store.root.join("bad.txt")) })
+            .configure(&ctx, &super::super::ConfigureOptions { paper_key_out: Some(ctx.store.root.join("bad.txt")), ..Default::default() })
             .is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -596,7 +640,7 @@ mod tests {
                     let mut store = remote(&root, &ctx);
                     barrier.wait();
                     let result =
-                        store.configure(&ctx, &super::super::ConfigureOptions { paper_key_out: Some(own.join("paper.txt")) });
+                        store.configure(&ctx, &super::super::ConfigureOptions { paper_key_out: Some(own.join("paper.txt")), ..Default::default() });
                     result.map(|r| r.created)
                 })
             })
@@ -622,7 +666,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let ctx = context(&root);
         let mut store = remote(&root, &ctx);
-        store.configure(&ctx, &super::super::ConfigureOptions { paper_key_out: Some(root.join("paper")) }).unwrap();
+        store.configure(&ctx, &super::super::ConfigureOptions { paper_key_out: Some(root.join("paper")), ..Default::default() }).unwrap();
         let descriptor = store.descriptor().unwrap();
         let mut base = None;
         let mut base_root = None;
@@ -672,7 +716,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let ctx = context(&root);
         let mut store = remote(&root, &ctx);
-        store.configure(&ctx, &super::super::ConfigureOptions { paper_key_out: Some(root.join("paper")) }).unwrap();
+        store.configure(&ctx, &super::super::ConfigureOptions { paper_key_out: Some(root.join("paper")), ..Default::default() }).unwrap();
         let descriptor = store.descriptor().unwrap();
         let mut record = crate::model::Record::new("machine");
         record.id = crate::ids::new_id();
