@@ -35,10 +35,15 @@
   "daily_gateway_request_delay_ms": 5,
   "tests": {
     "workspace_passed": 240,
-    "workspace_ignored": 8
+    "workspace_ignored": 8,
+    "t56_passed": 5
   },
   "cleanup_revision": "3edd581",
   "daily_final_state_count": 7967,
   "minimum_observed_host_free_gib": 32.514244079589844,
-  "cleanup_tests_revision": "3edd581"
+  "cleanup_tests_revision": "3edd581",
+  "rebased_on": "cddd095",
+  "rebased_source_revision": "379411a",
+  "rebased_binary_sha256": "78d0f33060157772156baf30b6b5a84dc2e981850fc3c4b9ddc8b88415ad1d25",
+  "rebase_push_path_changes": "none; two comments only; measurements retained by lead instruction"
 }

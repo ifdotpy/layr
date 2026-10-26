@@ -7,3 +7,4 @@ t24-store-partial.sh: 11 passed, 0 failed
 t35-overlay-sync.sh: 49 passed, 0 failed
 t42-public.sh: 99 passed, 0 failed
 t46-machine-bootstrap.sh: 18 passed, 0 failed
+t56-push-cache-retry.sh: 5 passed, 0 failed
