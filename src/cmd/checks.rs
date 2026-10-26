@@ -408,7 +408,9 @@ fn execute(
             bail!("privileged checks require the root layr daemon");
         }
         let path = std::path::PathBuf::from(format!("/var/tmp/layr-check-{}", crate::ids::new_id()));
-        std::fs::DirBuilder::new().mode(0o700).create(&path)?;
+        // Filesystem suites start service clients under test users. They must
+        // traverse this credential-free source copy to reach their own fixtures.
+        std::fs::DirBuilder::new().mode(0o711).create(&path)?;
         Some(crate::repo::Temp { path })
     } else {
         None
@@ -427,7 +429,7 @@ fn execute(
             bail!("cannot prepare private privileged check folder");
         }
         home = private.path.join(format!(".check-home-{}", crate::ids::new_id()));
-        std::fs::create_dir(&home)?;
+        std::fs::DirBuilder::new().mode(0o700).create(&home)?;
         // Keep test mounts private so killing a timed-out suite releases its mounts too.
         // This is cleanup isolation, not a security boundary for code running as root.
         command = Command::new("/usr/bin/unshare");
@@ -497,14 +499,16 @@ fn macos_profile(work: &std::path::Path, seed: &std::path::Path) -> Result<Strin
 (allow signal (target same-sandbox))
 (allow mach-lookup)
 (allow sysctl-read)
+(allow system-info (info-type "vfs.disk-space"))
 (allow file-read-metadata)
 (allow file-read*
     (literal "/")
+    (literal "/Volumes") (path-ancestors {work})
     (subpath "/System") (subpath "/usr") (subpath "/bin") (subpath "/sbin")
     (subpath "/Library/Apple") (subpath "/Library/Developer")
     (subpath "/Applications/Xcode.app/Contents")
     (subpath "/opt/homebrew") (subpath "/private/etc")
-    (subpath "/private/var/db/dyld") (subpath "/dev")
+    (subpath "/private/var/db/dyld") (subpath "/private/var/db/timezone") (subpath "/dev")
     (subpath {work}) (subpath {seed})
     (subpath "/Volumes/LayrRunner") (subpath "/Volumes/LayrRunnerCase"))
 (allow file-write*
@@ -526,12 +530,22 @@ fn execute(
     privileged: bool,
     limits: &Limits,
 ) -> Result<(i32, Vec<u8>, bool)> {
+    use std::os::unix::fs::DirBuilderExt;
     if privileged {
         bail!("privileged automatic checks are unavailable on macOS");
     }
-    let dir = std::fs::canonicalize(dir)?;
+    // Keep the writable tree outside the personal home. The no-follow APFS
+    // helpers need readable ancestor directories, not access to the home tree.
+    let private =
+        crate::repo::Temp { path: std::path::PathBuf::from(format!("/private/var/tmp/layr-check-{}", crate::ids::new_id())) };
+    std::fs::DirBuilder::new().mode(0o700).create(&private.path)?;
+    let status = std::process::Command::new("/bin/cp").args(["-cR", "--"]).arg(dir.join(".")).arg(&private.path).status()?;
+    if !status.success() {
+        bail!("cannot prepare private macOS check folder");
+    }
+    let dir = std::fs::canonicalize(&private.path)?;
     let home = dir.join(format!(".check-home-{}", crate::ids::new_id()));
-    std::fs::create_dir(&home)?;
+    std::fs::DirBuilder::new().mode(0o700).create(&home)?;
     let seed = std::path::PathBuf::from(crate::privs::user(ctx.caller.uid)?.home).join("Library/Application Support/Layr/checks");
     let mut command = std::process::Command::new("/usr/bin/sandbox-exec");
     command.args(["-p", &macos_profile(&dir, &seed)?, "--"]).args(argv).current_dir(&dir);
@@ -627,6 +641,9 @@ mod macos_tests {
         let outside = root.join("forbidden");
         assert!(!status(&["/usr/bin/touch".as_ref(), outside.as_os_str()])?.success());
         assert!(!outside.exists());
+        let secret = root.join("outside-content");
+        std::fs::write(&secret, b"outside the check")?;
+        assert!(!status(&["/bin/cat".as_ref(), secret.as_os_str()])?.success());
         let server = std::net::TcpListener::bind("127.0.0.1:0")?;
         let port = server.local_addr()?.port().to_string();
         // The same open local port succeeds without the sandbox, ruling out connection refusal.

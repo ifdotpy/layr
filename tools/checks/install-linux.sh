@@ -11,6 +11,18 @@ if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
     sysctl -p /etc/sysctl.d/90-layr-checks.conf
 fi
 id layr-checks >/dev/null 2>&1 || useradd --system --create-home --shell /usr/sbin/nologin layr-checks
+# Lima can reserve over a billion subordinate IDs for its initial user, exhausting
+# useradd's normal range. This VM runs no containers; reserve one normal block.
+python3 - <<'PY'
+from pathlib import Path
+for name in ('subuid','subgid'):
+    p=Path('/etc')/name
+    if not p.exists(): continue
+    rows=[line.split(':') for line in p.read_text().splitlines()]
+    for row in rows:
+        if len(row)==3 and int(row[2])>65536: row[2]='65536'
+    p.write_text(''.join(':'.join(row)+'\n' for row in rows))
+PY
 seed=/usr/local/share/layr-checks
 mkdir -p "$seed" /usr/local/lib/layr-checks
 export CARGO_HOME="$seed/cargo" RUSTUP_HOME="$seed/rustup"
