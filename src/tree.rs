@@ -345,6 +345,21 @@ impl Tree {
         Ok(())
     }
 
+    /// Some macOS releases require write access on a directory that is renamed.
+    /// Restore its mode through the open descriptor, including when the rename fails.
+    pub fn rename_directory(&self, from: &str, to: &str) -> Result<()> {
+        let directory = self.dir(from)?;
+        let mode = rustix::fs::fstat(&directory)?.st_mode & 0o7777;
+        if mode & 0o200 == 0 {
+            rustix::fs::fchmod(&directory, Mode::from_raw_mode(mode | 0o200))?;
+        }
+        let renamed = self.rename(from, to);
+        let restored = if mode & 0o200 == 0 { rustix::fs::fchmod(&directory, Mode::from_raw_mode(mode)) } else { Ok(()) };
+        renamed?;
+        restored.context("restore the renamed directory mode")?;
+        Ok(())
+    }
+
     pub fn chown(&self, rel: &str, u: u32, g: u32) -> Result<()> {
         if rel.is_empty() {
             #[cfg(target_os = "linux")]
