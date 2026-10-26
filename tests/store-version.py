@@ -134,6 +134,31 @@ with (store / ".layr-version.lock").open("r+") as lease:
             proc.communicate()
 print("PASS a different format cannot enter after the lease wait", flush=True)
 
+# A marker's temporary file is not legacy store data. Wait for its writer.
+initializing = root / "initializing"
+initializing.mkdir()
+with (initializing / ".layr-version.lock").open("w+") as lease:
+    fcntl.flock(lease, fcntl.LOCK_EX)
+    temporary = initializing / ".store-version.json.tmp-fixture"
+    temporary.write_text(json.dumps(current))
+    proc = subprocess.Popen([binary, "--root", str(initializing), "projects"], env=env,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        try:
+            proc.wait(timeout=0.2)
+            raise AssertionError("the command did not wait for the initial marker writer")
+        except subprocess.TimeoutExpired:
+            pass
+        temporary.rename(initializing / "store-version.json")
+        fcntl.flock(lease, fcntl.LOCK_UN)
+        stdout, stderr = proc.communicate(timeout=15)
+        assert proc.returncode == 0, (stdout, stderr)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate()
+print("PASS concurrent first use waits for the marker writer", flush=True)
+
 for value in ("not JSON", '{"format":2}', '[]'):
     marker.write_text(value)
     before = tree(store)
@@ -147,4 +172,4 @@ marker.symlink_to(outside)
 run(store, "projects", code=128)
 assert outside.read_text() == json.dumps(current)
 print("PASS malformed and symlink markers refuse access", flush=True)
-print("t53-store-version.sh: 7 passed, 0 failed")
+print("t53-store-version.sh: 8 passed, 0 failed")
