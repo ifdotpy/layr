@@ -59,9 +59,11 @@ class Fixture(http.server.BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
             assert body['epoch'] == 'root' and 0 < len(body['keys']) <= 256
             counts['batch'] += 1
+            counts[f"batch.size.{len(body['keys'])}"] += 1
             if counts['batch'] == 1:
                 self.send_response(503); self.send_header('Content-Type','application/json'); self.send_header('Retry-After','0')
                 data=json.dumps({'error':'gateway is busy; retry later'}).encode();self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data);return
+            if len(body['keys']) > 8: return self.answer({'error':'request timed out'},408,kind='application/json')
             counts['batch.keys'] += len(body['keys'])
             expires=int(time.time())+300
             return self.answer({'objects':[{'status':200,'url':f'https://localhost:{self.server.server_port}/o/project/{key}?Expires={expires}&Signature=fixture&Key-Pair-Id=K123&Hash-Algorithm=SHA256','expires':expires,'bytes':len(valid)} for key in body['keys']]},kind='application/json')

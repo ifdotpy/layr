@@ -69,7 +69,7 @@ impl Backend {
         let replay = std::sync::Arc::new(super::cdn::Replay::default());
         let backend = self.replay_transport(&replay);
         match verify(&backend, false) {
-            Err(error) if !error.is::<super::cdn::DirectFailure>() && !error.is::<super::cdn::BusyFailure>() && replay.retry(cached_cdn) => {
+            Err(error) if !error.is::<super::cdn::DirectFailure>() && !error.is::<super::cdn::BusyFailure>() && !error.is::<super::cdn::BatchDeadlineFailure>() && replay.retry(cached_cdn) => {
                 verify(&backend, true).map_err(|error| error.context(super::cdn::DirectFailure))
             }
             result => result,

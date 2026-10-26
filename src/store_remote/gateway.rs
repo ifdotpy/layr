@@ -636,6 +636,13 @@ impl Gateway {
             groups.entry(epoch.into()).or_default().push((key.clone(),relative.into()));
         }
         for (epoch, entries) in groups {
+            let prepared=self.prepare_batch_entries(&epoch,&entries)?;
+            let mut cache=self.prepared.lock().expect("prepared link lock");cache.extend(prepared);
+            while cache.len()>512 { cache.pop_first(); }
+        }
+        Ok(())
+    }
+    fn prepare_batch_entries(&self,epoch:&str,entries:&[(String,String)])->Result<Vec<(String,serde_json::Value)>> {
             let body=serde_json::to_vec(&serde_json::json!({"epoch":epoch,"keys":entries.iter().map(|(_,key)|key).collect::<Vec<_>>()}))?;
             let mut response=None;
             for attempt in 0..2 {
@@ -645,7 +652,13 @@ impl Gateway {
                 response=Some(reply); break;
             }
             let response=response.context("gateway batch proof refused")?;
-            if response.status().as_u16()==405 { return Ok(()); } // Older gateway: retain the single-key form.
+            if response.status().as_u16()==405 { return Ok(Vec::new()); } // Older gateway: retain the single-key form.
+            if response.status().as_u16()==408 {
+                if entries.len()<=1 {return Err(super::cdn::BatchDeadlineFailure.into());}
+                let half=entries.len().div_ceil(2);
+                let mut result=self.prepare_batch_entries(epoch,&entries[..half])?;
+                result.extend(self.prepare_batch_entries(epoch,&entries[half..])?);return Ok(result);
+            }
             let value:serde_json::Value=json(response,2<<20)?;
             let objects=value["objects"].as_array().filter(|objects|objects.len()==entries.len()).context("invalid CDN batch reply")?;
             let mut prepared=Vec::new();
@@ -660,10 +673,7 @@ impl Gateway {
                 }
                 prepared.push((format!("{}{key}",self.base),item.clone()));
             }
-            let mut cache=self.prepared.lock().expect("prepared link lock");cache.extend(prepared);
-            while cache.len()>512 { cache.pop_first(); }
-        }
-        Ok(())
+            Ok(prepared)
     }
 
     pub fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
@@ -1152,7 +1162,9 @@ mod tests {
         assert_eq!(batch,vec![b"verified ciphertext".to_vec();17]);
         let response = gateway.http.get(format!("https://localhost:{port}/counts")).send().unwrap();
         let counts: std::collections::BTreeMap<String, u64> = response.json().unwrap();
-        assert_eq!(counts.get("batch"), Some(&2)); // First request was busy; bounded retry reused the same body.
+        assert_eq!(counts.get("batch"), Some(&6)); // Busy retries the same body; deadlines split 17 -> 9+8 -> 5+4+8.
+        assert_eq!(counts.get("batch.size.17"),Some(&2));
+        for size in [9,5,4,8] {assert_eq!(counts.get(&format!("batch.size.{size}")),Some(&1));}
         assert_eq!(counts.get("batch.keys"), Some(&17));
         assert!(counts.get("5.link").is_none());
         assert!(counts.get("5.direct").is_none());

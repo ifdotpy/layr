@@ -160,3 +160,10 @@ impl std::fmt::Display for BusyFailure {
     fn fmt(&self, f:&mut std::fmt::Formatter<'_>)->std::fmt::Result { f.write_str("gateway is busy after bounded retries") }
 }
 impl std::error::Error for BusyFailure {}
+
+#[derive(Debug)]
+pub struct BatchDeadlineFailure;
+impl std::fmt::Display for BatchDeadlineFailure {
+    fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result {f.write_str("gateway signing deadline expired for one key after reducing the batch")}
+}
+impl std::error::Error for BatchDeadlineFailure {}
