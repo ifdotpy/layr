@@ -930,7 +930,7 @@ mod tests {
                 assert_eq!(Sha256::digest(store.backend.get(&key).unwrap().unwrap()), digest);
             }
             store.verify(true).unwrap();
-            // A zero-capacity cache must publish byte-for-byte the same object sizes as
+            // A zero-capacity cache must publish byte-for-byte the same compressed object payloads as
             // the warm-cache push, including the signed tree compression/checkpoint cadence.
             let mut empty_cache = remote(&root, &ctx);
             empty_cache.backend = super::super::backend::Backend::file(root.join("uncached-remote"));
@@ -945,19 +945,23 @@ mod tests {
             assert_eq!(push(&empty_cache, &ctx, &repo, &Options::default()).unwrap().states, 4);
             PUSH_CACHE_DISABLED.with(|disabled| disabled.set(false));
             PUSH_DETERMINISTIC.with(|enabled| enabled.set(false));
-            let sizes = |store: &Store| -> BTreeMap<String, usize> {
+            let payloads = |store: &Store| -> BTreeMap<String, Vec<u8>> {
+                let descriptor = store.descriptor().unwrap();
+                let identity = store.identity(&descriptor, None).unwrap();
                 store
                     .backend
                     .list("states/")
                     .unwrap()
                     .into_iter()
                     .map(|object| {
-                        let size = store.backend.get(&object.key).unwrap().unwrap().len();
-                        (object.key, size)
+                        let payload = store.backend.decrypted(&object.key, &identity).unwrap();
+                        (object.key, payload)
                     })
                     .collect()
             };
-            assert_eq!(sizes(&store), sizes(&empty_cache));
+            // age adds randomized header stanzas whose wire lengths can differ even
+            // for identical input. Compare the exact bytes passed to encryption.
+            assert_eq!(payloads(&store), payloads(&empty_cache));
             // Losing both caches must only rediscover immutable uploads, never republish them.
             std::fs::remove_file(store.dir.join("push-cache.sqlite3")).unwrap();
             std::fs::remove_file(store.dir.join("pushed-v2.json.zst")).unwrap();
