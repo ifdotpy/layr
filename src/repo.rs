@@ -99,7 +99,7 @@ pub fn cache_fits(saved: Option<&str>, local: &str, here: bool) -> bool {
 }
 
 pub fn skip_path(p: &str) -> bool {
-    p == ".git" || p.starts_with(".git/")
+    p == ".git" || p.starts_with(".git/") || cache_journal_name(p)
 }
 
 /// The kinds of change to a line, for `Repo::authorize_line`.
@@ -523,6 +523,7 @@ impl<'a> Repo<'a> {
     /// of the project holds a file of an overlay.
     pub fn working_snapshot(&self, ctx: &Ctx, line: &Line, parents: Vec<String>, message: &str) -> Result<StateRec> {
         let w = self.working(line);
+        recover_cache_replacements(&w)?;
         let private = self.private_paths(line)?;
         #[cfg(target_os = "macos")]
         if private.is_empty() && self.thin_line(line)? {
@@ -1475,6 +1476,7 @@ impl<'a> Repo<'a> {
     /// The cache paths of a line (`cache_paths`) in two lists: the caches, and the paths whose
     /// folder holds files in the head of the line. Such a folder is versioned: never a cache.
     pub fn line_cache_paths(&self, line: &Line) -> Result<(Vec<String>, Vec<String>)> {
+        recover_cache_replacements(&self.working(line))?;
         let head = self.state_root(&line.head)?;
         Ok(self.cache_paths(&self.working(line)).into_iter().partition(|p| !holds_files(&head, p)))
     }
@@ -1913,6 +1915,7 @@ pub fn regenerable_folders(w: &Path) -> Vec<String> {
 /// Create an empty nested subvolume for a regenerable cache at `path` in the working folder.
 pub fn make_cache(w: &Path, path: &str, uid: u32, gid: u32) -> Result<()> {
     let t = Tree::open(w)?;
+    recover_cache_replacement(&t, path)?;
     if let Some(m) = t.stat(path) {
         if fsutil::is_layer(w, path, &m) {
             return Ok(());
@@ -1992,6 +1995,7 @@ fn copy_tree(
 /// cache and made the folder again). Copies with reflinks: O(files) once.
 pub fn convert_cache(w: &Path, path: &str, uid: u32, gid: u32) -> Result<bool> {
     let t = Tree::open(w)?;
+    recover_cache_replacement(&t, path)?;
     let m = match t.stat(path) {
         Some(m) => m,
         None => {
@@ -2010,6 +2014,7 @@ pub fn convert_cache(w: &Path, path: &str, uid: u32, gid: u32) -> Result<bool> {
 /// that states hold them again: the folder holds versioned files. Copies with reflinks.
 pub fn uncache(w: &Path, path: &str, uid: u32, gid: u32) -> Result<bool> {
     let t = Tree::open(w)?;
+    recover_cache_replacement(&t, path)?;
     match t.stat(path) {
         Some(m) if fsutil::is_layer(w, path, &m) => {}
         _ => return Ok(false),
@@ -2018,8 +2023,105 @@ pub fn uncache(w: &Path, path: &str, uid: u32, gid: u32) -> Result<bool> {
     Ok(true)
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CacheReplacement {
+    path: String,
+    root: crate::tree::DirectoryRecord,
+    source: crate::tree::DirectoryRecord,
+    replacement: crate::tree::DirectoryRecord,
+}
+
+const CACHE_JOURNAL_PREFIX: &str = ".layr-cache-replace-";
+
+fn cache_journal(path: &str) -> String {
+    use sha2::Digest;
+    format!("{CACHE_JOURNAL_PREFIX}{}.json", hex::encode(sha2::Sha256::digest(path.as_bytes())))
+}
+
+fn cache_journal_name(name: &str) -> bool {
+    let Some(name) = name.strip_prefix(CACHE_JOURNAL_PREFIX) else {
+        return false;
+    };
+    let name = name.strip_suffix(".tmp").unwrap_or(name);
+    name.strip_suffix(".json").is_some_and(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
+fn read_cache_replacement(t: &Tree, journal: &str) -> Result<CacheReplacement> {
+    use std::io::Read;
+    let file = t.open_read(journal)?;
+    let metadata = file.metadata()?;
+    anyhow::ensure!(
+        metadata.uid() == rustix::process::geteuid().as_raw()
+            && metadata.mode() & 0o077 == 0
+            && metadata.nlink() == 1
+            && metadata.len() <= 4096,
+        "invalid cache replacement journal: {journal}"
+    );
+    let mut bytes = Vec::new();
+    file.take(4097).read_to_end(&mut bytes)?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+fn recover_cache_replacement(t: &Tree, path: &str) -> Result<()> {
+    let (journal, old, temporary) = (cache_journal(path), format!("{path}.layr-old"), format!("{path}.layr-new"));
+    if t.stat(&journal).is_none() {
+        anyhow::ensure!(
+            t.stat(path).is_some() || t.stat(&old).is_none(),
+            "interrupted cache replacement has no journal; restore {old} to {path}"
+        );
+        return Ok(());
+    }
+    let record = read_cache_replacement(t, &journal)?;
+    let root = t.directory_record("")?;
+    anyhow::ensure!(
+        record.path == path && root.device == record.root.device && root.inode == record.root.inode,
+        "cache replacement journal belongs to another folder"
+    );
+    if t.matches_directory(path, &record.replacement) {
+        t.restore_directory(path, &record.replacement)?;
+        if t.matches_directory(&old, &record.source) {
+            t.restore_directory(&old, &record.source)?;
+            t.remove(&old)?;
+        } else {
+            anyhow::ensure!(t.stat(&old).is_none(), "cache backup identity changed: {old}");
+        }
+    } else {
+        if !t.matches_directory(path, &record.source) {
+            anyhow::ensure!(
+                t.stat(path).is_none() && t.matches_directory(&old, &record.source),
+                "cache source identity changed: {path}"
+            );
+            t.rename_directory_checked(&old, path, &record.source)?;
+        }
+        t.restore_directory(path, &record.source)?;
+        if t.matches_directory(&temporary, &record.replacement) {
+            t.restore_directory(&temporary, &record.replacement)?;
+            t.remove(&temporary)?;
+        } else if t.stat(&temporary).is_some_and(|metadata| metadata.ftype == fsutil::FType::Symlink) {
+            t.remove(&temporary)?;
+        } else {
+            anyhow::ensure!(t.stat(&temporary).is_none(), "cache replacement identity changed: {temporary}");
+        }
+    }
+    t.remove(&journal)?;
+    t.sync_parent(&journal)
+}
+
+pub(crate) fn recover_cache_replacements(w: &Path) -> Result<()> {
+    let t = Tree::open(w)?;
+    for name in t.list("")? {
+        if cache_journal_name(&name) && name.ends_with(".json") {
+            let record = read_cache_replacement(&t, &name)?;
+            anyhow::ensure!(cache_journal(&record.path) == name, "cache journal path does not match its name");
+            recover_cache_replacement(&t, &record.path)?;
+        }
+    }
+    Ok(())
+}
+
 /// Replace the folder at `path` with a copy of its files in a new subvolume or plain folder.
 fn replace_folder(t: &Tree, path: &str, subvolume: bool, uid: u32, gid: u32) -> Result<()> {
+    recover_cache_replacement(t, path)?;
     let (tmp, old) = (format!("{path}.layr-new"), format!("{path}.layr-old"));
     for x in [&tmp, &old] {
         if t.stat(x).is_some() {
@@ -2040,10 +2142,20 @@ fn replace_folder(t: &Tree, path: &str, subvolume: bool, uid: u32, gid: u32) -> 
         t.remove(&tmp).with_context(|| format!("remove incomplete cache {tmp} after {error:#}"))?;
         return Err(error);
     }
-    t.rename_directory(path, &old)?;
-    t.rename_directory(&tmp, path)?;
+    let journal = cache_journal(path);
+    let record = CacheReplacement {
+        path: path.to_string(),
+        root: t.directory_record("")?,
+        source: t.directory_record(path)?,
+        replacement: t.directory_record(&tmp)?,
+    };
+    t.publish_private_file(&journal, &serde_json::to_vec(&record)?)?;
+    t.rename_directory_checked(path, &old, &record.source)?;
+    #[cfg(test)]
+    crate::tree::cache_test_fault("between-renames");
+    t.rename_directory_checked(&tmp, path, &record.replacement)?;
     t.chown(path, uid, gid)?;
-    t.remove(&old)?;
+    recover_cache_replacement(t, path)?;
     Ok(())
 }
 
@@ -2081,6 +2193,100 @@ pub fn holds_files(root: &Path, path: &str) -> bool {
 mod cache_copy_tests {
     use super::*;
     use std::os::unix::{fs::PermissionsExt, net::UnixListener};
+
+    #[test]
+    fn cache_replacement_fault_child() -> Result<()> {
+        let Some(root) = std::env::var_os("LAYR_TEST_CACHE_ROOT") else {
+            return Ok(());
+        };
+        let root = std::path::PathBuf::from(root);
+        let tree = Tree::open(&root)?;
+        let result =
+            replace_folder(&tree, "cache", false, rustix::process::geteuid().as_raw(), rustix::process::getegid().as_raw());
+        assert!(result.is_err(), "the injected fault must refuse the operation");
+        Ok(())
+    }
+
+    #[test]
+    fn cache_replacement_recovers_process_crashes_and_refuses_name_swaps() -> Result<()> {
+        use std::process::Command;
+        for phase in ["source-writable", "between-renames", "replacement-writable", "restore-error", "symlink-swap"] {
+            let root = std::env::temp_dir().join(format!("layr-cache-crash-{}", crate::ids::new_id()));
+            std::fs::create_dir_all(root.join("cache/nested"))?;
+            std::fs::create_dir(root.join("outside"))?;
+            std::fs::write(root.join("cache/nested/data"), "original")?;
+            std::fs::write(root.join("outside/data"), "outside")?;
+            std::fs::set_permissions(root.join("cache/nested/data"), std::fs::Permissions::from_mode(0o444))?;
+            std::fs::set_permissions(root.join("cache/nested"), std::fs::Permissions::from_mode(0o555))?;
+            std::fs::set_permissions(root.join("cache"), std::fs::Permissions::from_mode(0o555))?;
+            let status = Command::new(std::env::current_exe()?)
+                .args(["--exact", "repo::cache_copy_tests::cache_replacement_fault_child", "--nocapture"])
+                .env("LAYR_TEST_CACHE_ROOT", &root)
+                .env("LAYR_TEST_CACHE_FAULT", phase)
+                .status()?;
+            if phase.ends_with("writable") || phase == "between-renames" {
+                assert_eq!(status.code(), Some(93), "{phase}");
+            } else {
+                assert!(status.success(), "{phase}");
+            }
+            recover_cache_replacements(&root)?;
+            assert!(!std::fs::symlink_metadata(root.join("cache"))?.file_type().is_symlink());
+            assert_eq!(std::fs::read_to_string(root.join("cache/nested/data"))?, "original", "{phase}");
+            assert_eq!(std::fs::read_to_string(root.join("outside/data"))?, "outside", "{phase}");
+            for directory in ["cache", "cache/nested"] {
+                assert_eq!(std::fs::metadata(root.join(directory))?.permissions().mode() & 0o777, 0o555, "{phase}");
+            }
+            let tree = Tree::open(&root)?;
+            for name in tree.list("")? {
+                tree.remove(&name)?;
+            }
+            std::fs::remove_dir(root)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn interrupted_cache_replacement_recovers_every_recorded_boundary() -> Result<()> {
+        for phase in ["prepared", "source-writable", "source-moved", "replacement-writable", "replacement-moved"] {
+            let root = std::env::temp_dir().join(format!("layr-cache-recovery-{}", crate::ids::new_id()));
+            std::fs::create_dir_all(root.join("cache"))?;
+            std::fs::create_dir(root.join("cache.layr-new"))?;
+            std::fs::write(root.join("cache/data"), "original")?;
+            std::fs::write(root.join("cache.layr-new/data"), "original")?;
+            std::fs::set_permissions(root.join("cache"), std::fs::Permissions::from_mode(0o555))?;
+            std::fs::set_permissions(root.join("cache.layr-new"), std::fs::Permissions::from_mode(0o555))?;
+            let tree = Tree::open(&root)?;
+            let record = CacheReplacement {
+                path: "cache".into(),
+                root: tree.directory_record("")?,
+                source: tree.directory_record("cache")?,
+                replacement: tree.directory_record("cache.layr-new")?,
+            };
+            tree.publish_private_file(&cache_journal("cache"), &serde_json::to_vec(&record)?)?;
+            if phase != "prepared" {
+                tree.chmod("cache", 0o755)?;
+            }
+            if matches!(phase, "source-moved" | "replacement-writable" | "replacement-moved") {
+                tree.rename("cache", "cache.layr-old")?;
+            }
+            if matches!(phase, "replacement-writable" | "replacement-moved") {
+                tree.chmod("cache.layr-new", 0o755)?;
+            }
+            if phase == "replacement-moved" {
+                tree.rename("cache.layr-new", "cache")?;
+            }
+            recover_cache_replacements(&root)?;
+            assert_eq!(std::fs::read_to_string(root.join("cache/data"))?, "original", "{phase}");
+            assert_eq!(std::fs::metadata(root.join("cache"))?.permissions().mode() & 0o777, 0o555, "{phase}");
+            assert!(!root.join(cache_journal("cache")).exists(), "{phase}: journal");
+            for suffix in ["layr-old", "layr-new"] {
+                assert!(!root.join(format!("cache.{suffix}")).exists(), "{phase}: {suffix}");
+            }
+            tree.remove("cache")?;
+            std::fs::remove_dir_all(root)?;
+        }
+        Ok(())
+    }
 
     #[test]
     fn cache_directory_rename_restores_readonly_modes() -> Result<()> {
