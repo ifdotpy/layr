@@ -4,6 +4,10 @@
 . "$(dirname "$0")/lib.sh"
 
 sample $T/src
+mkdir -p $T/linksrc/a && echo x > $T/linksrc/a/one && ln $T/linksrc/a/one $T/linksrc/two
+l init links --from $T/linksrc -q >/dev/null
+L=$LAYR_ROOT/projects/links/lines/main
+eq "init --from keeps hard links" "$(stat -c %i $L/a/one)" "$(stat -c %i $L/two)"
 l init demo --from $T/src -q >/dev/null
 cd $LAYR_ROOT/projects/demo/lines/main || exit 1
 

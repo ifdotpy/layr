@@ -1153,7 +1153,8 @@ pub fn blame(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let mut cur = Some(start.clone());
     while let Some(id) = cur {
         let s = repo.state(&id)?;
-        let root = match repo.state_root(&id) {
+        // Read through the layers of a thin state: no view of each state of the history.
+        let root = match repo.state_src(&id) {
             Ok(r) => r,
             Err(_) => break,
         };

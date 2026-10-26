@@ -74,14 +74,15 @@ A recursive clone copies hard links as separate files. Thin layers clone each en
 
 ## File identity
 
-Move detection needs an identity that survives a clone. APFS clones, writes and renames keep the creation time.
-Layr uses the creation time as the identity. It no longer writes `com.layr.origin` on each entry.
+Move detection needs an identity that survives a clone. A file that moved without a change still shares its clone
+with the other tree: Layr matches it by the clone first. APFS clones, writes and renames keep the creation time:
+Layr matches the other files by it. It no longer writes `com.layr.origin` on each entry.
 That attribute cost about 80 bytes per entry in each tree.
 
 A tool that sets an old modification time (tar, zip, npm) also lowers the creation time to it.
 Many unrelated files then share one creation time, usually with zero nanoseconds. So:
 
-- A creation time with zero nanoseconds is no identity for moves.
+- A creation time with zero nanoseconds is no identity for moves. A shared clone still is.
 - A deleted file and a new file are a move only when their identity is unique in both trees.
 
 ## Limits

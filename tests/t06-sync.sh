@@ -38,6 +38,23 @@ cd $BR/projects/x/lines/main
 eq "B sees A's head as main@A" "on A" "$(B log -1 --format=%s main@$(l --project x remote list | grep '^\*' | awk '{print $2}'))"
 cd $A/main
 
+# B saves a state; A sends a later state against it. On APFS the state of B is a thin layer
+# without a view: the receiver makes one.
+cd $BR/projects/x/lines/main && echo q >> notes.txt && B save -qam "thin on B"
+cd $A/main && peer_exchange sync x -q -- $(peer)
+Q=$(l rev-parse main@$MB)
+l line new -q from-b $Q && cd $A/from-b && echo r >> notes.txt && l save -qam "on top of B"
+R=$(l rev-parse head)
+for v in "$BR"/projects/x/states/*; do
+    if [ -e "$BR/projects/x/deltas/$(basename "$v")" ]; then
+        command -v chflags >/dev/null && chflags -R nouchg "$v"
+        rm -rf "$v"
+    fi
+done
+peer_exchange sync x -q -- $(peer)
+eq "a state sent against a thin state of the peer arrives" "$(l rev-parse "$R^{tree}")" "$(B --project x rev-parse "$R^{tree}" 2>&1)"
+cd $A/main
+
 # A changed record is refused.
 cd $BR/projects/x/lines/main && echo t >> notes.txt && B save -qam "later on B" && cd $A/main
 python3 - $BR/projects/x/meta/db/layr.sqlite <<'PY'

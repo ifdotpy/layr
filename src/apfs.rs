@@ -820,7 +820,22 @@ pub(crate) fn clone_complete(src: &Path, dst: &Path, entries: &BTreeMap<String, 
     } else {
         seal(dst, false, false)?;
     }
-    Ok(())
+    // A folder clone gives the folders the time of the clone; a btrfs snapshot keeps them.
+    // They get the times of the source, from its scan.
+    let dirs: Vec<(&String, &ScanEntry)> = entries.iter().filter(|(_, e)| e.meta.is_dir()).collect();
+    each_parallel(&dirs, |(rel, e)| {
+        use std::os::macos::fs::MetadataExt as MacMetadataExt;
+        let p = if rel.is_empty() { dst.to_path_buf() } else { dst.join(rel) };
+        let sealed = fs::symlink_metadata(&p)?.st_flags() & libc::UF_IMMUTABLE != 0;
+        if sealed {
+            crate::sys::apfs_immutable(&p, false)?;
+        }
+        crate::sys::apfs_mtime(&p, e.fingerprint.4, e.fingerprint.5)?;
+        if sealed {
+            crate::sys::apfs_immutable(&p, true)?;
+        }
+        Ok(())
+    })
 }
 
 pub fn snapshot(src: &Path, dst: &Path, readonly: bool) -> Result<()> {
@@ -950,9 +965,14 @@ pub fn clone_file(_src: &File, _dst: &File) -> io::Result<()> {
 pub fn clone_range(_src: &File, _off: u64, _len: u64, _dst: &File, _dst_off: u64) -> io::Result<()> {
     Err(io::Error::from_raw_os_error(libc::ENOTSUP))
 }
-pub fn send_command(_parent: Option<&Path>, child: &Path) -> Result<Command> {
+pub fn send_command(parent: Option<&Path>, child: &Path) -> Result<Command> {
     let mut cmd = Command::new(std::env::current_exe()?);
     cmd.arg("__apfs-send").arg(child);
+    // With a parent the stream holds only the differences (`apfs_stream::send`). A parent that
+    // is no sealed tree gives a complete stream.
+    if let Some((p, id)) = parent.and_then(|p| clone_identity(p).ok().map(|(id, _)| (p, id))) {
+        cmd.arg(p).arg(id);
+    }
     Ok(cmd)
 }
 
@@ -1070,53 +1090,59 @@ pub(crate) fn candidates_scanned(
             )
         })
         .collect();
-    // The same identity as `identity`, as a key without an allocation.
-    let id_of = |e: &ScanEntry| -> (bool, i64, i64) {
-        if e.birth.1 == 0 {
-            (true, e.fingerprint.0 as i64, e.fingerprint.1 as i64)
-        } else {
-            (false, e.birth.0, e.birth.1)
-        }
+    // Two passes find moves. A file that moved without a change still shares its clone with
+    // the other tree: an exact match. The creation time matches the others; whole seconds
+    // (tar, npm, zip) give each tree its own identity (`identity`).
+    let by_clone = |e: &ScanEntry| -> Option<(u8, i64, i64)> {
+        let d = e.data.filter(|d| d.generation.is_some())?;
+        Some((2, d.clone_id? as i64, e.meta.size as i64))
     };
+    let by_birth = |e: &ScanEntry| -> Option<(u8, i64, i64)> {
+        Some(if e.birth.1 == 0 { (1, e.fingerprint.0 as i64, e.fingerprint.1 as i64) } else { (0, e.birth.0, e.birth.1) })
+    };
+    let passes: [&dyn Fn(&ScanEntry) -> Option<(u8, i64, i64)>; 2] = [&by_clone, &by_birth];
     // An identity that more than one entry of either tree has is no evidence of a move: hard
-    // links, copies that keep the creation time, or files with equal times.
-    let mut count: std::collections::HashMap<(bool, (bool, i64, i64)), usize> = Default::default();
+    // links, copies that keep the clone or the creation time, or equal times. The kinds of the
+    // two keys differ, so one count serves both passes.
+    let mut count: std::collections::HashMap<(bool, (u8, i64, i64)), usize> = Default::default();
     for (side, tree) in [(false, &a), (true, &b)] {
-        for (p, e) in tree.iter() {
-            if !p.is_empty() {
-                *count.entry((side, id_of(e))).or_default() += 1;
+        for e in tree.iter().filter(|(p, _)| !p.is_empty()).map(|(_, e)| e) {
+            for id in passes.iter().filter_map(|id_of| id_of(e)) {
+                *count.entry((side, id)).or_default() += 1;
             }
         }
     }
-    let mut removed: BTreeMap<(bool, i64, i64), Vec<String>> = BTreeMap::new();
-    let mut added: BTreeMap<(bool, i64, i64), Vec<String>> = BTreeMap::new();
-    for (p, c) in &changes {
-        if c.new.is_none() {
-            removed.entry(id_of(&a[p])).or_default().push(p.clone());
+    for id_of in passes {
+        let mut removed: BTreeMap<(u8, i64, i64), Vec<String>> = BTreeMap::new();
+        let mut added: BTreeMap<(u8, i64, i64), Vec<String>> = BTreeMap::new();
+        for (p, c) in &changes {
+            if c.new.is_none() {
+                if let Some(id) = id_of(&a[p]) {
+                    removed.entry(id).or_default().push(p.clone());
+                }
+            }
+            if c.old.is_none() {
+                if let Some(id) = id_of(&b[p]) {
+                    added.entry(id).or_default().push(p.clone());
+                }
+            }
         }
-        if c.old.is_none() {
-            added.entry(id_of(&b[p])).or_default().push(p.clone());
+        for (id, srcs) in removed {
+            let Some(dsts) = added.get(&id) else {
+                continue;
+            };
+            if srcs.len() != 1 || dsts.len() != 1 || count.get(&(false, id)) != Some(&1) || count.get(&(true, id)) != Some(&1) {
+                continue;
+            }
+            let (src, dst) = (&srcs[0], &dsts[0]);
+            if changes[src].old.as_ref().map(|m| m.ftype) != changes[dst].new.as_ref().map(|m| m.ftype) {
+                continue;
+            }
+            let old = changes.remove(src).unwrap().old;
+            let c = changes.get_mut(dst).unwrap();
+            c.old = old;
+            c.old_path = Some(src.clone());
         }
-    }
-    for (id, srcs) in removed {
-        let Some(dsts) = added.get(&id) else {
-            continue;
-        };
-        // Multiple hard links have the same identity. Do not invent a unique move.
-        if srcs.len() != 1 || dsts.len() != 1 {
-            continue;
-        }
-        if count.get(&(false, id.clone())) != Some(&1) || count.get(&(true, id.clone())) != Some(&1) {
-            continue;
-        }
-        let (src, dst) = (&srcs[0], &dsts[0]);
-        if changes[src].old.as_ref().map(|m| m.ftype) != changes[dst].new.as_ref().map(|m| m.ftype) {
-            continue;
-        }
-        let old = changes.remove(src).unwrap().old;
-        let c = changes.get_mut(dst).unwrap();
-        c.old = old;
-        c.old_path = Some(src.clone());
     }
     let mut read: Vec<String> = Vec::new();
     for (p, c) in &mut changes {
@@ -1518,6 +1544,28 @@ mod tests {
         let changes = crate::changes::file_changes(&base, &src)?;
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].ranges, Some(vec![(8192, 4096)]));
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a case-sensitive APFS test volume"]
+    fn copies_keep_the_times_of_folders() -> Result<()> {
+        let s = Sandbox::new();
+        let src = s.0.join("src");
+        create_subvolume(&src)?;
+        fs::create_dir_all(src.join("a/b"))?;
+        fs::write(src.join("a/b/f"), b"x")?;
+        for (rel, sec) in [("a/b", 1_000_000_000), ("a", 1_100_000_000)] {
+            crate::sys::apfs_mtime(&src.join(rel), sec, 123)?;
+        }
+        let times = |root: &Path| -> Result<Vec<(i64, i64)>> {
+            ["a", "a/b"].iter().map(|r| Ok(fs::symlink_metadata(root.join(r)).map(|m| (m.mtime(), m.mtime_nsec()))?)).collect()
+        };
+        let want = times(&src)?;
+        snapshot(&src, &s.0.join("sealed"), true)?;
+        snapshot(&s.0.join("sealed"), &s.0.join("open"), false)?;
+        assert_eq!(times(&s.0.join("sealed"))?, want);
+        assert_eq!(times(&s.0.join("open"))?, want);
         Ok(())
     }
 

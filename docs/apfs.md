@@ -42,18 +42,20 @@ The store and signed record formats remain compatible with the Linux backend.
   A journal restores the index after a process stops before the database transaction completes.
   Named saves with overlays retain the existing path.
 - An automatic state copies only the entries that changed since the line head. An unchanged folder makes no state.
-- `status`, `add`, `save -m <message>`, `diff` and the git export read the layers directly.
+- `status`, `add`, `rm`, `mv`, `save -m <message>`, `diff`, `blame` and the git export read the layers directly.
   Other commands that need a folder make a view in `states/<id>`.
   `layr gc` removes views that no command used for 10 minutes (setting `thin.view_seconds`).
   It also gives a line head with more than 32 layers a complete tree (setting `thin.chain`).
 - A state that is the base of another state stays on disk until that state goes, also after `gc` deletes its record.
 - File modes, symbolic links, hard links and file identity survive snapshots. Nested layers stay outside history.
-  The file identity for move detection is the creation time, which APFS clones, writes and renames keep.
-  A move needs an identity that is unique in both trees and is not a whole second.
+  Move detection first matches a file by the clone that it shares with the other tree, then by its creation time,
+  which APFS clones, writes and renames keep. A move needs an identity that is unique in both trees, and a creation
+  time that is not a whole second.
 - Immutable flags prevent ordinary writes to states. The store owner can remove these flags.
   Use the root service for separate users and root-owned state storage.
 - Overlays and peer sync are available.
-- APFS sends full btrfs version 1 streams. Existing Linux peers can receive them without an update.
+- APFS sends btrfs version 1 streams. A peer that has the parent state gets only the differences; a tree with hard
+  links is sent complete. Existing Linux peers can receive them without an update.
 - APFS receives full and incremental streams. It copies clone ranges when APFS cannot share those ranges.
 - APFS does not request compressed version 2 streams. Transfers between Linux peers retain their existing optimizations.
 - A local restore gives the current user the admin role on the restored project.

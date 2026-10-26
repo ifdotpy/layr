@@ -4,7 +4,8 @@ This page is part of the [Layr documentation](../README.md#documentation).
 
 ## Not in this version
 
-- APFS volume snapshots and incremental APFS sends. Current snapshots use verified directory clones; APFS sends use full streams.
+- APFS volume snapshots: they need root and an Apple entitlement. Current snapshots use verified directory clones.
+  APFS sends against a parent hold only the differences, but no other clone sources and no compressed streams.
 - Overlays beyond the first slice: routing patterns, ephemeral mode, folder overlays, encrypted
   remote copies and replication of overlays (`docs/overlays.md`, section 9.7).
 - Structured (AST) merge; format drivers can be plugged in through `merge.driver.<name>`.

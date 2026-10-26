@@ -82,10 +82,13 @@ fn main() {
     #[cfg(any(target_os = "macos", feature = "overlayfs"))]
     if argv.first().map(String::as_str) == Some("__apfs-send") {
         let result = (|| -> anyhow::Result<()> {
-            if argv.len() != 2 {
-                anyhow::bail!("invalid internal send arguments");
-            }
-            crate::apfs_stream::send(std::path::Path::new(&argv[1]), &mut std::io::stdout().lock())
+            // `__apfs-send <child> [<parent> <parent subvolume UUID>]`
+            let parent = match argv.len() {
+                2 => None,
+                4 => Some((std::path::Path::new(&argv[2]), argv[3].as_str())),
+                _ => anyhow::bail!("invalid internal send arguments"),
+            };
+            crate::apfs_stream::send(std::path::Path::new(&argv[1]), parent, &mut std::io::stdout().lock())
         })();
         if let Err(e) = result {
             eprintln!("fatal: {e:#}");

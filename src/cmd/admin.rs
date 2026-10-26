@@ -418,7 +418,7 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
                     // Revert only what the operation changed; later work stays.
                     (Some(before), Some(after)) if repo.p.has_state(after) => {
                         let cur = repo.scan(&l2)?;
-                        let later: BTreeSet<String> = changes::file_changes(&repo.state_root(after)?, &cur.path)?
+                        let later: BTreeSet<String> = changes::file_changes(&repo.state_src(after)?, &cur.path)?
                             .into_iter()
                             .flat_map(|c| [Some(c.path.clone()), c.old_path.clone()])
                             .flatten()
@@ -1248,12 +1248,34 @@ fn copy_folder(ctx: &Ctx, src: &std::path::Path, dst: &std::path::Path, include_
     })?;
     // On a store volume that ignores case, README and Readme would become one file.
     fsutil::refuse_case_collisions(dst, entries.iter().map(|(rel, _)| rel.as_str()))?;
+    // Names of one file stay names of one file: the first is copied, the others link to it.
+    let mut first: std::collections::HashMap<(u64, u64), String> = Default::default();
     for (rel, m) in entries {
         if m.is_dir() {
             fsutil::make_parents(dst, &format!("{rel}/x"), None)?;
             continue;
         }
-        crate::privs::as_caller_fs(ctx, || fsutil::copy_entry(src, &rel, dst, &rel, None))?;
+        let link = if m.is_file() {
+            use std::os::unix::fs::MetadataExt;
+            let lm = crate::privs::as_caller_fs(ctx, || Ok(std::fs::symlink_metadata(fsutil::safe_join(src, &rel)?)?))?;
+            (lm.nlink() > 1).then(|| (lm.dev(), lm.ino()))
+        } else {
+            None
+        };
+        match link.and_then(|k| first.get(&k).map(|f| (k, f.clone()))) {
+            Some((_, f)) => {
+                fsutil::make_parents(dst, &rel, None)?;
+                crate::privs::as_caller_fs(ctx, || {
+                    Ok(std::fs::hard_link(fsutil::safe_join(dst, &f)?, fsutil::safe_join(dst, &rel)?)?)
+                })?;
+            }
+            None => {
+                crate::privs::as_caller_fs(ctx, || fsutil::copy_entry(src, &rel, dst, &rel, None))?;
+                if let Some(k) = link {
+                    first.insert(k, rel.clone());
+                }
+            }
+        }
         n += 1;
     }
     Ok(n)
@@ -1956,8 +1978,8 @@ pub fn debug(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let h = here(ctx)?;
     match args.first().map(|s| s.as_str()) {
         Some("changes") if args.len() >= 3 => {
-            let a = h.repo.state_root(&revs::resolve(&h.repo, h.line.as_ref(), &args[1])?)?;
-            let b = h.repo.state_root(&revs::resolve(&h.repo, h.line.as_ref(), &args[2])?)?;
+            let a = h.repo.state_src(&revs::resolve(&h.repo, h.line.as_ref(), &args[1])?)?;
+            let b = h.repo.state_src(&revs::resolve(&h.repo, h.line.as_ref(), &args[2])?)?;
             for c in changes::candidates(&a, &b)? {
                 let k = |m: &Option<fsutil::Meta>| m.as_ref().map(|x| format!("{:?}", x.ftype)).unwrap_or("-".into());
                 outln!(
