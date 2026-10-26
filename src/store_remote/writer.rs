@@ -304,17 +304,11 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
     }
     drop(stage);
     let stage = crate::trace::span("store load index");
-    let mut present = if blind_layer { BTreeMap::new() } else { reader::attempts(&store.backend)? };
     let mut index = load_index(&store.dir)?;
-    index.retain(|id, entry| cache_path(&store.dir, id, entry).is_ok_and(|p| p.exists()));
-    // Only committed remote trees can be reused as delta bases.
-    if blind_layer {
-        // A write token cannot list epoch records or states. The local index contains only committed uploads.
-        present.extend(index.iter().map(|(id, pushed)| (id.clone(), pushed.attempt.clone())));
-    } else {
-        let committed: std::collections::BTreeSet<String> = store.backend.list("states/")?.into_iter().map(|o| o.key).collect();
-        index.retain(|id, pushed| committed.contains(&format::tree_name(id, &pushed.attempt)));
-    }
+    // Completed immutable trees are never collected. Cache metadata is written only after
+    // publication, so a regular push need not enumerate every historical remote object.
+    index.retain(|id, entry| cache_path(&store.dir, id, entry).is_ok());
+    let mut present: BTreeMap<String, String> = index.iter().map(|(id, entry)| (id.clone(), entry.attempt.clone())).collect();
     // Authenticate another writer's records only if a missing local parent cache is needed.
     // An ordinary incremental push reuses its already verified local parent directly.
     let mut remote_records = None;
@@ -330,6 +324,23 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
         if !reader::wanted(&state, opts) && !required.contains(&id) {
             report.omitted.push(format!("{} {}", id, serde_json::to_value(state.kind)?));
             continue;
+        }
+        if !blind_layer {
+            let prefix = format!("states/{id}/");
+            let mut complete = BTreeMap::new();
+            for object in store.backend.list(&prefix)? {
+                if let Some((remote, attempt)) = format::parse_tree_name(&object.key) {
+                    if remote != id {
+                        bail!("remote tree is outside its state prefix");
+                    }
+                    complete.entry(remote).or_insert(attempt);
+                }
+            }
+            if let Some(attempt) = complete.remove(&id) {
+                present.insert(id.clone(), attempt.clone());
+                index.insert(id, Cached { attempt, depth: format::FULL_TREE_EVERY - 1 });
+                continue;
+            }
         }
         states.push(state);
     }
@@ -359,7 +370,9 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
         let base = match base_id {
             Some(id) if latest.as_ref().is_some_and(|(last, _)| last == &id) => latest.take(),
             Some(id) => {
-                if !index.contains_key(&id) && store.backend.can_read() {
+                if index.get(&id).map(|entry| cache_path(&store.dir, &id, entry).is_ok_and(|p| p.exists())) != Some(true)
+                    && store.backend.can_read()
+                {
                     if let Ok(identity) = store.identity(&descriptor, opts.paper_key.as_deref()) {
                         if remote_records.is_none() {
                             remote_records = Some(reader::records(&store.backend, &identity, &descriptor.project)?);
@@ -373,7 +386,7 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
                         index.insert(id.clone(), cache_tree(&store.dir, &id, &pushed)?);
                     }
                 }
-                if let Some(entry) = index.get(&id) {
+                if let Some(entry) = index.get(&id).filter(|entry| cache_path(&store.dir, &id, entry).is_ok_and(|p| p.exists())) {
                     let pushed = cached_tree(&store.dir, &id, entry)?;
                     for entry in pushed.tree.files.values() {
                         hashes.entry(entry.2.clone()).or_insert_with(|| entry.3.clone());
