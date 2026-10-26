@@ -134,5 +134,45 @@ limit failed, so the retry uploaded only the file part and state tree. Listing
 prefixes were `keys/`, the writer's own record prefix, and the single new state
 prefix. It did not list the complete state history.
 
-The fresh gateway clone and a clean additional incremental push are recorded
-when the active fixture finishes.
+The paginated fresh clone of the 7,965-commit fixture plus its first new commit
+passed: 7,966 Git commits, all 7,965 original IDs unchanged, the new commit's
+parent correct, and tree `29217a1cfa33fc428f17a49d90a7b74f9e0903e1` matching
+the writer. It took 1,072.13 seconds, with maximum RSS 1,429,836 KiB. It used
+31,177 GET, four POST and two PUT requests, including 15 state-listing pages.
+The PUTs enroll the reader; they do not replace existing state objects.
+
+After that clone, a clean additional one-commit push on the same history took
+**3.584 seconds**, with **17 GET, one POST and three PUT requests**. All three
+publications were required: new signed records, one file part and one state tree.
+It listed `keys/` twice, its own record prefix once and the new state prefix once.
+It did not list or download old state trees. The preceding 392-commit sample used
+22 requests; the final large-history push used 21. The client still verifies its
+local signed record history and reads bounded metadata; this measurement does
+not claim constant CPU cost for arbitrarily large local databases.
+
+| Gateway operation | Seconds | Guest load at start/end | Sampled host load range |
+| --- | ---: | ---: | ---: |
+| 392-commit full push | 17.89 | 3.13 / 2.87 | 23.88–24.50 |
+| 393-commit fresh clone | 32.36 | 2.87 / 3.08 | 26.68–28.55 |
+| 7,965-commit full push | 974.48 | 3.08 / 4.00 | 21.39–78.98 |
+| 7,966-commit fresh clone | 1,072.13 | 1.73 / 1.90 | 12.85–29.53 (partial window) |
+| Clean daily one-commit push | 3.58 | 0.34 / 0.47 | 29.19 immediately afterward |
+
+Both host and guest expose 18 CPUs. Values are one-minute load averages, not CPU
+utilization percentages. The clone's host sampler covers only part of its run;
+there is no overlapping host sample for the short daily push. Raw timestamps
+make these limits explicit. The source-index preparation phases took 0.026 and
+0.052 seconds in the final full pushes, compared with repeated preparation of
+15.32 and 395.05 seconds in the earlier file samples.
+
+Raw [small gateway results](../benchmarks/git-history-20261026/layr-gateway.json),
+[large gateway results](../benchmarks/git-history-20261026/layr-studio-gateway.json),
+[phase totals](../benchmarks/git-history-20261026/phases.json), and
+[load samples](../benchmarks/git-history-20261026/load.jsonl) retain timings,
+request counts, listing prefixes and correctness results. The large result file
+also retains the failed old-limit attempt and the successful resume.
+
+The absolute ten-minute full-transfer target was not established on this busy
+host. The complete history round trip, daily push latency and bounded daily
+request count were established. Production server pagination was delivered in
+the separate layr-cloud change; no AWS operation was performed by this task.
