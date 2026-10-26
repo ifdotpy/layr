@@ -8,6 +8,7 @@ cd "$LAYR_ROOT/projects/retry/lines/main"
 l line new topic -q
 cd ../topic
 printf 'first child\n' > child
+l add child
 l save -qam first
 l remote add archive "file://$T/archive" --paper-key-out "$T/paper" >/dev/null
 l push archive -q
