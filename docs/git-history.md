@@ -66,6 +66,21 @@ recovers the exact authenticated delta-chain depth, so eviction preserves both
 content links and the cadence of full tree checkpoints. After a
 crash or disk-full failure, already published immutable objects are reused.
 
+While a push is active, `push-journal.sqlite3` keeps its content hash index and
+published-state cursor in a separate FULL-synchronous SQLite transaction per
+state. The cursor advances only after the state tree publishes. A restart reads
+authenticated trees only for publications beyond that cursor. Pending part
+entries are recorded before upload; recovery decrypts each part and verifies its
+file hashes through the normal reader before reusing it. Missing or corrupt
+parts are discarded from the journal. Old unreferenced parts are eligible for
+the store's 24-hour garbage collection grace period; file-backend `.put-*`
+temporaries are private publication files and are excluded from object listings.
+
+The transfer journal does not evict hashes during a push. It warns above 64 MiB
+and is removed after successful completion. It is separate from the bounded,
+rebuildable tree cache. `LAYR_TRACE=1` reports its peak disk size, commit time,
+and restart seeding time and reader GET count.
+
 Completed metadata avoids listing old remote states on each push; new states
 use their own prefixes. Advertised line and ref tips are rechecked with their
 exact state prefixes, so a later push can repair a partial replica that lacks a

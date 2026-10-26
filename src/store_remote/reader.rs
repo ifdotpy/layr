@@ -115,13 +115,27 @@ pub(super) struct Reader<'a> {
     depths: BTreeMap<(String, String), usize>,
     parts: BTreeMap<String, Vec<u8>>,
     part_bytes: usize,
+    gets: std::cell::Cell<usize>,
 }
 
 impl<'a> Reader<'a> {
     pub fn new(backend: &'a Backend, identity: &'a str, keys: &'a BTreeMap<String, VerifyingKey>) -> Self {
-        Self { backend, identity, keys, trees: BTreeMap::new(), depths: BTreeMap::new(), parts: BTreeMap::new(), part_bytes: 0 }
+        Self {
+            backend,
+            identity,
+            keys,
+            trees: BTreeMap::new(),
+            depths: BTreeMap::new(),
+            parts: BTreeMap::new(),
+            part_bytes: 0,
+            gets: std::cell::Cell::new(0),
+        }
+    }
+    pub fn get_count(&self) -> usize {
+        self.gets.get()
     }
     fn decrypted(&self, key: &str) -> Result<Vec<u8>> {
+        self.gets.set(self.gets.get() + 1);
         self.backend.decrypted(key, self.identity).with_context(|| format!("decrypt {key}"))
     }
     pub fn tree(&mut self, state: &str, attempt: &str) -> Result<(Header, Vec<u8>, Tree)> {

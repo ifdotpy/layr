@@ -72,6 +72,11 @@ def size(p):
     paths=[x for x in p.rglob('*') if x.is_file()] if p.is_dir() else [p]
     return sum(x.stat().st_size for x in paths)
 
+def journal_stats(label):
+    records=[json.loads(line[len('trace push-journal '):]) for line in (base/(label+'.log')).read_text().splitlines() if line.startswith('trace push-journal ')]
+    assert records, 'after push did not report its transfer journal'
+    return records[-1]
+
 def measure(kind,phase,binary):
     root=fs/(kind+'-local')
     project=root/'projects'/kind
@@ -103,6 +108,10 @@ def measure(kind,phase,binary):
     result={'after_run_id':args.after_run_id,'run_id':args.run_id,'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),'fixture':kind,'phase':phase,'seconds':seconds,'snapshot_states':sum(1 for p in (project/'states').iterdir() if p.is_dir()),'commits':int(subprocess.check_output(['git','-C',str(source),'rev-list','--count','HEAD'])),'uploaded_states':sum(1 for p in (archive/'states').rglob('*.tree.age')),'cache_bytes':sum(p.stat().st_size for p in files),'cache_allocated_bytes':sum(p.stat().st_blocks*512 for p in files),'cache_files':len(files),'encrypted_store_bytes':size(archive),'cache_path':str(target),'source_tip':subprocess.check_output(['git','-C',str(source),'rev-parse','HEAD']).decode().strip(),'time_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())}
     result['encrypted_store_objects']=sum(1 for p in archive.rglob('*') if p.is_file())
     result['cache_percent']=100*result['cache_bytes']/result['encrypted_store_bytes']
+    if phase=='after':
+        result['journal']=journal_stats(kind+'-'+label_for(phase))
+        result['journal_state_commit_percent']=100*result['journal']['state_commit_seconds']/seconds
+        assert not (target/'push-journal.sqlite3').exists(), 'completed transfer left its journal'
     if args.resume:
         for name,digest in before.items():assert hashlib.sha256((archive/name).read_bytes()).hexdigest()==digest,name
         result.update(interrupted=True,resume_seconds=seconds,prefix_last_progress_seconds=prefix_seconds,seconds_estimated=prefix_seconds+seconds,seconds=None,preserved_objects=len(before))
@@ -151,13 +160,13 @@ def daily():
             parsed=urllib.parse.urlsplit(self.path);parts=parsed.path.split('/')
             if parts[:2]==['','p']:
                 assert parts[2] in ('before','after') and self.headers.get('Authorization') is None
-                requests.append({'method':self.command,'phase':parts[2],'path':self.path,'credential':'none'})
+                requests.append({'time_ms':int(time.time()*1000),'method':self.command,'phase':parts[2],'path':self.path,'credential':'none'})
                 self.reply(404,{});return
             assert parts[:3]==['','v1','p'] and parts[3] in ('before','after')
             phase=parts[3];action='/'.join(parts[4:]);archive=archive_for('studio',phase)
             auth=self.headers.get('Authorization');query=urllib.parse.parse_qs(parsed.query)
             kind='grant' if auth=='Bearer '+grant else 'read' if auth=='Bearer '+proof else 'none'
-            requests.append({'method':self.command,'phase':phase,'path':self.path,'credential':kind})
+            requests.append({'time_ms':int(time.time()*1000),'method':self.command,'phase':phase,'path':self.path,'credential':kind})
             if self.command=='GET' and (action=='store.json' or action.startswith('slots/machine-')):
                 assert kind=='grant';path=archive/action
                 self.reply(200,path.read_bytes()) if path.exists() else self.reply(404,{})
@@ -219,6 +228,7 @@ def daily():
             counts=dict(collections.Counter(r['method'] for r in requests))
             listing_prefixes=[urllib.parse.parse_qs(urllib.parse.urlsplit(r['path']).query).get('prefix',[''])[0] for r in requests if '/objects?' in r['path']]
             result={'after_run_id':args.after_run_id,'run_id':args.run_id,'binary_sha256':hashlib.sha256((base/('layr-'+phase)).read_bytes()).hexdigest(),'fixture':'studio','phase':'daily-'+phase,'seconds':seconds,'imported_commits':7965,'prior_states':prior_states,'requests':counts,'request_count':len(requests),'listing_prefixes':listing_prefixes,'delay_ms':5,'cache_warmup':'same-object file-store cache reflinked to gateway URL alias','time_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())}
+            if phase=='after':result['journal']=journal_stats('daily-'+phase)
             with results.open('a') as out:out.write(json.dumps(result)+'\n')
             (base/('daily-'+phase+'-requests.json')).write_text(json.dumps(requests,indent=2)+'\n')
             print(json.dumps(result),flush=True)
