@@ -1038,24 +1038,52 @@ pub fn object_of(repo: &Repo, state: &str, path: &str) -> Result<Option<String>>
 }
 
 fn object_of_once(repo: &Repo, state: &str, path: &str) -> Result<Option<String>> {
-    let commit = match commit_of(repo, state)? {
+    let s = store(repo);
+    // A path query reads only its commit and ancestor trees. Avoid walking every unrelated
+    // subtree merely to return the root tree ID of an already imported state.
+    let mapped = repo.p.db.git_commit_of(state)?.filter(|c| git_out(&s, &["cat-file", "-e", &format!("{c}^{{commit}}")]).is_ok());
+    let commit = match mapped {
         Some(c) => c,
-        None => export_history(repo, state)?.0,
+        None => match commit_of(repo, state)? {
+            Some(c) => c,
+            None => export_history(repo, state)?.0,
+        },
     };
-    let spec = format!("{commit}:{path}");
-    let out =
-        base_cmd(&store(repo)).args(["rev-parse", "--verify", "-q", &spec]).stdin(Stdio::null()).output().context("run git")?;
-    match out.status.code() {
-        Some(0) => {
-            let oid = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            let s = store(repo);
-            check_object(&s, &mut CatFile::new(&s)?, &oid, "")?;
-            Ok(Some(oid))
+    let mut cat = CatFile::new(&s)?;
+    let raw = cat.object(&commit, "commit")?;
+    let mut oid = tree_id(&raw)?.to_string();
+    let mut kind = "tree";
+    for component in path.trim_end_matches('/').split('/').filter(|_| !path.is_empty()) {
+        if kind != "tree" {
+            return Ok(None);
         }
-        // --verify -q: exit 1 and no message when the name does not resolve.
-        Some(1) if out.stderr.is_empty() => Ok(None),
-        _ => bail!("git rev-parse {spec} failed: {}", String::from_utf8_lossy(&out.stderr).trim()),
+        let bytes = cat.object(&oid, "tree")?;
+        let mut rest = bytes.as_slice();
+        let mut found = None;
+        while !rest.is_empty() {
+            let space = rest.iter().position(|b| *b == b' ').context("bad Git tree mode")?;
+            let nul = rest.iter().position(|b| *b == 0).context("bad Git tree name")?;
+            let end = nul.checked_add(21).filter(|end| *end <= rest.len()).context("short Git tree ID")?;
+            if rest.get(space + 1..nul) == Some(component.as_bytes()) {
+                let kind = match &rest[..space] {
+                    b"40000" | b"040000" => "tree",
+                    b"160000" => "commit",
+                    _ => "blob",
+                };
+                found = Some((hex::encode(&rest[nul + 1..end]), kind));
+                break;
+            }
+            rest = &rest[end..];
+        }
+        let Some((next, next_kind)) = found else { return Ok(None) };
+        oid = next;
+        kind = next_kind;
     }
+    // Gitlinks name commits in another repository; their containing tree authenticates the ID.
+    if kind != "commit" {
+        check_object(&s, &mut cat, &oid, kind)?;
+    }
+    Ok(Some(oid))
 }
 
 /// The commit of a state in the git store, if it has one: the commit a record names (import,
