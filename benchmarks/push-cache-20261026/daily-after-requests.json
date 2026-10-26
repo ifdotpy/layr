@@ -1,0 +1,149 @@
+[
+  {
+    "time_ms": 1793056099028,
+    "method": "GET",
+    "phase": "after",
+    "path": "/v1/p/after/store.json",
+    "credential": "grant"
+  },
+  {
+    "time_ms": 1793056099040,
+    "method": "GET",
+    "phase": "after",
+    "path": "/v1/p/after/store.json",
+    "credential": "grant"
+  },
+  {
+    "time_ms": 1793056099050,
+    "method": "GET",
+    "phase": "after",
+    "path": "/v1/p/after/store.json",
+    "credential": "grant"
+  },
+  {
+    "time_ms": 1793056099073,
+    "method": "GET",
+    "phase": "after",
+    "path": "/v1/p/after/store.json",
+    "credential": "grant"
+  },
+  {
+    "time_ms": 1793056099085,
+    "method": "GET",
+    "phase": "after",
+    "path": "/v1/p/after/objects?prefix=keys%2F&limit=1000",
+    "credential": "grant"
+  },
+  {
+    "time_ms": 1793056099095,
+    "method": "GET",
+    "phase": "after",
+    "path": "/v1/p/after/store.json",
+    "credential": "grant"
+  },
+  {
+    "time_ms": 1793056099103,
+    "method": "GET",
+    "phase": "after",
+    "path": "/v1/p/after/store.json",
+    "credential": "grant"
+  },
+  {
+    "time_ms": 1793056099120,
+    "method": "GET",
+    "phase": "after",
+    "path": "/p/after/public.json",
+    "credential": "none"
+  },
+  {
+    "time_ms": 1793056099129,
+    "method": "GET",
+    "phase": "after",
+    "path": "/v1/p/after/slots/machine-01a179ae-cf9f-774f-894d-67b9584894f9.age",
+    "credential": "grant"
+  },
+  {
+    "time_ms": 1793056099139,
+    "method": "GET",
+    "phase": "after",
+    "path": "/v1/p/after/challenge",
+    "credential": "grant"
+  },
+  {
+    "time_ms": 1793056099149,
+    "method": "POST",
+    "phase": "after",
+    "path": "/v1/p/after/token",
+    "credential": "grant"
+  },
+  {
+    "time_ms": 1793056099159,
+    "method": "GET",
+    "phase": "after",
+    "path": "/v1/p/after/objects/slots/service.age",
+    "credential": "read"
+  },
+  {
+    "time_ms": 1793056099171,
+    "method": "GET",
+    "phase": "after",
+    "path": "/v1/p/after/store.json",
+    "credential": "grant"
+  },
+  {
+    "time_ms": 1793056099181,
+    "method": "GET",
+    "phase": "after",
+    "path": "/v1/p/after/objects?prefix=keys%2F&limit=1000",
+    "credential": "read"
+  },
+  {
+    "time_ms": 1793056099192,
+    "method": "GET",
+    "phase": "after",
+    "path": "/v1/p/after/store.json",
+    "credential": "grant"
+  },
+  {
+    "time_ms": 1793056100460,
+    "method": "GET",
+    "phase": "after",
+    "path": "/v1/p/after/objects?prefix=records%2F01a179ae-cf9f-774f-894d-67b9584894f9%2F&limit=1000",
+    "credential": "read"
+  },
+  {
+    "time_ms": 1793056100480,
+    "method": "PUT",
+    "phase": "after",
+    "path": "/v1/p/after/objects/records/01a179ae-cf9f-774f-894d-67b9584894f9/00000000000000007993-00000000000000008007.age",
+    "credential": "grant"
+  },
+  {
+    "time_ms": 1793056100911,
+    "method": "GET",
+    "phase": "after",
+    "path": "/v1/p/after/objects?prefix=states%2F01a17a75-9b6c-70cb-94cb-d459f63ecb97%2F&limit=1000",
+    "credential": "read"
+  },
+  {
+    "time_ms": 1793056101032,
+    "method": "PUT",
+    "phase": "after",
+    "path": "/v1/p/after/objects/states/01a17a75-9b6c-70cb-94cb-d459f63ecb97/5a60bd45.0000.data.age",
+    "credential": "grant"
+  },
+  {
+    "time_ms": 1793056101057,
+    "method": "PUT",
+    "phase": "after",
+    "path": "/v1/p/after/objects/states/01a17a75-9b6c-70cb-94cb-d459f63ecb97/5a60bd45.tree.age",
+    "credential": "grant"
+  },
+  {
+    "time_ms": 1793056101229,
+    "method": "GET",
+    "phase": "after",
+    "path": "/v1/p/after/store.json",
+    "credential": "grant"
+  }
+]

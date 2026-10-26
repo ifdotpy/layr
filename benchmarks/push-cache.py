@@ -153,7 +153,7 @@ def daily():
     openssl(['req','-new','-newkey','rsa:2048','-nodes','-keyout',str(tls/'key.pem'),'-out',str(tls/'request.csr'),'-subj','/CN=localhost'])
     (tls/'extensions.cnf').write_text('basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:localhost,IP:127.0.0.1\n')
     openssl(['x509','-req','-in',str(tls/'request.csr'),'-CA',str(tls/'ca.pem'),'-CAkey',str(tls/'ca-key.pem'),'-CAcreateserial','-out',str(tls/'cert.pem'),'-days','1','-extfile',str(tls/'extensions.cnf')])
-    grant=secrets.token_hex(32);proof='v1.read.push-cache-fixture'
+    grant=secrets.token_hex(32);proof='v1.read.pushcachefixture'
     grant_path=tls/'grant';grant_path.write_text(grant);grant_path.chmod(0o600)
     # A production challenge is small. Full record segments exceed its 16 KiB
     # response bound on a large history, so seal a short nonce with the age CLI.
