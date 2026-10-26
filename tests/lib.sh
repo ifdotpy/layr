@@ -10,9 +10,12 @@ if [ -n "${LAYR_OVERLAYFS_TEST_ROOT:-}" ]; then
 elif [ "$(uname -s)" = Darwin ]; then
     : "${LAYR_APFS_TEST_ROOT:?Set LAYR_APFS_TEST_ROOT to a case-sensitive APFS volume}"
     T=$(mktemp -d "$LAYR_APFS_TEST_ROOT/layr-test.XXXXXX")
+    export LAYR_TEST_DIRECT_MAIN=1
 else
     T=$(mktemp -d "${TMPDIR:-/var/tmp}/layr-test.XXXXXX")
 fi
+# Stop before any delete: without the folder, "$T/src" would become "/src".
+[ -n "$T" ] && [ -d "$T" ] || { echo "FATAL: cannot create the test folder" >&2; exit 1; }
 export LAYR_ROOT=$T/store
 export GIT_AUTHOR_NAME=Tester GIT_AUTHOR_EMAIL=tester@example.com GIT_COMMITTER_NAME=Tester GIT_COMMITTER_EMAIL=tester@example.com
 export LAYR_AUTHOR_NAME=Tester LAYR_AUTHOR_EMAIL=tester@example.com
@@ -120,6 +123,21 @@ sample() { # sample <dir>
     seq 1 20 | sed 's/^/line /' > "$1/notes.txt"
     printf 'target/\n*.log\n' > "$1/.gitignore"
     echo bin > "$1/target/out.bin"; echo x > "$1/debug.log"
+}
+
+# GNU and BSD (macOS) tools differ: sed -i needs a suffix argument on BSD, and stat has
+# other format flags. These helpers run the same on both.
+sed_inplace() { # sed_inplace <sed options> <script> <file>
+    local file=${*: -1}
+    sed -i.bak "${@:1:$#-1}" "$file" && rm -f "$file.bak"
+}
+
+stat_field() { # stat_field <inode|mode> <file>
+    if [ "$(uname -s)" = Darwin ]; then
+        case $1 in inode) stat -f %i "$2" ;; mode) stat -f %Lp "$2" ;; esac
+    else
+        case $1 in inode) stat -c %i "$2" ;; mode) stat -c %a "$2" ;; esac
+    fi
 }
 
 # Run a peer command through a named remote with an explicit transport for tests.
