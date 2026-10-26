@@ -340,7 +340,14 @@ impl Store {
             // paper slot is not this store's paper key, so nothing is recorded.
             if let (None, Some(paper)) = (&pin.paper_recipient, &self.paper_key_text) {
                 let opener = keys::identity_from_paper(paper).map_err(|_| anyhow::anyhow!("invalid paper key"))?;
-                if let Some(slot) = self.backend.root().get("slots/paper.age")? {
+                let root = self.backend.root();
+                // Configuration pins the root descriptor before resolving epochs. Open the
+                // machine/person slot first so a gateway paper-slot read has its own proof.
+                if !root.can_read() {
+                    let identity = self.own_identity(&self.root_descriptor()?, None)?;
+                    root.unlock_reader(&identity)?;
+                }
+                if let Some(slot) = root.get("slots/paper.age")? {
                     if let Ok(identity) = keys::open_slot(&slot, &opener) {
                         if keys::recipient_of(&identity)? != pin.recipient {
                             bail!("paper slot does not match store recipient");
