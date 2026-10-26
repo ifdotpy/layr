@@ -11,11 +11,19 @@ parser = argparse.ArgumentParser()
 parser.add_argument("project")
 parser.add_argument("--binary", type=pathlib.Path, required=True)
 parser.add_argument("--root", type=pathlib.Path, required=True)
+parser.add_argument("--gateway-token-file", type=pathlib.Path, help="private transport credential file; only its path enters the agent environment")
 args = parser.parse_args()
 if not re.fullmatch(r"[a-zA-Z0-9_-]+", args.project):
     parser.error("project must contain letters, digits, underscores or hyphens")
 binary = args.binary.resolve(strict=True)
 root = args.root.resolve(strict=True)
+environment = {"LAYR_ROOT": str(root)}
+if args.gateway_token_file:
+    token_file = args.gateway_token_file.resolve(strict=True)
+    info = token_file.stat()
+    if not token_file.is_file() or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        parser.error("gateway token file must be private and owned by this user")
+    environment["LAYR_GATEWAY_TOKEN_FILE"] = str(token_file)
 home = pathlib.Path.home()
 logs = home / "Library/Logs/Layr"
 agents = home / "Library/LaunchAgents"
@@ -27,7 +35,7 @@ for kind, command in (("checks", ["checks", "watch", "--json"]), ("fetch", ["fet
     config = {
         "Label": label,
         "ProgramArguments": [str(binary), "--project", args.project, *command],
-        "EnvironmentVariables": {"LAYR_ROOT": str(root)},
+        "EnvironmentVariables": environment,
         "WorkingDirectory": "/",
         "RunAtLoad": True,
         "ThrottleInterval": 5,
