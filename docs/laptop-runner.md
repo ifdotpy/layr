@@ -55,6 +55,10 @@ the transport credential needed for that project. Transport credentials come
 from the environment (`LAYR_GATEWAY_TOKEN_FILE` or the relevant storage variables),
 never project config or check commands. A root-owned `/etc/layr-runner.env` may
 provide those variable names/paths to the daemon; keep that file mode 0600.
+For a transient credential, use a root-owned mode 0700 directory such as
+`/run/layr-runner-credentials`, with the token file mode 0600. Keep it outside
+`/run/layr-runner`: systemd removes that daemon runtime directory on restart.
+A tmpfs credential must be provisioned again after a VM reboot.
 After cloning, as root in the project:
 
 ```sh
@@ -67,8 +71,11 @@ bash tools/checks/install-services.sh PROJECT
 The daemon has cgroup memory/process ceilings. `layr-checks@PROJECT` runs the
 watcher as the non-root service user and restarts on failure or VM boot.
 `layr-sync@PROJECT.timer` fetches then pushes results and the site index every
-15 seconds. Stop this project's units before replacing its binary or policy.
+120 seconds with up to 30 seconds of jitter. Stop this project's units before replacing its binary or policy.
 An executor elsewhere keeps both machine-local execution flags off.
+A shared gateway limit also applies to runners behind the same public IP.
+Respect HTTP 429 `Retry-After`; pause transport while an owner publishes a large
+fixture, then resume the timers. Check watchers can remain active during the pause.
 
 ```sh
 systemctl status layr-runner-daemon layr-checks@PROJECT layr-sync@PROJECT.timer
@@ -113,7 +120,7 @@ python3 tools/checks/install-macos-agent.py PROJECT \
 ```
 
 Use a stable installed binary path. The user LaunchAgents restart the watcher
-and fetch/push periodically, with logs under `~/Library/Logs/Layr`.
+and fetch/push every 120 seconds, with logs under `~/Library/Logs/Layr`.
 
 For a gateway remote, add `--gateway-token-file /private/path/to/token` to the
 installer command. The file must be owned by the runner user and mode 0600;
