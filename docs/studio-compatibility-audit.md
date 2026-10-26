@@ -44,3 +44,15 @@ It does not assert local store format compatibility.
 
 Sources: `src/main.rs`, `src/cmd/{mod,admin,remote,change}.rs`, and `src/person.rs`.
 `src/args.rs` and `src/service.rs` do not change between the compared revisions.
+
+## Related defects from review
+
+Cache cleanup now grants owner write access to directories before deletion.
+The new public regression uses 0555 directories and 0444 files.
+Both first conversion and cache repair must remove the old tree and preserve the new modes.
+
+Machine identity creation now has an exclusive local lease and create-once publication.
+Main also has the original identity race, independent of the format guard.
+`tests/machine-identity.py` uses 24 concurrent initializations for each fixture.
+It checks fresh roots, marker-only crash recovery, and an existing partial ID.
+Every project receives a later write and an `fsck` check.
