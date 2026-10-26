@@ -119,6 +119,8 @@ def measure(kind,phase,binary):
     if phase=='after':
         result['journal']=journal_stats(kind+'-'+label_for(phase))
         result['journal_state_commit_percent']=100*result['journal']['state_commit_seconds']/seconds
+        result['journal_commit_percent']=100*result['journal']['commit_seconds']/seconds
+        if kind=='layr':assert result['journal_commit_percent']<=5, 'journal commits exceed 5% of the 392-state push'
         assert not (target/'push-journal.sqlite3').exists(), 'completed transfer left its journal'
     if args.resume:
         for name,digest in before.items():assert hashlib.sha256((archive/name).read_bytes()).hexdigest()==digest,name
