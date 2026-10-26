@@ -224,7 +224,7 @@ l config check.denymerge '"false"'
 l protect main --check denymerge --path feature.txt=maintainer
 MERGE_SOURCE=$(state_id feature)
 MERGE_BEFORE=$(state_id head)
-if l merge feature -q > "$T/merge-refusal.log" 2>&1; then
+if l merge feature --expect "$MERGE_SOURCE" -q > "$T/merge-refusal.log" 2>&1; then
     MERGE_ALLOWED=true
 else
     MERGE_ALLOWED=false
@@ -275,8 +275,10 @@ ok 'overlay state IDs stay in the overlay transfer record' python3 - "$LAYR_ROOT
 import json, sqlite3, sys
 from pathlib import Path
 project=Path(sys.argv[1])
-parent_db=sqlite3.connect((project/'meta/db/layr.sqlite').as_uri()+'?mode=ro',uri=True)
-overlay_dbs=[sqlite3.connect((project/'meta/overlays'/name/'meta/db/layr.sqlite').as_uri()+'?mode=ro',uri=True) for name in ['secrets','hidden-golden']]
+# CLI commands have exited and checkpointed these databases. Immutable reads
+# need no WAL/SHM side files, which a read-only native SQLite opener cannot create.
+parent_db=sqlite3.connect((project/'meta/db/layr.sqlite').as_uri()+'?mode=ro&immutable=1',uri=True)
+overlay_dbs=[sqlite3.connect((project/'meta/overlays'/name/'meta/db/layr.sqlite').as_uri()+'?mode=ro&immutable=1',uri=True) for name in ['secrets','hidden-golden']]
 def push(db):
     return json.loads(db.execute("select raw from records where op='push' order by time desc, seq desc limit 1").fetchone()[0])['r']
 parent=push(parent_db)
@@ -381,7 +383,7 @@ import json, sqlite3, sys
 from pathlib import Path
 project, cli = map(Path, sys.argv[1:])
 for name, label in [('secrets', 'visible'), ('hidden-golden', 'hidden-reader')]:
-    db = sqlite3.connect((project / 'meta/overlays' / name / 'meta/db/layr.sqlite').as_uri() + '?mode=ro', uri=True)
+    db = sqlite3.connect((project / 'meta/overlays' / name / 'meta/db/layr.sqlite').as_uri() + '?mode=ro&immutable=1', uri=True)
     records = [json.loads(line)['r'] for line, in db.execute('select raw from records order by time, machine, seq')]
     show = json.loads((cli / f'overlay-show-{label}.json').read_text())
     ops = json.loads((cli / f'overlay-ops-{label}.json').read_text())
@@ -415,7 +417,7 @@ l push store -q
 (cd "$REPO" && cargo run -q -p layr-model --example store_golden -- "$T/archive" "$T/paper" "$T/model")
 
 ok 'page outputs contain verified metadata and text bounds' python3 - "$T/model" <<'PYPAGES'
-import json, sys
+import json, os, sys
 from pathlib import Path
 root = Path(sys.argv[1])
 load = lambda name: json.loads((root / (name + '.json')).read_text())
@@ -450,7 +452,7 @@ diff = load('diff')
 assert diff['base'] != diff['head']
 assert any(f['path'] == 'feature.txt' and f['status'] == 'add' and f['added'] == 2 and '+version one' in f['unified'] for f in diff['files'])
 config = load('config')
-assert config['policy']['access']['user:0'] == 'admin'
+assert config['policy']['access'][f'user:{os.getuid()}'] == 'admin'
 assert config['path_rules']['main']['feature.txt'] == 'maintainer'
 overlay = next(o for o in load('overlays') if o['name'] == 'secrets')
 assert overlay['name'] == 'secrets' and overlay['readable'] and overlay['readers'] and len(overlay['managers']) == 1
