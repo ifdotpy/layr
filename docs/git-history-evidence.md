@@ -176,3 +176,31 @@ The absolute ten-minute full-transfer target was not established on this busy
 host. The complete history round trip, daily push latency and bounded daily
 request count were established. Production server pagination was delivered in
 the separate layr-cloud change; no AWS operation was performed by this task.
+
+
+## Corrections after the full-suite review
+
+The branch now starts at the lead's rebased `6a9c58e`, on main `cb04041`, retaining
+both backend tests from the conflict resolution. Source fix `8c5ae13` addresses
+the two failures found by the lead's full Linux run:
+
+- Cached completion metadata could hide a missing advertised tip tree in a
+  partial remote. Push now rechecks line and ref tips through their exact state
+  prefixes. A missing tree returns to upload selection, and the later reader
+  fetch creates the delayed working folder with its exact bytes. Historical
+  state enumeration remains unnecessary for regular incremental pushes.
+- The bootstrap stand-in now accepts `prefix`, `limit=1000`, and `continuation`.
+  It returns one entry per page to exercise continuation. Its assertions retain
+  the boundary between project-grant discovery and private read proofs.
+
+The client also retries a first-page HTTP 400 with the legacy prefix-only query,
+using the same authentication and response-size limits. A focused unit test
+checks both public and writer modes against an older server that rejects the
+pagination query. Responses without continuation remain supported. Failed
+continuation requests are not retried as a new legacy listing.
+
+Own `layr-gh` validation on 2026-10-26: `cargo test --workspace --locked` passed
+231 tests, with seven intentionally ignored. Suites t24, t46, t19, t22, both t23
+suites, t35, t42, t45 and t49 passed with zero failures. The earlier performance
+samples remain recorded at their measured revisions; no full benchmark was
+repeated for these corrections. The lead runs the full suite again.
