@@ -21,6 +21,7 @@ import argparse
 parser=argparse.ArgumentParser(description='Compare push caches against two pinned Git fixture copies on a Btrfs volume.')
 parser.add_argument('--workspace',type=pathlib.Path,default=pathlib.Path('/root/pc'))
 parser.add_argument('--run-id',default='',help='Suffix for fresh before/after archives when repeating the comparison.')
+parser.add_argument('--after-run-id',default='',help='Use a fresh after archive with an existing matching baseline run.')
 parser.add_argument('--fixture',choices=['all','layr','studio'],default='all')
 parser.add_argument('--resume',action='store_true',help='Resume an interrupted after push; report log timestamp estimate separately.')
 parser.add_argument('phase',choices=['before','after','daily'])
@@ -32,7 +33,9 @@ assert os.path.ismount(fs), 'benchmark Btrfs mount is missing; remount the fixtu
 assert subprocess.check_output(['findmnt','-n','-o','FSTYPE',str(fs)],text=True).strip()=='btrfs', 'benchmark requires Btrfs'
 if args.phase in ('after','daily'):
     assert hashlib.sha256((base/'layr-before').read_bytes()).digest()!=hashlib.sha256((base/'layr-after').read_bytes()).digest(), 'before/after binaries are identical; force separate builds'
-def label_for(phase):return phase+('-'+args.run_id if args.run_id else '')
+def label_for(phase):
+    label=args.after_run_id if phase=='after' and args.after_run_id else args.run_id
+    return phase+('-'+label if label else '')
 def archive_for(kind,phase):return fs/(kind+'-'+label_for(phase)+'-archive')
 
 def run(args,env=None,cwd=None,label=None):
@@ -77,7 +80,7 @@ def measure(kind,phase,binary):
     target=project/'meta/remote-stores'/hashlib.sha256(('file://'+str(archive)).encode()).hexdigest()
     files=[p for p in target.rglob('*') if p.is_file() and (p.parent.name=='pushed' or p.name in ('pushed.json','pushed-v2.json.zst','push-cache.sqlite3'))]
     assert (target/'pushed-v2.json.zst').is_file() if phase=='after' else (target/'pushed.json').is_file(), 'unexpected cache format'
-    result={'run_id':args.run_id,'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),'fixture':kind,'phase':phase,'seconds':seconds,'snapshot_states':sum(1 for p in (project/'states').iterdir() if p.is_dir()),'commits':int(subprocess.check_output(['git','-C',str(source),'rev-list','--count','HEAD'])),'uploaded_states':sum(1 for p in (archive/'states').rglob('*.tree.age')),'cache_bytes':sum(p.stat().st_size for p in files),'cache_allocated_bytes':sum(p.stat().st_blocks*512 for p in files),'cache_files':len(files),'encrypted_store_bytes':size(archive),'cache_path':str(target),'source_tip':subprocess.check_output(['git','-C',str(source),'rev-parse','HEAD']).decode().strip(),'time_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())}
+    result={'after_run_id':args.after_run_id,'run_id':args.run_id,'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),'fixture':kind,'phase':phase,'seconds':seconds,'snapshot_states':sum(1 for p in (project/'states').iterdir() if p.is_dir()),'commits':int(subprocess.check_output(['git','-C',str(source),'rev-list','--count','HEAD'])),'uploaded_states':sum(1 for p in (archive/'states').rglob('*.tree.age')),'cache_bytes':sum(p.stat().st_size for p in files),'cache_allocated_bytes':sum(p.stat().st_blocks*512 for p in files),'cache_files':len(files),'encrypted_store_bytes':size(archive),'cache_path':str(target),'source_tip':subprocess.check_output(['git','-C',str(source),'rev-parse','HEAD']).decode().strip(),'time_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())}
     result['encrypted_store_objects']=sum(1 for p in archive.rglob('*') if p.is_file())
     result['cache_percent']=100*result['cache_bytes']/result['encrypted_store_bytes']
     if args.resume:
@@ -94,6 +97,8 @@ def measure(kind,phase,binary):
 
 
 def daily():
+    rows=[json.loads(line) for line in results.read_text().splitlines() if line]
+    assert any(row['fixture']=='studio' and row['phase']=='after' and row.get('run_id','')==args.run_id and row.get('after_run_id','')==args.after_run_id and not row.get('interrupted') for row in rows), 'daily comparison requires a completed uninterrupted large after run'
     # Serve the exact file-store objects through the private TLS routes. Reflink each
     # corresponding warm cache to the URL alias, so the measured push starts with the
     # same local state as its preceding complete push, without repeating bulk transfer.
@@ -193,7 +198,7 @@ def daily():
             assert not errors,errors
             counts=dict(collections.Counter(r['method'] for r in requests))
             listing_prefixes=[urllib.parse.parse_qs(urllib.parse.urlsplit(r['path']).query).get('prefix',[''])[0] for r in requests if '/objects?' in r['path']]
-            result={'run_id':args.run_id,'binary_sha256':hashlib.sha256((base/('layr-'+phase)).read_bytes()).hexdigest(),'fixture':'studio','phase':'daily-'+phase,'seconds':seconds,'imported_commits':7965,'prior_states':prior_states,'requests':counts,'request_count':len(requests),'listing_prefixes':listing_prefixes,'delay_ms':5,'cache_warmup':'same-object file-store cache reflinked to gateway URL alias','time_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())}
+            result={'after_run_id':args.after_run_id,'run_id':args.run_id,'binary_sha256':hashlib.sha256((base/('layr-'+phase)).read_bytes()).hexdigest(),'fixture':'studio','phase':'daily-'+phase,'seconds':seconds,'imported_commits':7965,'prior_states':prior_states,'requests':counts,'request_count':len(requests),'listing_prefixes':listing_prefixes,'delay_ms':5,'cache_warmup':'same-object file-store cache reflinked to gateway URL alias','time_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())}
             with results.open('a') as out:out.write(json.dumps(result)+'\n')
             (base/('daily-'+phase+'-requests.json')).write_text(json.dumps(requests,indent=2)+'\n')
             print(json.dumps(result),flush=True)
