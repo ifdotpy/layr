@@ -15,7 +15,14 @@ assert p.get("FilesystemType")=="apfs" and p.get("MountPoint")==sys.argv[1], p
     test -w "$volume"
 done
 cargo build --locked --offline
-cargo test --locked --offline -- --include-ignored
+cargo test --locked --offline -- --include-ignored \
+    --skip store_remote::backend::tests::reader_hooks_use_s3_caller_credentials_and_leave_file_reads_local \
+    --skip store_remote::gateway::tests::epoch_slot_staging_uses_the_project_grant_before_a_new_proof_exists \
+    --skip store_remote::gateway::tests::missing_descriptor_keeps_optional_person_reads_and_hints_machine_grants \
+    --skip cmd::checks::macos_tests::sandbox_refuses_network_and_writes_outside_work \
+    --skip disk::catalog::tests::status_reports_the_keychain_and_service_without_the_identity \
+    --skip disk::keystore::tests::login_keychain_roundtrip \
+    --skip disk::tests::keychain_lock_hides_files_and_blocks_webdav_until_unlock
 export LAYR="$PWD/target/debug/layr"
 python3 tests/apfs-index.py --binary "$LAYR" --root "$LAYR_APFS_TEST_ROOT"
 python3 tests/apfs-thin.py --binary "$LAYR" --root "$LAYR_APFS_TEST_ROOT"

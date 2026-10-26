@@ -96,8 +96,10 @@ sudo bash tools/checks/macos-operator.sh "$PWD/target/debug/layr" igor
 
 This enables volume ownership and executes the root-only `tests/apfs-service.sh`.
 Its result is operator evidence, separate from the nonprivileged APFS attestation.
-Automatic commands never invoke sudo. Report the operator check as unverified
-until this command has completed successfully.
+Automatic commands never invoke sudo. Separately, as the Mac user (without sudo),
+run `bash tools/checks/macos-operator.sh --keychain` to exercise the three login
+Keychain fixtures. Report each operator step as unverified until it has completed
+successfully. Automatic checks never receive login Keychain access.
 
 Enroll the Mac's own public machine identity from the project owner's machine,
 then clone into a dedicated user-owned store. In that clone:
@@ -124,7 +126,8 @@ access on a clone permits local operations and transport configuration; its own
 check definitions cannot select or replace automatic jobs.
 
 `sandbox-exec` denies network access and permits writes only in the private check
-folder and the two dedicated test volumes. The check gets a clean environment,
+folder and the two dedicated test volumes. Its private source copy lives under `/private/var/tmp`, outside the personal home.
+The check gets a clean environment,
 private HOME, timeout, process limits and capped logs. Tools and the prepared
 cache are read-only. Darwin does not enforce the Linux address-space limit;
 `checks.memory` still bounds output files there. Missing or refused sandbox
@@ -136,6 +139,22 @@ to macOS system interfaces and read-only system/Homebrew tools. The sandbox is
 not a VM isolation boundary; kernel or system-service defects may escape it.
 Approval grants trust to run that exact version. Linux privileged code has full
 VM root access and must never share the personal Mac's files or credentials.
+
+The automatic Mac command omits these exact unit test names only:
+
+| Test | Reason and separate coverage |
+| --- | --- |
+| `store_remote::backend::tests::reader_hooks_use_s3_caller_credentials_and_leave_file_reads_local` | Local HTTP server; full Linux suite on the same state |
+| `store_remote::gateway::tests::epoch_slot_staging_uses_the_project_grant_before_a_new_proof_exists` | Local HTTP server; full Linux suite on the same state |
+| `store_remote::gateway::tests::missing_descriptor_keeps_optional_person_reads_and_hints_machine_grants` | Local HTTP server; full Linux suite on the same state |
+| `cmd::checks::macos_tests::sandbox_refuses_network_and_writes_outside_work` | Needs an outside-sandbox TCP baseline; run separately on the Mac |
+| `disk::catalog::tests::status_reports_the_keychain_and_service_without_the_identity` | Login Keychain fixture; manual `--keychain` operator step |
+| `disk::keystore::tests::login_keychain_roundtrip` | Login Keychain fixture; manual `--keychain` operator step |
+| `disk::tests::keychain_lock_hides_files_and_blocks_webdav_until_unlock` | Login Keychain fixture; manual `--keychain` operator step |
+
+These omissions were confirmed by the actual sandboxed run (117 passed, 19 failed
+before the filesystem profile correction). All APFS storage/thin tests remain in
+the automatic suite. Network access remains blocked, including localhost services.
 
 ## Verification
 
