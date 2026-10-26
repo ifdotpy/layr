@@ -1390,6 +1390,88 @@ mod tests {
     }
 
     #[test]
+    fn rolling_back_journal_rows_only_causes_authenticated_reseeding() {
+        use std::{
+            os::unix::process::ExitStatusExt,
+            process::{Command, Stdio},
+        };
+        let root = std::env::temp_dir().join(crate::ids::new_id());
+        std::fs::create_dir_all(&root).unwrap();
+        let ctx = context(&root);
+        let mut store = remote(&root, &ctx);
+        store
+            .configure(&ctx, &super::super::ConfigureOptions { paper_key_out: Some(root.join("paper")), ..Default::default() })
+            .unwrap();
+        let repo = branch_fixture(&ctx, &store);
+        let states =
+            parents_first(repo.p.db.present_states().unwrap().into_iter().map(|(id, _)| repo.state(&id).unwrap()).collect())
+                .unwrap();
+        drop(repo);
+        let invoke = |point: Option<(&str, &str)>, log: &str| {
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args(["--ignored", "--exact", "store_remote::writer::tests::crash_push_process", "--nocapture"])
+                .env("LAYR_TEST_CRASH_ROOT", &root)
+                .env("LAYR_TRACE", "1")
+                .env_remove("LAYR_TEST_KILL_POINT")
+                .env_remove("LAYR_TEST_KILL_STATE")
+                .stdout(Stdio::null())
+                .stderr(std::fs::File::create(root.join(log)).unwrap());
+            if let Some((point, state)) = point {
+                command.env("LAYR_TEST_KILL_POINT", point).env("LAYR_TEST_KILL_STATE", state);
+            }
+            command.status().unwrap()
+        };
+        assert_eq!(invoke(Some(("before_part", &states[1].id)), "first.log").signal(), Some(libc::SIGKILL));
+        let path = store.dir.join("push-journal.sqlite3");
+        let older = root.join("older.sqlite3");
+        {
+            let db = rusqlite::Connection::open(&path).unwrap();
+            db.execute("VACUUM INTO ?1", [older.to_str().unwrap()]).unwrap();
+        }
+        assert_eq!(invoke(Some(("after_publish", &states[2].id)), "second.log").signal(), Some(libc::SIGKILL));
+        let before: BTreeMap<_, _> = store
+            .backend
+            .list("")
+            .unwrap()
+            .into_iter()
+            .map(|object| {
+                let digest = Sha256::digest(store.backend.get(&object.key).unwrap().unwrap());
+                (object.key, digest)
+            })
+            .collect();
+        let parts_before = before.keys().filter(|key| format::parse_data_name(key).is_some()).count();
+        // Drop the newer WAL as well: restore a coherent older committed database.
+        for suffix in ["-wal", "-shm"] {
+            let path = std::path::PathBuf::from(format!("{}{suffix}", path.display()));
+            if path.exists() {
+                std::fs::remove_file(path).unwrap();
+            }
+        }
+        std::fs::copy(older, &path).unwrap();
+        assert!(invoke(None, "resumed.log").success());
+        for (key, digest) in before {
+            assert_eq!(Sha256::digest(store.backend.get(&key).unwrap().unwrap()), digest);
+        }
+        store.verify(true).unwrap();
+        assert_eq!(reader::attempts(&store.backend).unwrap().len(), 4);
+        let parts_after =
+            store.backend.list("states/").unwrap().iter().filter(|object| format::parse_data_name(&object.key).is_some()).count();
+        assert_eq!(parts_before, parts_after);
+        let log = std::fs::read_to_string(root.join("resumed.log")).unwrap();
+        let stats: serde_json::Value =
+            serde_json::from_str(log.lines().find_map(|line| line.strip_prefix("trace push-journal ")).unwrap()).unwrap();
+        assert_eq!(stats["seed_states"], 2);
+        let report =
+            serde_json::json!({"case":"older_journal_copy","extra_uploaded_parts":parts_after-parts_before,"journal":stats});
+        if let Some(path) = std::env::var_os("LAYR_TEST_CRASH_REPORT") {
+            use std::io::Write;
+            writeln!(std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap(), "{report}").unwrap();
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn completion_metadata_is_bounded_and_invalid_metadata_rebuilds() {
         let root = std::env::temp_dir().join(crate::ids::new_id());
         std::fs::create_dir_all(&root).unwrap();

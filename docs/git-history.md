@@ -67,8 +67,13 @@ content links and the cadence of full tree checkpoints. After a
 crash or disk-full failure, already published immutable objects are reused.
 
 While a push is active, `push-journal.sqlite3` keeps its content hash index and
-published-state cursor in a separate FULL-synchronous SQLite transaction per
-state. The cursor advances only after the state tree publishes. A restart reads
+published-state cursor in SQLite WAL mode with `synchronous=NORMAL`. A pending
+part row enters the WAL before its PUT. That commit also includes the preceding
+published state; runs without parts group at 32 states. The cursor advances only
+after the state tree publishes. A process kill preserves committed rows. An OS
+crash can lose recent rows, which causes extra authenticated seeding or uploads
+and cannot justify a wrong content link. Remote publications remain authoritative.
+A restart reads
 authenticated trees only for publications beyond that cursor. Pending part
 entries are recorded before upload; recovery decrypts each part and verifies its
 file hashes through the normal reader before reusing it. Missing or corrupt

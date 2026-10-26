@@ -1,10 +1,10 @@
-//! Durable progress for one push. Removed after successful completion.
+//! Process-crash progress for one push. Remote publications remain authoritative.
 use super::{
     format::{Entry, Link},
     zst,
 };
 use anyhow::Result;
-use rusqlite::{params, Connection, Transaction};
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -43,6 +43,7 @@ pub(super) struct Journal {
     pub stats: Stats,
     pub resuming: bool,
     warned: bool,
+    staged_states: usize,
 }
 impl Journal {
     pub fn open(dir: &Path) -> Result<Self> {
@@ -51,7 +52,7 @@ impl Journal {
         let resuming = path.exists();
         std::fs::OpenOptions::new().write(true).create(true).truncate(false).mode(0o600).open(&path)?;
         let db = Connection::open(&path)?;
-        db.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;
+        db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;
             CREATE TABLE IF NOT EXISTS hashes (sha TEXT PRIMARY KEY, links BLOB NOT NULL) WITHOUT ROWID;
             CREATE TABLE IF NOT EXISTS completed (state TEXT PRIMARY KEY, attempt TEXT NOT NULL, depth INTEGER NOT NULL) WITHOUT ROWID;
             CREATE TABLE IF NOT EXISTS pending (object TEXT PRIMARY KEY, state TEXT NOT NULL, attempt TEXT NOT NULL, entries BLOB NOT NULL, modified INTEGER) WITHOUT ROWID;")?;
@@ -62,7 +63,7 @@ impl Journal {
             db.execute_batch("ALTER TABLE pending RENAME COLUMN created TO modified; UPDATE pending SET modified=NULL;")?;
         }
         let peak_bytes = std::fs::metadata(&path)?.len();
-        Ok(Self { db, path, stats: Stats { peak_bytes, ..Stats::default() }, resuming, warned: false })
+        Ok(Self { db, path, stats: Stats { peak_bytes, ..Stats::default() }, resuming, warned: false, staged_states: 0 })
     }
     pub fn hashes(&self) -> Result<BTreeMap<String, Vec<Link>>> {
         let mut result = BTreeMap::new();
@@ -91,28 +92,49 @@ impl Journal {
         }
         Ok(result)
     }
-    fn transaction(&mut self, state: bool, apply: impl FnOnce(&Transaction<'_>) -> Result<()>) -> Result<()> {
-        let tx = self.db.transaction()?;
-        apply(&tx)?;
+    fn transaction(&mut self, state: bool, commit: bool, apply: impl FnOnce(&Connection) -> Result<()>) -> Result<()> {
+        if self.db.is_autocommit() {
+            self.db.execute_batch("BEGIN IMMEDIATE")?;
+        }
+        apply(&self.db)?;
+        self.staged_states += usize::from(state);
+        self.observe_size()?;
+        // A part prepare commits the preceding published cursor and its own pending
+        // row together, before PUT. Runs of states without parts group at 32 states.
+        if commit || self.staged_states >= 32 {
+            self.flush()?;
+        }
+        Ok(())
+    }
+    fn observe_size(&mut self) -> Result<()> {
         let size = std::fs::metadata(&self.path)?.len()
-            + std::fs::metadata(self.path.with_file_name("push-journal.sqlite3-journal")).map_or(0, |m| m.len());
+            + std::fs::metadata(self.path.with_file_name("push-journal.sqlite3-wal")).map_or(0, |m| m.len())
+            + std::fs::metadata(self.path.with_file_name("push-journal.sqlite3-shm")).map_or(0, |m| m.len());
         self.stats.peak_bytes = self.stats.peak_bytes.max(size);
         if self.stats.peak_bytes > 64 << 20 && !self.warned {
             eprintln!("warning: active push journal exceeds 64 MiB; it is removed after the push completes");
             self.warned = true;
         }
+        Ok(())
+    }
+    fn flush(&mut self) -> Result<()> {
+        if self.db.is_autocommit() {
+            return Ok(());
+        }
         let started = Instant::now();
-        tx.commit()?;
+        self.db.execute_batch("COMMIT")?;
         let elapsed = started.elapsed().as_secs_f64();
         self.stats.commits += 1;
         self.stats.commit_seconds += elapsed;
-        if state {
-            self.stats.state_commits += 1;
+        if self.staged_states > 0 {
+            self.stats.state_commits += self.staged_states;
             self.stats.state_commit_seconds += elapsed;
         }
+        self.staged_states = 0;
+        self.observe_size()?;
         Ok(())
     }
-    fn insert_hashes(tx: &Transaction<'_>, hashes: &BTreeMap<String, Vec<Link>>) -> Result<()> {
+    fn insert_hashes(tx: &Connection, hashes: &BTreeMap<String, Vec<Link>>) -> Result<()> {
         let mut insert = tx.prepare_cached("INSERT OR IGNORE INTO hashes VALUES (?1,?2)")?;
         for (sha, links) in hashes {
             insert.execute(params![sha, zst::compress(&serde_json::to_vec(links)?, None)?])?;
@@ -122,19 +144,19 @@ impl Journal {
     pub fn prepare_part(&mut self, state: &str, attempt: &str, part: u32, entries: &[Entry]) -> Result<()> {
         let object = super::format::data_name(state, attempt, part);
         let bytes = zst::compress(&serde_json::to_vec(entries)?, None)?;
-        self.transaction(false, |tx| {
+        self.transaction(false, true, |tx| {
             tx.execute("INSERT OR REPLACE INTO pending VALUES (?1,?2,?3,?4,NULL)", params![object, state, attempt, bytes])?;
             Ok(())
         })
     }
     pub fn validate_part(&mut self, object: &str, modified: i64) -> Result<()> {
-        self.transaction(false, |tx| {
+        self.transaction(false, true, |tx| {
             tx.execute("UPDATE pending SET modified=?2 WHERE object=?1", params![object, modified])?;
             Ok(())
         })
     }
     pub fn discard_part(&mut self, object: &str) -> Result<()> {
-        self.transaction(false, |tx| {
+        self.transaction(false, true, |tx| {
             tx.execute("DELETE FROM pending WHERE object=?1", [object])?;
             Ok(())
         })
@@ -147,7 +169,7 @@ impl Journal {
         hashes: &BTreeMap<String, Vec<Link>>,
         protected: &[String],
     ) -> Result<()> {
-        self.transaction(true, |tx| {
+        self.transaction(true, false, |tx| {
             Self::insert_hashes(tx, hashes)?;
             tx.execute("INSERT OR REPLACE INTO completed VALUES (?1,?2,?3)", params![state, attempt, depth])?;
             tx.execute("DELETE FROM pending WHERE state=?1 AND attempt=?2", params![state, attempt])?;
@@ -157,7 +179,8 @@ impl Journal {
             Ok(())
         })
     }
-    pub fn finish(self) -> Result<Stats> {
+    pub fn finish(mut self) -> Result<Stats> {
+        self.flush()?;
         let Self { db, path, stats, .. } = self;
         drop(db);
         std::fs::remove_file(&path)?;
