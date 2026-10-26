@@ -50,6 +50,16 @@ Sources: `src/main.rs`, `src/cmd/{mod,admin,remote,change}.rs`, and `src/person.
 Cache cleanup now grants owner write access to directories before deletion.
 The new public regression uses 0555 directories and 0444 files.
 Both first conversion and cache repair must remove the old tree and preserve the new modes.
+Some macOS versions also require temporary owner write access on the directory during rename.
+The replacement records both directory identities and modes before it changes either name.
+Renames use held parent descriptors and refuse a changed directory identity.
+The next save or cache repair recovers an interrupted replacement.
+Tests exit child processes after permission changes and between renames.
+They also inject a mode restoration error and replace the staging entry with a symbolic link.
+
+The line root reserves `.layr-cache-replace-<64 hex digits>.json` and its `.tmp` companion for this journal.
+These files are private and do not enter history.
+A backup without a journal from an older binary requires explicit restoration of its folder.
 
 Machine identity creation now has an exclusive local lease and create-once publication.
 Main also has the original identity race, independent of the format guard.
