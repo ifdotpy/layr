@@ -768,6 +768,7 @@ pub fn build_index(repo: &Repo, state: &str, commit: &str, prev_state: Option<&s
 
 /// Git objects are a derived local cache. Validate the exact object identity before publishing.
 fn write_object(s: &Path, kind: &str, data: &[u8], expected: &str) -> Result<()> {
+    let _write = crate::trace::span("Git write object");
     use sha1::{Digest, Sha1};
     let header = format!("{kind} {}\0", data.len());
     let mut hash = Sha1::new();
@@ -786,12 +787,26 @@ fn write_object(s: &Path, kind: &str, data: &[u8], expected: &str) -> Result<()>
     compressed.write_all(data)?;
     std::fs::create_dir_all(path.parent().unwrap())?;
     std::fs::set_permissions(path.parent().unwrap(), std::fs::Permissions::from_mode(0o755))?;
-    fsutil::atomic_write(&path, &compressed.finish()?, 0o444)?;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444))?;
-    Ok(())
+    // Git objects are a rebuildable cache of durable records and state files. Publish complete
+    // objects atomically, without forcing the whole filesystem twice for every loose object.
+    use std::os::unix::fs::OpenOptionsExt;
+    let tmp = path.with_extension(format!("tmp-{}", ids::new_id()));
+    let result = (|| -> Result<()> {
+        let mut file = std::fs::OpenOptions::new().create_new(true).write(true).mode(0o444).open(&tmp)?;
+        file.write_all(&compressed.finish()?)?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o444))?;
+        drop(file);
+        std::fs::rename(&tmp, &path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 fn restore_import(repo: &Repo, state: &StateRec, parents: &[String], saved: serde_json::Value) -> Result<String> {
+    let _restore = crate::trace::span("Git restore import");
     let saved: GitImport = serde_json::from_value(saved).context("invalid stored Git import")?;
     if saved.format != 1 {
         bail!("unsupported stored Git import format {}", saved.format);

@@ -128,6 +128,7 @@ impl<'a> Reader<'a> {
         if let Some(tree) = self.trees.get(&wanted) {
             return Ok(tree.clone());
         }
+        let _decode = crate::trace::span("store decode tree");
         let mut at = wanted.clone();
         let mut pending = Vec::new();
         let mut seen = BTreeSet::new();
@@ -202,6 +203,7 @@ impl<'a> Reader<'a> {
         self.restore_over(tree, None, root)
     }
     fn restore_over(&mut self, tree: &Tree, base: Option<&Tree>, root: &std::path::Path) -> Result<usize> {
+        let _restore = crate::trace::span("store restore files");
         crate::fsutil::refuse_case_collisions(root, tree.files.keys().map(|k| k.as_str()))?;
         let target = crate::tree::Tree::open(root)?;
         if let Some(base) = base {
@@ -321,6 +323,7 @@ pub(super) fn wanted(state: &crate::model::StateRec, opts: &Options) -> bool {
 }
 
 pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Options) -> Result<Report> {
+    let _fetch = crate::trace::span("store fetch");
     let descriptor = store.descriptor()?;
     let identity = store.identity(&descriptor, opts.paper_key.as_deref())?;
     let local: Vec<String> = repo.p.export_jsonl()?.lines().map(str::to_string).collect();
