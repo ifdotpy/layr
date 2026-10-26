@@ -75,13 +75,17 @@ fn load_index(dir: &Path) -> Result<BTreeMap<String, Cached>> {
         Err(_) => return Ok(BTreeMap::new()),
     };
     let mut states = if value.get("format").is_some() {
-        let index: PushIndex = serde_json::from_value(value)?;
+        let Ok(index) = serde_json::from_value::<PushIndex>(value) else {
+            return Ok(BTreeMap::new());
+        };
         if index.format != 1 && index.format != 2 {
             return Ok(BTreeMap::new());
         }
         index.states
     } else {
-        let legacy: BTreeMap<String, Pushed> = serde_json::from_value(value)?;
+        let Ok(legacy) = serde_json::from_value::<BTreeMap<String, Pushed>>(value) else {
+            return Ok(BTreeMap::new());
+        };
         legacy.into_iter().map(|(id, pushed)| (id, Cached { attempt: pushed.attempt, depth: pushed.depth, root: None })).collect()
     };
     states.retain(|id, entry| valid_cached(id, entry));
@@ -907,6 +911,25 @@ mod tests {
             drop(repo);
             std::fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[test]
+    fn completion_metadata_is_bounded_and_invalid_metadata_rebuilds() {
+        let root = std::env::temp_dir().join(crate::ids::new_id());
+        std::fs::create_dir_all(&root).unwrap();
+        let index: BTreeMap<_, _> = (0..INDEX_STATES + 2)
+            .map(|_| (crate::ids::new_id(), Cached { attempt: "0123abcd".into(), depth: 0, root: None }))
+            .collect();
+        checkpoint(&root, &index).unwrap();
+        let restored = load_index(&root).unwrap();
+        assert_eq!(restored.len(), INDEX_STATES);
+        assert!(!restored.contains_key(index.first_key_value().unwrap().0));
+        assert!(restored.contains_key(index.last_key_value().unwrap().0));
+        for bytes in [b"damaged".as_slice(), b"{\"format\":2,\"states\":false}".as_slice()] {
+            std::fs::write(root.join("pushed-v2.json.zst"), zst::compress(bytes, None).unwrap()).unwrap();
+            assert!(load_index(&root).unwrap().is_empty());
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
