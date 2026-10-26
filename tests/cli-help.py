@@ -34,6 +34,8 @@ for store in (root / "absent", existing):
     env = dict(os.environ, LAYR_ROOT=str(store), LAYR_DIRECT="1", LAYR_SOCKET=str(root / "absent-socket"))
     for command in sorted(commands):
         for flag in ("--help", "-h"):
+            if command == "grep" and flag == "-h":
+                continue
             result = subprocess.run([binary, command, flag], cwd=root, env=env, capture_output=True, text=True)
             assert result.returncode == 0 and "usage: layr" in result.stdout, (command, flag, result.returncode, result.stderr)
             assert fingerprint(store) == before, (command, flag, "the store changed")
@@ -46,4 +48,15 @@ for store in (root / "absent", existing):
     assert result.returncode == 1 and not result.stdout, result
     assert fingerprint(store) == before, "help after -- changed the store"
     checks += 1
+grep_root = root / "grep-store"
+grep_source = root / "grep-source"
+grep_source.mkdir()
+(grep_source / "file").write_text("needle\n")
+env = dict(os.environ, LAYR_ROOT=str(grep_root), LAYR_DIRECT="1")
+env.pop("LAYR_SOCKET", None)
+subprocess.run([binary, "init", "grep-fixture", "--from", str(grep_source), "-q"], env=env, check=True, capture_output=True)
+work = grep_root / "projects/grep-fixture/lines/main"
+result = subprocess.run([binary, "grep", "-h", "needle"], cwd=work, env=env, capture_output=True, text=True)
+assert result.returncode == 0 and result.stdout == "needle\n", (result.returncode, result.stdout, result.stderr)
+checks += 1
 print(f"t57-cli-help.sh: {checks} passed, 0 failed")
