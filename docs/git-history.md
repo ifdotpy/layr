@@ -66,6 +66,13 @@ recovers the exact authenticated delta-chain depth, so eviction preserves both
 content links and the cadence of full tree checkpoints. After a
 crash or disk-full failure, already published immutable objects are reused.
 
+Without an index checkpoint, a recovered state has no local root hash (`root:
+None`). Leftover directory nodes, even structurally valid ones, cannot supply its
+parent tree. Parent selection reads the published tree through the normal remote
+signature checks. Every cache read also verifies each node against its referenced
+SHA-256 address. Journal completions contain attempts and depths, never root
+hashes; they cannot restore a missing index's trust in leftover local nodes.
+
 While a push is active, `push-journal.sqlite3` keeps its content hash index and
 published-state cursor in SQLite WAL mode with `synchronous=NORMAL`. A pending
 part row enters the WAL before its PUT. That commit also includes the preceding
