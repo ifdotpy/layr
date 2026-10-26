@@ -76,273 +76,275 @@ warning: method `restore` is never used
     |            ^^^^^^^
 
 warning: `layr` (bin "layr" test) generated 7 warnings (run `cargo fix --bin "layr" -p layr --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 19.46s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 12.09s
 warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
 note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
      Running unittests src/main.rs (target/debug/deps/layr-2690c8e3c763fc03)
 
-running 120 tests
+running 122 tests
 test cmd::replicate::tests::auxiliary_states_cross_the_peer_protocol ... ignored, requires a root Btrfs fixture and a built peer binary
-test access::tests::person_policy_never_inherits_executor_root ... ok
-test access::tests::roles_deny_and_rules ... ok
-test cmd::checks::policy_tests::creator_commands_ignore_runner_overrides_and_require_creator ... ok
-test cmd::overlaycmd::tests::reader_details_identify_principals_without_key_material ... ok
 test cmd::refs::tests::ttl_is_positive_and_checked ... ok
+test cmd::overlaycmd::tests::reader_details_identify_principals_without_key_material ... ok
+test access::tests::person_policy_never_inherits_executor_root ... ok
+test cmd::checks::policy_tests::creator_commands_ignore_runner_overrides_and_require_creator ... ok
 test cmd::remote::tests::omitted_state_summary_counts_each_state_once ... ok
 test cmd::replicate::tests::deleted_line_snapshots_are_undo_dependencies ... ok
-test db::tests::a_revoke_does_not_withdraw_another_signers_evidence ... ok
-test access::tests::overlay_readers_follow_signed_foreign_policy_without_changing_project_policy ... ok
-test cmd::overlaycmd::tests::operation_output_only_contains_public_fields_and_cli_names ... ok
-test db::tests::a_state_keeps_the_platform_of_its_caches ... ok
 test cmd::tests::glob_matches ... ok
-test disk::all::installed_tests::a_single_store_agent_stays_locked_without_a_keychain_item ... ok
+test access::tests::roles_deny_and_rules ... ok
+test cmd::overlaycmd::tests::operation_output_only_contains_public_fields_and_cli_names ... ok
 test cmd::remote::tests::remote_url_dispatch ... ok
+test access::tests::overlay_readers_follow_signed_foreign_policy_without_changing_project_policy ... ok
+test db::tests::records_set_the_stack_of_a_line ... ok
+test disk::all::installed_tests::a_single_store_agent_stays_locked_without_a_keychain_item ... ok
 test disk::all::tests::locked_stores_have_one_note_and_distinct_folders ... ok
-test disk::launch::tests::agent_arguments_are_xml_and_contain_no_paper_key_input ... ok
 test disk::keystore::tests::private_key_input_refuses_links_and_public_files ... ok
-test disk::launch::tests::one_service_replaces_modes_and_remove_checks_the_mode ... ok
+test disk::launch::tests::agent_arguments_are_xml_and_contain_no_paper_key_input ... ok
 test disk::launch::tests::all_store_arguments_round_trip_without_a_secret ... ok
+test disk::launch::tests::one_service_replaces_modes_and_remove_checks_the_mode ... ok
+test cmd::mergecmd::approval_tests::merge_approval_guard_refuses_derived_source_ancestry ... ok
 test disk::tests::cache_checks_hashes_and_enforces_its_size_limit ... ok
 test disk::tests::names_and_links_stay_inside_each_line ... ok
-test db::tests::a_state_id_cannot_be_named_twice ... ok
 test disk::tests::url_pin_updates_preserve_other_urls_and_refuse_a_conflicting_first_use ... ok
 test disk::webdav::tests::paths_and_hrefs_preserve_encoded_line_names ... ok
-test db::tests::queue_status_replay_is_order_independent ... ok
-test merge::derive_tests::derive_cycles_block_dependents ... ok
 test lineops::tests::batch_names_are_numbered_and_validated ... ok
+test merge::derive_tests::derive_cycles_block_dependents ... ok
 test merge::derive_tests::derive_dependencies_override_name_order ... ok
+test merge::derive_tests::derive_takes_only_declared_outputs_and_rejects_links ... ok
 test oci::client::tests::challenge_keeps_scope_commas ... ok
-test db::tests::records_of_caches_add_to_the_caches_of_a_state ... ok
 test oci::client::tests::remote_validation ... ok
 test oci::tests::chart_binds_the_exact_image ... ok
+test db::view_tests::saved_descriptors_and_checks_accept_view_subjects ... ok
 test oci::tests::non_utf8_paths_are_rejected_without_lossy_conversion ... ok
-test cmd::requests::tests::executor_verifies_encrypted_inner_signature_and_person_binding ... ok
-test disk::tests::a_refresh_rejects_another_project_and_keeps_the_previous_view ... ok
 test oci::tests::schema_errors_are_specific ... ok
 test oci::tests::deterministic_fixture ... ok
+test db::tests::legacy_approvals_checks_and_withdrawals_become_attestations ... ok
 test oci::tests::symlinks_never_read_their_targets_and_long_links_work ... ok
-test overlay::view_tests::malformed_descriptors_and_ids_fail ... ok
-test overlay::tests::the_base_key_names_the_head_and_the_stack ... ok
 test overlay::tests::ops_move_delete_and_copy ... ok
-test db::view_tests::saved_descriptors_and_checks_accept_view_subjects ... ok
-test oci::tests::tag_mapping_and_semver ... ok
+test overlay::tests::the_base_key_names_the_head_and_the_stack ... ok
+test overlay::view_tests::malformed_descriptors_and_ids_fail ... ok
 test overlay::view_tests::view_identity_uses_exact_canonical_bytes_and_stack_order ... ok
 test probes::tests::file_diff_reports_hashes_for_binary_and_patches_for_text ... ok
+test oci::tests::tag_mapping_and_semver ... ok
+test oplog::tests::operation_payloads_use_the_existing_signature_envelope ... ok
+test probes::tests::metric_diff_applies_noise_and_handles_zero_baselines ... ok
 test probes::tests::private_layer_outputs_require_all_project_readers ... ok
 test probes::tests::queue_limits_reject_only_growth_strictly_over_the_limit ... ok
-test probes::tests::metric_diff_applies_noise_and_handles_zero_baselines ... ok
-test probes::tests::schema_requires_safe_outputs_and_argv ... ok
-test probes::tests::screenshot_settings_keep_existing_definition_identity ... ok
-test oplog::tests::operation_payloads_use_the_existing_signature_envelope ... ok
 test probes::tests::structural_json_diff_tracks_keys_arrays_and_null ... ok
-test repo::cache_platform_tests::a_cache_warms_only_lines_of_its_platform ... ok
 test recv::tests::checks_streams ... ok
-test cmd::mergecmd::approval_tests::merge_approval_guard_refuses_derived_source_ancestry ... ok
-test secrets::tests::whole_file_limit_and_quotes ... ok
-test service::connect_tests::a_refused_connect_names_its_cause ... ok
+test db::tests::records_of_caches_add_to_the_caches_of_a_state ... ok
+test probes::tests::screenshot_settings_keep_existing_definition_identity ... ok
+test repo::cache_platform_tests::a_cache_warms_only_lines_of_its_platform ... ok
+test probes::tests::schema_requires_safe_outputs_and_argv ... ok
 test recv::tests::extra_clone_sources_require_exact_identity ... ok
+test db::tests::a_state_keeps_the_platform_of_its_caches ... ok
+test service::connect_tests::a_refused_connect_names_its_cause ... ok
 test store::tests::an_overlay_lives_in_the_private_folder_of_its_project ... ok
-test merge::derive_tests::derive_takes_only_declared_outputs_and_rejects_links ... ok
-test secrets::tests::candidates_and_exact_tokens ... ok
-test store_remote::backend::tests::listing_tolerates_only_a_vanished_publication_temporary ... ok
-test store_remote::backend::tests::publication_is_exclusive_and_never_changes_bytes ... ok
-test store_remote::backend::tests::file_listing_visits_only_the_requested_directory_and_refuses_its_links ... ok
-test store_remote::backend::tests::scoped_objects_use_the_same_exclusive_publication_and_stay_in_their_namespace ... ok
-test db::tests::refs_replay_in_order_and_keep_their_history ... ok
-test store_remote::backend::epoch_tests::historical_states_use_sealed_history_keys_but_slots_never_fall_back ... ok
-test db::tests::records_set_the_stack_of_a_line ... ok
-test db::tests::an_old_database_with_records_is_still_rebuilt ... ok
-test db::tests::legacy_approvals_checks_and_withdrawals_become_attestations ... ok
+test secrets::tests::whole_file_limit_and_quotes ... ok
 test db::tests::scoped_declassification_does_not_count_as_subject_approval ... ok
-test db::tests::check_reuse_preserves_argument_boundaries ... ok
+test store_remote::backend::tests::file_listing_visits_only_the_requested_directory_and_refuses_its_links ... ok
+test store_remote::backend::tests::listing_tolerates_only_a_vanished_publication_temporary ... ok
+test secrets::tests::candidates_and_exact_tokens ... ok
+test store_remote::backend::tests::publication_is_exclusive_and_never_changes_bytes ... ok
+test store_remote::backend::tests::scoped_objects_use_the_same_exclusive_publication_and_stay_in_their_namespace ... ok
+test store_remote::backend::epoch_tests::historical_states_use_sealed_history_keys_but_slots_never_fall_back ... ok
 test store_remote::gateway::tests::explicit_public_access_never_opens_person_keys ... ok
-test store_remote::legacy::tests::emit_desk_v1_fixture ... ignored, fixture writer invoked by t21-desk-import
+test store_remote::gateway::tests::epoch_slot_staging_uses_the_project_grant_before_a_new_proof_exists ... ok
 test db::tests::restored_states_clear_local_gc_tombstones ... ok
-test store_remote::overlays::tests::a_key_record_binds_the_parent_store_overlay_and_signer ... ok
-test cmd::replicate::tests::live_refs_include_auto_ancestry_and_gate_only_cache_states ... ok
+test store_remote::gateway::tests::reader_hooks_ignore_write_grants_set_identity_and_check_the_ca_file ... ok
 test store_remote::gateway::tests::token_expiry_tolerates_a_client_clock_behind_the_gateway ... ok
 test store_remote::gateway::tests::token_files_require_owner_private_mode_and_regular_no_follow_file ... ok
+test db::tests::refs_replay_in_order_and_keep_their_history ... ok
+test store_remote::gateway::tests::urls_refuse_credentials_queries_and_path_escapes ... ok
+test db::tests::queue_status_replay_is_order_independent ... ok
+test store_remote::legacy::tests::emit_desk_v1_fixture ... ignored, fixture writer invoked by t21-desk-import
+test store_remote::gateway::tests::old_gateways_can_reject_pagination_and_return_a_bounded_legacy_listing ... ok
 test store_remote::overlays::tests::a_removed_reader_cannot_substitute_the_layer_recipient ... ignored, invoked by t35 after it removes reader B
 test store_remote::overlays::tests::overlay_ciphertexts_reject_nonreader_keys ... ignored, invoked by t35 with its actual store and machine keys
+test db::tests::a_state_id_cannot_be_named_twice ... ok
 test db::tests::opening_a_database_that_init_is_creating_keeps_its_tables ... ok
-test store_remote::push_cache::tests::budget_grows_with_payload_and_survives_eviction_and_reopen ... ok
+test store_remote::overlays::tests::a_key_record_binds_the_parent_store_overlay_and_signer ... ok
+test store_remote::gateway::tests::missing_descriptor_keeps_optional_person_reads_and_hints_machine_grants ... ok
+test disk::tests::a_refresh_rejects_another_project_and_keeps_the_previous_view ... ok
+test cmd::requests::tests::executor_verifies_encrypted_inner_signature_and_person_binding ... ok
+test db::tests::check_reuse_preserves_argument_boundaries ... ok
 test store_remote::legacy::tests::desk_policy_binds_the_exact_message_and_enforces_the_signature_boundary ... ok
+test db::tests::a_revoke_does_not_withdraw_another_signers_evidence ... ok
+test store_remote::push_cache::tests::budget_grows_with_payload_and_survives_eviction_and_reopen ... ok
 test store_remote::reader::tests::a_changed_machine_key_is_reported_before_local_history_merge ... ok
-test store_remote::gateway::tests::urls_refuse_credentials_queries_and_path_escapes ... ok
-test store_remote::gateway::tests::epoch_slot_staging_uses_the_project_grant_before_a_new_proof_exists ... ok
-test store_remote::reader::tests::conflicting_history_rejects_the_complete_machine_set ... ok
-test store_remote::gateway::tests::reader_hooks_ignore_write_grants_set_identity_and_check_the_ca_file ... ok
-test store_remote::reader::tests::fetch_continues_from_an_existing_verified_prefix ... ok
-test store_remote::reader::tests::signed_tree_and_file_hash_detect_mutation ... ok
+test store_remote::backend::tests::reader_hooks_use_s3_caller_credentials_and_leave_file_reads_local ... ok
 test store_remote::legacy::tests::desk_v1_full_and_delta_trees_and_files_are_read_without_mutation ... ok
+test store_remote::reader::tests::conflicting_history_rejects_the_complete_machine_set ... ok
+test store_remote::reader::tests::signed_tree_and_file_hash_detect_mutation ... ok
+test store_remote::writer::tests::an_existing_key_file_is_not_reused_without_an_openable_unfinished_slot ... ok
+test store_remote::reader::tests::fetch_continues_from_an_existing_verified_prefix ... ok
+test store_remote::pin_tests::changed_file_descriptor_stops_writer_fetch_clone_and_mount_before_encryption_or_decryption ... ok
 test store_remote::writer::tests::crash_push_process ... ignored, subprocess helper for crash_content_hashes
 test store_remote::writer::tests::emit_portable_v2_fixture ... ignored, portable-state fixture invoked by t23-store-portable-peer
-test store_remote::writer::tests::an_existing_key_file_is_not_reused_without_an_openable_unfinished_slot ... ok
-test store_remote::gateway::tests::missing_descriptor_keeps_optional_person_reads_and_hints_machine_grants ... ok
-test store_remote::gateway::tests::old_gateways_can_reject_pagination_and_return_a_bounded_legacy_listing ... ok
+test cmd::replicate::tests::live_refs_include_auto_ancestry_and_gate_only_cache_states ... ok
 test store_remote::writer::tests::legacy_pushed_cache_migrates_without_changing_completion ... ok
-test store_remote::pin_tests::changed_file_descriptor_stops_writer_fetch_clone_and_mount_before_encryption_or_decryption ... ok
+test store_remote::reader::tests::a_gap_does_not_hide_a_contiguous_prefix_and_an_overlap_can_fill_it ... ok
+test db::tests::an_old_database_with_records_is_still_rebuilt ... ok
 test store_remote::reader::tests::writers_can_forward_overlapping_segments_of_a_third_machine ... ok
 test stream::tests::link_then_unlink_is_a_rename ... ok
 test stream::tests::orphan_delete_and_new_file ... ok
 test stream::tests::rename_of_folder_maps_children ... ok
-test repo::cache_platform_tests::auxiliary_states_resolve_but_source_commands_refuse_them ... ok
+test store_remote::push_cache::tests::subtrees_share_hashes_and_corruption_is_a_cache_miss ... ok
 test store_remote::writer::tests::two_initializers_never_publish_different_slot_identities ... ok
 test store_remote::writer::tests::initialization_recovers_after_each_publication_and_keeps_the_key_private ... ok
-test store_remote::backend::tests::reader_hooks_use_s3_caller_credentials_and_leave_file_reads_local ... ok
-test store_remote::reader::tests::a_gap_does_not_hide_a_contiguous_prefix_and_an_overlap_can_fill_it ... ok
-test store_remote::push_cache::tests::subtrees_share_hashes_and_corruption_is_a_cache_miss ... ok
+test repo::cache_platform_tests::auxiliary_states_resolve_but_source_commands_refuse_them ... ok
+test store_remote::writer::tests::fresh_push_discards_wal_sidecars_without_their_main_database ... ok
 test store_remote::writer::tests::live_refs_keep_auto_states_and_auxiliary_states_obey_the_cache_option ... ok
+test store_remote::writer::tests::rolling_back_journal_rows_only_causes_authenticated_reseeding ... ok
 test store_remote::writer::tests::collection_keeps_complete_reused_and_young_parts ... ok
+test store_remote::writer::tests::completion_metadata_is_bounded_and_invalid_metadata_rebuilds ... ok
 test store_remote::gateway::tests::listings_follow_pages_above_ten_thousand_and_preserve_access_modes ... ok
 test store_remote::writer::tests::enospc_after_publication_resumes_with_missing_or_corrupt_cache ... ok
-test store_remote::writer::tests::completion_metadata_is_bounded_and_invalid_metadata_rebuilds ... ok
 test store_remote::writer::tests::pending_part_age_survives_double_crash_and_gc_before_publication ... ok
 test store_remote::writer::tests::crash_content_hashes_are_reused_at_each_publication_boundary ... ok
 test store_remote::gateway::tests::listings_reject_duplicates_cursor_loops_bad_prefixes_and_excess_totals ... ok
 test store_remote::writer::tests::state_deltas_have_bounded_chains_and_reuse_content_across_lines ... ok
 test store_remote::push_cache::tests::cache_eviction_bounds_disk_and_keeps_the_current_tree ... ok
 
-test result: ok. 114 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 9.75s
+test result: ok. 116 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 9.16s
 
      Running unittests src/lib.rs (target/debug/deps/layr_model-9d141c687caf3114)
 
 running 61 tests
 test interdiff::tests::patch_format_keeps_modes_binary_renames_and_missing_newlines ... ok
-test overlays::tests::numbers_follow_signed_key_records_and_reasons_are_not_invented ... ok
-test operations::tests::public_addresses_exclude_credentials_and_parameters ... ok
-test operations::tests::versions_keep_explicit_actor_and_target_and_old_states_omit_them ... ok
 test operations::tests::bisect_results_keep_bounds_steps_and_reuse_in_record_order ... ok
-test operations::tests::validation_refuses_private_urls_wrong_counts_and_unknown_version_kinds ... ok
+test operations::tests::public_addresses_exclude_credentials_and_parameters ... ok
 test operations::tests::copies_keep_completed_transfers_scoped_to_machine_and_address ... ok
-test probes::tests::collected_source_definitions_follow_attestation_id_order ... ok
-test interdiff::tests::same_patch_has_no_interdiff_and_amendment_has_file_counts ... ok
-test probes::tests::absence_does_not_claim_a_probe_ran ... ok
+test overlays::tests::numbers_follow_signed_key_records_and_reasons_are_not_invented ... ok
 test overlays::tests::equal_times_use_canonical_machine_then_sequence_order ... ok
-test screenshots::tests::limits_use_the_unrounded_share_and_ignore_structure_only_rows ... ok
-test release::tests::latest_exact_list_and_gc_lifetime_follow_the_release_ref ... ok
-test screenshots::structure::tests::json_is_canonical_valid_json_and_keeps_native_frames ... ok
-test screenshots::tests::oversized_png_is_rejected_before_pixel_allocation ... ok
+test probes::tests::absence_does_not_claim_a_probe_ran ... ok
 test probes::tests::json_paths_escape_reserved_characters ... ok
 test probes::tests::numeric_noise_zero_and_negative_values_follow_cli ... ok
-test probes::tests::text_and_binary_outputs_match_cli_shapes ... ok
-test screenshots::structure::tests::xml_frames_survive_ignored_coordinates_and_attribute_changes ... ok
-test screenshots::structure::tests::ignored_xml_text_attributes_cannot_inflate_change_counts ... ok
+test operations::tests::validation_refuses_private_urls_wrong_counts_and_unknown_version_kinds ... ok
+test release::tests::latest_exact_list_and_gc_lifetime_follow_the_release_ref ... ok
+test interdiff::tests::same_patch_has_no_interdiff_and_amendment_has_file_counts ... ok
+test operations::tests::versions_keep_explicit_actor_and_target_and_old_states_omit_them ... ok
+test probes::tests::collected_source_definitions_follow_attestation_id_order ... ok
 test release::tests::limits_names_keys_and_digests_are_validated_before_folding ... ok
+test probes::tests::text_and_binary_outputs_match_cli_shapes ... ok
+test screenshots::structure::tests::html_normalizes_attributes_entities_and_generated_ids ... ok
+test screenshots::tests::mismatched_narrow_images_cannot_allocate_an_unbounded_canvas ... ok
+test screenshots::structure::tests::ignored_xml_text_attributes_cannot_inflate_change_counts ... ok
+test screenshots::tests::oversized_png_is_rejected_before_pixel_allocation ... ok
+test screenshots::structure::tests::json_is_canonical_valid_json_and_keeps_native_frames ... ok
 test screenshots::structure::tests::raw_html_style_text_is_not_parsed_as_elements ... ok
 test screenshots::tests::dimension_changes_count_the_union_of_the_images ... ok
-test screenshots::structure::tests::html_normalizes_attributes_entities_and_generated_ids ... ok
-test authority::tests::a_removed_reader_cannot_forge_an_overlay_key_with_a_valid_machine_signature ... ok
-test screenshots::tests::mismatched_narrow_images_cannot_allocate_an_unbounded_canvas ... ok
+test screenshots::structure::tests::xml_frames_survive_ignored_coordinates_and_attribute_changes ... ok
 test screenshots::tests::regions_merge_transitively_and_respect_the_eight_pixel_gap ... ok
-test screenshots::tests::screen_inventory_rejects_invalid_names_and_multiple_structures ... ok
 test screenshots::tests::tolerance_includes_alpha_and_uses_a_strict_boundary ... ok
-test tests::check_arguments_and_legacy_commands_are_exact ... ok
-test tests::change_show_includes_active_check_results_for_each_exact_version ... ok
-test tests::protection_preserves_distinct_ref_and_merge_author_rules ... ok
-test tests::queue_outcomes_keep_probes_and_removal ... ok
+test screenshots::tests::screen_inventory_rejects_invalid_names_and_multiple_structures ... ok
 test tests::legacy_evidence_keeps_the_change_id_at_its_first_derivation ... ok
-test tests::history_walks_merge_and_auto_states_but_excludes_auxiliary_roots ... ok
-test tests::record_order_duplicates_and_conflicts ... ok
-test tests::hidden_layers_come_only_from_their_own_records ... ok
-test tests::project_access_mode_and_epoch_metadata_follow_signed_order_without_keys ... ok
 test tests::overlays_stay_separate_and_unknown_records_stay_in_log ... ok
-test tests::refs_expire_and_history_keeps_deletion ... ok
+test authority::tests::a_removed_reader_cannot_forge_an_overlay_key_with_a_valid_machine_signature ... ok
+test tests::history_walks_merge_and_auto_states_but_excludes_auxiliary_roots ... ok
+test tests::check_arguments_and_legacy_commands_are_exact ... ok
+test tests::project_access_mode_and_epoch_metadata_follow_signed_order_without_keys ... ok
 test tests::merge_status_selects_target_machine_and_keeps_unknown_actor_and_groups_undecided ... ok
 test tests::project_policy_perspective_requires_one_creator_and_keeps_foreign_config_namespaced ... ok
-test validation::tests::new_records_validate_ref_and_attestation_boundaries ... ok
 test tests::protection_checks_and_paths_use_exact_requirements ... ok
-test validation::tests::optional_state_fields_preserve_legacy_bytes ... ok
-test validation::tests::saved_views_and_view_subjects_validate_their_identity ... ok
+test tests::protection_preserves_distinct_ref_and_merge_author_rules ... ok
+test tests::refs_expire_and_history_keeps_deletion ... ok
 test tests::heads_and_policy_keep_machine_scope ... ok
-test tests::revocations_bind_subject_actor_machine_and_order ... ok
-test validation::tests::derived_sources_allow_exact_views_but_cache_sources_remain_states ... ok
 test validation::tests::a_cache_path_may_start_with_a_dot ... ok
-test validation::tests::accepts_a_normal_record ... ok
-test authority::tests::manager_removal_keeps_exact_old_records_and_refuses_new_records_from_that_signer ... ok
+test tests::queue_outcomes_keep_probes_and_removal ... ok
+test tests::record_order_duplicates_and_conflicts ... ok
+test tests::revocations_bind_subject_actor_machine_and_order ... ok
+test tests::hidden_layers_come_only_from_their_own_records ... ok
+test screenshots::tests::limits_use_the_unrounded_share_and_ignore_structure_only_rows ... ok
+test tests::change_show_includes_active_check_results_for_each_exact_version ... ok
 test validation::tests::an_overlay_project_name_only_in_its_project_record ... ok
+test validation::tests::accepts_a_normal_record ... ok
 test validation::tests::auxiliary_states_cannot_join_source_history ... ok
 test validation::tests::checks_the_stack_of_a_line ... ok
+test validation::tests::new_records_validate_ref_and_attestation_boundaries ... ok
+test validation::tests::derived_sources_allow_exact_views_but_cache_sources_remain_states ... ok
+test validation::tests::optional_state_fields_preserve_legacy_bytes ... ok
 test validation::tests::reads_the_session_label_of_older_records ... ok
-test tests::a_person_proof_cannot_be_reused_for_another_effect ... ok
-test authority::tests::hidden_authority_uses_own_creation_and_rejects_another_parent_or_nonmanager ... ok
 test validation::tests::refuses_paths_as_ids_and_names ... ok
+test validation::tests::saved_views_and_view_subjects_validate_their_identity ... ok
+test authority::tests::manager_removal_keeps_exact_old_records_and_refuses_new_records_from_that_signer ... ok
+test authority::tests::hidden_authority_uses_own_creation_and_rejects_another_parent_or_nonmanager ... ok
+test tests::a_person_proof_cannot_be_reused_for_another_effect ... ok
 test tests::encrypted_person_proof_binds_ciphertext_digest_and_inner_routing ... ok
 test tests::person_approvals_survive_executor_scope_and_keep_revocations_separate ... ok
 
-test result: ok. 61 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+test result: ok. 61 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
 
      Running tests/index.rs (target/debug/deps/index-038d5de6d5c7ca18)
 
 running 6 tests
-test first_parent_and_all_parent_history_share_order_filtering_and_boundaries ... ok
+test indexed_blame_stops_at_symlinks_like_cli_regular_file_reads ... ok
 test open_changes_share_latest_version_and_main_ancestry_rule ... ok
 test paths_cover_mode_changes_deletion_and_recreation_without_unrelated_blobs ... ok
-test indexed_blame_stops_at_symlinks_like_cli_regular_file_reads ... ok
+test first_parent_and_all_parent_history_share_order_filtering_and_boundaries ... ok
 test heads_keep_all_undeleted_refs_even_when_expired ... ok
 test bad_head_watermark_unknown_signer_and_missing_record_use_full_verified_load ... ok
 
-test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
 
      Running unittests src/lib.rs (target/debug/deps/layr_store-15f28b287fcb7447)
 
 running 57 tests
 test aws::profile::unit::cache_times_of_the_cli_and_the_sdks_parse ... ok
-test canonical::tests::fractions_are_refused ... ok
 test epochs::tests::audiences_are_strictly_ordered_and_invalid_modes_fail ... ok
+test aws::profile::unit::the_cache_file_is_the_sha1_of_the_session_name ... ok
 test aws::profile::unit::the_sections_skip_comments_and_nested_values ... ok
-test http::tests::content_ranges_reject_invalid_totals_and_intervals ... ok
-test http::tests::ranges_are_bounded_and_single ... ok
-test canonical::tests::equals_python_json_dumps ... ok
-test http::tests::size_limits_are_enforced ... ok
-test http::tests::response_injection_is_refused_before_any_write ... ok
-test http::tests::valid_request_and_body ... ok
 test epochs::tests::discovery_rejects_reader_maps_and_hashes_canonical_sets ... ok
 test format::tests::object_names_are_strict ... ok
-test http::tests::repeated_list_fields_combine_in_order_with_raw_line_limits ... ok
-test format::tests::typed_tree_encoding_matches_store_canonical_bytes ... ok
-test http::tests::malformed_requests_are_refused ... ok
-test format::tests::signatures_bind_header_tree_and_domain ... ok
+test canonical::tests::fractions_are_refused ... ok
+test canonical::tests::equals_python_json_dumps ... ok
 test aws::profile::unit::role_profiles_are_refused ... ok
-test http::tests::other_duplicate_fields_are_refused ... ok
-test aws::profile::unit::the_cache_file_is_the_sha1_of_the_session_name ... ok
-test person::tests::a_vault_json_must_match_its_pin ... ok
-test person::tests::names_of_vaults_and_logins ... ok
-test index::tests::malformed_paths_graphs_versions_and_addresses_are_refused ... ok
+test http::tests::content_ranges_reject_invalid_totals_and_intervals ... ok
+test http::tests::ranges_are_bounded_and_single ... ok
 test index::tests::newest_uses_watermark_and_declines_incomparable_snapshots ... ok
-test person::tests::person_slot_names_bind_one_login_and_key ... ok
+test index::tests::malformed_paths_graphs_versions_and_addresses_are_refused ... ok
+test http::tests::repeated_list_fields_combine_in_order_with_raw_line_limits ... ok
+test http::tests::response_injection_is_refused_before_any_write ... ok
+test format::tests::typed_tree_encoding_matches_store_canonical_bytes ... ok
 test aws::profile::unit::profiles_read_custom_files_and_refuse_processes ... ok
-test person::tests::v2_pins_bind_the_project_and_recipient ... ok
-test aws::profile::unit::sso_refreshes_the_standard_cache_and_gets_role_keys_from_fake_endpoints ... ok
-test keys::tests::paper_and_machine_slots_open_the_same_identity ... ok
-test person::tests::signing_identity_is_sealed_to_one_person_and_bound_to_its_public_key ... ok
-test public::tests::rejects_missing_or_ambiguous_project_authority ... ok
-test public::tests::rejects_a_wrong_slot_and_a_published_vault_identity ... ok
+test http::tests::other_duplicate_fields_are_refused ... ok
+test http::tests::valid_request_and_body ... ok
+test http::tests::size_limits_are_enforced ... ok
 test aws::profile::unit::legacy_sso_and_missing_or_expired_tokens_require_login ... ok
+test http::tests::malformed_requests_are_refused ... ok
+test aws::profile::unit::sso_refreshes_the_standard_cache_and_gets_role_keys_from_fake_endpoints ... ok
+test person::tests::names_of_vaults_and_logins ... ok
+test person::tests::a_vault_json_must_match_its_pin ... ok
+test format::tests::signatures_bind_header_tree_and_domain ... ok
+test person::tests::person_slot_names_bind_one_login_and_key ... ok
+test person::tests::v2_pins_bind_the_project_and_recipient ... ok
+test public::tests::rejects_missing_or_ambiguous_project_authority ... ok
 test public::tests::every_manifest_field_is_authenticated ... ok
 test public::tests::public_opener_opens_only_its_sealed_vault ... ok
-test request::tests::claims_bind_the_executor_and_ref_moves_require_an_expected_value ... ok
-test s3::tests::conditional_multipart_encrypted_round_trip ... ignored, requires LAYR_TEST_S3_BUCKET and caller AWS environment
 test record::tests::signatures_cover_original_bytes ... ok
-test index::tests::encrypted_exact_byte_signatures_bind_project_address_and_trusted_signer ... ok
-test person::tests::an_invite_carries_one_valid_pin ... ok
-test zst::tests::authenticated_file_above_four_gib_restores ... ignored, explicit large-file check: use an isolated host with at least 24 GiB RAM
-test reader::tests::supplied_objects_restore_and_authenticate_a_file ... ok
-test s3::stream_tests::overflow_aborts_and_declared_oversize_never_starts_upload ... ok
-test zst::tests::file_size_limit_is_enforced_before_output_is_returned ... ok
-test s3::tests::server_errors_do_not_repeat_response_secrets ... ok
-test public::tests::writer_trust_follows_only_authenticated_trusted_machines ... ok
-test person::tests::an_index_opens_for_its_person_only_and_any_change_fails ... ok
-test session::tests::rejects_invalid_logins_and_noncanonical_challenges ... ok
-test request::tests::request_signature_covers_exact_body_bytes ... ok
+test keys::tests::paper_and_machine_slots_open_the_same_identity ... ok
+test public::tests::rejects_a_wrong_slot_and_a_published_vault_identity ... ok
 test request::tests::request_boundaries_reject_ambiguous_or_unbounded_inputs ... ok
-test request::tests::encryption_preserves_exact_signed_bytes_and_hides_comments ... ok
+test s3::tests::conditional_multipart_encrypted_round_trip ... ignored, requires LAYR_TEST_S3_BUCKET and caller AWS environment
+test session::tests::rejects_invalid_logins_and_noncanonical_challenges ... ok
+test person::tests::signing_identity_is_sealed_to_one_person_and_bound_to_its_public_key ... ok
+test request::tests::claims_bind_the_executor_and_ref_moves_require_an_expected_value ... ok
+test request::tests::request_signature_covers_exact_body_bytes ... ok
+test s3::tests::server_errors_do_not_repeat_response_secrets ... ok
+test zst::tests::authenticated_file_above_four_gib_restores ... ignored, explicit large-file check: use an isolated host with at least 24 GiB RAM
+test zst::tests::file_size_limit_is_enforced_before_output_is_returned ... ok
+test public::tests::writer_trust_follows_only_authenticated_trusted_machines ... ok
 test session::tests::proof_binds_domain_login_challenge_and_key ... ok
+test index::tests::encrypted_exact_byte_signatures_bind_project_address_and_trusted_signer ... ok
+test reader::tests::supplied_objects_restore_and_authenticate_a_file ... ok
+test request::tests::encryption_preserves_exact_signed_bytes_and_hides_comments ... ok
+test s3::stream_tests::overflow_aborts_and_declared_oversize_never_starts_upload ... ok
+test person::tests::an_invite_carries_one_valid_pin ... ok
 test zst::tests::frames_decode_with_and_without_a_base ... ok
+test person::tests::an_index_opens_for_its_person_only_and_any_change_fails ... ok
 test request::tests::encrypted_requests_verify_both_signatures_and_bind_routing ... ok
 test zst::tests::a_large_file_gets_a_small_delta ... ok
-test s3::stream_tests::disconnect_after_a_part_aborts_without_completing ... ok
 test s3::stream_tests::stream_uses_eight_mib_parts_and_conditional_completion ... ok
+test s3::stream_tests::disconnect_after_a_part_aborts_without_completing ... ok
 test aws::profile::unit::device_login_shows_the_url_and_code_and_saves_a_private_cache ... ok
 
 test result: ok. 55 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 1.02s
