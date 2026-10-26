@@ -132,6 +132,8 @@ private HOME, timeout, process limits and capped logs. Tools and the prepared
 cache are read-only. Darwin does not enforce the Linux address-space limit;
 `checks.memory` still bounds output files there. Missing or refused sandbox
 execution fails visibly.
+The private Cargo home links to the prepared read-only registry; its lock files
+and build outputs stay private. This avoids copying every cached crate on each run.
 The Mac process limit counts all processes of the runner user, including desktop
 applications; its default is 4096. Linux uses a dedicated service account.
 Residual risk: approved repository code executes on the personal Mac with access
