@@ -1069,7 +1069,9 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         // This new copy belongs to the cloning OS user. Its local policy never
         // selects automatic check commands, which use the verified creator.
-        set_config(ctx, &repo, "access", json!({format!("user:{}", ctx.caller.uid): "admin"}))?;
+        let mut access = repo.policy().access_json();
+        access[format!("user:{}", ctx.caller.uid)] = json!("admin");
+        set_config(ctx, &repo, "access", access)?;
         print_store_report(ctx, &report, "clone", a.has("--json"), a.has("-q"))?;
         Ok(if report.missing_lines.is_empty() { 0 } else { 2 })
     })();
