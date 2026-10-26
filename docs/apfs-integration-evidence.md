@@ -21,11 +21,21 @@ The clone fix is the laptop-runner owner's commit
 `c92d71c3cc44cfbfaf0a2249b44edc80951f0b9e`, cherry-picked as `a09e90c`.
 It is not a parallel implementation. The lead approved the policy and all-clone
 scope before it was applied. Git clones already use `init`, which grants their
-owner local admin. Remote policy, signing trust, gateway grants, and the
-creator-selected automatic check commands are unchanged.
+owner local admin. The initial version replaced the effective local access map,
+which removed existing readers on a cloned service. The Linux full suite exposed
+this at `t35-overlay-sync.sh`: the allowed overlay reader was rejected at the
+project access boundary before its overlay permission was checked.
+
+The same owner's fixup `630170fbc2a5cc02343661046a74370951629fba`, cherry-picked
+as `e12c3de`, instead adds the caller's admin entry to the existing effective
+local access map. It preserves existing explicit and fallback entries, including
+`*: writer`. Deny rules and temporary grants stay unchanged. Remote policy,
+signing trust, gateway grants, and creator-selected automatic check commands
+also stay unchanged.
 
 The person-request suite also directly checks the cloned project's local access
-setting. That assertion catches a missing grant even on the root runner, where
+setting, including the preserved fallback writer entry and the new caller admin
+entry. That assertion catches a missing grant even on the root runner, where
 an ordinary permission check would bypass the defect. The original CLI also
 fails this new witness because `config --get access` returns exit code 1; the
 fixed CLI passes it.
@@ -76,3 +86,25 @@ scratch store. Local logs:
 
 All runtime state and diagnostic files stayed outside the checkout. No main
 branch was merged, no deployment was changed, and README files were not edited.
+
+## Access-preservation correction
+
+The initial clone-owner implementation was not accepted after the Linux full
+suite found the overlay-reader regression. The access-preserving fixup above
+was applied before resubmission. APFS model integration passed all 47 checks
+again on the corrected runtime. Workspace tests also passed again: 227 passed,
+0 failed, 32 ignored.
+
+The earlier t41 assertion required the access map to contain only the owner.
+It was replaced with an exact assertion requiring both `*: writer` and the
+caller admin entry, preserving the fixture's original effective access. This
+checks the strengthened requirement rather than dropping the ownership check.
+The final t41 rerun passed all 60 checks, including that exact preserved-access
+assertion.
+
+Correction logs:
+
+- Corrected runtime build and model integration: `/Users/igor/.local/state/codex-agents/monitor-logs/8b8ea1e4-ddfa-5143-aeea-7bcc18b6977f.log` (model 47/47 passed; its subsequent t41 invocation exposed the old owner-only test expectation).
+- Corrected runtime workspace tests: `/Users/igor/.local/state/codex-agents/monitor-logs/f3b6951c-acec-5dd7-a25f-b9da25b88cca.log`.
+
+- Final corrected t41 run: `/Users/igor/.local/state/codex-agents/monitor-logs/a17ee49d-ad92-5997-8687-bc222fc6ecc7.log` (60 passed, 0 failed).
