@@ -51,7 +51,9 @@ hold complete cached trees, loaded only when needed as a parent. Metadata checkp
 every 128 states and at successful completion. An older complete-tree index is
 migrated when opened. After interruption, committed remote trees recover states
 that were uploaded after the last checkpoint. Completed local metadata avoids
-listing old remote states on each push; new states use their own prefixes. Cache files and metadata do not
+listing old remote states on each push; new states use their own prefixes.
+Advertised line and ref tips are rechecked with their exact state prefixes, so
+a later push can repair a partial replica that lacks a published tip tree. Cache files and metadata do not
 change the encrypted store format.
 
 Fetch restores parents before children. It clones an available immutable parent
