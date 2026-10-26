@@ -820,7 +820,22 @@ pub(crate) fn clone_complete(src: &Path, dst: &Path, entries: &BTreeMap<String, 
     } else {
         seal(dst, false, false)?;
     }
-    Ok(())
+    // A folder clone gives the folders the time of the clone; a btrfs snapshot keeps them.
+    // They get the times of the source, from its scan.
+    let dirs: Vec<(&String, &ScanEntry)> = entries.iter().filter(|(_, e)| e.meta.is_dir()).collect();
+    each_parallel(&dirs, |(rel, e)| {
+        use std::os::macos::fs::MetadataExt as MacMetadataExt;
+        let p = if rel.is_empty() { dst.to_path_buf() } else { dst.join(rel) };
+        let sealed = fs::symlink_metadata(&p)?.st_flags() & libc::UF_IMMUTABLE != 0;
+        if sealed {
+            crate::sys::apfs_immutable(&p, false)?;
+        }
+        crate::sys::apfs_mtime(&p, e.fingerprint.4, e.fingerprint.5)?;
+        if sealed {
+            crate::sys::apfs_immutable(&p, true)?;
+        }
+        Ok(())
+    })
 }
 
 pub fn snapshot(src: &Path, dst: &Path, readonly: bool) -> Result<()> {
@@ -1522,6 +1537,28 @@ mod tests {
         let changes = crate::changes::file_changes(&base, &src)?;
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].ranges, Some(vec![(8192, 4096)]));
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a case-sensitive APFS test volume"]
+    fn copies_keep_the_times_of_folders() -> Result<()> {
+        let s = Sandbox::new();
+        let src = s.0.join("src");
+        create_subvolume(&src)?;
+        fs::create_dir_all(src.join("a/b"))?;
+        fs::write(src.join("a/b/f"), b"x")?;
+        for (rel, sec) in [("a/b", 1_000_000_000), ("a", 1_100_000_000)] {
+            crate::sys::apfs_mtime(&src.join(rel), sec, 123)?;
+        }
+        let times = |root: &Path| -> Result<Vec<(i64, i64)>> {
+            ["a", "a/b"].iter().map(|r| Ok(fs::symlink_metadata(root.join(r)).map(|m| (m.mtime(), m.mtime_nsec()))?)).collect()
+        };
+        let want = times(&src)?;
+        snapshot(&src, &s.0.join("sealed"), true)?;
+        snapshot(&s.0.join("sealed"), &s.0.join("open"), false)?;
+        assert_eq!(times(&s.0.join("sealed"))?, want);
+        assert_eq!(times(&s.0.join("open"))?, want);
         Ok(())
     }
 
