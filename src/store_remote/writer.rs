@@ -315,20 +315,9 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
         let committed: std::collections::BTreeSet<String> = store.backend.list("states/")?.into_iter().map(|o| o.key).collect();
         index.retain(|id, pushed| committed.contains(&format::tree_name(id, &pushed.attempt)));
     }
-    // Other writers' states are usable bases only if this writer has a readable slot.
-    if let Some(identity) = store.identity(&descriptor, opts.paper_key.as_deref()).ok().filter(|_| store.backend.can_read()) {
-        let records = reader::records(&store.backend, &identity, &descriptor.project)?;
-        let mut source = reader::Reader::new(&store.backend, &identity, &records.keys);
-        for (id, attempt) in &present {
-            if index.contains_key(id) {
-                continue;
-            }
-            let (header, canonical, tree) = source.tree(id, attempt)?;
-            let depth = if header.tree == "full" { 0 } else { format::FULL_TREE_EVERY - 1 };
-            let pushed = Pushed { attempt: attempt.clone(), tree, depth, canonical };
-            index.insert(id.clone(), cache_tree(&store.dir, id, &pushed)?);
-        }
-    }
+    // Authenticate another writer's records only if a missing local parent cache is needed.
+    // An ordinary incremental push reuses its already verified local parent directly.
+    let mut remote_records = None;
     drop(stage);
     let stage = crate::trace::span("store select history");
     let required = reader::required_states(repo, &repo.p.export_jsonl()?.lines().map(str::to_string).collect::<Vec<_>>(), opts)?;
@@ -347,25 +336,21 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
     states.sort_by(|a, b| (a.time, &a.id).cmp(&(b.time, &b.id)));
     drop(stage);
     let stage = crate::trace::span("store secret checks");
-    // Every state that leaves the machine passes the secret detector before any upload.
-    for state in &states {
-        crate::secrets::check_state(ctx, repo, &state.id)?;
-    }
+    // Check changed files against one current secret source index before uploading any state.
+    crate::secrets::check_states(ctx, repo, states.iter().map(|state| state.id.as_str()))?;
     drop(stage);
     let stage = crate::trace::span("store collect hashes");
     let mut hashes = BTreeMap::new();
-    if !states.is_empty() {
-        for (id, entry) in &index {
-            for entry in cached_tree(&store.dir, id, entry)?.tree.files.into_values() {
-                hashes.entry(entry.2).or_insert(entry.3);
-            }
-        }
-    }
     drop(stage);
     let mut latest: Option<(String, Pushed)> = None;
     for state in parents_first(states)? {
         let stage = crate::trace::span("store select parent");
-        let direct = state.parents.iter().chain(state.derived_from.iter()).find(|id| index.contains_key(*id)).cloned();
+        let direct = state
+            .parents
+            .iter()
+            .chain(state.derived_from.iter())
+            .find(|id| present.contains_key(*id) || index.contains_key(*id))
+            .cloned();
         let base_id = if direct.is_some() || index.is_empty() {
             direct
         } else {
@@ -373,7 +358,31 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
         };
         let base = match base_id {
             Some(id) if latest.as_ref().is_some_and(|(last, _)| last == &id) => latest.take(),
-            Some(id) => Some((id.clone(), cached_tree(&store.dir, &id, &index[&id])?)),
+            Some(id) => {
+                if !index.contains_key(&id) && store.backend.can_read() {
+                    if let Ok(identity) = store.identity(&descriptor, opts.paper_key.as_deref()) {
+                        if remote_records.is_none() {
+                            remote_records = Some(reader::records(&store.backend, &identity, &descriptor.project)?);
+                        }
+                        let records = remote_records.as_ref().unwrap();
+                        let mut source = reader::Reader::new(&store.backend, &identity, &records.keys);
+                        let attempt = &present[&id];
+                        let (header, canonical, tree) = source.tree(&id, attempt)?;
+                        let depth = if header.tree == "full" { 0 } else { format::FULL_TREE_EVERY - 1 };
+                        let pushed = Pushed { attempt: attempt.clone(), tree, depth, canonical };
+                        index.insert(id.clone(), cache_tree(&store.dir, &id, &pushed)?);
+                    }
+                }
+                if let Some(entry) = index.get(&id) {
+                    let pushed = cached_tree(&store.dir, &id, entry)?;
+                    for entry in pushed.tree.files.values() {
+                        hashes.entry(entry.2.clone()).or_insert_with(|| entry.3.clone());
+                    }
+                    Some((id, pushed))
+                } else {
+                    None
+                }
+            }
             None => None,
         };
         drop(stage);

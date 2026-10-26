@@ -35,14 +35,19 @@ IDs, a new child commit, repeated import, and refused/forced rewinds.
 
 ## Transfer cost and recovery
 
-The writer keeps a content hash index for the push and compares each snapshot
+The writer keeps a content hash index for the current push, seeds it from needed
+parent trees, and compares each snapshot
 with an available parent. Unchanged entries reuse the parent's authenticated
 file links. Record segments contain at most 4 MiB of signed JSONL, except for a
 single larger record. Segments publish in sequence so a retry can continue after
 the last complete segment.
 
+Secret checks build one current private source index per push, then inspect each
+state's changes against its first parent. A root state has no parent, so its
+complete tree is checked. The index is rebuilt on the next command.
+
 The local `pushed.json` cache contains attempt and depth metadata. Separate files
-hold complete cached trees, loaded one at a time. Metadata checkpoints occur
+hold complete cached trees, loaded only when needed as a parent. Metadata checkpoints occur
 every 128 states and at successful completion. An older complete-tree index is
 migrated when opened. After interruption, committed remote trees recover states
 that were uploaded after the last checkpoint. Cache files and metadata do not
