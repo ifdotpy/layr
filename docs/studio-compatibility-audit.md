@@ -51,10 +51,13 @@ Cache cleanup now grants owner write access to directories before deletion.
 The new public regression uses 0555 directories and 0444 files.
 Both first conversion and cache repair must remove the old tree and preserve the new modes.
 Some macOS versions also require temporary owner write access on the directory during rename.
-The replacement records both directory identities and modes before it changes either name.
+The replacement records its intent before the copy starts.
+It records both directory identities and modes before it changes either name.
 Renames use held parent descriptors and refuse a changed directory identity.
 The next save or cache repair recovers an interrupted replacement.
-Tests exit child processes after permission changes and between renames.
+Tests exit child processes during the copy, after permission changes, and between renames.
+A concurrent `cache list` test must preserve the active repair journal and staging directory.
+Read-only commands do not recover journals. Recovery requires the project lock.
 They also inject a mode restoration error and replace the staging entry with a symbolic link.
 
 The line root reserves `.layr-cache-replace-<64 hex digits>.json` and its `.tmp` companion for this journal.

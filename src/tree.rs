@@ -396,7 +396,7 @@ impl Tree {
         let identity = file.metadata()?;
         let (parent, name) = self.parent(rel)?;
         let (_, temporary_name) = split(&temporary);
-        rustix::fs::renameat_with(&parent, temporary_name, &parent, name, rustix::fs::RenameFlags::NOREPLACE)?;
+        rustix::fs::renameat(&parent, temporary_name, &parent, name)?;
         let published = rustix::fs::statat(&parent, name, AtFlags::SYMLINK_NOFOLLOW)?;
         anyhow::ensure!(
             FileType::from_raw_mode(published.st_mode) == FileType::RegularFile
@@ -532,6 +532,18 @@ impl Tree {
     pub fn destroy_nested(&self) -> Result<()> {
         let d = openat2(&self.root, "", OFlags::RDONLY | OFlags::DIRECTORY)?;
         destroy_nested_in(&d)
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn cache_test_pause() {
+    let Some(root) = std::env::var_os("LAYR_TEST_CACHE_PAUSE") else { return };
+    let root = std::path::PathBuf::from(root);
+    std::fs::write(root.join("ready"), "ready").unwrap();
+    let start = std::time::Instant::now();
+    while !root.join("resume").exists() {
+        assert!(start.elapsed() < std::time::Duration::from_secs(30), "cache pause timed out");
+        std::thread::sleep(std::time::Duration::from_millis(5));
     }
 }
 
