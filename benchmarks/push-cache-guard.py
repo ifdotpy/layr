@@ -57,8 +57,7 @@ def stop_remote():
 
 
 def interrupted(signum, frame):
-    stop_remote()
-    raise SystemExit(128 + signum)
+    raise InterruptedError(signum)
 
 
 signal.signal(signal.SIGTERM, interrupted)
@@ -84,5 +83,6 @@ try:
                 raise SystemExit(75)
     observe()
     raise SystemExit(status)
-finally:
-    subprocess.run(['orb', '-m', args.machine, '-u', 'root', 'rm', '-f', pid_file], timeout=20)
+except InterruptedError as error:
+    stop_remote()
+    raise SystemExit(128 + int(error.args[0]))
