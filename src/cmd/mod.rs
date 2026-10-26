@@ -183,7 +183,7 @@ pub fn matches(specs: &[String], path: &str) -> bool {
     })
 }
 
-const HELP: &str = "usage: layr <command> [<args>]
+pub const HELP: &str = "usage: layr <command> [<args>]
 
 Work in a line:
    status, diff, add, rm, mv, restore, reset, save -m <message>, park, clean, apply
