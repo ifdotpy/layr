@@ -444,7 +444,15 @@ fn commit_info(s: &Path, c: &str) -> Result<(String, String, String, i64)> {
 
 /// Write the files of `commit` for `paths` (all when `None`) into `dst`, deleting paths that
 /// are not in the commit.
-fn materialize(s: &Path, commit: &str, dst: &Path, paths: Option<&[String]>, own: Option<(u32, u32)>) -> Result<()> {
+fn materialize(
+    s: &Path,
+    commit: &str,
+    dst: &Path,
+    paths: Option<&[String]>,
+    own: Option<(u32, u32)>,
+    source: Option<&Path>,
+) -> Result<()> {
+    let source = source.map(crate::tree::Tree::open).transpose()?;
     let mut args = vec!["ls-tree", "-r", "-z", "--full-tree", commit];
     let owned: Vec<String>;
     if let Some(p) = paths {
@@ -541,7 +549,13 @@ fn materialize(s: &Path, commit: &str, dst: &Path, paths: Option<&[String]>, own
             }
         } else {
             let m = if mode == "100755" { 0o755 } else { 0o644 };
-            fsutil::write_file(dst, path, &data, m, own)?;
+            let cloned = match &source {
+                Some(source) => clone_matching_blob(source, path, &data, dst, m, own)?,
+                None => false,
+            };
+            if !cloned {
+                fsutil::write_file(dst, path, &data, m, own)?;
+            }
         }
     }
     writer.join().map_err(|_| anyhow!("writer thread"))??;
@@ -549,9 +563,47 @@ fn materialize(s: &Path, commit: &str, dst: &Path, paths: Option<&[String]>, own
     Ok(())
 }
 
+/// Clone only exact blob bytes. Missing files, links and working edits use the Git blob.
+fn clone_matching_blob(
+    source: &crate::tree::Tree,
+    path: &str,
+    data: &[u8],
+    dst: &Path,
+    mode: u32,
+    own: Option<(u32, u32)>,
+) -> Result<bool> {
+    use std::io::Read;
+    let mut file = match source.open_read(path) {
+        Ok(file) => file,
+        Err(_) => return Ok(false),
+    };
+    if file.metadata()?.len() != data.len() as u64 {
+        return Ok(false);
+    }
+    let mut buf = [0u8; 64 * 1024];
+    for expected in data.chunks(buf.len()) {
+        file.read_exact(&mut buf[..expected.len()])?;
+        if &buf[..expected.len()] != expected {
+            return Ok(false);
+        }
+    }
+    // The caller-owned folder was copied with caller permissions before this snapshot.
+    // It cannot change between this comparison and the descriptor-safe clone.
+    fsutil::copy_entry(source.path.as_path(), path, dst, path, own)?;
+    fsutil::set_mode(dst, path, mode)?;
+    Ok(true)
+}
+
 /// Import the entire reachable DAG, parents first. A retry reuses completed imports.
-pub fn import_commit(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str, author_uid: u32) -> Result<(String, bool)> {
-    match import_commit_once(ctx, repo, commit, refname, author_uid) {
+pub fn import_commit(
+    ctx: &Ctx,
+    repo: &Repo,
+    commit: &str,
+    refname: &str,
+    author_uid: u32,
+    source: Option<&Path>,
+) -> Result<(String, bool)> {
+    match import_commit_once(ctx, repo, commit, refname, author_uid, source) {
         Ok(value) => Ok(value),
         Err(error) => {
             if !repair_cache(repo)? {
@@ -559,12 +611,19 @@ pub fn import_commit(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str, author
             }
             let remote = refname.split_once('/').context("import ref has no remote")?.0;
             fetch(ctx, repo, remote)?;
-            import_commit_once(ctx, repo, commit, refname, author_uid)
+            import_commit_once(ctx, repo, commit, refname, author_uid, source)
         }
     }
 }
 
-fn import_commit_once(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str, author_uid: u32) -> Result<(String, bool)> {
+fn import_commit_once(
+    ctx: &Ctx,
+    repo: &Repo,
+    commit: &str,
+    refname: &str,
+    author_uid: u32,
+    source: Option<&Path>,
+) -> Result<(String, bool)> {
     let s = init_store(repo)?;
     let revs = git_out(&s, &["rev-list", "--topo-order", "--reverse", "--parents", commit])?;
     let mut states = BTreeMap::new();
@@ -594,7 +653,7 @@ fn import_commit_once(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str, autho
                 let prev = parents.first().zip(git_parents.first()).map(|(st, c)| (st.clone(), c.to_string()));
                 let raw = cat.object(oid, "commit")?;
                 let objects = import_objects(&s, &raw, git_parents.first().copied(), &mut cat)?;
-                let st = import_one(ctx, repo, &s, oid, refname, parents, prev, objects)?;
+                let st = import_one(ctx, repo, &s, oid, refname, parents, prev, objects, source)?;
                 fresh |= oid == commit;
                 st
             }
@@ -614,6 +673,7 @@ fn import_one(
     parents: Vec<String>,
     prev: Option<(String, String)>,
     objects: GitImport,
+    source: Option<&Path>,
 ) -> Result<String> {
     // On a store volume that ignores case, README and Readme would become one file.
     #[cfg(target_os = "macos")]
@@ -667,11 +727,11 @@ fn import_one(
                     .filter(|x| !x.is_empty())
                     .map(|x| String::from_utf8_lossy(x).into_owned())
                     .collect();
-                materialize(&s, commit, &work, Some(&paths), None)?;
+                materialize(&s, commit, &work, Some(&paths), None, source)?;
             }
             None => {
                 crate::storage::create_subvolume(&work)?;
-                materialize(&s, commit, &work, None, None)?;
+                materialize(&s, commit, &work, None, None, source)?;
             }
         }
         let (name, email, msg, time) = commit_info(&s, commit)?;
