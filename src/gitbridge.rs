@@ -279,6 +279,7 @@ fn import_fetched(ctx: &Ctx, store: &Path, tmp: &Path, refs: &[(String, String)]
 /// `git fetch` of a remote into the store. Network access runs as the caller, into a temporary
 /// repository that borrows the store objects; the service then imports a pack through a pipe.
 pub fn fetch(ctx: &Ctx, repo: &Repo, remote: &str) -> Result<Vec<(String, String)>> {
+    verify_cache(repo)?;
     let s = init_store(repo)?;
     let url = remote_url(repo, remote)?;
     let tmp = std::env::temp_dir().join(format!("layr-fetch-{}", ids::new_id()));
@@ -537,6 +538,7 @@ fn materialize(s: &Path, commit: &str, dst: &Path, paths: Option<&[String]>, own
 
 /// Import the entire reachable DAG, parents first. A retry reuses completed imports.
 pub fn import_commit(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str, author_uid: u32) -> Result<(String, bool)> {
+    verify_cache(repo)?;
     let s = init_store(repo)?;
     let revs = git_out(&s, &["rev-list", "--topo-order", "--reverse", "--parents", commit])?;
     let mut states = BTreeMap::new();
@@ -766,6 +768,39 @@ pub fn build_index(repo: &Repo, state: &str, commit: &str, prev_state: Option<&s
 
 // ----- export -----
 
+/// Hash-check the cache before reusing its objects. A crash can lose unflushed objects, but
+/// immutable states and signed records can rebuild them. Keep damaged caches private for
+/// diagnosis; they may also contain fetched refs not imported into source history yet.
+thread_local! {
+    static VERIFIED_CACHES: std::cell::RefCell<BTreeSet<PathBuf>> = const { std::cell::RefCell::new(BTreeSet::new()) };
+}
+
+pub fn verify_cache(repo: &Repo) -> Result<()> {
+    if !has_store(repo) {
+        return Ok(());
+    }
+    let s = store(repo);
+    // Objects are immutable; verify once per command. New objects written by this command
+    // have their expected hash checked before publication. A crash ends this verification scope.
+    if VERIFIED_CACHES.with(|verified| verified.borrow().contains(&s)) {
+        return Ok(());
+    }
+    let check = base_cmd(&s)
+        .args(["fsck", "--full", "--no-reflogs", "--no-dangling"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if !check.success() {
+        let damaged = repo.p.dir.join(format!("git-damaged-{}", ids::new_id()));
+        std::fs::rename(&s, &damaged)?;
+        std::fs::set_permissions(&damaged, std::fs::Permissions::from_mode(0o700))?;
+        init_store(repo)?;
+    }
+    VERIFIED_CACHES.with(|verified| verified.borrow_mut().insert(s));
+    Ok(())
+}
+
 /// Git objects are a derived local cache. Validate the exact object identity before publishing.
 fn write_object(s: &Path, kind: &str, data: &[u8], expected: &str) -> Result<()> {
     let _write = crate::trace::span("Git write object");
@@ -887,6 +922,7 @@ fn restore_import(repo: &Repo, state: &StateRec, parents: &[String], saved: serd
 
 /// The nearest ancestor state with a git commit.
 pub fn mapped_ancestor(repo: &Repo, state: &str) -> Result<Option<(String, String)>> {
+    verify_cache(repo)?;
     for a in repo.ancestors(state)? {
         if let Some(c) = repo.p.db.git_commit_of(&a)? {
             if git_out(&store(repo), &["cat-file", "-e", &format!("{c}^{{commit}}")]).is_ok() {
@@ -927,6 +963,7 @@ pub fn tree_of(repo: &Repo, state: &str) -> Result<String> {
 /// commit a push exports: a tree for a folder, a blob for a file, the root tree for an empty path.
 /// `None` when the exported tree has no such path (absent, or a path a push does not export).
 pub fn object_of(repo: &Repo, state: &str, path: &str) -> Result<Option<String>> {
+    verify_cache(repo)?;
     let commit = match commit_of(repo, state)? {
         Some(c) => c,
         None => export_history(repo, state)?.0,
@@ -984,6 +1021,7 @@ pub fn state_of_history_commit(repo: &Repo, name: &str) -> Result<Option<String>
     if !has_store(repo) {
         return Ok(None);
     }
+    verify_cache(repo)?;
     let s = store(repo);
     let commit = match git_out(&s, &["rev-parse", "--verify", "-q", &format!("{name}^{{commit}}")]) {
         Ok(c) => c.trim().to_string(),
@@ -1003,6 +1041,7 @@ pub fn state_of_history_commit(repo: &Repo, name: &str) -> Result<Option<String>
 /// parents as its state (a merge stays a merge). The same states give the same commits. Returns
 /// the commit of `state` and the new (state, commit) pairs.
 pub fn export_history(repo: &Repo, state: &str) -> Result<(String, Vec<(String, String)>)> {
+    verify_cache(repo)?;
     repo.source_state(state)?;
     let mut known: BTreeMap<String, String> = BTreeMap::new();
     let mut order: Vec<String> = Vec::new();

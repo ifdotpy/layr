@@ -57,3 +57,7 @@ Loose objects in the rebuildable Git cache publish with atomic renames, using
 Git's normal cache durability model. The signed records and state files remain
 the durable source. Rebuilding Git objects does not force a filesystem flush for
 every object.
+The bridge hash-checks the existing Git cache once per command before using it.
+If validation fails, it moves the damaged cache to a private `git-damaged-*`
+folder and rebuilds the requested history from signed records and state files.
+The retained folder can contain fetched refs that were not imported yet.

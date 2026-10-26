@@ -70,6 +70,19 @@ l git remote add github "$R"
 l git push -q github main
 eq 'empty mirror receives all original IDs' "$original_ids" "$(git -C "$R" rev-list main | sort)"
 eq 'mirror tip is original commit' "$original_tip" "$(git -C "$R" rev-parse main)"
+# A truncated loose object must be detected even though its commit still exists.
+G=$LAYR_ROOT/projects/history/git
+blob=$(git -C "$R" rev-parse main:text)
+object=$G/objects/${blob:0:2}/${blob:2}
+chmod u+w "$object"
+printf truncated > "$object"
+C=$T/repaired.git
+git init --bare -q -b main "$C"
+l git remote add repaired "$C"
+l git push -q repaired main
+eq 'corrupt cache rebuild exports every original ID' "$original_ids" "$(git -C "$C" rev-list main | sort)"
+eq 'corrupt cache rebuild preserves the original tree' "$original_tree" "$(git -C "$C" rev-parse 'main^{tree}')"
+ok 'repaired Git cache has valid hashes and connectivity' git -C "$G" fsck --full --no-reflogs
 printf 'new\n' > after
 l add after
 l save -qm after
