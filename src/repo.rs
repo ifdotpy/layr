@@ -2203,7 +2203,13 @@ mod cache_copy_tests {
         let tree = Tree::open(&root)?;
         let result =
             replace_folder(&tree, "cache", false, rustix::process::geteuid().as_raw(), rustix::process::getegid().as_raw());
-        assert!(result.is_err(), "the injected fault must refuse the operation");
+        let error = format!("{:#}", result.expect_err("the injected fault must refuse the operation"));
+        let expected = if std::env::var("LAYR_TEST_CACHE_FAULT").as_deref() == Ok("restore-error") {
+            "restore the renamed directory mode"
+        } else {
+            "cache directory changed during rename"
+        };
+        assert!(error.contains(expected), "{error}");
         Ok(())
     }
 
