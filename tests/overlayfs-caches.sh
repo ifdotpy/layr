@@ -7,7 +7,7 @@ sample "$T/src"
 l init cachetest --from "$T/src" -q >/dev/null
 P=$LAYR_ROOT/projects/cachetest/lines
 cd "$P/main" || exit 1
-l cache add target
+l config regenerable '["target"]'
 no "the cache is not a mount" mountpoint -q target
 printf built > target/output
 l save -q --caches
@@ -22,8 +22,8 @@ no "history excludes the cache output" l show head:target/output
 ok "remove the cache root" rm -rf target
 mkdir target
 printf rebuilt > target/output
-l cache repair
-eq "cache repair preserves rebuilt output" rebuilt "$(cat target/output)"
+l save -q --caches
+eq "save --caches preserves rebuilt output" rebuilt "$(cat target/output)"
 # A saved cache belongs to a state. Advance the state before saving new output.
 printf '\nnew build input\n' >> notes.txt
 l save -qam "new build input"

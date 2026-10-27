@@ -291,7 +291,7 @@ extent (`filefrag -v`).
    subvolume (`rm -rf` was also tested as a normal user), and git can make a plain folder
    there. The next state
    would then put the folder's private files into the shared set. layr must refuse a named save when
-   the path of a folder overlay is not a subvolume, and offer a repair, as `layr cache repair`
+   the path of a folder overlay is not a subvolume, and offer a repair, as `layr overlay repair`
    does for caches.
 10. **Moves across the edge of a folder overlay.** `rename()` gives EXDEV: `git mv` fails, GNU
     `mv` copies with reflinks, uutils `mv` copies all data. A file overlay has no such edge. Are

@@ -117,7 +117,7 @@ for tool, fs, copy_mode in cases:
                 main = mount / 'store/projects' / name / 'lines/main'
             if warm:
                 if tool == 'layr':
-                    layr(main, 'cache', 'add', 'target')
+                    layr(main, 'config', 'regenerable', '["target"]')
                 else:
                     (main / 'target').mkdir()
                 run(['cp', '-a', '--reflink=never', str(cache) + '/.', main / 'target'])

@@ -247,6 +247,7 @@ pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
         "rebase" => Some("replay"),
         "revert" => Some("invert"),
         "checkout" | "switch" => return branch::removed_switch(ctx, &rest),
+        "cache" => return admin::removed_cache(&rest),
         _ => None,
     };
     if let Some(new) = replacement {
@@ -323,8 +324,7 @@ pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
         "machines" => Err(exit(128, "use layr remote list or layr remote trust <name> <machine>")),
         "debug" => admin::debug(ctx, &rest),
         "config" => admin::config(ctx, &rest),
-        "cache" => admin::cache(ctx, &rest),
-        "layer" => Err(exit(1, "this command was removed; use 'layr cache'")),
+        "layer" => Err(exit(1, "this command was removed; use 'layr overlay list'")),
         "remote" => remote::remote(ctx, &rest),
         "fetch" => remote::fetch(ctx, &rest),
         "pull" => remote::pull(ctx, &rest),

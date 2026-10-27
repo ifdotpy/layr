@@ -19,7 +19,7 @@ l add -A && l save -qm attributes
 mkdir -p node_modules/pkg
 printf 'cache\n' > node_modules/pkg/data
 ok "save converts a regenerable folder" l save -q --caches
-has "the folder is a layer" "node_modules" "$(l cache list)"
+has "the folder is a cache overlay" "folder=node_modules" "$(l overlay list)"
 no "layer data is absent from history" l show head:node_modules/pkg/data
 l line new -q warm 'head@{0}'
 eq "new line receives the saved layer" "cache" "$(cat "$P/warm/node_modules/pkg/data")"

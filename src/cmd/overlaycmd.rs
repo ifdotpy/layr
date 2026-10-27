@@ -24,6 +24,7 @@ const USAGE: &str =
        layr overlay managers <name> [machine:<id>...]
        layr overlay use [--add|--remove] <name>... | --none
        layr overlay move [--purge] <name> <path>... | --cancel [<path>...]
+       layr overlay repair <overlay>
        layr overlay show <name> --json
        layr overlay log <name> --ops [--json]
        layr overlay log|show|diff|grep|ls-files|blame <name> [<args>]
@@ -43,6 +44,7 @@ pub fn overlay(ctx: &Ctx, args: &[String]) -> Result<i32> {
         "mode" => access_mode(ctx, &rest),
         "use" => use_cmd(ctx, &rest),
         "move" => move_cmd(ctx, &rest),
+        "repair" => repair(ctx, &rest),
         "show" if rest.iter().take_while(|s| s.as_str() != "--").any(|s| s == "--json") => show_json(ctx, &rest),
         "log" if rest.iter().take_while(|s| s.as_str() != "--").any(|s| s == "--ops") => operations(ctx, &rest),
         "log" | "show" | "diff" | "grep" | "ls-files" | "blame" | "rev-parse" => read(ctx, sub, &rest),
@@ -233,15 +235,14 @@ pub(crate) fn make_overlay(
     Ok(())
 }
 
-/// A folder overlay is not part of the file stack: `save --caches`, `line new`, `merge` and
-/// `cache pull` move it (docs/cache-overlays.md, section 3).
+/// A folder overlay is not part of the file stack: `save --caches`, `line new` and `merge` move it (docs/cache-overlays.md, section 3).
 fn refuse_folder(repo: &Repo, name: &str) -> Result<()> {
     if repo.overlay_info(name)?.is_some() {
         if let Some(f) = repo.overlay_setting(name, "folder")? {
             return Err(exit(
                 1,
                 format!(
-                    "error: overlay '{name}' is the folder overlay of {}; use layr save --caches or layr cache pull",
+                    "error: overlay '{name}' is the folder overlay of {}; use layr save --caches or layr merge",
                     f.as_str().unwrap_or("?")
                 ),
             ));
@@ -345,6 +346,32 @@ fn reader_list(p: &Project) -> Vec<String> {
     pol.access.iter().filter(|(_, r)| **r >= Role::Reader).map(|(k, _)| show_principal(k)).collect()
 }
 
+/// A folder overlay's folder in a line, as `cache list -v` showed it: the state, the size of a
+/// cache, and the head of the overlay line that the line saved.
+struct InLine {
+    state: String,
+    size: Option<u64>,
+    saved: Option<String>,
+}
+
+fn folder_in_line(repo: &Repo, l: &crate::model::Line, name: &str, folder: &str, versioned: bool) -> InLine {
+    let cp = repo.working(l).join(folder);
+    let state = match (versioned, btrfs::is_subvolume(&cp)) {
+        (true, true) => format!("not a cache: has versioned files (run layr overlay repair {name})"),
+        (true, false) => crate::cmd::admin::VERSIONED.to_string(),
+        (false, true) => "cache".to_string(),
+        (false, false) if cp.exists() => format!("plain folder (run layr overlay repair {name})"),
+        (false, false) => "absent".to_string(),
+    };
+    let size = (state == "cache").then(|| crate::cache_overlay::tree_size(&cp));
+    let saved = repo
+        .overlay_project(name)
+        .ok()
+        .and_then(|p| p.db.line_by_name(&format!("line-{}", l.id)).ok().flatten())
+        .map(|ol| ids::short(&ol.head));
+    InLine { state, size, saved }
+}
+
 fn list(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let a = parse(&Spec::new().flag("--json"), args)?;
     let mut rows = Vec::new();
@@ -353,6 +380,11 @@ fn list(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let shown: BTreeSet<String> = match &h.line {
         Some(l) => repo.layers(l)?.into_iter().map(|x| x.overlay).collect(),
         None => BTreeSet::new(),
+    };
+    // The versioned folders of the line: a folder overlay there is no cache.
+    let versioned = match &h.line {
+        Some(l) => repo.line_cache_paths(l)?.1,
+        None => Vec::new(),
     };
     for name in repo.visible_overlay_names(ctx)? {
         let info = match repo.overlay_info(&name)? {
@@ -363,20 +395,38 @@ fn list(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let mark = if shown.contains(&name) { "* " } else { "  " };
         let owner = crate::ctx::Caller::from_uid(info.owner).user;
         let props = repo.overlay_props(&name)?;
+        let folder = repo.overlay_setting(&name, "folder")?.and_then(|v| v.as_str().map(str::to_owned));
+        let line_state = match (&h.line, &folder) {
+            (Some(l), Some(f)) => Some(folder_in_line(repo, l, &name, f, versioned.contains(f))),
+            _ => None,
+        };
         if a.has("--json") {
-            rows.push(serde_json::json!({"name":name,"mode":info.mode.name(),"hidden":info.hidden,"owner":info.owner,"readers":readers,"shown":shown.contains(&name),"properties":props.to_json()}));
+            rows.push(serde_json::json!({
+                "name":name,"mode":info.mode.name(),"hidden":info.hidden,"owner":info.owner,"readers":readers,
+                "shown":shown.contains(&name),"properties":props.to_json(),"folder":folder,
+                "state":line_state.as_ref().map(|s| &s.state),"size":line_state.as_ref().and_then(|s| s.size),
+                "saved":line_state.as_ref().and_then(|s| s.saved.clone()),
+            }));
         } else {
             let mut described = props.describe();
-            if let Some(f) = repo.overlay_setting(&name, "folder")?.and_then(|v| v.as_str().map(str::to_owned)) {
+            if let Some(f) = &folder {
                 described.insert(0, format!("folder={f}"));
             }
             let keys = repo.key_files(&name)?;
             if !keys.is_empty() {
                 described.push(format!("key-files={}", keys.join(",")));
             }
+            // A folder overlay in the line: its state, its size and its saved state (was `cache list -v`).
+            let tail = line_state
+                .map(|s| {
+                    let size = s.size.map(crate::cmd::admin::human_size).unwrap_or_else(|| "-".into());
+                    let saved = s.saved.map(|x| format!("saved {x}")).unwrap_or_else(|| "not saved".into());
+                    format!("\t{}\t{size}\t{saved}", s.state)
+                })
+                .unwrap_or_default();
             outln!(
                 ctx,
-                "{mark}{name}\t{}{}\towner {owner}\treaders {}{}",
+                "{mark}{name}\t{}{}\towner {owner}\treaders {}{}{tail}",
                 info.mode.name(),
                 if info.hidden { " hidden" } else { "" },
                 readers.join(","),
@@ -386,6 +436,43 @@ fn list(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     if a.has("--json") {
         outln!(ctx, "{}", serde_json::to_string(&rows)?);
+    }
+    Ok(0)
+}
+
+/// `layr overlay repair <overlay>`: in the current line, the folder of a folder overlay that a tool
+/// made again as a plain folder becomes a cache again. A cache folder with versioned files becomes
+/// a plain folder again (`layr cache repair` before; docs/cache-overlays.md, section 4).
+fn repair(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    let a = parse(&Spec::new(), args)?;
+    let name = match a.pos.as_slice() {
+        [name] => name.clone(),
+        _ => return Err(exit(128, "usage: layr overlay repair <overlay>")),
+    };
+    let h = here(ctx)?;
+    let repo = &h.repo;
+    repo.need_overlay(&name)?;
+    let folder = repo
+        .overlay_setting(&name, "folder")?
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .ok_or_else(|| exit(128, format!("fatal: overlay '{name}' is no folder overlay")))?;
+    let l = h.line()?.clone();
+    repo.authorize_line(ctx, &l, crate::repo::LineOp::Save)?;
+    let _lock = repo.p.lock()?;
+    let l = repo.line(&l.id)?;
+    let (u, g) = repo.owner_ids(&l);
+    crate::repo::recover_cache_replacements(&repo.working(&l))?;
+    let (caches, versioned) = repo.line_cache_paths(&l)?;
+    if versioned.contains(&folder) {
+        if crate::repo::uncache(&repo.working(&l), &folder, u, g)? {
+            outln!(ctx, "{folder}: {}", crate::cmd::admin::VERSIONED_AGAIN);
+        }
+    } else if caches.contains(&folder) {
+        if crate::repo::convert_cache(&repo.working(&l), &folder, u, g)? {
+            outln!(ctx, "{folder}: a cache again");
+        }
+    } else {
+        return Err(exit(1, format!("error: {folder} is no cache path of this line (regenerable)")));
     }
     Ok(0)
 }

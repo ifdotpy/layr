@@ -358,7 +358,7 @@ impl<'a> Repo<'a> {
         Ok(taken)
     }
 
-    /// Bring the caches of `from` into the line (`cache pull`, and `merge` of a line): for each
+    /// Bring the caches of `from` into the line (`merge` of a line): for each
     /// folder overlay, a fast-forward of the line's overlay line, or a `union-theirs` state; the
     /// files of the incoming state are copied over the line's folder (a missing or empty folder
     /// gets one snapshot). The caller holds the project lock. Returns folder and new state.
