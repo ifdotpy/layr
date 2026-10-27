@@ -391,6 +391,15 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
         if !wanted(&state, opts) && !required.contains(id) {
             continue;
         }
+        // A cache overlay state of another platform stays on the remote (docs/cache-overlays.md).
+        if repo.p.is_overlay() && crate::cache_overlay::other_platform(state.cache_platform.as_deref()) {
+            report.omitted.push(format!(
+                "cache state {}: platform {}",
+                crate::ids::short(id),
+                state.cache_platform.as_deref().unwrap_or("")
+            ));
+            continue;
+        }
         if repo.p.has_state(id) {
             repo.p.db.set_present(id, true)?;
         } else {
