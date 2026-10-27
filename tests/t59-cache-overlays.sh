@@ -13,7 +13,9 @@ cd $P/main
 l protect main --remove >/dev/null 2>&1 || true
 states() { ls "$O/$1/states" | wc -l | tr -d ' '; }
 
-# 1. save --caches makes the cache overlay of the folder and saves a state for the line.
+# 1. save --caches makes the cache overlay of the folder and saves a state for the line. Its
+#    readers are the machines the project trusts, not every user.
+self_id=$(l remote self --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 l line new rel main >/dev/null
 cd $P/rel
 rm -rf target; mkdir -p target/debug; echo bin1 > target/debug/x
@@ -24,6 +26,17 @@ has "the overlay is a folder overlay with the cache properties" "folder=target h
 eq "cache list keeps its format" "$(printf 'target\tcache')" "$(l cache list)"
 has "cache list -v shows the saved overlay state" "overlay cache.target" "$(l cache list -v)"
 eq "status does not show the cache" "" "$(l status --short)"
+readers=$(l overlay readers cache.target)
+has "this machine reads the cache overlay" "machine:$self_id" "$readers"
+eq "not every user" "" "$(echo "$readers" | grep -x '\*')"
+new_fs $T/m2 1G
+other=$(env LAYR_ROOT=$T/m2/store $LAYR remote self --json)
+other_id=$(echo "$other" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+other_key=$(echo "$other" | python3 -c 'import json,sys; print(json.load(sys.stdin)["public_key"])')
+l remote add test-peer ssh://test/p >/dev/null
+ok "trust another machine" l remote trust test-peer $other_id --public-key $other_key
+l save --caches -q
+has "the next save --caches adds it to the readers" "machine:$other_id" "$(l overlay readers cache.target)"
 no "overlay use refuses a folder overlay" l overlay use --add cache.target
 no "overlay move refuses a folder overlay" l overlay move cache.target notes.txt
 
@@ -87,6 +100,43 @@ has "it is a follow folder overlay" "folder=vendor/cache" "$(l overlay list)"
 no "a second overlay for the same folder fails" l overlay create deps2 --folder vendor/cache
 no "a folder overlay is not shared" l overlay create deps3 --folder x --mode shared
 no "an absolute folder fails" l overlay create deps4 --folder /tmp
+
+# 9. A protected line takes caches only with a merge that met its protection.
+cd $P/main
+l config check.unit 'test ! -e fail.txt'
+l protect main --check unit --no-expect >/dev/null
+l line new pm main >/dev/null
+cd $P/pm
+echo pm1 > target/debug/pm1
+l save --caches -q
+cd $P/main
+out=$(l merge pm 2>&1)
+has "an up-to-date merge without a passing check carries no cache" "not merged" "$out"
+no "so main has no file of it" test -e target/debug/pm1
+cd $P/pm
+echo code >> notes.txt
+l save -a -m "pm code" -q
+l save --caches -q
+cd $P/main
+out=$(l merge pm 2>&1)
+has "a merge whose check passed carries the cache" "Merged cache target" "$out"
+ok "main has the file" test -e target/debug/pm1
+l protect main --check unit --approvals 1 --no-expect >/dev/null
+cd $P/pm
+echo pm2 > target/debug/pm2
+l save --caches -q
+cd $P/main
+out=$(l merge pm 2>&1)
+has "a merge that lacks the approval carries no cache" "not merged" "$out"
+no "so main has no new file" test -e target/debug/pm2
+cd $P/pm
+echo more >> notes.txt
+l save -a -m "pm code 2" -q
+l save --caches -q
+cd $P/main
+no "a merge that lacks the approval is refused" l merge pm
+no "and carries no cache" test -e target/debug/pm2
+l protect main --remove >/dev/null
 
 # 8. A folder that .layrattributes no longer marks regenerable is not taken.
 cd $P/main
