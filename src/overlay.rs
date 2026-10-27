@@ -1091,7 +1091,6 @@ impl<'a> Repo<'a> {
         let orepo = self.overlay_repo(name)?;
         let _lock = orepo.p.lock()?;
         let mut keep: BTreeSet<String> = BTreeSet::from([info.root.clone()]);
-<<<<<<< head
         // A cache overlay keeps nothing for a line that is gone (docs/cache-overlays.md).
         let cache = self.overlay_setting(name, "cache")?.and_then(|v| v.as_bool()).unwrap_or(false);
         let live: BTreeSet<String> = self.lines()?.into_iter().map(|l| format!("line-{}", l.id)).collect();
@@ -1099,10 +1098,6 @@ impl<'a> Repo<'a> {
             if cache && !live.contains(&ol.name) {
                 continue;
             }
-||||||| base
-=======
-        for ol in orepo.p.db.lines()? {
->>>>>>> bba6c770d582763b864901a17d866a73
             let mut at = Some(ol.head.clone());
             for _ in 0..keep_n {
                 let Some(id) = at.take() else { break };
@@ -1232,12 +1227,7 @@ pub fn union_state(orepo: &Repo, ctx: &Ctx, ol: &Line, ours: &str, theirs: &str,
 }
 
 /// The changes that put every file of `theirs` over a tree with the files `ours`.
-<<<<<<< head
 pub(crate) fn union_ops(ours: &BTreeSet<String>, theirs: Vec<String>) -> Ops {
-||||||| base
-=======
-fn union_ops(ours: &BTreeSet<String>, theirs: Vec<String>) -> Ops {
->>>>>>> bba6c770d582763b864901a17d866a73
     let mut ops = Ops::default();
     for p in theirs {
         let mut at = 0;
