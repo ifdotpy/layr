@@ -76,7 +76,10 @@ class Fixture(http.server.BaseHTTPRequestHandler):
         assert body == {'challenge':'verified ciphertext'}
         counts['token'] += 1
         return self.answer({'token':'fixture.read','expires':int(time.time()*1000)+300000},kind='application/json')
-server = http.server.ThreadingHTTPServer(('127.0.0.1',0),Fixture)
+class Server(http.server.ThreadingHTTPServer):
+    # Admit the client's eight concurrent TLS connections before accepting them.
+    request_queue_size = 32
+server = Server(('127.0.0.1',0),Fixture)
 context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 context.load_cert_chain(root/'cert.pem',root/'key.pem')
 server.socket = context.wrap_socket(server.socket,server_side=True)
