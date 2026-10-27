@@ -134,6 +134,9 @@ one; a program on top that wants one commit per task uses it.
 
 ## 5. Warm caches
 
+Planned: caches become overlays with properties ([cache overlays](cache-overlays.md)). This
+section describes the caches as built.
+
 A cache is a folder of regenerable content, such as a Rust `target` folder, kept as a nested
 subvolume, outside states and diffs. Every working folder would otherwise build from
 nothing, and the same build output would be on disk once per folder.
