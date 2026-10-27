@@ -1,6 +1,7 @@
 # Cache overlays and remotes per layer
 
-Status: design approved by the owner on 2026-10-27. Section 8 says which slice builds which part.
+Status: design approved by the owner on 2026-10-27. Section 9 says which slice builds which part.
+Built: slice a (section 11).
 This file extends [overlays](overlays.md) (the model of layers, section 9 = what is built) and
 replaces the cache part of [design](design.md#5-warm-caches) as the slices land.
 
@@ -196,3 +197,24 @@ Each slice is one pull request that leaves `main` green.
    that no file names (a system compiler) is not in the key.
 4. **LRU on APFS.** macOS updates access times lazily; `lru` uses the access time and the
    modification time, whichever is newer.
+
+## 11. Built: slice a
+
+Built on 2026-10-27: the properties `history`, `quiet`, `merge` and `gc` for file overlays. Tests:
+`tests/t58-overlay-properties.sh` (one user; macOS and Linux) and the unit tests in
+`src/overlay.rs`.
+
+- `overlay create` takes `--history`, `--quiet`, `--merge` and `--gc`; `overlay set <name>`
+  changes them (the owner only). Each property is the setting `overlay.<name>.<property>`
+  (`history`: a number; `quiet`: true; `merge`: `union-theirs`; `gc`: `lru:<bytes>`). A default
+  is no setting. A hidden overlay keeps them in its own records.
+- `overlay list` shows the properties that differ from the default; `overlay list --json` and
+  `overlay show <name> --json` have a `properties` object.
+- `history`: applied after each named save and merge that moves an overlay line, after
+  `overlay set --history`, and by `gc`. `overlay log` still lists the deleted states (their
+  records stay); `overlay show` of such a state fails.
+- `merge=union-theirs`: as section 5. A three-way merge whose base `history` deleted refuses and
+  names `overlay set <name> --merge union-theirs`.
+- `quiet`: as section 4.1. A pending `overlay move` into a quiet overlay is not in `status`
+  either. The summary of `save` still counts the quiet files.
+- `gc=lru:<size>` is stored and shown; slice b applies it (it needs folder overlays).
