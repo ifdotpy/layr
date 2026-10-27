@@ -206,7 +206,7 @@ Git bridge:
    git remote, fetch, pull, push, clone, sync
    queue add/list/remove/run
 Overlays (files with their own readers and history, shown in lines):
-   overlay create, list, readers, use, move, log, show, diff, grep, ls-files
+   overlay create, set, list, readers, use, move, log, show, diff, grep, ls-files
 Projects and machines:
    init, projects, config, cache, export, gc, fsck, reindex, daemon
 

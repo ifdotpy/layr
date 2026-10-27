@@ -8,7 +8,7 @@ use crate::diff;
 use crate::ids;
 use crate::merge;
 use crate::model::{Line, Record, StateKind, StateRec};
-use crate::overlay::{Layer, Mode};
+use crate::overlay::{Layer, MergeKind, Mode};
 use crate::repo::{skip_path, Repo};
 use crate::revs;
 use anyhow::Result;
@@ -148,9 +148,26 @@ fn plan_overlays(ctx: &Ctx, repo: &Repo, line: &Line, theirs: Option<&Line>, lab
                 m.moves.push((tl.overlay.clone(), ol, tl.state.clone(), None));
                 continue;
             }
+            if repo.overlay_props(&tl.overlay)?.merge == MergeKind::UnionTheirs {
+                let st = crate::overlay::union_state(&o, ctx, &ol, &ours_s, &tl.state, message)?;
+                m.layers[i].state = st.id.clone();
+                m.moves.push((tl.overlay.clone(), ol, st.id.clone(), Some(st)));
+                continue;
+            }
             let base = o
                 .merge_base(&ours_s, &tl.state)?
                 .ok_or_else(|| exit(128, format!("fatal: overlay '{}': refusing to merge unrelated histories", tl.overlay)))?;
+            if !o.p.has_state(&base) {
+                return Err(exit(
+                    1,
+                    format!(
+                        "error: overlay '{}': the merge base {} was deleted by its history limit; use 'layr overlay set {} --merge union-theirs'",
+                        tl.overlay,
+                        crate::ids::short(&base),
+                        tl.overlay
+                    ),
+                ));
+            }
             let (st, out) =
                 merge_states(ctx, &o, &ol, &base, &ours_s, &tl.state, label, vec![ours_s.clone(), tl.state.clone()], message)?;
             m.conflicts += out.conflicts.len();
@@ -237,6 +254,9 @@ fn finish(
     repo.move_head(ctx, op, line, new_head, states, working_before, data)?;
     if let Some(v) = view {
         repo.install_base(line, v, new_head, &layers)?;
+    }
+    for name in ovl.filter(|o| o.changed()).map(|o| o.names()).unwrap_or_default() {
+        repo.after_overlay_move(ctx, &name);
     }
     let mut l2 = line.clone();
     l2.head = new_head.to_string();

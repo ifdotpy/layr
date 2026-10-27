@@ -7,14 +7,16 @@ use crate::args::{parse, Spec};
 use crate::ctx::Ctx;
 use crate::ids;
 use crate::model::{Record, StateKind, StateRec};
-use crate::overlay::{Layer, Mode};
+use crate::overlay::{Layer, MergeKind, Mode, Props, PROPS};
 use crate::repo::Repo;
 use crate::storage as btrfs;
 use crate::store::{check_name, Project};
 use anyhow::Result;
 use std::collections::{BTreeMap, BTreeSet};
 
-const USAGE: &str = "usage: layr overlay create <name> [--readers <principal>,...] [--mode shared|follow] [--hidden]
+const USAGE: &str =
+    "usage: layr overlay create <name> [--readers <principal>,...] [--mode shared|follow] [--hidden] [<properties>]
+       layr overlay set <name> <properties>
        layr overlay show-to-project <name>
        layr overlay list
        layr overlay readers <name> [<principal>...]
@@ -23,13 +25,15 @@ const USAGE: &str = "usage: layr overlay create <name> [--readers <principal>,..
        layr overlay move [--purge] <name> <path>... | --cancel [<path>...]
        layr overlay show <name> --json
        layr overlay log <name> --ops [--json]
-       layr overlay log|show|diff|grep|ls-files|blame <name> [<args>]";
+       layr overlay log|show|diff|grep|ls-files|blame <name> [<args>]
+properties: --history all|last|<N>  --quiet|--no-quiet  --merge three-way|union-theirs  --gc none|lru:<size>";
 
 pub fn overlay(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let sub = args.first().map(|s| s.as_str()).unwrap_or("list");
     let rest = args.get(1..).unwrap_or(&[]).to_vec();
     match sub {
         "create" => create(ctx, &rest),
+        "set" => set(ctx, &rest),
         "list" => list(ctx, &rest),
         "show-to-project" => show_to_project(ctx, &rest),
         "readers" => readers(ctx, &rest),
@@ -82,8 +86,9 @@ fn access_map(owner: u32, readers: &[String]) -> serde_json::Value {
 }
 
 fn create(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let spec = Spec::new().value("--readers|-r").value("--mode").flag("--hidden").flag("-q|--quiet");
+    let spec = props_spec(Spec::new().value("--readers|-r").value("--mode").flag("--hidden").flag("-q"));
     let a = parse(&spec, args)?;
+    let props = props_of(&a, Props::default())?;
     let h = here(ctx)?;
     let repo = &h.repo;
     if repo.p.is_overlay() {
@@ -150,6 +155,13 @@ fn create(ctx: &Ctx, args: &[String]) -> Result<i32> {
             format!("overlay.{name}"),
             serde_json::json!({"id":orepo.p.id,"owner": owner, "mode": mode.name(), "root": id, "hidden": hidden}),
         );
+        // Properties are separate settings, so an older layr reads the overlay as before.
+        for prop in PROPS {
+            let v = props.value(prop);
+            if !v.is_null() {
+                cfg.insert(format!("overlay.{name}.{prop}"), v);
+            }
+        }
         rec.data = serde_json::json!({"name": name, "parent":repo.p.id, "config": cfg});
         if hidden {
             orepo.commit_record(ctx, rec)?;
@@ -169,7 +181,82 @@ fn create(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let mut who: Vec<String> = vec![ctx.caller.user.clone()];
         who.extend(readers.iter().map(|r| show_principal(r)));
         who.dedup();
-        outln!(ctx, "Created overlay {name} (mode {}; readers: {})", mode.name(), who.join(", "));
+        let shown = props.describe();
+        let extra = if shown.is_empty() { String::new() } else { format!("; {}", shown.join(" ")) };
+        outln!(ctx, "Created overlay {name} (mode {}; readers: {}{extra})", mode.name(), who.join(", "));
+    }
+    Ok(0)
+}
+
+/// The options of overlay properties (docs/cache-overlays.md, section 4).
+fn props_spec(spec: Spec) -> Spec {
+    spec.value("--history").flag("--quiet").flag("--no-quiet").value("--merge").value("--gc")
+}
+
+/// `base` with the property options of `a`.
+fn props_of(a: &crate::args::Parsed, base: Props) -> Result<Props> {
+    let mut p = base;
+    if let Some(v) = a.get("--history") {
+        p.history = crate::overlay::parse_history(v)
+            .ok_or_else(|| exit(128, format!("fatal: invalid --history '{v}' (all, last or a number)")))?;
+    }
+    if a.has("--quiet") && a.has("--no-quiet") {
+        return Err(exit(128, "fatal: --quiet and --no-quiet exclude each other"));
+    }
+    if a.has("--quiet") {
+        p.quiet = true;
+    }
+    if a.has("--no-quiet") {
+        p.quiet = false;
+    }
+    if let Some(v) = a.get("--merge") {
+        p.merge =
+            MergeKind::parse(v).ok_or_else(|| exit(128, format!("fatal: invalid --merge '{v}' (three-way or union-theirs)")))?;
+    }
+    if let Some(v) = a.get("--gc") {
+        p.gc_lru = crate::overlay::parse_gc(v)
+            .ok_or_else(|| exit(128, format!("fatal: invalid --gc '{v}' (none or lru:<size>, for example lru:20G)")))?;
+    }
+    Ok(p)
+}
+
+/// `layr overlay set <name> <properties>`: the owner changes properties. The settings go into the
+/// records of the project, or of the overlay when it is hidden.
+fn set(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    let a = parse(&props_spec(Spec::new()), args)?;
+    let h = here(ctx)?;
+    let name = a.pos.first().ok_or_else(|| exit(128, USAGE))?.clone();
+    if a.pos.len() != 1 {
+        return Err(exit(128, USAGE));
+    }
+    let info = visible_info(ctx, &h.repo, &name)?;
+    let orepo = h.repo.overlay_repo(&name)?;
+    if !orepo.is_admin(ctx) {
+        return Err(exit(1, format!("permission denied: only the owner of overlay '{name}' sets its properties")));
+    }
+    let _lock = h.repo.p.lock()?;
+    let old = h.repo.overlay_props(&name)?;
+    let new = props_of(&a, old.clone())?;
+    let mut cfg = serde_json::Map::new();
+    for prop in PROPS {
+        if old.value(prop) != new.value(prop) {
+            cfg.insert(format!("overlay.{name}.{prop}"), new.value(prop));
+        }
+    }
+    if !cfg.is_empty() {
+        let mut rec = Record::new("config");
+        rec.data = serde_json::json!({"config": cfg});
+        if info.hidden {
+            let _olock = orepo.p.lock()?;
+            orepo.commit_record(ctx, rec)?;
+        } else {
+            h.repo.commit_record(ctx, rec)?;
+        }
+    }
+    let shown = new.describe();
+    outln!(ctx, "overlay {name}: {}", if shown.is_empty() { "no properties".to_string() } else { shown.join(" ") });
+    if new.history.is_some() && new.history != old.history {
+        h.repo.after_overlay_move(ctx, &name);
     }
     Ok(0)
 }
@@ -197,15 +284,18 @@ fn list(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let readers = repo.overlay_project(&name).map(|p| reader_list(&p)).unwrap_or_default();
         let mark = if shown.contains(&name) { "* " } else { "  " };
         let owner = crate::ctx::Caller::from_uid(info.owner).user;
+        let props = repo.overlay_props(&name)?;
         if a.has("--json") {
-            rows.push(serde_json::json!({"name":name,"mode":info.mode.name(),"hidden":info.hidden,"owner":info.owner,"readers":readers,"shown":shown.contains(&name)}));
+            rows.push(serde_json::json!({"name":name,"mode":info.mode.name(),"hidden":info.hidden,"owner":info.owner,"readers":readers,"shown":shown.contains(&name),"properties":props.to_json()}));
         } else {
+            let described = props.describe();
             outln!(
                 ctx,
-                "{mark}{name}\t{}{}\towner {owner}\treaders {}",
+                "{mark}{name}\t{}{}\towner {owner}\treaders {}{}",
                 info.mode.name(),
                 if info.hidden { " hidden" } else { "" },
-                readers.join(",")
+                readers.join(","),
+                if described.is_empty() { String::new() } else { format!("\t{}", described.join(" ")) }
             );
         }
     }
@@ -425,7 +515,7 @@ fn show_json(ctx: &Ctx, args: &[String]) -> Result<i32> {
         "managers":crate::overlay_managers::of(&h.repo, name)?.machines,
         "epochs":layr_model::overlays::epochs(&records),
         "patterns":setting("patterns")?.unwrap_or_else(|| serde_json::json!([])),
-        "peers":setting("peers")?,"state":state,
+        "peers":setting("peers")?,"state":state,"properties":h.repo.overlay_props(name)?.to_json(),
     });
     outln!(ctx, "{}", serde_json::to_string(&value)?);
     Ok(0)
