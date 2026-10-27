@@ -13,7 +13,7 @@ use crate::ids;
 use crate::model::{Line, Record, StateKind, StateRec};
 use crate::repo::{skip_path, Repo};
 use anyhow::{anyhow, bail, Context, Result};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -457,6 +457,38 @@ fn materialize(s: &Path, commit: &str, dst: &Path, paths: Option<&[String]>, own
     Ok(())
 }
 
+/// The imported states that `commit` descends from, as (state, commit) pairs: from each git
+/// parent the walk goes back to the first commit that has a state. The first parent comes first.
+/// Only the first 10000 commits of the history are read.
+fn mapped_ancestors(repo: &Repo, s: &Path, commit: &str) -> Result<Vec<(String, String)>> {
+    let revs = git_out(s, &["rev-list", "--parents", "--max-count=10000", commit])?;
+    let mut parents: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut first = None;
+    for line in revs.lines() {
+        let mut ids = line.split(' ').map(str::to_string);
+        let c = ids.next().unwrap_or_default();
+        first.get_or_insert_with(|| c.clone());
+        parents.insert(c, ids.collect());
+    }
+    let mut queue: VecDeque<String> = first.and_then(|c| parents.get(&c).cloned()).unwrap_or_default().into();
+    let mut seen = BTreeSet::new();
+    let mut found: Vec<(String, String)> = Vec::new();
+    while let Some(c) = queue.pop_front() {
+        if !seen.insert(c.clone()) {
+            continue;
+        }
+        match repo.p.db.state_of_commit(&c)?.into_iter().find(|x| repo.p.has_state(x)) {
+            Some(st) => {
+                if !found.iter().any(|(f, _)| f == &st) {
+                    found.push((st, c));
+                }
+            }
+            None => queue.extend(parents.get(&c).cloned().unwrap_or_default()),
+        }
+    }
+    Ok(found)
+}
+
 /// Make (or find) the state of a git commit. `prev` is the previous import of the same ref.
 pub fn import_commit(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str, author_uid: u32) -> Result<(String, bool)> {
     let s = init_store(repo)?;
@@ -465,18 +497,9 @@ pub fn import_commit(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str, author
         let _ = author_uid;
         return Ok((st.clone(), false));
     }
-    // The nearest ancestor commit that has a state.
-    let prev: Option<(String, String)> = {
-        let mut found = None;
-        let revs = git_out(&s, &["rev-list", "--first-parent", "--max-count=10000", commit])?;
-        for c in revs.lines().skip(1) {
-            if let Some(st) = repo.p.db.state_of_commit(c)?.into_iter().find(|x| repo.p.has_state(x)) {
-                found = Some((st, c.to_string()));
-                break;
-            }
-        }
-        found
-    };
+    // The imported states the commit descends from; the first one is the base of the diff.
+    let bases = mapped_ancestors(repo, &s, commit)?;
+    let prev = bases.first().cloned();
     // On a store volume that ignores case, README and Readme would become one file.
     #[cfg(target_os = "macos")]
     if !crate::sys::case_sensitive(&repo.p.work_dir()) {
@@ -519,7 +542,6 @@ pub fn import_commit(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str, author
     }
     let work = repo.p.work_dir().join(ids::new_id());
     let res = (|| -> Result<StateRec> {
-        let mut parents = Vec::new();
         match &prev {
             Some((pst, pc)) => {
                 repo.snapshot_state(pst, &work, false)?;
@@ -531,23 +553,13 @@ pub fn import_commit(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str, author
                     .map(|x| String::from_utf8_lossy(x).into_owned())
                     .collect();
                 materialize(&s, commit, &work, Some(&paths), None)?;
-                parents.push(pst.clone());
             }
             None => {
                 crate::storage::create_subvolume(&work)?;
                 materialize(&s, commit, &work, None, None)?;
             }
         }
-        // Exported states that this commit contains become parents too (good merge bases).
-        for (_, st, _, _, gc, status) in repo.p.db.exports()? {
-            if status != "pushed" || parents.contains(&st) {
-                continue;
-            }
-            let ok = base_cmd(&s).args(["merge-base", "--is-ancestor", &gc, commit]).status()?.success();
-            if ok && !parents.iter().any(|p| repo.is_ancestor(&st, p).unwrap_or(false)) {
-                parents.push(st);
-            }
-        }
+        let parents: Vec<String> = bases.iter().map(|(st, _)| st.clone()).collect();
         let (name, email, msg, time) = commit_info(&s, commit)?;
         let mut st = repo.new_state(ctx, &work, StateKind::Import, parents, &msg, None)?;
         st.author = crate::model::Author { name, email, uid: 0, session: None };

@@ -133,4 +133,38 @@ l merge -q origin/feature
 ok "merge of an imported branch" test -f f.txt
 eq "remote -v" "origin	$R (fetch)" "$(l git remote -v | head -1)"
 eq "open conflicts block a push" "1" "$(cd $U && git checkout -q main && echo X > src/a.txt && git commit -qam x && git push -q; cd $LAYR_ROOT/projects/gp/lines/main && echo Y > src/a.txt && l save -qam y && l git pull -q >/dev/null 2>&1; l git push origin task-9 >/dev/null 2>&1; echo $?)"
+
+# A fetch links a new head to the history it has: the imported commit is the second parent of
+# the merge that starts the new history, so it is not on the first-parent chain of the head.
+X_R=$T/rel.git; X_U=$T/relup
+git init -q --bare -b main $X_R
+git clone -q $X_R $X_U 2>/dev/null; cd $X_U
+echo one > a.txt; git add -A; git commit -qm "base"; git push -q origin main
+l git clone $X_R rel -q >/dev/null
+cd $LAYR_ROOT/projects/rel/lines/main || exit 1
+x_state=$(l rev-parse head)
+l line new topic >/dev/null
+l line new topic2 >/dev/null
+cd $X_U
+git checkout -q --orphan newroot; echo n0 > n.txt; git add -A; git commit -qm "new root"
+git merge -q --allow-unrelated-histories --no-edit -m "merge old" main
+for i in 1 2; do echo $i >> a.txt; git commit -qam "after $i"; done
+git push -q -f origin HEAD:main
+cd $LAYR_ROOT/projects/rel/lines/topic || exit 1
+l git fetch -q origin main
+ok "merge of a fetched head that does not follow the first parent" l merge -q origin/main
+has "fetch: the new head has the imported state as a parent" "$x_state" "$(l show --format=%P origin/main)"
+
+# A git merge of an exported branch: both parents are states layr knows, so both are parents.
+cd $LAYR_ROOT/projects/rel/lines/topic2 || exit 1
+echo local > local.txt; l add local.txt; l save -qm "topic work"
+t_state=$(l rev-parse head)
+l git push -q origin topic-work
+l git fetch -q origin main
+m_state=$(l rev-parse origin/main)
+git merge -q --no-edit "$(git -C $X_R rev-parse main)" 2>&1 | tail -1
+git push -q $X_R HEAD:refs/heads/merged
+l git fetch -q origin merged
+has "fetched merge: first parent is the exported state" "$t_state" "$(l show --format=%P origin/merged)"
+has "fetched merge: second parent is the fetched head" "$m_state" "$(l show --format=%P origin/merged)"
 finish
