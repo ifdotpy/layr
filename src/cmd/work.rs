@@ -853,6 +853,7 @@ pub fn commit(ctx: &Ctx, args: &[String]) -> Result<i32> {
     h.repo.authorize_line(ctx, &line, op)?;
     let _lock = h.repo.p.lock()?;
     let line = h.repo.line(&line.id)?;
+    crate::gitbridge::check_git_head(&h.repo, &line)?;
     crate::repo::recover_cache_replacements(&h.repo.working(&line))?;
     if a.has("-a") && !stacked {
         let (st, scan, _it, _index) = h.repo.status(&line)?;

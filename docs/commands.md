@@ -213,6 +213,10 @@ parent, and the index of that state. So `git rev-parse HEAD` changes only when t
 such a commit. The commit is made in the local git store only; nothing leaves the machine before
 a push. A push with `--squash` sends another commit for the same state; `HEAD` then shows that
 commit. `layr git sync` also records the commits of the head and its ancestors, as a push does.
+Git is read-only in such a line: a git commit, merge or reset there (`HEAD` no longer shows the
+commit of the head) makes the next save, merge, undo, reset, pull, push or `layr git sync` refuse,
+and nothing moves. The message names the commit to reset `HEAD` to (`git reset --hard <commit>`
+undoes the git change); then the command can run again.
 A `.git` folder that the line owner made instead is left alone.
 
 `layr log --json` writes one state JSON object per line. History filters and `--auto` apply before output.
