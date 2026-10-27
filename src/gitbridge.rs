@@ -876,6 +876,7 @@ pub fn make_git_folder(repo: &Repo, line: &Line, state: &str, w: &Path) -> Resul
 /// The folder belongs to the line owner, so all access goes through descriptors of the `.git`
 /// folder and never follows a link the owner made.
 pub fn refresh_git_folder(repo: &Repo, line: &Line) -> Result<()> {
+    if repo.p.workspace.as_ref().is_some_and(|b| b.locator.line == line.name) { return Ok(()); }
     let g = repo.working(line).join(".git");
     let dir = match fsutil::open_dir_nofollow(&g) {
         Ok(d) => d,

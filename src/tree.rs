@@ -43,19 +43,77 @@ fn is_dir(st: &rustix::fs::Stat) -> bool {
 pub struct Tree {
     root: OwnedFd,
     pub path: PathBuf,
+    strict_names: bool,
 }
 
 impl Tree {
     pub fn open(path: &Path) -> Result<Tree> {
         let fd = rustix::fs::open(path, path_flags() | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty())
             .map_err(|e| anyhow!("open {}: {e}", path.display()))?;
-        Ok(Tree { root: fd, path: path.to_path_buf() })
+        crate::workspace::check_open_root(path, &File::from(fd.try_clone()?).metadata()?)?;
+        #[cfg(target_os = "macos")]
+        let strict_names = crate::workspace::is_input_root(path) && !crate::sys::apfs_supported(path);
+        #[cfg(not(target_os = "macos"))]
+        let strict_names = false;
+        Ok(Tree { root: fd, path: path.to_path_buf(), strict_names })
+    }
+
+    /// Metadata of the opened root, even if its pathname is replaced.
+    pub fn root_metadata(&self) -> Result<std::fs::Metadata> {
+        Ok(File::from(self.root.try_clone()?).metadata()?)
+    }
+
+    /// Reject name aliases before a group of writes changes the input folder.
+    pub fn check_names<'a>(&self, paths: impl IntoIterator<Item = &'a str>) -> Result<()> {
+        if !self.strict_names {
+            return Ok(());
+        }
+        use unicode_normalization::UnicodeNormalization;
+        let mut names = std::collections::BTreeMap::new();
+        for path in paths {
+            crate::fsutil::check_rel(path)?;
+            let mut prefix = String::new();
+            for name in path.split('/') {
+                if !prefix.is_empty() {
+                    prefix.push('/');
+                }
+                prefix.push_str(name);
+                let folded = prefix.nfc().collect::<String>().to_lowercase();
+                if let Some(previous) = names.insert(folded, prefix.clone()) {
+                    if previous != prefix {
+                        bail!("filenames '{previous}' and '{prefix}' conflict on the input filesystem");
+                    }
+                }
+                let (parent, name) = split(&prefix);
+                match self.dir(parent) {
+                    Ok(dir) => self.exact_name(&dir, name)?,
+                    Err(error) if matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory) => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
+        Ok(())
     }
 
     /// A readable descriptor of the folder `rel_dir` (no links on the way; btrfs ioctls need a
     /// readable descriptor, not O_PATH).
     fn dir(&self, rel_dir: &str) -> io::Result<OwnedFd> {
-        openat2(&self.root, rel_dir, OFlags::RDONLY | OFlags::DIRECTORY)
+        if !self.strict_names {
+            return openat2(&self.root, rel_dir, OFlags::RDONLY | OFlags::DIRECTORY);
+        }
+        let mut dir = openat2(&self.root, "", OFlags::RDONLY | OFlags::DIRECTORY)?;
+        for name in rel_dir.split('/').filter(|s| !s.is_empty()) {
+            self.exact_name(&dir, name).map_err(|e| io::Error::other(e.to_string()))?;
+            dir = openat2(&dir, name, OFlags::RDONLY | OFlags::DIRECTORY)?;
+        }
+        Ok(dir)
+    }
+
+    fn exact_name(&self, dir: &OwnedFd, name: &str) -> Result<()> {
+        if self.strict_names && lstat_at(dir, name).is_some() && !list_fd(dir)?.iter().any(|n| n == name) {
+            bail!("filename '{name}' conflicts with an existing name on the input filesystem");
+        }
+        Ok(())
     }
 
     fn parent<'a>(&self, rel: &'a str) -> Result<(OwnedFd, &'a str)> {
@@ -65,6 +123,7 @@ impl Tree {
             bail!("empty name");
         }
         let d = self.dir(p).with_context(|| format!("{}: folder '{p}' (a link or missing)", self.path.display()))?;
+        self.exact_name(&d, n)?;
         Ok((d, n))
     }
 
@@ -84,6 +143,7 @@ impl Tree {
         crate::fsutil::check_rel(rel_dir)?;
         let mut cur = self.dir("")?;
         for comp in rel_dir.split('/').filter(|c| !c.is_empty()) {
+            self.exact_name(&cur, comp)?;
             let st = lstat_at(&cur, comp);
             let exists_dir = st.as_ref().map(is_dir).unwrap_or(false);
             if st.is_some() && !exists_dir {

@@ -170,6 +170,7 @@ pub struct Project<'a> {
     pub dir: PathBuf,
     pub id: String,
     pub db: Db,
+    pub workspace: Option<crate::workspace::Binding>,
 }
 
 pub struct Lock {
@@ -199,6 +200,9 @@ impl<'a> Project<'a> {
         }
     }
     pub fn line_path(&self, name: &str) -> PathBuf {
+        if let Some(binding) = &self.workspace {
+            if binding.locator.line == name { return binding.folder.clone(); }
+        }
         if check_name("line", name).is_ok() || (name.starts_with(".try-") && name[5..].chars().all(|c| c.is_ascii_hexdigit())) {
             self.lines_dir().join(name)
         } else {
@@ -270,7 +274,7 @@ impl<'a> Project<'a> {
         }
         let id = ids::new_id();
         let db = Db::open(&db_file(&dir))?;
-        let p = Project { store, name: name.to_string(), dir, id: id.clone(), db };
+        let p = Project { store, name: name.to_string(), dir, id: id.clone(), db, workspace: None };
         let mut rec = Record::new("project");
         rec.data = serde_json::json!({"name": name, "id": id, "config": config});
         p.append(rec, actor)?;
@@ -304,14 +308,14 @@ impl<'a> Project<'a> {
             std::fs::set_permissions(dir.join("meta").join("db"), fs::Permissions::from_mode(0o700))?;
         }
         let db = Db::open(&db_file(&dir))?;
-        Ok(Project { store, name: name.to_string(), dir, id: String::new(), db })
+        Ok(Project { store, name: name.to_string(), dir, id: String::new(), db, workspace: None })
     }
 
     /// Open a project that may not have its records yet.
     pub fn open_partial(store: &'a Store, name: &str) -> Result<Project<'a>> {
         let dir = store.project_dir(name)?;
         let db = Db::open(&db_file(&dir))?;
-        let mut p = Project { store, name: name.to_string(), dir, id: String::new(), db };
+        let mut p = Project { store, name: name.to_string(), dir, id: String::new(), db, workspace: None };
         p.id = p.project_id().unwrap_or_default();
         Ok(p)
     }
@@ -323,13 +327,20 @@ impl<'a> Project<'a> {
             bail!("project '{name}' not found");
         }
         let db = Db::open(&db_file(&dir))?;
-        let mut p = Project { store, name: name.to_string(), dir, id: String::new(), db };
+        let mut p = Project { store, name: name.to_string(), dir, id: String::new(), db, workspace: None };
         if p.db.stale {
             // A schema upgrade: derived tables come back from the records.
             p.rebuild_index()?;
             p.db.mark_current()?;
         }
         p.id = p.project_id()?;
+        p.workspace = crate::workspace::load(&p.meta_dir(), &store.root, name, &p.id)?;
+        if let Some(binding) = &p.workspace {
+            let line = p.db.line_by_name(&binding.locator.line)?.ok_or_else(|| anyhow!("the bound line no longer exists"))?;
+            if line.id != binding.locator.line_id || line.owner != binding.owner || line.machine != store.machine.id {
+                bail!("the bound line identity changed; repair its workspace binding before use");
+            }
+        }
         Ok(p)
     }
 

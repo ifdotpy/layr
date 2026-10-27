@@ -47,6 +47,7 @@ mod stream;
 mod sys;
 mod trace;
 mod tree;
+mod workspace;
 
 use std::collections::HashMap;
 
@@ -113,7 +114,16 @@ fn main() {
         let uid = rustix::process::getuid().as_raw();
         let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
         let env: HashMap<String, String> = std::env::vars().collect();
-        service::run_as(argv, ctx::Caller::from_uid(uid), cwd, env, &store::default_root())
+        // A nonprivileged direct client can use the locator's store. A daemon
+        // keeps its configured store, and root never follows an implicit link.
+        let root = if uid != 0 && std::env::var_os("LAYR_ROOT").is_none() {
+            match workspace::discover(&cwd) {
+                Ok(Some((_, locator))) => locator.store,
+                Ok(None) => store::default_root(),
+                Err(e) => { eprintln!("fatal: {e:#}"); std::process::exit(128); }
+            }
+        } else { store::default_root() };
+        service::run_as(argv, ctx::Caller::from_uid(uid), cwd, env, &root)
     } else {
         match service::forward(&argv) {
             Ok(c) => c,

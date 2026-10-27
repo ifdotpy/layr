@@ -59,6 +59,7 @@ pub fn branch(ctx: &Ctx, args: &[String]) -> Result<i32> {
         for name in &a.pos {
             let l = repo.line(name)?;
             repo.authorize_line(ctx, &l, crate::repo::LineOp::Manage)?;
+            crate::workspace::protect_root(&repo.working(&l))?;
             if current.as_ref().map(|c| c.id == l.id).unwrap_or(false) {
                 return Err(exit(1, format!("error: cannot delete line '{name}' used as the current folder")));
             }
@@ -125,6 +126,7 @@ pub fn branch(ctx: &Ctx, args: &[String]) -> Result<i32> {
         crate::store::check_name("line", &new)?;
         let l = repo.line(&old)?;
         repo.authorize_line(ctx, &l, crate::repo::LineOp::Manage)?;
+            crate::workspace::protect_root(&repo.working(&l))?;
         let _lock = repo.p.lock()?;
         if repo.p.db.line_by_name(&new)?.is_some() {
             return Err(exit(128, format!("fatal: a line named '{new}' already exists")));
@@ -328,6 +330,7 @@ pub fn adopt(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let name = a.pos.first().ok_or_else(|| exit(128, "usage: layr adopt <line> [--state <rev>|--head]"))?;
     let l = repo.line(name)?;
     repo.authorize_line(ctx, &l, crate::repo::LineOp::Manage)?;
+            crate::workspace::protect_root(&repo.working(&l))?;
     let _lock = repo.p.lock()?;
     let w = repo.working(&l);
     if w.exists() {

@@ -62,7 +62,7 @@ impl Status {
 }
 
 pub fn skip_path(p: &str) -> bool {
-    p == ".git" || p.starts_with(".git/")
+    p == ".git" || p.starts_with(".git/") || p == ".layr" || p.starts_with(".layr/")
 }
 
 /// The kinds of change to a line, for `Repo::authorize_line`.
@@ -322,7 +322,7 @@ impl<'a> Repo<'a> {
     ) -> Result<StateRec> {
         let id = ids::new_id();
         let dst = self.p.state_path(&id);
-        btrfs::snapshot(src, &dst, true)?;
+        self.snapshot(src, &dst, true)?;
         let info = btrfs::subvol_info(&dst)?;
         Ok(StateRec {
             id,
@@ -352,7 +352,7 @@ impl<'a> Repo<'a> {
         }
         let id = ids::new_id();
         let dst = self.p.state_path(&id);
-        btrfs::snapshot(&w, &dst, false)?;
+        self.snapshot(&w, &dst, false)?;
         let made = (|| -> Result<btrfs::SubvolInfo> {
             let t = Tree::open(&dst)?;
             for p in &private {
@@ -452,15 +452,29 @@ impl<'a> Repo<'a> {
         }
     }
 
+    pub(crate) fn snapshot(&self, src: &Path, dst: &Path, readonly: bool) -> Result<()> {
+        if let Some(binding) = &self.p.workspace {
+            if src.starts_with(&binding.folder) {
+                let scratch = self.p.lines_dir().join(format!(".capture-{}", ids::new_id()));
+                let excluded = if src == binding.folder {
+                    let line = self.line(&binding.locator.line)?;
+                    self.line_cache_paths(&line)?.0
+                } else { Vec::new() };
+                return crate::workspace::capture_part(binding, src, &scratch, dst, readonly, &excluded);
+            }
+        }
+        btrfs::snapshot(src, dst, readonly)
+    }
+
     pub fn temp_snapshot(&self, src: &Path, readonly: bool) -> Result<Temp> {
         let dst = self.p.scan_dir().join(ids::new_id());
-        btrfs::snapshot(src, &dst, readonly)?;
+        self.snapshot(src, &dst, readonly)?;
         Ok(Temp { path: dst })
     }
 
     pub fn temp_work(&self, src: &Path) -> Result<Temp> {
         let dst = self.p.work_dir().join(ids::new_id());
-        btrfs::snapshot(src, &dst, false)?;
+        self.snapshot(src, &dst, false)?;
         Ok(Temp { path: dst })
     }
 
@@ -747,6 +761,9 @@ impl<'a> Repo<'a> {
             }
         }
         // Moves keep the inode; then deletes (a folder can replace a file); then writes.
+        Tree::open(target)?.check_names(
+            list.iter().flat_map(|c| [Some(c.path.as_str()), c.old_path.as_deref()].into_iter().flatten()),
+        )?;
         for c in &list {
             if let Some(src) = &c.old_path {
                 let t = Tree::open(target)?;
@@ -1196,7 +1213,7 @@ pub fn regenerable_folders(w: &Path) -> Vec<String> {
     while let Some(dir) = stack.pop() {
         for name in t.list(&dir).unwrap_or_default() {
             let rel = if dir.is_empty() { name } else { format!("{dir}/{name}") };
-            if rel == ".git" {
+            if skip_path(&rel) {
                 continue;
             }
             match t.stat(&rel) {
@@ -1280,6 +1297,11 @@ fn copy_tree(t: &Tree, from: &str, to: &str, own: Option<(u32, u32)>) -> Result<
 /// Turn a plain folder at a cache path back into a nested subvolume (after a tool deleted the
 /// cache and made the folder again). Copies with reflinks: O(files) once.
 pub fn convert_cache(w: &Path, path: &str, uid: u32, gid: u32) -> Result<bool> {
+    if crate::workspace::is_input_root(w) {
+        let t = Tree::open(w)?;
+        t.mkdirs(path, Some((uid, gid)))?;
+        return Ok(false);
+    }
     let t = Tree::open(w)?;
     let m = match t.stat(path) {
         Some(m) => m,

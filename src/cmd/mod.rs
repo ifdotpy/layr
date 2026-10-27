@@ -9,6 +9,7 @@ pub mod remote;
 pub mod replicate;
 pub mod transfer;
 pub mod work;
+pub mod workspacecmd;
 
 use crate::ctx::{Ctx, Loc};
 use crate::model::Line;
@@ -261,6 +262,7 @@ pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
         "fsck" => admin::fsck(ctx, &rest),
         "reindex" => admin::reindex(ctx, &rest),
         "init" => admin::init(ctx, &rest),
+        "workspace" => workspacecmd::workspace(ctx, &rest),
         "projects" => admin::projects(ctx, &rest),
         "machines" => admin::machines(ctx, &rest),
         "debug" => admin::debug(ctx, &rest),

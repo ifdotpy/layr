@@ -837,6 +837,7 @@ pub fn rename_tree(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 pub fn delete_tree(path: &Path) -> Result<()> {
+    crate::workspace::protect_root(path)?;
     let path = absolute(path)?;
     let mut state = lock(&path)?;
     valid_path(&path)?;

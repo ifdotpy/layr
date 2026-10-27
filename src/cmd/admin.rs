@@ -100,8 +100,8 @@ pub fn record_caches(
         let snap = repo.p.cache_path(state, &name);
         if snap.exists() {
             caches.insert(p.clone(), name);
-        } else if btrfs::is_subvolume(&cp) {
-            btrfs::snapshot(&cp, &snap, true)?;
+        } else if btrfs::is_subvolume(&cp) || (crate::workspace::is_input_root(w) && cp.is_dir()) {
+            repo.snapshot(&cp, &snap, true)?;
             made.push(snap);
             caches.insert(p.clone(), name);
         }
@@ -243,6 +243,17 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
         return Err(exit(1, "permission denied: only the project admin or the user who made it can undo this operation"));
     }
     let _lock = repo.p.lock()?;
+    // Check the complete operation before changing any line or saving recovery
+    // states. The input folder cannot follow a deleted or renamed line.
+    if let Some(binding) = &repo.p.workspace {
+        if let Some(change) = r.lines.get(&binding.locator.line_id) {
+            match &change.before {
+                Some(before)
+                    if before.name == binding.locator.line && before.owner == binding.owner => {}
+                _ => bail!("cannot undo an operation that removes or changes the attached input line"),
+            }
+        }
+    }
     let mut rec = Record::new("undo");
     rec.data = serde_json::json!({"undo": r.id, "op": r.op});
     // A commit that changed overlays: their lines move back and the line shows their earlier
@@ -422,7 +433,11 @@ fn restore_working(repo: &Repo, line: &Line, state: &str) -> Result<()> {
     let own = repo.own(line);
     // Automatic states leave the overlay files out: those files stay as they are.
     let private = repo.private_paths(line)?;
-    for c in changes::file_changes(&scan.path, &target)? {
+    let changes = changes::file_changes(&scan.path, &target)?;
+    crate::tree::Tree::open(&w)?.check_names(
+        changes.iter().flat_map(|c| [Some(c.path.as_str()), c.old_path.as_deref()].into_iter().flatten()),
+    )?;
+    for c in changes {
         if skip_path(&c.path) || private.contains(&c.path) || c.old_path.as_ref().map(|o| private.contains(o)).unwrap_or(false) {
             continue;
         }
@@ -958,7 +973,7 @@ fn copy_folder(ctx: &Ctx, src: &std::path::Path, dst: &std::path::Path, include_
     let mut entries = Vec::new();
     crate::privs::as_caller_fs(ctx, || {
         fsutil::walk(src, "", &mut |rel, m| {
-            if rel == ".git" || rel.starts_with(".git/") {
+            if skip_path(rel) {
                 return Ok(false);
             }
             if !include_ignored && rules.ignored(rel, m.is_dir()) {
@@ -973,7 +988,39 @@ fn copy_folder(ctx: &Ctx, src: &std::path::Path, dst: &std::path::Path, include_
             fsutil::make_parents(dst, &format!("{rel}/x"), None)?;
             continue;
         }
-        crate::privs::as_caller_fs(ctx, || fsutil::copy_entry(src, &rel, dst, &rel, None))?;
+        // Open source data with the caller's permissions. The service writes
+        // through its private destination tree after restoring its identity.
+        let (file, link) = crate::privs::as_caller_fs(ctx, || {
+            let source = crate::tree::Tree::open(src)?;
+            if m.ftype == fsutil::FType::Symlink {
+                Ok((None, Some(source.read_link(&rel)?)))
+            } else if m.is_file() {
+                Ok((Some(source.open_read(&rel)?), None))
+            } else {
+                bail!("cannot import special file {rel}")
+            }
+        })?;
+        let target = crate::tree::Tree::open(dst)?;
+        target.mkdirs_for(&rel, None)?;
+        if let Some(link) = link {
+            target.symlink(&rel, &link)?;
+        } else if let Some(mut source) = file {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            let meta = source.metadata()?;
+            #[cfg(target_os = "macos")]
+            let cloned = target.clone_new_file(&source, &rel)?;
+            #[cfg(target_os = "linux")]
+            let cloned: Option<std::fs::File> = None;
+            let (mut output, is_clone) = match cloned {
+                Some(file) => (file, true),
+                None => (target.create(&rel, meta.mode() & 0o7777)?, false),
+            };
+            if !is_clone && crate::storage::clone_file(&source, &output).is_err() {
+                std::io::copy(&mut source, &mut output)?;
+            }
+            output.set_permissions(std::fs::Permissions::from_mode(meta.mode() & 0o7777))?;
+            fsutil::set_mtime(&output, meta.mtime(), meta.mtime_nsec())?;
+        }
         n += 1;
     }
     Ok(n)
@@ -1527,6 +1574,7 @@ pub fn cache(ctx: &Ctx, args: &[String]) -> Result<i32> {
                             (true, true) => "not a cache: has versioned files (run layr cache repair)",
                             (true, false) => VERSIONED,
                             (false, true) => "cache",
+                            (false, false) if crate::workspace::is_input_root(&repo.working(l)) && cp.is_dir() => "cache",
                             (false, false) if cp.exists() => "plain folder (run layr cache repair)",
                             (false, false) => "absent",
                         }

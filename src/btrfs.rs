@@ -111,6 +111,7 @@ pub fn subvol_info(path: &Path) -> Result<SubvolInfo> {
 /// Delete a subvolume and every subvolume nested inside it, or a plain folder tree. The tree is
 /// walked through descriptors (no link is followed), because a line belongs to its owner.
 pub fn delete_tree(path: &Path) -> Result<()> {
+    crate::workspace::protect_root(path)?;
     let _t = crate::trace::span(format!("delete {}", path.display()));
     if std::fs::symlink_metadata(path).is_err() {
         return Ok(());

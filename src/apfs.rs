@@ -257,6 +257,7 @@ pub fn snapshot(src: &Path, dst: &Path, readonly: bool) -> Result<()> {
     result
 }
 pub fn delete_tree(path: &Path) -> Result<()> {
+    crate::workspace::protect_root(path)?;
     let m = match fs::symlink_metadata(path) {
         Ok(m) => m,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),

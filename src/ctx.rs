@@ -100,13 +100,26 @@ impl Ctx {
             let sub = self.sub_in_line(p, line.as_deref()).unwrap_or_default();
             return Ok(Loc { project: p.to_string(), line, sub });
         }
+        if let Some(loc) = self.linked_location(&self.cwd)? { return Ok(loc); }
         match self.loc_from_path(&self.cwd) {
             Some(l) => Ok(l),
             None => bail!("not in a layr line (cwd {}); cd into a line or set LAYR_PROJECT", self.cwd.display()),
         }
     }
 
+    fn linked_location(&self, path: &Path) -> Result<Option<Loc>> {
+        let found = crate::privs::as_caller_fs(self, || crate::workspace::discover(path))?;
+        let Some((root, locator)) = found else { return Ok(None); };
+        if locator.store != self.store.root.canonicalize()? { bail!("workspace belongs to a different layr store"); }
+        let project = crate::store::Project::open(&self.store, &locator.project)?;
+        let binding = project.workspace.as_ref().ok_or_else(|| anyhow::anyhow!("workspace attachment is not complete"))?;
+        if binding.locator != locator || binding.folder != root { bail!("workspace locator does not match its store"); }
+        Ok(Some(Loc { project: locator.project, line: Some(locator.line),
+            sub: path.strip_prefix(root)?.to_string_lossy().into_owned() }))
+    }
+
     pub fn loc_from_path(&self, path: &Path) -> Option<Loc> {
+        if let Ok(Some(loc)) = self.linked_location(path) { return Some(loc); }
         let projects = self.store.projects_dir();
         let projects = projects.canonicalize().unwrap_or(projects);
         let rel = path.strip_prefix(&projects).ok()?;

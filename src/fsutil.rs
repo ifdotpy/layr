@@ -560,6 +560,8 @@ pub fn is_layer(root: &Path, rel: &str, m: &Meta) -> bool {
 
 /// Move a managed tree, including its mount when the backend requires it.
 pub fn rename_tree(from: impl AsRef<Path>, to: impl AsRef<Path>) -> Result<()> {
+    crate::workspace::protect_root(from.as_ref())?;
+    crate::workspace::protect_root(to.as_ref())?;
     #[cfg(feature = "overlayfs")]
     return crate::storage::rename_tree(from.as_ref(), to.as_ref());
     #[cfg(not(feature = "overlayfs"))]
