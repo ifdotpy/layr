@@ -71,7 +71,47 @@ pub enum Source<'s> {
     State(&'s str),
 }
 
+/// The platform key of a cache (docs/cache-overlays.md, section 6): `<os>-<arch>`, and with key
+/// files the first 16 hex digits of the SHA-256 of their names and contents in the working folder
+/// `w` (a missing file counts as empty). layr knows no toolchains: the files name them.
+pub fn platform_key(w: &Path, key_files: &[String]) -> String {
+    let base = crate::model::cache_platform();
+    if key_files.is_empty() {
+        return base;
+    }
+    use sha2::Digest;
+    let mut h = sha2::Sha256::new();
+    for f in key_files {
+        let data = fsutil::safe_join(w, f).ok().and_then(|p| std::fs::read(p).ok()).unwrap_or_default();
+        h.update((f.len() as u64).to_le_bytes());
+        h.update(f.as_bytes());
+        h.update((data.len() as u64).to_le_bytes());
+        h.update(&data);
+    }
+    format!("{base}-{}", &hex::encode(h.finalize())[..16])
+}
+
+/// A state of a cache overlay made on another operating system or processor: a machine never
+/// imports it from a layr remote (docs/cache-overlays.md, section 6).
+pub fn other_platform(platform: Option<&str>) -> bool {
+    let base = crate::model::cache_platform();
+    platform.is_some_and(|p| p != base && !p.starts_with(&format!("{base}-")))
+}
+
 impl<'a> Repo<'a> {
+    /// The key files of overlay `name` (`overlay.<name>.key-files`).
+    pub fn key_files(&self, name: &str) -> Result<Vec<String>> {
+        Ok(self
+            .overlay_setting(name, "key-files")?
+            .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok())
+            .unwrap_or_default())
+    }
+
+    /// The platform key of overlay `name` for the working folder `w`.
+    pub fn cache_key(&self, name: &str, w: &Path) -> Result<String> {
+        Ok(platform_key(w, &self.key_files(name)?))
+    }
+
     /// The folder overlays of the project: name and folder.
     pub fn folder_overlays(&self) -> Result<Vec<(String, String)>> {
         let mut out = Vec::new();
@@ -97,6 +137,8 @@ impl<'a> Repo<'a> {
         if self.overlay_info(&name)?.is_some() {
             bail!("overlay '{name}' exists and does not hold folder {folder}");
         }
+        // The project setting `cache.key-files` gives new cache overlays their key files.
+        let key_files = self.p.config_value("cache.key-files")?.filter(|v| v.is_array());
         crate::cmd::overlaycmd::make_overlay(
             ctx,
             self,
@@ -107,6 +149,7 @@ impl<'a> Repo<'a> {
             &cache_props(),
             Some(folder),
             true,
+            key_files.as_ref(),
         )?;
         Ok(name)
     }
@@ -209,7 +252,7 @@ impl<'a> Repo<'a> {
                     caches: Default::default(),
                     cache_by: Some(ctx.caller.uid),
                     cache_shared: shared,
-                    cache_platform: Some(crate::model::cache_platform()),
+                    cache_platform: Some(self.cache_key(&name, &w)?),
                 };
                 if let Err(e) = crate::overlay::move_overlay_line(&orepo, ctx, "commit", &ol, &id, vec![st]) {
                     let _ = btrfs::delete_tree(&dst);
@@ -225,24 +268,24 @@ impl<'a> Repo<'a> {
     /// A state of overlay `name` that a line of `uid` may show: on this machine, saved on this
     /// platform, and made by `uid` or on a protected line (a cache holds code that review does not
     /// see). The empty first state is no cache.
-    fn usable_cache(&self, orepo: &Repo, root: &str, id: &str, uid: u32) -> Result<bool> {
+    fn usable_cache(&self, orepo: &Repo, root: &str, id: &str, uid: u32, key: &str) -> Result<bool> {
         if id == root || !orepo.p.has_state(id) {
             return Ok(false);
         }
         let Some(st) = orepo.p.db.state(id)? else { return Ok(false) };
         let allowed = uid == 0 || st.cache_shared || st.cache_by == Some(uid);
-        Ok(allowed && st.cache_platform.as_deref() == Some(crate::model::cache_platform().as_str()))
+        Ok(allowed && st.cache_platform.as_deref() == Some(key))
     }
 
     /// The cache state of overlay `name` that a line of `uid` takes: the newest cache of the
     /// source line, or for a state the newest cache of the line that made it or of the line of its
     /// nearest ancestor that has one.
-    pub fn cache_source(&self, name: &str, from: &Source, uid: u32) -> Result<Option<String>> {
+    pub fn cache_source(&self, name: &str, from: &Source, uid: u32, key: &str) -> Result<Option<String>> {
         let info = self.need_overlay(name)?;
         let orepo = self.overlay_repo(name)?;
         let of_line = |line_id: &str| -> Result<Option<String>> {
             let Some(ol) = orepo.p.db.line_by_name(&format!("line-{line_id}"))? else { return Ok(None) };
-            Ok(self.usable_cache(&orepo, &info.root, &ol.head, uid)?.then_some(ol.head))
+            Ok(self.usable_cache(&orepo, &info.root, &ol.head, uid, key)?.then_some(ol.head))
         };
         let start = match from {
             Source::Line(l) => {
@@ -297,7 +340,8 @@ impl<'a> Repo<'a> {
                 Some(s) => Source::Line(s),
                 None => Source::State(start),
             };
-            let Some(sid) = self.cache_source(&name, &from, uid)? else { continue };
+            let key = self.cache_key(&name, w)?;
+            let Some(sid) = self.cache_source(&name, &from, uid, &key)? else { continue };
             let info = self.need_overlay(&name)?;
             let orepo = self.overlay_repo(&name)?;
             let cp = fsutil::safe_join(w, &folder)?;
@@ -328,7 +372,8 @@ impl<'a> Repo<'a> {
         let own = self.own(line);
         let shared = self.policy().rule_for(&line.name).is_some();
         for (name, folder) in self.folder_overlays()? {
-            let Some(sid) = self.cache_source(&name, from, uid)? else { continue };
+            let key = self.cache_key(&name, &w)?;
+            let Some(sid) = self.cache_source(&name, from, uid, &key)? else { continue };
             let info = self.need_overlay(&name)?;
             let orepo = self.overlay_repo(&name)?;
             let ol_name = Repo::overlay_line_name(&info, &line.id, line.owner);
@@ -346,7 +391,7 @@ impl<'a> Repo<'a> {
                         crate::overlay::union_state(&orepo, ctx, &ol, &ol.head, &sid, &format!("cache {folder}: union"))?;
                     st.cache_by = Some(ctx.caller.uid);
                     st.cache_shared = shared;
-                    st.cache_platform = Some(crate::model::cache_platform());
+                    st.cache_platform = Some(key.clone());
                     (st.id.clone(), vec![st])
                 };
                 // The working folder first: a failure leaves the overlay line where it was.
@@ -447,6 +492,30 @@ mod tests {
         let odd = cache_overlay_name("a b/c");
         assert!(odd.starts_with("cache.") && odd.len() == 18, "{odd}");
         assert_eq!(cache_props().describe(), ["history=last", "quiet", "merge=union-theirs"]);
+    }
+
+    #[test]
+    fn the_platform_key_names_the_key_files_and_their_content() {
+        let w = std::env::temp_dir().join(format!("layr-key-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&w);
+        std::fs::create_dir_all(&w).unwrap();
+        let base = crate::model::cache_platform();
+        assert_eq!(platform_key(&w, &[]), base);
+        let files = vec!["Cargo.lock".to_string(), "rust-toolchain.toml".to_string()];
+        let missing = platform_key(&w, &files);
+        assert!(missing.starts_with(&format!("{base}-")) && missing.len() == base.len() + 17);
+        std::fs::write(w.join("Cargo.lock"), "a").unwrap();
+        let one = platform_key(&w, &files);
+        assert_ne!(one, missing, "content counts");
+        assert_eq!(one, platform_key(&w, &files), "the key is stable");
+        std::fs::write(w.join("Cargo.lock"), "b").unwrap();
+        assert_ne!(one, platform_key(&w, &files));
+        assert!(!other_platform(Some(&base)));
+        assert!(!other_platform(Some(&one)));
+        assert!(!other_platform(None), "an old state names no platform");
+        assert!(other_platform(Some("plan9-mips")));
+        assert!(other_platform(Some(&format!("{base}x-0011"))));
+        let _ = std::fs::remove_dir_all(&w);
     }
 
     #[test]
