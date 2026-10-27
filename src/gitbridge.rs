@@ -1654,3 +1654,27 @@ pub fn refresh_git_folder(repo: &Repo, line: &Line) -> Result<()> {
     }
     Ok(())
 }
+
+/// Refuse a move of a line's head while the `.git` folder of the line shows another commit than
+/// `refresh_git_folder` wrote: a git commit, merge or reset made in the line. The next export
+/// would make its commit a child of layr's last export and drop git's commit from HEAD. Nothing
+/// moves on refusal. A `.git` folder that the line owner made is left alone.
+pub fn check_git_head(repo: &Repo, line: &Line) -> Result<()> {
+    if !has_store(repo) {
+        return Ok(());
+    }
+    let w = repo.working(line);
+    let dir = match fsutil::open_dir_nofollow(&w.join(".git")) {
+        Ok(d) => d,
+        Err(_) => return Ok(()),
+    };
+    if !fsutil::is_layer(&w, ".git", &fsutil::meta_of(&dir.metadata()?)) {
+        return Ok(());
+    }
+    let cur = fsutil::read_at(&dir, "HEAD").map(|c| String::from_utf8_lossy(&c).trim().to_string()).unwrap_or_default();
+    let expected = line_commit(repo, &line.head)?;
+    if cur != expected {
+        bail!("git HEAD moved outside layr ({cur}); layr lines are written with layr only. Undo the git change or reset git HEAD to {expected} to continue.");
+    }
+    Ok(())
+}
