@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Layr with a store on an APFS volume that ignores case (the macOS default).
 
-The test makes and removes two small images: a case-sensitive one for sources that hold names
-that differ only in case, and a case-insensitive one for the store.
+The test makes and removes two small images, or uses private folders on two prepared volumes:
+a case-sensitive one for sources that differ only in case, and a case-insensitive one for the store.
 """
 import argparse, os, shutil, subprocess, tempfile
 from pathlib import Path
@@ -10,13 +10,23 @@ from pathlib import Path
 p = argparse.ArgumentParser()
 p.add_argument('--binary', required=True)
 p.add_argument('--root', required=True, help='an empty folder for the images (any volume)')
+p.add_argument('--case-sensitive-root', help='use a private folder on this prepared volume instead of creating an image')
+p.add_argument('--case-insensitive-root', help='use a private folder on this prepared volume instead of creating an image')
 a = p.parse_args()
+if bool(a.case_sensitive_root) != bool(a.case_insensitive_root):
+    p.error('both prepared volume roots are required together')
 binary = str(Path(a.binary).resolve())
 base = Path(tempfile.mkdtemp(prefix='apfs-case-', dir=Path(a.root).resolve()))
 mounts = []
+folders = []
 
 
 def image(name, fs):
+    if a.case_sensitive_root:
+        root = a.case_sensitive_root if fs == 'Case-sensitive APFS' else a.case_insensitive_root
+        folder = Path(tempfile.mkdtemp(prefix='apfs-case-', dir=Path(root).resolve()))
+        folders.append(folder)
+        return folder
     img, mnt = base / f'{name}.sparseimage', base / name
     mnt.mkdir()
     subprocess.run(['hdiutil', 'create', '-size', '1g', '-type', 'SPARSE', '-fs', fs, '-volname', name, str(img)],
@@ -44,6 +54,10 @@ def names(folder):
 try:
     cs = image('Sensitive', 'Case-sensitive APFS')
     ci = image('Insensitive', 'APFS')
+    probe = cs / 'Probe'
+    probe.write_text('x')
+    assert not (cs / 'probe').exists(), 'the source image must distinguish case'
+    probe.unlink()
     probe = ci / 'Probe'
     probe.write_text('x')
     assert (ci / 'probe').exists(), 'the store image must ignore case'
@@ -235,4 +249,8 @@ try:
 finally:
     for m in mounts:
         subprocess.run(['hdiutil', 'detach', '-force', str(m)], capture_output=True)
+    for folder in folders:
+        subprocess.run(['chflags', '-R', 'nouchg', str(folder)], capture_output=True)
+        subprocess.run(['chmod', '-R', 'u+w', str(folder)], capture_output=True)
+        shutil.rmtree(folder, ignore_errors=True)
     shutil.rmtree(base, ignore_errors=True)

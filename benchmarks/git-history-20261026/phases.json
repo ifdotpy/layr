@@ -1,0 +1,342 @@
+{
+  "layr-file-push": {
+    "open project": {
+      "count": 1,
+      "seconds": 0.0031
+    },
+    "store records": {
+      "count": 1,
+      "seconds": 0.0677
+    },
+    "store load index": {
+      "count": 1,
+      "seconds": 0.0882
+    },
+    "store select history": {
+      "count": 1,
+      "seconds": 0.013
+    },
+    "store secret checks": {
+      "count": 1,
+      "seconds": 15.319799999999999
+    },
+    "store collect hashes": {
+      "count": 1,
+      "seconds": 0.0
+    },
+    "store select parent": {
+      "count": 392,
+      "seconds": 0.38330000000000003
+    },
+    "store part publish": {
+      "count": 361,
+      "seconds": 10.965200000000001
+    },
+    "store walk and frames": {
+      "count": 392,
+      "seconds": 15.638699999999996
+    },
+    "store tree encode": {
+      "count": 392,
+      "seconds": 0.9062999999999999
+    },
+    "store tree publish": {
+      "count": 392,
+      "seconds": 8.362299999999998
+    },
+    "store upload state": {
+      "count": 392,
+      "seconds": 25.20680000000001
+    },
+    "store checkpoint": {
+      "count": 392,
+      "seconds": 20.42719999999998
+    },
+    "send --no-data": {
+      "count": 390,
+      "seconds": 2.3456999999999972
+    },
+    "store push": {
+      "count": 1,
+      "seconds": 61.8258
+    },
+    "record push": {
+      "count": 1,
+      "seconds": 0.023
+    }
+  },
+  "layr-gateway-push": {
+    "open project": {
+      "count": 1,
+      "seconds": 0.0012
+    },
+    "store records": {
+      "count": 1,
+      "seconds": 0.0314
+    },
+    "store load index": {
+      "count": 1,
+      "seconds": 0.015
+    },
+    "store select history": {
+      "count": 1,
+      "seconds": 0.0099
+    },
+    "store secret checks": {
+      "count": 1,
+      "seconds": 0.0264
+    },
+    "store collect hashes": {
+      "count": 1,
+      "seconds": 0.0
+    },
+    "store select parent": {
+      "count": 392,
+      "seconds": 0.21260000000000018
+    },
+    "store part publish": {
+      "count": 361,
+      "seconds": 2.4981999999999998
+    },
+    "store walk and frames": {
+      "count": 392,
+      "seconds": 4.598299999999998
+    },
+    "store tree encode": {
+      "count": 392,
+      "seconds": 0.4161999999999999
+    },
+    "store tree publish": {
+      "count": 392,
+      "seconds": 2.659099999999996
+    },
+    "store upload state": {
+      "count": 392,
+      "seconds": 7.780800000000002
+    },
+    "store checkpoint": {
+      "count": 392,
+      "seconds": 9.448500000000001
+    },
+    "send --no-data": {
+      "count": 390,
+      "seconds": 0.9786999999999991
+    },
+    "store push": {
+      "count": 1,
+      "seconds": 17.7514
+    },
+    "record push": {
+      "count": 1,
+      "seconds": 0.02
+    }
+  },
+  "layr-gateway-clone": {
+    "store decode tree": {
+      "count": 403,
+      "seconds": 5.368500000000006
+    },
+    "store restore files": {
+      "count": 393,
+      "seconds": 3.1062000000000007
+    },
+    "record machine.trust": {
+      "count": 1,
+      "seconds": 0.0079
+    },
+    "store fetch": {
+      "count": 1,
+      "seconds": 28.1405
+    },
+    "Git write object": {
+      "count": 4240,
+      "seconds": 1.29239999999996
+    },
+    "Git restore import": {
+      "count": 392,
+      "seconds": 3.320600000000001
+    },
+    "send --no-data": {
+      "count": 1,
+      "seconds": 0.0012
+    },
+    "record line.adopt": {
+      "count": 1,
+      "seconds": 0.0782
+    },
+    "record config": {
+      "count": 3,
+      "seconds": 0.0196
+    }
+  },
+  "layr-studio-file-push": {
+    "open project": {
+      "count": 1,
+      "seconds": 0.0173
+    },
+    "store records": {
+      "count": 1,
+      "seconds": 4.5436000000000005
+    },
+    "store load index": {
+      "count": 1,
+      "seconds": 3.0449
+    },
+    "store select history": {
+      "count": 1,
+      "seconds": 0.4628
+    },
+    "store secret checks": {
+      "count": 1,
+      "seconds": 395.0521
+    },
+    "store collect hashes": {
+      "count": 1,
+      "seconds": 0.0001
+    },
+    "store select parent": {
+      "count": 7965,
+      "seconds": 114.02269999999997
+    },
+    "store part publish": {
+      "count": 6980,
+      "seconds": 194.023800000001
+    },
+    "store walk and frames": {
+      "count": 7965,
+      "seconds": 340.04630000000145
+    },
+    "store tree encode": {
+      "count": 7965,
+      "seconds": 138.25500000000056
+    },
+    "store tree publish": {
+      "count": 7965,
+      "seconds": 207.82319999999973
+    },
+    "store upload state": {
+      "count": 7965,
+      "seconds": 721.2416999999989
+    },
+    "store checkpoint": {
+      "count": 7965,
+      "seconds": 378.60470000000197
+    },
+    "send --no-data": {
+      "count": 7964,
+      "seconds": 73.02520000000068
+    },
+    "store push": {
+      "count": 1,
+      "seconds": 1650.7946000000002
+    },
+    "record push": {
+      "count": 1,
+      "seconds": 0.1023
+    }
+  },
+  "layr-studio-gateway-push": {
+    "open project": {
+      "count": 1,
+      "seconds": 0.0066
+    },
+    "store records": {
+      "count": 1,
+      "seconds": 1.3295
+    },
+    "store load index": {
+      "count": 1,
+      "seconds": 0.0148
+    },
+    "store select history": {
+      "count": 1,
+      "seconds": 0.32339999999999997
+    },
+    "store secret checks": {
+      "count": 1,
+      "seconds": 0.0519
+    },
+    "store collect hashes": {
+      "count": 1,
+      "seconds": 0.0
+    },
+    "store select parent": {
+      "count": 7965,
+      "seconds": 105.83690000000006
+    },
+    "store part publish": {
+      "count": 6980,
+      "seconds": 50.81130000000028
+    },
+    "store walk and frames": {
+      "count": 7965,
+      "seconds": 169.87140000000034
+    },
+    "store tree encode": {
+      "count": 7965,
+      "seconds": 116.38119999999935
+    },
+    "store tree publish": {
+      "count": 7965,
+      "seconds": 57.7874000000006
+    },
+    "store upload state": {
+      "count": 7965,
+      "seconds": 372.0623000000001
+    },
+    "store checkpoint": {
+      "count": 7965,
+      "seconds": 470.2452999999998
+    },
+    "send --no-data": {
+      "count": 7964,
+      "seconds": 55.13030000000025
+    },
+    "store push": {
+      "count": 1,
+      "seconds": 973.7604
+    },
+    "record push": {
+      "count": 1,
+      "seconds": 0.039299999999999995
+    }
+  },
+  "layr-studio-gateway-clone": {
+    "store decode tree": {
+      "count": 8225,
+      "seconds": 427.18780000000083
+    },
+    "store restore files": {
+      "count": 7966,
+      "seconds": 82.44269999999979
+    },
+    "record machine.trust": {
+      "count": 1,
+      "seconds": 0.0036
+    },
+    "store fetch": {
+      "count": 1,
+      "seconds": 898.5529
+    },
+    "Git write object": {
+      "count": 125361,
+      "seconds": 32.490099999987834
+    },
+    "Git restore import": {
+      "count": 7965,
+      "seconds": 161.32180000000037
+    },
+    "send --no-data": {
+      "count": 1,
+      "seconds": 0.0004
+    },
+    "record line.adopt": {
+      "count": 1,
+      "seconds": 0.1135
+    },
+    "record config": {
+      "count": 3,
+      "seconds": 0.0294
+    }
+  }
+}

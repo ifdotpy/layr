@@ -1,0 +1,146 @@
+[
+  {
+    "step": "remote",
+    "started_unix": 1793022916.6247962,
+    "vm_load_start": [
+      3.1337890625,
+      2.95556640625,
+      2.48388671875
+    ],
+    "vm_load_end": [
+      3.1337890625,
+      2.95556640625,
+      2.48388671875
+    ],
+    "seconds": 0.116,
+    "status": 0,
+    "maxrss_kib": 26932,
+    "requests": {
+      "GET": 2
+    }
+  },
+  {
+    "step": "push",
+    "started_unix": 1793022916.7411137,
+    "vm_load_start": [
+      3.1337890625,
+      2.95556640625,
+      2.48388671875
+    ],
+    "vm_load_end": [
+      2.87353515625,
+      2.9091796875,
+      2.47802734375
+    ],
+    "seconds": 17.894,
+    "status": 0,
+    "maxrss_kib": 36924,
+    "requests": {
+      "GET": 18,
+      "POST": 1,
+      "PUT": 754
+    }
+  },
+  {
+    "step": "stage",
+    "started_unix": 1793022934.6361694,
+    "vm_load_start": [
+      2.87353515625,
+      2.9091796875,
+      2.47802734375
+    ],
+    "vm_load_end": [
+      2.87353515625,
+      2.9091796875,
+      2.47802734375
+    ],
+    "seconds": 0.067,
+    "status": 0,
+    "maxrss_kib": 32136,
+    "requests": {
+      "GET": 0,
+      "POST": 0,
+      "PUT": 0
+    }
+  },
+  {
+    "step": "save",
+    "started_unix": 1793022934.703201,
+    "vm_load_start": [
+      2.87353515625,
+      2.9091796875,
+      2.47802734375
+    ],
+    "vm_load_end": [
+      2.87353515625,
+      2.9091796875,
+      2.47802734375
+    ],
+    "seconds": 0.376,
+    "status": 0,
+    "maxrss_kib": 32136,
+    "requests": {
+      "GET": 0,
+      "POST": 0,
+      "PUT": 0
+    }
+  },
+  {
+    "step": "incremental-push",
+    "started_unix": 1793022935.079652,
+    "vm_load_start": [
+      2.87353515625,
+      2.9091796875,
+      2.47802734375
+    ],
+    "vm_load_end": [
+      2.87353515625,
+      2.9091796875,
+      2.47802734375
+    ],
+    "seconds": 0.414,
+    "status": 0,
+    "maxrss_kib": 32888,
+    "requests": {
+      "GET": 18,
+      "POST": 1,
+      "PUT": 3
+    }
+  },
+  {
+    "step": "clone",
+    "started_unix": 1793022935.5038495,
+    "vm_load_start": [
+      2.87353515625,
+      2.9091796875,
+      2.47802734375
+    ],
+    "vm_load_end": [
+      3.07666015625,
+      2.9658203125,
+      2.51416015625
+    ],
+    "seconds": 32.355,
+    "status": 0,
+    "maxrss_kib": 76404,
+    "requests": {
+      "GET": 1070,
+      "POST": 1,
+      "PUT": 2
+    }
+  },
+  {
+    "project": "layr",
+    "all_original_ids_identical": true,
+    "new_parent_correct": true,
+    "expected_tree": "f4d7adf0668d72d9ed98dc288d422f7495f2b566",
+    "count": 393,
+    "tree": "f4d7adf0668d72d9ed98dc288d422f7495f2b566",
+    "request_delay_ms": 5,
+    "transferred_bytes": {
+      "GET": 7066438,
+      "POST": 177,
+      "PUT": 6135719
+    }
+  }
+]

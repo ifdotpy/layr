@@ -20,6 +20,7 @@ const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS records (id TEXT PRIMARY KEY, machine TEXT, seq INTEGER, time INTEGER, op TEXT, actor_uid INTEGER, raw TEXT);
 CREATE INDEX IF NOT EXISTS records_time ON records(time);
 CREATE UNIQUE INDEX IF NOT EXISTS records_seq ON records(machine, seq);
+CREATE INDEX IF NOT EXISTS records_git_import ON records(json_extract(raw, '$.r.data.state')) WHERE op='import';
 CREATE TABLE IF NOT EXISTS states (id TEXT PRIMARY KEY, display TEXT UNIQUE, kind TEXT, line TEXT, time INTEGER, rec TEXT, present INTEGER DEFAULT 1, deleted INTEGER DEFAULT 0, dropped INTEGER DEFAULT 0, machine TEXT);
 CREATE INDEX IF NOT EXISTS states_line ON states(line, kind, time);
 CREATE TABLE IF NOT EXISTS parents (state TEXT, parent TEXT, ord INTEGER, PRIMARY KEY(state, ord));
@@ -678,7 +679,24 @@ impl Db {
         Ok(self.conn.query_row("SELECT gcommit FROM git_map WHERE state=?1 LIMIT 1", params![state], |r| r.get(0)).optional()?)
     }
 
+    pub fn has_git_history(&self) -> Result<bool> {
+        Ok(self.conn.query_row("SELECT EXISTS(SELECT 1 FROM git_map)", [], |r| r.get(0))?)
+    }
+
+    /// Exact Git objects are part of the signed import record, never a machine-local cache.
+    pub fn git_import(&self, state: &str) -> Result<Option<serde_json::Value>> {
+        let raw: Option<String> = self.conn.query_row(
+            "SELECT json_extract(raw, '$.r.data.git') FROM records WHERE op='import' AND json_extract(raw, '$.r.data.state')=?1 AND json_type(raw, '$.r.data.git')='object' LIMIT 1",
+            params![state], |r| r.get(0),
+        ).optional()?;
+        raw.map(|s| Ok(serde_json::from_str(&s)?)).transpose()
+    }
+
     pub fn state_of_commit(&self, prefix: &str) -> Result<Vec<String>> {
+        if prefix.len() == 40 {
+            let mut st = self.conn.prepare("SELECT DISTINCT state FROM git_map WHERE gcommit=?1")?;
+            return Ok(st.query_map(params![prefix], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?);
+        }
         let mut st = self.conn.prepare("SELECT DISTINCT state FROM git_map WHERE gcommit LIKE ?1 || '%' LIMIT 3")?;
         let v = st.query_map(params![prefix], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
         Ok(v)
