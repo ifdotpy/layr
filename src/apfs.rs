@@ -123,27 +123,91 @@ pub(crate) fn scan_with_data(root: &Path, data: bool) -> Result<BTreeMap<String,
         scan_parallel(dir, root, &mut out)?;
     }
     if let Some(f) = saved {
-        // A file that cannot be written only costs the next process a scan; this process keeps
-        // the scan in memory either way.
+        // A failed write can cost a later read another scan. Keep it in the bounded
+        // memory cache whether or not the disk write succeeds.
         let _ = fs::create_dir_all(f.parent().unwrap())
             .map_err(anyhow::Error::from)
             .and_then(|_| crate::fsutil::atomic_write(&f, &encode_scan(&out), 0o600));
-        DECODED.lock().unwrap().push((f, std::sync::Arc::new(out.clone())));
+        DECODED.lock().unwrap().insert(f, std::sync::Arc::new(out.clone()));
     }
     Ok(out)
 }
 
-/// A command often reads one sealed tree more than once (a parent and its child share their
-/// base): the decoded scan stays in memory for the process, by the name of its file.
-static DECODED: std::sync::Mutex<Vec<(std::path::PathBuf, std::sync::Arc<BTreeMap<String, ScanEntry>>)>> =
-    std::sync::Mutex::new(Vec::new());
+/// Retain recently used sealed scans without retaining every tree in a long clone.
+const DECODED_SCAN_CACHE_BYTES: usize = 256 << 20;
+type DecodedScan = std::sync::Arc<BTreeMap<String, ScanEntry>>;
 
-fn decoded(file: &Path) -> Option<std::sync::Arc<BTreeMap<String, ScanEntry>>> {
-    if let Some((_, scan)) = DECODED.lock().unwrap().iter().find(|(p, _)| p == file) {
-        return Some(scan.clone());
+struct CachedScan {
+    scan: DecodedScan,
+    bytes: usize,
+    used: u64,
+}
+struct DecodedScanCache {
+    scans: BTreeMap<PathBuf, CachedScan>,
+    recent: BTreeMap<u64, PathBuf>,
+    bytes: usize,
+    limit: usize,
+    clock: u64,
+}
+impl DecodedScanCache {
+    const fn new(limit: usize) -> Self {
+        Self { scans: BTreeMap::new(), recent: BTreeMap::new(), bytes: 0, limit, clock: 0 }
+    }
+    fn advance(&mut self) -> u64 {
+        if self.clock == u64::MAX {
+            self.scans.clear();
+            self.recent.clear();
+            self.bytes = 0;
+            self.clock = 0;
+        }
+        self.clock += 1;
+        self.clock
+    }
+    fn get(&mut self, file: &Path) -> Option<DecodedScan> {
+        let used = self.advance();
+        let entry = self.scans.get_mut(file)?;
+        self.recent.remove(&entry.used);
+        self.recent.insert(used, file.to_path_buf());
+        entry.used = used;
+        Some(entry.scan.clone())
+    }
+    fn insert(&mut self, file: PathBuf, scan: DecodedScan) {
+        let used = self.advance();
+        if let Some(old) = self.scans.remove(&file) {
+            self.bytes -= old.bytes;
+            self.recent.remove(&old.used);
+        }
+        let bytes = decoded_scan_bytes(&file, &scan);
+        if bytes > self.limit {
+            return;
+        }
+        while self.bytes > self.limit - bytes {
+            let (_, file) = self.recent.pop_first().expect("decoded scan cache has an oldest entry");
+            let old = self.scans.remove(&file).expect("decoded scan cache index agrees");
+            self.bytes -= old.bytes;
+        }
+        self.bytes += bytes;
+        self.recent.insert(used, file.clone());
+        self.scans.insert(file, CachedScan { scan, bytes, used });
+    }
+}
+
+fn decoded_scan_bytes(file: &Path, scan: &BTreeMap<String, ScanEntry>) -> usize {
+    // Charge conservatively for BTree nodes, allocator slack, both path indexes and
+    // the Arc. ScanEntry has no heap fields; each entry owns only its path string.
+    scan.iter().fold(4096usize.saturating_add(file.as_os_str().len().saturating_mul(2)), |bytes, (path, _)| {
+        bytes.saturating_add(std::mem::size_of::<(String, ScanEntry)>() * 2 + 128).saturating_add(path.capacity())
+    })
+}
+
+static DECODED: std::sync::Mutex<DecodedScanCache> = std::sync::Mutex::new(DecodedScanCache::new(DECODED_SCAN_CACHE_BYTES));
+
+fn decoded(file: &Path) -> Option<DecodedScan> {
+    if let Some(scan) = DECODED.lock().unwrap().get(file) {
+        return Some(scan);
     }
     let scan = std::sync::Arc::new(decode_scan(&fs::read(file).ok()?)?);
-    DECODED.lock().unwrap().push((file.to_path_buf(), scan.clone()));
+    DECODED.lock().unwrap().insert(file.to_path_buf(), scan.clone());
     Some(scan)
 }
 
@@ -1253,6 +1317,72 @@ fn unshared(a: &File, b: &File, len: u64) -> Vec<(u64, u64)> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    fn cached_scan(size: u64) -> DecodedScan {
+        std::sync::Arc::new(BTreeMap::from([(
+            "file".to_string(),
+            ScanEntry {
+                fingerprint: (1, 1, 0o644, size, 0, 0, 0, 0),
+                meta: crate::fsutil::Meta {
+                    ftype: crate::fsutil::FType::File,
+                    mode: 0o644,
+                    size,
+                    ino: 1,
+                    uid: 0,
+                    gid: 0,
+                    mtime: 0,
+                },
+                data: None,
+                nlink: 1,
+                birth: (0, 0),
+            },
+        )]))
+    }
+
+    #[test]
+    fn decoded_scan_cache_evicts_the_least_recent_scan_within_its_byte_bound() {
+        let scan = cached_scan(42);
+        let weight = decoded_scan_bytes(Path::new("a"), &scan);
+        let mut cache = DecodedScanCache::new(weight * 2);
+        cache.insert(PathBuf::from("a"), scan.clone());
+        cache.insert(PathBuf::from("b"), scan.clone());
+        assert!(cache.get(Path::new("a")).is_some());
+        cache.insert(PathBuf::from("c"), scan.clone());
+        assert!(cache.bytes <= cache.limit);
+        assert_eq!(cache.scans.len(), 2);
+        assert!(cache.get(Path::new("b")).is_none());
+        assert!(cache.get(Path::new("a")).is_some());
+        assert!(cache.get(Path::new("c")).is_some());
+    }
+
+    #[test]
+    fn decoded_scan_arc_remains_valid_after_eviction() {
+        let held = cached_scan(73);
+        let mut cache = DecodedScanCache::new(decoded_scan_bytes(Path::new("a"), &held));
+        cache.insert(PathBuf::from("a"), held.clone());
+        let reader = cache.get(Path::new("a")).unwrap();
+        cache.insert(PathBuf::from("b"), cached_scan(99));
+        assert!(cache.get(Path::new("a")).is_none());
+        assert_eq!(reader["file"].meta.size, 73);
+        assert!(std::sync::Arc::ptr_eq(&held, &reader));
+        assert!(cache.bytes <= cache.limit);
+    }
+
+    #[test]
+    fn decoded_scan_cache_skips_oversized_scans_and_accounts_for_replacements() {
+        let scan = cached_scan(42);
+        let weight = decoded_scan_bytes(Path::new("a"), &scan);
+        let mut cache = DecodedScanCache::new(weight);
+        cache.insert(PathBuf::from("a"), scan.clone());
+        cache.insert(PathBuf::from("a"), scan.clone());
+        assert_eq!(cache.bytes, weight);
+        assert_eq!(cache.scans.len(), 1);
+        assert_eq!(cache.recent.len(), 1);
+        cache.insert(PathBuf::from("oversized"), scan);
+        assert!(cache.get(Path::new("oversized")).is_none());
+        assert!(cache.get(Path::new("a")).is_some());
+        assert_eq!(cache.bytes, weight);
+    }
 
     struct Sandbox(PathBuf);
     impl Sandbox {
