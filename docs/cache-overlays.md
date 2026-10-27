@@ -36,7 +36,9 @@ A cache is an ordinary overlay with properties. No separate cache concept remain
   | `platform` | on or off | off | Each state records its platform key; a line takes a state only from its own platform (section 6). |
 
 - A **cache overlay** is an overlay with `folder=<path>`, `quiet`, `history=last`,
-  `merge=union-theirs`, `platform`, in follow mode. Its readers are the readers of the project.
+  `merge=union-theirs`, `platform`, in follow mode. Its readers are its owner and the machines
+  that the project trusts (owner decision 2026-10-27), so store copies and peer sync give caches
+  only to those machines.
 - **`regenerable`** in `.layrattributes` is a short form: the folder that it marks gets a cache
   overlay with that folder and the defaults above, the first time `layr save --caches` saves it.
   `layr cache add <path>` does the same for the machine setting.
@@ -196,13 +198,14 @@ Each slice is one pull request that leaves `main` green.
 
 ## 10. Open questions
 
-1. **Unreviewed build output in protected lines.** `merge=union-theirs` makes the cache of a
-   merged line part of the cache of `main`. Today a cache reaches other users only when its maker
-   saved it on a protected line. With this design the merger of a line also passes the line's
-   build output on. Proposal: keep the merge, and let `line new` of another user take a cache of
-   a protected line only (as today).
-2. **Readers of cache overlays.** Proposal: the readers of the project. A private cache needs
-   `overlay create --readers` by hand.
+1. **Unreviewed build output in protected lines.** Decided by the owner on 2026-10-27: a merge
+   into a protected line carries the source line's caches only when that merge met the line's
+   protection: each required check passed on the new head, and the merged state has its
+   approvals, the same rule as for the code, with no bypass (root, an up-to-date merge).
+   Unprotected lines take the caches of every merge.
+2. **Readers of cache overlays.** Decided by the owner on 2026-10-27: the owner and the machines
+   the project trusts, not every user. Each `save --caches` adds machines that the project began
+   to trust since (on a key manager of the overlay).
 3. **Toolchain in the platform key.** layr hashes the files that `key-files` names. A toolchain
    that no file names (a system compiler) is not in the key.
 4. **LRU on APFS.** macOS updates access times lazily; `lru` uses the access time and the
@@ -239,7 +242,7 @@ Built on 2026-10-27: folder overlays and caches as cache overlays. Tests:
   overlay per folder). `overlay list` shows `folder=<path>`. `overlay use` and `overlay move`
   refuse a folder overlay.
 - `save --caches` makes the cache overlay `cache.<folder>` (`/` as `.`) of each cache path when it
-  is missing: folder overlay, readers `*`, `history=last`, `quiet`, `merge=union-theirs`, and the
+  is missing: folder overlay, readers: the trusted machines, `history=last`, `quiet`, `merge=union-theirs`, and the
   setting `overlay.<name>.cache = true`. It then saves one snapshot of the folder as a state of the
   line's overlay line. Each state records the user, the platform (`<os>-<arch>`) and whether the
   line is protected, with the rules of `design.md` section 5 for who may take it.
@@ -251,7 +254,12 @@ Built on 2026-10-27: folder overlays and caches as cache overlays. Tests:
 - `layr merge <line>` then brings the merged line's caches into the target (section 5): a
   fast-forward of the target's overlay line, or a `union-theirs` state; the incoming files are
   copied over the target's folder; an empty folder gets one snapshot. A failure here is a
-  warning; the merge stays.
+  warning; the merge stays. Into a protected line only when the merge met its protection (each
+  required check passed on the new head, the required approvals of the merged state); otherwise
+  the merge prints `Caches of '<line>' not merged`.
+- Cache overlay readers: the owner and every machine the project trusts (`machine:<UUID>`), not
+  `*`. Local users take caches by the rules of `design.md` section 5 (their own, or saved on a
+  protected line).
 - `layr cache pull <line or state>`: the same for one line, without a merge (item 24).
 - `layr cache list -v` adds the size of each cache folder and the overlay state the line saved.
   `cache list` without `-v` keeps its output.

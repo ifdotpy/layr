@@ -76,7 +76,7 @@ fn principals(list: &[String]) -> Result<Vec<String>> {
 }
 
 /// The access policy of an overlay: its owner is its admin, the readers read it.
-fn access_map(owner: u32, readers: &[String]) -> serde_json::Value {
+pub(crate) fn access_map(owner: u32, readers: &[String]) -> serde_json::Value {
     let mut m = serde_json::Map::new();
     for r in readers {
         m.insert(r.clone(), serde_json::json!("reader"));
