@@ -949,6 +949,10 @@ pub fn run_gc(ctx: &Ctx, repo: &Repo, dry: bool) -> Result<Vec<String>> {
         }
     }
     let caches = prune_caches(repo)?;
+    // Overlays with a history limit (docs/cache-overlays.md, section 5).
+    for name in repo.overlay_names()? {
+        repo.after_overlay_move(ctx, &name);
+    }
     #[cfg(target_os = "macos")]
     {
         let lines = repo.lines()?;
