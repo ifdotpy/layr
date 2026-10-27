@@ -725,7 +725,9 @@ impl<'a> Repo<'a> {
         if !w.exists() {
             bail!("line '{}' has no working folder on this machine", line.name);
         }
-        self.temp_snapshot(&w, true)
+        let dst = self.p.scan_dir().join(ids::new_id());
+        btrfs::scan_snapshot(&w, &dst)?;
+        Ok(Temp { path: dst })
     }
 
     /// The newest automatic state of a line, if any.
