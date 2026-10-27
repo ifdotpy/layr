@@ -134,7 +134,13 @@ echo more >> notes.txt
 l save -a -m "pm code 2" -q
 l save --caches -q
 cd $P/main
-no "a merge that lacks the approval is refused" l merge pm
+# Root bypasses approvals (the Linux suite runs as root): the merge then succeeds, but it did not
+# meet the protection, so it still carries no cache.
+if [ "$(id -u)" = 0 ]; then
+    has "a root merge without the approval carries no cache" "not merged" "$(l merge pm 2>&1)"
+else
+    no "a merge that lacks the approval is refused" l merge pm
+fi
 no "and carries no cache" test -e target/debug/pm2
 l protect main --remove >/dev/null
 
