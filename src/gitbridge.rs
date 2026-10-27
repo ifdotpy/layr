@@ -1671,7 +1671,11 @@ pub fn check_git_head(repo: &Repo, line: &Line) -> Result<()> {
     if !fsutil::is_layer(&w, ".git", &fsutil::meta_of(&dir.metadata()?)) {
         return Ok(());
     }
-    let cur = fsutil::read_at(&dir, "HEAD").map(|c| String::from_utf8_lossy(&c).trim().to_string()).unwrap_or_default();
+    // A HEAD that is missing or not a regular file is replaced by refresh_git_folder, as before.
+    let Some(cur) = fsutil::read_at(&dir, "HEAD") else {
+        return Ok(());
+    };
+    let cur = String::from_utf8_lossy(&cur).trim().to_string();
     let expected = line_commit(repo, &line.head)?;
     if cur != expected {
         bail!("git HEAD moved outside layr ({cur}); layr lines are written with layr only. Undo the git change or reset git HEAD to {expected} to continue.");
