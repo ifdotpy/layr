@@ -100,10 +100,12 @@ fn resolve_chain(
         recipients.insert(p.key.epoch.clone(), p.key.recipient.clone());
     }
     for (epoch, recipient) in &recipients {
-        let old = scoped.verified(false, |backend,_| {
-            let sealed=backend.get(&format!("history/{epoch}.age"))?.context("epoch has no sealed history identity")?;
-            let old=keys::open_slot(&sealed,&identity)?;
-            if keys::recipient_of(&old)? != *recipient { bail!("sealed history identity differs from the signed lineage"); }
+        let old = scoped.verified(false, |backend, _| {
+            let sealed = backend.get(&format!("history/{epoch}.age"))?.context("epoch has no sealed history identity")?;
+            let old = keys::open_slot(&sealed, &identity)?;
+            if keys::recipient_of(&old)? != *recipient {
+                bail!("sealed history identity differs from the signed lineage");
+            }
             Ok(old)
         })?;
         let backend = if epoch == "root" { root.clone() } else { root.scoped(&format!("project/epochs/{epoch}"))? };
@@ -180,24 +182,30 @@ fn opener(store: &Store, backend: &Backend, descriptor: &Descriptor) -> Result<(
     }
     Ok((super::public::identity(backend, descriptor)?.context("the store is not public")?, true))
 }
-pub(super) fn connect(store: &mut Store) -> Result<()> { connect_before_pending(store, None) }
+pub(super) fn connect(store: &mut Store) -> Result<()> {
+    connect_before_pending(store, None)
+}
 fn connect_before_pending(store: &mut Store, pending: Option<&Published>) -> Result<()> {
     if store.layer.is_some() {
         return Ok(());
     }
-    if store.backend.get("store.json")?.is_none() {return Ok(());}
-    let root=store.root_descriptor()?;
+    if store.backend.get("store.json")?.is_none() {
+        return Ok(());
+    }
+    let root = store.root_descriptor()?;
     if let Some(pin) = &store.pin {
         pin.check(&root)?;
     }
-    if let Some(pin) = store.person.as_ref().and_then(|person|person.index.pin(&root.project)) {
+    if let Some(pin) = store.person.as_ref().and_then(|person| person.index.pin(&root.project)) {
         pin.check_store(&root)?;
     }
     let mut chain = publications(&store.backend, &root)?;
     if let Some(pending) = pending {
         if chain.iter().any(|p| p.key.epoch == pending.key.epoch) {
             let latest = chain.last().context("pending epoch disappeared")?;
-            if latest.line.trim_end() != pending.line.trim_end() { bail!("pending rotation discovery differs from this machine's signed record"); }
+            if latest.line.trim_end() != pending.line.trim_end() {
+                bail!("pending rotation discovery differs from this machine's signed record");
+            }
             chain.pop();
         }
         let parent = chain.last().map_or("root", |p| p.key.epoch.as_str());
@@ -219,23 +227,27 @@ fn pending_rotation(store: &Store, repo: &Repo) -> Result<Option<Published>> {
     let mut found = None;
     for line in repo.p.export_jsonl()?.lines() {
         let record = oplog::parse_line(line, None)?.record;
-        if record.op != "project.key" || record.machine != store.machine { continue; }
+        if record.op != "project.key" || record.machine != store.machine {
+            continue;
+        }
         let key: Key = serde_json::from_value(record.data.clone())?;
         key.validate()?;
         let path = store.dir.join("project-keys").join(format!("{}.age", key.epoch));
-        if !path.exists() { continue; }
+        if !path.exists() {
+            continue;
+        }
         oplog::parse_line(line, Some(&store.key.verifying_key()))?;
         let identity = keys::open_machine_slot(&std::fs::read(&path)?, &store.key)?;
         if key.project != repo.p.id || keys::recipient_of(&identity)? != key.recipient {
             bail!("pending rotation identity differs from its signed record");
         }
-        if found.replace(Published { key, record, line:line.into() }).is_some() {
+        if found.replace(Published { key, record, line: line.into() }).is_some() {
             bail!("more than one local rotation is pending");
         }
     }
     Ok(found)
 }
-fn pending_readers(repo: &Repo, key: &Key) -> Result<BTreeMap<String,String>> {
+fn pending_readers(repo: &Repo, key: &Key) -> Result<BTreeMap<String, String>> {
     let mut readers = None;
     for line in repo.p.export_jsonl()?.lines() {
         let r = oplog::parse_line(line, None)?.record;
@@ -244,7 +256,9 @@ fn pending_readers(repo: &Repo, key: &Key) -> Result<BTreeMap<String,String>> {
         }
     }
     let readers = readers.context("pending rotation has no reader set")?;
-    if layr_store::epochs::readers_hash(&readers)? != key.readers_hash { bail!("pending rotation reader hash differs"); }
+    if layr_store::epochs::readers_hash(&readers)? != key.readers_hash {
+        bail!("pending rotation reader hash differs");
+    }
     Ok(readers)
 }
 
@@ -400,9 +414,15 @@ impl Store {
             Mode::Private
         };
         let mode = if let Some(pending) = &pending {
-            if !force && mode != pending.key.mode { bail!("resume the pending rotation before changing its mode"); }
+            if !force && mode != pending.key.mode {
+                bail!("resume the pending rotation before changing its mode");
+            }
             pending.key.mode
-        } else if force { old_mode } else { mode };
+        } else if force {
+            old_mode
+        } else {
+            mode
+        };
         let rotated = pending.is_some() || force || !remove.is_empty() || mode < old_mode;
         let service = repo
             .p
@@ -414,19 +434,33 @@ impl Store {
         }
         // Validate the complete tightening before any write, including manager authority.
         let mut tightened = Vec::new();
-        let mut remote_overlays=None;
+        let mut remote_overlays = None;
         for overlay in repo.visible_overlay_names(ctx)? {
             let orepo = match repo.overlay_repo(&overlay) {
-                Ok(repo)=>repo,
+                Ok(repo) => repo,
                 Err(_) => {
-                    if mode>=old_mode {continue;}
-                    if remote_overlays.is_none() {
-                        let authorities=crate::overlay_managers::from_lines(&descriptor.project,&remote.lines,&trusted)?;
-                        let (published,refused)=super::overlays::published(&self.backend,&descriptor.project,&self.root_descriptor()?.recipient,&trusted,&authorities)?;
-                        if !refused.is_empty() {bail!("cannot verify overlay access before closing: {}",refused.join("; "));}
-                        remote_overlays=Some(published);
+                    if mode >= old_mode {
+                        continue;
                     }
-                    if remote_overlays.as_ref().and_then(|overlays|overlays.get(&overlay)).is_some_and(|p|p.key.access_mode>mode) {
+                    if remote_overlays.is_none() {
+                        let authorities = crate::overlay_managers::from_lines(&descriptor.project, &remote.lines, &trusted)?;
+                        let (published, refused) = super::overlays::published(
+                            &self.backend,
+                            &descriptor.project,
+                            &self.root_descriptor()?.recipient,
+                            &trusted,
+                            &authorities,
+                        )?;
+                        if !refused.is_empty() {
+                            bail!("cannot verify overlay access before closing: {}", refused.join("; "));
+                        }
+                        remote_overlays = Some(published);
+                    }
+                    if remote_overlays
+                        .as_ref()
+                        .and_then(|overlays| overlays.get(&overlay))
+                        .is_some_and(|p| p.key.access_mode > mode)
+                    {
                         bail!("cannot tighten overlay {overlay}: its key manager needs reader access on this machine");
                     }
                     continue;
@@ -439,14 +473,17 @@ impl Store {
         }
         let _lock = repo.p.lock()?;
         if rotated {
-            let mut readers = if let Some(pending) = &pending { pending_readers(repo, &pending.key)? } else { readers(self, repo, remove)? };
+            let mut readers =
+                if let Some(pending) = &pending { pending_readers(repo, &pending.key)? } else { readers(self, repo, remove)? };
             for principal in remove {
                 let canonical = if crate::model::is_uuid(principal) { format!("machine:{principal}") } else { principal.clone() };
                 if canonical == format!("machine:{}", self.machine) {
                     bail!("the rotating machine must remain a reader");
                 }
                 if pending.is_some() {
-                    if readers.contains_key(&canonical) { bail!("resume the pending rotation before removing another reader"); }
+                    if readers.contains_key(&canonical) {
+                        bail!("resume the pending rotation before removing another reader");
+                    }
                 } else if readers.remove(&canonical).is_none() {
                     bail!("unknown project reader {principal}");
                 }
@@ -521,8 +558,12 @@ impl Store {
                     history.push((backend.clone(), old_identity.clone()));
                 }
             }
-            let recorded = repo.p.export_jsonl()?.lines().filter_map(|line|oplog::parse_line(line,None).ok())
-                .any(|r|r.record.op == "project.mode" && r.record.data["epoch"] == key.epoch);
+            let recorded = repo
+                .p
+                .export_jsonl()?
+                .lines()
+                .filter_map(|line| oplog::parse_line(line, None).ok())
+                .any(|r| r.record.op == "project.mode" && r.record.data["epoch"] == key.epoch);
             if !recorded {
                 let mut event = Record::new("project.mode");
                 event.data = serde_json::json!({"mode":mode,"epoch":key.epoch,"reason":reason});
@@ -532,7 +573,9 @@ impl Store {
             // An older proof must never be used to list or read the new namespace.
             if !root.put_new(&key.object(&record.id), line.as_bytes().to_vec())? {
                 let existing = root.get(&key.object(&record.id))?.context("pending discovery disappeared")?;
-                if std::str::from_utf8(&existing)?.trim_end() != line.trim_end() { bail!("pending epoch publication changed"); }
+                if std::str::from_utf8(&existing)?.trim_end() != line.trim_end() {
+                    bail!("pending epoch publication changed");
+                }
             }
             self.backend = Backend::Epoch(Box::new(EpochBackend { root: root.clone(), current: current.clone(), history }));
             self.backend.set_epoch(Some(&key.epoch))?;

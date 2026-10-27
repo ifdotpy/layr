@@ -510,13 +510,13 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
     let required = required_states(repo, &records.lines, opts)?;
     let catalog = store.backend.list("states/")?;
     let mut states = BTreeMap::new();
-    let mut objects = BTreeMap::<(String,String),Vec<String>>::new();
+    let mut objects = BTreeMap::<(String, String), Vec<String>>::new();
     for object in catalog {
         if let Some((state, attempt)) = format::parse_tree_name(&object.key) {
             states.entry(state.clone()).or_insert(attempt.clone());
-            objects.entry((state,attempt)).or_default().push(object.key);
-        } else if let Some((state,attempt,_)) = format::parse_data_name(&object.key) {
-            objects.entry((state,attempt)).or_default().push(object.key);
+            objects.entry((state, attempt)).or_default().push(object.key);
+        } else if let Some((state, attempt, _)) = format::parse_data_name(&object.key) {
+            objects.entry((state, attempt)).or_default().push(object.key);
         }
     }
     let mut reader = Reader::new(&store.backend, &identity, &records.keys);
@@ -537,7 +537,7 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
     let mut window_started = std::time::Instant::now();
     for (position, state) in missing.iter().enumerate() {
         if position >= window_end || window_started.elapsed().as_secs() >= 240 {
-            let (keys,end) = restore_window(&missing,position,&states,&objects);
+            let (keys, end) = restore_window(&missing, position, &states, &objects);
             store.backend.prepare_batch(&keys)?;
             window_end = end;
             window_started = std::time::Instant::now();

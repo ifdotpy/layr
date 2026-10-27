@@ -69,18 +69,25 @@ impl Backend {
         let replay = std::sync::Arc::new(super::cdn::Replay::default());
         let backend = self.replay_transport(&replay);
         match verify(&backend, false) {
-            Err(error) if !error.is::<super::cdn::DirectFailure>() && !error.is::<super::cdn::BusyFailure>() && !error.is::<super::cdn::BatchDeadlineFailure>() && replay.retry(cached_cdn) => {
+            Err(error)
+                if !error.is::<super::cdn::DirectFailure>()
+                    && !error.is::<super::cdn::BusyFailure>()
+                    && !error.is::<super::cdn::BatchDeadlineFailure>()
+                    && replay.retry(cached_cdn) =>
+            {
                 verify(&backend, true).map_err(|error| error.context(super::cdn::DirectFailure))
             }
             result => result,
         }
     }
-    pub(super) fn prepare_batch(&self, keys:&[String])->Result<()> {
+    pub(super) fn prepare_batch(&self, keys: &[String]) -> Result<()> {
         match self {
-            Self::Gateway(gateway)=>gateway.prepare_batch(keys),
-            Self::Prefix(base,prefix)=>base.prepare_batch(&keys.iter().map(|key|format!("{prefix}{key}")).collect::<Vec<_>>()),
-            Self::Epoch(epoch)=>epoch.current.prepare_batch(keys),
-            _=>Ok(()),
+            Self::Gateway(gateway) => gateway.prepare_batch(keys),
+            Self::Prefix(base, prefix) => {
+                base.prepare_batch(&keys.iter().map(|key| format!("{prefix}{key}")).collect::<Vec<_>>())
+            }
+            Self::Epoch(epoch) => epoch.current.prepare_batch(keys),
+            _ => Ok(()),
         }
     }
     fn parallel<T: Send>(&self, keys: &[String], get: impl Fn(&Backend, &str) -> Result<T> + Sync) -> Result<Vec<T>> {
@@ -91,15 +98,15 @@ impl Backend {
         for group in keys.chunks(256) {
             self.prepare_batch(group)?;
             for chunk in group.chunks(8) {
-            let batch = std::thread::scope(|scope| -> Result<Vec<T>> {
-                let get = &get;
-                let workers: Vec<_> = chunk.iter().map(|key| scope.spawn(move || get(self, key))).collect();
-                workers
-                    .into_iter()
-                    .map(|worker| worker.join().map_err(|_| anyhow::anyhow!("gateway fetch worker failed"))?)
-                    .collect()
-            })?;
-            results.extend(batch);
+                let batch = std::thread::scope(|scope| -> Result<Vec<T>> {
+                    let get = &get;
+                    let workers: Vec<_> = chunk.iter().map(|key| scope.spawn(move || get(self, key))).collect();
+                    workers
+                        .into_iter()
+                        .map(|worker| worker.join().map_err(|_| anyhow::anyhow!("gateway fetch worker failed"))?)
+                        .collect()
+                })?;
+                results.extend(batch);
             }
         }
         Ok(results)

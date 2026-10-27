@@ -52,7 +52,9 @@ impl std::fmt::Display for DirectFailure {
 impl std::error::Error for DirectFailure {}
 
 impl Replay {
-    pub fn cached(&self, key:&str)->bool { self.entries.lock().expect("CDN replay lock").0.contains_key(key) }
+    pub fn cached(&self, key: &str) -> bool {
+        self.entries.lock().expect("CDN replay lock").0.contains_key(key)
+    }
     pub fn is_direct(&self) -> bool {
         self.direct.load(Ordering::SeqCst)
     }
@@ -144,8 +146,11 @@ pub struct SigningLease<'a>(&'a Signing);
 impl Signing {
     pub fn acquire(&self) -> SigningLease<'_> {
         let mut active = self.active.lock().expect("signing admission lock");
-        while *active >= 4 { active = self.changed.wait(active).expect("signing admission lock"); }
-        *active += 1; SigningLease(self)
+        while *active >= 4 {
+            active = self.changed.wait(active).expect("signing admission lock");
+        }
+        *active += 1;
+        SigningLease(self)
     }
 }
 impl Drop for SigningLease<'_> {
@@ -157,13 +162,17 @@ impl Drop for SigningLease<'_> {
 #[derive(Debug)]
 pub struct BusyFailure;
 impl std::fmt::Display for BusyFailure {
-    fn fmt(&self, f:&mut std::fmt::Formatter<'_>)->std::fmt::Result { f.write_str("gateway is busy after bounded retries") }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("gateway is busy after bounded retries")
+    }
 }
 impl std::error::Error for BusyFailure {}
 
 #[derive(Debug)]
 pub struct BatchDeadlineFailure;
 impl std::fmt::Display for BatchDeadlineFailure {
-    fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result {f.write_str("gateway signing deadline expired for one key after reducing the batch")}
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("gateway signing deadline expired for one key after reducing the batch")
+    }
 }
 impl std::error::Error for BatchDeadlineFailure {}

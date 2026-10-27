@@ -131,17 +131,24 @@ fn json<T: serde::de::DeserializeOwned>(response: Response, limit: usize) -> Res
 }
 
 fn busy_response(mut send: impl FnMut() -> Result<Response>) -> Result<Response> {
-            for attempt in 0..4 {
-                let response = send()?;
-                if response.status().as_u16() != 503 { return Ok(response); }
-                let delay = response.headers().get("retry-after").and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok()).filter(|n| *n <= 60);
-                let body: serde_json::Value = serde_json::from_slice(&bytes(response, 512)?).unwrap_or_default();
-                if body["error"] != "gateway is busy; retry later" || delay.is_none() || attempt == 3 {
-                    return Err(super::cdn::BusyFailure.into());
-                }
-                std::thread::sleep(Duration::from_millis(delay.unwrap() * 1000 + (rand::random::<u16>() as u64 % 251)));
-            }
-            unreachable!()
+    for attempt in 0..4 {
+        let response = send()?;
+        if response.status().as_u16() != 503 {
+            return Ok(response);
+        }
+        let delay = response
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|n| *n <= 60);
+        let body: serde_json::Value = serde_json::from_slice(&bytes(response, 512)?).unwrap_or_default();
+        if body["error"] != "gateway is busy; retry later" || delay.is_none() || attempt == 3 {
+            return Err(super::cdn::BusyFailure.into());
+        }
+        std::thread::sleep(Duration::from_millis(delay.unwrap() * 1000 + (rand::random::<u16>() as u64 % 251)));
+    }
+    unreachable!()
 }
 
 fn ca_file(path: &std::path::Path) -> Result<Vec<u8>> {
@@ -288,18 +295,23 @@ impl Gateway {
             challenge: String,
             expires: i64,
         }
-        let challenge: Challenge = json(busy_response(|| self.http.get(url.clone()).send().map_err(reqwest::Error::without_url).map_err(Into::into))?, 4096)?;
+        let challenge: Challenge = json(
+            busy_response(|| self.http.get(url.clone()).send().map_err(reqwest::Error::without_url).map_err(Into::into))?,
+            4096,
+        )?;
         let now = crate::ids::now_ms();
         if challenge.expires <= now || challenge.expires > now + 60_000 {
             bail!("invalid or expired gateway session challenge");
         }
         let signature = layr_store::session::sign(&person.login, &challenge.challenge, &person.key)?;
-        let response = busy_response(|| self
-            .http
-            .post(self.base.join("/api/session")?)
-            .json(&serde_json::json!({"login":person.login,"challenge":challenge.challenge,"signature":signature}))
-            .send()
-            .map_err(reqwest::Error::without_url).map_err(Into::into))?;
+        let response = busy_response(|| {
+            self.http
+                .post(self.base.join("/api/session")?)
+                .json(&serde_json::json!({"login":person.login,"challenge":challenge.challenge,"signature":signature}))
+                .send()
+                .map_err(reqwest::Error::without_url)
+                .map_err(Into::into)
+        })?;
         let token: SessionToken = json(response, 4096)?;
         let now = crate::ids::now_ms();
         if token.login != person.login
@@ -452,7 +464,10 @@ impl Gateway {
             }
             if let Some(data) = &data {
                 request = request
-                    .header("content-type", if matches!(action, "token" | "cdn") { "application/json" } else { "application/octet-stream" })
+                    .header(
+                        "content-type",
+                        if matches!(action, "token" | "cdn") { "application/json" } else { "application/octet-stream" },
+                    )
                     .body(data.clone());
             }
             request.send().map_err(reqwest::Error::without_url).map_err(Into::into)
@@ -627,55 +642,82 @@ impl Gateway {
     }
 
     pub(super) fn prepare_batch(&self, keys: &[String]) -> Result<()> {
-        if self.replay.as_ref().is_some_and(|replay|replay.is_direct()) || !self.has_read_identity() || self.is_public() { return Ok(()); }
+        if self.replay.as_ref().is_some_and(|replay| replay.is_direct()) || !self.has_read_identity() || self.is_public() {
+            return Ok(());
+        }
         let now = crate::ids::now_ms().max(0) as u64 / 1000;
-        self.prepared.lock().expect("prepared link lock").retain(|_,item| item["status"] != 200 || item["direct"] == true || item["expires"].as_u64().is_some_and(|expires|expires > now + 5));
-        let mut groups = std::collections::BTreeMap::<String,Vec<(String,String)>>::new();
+        self.prepared.lock().expect("prepared link lock").retain(|_, item| {
+            item["status"] != 200 || item["direct"] == true || item["expires"].as_u64().is_some_and(|expires| expires > now + 5)
+        });
+        let mut groups = std::collections::BTreeMap::<String, Vec<(String, String)>>::new();
         for key in keys {
-            if !super::cdn::cacheable(key) || self.replay.as_ref().is_some_and(|replay|replay.cached(&format!("{}{key}",self.base))) { continue; }
-            if self.prepared.lock().expect("prepared link lock").contains_key(&format!("{}{key}",self.base)) { continue; }
-            let (epoch, relative) = epoch_path(key).unwrap_or(("root",key.as_str()));
-            groups.entry(epoch.into()).or_default().push((key.clone(),relative.into()));
+            if !super::cdn::cacheable(key)
+                || self.replay.as_ref().is_some_and(|replay| replay.cached(&format!("{}{key}", self.base)))
+            {
+                continue;
+            }
+            if self.prepared.lock().expect("prepared link lock").contains_key(&format!("{}{key}", self.base)) {
+                continue;
+            }
+            let (epoch, relative) = epoch_path(key).unwrap_or(("root", key.as_str()));
+            groups.entry(epoch.into()).or_default().push((key.clone(), relative.into()));
         }
         for (epoch, entries) in groups {
-            let prepared=self.prepare_batch_entries(&epoch,&entries)?;
-            let mut cache=self.prepared.lock().expect("prepared link lock");cache.extend(prepared);
-            while cache.len()>512 { cache.pop_first(); }
+            let prepared = self.prepare_batch_entries(&epoch, &entries)?;
+            let mut cache = self.prepared.lock().expect("prepared link lock");
+            cache.extend(prepared);
+            while cache.len() > 512 {
+                cache.pop_first();
+            }
         }
         Ok(())
     }
-    fn prepare_batch_entries(&self,epoch:&str,entries:&[(String,String)])->Result<Vec<(String,serde_json::Value)>> {
-            let body=serde_json::to_vec(&serde_json::json!({"epoch":epoch,"keys":entries.iter().map(|(_,key)|key).collect::<Vec<_>>()}))?;
-            let mut response=None;
-            for attempt in 0..2 {
-                let proof=self.proof()?;
-                let reply=self.send_query_inner(Method::POST,"cdn",Some(&proof),&[],Some(body.clone()),false)?;
-                if reply.status().as_u16()==401 && attempt==0 { *self.read.lock().expect("read proof lock")=None; continue; }
-                response=Some(reply); break;
+    fn prepare_batch_entries(&self, epoch: &str, entries: &[(String, String)]) -> Result<Vec<(String, serde_json::Value)>> {
+        let body =
+            serde_json::to_vec(&serde_json::json!({"epoch":epoch,"keys":entries.iter().map(|(_,key)|key).collect::<Vec<_>>()}))?;
+        let mut response = None;
+        for attempt in 0..2 {
+            let proof = self.proof()?;
+            let reply = self.send_query_inner(Method::POST, "cdn", Some(&proof), &[], Some(body.clone()), false)?;
+            if reply.status().as_u16() == 401 && attempt == 0 {
+                *self.read.lock().expect("read proof lock") = None;
+                continue;
             }
-            let response=response.context("gateway batch proof refused")?;
-            if response.status().as_u16()==405 { return Ok(Vec::new()); } // Older gateway: retain the single-key form.
-            if response.status().as_u16()==408 {
-                if entries.len()<=1 {return Err(super::cdn::BatchDeadlineFailure.into());}
-                let half=entries.len().div_ceil(2);
-                let mut result=self.prepare_batch_entries(epoch,&entries[..half])?;
-                result.extend(self.prepare_batch_entries(epoch,&entries[half..])?);return Ok(result);
+            response = Some(reply);
+            break;
+        }
+        let response = response.context("gateway batch proof refused")?;
+        if response.status().as_u16() == 405 {
+            return Ok(Vec::new());
+        } // Older gateway: retain the single-key form.
+        if response.status().as_u16() == 408 {
+            if entries.len() <= 1 {
+                return Err(super::cdn::BatchDeadlineFailure.into());
             }
-            let value:serde_json::Value=json(response,2<<20)?;
-            let objects=value["objects"].as_array().filter(|objects|objects.len()==entries.len()).context("invalid CDN batch reply")?;
-            let mut prepared=Vec::new();
-            for ((key,_), item) in entries.iter().zip(objects) {
-                let status=item["status"].as_u64().filter(|status|(100..=599).contains(status)).context("invalid CDN batch status")?;
-                if status==200 && item["direct"]!=true {
-                    let mut object=item.as_object().context("invalid CDN batch item")?.clone(); object.remove("status");
-                    let link:CdnLink=serde_json::from_value(serde_json::Value::Object(object))?;
-                    if checked_cdn_url(&self.base,key,&link,OBJECT_LIMIT as u64).is_err() {
-                        prepared.push((format!("{}{key}",self.base),serde_json::json!({"status":200,"direct":true}))); continue;
-                    }
+            let half = entries.len().div_ceil(2);
+            let mut result = self.prepare_batch_entries(epoch, &entries[..half])?;
+            result.extend(self.prepare_batch_entries(epoch, &entries[half..])?);
+            return Ok(result);
+        }
+        let value: serde_json::Value = json(response, 2 << 20)?;
+        let objects =
+            value["objects"].as_array().filter(|objects| objects.len() == entries.len()).context("invalid CDN batch reply")?;
+        let mut prepared = Vec::new();
+        for ((key, _), item) in entries.iter().zip(objects) {
+            let status =
+                item["status"].as_u64().filter(|status| (100..=599).contains(status)).context("invalid CDN batch status")?;
+            if status == 200 && item["direct"] != true {
+                let mut object = item.as_object().context("invalid CDN batch item")?.clone();
+                object.remove("status");
+                let link: CdnLink = serde_json::from_value(serde_json::Value::Object(object))?;
+                if checked_cdn_url(&self.base, key, &link, OBJECT_LIMIT as u64).is_err() {
+                    prepared.push((format!("{}{key}", self.base), serde_json::json!({"status":200,"direct":true})));
+                    continue;
                 }
-                prepared.push((format!("{}{key}",self.base),item.clone()));
             }
-            Ok(prepared)
+            prepared.push((format!("{}{key}", self.base), item.clone()));
+        }
+        Ok(prepared)
     }
 
     pub fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
@@ -688,25 +730,36 @@ impl Gateway {
 
     fn fetched(&self, key: &str, prefer_cdn: bool) -> Result<super::cdn::Download> {
         if prefer_cdn && super::cdn::cacheable(key) && self.has_read_identity() && !self.is_public() {
-            let prepared = self.prepared.lock().expect("prepared link lock").remove(&format!("{}{key}",self.base));
-            let prepared = prepared.filter(|entry|entry["status"] != 200 || entry["direct"] == true || entry["expires"].as_u64().is_some_and(|expires|expires > crate::ids::now_ms().max(0) as u64 / 1000));
+            let prepared = self.prepared.lock().expect("prepared link lock").remove(&format!("{}{key}", self.base));
+            let prepared = prepared.filter(|entry| {
+                entry["status"] != 200
+                    || entry["direct"] == true
+                    || entry["expires"].as_u64().is_some_and(|expires| expires > crate::ids::now_ms().max(0) as u64 / 1000)
+            });
             if let Some(entry) = prepared {
                 match entry["status"].as_u64() {
-                    Some(404) => return Ok(super::cdn::Download { bytes:None, cdn:false }),
+                    Some(404) => return Ok(super::cdn::Download { bytes: None, cdn: false }),
                     Some(200) if entry["direct"] == true => {
-                        #[cfg(debug_assertions)] eprintln!("layr: cacheable-key batch returned a direct object");
-                        return Ok(super::cdn::Download { bytes:self.get_direct(key)?, cdn:false });
+                        #[cfg(debug_assertions)]
+                        eprintln!("layr: cacheable-key batch returned a direct object");
+                        return Ok(super::cdn::Download { bytes: self.get_direct(key)?, cdn: false });
                     }
                     Some(200) => {
-                        let mut object = entry.as_object().context("invalid CDN batch item")?.clone(); object.remove("status");
+                        let mut object = entry.as_object().context("invalid CDN batch item")?.clone();
+                        object.remove("status");
                         let link: CdnLink = serde_json::from_value(serde_json::Value::Object(object))?;
                         let fetched = (|| -> Result<Vec<u8>> {
-                            let (response, length)=self.cdn_link_response(key,link,OBJECT_LIMIT as u64)?;
-                            let body=bytes(response,usize::try_from(length)?)?;
-                            if body.len() as u64 != length { bail!("CDN object length differs"); } Ok(body)
+                            let (response, length) = self.cdn_link_response(key, link, OBJECT_LIMIT as u64)?;
+                            let body = bytes(response, usize::try_from(length)?)?;
+                            if body.len() as u64 != length {
+                                bail!("CDN object length differs");
+                            }
+                            Ok(body)
                         })();
-                        if let Ok(body)=fetched { return Ok(super::cdn::Download {bytes:Some(body),cdn:true}); }
-                        return Ok(super::cdn::Download {bytes:self.get_direct(key)?,cdn:false});
+                        if let Ok(body) = fetched {
+                            return Ok(super::cdn::Download { bytes: Some(body), cdn: true });
+                        }
+                        return Ok(super::cdn::Download { bytes: self.get_direct(key)?, cdn: false });
                     }
                     Some(status) => bail!("gateway batch object: HTTP {status}"),
                     None => bail!("invalid CDN batch object status"),
@@ -1157,27 +1210,40 @@ mod tests {
                 assert_eq!(result.unwrap(), b"verified ciphertext");
             }
         }
-        let batch_keys:Vec<_> = (0..17).map(|index| format!("files/01a177aa-a7a5-716c-8774-{index:011x}5.age")).collect();
-        let batch = backend.verified(false, |backend, _| {
-            let bodies=backend.get_many(&batch_keys)?;
-            bodies.into_iter().map(|body| keys::decrypt(&identity,&body.context("missing batch object")?)).collect::<Result<Vec<_>>>()
-        }).unwrap();
-        assert_eq!(batch,vec![b"verified ciphertext".to_vec();17]);
-        let expired_key="files/01a177aa-a7a5-716c-8774-7f165724c166.age".to_string();
-        gateway.prepared.lock().unwrap().insert(format!("{}{expired_key}",gateway.base),serde_json::json!({"status":200,"expires":1,"url":"expired"}));
-        backend.verified(false,|backend,_| {
-            backend.prepare_batch(&[expired_key.clone()])?;
-            assert_eq!(keys::decrypt(&identity,&backend.get(&expired_key)?.unwrap())?,b"verified ciphertext");
-            Ok(())
-        }).unwrap();
+        let batch_keys: Vec<_> = (0..17).map(|index| format!("files/01a177aa-a7a5-716c-8774-{index:011x}5.age")).collect();
+        let batch = backend
+            .verified(false, |backend, _| {
+                let bodies = backend.get_many(&batch_keys)?;
+                bodies
+                    .into_iter()
+                    .map(|body| keys::decrypt(&identity, &body.context("missing batch object")?))
+                    .collect::<Result<Vec<_>>>()
+            })
+            .unwrap();
+        assert_eq!(batch, vec![b"verified ciphertext".to_vec(); 17]);
+        let expired_key = "files/01a177aa-a7a5-716c-8774-7f165724c166.age".to_string();
+        gateway
+            .prepared
+            .lock()
+            .unwrap()
+            .insert(format!("{}{expired_key}", gateway.base), serde_json::json!({"status":200,"expires":1,"url":"expired"}));
+        backend
+            .verified(false, |backend, _| {
+                backend.prepare_batch(&[expired_key.clone()])?;
+                assert_eq!(keys::decrypt(&identity, &backend.get(&expired_key)?.unwrap())?, b"verified ciphertext");
+                Ok(())
+            })
+            .unwrap();
         let response = gateway.http.get(format!("https://localhost:{port}/counts")).send().unwrap();
         let counts: std::collections::BTreeMap<String, u64> = response.json().unwrap();
         assert_eq!(counts.get("batch"), Some(&6)); // Busy retries the same body; deadlines split 17 -> 9+8 -> 5+4+8.
-        assert_eq!(counts.get("batch.size.17"),Some(&2));
-        for size in [9,5,4,8] {assert_eq!(counts.get(&format!("batch.size.{size}")),Some(&1));}
+        assert_eq!(counts.get("batch.size.17"), Some(&2));
+        for size in [9, 5, 4, 8] {
+            assert_eq!(counts.get(&format!("batch.size.{size}")), Some(&1));
+        }
         assert_eq!(counts.get("batch.keys"), Some(&17));
-        assert_eq!(counts.get("renewal.batch"),Some(&1));
-        assert_eq!(counts.get("6.cdn"),Some(&1));
+        assert_eq!(counts.get("renewal.batch"), Some(&1));
+        assert_eq!(counts.get("6.cdn"), Some(&1));
         assert!(counts.get("6.link").is_none());
         assert!(counts.get("6.direct").is_none());
         assert!(counts.get("5.link").is_none());
