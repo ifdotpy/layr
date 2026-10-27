@@ -14,6 +14,16 @@ This page is part of the [Layr documentation](../README.md#documentation).
   names (`received_uuid`), but its file content is trusted together with the machine that made
   it. Cache snapshots are checked the same way through the signed `save.caches` record.
 
+### Git folder imports
+
+An initialized submodule keeps its original `sub/.git` file during `init --from`.
+Its `gitdir` path can become invalid in the imported folder.
+
+Source inspection suggests a Linux service import can fail for a caller without root access.
+`copy_folder` creates directories as root, then copies files with the caller's permissions.
+The caller can lack write access to these directories.
+This service path has no live verification for this case.
+
 ### APFS service test
 
 The service uses kernel peer credentials and runs each request in a separate process.

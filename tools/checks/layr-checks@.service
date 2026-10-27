@@ -1,0 +1,14 @@
+[Unit]
+Description=Layr automatic checks for %i
+After=layr-runner-daemon.service
+Requires=layr-runner-daemon.service
+
+[Service]
+User=layr-checks
+Environment=LAYR_SOCKET=/run/layr-runner/layr.sock
+ExecStart=/usr/local/bin/layr --project %i checks watch --json
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
