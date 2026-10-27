@@ -12,7 +12,7 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | access        | `access [list|grant [--until <30m|2h|1d>]|revoke|deny|allow|check]`, `protect [<pattern> --update <role> --check <names> --path <path>=<role> --approvals <n> --approvers <principals> --direct --rewrite <role> --no-expect | --remove]`, `approve [--withdraw] <state>`, `attest <kind> <rev> [--payload <file>]`, `attestations <rev> [--kind <kind>] [--json]` |
 | safety        | `undo`, `op log`, `save`, `try <state> -- <cmd>`, `try <state> --check <name>`, `bisect list [--json]`, `bisect run [--good <rev>] [--bad <rev>] [--auto] [--ref-log <ref>] [--json] -- <cmd>`, `gc`, `fsck`, `reindex` |
 | Git bridge    | `git remote`, `git fetch`, `git pull`, `git push [--squash]`, `git clone`, `git sync`                             |
-| remotes       | `remote add\|list\|self\|remove\|trust`, `remote public <remote> on\|off`, `sync <remote>`, `push <remote>`, `fetch <remote>`, `pull <remote>`, `clone <url>` |
+| remotes       | `remote add\|list\|self\|remove\|trust`, `remote public <remote> on\|off`, `sync <remote>`, `push <remote>`, `push [--dry-run]` (every layer to each of its remotes), `overlay remote add\|list\|remove`, `fetch <remote>`, `pull <remote>`, `clone <url>` |
 | OCI           | `push <oci-remote> <rev> [--runnable <name>] [--json]`, `access token <principal> [--until <duration>]`, `access token --revoke <principal>` |
 | records       | `op export`, `op import` (JSONL) |
 | copies        | `export <folder>`                                                                              |
