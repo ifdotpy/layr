@@ -90,6 +90,7 @@ impl<'a> Repo<'a> {
     /// The cache overlay of `folder`, made when missing. The caller holds the project lock.
     fn ensure_cache_overlay(&self, ctx: &Ctx, folder: &str) -> Result<String> {
         if let Some(n) = self.folder_overlay_of(folder)? {
+            self.sync_cache_readers(ctx, &n);
             return Ok(n);
         }
         let name = cache_overlay_name(folder);
@@ -100,7 +101,7 @@ impl<'a> Repo<'a> {
             ctx,
             self,
             &name,
-            &["*".to_string()],
+            &self.cache_readers()?,
             Mode::Follow,
             false,
             &cache_props(),
@@ -108,6 +109,48 @@ impl<'a> Repo<'a> {
             true,
         )?;
         Ok(name)
+    }
+
+    /// The readers of a cache overlay besides its owner: the machines this project trusts (this
+    /// machine included), so that store copies and peer sync give caches only to them. Local users
+    /// take a cache by the rules of `usable_cache`.
+    fn cache_readers(&self) -> Result<Vec<String>> {
+        Ok(crate::store_remote::overlays::trusted_keys(self)?.into_keys().map(|m| format!("machine:{m}")).collect())
+    }
+
+    /// Add machines that the project trusts since the cache overlay was made to its readers. Only a
+    /// key manager of the overlay may; elsewhere the readers stay, and the next save on a manager
+    /// adds them. A failure leaves the readers as they were.
+    fn sync_cache_readers(&self, ctx: &Ctx, name: &str) {
+        let r = (|| -> Result<()> {
+            let orepo = self.overlay_repo(name)?;
+            let have: BTreeSet<String> = orepo
+                .policy()
+                .access
+                .iter()
+                .filter(|(_, r)| **r >= crate::access::Role::Reader)
+                .map(|(p, _)| p.clone())
+                .collect();
+            let want = self.cache_readers()?;
+            if want.iter().all(|m| have.contains(m)) || !orepo.is_admin(ctx) {
+                return Ok(());
+            }
+            crate::overlay_managers::of(self, name)?.require(&ctx.store.machine.id)?;
+            let info = self.need_overlay(name)?;
+            let mut readers: Vec<String> = have.into_iter().filter(|p| *p != format!("user:{}", info.owner)).collect();
+            for m in want {
+                if !readers.contains(&m) {
+                    readers.push(m);
+                }
+            }
+            let _lock = orepo.p.lock()?;
+            let mut record = crate::model::Record::new("overlay.readers");
+            record.data = serde_json::json!({"config":{"access": crate::cmd::overlaycmd::access_map(info.owner, &readers)}});
+            orepo.commit_record(ctx, record).map(|_| ())
+        })();
+        if let Err(e) = r {
+            eprintln!("warning: overlay '{name}': readers not updated: {e:#}");
+        }
     }
 
     /// Save the nested layers at `paths` of the line's working folder as new states of their
