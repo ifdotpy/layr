@@ -471,11 +471,13 @@ fn run_line_checks(
 /// Paths a merge must not overwrite: local changes, and in a line with overlays also ignored
 /// files (a user's own key where an overlay has one).
 /// A new state would drop the open conflicts of the head and keep their markers as content.
+/// Only files with markers matter: other kinds stay listed until the next commit.
 fn refuse_open_conflicts(st: &crate::repo::Status) -> Result<()> {
-    if st.conflicts.is_empty() {
+    let paths: Vec<&str> =
+        st.conflicts.iter().filter(|c| c.kind == "content" || c.kind == "add/add").map(|c| c.path.as_str()).collect();
+    if paths.is_empty() {
         return Ok(());
     }
-    let paths: Vec<&str> = st.conflicts.iter().map(|c| c.path.as_str()).collect();
     Err(exit(
         1,
         format!("error: unresolved conflicts in {}: fix the files and 'layr save -m <message>' first.", paths.join(", ")),
