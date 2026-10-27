@@ -1,0 +1,11 @@
+[Unit]
+Description=Receive source and publish signed results for %i
+After=layr-runner-daemon.service network-online.target
+Requires=layr-runner-daemon.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/layr-runner.env
+Environment=LAYR_SOCKET=/run/layr-runner/layr.sock
+ExecStart=/usr/local/bin/layr --project %i fetch origin
+ExecStart=/usr/local/bin/layr --project %i push origin --index

@@ -74,6 +74,7 @@ cleanup() {
     cd /
     if [ "$(uname -s)" = Darwin ]; then
         chflags -R nouchg "$T" 2>/dev/null || true
+        chmod -R u+w "$T" 2>/dev/null || true
         rm -rf "$T"
         return
     fi

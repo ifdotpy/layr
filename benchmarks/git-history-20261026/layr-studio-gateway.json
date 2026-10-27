@@ -1,0 +1,225 @@
+[
+  {
+    "step": "remote",
+    "started_unix": 1793022968.353892,
+    "vm_load_start": [
+      3.07666015625,
+      2.9658203125,
+      2.51416015625
+    ],
+    "vm_load_end": [
+      3.07666015625,
+      2.9658203125,
+      2.51416015625
+    ],
+    "seconds": 0.261,
+    "status": 0,
+    "maxrss_kib": 27032,
+    "requests": {
+      "GET": 2
+    }
+  },
+  {
+    "step": "push",
+    "started_unix": 1793022968.615049,
+    "vm_load_start": [
+      3.07666015625,
+      2.9658203125,
+      2.51416015625
+    ],
+    "vm_load_end": [
+      4.0,
+      3.50732421875,
+      3.19677734375
+    ],
+    "seconds": 974.478,
+    "status": 0,
+    "maxrss_kib": 498284,
+    "requests": {
+      "GET": 18,
+      "POST": 1,
+      "PUT": 15000
+    }
+  },
+  {
+    "step": "stage",
+    "started_unix": 1793023943.0938225,
+    "vm_load_start": [
+      4.0,
+      3.50732421875,
+      3.19677734375
+    ],
+    "vm_load_end": [
+      4.0,
+      3.50732421875,
+      3.19677734375
+    ],
+    "seconds": 0.116,
+    "status": 0,
+    "maxrss_kib": 33524,
+    "requests": {
+      "GET": 0,
+      "POST": 0,
+      "PUT": 0
+    }
+  },
+  {
+    "step": "save",
+    "started_unix": 1793023943.2104864,
+    "vm_load_start": [
+      4.0,
+      3.50732421875,
+      3.19677734375
+    ],
+    "vm_load_end": [
+      4.0,
+      3.50732421875,
+      3.19677734375
+    ],
+    "seconds": 0.299,
+    "status": 0,
+    "maxrss_kib": 33524,
+    "requests": {
+      "GET": 0,
+      "POST": 0,
+      "PUT": 0
+    }
+  },
+  {
+    "step": "incremental-push",
+    "started_unix": 1793023943.5098777,
+    "vm_load_start": [
+      4.0,
+      3.50732421875,
+      3.19677734375
+    ],
+    "vm_load_end": [
+      4.0,
+      3.50732421875,
+      3.19677734375
+    ],
+    "seconds": 2.825,
+    "status": 128,
+    "maxrss_kib": 248684,
+    "requests": {
+      "GET": 16,
+      "POST": 1,
+      "PUT": 1
+    }
+  },
+  {
+    "step": "incremental-push-resume",
+    "started_unix": 1793024565.8441818,
+    "vm_load_start": [
+      1.7978515625,
+      1.35498046875,
+      2.1474609375
+    ],
+    "vm_load_end": [
+      1.73388671875,
+      1.3486328125,
+      2.14111328125
+    ],
+    "seconds": 2.607,
+    "status": 0,
+    "maxrss_kib": 480848,
+    "requests": {
+      "GET": 17,
+      "POST": 1,
+      "PUT": 2
+    },
+    "listing_prefixes": {
+      "keys/": 2,
+      "records/01a177d8-eb2f-709c-9243-a759ebfd3910/": 1,
+      "states/01a1788e-2235-76f9-85e4-bd16c76ffd77/": 1
+    }
+  },
+  {
+    "step": "clone",
+    "started_unix": 1793024568.491086,
+    "vm_load_start": [
+      1.73388671875,
+      1.3486328125,
+      2.14111328125
+    ],
+    "vm_load_end": [
+      1.8984375,
+      1.70703125,
+      1.87109375
+    ],
+    "seconds": 1072.133,
+    "status": 0,
+    "maxrss_kib": 1429836,
+    "requests": {
+      "GET": 31177,
+      "POST": 4,
+      "PUT": 2
+    },
+    "listing_prefixes": {
+      "keys/": 1,
+      "records/": 1,
+      "states/": 15,
+      "overlays/": 2
+    }
+  },
+  {
+    "project": "layr-studio",
+    "all_original_ids_identical": true,
+    "new_parent_correct": true,
+    "expected_tree": "29217a1cfa33fc428f17a49d90a7b74f9e0903e1",
+    "count": 7966,
+    "tree": "29217a1cfa33fc428f17a49d90a7b74f9e0903e1",
+    "request_delay_ms": 5,
+    "transferred_bytes": {
+      "GET": 596274285,
+      "POST": 295,
+      "PUT": 2378
+    }
+  },
+  {
+    "step": "save-normal",
+    "started_unix": 1793029917.2513237,
+    "vm_load_start": [
+      0.3369140625,
+      0.23876953125,
+      0.2607421875
+    ],
+    "vm_load_end": [
+      0.3369140625,
+      0.23876953125,
+      0.2607421875
+    ],
+    "seconds": 0.358,
+    "status": 0,
+    "maxrss_kib": 26592,
+    "requests": {},
+    "listing_prefixes": {}
+  },
+  {
+    "step": "incremental-push-normal",
+    "started_unix": 1793029917.6110244,
+    "vm_load_start": [
+      0.3369140625,
+      0.23876953125,
+      0.2607421875
+    ],
+    "vm_load_end": [
+      0.47021484375,
+      0.26806640625,
+      0.2705078125
+    ],
+    "seconds": 3.584,
+    "status": 0,
+    "maxrss_kib": 481388,
+    "requests": {
+      "GET": 17,
+      "POST": 1,
+      "PUT": 3
+    },
+    "listing_prefixes": {
+      "keys/": 2,
+      "records/01a177d8-eb2f-709c-9243-a759ebfd3910/": 1,
+      "states/01a178e9-4aee-73bb-8b35-deebdacc039e/": 1
+    }
+  }
+]
