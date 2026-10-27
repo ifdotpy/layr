@@ -15,13 +15,7 @@ use anyhow::Result;
 use std::collections::{BTreeMap, BTreeSet};
 
 const USAGE: &str =
-<<<<<<< head
     "usage: layr overlay create <name> [--readers <principal>,...] [--mode shared|follow] [--hidden] [--folder <path>] [<properties>]
-||||||| base
-const USAGE: &str = "usage: layr overlay create <name> [--readers <principal>,...] [--mode shared|follow] [--hidden]
-=======
-    "usage: layr overlay create <name> [--readers <principal>,...] [--mode shared|follow] [--hidden] [<properties>]
->>>>>>> bba6c770d582763b864901a17d866a73
        layr overlay set <name> <properties>
        layr overlay show-to-project <name>
        layr overlay list
@@ -92,13 +86,7 @@ fn access_map(owner: u32, readers: &[String]) -> serde_json::Value {
 }
 
 fn create(ctx: &Ctx, args: &[String]) -> Result<i32> {
-<<<<<<< head
     let spec = props_spec(Spec::new().value("--readers|-r").value("--mode").flag("--hidden").flag("-q").value("--folder"));
-||||||| base
-    let spec = Spec::new().value("--readers|-r").value("--mode").flag("--hidden").flag("-q|--quiet");
-=======
-    let spec = props_spec(Spec::new().value("--readers|-r").value("--mode").flag("--hidden").flag("-q"));
->>>>>>> bba6c770d582763b864901a17d866a73
     let a = parse(&spec, args)?;
     let props = props_of(&a, Props::default())?;
     let h = here(ctx)?;
@@ -213,7 +201,6 @@ pub(crate) fn make_overlay(
                 cfg.insert(format!("overlay.{name}.{prop}"), v);
             }
         }
-<<<<<<< head
         if let Some(f) = folder {
             cfg.insert(format!("overlay.{name}.folder"), serde_json::json!(f));
         }
@@ -221,9 +208,6 @@ pub(crate) fn make_overlay(
         if cache {
             cfg.insert(format!("overlay.{name}.cache"), serde_json::json!(true));
         }
-||||||| base
-=======
->>>>>>> bba6c770d582763b864901a17d866a73
         rec.data = serde_json::json!({"name": name, "parent":repo.p.id, "config": cfg});
         if hidden {
             orepo.commit_record(ctx, rec)?;
@@ -239,7 +223,6 @@ pub(crate) fn make_overlay(
         }
         return Err(e);
     }
-<<<<<<< head
     Ok(())
 }
 
@@ -258,23 +241,6 @@ fn refuse_folder(repo: &Repo, name: &str) -> Result<()> {
         }
     }
     Ok(())
-||||||| base
-    if !a.has("-q") {
-        let mut who: Vec<String> = vec![ctx.caller.user.clone()];
-        who.extend(readers.iter().map(|r| show_principal(r)));
-        who.dedup();
-        outln!(ctx, "Created overlay {name} (mode {}; readers: {})", mode.name(), who.join(", "));
-=======
-    if !a.has("-q") {
-        let mut who: Vec<String> = vec![ctx.caller.user.clone()];
-        who.extend(readers.iter().map(|r| show_principal(r)));
-        who.dedup();
-        let shown = props.describe();
-        let extra = if shown.is_empty() { String::new() } else { format!("; {}", shown.join(" ")) };
-        outln!(ctx, "Created overlay {name} (mode {}; readers: {}{extra})", mode.name(), who.join(", "));
-    }
-    Ok(0)
->>>>>>> bba6c770d582763b864901a17d866a73
 }
 
 /// The options of overlay properties (docs/cache-overlays.md, section 4).
@@ -377,15 +343,10 @@ fn list(ctx: &Ctx, args: &[String]) -> Result<i32> {
         if a.has("--json") {
             rows.push(serde_json::json!({"name":name,"mode":info.mode.name(),"hidden":info.hidden,"owner":info.owner,"readers":readers,"shown":shown.contains(&name),"properties":props.to_json()}));
         } else {
-<<<<<<< head
             let mut described = props.describe();
             if let Some(f) = repo.overlay_setting(&name, "folder")?.and_then(|v| v.as_str().map(str::to_owned)) {
                 described.insert(0, format!("folder={f}"));
             }
-||||||| base
-=======
-            let described = props.describe();
->>>>>>> bba6c770d582763b864901a17d866a73
             outln!(
                 ctx,
                 "{mark}{name}\t{}{}\towner {owner}\treaders {}{}",

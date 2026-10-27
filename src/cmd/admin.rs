@@ -956,19 +956,12 @@ pub fn run_gc(ctx: &Ctx, repo: &Repo, dry: bool) -> Result<Vec<String>> {
         }
     }
     let caches = prune_caches(repo)?;
-<<<<<<< head
     // Overlays with a history limit and folder overlays with an LRU limit (docs/cache-overlays.md).
     for name in repo.overlay_names()? {
         repo.after_overlay_move(ctx, &name);
     }
     if let Err(e) = repo.cache_gc_lru() {
         eprintln!("warning: cache size limits not applied: {e:#}");
-||||||| base
-=======
-    // Overlays with a history limit (docs/cache-overlays.md, section 5).
-    for name in repo.overlay_names()? {
-        repo.after_overlay_move(ctx, &name);
->>>>>>> bba6c770d582763b864901a17d866a73
     }
     #[cfg(target_os = "macos")]
     {
