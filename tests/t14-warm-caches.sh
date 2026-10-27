@@ -39,7 +39,7 @@ ok "merge with its check" in_line layr-u2 main merge -q a1 --expect $(tip layr-u
 no "a passing check keeps no build output" sh -c "ls $LAYR_ROOT/projects/w/states | grep -q @target"
 
 # 3. The owner of main builds there and keeps the output on purpose: the head of main gets it.
-as layr-admin sh -c "cd $P/main && echo 1 > target/count && echo built > target/out && head -c 1048576 /dev/zero > target/big.bin"
+as layr-admin sh -c "cd $P/main && mkdir -p target && echo 1 > target/count && echo built > target/out && head -c 1048576 /dev/zero > target/big.bin"
 head_before=$(tip layr-admin main)
 ok "save --caches on a clean main" in_line layr-admin main save -q --caches
 eq "the head of main did not move" "$head_before" "$(tip layr-admin main)"
