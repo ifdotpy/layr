@@ -45,9 +45,11 @@ impl Backend {
             Self::Epoch(e) => {
                 e.root.set_epoch(epoch)?;
                 e.current.set_epoch(epoch)?;
-                for (backend, _) in &e.history { backend.set_epoch(epoch)?; }
+                for (backend, _) in &e.history {
+                    backend.set_epoch(epoch)?;
+                }
                 Ok(())
-            },
+            }
             _ => Ok(()),
         }
     }
@@ -385,7 +387,16 @@ impl Backend {
             Self::File(root, uid, gid) => crate::privs::as_user_fs(*uid, *gid, || {
                 let mut out = Vec::new();
                 if root.exists() {
-                    walk(root, root, prefix, &mut out)?;
+                    // A state prefix must not enumerate every sibling state directory.
+                    let directory = prefix.rsplit_once('/').map(|(parent, _)| parent).unwrap_or("");
+                    let start = if directory.is_empty() { root.clone() } else { crate::fsutil::safe_join(root, directory)? };
+                    match fs::symlink_metadata(&start) {
+                        Ok(meta) if meta.file_type().is_symlink() => bail!("symbolic link in remote store: {directory}"),
+                        Ok(meta) if meta.is_dir() => walk(root, &start, prefix, &mut out)?,
+                        Ok(_) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(error.into()),
+                    }
                 }
                 out.sort_by(|a, b| a.key.cmp(&b.key));
                 Ok(out)
@@ -425,22 +436,33 @@ impl Backend {
 }
 
 fn walk(root: &Path, dir: &Path, prefix: &str, out: &mut Vec<Object>) -> Result<()> {
-    for e in fs::read_dir(dir)? {
-        let e = e?;
-        let path = e.path();
-        let name = path.strip_prefix(root)?.to_str().context("non-UTF-8 remote object")?.to_string();
-        let m = fs::symlink_metadata(&path)?;
-        if m.file_type().is_symlink() {
-            bail!("symbolic link in remote store: {name}");
+    for entry in fs::read_dir(dir)? {
+        walk_entry(root, entry?, prefix, out)?;
+    }
+    Ok(())
+}
+
+fn walk_entry(root: &Path, entry: fs::DirEntry, prefix: &str, out: &mut Vec<Object>) -> Result<()> {
+    let path = entry.path();
+    let name = path.strip_prefix(root)?.to_str().context("non-UTF-8 remote object")?.to_string();
+    let temporary = entry.file_name().to_string_lossy().starts_with(".put-");
+    let m = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        // Publication unlinks its internal temporary file after creating the final
+        // hard link. A listing may have already read that directory entry.
+        Err(error) if temporary && error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    if m.file_type().is_symlink() {
+        bail!("symbolic link in remote store: {name}");
+    }
+    if m.is_dir() {
+        if prefix.starts_with(&format!("{name}/")) || name.starts_with(prefix) {
+            walk(root, &path, prefix, out)?;
         }
-        if m.is_dir() {
-            if prefix.starts_with(&format!("{name}/")) || name.starts_with(prefix) {
-                walk(root, &path, prefix, out)?;
-            }
-        } else if name.starts_with(prefix) && !e.file_name().to_string_lossy().starts_with(".put-") {
-            let modified = m.modified()?.duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64;
-            out.push(Object { key: name, modified });
-        }
+    } else if name.starts_with(prefix) && !temporary {
+        let modified = m.modified()?.duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64;
+        out.push(Object { key: name, modified });
     }
     Ok(())
 }
@@ -520,6 +542,49 @@ mod tests {
         assert_eq!(overlay.list("").unwrap().len(), 1);
         assert!(backend.scoped("../bad").is_err());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn listing_tolerates_only_a_vanished_publication_temporary() {
+        let root = std::env::temp_dir().join(crate::ids::new_id());
+        fs::create_dir(&root).unwrap();
+        let mut objects = Vec::new();
+        for (name, tolerated) in [(".put-published", true), ("published-object", false)] {
+            let path = root.join(name);
+            fs::write(&path, b"publication bytes").unwrap();
+            let entry = fs::read_dir(&root).unwrap().next().unwrap().unwrap();
+            // Force the interval between read_dir and stat: the uploader removes
+            // its temporary name once the public hard link exists.
+            fs::remove_file(&path).unwrap();
+            assert_eq!(walk_entry(&root, entry, "", &mut objects).is_ok(), tolerated);
+        }
+        for name in ["public-link", ".put-link"] {
+            let path = root.join(name);
+            std::os::unix::fs::symlink("missing-target", &path).unwrap();
+            assert!(Backend::file(root.clone()).list("").is_err());
+            fs::remove_file(path).unwrap();
+        }
+        assert!(objects.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn file_listing_visits_only_the_requested_directory_and_refuses_its_links() {
+        let root = std::env::temp_dir().join(crate::ids::new_id());
+        let backend = Backend::file(root.clone());
+        backend.put_new("states/one/a.age", b"one".to_vec()).unwrap();
+        backend.put_new("states/two/b.age", b"two".to_vec()).unwrap();
+        // This sibling must not be inspected for an exact state-directory prefix.
+        std::os::unix::fs::symlink("/missing", root.join("states/two/link")).unwrap();
+        let files = backend.list("states/one/").unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].key, "states/one/a.age");
+        assert_eq!(backend.list("states/one/a").unwrap().len(), 1);
+        assert!(backend.list("states/missing/").unwrap().is_empty());
+        assert!(backend.list("states/two/").is_err());
+        std::os::unix::fs::symlink("one", root.join("states/link")).unwrap();
+        assert!(backend.list("states/link/").is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

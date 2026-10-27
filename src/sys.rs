@@ -16,13 +16,16 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::process::Command;
 
 /// Bound automatic check processes before executing any project code.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn check_limits_before_exec(cmd: &mut Command, memory: u64, processes: u64, seconds: u64) -> Result<()> {
     use std::os::unix::process::CommandExt;
     // SAFETY: pre_exec only calls async-signal-safe system calls with stack values.
     unsafe {
         cmd.pre_exec(move || {
             for (resource, value) in [
+                // Darwin exposes RLIMIT_AS as RLIMIT_RSS and rejects an address-space cap.
+                // Keep the other hard limits there; Linux also enforces virtual memory.
+                #[cfg(target_os = "linux")]
                 (libc::RLIMIT_AS, memory),
                 (libc::RLIMIT_NPROC, processes),
                 (libc::RLIMIT_CPU, seconds),
@@ -35,6 +38,7 @@ pub fn check_limits_before_exec(cmd: &mut Command, memory: u64, processes: u64, 
                     return Err(io::Error::last_os_error());
                 }
             }
+            #[cfg(target_os = "linux")]
             if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
                 return Err(io::Error::last_os_error());
             }
@@ -584,8 +588,8 @@ pub fn apfs_clone(src: &std::path::Path, dst: &std::path::Path) -> io::Result<()
     let destination = open_parent(dst)?;
     let name = CString::new(dst.file_name().ok_or_else(|| io::Error::other("missing clone destination name"))?.as_bytes())?;
     // SAFETY: the descriptors stay live. Each path component was opened without following
-    // links. The destination is a single name. fclonefileat also supports macOS 14.
-    if unsafe { libc::fclonefileat(source.as_raw_fd(), destination.as_raw_fd(), name.as_ptr(), 0x0002) } != 0 {
+    // links. The destination is a single name. CLONE_NOOWNERCOPY | CLONE_ACL retains the ACL.
+    if unsafe { libc::fclonefileat(source.as_raw_fd(), destination.as_raw_fd(), name.as_ptr(), 0x0002 | 0x0004) } != 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(())
@@ -909,11 +913,22 @@ pub fn apfs_copy_metadata_fd(src: std::os::fd::BorrowedFd<'_>, dst: std::os::fd:
 }
 
 #[cfg(target_os = "macos")]
+pub fn apfs_copy_acl_fd(src: std::os::fd::BorrowedFd<'_>, dst: std::os::fd::BorrowedFd<'_>) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: both descriptors remain open. Copy ACLs without replacing the layer marker.
+    if unsafe { libc::fcopyfile(src.as_raw_fd(), dst.as_raw_fd(), std::ptr::null_mut(), libc::COPYFILE_ACL) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
 pub fn apfs_clone_at(src: std::os::fd::BorrowedFd<'_>, dir: std::os::fd::BorrowedFd<'_>, name: &str) -> io::Result<()> {
     use std::os::fd::AsRawFd;
     let name = CString::new(name)?;
     // SAFETY: both descriptors are live; name is one NUL-terminated component.
-    if unsafe { libc::fclonefileat(src.as_raw_fd(), dir.as_raw_fd(), name.as_ptr(), 0x0002) } != 0 {
+    // CLONE_NOOWNERCOPY | CLONE_ACL retains the source ACL with the caller's ownership.
+    if unsafe { libc::fclonefileat(src.as_raw_fd(), dir.as_raw_fd(), name.as_ptr(), 0x0002 | 0x0004) } != 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(())

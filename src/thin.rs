@@ -256,22 +256,33 @@ fn open_parent(root: &Path, rel: &str) -> Result<()> {
 /// Give folder `dst` the metadata of folder `src`, except the Layr markers.
 fn copy_dir_meta(src: &Path, dst: &Path, root: bool) -> Result<()> {
     let m = fs::symlink_metadata(src)?;
+    let mode = m.mode() & 0o7777;
     crate::sys::apfs_immutable(dst, false)?;
-    if !root {
-        crate::sys::apfs_copy_metadata(src, dst).with_context(|| format!("copy metadata {}", dst.display()))?;
-        crate::sys::apfs_immutable(dst, false)?;
-        for name in [c"com.layr.subvolume", REMOVED] {
-            if let Err(e) = crate::sys::apfs_remove_attribute(dst, name) {
-                if e.raw_os_error() != Some(libc::ENOATTR) {
-                    return Err(e.into());
+    let original = fs::symlink_metadata(dst)?.permissions();
+    fs::set_permissions(dst, fs::Permissions::from_mode(original.mode() | 0o200))?;
+    let copied = (|| -> Result<()> {
+        if !root {
+            crate::sys::apfs_copy_metadata(src, dst).with_context(|| format!("copy metadata {}", dst.display()))?;
+            crate::sys::apfs_immutable(dst, false)?;
+            // copyfile applies the source mode too. Keep this private directory writable
+            // until marker removal and all time updates finish.
+            fs::set_permissions(dst, fs::Permissions::from_mode(mode | 0o200))?;
+            for name in [c"com.layr.subvolume", REMOVED] {
+                if let Err(e) = crate::sys::apfs_remove_attribute(dst, name) {
+                    if e.raw_os_error() != Some(libc::ENOATTR) {
+                        return Err(e).with_context(|| format!("remove {name:?} from {}", dst.display()));
+                    }
                 }
             }
+            apfs::keep_birthtime(&m, dst)?;
         }
-        apfs::keep_birthtime(&m, dst)?;
-    }
-    fs::set_permissions(dst, fs::Permissions::from_mode(m.mode() & 0o7777))?;
-    crate::fsutil::set_mtime(&fs::File::open(dst)?, m.mtime(), m.mtime_nsec())?;
-    Ok(())
+        crate::fsutil::set_mtime(&fs::File::open(dst)?, m.mtime(), m.mtime_nsec())?;
+        Ok(())
+    })();
+    // Restore the destination's old mode on failure. Never change the source.
+    fs::set_permissions(dst, if copied.is_ok() { fs::Permissions::from_mode(mode) } else { original })
+        .with_context(|| format!("set directory mode {}", dst.display()))?;
+    copied.with_context(|| format!("set directory metadata {}", dst.display()))
 }
 
 /// Clone an entry with its metadata. A folder brings its content. A clone cannot start at a link.
@@ -1196,6 +1207,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn readonly_directory_metadata_keeps_modes() -> Result<()> {
+        let s = Sandbox(std::env::temp_dir().canonicalize()?.join(format!("readonly-metadata-{}", crate::ids::new_id())));
+        fs::create_dir(&s.0)?;
+        let src = s.0.join("source");
+        let dst = s.0.join("destination");
+        fs::create_dir(&src)?;
+        fs::create_dir(&dst)?;
+        fs::write(src.join("evidence.txt"), b"read-only evidence\n")?;
+        fs::set_permissions(src.join("evidence.txt"), fs::Permissions::from_mode(0o444))?;
+        fs::set_permissions(&src, fs::Permissions::from_mode(0o555))?;
+        let before = apfs::scan_with_data(&src, false)?;
+        copy_dir_meta(&src, &dst, false)?;
+        // A later materialization can update an already read-only directory.
+        copy_dir_meta(&src, &dst, false)?;
+        assert!(apfs::scan_with_data(&src, false)? == before, "Source metadata and bytes stay unchanged");
+        assert_eq!(fs::symlink_metadata(&src)?.mode() & 0o7777, 0o555);
+        assert_eq!(fs::symlink_metadata(src.join("evidence.txt"))?.mode() & 0o7777, 0o444);
+        assert_eq!(fs::symlink_metadata(&dst)?.mode() & 0o7777, 0o555);
+        Ok(())
+    }
+
     /// Type, mode, size, time, and bytes of every entry except the root.
     fn content(map: &BTreeMap<String, ScanEntry>, path: impl Fn(&str) -> PathBuf) -> Vec<(String, String)> {
         map.iter()
@@ -1354,8 +1387,9 @@ mod tests {
         let w = writer(src.clone(), stop.clone());
         let results = (|| -> Result<()> {
             for n in 0..2 {
-                apfs::snapshot(&src, &s.0.join(format!("full{n}")), n % 2 == 0)?;
-                snapshot_over(&Layered::complete(&base), "base", &src, &s.0.join(format!("thin{n}")), false)?;
+                apfs::snapshot(&src, &s.0.join(format!("full{n}")), n % 2 == 0).with_context(|| format!("full copy {n}"))?;
+                snapshot_over(&Layered::complete(&base), "base", &src, &s.0.join(format!("thin{n}")), false)
+                    .with_context(|| format!("thin copy {n}"))?;
             }
             Ok(())
         })();
@@ -1374,7 +1408,9 @@ mod tests {
             let thin = Layered::over(&s.0.join(format!("thin{n}")), Layered::complete(&base))?;
             for i in 0..2000 {
                 let rel = format!("d{}/f{i}", i % 10);
-                for bytes in [fs::read(full.join(&rel))?, fs::read(thin.path(&rel)?)?] {
+                let full_bytes = fs::read(full.join(&rel)).with_context(|| format!("full copy {n}: {rel}"))?;
+                let thin_bytes = fs::read(thin.path(&rel)?).with_context(|| format!("thin copy {n}: {rel}"))?;
+                for bytes in [full_bytes, thin_bytes] {
                     // The writer truncates before it writes: an empty file is one of its versions.
                     assert!(bytes.is_empty() || bytes == b"first" || bytes.starts_with(b"version "), "{rel}: {bytes:?}");
                 }
