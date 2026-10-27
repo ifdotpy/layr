@@ -1,0 +1,14 @@
+# Full kernel isolation for privileged loop-device tests; no Mac filesystem mounts.
+minimumLimaVersion: 2.0.0
+base:
+- template:_images/ubuntu-24.04
+vmType: vz
+cpus: 4
+memory: 8GiB
+disk: 80GiB
+mounts: []
+ssh:
+  forwardAgent: false
+containerd:
+  system: false
+  user: false

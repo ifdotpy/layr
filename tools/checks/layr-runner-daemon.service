@@ -1,0 +1,20 @@
+[Unit]
+Description=Layr dedicated runner daemon
+After=local-fs.target network-online.target
+Wants=network-online.target
+RequiresMountsFor=/var/lib/layr
+
+[Service]
+EnvironmentFile=-/etc/layr-runner.env
+Environment=LAYR_ROOT=/var/lib/layr
+RuntimeDirectory=layr-runner
+RuntimeDirectoryMode=0755
+ExecStart=/usr/local/bin/layr daemon --socket /run/layr-runner/layr.sock
+Restart=always
+RestartSec=5
+KillMode=control-group
+MemoryMax=7G
+TasksMax=1024
+
+[Install]
+WantedBy=multi-user.target
