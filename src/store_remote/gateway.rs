@@ -13,6 +13,60 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+// Measurement copy only. Keep headers, URLs, aliases, object IDs and credentials out of evidence.
+trait CountedSend { fn counted_send(self) -> std::result::Result<Response, reqwest::Error>; }
+impl CountedSend for reqwest::blocking::RequestBuilder {
+    fn counted_send(self) -> std::result::Result<Response, reqwest::Error> {
+        let (client, request) = self.build_split(); let request = request?;
+        let parts: Vec<_> = request.url().path().split('/').filter(|part| !part.is_empty()).collect();
+        let class = |parts: &[&str]| {
+            let parts = if parts.starts_with(&["project", "epochs"]) { parts.get(3..).unwrap_or(&[]) } else { parts };
+            match parts.first().copied().unwrap_or("") {
+                "states"=>"states", "records"=>"records", "files"=>"files", "slots"=>"slots",
+                "keys"=>"keys", "history"=>"history", "requests"=>"requests", "claims"=>"claims",
+                "store.json"=>"store.json", "public.json"=>"public.json",
+                "index"=>match parts.get(1).copied().unwrap_or("") {"heads"=>"index-heads","paths"=>"index-paths","graph"=>"index-graph",_=>"index-other"},
+                _=>"other",
+            }
+        };
+        let route = if parts.first()==Some(&"o") { format!("cdn:{}",class(parts.get(2..).unwrap_or(&[]))) }
+            else if parts.starts_with(&["v1","p"]) {
+                match parts.get(3).copied().unwrap_or("") {
+                    "objects" if parts.len()==4 => {
+                        let prefix=request.url().query_pairs().find(|(name,_)|name=="prefix").map(|(_,value)|value.into_owned()).unwrap_or_default();
+                        format!("gateway:list:{}",class(&prefix.split('/').collect::<Vec<_>>()))
+                    },
+                    "objects"=>format!("gateway:objects:{}",class(parts.get(4..).unwrap_or(&[]))),
+                    "cdn"=>"gateway:cdn-batch".into(),
+                    "token"=>"gateway:token".into(),"challenge"=>"gateway:challenge".into(),
+                    "store.json"=>"gateway:store.json".into(),"slots"=>"gateway:slots".into(),_=>"gateway:other".into(),
+                }
+            } else { "other".into() };
+        let object = if parts.first()==Some(&"o") { Some(parts.get(2..).unwrap_or(&[]).join("/")) }
+            else if parts.starts_with(&["v1","p"]) && parts.get(3)==Some(&"objects") && parts.len()>4 {Some(parts[4..].join("/"))} else {None};
+        let object_hash=object.as_ref().map(|key|{use sha2::Digest;hex::encode(sha2::Sha256::digest(key.as_bytes()))});
+        let signing=request.headers().get("x-layr-cdn").is_some();
+        let batch_keys=if route=="gateway:cdn-batch" {request.body().and_then(|body|body.as_bytes()).and_then(|body|serde_json::from_slice::<serde_json::Value>(body).ok()).and_then(|body|body["keys"].as_array().map(Vec::len))} else {None};
+        let method=request.method().as_str().to_string();
+        let started=std::time::Instant::now(); let result=client.execute(request);
+        if let Ok(path)=std::env::var("LAYR_COUNT_HTTP_FILE") {
+            static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            let _guard=LOCK.lock().expect("measurement lock");
+            let response=result.as_ref().ok();
+            let cache=response.and_then(|r|r.headers().get("x-cache")).and_then(|v|v.to_str().ok()).map(|v|match v {
+                "Hit from cloudfront"=>"hit","Miss from cloudfront"=>"miss","RefreshHit from cloudfront"=>"refresh-hit",_=>"other"});
+            let row=serde_json::json!({"method":method,"route":route,"status":response.map(|r|r.status().as_u16()),
+                "objectHash":object_hash,"singleSigning":signing,"batchKeys":batch_keys,
+                "signedMetadataResponse":response.and_then(|r|r.headers().get("content-type")).and_then(|v|v.to_str().ok()).is_some_and(|v|v.starts_with("application/vnd.layr.cdn+json")),
+                "declaredBytes":response.and_then(|r|r.content_length()),"cache":cache,"responseMs":started.elapsed().as_millis()});
+            if let Ok(mut file)=std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(path) {
+                use std::io::Write; let _=file.write_all(format!("{row}\n").as_bytes());
+            }
+        }
+        result
+    }
+}
+
 const OBJECT_LIMIT: usize = 32 << 20;
 const SLOTS_LIMIT: usize = 8 << 20;
 const CLOCK_SKEW_MS: i64 = 5 * 60 * 1000;
@@ -296,7 +350,7 @@ impl Gateway {
             expires: i64,
         }
         let challenge: Challenge = json(
-            busy_response(|| self.http.get(url.clone()).send().map_err(reqwest::Error::without_url).map_err(Into::into))?,
+            busy_response(|| self.http.get(url.clone()).counted_send().map_err(reqwest::Error::without_url).map_err(Into::into))?,
             4096,
         )?;
         let now = crate::ids::now_ms();
@@ -308,7 +362,7 @@ impl Gateway {
             self.http
                 .post(self.base.join("/api/session")?)
                 .json(&serde_json::json!({"login":person.login,"challenge":challenge.challenge,"signature":signature}))
-                .send()
+                .counted_send()
                 .map_err(reqwest::Error::without_url)
                 .map_err(Into::into)
         })?;
@@ -361,7 +415,7 @@ impl Gateway {
             if let Some(body) = body {
                 request = request.json(body);
             }
-            request.send().map_err(reqwest::Error::without_url).map_err(Into::into)
+            request.counted_send().map_err(reqwest::Error::without_url).map_err(Into::into)
         };
         if let Some(token) = token {
             return json(send(token)?, 512 << 10);
@@ -381,9 +435,9 @@ impl Gateway {
         let slot = layr_store::person::slot_name(login, recipient)?;
         let url = self.base.join(&format!("/v1/p/{project}/slots/{slot}"))?;
         let response =
-            self.http.get(url.clone()).bearer_auth(self.session_token(false)?).send().map_err(reqwest::Error::without_url)?;
+            self.http.get(url.clone()).bearer_auth(self.session_token(false)?).counted_send().map_err(reqwest::Error::without_url)?;
         let response = if response.status().as_u16() == 401 {
-            self.http.get(url).bearer_auth(self.session_token(true)?).send().map_err(reqwest::Error::without_url)?
+            self.http.get(url).bearer_auth(self.session_token(true)?).counted_send().map_err(reqwest::Error::without_url)?
         } else {
             response
         };
@@ -470,7 +524,7 @@ impl Gateway {
                     )
                     .body(data.clone());
             }
-            request.send().map_err(reqwest::Error::without_url).map_err(Into::into)
+            request.counted_send().map_err(reqwest::Error::without_url).map_err(Into::into)
         };
         let send = |token: Option<&str>| -> Result<Response> {
             let _lease = (cdn || action == "cdn").then(|| self.signing.acquire());
@@ -600,7 +654,7 @@ impl Gateway {
             url.query_pairs_mut().append_pair(key, value);
         }
         // Anonymous routes are GET only and never carry a token or private read proof.
-        busy_response(|| self.http.get(url.clone()).send().map_err(reqwest::Error::without_url).map_err(Into::into))
+        busy_response(|| self.http.get(url.clone()).counted_send().map_err(reqwest::Error::without_url).map_err(Into::into))
     }
 
     /// A side metadata request must not turn a writer into a public-only reader.
@@ -802,7 +856,7 @@ impl Gateway {
     fn cdn_link_response(&self, key: &str, link: CdnLink, maximum: u64) -> Result<(Response, u64)> {
         let url = checked_cdn_url(&self.base, key, &link, maximum)?;
         // Never forward gateway credentials to the signed object request.
-        let response = self.http.get(url).send().map_err(reqwest::Error::without_url)?;
+        let response = self.http.get(url).counted_send().map_err(reqwest::Error::without_url)?;
         if response.status().as_u16() != 200 {
             bail!("CDN object unavailable");
         }
@@ -1034,7 +1088,7 @@ impl Gateway {
             .timeout(Duration::from_secs(7200))
             .header("content-type", "application/octet-stream")
             .body(reqwest::blocking::Body::sized(file, length))
-            .send()
+            .counted_send()
             .map_err(reqwest::Error::without_url)?;
         match response.status().as_u16() {
             201 => Ok(true),
@@ -1234,7 +1288,7 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-        let response = gateway.http.get(format!("https://localhost:{port}/counts")).send().unwrap();
+        let response = gateway.http.get(format!("https://localhost:{port}/counts")).counted_send().unwrap();
         let counts: std::collections::BTreeMap<String, u64> = response.json().unwrap();
         assert_eq!(counts.get("batch"), Some(&6)); // Busy retries the same body; deadlines split 17 -> 9+8 -> 5+4+8.
         assert_eq!(counts.get("batch.size.17"), Some(&2));
