@@ -189,4 +189,43 @@ has "HEAD needs a line" "add --line <name>" "$(as layr-r1 $L --project p log 2>&
 has "a command outside a line names --project" "--project <name>" "$(as layr-r1 $L log 2>&1)"
 no "a reader makes no line" as layr-r1 $L --project p line new -q r1 main
 no "a reader does not commit in another user's line" in_line layr-r1 u1 save --allow-empty -qm intrude
+
+# Peer transfers expose signed records, unlike the Git export. A maintainer has push only.
+l --project p remote add permission-peer ssh://test/p
+has "push alone cannot start a peer transfer" "permission denied" "$(in_line layr-u2 main push permission-peer --command -- true 2>&1)"
+git init -q --bare "$T/permission.git"
+chown -R layr-u2: "$T/permission.git"
+l --project p git remote add permission-git "$T/permission.git"
+ok "push alone still permits the Git export" in_line layr-u2 main git push -q permission-git main
+l --project p access grant layr-u2 admin
+l --project p access deny layr-u2 records
+has "peer push also needs records" "permission denied" "$(in_line layr-u2 main push permission-peer --command -- true 2>&1)"
+ok "a records deny still permits the Git export" in_line layr-u2 main git push -q permission-git main
+l --project p remote add permission-store "file://$T/permission-store" --paper-key-out "$T/permission.paper" >/dev/null
+chmod -R a+rwX "$T/permission-store"
+has "store push also needs records" "permission denied" "$(in_line layr-u2 main push permission-store -q 2>&1)"
+has "store fetch also needs records" "permission denied" "$(in_line layr-u2 main fetch permission-store -q 2>&1)"
+
+# A merge must still have permission after its configured check releases the project lock.
+sample "$T/race-source"
+l init race --from "$T/race-source" --owner layr-admin -q >/dev/null
+R=$LAYR_ROOT/projects/race/lines
+l --project race access grant layr-u2 maintainer
+as layr-admin $L --project race line new -q topic main
+as layr-admin sh -c "cd $R/topic && echo changed >> notes.txt && $L save -qam changed"
+reviewed=$(as layr-admin $L --project race --line topic rev-parse head)
+before=$(l --project race --line main rev-parse head)
+mkdir "$T/check-gate" && chmod 777 "$T/check-gate"
+l --project race config check.wait "touch '$T/check-gate/started'; while ! test -f '$T/check-gate/release'; do sleep 0.05; done"
+l --project race protect main --check wait
+as layr-u2 $L --project race --line main merge topic --expect "$reviewed" -q > "$T/race.out" 2>&1 &
+merge_pid=$!
+for i in $(seq 1 200); do [ -f "$T/check-gate/started" ] && break; sleep 0.05; done
+ok "the merge releases its lock during the check" test -f "$T/check-gate/started"
+l --project race access deny layr-u2 merge
+touch "$T/check-gate/release"
+wait "$merge_pid"; merge_result=$?
+eq "a permission revoked during the check refuses the merge" 128 "$merge_result"
+has "the merge names the revoked permission" "permission denied" "$(cat "$T/race.out")"
+eq "the refused merge leaves its target unchanged" "$before" "$(l --project race --line main rev-parse head)"
 finish
