@@ -1581,7 +1581,7 @@ struct State {
 | Files/history | `status`, `diff`, `add`, `rm`, `mv`, `apply`, `commit`, `restore`, `reset`, `log`, `show`, `blame`, `grep`, `ls-files`, `rev-parse` | Structured change events |
 | Integration | `merge`, `merge-base`, `cherry-pick`, `revert`, `rebase`, `stash`, `undo`, `save` | Consistent view identities |
 | Overlays | `overlay create/list/readers/use/move/log/show/diff/...` | Composite identity / routing |
-| Cache | `cache add/remove/list/repair` (алиас `layer`), `save --caches`, `regenerable` | Capture/fork/resolve/promote |
+| Cache | `overlay list`, `overlay repair` (the `cache` commands were removed), `save --caches`, `regenerable` | Capture/fork/resolve/promote |
 | Policy | `access`, `protect`, `approve`, `approvals`, `try`, `checks` | Policy on artifact namespaces |
 | Replica/maintenance | `sync`, `remote list`, `remote trust`, `export`, `gc`, `fsck`, `reindex`, `op log/export/import` | Object API / leases / event cursor |
 | Git bridge | `git remote`, `git clone`, `git fetch`, `git pull`, `git push`, `git sync` | Separate adapter, not Core identity |

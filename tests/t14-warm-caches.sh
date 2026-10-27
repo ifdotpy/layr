@@ -21,7 +21,7 @@ l init w --from $T/src --owner layr-admin -q >/dev/null
 P=$LAYR_ROOT/projects/w/lines
 l --project w access grant layr-u1 writer
 l --project w access grant layr-u2 maintainer
-(cd $P/main && l cache add target)
+(cd $P/main && l config regenerable '["target"]')
 # The "build" of the check: a counter shows whether it started from earlier output.
 l --project w config check.build 'n=$(cat target/count 2>/dev/null || echo 0); echo $((n+1)) > target/count; echo built > target/out; head -c 1048576 /dev/zero > target/big.bin'
 l --project w protect main --check build
@@ -102,7 +102,7 @@ else:
 PY
 }
 snap_uuid() { btrfs subvolume show "$LAYR_ROOT/projects/w/states/$1" | awk '$1 == "UUID:" {print $2}'; }
-l --project w cache add gen
+l --project w config regenerable '["target","gen"]'
 as layr-admin sh -c "mkdir $P/main/gen && echo g > $P/main/gen/out"
 head=$(tip layr-admin main)
 id=$(db id $head)

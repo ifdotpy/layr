@@ -6,7 +6,7 @@ l init p --from "$T/src" -q >/dev/null
 cd "$LAYR_ROOT/projects/p/lines/main"
 S1=$(l rev-parse head)
 no 'the layer alias is removed' l layer list
-has 'layer names cache' 'layr cache' "$(l layer list 2>&1)"
+has 'layer names overlay' 'layr overlay list' "$(l layer list 2>&1)"
 removed_cli() {
     local replacement=$1 output rc
     shift

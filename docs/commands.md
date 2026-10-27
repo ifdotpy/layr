@@ -17,14 +17,14 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | records       | `op export`, `op import` (JSONL) |
 | copies        | `export <folder>`                                                                              |
 | views         | `view [<rev or line>] [--json]`, `view save [<line>] [--json]`, `view show <id> [--json]` |
-| overlays      | `overlay create <name> [--readers <principals>] [--mode shared\|follow] [--hidden] [--history all\|last\|<N>] [--quiet] [--merge three-way\|union-theirs] [--gc none\|lru:<size>]`, `overlay set <name> <properties>`, `overlay list [--json]`, `overlay show-to-project <name>`, `overlay readers`, `overlay use [--add\|--remove\|--none] <names>`, `overlay move [--purge] <name> <paths>`, `overlay log\|show\|diff\|grep\|ls-files <name>` |
+| overlays      | `overlay create <name> [--readers <principals>] [--mode shared\|follow] [--hidden] [--history all\|last\|<N>] [--quiet] [--merge three-way\|union-theirs] [--gc none\|lru:<size>]`, `overlay set <name> <properties>`, `overlay list [--json]`, `overlay show-to-project <name>`, `overlay readers`, `overlay use [--add\|--remove\|--none] <names>`, `overlay move [--purge] <name> <paths>`, `overlay repair <overlay>`, `overlay log\|show\|diff\|grep\|ls-files <name>` |
 | refs          | `ref set <name> <rev> [--expect <rev>] [--ttl <dur>]`, `ref list [<prefix>]`, `ref log <name>`, `ref delete <name> [--expect <rev>]` |
 | queue         | `queue add <rev> [--into <line>]`, `queue list [--into <line>] [--json]`, `queue remove <entry>`, `queue run [--into <line>]` |
 | probes        | `probe run <rev> [--probe <name>] [--json]`, `probe diff <base> <head> [--json]` |
 | changes       | `comment <change> <text> [--version vN] [--path <path>] [--line N] [--reply-to <id>] [--json]`, `change list`, `change show <id>`, `change log <id>`, `change diff <id> [--from vN] [--to vM]` |
 | requests      | `request <kind> ... --person [--remote <name>] [--expires <epoch-ms>]`, `requests apply [--remote <name>] [--json]` |
 | person        | `person keys [--paper-key-out <path>] [--site <url>] [--store <url>]`, `person show [--json]`, `person accept`, `access person-key <login> <public-key>` |
-| setup         | `init`, `projects`, `config`, `cache add|remove|list [-v]|repair|pull <line or state>`, `daemon`                        |
+| setup         | `init`, `projects`, `config`, `daemon`                                                                              |
 
 Person signing-key pins are machine-local: enrollment pins them on the executor, and an admin can later run `layr access person-key <login> <public-key>` there.
 Pins do not replicate because a trusted writer machine must not replace a person's key and impersonate their approvals.
@@ -119,6 +119,9 @@ Removed command names fail and show their replacements. They are not aliases.
 `branch`, `commit`, `stash`, `cherry-pick`, `rebase`, and `revert` use the new names above.
 `checkout` and `switch` are removed because a line is a folder.
 The old `--no-commit`, `--autostash`, and `--layers` options fail and name `--no-save`, `--autopark`, and `--caches`.
+The `cache` command group is removed. Its forms fail and name their replacements: `cache list` is
+`overlay list`, `cache repair` is `overlay repair <overlay>`, `cache add` and `cache remove` are the
+`regenerable` attribute in `.layrattributes`, and `cache pull` is `line new <name> <line>` or `merge <line>`.
 Git commands under `layr git` keep Git words.
 
 Revisions: `head`, `@`, `head~2`, `head^2`, line names, `line@machine`, tags, `origin/main`,
@@ -139,8 +142,8 @@ folder. A path that the exported commit does not have fails with exit 128.
 1. A writer makes a line (`layr line new topic-1 main`), or a maintainer makes one for a user
    (`--owner bob`). Only the owner changes a line.
 2. The user works and saves named states in that folder. A program that drives the user can call
-   `layr save` at quiet points, and `layr cache repair` when a build tool made a cache folder
-   again.
+   `layr save` at quiet points, and `layr overlay repair <overlay>` when a build tool made a cache
+   folder again.
 3. Review takes an exact state: `layr diff main...topic-1`, `layr try <state> -- <tests>` runs the
    command in a temporary copy of that state and records the result.
 4. A maintainer runs `layr merge topic-1 --expect <state>` in the protected main line: it merges
