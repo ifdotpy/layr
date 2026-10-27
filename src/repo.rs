@@ -84,6 +84,16 @@ impl Status {
         }
         s
     }
+    /// Leave out `paths` (the files of quiet overlays) from what the status shows.
+    pub fn drop_paths(&mut self, paths: &BTreeSet<String>) {
+        if paths.is_empty() {
+            return;
+        }
+        self.staged.retain(|c| !paths.contains(&c.path));
+        self.unstaged.retain(|c| !paths.contains(&c.path));
+        self.untracked.retain(|p| !paths.contains(p));
+        self.conflicts.retain(|c| !paths.contains(&c.path));
+    }
     pub fn clean(&self) -> bool {
         self.staged.is_empty() && self.unstaged.is_empty()
     }
