@@ -335,9 +335,20 @@ impl Gateway {
         query: Option<(&str, &str)>,
         data: Option<Vec<u8>>,
     ) -> Result<Response> {
+        self.send_query(method, action, bearer, query.as_slice(), data)
+    }
+
+    fn send_query(
+        &self,
+        method: Method,
+        action: &str,
+        bearer: Option<&str>,
+        query: &[(&str, &str)],
+        data: Option<Vec<u8>>,
+    ) -> Result<Response> {
         let mut url = self.base.clone();
         url.set_path(&format!("{}{action}", self.base.path()));
-        if let Some((key, value)) = query {
+        for (key, value) in query {
             url.query_pairs_mut().append_pair(key, value);
         }
         let person = bearer.is_none() && self.person.lock().map_err(|_| anyhow!("gateway session lock failed"))?.is_some();
@@ -361,10 +372,11 @@ impl Gateway {
             Ok(response)
         } else {
             let bootstrap = self.bootstrap_action(&method, action)
-                && (query.is_none()
-                    || query.is_some_and(|(name, epoch)| {
-                        name == "epoch" && super::format::is_uuid(epoch) && matches!(action, "challenge" | "token")
-                    }));
+                && (query.is_empty()
+                    || query.len() == 1
+                        && query.first().is_some_and(|(name, epoch)| {
+                            *name == "epoch" && super::format::is_uuid(epoch) && matches!(action, "challenge" | "token")
+                        }));
             let response = send(bearer.or_else(|| if bootstrap { self.token.as_deref() } else { None }))?;
             if bootstrap && response.status().as_u16() == 404 && (action != "store.json" || self.token.is_some()) {
                 bail!("gateway bootstrap: HTTP 404 (no such project or machine slot); check the project name and a missing or wrong LAYR_GATEWAY_TOKEN_FILE grant");
@@ -429,15 +441,19 @@ impl Gateway {
     }
 
     fn read_request(&self, action: &str, query: Option<(&str, &str)>) -> Result<Response> {
+        self.read_request_query(action, query.as_slice())
+    }
+
+    fn read_request_query(&self, action: &str, query: &[(&str, &str)]) -> Result<Response> {
         let token = self.proof().with_context(|| format!("gateway read {action}"))?;
-        let response = self.send(Method::GET, action, Some(&token), query, None)?;
+        let response = self.send_query(Method::GET, action, Some(&token), query, None)?;
         if response.status().as_u16() != 401 {
             return Ok(response);
         }
         // A gateway restart discards its in-memory HMAC key. Exchange one new proof.
         *self.read.lock().map_err(|_| anyhow!("gateway read token lock failed"))? = None;
         let token = self.proof()?;
-        self.send(Method::GET, action, Some(&token), query, None)
+        self.send_query(Method::GET, action, Some(&token), query, None)
     }
 
     pub fn prove_reader(&self) -> Result<()> {
@@ -457,11 +473,15 @@ impl Gateway {
     }
 
     fn public_request(&self, action: &str, prefix: Option<&str>) -> Result<Response> {
+        self.public_request_query(action, prefix.map(|value| ("prefix", value)).as_slice())
+    }
+
+    fn public_request_query(&self, action: &str, query: &[(&str, &str)]) -> Result<Response> {
         let mut url = self.base.clone();
         let path = self.base.path().strip_prefix("/v1").context("invalid gateway base")?;
         url.set_path(&format!("{path}{action}"));
-        if let Some(prefix) = prefix {
-            url.query_pairs_mut().append_pair("prefix", prefix);
+        for (key, value) in query {
+            url.query_pairs_mut().append_pair(key, value);
         }
         // Anonymous routes are GET only and never carry a token or private read proof.
         self.http.get(url).send().map_err(reqwest::Error::without_url).map_err(Into::into)
@@ -606,9 +626,11 @@ impl Gateway {
         #[derive(Deserialize)]
         struct Objects {
             objects: Vec<Entry>,
+            #[serde(default)]
+            continuation: Option<String>,
         }
         let has_identity = self.identity.lock().map_err(|_| anyhow!("gateway identity lock failed"))?.is_some();
-        let response = if self.is_public() {
+        if self.is_public() {
             let logical = epoch_path(prefix).map(|(_, k)| k).unwrap_or(prefix);
             if !prefix.starts_with("keys/")
                 && !logical.starts_with("records/")
@@ -617,29 +639,56 @@ impl Gateway {
             {
                 return Ok(Vec::new());
             }
-            self.public_request("objects", Some(prefix))?
-        } else if !has_identity
-            && (prefix.starts_with("records/")
-                || prefix.starts_with("states/")
-                || prefix == "keys/"
-                || overlay_keys_prefix(prefix))
-        {
-            self.send(Method::GET, "objects", self.token.as_deref(), Some(("prefix", prefix)), None)?
-        } else {
-            self.read_request("objects", Some(("prefix", prefix)))?
-        };
-        let listing: Objects = json(response, 8 << 20)?;
-        if listing.objects.len() > 10_000 {
-            bail!("too many gateway objects");
         }
         let mut found = std::collections::BTreeSet::new();
+        let mut cursors = std::collections::BTreeSet::new();
+        let mut continuation: Option<String> = None;
         let mut objects = Vec::new();
-        for entry in listing.objects {
-            super::backend::check_key(&entry.key)?;
-            if !entry.key.starts_with(prefix) || !found.insert(entry.key.clone()) {
-                bail!("invalid gateway object listing");
+        let mut legacy = false;
+        loop {
+            let mut query = vec![("prefix", prefix)];
+            if !legacy {
+                query.push(("limit", "1000"));
             }
-            objects.push(Object { key: entry.key, modified: entry.modified / 1000 });
+            if let Some(cursor) = &continuation {
+                query.push(("continuation", cursor));
+            }
+            let response = if self.is_public() {
+                self.public_request_query("objects", &query)?
+            } else if !has_identity
+                && (prefix.starts_with("records/")
+                    || prefix.starts_with("states/")
+                    || prefix == "keys/"
+                    || overlay_keys_prefix(prefix))
+            {
+                self.send_query(Method::GET, "objects", self.token.as_deref(), &query, None)?
+            } else {
+                self.read_request_query("objects", &query)?
+            };
+            if response.status().as_u16() == 400 && continuation.is_none() && !legacy {
+                // Older servers may reject the opt-in pagination query. Retry only the first
+                // page with the legacy prefix query and the same authentication boundary.
+                legacy = true;
+                continue;
+            }
+            // Older gateways may omit the cursor and return their bounded complete listing.
+            // New gateways return at most 1,000 objects per page, each at most 8 MiB.
+            let listing: Objects = json(response, 8 << 20)?;
+            if objects.len() + listing.objects.len() > 100_000 {
+                bail!("too many gateway objects");
+            }
+            for entry in listing.objects {
+                super::backend::check_key(&entry.key)?;
+                if !entry.key.starts_with(prefix) || !found.insert(entry.key.clone()) {
+                    bail!("invalid gateway object listing");
+                }
+                objects.push(Object { key: entry.key, modified: entry.modified / 1000 });
+            }
+            let Some(cursor) = listing.continuation else { break };
+            if cursor.is_empty() || cursor.len() > 8192 || !cursors.insert(cursor.clone()) || cursors.len() > 1024 {
+                bail!("invalid gateway listing continuation");
+            }
+            continuation = Some(cursor);
         }
         objects.sort_by(|a, b| a.key.cmp(&b.key));
         Ok(objects)
@@ -781,6 +830,118 @@ fn token_file(path: &std::path::Path, uid: u32) -> Result<String> {
 mod tests {
     use super::*;
     use std::os::unix::fs::{symlink, PermissionsExt};
+    fn listing_pages(pages: Vec<serde_json::Value>, public: bool) -> Result<Vec<Object>> {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for (number, page) in pages.into_iter().enumerate() {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let mut request = Vec::new();
+                let mut byte = [0];
+                while !request.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).unwrap();
+                    request.push(byte[0]);
+                }
+                let request = String::from_utf8(request).unwrap().to_ascii_lowercase();
+                assert!(request.starts_with(if public { "get /p/project/objects?" } else { "get /v1/p/project/objects?" }));
+                assert!(request.contains("limit=1000"));
+                assert_eq!(request.contains("continuation="), number > 0);
+                assert_eq!(request.contains("authorization: bearer fixture.write"), !public);
+                let body = serde_json::to_vec(&page).unwrap();
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+                let _ = stream.write_all(&body);
+            }
+        });
+        let mut gateway = Gateway::open("layr+https://localhost/project").unwrap();
+        gateway.base = reqwest::Url::parse(&format!("http://{address}/v1/p/project/")).unwrap();
+        gateway.token = Some("fixture.write".into());
+        if public {
+            gateway.use_public_access();
+        }
+        let result = gateway.list("states/");
+        server.join().unwrap();
+        result
+    }
+
+    #[test]
+    fn listings_follow_pages_above_ten_thousand_and_preserve_access_modes() {
+        for public in [false, true] {
+            let pages = (0..11).map(|page| serde_json::json!({
+                "objects": (page*1000..(page+1)*1000).map(|n| serde_json::json!({"key":format!("states/{n:05}/data"),"modified":1000})).collect::<Vec<_>>(),
+                "continuation": if page < 10 { Some(format!("page{page}")) } else { None }
+            })).collect();
+            assert_eq!(listing_pages(pages, public).unwrap().len(), 11_000);
+        }
+    }
+
+    #[test]
+    fn old_gateways_can_reject_pagination_and_return_a_bounded_legacy_listing() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        for public in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                for first in [true, false] {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                    let mut request = Vec::new();
+                    let mut byte = [0];
+                    while !request.ends_with(b"\r\n\r\n") {
+                        stream.read_exact(&mut byte).unwrap();
+                        request.push(byte[0]);
+                    }
+                    let request = String::from_utf8(request).unwrap().to_ascii_lowercase();
+                    assert!(request.starts_with(if public { "get /p/project/objects?" } else { "get /v1/p/project/objects?" }));
+                    assert_eq!(request.contains("limit="), first);
+                    assert_eq!(request.contains("authorization: bearer fixture.write"), !public);
+                    let (status, body) =
+                        if first { (400, "{}") } else { (200, "{\"objects\":[{\"key\":\"states/a\",\"modified\":1000}]}") };
+                    write!(
+                        stream,
+                        "HTTP/1.1 {status} response\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .unwrap();
+                }
+            });
+            let mut gateway = Gateway::open("layr+https://localhost/project").unwrap();
+            gateway.base = reqwest::Url::parse(&format!("http://{address}/v1/p/project/")).unwrap();
+            gateway.token = Some("fixture.write".into());
+            if public {
+                gateway.use_public_access();
+            }
+            assert_eq!(gateway.list("states/").unwrap().len(), 1);
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn listings_reject_duplicates_cursor_loops_bad_prefixes_and_excess_totals() {
+        let entry = |key: &str| serde_json::json!({"key":key,"modified":1000});
+        for pages in [
+            vec![
+                serde_json::json!({"objects":[entry("states/a")],"continuation":"next"}),
+                serde_json::json!({"objects":[entry("states/a")]}),
+            ],
+            vec![
+                serde_json::json!({"objects":[entry("states/a")],"continuation":"next"}),
+                serde_json::json!({"objects":[entry("states/b")],"continuation":"next"}),
+            ],
+            vec![serde_json::json!({"objects":[entry("records/a")]})],
+        ] {
+            assert!(listing_pages(pages, false).is_err());
+        }
+        let pages =
+            vec![serde_json::json!({"objects":[],"continuation":"next"}), serde_json::json!({"objects":[entry("states/a")]})];
+        assert_eq!(listing_pages(pages, true).unwrap().len(), 1);
+        let oversized = (0..100_001).map(|n| entry(&format!("states/{n}"))).collect::<Vec<_>>();
+        assert!(listing_pages(vec![serde_json::json!({"objects":oversized})], false).is_err());
+    }
+
     #[test]
     fn token_expiry_tolerates_a_client_clock_behind_the_gateway() {
         let gateway_now = 1_792_951_000_000;
@@ -871,22 +1032,29 @@ mod tests {
             ] {
                 let (mut stream, _) = listener.accept().unwrap();
                 stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-                let mut bytes = Vec::new(); let mut part = [0;2048];
-                while !bytes.windows(4).any(|p|p==b"\r\n\r\n") {
-                    let count=stream.read(&mut part).unwrap(); assert!(count>0);bytes.extend_from_slice(&part[..count]);
+                let mut bytes = Vec::new();
+                let mut part = [0; 2048];
+                while !bytes.windows(4).any(|p| p == b"\r\n\r\n") {
+                    let count = stream.read(&mut part).unwrap();
+                    assert!(count > 0);
+                    bytes.extend_from_slice(&part[..count]);
                 }
-                let request=String::from_utf8(bytes).unwrap().to_ascii_lowercase();
+                let request = String::from_utf8(bytes).unwrap().to_ascii_lowercase();
                 assert!(request.starts_with(&format!("put /v1/p/project/objects/{path} ")));
                 assert!(request.contains(&format!("authorization: bearer {bearer}\r\n")));
-                write!(stream,"HTTP/1.1 201 Created\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                write!(stream, "HTTP/1.1 201 Created\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
             }
         });
-        let mut gateway=Gateway::open("layr+https://localhost/project").unwrap();
-        gateway.base=reqwest::Url::parse(&format!("http://{address}/v1/p/project/")).unwrap();
-        gateway.token=Some("project.grant".into());
-        *gateway.read.lock().unwrap()=Some(("old.read.proof".into(),crate::ids::now_ms()+60_000));
-        for key in [format!("project/epochs/{epoch}/slots/machine-test.age"),"slots/machine-test.age".into(),format!("project/epochs/{epoch}/history/root.age")] {
-            assert!(gateway.put_new(&key,b"sealed object".to_vec()).unwrap());
+        let mut gateway = Gateway::open("layr+https://localhost/project").unwrap();
+        gateway.base = reqwest::Url::parse(&format!("http://{address}/v1/p/project/")).unwrap();
+        gateway.token = Some("project.grant".into());
+        *gateway.read.lock().unwrap() = Some(("old.read.proof".into(), crate::ids::now_ms() + 60_000));
+        for key in [
+            format!("project/epochs/{epoch}/slots/machine-test.age"),
+            "slots/machine-test.age".into(),
+            format!("project/epochs/{epoch}/history/root.age"),
+        ] {
+            assert!(gateway.put_new(&key, b"sealed object".to_vec()).unwrap());
         }
         server.join().unwrap();
     }

@@ -3,6 +3,7 @@
 Status: file overlays support shared and follow mode (section 9), store encryption and peer sync (section 10). Sections 1
 to 8 are the design and the experiments of 2026-10-11; section 9 says what the slice does, where
 it differs from the design, and what is left.
+[Cache overlays](cache-overlays.md) adds overlay properties, folder overlays and remotes per layer.
 
 An overlay is a file tree with an owner, readers and its own history. A line shows several
 overlays as one folder. With overlays, a project keeps files in history that not every reader
@@ -373,7 +374,7 @@ are in `tests/t16-overlays.sh`; the model is in `src/overlay.rs`.
 | `layr overlay log <name> --ops [--json]` | All operations from the overlay's own signed records, newest first. JSON is an array with the CLI operation name, actor, time and record ID. Payloads and key material are omitted. |
 
 The metadata JSON fields are `name`, `hidden`, `access_mode`, `readers`, `managers`, `epochs`, `patterns`,
-`peers`, and `state`. Readers use canonical principals and kinds `user`, `group`, `everyone`,
+`peers`, `state`, and `properties` (`history`, `quiet`, `merge`, `gc`; see [cache overlays](cache-overlays.md)). Readers use canonical principals and kinds `user`, `group`, `everyone`,
 `machine`, or `person`. Each epoch has `number`, `id`, `time` in milliseconds and `machine`.
 Numbers start at 1 in signed key record application order (time, machine, sequence), rather
 than UUID order. A later signed record for the same epoch ID gets its own number. `reason`
