@@ -211,6 +211,7 @@ pub mod git {
         repo.authorize_line(ctx, &line, crate::repo::LineOp::Save)?;
         let _lock = repo.p.lock()?;
         let line = repo.line(&line.id)?;
+        gitbridge::check_git_head(repo, &line)?;
         let state = repo.state(&line.head)?;
         if !state.conflicts.is_empty() {
             return Err(exit(
@@ -259,6 +260,9 @@ pub mod git {
         let h = here(ctx)?;
         let repo = &h.repo;
         let line = h.line.clone();
+        if let Some(l) = &line {
+            gitbridge::check_git_head(repo, l)?;
+        }
         let remote = a.pos.first().cloned().unwrap_or_else(|| "origin".into());
         let (rev, branch) = match a.pos.get(1) {
             Some(spec) => match spec.split_once(':') {

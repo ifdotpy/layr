@@ -1565,6 +1565,7 @@ impl<'a> Repo<'a> {
         working_before: Option<String>,
         data: serde_json::Value,
     ) -> Result<Record> {
+        crate::gitbridge::check_git_head(self, line)?;
         let mut rec = Record::new(op);
         rec.states = states;
         let working_after = match &working_before {
