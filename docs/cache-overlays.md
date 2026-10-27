@@ -319,9 +319,8 @@ tests in `src/cache_overlay.rs`.
 Limits of slice d:
 
 - Peer sync (`ssh://`) has no platform filter. A peer gets an overlay only when the overlay
-  permits it (section 10 of [overlays](overlays.md)); cache overlays have readers `*` and no
-  machine readers, so peers do not get them by default.
-- A store encrypts an overlay for its readers. A cache overlay reaches another machine through a
-  store only with a slot that opens: the owner's paper key, or a machine reader added with
-  `layr overlay readers cache.<folder> '*' machine:<UUID>`.
+  permits it (section 10 of [overlays](overlays.md)); the readers of a cache overlay are the
+  machines the project trusts, so trusted peers get caches and other peers do not.
+- A store encrypts an overlay for its readers: a trusted machine opens a cache overlay with its
+  machine slot, which the next push makes; the owner's paper key opens it too.
 - The live move (`sync --caches`) still uses the old state caches.
