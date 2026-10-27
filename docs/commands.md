@@ -12,19 +12,19 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | access        | `access [list|grant [--until <30m|2h|1d>]|revoke|deny|allow|check]`, `protect [<pattern> --update <role> --check <names> --path <path>=<role> --approvals <n> --approvers <principals> --direct --rewrite <role> --no-expect | --remove]`, `approve [--withdraw] <state>`, `attest <kind> <rev> [--payload <file>]`, `attestations <rev> [--kind <kind>] [--json]` |
 | safety        | `undo`, `op log`, `save`, `try <state> -- <cmd>`, `try <state> --check <name>`, `bisect list [--json]`, `bisect run [--good <rev>] [--bad <rev>] [--auto] [--ref-log <ref>] [--json] -- <cmd>`, `gc`, `fsck`, `reindex` |
 | Git bridge    | `git remote`, `git fetch`, `git pull`, `git push [--squash]`, `git clone`, `git sync`                             |
-| remotes       | `remote add\|list\|self\|remove\|trust`, `remote public <remote> on\|off`, `sync <remote>`, `push <remote>`, `fetch <remote>`, `pull <remote>`, `clone <url>` |
+| remotes       | `remote add\|list\|self\|remove\|trust`, `remote public <remote> on\|off`, `sync <remote>`, `push <remote>`, `push [--dry-run]` (every layer to each of its remotes), `overlay remote add\|list\|remove`, `fetch <remote>`, `pull <remote>`, `clone <url>` |
 | OCI           | `push <oci-remote> <rev> [--runnable <name>] [--json]`, `access token <principal> [--until <duration>]`, `access token --revoke <principal>` |
 | records       | `op export`, `op import` (JSONL) |
 | copies        | `export <folder>`                                                                              |
 | views         | `view [<rev or line>] [--json]`, `view save [<line>] [--json]`, `view show <id> [--json]` |
-| overlays      | `overlay create <name> [--readers <principals>] [--mode shared\|follow] [--hidden]`, `overlay list [--json]`, `overlay show-to-project <name>`, `overlay readers`, `overlay use [--add\|--remove\|--none] <names>`, `overlay move [--purge] <name> <paths>`, `overlay log\|show\|diff\|grep\|ls-files <name>` |
+| overlays      | `overlay create <name> [--readers <principals>] [--mode shared\|follow] [--hidden] [--history all\|last\|<N>] [--quiet] [--merge three-way\|union-theirs] [--gc none\|lru:<size>]`, `overlay set <name> <properties>`, `overlay list [--json]`, `overlay show-to-project <name>`, `overlay readers`, `overlay use [--add\|--remove\|--none] <names>`, `overlay move [--purge] <name> <paths>`, `overlay log\|show\|diff\|grep\|ls-files <name>` |
 | refs          | `ref set <name> <rev> [--expect <rev>] [--ttl <dur>]`, `ref list [<prefix>]`, `ref log <name>`, `ref delete <name> [--expect <rev>]` |
 | queue         | `queue add <rev> [--into <line>]`, `queue list [--into <line>] [--json]`, `queue remove <entry>`, `queue run [--into <line>]` |
 | probes        | `probe run <rev> [--probe <name>] [--json]`, `probe diff <base> <head> [--json]` |
 | changes       | `comment <change> <text> [--version vN] [--path <path>] [--line N] [--reply-to <id>] [--json]`, `change list`, `change show <id>`, `change log <id>`, `change diff <id> [--from vN] [--to vM]` |
 | requests      | `request <kind> ... --person [--remote <name>] [--expires <epoch-ms>]`, `requests apply [--remote <name>] [--json]` |
 | person        | `person keys [--paper-key-out <path>] [--site <url>] [--store <url>]`, `person show [--json]`, `person accept`, `access person-key <login> <public-key>` |
-| setup         | `init`, `projects`, `config`, `cache add|remove|list|repair`, `daemon`                        |
+| setup         | `init`, `projects`, `config`, `cache add|remove|list [-v]|repair|pull <line or state>`, `daemon`                        |
 
 Person signing-key pins are machine-local: enrollment pins them on the executor, and an admin can later run `layr access person-key <login> <public-key>` there.
 Pins do not replicate because a trusted writer machine must not replace a person's key and impersonate their approvals.
@@ -226,7 +226,7 @@ Use `layr overlay show-to-project <name>` to make one visible to project readers
 This change is recorded and cannot be reversed.
 
 `layr overlay show <name> --json` writes an object with `name`, `hidden`, `access_mode`, `readers`,
-`managers`, `epochs`, `patterns`, `peers`, and `state`. Each reader has a canonical
+`managers`, `epochs`, `patterns`, `peers`, `state`, and `properties`. Each reader has a canonical
 `principal` and a `kind` (`user`, `group`, `everyone`, `machine`, or `person`). Person
 principals contain the login without the age recipient. Managers are machine UUIDs.
 Epochs have `number`, `id`, `time` (milliseconds), and `machine`; `reason` appears only

@@ -103,7 +103,7 @@ pub mod git {
                 continue;
             }
             let prev = repo.p.db.remote_ref(name)?;
-            let (st, fresh) = gitbridge::import_commit(ctx, repo, commit, name, ctx.caller.uid)?;
+            let (st, fresh) = gitbridge::import_commit(ctx, repo, commit, name, ctx.caller.uid, None)?;
             if prev.as_ref().map(|p| p.0 != st).unwrap_or(true) && !fresh {
                 let mut rec = Record::new("remote.ref");
                 rec.data = serde_json::json!({"ref": name, "state": st, "commit": commit});
@@ -734,6 +734,10 @@ pub fn sync(ctx: &Ctx, args: &[String]) -> Result<i32> {
     exchange(ctx, args, "sync")
 }
 pub fn push(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    // Without a remote name: every layer to each of its remotes (docs/cache-overlays.md).
+    if args.iter().all(|s| s.starts_with('-')) {
+        return super::layerpush::push_all(ctx, args);
+    }
     exchange(ctx, args, "push")
 }
 pub fn index(ctx: &Ctx, args: &[String]) -> Result<i32> {
@@ -837,6 +841,9 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
     )?;
     match remote_kind {
         Kind::Peer { host, project } => {
+            // Peer exchange transfers signed records as well as states.
+            h.repo.require(ctx, "sync")?;
+            h.repo.require(ctx, "records")?;
             let command = if a.has("--command") {
                 if a.paths.is_empty() {
                     bail!("--command needs -- <command> [<args>]");
@@ -863,6 +870,10 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
             }
         }
         Kind::Store => {
+            if !public_fetch {
+                h.repo.require(ctx, "sync")?;
+                h.repo.require(ctx, "records")?;
+            }
             if a.has("--command") {
                 bail!("--command is available only for peer remotes");
             }
