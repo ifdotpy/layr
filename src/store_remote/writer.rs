@@ -1162,7 +1162,11 @@ mod tests {
     #[test]
     #[ignore = "subprocess helper for crash_content_hashes"]
     fn crash_push_process() {
-        let root = std::path::PathBuf::from(std::env::var_os("LAYR_TEST_CRASH_ROOT").unwrap());
+        // CI runs ignored tests too (--include-ignored). Without the variable this is not a
+        // subprocess run, so do nothing. The crash tests fail if their subprocess does not push.
+        let Some(root) = std::env::var_os("LAYR_TEST_CRASH_ROOT").map(std::path::PathBuf::from) else {
+            return;
+        };
         let ctx = context(&root);
         let store = remote(&root, &ctx);
         let repo = branch_fixture(&ctx, &store);
