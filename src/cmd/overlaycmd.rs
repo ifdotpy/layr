@@ -27,7 +27,7 @@ const USAGE: &str =
        layr overlay show <name> --json
        layr overlay log <name> --ops [--json]
        layr overlay log|show|diff|grep|ls-files|blame <name> [<args>]
-properties: --history all|last|<N>  --quiet|--no-quiet  --merge three-way|union-theirs  --gc none|lru:<size>";
+properties: --history all|last|<N>  --quiet|--no-quiet  --merge three-way|union-theirs  --gc none|lru:<size>  --key-files <files>|none";
 
 pub fn overlay(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let sub = args.first().map(|s| s.as_str()).unwrap_or("list");
@@ -122,7 +122,8 @@ fn create(ctx: &Ctx, args: &[String]) -> Result<i32> {
             return Err(exit(128, format!("fatal: overlay '{other}' already holds folder {f}")));
         }
     }
-    make_overlay(ctx, repo, &name, &readers, mode, hidden, &props, folder.as_deref(), false)?;
+    let key_files = a.get("--key-files").map(key_files_value).transpose()?;
+    make_overlay(ctx, repo, &name, &readers, mode, hidden, &props, folder.as_deref(), false, key_files.as_ref())?;
     if !a.has("-q") {
         let mut who: Vec<String> = vec![ctx.caller.user.clone()];
         who.extend(readers.iter().map(|r| show_principal(r)));
@@ -151,6 +152,7 @@ pub(crate) fn make_overlay(
     props: &Props,
     folder: Option<&str>,
     cache: bool,
+    key_files: Option<&serde_json::Value>,
 ) -> Result<()> {
     let owner = ctx.caller.uid;
     let pname = format!("{}%{name}", repo.p.name);
@@ -206,6 +208,9 @@ pub(crate) fn make_overlay(
         if let Some(f) = folder {
             cfg.insert(format!("overlay.{name}.folder"), serde_json::json!(f));
         }
+        if let Some(k) = key_files {
+            cfg.insert(format!("overlay.{name}.key-files"), k.clone());
+        }
         // A cache overlay follows the cache paths (`regenerable`, `cache add`) of each line.
         if cache {
             cfg.insert(format!("overlay.{name}.cache"), serde_json::json!(true));
@@ -247,7 +252,19 @@ fn refuse_folder(repo: &Repo, name: &str) -> Result<()> {
 
 /// The options of overlay properties (docs/cache-overlays.md, section 4).
 fn props_spec(spec: Spec) -> Spec {
-    spec.value("--history").flag("--quiet").flag("--no-quiet").value("--merge").value("--gc")
+    spec.value("--history").flag("--quiet").flag("--no-quiet").value("--merge").value("--gc").value("--key-files")
+}
+
+/// `--key-files a,b` as the setting value; `none` clears it.
+fn key_files_value(v: &str) -> Result<serde_json::Value> {
+    if v == "none" {
+        return Ok(serde_json::Value::Null);
+    }
+    let mut files = Vec::new();
+    for f in v.split(',').map(str::trim).filter(|f| !f.is_empty()) {
+        files.push(crate::cache_overlay::folder_path(f)?);
+    }
+    Ok(serde_json::json!(files))
 }
 
 /// `base` with the property options of `a`.
@@ -300,6 +317,10 @@ fn set(ctx: &Ctx, args: &[String]) -> Result<i32> {
             cfg.insert(format!("overlay.{name}.{prop}"), new.value(prop));
         }
     }
+    // The files of the platform key of a cache (docs/cache-overlays.md, section 6).
+    if let Some(v) = a.get("--key-files") {
+        cfg.insert(format!("overlay.{name}.key-files"), key_files_value(v)?);
+    }
     if !cfg.is_empty() {
         let mut rec = Record::new("config");
         rec.data = serde_json::json!({"config": cfg});
@@ -348,6 +369,10 @@ fn list(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let mut described = props.describe();
             if let Some(f) = repo.overlay_setting(&name, "folder")?.and_then(|v| v.as_str().map(str::to_owned)) {
                 described.insert(0, format!("folder={f}"));
+            }
+            let keys = repo.key_files(&name)?;
+            if !keys.is_empty() {
+                described.push(format!("key-files={}", keys.join(",")));
             }
             outln!(
                 ctx,
