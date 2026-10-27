@@ -1,7 +1,7 @@
 # Cache overlays and remotes per layer
 
 Status: design approved by the owner on 2026-10-27. Section 9 says which slice builds which part.
-Built: slice a (section 11), slice b (section 12), slice c (section 13).
+Built: slices a to d (sections 11 to 14).
 This file extends [overlays](overlays.md) (the model of layers, section 9 = what is built) and
 replaces the cache part of [design](design.md#5-warm-caches) as the slices land.
 
@@ -291,3 +291,29 @@ Built on 2026-10-27: git remotes per overlay and `layr push` of every layer. Tes
 - A failed remote is reported and the others still run; the exit code is 1.
 - The secret detector does not check an overlay's git push: an overlay is where private files
   belong. Its remote must be as private as its readers.
+
+## 14. Built: slice d
+
+Built on 2026-10-27: the platform key and the platform filter of layr remotes. Tests:
+`tests/t61-cache-platform.sh` (one user; a local store and a clone with the paper key) and unit
+tests in `src/cache_overlay.rs`.
+
+- `overlay create|set <name> --key-files <a,b>|none` sets `overlay.<name>.key-files`. The project
+  setting `cache.key-files` (a JSON array) gives each new cache overlay its key files, for example
+  `layr config cache.key-files '["Cargo.lock", "rust-toolchain.toml"]'`. `overlay list` shows them.
+- Each cache state records its key; `line new`, `merge` and `cache pull` take a state only when its
+  key equals the key computed in the target folder at that time. A changed lock file makes the next
+  line cold until the next `save --caches`.
+- A store fetch or clone does not import a cache overlay state of another `<os>-<arch>`; the report
+  names it (`cache state <id>: platform <key>`). The states of the same `<os>-<arch>` with other key
+  files are imported; lines just do not take them.
+
+Limits of slice d:
+
+- Peer sync (`ssh://`) has no platform filter. A peer gets an overlay only when the overlay
+  permits it (section 10 of [overlays](overlays.md)); cache overlays have readers `*` and no
+  machine readers, so peers do not get them by default.
+- A store encrypts an overlay for its readers. A cache overlay reaches another machine through a
+  store only with a slot that opens: the owner's paper key, or a machine reader added with
+  `layr overlay readers cache.<folder> '*' machine:<UUID>`.
+- The live move (`sync --caches`) still uses the old state caches.
