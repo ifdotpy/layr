@@ -3,6 +3,7 @@
 Status: file overlays support shared and follow mode (section 9), store encryption and peer sync (section 10). Sections 1
 to 8 are the design and the experiments of 2026-10-11; section 9 says what the slice does, where
 it differs from the design, and what is left.
+[Cache overlays](cache-overlays.md) adds overlay properties, folder overlays and remotes per layer.
 
 An overlay is a file tree with an owner, readers and its own history. A line shows several
 overlays as one folder. With overlays, a project keeps files in history that not every reader
