@@ -24,7 +24,7 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | changes       | `comment <change> <text> [--version vN] [--path <path>] [--line N] [--reply-to <id>] [--json]`, `change list`, `change show <id>`, `change log <id>`, `change diff <id> [--from vN] [--to vM]` |
 | requests      | `request <kind> ... --person [--remote <name>] [--expires <epoch-ms>]`, `requests apply [--remote <name>] [--json]` |
 | person        | `person keys [--paper-key-out <path>] [--site <url>] [--store <url>]`, `person show [--json]`, `person accept`, `access person-key <login> <public-key>` |
-| setup         | `init`, `projects`, `config`, `cache add|remove|list|repair`, `daemon`                        |
+| setup         | `init`, `projects`, `config`, `cache add|remove|list [-v]|repair|pull <line or state>`, `daemon`                        |
 
 Person signing-key pins are machine-local: enrollment pins them on the executor, and an admin can later run `layr access person-key <login> <public-key>` there.
 Pins do not replicate because a trusted writer machine must not replace a person's key and impersonate their approvals.

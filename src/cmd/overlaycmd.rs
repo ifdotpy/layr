@@ -15,7 +15,7 @@ use anyhow::Result;
 use std::collections::{BTreeMap, BTreeSet};
 
 const USAGE: &str =
-    "usage: layr overlay create <name> [--readers <principal>,...] [--mode shared|follow] [--hidden] [<properties>]
+    "usage: layr overlay create <name> [--readers <principal>,...] [--mode shared|follow] [--hidden] [--folder <path>] [<properties>]
        layr overlay set <name> <properties>
        layr overlay show-to-project <name>
        layr overlay list
@@ -76,7 +76,7 @@ fn principals(list: &[String]) -> Result<Vec<String>> {
 }
 
 /// The access policy of an overlay: its owner is its admin, the readers read it.
-fn access_map(owner: u32, readers: &[String]) -> serde_json::Value {
+pub(crate) fn access_map(owner: u32, readers: &[String]) -> serde_json::Value {
     let mut m = serde_json::Map::new();
     for r in readers {
         m.insert(r.clone(), serde_json::json!("reader"));
@@ -86,7 +86,7 @@ fn access_map(owner: u32, readers: &[String]) -> serde_json::Value {
 }
 
 fn create(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let spec = props_spec(Spec::new().value("--readers|-r").value("--mode").flag("--hidden").flag("-q"));
+    let spec = props_spec(Spec::new().value("--readers|-r").value("--mode").flag("--hidden").flag("-q").value("--folder"));
     let a = parse(&spec, args)?;
     let props = props_of(&a, Props::default())?;
     let h = here(ctx)?;
@@ -98,25 +98,64 @@ fn create(ctx: &Ctx, args: &[String]) -> Result<i32> {
     check_name("overlay", &name)?;
     repo.require(ctx, "line.create")?;
     let hidden = a.has("--hidden");
+    let folder = a.get("--folder").map(crate::cache_overlay::folder_path).transpose()?;
     let mode = match a.get("--mode") {
         Some(m) => Mode::parse(m).ok_or_else(|| exit(128, format!("fatal: unknown mode '{m}' (shared or follow)")))?,
-        None if hidden => Mode::Follow,
+        None if hidden || folder.is_some() => Mode::Follow,
         None => Mode::Shared,
     };
     if hidden && mode != Mode::Follow {
         return Err(exit(128, "hidden overlays require follow mode"));
+    }
+    if folder.is_some() && (hidden || mode != Mode::Follow) {
+        return Err(exit(128, "a folder overlay uses follow mode and is not hidden"));
     }
     let readers = principals(&a.all("--readers"))?;
     let _lock = repo.p.lock()?;
     if repo.overlay_info(&name)?.is_some() {
         return Err(exit(128, format!("fatal: overlay '{name}' already exists")));
     }
+    if let Some(f) = &folder {
+        if let Some((other, _)) = repo.folder_overlays()?.into_iter().find(|(_, x)| x == f) {
+            return Err(exit(128, format!("fatal: overlay '{other}' already holds folder {f}")));
+        }
+    }
+    make_overlay(ctx, repo, &name, &readers, mode, hidden, &props, folder.as_deref(), false)?;
+    if !a.has("-q") {
+        let mut who: Vec<String> = vec![ctx.caller.user.clone()];
+        who.extend(readers.iter().map(|r| show_principal(r)));
+        who.dedup();
+        let mut shown = props.describe();
+        if let Some(f) = &folder {
+            shown.insert(0, format!("folder={f}"));
+        }
+        let extra = if shown.is_empty() { String::new() } else { format!("; {}", shown.join(" ")) };
+        outln!(ctx, "Created overlay {name} (mode {}; readers: {}{extra})", mode.name(), who.join(", "));
+    }
+    Ok(0)
+}
+
+/// Make overlay `name` of the caller with its empty first state and its records. The caller holds
+/// the project lock and has checked that no overlay has the name. `folder`: a folder overlay;
+/// `cache`: the cache overlay of a cache path (`save --caches`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn make_overlay(
+    ctx: &Ctx,
+    repo: &Repo,
+    name: &str,
+    readers: &[String],
+    mode: Mode,
+    hidden: bool,
+    props: &Props,
+    folder: Option<&str>,
+    cache: bool,
+) -> Result<()> {
     let owner = ctx.caller.uid;
     let pname = format!("{}%{name}", repo.p.name);
     let dir = ctx.store.project_dir(&pname)?;
     let made = (|| -> Result<String> {
         let config = serde_json::json!({
-            "access": access_map(owner, &readers),
+            "access": access_map(owner, readers),
             "overlay": {"project": repo.p.id, "name": name, "mode": mode.name(), "hidden": hidden},
         });
         let op = Project::create_overlay(&ctx.store, &pname, &ctx.actor(), config)?;
@@ -162,6 +201,13 @@ fn create(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 cfg.insert(format!("overlay.{name}.{prop}"), v);
             }
         }
+        if let Some(f) = folder {
+            cfg.insert(format!("overlay.{name}.folder"), serde_json::json!(f));
+        }
+        // A cache overlay follows the cache paths (`regenerable`, `cache add`) of each line.
+        if cache {
+            cfg.insert(format!("overlay.{name}.cache"), serde_json::json!(true));
+        }
         rec.data = serde_json::json!({"name": name, "parent":repo.p.id, "config": cfg});
         if hidden {
             orepo.commit_record(ctx, rec)?;
@@ -172,20 +218,29 @@ fn create(ctx: &Ctx, args: &[String]) -> Result<i32> {
     })();
     if let Err(e) = made {
         // No record of the project names the overlay: its folder goes.
-        if repo.overlay_info(&name)?.is_none() {
+        if repo.overlay_info(name)?.is_none() {
             let _ = btrfs::delete_tree(&dir);
         }
         return Err(e);
     }
-    if !a.has("-q") {
-        let mut who: Vec<String> = vec![ctx.caller.user.clone()];
-        who.extend(readers.iter().map(|r| show_principal(r)));
-        who.dedup();
-        let shown = props.describe();
-        let extra = if shown.is_empty() { String::new() } else { format!("; {}", shown.join(" ")) };
-        outln!(ctx, "Created overlay {name} (mode {}; readers: {}{extra})", mode.name(), who.join(", "));
+    Ok(())
+}
+
+/// A folder overlay is not part of the file stack: `save --caches`, `line new`, `merge` and
+/// `cache pull` move it (docs/cache-overlays.md, section 3).
+fn refuse_folder(repo: &Repo, name: &str) -> Result<()> {
+    if repo.overlay_info(name)?.is_some() {
+        if let Some(f) = repo.overlay_setting(name, "folder")? {
+            return Err(exit(
+                1,
+                format!(
+                    "error: overlay '{name}' is the folder overlay of {}; use layr save --caches or layr cache pull",
+                    f.as_str().unwrap_or("?")
+                ),
+            ));
+        }
     }
-    Ok(0)
+    Ok(())
 }
 
 /// The options of overlay properties (docs/cache-overlays.md, section 4).
@@ -288,7 +343,10 @@ fn list(ctx: &Ctx, args: &[String]) -> Result<i32> {
         if a.has("--json") {
             rows.push(serde_json::json!({"name":name,"mode":info.mode.name(),"hidden":info.hidden,"owner":info.owner,"readers":readers,"shown":shown.contains(&name),"properties":props.to_json()}));
         } else {
-            let described = props.describe();
+            let mut described = props.describe();
+            if let Some(f) = repo.overlay_setting(&name, "folder")?.and_then(|v| v.as_str().map(str::to_owned)) {
+                described.insert(0, format!("folder={f}"));
+            }
             outln!(
                 ctx,
                 "{mark}{name}\t{}{}\towner {owner}\treaders {}{}",
@@ -688,6 +746,7 @@ fn use_cmd(ctx: &Ctx, args: &[String]) -> Result<i32> {
         names.extend(cur.iter().map(|l| l.overlay.clone()));
     }
     for n in &a.pos {
+        refuse_folder(&h.repo, n)?;
         if a.has("--remove") {
             names.retain(|x| x != n);
         } else if !names.contains(n) {
@@ -762,6 +821,7 @@ fn move_cmd(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let name = a.rest()[0].clone();
     let specs = h.specs(&a.rest()[1..])?;
     repo.need_overlay(&name)?;
+    refuse_folder(repo, &name)?;
     repo.authorize_line(ctx, &line, crate::repo::LineOp::Save)?;
     let _lock = repo.p.lock()?;
     let mut line = repo.line(&line.id)?;
