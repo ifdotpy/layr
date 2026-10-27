@@ -147,16 +147,16 @@ is valid for a state, so it never decides that by itself:
 - A new line (and the temporary copy of a check) takes for each cache the snapshot of its start
   state, or else of the nearest ancestor state on this machine that has one. The copy shares
   all blocks; only its files change owner. The build tool then decides what to rebuild.
-- Which folders are caches: the paths of `layr cache add`, and the folders that `.layrattributes`
+- Which folders are caches: the paths of the project setting `regenerable`, and the folders that `.layrattributes`
   files mark `regenerable`. A `.layrattributes` line is a pattern of the `.gitignore` form and
   attributes (`node_modules regenerable`; `-regenerable` unsets it; the last matching line wins);
   a file applies to its folder. It is part of the project, so on a protected line it changes
   only through review. A regenerable folder is a cache only if the ignore rules ignore it: a
   cache must not hide files that are in history. For the same reason a folder with files in the
   head state is not a cache, even when the ignore rules ignore it (files added with `add -f`, or
-  kept by `init --include-ignored`): `save --caches`, `cache add` and `cache list` say so, and
-  `save --caches` and `cache repair` turn such a folder that an older layr made a cache back into
-  a plain folder. A new line takes a regenerable folder only warm, while its `.layrattributes`
+  kept by `init --include-ignored`): `save --caches` says so, and `save --caches` or
+  `layr overlay repair <overlay>` turns such a folder that an older layr made a cache back into a
+  plain folder. A new line takes a regenerable folder only warm, while its `.layrattributes`
   still marks it, and takes a folder with files from its state, even when an ancestor saved it
   as a cache.
 - Caches come only from `layr save --caches`, the explicit choice of someone who may save the

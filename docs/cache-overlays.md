@@ -41,7 +41,8 @@ A cache is an ordinary overlay with properties. No separate cache concept remain
   only to those machines.
 - **`regenerable`** in `.layrattributes` is a short form: the folder that it marks gets a cache
   overlay with that folder and the defaults above, the first time `layr save --caches` saves it.
-  `layr cache add <path>` does the same for the machine setting.
+  The project setting `regenerable` (`layr config regenerable '["<path>"]'`) names cache paths for
+  every line; a new line gets an empty cache of such a path at once.
 - Each line has its own overlay line in a follow overlay (`line-<line id>`). So **a line has
   caches**, not a state: `line new X <line>` takes the newest cache of that line.
 
@@ -77,13 +78,14 @@ plain folder; `save --caches` says so.
 | `layr overlay create <name> [--history all\|last\|<N>] [--quiet] [--merge three-way\|union-theirs] [--gc none\|lru:<size>] [--folder <path>] [--platform]` | Makes an overlay with these properties. |
 | `layr overlay set <name> [--history ...] [--quiet\|--no-quiet] [--merge ...] [--gc ...] [--platform\|--no-platform]` | Changes properties. The owner only. A record `overlay.set` keeps the change. `--folder` cannot change. |
 | `layr overlay list`, `layr overlay show <name> --json` | Also show the properties. |
-| `layr save --caches` | For each cache path of the line (as today: `regenerable` and `cache add`): makes its cache overlay when missing, makes the folder a nested layer when a tool made a plain folder, and saves a new state of the overlay line of this line (one clone). Older states go by `history`. |
+| `layr save --caches` | For each cache path of the line (`regenerable`, in `.layrattributes` or the project setting): makes its cache overlay when missing, makes the folder a nested layer when a tool made a plain folder, and saves a new state of the overlay line of this line (one clone). Older states go by `history`. |
 | `layr save -m <message>` | Also saves the quiet file overlays of the stack from the working folder (section 4.1). |
 | `layr line new <name> <line>` | The new line takes the newest state of each cache overlay of the source line. |
 | `layr line new <name> <state>` | The new line takes, for each cache overlay, the newest state saved at that state or at its nearest ancestor (the rule of `warm_cache` today). It prints `no cache for <path>` when there is none. |
 | `layr merge <line>` | Merges each follow overlay of the source line, with the overlay's `merge` property. A cache overlay unions the files into the target's folder. |
-| `layr cache pull <line or state>` | Takes the newest caches of another line or state into the current line (`merge=union-theirs` for one overlay, without a merge of the shared set). |
-| `layr cache list` | The cache overlays of the line: path, state, size on disk. |
+| `layr overlay repair <overlay>` | In the current line, the folder of that folder overlay: a plain folder becomes a cache again; a cache with versioned files becomes a plain folder. |
+| `layr overlay list` | Also shows, for each folder overlay in a line, the state of its folder, its size on disk and its saved state (was `layr cache list -v`). |
+| `layr cache add\|remove\|list\|repair\|pull` | Removed. Section 15 names the replacements. |
 | `layr gc` | Also applies `history` to overlay lines and `gc lru:<size>` to working folders. |
 | `layr overlay remote add <overlay> <remote> <git URL>` | The overlay's history goes to its own git repository (section 7). Refused for a cache overlay. |
 | `layr push [--dry-run]` | Pushes every layer to each of its remotes (section 7). `--dry-run` lists layer, remote and size. |
@@ -128,7 +130,7 @@ with `platform` records a key in each state:
 `["Cargo.lock", "rust-toolchain.toml"]`). layr does not know toolchains; the program on top names
 the files that select a toolchain. A missing file counts as empty.
 
-- `line new`, `cache pull` and merges take a state only when its key equals the key of the target
+- `line new` and merges take a state only when its key equals the key of the target
   line (computed in that line at that time).
 - Remotes (section 7): a layr remote carries the states of every platform; a receiving machine
   imports only the states of its own `<os>-<arch>`.
@@ -177,8 +179,8 @@ target     archive  layr  1 state, 812 MiB (macos-aarch64-...)
 - **`save --caches`** keeps its name and meaning for the user: it saves the caches of the line.
   It writes cache overlay states and no more `StateRec.caches`. On a protected line with no
   changes it no longer needs to give the caches to the head state: the caches belong to the line.
-- **`regenerable` and `cache add|remove|list|repair`** keep their meaning. `cache repair` turns a
-  plain folder at a cache path into a nested layer, as today.
+- **`regenerable`** keeps its meaning. The `cache` commands are removed (section 15). `overlay repair`
+  turns a plain folder at a cache path into a nested layer, as `cache repair` did.
 - **`sync --caches`** (live move) carries cache overlays as it carries other overlays; the old
   flag keeps the old cache snapshots for one release.
 - **Older layr binaries** read the overlay records as ordinary overlay records: properties are
@@ -249,7 +251,7 @@ Built on 2026-10-27: folder overlays and caches as cache overlays. Tests:
 - `line new X <line>` takes the newest cache state of that line (dogfood item 10).
   `line new X <state>` takes the newest cache of the line that made the state, or of the line of
   its nearest ancestor that has one (item 21). A cache overlay goes into a new line only while
-  its folder is a cache path there (`regenerable` or `cache add`) and the ignore rules ignore it.
+  its folder is a cache path there (`regenerable`) and the ignore rules ignore it.
   Without a cache overlay state, the old caches of the state apply as before.
 - `layr merge <line>` then brings the merged line's caches into the target (section 5): a
   fast-forward of the target's overlay line, or a `union-theirs` state; the incoming files are
@@ -260,9 +262,9 @@ Built on 2026-10-27: folder overlays and caches as cache overlays. Tests:
 - Cache overlay readers: the owner and every machine the project trusts (`machine:<UUID>`), not
   `*`. Local users take caches by the rules of `design.md` section 5 (their own, or saved on a
   protected line).
-- `layr cache pull <line or state>`: the same for one line, without a merge (item 24).
-- `layr cache list -v` adds the size of each cache folder and the overlay state the line saved.
-  `cache list` without `-v` keeps its output.
+- `layr cache pull <line or state>` (removed in section 15): the same for one line, without a merge (item 24).
+- `layr cache list -v` (removed in section 15) showed the size of each cache folder and the overlay state
+  the line saved; `overlay list` shows both.
 - `gc` applies `gc=lru:<size>` to the folder of each line (the newer of access and change time;
   apparent sizes) and deletes the cache states of deleted lines.
 - The secret detector does not read folder overlays: they hold build output.
@@ -309,7 +311,7 @@ tests in `src/cache_overlay.rs`.
 - `overlay create|set <name> --key-files <a,b>|none` sets `overlay.<name>.key-files`. The project
   setting `cache.key-files` (a JSON array) gives each new cache overlay its key files, for example
   `layr config cache.key-files '["Cargo.lock", "rust-toolchain.toml"]'`. `overlay list` shows them.
-- Each cache state records its key; `line new`, `merge` and `cache pull` take a state only when its
+- Each cache state records its key; `line new` and `merge` take a state only when its
   key equals the key computed in the target folder at that time. A changed lock file makes the next
   line cold until the next `save --caches`.
 - A store fetch or clone does not import a cache overlay state of another `<os>-<arch>`; the report
@@ -324,3 +326,30 @@ Limits of slice d:
 - A store encrypts an overlay for its readers: a trusted machine opens a cache overlay with its
   machine slot, which the next push makes; the owner's paper key opens it too.
 - The live move (`sync --caches`) still uses the old state caches.
+
+## 15. Command change (owner decision, 2026-10-27)
+
+A cache is an overlay. The `layr cache` command group is removed. Each form fails with exit
+status 2 and names its replacement:
+
+| Removed form | Replacement | Message |
+| --- | --- | --- |
+| `layr cache list [-v]` | `layr overlay list` | `layr cache list was removed. Use 'layr overlay list'.` |
+| `layr cache add <path>` | `regenerable` in `.layrattributes`, then `layr save --caches` | `layr cache add was removed. Use 'regenerable' in .layrattributes, then 'layr save --caches'.` |
+| `layr cache remove <path>` | `-regenerable` in `.layrattributes`, or `layr config regenerable` without the path | `layr cache remove was removed. Use '-regenerable' in .layrattributes, or 'layr config regenerable' without the path.` |
+| `layr cache repair` | `layr overlay repair <overlay>` | `layr cache repair was removed. Use 'layr overlay repair <overlay>'.` |
+| `layr cache pull <line or state>` | `layr line new <name> <line>`, or `layr merge <line>` | `layr cache pull was removed. Use 'layr line new <name> <line>' or 'layr merge <line>'.` |
+
+A bare `layr cache`, or any other form, fails with `layr cache was removed. Use 'layr overlay list'.`
+The lines that carry caches are unchanged:
+`line new` takes them, and `merge` brings them back.
+
+- `overlay list` shows folder overlays only. A regenerable folder with no overlay has no row. It
+  has no overlay until its first `save --caches`, and a folder with versioned files never gets one.
+  `save --caches` prints why a folder is no cache.
+- `overlay repair <overlay>` needs the overlay. It repairs one folder of the current line.
+- `cache add` converted the folder at once. With `regenerable`, `save --caches` converts it.
+- `overlay move` puts files in a file overlay. It does not make a folder a cache.
+- There is no `overlay delete`. The owner has not decided how to remove a cache overlay and its
+  history. `-regenerable` stops new saves of the folder; the overlay keeps its states.
+- `pull_caches` stays in the library: `merge` calls it.

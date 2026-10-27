@@ -143,7 +143,7 @@ def cache_conversion(repair, check_links):
     (target / "a").write_bytes(b"cache data\n" * 2048)
     os.link(target / "a", target / "nested/b")
     os.utime(target / "a", ns=(1700000000123456789, 1700000000123456789))
-    run(work, *( ["cache", "repair"] if repair else ["save", "--caches", "-q"] ))
+    run(work, *( ["overlay", "repair", "cache.target"] if repair else ["save", "--caches", "-q"] ))
     a, b = (target / "a").stat(), (target / "nested/b").stat()
     assert (target / "a").read_bytes() == b"cache data\n" * 2048
     if check_links:
@@ -172,7 +172,7 @@ def pnpm_cache(repair):
     shim.chmod(0o755)
     (target / ".bin/pkg-link").symlink_to("../pkg/index.js")
     (target / "dangling").symlink_to("missing")
-    run(work, *(["cache", "repair"] if repair else ["save", "--caches", "-q"]))
+    run(work, *(["overlay", "repair", "cache.target"] if repair else ["save", "--caches", "-q"]))
     for path, expected in [("pkg", ".pnpm/pkg@1/node_modules/pkg"),
                            (".pnpm/tool@1/node_modules/pkg", "../../pkg@1/node_modules/pkg"),
                            (".bin/pkg-link", "../pkg/index.js"), ("dangling", "missing")]:
@@ -196,7 +196,7 @@ def failed_cache_copy(repair, unreadable=False):
     else:
         os.mkfifo(target / "unsupported")
     try:
-        run(work, *(["cache", "repair"] if repair else ["save", "--caches", "-q"]), success=False)
+        run(work, *(["overlay", "repair", "cache.target"] if repair else ["save", "--caches", "-q"]), success=False)
     finally:
         if unreadable and (target / "unreadable").exists():
             (target / "unreadable").chmod(0o600)
@@ -226,7 +226,7 @@ def cache_readonly(repair):
     nested.chmod(0o555)
     target.chmod(0o555)
     try:
-        run(work, *(["cache", "repair"] if repair else ["save", "--caches", "-q"]))
+        run(work, *(["overlay", "repair", "cache.target"] if repair else ["save", "--caches", "-q"]))
         assert data.read_text() == "read-only cache output\n"
         assert target.stat().st_mode & 0o777 == 0o555
         assert nested.stat().st_mode & 0o777 == 0o555
@@ -268,7 +268,7 @@ def cache_directory_metadata(repair, kind):
             return subprocess.check_output(["/bin/ls", "-lde", str(path)], text=True).splitlines()[1:]
         expected = [acl(path) for path in (target, nested, data)]
         assert all(expected), expected
-    run(work, *(["cache", "repair"] if repair else ["save", "--caches", "-q"]))
+    run(work, *(["overlay", "repair", "cache.target"] if repair else ["save", "--caches", "-q"]))
     if kind == "mode":
         assert target.stat().st_mode & 0o777 == 0o700, oct(target.stat().st_mode)
         assert nested.stat().st_mode & 0o777 == 0o750, oct(nested.stat().st_mode)
@@ -280,7 +280,7 @@ def cache_directory_metadata(repair, kind):
                 assert os.getxattr(path, attribute) == b"cache directory"
     else:
         assert [acl(path) for path in (target, nested, data)] == expected
-    assert "cache" in run(work, "cache", "list").stdout
+    assert "\tcache\t" in run(work, "overlay", "list").stdout
 
 
 def cache_symlink_xattrs(repair):
@@ -308,7 +308,7 @@ def cache_symlink_xattrs(repair):
     put(outside, "referent attribute")
     put(target / "link", "link attribute")
     put(target / "dangling", "dangling attribute")
-    run(work, *(["cache", "repair"] if repair else ["save", "--caches", "-q"]))
+    run(work, *(["overlay", "repair", "cache.target"] if repair else ["save", "--caches", "-q"]))
     assert get(target / "link") == b"link attribute"
     assert get(target / "dangling") == b"dangling attribute"
     assert get(outside) == b"referent attribute"
