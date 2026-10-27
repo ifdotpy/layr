@@ -128,7 +128,9 @@ pub(crate) fn scan_with_data(root: &Path, data: bool) -> Result<BTreeMap<String,
         let _ = fs::create_dir_all(f.parent().unwrap())
             .map_err(anyhow::Error::from)
             .and_then(|_| crate::fsutil::atomic_write(&f, &encode_scan(&out), 0o600));
-        DECODED.lock().unwrap().push((f, std::sync::Arc::new(out.clone())));
+        let mut cache = DECODED.lock().unwrap();
+        cache.push((f.clone(), std::sync::Arc::new(out.clone())));
+        measure_scan("insert", measured_scan_bytes(&f, &out), cache.len());
     }
     Ok(out)
 }
@@ -138,12 +140,28 @@ pub(crate) fn scan_with_data(root: &Path, data: bool) -> Result<BTreeMap<String,
 static DECODED: std::sync::Mutex<Vec<(std::path::PathBuf, std::sync::Arc<BTreeMap<String, ScanEntry>>)>> =
     std::sync::Mutex::new(Vec::new());
 
-fn decoded(file: &Path) -> Option<std::sync::Arc<BTreeMap<String, ScanEntry>>> {
-    if let Some((_, scan)) = DECODED.lock().unwrap().iter().find(|(p, _)| p == file) {
-        return Some(scan.clone());
+fn measured_scan_bytes(file: &Path, scan: &BTreeMap<String, ScanEntry>) -> usize {
+    4096 + file.as_os_str().len() * 2 + scan.iter().map(|(path, _)| std::mem::size_of::<(String, ScanEntry)>() * 2 + 128 + path.capacity()).sum::<usize>()
+}
+fn measure_scan(event: &str, added: usize, entries: usize) {
+    let Some(path) = std::env::var_os("LAYR_APFS_SCAN_MEASURE_FILE") else { return; };
+    static BYTES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let bytes = if added > 0 { BYTES.fetch_add(added, std::sync::atomic::Ordering::Relaxed) + added } else { BYTES.load(std::sync::atomic::Ordering::Relaxed) };
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{{\"event\":\"{}\",\"retainedBytes\":{},\"entries\":{}}}", event, bytes, entries);
     }
+}
+fn decoded(file: &Path) -> Option<std::sync::Arc<BTreeMap<String, ScanEntry>>> {
+    let cache = DECODED.lock().unwrap();
+    let found = cache.iter().find(|(path, _)| path == file).map(|(_,scan)|scan.clone());
+    let count = cache.len(); drop(cache);
+    if let Some(scan) = found { measure_scan("hit", 0, count); return Some(scan); }
+    measure_scan("miss", 0, count);
     let scan = std::sync::Arc::new(decode_scan(&fs::read(file).ok()?)?);
-    DECODED.lock().unwrap().push((file.to_path_buf(), scan.clone()));
+    let mut cache = DECODED.lock().unwrap();
+    cache.push((file.to_path_buf(), scan.clone()));
+    measure_scan("insert", measured_scan_bytes(file, &scan), cache.len());
     Some(scan)
 }
 
