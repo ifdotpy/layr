@@ -134,10 +134,11 @@ sed_inplace() { # sed_inplace <sed options> <script> <file>
 }
 
 stat_field() { # stat_field <inode|mode> <file>
-    if [ "$(uname -s)" = Darwin ]; then
-        case $1 in inode) stat -f %i "$2" ;; mode) stat -f %Lp "$2" ;; esac
-    else
+    # Probe the flavor: CI puts GNU coreutils first in PATH even on macOS.
+    if stat --version >/dev/null 2>&1; then
         case $1 in inode) stat -c %i "$2" ;; mode) stat -c %a "$2" ;; esac
+    else
+        case $1 in inode) stat -f %i "$2" ;; mode) stat -f %Lp "$2" ;; esac
     fi
 }
 
