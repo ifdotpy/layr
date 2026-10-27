@@ -42,4 +42,17 @@ cd $T/b/store/projects/p/lines/main
 env LAYR_ROOT=$T/b/store $LAYR line new warm main >/dev/null 2>&1
 eq "a new line in the clone starts warm" built-v2 "$(cat $T/b/store/projects/p/lines/warm/target/out 2>/dev/null)"
 
+# 3. A machine the project trusts reads the cache overlay through its own machine slot.
+new_fs $T/c 2G
+c=$(env LAYR_ROOT=$T/c/store $LAYR remote self --json)
+c_id=$(echo "$c" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+c_key=$(echo "$c" | python3 -c 'import json,sys; print(json.load(sys.stdin)["public_key"])')
+cd $P/main
+ok "trust machine c" l remote trust archive $c_id --public-key $c_key
+l save --caches -q
+has "machine c reads the cache overlay" "machine:$c_id" "$(l overlay readers cache.target)"
+ok "push again" l push archive -q
+out=$(env LAYR_ROOT=$T/c/store $LAYR clone "file://$T/archive" p 2>&1)
+has "machine c clones the cache overlay without the paper key" "overlay cache.target" "$out"
+
 finish

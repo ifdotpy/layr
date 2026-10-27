@@ -557,6 +557,9 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
         drop(stage);
         let stage = crate::trace::span("store upload state");
         let root = repo.state_root(&state.id)?;
+        // A base that a history limit deleted here (docs/cache-overlays.md) cannot be compared:
+        // the state goes up as a complete tree.
+        let base = base.filter(|(id, _)| repo.p.has_state(id));
         let base_root = base.as_ref().map(|(id, _)| repo.state_root(id)).transpose()?;
         let (pushed, files, bytes) = upload_state_journal(
             store,
