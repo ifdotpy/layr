@@ -17,6 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 const USAGE: &str =
     "usage: layr overlay create <name> [--readers <principal>,...] [--mode shared|follow] [--hidden] [--folder <path>] [<properties>]
        layr overlay set <name> <properties>
+       layr overlay remote add <name> <remote> <git url> | list <name> | remove <name> <remote>
        layr overlay show-to-project <name>
        layr overlay list
        layr overlay readers <name> [<principal>...]
@@ -34,6 +35,7 @@ pub fn overlay(ctx: &Ctx, args: &[String]) -> Result<i32> {
     match sub {
         "create" => create(ctx, &rest),
         "set" => set(ctx, &rest),
+        "remote" => super::layerpush::overlay_remote(ctx, &rest),
         "list" => list(ctx, &rest),
         "show-to-project" => show_to_project(ctx, &rest),
         "readers" => readers(ctx, &rest),

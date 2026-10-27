@@ -1,7 +1,7 @@
 # Cache overlays and remotes per layer
 
 Status: design approved by the owner on 2026-10-27. Section 9 says which slice builds which part.
-Built: slice a (section 11), slice b (section 12).
+Built: slice a (section 11), slice b (section 12), slice c (section 13).
 This file extends [overlays](overlays.md) (the model of layers, section 9 = what is built) and
 replaces the cache part of [design](design.md#5-warm-caches) as the slices land.
 
@@ -83,7 +83,7 @@ plain folder; `save --caches` says so.
 | `layr cache pull <line or state>` | Takes the newest caches of another line or state into the current line (`merge=union-theirs` for one overlay, without a merge of the shared set). |
 | `layr cache list` | The cache overlays of the line: path, state, size on disk. |
 | `layr gc` | Also applies `history` to overlay lines and `gc lru:<size>` to working folders. |
-| `layr overlay remote add <overlay> <git URL>` | The overlay's history goes to its own git repository (section 7). Refused for a cache overlay. |
+| `layr overlay remote add <overlay> <remote> <git URL>` | The overlay's history goes to its own git repository (section 7). Refused for a cache overlay. |
 | `layr push [--dry-run]` | Pushes every layer to each of its remotes (section 7). `--dry-run` lists layer, remote and size. |
 
 `layr overlay create -q` keeps its meaning (no output). The long form `--quiet` of `overlay create`
@@ -268,3 +268,26 @@ Limits of slice b:
 - A union never deletes a file of the target's folder.
 - Tested with one user on macOS. The Linux root suite (t14, t15 with several users) is not run
   here; their checks of `cache list` output and of old cache records are kept by design.
+
+## 13. Built: slice c
+
+Built on 2026-10-27: git remotes per overlay and `layr push` of every layer. Tests:
+`tests/t60-layer-remotes.sh` (one user, local bare repositories). The code is in
+`src/cmd/layerpush.rs`.
+
+- `layr overlay remote add <overlay> <remote> <git URL>`, `overlay remote list <overlay>` and
+  `overlay remote remove <overlay> <remote>`. The owner adds and removes; readers list. The
+  setting `overlay.<name>.git.<remote>` = `{"url": ..., "branch": null}` is in the overlay's own
+  records. `branch` is kept for the planned follow-up of section 7 and not used yet. A folder
+  overlay is refused.
+- `layr push` without a remote name pushes the current line: the repository to each layr remote
+  (`layr push <remote>` of each store and peer), the line to each git remote of the project
+  (`layr git push <remote> <line>`), and the overlay line of each overlay to each of its git
+  remotes, to the branch of the line's name. The overlay gets its own git store
+  (`<project>%<overlay>`), its own export records, and commits of its own history.
+- `layr push --dry-run` prints `layer remote kind size`: for git the states that the remote does
+  not have yet (from the export records) and the size of the layer's tree; for a layr remote one
+  row for the repository and one per cache overlay with its size and platform.
+- A failed remote is reported and the others still run; the exit code is 1.
+- The secret detector does not check an overlay's git push: an overlay is where private files
+  belong. Its remote must be as private as its readers.
