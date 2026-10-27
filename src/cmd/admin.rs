@@ -74,6 +74,7 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
         repo.authorize_line(ctx, &l, crate::repo::LineOp::Save)?;
         let _lock = repo.p.lock()?;
         let l = repo.line(&l.id)?;
+        crate::repo::recover_cache_replacements(&repo.working(&l))?;
         let (caches, versioned) = if a.has("--caches") { repo.line_cache_paths(&l)? } else { Default::default() };
         let st = if a.has("--caches") {
             // A cache folder that a tool made again as a plain folder becomes a cache first, so
@@ -88,7 +89,7 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 }
             }
             for p in &caches {
-                let _ = crate::repo::convert_cache(&repo.working(&l), p, u, g);
+                crate::repo::convert_cache(&repo.working(&l), p, u, g)?;
             }
             Some(repo.caches_state(ctx, &l, &msg, a.has("--running"), &caches)?)
         } else {
@@ -100,6 +101,13 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
                     // Caches saved on a protected line may warm other users' lines.
                     let shared = repo.policy().rule_for(&l.name).is_some();
                     record_caches(ctx, repo, &s.id, &repo.working(&l), &caches, shared)?;
+                    // The line's caches as cache overlays (docs/cache-overlays.md): new lines from
+                    // this line take them, whatever state the line's name selects.
+                    for (p, name, id) in repo.save_cache_overlays(ctx, &l, &caches, shared)? {
+                        if !a.has("-q") {
+                            outln!(ctx, "{p}: overlay {name} {}", ids::short(&id));
+                        }
+                    }
                 }
                 if !a.has("-q") {
                     outln!(ctx, "{} {}", l.name, ids::display(&s.id));
@@ -948,6 +956,13 @@ pub fn run_gc(ctx: &Ctx, repo: &Repo, dry: bool) -> Result<Vec<String>> {
         }
     }
     let caches = prune_caches(repo)?;
+    // Overlays with a history limit and folder overlays with an LRU limit (docs/cache-overlays.md).
+    for name in repo.overlay_names()? {
+        repo.after_overlay_move(ctx, &name);
+    }
+    if let Err(e) = repo.cache_gc_lru() {
+        eprintln!("warning: cache size limits not applied: {e:#}");
+    }
     #[cfg(target_os = "macos")]
     {
         let lines = repo.lines()?;
@@ -1230,7 +1245,13 @@ pub fn reindex(ctx: &Ctx, _args: &[String]) -> Result<i32> {
     Ok(0)
 }
 
-fn copy_folder(ctx: &Ctx, src: &std::path::Path, dst: &std::path::Path, include_ignored: bool) -> Result<usize> {
+fn copy_folder(
+    ctx: &Ctx,
+    src: &std::path::Path,
+    dst: &std::path::Path,
+    include_ignored: bool,
+    tracked: Option<&BTreeSet<String>>,
+) -> Result<usize> {
     let rules = crate::ignore_rules::Rules::new(src);
     let mut n = 0;
     let mut entries = Vec::new();
@@ -1239,7 +1260,7 @@ fn copy_folder(ctx: &Ctx, src: &std::path::Path, dst: &std::path::Path, include_
             if rel == ".git" || rel.starts_with(".git/") {
                 return Ok(false);
             }
-            if !include_ignored && rules.ignored(rel, m.is_dir()) {
+            if !include_ignored && rules.ignored(rel, m.is_dir()) && !tracked.is_some_and(|paths| paths.contains(rel)) {
                 return Ok(false);
             }
             entries.push((rel.to_string(), m.clone()));
@@ -1250,7 +1271,7 @@ fn copy_folder(ctx: &Ctx, src: &std::path::Path, dst: &std::path::Path, include_
     fsutil::refuse_case_collisions(dst, entries.iter().map(|(rel, _)| rel.as_str()))?;
     // Names of one file stay names of one file: the first is copied, the others link to it.
     let mut first: std::collections::HashMap<(u64, u64), String> = Default::default();
-    for (rel, m) in entries {
+    for (rel, m) in &entries {
         if m.is_dir() {
             fsutil::make_parents(dst, &format!("{rel}/x"), None)?;
             continue;
@@ -1277,6 +1298,10 @@ fn copy_folder(ctx: &Ctx, src: &std::path::Path, dst: &std::path::Path, include_
             }
         }
         n += 1;
+    }
+    // Set directory modes after their children, so a restrictive mode cannot block the copy.
+    for (rel, m) in entries.iter().rev().filter(|(_, m)| m.is_dir()) {
+        fsutil::set_mode(dst, rel, m.mode)?;
     }
     Ok(n)
 }
@@ -1338,7 +1363,7 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 .find(|(b, _)| b == &format!("origin/{branch}") || b.ends_with(&format!("/{branch}")))
                 .map(|x| x.1.clone());
             let state = state.ok_or_else(|| exit(128, format!("fatal: remote has no branch '{branch}'")))?;
-            let (st, _) = crate::gitbridge::import_commit(ctx, &repo, &state, &format!("origin/{branch}"), owner)?;
+            let (st, _) = crate::gitbridge::import_commit(ctx, &repo, &state, &format!("origin/{branch}"), owner, None)?;
             drop(cleanup);
             return Ok((st, branch));
         }
@@ -1363,16 +1388,30 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 let branch = String::from_utf8_lossy(&branch.stdout).trim().to_string();
                 let _ = (s, refs);
                 if !head.is_empty() && head != "HEAD" {
-                    let (st, _) = crate::gitbridge::import_commit(ctx, &repo, &head, &format!("local/{branch}"), owner)?;
+                    // Keep force-added paths and their parents even when ignore rules match.
+                    let tracked = caller_git(ctx, &src, &["ls-tree", "-r", "-t", "-z", "--name-only", &head])?;
+                    if !tracked.status.success() {
+                        bail!("cannot list source HEAD paths: {}", String::from_utf8_lossy(&tracked.stderr));
+                    }
+                    let tracked: BTreeSet<String> = tracked
+                        .stdout
+                        .split(|b| *b == 0)
+                        .filter(|p| !p.is_empty())
+                        .map(|p| String::from_utf8_lossy(p).into_owned())
+                        .collect();
+                    // Copy as the caller, then freeze the bytes used by both the HEAD import
+                    // and the folder content. A source edit cannot race the blob comparison.
+                    let tmp = repo.p.work_dir().join(ids::new_id());
+                    btrfs::create_subvolume(&tmp)?;
+                    let _t2 = crate::repo::Temp { path: tmp.clone() };
+                    copy_folder(ctx, &src, &tmp, a.has("--include-ignored"), Some(&tracked))?;
+                    let snap = repo.temp_snapshot(&tmp, true)?;
+                    let (st, _) =
+                        crate::gitbridge::import_commit(ctx, &repo, &head, &format!("local/{branch}"), owner, Some(&snap.path))?;
                     parents.push(st.clone());
                     // The folder content on top (unsaved changes, if any).
                     btrfs::delete_tree(&work)?;
                     repo.snapshot_state(&st, &work, false)?;
-                    let tmp = repo.p.work_dir().join(ids::new_id());
-                    btrfs::create_subvolume(&tmp)?;
-                    let _t2 = crate::repo::Temp { path: tmp.clone() };
-                    copy_folder(ctx, &src, &tmp, a.has("--include-ignored"))?;
-                    let snap = repo.temp_snapshot(&tmp, true)?;
                     let imported = repo.state_root(&st)?;
                     let diffs = changes::file_changes(&imported, &snap.path);
                     // Different file systems give no common lineage: compare by walking instead.
@@ -1381,41 +1420,51 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
                     let mut seen = BTreeSet::new();
                     let mut files = Vec::new();
                     fsutil::walk(&snap.path, "", &mut |rel, m| {
-                        if !m.is_dir() {
-                            seen.insert(rel.to_string());
-                            files.push((rel.to_string(), m.mode));
-                        }
+                        seen.insert(rel.to_string());
+                        files.push((rel.to_string(), m.mode, m.is_dir()));
                         Ok(true)
                     })?;
                     let mut gone = Vec::new();
-                    fsutil::walk(&imported, "", &mut |rel, m| {
-                        if !m.is_dir() && !skip_path(rel) && !seen.contains(rel) {
+                    fsutil::walk(&imported, "", &mut |rel, _| {
+                        if !skip_path(rel) && !seen.contains(rel) {
                             gone.push(rel.to_string());
                         }
                         Ok(true)
                     })?;
                     let mut copies = Vec::new();
-                    for (rel, mode) in &files {
+                    let mut directories = Vec::new();
+                    for (rel, mode, is_dir) in &files {
                         if !fsutil::same_entry(&imported, rel, &snap.path, rel, None)?
                             || fsutil::lmeta(&imported, rel).map(|x| x.mode != *mode).unwrap_or(true)
                         {
-                            copies.push(rel.clone());
+                            if *is_dir {
+                                directories.push(rel.clone());
+                            } else {
+                                copies.push(rel.clone());
+                            }
                         }
                     }
-                    let gone_paths: Vec<&str> = gone.iter().map(String::as_str).collect();
-                    let copy_paths: Vec<&str> = copies.iter().map(String::as_str).collect();
+                    // This private tree has no user file handles to preserve. Remove replaced
+                    // entries too, so APFS can clone the current bytes into new inodes.
+                    let replaced_directories: Vec<&String> =
+                        directories.iter().filter(|p| fsutil::lmeta(&imported, p).is_some_and(|m| !m.is_dir())).collect();
+                    let gone_paths: Vec<&str> =
+                        gone.iter().chain(&copies).chain(replaced_directories).map(String::as_str).collect();
+                    // Apply directory modes last, from children to parents. Existing directories
+                    // keep unchanged children when only their mode differs.
+                    let copy_paths: Vec<&str> = copies.iter().chain(directories.iter().rev()).map(String::as_str).collect();
                     fsutil::replace_entries(&snap.path, &work, &gone_paths, &copy_paths, None)?;
-                    changed |= !copies.is_empty() || !gone.is_empty();
+                    changed |= !copies.is_empty() || !directories.is_empty() || !gone.is_empty();
                     if !changed {
                         drop(cleanup);
                         return Ok((st, branch));
                     }
                     msg = "unsaved changes of the imported folder".into();
                 } else {
-                    copy_folder(ctx, &src, &work, a.has("--include-ignored"))?;
+                    copy_folder(ctx, &src, &work, a.has("--include-ignored"), None)?;
                 }
             } else {
-                copy_folder(ctx, &src, &work, a.has("--include-ignored"))?;
+                copy_folder(ctx, &src, &work, a.has("--include-ignored"), None)?;
             }
         }
         let st = repo.new_state(ctx, &work, StateKind::Commit, parents, &msg, None)?;
@@ -1898,6 +1947,8 @@ pub fn cache(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let sub = args.first().map(|s| s.as_str()).unwrap_or("list");
     match sub {
         "list" => {
+            // `-v`: also the size of each cache and the cache overlay state the line saved.
+            let verbose = args.get(1).is_some_and(|x| x == "-v" || x == "--verbose");
             // The machine setting, and in a line also the regenerable folders of `.layrattributes`.
             let (paths, versioned) = match &h.line {
                 Some(l) => (repo.cache_paths(&repo.working(l)), repo.line_cache_paths(l)?.1),
@@ -1917,7 +1968,22 @@ pub fn cache(ctx: &Ctx, args: &[String]) -> Result<i32> {
                     }
                     None => "",
                 };
-                outln!(ctx, "{p}\t{state}");
+                // A cache: its size and the cache overlay state the line has saved.
+                let extra = match &h.line {
+                    Some(l) if verbose && state == "cache" => {
+                        let size = crate::cache_overlay::tree_size(&repo.working(l).join(&p));
+                        let saved = match repo.folder_overlay_of(&p)? {
+                            Some(name) => {
+                                let ol = repo.overlay_project(&name)?.db.line_by_name(&format!("line-{}", l.id))?;
+                                format!("\toverlay {name} {}", ol.map(|o| ids::short(&o.head)).unwrap_or_else(|| "(not saved)".into()))
+                            }
+                            None => "\t(not saved)".into(),
+                        };
+                        format!("\t{}{saved}", human_size(size))
+                    }
+                    _ => String::new(),
+                };
+                outln!(ctx, "{p}\t{state}{extra}");
             }
             Ok(0)
         }
@@ -1956,6 +2022,7 @@ pub fn cache(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let _lock = repo.p.lock()?;
             let l = repo.line(&l.id)?;
             let (u, g) = repo.owner_ids(&l);
+            crate::repo::recover_cache_replacements(&repo.working(&l))?;
             let (caches, versioned) = repo.line_cache_paths(&l)?;
             for p in versioned {
                 if crate::repo::uncache(&repo.working(&l), &p, u, g)? {
@@ -1969,7 +2036,33 @@ pub fn cache(ctx: &Ctx, args: &[String]) -> Result<i32> {
             }
             Ok(0)
         }
-        _ => Err(exit(128, "usage: layr cache (list|add|remove|repair) [<path>]")),
+        "pull" => {
+            // The newest caches of another line or state, into the current line
+            // (docs/cache-overlays.md): a union with the line's caches, the incoming file winning.
+            let from = args.get(1).ok_or_else(|| exit(128, "usage: layr cache pull <line or state>"))?;
+            let l = h.line()?.clone();
+            repo.authorize_line(ctx, &l, crate::repo::LineOp::Save)?;
+            let _lock = repo.p.lock()?;
+            let l = repo.line(&l.id)?;
+            let source_line = repo.p.db.line_by_name(from)?.map(|x| repo.localize(x)).transpose()?;
+            let state;
+            let src = match &source_line {
+                Some(s) => crate::cache_overlay::Source::Line(s),
+                None => {
+                    state = revs::resolve(repo, Some(&l), from)?;
+                    crate::cache_overlay::Source::State(&state)
+                }
+            };
+            let got = repo.pull_caches(ctx, &l, &src)?;
+            if got.is_empty() {
+                outln!(ctx, "no newer caches in {from}");
+            }
+            for (p, id) in got {
+                outln!(ctx, "{p}: {}", ids::short(&id));
+            }
+            Ok(0)
+        }
+        _ => Err(exit(128, "usage: layr cache (list [-v]|add|remove|repair|pull) [<path>|<line>]")),
     }
 }
 
@@ -2012,5 +2105,21 @@ pub fn debug(ctx: &Ctx, args: &[String]) -> Result<i32> {
             Ok(0)
         }
         _ => Err(exit(128, "usage: layr debug changes <a> <b> | layr debug receive <name> <uuid> < stream")),
+    }
+}
+
+/// A byte count for people: `812 MiB`.
+fn human_size(n: u64) -> String {
+    let units = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut v = n as f64;
+    let mut i = 0;
+    while v >= 1024.0 && i + 1 < units.len() {
+        v /= 1024.0;
+        i += 1;
+    }
+    if i == 0 {
+        format!("{n} B")
+    } else {
+        format!("{v:.1} {}", units[i])
     }
 }

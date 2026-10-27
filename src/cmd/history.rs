@@ -268,6 +268,11 @@ pub fn diff(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         _ => (resolve(&revs_v[0])?, resolve(&revs_v[1])?, false),
     };
+    // The files of quiet overlays stay out of a diff of the working content or the index.
+    let quiet_paths = match (&line, revs_v.len()) {
+        (Some(l), n) if n <= 1 && !revs_v.iter().any(|r| r.contains("..")) => repo.quiet_paths(l)?,
+        _ => Default::default(),
+    };
     let reverse = a.has("-R");
     let renames = !a.has("--no-renames");
     let compute = |old: &Snap, new: &Snap| -> Result<Vec<FileDiff>> {
@@ -276,6 +281,7 @@ pub fn diff(ctx: &Ctx, args: &[String]) -> Result<i32> {
             .into_iter()
             .filter(|c| {
                 !skip_path(&c.path)
+                    && !quiet_paths.contains(&c.path)
                     && (matches(&specs, &c.path) || c.old_path.as_deref().map(|o| matches(&specs, o)).unwrap_or(false))
             })
             .collect();

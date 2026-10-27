@@ -45,9 +45,11 @@ impl Backend {
             Self::Epoch(e) => {
                 e.root.set_epoch(epoch)?;
                 e.current.set_epoch(epoch)?;
-                for (backend, _) in &e.history { backend.set_epoch(epoch)?; }
+                for (backend, _) in &e.history {
+                    backend.set_epoch(epoch)?;
+                }
                 Ok(())
-            },
+            }
             _ => Ok(()),
         }
     }
@@ -385,7 +387,16 @@ impl Backend {
             Self::File(root, uid, gid) => crate::privs::as_user_fs(*uid, *gid, || {
                 let mut out = Vec::new();
                 if root.exists() {
-                    walk(root, root, prefix, &mut out)?;
+                    // A state prefix must not enumerate every sibling state directory.
+                    let directory = prefix.rsplit_once('/').map(|(parent, _)| parent).unwrap_or("");
+                    let start = if directory.is_empty() { root.clone() } else { crate::fsutil::safe_join(root, directory)? };
+                    match fs::symlink_metadata(&start) {
+                        Ok(meta) if meta.file_type().is_symlink() => bail!("symbolic link in remote store: {directory}"),
+                        Ok(meta) if meta.is_dir() => walk(root, &start, prefix, &mut out)?,
+                        Ok(_) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(error.into()),
+                    }
                 }
                 out.sort_by(|a, b| a.key.cmp(&b.key));
                 Ok(out)
@@ -555,6 +566,25 @@ mod tests {
         }
         assert!(objects.is_empty());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn file_listing_visits_only_the_requested_directory_and_refuses_its_links() {
+        let root = std::env::temp_dir().join(crate::ids::new_id());
+        let backend = Backend::file(root.clone());
+        backend.put_new("states/one/a.age", b"one".to_vec()).unwrap();
+        backend.put_new("states/two/b.age", b"two".to_vec()).unwrap();
+        // This sibling must not be inspected for an exact state-directory prefix.
+        std::os::unix::fs::symlink("/missing", root.join("states/two/link")).unwrap();
+        let files = backend.list("states/one/").unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].key, "states/one/a.age");
+        assert_eq!(backend.list("states/one/a").unwrap().len(), 1);
+        assert!(backend.list("states/missing/").unwrap().is_empty());
+        assert!(backend.list("states/two/").is_err());
+        std::os::unix::fs::symlink("one", root.join("states/link")).unwrap();
+        assert!(backend.list("states/link/").is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

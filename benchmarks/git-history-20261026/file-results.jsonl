@@ -1,0 +1,16 @@
+{"step": "layr-remote", "seconds": 0.498, "status": 0, "maxrss_kib": 13760}
+{"step": "layr-push", "seconds": 61.888, "status": 0, "maxrss_kib": 31668}
+{"step": "layr-clone", "seconds": 62.702, "status": 0, "maxrss_kib": 65760}
+{"step": "layr-mirror-init", "seconds": 0.003, "status": 0, "maxrss_kib": 14092}
+{"step": "layr-mirror-remote", "seconds": 0.047, "status": 0, "maxrss_kib": 14092}
+{"step": "layr-mirror-push", "seconds": 18.725, "status": 0, "maxrss_kib": 48216}
+{"step": "layr-fsck", "seconds": 0.376, "status": 0, "maxrss_kib": 37008}
+{"project": "layr", "original_count": 392, "exported_count": 392, "all_ids_identical": true, "source_tip": "c1d7229a30aa808fedc0274e961b2f38e7cc2f7d", "exported_tip": "c1d7229a30aa808fedc0274e961b2f38e7cc2f7d", "source_tree": "3f89a5f27d6d8402043ccbe69a8dec511496a922", "exported_tree": "3f89a5f27d6d8402043ccbe69a8dec511496a922", "archive_bytes": 6099639, "archive_objects": 759}
+{"step": "layr-studio-remote", "seconds": 0.704, "status": 0, "maxrss_kib": 14092}
+{"step": "layr-studio-push", "seconds": 1651.76, "status": 0, "maxrss_kib": 525260}
+{"step": "layr-studio-clone", "seconds": 1808.32, "status": 0, "maxrss_kib": 1414556}
+{"step": "layr-studio-mirror-init", "seconds": 0.001, "status": 0, "maxrss_kib": 14092}
+{"step": "layr-studio-mirror-remote", "seconds": 0.116, "status": 0, "maxrss_kib": 14092}
+{"step": "layr-studio-mirror-push", "seconds": 99.593, "status": 0, "maxrss_kib": 258056}
+{"step": "layr-studio-fsck", "seconds": 7.09, "status": 0, "maxrss_kib": 261388}
+{"project": "layr-studio", "original_count": 7965, "exported_count": 7965, "all_ids_identical": true, "source_tip": "eec4c6d136da146a5d3d659575c1baf2d93849f8", "exported_tip": "eec4c6d136da146a5d3d659575c1baf2d93849f8", "source_tree": "f73d8a3b174dae65889605159ff2e9d98657bb57", "exported_tree": "f73d8a3b174dae65889605159ff2e9d98657bb57", "archive_bytes": 367301433, "archive_objects": 15005}
