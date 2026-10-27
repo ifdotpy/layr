@@ -133,4 +133,35 @@ l merge -q origin/feature
 ok "merge of an imported branch" test -f f.txt
 eq "remote -v" "origin	$R (fetch)" "$(l git remote -v | head -1)"
 eq "open conflicts block a push" "1" "$(cd $U && git checkout -q main && echo X > src/a.txt && git commit -qam x && git push -q; cd $LAYR_ROOT/projects/gp/lines/main && echo Y > src/a.txt && l save -qam y && l git pull -q >/dev/null 2>&1; l git push origin task-9 >/dev/null 2>&1; echo $?)"
+# Git writes in a line's .git are refused: layr writes the line's history, and git HEAD must
+# stay at the last commit layr exported. Nothing moves; a reset to that commit lets layr go on.
+l git clone $R gx -q >/dev/null
+cd $LAYR_ROOT/projects/gx/lines/main || exit 1
+echo g1 > guard.txt; l add guard.txt; l save -qm "guard 1"
+g1=$(git rev-parse HEAD); gh=$(l rev-parse head)
+echo g2 > guard2.txt; git add guard2.txt; git commit -qm "git work"
+gc=$(git rev-parse HEAD)
+echo g3 > guard3.txt; l add guard3.txt
+out=$(l save -qm "guard 2" 2>&1); rc=$?
+eq "save refuses after a git commit in the line" "refused" "$([ "$rc" -ne 0 ] && echo refused)"
+has "the refusal names the git HEAD" "git HEAD moved outside layr ($gc)" "$out"
+eq "the refused save leaves git HEAD" "$gc" "$(git rev-parse HEAD)"
+eq "the refused save leaves the line head" "$gh" "$(l rev-parse head)"
+git reset -q --hard $g1
+eq "after a reset to the last export, save builds on it" "$g1" "$(l save -qm "guard 4" >/dev/null 2>&1; git rev-parse HEAD^)"
+
+# The same for a git merge in the line.
+cd $LAYR_ROOT && l git clone $R gy -q >/dev/null
+cd $LAYR_ROOT/projects/gy/lines/main || exit 1
+echo y1 > guard.txt; l add guard.txt; l save -qm "guard 1"
+y1=$(git rev-parse HEAD); yh=$(l rev-parse head)
+git checkout -q -b side; echo s > side.txt; git add side.txt; git commit -qm "side work"
+git checkout -q --detach $y1; echo m > main.txt; git add main.txt; git commit -qm "main work"
+git merge -q --no-edit side; ym=$(git rev-parse HEAD)
+echo y2 > guard2.txt; l add guard2.txt
+out=$(l save -qm "guard 2" 2>&1); rc=$?
+eq "save refuses after a git merge in the line" "refused" "$([ "$rc" -ne 0 ] && echo refused)"
+has "the merge refusal names the git HEAD" "git HEAD moved outside layr ($ym)" "$out"
+eq "the refused save leaves the merge in git HEAD" "$ym" "$(git rev-parse HEAD)"
+eq "the refused save leaves the line head of the merge case" "$yh" "$(l rev-parse head)"
 finish
