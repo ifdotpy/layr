@@ -1339,6 +1339,7 @@ impl<'a> Repo<'a> {
         };
         self.materialize_with(&line, start, &dst, &layers, true)?;
         let res = (|| -> Result<Record> {
+            self.take_caches(ctx, &line, start, source, &dst)?;
             let mut rec = Record::new("line.create");
             rec.lines.insert(
                 line.id.clone(),
@@ -1873,7 +1874,7 @@ fn prune_empty_parents(target: &Path, to: &Path, rel: &str) -> Result<()> {
 
 /// Give every entry of a tree (a new cache copy, still private) to `uid:gid`, without following
 /// links and without entering nested subvolumes.
-fn give_tree(root: &Path, uid: u32, gid: u32) -> Result<()> {
+pub(crate) fn give_tree(root: &Path, uid: u32, gid: u32) -> Result<()> {
     let mut paths = Vec::new();
     fsutil::walk(root, "", &mut |rel, m| {
         if m.uid != uid || m.gid != gid {
