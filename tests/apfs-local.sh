@@ -2,6 +2,7 @@
 # Local APFS commands, with the default main protection and the real caller identity.
 [ "$(uname -s)" = Darwin ] || { echo 'This test requires macOS'; exit 1; }
 . "$(dirname "$0")/lib.sh"
+unset LAYR_TEST_DIRECT_MAIN # lib.sh sets it on macOS; this test checks the default protection
 
 sample "$T/src"
 printf 'read only\n' > "$T/src/readonly.txt"

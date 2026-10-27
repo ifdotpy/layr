@@ -7,7 +7,7 @@ sample $T/src
 mkdir -p $T/linksrc/a && echo x > $T/linksrc/a/one && ln $T/linksrc/a/one $T/linksrc/two
 l init links --from $T/linksrc -q >/dev/null
 L=$LAYR_ROOT/projects/links/lines/main
-eq "init --from keeps hard links" "$(stat -c %i $L/a/one)" "$(stat -c %i $L/two)"
+eq "init --from keeps hard links" "$(stat_field inode $L/a/one)" "$(stat_field inode $L/two)"
 l init demo --from $T/src -q >/dev/null
 cd $LAYR_ROOT/projects/demo/lines/main || exit 1
 
@@ -17,7 +17,7 @@ ln -s $LAYR_ROOT/projects/demo/lines/main $T/linked
 eq "a link to a line works as the line" "main" "$(cd $T/linked && l line list --show-current)"
 eq "porcelain clean" "" "$(l status --porcelain)"
 
-sed -i 's/line 5/line five/' notes.txt; echo new > added.txt; rm src/main.rs; mkdir -p docs/deep; echo d > docs/deep/a.md
+sed_inplace 's/line 5/line five/' notes.txt; echo new > added.txt; rm src/main.rs; mkdir -p docs/deep; echo d > docs/deep/a.md
 echo y > other.log; mkdir -p target; echo z > target/x
 eq "short status" " M notes.txt
  D src/main.rs
@@ -48,7 +48,7 @@ l save -qam "Remove main"
 eq "log oneline" "Remove main
 First change
 initial state" "$(l log --format=%s)"
-eq "log -n" "1" "$(l log --oneline -n 1 | wc -l)"
+eq "log -n" "1" "$(l log --oneline -n 1 | wc -l | tr -d ' ')"
 eq "log path filter" "First change" "$(l log --format=%s -- notes.txt | head -1)"
 eq "show path" "line five" "$(l show head:notes.txt | sed -n 5p)"
 eq "show dir" "tree head:docs" "$(l show head:docs | head -1)"
@@ -97,7 +97,7 @@ eq "clean needs -f" "128" "$(l clean 2>/dev/null; echo $?)"
 
 # partial staging: one hunk by patch
 seq 1 40 | sed 's/^/row /' > big.txt; l add big.txt; l save -qm big
-sed -i 's/^row 3$/ROW 3 staged/; s/^row 35$/ROW 35 not staged/' big.txt
+sed_inplace 's/^row 3$/ROW 3 staged/; s/^row 35$/ROW 35 not staged/' big.txt
 l diff big.txt | awk '/^@@/{n++} n<2' > $T/hunk1.patch
 l apply --cached $T/hunk1.patch
 eq "partial add: index has the first hunk" "1	1	big.txt" "$(l diff --cached --numstat)"

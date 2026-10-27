@@ -15,6 +15,7 @@ mod stream_fs;
 #[cfg(all(feature = "overlayfs", not(target_os = "linux")))]
 compile_error!("the overlayfs feature requires Linux");
 mod args;
+mod cache_overlay;
 mod changes;
 mod cmd;
 mod db;
@@ -54,6 +55,7 @@ mod storage;
 mod storage;
 mod store;
 mod store_remote;
+mod store_version;
 mod stream;
 #[allow(unsafe_code)]
 mod sys;
@@ -125,6 +127,38 @@ fn main() {
                 argv.drain(..2);
             }
             _ => break,
+        }
+    }
+    // grep already uses -h to omit filenames. Its long help flag remains available.
+    let short_help = argv.first().map(String::as_str) != Some("grep");
+    if argv.iter().take_while(|arg| arg.as_str() != "--").any(|arg| arg == "--help" || (short_help && arg == "-h"))
+        || argv.first().map(String::as_str) == Some("help")
+    {
+        print!("{}", cmd::HELP);
+        return;
+    }
+    match argv.first().map(String::as_str) {
+        Some("--version" | "version") => {
+            println!("layr version {}", env!("CARGO_PKG_VERSION"));
+            return;
+        }
+        None | Some("--help" | "-h" | "help") => {
+            print!("{}", cmd::HELP);
+            return;
+        }
+        Some("store-version") => match store_version::run(&store::default_root(), &argv[1..]) {
+            Ok(code) => std::process::exit(code),
+            Err(error) => {
+                eprintln!("layr store-version: {error:#}");
+                std::process::exit(128);
+            }
+        },
+        _ => {}
+    }
+    if let Some(command) = argv.first() {
+        if !cmd::COMMANDS.contains(&command.as_str()) {
+            eprintln!("layr: '{command}' is not a layr command. See 'layr help'.");
+            std::process::exit(1);
         }
     }
     if argv.first().map(String::as_str) == Some("person") {

@@ -7,6 +7,7 @@ pub mod branch;
 pub mod change;
 pub mod checks;
 pub mod history;
+pub mod layerpush;
 pub mod mergecmd;
 pub mod oci;
 pub mod overlaycmd;
@@ -183,7 +184,7 @@ pub fn matches(specs: &[String], path: &str) -> bool {
     })
 }
 
-const HELP: &str = "usage: layr <command> [<args>]
+pub const HELP: &str = "usage: layr <command> [<args>]\n   store-version [--json] [--upgrade]
 
 Work in a line:
    status, diff, add, rm, mv, restore, reset, save -m <message>, park, clean, apply
@@ -206,7 +207,7 @@ Git bridge:
    git remote, fetch, pull, push, clone, sync
    queue add/list/remove/run
 Overlays (files with their own readers and history, shown in lines):
-   overlay create, list, readers, use, move, log, show, diff, grep, ls-files
+   overlay create, set, list, readers, use, move, remote, log, show, diff, grep, ls-files
 Projects and machines:
    init, projects, config, cache, export, gc, fsck, reindex, daemon
 
@@ -216,6 +217,17 @@ Lines are folders: <root>/projects/<project>/lines/<line>. Run commands inside a
 /// The commands that work in an overlay's own project: reading its history, and its checks.
 const OVERLAY_READS: &[&str] =
     &["log", "show", "diff", "grep", "ls-files", "blame", "rev-parse", "merge-base", "fsck", "reindex", "help", "version"];
+
+/// Public command names, including removed commands with a replacement diagnostic.
+pub const COMMANDS: &[&str] = &[
+    "help", "--help", "-h", "version", "--version", "status", "diff", "show", "log", "rev-parse", "merge-base", "blame",
+    "index", "grep", "ls-files", "add", "rm", "mv", "apply", "restore", "reset", "park", "clean", "line", "tag", "adopt",
+    "merge", "pick", "invert", "replay", "save", "undo", "op", "try", "bisect", "access", "protect", "approve", "approvals",
+    "checks", "ref", "release", "queue", "request", "requests", "view", "attest", "attestations", "change", "comment", "probe",
+    "gc", "fsck", "reindex", "init", "projects", "machines", "debug", "config", "cache", "layer", "remote", "fetch", "pull",
+    "push", "git-sync", "git", "clone", "overlay", "export", "sync", "serve-peer", "worktree", "branch", "commit", "stash",
+    "cherry-pick", "rebase", "revert", "checkout", "switch", "person", "mount", "daemon",
+];
 
 pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
     let (cmd, rest) = match argv.first() {
