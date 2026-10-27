@@ -500,7 +500,26 @@ pub fn merge(ctx: &Ctx, args: &[String]) -> Result<i32> {
         return Err(exit(1, "layr merges never stop on a conflict: fix the files and run 'layr save -m <message>'."));
     }
     let rev = a.pos.first().ok_or_else(|| exit(128, "usage: layr merge <rev> [--expect <state>]"))?.clone();
-    merge_rev(ctx, &h.repo, &line, &rev, &a)
+    let code = merge_rev(ctx, &h.repo, &line, &rev, &a)?;
+    // The caches of a merged line go with it (docs/cache-overlays.md, section 5). They are
+    // regenerable: a failure is reported and never undoes the merge.
+    if let Some(theirs) = h.repo.p.db.line_by_name(&rev)? {
+        let r = (|| -> Result<()> {
+            let theirs = h.repo.localize(theirs)?;
+            let _lock = h.repo.p.lock()?;
+            let line = h.repo.line(&line.id)?;
+            for (p, id) in h.repo.pull_caches(ctx, &line, &crate::cache_overlay::Source::Line(&theirs))? {
+                if !a.has("-q") {
+                    outln!(ctx, "Merged cache {p}: {}", ids::short(&id));
+                }
+            }
+            Ok(())
+        })();
+        if let Err(e) = r {
+            eprintln!("warning: caches of '{rev}' not merged: {e:#}");
+        }
+    }
+    Ok(code)
 }
 
 #[derive(Debug)]

@@ -1,7 +1,7 @@
 # Cache overlays and remotes per layer
 
 Status: design approved by the owner on 2026-10-27. Section 9 says which slice builds which part.
-Built: slice a (section 11).
+Built: slice a (section 11), slice b (section 12).
 This file extends [overlays](overlays.md) (the model of layers, section 9 = what is built) and
 replaces the cache part of [design](design.md#5-warm-caches) as the slices land.
 
@@ -144,6 +144,16 @@ There are two kinds of remote:
   records `overlay.<name>.git.<remote>` in the overlay's own records, so only its readers see the
   URL. The branch of an overlay line is the name of the line that uses it. A cache overlay never
   goes to git: `overlay remote add` refuses it.
+- An overlay remote is a remote plus an optional branch name, so that the follow-up below fits
+  without a change of the records.
+
+Planned follow-up (owner, 2026-10-27; not in slices a to d): `layr overlay remote add <overlay>
+<remote> [--branch <name>] [--encrypt]`. The remote can be a separate repository (overlay lines map
+to its branches) or an orphan branch of the same repository (for example `overlay/notes` in
+`origin`) that holds only the overlay files. Git has no read rights per branch, so an overlay whose
+readers differ from the readers of the repository needs `--encrypt` (age, for its readers) on a
+branch of the same repository; a plain `git clone` also gets that branch unless its refspec leaves
+it out. Caches never go to git in either form.
 
 `layr push` without a remote name pushes the current line: the repository to each layr remote,
 and each layer to each of its git remotes. `layr push --dry-run` prints one row per layer and
@@ -218,3 +228,43 @@ Built on 2026-10-27: the properties `history`, `quiet`, `merge` and `gc` for fil
 - `quiet`: as section 4.1. A pending `overlay move` into a quiet overlay is not in `status`
   either. The summary of `save` still counts the quiet files.
 - `gc=lru:<size>` is stored and shown; slice b applies it (it needs folder overlays).
+
+## 12. Built: slice b
+
+Built on 2026-10-27: folder overlays and caches as cache overlays. Tests:
+`tests/t59-cache-overlays.sh` (one user; macOS and Linux) and unit tests in
+`src/cache_overlay.rs`. The model is in `src/cache_overlay.rs`.
+
+- `overlay create <name> --folder <path>` makes a folder overlay (follow mode, not hidden; one
+  overlay per folder). `overlay list` shows `folder=<path>`. `overlay use` and `overlay move`
+  refuse a folder overlay.
+- `save --caches` makes the cache overlay `cache.<folder>` (`/` as `.`) of each cache path when it
+  is missing: folder overlay, readers `*`, `history=last`, `quiet`, `merge=union-theirs`, and the
+  setting `overlay.<name>.cache = true`. It then saves one snapshot of the folder as a state of the
+  line's overlay line. Each state records the user, the platform (`<os>-<arch>`) and whether the
+  line is protected, with the rules of `design.md` section 5 for who may take it.
+- `line new X <line>` takes the newest cache state of that line (dogfood item 10).
+  `line new X <state>` takes the newest cache of the line that made the state, or of the line of
+  its nearest ancestor that has one (item 21). A cache overlay goes into a new line only while
+  its folder is a cache path there (`regenerable` or `cache add`) and the ignore rules ignore it.
+  Without a cache overlay state, the old caches of the state apply as before.
+- `layr merge <line>` then brings the merged line's caches into the target (section 5): a
+  fast-forward of the target's overlay line, or a `union-theirs` state; the incoming files are
+  copied over the target's folder; an empty folder gets one snapshot. A failure here is a
+  warning; the merge stays.
+- `layr cache pull <line or state>`: the same for one line, without a merge (item 24).
+- `layr cache list -v` adds the size of each cache folder and the overlay state the line saved.
+  `cache list` without `-v` keeps its output.
+- `gc` applies `gc=lru:<size>` to the folder of each line (the newer of access and change time;
+  apparent sizes) and deletes the cache states of deleted lines.
+- The secret detector does not read folder overlays: they hold build output.
+
+Limits of slice b:
+
+- `save --caches` still also writes the old caches of a state (`StateRec.caches`), so `try`, the
+  live move (`sync --caches`) and older binaries keep working. That is two snapshots per folder.
+  Slice d moves the live move to cache overlays; then the old write can go.
+- Only `layr merge <line>` merges caches; the merge queue and `merge <state>` do not.
+- A union never deletes a file of the target's folder.
+- Tested with one user on macOS. The Linux root suite (t14, t15 with several users) is not run
+  here; their checks of `cache list` output and of old cache records are kept by design.
