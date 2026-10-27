@@ -101,6 +101,13 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
                     // Caches saved on a protected line may warm other users' lines.
                     let shared = repo.policy().rule_for(&l.name).is_some();
                     record_caches(ctx, repo, &s.id, &repo.working(&l), &caches, shared)?;
+                    // The line's caches as cache overlays (docs/cache-overlays.md): new lines from
+                    // this line take them, whatever state the line's name selects.
+                    for (p, name, id) in repo.save_cache_overlays(ctx, &l, &caches, shared)? {
+                        if !a.has("-q") {
+                            outln!(ctx, "{p}: overlay {name} {}", ids::short(&id));
+                        }
+                    }
                 }
                 if !a.has("-q") {
                     outln!(ctx, "{} {}", l.name, ids::display(&s.id));
@@ -949,9 +956,12 @@ pub fn run_gc(ctx: &Ctx, repo: &Repo, dry: bool) -> Result<Vec<String>> {
         }
     }
     let caches = prune_caches(repo)?;
-    // Overlays with a history limit (docs/cache-overlays.md, section 5).
+    // Overlays with a history limit and folder overlays with an LRU limit (docs/cache-overlays.md).
     for name in repo.overlay_names()? {
         repo.after_overlay_move(ctx, &name);
+    }
+    if let Err(e) = repo.cache_gc_lru() {
+        eprintln!("warning: cache size limits not applied: {e:#}");
     }
     #[cfg(target_os = "macos")]
     {
@@ -1937,6 +1947,8 @@ pub fn cache(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let sub = args.first().map(|s| s.as_str()).unwrap_or("list");
     match sub {
         "list" => {
+            // `-v`: also the size of each cache and the cache overlay state the line saved.
+            let verbose = args.get(1).is_some_and(|x| x == "-v" || x == "--verbose");
             // The machine setting, and in a line also the regenerable folders of `.layrattributes`.
             let (paths, versioned) = match &h.line {
                 Some(l) => (repo.cache_paths(&repo.working(l)), repo.line_cache_paths(l)?.1),
@@ -1956,7 +1968,22 @@ pub fn cache(ctx: &Ctx, args: &[String]) -> Result<i32> {
                     }
                     None => "",
                 };
-                outln!(ctx, "{p}\t{state}");
+                // A cache: its size and the cache overlay state the line has saved.
+                let extra = match &h.line {
+                    Some(l) if verbose && state == "cache" => {
+                        let size = crate::cache_overlay::tree_size(&repo.working(l).join(&p));
+                        let saved = match repo.folder_overlay_of(&p)? {
+                            Some(name) => {
+                                let ol = repo.overlay_project(&name)?.db.line_by_name(&format!("line-{}", l.id))?;
+                                format!("\toverlay {name} {}", ol.map(|o| ids::short(&o.head)).unwrap_or_else(|| "(not saved)".into()))
+                            }
+                            None => "\t(not saved)".into(),
+                        };
+                        format!("\t{}{saved}", human_size(size))
+                    }
+                    _ => String::new(),
+                };
+                outln!(ctx, "{p}\t{state}{extra}");
             }
             Ok(0)
         }
@@ -2009,7 +2036,33 @@ pub fn cache(ctx: &Ctx, args: &[String]) -> Result<i32> {
             }
             Ok(0)
         }
-        _ => Err(exit(128, "usage: layr cache (list|add|remove|repair) [<path>]")),
+        "pull" => {
+            // The newest caches of another line or state, into the current line
+            // (docs/cache-overlays.md): a union with the line's caches, the incoming file winning.
+            let from = args.get(1).ok_or_else(|| exit(128, "usage: layr cache pull <line or state>"))?;
+            let l = h.line()?.clone();
+            repo.authorize_line(ctx, &l, crate::repo::LineOp::Save)?;
+            let _lock = repo.p.lock()?;
+            let l = repo.line(&l.id)?;
+            let source_line = repo.p.db.line_by_name(from)?.map(|x| repo.localize(x)).transpose()?;
+            let state;
+            let src = match &source_line {
+                Some(s) => crate::cache_overlay::Source::Line(s),
+                None => {
+                    state = revs::resolve(repo, Some(&l), from)?;
+                    crate::cache_overlay::Source::State(&state)
+                }
+            };
+            let got = repo.pull_caches(ctx, &l, &src)?;
+            if got.is_empty() {
+                outln!(ctx, "no newer caches in {from}");
+            }
+            for (p, id) in got {
+                outln!(ctx, "{p}: {}", ids::short(&id));
+            }
+            Ok(0)
+        }
+        _ => Err(exit(128, "usage: layr cache (list [-v]|add|remove|repair|pull) [<path>|<line>]")),
     }
 }
 
@@ -2052,5 +2105,21 @@ pub fn debug(ctx: &Ctx, args: &[String]) -> Result<i32> {
             Ok(0)
         }
         _ => Err(exit(128, "usage: layr debug changes <a> <b> | layr debug receive <name> <uuid> < stream")),
+    }
+}
+
+/// A byte count for people: `812 MiB`.
+fn human_size(n: u64) -> String {
+    let units = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut v = n as f64;
+    let mut i = 0;
+    while v >= 1024.0 && i + 1 < units.len() {
+        v /= 1024.0;
+        i += 1;
+    }
+    if i == 0 {
+        format!("{n} B")
+    } else {
+        format!("{v:.1} {}", units[i])
     }
 }
