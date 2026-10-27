@@ -1676,7 +1676,10 @@ pub fn check_git_head(repo: &Repo, line: &Line) -> Result<()> {
         return Ok(());
     };
     let cur = String::from_utf8_lossy(&cur).trim().to_string();
-    let expected = line_commit(repo, &line.head)?;
+    // Without a commit for the head, refresh_git_folder keeps HEAD and only warns: no refusal.
+    let Ok(expected) = line_commit(repo, &line.head) else {
+        return Ok(());
+    };
     if cur != expected {
         bail!("git HEAD moved outside layr ({cur}); layr lines are written with layr only. Undo the git change or reset git HEAD to {expected} to continue.");
     }
