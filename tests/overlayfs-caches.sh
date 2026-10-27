@@ -8,6 +8,7 @@ l init cachetest --from "$T/src" -q >/dev/null
 P=$LAYR_ROOT/projects/cachetest/lines
 cd "$P/main" || exit 1
 l config regenerable '["target"]'
+mkdir -p target
 no "the cache is not a mount" mountpoint -q target
 printf built > target/output
 l save -q --caches
