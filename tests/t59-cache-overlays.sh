@@ -1,7 +1,8 @@
 #!/bin/bash
 # Cache overlays (docs/cache-overlays.md): `regenerable` folders become folder overlays; a line has
-# caches, so new lines from a line start warm; merge and `cache pull` bring caches between lines;
-# `gc lru:<size>` limits them. One user, so it runs on macOS and on Linux.
+# caches, so new lines from a line start warm; a merge brings caches back; `gc lru:<size>` limits
+# them; `overlay list` and `overlay repair` replace the removed `cache` commands. One user, so it
+# runs on macOS and on Linux.
 . "$(dirname "$0")/lib.sh"
 
 sample $T/src
@@ -19,12 +20,13 @@ self_id=$(l remote self --json | python3 -c 'import json,sys; print(json.load(sy
 l line new rel main >/dev/null
 cd $P/rel
 rm -rf target; mkdir -p target/debug; echo bin1 > target/debug/x
-l cache repair >/dev/null
 out=$(l save --caches)
 has "save --caches names the cache overlay" "target: overlay cache.target" "$out"
 has "the overlay is a folder overlay with the cache properties" "folder=target history=last quiet merge=union-theirs" "$(l overlay list)"
-eq "cache list keeps its format" "$(printf 'target\tcache')" "$(l cache list)"
-has "cache list -v shows the saved overlay state" "overlay cache.target" "$(l cache list -v)"
+row=$(l overlay list | grep cache.target)
+eq "overlay list shows the state of the folder" "cache" "$(echo "$row" | cut -f6)"
+has "overlay list shows the size of the cache" "B" "$(echo "$row" | cut -f7)"
+has "overlay list shows the saved overlay state" "saved " "$(echo "$row" | cut -f8)"
 eq "status does not show the cache" "" "$(l status --short)"
 readers=$(l overlay readers cache.target)
 has "this machine reads the cache overlay" "machine:$self_id" "$readers"
@@ -67,7 +69,7 @@ l line delete -D fromstate >/dev/null 2>&1
 l gc -q >/dev/null 2>&1
 eq "gc drops the cache of a deleted line" 3 "$(states cache.target)"
 
-# 5. merge of a line unions its cache into the target; cache pull takes another line's cache.
+# 5. merge of a line unions its cache into the target.
 cd $P/warm
 echo w > target/debug/w
 l save --caches -q
@@ -75,11 +77,7 @@ cd $P/main
 out=$(l merge warm 2>&1)
 has "the merge brings the cache" "Merged cache target" "$out"
 eq "main has the merged line's files" "changed w" "$(cat target/debug/x target/debug/w | tr '\n' ' ' | sed 's/ $//')"
-out=$(l cache pull rel)
-has "cache pull names the folder" "target:" "$out"
-eq "the incoming file wins" bin3 "$(cat target/debug/x)"
-eq "and the line's other files stay" w "$(cat target/debug/w)"
-eq "a second pull has nothing new" "no newer caches in rel" "$(l cache pull rel)"
+eq "the incoming file wins" "changed" "$(cat target/debug/x)"
 eq "status stays clean" "" "$(l status --short)"
 
 # 6. gc lru:<size> trims the cache folders of the lines, oldest files first.
@@ -100,6 +98,20 @@ has "it is a follow folder overlay" "folder=vendor/cache" "$(l overlay list)"
 no "a second overlay for the same folder fails" l overlay create deps2 --folder vendor/cache
 no "a folder overlay is not shared" l overlay create deps3 --folder x --mode shared
 no "an absolute folder fails" l overlay create deps4 --folder /tmp
+
+# 8b. The removed cache commands name their replacements; overlay repair makes a cache again.
+has "cache add names its replacement" "layr cache add was removed. Use 'regenerable' in .layrattributes" "$(l cache add x 2>&1)"
+has "cache list names overlay list" "layr cache list was removed. Use 'layr overlay list'." "$(l cache list -v 2>&1)"
+has "cache pull names the line and merge commands" "layr cache pull was removed. Use 'layr line new <name> <line>' or 'layr merge <line>'." "$(l cache pull rel 2>&1)"
+has "cache repair names overlay repair" "layr cache repair was removed. Use 'layr overlay repair <overlay>'." "$(l cache repair 2>&1)"
+has "cache remove names -regenerable" "layr cache remove was removed. Use '-regenerable' in .layrattributes" "$(l cache remove target 2>&1)"
+no "each removed form fails" l cache list
+cd $P/rel
+rm -rf target; mkdir -p target/debug; echo tool > target/debug/x
+eq "overlay repair makes the plain folder a cache again" "target: a cache again" "$(l overlay repair cache.target)"
+eq "and keeps its files" "tool" "$(cat target/debug/x)"
+has "repair of a folder that is no cache path fails" "is no cache path" "$(l overlay repair deps 2>&1 || true)"
+cd $P/main
 
 # 9. A protected line takes caches only with a merge that met its protection.
 cd $P/main

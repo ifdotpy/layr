@@ -6,9 +6,9 @@
 sample $T/src
 l init g --from $T/src -q >/dev/null
 P=$LAYR_ROOT/projects/g/lines
+cstate() { l overlay list | grep cache.target | cut -f6; }
 cd $P/main
-l cache add target
-ok "the cache folder is a subvolume" sh -c "btrfs subvolume show $P/main/target >/dev/null"
+l config regenerable '["target"]'
 l line new -q w
 cd $P/w
 ok "a new line gets the cache as a subvolume" sh -c "btrfs subvolume show $P/w/target >/dev/null"
@@ -16,10 +16,12 @@ head -c 20000000 /dev/urandom > target/big.bin; echo src >> notes.txt
 l save -q
 eq "automatic states do not hold the cache content" "" "$(l show head@{0}:target | tail -n +3)"
 eq "status ignores the cache" " M notes.txt" "$(l status -s)"
+l save -q --caches
+eq "save --caches makes the cache overlay" "cache" "$(cstate)"
 rm -rf target; mkdir target; echo rebuilt > target/out
-eq "a tool replaced the cache with a plain folder" "plain" "$(l cache list | awk '{print $2}')"
-l cache repair >/dev/null; l save -q
-eq "cache repair makes it a cache again" "cache" "$(l cache list | awk '{print $2}')"
+has "a tool replaced the cache with a plain folder" "plain folder" "$(cstate)"
+l overlay repair cache.target >/dev/null; l save -q
+eq "overlay repair makes it a cache again" "cache" "$(cstate)"
 eq "and keeps its content" "rebuilt" "$(cat target/out)"
 # A live move with warm build output. The first sync sends the state without caches; the next
 # sync with --caches must still send them.

@@ -30,7 +30,8 @@ printf 'old build output\n' > target/old
 "$OLD_LAYR" save -q --layers
 l line new -q read-old-cache
 ok "new client restores an old saved cache" cmp target/old ../read-old-cache/target/old
-l cache add generated
+l config regenerable '["generated"]'
+mkdir -p generated
 printf 'new build output\n' > generated/new
 l save -q --caches
 "$OLD_LAYR" branch -q read-new-cache
