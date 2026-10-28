@@ -23,6 +23,12 @@ l add -A >/dev/null; l save -qm two >/dev/null
 head=$(l log -n1 | awk 'NR==1{print $2}')
 eq "status is clean" "nothing to save, working tree clean" "$(l status | tail -1)"
 out=$(l save)
+if [ "$out" != "w $head" ]; then
+    echo "DIAG save printed: $out; head: $head"
+    echo "DIAG status:"; l status
+    echo "DIAG diff head..new:"; l diff --name-status "$head" "$(id "$out")"
+    echo "DIAG log:"; l log -n3 | head -20
+fi
 eq "after a named state, the save prints the head" "w $head" "$out"
 eq "a second save prints the same" "$out" "$(l save)"
 echo three >> b.txt
