@@ -107,6 +107,7 @@ pub fn parse_functions(json: &[u8]) -> anyhow::Result<BTreeMap<String, (Ranges, 
 pub struct Hunk {
     pub old_start: u32,
     pub old_len: u32,
+    pub new_len: u32,
     pub added: Vec<String>,
 }
 
@@ -114,6 +115,8 @@ pub struct Hunk {
 pub struct FileChange {
     /// Path in the baseline state.
     pub old_path: String,
+    /// Path in the new state; differs after a rename.
+    pub new_path: String,
     pub hunks: Vec<Hunk>,
 }
 
@@ -131,31 +134,34 @@ pub fn parse_hunks(diff: &str) -> Vec<FileChange> {
     let mut out: Vec<FileChange> = Vec::new();
     let mut in_hunk = false;
     let mut cur: Option<FileChange> = None;
+    let mk = |p: &str| FileChange { old_path: p.to_string(), new_path: p.to_string(), hunks: Vec::new() };
     for l in diff.lines() {
         if l.starts_with("diff --git ") {
             in_hunk = false;
             out.extend(cur.take());
-        } else if !in_hunk && l.starts_with("--- ") {
-            cur = l[4..].strip_prefix("a/").map(|p| FileChange { old_path: p.to_string(), hunks: Vec::new() });
-        } else if !in_hunk && l.starts_with("+++ ") {
-            // Header only.
+        } else if in_hunk && !l.starts_with("@@ ") {
+            if let (Some(t), Some(h)) = (l.strip_prefix('+'), cur.as_mut().and_then(|c| c.hunks.last_mut())) {
+                h.added.push(t.to_string());
+            }
+        } else if let Some(p) = l.strip_prefix("rename from ") {
+            cur = Some(mk(p));
+        } else if let Some(p) = l.strip_prefix("rename to ") {
+            if let Some(c) = cur.as_mut() {
+                c.new_path = p.to_string();
+            }
+        } else if let Some(p) = l.strip_prefix("--- a/") {
+            cur.get_or_insert_with(|| mk(p));
         } else if let Some(h) = l.strip_prefix("@@ ") {
             in_hunk = true;
             let mut it = h.split(' ');
-            let (Some(a), Some(_)) = (it.next(), it.next()) else { continue };
-            if let (Some((s, n)), Some(c)) = (parse_span(a), cur.as_mut()) {
-                c.hunks.push(Hunk { old_start: s, old_len: n, added: Vec::new() });
-            }
-        } else if in_hunk {
-            if let (Some(t), Some(c)) = (l.strip_prefix('+'), cur.as_mut()) {
-                if let Some(h) = c.hunks.last_mut() {
-                    h.added.push(t.to_string());
-                }
+            let (Some(a), Some(b)) = (it.next(), it.next()) else { continue };
+            if let (Some((s, n)), Some((_, m)), Some(c)) = (parse_span(a), parse_span(b), cur.as_mut()) {
+                c.hunks.push(Hunk { old_start: s, old_len: n, new_len: m, added: Vec::new() });
             }
         }
     }
     out.extend(cur);
-    out.retain(|c| !c.hunks.is_empty());
+    out.retain(|c| !c.hunks.is_empty() || c.old_path != c.new_path);
     out
 }
 
@@ -178,9 +184,17 @@ mod tests {
         assert_eq!(c.len(), 1);
         assert_eq!(c[0].old_path, "src/a.rs");
         let h = &c[0].hunks;
-        assert_eq!((h[0].old_start, h[0].old_len, h[0].added.len()), (3, 0, 2));
+        assert_eq!((h[0].old_start, h[0].old_len, h[0].new_len, h[0].added.len()), (3, 0, 2, 2));
         assert_eq!((h[1].old_start, h[1].old_len, h[1].added.clone()), (10, 1, vec!["new".to_string()]));
         assert_eq!((h[2].old_start, h[2].old_len), (20, 2));
+    }
+
+    #[test]
+    fn renames() {
+        let d = "diff --git a/o.rs b/n.rs\nsimilarity index 100%\nrename from o.rs\nrename to n.rs\ndiff --git a/p.rs b/q.rs\nrename from p.rs\nrename to q.rs\n--- a/p.rs\n+++ b/q.rs\n@@ -1 +1 @@\n-a\n+b\n";
+        let c = parse_hunks(d);
+        assert_eq!((c[0].old_path.as_str(), c[0].new_path.as_str(), c[0].hunks.len()), ("o.rs", "n.rs", 0));
+        assert_eq!((c[1].old_path.as_str(), c[1].new_path.as_str(), c[1].hunks.len()), ("p.rs", "q.rs", 1));
     }
 
     #[test]

@@ -1,7 +1,49 @@
 //! Stale test selection. The rules are in docs/retest.md.
 
 use crate::parse::{in_ranges, overlaps, FileChange, Hunk};
-use crate::record::{FileCov, TestRec};
+use crate::record::{FileCov, Ranges, TestRec};
+
+/// Line `l` of the old state in the new state. `None` when a hunk changed that line.
+fn map_line(hunks: &[Hunk], l: u32) -> Option<u32> {
+    let mut delta = 0i64;
+    for h in hunks {
+        let (old, new) = (h.old_len as i64, h.new_len as i64);
+        if h.old_len == 0 {
+            if l > h.old_start {
+                delta += new;
+            }
+        } else if l > h.old_start + h.old_len - 1 {
+            delta += new - old;
+        } else if l >= h.old_start {
+            return None;
+        }
+    }
+    u32::try_from(l as i64 + delta).ok()
+}
+
+fn map_ranges(hunks: &[Hunk], r: &Ranges) -> Option<Ranges> {
+    r.iter().map(|x| Some([map_line(hunks, x[0])?, map_line(hunks, x[1])?])).collect()
+}
+
+/// The entry of a test that stays unchanged, in the lines of the new state.
+/// `None` when the test is stale, or when an end of a range was itself changed (run it, do not guess).
+pub fn carry(rec: &TestRec, changes: &[FileChange]) -> Option<TestRec> {
+    if is_stale(rec, changes) {
+        return None;
+    }
+    let mut out = TestRec { status: rec.status.clone(), files: Default::default() };
+    for (path, cov) in &rec.files {
+        let c = changes.iter().find(|c| &c.old_path == path);
+        let (name, hunks) = c.map_or((path, &[][..]), |c| (&c.new_path, &c.hunks[..]));
+        let cov = FileCov {
+            lines: map_ranges(hunks, &cov.lines)?,
+            funcs: map_ranges(hunks, &cov.funcs)?,
+            idle: map_ranges(hunks, &cov.idle)?,
+        };
+        out.files.insert(name.clone(), cov);
+    }
+    Some(out)
+}
 
 /// A test is stale when a change since its record can alter what it executed.
 pub fn is_stale(rec: &TestRec, changes: &[FileChange]) -> bool {
@@ -151,10 +193,30 @@ mod tests {
     }
 
     #[test]
+    fn carry_shifts_ranges_and_follows_renames() {
+        // Ten lines inserted above everything: f 4..9 becomes 14..19.
+        let ins = diff("-0,0", &["fn h() {}"; 10]);
+        let mut ins = ins;
+        ins[0].hunks[0].new_len = 10;
+        ins[0].new_path = "b.rs".into();
+        let r = carry(&rec("pass"), &ins).unwrap();
+        let cov = &r.files["b.rs"];
+        assert_eq!(
+            (cov.funcs.clone(), cov.idle.clone(), cov.lines.clone()),
+            (vec![[14, 19]], vec![[21, 23]], vec![[14, 16], [19, 19]])
+        );
+        // An edit inside idle `g` at its first line changes a range end: not carried.
+        assert!(carry(&rec("pass"), &diff("-11", &["fn g() {"])).is_none());
+        // A stale test is not carried.
+        assert!(carry(&rec("pass"), &diff("-6", &["x"])).is_none());
+    }
+
+    #[test]
     fn failed_test_and_other_files() {
         assert!(is_stale(&rec("fail"), &[]));
         let mut c = diff("-6", &["x"]);
         c[0].old_path = "b.rs".into();
+        c[0].new_path = "b.rs".into();
         assert!(!is_stale(&rec("pass"), &c));
     }
 }
