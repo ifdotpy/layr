@@ -5,6 +5,7 @@ mod deps;
 mod parse;
 mod record;
 mod select;
+mod tools;
 
 use anyhow::{bail, Context, Result};
 use record::{test_key, FileCov, Record, TestRec};
@@ -16,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
+use tools::Tool;
 
 /// Folder of the raw profiles of one run. The wrapper reads it from this variable.
 const PROFILE_DIR_VAR: &str = "LAYR_RETEST_PROFILE_DIR";
@@ -87,18 +89,33 @@ fn state_id(rev: &str) -> Result<String> {
     Ok(v["id"].as_str().context("state without id")?.to_string())
 }
 
-/// Save the working copy if it changed, and return the id of the state to record.
-fn current_state() -> Result<String> {
+/// Save the working copy if it changed. Returns the id of the state to record, and the id of the
+/// head when the working copy equals the head (a new line can have the head, not an auto state).
+fn current_state() -> Result<(String, Option<String>)> {
     let out = layr(&["save"])?;
+    let status: Value = serde_json::from_str(&layr(&["status", "--json"])?)?;
+    let clean =
+        ["conflicts", "staged", "unstaged", "untracked"].iter().all(|k| status[k].as_array().is_some_and(|a| a.is_empty()));
+    let head = if clean { Some(state_id("head")?) } else { None };
     let id32 = out.split_whitespace().last().filter(|w| w.len() == 32 && w.chars().all(|c| c.is_ascii_hexdigit()));
-    state_id(id32.unwrap_or("head"))
+    // "No changes" means the working copy is the head, or the newest auto state when it differs from the head.
+    let current = match (id32, &head) {
+        (Some(id), _) => state_id(id)?,
+        (None, Some(h)) => h.clone(),
+        (None, None) => state_id("head@{0}")?,
+    };
+    Ok((current, head))
 }
 
 /// Newest state in the line's log (autos included) that has a record.
-fn find_baseline(root: &Path) -> Result<Option<String>> {
+fn find_baseline(root: &Path, tool: Tool) -> Result<Option<String>> {
     for l in layr(&["log", "--json", "--auto"])?.lines() {
         let v: Value = serde_json::from_str(l)?;
-        if let Some(id) = v["id"].as_str().filter(|id| record::has_record(root, id)) {
+        let has = |id: &str| match tool {
+            Tool::Nextest => record::has_record(root, id),
+            t => record::tool_record_path(root, t.name(), id).is_file(),
+        };
+        if let Some(id) = v["id"].as_str().filter(|id| has(id)) {
             return Ok(Some(id.to_string()));
         }
     }
@@ -248,27 +265,74 @@ fn remove_stray_profiles(dir: &Path, since: std::time::SystemTime) -> usize {
     n
 }
 
+/// Run vitest, jest or pytest-testmon. They select the tests; we give them the changed files and
+/// keep the record of the last passing state.
+fn run_tool(tool: Tool, root: &Path, full: bool, extra: &[String]) -> Result<i32> {
+    let (current, head) = current_state()?;
+    let baseline = if tool == Tool::Pytest || full { None } else { find_baseline(root, tool)? };
+    let files: Option<Vec<String>> = match &baseline {
+        Some(b) if *b != current => Some(
+            layr(&["diff", b, &current, "--name-only"])?
+                .lines()
+                .filter(|f| !f.starts_with(record::RECORD_DIR) && root.join(f).is_file())
+                .map(str::to_string)
+                .collect(),
+        ),
+        Some(_) => Some(Vec::new()),
+        None => None,
+    };
+    let cmd = tool.command(std::env::var(tool.env_var()).ok());
+    let mut code = 0;
+    match tools::build(tool, &cmd, files.as_deref(), full, extra) {
+        None => eprintln!("layr-retest: no changed file since the baseline, nothing to run"),
+        Some(args) => {
+            eprintln!("layr-retest: {}", args.join(" "));
+            let mut c = Command::new(&args[0]);
+            c.args(&args[1..]).current_dir(root);
+            if tool == Tool::Pytest {
+                std::fs::create_dir_all(root.join(record::RECORD_DIR))?;
+                c.env("TESTMON_DATAFILE", root.join(record::RECORD_DIR).join("testmondata"));
+            }
+            code = c.status().with_context(|| format!("cannot start {}", args[0]))?.code().unwrap_or(1);
+        }
+    }
+    if code != 0 {
+        // No pass record: the next run starts again from the last passing baseline.
+        return Ok(code);
+    }
+    let rec = tools::ToolRecord { tool: tool.name().into(), baseline: baseline.clone(), status: "pass".into() };
+    for id in std::iter::once(&current).chain(head.as_ref().filter(|h| **h != current)) {
+        let p = record::tool_record_path(root, tool.name(), id);
+        std::fs::create_dir_all(p.parent().unwrap())?;
+        std::fs::write(&p, serde_json::to_vec(&rec)?)?;
+    }
+    layr(&["save", "--caches"])?;
+    Ok(0)
+}
+
 fn run(args: &[String]) -> Result<i32> {
     let (mine, extra) = match args.iter().position(|a| a == "--") {
         Some(i) => (&args[..i], &args[i + 1..]),
         None => (args, &args[args.len()..]),
     };
     let full = mine.iter().any(|a| a == "--full");
-    if let Some(bad) = mine.iter().find(|a| *a != "--full") {
-        bail!("unknown option {bad}");
+    let mut tool = Tool::Nextest;
+    let mut it = mine.iter().filter(|a| *a != "--full");
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--tool" => tool = Tool::parse(it.next().context("--tool needs a name")?)?,
+            bad => bail!("unknown option {bad}"),
+        }
     }
     let root = std::env::current_dir()?;
+    if tool != Tool::Nextest {
+        return run_tool(tool, &root, full, extra);
+    }
     let t0 = std::time::Instant::now();
     let started = std::time::SystemTime::now();
 
-    let current = current_state()?;
-    // An auto state is in no other line. When the working copy equals the head, the head (a state
-    // that a new line can have) gets the same record.
-    let status: Value = serde_json::from_str(&layr(&["status", "--json"])?)?;
-    let clean =
-        ["conflicts", "staged", "unstaged", "untracked"].iter().all(|k| status[k].as_array().is_some_and(|a| a.is_empty()));
-    let head = if clean { Some(state_id("head")?) } else { None };
-    let baseline = find_baseline(&root)?;
+    let (current, head) = current_state()?;
+    let baseline = find_baseline(&root, Tool::Nextest)?;
     let base_rec = baseline.as_deref().map(|b| record::load(&root, b)).transpose()?;
     let changes = match baseline.as_deref() {
         Some(b) if b != current => parse::parse_hunks(&layr(&["diff", b, &current, "-U0"])?),
