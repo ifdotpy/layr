@@ -116,7 +116,8 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
             }
             None => {
                 if !a.has("-q") {
-                    outln!(ctx, "{} no changes", l.name);
+                    // The state that equals the working content, in the format of a new state.
+                    outln!(ctx, "{} {}", l.name, ids::display(&repo.save_base(&l)?));
                 }
             }
         }
