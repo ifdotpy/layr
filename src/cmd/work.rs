@@ -822,6 +822,7 @@ pub fn commit(ctx: &Ctx, args: &[String]) -> Result<i32> {
         .flag("-q|--quiet")
         .flag("-v|--verbose")
         .flag("--no-edit")
+        .flag("--allow-conflict-markers")
         .value("--author")
         .flag("-s|--signoff");
     let a = parse(&spec, args)?;
@@ -930,6 +931,29 @@ pub fn commit(ctx: &Ctx, args: &[String]) -> Result<i32> {
             p.rollback()?;
         }
         return nothing(&h, &line);
+    }
+    // A file with a full set of conflict markers is no result of a merge: refuse it unless asked.
+    if !a.has("--allow-conflict-markers") {
+        let mut marked = Vec::new();
+        for c in &staged {
+            if !c.new.as_ref().is_some_and(|m| m.is_file() && m.size <= fsutil::MAX_TEXT) {
+                continue;
+            }
+            if crate::repo::has_markers(&fsutil::read_file(&new_root, &c.path)?) {
+                marked.push(c.path.clone());
+            }
+        }
+        if !marked.is_empty() {
+            h.repo.discard_states(std::slice::from_ref(&state));
+            #[cfg(target_os = "macos")]
+            if let Some(p) = promotion.take() {
+                p.rollback()?;
+            }
+            return Err(exit(
+                1,
+                format!("error: conflict markers in {}: resolve them, or save with --allow-conflict-markers.", marked.join(", ")),
+            ));
+        }
     }
     if let Some((n, e)) = author {
         state.author.name = n;

@@ -43,6 +43,7 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
         .flag("--no-verify|-n")
         .flag("-v|--verbose")
         .flag("--no-edit")
+        .flag("--allow-conflict-markers")
         .value("--author")
         .flag("-s|--signoff")
         .flag("--running")
