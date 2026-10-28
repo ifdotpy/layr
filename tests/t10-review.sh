@@ -10,6 +10,7 @@ cd $W
 
 # 1. The .git folder belongs to the line owner: links in it must not redirect root writes.
 echo victim-head > $T/victim1; echo victim-index > $T/victim2
+chmod -R u+w .git # the folder is read only for git; the owner can open it
 rm .git/HEAD .git/index; ln -s $T/victim1 .git/HEAD; ln -s $T/victim2 .git/index
 echo b > b.txt; l add b.txt; l save -qm b; l git push -q origin t1
 eq "a link at .git/HEAD does not redirect the write" "victim-head" "$(cat $T/victim1)"
