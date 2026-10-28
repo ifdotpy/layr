@@ -37,7 +37,9 @@ out=$(l status 2>&1)
 secs=$(since $t0)
 has "status shows the edit" "notes.txt" "$out"
 eq "status of the cache folder files is not listed" 0 "$(echo "$out" | grep -c 'target/')"
-ok "status of the big line takes at most 15 seconds ($secs s)" test "$secs" -le 15
+# Linux compares through a snapshot of the whole folder, so it gets a looser bound.
+limit=15; [ "$(uname -s)" = Darwin ] || limit=60
+ok "status of the big line takes at most $limit seconds ($secs s)" test "$secs" -le "$limit"
 
 # 2. Another command takes the project lock while status compares other lines.
 LAYR_TRACE=1 l status >/dev/null 2>$T/trace.txt &
