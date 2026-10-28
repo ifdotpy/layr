@@ -30,10 +30,7 @@ fn main() {
         .or_else(|| git(&["describe", "--always", "--dirty", "--exclude", "*"]))
         .unwrap_or_else(|| "unknown".into());
     println!("cargo:rustc-env=LAYR_BUILD_ID={build}");
-    // `layr version` shows the commit and the build date. The commit is read at each HEAD change
-    // (watched above); the date is the day of the build.
-    let commit = git(&["rev-parse", "--short", "HEAD"]).unwrap_or_else(|| "unknown".into());
+    // `layr version` shows the build identity (LAYR_BUILD_ID) and the day of the build.
     let date = output("date", &["+%Y-%m-%d"]).unwrap_or_else(|| "unknown".into());
-    println!("cargo:rustc-env=LAYR_BUILD_COMMIT={commit}");
     println!("cargo:rustc-env=LAYR_BUILD_DATE={date}");
 }
