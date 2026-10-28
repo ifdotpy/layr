@@ -171,3 +171,74 @@ fn runs_only_the_stale_test() {
     let _ = Command::new("chflags").args(["-R", "nouchg"]).arg(&tmp).status();
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// vitest adapter with a fake tool: a script that logs its arguments and exits with the code in a file.
+/// No real vitest, jest or pytest-testmon is used.
+#[test]
+fn vitest_adapter_with_a_fake_tool() {
+    let tmp = std::env::temp_dir().canonicalize().unwrap().join(format!("layr-retest-tool-{}", std::process::id()));
+    let src = tmp.join("src-project");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("a.ts"), "export const a = 1;\n").unwrap();
+    std::fs::write(src.join("b.ts"), "export const b = 2;\n").unwrap();
+    std::fs::write(src.join(".layrattributes"), ".layr-retest regenerable\n").unwrap();
+    std::fs::write(src.join(".gitignore"), "/.layr-retest\n").unwrap();
+    let (log, code) = (tmp.join("argv.log"), tmp.join("code"));
+    let fake = tmp.join("fake-vitest");
+    std::fs::write(&fake, format!("#!/bin/sh\necho \"$@\" >> {}\nexit $(cat {})\n", log.display(), code.display())).unwrap();
+    std::fs::write(&code, "0").unwrap();
+    Command::new("chmod").arg("+x").arg(&fake).status().unwrap();
+    let root = tmp.join("store");
+    sh(&tmp, &root, "layr", &["init", "app", "--from", src.to_str().unwrap()]);
+    sh(&root.join("projects/app/lines/main"), &root, "layr", &["line", "new", "work"]);
+    let line = root.join("projects/app/lines/work");
+
+    let run = |args: &[&str]| -> (bool, String) {
+        let o = Command::new(env!("CARGO_BIN_EXE_layr-retest"))
+            .args(args)
+            .current_dir(&line)
+            .env("LAYR_ROOT", &root)
+            .env("LAYR_RETEST_VITEST", &fake)
+            .output()
+            .unwrap();
+        let _ = std::fs::read_to_string(&log); // the log is read by `calls`
+        (o.status.success(), String::from_utf8_lossy(&o.stderr).into_owned())
+    };
+    let calls = || -> Vec<String> { std::fs::read_to_string(&log).unwrap_or_default().lines().map(str::to_string).collect() };
+
+    // 1. No baseline: the whole suite.
+    assert!(run(&["run", "--tool", "vitest"]).0);
+    assert_eq!(calls(), vec!["run"]);
+
+    // 2. No change: the tool does not run, and the run passes.
+    let (ok, err) = run(&["run", "--tool", "vitest"]);
+    assert!(ok && err.contains("nothing to run"), "{err}");
+    assert_eq!(calls().len(), 1);
+
+    // 3. One file changed: only `related --run` that file.
+    std::fs::write(line.join("a.ts"), "export const a = 10;\n").unwrap();
+    assert!(run(&["run", "--tool", "vitest", "--", "--bail"]).0);
+    assert_eq!(calls().last().unwrap(), "related --run a.ts --bail");
+
+    // 4. A failing run writes no pass record: the next run starts from the same baseline again.
+    std::fs::write(&code, "1").unwrap();
+    std::fs::write(line.join("b.ts"), "export const b = 20;\n").unwrap();
+    assert!(!run(&["run", "--tool", "vitest"]).0);
+    assert_eq!(calls().last().unwrap(), "related --run b.ts");
+    std::fs::write(&code, "0").unwrap();
+    assert!(run(&["run", "--tool", "vitest"]).0);
+    assert_eq!(calls().last().unwrap(), "related --run b.ts");
+    assert_eq!(calls().len(), 4);
+
+    // 5. After a pass nothing is left; `--full` runs everything.
+    let (ok, err) = run(&["run", "--tool", "vitest"]);
+    assert!(ok && err.contains("nothing to run"), "{err}");
+    assert!(run(&["run", "--tool", "vitest", "--full"]).0);
+    assert_eq!(calls().last().unwrap(), "run");
+
+    // The records of the tool are apart from the nextest records.
+    assert!(line.join(".layr-retest/vitest").is_dir());
+
+    let _ = Command::new("chflags").args(["-R", "nouchg"]).arg(&tmp).status();
+    let _ = std::fs::remove_dir_all(&tmp);
+}

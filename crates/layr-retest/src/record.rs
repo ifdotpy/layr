@@ -54,6 +54,11 @@ pub fn has_record(root: &Path, state: &str) -> bool {
     record_path(root, state).is_file()
 }
 
+/// Records of the tools that select tests themselves are in a folder per tool.
+pub fn tool_record_path(root: &Path, tool: &str, state: &str) -> PathBuf {
+    root.join(RECORD_DIR).join(tool).join(format!("{state}.json"))
+}
+
 pub fn load(root: &Path, state: &str) -> Result<Record> {
     let p = record_path(root, state);
     serde_json::from_slice(&std::fs::read(&p).with_context(|| p.display().to_string())?)

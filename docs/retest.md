@@ -1,6 +1,6 @@
 # layr-retest: run only the tests that a change can affect
 
-Status: first version built (2026-10-28): the Rust adapter, in `crates/layr-retest`. Design
+Status: first version built (2026-10-28): the Rust adapter, and the vitest, jest and pytest adapters (not tried with the real tools), in `crates/layr-retest`. Design
 agreed with the owner on 2026-10-28. Prototype measurements are in the last section. See
 "First version" for the command line, the record format and what is not done.
 
@@ -240,6 +240,35 @@ The installed `layr` 0.4.0 (2026-10-26) has no cache overlays. Build the one in 
   the start of the run, and prints how many. That coverage is lost: code that only that child ran
   is not in the record, so a change of it does not select the test. `--full` finds such a change.
 
+### JS/TS and Python adapters
+
+`layr-retest run --tool vitest|jest|pytest [--full] [-- <tool args>]`. The default tool is
+`nextest`. These tools choose the tests themselves. layr-retest saves the working copy, finds the
+baseline, gives the tool the changed files, and keeps the record.
+
+- Baseline: the newest state with a record of this tool (`.layr-retest/<tool>/<state>.json`:
+  `tool`, `baseline`, `status`). The nextest records stay in `.layr-retest/<state>.json`.
+- vitest: without a baseline, or with `--full`: `<cmd> run <args>`. Else
+  `<cmd> related --run <changed files> <args>`.
+- jest: without a baseline, or with `--full`: `<cmd> <args>`. Else
+  `<cmd> <args> --findRelatedTests <changed files>`.
+- Changed files: `layr diff <baseline> <current> --name-only`, only files that still exist, and
+  not the record folder. If no file changed, nothing runs and the run passes (a record is written).
+- pytest: `<cmd> --testmon <args>` with `TESTMON_DATAFILE=.layr-retest/testmondata`, so the data
+  file is in the cache folder and travels with the records. `--full` uses `--testmon-noselect`.
+  No file list is needed.
+- A record is written only when the tool exits with 0. After a failed run the next run starts
+  again from the last passing baseline, so the files of the failed run are given again.
+- The command: `LAYR_RETEST_VITEST`, `LAYR_RETEST_JEST`, `LAYR_RETEST_PYTEST` replace the default
+  (`npx vitest`, `npx jest`, `pytest`), for example `LAYR_RETEST_VITEST="pnpm exec vitest"`.
+- Limits: vitest and jest use the import graph, so a file that a test reads from disk is not seen
+  (`--full` finds it). The records of these tools hold no coverage. Not tested with the real tools:
+  vitest, jest and pytest-testmon are not installed on this machine (`npx` and `node` are), and
+  nothing was downloaded. The end to end test `vitest_adapter_with_a_fake_tool` uses a script that
+  logs its arguments and exits with a code from a file: first run, no change, one changed file,
+  a failing run, `--full`. Argument building of all three tools has unit tests (`tools.rs`).
+  The jest and pytest run paths share the code of the vitest path and are checked by unit tests only.
+
 ### Contradiction
 
 `run --full` compares each failed test with the entry in the nearest record. If it said `pass`, the
@@ -268,7 +297,6 @@ the old chain is not used again. The end to end test shows it with a test that r
 - The line root must be the cargo project root. The path of `layr-retest` must have no spaces
   (cargo splits the runner on spaces).
 - Cross compilation: the runner variable uses the host triple.
-- Python and JS/TS adapters.
 - No schedule for `--full`.
 
 ## Not decided
