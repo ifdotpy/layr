@@ -75,7 +75,7 @@ pub mod git {
         }
     }
 
-    /// Branches to import after a fetch: the requested ones, the ones imported before, and the
+    /// Branches to import after a fetch (the caller holds no project lock): the requested ones, the ones imported before, and the
     /// ones that match a line name or the default branch.
     fn import_after_fetch(
         ctx: &Ctx,
@@ -103,8 +103,10 @@ pub mod git {
                 continue;
             }
             let prev = repo.p.db.remote_ref(name)?;
-            let (st, fresh) = gitbridge::import_commit(ctx, repo, commit, name, ctx.caller.uid, None)?;
+            // The import takes the project lock for one commit at a time.
+            let (st, fresh) = gitbridge::import_commit_unlocked(ctx, repo, commit, name, ctx.caller.uid)?;
             if prev.as_ref().map(|p| p.0 != st).unwrap_or(true) && !fresh {
+                let _lock = repo.p.lock()?;
                 let mut rec = Record::new("remote.ref");
                 rec.data = serde_json::json!({"ref": name, "state": st, "commit": commit});
                 repo.commit_record(ctx, rec)?;
@@ -122,7 +124,6 @@ pub mod git {
         let remote = a.pos.first().cloned().unwrap_or_else(|| "origin".into());
         let only = a.pos.get(1).cloned();
         let refs = gitbridge::fetch(ctx, repo, &remote)?;
-        let _lock = repo.p.lock()?;
         let done = import_after_fetch(ctx, repo, &remote, &refs, only.as_deref())?;
         if !a.has("-q") {
             let url = gitbridge::remote_url(repo, &remote)?;
@@ -171,10 +172,7 @@ pub mod git {
                 }
             }
         };
-        {
-            let _lock = h.repo.p.lock()?;
-            import_after_fetch(ctx, &h.repo, &remote, &refs, Some(&branch))?;
-        }
+        import_after_fetch(ctx, &h.repo, &remote, &refs, Some(&branch))?;
         let rev = format!("{remote}/{branch}");
         if h.repo.p.db.remote_ref(&rev)?.is_none() {
             return Err(exit(1, format!("fatal: couldn't find remote ref {branch}")));
