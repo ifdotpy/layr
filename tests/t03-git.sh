@@ -144,12 +144,13 @@ l git clone $R gx -q >/dev/null
 cd $LAYR_ROOT/projects/gx/lines/main || exit 1
 echo g1 > guard.txt; l add guard.txt; l save -qm "guard 1"
 g1=$(git rev-parse HEAD); gh=$(l rev-parse head)
+chmod -R u+w .git # the guard is read only; open it to simulate a git write
 echo g2 > guard2.txt; git add guard2.txt; git commit -qm "git work"
 gc=$(git rev-parse HEAD)
 echo g3 > guard3.txt; l add guard3.txt
 out=$(l save -qm "guard 2" 2>&1); rc=$?
 eq "save refuses after a git commit in the line" "refused" "$([ "$rc" -ne 0 ] && echo refused)"
-has "the refusal names the git HEAD" "git HEAD moved outside layr ($gc)" "$out"
+has "the refusal names the git HEAD" "A git commit, merge, reset or checkout ran in this line ($gc)" "$out"
 eq "the refused save leaves git HEAD" "$gc" "$(git rev-parse HEAD)"
 eq "the refused save leaves the line head" "$gh" "$(l rev-parse head)"
 git reset -q --hard $g1
@@ -160,13 +161,14 @@ cd $LAYR_ROOT && l git clone $R gy -q >/dev/null
 cd $LAYR_ROOT/projects/gy/lines/main || exit 1
 echo y1 > guard.txt; l add guard.txt; l save -qm "guard 1"
 y1=$(git rev-parse HEAD); yh=$(l rev-parse head)
+chmod -R u+w .git
 git checkout -q -b side; echo s > side.txt; git add side.txt; git commit -qm "side work"
 git checkout -q --detach $y1; echo m > main.txt; git add main.txt; git commit -qm "main work"
 git merge -q --no-edit side; ym=$(git rev-parse HEAD)
 echo y2 > guard2.txt; l add guard2.txt
 out=$(l save -qm "guard 2" 2>&1); rc=$?
 eq "save refuses after a git merge in the line" "refused" "$([ "$rc" -ne 0 ] && echo refused)"
-has "the merge refusal names the git HEAD" "git HEAD moved outside layr ($ym)" "$out"
+has "the merge refusal names the git HEAD" "A git commit, merge, reset or checkout ran in this line ($ym)" "$out"
 eq "the refused save leaves the merge in git HEAD" "$ym" "$(git rev-parse HEAD)"
 eq "the refused save leaves the line head of the merge case" "$yh" "$(l rev-parse head)"
 finish

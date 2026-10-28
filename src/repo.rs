@@ -114,14 +114,15 @@ pub fn skip_path(p: &str) -> bool {
 
 /// The kinds of change to a line, for `Repo::authorize_line`.
 #[derive(Clone, Copy, Debug)]
-pub enum LineOp {
+pub enum LineOp<'a> {
     /// Snapshots of the working content (save, overlay repair): the owner.
     Save,
     /// Commit, reset, add, apply, stash and the other work commands: the owner, and only if the
     /// line is not protected or its rule allows direct changes.
     Direct,
     /// A merge into the line: the owner; for a protected line the rule's update role.
-    Merge { expect: bool },
+    /// `hint` is the ready command the refusal of a protected line names.
+    Merge { expect: bool, hint: Option<&'a str> },
     /// Delete, rename or adopt: the owner, or a maintainer.
     Manage,
     /// Moving the head back: the owner; for a protected line the rule's rewrite role.
@@ -200,7 +201,7 @@ impl<'a> Repo<'a> {
     /// Whether the caller may make this kind of change to a line. Returns the line's protection
     /// rule. Only the owner changes a line; a protected line changes through merges by the role
     /// its rule names; moving a protected line back needs the rule's rewrite role.
-    pub fn authorize_line(&self, ctx: &Ctx, line: &Line, op: LineOp) -> Result<Option<Rule>> {
+    pub fn authorize_line(&self, ctx: &Ctx, line: &Line, op: LineOp<'_>) -> Result<Option<Rule>> {
         let pol = self.policy();
         let rule = pol.rule_for(&line.name);
         if ctx.caller.is_root() {
@@ -228,7 +229,7 @@ impl<'a> Repo<'a> {
                     return Err(not_owner());
                 }
             }
-            LineOp::Merge { expect } => match &rule {
+            LineOp::Merge { expect, hint } => match &rule {
                 None if !owner => return Err(not_owner()),
                 None => {}
                 Some(r) => {
@@ -241,7 +242,8 @@ impl<'a> Repo<'a> {
                         );
                     }
                     if r.expect && !expect {
-                        bail!("the protected line '{name}' takes only a reviewed state: add --expect <state>");
+                        let hint = hint.map(|h| format!(" ({h})")).unwrap_or_default();
+                        bail!("the protected line '{name}' takes only a reviewed state: add --expect <state>{hint}");
                     }
                 }
             },

@@ -1751,6 +1751,8 @@ pub fn make_git_folder(repo: &Repo, line: &Line, state: &str, w: &Path) -> Resul
     for p in paths {
         fsutil::chown_nofollow(&g.join(p), u, gid)?;
     }
+    // Read only for git: a git write needs lock files and new objects; layr writes through descriptors.
+    fsutil::git_writable(w, false);
     Ok(())
 }
 
@@ -1775,17 +1777,26 @@ pub fn refresh_git_folder(repo: &Repo, line: &Line) -> Result<()> {
     // A HEAD that is not a regular file (for example a link) is replaced.
     let cur = fsutil::read_at(&dir, "HEAD").map(|c| String::from_utf8_lossy(&c).trim().to_string()).unwrap_or_default();
     let c = line_commit(repo, &line.head)?;
+    let w = repo.working(line);
     if cur == c {
+        fsutil::git_writable(&w, false);
         return Ok(());
     }
+    fsutil::git_writable(&w, true);
+    let r = write_git_folder(repo, line, &dir, &c);
+    fsutil::git_writable(&w, false);
+    r
+}
+
+fn write_git_folder(repo: &Repo, line: &Line, dir: &std::fs::File, c: &str) -> Result<()> {
     let own = Some(repo.owner_ids(line));
     let head = format!("{c}\n");
-    fsutil::replace_at(&dir, "HEAD", &mut |f| Ok((&*f).write_all(head.as_bytes())?), own)?;
+    fsutil::replace_at(dir, "HEAD", &mut |f| Ok((&*f).write_all(head.as_bytes())?), own)?;
     // The index of the head state: its stat data matches files copied from that state.
     let idx = index_path(repo, &line.head);
     if idx.exists() {
         fsutil::replace_at(
-            &dir,
+            dir,
             "index",
             &mut |f| {
                 let src = std::fs::File::open(&idx)?;
@@ -1797,7 +1808,7 @@ pub fn refresh_git_folder(repo: &Repo, line: &Line) -> Result<()> {
             own,
         )?;
     } else {
-        fsutil::unlink_at(&dir, "index");
+        fsutil::unlink_at(dir, "index");
     }
     Ok(())
 }
@@ -1828,7 +1839,12 @@ pub fn check_git_head(repo: &Repo, line: &Line) -> Result<()> {
         return Ok(());
     };
     if cur != expected {
-        bail!("git HEAD moved outside layr ({cur}); layr lines are written with layr only. Undo the git change or reset git HEAD to {expected} to continue.");
+        bail!(
+            "A git commit, merge, reset or checkout ran in this line ({cur}). layr did not touch the files.\n\
+             To keep the files as they are and continue, run:\n  printf '%s\\n' {expected} > .git/HEAD\n\
+             and then:\n  layr save -a -m \"<message>\"\n\
+             Use layr merge, layr git fetch and layr save instead of git."
+        );
     }
     Ok(())
 }
