@@ -31,6 +31,7 @@ l add result.txt && l save -qm result
 head=$(l rev-parse head)
 cd "$P/main" || exit 1
 no "protected merge requires the expected state" l merge topic
+has "the refusal names the state as a command" "layr merge topic --expect $head)" "$(l merge topic 2>&1)"
 ok "protected merge accepts the expected state" l merge topic --expect "$head"
 eq "main receives the file" "topic" "$(cat result.txt)"
 ok "state signatures and snapshots pass fsck" l fsck
