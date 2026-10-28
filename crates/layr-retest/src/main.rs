@@ -1,6 +1,7 @@
 //! layr-retest: run only the tests that a change can affect. See docs/retest.md.
 //! Uses the public `layr` CLI, `cargo nextest` and the LLVM tools. No internal crate of layr.
 
+mod deps;
 mod parse;
 mod record;
 mod select;
@@ -20,8 +21,9 @@ use std::sync::Mutex;
 const PROFILE_DIR_VAR: &str = "LAYR_RETEST_PROFILE_DIR";
 /// Number of parallel coverage exports.
 const EXPORT_WORKERS: usize = 4;
-/// Files that no record keeps: dependencies, the standard library and build output.
-const IGNORE_FILES: &str = r"(/\.cargo/|/\.rustup/|/rustc/|/target/)";
+/// Files that no record keeps: the standard library and build output. Cargo's own folders stay:
+/// they name the packages that a test used.
+const IGNORE_FILES: &str = r"(/\.rustup/|/rustc/|/target/)";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -79,7 +81,7 @@ fn layr(args: &[&str]) -> Result<String> {
 }
 
 fn state_id(rev: &str) -> Result<String> {
-    let out = layr(&["log", "--json", "--auto", "-n", "1", rev])?;
+    let out = layr(&["log", "--json", "-n", "1", rev])?;
     let v: Value = serde_json::from_str(out.lines().next().context("no such state")?)?;
     Ok(v["id"].as_str().context("state without id")?.to_string())
 }
@@ -164,8 +166,11 @@ fn llvm_tool(name: &str) -> Result<PathBuf> {
     Ok(p)
 }
 
+/// Files and packages that one test executed.
+type Exported = (BTreeMap<String, FileCov>, Vec<String>);
+
 /// Coverage of one test, from its raw profile and its test binary.
-fn export(root: &Path, bin: &Path, raw: &Path, tools: &(PathBuf, PathBuf)) -> Result<BTreeMap<String, FileCov>> {
+fn export(root: &Path, bin: &Path, raw: &Path, tools: &(PathBuf, PathBuf)) -> Result<Exported> {
     let data = raw.with_extension("profdata");
     output(Command::new(&tools.0).args(["merge", "-sparse"]).arg(raw).arg("-o").arg(&data))?;
     let base = |fmt: &str| {
@@ -184,9 +189,12 @@ fn export(root: &Path, bin: &Path, raw: &Path, tools: &(PathBuf, PathBuf)) -> Re
         Some(r.to_string_lossy().into_owned())
     };
     let mut files: BTreeMap<String, FileCov> = BTreeMap::new();
+    let mut packages = std::collections::BTreeSet::new();
     for (f, lines) in parse::parse_lcov(&lcov) {
         if let Some(r) = rel(&f) {
             files.entry(r).or_default().lines = lines;
+        } else if let Some(p) = deps::package_of(&f).filter(|_| !lines.is_empty()) {
+            packages.insert(p);
         }
     }
     for (f, (funcs, idle)) in funcs {
@@ -197,7 +205,7 @@ fn export(root: &Path, bin: &Path, raw: &Path, tools: &(PathBuf, PathBuf)) -> Re
         }
     }
     files.retain(|_, c| !c.lines.is_empty() || !c.funcs.is_empty());
-    Ok(files)
+    Ok((files, packages.into_iter().collect()))
 }
 
 fn run(args: &[String]) -> Result<i32> {
@@ -213,11 +221,25 @@ fn run(args: &[String]) -> Result<i32> {
     let t0 = std::time::Instant::now();
 
     let current = current_state()?;
+    // An auto state is in no other line. When the working copy equals the head, the head (a state
+    // that a new line can have) gets the same record.
+    let status: Value = serde_json::from_str(&layr(&["status", "--json"])?)?;
+    let clean =
+        ["conflicts", "staged", "unstaged", "untracked"].iter().all(|k| status[k].as_array().is_some_and(|a| a.is_empty()));
+    let head = if clean { Some(state_id("head")?) } else { None };
     let baseline = find_baseline(&root)?;
     let base_rec = baseline.as_deref().map(|b| record::load(&root, b)).transpose()?;
     let changes = match baseline.as_deref() {
         Some(b) if b != current => parse::parse_hunks(&layr(&["diff", b, &current, "-U0"])?),
         _ => Vec::new(),
+    };
+
+    let ext = match baseline.as_deref() {
+        Some(b) if b != current && deps::Ext::lock_changed(&changes) => {
+            let lock = |s: &str| layr(&["show", &format!("{s}:Cargo.lock")]).unwrap_or_default();
+            deps::Ext::new(&changes, &lock(b), &lock(&current))
+        }
+        _ => deps::Ext::new(&changes, "", ""),
     };
 
     // Build the instrumented tests and list them.
@@ -246,7 +268,7 @@ fn run(args: &[String]) -> Result<i32> {
         for t in &s.tests {
             all.push((s.binary_id.clone(), t.clone()));
             let old = base_rec.as_ref().and_then(|r| r.tests.get(&test_key(&s.binary_id, t)));
-            match old.filter(|_| !full).and_then(|r| select::carry(r, &changes)) {
+            match old.filter(|_| !full).and_then(|r| select::carry(r, &changes, &ext)) {
                 Some(r) => {
                     carried.insert(test_key(&s.binary_id, t), r);
                 }
@@ -300,7 +322,7 @@ fn run(args: &[String]) -> Result<i32> {
         .filter(|(k, ..)| results.contains_key(k))
         .collect();
     let next = AtomicUsize::new(0);
-    let done: Mutex<BTreeMap<String, Result<BTreeMap<String, FileCov>>>> = Mutex::new(BTreeMap::new());
+    let done: Mutex<BTreeMap<String, Result<Exported>>> = Mutex::new(BTreeMap::new());
     std::thread::scope(|sc| {
         for _ in 0..EXPORT_WORKERS {
             sc.spawn(|| loop {
@@ -308,7 +330,7 @@ fn run(args: &[String]) -> Result<i32> {
                 let Some((key, s, test)) = jobs.get(i) else { break };
                 let raw = profile_path(&profdir, &s.binary_id, test);
                 // A test that died before it wrote a profile has no coverage.
-                let r = if raw.is_file() { export(&root, &s.path, &raw, &tools) } else { Ok(BTreeMap::new()) };
+                let r = if raw.is_file() { export(&root, &s.path, &raw, &tools) } else { Ok(Default::default()) };
                 done.lock().unwrap().insert(key.clone(), r);
             });
         }
@@ -326,7 +348,8 @@ fn run(args: &[String]) -> Result<i32> {
         let old = base_rec.as_ref().and_then(|r| r.tests.get(&key));
         let kept = carried.remove(&key);
         match (results.get(&key), done.remove(&key)) {
-            (Some(&ok), Some(files)) => {
+            (Some(&ok), Some(exported)) => {
+                let (files, deps) = exported?;
                 if full && !ok && old.is_some_and(|o| o.status == "pass") {
                     contradictions += 1;
                     eprintln!(
@@ -334,7 +357,7 @@ fn run(args: &[String]) -> Result<i32> {
                         baseline.as_deref().unwrap_or("?")
                     );
                 }
-                rec.tests.insert(key, TestRec { status: if ok { "pass" } else { "fail" }.into(), files: files? });
+                rec.tests.insert(key, TestRec { status: if ok { "pass" } else { "fail" }.into(), files, deps });
             }
             _ => {
                 if let Some(o) = kept {
@@ -344,6 +367,12 @@ fn run(args: &[String]) -> Result<i32> {
         }
     }
     record::save(&root, &current, &rec)?;
+    if let Some(h) = head.filter(|h| *h != current) {
+        record::save(&root, &h, &rec)?;
+    }
+    // The record folder is a cache path of the line; this makes it a state of the cache overlay,
+    // which a new line and `layr merge` take (docs/retest.md, "Records in a cache overlay").
+    layr(&["save", "--caches"])?;
     let _ = std::fs::remove_dir_all(&profdir);
     let failed = results.values().filter(|ok| !**ok).count();
     eprintln!(

@@ -140,7 +140,8 @@ Run in the root folder of a layr line that is also the cargo project root.
 ### Record format
 
 File `.layr-retest/<state id>.json` in the line root (the id is the one that `layr log --json`
-prints). The folder is in `.gitignore`, so a save does not see it.
+prints). The folder is in `.gitignore`, so a save does not see it. It is a cache path (see Records in a
+cache overlay).
 
 ```json
 {
@@ -148,6 +149,7 @@ prints). The folder is in `.gitignore`, so a save does not see it.
   "tests": {
     "<binary id> <test name>": {
       "status": "pass",
+      "deps": ["hex-0.4.3"],
       "files": {
         "src/lib.rs": { "lines": [[1, 3], [7, 7]], "funcs": [[1, 3]], "idle": [[5, 9]] }
       }
@@ -185,6 +187,44 @@ that holds an unbalanced bracket can fool it.
 A state with auto states: auto states are siblings (they all have the last named state as parent).
 So the baseline search reads the whole line log, not only the ancestors of the current state.
 
+### Dependencies
+
+- Each test record has `deps`: the packages outside the project whose files the test executed.
+  A file in `<cargo home>/registry/src/<index>/<name>-<version>/` gives `<name>-<version>`. A file in
+  `<cargo home>/git/checkouts/<folder>/<rev>/` gives `git:<folder>/<rev>`. Only files with an
+  executed line count.
+- If `Cargo.lock` changed, the tool reads it at the baseline and at the current state
+  (`layr show <state>:Cargo.lock`). A package entry (name, version, source) of the old file that is
+  missing in the new file is removed. A test that used a removed package is stale. A new or
+  unchanged package does not make a test stale. A git package matches by the short revision.
+- If a `Cargo.toml` or `build.rs` changed in folder D, a test is stale when it executed any file
+  under D. For the root folder this means every test that executed any project file.
+- A new `Cargo.lock` or `Cargo.toml` (not in the baseline) selects nothing: no earlier test could use it.
+- `Cargo.lock` outside the root folder, `.cargo/config.toml`, and files that a test reads are not seen.
+
+### Records in a cache overlay
+
+`.layr-retest` is a cache path of the line, so a new line and `layr merge` take the records
+(`docs/cache-overlays.md`). The setup, once per project:
+
+1. In `.layrattributes` of the project: `.layr-retest regenerable`. (This repository has no
+   `.layrattributes`; add the file when the project wants it. The project setting
+   `layr config regenerable '[".layr-retest"]'` does the same for every line of the machine.)
+2. `.layr-retest` must be in `.gitignore` (already true here).
+3. Key files: a cache overlay is taken only when its key equals the key of the new line. The key
+   has no key files by default, so a lockfile change does not drop the records. If the project
+   sets `cache.key-files` (for example to `Cargo.lock`), run once:
+   `layr overlay set <overlay> --key-files none`. The overlay name is in `layr overlay list`
+   (`cache.<hash>`, folder `.layr-retest`).
+
+After it writes the record, `run` calls `layr save --caches`. That saves the folder as the newest
+state of the line's cache overlay (`history=last`, `union-theirs`, readers: trusted machines).
+The record also goes under the id of the head when the working copy equals the head, because an
+auto state is in no other line. So the flow is: work, `layr save -m`, `layr-retest run`,
+`layr line new X <line>`, and `layr-retest run` in X selects only what changed.
+
+The installed `layr` 0.4.0 (2026-10-26) has no cache overlays. Build the one in this repository.
+
 ### Contradiction
 
 `run --full` compares each failed test with the entry in the nearest record. If it said `pass`, the
@@ -202,13 +242,11 @@ the old chain is not used again. The end to end test shows it with a test that r
 
 ### Not done
 
-- Overlay wiring (TODO). Records are plain files in the line, ignored by git and by layr, so they
-  are not in history, not synced and not in a new line. Next: `layr overlay create retest`,
-  `layr overlay move retest .layr-retest`, so that records move with peer sync. This needs a test
-  of the folder overlay rules in `cache-overlays.md` and is not tried yet.
-- Lockfile and `Cargo.toml` changes. Only changes of `.rs` files select tests. A change of a
-  dependency, a feature, `build.rs`, or a file that a test reads (`include_str!`, fixtures) is
-  found by `--full` only.
+- Only the new line and `layr merge` paths of the cache overlay are tested; peer sync of records
+  is not tried.
+- A file that a test reads (`include_str!`, fixtures, data files), and a change of the toolchain,
+  are found by `--full` only. No end to end test for a lockfile change (it needs a second cached
+  version of a package); the rules have unit tests.
 - The record key does not include the nextest arguments. A run with other `-p` arguments only
   carries entries of the tests it lists; entries of other packages are dropped.
 - Test names are cleaned for profile file names. Two names that differ only in cleaned characters share a file.

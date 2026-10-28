@@ -1,5 +1,6 @@
 //! Stale test selection. The rules are in docs/retest.md.
 
+use crate::deps::Ext;
 use crate::parse::{in_ranges, overlaps, FileChange, Hunk};
 use crate::record::{FileCov, Ranges, TestRec};
 
@@ -27,11 +28,11 @@ fn map_ranges(hunks: &[Hunk], r: &Ranges) -> Option<Ranges> {
 
 /// The entry of a test that stays unchanged, in the lines of the new state.
 /// `None` when the test is stale, or when an end of a range was itself changed (run it, do not guess).
-pub fn carry(rec: &TestRec, changes: &[FileChange]) -> Option<TestRec> {
-    if is_stale(rec, changes) {
+pub fn carry(rec: &TestRec, changes: &[FileChange], ext: &Ext) -> Option<TestRec> {
+    if is_stale(rec, changes, ext) {
         return None;
     }
-    let mut out = TestRec { status: rec.status.clone(), files: Default::default() };
+    let mut out = TestRec { status: rec.status.clone(), files: Default::default(), deps: rec.deps.clone() };
     for (path, cov) in &rec.files {
         let c = changes.iter().find(|c| &c.old_path == path);
         let (name, hunks) = c.map_or((path, &[][..]), |c| (&c.new_path, &c.hunks[..]));
@@ -46,8 +47,8 @@ pub fn carry(rec: &TestRec, changes: &[FileChange]) -> Option<TestRec> {
 }
 
 /// A test is stale when a change since its record can alter what it executed.
-pub fn is_stale(rec: &TestRec, changes: &[FileChange]) -> bool {
-    if rec.status != "pass" {
+pub fn is_stale(rec: &TestRec, changes: &[FileChange], ext: &Ext) -> bool {
+    if rec.status != "pass" || ext.hits(rec) {
         return true;
     }
     changes.iter().any(|c| match rec.files.get(&c.old_path) {
@@ -127,6 +128,14 @@ mod tests {
     use crate::parse::parse_hunks;
     use std::collections::BTreeMap;
 
+    fn is_stale(r: &TestRec, c: &[FileChange]) -> bool {
+        super::is_stale(r, c, &Ext::default())
+    }
+
+    fn carry(r: &TestRec, c: &[FileChange]) -> Option<TestRec> {
+        super::carry(r, c, &Ext::default())
+    }
+
     // File layout of the examples:
     //  1 use std::fmt;            module level
     //  2 const K: i32 = 1;        module level
@@ -144,7 +153,7 @@ mod tests {
     fn rec(status: &str) -> TestRec {
         let mut files = BTreeMap::new();
         files.insert("a.rs".to_string(), FileCov { lines: vec![[4, 6], [9, 9]], funcs: vec![[4, 9]], idle: vec![[11, 13]] });
-        TestRec { status: status.into(), files }
+        TestRec { status: status.into(), files, deps: vec![] }
     }
 
     fn diff(old_start: &str, added: &[&str]) -> Vec<FileChange> {
