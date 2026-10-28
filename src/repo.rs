@@ -1612,9 +1612,14 @@ impl<'a> Repo<'a> {
 
     /// All ancestors of `id` (including itself), breadth first.
     pub fn ancestors(&self, id: &str) -> Result<Vec<String>> {
+        self.ancestors_of(vec![id.to_string()])
+    }
+
+    /// All ancestors of the `seeds` (including them), breadth first, each state read once.
+    fn ancestors_of(&self, seeds: Vec<String>) -> Result<Vec<String>> {
         let mut seen = BTreeSet::new();
         let mut order = Vec::new();
-        let mut q = std::collections::VecDeque::from([id.to_string()]);
+        let mut q = std::collections::VecDeque::from(seeds);
         while let Some(x) = q.pop_front() {
             if !seen.insert(x.clone()) {
                 continue;
@@ -1637,23 +1642,19 @@ impl<'a> Repo<'a> {
     }
 
     /// The best common ancestor: a common ancestor that is not an ancestor of another one.
+    /// One walk finds every state that is a proper ancestor of a common ancestor.
     pub fn merge_base(&self, a: &str, b: &str) -> Result<Option<String>> {
         let aa = self.ancestors(a)?;
         let bs: BTreeSet<String> = self.ancestors(b)?.into_iter().collect();
         let common: Vec<String> = aa.into_iter().filter(|x| bs.contains(x)).collect();
+        let mut parents = Vec::new();
         for c in &common {
-            let mut best = true;
-            for d in &common {
-                if d != c && self.is_ancestor(c, d)? {
-                    best = false;
-                    break;
-                }
-            }
-            if best {
-                return Ok(Some(c.clone()));
+            if let Some(s) = self.p.db.state(c)? {
+                parents.extend(s.parents);
             }
         }
-        Ok(None)
+        let below: BTreeSet<String> = self.ancestors_of(parents)?.into_iter().collect();
+        Ok(common.into_iter().find(|c| !below.contains(c)))
     }
 
     /// Commits reachable from `id` by first parents.

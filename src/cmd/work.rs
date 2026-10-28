@@ -50,19 +50,31 @@ pub fn status(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let a = parse(&spec, args)?;
     let h = here(ctx)?;
     #[cfg(target_os = "macos")]
-    let _lock = h.repo.p.lock()?;
+    let lock = h.repo.p.lock()?;
     let line = h.line()?.clone();
     #[cfg(target_os = "macos")]
     let line = h.repo.line(&line.id)?;
     let filtered = h.repo.filtered_view(ctx, &line)?;
     let specs = h.specs(&a.rest())?;
     #[cfg(target_os = "macos")]
-    let mut st = if filtered.is_some() { h.repo.snapshot_status(ctx, &line)? } else { h.repo.status_report(&line)? };
+    let mut st = {
+        let _t = crate::trace::span("status compare");
+        if filtered.is_some() { h.repo.snapshot_status(ctx, &line)? } else { h.repo.status_report(&line)? }
+    };
     #[cfg(not(target_os = "macos"))]
     let mut st = if filtered.is_some() { h.repo.snapshot_status(ctx, &line)? } else { h.repo.status(&line)?.0 };
+    // The lock keeps the index still while the working folder is compared. The rest only reads
+    // immutable states, so other commands must not wait for it.
+    #[cfg(target_os = "macos")]
+    drop(lock);
     // The files of quiet overlays are not shown (docs/cache-overlays.md, section 4.1).
-    st.drop_paths(&h.repo.quiet_paths(&line)?);
+    let quiet = {
+        let _t = crate::trace::span("status quiet paths");
+        h.repo.quiet_paths(&line)?
+    };
+    st.drop_paths(&quiet);
     let overlaps = if filtered.is_none() && (a.has("--json") || (!a.has("-s") && !a.has("--porcelain"))) {
+        let _t = crate::trace::span("status overlaps");
         h.repo.overlaps(ctx, &line)?.into_iter().filter(|o| matches(&specs, &o.path)).collect::<Vec<_>>()
     } else {
         Vec::new()
