@@ -240,12 +240,17 @@ fn run(args: &[String]) -> Result<i32> {
     // Select.
     let mut all: Vec<(String, String)> = Vec::new();
     let mut stale: Vec<(String, String)> = Vec::new();
+    // Entries of unchanged tests, moved to the lines of the new state.
+    let mut carried: BTreeMap<String, TestRec> = BTreeMap::new();
     for s in &suites {
         for t in &s.tests {
             all.push((s.binary_id.clone(), t.clone()));
             let old = base_rec.as_ref().and_then(|r| r.tests.get(&test_key(&s.binary_id, t)));
-            if full || old.is_none_or(|r| select::is_stale(r, &changes)) {
-                stale.push((s.binary_id.clone(), t.clone()));
+            match old.filter(|_| !full).and_then(|r| select::carry(r, &changes)) {
+                Some(r) => {
+                    carried.insert(test_key(&s.binary_id, t), r);
+                }
+                None => stale.push((s.binary_id.clone(), t.clone())),
             }
         }
     }
@@ -319,6 +324,7 @@ fn run(args: &[String]) -> Result<i32> {
     for (b, t) in &all {
         let key = test_key(b, t);
         let old = base_rec.as_ref().and_then(|r| r.tests.get(&key));
+        let kept = carried.remove(&key);
         match (results.get(&key), done.remove(&key)) {
             (Some(&ok), Some(files)) => {
                 if full && !ok && old.is_some_and(|o| o.status == "pass") {
@@ -331,8 +337,8 @@ fn run(args: &[String]) -> Result<i32> {
                 rec.tests.insert(key, TestRec { status: if ok { "pass" } else { "fail" }.into(), files: files? });
             }
             _ => {
-                if let Some(o) = old.filter(|_| !full) {
-                    rec.tests.insert(key, o.clone());
+                if let Some(o) = kept {
+                    rec.tests.insert(key, o);
                 }
             }
         }

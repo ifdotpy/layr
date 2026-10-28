@@ -159,7 +159,10 @@ prints). The folder is in `.gitignore`, so a save does not see it.
 - `lines`: executed line ranges. `funcs`: ranges of functions that the test executed. `idle`:
   ranges of other functions in the file. All ranges are inclusive and use lines of the state
   that the record belongs to.
-- A record is complete. A test that did not run keeps its entry from the baseline.
+- A record is complete. A test that did not run keeps its entry from the baseline, with every
+  range moved to the lines of the new state through the hunks of the diff, and the file key
+  changed after a rename. If a hunk changed the first or last line of a range, the entry cannot
+  be moved and the test runs again.
 - A full run writes a record with no baseline and no carried entries. Later runs find it first,
   so older records are no longer used.
 - `idle` is not in the first design. It is needed to tell a change inside a function that the

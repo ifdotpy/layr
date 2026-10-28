@@ -67,6 +67,19 @@ fn runs_only_the_stale_test() {
     let err = retest(&line, &root, &["run"]);
     assert!(err.contains("3 tests, 0 selected"), "{err}");
 
+    // 4b. An uncalled function above `a` shifts every line: nothing runs, the records must shift.
+    let s = std::fs::read_to_string(&lib).unwrap();
+    std::fs::write(&lib, format!("pub fn d() -> i32 {{\n    4\n}}\n\n{s}")).unwrap();
+    let err = retest(&line, &root, &["run"]);
+    assert!(err.contains("3 tests, 0 selected"), "{err}");
+
+    // 4c. Edit `a` at its new place: `ta` must run, `tb` must not.
+    let s = std::fs::read_to_string(&lib).unwrap();
+    std::fs::write(&lib, s.replace("    1 + 0\n", "    1 + 0 + 0\n")).unwrap();
+    let err = retest(&line, &root, &["run"]);
+    assert!(err.contains("3 tests, 1 selected"), "{err}");
+    assert!(err.contains("tiny tests::ta") && !err.contains("tiny tests::tb"), "{err}");
+
     // 5. A file that coverage cannot see changes: nothing runs.
     std::fs::write(line.join("data.txt"), "bad").unwrap();
     let err = retest(&line, &root, &["run"]);
