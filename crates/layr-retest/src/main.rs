@@ -16,7 +16,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 use tools::Tool;
 
 /// Folder of the raw profiles of one run. The wrapper reads it from this variable.
@@ -187,29 +187,50 @@ fn llvm_tool(name: &str) -> Result<PathBuf> {
 /// Files and packages that one test executed.
 type Exported = (BTreeMap<String, FileCov>, Vec<String>);
 
+/// Function tables per test binary, built on first use. The key says whether the other bin
+/// targets were exported with it.
+#[derive(Default)]
+struct Tables(Mutex<BTreeMap<(PathBuf, bool), Arc<OnceLock<Result<parse::FuncTable, String>>>>>);
+
+/// `llvm-cov export` of `bin` (and `others`, when given) with the profile `data`.
+fn cov_export(tools: &(PathBuf, PathBuf), bin: &Path, others: &[PathBuf], data: &Path, fmt: &[&str]) -> Command {
+    let mut c = Command::new(&tools.1);
+    c.arg("export").arg(bin).arg(format!("-instr-profile={}", data.display()));
+    c.args(others.iter().flat_map(|o| ["-object".as_ref(), o.as_os_str()]));
+    c.arg(format!("-ignore-filename-regex={IGNORE_FILES}")).args(fmt);
+    c
+}
+
 /// Coverage of one test, from its raw profile and its test binary.
-fn export(root: &Path, bin: &Path, others: &[PathBuf], dir: &Path, tools: &(PathBuf, PathBuf)) -> Result<Exported> {
+fn export(root: &Path, bin: &Path, others: &[PathBuf], dir: &Path, tools: &(PathBuf, PathBuf), tables: &Tables) -> Result<Exported> {
     let raws: Vec<PathBuf> =
         std::fs::read_dir(dir)?.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "profraw")).collect();
     let data = dir.join("merged.profdata");
     output(Command::new(&tools.0).args(["merge", "-sparse"]).args(&raws).arg("-o").arg(&data))?;
-    let base = |fmt: &str| {
-        let mut c = Command::new(&tools.1);
-        c.arg("export").arg(bin).arg(format!("-instr-profile={}", data.display()));
-        // Processes that the test started ran other instrumented executables of the project.
-        c.args(others.iter().flat_map(|o| ["-object".as_ref(), o.as_os_str()]));
-        c.arg(format!("-ignore-filename-regex={IGNORE_FILES}")).arg(format!("-format={fmt}"));
-        c
-    };
-    let lcov = String::from_utf8_lossy(&output(base("lcov").arg("-skip-functions"))?).into_owned();
-    let funcs = parse::parse_functions(&output(&mut base("text"))?)?;
-    let _ = std::fs::remove_file(&data);
+    // One profile file means that the test process was the only process with instrumented code.
+    // Another file is from a child process, which may have run another bin target of the project.
+    let others = if raws.len() > 1 { others } else { &[] };
     let rel = |p: &str| -> Option<String> {
         let canon = root.canonicalize().ok();
         let p = Path::new(p);
         let r = p.strip_prefix(root).ok().or_else(|| canon.as_deref().and_then(|c| p.strip_prefix(c).ok()))?;
         Some(r.to_string_lossy().into_owned())
     };
+    let lcov = String::from_utf8_lossy(&output(&mut cov_export(tools, bin, others, &data, &["-format=lcov", "-skip-functions"]))?).into_owned();
+    // Function ranges do not depend on the test; the profile only says which functions ran.
+    let ran = parse::parse_covered(&String::from_utf8_lossy(&output(
+        Command::new(&tools.0).args(["show", "--covered", "--all-functions"]).arg(&data),
+    )?));
+    let cell = tables.0.lock().unwrap().entry((bin.to_path_buf(), !others.is_empty())).or_default().clone();
+    let table = cell
+        .get_or_init(|| {
+            let json = output(&mut cov_export(tools, bin, others, &data, &["-format=text", "-skip-expansions"]));
+            json.and_then(|j| parse::parse_function_table(&j, |f| rel(f).is_some())).map_err(|e| format!("{e:#}"))
+        })
+        .as_ref()
+        .map_err(|e| anyhow::anyhow!("function table of {}: {e}", bin.display()))?;
+    let funcs = table.classify(&ran);
+    let _ = std::fs::remove_file(&data);
     let mut files: BTreeMap<String, FileCov> = BTreeMap::new();
     let mut packages = std::collections::BTreeSet::new();
     for (f, lines) in parse::parse_lcov(&lcov) {
@@ -430,6 +451,7 @@ fn run(args: &[String]) -> Result<i32> {
         .filter(|(k, ..)| results.contains_key(k))
         .collect();
     let next = AtomicUsize::new(0);
+    let tables = Tables::default();
     let done: Mutex<BTreeMap<String, Result<Exported>>> = Mutex::new(BTreeMap::new());
     std::thread::scope(|sc| {
         for _ in 0..EXPORT_WORKERS {
@@ -438,7 +460,7 @@ fn run(args: &[String]) -> Result<i32> {
                 let Some((key, s, test)) = jobs.get(i) else { break };
                 let dir = profile_dir(&profdir, &s.binary_id, test);
                 // A test that died before it wrote a profile has no coverage.
-                let r = if dir.is_dir() { export(&root, &s.path, &bins, &dir, &tools) } else { Ok(Default::default()) };
+                let r = if dir.is_dir() { export(&root, &s.path, &bins, &dir, &tools, &tables) } else { Ok(Default::default()) };
                 done.lock().unwrap().insert(key.clone(), r);
             });
         }
