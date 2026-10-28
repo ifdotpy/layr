@@ -28,6 +28,10 @@ pub struct TestRec {
     pub status: String,
     /// Coverage per file; the key is a path relative to the line root.
     pub files: BTreeMap<String, FileCov>,
+    /// Packages outside the project whose files the test executed: `<name>-<version>` (registry)
+    /// or `git:<checkout folder>/<short rev>`.
+    #[serde(default)]
+    pub deps: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Default, Debug)]
