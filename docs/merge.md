@@ -17,6 +17,17 @@ rename/rename and delete/modify. Files changed on both sides use the driver from
 | `blocks`          | binary merge by byte ranges from the change lists: allowed when both sides kept the inode and size and the ranges do not overlap; `merge-verify=<name>` runs a check command |
 | `<name>`          | `merge.driver.<name>` command with `%O %A %B %P`, run as the caller of the merge     |
 
+### Conflicts and conflict markers
+
+A merge never stops on a conflict. The new state holds the conflict markers and lists the conflicted paths.
+`layr merge` prints each path and exits with 1. `layr status` shows each open path as `UU`.
+A merge, `pick` or `invert` is refused while the head has open conflicts. Resolve the files and run `layr save -m <message>` first.
+A new merge would keep the old markers as file content and would list no conflict.
+
+`layr save -m` refuses a changed file that holds a full set of conflict markers (`<<<<<<< `, `>>>>>>> ` at line starts).
+Add `--allow-conflict-markers` to save such a file, for example a document about conflicts.
+Layers (overlays) are not checked.
+
 ### Derived files
 
 Declare outputs in `.layrattributes` or `.gitattributes`:

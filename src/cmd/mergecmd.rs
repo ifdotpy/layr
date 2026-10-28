@@ -470,6 +470,20 @@ fn run_line_checks(
 
 /// Paths a merge must not overwrite: local changes, and in a line with overlays also ignored
 /// files (a user's own key where an overlay has one).
+/// A new state would drop the open conflicts of the head and keep their markers as content.
+/// Only files with markers matter: other kinds stay listed until the next commit.
+fn refuse_open_conflicts(st: &crate::repo::Status) -> Result<()> {
+    let paths: Vec<&str> =
+        st.conflicts.iter().filter(|c| c.kind == "content" || c.kind == "add/add").map(|c| c.path.as_str()).collect();
+    if paths.is_empty() {
+        return Ok(());
+    }
+    Err(exit(
+        1,
+        format!("error: unresolved conflicts in {}: fix the files and 'layr save -m <message>' first.", paths.join(", ")),
+    ))
+}
+
 fn local_paths(repo: &Repo, line: &Line, st: &crate::repo::Status) -> Result<std::collections::BTreeSet<String>> {
     let mut local = st.local_paths();
     if !repo.layers(line)?.is_empty() {
@@ -744,6 +758,7 @@ fn merge_rev_inner(
     if !st.staged.is_empty() {
         return Err(exit(1, "error: you have staged changes; save or park them before merging."));
     }
+    refuse_open_conflicts(&st)?;
     let mut local = local_paths(repo, &line, &st)?;
     let quiet = a.has("-q");
     let checks = rule.as_ref().map(|r| r.check.clone()).unwrap_or_default();
@@ -948,6 +963,7 @@ fn pick(ctx: &Ctx, args: &[String], revert: bool) -> Result<i32> {
     if !st.staged.is_empty() {
         return Err(exit(1, "error: you have staged changes; save or park them first."));
     }
+    refuse_open_conflicts(&st)?;
     let local = st.local_paths();
     let mut code = 0;
     let mut first_w = w;

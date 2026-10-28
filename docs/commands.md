@@ -101,6 +101,7 @@ Named saves also accept these options:
 - `-a` or `--all` includes changes to tracked files.
 - `--author <author>` sets the author.
 - `--allow-empty` permits a state without file changes.
+- `--allow-conflict-markers` permits a changed file with a full set of conflict markers ([merge](merge.md#conflicts-and-conflict-markers)).
 - `-q` or `--quiet` hides the usual output.
 - Other accepted options: `--no-edit`, `-s` or `--signoff`, `--no-verify`, `-v` or `--verbose`.
 
