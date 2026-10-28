@@ -30,13 +30,18 @@ out=$(l git push --squash origin task-1)
 has "push makes a new branch" "[new branch]" "$out"
 eq "one commit on top of upstream" "upstream 2" "$(git -C $R log -1 --format=%s task-1~1)"
 eq "the commit has the task content" "local.txt" "$(git -C $R diff --name-only task-1~1 task-1)"
-has "repeated push is a no-op" "Everything up-to-date" "$(l git push origin task-1)"
 c1=$(git -C $R rev-parse task-1)
+# A push without --squash sends the history of the state, never the squash commit made before.
+has "a push without --squash does not reuse the squash commit" "layr git pull" "$(l git push origin task-1 2>&1)"
+has "repeated push is a no-op" "Everything up-to-date" "$(l git push --squash origin task-1)"
+hs=$(l rev-parse head); hc=$(git -C $LAYR_ROOT/projects/gp/git rev-parse "refs/layr/states/$hs" 2>/dev/null)
 git -C $R update-ref -d refs/heads/task-1
 l git push -q origin task-1
-eq "the same state gives the same commit" "$c1" "$(git -C $R rev-parse task-1)"
+eq "a push without --squash sends the history commit of the state" "$hc" "$(git -C $R rev-parse task-1)"
+ok "the history commit is not the squash commit" test "$c1" != "$hc"
+has "the history keeps the line's commits" "local work" "$(git -C $R log --format=%s task-1)"
 eq "git folder after push: clean" "" "$(git status --short)"
-eq "git folder HEAD is the pushed commit" "$c1" "$(git rev-parse HEAD)"
+eq "git folder HEAD is the pushed commit" "$hc" "$(git rev-parse HEAD)"
 
 # Lost response: the push reached the remote, the record of it did not.
 echo y >> local.txt; l save -qam "second"

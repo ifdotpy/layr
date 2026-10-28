@@ -594,6 +594,10 @@ fn clone_matching_blob(
     Ok(true)
 }
 
+/// Commits imported between two progress lines on standard error. A long import holds the store
+/// lock, so the lines show that it still runs.
+const IMPORT_PROGRESS_EVERY: usize = 50;
+
 /// Import the entire reachable DAG, parents first. A retry reuses completed imports.
 pub fn import_commit(
     ctx: &Ctx,
@@ -629,6 +633,7 @@ fn import_commit_once(
     let mut states = BTreeMap::new();
     let mut cat = CatFile::new(&s)?;
     let mut fresh = false;
+    let mut imported = 0usize;
     for line in revs.lines() {
         let mut fields = line.split_whitespace();
         let oid = fields.next().context("empty Git revision")?;
@@ -655,6 +660,10 @@ fn import_commit_once(
                 let objects = import_objects(&s, &raw, git_parents.first().copied(), &mut cat)?;
                 let st = import_one(ctx, repo, &s, oid, refname, parents, prev, objects, source)?;
                 fresh |= oid == commit;
+                imported += 1;
+                if imported % IMPORT_PROGRESS_EVERY == 0 {
+                    eprintln!("layr: imported {imported} commits of {refname}");
+                }
                 st
             }
         };
@@ -1157,8 +1166,10 @@ fn commit_of(repo: &Repo, state: &str) -> Result<Option<String>> {
 }
 
 /// The commit that a record names for a state (import, push, git-sync), if it is in the store.
+/// A squash commit is never one: it has the parent of an earlier export, not the history.
 fn recorded_commit(repo: &Repo, state: &str) -> Result<Option<String>> {
-    if let Some(c) = repo.p.db.git_commit_of(state)? {
+    let squash = repo.p.db.squash_commits_of(state)?;
+    for c in repo.p.db.git_commits_of(state)?.into_iter().filter(|c| !squash.contains(c)) {
         if git_out(&store(repo), &["cat-file", "-e", &format!("{c}^{{commit}}")]).is_ok() {
             check_commit(repo, &c)?;
             return Ok(Some(c));

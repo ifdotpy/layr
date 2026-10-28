@@ -314,7 +314,12 @@ pub mod git {
         let url = gitbridge::remote_url(repo, &remote)?;
         // A push prepared earlier (for example before a lost response): read the remote ref first.
         let mut prepared: Option<(String, String)> = None;
+        let squash_commits = repo.p.db.squash_commits_of(&state_id)?;
         for (eid, st, r, b, c, status) in repo.p.db.exports()? {
+            // A squash commit answers only a push with --squash; a history commit answers only one without.
+            if squash_commits.contains(&c) != a.has("--squash") {
+                continue;
+            }
             if st == state_id && r == remote && b == branch && status == "prepared" {
                 prepared = Some((eid, c.clone()));
             }
@@ -355,7 +360,7 @@ pub mod git {
                     made.into_iter().map(|(s, c)| (s, serde_json::Value::String(c))).collect();
                 let eid = ids::new_id();
                 let mut rec = Record::new("export");
-                rec.data = serde_json::json!({"export": eid, "state": state_id, "remote": remote, "branch": branch, "commit": c, "parent": parent, "commits": commits, "status": "prepared"});
+                rec.data = serde_json::json!({"export": eid, "state": state_id, "remote": remote, "branch": branch, "commit": c, "parent": parent, "squash": a.has("--squash"), "commits": commits, "status": "prepared"});
                 repo.commit_record(ctx, rec)?;
                 (eid, c)
             }
