@@ -2,7 +2,7 @@
 
 use crate::record::Ranges;
 use serde::Deserialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 /// Sort and merge line numbers or ranges into inclusive ranges. Touching ranges merge.
 pub fn merge_ranges(mut v: Vec<[u32; 2]>) -> Ranges {
@@ -69,17 +69,23 @@ struct ExportData {
 }
 #[derive(Deserialize)]
 struct Func {
-    count: u64,
+    name: String,
     filenames: Vec<String>,
     /// `[line start, col start, line end, col end, count, file id, expanded file id, kind]`
     regions: Vec<[u64; 8]>,
 }
 
-/// Function line ranges per file from the `llvm-cov export` JSON: `(executed, idle)`.
-/// A range is idle only when no copy of the function ran. Only code regions (kind 0) count.
-pub fn parse_functions(json: &[u8]) -> anyhow::Result<BTreeMap<String, (Ranges, Ranges)>> {
+/// The functions of one binary with their line spans per file. It does not depend on the test,
+/// so it is built once per binary; `classify` then needs only the names of the functions that a
+/// test executed.
+#[derive(Default)]
+pub struct FuncTable(Vec<(String, Vec<(String, [u32; 2])>)>);
+
+/// Function spans from the `llvm-cov export` JSON. Only code regions (kind 0) count. Spans in
+/// files for which `keep` is false are dropped.
+pub fn parse_function_table(json: &[u8], keep: impl Fn(&str) -> bool) -> anyhow::Result<FuncTable> {
     let e: Export = serde_json::from_slice(json)?;
-    let mut spans: BTreeMap<String, BTreeMap<[u32; 2], bool>> = BTreeMap::new();
+    let mut out = Vec::new();
     for f in e.data.iter().flat_map(|d| &d.functions) {
         let mut per_file: BTreeMap<u64, [u32; 2]> = BTreeMap::new();
         for r in f.regions.iter().filter(|r| r[7] == 0 && r[5] == r[6]) {
@@ -87,19 +93,43 @@ pub fn parse_functions(json: &[u8]) -> anyhow::Result<BTreeMap<String, (Ranges, 
             s[0] = s[0].min(r[0] as u32);
             s[1] = s[1].max(r[2] as u32);
         }
-        for (id, span) in per_file {
-            let Some(name) = f.filenames.get(id as usize) else { continue };
-            *spans.entry(name.clone()).or_default().entry(span).or_insert(false) |= f.count > 0;
+        let spans: Vec<(String, [u32; 2])> = per_file
+            .into_iter()
+            .filter_map(|(id, span)| f.filenames.get(id as usize).filter(|n| keep(n)).map(|n| (n.clone(), span)))
+            .collect();
+        if !spans.is_empty() {
+            out.push((f.name.clone(), spans));
         }
     }
-    Ok(spans
-        .into_iter()
-        .map(|(file, m)| {
-            let ran: Ranges = m.iter().filter(|(_, x)| **x).map(|(s, _)| *s).collect();
-            let idle: Ranges = m.iter().filter(|(_, x)| !**x).map(|(s, _)| *s).collect();
-            (file, (ran, idle))
-        })
-        .collect())
+    Ok(FuncTable(out))
+}
+
+impl FuncTable {
+    /// Function line ranges per file: `(executed, idle)`. A range is idle only when no copy of the
+    /// function ran. `ran` holds the names of the functions with a count above 0.
+    pub fn classify(&self, ran: &HashSet<String>) -> BTreeMap<String, (Ranges, Ranges)> {
+        let mut spans: BTreeMap<&str, BTreeMap<[u32; 2], bool>> = BTreeMap::new();
+        for (name, list) in &self.0 {
+            let hit = ran.contains(name);
+            for (file, span) in list {
+                *spans.entry(file).or_default().entry(*span).or_insert(false) |= hit;
+            }
+        }
+        spans
+            .into_iter()
+            .map(|(file, m)| {
+                let ran: Ranges = m.iter().filter(|(_, x)| **x).map(|(s, _)| *s).collect();
+                let idle: Ranges = m.iter().filter(|(_, x)| !**x).map(|(s, _)| *s).collect();
+                (file.to_string(), (ran, idle))
+            })
+            .collect()
+    }
+}
+
+/// Names of the functions that ran: `llvm-profdata show --covered --all-functions` prints one
+/// name per line (only functions with a count above 0).
+pub fn parse_covered(text: &str) -> HashSet<String> {
+    text.lines().filter(|l| !l.is_empty()).map(str::to_string).collect()
 }
 
 /// One hunk of `diff -U0`, on the old side. `old_len == 0` means a pure insertion after `old_start`.
@@ -208,14 +238,24 @@ mod tests {
     #[test]
     fn functions_from_json() {
         let j = br#"{"data":[{"functions":[
-          {"count":2,"filenames":["/p/a.rs"],"regions":[[10,1,12,2,2,0,0,0],[11,5,11,9,2,0,0,0]]},
-          {"count":0,"filenames":["/p/a.rs"],"regions":[[20,1,25,2,0,0,0,0]]},
-          {"count":1,"filenames":["/p/a.rs"],"regions":[[30,1,31,2,1,0,0,0],[40,1,41,2,1,0,0,1]]},
-          {"count":0,"filenames":["/p/a.rs"],"regions":[[10,1,12,2,0,0,0,0]]}
+          {"name":"a","count":2,"filenames":["/p/a.rs"],"regions":[[10,1,12,2,2,0,0,0],[11,5,11,9,2,0,0,0]]},
+          {"name":"b","count":0,"filenames":["/p/a.rs"],"regions":[[20,1,25,2,0,0,0,0]]},
+          {"name":"c","count":1,"filenames":["/p/a.rs"],"regions":[[30,1,31,2,1,0,0,0],[40,1,41,2,1,0,0,1]]},
+          {"name":"a2","count":0,"filenames":["/p/a.rs"],"regions":[[10,1,12,2,0,0,0,0]]},
+          {"name":"d","count":5,"filenames":["/dep/x.rs"],"regions":[[1,1,2,2,5,0,0,0]]}
         ]}]}"#;
-        let m = parse_functions(j).unwrap();
+        let t = parse_function_table(j, |f| f.starts_with("/p/")).unwrap();
+        let ran: HashSet<String> = ["a", "c", "d"].map(String::from).into();
+        let m = t.classify(&ran);
+        assert_eq!(m.len(), 1);
         let (ran, idle) = &m["/p/a.rs"];
         assert_eq!(ran, &vec![[10, 12], [30, 31]]);
         assert_eq!(idle, &vec![[20, 25]]);
+    }
+
+    #[test]
+    fn covered_function_names() {
+        let r = parse_covered("_RNvA\n_RNvC\n\n");
+        assert_eq!(r, ["_RNvA", "_RNvC"].map(String::from).into());
     }
 }
