@@ -1,0 +1,91 @@
+//! End to end: a tiny cargo project in a layr line with two tests on two functions.
+//! Needs `layr`, `cargo nextest` and the `llvm-tools` rustup component. The store is a temp
+//! folder with its own LAYR_ROOT. Takes about 10 s.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+// `tc` reads a file, which coverage cannot track.
+const LIB: &str = "pub fn a() -> i32 {\n    1\n}\n\npub fn b() -> i32 {\n    2\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn ta() {\n        assert_eq!(a(), 1);\n    }\n\n    #[test]\n    fn tb() {\n        assert_eq!(b(), 2);\n    }\n\n    #[test]\n    fn tc() {\n        assert_eq!(std::fs::read_to_string(\"data.txt\").unwrap(), \"ok\");\n    }\n}\n";
+
+fn sh(dir: &Path, root: &Path, prog: &str, args: &[&str]) -> (String, String) {
+    let o = Command::new(prog)
+        .args(args)
+        .current_dir(dir)
+        .env("LAYR_ROOT", root)
+        .env_remove("RUSTFLAGS")
+        .env_remove("CARGO_TARGET_DIR")
+        .output()
+        .unwrap();
+    let (out, err) = (String::from_utf8_lossy(&o.stdout).into_owned(), String::from_utf8_lossy(&o.stderr).into_owned());
+    assert!(o.status.success(), "{prog} {args:?} failed:\n{out}\n{err}");
+    (out, err)
+}
+
+fn retest(line: &Path, root: &Path, args: &[&str]) -> String {
+    let t = std::time::Instant::now();
+    let (_, err) = sh(line, root, env!("CARGO_BIN_EXE_layr-retest"), args);
+    eprintln!("layr-retest {args:?}: {:.1}s\n{err}", t.elapsed().as_secs_f32());
+    err
+}
+
+#[test]
+fn runs_only_the_stale_test() {
+    // layr refuses a store path with a symlink in it (/var is one on macOS).
+    let tmp = std::env::temp_dir().canonicalize().unwrap().join(format!("layr-retest-e2e-{}", std::process::id()));
+    let src = tmp.join("src-project");
+    std::fs::create_dir_all(src.join("src")).unwrap();
+    std::fs::write(src.join("Cargo.toml"), "[package]\nname = \"tiny\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+    std::fs::write(src.join("src/lib.rs"), LIB).unwrap();
+    std::fs::write(src.join("data.txt"), "ok").unwrap();
+    std::fs::write(src.join(".gitignore"), "/target\n/.layr-retest\n").unwrap();
+    let root = tmp.join("store");
+
+    sh(&tmp, &root, "layr", &["init", "app", "--from", src.to_str().unwrap()]);
+    let main: PathBuf = root.join("projects/app/lines/main");
+    sh(&main, &root, "layr", &["line", "new", "work"]);
+    let line = root.join("projects/app/lines/work");
+    let lib = line.join("src/lib.rs");
+
+    // 1. No record: every test runs.
+    let err = retest(&line, &root, &["run"]);
+    assert!(err.contains("3 tests, 3 selected"), "{err}");
+
+    // 2. No change: nothing runs.
+    let err = retest(&line, &root, &["run"]);
+    assert!(err.contains("3 tests, 0 selected"), "{err}");
+
+    // 3. Change the body of `a`: only `ta` runs.
+    std::fs::write(&lib, LIB.replace("    1\n", "    1 + 0\n")).unwrap();
+    let err = retest(&line, &root, &["run"]);
+    assert!(err.contains("3 tests, 1 selected"), "{err}");
+    assert!(err.contains("ran 1, passed 1"), "{err}");
+
+    // 4. A new function that no test calls: nothing runs.
+    let s = std::fs::read_to_string(&lib).unwrap();
+    std::fs::write(&lib, s.replace("pub fn b()", "pub fn c() -> i32 {\n    3\n}\n\npub fn b()")).unwrap();
+    let err = retest(&line, &root, &["run"]);
+    assert!(err.contains("3 tests, 0 selected"), "{err}");
+
+    // 5. A file that coverage cannot see changes: nothing runs.
+    std::fs::write(line.join("data.txt"), "bad").unwrap();
+    let err = retest(&line, &root, &["run"]);
+    assert!(err.contains("3 tests, 0 selected"), "{err}");
+
+    // 6. A full run runs all, fails `tc`, and reports the contradiction with the saved pass.
+    let o = Command::new(env!("CARGO_BIN_EXE_layr-retest"))
+        .args(["run", "--full"])
+        .current_dir(&line)
+        .env("LAYR_ROOT", &root)
+        .env_remove("RUSTFLAGS")
+        .env_remove("CARGO_TARGET_DIR")
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(!o.status.success(), "{err}");
+    assert!(err.contains("3 selected") && err.contains("CONTRADICTION: tiny tests::tc"), "{err}");
+
+    // Saved states are immutable on macOS; unlock them before the delete.
+    let _ = Command::new("chflags").args(["-R", "nouchg"]).arg(&tmp).status();
+    let _ = std::fs::remove_dir_all(&tmp);
+}

@@ -1,0 +1,354 @@
+//! layr-retest: run only the tests that a change can affect. See docs/retest.md.
+//! Uses the public `layr` CLI, `cargo nextest` and the LLVM tools. No internal crate of layr.
+
+mod parse;
+mod record;
+mod select;
+
+use anyhow::{bail, Context, Result};
+use record::{test_key, FileCov, Record, TestRec};
+use serde_json::Value;
+use std::collections::BTreeMap;
+use std::io::{BufRead, BufReader};
+use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
+
+/// Folder of the raw profiles of one run. The wrapper reads it from this variable.
+const PROFILE_DIR_VAR: &str = "LAYR_RETEST_PROFILE_DIR";
+/// Number of parallel coverage exports.
+const EXPORT_WORKERS: usize = 4;
+/// Files that no record keeps: dependencies, the standard library and build output.
+const IGNORE_FILES: &str = r"(/\.cargo/|/\.rustup/|/rustc/|/target/)";
+
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let r = match args.first().map(String::as_str) {
+        Some("wrap") => wrap(&args[1..]),
+        Some("run") => run(&args[1..]),
+        _ => {
+            eprintln!("usage: layr-retest run [--full] [-- <nextest args>]\n       layr-retest wrap -- <test binary> <args>");
+            std::process::exit(2);
+        }
+    };
+    match r {
+        Ok(code) => std::process::exit(code),
+        Err(e) => {
+            eprintln!("layr-retest: {e:#}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// The one owner of the raw profile path of a test.
+fn profile_path(dir: &Path, binary_id: &str, test: &str) -> PathBuf {
+    let clean = |s: &str| -> String {
+        s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' { c } else { '_' }).collect()
+    };
+    dir.join(clean(binary_id)).join(format!("{}.profraw", clean(test)))
+}
+
+/// Cargo target runner. In the run phase nextest sets the test name; the list phase has none.
+fn wrap(args: &[String]) -> Result<i32> {
+    let args = args.strip_prefix(&["--".to_string()]).unwrap_or(args);
+    let Some((prog, rest)) = args.split_first() else { bail!("wrap: no test binary") };
+    let mut cmd = Command::new(prog);
+    cmd.args(rest);
+    if let (Ok(dir), Ok(bin), Ok(test)) =
+        (std::env::var(PROFILE_DIR_VAR), std::env::var("NEXTEST_BINARY_ID"), std::env::var("NEXTEST_TEST_NAME"))
+    {
+        let p = profile_path(Path::new(&dir), &bin, &test);
+        std::fs::create_dir_all(p.parent().unwrap())?;
+        cmd.env("LLVM_PROFILE_FILE", p);
+    }
+    Err(cmd.exec()).with_context(|| format!("cannot start {prog}"))
+}
+
+fn output(cmd: &mut Command) -> Result<Vec<u8>> {
+    let o = cmd.output().with_context(|| format!("cannot start {:?}", cmd.get_program()))?;
+    if !o.status.success() {
+        bail!("{:?} failed: {}", cmd.get_program(), String::from_utf8_lossy(&o.stderr).trim());
+    }
+    Ok(o.stdout)
+}
+
+fn layr(args: &[&str]) -> Result<String> {
+    Ok(String::from_utf8_lossy(&output(Command::new("layr").args(args))?).into_owned())
+}
+
+fn state_id(rev: &str) -> Result<String> {
+    let out = layr(&["log", "--json", "--auto", "-n", "1", rev])?;
+    let v: Value = serde_json::from_str(out.lines().next().context("no such state")?)?;
+    Ok(v["id"].as_str().context("state without id")?.to_string())
+}
+
+/// Save the working copy if it changed, and return the id of the state to record.
+fn current_state() -> Result<String> {
+    let out = layr(&["save"])?;
+    let id32 = out.split_whitespace().last().filter(|w| w.len() == 32 && w.chars().all(|c| c.is_ascii_hexdigit()));
+    state_id(id32.unwrap_or("head"))
+}
+
+/// Newest state in the line's log (autos included) that has a record.
+fn find_baseline(root: &Path) -> Result<Option<String>> {
+    for l in layr(&["log", "--json", "--auto"])?.lines() {
+        let v: Value = serde_json::from_str(l)?;
+        if let Some(id) = v["id"].as_str().filter(|id| record::has_record(root, id)) {
+            return Ok(Some(id.to_string()));
+        }
+    }
+    Ok(None)
+}
+
+struct Suite {
+    binary_id: String,
+    /// Prefix of the test names in nextest's JSON events.
+    prefix: String,
+    path: PathBuf,
+    tests: Vec<String>,
+}
+
+fn parse_list(json: &[u8]) -> Result<Vec<Suite>> {
+    let v: Value = serde_json::from_slice(json)?;
+    let mut out = Vec::new();
+    for s in v["rust-suites"].as_object().context("no suites in the test list")?.values() {
+        let tests =
+            s["testcases"].as_object().map(|m| m.iter().filter(|(_, t)| t["ignored"] != true).map(|(n, _)| n.clone()).collect());
+        out.push(Suite {
+            binary_id: s["binary-id"].as_str().unwrap_or_default().to_string(),
+            prefix: format!(
+                "{}::{}",
+                s["package-name"].as_str().unwrap_or_default(),
+                s["binary-name"].as_str().unwrap_or_default()
+            ),
+            path: PathBuf::from(s["binary-path"].as_str().unwrap_or_default()),
+            tests: tests.unwrap_or_default(),
+        });
+    }
+    Ok(out)
+}
+
+/// Escape a literal for a nextest filter expression.
+fn esc(s: &str) -> String {
+    s.replace('\\', "\\\\").replace(')', "\\)").replace(',', "\\,")
+}
+
+fn filter_expr(selected: &[(String, String)]) -> String {
+    let mut by_bin: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for (b, t) in selected {
+        by_bin.entry(b).or_default().push(t);
+    }
+    by_bin
+        .iter()
+        .map(|(b, ts)| {
+            let t: Vec<String> = ts.iter().map(|t| format!("test(={})", esc(t))).collect();
+            format!("(binary_id(={}) & ({}))", esc(b), t.join(" | "))
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+fn rustc_host() -> Result<String> {
+    let out = String::from_utf8(output(Command::new("rustc").arg("-vV"))?)?;
+    out.lines().find_map(|l| l.strip_prefix("host: ")).map(str::to_string).context("no host in rustc -vV")
+}
+
+fn llvm_tool(name: &str) -> Result<PathBuf> {
+    let sysroot = String::from_utf8(output(Command::new("rustc").args(["--print", "sysroot"]))?)?;
+    let p = Path::new(sysroot.trim()).join("lib/rustlib").join(rustc_host()?).join("bin").join(name);
+    if !p.is_file() {
+        bail!("{} not found; run: rustup component add llvm-tools", p.display());
+    }
+    Ok(p)
+}
+
+/// Coverage of one test, from its raw profile and its test binary.
+fn export(root: &Path, bin: &Path, raw: &Path, tools: &(PathBuf, PathBuf)) -> Result<BTreeMap<String, FileCov>> {
+    let data = raw.with_extension("profdata");
+    output(Command::new(&tools.0).args(["merge", "-sparse"]).arg(raw).arg("-o").arg(&data))?;
+    let base = |fmt: &str| {
+        let mut c = Command::new(&tools.1);
+        c.arg("export").arg(bin).arg(format!("-instr-profile={}", data.display()));
+        c.arg(format!("-ignore-filename-regex={IGNORE_FILES}")).arg(format!("-format={fmt}"));
+        c
+    };
+    let lcov = String::from_utf8_lossy(&output(base("lcov").arg("-skip-functions"))?).into_owned();
+    let funcs = parse::parse_functions(&output(&mut base("text"))?)?;
+    let _ = std::fs::remove_file(&data);
+    let rel = |p: &str| -> Option<String> {
+        let canon = root.canonicalize().ok();
+        let p = Path::new(p);
+        let r = p.strip_prefix(root).ok().or_else(|| canon.as_deref().and_then(|c| p.strip_prefix(c).ok()))?;
+        Some(r.to_string_lossy().into_owned())
+    };
+    let mut files: BTreeMap<String, FileCov> = BTreeMap::new();
+    for (f, lines) in parse::parse_lcov(&lcov) {
+        if let Some(r) = rel(&f) {
+            files.entry(r).or_default().lines = lines;
+        }
+    }
+    for (f, (funcs, idle)) in funcs {
+        if let Some(r) = rel(&f) {
+            let e = files.entry(r).or_default();
+            e.funcs = funcs;
+            e.idle = idle;
+        }
+    }
+    files.retain(|_, c| !c.lines.is_empty() || !c.funcs.is_empty());
+    Ok(files)
+}
+
+fn run(args: &[String]) -> Result<i32> {
+    let (mine, extra) = match args.iter().position(|a| a == "--") {
+        Some(i) => (&args[..i], &args[i + 1..]),
+        None => (args, &args[args.len()..]),
+    };
+    let full = mine.iter().any(|a| a == "--full");
+    if let Some(bad) = mine.iter().find(|a| *a != "--full") {
+        bail!("unknown option {bad}");
+    }
+    let root = std::env::current_dir()?;
+    let t0 = std::time::Instant::now();
+
+    let current = current_state()?;
+    let baseline = find_baseline(&root)?;
+    let base_rec = baseline.as_deref().map(|b| record::load(&root, b)).transpose()?;
+    let changes = match baseline.as_deref() {
+        Some(b) if b != current => parse::parse_hunks(&layr(&["diff", b, &current, "-U0"])?),
+        _ => Vec::new(),
+    };
+
+    // Build the instrumented tests and list them.
+    let target = root.join("target/retest");
+    let profdir = target.join("profraw");
+    let _ = std::fs::remove_dir_all(&profdir);
+    let exe = std::env::current_exe()?;
+    let runner_var = format!("CARGO_TARGET_{}_RUNNER", rustc_host()?.to_uppercase().replace('-', "_"));
+    let flags = format!("{} -C instrument-coverage", std::env::var("RUSTFLAGS").unwrap_or_default());
+    let nextest = |sub: &[&str]| {
+        let mut c = Command::new("cargo");
+        c.arg("nextest").args(sub).args(extra);
+        c.env("RUSTFLAGS", flags.trim()).env("CARGO_TARGET_DIR", &target).env(PROFILE_DIR_VAR, &profdir);
+        c.env(&runner_var, format!("{} wrap --", exe.display())).env("NEXTEST_EXPERIMENTAL_LIBTEST_JSON", "1");
+        c
+    };
+    let list = output(nextest(&["list", "--message-format", "json"]).stderr(Stdio::inherit()))?;
+    let suites = parse_list(&list)?;
+
+    // Select.
+    let mut all: Vec<(String, String)> = Vec::new();
+    let mut stale: Vec<(String, String)> = Vec::new();
+    for s in &suites {
+        for t in &s.tests {
+            all.push((s.binary_id.clone(), t.clone()));
+            let old = base_rec.as_ref().and_then(|r| r.tests.get(&test_key(&s.binary_id, t)));
+            if full || old.is_none_or(|r| select::is_stale(r, &changes)) {
+                stale.push((s.binary_id.clone(), t.clone()));
+            }
+        }
+    }
+    let note = if full {
+        "full run"
+    } else if baseline.is_none() {
+        "no record, full run"
+    } else {
+        "incremental"
+    };
+    eprintln!("layr-retest: {} tests, {} selected, {} skipped ({note})", all.len(), stale.len(), all.len() - stale.len());
+
+    // Run.
+    let mut results: BTreeMap<String, bool> = BTreeMap::new();
+    let mut code = 0;
+    if !stale.is_empty() {
+        let mut cmd = nextest(&["run", "--no-fail-fast", "--message-format", "libtest-json"]);
+        if stale.len() < all.len() {
+            cmd.args(["-E", &filter_expr(&stale)]);
+        }
+        let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn().context("cannot start cargo nextest")?;
+        for l in BufReader::new(child.stdout.take().unwrap()).lines() {
+            let Ok(v) = serde_json::from_str::<Value>(&l?) else { continue };
+            let (Some("test"), Some(ev), Some(name)) = (v["type"].as_str(), v["event"].as_str(), v["name"].as_str()) else {
+                continue;
+            };
+            if ev == "started" || ev == "ignored" {
+                continue;
+            }
+            let Some((prefix, test)) = name.split_once('$') else { continue };
+            // A lib and a bin of one package share a prefix; the test name tells them apart.
+            if let Some(s) = suites.iter().find(|s| s.prefix == prefix && s.tests.iter().any(|t| t == test)) {
+                results.insert(test_key(&s.binary_id, test), ev == "ok");
+            }
+        }
+        code = child.wait()?.code().unwrap_or(1);
+        if results.is_empty() && code != 0 {
+            return Ok(code);
+        }
+    }
+
+    // Export coverage of the tests that ran.
+    let tools = (llvm_tool("llvm-profdata")?, llvm_tool("llvm-cov")?);
+    let jobs: Vec<(String, &Suite, &str)> = suites
+        .iter()
+        .flat_map(|s| s.tests.iter().map(move |t| (test_key(&s.binary_id, t), s, t.as_str())))
+        .filter(|(k, ..)| results.contains_key(k))
+        .collect();
+    let next = AtomicUsize::new(0);
+    let done: Mutex<BTreeMap<String, Result<BTreeMap<String, FileCov>>>> = Mutex::new(BTreeMap::new());
+    std::thread::scope(|sc| {
+        for _ in 0..EXPORT_WORKERS {
+            sc.spawn(|| loop {
+                let i = next.fetch_add(1, Ordering::SeqCst);
+                let Some((key, s, test)) = jobs.get(i) else { break };
+                let raw = profile_path(&profdir, &s.binary_id, test);
+                // A test that died before it wrote a profile has no coverage.
+                let r = if raw.is_file() { export(&root, &s.path, &raw, &tools) } else { Ok(BTreeMap::new()) };
+                done.lock().unwrap().insert(key.clone(), r);
+            });
+        }
+    });
+    let mut done = done.into_inner().unwrap();
+
+    // Write the record. Tests that did not run keep their old entry.
+    let mut rec = Record { baseline: if full { None } else { baseline.clone() }, tests: BTreeMap::new() };
+    if baseline.as_deref() == Some(current.as_str()) {
+        rec.baseline = base_rec.as_ref().and_then(|r| r.baseline.clone());
+    }
+    let mut contradictions = 0;
+    for (b, t) in &all {
+        let key = test_key(b, t);
+        let old = base_rec.as_ref().and_then(|r| r.tests.get(&key));
+        match (results.get(&key), done.remove(&key)) {
+            (Some(&ok), Some(files)) => {
+                if full && !ok && old.is_some_and(|o| o.status == "pass") {
+                    contradictions += 1;
+                    eprintln!(
+                        "layr-retest: CONTRADICTION: {key} failed in this full run, but the record of state {} says pass",
+                        baseline.as_deref().unwrap_or("?")
+                    );
+                }
+                rec.tests.insert(key, TestRec { status: if ok { "pass" } else { "fail" }.into(), files: files? });
+            }
+            _ => {
+                if let Some(o) = old.filter(|_| !full) {
+                    rec.tests.insert(key, o.clone());
+                }
+            }
+        }
+    }
+    record::save(&root, &current, &rec)?;
+    let _ = std::fs::remove_dir_all(&profdir);
+    let failed = results.values().filter(|ok| !**ok).count();
+    eprintln!(
+        "layr-retest: ran {}, passed {}, failed {}, skipped {}; record {}; {:.1}s{}",
+        results.len(),
+        results.len() - failed,
+        failed,
+        all.len() - stale.len(),
+        current,
+        t0.elapsed().as_secs_f32(),
+        if contradictions > 0 { format!("; {contradictions} contradiction(s)") } else { String::new() }
+    );
+    Ok(code)
+}
