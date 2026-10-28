@@ -737,6 +737,14 @@ impl<'a> Repo<'a> {
         Ok(self.p.db.line_states(&line.id, StateKind::Auto)?.into_iter().find(|s| self.p.has_state(&s.id)))
     }
 
+    /// The state that a save compares the working content with: the newest automatic state made
+    /// over the line's current head, else the head. An automatic state over an earlier head is
+    /// older than the head and no base for "changed since".
+    pub fn save_base(&self, line: &Line) -> Result<String> {
+        let auto = self.last_auto(line)?.filter(|s| s.parents.contains(&line.head));
+        Ok(auto.map(|s| s.id).unwrap_or_else(|| line.head.clone()))
+    }
+
     /// The id of a state equal to the working content: a new automatic state, or the previous
     /// automatic state (or head) when nothing changed. The caller holds the project lock.
     pub fn working_state(&self, ctx: &Ctx, line: &Line, message: &str) -> Result<Option<String>> {
@@ -745,7 +753,7 @@ impl<'a> Repo<'a> {
         }
         Ok(match self.save(ctx, line, message, false, false)? {
             Some(s) => Some(s.id),
-            None => Some(self.last_auto(line)?.map(|s| s.id).unwrap_or(line.head.clone())),
+            None => Some(self.save_base(line)?),
         })
     }
 
@@ -761,7 +769,7 @@ impl<'a> Repo<'a> {
         if !force && self.private_paths(line)?.is_empty() && self.thin_line(line)? {
             // Compare before any copy: an unchanged folder makes no state. One scan of the
             // working folder serves the comparison and the layer over the head.
-            let prev = self.last_auto(line)?.map(|s| s.id).unwrap_or(line.head.clone());
+            let prev = self.save_base(line)?;
             let new = btrfs::scan_with_data(&w, true)?;
             let head = self.state_src(&line.head)?;
             let head_scan = head.scan(true)?;
@@ -798,10 +806,12 @@ impl<'a> Repo<'a> {
         let mut st = self.working_snapshot(ctx, line, vec![line.head.clone()], message)?;
         st.running = running;
         if !force {
-            let prev = self.last_auto(line)?.map(|s| s.id).unwrap_or(line.head.clone());
+            let prev = self.save_base(line)?;
             if self.p.has_state(&prev) {
                 let base = self.state_src(&prev)?;
-                let changed = changes::candidates(&base, &self.state_src(&st.id)?)?.into_iter().any(|c| !skip_path(&c.path));
+                // Confirmed file changes: the raw candidates also list folders and files that only
+                // got new times, such as the working folder after a named state.
+                let changed = changes::file_changes(&base, &self.state_src(&st.id)?)?.into_iter().any(|c| !skip_path(&c.path));
                 if !changed {
                     self.discard_states(std::slice::from_ref(&st));
                     return Ok(None);
