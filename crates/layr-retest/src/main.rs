@@ -44,12 +44,13 @@ fn main() {
     }
 }
 
-/// The one owner of the raw profile path of a test.
-fn profile_path(dir: &Path, binary_id: &str, test: &str) -> PathBuf {
+/// The one owner of the folder of the raw profiles of a test. Every process that the test starts
+/// writes its own file there (`%p` is the process id).
+fn profile_dir(dir: &Path, binary_id: &str, test: &str) -> PathBuf {
     let clean = |s: &str| -> String {
         s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' { c } else { '_' }).collect()
     };
-    dir.join(clean(binary_id)).join(format!("{}.profraw", clean(test)))
+    dir.join(clean(binary_id)).join(clean(test))
 }
 
 /// Cargo target runner. In the run phase nextest sets the test name; the list phase has none.
@@ -61,9 +62,9 @@ fn wrap(args: &[String]) -> Result<i32> {
     if let (Ok(dir), Ok(bin), Ok(test)) =
         (std::env::var(PROFILE_DIR_VAR), std::env::var("NEXTEST_BINARY_ID"), std::env::var("NEXTEST_TEST_NAME"))
     {
-        let p = profile_path(Path::new(&dir), &bin, &test);
-        std::fs::create_dir_all(p.parent().unwrap())?;
-        cmd.env("LLVM_PROFILE_FILE", p);
+        let p = profile_dir(Path::new(&dir), &bin, &test);
+        std::fs::create_dir_all(&p)?;
+        cmd.env("LLVM_PROFILE_FILE", p.join("%p.profraw"));
     }
     Err(cmd.exec()).with_context(|| format!("cannot start {prog}"))
 }
@@ -170,12 +171,16 @@ fn llvm_tool(name: &str) -> Result<PathBuf> {
 type Exported = (BTreeMap<String, FileCov>, Vec<String>);
 
 /// Coverage of one test, from its raw profile and its test binary.
-fn export(root: &Path, bin: &Path, raw: &Path, tools: &(PathBuf, PathBuf)) -> Result<Exported> {
-    let data = raw.with_extension("profdata");
-    output(Command::new(&tools.0).args(["merge", "-sparse"]).arg(raw).arg("-o").arg(&data))?;
+fn export(root: &Path, bin: &Path, others: &[PathBuf], dir: &Path, tools: &(PathBuf, PathBuf)) -> Result<Exported> {
+    let raws: Vec<PathBuf> =
+        std::fs::read_dir(dir)?.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "profraw")).collect();
+    let data = dir.join("merged.profdata");
+    output(Command::new(&tools.0).args(["merge", "-sparse"]).args(&raws).arg("-o").arg(&data))?;
     let base = |fmt: &str| {
         let mut c = Command::new(&tools.1);
         c.arg("export").arg(bin).arg(format!("-instr-profile={}", data.display()));
+        // Processes that the test started ran other instrumented executables of the project.
+        c.args(others.iter().flat_map(|o| ["-object".as_ref(), o.as_os_str()]));
         c.arg(format!("-ignore-filename-regex={IGNORE_FILES}")).arg(format!("-format={fmt}"));
         c
     };
@@ -208,6 +213,41 @@ fn export(root: &Path, bin: &Path, raw: &Path, tools: &(PathBuf, PathBuf)) -> Re
     Ok((files, packages.into_iter().collect()))
 }
 
+/// The bin targets of the workspace, built instrumented in `<target>/debug/<name>`.
+fn bin_objects(target: &Path) -> Result<Vec<PathBuf>> {
+    let meta: Value =
+        serde_json::from_slice(&output(Command::new("cargo").args(["metadata", "--no-deps", "--format-version", "1"]))?)?;
+    let mut out = Vec::new();
+    for t in meta["packages"].as_array().into_iter().flatten().flat_map(|p| p["targets"].as_array().into_iter().flatten()) {
+        let is_bin = t["kind"].as_array().is_some_and(|k| k.iter().any(|k| k == "bin"));
+        let path = target.join("debug").join(t["name"].as_str().unwrap_or_default());
+        if is_bin && path.is_file() {
+            out.push(path);
+        }
+    }
+    Ok(out)
+}
+
+/// Delete `.profraw` files outside `target/` that appeared since `since`. Returns how many.
+fn remove_stray_profiles(dir: &Path, since: std::time::SystemTime) -> usize {
+    let mut n = 0;
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let p = e.path();
+        let name = e.file_name();
+        if p.is_dir() && !p.is_symlink() {
+            if name != "target" && name != ".git" {
+                n += remove_stray_profiles(&p, since);
+            }
+        } else if p.extension().is_some_and(|x| x == "profraw")
+            && p.metadata().and_then(|m| m.modified()).is_ok_and(|t| t >= since)
+            && std::fs::remove_file(&p).is_ok()
+        {
+            n += 1;
+        }
+    }
+    n
+}
+
 fn run(args: &[String]) -> Result<i32> {
     let (mine, extra) = match args.iter().position(|a| a == "--") {
         Some(i) => (&args[..i], &args[i + 1..]),
@@ -219,6 +259,7 @@ fn run(args: &[String]) -> Result<i32> {
     }
     let root = std::env::current_dir()?;
     let t0 = std::time::Instant::now();
+    let started = std::time::SystemTime::now();
 
     let current = current_state()?;
     // An auto state is in no other line. When the working copy equals the head, the head (a state
@@ -252,6 +293,8 @@ fn run(args: &[String]) -> Result<i32> {
     let nextest = |sub: &[&str]| {
         let mut c = Command::new("cargo");
         c.arg("nextest").args(sub).args(extra);
+        // Cargo, build scripts and the list phase write here; the wrapper gives each test its own folder.
+        c.env("LLVM_PROFILE_FILE", profdir.join("other/%p.profraw"));
         c.env("RUSTFLAGS", flags.trim()).env("CARGO_TARGET_DIR", &target).env(PROFILE_DIR_VAR, &profdir);
         c.env(&runner_var, format!("{} wrap --", exe.display())).env("NEXTEST_EXPERIMENTAL_LIBTEST_JSON", "1");
         c
@@ -316,6 +359,7 @@ fn run(args: &[String]) -> Result<i32> {
 
     // Export coverage of the tests that ran.
     let tools = (llvm_tool("llvm-profdata")?, llvm_tool("llvm-cov")?);
+    let bins = bin_objects(&target)?;
     let jobs: Vec<(String, &Suite, &str)> = suites
         .iter()
         .flat_map(|s| s.tests.iter().map(move |t| (test_key(&s.binary_id, t), s, t.as_str())))
@@ -328,9 +372,9 @@ fn run(args: &[String]) -> Result<i32> {
             sc.spawn(|| loop {
                 let i = next.fetch_add(1, Ordering::SeqCst);
                 let Some((key, s, test)) = jobs.get(i) else { break };
-                let raw = profile_path(&profdir, &s.binary_id, test);
+                let dir = profile_dir(&profdir, &s.binary_id, test);
                 // A test that died before it wrote a profile has no coverage.
-                let r = if raw.is_file() { export(&root, &s.path, &raw, &tools) } else { Ok(Default::default()) };
+                let r = if dir.is_dir() { export(&root, &s.path, &bins, &dir, &tools) } else { Ok(Default::default()) };
                 done.lock().unwrap().insert(key.clone(), r);
             });
         }
@@ -365,6 +409,10 @@ fn run(args: &[String]) -> Result<i32> {
                 }
             }
         }
+    }
+    let stray = remove_stray_profiles(&root, started);
+    if stray > 0 {
+        eprintln!("layr-retest: removed {stray} stray .profraw file(s) from the project: a process with a cleared environment ran instrumented code, so that coverage is lost");
     }
     record::save(&root, &current, &rec)?;
     if let Some(h) = head.filter(|h| *h != current) {

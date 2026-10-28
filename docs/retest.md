@@ -225,6 +225,21 @@ auto state is in no other line. So the flow is: work, `layr save -m`, `layr-rete
 
 The installed `layr` 0.4.0 (2026-10-26) has no cache overlays. Build the one in this repository.
 
+### Processes that a test starts
+
+- The wrapper gives each test a folder `<profile dir>/<binary id>/<test>/` and sets
+  `LLVM_PROFILE_FILE` to `<folder>/%p.profraw`. Each process of the test (the test itself and any
+  child that keeps the environment) writes its own file. All files of the folder are merged.
+- The export uses the test binary and, with `-object`, every bin target of the workspace
+  (`cargo metadata`, built in `target/retest/debug/<name>`). So code that runs only in a child
+  process is in the record of the test that started the child.
+- `cargo nextest list` and `run` have `LLVM_PROFILE_FILE=<profile dir>/other/%p.profraw`, so the list
+  phase and build scripts write no file in the project.
+- Limit: a child started with a cleared environment writes `default_*.profraw` in its working
+  folder. After the run the tool deletes every `.profraw` file outside `target/` that is newer than
+  the start of the run, and prints how many. That coverage is lost: code that only that child ran
+  is not in the record, so a change of it does not select the test. `--full` finds such a change.
+
 ### Contradiction
 
 `run --full` compares each failed test with the entry in the nearest record. If it said `pass`, the
