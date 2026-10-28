@@ -451,7 +451,7 @@ fn run_line_checks(
     if now.head != head {
         return Err(target_moved(&line.name));
     }
-    let rule = repo.authorize_line(ctx, &now, crate::repo::LineOp::Merge { expect: guard.expect })?;
+    let rule = repo.authorize_line(ctx, &now, crate::repo::LineOp::Merge { expect: guard.expect, hint: None })?;
     if rule.as_ref() != guard.rule {
         return Err(exit(1, "merge protection changed during checks; run the merge again"));
     }
@@ -684,7 +684,12 @@ fn merge_rev_inner(
         .map(|e| if queue.is_some() { Ok(e.to_string()) } else { revs::resolve(repo, Some(line), e) })
         .transpose()?;
     let expect = want.is_some();
-    repo.authorize_line(ctx, line, crate::repo::LineOp::Merge { expect })?;
+    // The refusal of a protected line names the ready command; the state is read only.
+    let hint = match queue {
+        None if !expect => Some(format!("layr merge {rev} --expect {}", ids::display(&revs::resolve(repo, Some(line), rev)?))),
+        _ => None,
+    };
+    repo.authorize_line(ctx, line, crate::repo::LineOp::Merge { expect, hint: hint.as_deref() })?;
     let lock = repo.p.lock()?;
     let line = repo.line(&line.id)?;
     if let Some(q) = queue {
@@ -711,7 +716,7 @@ fn merge_rev_inner(
             ));
         }
     }
-    let rule = repo.authorize_line(ctx, &line, crate::repo::LineOp::Merge { expect })?;
+    let rule = repo.authorize_line(ctx, &line, crate::repo::LineOp::Merge { expect, hint: hint.as_deref() })?;
     let w = repo.working_state(ctx, &line, if queue.is_some() { "before a queued merge" } else { "before a layr command" })?;
     let guard = MergeGuard { expect, rule: rule.as_ref(), source: &theirs };
     let head = line.head.clone();
