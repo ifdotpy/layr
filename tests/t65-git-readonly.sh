@@ -3,18 +3,16 @@
 # and layr (save, merge, push, reset, line delete) still works.
 . "$(dirname "$0")/lib.sh"
 
-# Root ignores the read only mode, so as root the git commands and the mode checks run as a
-# user with a reader grant, as a line reader runs them. Elsewhere they run as the caller.
+# Root ignores the read only mode, so as root the git commands run as a user that owns the test
+# line and has a reader grant for the store. Elsewhere they run as the caller.
 if [ "$(id -u)" = 0 ]; then
     GIT_USER=layr-git-u
     id $GIT_USER >/dev/null 2>&1 || useradd -m $GIT_USER
     chmod 755 $T $LAYR_ROOT
     git_as() { runuser -u $GIT_USER -- env PATH="$PATH" git -c safe.directory='*' "$@"; }
-    user_test() { runuser -u $GIT_USER -- env PATH="$PATH" test "$@"; }
 else
     GIT_USER=
     git_as() { git "$@"; }
-    user_test() { test "$@"; }
 fi
 
 R=$T/remote.git; U=$T/up
@@ -41,7 +39,7 @@ check() { # check <description> <git args...>: the write fails and nothing chang
 }
 # The worktree parent is writable for the git user, so only the sealed .git can refuse it.
 wt_parent=$T/wt-parent; mkdir -p $wt_parent
-[ -z "$GIT_USER" ] || chown $GIT_USER $wt_parent
+[ -z "$GIT_USER" ] || chown $GIT_USER $wt_parent $LAYR_ROOT/projects/ro/lines/main
 echo three > c.txt; git_as add c.txt 2>/dev/null
 check "git commit" commit --allow-empty -qm nope
 check "git merge" merge --no-edit -q $sidec
@@ -65,7 +63,7 @@ ok "git HEAD follows the save" test "$(git rev-parse HEAD)" != "$head"
 ok "merge works" l merge side
 ok "push works" l git push -q origin main
 eq "the remote has the line head" "$(git rev-parse HEAD)" "$(git -C $R rev-parse main)"
-ok "line is still sealed after the save" user_test ! -w .git
+eq "line is still sealed after the save" 555 "$(stat_field mode .git)"
 
 # After a git move of HEAD, the new refusal text works: write HEAD in place, then save.
 ex=$(git rev-parse HEAD)
@@ -76,14 +74,14 @@ has "the refusal tells what to run" "printf '%s\\n' $ex > .git/HEAD" "$out"
 printf '%s\n' $ex > .git/HEAD
 echo again >> b.txt
 ok "save works after the HEAD fix" l save -a -qm fixed
-ok ".git is sealed again" user_test ! -w .git
+eq ".git is sealed again" 555 "$(stat_field mode .git)"
 
 # An older line gets sealed at its next refresh, and line delete works on a sealed line.
 chmod -R u+w .git
 echo x >> b.txt; l save -a -qm x >/dev/null
-ok "refresh seals a writable .git" user_test ! -w .git
+eq "refresh seals a writable .git" 555 "$(stat_field mode .git)"
 cd $LAYR_ROOT/projects/ro/lines/side || exit 1
-ok "side line is sealed" user_test ! -w .git
+eq "side line is sealed" 555 "$(stat_field mode .git)"
 cd $LAYR_ROOT/projects/ro/lines/main || exit 1
 ok "line delete of a sealed line" l line delete -D side
 no "the deleted line is gone" test -e $LAYR_ROOT/projects/ro/lines/side
