@@ -1,7 +1,8 @@
 # layr-retest: run only the tests that a change can affect
 
-Status: design, agreed with the owner on 2026-10-28. Prototype measurements are in the last
-section. Not built yet.
+Status: first version built (2026-10-28): the Rust adapter, in `crates/layr-retest`. Design
+agreed with the owner on 2026-10-28. Prototype measurements are in the last section. See
+"First version" for the command line, the record format and what is not done.
 
 ## Goal
 
@@ -103,7 +104,117 @@ of layr has no terms for tests, coverage or adapters.
 - Coverage export: 0.5 s of CPU per test with the binary of that test only (1.8 s with all
   binaries). This is the main cost; it runs only for the tests that ran and is parallel.
 
+## First version
+
+Crate `crates/layr-retest`, binary `layr-retest`. It runs `layr`, `cargo nextest`, `llvm-profdata`
+and `llvm-cov` as programs and uses no internal crate of layr. The two LLVM tools come from the
+`llvm-tools` rustup component of the active toolchain.
+
+### Command line
+
+Run in the root folder of a layr line that is also the cargo project root.
+
+- `layr-retest run [--full] [-- <nextest args>]`
+  1. Saves the working copy (`layr save`, an auto state if it changed). The id of that state, or of
+     the head if nothing changed, is the current state.
+  2. Baseline: the newest state in `layr log --auto` that has a record file. Without one, or with
+     `--full`, all tests run.
+  3. `layr diff <baseline> <current> -U0` gives the hunks.
+  4. `cargo nextest list` (instrumented build in `target/retest`) gives all tests. Stale tests are
+     selected by the Rules. Tests that have no record, and tests that failed, always run.
+  5. `cargo nextest run --no-fail-fast -E '<filter of the stale tests>'` runs them. A run of all
+     tests has no filter.
+  6. For each test that ran: `llvm-profdata merge -sparse`, then `llvm-cov export` (lcov for
+     executed lines, JSON for function ranges) on the binary of that test. Four exports run at a
+     time. Files outside the project, in `target/`, and in `.cargo`, `.rustup` and `/rustc/` are dropped.
+  7. The record is written and the raw profiles are deleted.
+  8. The exit code is the exit code of nextest. The last line prints how many tests ran, passed,
+     failed and were skipped.
+  The nextest arguments after `--` go to both `list` and `run`. Use them to select packages
+  (`-p`, `--workspace`). Do not put `-E` there.
+- `layr-retest wrap -- <test binary> <args>` is the cargo target runner that `run` installs
+  (`CARGO_TARGET_<TRIPLE>_RUNNER`). With `NEXTEST_TEST_NAME` set it sets `LLVM_PROFILE_FILE` to
+  `$LAYR_RETEST_PROFILE_DIR/<binary id>/<test>.profraw` (names cleaned to letters, digits and
+  `_-.`), then execs the test. In the list phase it sets no profile.
+
+### Record format
+
+File `.layr-retest/<state id>.json` in the line root (the id is the one that `layr log --json`
+prints). The folder is in `.gitignore`, so a save does not see it.
+
+```json
+{
+  "baseline": "<state id of the record that this run started from, or null for a full run>",
+  "tests": {
+    "<binary id> <test name>": {
+      "status": "pass",
+      "files": {
+        "src/lib.rs": { "lines": [[1, 3], [7, 7]], "funcs": [[1, 3]], "idle": [[5, 9]] }
+      }
+    }
+  }
+}
+```
+
+- `lines`: executed line ranges. `funcs`: ranges of functions that the test executed. `idle`:
+  ranges of other functions in the file. All ranges are inclusive and use lines of the state
+  that the record belongs to.
+- A record is complete. A test that did not run keeps its entry from the baseline.
+- A full run writes a record with no baseline and no carried entries. Later runs find it first,
+  so older records are no longer used.
+- `idle` is not in the first design. It is needed to tell a change inside a function that the
+  test did not call (no effect) from a change at module level (the test is stale).
+
+### Selection
+
+A test is stale when it has no entry, or failed, or one hunk of a file in its record is one of:
+
+- an old line of the hunk is an executed line, or in an executed function;
+- a pure insertion strictly inside an executed function (a new match arm);
+- a changed line is outside every function of the file, or a pure insertion outside every function
+  is not made only of whole functions, comments and blank lines (a new constant, a type, a field).
+
+A new function that nothing calls, a change inside an idle function and a comment between functions
+do not make a test stale. The "whole functions" check reads the added text: a line starts a function
+(`fn`, `pub fn`, `async`, `const`, `unsafe`, `extern` before `fn`), then brackets balance. A string
+that holds an unbalanced bracket can fool it.
+
+A state with auto states: auto states are siblings (they all have the last named state as parent).
+So the baseline search reads the whole line log, not only the ancestors of the current state.
+
+### Contradiction
+
+`run --full` compares each failed test with the entry in the nearest record. If it said `pass`, the
+tool prints `CONTRADICTION: <test>` and the state of that record. The full run writes a fresh record, so
+the old chain is not used again. The end to end test shows it with a test that reads a data file.
+
+### Tests
+
+- Unit tests (`parse.rs`, `select.rs`): lcov to ranges, `-U0` hunks, function ranges, and each
+  selection rule.
+- `crates/layr-retest/tests/e2e.rs`: temporary `LAYR_ROOT`, a tiny project with three tests. Runs:
+  no record, no change, change of one function, a new uncalled function, a change of a data file,
+  full run with a contradiction. About 10 s. Needs `layr`, `cargo-nextest` and `llvm-tools`.
+  Run: `cargo nextest run -p layr-retest`.
+
+### Not done
+
+- Overlay wiring (TODO). Records are plain files in the line, ignored by git and by layr, so they
+  are not in history, not synced and not in a new line. Next: `layr overlay create retest`,
+  `layr overlay move retest .layr-retest`, so that records move with peer sync. This needs a test
+  of the folder overlay rules in `cache-overlays.md` and is not tried yet.
+- Lockfile and `Cargo.toml` changes. Only changes of `.rs` files select tests. A change of a
+  dependency, a feature, `build.rs`, or a file that a test reads (`include_str!`, fixtures) is
+  found by `--full` only.
+- The record key does not include the nextest arguments. A run with other `-p` arguments only
+  carries entries of the tests it lists; entries of other packages are dropped.
+- Test names are cleaned for profile file names. Two names that differ only in cleaned characters share a file.
+- The line root must be the cargo project root. The path of `layr-retest` must have no spaces
+  (cargo splits the runner on spaces).
+- Cross compilation: the runner variable uses the host triple.
+- Python and JS/TS adapters.
+- No schedule for `--full`.
+
 ## Not decided
 
-- The record format in detail and the tool's command line.
-- Function ranges from the JSON export: check that they cover closures and generic copies.
+- Whether the record folder should be gzip-compressed (5.8 KB per 116 tests in the prototype).
