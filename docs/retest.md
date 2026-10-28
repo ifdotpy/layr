@@ -63,7 +63,9 @@ but needs nightly Rust, a call in every test, and git. The adapter uses only sta
    `LLVM_PROFILE_FILE=<dir>/<binary>/<test>.profraw` and starts the test. In the list phase the
    test name is not set; the wrapper then writes no profile.
 3. After the run: `llvm-profdata merge` and `llvm-cov export -format=lcov -skip-functions` on the
-   binary of that test give its executed lines; the JSON export gives the line ranges of functions.
+   binary of that test give its executed lines. The line ranges of functions come from one JSON
+   export per binary and the names of the executed functions from `llvm-profdata show` (see
+   "Coverage export cost").
 4. Select: a test is stale when a changed hunk intersects its executed lines, or lies inside a
    function that it executed, or is at module level in a file that it executed, or is a lockfile
    change of a package whose files it executed.
@@ -116,12 +118,57 @@ The tests of `layr-retest` itself are excluded: its end-to-end test calls `layr`
 | One function body changed in `layr-model` | 2 | 46.0 s |
 | `--full` after a change (warm build) | 261 | 410.0 s |
 
+After the faster export (2026-10-28, same Mac, 262 tests, load 12 to 40 at the start, so the numbers
+move with the load of the machine; the gate lock was taken):
+
+| Run | Selected | Before | After |
+| --- | --- | --- | --- |
+| `--full`, warm build | 262 | 199.7 s (load 29) | 98.4 s to 105.0 s (load 12 to 33) |
+| No change | 0 | 15.5 s (first version, quiet machine) | 46.2 s (load 45, not comparable) |
+| One function changed (the probe below) | 2 | 46.0 s (first version) | 58.6 s (load 45) |
+
+The `--full` rows are the clean comparison: the same machine within one hour, the old and the new
+binary. The 410 s of the first version was taken on a busier machine. The export of 262 tests now
+takes about 85 s of the 98 s. The remaining cost is the lcov export of each test (0.4 s of CPU) and
+the build of the tests.
+
 Selection check: a `panic!` at the top of `layr_model::diff::is_binary`. The incremental run
 selected 2 tests and both failed; the `--full` run failed the same 2 tests and passed the other
-259. No stray `.profraw` file was left in the line.
+259. Repeated with the faster export: the same 2 tests failed in both runs. No stray `.profraw` file was left in the line.
 
-The coverage export dominates a run with many tests: the `--full` run took 410 s, the tests 13.5 s of it, and the build was warm (not measured per step).
-A faster export is open work (see Not decided).
+The coverage export dominated a run with many tests: the `--full` run took 410 s, the tests 13.5 s of it.
+
+### Coverage export cost
+
+Measured on one test of `layr-model` (binary 25 MB, 2480 files with the registry crates, load
+about 30; the numbers move by 20 % with the load of the machine):
+
+| Step | Time |
+| --- | --- |
+| `llvm-profdata merge` | 0.05 s |
+| `llvm-cov export` lcov, `-skip-functions` | 0.4 to 0.55 s |
+| `llvm-cov export` JSON (text), all functions | 0.4 to 0.65 s, 58 MB of output |
+| `llvm-profdata show --covered --all-functions` | 0.01 to 0.03 s, 15 KB |
+| `-num-threads` 1, 4 | no gain or slower |
+
+So a test cost about 1.2 s of CPU, and the JSON is 58 MB that was parsed again for every test. The
+bin targets are one more 100 MB object when `-object` is used; with it a test cost about 1.8 s.
+
+Method now:
+
+- The function ranges and the idle ranges do not depend on the test. They are read once per test
+  binary from the JSON of the first test of that binary (`-skip-expansions`, only files of the
+  project kept), and stored as a table: function name, file, line span.
+- Per test: `llvm-profdata show --covered --all-functions` lists the symbols of the functions with a
+  count above 0. A span is executed when any function with that span ran, as before. Lines still come from
+  the lcov export of that test, so the line granularity is the same.
+- The `-object` bin targets are exported only when the profile folder of the test has more than one
+  profile file, that is when a child process ran.
+- Tried and dropped: one JSON export per test for both lines and functions (the JSON is the
+  slow and large part, and the lcov is smaller to parse), more workers (8 workers on 18 CPUs showed no clear gain under a varying load),
+  and `-num-threads`.
+- The record content is equal: on the layr workspace the records of the old and the new method are
+  equal for all 262 tests.
 
 ## First version
 
@@ -144,8 +191,9 @@ Run in the root folder of a layr line that is also the cargo project root.
   5. `cargo nextest run --no-fail-fast -E '<filter of the stale tests>'` runs them. A run of all
      tests has no filter.
   6. For each test that ran: `llvm-profdata merge -sparse`, then `llvm-cov export` (lcov for
-     executed lines, JSON for function ranges) on the binary of that test. Four exports run at a
-     time. Files outside the project, in `target/`, and in `.cargo`, `.rustup` and `/rustc/` are dropped.
+     executed lines) on the binary of that test, and `llvm-profdata show --covered --all-functions`
+     for the executed function names. Function ranges come from a table that is built once per
+     test binary. Four exports run at a time. Files outside the project, in `target/`, and in `.cargo`, `.rustup` and `/rustc/` are dropped.
   7. The record is written and the raw profiles are deleted.
   8. The exit code is the exit code of nextest. The last line prints how many tests ran, passed,
      failed and were skipped.
@@ -249,9 +297,11 @@ The installed `layr` 0.4.0 (2026-10-26) has no cache overlays. Build the one in 
 - The wrapper gives each test a folder `<profile dir>/<binary id>/<test>/` and sets
   `LLVM_PROFILE_FILE` to `<folder>/%p.profraw`. Each process of the test (the test itself and any
   child that keeps the environment) writes its own file. All files of the folder are merged.
-- The export uses the test binary and, with `-object`, every bin target of the workspace
-  (`cargo metadata`, built in `target/retest/debug/<name>`). So code that runs only in a child
-  process is in the record of the test that started the child.
+- When the folder has more than one profile file, the export uses the test binary and, with
+  `-object`, every bin target of the workspace (`cargo metadata`, built in
+  `target/retest/debug/<name>`). So code that runs only in a child process is in the record of the
+  test that started the child. With one profile file only the test binary is exported: the one
+  process was the test itself.
 - `cargo nextest list` and `run` have `LLVM_PROFILE_FILE=<profile dir>/other/%p.profraw`, so the list
   phase and build scripts write no file in the project.
 - Limit: a child started with a cleared environment writes `default_*.profraw` in its working
@@ -321,5 +371,5 @@ the old chain is not used again. The end to end test shows it with a test that r
 ## Not decided
 
 - Whether the record folder should be gzip-compressed (5.8 KB per 116 tests in the prototype).
-- A faster coverage export: one `llvm-cov export` process per test costs about 1 s each. A candidate:
-  read the profiles and the coverage mapping in process instead of starting `llvm-cov` per test.
+- A faster coverage export: the lcov export of each test is still one `llvm-cov` process (about
+  0.4 s). A candidate: read the profiles and the coverage mapping in process.
