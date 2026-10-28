@@ -104,6 +104,25 @@ of layr has no terms for tests, coverage or adapters.
 - Coverage export: 0.5 s of CPU per test with the binary of that test only (1.8 s with all
   binaries). This is the main cost; it runs only for the tests that ran and is parallel.
 
+## Measurements on the layr workspace (2026-10-28, this Mac, state a5310ad)
+
+`layr-retest run -- --workspace --exclude layr-retest`, 261 tests, 4 test threads, 4 build jobs.
+The tests of `layr-retest` itself are excluded: its end-to-end test calls `layr` from `PATH`.
+
+| Run | Selected | Time |
+| --- | --- | --- |
+| First run, cold instrumented build | 261 | 330.6 s (the tests themselves: 13.5 s) |
+| No change | 0 | 15.5 s |
+| One function body changed in `layr-model` | 2 | 46.0 s |
+| `--full` after a change (warm build) | 261 | 410.0 s |
+
+Selection check: a `panic!` at the top of `layr_model::diff::is_binary`. The incremental run
+selected 2 tests and both failed; the `--full` run failed the same 2 tests and passed the other
+259. No stray `.profraw` file was left in the line.
+
+The coverage export dominates a run with many tests: the `--full` run took 410 s, the tests 13.5 s of it, and the build was warm (not measured per step).
+A faster export is open work (see Not decided).
+
 ## First version
 
 Crate `crates/layr-retest`, binary `layr-retest`. It runs `layr`, `cargo nextest`, `llvm-profdata`
@@ -302,3 +321,5 @@ the old chain is not used again. The end to end test shows it with a test that r
 ## Not decided
 
 - Whether the record folder should be gzip-compressed (5.8 KB per 116 tests in the prototype).
+- A faster coverage export: one `llvm-cov export` process per test costs about 1 s each. A candidate:
+  read the profiles and the coverage mapping in process instead of starting `llvm-cov` per test.
