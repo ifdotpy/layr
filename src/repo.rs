@@ -807,7 +807,9 @@ impl<'a> Repo<'a> {
             let prev = self.save_base(line)?;
             if self.p.has_state(&prev) {
                 let base = self.state_src(&prev)?;
-                let changed = changes::candidates(&base, &self.state_src(&st.id)?)?.into_iter().any(|c| !skip_path(&c.path));
+                // Confirmed file changes: the raw candidates also list folders and files that only
+                // got new times, such as the working folder after a named state.
+                let changed = changes::file_changes(&base, &self.state_src(&st.id)?)?.into_iter().any(|c| !skip_path(&c.path));
                 if !changed {
                     self.discard_states(std::slice::from_ref(&st));
                     return Ok(None);
