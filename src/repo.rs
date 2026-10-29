@@ -741,6 +741,41 @@ impl<'a> Repo<'a> {
         Ok(Temp { path: dst })
     }
 
+    /// `scan` limited to the paths that `specs` name (APFS): a restore of a few files then
+    /// copies those files, not the whole working folder (seconds to minutes in a large line,
+    /// under the store lock). A pattern or the whole folder takes the complete scan.
+    #[cfg(target_os = "macos")]
+    pub fn scan_matching(&self, line: &Line, specs: &[String]) -> Result<Temp> {
+        if specs.iter().any(|s| s.is_empty() || s.contains(['*', '?', '['])) {
+            return self.scan(line);
+        }
+        let w = self.working(line);
+        let mut paths = BTreeSet::new();
+        for spec in specs {
+            let Ok(root) = fsutil::safe_join(&w, spec) else { continue };
+            let Ok(m) = std::fs::symlink_metadata(&root) else { continue };
+            paths.insert(spec.clone());
+            if m.is_dir() {
+                let mut stack = vec![spec.clone()];
+                while let Some(dir) = stack.pop() {
+                    for e in std::fs::read_dir(w.join(&dir))? {
+                        let e = e?;
+                        let rel = format!("{dir}/{}", e.file_name().to_string_lossy());
+                        if e.file_type()?.is_dir() {
+                            stack.push(rel.clone());
+                        }
+                        paths.insert(rel);
+                    }
+                }
+            }
+        }
+        let dst = self.p.scan_dir().join(ids::new_id());
+        btrfs::create_subvolume(&dst)?;
+        let t = Temp { path: dst };
+        btrfs::copy_selected(&w, &t.path, &paths)?;
+        Ok(t)
+    }
+
     /// The newest automatic state of a line, if any.
     pub fn last_auto(&self, line: &Line) -> Result<Option<StateRec>> {
         Ok(self.p.db.line_states(&line.id, StateKind::Auto)?.into_iter().find(|s| self.p.has_state(&s.id)))
