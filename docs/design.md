@@ -180,6 +180,10 @@ is valid for a state, so it never decides that by itself:
   snapshots (and a deleted line's folder) into `meta/trash`; the same command deletes the trash
   after it releases the lock, so other commands do not wait for the deletion. A trash left by
   an interrupted command goes with the next one. `gc --dry-run` lists the caches it would delete.
+- On APFS a cache snapshot copies every file (minutes for build output). `save --caches` makes
+  these copies before the store lock; under the lock a snapshot of an unchanged cache takes its
+  copy with one rename (after a scan), a changed cache is copied again, and unused copies go to
+  the trash. A sealed tree keeps its seal through these renames.
 
 A cache helps only a tool that checks its own output and accepts a new path, because every line
 has its own folder. Cargo's `target` does: Cargo compares fingerprints and rebuilds what a change
