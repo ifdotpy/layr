@@ -24,5 +24,10 @@ ok "undo of the restore" l undo
 eq "undo brings the edit back" "edited" "$(cat tracked.txt)"
 eq "the untracked files stay" "300" "$(ls bulk | wc -l | tr -d ' ')"
 eq "no prepared copies stay" "" "$(ls -A "$LAYR_ROOT/projects/hold/meta/work" 2>/dev/null)"
+
+# add reads the working folder before the lock and does not read it again under the lock.
+printf 'new\n' > new.txt
+eq "add reads the folder once" "1" "$(LAYR_TRACE=1 l add new.txt 2>&1 | grep -c 'validated read')"
+has "add stages the file" "A  new.txt" "$(l status --short)"
 ok "states remain valid" l fsck
 finish
