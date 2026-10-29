@@ -187,6 +187,12 @@ is valid for a state, so it never decides that by itself:
 - Under a lock, layr deletes no large tree on APFS: it renames it into the store's `trash`,
   which the process empties after it releases its last store lock. A wait for or a hold of the
   lock of 1 s or more goes to `meta/lock-slow.log` of the project.
+- A command that saves the working folder first (`save`, `line delete`, and every command that
+  starts with an automatic state, such as `restore`, `reset` or `merge`) writes that layer
+  before the store lock. Under the lock it scans the folder again and takes the layer with one
+  rename when the folder, the head and the previous state did not change; else it writes the
+  state under the lock as before. The state after such a command is a layer over the state
+  before it, so it copies only what the command changed.
 
 A cache helps only a tool that checks its own output and accepts a new path, because every line
 has its own folder. Cargo's `target` does: Cargo compares fingerprints and rebuilds what a change

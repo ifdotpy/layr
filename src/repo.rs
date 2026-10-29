@@ -534,19 +534,28 @@ impl<'a> Repo<'a> {
     /// leaves the overlay files out (a writable snapshot, the files removed, read-only): no state
     /// of the project holds a file of an overlay. The caller holds the project lock.
     pub fn working_snapshot(&self, ctx: &Ctx, line: &Line, parents: Vec<String>, message: &str) -> Result<StateRec> {
+        self.working_snapshot_over(ctx, line, parents, message, &line.head)
+    }
+
+    /// `working_snapshot` with its thin layer over `base` (APFS): over a state close to the
+    /// working content, only the few entries that differ are copied.
+    pub fn working_snapshot_over(&self, ctx: &Ctx, line: &Line, parents: Vec<String>, message: &str, base: &str) -> Result<StateRec> {
         let w = self.working(line);
         recover_cache_replacements(&w)?;
         let private = self.private_paths(line)?;
+        #[cfg(not(target_os = "macos"))]
+        let _ = base;
         #[cfg(target_os = "macos")]
         if private.is_empty() && self.thin_line(line)? {
-            // A thin layer over the head: only the entries that changed are copied.
+            // A thin layer over the base: only the entries that changed are copied.
             let id = ids::new_id();
-            let head = self.state_src(&line.head)?;
+            let base = if self.p.has_state(base) { base } else { line.head.as_str() };
+            let head = self.state_src(base)?;
             let dst = self.p.delta_path(&id);
-            match crate::thin::snapshot_over(&head, &line.head, &w, &dst, false) {
+            match crate::thin::snapshot_over(&head, base, &w, &dst, false) {
                 Ok(Some(_)) => return self.describe_state(ctx, id, StateKind::Auto, parents, message, Some(line)),
                 Ok(None) => {
-                    crate::thin::write_layer(&head.at("")?, &dst, &crate::thin::Diff::default(), &line.head, false, None)?;
+                    crate::thin::write_layer(&head.at("")?, &dst, &crate::thin::Diff::default(), base, false, None)?;
                     return self.describe_state(ctx, id, StateKind::Auto, parents, message, Some(line));
                 }
                 // Hard links need a complete tree.
@@ -732,6 +741,41 @@ impl<'a> Repo<'a> {
         Ok(Temp { path: dst })
     }
 
+    /// `scan` limited to the paths that `specs` name (APFS): a restore of a few files then
+    /// copies those files, not the whole working folder (seconds to minutes in a large line,
+    /// under the store lock). A pattern or the whole folder takes the complete scan.
+    #[cfg(target_os = "macos")]
+    pub fn scan_matching(&self, line: &Line, specs: &[String]) -> Result<Temp> {
+        if specs.iter().any(|s| s.is_empty() || s.contains(['*', '?', '['])) {
+            return self.scan(line);
+        }
+        let w = self.working(line);
+        let mut paths = BTreeSet::new();
+        for spec in specs {
+            let Ok(root) = fsutil::safe_join(&w, spec) else { continue };
+            let Ok(m) = std::fs::symlink_metadata(&root) else { continue };
+            paths.insert(spec.clone());
+            if m.is_dir() {
+                let mut stack = vec![spec.clone()];
+                while let Some(dir) = stack.pop() {
+                    for e in std::fs::read_dir(w.join(&dir))? {
+                        let e = e?;
+                        let rel = format!("{dir}/{}", e.file_name().to_string_lossy());
+                        if e.file_type()?.is_dir() {
+                            stack.push(rel.clone());
+                        }
+                        paths.insert(rel);
+                    }
+                }
+            }
+        }
+        let dst = self.p.scan_dir().join(ids::new_id());
+        btrfs::create_subvolume(&dst)?;
+        let t = Temp { path: dst };
+        btrfs::copy_selected(&w, &t.path, &paths)?;
+        Ok(t)
+    }
+
     /// The newest automatic state of a line, if any.
     pub fn last_auto(&self, line: &Line) -> Result<Option<StateRec>> {
         Ok(self.p.db.line_states(&line.id, StateKind::Auto)?.into_iter().find(|s| self.p.has_state(&s.id)))
@@ -755,6 +799,46 @@ impl<'a> Repo<'a> {
             Some(s) => Some(s.id),
             None => Some(self.save_base(line)?),
         })
+    }
+
+    /// Write the automatic state of the working folder before the caller takes the store lock
+    /// (APFS). Copying the changed files took seconds to minutes under the lock and stopped
+    /// every other command of the project. Under the lock `save` scans the folder again and
+    /// takes this layer with one rename when the folder, the head and the previous state did
+    /// not change; else it writes the state as before.
+    #[cfg(target_os = "macos")]
+    pub fn prepare_save(&self, line: &Line) -> Result<()> {
+        let w = self.working(line);
+        if !w.exists() || !self.private_paths(line)?.is_empty() || !self.thin_line(line)? {
+            return Ok(());
+        }
+        let _t = crate::trace::span("prepare save");
+        let prev = self.save_base(line)?;
+        let new = btrfs::scan_with_data(&w, true)?;
+        let head = self.state_src(&line.head)?;
+        let head_scan = head.scan(true)?;
+        let head_diff = crate::thin::diff(&head_scan, &|k| head.path(k), &new, &w)?;
+        if !head_diff.write.iter().chain(head_diff.removed.iter()).any(|p| !skip_path(p)) {
+            return Ok(());
+        }
+        let path = self.p.work_dir().join(format!("prepared-save-{}", ids::new_id()));
+        std::fs::create_dir_all(self.p.work_dir())?;
+        match crate::thin::write_checked_scan(&w, &head, &head_scan, &new, &head_diff, &path, &line.head, false) {
+            Ok(Some(scan)) => {
+                PREPARED_SAVES.with(|p| {
+                    p.borrow_mut().push(PreparedSave { line: line.id.clone(), head: line.head.clone(), prev, scan, path })
+                });
+            }
+            Ok(None) => self.p.trash(&path)?,
+            Err(_) => {
+                let _ = self.p.trash(&path);
+            }
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    pub fn prepare_save(&self, _line: &Line) -> Result<()> {
+        Ok(())
     }
 
     /// Save the working content as an automatic state if it changed since the previous one.
@@ -788,7 +872,20 @@ impl<'a> Repo<'a> {
             }
             let id = ids::new_id();
             let dst = self.p.delta_path(&id);
-            let mut st = match crate::thin::write_checked(&w, &head, &head_scan, &new, &head_diff, &dst, &line.head, false) {
+            // A layer written before the lock (`prepare_save`) for exactly this content and
+            // head: one rename instead of copying the changed files under the lock.
+            let written = match take_prepared_save(&line.id) {
+                Some(pre) if pre.head == line.head && pre.prev == prev && pre.scan == new => {
+                    let _t = crate::trace::span("take prepared save");
+                    btrfs::move_tree(&pre.path, &dst).map(|_| ())
+                }
+                Some(pre) => {
+                    self.p.trash(&pre.path)?;
+                    crate::thin::write_checked(&w, &head, &head_scan, &new, &head_diff, &dst, &line.head, false)
+                }
+                None => crate::thin::write_checked(&w, &head, &head_scan, &new, &head_diff, &dst, &line.head, false),
+            };
+            let mut st = match written {
                 Ok(()) => self.describe_state(ctx, id, StateKind::Auto, vec![line.head.clone()], message, Some(line))?,
                 // Hard links need a complete tree.
                 Err(e) if crate::thin::needs_complete(&e) => {
@@ -1610,7 +1707,9 @@ impl<'a> Repo<'a> {
         if !w.exists() {
             return Ok(None);
         }
-        let st = self.working_snapshot(ctx, line, vec![line.head.clone()], &format!("after {op}"))?;
+        // Over the state saved before the operation: only what the operation changed is copied.
+        let base = self.save_base(line)?;
+        let st = self.working_snapshot_over(ctx, line, vec![line.head.clone()], &format!("after {op}"), &base)?;
         let id = st.id.clone();
         rec.states.push(st);
         Ok(Some(id))
@@ -2534,4 +2633,26 @@ mod cache_platform_tests {
         drop(p);
         std::fs::remove_dir_all(dir).unwrap();
     }
+}
+
+/// An automatic state layer written before a store lock (`Repo::prepare_save`).
+#[cfg(target_os = "macos")]
+struct PreparedSave {
+    line: String,
+    head: String,
+    prev: String,
+    scan: BTreeMap<String, btrfs::ScanEntry>,
+    path: PathBuf,
+}
+#[cfg(target_os = "macos")]
+thread_local! {
+    static PREPARED_SAVES: std::cell::RefCell<Vec<PreparedSave>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+#[cfg(target_os = "macos")]
+fn take_prepared_save(line: &str) -> Option<PreparedSave> {
+    PREPARED_SAVES.with(|p| {
+        let mut p = p.borrow_mut();
+        let i = p.iter().position(|x| x.line == line)?;
+        Some(p.remove(i))
+    })
 }

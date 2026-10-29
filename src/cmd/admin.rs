@@ -77,6 +77,8 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
         #[cfg(target_os = "macos")]
         if a.has("--caches") {
             prepare_cache_copies(repo, &l)?;
+        } else {
+            repo.prepare_save(&l)?;
         }
         let _lock = repo.p.lock()?;
         let l = repo.line(&l.id)?;
