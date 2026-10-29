@@ -298,7 +298,7 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
         return Err(exit(1, "permission denied: only the project admin or the user who made it can undo this operation"));
     }
     let _queue_lock = if r.data.get("queue_change").is_some() { Some(super::queue::require_lock(repo)?) } else { None };
-    let _lock = repo.p.lock()?;
+    let lock = repo.p.lock()?;
     let mut rec = Record::new("undo");
     rec.data = serde_json::json!({"undo": r.id, "op": r.op});
     if let Some(value) = r.data.get("ref_change") {
@@ -474,7 +474,7 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
             (None, Some(l)) if alive => {
                 // The operation created the line: delete it (content saved first).
                 wb = repo.working_state(ctx, l, "before undo")?;
-                btrfs::delete_tree(&repo.working(l))?;
+                trash(repo, &repo.working(l))?;
                 repo.drop_stage(l)?;
             }
             _ => {}
@@ -504,6 +504,8 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
         fmt_time(r.time),
         short_op(&done.id)
     );
+    drop(lock);
+    empty_trash(repo);
     Ok(0)
 }
 
@@ -954,7 +956,7 @@ pub fn run_gc(ctx: &Ctx, repo: &Repo, dry: bool) -> Result<Vec<String>> {
         let s = repo.p.db.state(id)?;
         if let Some(s) = &s {
             for snap in s.caches.values() {
-                let _ = btrfs::delete_tree(&repo.p.cache_path(id, snap));
+                let _ = trash(repo, &repo.p.cache_path(id, snap));
             }
         }
         if repo.p.delete_state(id).is_ok() {
@@ -1010,7 +1012,7 @@ pub fn run_gc(ctx: &Ctx, repo: &Repo, dry: bool) -> Result<Vec<String>> {
                     .map(|t| t.elapsed().map(|x| x.as_secs() > 3600).unwrap_or(false))
                     .unwrap_or(false);
                 if old {
-                    let _ = btrfs::delete_tree(&e.path());
+                    let _ = trash(repo, &e.path());
                 }
             }
         }
