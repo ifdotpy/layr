@@ -287,6 +287,8 @@ pub fn begin_change(ctx: &Ctx, repo: &Repo, line: &Line) -> Result<(crate::store
 /// `begin_change` for another kind of change (a merge).
 pub fn begin(ctx: &Ctx, repo: &Repo, line: &Line, op: crate::repo::LineOp) -> Result<(crate::store::Lock, Option<String>)> {
     repo.authorize_line(ctx, line, op)?;
+    // The copy of changed files goes before the lock; under it the save takes it by a rename.
+    repo.prepare_save(line)?;
     let lock = repo.p.lock()?;
     let line = repo.line(&line.id)?;
     let w = repo.working_state(ctx, &line, "before a layr command")?;
@@ -440,25 +442,39 @@ pub fn add(ctx: &Ctx, args: &[String]) -> Result<i32> {
         specs = vec![String::new()];
     }
     h.repo.authorize_line(ctx, &line, crate::repo::LineOp::Direct)?;
-    let _lock = h.repo.p.lock()?;
-    let line = h.repo.line(&line.id)?;
-    let quiet = h.repo.quiet_paths(&line)?;
+    // The status and the copy of the named paths read the whole working folder: seconds in a
+    // large line. They run before the store lock; under it the copy is used when the head and
+    // the staging content did not change, else the read runs again under the lock.
     #[cfg(target_os = "macos")]
-    let prepared = {
-        let work = h.repo.working(&line);
-        let (index, stage) = h.repo.index_source(&line)?;
+    let read = |line: &Line| -> Result<Option<(crate::repo::Temp, BTreeSet<String>, Vec<String>)>> {
+        let quiet = h.repo.quiet_paths(line)?;
+        let work = h.repo.working(line);
+        let (index, stage) = h.repo.index_source(line)?;
         let mut roots = vec![work.as_path()];
         if let Some(s) = &stage {
             roots.push(s.as_path());
         }
         crate::storage::stable_read(&roots, || {
-            let st = h.repo.status_for_add(&line, &work, &index)?;
+            let st = h.repo.status_for_add(line, &work, &index)?;
             let (paths, ignored) = select_add(&h, &a, &specs, &st, &work, &index, &quiet)?;
             let scan = crate::repo::Temp { path: h.repo.p.scan_dir().join(ids::new_id()) };
             crate::storage::create_subvolume(&scan.path)?;
             crate::storage::copy_selected(&work, &scan.path, &paths)?;
             Ok((scan, paths, ignored))
-        })?
+        })
+    };
+    #[cfg(target_os = "macos")]
+    let early = {
+        let token = add_token(&h.repo, &line)?;
+        read(&line)?.map(|r| (token, r))
+    };
+    let _lock = h.repo.p.lock()?;
+    let line = h.repo.line(&line.id)?;
+    let quiet = h.repo.quiet_paths(&line)?;
+    #[cfg(target_os = "macos")]
+    let prepared = match early {
+        Some((token, r)) if token == add_token(&h.repo, &line)? => Some(r),
+        _ => read(&line)?,
     };
     #[cfg(not(target_os = "macos"))]
     let prepared: Option<(crate::repo::Temp, BTreeSet<String>, Vec<String>)> = None;
@@ -496,6 +512,16 @@ pub fn add(ctx: &Ctx, args: &[String]) -> Result<i32> {
         return Err(exit(1, m));
     }
     Ok(0)
+}
+
+/// What an `add` read depends on besides the working folder: the head and the staging content.
+#[cfg(target_os = "macos")]
+fn add_token(repo: &Repo, line: &Line) -> Result<(String, Option<Vec<(String, crate::storage::Fingerprint)>>)> {
+    let stage = match repo.current_stage(line)? {
+        Some(s) => Some(crate::storage::scan_with_data(&s, true)?.into_iter().map(|(k, v)| (k, v.fingerprint)).collect()),
+        None => None,
+    };
+    Ok((line.head.clone(), stage))
 }
 
 pub fn rm(ctx: &Ctx, args: &[String]) -> Result<i32> {
@@ -1251,6 +1277,9 @@ pub fn restore_impl(
         matched |= !d.is_empty();
     }
     if worktree {
+        #[cfg(target_os = "macos")]
+        let scan = repo.scan_matching(&line, specs)?;
+        #[cfg(not(target_os = "macos"))]
         let scan = repo.scan(&line)?;
         let wdir = repo.working(&line);
         let d = restore_paths(repo, &line, &src_root, &scan.path, &wdir, specs, Some(&index))?;
