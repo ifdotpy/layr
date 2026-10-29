@@ -73,6 +73,10 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let msg = a.get("--note").unwrap_or("").to_string();
     for l in lines {
         repo.authorize_line(ctx, &l, crate::repo::LineOp::Save)?;
+        #[cfg(target_os = "macos")]
+        if a.has("--caches") {
+            prepare_cache_copies(repo, &l)?;
+        }
         let _lock = repo.p.lock()?;
         let l = repo.line(&l.id)?;
         crate::repo::recover_cache_replacements(&repo.working(&l))?;
@@ -124,9 +128,35 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 }
             }
         }
+        #[cfg(target_os = "macos")]
+        for p in btrfs::take_prepared() {
+            trash(repo, &p)?;
+        }
     }
     empty_trash(repo);
     Ok(0)
+}
+
+/// On APFS a snapshot copies every file, and a save with caches took minutes under the store
+/// lock for build output. This copies the line's caches before the lock: one copy for the
+/// state's cache (none when the head already has it) and one for the cache overlay. Under the
+/// lock a snapshot of an unchanged cache takes a copy with one rename; a changed cache is copied
+/// again, and unused copies go to the trash.
+#[cfg(target_os = "macos")]
+fn prepare_cache_copies(repo: &Repo, l: &Line) -> Result<()> {
+    let w = repo.working(l);
+    for p in repo.line_cache_paths(l)?.0 {
+        let cp = fsutil::safe_join(&w, &p)?;
+        if !btrfs::is_subvolume(&cp) {
+            continue;
+        }
+        let name = format!("{}@{}", l.head, p.replace('/', "%2F"));
+        let copies = if repo.p.cache_path(&l.head, &name).exists() { 1 } else { 2 };
+        for _ in 0..copies {
+            btrfs::prepare_snapshot(&cp, &repo.p.work_dir(), true)?;
+        }
+    }
+    Ok(())
 }
 
 /// Snapshot the caches at `paths` of a working folder (`w`) as the caches of `state` and record
@@ -1061,7 +1091,12 @@ pub fn trash(repo: &Repo, path: &Path) -> Result<()> {
     let dir = trash_dir(repo);
     std::fs::create_dir_all(&dir)?;
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    if std::fs::rename(path, dir.join(format!("{name}.{}", ids::new_id()))).is_err() {
+    let to = dir.join(format!("{name}.{}", ids::new_id()));
+    #[cfg(target_os = "macos")]
+    let moved = btrfs::move_tree(path, &to).is_ok();
+    #[cfg(not(target_os = "macos"))]
+    let moved = std::fs::rename(path, &to).is_ok();
+    if !moved {
         btrfs::delete_tree(path)?;
     }
     Ok(())
