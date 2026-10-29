@@ -890,11 +890,17 @@ pub fn commit(ctx: &Ctx, args: &[String]) -> Result<i32> {
     // rule (commit_layers checks it), so a protected line takes commits of its overlays only.
     let op = if stacked { crate::repo::LineOp::Save } else { crate::repo::LineOp::Direct };
     h.repo.authorize_line(ctx, &line, op)?;
+    // -a stages the changed tracked files like `add -u`, which reads the working folder before
+    // the store lock (a status of a large line took tens of seconds under it).
+    #[cfg(target_os = "macos")]
+    if a.has("-a") && !stacked {
+        add(ctx, &["-u".to_string()])?;
+    }
     let _lock = h.repo.p.lock()?;
     let line = h.repo.line(&line.id)?;
     crate::gitbridge::check_git_head(&h.repo, &line)?;
     crate::repo::recover_cache_replacements(&h.repo.working(&line))?;
-    if a.has("-a") && !stacked {
+    if a.has("-a") && !stacked && !cfg!(target_os = "macos") {
         let (st, scan, _it, _index) = h.repo.status(&line)?;
         let paths: BTreeSet<String> = st.unstaged.iter().map(|c| c.path.clone()).collect();
         if !paths.is_empty() {
