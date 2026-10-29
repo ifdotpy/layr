@@ -1,7 +1,8 @@
 #!/bin/bash
 # Cache retention without a daemon: save --caches and line delete keep only the newest
 # retention.caches caches (plus the caches of line heads) and leave no trash; gc --dry-run
-# lists the caches it would delete.
+# lists the caches it would delete. save --caches copies the caches before the store lock and
+# under the lock only renames those copies into place.
 [ "$(uname -s)" = Darwin ] || { echo 'This test requires macOS'; exit 1; }
 . "$(dirname "$0")/lib.sh"
 
@@ -32,6 +33,15 @@ build topic 3
 eq "save --caches keeps one cache" "1" "$(caches)"
 eq "save --caches leaves no trash" "" "$(ls -A "$S/meta/trash" 2>/dev/null)"
 eq "the kept cache is the newest build" "out 3" "$(cat "$S/states/$(ls "$S/states" | grep '@target')/out" 2>/dev/null)"
+
+# 1b. The copies are made before the lock: under it the save takes them and leaves none.
+printf '4\n' > target/out
+has "save --caches takes the copies made before the lock" "APFS take prepared copy" "$(LAYR_TRACE=1 l save -q --caches 2>&1)"
+printf '5\n' > target/out
+no "save --caches copies no cache under the lock" grep -q 'APFS clone .*/states/' <<< "$(LAYR_TRACE=1 l save -q --caches 2>&1)"
+eq "the taken copy is the current build" "1" "$(grep -lx 5 "$S"/states/*@target/out 2>/dev/null | wc -l | tr -d ' ')"
+eq "save --caches leaves no copies" "" "$(ls -A "$S/meta/work" 2>/dev/null)"
+eq "a sealed cache moves to the trash and is deleted" "" "$(ls -A "$S/meta/trash" 2>/dev/null)"
 
 # 2. gc --dry-run lists the caches that a lower limit lets go; gc deletes them.
 l config retention.caches 10
