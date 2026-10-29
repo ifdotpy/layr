@@ -1051,13 +1051,13 @@ pub fn delete_state(p: &Project, id: &str) -> Result<bool> {
     if bases(p)?.values().any(|b| b == id) {
         // Keep the layer; a view is not needed.
         if p.delta_path(id).is_dir() {
-            apfs::delete_tree(&p.state_path(id))?;
+            p.trash(&p.state_path(id))?;
             let _ = fs::remove_file(view_stamp(p, id));
         }
         return Ok(false);
     }
-    apfs::delete_tree(&p.state_path(id))?;
-    apfs::delete_tree(&p.delta_path(id))?;
+    p.trash(&p.state_path(id))?;
+    p.trash(&p.delta_path(id))?;
     let _ = fs::remove_file(view_stamp(p, id));
     Ok(true)
 }
