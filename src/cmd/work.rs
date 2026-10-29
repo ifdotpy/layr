@@ -287,6 +287,8 @@ pub fn begin_change(ctx: &Ctx, repo: &Repo, line: &Line) -> Result<(crate::store
 /// `begin_change` for another kind of change (a merge).
 pub fn begin(ctx: &Ctx, repo: &Repo, line: &Line, op: crate::repo::LineOp) -> Result<(crate::store::Lock, Option<String>)> {
     repo.authorize_line(ctx, line, op)?;
+    // The copy of changed files goes before the lock; under it the save takes it by a rename.
+    repo.prepare_save(line)?;
     let lock = repo.p.lock()?;
     let line = repo.line(&line.id)?;
     let w = repo.working_state(ctx, &line, "before a layr command")?;

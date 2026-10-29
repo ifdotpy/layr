@@ -70,6 +70,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/case" && python3 tests/apfs-case.py --binary "$LAYR" --root "$RUNNER_TEMP/case"
           bash tests/apfs-local.sh
           bash tests/apfs-cache-retention.sh
+          bash tests/apfs-lock-hold.sh
           bash tests/run.sh t50-upstream-fixes t51-git-init-space t52-git-init-metadata t53-store-version t55-machine-identity t63-git-import-tree
           LAYR_TEST_DIRECT_MAIN=1 bash tests/run.sh t01-basic t02-merge t03-git t05-transfer t06-sync t08-gitcompat t62-merge-git
           # The default macOS volume ignores case: run the core commands on such a store too.

@@ -120,6 +120,7 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
                     return Err(exit(1, format!("error: the line '{name}' is not fully merged.\nIf you are sure you want to delete it, run 'layr line delete -D {name}'.")));
                 }
             }
+            repo.prepare_save(&l)?;
             let _lock = repo.p.lock()?;
             // Automatic states leave overlay files out: uncommitted changes of them would be lost.
             if !a.has("-f") && repo.is_stacked(&l)? && repo.working(&l).exists() {
