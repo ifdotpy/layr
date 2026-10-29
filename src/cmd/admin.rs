@@ -49,6 +49,7 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
         .flag("--running")
         .flag("--force")
         .flag("--caches")
+        .value("--cache")
         .removed("--layers", "--caches")
         .flag("--all-lines")
         .flag("-q|--quiet");
@@ -80,7 +81,19 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let _lock = repo.p.lock()?;
         let l = repo.line(&l.id)?;
         crate::repo::recover_cache_replacements(&repo.working(&l))?;
-        let (caches, versioned) = if a.has("--caches") { repo.line_cache_paths(&l)? } else { Default::default() };
+        let (mut caches, mut versioned) = if a.has("--caches") { repo.line_cache_paths(&l)? } else { Default::default() };
+        // `--cache <path>` saves one cache only. A big cache (build output) costs a minute to save.
+        if let Some(only) = a.get("--cache") {
+            if !a.has("--caches") {
+                return Err(exit(2, "--cache selects a cache path for --caches."));
+            }
+            let only = only.trim_matches('/');
+            caches.retain(|p| p == only);
+            versioned.retain(|p| p == only);
+            if caches.is_empty() && versioned.is_empty() {
+                return Err(exit(1, format!("error: '{only}' is no cache path of the line (see layr overlay list)")));
+            }
+        }
         let st = if a.has("--caches") {
             // A cache folder that a tool made again as a plain folder becomes a cache first, so
             // its files stay out of the state. A folder with versioned files is no cache; one

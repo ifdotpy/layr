@@ -109,6 +109,7 @@ Named saves also accept these options:
 Use `--note <text>` to add an optional note to the auto state.
 If nothing changed since the newest auto state made over the head (or since the head when there is none), no state is made. The output names the existing state: `<line> <state id>`.
 Use `--running`, `--force`, `--caches`, or `-q` with an auto save.
+`--caches --cache <path>` saves only that cache path. A big cache such as build output takes a minute to save; a small one takes a second. It fails when the path is no cache path of the line.
 Use `--all-lines` to save auto states for all lines. `--all` applies only to named saves.
 `--note` cannot be combined with `-m`, `-F`, or `--amend`.
 
