@@ -1277,6 +1277,9 @@ pub fn restore_impl(
         matched |= !d.is_empty();
     }
     if worktree {
+        #[cfg(target_os = "macos")]
+        let scan = repo.scan_matching(&line, specs)?;
+        #[cfg(not(target_os = "macos"))]
         let scan = repo.scan(&line)?;
         let wdir = repo.working(&line);
         let d = restore_paths(repo, &line, &src_root, &scan.path, &wdir, specs, Some(&index))?;
