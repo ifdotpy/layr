@@ -109,6 +109,9 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
                             outln!(ctx, "{p}: overlay {name} {}", ids::short(&id));
                         }
                     }
+                    // Retention when caches are made, not only in gc: no daemon has to run.
+                    // The trash is emptied below, after the store lock.
+                    trash_excess_caches(repo)?;
                 }
                 if !a.has("-q") {
                     outln!(ctx, "{} {}", l.name, ids::display(&s.id));
@@ -122,6 +125,7 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
             }
         }
     }
+    empty_trash(repo);
     Ok(0)
 }
 
@@ -935,7 +939,7 @@ pub fn retention_plan(repo: &Repo) -> Result<(BTreeSet<String>, Vec<String>)> {
 }
 
 pub fn run_gc(ctx: &Ctx, repo: &Repo, dry: bool) -> Result<Vec<String>> {
-    let _lock = repo.p.lock()?;
+    let lock = repo.p.lock()?;
     let (_keep, delete) = retention_plan(repo)?;
     if dry {
         return Ok(delete);
@@ -957,7 +961,7 @@ pub fn run_gc(ctx: &Ctx, repo: &Repo, dry: bool) -> Result<Vec<String>> {
             deleted.push(id.clone());
         }
     }
-    let caches = prune_caches(repo)?;
+    let caches = trash_excess_caches(repo)?;
     // Overlays with a history limit and folder overlays with an LRU limit (docs/cache-overlays.md).
     for name in repo.overlay_names()? {
         repo.after_overlay_move(ctx, &name);
@@ -1011,13 +1015,15 @@ pub fn run_gc(ctx: &Ctx, repo: &Repo, dry: bool) -> Result<Vec<String>> {
             }
         }
     }
+    drop(lock);
+    empty_trash(repo);
     Ok(deleted)
 }
 
 /// Cache snapshots (build output) are large and only the newest ones warm new lines: they stay
 /// for the heads of lines and for the newest `retention.caches` (5) states with caches. The
-/// states themselves stay; only their cache snapshots go.
-fn prune_caches(repo: &Repo) -> Result<Vec<String>> {
+/// states themselves stay; only their cache snapshots go. Returns `(state, snapshot name)`.
+pub fn excess_caches(repo: &Repo) -> Result<Vec<(String, String)>> {
     let keep_n = repo.p.config_u64("retention.caches", 5) as usize;
     let mut heads: BTreeSet<String> = repo.p.db.lines()?.into_iter().map(|l| l.head).collect();
     heads.extend(repo.p.db.refs("", ids::now_ms())?.into_iter().map(|r| r.target));
@@ -1031,18 +1037,52 @@ fn prune_caches(repo: &Repo) -> Result<Vec<String>> {
         }
     }
     with_caches.sort_by_key(|x| std::cmp::Reverse(x.0));
-    let mut deleted = Vec::new();
+    let mut out = Vec::new();
     for (_, id, snaps) in with_caches.into_iter().skip(keep_n) {
-        if heads.contains(&id) {
-            continue;
-        }
-        for n in snaps {
-            if btrfs::delete_tree(&repo.p.cache_path(&id, &n)).is_ok() {
-                deleted.push(n);
-            }
+        if !heads.contains(&id) {
+            out.extend(snaps.into_iter().map(|n| (id.clone(), n)));
         }
     }
-    Ok(deleted)
+    Ok(out)
+}
+
+/// Trees that left the store and that no record or command reads any more. Deleting build
+/// output takes seconds to minutes, so the command that moved them deletes them after it
+/// releases the store lock.
+fn trash_dir(repo: &Repo) -> std::path::PathBuf {
+    repo.p.meta_dir().join("trash")
+}
+
+/// Move `path` into the trash: one rename, so it is quick under the store lock. A tree that
+/// cannot move is deleted in place.
+pub fn trash(repo: &Repo, path: &Path) -> Result<()> {
+    let dir = trash_dir(repo);
+    std::fs::create_dir_all(&dir)?;
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    if std::fs::rename(path, dir.join(format!("{name}.{}", ids::new_id()))).is_err() {
+        btrfs::delete_tree(path)?;
+    }
+    Ok(())
+}
+
+/// Move the cache snapshots that retention lets go into the trash. Returns their names.
+pub fn trash_excess_caches(repo: &Repo) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    for (id, name) in excess_caches(repo)? {
+        trash(repo, &repo.p.cache_path(&id, &name))?;
+        out.push(name);
+    }
+    Ok(out)
+}
+
+/// Delete what is in the trash, without the store lock. A tree that another command is deleting
+/// at the same time may fail; the next command deletes the rest.
+pub fn empty_trash(repo: &Repo) {
+    if let Ok(rd) = std::fs::read_dir(trash_dir(repo)) {
+        for e in rd.flatten() {
+            let _ = btrfs::delete_tree(&e.path());
+        }
+    }
 }
 
 pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
@@ -1064,6 +1104,13 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
         outln!(ctx, "{verb} {} state(s)", v.len());
         for id in v.iter().take(50) {
             outln!(ctx, "\t{}", ids::short(id));
+        }
+        if a.has("-n") {
+            let caches = excess_caches(&h.repo)?;
+            outln!(ctx, "would delete {} cache(s)", caches.len());
+            for (_, name) in caches.iter().take(50) {
+                outln!(ctx, "\t{name}");
+            }
         }
     }
     Ok(0)

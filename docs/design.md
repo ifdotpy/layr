@@ -174,8 +174,12 @@ is valid for a state, so it never decides that by itself:
   machine never puts Mac binaries into a Linux line. A cache of an older layr, which names no
   platform, warms only lines on the machine that saved it.
 - A check starts from the warm caches of its state, but its build output is not kept.
-- gc keeps the cache snapshots of line heads and of the newest `retention.caches` (5) states
-  with caches; the states themselves stay.
+- Layr keeps the cache snapshots of line heads and of the newest `retention.caches` (5) states
+  with caches; the states themselves stay. `save --caches`, `line delete` and gc apply this
+  limit, so it holds without the daemon. Under the store lock they only rename the extra
+  snapshots (and a deleted line's folder) into `meta/trash`; the same command deletes the trash
+  after it releases the lock, so other commands do not wait for the deletion. A trash left by
+  an interrupted command goes with the next one. `gc --dry-run` lists the caches it would delete.
 
 A cache helps only a tool that checks its own output and accepts a new path, because every line
 has its own folder. Cargo's `target` does: Cargo compares fingerprints and rebuilds what a change

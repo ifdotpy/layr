@@ -154,14 +154,19 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
             rec.data = serde_json::json!({"name": l.name, "final_state": last});
             repo.commit_record(ctx, rec)?;
             crate::fsutil::git_writable(&repo.working(&l), true);
-            crate::storage::delete_tree(&repo.working(&l))?;
+            // Into the trash, emptied below after the store lock: a folder with build output
+            // takes minutes to delete, and other commands must not wait for it.
+            super::admin::trash(repo, &repo.working(&l))?;
             repo.drop_stage(&l)?;
             repo.set_pending_moves(&l, &Default::default())?;
             repo.prune_bases(&l, None, 0)?;
             // The owner of a deleted line no longer reads the git objects.
             crate::gitbridge::sync_store_access(repo)?;
+            // The line's head no longer keeps its caches.
+            super::admin::trash_excess_caches(repo)?;
             outln!(ctx, "Deleted line {} (was {}).", l.name, ids::short(&l.head));
         }
+        super::admin::empty_trash(repo);
         return Ok(0);
     }
     if a.has("-m") || a.has("-M") {
