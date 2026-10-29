@@ -57,6 +57,40 @@ pub fn is_stale(rec: &TestRec, changes: &[FileChange], ext: &Ext) -> bool {
     })
 }
 
+/// Files that cargo reads besides Rust source: a change there can add a test target or break the build.
+fn is_build_input(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    path.starts_with(".cargo/")
+        || path.contains("/.cargo/")
+        || matches!(name, "Cargo.toml" | "Cargo.lock" | "build.rs" | "rust-toolchain" | "rust-toolchain.toml" | "nextest.toml")
+}
+
+/// True when the change since the baseline cannot add, remove or break a test, so no build is needed
+/// (given that no recorded test is stale): only blank lines and line comments of Rust files changed,
+/// plus files that cargo does not read. `name_status` is the output of `layr diff --name-status`.
+/// Any other change to a Rust file, a new, deleted or renamed Rust file, and any build input
+/// (`Cargo.toml`, `Cargo.lock`, `build.rs`, cargo and nextest config) needs the build and the test list.
+/// A change in a function that no test ran still needs the build: it may not compile.
+pub fn no_build_needed(name_status: &str, changes: &[FileChange]) -> bool {
+    let comment = |l: &String| l.trim().is_empty() || l.trim_start().starts_with("//");
+    name_status.lines().filter(|l| !l.is_empty()).all(|l| {
+        let mut f = l.split('\t');
+        let status = f.next().unwrap_or_default();
+        let paths: Vec<&str> = f.collect();
+        if paths.iter().any(|p| is_build_input(p)) {
+            return false;
+        }
+        if !paths.iter().any(|p| p.ends_with(".rs")) {
+            return true;
+        }
+        status == "M"
+            && changes
+                .iter()
+                .find(|c| paths.contains(&c.old_path.as_str()))
+                .is_some_and(|c| c.hunks.iter().all(|h| h.added.iter().chain(&h.removed).all(comment)))
+    })
+}
+
 fn hunk_hits(cov: &FileCov, h: &Hunk) -> bool {
     if h.old_len > 0 {
         let (lo, hi) = (h.old_start, h.old_start + h.old_len - 1);
@@ -64,7 +98,12 @@ fn hunk_hits(cov: &FileCov, h: &Hunk) -> bool {
         if overlaps(&cov.lines, lo, hi) || overlaps(&cov.funcs, lo, hi) {
             return true;
         }
-        // Module level: some changed line is in no function of the file.
+        // Module level: some changed line is in no function of the file. Blank lines and line
+        // comments there change nothing.
+        let blank_or_comment = |l: &String| l.trim().is_empty() || l.trim_start().starts_with("//");
+        if !(h.removed.is_empty() && h.added.is_empty()) && h.removed.iter().chain(&h.added).all(blank_or_comment) {
+            return false;
+        }
         return (lo..=hi).any(|l| !in_ranges(&cov.funcs, l) && !in_ranges(&cov.idle, l));
     }
     // Pure insertion between line `old_start` and `old_start + 1`.
@@ -126,6 +165,46 @@ fn starts_fn(t: &str) -> bool {
 mod tests {
     use super::*;
     use crate::parse::parse_hunks;
+
+    fn rs_diff(path: &str, removed: &[&str], added: &[&str]) -> Vec<FileChange> {
+        let mut d = format!("diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -5,{} +5,{} @@\n", removed.len(), added.len());
+        d.extend(removed.iter().map(|r| format!("-{r}\n")));
+        d.extend(added.iter().map(|a| format!("+{a}\n")));
+        parse_hunks(&d)
+    }
+
+    #[test]
+    fn no_build_for_files_that_cargo_does_not_read() {
+        assert!(no_build_needed("", &[]));
+        assert!(no_build_needed("M\tdocs/a.md\nA\tweb/x.ts\nD\tweb/y.json\n", &[]));
+    }
+
+    #[test]
+    fn build_for_build_inputs() {
+        for p in ["Cargo.toml", "crates/a/Cargo.toml", "Cargo.lock", "a/build.rs", ".cargo/config.toml", "rust-toolchain.toml", ".config/nextest.toml"] {
+            assert!(!no_build_needed(&format!("M\t{p}\n"), &[]), "{p}");
+        }
+    }
+
+    #[test]
+    fn build_for_added_deleted_or_renamed_rust_files() {
+        for s in ["A\tsrc/new.rs", "D\tsrc/old.rs", "R100\tsrc/a.rs\tsrc/b.rs"] {
+            assert!(!no_build_needed(s, &[]), "{s}");
+        }
+    }
+
+    #[test]
+    fn no_build_for_comment_and_blank_changes_only() {
+        let c = rs_diff("src/a.rs", &["// old"], &["", "    // new", "/// doc"]);
+        assert!(no_build_needed("M\tsrc/a.rs", &c));
+        // Code removed, code added, or a block comment: build.
+        assert!(!no_build_needed("M\tsrc/a.rs", &rs_diff("src/a.rs", &["let x = 1;"], &["// gone"])));
+        assert!(!no_build_needed("M\tsrc/a.rs", &rs_diff("src/a.rs", &[], &["#[test]", "fn t() {}"])));
+        assert!(!no_build_needed("M\tsrc/a.rs", &rs_diff("src/a.rs", &[], &["/* c */"])));
+        // A modified Rust file with no hunk is not understood: build.
+        assert!(!no_build_needed("M\tsrc/a.rs", &[]));
+    }
+
     use std::collections::BTreeMap;
 
     fn is_stale(r: &TestRec, c: &[FileChange]) -> bool {
@@ -181,6 +260,25 @@ mod tests {
         assert!(is_stale(&rec("pass"), &diff("-2,1", &["const K: i32 = 2;"])));
         assert!(is_stale(&rec("pass"), &diff("-2,0", &["const J: i32 = 2;"])));
         assert!(is_stale(&rec("pass"), &diff("-1,0", &["fn h() {}", "const J: i32 = 2;"])));
+    }
+
+    #[test]
+    fn module_level_comment_changes_are_not_stale() {
+        // Line 1 is `use std::fmt;` in the layout above; here the diff says it was a comment.
+        let mut c = diff("-1", &["// other"]);
+        c[0].hunks[0].removed = vec!["// old".into()];
+        assert!(!is_stale(&rec("pass"), &c));
+        // Removing a comment line, and replacing a comment with code, are different.
+        let mut gone = diff("-1", &[]);
+        gone[0].hunks[0].removed = vec!["".into()];
+        gone[0].hunks[0].new_len = 0;
+        assert!(!is_stale(&rec("pass"), &gone));
+        let mut code = diff("-1", &["const J: i32 = 2;"]);
+        code[0].hunks[0].removed = vec!["// old".into()];
+        assert!(is_stale(&rec("pass"), &code));
+        let mut code = diff("-1", &["// c"]);
+        code[0].hunks[0].removed = vec!["use std::fmt;".into()];
+        assert!(is_stale(&rec("pass"), &code));
     }
 
     #[test]
