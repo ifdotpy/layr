@@ -266,13 +266,15 @@ Run in the root folder of a layr line that is also the cargo project root.
   3. `layr diff <baseline> <current> -U0` gives the hunks.
   4. `cargo nextest list` (instrumented build in `target/retest`) gives all tests. Stale tests are
      selected by the Rules. Tests that have no record, and tests that failed, always run.
-  5. `cargo nextest run --no-fail-fast -E '<filter of the stale tests>'` runs them. A run of all
-     tests has no filter.
-  6. For each test that ran: `llvm-profdata merge -sparse`, then `llvm-cov export` (lcov for
+  5. `cargo nextest run --no-fail-fast --message-format libtest-json -E '<filter of the stale tests>'`
+     runs them. A run of all tests has no filter. The tool reads the event stream of nextest.
+  6. When an event says that a test finished, the tool exports the coverage of that test while the
+     other tests still run: `llvm-profdata merge -sparse`, then `llvm-cov export` (lcov for
      executed lines) on the binary of that test, and `llvm-profdata show --covered --all-functions`
      for the executed function names. Function ranges come from a table that is built once per
-     test binary. Four exports run at a time. Files outside the project, in `target/`, and in `.cargo`, `.rustup` and `/rustc/` are dropped.
-  7. The record is written and the raw profiles are deleted.
+     test binary. Four exports run at a time (`EXPORT_WORKERS`). Files outside the project, in `target/`, and in `.cargo`, `.rustup` and `/rustc/` are dropped.
+     The raw profiles of a test are deleted right after its export (see "Raw profile disk").
+  7. The record is written.
   8. The exit code is the exit code of nextest. The last line prints how many tests ran, passed,
      failed and were skipped.
   Before step 4 the fast path of "No build when nothing can change" can end the run.
@@ -377,6 +379,39 @@ auto state is in no other line. So the flow is: work, `layr save -m`, `layr-rete
 
 The installed `layr` 0.4.0 (2026-10-26) has no cache overlays. Build the one in this repository.
 
+### Raw profile disk
+
+Raw profiles are large (1.5 MB per test in the layr workspace, about 18 MB in Studio). The export
+runs while the tests run, and deletes the profile folder of a test after its export. So the raw
+profiles on disk are the tests in flight plus the finished tests that wait for an export worker.
+The wait list is short: the channel to the four workers holds four jobs; when it is full the
+reader stops, the pipe of nextest fills and nextest waits for the reader. The pipe still holds
+some events, so the bound is "tests in flight plus a few", not exactly the number of workers.
+Before this change the export ran after all tests, so the raw profiles of all tests were on disk
+at the same time (18 GB at 60 % of the 1615 tests of Studio).
+
+Why the event stream and not the runner `wrap`: the wrapper would need to share the function
+tables of a test binary and to limit the number of exports between processes. The reader already
+had the events, so it is one channel and four threads.
+
+### Killed child processes
+
+A test can start a bin target of the workspace and stop it with SIGKILL (the Studio supervisor).
+LLVM writes a profile only when the process exits, so the killed child writes none, the code of
+the bin is in no record, and a change of it selected no test (a `panic!` probe in it: 0 selected,
+plain nextest 20 failures). Continuous mode (`%c`) did not work on this Mac (alignment and link
+errors). The rule instead:
+
+- After the build, the tool reads the source file of every bin target (`cargo metadata`, targets
+  of kind `bin`, field `src_path`).
+- A changed file that is the source of a bin target, that exists in the baseline (not a new
+  file), and that is in no `files` of any test record of the baseline, selects every test. The
+  run prints `bin target source changed and no test record has it: <files>; running every test`
+  and the note `full run, changed bin target`.
+- Limit: only the file of the target (`src/main.rs`, `src/bin/x.rs`) counts. A module file of the
+  bin that only a killed child runs is not seen. A change of a comment-only kind ends in the
+  fast path of "No build when nothing can change" and selects nothing, as for other files.
+
 ### Processes that a test starts
 
 - The wrapper gives each test a folder `<profile dir>/<binary id>/<test>/` and sets
@@ -452,6 +487,7 @@ the old chain is not used again. The end to end test shows it with a test that r
   (cargo splits the runner on spaces).
 - Cross compilation: the runner variable uses the host triple.
 - No schedule for `--full`.
+- A child that a test kills has no coverage, see "Killed child processes".
 - Child processes only have coverage when the child is a bin target built in `target/retest`. A test
   that starts a binary from another folder (Studio's gate sets `STUDIO_SUPERVISOR_BINARY` to the
   plain `target/debug` build) runs code that has no instrumentation, so a change of that binary does
