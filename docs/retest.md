@@ -39,6 +39,33 @@ The user selects the schedule of the full run.
 5. The test tool runs only the stale tests, with a filter that it already supports.
 6. The tool saves the pass and the new coverage of the tests that ran (see Records).
 
+## No build when nothing can change
+
+A run that selects no test must not build. After the baseline and the hunks are known, the tool
+reads the test list from the baseline record (it lists every test of its state) and skips `cargo`
+and `nextest list` when all of these hold:
+
+- every recorded test is carried (none is stale, none failed, none is missing a range end);
+- the baseline record has the same nextest arguments as this run (`args` in the record);
+- `layr diff --name-status` shows only files that cargo does not read, or Rust files with a change
+  of blank lines and `//` comments only. A new, deleted or renamed `.rs` file, any other change of a
+  `.rs` file, `Cargo.toml`, `Cargo.lock`, `build.rs`, `.cargo/` files, `rust-toolchain*` and
+  `nextest.toml` need the build and the test list.
+
+Why these limits: a new test can only come from a new or changed Rust file (a `#[test]`, a macro
+call, a new target in `Cargo.toml` or `build.rs`), so those changes list the tests again. A code
+change in a function that no test ran also builds, because the build is the only check that the
+code compiles. A skipped build does not compile the code: it only runs when the code has no
+change of meaning. A `//` line inside a multi-line string literal is read as a comment (the
+same limit as the insertion rule in Selection).
+
+The run then writes the moved record, prints `N tests, 0 selected, N skipped (incremental, no
+build)` and exits. A run with no change at all does not even write a record.
+
+Building only the crates that have selected tests is not done. A change in crate A can break a
+dependent crate B that has no selected test, and only a full build finds it. The build with
+selected tests stays one build of the whole selection of the nextest arguments.
+
 ## Adapters
 
 The tool reuses existing test tools. Its own code is the adapters and the record format.
@@ -170,6 +197,53 @@ Method now:
 - The record content is equal: on the layr workspace the records of the old and the new method are
   equal for all 262 tests.
 
+## Measurements 2026-10-29: Studio crate, where the time goes
+
+Crate `studio-runtime-process` (146 tests, nextest profile `ci`, warm `target` and `target/retest`)
+in Studio line `retest-gate` (`target` is 19.6 GiB, the record folder 11 MiB), this Mac, builds with
+`CARGO_BUILD_JOBS=4`. Load: 18 to 105 (1-minute average, other agents were running; each row
+says its load). Times are seconds. "Before" is the binary of layr d730ca3 with step timings added.
+
+| Step | Before, no change (3 runs, load 19 to 49) | Before, one line (pre-saved, load 42) | After, one line (pre-saved, load 23) |
+| --- | --- | --- | --- |
+| save, status, baseline, diff | 4.7 to 11.5 | 7.6 | 6.8 |
+| build and list | 1.3 to 2.1 | 5.8 | 12.1 |
+| run selected tests | 0.0 | 1.3 | 1.8 |
+| export coverage | 0.2 | 3.8 | 6.3 |
+| record | 0.5 to 1.0 | 0.8 | 2.0 |
+| `layr save --caches` | 52 to 73 | 161 | 0 (not called without `--save`) |
+| total | 66 to 83 | 180 | 29.1 |
+| plain `cargo nextest run`, same change | 19 to 24 | 29 | 26 |
+
+What the numbers say:
+
+- The first version did not lose its time in two builds. A warm no-change run spent 1.3 to 2.1 s in
+  `cargo`, and 52 to 73 s in `layr save --caches`, which saves every cache of the line (the 19.6 GiB
+  `target` too). That was 80 % of the run.
+- `layr save --caches --cache .layr-retest` saves the record folder only, but it still makes a state of
+  the line: 75 s in this line (load 28). So the save is off by default and `--save` runs it
+  once at the end of a series. It holds the lock of the store while it runs.
+- `layr save` of a changed working copy takes 38 to 57 s in this line (3.7 s in the layr line, whose
+  `target` is 3.4 GB), and 100 s or more when another session holds the store lock. This is layr, not
+  layr-retest, and it is the same cost that a `layr save -m` of the agent pays. The table
+  pre-saves the change, so that the save step is only the status check. `layr status --json` took
+  4 s (5.6 MB, it lists 49 000 ignored files); the tool now reads `layr status --porcelain` (0.25 s).
+- One changed line: 29 s against 26 s for the plain run in the same minute. The selected tests take
+  1.8 s instead of 15 s, but the instrumented build of the changed crate costs 12 s (the plain build
+  about 5 s), the coverage export 6 s and the record 2 s. The floor of this design is: instrumented
+  incremental build + export of every selected test (0.4 s of CPU each, 4 at a time). It wins when
+  many tests are skipped or the tests are slow; it does not win on a crate whose tests take 15 s.
+- The gate's plain nextest step is already replaced by the retest step when `STUDIO_RETEST=1`, so
+  there is no second test build in the gate for this step.
+
+Layr workspace (262 tests, `--workspace --exclude layr-retest`, load 38 to 56): full run with the
+build 272 s (build and list 126 s, export 102 s); no change after it 30 s (a `Cargo.lock` change
+sent it through the build); the probe check below.
+
+Selection check with `panic!("probe")` at the top of `layr_model::diff::is_binary`: the incremental
+run selected 2 tests and both failed; `--full` failed the same 2 (`interdiff::tests::patch_format_keeps_modes_binary_renames_and_missing_newlines`,
+`interdiff::tests::same_patch_has_no_interdiff_and_amendment_has_file_counts`) and passed 260.
+
 ## First version
 
 Crate `crates/layr-retest`, binary `layr-retest`. It runs `layr`, `cargo nextest`, `llvm-profdata`
@@ -180,7 +254,11 @@ and `llvm-cov` as programs and uses no internal crate of layr. The two LLVM tool
 
 Run in the root folder of a layr line that is also the cargo project root.
 
-- `layr-retest run [--full] [-- <nextest args>]`
+- `layr-retest run [--full] [--save] [-- <nextest args>]`
+  `--save` ends the run with `layr save --caches --cache .layr-retest` (after step 7), which puts the
+  records in the cache overlay so that a new line takes them. It is off by default: the call makes a
+  state of the line and holds the lock of the store (75 s in the Studio line, see Measurements 2026-10-29).
+  Run it once at the end of a series of runs, or when a new line is about to start.
   1. Saves the working copy (`layr save`, an auto state if it changed). The id of that state, or of
      the head if nothing changed, is the current state.
   2. Baseline: the newest state in `layr log --auto` that has a record file. Without one, or with
@@ -197,6 +275,8 @@ Run in the root folder of a layr line that is also the cargo project root.
   7. The record is written and the raw profiles are deleted.
   8. The exit code is the exit code of nextest. The last line prints how many tests ran, passed,
      failed and were skipped.
+  Before step 4 the fast path of "No build when nothing can change" can end the run.
+  Every step prints `layr-retest: step <name>: <seconds>s`.
   The nextest arguments after `--` go to both `list` and `run`. Use them to select packages
   (`-p`, `--workspace`). Do not put `-E` there.
 - `layr-retest wrap -- <test binary> <args>` is the cargo target runner that `run` installs
@@ -213,6 +293,7 @@ cache overlay).
 ```json
 {
   "baseline": "<state id of the record that this run started from, or null for a full run>",
+  "args": ["--workspace"],
   "tests": {
     "<binary id> <test name>": {
       "status": "pass",
@@ -284,10 +365,14 @@ So the baseline search reads the whole line log, not only the ancestors of the c
    `layr overlay set <overlay> --key-files none`. The overlay name is in `layr overlay list`
    (`cache.<hash>`, folder `.layr-retest`).
 
-After it writes the record, `run` calls `layr save --caches`. That saves the folder as the newest
+With `--save`, `run` calls `layr save --caches --cache .layr-retest` after it writes the record. The `--cache`
+option saves only that cache path: `layr save --caches` alone also saves every other cache of the line,
+and the build folder of a big project (19.6 GiB for Studio) takes 50 to 160 s. A layr without
+`--cache` makes this call fail; the run then prints a warning and keeps the record files. The call
+saves the folder as the newest
 state of the line's cache overlay (`history=last`, `union-theirs`, readers: trusted machines).
 The record also goes under the id of the head when the working copy equals the head, because an
-auto state is in no other line. So the flow is: work, `layr save -m`, `layr-retest run`,
+auto state is in no other line. So the flow is: work, `layr save -m`, `layr-retest run --save`,
 `layr line new X <line>`, and `layr-retest run` in X selects only what changed.
 
 The installed `layr` 0.4.0 (2026-10-26) has no cache overlays. Build the one in this repository.
@@ -367,6 +452,10 @@ the old chain is not used again. The end to end test shows it with a test that r
   (cargo splits the runner on spaces).
 - Cross compilation: the runner variable uses the host triple.
 - No schedule for `--full`.
+- Child processes only have coverage when the child is a bin target built in `target/retest`. A test
+  that starts a binary from another folder (Studio's gate sets `STUDIO_SUPERVISOR_BINARY` to the
+  plain `target/debug` build) runs code that has no instrumentation, so a change of that binary does
+  not select the test.
 
 ## Not decided
 

@@ -21,6 +21,10 @@ use tools::Tool;
 
 /// Folder of the raw profiles of one run. The wrapper reads it from this variable.
 const PROFILE_DIR_VAR: &str = "LAYR_RETEST_PROFILE_DIR";
+/// Set by `--save`: the run ends with `layr save --caches --cache` so that new lines take the records.
+/// Off by default: the call makes a state of the line, which takes 40 to 75 s in a line with a big
+/// build folder, and it holds the lock of the store.
+static SAVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// Number of parallel coverage exports.
 const EXPORT_WORKERS: usize = 4;
 /// Files that no record keeps: the standard library and build output. Cargo's own folders stay:
@@ -33,7 +37,7 @@ fn main() {
         Some("wrap") => wrap(&args[1..]),
         Some("run") => run(&args[1..]),
         _ => {
-            eprintln!("usage: layr-retest run [--full] [-- <nextest args>]\n       layr-retest wrap -- <test binary> <args>");
+            eprintln!("usage: layr-retest run [--full] [--save] [-- <nextest args>]\n       layr-retest wrap -- <test binary> <args>");
             std::process::exit(2);
         }
     };
@@ -93,9 +97,8 @@ fn state_id(rev: &str) -> Result<String> {
 /// head when the working copy equals the head (a new line can have the head, not an auto state).
 fn current_state() -> Result<(String, Option<String>)> {
     let out = layr(&["save"])?;
-    let status: Value = serde_json::from_str(&layr(&["status", "--json"])?)?;
-    let clean =
-        ["conflicts", "staged", "unstaged", "untracked"].iter().all(|k| status[k].as_array().is_some_and(|a| a.is_empty()));
+    // `status --json` lists every ignored file (5 MB and 4 s in a line with a big build folder).
+    let clean = layr(&["status", "--porcelain"])?.trim().is_empty();
     let head = if clean { Some(state_id("head")?) } else { None };
     let id32 = out.split_whitespace().last().filter(|w| w.len() == 32 && w.chars().all(|c| c.is_ascii_hexdigit()));
     // "No changes" means the working copy is the head, or the newest auto state when it differs from the head.
@@ -105,6 +108,18 @@ fn current_state() -> Result<(String, Option<String>)> {
         (None, None) => state_id("head@{0}")?,
     };
     Ok((current, head))
+}
+
+/// Make the record folder the newest state of its cache overlay, so that a new line takes the records.
+/// Only that folder: saving every cache of the line (build output) takes a minute. The records are files
+/// already, so a failure here is a warning.
+fn save_records() {
+    if !SAVE.load(Ordering::Relaxed) {
+        return;
+    }
+    if let Err(e) = layr(&["save", "--caches", "--cache", record::RECORD_DIR]) {
+        eprintln!("layr-retest: warning: records are not in the cache overlay (needs a layr with `save --caches --cache`): {e:#}");
+    }
 }
 
 /// Newest state in the line's log (autos included) that has a record.
@@ -327,8 +342,18 @@ fn run_tool(tool: Tool, root: &Path, full: bool, extra: &[String]) -> Result<i32
         std::fs::create_dir_all(p.parent().unwrap())?;
         std::fs::write(&p, serde_json::to_vec(&rec)?)?;
     }
-    layr(&["save", "--caches"])?;
+    save_records();
     Ok(0)
+}
+
+/// Prints the time since the last mark, so a run shows where it spends its time.
+struct Lap(std::time::Instant);
+
+impl Lap {
+    fn mark(&mut self, step: &str) {
+        eprintln!("layr-retest: step {step}: {:.1}s", self.0.elapsed().as_secs_f32());
+        self.0 = std::time::Instant::now();
+    }
 }
 
 fn run(args: &[String]) -> Result<i32> {
@@ -338,7 +363,8 @@ fn run(args: &[String]) -> Result<i32> {
     };
     let full = mine.iter().any(|a| a == "--full");
     let mut tool = Tool::Nextest;
-    let mut it = mine.iter().filter(|a| *a != "--full");
+    SAVE.store(mine.iter().any(|a| a == "--save"), Ordering::Relaxed);
+    let mut it = mine.iter().filter(|a| *a != "--full" && *a != "--save");
     while let Some(a) = it.next() {
         match a.as_str() {
             "--tool" => tool = Tool::parse(it.next().context("--tool needs a name")?)?,
@@ -350,6 +376,7 @@ fn run(args: &[String]) -> Result<i32> {
         return run_tool(tool, &root, full, extra);
     }
     let t0 = std::time::Instant::now();
+    let mut lap = Lap(t0);
     let started = std::time::SystemTime::now();
 
     let (current, head) = current_state()?;
@@ -368,6 +395,32 @@ fn run(args: &[String]) -> Result<i32> {
         _ => deps::Ext::new(&changes, "", ""),
     };
 
+    lap.mark("save, baseline, diff");
+
+    // Nothing is stale and the change cannot add a test or break the build: no build, no test list.
+    // The record lists every test of the baseline, so that list stands for the test list.
+    if let (Some(b), Some(old), false) = (baseline.as_deref(), base_rec.as_ref(), full) {
+        let name_status = if b != current { layr(&["diff", "--name-status", b, &current])? } else { String::new() };
+        let carried: Option<BTreeMap<String, TestRec>> = old
+            .tests
+            .iter()
+            .map(|(k, t)| select::carry(t, &changes, &ext).map(|c| (k.clone(), c)))
+            .collect();
+        if let Some(tests) = carried.filter(|t| !t.is_empty() && old.args == extra && select::no_build_needed(&name_status, &changes)) {
+            let n = tests.len();
+            eprintln!("layr-retest: {n} tests, 0 selected, {n} skipped (incremental, no build)");
+            if b != current {
+                let rec = Record { baseline: baseline.clone(), args: extra.to_vec(), tests };
+                record::save(&root, &current, &rec)?;
+                if let Some(h) = head.filter(|h| *h != current) {
+                    record::save(&root, &h, &rec)?;
+                }
+                save_records();
+            }
+            eprintln!("layr-retest: ran 0, passed 0, failed 0, skipped {n}; record {current}; {:.1}s", t0.elapsed().as_secs_f32());
+            return Ok(0);
+        }
+    }
     // Build the instrumented tests and list them.
     let target = root.join("target/retest");
     let profdir = target.join("profraw");
@@ -386,6 +439,7 @@ fn run(args: &[String]) -> Result<i32> {
     };
     let list = output(nextest(&["list", "--message-format", "json"]).stderr(Stdio::inherit()))?;
     let suites = parse_list(&list)?;
+    lap.mark("build and list");
 
     // Select.
     let mut all: Vec<(String, String)> = Vec::new();
@@ -442,6 +496,7 @@ fn run(args: &[String]) -> Result<i32> {
         }
     }
 
+    lap.mark("run tests");
     // Export coverage of the tests that ran.
     let tools = (llvm_tool("llvm-profdata")?, llvm_tool("llvm-cov")?);
     let bins = bin_objects(&target)?;
@@ -466,9 +521,10 @@ fn run(args: &[String]) -> Result<i32> {
         }
     });
     let mut done = done.into_inner().unwrap();
+    lap.mark("export coverage");
 
     // Write the record. Tests that did not run keep their old entry.
-    let mut rec = Record { baseline: if full { None } else { baseline.clone() }, tests: BTreeMap::new() };
+    let mut rec = Record { baseline: if full { None } else { baseline.clone() }, args: extra.to_vec(), tests: BTreeMap::new() };
     if baseline.as_deref() == Some(current.as_str()) {
         rec.baseline = base_rec.as_ref().and_then(|r| r.baseline.clone());
     }
@@ -506,7 +562,9 @@ fn run(args: &[String]) -> Result<i32> {
     }
     // The record folder is a cache path of the line; this makes it a state of the cache overlay,
     // which a new line and `layr merge` take (docs/retest.md, "Records in a cache overlay").
-    layr(&["save", "--caches"])?;
+    lap.mark("record");
+    save_records();
+    lap.mark("save caches");
     let _ = std::fs::remove_dir_all(&profdir);
     let failed = results.values().filter(|ok| !**ok).count();
     eprintln!(

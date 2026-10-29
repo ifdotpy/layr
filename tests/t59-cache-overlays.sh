@@ -164,4 +164,17 @@ l save -a -m "no cache" -q
 l line new cold main >/dev/null
 no "a new line does not take it" test -e $P/cold/target/debug/w
 
+# 9. --cache saves one cache path; the other cache is left alone.
+cd $P/main
+printf 'target regenerable\nsmall regenerable\n' > .layrattributes
+echo 'small/' >> .gitignore
+mkdir -p small target/debug
+echo s > small/f
+echo t2 > target/debug/t2
+out=$(l save --caches --cache small)
+has "--cache saves the named cache" "small: overlay cache.small" "$out"
+eq "--cache leaves the other cache" "" "$(echo "$out" | grep 'target: overlay')"
+no "--cache with a path that is no cache fails" l save --caches --cache nothing
+no "--cache needs --caches" l save --cache small
+
 finish

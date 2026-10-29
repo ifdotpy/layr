@@ -77,8 +77,11 @@ fn runs_only_the_stale_test() {
     std::fs::create_dir_all(src.join("tests")).unwrap();
     std::fs::write(src.join("src/bin/kid.rs"), KID).unwrap();
     std::fs::write(src.join("tests/kid.rs"), KID_TEST).unwrap();
-    std::fs::write(src.join(".layrattributes"), ".layr-retest regenerable\n").unwrap();
+    // `target` is a second cache path: the run must save only the records, not the build output.
+    std::fs::write(src.join(".layrattributes"), ".layr-retest regenerable\ntarget regenerable\n").unwrap();
     std::fs::write(src.join(".gitignore"), "/target\n/.layr-retest\n").unwrap();
+    // The lock file is part of the project before the first run, as in a real project.
+    sh(&src, &tmp.join("unused"), "cargo", &["generate-lockfile", "--offline"]);
     let root = tmp.join("store");
 
     sh(&tmp, &root, "layr", &["init", "app", "--from", src.to_str().unwrap()]);
@@ -87,8 +90,8 @@ fn runs_only_the_stale_test() {
     let line = root.join("projects/app/lines/work");
     let lib = line.join("src/lib.rs");
 
-    // 1. No record: every test runs.
-    let err = retest(&line, &root, &["run"]);
+    // 1. No record: every test runs. `--save` puts the records in the cache overlay.
+    let err = retest(&line, &root, &["run", "--save"]);
     assert!(err.contains("5 tests, 5 selected"), "{err}");
 
     assert!(err.contains("removed 1 stray .profraw"), "{err}");
@@ -96,6 +99,10 @@ fn runs_only_the_stale_test() {
     // Processes outside a test (the list phase, build scripts) leave no profile in the project.
     let stray: Vec<_> = walk(&line).into_iter().filter(|p| p.extension().is_some_and(|e| e == "profraw")).collect();
     assert!(stray.is_empty(), "{stray:?}");
+
+    // Only the records went to a cache overlay.
+    let (overlays, _) = sh(&line, &root, "layr", &["overlay", "list"]);
+    assert!(overlays.contains("folder=.layr-retest") && !overlays.contains("folder=target"), "{overlays}");
 
     // The test that uses `hex` has the registry package in its record; the others do not.
     let rec: serde_json::Value = last_record(&line);
@@ -105,7 +112,20 @@ fn runs_only_the_stale_test() {
 
     // 2. No change: nothing runs.
     let err = retest(&line, &root, &["run"]);
-    assert!(err.contains("5 tests, 0 selected"), "{err}");
+    assert!(err.contains("5 tests, 0 selected") && err.contains("no build"), "{err}");
+
+    // 2b. A comment above everything shifts the lines. It cannot add a test: no build, and the
+    // records move. A run with other nextest arguments cannot use them and builds.
+    std::fs::write(&lib, format!("// note\n{LIB}")).unwrap();
+    let err = retest(&line, &root, &["run"]);
+    assert!(err.contains("5 tests, 0 selected") && err.contains("no build"), "{err}");
+    let err = retest(&line, &root, &["run", "--", "--workspace"]);
+    assert!(err.contains("5 tests, 0 selected") && !err.contains("no build"), "{err}");
+    std::fs::write(&lib, LIB).unwrap();
+    let err = retest(&line, &root, &["run", "--", "--workspace"]);
+    assert!(err.contains("no build"), "{err}");
+    let err = retest(&line, &root, &["run"]);
+    assert!(err.contains("5 tests, 0 selected") && !err.contains("no build"), "{err}");
 
     // 3. Change the body of `a`: only `ta` runs.
     std::fs::write(&lib, LIB.replace("    1\n", "    1 + 0\n")).unwrap();
@@ -139,10 +159,10 @@ fn runs_only_the_stale_test() {
     assert!(err.contains("5 tests, 1 selected"), "{err}");
     assert!(err.contains("tiny::kid tk") && err.contains("ran 1, passed 1"), "{err}");
 
-    // 5. A file that coverage cannot see changes: nothing runs.
+    // 5. A file that coverage cannot see changes: nothing runs, and nothing is built.
     std::fs::write(line.join("data.txt"), "bad").unwrap();
     let err = retest(&line, &root, &["run"]);
-    assert!(err.contains("5 tests, 0 selected"), "{err}");
+    assert!(err.contains("5 tests, 0 selected") && err.contains("no build"), "{err}");
 
     // 6. A full run runs all, fails `tc`, and reports the contradiction with the saved pass.
     let o = Command::new(env!("CARGO_BIN_EXE_layr-retest"))
@@ -160,12 +180,23 @@ fn runs_only_the_stale_test() {
 
     // 7. The records are in the cache overlay: a line made from this line takes them.
     std::fs::write(line.join("data.txt"), "ok").unwrap();
-    sh(&line, &root, "layr", &["add", "Cargo.lock"]);
     sh(&line, &root, "layr", &["save", "-a", "-m", "work"]);
-    retest(&line, &root, &["run"]);
+    retest(&line, &root, &["run", "--save"]);
     sh(&main, &root, "layr", &["line", "new", "work2", "work"]);
     let err = retest(&root.join("projects/app/lines/work2"), &root, &["run"]);
     assert!(err.contains("5 tests, 0 selected"), "{err}");
+
+    // 8. A new test in a file that no recorded test selects: it is found and runs, no false pass.
+    let lib2 = root.join("projects/app/lines/work2/src/lib.rs");
+    let s = std::fs::read_to_string(&lib2).unwrap();
+    std::fs::write(&lib2, s.replace("    #[test]\n    fn tb()", "    #[test]\n    fn tn() {\n        assert_eq!(b(), 2);\n    }\n\n    #[test]\n    fn tb()")).unwrap();
+    let err = retest(&root.join("projects/app/lines/work2"), &root, &["run"]);
+    assert!(err.contains("6 tests, 1 selected") && err.contains("tiny tests::tn") && !err.contains("no build"), "{err}");
+
+    // 9. Without --save the run writes the record file and leaves the overlay alone.
+    std::fs::write(&lib2, std::fs::read_to_string(&lib2).unwrap().replace("    2\n", "    2 + 0\n")).unwrap();
+    let err = retest(&root.join("projects/app/lines/work2"), &root, &["run"]);
+    assert!(err.contains("6 tests, 2 selected") && err.contains("ran 2, passed 2"), "{err}");
 
     // Saved states are immutable on macOS; unlock them before the delete.
     let _ = Command::new("chflags").args(["-R", "nouchg"]).arg(&tmp).status();
