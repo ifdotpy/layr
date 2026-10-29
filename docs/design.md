@@ -181,9 +181,12 @@ is valid for a state, so it never decides that by itself:
   after it releases the lock, so other commands do not wait for the deletion. A trash left by
   an interrupted command goes with the next one. `gc --dry-run` lists the caches it would delete.
 - On APFS a cache snapshot copies every file (minutes for build output). `save --caches` makes
-  these copies before the store lock; under the lock a snapshot of an unchanged cache takes its
-  copy with one rename (after a scan), a changed cache is copied again, and unused copies go to
-  the trash. A sealed tree keeps its seal through these renames.
+  these copies before the store lock; under the lock a snapshot takes its copy with one rename,
+  and unused copies go to the trash. A cache is build output, so a consistent copy from a few
+  seconds before the lock warms a line as well. A sealed tree keeps its seal through renames.
+- Under a lock, layr deletes no large tree on APFS: it renames it into the store's `trash`,
+  which the process empties after it releases its last store lock. A wait for or a hold of the
+  lock of 1 s or more goes to `meta/lock-slow.log` of the project.
 
 A cache helps only a tool that checks its own output and accepts a new path, because every line
 has its own folder. Cargo's `target` does: Cargo compares fingerprints and rebuilds what a change

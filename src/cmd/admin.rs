@@ -114,7 +114,6 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
                         }
                     }
                     // Retention when caches are made, not only in gc: no daemon has to run.
-                    // The trash is emptied below, after the store lock.
                     trash_excess_caches(repo)?;
                 }
                 if !a.has("-q") {
@@ -130,18 +129,16 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         #[cfg(target_os = "macos")]
         for p in btrfs::take_prepared() {
-            trash(repo, &p)?;
+            repo.p.trash(&p)?;
         }
     }
-    empty_trash(repo);
     Ok(0)
 }
 
 /// On APFS a snapshot copies every file, and a save with caches took minutes under the store
 /// lock for build output. This copies the line's caches before the lock: one copy for the
 /// state's cache (none when the head already has it) and one for the cache overlay. Under the
-/// lock a snapshot of an unchanged cache takes a copy with one rename; a changed cache is copied
-/// again, and unused copies go to the trash.
+/// lock a snapshot takes a copy with one rename, and unused copies go to the trash.
 #[cfg(target_os = "macos")]
 fn prepare_cache_copies(repo: &Repo, l: &Line) -> Result<()> {
     let w = repo.working(l);
@@ -328,7 +325,7 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
         return Err(exit(1, "permission denied: only the project admin or the user who made it can undo this operation"));
     }
     let _queue_lock = if r.data.get("queue_change").is_some() { Some(super::queue::require_lock(repo)?) } else { None };
-    let lock = repo.p.lock()?;
+    let _lock = repo.p.lock()?;
     let mut rec = Record::new("undo");
     rec.data = serde_json::json!({"undo": r.id, "op": r.op});
     if let Some(value) = r.data.get("ref_change") {
@@ -504,7 +501,7 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
             (None, Some(l)) if alive => {
                 // The operation created the line: delete it (content saved first).
                 wb = repo.working_state(ctx, l, "before undo")?;
-                trash(repo, &repo.working(l))?;
+                repo.p.trash(&repo.working(l))?;
                 repo.drop_stage(l)?;
             }
             _ => {}
@@ -534,8 +531,6 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
         fmt_time(r.time),
         short_op(&done.id)
     );
-    drop(lock);
-    empty_trash(repo);
     Ok(0)
 }
 
@@ -971,7 +966,7 @@ pub fn retention_plan(repo: &Repo) -> Result<(BTreeSet<String>, Vec<String>)> {
 }
 
 pub fn run_gc(ctx: &Ctx, repo: &Repo, dry: bool) -> Result<Vec<String>> {
-    let lock = repo.p.lock()?;
+    let _lock = repo.p.lock()?;
     let (_keep, delete) = retention_plan(repo)?;
     if dry {
         return Ok(delete);
@@ -986,7 +981,7 @@ pub fn run_gc(ctx: &Ctx, repo: &Repo, dry: bool) -> Result<Vec<String>> {
         let s = repo.p.db.state(id)?;
         if let Some(s) = &s {
             for snap in s.caches.values() {
-                let _ = trash(repo, &repo.p.cache_path(id, snap));
+                let _ = repo.p.trash(&repo.p.cache_path(id, snap));
             }
         }
         if repo.p.delete_state(id).is_ok() {
@@ -1042,13 +1037,11 @@ pub fn run_gc(ctx: &Ctx, repo: &Repo, dry: bool) -> Result<Vec<String>> {
                     .map(|t| t.elapsed().map(|x| x.as_secs() > 3600).unwrap_or(false))
                     .unwrap_or(false);
                 if old {
-                    let _ = trash(repo, &e.path());
+                    let _ = repo.p.trash(&e.path());
                 }
             }
         }
     }
-    drop(lock);
-    empty_trash(repo);
     Ok(deleted)
 }
 
@@ -1078,48 +1071,14 @@ pub fn excess_caches(repo: &Repo) -> Result<Vec<(String, String)>> {
     Ok(out)
 }
 
-/// Trees that left the store and that no record or command reads any more. Deleting build
-/// output takes seconds to minutes, so the command that moved them deletes them after it
-/// releases the store lock.
-fn trash_dir(repo: &Repo) -> std::path::PathBuf {
-    repo.p.meta_dir().join("trash")
-}
-
-/// Move `path` into the trash: one rename, so it is quick under the store lock. A tree that
-/// cannot move is deleted in place.
-pub fn trash(repo: &Repo, path: &Path) -> Result<()> {
-    let dir = trash_dir(repo);
-    std::fs::create_dir_all(&dir)?;
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let to = dir.join(format!("{name}.{}", ids::new_id()));
-    #[cfg(target_os = "macos")]
-    let moved = btrfs::move_tree(path, &to).is_ok();
-    #[cfg(not(target_os = "macos"))]
-    let moved = std::fs::rename(path, &to).is_ok();
-    if !moved {
-        btrfs::delete_tree(path)?;
-    }
-    Ok(())
-}
-
 /// Move the cache snapshots that retention lets go into the trash. Returns their names.
 pub fn trash_excess_caches(repo: &Repo) -> Result<Vec<String>> {
     let mut out = Vec::new();
     for (id, name) in excess_caches(repo)? {
-        trash(repo, &repo.p.cache_path(&id, &name))?;
+        repo.p.trash(&repo.p.cache_path(&id, &name))?;
         out.push(name);
     }
     Ok(out)
-}
-
-/// Delete what is in the trash, without the store lock. A tree that another command is deleting
-/// at the same time may fail; the next command deletes the rest.
-pub fn empty_trash(repo: &Repo) {
-    if let Ok(rd) = std::fs::read_dir(trash_dir(repo)) {
-        for e in rd.flatten() {
-            let _ = btrfs::delete_tree(&e.path());
-        }
-    }
 }
 
 pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {

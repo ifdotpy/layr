@@ -888,26 +888,26 @@ pub fn scan_snapshot(src: &Path, dst: &Path) -> Result<()> {
     snapshot_with(src, dst, true, false)
 }
 
-/// A copy of a tree made before a store lock (`prepare_snapshot`), with the scan of its source
-/// that the copy matches.
+/// A copy of a tree made before a store lock (`prepare_snapshot`).
 struct Prepared {
     src: PathBuf,
     readonly: bool,
-    scan: BTreeMap<String, ScanEntry>,
     path: PathBuf,
 }
 thread_local! {
     static PREPARED: std::cell::RefCell<Vec<Prepared>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Copy `src` into `dir` now, before the caller takes the store lock. A later `snapshot` of the
-/// unchanged `src` then takes this copy with one rename instead of copying every file again:
-/// build output has hundreds of thousands of files, and that copy took minutes under the lock.
+/// Copy `src` into `dir` now, before the caller takes the store lock. A later `snapshot` of
+/// `src` then takes this copy with one rename instead of copying every file under the lock:
+/// build output has hundreds of thousands of files, and that copy took minutes under it. The
+/// copy is a consistent copy of `src` from a moment before the lock; a cache is build output,
+/// and a few seconds older output warms a line as well.
 pub fn prepare_snapshot(src: &Path, dir: &Path, readonly: bool) -> Result<()> {
     fs::create_dir_all(dir)?;
     let path = dir.join(format!("prepared-{}", crate::ids::new_id()));
-    let scan = copy_snapshot(src, &path, readonly, true)?;
-    PREPARED.with(|p| p.borrow_mut().push(Prepared { src: src.to_path_buf(), readonly, scan, path }));
+    copy_snapshot(src, &path, readonly, true)?;
+    PREPARED.with(|p| p.borrow_mut().push(Prepared { src: src.to_path_buf(), readonly, path }));
     Ok(())
 }
 
@@ -946,22 +946,18 @@ pub fn take_prepared() -> Vec<PathBuf> {
 
 fn snapshot_with(src: &Path, dst: &Path, readonly: bool, keep_links: bool) -> Result<()> {
     if keep_links {
-        let found = PREPARED.with(|p| p.borrow().iter().any(|x| x.src == src && x.readonly == readonly));
-        if found {
+        let taken = PREPARED.with(|p| {
+            let mut p = p.borrow_mut();
+            let i = p.iter().position(|x| x.src == src && x.readonly == readonly)?;
+            Some(p.remove(i).path)
+        });
+        if let Some(path) = taken {
             let _t = crate::trace::span(format!("APFS take prepared copy {}", dst.display()));
             if fs::symlink_metadata(dst).is_ok() {
+                PREPARED.with(|p| p.borrow_mut().push(Prepared { src: src.to_path_buf(), readonly, path }));
                 bail!("snapshot destination already exists");
             }
-            let now = scan(src)?;
-            let taken = PREPARED.with(|p| {
-                let mut p = p.borrow_mut();
-                let i = p.iter().position(|x| x.src == src && x.readonly == readonly && x.scan == now)?;
-                Some(p.remove(i).path)
-            });
-            if let Some(path) = taken {
-                move_tree(&path, dst).context("publish prepared snapshot")?;
-                return Ok(());
-            }
+            return move_tree(&path, dst).context("publish prepared snapshot");
         }
     }
     copy_snapshot(src, dst, readonly, keep_links).map(|_| ())
