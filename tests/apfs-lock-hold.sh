@@ -116,6 +116,22 @@ eq "reset --hard copies no tree under the lock" "" "$(locked "$trace" | grep -E 
 no "reset --hard removes a file that the target does not have" test -e topic.txt
 eq "reset --hard keeps untracked files" "300" "$(ls bulk | wc -l | tr -d ' ')"
 eq "no prepared copies stay" "" "$(ls -A "$LAYR_ROOT/projects/hold/meta/work" 2>/dev/null)"
+# replay merges each state onto the new base before the lock; under it each step takes its result.
+l line new -q rp-base main
+l line new -q rp-work main
+cd "$P/rp-work" || exit 1
+printf 'one\n' > rp1.txt && l add rp1.txt && l save -qm rp1
+printf 'two\n' > rp2.txt && l add rp2.txt && l save -qm rp2
+cd "$P/rp-base" || exit 1
+printf 'base\n' > rpb.txt && l add rpb.txt && l save -qm rpb
+cd "$P/rp-work" || exit 1
+trace=$(LAYR_TRACE=1 l replay rp-base 2>&1)
+has "replay merges before the lock" "prepare replay" "$trace"
+has "replay takes the lock" "store lock taken" "$trace"
+eq "replay copies no tree under the lock" "" "$(locked "$trace" | grep -E "$copies")"
+eq "the replayed line has every file" "base one two" "$(cat rpb.txt rp1.txt rp2.txt | tr '\n' ' ' | sed 's/ $//')"
+eq "the replayed states keep their messages" "rp2 rp1 rpb" "$(l log -3 --format=%s | tr '\n' ' ' | sed 's/ $//')"
+eq "no prepared copies stay after replay" "" "$(ls -A "$LAYR_ROOT/projects/hold/meta/work" 2>/dev/null)"
 eq "the trash is empty" "" "$(ls -A "$LAYR_ROOT/trash" 2>/dev/null)"
 ok "states remain valid" l fsck
 finish
