@@ -1059,9 +1059,17 @@ fn check_commit(repo: &Repo, commit: &str) -> Result<()> {
     }
     Ok(())
 }
-fn check_reachable(repo: &Repo, commit: &str) -> Result<()> {
+/// Check the objects of `commit`, except those the remote already has through `remote_tip` (when
+/// the store has that commit): a push then reads its new objects, not the whole history.
+fn check_reachable(repo: &Repo, commit: &str, remote_tip: Option<&str>) -> Result<()> {
     let s = store(repo);
-    let objects = git_out(&s, &["rev-list", "--objects", "--no-object-names", commit])?;
+    let known = remote_tip.filter(|t| git_out(&s, &["cat-file", "-e", &format!("{t}^{{commit}}")]).is_ok());
+    let mut args = vec!["rev-list", "--objects", "--no-object-names", commit];
+    if let Some(tip) = known {
+        args.extend(["--not", tip]);
+    }
+    let objects = git_out(&s, &args)?;
+    let _t = crate::trace::span(format!("check of {} Git objects", objects.lines().count()));
     let mut cat = CatFile::new(&s)?;
     for oid in objects.lines() {
         check_object(&s, &mut cat, oid, "")?;
@@ -1631,7 +1639,8 @@ fn refresh_index(repo: &Repo, state: &str) -> Result<()> {
 
 /// Push a prepared commit to `refs/heads/<branch>` of the remote, as the caller.
 pub fn push(ctx: &Ctx, repo: &Repo, url: &str, commit: &str, branch: &str, force: bool) -> Result<()> {
-    if let Err(error) = check_reachable(repo, commit) {
+    let before = ls_remote(ctx, repo, url, branch)?;
+    if let Err(error) = check_reachable(repo, commit, before.as_deref()) {
         if !repair_cache(repo)? {
             return Err(error);
         }
@@ -1645,10 +1654,9 @@ pub fn push(ctx: &Ctx, repo: &Repo, url: &str, commit: &str, branch: &str, force
         if !rebuilt {
             bail!("cannot rebuild prepared Git commit {commit}; prepare the export again");
         }
-        check_reachable(repo, commit)?;
+        check_reachable(repo, commit, before.as_deref())?;
     }
     let s = store(repo);
-    let before = ls_remote(ctx, repo, url, branch)?;
     if !force {
         if let Some(remote) = &before {
             if remote != commit

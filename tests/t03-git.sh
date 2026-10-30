@@ -44,7 +44,9 @@ eq "git folder after push: clean" "" "$(git status --short)"
 eq "git folder HEAD is the pushed commit" "$hc" "$(git rev-parse HEAD)"
 # The secret check of a push reads only the states without a Git commit, not the whole history.
 echo n >> local.txt; l save -qam "after the push"
-eq "a push checks only its new states for secrets" "1" "$(LAYR_TRACE=1 l git push -q origin task-1 2>&1 | sed -n 's/.*secret check of \([0-9]*\) new states/\1/p')"
+eq "a push checks only its new states for secrets" "1" "$(LAYR_TRACE=1 l git push -q origin task-1 2>&1 | tee $T/push-trace.txt | sed -n 's/.*secret check of \([0-9]*\) new states/\1/p')"
+# The object check of that push stops at the objects the remote has: the commit, the tree and one file.
+eq "a push checks only the Git objects new to the remote" "3" "$(sed -n 's/.*check of \([0-9]*\) Git objects.*/\1/p' $T/push-trace.txt)"
 
 # Lost response: the push reached the remote, the record of it did not.
 echo y >> local.txt; l save -qam "second"
