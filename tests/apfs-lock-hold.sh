@@ -132,6 +132,38 @@ eq "replay copies no tree under the lock" "" "$(locked "$trace" | grep -E "$copi
 eq "the replayed line has every file" "base one two" "$(cat rpb.txt rp1.txt rp2.txt | tr '\n' ' ' | sed 's/ $//')"
 eq "the replayed states keep their messages" "rp2 rp1 rpb" "$(l log -3 --format=%s | tr '\n' ' ' | sed 's/ $//')"
 eq "no prepared copies stay after replay" "" "$(ls -A "$LAYR_ROOT/projects/hold/meta/work" 2>/dev/null)"
+
+# clean -n only reads; clean -f, park and pick copy before the lock; undo reads its trees before it.
+mkdir -p junk && for i in $(seq 1 50); do printf '%s\n' "$i" > "junk/f$i"; done
+trace=$(LAYR_TRACE=1 l clean -n -d 2>&1)
+has "clean -n lists the folder" "Would remove junk/" "$trace"
+eq "clean -n takes no store lock" "" "$(printf '%s\n' "$trace" | grep 'store lock taken')"
+trace=$(LAYR_TRACE=1 l clean -f -d -q 2>&1)
+has "clean -f takes the lock" "store lock taken" "$trace"
+eq "clean -f copies no tree under the lock" "" "$(locked "$trace" | grep -E "$copies")"
+no "clean -f removes the folder" test -e junk
+printf 'edit\n' > rp1.txt
+trace=$(LAYR_TRACE=1 l park -q 2>&1)
+has "park takes the lock" "store lock taken" "$trace"
+eq "park copies no tree under the lock" "" "$(locked "$trace" | grep -E "$copies")"
+eq "park puts the head content back" "one" "$(cat rp1.txt)"
+ok "park pop" l park pop -q
+eq "park pop brings the edit back" "edit" "$(cat rp1.txt)"
+l restore rp1.txt
+l line new -q pk-src rp-base
+cd "$P/pk-src" || exit 1
+printf 'picked\n' > pk.txt && l add pk.txt && l save -qm pk
+pk=$(l rev-parse head)
+cd "$P/rp-work" || exit 1
+trace=$(LAYR_TRACE=1 l pick "$pk" 2>&1)
+has "pick merges before the lock" "prepare pick" "$trace"
+eq "pick copies no tree under the lock" "" "$(locked "$trace" | grep -E "$copies")"
+eq "pick brings the file" "picked" "$(cat pk.txt)"
+trace=$(LAYR_TRACE=1 l undo 2>&1)
+has "undo takes the lock" "store lock taken" "$trace"
+eq "undo builds no state tree under the lock" "" "$(locked "$trace" | grep 'thin materialize')"
+no "undo of the pick removes the file" test -e pk.txt
+eq "no prepared copies stay after these commands" "" "$(ls -A "$LAYR_ROOT/projects/hold/meta/work" 2>/dev/null)"
 eq "the trash is empty" "" "$(ls -A "$LAYR_ROOT/trash" 2>/dev/null)"
 ok "states remain valid" l fsck
 finish

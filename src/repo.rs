@@ -1231,6 +1231,56 @@ impl<'a> Repo<'a> {
         Ok(())
     }
 
+    /// The head and the index content of a line: a read before the store lock is still valid
+    /// under it when this did not change.
+    #[cfg(target_os = "macos")]
+    pub fn index_token(&self, line: &Line) -> Result<IndexToken> {
+        let stage = match self.current_stage(line)? {
+            Some(s) => Some(btrfs::scan_with_data(&s, true)?.into_iter().map(|(k, v)| (k, v.fingerprint)).collect()),
+            None => None,
+        };
+        Ok((line.head.clone(), stage))
+    }
+
+    /// Read the status of a line before the store lock (APFS): its copy of the working folder
+    /// took seconds to minutes under the lock. `locked_status` takes it when the head and the
+    /// index did not change; the lock never covers the working folder.
+    pub fn prepare_status(&self, line: &Line) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        {
+            let token = self.index_token(line)?;
+            let (st, scan, _, _) = self.status(line)?;
+            PREPARED_STATUS.with(|p| *p.borrow_mut() = Some(PreparedStatus { line: line.id.clone(), token, st, scan }));
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = line;
+        Ok(())
+    }
+
+    /// `status` under the store lock: the one that `prepare_status` read when it still holds.
+    pub fn locked_status(&self, line: &Line) -> Result<(Status, Temp, Option<Temp>, Snap)> {
+        #[cfg(target_os = "macos")]
+        if let Some(p) = PREPARED_STATUS.with(|p| p.borrow_mut().take()) {
+            if p.line == line.id && p.token == self.index_token(line)? {
+                let (index, itemp) = self.index_view(line)?;
+                return Ok((p.st, p.scan, itemp, index));
+            }
+        }
+        self.status(line)
+    }
+
+    /// Drop what a command prepared before the lock and did not take: a status, and prepared
+    /// snapshot copies (to the trash). Call after the lock.
+    pub fn discard_prepared(&self) {
+        #[cfg(target_os = "macos")]
+        {
+            PREPARED_STATUS.with(|p| p.borrow_mut().take());
+            for p in btrfs::take_prepared() {
+                let _ = self.p.trash(&p);
+            }
+        }
+    }
+
     pub fn status(&self, line: &Line) -> Result<(Status, Temp, Option<Temp>, Snap)> {
         let scan = self.scan(line)?;
         let (index, itemp) = self.index_view(line)?;
@@ -2394,7 +2444,10 @@ mod cache_copy_tests {
             store: crate::store::Store::open(&root.join("store"))?,
             caller: crate::ctx::Caller::from_uid(rustix::process::geteuid().as_raw()),
             cwd: root.join("store/projects/concurrent/lines/main"),
-            env: std::collections::HashMap::from([("LAYR_PROJECT".into(), "concurrent".into()), ("LAYR_LINE".into(), "main".into())]),
+            env: std::collections::HashMap::from([
+                ("LAYR_PROJECT".into(), "concurrent".into()),
+                ("LAYR_LINE".into(), "main".into()),
+            ]),
             out: std::cell::RefCell::new(Box::new(std::io::sink())),
         })
     }
@@ -2415,7 +2468,25 @@ mod cache_copy_tests {
         assert_eq!(run(&ctx, &["init", "concurrent", "-q"])?, 0);
         ctx.cwd = root.join("store/projects/concurrent/lines/main");
         std::fs::write(ctx.cwd.join(".layrattributes"), "cache regenerable\n")?;
-        assert_eq!(run(&ctx, &["overlay", "create", "cache.cache", "--folder", "cache", "--history", "last", "--quiet", "--merge", "union-theirs", "-q"])?, 0);
+        assert_eq!(
+            run(
+                &ctx,
+                &[
+                    "overlay",
+                    "create",
+                    "cache.cache",
+                    "--folder",
+                    "cache",
+                    "--history",
+                    "last",
+                    "--quiet",
+                    "--merge",
+                    "union-theirs",
+                    "-q"
+                ]
+            )?,
+            0
+        );
         std::fs::write(ctx.cwd.join(".gitignore"), "cache/\n")?;
         std::fs::create_dir(ctx.cwd.join("cache"))?;
         std::fs::write(ctx.cwd.join("cache/data"), "original")?;
@@ -2683,6 +2754,23 @@ mod cache_platform_tests {
         drop(p);
         std::fs::remove_dir_all(dir).unwrap();
     }
+}
+
+/// The head and the index content of a line (`Repo::index_token`).
+#[cfg(target_os = "macos")]
+pub type IndexToken = (String, Option<Vec<(String, crate::storage::Fingerprint)>>);
+
+/// A status read before a store lock (`Repo::prepare_status`).
+#[cfg(target_os = "macos")]
+struct PreparedStatus {
+    line: String,
+    token: IndexToken,
+    st: Status,
+    scan: Temp,
+}
+#[cfg(target_os = "macos")]
+thread_local! {
+    static PREPARED_STATUS: std::cell::RefCell<Option<PreparedStatus>> = const { std::cell::RefCell::new(None) };
 }
 
 /// An automatic state layer written before a store lock (`Repo::prepare_save`).

@@ -1343,7 +1343,7 @@ const SHARED_MIN: u64 = 1 << 20;
 fn unshared(a: &File, b: &File, len: u64) -> Vec<(u64, u64)> {
     let _t = crate::trace::span("APFS shared extents");
     // Data in the page cache can still map to the old shared block: write it first.
-    if a.sync_data().is_err() || b.sync_data().is_err() {
+    if crate::sys::fsync_data(a).is_err() || crate::sys::fsync_data(b).is_err() {
         return vec![(0, len)];
     }
     let (Some(ea), Some(eb)) = (crate::sys::apfs_extents(a, len), crate::sys::apfs_extents(b, len)) else {
