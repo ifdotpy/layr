@@ -1,0 +1,20 @@
+name: pr-title
+
+# Pull requests merge by squash, and the title becomes the commit on main.
+# release-please writes the release notes from these commits (AGENTS.md).
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+jobs:
+  title:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Conventional Commit title
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          if ! printf '%s\n' "$TITLE" | grep -Eq '^(feat|fix|perf|revert|docs|test|refactor|build|ci|chore|style)(\([a-z0-9-]+\))?!?: .+'; then
+            echo "The pull request title needs a Conventional Commit subject, for example 'fix(merge): Keep the base'."
+            exit 1
+          fi
