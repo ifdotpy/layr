@@ -515,11 +515,12 @@ pub fn add(ctx: &Ctx, args: &[String]) -> Result<i32> {
 }
 
 /// What an `add` read depends on besides the working folder: the head and the staging content.
-#[cfg(target_os = "macos")]
 /// The head and the index content of a line: a read before the lock is still valid under it
 /// when this did not change.
+#[cfg(target_os = "macos")]
 pub type AddToken = (String, Option<Vec<(String, crate::storage::Fingerprint)>>);
 
+#[cfg(target_os = "macos")]
 pub fn add_token(repo: &Repo, line: &Line) -> Result<AddToken> {
     let stage = match repo.current_stage(line)? {
         Some(s) => Some(crate::storage::scan_with_data(&s, true)?.into_iter().map(|(k, v)| (k, v.fingerprint)).collect()),
