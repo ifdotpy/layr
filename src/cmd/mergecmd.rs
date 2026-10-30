@@ -650,7 +650,7 @@ pub fn merge(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if let Some(theirs) = h.repo.p.db.line_by_name(&rev)? {
         let r = (|| -> Result<()> {
             let theirs = h.repo.localize(theirs)?;
-            let _lock = h.repo.p.lock()?;
+            let lock = h.repo.p.lock()?;
             let line = h.repo.line(&line.id)?;
             // A protected line takes caches only with a merge that met its protection.
             if let Some(rule) = h.repo.policy().rule_for(&line.name) {
@@ -665,6 +665,10 @@ pub fn merge(ctx: &Ctx, args: &[String]) -> Result<i32> {
                     return Ok(());
                 }
             }
+            // The copies of build output take minutes. They hold only the lock of each cache
+            // overlay: the commands of the project do not wait for them.
+            drop(lock);
+            let _t = crate::trace::span("merge caches");
             for (p, id) in h.repo.pull_caches(ctx, &line, &crate::cache_overlay::Source::Line(&theirs))? {
                 if !a.has("-q") {
                     outln!(ctx, "Merged cache {p}: {}", ids::short(&id));

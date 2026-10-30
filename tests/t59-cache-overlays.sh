@@ -74,8 +74,14 @@ cd $P/warm
 echo w > target/debug/w
 l save --caches -q
 cd $P/main
-out=$(l merge warm 2>&1)
+out=$(LAYR_TRACE=1 l merge warm 2>&1)
 has "the merge brings the cache" "Merged cache target" "$out"
+# The cache copy holds only the lock of the cache overlay, not the lock of the project.
+eq "the cache copy holds the overlay lock after the project lock is released" "ok" "$(printf '%s\n' "$out" | awk '
+  /store lock held: p$/ {p = NR}
+  /store lock taken: p%cache.target$/ && !o {o = NR}
+  /merge caches$/ {m = NR}
+  END {if (p && o && m && p < o && o < m) print "ok"}')"
 eq "main has the merged line's files" "changed w" "$(cat target/debug/x target/debug/w | tr '\n' ' ' | sed 's/ $//')"
 eq "the incoming file wins" "changed" "$(cat target/debug/x)"
 eq "status stays clean" "" "$(l status --short)"

@@ -231,6 +231,8 @@ pub struct Lock {
     waited: std::time::Duration,
     log: PathBuf,
     trash: PathBuf,
+    /// The project name, for `LAYR_TRACE`.
+    project: String,
 }
 
 /// The store locks this process holds. The trash is emptied when the last one goes.
@@ -247,7 +249,7 @@ impl Drop for Lock {
         let held = self.since.elapsed();
         drop(self.f.take());
         if std::env::var_os("LAYR_TRACE").is_some() {
-            eprintln!("trace {:>8.1} ms  store lock held", held.as_secs_f64() * 1000.0);
+            eprintln!("trace {:>8.1} ms  store lock held: {}", held.as_secs_f64() * 1000.0, self.project);
         }
         if HELD_LOCKS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) == 1 {
             // Deleting build output takes minutes: it runs after the last lock, so other
@@ -567,7 +569,7 @@ impl<'a> Project<'a> {
         rustix::fs::flock(&f, rustix::fs::FlockOperation::LockExclusive)?;
         HELD_LOCKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if std::env::var_os("LAYR_TRACE").is_some() {
-            eprintln!("trace {:>8.1} ms  store lock taken", asked.elapsed().as_secs_f64() * 1000.0);
+            eprintln!("trace {:>8.1} ms  store lock taken: {}", asked.elapsed().as_secs_f64() * 1000.0, self.name);
         }
         if let Ok(mut d) = LOCK_TRASH.lock() {
             *d = Some(self.store.trash_dir());
@@ -578,6 +580,7 @@ impl<'a> Project<'a> {
             waited: asked.elapsed(),
             log: self.meta_dir().join("lock-slow.log"),
             trash: self.store.trash_dir(),
+            project: self.name.clone(),
         };
         #[cfg(target_os = "macos")]
         crate::apfs_commit::recover(self)?;
