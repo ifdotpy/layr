@@ -193,6 +193,11 @@ is valid for a state, so it never decides that by itself:
   rename when the folder, the head and the previous state did not change; else it writes the
   state under the lock as before. The state after such a command is a layer over the state
   before it, so it copies only what the command changed.
+- An automatic state is a layer over the previous automatic state of the same head, so a save
+  copies only what changed since that save (a new `node_modules` is copied once, not at every
+  save). After `thin.chain` (32) layers it starts again over the head. When the folder changed
+  between the layer before the lock and the lock (a build writes into it), that layer becomes an
+  automatic state too, and the state under the lock copies only the entries that changed since.
 - `merge <rev>` on APFS reads the status and merges the three trees before the store lock, and
   `reset --hard` copies the working folder and reads the target tree before it. The states are
   immutable and the lock never covers the working folder. Under the lock the merge takes its

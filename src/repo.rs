@@ -801,6 +801,30 @@ impl<'a> Repo<'a> {
         })
     }
 
+    /// The state that the layer of the next automatic state goes over (APFS): the previous
+    /// automatic state over this head, so a save copies only what changed since that save, not
+    /// every change since the head (a whole node_modules at each save took minutes). A chain of
+    /// `thin.chain` layers starts again over the head.
+    #[cfg(target_os = "macos")]
+    fn save_layer_base(&self, line: &Line, prev: &str) -> String {
+        let max = self.p.config_u64("thin.chain", crate::thin::MAX_CHAIN) as usize;
+        if prev != line.head && self.p.delta_path(prev).is_dir() && crate::thin::chain_len(&self.p, prev) < max {
+            prev.to_string()
+        } else {
+            line.head.clone()
+        }
+    }
+
+    /// The layer of an automatic state at `dst`, over `save_layer_base`.
+    #[cfg(target_os = "macos")]
+    fn write_save_layer(&self, line: &Line, prev: &str, w: &Path, new: &BTreeMap<String, btrfs::ScanEntry>, dst: &Path) -> Result<()> {
+        let base_id = self.save_layer_base(line, prev);
+        let base = self.state_src(&base_id)?;
+        let base_scan = base.scan(true)?;
+        let d = crate::thin::diff(&base_scan, &|k| base.path(k), new, w)?;
+        crate::thin::write_checked(w, &base, &base_scan, new, &d, dst, &base_id, false)
+    }
+
     /// Write the automatic state of the working folder before the caller takes the store lock
     /// (APFS). Copying the changed files took seconds to minutes under the lock and stopped
     /// every other command of the project. Under the lock `save` scans the folder again and
@@ -815,15 +839,21 @@ impl<'a> Repo<'a> {
         let _t = crate::trace::span("prepare save");
         let prev = self.save_base(line)?;
         let new = btrfs::scan_with_data(&w, true)?;
-        let head = self.state_src(&line.head)?;
-        let head_scan = head.scan(true)?;
-        let head_diff = crate::thin::diff(&head_scan, &|k| head.path(k), &new, &w)?;
-        if !head_diff.write.iter().chain(head_diff.removed.iter()).any(|p| !skip_path(p)) {
+        let base_id = self.save_layer_base(line, &prev);
+        let base = self.state_src(&base_id)?;
+        let base_scan = base.scan(true)?;
+        let d = crate::thin::diff(&base_scan, &|k| base.path(k), &new, &w)?;
+        // Nothing changed since the previous save: the save under the lock makes no state.
+        let unchanged = |d: &crate::thin::Diff| !d.write.iter().chain(d.removed.iter()).any(|p| !skip_path(p));
+        if unchanged(&d) || (base_id != prev && self.p.has_state(&prev) && {
+            let p = self.state_src(&prev)?;
+            unchanged(&crate::thin::diff(&p.scan(true)?, &|k| p.path(k), &new, &w)?)
+        }) {
             return Ok(());
         }
         let path = self.p.work_dir().join(format!("prepared-save-{}", ids::new_id()));
         std::fs::create_dir_all(self.p.work_dir())?;
-        match crate::thin::write_checked_scan(&w, &head, &head_scan, &new, &head_diff, &path, &line.head, false) {
+        match crate::thin::write_checked_scan(&w, &base, &base_scan, &new, &d, &path, &base_id, false) {
             Ok(Some(scan)) => {
                 PREPARED_SAVES.with(|p| {
                     p.borrow_mut().push(PreparedSave { line: line.id.clone(), head: line.head.clone(), prev, scan, path })
@@ -874,16 +904,32 @@ impl<'a> Repo<'a> {
             let dst = self.p.delta_path(&id);
             // A layer written before the lock (`prepare_save`) for exactly this content and
             // head: one rename instead of copying the changed files under the lock.
+            let mut earlier: Option<StateRec> = None;
             let written = match take_prepared_save(&line.id) {
                 Some(pre) if pre.head == line.head && pre.prev == prev && pre.scan == new => {
                     let _t = crate::trace::span("take prepared save");
                     btrfs::move_tree(&pre.path, &dst).map(|_| ())
                 }
+                // The folder changed while that layer was written (a build or an install writes
+                // into it). The layer becomes the automatic state of the folder at that moment,
+                // and this state is a layer over it with only the entries that changed since:
+                // writing the whole change again took minutes under the lock.
+                Some(pre) if pre.head == line.head && pre.prev == prev => {
+                    let _t = crate::trace::span("layer over prepared save");
+                    let pid = ids::new_id();
+                    btrfs::move_tree(&pre.path, &self.p.delta_path(&pid))?;
+                    let s1 = self.describe_state(ctx, pid.clone(), StateKind::Auto, vec![line.head.clone()], message, Some(line))?;
+                    let base = self.state_src(&pid)?;
+                    let base_scan = base.scan(true)?;
+                    let d = crate::thin::diff(&base_scan, &|k| base.path(k), &new, &w)?;
+                    earlier = Some(s1);
+                    crate::thin::write_checked(&w, &base, &base_scan, &new, &d, &dst, &pid, false)
+                }
                 Some(pre) => {
                     self.p.trash(&pre.path)?;
-                    crate::thin::write_checked(&w, &head, &head_scan, &new, &head_diff, &dst, &line.head, false)
+                    self.write_save_layer(line, &prev, &w, &new, &dst)
                 }
-                None => crate::thin::write_checked(&w, &head, &head_scan, &new, &head_diff, &dst, &line.head, false),
+                None => self.write_save_layer(line, &prev, &w, &new, &dst),
             };
             let mut st = match written {
                 Ok(()) => self.describe_state(ctx, id, StateKind::Auto, vec![line.head.clone()], message, Some(line))?,
@@ -891,10 +937,14 @@ impl<'a> Repo<'a> {
                 Err(e) if crate::thin::needs_complete(&e) => {
                     self.new_state(ctx, &w, StateKind::Auto, vec![line.head.clone()], message, Some(line))?
                 }
-                Err(e) => return Err(e),
+                Err(e) => {
+                    self.discard_states(earlier.as_slice());
+                    return Err(e);
+                }
             };
             st.running = running;
             let mut rec = Record::new("save");
+            rec.states.extend(earlier);
             rec.states.push(st.clone());
             rec.data = serde_json::json!({"line": line.id});
             self.commit_record(ctx, rec)?;

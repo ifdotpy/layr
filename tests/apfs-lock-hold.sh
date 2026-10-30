@@ -64,6 +64,39 @@ ok "it did not wait for the push" test "$took" -lt 3
 wait $PUSH
 eq "the push succeeded" "0" "$?"
 ok "the remote has the line" git -C "$R" rev-parse --verify -q topic
+# A folder that changes while a save waits for the lock: the layer written before the lock
+# becomes an automatic state, and the state under the lock copies only the changed entry.
+mkdir -p bulk2 && for i in $(seq 1 200); do printf '%s\n' "$i" > "bulk2/f$i"; done
+python3 -c 'import fcntl,sys,time; f=open(sys.argv[1],"a"); fcntl.flock(f,fcntl.LOCK_EX); time.sleep(6)' "$LAYR_ROOT/projects/hold/meta/lock" &
+HOLDER=$!
+sleep 1
+LAYR_TRACE=1 l save > "$T/late-save.log" 2>&1 &
+SAVE=$!
+sleep 3
+printf 'late\n' > late.txt
+wait $HOLDER; wait $SAVE
+trace=$(cat "$T/late-save.log")
+has "the save wrote its layer before the lock" "prepare save" "$trace"
+has "the changed folder gets a layer over the prepared one" "layer over prepared save" "$trace"
+has "under the lock only the changed entry is copied" "thin write 1 entries" "$(printf '%s\n' "$trace" | sed 's/  */ /g')"
+auto=$(printf '%s\n' "$trace" | awk '$1 == "topic" {print $2}')
+eq "the state has the late file" "late" "$(l show "$auto:late.txt")"
+eq "the state has the files of the prepared layer" "200" "$(l show "$auto:bulk2/f200")"
+rm -rf bulk2 late.txt
+
+# A save after a save copies only what changed since the previous save, not every change since
+# the head (a new node_modules at each save), and a save with no change writes no layer.
+mkdir -p bulk3 && for i in $(seq 1 200); do printf '%s\n' "$i" > "bulk3/f$i"; done
+l save >/dev/null
+printf 'changed\n' > bulk3/f1
+trace=$(LAYR_TRACE=1 l save 2>&1)
+eq "the next save copies only the changed file" "1" "$(printf '%s\n' "$trace" | sed -n 's/.*thin write \([0-9]*\) entries/\1/p' | sort -n | tail -1)"
+auto=$(printf '%s\n' "$trace" | awk '$1 == "topic" {print $2}')
+eq "the state has the change" "changed" "$(l show "$auto:bulk3/f1")"
+eq "the state keeps the files of the earlier save" "200" "$(l show "$auto:bulk3/f200")"
+eq "a save without a change writes no layer" "" "$(LAYR_TRACE=1 l save 2>&1 | grep 'thin write')"
+rm -rf bulk3
+
 # merge and reset --hard copy and merge the trees before the lock; under it they only rename.
 locked() { printf '%s\n' "$1" | awk '/store lock held/{exit} on{print} /store lock taken/{on=1}'; }
 copies='APFS (clone|copy tree)|thin materialize'
