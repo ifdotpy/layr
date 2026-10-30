@@ -273,7 +273,7 @@ Run in the root folder of a layr line that is also the cargo project root.
      executed lines) on the binary of that test, and `llvm-profdata show --covered --all-functions`
      for the executed function names. Function ranges come from a table that is built once per
      test binary. Four exports run at a time (`EXPORT_WORKERS`). Files outside the project, in `target/`, and in `.cargo`, `.rustup` and `/rustc/` are dropped.
-     The raw profiles of a test are deleted right after its export (see "Raw profile disk").
+     The wrapper merges and deletes the raw profiles of a test right after the test; the export deletes the rest (see "Raw profile disk").
   7. The record is written.
   8. The exit code is the exit code of nextest. The last line prints how many tests ran, passed,
      failed and were skipped.
@@ -284,7 +284,7 @@ Run in the root folder of a layr line that is also the cargo project root.
 - `layr-retest wrap -- <test binary> <args>` is the cargo target runner that `run` installs
   (`CARGO_TARGET_<TRIPLE>_RUNNER`). With `NEXTEST_TEST_NAME` set it sets `LLVM_PROFILE_FILE` to
   `$LAYR_RETEST_PROFILE_DIR/<binary id>/<test>.profraw` (names cleaned to letters, digits and
-  `_-.`), then execs the test. In the list phase it sets no profile.
+  `_-.`), then runs the test, merges its raw profiles and returns its exit code (see "Raw profile disk"). In the list phase it sets no profile and execs the test.
 
 ### Record format
 
@@ -381,18 +381,22 @@ The installed `layr` 0.4.0 (2026-10-26) has no cache overlays. Build the one in 
 
 ### Raw profile disk
 
-Raw profiles are large (1.5 MB per test in the layr workspace, about 18 MB in Studio). The export
-runs while the tests run, and deletes the profile folder of a test after its export. So the raw
-profiles on disk are the tests in flight plus the finished tests that wait for an export worker.
-The wait list is short: the channel to the four workers holds four jobs; when it is full the
-reader stops, the pipe of nextest fills and nextest waits for the reader. The pipe still holds
-some events, so the bound is "tests in flight plus a few", not exactly the number of workers.
-Before this change the export ran after all tests, so the raw profiles of all tests were on disk
-at the same time (18 GB at 60 % of the 1615 tests of Studio).
+Raw profiles are large (1.5 MB per test in the layr workspace, about 18 MB in Studio). Two steps
+keep them small:
 
-Why the event stream and not the runner `wrap`: the wrapper would need to share the function
-tables of a test binary and to limit the number of exports between processes. The reader already
-had the events, so it is one channel and four threads.
+- The wrapper (`layr-retest wrap`) does not exec the test. It starts the test, waits, and then
+  runs `llvm-profdata merge -sparse` on the raw files of that test, writes `merged.profdata`
+  (small: only functions with a count above 0) and `raw-count`, and deletes the raw files. It
+  returns the exit code of the test. So raw files exist only while their test runs. If the merge
+  fails or the wrapper is killed, the raw files stay and the export merges them.
+- The export runs while the tests run (event stream of nextest) and deletes the profile folder of
+  a test after its export. Finished tests wait for the four export workers with only the small
+  `merged.profdata`.
+
+So the raw profiles on disk are those of the tests in flight, and the rest is small. A first
+try that only moved the export into the event stream did not bound the disk: the tests ran faster
+than four workers could export, and a full nextest pipe does not stop running tests (peak
+1059496 KiB before, 930020 KiB after, on the layr workspace).
 
 ### Killed child processes
 
