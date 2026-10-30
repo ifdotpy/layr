@@ -64,5 +64,25 @@ ok "it did not wait for the push" test "$took" -lt 3
 wait $PUSH
 eq "the push succeeded" "0" "$?"
 ok "the remote has the line" git -C "$R" rev-parse --verify -q topic
+# merge and reset --hard copy and merge the trees before the lock; under it they only rename.
+locked() { printf '%s\n' "$1" | awk '/store lock held/{exit} on{print} /store lock taken/{on=1}'; }
+copies='APFS (clone|copy tree)|thin materialize'
+l line new -q side
+cd "$P/side" || exit 1
+printf 'side\n' > side.txt && l add side.txt && l save -qm side
+cd "$P/topic" || exit 1
+printf 'topic\n' > topic.txt && l add topic.txt && l save -qm topic
+trace=$(LAYR_TRACE=1 l merge -q side 2>&1)
+has "merge prepares before the lock" "prepare merge" "$trace"
+has "merge takes the lock" "store lock taken" "$trace"
+eq "merge copies no tree under the lock" "" "$(locked "$trace" | grep -E "$copies")"
+eq "the merge brings the file" "side" "$(cat side.txt)"
+trace=$(LAYR_TRACE=1 l reset -q --hard side 2>&1)
+has "reset takes the lock" "store lock taken" "$trace"
+eq "reset --hard copies no tree under the lock" "" "$(locked "$trace" | grep -E "$copies")"
+no "reset --hard removes a file that the target does not have" test -e topic.txt
+eq "reset --hard keeps untracked files" "300" "$(ls bulk | wc -l | tr -d ' ')"
+eq "no prepared copies stay" "" "$(ls -A "$LAYR_ROOT/projects/hold/meta/work" 2>/dev/null)"
+eq "the trash is empty" "" "$(ls -A "$LAYR_ROOT/trash" 2>/dev/null)"
 ok "states remain valid" l fsck
 finish

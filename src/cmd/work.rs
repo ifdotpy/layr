@@ -515,8 +515,13 @@ pub fn add(ctx: &Ctx, args: &[String]) -> Result<i32> {
 }
 
 /// What an `add` read depends on besides the working folder: the head and the staging content.
+/// The head and the index content of a line: a read before the lock is still valid under it
+/// when this did not change.
 #[cfg(target_os = "macos")]
-fn add_token(repo: &Repo, line: &Line) -> Result<(String, Option<Vec<(String, crate::storage::Fingerprint)>>)> {
+pub type AddToken = (String, Option<Vec<(String, crate::storage::Fingerprint)>>);
+
+#[cfg(target_os = "macos")]
+pub fn add_token(repo: &Repo, line: &Line) -> Result<AddToken> {
     let stage = match repo.current_stage(line)? {
         Some(s) => Some(crate::storage::scan_with_data(&s, true)?.into_iter().map(|(k, v)| (k, v.fingerprint)).collect()),
         None => None,
@@ -1341,6 +1346,16 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
         return restore_impl(ctx, &h, &line, &specs, true, false, Some(src), false, false);
     }
     let target = revs::resolve(&h.repo, Some(&line), pos.first().map(|s| s.as_str()).unwrap_or("head"))?;
+    // APFS: the copy of the working folder and the tree of the target go before the store lock
+    // (minutes under it in a large project). The working folder is never under the lock.
+    #[cfg(target_os = "macos")]
+    let prepared = if a.has("--hard") && h.repo.layers(&line)?.is_empty() {
+        hard_reset_changes(&h.repo, &line, &h.repo.state_root(&target)?).ok()
+    } else {
+        None
+    };
+    #[cfg(not(target_os = "macos"))]
+    let prepared: Option<(Temp, Vec<Change>)> = None;
     let (_lock, w) = begin_change(ctx, &h.repo, &line)?;
     let line = h.repo.line(&line.id)?;
     let repo = &h.repo;
@@ -1379,14 +1394,12 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
         "hard" => {
             repo.drop_stage(&line)?;
             if !repo.reset_snapshot(ctx, &line, &target)? {
-                let scan = repo.scan(&line)?;
+                let (_scan, list) = match prepared {
+                    Some(p) => p,
+                    None => hard_reset_changes(repo, &line, &target_root)?,
+                };
                 let wdir = repo.working(&line);
-                // Revert every tracked path; untracked and ignored files stay.
                 let own = repo.own(&line);
-                let list: Vec<_> = changes::without_moves(changes::file_changes(&scan.path, &target_root)?)
-                    .into_iter()
-                    .filter(|c| !skip_path(&c.path))
-                    .collect();
                 let gone: Vec<&str> = list
                     .iter()
                     .filter(|c| c.new.is_none() && fsutil::lmeta(&index, &c.path).is_some())
@@ -1412,6 +1425,17 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
         outln!(ctx, "head is now at {} {}", ids::short(&target), s.message.lines().next().unwrap_or(""));
     }
     Ok(0)
+}
+
+/// The changes from the working folder to `target_root` that `reset --hard` applies: every
+/// tracked path; untracked and ignored files stay. The scan stays alive with the list.
+fn hard_reset_changes(repo: &Repo, line: &Line, target_root: &std::path::Path) -> Result<(Temp, Vec<Change>)> {
+    let scan = repo.scan(line)?;
+    let list = changes::without_moves(changes::file_changes(&scan.path, target_root)?)
+        .into_iter()
+        .filter(|c| !skip_path(&c.path))
+        .collect();
+    Ok((scan, list))
 }
 
 pub fn stash(ctx: &Ctx, args: &[String]) -> Result<i32> {

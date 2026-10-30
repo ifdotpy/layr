@@ -246,6 +246,9 @@ impl Drop for Lock {
     fn drop(&mut self) {
         let held = self.since.elapsed();
         drop(self.f.take());
+        if std::env::var_os("LAYR_TRACE").is_some() {
+            eprintln!("trace {:>8.1} ms  store lock held", held.as_secs_f64() * 1000.0);
+        }
         if HELD_LOCKS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) == 1 {
             // Deleting build output takes minutes: it runs after the last lock, so other
             // commands do not wait for it.
@@ -277,6 +280,29 @@ impl Drop for Lock {
 
 /// Delete what is in the trash, without a store lock. A tree that another process is deleting
 /// at the same time may fail; the next process deletes the rest.
+/// The trash of the store whose lock this process holds (`Store::trash_dir`).
+static LOCK_TRASH: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+/// Delete a temporary tree. Under a store lock on APFS it only moves to the trash, which the
+/// last lock empties: a copy of a working folder took seconds to delete, and every other
+/// command of the project waited for it.
+pub fn discard_tree(path: &Path) {
+    #[cfg(target_os = "macos")]
+    if HELD_LOCKS.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+        let dir = LOCK_TRASH.lock().ok().and_then(|d| d.clone());
+        if let (Some(dir), Some(name)) = (dir, path.file_name()) {
+            if fs::symlink_metadata(path).is_err() {
+                return;
+            }
+            let to = dir.join(format!("{}.{}", name.to_string_lossy(), crate::ids::new_id()));
+            if fs::create_dir_all(&dir).is_ok() && crate::storage::move_tree(path, &to).is_ok() {
+                return;
+            }
+        }
+    }
+    let _ = crate::storage::delete_tree(path);
+}
+
 pub fn empty_trash(dir: &Path) {
     if let Ok(rd) = fs::read_dir(dir) {
         for e in rd.flatten() {
@@ -540,6 +566,12 @@ impl<'a> Project<'a> {
         let asked = std::time::Instant::now();
         rustix::fs::flock(&f, rustix::fs::FlockOperation::LockExclusive)?;
         HELD_LOCKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if std::env::var_os("LAYR_TRACE").is_some() {
+            eprintln!("trace {:>8.1} ms  store lock taken", asked.elapsed().as_secs_f64() * 1000.0);
+        }
+        if let Ok(mut d) = LOCK_TRASH.lock() {
+            *d = Some(self.store.trash_dir());
+        }
         let lock = Lock {
             f: Some(f),
             since: std::time::Instant::now(),
