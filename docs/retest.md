@@ -266,13 +266,15 @@ Run in the root folder of a layr line that is also the cargo project root.
   3. `layr diff <baseline> <current> -U0` gives the hunks.
   4. `cargo nextest list` (instrumented build in `target/retest`) gives all tests. Stale tests are
      selected by the Rules. Tests that have no record, and tests that failed, always run.
-  5. `cargo nextest run --no-fail-fast -E '<filter of the stale tests>'` runs them. A run of all
-     tests has no filter.
-  6. For each test that ran: `llvm-profdata merge -sparse`, then `llvm-cov export` (lcov for
+  5. `cargo nextest run --no-fail-fast --message-format libtest-json -E '<filter of the stale tests>'`
+     runs them. A run of all tests has no filter. The tool reads the event stream of nextest.
+  6. When an event says that a test finished, the tool exports the coverage of that test while the
+     other tests still run: `llvm-profdata merge -sparse`, then `llvm-cov export` (lcov for
      executed lines) on the binary of that test, and `llvm-profdata show --covered --all-functions`
      for the executed function names. Function ranges come from a table that is built once per
-     test binary. Four exports run at a time. Files outside the project, in `target/`, and in `.cargo`, `.rustup` and `/rustc/` are dropped.
-  7. The record is written and the raw profiles are deleted.
+     test binary. Four exports run at a time (`EXPORT_WORKERS`). Files outside the project, in `target/`, and in `.cargo`, `.rustup` and `/rustc/` are dropped.
+     The wrapper merges and deletes the raw profiles of a test right after the test; the export deletes the rest (see "Raw profile disk").
+  7. The record is written.
   8. The exit code is the exit code of nextest. The last line prints how many tests ran, passed,
      failed and were skipped.
   Before step 4 the fast path of "No build when nothing can change" can end the run.
@@ -282,7 +284,7 @@ Run in the root folder of a layr line that is also the cargo project root.
 - `layr-retest wrap -- <test binary> <args>` is the cargo target runner that `run` installs
   (`CARGO_TARGET_<TRIPLE>_RUNNER`). With `NEXTEST_TEST_NAME` set it sets `LLVM_PROFILE_FILE` to
   `$LAYR_RETEST_PROFILE_DIR/<binary id>/<test>.profraw` (names cleaned to letters, digits and
-  `_-.`), then execs the test. In the list phase it sets no profile.
+  `_-.`), then runs the test, merges its raw profiles and returns its exit code (see "Raw profile disk"). In the list phase it sets no profile and execs the test.
 
 ### Record format
 
@@ -377,6 +379,58 @@ auto state is in no other line. So the flow is: work, `layr save -m`, `layr-rete
 
 The installed `layr` 0.4.0 (2026-10-26) has no cache overlays. Build the one in this repository.
 
+### Raw profile disk
+
+Raw profiles are large (1.5 MB per test in the layr workspace, about 18 MB in Studio). Two steps
+keep them small:
+
+- The wrapper (`layr-retest wrap`) does not exec the test. It starts the test, waits, and then
+  runs `llvm-profdata merge -sparse` on the raw files of that test, writes `merged.profdata`
+  (small: only functions with a count above 0) and `raw-count`, and deletes the raw files. It
+  returns the exit code of the test. So raw files exist only while their test runs. If the merge
+  fails or the wrapper is killed, the raw files stay and the export merges them.
+- The export runs while the tests run (event stream of nextest) and deletes the profile folder of
+  a test after its export. Finished tests wait for the four export workers with only the small
+  `merged.profdata`.
+
+So the raw profiles on disk are those of the tests in flight, and the rest is small. A first
+try that only moved the export into the event stream did not bound the disk: the tests ran faster
+than four workers could export, and a full nextest pipe does not stop running tests (peak
+1059496 KiB before, 930020 KiB after, on the layr workspace).
+
+Measured on the layr workspace (`--full`, `--workspace --exclude layr-retest`, 262 tests,
+2026-10-30, load 80 to 135, peak of `du` on `target/retest/profraw` once per second):
+
+| Method | Peak raw profile disk |
+| --- | --- |
+| Export after all tests (old) | 1059496 KiB and 942044 KiB (two runs) |
+| Export in the event stream only | 930020 KiB |
+| Merge in the wrapper, export in the stream | 122328 KiB |
+
+The record equals the old record except for tests whose coverage varies from run to run: two runs
+of the old method differ in 1 test (`pending_part_age_survives_double_crash_and_gc_before_publication`),
+and the new method differs from the old in 2 more `store_remote` tests (one line each, timing
+dependent). Probe `panic!("probe")` at the top of `layr_model::diff::is_binary`: the incremental
+run selected 3 tests and the same 2 `interdiff` tests failed as in the `--full` run (260 passed).
+
+### Killed child processes
+
+A test can start a bin target of the workspace and stop it with SIGKILL (the Studio supervisor).
+LLVM writes a profile only when the process exits, so the killed child writes none, the code of
+the bin is in no record, and a change of it selected no test (a `panic!` probe in it: 0 selected,
+plain nextest 20 failures). Continuous mode (`%c`) did not work on this Mac (alignment and link
+errors). The rule instead:
+
+- After the build, the tool reads the source file of every bin target (`cargo metadata`, targets
+  of kind `bin`, field `src_path`).
+- A changed file that is the source of a bin target, that exists in the baseline (not a new
+  file), and that is in no `files` of any test record of the baseline, selects every test. The
+  run prints `bin target source changed and no test record has it: <files>; running every test`
+  and the note `full run, changed bin target`.
+- Limit: only the file of the target (`src/main.rs`, `src/bin/x.rs`) counts. A module file of the
+  bin that only a killed child runs is not seen. A change of a comment-only kind ends in the
+  fast path of "No build when nothing can change" and selects nothing, as for other files.
+
 ### Processes that a test starts
 
 - The wrapper gives each test a folder `<profile dir>/<binary id>/<test>/` and sets
@@ -452,6 +506,7 @@ the old chain is not used again. The end to end test shows it with a test that r
   (cargo splits the runner on spaces).
 - Cross compilation: the runner variable uses the host triple.
 - No schedule for `--full`.
+- A child that a test kills has no coverage, see "Killed child processes".
 - Child processes only have coverage when the child is a bin target built in `target/retest`. A test
   that starts a binary from another folder (Studio's gate sets `STUDIO_SUPERVISOR_BINARY` to the
   plain `target/debug` build) runs code that has no instrumentation, so a change of that binary does

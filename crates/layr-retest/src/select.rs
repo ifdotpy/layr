@@ -3,6 +3,7 @@
 use crate::deps::Ext;
 use crate::parse::{in_ranges, overlaps, FileChange, Hunk};
 use crate::record::{FileCov, Ranges, TestRec};
+use std::collections::BTreeMap;
 
 /// Line `l` of the old state in the new state. `None` when a hunk changed that line.
 fn map_line(hunks: &[Hunk], l: u32) -> Option<u32> {
@@ -89,6 +90,18 @@ pub fn no_build_needed(name_status: &str, changes: &[FileChange]) -> bool {
                 .find(|c| paths.contains(&c.old_path.as_str()))
                 .is_some_and(|c| c.hunks.iter().all(|h| h.added.iter().chain(&h.removed).all(comment)))
     })
+}
+
+/// Changed files of bin targets that no test record knows. A test can start such a bin and stop it
+/// with SIGKILL: LLVM then writes no profile, so the code is in no record and a change of it would
+/// select no test. `bins` are the source files of the bin targets, relative to the line root.
+/// Files that are new in the diff are not in `changes`, so they are not listed.
+pub fn unrecorded_bin_changes<'a>(bins: &[String], changes: &'a [FileChange], tests: &BTreeMap<String, TestRec>) -> Vec<&'a str> {
+    changes
+        .iter()
+        .map(|c| c.old_path.as_str())
+        .filter(|p| bins.iter().any(|b| b == p) && !tests.values().any(|t| t.files.contains_key(*p)))
+        .collect()
 }
 
 fn hunk_hits(cov: &FileCov, h: &Hunk) -> bool {
@@ -205,7 +218,23 @@ mod tests {
         assert!(!no_build_needed("M\tsrc/a.rs", &[]));
     }
 
-    use std::collections::BTreeMap;
+    #[test]
+    fn changed_bin_file_that_no_record_knows_is_listed() {
+        let bins = vec!["src/bin/sup.rs".to_string(), "src/main.rs".to_string()];
+        let tests: BTreeMap<String, TestRec> = [("t".to_string(), rec("pass"))].into();
+        let change = |p: &str| rs_diff(p, &["x"], &["y"]);
+        // A bin file in no record: listed.
+        assert_eq!(unrecorded_bin_changes(&bins, &change("src/bin/sup.rs"), &tests), vec!["src/bin/sup.rs"]);
+        // A bin file that a record has (rec() has a.rs): not listed.
+        let bins_a = vec!["a.rs".to_string()];
+        assert!(unrecorded_bin_changes(&bins_a, &change("a.rs"), &tests).is_empty());
+        // A file that is not a bin target, and no change at all: not listed.
+        assert!(unrecorded_bin_changes(&bins, &change("src/lib.rs"), &tests).is_empty());
+        assert!(unrecorded_bin_changes(&bins, &[], &tests).is_empty());
+        // A new file is not in `changes` (parse_hunks leaves it out), so it is not listed.
+        let new = parse_hunks("diff --git a/src/main.rs b/src/main.rs\nnew file mode 100644\n--- /dev/null\n+++ b/src/main.rs\n@@ -0,0 +1 @@\n+fn main() {}\n");
+        assert!(unrecorded_bin_changes(&bins, &new, &tests).is_empty());
+    }
 
     fn is_stale(r: &TestRec, c: &[FileChange]) -> bool {
         super::is_stale(r, c, &Ext::default())

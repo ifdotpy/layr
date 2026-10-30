@@ -15,12 +15,16 @@ use std::io::{BufRead, BufReader};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock};
 use tools::Tool;
 
 /// Folder of the raw profiles of one run. The wrapper reads it from this variable.
 const PROFILE_DIR_VAR: &str = "LAYR_RETEST_PROFILE_DIR";
+/// Path of `llvm-profdata`, for the wrapper, which merges the raw profiles of its test right after the test.
+const PROFDATA_VAR: &str = "LAYR_RETEST_PROFDATA";
+/// File in the profile folder of a test: how many raw profile files (processes) the merge read.
+const RAW_COUNT_FILE: &str = "raw-count";
 /// Set by `--save`: the run ends with `layr save --caches --cache` so that new lines take the records.
 /// Off by default: the call makes a state of the line, which takes 40 to 75 s in a line with a big
 /// build folder, and it holds the lock of the store.
@@ -65,14 +69,35 @@ fn wrap(args: &[String]) -> Result<i32> {
     let Some((prog, rest)) = args.split_first() else { bail!("wrap: no test binary") };
     let mut cmd = Command::new(prog);
     cmd.args(rest);
-    if let (Ok(dir), Ok(bin), Ok(test)) =
+    let (Ok(dir), Ok(bin), Ok(test)) =
         (std::env::var(PROFILE_DIR_VAR), std::env::var("NEXTEST_BINARY_ID"), std::env::var("NEXTEST_TEST_NAME"))
-    {
-        let p = profile_dir(Path::new(&dir), &bin, &test);
-        std::fs::create_dir_all(&p)?;
-        cmd.env("LLVM_PROFILE_FILE", p.join("%p.profraw"));
+    else {
+        return Err(cmd.exec()).with_context(|| format!("cannot start {prog}"));
+    };
+    let p = profile_dir(Path::new(&dir), &bin, &test);
+    std::fs::create_dir_all(&p)?;
+    cmd.env("LLVM_PROFILE_FILE", p.join("%p.profraw"));
+    // Not exec: after the test, merge its raw profiles into one small file and delete them, so
+    // the raw profiles on disk are only those of the tests that run now.
+    let status = cmd.status().with_context(|| format!("cannot start {prog}"))?;
+    if let Ok(profdata) = std::env::var(PROFDATA_VAR) {
+        // On failure the raw files stay and the export merges them.
+        let _ = merge_raw(Path::new(&profdata), &p);
     }
-    Err(cmd.exec()).with_context(|| format!("cannot start {prog}"))
+    use std::os::unix::process::ExitStatusExt;
+    Ok(status.code().unwrap_or_else(|| 128 + status.signal().unwrap_or(0)))
+}
+
+/// Merge the raw profiles of a folder into `merged.profdata`, then delete them. Returns the number of raw files.
+fn merge_raw(profdata: &Path, dir: &Path) -> Result<usize> {
+    let raws: Vec<PathBuf> =
+        std::fs::read_dir(dir)?.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "profraw")).collect();
+    if !raws.is_empty() {
+        output(Command::new(profdata).args(["merge", "-sparse"]).args(&raws).arg("-o").arg(dir.join("merged.profdata")))?;
+        std::fs::write(dir.join(RAW_COUNT_FILE), raws.len().to_string())?;
+        raws.iter().for_each(|r| drop(std::fs::remove_file(r)));
+    }
+    Ok(raws.len())
 }
 
 fn output(cmd: &mut Command) -> Result<Vec<u8>> {
@@ -218,19 +243,16 @@ fn cov_export(tools: &(PathBuf, PathBuf), bin: &Path, others: &[PathBuf], data: 
 
 /// Coverage of one test, from its raw profile and its test binary.
 fn export(root: &Path, bin: &Path, others: &[PathBuf], dir: &Path, tools: &(PathBuf, PathBuf), tables: &Tables) -> Result<Exported> {
-    let raws: Vec<PathBuf> =
-        std::fs::read_dir(dir)?.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "profraw")).collect();
+    // The wrapper already merged the raw files. If it could not (it was killed), merge them here.
     let data = dir.join("merged.profdata");
-    output(Command::new(&tools.0).args(["merge", "-sparse"]).args(&raws).arg("-o").arg(&data))?;
+    let n = match std::fs::read_to_string(dir.join(RAW_COUNT_FILE)) {
+        Ok(n) if data.is_file() => n.trim().parse().unwrap_or(2),
+        _ => merge_raw(&tools.0, dir)?,
+    };
     // One profile file means that the test process was the only process with instrumented code.
     // Another file is from a child process, which may have run another bin target of the project.
-    let others = if raws.len() > 1 { others } else { &[] };
-    let rel = |p: &str| -> Option<String> {
-        let canon = root.canonicalize().ok();
-        let p = Path::new(p);
-        let r = p.strip_prefix(root).ok().or_else(|| canon.as_deref().and_then(|c| p.strip_prefix(c).ok()))?;
-        Some(r.to_string_lossy().into_owned())
-    };
+    let others = if n > 1 { others } else { &[] };
+    let rel = |p: &str| relative_to(root, p);
     let lcov = String::from_utf8_lossy(&output(&mut cov_export(tools, bin, others, &data, &["-format=lcov", "-skip-functions"]))?).into_owned();
     // Function ranges do not depend on the test; the profile only says which functions ran.
     let ran = parse::parse_covered(&String::from_utf8_lossy(&output(
@@ -266,19 +288,28 @@ fn export(root: &Path, bin: &Path, others: &[PathBuf], dir: &Path, tools: &(Path
     Ok((files, packages.into_iter().collect()))
 }
 
-/// The bin targets of the workspace, built instrumented in `<target>/debug/<name>`.
-fn bin_objects(target: &Path) -> Result<Vec<PathBuf>> {
+/// Name and source file of every bin target of the workspace.
+fn bin_targets() -> Result<Vec<(String, String)>> {
     let meta: Value =
         serde_json::from_slice(&output(Command::new("cargo").args(["metadata", "--no-deps", "--format-version", "1"]))?)?;
-    let mut out = Vec::new();
-    for t in meta["packages"].as_array().into_iter().flatten().flat_map(|p| p["targets"].as_array().into_iter().flatten()) {
-        let is_bin = t["kind"].as_array().is_some_and(|k| k.iter().any(|k| k == "bin"));
-        let path = target.join("debug").join(t["name"].as_str().unwrap_or_default());
-        if is_bin && path.is_file() {
-            out.push(path);
-        }
-    }
-    Ok(out)
+    let targets = meta["packages"].as_array().into_iter().flatten().flat_map(|p| p["targets"].as_array().into_iter().flatten());
+    Ok(targets
+        .filter(|t| t["kind"].as_array().is_some_and(|k| k.iter().any(|k| k == "bin")))
+        .map(|t| (t["name"].as_str().unwrap_or_default().to_string(), t["src_path"].as_str().unwrap_or_default().to_string()))
+        .collect())
+}
+
+/// The bin targets of the workspace, built instrumented in `<target>/debug/<name>`.
+fn bin_objects(target: &Path) -> Result<Vec<PathBuf>> {
+    Ok(bin_targets()?.into_iter().map(|(name, _)| target.join("debug").join(name)).filter(|p| p.is_file()).collect())
+}
+
+/// Path of `p` relative to the line root, if it is inside.
+fn relative_to(root: &Path, p: &str) -> Option<String> {
+    let canon = root.canonicalize().ok();
+    let p = Path::new(p);
+    let r = p.strip_prefix(root).ok().or_else(|| canon.as_deref().and_then(|c| p.strip_prefix(c).ok()))?;
+    Some(r.to_string_lossy().into_owned())
 }
 
 /// Delete `.profraw` files outside `target/` that appeared since `since`. Returns how many.
@@ -426,6 +457,7 @@ fn run(args: &[String]) -> Result<i32> {
     let profdir = target.join("profraw");
     let _ = std::fs::remove_dir_all(&profdir);
     let exe = std::env::current_exe()?;
+    let tools = (llvm_tool("llvm-profdata")?, llvm_tool("llvm-cov")?);
     let runner_var = format!("CARGO_TARGET_{}_RUNNER", rustc_host()?.to_uppercase().replace('-', "_"));
     let flags = format!("{} -C instrument-coverage", std::env::var("RUSTFLAGS").unwrap_or_default());
     let nextest = |sub: &[&str]| {
@@ -433,6 +465,7 @@ fn run(args: &[String]) -> Result<i32> {
         c.arg("nextest").args(sub).args(extra);
         // Cargo, build scripts and the list phase write here; the wrapper gives each test its own folder.
         c.env("LLVM_PROFILE_FILE", profdir.join("other/%p.profraw"));
+        c.env(PROFDATA_VAR, &tools.0);
         c.env("RUSTFLAGS", flags.trim()).env("CARGO_TARGET_DIR", &target).env(PROFILE_DIR_VAR, &profdir);
         c.env(&runner_var, format!("{} wrap --", exe.display())).env("NEXTEST_EXPERIMENTAL_LIBTEST_JSON", "1");
         c
@@ -440,6 +473,20 @@ fn run(args: &[String]) -> Result<i32> {
     let list = output(nextest(&["list", "--message-format", "json"]).stderr(Stdio::inherit()))?;
     let suites = parse_list(&list)?;
     lap.mark("build and list");
+
+    // A test can start a bin and stop it with SIGKILL: no profile, so the bin's code is in no record
+    // and a change of it selects nothing. Run every test then (docs/retest.md, "Killed child processes").
+    let mut full = full;
+    let mut forced = false;
+    if let (false, Some(old)) = (full, base_rec.as_ref()) {
+        let bins: Vec<String> = bin_targets()?.iter().filter_map(|(_, src)| relative_to(&root, src)).collect();
+        let hit = select::unrecorded_bin_changes(&bins, &changes, &old.tests);
+        if !hit.is_empty() {
+            eprintln!("layr-retest: bin target source changed and no test record has it: {}; running every test", hit.join(", "));
+            full = true;
+            forced = true;
+        }
+    }
 
     // Select.
     let mut all: Vec<(String, String)> = Vec::new();
@@ -458,7 +505,9 @@ fn run(args: &[String]) -> Result<i32> {
             }
         }
     }
-    let note = if full {
+    let note = if forced {
+        "full run, changed bin target"
+    } else if full {
         "full run"
     } else if baseline.is_none() {
         "no record, full run"
@@ -467,61 +516,61 @@ fn run(args: &[String]) -> Result<i32> {
     };
     eprintln!("layr-retest: {} tests, {} selected, {} skipped ({note})", all.len(), stale.len(), all.len() - stale.len());
 
-    // Run.
+    // Run, and export the coverage of each test as soon as nextest reports it. The wrapper has
+    // merged the raw profiles of the test already, so a test that waits for an export holds only
+    // a small `merged.profdata`. The export deletes the folder of the test.
+    let bins = bin_objects(&target)?;
+    let tables = Tables::default();
+    let done: Mutex<BTreeMap<String, Result<Exported>>> = Mutex::new(BTreeMap::new());
     let mut results: BTreeMap<String, bool> = BTreeMap::new();
     let mut code = 0;
+    let mut run_failed = Ok(());
     if !stale.is_empty() {
         let mut cmd = nextest(&["run", "--no-fail-fast", "--message-format", "libtest-json"]);
         if stale.len() < all.len() {
             cmd.args(["-E", &filter_expr(&stale)]);
         }
         let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn().context("cannot start cargo nextest")?;
-        for l in BufReader::new(child.stdout.take().unwrap()).lines() {
-            let Ok(v) = serde_json::from_str::<Value>(&l?) else { continue };
-            let (Some("test"), Some(ev), Some(name)) = (v["type"].as_str(), v["event"].as_str(), v["name"].as_str()) else {
-                continue;
-            };
-            if ev == "started" || ev == "ignored" {
-                continue;
+        let (tx, rx) = std::sync::mpsc::sync_channel::<(String, PathBuf, PathBuf)>(EXPORT_WORKERS);
+        let rx = Mutex::new(rx);
+        std::thread::scope(|sc| {
+            for _ in 0..EXPORT_WORKERS {
+                sc.spawn(|| loop {
+                    let Ok((key, bin, dir)) = rx.lock().unwrap().recv() else { break };
+                    // A test that died before it wrote a profile has no coverage.
+                    let r = if dir.is_dir() { export(&root, &bin, &bins, &dir, &tools, &tables) } else { Ok(Default::default()) };
+                    let _ = std::fs::remove_dir_all(&dir);
+                    done.lock().unwrap().insert(key, r);
+                });
             }
-            let Some((prefix, test)) = name.split_once('$') else { continue };
-            // A lib and a bin of one package share a prefix; the test name tells them apart.
-            if let Some(s) = suites.iter().find(|s| s.prefix == prefix && s.tests.iter().any(|t| t == test)) {
-                results.insert(test_key(&s.binary_id, test), ev == "ok");
+            for l in BufReader::new(child.stdout.take().unwrap()).lines() {
+                let Ok(l) = l else { break };
+                let Ok(v) = serde_json::from_str::<Value>(&l) else { continue };
+                let (Some("test"), Some(ev), Some(name)) = (v["type"].as_str(), v["event"].as_str(), v["name"].as_str()) else {
+                    continue;
+                };
+                if ev == "started" || ev == "ignored" {
+                    continue;
+                }
+                let Some((prefix, test)) = name.split_once('$') else { continue };
+                // A lib and a bin of one package share a prefix; the test name tells them apart.
+                if let Some(s) = suites.iter().find(|s| s.prefix == prefix && s.tests.iter().any(|t| t == test)) {
+                    let key = test_key(&s.binary_id, test);
+                    results.insert(key.clone(), ev == "ok");
+                    let _ = tx.send((key, s.path.clone(), profile_dir(&profdir, &s.binary_id, test)));
+                }
             }
-        }
-        code = child.wait()?.code().unwrap_or(1);
+            drop(tx);
+            // The scope waits for the workers, which end when the channel is closed.
+            run_failed = child.wait().map(|st| code = st.code().unwrap_or(1)).context("cannot wait for cargo nextest");
+        });
+        run_failed?;
         if results.is_empty() && code != 0 {
             return Ok(code);
         }
     }
-
-    lap.mark("run tests");
-    // Export coverage of the tests that ran.
-    let tools = (llvm_tool("llvm-profdata")?, llvm_tool("llvm-cov")?);
-    let bins = bin_objects(&target)?;
-    let jobs: Vec<(String, &Suite, &str)> = suites
-        .iter()
-        .flat_map(|s| s.tests.iter().map(move |t| (test_key(&s.binary_id, t), s, t.as_str())))
-        .filter(|(k, ..)| results.contains_key(k))
-        .collect();
-    let next = AtomicUsize::new(0);
-    let tables = Tables::default();
-    let done: Mutex<BTreeMap<String, Result<Exported>>> = Mutex::new(BTreeMap::new());
-    std::thread::scope(|sc| {
-        for _ in 0..EXPORT_WORKERS {
-            sc.spawn(|| loop {
-                let i = next.fetch_add(1, Ordering::SeqCst);
-                let Some((key, s, test)) = jobs.get(i) else { break };
-                let dir = profile_dir(&profdir, &s.binary_id, test);
-                // A test that died before it wrote a profile has no coverage.
-                let r = if dir.is_dir() { export(&root, &s.path, &bins, &dir, &tools, &tables) } else { Ok(Default::default()) };
-                done.lock().unwrap().insert(key.clone(), r);
-            });
-        }
-    });
+    lap.mark("run tests and export coverage");
     let mut done = done.into_inner().unwrap();
-    lap.mark("export coverage");
 
     // Write the record. Tests that did not run keep their old entry.
     let mut rec = Record { baseline: if full { None } else { baseline.clone() }, args: extra.to_vec(), tests: BTreeMap::new() };
