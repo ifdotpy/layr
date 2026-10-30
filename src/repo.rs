@@ -55,7 +55,7 @@ pub struct Temp {
 
 impl Drop for Temp {
     fn drop(&mut self) {
-        let _ = btrfs::delete_tree(&self.path);
+        crate::store::discard_tree(&self.path);
     }
 }
 
