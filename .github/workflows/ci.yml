@@ -45,7 +45,7 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           sudo -E env "PATH=$PATH" LAYR="$PWD/target/debug/layr" LAYR_MINIO_BIN="$HOME/minio/minio" tests/run.sh
   macos:
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - name: Install tools
