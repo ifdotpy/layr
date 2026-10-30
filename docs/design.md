@@ -203,6 +203,14 @@ is valid for a state, so it never decides that by itself:
   immutable and the lock never covers the working folder. Under the lock the merge takes its
   result with one rename when the head, the source and the index did not change; else it merges
   again under the lock. Temporary trees that a command drops under the lock go to the trash.
+  `replay` and `pick` merge their chain of states the same way; `park` builds its tree, and
+  `clean -f` reads its status, before the lock; `clean -n` takes no lock; `undo` writes the
+  automatic state and reads its trees before the lock. A folder that `clean` removes goes to
+  the trash. `merge <line>` copies the caches of that line under the lock of each cache overlay
+  only.
+- Reading physical extents (`F_LOG2PHYS_EXT`) needs the file data on the device: layr calls
+  `fsync`. Rust's `sync_data` is `F_FULLFSYNC` on macOS, which also flushes the drive cache of
+  the whole device (674 calls in one `status` of a Studio line).
 
 A cache helps only a tool that checks its own output and accepts a new path, because every line
 has its own folder. Cargo's `target` does: Cargo compares fingerprints and rebuilds what a change

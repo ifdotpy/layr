@@ -648,6 +648,20 @@ pub fn apfs_data_identity(path: &std::path::Path) -> io::Result<ApfsDataIdentity
     })
 }
 
+/// Write the dirty data of a file to the device with `fsync`. On macOS `File::sync_data` is
+/// `F_FULLFSYNC`, which also flushes the drive cache of the whole device: about 0.5 ms on an
+/// idle Mac and much more while other programs write. Physical addresses need only the data
+/// on the device.
+#[cfg(target_os = "macos")]
+pub fn fsync_data(f: &std::fs::File) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: the descriptor belongs to `f`, which is open for the call.
+    if unsafe { libc::fsync(f.as_raw_fd()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// The physical extents of a file: (file offset, length, device offset). `None` when APFS does
 /// not report a mapping for some range (a hole, or data not yet allocated).
 #[cfg(target_os = "macos")]

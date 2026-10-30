@@ -118,11 +118,6 @@ struct PreparedMerge {
 thread_local! {
     static PREPARED_MERGE: std::cell::RefCell<Option<PreparedMerge>> = const { std::cell::RefCell::new(None) };
 }
-#[cfg(target_os = "macos")]
-thread_local! {
-    /// The status of the line before the lock, with the head and the index it was read with.
-    static PREPARED_STATUS: std::cell::RefCell<Option<(work::AddToken, crate::repo::Status)>> = const { std::cell::RefCell::new(None) };
-}
 
 /// The reads of `merge <rev>` before the store lock (APFS): the automatic state of the working
 /// folder, the status, the trees of the states, and the merge result. Errors only lose the
@@ -131,9 +126,7 @@ thread_local! {
 fn prepare_merge(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str) -> Result<()> {
     let _t = crate::trace::span("prepare merge");
     repo.prepare_save(line)?;
-    let token = work::add_token(repo, line)?;
-    let st = repo.status(line)?.0;
-    PREPARED_STATUS.with(|p| *p.borrow_mut() = Some((token, st)));
+    repo.prepare_status(line)?;
     let theirs = revs::resolve(repo, Some(line), rev)?;
     let head = line.head.as_str();
     if theirs == head || repo.is_ancestor(&theirs, head)? {
@@ -154,67 +147,89 @@ fn prepare_merge(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str) -> Result<()> {
     Ok(())
 }
 
-/// The status of a line under the lock: the one read before the lock when the head and the
-/// index did not change since; the working folder is never under the lock.
-fn locked_status(repo: &Repo, line: &Line) -> Result<crate::repo::Status> {
-    #[cfg(target_os = "macos")]
-    if let Some((token, st)) = PREPARED_STATUS.with(|p| p.borrow_mut().take()) {
-        if token == work::add_token(repo, line)? {
-            return Ok(st);
-        }
-    }
-    Ok(repo.status(line)?.0)
-}
-
-/// One state of `replay <upstream>` merged before the store lock (APFS).
+/// One merge of a chain (`replay`, `pick`) made before the store lock (APFS).
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct PreparedStep {
-    source: String,
+    base: String,
+    theirs: String,
+    label: String,
     work: crate::repo::Temp,
     out: merge::Outcome,
 }
 
-/// The merges of `replay` before the store lock (APFS), for the line at `head` onto `onto`:
-/// each state of the chain merges onto the result of the one before it, in temporary folders.
-/// Copying and merging the trees of every state took minutes under the lock.
+/// The prepared merges of a chain under the lock: each step hands its result to
+/// `merge_states` when it is the next one; the first step that is not drops the rest.
+type Steps = std::iter::Peekable<std::vec::IntoIter<PreparedStep>>;
+
+/// Give `merge_states` the prepared merge of (`base`, `theirs`) over `ours` when it is the next
+/// one of `steps`. Its conflicts get the real state of `ours`.
 #[cfg(target_os = "macos")]
-fn prepare_replay(ctx: &Ctx, repo: &Repo, line: &Line, upstream: &str, onto: &str) -> Result<Vec<PreparedStep>> {
-    let _t = crate::trace::span("prepare replay");
-    let token = work::add_token(repo, line)?;
-    let st = repo.status(line)?.0;
-    PREPARED_STATUS.with(|p| *p.borrow_mut() = Some((token, st)));
-    let Some(base) = repo.merge_base(&line.head, upstream)? else { return Ok(Vec::new()) };
-    let mut chain = repo.first_parent_chain(&line.head, Some(&base))?;
-    chain.reverse();
-    let mut steps: Vec<PreparedStep> = Vec::new();
-    for p in chain {
-        let c = repo.state(&p)?;
-        if c.parents.len() > 1 {
-            continue;
+fn hand_over(steps: &mut Steps, line: &Line, base: &str, ours: &str, theirs: &str, label: &str) {
+    match steps.next_if(|s| s.base == base && s.theirs == theirs && s.label == label) {
+        Some(step) => {
+            let mut out = step.out;
+            for conflict in &mut out.conflicts {
+                conflict.ours = Some(ours.to_string());
+            }
+            PREPARED_MERGE.with(|m| {
+                *m.borrow_mut() = Some(PreparedMerge {
+                    line: line.id.clone(),
+                    base: base.to_string(),
+                    ours: ours.to_string(),
+                    theirs: theirs.to_string(),
+                    label: label.to_string(),
+                    work: step.work,
+                    out,
+                })
+            });
         }
+        // A later prepared merge was made over this one: none of them holds any more.
+        None => *steps = Vec::new().into_iter().peekable(),
+    }
+}
+
+/// The merges of a chain before the store lock (APFS): each (base, theirs, label) merges onto
+/// the result of the one before it, the first onto `onto`, in temporary folders, with a
+/// prepared snapshot copy of each result. Copying and merging the trees of every state took
+/// minutes under the lock.
+#[cfg(target_os = "macos")]
+fn prepare_steps(ctx: &Ctx, repo: &Repo, line: &Line, onto: &str, chain: Vec<(String, String, String)>) -> Result<Vec<PreparedStep>> {
+    let mut steps: Vec<PreparedStep> = Vec::new();
+    for (base, theirs, label) in chain {
         let ours_root = match steps.last() {
             Some(s) => s.work.path.clone(),
             None => repo.state_root(onto)?,
         };
-        let (work, out) = merge_trees_at(ctx, repo, line, &c.parents[0], "", &ours_root, &p, &ids::short(&p))?;
+        let (work, out) = merge_trees_at(ctx, repo, line, &base, "", &ours_root, &theirs, &label)?;
         crate::storage::prepare_snapshot(&work.path, &repo.p.work_dir(), true)?;
-        steps.push(PreparedStep { source: p, work, out });
+        steps.push(PreparedStep { base, theirs, label, work, out });
     }
     Ok(steps)
+}
+
+/// The merges of `replay` before the store lock (APFS), for the line at its head onto `onto`.
+#[cfg(target_os = "macos")]
+fn prepare_replay(ctx: &Ctx, repo: &Repo, line: &Line, upstream: &str, onto: &str) -> Result<Vec<PreparedStep>> {
+    let _t = crate::trace::span("prepare replay");
+    repo.prepare_status(line)?;
+    let Some(base) = repo.merge_base(&line.head, upstream)? else { return Ok(Vec::new()) };
+    let mut chain = repo.first_parent_chain(&line.head, Some(&base))?;
+    chain.reverse();
+    let mut list = Vec::new();
+    for p in chain {
+        let c = repo.state(&p)?;
+        if c.parents.len() == 1 {
+            list.push((c.parents[0].clone(), p.clone(), ids::short(&p)));
+        }
+    }
+    prepare_steps(ctx, repo, line, onto, list)
 }
 
 /// Delete what the preparation left (after the lock).
 fn discard_prepared(repo: &Repo) {
     #[cfg(target_os = "macos")]
-    {
-        PREPARED_STATUS.with(|p| p.borrow_mut().take());
-        PREPARED_MERGE.with(|p| p.borrow_mut().take());
-        for p in crate::storage::take_prepared() {
-            let _ = repo.p.trash(&p);
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    let _ = repo;
+    PREPARED_MERGE.with(|p| p.borrow_mut().take());
+    repo.discard_prepared();
 }
 
 /// The merge of the follow overlays of two lines (docs/overlays.md, section 1): it goes with the
@@ -925,7 +940,7 @@ fn merge_rev_inner(
         }
         return Ok(0);
     }
-    let st = locked_status(repo, &line)?;
+    let st = repo.locked_status(&line)?.0;
     if !st.staged.is_empty() {
         return Err(exit(1, "error: you have staged changes; save or park them before merging."));
     }
@@ -1128,9 +1143,28 @@ fn pick(ctx: &Ctx, args: &[String], revert: bool) -> Result<i32> {
             picks.push(revs::resolve(repo, Some(&line), r)?);
         }
     }
+    // The merge of each picked state onto the head (base and theirs swapped for an invert).
+    let pair = |p: &str| -> Result<(String, String)> {
+        let parent = repo.state(p)?.parents.first().cloned().ok_or_else(|| exit(128, format!("fatal: {} has no parent", ids::short(p))))?;
+        Ok(if revert { (p.to_string(), parent) } else { (parent, p.to_string()) })
+    };
+    #[cfg(target_os = "macos")]
+    let prepared = (|| -> Result<Vec<PreparedStep>> {
+        let _t = crate::trace::span("prepare pick");
+        repo.prepare_status(&line)?;
+        let chain = picks.iter().map(|p| pair(p).map(|(b, t)| (b, t, ids::short(p)))).collect::<Result<Vec<_>>>()?;
+        prepare_steps(ctx, repo, &line, &line.head, chain)
+    })()
+    .unwrap_or_default();
+    #[cfg(not(target_os = "macos"))]
+    let prepared: Vec<PreparedStep> = Vec::new();
+    let head_before = line.head.clone();
+    let r = (|| -> Result<i32> {
     let (_lock, w) = work::begin_change(ctx, repo, &line)?;
     let mut line = repo.line(&line.id)?;
-    let (st, _scan, _it, _idx) = repo.status(&line)?;
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut, unused_variables))]
+    let mut steps: Steps = if line.head == head_before { prepared } else { Vec::new() }.into_iter().peekable();
+    let st = repo.locked_status(&line)?.0;
     if !st.staged.is_empty() {
         return Err(exit(1, "error: you have staged changes; save or park them first."));
     }
@@ -1140,11 +1174,7 @@ fn pick(ctx: &Ctx, args: &[String], revert: bool) -> Result<i32> {
     let mut first_w = w;
     for p in picks {
         let c = repo.state(&p)?;
-        let parent = match c.parents.first() {
-            Some(x) => x.clone(),
-            None => return Err(exit(128, format!("fatal: {} has no parent", ids::short(&p)))),
-        };
-        let (base, theirs) = if revert { (p.clone(), parent.clone()) } else { (parent.clone(), p.clone()) };
+        let (base, theirs) = pair(&p)?;
         let subject = c.message.lines().next().unwrap_or("").to_string();
         let message = if revert {
             format!("Invert \"{subject}\"\n\nThis inverts state {}.", ids::display(&p))
@@ -1154,6 +1184,8 @@ fn pick(ctx: &Ctx, args: &[String], revert: bool) -> Result<i32> {
             c.message.clone()
         };
         let label = ids::short(&p);
+        #[cfg(target_os = "macos")]
+        hand_over(&mut steps, &line, &base, &line.head, &theirs, &label);
         let (mut state, out) =
             merge_states(ctx, repo, &line, &base, &line.head, &theirs, &label, vec![line.head.clone()], &message)?;
         if !revert {
@@ -1198,6 +1230,9 @@ fn pick(ctx: &Ctx, args: &[String], revert: bool) -> Result<i32> {
         }
     }
     Ok(code)
+    })();
+    discard_prepared(repo);
+    r
 }
 
 pub fn cherry_pick(ctx: &Ctx, args: &[String]) -> Result<i32> {
@@ -1261,8 +1296,8 @@ fn replay_locked(
     let line = repo.line(&line.id)?;
     // The merges prepared before the lock hold when the line did not move.
     #[cfg_attr(not(target_os = "macos"), allow(unused_mut, unused_variables))]
-    let mut steps = if prepared.0 == line.head { prepared.1 } else { Vec::new() }.into_iter().peekable();
-    let st = locked_status(repo, &line)?;
+    let mut steps: Steps = if prepared.0 == line.head { prepared.1 } else { Vec::new() }.into_iter().peekable();
+    let st = repo.locked_status(&line)?.0;
     if !st.clean() {
         return Err(exit(1, "error: cannot replay: you have unstaged or staged changes.\nPlease save or park them."));
     }
@@ -1284,29 +1319,7 @@ fn replay_locked(
         }
         let parent = c.parents[0].clone();
         #[cfg(target_os = "macos")]
-        {
-            match steps.next_if(|s| s.source == *p) {
-                Some(step) => {
-                    let mut out = step.out;
-                    for conflict in &mut out.conflicts {
-                        conflict.ours = Some(cur.clone());
-                    }
-                    PREPARED_MERGE.with(|m| {
-                        *m.borrow_mut() = Some(PreparedMerge {
-                            line: line.id.clone(),
-                            base: parent.clone(),
-                            ours: cur.clone(),
-                            theirs: p.clone(),
-                            label: ids::short(p),
-                            work: step.work,
-                            out,
-                        })
-                    });
-                }
-                // A later prepared merge was made over this one: none of them holds any more.
-                None => steps = Vec::new().into_iter().peekable(),
-            }
-        }
+        hand_over(&mut steps, &line, &parent, &cur, p, &ids::short(p));
         let (mut s, out) = merge_states(ctx, repo, &line, &parent, &cur, p, &ids::short(p), vec![cur.clone()], &c.message)?;
         s.author = c.author.clone();
         s.change_id = c.change_id.clone();

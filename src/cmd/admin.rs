@@ -340,6 +340,22 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
         return Err(exit(1, "permission denied: only the project admin or the user who made it can undo this operation"));
     }
     let _queue_lock = if r.data.get("queue_change").is_some() { Some(super::queue::require_lock(repo)?) } else { None };
+    // Before the lock: the automatic state of each line's folder and the trees that the undo
+    // reads (seconds to minutes each under the lock). Errors only lose the preparation.
+    for (lid, ch) in &r.lines {
+        if let Ok(Some(l)) = repo.p.db.line_by_id(lid) {
+            let _ = repo.prepare_save(&l);
+        }
+        for s in [&ch.working_before, &ch.working_after].into_iter().flatten() {
+            let _ = repo.state_root(s);
+        }
+    }
+    let r2 = undo_locked(ctx, repo, &r, force);
+    repo.discard_prepared();
+    r2
+}
+
+fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
     let _lock = repo.p.lock()?;
     let mut rec = Record::new("undo");
     rec.data = serde_json::json!({"undo": r.id, "op": r.op});
