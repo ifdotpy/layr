@@ -6,6 +6,26 @@ on:
   pull_request:
 
 jobs:
+  commits:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Conventional Commit subjects
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # release-please writes the release notes from these subjects (AGENTS.md).
+          bad=$(git log --no-merges --format='%h %s' "$BASE..$HEAD" \
+            | grep -Ev '^[0-9a-f]+ (feat|fix|perf|revert|docs|test|refactor|build|ci|chore|style)(\([a-z0-9-]+\))?!?: .+' || true)
+          if [ -n "$bad" ]; then
+            echo "These commits need a Conventional Commit subject, for example 'fix(merge): Keep the base':"
+            echo "$bad"
+            exit 1
+          fi
   test:
     runs-on: ubuntu-24.04
     steps:
