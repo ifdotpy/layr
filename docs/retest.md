@@ -398,6 +398,21 @@ try that only moved the export into the event stream did not bound the disk: the
 than four workers could export, and a full nextest pipe does not stop running tests (peak
 1059496 KiB before, 930020 KiB after, on the layr workspace).
 
+Measured on the layr workspace (`--full`, `--workspace --exclude layr-retest`, 262 tests,
+2026-10-30, load 80 to 135, peak of `du` on `target/retest/profraw` once per second):
+
+| Method | Peak raw profile disk |
+| --- | --- |
+| Export after all tests (old) | 1059496 KiB and 942044 KiB (two runs) |
+| Export in the event stream only | 930020 KiB |
+| Merge in the wrapper, export in the stream | 122328 KiB |
+
+The record equals the old record except for tests whose coverage varies from run to run: two runs
+of the old method differ in 1 test (`pending_part_age_survives_double_crash_and_gc_before_publication`),
+and the new method differs from the old in 2 more `store_remote` tests (one line each, timing
+dependent). Probe `panic!("probe")` at the top of `layr_model::diff::is_binary`: the incremental
+run selected 3 tests and the same 2 `interdiff` tests failed as in the `--full` run (260 passed).
+
 ### Killed child processes
 
 A test can start a bin target of the workspace and stop it with SIGKILL (the Studio supervisor).
