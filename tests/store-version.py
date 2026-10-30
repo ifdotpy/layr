@@ -2,6 +2,7 @@
 import fcntl
 import hashlib
 import json
+import re
 import os
 from pathlib import Path
 import subprocess
@@ -9,6 +10,8 @@ import sys
 
 binary = str(Path(sys.argv[1]).resolve())
 root = Path(sys.argv[2]).resolve()
+# The package version is owned by Cargo.toml (release-please changes it at each release).
+package = re.search(r'^version = "([^"]+)"', (Path(__file__).resolve().parent.parent / "Cargo.toml").read_text(), re.M).group(1)
 env = dict(os.environ, LAYR_DIRECT="1")
 for key in ("LAYR_SOCKET", "LAYR_PROJECT", "LAYR_LINE", "LAYR_ROOT"):
     env.pop(key, None)
@@ -53,7 +56,7 @@ run(store, "projects")
 report = inspect(store)
 assert report["state"] == "compatible" and report["compatible"]
 current = report["binary"]
-assert current["format"] == 1 and current["version"] == "0.4.0" and current["build"] != "unknown"
+assert current["format"] == 1 and current["version"] == package and current["build"] != "unknown"
 assert report["store"] == current
 marker = store / "store-version.json"
 assert json.loads(marker.read_text()) == current
