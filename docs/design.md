@@ -193,6 +193,11 @@ is valid for a state, so it never decides that by itself:
   rename when the folder, the head and the previous state did not change; else it writes the
   state under the lock as before. The state after such a command is a layer over the state
   before it, so it copies only what the command changed.
+- `merge <rev>` on APFS reads the status and merges the three trees before the store lock, and
+  `reset --hard` copies the working folder and reads the target tree before it. The states are
+  immutable and the lock never covers the working folder. Under the lock the merge takes its
+  result with one rename when the head, the source and the index did not change; else it merges
+  again under the lock. Temporary trees that a command drops under the lock go to the trash.
 
 A cache helps only a tool that checks its own output and accepts a new path, because every line
 has its own folder. Cargo's `target` does: Cargo compares fingerprints and rebuilds what a change
