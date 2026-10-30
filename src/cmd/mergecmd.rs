@@ -104,6 +104,7 @@ struct PreparedMerge {
 thread_local! {
     static PREPARED_MERGE: std::cell::RefCell<Option<PreparedMerge>> = const { std::cell::RefCell::new(None) };
 }
+#[cfg(target_os = "macos")]
 thread_local! {
     /// The status of the line before the lock, with the head and the index it was read with.
     static PREPARED_STATUS: std::cell::RefCell<Option<(work::AddToken, crate::repo::Status)>> = const { std::cell::RefCell::new(None) };
@@ -142,6 +143,7 @@ fn prepare_merge(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str) -> Result<()> {
 /// The status of a line under the lock: the one read before the lock when the head and the
 /// index did not change since; the working folder is never under the lock.
 fn locked_status(repo: &Repo, line: &Line) -> Result<crate::repo::Status> {
+    #[cfg(target_os = "macos")]
     if let Some((token, st)) = PREPARED_STATUS.with(|p| p.borrow_mut().take()) {
         if token == work::add_token(repo, line)? {
             return Ok(st);
@@ -152,9 +154,9 @@ fn locked_status(repo: &Repo, line: &Line) -> Result<crate::repo::Status> {
 
 /// Delete what the preparation left (after the lock).
 fn discard_prepared(repo: &Repo) {
-    PREPARED_STATUS.with(|p| p.borrow_mut().take());
     #[cfg(target_os = "macos")]
     {
+        PREPARED_STATUS.with(|p| p.borrow_mut().take());
         PREPARED_MERGE.with(|p| p.borrow_mut().take());
         for p in crate::storage::take_prepared() {
             let _ = repo.p.trash(&p);
