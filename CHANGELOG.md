@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.1](https://github.com/ifdotpy/layr/compare/v0.5.0...v0.5.1) (2026-10-30)
+
+
+### Performance
+
+* **push:** Check only new states for secrets before a git push ([#61](https://github.com/ifdotpy/layr/issues/61)) ([3dfec8e](https://github.com/ifdotpy/layr/commit/3dfec8ea81c6d9cd9f3a9b31abe516a2720c36ff))
+* **save:** Copy only what changed since the previous save ([#63](https://github.com/ifdotpy/layr/issues/63)) ([515dd5f](https://github.com/ifdotpy/layr/commit/515dd5f26fefd43eba2f5af2d5186760c5221cc4))
+
 ## [0.5.0](https://github.com/ifdotpy/layr/compare/v0.4.0...v0.5.0) (2026-10-30)
 
 
