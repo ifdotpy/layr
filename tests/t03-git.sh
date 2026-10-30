@@ -42,6 +42,9 @@ ok "the history commit is not the squash commit" test "$c1" != "$hc"
 has "the history keeps the line's commits" "local work" "$(git -C $R log --format=%s task-1)"
 eq "git folder after push: clean" "" "$(git status --short)"
 eq "git folder HEAD is the pushed commit" "$hc" "$(git rev-parse HEAD)"
+# The secret check of a push reads only the states without a Git commit, not the whole history.
+echo n >> local.txt; l save -qam "after the push"
+eq "a push checks only its new states for secrets" "1" "$(LAYR_TRACE=1 l git push -q origin task-1 2>&1 | sed -n 's/.*secret check of \([0-9]*\) new states/\1/p')"
 
 # Lost response: the push reached the remote, the record of it did not.
 echo y >> local.txt; l save -qam "second"
