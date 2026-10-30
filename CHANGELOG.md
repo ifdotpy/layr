@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.5.2](https://github.com/ifdotpy/layr/compare/v0.5.1...v0.5.2) (2026-10-30)
+
+
+### Performance
+
+* **lock:** Prepare clean, park, pick and undo before the store lock ([#69](https://github.com/ifdotpy/layr/issues/69)) ([720d3f5](https://github.com/ifdotpy/layr/commit/720d3f58c9c9d00b40acf20e9a6505679470d552))
+* **merge:** Copy the caches of a merged line without the project lock ([#65](https://github.com/ifdotpy/layr/issues/65)) ([2e156eb](https://github.com/ifdotpy/layr/commit/2e156ebdd18d0eedc53277f41c9c8cbe6e3f82f5))
+* **replay:** Merge the replayed states before the store lock ([#66](https://github.com/ifdotpy/layr/issues/66)) ([075c91d](https://github.com/ifdotpy/layr/commit/075c91d22a8e332adebb09f07bc2531f42ba8dac))
+
 ## [0.5.1](https://github.com/ifdotpy/layr/compare/v0.5.0...v0.5.1) (2026-10-30)
 
 
