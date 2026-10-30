@@ -92,7 +92,6 @@
 * **lock:** Copy caches before the store lock in save --caches on APFS ([50d9668](https://github.com/ifdotpy/layr/commit/50d9668c1f3a25762d8cb5e47498e837e8283023))
 * **lock:** Copy only the named paths for a restore of the working folder ([6c833ec](https://github.com/ifdotpy/layr/commit/6c833ecdf4098bd440827ab512e2d4f1d59b21fd))
 * **lock:** Delete trees after the last store lock; log slow lock holds ([dd29bf4](https://github.com/ifdotpy/layr/commit/dd29bf49510b2d82ef6ebab362a58eb55a611e06))
-* **lock:** Merge and reset --hard before the store lock ([df53b41](https://github.com/ifdotpy/layr/commit/df53b417081cf3a30f15d23b9d43d72b0cac036a))
 * **lock:** Merge and reset --hard before the store lock ([4407320](https://github.com/ifdotpy/layr/commit/440732059f86156391cc4dd0d50809d8eff6c7f1))
 * **lock:** Move the remaining slow deletions of gc and undo out of the store lock ([6000c8d](https://github.com/ifdotpy/layr/commit/6000c8dbb7e91ba5a81066c265e18cf8932a90c9))
 * **lock:** Push to git remotes without the store lock ([8e03b1c](https://github.com/ifdotpy/layr/commit/8e03b1ca9f411d401db7fd91154e5e2347f1a07c))
