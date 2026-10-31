@@ -412,7 +412,7 @@ fn same(a: &ScanEntry, b: &ScanEntry, link: impl Fn() -> Result<bool>) -> Result
 /// attributes and ACLs are not part of the scan: `same` runs first and this runs on entries
 /// that look equal. A change of them keeps the modification time.
 #[cfg(target_os = "macos")]
-fn stored_metadata_same(a: &Path, b: &Path) -> Result<bool> {
+pub(crate) fn stored_metadata_same(a: &Path, b: &Path) -> Result<bool> {
     // The system stamps `com.apple.provenance` on a file and no user sets it; its value costs
     // a slow system call on every file, so only its presence counts.
     let read = |name: &[u8]| name != b"com.apple.provenance";
@@ -422,16 +422,20 @@ fn stored_metadata_same(a: &Path, b: &Path) -> Result<bool> {
     Ok(xa == xb && crate::sys::apfs_acl_text(a)? == crate::sys::apfs_acl_text(b)?)
 }
 #[cfg(not(target_os = "macos"))]
-fn stored_metadata_same(_: &Path, _: &Path) -> Result<bool> {
+pub(crate) fn stored_metadata_same(_: &Path, _: &Path) -> Result<bool> {
     Ok(true)
 }
 
 /// Compare a scan of `new` with a scan of `old`. Both scans need data identities.
+/// `since` is the time (seconds) at which `old` was a copy of `new` in extended attributes and
+/// ACLs, or 0 when unknown. Changing either updates the change time of an entry, so an entry
+/// that was last changed before `since` needs no read of them.
 pub fn diff(
     old: &BTreeMap<String, ScanEntry>,
     old_path: &(dyn Fn(&str) -> Result<PathBuf> + Sync),
     new: &BTreeMap<String, ScanEntry>,
     new_root: &Path,
+    since: i64,
 ) -> Result<Diff> {
     let mut d = Diff::default();
     let mut equal = Vec::new();
@@ -452,7 +456,9 @@ pub fn diff(
                 if !same(o, e, link)? {
                     d.write.insert(k.clone());
                 } else {
-                    equal.push(k.as_str());
+                    if e.fingerprint.6 >= since - 1 {
+                        equal.push(k.as_str());
+                    }
                 }
             }
         }
@@ -882,7 +888,7 @@ pub fn extract<'a>(src: &Layered, paths: impl Iterator<Item = &'a str>, dst: &Pa
 pub fn snapshot_over(base: &Layered, base_id: &str, src: &Path, dst: &Path, writable: bool) -> Result<Option<Diff>> {
     let old = base.scan(true)?;
     let before = apfs::scan_with_data(src, true)?;
-    let d = diff(&old, &|k| base.path(k), &before, src)?;
+    let d = diff(&old, &|k| base.path(k), &before, src, 0)?;
     if d.is_empty() {
         return Ok(None);
     }
@@ -1037,7 +1043,7 @@ pub fn write_checked_scan(
             }
             settle(round);
             round += 1;
-            d = diff(old, &|k| base.path(k), &after, src)?;
+            d = diff(old, &|k| base.path(k), &after, src, 0)?;
             before = after;
             continue;
         }
@@ -1051,7 +1057,7 @@ pub fn write_checked_scan(
         apfs::delete_tree(dst)?;
         settle(round);
         round += 1;
-        d = diff(old, &|k| base.path(k), &after, src)?;
+        d = diff(old, &|k| base.path(k), &after, src, 0)?;
         before = after;
     }
 }

@@ -1258,6 +1258,19 @@ pub fn candidates_equal(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized
     candidates_of(parent, child, false)
 }
 
+thread_local! {
+    static STORED_COMPARE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `f` so that candidates also name files that differ in extended attributes or ACL alone.
+/// The writers of states (`add`, `save -a`) need them; a plain status skips the reads they cost.
+pub(crate) fn with_stored_compare<T>(f: impl FnOnce() -> T) -> T {
+    let before = STORED_COMPARE.replace(true);
+    let out = f();
+    STORED_COMPARE.set(before);
+    out
+}
+
 fn candidates_of(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), exact: bool) -> Result<Vec<crate::changes::Change>> {
     let _t = crate::trace::span("APFS candidates");
     let (a, b) = match top_layer_scans(parent, child)? {
@@ -1379,7 +1392,36 @@ fn candidates_scanned_with(
         }
         _ => false,
     };
-    let names: std::collections::BTreeSet<_> = a.keys().chain(b.keys()).filter(|s| !s.is_empty() && !unchanged(s)).collect();
+    let mut names: std::collections::BTreeSet<_> = a.keys().chain(b.keys()).filter(|s| !s.is_empty() && !unchanged(s)).collect();
+    if STORED_COMPARE.get() {
+        // A file with the same data can differ in extended attributes or ACL alone: a state keeps
+        // them, so it is a change. Paths are read in threads, as `thin::diff` does.
+        let same_data: Vec<&String> = a
+            .iter()
+            .filter(|(p, x)| !p.is_empty() && x.meta.is_file() && b.get(*p).is_some_and(|y| y.meta.is_file()) && unchanged(p))
+            .map(|(p, _)| p)
+            .collect();
+        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 4);
+        let stored_differ: Vec<&String> = std::thread::scope(|scope| {
+            let jobs: Vec<_> = same_data
+                .chunks(same_data.len().div_ceil(threads).max(1))
+                .map(|chunk| {
+                    scope.spawn(move || {
+                        chunk
+                            .iter()
+                            .copied()
+                            .filter(|p| match (parent.at(p), child.at(p)) {
+                                (Ok(x), Ok(y)) => !crate::thin::stored_metadata_same(&x, &y).unwrap_or(false),
+                                _ => false,
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            jobs.into_iter().flat_map(|j| j.join().unwrap()).collect()
+        });
+        names.extend(stored_differ);
+    }
     let mut changes: BTreeMap<_, _> = names
         .into_iter()
         .map(|p| {
