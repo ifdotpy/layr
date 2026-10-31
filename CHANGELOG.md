@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.9.1](https://github.com/ifdotpy/layr/compare/v0.9.0...v0.9.1) (2026-10-31)
+
+
+### Bug Fixes
+
+* **fs:** Same change and cache rules on every backend, refuse Unicode name collisions ([#87](https://github.com/ifdotpy/layr/issues/87)) ([6fe5647](https://github.com/ifdotpy/layr/commit/6fe5647ac56db872ad26f40151a16e3531f0c6e2))
+
+
+### Performance
+
+* Less work under the store lock and fewer full walks ([#84](https://github.com/ifdotpy/layr/issues/84)) ([ee50ecc](https://github.com/ifdotpy/layr/commit/ee50eccfb19c0cd93f812df50a7b97b4dc84976c))
+
 ## [0.9.0](https://github.com/ifdotpy/layr/compare/v0.8.0...v0.9.0) (2026-10-31)
 
 
