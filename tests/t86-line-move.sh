@@ -3,6 +3,10 @@
 # on every backend. Daily commands work from the moved folder and its subfolders.
 . "$(dirname "$0")/lib.sh"
 
+# The store sits in a folder of the test file system, so that a folder beside it is on the same
+# file system (on btrfs the store root is the mount point itself).
+FS=$LAYR_ROOT
+export LAYR_ROOT=$FS/store; mkdir -p $LAYR_ROOT
 R=$T/remote.git; U=$T/up
 git init -q --bare -b main $R
 git clone -q $R $U 2>/dev/null
@@ -12,14 +16,14 @@ l git clone $R p -q >/dev/null
 M=$LAYR_ROOT/projects/p/lines
 cd $M/main || exit 1
 l line new -q w >/dev/null
-W=$T/outside/work
-mkdir -p $T/outside
+W=$FS/outside/work
+mkdir -p $FS/outside
 
 # Refusals change nothing.
-mkdir $T/outside/exists
-out=$(l line move w $T/outside/exists 2>&1); rc=$?
+mkdir $FS/outside/exists
+out=$(l line move w $FS/outside/exists 2>&1); rc=$?
 eq "an existing path is refused" 1 "$rc"; has "existing path message" "already exists" "$out"
-out=$(l line move w $T/nodir/work 2>&1); rc=$?
+out=$(l line move w $FS/nodir/work 2>&1); rc=$?
 eq "a missing parent is refused" 1 "$rc"; has "missing parent message" "does not exist" "$out"
 out=$(l line move w $LAYR_ROOT/inside 2>&1); rc=$?
 eq "a path inside the store is refused" 1 "$rc"; has "inside store message" "inside the store" "$out"
@@ -27,7 +31,7 @@ out=$(l line move w 2>&1); rc=$?
 eq "a line in the store cannot move back" 1 "$rc"; has "already in store message" "already in the store" "$out"
 dev() { python3 -c 'import os,sys; print(os.stat(sys.argv[1]).st_dev)' "$1"; }
 for other in /dev/shm /tmp "$HOME"; do # a folder on another file system, when one exists
-    if [ -d "$other" ] && [ "$(dev $other)" != "$(dev $T)" ]; then
+    if [ -d "$other" ] && [ "$(dev $other)" != "$(dev $FS)" ]; then
         out=$(l line move w $other/layr-move-x 2>&1); rc=$?
         eq "another file system is refused" 1 "$rc"; has "other file system message" "another file system" "$out"
         no "nothing was created there" test -e $other/layr-move-x
