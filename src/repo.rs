@@ -1168,11 +1168,10 @@ impl<'a> Repo<'a> {
     }
 
     /// Add only needs paths that differ between the index and the working tree.
-<<<<<<< head
     /// `limit` names the paths (with their ignore files) that the caller reads: only they are
-    /// scanned and compared, and the lists hold nothing else.
-    #[cfg(target_os = "macos")]
+    /// scanned and compared, and the lists hold nothing else (APFS).
     pub fn status_for_add(&self, line: &Line, scan: &Path, index: &Snap, limit: Option<&BTreeSet<String>>) -> Result<Status> {
+        #[cfg(target_os = "macos")]
         if let Some(paths) = limit {
             let mut st = Status::default();
             let list = changes::file_changes_of(
@@ -1184,12 +1183,8 @@ impl<'a> Repo<'a> {
             self.finish_status(line, scan, index, false, &mut st)?;
             return Ok(st);
         }
-||||||| base
-    #[cfg(target_os = "macos")]
-    pub fn status_for_add(&self, line: &Line, scan: &Path, index: &Snap) -> Result<Status> {
-=======
-    pub fn status_for_add(&self, line: &Line, scan: &Path, index: &Snap) -> Result<Status> {
->>>>>>> f81afd9
+        #[cfg(not(target_os = "macos"))]
+        let _ = limit;
         self.status_of_inner(line, scan, index, false)
     }
 
@@ -1315,7 +1310,7 @@ impl<'a> Repo<'a> {
         let _t = crate::trace::span("status for add");
         let scan = self.scan(line)?;
         let (index, itemp) = self.index_view(line)?;
-        let st = self.status_for_add(line, &scan.path, &index)?;
+        let st = self.status_for_add(line, &scan.path, &index, None)?;
         Ok((st, scan, itemp, index))
     }
 
