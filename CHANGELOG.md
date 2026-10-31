@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/ifdotpy/layr/compare/v0.5.2...v0.6.0) (2026-10-31)
+
+
+### Features
+
+* **lines:** Keep other lines' work out of new lines and pushes ([#70](https://github.com/ifdotpy/layr/issues/70)) ([901f850](https://github.com/ifdotpy/layr/commit/901f850d0c5b9e329c7feb0a7f76fff7d1f3cc35))
+
 ## [0.5.2](https://github.com/ifdotpy/layr/compare/v0.5.1...v0.5.2) (2026-10-30)
 
 
