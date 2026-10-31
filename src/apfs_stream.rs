@@ -311,6 +311,22 @@ fn plan(parent: &Path, child: &Path) -> Result<Option<Plan>> {
     Ok(Some(Plan { remove, create: fresh.into_iter().collect(), meta }))
 }
 
+#[cfg(feature = "overlayfs")]
+fn same_content(a: &Path, b: &Path) -> Result<bool> {
+    let (mut a, mut b) = (File::open(a)?, File::open(b)?);
+    let (mut x, mut y) = (vec![0u8; 1 << 16], vec![0u8; 1 << 16]);
+    loop {
+        let n = a.read(&mut x)?;
+        if n == 0 {
+            return Ok(true);
+        }
+        b.read_exact(&mut y[..n])?;
+        if x[..n] != y[..n] {
+            return Ok(false);
+        }
+    }
+}
+
 /// The plan from `parent` to `child` on OverlayFS. Both trees are layers over shared lower
 /// layers, so only the paths that their own layers hold can differ (`changed_paths`). Without
 /// a shared layer, and for hard links, a complete stream is sent.
@@ -322,6 +338,7 @@ fn plan(parent: &Path, child: &Path) -> Result<Option<Plan>> {
     let mut remove = BTreeMap::new();
     let mut create = std::collections::BTreeSet::new();
     let mut dirs = vec![String::new()];
+    let mut kept = Vec::new();
     for rel in &names {
         let (old, new) = (fs::symlink_metadata(parent.join(rel)).ok(), fs::symlink_metadata(child.join(rel)).ok());
         match (old, new) {
@@ -334,18 +351,19 @@ fn plan(parent: &Path, child: &Path) -> Result<Option<Plan>> {
             }
             (Some(o), Some(n)) if o.is_dir() && n.is_dir() => dirs.push(rel.clone()),
             (Some(o), Some(n)) => {
-                // Same size, times and mode: the receiver already has this file.
+                // The receiver keeps a file only when its content is proven equal. Times can be
+                // restored by tools, so they prove nothing.
                 let same = if n.is_file() {
-                    o.is_file()
-                        && o.len() == n.len()
-                        && (o.mtime(), o.mtime_nsec()) == (n.mtime(), n.mtime_nsec())
-                        && o.mode() == n.mode()
+                    o.is_file() && o.len() == n.len() && same_content(&parent.join(rel), &child.join(rel))?
                 } else if n.file_type().is_symlink() {
                     o.file_type().is_symlink() && fs::read_link(parent.join(rel))? == fs::read_link(child.join(rel))?
                 } else {
                     false
                 };
-                if !same {
+                if same {
+                    // Keep the file, send its attributes, mode and times again.
+                    kept.push(rel.clone());
+                } else {
                     remove.insert(rel.clone(), o.is_dir());
                     create.insert(rel.clone());
                 }
@@ -360,7 +378,7 @@ fn plan(parent: &Path, child: &Path) -> Result<Option<Plan>> {
         let (old, new) = (attrs(&parent.join(rel))?, attrs(&child.join(rel))?);
         meta.push((rel.clone(), old.keys().filter(|k| !new.contains_key(*k)).cloned().collect()));
     }
-    meta.extend(create.iter().map(|rel| (rel.clone(), Vec::new())));
+    meta.extend(create.iter().chain(&kept).map(|rel| (rel.clone(), Vec::new())));
     Ok(Some(Plan { remove: remove.into_iter().rev().collect(), create: create.into_iter().collect(), meta }))
 }
 

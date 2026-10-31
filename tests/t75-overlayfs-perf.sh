@@ -3,7 +3,7 @@
 # a clean status reads no file content, and a send with a parent is incremental.
 if [ -z "${LAYR_OVERLAYFS_TEST_ROOT:-}" ]; then
     echo "SKIP: this test needs the OverlayFS backend (LAYR_OVERLAYFS_TEST_ROOT)"
-    echo "t73-overlayfs-perf.sh: 0 passed, 0 failed"
+    echo "t75-overlayfs-perf.sh: 0 passed, 0 failed"
     exit 0
 fi
 . "$(dirname "$0")/lib.sh"
@@ -73,11 +73,10 @@ cd $A/w
 LAYR_TRACE=1 l status --porcelain > $T/status.out 2> $T/status.trace
 eq "status of a clean line is empty" "" "$(cat $T/status.out)"
 eq "a clean status compares no content" "0" "$(grep -c 'content compare' $T/status.trace)"
-# A write that copies a file up but keeps its content and times is no change.
+# A write that copies a file up but keeps its content is no change.
 chmod 644 d001/f001
 LAYR_TRACE=1 l status --porcelain > $T/status.out 2> $T/status.trace
-eq "a copied-up file with equal size and times is not read" "0" "$(grep -c 'content compare' $T/status.trace)"
-no "and it is not reported" grep -q f001 $T/status.out
+no "a copied-up file with equal content is not reported" grep -q f001 $T/status.out
 # Same size, new content: the file is read and reported.
 printf 'ZZ' | dd of=d002/f002 bs=1 seek=10 conv=notrunc status=none
 LAYR_TRACE=1 l status --porcelain > $T/status.out 2> $T/status.trace
@@ -115,6 +114,21 @@ l save -qam s2
 R=$(l rev-parse head)
 peer_exchange sync s -q -- $(peer)
 eq "the peer holds the incremental state" "$(l rev-parse "$R^{tree}")" "$(env LAYR_ROOT=$BR $LAYR --project s rev-parse "$R^{tree}" 2>&1)"
+# Same size, mtime restored: status still sees the change and a sync delivers it.
+python3 - <<'PY'
+import os
+p = "sub/f010"
+st = os.stat(p)
+data = bytearray(open(p, "rb").read())
+data[0] ^= 0xFF
+open(p, "wb").write(bytes(data))
+os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns))
+PY
+has "a rewrite with a restored mtime is reported" "sub/f010" "$(l status --porcelain)"
+l save -qam s3
+R=$(l rev-parse head)
+peer_exchange sync s -q -- $(peer)
+eq "a rewrite with a restored mtime reaches the peer" "$(l rev-parse "$R^{tree}")" "$(env LAYR_ROOT=$BR $LAYR --project s rev-parse "$R^{tree}" 2>&1)"
 # The two newest sealed states: the second was saved after the first, in the same line.
 set -- $(ls -1t $LAYR_ROOT/projects/s/states | grep -v @ | head -2)
 child=$LAYR_ROOT/projects/s/states/$1

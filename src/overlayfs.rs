@@ -1114,8 +1114,9 @@ pub fn supports_local_clone_receive() -> bool {
 
 struct ScanEntry {
     meta: crate::fsutil::Meta,
-    // Modification time (seconds, nanoseconds) and mode, read from the tree itself.
-    stamp: Option<(i64, i64, u32)>,
+    // Modification and change time (seconds, nanoseconds) and mode, read from the tree itself.
+    // A user can restore the modification time, never the change time.
+    stamp: Option<(i64, i64, i64, i64, u32)>,
 }
 fn scan_entries(root: &Path) -> Result<BTreeMap<String, ScanEntry>> {
     let mut out = BTreeMap::new();
@@ -1136,7 +1137,7 @@ fn visible_entry(root: &Path, root_dev: u64, rel: &str) -> Result<Option<ScanEnt
     if m.is_dir() && (m.dev() != root_dev || is_subvolume(&full)) {
         return Ok(None);
     }
-    Ok(Some(ScanEntry { meta: crate::fsutil::meta_of(&m), stamp: Some((m.mtime(), m.mtime_nsec(), m.mode())) }))
+    Ok(Some(ScanEntry { meta: crate::fsutil::meta_of(&m), stamp: Some((m.mtime(), m.mtime_nsec(), m.ctime(), m.ctime_nsec(), m.mode())) }))
 }
 // The layers above the ones both trees share, top first. `None` when either tree is not an
 // OverlayFS mount of this store or the two share no layer.
@@ -1295,8 +1296,8 @@ pub fn candidates(parent: &Path, child: &Path) -> Result<Vec<crate::changes::Cha
     }
     for (p, c) in &mut changes {
         if c.old_path.is_none() && c.old.as_ref().is_some_and(|m| m.is_file()) && c.new.as_ref().is_some_and(|m| m.is_file()) {
-            // Same size, time and mode (in a tree read through its layers): equal without a
-            // read. Other files get their exact changed ranges, which a merge needs.
+            // Same size, mode, modification and change time (the check git calls racy): equal
+            // without a read. Other files get their exact changed ranges, which a merge needs.
             let quick = !exact
                 && a.get(p).zip(b.get(p)).is_some_and(|(x, y)| x.stamp.is_some() && x.stamp == y.stamp && x.meta.size == y.meta.size);
             c.ranges = Some(if quick { Vec::new() } else { changed_ranges(&parent.join(p), &child.join(p))? });
