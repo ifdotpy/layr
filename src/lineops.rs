@@ -64,21 +64,22 @@ fn snapshots(src: &Path, destinations: &[PathBuf]) -> Result<()> {
     }
 }
 
+/// Line folders made without the project lock, waiting for `commit_prepared_lines`.
+pub(crate) struct PreparedLines {
+    start: String,
+    lines: Vec<Line>,
+    tmps: Vec<PathBuf>,
+    recs: Vec<Record>,
+}
+
 impl Repo<'_> {
-    /// The caller holds the project lock. All names pass validation before any snapshot.
-    pub fn create_lines(
-        &self,
-        ctx: &Ctx,
-        prefix: &str,
-        start: &str,
-        owner: u32,
-        source: Option<&Line>,
-        count: usize,
-        view: Option<&crate::overlay::View>,
-    ) -> Result<Vec<Line>> {
-        self.create_named_lines(ctx, batch_names(prefix, count)?, start, owner, source, view)
+    /// The names of a batch: `<prefix>-1` to `<prefix>-<count>`, all valid.
+    pub fn batch_line_names(&self, prefix: &str, count: usize) -> Result<Vec<String>> {
+        batch_names(prefix, count)
     }
 
+    /// Create lines with the project lock held (the caller took it). The lock-free command path
+    /// calls `prepare_named_lines` first and `commit_prepared_lines` under the lock.
     pub(crate) fn create_named_lines(
         &self,
         ctx: &Ctx,
@@ -88,12 +89,35 @@ impl Repo<'_> {
         source: Option<&Line>,
         view: Option<&crate::overlay::View>,
     ) -> Result<Vec<Line>> {
-        for name in &names {
+        let prepared = self.prepare_named_lines(ctx, names, start, owner, source, view)?;
+        self.commit_prepared_lines(ctx, prepared)
+    }
+
+    fn check_names_free(&self, names: &[String]) -> Result<()> {
+        for name in names {
             crate::store::check_name("line", name)?;
             if self.p.db.line_by_name(name)?.is_some() || self.p.line_path(name).symlink_metadata().is_ok() {
                 bail!("a line named '{name}' already exists");
             }
         }
+        Ok(())
+    }
+
+    /// The heavy part of line creation, without the project lock: the tree clone, the overlay
+    /// layers, the .git folder and the caches of every line, in the service's work folder. The
+    /// lines appear only in `commit_prepared_lines`, which checks again under the lock.
+    pub(crate) fn prepare_named_lines(
+        &self,
+        ctx: &Ctx,
+        names: Vec<String>,
+        start: &str,
+        owner: u32,
+        source: Option<&Line>,
+        view: Option<&crate::overlay::View>,
+    ) -> Result<PreparedLines> {
+        let _t = crate::trace::span("prepare lines");
+        self.check_names_free(&names)?;
+        self.source_state(start)?;
         let lines: Vec<Line> = names
             .into_iter()
             .map(|name| Line {
@@ -104,10 +128,11 @@ impl Repo<'_> {
                 machine: self.p.store.machine.id.clone(),
             })
             .collect();
-        let destinations: Vec<PathBuf> = lines.iter().map(|_| self.p.work_dir().join(ids::new_id())).collect();
-        let result = (|| -> Result<()> {
-            snapshots(&self.state_root(start)?, &destinations)?;
-            for (line, tmp) in lines.iter().zip(&destinations) {
+        let tmps: Vec<PathBuf> = lines.iter().map(|_| self.p.work_dir().join(ids::new_id())).collect();
+        let result = (|| -> Result<Vec<Record>> {
+            snapshots(&self.state_root(start)?, &tmps)?;
+            let mut recs = Vec::new();
+            for (line, tmp) in lines.iter().zip(&tmps) {
                 let layers = if let Some(view) = view {
                     self.prepare_view_layers(ctx, line, view)?;
                     view.layers.clone()
@@ -129,7 +154,6 @@ impl Repo<'_> {
                         rec.data["stack"] = self.public_stack_data(&line.id, &layers)?;
                     }
                 }
-                crate::fsutil::rename_tree(tmp, self.working(line))?;
                 rec.lines.insert(
                     line.id.clone(),
                     LineChange {
@@ -139,15 +163,54 @@ impl Repo<'_> {
                         working_after: None,
                     },
                 );
+                recs.push(rec);
+            }
+            Ok(recs)
+        })();
+        let prepared = PreparedLines { start: start.to_string(), lines, tmps, recs: Vec::new() };
+        match result {
+            Ok(recs) => Ok(PreparedLines { recs, ..prepared }),
+            Err(e) => {
+                self.discard_prepared_lines(prepared);
+                Err(e)
+            }
+        }
+    }
+
+    /// Delete the prepared folders and the bases of lines that were never recorded.
+    pub(crate) fn discard_prepared_lines(&self, prepared: PreparedLines) {
+        for (line, tmp) in prepared.lines.iter().zip(&prepared.tmps) {
+            let _ = crate::storage::delete_tree(tmp);
+            if self.p.db.line_by_id(&line.id).ok().flatten().is_none() {
+                let _ = self.prune_bases(line, None, 0);
+            }
+        }
+    }
+
+    /// The caller holds the project lock. Checks that the names are still free and the start
+    /// state is still there, then moves each prepared folder into place and records the line.
+    pub(crate) fn commit_prepared_lines(&self, ctx: &Ctx, prepared: PreparedLines) -> Result<Vec<Line>> {
+        let _t = crate::trace::span("record lines");
+        let PreparedLines { start, lines, tmps, recs } = prepared;
+        let result = (|| -> Result<()> {
+            let names: Vec<String> = lines.iter().map(|l| l.name.clone()).collect();
+            self.check_names_free(&names)?;
+            self.source_state(&start)?;
+            for ((line, tmp), rec) in lines.iter().zip(&tmps).zip(recs) {
+                crate::fsutil::rename_tree(tmp, self.working(line))?;
                 self.commit_record(ctx, rec)?;
             }
             Ok(())
         })();
         if let Err(e) = result {
-            for (line, tmp) in lines.iter().zip(&destinations) {
+            for (line, tmp) in lines.iter().zip(&tmps) {
+                // A moved tmp is ours at the line path; a folder there while tmp exists is not ours.
+                let moved = !tmp.exists();
                 let _ = crate::storage::delete_tree(tmp);
                 if self.p.db.line_by_id(&line.id)?.is_none() {
-                    let _ = crate::storage::delete_tree(&self.working(line));
+                    if moved && self.p.db.line_by_name(&line.name)?.is_none() {
+                        let _ = crate::storage::delete_tree(&self.working(line));
+                    }
                     let _ = self.prune_bases(line, None, 0);
                 }
             }

@@ -266,10 +266,31 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
         if owner == 0 && !ctx.caller.is_root() {
             return Err(exit(128, "fatal: only root can create a line owned by root"));
         }
-        let _lock = repo.p.lock()?;
-        if let Some(count) = a.get("--count") {
-            let count = count.parse::<usize>().map_err(|_| exit(128, "--count must be a positive integer"))?;
-            let lines = repo.create_lines(ctx, name, &start, owner, source.as_ref(), count, explicit_view.as_ref())?;
+        // The tree clone, .git folder and caches are made before the lock; under it the command
+        // checks the names and the start state, moves the folders into place and records them.
+        let view = explicit_view.as_ref();
+        let (names, from, from_line) = match a.get("--count") {
+            Some(count) => {
+                let count = count.parse::<usize>().map_err(|_| exit(128, "--count must be a positive integer"))?;
+                (repo.batch_line_names(name, count)?, start.clone(), source.as_ref())
+            }
+            // A single line made from a view starts at the view's shared state, from no line.
+            None => match view {
+                Some(v) => (vec![name.to_string()], v.shared.clone(), None),
+                None => (vec![name.to_string()], start.clone(), source.as_ref()),
+            },
+        };
+        let prepared = repo.prepare_named_lines(ctx, names, &from, owner, from_line, view)?;
+        let lock = match repo.p.lock() {
+            Ok(l) => l,
+            Err(e) => {
+                repo.discard_prepared_lines(prepared);
+                return Err(e);
+            }
+        };
+        let lines = repo.commit_prepared_lines(ctx, prepared)?;
+        drop(lock);
+        if a.get("--count").is_some() {
             if a.has("--json") {
                 outln!(ctx, "{}", serde_json::to_string(&lines.iter().map(|line| line_json(repo, line)).collect::<Vec<_>>())?);
             } else {
@@ -283,10 +304,7 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
             }
             return Ok(0);
         }
-        let l = match &explicit_view {
-            Some(view) => repo.create_line_view(ctx, name, view, owner)?,
-            None => repo.create_line_from(ctx, name, &start, owner, source.as_ref())?,
-        };
+        let l = lines.into_iter().next().expect("one line");
         if a.has("--json") {
             outln!(ctx, "{}", line_json(repo, &l));
             return Ok(0);

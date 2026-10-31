@@ -164,6 +164,18 @@ has "undo takes the lock" "store lock taken" "$trace"
 eq "undo builds no state tree under the lock" "" "$(locked "$trace" | grep 'thin materialize')"
 no "undo of the pick removes the file" test -e pk.txt
 eq "no prepared copies stay after these commands" "" "$(ls -A "$LAYR_ROOT/projects/hold/meta/work" 2>/dev/null)"
+# line new clones the tree, makes .git and takes caches before the lock; under it only renames.
+cd "$P/main" || exit 1
+for opt in "" "--count 2"; do
+    trace=$(LAYR_TRACE=1 l line new $opt -q nl${opt:+b} 2>&1)
+    has "line new $opt takes the lock" "store lock taken" "$trace"
+    has "line new $opt prepares before the lock" "prepare lines" "$trace"
+    eq "line new $opt copies no tree under the lock" "" "$(locked "$trace" | grep -E "$copies|make .git|git folder|take cache")"
+    eq "line new $opt runs no preparation under the lock" "" "$(locked "$trace" | grep -E 'prepare lines')"
+done
+ok "the new lines exist" test -d "$P/nl" -a -d "$P/nlb-1" -a -d "$P/nlb-2"
+no "a taken name is refused" l line new -q nl
+eq "no prepared copies stay after line new" "" "$(ls -A "$LAYR_ROOT/projects/hold/meta/work" 2>/dev/null)"
 eq "the trash is empty" "" "$(ls -A "$LAYR_ROOT/trash" 2>/dev/null)"
 ok "states remain valid" l fsck
 
