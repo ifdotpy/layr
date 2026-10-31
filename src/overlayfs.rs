@@ -298,7 +298,8 @@ pub fn recover(root: &Path) -> Result<()> {
         state.save()?;
     }
     if let Some((from, to)) = state.registry.pending_move.clone() {
-        if !from.starts_with(&root) || !to.starts_with(&root) {
+        // A line moved out of the store (or back) has one end outside it.
+        if !from.starts_with(&root) && !to.starts_with(&root) {
             bail!("rename outside OverlayFS store");
         }
         valid_path(&from)?;
@@ -324,7 +325,7 @@ pub fn recover(root: &Path) -> Result<()> {
         }
     }
     for (path, e) in state.registry.trees.clone().iter() {
-        if !path.starts_with(&root) {
+        if !path.starts_with(&root) && external_home(path).is_none() {
             bail!("OverlayFS mount outside its store");
         }
         valid_path(path)?;
