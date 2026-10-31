@@ -109,7 +109,20 @@ impl Ctx {
         }
     }
 
+    /// The project and line of a folder: inside the store, or inside a line moved out of it.
     pub fn loc_from_path(&self, path: &Path) -> Option<Loc> {
+        self.loc_in_store(path).or_else(|| self.loc_moved(path))
+    }
+
+    fn loc_moved(&self, path: &Path) -> Option<Loc> {
+        let (e, sub) = crate::linepaths::find(&self.store, path)?;
+        let dir = self.store.project_dir(&e.project).ok()?;
+        let db = crate::db::Db::open(&crate::store::db_file(&dir)).ok()?;
+        let line = db.line_by_id(&e.line).ok()??;
+        Some(Loc { project: e.project, line: Some(line.name), sub })
+    }
+
+    fn loc_in_store(&self, path: &Path) -> Option<Loc> {
         let projects = self.store.projects_dir();
         let projects = projects.canonicalize().unwrap_or(projects);
         let rel = path.strip_prefix(&projects).ok()?;

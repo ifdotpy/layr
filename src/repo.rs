@@ -305,7 +305,7 @@ impl<'a> Repo<'a> {
             return Ok(l);
         }
         if let Some((_, h)) = self.p.db.line_heads(&l.id)?.into_iter().find(|(m, _)| m == me) {
-            if self.p.line_path(&l.name).exists() {
+            if self.working(&l).exists() {
                 l.head = h;
                 l.machine = me.clone();
             }
@@ -435,8 +435,9 @@ impl<'a> Repo<'a> {
         btrfs::snapshot(&self.state_root(id)?, dst, readonly)
     }
 
+    /// The working folder of a line: its recorded path (`layr line move`), else `lines/<name>`.
     pub fn working(&self, line: &Line) -> PathBuf {
-        self.p.line_path(&line.name)
+        self.p.moved_path(&line.id).unwrap_or_else(|| self.p.default_line_path(&line.name))
     }
 
     pub fn owner_ids(&self, line: &Line) -> (u32, u32) {

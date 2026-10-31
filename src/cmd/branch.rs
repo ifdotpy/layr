@@ -31,11 +31,113 @@ fn line_json(repo: &crate::repo::Repo, line: &crate::model::Line) -> serde_json:
 }
 
 pub fn line(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let (sub, rest) = args.split_first().ok_or_else(|| exit(2, "usage: layr line new/list/delete/rename"))?;
+    let (sub, rest) = args.split_first().ok_or_else(|| exit(2, "usage: layr line new/list/delete/rename/move"))?;
+    if sub == "move" {
+        return line_move(ctx, rest);
+    }
     if !matches!(sub.as_str(), "new" | "list" | "delete" | "rename") {
-        return Err(exit(2, "usage: layr line new/list/delete/rename"));
+        return Err(exit(2, "usage: layr line new/list/delete/rename/move"));
     }
     line_command(ctx, rest, sub)
+}
+
+/// The checked absolute target of `layr line move <line> <path>`.
+fn move_target(ctx: &Ctx, repo: &crate::repo::Repo, from: &std::path::Path, arg: &str) -> Result<std::path::PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    use std::path::{Component, PathBuf};
+    let fail = |m: String| exit(1, format!("error: {m}"));
+    let raw = match arg.strip_prefix('~') {
+        Some("") => ctx.caller.home.clone(),
+        Some(rest) if rest.starts_with('/') => ctx.caller.home.join(&rest[1..]),
+        _ => PathBuf::from(arg),
+    };
+    let raw = if raw.is_absolute() { raw } else { ctx.cwd.join(raw) };
+    let mut clean = PathBuf::new();
+    for c in raw.components() {
+        match c {
+            Component::ParentDir => {
+                clean.pop();
+            }
+            Component::CurDir => {}
+            c => clean.push(c),
+        }
+    }
+    if clean.symlink_metadata().is_ok() {
+        return Err(fail(format!("{} already exists", clean.display())));
+    }
+    let (Some(parent), Some(name)) = (clean.parent(), clean.file_name()) else {
+        return Err(fail(format!("{} has no parent folder", clean.display())));
+    };
+    let parent = parent.canonicalize().map_err(|_| fail(format!("the parent folder {} does not exist", parent.display())))?;
+    if !parent.is_dir() {
+        return Err(fail(format!("{} is not a folder", parent.display())));
+    }
+    use rustix::fs::Access;
+    if rustix::fs::access(&parent, Access::WRITE_OK | Access::EXEC_OK).is_err() {
+        return Err(fail(format!("you cannot write in {}", parent.display())));
+    }
+    let to = parent.join(name);
+    let root = ctx.store.root.canonicalize().unwrap_or_else(|_| ctx.store.root.clone());
+    if to.starts_with(&root) {
+        return Err(fail(format!("{} is inside the store {}; use 'layr line move <line>' to move a line back", to.display(), root.display())));
+    }
+    if to.starts_with(from) {
+        return Err(fail("the target is inside the folder of the line".into()));
+    }
+    let store_dev = std::fs::metadata(repo.p.lines_dir())?.dev();
+    if std::fs::metadata(&parent)?.dev() != store_dev {
+        return Err(fail(format!("{} is on another file system than the store; a line can only move within one file system", parent.display())));
+    }
+    if crate::linepaths::index(&ctx.store.root).iter().any(|e| e.path.starts_with(&to) || to.starts_with(&e.path)) {
+        return Err(fail(format!("{} overlaps the folder of another moved line", to.display())));
+    }
+    Ok(to)
+}
+
+/// `layr line move <line> [<path>]`: keep the working folder of a line at `<path>` (outside the
+/// store, same file system), or back in the store without a path. Only this machine knows the path.
+fn line_move(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    let a = parse(&Spec::new(), args)?;
+    if !(1..=2).contains(&a.pos.len()) {
+        return Err(exit(2, "usage: layr line move <line> [<path>]"));
+    }
+    let h = here(ctx)?;
+    let repo = &h.repo;
+    let l = repo.line(&a.pos[0])?;
+    repo.authorize_line(ctx, &l, crate::repo::LineOp::Manage)?;
+    if h.line.as_ref().is_some_and(|c| c.id == l.id) {
+        return Err(exit(1, format!("error: cannot move line '{}' used as the current folder; run the command from another folder", l.name)));
+    }
+    let _lock = repo.p.lock()?;
+    let from = repo.working(&l);
+    if !from.is_dir() {
+        return Err(exit(1, format!("error: line '{}' has no working folder on this machine", l.name)));
+    }
+    let moved = repo.p.moved_path(&l.id).is_some();
+    let to = match a.pos.get(1) {
+        Some(arg) => move_target(ctx, repo, &from, arg)?,
+        None if moved => {
+            let d = repo.p.default_line_path(&l.name);
+            if d.symlink_metadata().is_ok() {
+                return Err(exit(1, format!("error: {} already exists", d.display())));
+            }
+            d
+        }
+        None => return Err(exit(1, format!("error: line '{}' is already in the store: {}", l.name, from.display()))),
+    };
+    crate::linepaths::register_with(&ctx.store.root, Some(&to));
+    let back = a.pos.len() == 1;
+    let done = crate::fsutil::rename_tree(&from, &to).map_err(anyhow::Error::from).and_then(|_| {
+        let r = repo.p.set_moved_path(&l.id, if back { None } else { Some(&to) });
+        if r.is_err() {
+            let _ = crate::fsutil::rename_tree(&to, &from);
+        }
+        r
+    });
+    crate::linepaths::register(&ctx.store.root);
+    done?;
+    outln!(ctx, "Moved line {} to {}", l.name, to.display());
+    Ok(0)
 }
 
 fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
@@ -161,6 +263,7 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
             // Into the trash, emptied after the store lock: a folder with build output takes
             // minutes to delete, and other commands must not wait for it.
             repo.p.trash(&repo.working(&l))?;
+            repo.p.set_moved_path(&l.id, None)?;
             repo.drop_stage(&l)?;
             repo.set_pending_moves(&l, &Default::default())?;
             repo.prune_bases(&l, None, 0)?;
@@ -185,7 +288,10 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
         if repo.p.db.line_by_name(&new)?.is_some() {
             return Err(exit(128, format!("fatal: a line named '{new}' already exists")));
         }
-        crate::fsutil::rename_tree(repo.p.line_path(&l.name), repo.p.line_path(&new))?;
+        // A line moved to a chosen path keeps its folder.
+        if repo.p.moved_path(&l.id).is_none() {
+            crate::fsutil::rename_tree(repo.p.line_path(&l.name), repo.p.default_line_path(&new))?;
+        }
         let mut after = repo.line_state(&l, &l.head);
         after.name = new.clone();
         let mut rec = Record::new("line.rename");

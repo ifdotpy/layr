@@ -289,7 +289,7 @@ pub fn undo(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let mut found = None;
             for r in repo.p.db.records(5000)? {
                 let local = r.lines.keys().all(|lid| {
-                    repo.p.db.line_by_id(lid).ok().flatten().map(|l| repo.p.line_path(&l.name).exists()).unwrap_or(false)
+                    repo.p.db.line_by_id(lid).ok().flatten().map(|l| repo.working(&l).exists()).unwrap_or(false)
                         || r.op == "line.delete"
                 });
                 if r.actor.uid == ctx.caller.uid
@@ -497,8 +497,8 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
             (Some(b), Some(l)) if alive => {
                 // Save the current content, then restore the old pointers and content.
                 wb = repo.working_state(ctx, l, "before undo")?;
-                if b.name != l.name {
-                    crate::fsutil::rename_tree(repo.p.line_path(&l.name), repo.p.line_path(&b.name))?;
+                if b.name != l.name && repo.p.moved_path(&l.id).is_none() {
+                    crate::fsutil::rename_tree(repo.p.line_path(&l.name), repo.p.default_line_path(&b.name))?;
                 }
                 let mut l2 = l.clone();
                 l2.name = b.name.clone();
