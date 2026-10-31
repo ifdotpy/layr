@@ -39,17 +39,27 @@ LAYR_TRACE=1 l save -a -m "with stage" -q 2> $T/save-a.trace
 ok "save -a uses the status for add" test "$(count 'status for add' $T/save-a.trace)" -ge 1
 eq "the save has the staged and the changed files" "a.txt b.txt notes.txt" "$(l show --name-only --format= head | sort | tr '\n' ' ' | sed 's/ $//')"
 
-# 2. A save updates the git index for the changed paths only.
-echo d > d.txt
-l add d.txt
-l save -q -m warm
-echo more >> notes.txt
+# 2. A save updates the git index for the changed paths only (a project with a git bridge).
+R=$T/remote.git; U=$T/up
+git init -q --bare -b main $R
+git clone -q $R $U 2>/dev/null; cd $U
+mkdir -p src; seq 1 30 > src/a.txt; seq 1 30 > src/b.txt; echo '*.o' > .gitignore
+git add -A; git commit -qm "upstream 1"; git push -q origin main
+l git clone $R gp -q >/dev/null
+cd $LAYR_ROOT/projects/gp/lines/main
+l protect main --remove >/dev/null 2>&1 || true
+echo one >> src/a.txt
+l save -a -q -m warm
+echo two >> src/a.txt
 LAYR_TRACE=1 l save -a -m edit -q 2> $T/save.trace
 eq "a save refreshes no tracked file of the git index" "" "$(grep 'git index refresh' $T/save.trace)"
 has "a save updates the changed paths of the git index" "git index update of 1 changed paths" "$(cat $T/save.trace)"
-eq "git status is clean after the save" "" "$(git status --short)"
-l line new fresh rel >/dev/null
-eq "git status is clean in a fresh line" "" "$(cd $P/fresh && git status --short)"
+eq "git status is clean after the save" "" "$(git status --short 2>&1)"
+l line new fresh main >/dev/null
+eq "git status is clean in a fresh line" "" "$(cd $LAYR_ROOT/projects/gp/lines/fresh && git status --short 2>&1)"
+echo three >> src/b.txt
+l save -a -q -m third
+eq "git status is clean after a save of another file" "" "$(git status --short 2>&1)"
 
 # 3. A line delete finds the nested subvolumes without a search.
 cd $P/rel
