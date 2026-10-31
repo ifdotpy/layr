@@ -1130,17 +1130,15 @@ impl<'a> Repo<'a> {
         crate::fsutil::atomic_write(&self.stage_base_file(line), self.stage_key(line)?.as_bytes(), 0o600)
     }
 
-    /// The staging line if it was made from the current head (a stale one is dropped).
+    /// The staging line if it was made from the current head. A reader never deletes a stale
+    /// one: `line` may be older than the head another command just moved, and then the index
+    /// is that command's new one. Writers replace a stale index under the lock (`ensure_stage`)
+    /// and a commit drops it after its own read.
     pub fn current_stage(&self, line: &Line) -> Result<Option<PathBuf>> {
         match self.stage(line) {
             Some(s) => {
                 let base = std::fs::read_to_string(self.stage_base_file(line)).unwrap_or_default();
-                if base.trim() == self.stage_key(line)? {
-                    Ok(Some(s))
-                } else {
-                    self.drop_stage(line)?;
-                    Ok(None)
-                }
+                Ok((base.trim() == self.stage_key(line)?).then_some(s))
             }
             None => Ok(None),
         }

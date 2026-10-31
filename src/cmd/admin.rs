@@ -528,6 +528,11 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
                     machine: repo.p.store.machine.id.clone(),
                 };
                 repo.materialize(&l, &src, &w)?;
+                if let Some(staged) = r.data.get("staged_state").and_then(|v| v.as_str()) {
+                    // The index of the deleted line comes back with it.
+                    repo.snapshot_state(staged, &repo.p.stage_path(&l.id), false)?;
+                    repo.mark_stage(&l)?;
+                }
             }
             (None, Some(l)) if alive => {
                 // The operation created the line: delete it (content saved first).
