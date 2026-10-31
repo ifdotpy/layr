@@ -804,6 +804,12 @@ fn copy_entry_impl(
     // and a write would also change every other link to the inode. Publish a new file by rename.
     if _replace_index {
         if let Some(old) = t.open_write(dst_rel)? {
+            // btrfs: a reflink swaps the whole content of a single-link file in one step. The
+            // inode stays, and moves are found by inode. Elsewhere the new file gets a new inode.
+            #[cfg(target_os = "linux")]
+            if old.metadata()?.nlink() == 1 && rustix::fs::ioctl_ficlone(&old, &s).is_ok() {
+                return finish(&old);
+            }
             return t.replace_file_atomic(dst_rel, |d| {
                 fill(d)?;
                 #[cfg(target_os = "linux")]
