@@ -62,9 +62,51 @@ same limit as the insertion rule in Selection).
 The run then writes the moved record, prints `N tests, 0 selected, N skipped (incremental, no
 build)` and exits. A run with no change at all does not even write a record.
 
-Building only the crates that have selected tests is not done. A change in crate A can break a
-dependent crate B that has no selected test, and only a full build finds it. The build with
-selected tests stays one build of the whole selection of the nextest arguments.
+## Partial build
+
+When the nextest arguments contain `--workspace` (or `--all`), the record has the same arguments, and
+the run is not a full run, the tool builds and lists only the packages it needs. It replaces
+`--workspace` and `--exclude` by `-p <package>` for each needed package and keeps the other
+arguments. The run prints `partial build, N of M packages: ...`. A run without `--workspace` keeps
+the user's own package selection.
+
+A package is needed when one of these holds:
+
+- it holds a test that must run (stale, failed, or with a range end that moved);
+- it owns a changed path (any file under its folder, from `layr diff --name-status`, both sides of
+  a rename). A new test can only appear in such a package, and a compile error in it shows;
+- it has a bin target and an integration test (cargo builds the bin for those tests, and a test
+  of another package can start it from `target/retest/debug`), and it depends, directly or not, on
+  a package that owns a changed path. The bin must be rebuilt so that tests do not start a stale one.
+
+Full build instead: a build input changed (`Cargo.toml`, `Cargo.lock`, `build.rs`, `.cargo/`,
+toolchain and nextest config), a stale test belongs to a package that the workspace no longer has,
+the needed set is every package, the run is full or forced by the killed-bin rule, or there is no
+record with the same arguments.
+
+The tests of the packages that are not built are carried from the baseline record (they are not
+stale, else their package would be built), so the record stays complete and the count of tests in
+the summary is the full count.
+
+Limits:
+
+- A compile error in a package that is not built is not reported. Such a package has no changed
+  file and no stale test, but it can depend on a changed package. The gate's `clippy` step
+  (`cargo clippy --workspace --all-targets`) compiles every package and is the check for this; `layr-retest` is
+  not a compile check.
+- A test that is generated in package A by a file of package B (a macro from another crate) is
+  not found until A has a changed file. `--full` finds it.
+- A bin that a test starts, in a package without an integration test, is not rebuilt by a
+  change of a dependency. The same limit exists without partial build, because cargo does not
+  build such a bin for the tests.
+
+## Incremental compilation
+
+`layr-retest` sets `CARGO_INCREMENTAL=1` for its own cargo calls. They write to `target/retest`
+only, so this does not change the caller's builds. It is set by the tool and not by the caller
+because the callers (a gate script) set `CARGO_INCREMENTAL=0` for their plain builds, and a second
+variable per caller would be easy to forget. `LAYR_RETEST_INCREMENTAL=0` leaves the caller's value.
+The first incremental build of a crate is slower than a non-incremental one; the gain is on later builds.
 
 ## Adapters
 

@@ -59,7 +59,7 @@ pub fn is_stale(rec: &TestRec, changes: &[FileChange], ext: &Ext) -> bool {
 }
 
 /// Files that cargo reads besides Rust source: a change there can add a test target or break the build.
-fn is_build_input(path: &str) -> bool {
+pub fn is_build_input(path: &str) -> bool {
     let name = path.rsplit('/').next().unwrap_or(path);
     path.starts_with(".cargo/")
         || path.contains("/.cargo/")

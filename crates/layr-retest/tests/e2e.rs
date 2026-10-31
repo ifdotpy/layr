@@ -222,6 +222,83 @@ fn runs_only_the_stale_test() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+const PKG_LIB: &str = "pub fn f() -> i32 {\n    1\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t1() {\n        assert_eq!(super::f(), 1);\n    }\n}\n";
+
+/// Mtime of the newest test binary of a package in the instrumented target.
+fn test_binary_mtime(line: &Path, pkg: &str) -> std::time::SystemTime {
+    std::fs::read_dir(line.join("target/retest/debug/deps"))
+        .unwrap()
+        .flatten()
+        .filter(|e| {
+            let n = e.file_name().to_string_lossy().into_owned();
+            n.starts_with(&format!("{pkg}-")) && !n.contains('.')
+        })
+        .map(|e| e.metadata().unwrap().modified().unwrap())
+        .max()
+        .unwrap()
+}
+
+/// A workspace of two packages: a run builds only the packages that it needs.
+#[test]
+fn builds_only_packages_with_selected_tests() {
+    let tmp = std::env::temp_dir().canonicalize().unwrap().join(format!("layr-retest-partial-{}", std::process::id()));
+    let src = tmp.join("src-project");
+    for p in ["a", "b"] {
+        std::fs::create_dir_all(src.join(p).join("src")).unwrap();
+        std::fs::write(src.join(p).join("Cargo.toml"), format!("[package]\nname = \"{p}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n")).unwrap();
+        std::fs::write(src.join(p).join("src/lib.rs"), PKG_LIB).unwrap();
+    }
+    std::fs::write(src.join("Cargo.toml"), "[workspace]\nmembers = [\"a\", \"b\"]\nresolver = \"2\"\n").unwrap();
+    std::fs::write(src.join(".layrattributes"), ".layr-retest regenerable\ntarget regenerable\n").unwrap();
+    std::fs::write(src.join(".gitignore"), "/target\n/.layr-retest\n").unwrap();
+    sh(&src, &tmp.join("unused"), "cargo", &["generate-lockfile", "--offline"]);
+    let root = tmp.join("store");
+    sh(&tmp, &root, "layr", &["init", "app", "--from", src.to_str().unwrap()]);
+    sh(&root.join("projects/app/lines/main"), &root, "layr", &["line", "new", "work"]);
+    let line = root.join("projects/app/lines/work");
+    let ws = ["run", "--", "--workspace"];
+
+    // 1. No record: the full build, every test.
+    let err = retest(&line, &root, &ws);
+    assert!(err.contains("2 tests, 2 selected") && !err.contains("partial build"), "{err}");
+
+    // 2. A change in `a`: only `a` is built and listed; `b` keeps its test binary and its record.
+    let b_binary = test_binary_mtime(&line, "b");
+    let a = line.join("a/src/lib.rs");
+    std::fs::write(&a, PKG_LIB.replace("    1\n}", "    1 + 0\n}")).unwrap();
+    let err = retest(&line, &root, &ws);
+    assert!(err.contains("partial build, 1 of 2 packages: a"), "{err}");
+    assert!(err.contains("2 tests, 1 selected") && err.contains("ran 1, passed 1"), "{err}");
+    assert_eq!(test_binary_mtime(&line, "b"), b_binary, "b was built");
+    assert!(last_record(&line)["tests"].get("b tests::t1").is_some(), "record lost b");
+
+    // 3. A new test in `b`, which has no selected test: `b` is built and listed, the test is found.
+    let b = line.join("b/src/lib.rs");
+    std::fs::write(&b, PKG_LIB.replace("    #[test]\n    fn t1()", "    #[test]\n    fn t2() {\n        assert_eq!(super::f(), 1);\n    }\n\n    #[test]\n    fn t1()")).unwrap();
+    let err = retest(&line, &root, &ws);
+    assert!(err.contains("partial build, 1 of 2 packages: b"), "{err}");
+    assert!(err.contains("3 tests, 1 selected") && err.contains("b tests::t2"), "{err}");
+
+    // 4. Changes in both packages need both: the full build, no partial note.
+    std::fs::write(&a, PKG_LIB.replace("    1\n}", "    1 + 0 + 0\n}")).unwrap();
+    std::fs::write(&b, std::fs::read_to_string(&b).unwrap().replace("    1\n}", "    1 + 0\n}")).unwrap();
+    let err = retest(&line, &root, &ws);
+    assert!(!err.contains("partial build") && err.contains("3 tests, 3 selected"), "{err}");
+
+    // 5. A build input changed: the full build.
+    std::fs::write(line.join("a/Cargo.toml"), "[package]\nname = \"a\"\nversion = \"0.1.1\"\nedition = \"2021\"\n").unwrap();
+    let err = retest(&line, &root, &ws);
+    assert!(!err.contains("partial build"), "{err}");
+
+    // 6. A run without `--workspace` keeps the user's own selection.
+    std::fs::write(&a, PKG_LIB.replace("    1\n}", "    1 + 1 - 1\n}")).unwrap();
+    let err = retest(&line, &root, &["run", "--", "-p", "a"]);
+    assert!(!err.contains("partial build"), "{err}");
+
+    let _ = Command::new("chflags").args(["-R", "nouchg"]).arg(&tmp).status();
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 /// vitest adapter with a fake tool: a script that logs its arguments and exits with the code in a file.
 /// No real vitest, jest or pytest-testmon is used.
 #[test]

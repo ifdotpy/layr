@@ -3,6 +3,7 @@
 
 mod deps;
 mod parse;
+mod pkgs;
 mod record;
 mod select;
 mod tools;
@@ -29,6 +30,9 @@ const RAW_COUNT_FILE: &str = "raw-count";
 /// Off by default: the call makes a state of the line, which takes 40 to 75 s in a line with a big
 /// build folder, and it holds the lock of the store.
 static SAVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Set to `0` to leave `CARGO_INCREMENTAL` as the caller has it. By default layr-retest sets it to 1 for its
+/// own cargo calls: they build into `target/retest` only, and an incremental build of a small change is faster.
+const INCREMENTAL_VAR: &str = "LAYR_RETEST_INCREMENTAL";
 /// Number of parallel coverage exports.
 const EXPORT_WORKERS: usize = 4;
 /// Files that no record keeps: the standard library and build output. Cargo's own folders stay:
@@ -288,10 +292,13 @@ fn export(root: &Path, bin: &Path, others: &[PathBuf], dir: &Path, tools: &(Path
     Ok((files, packages.into_iter().collect()))
 }
 
+/// `cargo metadata` of the workspace members.
+fn metadata() -> Result<Value> {
+    Ok(serde_json::from_slice(&output(Command::new("cargo").args(["metadata", "--no-deps", "--format-version", "1"]))?)?)
+}
+
 /// Name and source file of every bin target of the workspace.
-fn bin_targets() -> Result<Vec<(String, String)>> {
-    let meta: Value =
-        serde_json::from_slice(&output(Command::new("cargo").args(["metadata", "--no-deps", "--format-version", "1"]))?)?;
+fn bin_targets(meta: &Value) -> Result<Vec<(String, String)>> {
     let targets = meta["packages"].as_array().into_iter().flatten().flat_map(|p| p["targets"].as_array().into_iter().flatten());
     Ok(targets
         .filter(|t| t["kind"].as_array().is_some_and(|k| k.iter().any(|k| k == "bin")))
@@ -300,8 +307,8 @@ fn bin_targets() -> Result<Vec<(String, String)>> {
 }
 
 /// The bin targets of the workspace, built instrumented in `<target>/debug/<name>`.
-fn bin_objects(target: &Path) -> Result<Vec<PathBuf>> {
-    Ok(bin_targets()?.into_iter().map(|(name, _)| target.join("debug").join(name)).filter(|p| p.is_file()).collect())
+fn bin_objects(meta: &Value, target: &Path) -> Result<Vec<PathBuf>> {
+    Ok(bin_targets(meta)?.into_iter().map(|(name, _)| target.join("debug").join(name)).filter(|p| p.is_file()).collect())
 }
 
 /// Path of `p` relative to the line root, if it is inside.
@@ -426,12 +433,15 @@ fn run(args: &[String]) -> Result<i32> {
         _ => deps::Ext::new(&changes, "", ""),
     };
 
+    let name_status = match baseline.as_deref() {
+        Some(b) if b != current => layr(&["diff", "--name-status", b, &current])?,
+        _ => String::new(),
+    };
     lap.mark("save, baseline, diff");
 
     // Nothing is stale and the change cannot add a test or break the build: no build, no test list.
     // The record lists every test of the baseline, so that list stands for the test list.
     if let (Some(b), Some(old), false) = (baseline.as_deref(), base_rec.as_ref(), full) {
-        let name_status = if b != current { layr(&["diff", "--name-status", b, &current])? } else { String::new() };
         let carried: Option<BTreeMap<String, TestRec>> = old
             .tests
             .iter()
@@ -452,6 +462,57 @@ fn run(args: &[String]) -> Result<i32> {
             return Ok(0);
         }
     }
+    // Select the packages to build. A full run, a run without a usable record and a run that
+    // cannot say which packages it needs build the whole selection of the nextest arguments.
+    let meta = metadata()?;
+    let mut full = full;
+    let mut forced = false;
+    // A test can start a bin and stop it with SIGKILL: no profile, so the bin's code is in no record
+    // and a change of it selects nothing. Run every test then (docs/retest.md, "Killed child processes").
+    if let (false, Some(old)) = (full, base_rec.as_ref()) {
+        let bins: Vec<String> = bin_targets(&meta)?.iter().filter_map(|(_, src)| relative_to(&root, src)).collect();
+        let hit = select::unrecorded_bin_changes(&bins, &changes, &old.tests);
+        if !hit.is_empty() {
+            eprintln!("layr-retest: bin target source changed and no test record has it: {}; running every test", hit.join(", "));
+            full = true;
+            forced = true;
+        }
+    }
+    // Tests of the baseline that this run does not list: their packages are not built.
+    let mut unlisted: BTreeMap<String, TestRec> = BTreeMap::new();
+    let mut nargs: Vec<String> = extra.to_vec();
+    if let (false, Some(old)) = (full, base_rec.as_ref().filter(|o| o.args == extra)) {
+        let stale: Vec<&str> = old
+            .tests
+            .iter()
+            .filter(|(_, t)| select::carry(t, &changes, &ext).is_none())
+            .filter_map(|(k, _)| k.split_once(' ').map(|(id, _)| id))
+            .collect();
+        let changed: Vec<String> = name_status.lines().flat_map(|l| l.split('\t').skip(1)).map(str::to_string).collect();
+        let pkgs = pkgs::load(&meta, |p| relative_to(&root, p));
+        let narrowed = pkgs::build_set(&pkgs, &stale, &changed, &pkgs::excluded(extra))
+            .and_then(|set| pkgs::narrow_args(extra, &set).map(|a| (set, a)));
+        if let Some((set, args)) = narrowed {
+            eprintln!(
+                "layr-retest: partial build, {} of {} packages: {} (compile errors elsewhere are not reported, docs/retest.md)",
+                set.len(),
+                pkgs.len(),
+                set.join(", ")
+            );
+            // Every test of an unbuilt package is carried: it is not stale (its package would be built).
+            let built = |id: &str| set.iter().any(|p| p == id.split("::").next().unwrap_or(id));
+            for (k, t) in &old.tests {
+                let id = k.split_once(' ').map_or(k.as_str(), |(id, _)| id);
+                if !built(id) {
+                    if let Some(c) = select::carry(t, &changes, &ext) {
+                        unlisted.insert(k.clone(), c);
+                    }
+                }
+            }
+            nargs = args;
+        }
+    }
+
     // Build the instrumented tests and list them.
     let target = root.join("target/retest");
     let profdir = target.join("profraw");
@@ -462,31 +523,20 @@ fn run(args: &[String]) -> Result<i32> {
     let flags = format!("{} -C instrument-coverage", std::env::var("RUSTFLAGS").unwrap_or_default());
     let nextest = |sub: &[&str]| {
         let mut c = Command::new("cargo");
-        c.arg("nextest").args(sub).args(extra);
+        c.arg("nextest").args(sub).args(&nargs);
         // Cargo, build scripts and the list phase write here; the wrapper gives each test its own folder.
         c.env("LLVM_PROFILE_FILE", profdir.join("other/%p.profraw"));
         c.env(PROFDATA_VAR, &tools.0);
         c.env("RUSTFLAGS", flags.trim()).env("CARGO_TARGET_DIR", &target).env(PROFILE_DIR_VAR, &profdir);
         c.env(&runner_var, format!("{} wrap --", exe.display())).env("NEXTEST_EXPERIMENTAL_LIBTEST_JSON", "1");
+        if std::env::var(INCREMENTAL_VAR).as_deref() != Ok("0") {
+            c.env("CARGO_INCREMENTAL", "1");
+        }
         c
     };
     let list = output(nextest(&["list", "--message-format", "json"]).stderr(Stdio::inherit()))?;
     let suites = parse_list(&list)?;
     lap.mark("build and list");
-
-    // A test can start a bin and stop it with SIGKILL: no profile, so the bin's code is in no record
-    // and a change of it selects nothing. Run every test then (docs/retest.md, "Killed child processes").
-    let mut full = full;
-    let mut forced = false;
-    if let (false, Some(old)) = (full, base_rec.as_ref()) {
-        let bins: Vec<String> = bin_targets()?.iter().filter_map(|(_, src)| relative_to(&root, src)).collect();
-        let hit = select::unrecorded_bin_changes(&bins, &changes, &old.tests);
-        if !hit.is_empty() {
-            eprintln!("layr-retest: bin target source changed and no test record has it: {}; running every test", hit.join(", "));
-            full = true;
-            forced = true;
-        }
-    }
 
     // Select.
     let mut all: Vec<(String, String)> = Vec::new();
@@ -514,12 +564,13 @@ fn run(args: &[String]) -> Result<i32> {
     } else {
         "incremental"
     };
-    eprintln!("layr-retest: {} tests, {} selected, {} skipped ({note})", all.len(), stale.len(), all.len() - stale.len());
+    let total = all.len() + unlisted.len();
+    eprintln!("layr-retest: {total} tests, {} selected, {} skipped ({note})", stale.len(), total - stale.len());
 
     // Run, and export the coverage of each test as soon as nextest reports it. The wrapper has
     // merged the raw profiles of the test already, so a test that waits for an export holds only
     // a small `merged.profdata`. The export deletes the folder of the test.
-    let bins = bin_objects(&target)?;
+    let bins = bin_objects(&meta, &target)?;
     let tables = Tables::default();
     let done: Mutex<BTreeMap<String, Result<Exported>>> = Mutex::new(BTreeMap::new());
     let mut results: BTreeMap<String, bool> = BTreeMap::new();
@@ -577,6 +628,7 @@ fn run(args: &[String]) -> Result<i32> {
     if baseline.as_deref() == Some(current.as_str()) {
         rec.baseline = base_rec.as_ref().and_then(|r| r.baseline.clone());
     }
+    rec.tests.append(&mut unlisted);
     let mut contradictions = 0;
     for (b, t) in &all {
         let key = test_key(b, t);
@@ -621,7 +673,7 @@ fn run(args: &[String]) -> Result<i32> {
         results.len(),
         results.len() - failed,
         failed,
-        all.len() - stale.len(),
+        total - stale.len(),
         current,
         t0.elapsed().as_secs_f32(),
         if contradictions > 0 { format!("; {contradictions} contradiction(s)") } else { String::new() }
