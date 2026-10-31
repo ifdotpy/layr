@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.9.0](https://github.com/ifdotpy/layr/compare/v0.8.0...v0.9.0) (2026-10-31)
+
+
+### Features
+
+* **gc:** share identical cache data on APFS and btrfs ([#78](https://github.com/ifdotpy/layr/issues/78)) ([d366b8a](https://github.com/ifdotpy/layr/commit/d366b8aca8d618ce822558dec61e709dc864a384))
+* **retest:** line-tables-only debuginfo and a stale artifact sweep ([#80](https://github.com/ifdotpy/layr/issues/80)) ([40e610e](https://github.com/ifdotpy/layr/commit/40e610e0ba2302ad15a983c3c99b308aaf369f76))
+* **retest:** make test selection part of the layr CLI ([#82](https://github.com/ifdotpy/layr/issues/82)) ([93e8981](https://github.com/ifdotpy/layr/commit/93e89810b90a382a6c85936757dbd750f7390ba5))
+
 ## [0.8.0](https://github.com/ifdotpy/layr/compare/v0.7.0...v0.8.0) (2026-10-31)
 
 
