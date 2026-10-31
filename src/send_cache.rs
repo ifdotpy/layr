@@ -8,7 +8,7 @@ use std::os::fd::AsFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
-const MAX_ENTRY: u64 = 8 << 20;
+pub const MAX_ENTRY: u64 = 8 << 20;
 const MAX_TOTAL: u64 = 32 << 20;
 const MAX_ENTRIES: usize = 256;
 
@@ -75,36 +75,47 @@ impl Cache {
         if size > MAX_ENTRY {
             return Ok(());
         }
-        let dir = fsutil::open_dir_nofollow(&self.dir)?;
-        // Readers can use an entry while another command replaces or removes its name.
-        rustix::fs::flock(&dir, rustix::fs::FlockOperation::LockExclusive)?;
-        let mut entries = Vec::new();
-        let mut total = 0;
-        for entry in fs::read_dir(&self.dir)?.flatten() {
-            let m = fs::symlink_metadata(entry.path())?;
-            if m.is_file() {
-                total += m.len();
-                entries.push((m.modified()?, entry.path(), m.len()));
-            }
-        }
-        entries.sort();
-        let mut count = entries.len();
-        for (_, path, len) in entries {
-            if total + size <= MAX_TOTAL && count < MAX_ENTRIES {
-                break;
-            }
-            fs::remove_file(path)?;
-            total -= len;
-            count -= 1;
-        }
+        // The checksum needs no lock.
         let mut saved = Sha256::digest(data).to_vec();
         saved.extend_from_slice(data);
         // This cache is disposable. Publish atomically, but do not force a disk transaction.
-        // A partial write after a crash fails the checksum and causes a fresh stream.
+        // A partial write after a crash fails the checksum and causes a fresh stream. The write
+        // happens before the lock; only the eviction and the rename are under it.
         let tmp = self.dir.join(format!(".tmp-{}", crate::ids::new_id()));
-        let result = (|| {
+        let result = (|| -> anyhow::Result<()> {
             let mut f = fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
             f.write_all(&saved)?;
+            drop(f);
+            let dir = fsutil::open_dir_nofollow(&self.dir)?;
+            // Readers can use an entry while another command replaces or removes its name. The
+            // cache is disposable: when another command holds the lock, skip saving.
+            match rustix::fs::flock(&dir, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+                Ok(()) => {}
+                Err(rustix::io::Errno::WOULDBLOCK) => return Ok(()),
+                Err(e) => return Err(e.into()),
+            }
+            let mut entries = Vec::new();
+            let mut total = 0;
+            for entry in fs::read_dir(&self.dir)?.flatten() {
+                if entry.file_name().to_string_lossy().starts_with(".tmp-") {
+                    continue;
+                }
+                let m = fs::symlink_metadata(entry.path())?;
+                if m.is_file() {
+                    total += m.len();
+                    entries.push((m.modified()?, entry.path(), m.len()));
+                }
+            }
+            entries.sort();
+            let mut count = entries.len();
+            for (_, path, len) in entries {
+                if total + size <= MAX_TOTAL && count < MAX_ENTRIES {
+                    break;
+                }
+                fs::remove_file(path)?;
+                total -= len;
+                count -= 1;
+            }
             fs::rename(&tmp, self.dir.join(&self.name))?;
             Ok(())
         })();

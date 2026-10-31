@@ -1168,6 +1168,7 @@ impl<'a> Repo<'a> {
     }
 
     /// Add only needs paths that differ between the index and the working tree.
+<<<<<<< head
     /// `limit` names the paths (with their ignore files) that the caller reads: only they are
     /// scanned and compared, and the lists hold nothing else.
     #[cfg(target_os = "macos")]
@@ -1183,6 +1184,12 @@ impl<'a> Repo<'a> {
             self.finish_status(line, scan, index, false, &mut st)?;
             return Ok(st);
         }
+||||||| base
+    #[cfg(target_os = "macos")]
+    pub fn status_for_add(&self, line: &Line, scan: &Path, index: &Snap) -> Result<Status> {
+=======
+    pub fn status_for_add(&self, line: &Line, scan: &Path, index: &Snap) -> Result<Status> {
+>>>>>>> f81afd9
         self.status_of_inner(line, scan, index, false)
     }
 
@@ -1191,6 +1198,7 @@ impl<'a> Repo<'a> {
         if full {
             let head = self.head_src(line)?;
             if !same_tree(index, &head) {
+                let _t = crate::trace::span("status: head to index diff");
                 let staged: Vec<Change> =
                     changes::file_changes(&head, index)?.into_iter().filter(|c| !skip_path(&c.path)).collect();
                 st.staged = changes::with_renames(&head, index, staged);
@@ -1299,6 +1307,15 @@ impl<'a> Repo<'a> {
         let scan = self.scan(line)?;
         let (index, itemp) = self.index_view(line)?;
         let st = self.status_of(line, &scan.path, &index)?;
+        Ok((st, scan, itemp, index))
+    }
+
+    /// The status `add` needs: unstaged and untracked paths only, without the head to index diff.
+    pub fn status_light(&self, line: &Line) -> Result<(Status, Temp, Option<Temp>, Snap)> {
+        let _t = crate::trace::span("status for add");
+        let scan = self.scan(line)?;
+        let (index, itemp) = self.index_view(line)?;
+        let st = self.status_for_add(line, &scan.path, &index)?;
         Ok((st, scan, itemp, index))
     }
 

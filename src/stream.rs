@@ -8,6 +8,7 @@
 
 use anyhow::{bail, Result};
 use std::collections::HashMap;
+use std::io::Read;
 
 const MAGIC: &[u8] = b"btrfs-stream\0";
 
@@ -75,24 +76,22 @@ fn le64(b: &[u8]) -> u64 {
     u64::from_le_bytes(a)
 }
 
-/// Parse a send stream into commands. Unknown commands become `Cmd::Other`.
-pub fn parse(data: &[u8]) -> Result<Vec<Cmd>> {
-    if data.len() < MAGIC.len() + 4 || &data[..MAGIC.len()] != MAGIC {
-        bail!("not a btrfs send stream");
-    }
-    let mut pos = MAGIC.len() + 4;
-    let mut out = Vec::new();
-    while pos + 10 <= data.len() {
-        let len = le32(&data[pos..]) as usize;
-        let code = le16(&data[pos + 4..]);
-        let body_start = pos + 10;
-        let body_end = body_start + len;
-        if body_end > data.len() {
-            bail!("truncated send stream");
-        }
-        let body = &data[body_start..body_end];
-        pos = body_end;
-        let mut attrs: HashMap<u16, &[u8]> = HashMap::new();
+/// The attributes of a command that `decode` needs, as fixed fields.
+#[derive(Default)]
+struct Attrs<'a> {
+    path: Option<&'a [u8]>,
+    path_to: Option<&'a [u8]>,
+    path_link: Option<&'a [u8]>,
+    file_offset: u64,
+    size: u64,
+    mode: u64,
+    clone_len: u64,
+}
+
+impl<'a> Attrs<'a> {
+    fn scan(body: &'a [u8]) -> Self {
+        let num = |v: &[u8]| if v.len() >= 8 { le64(v) } else { 0 };
+        let mut out = Attrs::default();
         let mut a = 0;
         while a + 4 <= body.len() {
             let t = le16(&body[a..]);
@@ -101,37 +100,87 @@ pub fn parse(data: &[u8]) -> Result<Vec<Cmd>> {
             if s + l > body.len() {
                 break;
             }
-            attrs.insert(t, &body[s..s + l]);
+            let v = &body[s..s + l];
+            match t {
+                attr::PATH => out.path = Some(v),
+                attr::PATH_TO => out.path_to = Some(v),
+                attr::PATH_LINK => out.path_link = Some(v),
+                attr::FILE_OFFSET => out.file_offset = num(v),
+                attr::SIZE => out.size = num(v),
+                attr::MODE => out.mode = num(v),
+                attr::CLONE_LEN => out.clone_len = num(v),
+                _ => {}
+            }
             a = s + l;
         }
-        let path = |k: u16| -> Result<String> {
-            match attrs.get(&k) {
+        out
+    }
+}
+
+/// Read a send stream command by command and call `f` for each. Unknown commands become
+/// `Cmd::Other`. Only one command body is in memory. The stream is read to its end.
+pub fn decode(mut r: impl Read, mut f: impl FnMut(Cmd)) -> Result<()> {
+    let mut head = [0u8; MAGIC.len() + 4];
+    if r.read_exact(&mut head).is_err() || &head[..MAGIC.len()] != MAGIC {
+        bail!("not a btrfs send stream");
+    }
+    let mut header = [0u8; 10];
+    let mut body = Vec::new();
+    loop {
+        let n = read_all(&mut r, &mut header)?;
+        if n == 0 {
+            return Ok(());
+        }
+        if n < header.len() {
+            bail!("truncated send stream");
+        }
+        let len = le32(&header) as usize;
+        let code = le16(&header[4..]);
+        body.resize(len, 0);
+        if r.read_exact(&mut body).is_err() {
+            bail!("truncated send stream");
+        }
+        let at = Attrs::scan(&body);
+        let path = |v: Option<&[u8]>| -> Result<String> {
+            match v {
                 Some(v) => Ok(String::from_utf8_lossy(v).into_owned()),
-                None => bail!("send command {code} without attribute {k}"),
+                None => bail!("send command {code} without a path attribute"),
             }
         };
-        let num = |k: u16| -> u64 { attrs.get(&k).map(|v| if v.len() >= 8 { le64(v) } else { 0 }).unwrap_or(0) };
         let c = match code {
-            cmd::MKFILE => Cmd::Create { path: path(attr::PATH)?, kind: Kind::File },
-            cmd::MKDIR => Cmd::Create { path: path(attr::PATH)?, kind: Kind::Dir },
-            cmd::MKNOD | cmd::MKFIFO | cmd::MKSOCK => Cmd::Create { path: path(attr::PATH)?, kind: Kind::Special },
-            cmd::SYMLINK => Cmd::Symlink { path: path(attr::PATH)?, target: path(attr::PATH_LINK)? },
-            cmd::RENAME => Cmd::Rename { from: path(attr::PATH)?, to: path(attr::PATH_TO)? },
-            cmd::LINK => Cmd::Link { path: path(attr::PATH)?, target: path(attr::PATH_LINK)? },
-            cmd::UNLINK => Cmd::Unlink { path: path(attr::PATH)? },
-            cmd::RMDIR => Cmd::Rmdir { path: path(attr::PATH)? },
-            cmd::UPDATE_EXTENT => Cmd::Extent { path: path(attr::PATH)?, offset: num(attr::FILE_OFFSET), len: num(attr::SIZE) },
-            cmd::CLONE => Cmd::Extent { path: path(attr::PATH)?, offset: num(attr::FILE_OFFSET), len: num(attr::CLONE_LEN) },
+            cmd::MKFILE => Cmd::Create { path: path(at.path)?, kind: Kind::File },
+            cmd::MKDIR => Cmd::Create { path: path(at.path)?, kind: Kind::Dir },
+            cmd::MKNOD | cmd::MKFIFO | cmd::MKSOCK => Cmd::Create { path: path(at.path)?, kind: Kind::Special },
+            cmd::SYMLINK => Cmd::Symlink { path: path(at.path)?, target: path(at.path_link)? },
+            cmd::RENAME => Cmd::Rename { from: path(at.path)?, to: path(at.path_to)? },
+            cmd::LINK => Cmd::Link { path: path(at.path)?, target: path(at.path_link)? },
+            cmd::UNLINK => Cmd::Unlink { path: path(at.path)? },
+            cmd::RMDIR => Cmd::Rmdir { path: path(at.path)? },
+            cmd::UPDATE_EXTENT => Cmd::Extent { path: path(at.path)?, offset: at.file_offset, len: at.size },
+            cmd::CLONE => Cmd::Extent { path: path(at.path)?, offset: at.file_offset, len: at.clone_len },
             cmd::WRITE | cmd::ENCODED_WRITE | cmd::FALLOCATE => {
-                Cmd::Extent { path: path(attr::PATH)?, offset: num(attr::FILE_OFFSET), len: u64::MAX }
+                Cmd::Extent { path: path(at.path)?, offset: at.file_offset, len: u64::MAX }
             }
-            cmd::TRUNCATE => Cmd::Truncate { path: path(attr::PATH)?, size: num(attr::SIZE) },
-            cmd::CHMOD => Cmd::Chmod { path: path(attr::PATH)?, mode: num(attr::MODE) as u32 },
+            cmd::TRUNCATE => Cmd::Truncate { path: path(at.path)?, size: at.size },
+            cmd::CHMOD => Cmd::Chmod { path: path(at.path)?, mode: at.mode as u32 },
             _ => Cmd::Other,
         };
-        out.push(c);
+        f(c);
     }
-    Ok(out)
+}
+
+/// Fill `buf` from `r`; fewer bytes only at the end of the stream.
+fn read_all(r: &mut impl Read, buf: &mut [u8]) -> Result<usize> {
+    let mut n = 0;
+    while n < buf.len() {
+        match r.read(&mut buf[n..]) {
+            Ok(0) => break,
+            Ok(k) => n += k,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(n)
 }
 
 /// One entry touched by the stream.
@@ -307,13 +356,11 @@ impl Model {
     }
 }
 
-/// Turn a parsed stream into touched entries.
-pub fn entries(cmds: &[Cmd]) -> Vec<Entry> {
+/// Read a send stream into touched entries, command by command.
+pub fn entries_from(r: impl Read) -> Result<Vec<Entry>> {
     let mut m = Model::new();
-    for c in cmds {
-        m.apply(c);
-    }
-    m.finish()
+    decode(r, |c| m.apply(&c))?;
+    Ok(m.finish())
 }
 
 #[cfg(test)]
@@ -322,6 +369,51 @@ mod tests {
 
     fn s(x: &str) -> String {
         x.to_string()
+    }
+
+    fn entries(cmds: &[Cmd]) -> Vec<Entry> {
+        let mut m = Model::new();
+        for c in cmds {
+            m.apply(c);
+        }
+        m.finish()
+    }
+
+    fn command(code: u16, attrs: &[(u16, &[u8])]) -> Vec<u8> {
+        let mut body = Vec::new();
+        for (t, v) in attrs {
+            body.extend_from_slice(&t.to_le_bytes());
+            body.extend_from_slice(&(v.len() as u16).to_le_bytes());
+            body.extend_from_slice(v);
+        }
+        let mut out = (body.len() as u32).to_le_bytes().to_vec();
+        out.extend_from_slice(&code.to_le_bytes());
+        out.extend_from_slice(&[0; 4]);
+        out.extend(body);
+        out
+    }
+
+    #[test]
+    fn decode_reads_commands_one_by_one() {
+        let mut data = MAGIC.to_vec();
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend(command(cmd::MKFILE, &[(attr::PATH, b"a")]));
+        data.extend(command(cmd::RENAME, &[(attr::PATH, b"a"), (attr::PATH_TO, b"b")]));
+        data.extend(command(cmd::UPDATE_EXTENT, &[(attr::PATH, b"b"), (attr::FILE_OFFSET, &4096u64.to_le_bytes()), (attr::SIZE, &8u64.to_le_bytes())]));
+        data.extend(command(99, &[]));
+        let mut got = Vec::new();
+        decode(&data[..], |c| got.push(c)).unwrap();
+        assert_eq!(
+            got,
+            vec![
+                Cmd::Create { path: s("a"), kind: Kind::File },
+                Cmd::Rename { from: s("a"), to: s("b") },
+                Cmd::Extent { path: s("b"), offset: 4096, len: 8 },
+                Cmd::Other,
+            ]
+        );
+        assert!(decode(&data[..data.len() - 1], |_| {}).is_err());
+        assert!(decode(&b"nope"[..], |_| {}).is_err());
     }
 
     #[test]

@@ -525,25 +525,50 @@ fn open_ro(p: &Path) -> Result<File> {
     OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(p).with_context(|| format!("open {}", p.display()))
 }
 
+thread_local! {
+    /// The two compare buffers of `same_range`, reused by every call of the thread.
+    static COMPARE_BUFFERS: std::cell::RefCell<(Vec<u8>, Vec<u8>)> =
+        const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
+}
+
 fn same_range(a: &mut File, b: &mut File, off: u64, len: u64) -> Result<bool> {
     a.seek(SeekFrom::Start(off))?;
     b.seek(SeekFrom::Start(off))?;
-    let mut left = len;
-    let mut ba = vec![0u8; 1 << 16];
-    let mut bb = vec![0u8; 1 << 16];
-    while left > 0 {
-        let want = left.min(ba.len() as u64) as usize;
-        let na = read_full(a, &mut ba[..want])?;
-        let nb = read_full(b, &mut bb[..want])?;
-        if na != nb || ba[..na] != bb[..nb] {
-            return Ok(false);
+    COMPARE_BUFFERS.with(|cell| {
+        let (ba, bb) = &mut *cell.borrow_mut();
+        ba.resize(1 << 16, 0);
+        bb.resize(1 << 16, 0);
+        let mut left = len;
+        while left > 0 {
+            let want = left.min(ba.len() as u64) as usize;
+            let na = read_full(a, &mut ba[..want])?;
+            let nb = read_full(b, &mut bb[..want])?;
+            if na != nb || ba[..na] != bb[..nb] {
+                return Ok(false);
+            }
+            if na < want {
+                break;
+            }
+            left -= na as u64;
         }
-        if na < want {
-            break;
+        Ok(true)
+    })
+}
+
+/// The byte ranges as sorted, disjoint `(offset, length)` pairs inside a file of `size` bytes:
+/// overlapping and adjacent ranges merge, so no byte is compared twice.
+fn merged_ranges(ranges: &[(u64, u64)], size: u64) -> Vec<(u64, u64)> {
+    let mut v: Vec<(u64, u64)> =
+        ranges.iter().filter(|(off, _)| *off < size).map(|(off, len)| (*off, off.saturating_add(*len).min(size))).collect();
+    v.sort_unstable();
+    let mut out: Vec<(u64, u64)> = Vec::with_capacity(v.len());
+    for (start, end) in v {
+        match out.last_mut() {
+            Some(last) if start <= last.1 => last.1 = last.1.max(end),
+            _ => out.push((start, end)),
         }
-        left -= na as u64;
     }
-    Ok(true)
+    out.into_iter().map(|(start, end)| (start, end - start)).collect()
 }
 
 fn read_full(f: &mut File, buf: &mut [u8]) -> Result<usize> {
@@ -586,12 +611,8 @@ pub fn same_entry(
             let mut b = open_ro(&rb.at(pb)?)?;
             match ranges {
                 Some(rs) => {
-                    for (off, len) in rs {
-                        if *off >= ma.size {
-                            continue;
-                        }
-                        let l = (*len).min(ma.size - off);
-                        if !same_range(&mut a, &mut b, *off, l)? {
+                    for (off, len) in merged_ranges(rs, ma.size) {
+                        if !same_range(&mut a, &mut b, off, len)? {
                             return Ok(false);
                         }
                     }
@@ -1192,4 +1213,16 @@ pub fn fiemap_space(root: &Path) -> Result<Space> {
     let mut space = Space::default();
     fiemap_visit(root, &mut |h| space.add(h))?;
     Ok(space)
+}
+
+#[cfg(test)]
+mod range_tests {
+    use super::merged_ranges;
+
+    #[test]
+    fn ranges_merge_and_clip() {
+        let r = [(100, 50), (0, 10), (10, 5), (120, 100), (500, 1), (300, u64::MAX)];
+        assert_eq!(merged_ranges(&r, 400), vec![(0, 15), (100, 120), (300, 100)]);
+        assert_eq!(merged_ranges(&[], 400), vec![]);
+    }
 }

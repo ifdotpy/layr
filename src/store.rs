@@ -423,7 +423,41 @@ impl<'a> Project<'a> {
                 }
             }
         }
+        #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+        {
+            let _t = crate::trace::span(format!("trash {}", path.display()));
+            if fs::symlink_metadata(path).is_err() {
+                return Ok(());
+            }
+            // A subvolume with known nested subvolumes is destroyed at once, with no search.
+            if crate::storage::is_subvolume(path) && crate::storage::destroy_known(path, &self.nested_hints(path))? {
+                return Ok(());
+            }
+            // What needs a search or a file by file delete waits for the end of the last lock.
+            if HELD_LOCKS.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+                let dir = self.store.trash_dir();
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let to = dir.join(format!("{name}.{}", crate::ids::new_id()));
+                if fs::create_dir_all(&dir).is_ok() && crate::storage::move_tree(path, &to).is_ok() {
+                    return Ok(());
+                }
+            }
+        }
         crate::storage::delete_tree(path)
+    }
+    /// The paths of nested subvolumes (caches) that a working folder of a line is known to hold:
+    /// the machine setting and the caches that the head of the line saved.
+    #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+    fn nested_hints(&self, path: &Path) -> Vec<String> {
+        let mut hints = self.config_strings("regenerable");
+        let line = match (path.parent() == Some(self.lines_dir().as_path()), path.file_name()) {
+            (true, Some(name)) => self.db.line_by_name(&name.to_string_lossy()).ok().flatten(),
+            _ => None,
+        };
+        if let Some(rec) = line.and_then(|l| self.db.state(&l.head).ok().flatten()) {
+            hints.extend(rec.caches.keys().cloned());
+        }
+        hints
     }
     /// Delete the trees of a state. On APFS a state that another thin state uses as its base
     /// stays until that state goes (`thin::delete_state`); this returns false then.

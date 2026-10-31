@@ -121,30 +121,43 @@ pub fn delete_tree(path: &Path) -> Result<()> {
         return Ok(());
     }
     if is_subvolume(path) {
-        // O(1) in the usual case. Only a subvolume with nested subvolumes (a working folder with
-        // its .git folder or caches) answers ENOTEMPTY; then the nested ones are found and
-        // destroyed first, through descriptors.
-        let (dir, name) = split_parent(path)?;
-        match sys::subvol_destroy(dir.as_fd(), &name) {
-            Ok(()) => return Ok(()),
-            Err(e) if is_not_empty(&e) => {
-                let t = crate::tree::Tree::open(path)?;
-                // The usual nested subvolume first (the .git folder), then a full search.
-                if t.stat(".git").map(|m| m.is_dir() && m.ino == FIRST_FREE_OBJECTID).unwrap_or(false) {
-                    t.remove(".git")?;
-                    if sys::subvol_destroy(dir.as_fd(), &name).is_ok() {
-                        return Ok(());
-                    }
-                }
-                t.destroy_nested()?;
-                return delete_subvolume(path);
-            }
-            Err(e) => return Err(e.context(format!("delete subvolume {}", path.display()))),
+        if destroy_known(path, &[])? {
+            return Ok(());
         }
+        let _t = crate::trace::span("delete: full search for nested subvolumes");
+        crate::tree::Tree::open(path)?.destroy_nested()?;
+        return delete_subvolume(path);
     }
     let parent = path.parent().ok_or_else(|| anyhow!("no parent: {}", path.display()))?;
     let name = path.file_name().ok_or_else(|| anyhow!("no name: {}", path.display()))?.to_string_lossy().into_owned();
     crate::tree::Tree::open(parent)?.remove(&name)
+}
+
+/// Destroy the subvolume `path` without a search: O(1) in the usual case. A subvolume with
+/// nested subvolumes (a working folder with its .git folder or caches) answers ENOTEMPTY; then
+/// the `.git` folder and the `nested` paths (known cache roots) go first, through descriptors.
+/// False when nested subvolumes remain: the caller searches for them (`delete_tree`) or defers.
+pub fn destroy_known(path: &Path, nested: &[String]) -> Result<bool> {
+    let (dir, name) = split_parent(path)?;
+    match sys::subvol_destroy(dir.as_fd(), &name) {
+        Ok(()) => Ok(true),
+        Err(e) if is_not_empty(&e) => {
+            let _t = crate::trace::span("delete: known nested subvolumes");
+            let t = crate::tree::Tree::open(path)?;
+            for rel in std::iter::once(".git").chain(nested.iter().map(|n| n.as_str())) {
+                if t.stat(rel).map(|m| m.is_dir() && m.ino == FIRST_FREE_OBJECTID).unwrap_or(false) {
+                    t.remove(rel)?;
+                }
+            }
+            Ok(sys::subvol_destroy(dir.as_fd(), &name).is_ok())
+        }
+        Err(e) => Err(e.context(format!("delete subvolume {}", path.display()))),
+    }
+}
+
+/// Move a tree to `to` on the same file system (the store trash).
+pub fn move_tree(src: &Path, to: &Path) -> Result<()> {
+    std::fs::rename(src, to).with_context(|| format!("move {} to {}", src.display(), to.display()))
 }
 
 pub fn is_not_empty(e: &anyhow::Error) -> bool {
@@ -162,8 +175,31 @@ pub fn clone_range(src: &File, src_off: u64, len: u64, dst: &File, dst_off: u64)
     sys::clone_range(src, src_off, len, dst, dst_off)
 }
 
-/// Ask the kernel for a metadata stream, or read an immutable pair from the cache.
-pub fn send_no_data(parent: &Path, child: &Path) -> Result<Vec<u8>> {
+/// Copies what it reads into a buffer that stays at most `limit` bytes; past that it drops the
+/// copy (`kept` then gives nothing).
+struct Tee<R> {
+    inner: R,
+    copy: Option<Vec<u8>>,
+    limit: usize,
+}
+
+impl<R: Read> Read for Tee<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        if let Some(copy) = &mut self.copy {
+            if copy.len() + n > self.limit {
+                self.copy = None;
+            } else {
+                copy.extend_from_slice(&buf[..n]);
+            }
+        }
+        Ok(n)
+    }
+}
+
+/// Ask the kernel for a metadata stream and decode it as it arrives, or decode an immutable
+/// pair from the cache. Only a stream that the cache can keep is also buffered.
+pub fn send_no_data(parent: &Path, child: &Path) -> Result<Vec<crate::stream::Entry>> {
     let _t = crate::trace::span("send --no-data");
     let p = File::open(parent)?;
     let c = File::open(child)?;
@@ -173,11 +209,11 @@ pub fn send_no_data(parent: &Path, child: &Path) -> Result<Vec<u8>> {
     let is_new = NEW_SNAPSHOTS.with(|paths| paths.borrow().contains(parent) || paths.borrow().contains(child));
     let cache = if is_new { None } else { crate::send_cache::Cache::for_states(parent, child, &p, &c) };
     if let Some(data) = cache.as_ref().and_then(|cache| cache.read()) {
-        return Ok(data);
+        return crate::stream::entries_from(&data[..]);
     }
     let parent_id = sys::subvol_info(p.as_fd())?.tree_id;
     let (read, write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)?;
-    let data = std::thread::scope(|scope| {
+    let (entries, kept) = std::thread::scope(|scope| {
         let writer = std::thread::Builder::new()
             .spawn_scoped(scope, move || {
                 let result = sys::send_no_data(c.as_fd(), write.as_fd(), parent_id);
@@ -185,21 +221,25 @@ pub fn send_no_data(parent: &Path, child: &Path) -> Result<Vec<u8>> {
                 result
             })
             .context("start metadata stream thread")?;
-        let mut data = Vec::new();
-        let mut reader = File::from(read);
-        let result = reader.read_to_end(&mut data);
+        let mut tee = Tee {
+            inner: File::from(read),
+            copy: cache.as_ref().map(|_| Vec::new()),
+            limit: crate::send_cache::MAX_ENTRY as usize,
+        };
+        let result = crate::stream::entries_from(&mut tee);
         // Close before joining, including on a read error, so the producer cannot block.
-        drop(reader);
+        let kept = tee.copy.take();
+        drop(tee);
         let sent = writer.join().map_err(|_| anyhow!("metadata stream thread failed"))?;
-        result.context("read metadata stream")?;
+        let entries = result.context("read metadata stream")?;
         sent.context("send metadata stream")?;
-        Ok::<_, anyhow::Error>(data)
+        Ok::<_, anyhow::Error>((entries, kept))
     })?;
-    if let Some(cache) = cache {
+    if let (Some(cache), Some(data)) = (cache, kept) {
         // Cache failures do not change command results.
         let _ = cache.write(&data);
     }
-    Ok(data)
+    Ok(entries)
 }
 
 /// Start a full data `btrfs send` (with an optional parent) writing to stdout of the child.
