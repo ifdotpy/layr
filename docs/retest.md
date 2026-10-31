@@ -1,4 +1,4 @@
-# layr-retest: run only the tests that a change can affect
+# layr retest: run only the tests that a change can affect
 
 Status: first version built (2026-10-28): the Rust adapter, and the vitest, jest and pytest adapters (not tried with the real tools), in `crates/layr-retest`. Design
 agreed with the owner on 2026-10-28. Prototype measurements are in the last section. See
@@ -11,7 +11,7 @@ The goal is speed only. A saved pass is not evidence for a merge, a release or m
 those keep using `check` attestations of layr (`docs/checks.md`).
 
 A wrong saved pass skips a test that would fail, so it hides a defect. A periodic full run is the
-safety net: `layr-retest --full` runs every test and checks the saved passes (see Contradiction).
+safety net: `layr retest run --full` runs every test and checks the saved passes (see Contradiction).
 The user selects the schedule of the full run.
 
 ## Rules
@@ -178,8 +178,10 @@ give the same result each time.
 
 ## Place
 
-A separate crate `layr-retest` in this repository. It uses only the public CLI of layr. The core
-of layr has no terms for tests, coverage or adapters.
+A separate crate `layr-retest` in this repository, a library with the entry point `layr_retest::main(args)`.
+The `layr` binary dispatches `layr retest <sub>` to it and has no other code for tests, coverage or adapters.
+The crate uses only the public CLI of layr, as processes of the running `layr` executable. It does not
+call the internal API: a process call keeps the crate free of layr internals and was already tested.
 
 ## Prototype measurements (2026-10-28, this Mac, Rust 1.99.1, nextest 0.9.146)
 
@@ -193,7 +195,7 @@ of layr has no terms for tests, coverage or adapters.
 
 ## Measurements on the layr workspace (2026-10-28, this Mac, state a5310ad)
 
-`layr-retest run -- --workspace --exclude layr-retest`, 261 tests, 4 test threads, 4 build jobs.
+`layr retest run -- --workspace --exclude layr-retest`, 261 tests, 4 test threads, 4 build jobs.
 The tests of `layr-retest` itself are excluded: its end-to-end test calls `layr` from `PATH`.
 
 | Run | Selected | Time |
@@ -308,7 +310,7 @@ run selected 2 tests and both failed; `--full` failed the same 2 (`interdiff::te
 
 ## First version
 
-Crate `crates/layr-retest`, binary `layr-retest`. It runs `layr`, `cargo nextest`, `llvm-profdata`
+Crate `crates/layr-retest`, a library. The `layr` binary depends on it and runs `layr retest <sub>` in the process of the caller (not in the daemon). There is no separate binary. It runs the `layr` CLI (as a process of `std::env::current_exe()`), `cargo nextest`, `llvm-profdata`
 and `llvm-cov` as programs and uses no internal crate of layr. The two LLVM tools come from the
 `llvm-tools` rustup component of the active toolchain.
 
@@ -316,7 +318,7 @@ and `llvm-cov` as programs and uses no internal crate of layr. The two LLVM tool
 
 Run in the root folder of a layr line that is also the cargo project root.
 
-- `layr-retest run [--full] [--save] [-- <nextest args>]`
+- `layr retest run [--full] [--save] [-- <nextest args>]`
   `--save` ends the run with `layr save --caches --cache .layr-retest` (after step 7), which puts the
   records in the cache overlay so that a new line takes them. It is off by default: the call makes a
   state of the line and holds the lock of the store (75 s in the Studio line, see Measurements 2026-10-29).
@@ -343,10 +345,31 @@ Run in the root folder of a layr line that is also the cargo project root.
   Every step prints `layr-retest: step <name>: <seconds>s`.
   The nextest arguments after `--` go to both `list` and `run`. Use them to select packages
   (`-p`, `--workspace`). Do not put `-E` there.
-- `layr-retest wrap -- <test binary> <args>` is the cargo target runner that `run` installs
-  (`CARGO_TARGET_<TRIPLE>_RUNNER`). With `NEXTEST_TEST_NAME` set it sets `LLVM_PROFILE_FILE` to
+- `layr retest wrap -- <test binary> <args>` is the cargo target runner that `run` installs
+  (`CARGO_TARGET_<TRIPLE>_RUNNER`, set to `<layr> retest wrap --`). With `NEXTEST_TEST_NAME` set it sets `LLVM_PROFILE_FILE` to
   `$LAYR_RETEST_PROFILE_DIR/<binary id>/<test>.profraw` (names cleaned to letters, digits and
   `_-.`), then runs the test, merges its raw profiles and returns its exit code (see "Raw profile disk"). In the list phase it sets no profile and execs the test.
+
+- `layr retest init [--yes]` makes a project ready. It is safe to run twice.
+  - Finds a cargo project, and vitest, jest or pytest projects.
+  - Checks `cargo-nextest` and the `llvm-tools` rustup component of the active toolchain. A missing one
+    prints its install command (`cargo install cargo-nextest --locked`, `rustup component add llvm-tools`);
+    `--yes` runs it. Exit code 1 if one is still missing.
+  - Adds `target regenerable` and `.layr-retest regenerable` to `.layrattributes`, and `.layr-retest`
+    to `.gitignore`, when missing.
+  - Prints the gate command: `layr retest run -- --workspace` (or `--tool vitest|jest|pytest`).
+- `layr retest doctor` reads and never writes. It prints `ok:` or `warn:` lines with numbers; exit code 0
+  when there is no warning, else 1.
+  - Tools present, and the LLVM major version of `llvm-profdata` equals that of `rustc`.
+  - Test sources (files under `tests/`, and code after `#[cfg(test)]`) that start a bin by a
+    `target/debug` path or by an env variable whose name has a word `BIN`, `BINARY`, `EXE` or `EXECUTABLE`, or is a bin target name.
+    That bin is not instrumented, so a change of it forces full runs. Use `env!("CARGO_BIN_EXE_<name>")`.
+  - The number of test targets (lib, bin, integration), the size of the integration test binaries (from
+    `cargo metadata` and the files in `target/retest/debug/deps` or `target/debug/deps`; it does not run
+    `cargo nextest list`, which builds). For a crate with two or more integration test binaries: one
+    binary (`autotests = false`, one `tests/main.rs`) saves the size of all but the largest and one link each.
+  - Records: count, and the age of the newest (warning above 14 days). Size of `target/retest`
+    (warning above 20 GB).
 
 ### Record format
 
@@ -436,8 +459,8 @@ and the build folder of a big project (19.6 GiB for Studio) takes 50 to 160 s. A
 saves the folder as the newest
 state of the line's cache overlay (`history=last`, `union-theirs`, readers: trusted machines).
 The record also goes under the id of the head when the working copy equals the head, because an
-auto state is in no other line. So the flow is: work, `layr save -m`, `layr-retest run --save`,
-`layr line new X <line>`, and `layr-retest run` in X selects only what changed.
+auto state is in no other line. So the flow is: work, `layr save -m`, `layr retest run --save`,
+`layr line new X <line>`, and `layr retest run` in X selects only what changed.
 
 The installed `layr` 0.4.0 (2026-10-26) has no cache overlays. Build the one in this repository.
 
@@ -446,7 +469,7 @@ The installed `layr` 0.4.0 (2026-10-26) has no cache overlays. Build the one in 
 Raw profiles are large (1.5 MB per test in the layr workspace, about 18 MB in Studio). Two steps
 keep them small:
 
-- The wrapper (`layr-retest wrap`) does not exec the test. It starts the test, waits, and then
+- The wrapper (`layr retest wrap`) does not exec the test. It starts the test, waits, and then
   runs `llvm-profdata merge -sparse` on the raw files of that test, writes `merged.profdata`
   (small: only functions with a count above 0) and `raw-count`, and deletes the raw files. It
   returns the exit code of the test. So raw files exist only while their test runs. If the merge
@@ -512,7 +535,7 @@ errors). The rule instead:
 
 ### JS/TS and Python adapters
 
-`layr-retest run --tool vitest|jest|pytest [--full] [-- <tool args>]`. The default tool is
+`layr retest run --tool vitest|jest|pytest [--full] [-- <tool args>]`. The default tool is
 `nextest`. These tools choose the tests themselves. layr-retest saves the working copy, finds the
 baseline, gives the tool the changed files, and keeps the record.
 
@@ -549,9 +572,10 @@ the old chain is not used again. The end to end test shows it with a test that r
 
 - Unit tests (`parse.rs`, `select.rs`): lcov to ranges, `-U0` hunks, function ranges, and each
   selection rule.
-- `crates/layr-retest/tests/e2e.rs`: temporary `LAYR_ROOT`, a tiny project with three tests. Runs:
+- `crates/layr-retest/tests/e2e.rs`: runs `layr retest ...` (the `layr` built from this repository must be first in `PATH`), with a temporary `LAYR_ROOT`, a tiny project with three tests. Runs:
   no record, no change, change of one function, a new uncalled function, a change of a data file,
   full run with a contradiction. About 10 s. Needs `layr`, `cargo-nextest` and `llvm-tools`.
+  Also: `doctor` on the tiny project, and `init` twice. Unit tests: `init.rs` (idempotent edits), `doctor.rs` (the rules).
   Run: `cargo nextest run -p layr-retest`.
 
 ### Not done
@@ -564,7 +588,7 @@ the old chain is not used again. The end to end test shows it with a test that r
 - The record key does not include the nextest arguments. A run with other `-p` arguments only
   carries entries of the tests it lists; entries of other packages are dropped.
 - Test names are cleaned for profile file names. Two names that differ only in cleaned characters share a file.
-- The line root must be the cargo project root. The path of `layr-retest` must have no spaces
+- The line root must be the cargo project root. The path of the `layr` executable must have no spaces
   (cargo splits the runner on spaces).
 - Cross compilation: the runner variable uses the host triple.
 - No schedule for `--full`.

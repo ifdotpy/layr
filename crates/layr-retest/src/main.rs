@@ -2,6 +2,8 @@
 //! Uses the public `layr` CLI, `cargo nextest` and the LLVM tools. No internal crate of layr.
 
 mod deps;
+mod doctor;
+mod init;
 mod parse;
 mod record;
 mod select;
@@ -38,21 +40,18 @@ const EXPORT_WORKERS: usize = 4;
 /// they name the packages that a test used.
 const IGNORE_FILES: &str = r"(/\.rustup/|/rustc/|/target/)";
 
-fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let r = match args.first().map(String::as_str) {
+/// Entry point of `layr retest <sub> ...`: `args` are the words after `retest`. Returns the exit code.
+pub fn main(args: &[String]) -> Result<i32> {
+    match args.first().map(String::as_str) {
         Some("wrap") => wrap(&args[1..]),
         Some("run") => run(&args[1..]),
+        Some("init") => init::run(&args[1..]),
+        Some("doctor") => doctor::run(&args[1..]),
         _ => {
-            eprintln!("usage: layr-retest run [--full] [--save] [-- <nextest args>]\n       layr-retest wrap -- <test binary> <args>");
-            std::process::exit(2);
-        }
-    };
-    match r {
-        Ok(code) => std::process::exit(code),
-        Err(e) => {
-            eprintln!("layr-retest: {e:#}");
-            std::process::exit(1);
+            eprintln!(
+                "usage: layr retest run [--full] [--save] [--tool vitest|jest|pytest] [-- <nextest args>]\n       layr retest init [--yes]\n       layr retest doctor\n       layr retest wrap -- <test binary> <args>"
+            );
+            Ok(2)
         }
     }
 }
@@ -111,8 +110,9 @@ fn output(cmd: &mut Command) -> Result<Vec<u8>> {
     Ok(o.stdout)
 }
 
+/// Runs the layr CLI as a process of this executable (the `layr` that runs `layr retest`).
 fn layr(args: &[&str]) -> Result<String> {
-    Ok(String::from_utf8_lossy(&output(Command::new("layr").args(args))?).into_owned())
+    Ok(String::from_utf8_lossy(&output(Command::new(std::env::current_exe()?).args(args))?).into_owned())
 }
 
 fn state_id(rev: &str) -> Result<String> {
@@ -495,7 +495,7 @@ fn run(args: &[String]) -> Result<i32> {
         c.env("LLVM_PROFILE_FILE", profdir.join("other/%p.profraw"));
         c.env(PROFDATA_VAR, &tools.0);
         c.env("RUSTFLAGS", &flags).env("CARGO_TARGET_DIR", &target).env(PROFILE_DIR_VAR, &profdir);
-        c.env(&runner_var, format!("{} wrap --", exe.display())).env("NEXTEST_EXPERIMENTAL_LIBTEST_JSON", "1");
+        c.env(&runner_var, format!("{} retest wrap --", exe.display())).env("NEXTEST_EXPERIMENTAL_LIBTEST_JSON", "1");
         if std::env::var(INCREMENTAL_VAR).as_deref() != Ok("0") {
             c.env("CARGO_INCREMENTAL", "1");
         }
