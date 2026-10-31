@@ -245,7 +245,7 @@ fn cov_export(tools: &(PathBuf, PathBuf), bin: &Path, others: &[PathBuf], data: 
 }
 
 /// Coverage of one test, from its raw profile and its test binary.
-fn export(root: &Path, bin: &Path, others: &[PathBuf], dir: &Path, tools: &(PathBuf, PathBuf), tables: &Tables) -> Result<Exported> {
+fn export(root: &Path, bin: &Path, others: &[PathBuf], libs: &[PathBuf], dir: &Path, tools: &(PathBuf, PathBuf), tables: &Tables) -> Result<Exported> {
     // The wrapper already merged the raw files. If it could not (it was killed), merge them here.
     let data = dir.join("merged.profdata");
     let n = match std::fs::read_to_string(dir.join(RAW_COUNT_FILE)) {
@@ -255,8 +255,10 @@ fn export(root: &Path, bin: &Path, others: &[PathBuf], dir: &Path, tools: &(Path
     // One profile file means that the test process was the only process with instrumented code.
     // Another file is from a child process, which may have run another bin target of the project.
     let others = if n > 1 { others } else { &[] };
+    // A dylib of the workspace runs inside the test process: it is an object of every test.
+    let objects: Vec<PathBuf> = libs.iter().chain(others).cloned().collect();
     let rel = |p: &str| relative_to(root, p);
-    let lcov = String::from_utf8_lossy(&output(&mut cov_export(tools, bin, others, &data, &["-format=lcov", "-skip-functions"]))?).into_owned();
+    let lcov = String::from_utf8_lossy(&output(&mut cov_export(tools, bin, &objects, &data, &["-format=lcov", "-skip-functions"]))?).into_owned();
     // Function ranges do not depend on the test; the profile only says which functions ran.
     let ran = parse::parse_covered(&String::from_utf8_lossy(&output(
         Command::new(&tools.0).args(["show", "--covered", "--all-functions"]).arg(&data),
@@ -264,7 +266,7 @@ fn export(root: &Path, bin: &Path, others: &[PathBuf], dir: &Path, tools: &(Path
     let cell = tables.0.lock().unwrap().entry((bin.to_path_buf(), !others.is_empty())).or_default().clone();
     let table = cell
         .get_or_init(|| {
-            let json = output(&mut cov_export(tools, bin, others, &data, &["-format=text", "-skip-expansions"]));
+            let json = output(&mut cov_export(tools, bin, &objects, &data, &["-format=text", "-skip-expansions"]));
             json.and_then(|j| parse::parse_function_table(&j, |f| rel(f).is_some())).map_err(|e| format!("{e:#}"))
         })
         .as_ref()
@@ -291,20 +293,43 @@ fn export(root: &Path, bin: &Path, others: &[PathBuf], dir: &Path, tools: &(Path
     Ok((files, packages.into_iter().collect()))
 }
 
-/// Name and source file of every bin target of the workspace.
-fn bin_targets() -> Result<Vec<(String, String)>> {
+/// Name and source file of every target of the workspace with the crate type `kind`.
+fn kind_targets(kind: &str) -> Result<Vec<(String, String)>> {
     let meta: Value =
         serde_json::from_slice(&output(Command::new("cargo").args(["metadata", "--no-deps", "--format-version", "1"]))?)?;
     let targets = meta["packages"].as_array().into_iter().flatten().flat_map(|p| p["targets"].as_array().into_iter().flatten());
     Ok(targets
-        .filter(|t| t["kind"].as_array().is_some_and(|k| k.iter().any(|k| k == "bin")))
+        .filter(|t| t["kind"].as_array().is_some_and(|k| k.iter().any(|k| k == kind)))
         .map(|t| (t["name"].as_str().unwrap_or_default().to_string(), t["src_path"].as_str().unwrap_or_default().to_string()))
         .collect())
+}
+
+fn bin_targets() -> Result<Vec<(String, String)>> {
+    kind_targets("bin")
+}
+
+/// Build file name of the dylib target `name`.
+fn dylib_file(name: &str) -> String {
+    let ext = if cfg!(target_os = "macos") { "dylib" } else if cfg!(windows) { "dll" } else { "so" };
+    let prefix = if cfg!(windows) { "" } else { "lib" };
+    format!("{prefix}{}.{ext}", name.replace('-', "_"))
 }
 
 /// The bin targets of the workspace, built instrumented in `<target>/debug/<name>`.
 fn bin_objects(target: &Path) -> Result<Vec<PathBuf>> {
     Ok(bin_targets()?.into_iter().map(|(name, _)| target.join("debug").join(name)).filter(|p| p.is_file()).collect())
+}
+
+/// The dylib targets of the workspace, built instrumented in `<target>/debug`. A dylib holds the
+/// code of the packages that it links, so `llvm-cov` needs it as an object too.
+fn dylib_objects(target: &Path) -> Result<Vec<PathBuf>> {
+    Ok(kind_targets("dylib")?.into_iter().map(|(name, _)| target.join("debug").join(dylib_file(&name))).filter(|p| p.is_file()).collect())
+}
+
+/// RUSTFLAGS of the instrumented build. A workspace dylib needs `-C prefer-dynamic` in every crate.
+fn build_flags(base: &str, dylib: bool) -> String {
+    let dynamic = if dylib { " -C prefer-dynamic" } else { "" };
+    format!("{base} -C instrument-coverage{dynamic}").trim().to_string()
 }
 
 /// Path of `p` relative to the line root, if it is inside.
@@ -462,14 +487,14 @@ fn run(args: &[String]) -> Result<i32> {
     let exe = std::env::current_exe()?;
     let tools = (llvm_tool("llvm-profdata")?, llvm_tool("llvm-cov")?);
     let runner_var = format!("CARGO_TARGET_{}_RUNNER", rustc_host()?.to_uppercase().replace('-', "_"));
-    let flags = format!("{} -C instrument-coverage", std::env::var("RUSTFLAGS").unwrap_or_default());
+    let flags = build_flags(&std::env::var("RUSTFLAGS").unwrap_or_default(), !kind_targets("dylib")?.is_empty());
     let nextest = |sub: &[&str]| {
         let mut c = Command::new("cargo");
         c.arg("nextest").args(sub).args(extra);
         // Cargo, build scripts and the list phase write here; the wrapper gives each test its own folder.
         c.env("LLVM_PROFILE_FILE", profdir.join("other/%p.profraw"));
         c.env(PROFDATA_VAR, &tools.0);
-        c.env("RUSTFLAGS", flags.trim()).env("CARGO_TARGET_DIR", &target).env(PROFILE_DIR_VAR, &profdir);
+        c.env("RUSTFLAGS", &flags).env("CARGO_TARGET_DIR", &target).env(PROFILE_DIR_VAR, &profdir);
         c.env(&runner_var, format!("{} wrap --", exe.display())).env("NEXTEST_EXPERIMENTAL_LIBTEST_JSON", "1");
         if std::env::var(INCREMENTAL_VAR).as_deref() != Ok("0") {
             c.env("CARGO_INCREMENTAL", "1");
@@ -526,6 +551,7 @@ fn run(args: &[String]) -> Result<i32> {
     // merged the raw profiles of the test already, so a test that waits for an export holds only
     // a small `merged.profdata`. The export deletes the folder of the test.
     let bins = bin_objects(&target)?;
+    let libs = dylib_objects(&target)?;
     let tables = Tables::default();
     let done: Mutex<BTreeMap<String, Result<Exported>>> = Mutex::new(BTreeMap::new());
     let mut results: BTreeMap<String, bool> = BTreeMap::new();
@@ -544,7 +570,7 @@ fn run(args: &[String]) -> Result<i32> {
                 sc.spawn(|| loop {
                     let Ok((key, bin, dir)) = rx.lock().unwrap().recv() else { break };
                     // A test that died before it wrote a profile has no coverage.
-                    let r = if dir.is_dir() { export(&root, &bin, &bins, &dir, &tools, &tables) } else { Ok(Default::default()) };
+                    let r = if dir.is_dir() { export(&root, &bin, &bins, &libs, &dir, &tools, &tables) } else { Ok(Default::default()) };
                     let _ = std::fs::remove_dir_all(&dir);
                     done.lock().unwrap().insert(key, r);
                 });
@@ -633,4 +659,23 @@ fn run(args: &[String]) -> Result<i32> {
         if contradictions > 0 { format!("; {contradictions} contradiction(s)") } else { String::new() }
     );
     Ok(code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prefer_dynamic_only_with_a_dylib() {
+        assert_eq!(build_flags("", false), "-C instrument-coverage");
+        assert_eq!(build_flags("-Dwarnings", false), "-Dwarnings -C instrument-coverage");
+        assert_eq!(build_flags("-Dwarnings", true), "-Dwarnings -C instrument-coverage -C prefer-dynamic");
+    }
+
+    #[test]
+    fn dylib_file_name_uses_underscores() {
+        let f = dylib_file("my-deps");
+        assert!(f.contains("my_deps") && !f.contains('-'), "{f}");
+        assert!(f.starts_with("lib") || cfg!(windows), "{f}");
+    }
 }

@@ -249,6 +249,10 @@ Method now:
   the lcov export of that test, so the line granularity is the same.
 - The `-object` bin targets are exported only when the profile folder of the test has more than one
   profile file, that is when a child process ran.
+- A workspace `dylib` target (a crate with `crate-type = ["dylib"]` that holds third-party
+  dependencies, so that test binaries stay small) is found with `cargo metadata`. Then the build adds
+  `-C prefer-dynamic`, and every built dylib in `target/retest/debug` is an `-object` of every test, because it
+  runs inside the test process. Crates that bundle C libraries must stay out of the dylib.
 - Tried and dropped: one JSON export per test for both lines and functions (the JSON is the
   slow and large part, and the lcov is smaller to parse), more workers (8 workers on 18 CPUs showed no clear gain under a varying load),
   and `-num-threads`.
