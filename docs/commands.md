@@ -11,7 +11,7 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | lines         | `line new <name> [<rev>] [--count N] [--json]`, `line list [--json]`, `line delete`, `line rename`, `tag`, `merge [--expect]`, `pick`, `invert`, `replay`, `adopt` |
 | access        | `access [list|grant [--until <30m|2h|1d>]|revoke|deny|allow|check]`, `protect [<pattern> --update <role> --check <names> --path <path>=<role> --approvals <n> --approvers <principals> --direct --rewrite <role> --no-expect | --remove]`, `approve [--withdraw] <state>`, `attest <kind> <rev> [--payload <file>]`, `attestations <rev> [--kind <kind>] [--json]` |
 | safety        | `undo`, `op log`, `save`, `try <state> -- <cmd>`, `try <state> --check <name>`, `bisect list [--json]`, `bisect run [--good <rev>] [--bad <rev>] [--auto] [--ref-log <ref>] [--json] -- <cmd>`, `gc`, `fsck`, `reindex` |
-| Git bridge    | `git remote`, `git fetch`, `git pull`, `git push [--squash] [--include-base]`, `git clone`, `git sync`                             |
+| Git bridge    | `git remote`, `git fetch`, `git pull`, `git push [--squash] [--include-base <lines>]`, `git clone`, `git sync`                             |
 | remotes       | `remote add\|list\|self\|remove\|trust`, `remote public <remote> on\|off`, `sync <remote>`, `push <remote>`, `push [--dry-run]` (every layer to each of its remotes), `overlay remote add\|list\|remove`, `fetch <remote>`, `pull <remote>`, `clone <url>` |
 | OCI           | `push <oci-remote> <rev> [--runnable <name>] [--json]`, `access token <principal> [--until <duration>]`, `access token --revoke <principal>` |
 | records       | `op export`, `op import` (JSONL) |
@@ -89,8 +89,9 @@ The gateway must expose the routes only when a signed public manifest is present
 
 `line new <name> [<rev>] [--count N]` creates lines. Use `line list`, `line delete <name>`, or `line rename [<old>] <new>` to manage them.
 A line is a folder. Use `cd` to enter it.
-`line new` refuses an automatic state that holds unsaved work (changed paths that are not ignored):
-the new line would carry that work into its saves and pushes. An automatic state with only
+`line new` refuses an automatic state that holds unsaved work (paths that are not ignored and
+differ from both its parent and the current head of its line): the new line would carry that work
+into its saves and pushes. An automatic state with only
 ignored build output is a warm start.
 
 `reset <rev>` without `--hard` moves the head and keeps the files (mixed, as in git). It lists the
@@ -174,7 +175,8 @@ folder. A path that the exported commit does not have fails with exit 128.
    a repeated push reads the remote ref first. With `push.require_check true`, a push needs a
    passing `layr try` of that exact state. A push refuses when the line started on states of
    another line that no push carried yet (for example local work on main): the refusal lists
-   them. Start the line from the remote branch, or add `--include-base` to push them too. A
+   them with the line that made each one. Start the line from the remote branch and pick your
+   states. To publish that work on purpose, name its lines: `--include-base main[,<line>]`. A
    merge of another line into this line is not refused.
 
 The design and the reasons for it, including what layr leaves to programs built on it, are in

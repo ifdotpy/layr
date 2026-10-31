@@ -1852,10 +1852,11 @@ impl<'a> Repo<'a> {
         Ok(self.ancestors(b)?.iter().any(|x| x == a))
     }
 
-    /// The paths that are not ignored and that an automatic state changes against its parent:
-    /// the unsaved work of its line. Build output and other ignored files are not work.
-    pub fn unsaved_paths(&self, auto: &StateRec) -> Result<Vec<String>> {
-        let Some(parent) = auto.parents.first() else { return Ok(Vec::new()) };
+    /// The paths that are not ignored and that an automatic state changes against `base` (its
+    /// parent, or the current head of its line): work that no named state holds. Build output and
+    /// other ignored files are not work.
+    pub fn unsaved_paths(&self, base: &str, auto: &StateRec) -> Result<Vec<String>> {
+        let parent = base;
         let root = self.state_src(&auto.id)?;
         let rules = Rules::of(&root);
         let list = crate::changes::file_changes(&self.state_src(parent)?, &root)?;
