@@ -1763,6 +1763,14 @@ impl<'a> Repo<'a> {
     pub fn restore_caches(&self, line: &Line) -> Result<()> {
         let (w, (u, g)) = (self.working(line), self.owner_ids(line));
         for p in self.plain_caches(line)? {
+            // APFS marks the folder in place, files included: no copy. Else reflink copy into a
+            // new subvolume.
+            #[cfg(target_os = "macos")]
+            {
+                let _ = (u, g);
+                btrfs::mark_cache(&fsutil::safe_join(&w, &p)?)?;
+            }
+            #[cfg(not(target_os = "macos"))]
             convert_cache(&w, &p, u, g)?;
         }
         Ok(())
@@ -2345,10 +2353,6 @@ pub fn convert_cache(w: &Path, path: &str, uid: u32, gid: u32) -> Result<bool> {
     if !m.is_dir() || fsutil::is_layer(w, path, &m) {
         return Ok(false);
     }
-    // APFS marks the folder in place, files included. Else copy with reflinks into a new subvolume.
-    #[cfg(target_os = "macos")]
-    btrfs::mark_cache(&fsutil::safe_join(w, path)?)?;
-    #[cfg(not(target_os = "macos"))]
     replace_folder(&t, path, true, uid, gid)?;
     Ok(true)
 }
