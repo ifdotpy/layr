@@ -116,6 +116,15 @@ eq "reset --hard copies no tree under the lock" "" "$(locked "$trace" | grep -E 
 no "reset --hard removes a file that the target does not have" test -e topic.txt
 eq "reset --hard keeps untracked files" "300" "$(ls bulk | wc -l | tr -d ' ')"
 eq "no prepared copies stay" "" "$(ls -A "$LAYR_ROOT/projects/hold/meta/work" 2>/dev/null)"
+# status compares the working folder without the store lock: the scan and the compare come
+# before any lock, and a status with no staged change takes none.
+cd "$P/topic" || exit 1
+printf 'dirty\n' > dirty.txt
+trace=$(LAYR_TRACE=1 l status 2>&1)
+has "status compares the folder" "status compare" "$trace"
+eq "status compares nothing under the store lock" "" "$(locked "$trace" | grep -E 'status compare|scan|validated read')"
+eq "status holds no store lock" "" "$(printf '%s\n' "$trace" | grep 'store lock taken')"
+rm -f dirty.txt
 # replay merges each state onto the new base before the lock; under it each step takes its result.
 l line new -q rp-base main
 l line new -q rp-work main

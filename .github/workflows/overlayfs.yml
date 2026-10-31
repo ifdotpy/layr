@@ -51,6 +51,7 @@ jobs:
           sudo env LAYR_OVERLAYFS_TEST_ROOT="$LAYR_OVERLAYFS_TEST_ROOT" TMPDIR="$LAYR_OVERLAYFS_TEST_ROOT" "$UNIT_TESTS" --include-ignored
           sudo env LAYR_OVERLAYFS_TEST_ROOT="$LAYR_OVERLAYFS_TEST_ROOT" LAYR="$LAYR" bash tests/overlayfs-local.sh
           sudo env LAYR_OVERLAYFS_TEST_ROOT="$LAYR_OVERLAYFS_TEST_ROOT" LAYR="$LAYR" bash tests/overlayfs-caches.sh
+          sudo env LAYR_OVERLAYFS_TEST_ROOT="$LAYR_OVERLAYFS_TEST_ROOT" LAYR="$LAYR" bash tests/save-unsettled.sh
           if [ "${{ matrix.filesystem }}" = ext4 ]; then
             # A store in a folder that ignores case (ext4 casefold) is refused with a clear message.
             truncate -s 64M "$RUNNER_TEMP/fold.img" && mkfs.ext4 -q -F -O casefold "$RUNNER_TEMP/fold.img"
