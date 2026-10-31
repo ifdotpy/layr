@@ -1168,8 +1168,21 @@ impl<'a> Repo<'a> {
     }
 
     /// Add only needs paths that differ between the index and the working tree.
+    /// `limit` names the paths (with their ignore files) that the caller reads: only they are
+    /// scanned and compared, and the lists hold nothing else.
     #[cfg(target_os = "macos")]
-    pub fn status_for_add(&self, line: &Line, scan: &Path, index: &Snap) -> Result<Status> {
+    pub fn status_for_add(&self, line: &Line, scan: &Path, index: &Snap, limit: Option<&BTreeSet<String>>) -> Result<Status> {
+        if let Some(paths) = limit {
+            let mut st = Status::default();
+            let list = changes::file_changes_of(
+                index,
+                scan,
+                btrfs::candidates_scanned(index, scan, btrfs::scan_paths(index, paths)?, btrfs::scan_paths(scan, paths)?)?,
+            )?;
+            classify(scan, list, &mut st);
+            self.finish_status(line, scan, index, false, &mut st)?;
+            return Ok(st);
+        }
         self.status_of_inner(line, scan, index, false)
     }
 

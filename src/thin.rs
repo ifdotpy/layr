@@ -143,6 +143,21 @@ impl Layered {
         &self.layers[self.layers.len() - 1].root
     }
 
+    /// The roots of the layers, top first.
+    pub fn roots(&self) -> Vec<&Path> {
+        self.layers.iter().map(|l| l.root.as_path()).collect()
+    }
+
+    /// The paths that the top layer removes from the layers below.
+    pub fn top_removed(&self) -> &BTreeSet<String> {
+        &self.layers[0].removed
+    }
+
+    /// The entry at `rel` alone (no content below it) in the merged tree, as `scan` gives it.
+    pub fn entry(&self, rel: &str) -> Result<Option<ScanEntry>> {
+        self.find(rel)?.map(|p| apfs::entry_of_path(&p)).transpose()
+    }
+
     /// The path of `rel` in the layer that holds it. `None` when the tree has no such entry.
     pub fn find(&self, rel: &str) -> Result<Option<PathBuf>> {
         for (i, l) in self.layers.iter().enumerate() {
@@ -213,7 +228,7 @@ impl Layered {
 
     /// Entries in walk order (a folder before its content), as `fsutil::walk` gives them.
     pub fn entries(&self, rel: &str) -> Result<Vec<(String, crate::fsutil::Meta)>> {
-        let map = self.scan(false)?;
+        let map = if rel.is_empty() { self.scan(false)? } else { self.scan_at(rel)? };
         let prefix = if rel.is_empty() { String::new() } else { format!("{rel}/") };
         Ok(map.into_iter().filter(|(k, _)| !k.is_empty() && k.starts_with(&prefix)).map(|(k, v)| (k, v.meta)).collect())
     }

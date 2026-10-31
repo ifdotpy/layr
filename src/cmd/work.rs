@@ -414,6 +414,39 @@ fn select_add(
     Ok((paths, ignored_named))
 }
 
+/// The paths that `add` with these pathspecs can touch, with the ignore files that decide
+/// their state: every parent folder's. `None` (the whole tree) when a spec names the root.
+#[cfg(target_os = "macos")]
+fn add_scan_limit(specs: &[String]) -> Option<BTreeSet<String>> {
+    let mut out = BTreeSet::new();
+    for s in specs {
+        // A pattern is read from its last literal folder.
+        let lit = match s.find(['*', '?', '[']) {
+            Some(i) => s[..i].rfind('/').map(|j| &s[..j]).unwrap_or(""),
+            None => s.as_str(),
+        };
+        if lit.is_empty() {
+            return None;
+        }
+        out.insert(lit.to_string());
+        let mut dir = String::new();
+        let mut parts: Vec<&str> = lit.split('/').collect();
+        parts.pop();
+        for name in std::iter::once("").chain(parts.into_iter()) {
+            if !name.is_empty() {
+                if !dir.is_empty() {
+                    dir.push('/');
+                }
+                dir.push_str(name);
+            }
+            for f in [".gitignore", ".layrignore"] {
+                out.insert(if dir.is_empty() { f.to_string() } else { format!("{dir}/{f}") });
+            }
+        }
+    }
+    Some(out)
+}
+
 pub fn add(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let spec = Spec::new()
         .flag("-A|--all")
@@ -446,6 +479,8 @@ pub fn add(ctx: &Ctx, args: &[String]) -> Result<i32> {
     // large line. They run before the store lock; under it the copy is used when the head and
     // the staging content did not change, else the read runs again under the lock.
     #[cfg(target_os = "macos")]
+    let limit = add_scan_limit(&specs);
+    #[cfg(target_os = "macos")]
     let read = |line: &Line| -> Result<Option<(crate::repo::Temp, BTreeSet<String>, Vec<String>)>> {
         let quiet = h.repo.quiet_paths(line)?;
         let work = h.repo.working(line);
@@ -454,14 +489,18 @@ pub fn add(ctx: &Ctx, args: &[String]) -> Result<i32> {
         if let Some(s) = &stage {
             roots.push(s.as_path());
         }
-        crate::storage::stable_read(&roots, || {
-            let st = h.repo.status_for_add(line, &work, &index)?;
+        let read = || {
+            let st = h.repo.status_for_add(line, &work, &index, limit.as_ref())?;
             let (paths, ignored) = select_add(&h, &a, &specs, &st, &work, &index, &quiet)?;
             let scan = crate::repo::Temp { path: h.repo.p.scan_dir().join(ids::new_id()) };
             crate::storage::create_subvolume(&scan.path)?;
             crate::storage::copy_selected(&work, &scan.path, &paths)?;
             Ok((scan, paths, ignored))
-        })
+        };
+        match &limit {
+            Some(l) => crate::storage::stable_read_paths(&roots, l, read),
+            None => crate::storage::stable_read(&roots, read),
+        }
     };
     #[cfg(target_os = "macos")]
     let early = {

@@ -166,7 +166,7 @@ pub fn really_changed(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized),
 
 /// File level changes (folders dropped), confirmed by content. A move keeps `old_path`.
 pub fn file_changes(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<Change>> {
-    file_changes_of(parent, child, candidates(parent, child)?)
+    file_changes_of(parent, child, candidates_equal(parent, child)?)
 }
 
 /// File level changes of a candidate list (`file_changes`).
@@ -323,6 +323,18 @@ fn split(d: &[u8]) -> Vec<&[u8]> {
 #[cfg(target_os = "macos")]
 pub fn candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<Change>> {
     crate::storage::candidates(parent, child)
+}
+
+/// Candidates for a caller that only asks whether content differs: APFS then skips the exact
+/// ranges of changed files. Other backends have the ranges from their stream at no cost.
+#[cfg(target_os = "macos")]
+fn candidates_equal(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<Change>> {
+    crate::storage::candidates_equal(parent, child)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn candidates_equal(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<Change>> {
+    candidates(parent, child)
 }
 
 #[cfg(feature = "overlayfs")]

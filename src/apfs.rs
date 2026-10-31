@@ -643,6 +643,40 @@ pub fn stable_read<T>(roots: &[&Path], read: impl FnOnce() -> Result<T>) -> Resu
     result.map(Some)
 }
 
+/// `stable_read` for a read that uses only `paths` below each root: only they are scanned and
+/// validated, not the whole tree. A path that the read notes and `paths` does not hold makes
+/// the check fail, so the caller falls back to a snapshot.
+pub fn stable_read_paths<T>(
+    roots: &[&Path],
+    paths: &std::collections::BTreeSet<String>,
+    read: impl FnOnce() -> Result<T>,
+) -> Result<Option<T>> {
+    let _t = crate::trace::span(format!("APFS validated read of {} paths", paths.len()));
+    let before = roots.iter().map(|root| scan_paths(*root, paths)).collect::<Result<Vec<_>>>()?;
+    if before
+        .iter()
+        .any(|tree| tree.values().any(|entry| entry.meta.is_file() && entry.data.and_then(|d| d.generation).is_none()))
+    {
+        return Ok(None);
+    }
+    let outer_touched =
+        TOUCHED.with_borrow_mut(|t| std::mem::replace(t, roots.iter().map(|r| (r.to_path_buf(), Default::default())).collect()));
+    let result = read();
+    let touched = TOUCHED.with_borrow_mut(|t| std::mem::replace(t, outer_touched));
+    for (root, paths) in &touched {
+        note_read(root, paths);
+    }
+    for ((root, expected), (_, paths)) in roots.iter().zip(&before).zip(touched) {
+        for p in &paths {
+            match entry_at(root, p) {
+                Ok(now) if now.as_ref() == expected.get(p) => {}
+                _ => return Ok(None),
+            }
+        }
+    }
+    result.map(Some)
+}
+
 /// Copy selected entries to a private tree. The caller must validate the live source
 /// before it publishes any of these bytes to an index.
 pub fn copy_selected(src: &Path, dst: &Path, paths: &std::collections::BTreeSet<String>) -> Result<()> {
@@ -1203,9 +1237,60 @@ pub(crate) fn scan_src(s: &(impl Src + ?Sized)) -> Result<BTreeMap<String, ScanE
         _ => scan_with_data(s.folder().context("missing tree folder")?, true),
     }
 }
+/// Candidates with the exact changed ranges of every changed file.
 pub fn candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<crate::changes::Change>> {
+    candidates_of(parent, child, true)
+}
+
+/// Candidates for callers that only ask whether content differs: a changed file has no ranges.
+pub fn candidates_equal(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<crate::changes::Change>> {
+    candidates_of(parent, child, false)
+}
+
+fn candidates_of(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), exact: bool) -> Result<Vec<crate::changes::Change>> {
     let _t = crate::trace::span("APFS candidates");
-    candidates_scanned(parent, child, scan_src(parent)?, scan_src(child)?)
+    let (a, b) = match top_layer_scans(parent, child)? {
+        Some(both) => both,
+        None => (scan_src(parent)?, scan_src(child)?),
+    };
+    candidates_scanned_with(parent, child, a, b, exact)
+}
+
+/// The entries that can differ when `parent` is the direct base of the thin tree `child`: those
+/// of its top layer and those below its removed paths. No other entry changed.
+#[allow(clippy::type_complexity)]
+fn top_layer_scans(
+    parent: &(impl Src + ?Sized),
+    child: &(impl Src + ?Sized),
+) -> Result<Option<(BTreeMap<String, ScanEntry>, BTreeMap<String, ScanEntry>)>> {
+    let Some(c) = child.layered().filter(|c| !c.is_complete()) else {
+        return Ok(None);
+    };
+    let base = match (parent.layered(), parent.folder()) {
+        (Some(l), _) => l.clone(),
+        (None, Some(f)) => crate::thin::Layered::complete(f),
+        _ => return Ok(None),
+    };
+    if c.roots()[1..] != base.roots()[..] {
+        return Ok(None);
+    }
+    let top = scan_with_data(c.top(), true)?;
+    let mut a = BTreeMap::new();
+    for k in top.keys().filter(|k| !k.is_empty()) {
+        if let Some(e) = base.entry(k)? {
+            a.insert(k.clone(), e);
+        }
+    }
+    for r in c.top_removed() {
+        a.extend(base.scan_at(r)?);
+    }
+    let _t = crate::trace::span(format!("APFS top layer candidates from {} entries", top.len() + a.len()));
+    Ok(Some((a, top)))
+}
+
+/// The entry at `path` alone, as a scan gives it.
+pub(crate) fn entry_of_path(path: &Path) -> Result<ScanEntry> {
+    entry_of_metadata(&fs::symlink_metadata(path)?, path, true)
 }
 
 /// Entries at and below `paths` of a folder or a layered tree, as `scan_src` gives them.
@@ -1223,6 +1308,7 @@ pub(crate) fn scan_paths(
             None => out.extend(scan_at(s.folder().context("missing tree folder")?, p)?),
         }
     }
+    let _t = crate::trace::span(format!("APFS scan of {} paths visited {} entries", paths.len(), out.len()));
     Ok(out)
 }
 
@@ -1245,12 +1331,24 @@ pub(crate) fn scan_at(root: &Path, rel: &str) -> Result<BTreeMap<String, ScanEnt
     Ok(out)
 }
 
-/// `candidates` from given scans of both trees.
+/// `candidates_equal` from given scans of both trees.
 pub(crate) fn candidates_scanned(
     parent: &(impl Src + ?Sized),
     child: &(impl Src + ?Sized),
     a: BTreeMap<String, ScanEntry>,
     b: BTreeMap<String, ScanEntry>,
+) -> Result<Vec<crate::changes::Change>> {
+    candidates_scanned_with(parent, child, a, b, false)
+}
+
+/// `candidates` from given scans of both trees. `exact` computes the changed ranges of changed
+/// files; else a file with other content has none, and an equal one has an empty list.
+fn candidates_scanned_with(
+    parent: &(impl Src + ?Sized),
+    child: &(impl Src + ?Sized),
+    a: BTreeMap<String, ScanEntry>,
+    b: BTreeMap<String, ScanEntry>,
+    exact: bool,
 ) -> Result<Vec<crate::changes::Change>> {
     // An entry that both trees have with the same metadata and shared data is no candidate, as
     // the btrfs stream would not name it: no `Change` for it.
@@ -1353,7 +1451,13 @@ pub(crate) fn candidates_scanned(
             if !shared {
                 read.push(p.clone());
             }
-            c.ranges = Some(if shared { Vec::new() } else { changed_ranges(parent, child, p)? });
+            c.ranges = if shared {
+                Some(Vec::new())
+            } else if exact {
+                Some(changed_ranges(parent, child, p)?)
+            } else {
+                same_content(parent, child, p)?.then(Vec::new)
+            };
         }
     }
     // Content comes only from compared files and from paths that appear, go or move.
@@ -1367,6 +1471,36 @@ pub(crate) fn candidates_scanned(
         note_read(root, &read);
     }
     Ok(changes.into_values().collect())
+}
+
+/// True when both files hold the same bytes. Stops at the first difference and reads in large
+/// buffers; blocks at the same physical address are skipped (`unshared`).
+fn same_content(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), rel: &str) -> Result<bool> {
+    use std::os::unix::fs::FileExt;
+    let open = |p: PathBuf| -> Result<File> {
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(&p).with_context(|| format!("open {}", p.display()))
+    };
+    let (a, b) = (open(parent.at(rel)?)?, open(child.at(rel)?)?);
+    let len = a.metadata()?.len();
+    if len != b.metadata()?.len() {
+        return Ok(false);
+    }
+    let read = if len >= SHARED_MIN { unshared(&a, &b, len) } else { vec![(0, len)] };
+    let (mut ab, mut bb) = (vec![0u8; 1 << 20], vec![0u8; 1 << 20]);
+    for (from, to) in read {
+        let mut pos = from;
+        while pos < to {
+            let n = ((to - pos).min(ab.len() as u64)) as usize;
+            a.read_exact_at(&mut ab[..n], pos)?;
+            b.read_exact_at(&mut bb[..n], pos)?;
+            if ab[..n] != bb[..n] {
+                return Ok(false);
+            }
+            pos += n as u64;
+        }
+    }
+    Ok(true)
 }
 
 // Compare fixed blocks when APFS cannot report changed extents. Adjacent blocks coalesce.
