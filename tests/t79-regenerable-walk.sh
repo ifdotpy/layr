@@ -5,8 +5,8 @@
 . "$(dirname "$0")/lib.sh"
 
 sample $T/src
-printf 'big/\nbig2/\n' >> $T/src/.gitignore
-printf 'big regenerable\nbig2 regenerable\nvend regenerable\n' > $T/src/.layrattributes
+printf 'big/\nbig2/\nout/\n' >> $T/src/.gitignore
+printf 'big regenerable\nbig2 regenerable\nout regenerable\nvend regenerable\n' > $T/src/.layrattributes
 mkdir -p $T/src/vend && echo tracked > $T/src/vend/keep.txt
 l init r --from $T/src -q >/dev/null
 P=$LAYR_ROOT/projects/r/lines
@@ -63,4 +63,11 @@ eq "its file stays in the state" tracked "$(l show head:vend/keep.txt)"
 has "a named save makes big2/ a cache overlay too" "big2" "$(l overlay list)"
 below 1000 "a named save visits no entry under big/" $T/named.trace
 eq "the named state holds no file of big/" "" "$(l show head:big | tail -n +3)"
+
+# A file staged with add -f makes its regenerable folder versioned before the save.
+mkdir out && echo keep > out/keep.txt
+l add -f out/keep.txt
+l save -qm "keep out"
+eq "a staged file keeps its folder out of the caches" "" "$(l overlay list | grep -c cache.out | grep -v '^0$')"
+eq "the staged file is in the state" keep "$(l show head:out/keep.txt)"
 finish

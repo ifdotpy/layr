@@ -1777,7 +1777,7 @@ impl<'a> Repo<'a> {
         if self.p.is_overlay() {
             return Ok((Vec::new(), Vec::new()));
         }
-        let (mut plain, mut versioned, mut head) = (Vec::new(), Vec::new(), None);
+        let (mut plain, mut versioned, mut head, mut stage) = (Vec::new(), Vec::new(), None, None);
         for p in regenerable_quick(&w) {
             match fsutil::lmeta(&w, &p) {
                 Some(m) if m.is_dir() && !fsutil::is_layer(&w, &p, &m) => {}
@@ -1786,7 +1786,11 @@ impl<'a> Repo<'a> {
             if head.is_none() {
                 head = Some(self.state_root(&line.head)?);
             }
-            if holds_files(head.as_ref().unwrap(), &p) {
+            if stage.is_none() {
+                stage = Some(self.current_stage(line)?);
+            }
+            // A file staged with `add -f` is tracked too.
+            if holds_files(head.as_ref().unwrap(), &p) || stage.as_ref().unwrap().as_ref().is_some_and(|s| holds_files(s, &p)) {
                 versioned.push(p);
             } else {
                 plain.push(p);
