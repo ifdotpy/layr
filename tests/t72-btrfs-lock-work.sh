@@ -45,8 +45,8 @@ l add d.txt
 l save -q -m warm
 echo more >> notes.txt
 LAYR_TRACE=1 l save -a -m edit -q 2> $T/save.trace
-eq "a save refreshes no tracked file of the git index" 0 "$(count 'git index refresh' $T/save.trace)"
-ok "a save updates the changed paths of the git index" test "$(count 'git index update of 1 changed paths' $T/save.trace)" -eq 1
+eq "a save refreshes no tracked file of the git index" "" "$(grep 'git index refresh' $T/save.trace)"
+has "a save updates the changed paths of the git index" "git index update of 1 changed paths" "$(cat $T/save.trace)"
 eq "git status is clean after the save" "" "$(git status --short)"
 l line new fresh rel >/dev/null
 eq "git status is clean in a fresh line" "" "$(cd $P/fresh && git status --short)"
@@ -58,6 +58,6 @@ l save --caches -q
 cd $P/main
 LAYR_TRACE=1 l line delete -D rel 2> $T/delete.trace >/dev/null
 ok "the line folder is gone" test ! -e $P/rel
-ok "the known nested subvolumes are destroyed first" test "$(count 'delete: known nested subvolumes' $T/delete.trace)" -ge 1
-eq "no search of the working folder for nested subvolumes" 0 "$(count 'full search for nested' $T/delete.trace)"
+has "the known nested subvolumes are destroyed first" "delete: known nested subvolumes" "$(cat $T/delete.trace)"
+eq "no search of the working folder for nested subvolumes" "" "$(grep 'full search for nested' $T/delete.trace)"
 finish

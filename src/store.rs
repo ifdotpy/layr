@@ -399,8 +399,9 @@ impl<'a> Project<'a> {
         }
         crate::storage::delete_tree(path)
     }
-    /// The paths of nested subvolumes (caches) that a working folder of a line is known to hold:
-    /// the machine setting and the caches that the head of the line saved.
+    /// The paths of nested subvolumes (caches) that a working folder of a line can hold: the
+    /// machine setting, the caches that the head of the line saved and the folders of the cache
+    /// overlays.
     #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
     fn nested_hints(&self, path: &Path) -> Vec<String> {
         let mut hints = self.config_strings("regenerable");
@@ -410,6 +411,16 @@ impl<'a> Project<'a> {
         };
         if let Some(rec) = line.and_then(|l| self.db.state(&l.head).ok().flatten()) {
             hints.extend(rec.caches.keys().cloned());
+        }
+        // The folders of the cache overlays (`overlay.<name>.folder`).
+        let mut names: Vec<String> = Vec::new();
+        for entry in fs::read_dir(self.dir.join("meta/overlays")).into_iter().flatten().flatten() {
+            names.push(entry.file_name().to_string_lossy().into_owned());
+        }
+        for name in names {
+            if let Ok(Some(v)) = self.db.overlay_config(&format!("overlay.{name}.folder")) {
+                hints.extend(v.as_str().map(str::to_owned));
+            }
         }
         hints
     }
