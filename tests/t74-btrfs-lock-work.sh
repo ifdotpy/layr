@@ -7,7 +7,7 @@
 . "$(dirname "$0")/lib.sh"
 
 if [ "$(uname -s)" != Linux ] || [ -n "${LAYR_OVERLAYFS_TEST_ROOT:-}" ]; then
-    echo "t72-btrfs-lock-work.sh: 0 passed, 0 failed (btrfs only)"
+    echo "t74-btrfs-lock-work.sh: 0 passed, 0 failed (btrfs only)"
     exit 0
 fi
 
