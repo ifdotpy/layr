@@ -74,9 +74,8 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let msg = a.get("--note").unwrap_or("").to_string();
     for l in lines {
         repo.authorize_line(ctx, &l, crate::repo::LineOp::Save)?;
-        #[cfg(target_os = "macos")]
         if a.has("--caches") {
-            prepare_cache_copies(repo, &l)?;
+            prepare_caches(repo, &l, a.get("--cache"))?;
         } else {
             repo.prepare_save(&l)?;
         }
@@ -150,17 +149,34 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
     Ok(0)
 }
 
-/// On APFS a snapshot copies every file, and a save with caches took minutes under the store
-/// lock for build output. This copies the line's caches before the lock: one copy for the
-/// state's cache (none when the head already has it) and one for the cache overlay. Under the
-/// lock a snapshot takes a copy with one rename, and unused copies go to the trash.
-#[cfg(target_os = "macos")]
-fn prepare_cache_copies(repo: &Repo, l: &Line) -> Result<()> {
+/// A cache folder that a tool made as a plain folder becomes a cache by a copy of all its files,
+/// and on APFS a snapshot copies every file too: a save with caches took a minute under the
+/// store lock for build output. This does both before the lock, for the selected caches (`only`:
+/// `--cache`): the plain folder becomes a cache, then (APFS) one copy for the state's cache (none
+/// when the head already has it) and one for the cache overlay. Under the lock a conversion finds
+/// a cache already, a snapshot takes a copy with one rename, and unused copies go to the trash.
+/// The files of a cache are build output: a copy from a moment before the lock is as good.
+fn prepare_caches(repo: &Repo, l: &Line, only: Option<&str>) -> Result<()> {
     let w = repo.working(l);
+    let (u, g) = repo.owner_ids(l);
+    let only = only.map(|o| o.trim_matches('/'));
     for p in repo.line_cache_paths(l)?.0 {
-        let cp = fsutil::safe_join(&w, &p)?;
-        if !btrfs::is_subvolume(&cp) {
+        if only.is_some_and(|o| o != p) {
             continue;
+        }
+        crate::repo::convert_cache(&w, &p, u, g)?;
+        #[cfg(target_os = "macos")]
+        prepare_cache_copy(repo, l, &w, &p)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn prepare_cache_copy(repo: &Repo, l: &Line, w: &Path, p: &str) -> Result<()> {
+    {
+        let cp = fsutil::safe_join(w, p)?;
+        if !btrfs::is_subvolume(&cp) {
+            return Ok(());
         }
         let name = format!("{}@{}", l.head, p.replace('/', "%2F"));
         let copies = if repo.p.cache_path(&l.head, &name).exists() { 1 } else { 2 };
