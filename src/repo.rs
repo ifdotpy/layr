@@ -542,6 +542,7 @@ impl<'a> Repo<'a> {
     pub fn working_snapshot_over(&self, ctx: &Ctx, line: &Line, parents: Vec<String>, message: &str, base: &str) -> Result<StateRec> {
         let w = self.working(line);
         recover_cache_replacements(&w)?;
+        self.restore_caches(line)?;
         let private = self.private_paths(line)?;
         #[cfg(not(target_os = "macos"))]
         let _ = base;
@@ -815,6 +816,27 @@ impl<'a> Repo<'a> {
         }
     }
 
+    /// True when the working folder `w` differs from `base` by what `status` reports: content,
+    /// type, link target, executable bit, added or removed files. The thin diff `d` also lists
+    /// times, modes, owners and folders; those make no automatic state, as on every backend.
+    #[cfg(target_os = "macos")]
+    fn thin_changed(&self, base: &Snap, w: &Path, d: &crate::thin::Diff) -> Result<bool> {
+        let wp = w.to_path_buf();
+        for p in d.write.iter().chain(d.removed.iter()).filter(|p| !skip_path(p)) {
+            let c = changes::Change {
+                path: p.clone(),
+                old_path: None,
+                old: fsutil::lmeta(base, p),
+                new: fsutil::lmeta(&wp, p),
+                ranges: None,
+            };
+            if !changes::file_changes_of(base, &wp, vec![c])?.is_empty() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// The layer of an automatic state at `dst`, over `save_layer_base`.
     #[cfg(target_os = "macos")]
     fn write_save_layer(&self, line: &Line, prev: &str, w: &Path, new: &BTreeMap<String, btrfs::ScanEntry>, dst: &Path) -> Result<()> {
@@ -836,6 +858,10 @@ impl<'a> Repo<'a> {
         if !w.exists() || !self.private_paths(line)?.is_empty() || !self.thin_line(line)? {
             return Ok(());
         }
+        // A cache that a tool made again as a plain folder is made a cache under the lock first.
+        if !self.plain_caches(line)?.is_empty() {
+            return Ok(());
+        }
         let _t = crate::trace::span("prepare save");
         let prev = self.save_base(line)?;
         let new = btrfs::scan_with_data(&w, true)?;
@@ -844,10 +870,9 @@ impl<'a> Repo<'a> {
         let base_scan = base.scan(true)?;
         let d = crate::thin::diff(&base_scan, &|k| base.path(k), &new, &w)?;
         // Nothing changed since the previous save: the save under the lock makes no state.
-        let unchanged = |d: &crate::thin::Diff| !d.write.iter().chain(d.removed.iter()).any(|p| !skip_path(p));
-        if unchanged(&d) || (base_id != prev && self.p.has_state(&prev) && {
+        if !self.thin_changed(&base, &w, &d)? || (base_id != prev && self.p.has_state(&prev) && {
             let p = self.state_src(&prev)?;
-            unchanged(&crate::thin::diff(&p.scan(true)?, &|k| p.path(k), &new, &w)?)
+            !self.thin_changed(&p, &w, &crate::thin::diff(&p.scan(true)?, &|k| p.path(k), &new, &w)?)?
         }) {
             return Ok(());
         }
@@ -879,6 +904,7 @@ impl<'a> Repo<'a> {
             return Ok(None);
         }
         recover_cache_replacements(&w)?;
+        self.restore_caches(line)?;
         #[cfg(target_os = "macos")]
         if !force && self.private_paths(line)?.is_empty() && self.thin_line(line)? {
             // Compare before any copy: an unchanged folder makes no state. One scan of the
@@ -888,12 +914,11 @@ impl<'a> Repo<'a> {
             let head = self.state_src(&line.head)?;
             let head_scan = head.scan(true)?;
             let head_diff = crate::thin::diff(&head_scan, &|k| head.path(k), &new, &w)?;
-            let relevant = |d: &crate::thin::Diff| d.write.iter().chain(d.removed.iter()).any(|p| !skip_path(p));
             let changed = if prev == line.head {
-                relevant(&head_diff)
+                self.thin_changed(&head, &w, &head_diff)?
             } else if self.p.has_state(&prev) {
                 let base = self.state_src(&prev)?;
-                relevant(&crate::thin::diff(&base.scan(true)?, &|k| base.path(k), &new, &w)?)
+                self.thin_changed(&base, &w, &crate::thin::diff(&base.scan(true)?, &|k| base.path(k), &new, &w)?)?
             } else {
                 true
             };
@@ -1696,6 +1721,53 @@ impl<'a> Repo<'a> {
         paths
     }
 
+    /// Cache paths of the line that a tool made again as plain folders (`cargo clean` removes
+    /// `target/` and a build makes it again), so that a snapshot would put their files into a
+    /// state. Only paths that were caches can be such: the machine setting and the folder
+    /// overlays. A folder that the head versions is no cache.
+    fn plain_caches(&self, line: &Line) -> Result<Vec<String>> {
+        let w = self.working(line);
+        if self.p.is_overlay() {
+            return Ok(Vec::new());
+        }
+        let setting = self.p.config_strings("regenerable");
+        let mut paths = setting.clone();
+        for (_, f) in self.folder_overlays()? {
+            if !paths.contains(&f) {
+                paths.push(f);
+            }
+        }
+        let (t, regenerable, ignored) = (Tree::open(&w)?, Rules::attribute(&w, "regenerable"), Rules::new(&w));
+        let mut head = None;
+        let mut out = Vec::new();
+        for p in paths {
+            let Some(m) = t.stat(&p) else { continue };
+            if !m.is_dir() || fsutil::is_layer(&w, &p, &m) {
+                continue;
+            }
+            if !(setting.contains(&p) || regenerable.ignored(&p, true)) || !ignored.ignored(&p, true) {
+                continue;
+            }
+            if head.is_none() {
+                head = Some(self.state_root(&line.head)?);
+            }
+            if !holds_files(head.as_ref().unwrap(), &p) {
+                out.push(p);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Make the cache paths that a tool made again as plain folders caches again, before a
+    /// snapshot of the working folder. The caller holds the project lock.
+    pub fn restore_caches(&self, line: &Line) -> Result<()> {
+        let (w, (u, g)) = (self.working(line), self.owner_ids(line));
+        for p in self.plain_caches(line)? {
+            convert_cache(&w, &p, u, g)?;
+        }
+        Ok(())
+    }
+
     /// The cache paths of a line (`cache_paths`) in two lists: the caches, and the paths whose
     /// folder holds files in the head of the line. Such a folder is versioned: never a cache.
     pub fn line_cache_paths(&self, line: &Line) -> Result<(Vec<String>, Vec<String>)> {
@@ -2273,6 +2345,10 @@ pub fn convert_cache(w: &Path, path: &str, uid: u32, gid: u32) -> Result<bool> {
     if !m.is_dir() || fsutil::is_layer(w, path, &m) {
         return Ok(false);
     }
+    // APFS marks the folder in place, files included. Else copy with reflinks into a new subvolume.
+    #[cfg(target_os = "macos")]
+    btrfs::mark_cache(&fsutil::safe_join(w, path)?)?;
+    #[cfg(not(target_os = "macos"))]
     replace_folder(&t, path, true, uid, gid)?;
     Ok(true)
 }

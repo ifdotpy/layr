@@ -138,9 +138,7 @@ pub fn case_clash(path: &Path) -> Option<String> {
     {
         let name = path.file_name()?;
         let m = fs::symlink_metadata(path).ok()?;
-        if crate::sys::case_sensitive_dev(m.dev(), path) {
-            return None;
-        }
+        let sensitive = crate::sys::case_sensitive_dev(m.dev(), path);
         // A file with several links: the folder listing names the entries reliably.
         if !m.is_dir() && m.nlink() > 1 {
             let mut other = None;
@@ -149,7 +147,7 @@ pub fn case_clash(path: &Path) -> Option<String> {
                 if n == name {
                     return None;
                 }
-                if case_key(&n.to_string_lossy()) == case_key(&name.to_string_lossy()) {
+                if name_key(sensitive, &n.to_string_lossy()) == name_key(sensitive, &name.to_string_lossy()) {
                     other = Some(n.to_string_lossy().into_owned());
                 }
             }
@@ -179,9 +177,7 @@ pub fn refuse_case_clash(root: &Path, rel: &str) -> Result<()> {
 
 #[cfg(target_os = "macos")]
 fn refuse_case_clash_apfs(root: &Path, rel: &str) -> Result<()> {
-    if fs::symlink_metadata(root).map(|m| crate::sys::case_sensitive_dev(m.dev(), root)).unwrap_or(true) {
-        return Ok(());
-    }
+    let sensitive = fs::symlink_metadata(root).map(|m| crate::sys::case_sensitive_dev(m.dev(), root)).unwrap_or(true);
     let mut path = root.to_path_buf();
     let mut done = String::new();
     for part in rel.split('/').filter(|c| !c.is_empty()) {
@@ -200,7 +196,8 @@ fn refuse_case_clash_apfs(root: &Path, rel: &str) -> Result<()> {
             }
             let parent = done.rsplit_once('/').map(|(p, _)| format!("{p}/")).unwrap_or_default();
             bail!(
-                "{done} and {parent}{stored} differ only in case, and the volume of this store does not tell them apart.\nRename one of them, or use a store on a case-sensitive APFS volume."
+                "{done} and {parent}{stored} {}",
+                clash_reason(sensitive)
             );
         }
         if fs::symlink_metadata(&path).is_err() {
@@ -230,6 +227,28 @@ pub fn case_key(name: &str) -> String {
         c => c,
     };
     name.nfd().flat_map(char::to_lowercase).map(fold).nfd().collect()
+}
+
+/// The form of a name that the volume compares. APFS ignores the Unicode normal form also on a
+/// case-sensitive volume: `cafe\u{301}` and `caf\u{e9}` are one entry there.
+#[cfg(target_os = "macos")]
+pub fn name_key(case_sensitive: bool, name: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    if case_sensitive {
+        name.nfd().collect()
+    } else {
+        case_key(name)
+    }
+}
+
+/// The end of a clash message: what the volume ignores and what to do.
+#[cfg(target_os = "macos")]
+fn clash_reason(case_sensitive: bool) -> &'static str {
+    if case_sensitive {
+        "differ only in Unicode normalization, and the volume of this store does not tell them apart.\nRename one of them."
+    } else {
+        "differ only in case, and the volume of this store does not tell them apart.\nRename one of them, or use a store on a case-sensitive APFS volume."
+    }
 }
 
 /// True when the entry `rel` below `root` holds no files: it leaves (`leaves(rel)`), or it is a
@@ -292,9 +311,7 @@ pub fn replace_work_entries(src: &Path, dst: &Path, gone: &[&str], write: &[&str
 
 #[cfg(target_os = "macos")]
 fn refuse_remaining_clashes(dst: &Path, gone: &[&str], write: &[&str]) -> Result<()> {
-    if fs::symlink_metadata(dst).map(|m| crate::sys::case_sensitive_dev(m.dev(), dst)).unwrap_or(true) {
-        return Ok(());
-    }
+    let sensitive = fs::symlink_metadata(dst).map(|m| crate::sys::case_sensitive_dev(m.dev(), dst)).unwrap_or(true);
     let gone: std::collections::BTreeSet<&str> = gone.iter().copied().collect();
     let leaves = |rel: &str| rel.match_indices('/').map(|(i, _)| &rel[..i]).chain([rel]).any(|a| gone.contains(a));
     // Writes below one folder share its ancestors: check each once.
@@ -316,7 +333,8 @@ fn refuse_remaining_clashes(dst: &Path, gone: &[&str], write: &[&str]) -> Result
                 // After the removals, nothing but empty folders may stay there.
                 if !holds_no_files(dst, &other, &leaves) {
                     bail!(
-                        "{done} and {other} differ only in case, and the volume of this store does not tell them apart.\nRename one of them, or use a store on a case-sensitive APFS volume."
+                        "{done} and {other} {}",
+                        clash_reason(sensitive)
                     );
                 }
                 break;
@@ -334,9 +352,7 @@ fn refuse_remaining_clashes(dst: &Path, gone: &[&str], write: &[&str]) -> Result
 pub fn refuse_case_collisions<'a>(dst: &Path, paths: impl Iterator<Item = &'a str>) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
-        if crate::sys::case_sensitive(dst) {
-            return Ok(());
-        }
+        let sensitive = crate::sys::case_sensitive(dst);
         let mut seen: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> = Default::default();
         for p in paths {
             let mut prefix = String::new();
@@ -345,7 +361,7 @@ pub fn refuse_case_collisions<'a>(dst: &Path, paths: impl Iterator<Item = &'a st
                     prefix.push('/');
                 }
                 prefix.push_str(part);
-                seen.entry(case_key(&prefix)).or_default().insert(prefix.clone());
+                seen.entry(name_key(sensitive, &prefix)).or_default().insert(prefix.clone());
             }
         }
         let groups: Vec<String> =
@@ -353,9 +369,11 @@ pub fn refuse_case_collisions<'a>(dst: &Path, paths: impl Iterator<Item = &'a st
         if !groups.is_empty() {
             let shown: Vec<String> = groups.iter().take(10).map(|g| format!("  {g}")).collect();
             bail!(
-                "these names differ only in case, and the volume of this store does not tell them apart:\n{}{}\nRename all but one of each group, or use a store on a case-sensitive APFS volume.",
+                "these names differ only in {}, and the volume of this store does not tell them apart:\n{}{}\nRename all but one of each group{}.",
+                if sensitive { "Unicode normalization" } else { "case" },
                 shown.join("\n"),
-                if groups.len() > 10 { format!("\n  and {} more", groups.len() - 10) } else { String::new() }
+                if groups.len() > 10 { format!("\n  and {} more", groups.len() - 10) } else { String::new() },
+                if sensitive { "" } else { ", or use a store on a case-sensitive APFS volume" }
             );
         }
         Ok(())
