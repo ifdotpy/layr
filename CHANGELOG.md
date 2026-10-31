@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.0](https://github.com/ifdotpy/layr/compare/v0.7.0...v0.8.0) (2026-10-31)
+
+
+### Features
+
+* **du:** Show the disk space of lines and store parts; gc drops pushed automatic states ([#79](https://github.com/ifdotpy/layr/issues/79)) ([bfca40a](https://github.com/ifdotpy/layr/commit/bfca40a519441f9241607c9c305949872f46a5ef))
+* **retest:** export a workspace dylib as an llvm-cov object ([#77](https://github.com/ifdotpy/layr/issues/77)) ([bd569c8](https://github.com/ifdotpy/layr/commit/bd569c8124bde0f12edd52bea048b7170a3313dc))
+
 ## [0.7.0](https://github.com/ifdotpy/layr/compare/v0.6.1...v0.7.0) (2026-10-31)
 
 
