@@ -148,11 +148,26 @@ fn runs_only_the_stale_test() {
     let err = retest(&line, &root, &["run"]);
     assert!(err.contains("6 tests, 0 selected") && !err.contains("no build"), "{err}");
 
-    // 3. Change the body of `a`: only `ta` runs.
+    // 3. Change the body of `a`: only `ta` runs. The build leaves old files behind: the sweep
+    // removes what this build did not use and keeps the rest (the run below needs the test binaries).
+    let debug = line.join("target/retest/debug");
+    let (zombie, zombie_meta) = (debug.join("deps/libzombie-0123456789abcdef.rlib"), debug.join("deps/zombie-0123456789abcdef.d"));
+    std::fs::write(&zombie, vec![0u8; 3_000_000]).unwrap();
+    std::fs::write(&zombie_meta, "x").unwrap();
+    let inc = std::fs::read_dir(debug.join("incremental")).unwrap().map(|e| e.unwrap().path()).find(|p| p.file_name().unwrap().to_string_lossy().starts_with("tiny-")).unwrap();
+    std::fs::create_dir_all(inc.join("s-0-old/x")).unwrap();
+    std::fs::write(inc.join("s-0-old.lock"), "").unwrap();
+    // Make the old session the oldest.
+    std::fs::File::open(inc.join("s-0-old")).unwrap().set_modified(std::time::UNIX_EPOCH).unwrap();
     std::fs::write(&lib, LIB.replace("    1\n", "    1 + 0\n")).unwrap();
     let err = retest(&line, &root, &["run"]);
     assert!(err.contains("6 tests, 1 selected"), "{err}");
     assert!(err.contains("ran 1, passed 1"), "{err}");
+    assert!(err.contains("swept stale build output, freed "), "{err}");
+    assert!(!zombie.exists() && !zombie_meta.exists() && !inc.join("s-0-old").exists() && !inc.join("s-0-old.lock").exists());
+    let live = std::fs::read_dir(debug.join("deps")).unwrap().filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with("libtiny-")).count();
+    assert!(live >= 1, "the sweep removed the live rlib of the package");
+    assert!(std::fs::read_dir(&inc).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().starts_with("s-")), "the newest session stays");
 
     // 4. A new function that no test calls: nothing runs.
     let s = std::fs::read_to_string(&lib).unwrap();
