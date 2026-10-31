@@ -301,17 +301,28 @@ fn copy_dir_meta(src: &Path, dst: &Path, root: bool) -> Result<()> {
 }
 
 /// Clone an entry with its metadata. A folder brings its content. A clone cannot start at a link.
-fn clone_entry(from: &Path, to: &Path, m: &fs::Metadata) -> Result<()> {
+/// False when a writer removed the entry before the clone: the callers that copy a live folder
+/// see that change in their next scan (or, in the last round, keep the entry out).
+fn clone_entry(from: &Path, to: &Path, m: &fs::Metadata) -> Result<bool> {
+    let gone = |e: &std::io::Error| e.kind() == ErrorKind::NotFound && fs::symlink_metadata(from).is_err();
     if m.file_type().is_symlink() {
-        std::os::unix::fs::symlink(fs::read_link(from)?, to)?;
+        let target = match fs::read_link(from) {
+            Ok(t) => t,
+            Err(e) if gone(&e) => return Ok(false),
+            Err(e) => return Err(e.into()),
+        };
+        std::os::unix::fs::symlink(target, to)?;
         crate::sys::apfs_copy_metadata(from, to).with_context(|| format!("copy metadata {}", to.display()))?;
         crate::sys::apfs_immutable(to, false)?;
         apfs::keep_birthtime(m, to)?;
         crate::sys::apfs_mtime(to, m.mtime(), m.mtime_nsec())?;
-        return Ok(());
+        return Ok(true);
     }
-    crate::sys::apfs_clone(from, to).with_context(|| format!("clone {}", from.display()))?;
-    Ok(())
+    match crate::sys::apfs_clone(from, to) {
+        Ok(()) => Ok(true),
+        Err(e) if gone(&e) => Ok(false),
+        Err(e) => Err(anyhow::Error::from(e).context(format!("clone {}", from.display()))),
+    }
 }
 
 /// Apply one layer to a writable complete tree.
@@ -744,8 +755,8 @@ pub fn stage_entries(index: &Layered, src: &Path, paths: &BTreeSet<String>, own:
                     }
                     Err(e) => return Err(e.into()),
                 };
-            if !moved {
-                clone_entry(&from, &at, &m)?;
+            if !moved && !clone_entry(&from, &at, &m)? {
+                continue;
             }
             if !moved || std::os::macos::fs::MetadataExt::st_flags(&m) & libc::UF_IMMUTABLE != 0 {
                 crate::sys::apfs_immutable(&at, false)?;
@@ -813,8 +824,9 @@ pub fn extract<'a>(src: &Layered, paths: impl Iterator<Item = &'a str>, dst: &Pa
             if let Some(parent) = to.parent() {
                 fs::create_dir_all(parent)?;
             }
-            clone_entry(&from, &to, &m)?;
-            crate::sys::apfs_immutable(&to, false)?;
+            if clone_entry(&from, &to, &m)? {
+                crate::sys::apfs_immutable(&to, false)?;
+            }
         }
         Ok(())
     })();

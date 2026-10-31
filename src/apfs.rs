@@ -971,10 +971,20 @@ fn clone_around(
             fs::set_permissions(&cto, fs::Permissions::from_mode(cm.mode() & 0o7777))?;
         } else if ancestors.contains(child.as_str()) {
             clone_around(src, dst, &child, nested, ancestors, readonly)?;
-        } else if fs::symlink_metadata(&cfrom)?.file_type().is_symlink() {
-            copy_tree(&cfrom, &cto, false, &mut BTreeMap::new())?;
         } else {
-            crate::sys::apfs_clone(&cfrom, &cto)?;
+            // An entry that a writer removed during the copy: the scan after the copy sees the
+            // change. Any other failure stops the copy.
+            let copied = match fs::symlink_metadata(&cfrom) {
+                Ok(cm) if cm.file_type().is_symlink() => copy_tree(&cfrom, &cto, false, &mut BTreeMap::new()),
+                Ok(_) => crate::sys::apfs_clone(&cfrom, &cto).map_err(anyhow::Error::from),
+                Err(e) => Err(e.into()),
+            };
+            if let Err(err) = copied {
+                if fs::symlink_metadata(&cfrom).is_ok() {
+                    return Err(err.context(format!("clone {}", cfrom.display())));
+                }
+                let _ = delete_tree(&cto);
+            }
         }
     }
     // The folder gets the metadata of the source last: a copy of a sealed folder is sealed.
