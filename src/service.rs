@@ -340,8 +340,13 @@ fn periodic(root: &Path, hourly: bool) {
                 let last = saved.max(checks.get(&l.id).copied().unwrap_or(0));
                 if now - last >= interval {
                     if let Ok(_lock) = repo.p.lock() {
-                        if let Ok(None) = repo.save(&ctx, &l, "periodic", true, false) {
-                            checks.insert(l.id.clone(), now);
+                        match repo.save(&ctx, &l, "periodic", true, false) {
+                            Ok(None) => {
+                                checks.insert(l.id.clone(), now);
+                            }
+                            Ok(Some(_)) => {}
+                            // A failed save is compared again on the next tick: say why.
+                            Err(e) => eprintln!("layr periodic save ({name}/{}): {e:#}", l.name),
                         }
                     }
                 }
