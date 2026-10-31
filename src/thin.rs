@@ -374,6 +374,10 @@ pub struct Diff {
     pub write: BTreeSet<String>,
     /// Topmost paths that the new tree removes or replaces with another type.
     pub removed: BTreeSet<String>,
+    /// Topmost folders of `write` that are new: nothing below them is in the base, so one clone
+    /// of the folder copies its whole content. Per-file clones of a new `node_modules` took
+    /// minutes under load. Empty when the caller did not compute it.
+    pub whole: BTreeSet<String>,
 }
 
 impl Diff {
@@ -446,6 +450,18 @@ pub fn diff(
     for k in replaced {
         d.removed.remove(&k);
     }
+    // A written folder that is not in `old` (or replaces another type) has no old content.
+    // A special file below it keeps the per-entry path, which refuses it by name.
+    let special: Vec<&String> = new.iter().filter(|(_, e)| e.meta.ftype == FType::Special).map(|(k, _)| k).collect();
+    for k in &d.write {
+        let dir = new.get(k).is_some_and(|e| e.meta.ftype == FType::Dir);
+        if dir && (!old.contains_key(k) || d.removed.contains(k)) && !ancestors(k).any(|a| d.whole.contains(a)) {
+            let below = format!("{k}/");
+            if !special.iter().any(|s| s.starts_with(&below)) {
+                d.whole.insert(k.clone());
+            }
+        }
+    }
     Ok(d)
 }
 
@@ -462,6 +478,7 @@ pub fn write_layer(
     gone: Option<&mut BTreeSet<String>>,
 ) -> Result<()> {
     let _t = crate::trace::span(format!("thin write {} entries", d.write.len()));
+    let _c = (!d.whole.is_empty()).then(|| crate::trace::span(format!("thin clone {} new folders", d.whole.len())));
     ensure_parent(dst)?;
     fs::create_dir(dst)?;
     let result = (|| -> Result<()> {
@@ -476,7 +493,7 @@ pub fn write_layer(
             },
         )?;
         set_removed(dst, &d.removed)?;
-        add_entries(src, dst, d.write.iter().map(|s| s.as_str()), d.removed.iter().map(|s| s.as_str()), gone)?;
+        add_entries(src, dst, d.write.iter().map(|s| s.as_str()), d.removed.iter().map(|s| s.as_str()), &d.whole, gone)?;
         copy_dir_meta(src, dst, true)?;
         if !writable {
             apfs::seal(dst, true, false)?;
@@ -496,6 +513,7 @@ pub fn add_entries<'a>(
     dst: &Path,
     write: impl Iterator<Item = &'a str>,
     removed: impl Iterator<Item = &'a str>,
+    whole: &BTreeSet<String>,
     mut gone: Option<&mut BTreeSet<String>>,
 ) -> Result<()> {
     let mut dirs: BTreeSet<String> = BTreeSet::new();
@@ -517,6 +535,12 @@ pub fn add_entries<'a>(
         container(&mut dirs, r)?;
     }
     for k in write {
+        // Below a folder that one clone copies with its content.
+        // Its folders get the times of `src` below, as the folders of a per-entry copy do.
+        if ancestors(k).any(|a| whole.contains(a)) {
+            dirs.insert(k.to_string());
+            continue;
+        }
         // Below a new folder that went away: the entry went away too.
         if let Some(g) = gone.as_deref_mut() {
             if ancestors(k).any(|a| g.contains(a)) {
@@ -533,7 +557,14 @@ pub fn add_entries<'a>(
                 open_parent(dst, k)?;
                 apfs::delete_tree(&to)?;
             }
-            if m.is_dir() {
+            if m.is_dir() && whole.contains(k) {
+                // A new folder: one clone copies its content (layer rule 5 holds, as the
+                // content is all new). A clone keeps the folder's own mode, so open it for the
+                // metadata step below.
+                crate::sys::apfs_clone(&from, &to).with_context(|| format!("clone {}", from.display()))?;
+                crate::sys::apfs_immutable(&to, false)?;
+                dirs.insert(k.to_string());
+            } else if m.is_dir() {
                 fs::create_dir(&to)?;
                 dirs.insert(k.to_string());
             } else if m.is_file() {
@@ -966,7 +997,7 @@ pub fn write_checked_scan(
     writable: bool,
 ) -> Result<Option<BTreeMap<String, ScanEntry>>> {
     let mut before = before.clone();
-    let mut d = Diff { write: d.write.clone(), removed: d.removed.clone() };
+    let mut d = Diff { write: d.write.clone(), removed: d.removed.clone(), whole: d.whole.clone() };
     let mut round = 0;
     loop {
         if d.write.iter().any(|k| before.get(k).is_some_and(linked)) {
