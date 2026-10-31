@@ -584,7 +584,7 @@ fn restore_working(repo: &Repo, line: &Line, state: &str) -> Result<()> {
     let gone: Vec<&str> =
         list.iter().flat_map(|c| c.old_path.as_deref().into_iter().chain(c.new.is_none().then_some(c.path.as_str()))).collect();
     let write: Vec<&str> = list.iter().filter(|c| c.new.is_some()).map(|c| c.path.as_str()).collect();
-    fsutil::replace_entries(&target, &w, &gone, &write, own)
+    fsutil::replace_work_entries(&target, &w, &gone, &write, own)
 }
 
 pub fn op(ctx: &Ctx, args: &[String]) -> Result<i32> {

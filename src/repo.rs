@@ -1512,7 +1512,7 @@ impl<'a> Repo<'a> {
         }
         for c in &list {
             if c.new.is_some() {
-                fsutil::copy_entry(to, &c.path, target, &c.path, own)?;
+                fsutil::copy_work_entry(to, &c.path, target, &c.path, own)?;
             }
         }
         Ok(list)

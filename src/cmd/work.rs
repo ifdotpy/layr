@@ -1149,6 +1149,8 @@ fn restore_paths(
     specs: &[String],
     known: Option<&Snap>,
 ) -> Result<Vec<String>> {
+    // The index keeps the times of the state; the working folder gets the current time.
+    let to_work = known.is_some();
     let own = repo.own(line);
     let mut done = Vec::new();
     for c in changes::without_moves(changes::file_changes(target_view, source)?) {
@@ -1163,7 +1165,11 @@ fn restore_paths(
             }
             fsutil::remove_entry(target, &c.path)?;
         } else {
-            fsutil::copy_entry(source, &c.path, target, &c.path, own)?;
+            if to_work {
+                fsutil::copy_work_entry(source, &c.path, target, &c.path, own)?;
+            } else {
+                fsutil::copy_entry(source, &c.path, target, &c.path, own)?;
+            }
         }
         done.push(c.path.clone());
     }
@@ -1230,7 +1236,7 @@ pub fn restore_impl(
             };
             let root = repo.state_src(&sid)?;
             if fsutil::lmeta(&root, &c.path).is_some() {
-                fsutil::copy_entry(&root, &c.path, &wdir, &c.path, repo.own(&line))?;
+                fsutil::copy_work_entry(&root, &c.path, &wdir, &c.path, repo.own(&line))?;
             } else {
                 fsutil::remove_entry(&wdir, &c.path)?;
             }
@@ -1391,7 +1397,7 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
                     .map(|c| c.path.as_str())
                     .collect();
                 let write: Vec<&str> = list.iter().filter(|c| c.new.is_some()).map(|c| c.path.as_str()).collect();
-                fsutil::replace_entries(&target_root, &wdir, &gone, &write, own)?;
+                fsutil::replace_work_entries(&target_root, &wdir, &gone, &write, own)?;
             }
         }
         _ => {
@@ -1541,7 +1547,7 @@ pub fn stash(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 if c.new.is_none() {
                     fsutil::remove_entry(&wdir, &c.path)?;
                 } else {
-                    fsutil::copy_entry(&result.path, &c.path, &wdir, &c.path, own)?;
+                    fsutil::copy_work_entry(&result.path, &c.path, &wdir, &c.path, own)?;
                 }
             }
             for m in &out.messages {
@@ -1626,7 +1632,7 @@ pub fn stash(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 let wtree = crate::tree::Tree::open(&wdir)?;
                 for p in &paths {
                     if fsutil::lmeta(target, p).is_some() {
-                        fsutil::copy_entry(target, p, &wdir, p, own)?;
+                        fsutil::copy_work_entry(target, p, &wdir, p, own)?;
                     } else if fsutil::lmeta(&index, p).is_some() || fsutil::lmeta(&head_root, p).is_some() || untracked {
                         fsutil::remove_entry(&wdir, p)?;
                         prune_empty_in(&wtree, p);
