@@ -185,6 +185,8 @@ done
 ok "the new lines exist" test -d "$P/nl" -a -d "$P/nlb-1" -a -d "$P/nlb-2"
 no "a taken name is refused" l line new -q nl
 eq "no prepared copies stay after line new" "" "$(ls -A "$LAYR_ROOT/projects/hold/meta/work" 2>/dev/null)"
+# The trash is emptied in the background after a command.
+for i in $(seq 1 100); do [ -z "$(ls -A "$LAYR_ROOT/trash" 2>/dev/null)" ] && break; sleep 0.1; done
 eq "the trash is empty" "" "$(ls -A "$LAYR_ROOT/trash" 2>/dev/null)"
 ok "states remain valid" l fsck
 
