@@ -140,7 +140,10 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
                     ));
                 }
             }
+            let l = repo.line(&l.id)?;
             let last = repo.working_state(ctx, &l, "before line delete")?;
+            // A staged version may exist nowhere else: keep it as a state, so `undo` restores the index.
+            let staged = staged_state(ctx, repo, &l)?;
             // Record first, then delete the folder: the content is in the saved state.
             let mut rec = Record::new("line.delete");
             rec.lines.insert(
@@ -152,7 +155,7 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
                     working_after: None,
                 },
             );
-            rec.data = serde_json::json!({"name": l.name, "final_state": last});
+            rec.data = serde_json::json!({"name": l.name, "final_state": last, "staged_state": staged});
             repo.commit_record(ctx, rec)?;
             crate::fsutil::git_writable(&repo.working(&l), true);
             // Into the trash, emptied after the store lock: a folder with build output takes
@@ -487,4 +490,24 @@ pub fn tag(ctx: &Ctx, args: &[String]) -> Result<i32> {
     rec.data = serde_json::json!({"name": name, "state": id, "message": a.get("-m")});
     repo.commit_record(ctx, rec)?;
     Ok(0)
+}
+
+/// The index of a line as an automatic state, when it differs from the head (None otherwise).
+fn staged_state(ctx: &Ctx, repo: &crate::repo::Repo, l: &crate::model::Line) -> Result<Option<String>> {
+    if repo.current_stage(l)?.is_none() {
+        return Ok(None);
+    }
+    let (index, _temp) = repo.index_view(l)?;
+    let head = repo.head_src(l)?;
+    if !crate::changes::file_changes(&head, &index)?.iter().any(|c| !crate::repo::skip_path(&c.path)) {
+        return Ok(None);
+    }
+    let mut keep = Vec::new();
+    let tree = repo.complete(index, &mut keep)?;
+    let st = repo.new_state(ctx, &tree, StateKind::Auto, vec![l.head.clone()], "staged before line delete", Some(l))?;
+    let mut rec = Record::new("save");
+    rec.states.push(st.clone());
+    rec.data = serde_json::json!({"line": l.id});
+    repo.commit_record(ctx, rec)?;
+    Ok(Some(st.id))
 }

@@ -616,6 +616,30 @@ pub fn rm(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         plan.push((s.clone(), files));
     }
+    // Git's rule: a staged version that differs from both the head and the working file exists
+    // nowhere else, so removing it needs -f.
+    if !a.has("-f") {
+        let head = h.repo.head_src(&line)?;
+        let mut lost = Vec::new();
+        for (_, files) in &plan {
+            for f in files {
+                if fsutil::lmeta(index, f).is_some()
+                    && !fsutil::same_entry(index, f, &head, f, None)?
+                    && !fsutil::same_entry(index, f, &w, f, None)?
+                {
+                    lost.push(h.rel(f));
+                }
+            }
+        }
+        if !lost.is_empty() {
+            let list: String = lost.iter().map(|f| format!("    {f}\n")).collect();
+            let many = if lost.len() == 1 { "file has" } else { "files have" };
+            return Err(exit(
+                1,
+                format!("error: the following {many} staged content different from both the\nfile and the HEAD:\n{list}(use -f to force removal)"),
+            ));
+        }
+    }
     let mut removed = Vec::new();
     if a.has("-n") {
         removed.extend(plan.into_iter().flat_map(|(_, files)| files));

@@ -2007,7 +2007,7 @@ mod tests {
 
     #[test]
     #[ignore = "requires a case-sensitive APFS test volume"]
-    fn index_copy_preserves_hard_links_and_failed_copy_keeps_original() -> Result<()> {
+    fn index_copy_breaks_hard_links_and_failed_copy_keeps_original() -> Result<()> {
         let s = Sandbox::new();
         let src = s.0.join("source");
         let dst = s.0.join("index");
@@ -2016,12 +2016,15 @@ mod tests {
         fs::write(src.join("file"), b"new")?;
         fs::write(dst.join("file"), b"old")?;
         fs::hard_link(dst.join("file"), dst.join("alias"))?;
-        let original = fs::metadata(dst.join("file"))?.ino();
+        let linked = fs::metadata(dst.join("file"))?.ino();
         crate::fsutil::copy_index_entry(&src, "file", &dst, "file", None)?;
-        assert_eq!(fs::metadata(dst.join("file"))?.ino(), original);
-        assert_eq!(fs::metadata(dst.join("alias"))?.ino(), original);
-        assert_eq!(fs::read(dst.join("alias"))?, b"new");
+        // The other link keeps the old inode and content; the copied path gets a new file.
+        assert_ne!(fs::metadata(dst.join("file"))?.ino(), linked);
+        assert_eq!(fs::metadata(dst.join("alias"))?.ino(), linked);
+        assert_eq!(fs::read(dst.join("alias"))?, b"old");
+        assert_eq!(fs::read(dst.join("file"))?, b"new");
         fs::remove_file(dst.join("alias"))?;
+        let original = fs::metadata(dst.join("file"))?.ino();
         fs::write(src.join("file"), b"later")?;
         let tree = crate::tree::Tree::open(&dst)?;
         let result = tree.replace_index_file(&File::open(src.join("file"))?, "file", |_| bail!("test preparation error"));

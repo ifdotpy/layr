@@ -284,6 +284,26 @@ impl Tree {
         result
     }
 
+    /// Publish a new file at `rel` by rename: `fill` writes a temporary file next to it, and
+    /// the old inode (with every other link to it) stays untouched, also when `fill` fails.
+    pub fn replace_file_atomic(&self, rel: &str, fill: impl FnOnce(&File) -> Result<()>) -> Result<()> {
+        let (dir, name) = self.parent(rel)?;
+        let temp = format!(".layr-copy-{}", crate::ids::new_id());
+        let fd = rustix::fs::openat(
+            &dir,
+            temp.as_str(),
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::from_raw_mode(0o600 as _),
+        )
+        .map_err(|e| anyhow!("create {rel}: {e}"))?;
+        let file = File::from(fd);
+        let done = fill(&file).and_then(|_| Ok(rustix::fs::renameat(&dir, temp.as_str(), &dir, name)?));
+        if done.is_err() {
+            let _ = rustix::fs::unlinkat(&dir, temp.as_str(), AtFlags::empty());
+        }
+        done
+    }
+
     /// An existing regular file opened for writing, or None (absent, a link, not a file).
     pub fn open_write(&self, rel: &str) -> Result<Option<File>> {
         let (d, n) = match self.parent(rel) {
