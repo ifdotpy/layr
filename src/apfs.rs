@@ -1834,3 +1834,8 @@ pub fn mark_received(path: &Path, uuid: &str) -> Result<()> {
     result?;
     Ok(())
 }
+
+/// Disk space of a folder (`layr du`): APFS reports the private size of each file.
+pub fn space(path: &Path) -> Result<crate::fsutil::Space> {
+    crate::fsutil::apfs_space(path)
+}

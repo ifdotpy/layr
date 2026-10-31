@@ -1326,3 +1326,18 @@ pub fn contains_managed_tree(path: &Path) -> bool {
     };
     lock(&path).is_ok_and(|s| s.registry.trees.keys().any(|p| p.starts_with(&path)))
 }
+
+/// Disk space of a folder (`layr du`). A mounted tree reads its files from shared lower layers
+/// and its own upper layer: only the upper layer is its own. A plain folder is its own files.
+pub fn space(path: &Path) -> Result<crate::fsutil::Space> {
+    let abs = absolute(path)?;
+    let upper = {
+        let state = lock(&abs)?;
+        state.registry.trees.get(&abs).filter(|e| !e.plain && !e.info.readonly).map(|e| state.object(&e.info.uuid).join("upper"))
+    };
+    let total = crate::fsutil::fiemap_space(path)?;
+    match upper {
+        Some(upper) if upper.is_dir() => Ok(crate::fsutil::Space { total: total.total, unique: crate::fsutil::fiemap_space(&upper)?.unique }),
+        _ => Ok(total),
+    }
+}

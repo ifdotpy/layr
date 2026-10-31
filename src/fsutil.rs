@@ -1072,3 +1072,70 @@ pub fn rename_tree(from: impl AsRef<Path>, to: impl AsRef<Path>) -> Result<()> {
     #[cfg(not(feature = "overlayfs"))]
     Ok(fs::rename(from, to)?)
 }
+
+/// Disk space of a folder for `layr du`: the allocated bytes of its files, and the bytes that
+/// no clone, snapshot or state shares, which deleting the folder frees. A file with several
+/// links counts once.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct Space {
+    pub total: u64,
+    pub unique: u64,
+}
+
+/// `Space` of a folder on APFS: the allocated and the private size of each file.
+#[cfg(target_os = "macos")]
+pub fn apfs_space(root: &Path) -> Result<Space> {
+    use std::os::fd::AsFd;
+    fn walk(dir: &File, space: &mut Space, seen: &mut std::collections::HashSet<u64>, buf: &mut Vec<u8>) -> Result<()> {
+        for e in crate::sys::apfs_space_read(dir.as_fd(), buf)? {
+            if e.dir {
+                let flags = rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::NOFOLLOW;
+                match rustix::fs::openat(dir, e.name.as_os_str(), flags, rustix::fs::Mode::empty()) {
+                    Ok(fd) => walk(&File::from(fd), space, seen, buf)?,
+                    Err(rustix::io::Errno::ACCESS) => {}
+                    Err(err) => return Err(err.into()),
+                }
+            } else if e.links <= 1 || seen.insert(e.ino) {
+                space.total += e.alloc;
+                space.unique += e.private;
+            }
+        }
+        Ok(())
+    }
+    let mut space = Space::default();
+    let dir = File::open(root).with_context(|| format!("open {}", root.display()))?;
+    walk(&dir, &mut space, &mut Default::default(), &mut Vec::new())?;
+    Ok(space)
+}
+
+/// `Space` of a folder on Linux: the extents of each file, and those without the shared flag.
+#[cfg(target_os = "linux")]
+pub fn fiemap_space(root: &Path) -> Result<Space> {
+    fn walk(dir: &Path, space: &mut Space, seen: &mut std::collections::HashSet<(u64, u64)>) -> Result<()> {
+        let entries = match fs::read_dir(dir) {
+            Ok(v) => v,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Ok(()),
+            Err(e) => return Err(anyhow!("{}: {e}", dir.display())),
+        };
+        for e in entries {
+            let e = e?;
+            let m = e.metadata()?;
+            if m.is_dir() {
+                walk(&e.path(), space, seen)?;
+            } else if m.is_file() && (m.nlink() <= 1 || seen.insert((m.dev(), m.ino()))) {
+                match File::open(e.path()).and_then(|f| crate::sys::fiemap_space(&f)) {
+                    Ok((total, unique)) => {
+                        space.total += total;
+                        space.unique += unique;
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {}
+                    Err(err) => return Err(anyhow!("{}: {err}", e.path().display())),
+                }
+            }
+        }
+        Ok(())
+    }
+    let mut space = Space::default();
+    walk(root, &mut space, &mut Default::default())?;
+    Ok(space)
+}

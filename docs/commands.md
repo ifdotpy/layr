@@ -10,7 +10,7 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | history       | `log [--json]`, `show`, `blame`, `grep`, `ls-files`, `rev-parse`, `merge-base`                        |
 | lines         | `line new <name> [<rev>] [--count N] [--json]`, `line list [--json]`, `line delete`, `line rename`, `tag`, `merge [--expect]`, `pick`, `invert`, `replay`, `adopt` |
 | access        | `access [list|grant [--until <30m|2h|1d>]|revoke|deny|allow|check]`, `protect [<pattern> --update <role> --check <names> --path <path>=<role> --approvals <n> --approvers <principals> --direct --rewrite <role> --no-expect | --remove]`, `approve [--withdraw] <state>`, `attest <kind> <rev> [--payload <file>]`, `attestations <rev> [--kind <kind>] [--json]` |
-| safety        | `undo`, `op log`, `save`, `try <state> -- <cmd>`, `try <state> --check <name>`, `bisect list [--json]`, `bisect run [--good <rev>] [--bad <rev>] [--auto] [--ref-log <ref>] [--json] -- <cmd>`, `gc`, `fsck`, `reindex` |
+| safety        | `undo`, `op log`, `save`, `try <state> -- <cmd>`, `try <state> --check <name>`, `bisect list [--json]`, `bisect run [--good <rev>] [--bad <rev>] [--auto] [--ref-log <ref>] [--json] -- <cmd>`, `gc`, `du [<line>...] [--json]`, `fsck`, `reindex` |
 | Git bridge    | `git remote`, `git fetch`, `git pull`, `git push [--squash] [--include-base <lines>]`, `git clone`, `git sync`                             |
 | remotes       | `remote add\|list\|self\|remove\|trust`, `remote public <remote> on\|off`, `sync <remote>`, `push <remote>`, `push [--dry-run]` (every layer to each of its remotes), `overlay remote add\|list\|remove`, `fetch <remote>`, `pull <remote>`, `clone <url>` |
 | OCI           | `push <oci-remote> <rev> [--runnable <name>] [--json]`, `access token <principal> [--until <duration>]`, `access token --revoke <principal>` |
@@ -137,6 +137,13 @@ The `cache` command group is removed. Its forms fail and name their replacements
 `overlay list`, `cache repair` is `overlay repair <overlay>`, `cache add` and `cache remove` are the
 `regenerable` attribute in `.layrattributes`, and `cache pull` is `line new <name> <line>` or `merge <line>`.
 Git commands under `layr git` keep Git words.
+
+`du [<line>...] [--json]` shows the disk space of each line on this machine: `total` is the
+allocated size of its files, `unique` the part that no other line, state or clone shares, which
+deleting the line frees. A file with several links counts once. It reads only metadata and takes
+no store lock. Each backend measures `unique` in its own way: APFS reports the private size of a
+file; on btrfs, XFS and ext4 the extents that a snapshot or reflink shares carry a shared flag
+(`FIEMAP`); an OverlayFS line owns only its upper layer.
 
 Revisions: `head`, `@`, `head~2`, `head^2`, line names, `line@machine`, tags, `origin/main`,
 state id prefixes, git commit ids (full or a prefix of at least 4 digits), `park@{n}`, `head@{n}`
