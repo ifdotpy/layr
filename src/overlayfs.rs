@@ -623,16 +623,8 @@ fn snapshot_layers(
         sync_tree(&data)?;
         return Ok((Vec::new(), hard_links));
     }
-<<<<<<< head
-    let upper = state.object(&parent.info.uuid).join("upper");
-    for round in 0..3 {
-||||||| base
-    let upper = state.object(&parent.info.uuid).join("upper");
-    for _ in 0..3 {
-=======
     let upper = object_path(home, &parent.info.uuid).join("upper");
-    for _ in 0..3 {
->>>>>>> origin/perf/overlayfs
+    for round in 0..3 {
         let excluded: HashSet<_> = nested.iter().map(|p| upper.join(p.strip_prefix(src).unwrap())).collect();
         let upper_scan = || -> Result<_> {
             let mut found = scan(&upper, &excluded)?;

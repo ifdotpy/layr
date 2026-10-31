@@ -64,13 +64,7 @@ jobs:
             grep "ignores case" "$RUNNER_TEMP/fold.err"
             sudo umount /var/tmp/layr-fold
           fi
-<<<<<<< head
-          sudo env LAYR_OVERLAYFS_TEST_ROOT="$LAYR_OVERLAYFS_TEST_ROOT" LAYR="$LAYR" bash tests/run.sh t01-basic t02-merge t03-git t05-transfer t06-sync t07-service t08-gitcompat t11-security t13-access t16-overlays t70-du t71-gc-pushed t75-save-change-rules t76-cache-recreated t77-unicode-names
-||||||| base
-          sudo env LAYR_OVERLAYFS_TEST_ROOT="$LAYR_OVERLAYFS_TEST_ROOT" LAYR="$LAYR" bash tests/run.sh t01-basic t02-merge t03-git t05-transfer t06-sync t07-service t08-gitcompat t11-security t13-access t16-overlays t70-du t71-gc-pushed
-=======
-          sudo env LAYR_OVERLAYFS_TEST_ROOT="$LAYR_OVERLAYFS_TEST_ROOT" LAYR="$LAYR" bash tests/run.sh t01-basic t02-merge t03-git t05-transfer t06-sync t07-service t08-gitcompat t11-security t13-access t16-overlays t70-du t71-gc-pushed t78-overlayfs-perf
->>>>>>> origin/perf/overlayfs
+          sudo env LAYR_OVERLAYFS_TEST_ROOT="$LAYR_OVERLAYFS_TEST_ROOT" LAYR="$LAYR" bash tests/run.sh t01-basic t02-merge t03-git t05-transfer t06-sync t07-service t08-gitcompat t11-security t13-access t16-overlays t70-du t71-gc-pushed t75-save-change-rules t76-cache-recreated t77-unicode-names t78-overlayfs-perf
       - name: Unmount the test filesystem
         if: always()
         run: sudo umount -R "/var/tmp/layr-overlayfs-ci" || true
