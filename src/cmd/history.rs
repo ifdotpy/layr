@@ -363,6 +363,8 @@ fn relative(ms: i64) -> String {
 
 pub struct Decor {
     map: HashMap<String, Vec<String>>,
+    /// The git commit of each state that has one (`git_map`), shown next to the state id.
+    git: HashMap<String, String>,
 }
 
 impl Decor {
@@ -382,7 +384,7 @@ impl Decor {
         for v in map.values_mut() {
             v.sort_by_key(|x| (!x.starts_with(head), x.starts_with("tag:"), x.clone()));
         }
-        Ok(Decor { map })
+        Ok(Decor { map, git: repo.p.db.git_map()? })
     }
     pub fn of(&self, id: &str) -> String {
         match self.map.get(id) {
@@ -500,6 +502,11 @@ fn medium(s: &StateRec, decor: &Decor, date_style: &str, kind_note: bool, human:
     let mut o = format!("{label} {}{}\n", ids::display(&s.id), decor.of(&s.id));
     if s.parents.len() > 1 {
         o.push_str(&format!("Merge: {}\n", s.parents.iter().map(|p| ids::short(p)).collect::<Vec<_>>().join(" ")));
+    }
+    if human {
+        if let Some(c) = decor.git.get(&s.id) {
+            o.push_str(&format!("Git:    {c}\n"));
+        }
     }
     o.push_str(&format!("Author: {} <{}>\n", s.author.name, s.author.email));
     o.push_str(&format!("Date:   {}\n", fmt_date(s.time, date_style)));
@@ -933,7 +940,7 @@ pub fn log(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let decor = if a.has("--decorate") || a.get("--format").map(|f| f.contains("%d") || f.contains("%D")).unwrap_or(false) {
         decor
     } else {
-        Decor { map: HashMap::new() }
+        Decor { map: HashMap::new(), ..decor }
     };
     let date_style = a.get("--date").unwrap_or("default").to_string();
     let fmt = pretty_format(&a);
@@ -982,6 +989,7 @@ pub fn rev_parse(ctx: &Ctx, args: &[String]) -> Result<i32> {
         .flag("--show-prefix")
         .flag("--show-cdup")
         .flag("--symbolic-full-name")
+        .flag("--git")
         .flag("--git-common-dir");
     let a = parse(&spec, args)?;
     let h = here(ctx)?;
@@ -1070,6 +1078,17 @@ pub fn rev_parse(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         let rr = r.trim_end_matches("^{commit}").trim_end_matches("^{}");
         match revs::resolve(repo, line.as_ref(), rr) {
+            // --git: the git commit of the state, not its layr id.
+            Ok(id) if a.has("--git") => match crate::gitbridge::commit_of(repo, &id)? {
+                Some(c) => outln!(ctx, "{}", &c[..short.unwrap_or(c.len()).clamp(4, c.len())]),
+                None if a.has("-q") => return Ok(1),
+                None => {
+                    return Err(exit(
+                        128,
+                        format!("fatal: state {} has no git commit yet; 'layr git push' makes one", ids::short(&id)),
+                    ))
+                }
+            },
             Ok(id) => match short {
                 Some(n) => outln!(ctx, "{}", &ids::display(&id)[..n.clamp(4, 32)]),
                 None => outln!(ctx, "{}", ids::display(&id)),

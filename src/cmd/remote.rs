@@ -253,6 +253,7 @@ pub mod git {
             .value("-m|--message")
             .flag("--squash")
             .flag("--no-verify")
+            .flag("--include-base")
             .flag("--tags");
         let a = parse(&spec, args)?;
         let h = here(ctx)?;
@@ -284,6 +285,33 @@ pub mod git {
             _ => rev.clone(),
         };
         let state_id = revs::resolve(repo, line.as_ref(), &source)?;
+        // A line started on unpushed states of another line would publish that line's work too.
+        let owner = match repo.p.db.line_by_name(&source)? {
+            Some(l) => Some(repo.localize(l)?),
+            None => line.clone(),
+        };
+        if let (Some(l), false) = (&owner, a.has("--include-base")) {
+            let foreign = repo.foreign_base(l, &state_id)?;
+            if !foreign.is_empty() {
+                let mut msg = format!(
+                    "error: line '{}' started on {} unpushed state(s) of other lines; this push would publish them:",
+                    l.name,
+                    foreign.len()
+                );
+                for s in foreign.iter().take(10) {
+                    let from = s.line.as_deref().map(|id| repo.p.db.line_by_id(id)).transpose()?.flatten();
+                    let from = from.map(|x| x.name).unwrap_or_else(|| "deleted line".into());
+                    msg.push_str(&format!("\n  {} ({from}) {}", ids::short(&s.id), s.message.lines().next().unwrap_or("")));
+                }
+                if foreign.len() > 10 {
+                    msg.push_str(&format!("\n  ... and {} more", foreign.len() - 10));
+                }
+                msg.push_str(&format!(
+                    "\nStart a new line from the remote branch ('layr line new <name> {remote}/main') and pick your states, or add --include-base to push them too."
+                ));
+                return Err(exit(1, msg));
+            }
+        }
         crate::secrets::check_history(ctx, repo, &state_id)?;
         let state = repo.state(&state_id)?;
         if !state.conflicts.is_empty() {

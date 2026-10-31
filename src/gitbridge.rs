@@ -1294,7 +1294,7 @@ fn object_of_once(repo: &Repo, state: &str, path: &str) -> Result<Option<String>
 /// The commit of a state in the git store, if it has one: the commit a record names (import,
 /// push, git-sync), or else the history commit made for the state without a record
 /// (`history_commit`).
-fn commit_of(repo: &Repo, state: &str) -> Result<Option<String>> {
+pub fn commit_of(repo: &Repo, state: &str) -> Result<Option<String>> {
     if let Some(c) = recorded_commit(repo, state)? {
         return Ok(Some(c));
     }
@@ -1384,7 +1384,12 @@ fn export_history_once(repo: &Repo, state: &str) -> Result<(String, Vec<(String,
         // A history commit made earlier without a record: a record of this export names it.
         if let Some(c) = history_commit(repo, &s)? {
             made.push((s.clone(), c.clone()));
-            known.insert(s, c);
+            known.insert(s.clone(), c);
+            // Its parents have history commits too. The record names them all, so later pushes,
+            // their secret check and `foreign_base` stop at them.
+            for p in repo.state(&s)?.parents.iter().rev() {
+                stack.push((p.clone(), false));
+            }
             continue;
         }
         let rec = repo.state(&s)?;

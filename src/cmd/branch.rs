@@ -230,6 +230,28 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
             }
             _ => None,
         };
+        // An automatic state holds the unsaved work of its line. A line started on it would carry
+        // that work into its own saves and pushes; one with caches only is a warm start.
+        let start_state = repo.state(&start)?;
+        if start_state.kind == StateKind::Auto {
+            let unsaved = repo.unsaved_paths(&start_state)?;
+            if !unsaved.is_empty() {
+                let from = start_state.line.as_deref().map(|id| repo.p.db.line_by_id(id)).transpose()?.flatten();
+                let mut shown = unsaved.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
+                if unsaved.len() > 5 {
+                    shown.push_str(&format!(" and {} more", unsaved.len() - 5));
+                }
+                return Err(exit(
+                    1,
+                    format!(
+                        "error: {} is an automatic state of line '{}' with unsaved work ({shown}); a new line would carry it.\nStart from a named state, for example {} or origin/main, or save the work in its line first.",
+                        ids::short(&start),
+                        from.map(|l| l.name).unwrap_or_else(|| "deleted line".into()),
+                        ids::short(&start_state.parents[0]),
+                    ),
+                ));
+            }
+        }
         let owner = owner_arg(ctx, a.get("--owner"))?;
         repo.require(ctx, "line.create").map_err(|e| exit(128, format!("fatal: {e}")))?;
         if owner != ctx.caller.uid {

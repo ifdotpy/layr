@@ -1852,6 +1852,46 @@ impl<'a> Repo<'a> {
         Ok(self.ancestors(b)?.iter().any(|x| x == a))
     }
 
+    /// The paths that are not ignored and that an automatic state changes against its parent:
+    /// the unsaved work of its line. Build output and other ignored files are not work.
+    pub fn unsaved_paths(&self, auto: &StateRec) -> Result<Vec<String>> {
+        let Some(parent) = auto.parents.first() else { return Ok(Vec::new()) };
+        let root = self.state_src(&auto.id)?;
+        let rules = Rules::of(&root);
+        let list = crate::changes::file_changes(&self.state_src(parent)?, &root)?;
+        Ok(list
+            .into_iter()
+            .filter(|c| {
+                let dir = c.new.as_ref().or(c.old.as_ref()).is_some_and(|m| m.is_dir());
+                !skip_path(&c.path) && !rules.ignored(&c.path, dir)
+            })
+            .map(|c| c.path)
+            .collect())
+    }
+
+    /// The states under `state` that `line` started on, that no push carries yet and that
+    /// another line made: a push of `state` would publish that line's work as well. Automatic
+    /// states pass to their parent (`line new` refuses one with unsaved work).
+    pub fn foreign_base(&self, line: &Line, state: &str) -> Result<Vec<StateRec>> {
+        let Some(start) = self.p.db.line_start(&line.id)? else { return Ok(Vec::new()) };
+        if !self.is_ancestor(&start, state)? {
+            return Ok(Vec::new());
+        }
+        let mut found = Vec::new();
+        let mut next = Some(start);
+        while let Some(id) = next {
+            if self.p.db.git_commit_of(&id)?.is_some() {
+                break;
+            }
+            let s = self.state(&id)?;
+            next = s.parents.first().cloned();
+            if s.line.as_deref().is_some_and(|l| l != line.id) && !matches!(s.kind, StateKind::Auto | StateKind::Import) {
+                found.push(s);
+            }
+        }
+        Ok(found)
+    }
+
     /// The best common ancestor: a common ancestor that is not an ancestor of another one.
     /// One walk finds every state that is a proper ancestor of a common ancestor.
     pub fn merge_base(&self, a: &str, b: &str) -> Result<Option<String>> {

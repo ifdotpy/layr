@@ -680,6 +680,18 @@ impl Db {
         Ok(self.conn.query_row("SELECT gcommit FROM git_map WHERE state=?1 LIMIT 1", params![state], |r| r.get(0)).optional()?)
     }
 
+    /// One Git commit of each state that has one.
+    pub fn git_map(&self) -> Result<std::collections::HashMap<String, String>> {
+        let mut st = self.conn.prepare("SELECT state, gcommit FROM git_map")?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        let mut map = std::collections::HashMap::new();
+        for row in rows {
+            let (state, commit) = row?;
+            map.entry(state).or_insert(commit);
+        }
+        Ok(map)
+    }
+
     /// Every Git commit that `git_map` holds for a state, squash commits included.
     pub fn git_commits_of(&self, state: &str) -> Result<Vec<String>> {
         let mut st = self.conn.prepare("SELECT gcommit FROM git_map WHERE state=?1")?;
@@ -975,6 +987,19 @@ impl Db {
             Some(l) => Ok(Some(crate::oplog::parse_line(&l, None)?.record)),
             None => Ok(None),
         }
+    }
+
+    /// The head a line was created at, from its `line.create` record.
+    pub fn line_start(&self, line: &str) -> Result<Option<String>> {
+        let mut st = self.conn.prepare("SELECT raw FROM records WHERE op='line.create' AND instr(raw, ?1) > 0")?;
+        let v = st.query_map(params![line], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+        for l in v {
+            let rec = crate::oplog::parse_line(&l, None)?.record;
+            if let Some(after) = rec.lines.get(line).and_then(|c| c.after.as_ref()) {
+                return Ok(Some(after.head.clone()));
+            }
+        }
+        Ok(None)
     }
 
     /// Records newest first.
