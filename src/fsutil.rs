@@ -526,6 +526,7 @@ fn open_ro(p: &Path) -> Result<File> {
 }
 
 fn same_range(a: &mut File, b: &mut File, off: u64, len: u64) -> Result<bool> {
+    let _t = crate::trace::span("content compare");
     a.seek(SeekFrom::Start(off))?;
     b.seek(SeekFrom::Start(off))?;
     let mut left = len;
