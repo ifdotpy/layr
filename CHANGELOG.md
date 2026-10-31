@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.7.0](https://github.com/ifdotpy/layr/compare/v0.6.1...v0.7.0) (2026-10-31)
+
+
+### Features
+
+* **retest:** incremental compilation for the instrumented target ([#72](https://github.com/ifdotpy/layr/issues/72)) ([f6a5118](https://github.com/ifdotpy/layr/commit/f6a51182acf056b55d892bc785e5343350983b03))
+
+
+### Bug Fixes
+
+* **work:** Give written working files the current time ([#76](https://github.com/ifdotpy/layr/issues/76)) ([ca0865f](https://github.com/ifdotpy/layr/commit/ca0865fff04fb83eae1ee1f3b4bf0b626b2e8ff5))
+
 ## [0.6.1](https://github.com/ifdotpy/layr/compare/v0.6.0...v0.6.1) (2026-10-31)
 
 
