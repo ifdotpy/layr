@@ -91,9 +91,9 @@ the summary is the full count.
 Limits:
 
 - A compile error in a package that is not built is not reported. Such a package has no changed
-  file and no stale test, but it can depend on a changed package. The gate's `clippy` step
-  (`cargo clippy --workspace --all-targets`) compiles every package and is the check for this; `layr-retest` is
-  not a compile check.
+  file and no stale test, but it can depend on a changed package. The gate's clippy step
+  (Studio: `just clippy-runtime`, which compiles every package) is the check for this; `layr-retest` is
+  not a compile check. Run it, or `cargo check --workspace --all-targets`, in the same gate.
 - A test that is generated in package A by a file of package B (a macro from another crate) is
   not found until A has a changed file. `--full` finds it.
 - A bin that a test starts, in a package without an integration test, is not rebuilt by a
@@ -107,6 +107,49 @@ only, so this does not change the caller's builds. It is set by the tool and not
 because the callers (a gate script) set `CARGO_INCREMENTAL=0` for their plain builds, and a second
 variable per caller would be easy to forget. `LAYR_RETEST_INCREMENTAL=0` leaves the caller's value.
 The first incremental build of a crate is slower than a non-incremental one; the gain is on later builds.
+
+### Measurements 2026-10-31: partial build and incremental compilation
+
+Studio line `retest-gate`, `--workspace --profile fast` (record of 1615 tests), change: `black_box(N)`
+in `spawn_process` (6 tests selected), `CARGO_BUILD_JOBS=4`, `nice -n 10`, one run per gate-lock take.
+Load is the 1-minute average at the start of the run (other agents ran). Times are seconds;
+"total" is build and list + run and export + record, without save and diff (APFS cost, out of scope).
+
+| Run | Load | Build and list | Run and export | Total | Notes |
+| --- | --- | --- | --- | --- | --- |
+| Baseline (installed `layr-retest`, full build, `CARGO_INCREMENTAL=0`) | 26 | 237.7 | 48.8 | 289.7 | ran 12 (older baseline state) |
+| Partial build, first run | 15 | 237.8 | 21.2 | 261.8 | 5 of 17 packages; 110 crates rebuilt, see below |
+| Partial build, second run | 11 | 116.0 | n/a | n/a | the disk was full in the run phase |
+| Incremental, first run (full build) | 11 | 250.8 | 34.3 | 287.9 | builds the incremental cache |
+| Incremental, second run (full build) | 11 | 68.4 | 26.9 | 97.5 | 6 tests, same set as the partial run |
+| Partial + incremental | | | | | not measured: the disk had no room for both caches |
+
+What the numbers say:
+
+- Incremental compilation is the large gain on a small change: 237.7 s to 68.4 s for the build, after
+  one run that fills the cache. Cost: `debug/incremental` was 10.9 GB after the first run and 16.4 GB
+  after the second (`du`, the cache of 61 crates and test targets with coverage instrumentation).
+- Partial build halves a warm build (116.0 s) but has a high first cost. With `-p`, cargo unifies
+  features over the selected packages only. In Studio this differs from the `--workspace` set, so
+  110 crates (`syn`, `tokio`, `serde_json`, ...) were rebuilt into a second set of artifacts:
+  +11 GB in `target/retest`, and no time gain on the first run. The set stays valid for later
+  partial builds. A workspace whose packages agree on dependency features does not pay this.
+- Both together are not measured. Expect the gains to add up for the build step, and the disk
+  costs to add up too.
+- The 5 packages built for this change are the ones with a test to run (`studio-runtime-http`,
+  `-services`, `-process`) plus the `studio-process-supervisor` and `studio-runtime-server` bins
+  that depend on the changed package. The bin rule keeps the supervisor fresh for tests that start it.
+
+Probe, Studio: `panic!("retest probe")` in the supervisor `main.rs`, scope
+`-p studio-runtime-process -p studio-process-supervisor --profile ci` (157 tests). The change is a
+bin target source that no record has, so the run is a full run (no partial build), and it failed
+the same 20 tests as plain nextest (11 fail and 9 timeout in retest, 16 fail and 4 timeout in
+plain: the same names; nextest prints a timeout as `FAIL` at the end of a plain run).
+
+Probe, layr workspace (`--workspace --exclude layr-retest`, 262 tests): `panic!("probe")` in
+`layr_model::diff::is_binary`. The incremental run built 2 of 4 packages (`layr`, `layr-model`),
+selected 2 tests and failed the same 2 `interdiff` tests as `--full` (260 passed). Full run 110.7 s
+(build 53.9 s), probe run 21.6 s (build 5.6 s).
 
 ## Adapters
 
