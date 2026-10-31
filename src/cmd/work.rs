@@ -1409,6 +1409,23 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let s = repo.state(&target)?;
         outln!(ctx, "head is now at {} {}", ids::short(&target), s.message.lines().next().unwrap_or(""));
     }
+    // A mixed reset keeps the files: name the ones that now differ from the new head, as git
+    // does, and the command that changes them.
+    if mode == "mixed" && !a.has("-q") && target != line.head {
+        drop(_lock);
+        let (st, _scan, _it, _idx) = repo.status(&repo.line(&line.id)?)?;
+        if !st.unstaged.is_empty() {
+            outln!(ctx, "Unstaged changes after reset:");
+            for c in st.unstaged.iter().take(20) {
+                outln!(ctx, "{}\t{}", if c.new.is_none() { 'D' } else { 'M' }, c.path);
+            }
+            if st.unstaged.len() > 20 {
+                outln!(ctx, "... and {} more", st.unstaged.len() - 20);
+            }
+            let rev = pos.first().map(String::as_str).unwrap_or("head");
+            eprintln!("hint: reset without --hard keeps the files; 'layr reset --hard {rev}' changes them");
+        }
+    }
     Ok(0)
 }
 

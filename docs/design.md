@@ -132,6 +132,13 @@ git commit, with the same parents (merges stay merges). The same state always gi
 commit. `layr git push --squash` exports the pushed state as one commit on top of the last exported
 one; a program on top that wants one commit per task uses it.
 
+A line must not publish the work of another line by accident. A line started on unsaved work of an
+automatic state, or on local states of another line that no push carried, would put that work
+into its pull request. So `line new` refuses an automatic state with changed paths that are not
+ignored, and `git push` refuses while the line's start state has unpushed states of another line
+below it (`Repo::foreign_base`, read from the `line.create` record). Only the start counts: a
+merge or a fast-forward of another line later is a deliberate choice. `--include-base` pushes them.
+
 ## 5. Warm caches
 
 Planned: caches become overlays with properties ([cache overlays](cache-overlays.md)). This
