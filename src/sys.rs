@@ -1242,3 +1242,144 @@ pub fn drop_to_user(uid: u32, gid: u32) -> Result<()> {
     }
     Ok(())
 }
+
+/// One entry of a folder with its sizes for `layr du`: allocated bytes and the bytes that no
+/// clone shares (APFS private size).
+#[cfg(target_os = "macos")]
+pub struct SpaceEntry {
+    pub name: std::ffi::OsString,
+    pub dir: bool,
+    pub ino: u64,
+    pub links: u32,
+    pub alloc: u64,
+    pub private: u64,
+    /// The data identity that clones of this file share (0: none).
+    pub clone: u64,
+}
+
+/// Read the sizes of all entries of an open folder with `getattrlistbulk`.
+#[cfg(target_os = "macos")]
+pub fn apfs_space_read(dir: BorrowedFd<'_>, buf: &mut Vec<u8>) -> io::Result<Vec<SpaceEntry>> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut attrs = libc::attrlist {
+        bitmapcount: libc::ATTR_BIT_MAP_COUNT,
+        reserved: 0,
+        commonattr: libc::ATTR_CMN_RETURNED_ATTRS | libc::ATTR_CMN_NAME | libc::ATTR_CMN_OBJTYPE | libc::ATTR_CMN_FILEID,
+        volattr: 0,
+        dirattr: 0,
+        fileattr: libc::ATTR_FILE_LINKCOUNT | libc::ATTR_FILE_ALLOCSIZE,
+        forkattr: libc::ATTR_CMNEXT_PRIVATESIZE | libc::ATTR_CMNEXT_CLONEID,
+    };
+    let flags = libc::FSOPT_NOFOLLOW | libc::FSOPT_PACK_INVAL_ATTRS | libc::FSOPT_ATTR_CMN_EXTENDED;
+    if buf.len() < 256 * 1024 {
+        buf.resize(256 * 1024, 0);
+    }
+    let mut out = Vec::new();
+    loop {
+        // SAFETY: the folder descriptor is live; attrs and buf are valid for their sizes.
+        let n = unsafe {
+            libc::getattrlistbulk(
+                dir.as_raw_fd(),
+                (&mut attrs as *mut libc::attrlist).cast(),
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+                flags as u64,
+            )
+        };
+        if n < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if n == 0 {
+            return Ok(out);
+        }
+        let mut pos = 0usize;
+        for _ in 0..n {
+            let rd = |off: usize, len: usize| -> io::Result<&[u8]> {
+                buf.get(off..off + len).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "short getattrlistbulk entry"))
+            };
+            let u32_at = |off: usize| -> io::Result<u32> { Ok(u32::from_ne_bytes(rd(off, 4)?.try_into().unwrap())) };
+            let i32_at = |off: usize| -> io::Result<i32> { Ok(i32::from_ne_bytes(rd(off, 4)?.try_into().unwrap())) };
+            let u64_at = |off: usize| -> io::Result<u64> { Ok(u64::from_ne_bytes(rd(off, 8)?.try_into().unwrap())) };
+            let len = u32_at(pos)? as usize;
+            if len == 0 {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "empty getattrlistbulk entry"));
+            }
+            // Layout: length, returned attributes (5 words), then the attributes in bit order:
+            // name, type, file id; for a file the link count and the allocated size; then the
+            // private size and the clone id. A folder has no file group.
+            let mut q = pos + 4 + 20;
+            let name_ref = q;
+            q += 8;
+            let dir = u32_at(q)? == 2; // VDIR
+            q += 4;
+            let ino = u64_at(q)?;
+            q += 8;
+            let (links, alloc) = if dir {
+                (1, 0)
+            } else {
+                let links = u32_at(q)?;
+                let alloc = u64_at(q + 4)?;
+                q += 12;
+                (links, alloc)
+            };
+            let (private, clone) = if dir { (0, 0) } else { (u64_at(q)?, u64_at(q + 8)?) };
+            let name_off = name_ref as i64 + i32_at(name_ref)? as i64;
+            let name_len = u32_at(name_ref + 4)? as usize;
+            let raw = rd(name_off as usize, name_len)?;
+            let name = std::ffi::OsStr::from_bytes(raw.strip_suffix(&[0]).unwrap_or(raw)).to_os_string();
+            out.push(SpaceEntry { name, dir, ino, links, alloc, private, clone });
+            pos += len;
+        }
+    }
+}
+
+/// The extents of an open file (`FIEMAP`): physical address, length, and whether another file
+/// or snapshot shares it (`FIEMAP_EXTENT_SHARED`). btrfs, XFS and ext4.
+#[cfg(target_os = "linux")]
+pub fn fiemap_extents(file: &std::fs::File) -> io::Result<Vec<(u64, u64, bool)>> {
+    const FS_IOC_FIEMAP: libc::c_ulong = 0xC020_660B;
+    const EXTENT_LAST: u32 = 0x1;
+    const EXTENT_SHARED: u32 = 0x2000;
+    const COUNT: usize = 256;
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct Extent {
+        logical: u64,
+        physical: u64,
+        length: u64,
+        reserved64: [u64; 2],
+        flags: u32,
+        reserved: [u32; 3],
+    }
+    #[repr(C)]
+    struct Map {
+        start: u64,
+        length: u64,
+        flags: u32,
+        mapped: u32,
+        count: u32,
+        reserved: u32,
+        extents: [Extent; COUNT],
+    }
+    let mut out = Vec::new();
+    let mut start = 0u64;
+    loop {
+        let mut map = Map { start, length: u64::MAX - start, flags: 0, mapped: 0, count: COUNT as u32, reserved: 0, extents: [Extent::default(); COUNT] };
+        // SAFETY: the descriptor is live and `map` is a valid fiemap buffer with room for COUNT extents.
+        if unsafe { libc::ioctl(file.as_raw_fd(), FS_IOC_FIEMAP as _, &mut map as *mut Map) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mapped = (map.mapped as usize).min(COUNT);
+        if mapped == 0 {
+            return Ok(out);
+        }
+        for e in &map.extents[..mapped] {
+            out.push((e.physical, e.length, e.flags & EXTENT_SHARED != 0));
+            if e.flags & EXTENT_LAST != 0 {
+                return Ok(out);
+            }
+        }
+        let last = map.extents[mapped - 1];
+        start = last.logical + last.length;
+    }
+}

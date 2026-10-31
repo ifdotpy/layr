@@ -282,3 +282,13 @@ pub fn file_identity(path: &Path) -> Result<Vec<u8>> {
     use std::os::unix::fs::MetadataExt;
     Ok(std::fs::symlink_metadata(path)?.ino().to_le_bytes().to_vec())
 }
+
+/// Disk space of a folder (`layr du`): extents that a snapshot or a reflink shares are flagged.
+pub fn space(path: &Path) -> Result<crate::fsutil::Space> {
+    crate::fsutil::fiemap_space(path)
+}
+
+/// Visit the files of a folder for `layr du --store` (see `fsutil::Held`).
+pub fn visit_space(path: &Path, f: &mut dyn FnMut(&crate::fsutil::Held)) -> Result<()> {
+    crate::fsutil::fiemap_visit(path, f)
+}

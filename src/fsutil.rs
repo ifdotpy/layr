@@ -1072,3 +1072,110 @@ pub fn rename_tree(from: impl AsRef<Path>, to: impl AsRef<Path>) -> Result<()> {
     #[cfg(not(feature = "overlayfs"))]
     Ok(fs::rename(from, to)?)
 }
+
+/// Disk space of a folder for `layr du`: the allocated bytes of its files, and the bytes that
+/// no clone, snapshot or state shares, which deleting the folder frees. A file with several
+/// links counts once.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct Space {
+    pub total: u64,
+    pub unique: u64,
+}
+
+/// What one file holds for `layr du`: its allocated bytes, the bytes that no other file shares,
+/// and data that clones of it share, by a key that names that data with its size (the APFS
+/// clone id, or the physical address of a Linux extent).
+pub struct Held<'a> {
+    pub alloc: u64,
+    /// Bytes that the file system reports as not shared (`layr du` of lines).
+    pub own: u64,
+    /// The part of `own` that has no key (`layr du --store` counts it for its part alone).
+    pub exclusive: u64,
+    pub shared: &'a [(u64, u64)],
+}
+
+impl Space {
+    /// Add one file: its own bytes are unique to the folder.
+    pub fn add(&mut self, h: &Held) {
+        self.total += h.alloc;
+        self.unique += h.own;
+    }
+}
+
+/// Visit the files of a folder on APFS: allocated size, private size and clone id of each.
+#[cfg(target_os = "macos")]
+pub fn apfs_visit(root: &Path, f: &mut dyn FnMut(&Held)) -> Result<()> {
+    use std::os::fd::AsFd;
+    fn walk(dir: &File, f: &mut dyn FnMut(&Held), seen: &mut std::collections::HashSet<u64>, buf: &mut Vec<u8>) -> Result<()> {
+        for e in crate::sys::apfs_space_read(dir.as_fd(), buf)? {
+            if e.dir {
+                let flags = rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::NOFOLLOW;
+                match rustix::fs::openat(dir, e.name.as_os_str(), flags, rustix::fs::Mode::empty()) {
+                    Ok(fd) => walk(&File::from(fd), f, seen, buf)?,
+                    Err(rustix::io::Errno::ACCESS) => {}
+                    Err(err) => return Err(err.into()),
+                }
+            } else if e.links <= 1 || seen.insert(e.ino) {
+                // Shared bytes without a clone id get a key of their own file (top bit set).
+                let rest = e.alloc.saturating_sub(e.private);
+                let key = if e.clone != 0 { e.clone } else { e.ino | 1 << 63 };
+                let shared = [(key, rest)];
+                let own = e.private.min(e.alloc);
+                f(&Held { alloc: e.alloc, own, exclusive: own, shared: &shared[..usize::from(rest > 0)] });
+            }
+        }
+        Ok(())
+    }
+    let dir = File::open(root).with_context(|| format!("open {}", root.display()))?;
+    walk(&dir, f, &mut Default::default(), &mut Vec::new())
+}
+
+/// `Space` of a folder on APFS.
+#[cfg(target_os = "macos")]
+pub fn apfs_space(root: &Path) -> Result<Space> {
+    let mut space = Space::default();
+    apfs_visit(root, &mut |h| space.add(h))?;
+    Ok(space)
+}
+
+/// Visit the files of a folder on Linux: the extents of each, shared ones by physical address.
+#[cfg(target_os = "linux")]
+pub fn fiemap_visit(root: &Path, f: &mut dyn FnMut(&Held)) -> Result<()> {
+    fn walk(dir: &Path, f: &mut dyn FnMut(&Held), seen: &mut std::collections::HashSet<(u64, u64)>) -> Result<()> {
+        let entries = match fs::read_dir(dir) {
+            Ok(v) => v,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Ok(()),
+            Err(e) => return Err(anyhow!("{}: {e}", dir.display())),
+        };
+        for e in entries {
+            let e = e?;
+            let m = e.metadata()?;
+            if m.is_dir() {
+                walk(&e.path(), f, seen)?;
+            } else if m.is_file() && (m.nlink() <= 1 || seen.insert((m.dev(), m.ino()))) {
+                match File::open(e.path()).and_then(|file| crate::sys::fiemap_extents(&file)) {
+                    Ok(extents) => {
+                        let alloc = extents.iter().map(|x| x.1).sum();
+                        // Every extent has a key: ext4 never flags a shared extent, and a file seen
+                        // through an OverlayFS mount is the same extent as its layer file.
+                        let own = extents.iter().filter(|x| !x.2).map(|x| x.1).sum();
+                        let shared: Vec<(u64, u64)> = extents.iter().map(|x| (x.0, x.1)).collect();
+                        f(&Held { alloc, own, exclusive: 0, shared: &shared });
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {}
+                    Err(err) => return Err(anyhow!("{}: {err}", e.path().display())),
+                }
+            }
+        }
+        Ok(())
+    }
+    walk(root, f, &mut Default::default())
+}
+
+/// `Space` of a folder on Linux.
+#[cfg(target_os = "linux")]
+pub fn fiemap_space(root: &Path) -> Result<Space> {
+    let mut space = Space::default();
+    fiemap_visit(root, &mut |h| space.add(h))?;
+    Ok(space)
+}

@@ -10,7 +10,7 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | history       | `log [--json]`, `show`, `blame`, `grep`, `ls-files`, `rev-parse`, `merge-base`                        |
 | lines         | `line new <name> [<rev>] [--count N] [--json]`, `line list [--json]`, `line delete`, `line rename`, `tag`, `merge [--expect]`, `pick`, `invert`, `replay`, `adopt` |
 | access        | `access [list|grant [--until <30m|2h|1d>]|revoke|deny|allow|check]`, `protect [<pattern> --update <role> --check <names> --path <path>=<role> --approvals <n> --approvers <principals> --direct --rewrite <role> --no-expect | --remove]`, `approve [--withdraw] <state>`, `attest <kind> <rev> [--payload <file>]`, `attestations <rev> [--kind <kind>] [--json]` |
-| safety        | `undo`, `op log`, `save`, `try <state> -- <cmd>`, `try <state> --check <name>`, `bisect list [--json]`, `bisect run [--good <rev>] [--bad <rev>] [--auto] [--ref-log <ref>] [--json] -- <cmd>`, `gc`, `fsck`, `reindex` |
+| safety        | `undo`, `op log`, `save`, `try <state> -- <cmd>`, `try <state> --check <name>`, `bisect list [--json]`, `bisect run [--good <rev>] [--bad <rev>] [--auto] [--ref-log <ref>] [--json] -- <cmd>`, `gc`, `du [<line>...] [--json]`, `du --store [--json]`, `fsck`, `reindex` |
 | Git bridge    | `git remote`, `git fetch`, `git pull`, `git push [--squash] [--include-base <lines>]`, `git clone`, `git sync`                             |
 | remotes       | `remote add\|list\|self\|remove\|trust`, `remote public <remote> on\|off`, `sync <remote>`, `push <remote>`, `push [--dry-run]` (every layer to each of its remotes), `overlay remote add\|list\|remove`, `fetch <remote>`, `pull <remote>`, `clone <url>` |
 | OCI           | `push <oci-remote> <rev> [--runnable <name>] [--json]`, `access token <principal> [--until <duration>]`, `access token --revoke <principal>` |
@@ -137,6 +137,30 @@ The `cache` command group is removed. Its forms fail and name their replacements
 `overlay list`, `cache repair` is `overlay repair <overlay>`, `cache add` and `cache remove` are the
 `regenerable` attribute in `.layrattributes`, and `cache pull` is `line new <name> <line>` or `merge <line>`.
 Git commands under `layr git` keep Git words.
+
+`du [<line>...] [--json]` shows the disk space of each line on this machine: `total` is the
+allocated size of its files, `unique` the part that no other line, state or clone shares, which
+deleting the line frees. A file with several links counts once. It reads only metadata and takes
+no store lock. Each backend measures `unique` in its own way: APFS reports the private size of a
+file; on btrfs, XFS and ext4 the extents that a snapshot or reflink shares carry a shared flag
+(`FIEMAP`); an OverlayFS line owns only its upper layer.
+
+`du --store` covers the whole store: each line folder, each other folder of a project (`states`,
+`deltas`, `git`, `meta`) and `trash`. For each part it shows `frees`: the bytes that only this part
+holds, also data that its own files share among themselves, which deleting the part frees. Shared
+data counts once under a key that names it (the APFS clone id, or the physical address of an
+extent), and belongs to a part when no other part references it. The last lines show the data that
+several parts share and the store total. It reads every file's metadata (on Linux it opens each
+file), so a large store takes minutes; 4 workers share the folders of `states` and `deltas`.
+
+`gc` deletes the states that nothing keeps. Line heads and their history, tags, refs, park entries
+and conflict sources stay. The newest `retention.auto` (50) automatic states of each line, one per
+hour for `retention.hours` (24), and every state that a record of the last `undo.days` (7) names
+stay too, except an automatic state whose work a push already holds: its parent has a git commit
+(pushed or imported), it has no caches, and its files that are not ignored equal the parent. Such a
+state differs only in build output, which a build makes again, so a deleted line frees its space at
+the next `gc`. The newest automatic state of a live line always stays. `gc` compares these states
+before it takes the store lock.
 
 Revisions: `head`, `@`, `head~2`, `head^2`, line names, `line@machine`, tags, `origin/main`,
 state id prefixes, git commit ids (full or a prefix of at least 4 digits), `park@{n}`, `head@{n}`

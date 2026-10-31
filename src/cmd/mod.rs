@@ -6,6 +6,7 @@ pub mod bisect;
 pub mod branch;
 pub mod change;
 pub mod checks;
+pub mod du;
 pub mod history;
 pub mod layerpush;
 pub mod mergecmd;
@@ -209,7 +210,7 @@ Git bridge:
 Overlays (files with their own readers and history, shown in lines):
    overlay create, set, list, readers, use, move, remote, log, show, diff, grep, ls-files
 Projects and machines:
-   init, projects, config, cache, export, gc, fsck, reindex, daemon
+   init, projects, config, cache, export, gc, du [<line>...] [--json], fsck, reindex, daemon
 
 Lines are folders: <root>/projects/<project>/lines/<line>. Run commands inside a line folder.
 ";
@@ -224,7 +225,7 @@ pub const COMMANDS: &[&str] = &[
     "index", "grep", "ls-files", "add", "rm", "mv", "apply", "restore", "reset", "park", "clean", "line", "tag", "adopt",
     "merge", "pick", "invert", "replay", "save", "undo", "op", "try", "bisect", "access", "protect", "approve", "approvals",
     "checks", "ref", "release", "queue", "request", "requests", "view", "attest", "attestations", "change", "comment", "probe",
-    "gc", "fsck", "reindex", "init", "projects", "machines", "debug", "config", "cache", "layer", "remote", "fetch", "pull",
+    "gc", "du", "fsck", "reindex", "init", "projects", "machines", "debug", "config", "cache", "layer", "remote", "fetch", "pull",
     "push", "git-sync", "git", "clone", "overlay", "export", "sync", "serve-peer", "worktree", "branch", "commit", "stash",
     "cherry-pick", "rebase", "revert", "checkout", "switch", "person", "mount", "daemon",
 ];
@@ -317,6 +318,7 @@ pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
         "comment" => change::comment(ctx, &rest),
         "probe" => probe::probe(ctx, &rest),
         "gc" => admin::gc(ctx, &rest),
+        "du" => du::du(ctx, &rest),
         "fsck" => admin::fsck(ctx, &rest),
         "reindex" => admin::reindex(ctx, &rest),
         "init" => admin::init(ctx, &rest),
