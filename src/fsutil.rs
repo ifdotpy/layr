@@ -902,6 +902,16 @@ fn walk_folder(root: &Path, rel: &str, f: &mut dyn FnMut(&str, &Meta) -> Result<
 
 /// Write `data` to `path` atomically: a temporary file, `fsync`, rename, `fsync` of the folder.
 pub fn atomic_write(path: &Path, data: &[u8], mode: u32) -> Result<()> {
+    write_durable(path, data, mode, true)
+}
+
+/// Write a rebuildable cache file: published atomically (never a partial file), without
+/// `fsync`. A crash can lose it; the next command makes it again.
+pub fn cache_write(path: &Path, data: &[u8], mode: u32) -> Result<()> {
+    write_durable(path, data, mode, false)
+}
+
+fn write_durable(path: &Path, data: &[u8], mode: u32, durable: bool) -> Result<()> {
     use std::io::Write;
     let dir = path.parent().ok_or_else(|| anyhow!("no parent"))?;
     // A new file with an unpredictable name, never through an existing name or a link.
@@ -914,10 +924,14 @@ pub fn atomic_write(path: &Path, data: &[u8], mode: u32) -> Result<()> {
     {
         let mut f = OpenOptions::new().write(true).create_new(true).custom_flags(libc::O_NOFOLLOW).mode(mode).open(&tmp)?;
         f.write_all(data)?;
-        f.sync_all()?;
+        if durable {
+            f.sync_all()?;
+        }
     }
     fs::rename(&tmp, path)?;
-    File::open(dir)?.sync_all()?;
+    if durable {
+        File::open(dir)?.sync_all()?;
+    }
     Ok(())
 }
 

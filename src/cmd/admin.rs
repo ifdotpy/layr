@@ -1143,6 +1143,7 @@ pub fn trash_excess_caches(repo: &Repo) -> Result<Vec<String>> {
 }
 
 pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    crate::store::EMPTY_TRASH_FULLY.store(true, std::sync::atomic::Ordering::SeqCst);
     if args.iter().any(|v| v == "--remote" || v.starts_with("--remote=")) {
         return crate::store_remote::command(ctx, "gc", args);
     }

@@ -253,8 +253,11 @@ impl Drop for Lock {
         }
         if HELD_LOCKS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) == 1 {
             // Deleting build output takes minutes: it runs after the last lock, so other
-            // commands do not wait for it.
-            empty_trash(&self.trash);
+            // commands do not wait for it. A command spends only `TRASH_BUDGET` on it; the
+            // next commands and `layr gc` delete the rest.
+            let budget = if EMPTY_TRASH_FULLY.load(std::sync::atomic::Ordering::SeqCst) { None } else { Some(trash_budget()) };
+            let _t = crate::trace::span(format!("empty trash ({})", budget.map_or("all".into(), |b| format!("{} ms", b.as_millis()))));
+            empty_trash(&self.trash, budget);
         }
         if held < SLOW_LOCK && self.waited < SLOW_LOCK {
             return;
@@ -307,12 +310,53 @@ pub fn discard_tree(path: &Path) {
     let _ = crate::storage::delete_tree(path);
 }
 
-pub fn empty_trash(dir: &Path) {
+/// The time one command spends on emptying the trash after its last lock.
+const TRASH_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+/// `LAYR_TRASH_BUDGET_MS` replaces it (tests).
+fn trash_budget() -> std::time::Duration {
+    std::env::var("LAYR_TRASH_BUDGET_MS").ok().and_then(|v| v.parse().ok()).map_or(TRASH_BUDGET, std::time::Duration::from_millis)
+}
+/// Set by `layr gc`: it empties the whole trash.
+pub static EMPTY_TRASH_FULLY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Delete what is in the trash, for at most `budget` (`None`: all of it; a started delete of
+/// one file or folder is not cut). A big tree is deleted entry by entry, so the budget holds
+/// for it too. Two processes may work on one tree: an entry that is gone is not an error.
+pub fn empty_trash(dir: &Path, budget: Option<std::time::Duration>) {
+    let deadline = budget.map(|b| std::time::Instant::now() + b);
+    let late = || deadline.is_some_and(|d| std::time::Instant::now() >= d);
     if let Ok(rd) = fs::read_dir(dir) {
         for e in rd.flatten() {
-            let _ = crate::storage::delete_tree(&e.path());
+            if late() || !empty_tree(&e.path(), &late) {
+                return;
+            }
         }
     }
+}
+
+/// Delete `path`; false when the budget ended before it was gone.
+fn empty_tree(path: &Path, late: &dyn Fn() -> bool) -> bool {
+    #[cfg(not(target_os = "macos"))]
+    let _ = late;
+    #[cfg(target_os = "macos")]
+    if let Ok(m) = fs::symlink_metadata(path) {
+        if m.is_dir() {
+            // Open the folder (it can be sealed), delete its entries, then the folder.
+            use std::os::unix::fs::PermissionsExt;
+            let _ = crate::sys::apfs_immutable(path, false);
+            let _ = fs::set_permissions(path, fs::Permissions::from_mode((m.permissions().mode() & 0o7777) | 0o700));
+            if let Ok(rd) = fs::read_dir(path) {
+                for e in rd.flatten() {
+                    if late() {
+                        return false;
+                    }
+                    empty_tree(&e.path(), late);
+                }
+            }
+        }
+    }
+    let _ = crate::storage::delete_tree(path);
+    true
 }
 
 impl Store {
