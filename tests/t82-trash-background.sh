@@ -2,6 +2,7 @@
 # The trash is emptied by a background process after a command: the command does not wait for
 # the deletion, the trash still goes away, and gc empties it at once.
 . "$(dirname "$0")/lib.sh"
+unset LAYR_TRASH_BUDGET_MS
 
 sample $T/src
 l init p --from $T/src -q >/dev/null
