@@ -98,6 +98,105 @@ layr-retest`, 262 tests): the incremental run selected 2 tests and failed the sa
 tests as `--full` (260 passed). A `panic!` in the Studio supervisor `main.rs` (bin source that no
 record has) forces a full run and failed the same 20 tests as plain nextest.
 
+## Debug info level
+
+`layr-retest` sets `CARGO_PROFILE_DEV_DEBUG=line-tables-only` and `CARGO_PROFILE_TEST_DEBUG=line-tables-only`
+for its own cargo calls (nextest builds with the test profile, which inherits from dev; both are set
+so that a `[profile.test]` of the project does not win). Coverage needs the coverage mapping and
+the line tables, not variable info. The variables apply to `target/retest` only. The tool sets them
+and not the caller, for the same reason as `CARGO_INCREMENTAL`. `LAYR_RETEST_LINE_TABLES=0` leaves
+the project's own level.
+
+## Sweeping stale build output
+
+Cargo never removes the files of older hashes. A new feature set, a changed flag or a new toolchain
+leaves `.rlib`, `.rmeta`, `.d` and test binaries with the old hash in `target/retest/debug/deps`,
+and every incremental build of a crate leaves a new set of `.rcgu.o` object files there (macOS
+keeps them next to the binary). The sweep runs right after the build, inside the same run.
+
+Rules:
+
+- Live files: the tool runs `cargo test --no-run --message-format json` with the same environment and
+  arguments (a no-op: every file is fresh). Every file of a `compiler-artifact` message is live. If
+  that call fails, or lists nothing, there is no sweep.
+- In `debug/deps`, a file whose name has a 16 digit hex cargo hash (`name-<hash>[.ext]`, with or
+  without the `lib` prefix) is removed when no live file has the same `name-hash`. All files of one
+  `name-hash` live or go together (`.rlib`, `.rmeta`, `.d`, the binary, `.dSYM`). Files without a
+  cargo hash stay.
+- Object files `name-hash.<unit>.<build>.rcgu.o`: of each `name-hash`, only the build that has the
+  newest object file stays.
+- In `debug/incremental/<crate>-<hash>`, only the newest finalized session folder and its `.lock`
+  file stay. A crate folder without a finalized session stays as it is.
+- Lock: the sweep takes cargo's own build lock (`debug/.cargo-lock`, `flock`) without waiting. If
+  another cargo of this target holds it, the sweep is skipped. No cargo can start in the target while the
+  sweep holds the lock.
+- Only `target/retest/debug/deps` and `target/retest/debug/incremental` are touched. `.fingerprint`
+  and `build` stay (small).
+- It prints `swept stale build output, freed N MB`. Only files with one hard link count: an object
+  file is also a link in the incremental folder and counts when its last link goes.
+
+A run with other package selection (`-- -p foo`) treats the files of the other packages as stale and
+removes them; the next run with the full selection builds them again. Keep one selection per line.
+The early exit "no build" does not sweep: nothing was built.
+
+### Measurements 2026-10-31 (debug info and sweep)
+
+layr workspace, `--workspace --exclude layr-retest`, 262 tests, `CARGO_BUILD_JOBS=4`, `nice -n 10`,
+`--full` for the first rows. Load average 8 to 19 (other agents ran), so times are only indicative.
+
+| Build (cold `target/retest`, `--full`) | `target/retest` | deps | incremental | Time |
+| --- | --- | --- | --- | --- |
+| default debug info (installed tool) | 2.3 GB | 1.6 GB | 0.4 GB | 129 s |
+| `line-tables-only` | 1.9 GB | 1.2 GB | 0.4 GB | 161 s, 126 s (second run) |
+
+Records of the `--full` runs: all 262 tests have the same status, files and deps in the installed
+tool's record and in the new one. The coverage ranges equal in 254 tests. Known run-to-run variation:
+`store_remote::writer::tests::pending_part_age_survives_double_crash_and_gc_before_publication`
+differs between two runs of the same binary, and `...fresh_push_discards_wal_sidecars...` and
+`thin::tests::readonly_directory_metadata_keeps_modes` differ between runs with the same debug level.
+With `line-tables-only`, six `layr-model::index` tests have one more `idle` range per file (an
+uncalled function, for example `lib.rs` 35 to 54), the same in both runs of the new tool; with
+`LAYR_RETEST_LINE_TABLES=0` the records equal the installed tool's apart from the known variation.
+The extra range is a function that no test calls, so no selection depends on it.
+
+Sweep: three small changes (`min(8000)` to `min(8000 + 0)`, then more `+ 0`), 2 tests selected each
+time.
+
+| Step | `target/retest` | deps |
+| --- | --- | --- |
+| After `--full` (no object file sweep yet) | 2836 MB | 1273 MB |
+| After change 1, 2, 3 without the object sweep | 2982, 3129, 3275 MB | 1405, 1537, 1669 MB |
+| Sweep on the next run (change 4) | 2766 MB (freed 696 MB) | 1131 MB |
+| After change 5, 6, 7 with the sweep | 2778, 2793, 2806 MB | 1130, 1131, 1131 MB |
+
+Without the sweep the folder grew by 146 MB per small change; with it by 12 to 15 MB (incremental
+folder). The first sweep after a toolchain or debug level change freed 1251 MB (the old build).
+
+Probe: `panic!("probe")` as first statement of `layr_model::diff::is_binary`. The incremental run
+selected 2 tests and failed 2; `--full` ran 262 and failed the same 2
+(`interdiff::tests::patch_format_keeps_modes_binary_renames_and_missing_newlines` and
+`interdiff::tests::same_patch_has_no_interdiff_and_amendment_has_file_counts`).
+
+### Time cost (2026-10-31, same workspace, load 9 to 16 at the start of each run)
+
+A disk change must not make a run slower. `LAYR_RETEST_SWEEP=0` switches the sweep off for the comparison.
+
+| Measure | Result |
+| --- | --- |
+| Extra `cargo test --no-run --message-format json` (all fresh) | 0.33 and 0.36 s (0.78 s at load 40) |
+| Sweep itself, about 455 MB freed | 0.27 and 0.30 s (1.87 s once, at load 40, 467 MB) |
+| Sweep, total per run | 0.6 to 0.7 s, printed in the `swept ...` line |
+| Build and list, 3 small changes, `line-tables-only` | 6.9, 5.9, 11.4 s |
+| Build and list, 3 small changes, `LAYR_RETEST_LINE_TABLES=0` | 8.4, 5.9, 12.9 s |
+| Cold `--full`, `line-tables-only` / default debug info | build 57.5 s, run 129 s / build 90.8 s, run 201 s |
+| `target/retest` after the cold run and 3 small changes | 2257 MB / 2603 MB |
+
+Line tables are not slower to rebuild (equal within the load noise) and the cold build is faster.
+The sweep stays under 1 s, so it runs on every build and keeps no state. Sweep-on and sweep-off
+runs of the whole tool (`sweep-on`: 12.4 to 36 s build and list, `sweep-off`: 30 to 104 s) cannot be
+compared: other agents raised the load to 30 to 130 during the sweep-off runs. Use the printed
+times of the artifact list and the sweep.
+
 ### Unique disk of a new line (APFS clones)
 
 `du` counts clones in full, so these use the change of `df` free space. A new line is a `cp -c -R`
