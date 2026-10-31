@@ -3,7 +3,7 @@
 # a clean status reads no file content, and a send with a parent is incremental.
 if [ -z "${LAYR_OVERLAYFS_TEST_ROOT:-}" ]; then
     echo "SKIP: this test needs the OverlayFS backend (LAYR_OVERLAYFS_TEST_ROOT)"
-    echo "t75-overlayfs-perf.sh: 0 passed, 0 failed"
+    echo "t78-overlayfs-perf.sh: 0 passed, 0 failed"
     exit 0
 fi
 . "$(dirname "$0")/lib.sh"
