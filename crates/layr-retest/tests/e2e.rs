@@ -345,6 +345,7 @@ fn workspace_dylib_is_an_export_object() {
         "#[cfg(test)]\nextern crate dyn_deps;\n\npub fn a() -> i32 {\n    1\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn th() {\n        assert_eq!(hex::FromHexError::OddLength.to_string(), \"Odd number of digits\");\n    }\n\n    #[test]\n    fn ta() {\n        assert_eq!(super::a(), 1);\n    }\n}\n",
     )
     .unwrap();
+    std::fs::write(src.join("src/main.rs"), "fn main() {}\n").unwrap();
     std::fs::write(src.join(".layrattributes"), ".layr-retest regenerable\ntarget regenerable\n").unwrap();
     std::fs::write(src.join(".gitignore"), "/target\n/.layr-retest\n").unwrap();
     sh(&src, &tmp.join("unused"), "cargo", &["generate-lockfile", "--offline"]);
@@ -355,6 +356,22 @@ fn workspace_dylib_is_an_export_object() {
 
     let err = retest(&line, &root, &["run"]);
     assert!(err.contains("2 tests, 2 selected") && err.contains("failed 0"), "{err}");
+    // The test binary of `main.rs` does not use the dylib. Built instrumented, it must link std
+    // like the plain build, so that a copy of it runs elsewhere (a dylib itself needs `@rpath/libstd`).
+    let deps_dir = line.join("target/retest/debug/deps");
+    let linkage = |p: &std::path::Path| {
+        let p = p.to_str().unwrap();
+        if cfg!(target_os = "macos") { sh_out("otool", &["-L", p]) } else { sh_out("ldd", &[p]) }
+    };
+    let plain: Vec<String> = std::fs::read_dir(&deps_dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with("dyn_app-") && p.extension().is_none())
+        .map(|p| linkage(&p))
+        .filter(|l| !l.contains("dyn_deps"))
+        .collect();
+    assert_eq!(plain.len(), 1, "expected one binary without the dylib: {plain:?}");
+    assert!(!plain[0].contains("libstd-"), "instrumented binary links std dynamically: {}", plain[0]);
     let rec = last_record(&line);
     assert!(rec["tests"]["dyn-app tests::th"]["deps"].to_string().contains("hex-0.4."), "{rec}");
     assert_eq!(rec["tests"]["dyn-app tests::ta"]["deps"].to_string(), "[]", "{rec}");
@@ -386,4 +403,10 @@ fn init_is_idempotent() {
     assert_eq!(std::fs::read_to_string(tmp.join(".layrattributes")).unwrap(), attrs);
     assert_eq!(std::fs::read_to_string(tmp.join(".gitignore")).unwrap(), ignore);
     let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// Stdout of a tool run, for linkage checks.
+fn sh_out(prog: &str, args: &[&str]) -> String {
+    let o = Command::new(prog).args(args).output().unwrap();
+    String::from_utf8_lossy(&o.stdout).into_owned()
 }
