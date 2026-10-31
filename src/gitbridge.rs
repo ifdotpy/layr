@@ -1436,11 +1436,15 @@ fn commit_tree(
     let res = (|| -> Result<String> {
         let mut paths: Vec<String> = Vec::new();
         let mut full: Option<PathBuf> = None;
+        // True when the index is a copy of the index of the base: its entries for unchanged
+        // files have valid stat data, so no refresh of every tracked file is needed.
+        let mut inherited = false;
         match base {
             Some((ast, ac)) => {
                 let ai = index_path(repo, ast);
                 // gc may remove a kept index at any time: then the tree of the commit is read.
-                if !ai.exists() || std::fs::copy(&ai, &tmp_idx).is_err() {
+                inherited = ai.exists() && std::fs::copy(&ai, &tmp_idx).is_ok();
+                if !inherited {
                     let out = base_cmd(&s).env("GIT_INDEX_FILE", &tmp_idx).args(["read-tree", ac]).output()?;
                     if !out.status.success() {
                         bail!("git read-tree failed");
@@ -1486,6 +1490,7 @@ fn commit_tree(
             None => work_tree(repo, &src, &paths, &mut keep)?,
         };
         // Changed paths are hashed again: see FORGET_CHANGED.
+        let _t = crate::trace::span(format!("git index update of {} changed paths", paths.len()));
         for args in [&FORGET_CHANGED[..], &["update-index", "--add", "--remove", "-z", "--stdin"]] {
             let mut c = base_cmd(&s);
             c.env("GIT_INDEX_FILE", &tmp_idx).env("GIT_WORK_TREE", &root).args(args);
@@ -1551,16 +1556,17 @@ fn commit_tree(
         let commit = String::from_utf8_lossy(&out.stdout).trim().to_string();
         git_out(&s, &["update-ref", refname, &commit])?;
         // Keep the index for the next export and for lines made from this state.
-        keep_index(repo, &state.id, &tmp_idx)?;
+        keep_index(repo, &state.id, &tmp_idx, inherited)?;
         Ok(commit)
     })();
     let _ = std::fs::remove_file(&tmp_idx);
     res
 }
 
-/// Keep `idx` as the index of `state` unless it has one. The file appears complete or not at
+/// Keep `idx` as the index of `state` unless it has one. An index that is not a copy of an
+/// earlier index gets its stat data from one refresh. The file appears complete or not at
 /// all: other processes copy kept indexes without the project lock.
-fn keep_index(repo: &Repo, state: &str, idx: &Path) -> Result<()> {
+fn keep_index(repo: &Repo, state: &str, idx: &Path, inherited: bool) -> Result<()> {
     let dst = index_path(repo, state);
     if dst.exists() {
         return Ok(());
@@ -1571,7 +1577,9 @@ fn keep_index(repo: &Repo, state: &str, idx: &Path) -> Result<()> {
         let _ = std::fs::remove_file(&tmp);
     }
     r.context("keep the git index of the exported state")?;
-    let _ = refresh_index(repo, state);
+    if !inherited {
+        let _ = refresh_index(repo, state);
+    }
     Ok(())
 }
 
@@ -1622,6 +1630,7 @@ fn refresh_index(repo: &Repo, state: &str) -> Result<()> {
     if is_thin(repo, state) {
         return Ok(());
     }
+    let _t = crate::trace::span("git index refresh");
     let s = store(repo);
     let root = repo.state_root(state)?;
     base_cmd(&s)
