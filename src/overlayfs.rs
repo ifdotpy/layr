@@ -45,8 +45,12 @@ struct Registry {
     #[serde(default)]
     pending_move: Option<(PathBuf, PathBuf)>,
 }
+// The registry lock is held only to read or publish registry changes, never during
+// a scan, copy or flush. A tree under construction lives in `objects/<id>.tmp` (see
+// `Building`) and joins the registry in one short locked step.
 struct Locked {
     home: PathBuf,
+    _held: Option<crate::trace::Span>,
     _lock: File,
     registry: Registry,
 }
@@ -69,7 +73,11 @@ fn private_dir(path: &Path) -> Result<()> {
 }
 fn lock_at(home: PathBuf) -> Result<Locked> {
     let lock = fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(home.join("lock"))?;
-    rustix::fs::flock(&lock, rustix::fs::FlockOperation::LockExclusive)?;
+    {
+        let _wait = crate::trace::span("OverlayFS registry lock wait");
+        rustix::fs::flock(&lock, rustix::fs::FlockOperation::LockExclusive)?;
+    }
+    let held = crate::trace::span("OverlayFS registry lock held");
     let registry = match fs::read(home.join("registry.json")) {
         Ok(data) => serde_json::from_slice(&data)?,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -80,7 +88,7 @@ fn lock_at(home: PathBuf) -> Result<Locked> {
         }
         Err(e) => return Err(e.into()),
     };
-    Ok(Locked { home, _lock: lock, registry })
+    Ok(Locked { home, _held: held, _lock: lock, registry })
 }
 fn lock(path: &Path) -> Result<Locked> {
     for parent in absolute(path)?.ancestors() {
@@ -92,13 +100,41 @@ fn lock(path: &Path) -> Result<Locked> {
     }
     bail!("no OverlayFS registry for {}", path.display())
 }
+fn object_path(home: &Path, id: &str) -> PathBuf {
+    home.join("objects").join(id)
+}
+// An object under construction. Its directory is `objects/<id>.tmp` and its owner holds
+// a lock on it, so `collect` removes only the leftovers of a dead owner. `publish`
+// renames it to `objects/<id>`; the caller holds the registry lock for that step.
+struct Building {
+    id: String,
+    dir: PathBuf,
+    _lock: File,
+}
+impl Building {
+    fn begin(home: &Path) -> Result<Building> {
+        let id = crate::ids::new_id();
+        let dir = home.join("objects").join(format!("{id}.tmp"));
+        private_dir(&dir)?;
+        let lock = File::open(&dir)?;
+        rustix::fs::flock(&lock, rustix::fs::FlockOperation::LockExclusive)?;
+        Ok(Building { id, dir, _lock: lock })
+    }
+    fn publish(self, home: &Path) -> Result<String> {
+        fs::rename(&self.dir, object_path(home, &self.id))?;
+        Ok(self.id)
+    }
+    fn discard(self) {
+        let _ = fs::remove_dir_all(&self.dir);
+    }
+}
 impl Locked {
     fn save(&self) -> Result<()> {
         File::open(self.home.join("objects"))?.sync_all()?;
         crate::fsutil::atomic_write(&self.home.join("registry.json"), &serde_json::to_vec(&self.registry)?, 0o600)
     }
     fn object(&self, id: &str) -> PathBuf {
-        self.home.join("objects").join(id)
+        object_path(&self.home, id)
     }
     fn new_object(&self) -> Result<String> {
         let id = crate::ids::new_id();
@@ -130,14 +166,7 @@ impl Locked {
             let work = object.join("work");
             if !upper.exists() {
                 if e.hard_links {
-                    let temp = object.join("upper-pending");
-                    if temp.exists() {
-                        fs::remove_dir_all(&temp)?;
-                    }
-                    copy_tree(&data, &temp, &HashSet::new(), &mut HashMap::new())?;
-                    sync_tree(&temp)?;
-                    fs::rename(&temp, &upper)?;
-                    File::open(&object)?.sync_all()?;
+                    prepare_upper(&object, &data)?;
                 } else {
                     fs::create_dir(&upper)?;
                 }
@@ -167,12 +196,30 @@ impl Locked {
         for e in fs::read_dir(self.home.join("objects"))? {
             let e = e?;
             let name = e.file_name().to_string_lossy().into_owned();
-            if !used.contains(&name) {
+            if name.ends_with(".tmp") {
+                // Removed only when no live command holds the lock of its owner.
+                let dir = File::open(e.path())?;
+                if rustix::fs::flock(&dir, rustix::fs::FlockOperation::NonBlockingLockExclusive).is_ok() {
+                    fs::remove_dir_all(e.path())?;
+                }
+            } else if !used.contains(&name) {
                 fs::remove_dir_all(e.path())?;
             }
         }
         Ok(())
     }
+}
+// A writable tree over hard-linked data starts from a full copy, so its links stay inside it.
+fn prepare_upper(object: &Path, data: &Path) -> Result<()> {
+    let temp = object.join("upper-pending");
+    if temp.exists() {
+        fs::remove_dir_all(&temp)?;
+    }
+    copy_tree(data, &temp, &HashSet::new(), &mut HashMap::new())?;
+    sync_tree(&temp)?;
+    fs::rename(&temp, object.join("upper"))?;
+    File::open(object)?.sync_all()?;
+    Ok(())
 }
 fn mounted(path: &Path) -> Result<bool> {
     // Managed roots reject whitespace and mount-option separators on creation.
@@ -545,9 +592,19 @@ fn sync_tree(path: &Path) -> Result<()> {
 // The live mount and its open file descriptors stay unchanged. Copy only its
 // upper layer, then mount that immutable copy above the same immutable bases.
 // Compact long chains and hard-linked trees into one portable tree.
-fn snapshot_layers(state: &Locked, src: &Path, parent: &Entry, id: &str) -> Result<(String, Vec<String>, bool)> {
-    let nested: HashSet<_> = state.registry.trees.keys().filter(|p| **p != src && p.starts_with(src)).cloned().collect();
-    let data = state.object(id).join("data");
+fn nested_trees(registry: &Registry, src: &Path) -> HashSet<PathBuf> {
+    registry.trees.keys().filter(|p| **p != src && p.starts_with(src)).cloned().collect()
+}
+// Copies into `build` without the registry lock. The caller publishes the result only
+// if the registry still holds the same parent entry and nested trees.
+fn snapshot_layers(
+    home: &Path,
+    nested: &HashSet<PathBuf>,
+    src: &Path,
+    parent: &Entry,
+    build: &Building,
+) -> Result<(Vec<String>, bool)> {
+    let data = build.dir.join("data");
     if parent.plain {
         // A build can replace a cache directory. Never follow its replacement
         // symlink with the service's credentials.
@@ -556,18 +613,26 @@ fn snapshot_layers(state: &Locked, src: &Path, parent: &Entry, id: &str) -> Resu
         let excluded = nested.iter().map(|p| anchored.join(p.strip_prefix(src).unwrap())).collect();
         copy_stable(&anchored, &data, &excluded)?;
         sync_tree(&data)?;
-        return Ok((id.into(), Vec::new(), tree_has_links(&data)?));
+        return Ok((Vec::new(), tree_has_links(&data)?));
     }
-    let hard_links = tree_has_links_excluding(src, &nested)?;
+    let hard_links = tree_has_links_excluding(src, nested)?;
     let bases: Vec<_> = std::iter::once(parent.lower.clone()).chain(parent.bases.iter().cloned()).collect();
-    let option_bytes: usize = bases.iter().map(|id| state.object(id).as_os_str().len() + 6).sum();
+    let option_bytes: usize = bases.iter().map(|id| object_path(home, id).as_os_str().len() + 6).sum();
     if hard_links || bases.len() >= 16 || option_bytes > 2800 {
-        copy_stable(src, &data, &nested)?;
+        copy_stable(src, &data, nested)?;
         sync_tree(&data)?;
-        return Ok((id.into(), Vec::new(), hard_links));
+        return Ok((Vec::new(), hard_links));
     }
+<<<<<<< head
     let upper = state.object(&parent.info.uuid).join("upper");
     for round in 0..3 {
+||||||| base
+    let upper = state.object(&parent.info.uuid).join("upper");
+    for _ in 0..3 {
+=======
+    let upper = object_path(home, &parent.info.uuid).join("upper");
+    for _ in 0..3 {
+>>>>>>> origin/perf/overlayfs
         let excluded: HashSet<_> = nested.iter().map(|p| upper.join(p.strip_prefix(src).unwrap())).collect();
         let upper_scan = || -> Result<_> {
             let mut found = scan(&upper, &excluded)?;
@@ -577,9 +642,9 @@ fn snapshot_layers(state: &Locked, src: &Path, parent: &Entry, id: &str) -> Resu
             Ok(found)
         };
         let before = upper_scan()?;
-        copy_delta(&upper, src, &data, &nested, &mut HashMap::new())?;
+        copy_delta(&upper, src, &data, nested, &mut HashMap::new())?;
         // A cache may exist only in a lower layer. Mask it in this snapshot.
-        for cache in &nested {
+        for cache in nested {
             let rel = cache.strip_prefix(src)?;
             let target = data.join(rel);
             // Validate every parent before writing below a copied directory.
@@ -602,11 +667,24 @@ fn snapshot_layers(state: &Locked, src: &Path, parent: &Entry, id: &str) -> Resu
                 crate::fsutil::mark_unsettled(src);
             }
             sync_tree(&data)?;
-            return Ok((id.into(), bases, false));
+            return Ok((bases, false));
         }
         fs::remove_dir_all(&data)?;
     }
     unreachable!("the last round returns")
+}
+// The tree that was copied must still be the one the registry names.
+fn same_source(state: &Locked, src: &Path, parent: &Entry, nested: &HashSet<PathBuf>) -> Result<()> {
+    let now = state.registry.trees.get(src).context("snapshot source changed during the copy; retry")?;
+    if now.info.uuid != parent.info.uuid
+        || now.info.readonly != parent.info.readonly
+        || now.lower != parent.lower
+        || now.bases != parent.bases
+        || nested_trees(&state.registry, src) != *nested
+    {
+        bail!("snapshot source changed during the copy; retry");
+    }
+    Ok(())
 }
 fn tree_has_links_excluding(path: &Path, nested: &HashSet<PathBuf>) -> Result<bool> {
     if nested.contains(path) {
@@ -693,43 +771,57 @@ pub fn snapshot(src: &Path, dst: &Path, readonly: bool) -> Result<()> {
     let src = absolute(src)?;
     let dst = absolute(dst)?;
     valid_path(&dst)?;
-    let mut state = lock(&src)?;
-    if lock_home(&dst)? != state.home {
-        bail!("snapshot must stay in one store");
-    }
-    if dst.exists() {
-        bail!("snapshot destination exists");
-    }
-    let parent = state.registry.trees.get(&src).context("snapshot source is unmanaged")?.clone();
-    let id = state.new_object()?;
-    let (lower, bases, hard_links) = if parent.info.readonly {
-        (parent.lower.clone(), parent.bases.clone(), parent.hard_links)
-    } else {
-        match snapshot_layers(&state, &src, &parent, &id) {
-            Ok(value) => value,
-            Err(error) => {
-                state.collect()?;
-                return Err(error);
+    // Read the plan under the registry lock, copy without it, then publish under it.
+    let (home, parent, nested, plain, build) = {
+        let state = lock(&src)?;
+        if lock_home(&dst)? != state.home {
+            bail!("snapshot must stay in one store");
+        }
+        if dst.exists() {
+            bail!("snapshot destination exists");
+        }
+        let parent = state.registry.trees.get(&src).context("snapshot source is unmanaged")?.clone();
+        let nested = nested_trees(&state.registry, &src);
+        let plain = !readonly && state.registry.trees.iter().any(|(p, e)| dst.starts_with(p) && !e.info.readonly && !e.plain);
+        (state.home.clone(), parent, nested, plain, Building::begin(&state.home)?)
+    };
+    let copied = copy_snapshot(&home, &nested, &src, &dst, readonly, plain, &parent, &build);
+    let (lower, bases, hard_links) = match copied {
+        Ok(value) => value,
+        Err(error) => {
+            build.discard();
+            return Err(error);
+        }
+    };
+    let mut state = lock_at(home.clone())?;
+    let published = (|| -> Result<Entry> {
+        same_source(&state, &src, &parent, &nested)?;
+        if state.registry.trees.contains_key(&dst) {
+            bail!("snapshot destination exists");
+        }
+        Ok(Entry {
+            info: SubvolInfo { uuid: String::new(), received_uuid: None, parent_uuid: Some(parent.info.uuid.clone()), readonly },
+            lower,
+            hard_links,
+            bases,
+            plain,
+            restore_cache: false,
+        })
+    })();
+    let mut entry = match published {
+        Ok(entry) => entry,
+        Err(error) => {
+            build.discard();
+            if plain {
+                let _ = fs::remove_dir_all(&dst);
             }
+            return Err(error);
         }
     };
-    let plain = !readonly && state.registry.trees.iter().any(|(p, e)| dst.starts_with(p) && !e.info.readonly && !e.plain);
-    let entry = Entry {
-        info: SubvolInfo { uuid: id, received_uuid: None, parent_uuid: Some(parent.info.uuid), readonly },
-        lower,
-        hard_links,
-        bases,
-        plain,
-        restore_cache: false,
-    };
-    if plain {
-        // A cache is an ordinary directory. Its saved copy remains private.
-        if parent.plain {
-            copy_cache(&state.object(&entry.lower).join("data"), &dst)?;
-        } else {
-            copy_cache(&src, &dst)?;
-        }
-        sync_tree(&dst)?;
+    let id = build.publish(&home)?;
+    entry.info.uuid = id.clone();
+    if entry.lower.is_empty() {
+        entry.lower = id;
     }
     File::open(state.object(&entry.lower))?.sync_all()?;
     if !plain {
@@ -745,6 +837,40 @@ pub fn snapshot(src: &Path, dst: &Path, readonly: bool) -> Result<()> {
         return Err(e);
     }
     Ok(())
+}
+// The slow part of a snapshot: no registry lock is held. Returns the lower layer (empty
+// for the new object itself), the bases and the hard-link flag.
+fn copy_snapshot(
+    home: &Path,
+    nested: &HashSet<PathBuf>,
+    src: &Path,
+    dst: &Path,
+    readonly: bool,
+    plain: bool,
+    parent: &Entry,
+    build: &Building,
+) -> Result<(String, Vec<String>, bool)> {
+    let (lower, bases, hard_links) = if parent.info.readonly {
+        (parent.lower.clone(), parent.bases.clone(), parent.hard_links)
+    } else {
+        let (bases, hard_links) = snapshot_layers(home, nested, src, parent, build)?;
+        (String::new(), bases, hard_links)
+    };
+    if plain {
+        // A cache is an ordinary directory. Its saved copy remains private.
+        if parent.plain {
+            let data = if lower.is_empty() { build.dir.join("data") } else { object_path(home, &lower).join("data") };
+            copy_cache(&data, dst)?;
+        } else {
+            copy_cache(src, dst)?;
+        }
+        sync_tree(dst)?;
+    } else if !readonly && hard_links {
+        // Build the private copy of hard-linked data before the registry lock is taken.
+        let data = if lower.is_empty() { build.dir.join("data") } else { object_path(home, &lower).join("data") };
+        prepare_upper(&build.dir, &data)?;
+    }
+    Ok((lower, bases, hard_links))
 }
 fn lock_home(path: &Path) -> Result<PathBuf> {
     for p in absolute(path)?.ancestors() {
@@ -764,14 +890,17 @@ pub fn set_readonly(path: &Path) -> Result<()> {
     if e.plain {
         bail!("cannot seal a working cache in place; snapshot it instead");
     }
-    let id = state.new_object()?;
-    let (lower, bases, hard_links) = match snapshot_layers(&state, &path, &e, &id) {
+    // Sealing keeps the registry lock: the tree is unmounted and remounted in one step.
+    let nested = nested_trees(&state.registry, &path);
+    let build = Building::begin(&state.home)?;
+    let (bases, hard_links) = match snapshot_layers(&state.home, &nested, &path, &e, &build) {
         Ok(value) => value,
         Err(error) => {
-            state.collect()?;
+            build.discard();
             return Err(error);
         }
     };
+    let lower = build.publish(&state.home)?;
     sys::overlay_unmount(&path).with_context(|| format!("unmount {}", path.display()))?;
     e.hard_links = hard_links;
     e.lower = lower;
@@ -962,13 +1091,36 @@ pub fn clone_identity(path: &Path) -> Result<(String, Option<u64>)> {
 pub fn send_clone_identity(path: &Path) -> Result<(String, u64)> {
     Ok((clone_identity(path)?.0, 1))
 }
-pub fn send_command(_parent: Option<&Path>, child: &Path) -> Result<Command> {
+pub fn send_command(parent: Option<&Path>, child: &Path) -> Result<Command> {
     let mut c = Command::new(std::env::current_exe()?);
     c.arg("__apfs-send").arg(child);
+    // With a parent the stream holds only the differences (`apfs_stream::send`). A parent that
+    // is no sealed tree gives a complete stream.
+    if let Some((p, id)) = parent.and_then(|p| clone_identity(p).ok().map(|(id, _)| (p, id))) {
+        c.arg(p).arg(id);
+    }
     Ok(c)
 }
 pub fn send_optimized(parent: Option<&Path>, child: &Path, _clones: &[PathBuf], _compressed: bool) -> Result<Command> {
     send_command(parent, child)
+}
+/// The paths whose entries can differ between the sealed trees `parent` and `child`, for an
+/// incremental send (see `changed_names`). `None` when they share no layer or have hard links
+/// (a stream names those by inode): the stream is then complete.
+pub fn changed_paths(parent: &Path, child: &Path) -> Result<Option<std::collections::BTreeSet<String>>> {
+    let sealed = |path: &Path| -> bool {
+        let Ok(path) = absolute(path) else {
+            return false;
+        };
+        lock(&path).is_ok_and(|s| s.registry.trees.get(&path).is_some_and(|e| e.info.readonly && !e.plain && !e.hard_links))
+    };
+    if !sealed(parent) || !sealed(child) {
+        return Ok(None);
+    }
+    match own_layers(parent, child)? {
+        Some(layers) => Ok(Some(changed_names(parent, child, &layers)?)),
+        None => Ok(None),
+    }
 }
 pub fn supports_compressed_receive() -> bool {
     false
@@ -979,19 +1131,144 @@ pub fn supports_local_clone_receive() -> bool {
 
 struct ScanEntry {
     meta: crate::fsutil::Meta,
+    // Modification and change time (seconds, nanoseconds) and mode, read from the tree itself.
+    // A user can restore the modification time, never the change time.
+    stamp: Option<(i64, i64, i64, i64, u32)>,
 }
 fn scan_entries(root: &Path) -> Result<BTreeMap<String, ScanEntry>> {
     let mut out = BTreeMap::new();
     crate::fsutil::walk(root, "", &mut |rel, m| {
-        out.insert(rel.into(), ScanEntry { meta: m.clone() });
+        out.insert(rel.into(), ScanEntry { meta: m.clone(), stamp: None });
         Ok(true)
     })?;
     Ok(out)
 }
+// The entry at `rel` as a tree walk lists it: nested trees and mounts are not listed.
+fn visible_entry(root: &Path, root_dev: u64, rel: &str) -> Result<Option<ScanEntry>> {
+    let full = root.join(rel);
+    let m = match fs::symlink_metadata(&full) {
+        Ok(m) => m,
+        Err(e) if matches!(e.raw_os_error(), Some(libc::ENOENT | libc::ENOTDIR)) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    if m.is_dir() && (m.dev() != root_dev || is_subvolume(&full)) {
+        return Ok(None);
+    }
+    Ok(Some(ScanEntry { meta: crate::fsutil::meta_of(&m), stamp: Some((m.mtime(), m.mtime_nsec(), m.ctime(), m.ctime_nsec(), m.mode())) }))
+}
+// The layers above the ones both trees share, top first. `None` when either tree is not an
+// OverlayFS mount of this store or the two share no layer.
+fn own_layers(parent: &Path, child: &Path) -> Result<Option<Vec<PathBuf>>> {
+    let (parent, child) = (absolute(parent)?, absolute(child)?);
+    let Ok(state) = lock(&parent) else {
+        return Ok(None);
+    };
+    let stack = |path: &Path| -> Option<Vec<(String, PathBuf)>> {
+        let e = state.registry.trees.get(path).filter(|e| !e.plain)?;
+        let mut layers = Vec::new();
+        if !e.info.readonly {
+            layers.push((format!("upper:{}", e.info.uuid), state.object(&e.info.uuid).join("upper")));
+        }
+        for id in std::iter::once(&e.lower).chain(e.bases.iter()) {
+            layers.push((id.clone(), state.object(id).join("data")));
+        }
+        Some(layers)
+    };
+    let (Some(a), Some(b)) = (stack(&parent), stack(&child)) else {
+        return Ok(None);
+    };
+    let (mut i, mut j) = (a.len(), b.len());
+    while i > 0 && j > 0 && a[i - 1].0 == b[j - 1].0 {
+        i -= 1;
+        j -= 1;
+    }
+    if i == a.len() {
+        return Ok(None);
+    }
+    Ok(Some(a[..i].iter().chain(&b[..j]).map(|(_, dir)| dir.clone()).collect()))
+}
+// Every path a layer holds (files, folders, whiteouts), and whether the layer hides
+// the lower content of a folder (opaque or redirected).
+fn layer_paths(dir: &Path, rel: &str, out: &mut BTreeMap<String, bool>) -> Result<()> {
+    for e in fs::read_dir(dir)? {
+        let e = e?;
+        let path = e.path();
+        let name = format!("{rel}{}", e.file_name().to_string_lossy());
+        let mut hides = false;
+        if e.file_type()?.is_dir() {
+            hides = sys::overlay_xattrs(&path)?
+                .iter()
+                .any(|(n, _)| n == b"trusted.overlay.opaque" || n == b"trusted.overlay.redirect");
+            layer_paths(&path, &format!("{name}/"), out)?;
+        }
+        *out.entry(name).or_default() |= hides;
+    }
+    Ok(())
+}
+// Paths whose content can differ. A path that no unshared layer holds is the same file in
+// both trees. A folder that one tree lacks or replaces is listed with everything below it.
+fn changed_names(parent: &Path, child: &Path, layers: &[PathBuf]) -> Result<std::collections::BTreeSet<String>> {
+    let mut held = BTreeMap::new();
+    for layer in layers {
+        layer_paths(layer, "", &mut held)?;
+    }
+    let dev = |root: &Path| -> Result<u64> { Ok(fs::symlink_metadata(root)?.dev()) };
+    let (pdev, cdev) = (dev(parent)?, dev(child)?);
+    let mut names = std::collections::BTreeSet::new();
+    let mut inside: Option<String> = None;
+    for (rel, hides) in &held {
+        if inside.as_ref().is_some_and(|prefix| rel.starts_with(prefix.as_str())) {
+            continue;
+        }
+        let (old, new) = (visible_entry(parent, pdev, rel)?, visible_entry(child, cdev, rel)?);
+        if old.is_none() && new.is_none() {
+            inside = Some(format!("{rel}/"));
+            continue;
+        }
+        names.insert(rel.clone());
+        let is_dir = |e: &Option<ScanEntry>| e.as_ref().is_some_and(|e| e.meta.is_dir());
+        let deep = match (&old, &new) {
+            (Some(_), Some(_)) if is_dir(&old) && is_dir(&new) => *hides,
+            (Some(_), Some(_)) => is_dir(&old) || is_dir(&new),
+            _ => is_dir(&old) || is_dir(&new),
+        };
+        if deep {
+            inside = Some(format!("{rel}/"));
+            for root in [parent, child] {
+                crate::fsutil::walk(root, rel, &mut |below, _| {
+                    names.insert(below.to_string());
+                    Ok(true)
+                })?;
+            }
+        }
+    }
+    Ok(names)
+}
+/// Changes from `parent` to `child`. When both are OverlayFS trees of this store, only the
+/// paths that their unshared layers hold are read: a path in a shared lower layer is the
+/// same file in both. Other trees are walked in full.
 pub fn candidates(parent: &Path, child: &Path) -> Result<Vec<crate::changes::Change>> {
     let _t = crate::trace::span("OverlayFS candidates");
-    let (a, b) = (scan_entries(parent)?, scan_entries(child)?);
-    let names: std::collections::BTreeSet<_> = a.keys().chain(b.keys()).filter(|s| !s.is_empty()).collect();
+    let (names, a, b, exact) = match own_layers(parent, child)? {
+        Some(layers) => {
+            let names = changed_names(parent, child, &layers)?;
+            let (pdev, cdev) = (fs::symlink_metadata(parent)?.dev(), fs::symlink_metadata(child)?.dev());
+            let (mut a, mut b) = (BTreeMap::new(), BTreeMap::new());
+            for name in &names {
+                if let Some(e) = visible_entry(parent, pdev, name)? {
+                    a.insert(name.clone(), e);
+                }
+                if let Some(e) = visible_entry(child, cdev, name)? {
+                    b.insert(name.clone(), e);
+                }
+            }
+            (names, a, b, false)
+        }
+        None => {
+            let (a, b) = (scan_entries(parent)?, scan_entries(child)?);
+            (a.keys().chain(b.keys()).filter(|s| !s.is_empty()).cloned().collect(), a, b, true)
+        }
+    };
     let mut changes: BTreeMap<_, _> = names
         .into_iter()
         .map(|p| {
@@ -1000,8 +1277,8 @@ pub fn candidates(parent: &Path, child: &Path) -> Result<Vec<crate::changes::Cha
                 crate::changes::Change {
                     path: p.clone(),
                     old_path: None,
-                    old: a.get(p).map(|entry| entry.meta.clone()),
-                    new: b.get(p).map(|entry| entry.meta.clone()),
+                    old: a.get(&p).map(|entry| entry.meta.clone()),
+                    new: b.get(&p).map(|entry| entry.meta.clone()),
                     ranges: None,
                 },
             )
@@ -1036,7 +1313,11 @@ pub fn candidates(parent: &Path, child: &Path) -> Result<Vec<crate::changes::Cha
     }
     for (p, c) in &mut changes {
         if c.old_path.is_none() && c.old.as_ref().is_some_and(|m| m.is_file()) && c.new.as_ref().is_some_and(|m| m.is_file()) {
-            c.ranges = Some(changed_ranges(&parent.join(p), &child.join(p))?);
+            // Same size, mode, modification and change time (the check git calls racy): equal
+            // without a read. Other files get their exact changed ranges, which a merge needs.
+            let quick = !exact
+                && a.get(p).zip(b.get(p)).is_some_and(|(x, y)| x.stamp.is_some() && x.stamp == y.stamp && x.meta.size == y.meta.size);
+            c.ranges = Some(if quick { Vec::new() } else { changed_ranges(&parent.join(p), &child.join(p))? });
         }
     }
     Ok(changes.into_values().collect())
@@ -1045,6 +1326,7 @@ pub fn candidates(parent: &Path, child: &Path) -> Result<Vec<crate::changes::Cha
 // Compare fixed blocks when the backend cannot report changed extents.
 fn changed_ranges(a: &Path, b: &Path) -> Result<Vec<(u64, u64)>> {
     use std::io::Read;
+    let _t = crate::trace::span("content compare");
     let (mut a, mut b) = (File::open(a)?, File::open(b)?);
     let (alen, blen) = (a.metadata()?.len(), b.metadata()?.len());
     let mut ranges: Vec<(u64, u64)> = Vec::new();
