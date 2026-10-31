@@ -408,14 +408,33 @@ fn same(a: &ScanEntry, b: &ScanEntry, link: impl Fn() -> Result<bool>) -> Result
     }
 }
 
+/// True when two entries of equal type carry the same extended attributes and ACL. Extended
+/// attributes and ACLs are not part of the scan: `same` runs first and this runs on entries
+/// that look equal. A change of them keeps the modification time.
+#[cfg(target_os = "macos")]
+fn stored_metadata_same(a: &Path, b: &Path) -> Result<bool> {
+    // The system stamps `com.apple.provenance` on a file and no user sets it; its value costs
+    // a slow system call on every file, so only its presence counts.
+    let read = |name: &[u8]| name != b"com.apple.provenance";
+    let (mut xa, mut xb) = (crate::sys::apfs_xattrs_where(a, read)?, crate::sys::apfs_xattrs_where(b, read)?);
+    xa.sort();
+    xb.sort();
+    Ok(xa == xb && crate::sys::apfs_acl_text(a)? == crate::sys::apfs_acl_text(b)?)
+}
+#[cfg(not(target_os = "macos"))]
+fn stored_metadata_same(_: &Path, _: &Path) -> Result<bool> {
+    Ok(true)
+}
+
 /// Compare a scan of `new` with a scan of `old`. Both scans need data identities.
 pub fn diff(
     old: &BTreeMap<String, ScanEntry>,
-    old_path: &dyn Fn(&str) -> Result<PathBuf>,
+    old_path: &(dyn Fn(&str) -> Result<PathBuf> + Sync),
     new: &BTreeMap<String, ScanEntry>,
     new_root: &Path,
 ) -> Result<Diff> {
     let mut d = Diff::default();
+    let mut equal = Vec::new();
     for (k, e) in new {
         if k.is_empty() {
             continue;
@@ -432,10 +451,32 @@ pub fn diff(
                 let link = || Ok(fs::read_link(old_path(k)?)? == fs::read_link(new_root.join(k))?);
                 if !same(o, e, link)? {
                     d.write.insert(k.clone());
+                } else {
+                    equal.push(k.as_str());
                 }
             }
         }
     }
+    // Extended attributes and ACLs are not in the scan: read them for the entries that look equal.
+    // An unreadable entry differs. Threads share the work, as the scan does.
+    let _t = crate::trace::span(format!("thin stored metadata of {} entries", equal.len()));
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 4);
+    let differ: Vec<&str> = std::thread::scope(|scope| {
+        let jobs: Vec<_> = equal
+            .chunks(equal.len().div_ceil(threads).max(1))
+            .map(|chunk| {
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .copied()
+                        .filter(|k| !old_path(k).and_then(|a| stored_metadata_same(&a, &new_root.join(k))).unwrap_or(false))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        jobs.into_iter().flat_map(|j| j.join().unwrap()).collect()
+    });
+    d.write.extend(differ.into_iter().map(String::from));
     for k in old.keys() {
         if !k.is_empty() && !new.contains_key(k) && !ancestors(k).any(|a| d.removed.contains(a)) {
             d.removed.insert(k.clone());
