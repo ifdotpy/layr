@@ -812,10 +812,7 @@ fn import_one(
 ) -> Result<String> {
     // On a store volume that ignores case, README and Readme would become one file. The earlier
     // state passed this check: only the entries of changed folders can collide.
-    #[cfg(target_os = "macos")]
-    if !crate::sys::case_sensitive(&repo.p.work_dir()) {
-        fsutil::refuse_case_collisions(&repo.p.work_dir(), changes.names.iter().map(|n| n.as_str()))?;
-    }
+    fsutil::refuse_case_collisions(&repo.p.work_dir(), changes.names.iter().map(|n| n.as_str()))?;
     let work = repo.p.work_dir().join(ids::new_id());
     let res = (|| -> Result<StateRec> {
         let (name, email, msg, time) = commit_info(raw);
