@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 // `tc` reads a file, which coverage cannot track.
-const LIB: &str = "pub fn a() -> i32 {\n    1\n}\n\npub fn b() -> i32 {\n    2\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn ta() {\n        assert_eq!(a(), 1);\n    }\n\n    #[test]\n    fn tb() {\n        assert_eq!(b(), 2);\n    }\n\n    #[test]\n    fn th() {\n        assert_eq!(hex::encode([1u8]), \"01\");\n    }\n\n    #[test]\n    fn tc() {\n        assert_eq!(std::fs::read_to_string(\"data.txt\").unwrap(), \"ok\");\n    }\n}\n";
+const LIB: &str = "pub fn a() -> i32 {\n    1\n}\n\npub fn b() -> i32 {\n    2\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn ta() {\n        assert_eq!(a(), 1);\n    }\n\n    #[test]\n    fn tb() {\n        assert_eq!(b(), 2);\n    }\n\n    #[test]\n    fn th() {\n        assert_eq!(hex::FromHexError::OddLength.to_string(), \"Odd number of digits\");\n    }\n\n    #[test]\n    fn tc() {\n        assert_eq!(std::fs::read_to_string(\"data.txt\").unwrap(), \"ok\");\n    }\n}\n";
 
 const KID: &str = "fn work() -> i32 {\n    7\n}\n\nfn main() {\n    print!(\"{}\", work());\n}\n";
 const KID_TEST: &str = "#[test]\nfn tk() {\n    let o = std::process::Command::new(env!(\"CARGO_BIN_EXE_kid\")).output().unwrap();\n    assert_eq!(o.stdout, b\"7\");\n    // A child with a cleared environment writes a default profile into the cwd.\n    std::process::Command::new(env!(\"CARGO_BIN_EXE_kid\")).env_clear().output().unwrap();\n}\n";
@@ -290,5 +290,48 @@ fn vitest_adapter_with_a_fake_tool() {
     assert!(line.join(".layr-retest/vitest").is_dir());
 
     let _ = Command::new("chflags").args(["-R", "nouchg"]).arg(&tmp).status();
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// A workspace dylib holds the code of a dependency (here `Display` of a `hex` error, which is not
+/// generic). The record of a test that runs it must list the package, so the dylib reaches `llvm-cov export` as an object.
+#[test]
+fn workspace_dylib_is_an_export_object() {
+    let tmp = std::env::temp_dir().canonicalize().unwrap().join(format!("layr-retest-dyn-{}", std::process::id()));
+    let src = tmp.join("src-project");
+    for d in ["src", "dyn-deps/src"] {
+        std::fs::create_dir_all(src.join(d)).unwrap();
+    }
+    std::fs::write(
+        src.join("Cargo.toml"),
+        "[package]\nname = \"dyn-app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\nmembers = [\"dyn-deps\"]\n\n[dev-dependencies]\ndyn-deps = { path = \"dyn-deps\" }\nhex = \"0.4\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        src.join("dyn-deps/Cargo.toml"),
+        "[package]\nname = \"dyn-deps\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\ncrate-type = [\"dylib\"]\n\n[dependencies]\nhex = \"0.4\"\n",
+    )
+    .unwrap();
+    std::fs::write(src.join("dyn-deps/src/lib.rs"), "extern crate hex;\n").unwrap();
+    std::fs::write(
+        src.join("src/lib.rs"),
+        "#[cfg(test)]\nextern crate dyn_deps;\n\npub fn a() -> i32 {\n    1\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn th() {\n        assert_eq!(hex::FromHexError::OddLength.to_string(), \"Odd number of digits\");\n    }\n\n    #[test]\n    fn ta() {\n        assert_eq!(super::a(), 1);\n    }\n}\n",
+    )
+    .unwrap();
+    std::fs::write(src.join(".layrattributes"), ".layr-retest regenerable\ntarget regenerable\n").unwrap();
+    std::fs::write(src.join(".gitignore"), "/target\n/.layr-retest\n").unwrap();
+    sh(&src, &tmp.join("unused"), "cargo", &["generate-lockfile", "--offline"]);
+    let root = tmp.join("store");
+    sh(&tmp, &root, "layr", &["init", "dynapp", "--from", src.to_str().unwrap()]);
+    sh(&root.join("projects/dynapp/lines/main"), &root, "layr", &["line", "new", "work"]);
+    let line = root.join("projects/dynapp/lines/work");
+
+    let err = retest(&line, &root, &["run"]);
+    assert!(err.contains("2 tests, 2 selected") && err.contains("failed 0"), "{err}");
+    let rec = last_record(&line);
+    assert!(rec["tests"]["dyn-app tests::th"]["deps"].to_string().contains("hex-0.4."), "{rec}");
+    assert_eq!(rec["tests"]["dyn-app tests::ta"]["deps"].to_string(), "[]", "{rec}");
+    let err = retest(&line, &root, &["run"]);
+    assert!(err.contains("2 tests, 0 selected"), "{err}");
     let _ = std::fs::remove_dir_all(&tmp);
 }
