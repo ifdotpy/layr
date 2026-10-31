@@ -1087,7 +1087,10 @@ pub struct Space {
 /// clone id, or the physical address of a Linux extent).
 pub struct Held<'a> {
     pub alloc: u64,
+    /// Bytes that the file system reports as not shared (`layr du` of lines).
     pub own: u64,
+    /// The part of `own` that has no key (`layr du --store` counts it for its part alone).
+    pub exclusive: u64,
     pub shared: &'a [(u64, u64)],
 }
 
@@ -1117,7 +1120,8 @@ pub fn apfs_visit(root: &Path, f: &mut dyn FnMut(&Held)) -> Result<()> {
                 let rest = e.alloc.saturating_sub(e.private);
                 let key = if e.clone != 0 { e.clone } else { e.ino | 1 << 63 };
                 let shared = [(key, rest)];
-                f(&Held { alloc: e.alloc, own: e.private.min(e.alloc), shared: &shared[..usize::from(rest > 0)] });
+                let own = e.private.min(e.alloc);
+                f(&Held { alloc: e.alloc, own, exclusive: own, shared: &shared[..usize::from(rest > 0)] });
             }
         }
         Ok(())
@@ -1152,9 +1156,11 @@ pub fn fiemap_visit(root: &Path, f: &mut dyn FnMut(&Held)) -> Result<()> {
                 match File::open(e.path()).and_then(|file| crate::sys::fiemap_extents(&file)) {
                     Ok(extents) => {
                         let alloc = extents.iter().map(|x| x.1).sum();
+                        // Every extent has a key: ext4 never flags a shared extent, and a file seen
+                        // through an OverlayFS mount is the same extent as its layer file.
                         let own = extents.iter().filter(|x| !x.2).map(|x| x.1).sum();
-                        let shared: Vec<(u64, u64)> = extents.iter().filter(|x| x.2).map(|x| (x.0, x.1)).collect();
-                        f(&Held { alloc, own, shared: &shared });
+                        let shared: Vec<(u64, u64)> = extents.iter().map(|x| (x.0, x.1)).collect();
+                        f(&Held { alloc, own, exclusive: 0, shared: &shared });
                     }
                     Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {}
                     Err(err) => return Err(anyhow!("{}: {err}", e.path().display())),

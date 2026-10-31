@@ -92,6 +92,12 @@ fn parts(root: &Path) -> Result<Vec<(String, PathBuf)>> {
         Ok(v)
     };
     for (name, path) in dirs(root)? {
+        // The OverlayFS registry holds layers (a part of their own) and the upper layers of
+        // lines, which belong to the lines.
+        if name == ".layr-overlayfs" {
+            out.push(("overlayfs layers".into(), path));
+            continue;
+        }
         if name != "projects" {
             out.push((name, path));
             continue;
@@ -128,7 +134,16 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
     // Work units: a part with only folders at its top (states, deltas: one per state) splits into
     // them, so that the workers share a large part.
     let mut units: Vec<(usize, PathBuf)> = Vec::new();
-    for (i, (_, path)) in parts.iter().enumerate() {
+    for (i, (name, path)) in parts.iter().enumerate() {
+        if name == "overlayfs layers" {
+            for e in std::fs::read_dir(path.join("objects"))? {
+                let data = e?.path().join("data");
+                if data.is_dir() {
+                    units.push((i, data));
+                }
+            }
+            continue;
+        }
         let children: Vec<_> = std::fs::read_dir(path)?.collect::<std::io::Result<_>>()?;
         if !children.is_empty() && children.iter().all(|e| e.file_type().is_ok_and(|t| t.is_dir())) {
             units.extend(children.into_iter().map(|e| (i, e.path())));
@@ -148,7 +163,7 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
                 let mut own = 0u64;
                 let mut local: HashMap<u64, u64> = HashMap::new();
                 let walked = crate::storage::visit_space(path, &mut |h| {
-                    own += h.own;
+                    own += h.exclusive;
                     for &(k, b) in h.shared {
                         let e = local.entry(k).or_insert(0);
                         *e = (*e).max(b);
