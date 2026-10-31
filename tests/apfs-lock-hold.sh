@@ -197,4 +197,22 @@ n=$(printf '%s\n' "$trace" | grep -c 'thin bases')
 ok "gc walks the layers at most three times, not once per deleted state" test "$n" -ge 1 -a "$n" -le 3
 eq "the trash is empty after gc" "" "$(ls -A "$LAYR_ROOT/trash" 2>/dev/null)"
 ok "states remain valid after gc" l fsck
+# save --caches converts a plain cache folder and clones the caches before the lock; under it
+# only checks and records. The first save (plain folder) and a repeated one (new head).
+cd "$P/topic" || exit 1
+printf 'cachedir/\n' >> .gitignore
+printf 'cachedir regenerable\n' > .layrattributes
+l add .gitignore .layrattributes && l save -qm cache-attrs
+mkdir -p cachedir/sub && for i in $(seq 1 200); do printf '%s\n' "$i" > "cachedir/sub/f$i"; done
+trace=$(LAYR_TRACE=1 l save --caches --cache cachedir 2>&1)
+eq "save --caches copies no tree under the lock" "" "$(locked "$trace" | grep -E "$copies")"
+has "save --caches clones before the lock" "APFS clone" "$trace"
+eq "the cache keeps its files" "200" "$(ls cachedir/sub | wc -l | tr -d ' ')"
+printf 'x\n' > cache-head.txt
+l add cache-head.txt && l save -qm cache-head
+printf 'more\n' > cachedir/more
+trace=$(LAYR_TRACE=1 l save --caches --cache cachedir 2>&1)
+eq "a repeated save --caches copies no tree under the lock" "" "$(locked "$trace" | grep -E "$copies")"
+eq "no prepared copies stay after save --caches" "" "$(ls -A "$LAYR_ROOT/projects/hold/meta/work" 2>/dev/null)"
+ok "states remain valid after save --caches" l fsck
 finish
