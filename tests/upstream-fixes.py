@@ -201,7 +201,7 @@ def failed_cache_copy(repair, unreadable=False):
         if unreadable and (target / "unreadable").exists():
             (target / "unreadable").chmod(0o600)
     assert (target / "kept").read_text() == "keep this\n"
-    assert not (work / "target.layr-new").exists(), "failed conversion leaves a temporary copy"
+    assert not list(work.glob("target.layr-*")), "failed conversion leaves a temporary copy"
     if unreadable:
         assert (target / "unreadable").read_text() == "private output\n"
     else:
@@ -231,11 +231,10 @@ def cache_readonly(repair):
         assert target.stat().st_mode & 0o777 == 0o555
         assert nested.stat().st_mode & 0o777 == 0o555
         assert data.stat().st_mode & 0o777 == 0o444
-        assert not (work / "target.layr-old").exists()
-        assert not (work / "target.layr-new").exists()
+        assert not list(work.glob("target.layr-*"))
     finally:
         # Release only this fixture's directory modes so the test harness can remove it.
-        for folder in (target, work / "target.layr-old", work / "target.layr-new"):
+        for folder in (target, *work.glob("target.layr-*")):
             if folder.exists():
                 for base, directories, files in os.walk(folder):
                     os.chmod(base, os.stat(base).st_mode | 0o700)
