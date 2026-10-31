@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/ifdotpy/layr/compare/v0.6.0...v0.6.1) (2026-10-31)
+
+
+### Bug Fixes
+
+* **push:** Require the line names in --include-base ([#73](https://github.com/ifdotpy/layr/issues/73)) ([d15114c](https://github.com/ifdotpy/layr/commit/d15114c6940b6e90e5de49d16b3a8c2ebb462c1c))
+
 ## [0.6.0](https://github.com/ifdotpy/layr/compare/v0.5.2...v0.6.0) (2026-10-31)
 
 
