@@ -980,17 +980,17 @@ pub fn build_index(repo: &Repo, state: &str, commit: &str, prev_state: Option<&s
             }
             let root = work_tree(repo, &src, &paths, &mut keep)?;
             // Changed paths are hashed again: see FORGET_CHANGED.
+            let _t = crate::trace::span(format!("git index update of {} changed paths", paths.len()));
             run(&root, &FORGET_CHANGED, Some(&input))?;
             run(&root, &["update-index", "--add", "--remove", "-z", "--stdin"], Some(&input))?;
-            // Unchanged files share size and time with the previous state: their stat data stay
-            // valid. A thin state has no complete folder to refresh against.
-            if !is_thin(repo, state) {
-                run(&root, &["update-index", "-q", "--refresh"], None)?;
-            }
+            // Unchanged files share size and time with the previous state, and the index
+            // compares only those (core.checkStat=minimal, core.trustctime=false): their stat
+            // data stay valid across a snapshot, so no refresh of every tracked file is needed.
         }
         _ => {
             let root = repo.complete(src, &mut keep)?;
             run(&root, &["read-tree", commit], None)?;
+            let _t = crate::trace::span("git index refresh");
             run(&root, &["update-index", "-q", "--refresh"], None)?;
         }
     }

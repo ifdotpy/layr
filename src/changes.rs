@@ -36,9 +36,7 @@ impl Change {
 #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 pub fn candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<Change>> {
     let (parent, child) = (folder(parent)?, folder(child)?);
-    let data = btrfs::send_no_data(parent, child)?;
-    let cmds = stream::parse(&data)?;
-    let entries = stream::entries(&cmds);
+    let entries = btrfs::send_no_data(parent, child)?;
     build(parent, child, entries)
 }
 
@@ -82,12 +80,20 @@ fn build(parent: &Path, child: &Path, entries: Vec<stream::Entry>) -> Result<Vec
             (None, None) => {}
         }
     }
-    // Content below a moved folder moved too.
-    for (o, p) in moved_dirs {
+    // Content below a moved folder moved too. One walk per outermost moved folder; a folder
+    // moved inside it again maps its own files (the longest moved prefix of a path wins).
+    let map: BTreeMap<String, String> = moved_dirs.iter().map(|(o, p)| (p.clone(), o.clone())).collect();
+    let roots: Vec<&String> = map
+        .keys()
+        .filter(|p| !p.match_indices('/').any(|(i, _)| map.contains_key(&p[..i])))
+        .collect();
+    for p in roots {
         let mut found: Vec<(String, String)> = Vec::new();
-        fsutil::walk(child, &p, &mut |rel, _m| {
-            let tail = &rel[p.len() + 1..];
-            found.push((format!("{o}/{tail}"), rel.to_string()));
+        fsutil::walk(child, p, &mut |rel, _m| {
+            let Some((top, from)) = rel.rmatch_indices('/').find_map(|(i, _)| map.get(&rel[..i]).map(|o| (i, o))) else {
+                return Ok(true);
+            };
+            found.push((format!("{from}/{}", &rel[top + 1..]), rel.to_string()));
             Ok(true)
         })?;
         for (src, dst) in found {
