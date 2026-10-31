@@ -1042,6 +1042,7 @@ pub fn complete_tree(p: &Project, id: &str) -> Result<PathBuf> {
 
 /// The base of each thin state on this machine.
 pub fn bases(p: &Project) -> Result<BTreeMap<String, String>> {
+    let _t = crate::trace::span("thin bases");
     let mut out = BTreeMap::new();
     let dir = p.deltas_dir();
     let rd = match fs::read_dir(&dir) {
@@ -1064,18 +1065,56 @@ pub fn bases(p: &Project) -> Result<BTreeMap<String, String>> {
 /// Delete the trees of a state. A state that is the base of another thin state keeps its
 /// trees until that state goes; this returns false then.
 pub fn delete_state(p: &Project, id: &str) -> Result<bool> {
-    if bases(p)?.values().any(|b| b == id) {
+    Ok(delete_states(p, std::slice::from_ref(&id.to_string()))?.contains(id))
+}
+
+/// Drop the view of a kept state, or the trees of a state nothing uses.
+fn drop_state(p: &Project, id: &str, keep_layer: bool) -> Result<()> {
+    if keep_layer {
         // Keep the layer; a view is not needed.
         if p.delta_path(id).is_dir() {
             p.trash(&p.state_path(id))?;
             let _ = fs::remove_file(view_stamp(p, id));
         }
-        return Ok(false);
+        return Ok(());
     }
     p.trash(&p.state_path(id))?;
     p.trash(&p.delta_path(id))?;
     let _ = fs::remove_file(view_stamp(p, id));
-    Ok(true)
+    Ok(())
+}
+
+/// Delete the trees of many states with one walk over the layers. A state that is the base of
+/// a thin state that stays keeps its layer; it goes once its last upper state is gone. Returns
+/// the states whose trees are gone. Cost: O(states + layers).
+pub fn delete_states(p: &Project, ids: &[String]) -> Result<BTreeSet<String>> {
+    let base_of = bases(p)?;
+    let mut refs: BTreeMap<&str, usize> = BTreeMap::new();
+    for b in base_of.values() {
+        *refs.entry(b.as_str()).or_default() += 1;
+    }
+    let wanted: BTreeSet<&str> = ids.iter().map(String::as_str).collect();
+    let mut gone = BTreeSet::new();
+    let mut queue: Vec<&str> = Vec::new();
+    for id in &wanted {
+        if refs.get(id).copied().unwrap_or(0) == 0 {
+            queue.push(id);
+        } else {
+            drop_state(p, id, true)?;
+        }
+    }
+    while let Some(id) = queue.pop() {
+        drop_state(p, id, false)?;
+        gone.insert(id.to_string());
+        if let Some(b) = base_of.get(id) {
+            let n = refs.entry(b.as_str()).or_default();
+            *n = n.saturating_sub(1);
+            if *n == 0 && wanted.contains(b.as_str()) {
+                queue.push(b);
+            }
+        }
+    }
+    Ok(gone)
 }
 
 /// Delete the trees of a state now, also when other thin states use it as their base: those
@@ -1108,7 +1147,7 @@ pub fn evict_views(p: &Project, keep: &BTreeSet<String>) -> Result<usize> {
             .map(|d| d.as_secs())
             .unwrap_or(u64::MAX);
         if age >= limit {
-            apfs::delete_tree(&full)?;
+            p.trash(&full)?;
             let _ = fs::remove_file(view_stamp(p, &id));
             n += 1;
         }
@@ -1119,7 +1158,7 @@ pub fn evict_views(p: &Project, keep: &BTreeSet<String>) -> Result<usize> {
 /// Give a thin state a complete tree and drop its layer, so the chains above it get short.
 pub fn make_keyframe(p: &Project, id: &str) -> Result<()> {
     complete_tree(p, id)?;
-    apfs::delete_tree(&p.delta_path(id))?;
+    p.trash(&p.delta_path(id))?;
     let _ = fs::remove_file(view_stamp(p, id));
     Ok(())
 }
@@ -1137,35 +1176,45 @@ pub struct Upkeep {
 /// and give a head with a long chain a complete tree. `heads` are the states that lines read now.
 pub fn upkeep(p: &Project, heads: &BTreeSet<String>) -> Result<Upkeep> {
     let mut done = Upkeep::default();
-    // Deleted states that stayed as a base: an upper state may have gone since.
-    loop {
-        let bases = bases(p)?;
-        let used: BTreeSet<&String> = bases.values().collect();
-        let mut gone = 0;
-        let mut ids: BTreeSet<String> = bases.keys().cloned().collect();
-        for e in fs::read_dir(p.states_dir())?.flatten() {
-            ids.insert(e.file_name().to_string_lossy().into_owned());
+    // Deleted states that stayed as a base: one walk, then leaves first through a queue.
+    let base_of = bases(p)?;
+    let mut refs: BTreeMap<&str, usize> = BTreeMap::new();
+    for b in base_of.values() {
+        *refs.entry(b.as_str()).or_default() += 1;
+    }
+    let mut ids: BTreeSet<String> = base_of.keys().cloned().collect();
+    for e in fs::read_dir(p.states_dir())?.flatten() {
+        ids.insert(e.file_name().to_string_lossy().into_owned());
+    }
+    let gone_record = |id: &str| -> Result<bool> {
+        Ok(match p.db.state_flags(id)? {
+            Some((_, deleted)) => deleted,
+            // A layer without a record: a process stopped before its record. A commit
+            // journal owns its own layer; a young layer may still get its record.
+            None => p.delta_path(id).is_dir() && old_layer(&p.delta_path(id)) && !crate::apfs_commit::preserves(p, id)?,
+        })
+    };
+    let mut queue: Vec<&str> = Vec::new();
+    for id in &ids {
+        if crate::model::is_uuid(id) && refs.get(id.as_str()).copied().unwrap_or(0) == 0 && gone_record(id)? {
+            queue.push(id);
         }
-        for id in ids {
-            if !crate::model::is_uuid(&id) || used.contains(&id) {
-                continue;
+    }
+    while let Some(id) = queue.pop() {
+        p.trash(&p.state_path(id))?;
+        p.trash(&p.delta_path(id))?;
+        let _ = fs::remove_file(view_stamp(p, id));
+        done.deleted += 1;
+        if let Some(b) = base_of.get(id) {
+            let n = refs.entry(b.as_str()).or_default();
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                if let Some(b) = ids.get(b.as_str()) {
+                    if crate::model::is_uuid(b) && gone_record(b)? {
+                        queue.push(b);
+                    }
+                }
             }
-            let gone_record = match p.db.state_flags(&id)? {
-                Some((_, deleted)) => deleted,
-                // A layer without a record: a process stopped before its record. A commit
-                // journal owns its own layer; a young layer may still get its record.
-                None => p.delta_path(&id).is_dir() && old_layer(&p.delta_path(&id)) && !crate::apfs_commit::preserves(p, &id)?,
-            };
-            if gone_record {
-                apfs::delete_tree(&p.state_path(&id))?;
-                apfs::delete_tree(&p.delta_path(&id))?;
-                let _ = fs::remove_file(view_stamp(p, &id));
-                gone += 1;
-            }
-        }
-        done.deleted += gone;
-        if gone == 0 {
-            break;
         }
     }
     done.views = evict_views(p, &BTreeSet::new())?;

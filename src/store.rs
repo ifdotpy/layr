@@ -392,6 +392,15 @@ impl<'a> Project<'a> {
             Ok(true)
         }
     }
+    /// Delete the trees of many states; on APFS with one walk over the thin layers
+    /// (`thin::delete_states`). A state kept as a base counts as handled, as in `delete_state`.
+    pub fn delete_states(&self, ids: &[String]) -> Vec<String> {
+        #[cfg(target_os = "macos")]
+        if crate::thin::delete_states(self, ids).is_ok() {
+            return ids.to_vec();
+        }
+        ids.iter().filter(|id| self.delete_state(id).is_ok()).cloned().collect()
+    }
     /// True when the content of a state is on this machine: a complete tree or a thin layer.
     pub fn has_state(&self, id: &str) -> bool {
         self.state_path(id).exists() || self.delta_path(id).exists()

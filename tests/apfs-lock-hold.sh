@@ -166,4 +166,14 @@ no "undo of the pick removes the file" test -e pk.txt
 eq "no prepared copies stay after these commands" "" "$(ls -A "$LAYR_ROOT/projects/hold/meta/work" 2>/dev/null)"
 eq "the trash is empty" "" "$(ls -A "$LAYR_ROOT/trash" 2>/dev/null)"
 ok "states remain valid" l fsck
+
+# gc reads the thin layers a fixed number of times, however many states it deletes, and leaves no trash.
+cd "$P/main" || exit 1
+l config retention.auto 2; l config retention.hours 0; l config undo.days 0
+for i in 1 2 3 4 5 6 7 8; do echo "$i" > gcauto.txt; l save -q; done
+trace=$(LAYR_TRACE=1 l gc 2>&1)
+n=$(printf '%s\n' "$trace" | grep -c 'thin bases')
+ok "gc walks the layers at most three times, not once per deleted state" test "$n" -ge 1 -a "$n" -le 3
+eq "the trash is empty after gc" "" "$(ls -A "$LAYR_ROOT/trash" 2>/dev/null)"
+ok "states remain valid after gc" l fsck
 finish
