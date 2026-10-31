@@ -19,6 +19,7 @@ mod cache_overlay;
 mod changes;
 mod cmd;
 mod db;
+mod dedup;
 mod diff;
 mod disk;
 mod fsutil;
@@ -159,6 +160,16 @@ fn main() {
         if !cmd::COMMANDS.contains(&command.as_str()) {
             eprintln!("layr: '{command}' is not a layr command. See 'layr help'.");
             std::process::exit(1);
+        }
+    }
+    if argv.first().map(String::as_str) == Some("retest") {
+        // Runs in the caller's process: it starts cargo and takes minutes, which the daemon must not do.
+        match layr_retest::main(&argv[1..]) {
+            Ok(code) => std::process::exit(code),
+            Err(error) => {
+                eprintln!("layr retest: {error:#}");
+                std::process::exit(1);
+            }
         }
     }
     if argv.first().map(String::as_str) == Some("person") {

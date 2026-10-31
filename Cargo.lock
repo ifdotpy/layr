@@ -1447,7 +1447,7 @@ dependencies = [
 
 [[package]]
 name = "layr"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "age",
  "anyhow",
@@ -1459,6 +1459,7 @@ dependencies = [
  "hmac",
  "ignore",
  "layr-model",
+ "layr-retest",
  "layr-store",
  "libc",
  "rand 0.8.8",

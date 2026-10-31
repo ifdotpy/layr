@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "layr"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2021"
 description = "Local version control on btrfs, APFS and OverlayFS"
 license = "MIT"
@@ -20,6 +20,7 @@ overlayfs = []
 [dependencies]
 layr-store = { path = "crates/layr-store" }
 layr-model = { path = "crates/layr-model" }
+layr-retest = { path = "crates/layr-retest" }
 anyhow = "1"
 age = { version = "0.11", features = ["ssh"] }
 base64 = "0.22"
