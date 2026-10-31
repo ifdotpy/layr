@@ -1149,11 +1149,13 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if args.iter().any(|v| v == "--remote" || v.starts_with("--remote=")) {
         return crate::store_remote::command(ctx, "gc", args);
     }
-    let spec = Spec::new().flag("-n|--dry-run").flag("-q|--quiet");
+    let spec = Spec::new().flag("-n|--dry-run").flag("-q|--quiet").flag("--no-dedup");
     let a = parse(&spec, args)?;
     let h = here(ctx)?;
     h.repo.require(ctx, "gc")?;
     let v = run_gc(ctx, &h.repo, a.has("-n"))?;
+    // After the project lock is released: hashing and comparing cache files takes long.
+    let shared = if a.has("--no-dedup") { None } else { Some(crate::dedup::run(&h.repo, a.has("-n"))?) };
     // Saved scans of removed or changed trees go too.
     #[cfg(target_os = "macos")]
     if !a.has("-n") {
@@ -1171,6 +1173,10 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
             for (_, name) in caches.iter().take(50) {
                 outln!(ctx, "\t{name}");
             }
+        }
+        if let Some(r) = shared {
+            let verb = if a.has("-n") { "would share" } else { "shared" };
+            outln!(ctx, "{verb} {} of disk in {} cache file(s), {:.1} s", human_size(r.bytes), r.files, r.seconds);
         }
     }
     Ok(0)
