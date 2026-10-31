@@ -72,6 +72,10 @@ pub fn set_writable(path: &Path) -> Result<()> {
     seal(path, false, false)?;
     update_readonly(path, false)
 }
+/// Make the existing folder `path`, files included, a cache in place: no copy.
+pub fn mark_cache(path: &Path) -> Result<()> {
+    mark(path, None, false)
+}
 pub fn create_subvolume(path: &Path) -> Result<()> {
     if !is_supported(path.parent().context("missing parent")?) {
         bail!("layr requires APFS on macOS");
