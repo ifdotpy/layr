@@ -12,7 +12,7 @@ source = Path(__file__).resolve().parent.parent
 dispatch = (source / "src/cmd/mod.rs").read_text().split("pub fn run(ctx:", 1)[1].split("#[cfg(test)]", 1)[0]
 arms = re.findall(r'^\s*((?:"[^"]+"\s*\|\s*)*"[^"]+")\s*=>', dispatch, re.M)
 commands = {name for arm in arms for name in re.findall(r'"([^"]+)"', arm)}
-commands.update(("person", "mount", "daemon"))
+commands.update(("person", "mount", "daemon", "retest"))
 existing = root / "existing"
 (existing / "machine").mkdir(parents=True)
 (existing / "machine/id").write_text("test-machine")

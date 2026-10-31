@@ -20,6 +20,7 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | overlays      | `overlay create <name> [--readers <principals>] [--mode shared\|follow] [--hidden] [--history all\|last\|<N>] [--quiet] [--merge three-way\|union-theirs] [--gc none\|lru:<size>]`, `overlay set <name> <properties>`, `overlay list [--json]`, `overlay show-to-project <name>`, `overlay readers`, `overlay use [--add\|--remove\|--none] <names>`, `overlay move [--purge] <name> <paths>`, `overlay repair <overlay>`, `overlay log\|show\|diff\|grep\|ls-files <name>` |
 | refs          | `ref set <name> <rev> [--expect <rev>] [--ttl <dur>]`, `ref list [<prefix>]`, `ref log <name>`, `ref delete <name> [--expect <rev>]` |
 | queue         | `queue add <rev> [--into <line>]`, `queue list [--into <line>] [--json]`, `queue remove <entry>`, `queue run [--into <line>]` |
+| tests         | `retest run [--full] [--save] [--tool vitest\|jest\|pytest] [-- <nextest args>]`, `retest init [--yes]`, `retest doctor` (see `docs/retest.md`) |
 | probes        | `probe run <rev> [--probe <name>] [--json]`, `probe diff <base> <head> [--json]` |
 | changes       | `comment <change> <text> [--version vN] [--path <path>] [--line N] [--reply-to <id>] [--json]`, `change list`, `change show <id>`, `change log <id>`, `change diff <id> [--from vN] [--to vM]` |
 | requests      | `request <kind> ... --person [--remote <name>] [--expires <epoch-ms>]`, `requests apply [--remote <name>] [--json]` |

@@ -1459,6 +1459,7 @@ dependencies = [
  "hmac",
  "ignore",
  "layr-model",
+ "layr-retest",
  "layr-store",
  "libc",
  "rand 0.8.8",

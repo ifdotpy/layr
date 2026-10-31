@@ -20,6 +20,7 @@ overlayfs = []
 [dependencies]
 layr-store = { path = "crates/layr-store" }
 layr-model = { path = "crates/layr-model" }
+layr-retest = { path = "crates/layr-retest" }
 anyhow = "1"
 age = { version = "0.11", features = ["ssh"] }
 base64 = "0.22"
