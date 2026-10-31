@@ -104,7 +104,7 @@ pub fn safe_join(root: &Path, rel: &str) -> Result<PathBuf> {
 }
 
 /// A tree to read: a folder, or on APFS a thin state over its base (`thin::Layered`).
-pub trait Src {
+pub trait Src: Sync {
     /// The path to read `rel` from; it may not exist. Fails for a path through a link.
     fn at(&self, rel: &str) -> Result<PathBuf>;
     /// The folder, when the tree is one complete folder.

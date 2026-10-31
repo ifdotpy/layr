@@ -1022,7 +1022,12 @@ pub fn commit(ctx: &Ctx, args: &[String]) -> Result<i32> {
             return Err(e);
         }
     };
-    let all_changes: Vec<Change> = match changes::file_changes(&head_root, &new_root) {
+    // An attribute-only change that `add` staged is a change of the state.
+    #[cfg(target_os = "macos")]
+    let compared = crate::storage::with_stored_compare(|| changes::file_changes(&head_root, &new_root));
+    #[cfg(not(target_os = "macos"))]
+    let compared = changes::file_changes(&head_root, &new_root);
+    let all_changes: Vec<Change> = match compared {
         Ok(v) => v,
         Err(e) => {
             h.repo.discard_states(std::slice::from_ref(&state));

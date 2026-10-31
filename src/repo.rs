@@ -817,6 +817,17 @@ impl<'a> Repo<'a> {
         }
     }
 
+    /// The time in seconds since which `base` equals the working folder in extended attributes: the time of
+    /// an automatic state of this line that a layer chain continues over (`save_layer_base`);
+    /// 0 for a head, which may come from elsewhere.
+    #[cfg(target_os = "macos")]
+    fn since_of(&self, line: &Line, base_id: &str) -> i64 {
+        if base_id == line.head {
+            return 0;
+        }
+        self.state(base_id).map(|s| s.time / 1000).unwrap_or(0)
+    }
+
     /// True when the working folder `w` differs from `base` by what `status` reports: content,
     /// type, link target, executable bit, added or removed files. The thin diff `d` also lists
     /// times, modes, owners and folders; those make no automatic state, as on every backend.
@@ -844,7 +855,7 @@ impl<'a> Repo<'a> {
         let base_id = self.save_layer_base(line, prev);
         let base = self.state_src(&base_id)?;
         let base_scan = base.scan(true)?;
-        let d = crate::thin::diff(&base_scan, &|k| base.path(k), new, w)?;
+        let d = crate::thin::diff(&base_scan, &|k| base.path(k), new, w, self.since_of(line, &base_id))?;
         crate::thin::write_checked(w, &base, &base_scan, new, &d, dst, &base_id, false)
     }
 
@@ -869,11 +880,11 @@ impl<'a> Repo<'a> {
         let base_id = self.save_layer_base(line, &prev);
         let base = self.state_src(&base_id)?;
         let base_scan = base.scan(true)?;
-        let d = crate::thin::diff(&base_scan, &|k| base.path(k), &new, &w)?;
+        let d = crate::thin::diff(&base_scan, &|k| base.path(k), &new, &w, self.since_of(line, &base_id))?;
         // Nothing changed since the previous save: the save under the lock makes no state.
         if !self.thin_changed(&base, &w, &d)? || (base_id != prev && self.p.has_state(&prev) && {
             let p = self.state_src(&prev)?;
-            !self.thin_changed(&p, &w, &crate::thin::diff(&p.scan(true)?, &|k| p.path(k), &new, &w)?)?
+            !self.thin_changed(&p, &w, &crate::thin::diff(&p.scan(true)?, &|k| p.path(k), &new, &w, self.since_of(line, &prev))?)?
         }) {
             return Ok(());
         }
@@ -914,13 +925,13 @@ impl<'a> Repo<'a> {
             let prev = self.save_base(line)?;
             let new = btrfs::scan_with_data(&w, true)?;
             let head = self.state_src(&line.head)?;
-            let head_scan = head.scan(true)?;
-            let head_diff = crate::thin::diff(&head_scan, &|k| head.path(k), &new, &w)?;
             let changed = if prev == line.head {
+                let head_scan = head.scan(true)?;
+                let head_diff = crate::thin::diff(&head_scan, &|k| head.path(k), &new, &w, 0)?;
                 self.thin_changed(&head, &w, &head_diff)?
             } else if self.p.has_state(&prev) {
                 let base = self.state_src(&prev)?;
-                self.thin_changed(&base, &w, &crate::thin::diff(&base.scan(true)?, &|k| base.path(k), &new, &w)?)?
+                self.thin_changed(&base, &w, &crate::thin::diff(&base.scan(true)?, &|k| base.path(k), &new, &w, self.since_of(line, &prev))?)?
             } else {
                 true
             };
@@ -948,7 +959,7 @@ impl<'a> Repo<'a> {
                     let s1 = self.describe_state(ctx, pid.clone(), StateKind::Auto, vec![line.head.clone()], message, Some(line))?;
                     let base = self.state_src(&pid)?;
                     let base_scan = base.scan(true)?;
-                    let d = crate::thin::diff(&base_scan, &|k| base.path(k), &new, &w)?;
+                    let d = crate::thin::diff(&base_scan, &|k| base.path(k), &new, &w, 0)?;
                     earlier = Some(s1);
                     crate::thin::write_checked(&w, &base, &base_scan, &new, &d, &dst, &pid, false)
                 }
@@ -1196,6 +1207,13 @@ impl<'a> Repo<'a> {
     /// scanned and compared, and the lists hold nothing else (APFS).
     pub fn status_for_add(&self, line: &Line, scan: &Path, index: &Snap, limit: Option<&BTreeSet<String>>) -> Result<Status> {
         #[cfg(target_os = "macos")]
+        return btrfs::with_stored_compare(|| self.status_for_add_inner(line, scan, index, limit));
+        #[cfg(not(target_os = "macos"))]
+        self.status_for_add_inner(line, scan, index, limit)
+    }
+
+    fn status_for_add_inner(&self, line: &Line, scan: &Path, index: &Snap, limit: Option<&BTreeSet<String>>) -> Result<Status> {
+        #[cfg(target_os = "macos")]
         if let Some(paths) = limit {
             let mut st = Status::default();
             let list = changes::file_changes_of(
@@ -1218,8 +1236,12 @@ impl<'a> Repo<'a> {
             let head = self.head_src(line)?;
             if !same_tree(index, &head) {
                 let _t = crate::trace::span("status: head to index diff");
-                let staged: Vec<Change> =
-                    changes::file_changes(&head, index)?.into_iter().filter(|c| !skip_path(&c.path)).collect();
+                // The index holds what `add` staged, an attribute-only change included.
+                #[cfg(target_os = "macos")]
+                let diff = btrfs::with_stored_compare(|| changes::file_changes(&head, index))?;
+                #[cfg(not(target_os = "macos"))]
+                let diff = changes::file_changes(&head, index)?;
+                let staged: Vec<Change> = diff.into_iter().filter(|c| !skip_path(&c.path)).collect();
                 st.staged = changes::with_renames(&head, index, staged);
             }
         }
