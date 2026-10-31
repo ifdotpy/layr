@@ -94,6 +94,10 @@ differ from both its parent and the current head of its line): the new line woul
 into its saves and pushes. An automatic state with only
 ignored build output is a warm start.
 
+Files that `restore`, `reset`, `merge`, `pick`, `undo`, `apply` and `park` write into the working
+folder get the current time, as `git checkout` gives them, so build tools that compare times
+(Cargo, make) rebuild them. Files that stay keep their time.
+
 `reset <rev>` without `--hard` moves the head and keeps the files (mixed, as in git). It lists the
 files that now differ from the new head and names `layr reset --hard <rev>`, which changes them.
 

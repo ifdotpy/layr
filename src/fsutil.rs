@@ -277,6 +277,19 @@ pub fn replace_entries(src: &Path, dst: &Path, gone: &[&str], write: &[&str], ow
     Ok(())
 }
 
+/// `replace_entries` into a working folder: written files get the current time.
+pub fn replace_work_entries(src: &Path, dst: &Path, gone: &[&str], write: &[&str], own: Option<(u32, u32)>) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    refuse_remaining_clashes(dst, gone, write)?;
+    for g in gone {
+        remove_entry(dst, g)?;
+    }
+    for w in write {
+        copy_work_entry(src, w, dst, w, own)?;
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "macos")]
 fn refuse_remaining_clashes(dst: &Path, gone: &[&str], write: &[&str]) -> Result<()> {
     if fs::symlink_metadata(dst).map(|m| crate::sys::case_sensitive_dev(m.dev(), dst)).unwrap_or(true) {
@@ -645,7 +658,20 @@ pub fn copy_entry(
     dst_rel: &str,
     own: Option<(u32, u32)>,
 ) -> Result<()> {
-    copy_entry_impl(src_root, src_rel, dst_root, dst_rel, own, false)
+    copy_entry_impl(src_root, src_rel, dst_root, dst_rel, own, false, false)
+}
+
+/// `copy_entry` into a working folder. A written file gets the current time, as `git checkout`
+/// gives it: build tools such as Cargo and make compare times, and a file with the old time of
+/// its state would look older than the build output of other content.
+pub fn copy_work_entry(
+    src_root: &(impl Src + ?Sized),
+    src_rel: &str,
+    dst_root: &Path,
+    dst_rel: &str,
+    own: Option<(u32, u32)>,
+) -> Result<()> {
+    copy_entry_impl(src_root, src_rel, dst_root, dst_rel, own, false, true)
 }
 
 /// Copy into a private index. APFS can replace a single-link inode with a new clone.
@@ -656,7 +682,7 @@ pub fn copy_index_entry(
     dst_rel: &str,
     own: Option<(u32, u32)>,
 ) -> Result<()> {
-    copy_entry_impl(src_root, src_rel, dst_root, dst_rel, own, true)
+    copy_entry_impl(src_root, src_rel, dst_root, dst_rel, own, true, false)
 }
 
 fn copy_entry_impl(
@@ -666,6 +692,7 @@ fn copy_entry_impl(
     dst_rel: &str,
     own: Option<(u32, u32)>,
     _replace_index: bool,
+    now: bool,
 ) -> Result<()> {
     let src = src_root.at(src_rel)?;
     let m = fs::symlink_metadata(&src).with_context(|| format!("stat {}", src.display()))?;
@@ -692,7 +719,11 @@ fn copy_entry_impl(
     let s = open_ro(&src)?;
     let finish = |d: &File| -> Result<()> {
         d.set_permissions(fs::Permissions::from_mode(m.mode() & 0o7777))?;
-        set_mtime(d, m.mtime(), m.mtime_nsec())?;
+        if now {
+            set_mtime(d, 0, rustix::fs::UTIME_NOW as i64)?;
+        } else {
+            set_mtime(d, m.mtime(), m.mtime_nsec())?;
+        }
         fchown(d, own)
     };
     #[cfg(target_os = "macos")]
