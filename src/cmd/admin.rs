@@ -887,8 +887,20 @@ pub fn try_command(
 /// Retention. Kept: line heads and their history, tags, remote refs, park entries, the newest
 /// export per branch, conflict sources, automatic states (the newest N per line and
 /// one per hour for a day), and every state that a record inside the undo window names.
-pub fn retention_plan(repo: &Repo) -> Result<(BTreeSet<String>, Vec<String>)> {
+/// The automatic-state and undo-window rules do not keep an automatic state that a push already
+/// holds (`pushed_work`): only build output would go, and a build makes it again.
+/// `pushed` caches `pushed_work` answers: states never change, so a plan before the store lock
+/// answers most of them for the plan under it.
+pub fn retention_plan(repo: &Repo, pushed: &mut BTreeMap<String, bool>) -> Result<(BTreeSet<String>, Vec<String>)> {
     let db = &repo.p.db;
+    let mut held = |id: &str| -> Result<bool> {
+        if let Some(v) = pushed.get(id) {
+            return Ok(*v);
+        }
+        let v = pushed_work(repo, id)?;
+        pushed.insert(id.to_string(), v);
+        Ok(v)
+    };
     let mut roots: Vec<String> = Vec::new();
     let now = ids::now_ms();
     let keep_auto = repo.p.config_u64("retention.auto", 50) as usize;
@@ -903,6 +915,10 @@ pub fn retention_plan(repo: &Repo) -> Result<(BTreeSet<String>, Vec<String>)> {
         let autos = db.line_states(&l.id, StateKind::Auto)?;
         let mut buckets: BTreeSet<i64> = BTreeSet::new();
         for (i, s) in autos.iter().enumerate() {
+            // The newest automatic state of a line stays: it is the line's latest undo point.
+            if i > 0 && held(&s.id)? {
+                continue;
+            }
             if i < keep_auto {
                 keep.insert(s.id.clone());
             } else if now - s.time < hourly * 3600 * 1000 && buckets.insert(s.time / 3_600_000) {
@@ -937,19 +953,18 @@ pub fn retention_plan(repo: &Repo) -> Result<(BTreeSet<String>, Vec<String>)> {
             }
         }
         for s in &r.states {
-            keep.insert(s.id.clone());
+            if !held(&s.id)? {
+                keep.insert(s.id.clone());
+            }
         }
         for ch in r.lines.values() {
-            for x in [
-                ch.before.as_ref().map(|b| b.head.clone()),
-                ch.after.as_ref().map(|b| b.head.clone()),
-                ch.working_before.clone(),
-                ch.working_after.clone(),
-            ]
-            .into_iter()
-            .flatten()
-            {
+            for x in [ch.before.as_ref().map(|b| b.head.clone()), ch.after.as_ref().map(|b| b.head.clone())].into_iter().flatten() {
                 keep.insert(x);
+            }
+            for x in [ch.working_before.clone(), ch.working_after.clone()].into_iter().flatten() {
+                if !held(&x)? {
+                    keep.insert(x);
+                }
             }
         }
     }
@@ -996,12 +1011,30 @@ pub fn retention_plan(repo: &Repo) -> Result<(BTreeSet<String>, Vec<String>)> {
     Ok((keep, delete))
 }
 
+/// True for an automatic state without caches whose parent has a git commit (pushed or imported)
+/// and whose paths that are not ignored equal that parent: a push holds all its work.
+fn pushed_work(repo: &Repo, id: &str) -> Result<bool> {
+    let Some(s) = repo.p.db.state(id)? else { return Ok(false) };
+    if s.kind != StateKind::Auto || !s.caches.is_empty() || !repo.p.has_state(id) {
+        return Ok(false);
+    }
+    let Some(parent) = s.parents.first() else { return Ok(false) };
+    if repo.p.db.git_commit_of(parent)?.is_none() || !repo.p.has_state(parent) {
+        return Ok(false);
+    }
+    Ok(repo.unsaved_paths(parent, &s)?.is_empty())
+}
+
 pub fn run_gc(ctx: &Ctx, repo: &Repo, dry: bool) -> Result<Vec<String>> {
-    let _lock = repo.p.lock()?;
-    let (_keep, delete) = retention_plan(repo)?;
+    // The comparisons of automatic states with their parents take seconds to minutes: a first
+    // plan without the lock makes them, and the plan under the lock reuses them.
+    let mut pushed = BTreeMap::new();
+    let (_keep, delete) = retention_plan(repo, &mut pushed)?;
     if dry {
         return Ok(delete);
     }
+    let _lock = repo.p.lock()?;
+    let (_keep, delete) = retention_plan(repo, &mut pushed)?;
     for expired in repo.p.db.expired_refs(ids::now_ms())? {
         let mut rec = Record::new("ref.expire");
         rec.data = serde_json::json!({"ref_change": crate::model::RefChange { name:expired.name.clone(),before:Some(expired),after:None }});

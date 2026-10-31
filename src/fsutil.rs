@@ -1082,36 +1082,62 @@ pub struct Space {
     pub unique: u64,
 }
 
-/// `Space` of a folder on APFS: the allocated and the private size of each file.
+/// What one file holds for `layr du`: its allocated bytes, the bytes that no other file shares,
+/// and data that clones of it share, by a key that names that data with its size (the APFS
+/// clone id, or the physical address of a Linux extent).
+pub struct Held<'a> {
+    pub alloc: u64,
+    pub own: u64,
+    pub shared: &'a [(u64, u64)],
+}
+
+impl Space {
+    /// Add one file: its own bytes are unique to the folder.
+    pub fn add(&mut self, h: &Held) {
+        self.total += h.alloc;
+        self.unique += h.own;
+    }
+}
+
+/// Visit the files of a folder on APFS: allocated size, private size and clone id of each.
 #[cfg(target_os = "macos")]
-pub fn apfs_space(root: &Path) -> Result<Space> {
+pub fn apfs_visit(root: &Path, f: &mut dyn FnMut(&Held)) -> Result<()> {
     use std::os::fd::AsFd;
-    fn walk(dir: &File, space: &mut Space, seen: &mut std::collections::HashSet<u64>, buf: &mut Vec<u8>) -> Result<()> {
+    fn walk(dir: &File, f: &mut dyn FnMut(&Held), seen: &mut std::collections::HashSet<u64>, buf: &mut Vec<u8>) -> Result<()> {
         for e in crate::sys::apfs_space_read(dir.as_fd(), buf)? {
             if e.dir {
                 let flags = rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::NOFOLLOW;
                 match rustix::fs::openat(dir, e.name.as_os_str(), flags, rustix::fs::Mode::empty()) {
-                    Ok(fd) => walk(&File::from(fd), space, seen, buf)?,
+                    Ok(fd) => walk(&File::from(fd), f, seen, buf)?,
                     Err(rustix::io::Errno::ACCESS) => {}
                     Err(err) => return Err(err.into()),
                 }
             } else if e.links <= 1 || seen.insert(e.ino) {
-                space.total += e.alloc;
-                space.unique += e.private;
+                // Shared bytes without a clone id get a key of their own file (top bit set).
+                let rest = e.alloc.saturating_sub(e.private);
+                let key = if e.clone != 0 { e.clone } else { e.ino | 1 << 63 };
+                let shared = [(key, rest)];
+                f(&Held { alloc: e.alloc, own: e.private.min(e.alloc), shared: &shared[..usize::from(rest > 0)] });
             }
         }
         Ok(())
     }
-    let mut space = Space::default();
     let dir = File::open(root).with_context(|| format!("open {}", root.display()))?;
-    walk(&dir, &mut space, &mut Default::default(), &mut Vec::new())?;
+    walk(&dir, f, &mut Default::default(), &mut Vec::new())
+}
+
+/// `Space` of a folder on APFS.
+#[cfg(target_os = "macos")]
+pub fn apfs_space(root: &Path) -> Result<Space> {
+    let mut space = Space::default();
+    apfs_visit(root, &mut |h| space.add(h))?;
     Ok(space)
 }
 
-/// `Space` of a folder on Linux: the extents of each file, and those without the shared flag.
+/// Visit the files of a folder on Linux: the extents of each, shared ones by physical address.
 #[cfg(target_os = "linux")]
-pub fn fiemap_space(root: &Path) -> Result<Space> {
-    fn walk(dir: &Path, space: &mut Space, seen: &mut std::collections::HashSet<(u64, u64)>) -> Result<()> {
+pub fn fiemap_visit(root: &Path, f: &mut dyn FnMut(&Held)) -> Result<()> {
+    fn walk(dir: &Path, f: &mut dyn FnMut(&Held), seen: &mut std::collections::HashSet<(u64, u64)>) -> Result<()> {
         let entries = match fs::read_dir(dir) {
             Ok(v) => v,
             Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Ok(()),
@@ -1121,12 +1147,14 @@ pub fn fiemap_space(root: &Path) -> Result<Space> {
             let e = e?;
             let m = e.metadata()?;
             if m.is_dir() {
-                walk(&e.path(), space, seen)?;
+                walk(&e.path(), f, seen)?;
             } else if m.is_file() && (m.nlink() <= 1 || seen.insert((m.dev(), m.ino()))) {
-                match File::open(e.path()).and_then(|f| crate::sys::fiemap_space(&f)) {
-                    Ok((total, unique)) => {
-                        space.total += total;
-                        space.unique += unique;
+                match File::open(e.path()).and_then(|file| crate::sys::fiemap_extents(&file)) {
+                    Ok(extents) => {
+                        let alloc = extents.iter().map(|x| x.1).sum();
+                        let own = extents.iter().filter(|x| !x.2).map(|x| x.1).sum();
+                        let shared: Vec<(u64, u64)> = extents.iter().filter(|x| x.2).map(|x| (x.0, x.1)).collect();
+                        f(&Held { alloc, own, shared: &shared });
                     }
                     Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {}
                     Err(err) => return Err(anyhow!("{}: {err}", e.path().display())),
@@ -1135,7 +1163,13 @@ pub fn fiemap_space(root: &Path) -> Result<Space> {
         }
         Ok(())
     }
+    walk(root, f, &mut Default::default())
+}
+
+/// `Space` of a folder on Linux.
+#[cfg(target_os = "linux")]
+pub fn fiemap_space(root: &Path) -> Result<Space> {
     let mut space = Space::default();
-    walk(root, &mut space, &mut Default::default())?;
+    fiemap_visit(root, &mut |h| space.add(h))?;
     Ok(space)
 }

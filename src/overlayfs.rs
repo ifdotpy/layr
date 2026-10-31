@@ -1341,3 +1341,8 @@ pub fn space(path: &Path) -> Result<crate::fsutil::Space> {
         _ => Ok(total),
     }
 }
+
+/// Visit the files of a folder for `layr du --store` (see `fsutil::Held`).
+pub fn visit_space(path: &Path, f: &mut dyn FnMut(&crate::fsutil::Held)) -> Result<()> {
+    crate::fsutil::fiemap_visit(path, f)
+}

@@ -1839,3 +1839,8 @@ pub fn mark_received(path: &Path, uuid: &str) -> Result<()> {
 pub fn space(path: &Path) -> Result<crate::fsutil::Space> {
     crate::fsutil::apfs_space(path)
 }
+
+/// Visit the files of a folder for `layr du --store` (see `fsutil::Held`).
+pub fn visit_space(path: &Path, f: &mut dyn FnMut(&crate::fsutil::Held)) -> Result<()> {
+    crate::fsutil::apfs_visit(path, f)
+}

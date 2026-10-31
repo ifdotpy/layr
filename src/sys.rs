@@ -1253,6 +1253,8 @@ pub struct SpaceEntry {
     pub links: u32,
     pub alloc: u64,
     pub private: u64,
+    /// The data identity that clones of this file share (0: none).
+    pub clone: u64,
 }
 
 /// Read the sizes of all entries of an open folder with `getattrlistbulk`.
@@ -1266,7 +1268,7 @@ pub fn apfs_space_read(dir: BorrowedFd<'_>, buf: &mut Vec<u8>) -> io::Result<Vec
         volattr: 0,
         dirattr: 0,
         fileattr: libc::ATTR_FILE_LINKCOUNT | libc::ATTR_FILE_ALLOCSIZE,
-        forkattr: libc::ATTR_CMNEXT_PRIVATESIZE,
+        forkattr: libc::ATTR_CMNEXT_PRIVATESIZE | libc::ATTR_CMNEXT_CLONEID,
     };
     let flags = libc::FSOPT_NOFOLLOW | libc::FSOPT_PACK_INVAL_ATTRS | libc::FSOPT_ATTR_CMN_EXTENDED;
     if buf.len() < 256 * 1024 {
@@ -1303,8 +1305,8 @@ pub fn apfs_space_read(dir: BorrowedFd<'_>, buf: &mut Vec<u8>) -> io::Result<Vec
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "empty getattrlistbulk entry"));
             }
             // Layout: length, returned attributes (5 words), then the attributes in bit order:
-            // name, type, file id; for a file the link count and the allocated size; the private
-            // size last. A folder has no file group.
+            // name, type, file id; for a file the link count and the allocated size; then the
+            // private size and the clone id. A folder has no file group.
             let mut q = pos + 4 + 20;
             let name_ref = q;
             q += 8;
@@ -1320,21 +1322,21 @@ pub fn apfs_space_read(dir: BorrowedFd<'_>, buf: &mut Vec<u8>) -> io::Result<Vec
                 q += 12;
                 (links, alloc)
             };
-            let private = if dir { 0 } else { u64_at(q)? };
+            let (private, clone) = if dir { (0, 0) } else { (u64_at(q)?, u64_at(q + 8)?) };
             let name_off = name_ref as i64 + i32_at(name_ref)? as i64;
             let name_len = u32_at(name_ref + 4)? as usize;
             let raw = rd(name_off as usize, name_len)?;
             let name = std::ffi::OsStr::from_bytes(raw.strip_suffix(&[0]).unwrap_or(raw)).to_os_string();
-            out.push(SpaceEntry { name, dir, ino, links, alloc, private });
+            out.push(SpaceEntry { name, dir, ino, links, alloc, private, clone });
             pos += len;
         }
     }
 }
 
-/// The bytes of an open file and the part of them in extents that no other file or snapshot
-/// shares (`FIEMAP`, the `FIEMAP_EXTENT_SHARED` flag): btrfs, XFS and ext4.
+/// The extents of an open file (`FIEMAP`): physical address, length, and whether another file
+/// or snapshot shares it (`FIEMAP_EXTENT_SHARED`). btrfs, XFS and ext4.
 #[cfg(target_os = "linux")]
-pub fn fiemap_space(file: &std::fs::File) -> io::Result<(u64, u64)> {
+pub fn fiemap_extents(file: &std::fs::File) -> io::Result<Vec<(u64, u64, bool)>> {
     const FS_IOC_FIEMAP: libc::c_ulong = 0xC020_660B;
     const EXTENT_LAST: u32 = 0x1;
     const EXTENT_SHARED: u32 = 0x2000;
@@ -1359,7 +1361,8 @@ pub fn fiemap_space(file: &std::fs::File) -> io::Result<(u64, u64)> {
         reserved: u32,
         extents: [Extent; COUNT],
     }
-    let (mut total, mut unique, mut start) = (0u64, 0u64, 0u64);
+    let mut out = Vec::new();
+    let mut start = 0u64;
     loop {
         let mut map = Map { start, length: u64::MAX - start, flags: 0, mapped: 0, count: COUNT as u32, reserved: 0, extents: [Extent::default(); COUNT] };
         // SAFETY: the descriptor is live and `map` is a valid fiemap buffer with room for COUNT extents.
@@ -1368,15 +1371,12 @@ pub fn fiemap_space(file: &std::fs::File) -> io::Result<(u64, u64)> {
         }
         let mapped = (map.mapped as usize).min(COUNT);
         if mapped == 0 {
-            return Ok((total, unique));
+            return Ok(out);
         }
         for e in &map.extents[..mapped] {
-            total += e.length;
-            if e.flags & EXTENT_SHARED == 0 {
-                unique += e.length;
-            }
+            out.push((e.physical, e.length, e.flags & EXTENT_SHARED != 0));
             if e.flags & EXTENT_LAST != 0 {
-                return Ok((total, unique));
+                return Ok(out);
             }
         }
         let last = map.extents[mapped - 1];

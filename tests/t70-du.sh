@@ -31,4 +31,16 @@ eq "du <line> lists only that line" "w" "$(l du --json w | python3 -c 'import js
 no "an unknown line is refused" l du nosuch
 has "the table has a header" "unique" "$(l du)"
 has "the table has the sum" "all lines" "$(l du)"
+
+# --store: every part of the store, and the bytes that only that part holds.
+sync
+st=$(l du --store --json)
+part() { printf %s "$st" | python3 -c 'import json,sys; d=json.load(sys.stdin); rows={r["part"]: r for r in d["parts"]}; print(rows.get(sys.argv[1], {}).get(sys.argv[2], -1) if sys.argv[1] != "-" else d[sys.argv[2]])' "$1" "$2"; }
+ok "--store lists the states of the project" test "$(part p/states frees)" -ge 0
+ok "--store: the line's own file is freed by deleting it" test "$(part p/lines/w frees)" -ge $((4 * MiB))
+ok "--store: the base file that states share is not main's alone" test "$(part p/lines/main frees)" -lt $((4 * MiB))
+ok "--store: the total holds the base file and the own file once" test "$(part - total)" -ge $((8 * MiB))
+ok "--store: the total does not count clones twice" test "$(part - total)" -lt $((40 * MiB))
+has "--store prints the total" "store total" "$(l du --store)"
+no "--store takes no line names" l du --store w
 finish
