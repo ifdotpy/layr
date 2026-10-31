@@ -1,4 +1,4 @@
-# layr-retest: run only the tests that a change can affect
+# layr retest: run only the tests that a change can affect
 
 Status: first version built (2026-10-28): the Rust adapter, and the vitest, jest and pytest adapters (not tried with the real tools), in `crates/layr-retest`. Design
 agreed with the owner on 2026-10-28. Prototype measurements are in the last section. See
@@ -11,7 +11,7 @@ The goal is speed only. A saved pass is not evidence for a merge, a release or m
 those keep using `check` attestations of layr (`docs/checks.md`).
 
 A wrong saved pass skips a test that would fail, so it hides a defect. A periodic full run is the
-safety net: `layr-retest --full` runs every test and checks the saved passes (see Contradiction).
+safety net: `layr retest run --full` runs every test and checks the saved passes (see Contradiction).
 The user selects the schedule of the full run.
 
 ## Rules
@@ -98,6 +98,105 @@ layr-retest`, 262 tests): the incremental run selected 2 tests and failed the sa
 tests as `--full` (260 passed). A `panic!` in the Studio supervisor `main.rs` (bin source that no
 record has) forces a full run and failed the same 20 tests as plain nextest.
 
+## Debug info level
+
+`layr-retest` sets `CARGO_PROFILE_DEV_DEBUG=line-tables-only` and `CARGO_PROFILE_TEST_DEBUG=line-tables-only`
+for its own cargo calls (nextest builds with the test profile, which inherits from dev; both are set
+so that a `[profile.test]` of the project does not win). Coverage needs the coverage mapping and
+the line tables, not variable info. The variables apply to `target/retest` only. The tool sets them
+and not the caller, for the same reason as `CARGO_INCREMENTAL`. `LAYR_RETEST_LINE_TABLES=0` leaves
+the project's own level.
+
+## Sweeping stale build output
+
+Cargo never removes the files of older hashes. A new feature set, a changed flag or a new toolchain
+leaves `.rlib`, `.rmeta`, `.d` and test binaries with the old hash in `target/retest/debug/deps`,
+and every incremental build of a crate leaves a new set of `.rcgu.o` object files there (macOS
+keeps them next to the binary). The sweep runs right after the build, inside the same run.
+
+Rules:
+
+- Live files: the tool runs `cargo test --no-run --message-format json` with the same environment and
+  arguments (a no-op: every file is fresh). Every file of a `compiler-artifact` message is live. If
+  that call fails, or lists nothing, there is no sweep.
+- In `debug/deps`, a file whose name has a 16 digit hex cargo hash (`name-<hash>[.ext]`, with or
+  without the `lib` prefix) is removed when no live file has the same `name-hash`. All files of one
+  `name-hash` live or go together (`.rlib`, `.rmeta`, `.d`, the binary, `.dSYM`). Files without a
+  cargo hash stay.
+- Object files `name-hash.<unit>.<build>.rcgu.o`: of each `name-hash`, only the build that has the
+  newest object file stays.
+- In `debug/incremental/<crate>-<hash>`, only the newest finalized session folder and its `.lock`
+  file stay. A crate folder without a finalized session stays as it is.
+- Lock: the sweep takes cargo's own build lock (`debug/.cargo-lock`, `flock`) without waiting. If
+  another cargo of this target holds it, the sweep is skipped. No cargo can start in the target while the
+  sweep holds the lock.
+- Only `target/retest/debug/deps` and `target/retest/debug/incremental` are touched. `.fingerprint`
+  and `build` stay (small).
+- It prints `swept stale build output, freed N MB`. Only files with one hard link count: an object
+  file is also a link in the incremental folder and counts when its last link goes.
+
+A run with other package selection (`-- -p foo`) treats the files of the other packages as stale and
+removes them; the next run with the full selection builds them again. Keep one selection per line.
+The early exit "no build" does not sweep: nothing was built.
+
+### Measurements 2026-10-31 (debug info and sweep)
+
+layr workspace, `--workspace --exclude layr-retest`, 262 tests, `CARGO_BUILD_JOBS=4`, `nice -n 10`,
+`--full` for the first rows. Load average 8 to 19 (other agents ran), so times are only indicative.
+
+| Build (cold `target/retest`, `--full`) | `target/retest` | deps | incremental | Time |
+| --- | --- | --- | --- | --- |
+| default debug info (installed tool) | 2.3 GB | 1.6 GB | 0.4 GB | 129 s |
+| `line-tables-only` | 1.9 GB | 1.2 GB | 0.4 GB | 161 s, 126 s (second run) |
+
+Records of the `--full` runs: all 262 tests have the same status, files and deps in the installed
+tool's record and in the new one. The coverage ranges equal in 254 tests. Known run-to-run variation:
+`store_remote::writer::tests::pending_part_age_survives_double_crash_and_gc_before_publication`
+differs between two runs of the same binary, and `...fresh_push_discards_wal_sidecars...` and
+`thin::tests::readonly_directory_metadata_keeps_modes` differ between runs with the same debug level.
+With `line-tables-only`, six `layr-model::index` tests have one more `idle` range per file (an
+uncalled function, for example `lib.rs` 35 to 54), the same in both runs of the new tool; with
+`LAYR_RETEST_LINE_TABLES=0` the records equal the installed tool's apart from the known variation.
+The extra range is a function that no test calls, so no selection depends on it.
+
+Sweep: three small changes (`min(8000)` to `min(8000 + 0)`, then more `+ 0`), 2 tests selected each
+time.
+
+| Step | `target/retest` | deps |
+| --- | --- | --- |
+| After `--full` (no object file sweep yet) | 2836 MB | 1273 MB |
+| After change 1, 2, 3 without the object sweep | 2982, 3129, 3275 MB | 1405, 1537, 1669 MB |
+| Sweep on the next run (change 4) | 2766 MB (freed 696 MB) | 1131 MB |
+| After change 5, 6, 7 with the sweep | 2778, 2793, 2806 MB | 1130, 1131, 1131 MB |
+
+Without the sweep the folder grew by 146 MB per small change; with it by 12 to 15 MB (incremental
+folder). The first sweep after a toolchain or debug level change freed 1251 MB (the old build).
+
+Probe: `panic!("probe")` as first statement of `layr_model::diff::is_binary`. The incremental run
+selected 2 tests and failed 2; `--full` ran 262 and failed the same 2
+(`interdiff::tests::patch_format_keeps_modes_binary_renames_and_missing_newlines` and
+`interdiff::tests::same_patch_has_no_interdiff_and_amendment_has_file_counts`).
+
+### Time cost (2026-10-31, same workspace, load 9 to 16 at the start of each run)
+
+A disk change must not make a run slower. `LAYR_RETEST_SWEEP=0` switches the sweep off for the comparison.
+
+| Measure | Result |
+| --- | --- |
+| Extra `cargo test --no-run --message-format json` (all fresh) | 0.33 and 0.36 s (0.78 s at load 40) |
+| Sweep itself, about 455 MB freed | 0.27 and 0.30 s (1.87 s once, at load 40, 467 MB) |
+| Sweep, total per run | 0.6 to 0.7 s, printed in the `swept ...` line |
+| Build and list, 3 small changes, `line-tables-only` | 6.9, 5.9, 11.4 s |
+| Build and list, 3 small changes, `LAYR_RETEST_LINE_TABLES=0` | 8.4, 5.9, 12.9 s |
+| Cold `--full`, `line-tables-only` / default debug info | build 57.5 s, run 129 s / build 90.8 s, run 201 s |
+| `target/retest` after the cold run and 3 small changes | 2257 MB / 2603 MB |
+
+Line tables are not slower to rebuild (equal within the load noise) and the cold build is faster.
+The sweep stays under 1 s, so it runs on every build and keeps no state. Sweep-on and sweep-off
+runs of the whole tool (`sweep-on`: 12.4 to 36 s build and list, `sweep-off`: 30 to 104 s) cannot be
+compared: other agents raised the load to 30 to 130 during the sweep-off runs. Use the printed
+times of the artifact list and the sweep.
+
 ### Unique disk of a new line (APFS clones)
 
 `du` counts clones in full, so these use the change of `df` free space. A new line is a `cp -c -R`
@@ -178,8 +277,10 @@ give the same result each time.
 
 ## Place
 
-A separate crate `layr-retest` in this repository. It uses only the public CLI of layr. The core
-of layr has no terms for tests, coverage or adapters.
+A separate crate `layr-retest` in this repository, a library with the entry point `layr_retest::main(args)`.
+The `layr` binary dispatches `layr retest <sub>` to it and has no other code for tests, coverage or adapters.
+The crate uses only the public CLI of layr, as processes of the running `layr` executable. It does not
+call the internal API: a process call keeps the crate free of layr internals and was already tested.
 
 ## Prototype measurements (2026-10-28, this Mac, Rust 1.99.1, nextest 0.9.146)
 
@@ -193,7 +294,7 @@ of layr has no terms for tests, coverage or adapters.
 
 ## Measurements on the layr workspace (2026-10-28, this Mac, state a5310ad)
 
-`layr-retest run -- --workspace --exclude layr-retest`, 261 tests, 4 test threads, 4 build jobs.
+`layr retest run -- --workspace --exclude layr-retest`, 261 tests, 4 test threads, 4 build jobs.
 The tests of `layr-retest` itself are excluded: its end-to-end test calls `layr` from `PATH`.
 
 | Run | Selected | Time |
@@ -308,7 +409,7 @@ run selected 2 tests and both failed; `--full` failed the same 2 (`interdiff::te
 
 ## First version
 
-Crate `crates/layr-retest`, binary `layr-retest`. It runs `layr`, `cargo nextest`, `llvm-profdata`
+Crate `crates/layr-retest`, a library. The `layr` binary depends on it and runs `layr retest <sub>` in the process of the caller (not in the daemon). There is no separate binary. It runs the `layr` CLI (as a process of `std::env::current_exe()`), `cargo nextest`, `llvm-profdata`
 and `llvm-cov` as programs and uses no internal crate of layr. The two LLVM tools come from the
 `llvm-tools` rustup component of the active toolchain.
 
@@ -316,7 +417,7 @@ and `llvm-cov` as programs and uses no internal crate of layr. The two LLVM tool
 
 Run in the root folder of a layr line that is also the cargo project root.
 
-- `layr-retest run [--full] [--save] [-- <nextest args>]`
+- `layr retest run [--full] [--save] [-- <nextest args>]`
   `--save` ends the run with `layr save --caches --cache .layr-retest` (after step 7), which puts the
   records in the cache overlay so that a new line takes them. It is off by default: the call makes a
   state of the line and holds the lock of the store (75 s in the Studio line, see Measurements 2026-10-29).
@@ -343,10 +444,31 @@ Run in the root folder of a layr line that is also the cargo project root.
   Every step prints `layr-retest: step <name>: <seconds>s`.
   The nextest arguments after `--` go to both `list` and `run`. Use them to select packages
   (`-p`, `--workspace`). Do not put `-E` there.
-- `layr-retest wrap -- <test binary> <args>` is the cargo target runner that `run` installs
-  (`CARGO_TARGET_<TRIPLE>_RUNNER`). With `NEXTEST_TEST_NAME` set it sets `LLVM_PROFILE_FILE` to
+- `layr retest wrap -- <test binary> <args>` is the cargo target runner that `run` installs
+  (`CARGO_TARGET_<TRIPLE>_RUNNER`, set to `<layr> retest wrap --`). With `NEXTEST_TEST_NAME` set it sets `LLVM_PROFILE_FILE` to
   `$LAYR_RETEST_PROFILE_DIR/<binary id>/<test>.profraw` (names cleaned to letters, digits and
   `_-.`), then runs the test, merges its raw profiles and returns its exit code (see "Raw profile disk"). In the list phase it sets no profile and execs the test.
+
+- `layr retest init [--yes]` makes a project ready. It is safe to run twice.
+  - Finds a cargo project, and vitest, jest or pytest projects.
+  - Checks `cargo-nextest` and the `llvm-tools` rustup component of the active toolchain. A missing one
+    prints its install command (`cargo install cargo-nextest --locked`, `rustup component add llvm-tools`);
+    `--yes` runs it. Exit code 1 if one is still missing.
+  - Adds `target regenerable` and `.layr-retest regenerable` to `.layrattributes`, and `.layr-retest`
+    to `.gitignore`, when missing.
+  - Prints the gate command: `layr retest run -- --workspace` (or `--tool vitest|jest|pytest`).
+- `layr retest doctor` reads and never writes. It prints `ok:` or `warn:` lines with numbers; exit code 0
+  when there is no warning, else 1.
+  - Tools present, and the LLVM major version of `llvm-profdata` equals that of `rustc`.
+  - Test sources (files under `tests/`, and code after `#[cfg(test)]`) that start a bin by a
+    `target/debug` path or by an env variable whose name has a word `BIN`, `BINARY`, `EXE` or `EXECUTABLE`, or is a bin target name.
+    That bin is not instrumented, so a change of it forces full runs. Use `env!("CARGO_BIN_EXE_<name>")`.
+  - The number of test targets (lib, bin, integration), the size of the integration test binaries (from
+    `cargo metadata` and the files in `target/retest/debug/deps` or `target/debug/deps`; it does not run
+    `cargo nextest list`, which builds). For a crate with two or more integration test binaries: one
+    binary (`autotests = false`, one `tests/main.rs`) saves the size of all but the largest and one link each.
+  - Records: count, and the age of the newest (warning above 14 days). Size of `target/retest`
+    (warning above 20 GB).
 
 ### Record format
 
@@ -436,8 +558,8 @@ and the build folder of a big project (19.6 GiB for Studio) takes 50 to 160 s. A
 saves the folder as the newest
 state of the line's cache overlay (`history=last`, `union-theirs`, readers: trusted machines).
 The record also goes under the id of the head when the working copy equals the head, because an
-auto state is in no other line. So the flow is: work, `layr save -m`, `layr-retest run --save`,
-`layr line new X <line>`, and `layr-retest run` in X selects only what changed.
+auto state is in no other line. So the flow is: work, `layr save -m`, `layr retest run --save`,
+`layr line new X <line>`, and `layr retest run` in X selects only what changed.
 
 The installed `layr` 0.4.0 (2026-10-26) has no cache overlays. Build the one in this repository.
 
@@ -446,7 +568,7 @@ The installed `layr` 0.4.0 (2026-10-26) has no cache overlays. Build the one in 
 Raw profiles are large (1.5 MB per test in the layr workspace, about 18 MB in Studio). Two steps
 keep them small:
 
-- The wrapper (`layr-retest wrap`) does not exec the test. It starts the test, waits, and then
+- The wrapper (`layr retest wrap`) does not exec the test. It starts the test, waits, and then
   runs `llvm-profdata merge -sparse` on the raw files of that test, writes `merged.profdata`
   (small: only functions with a count above 0) and `raw-count`, and deletes the raw files. It
   returns the exit code of the test. So raw files exist only while their test runs. If the merge
@@ -512,7 +634,7 @@ errors). The rule instead:
 
 ### JS/TS and Python adapters
 
-`layr-retest run --tool vitest|jest|pytest [--full] [-- <tool args>]`. The default tool is
+`layr retest run --tool vitest|jest|pytest [--full] [-- <tool args>]`. The default tool is
 `nextest`. These tools choose the tests themselves. layr-retest saves the working copy, finds the
 baseline, gives the tool the changed files, and keeps the record.
 
@@ -549,9 +671,10 @@ the old chain is not used again. The end to end test shows it with a test that r
 
 - Unit tests (`parse.rs`, `select.rs`): lcov to ranges, `-U0` hunks, function ranges, and each
   selection rule.
-- `crates/layr-retest/tests/e2e.rs`: temporary `LAYR_ROOT`, a tiny project with three tests. Runs:
+- `crates/layr-retest/tests/e2e.rs`: runs `layr retest ...` (the `layr` built from this repository must be first in `PATH`), with a temporary `LAYR_ROOT`, a tiny project with three tests. Runs:
   no record, no change, change of one function, a new uncalled function, a change of a data file,
   full run with a contradiction. About 10 s. Needs `layr`, `cargo-nextest` and `llvm-tools`.
+  Also: `doctor` on the tiny project, and `init` twice. Unit tests: `init.rs` (idempotent edits), `doctor.rs` (the rules).
   Run: `cargo nextest run -p layr-retest`.
 
 ### Not done
@@ -564,7 +687,7 @@ the old chain is not used again. The end to end test shows it with a test that r
 - The record key does not include the nextest arguments. A run with other `-p` arguments only
   carries entries of the tests it lists; entries of other packages are dropped.
 - Test names are cleaned for profile file names. Two names that differ only in cleaned characters share a file.
-- The line root must be the cargo project root. The path of `layr-retest` must have no spaces
+- The line root must be the cargo project root. The path of the `layr` executable must have no spaces
   (cargo splits the runner on spaces).
 - Cross compilation: the runner variable uses the host triple.
 - No schedule for `--full`.

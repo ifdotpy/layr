@@ -1895,9 +1895,11 @@ mod tests {
         file.write_all_at(b"x", 8192)?;
         crate::fsutil::set_mtime(&file, m.mtime(), m.mtime_nsec())?;
         assert_ne!(crate::sys::apfs_data_identity(&src.join("file"))?.clone_id, right.clone_id);
-        let changes = crate::changes::file_changes(&base, &src)?;
-        assert_eq!(changes.len(), 1);
-        assert_eq!(changes[0].ranges, Some(vec![(8192, 4096)]));
+        // `file_changes` only tells that the file changed; `candidates` (merge) gives the ranges.
+        assert_eq!(crate::changes::file_changes(&base, &src)?.len(), 1);
+        let exact = candidates(&base, &src)?;
+        assert_eq!(exact.len(), 1);
+        assert_eq!(exact[0].ranges, Some(vec![(8192, 4096)]));
         Ok(())
     }
 

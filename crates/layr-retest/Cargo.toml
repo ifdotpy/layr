@@ -5,9 +5,10 @@ edition = "2021"
 description = "Run only the tests that a change can affect, on top of the layr CLI"
 license = "MIT"
 publish = false
+autobins = false
 
-[[bin]]
-name = "layr-retest"
+[lib]
+# Renamed to src/lib.rs once the changes to main.rs in open PRs are merged.
 path = "src/main.rs"
 
 [dependencies]

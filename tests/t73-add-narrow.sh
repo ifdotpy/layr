@@ -4,7 +4,7 @@
 # bytes is no change. LAYR_TRACE reports the entries a path scan visited.
 . "$(dirname "$0")/lib.sh"
 
-[ "$(uname -s)" = Darwin ] || { echo "skip: APFS only"; exit 0; }
+[ "$(uname -s)" = Darwin ] || { echo "$(basename "$0"): 0 passed, 0 failed (APFS only)"; exit 0; }
 sample $T/src
 l init p --from $T/src -q >/dev/null
 cd $LAYR_ROOT/projects/p/lines/main

@@ -196,6 +196,7 @@ Lines and states:
    save -m <message> [-a] [--amend]
    save [--note <text>] [--all-lines] [--running] [--force] [--caches [--cache <path>]]
    park [list/show/pop/apply/drop/clear]
+   retest run [--full] [--save] [-- <nextest args>], retest init [--yes], retest doctor
    tag, merge, pick, invert, replay, undo, op, try, bisect run, adopt
    ref set/list/log/delete, release attach/files/get, attest, attestations, change list/show/log/diff
    view [<rev or line>] [--json], view save [<line>], view show <id>
@@ -222,7 +223,7 @@ const OVERLAY_READS: &[&str] =
 /// Public command names, including removed commands with a replacement diagnostic.
 pub const COMMANDS: &[&str] = &[
     "help", "--help", "-h", "version", "--version", "status", "diff", "show", "log", "rev-parse", "merge-base", "blame",
-    "index", "grep", "ls-files", "add", "rm", "mv", "apply", "restore", "reset", "park", "clean", "line", "tag", "adopt",
+    "index", "grep", "ls-files", "add", "rm", "mv", "apply", "restore", "reset", "retest", "park", "clean", "line", "tag", "adopt",
     "merge", "pick", "invert", "replay", "save", "undo", "op", "try", "bisect", "access", "protect", "approve", "approvals",
     "checks", "ref", "release", "queue", "request", "requests", "view", "attest", "attestations", "change", "comment", "probe",
     "gc", "du", "fsck", "reindex", "init", "projects", "machines", "debug", "config", "cache", "layer", "remote", "fetch", "pull",

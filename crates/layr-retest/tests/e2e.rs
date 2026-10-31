@@ -1,6 +1,6 @@
 //! End to end: a tiny cargo project in a layr line with two tests on two functions.
-//! Needs a `layr` with cache overlays (the one built from this repository: `cargo build -p layr`
-//! and put `target/debug` first in PATH; the installed 0.4.0 of 2026-10-26 is too old),
+//! Runs `layr retest ...`. Needs the `layr` built from this repository first in PATH
+//! (`cargo build -p layr`, then `target/debug` first in PATH),
 //! `cargo nextest`, the registry package `hex` 0.4 in the cargo cache (the test runs offline), `cargo nextest` and the `llvm-tools` rustup component. The store is a temp
 //! folder with its own LAYR_ROOT. Takes about 10 s.
 
@@ -62,8 +62,10 @@ fn walk(dir: &Path) -> Vec<PathBuf> {
 
 fn retest(line: &Path, root: &Path, args: &[&str]) -> String {
     let t = std::time::Instant::now();
-    let (_, err) = sh(line, root, env!("CARGO_BIN_EXE_layr-retest"), args);
-    eprintln!("layr-retest {args:?}: {:.1}s\n{err}", t.elapsed().as_secs_f32());
+    let mut all = vec!["retest"];
+    all.extend_from_slice(args);
+    let (_, err) = sh(line, root, "layr", &all);
+    eprintln!("layr retest {args:?}: {:.1}s\n{err}", t.elapsed().as_secs_f32());
     err
 }
 
@@ -120,6 +122,15 @@ fn runs_only_the_stale_test() {
     assert!(deps("tests::th").contains("hex-0.4."), "{rec}");
     assert_eq!(deps("tests::ta"), "[]", "{rec}");
 
+    // 1b. Doctor: the two integration tests are two binaries, which it says; it reads and writes nothing.
+    let before = walk(&line).len();
+    let o = Command::new("layr").args(["retest", "doctor"]).current_dir(&line).env("LAYR_ROOT", &root).output().unwrap();
+    let text = String::from_utf8_lossy(&o.stdout);
+    assert_eq!(o.status.code(), Some(1), "{text}");
+    assert!(text.contains("tiny: 2 integration test binaries"), "{text}");
+    assert!(text.contains("ok: 2 records") || text.contains("ok: 1 records"), "{text}");
+    assert_eq!(walk(&line).len(), before);
+
     // 2. No change: nothing runs.
     let err = retest(&line, &root, &["run"]);
     assert!(err.contains("6 tests, 0 selected") && err.contains("no build"), "{err}");
@@ -137,11 +148,26 @@ fn runs_only_the_stale_test() {
     let err = retest(&line, &root, &["run"]);
     assert!(err.contains("6 tests, 0 selected") && !err.contains("no build"), "{err}");
 
-    // 3. Change the body of `a`: only `ta` runs.
+    // 3. Change the body of `a`: only `ta` runs. The build leaves old files behind: the sweep
+    // removes what this build did not use and keeps the rest (the run below needs the test binaries).
+    let debug = line.join("target/retest/debug");
+    let (zombie, zombie_meta) = (debug.join("deps/libzombie-0123456789abcdef.rlib"), debug.join("deps/zombie-0123456789abcdef.d"));
+    std::fs::write(&zombie, vec![0u8; 3_000_000]).unwrap();
+    std::fs::write(&zombie_meta, "x").unwrap();
+    let inc = std::fs::read_dir(debug.join("incremental")).unwrap().map(|e| e.unwrap().path()).find(|p| p.file_name().unwrap().to_string_lossy().starts_with("tiny-")).unwrap();
+    std::fs::create_dir_all(inc.join("s-0-old/x")).unwrap();
+    std::fs::write(inc.join("s-0-old.lock"), "").unwrap();
+    // Make the old session the oldest.
+    std::fs::File::open(inc.join("s-0-old")).unwrap().set_modified(std::time::UNIX_EPOCH).unwrap();
     std::fs::write(&lib, LIB.replace("    1\n", "    1 + 0\n")).unwrap();
     let err = retest(&line, &root, &["run"]);
     assert!(err.contains("6 tests, 1 selected"), "{err}");
     assert!(err.contains("ran 1, passed 1"), "{err}");
+    assert!(err.contains("swept stale build output, freed "), "{err}");
+    assert!(!zombie.exists() && !zombie_meta.exists() && !inc.join("s-0-old").exists() && !inc.join("s-0-old.lock").exists());
+    let live = std::fs::read_dir(debug.join("deps")).unwrap().filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with("libtiny-")).count();
+    assert!(live >= 1, "the sweep removed the live rlib of the package");
+    assert!(std::fs::read_dir(&inc).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().starts_with("s-")), "the newest session stays");
 
     // 4. A new function that no test calls: nothing runs.
     let s = std::fs::read_to_string(&lib).unwrap();
@@ -184,8 +210,8 @@ fn runs_only_the_stale_test() {
     assert!(err.contains("6 tests, 0 selected") && err.contains("no build"), "{err}");
 
     // 6. A full run runs all, fails `tc`, and reports the contradiction with the saved pass.
-    let o = Command::new(env!("CARGO_BIN_EXE_layr-retest"))
-        .args(["run", "--full"])
+    let o = Command::new("layr")
+        .args(["retest", "run", "--full"])
         .current_dir(&line)
         .env("LAYR_ROOT", &root)
         .env_remove("RUSTFLAGS")
@@ -244,7 +270,8 @@ fn vitest_adapter_with_a_fake_tool() {
     let line = root.join("projects/app/lines/work");
 
     let run = |args: &[&str]| -> (bool, String) {
-        let o = Command::new(env!("CARGO_BIN_EXE_layr-retest"))
+        let o = Command::new("layr")
+            .arg("retest")
             .args(args)
             .current_dir(&line)
             .env("LAYR_ROOT", &root)
@@ -333,5 +360,30 @@ fn workspace_dylib_is_an_export_object() {
     assert_eq!(rec["tests"]["dyn-app tests::ta"]["deps"].to_string(), "[]", "{rec}");
     let err = retest(&line, &root, &["run"]);
     assert!(err.contains("2 tests, 0 selected"), "{err}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// `layr retest init` edits `.layrattributes` and `.gitignore` once, and a second run changes nothing.
+#[test]
+fn init_is_idempotent() {
+    let tmp = std::env::temp_dir().canonicalize().unwrap().join(format!("layr-retest-init-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    std::fs::write(tmp.join("Cargo.toml"), "[package]\nname = \"p\"\nversion = \"0.1.0\"\n").unwrap();
+    std::fs::write(tmp.join(".gitignore"), "/target").unwrap();
+    let init = || {
+        let o = Command::new("layr").args(["retest", "init"]).current_dir(&tmp).env("LAYR_ROOT", tmp.join("unused")).output().unwrap();
+        (o.status.code(), String::from_utf8_lossy(&o.stdout).into_owned())
+    };
+    let (code, out) = init();
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.contains("layr retest run -- --workspace"), "{out}");
+    let attrs = std::fs::read_to_string(tmp.join(".layrattributes")).unwrap();
+    let ignore = std::fs::read_to_string(tmp.join(".gitignore")).unwrap();
+    assert_eq!(attrs, "target regenerable\n.layr-retest regenerable\n");
+    assert_eq!(ignore, "/target\n.layr-retest\n");
+    let (code, out) = init();
+    assert_eq!(code, Some(0), "{out}");
+    assert_eq!(std::fs::read_to_string(tmp.join(".layrattributes")).unwrap(), attrs);
+    assert_eq!(std::fs::read_to_string(tmp.join(".gitignore")).unwrap(), ignore);
     let _ = std::fs::remove_dir_all(&tmp);
 }

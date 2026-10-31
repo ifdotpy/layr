@@ -86,7 +86,7 @@ plain folder; `save --caches` says so.
 | `layr overlay repair <overlay>` | In the current line, the folder of that folder overlay: a plain folder becomes a cache again; a cache with versioned files becomes a plain folder. |
 | `layr overlay list` | Also shows, for each folder overlay in a line, the state of its folder, its size on disk and its saved state (was `layr cache list -v`). |
 | `layr cache add\|remove\|list\|repair\|pull` | Removed. Section 15 names the replacements. |
-| `layr gc` | Also applies `history` to overlay lines and `gc lru:<size>` to working folders. |
+| `layr gc [-n] [--no-dedup]` | Also applies `history` to overlay lines and `gc lru:<size>` to working folders, then shares equal cache content (section 16). |
 | `layr overlay remote add <overlay> <remote> <git URL>` | The overlay's history goes to its own git repository (section 7). Refused for a cache overlay. |
 | `layr push [--dry-run]` | Pushes every layer to each of its remotes (section 7). `--dry-run` lists layer, remote and size. |
 
@@ -353,3 +353,40 @@ The lines that carry caches are unchanged:
 - There is no `overlay delete`. The owner has not decided how to remove a cache overlay and its
   history. `-regenerable` stops new saves of the folder; the overlay keeps its states.
 - `pull_caches` stays in the library: `merge` calls it.
+
+## 16. Deduplication in `gc`
+
+A clone of a cache folder stops sharing as soon as a build tool writes a whole new file, even when
+the new file equals the old one. `layr gc` shares such content again, on APFS and on btrfs.
+
+- `layr gc` runs it by default and prints `shared <bytes> of disk in <n> cache file(s), <seconds> s` (physical bytes freed, and the wall clock of the pass).
+  `layr gc -n` changes nothing and prints `would share ...`. `--no-dedup` skips it.
+- Scope: one cache overlay at a time (`target` and `.layr-retest` never share with each other, and projects never do). In an overlay: the files in the folders of folder overlays in the working folders of the lines of the
+  project. Their content is matched with the files of cache states (`states/<id>@<path>`) and of
+  cache overlay states of the project. Those states are read-only, so they are sources only: gc
+  changes only files in the working folders of lines. Nothing outside these folders is read or
+  changed. Symbolic links are not followed. A file with more than one hard link, and a file under
+  4 KiB, is skipped.
+- Locks: the pass runs after `gc` has released the project lock, as `save --caches` copies caches
+  before its lock. A save or a build in a line can run at the same time.
+- APFS: whole files only. Files of equal size are hashed (SHA-256) and compared byte by byte. The
+  duplicate is replaced by a `clonefile` of one copy, made under a temporary name in the same
+  folder and moved over the duplicate with an atomic rename. The new file takes mode, owner,
+  extended attributes and mtime of the duplicate (cargo reads mtimes). Before the rename gc checks
+  that inode, size and mtime of the duplicate and of the source are as at the scan, and skips the
+  file when they changed. A file that already shares its extents with the source is skipped.
+  APFS has no block-level API, so partial matches stay.
+- btrfs: blocks, like `duperemove`, with `FIDEDUPERANGE` (in `sys.rs`). Each file is cut into
+  128 KiB blocks, which are hashed. Equal blocks of two files, at any offset, become one range
+  when they follow each other, and the kernel shares the range only if the bytes are equal, so a
+  write during the call cannot lose data. 128 KiB is the largest uncompressed extent: 4 KiB blocks
+  find more matches but split extents into many small ones. Ranges whose first byte already has the
+  same device offset (`FIEMAP`) are skipped, so a second run shares nothing new.
+- Cost: gc reads the cache files once to hash them. On APFS, files that already share all their
+  extents count as one file, so only distinct content is read; equal hashes are compared byte by
+  byte. A build right after gc is not slower: a clone costs nothing until cargo writes, and cargo
+  writes new files. `OverlayFS` stores have no extents to share: the pass does nothing there.
+  Measured on a cargo target of 190 MB per line in 5 lines (release build): 4.5 s.
+- The block pass is plain code with tests on every platform. The ioctl runs on btrfs only: its
+  test is `tests/t72-gc-dedup.sh` in the Linux job. On a file system without `FIDEDUPERANGE` the
+  pass ends without a change.

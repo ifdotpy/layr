@@ -520,7 +520,7 @@ pub fn add(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let (scan, paths, ignored_named) = match prepared {
         Some(v) => v,
         None => {
-            let (st, scan, _it, index) = h.repo.status(&line)?;
+            let (st, scan, _it, index) = h.repo.status_light(&line)?;
             let (paths, ignored) = select_add(&h, &a, &specs, &st, &scan.path, &index, &quiet)?;
             (scan, paths, ignored)
         }
@@ -930,7 +930,7 @@ pub fn commit(ctx: &Ctx, args: &[String]) -> Result<i32> {
     crate::gitbridge::check_git_head(&h.repo, &line)?;
     crate::repo::recover_cache_replacements(&h.repo.working(&line))?;
     if a.has("-a") && !stacked && !cfg!(target_os = "macos") {
-        let (st, scan, _it, _index) = h.repo.status(&line)?;
+        let (st, scan, _it, _index) = h.repo.status_light(&line)?;
         let paths: BTreeSet<String> = st.unstaged.iter().map(|c| c.path.clone()).collect();
         if !paths.is_empty() {
             stage_paths(&h.repo, &line, &scan.path, &paths)?;
@@ -990,13 +990,14 @@ pub fn commit(ctx: &Ctx, args: &[String]) -> Result<i32> {
             return Err(e);
         }
     };
-    let staged: Vec<Change> = match changes::file_changes(&head_root, &new_root) {
-        Ok(v) => v.into_iter().filter(|c| !skip_path(&c.path)).collect(),
+    let all_changes: Vec<Change> = match changes::file_changes(&head_root, &new_root) {
+        Ok(v) => v,
         Err(e) => {
             h.repo.discard_states(std::slice::from_ref(&state));
             return Err(e);
         }
     };
+    let staged: Vec<Change> = all_changes.iter().filter(|c| !skip_path(&c.path)).cloned().collect();
     if staged.is_empty() && !a.has("--allow-empty") && !a.has("--amend") {
         h.repo.discard_states(std::slice::from_ref(&state));
         #[cfg(target_os = "macos")]
@@ -1043,7 +1044,7 @@ pub fn commit(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
     }
     let secrets = crate::trace::span("secret check");
-    let checked = crate::secrets::check_between(ctx, &h.repo, &head_root, &new_root, &line.head);
+    let checked = crate::secrets::check_changes(ctx, &h.repo, &head_root, &new_root, &line.head, &all_changes);
     drop(secrets);
     if let Err(e) = checked {
         h.repo.discard_states(std::slice::from_ref(&state));
