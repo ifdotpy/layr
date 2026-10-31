@@ -73,7 +73,7 @@ jobs:
           bash tests/apfs-lock-hold.sh
           bash tests/save-unsettled.sh
           bash tests/run.sh t50-upstream-fixes t51-git-init-space t52-git-init-metadata t53-store-version t55-machine-identity t63-git-import-tree
-          LAYR_TEST_DIRECT_MAIN=1 bash tests/run.sh t01-basic t02-merge t03-git t05-transfer t06-sync t08-gitcompat t62-merge-git t68-line-base t69-work-mtime t70-du t71-gc-pushed t72-gc-dedup t73-add-narrow t75-save-change-rules t76-cache-recreated t77-unicode-names
+          LAYR_TEST_DIRECT_MAIN=1 bash tests/run.sh t01-basic t02-merge t03-git t05-transfer t06-sync t08-gitcompat t62-merge-git t68-line-base t69-work-mtime t70-du t71-gc-pushed t72-gc-dedup t73-add-narrow t75-save-change-rules t76-cache-recreated t77-unicode-names t79-regenerable-walk
           # The default macOS volume ignores case: run the core commands on such a store too.
           hdiutil create -size 2g -fs APFS -volname LayrCase -type SPARSE -o "$RUNNER_TEMP/case.sparseimage"
           hdiutil attach "$RUNNER_TEMP/case.sparseimage" -nobrowse

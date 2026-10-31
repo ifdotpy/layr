@@ -38,7 +38,18 @@ impl Change {
 pub fn candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<Change>> {
     let (parent, child) = (folder(parent)?, folder(child)?);
     let entries = btrfs::send_no_data(parent, child)?;
-    build(parent, child, entries)
+    Ok(without_skipped(child, build(parent, child, entries)?))
+}
+
+/// The changes without those below a folder that `fsutil::set_skipped` names for `child`.
+#[cfg(not(target_os = "macos"))]
+fn without_skipped(child: &Path, mut list: Vec<Change>) -> Vec<Change> {
+    let skipped = crate::fsutil::skipped_of(child);
+    if !skipped.is_empty() {
+        let below = |p: &str| skipped.iter().any(|s| p.strip_prefix(s.as_str()).is_some_and(|rest| rest.starts_with('/')));
+        list.retain(|c| !below(&c.path) && !c.old_path.as_deref().is_some_and(below));
+    }
+    list
 }
 
 fn build(parent: &Path, child: &Path, entries: Vec<stream::Entry>) -> Result<Vec<Change>> {
@@ -84,10 +95,7 @@ fn build(parent: &Path, child: &Path, entries: Vec<stream::Entry>) -> Result<Vec
     // Content below a moved folder moved too. One walk per outermost moved folder; a folder
     // moved inside it again maps its own files (the longest moved prefix of a path wins).
     let map: BTreeMap<String, String> = moved_dirs.iter().map(|(o, p)| (p.clone(), o.clone())).collect();
-    let roots: Vec<&String> = map
-        .keys()
-        .filter(|p| !p.match_indices('/').any(|(i, _)| map.contains_key(&p[..i])))
-        .collect();
+    let roots: Vec<&String> = map.keys().filter(|p| !p.match_indices('/').any(|(i, _)| map.contains_key(&p[..i]))).collect();
     for p in roots {
         let mut found: Vec<(String, String)> = Vec::new();
         fsutil::walk(child, p, &mut |rel, _m| {
@@ -345,7 +353,8 @@ fn candidates_equal(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -
 
 #[cfg(feature = "overlayfs")]
 pub fn candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<Change>> {
-    crate::storage::candidates(folder(parent)?, folder(child)?)
+    let child = folder(child)?;
+    Ok(without_skipped(child, crate::storage::candidates(folder(parent)?, child)?))
 }
 
 /// Linux backends compare complete folders only.

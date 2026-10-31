@@ -299,7 +299,10 @@ pub fn diff(ctx: &Ctx, args: &[String]) -> Result<i32> {
         // read-only snapshot when validation fails.
         let l = h.line()?;
         #[cfg(target_os = "macos")]
-        let fast = crate::storage::stable_read(&[repo.working(l).as_path()], || compute(&old, &new))?;
+        let fast = {
+            let _skip = repo.skip_guard(l)?;
+            crate::storage::stable_read(&[repo.working(l).as_path()], || compute(&old, &new))?
+        };
         #[cfg(not(target_os = "macos"))]
         let fast: Option<Vec<FileDiff>> = None;
         match fast {

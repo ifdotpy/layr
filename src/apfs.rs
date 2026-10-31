@@ -29,6 +29,10 @@ pub fn is_supported(path: &Path) -> bool {
 pub fn is_subvolume(path: &Path) -> bool {
     path.is_dir() && subvol_info(path).is_ok()
 }
+/// A folder that walks do not enter: a nested layer, or a regenerable folder that is no cache yet.
+fn is_nested(path: &Path) -> bool {
+    crate::fsutil::is_skipped(path) || is_subvolume(path)
+}
 pub fn subvol_info(path: &Path) -> Result<SubvolInfo> {
     Ok(serde_json::from_slice(&crate::sys::apfs_marker(path, None)?)?)
 }
@@ -133,6 +137,8 @@ pub(crate) fn scan_shared(root: &Path, data: bool) -> Result<Arc<BTreeMap<String
         let dir = crate::fsutil::open_dir_nofollow(root)?;
         scan_parallel(dir, root, &mut out)?;
     }
+    drop(_t);
+    let _t = crate::trace::span(format!("APFS bulk scan visited {} entries", out.len()));
     let out = Arc::new(out);
     if let Some(f) = saved {
         // A file that cannot be written only costs the next process a scan; this process keeps
@@ -443,7 +449,7 @@ fn read_folder(
             _ => crate::fsutil::FType::Special,
         };
         let is_file = ftype == crate::fsutil::FType::File;
-        if ftype == crate::fsutil::FType::Dir && !is_subvolume(&root.join(&next)) {
+        if ftype == crate::fsutil::FType::Dir && !is_nested(&root.join(&next)) {
             folders.push((name, next.clone()));
         }
         out.push((
@@ -882,11 +888,7 @@ pub(crate) fn needs_file_copies(_src: &Path, entries: &BTreeMap<String, ScanEntr
 
 /// Folders inside the tree that are trees of their own (nested layers).
 fn nested_layers<'a>(src: &Path, entries: &'a BTreeMap<String, ScanEntry>) -> Vec<&'a String> {
-    entries
-        .iter()
-        .filter(|(p, e)| !p.is_empty() && e.meta.is_dir() && is_subvolume(&src.join(p)))
-        .map(|(p, _)| p)
-        .collect()
+    entries.iter().filter(|(p, e)| !p.is_empty() && e.meta.is_dir() && is_nested(&src.join(p))).map(|(p, _)| p).collect()
 }
 
 /// Copy the complete tree `src` (scanned as `entries`) to the new path `dst`. A read-only copy
@@ -962,7 +964,8 @@ fn clone_around(
     fs::create_dir(&to)?;
     for e in fs::read_dir(&from)? {
         let name = e?.file_name();
-        let child = if rel.is_empty() { name.to_string_lossy().into_owned() } else { format!("{rel}/{}", name.to_string_lossy()) };
+        let child =
+            if rel.is_empty() { name.to_string_lossy().into_owned() } else { format!("{rel}/{}", name.to_string_lossy()) };
         let (cfrom, cto) = (from.join(&name), to.join(&name));
         if nested.contains(child.as_str()) {
             let cm = fs::symlink_metadata(&cfrom)?;
@@ -1335,7 +1338,7 @@ pub(crate) fn scan_at(root: &Path, rel: &str) -> Result<BTreeMap<String, ScanEnt
         Err(e) => return Err(e.into()),
     };
     out.insert(rel.to_string(), entry_of_metadata(&m, &path, true)?);
-    if m.is_dir() && !is_subvolume(&path) {
+    if m.is_dir() && !is_nested(&path) {
         let dir = crate::fsutil::open_dir_nofollow(&path)?;
         scan_bulk(&dir, root, rel, &mut out, &mut Vec::new())?;
     }
