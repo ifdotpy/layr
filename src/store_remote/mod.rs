@@ -657,8 +657,8 @@ impl Store {
                 continue;
             }
             let local = crate::model::Line { machine: repo.p.store.machine.id.clone(), owner: ctx.caller.uid, ..line.clone() };
-            if !repo.p.line_path(&local.name).exists() {
-                repo.materialize(&local, &local.head, &repo.p.line_path(&local.name))?;
+            if !repo.working(&local).exists() {
+                repo.materialize(&local, &local.head, &repo.working(&local))?;
                 let mut record = crate::model::Record::new("line.adopt");
                 record.lines.insert(
                     local.id.clone(),

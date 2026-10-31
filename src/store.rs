@@ -122,6 +122,7 @@ impl Store {
         if root.join(".layr-overlayfs").exists() {
             bail!("this store requires a layr build with the overlayfs feature");
         }
+        crate::linepaths::register(root);
         #[cfg(feature = "overlayfs")]
         crate::storage::recover(root)?;
         let machine_lock = fs::OpenOptions::new()
@@ -494,7 +495,15 @@ impl<'a> Project<'a> {
     pub fn has_state(&self, id: &str) -> bool {
         self.state_path(id).exists() || self.delta_path(id).exists()
     }
+    /// The working folder of a line: the path recorded by `layr line move`, else `lines/<name>`.
     pub fn line_path(&self, name: &str) -> PathBuf {
+        if let Some(path) = self.db.line_by_name(name).ok().flatten().and_then(|l| self.moved_path(&l.id)) {
+            return path;
+        }
+        self.default_line_path(name)
+    }
+    /// The folder of a line in the store, `lines/<name>`.
+    pub fn default_line_path(&self, name: &str) -> PathBuf {
         if check_name("line", name).is_ok() || (name.starts_with(".try-") && name[5..].chars().all(|c| c.is_ascii_hexdigit())) {
             self.lines_dir().join(name)
         } else {

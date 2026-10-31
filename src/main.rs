@@ -28,6 +28,7 @@ mod ids;
 use layr_store::http;
 mod ignore_rules;
 mod lineops;
+mod linepaths;
 mod merge;
 mod model;
 mod oci;
