@@ -117,11 +117,10 @@ l init gcviews --from "$T/src" -q >/dev/null
 G=$LAYR_ROOT/projects/gcviews/lines
 cd "$G/main"
 l config retention.auto 0; l config retention.hours 0; l config undo.days 0
-echo temporary > code
-l save -q
-AUTO=$(l rev-parse 'head@{0}')
-l line new -q temporary "$AUTO"
+l line new -q temporary
 cd "$G/temporary"
+echo temporary > code
+l save -qam temporary
 OLD=$(l view save --json)
 OLD_ID=$(printf '%s' "$OLD" | python3 -c 'import json,sys; print(json.load(sys.stdin)["view_id"])')
 OLD_STATE=$(printf '%s' "$OLD" | python3 -c 'import json,sys; print(json.load(sys.stdin)["view"]["shared"])')
