@@ -262,13 +262,15 @@ impl Drop for Lock {
         let args: Vec<String> = std::env::args().skip(1).collect();
         let mut command = args.join(" ");
         command.truncate(300);
+        // The slowest steps of the hold name its cause (`trace::span`).
         let line = format!(
-            "{}\t{}\twait_ms={}\theld_ms={}\t{}\n",
+            "{}\t{}\twait_ms={}\theld_ms={}\t{}\tspans={}\n",
             crate::ids::now_ms(),
             std::process::id(),
             self.waited.as_millis(),
             held.as_millis(),
-            command.replace(['\t', '\n'], " ")
+            command.replace(['\t', '\n'], " "),
+            crate::trace::slowest(3).replace(['\t', '\n'], " ")
         );
         if fs::metadata(&self.log).map(|m| m.len() > SLOW_LOCK_LOG_MAX).unwrap_or(false) {
             let _ = fs::remove_file(&self.log);
@@ -576,7 +578,10 @@ impl<'a> Project<'a> {
         }
         let lock = Lock {
             f: Some(f),
-            since: std::time::Instant::now(),
+            since: {
+                crate::trace::reset();
+                std::time::Instant::now()
+            },
             waited: asked.elapsed(),
             log: self.meta_dir().join("lock-slow.log"),
             trash: self.store.trash_dir(),

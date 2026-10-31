@@ -874,6 +874,7 @@ impl<'a> Repo<'a> {
     /// Save the working content as an automatic state if it changed since the previous one.
     /// The caller holds the project lock.
     pub fn save(&self, ctx: &Ctx, line: &Line, message: &str, running: bool, force: bool) -> Result<Option<StateRec>> {
+        let _t = crate::trace::span("save working state");
         let w = self.working(line);
         if !w.exists() {
             return Ok(None);
@@ -1461,6 +1462,7 @@ impl<'a> Repo<'a> {
         local: &BTreeSet<String>,
         force: bool,
     ) -> Result<Vec<Change>> {
+        let _t = crate::trace::span("write working folder");
         let list: Vec<Change> = changes::file_changes(from, to)?.into_iter().filter(|c| !skip_path(&c.path)).collect();
         if !force {
             let mut hit = BTreeSet::new();
