@@ -563,6 +563,10 @@ pub fn add_entries<'a>(
     whole: &BTreeSet<String>,
     mut gone: Option<&mut BTreeSet<String>>,
 ) -> Result<()> {
+    let write: Vec<&str> = write.collect();
+    // Folders that one clone copied with all the entries `write` names below them. A folder
+    // whose clone missed an entry (a writer changed it during the clone) is copied per entry.
+    let mut cloned: BTreeSet<String> = BTreeSet::new();
     let mut dirs: BTreeSet<String> = BTreeSet::new();
     // The ancestors of written and removed paths are folders of the layer (layer rule 5).
     // `diff` compares exact names, so a removed path and a written path never need the same
@@ -581,10 +585,10 @@ pub fn add_entries<'a>(
     for r in removed {
         container(&mut dirs, r)?;
     }
-    for k in write {
+    for &k in &write {
         // Below a folder that one clone copies with its content.
         // Its folders get the times of `src` below, as the folders of a per-entry copy do.
-        if ancestors(k).any(|a| whole.contains(a)) {
+        if ancestors(k).any(|a| cloned.contains(a)) {
             dirs.insert(k.to_string());
             continue;
         }
@@ -610,6 +614,17 @@ pub fn add_entries<'a>(
                 // metadata step below.
                 crate::sys::apfs_clone(&from, &to).with_context(|| format!("clone {}", from.display()))?;
                 crate::sys::apfs_immutable(&to, false)?;
+                let below = format!("{k}/");
+                let complete = write
+                    .iter()
+                    .filter(|w| w.starts_with(&below))
+                    .all(|w| fs::symlink_metadata(dst.join(w)).is_ok());
+                if complete {
+                    cloned.insert(k.to_string());
+                } else {
+                    apfs::delete_tree(&to)?;
+                    fs::create_dir(&to)?;
+                }
                 dirs.insert(k.to_string());
             } else if m.is_dir() {
                 fs::create_dir(&to)?;
