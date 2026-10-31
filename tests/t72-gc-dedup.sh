@@ -3,7 +3,7 @@
 # APFS clones whole files, btrfs shares blocks with FIDEDUPERANGE. One user, so it runs on
 # macOS and on Linux.
 . "$(dirname "$0")/lib.sh"
-[ -n "${LAYR_OVERLAYFS_TEST_ROOT:-}" ] && { echo "t72-gc-dedup.sh: 0 passed, 0 failed (OverlayFS shares nothing)"; exit 0; }
+[ -n "${LAYR_OVERLAYFS_TEST_ROOT:-}" ] && { echo "t72-gc-dedup.sh (OverlayFS shares nothing): 0 passed, 0 failed"; exit 0; }
 
 mtime() { python3 -c 'import os,sys; print(os.stat(sys.argv[1]).st_mtime_ns)' "$1"; }
 inode() { python3 -c 'import os,sys; print(os.stat(sys.argv[1]).st_ino)' "$1"; }
