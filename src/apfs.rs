@@ -4,12 +4,13 @@ use crate::fsutil::Src;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     fs::{self, File},
     io,
     os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
     process::Command,
+    sync::Arc,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,6 +111,12 @@ fn scan(root: &Path) -> Result<BTreeMap<String, ScanEntry>> {
 }
 
 pub(crate) fn scan_with_data(root: &Path, data: bool) -> Result<BTreeMap<String, ScanEntry>> {
+    Ok((*scan_shared(root, data)?).clone())
+}
+
+/// The scan of `root`, shared: the memo and the decoded scans give the same map to every
+/// caller without a copy.
+pub(crate) fn scan_shared(root: &Path, data: bool) -> Result<Arc<BTreeMap<String, ScanEntry>>> {
     let _ = data;
     if let Some(scan) = MEMO.with_borrow(|memo| memo.iter().find(|(r, _)| r == root).map(|(_, s)| s.clone())) {
         return Ok(scan);
@@ -117,7 +124,7 @@ pub(crate) fn scan_with_data(root: &Path, data: bool) -> Result<BTreeMap<String,
     let m = fs::symlink_metadata(root)?;
     let saved = sealed_scan_file(root, &m);
     if let Some(scan) = saved.as_ref().and_then(|f| decoded(f)) {
-        return Ok((*scan).clone());
+        return Ok(scan);
     }
     let _t = crate::trace::span("APFS bulk scan");
     let mut out = BTreeMap::new();
@@ -126,45 +133,74 @@ pub(crate) fn scan_with_data(root: &Path, data: bool) -> Result<BTreeMap<String,
         let dir = crate::fsutil::open_dir_nofollow(root)?;
         scan_parallel(dir, root, &mut out)?;
     }
+    let out = Arc::new(out);
     if let Some(f) = saved {
         // A file that cannot be written only costs the next process a scan; this process keeps
         // the scan in memory either way.
         let _ = fs::create_dir_all(f.parent().unwrap())
             .map_err(anyhow::Error::from)
-            .and_then(|_| crate::fsutil::atomic_write(&f, &encode_scan(&out), 0o600));
-        DECODED.lock().unwrap().push((f, std::sync::Arc::new(out.clone())));
+            .and_then(|_| crate::fsutil::cache_write(&f, &encode_scan(&out), 0o600));
+        DECODED.lock().unwrap().insert(f, out.clone());
     }
     Ok(out)
 }
 
 /// A command often reads one sealed tree more than once (a parent and its child share their
-/// base): the decoded scan stays in memory for the process, by the name of its file.
-static DECODED: std::sync::Mutex<Vec<(std::path::PathBuf, std::sync::Arc<BTreeMap<String, ScanEntry>>)>> =
-    std::sync::Mutex::new(Vec::new());
+/// base): the decoded scan stays in memory for the process, by the name of its file. The
+/// scans together hold at most `DECODED_ENTRIES` entries; the oldest go first.
+static DECODED: std::sync::Mutex<Decoded> = std::sync::Mutex::new(Decoded { by_file: None, order: VecDeque::new(), entries: 0 });
+const DECODED_ENTRIES: usize = 1_000_000;
 
-fn decoded(file: &Path) -> Option<std::sync::Arc<BTreeMap<String, ScanEntry>>> {
-    if let Some((_, scan)) = DECODED.lock().unwrap().iter().find(|(p, _)| p == file) {
-        return Some(scan.clone());
+struct Decoded {
+    by_file: Option<HashMap<PathBuf, Arc<BTreeMap<String, ScanEntry>>>>,
+    order: VecDeque<PathBuf>,
+    entries: usize,
+}
+impl Decoded {
+    fn get(&self, file: &Path) -> Option<Arc<BTreeMap<String, ScanEntry>>> {
+        self.by_file.as_ref()?.get(file).cloned()
     }
-    let scan = std::sync::Arc::new(decode_scan(&fs::read(file).ok()?)?);
-    DECODED.lock().unwrap().push((file.to_path_buf(), scan.clone()));
+    fn insert(&mut self, file: PathBuf, scan: Arc<BTreeMap<String, ScanEntry>>) {
+        let map = self.by_file.get_or_insert_with(HashMap::new);
+        self.entries += scan.len();
+        if let Some(old) = map.insert(file.clone(), scan) {
+            self.entries -= old.len();
+            self.order.retain(|f| *f != file);
+        }
+        self.order.push_back(file);
+        // The newest scan stays, however large.
+        while self.entries > DECODED_ENTRIES && self.order.len() > 1 {
+            let oldest = self.order.pop_front().unwrap();
+            if let Some(gone) = map.remove(&oldest) {
+                self.entries -= gone.len();
+            }
+        }
+    }
+}
+
+fn decoded(file: &Path) -> Option<Arc<BTreeMap<String, ScanEntry>>> {
+    if let Some(scan) = DECODED.lock().unwrap().get(file) {
+        return Some(scan);
+    }
+    let scan = Arc::new(decode_scan(&fs::read(file).ok()?)?);
+    DECODED.lock().unwrap().insert(file.to_path_buf(), scan.clone());
     Some(scan)
 }
 
 /// The entries of a sealed state or layer, from its saved scan (made now when it is missing).
 /// `None` for a tree that can change. Its paths are the names that the volume stores.
-pub(crate) fn sealed_entries(root: &Path) -> Option<std::sync::Arc<BTreeMap<String, ScanEntry>>> {
+pub(crate) fn sealed_entries(root: &Path) -> Option<Arc<BTreeMap<String, ScanEntry>>> {
     let m = fs::symlink_metadata(root).ok()?;
     let file = sealed_scan_file(root, &m)?;
     if let Some(scan) = decoded(&file) {
         return Some(scan);
     }
-    Some(std::sync::Arc::new(scan_with_data(root, true).ok()?))
+    scan_shared(root, true).ok()
 }
 
 thread_local! {
     /// The scans that `stable_read` validates, used by the read instead of new scans.
-    static MEMO: std::cell::RefCell<Vec<(std::path::PathBuf, BTreeMap<String, ScanEntry>)>> =
+    static MEMO: std::cell::RefCell<Vec<(std::path::PathBuf, Arc<BTreeMap<String, ScanEntry>>)>> =
         const { std::cell::RefCell::new(Vec::new()) };
     /// The paths below those roots whose content the read may use (`note_read`).
     static TOUCHED: std::cell::RefCell<Vec<(std::path::PathBuf, std::collections::BTreeSet<String>)>> =
@@ -177,7 +213,7 @@ pub fn with_known_scan<T>(root: &Path, scan: &BTreeMap<String, ScanEntry>, f: im
     let outer = MEMO.with_borrow_mut(|memo| {
         let outer = memo.clone();
         memo.retain(|(r, _)| r != root);
-        memo.push((root.to_path_buf(), scan.clone()));
+        memo.push((root.to_path_buf(), Arc::new(scan.clone())));
         outer
     });
     let out = f();
@@ -572,7 +608,7 @@ pub(crate) fn scan_with_lstat(root: &Path, data: bool) -> Result<BTreeMap<String
 /// Unknown counts (including mmap) or a concurrent change require a snapshot.
 pub fn stable_read<T>(roots: &[&Path], read: impl FnOnce() -> Result<T>) -> Result<Option<T>> {
     let _t = crate::trace::span("APFS validated read");
-    let before = roots.iter().map(|root| scan_with_data(root, true)).collect::<Result<Vec<_>>>()?;
+    let before = roots.iter().map(|root| scan_shared(root, true)).collect::<Result<Vec<_>>>()?;
     if before
         .iter()
         .any(|tree| tree.values().any(|entry| entry.meta.is_file() && entry.data.and_then(|d| d.generation).is_none()))
@@ -602,6 +638,40 @@ pub fn stable_read<T>(roots: &[&Path], read: impl FnOnce() -> Result<T>) -> Resu
         for p in &paths {
             // A deleted or replaced path can make either the read or this check fail.
             // Discard the result and use the existing snapshot path in that case.
+            match entry_at(root, p) {
+                Ok(now) if now.as_ref() == expected.get(p) => {}
+                _ => return Ok(None),
+            }
+        }
+    }
+    result.map(Some)
+}
+
+/// `stable_read` for a read that uses only `paths` below each root: only they are scanned and
+/// validated, not the whole tree. A path that the read notes and `paths` does not hold makes
+/// the check fail, so the caller falls back to a snapshot.
+pub fn stable_read_paths<T>(
+    roots: &[&Path],
+    paths: &std::collections::BTreeSet<String>,
+    read: impl FnOnce() -> Result<T>,
+) -> Result<Option<T>> {
+    let _t = crate::trace::span(format!("APFS validated read of {} paths", paths.len()));
+    let before = roots.iter().map(|root| scan_paths(*root, paths)).collect::<Result<Vec<_>>>()?;
+    if before
+        .iter()
+        .any(|tree| tree.values().any(|entry| entry.meta.is_file() && entry.data.and_then(|d| d.generation).is_none()))
+    {
+        return Ok(None);
+    }
+    let outer_touched =
+        TOUCHED.with_borrow_mut(|t| std::mem::replace(t, roots.iter().map(|r| (r.to_path_buf(), Default::default())).collect()));
+    let result = read();
+    let touched = TOUCHED.with_borrow_mut(|t| std::mem::replace(t, outer_touched));
+    for (root, paths) in &touched {
+        note_read(root, paths);
+    }
+    for ((root, expected), (_, paths)) in roots.iter().zip(&before).zip(touched) {
+        for p in &paths {
             match entry_at(root, p) {
                 Ok(now) if now.as_ref() == expected.get(p) => {}
                 _ => return Ok(None),
@@ -835,34 +905,29 @@ fn clone_complete_with(
     if needs_file_copies(src, entries, keep_links) {
         return copy_tree(src, dst, true, &mut BTreeMap::new());
     }
-    // Clone the tree at once when no entry needs file-by-file handling. The clone keeps flags,
-    // attributes, and creation times.
-    let nested = nested_layers(src, entries);
-    crate::sys::apfs_clone(src, dst)?;
+    // Clone whole subtrees that hold no nested layer. A nested layer stays outside the tree: as
+    // in a file-by-file copy, its folder is empty and carries no marker. A line's `.git` is such
+    // a layer. The work follows the tree without its nested layers, not their size.
+    let nested: BTreeSet<&str> = nested_layers(src, entries).into_iter().map(|p| p.as_str()).collect();
+    if nested.is_empty() {
+        crate::sys::apfs_clone(src, dst)?;
+    } else {
+        let _t = crate::trace::span(format!("APFS clone around {} nested layers", nested.len()));
+        let mut ancestors = BTreeSet::new();
+        for rel in &nested {
+            let mut at = *rel;
+            while let Some((parent, _)) = at.rsplit_once('/') {
+                ancestors.insert(parent);
+                at = parent;
+            }
+        }
+        ancestors.insert("");
+        clone_around(src, dst, "", &nested, &ancestors, readonly)?;
+    }
     if readonly {
         crate::sys::apfs_immutable(dst, false)?;
     } else {
         seal(dst, false, false)?;
-    }
-    // A nested layer stays outside the tree: as in a file-by-file copy, its folder is empty and
-    // carries no marker. A line's `.git` is such a layer, so this keeps whole-tree clones for lines.
-    for rel in nested {
-        let (from, to) = (src.join(rel), dst.join(rel));
-        let m = fs::symlink_metadata(&from)?;
-        // A read-only clone keeps the flags of the parent; open it for this one change.
-        let parent = to.parent().expect("nested layer has a parent").to_path_buf();
-        use std::os::macos::fs::MetadataExt as MacMetadataExt;
-        let sealed = fs::symlink_metadata(&parent)?.st_flags() & libc::UF_IMMUTABLE != 0;
-        if sealed {
-            crate::sys::apfs_immutable(&parent, false)?;
-        }
-        delete_tree(&to)?;
-        fs::create_dir(&to)?;
-        keep_birthtime(&m, &to)?;
-        fs::set_permissions(&to, fs::Permissions::from_mode(m.mode() & 0o7777))?;
-        if sealed {
-            crate::sys::apfs_immutable(&parent, true)?;
-        }
     }
     // A folder clone gives the folders the time of the clone; a btrfs snapshot keeps them.
     // They get the times of the source, from its scan.
@@ -880,6 +945,55 @@ fn clone_complete_with(
         }
         Ok(())
     })
+}
+
+/// Clone the folder `rel` of `src` that holds nested layers: its own entries one by one, whole
+/// subtrees at once, each nested layer as an empty folder with its creation time and mode.
+fn clone_around(
+    src: &Path,
+    dst: &Path,
+    rel: &str,
+    nested: &BTreeSet<&str>,
+    ancestors: &BTreeSet<&str>,
+    readonly: bool,
+) -> Result<()> {
+    let (from, to) = if rel.is_empty() { (src.to_path_buf(), dst.to_path_buf()) } else { (src.join(rel), dst.join(rel)) };
+    let m = fs::symlink_metadata(&from)?;
+    fs::create_dir(&to)?;
+    for e in fs::read_dir(&from)? {
+        let name = e?.file_name();
+        let child = if rel.is_empty() { name.to_string_lossy().into_owned() } else { format!("{rel}/{}", name.to_string_lossy()) };
+        let (cfrom, cto) = (from.join(&name), to.join(&name));
+        if nested.contains(child.as_str()) {
+            let cm = fs::symlink_metadata(&cfrom)?;
+            fs::create_dir(&cto)?;
+            keep_birthtime(&cm, &cto)?;
+            fs::set_permissions(&cto, fs::Permissions::from_mode(cm.mode() & 0o7777))?;
+        } else if ancestors.contains(child.as_str()) {
+            clone_around(src, dst, &child, nested, ancestors, readonly)?;
+        } else {
+            // An entry that a writer removed during the copy: the scan after the copy sees the
+            // change. Any other failure stops the copy.
+            let copied = match fs::symlink_metadata(&cfrom) {
+                Ok(cm) if cm.file_type().is_symlink() => copy_tree(&cfrom, &cto, false, &mut BTreeMap::new()),
+                Ok(_) => crate::sys::apfs_clone(&cfrom, &cto).map_err(anyhow::Error::from),
+                Err(e) => Err(e.into()),
+            };
+            if let Err(err) = copied {
+                if fs::symlink_metadata(&cfrom).is_ok() {
+                    return Err(err.context(format!("clone {}", cfrom.display())));
+                }
+                let _ = delete_tree(&cto);
+            }
+        }
+    }
+    // The folder gets the metadata of the source last: a copy of a sealed folder is sealed.
+    keep_birthtime(&m, &to)?;
+    crate::sys::apfs_copy_metadata(&from, &to).with_context(|| format!("copy metadata {}", to.display()))?;
+    if !(readonly && !rel.is_empty()) {
+        crate::sys::apfs_immutable(&to, false)?;
+    }
+    Ok(())
 }
 
 pub fn snapshot(src: &Path, dst: &Path, readonly: bool) -> Result<()> {
@@ -1009,10 +1123,7 @@ fn copy_snapshot(src: &Path, dst: &Path, readonly: bool, keep_links: bool) -> Re
                 break;
             }
             if round + 1 == crate::thin::COPY_ROUNDS {
-                eprintln!(
-                    "warning: {} changed during the whole copy; each file is kept as one of its versions from that time",
-                    src.display()
-                );
+                crate::fsutil::mark_unsettled(src);
                 break;
             }
             let paths = crate::thin::changed_paths(&before, &after);
@@ -1137,9 +1248,60 @@ pub(crate) fn scan_src(s: &(impl Src + ?Sized)) -> Result<BTreeMap<String, ScanE
         _ => scan_with_data(s.folder().context("missing tree folder")?, true),
     }
 }
+/// Candidates with the exact changed ranges of every changed file.
 pub fn candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<crate::changes::Change>> {
+    candidates_of(parent, child, true)
+}
+
+/// Candidates for callers that only ask whether content differs: a changed file has no ranges.
+pub fn candidates_equal(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<crate::changes::Change>> {
+    candidates_of(parent, child, false)
+}
+
+fn candidates_of(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), exact: bool) -> Result<Vec<crate::changes::Change>> {
     let _t = crate::trace::span("APFS candidates");
-    candidates_scanned(parent, child, scan_src(parent)?, scan_src(child)?)
+    let (a, b) = match top_layer_scans(parent, child)? {
+        Some(both) => both,
+        None => (scan_src(parent)?, scan_src(child)?),
+    };
+    candidates_scanned_with(parent, child, a, b, exact)
+}
+
+/// The entries that can differ when `parent` is the direct base of the thin tree `child`: those
+/// of its top layer and those below its removed paths. No other entry changed.
+#[allow(clippy::type_complexity)]
+fn top_layer_scans(
+    parent: &(impl Src + ?Sized),
+    child: &(impl Src + ?Sized),
+) -> Result<Option<(BTreeMap<String, ScanEntry>, BTreeMap<String, ScanEntry>)>> {
+    let Some(c) = child.layered().filter(|c| !c.is_complete()) else {
+        return Ok(None);
+    };
+    let base = match (parent.layered(), parent.folder()) {
+        (Some(l), _) => l.clone(),
+        (None, Some(f)) => crate::thin::Layered::complete(f),
+        _ => return Ok(None),
+    };
+    if c.roots()[1..] != base.roots()[..] {
+        return Ok(None);
+    }
+    let top = scan_with_data(c.top(), true)?;
+    let mut a = BTreeMap::new();
+    for k in top.keys().filter(|k| !k.is_empty()) {
+        if let Some(e) = base.entry(k)? {
+            a.insert(k.clone(), e);
+        }
+    }
+    for r in c.top_removed() {
+        a.extend(base.scan_at(r)?);
+    }
+    let _t = crate::trace::span(format!("APFS top layer candidates from {} entries", top.len() + a.len()));
+    Ok(Some((a, top)))
+}
+
+/// The entry at `path` alone, as a scan gives it.
+pub(crate) fn entry_of_path(path: &Path) -> Result<ScanEntry> {
+    entry_of_metadata(&fs::symlink_metadata(path)?, path, true)
 }
 
 /// Entries at and below `paths` of a folder or a layered tree, as `scan_src` gives them.
@@ -1157,6 +1319,7 @@ pub(crate) fn scan_paths(
             None => out.extend(scan_at(s.folder().context("missing tree folder")?, p)?),
         }
     }
+    let _t = crate::trace::span(format!("APFS scan of {} paths visited {} entries", paths.len(), out.len()));
     Ok(out)
 }
 
@@ -1179,12 +1342,24 @@ pub(crate) fn scan_at(root: &Path, rel: &str) -> Result<BTreeMap<String, ScanEnt
     Ok(out)
 }
 
-/// `candidates` from given scans of both trees.
+/// `candidates_equal` from given scans of both trees.
 pub(crate) fn candidates_scanned(
     parent: &(impl Src + ?Sized),
     child: &(impl Src + ?Sized),
     a: BTreeMap<String, ScanEntry>,
     b: BTreeMap<String, ScanEntry>,
+) -> Result<Vec<crate::changes::Change>> {
+    candidates_scanned_with(parent, child, a, b, false)
+}
+
+/// `candidates` from given scans of both trees. `exact` computes the changed ranges of changed
+/// files; else a file with other content has none, and an equal one has an empty list.
+fn candidates_scanned_with(
+    parent: &(impl Src + ?Sized),
+    child: &(impl Src + ?Sized),
+    a: BTreeMap<String, ScanEntry>,
+    b: BTreeMap<String, ScanEntry>,
+    exact: bool,
 ) -> Result<Vec<crate::changes::Change>> {
     // An entry that both trees have with the same metadata and shared data is no candidate, as
     // the btrfs stream would not name it: no `Change` for it.
@@ -1287,7 +1462,13 @@ pub(crate) fn candidates_scanned(
             if !shared {
                 read.push(p.clone());
             }
-            c.ranges = Some(if shared { Vec::new() } else { changed_ranges(parent, child, p)? });
+            c.ranges = if shared {
+                Some(Vec::new())
+            } else if exact {
+                Some(changed_ranges(parent, child, p)?)
+            } else {
+                same_content(parent, child, p)?.then(Vec::new)
+            };
         }
     }
     // Content comes only from compared files and from paths that appear, go or move.
@@ -1301,6 +1482,36 @@ pub(crate) fn candidates_scanned(
         note_read(root, &read);
     }
     Ok(changes.into_values().collect())
+}
+
+/// True when both files hold the same bytes. Stops at the first difference and reads in large
+/// buffers; blocks at the same physical address are skipped (`unshared`).
+fn same_content(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), rel: &str) -> Result<bool> {
+    use std::os::unix::fs::FileExt;
+    let open = |p: PathBuf| -> Result<File> {
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(&p).with_context(|| format!("open {}", p.display()))
+    };
+    let (a, b) = (open(parent.at(rel)?)?, open(child.at(rel)?)?);
+    let len = a.metadata()?.len();
+    if len != b.metadata()?.len() {
+        return Ok(false);
+    }
+    let read = if len >= SHARED_MIN { unshared(&a, &b, len) } else { vec![(0, len)] };
+    let (mut ab, mut bb) = (vec![0u8; 1 << 20], vec![0u8; 1 << 20]);
+    for (from, to) in read {
+        let mut pos = from;
+        while pos < to {
+            let n = ((to - pos).min(ab.len() as u64)) as usize;
+            a.read_exact_at(&mut ab[..n], pos)?;
+            b.read_exact_at(&mut bb[..n], pos)?;
+            if ab[..n] != bb[..n] {
+                return Ok(false);
+            }
+            pos += n as u64;
+        }
+    }
+    Ok(true)
 }
 
 // Compare fixed blocks when APFS cannot report changed extents. Adjacent blocks coalesce.
@@ -1695,9 +1906,11 @@ mod tests {
         file.write_all_at(b"x", 8192)?;
         crate::fsutil::set_mtime(&file, m.mtime(), m.mtime_nsec())?;
         assert_ne!(crate::sys::apfs_data_identity(&src.join("file"))?.clone_id, right.clone_id);
-        let changes = crate::changes::file_changes(&base, &src)?;
-        assert_eq!(changes.len(), 1);
-        assert_eq!(changes[0].ranges, Some(vec![(8192, 4096)]));
+        // `file_changes` only tells that the file changed; `candidates` (merge) gives the ranges.
+        assert_eq!(crate::changes::file_changes(&base, &src)?.len(), 1);
+        let exact = candidates(&base, &src)?;
+        assert_eq!(exact.len(), 1);
+        assert_eq!(exact[0].ranges, Some(vec![(8192, 4096)]));
         Ok(())
     }
 

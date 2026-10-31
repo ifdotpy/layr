@@ -9,6 +9,25 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static UNSETTLED: AtomicBool = AtomicBool::new(false);
+
+/// A copy of `src` could not settle: writers changed it in every round, so its files come from
+/// different moments. The copy stays; `repo.save` marks the state as taken while processes ran.
+pub fn mark_unsettled(src: &Path) {
+    if !UNSETTLED.swap(true, Ordering::Relaxed) {
+        eprintln!(
+            "layr: {} kept changing while it was copied; the state is kept and marked as taken while processes ran",
+            src.display()
+        );
+    }
+}
+
+/// Whether a copy has not settled since the last call; clears the mark.
+pub fn take_unsettled() -> bool {
+    UNSETTLED.swap(false, Ordering::Relaxed)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FType {
@@ -543,25 +562,51 @@ fn open_ro(p: &Path) -> Result<File> {
     OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(p).with_context(|| format!("open {}", p.display()))
 }
 
+thread_local! {
+    /// The two compare buffers of `same_range`, reused by every call of the thread.
+    static COMPARE_BUFFERS: std::cell::RefCell<(Vec<u8>, Vec<u8>)> =
+        const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
+}
+
 fn same_range(a: &mut File, b: &mut File, off: u64, len: u64) -> Result<bool> {
+    let _t = crate::trace::span("content compare");
     a.seek(SeekFrom::Start(off))?;
     b.seek(SeekFrom::Start(off))?;
-    let mut left = len;
-    let mut ba = vec![0u8; 1 << 16];
-    let mut bb = vec![0u8; 1 << 16];
-    while left > 0 {
-        let want = left.min(ba.len() as u64) as usize;
-        let na = read_full(a, &mut ba[..want])?;
-        let nb = read_full(b, &mut bb[..want])?;
-        if na != nb || ba[..na] != bb[..nb] {
-            return Ok(false);
+    COMPARE_BUFFERS.with(|cell| {
+        let (ba, bb) = &mut *cell.borrow_mut();
+        ba.resize(1 << 16, 0);
+        bb.resize(1 << 16, 0);
+        let mut left = len;
+        while left > 0 {
+            let want = left.min(ba.len() as u64) as usize;
+            let na = read_full(a, &mut ba[..want])?;
+            let nb = read_full(b, &mut bb[..want])?;
+            if na != nb || ba[..na] != bb[..nb] {
+                return Ok(false);
+            }
+            if na < want {
+                break;
+            }
+            left -= na as u64;
         }
-        if na < want {
-            break;
+        Ok(true)
+    })
+}
+
+/// The byte ranges as sorted, disjoint `(offset, length)` pairs inside a file of `size` bytes:
+/// overlapping and adjacent ranges merge, so no byte is compared twice.
+fn merged_ranges(ranges: &[(u64, u64)], size: u64) -> Vec<(u64, u64)> {
+    let mut v: Vec<(u64, u64)> =
+        ranges.iter().filter(|(off, _)| *off < size).map(|(off, len)| (*off, off.saturating_add(*len).min(size))).collect();
+    v.sort_unstable();
+    let mut out: Vec<(u64, u64)> = Vec::with_capacity(v.len());
+    for (start, end) in v {
+        match out.last_mut() {
+            Some(last) if start <= last.1 => last.1 = last.1.max(end),
+            _ => out.push((start, end)),
         }
-        left -= na as u64;
     }
-    Ok(true)
+    out.into_iter().map(|(start, end)| (start, end - start)).collect()
 }
 
 fn read_full(f: &mut File, buf: &mut [u8]) -> Result<usize> {
@@ -604,12 +649,8 @@ pub fn same_entry(
             let mut b = open_ro(&rb.at(pb)?)?;
             match ranges {
                 Some(rs) => {
-                    for (off, len) in rs {
-                        if *off >= ma.size {
-                            continue;
-                        }
-                        let l = (*len).min(ma.size - off);
-                        if !same_range(&mut a, &mut b, *off, l)? {
+                    for (off, len) in merged_ranges(rs, ma.size) {
+                        if !same_range(&mut a, &mut b, off, len)? {
                             return Ok(false);
                         }
                     }
@@ -920,6 +961,16 @@ fn walk_folder(root: &Path, rel: &str, f: &mut dyn FnMut(&str, &Meta) -> Result<
 
 /// Write `data` to `path` atomically: a temporary file, `fsync`, rename, `fsync` of the folder.
 pub fn atomic_write(path: &Path, data: &[u8], mode: u32) -> Result<()> {
+    write_durable(path, data, mode, true)
+}
+
+/// Write a rebuildable cache file: published atomically (never a partial file), without
+/// `fsync`. A crash can lose it; the next command makes it again.
+pub fn cache_write(path: &Path, data: &[u8], mode: u32) -> Result<()> {
+    write_durable(path, data, mode, false)
+}
+
+fn write_durable(path: &Path, data: &[u8], mode: u32, durable: bool) -> Result<()> {
     use std::io::Write;
     let dir = path.parent().ok_or_else(|| anyhow!("no parent"))?;
     // A new file with an unpredictable name, never through an existing name or a link.
@@ -932,10 +983,14 @@ pub fn atomic_write(path: &Path, data: &[u8], mode: u32) -> Result<()> {
     {
         let mut f = OpenOptions::new().write(true).create_new(true).custom_flags(libc::O_NOFOLLOW).mode(mode).open(&tmp)?;
         f.write_all(data)?;
-        f.sync_all()?;
+        if durable {
+            f.sync_all()?;
+        }
     }
     fs::rename(&tmp, path)?;
-    File::open(dir)?.sync_all()?;
+    if durable {
+        File::open(dir)?.sync_all()?;
+    }
     Ok(())
 }
 
@@ -1196,4 +1251,16 @@ pub fn fiemap_space(root: &Path) -> Result<Space> {
     let mut space = Space::default();
     fiemap_visit(root, &mut |h| space.add(h))?;
     Ok(space)
+}
+
+#[cfg(test)]
+mod range_tests {
+    use super::merged_ranges;
+
+    #[test]
+    fn ranges_merge_and_clip() {
+        let r = [(100, 50), (0, 10), (10, 5), (120, 100), (500, 1), (300, u64::MAX)];
+        assert_eq!(merged_ranges(&r, 400), vec![(0, 15), (100, 120), (300, 100)]);
+        assert_eq!(merged_ranges(&[], 400), vec![]);
+    }
 }

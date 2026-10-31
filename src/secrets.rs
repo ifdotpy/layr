@@ -294,7 +294,14 @@ fn scan_large(
     Ok(())
 }
 
-fn check_tree(ctx: &Ctx, repo: &Repo, old: Option<&Snap>, new: &Snap, rev: &str) -> Result<()> {
+fn check_tree(
+    ctx: &Ctx,
+    repo: &Repo,
+    old: Option<&Snap>,
+    new: &Snap,
+    rev: &str,
+    changes: Option<&[crate::changes::Change]>,
+) -> Result<()> {
     if repo.p.is_overlay() {
         return Ok(());
     }
@@ -304,7 +311,7 @@ fn check_tree(ctx: &Ctx, repo: &Repo, old: Option<&Snap>, new: &Snap, rev: &str)
         return Ok(());
     }
     let approvals = allowed(repo)?;
-    check_indexed(old, new, rev, &key, &hashes, &approvals)
+    check_indexed(old, new, rev, &key, &hashes, &approvals, changes)
 }
 
 fn check_indexed(
@@ -314,9 +321,13 @@ fn check_indexed(
     key: &[u8],
     hashes: &Index,
     approvals: &BTreeSet<(String, String)>,
+    changes: Option<&[crate::changes::Change]>,
 ) -> Result<()> {
     let files = match old {
-        Some(old) => crate::diff::file_diffs(old, new, &crate::changes::file_changes(old, new)?)?,
+        Some(old) => match changes {
+            Some(list) => crate::diff::file_diffs(old, new, list)?,
+            None => crate::diff::file_diffs(old, new, &crate::changes::file_changes(old, new)?)?,
+        },
         None => crate::overlay::files_of(new)?
             .into_iter()
             .map(|path| {
@@ -347,7 +358,12 @@ fn check_indexed(
 }
 
 pub fn check_between(ctx: &Ctx, repo: &Repo, old: &Snap, new: &Snap, rev: &str) -> Result<()> {
-    check_tree(ctx, repo, Some(old), new, rev)
+    check_tree(ctx, repo, Some(old), new, rev, None)
+}
+
+/// `check_between` for a caller that already computed `file_changes(old, new)`.
+pub fn check_changes(ctx: &Ctx, repo: &Repo, old: &Snap, new: &Snap, rev: &str, changes: &[crate::changes::Change]) -> Result<()> {
+    check_tree(ctx, repo, Some(old), new, rev, Some(changes))
 }
 
 /// One operation uses one current source index, then checks each state's changed files.
@@ -367,14 +383,14 @@ pub fn check_states<'a>(ctx: &Ctx, repo: &Repo, states: impl IntoIterator<Item =
         let record = repo.state(state)?;
         let root = repo.state_src(state)?;
         let old = record.parents.first().map(|parent| repo.state_src(parent)).transpose()?;
-        check_indexed(old.as_ref(), &root, state, &key, &hashes, &approvals)?;
+        check_indexed(old.as_ref(), &root, state, &key, &hashes, &approvals, None)?;
     }
     Ok(())
 }
 
 /// A folder export sends only the selected tree, including unchanged files.
 pub fn check_contents(ctx: &Ctx, repo: &Repo, state: &str) -> Result<()> {
-    check_tree(ctx, repo, None, &repo.state_src(state)?, state)
+    check_tree(ctx, repo, None, &repo.state_src(state)?, state, None)
 }
 
 /// Exports include history, so inspect every state that can leave the machine. A state with a

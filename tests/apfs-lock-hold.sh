@@ -116,6 +116,15 @@ eq "reset --hard copies no tree under the lock" "" "$(locked "$trace" | grep -E 
 no "reset --hard removes a file that the target does not have" test -e topic.txt
 eq "reset --hard keeps untracked files" "300" "$(ls bulk | wc -l | tr -d ' ')"
 eq "no prepared copies stay" "" "$(ls -A "$LAYR_ROOT/projects/hold/meta/work" 2>/dev/null)"
+# status compares the working folder without the store lock: the scan and the compare come
+# before any lock, and a status with no staged change takes none.
+cd "$P/topic" || exit 1
+printf 'dirty\n' > dirty.txt
+trace=$(LAYR_TRACE=1 l status 2>&1)
+has "status compares the folder" "status compare" "$trace"
+eq "status compares nothing under the store lock" "" "$(locked "$trace" | grep -E 'status compare|scan|validated read')"
+eq "status holds no store lock" "" "$(printf '%s\n' "$trace" | grep 'store lock taken')"
+rm -f dirty.txt
 # replay merges each state onto the new base before the lock; under it each step takes its result.
 l line new -q rp-base main
 l line new -q rp-work main
@@ -164,6 +173,28 @@ has "undo takes the lock" "store lock taken" "$trace"
 eq "undo builds no state tree under the lock" "" "$(locked "$trace" | grep 'thin materialize')"
 no "undo of the pick removes the file" test -e pk.txt
 eq "no prepared copies stay after these commands" "" "$(ls -A "$LAYR_ROOT/projects/hold/meta/work" 2>/dev/null)"
+# line new clones the tree, makes .git and takes caches before the lock; under it only renames.
+cd "$P/main" || exit 1
+for opt in "" "--count 2"; do
+    trace=$(LAYR_TRACE=1 l line new $opt -q nl${opt:+b} 2>&1)
+    has "line new $opt takes the lock" "store lock taken" "$trace"
+    has "line new $opt prepares before the lock" "prepare lines" "$trace"
+    eq "line new $opt copies no tree under the lock" "" "$(locked "$trace" | grep -E "$copies|make .git|git folder|take cache")"
+    eq "line new $opt runs no preparation under the lock" "" "$(locked "$trace" | grep -E 'prepare lines')"
+done
+ok "the new lines exist" test -d "$P/nl" -a -d "$P/nlb-1" -a -d "$P/nlb-2"
+no "a taken name is refused" l line new -q nl
+eq "no prepared copies stay after line new" "" "$(ls -A "$LAYR_ROOT/projects/hold/meta/work" 2>/dev/null)"
 eq "the trash is empty" "" "$(ls -A "$LAYR_ROOT/trash" 2>/dev/null)"
 ok "states remain valid" l fsck
+
+# gc reads the thin layers a fixed number of times, however many states it deletes, and leaves no trash.
+cd "$P/main" || exit 1
+l config retention.auto 2; l config retention.hours 0; l config undo.days 0
+for i in 1 2 3 4 5 6 7 8; do echo "$i" > gcauto.txt; l save -q; done
+trace=$(LAYR_TRACE=1 l gc 2>&1)
+n=$(printf '%s\n' "$trace" | grep -c 'thin bases')
+ok "gc walks the layers at most three times, not once per deleted state" test "$n" -ge 1 -a "$n" -le 3
+eq "the trash is empty after gc" "" "$(ls -A "$LAYR_ROOT/trash" 2>/dev/null)"
+ok "states remain valid after gc" l fsck
 finish

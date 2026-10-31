@@ -49,8 +49,6 @@ pub fn status(ctx: &Ctx, args: &[String]) -> Result<i32> {
         .flag("--json");
     let a = parse(&spec, args)?;
     let h = here(ctx)?;
-    #[cfg(target_os = "macos")]
-    let lock = h.repo.p.lock()?;
     let line = h.line()?.clone();
     #[cfg(target_os = "macos")]
     let line = h.repo.line(&line.id)?;
@@ -59,14 +57,24 @@ pub fn status(ctx: &Ctx, args: &[String]) -> Result<i32> {
     #[cfg(target_os = "macos")]
     let mut st = {
         let _t = crate::trace::span("status compare");
-        if filtered.is_some() { h.repo.snapshot_status(ctx, &line)? } else { h.repo.status_report(&line)? }
+        if filtered.is_some() {
+            h.repo.snapshot_status(ctx, &line)?
+        } else {
+            // The comparison runs without the store lock, as on Linux: it can last many seconds
+            // and the saved status is published by an atomic rename. A save, add or reset that
+            // swaps the staging folder meanwhile makes it fail; then it runs again under the lock.
+            match h.repo.status_report(&line) {
+                Ok(st) => st,
+                Err(_) => {
+                    let _lock = h.repo.p.lock()?;
+                    let line = h.repo.line(&line.id)?;
+                    h.repo.status_report(&line)?
+                }
+            }
+        }
     };
     #[cfg(not(target_os = "macos"))]
     let mut st = if filtered.is_some() { h.repo.snapshot_status(ctx, &line)? } else { h.repo.status(&line)?.0 };
-    // The lock keeps the index still while the working folder is compared. The rest only reads
-    // immutable states, so other commands must not wait for it.
-    #[cfg(target_os = "macos")]
-    drop(lock);
     // The files of quiet overlays are not shown (docs/cache-overlays.md, section 4.1).
     let quiet = {
         let _t = crate::trace::span("status quiet paths");
@@ -414,6 +422,39 @@ fn select_add(
     Ok((paths, ignored_named))
 }
 
+/// The paths that `add` with these pathspecs can touch, with the ignore files that decide
+/// their state: every parent folder's. `None` (the whole tree) when a spec names the root.
+#[cfg(target_os = "macos")]
+fn add_scan_limit(specs: &[String]) -> Option<BTreeSet<String>> {
+    let mut out = BTreeSet::new();
+    for s in specs {
+        // A pattern is read from its last literal folder.
+        let lit = match s.find(['*', '?', '[']) {
+            Some(i) => s[..i].rfind('/').map(|j| &s[..j]).unwrap_or(""),
+            None => s.as_str(),
+        };
+        if lit.is_empty() {
+            return None;
+        }
+        out.insert(lit.to_string());
+        let mut dir = String::new();
+        let mut parts: Vec<&str> = lit.split('/').collect();
+        parts.pop();
+        for name in std::iter::once("").chain(parts.into_iter()) {
+            if !name.is_empty() {
+                if !dir.is_empty() {
+                    dir.push('/');
+                }
+                dir.push_str(name);
+            }
+            for f in [".gitignore", ".layrignore"] {
+                out.insert(if dir.is_empty() { f.to_string() } else { format!("{dir}/{f}") });
+            }
+        }
+    }
+    Some(out)
+}
+
 pub fn add(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let spec = Spec::new()
         .flag("-A|--all")
@@ -446,6 +487,8 @@ pub fn add(ctx: &Ctx, args: &[String]) -> Result<i32> {
     // large line. They run before the store lock; under it the copy is used when the head and
     // the staging content did not change, else the read runs again under the lock.
     #[cfg(target_os = "macos")]
+    let limit = add_scan_limit(&specs);
+    #[cfg(target_os = "macos")]
     let read = |line: &Line| -> Result<Option<(crate::repo::Temp, BTreeSet<String>, Vec<String>)>> {
         let quiet = h.repo.quiet_paths(line)?;
         let work = h.repo.working(line);
@@ -454,14 +497,18 @@ pub fn add(ctx: &Ctx, args: &[String]) -> Result<i32> {
         if let Some(s) = &stage {
             roots.push(s.as_path());
         }
-        crate::storage::stable_read(&roots, || {
-            let st = h.repo.status_for_add(line, &work, &index)?;
+        let read = || {
+            let st = h.repo.status_for_add(line, &work, &index, limit.as_ref())?;
             let (paths, ignored) = select_add(&h, &a, &specs, &st, &work, &index, &quiet)?;
             let scan = crate::repo::Temp { path: h.repo.p.scan_dir().join(ids::new_id()) };
             crate::storage::create_subvolume(&scan.path)?;
             crate::storage::copy_selected(&work, &scan.path, &paths)?;
             Ok((scan, paths, ignored))
-        })
+        };
+        match &limit {
+            Some(l) => crate::storage::stable_read_paths(&roots, l, read),
+            None => crate::storage::stable_read(&roots, read),
+        }
     };
     #[cfg(target_os = "macos")]
     let early = {
@@ -481,7 +528,7 @@ pub fn add(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let (scan, paths, ignored_named) = match prepared {
         Some(v) => v,
         None => {
-            let (st, scan, _it, index) = h.repo.status(&line)?;
+            let (st, scan, _it, index) = h.repo.status_light(&line)?;
             let (paths, ignored) = select_add(&h, &a, &specs, &st, &scan.path, &index, &quiet)?;
             (scan, paths, ignored)
         }
@@ -891,7 +938,7 @@ pub fn commit(ctx: &Ctx, args: &[String]) -> Result<i32> {
     crate::gitbridge::check_git_head(&h.repo, &line)?;
     crate::repo::recover_cache_replacements(&h.repo.working(&line))?;
     if a.has("-a") && !stacked && !cfg!(target_os = "macos") {
-        let (st, scan, _it, _index) = h.repo.status(&line)?;
+        let (st, scan, _it, _index) = h.repo.status_light(&line)?;
         let paths: BTreeSet<String> = st.unstaged.iter().map(|c| c.path.clone()).collect();
         if !paths.is_empty() {
             stage_paths(&h.repo, &line, &scan.path, &paths)?;
@@ -951,13 +998,14 @@ pub fn commit(ctx: &Ctx, args: &[String]) -> Result<i32> {
             return Err(e);
         }
     };
-    let staged: Vec<Change> = match changes::file_changes(&head_root, &new_root) {
-        Ok(v) => v.into_iter().filter(|c| !skip_path(&c.path)).collect(),
+    let all_changes: Vec<Change> = match changes::file_changes(&head_root, &new_root) {
+        Ok(v) => v,
         Err(e) => {
             h.repo.discard_states(std::slice::from_ref(&state));
             return Err(e);
         }
     };
+    let staged: Vec<Change> = all_changes.iter().filter(|c| !skip_path(&c.path)).cloned().collect();
     if staged.is_empty() && !a.has("--allow-empty") && !a.has("--amend") {
         h.repo.discard_states(std::slice::from_ref(&state));
         #[cfg(target_os = "macos")]
@@ -1004,7 +1052,7 @@ pub fn commit(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
     }
     let secrets = crate::trace::span("secret check");
-    let checked = crate::secrets::check_between(ctx, &h.repo, &head_root, &new_root, &line.head);
+    let checked = crate::secrets::check_changes(ctx, &h.repo, &head_root, &new_root, &line.head, &all_changes);
     drop(secrets);
     if let Err(e) = checked {
         h.repo.discard_states(std::slice::from_ref(&state));

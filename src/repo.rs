@@ -899,6 +899,7 @@ impl<'a> Repo<'a> {
     /// Save the working content as an automatic state if it changed since the previous one.
     /// The caller holds the project lock.
     pub fn save(&self, ctx: &Ctx, line: &Line, message: &str, running: bool, force: bool) -> Result<Option<StateRec>> {
+        let _t = crate::trace::span("save working state");
         let w = self.working(line);
         if !w.exists() {
             return Ok(None);
@@ -967,7 +968,7 @@ impl<'a> Repo<'a> {
                     return Err(e);
                 }
             };
-            st.running = running;
+            st.running = running || crate::fsutil::take_unsettled();
             let mut rec = Record::new("save");
             rec.states.extend(earlier);
             rec.states.push(st.clone());
@@ -976,7 +977,7 @@ impl<'a> Repo<'a> {
             return Ok(Some(st));
         }
         let mut st = self.working_snapshot(ctx, line, vec![line.head.clone()], message)?;
-        st.running = running;
+        st.running = running || crate::fsutil::take_unsettled();
         if !force {
             let prev = self.save_base(line)?;
             if self.p.has_state(&prev) {
@@ -1192,8 +1193,23 @@ impl<'a> Repo<'a> {
     }
 
     /// Add only needs paths that differ between the index and the working tree.
-    #[cfg(target_os = "macos")]
-    pub fn status_for_add(&self, line: &Line, scan: &Path, index: &Snap) -> Result<Status> {
+    /// `limit` names the paths (with their ignore files) that the caller reads: only they are
+    /// scanned and compared, and the lists hold nothing else (APFS).
+    pub fn status_for_add(&self, line: &Line, scan: &Path, index: &Snap, limit: Option<&BTreeSet<String>>) -> Result<Status> {
+        #[cfg(target_os = "macos")]
+        if let Some(paths) = limit {
+            let mut st = Status::default();
+            let list = changes::file_changes_of(
+                index,
+                scan,
+                btrfs::candidates_scanned(index, scan, btrfs::scan_paths(index, paths)?, btrfs::scan_paths(scan, paths)?)?,
+            )?;
+            classify(scan, list, &mut st);
+            self.finish_status(line, scan, index, false, &mut st)?;
+            return Ok(st);
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = limit;
         self.status_of_inner(line, scan, index, false)
     }
 
@@ -1202,6 +1218,7 @@ impl<'a> Repo<'a> {
         if full {
             let head = self.head_src(line)?;
             if !same_tree(index, &head) {
+                let _t = crate::trace::span("status: head to index diff");
                 let staged: Vec<Change> =
                     changes::file_changes(&head, index)?.into_iter().filter(|c| !skip_path(&c.path)).collect();
                 st.staged = changes::with_renames(&head, index, staged);
@@ -1310,6 +1327,15 @@ impl<'a> Repo<'a> {
         let scan = self.scan(line)?;
         let (index, itemp) = self.index_view(line)?;
         let st = self.status_of(line, &scan.path, &index)?;
+        Ok((st, scan, itemp, index))
+    }
+
+    /// The status `add` needs: unstaged and untracked paths only, without the head to index diff.
+    pub fn status_light(&self, line: &Line) -> Result<(Status, Temp, Option<Temp>, Snap)> {
+        let _t = crate::trace::span("status for add");
+        let scan = self.scan(line)?;
+        let (index, itemp) = self.index_view(line)?;
+        let st = self.status_for_add(line, &scan.path, &index, None)?;
         Ok((st, scan, itemp, index))
     }
 
@@ -1486,6 +1512,7 @@ impl<'a> Repo<'a> {
         local: &BTreeSet<String>,
         force: bool,
     ) -> Result<Vec<Change>> {
+        let _t = crate::trace::span("write working folder");
         let list: Vec<Change> = changes::file_changes(from, to)?.into_iter().filter(|c| !skip_path(&c.path)).collect();
         if !force {
             let mut hit = BTreeSet::new();

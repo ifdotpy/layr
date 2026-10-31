@@ -1040,7 +1040,6 @@ pub fn run_gc(ctx: &Ctx, repo: &Repo, dry: bool) -> Result<Vec<String>> {
         rec.data = serde_json::json!({"ref_change": crate::model::RefChange { name:expired.name.clone(),before:Some(expired),after:None }});
         repo.commit_record(ctx, rec)?;
     }
-    let mut deleted = Vec::new();
     for id in &delete {
         let s = repo.p.db.state(id)?;
         if let Some(s) = &s {
@@ -1048,10 +1047,8 @@ pub fn run_gc(ctx: &Ctx, repo: &Repo, dry: bool) -> Result<Vec<String>> {
                 let _ = repo.p.trash(&repo.p.cache_path(id, snap));
             }
         }
-        if repo.p.delete_state(id).is_ok() {
-            deleted.push(id.clone());
-        }
     }
+    let deleted = repo.p.delete_states(&delete);
     let caches = trash_excess_caches(repo)?;
     // Overlays with a history limit and folder overlays with an LRU limit (docs/cache-overlays.md).
     for name in repo.overlay_names()? {
@@ -1146,6 +1143,7 @@ pub fn trash_excess_caches(repo: &Repo) -> Result<Vec<String>> {
 }
 
 pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    crate::store::EMPTY_TRASH_FULLY.store(true, std::sync::atomic::Ordering::SeqCst);
     if args.iter().any(|v| v == "--remote" || v.starts_with("--remote=")) {
         return crate::store_remote::command(ctx, "gc", args);
     }
