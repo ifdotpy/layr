@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.2](https://github.com/ifdotpy/layr/compare/v0.9.1...v0.9.2) (2026-10-31)
+
+
+### Bug Fixes
+
+* **retest:** link instrumented binaries like the plain build ([#98](https://github.com/ifdotpy/layr/issues/98)) ([10f3002](https://github.com/ifdotpy/layr/commit/10f30029da148f18b44335b1b1364644b756a5e5))
+
 ## [0.9.1](https://github.com/ifdotpy/layr/compare/v0.9.0...v0.9.1) (2026-10-31)
 
 
