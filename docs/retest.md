@@ -62,43 +62,12 @@ same limit as the insertion rule in Selection).
 The run then writes the moved record, prints `N tests, 0 selected, N skipped (incremental, no
 build)` and exits. A run with no change at all does not even write a record.
 
-## Partial build
-
-When the nextest arguments contain `--workspace` (or `--all`), the record has the same arguments, and
-the run is not a full run, the tool builds and lists only the packages it needs. It replaces
-`--workspace` and `--exclude` by `-p <package>` for each needed package and keeps the other
-arguments. The run prints `partial build, N of M packages: ...`. A run without `--workspace` keeps
-the user's own package selection.
-
-A package is needed when one of these holds:
-
-- it holds a test that must run (stale, failed, or with a range end that moved);
-- it owns a changed path (any file under its folder, from `layr diff --name-status`, both sides of
-  a rename). A new test can only appear in such a package, and a compile error in it shows;
-- it has a bin target and an integration test (cargo builds the bin for those tests, and a test
-  of another package can start it from `target/retest/debug`), and it depends, directly or not, on
-  a package that owns a changed path. The bin must be rebuilt so that tests do not start a stale one.
-
-Full build instead: a build input changed (`Cargo.toml`, `Cargo.lock`, `build.rs`, `.cargo/`,
-toolchain and nextest config), a stale test belongs to a package that the workspace no longer has,
-the needed set is every package, the run is full or forced by the killed-bin rule, or there is no
-record with the same arguments.
-
-The tests of the packages that are not built are carried from the baseline record (they are not
-stale, else their package would be built), so the record stays complete and the count of tests in
-the summary is the full count.
-
-Limits:
-
-- A compile error in a package that is not built is not reported. Such a package has no changed
-  file and no stale test, but it can depend on a changed package. The gate's clippy step
-  (Studio: `just clippy-runtime`, which compiles every package) is the check for this; `layr-retest` is
-  not a compile check. Run it, or `cargo check --workspace --all-targets`, in the same gate.
-- A test that is generated in package A by a file of package B (a macro from another crate) is
-  not found until A has a changed file. `--full` finds it.
-- A bin that a test starts, in a package without an integration test, is not rebuilt by a
-  change of a dependency. The same limit exists without partial build, because cargo does not
-  build such a bin for the tests.
+Building only the crates that have selected tests is not done (tried 2026-10-31, dropped). A change in
+crate A can break a dependent crate B that has no selected test, and only a full build finds it.
+With `-p`, cargo also unifies features over the selected packages only: in Studio this rebuilt
+110 crates into a second artifact set (+11 GB) and the first run gained no time. Incremental
+compilation (below) gives the gain without these rules. The build with selected tests stays one
+build of the whole selection of the nextest arguments.
 
 ## Incremental compilation
 
@@ -108,48 +77,52 @@ because the callers (a gate script) set `CARGO_INCREMENTAL=0` for their plain bu
 variable per caller would be easy to forget. `LAYR_RETEST_INCREMENTAL=0` leaves the caller's value.
 The first incremental build of a crate is slower than a non-incremental one; the gain is on later builds.
 
-### Measurements 2026-10-31: partial build and incremental compilation
+### Measurements 2026-10-31
 
-Studio line `retest-gate`, `--workspace --profile fast` (record of 1615 tests), change: `black_box(N)`
-in `spawn_process` (6 tests selected), `CARGO_BUILD_JOBS=4`, `nice -n 10`, one run per gate-lock take.
-Load is the 1-minute average at the start of the run (other agents ran). Times are seconds;
-"total" is build and list + run and export + record, without save and diff (APFS cost, out of scope).
+Studio line `retest-gate`, `--workspace --profile fast`, change: `black_box(N)` in `spawn_process`
+(6 tests selected), `CARGO_BUILD_JOBS=4`, `nice -n 10`, one run per gate-lock take. Load is the
+1-minute average at the start (other agents ran). Times are seconds; "total" is build and list +
+run and export + record, without save and diff (APFS cost, out of scope).
 
-| Run | Load | Build and list | Run and export | Total | Notes |
+| Run | Load | Build and list | Run and export | Total |
+| --- | --- | --- | --- | --- |
+| Baseline (`CARGO_INCREMENTAL=0`) | 26 | 237.7 | 52 | 289.7 |
+| Incremental, first run (fills the cache) | 11 | 250.8 | 37 | 287.9 |
+| Incremental, second run | 11 | 68.4 | 29 | 97.5 |
+
+The baseline ran 12 tests (older baseline state); both incremental runs ran the same 6.
+`debug/incremental` was 10.9 GB after the first incremental run and 16.4 GB after the second (`du`).
+
+Probes: `panic!("probe")` in `layr_model::diff::is_binary` (layr workspace, `--workspace --exclude
+layr-retest`, 262 tests): the incremental run selected 2 tests and failed the same 2 `interdiff`
+tests as `--full` (260 passed). A `panic!` in the Studio supervisor `main.rs` (bin source that no
+record has) forces a full run and failed the same 20 tests as plain nextest.
+
+### Unique disk of a new line (APFS clones)
+
+`du` counts clones in full, so these use the change of `df` free space. A new line is a `cp -c -R`
+of `target/retest`; then one small change is built into the clone (`cargo nextest run --no-run
+--workspace`, same RUSTFLAGS as layr-retest). The clone itself costs about 0.
+
+Layr workspace (`debug/incremental` 0.67 to 0.96 GB, `target/retest` 2.26 to 2.55 GB; two passes, the
+second is shown, the first in brackets; free space 52.9 GB before, 50.6 GB after):
+
+| Phase | Change | Build s | Unique GB | Of incremental | Of `target/retest` |
 | --- | --- | --- | --- | --- | --- |
-| Baseline (installed `layr-retest`, full build, `CARGO_INCREMENTAL=0`) | 26 | 237.7 | 48.8 | 289.7 | ran 12 (older baseline state) |
-| Partial build, first run | 15 | 237.8 | 21.2 | 261.8 | 5 of 17 packages; 110 crates rebuilt, see below |
-| Partial build, second run | 11 | 116.0 | n/a | n/a | the disk was full in the run phase |
-| Incremental, first run (full build) | 11 | 250.8 | 34.3 | 287.9 | builds the incremental cache |
-| Incremental, second run (full build) | 11 | 68.4 | 26.9 | 97.5 | 6 tests, same set as the partial run |
-| Partial + incremental | | | | | not measured: the disk had no room for both caches |
+| Incremental on | 1 | 18 [16] | 0.97 [0.86] | 1.01 [1.28] | 0.38 [0.38] |
+| Incremental on | 2 | 7 [6] | 0.26 [0.32] | 0.28 [0.48] | 0.10 [0.14] |
+| Incremental off | 1 | 39 | 1.26 | 1.31 | 0.49 |
+| Incremental off | 2 | 32 | 0.67 | 0.70 | 0.27 |
 
-What the numbers say:
+Studio (`debug/incremental` 9.38 GB, `target/retest` 34.3 GB by `du`), change 1 only, incremental on:
+build 147 s, unique 15.84 GB (1.69 of incremental, 0.46 of `target/retest`). This is a `df` delta
+and other agents wrote to the disk meanwhile. Change 2 and the incremental-off phase are not
+measured: the run stopped at the 15 GB free-space floor.
 
-- Incremental compilation is the large gain on a small change: 237.7 s to 68.4 s for the build, after
-  one run that fills the cache. Cost: `debug/incremental` was 10.9 GB after the first run and 16.4 GB
-  after the second (`du`, the cache of 61 crates and test targets with coverage instrumentation).
-- Partial build halves a warm build (116.0 s) but has a high first cost. With `-p`, cargo unifies
-  features over the selected packages only. In Studio this differs from the `--workspace` set, so
-  110 crates (`syn`, `tokio`, `serde_json`, ...) were rebuilt into a second set of artifacts:
-  +11 GB in `target/retest`, and no time gain on the first run. The set stays valid for later
-  partial builds. A workspace whose packages agree on dependency features does not pay this.
-- Both together are not measured. Expect the gains to add up for the build step, and the disk
-  costs to add up too.
-- The 5 packages built for this change are the ones with a test to run (`studio-runtime-http`,
-  `-services`, `-process`) plus the `studio-process-supervisor` and `studio-runtime-server` bins
-  that depend on the changed package. The bin rule keeps the supervisor fresh for tests that start it.
-
-Probe, Studio: `panic!("retest probe")` in the supervisor `main.rs`, scope
-`-p studio-runtime-process -p studio-process-supervisor --profile ci` (157 tests). The change is a
-bin target source that no record has, so the run is a full run (no partial build), and it failed
-the same 20 tests as plain nextest (11 fail and 9 timeout in retest, 16 fail and 4 timeout in
-plain: the same names; nextest prints a timeout as `FAIL` at the end of a plain run).
-
-Probe, layr workspace (`--workspace --exclude layr-retest`, 262 tests): `panic!("probe")` in
-`layr_model::diff::is_binary`. The incremental run built 2 of 4 packages (`layr`, `layr-model`),
-selected 2 tests and failed the same 2 `interdiff` tests as `--full` (260 passed). Full run 110.7 s
-(build 53.9 s), probe run 21.6 s (build 5.6 s).
+Reading: the clone is free; each change costs the files it rewrites. With incremental on a second
+change in a line is cheaper (0.26 GB against 0.67 GB off in the layr workspace) and much faster
+(7 s against 32 s). The first change in a new line costs about the size of the incremental
+directory (layr 1.0, Studio 1.7 times).
 
 ## Adapters
 
