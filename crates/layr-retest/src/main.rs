@@ -29,6 +29,9 @@ const RAW_COUNT_FILE: &str = "raw-count";
 /// Off by default: the call makes a state of the line, which takes 40 to 75 s in a line with a big
 /// build folder, and it holds the lock of the store.
 static SAVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Set to `0` to leave `CARGO_INCREMENTAL` as the caller has it. By default layr-retest sets it to 1 for its
+/// own cargo calls: they build into `target/retest` only, and an incremental build of a small change is faster.
+const INCREMENTAL_VAR: &str = "LAYR_RETEST_INCREMENTAL";
 /// Number of parallel coverage exports.
 const EXPORT_WORKERS: usize = 4;
 /// Files that no record keeps: the standard library and build output. Cargo's own folders stay:
@@ -468,6 +471,9 @@ fn run(args: &[String]) -> Result<i32> {
         c.env(PROFDATA_VAR, &tools.0);
         c.env("RUSTFLAGS", flags.trim()).env("CARGO_TARGET_DIR", &target).env(PROFILE_DIR_VAR, &profdir);
         c.env(&runner_var, format!("{} wrap --", exe.display())).env("NEXTEST_EXPERIMENTAL_LIBTEST_JSON", "1");
+        if std::env::var(INCREMENTAL_VAR).as_deref() != Ok("0") {
+            c.env("CARGO_INCREMENTAL", "1");
+        }
         c
     };
     let list = output(nextest(&["list", "--message-format", "json"]).stderr(Stdio::inherit()))?;

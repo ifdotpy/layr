@@ -62,9 +62,67 @@ same limit as the insertion rule in Selection).
 The run then writes the moved record, prints `N tests, 0 selected, N skipped (incremental, no
 build)` and exits. A run with no change at all does not even write a record.
 
-Building only the crates that have selected tests is not done. A change in crate A can break a
-dependent crate B that has no selected test, and only a full build finds it. The build with
-selected tests stays one build of the whole selection of the nextest arguments.
+Building only the crates that have selected tests is not done (tried 2026-10-31, dropped). A change in
+crate A can break a dependent crate B that has no selected test, and only a full build finds it.
+With `-p`, cargo also unifies features over the selected packages only: in Studio this rebuilt
+110 crates into a second artifact set (+11 GB) and the first run gained no time. Incremental
+compilation (below) gives the gain without these rules. The build with selected tests stays one
+build of the whole selection of the nextest arguments.
+
+## Incremental compilation
+
+`layr-retest` sets `CARGO_INCREMENTAL=1` for its own cargo calls. They write to `target/retest`
+only, so this does not change the caller's builds. It is set by the tool and not by the caller
+because the callers (a gate script) set `CARGO_INCREMENTAL=0` for their plain builds, and a second
+variable per caller would be easy to forget. `LAYR_RETEST_INCREMENTAL=0` leaves the caller's value.
+The first incremental build of a crate is slower than a non-incremental one; the gain is on later builds.
+
+### Measurements 2026-10-31
+
+Studio line `retest-gate`, `--workspace --profile fast`, change: `black_box(N)` in `spawn_process`
+(6 tests selected), `CARGO_BUILD_JOBS=4`, `nice -n 10`, one run per gate-lock take. Load is the
+1-minute average at the start (other agents ran). Times are seconds; "total" is build and list +
+run and export + record, without save and diff (APFS cost, out of scope).
+
+| Run | Load | Build and list | Run and export | Total |
+| --- | --- | --- | --- | --- |
+| Baseline (`CARGO_INCREMENTAL=0`) | 26 | 237.7 | 52 | 289.7 |
+| Incremental, first run (fills the cache) | 11 | 250.8 | 37 | 287.9 |
+| Incremental, second run | 11 | 68.4 | 29 | 97.5 |
+
+The baseline ran 12 tests (older baseline state); both incremental runs ran the same 6.
+`debug/incremental` was 10.9 GB after the first incremental run and 16.4 GB after the second (`du`).
+
+Probes: `panic!("probe")` in `layr_model::diff::is_binary` (layr workspace, `--workspace --exclude
+layr-retest`, 262 tests): the incremental run selected 2 tests and failed the same 2 `interdiff`
+tests as `--full` (260 passed). A `panic!` in the Studio supervisor `main.rs` (bin source that no
+record has) forces a full run and failed the same 20 tests as plain nextest.
+
+### Unique disk of a new line (APFS clones)
+
+`du` counts clones in full, so these use the change of `df` free space. A new line is a `cp -c -R`
+of `target/retest`; then one small change is built into the clone (`cargo nextest run --no-run
+--workspace`, same RUSTFLAGS as layr-retest). The clone itself costs about 0.
+
+Layr workspace (`debug/incremental` 0.67 to 0.96 GB, `target/retest` 2.26 to 2.55 GB; two passes, the
+second is shown, the first in brackets; free space 52.9 GB before, 50.6 GB after):
+
+| Phase | Change | Build s | Unique GB | Of incremental | Of `target/retest` |
+| --- | --- | --- | --- | --- | --- |
+| Incremental on | 1 | 18 [16] | 0.97 [0.86] | 1.01 [1.28] | 0.38 [0.38] |
+| Incremental on | 2 | 7 [6] | 0.26 [0.32] | 0.28 [0.48] | 0.10 [0.14] |
+| Incremental off | 1 | 39 | 1.26 | 1.31 | 0.49 |
+| Incremental off | 2 | 32 | 0.67 | 0.70 | 0.27 |
+
+Studio (`debug/incremental` 9.38 GB, `target/retest` 34.3 GB by `du`), change 1 only, incremental on:
+build 147 s, unique 15.84 GB (1.69 of incremental, 0.46 of `target/retest`). This is a `df` delta
+and other agents wrote to the disk meanwhile. Change 2 and the incremental-off phase are not
+measured: the run stopped at the 15 GB free-space floor.
+
+Reading: the clone is free; each change costs the files it rewrites. With incremental on a second
+change in a line is cheaper (0.26 GB against 0.67 GB off in the layr workspace) and much faster
+(7 s against 32 s). The first change in a new line costs about the size of the incremental
+directory (layr 1.0, Studio 1.7 times).
 
 ## Adapters
 
