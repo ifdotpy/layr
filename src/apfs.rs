@@ -1113,10 +1113,7 @@ fn copy_snapshot(src: &Path, dst: &Path, readonly: bool, keep_links: bool) -> Re
                 break;
             }
             if round + 1 == crate::thin::COPY_ROUNDS {
-                eprintln!(
-                    "warning: {} changed during the whole copy; each file is kept as one of its versions from that time",
-                    src.display()
-                );
+                crate::fsutil::mark_unsettled(src);
                 break;
             }
             let paths = crate::thin::changed_paths(&before, &after);

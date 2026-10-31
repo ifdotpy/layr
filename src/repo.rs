@@ -968,7 +968,7 @@ impl<'a> Repo<'a> {
                     return Err(e);
                 }
             };
-            st.running = running;
+            st.running = running || crate::fsutil::take_unsettled();
             let mut rec = Record::new("save");
             rec.states.extend(earlier);
             rec.states.push(st.clone());
@@ -977,7 +977,7 @@ impl<'a> Repo<'a> {
             return Ok(Some(st));
         }
         let mut st = self.working_snapshot(ctx, line, vec![line.head.clone()], message)?;
-        st.running = running;
+        st.running = running || crate::fsutil::take_unsettled();
         if !force {
             let prev = self.save_base(line)?;
             if self.p.has_state(&prev) {

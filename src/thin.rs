@@ -969,10 +969,7 @@ pub fn write_checked_scan(
                 removed.extend(gone.into_iter().filter(|g| old.contains_key(g)));
                 set_removed(dst, &removed)?;
             }
-            eprintln!(
-                "warning: {} changed during the whole copy; each file is kept as one of its versions from that time",
-                src.display()
-            );
+            crate::fsutil::mark_unsettled(src);
             if !writable {
                 apfs::seal(dst, true, false)?;
             }

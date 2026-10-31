@@ -49,8 +49,6 @@ pub fn status(ctx: &Ctx, args: &[String]) -> Result<i32> {
         .flag("--json");
     let a = parse(&spec, args)?;
     let h = here(ctx)?;
-    #[cfg(target_os = "macos")]
-    let lock = h.repo.p.lock()?;
     let line = h.line()?.clone();
     #[cfg(target_os = "macos")]
     let line = h.repo.line(&line.id)?;
@@ -59,14 +57,24 @@ pub fn status(ctx: &Ctx, args: &[String]) -> Result<i32> {
     #[cfg(target_os = "macos")]
     let mut st = {
         let _t = crate::trace::span("status compare");
-        if filtered.is_some() { h.repo.snapshot_status(ctx, &line)? } else { h.repo.status_report(&line)? }
+        if filtered.is_some() {
+            h.repo.snapshot_status(ctx, &line)?
+        } else {
+            // The comparison runs without the store lock, as on Linux: it can last many seconds
+            // and the saved status is published by an atomic rename. A save, add or reset that
+            // swaps the staging folder meanwhile makes it fail; then it runs again under the lock.
+            match h.repo.status_report(&line) {
+                Ok(st) => st,
+                Err(_) => {
+                    let _lock = h.repo.p.lock()?;
+                    let line = h.repo.line(&line.id)?;
+                    h.repo.status_report(&line)?
+                }
+            }
+        }
     };
     #[cfg(not(target_os = "macos"))]
     let mut st = if filtered.is_some() { h.repo.snapshot_status(ctx, &line)? } else { h.repo.status(&line)?.0 };
-    // The lock keeps the index still while the working folder is compared. The rest only reads
-    // immutable states, so other commands must not wait for it.
-    #[cfg(target_os = "macos")]
-    drop(lock);
     // The files of quiet overlays are not shown (docs/cache-overlays.md, section 4.1).
     let quiet = {
         let _t = crate::trace::span("status quiet paths");

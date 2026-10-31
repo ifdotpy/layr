@@ -9,6 +9,25 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static UNSETTLED: AtomicBool = AtomicBool::new(false);
+
+/// A copy of `src` could not settle: writers changed it in every round, so its files come from
+/// different moments. The copy stays; `repo.save` marks the state as taken while processes ran.
+pub fn mark_unsettled(src: &Path) {
+    if !UNSETTLED.swap(true, Ordering::Relaxed) {
+        eprintln!(
+            "layr: {} kept changing while it was copied; the state is kept and marked as taken while processes ran",
+            src.display()
+        );
+    }
+}
+
+/// Whether a copy has not settled since the last call; clears the mark.
+pub fn take_unsettled() -> bool {
+    UNSETTLED.swap(false, Ordering::Relaxed)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FType {

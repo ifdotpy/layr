@@ -520,7 +520,9 @@ fn copy_cache_at(src: &Path, parent: &File, name: &std::ffi::OsStr, marker: Opti
 }
 
 // OverlayFS can update directory metadata on the first access. Retry a full
-// copy, but publish only a copy whose before and after scans agree.
+// copy, but publish only a copy whose before and after scans agree. When writers change the
+// source in every round, the last copy stays and the save marks its state as taken while
+// processes ran.
 fn copy_stable(src: &Path, dst: &Path, nested: &HashSet<PathBuf>) -> Result<()> {
     for _ in 0..3 {
         let before = scan(src, nested)?;
@@ -530,7 +532,9 @@ fn copy_stable(src: &Path, dst: &Path, nested: &HashSet<PathBuf>) -> Result<()> 
         }
         fs::remove_dir_all(dst)?;
     }
-    bail!("source changed during OverlayFS snapshot; retry when writers are idle")
+    copy_tree(src, dst, nested, &mut HashMap::new())?;
+    crate::fsutil::mark_unsettled(src);
+    Ok(())
 }
 // Persist the copied tree before publishing its registry entry. One filesystem
 // flush covers file data, xattrs and directory entries without one fsync per file.
@@ -563,7 +567,7 @@ fn snapshot_layers(state: &Locked, src: &Path, parent: &Entry, id: &str) -> Resu
         return Ok((id.into(), Vec::new(), hard_links));
     }
     let upper = state.object(&parent.info.uuid).join("upper");
-    for _ in 0..3 {
+    for round in 0..3 {
         let excluded: HashSet<_> = nested.iter().map(|p| upper.join(p.strip_prefix(src).unwrap())).collect();
         let upper_scan = || -> Result<_> {
             let mut found = scan(&upper, &excluded)?;
@@ -591,13 +595,18 @@ fn snapshot_layers(state: &Locked, src: &Path, parent: &Entry, id: &str) -> Resu
             }
             sys::overlay_attribute(&target, c"trusted.overlay.opaque", Some(b"y"))?;
         }
-        if before == upper_scan()? {
+        let settled = before == upper_scan()?;
+        // Writers changed the upper layer in every round: keep the last copy (see `copy_stable`).
+        if settled || round == 2 {
+            if !settled {
+                crate::fsutil::mark_unsettled(src);
+            }
             sync_tree(&data)?;
             return Ok((id.into(), bases, false));
         }
         fs::remove_dir_all(&data)?;
     }
-    bail!("source changed during OverlayFS snapshot; retry when writers are idle")
+    unreachable!("the last round returns")
 }
 fn tree_has_links_excluding(path: &Path, nested: &HashSet<PathBuf>) -> Result<bool> {
     if nested.contains(path) {
