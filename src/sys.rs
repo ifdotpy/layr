@@ -270,6 +270,99 @@ pub fn clone_range(src: &impl AsFd, src_off: u64, len: u64, dst: &impl AsFd, dst
     ioctl_ptr(dst.as_fd(), FICLONERANGE, &mut a)
 }
 
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+const FIDEDUPERANGE: libc::c_ulong = 0xc018_9436;
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+const FS_IOC_FIEMAP: libc::c_ulong = 0xc020_660b;
+/// Extent flags that give no stable device offset: unknown, delayed allocation, inline data.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+const FIEMAP_UNSTABLE: u32 = 0x2 | 0x4 | 0x200;
+
+/// `struct file_dedupe_range` with one `struct file_dedupe_range_info`.
+#[repr(C)]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+struct DedupeArgs {
+    src_offset: u64,
+    src_length: u64,
+    dest_count: u16,
+    reserved1: u16,
+    reserved2: u32,
+    dest_fd: i64,
+    dest_offset: u64,
+    bytes_deduped: u64,
+    status: i32,
+    reserved3: u32,
+}
+
+#[repr(C)]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+struct FiemapExtent {
+    logical: u64,
+    physical: u64,
+    length: u64,
+    reserved64: [u64; 2],
+    flags: u32,
+    reserved: [u32; 3],
+}
+
+#[repr(C)]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+struct Fiemap {
+    start: u64,
+    length: u64,
+    flags: u32,
+    mapped_extents: u32,
+    extent_count: u32,
+    reserved: u32,
+    extent: FiemapExtent,
+}
+
+/// Share a byte range of `src` with `dst` when the kernel finds the bytes equal (FIDEDUPERANGE).
+/// The kernel compares inside, so a write to either file during the call cannot lose data.
+/// Returns the bytes shared: 0 when the ranges differ. `dst` is open for writing.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub fn dedupe_range(src: &impl AsFd, src_off: u64, len: u64, dst: &impl AsFd, dst_off: u64) -> io::Result<u64> {
+    let mut a = DedupeArgs {
+        src_offset: src_off,
+        src_length: len,
+        dest_count: 1,
+        reserved1: 0,
+        reserved2: 0,
+        dest_fd: dst.as_fd().as_raw_fd() as i64,
+        dest_offset: dst_off,
+        bytes_deduped: 0,
+        status: 0,
+        reserved3: 0,
+    };
+    ioctl_ptr(src.as_fd(), FIDEDUPERANGE, &mut a)?;
+    match a.status {
+        0 => Ok(a.bytes_deduped),
+        e if e < 0 => Err(io::Error::from_raw_os_error(-e)),
+        _ => Ok(0),
+    }
+}
+
+/// The device offset of the byte at `off`, or `None` when the file system gives none (a hole,
+/// delayed allocation, inline data, or no FIEMAP). Equal offsets in two files mean one extent.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub fn physical_at(f: &impl AsFd, off: u64) -> Option<u64> {
+    let mut m = Fiemap {
+        start: off,
+        length: 1,
+        flags: 0,
+        mapped_extents: 0,
+        extent_count: 1,
+        reserved: 0,
+        extent: FiemapExtent { logical: 0, physical: 0, length: 0, reserved64: [0; 2], flags: 0, reserved: [0; 3] },
+    };
+    ioctl_ptr(f.as_fd(), FS_IOC_FIEMAP, &mut m).ok()?;
+    let e = &m.extent;
+    if m.mapped_extents == 0 || e.flags & FIEMAP_UNSTABLE != 0 || off < e.logical {
+        return None;
+    }
+    Some(e.physical + (off - e.logical))
+}
+
 // ----- processes -----
 
 pub enum Fork {

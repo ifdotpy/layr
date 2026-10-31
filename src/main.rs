@@ -19,6 +19,7 @@ mod cache_overlay;
 mod changes;
 mod cmd;
 mod db;
+mod dedup;
 mod diff;
 mod disk;
 mod fsutil;
