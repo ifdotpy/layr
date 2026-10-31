@@ -54,7 +54,10 @@ out=$(l line new dirty $dirty 2>&1); rc=$?
 eq "a line on unsaved work is refused" 1 "$rc"
 has "the refusal names the unsaved file" "c.txt" "$out"
 no "the refused line does not exist" test -d $M/dirty
-rm c.txt
+# The same work saved later in a named state of its line: the automatic state is saved work.
+l add c.txt; l save -qm "save c"
+ok "a line starts on an automatic state whose work a later named state holds" l line new -q later $dirty
+l rm -q c.txt; l save -qm "drop c"
 
 # 5. A push refuses the unpushed states of another line under the line's start.
 l line new -q task main >/dev/null
@@ -62,9 +65,13 @@ cd $M/task || exit 1
 echo task > t.txt; l add t.txt; l save -qm task
 out=$(l git push origin task 2>&1); rc=$?
 eq "a push of a line started on unpushed work of main is refused" 1 "$rc"
-has "the refusal names the state of main" "(main) local" "$out"
+has "the refusal names the line of each state" "(line main) local" "$out"
+has "the refusal names the exact flag" "--include-base main" "$out"
 no "nothing reached the remote" git -C $R rev-parse -q --verify refs/heads/task
-ok "--include-base pushes it" l git push -q --include-base origin task
+no "--include-base needs the line names" l git push -q --include-base origin task
+no "--include-base of another line does not cover main" l git push -q --include-base other origin task
+no "nothing reached the remote after the refusals" git -C $R rev-parse -q --verify refs/heads/task
+ok "--include-base main pushes it" l git push -q --include-base main origin task
 eq "the push carries the work of main" "b.txt" "$(git -C $R diff --name-only main task -- b.txt)"
 # A line from the remote branch carries only its own work; a merge of another line is allowed.
 l line new -q clean origin/main >/dev/null

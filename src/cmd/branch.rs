@@ -233,10 +233,16 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
         // An automatic state holds the unsaved work of its line. A line started on it would carry
         // that work into its own saves and pushes; one with caches only is a warm start.
         let start_state = repo.state(&start)?;
-        if start_state.kind == StateKind::Auto {
-            let unsaved = repo.unsaved_paths(&start_state)?;
+        if start_state.kind == StateKind::Auto && !start_state.parents.is_empty() {
+            let from = start_state.line.as_deref().map(|id| repo.p.db.line_by_id(id)).transpose()?.flatten().map(|l| repo.localize(l)).transpose()?;
+            let mut unsaved = repo.unsaved_paths(&start_state.parents[0], &start_state)?;
+            // A later named state of its line may hold that work: then it is saved.
+            if let Some(head) = from.as_ref().map(|l| l.head.clone()).filter(|h| *h != start_state.parents[0]) {
+                if !unsaved.is_empty() && repo.unsaved_paths(&head, &start_state)?.is_empty() {
+                    unsaved.clear();
+                }
+            }
             if !unsaved.is_empty() {
-                let from = start_state.line.as_deref().map(|id| repo.p.db.line_by_id(id)).transpose()?.flatten();
                 let mut shown = unsaved.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
                 if unsaved.len() > 5 {
                     shown.push_str(&format!(" and {} more", unsaved.len() - 5));

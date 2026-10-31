@@ -137,7 +137,8 @@ automatic state, or on local states of another line that no push carried, would 
 into its pull request. So `line new` refuses an automatic state with changed paths that are not
 ignored, and `git push` refuses while the line's start state has unpushed states of another line
 below it (`Repo::foreign_base`, read from the `line.create` record). Only the start counts: a
-merge or a fast-forward of another line later is a deliberate choice. `--include-base` pushes them.
+merge or a fast-forward of another line later is a deliberate choice. `--include-base <lines>`
+pushes them; it must name each line, so a flag added blindly does not cover them.
 
 ## 5. Warm caches
 
