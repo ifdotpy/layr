@@ -111,12 +111,14 @@ pub fn resolve_root(root: &Path) -> Result<PathBuf> {
 
 impl Store {
     pub fn open(root: &Path) -> Result<Store> {
+        // Resolve aliases once at the store boundary. Paths inside a line still refuse links.
+        // A refused store is not created, so the resolution comes first.
+        let root = resolve_root(root)?;
+        let root = root.as_path();
+        crate::rootcheck::check_store(root)?;
         if !root.exists() {
             mkdir_mode(root, 0o755)?;
         }
-        // Resolve aliases once at the store boundary. Paths inside a line still refuse links.
-        let root = resolve_root(root)?;
-        let root = root.as_path();
         let version_guard = crate::store_version::Guard::open(root)?;
         #[cfg(not(feature = "overlayfs"))]
         if root.join(".layr-overlayfs").exists() {
@@ -679,6 +681,7 @@ impl<'a> Project<'a> {
     pub fn open(store: &'a Store, name: &str) -> Result<Project<'a>> {
         let _t = crate::trace::span("open project");
         let dir = store.project_dir(name)?;
+        crate::rootcheck::check_project_folder(&dir)?;
         if !db_file(&dir).is_file() {
             bail!("project '{name}' not found");
         }
@@ -689,6 +692,7 @@ impl<'a> Project<'a> {
             p.rebuild_index()?;
             p.db.mark_current()?;
         }
+        crate::rootcheck::check_project(&p)?;
         p.id = p.project_id()?;
         #[cfg(target_os = "macos")]
         if crate::apfs_commit::pending(&p)? {

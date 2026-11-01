@@ -664,6 +664,14 @@ impl Db {
         Ok(v)
     }
 
+    /// The newest local states, by time, whose folders the rollback check looks at.
+    #[cfg_attr(not(all(target_os = "linux", not(feature = "overlayfs"))), allow(dead_code))]
+    pub fn newest_present_states(&self, n: usize) -> Result<Vec<String>> {
+        let mut st = self.conn.prepare("SELECT id FROM states WHERE present=1 AND deleted=0 ORDER BY time DESC LIMIT ?1")?;
+        let v = st.query_map(params![n as i64], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+        Ok(v)
+    }
+
     fn line_row(r: &rusqlite::Row) -> rusqlite::Result<Line> {
         Ok(Line { id: r.get(0)?, name: r.get(1)?, owner: r.get::<_, i64>(2)? as u32, machine: r.get(3)?, head: r.get(4)? })
     }

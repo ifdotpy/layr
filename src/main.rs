@@ -42,6 +42,7 @@ mod radar;
 mod recv;
 mod repo;
 mod revs;
+mod rootcheck;
 mod secrets;
 #[cfg(target_os = "linux")]
 mod send_cache;
@@ -164,6 +165,10 @@ fn main() {
             }
         },
         _ => {}
+    }
+    if matches!(argv.first().map(String::as_str), Some("init" | "daemon")) {
+        // Before the store opens: the override applies to the process that opens the store.
+        rootcheck::take_allow_flag(&mut argv);
     }
     if let Some(command) = argv.first() {
         if !cmd::COMMANDS.contains(&command.as_str()) {
