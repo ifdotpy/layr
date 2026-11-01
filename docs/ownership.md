@@ -90,6 +90,55 @@ Peer sync and store fetch import records from other machines. They go through th
 `Db::derive`, so they add and release owners the same way. A record from another machine never
 frees a state that a local owner holds: owners are per state, not per machine.
 
+## Temporary objects
+
+A crash must not leave space that nothing owns. Every temporary path that layr makes on the
+store's disk has an owner too: the process that made it. Before a command creates a temporary
+path it adds a row `temps(path, pid, start, kind)` (one SQLite statement, outside the store lock
+is fine); when the path is renamed into place or removed, the row goes. `gc --repair` and the
+start of every command remove the paths of rows whose process is gone (pid not alive, or a
+different process start time).
+
+This covers, by kind:
+
+| kind | paths |
+|---|---|
+| `copy` | `.apfs-<uuid>` beside a destination, `meta/work/*`, `meta/scan/*`, prepared saves |
+| `receive` | `states/.receive-<uuid>` and its stream spool |
+| `snapshot` | a state or cache snapshot made before its record: it becomes owned by the record in the transaction that commits it; a crash before the commit leaves a dead temp row |
+| `line` | a line folder published before its `line.create` record, a line folder and stage after its `line.delete` record (the delete moves them to the trash as a temp, then finishes) |
+| `try` | `lines/.try-*` (`--keep` turns the row into a normal owner) |
+| `file` | `.<name>.tmp-*` of `atomic_write` and `cache_write`, OCI layer archives, `.layr-dedup-*` |
+| `remote` | `.put-*` of a `file://` store remote (the remote has its own `temps` file next to its objects) |
+| `git` | temporary git index and fetch folders: they move from `$TMPDIR` to `meta/tmp/git` |
+
+Rules: no temporary path is created outside a folder that `gc --repair` walks; a failure path
+removes its temporary object at once (a guard), and the `temps` row is only for crashes.
+
+Disk caches outside the project database (the mount cache of `layr mount`, `meta/oci/blobs`)
+count their partial files (`.part-*`) in their size budget and remove partial files older than
+one hour at open.
+
+## Derived data of a state
+
+Some data exists only because a state exists. It has the state as its owner and goes when the
+state is freed:
+
+- the git index `git/layr-index/<state>` and the internal git ref `refs/layr/states/<state>`;
+  after a free, layr runs `git gc --prune=now` in the background when more than 1 GiB of loose
+  or unreferenced objects collected (`git count-objects`);
+- OCI derived refs: a `ref` owner with an expiry (`oci.retention`, default 30 days), not `None`.
+
+Quarantine data (`git-damaged-*`, `*.layr-old-*`) is never freed automatically: it can hold the
+only copy. `layr gc` lists it with its size and age, and `layr gc --drop-quarantine <path>`
+removes one after the owner looked at it.
+
+## Trash
+
+The background emptier (`layr __empty-trash`) stops when a full pass deletes nothing, and writes
+the paths it could not delete with the error to `trash.errors`; `layr gc` and `layr du --store`
+show them.
+
 ## gc
 
 `layr gc` becomes a check and repair:
