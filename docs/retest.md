@@ -201,7 +201,7 @@ times of the artifact list and the sweep.
 
 `du` counts clones in full, so these use the change of `df` free space. A new line is a `cp -c -R`
 of `target/retest`; then one small change is built into the clone (`cargo nextest run --no-run
---workspace`, same RUSTFLAGS as layr-retest). The clone itself costs about 0.
+--workspace`, same flags as layr-retest). The clone itself costs about 0.
 
 Layr workspace (`debug/incremental` 0.67 to 0.96 GB, `target/retest` 2.26 to 2.55 GB; two passes, the
 second is shown, the first in brackets; free space 52.9 GB before, 50.6 GB after):
@@ -241,7 +241,8 @@ disk. The full run catches such a change.
 No maintained tool exists. `cargo-difftests` (0.6.1, last change 2024-05) has the right mechanism
 but needs nightly Rust, a call in every test, and git. The adapter uses only stable parts:
 
-1. Build the tests with `RUSTFLAGS="-C instrument-coverage"` in a separate target folder.
+1. Build the tests with `-C instrument-coverage` added to the project rustflags (see "Project
+   rustflags") in a separate target folder.
 2. Set the cargo target `runner` to a small wrapper. nextest starts every test in its own process
    through this runner and gives it `NEXTEST_BINARY_ID` and `NEXTEST_TEST_NAME`. The wrapper sets
    `LLVM_PROFILE_FILE=<dir>/<binary>/<test>.profraw` and starts the test. In the list phase the
@@ -256,6 +257,47 @@ but needs nightly Rust, a call in every test, and git. The adapter uses only sta
 5. Run the stale tests with a nextest filter: `cargo nextest run -E 'test(=a) | test(=b)'`.
 
 The `llvm-tools` component of rustup gives `llvm-profdata` and `llvm-cov`.
+
+### Project rustflags
+
+Cargo reads the rustflags from the first set source of: `CARGO_ENCODED_RUSTFLAGS`, `RUSTFLAGS`,
+`target.<triple>.rustflags` (config files, `CARGO_TARGET_<TRIPLE>_RUSTFLAGS`), `build.rustflags`
+(config files, `CARGO_BUILD_RUSTFLAGS`). Measured with cargo 1.99.1: a probe workspace whose
+`RUSTC_WRAPPER` logged the flags that rustc received.
+
+| Setting (config has `build.rustflags = ["--cfg", "projflag"]` unless noted) | rustc receives |
+| --- | --- |
+| `RUSTFLAGS=-C instrument-coverage` | only the coverage flag: the config value is dropped |
+| `RUSTFLAGS=""` | nothing: an empty variable also replaces the config |
+| `CARGO_ENCODED_RUSTFLAGS` (with `RUSTFLAGS` set too) | the encoded value only: it wins over `RUSTFLAGS` |
+| `CARGO_BUILD_RUSTFLAGS=-C instrument-coverage` | config and variable merged |
+| `--config 'build.rustflags=[...]'` | config and option merged |
+| `target.<triple>.rustflags` in config, `build.rustflags` too | the target value only: build is ignored |
+| `CARGO_BUILD_RUSTFLAGS` with a target value in config | the target value only |
+| `CARGO_TARGET_<TRIPLE>_RUSTFLAGS` with a target value in config | config and variable merged |
+| `target.'cfg(...)'.rustflags` | it shadows `build.rustflags` like a target value |
+| target value in the parent folder, build value in the line | the parent target value only |
+
+Two sources have two sections: a target value hides the build value. So one variable cannot add
+the flag to every project. `cargo config get` is nightly only (not usable on 1.99.1). A
+`RUSTC_WRAPPER` that adds the flag would replace the `sccache` wrapper of `~/.cargo/config.toml`.
+
+Choice: `layr retest` reads the config files that cargo reads for the line (`$CARGO_HOME`, then
+`.cargo/config.toml` and `.cargo/config` of the line and its parents, top down). It sets only the
+variable that cargo reads:
+
+1. `CARGO_ENCODED_RUSTFLAGS` if set: the value plus the flag.
+2. Else `RUSTFLAGS` if set: the value plus the flag.
+3. Else `CARGO_TARGET_<TRIPLE>_RUSTFLAGS` if a `target.<triple>` value exists in a file or the
+   variable is set.
+4. Else `CARGO_BUILD_RUSTFLAGS`.
+
+`<triple>` is `CARGO_BUILD_TARGET`, else `build.target`, else the host. Retest never sets
+`RUSTFLAGS` itself, so a project value is never replaced. Limits (retest stops with an error):
+a `target.'cfg(...)'` value with rustflags, a `build.target` that is not a string.
+Tests: unit tests in `src/rustflags.rs`; e2e `build_rustflags_reach_the_instrumented_build` and
+`target_rustflags_reach_the_instrumented_build` (a project whose only `cfg(projflag)` comes from
+its config; both fail with the old `RUSTFLAGS` code).
 
 ## Records
 
