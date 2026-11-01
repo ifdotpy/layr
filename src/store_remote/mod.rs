@@ -151,6 +151,48 @@ pub fn open_named(name: &str, repo: &Repo) -> Result<Store> {
     Ok(store)
 }
 
+/// The store remotes whose successful push records name each state: state id to remote names.
+/// A state a store holds is recoverable from it (`restore_state`).
+pub fn store_copies(repo: &Repo) -> Result<std::collections::BTreeMap<String, Vec<String>>> {
+    let mut copies: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    for rec in repo.p.db.records_with_op("push")? {
+        let data = &rec.data;
+        let (Some(name), Some(url)) = (data["remote"].as_str(), data["url"].as_str()) else { continue };
+        if data["result"] != "success" || !matches!(crate::cmd::remote::kind(url), Ok(crate::cmd::remote::Kind::Store)) {
+            continue;
+        }
+        for id in data["state_ids_sent"].as_array().into_iter().flatten().filter_map(|v| v.as_str()) {
+            let names = copies.entry(id.to_string()).or_default();
+            if !names.iter().any(|n| n == name) {
+                names.push(name.to_string());
+            }
+        }
+    }
+    Ok(copies)
+}
+
+/// Restore a state that is not on this machine from a store remote that holds it. Fails with the
+/// reason when no remote gives it (for example, when the remote is offline).
+pub fn restore_state(repo: &Repo, id: &str) -> Result<()> {
+    let names = store_copies(repo)?.remove(id).unwrap_or_default();
+    if names.is_empty() {
+        bail!("state {} is not on this machine (run layr fetch <remote>)", crate::ids::short(id));
+    }
+    let mut errors = Vec::new();
+    for name in &names {
+        match open_named(name, repo).and_then(|store| reader::restore_states(&store, repo, &[id.to_string()])) {
+            Ok(_) => return Ok(()),
+            Err(e) => errors.push(format!("{name}: {e:#}")),
+        }
+    }
+    bail!(
+        "state {} is not on this machine; store remote {} holds it but cannot give it ({}); check the remote and run the command again",
+        crate::ids::short(id),
+        names.join(", "),
+        errors.join("; ")
+    )
+}
+
 fn open_with_pin(url: &str, repo: &Repo, pin: Option<StorePin>) -> Result<Store> {
     let hash = hex::encode(Sha256::digest(url.as_bytes()));
     Ok(Store {

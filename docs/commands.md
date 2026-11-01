@@ -175,6 +175,14 @@ state differs only in build output, which a build makes again, so a deleted line
 the next `gc`. The newest automatic state of a live line always stays. `gc` compares these states
 before it takes the store lock.
 
+`gc` evicts a state that a store remote holds (a successful `layr push <store-remote>` names it):
+its tree goes, its record stays, and the next command that reads the tree fetches it back from that
+remote. A recoverable state stays on disk when it is a line head, the newest automatic state of a
+line, a state with caches, a state that a cache overlay names, or a base of a thin layer chain that
+a state on disk needs. Without a reachable remote, a command that needs the tree fails and names the
+remote. `gc --all-projects` runs `gc` for every project (macOS periodic run:
+`packaging/launchd/ws.layr.gc.plist`). See [design.md](design.md#state-eviction-and-fetch-on-demand).
+
 Revisions: `head`, `@`, `head~2`, `head^2`, line names, `line@machine`, tags, `origin/main`,
 state id prefixes, git commit ids (full or a prefix of at least 4 digits), `park@{n}`, `head@{n}`
 (auto states, newest first). Every command that takes a revision takes a git commit id.

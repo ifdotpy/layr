@@ -236,10 +236,17 @@ pub struct Lock {
     trash: PathBuf,
     /// The project name, for `LAYR_TRACE`.
     project: String,
+    /// The meta folder of the project whose lock this is (`Project::holds_lock`).
+    meta: PathBuf,
 }
 
 /// The store locks this process holds. The trash is emptied when the last one goes.
 static HELD_LOCKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The meta folders of the projects whose lock this process holds. A second lock file
+/// descriptor in this process would wait for the first, so code that may run under the lock
+/// checks `Project::holds_lock` first.
+static HELD_PROJECTS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
 
 /// A wait for or a hold of the store lock this long goes to `meta/lock-slow.log`: one lock
 /// serializes the commands of every user of the project, so a slow hold stops all of them.
@@ -255,6 +262,11 @@ impl Drop for Lock {
         drop(self.f.take());
         if std::env::var_os("LAYR_TRACE").is_some() {
             eprintln!("trace {:>8.1} ms  store lock held: {}", held.as_secs_f64() * 1000.0, self.project);
+        }
+        if let Ok(mut held) = HELD_PROJECTS.lock() {
+            if let Some(i) = held.iter().position(|m| *m == self.meta) {
+                held.remove(i);
+            }
         }
         if HELD_LOCKS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) == 1 {
             // Deleting build output takes minutes: it runs after the last lock, so other
@@ -423,6 +435,10 @@ impl<'a> Project<'a> {
     }
     pub fn meta_dir(&self) -> PathBuf {
         self.dir.join("meta")
+    }
+    /// True when this process holds the lock of this project (taking it again would wait forever).
+    pub fn holds_lock(&self) -> bool {
+        HELD_PROJECTS.lock().map(|held| held.contains(&self.meta_dir())).unwrap_or(false)
     }
     pub fn git_dir(&self) -> PathBuf {
         self.dir.join("git")
@@ -724,6 +740,9 @@ impl<'a> Project<'a> {
         let asked = std::time::Instant::now();
         rustix::fs::flock(&f, rustix::fs::FlockOperation::LockExclusive)?;
         HELD_LOCKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let Ok(mut held) = HELD_PROJECTS.lock() {
+            held.push(self.meta_dir());
+        }
         if std::env::var_os("LAYR_TRACE").is_some() {
             eprintln!("trace {:>8.1} ms  store lock taken: {}", asked.elapsed().as_secs_f64() * 1000.0, self.name);
         }
@@ -740,6 +759,7 @@ impl<'a> Project<'a> {
             log: self.meta_dir().join("lock-slow.log"),
             trash: self.store.trash_dir(),
             project: self.name.clone(),
+            meta: self.meta_dir(),
         };
         #[cfg(target_os = "macos")]
         crate::apfs_commit::recover(self)?;

@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Periodic gc of every layr project on macOS. Replace __LAYR__ with the path of the layr
+     binary and __HOME__ with the home folder, then copy the file to ~/Library/LaunchAgents and
+     run: launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ws.layr.gc.plist
+     See docs/design.md, "State eviction and fetch on demand". -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>ws.layr.gc</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__LAYR__</string>
+        <string>gc</string>
+        <string>--all-projects</string>
+        <string>-q</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>21600</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>LowPriorityIO</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>__HOME__/Library/Logs/layr-gc.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/Library/Logs/layr-gc.log</string>
+</dict>
+</plist>

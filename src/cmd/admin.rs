@@ -912,7 +912,13 @@ pub fn try_command(
 /// holds (`pushed_work`): only build output would go, and a build makes it again.
 /// `pushed` caches `pushed_work` answers: states never change, so a plan before the store lock
 /// answers most of them for the plan under it.
-pub fn retention_plan(repo: &Repo, pushed: &mut BTreeMap<String, bool>) -> Result<(BTreeSet<String>, Vec<String>)> {
+/// Returns `(keep, delete, evict)`. `delete` holds the states nothing keeps and no store holds:
+/// their trees and records go. `evict` holds the states a store remote holds whose trees go
+/// while their records stay (`store_remote::restore_state` brings them back). A recoverable
+/// state stays on disk when it is a line head, the newest automatic state of a line, a state
+/// with caches, a state a cache overlay names, or (through `thin::delete_states`) a base that a
+/// state on disk needs.
+pub fn retention_plan(repo: &Repo, pushed: &mut BTreeMap<String, bool>) -> Result<(BTreeSet<String>, Vec<String>, Vec<String>)> {
     let db = &repo.p.db;
     let mut held = |id: &str| -> Result<bool> {
         if let Some(v) = pushed.get(id) {
@@ -928,15 +934,22 @@ pub fn retention_plan(repo: &Repo, pushed: &mut BTreeMap<String, bool>) -> Resul
     let hourly = repo.p.config_u64("retention.hours", 24) as i64;
     let undo_days = repo.p.config_u64("undo.days", 7) as i64;
     let mut keep: BTreeSet<String> = BTreeSet::new();
+    // States that stay on disk even when a store holds them.
+    let mut must: BTreeSet<String> = BTreeSet::new();
     for l in db.lines()? {
         roots.push(l.head.clone());
+        must.insert(l.head.clone());
         for (_, h) in db.line_heads(&l.id)? {
+            must.insert(h.clone());
             roots.push(h);
         }
         let autos = db.line_states(&l.id, StateKind::Auto)?;
         let mut buckets: BTreeSet<i64> = BTreeSet::new();
         for (i, s) in autos.iter().enumerate() {
             // The newest automatic state of a line stays: it is the line's latest undo point.
+            if i == 0 {
+                must.insert(s.id.clone());
+            }
             if i > 0 && held(&s.id)? {
                 continue;
             }
@@ -1023,13 +1036,40 @@ pub fn retention_plan(repo: &Repo, pushed: &mut BTreeMap<String, bool>) -> Resul
             }
         }
     }
-    let mut delete = Vec::new();
-    for (id, _) in db.present_states()? {
-        if !keep.contains(&id) {
-            delete.push(id);
+    // A cache overlay names project states through its heads and records. An error here stops the
+    // plan: nothing is evicted on a guess.
+    for name in repo.overlay_names()? {
+        let overlay = repo.overlay_repo(&name)?;
+        for line in overlay.p.db.lines()? {
+            must.insert(line.head);
+        }
+        for raw in overlay.p.db.all_lines()? {
+            for token in raw.split(|c: char| !c.is_ascii_hexdigit()).filter(|t| t.len() == 32) {
+                if db.state(token)?.is_some() {
+                    must.insert(token.to_string());
+                }
+            }
         }
     }
-    Ok((keep, delete))
+    let copies = crate::store_remote::store_copies(repo)?;
+    let mut delete = Vec::new();
+    let mut evict = Vec::new();
+    for (id, _) in db.present_states()? {
+        if !keep.contains(&id) {
+            if copies.contains_key(&id) {
+                evict.push(id);
+            } else {
+                delete.push(id);
+            }
+        } else if copies.contains_key(&id)
+            && !must.contains(&id)
+            && repo.p.has_state(&id)
+            && db.state(&id)?.is_some_and(|s| s.caches.is_empty())
+        {
+            evict.push(id);
+        }
+    }
+    Ok((keep, delete, evict))
 }
 
 /// True for an automatic state without caches whose parent has a git commit (pushed or imported)
@@ -1052,18 +1092,20 @@ pub fn run_gc(ctx: &Ctx, repo: &Repo, dry: bool) -> Result<Vec<String>> {
     // The comparisons of automatic states with their parents take seconds to minutes: a first
     // plan without the lock makes them, and the plan under the lock reuses them.
     let mut pushed = BTreeMap::new();
-    let (_keep, delete) = retention_plan(repo, &mut pushed)?;
+    let (_keep, delete, evict) = retention_plan(repo, &mut pushed)?;
     if dry {
-        return Ok(delete);
+        return Ok(delete.into_iter().chain(evict).collect());
     }
     let _lock = repo.p.lock()?;
-    let (_keep, delete) = retention_plan(repo, &mut pushed)?;
+    let (_keep, delete, evict) = retention_plan(repo, &mut pushed)?;
     for expired in repo.p.db.expired_refs(ids::now_ms())? {
         let mut rec = Record::new("ref.expire");
         rec.data = serde_json::json!({"ref_change": crate::model::RefChange { name:expired.name.clone(),before:Some(expired),after:None }});
         repo.commit_record(ctx, rec)?;
     }
-    for id in &delete {
+    // Cache snapshots of a state that goes (deleted or evicted) go with it: `excess_caches` only
+    // looks at present states.
+    for id in delete.iter().chain(evict.iter()) {
         let s = repo.p.db.state(id)?;
         if let Some(s) = &s {
             for snap in s.caches.values() {
@@ -1071,7 +1113,17 @@ pub fn run_gc(ctx: &Ctx, repo: &Repo, dry: bool) -> Result<Vec<String>> {
             }
         }
     }
-    let deleted = repo.p.delete_states(&delete);
+    let removed: Vec<String> = delete.iter().chain(evict.iter()).cloned().collect();
+    let gone = repo.p.delete_states(&removed);
+    // An evicted state keeps its record and reads as not present. A state whose tree stays as a
+    // base of another state on disk keeps its present flag.
+    for id in &evict {
+        if !repo.p.has_state(id) {
+            repo.p.db.set_present(id, false)?;
+        }
+    }
+    // Only the states that nothing can fetch are named by the gc record (`deleted`).
+    let deleted: Vec<String> = delete.iter().filter(|id| gone.contains(id)).cloned().collect();
     let caches = trash_excess_caches(repo)?;
     // Cache overlay lines of deleted lines: their states go below (docs/cache-overlays.md).
     if let Err(e) = repo.drop_orphan_cache_lines(ctx) {
@@ -1130,7 +1182,7 @@ pub fn run_gc(ctx: &Ctx, repo: &Repo, dry: bool) -> Result<Vec<String>> {
             }
         }
     }
-    Ok(deleted)
+    Ok(removed)
 }
 
 /// Cache snapshots (build output) are large and only the newest ones warm new lines: they stay
@@ -1169,13 +1221,38 @@ pub fn trash_excess_caches(repo: &Repo) -> Result<Vec<String>> {
     Ok(out)
 }
 
+/// `layr gc --all-projects`: the retention of every project of the store, for a periodic run
+/// (`packaging/launchd/ws.layr.gc.plist`). A project that fails does not stop the others; the
+/// exit code is 1 then.
+fn gc_all_projects(ctx: &Ctx, dry: bool, quiet: bool) -> Result<i32> {
+    let mut code = 0;
+    for name in ctx.store.project_names()?.into_iter().filter(|n| !n.contains('%')) {
+        let result = Repo::open(ctx, &name).and_then(|repo| {
+            repo.require(ctx, "gc")?;
+            run_gc(ctx, &repo, dry)
+        });
+        match result {
+            Ok(removed) if !quiet => outln!(ctx, "{name}: {} state(s)", removed.len()),
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("layr gc ({name}): {e:#}");
+                code = 1;
+            }
+        }
+    }
+    Ok(code)
+}
+
 pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
     crate::store::EMPTY_TRASH_FULLY.store(true, std::sync::atomic::Ordering::SeqCst);
     if args.iter().any(|v| v == "--remote" || v.starts_with("--remote=")) {
         return crate::store_remote::command(ctx, "gc", args);
     }
-    let spec = Spec::new().flag("-n|--dry-run").flag("-q|--quiet").flag("--dedup");
+    let spec = Spec::new().flag("-n|--dry-run").flag("-q|--quiet").flag("--dedup").flag("--all-projects");
     let a = parse(&spec, args)?;
+    if a.has("--all-projects") {
+        return gc_all_projects(ctx, a.has("-n"), a.has("-q"));
+    }
     let h = here(ctx)?;
     h.repo.require(ctx, "gc")?;
     let v = run_gc(ctx, &h.repo, a.has("-n"))?;
