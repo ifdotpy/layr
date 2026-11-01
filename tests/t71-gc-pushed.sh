@@ -1,5 +1,5 @@
 #!/bin/bash
-# gc and pushed work: the undo window and the automatic-state rules do not keep an automatic
+# gc and saved work: the undo window and the automatic-state rules do not keep an automatic
 # state whose parent a push holds and whose files that are not ignored equal it (only build
 # output differs). An automatic state with unsaved work stays for the undo window.
 . "$(dirname "$0")/lib.sh"
@@ -24,6 +24,14 @@ built=$(id "$(l save)")
 head -c 1048576 /dev/urandom > target/out2
 built2=$(id "$(l save)")
 
+# A line whose named work was never pushed, with build output in its automatic states.
+cd $M/main || exit 1
+l line new -q np origin/main >/dev/null
+cd $M/np || exit 1
+echo local > a.txt; l save -qam "not pushed"
+mkdir -p target; head -c 1048576 /dev/urandom > target/out
+npbuilt=$(id "$(l save)")
+
 # A line with unsaved work.
 cd $M/main || exit 1
 l line new -q u origin/main >/dev/null
@@ -35,9 +43,10 @@ cd $M/main || exit 1
 plan=$(l gc -n)
 has "an older automatic state with pushed work and build output goes" "$(short $built)" "$plan"
 no "the newest automatic state of a live line stays" sh -c "printf %s \"\$1\" | grep -q $(short $built2)" _ "$plan"
-l line delete -D w u -q >/dev/null
+l line delete -D w u np -q >/dev/null
 plan=$(l gc -n)
 has "after the line is deleted, its last automatic state goes too" "$(short $built2)" "$plan"
+has "a deleted line's build-output state goes even when its work was never pushed" "$(short $npbuilt)" "$plan"
 no "an automatic state with unsaved work stays in the undo window" sh -c "printf %s \"\$1\" | grep -q $(short $unsaved)" _ "$plan"
 l gc -q
 eq "fsck is clean after gc" 0 "$(l fsck >/dev/null 2>&1; echo $?)"

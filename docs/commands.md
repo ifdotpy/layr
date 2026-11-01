@@ -167,8 +167,8 @@ file), so a large store takes minutes; 4 workers share the folders of `states` a
 `gc` deletes the states that nothing keeps. Line heads and their history, tags, refs, park entries
 and conflict sources stay. The newest `retention.auto` (50) automatic states of each line, one per
 hour for `retention.hours` (24), and every state that a record of the last `undo.days` (7) names
-stay too, except an automatic state whose work a push already holds: its parent has a git commit
-(pushed or imported), it has no caches, and its files that are not ignored equal the parent. Such a
+stay too, except an automatic state whose work its parent already holds: it has no caches and its
+files that are not ignored equal the parent (pushed or not; the parent stays while anything names it). Such a
 state differs only in build output, which a build makes again, so a deleted line frees its space at
 the next `gc`. The newest automatic state of a live line always stays. `gc` compares these states
 before it takes the store lock.
