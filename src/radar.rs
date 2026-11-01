@@ -114,6 +114,7 @@ impl StateCompare {
         if let Some(found) = self.read() {
             return Ok(found);
         }
+        let _t = crate::trace::span("overlap compare miss");
         // The ignore rules of the saved state: the tree is immutable, so the key stays valid.
         let found = compare(&self.base, &self.theirs, &Rules::of(&self.theirs))?;
         // A save that fails costs only time on the next call.

@@ -46,10 +46,11 @@ c.txt l6'
 # The first status of the line is the cold one: no compare of two saved states is cached yet.
 LAYR_TRACE=1 l status >/dev/null 2> $T/trace1
 LAYR_TRACE=1 l status >/dev/null 2> $T/trace2
-n1=$(grep -c candidates $T/trace1)
-n2=$(grep -c candidates $T/trace2)
-ok "the cold status makes candidate compares ($n1)" test "$n1" -gt 0
-ok "the warm status makes fewer candidate compares ($n2 < $n1)" test "$n2" -lt "$n1"
+# A compare of two saved states that misses the cache is traced on every platform.
+n1=$(grep -c "overlap compare miss" $T/trace1)
+n2=$(grep -c "overlap compare miss" $T/trace2)
+ok "the cold status computes state compares ($n1)" test "$n1" -gt 0
+ok "the warm status computes no state compare ($n2)" test "$n2" -eq 0
 ok "the compare cache holds entries" test -n "$(ls $CACHE 2>/dev/null)"
 
 eq "status lists the overlaps of the six lines" "$EXPECT" "$(pairs)"
