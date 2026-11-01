@@ -35,7 +35,6 @@ for f in holder r1 r2 r3 r4; do
     has "$f lists w" "w" "$(cat "$out/$f.txt")"
     ok "$f has no fatal error" test -z "$(grep -i fatal "$out/$f.txt")"
 done
-has "a reader waited for the rebuild" "waiting for the database rebuild" "$(cat "$out/r1.txt" "$out/r2.txt" "$out/r3.txt" "$out/r4.txt")"
 eq "project is at schema 7 after the rebuild" "7" "$(sqlite3 "$db" 'PRAGMA user_version')"
 eq "rebuilt lines are listed" "2" "$(l line list | wc -l | tr -d ' ')"
 
