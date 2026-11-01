@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.3](https://github.com/ifdotpy/layr/compare/v0.9.2...v0.9.3) (2026-11-01)
+
+
+### Bug Fixes
+
+* Keep staged, cache and xattr data safe; faster saves; line move ([#100](https://github.com/ifdotpy/layr/issues/100)) ([5278335](https://github.com/ifdotpy/layr/commit/5278335e96d2a31ae4a4cfb1f76691eec3b15c0a))
+
 ## [0.9.2](https://github.com/ifdotpy/layr/compare/v0.9.1...v0.9.2) (2026-10-31)
 
 
