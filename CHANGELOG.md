@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.0](https://github.com/ifdotpy/layr/compare/v0.11.0...v0.12.0) (2026-11-01)
+
+
+### Features
+
+* **gc:** Keep only states that cannot be fetched back ([#111](https://github.com/ifdotpy/layr/issues/111)) ([a7b7162](https://github.com/ifdotpy/layr/commit/a7b7162a2d3ed3df1bface4a9942523847ff30a3))
+
 ## [0.11.0](https://github.com/ifdotpy/layr/compare/v0.10.0...v0.11.0) (2026-11-01)
 
 

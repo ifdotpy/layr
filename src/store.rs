@@ -1079,6 +1079,15 @@ impl<'a> Project<'a> {
         self.db.config(key).ok().flatten().and_then(|v| v.as_bool()).unwrap_or(default)
     }
 
+    /// Project config key `gc.evict` (`on` or `off`, default `off`). This is its only owner:
+    /// readers call `gc_evicts`, and `cmd::admin::set_config` accepts only the two values.
+    pub const GC_EVICT_KEY: &'static str = "gc.evict";
+
+    /// True when `gc.evict` is `on`. Any other value, or a read error, means off.
+    pub fn gc_evicts(&self) -> bool {
+        self.config_value(Self::GC_EVICT_KEY).ok().flatten().and_then(|v| v.as_str().map(|s| s == "on")).unwrap_or(false)
+    }
+
     pub fn config_strings(&self, key: &str) -> Vec<String> {
         self.db
             .config(key)

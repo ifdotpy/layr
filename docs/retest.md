@@ -109,35 +109,105 @@ the project's own level.
 
 ## Sweeping stale build output
 
-Cargo never removes the files of older hashes. A new feature set, a changed flag or a new toolchain
-leaves `.rlib`, `.rmeta`, `.d` and test binaries with the old hash in `target/retest/debug/deps`,
-and every incremental build of a crate leaves a new set of `.rcgu.o` object files there (macOS
-keeps them next to the binary). The sweep runs right after the build, inside the same run.
+Cargo never removes the output of an old unit. A unit is one compiled crate, test binary or build
+script run. Its name ends in a 16 hex digit hash (`name-<hash>`). A new feature set, a changed flag,
+a new toolchain or a focused command leaves the files of the units that no later build uses.
 
-Rules:
+`layr retest sweep [--dry-run]` removes them. `layr retest run` sweeps after its build with the same rule.
 
-- Live files: the tool runs `cargo test --no-run --message-format json` with the same environment and
-  arguments (a no-op: every file is fresh). Every file of a `compiler-artifact` message is live. If
-  that call fails, or lists nothing, there is no sweep.
-- In `debug/deps`, a file whose name has a 16 digit hex cargo hash (`name-<hash>[.ext]`, with or
-  without the `lib` prefix) is removed when no live file has the same `name-hash`. All files of one
-  `name-hash` live or go together (`.rlib`, `.rmeta`, `.d`, the binary, `.dSYM`). Files without a
-  cargo hash stay.
-- Object files `name-hash.<unit>.<build>.rcgu.o`: of each `name-hash`, only the build that has the
-  newest object file stays.
-- In `debug/incremental/<crate>-<hash>`, only the newest finalized session folder and its `.lock`
-  file stay. A crate folder without a finalized session stays as it is.
-- Lock: the sweep takes cargo's own build lock (`debug/.cargo-lock`, `flock`) without waiting. If
-  another cargo of this target holds it, the sweep is skipped. No cargo can start in the target while the
-  sweep holds the lock.
-- Only `target/retest/debug/deps` and `target/retest/debug/incremental` are touched. `.fingerprint`
-  and `build` stay (small).
-- It prints `swept stale build output, freed N MB`. Only files with one hard link count: an object
-  file is also a link in the incremental folder and counts when its last link goes.
+### Live set
 
-A run with other package selection (`-- -p foo`) treats the files of the other packages as stale and
-removes them; the next run with the full selection builds them again. Keep one selection per line.
-The early exit "no build" does not sweep: nothing was built.
+The live set is the set of unit hashes that the standard build commands use in this tree. The commands
+are in the root `Cargo.toml` of the workspace:
+
+```toml
+[workspace.metadata.layr-retest]
+env = { RUSTUP_TOOLCHAIN = "1.99.1-aarch64-apple-darwin", RUSTC_WRAPPER = "", CARGO_INCREMENTAL = "0" }
+sweep = [["build", "--workspace", "--exclude", "studio-native-client", "--tests", "--bins", "--examples", "--locked"]]
+```
+
+- `sweep` lists cargo commands without `cargo`. The sweep adds `--message-format json` (nextest:
+  `--cargo-message-format json`) and runs each command in the target folder with `env`. A command that is
+  built already only lists its units. A command that is not built yet compiles first.
+- The hashes come from cargo's messages: every artifact, fresh or not, and every build script run.
+  Cargo names a bin or an example only by its copy in `debug` (`debug/app`). The sweep matches a copy
+  to its hashed file by size and modification time. With no match, every hashed file of that name is live.
+- `env` sets the variables that change the unit hashes (toolchain, wrapper, incremental). It is applied
+  over the environment of the caller.
+- `layr retest run` adds its own command (`test --no-run` and its arguments) to the list. A focused run
+  does not remove the units of the standard commands, and the units it built stay.
+- Without a `sweep` list, `layr retest run` skips the sweep and `layr retest sweep` stops. Nothing is removed.
+- `target/retest` is swept with the same list and the environment of `run` (instrumented RUSTFLAGS, debug
+  info, incremental). It is swept only when it exists.
+
+### What goes
+
+A unit that the live set does not name goes whole:
+
+- its entries in `debug/.fingerprint` and `debug/build` (with `out/`),
+- its files and folders with the hash in `debug/deps` and `debug/examples` (`.rlib`, `.rmeta`, `.d`,
+  object files, test binaries, `.dSYM`).
+
+No file of a live unit goes, with one exception (next section). In `debug/incremental` only the newest
+finalized session of each crate folder stays. The folder names are not cargo hashes, so this rule is per
+folder. Names without a cargo hash stay.
+
+### Object files
+
+Each build writes a new set of object files (`<crate>-<hash>.<cgu>.<build>.rcgu.o`, macOS keeps them
+for the debug info) for the same unit hash. A source change keeps the unit hash, so the old sets pile up.
+Cargo does not use them. The one exception to "no file of a live unit goes": for each live unit, only
+the object files of its newest build stay (newest modification time). This rule was measured and tested in
+PR #80, and it is restored here. Its test is `deps_keeps_only_the_newest_object_build_of_a_live_unit`.
+Two name forms carry a build id: `<crate>-<hash>.<cgu>.<build>.rcgu.o`, and `<crate>-<hash>.<crate>.<id>-cgu.<n>.rcgu.o`
+(one `<id>` for all codegen units of a compile; the Studio crates use this form). Other names stay.
+A first version parsed the cgu index as the build id and removed the current objects of integration tests,
+so cargo rebuilt the workspace crates on the next build. Test: `deps_keeps_object_names_without_a_build_id`.
+The e2e test `sweep_removes_the_units_that_no_standard_command_uses` checks one build per unit after an edit.
+
+### Safety
+
+- Every target is listed before any removal. A failing command in any target changes nothing.
+- A sweep never sweeps a folder whose listing compiled a unit: cargo's JSON shows `fresh: false` for it. The
+  folder is skipped and the output says why. The listing itself still runs cargo, so that one build is
+  spent. A sweep of a folder that was built with the same commands costs seconds and compiles nothing.
+- The sweep holds cargo's build lock (`debug/.cargo-lock`) during the removal and does not wait for it.
+  A busy lock skips that folder. A listing runs before the lock: a cargo that finishes between the two
+  can lose its newest units, and the next build compiles them again.
+- An empty live set removes nothing.
+- `--dry-run` prints the bytes that a sweep would free and removes nothing.
+- An uplifted dylib (`target/debug/lib<name>.dylib`, no hashed copy in `deps`) keeps the units that hold its
+  marker file (`lib-<name>`, `bin-<name>`, `example-<name>` or `test-<name>`) in `.fingerprint`. Without this
+  rule the sweep removed the dylib's unit, and the next build recompiled the crates that depend on it.
+  Test: `live_units_keeps_the_marked_units_of_an_uplifted_dylib`.
+- Output: `swept <folder>, freed N MB`, and the time of the whole command.
+
+### Listing that compiles
+
+A listing that compiles a unit cannot be checked for the live set, so its folder is not swept. The
+`run` sweep follows the same rule: a standard command that was never built in `target/retest` (for
+example `--examples` when the test build did not compile them) skips the sweep of that run.
+
+### Studio measurement (2026-11-01)
+
+Studio `sweep-check` line from origin/main (`target` of about 53 GB apparent size, `du`). Gate build:
+`cargo build --workspace --exclude studio-native-client --tests --bins --examples --locked` with
+`RUSTUP_TOOLCHAIN=1.99.1-aarch64-apple-darwin RUSTC_WRAPPER= CARGO_INCREMENTAL=0`.
+
+| Step | Result |
+| --- | --- |
+| Gate build after the base change | 6 crates compiled, 142 s |
+| Dry run, first after the #114 rustflags change | retest folder listing compiled 535 units (702 s), then the target sweep freed 0 MB |
+| Sweep (warm) | 2.6 s: `target` freed 0 MB, `target/retest` freed 13,247 MB |
+| Build after sweep | 0 crates compiled |
+| One-line change, build | 6 crates compiled, 162 s; `target/debug` du +54 MB, no new object sets |
+| Dry run before the change sweep | retest listing compiled 22 units (170 s), so that folder was not swept in the dry run |
+| Sweep after the change (warm) | 1.4 s, freed 0 MB; `target/debug` du back to the size before the change |
+| Build after the change sweep | 0 crates compiled |
+
+The timed sweeps are the warm ones. The long times came from cargo's listing compiling a folder that was
+stale, which the sweep then skips. Freed sizes count files with one hard link; APFS clones are not
+counted, so `du` changes differ from the freed value.
 
 ### Measurements 2026-10-31 (debug info and sweep)
 
@@ -201,7 +271,7 @@ times of the artifact list and the sweep.
 
 `du` counts clones in full, so these use the change of `df` free space. A new line is a `cp -c -R`
 of `target/retest`; then one small change is built into the clone (`cargo nextest run --no-run
---workspace`, same RUSTFLAGS as layr-retest). The clone itself costs about 0.
+--workspace`, same flags as layr-retest). The clone itself costs about 0.
 
 Layr workspace (`debug/incremental` 0.67 to 0.96 GB, `target/retest` 2.26 to 2.55 GB; two passes, the
 second is shown, the first in brackets; free space 52.9 GB before, 50.6 GB after):
@@ -241,7 +311,8 @@ disk. The full run catches such a change.
 No maintained tool exists. `cargo-difftests` (0.6.1, last change 2024-05) has the right mechanism
 but needs nightly Rust, a call in every test, and git. The adapter uses only stable parts:
 
-1. Build the tests with `RUSTFLAGS="-C instrument-coverage"` in a separate target folder.
+1. Build the tests with `-C instrument-coverage` added to the project rustflags (see "Project
+   rustflags") in a separate target folder.
 2. Set the cargo target `runner` to a small wrapper. nextest starts every test in its own process
    through this runner and gives it `NEXTEST_BINARY_ID` and `NEXTEST_TEST_NAME`. The wrapper sets
    `LLVM_PROFILE_FILE=<dir>/<binary>/<test>.profraw` and starts the test. In the list phase the
@@ -256,6 +327,47 @@ but needs nightly Rust, a call in every test, and git. The adapter uses only sta
 5. Run the stale tests with a nextest filter: `cargo nextest run -E 'test(=a) | test(=b)'`.
 
 The `llvm-tools` component of rustup gives `llvm-profdata` and `llvm-cov`.
+
+### Project rustflags
+
+Cargo reads the rustflags from the first set source of: `CARGO_ENCODED_RUSTFLAGS`, `RUSTFLAGS`,
+`target.<triple>.rustflags` (config files, `CARGO_TARGET_<TRIPLE>_RUSTFLAGS`), `build.rustflags`
+(config files, `CARGO_BUILD_RUSTFLAGS`). Measured with cargo 1.99.1: a probe workspace whose
+`RUSTC_WRAPPER` logged the flags that rustc received.
+
+| Setting (config has `build.rustflags = ["--cfg", "projflag"]` unless noted) | rustc receives |
+| --- | --- |
+| `RUSTFLAGS=-C instrument-coverage` | only the coverage flag: the config value is dropped |
+| `RUSTFLAGS=""` | nothing: an empty variable also replaces the config |
+| `CARGO_ENCODED_RUSTFLAGS` (with `RUSTFLAGS` set too) | the encoded value only: it wins over `RUSTFLAGS` |
+| `CARGO_BUILD_RUSTFLAGS=-C instrument-coverage` | config and variable merged |
+| `--config 'build.rustflags=[...]'` | config and option merged |
+| `target.<triple>.rustflags` in config, `build.rustflags` too | the target value only: build is ignored |
+| `CARGO_BUILD_RUSTFLAGS` with a target value in config | the target value only |
+| `CARGO_TARGET_<TRIPLE>_RUSTFLAGS` with a target value in config | config and variable merged |
+| `target.'cfg(...)'.rustflags` | it shadows `build.rustflags` like a target value |
+| target value in the parent folder, build value in the line | the parent target value only |
+
+Two sources have two sections: a target value hides the build value. So one variable cannot add
+the flag to every project. `cargo config get` is nightly only (not usable on 1.99.1). A
+`RUSTC_WRAPPER` that adds the flag would replace the `sccache` wrapper of `~/.cargo/config.toml`.
+
+Choice: `layr retest` reads the config files that cargo reads for the line (`$CARGO_HOME`, then
+`.cargo/config.toml` and `.cargo/config` of the line and its parents, top down). It sets only the
+variable that cargo reads:
+
+1. `CARGO_ENCODED_RUSTFLAGS` if set: the value plus the flag.
+2. Else `RUSTFLAGS` if set: the value plus the flag.
+3. Else `CARGO_TARGET_<TRIPLE>_RUSTFLAGS` if a `target.<triple>` value exists in a file or the
+   variable is set.
+4. Else `CARGO_BUILD_RUSTFLAGS`.
+
+`<triple>` is `CARGO_BUILD_TARGET`, else `build.target`, else the host. Retest never sets
+`RUSTFLAGS` itself, so a project value is never replaced. Limits (retest stops with an error):
+a `target.'cfg(...)'` value with rustflags, a `build.target` that is not a string.
+Tests: unit tests in `src/rustflags.rs`; e2e `build_rustflags_reach_the_instrumented_build` and
+`target_rustflags_reach_the_instrumented_build` (a project whose only `cfg(projflag)` comes from
+its config; both fail with the old `RUSTFLAGS` code).
 
 ## Records
 

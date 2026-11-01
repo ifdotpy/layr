@@ -6,6 +6,7 @@ mod doctor;
 mod init;
 mod parse;
 mod record;
+mod rustflags;
 mod select;
 mod sweep;
 mod tools;
@@ -13,7 +14,7 @@ mod tools;
 use anyhow::{bail, Context, Result};
 use record::{test_key, FileCov, Record, TestRec};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -53,9 +54,10 @@ pub fn main(args: &[String]) -> Result<i32> {
         Some("run") => run(&args[1..]),
         Some("init") => init::run(&args[1..]),
         Some("doctor") => doctor::run(&args[1..]),
+        Some("sweep") => sweep_cmd(&args[1..]),
         _ => {
             eprintln!(
-                "usage: layr retest run [--full] [--save] [--tool vitest|jest|pytest] [-- <nextest args>]\n       layr retest init [--yes]\n       layr retest doctor\n       layr retest wrap -- <test binary> <args>"
+                "usage: layr retest run [--full] [--save] [--tool vitest|jest|pytest] [-- <nextest args>]\n       layr retest init [--yes]\n       layr retest doctor\n       layr retest sweep [--dry-run]\n       layr retest wrap -- <test binary> <args>"
             );
             Ok(2)
         }
@@ -307,25 +309,166 @@ fn debug_vars(opt_out: Option<&str>) -> Vec<(&'static str, &'static str)> {
     vec![("CARGO_PROFILE_DEV_DEBUG", "line-tables-only"), ("CARGO_PROFILE_TEST_DEBUG", "line-tables-only")]
 }
 
-/// Remove the build output that the build just made did not use. `build` lists what cargo uses; it
-/// is a no-op build because the files are fresh. Any failure only skips the sweep.
-fn sweep_stale(target: &Path, mut build: Command) {
-    let t = std::time::Instant::now();
-    let Ok(out) = build.stdout(Stdio::piped()).stderr(Stdio::null()).output() else { return };
-    let listed = t.elapsed().as_secs_f32();
-    if !out.status.success() {
-        eprintln!("layr-retest: sweep skipped: cargo could not list the build output");
-        return;
+/// Settings of `[workspace.metadata.layr-retest]` in the root `Cargo.toml`: `sweep` lists the standard
+/// build commands (cargo arguments without `cargo`), and `env` sets the variables that change the unit
+/// hashes of those builds (for example the toolchain of a gate).
+struct SweepConfig {
+    env: Vec<(String, String)>,
+    commands: Vec<Vec<String>>,
+}
+
+/// Reads the sweep settings of the workspace at `root`. `None` when it has no `sweep` list.
+fn sweep_config(root: &Path) -> Result<Option<SweepConfig>> {
+    let meta: Value =
+        serde_json::from_slice(&output(Command::new("cargo").args(["metadata", "--no-deps", "--format-version", "1"]).current_dir(root))?)?;
+    let cfg = &meta["metadata"]["layr-retest"];
+    let Some(list) = cfg["sweep"].as_array() else { return Ok(None) };
+    let mut commands = Vec::new();
+    for c in list {
+        let args = c.as_array().context("sweep: each command is an array of strings")?;
+        commands.push(args.iter().map(|a| a.as_str().map(String::from).context("sweep: each argument is a string")).collect::<Result<Vec<_>>>()?);
     }
-    match sweep::sweep(target, &sweep::live_files(&out.stdout)) {
+    let mut env = Vec::new();
+    for (k, v) in cfg["env"].as_object().into_iter().flatten() {
+        env.push((k.clone(), v.as_str().context("sweep env: each value is a string")?.to_string()));
+    }
+    Ok(Some(SweepConfig { env, commands }))
+}
+
+/// The environment that changes the unit hashes of the retest build: the instrumented rustflags (the
+/// flags that cargo reads for the project, with `-C instrument-coverage` appended), incremental
+/// compilation and the debug info level. The sweep lists the units under the same values.
+fn hash_env(root: &Path) -> Result<Vec<(String, String)>> {
+    let env_of = |k: &str| std::env::var(k).ok();
+    let files = rustflags::config_files(root, &env_of)?;
+    let (var, value) = rustflags::env_with_flags(&env_of, &files, &rustc_host()?, &["-C", "instrument-coverage"])?;
+    let mut env = vec![(var, value)];
+    if std::env::var(INCREMENTAL_VAR).as_deref() != Ok("0") {
+        env.push(("CARGO_INCREMENTAL".to_string(), "1".to_string()));
+    }
+    env.extend(debug_vars(std::env::var(LINE_TABLES_VAR).ok().as_deref()).into_iter().map(|(k, v)| (k.to_string(), v.to_string())));
+    Ok(env)
+}
+
+/// The cargo arguments that make cargo print the units of the build as JSON. Nextest forwards its own flag.
+fn listing(args: &[String]) -> Vec<String> {
+    let flag = if args.first().is_some_and(|a| a == "nextest") { "--cargo-message-format" } else { "--message-format" };
+    args.iter().cloned().chain([flag.to_string(), "json".to_string()]).collect()
+}
+
+/// The live units of the target folder `target`: the units that every command of `commands` uses, each
+/// run with `env`, and the units that a listing compiled. A listing does not sweep a folder it compiled
+/// in. Any failing command fails all.
+fn live_units(root: &Path, target: &Path, env: &[(String, String)], commands: &[Vec<String>]) -> Result<sweep::Listing> {
+    let mut all = sweep::Listing { live: BTreeSet::new(), built: Vec::new() };
+    for args in commands {
+        let mut c = Command::new("cargo");
+        c.args(listing(args)).current_dir(root).env("CARGO_TARGET_DIR", target).envs(env.iter().map(|(k, v)| (k, v)));
+        let o = c.stderr(Stdio::inherit()).output().with_context(|| format!("cannot start cargo {}", args.join(" ")))?;
+        if !o.status.success() {
+            bail!("cargo {} failed", args.join(" "));
+        }
+        let l = sweep::live_units(&target.join("debug"), &o.stdout);
+        all.live.extend(l.live);
+        all.built.extend(l.built);
+    }
+    Ok(all)
+}
+
+/// The reason a folder is not swept, when its listing compiled units.
+fn built_reason(built: &[String]) -> Option<String> {
+    let first = built.first()?;
+    Some(format!("the listing compiled {} unit(s), first: {first}; run the standard build first", built.len()))
+}
+
+/// Sweep the profile folder `debug` under cargo's lock. `None` when the lock is busy. A dry run counts only.
+fn sweep_folder(debug: &Path, live: &BTreeSet<String>, dry: bool) -> Result<Option<u64>> {
+    if dry {
+        return Ok(Some(sweep::sweep_units(debug, live, true)));
+    }
+    sweep::locked(debug, || sweep::sweep_units(debug, live, false))
+}
+
+/// The sweep after a retest build: the live units of the standard commands and of the run's own command
+/// (`own`), in `target/retest`. A failure skips the sweep and removes nothing.
+fn sweep_after_build(root: &Path, target: &Path, hash: &[(String, String)], own: Vec<String>) {
+    let t = std::time::Instant::now();
+    let cfg = match sweep_config(root) {
+        Ok(Some(c)) => c,
+        Ok(None) => return eprintln!("layr-retest: sweep skipped: no `sweep` list under [workspace.metadata.layr-retest] in Cargo.toml"),
+        Err(e) => return eprintln!("layr-retest: sweep skipped: {e:#}"),
+    };
+    let mut env = hash.to_vec();
+    env.extend(cfg.env.iter().cloned());
+    let mut commands = cfg.commands;
+    commands.push(own);
+    let listing = match live_units(root, target, &env, &commands) {
+        Ok(l) => l,
+        Err(e) => return eprintln!("layr-retest: sweep skipped, nothing removed: {e:#}"),
+    };
+    if let Some(why) = built_reason(&listing.built) {
+        return eprintln!("layr-retest: sweep skipped: {why}");
+    }
+    let live = listing.live;
+    let listed = t.elapsed().as_secs_f32();
+    match sweep_folder(&target.join("debug"), &live, false) {
         Ok(Some(n)) => eprintln!(
             "layr-retest: swept stale build output, freed {:.1} MB (artifact list {listed:.2}s, sweep {:.2}s)",
             n as f64 / 1e6,
             t.elapsed().as_secs_f32() - listed
         ),
-        Ok(None) => eprintln!("layr-retest: sweep skipped (build lock busy or nothing listed)"),
+        Ok(None) => eprintln!("layr-retest: sweep skipped (build lock busy)"),
         Err(e) => eprintln!("layr-retest: sweep skipped: {e:#}"),
     }
+}
+
+/// `layr retest sweep [--dry-run]`: remove the units that the standard commands of the workspace do not
+/// use, from `target/debug` and, when it exists, `target/retest/debug`. Every folder is listed before any
+/// removal: one failing command changes nothing.
+fn sweep_cmd(args: &[String]) -> Result<i32> {
+    let dry = match args {
+        [] => false,
+        [a] if a == "--dry-run" => true,
+        _ => {
+            eprintln!("usage: layr retest sweep [--dry-run]");
+            return Ok(2);
+        }
+    };
+    let t0 = std::time::Instant::now();
+    let root = std::env::current_dir()?;
+    let Some(cfg) = sweep_config(&root)? else {
+        eprintln!("layr-retest: no sweep list: add `sweep = [[\"build\", ...]]` under [workspace.metadata.layr-retest] in Cargo.toml");
+        return Ok(2);
+    };
+    let folders = [(root.join("target"), Vec::new()), (root.join("target/retest"), hash_env(&root)?)];
+    let mut lists = Vec::new();
+    for (target, env) in folders {
+        if !target.join("debug").is_dir() {
+            continue;
+        }
+        let mut env = env;
+        env.extend(cfg.env.iter().cloned());
+        match live_units(&root, &target, &env, &cfg.commands) {
+            Ok(l) => match built_reason(&l.built) {
+                Some(why) => eprintln!("layr-retest: {}: sweep skipped: {why}", target.strip_prefix(&root).unwrap_or(&target).display()),
+                None => lists.push((target, l.live)),
+            },
+            Err(e) => {
+                eprintln!("layr-retest: sweep skipped, nothing changed: {e:#}");
+                return Ok(1);
+            }
+        }
+    }
+    for (target, live) in lists {
+        let name = target.strip_prefix(&root).unwrap_or(&target).display().to_string();
+        match sweep_folder(&target.join("debug"), &live, dry)? {
+            Some(n) if dry => eprintln!("layr-retest: {name}: would free {:.1} MB", n as f64 / 1e6),
+            Some(n) => eprintln!("layr-retest: swept {name}, freed {:.1} MB", n as f64 / 1e6),
+            None => eprintln!("layr-retest: {name}: sweep skipped (build lock busy)"),
+        }
+    }
+    eprintln!("layr-retest: sweep took {:.2}s", t0.elapsed().as_secs_f32());
+    Ok(0)
 }
 
 /// Name and source file of every target of the workspace with the crate type `kind`.
@@ -359,11 +502,6 @@ fn bin_objects(target: &Path) -> Result<Vec<PathBuf>> {
 /// code of the packages that it links, so `llvm-cov` needs it as an object too.
 fn dylib_objects(target: &Path) -> Result<Vec<PathBuf>> {
     Ok(kind_targets("dylib")?.into_iter().map(|(name, _)| target.join("debug").join(dylib_file(&name))).filter(|p| p.is_file()).collect())
-}
-
-/// RUSTFLAGS of the instrumented build. No `-C prefer-dynamic`: binaries link std like the plain build.
-fn build_flags(base: &str) -> String {
-    format!("{base} -C instrument-coverage").trim().to_string()
 }
 
 /// Path of `p` relative to the line root, if it is inside.
@@ -521,19 +659,16 @@ fn run(args: &[String]) -> Result<i32> {
     let exe = std::env::current_exe()?;
     let tools = (llvm_tool("llvm-profdata")?, llvm_tool("llvm-cov")?);
     let runner_var = format!("CARGO_TARGET_{}_RUNNER", rustc_host()?.to_uppercase().replace('-', "_"));
-    let flags = build_flags(&std::env::var("RUSTFLAGS").unwrap_or_default());
+    let hash = hash_env(&root)?;
     let cargo = |first: &[&str]| {
         let mut c = Command::new("cargo");
         c.args(first).args(extra);
         // Cargo, build scripts and the list phase write here; the wrapper gives each test its own folder.
         c.env("LLVM_PROFILE_FILE", profdir.join("other/%p.profraw"));
         c.env(PROFDATA_VAR, &tools.0);
-        c.env("RUSTFLAGS", &flags).env("CARGO_TARGET_DIR", &target).env(PROFILE_DIR_VAR, &profdir);
+        c.env("CARGO_TARGET_DIR", &target).env(PROFILE_DIR_VAR, &profdir);
         c.env(&runner_var, format!("{} retest wrap --", exe.display())).env("NEXTEST_EXPERIMENTAL_LIBTEST_JSON", "1");
-        if std::env::var(INCREMENTAL_VAR).as_deref() != Ok("0") {
-            c.env("CARGO_INCREMENTAL", "1");
-        }
-        c.envs(debug_vars(std::env::var(LINE_TABLES_VAR).ok().as_deref()));
+        c.envs(hash.iter().map(|(k, v)| (k, v)));
         c
     };
     let nextest = |sub: &[&str]| {
@@ -545,7 +680,9 @@ fn run(args: &[String]) -> Result<i32> {
     let suites = parse_list(&list)?;
     lap.mark("build and list");
     if std::env::var(SWEEP_VAR).as_deref() != Ok("0") {
-        sweep_stale(&target, cargo(&["test", "--no-run", "--message-format", "json"]));
+        let mut own = vec!["test".to_string(), "--no-run".to_string()];
+        own.extend(extra.iter().cloned());
+        sweep_after_build(&root, &target, &hash, own);
         lap.mark("sweep");
     }
 
@@ -708,12 +845,6 @@ fn run(args: &[String]) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn build_flags_never_prefer_dynamic() {
-        assert_eq!(build_flags(""), "-C instrument-coverage");
-        assert_eq!(build_flags("-Dwarnings"), "-Dwarnings -C instrument-coverage");
-    }
 
     #[test]
     fn dylib_file_name_uses_underscores() {
