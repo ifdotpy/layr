@@ -245,6 +245,19 @@ impl Cache {
         }
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
         let cache = Self { dir, limit, lock: Mutex::new(()) };
+        // Partial files of a put that stopped (a crash) go after an hour.
+        for item in std::fs::read_dir(&cache.dir)?.flatten() {
+            let stale = item.file_name().to_string_lossy().starts_with(".part-")
+                && item
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .is_some_and(|age| age > Duration::from_secs(3600));
+            if stale {
+                let _ = std::fs::remove_file(item.path());
+            }
+        }
         cache.evict()?;
         Ok(cache)
     }
@@ -277,10 +290,12 @@ impl Cache {
         }
         let _lock = self.lock.lock().unwrap();
         let partial = self.dir.join(format!(".part-{}", crate::ids::new_id()));
+        // Removes the partial file on every error (after the rename the name is gone).
+        let _partial = crate::fsutil::TempGuard(&partial);
         let mut file =
             std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(&partial)?;
         file.write_all(bytes)?;
-        std::fs::rename(partial, self.dir.join(hash))?;
+        std::fs::rename(&partial, self.dir.join(hash))?;
         self.evict()
     }
     fn evict(&self) -> Result<()> {
@@ -289,7 +304,8 @@ impl Cache {
         for item in std::fs::read_dir(&self.dir)? {
             let item = item?;
             let name = item.file_name().to_string_lossy().into_owned();
-            if name.len() != 64 || !name.bytes().all(|c| c.is_ascii_hexdigit()) {
+            // Partial files count too: they use the same disk.
+            if !name.starts_with(".part-") && (name.len() != 64 || !name.bytes().all(|c| c.is_ascii_hexdigit())) {
                 continue;
             }
             let metadata = std::fs::symlink_metadata(item.path())?;
@@ -833,6 +849,67 @@ mod tests {
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
         cache.put(&hash(b"toolong"), b"toolong").unwrap();
         assert!(!dir.join(hash(b"toolong")).exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod partial_tests {
+    use super::Cache;
+    use sha2::{Digest, Sha256};
+    use std::time::{Duration, SystemTime};
+
+    fn hash(data: &[u8]) -> String {
+        hex::encode(Sha256::digest(data))
+    }
+
+    fn partials(dir: &std::path::Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(".part-"))
+            .collect()
+    }
+
+    fn aged(path: &std::path::Path, age: Duration) {
+        let file = std::fs::File::options().write(true).open(path).unwrap();
+        file.set_times(std::fs::FileTimes::new().set_modified(SystemTime::now() - age)).unwrap();
+    }
+
+    /// A folder under the final name makes the rename fail after the partial file is written.
+    #[test]
+    fn a_failed_put_leaves_no_partial_file() {
+        let dir = std::env::temp_dir().join(format!("layr-disk-part-{}", crate::ids::new_id()));
+        let cache = Cache::open(dir.clone(), 1024).unwrap();
+        std::fs::create_dir_all(dir.join(hash(b"abc"))).unwrap();
+        assert!(cache.put(&hash(b"abc"), b"abc").is_err());
+        assert!(partials(&dir).is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn open_removes_partial_files_older_than_an_hour() {
+        let dir = std::env::temp_dir().join(format!("layr-disk-open-{}", crate::ids::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".part-old"), b"x").unwrap();
+        aged(&dir.join(".part-old"), Duration::from_secs(7200));
+        std::fs::write(dir.join(".part-new"), b"x").unwrap();
+        Cache::open(dir.clone(), 1024).unwrap();
+        assert_eq!(partials(&dir), vec![".part-new".to_string()]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The partial file counts toward the limit: the older partial goes before the new file.
+    #[test]
+    fn partial_files_count_in_the_size_budget() {
+        let dir = std::env::temp_dir().join(format!("layr-disk-budget-{}", crate::ids::new_id()));
+        let cache = Cache::open(dir.clone(), 5).unwrap();
+        std::fs::write(dir.join(".part-older"), b"four").unwrap();
+        aged(&dir.join(".part-older"), Duration::from_secs(1800));
+        cache.put(&hash(b"abc"), b"abc").unwrap();
+        assert!(partials(&dir).is_empty());
+        assert!(dir.join(hash(b"abc")).exists());
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

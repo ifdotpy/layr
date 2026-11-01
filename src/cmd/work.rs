@@ -500,7 +500,7 @@ pub fn add(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let read = || {
             let st = h.repo.status_for_add(line, &work, &index, limit.as_ref())?;
             let (paths, ignored) = select_add(&h, &a, &specs, &st, &work, &index, &quiet)?;
-            let scan = crate::repo::Temp { path: h.repo.p.scan_dir().join(ids::new_id()) };
+            let scan = crate::repo::Temp { path: h.repo.p.scan_dir().join(crate::store::temp_name()) };
             crate::storage::create_subvolume(&scan.path)?;
             crate::storage::copy_selected(&work, &scan.path, &paths)?;
             Ok((scan, paths, ignored))
@@ -647,7 +647,7 @@ pub fn rm(ctx: &Ctx, args: &[String]) -> Result<i32> {
         match (&thin, &full) {
             #[cfg(target_os = "macos")]
             (Some(t), _) => {
-                let none = crate::repo::Temp { path: h.repo.p.scan_dir().join(ids::new_id()) };
+                let none = crate::repo::Temp { path: h.repo.p.scan_dir().join(crate::store::temp_name()) };
                 std::fs::create_dir_all(&none.path)?;
                 let paths: BTreeSet<String> = plan.iter().map(|(s, _)| s.clone()).collect();
                 crate::thin::stage_entries(t, &none.path, &paths, h.repo.own(&line))?;
@@ -742,7 +742,7 @@ pub fn mv(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
     }
     let scan = if thin {
-        let copy = crate::repo::Temp { path: h.repo.p.scan_dir().join(ids::new_id()) };
+        let copy = crate::repo::Temp { path: h.repo.p.scan_dir().join(crate::store::temp_name()) };
         crate::storage::create_subvolume(&copy.path)?;
         #[cfg(target_os = "macos")]
         crate::storage::copy_selected(&w, &copy.path, &paths)?;
@@ -1752,7 +1752,7 @@ fn park_tree(
     untracked: bool,
     ignored: bool,
 ) -> Result<(Temp, BTreeSet<String>)> {
-    let work = Temp { path: repo.p.work_dir().join(ids::new_id()) };
+    let work = Temp { path: repo.p.work_dir().join(crate::store::temp_name()) };
     repo.snapshot_state(&line.head, &work.path, false)?;
     let own = repo.own(line);
     let mut paths: BTreeSet<String> = BTreeSet::new();

@@ -1023,7 +1023,7 @@ thread_local! {
 /// and a few seconds older output warms a line as well.
 pub fn prepare_snapshot(src: &Path, dir: &Path, readonly: bool) -> Result<()> {
     fs::create_dir_all(dir)?;
-    let path = dir.join(format!("prepared-{}", crate::ids::new_id()));
+    let path = dir.join(format!("prepared-{}", crate::store::temp_name()));
     copy_snapshot(src, &path, readonly, true)?;
     PREPARED.with(|p| p.borrow_mut().push(Prepared { src: src.to_path_buf(), readonly, path }));
     Ok(())
