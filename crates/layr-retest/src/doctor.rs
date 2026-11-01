@@ -174,6 +174,69 @@ fn tool_checks(f: &mut Vec<Finding>) {
     }
 }
 
+/// Absolute `rerun-if-changed` paths under `root` in the build script outputs of `target_dir`
+/// (`<target_dir>/build/<package>-<hash>/output`). Returns `(package, path)`, and whether any
+/// build output was read. Every line has its own absolute path, so such a path makes cargo
+/// rebuild the build script and all crates after it in each new line.
+pub fn absolute_rerun_paths(target_dir: &Path, root: &Path) -> (Vec<(String, String)>, bool) {
+    let mut hits = Vec::new();
+    let mut seen = false;
+    let Ok(rd) = std::fs::read_dir(target_dir.join("build")) else { return (hits, seen) };
+    let mut dirs: Vec<_> = rd.flatten().collect();
+    dirs.sort_by_key(|e| e.file_name());
+    for e in dirs {
+        let Ok(text) = std::fs::read_to_string(e.path().join("output")) else { continue };
+        seen = true;
+        let name = e.file_name().to_string_lossy().into_owned();
+        let package = name.rsplit_once('-').map_or(name.as_str(), |(p, _)| p).to_string();
+        for line in text.lines() {
+            let Some(v) = line.strip_prefix("cargo:rerun-if-changed=").or_else(|| line.strip_prefix("cargo::rerun-if-changed="))
+            else {
+                continue;
+            };
+            if Path::new(v).is_absolute() && Path::new(v).starts_with(root) {
+                let hit = (package.clone(), v.to_string());
+                if !hits.contains(&hit) {
+                    hits.push(hit);
+                }
+            }
+        }
+    }
+    (hits, seen)
+}
+
+fn rerun_checks(root: &Path, f: &mut Vec<Finding>) {
+    let canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let mut seen = false;
+    let mut bad = false;
+    let mut reported: Vec<(String, String)> = Vec::new();
+    for dir in ["target/debug", "target/retest/debug"] {
+        let d = root.join(dir);
+        let (mut hits, s) = absolute_rerun_paths(&d, root);
+        if canon != root {
+            hits.extend(absolute_rerun_paths(&d, &canon).0);
+        }
+        seen |= s;
+        for (package, path) in hits {
+            bad = true;
+            if !reported.contains(&(package.clone(), path.clone())) {
+                reported.push((package.clone(), path.clone()));
+            } else {
+                continue;
+            }
+            f.push(warn(format!(
+                "{package}: build script prints an absolute rerun-if-changed path {path}; \
+                 print a path relative to CARGO_MANIFEST_DIR (an absolute path rebuilds it in every new line)"
+            )));
+        }
+    }
+    if !seen {
+        f.push(ok("build once to check build script paths"));
+    } else if !bad {
+        f.push(ok("no build script prints an absolute rerun-if-changed path"));
+    }
+}
+
 pub fn check(root: &Path) -> Vec<Finding> {
     let mut f = Vec::new();
     if !root.join("Cargo.toml").is_file() {
@@ -257,7 +320,12 @@ pub fn check(root: &Path) -> Vec<Finding> {
     }
     let rt = dir_size(&root.join("target/retest"));
     let text = format!("target/retest: {}", fmt_size(rt));
-    f.push(if rt > BIG_RETEST_BYTES { warn(format!("{text}; delete it to free disk, the next run rebuilds it")) } else { ok(text) });
+    f.push(if rt > BIG_RETEST_BYTES {
+        warn(format!("{text}; delete it to free disk, the next run rebuilds it"))
+    } else {
+        ok(text)
+    });
+    rerun_checks(root, &mut f);
     f
 }
 
@@ -315,6 +383,26 @@ mod tests {
         assert!(f.text.contains("3 integration test binaries"), "{}", f.text);
         assert!(f.text.contains("60.0 MB in all"), "{}", f.text);
         assert!(f.text.contains("saves 30.0 MB"), "{}", f.text);
+    }
+
+    #[test]
+    fn flags_absolute_rerun_paths_in_build_output() {
+        let t = std::env::temp_dir().join(format!("layr-doctor-rerun-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        let root = t.join("proj");
+        let b = root.join("target/debug/build");
+        for (dir, body) in [
+            ("good-1a2b", "cargo:rerun-if-changed=schema/api.json\ncargo:rerun-if-changed=/usr/lib/x\n".to_string()),
+            ("bad-3c4d", format!("cargo::rerun-if-changed={}/schema/api.json\n", root.display())),
+        ] {
+            std::fs::create_dir_all(b.join(dir)).unwrap();
+            std::fs::write(b.join(dir).join("output"), body).unwrap();
+        }
+        let (hits, seen) = absolute_rerun_paths(&root.join("target/debug"), &root);
+        let _ = std::fs::remove_dir_all(&t);
+        assert!(seen);
+        assert_eq!(hits, vec![("bad".to_string(), format!("{}/schema/api.json", root.display()))]);
+        assert!(!absolute_rerun_paths(&t.join("none"), &root).1);
     }
 
     #[test]
