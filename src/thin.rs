@@ -553,6 +553,14 @@ pub fn write_layer(
     result
 }
 
+/// True when the new folder `k` of `src` is a nested layer or holds one. A clone of such a folder
+/// copies the layer's files and marker, so its entries are copied one by one instead. A nested
+/// layer stays an empty folder in a state: its files are a cache, not state content.
+fn holds_layer(src: &Path, k: &str, write: &[&str]) -> bool {
+    let below = format!("{k}/");
+    apfs::is_subvolume(&src.join(k)) || write.iter().any(|w| w.starts_with(&below) && apfs::is_subvolume(&src.join(w)))
+}
+
 /// Copy entries of `src` into a writable layer. Each folder of the layer gets the metadata of
 /// the same folder of `src`.
 pub fn add_entries<'a>(
@@ -608,7 +616,7 @@ pub fn add_entries<'a>(
                 open_parent(dst, k)?;
                 apfs::delete_tree(&to)?;
             }
-            if m.is_dir() && whole.contains(k) {
+            if m.is_dir() && whole.contains(k) && !holds_layer(src, k, &write) {
                 // A new folder: one clone copies its content (layer rule 5 holds, as the
                 // content is all new). A clone keeps the folder's own mode, so open it for the
                 // metadata step below.
