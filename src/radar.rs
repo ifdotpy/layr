@@ -1,13 +1,15 @@
 //! On-demand path overlaps between live lines. Nothing is written to permanent history.
 //!
-//! Two trees are compared in two steps. The compare of two saved states (immutable) is cached
-//! under the owning project's `meta/` folder. Inside that compare, the ignore rules of the saved
-//! state skip ignored paths before any content compare. The caller's ignore rules and hidden
-//! paths run after the cache on every call. The live folder is compared each time.
+//! The changes of our live folder against a merge base are the combination of two parts: the
+//! compare of the base with our head (a saved state compare, cached under the owning project's
+//! `meta/` folder) and one compare of our head with the live folder, which runs once per call.
+//! A path that both parts changed is checked again against the base. Inside a saved compare, the
+//! ignore rules of the saved state skip ignored paths before any content compare. The caller's
+//! ignore rules and hidden paths run after the cache on every call.
 
 use crate::changes;
 use crate::ctx::Ctx;
-use crate::fsutil::Src;
+use crate::fsutil::{self, Src};
 use crate::ignore_rules::Rules;
 use crate::model::Line;
 use crate::repo::{skip_path, Repo, Snap};
@@ -21,7 +23,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// Format of the saved state compares. Bump it when `changes::candidates`,
 /// `changes::really_changed`, `skip_path` or the ignore rules inside the compare change their
 /// results: older entries then miss. 2: the ignore rules of the saved state skip paths.
-const COMPARE_FORMAT: u32 = 2;
+/// 3: a change records whether its path is missing in the parent (`added`) or the child (`removed`).
+const COMPARE_FORMAT: u32 = 3;
 /// The folder under `meta/` that holds the saved state compares. `gc` removes the entries whose
 /// states are gone.
 const COMPARE_DIR: &str = "overlap-compares";
@@ -45,6 +48,10 @@ struct Found {
     is_dir: bool,
     /// Milliseconds of the new file, 0 when there is none.
     time: i64,
+    /// The path is missing in the parent tree of the compare.
+    added: bool,
+    /// The path is missing in the child tree of the compare.
+    removed: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -68,9 +75,101 @@ fn compare(base: &(impl Src + ?Sized), child: &(impl Src + ?Sized), rules: &Rule
             continue;
         }
         let time = change.new.as_ref().map(|m| m.mtime * 1000).unwrap_or(0);
-        out.push(Found { path: change.path, old_path: change.old_path, is_dir, time });
+        let (added, removed) = (change.old.is_none(), change.new.is_none());
+        out.push(Found { path: change.path, old_path: change.old_path, is_dir, time, added, removed });
     }
     Ok(out)
+}
+
+/// The test of `compare` for one path: whether the path changed from `base` to `live`.
+fn recheck(base: &(impl Src + ?Sized), live: &(impl Src + ?Sized), rules: &Rules, path: &str) -> Result<Option<Found>> {
+    let old = fsutil::lmeta(base, path);
+    let new = fsutil::lmeta(live, path);
+    if old.is_none() && new.is_none() {
+        return Ok(None);
+    }
+    let is_dir = new.as_ref().or(old.as_ref()).is_some_and(|m| m.is_dir());
+    if skip_path(path) || rules.ignored(path, is_dir) {
+        return Ok(None);
+    }
+    let time = new.as_ref().map(|m| m.mtime * 1000).unwrap_or(0);
+    let (added, removed) = (old.is_none(), new.is_none());
+    let change = changes::Change { path: path.to_string(), old_path: None, old, new, ranges: None };
+    if !changes::really_changed(base, live, &change)? {
+        return Ok(None);
+    }
+    Ok(Some(Found { path: path.to_string(), old_path: None, is_dir, time, added, removed }))
+}
+
+/// The changes of the live tree against the base, from the two parts. A path that the saved part
+/// and the live part both changed is checked again with `recheck`, because it may have changed
+/// back. `None` when a rename is in either part: renames pair files across the whole tree.
+fn merge_changes(
+    saved: &[Found],
+    head_live: &[Found],
+    mut recheck: impl FnMut(&str) -> Result<Option<Found>>,
+) -> Result<Option<Vec<Found>>> {
+    if saved.iter().chain(head_live).any(|f| f.old_path.is_some()) {
+        return Ok(None);
+    }
+    let live_paths: BTreeSet<&str> = head_live.iter().map(|f| f.path.as_str()).collect();
+    let saved_paths: BTreeSet<&str> = saved.iter().map(|f| f.path.as_str()).collect();
+    let mut out: Vec<Found> = saved.iter().filter(|f| !live_paths.contains(f.path.as_str())).cloned().collect();
+    for f in head_live {
+        if saved_paths.contains(f.path.as_str()) {
+            out.extend(recheck(&f.path)?);
+        } else {
+            out.push(f.clone());
+        }
+    }
+    Ok(Some(out))
+}
+
+/// The changes of `live` against `base` from the two parts (`merge_changes`). `None` when the
+/// direct compare must decide: a rename, or a file that the parts show as added and as removed
+/// (git pairs such files as renames when their content is similar).
+fn combine(
+    base: &(impl Src + ?Sized),
+    live: &(impl Src + ?Sized),
+    rules: &Rules,
+    saved: &[Found],
+    head_live: &[Found],
+) -> Result<Option<Vec<Found>>> {
+    let Some(merged) = merge_changes(saved, head_live, |path| recheck(base, live, rules, path))? else {
+        return Ok(None);
+    };
+    let lone: Vec<changes::Change> = merged
+        .iter()
+        .filter(|f| !f.is_dir && (f.added || f.removed))
+        .map(|f| changes::Change {
+            path: f.path.clone(),
+            old_path: None,
+            old: if f.removed { fsutil::lmeta(base, &f.path) } else { None },
+            new: if f.added { fsutil::lmeta(live, &f.path) } else { None },
+            ranges: None,
+        })
+        .collect();
+    if changes::with_renames(base, live, lone).iter().any(|c| c.old_path.is_some()) {
+        return Ok(None);
+    }
+    Ok(Some(merged))
+}
+
+/// The changes of `live` against `base`, as `compare` gives them. With both parts (the saved
+/// compare and the live compare of our head), they combine; otherwise the direct compare runs.
+fn changes_vs_base(
+    base: &(impl Src + ?Sized),
+    live: &(impl Src + ?Sized),
+    rules: &Rules,
+    parts: Option<(&[Found], &[Found])>,
+) -> Result<Vec<Found>> {
+    if let Some((saved, head_live)) = parts {
+        if let Some(found) = combine(base, live, rules, saved, head_live)? {
+            return Ok(found);
+        }
+    }
+    let _t = crate::trace::span("overlap live compare");
+    compare(base, live, rules)
 }
 
 /// The paths of `found` that the caller may see: not ignored, not hidden. A change with a hidden
@@ -167,26 +266,42 @@ fn run_compares(jobs: &[StateCompare]) -> Result<Vec<Vec<Found>>> {
     out.into_iter().map(|f| f.ok_or_else(|| anyhow!("status overlap compare missing"))).collect()
 }
 
-/// A compare with a live folder of another line. The rules and hidden sets stay with the caller.
-struct LayerPlan {
-    /// Our visible changes against the base of this overlay layer.
-    ours: BTreeMap<String, i64>,
-    rules: Rules,
-    state_time: i64,
-    job: usize,
+/// The state compares and live compares of one `overlaps` call. Each one runs once.
+#[derive(Default)]
+struct Work {
+    /// The saved compares: base -> their head, our base -> head, and overlay layers.
+    jobs: Vec<StateCompare>,
+    /// Our saved compare per merge base: the index in `jobs`.
+    ours_jobs: BTreeMap<String, usize>,
+    /// Our head -> live folder. `Some(None)`: our head state cannot be read.
+    head_live: Option<Option<Vec<Found>>>,
+    /// The saved compare of an overlay: base -> our head of the overlay, by (overlay, base).
+    layer_jobs: BTreeMap<(String, String), usize>,
+    /// Our overlay head -> live folder, once per overlay. `Some(None)`: the head cannot be read.
+    layer_live: BTreeMap<String, Option<Vec<Found>>>,
 }
 
-/// What one other line contributes, with its state compare in `jobs`.
+/// What one other line contributes, with its state compare in `Work::jobs`.
 struct OtherPlan {
     name: String,
     owner: u32,
-    /// Our visible changes against the merge base with this line.
-    our_paths: BTreeMap<String, i64>,
+    /// The merge base with this line. `our_job` is our compare against it.
+    base: String,
+    our_job: Option<usize>,
     their_private: BTreeSet<String>,
     hidden: BTreeSet<String>,
     state_time: i64,
     job: usize,
     layers: Vec<LayerPlan>,
+}
+
+/// One overlay layer that both lines hold, with its state compares in `Work::jobs`.
+struct LayerPlan {
+    overlay: String,
+    base: String,
+    our_job: Option<usize>,
+    state_time: i64,
+    job: usize,
 }
 
 impl Repo<'_> {
@@ -240,6 +355,36 @@ impl Repo<'_> {
         }
     }
 
+    /// Our head -> live folder compare: one per call, shared by all merge bases.
+    fn our_head_live(&self, line: &Line, live: &Path, rules: &Rules, work: &mut Work) -> Result<()> {
+        if work.head_live.is_none() {
+            work.head_live = Some(match self.state_src(&line.head) {
+                Ok(head) => {
+                    let _t = crate::trace::span("overlap live compare");
+                    Some(compare(&head, live, rules)?)
+                }
+                Err(_) => None,
+            });
+        }
+        Ok(())
+    }
+
+    /// The saved compare of a merge base -> our head, once per base. `None` when our head is
+    /// unreadable: the changes then come from the direct compare.
+    fn our_base_job(&self, line: &Line, base: &str, work: &mut Work) -> Result<Option<usize>> {
+        if let Some(job) = work.ours_jobs.get(base) {
+            return Ok(Some(*job));
+        }
+        if !matches!(work.head_live, Some(Some(_))) {
+            return Ok(None);
+        }
+        let job = work.jobs.len();
+        let state = StateCompare::new(&self.compare_dir(), base, &line.head, self.state_src(base)?, self.state_src(&line.head)?);
+        work.jobs.push(state);
+        work.ours_jobs.insert(base.to_string(), job);
+        Ok(Some(job))
+    }
+
     pub fn overlaps(&self, ctx: &Ctx, line: &Line) -> Result<Vec<Overlap>> {
         self.can_read(ctx)?;
         // Taking the working folder tree is costly; do it only when another line needs it.
@@ -247,10 +392,9 @@ impl Repo<'_> {
         let ignored = Rules::new(&self.working(line));
         let our_hidden = self.radar_hidden(ctx, line)?;
         let our_private = self.private_paths(line)?;
-        let mut ours_by_base: BTreeMap<String, BTreeMap<String, i64>> = BTreeMap::new();
-        // Step 1, on this thread: the live parts and the state lookups (`Repo` is not `Sync`).
-        let mut jobs: Vec<StateCompare> = Vec::new();
+        let mut work = Work::default();
         let mut plans: Vec<OtherPlan> = Vec::new();
+        // Step 1, on this thread: the live parts and the state lookups (`Repo` is not `Sync`).
         for other in self.lines()? {
             if other.id == line.id || other.machine != self.p.store.machine.id || !self.working(&other).exists() {
                 continue;
@@ -267,24 +411,22 @@ impl Repo<'_> {
                 ours = Some(self.radar_tree(line)?);
             }
             let ours_root = &ours.as_ref().expect("scanned above").1;
-            if !ours_by_base.contains_key(&base) {
-                let found = compare(&root, ours_root, &ignored)?;
-                ours_by_base.insert(base.clone(), visible(&found, &our_private, &ignored));
-            }
-            let our_paths = ours_by_base[&base].clone();
-            let hidden = self.radar_hidden(ctx, &other)?;
+            self.our_head_live(line, ours_root, &ignored, &mut work)?;
+            let our_job = self.our_base_job(line, &base, &mut work)?;
             // show <state>:<path> and try use project read access for both head and auto states.
             let head = self.state(&other.head)?;
             let state = self.last_auto(&other)?.filter(|s| s.time >= head.time).unwrap_or(head);
             let theirs = self.state_src(&state.id)?;
+            let hidden = self.radar_hidden(ctx, &other)?;
             let their_private = self.private_paths(&other)?;
-            let job = jobs.len();
-            jobs.push(StateCompare::new(&self.compare_dir(), &base, &state.id, root, theirs));
-            let layers = self.overlay_plans(ctx, line, &other, ours_root, &our_hidden, &mut jobs)?;
+            let job = work.jobs.len();
+            work.jobs.push(StateCompare::new(&self.compare_dir(), &base, &state.id, root, theirs));
+            let layers = self.overlay_plans(ctx, line, &other, ours_root, &mut work)?;
             plans.push(OtherPlan {
                 name: other.name.clone(),
                 owner: other.owner,
-                our_paths,
+                base,
+                our_job,
                 their_private,
                 hidden,
                 state_time: state.time,
@@ -295,30 +437,57 @@ impl Repo<'_> {
         // Step 2: the saved state compares, in parallel.
         let found = {
             let _t = crate::trace::span("status overlap compares");
-            run_compares(&jobs)?
+            run_compares(&work.jobs)?
         };
-        // Step 3, on this thread: the caller's filters, in the order of the lines.
+        // Step 3, on this thread: our changes per base and the caller's filters, in the order of the lines.
         let mut overlaps = Vec::new();
-        for p in &plans {
-            for (path, time) in visible(&found[p.job], &p.their_private, &ignored) {
-                if p.our_paths.contains_key(&path) && !our_hidden.contains(&path) && !p.hidden.contains(&path) {
-                    overlaps.push(Overlap {
-                        path,
-                        line: p.name.clone(),
-                        owner: p.owner,
-                        changed_at: if time == 0 { p.state_time } else { time },
-                    });
+        if let Some((_, ours_root)) = ours.as_ref() {
+            let overlay_rules = Rules::new(ours_root);
+            let mut ours_keys: BTreeMap<String, BTreeMap<String, i64>> = BTreeMap::new();
+            let mut layer_keys: BTreeMap<(String, String), BTreeMap<String, i64>> = BTreeMap::new();
+            for p in &plans {
+                if !ours_keys.contains_key(&p.base) {
+                    let base_src = self.state_src(&p.base)?;
+                    let parts = match (p.our_job, work.head_live.as_ref().and_then(|h| h.as_ref())) {
+                        (Some(j), Some(live)) => Some((found[j].as_slice(), live.as_slice())),
+                        _ => None,
+                    };
+                    let changed = changes_vs_base(&base_src, ours_root, &ignored, parts)?;
+                    ours_keys.insert(p.base.clone(), visible(&changed, &our_private, &ignored));
                 }
-            }
-            for layer in &p.layers {
-                for (path, time) in visible(&found[layer.job], &p.hidden, &layer.rules) {
-                    if layer.ours.contains_key(&path) {
+                let our_paths = &ours_keys[&p.base];
+                for (path, time) in visible(&found[p.job], &p.their_private, &ignored) {
+                    if our_paths.contains_key(&path) && !our_hidden.contains(&path) && !p.hidden.contains(&path) {
                         overlaps.push(Overlap {
                             path,
                             line: p.name.clone(),
                             owner: p.owner,
-                            changed_at: if time == 0 { layer.state_time } else { time },
+                            changed_at: if time == 0 { p.state_time } else { time },
                         });
+                    }
+                }
+                for layer in &p.layers {
+                    let key = (layer.overlay.clone(), layer.base.clone());
+                    if !layer_keys.contains_key(&key) {
+                        let repo = self.overlay_repo(&layer.overlay)?;
+                        let base_src = repo.state_src(&layer.base)?;
+                        let parts = match (layer.our_job, work.layer_live.get(&layer.overlay).and_then(|l| l.as_ref())) {
+                            (Some(j), Some(live)) => Some((found[j].as_slice(), live.as_slice())),
+                            _ => None,
+                        };
+                        let changed = changes_vs_base(&base_src, ours_root, &overlay_rules, parts)?;
+                        layer_keys.insert(key.clone(), visible(&changed, &our_hidden, &overlay_rules));
+                    }
+                    let ours_layer = &layer_keys[&key];
+                    for (path, time) in visible(&found[layer.job], &p.hidden, &overlay_rules) {
+                        if ours_layer.contains_key(&path) {
+                            overlaps.push(Overlap {
+                                path,
+                                line: p.name.clone(),
+                                owner: p.owner,
+                                changed_at: if time == 0 { layer.state_time } else { time },
+                            });
+                        }
                     }
                 }
             }
@@ -328,16 +497,9 @@ impl Repo<'_> {
         Ok(overlaps)
     }
 
-    /// The overlay layers that both lines hold: our live changes now, the state compare as a job.
-    fn overlay_plans(
-        &self,
-        ctx: &Ctx,
-        line: &Line,
-        other: &Line,
-        ours: &Path,
-        our_hidden: &BTreeSet<String>,
-        jobs: &mut Vec<StateCompare>,
-    ) -> Result<Vec<LayerPlan>> {
+    /// The overlay layers that both lines hold: the state compares as jobs, and our overlay head
+    /// compared with the live folder once per overlay.
+    fn overlay_plans(&self, ctx: &Ctx, line: &Line, other: &Line, ours: &Path, work: &mut Work) -> Result<Vec<LayerPlan>> {
         let mut plans = Vec::new();
         let their_layers = self.layers(other)?;
         for layer in self.layers(line)? {
@@ -365,13 +527,66 @@ impl Repo<'_> {
                 Ok(root) => root,
                 Err(_) => continue,
             };
-            let rules = Rules::new(ours);
-            let ours_changes = visible(&compare(&base_root, ours, &rules)?, our_hidden, &rules);
+            if !work.layer_live.contains_key(&layer.overlay) {
+                let live = match repo.state_src(&layer.state) {
+                    Ok(head) => {
+                        let _t = crate::trace::span("overlap live compare");
+                        Some(compare(&head, ours, &Rules::new(ours))?)
+                    }
+                    Err(_) => None,
+                };
+                work.layer_live.insert(layer.overlay.clone(), live);
+            }
+            let key = (layer.overlay.clone(), base.clone());
+            let our_job = match work.layer_jobs.get(&key) {
+                Some(job) => Some(*job),
+                None if matches!(work.layer_live.get(&layer.overlay), Some(Some(_))) => {
+                    let job = work.jobs.len();
+                    let state = StateCompare::new(
+                        &repo.compare_dir(),
+                        &base,
+                        &layer.state,
+                        repo.state_src(&base)?,
+                        repo.state_src(&layer.state)?,
+                    );
+                    work.jobs.push(state);
+                    work.layer_jobs.insert(key, job);
+                    Some(job)
+                }
+                None => None,
+            };
             let state = repo.state(&theirs.state)?;
-            let job = jobs.len();
-            jobs.push(StateCompare::new(&repo.compare_dir(), &base, &theirs.state, base_root, their_root));
-            plans.push(LayerPlan { ours: ours_changes, rules, state_time: state.time, job });
+            let job = work.jobs.len();
+            work.jobs.push(StateCompare::new(&repo.compare_dir(), &base, &theirs.state, base_root, their_root));
+            plans.push(LayerPlan { overlay: layer.overlay.clone(), base, our_job, state_time: state.time, job });
         }
         Ok(plans)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn f(path: &str) -> Found {
+        Found { path: path.into(), old_path: None, is_dir: false, time: 1, added: false, removed: false }
+    }
+
+    /// A path that both parts changed goes to the recheck; the other paths of both parts stay.
+    #[test]
+    fn a_path_changed_in_both_parts_is_checked_again() {
+        let saved = vec![f("a"), f("b")];
+        let live = vec![f("b"), f("c")];
+        let merged = merge_changes(&saved, &live, |p| Ok(if p == "b" { None } else { Some(f(p)) }));
+        let paths: Vec<String> = merged.unwrap().unwrap().into_iter().map(|x| x.path).collect();
+        assert_eq!(paths, ["a", "c"]);
+    }
+
+    /// A rename in either part needs the direct compare.
+    #[test]
+    fn a_rename_needs_the_direct_compare() {
+        let mut moved = f("new");
+        moved.old_path = Some("old".into());
+        assert!(merge_changes(&[moved], &[], |_| Ok(None)).unwrap().is_none());
     }
 }
