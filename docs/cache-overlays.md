@@ -267,6 +267,10 @@ Built on 2026-10-27: folder overlays and caches as cache overlays. Tests:
   the line saved; `overlay list` shows both.
 - `gc` applies `gc=lru:<size>` to the folder of each line (the newer of access and change time;
   apparent sizes) and deletes the cache states of deleted lines.
+- `line delete` also deletes the cache overlay lines (`line-<id>`) of the line. `undo` of that delete
+  restores the line but not its cache overlay lines: the next `save --caches` makes new ones. `gc`
+  and `fsck --repair` remove cache overlay lines of deleted lines that older versions left behind.
+  `fsck` marks such a problem "(of a deleted line)".
 - The secret detector does not read folder overlays: they hold build output.
 
 Limits of slice b:

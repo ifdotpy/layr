@@ -467,8 +467,15 @@ impl<'a> Repo<'a> {
     ) -> Result<StateRec> {
         let id = ids::new_id();
         let dst = self.p.state_path(&id);
-        btrfs::snapshot(src, &dst, true)?;
-        self.describe_state(ctx, id, kind, parents, message, line)
+        if let Err(e) = btrfs::snapshot(src, &dst, true) {
+            let _ = btrfs::delete_tree(&dst);
+            return Err(e);
+        }
+        let made = self.describe_state(ctx, id, kind, parents, message, line);
+        if made.is_err() {
+            let _ = btrfs::delete_tree(&dst);
+        }
+        made
     }
 
     /// A new state with the content of `base`: on APFS an empty thin layer over it, elsewhere a
@@ -713,8 +720,11 @@ impl<'a> Repo<'a> {
         match self.p.append(rec, &ctx.actor()) {
             Ok(r) => Ok(r),
             Err(e) => {
-                // The record and its rows are one transaction: nothing was recorded.
-                self.discard_states(&states);
+                // The record and its rows are one transaction, but COMMIT can fail after the commit
+                // point (a full disk). A state that the database names is recorded: keep it.
+                let unrecorded: Vec<StateRec> =
+                    states.into_iter().filter(|s| self.p.db.state(&s.id).is_ok_and(|known| known.is_none())).collect();
+                self.discard_states(&unrecorded);
                 Err(e)
             }
         }
@@ -908,6 +918,18 @@ impl<'a> Repo<'a> {
         Ok(())
     }
 
+    /// True when state `id` differs from the save base of `line`. Without a base, every state
+    /// differs. Confirmed file changes count: the raw candidates also list folders and files that
+    /// only got new times, such as the working folder after a named state.
+    fn changed_since_save_base(&self, line: &Line, id: &str) -> Result<bool> {
+        let prev = self.save_base(line)?;
+        if !self.p.has_state(&prev) {
+            return Ok(true);
+        }
+        let base = self.state_src(&prev)?;
+        Ok(changes::file_changes(&base, &self.state_src(id)?)?.into_iter().any(|c| !skip_path(&c.path)))
+    }
+
     /// Save the working content as an automatic state if it changed since the previous one.
     /// The caller holds the project lock.
     pub fn save(&self, ctx: &Ctx, line: &Line, message: &str, running: bool, force: bool) -> Result<Option<StateRec>> {
@@ -969,13 +991,20 @@ impl<'a> Repo<'a> {
                 }
                 None => self.write_save_layer(line, &prev, &w, &new, &dst),
             };
-            let mut st = match written {
-                Ok(()) => self.describe_state(ctx, id, StateKind::Auto, vec![line.head.clone()], message, Some(line))?,
-                // Hard links need a complete tree.
+            let made = match written {
+                Ok(()) => self.describe_state(ctx, id.clone(), StateKind::Auto, vec![line.head.clone()], message, Some(line)),
+                // Hard links need a complete tree; the failed thin layer is removed first.
                 Err(e) if crate::thin::needs_complete(&e) => {
-                    self.new_state(ctx, &w, StateKind::Auto, vec![line.head.clone()], message, Some(line))?
+                    let _ = self.p.delete_state(&id);
+                    self.new_state(ctx, &w, StateKind::Auto, vec![line.head.clone()], message, Some(line))
                 }
+                Err(e) => Err(e),
+            };
+            let mut st = match made {
+                Ok(st) => st,
                 Err(e) => {
+                    // A failed save leaves no snapshot and no record: the layer and the earlier state go.
+                    let _ = self.p.delete_state(&id);
                     self.discard_states(earlier.as_slice());
                     return Err(e);
                 }
@@ -991,16 +1020,16 @@ impl<'a> Repo<'a> {
         let mut st = self.working_snapshot(ctx, line, vec![line.head.clone()], message)?;
         st.running = running || crate::fsutil::take_unsettled();
         if !force {
-            let prev = self.save_base(line)?;
-            if self.p.has_state(&prev) {
-                let base = self.state_src(&prev)?;
-                // Confirmed file changes: the raw candidates also list folders and files that only
-                // got new times, such as the working folder after a named state.
-                let changed = changes::file_changes(&base, &self.state_src(&st.id)?)?.into_iter().any(|c| !skip_path(&c.path));
-                if !changed {
+            let changed = match self.changed_since_save_base(line, &st.id) {
+                Ok(changed) => changed,
+                Err(e) => {
                     self.discard_states(std::slice::from_ref(&st));
-                    return Ok(None);
+                    return Err(e);
                 }
+            };
+            if !changed {
+                self.discard_states(std::slice::from_ref(&st));
+                return Ok(None);
             }
         }
         let mut rec = Record::new("save");
@@ -3179,4 +3208,68 @@ fn take_prepared_save(line: &str) -> Option<PreparedSave> {
         let i = p.iter().position(|x| x.line == line)?;
         Some(p.remove(i))
     })
+}
+
+#[cfg(test)]
+mod commit_record_tests {
+    use super::*;
+    use crate::ctx::Caller;
+    use crate::model::{Actor, Author};
+    use crate::store::{Project, Store};
+
+    /// COMMIT can fail after the commit point (a full disk). The record is then in the database,
+    /// so its state must keep its snapshot: a present state without a snapshot is damage.
+    #[test]
+    fn a_state_that_the_database_names_keeps_its_snapshot_after_a_failed_commit() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("layr-commit-record-{}", ids::new_id()));
+        let ctx = Ctx {
+            store: Store::open(&dir)?,
+            caller: Caller::from_uid(0),
+            cwd: dir.clone(),
+            env: std::collections::HashMap::from([("LAYR_PROJECT".into(), "p".into())]),
+            out: std::cell::RefCell::new(Box::new(std::io::sink())),
+        };
+        let project_dir = ctx.store.projects_dir().join("p");
+        std::fs::create_dir_all(project_dir.join("meta/db"))?;
+        std::fs::create_dir(project_dir.join("states"))?;
+        let id = ids::new_id();
+        let p = Project {
+            store: &ctx.store,
+            name: "p".into(),
+            dir: project_dir.clone(),
+            id: id.clone(),
+            db: crate::db::Db::open(&project_dir.join("meta/db/layr.sqlite"))?,
+        };
+        let mut rec = Record::new("project");
+        rec.data = serde_json::json!({"id": id, "name": "p", "config": {}});
+        p.append(rec, &Actor { uid: 0, name: "root".into(), session: None })?;
+        let repo = Repo { p };
+        let state = ids::new_id();
+        std::fs::create_dir(repo.p.state_path(&state))?;
+        let mut rec = Record::new("state");
+        rec.states.push(StateRec {
+            id: state.clone(),
+            kind: StateKind::Auto,
+            change_id: None,
+            derived_from: None,
+            context: None,
+            parents: vec![],
+            line: None,
+            subvol: String::new(),
+            author: Author::default(),
+            message: String::new(),
+            time: ids::now_ms(),
+            running: false,
+            conflicts: vec![],
+            caches: Default::default(),
+            cache_by: None,
+            cache_shared: false,
+            cache_platform: None,
+        });
+        crate::db::FAIL_AFTER_COMMIT.with(|f| f.set(true));
+        assert!(repo.commit_record(&ctx, rec).is_err());
+        assert!(repo.p.db.state(&state)?.is_some(), "the database holds the record");
+        assert!(repo.p.has_state(&state), "a state that the record names keeps its snapshot");
+        Ok(())
+    }
 }
