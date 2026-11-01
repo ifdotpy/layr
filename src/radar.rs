@@ -1,8 +1,9 @@
 //! On-demand path overlaps between live lines. Nothing is written to permanent history.
 //!
 //! Two trees are compared in two steps. The compare of two saved states (immutable) is cached
-//! under the owning project's `meta/` folder; the filters of the caller (ignore rules, private
-//! and hidden paths) run after the cache on every call. The live folder is compared each time.
+//! under the owning project's `meta/` folder. Inside that compare, the ignore rules of the saved
+//! state skip ignored paths before any content compare. The caller's ignore rules and hidden
+//! paths run after the cache on every call. The live folder is compared each time.
 
 use crate::changes;
 use crate::ctx::Ctx;
@@ -18,8 +19,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Format of the saved state compares. Bump it when `changes::candidates`,
-/// `changes::really_changed` or `skip_path` change their results: older entries then miss.
-const COMPARE_FORMAT: u32 = 1;
+/// `changes::really_changed`, `skip_path` or the ignore rules inside the compare change their
+/// results: older entries then miss. 2: the ignore rules of the saved state skip paths.
+const COMPARE_FORMAT: u32 = 2;
 /// The folder under `meta/` that holds the saved state compares. `gc` removes the entries whose
 /// states are gone.
 const COMPARE_DIR: &str = "overlap-compares";
@@ -53,14 +55,18 @@ struct SavedCompare {
     found: Vec<Found>,
 }
 
-/// The real changes between two trees. Skipped paths (`skip_path`) are left out.
-fn compare(base: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<Found>> {
+/// The real changes between two trees. Paths that `skip_path` or `rules` ignore are left out
+/// before the content compare, so ignored build output costs no content reads.
+fn compare(base: &(impl Src + ?Sized), child: &(impl Src + ?Sized), rules: &Rules) -> Result<Vec<Found>> {
     let mut out = Vec::new();
     for change in changes::candidates(base, child)? {
-        if skip_path(&change.path) || !changes::really_changed(base, child, &change)? {
+        let is_dir = change.new.as_ref().or(change.old.as_ref()).is_some_and(|m| m.is_dir());
+        if skip_path(&change.path) || rules.ignored(&change.path, is_dir) {
             continue;
         }
-        let is_dir = change.new.as_ref().or(change.old.as_ref()).is_some_and(|m| m.is_dir());
+        if !changes::really_changed(base, child, &change)? {
+            continue;
+        }
         let time = change.new.as_ref().map(|m| m.mtime * 1000).unwrap_or(0);
         out.push(Found { path: change.path, old_path: change.old_path, is_dir, time });
     }
@@ -108,7 +114,8 @@ impl StateCompare {
         if let Some(found) = self.read() {
             return Ok(found);
         }
-        let found = compare(&self.base, &self.theirs)?;
+        // The ignore rules of the saved state: the tree is immutable, so the key stays valid.
+        let found = compare(&self.base, &self.theirs, &Rules::of(&self.theirs))?;
         // A save that fails costs only time on the next call.
         let _ = self.write(&found);
         Ok(found)
@@ -260,7 +267,7 @@ impl Repo<'_> {
             }
             let ours_root = &ours.as_ref().expect("scanned above").1;
             if !ours_by_base.contains_key(&base) {
-                let found = compare(&root, ours_root)?;
+                let found = compare(&root, ours_root, &ignored)?;
                 ours_by_base.insert(base.clone(), visible(&found, &our_private, &ignored));
             }
             let our_paths = ours_by_base[&base].clone();
@@ -358,7 +365,7 @@ impl Repo<'_> {
                 Err(_) => continue,
             };
             let rules = Rules::new(ours);
-            let ours_changes = visible(&compare(&base_root, ours)?, our_hidden, &rules);
+            let ours_changes = visible(&compare(&base_root, ours, &rules)?, our_hidden, &rules);
             let state = repo.state(&theirs.state)?;
             let job = jobs.len();
             jobs.push(StateCompare::new(&repo.compare_dir(), &base, &theirs.state, base_root, their_root));

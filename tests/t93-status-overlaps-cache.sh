@@ -98,6 +98,25 @@ eq "an overlay that two lines changed is compared" "private/notes.md p1
 private/notes.md p2" "$(pairs)"
 ok "the overlay compare is cached in the overlay project" test -n "$(ls $LAYR_ROOT/projects/ov/meta/overlays/notes/meta/overlap-compares 2>/dev/null)"
 
+# The saved state of a line ignores a large folder with its own rules: its changes there are no
+# overlap, and the compare skips them before any content compare.
+mkdir -p $T/bsrc/target; for i in $(seq 1 300); do echo $i > $T/bsrc/target/f$i; done; echo keep > $T/bsrc/shared.txt
+l init big --from $T/bsrc -q >/dev/null
+B=$LAYR_ROOT/projects/big/lines
+cd $B/main || exit 1
+l protect main --remove >/dev/null 2>&1 || true
+for n in big1 bigq; do
+    cd $B/main || exit 1
+    l line new -q $n >/dev/null
+done
+cd $B/big1 || exit 1
+printf 'target/\n' > .gitignore && l add .gitignore >/dev/null
+for i in $(seq 1 300); do echo more >> target/f$i; done
+echo more >> shared.txt && l save -a -m big1 >/dev/null
+cd $B/bigq || exit 1
+echo more >> shared.txt; echo more >> target/f1
+eq "a large folder that the saved state ignores gives no overlap" "shared.txt big1" "$(pairs)"
+
 # gc removes an unreadable entry.
 cd $P/mine || exit 1
 printf 'junk' > $CACHE/junk.json
