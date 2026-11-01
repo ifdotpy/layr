@@ -2,7 +2,7 @@
 
 This page is part of the [Layr documentation](../README.md#documentation).
 
-Status: proposed 2026-11-01. Implementation follows the phases at the end.
+Status: accepted 2026-11-01. Implementation follows the phases at the end.
 
 ## Why
 
