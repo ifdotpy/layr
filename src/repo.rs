@@ -26,6 +26,8 @@ pub type Snap = PathBuf;
 
 pub struct Repo<'a> {
     pub p: Project<'a>,
+    /// The command that opened this repo. A restore of an evicted state connects with it.
+    pub ctx: Option<&'a Ctx>,
 }
 
 /// A complete folder as a tree to read.
@@ -132,7 +134,7 @@ pub enum LineOp<'a> {
 impl<'a> Repo<'a> {
     pub fn open(ctx: &'a Ctx, project: &str) -> Result<Repo<'a>> {
         let p = Project::open(&ctx.store, project)?;
-        let r = Repo { p };
+        let r = Repo { p, ctx: Some(ctx) };
         r.can_read(ctx)?;
         Ok(r)
     }
@@ -3250,7 +3252,7 @@ mod commit_record_tests {
         let mut rec = Record::new("project");
         rec.data = serde_json::json!({"id": id, "name": "p", "config": {}});
         p.append(rec, &Actor { uid: 0, name: "root".into(), session: None })?;
-        let repo = Repo { p };
+        let repo = Repo { p, ctx: None };
         let state = ids::new_id();
         std::fs::create_dir(repo.p.state_path(&state))?;
         let mut rec = Record::new("state");

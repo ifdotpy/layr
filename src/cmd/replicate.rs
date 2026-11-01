@@ -766,7 +766,7 @@ pub fn serve(ctx: &Ctx, args: &[String]) -> Result<i32> {
         w.json(&json!({"op": "error", "message": format!("project '{name}' here has another id")}))?;
         bail!("project id mismatch");
     }
-    let mut repo = Repo { p };
+    let mut repo = Repo { p, ctx: Some(ctx) };
     let peer_seqs: BTreeMap<String, u64> = serde_json::from_value(hello["seqs"].clone())?;
     w.json(&json!({"op": "hello", "direction_v1": true, "overlay_sync_v1": true, "compressed_send_v2": btrfs::supports_compressed_receive(), "clone_sources_v1": true, "clone_identities_v1": clone_identities(&repo.p)?, "project_id": repo.p.id, "machine": repo.p.store.machine.id, "public_key": own_key(&repo.p), "seqs": seqs(&repo.p)?, "present": present(&repo.p)?, "caches": present_caches(&repo.p)?, "layers": present_caches(&repo.p)?}))?;
     let lines = recv_records(&mut w)?;
@@ -1042,7 +1042,7 @@ mod tests {
             env: std::collections::HashMap::from([("LAYR_PROJECT".into(), "p".into())]),
             out: std::cell::RefCell::new(Box::new(std::fs::File::create(base.join("report.json")).unwrap())),
         };
-        let repo = Repo { p: Project::create(&ctx.store, "p", &ctx.actor(), json!({})).unwrap() };
+        let repo = Repo { p: Project::create(&ctx.store, "p", &ctx.actor(), json!({})).unwrap(), ctx: None };
         let mut ids = Vec::new();
         for (kind, name) in [(StateKind::Cache, "caches/peer"), (StateKind::Derived, "derived/peer")] {
             let _lock = repo.p.lock().unwrap();
@@ -1130,7 +1130,7 @@ mod tests {
         let required = required_states(&p).unwrap();
         assert!(required.contains(&all[0]) && required.contains(&all[1]));
         assert!(!required.contains(&all[2]));
-        let repo = Repo { p };
+        let repo = Repo { p, ctx: None };
         let mine = all.iter().cloned().collect();
         let selected: Vec<_> =
             plan(&repo, &mine, &BTreeSet::new(), false, false).unwrap().into_iter().map(|(id, _)| id).collect();

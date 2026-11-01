@@ -63,13 +63,13 @@ ok "line new starts from a state fetched back" l line new -q x "$t1"
 ok "gc --all-projects runs" l gc --all-projects -q
 l line delete -D x -q >/dev/null
 
-# Offline: the copy is on the store remote, which cannot be reached.
+# Offline: the copy is on the store remote, which cannot be reached (the URL stays the same).
 ok "gc evicts again" l gc -q
 no "the evicted state is not on disk" on_disk "$t1"
-l config cloud.remote.archive.url "file://$T/missing" >/dev/null
+mv "$T/archive" "$T/archive.away"
 no "reading the evicted state offline fails" l show "$t1:notes.txt"
 has "the offline error names the remote" "archive" "$(l show "$t1:notes.txt" 2>&1 || true)"
 has "the offline error says the state is not on this machine" "not on this machine" "$(l show "$t1:notes.txt" 2>&1 || true)"
-l config cloud.remote.archive.url "file://$T/archive" >/dev/null
+mv "$T/archive.away" "$T/archive"
 has "the state reads again when the remote is back" temporary "$(l show "$t1:notes.txt")"
 finish

@@ -175,8 +175,9 @@ state differs only in build output, which a build makes again, so a deleted line
 the next `gc`. The newest automatic state of a live line always stays. `gc` compares these states
 before it takes the store lock.
 
-`gc` evicts a state that a store remote holds (a successful `layr push <store-remote>` names it)
-only when the project config `gc.evict` is `on` (`layr config gc.evict on`; default `off`). With
+`gc` evicts a state that a store remote holds (a successful `layr push <store-remote>` names it,
+the remote still has the recorded URL, and this machine reads that store) only when the project
+config `gc.evict` is `on` (`layr config gc.evict on`; default `off`). With
 `off`, such a state is kept with its history and nothing is deleted for it. With `on`, its tree goes,
 its record stays, and the next command that reads the tree fetches it back from that remote. A recoverable state stays on disk when it is a line head, the newest automatic state of a
 line, a state with caches, a state that a cache overlay names, or a base of a thin layer chain that

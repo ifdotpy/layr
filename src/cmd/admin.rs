@@ -1065,10 +1065,11 @@ pub fn retention_plan(repo: &Repo, pushed: &mut BTreeMap<String, bool>) -> Resul
     let mut delete = Vec::new();
     let mut evict = Vec::new();
     for (id, _) in db.present_states()? {
+        // A state whose tree the store format cannot restore exactly stays on disk.
         if !keep.contains(&id) {
             if !copies.contains_key(&id) {
                 delete.push(id);
-            } else if evict_on {
+            } else if evict_on && crate::store_remote::restorable(repo, &id)? {
                 evict.push(id);
             }
         } else if evict_on
@@ -1076,6 +1077,7 @@ pub fn retention_plan(repo: &Repo, pushed: &mut BTreeMap<String, bool>) -> Resul
             && !must.contains(&id)
             && repo.p.has_state(&id)
             && db.state(&id)?.is_some_and(|s| s.caches.is_empty())
+            && crate::store_remote::restorable(repo, &id)?
         {
             evict.push(id);
         }
@@ -1623,7 +1625,7 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
         &actor,
         serde_json::json!({"access": {format!("user:{owner}"): "admin"}, "protect": {"main": {}}}),
     )?;
-    let repo = Repo { p };
+    let repo = Repo { p, ctx: Some(ctx) };
     let res = (|| -> Result<(String, String)> {
         let _lock = repo.p.lock()?;
         let work = repo.p.work_dir().join(ids::new_id());

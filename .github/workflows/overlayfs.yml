@@ -17,7 +17,7 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq xfsprogs e2fsprogs btrfs-progs zstd git python3
+          sudo apt-get install -y -qq xfsprogs e2fsprogs btrfs-progs zstd git python3 attr
       - name: Create the test filesystem
         env:
           TEST_FILESYSTEM: ${{ matrix.filesystem }}
@@ -64,7 +64,7 @@ jobs:
             grep "ignores case" "$RUNNER_TEMP/fold.err"
             sudo umount /var/tmp/layr-fold
           fi
-          sudo env LAYR_OVERLAYFS_TEST_ROOT="$LAYR_OVERLAYFS_TEST_ROOT" LAYR="$LAYR" bash tests/run.sh t01-basic t02-merge t03-git t05-transfer t06-sync t07-service t08-gitcompat t11-security t13-access t16-overlays t70-du t71-gc-pushed t75-save-change-rules t76-cache-recreated t77-unicode-names t78-overlayfs-perf t83-index-safety t84-cache-safety t82-trash-background t86-line-move t88-delete-overlay-lines t89-cache-state t90-evict-recoverable t92-owners-shadow
+          sudo env LAYR_OVERLAYFS_TEST_ROOT="$LAYR_OVERLAYFS_TEST_ROOT" LAYR="$LAYR" bash tests/run.sh t01-basic t02-merge t03-git t05-transfer t06-sync t07-service t08-gitcompat t11-security t13-access t16-overlays t70-du t71-gc-pushed t75-save-change-rules t76-cache-recreated t77-unicode-names t78-overlayfs-perf t83-index-safety t84-cache-safety t82-trash-background t86-line-move t88-delete-overlay-lines t89-cache-state t90-evict-recoverable t91-evict-format t92-evict-trust t92-owners-shadow
       - name: Unmount the test filesystem
         if: always()
         run: sudo umount -R "/var/tmp/layr-overlayfs-ci" || true

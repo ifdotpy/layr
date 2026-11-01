@@ -1425,7 +1425,7 @@ mod approval_tests {
         let mut record = Record::new("state");
         record.states = vec![derived.clone()];
         p.append(record, &ctx.actor()).unwrap();
-        let repo = Repo { p };
+        let repo = Repo { p, ctx: None };
         let line = Line {
             id: crate::ids::new_id(),
             name: "main".into(),
