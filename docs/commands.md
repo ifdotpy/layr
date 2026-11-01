@@ -8,7 +8,7 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | ------------- | -------------------------------------------------------------------------------------------- |
 | work          | `status [--json]`, `diff`, `add`, `rm`, `mv`, `apply [--cached]`, `save -m <message> [-a] [--amend]`, `restore`, `reset`, `park`, `clean` |
 | history       | `log [--json]`, `show`, `blame`, `grep`, `ls-files`, `rev-parse`, `merge-base`                        |
-| lines         | `line new <name> [<rev>] [--count N] [--json]`, `line list [--json]`, `line delete`, `line rename`, `tag`, `merge [--expect]`, `pick`, `invert`, `replay`, `adopt` |
+| lines         | `line new <name> [<rev>] [--count N] [--json]`, `line list [--json]`, `line delete`, `line rename`, `line move`, `tag`, `merge [--expect]`, `pick`, `invert`, `replay`, `adopt` |
 | access        | `access [list|grant [--until <30m|2h|1d>]|revoke|deny|allow|check]`, `protect [<pattern> --update <role> --check <names> --path <path>=<role> --approvals <n> --approvers <principals> --direct --rewrite <role> --no-expect | --remove]`, `approve [--withdraw] <state>`, `attest <kind> <rev> [--payload <file>]`, `attestations <rev> [--kind <kind>] [--json]` |
 | safety        | `undo`, `op log`, `save`, `try <state> -- <cmd>`, `try <state> --check <name>`, `bisect list [--json]`, `bisect run [--good <rev>] [--bad <rev>] [--auto] [--ref-log <ref>] [--json] -- <cmd>`, `gc`, `du [<line>...] [--json]`, `du --store [--json]`, `fsck`, `reindex` |
 | Git bridge    | `git remote`, `git fetch`, `git pull`, `git push [--squash] [--include-base <lines>]`, `git clone`, `git sync`                             |
@@ -90,6 +90,16 @@ The gateway must expose the routes only when a signed public manifest is present
 
 `line new <name> [<rev>] [--count N]` creates lines. Use `line list`, `line delete <name>`, or `line rename [<old>] <new>` to manage them.
 A line is a folder. Use `cd` to enter it.
+`line move <line> <path>` keeps the working folder of a line at `<path>`, outside the store, for
+example `~/Projects/app` as the real folder of the line `main`. `line move <line>` without a path
+moves it back to `lines/<name>`. The path must not exist, its parent must exist and be writable
+by you, it must be outside the store and on the same file system as the store, and it must not
+overlap the folder of another moved line. You need the right to manage the line, and you cannot
+move the line of the current folder. The move is one rename under the project lock, so `.git`,
+caches and overlays move with the folder. Commands in the moved folder and its subfolders find
+their line as in the store. `line list --json` and `--path`, `du`, `du --store`, `gc` and
+`line delete` use the real path. `line rename` keeps the folder where it is.
+The path is local to this machine and is never replicated.
 `line new` refuses an automatic state that holds unsaved work (paths that are not ignored and
 differ from both its parent and the current head of its line): the new line would carry that work
 into its saves and pushes. An automatic state with only

@@ -1058,36 +1058,62 @@ pub fn apfs_unseal_fd(fd: std::os::fd::BorrowedFd<'_>) -> io::Result<()> {
 
 #[cfg(target_os = "macos")]
 pub fn apfs_xattrs(path: &std::path::Path) -> io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+    apfs_xattrs_where(path, |_| true)
+}
+
+/// The attributes of `path` as `apfs_xattrs` reads them; the value of an attribute that
+/// `read_value` refuses stays empty. Reading a value costs a system call of its own.
+#[cfg(target_os = "macos")]
+pub fn apfs_xattrs_where(path: &std::path::Path, read_value: impl Fn(&[u8]) -> bool) -> io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
     let cp = cpath(path)?;
-    // SAFETY: the path and the allocated buffers remain valid during each call.
-    unsafe {
-        let n = libc::listxattr(cp.as_ptr(), std::ptr::null_mut(), 0, libc::XATTR_NOFOLLOW);
-        if n < 0 {
+    // Most entries have none or a few small attributes: one call each with a buffer that fits
+    // them, and a second call with the exact size only when the buffer was too small.
+    let mut names = vec![0u8; 512];
+    // SAFETY: the path and the buffers remain valid during each call.
+    let n = loop {
+        let n = unsafe { libc::listxattr(cp.as_ptr(), names.as_mut_ptr().cast(), names.len(), libc::XATTR_NOFOLLOW) };
+        if n >= 0 {
+            break n as usize;
+        }
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ERANGE) {
+            return Err(error);
+        }
+        let size = unsafe { libc::listxattr(cp.as_ptr(), std::ptr::null_mut(), 0, libc::XATTR_NOFOLLOW) };
+        if size < 0 {
             return Err(io::Error::last_os_error());
         }
-        let mut names = vec![0u8; n as usize];
-        let n = libc::listxattr(cp.as_ptr(), names.as_mut_ptr().cast(), names.len(), libc::XATTR_NOFOLLOW);
-        if n < 0 {
-            return Err(io::Error::last_os_error());
+        names = vec![0u8; size as usize + 64];
+    };
+    names.truncate(n);
+    let mut result = Vec::new();
+    for name in names.split(|b| *b == 0).filter(|s| !s.is_empty()) {
+        if !read_value(name) {
+            result.push((name.to_vec(), Vec::new()));
+            continue;
         }
-        names.truncate(n as usize);
-        let mut result = Vec::new();
-        for name in names.split(|b| *b == 0).filter(|s| !s.is_empty()) {
-            let cn = std::ffi::CString::new(name)?;
-            let n = libc::getxattr(cp.as_ptr(), cn.as_ptr(), std::ptr::null_mut(), 0, 0, libc::XATTR_NOFOLLOW);
-            if n < 0 {
+        let cn = std::ffi::CString::new(name)?;
+        let mut value = vec![0u8; 256];
+        let n = loop {
+            // SAFETY: as above.
+            let n = unsafe { libc::getxattr(cp.as_ptr(), cn.as_ptr(), value.as_mut_ptr().cast(), value.len(), 0, libc::XATTR_NOFOLLOW) };
+            if n >= 0 {
+                break n as usize;
+            }
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ERANGE) {
+                return Err(error);
+            }
+            let size = unsafe { libc::getxattr(cp.as_ptr(), cn.as_ptr(), std::ptr::null_mut(), 0, 0, libc::XATTR_NOFOLLOW) };
+            if size < 0 {
                 return Err(io::Error::last_os_error());
             }
-            let mut value = vec![0u8; n as usize];
-            let n = libc::getxattr(cp.as_ptr(), cn.as_ptr(), value.as_mut_ptr().cast(), value.len(), 0, libc::XATTR_NOFOLLOW);
-            if n < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            value.truncate(n as usize);
-            result.push((name.to_vec(), value));
-        }
-        Ok(result)
+            value = vec![0u8; size as usize + 64];
+        };
+        value.truncate(n);
+        result.push((name.to_vec(), value));
     }
+    Ok(result)
 }
 
 #[cfg(target_os = "macos")]
@@ -1180,6 +1206,39 @@ pub fn apfs_has_acl(path: &std::path::Path) -> io::Result<bool> {
     }
     Ok(result as u32 & libc::COPYFILE_ACL != 0)
 }
+/// The ACL of `path` (the link itself) as text; `None` without an ACL.
+#[cfg(target_os = "macos")]
+pub fn apfs_acl_text(path: &std::path::Path) -> io::Result<Option<Vec<u8>>> {
+    unsafe extern "C" {
+        fn acl_get_link_np(path: *const libc::c_char, kind: libc::c_int) -> *mut libc::c_void;
+        fn acl_to_text(acl: *mut libc::c_void, len: *mut libc::ssize_t) -> *mut libc::c_char;
+        fn acl_free(ptr: *mut libc::c_void) -> libc::c_int;
+    }
+    let path = cpath(path)?;
+    // SAFETY: the ACL and the text are owned by libc, copied, and freed once.
+    unsafe {
+        let acl = acl_get_link_np(path.as_ptr(), 0x100);
+        if acl.is_null() {
+            let error = io::Error::last_os_error();
+            return match error.raw_os_error() {
+                Some(libc::ENOENT) | Some(libc::EOPNOTSUPP) => Ok(None),
+                _ => Err(error),
+            };
+        }
+        let mut len: libc::ssize_t = 0;
+        let text = acl_to_text(acl, &mut len);
+        if text.is_null() {
+            let error = io::Error::last_os_error();
+            acl_free(acl);
+            return Err(error);
+        }
+        let out = std::ffi::CStr::from_ptr(text).to_bytes().to_vec();
+        acl_free(text.cast());
+        acl_free(acl);
+        Ok(Some(out))
+    }
+}
+
 #[cfg(target_os = "macos")]
 pub fn apfs_clear_acl(path: &std::path::Path) -> io::Result<()> {
     unsafe extern "C" {

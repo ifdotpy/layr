@@ -104,7 +104,7 @@ pub fn safe_join(root: &Path, rel: &str) -> Result<PathBuf> {
 }
 
 /// A tree to read: a folder, or on APFS a thin state over its base (`thin::Layered`).
-pub trait Src {
+pub trait Src: Sync {
     /// The path to read `rel` from; it may not exist. Fails for a path through a link.
     fn at(&self, rel: &str) -> Result<PathBuf>;
     /// The folder, when the tree is one complete folder.
@@ -785,6 +785,35 @@ fn copy_entry_impl(
     }
     // Keep the inode of a file that is there: btrfs then reports an in-place change with byte
     // ranges, and running tools keep their file handles.
+    let fill = |d: &File| -> Result<()> {
+        if crate::storage::clone_file(&s, d).is_err() {
+            let mut s2 = open_ro(&src)?;
+            let mut d2 = d.try_clone()?;
+            d2.set_len(0)?;
+            std::io::copy(&mut s2, &mut d2)?;
+        }
+        Ok(())
+    };
+    // An index file is never written in place: a failed copy would lose the staged version,
+    // and a write would also change every other link to the inode. Publish a new file by rename.
+    if _replace_index {
+        if let Some(old) = t.open_write(dst_rel)? {
+            // btrfs: a reflink swaps the whole content of a single-link file in one step. The
+            // inode stays, and moves are found by inode. Elsewhere the new file gets a new inode.
+            #[cfg(target_os = "linux")]
+            if old.metadata()?.nlink() == 1 && rustix::fs::ioctl_ficlone(&old, &s).is_ok() {
+                return finish(&old);
+            }
+            return t.replace_file_atomic(dst_rel, |d| {
+                fill(d)?;
+                #[cfg(target_os = "linux")]
+                let _ = copy_xattrs(&old, d);
+                #[cfg(not(target_os = "linux"))]
+                let _ = &old;
+                finish(d)
+            });
+        }
+    }
     let (d, cloned) = match t.open_write(dst_rel)? {
         Some(d) => {
             d.set_len(0)?;
@@ -801,10 +830,8 @@ fn copy_entry_impl(
             }
         }
     };
-    if !cloned && crate::storage::clone_file(&s, &d).is_err() {
-        let mut s2 = open_ro(&src)?;
-        let mut d2 = d.try_clone()?;
-        std::io::copy(&mut s2, &mut d2)?;
+    if !cloned {
+        fill(&d)?;
     }
     finish(&d)
 }
@@ -1282,12 +1309,35 @@ pub fn fiemap_space(root: &Path) -> Result<Space> {
 
 #[cfg(test)]
 mod range_tests {
-    use super::merged_ranges;
+    use super::{copy_index_entry, merged_ranges};
+    use std::fs;
 
     #[test]
     fn ranges_merge_and_clip() {
         let r = [(100, 50), (0, 10), (10, 5), (120, 100), (500, 1), (300, u64::MAX)];
         assert_eq!(merged_ranges(&r, 400), vec![(0, 15), (100, 120), (300, 100)]);
         assert_eq!(merged_ranges(&[], 400), vec![]);
+    }
+
+    #[test]
+    fn index_copy_keeps_old_file_and_other_links() {
+        let root = std::env::temp_dir().join(format!("layr-index-copy-{}", crate::ids::new_id()));
+        let (src, dst) = (root.join("src"), root.join("index"));
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dst).unwrap();
+        fs::write(src.join("f"), b"new").unwrap();
+        fs::write(dst.join("f"), b"old").unwrap();
+        fs::hard_link(dst.join("f"), dst.join("g")).unwrap();
+        // A failed write leaves the old version and no temporary file.
+        let t = crate::tree::Tree::open(&dst).unwrap();
+        assert!(t.replace_file_atomic("f", |_| anyhow::bail!("copy failed")).is_err());
+        assert_eq!(fs::read(dst.join("f")).unwrap(), b"old");
+        assert_eq!(fs::read_dir(&dst).unwrap().count(), 2);
+        // A copy publishes a new file: the other link keeps the old content.
+        copy_index_entry(&src, "f", &dst, "f", None).unwrap();
+        assert_eq!(fs::read(dst.join("f")).unwrap(), b"new");
+        assert_eq!(fs::read(dst.join("g")).unwrap(), b"old");
+        assert_eq!(fs::read_dir(&dst).unwrap().count(), 2);
+        fs::remove_dir_all(&root).unwrap();
     }
 }

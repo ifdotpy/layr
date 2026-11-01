@@ -279,6 +279,7 @@ fn deletion_states(rec: &crate::model::Record) -> BTreeSet<String> {
         .values()
         .filter_map(|ch| ch.working_before.clone())
         .chain(rec.data.get("final_state").and_then(Value::as_str).map(str::to_owned))
+        .chain(rec.data.get("staged_state").and_then(Value::as_str).map(str::to_owned))
         .collect()
 }
 

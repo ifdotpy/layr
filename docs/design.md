@@ -229,6 +229,15 @@ original line. pnpm links packages by relative paths, but the scripts in `node_m
 output at another path. Which folders are caches, who builds them, and when a build is good
 enough to save, is the choice of the program on top.
 
+### Lines outside the store
+
+`layr line move` keeps a line folder at a path outside the store on this machine (same file
+system, so the move is a rename on APFS, btrfs and OverlayFS). The path is machine data, not a
+record: `meta/line-paths.json` of the project maps line id to path (the owner), and the store
+index `line-paths.json` maps a path to project and line id, so a command finds its line from the
+current folder without opening every project. `Repo::working` reads the path; nothing else builds
+line folder paths. On OverlayFS the registry also manages the folders outside the store.
+
 ## 6. What is not in layr
 
 - Choosing between several attempts at one task, and marking the others stale: a workflow of

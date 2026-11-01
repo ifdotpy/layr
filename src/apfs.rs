@@ -1261,6 +1261,19 @@ pub fn candidates_equal(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized
     candidates_of(parent, child, false)
 }
 
+thread_local! {
+    static STORED_COMPARE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `f` so that candidates also name files that differ in extended attributes or ACL alone.
+/// The writers of states (`add`, `save -a`) need them; a plain status skips the reads they cost.
+pub(crate) fn with_stored_compare<T>(f: impl FnOnce() -> T) -> T {
+    let before = STORED_COMPARE.replace(true);
+    let out = f();
+    STORED_COMPARE.set(before);
+    out
+}
+
 fn candidates_of(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), exact: bool) -> Result<Vec<crate::changes::Change>> {
     let _t = crate::trace::span("APFS candidates");
     let (a, b) = match top_layer_scans(parent, child)? {
@@ -1382,7 +1395,36 @@ fn candidates_scanned_with(
         }
         _ => false,
     };
-    let names: std::collections::BTreeSet<_> = a.keys().chain(b.keys()).filter(|s| !s.is_empty() && !unchanged(s)).collect();
+    let mut names: std::collections::BTreeSet<_> = a.keys().chain(b.keys()).filter(|s| !s.is_empty() && !unchanged(s)).collect();
+    if STORED_COMPARE.get() {
+        // A file with the same data can differ in extended attributes or ACL alone: a state keeps
+        // them, so it is a change. Paths are read in threads, as `thin::diff` does.
+        let same_data: Vec<&String> = a
+            .iter()
+            .filter(|(p, x)| !p.is_empty() && x.meta.is_file() && b.get(*p).is_some_and(|y| y.meta.is_file()) && unchanged(p))
+            .map(|(p, _)| p)
+            .collect();
+        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 4);
+        let stored_differ: Vec<&String> = std::thread::scope(|scope| {
+            let jobs: Vec<_> = same_data
+                .chunks(same_data.len().div_ceil(threads).max(1))
+                .map(|chunk| {
+                    scope.spawn(move || {
+                        chunk
+                            .iter()
+                            .copied()
+                            .filter(|p| match (parent.at(p), child.at(p)) {
+                                (Ok(x), Ok(y)) => !crate::thin::stored_metadata_same(&x, &y).unwrap_or(false),
+                                _ => false,
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            jobs.into_iter().flat_map(|j| j.join().unwrap()).collect()
+        });
+        names.extend(stored_differ);
+    }
     let mut changes: BTreeMap<_, _> = names
         .into_iter()
         .map(|p| {
@@ -2010,7 +2052,7 @@ mod tests {
 
     #[test]
     #[ignore = "requires a case-sensitive APFS test volume"]
-    fn index_copy_preserves_hard_links_and_failed_copy_keeps_original() -> Result<()> {
+    fn index_copy_breaks_hard_links_and_failed_copy_keeps_original() -> Result<()> {
         let s = Sandbox::new();
         let src = s.0.join("source");
         let dst = s.0.join("index");
@@ -2019,12 +2061,15 @@ mod tests {
         fs::write(src.join("file"), b"new")?;
         fs::write(dst.join("file"), b"old")?;
         fs::hard_link(dst.join("file"), dst.join("alias"))?;
-        let original = fs::metadata(dst.join("file"))?.ino();
+        let linked = fs::metadata(dst.join("file"))?.ino();
         crate::fsutil::copy_index_entry(&src, "file", &dst, "file", None)?;
-        assert_eq!(fs::metadata(dst.join("file"))?.ino(), original);
-        assert_eq!(fs::metadata(dst.join("alias"))?.ino(), original);
-        assert_eq!(fs::read(dst.join("alias"))?, b"new");
+        // The other link keeps the old inode and content; the copied path gets a new file.
+        assert_ne!(fs::metadata(dst.join("file"))?.ino(), linked);
+        assert_eq!(fs::metadata(dst.join("alias"))?.ino(), linked);
+        assert_eq!(fs::read(dst.join("alias"))?, b"old");
+        assert_eq!(fs::read(dst.join("file"))?, b"new");
         fs::remove_file(dst.join("alias"))?;
+        let original = fs::metadata(dst.join("file"))?.ino();
         fs::write(src.join("file"), b"later")?;
         let tree = crate::tree::Tree::open(&dst)?;
         let result = tree.replace_index_file(&File::open(src.join("file"))?, "file", |_| bail!("test preparation error"));

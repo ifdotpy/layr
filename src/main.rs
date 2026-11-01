@@ -28,6 +28,7 @@ mod ids;
 use layr_store::http;
 mod ignore_rules;
 mod lineops;
+mod linepaths;
 mod merge;
 mod model;
 mod oci;
@@ -69,6 +70,14 @@ use std::collections::HashMap;
 
 fn main() {
     let mut argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.first().map(String::as_str) == Some("__empty-trash") && argv.len() == 2 {
+        // The trash of a store, emptied in the background after a command (`store::Lock`).
+        if let Err(e) = crate::store::empty_trash_process(std::path::Path::new(&argv[1])) {
+            eprintln!("layr empty trash: {e:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if argv.first().map(String::as_str) == Some("__registry-http") {
         let result = (|| -> anyhow::Result<()> {
             anyhow::ensure!(argv.len() == 3, "invalid internal registry arguments");

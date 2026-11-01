@@ -361,10 +361,9 @@ fn dylib_objects(target: &Path) -> Result<Vec<PathBuf>> {
     Ok(kind_targets("dylib")?.into_iter().map(|(name, _)| target.join("debug").join(dylib_file(&name))).filter(|p| p.is_file()).collect())
 }
 
-/// RUSTFLAGS of the instrumented build. A workspace dylib needs `-C prefer-dynamic` in every crate.
-fn build_flags(base: &str, dylib: bool) -> String {
-    let dynamic = if dylib { " -C prefer-dynamic" } else { "" };
-    format!("{base} -C instrument-coverage{dynamic}").trim().to_string()
+/// RUSTFLAGS of the instrumented build. No `-C prefer-dynamic`: binaries link std like the plain build.
+fn build_flags(base: &str) -> String {
+    format!("{base} -C instrument-coverage").trim().to_string()
 }
 
 /// Path of `p` relative to the line root, if it is inside.
@@ -522,7 +521,7 @@ fn run(args: &[String]) -> Result<i32> {
     let exe = std::env::current_exe()?;
     let tools = (llvm_tool("llvm-profdata")?, llvm_tool("llvm-cov")?);
     let runner_var = format!("CARGO_TARGET_{}_RUNNER", rustc_host()?.to_uppercase().replace('-', "_"));
-    let flags = build_flags(&std::env::var("RUSTFLAGS").unwrap_or_default(), !kind_targets("dylib")?.is_empty());
+    let flags = build_flags(&std::env::var("RUSTFLAGS").unwrap_or_default());
     let cargo = |first: &[&str]| {
         let mut c = Command::new("cargo");
         c.args(first).args(extra);
@@ -711,10 +710,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn prefer_dynamic_only_with_a_dylib() {
-        assert_eq!(build_flags("", false), "-C instrument-coverage");
-        assert_eq!(build_flags("-Dwarnings", false), "-Dwarnings -C instrument-coverage");
-        assert_eq!(build_flags("-Dwarnings", true), "-Dwarnings -C instrument-coverage -C prefer-dynamic");
+    fn build_flags_never_prefer_dynamic() {
+        assert_eq!(build_flags(""), "-C instrument-coverage");
+        assert_eq!(build_flags("-Dwarnings"), "-Dwarnings -C instrument-coverage");
     }
 
     #[test]

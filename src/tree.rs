@@ -52,6 +52,20 @@ pub struct DirectoryRecord {
     pub mode: u32,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Signature {
+    dir: bool,
+    ino: u64,
+    size: u64,
+    times: [i64; 4],
+}
+
+impl Signature {
+    pub fn is_dir(&self) -> bool {
+        self.dir
+    }
+}
+
 impl DirectoryRecord {
     fn matches(&self, stat: &rustix::fs::Stat) -> bool {
         is_dir(stat) && self.device == stat.st_dev as u64 && self.inode == stat.st_ino as u64
@@ -284,6 +298,26 @@ impl Tree {
         result
     }
 
+    /// Publish a new file at `rel` by rename: `fill` writes a temporary file next to it, and
+    /// the old inode (with every other link to it) stays untouched, also when `fill` fails.
+    pub fn replace_file_atomic(&self, rel: &str, fill: impl FnOnce(&File) -> Result<()>) -> Result<()> {
+        let (dir, name) = self.parent(rel)?;
+        let temp = format!(".layr-copy-{}", crate::ids::new_id());
+        let fd = rustix::fs::openat(
+            &dir,
+            temp.as_str(),
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::from_raw_mode(0o600 as _),
+        )
+        .map_err(|e| anyhow!("create {rel}: {e}"))?;
+        let file = File::from(fd);
+        let done = fill(&file).and_then(|_| Ok(rustix::fs::renameat(&dir, temp.as_str(), &dir, name)?));
+        if done.is_err() {
+            let _ = rustix::fs::unlinkat(&dir, temp.as_str(), AtFlags::empty());
+        }
+        done
+    }
+
     /// An existing regular file opened for writing, or None (absent, a link, not a file).
     pub fn open_write(&self, rel: &str) -> Result<Option<File>> {
         let (d, n) = match self.parent(rel) {
@@ -321,7 +355,7 @@ impl Tree {
     pub fn read_link(&self, rel: &str) -> Result<String> {
         let (d, n) = self.parent(rel)?;
         let t = rustix::fs::readlinkat(&d, n, Vec::new()).map_err(|e| anyhow!("readlink {rel}: {e}"))?;
-        Ok(t.to_string_lossy().into_owned())
+        t.to_str().map(str::to_string).map_err(|_| anyhow!("{rel}: the link target is not valid UTF-8"))
     }
 
     pub fn symlink(&self, rel: &str, target: &str) -> Result<()> {
@@ -422,7 +456,7 @@ impl Tree {
         rustix::fs::fchmod(&directory, Mode::from_raw_mode(((stat.st_mode as u32 & 0o7777) | 0o200) as _))?;
         #[cfg(test)]
         {
-            let phase = if from.ends_with(".layr-new") { "replacement-writable" } else { "source-writable" };
+            let phase = if from.contains(".layr-new") { "replacement-writable" } else { "source-writable" };
             cache_test_fault(phase);
             if phase == "replacement-writable" && std::env::var("LAYR_TEST_CACHE_FAULT").as_deref() == Ok("symlink-swap") {
                 let source = self.path.join(from);
@@ -501,6 +535,44 @@ impl Tree {
             rustix::fs::fchmod(&fd, Mode::from_raw_mode((mode & 0o7777) as _))?;
         }
         Ok(())
+    }
+
+    /// Names in a folder, refusing a name that is not UTF-8: a lossy name would map two
+    /// different files to one string.
+    pub fn list_strict(&self, rel_dir: &str) -> Result<Vec<String>> {
+        let d = openat2(&self.root, rel_dir, OFlags::RDONLY | OFlags::DIRECTORY)?;
+        let mut v = Vec::new();
+        for e in rustix::fs::Dir::read_from(&d)? {
+            let e = e?;
+            let name = e.file_name().to_bytes();
+            if name == b"." || name == b".." {
+                continue;
+            }
+            match std::str::from_utf8(name) {
+                Ok(name) => v.push(name.to_string()),
+                Err(_) => bail!(
+                    "{rel_dir}: the name {:?} is not valid UTF-8; layr cannot copy it safely",
+                    String::from_utf8_lossy(name)
+                ),
+            }
+        }
+        Ok(v)
+    }
+
+    /// What identifies an entry's content: kind, inode, size and times. A folder has no times.
+    pub fn signature(&self, rel: &str) -> Result<Signature> {
+        use std::os::unix::fs::MetadataExt;
+        let (d, n) = self.parent(rel)?;
+        let fd =
+            rustix::fs::openat(&d, n, entry_flags() | OFlags::CLOEXEC, Mode::empty()).with_context(|| format!("stat {rel}"))?;
+        let m = File::from(fd).metadata()?;
+        let dir = m.is_dir();
+        Ok(Signature {
+            dir,
+            ino: m.ino(),
+            size: if dir { 0 } else { m.len() },
+            times: if dir { [0; 4] } else { [m.mtime(), m.mtime_nsec(), m.ctime(), m.ctime_nsec()] },
+        })
     }
 
     /// Names in a folder of the tree.

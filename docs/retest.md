@@ -351,9 +351,8 @@ Method now:
 - The `-object` bin targets are exported only when the profile folder of the test has more than one
   profile file, that is when a child process ran.
 - A workspace `dylib` target (a crate with `crate-type = ["dylib"]` that holds third-party
-  dependencies, so that test binaries stay small) is found with `cargo metadata`. Then the build adds
-  `-C prefer-dynamic`, and every built dylib in `target/retest/debug` is an `-object` of every test, because it
-  runs inside the test process. Crates that bundle C libraries must stay out of the dylib.
+  dependencies, so that test binaries stay small) is found with `cargo metadata`. Every built dylib in `target/retest/debug` is an `-object` of every test, because it
+  runs inside the test process. The build does not add `-C prefer-dynamic`, so instrumented binaries link std like the plain build and can be copied and run elsewhere. Crates that bundle C libraries must stay out of the dylib.
 - Tried and dropped: one JSON export per test for both lines and functions (the JSON is the
   slow and large part, and the lcov is smaller to parse), more workers (8 workers on 18 CPUs showed no clear gain under a varying load),
   and `-num-threads`.
@@ -467,6 +466,11 @@ Run in the root folder of a layr line that is also the cargo project root.
     `cargo metadata` and the files in `target/retest/debug/deps` or `target/debug/deps`; it does not run
     `cargo nextest list`, which builds). For a crate with two or more integration test binaries: one
     binary (`autotests = false`, one `tests/main.rs`) saves the size of all but the largest and one link each.
+  - Build script output (`target/debug/build/*/output`, and the same under `target/retest/debug`): a
+    `cargo:rerun-if-changed=` (or `cargo::`) value that is an absolute path under the project root is a
+    warning. Each line has its own absolute path, so cargo marks the build script dirty in every new
+    line and rebuilds all crates after it, although `target/` is warm. Print a path relative to
+    `CARGO_MANIFEST_DIR`. Without build output, it says `build once to check build script paths`.
   - Records: count, and the age of the newest (warning above 14 days). Size of `target/retest`
     (warning above 20 GB).
 
