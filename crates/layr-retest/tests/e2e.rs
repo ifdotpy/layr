@@ -4,6 +4,7 @@
 //! `cargo nextest`, the registry package `hex` 0.4 in the cargo cache (the test runs offline), `cargo nextest` and the `llvm-tools` rustup component. The store is a temp
 //! folder with its own LAYR_ROOT. Takes about 10 s.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -77,7 +78,7 @@ fn runs_only_the_stale_test() {
     std::fs::create_dir_all(src.join("src")).unwrap();
     std::fs::write(
         src.join("Cargo.toml"),
-        "[package]\nname = \"tiny\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nhex = \"0.4\"\n",
+        "[package]\nname = \"tiny\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n\n[workspace.metadata.layr-retest]\nsweep = [[\"test\", \"--workspace\", \"--no-run\"]]\n\n[dependencies]\nhex = \"0.4\"\n",
     )
     .unwrap();
     std::fs::write(src.join("src/lib.rs"), LIB).unwrap();
@@ -446,4 +447,172 @@ fn target_rustflags_reach_the_instrumented_build() {
     let host = sh_out("rustc", &["-vV"]);
     let host = host.lines().find_map(|l| l.strip_prefix("host: ")).expect("rustc host").to_string();
     project_flags_run("target-flags", &format!("[target.{host}]\nrustflags = [\"--cfg\", \"projflag\"]\n"));
+}
+
+/// A workspace of two crates for the sweep: `lib-a` (feature `extra`) and `app` (feature `app-only`).
+/// `sweep` is the `sweep = [...]` line of the workspace metadata.
+fn sweep_workspace(dir: &Path, sweep: &str) {
+    std::fs::create_dir_all(dir.join("lib-a/src")).unwrap();
+    std::fs::create_dir_all(dir.join("app/src")).unwrap();
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        format!("[workspace]\nmembers = [\"lib-a\", \"app\"]\nresolver = \"2\"\n\n[workspace.metadata.layr-retest]\n{sweep}\n"),
+    )
+    .unwrap();
+    std::fs::write(dir.join("lib-a/Cargo.toml"), "[package]\nname = \"lib-a\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[features]\nextra = []\n").unwrap();
+    std::fs::write(
+        dir.join("lib-a/src/lib.rs"),
+        "pub fn a() -> i32 {\n    1\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {\n        assert_eq!(super::a(), 1);\n    }\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("app/Cargo.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[features]\napp-only = []\n\n[dependencies]\nlib-a = { path = \"../lib-a\" }\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("app/src/main.rs"), "fn main() {\n    println!(\"{}\", lib_a::a());\n}\n").unwrap();
+}
+
+/// Names of the entries of `dir/sub`.
+fn entries(dir: &Path, sub: &str) -> BTreeSet<String> {
+    std::fs::read_dir(dir.join(sub)).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect()
+}
+
+/// Cargo hashes of the entries of `dir/sub`: the text after the last `-` of the name before its first `.`.
+fn hashes(dir: &Path, sub: &str) -> BTreeSet<String> {
+    entries(dir, sub).iter().map(|n| n.rsplit_once('-').unwrap().1.split('.').next().unwrap().to_string()).collect()
+}
+
+/// The build ids of the object files of each unit in `dir/deps`: `<name>-<hash>.<cgu>.<build>.rcgu.o`.
+fn object_builds(dir: &Path) -> std::collections::BTreeMap<String, BTreeSet<String>> {
+    let mut out: std::collections::BTreeMap<String, BTreeSet<String>> = Default::default();
+    for n in entries(dir, "deps").into_iter().filter(|n| n.ends_with(".rcgu.o")) {
+        let parts: Vec<&str> = n.split('.').collect();
+        let hash = hash_of(parts[0]);
+        // `<crate>-<hash>.<cgu>.<build>.rcgu.o` or `<crate>-<hash>.<crate>.<id>-cgu.<n>.rcgu.o`.
+        let build = if parts.len() == 5 { parts[2].to_string() } else { parts[2].trim_end_matches("-cgu").to_string() };
+        out.entry(hash).or_default().insert(build);
+    }
+    out
+}
+
+fn hash_of(name: &str) -> String {
+    name.rsplit_once('-').unwrap().1.to_string()
+}
+
+/// Runs cargo in `dir` and returns its stderr, where cargo writes `Compiling` lines.
+fn cargo(dir: &Path, args: &[&str]) -> String {
+    sh(dir, &dir.join("unused-store"), "cargo", args).1
+}
+
+fn sweep_cmd(dir: &Path, args: &[&str]) -> String {
+    let mut all = vec!["retest", "sweep"];
+    all.extend_from_slice(args);
+    let (_, err) = sh(dir, &dir.join("unused-store"), "layr", &all);
+    err
+}
+
+/// Standard build, a build with a feature the standard command does not use, a changed function, then
+/// the sweep: the feature build is gone, the standard units stay, and the next build compiles nothing.
+#[test]
+fn sweep_removes_the_units_that_no_standard_command_uses() {
+    let tmp = std::env::temp_dir().canonicalize().unwrap().join(format!("layr-retest-sweep-e2e-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let ws = tmp.join("ws");
+    sweep_workspace(&ws, "sweep = [[\"build\", \"--workspace\", \"--tests\", \"--bins\"]]");
+    let build = ["build", "--workspace", "--tests", "--bins"];
+    let debug = ws.join("target/debug");
+
+    cargo(&ws, &build);
+    let (units, outputs) = (entries(&debug, ".fingerprint"), hashes(&debug, "deps"));
+
+    cargo(&ws, &["build", "--workspace", "--tests", "--bins", "--features", "lib-a/extra"]);
+    assert!(entries(&debug, ".fingerprint").len() > units.len());
+
+    // A changed function keeps the unit hash: the build writes new object files of the same unit.
+    std::fs::write(ws.join("lib-a/src/lib.rs"), std::fs::read_to_string(ws.join("lib-a/src/lib.rs")).unwrap().replace("    1\n", "    1 + 0\n")).unwrap();
+    cargo(&ws, &build);
+
+    // A dry run names the bytes and removes nothing.
+    let before = entries(&debug, "deps");
+    let err = sweep_cmd(&ws, &["--dry-run"]);
+    assert!(err.contains("would free"), "{err}");
+    assert_eq!(entries(&debug, "deps"), before);
+
+    // Before the sweep, the changed unit has object files of two builds.
+    assert!(object_builds(&debug).values().any(|b| b.len() > 1), "{:?}", object_builds(&debug));
+
+    let err = sweep_cmd(&ws, &[]);
+    assert!(err.contains("swept"), "{err}");
+    assert_eq!(entries(&debug, ".fingerprint"), units, "a non-live unit stays");
+    assert_eq!(hashes(&debug, "deps"), outputs, "a unit of the feature build stays, or a live unit lost its newest files");
+    // The one exception: a live unit keeps only the object files of its newest build.
+    let builds = object_builds(&debug);
+    assert!(builds.values().all(|b| b.len() == 1), "{builds:?}");
+
+    let err = cargo(&ws, &build);
+    assert!(!err.contains("Compiling"), "the next build compiled:\n{err}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// The focused command ran last: the units of the other standard commands survive the sweep.
+#[test]
+fn sweep_keeps_the_units_of_the_other_standard_commands() {
+    let tmp = std::env::temp_dir().canonicalize().unwrap().join(format!("layr-retest-sweep-focus-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let ws = tmp.join("ws");
+    sweep_workspace(
+        &ws,
+        "sweep = [[\"build\", \"--workspace\", \"--tests\", \"--bins\"], [\"test\", \"-p\", \"lib-a\", \"--features\", \"extra\", \"--no-run\"]]",
+    );
+    let build = ["build", "--workspace", "--tests", "--bins"];
+    let lib_test = ["test", "-p", "lib-a", "--features", "extra", "--no-run"];
+    let debug = ws.join("target/debug");
+
+    cargo(&ws, &build);
+    cargo(&ws, &lib_test);
+    let (units, outputs) = (entries(&debug, ".fingerprint"), hashes(&debug, "deps"));
+
+    // The focused command ran last and has units of its own.
+    cargo(&ws, &["build", "-p", "app", "--features", "app-only", "--tests"]);
+    assert!(entries(&debug, ".fingerprint").len() > units.len());
+    sweep_cmd(&ws, &[]);
+
+    assert_eq!(entries(&debug, ".fingerprint"), units);
+    assert_eq!(hashes(&debug, "deps"), outputs);
+    let err = cargo(&ws, &build);
+    assert!(!err.contains("Compiling"), "the workspace build compiled:\n{err}");
+    let err = cargo(&ws, &lib_test);
+    assert!(!err.contains("Compiling"), "the lib test build compiled:\n{err}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// The listing of a standard command compiles units: the sweep does not sweep that folder, and
+/// removes nothing there, not even units that are not live.
+#[test]
+fn sweep_skips_a_folder_whose_listing_compiled() {
+    let tmp = std::env::temp_dir().canonicalize().unwrap().join(format!("layr-retest-sweep-skip-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let ws = tmp.join("ws");
+    sweep_workspace(
+        &ws,
+        "sweep = [[\"build\", \"--workspace\", \"--tests\", \"--bins\"], [\"build\", \"-p\", \"app\", \"--features\", \"app-only\", \"--tests\"]]",
+    );
+    let debug = ws.join("target/debug");
+    cargo(&ws, &["build", "--workspace", "--tests", "--bins"]);
+    // A stale unit that a sweep would remove, if it swept this folder.
+    cargo(&ws, &["build", "--workspace", "--tests", "--bins", "--features", "lib-a/extra"]);
+    let before = entries(&debug, ".fingerprint");
+
+    // The second standard command was never built: its listing compiles it, so nothing is swept.
+    let err = sweep_cmd(&ws, &[]);
+    assert!(err.contains("sweep skipped") && err.contains("compiled"), "{err}");
+    let after = entries(&debug, ".fingerprint");
+    assert!(before.is_subset(&after), "a unit was removed:\n{err}");
+
+    // The next sweep, with the second command built, sweeps the stale unit.
+    let err = sweep_cmd(&ws, &[]);
+    assert!(err.contains("swept"), "{err}");
+    assert!(entries(&debug, ".fingerprint").len() < after.len());
+    let _ = std::fs::remove_dir_all(&tmp);
 }
