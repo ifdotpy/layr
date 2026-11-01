@@ -188,6 +188,27 @@ A listing that compiles a unit cannot be checked for the live set, so its folder
 `run` sweep follows the same rule: a standard command that was never built in `target/retest` (for
 example `--examples` when the test build did not compile them) skips the sweep of that run.
 
+### Studio measurement (2026-11-01)
+
+Studio `sweep-check` line from origin/main (`target` of about 53 GB apparent size, `du`). Gate build:
+`cargo build --workspace --exclude studio-native-client --tests --bins --examples --locked` with
+`RUSTUP_TOOLCHAIN=1.99.1-aarch64-apple-darwin RUSTC_WRAPPER= CARGO_INCREMENTAL=0`.
+
+| Step | Result |
+| --- | --- |
+| Gate build after the base change | 6 crates compiled, 142 s |
+| Dry run, first after the #114 rustflags change | retest folder listing compiled 535 units (702 s), then the target sweep freed 0 MB |
+| Sweep (warm) | 2.6 s: `target` freed 0 MB, `target/retest` freed 13,247 MB |
+| Build after sweep | 0 crates compiled |
+| One-line change, build | 6 crates compiled, 162 s; `target/debug` du +54 MB, no new object sets |
+| Dry run before the change sweep | retest listing compiled 22 units (170 s), so that folder was not swept in the dry run |
+| Sweep after the change (warm) | 1.4 s, freed 0 MB; `target/debug` du back to the size before the change |
+| Build after the change sweep | 0 crates compiled |
+
+The timed sweeps are the warm ones. The long times came from cargo's listing compiling a folder that was
+stale, which the sweep then skips. Freed sizes count files with one hard link; APFS clones are not
+counted, so `du` changes differ from the freed value.
+
 ### Measurements 2026-10-31 (debug info and sweep)
 
 layr workspace, `--workspace --exclude layr-retest`, 262 tests, `CARGO_BUILD_JOBS=4`, `nice -n 10`,
