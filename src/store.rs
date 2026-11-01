@@ -122,6 +122,7 @@ impl Store {
         if root.join(".layr-overlayfs").exists() {
             bail!("this store requires a layr build with the overlayfs feature");
         }
+        crate::linepaths::register(root);
         #[cfg(feature = "overlayfs")]
         crate::storage::recover(root)?;
         let machine_lock = fs::OpenOptions::new()
@@ -247,17 +248,26 @@ const SLOW_LOCK_LOG_MAX: u64 = 1 << 20;
 impl Drop for Lock {
     fn drop(&mut self) {
         let held = self.since.elapsed();
+        // The steps of the hold, before the trash work after it adds its own.
+        let steps = crate::trace::slowest(3);
         drop(self.f.take());
         if std::env::var_os("LAYR_TRACE").is_some() {
             eprintln!("trace {:>8.1} ms  store lock held: {}", held.as_secs_f64() * 1000.0, self.project);
         }
         if HELD_LOCKS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) == 1 {
             // Deleting build output takes minutes: it runs after the last lock, so other
-            // commands do not wait for it. A command spends only `TRASH_BUDGET` on it; the
-            // next commands and `layr gc` delete the rest.
-            let budget = if EMPTY_TRASH_FULLY.load(std::sync::atomic::Ordering::SeqCst) { None } else { Some(trash_budget()) };
-            let _t = crate::trace::span(format!("empty trash ({})", budget.map_or("all".into(), |b| format!("{} ms", b.as_millis()))));
-            empty_trash(&self.trash, budget);
+            // commands do not wait for it, and in a process of its own, so this command does
+            // not wait either. `layr gc` empties it at once; LAYR_TRASH_BUDGET_MS (tests) or a
+            // failed start spend a bounded time here instead.
+            let fully = EMPTY_TRASH_FULLY.load(std::sync::atomic::Ordering::SeqCst);
+            if fully {
+                let _t = crate::trace::span("empty trash (all)");
+                empty_trash(&self.trash, None);
+            } else if std::env::var_os("LAYR_TRASH_BUDGET_MS").is_some() || !spawn_trash_emptier(&self.trash) {
+                let budget = trash_budget();
+                let _t = crate::trace::span(format!("empty trash ({} ms)", budget.as_millis()));
+                empty_trash(&self.trash, Some(budget));
+            }
         }
         if held < SLOW_LOCK && self.waited < SLOW_LOCK {
             return;
@@ -273,7 +283,7 @@ impl Drop for Lock {
             self.waited.as_millis(),
             held.as_millis(),
             command.replace(['\t', '\n'], " "),
-            crate::trace::slowest(3).replace(['\t', '\n'], " ")
+            steps.replace(['\t', '\n'], " ")
         );
         if fs::metadata(&self.log).map(|m| m.len() > SLOW_LOCK_LOG_MAX).unwrap_or(false) {
             let _ = fs::remove_file(&self.log);
@@ -322,6 +332,40 @@ pub static EMPTY_TRASH_FULLY: std::sync::atomic::AtomicBool = std::sync::atomic:
 /// Delete what is in the trash, for at most `budget` (`None`: all of it; a started delete of
 /// one file or folder is not cut). A big tree is deleted entry by entry, so the budget holds
 /// for it too. Two processes may work on one tree: an entry that is gone is not an error.
+/// Start `layr __empty-trash <dir>` in the background when the trash holds something: true when
+/// it started (or nothing waits). The child deletes everything; one child per trash at a time.
+fn spawn_trash_emptier(dir: &Path) -> bool {
+    if fs::read_dir(dir).map(|mut rd| rd.next().is_none()).unwrap_or(true) {
+        return true;
+    }
+    let Ok(exe) = std::env::current_exe() else { return false };
+    std::process::Command::new(exe)
+        .arg("__empty-trash")
+        .arg(dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .is_ok()
+}
+
+/// `layr __empty-trash <dir>`: delete everything in the trash, unless another process does it.
+pub fn empty_trash_process(dir: &Path) -> anyhow::Result<()> {
+    let lock = fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.with_extension("lock"))?;
+    match rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+        Ok(()) => {}
+        Err(rustix::io::Errno::WOULDBLOCK) => return Ok(()),
+        Err(e) => return Err(e.into()),
+    }
+    // Trees that commands move here while it runs go too.
+    loop {
+        empty_trash(dir, None);
+        if fs::read_dir(dir).map(|mut rd| rd.next().is_none()).unwrap_or(true) {
+            return Ok(());
+        }
+    }
+}
+
 pub fn empty_trash(dir: &Path, budget: Option<std::time::Duration>) {
     let deadline = budget.map(|b| std::time::Instant::now() + b);
     let late = || deadline.is_some_and(|d| std::time::Instant::now() >= d);
@@ -494,7 +538,15 @@ impl<'a> Project<'a> {
     pub fn has_state(&self, id: &str) -> bool {
         self.state_path(id).exists() || self.delta_path(id).exists()
     }
+    /// The working folder of a line: the path recorded by `layr line move`, else `lines/<name>`.
     pub fn line_path(&self, name: &str) -> PathBuf {
+        if let Some(path) = self.db.line_by_name(name).ok().flatten().and_then(|l| self.moved_path(&l.id)) {
+            return path;
+        }
+        self.default_line_path(name)
+    }
+    /// The folder of a line in the store, `lines/<name>`.
+    pub fn default_line_path(&self, name: &str) -> PathBuf {
         if check_name("line", name).is_ok() || (name.starts_with(".try-") && name[5..].chars().all(|c| c.is_ascii_hexdigit())) {
             self.lines_dir().join(name)
         } else {

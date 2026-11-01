@@ -102,7 +102,15 @@ fn parts(root: &Path) -> Result<Vec<(String, PathBuf)>> {
             out.push((name, path));
             continue;
         }
+        let moved = crate::linepaths::index(root);
         for (project, ppath) in dirs(&path)? {
+            // Lines moved out of the store (`layr line move`) are listed with the others.
+            for e in moved.iter().filter(|e| e.project == project && e.path.is_dir()) {
+                let db = crate::db::Db::open(&crate::store::db_file(&ppath));
+                if let Some(l) = db.ok().and_then(|db| db.line_by_id(&e.line).ok().flatten()) {
+                    out.push((format!("{project}/lines/{}", l.name), e.path.clone()));
+                }
+            }
             for (part, path) in dirs(&ppath)? {
                 if part == "lines" {
                     for (line, path) in dirs(&path)? {

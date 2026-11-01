@@ -192,7 +192,7 @@ Work in a line:
 Read history:
    log, show, blame, grep, ls-files, rev-parse, merge-base
 Lines and states:
-   line new <name> [<rev>] [--count N], line list, line delete, line rename
+   line new <name> [<rev>] [--count N], line list, line delete, line rename, line move <line> [<path>]
    save -m <message> [-a] [--amend]
    save [--note <text>] [--all-lines] [--running] [--force] [--caches [--cache <path>]]
    park [list/show/pop/apply/drop/clear]

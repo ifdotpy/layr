@@ -881,7 +881,7 @@ fn thin_import(
         let data = cat.object(oid, "blob")?;
         place_blob(work, mode, path, &data, None, source.as_ref())?;
     }
-    let d = crate::thin::Diff { write: changes.write.iter().map(|w| w.0.clone()).collect(), removed: changes.removed.clone() };
+    let d = crate::thin::Diff { write: changes.write.iter().map(|w| w.0.clone()).collect(), removed: changes.removed.clone(), whole: Default::default() };
     let id = ids::new_id();
     crate::thin::write_layer(work, &repo.p.delta_path(&id), &d, base, false, None)?;
     Ok(Some(id))

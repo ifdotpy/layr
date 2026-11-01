@@ -165,9 +165,23 @@ pub fn really_changed(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized),
     // APFS also uses kernel clone IDs; live status reads validate generations.
     #[cfg(any(target_os = "macos", feature = "overlayfs"))]
     if o.is_file() && o.size == n.size && c.ranges.as_ref().is_some_and(|ranges| ranges.is_empty()) {
-        return Ok(false);
+        return Ok(!stored_same(parent, child, &c.path));
     }
-    Ok(!fsutil::same_entry(parent, c.src(), child, &c.path, c.ranges.as_deref())?)
+    let equal = fsutil::same_entry(parent, c.src(), child, &c.path, c.ranges.as_deref())?;
+    Ok(!equal || (o.is_file() && !stored_same(parent, child, &c.path)))
+}
+
+/// True when two files hold the same extended attributes and ACL (APFS; else always).
+#[cfg(target_os = "macos")]
+fn stored_same(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), path: &str) -> bool {
+    match (parent.at(path), child.at(path)) {
+        (Ok(a), Ok(b)) => crate::thin::stored_metadata_same(&a, &b).unwrap_or(false),
+        _ => true,
+    }
+}
+#[cfg(not(target_os = "macos"))]
+fn stored_same(_: &(impl Src + ?Sized), _: &(impl Src + ?Sized), _: &str) -> bool {
+    true
 }
 
 /// File level changes (folders dropped), confirmed by content. A move keeps `old_path`.
@@ -357,14 +371,14 @@ fn folder(s: &(impl Src + ?Sized)) -> Result<&Path> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::Cell;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// A folder that counts the reads of its files.
-    struct Counting(PathBuf, Cell<usize>);
+    struct Counting(PathBuf, AtomicUsize);
     impl Src for Counting {
         fn at(&self, rel: &str) -> Result<PathBuf> {
-            self.1.set(self.1.get() + 1);
+            self.1.fetch_add(1, Ordering::Relaxed);
             fsutil::safe_join(&self.0, rel)
         }
         fn folder(&self) -> Option<&Path> {
@@ -392,11 +406,11 @@ mod tests {
             changes.push(Change { path: format!("old{i}"), old_path: None, old: Some(meta(8)), new: None, ranges: None });
             changes.push(Change { path: format!("new{i}"), old_path: None, old: None, new: Some(meta(8)), ranges: None });
         }
-        let (parent, child) = (Counting(p, Cell::new(0)), Counting(c, Cell::new(0)));
+        let (parent, child) = (Counting(p, AtomicUsize::new(0)), Counting(c, AtomicUsize::new(0)));
         let out = with_renames(&parent, &child, changes);
         let moves = out.iter().filter(|c| c.old_path.is_some()).count();
         assert_eq!(moves, n, "every file pairs with its equal");
-        let reads = parent.1.get() + child.1.get();
+        let reads = parent.1.load(Ordering::Relaxed) + child.1.load(Ordering::Relaxed);
         assert!(reads <= 4 * n + 2, "{reads} reads for {n} + {n} candidates");
         std::fs::remove_dir_all(tmp).unwrap();
     }

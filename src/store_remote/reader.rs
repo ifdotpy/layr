@@ -286,6 +286,9 @@ pub(super) fn deletion_dependencies(lines: &[String]) -> Result<BTreeSet<String>
         if let Some(state) = record.data["final_state"].as_str() {
             ids.insert(state.to_string());
         }
+        if let Some(state) = record.data["staged_state"].as_str() {
+            ids.insert(state.to_string());
+        }
         for change in record.lines.values() {
             if let Some(state) = &change.working_before {
                 ids.insert(state.clone());
