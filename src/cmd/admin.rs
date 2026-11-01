@@ -95,6 +95,9 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 return Err(exit(1, format!("error: '{only}' is no cache path of the line (see layr overlay list)")));
             }
         }
+        if !a.has("--caches") && !a.has("-q") {
+            repo.note_versioned_regenerable(ctx, &l)?;
+        }
         let st = if a.has("--caches") {
             // A cache folder that a tool made again as a plain folder becomes a cache first, so
             // its files stay out of the state. A folder with versioned files is no cache; one
@@ -979,7 +982,8 @@ pub fn retention_plan(repo: &Repo, pushed: &mut BTreeMap<String, bool>) -> Resul
             }
         }
         for ch in r.lines.values() {
-            for x in [ch.before.as_ref().map(|b| b.head.clone()), ch.after.as_ref().map(|b| b.head.clone())].into_iter().flatten() {
+            for x in [ch.before.as_ref().map(|b| b.head.clone()), ch.after.as_ref().map(|b| b.head.clone())].into_iter().flatten()
+            {
                 keep.insert(x);
             }
             for x in [ch.working_before.clone(), ch.working_after.clone()].into_iter().flatten() {

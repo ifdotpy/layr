@@ -456,6 +456,12 @@ fn add_scan_limit(specs: &[String]) -> Option<BTreeSet<String>> {
 }
 
 pub fn add(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    let done = add_named(ctx, args);
+    crate::repo::named_paths(&[]);
+    done
+}
+
+fn add_named(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let spec = Spec::new()
         .flag("-A|--all")
         .flag("-u|--update")
@@ -487,6 +493,8 @@ pub fn add(ctx: &Ctx, args: &[String]) -> Result<i32> {
     // large line. They run before the store lock; under it the copy is used when the head and
     // the staging content did not change, else the read runs again under the lock.
     #[cfg(target_os = "macos")]
+    // A path that `add` names inside a regenerable folder is tracked: the walks enter the folder.
+    crate::repo::named_paths(&specs);
     let limit = add_scan_limit(&specs);
     #[cfg(target_os = "macos")]
     let read = |line: &Line| -> Result<Option<(crate::repo::Temp, BTreeSet<String>, Vec<String>)>> {
@@ -961,6 +969,8 @@ pub fn commit(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let line = h.repo.line(&line.id)?;
     crate::gitbridge::check_git_head(&h.repo, &line)?;
     crate::repo::recover_cache_replacements(&h.repo.working(&line))?;
+    // A regenerable folder becomes a cache overlay on a named save too (it is no state content).
+    h.repo.restore_caches(ctx, &line)?;
     if a.has("-a") && !stacked && !cfg!(target_os = "macos") {
         let (st, scan, _it, _index) = h.repo.status_light(&line)?;
         let paths: BTreeSet<String> = st.unstaged.iter().map(|c| c.path.clone()).collect();
@@ -1102,6 +1112,9 @@ pub fn commit(ctx: &Ctx, args: &[String]) -> Result<i32> {
         h.repo.move_head(ctx, "commit", &line, &state.id, vec![state.clone()], None, data)
     };
     rec?;
+    if !a.has("-q") {
+        h.repo.note_versioned_regenerable(ctx, &line)?;
+    }
     #[cfg(target_os = "macos")]
     if let Some(p) = promotion.take() {
         p.finish()?;

@@ -55,6 +55,7 @@ pub struct Temp {
 
 impl Drop for Temp {
     fn drop(&mut self) {
+        fsutil::set_skipped(&self.path, Vec::new());
         crate::store::discard_tree(&self.path);
     }
 }
@@ -540,10 +541,17 @@ impl<'a> Repo<'a> {
 
     /// `working_snapshot` with its thin layer over `base` (APFS): over a state close to the
     /// working content, only the few entries that differ are copied.
-    pub fn working_snapshot_over(&self, ctx: &Ctx, line: &Line, parents: Vec<String>, message: &str, base: &str) -> Result<StateRec> {
+    pub fn working_snapshot_over(
+        &self,
+        ctx: &Ctx,
+        line: &Line,
+        parents: Vec<String>,
+        message: &str,
+        base: &str,
+    ) -> Result<StateRec> {
         let w = self.working(line);
         recover_cache_replacements(&w)?;
-        self.restore_caches(line)?;
+        self.restore_caches(ctx, line)?;
         let private = self.private_paths(line)?;
         #[cfg(not(target_os = "macos"))]
         let _ = base;
@@ -739,6 +747,9 @@ impl<'a> Repo<'a> {
             bail!("line '{}' has no working folder on this machine", line.name);
         }
         let dst = self.p.scan_dir().join(ids::new_id());
+        let _skip = self.skip_guard(line)?;
+        // The snapshot of a backend that copies no folder shows them; its changes leave them out.
+        fsutil::set_skipped(&dst, fsutil::skipped_of(&w));
         btrfs::scan_snapshot(&w, &dst)?;
         Ok(Temp { path: dst })
     }
@@ -851,7 +862,14 @@ impl<'a> Repo<'a> {
 
     /// The layer of an automatic state at `dst`, over `save_layer_base`.
     #[cfg(target_os = "macos")]
-    fn write_save_layer(&self, line: &Line, prev: &str, w: &Path, new: &BTreeMap<String, btrfs::ScanEntry>, dst: &Path) -> Result<()> {
+    fn write_save_layer(
+        &self,
+        line: &Line,
+        prev: &str,
+        w: &Path,
+        new: &BTreeMap<String, btrfs::ScanEntry>,
+        dst: &Path,
+    ) -> Result<()> {
         let base_id = self.save_layer_base(line, prev);
         let base = self.state_src(&base_id)?;
         let base_scan = base.scan(true)?;
@@ -871,7 +889,7 @@ impl<'a> Repo<'a> {
             return Ok(());
         }
         // A cache that a tool made again as a plain folder is made a cache under the lock first.
-        if !self.plain_caches(line)?.is_empty() {
+        if !self.plain_caches(line)?.0.is_empty() {
             return Ok(());
         }
         let _t = crate::trace::span("prepare save");
@@ -882,10 +900,12 @@ impl<'a> Repo<'a> {
         let base_scan = base.scan(true)?;
         let d = crate::thin::diff(&base_scan, &|k| base.path(k), &new, &w, self.since_of(line, &base_id))?;
         // Nothing changed since the previous save: the save under the lock makes no state.
-        if !self.thin_changed(&base, &w, &d)? || (base_id != prev && self.p.has_state(&prev) && {
-            let p = self.state_src(&prev)?;
-            !self.thin_changed(&p, &w, &crate::thin::diff(&p.scan(true)?, &|k| p.path(k), &new, &w, self.since_of(line, &prev))?)?
-        }) {
+        if !self.thin_changed(&base, &w, &d)?
+            || (base_id != prev && self.p.has_state(&prev) && {
+                let p = self.state_src(&prev)?;
+                !self.thin_changed(&p, &w, &crate::thin::diff(&p.scan(true)?, &|k| p.path(k), &new, &w, self.since_of(line, &prev))?)?
+            })
+        {
             return Ok(());
         }
         let path = self.p.work_dir().join(format!("prepared-save-{}", ids::new_id()));
@@ -917,7 +937,7 @@ impl<'a> Repo<'a> {
             return Ok(None);
         }
         recover_cache_replacements(&w)?;
-        self.restore_caches(line)?;
+        self.restore_caches(ctx, line)?;
         #[cfg(target_os = "macos")]
         if !force && self.private_paths(line)?.is_empty() && self.thin_line(line)? {
             // Compare before any copy: an unchanged folder makes no state. One scan of the
@@ -956,7 +976,8 @@ impl<'a> Repo<'a> {
                     let _t = crate::trace::span("layer over prepared save");
                     let pid = ids::new_id();
                     btrfs::move_tree(&pre.path, &self.p.delta_path(&pid))?;
-                    let s1 = self.describe_state(ctx, pid.clone(), StateKind::Auto, vec![line.head.clone()], message, Some(line))?;
+                    let s1 =
+                        self.describe_state(ctx, pid.clone(), StateKind::Auto, vec![line.head.clone()], message, Some(line))?;
                     let base = self.state_src(&pid)?;
                     let base_scan = base.scan(true)?;
                     let d = crate::thin::diff(&base_scan, &|k| base.path(k), &new, &w, 0)?;
@@ -1365,6 +1386,7 @@ impl<'a> Repo<'a> {
     #[cfg(target_os = "macos")]
     pub fn status_report(&self, line: &Line) -> Result<Status> {
         let work = self.working(line);
+        let _skip = self.skip_guard(line)?;
         let (index, stage) = self.index_source(line)?;
         // LAYR_NO_STATUS_CACHE=1 compares the whole folder every time (for comparisons).
         let key = match std::env::var_os("LAYR_NO_STATUS_CACHE") {
@@ -1769,14 +1791,62 @@ impl<'a> Repo<'a> {
         paths
     }
 
+    /// The regenerable folders of the line that are no cache yet (`regenerable_quick`), in two
+    /// lists: those the head holds no files of, and those it does (versioned: never a cache).
+    pub fn regenerable_plain(&self, line: &Line) -> Result<(Vec<String>, Vec<String>)> {
+        let w = self.working(line);
+        if self.p.is_overlay() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        let (mut plain, mut versioned, mut head, mut stage) = (Vec::new(), Vec::new(), None, None);
+        let named = NAMED.with(|n| n.borrow().clone());
+        for p in regenerable_quick(&w) {
+            if named.iter().any(|n| n.strip_prefix(p.as_str()).is_some_and(|rest| rest.starts_with('/'))) {
+                continue;
+            }
+            match fsutil::lmeta(&w, &p) {
+                Some(m) if m.is_dir() && !fsutil::is_layer(&w, &p, &m) => {}
+                _ => continue,
+            }
+            if head.is_none() {
+                head = Some(self.state_root(&line.head)?);
+            }
+            if stage.is_none() {
+                stage = Some(self.current_stage(line)?);
+            }
+            // A file staged with `add -f` is tracked too.
+            if holds_files(head.as_ref().unwrap(), &p) || stage.as_ref().unwrap().as_ref().is_some_and(|s| holds_files(s, &p)) {
+                versioned.push(p);
+            } else {
+                plain.push(p);
+            }
+        }
+        Ok((plain, versioned))
+    }
+
+    /// Leave the regenerable folders that are no cache yet out of the walks of the working
+    /// folder, until the guard drops.
+    pub fn skip_guard(&self, line: &Line) -> Result<SkipGuard> {
+        Ok(SkipGuard::new(&self.working(line), self.regenerable_plain(line)?.0))
+    }
+
+    /// Say once which regenerable folders are no cache because the head versions their files.
+    pub fn note_versioned_regenerable(&self, ctx: &Ctx, line: &Line) -> Result<()> {
+        for p in self.regenerable_plain(line)?.1 {
+            outln!(ctx, "{p}: {}", crate::cmd::admin::VERSIONED);
+        }
+        Ok(())
+    }
+
     /// Cache paths of the line that a tool made again as plain folders (`cargo clean` removes
     /// `target/` and a build makes it again), so that a snapshot would put their files into a
     /// state. Only paths that were caches can be such: the machine setting and the folder
-    /// overlays. A folder that the head versions is no cache.
-    fn plain_caches(&self, line: &Line) -> Result<Vec<String>> {
+    /// overlays. A folder that the head versions is no cache. The second list: the folders that
+    /// `.layrattributes` makes regenerable and that were never caches (`regenerable_plain`).
+    fn plain_caches(&self, line: &Line) -> Result<(Vec<String>, Vec<String>)> {
         let w = self.working(line);
         if self.p.is_overlay() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
         let setting = self.p.config_strings("regenerable");
         let mut paths = setting.clone();
@@ -1803,23 +1873,32 @@ impl<'a> Repo<'a> {
                 out.push(p);
             }
         }
-        Ok(out)
+        let fresh: Vec<String> = self.regenerable_plain(line)?.0.into_iter().filter(|p| !out.contains(p)).collect();
+        out.extend(fresh.iter().cloned());
+        Ok((out, fresh))
     }
 
     /// Make the cache paths that a tool made again as plain folders caches again, before a
-    /// snapshot of the working folder. The caller holds the project lock.
-    pub fn restore_caches(&self, line: &Line) -> Result<()> {
+    /// snapshot of the working folder. A folder that only `.layrattributes` makes regenerable
+    /// becomes a cache, and a cache overlay as `save --caches` makes it, so that later commands
+    /// skip it. The caller holds the project lock.
+    pub fn restore_caches(&self, ctx: &Ctx, line: &Line) -> Result<()> {
         let (w, (u, g)) = (self.working(line), self.owner_ids(line));
-        for p in self.plain_caches(line)? {
+        let (all, fresh) = self.plain_caches(line)?;
+        for p in &all {
             // APFS marks the folder in place, files included: no copy. Else reflink copy into a
             // new subvolume.
             #[cfg(target_os = "macos")]
             {
                 let _ = (u, g);
-                btrfs::mark_cache(&fsutil::safe_join(&w, &p)?)?;
+                btrfs::mark_cache(&fsutil::safe_join(&w, p)?)?;
             }
             #[cfg(not(target_os = "macos"))]
-            convert_cache(&w, &p, u, g)?;
+            convert_cache(&w, p, u, g)?;
+        }
+        if !fresh.is_empty() {
+            let shared = self.policy().rule_for(&line.name).is_some();
+            self.save_cache_overlays(ctx, line, &fresh, shared)?;
         }
         Ok(())
     }
@@ -2300,6 +2379,72 @@ pub fn regenerable_folders(w: &Path) -> Vec<String> {
                     }
                 }
                 _ => {}
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+thread_local! {
+    /// Paths that the running command names (`add <path>`).
+    static NAMED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// A regenerable folder that holds a named path is walked: the command asks for its files.
+pub fn named_paths(paths: &[String]) {
+    NAMED.with(|n| *n.borrow_mut() = paths.to_vec());
+}
+
+/// Leaves folders out of the walks of `root` while it lives (`fsutil::set_skipped`).
+pub struct SkipGuard(PathBuf);
+
+impl SkipGuard {
+    pub fn new(root: &Path, folders: Vec<String>) -> SkipGuard {
+        fsutil::set_skipped(root, folders);
+        SkipGuard(root.to_path_buf())
+    }
+}
+
+impl Drop for SkipGuard {
+    fn drop(&mut self) {
+        fsutil::set_skipped(&self.0, Vec::new());
+    }
+}
+
+/// `regenerable_folders` for every save: it reads the `.layrattributes` of the root only, lists
+/// folders without a stat per entry, and does not enter a folder that the ignore rules ignore
+/// (a regenerable folder below an ignored one is not found). No regenerable line: no walk.
+pub fn regenerable_quick(w: &Path) -> Vec<String> {
+    let named = std::fs::read_to_string(w.join(".layrattributes")).is_ok_and(|text| {
+        text.lines().any(|l| !l.trim_start().starts_with('#') && l.split_whitespace().skip(1).any(|word| word == "regenerable"))
+    });
+    if !named {
+        return Vec::new();
+    }
+    let (regenerable, ignored) = (Rules::attribute(w, "regenerable"), Rules::new(w));
+    let mut found = Vec::new();
+    let mut stack = vec![String::new()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(if dir.is_empty() { w.to_path_buf() } else { w.join(&dir) }) else { continue };
+        for e in entries.flatten() {
+            if !e.file_type().is_ok_and(|t| t.is_dir()) {
+                continue;
+            }
+            let rel = if dir.is_empty() {
+                e.file_name().to_string_lossy().into_owned()
+            } else {
+                format!("{dir}/{}", e.file_name().to_string_lossy())
+            };
+            if rel == ".git" {
+                continue;
+            }
+            if regenerable.ignored(&rel, true) {
+                if ignored.ignored(&rel, true) {
+                    found.push(rel);
+                }
+            } else if !ignored.ignored(&rel, true) {
+                stack.push(rel);
             }
         }
     }

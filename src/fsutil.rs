@@ -214,10 +214,7 @@ fn refuse_case_clash_apfs(root: &Path, rel: &str) -> Result<()> {
                 continue;
             }
             let parent = done.rsplit_once('/').map(|(p, _)| format!("{p}/")).unwrap_or_default();
-            bail!(
-                "{done} and {parent}{stored} {}",
-                clash_reason(sensitive)
-            );
+            bail!("{done} and {parent}{stored} {}", clash_reason(sensitive));
         }
         if fs::symlink_metadata(&path).is_err() {
             break;
@@ -351,10 +348,7 @@ fn refuse_remaining_clashes(dst: &Path, gone: &[&str], write: &[&str]) -> Result
                 let other = if parent.is_empty() { stored } else { format!("{parent}/{stored}") };
                 // After the removals, nothing but empty folders may stay there.
                 if !holds_no_files(dst, &other, &leaves) {
-                    bail!(
-                        "{done} and {other} {}",
-                        clash_reason(sensitive)
-                    );
+                    bail!("{done} and {other} {}", clash_reason(sensitive));
                 }
                 break;
             }
@@ -967,6 +961,10 @@ fn walk_folder(root: &Path, rel: &str, f: &mut dyn FnMut(&str, &Meta) -> Result<
                 Err(_) => continue,
             };
             let meta = meta_of(&m);
+            if meta.is_dir() && is_skipped(&root.join(&child)) {
+                f(&child, &meta)?;
+                continue;
+            }
             if meta.is_dir()
                 && (m.dev() != dev
                     || ((cfg!(target_os = "macos") || cfg!(feature = "overlayfs"))
@@ -1143,13 +1141,42 @@ pub fn git_writable(w: &Path, writable: bool) {
         let _ = rustix::fs::fchmod(&g, mode);
     }
     for s in subs {
-        if let Ok(fd) = rustix::fs::openat(&g, s, OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty()) {
+        if let Ok(fd) =
+            rustix::fs::openat(&g, s, OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty())
+        {
             let _ = rustix::fs::fchmod(&fd, mode);
         }
     }
     if !writable {
         let _ = rustix::fs::fchmod(&g, mode);
     }
+}
+
+/// Regenerable folders that the walks of a tree leave out before they are caches
+/// (`Repo::skip_regenerable`): tree root, and folders relative to it. A walk reads a folder as a
+/// nested layer: it lists the folder, not its content.
+static SKIPPED: std::sync::Mutex<Vec<(PathBuf, Vec<String>)>> = std::sync::Mutex::new(Vec::new());
+
+/// Leave `folders` of `root` out of walks, replacing the earlier list of `root`.
+pub fn set_skipped(root: &Path, folders: Vec<String>) {
+    let mut all = SKIPPED.lock().unwrap();
+    all.retain(|(r, _)| r != root);
+    if !folders.is_empty() {
+        all.push((root.to_path_buf(), folders));
+    }
+}
+
+/// Whether `path` is a folder that `set_skipped` names.
+pub fn is_skipped(path: &Path) -> bool {
+    let all = SKIPPED.lock().unwrap();
+    all.iter().any(|(root, folders)| {
+        path.strip_prefix(root).ok().and_then(|rel| rel.to_str()).is_some_and(|rel| folders.iter().any(|f| f == rel))
+    })
+}
+
+/// The skipped folders of `root`.
+pub fn skipped_of(root: &Path) -> Vec<String> {
+    SKIPPED.lock().unwrap().iter().find(|(r, _)| r == root).map(|(_, f)| f.clone()).unwrap_or_default()
 }
 
 /// Whether a known directory is a nested storage root.
