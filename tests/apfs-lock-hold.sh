@@ -41,10 +41,11 @@ printf 'new\n' > new.txt
 eq "add reads the folder once" "1" "$(LAYR_TRACE=1 l add new.txt 2>&1 | grep -c 'validated read')"
 has "add stages the file" "A  new.txt" "$(l status --short)"
 
-# save -a -m stages the changed tracked files with the read of add, before the lock.
+# save -a -m stages the changed tracked files with the read of add, before the lock. The named save
+# then reads the folder once more, after the lock, for the warning that names the left out files (t96).
 printf 'changed by -a\n' > dir/a
 trace=$(LAYR_TRACE=1 l save -a -qm all 2>&1)
-eq "save -a reads the folder once" "1" "$(printf '%s\n' "$trace" | grep -c 'validated read')"
+eq "save -a reads the folder once for the save and once for its warning" "2" "$(printf '%s\n' "$trace" | grep -c 'validated read')"
 eq "save -a saves the changed tracked file" "changed by -a" "$(l show head:dir/a)"
 no "save -a leaves the file unstaged" sh -c "'$LAYR' status --short | grep -q 'dir/a'"
 
