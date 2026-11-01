@@ -1007,6 +1007,7 @@ fn write_durable(path: &Path, data: &[u8], mode: u32, durable: bool) -> Result<(
         std::process::id(),
         rand::random::<u64>()
     ));
+    let _temporary = TempGuard(&tmp);
     {
         let mut f = OpenOptions::new().write(true).create_new(true).custom_flags(libc::O_NOFOLLOW).mode(mode).open(&tmp)?;
         f.write_all(data)?;
@@ -1019,6 +1020,16 @@ fn write_durable(path: &Path, data: &[u8], mode: u32, durable: bool) -> Result<(
         File::open(dir)?.sync_all()?;
     }
     Ok(())
+}
+
+/// Removes a temporary file when its writer returns, on an error too. After a rename the name is
+/// gone and the removal does nothing.
+pub struct TempGuard<'a>(pub &'a Path);
+
+impl Drop for TempGuard<'_> {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(self.0);
+    }
 }
 
 /// The git blob id of some bytes.
@@ -1312,5 +1323,34 @@ mod range_tests {
         assert_eq!(fs::read(dst.join("g")).unwrap(), b"old");
         assert_eq!(fs::read_dir(&dst).unwrap().count(), 2);
         fs::remove_dir_all(&root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod write_tests {
+    use super::{atomic_write, cache_write};
+    use std::fs;
+
+    /// A rename onto a non-empty folder fails after the temporary file exists. The failed write
+    /// must leave no `.<name>.tmp-*` file behind, for the durable and the cache write alike.
+    #[test]
+    fn a_failed_rename_leaves_no_temporary_file() {
+        let dir = std::env::temp_dir().join(format!("layr-atomic-write-{}", crate::ids::new_id()));
+        fs::create_dir_all(dir.join("target/inner")).unwrap();
+        let target = dir.join("target");
+        assert!(atomic_write(&target, b"data", 0o600).is_err());
+        assert!(cache_write(&target, b"data", 0o600).is_err());
+        let leftovers: Vec<_> = fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(leftovers, vec![std::ffi::OsString::from("target")]);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_written_file_leaves_no_temporary_file() {
+        let dir = std::env::temp_dir().join(format!("layr-atomic-ok-{}", crate::ids::new_id()));
+        fs::create_dir_all(&dir).unwrap();
+        atomic_write(&dir.join("file"), b"data", 0o600).unwrap();
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        fs::remove_dir_all(dir).unwrap();
     }
 }

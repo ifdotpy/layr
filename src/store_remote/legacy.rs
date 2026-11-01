@@ -194,7 +194,7 @@ pub(super) fn import(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Optio
         let source = header(store, &identity, seq, &attempt)?.0;
         policy.check(&source, &canonical)?;
         let tree: Tree = serde_json::from_slice(&canonical)?;
-        let stage = repo.p.work_dir().join(crate::ids::new_id());
+        let stage = repo.p.work_dir().join(crate::store::temp_name());
         crate::storage::create_subvolume(&stage)?;
         let result = (|| -> Result<()> {
             let target = crate::tree::Tree::open(&stage)?;

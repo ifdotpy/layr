@@ -965,7 +965,7 @@ impl<'a> Repo<'a> {
     /// wins), read-only.
     pub fn assemble(&self, line: &Line, head: &str, layers: &[Layer]) -> Result<Temp> {
         let _t = crate::trace::span("assemble");
-        let t = Temp { path: self.p.work_dir().join(ids::new_id()) };
+        let t = Temp { path: self.p.work_dir().join(crate::store::temp_name()) };
         self.snapshot_state(head, &t.path, false)?;
         self.put_layers(&t.path, layers, self.own(line))?;
         btrfs::set_readonly(&t.path)?;
