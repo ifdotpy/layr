@@ -241,6 +241,7 @@ impl Db {
             replay(self)?;
             // Test only (tests/t95-schema-rebuild-readers.sh): hold the transaction open.
             if let Some(ms) = std::env::var("LAYR_TEST_REBUILD_HOLD_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
+                eprintln!("test: rebuild held for {ms} ms");
                 std::thread::sleep(std::time::Duration::from_millis(ms));
             }
             self.conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;

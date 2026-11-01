@@ -17,9 +17,13 @@ eq "project is at schema 6" "6" "$(sqlite3 "$db" 'PRAGMA user_version')"
 
 out=$T/rebuild-out
 mkdir -p "$out"
-# The rebuilder starts first and holds the rebuild; the readers start while it holds the lock.
+# The rebuilder starts first and holds the rebuild; the readers start once it holds the lock.
 ( export LAYR_TEST_REBUILD_HOLD_MS=5000; l line list > "$out/holder.txt" 2>&1; echo $? > "$out/holder.rc" ) &
-sleep 1
+for _ in $(seq 1 300); do
+    grep -q 'rebuild held' "$out/holder.txt" 2>/dev/null && break
+    sleep 0.1
+done
+has "the rebuilder holds the rebuild" "rebuild held" "$(cat "$out/holder.txt" 2>/dev/null)"
 for i in 1 2 3 4; do
     ( l line list > "$out/r$i.txt" 2>&1; echo $? > "$out/r$i.rc" ) &
 done
