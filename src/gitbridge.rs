@@ -884,6 +884,7 @@ fn thin_import(
     let d = crate::thin::Diff { write: changes.write.iter().map(|w| w.0.clone()).collect(), removed: changes.removed.clone(), whole: Default::default() };
     let id = ids::new_id();
     crate::thin::write_layer(work, &repo.p.delta_path(&id), &d, base, false, None)?;
+    repo.p.db.record_base(&id, base)?;
     Ok(Some(id))
 }
 
