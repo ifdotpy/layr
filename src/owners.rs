@@ -19,6 +19,9 @@ pub const AUTO_RING_DEFAULT: usize = 10;
 pub const UNDO_OPS_DEFAULT: usize = 20;
 pub const UNDO_DELETED_DEFAULT: usize = 5;
 
+/// Statement cache size of a connection that runs the owners code (it has about 20 statements).
+pub const OWNERS_STATEMENTS: usize = 64;
+
 /// Config keys of the rings. `retention.auto` is also read by `gc`, which keeps 50 when unset.
 pub const KEY_AUTO: &str = "retention.auto";
 pub const KEY_UNDO_OPS: &str = "undo.ops";
@@ -71,13 +74,31 @@ pub fn deleted_entry(rec: &Record, ord: &str) -> Vec<(String, Vec<String>)> {
 }
 
 impl Db {
+    /// Statements of the owners code are prepared once per connection: a replay runs them for
+    /// every record, and preparing each one again was most of the time.
+    fn cached(&self, sql: &str) -> rusqlite::Result<rusqlite::CachedStatement<'_>> {
+        self.conn.prepare_cached(sql)
+    }
+
+    fn exec(&self, sql: &str, p: impl rusqlite::Params) -> rusqlite::Result<usize> {
+        self.conn.prepare_cached(sql)?.execute(p)
+    }
+
+    fn one<T>(
+        &self,
+        sql: &str,
+        p: impl rusqlite::Params,
+        f: impl FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+    ) -> rusqlite::Result<T> {
+        self.conn.prepare_cached(sql)?.query_row(p, f)
+    }
+
     fn owners_live(&self, state: &str) -> Result<bool> {
-        Ok(self.conn.query_row("SELECT EXISTS(SELECT 1 FROM owners WHERE state=?1)", params![state], |r| r.get(0))?)
+        Ok(self.one("SELECT EXISTS(SELECT 1 FROM owners WHERE state=?1)", params![state], |r| r.get(0))?)
     }
 
     fn line_alive(&self, line: &str) -> Result<bool> {
-        let deleted: Option<i64> =
-            self.conn.query_row("SELECT deleted FROM lines WHERE id=?1", params![line], |r| r.get(0)).optional()?;
+        let deleted: Option<i64> = self.one("SELECT deleted FROM lines WHERE id=?1", params![line], |r| r.get(0)).optional()?;
         Ok(deleted == Some(0))
     }
 
@@ -114,7 +135,7 @@ impl Db {
         let mut work = rows;
         while let Some((s, k, h)) = work.pop() {
             let had = self.owners_live(&s)?;
-            let n = self.conn.execute("INSERT OR IGNORE INTO owners(state, kind, holder) VALUES(?1,?2,?3)", params![s, k, h])?;
+            let n = self.exec("INSERT OR IGNORE INTO owners(state, kind, holder) VALUES(?1,?2,?3)", params![s, k, h])?;
             if n > 0 && !had {
                 work.extend(self.held_rows(&s)?);
             }
@@ -126,9 +147,9 @@ impl Db {
     fn remove_rows(&self, rows: Vec<Row>) -> Result<()> {
         let mut work = rows;
         while let Some((s, k, h)) = work.pop() {
-            let n = self.conn.execute("DELETE FROM owners WHERE state=?1 AND kind=?2 AND holder=?3", params![s, k, h])?;
+            let n = self.exec("DELETE FROM owners WHERE state=?1 AND kind=?2 AND holder=?3", params![s, k, h])?;
             if n > 0 && !self.owners_live(&s)? {
-                let mut st = self.conn.prepare(
+                let mut st = self.cached(
                     "SELECT state, kind, holder FROM owners WHERE holder=?1 AND kind IN ('parent','derived','conflict')",
                 )?;
                 let held = st
@@ -142,7 +163,7 @@ impl Db {
 
     /// The states of one holder, after `kind` (the holder of a row is its owner's name).
     fn holder_states(&self, kind: &str, holder: &str) -> Result<BTreeSet<String>> {
-        let mut st = self.conn.prepare("SELECT state FROM owners WHERE kind=?1 AND holder=?2")?;
+        let mut st = self.cached("SELECT state FROM owners WHERE kind=?1 AND holder=?2")?;
         let v = st.query_map(params![kind, holder], |r| r.get::<_, String>(0))?.collect::<Result<BTreeSet<_>, _>>()?;
         Ok(v)
     }
@@ -161,7 +182,7 @@ impl Db {
 
     fn holders(&self, kind: &str, lo: &str, hi: &str) -> Result<Vec<String>> {
         let mut st =
-            self.conn.prepare("SELECT DISTINCT holder FROM owners WHERE kind=?1 AND holder>=?2 AND holder<?3 ORDER BY holder")?;
+            self.cached("SELECT DISTINCT holder FROM owners WHERE kind=?1 AND holder>=?2 AND holder<?3 ORDER BY holder")?;
         let v = st.query_map(params![kind, lo, hi], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
         Ok(v)
     }
@@ -188,8 +209,7 @@ impl Db {
         }
         let keep = self.ring_size(KEY_AUTO, AUTO_RING_DEFAULT);
         let autos = if alive {
-            let mut st =
-                self.conn.prepare("SELECT id FROM states WHERE line=?1 AND kind=?2 ORDER BY time DESC, id DESC LIMIT ?3")?;
+            let mut st = self.cached("SELECT id FROM states WHERE line=?1 AND kind=?2 ORDER BY time DESC, id DESC LIMIT ?3")?;
             let v = st
                 .query_map(params![line, kind_str(StateKind::Auto), keep as i64], |r| r.get::<_, String>(0))?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -199,7 +219,7 @@ impl Db {
         };
         self.set_owners("auto", line, &autos)?;
         let parks = if alive {
-            let mut st = self.conn.prepare("SELECT id FROM states WHERE line=?1 AND kind=?2 AND dropped=0")?;
+            let mut st = self.cached("SELECT id FROM states WHERE line=?1 AND kind=?2 AND dropped=0")?;
             let v = st
                 .query_map(params![line, kind_str(StateKind::Stash)], |r| r.get::<_, String>(0))?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -257,7 +277,7 @@ impl Db {
     /// Rebuild the undo and deleted rings from the stored records. Used when a ring size changes:
     /// a ring that shrank had dropped its oldest records, which a bigger ring must bring back.
     fn resync_rings(&self) -> Result<()> {
-        let mut st = self.conn.prepare("SELECT id FROM lines")?;
+        let mut st = self.cached("SELECT id FROM lines")?;
         let lines = st.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
         drop(st);
         for line in &lines {
@@ -279,8 +299,7 @@ impl Db {
                 self.set_owners("deleted", &h, &named)?;
             }
         }
-        let mut st =
-            self.conn.prepare("SELECT DISTINCT substr(holder, 1, instr(holder, '|') - 1) FROM owners WHERE kind='undo'")?;
+        let mut st = self.cached("SELECT DISTINCT substr(holder, 1, instr(holder, '|') - 1) FROM owners WHERE kind='undo'")?;
         let undo_lines = st.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
         drop(st);
         for line in &undo_lines {
@@ -291,7 +310,7 @@ impl Db {
 
     /// The state of a line's own stash or head lookups.
     fn state_line(&self, state: &str) -> Result<Option<String>> {
-        Ok(self.conn.query_row("SELECT line FROM states WHERE id=?1", params![state], |r| r.get(0)).optional()?.flatten())
+        Ok(self.one("SELECT line FROM states WHERE id=?1", params![state], |r| r.get(0)).optional()?.flatten())
     }
 
     /// The owners that one record changes. Runs at the end of `Db::derive`, after the record's own
@@ -412,7 +431,7 @@ impl Db {
 
     /// Owners as stored, sorted.
     pub fn owner_rows(&self) -> Result<Vec<Row>> {
-        let mut st = self.conn.prepare("SELECT state, kind, holder FROM owners ORDER BY state, kind, holder")?;
+        let mut st = self.cached("SELECT state, kind, holder FROM owners ORDER BY state, kind, holder")?;
         let v = st
             .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?
             .collect::<Result<Vec<_>, _>>()?;
@@ -422,6 +441,7 @@ impl Db {
     /// The owners that the stored records give: a replay into a temporary database.
     pub fn recomputed_owners(&self, local: &str) -> Result<Vec<Row>> {
         let mem = Db { conn: Connection::open_in_memory()?, stale: false };
+        mem.conn.set_prepared_statement_cache_capacity(OWNERS_STATEMENTS);
         mem.conn.execute_batch(SCHEMA)?;
         for raw in self.all_lines()? {
             let rec = crate::oplog::parse_line(&raw, None)?.record;
@@ -441,9 +461,9 @@ impl Db {
     /// Replace the stored table with rows (`fsck --repair`).
     pub fn replace_owners(&self, rows: &[Row]) -> Result<()> {
         self.with_tx(|| {
-            self.conn.execute("DELETE FROM owners", [])?;
+            self.exec("DELETE FROM owners", [])?;
             for (s, k, h) in rows {
-                self.conn.execute("INSERT INTO owners(state, kind, holder) VALUES(?1,?2,?3)", params![s, k, h])?;
+                self.exec("INSERT INTO owners(state, kind, holder) VALUES(?1,?2,?3)", params![s, k, h])?;
             }
             Ok(())
         })
@@ -452,14 +472,14 @@ impl Db {
     /// Record that a thin layer of `state` is made over `base` (APFS only; no other file system
     /// writes this table).
     pub fn record_base(&self, state: &str, base: &str) -> Result<()> {
-        self.conn.execute("INSERT OR REPLACE INTO bases(state, base) VALUES(?1,?2)", params![state, base])?;
+        self.exec("INSERT OR REPLACE INTO bases(state, base) VALUES(?1,?2)", params![state, base])?;
         Ok(())
     }
 
     /// Replace the layer bases with the ones found on disk (`layr reindex`).
     pub fn replace_bases(&self, bases: &BTreeMap<String, String>) -> Result<()> {
         self.with_tx(|| {
-            self.conn.execute("DELETE FROM bases", [])?;
+            self.exec("DELETE FROM bases", [])?;
             for (state, base) in bases {
                 self.record_base(state, base)?;
             }
@@ -471,7 +491,7 @@ impl Db {
     /// and the present states that the plan keeps and no owner names.
     pub fn owners_difference(&self, keep: &BTreeSet<String>, freed: &[String]) -> Result<(Vec<(String, String)>, Vec<String>)> {
         let mut owned: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        let mut st = self.conn.prepare("SELECT state, kind FROM owners")?;
+        let mut st = self.cached("SELECT state, kind FROM owners")?;
         for row in st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
             let (state, kind) = row?;
             owned.entry(state).or_default().insert(kind);

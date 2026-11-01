@@ -95,6 +95,7 @@ impl Db {
     /// Open the database. Returns it and whether the derived tables must be rebuilt.
     pub fn open(path: &Path) -> Result<Db> {
         let conn = Connection::open(path)?;
+        conn.set_prepared_statement_cache_capacity(crate::owners::OWNERS_STATEMENTS);
         conn.pragma_update(None, "journal_mode", "WAL")?;
         // FULL: a committed record survives a power loss. The database has its own subvolume,
         // so this fsync costs a few milliseconds even right after a snapshot.
