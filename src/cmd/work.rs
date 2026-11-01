@@ -456,6 +456,12 @@ fn add_scan_limit(specs: &[String]) -> Option<BTreeSet<String>> {
 }
 
 pub fn add(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    let done = add_named(ctx, args);
+    crate::repo::named_paths(&[]);
+    done
+}
+
+fn add_named(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let spec = Spec::new()
         .flag("-A|--all")
         .flag("-u|--update")
@@ -487,6 +493,8 @@ pub fn add(ctx: &Ctx, args: &[String]) -> Result<i32> {
     // large line. They run before the store lock; under it the copy is used when the head and
     // the staging content did not change, else the read runs again under the lock.
     #[cfg(target_os = "macos")]
+    // A path that `add` names inside a regenerable folder is tracked: the walks enter the folder.
+    crate::repo::named_paths(&specs);
     let limit = add_scan_limit(&specs);
     #[cfg(target_os = "macos")]
     let read = |line: &Line| -> Result<Option<(crate::repo::Temp, BTreeSet<String>, Vec<String>)>> {

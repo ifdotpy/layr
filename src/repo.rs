@@ -1778,7 +1778,11 @@ impl<'a> Repo<'a> {
             return Ok((Vec::new(), Vec::new()));
         }
         let (mut plain, mut versioned, mut head, mut stage) = (Vec::new(), Vec::new(), None, None);
+        let named = NAMED.with(|n| n.borrow().clone());
         for p in regenerable_quick(&w) {
+            if named.iter().any(|n| n.strip_prefix(p.as_str()).is_some_and(|rest| rest.starts_with('/'))) {
+                continue;
+            }
             match fsutil::lmeta(&w, &p) {
                 Some(m) if m.is_dir() && !fsutil::is_layer(&w, &p, &m) => {}
                 _ => continue,
@@ -2359,6 +2363,16 @@ pub fn regenerable_folders(w: &Path) -> Vec<String> {
     }
     found.sort();
     found
+}
+
+thread_local! {
+    /// Paths that the running command names (`add <path>`).
+    static NAMED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// A regenerable folder that holds a named path is walked: the command asks for its files.
+pub fn named_paths(paths: &[String]) {
+    NAMED.with(|n| *n.borrow_mut() = paths.to_vec());
 }
 
 /// Leaves folders out of the walks of `root` while it lives (`fsutil::set_skipped`).
