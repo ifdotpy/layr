@@ -35,6 +35,39 @@ fn conflict_code(kind: &str) -> &'static str {
     }
 }
 
+/// The status that `layr status` shows: the comparison of the working folder, minus the files of
+/// quiet overlays. `filtered` is true for a view that shows only the caller's layers.
+fn shown_status(ctx: &Ctx, h: &Here, line: &Line, filtered: bool) -> Result<Status> {
+    #[cfg(target_os = "macos")]
+    let mut st = {
+        let _t = crate::trace::span("status compare");
+        if filtered {
+            h.repo.snapshot_status(ctx, line)?
+        } else {
+            // The comparison runs without the store lock, as on Linux: it can last many seconds
+            // and the saved status is published by an atomic rename. A save, add or reset that
+            // swaps the staging folder meanwhile makes it fail; then it runs again under the lock.
+            match h.repo.status_report(line) {
+                Ok(st) => st,
+                Err(_) => {
+                    let _lock = h.repo.p.lock()?;
+                    let line = h.repo.line(&line.id)?;
+                    h.repo.status_report(&line)?
+                }
+            }
+        }
+    };
+    #[cfg(not(target_os = "macos"))]
+    let mut st = if filtered { h.repo.snapshot_status(ctx, line)? } else { h.repo.status(line)?.0 };
+    // The files of quiet overlays are not shown (docs/cache-overlays.md, section 4.1).
+    let quiet = {
+        let _t = crate::trace::span("status quiet paths");
+        h.repo.quiet_paths(line)?
+    };
+    st.drop_paths(&quiet);
+    Ok(st)
+}
+
 pub fn status(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let spec = Spec::new()
         .flag("-s|--short")
@@ -54,33 +87,7 @@ pub fn status(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let line = h.repo.line(&line.id)?;
     let filtered = h.repo.filtered_view(ctx, &line)?;
     let specs = h.specs(&a.rest())?;
-    #[cfg(target_os = "macos")]
-    let mut st = {
-        let _t = crate::trace::span("status compare");
-        if filtered.is_some() {
-            h.repo.snapshot_status(ctx, &line)?
-        } else {
-            // The comparison runs without the store lock, as on Linux: it can last many seconds
-            // and the saved status is published by an atomic rename. A save, add or reset that
-            // swaps the staging folder meanwhile makes it fail; then it runs again under the lock.
-            match h.repo.status_report(&line) {
-                Ok(st) => st,
-                Err(_) => {
-                    let _lock = h.repo.p.lock()?;
-                    let line = h.repo.line(&line.id)?;
-                    h.repo.status_report(&line)?
-                }
-            }
-        }
-    };
-    #[cfg(not(target_os = "macos"))]
-    let mut st = if filtered.is_some() { h.repo.snapshot_status(ctx, &line)? } else { h.repo.status(&line)?.0 };
-    // The files of quiet overlays are not shown (docs/cache-overlays.md, section 4.1).
-    let quiet = {
-        let _t = crate::trace::span("status quiet paths");
-        h.repo.quiet_paths(&line)?
-    };
-    st.drop_paths(&quiet);
+    let st = shown_status(ctx, &h, &line, filtered.is_some())?;
     let overlaps = if filtered.is_none() && (a.has("--json") || (!a.has("-s") && !a.has("--porcelain"))) {
         let _t = crate::trace::span("status overlaps");
         h.repo.overlaps(ctx, &line)?.into_iter().filter(|o| matches(&specs, &o.path)).collect::<Vec<_>>()
@@ -910,7 +917,19 @@ fn run_git_apply(ctx: &Ctx, dir: &Path, patch: &[u8], flags: &[String], uid: u32
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// A named save (`save -m`, with or without `-a`). Once it made a state, it names the files that
+/// the save left out. The warning runs after the store lock is released.
 pub fn commit(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    let code = commit_state(ctx, args)?;
+    if code == 0 {
+        if let Err(e) = warn_left_out(ctx) {
+            eprintln!("warning: cannot list the files this save left out: {e:#}");
+        }
+    }
+    Ok(code)
+}
+
+fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let spec = Spec::new()
         .value("-m|--message")
         .value("-F|--file")
@@ -1123,6 +1142,39 @@ pub fn commit(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
     }
     Ok(0)
+}
+
+/// Prints on stderr the files that a named save left out: untracked files, and tracked files whose
+/// working content differs from the new state. Prints nothing when none are left out.
+fn warn_left_out(ctx: &Ctx) -> Result<()> {
+    let h = here(ctx)?;
+    let line = h.line()?.clone();
+    #[cfg(target_os = "macos")]
+    let line = h.repo.line(&line.id)?;
+    let filtered = h.repo.filtered_view(ctx, &line)?.is_some();
+    let st = shown_status(ctx, &h, &line, filtered)?;
+    let conflicted: BTreeSet<String> = st.conflicts.iter().map(|c| c.path.clone()).collect();
+    let untracked: Vec<String> = untracked_list(&st, "normal").iter().map(|p| h.rel(p)).collect();
+    let mut modified: Vec<String> =
+        st.unstaged.iter().filter(|c| !conflicted.contains(&c.path)).map(|c| h.rel(&c.path)).collect();
+    modified.sort();
+    for msg in [left_out_line("untracked", &untracked), left_out_line("modified, not added", &modified)].into_iter().flatten() {
+        eprintln!("{msg}");
+    }
+    Ok(())
+}
+
+/// One warning line: the first 20 paths, then the number of the others.
+fn left_out_line(kind: &str, paths: &[String]) -> Option<String> {
+    const SHOWN: usize = 20;
+    if paths.is_empty() {
+        return None;
+    }
+    let mut text = paths.iter().take(SHOWN).cloned().collect::<Vec<_>>().join(", ");
+    if paths.len() > SHOWN {
+        text.push_str(&format!(", and {} more", paths.len() - SHOWN));
+    }
+    Some(format!("not saved ({kind}): {text}"))
 }
 
 /// The summary of a commit: the short statistics and the created, deleted and moved files.
