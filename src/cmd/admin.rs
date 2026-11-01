@@ -1493,6 +1493,8 @@ pub fn reindex(ctx: &Ctx, _args: &[String]) -> Result<i32> {
     h.repo.require(ctx, "fsck")?;
     let _lock = h.repo.p.lock()?;
     h.repo.p.rebuild_index()?;
+    // Layer bases exist on APFS only: elsewhere the table stays empty.
+    #[cfg(target_os = "macos")]
     h.repo.p.db.replace_bases(&crate::thin::bases(&h.repo.p)?)?;
     let n: i64 = h.repo.p.db.conn.query_row("SELECT COUNT(*) FROM records", [], |r| r.get(0))?;
     outln!(ctx, "index rebuilt from {n} records");
