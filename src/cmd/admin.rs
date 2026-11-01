@@ -1069,12 +1069,7 @@ pub fn retention_plan(repo: &Repo, pushed: &mut BTreeMap<String, bool>) -> Resul
         if !keep.contains(&id) {
             if !copies.contains_key(&id) {
                 delete.push(id);
-<<<<<<< head
             } else if evict_on && crate::store_remote::restorable(repo, &id)? {
-||||||| base
-=======
-            } else if evict_on {
->>>>>>> origin/main
                 evict.push(id);
             }
         } else if evict_on
