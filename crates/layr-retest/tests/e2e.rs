@@ -410,3 +410,40 @@ fn sh_out(prog: &str, args: &[&str]) -> String {
     let o = Command::new(prog).args(args).output().unwrap();
     String::from_utf8_lossy(&o.stdout).into_owned()
 }
+
+const FLAG_LIB: &str = "#[cfg(not(projflag))]\ncompile_error!(\"projflag is missing: the project rustflags were not passed\");\n\npub fn a() -> i32 {\n    1\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn ta() {\n        assert_eq!(super::a(), 1);\n    }\n}\n";
+
+/// Runs `layr retest run` on a project whose only `projflag` comes from its cargo config.
+/// Without the project flags the instrumented build fails to compile.
+fn project_flags_run(name: &str, config: &str) {
+    let tmp = std::env::temp_dir().canonicalize().unwrap().join(format!("layr-retest-{name}-{}", std::process::id()));
+    let src = tmp.join("src-project");
+    std::fs::create_dir_all(src.join("src")).unwrap();
+    std::fs::create_dir_all(src.join(".cargo")).unwrap();
+    std::fs::write(src.join("Cargo.toml"), "[package]\nname = \"flags\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+    std::fs::write(src.join(".cargo/config.toml"), config).unwrap();
+    std::fs::write(src.join("src/lib.rs"), FLAG_LIB).unwrap();
+    std::fs::write(src.join(".layrattributes"), ".layr-retest regenerable\ntarget regenerable\n").unwrap();
+    std::fs::write(src.join(".gitignore"), "/target\n/.layr-retest\n").unwrap();
+    sh(&src, &tmp.join("unused"), "cargo", &["generate-lockfile", "--offline"]);
+    let root = tmp.join("store");
+    sh(&tmp, &root, "layr", &["init", "app", "--from", src.to_str().unwrap()]);
+    let main: PathBuf = root.join("projects/app/lines/main");
+    sh(&main, &root, "layr", &["line", "new", "work"]);
+    let line = root.join("projects/app/lines/work");
+    let err = retest(&line, &root, &["run"]);
+    assert!(err.contains("passed 1, failed 0"), "{err}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn build_rustflags_reach_the_instrumented_build() {
+    project_flags_run("build-flags", "[build]\nrustflags = [\"--cfg\", \"projflag\"]\n");
+}
+
+#[test]
+fn target_rustflags_reach_the_instrumented_build() {
+    let host = sh_out("rustc", &["-vV"]);
+    let host = host.lines().find_map(|l| l.strip_prefix("host: ")).expect("rustc host").to_string();
+    project_flags_run("target-flags", &format!("[target.{host}]\nrustflags = [\"--cfg\", \"projflag\"]\n"));
+}

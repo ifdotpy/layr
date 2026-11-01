@@ -917,7 +917,8 @@ pub fn try_command(
 /// while their records stay (`store_remote::restore_state` brings them back). A recoverable
 /// state stays on disk when it is a line head, the newest automatic state of a line, a state
 /// with caches, a state a cache overlay names, or (through `thin::delete_states`) a base that a
-/// state on disk needs.
+/// state on disk needs. `evict` is empty unless `gc.evict` is on (`Project::gc_evicts`). With it
+/// off, a state that a store remote holds is kept with its history, so nothing is deleted for it.
 pub fn retention_plan(repo: &Repo, pushed: &mut BTreeMap<String, bool>) -> Result<(BTreeSet<String>, Vec<String>, Vec<String>)> {
     let db = &repo.p.db;
     let mut held = |id: &str| -> Result<bool> {
@@ -1002,6 +1003,16 @@ pub fn retention_plan(repo: &Repo, pushed: &mut BTreeMap<String, bool>) -> Resul
             }
         }
     }
+    let copies = crate::store_remote::store_copies(repo)?;
+    let evict_on = repo.p.gc_evicts();
+    if !evict_on {
+        // With eviction off, a state that a store holds is a root: it stays with its history.
+        for (id, _) in db.present_states()? {
+            if copies.contains_key(&id) {
+                roots.push(id);
+            }
+        }
+    }
     // History of every root.
     let mut stack = roots;
     while let Some(x) = stack.pop() {
@@ -1051,17 +1062,17 @@ pub fn retention_plan(repo: &Repo, pushed: &mut BTreeMap<String, bool>) -> Resul
             }
         }
     }
-    let copies = crate::store_remote::store_copies(repo)?;
     let mut delete = Vec::new();
     let mut evict = Vec::new();
     for (id, _) in db.present_states()? {
         if !keep.contains(&id) {
-            if copies.contains_key(&id) {
-                evict.push(id);
-            } else {
+            if !copies.contains_key(&id) {
                 delete.push(id);
+            } else if evict_on {
+                evict.push(id);
             }
-        } else if copies.contains_key(&id)
+        } else if evict_on
+            && copies.contains_key(&id)
             && !must.contains(&id)
             && repo.p.has_state(&id)
             && db.state(&id)?.is_some_and(|s| s.caches.is_empty())
@@ -1088,16 +1099,32 @@ fn pushed_work(repo: &Repo, id: &str) -> Result<bool> {
     Ok(repo.unsaved_paths(parent, &s)?.is_empty())
 }
 
+/// Shadow mode (docs/ownership.md): how the owners table differs from the plan. Frees nothing.
+fn owners_difference(ctx: &Ctx, repo: &Repo, keep: &BTreeSet<String>, delete: &[String]) -> Result<()> {
+    let (frees, unowned) = repo.p.db.owners_difference(keep, delete)?;
+    outln!(ctx, "owners: plan frees {} state(s) that owners keep", frees.len());
+    for (id, kinds) in frees.iter().take(10) {
+        outln!(ctx, "\t{} kept by {kinds}", ids::short(id));
+    }
+    outln!(ctx, "owners: plan keeps {} state(s) that no owner names", unowned.len());
+    for id in unowned.iter().take(10) {
+        outln!(ctx, "\t{}", ids::short(id));
+    }
+    Ok(())
+}
+
 pub fn run_gc(ctx: &Ctx, repo: &Repo, dry: bool) -> Result<Vec<String>> {
     // The comparisons of automatic states with their parents take seconds to minutes: a first
     // plan without the lock makes them, and the plan under the lock reuses them.
     let mut pushed = BTreeMap::new();
-    let (_keep, delete, evict) = retention_plan(repo, &mut pushed)?;
+    let (keep, delete, evict) = retention_plan(repo, &mut pushed)?;
     if dry {
+        owners_difference(ctx, repo, &keep, &delete)?;
         return Ok(delete.into_iter().chain(evict).collect());
     }
     let _lock = repo.p.lock()?;
-    let (_keep, delete, evict) = retention_plan(repo, &mut pushed)?;
+    let (keep, delete, evict) = retention_plan(repo, &mut pushed)?;
+    owners_difference(ctx, repo, &keep, &delete)?;
     for expired in repo.p.db.expired_refs(ids::now_ms())? {
         let mut rec = Record::new("ref.expire");
         rec.data = serde_json::json!({"ref_change": crate::model::RefChange { name:expired.name.clone(),before:Some(expired),after:None }});
@@ -1313,6 +1340,23 @@ pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
             outln!(ctx, "records: {err:#}");
         }
     }
+    // Owners (shadow mode, docs/ownership.md): the table must equal the replay of the records.
+    let want = repo.p.db.recomputed_owners(&repo.p.store.machine.id)?;
+    let (missing, extra) = repo.p.db.owners_diff(&want)?;
+    if !missing.is_empty() || !extra.is_empty() {
+        problems += 1;
+        outln!(ctx, "owners differ from the records: {} missing, {} extra", missing.len(), extra.len());
+        for (s, k, h) in missing.iter().take(5) {
+            outln!(ctx, "\tmissing: {} {k} {h}", ids::short(s));
+        }
+        for (s, k, h) in extra.iter().take(5) {
+            outln!(ctx, "\textra: {} {k} {h}", ids::short(s));
+        }
+        if a.has("--repair") {
+            repo.p.db.replace_owners(&want)?;
+            outln!(ctx, "owners rewritten from the records");
+        }
+    }
     // Snapshots without a record: a save that stopped between its snapshot and its record.
     for e in std::fs::read_dir(repo.p.states_dir())?.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
@@ -1462,6 +1506,9 @@ pub fn reindex(ctx: &Ctx, _args: &[String]) -> Result<i32> {
     h.repo.require(ctx, "fsck")?;
     let _lock = h.repo.p.lock()?;
     h.repo.p.rebuild_index()?;
+    // Layer bases exist on APFS only: elsewhere the table stays empty.
+    #[cfg(target_os = "macos")]
+    h.repo.p.db.replace_bases(&crate::thin::bases(&h.repo.p)?)?;
     let n: i64 = h.repo.p.db.conn.query_row("SELECT COUNT(*) FROM records", [], |r| r.get(0))?;
     outln!(ctx, "index rebuilt from {n} records");
     if !h.repo.p.is_overlay() {
@@ -1743,6 +1790,9 @@ fn default_branch(repo: &Repo) -> Option<String> {
 }
 
 pub fn set_config(ctx: &Ctx, repo: &Repo, key: &str, value: serde_json::Value) -> Result<()> {
+    if key == Project::GC_EVICT_KEY &&!value.is_null() && !matches!(value.as_str(), Some("on" | "off")) {
+        return Err(exit(1, format!("{key} is on or off")));
+    }
     if !repo.p.is_overlay() {
         if let Some(rest) = key.strip_prefix("overlay.") {
             let name = rest.split('.').next().unwrap_or("");

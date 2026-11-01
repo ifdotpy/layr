@@ -6,6 +6,7 @@ mod doctor;
 mod init;
 mod parse;
 mod record;
+mod rustflags;
 mod select;
 mod sweep;
 mod tools;
@@ -361,11 +362,6 @@ fn dylib_objects(target: &Path) -> Result<Vec<PathBuf>> {
     Ok(kind_targets("dylib")?.into_iter().map(|(name, _)| target.join("debug").join(dylib_file(&name))).filter(|p| p.is_file()).collect())
 }
 
-/// RUSTFLAGS of the instrumented build. No `-C prefer-dynamic`: binaries link std like the plain build.
-fn build_flags(base: &str) -> String {
-    format!("{base} -C instrument-coverage").trim().to_string()
-}
-
 /// Path of `p` relative to the line root, if it is inside.
 fn relative_to(root: &Path, p: &str) -> Option<String> {
     let canon = root.canonicalize().ok();
@@ -521,14 +517,16 @@ fn run(args: &[String]) -> Result<i32> {
     let exe = std::env::current_exe()?;
     let tools = (llvm_tool("llvm-profdata")?, llvm_tool("llvm-cov")?);
     let runner_var = format!("CARGO_TARGET_{}_RUNNER", rustc_host()?.to_uppercase().replace('-', "_"));
-    let flags = build_flags(&std::env::var("RUSTFLAGS").unwrap_or_default());
+    let env_of = |k: &str| std::env::var(k).ok();
+    let files = rustflags::config_files(&root, &env_of)?;
+    let (flag_var, flag_value) = rustflags::env_with_flags(&env_of, &files, &rustc_host()?, &["-C", "instrument-coverage"])?;
     let cargo = |first: &[&str]| {
         let mut c = Command::new("cargo");
         c.args(first).args(extra);
         // Cargo, build scripts and the list phase write here; the wrapper gives each test its own folder.
         c.env("LLVM_PROFILE_FILE", profdir.join("other/%p.profraw"));
         c.env(PROFDATA_VAR, &tools.0);
-        c.env("RUSTFLAGS", &flags).env("CARGO_TARGET_DIR", &target).env(PROFILE_DIR_VAR, &profdir);
+        c.env(&flag_var, &flag_value).env("CARGO_TARGET_DIR", &target).env(PROFILE_DIR_VAR, &profdir);
         c.env(&runner_var, format!("{} retest wrap --", exe.display())).env("NEXTEST_EXPERIMENTAL_LIBTEST_JSON", "1");
         if std::env::var(INCREMENTAL_VAR).as_deref() != Ok("0") {
             c.env("CARGO_INCREMENTAL", "1");
@@ -708,12 +706,6 @@ fn run(args: &[String]) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn build_flags_never_prefer_dynamic() {
-        assert_eq!(build_flags(""), "-C instrument-coverage");
-        assert_eq!(build_flags("-Dwarnings"), "-Dwarnings -C instrument-coverage");
-    }
 
     #[test]
     fn dylib_file_name_uses_underscores() {
