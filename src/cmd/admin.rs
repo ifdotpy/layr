@@ -917,7 +917,8 @@ pub fn try_command(
 /// while their records stay (`store_remote::restore_state` brings them back). A recoverable
 /// state stays on disk when it is a line head, the newest automatic state of a line, a state
 /// with caches, a state a cache overlay names, or (through `thin::delete_states`) a base that a
-/// state on disk needs.
+/// state on disk needs. `evict` is empty unless `gc.evict` is on (`Project::gc_evicts`). With it
+/// off, a state that a store remote holds is kept with its history, so nothing is deleted for it.
 pub fn retention_plan(repo: &Repo, pushed: &mut BTreeMap<String, bool>) -> Result<(BTreeSet<String>, Vec<String>, Vec<String>)> {
     let db = &repo.p.db;
     let mut held = |id: &str| -> Result<bool> {
@@ -1002,6 +1003,16 @@ pub fn retention_plan(repo: &Repo, pushed: &mut BTreeMap<String, bool>) -> Resul
             }
         }
     }
+    let copies = crate::store_remote::store_copies(repo)?;
+    let evict_on = repo.p.gc_evicts();
+    if !evict_on {
+        // With eviction off, a state that a store holds is a root: it stays with its history.
+        for (id, _) in db.present_states()? {
+            if copies.contains_key(&id) {
+                roots.push(id);
+            }
+        }
+    }
     // History of every root.
     let mut stack = roots;
     while let Some(x) = stack.pop() {
@@ -1051,17 +1062,17 @@ pub fn retention_plan(repo: &Repo, pushed: &mut BTreeMap<String, bool>) -> Resul
             }
         }
     }
-    let copies = crate::store_remote::store_copies(repo)?;
     let mut delete = Vec::new();
     let mut evict = Vec::new();
     for (id, _) in db.present_states()? {
         if !keep.contains(&id) {
-            if copies.contains_key(&id) {
-                evict.push(id);
-            } else {
+            if !copies.contains_key(&id) {
                 delete.push(id);
+            } else if evict_on {
+                evict.push(id);
             }
-        } else if copies.contains_key(&id)
+        } else if evict_on
+            && copies.contains_key(&id)
             && !must.contains(&id)
             && repo.p.has_state(&id)
             && db.state(&id)?.is_some_and(|s| s.caches.is_empty())
@@ -1741,6 +1752,9 @@ fn default_branch(repo: &Repo) -> Option<String> {
 }
 
 pub fn set_config(ctx: &Ctx, repo: &Repo, key: &str, value: serde_json::Value) -> Result<()> {
+    if key == Project::GC_EVICT_KEY &&!value.is_null() && !matches!(value.as_str(), Some("on" | "off")) {
+        return Err(exit(1, format!("{key} is on or off")));
+    }
     if !repo.p.is_overlay() {
         if let Some(rest) = key.strip_prefix("overlay.") {
             let name = rest.split('.').next().unwrap_or("");
