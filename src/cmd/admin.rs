@@ -357,7 +357,8 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
     }
     let _queue_lock = if r.data.get("queue_change").is_some() { Some(super::queue::require_lock(repo)?) } else { None };
     // Before the lock: the automatic state of each line's folder and the trees that the undo
-    // reads (seconds to minutes each under the lock). Errors only lose the preparation.
+    // reads (seconds to minutes each under the lock). Errors only lose the preparation; the
+    // states are loaded again under the lock, where an error stops the undo.
     for (lid, ch) in &r.lines {
         if let Ok(Some(l)) = repo.p.db.line_by_id(lid) {
             let _ = repo.prepare_save(&l);
@@ -462,6 +463,23 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
         }
         _ => {}
     }
+    // Every state the undo reads loads before the first file changes. A state that cannot load
+    // stops the undo here with no file changed; a state that a store remote holds comes back
+    // from it (`state_src`).
+    let mut needed: Vec<String> = Vec::new();
+    for ch in r.lines.values() {
+        needed.extend(
+            [ch.before.as_ref().map(|b| b.head.clone()), ch.working_before.clone(), ch.working_after.clone()]
+                .into_iter()
+                .flatten(),
+        );
+    }
+    needed.extend(["final_state", "staged_state"].iter().filter_map(|k| r.data.get(*k)?.as_str().map(str::to_string)));
+    for s in &needed {
+        repo.state_src(s).map_err(|e| {
+            exit(1, format!("error: cannot undo, no file changed: {e:#} (undo window: {} days)", repo.p.config_u64("undo.days", 7)))
+        })?;
+    }
     for (lid, ch) in &r.lines {
         let cur = repo.p.db.line_by_id(lid)?;
         let cur_state = cur
@@ -479,19 +497,6 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
                 "error: the line changed after this operation; undo the later operations first (layr op log), or use --force",
             ));
         }
-        // Required states must still exist (retention can delete old automatic states).
-        for s in [ch.before.as_ref().map(|b| b.head.clone()), ch.working_before.clone()].into_iter().flatten() {
-            if !repo.p.has_state(&s) {
-                return Err(exit(
-                    1,
-                    format!(
-                        "error: cannot undo: state {} was deleted by retention (undo window: {} days)",
-                        ids::short(&s),
-                        repo.p.config_u64("undo.days", 7)
-                    ),
-                ));
-            }
-        }
         let mut wb = None;
         match (&ch.before, &cur) {
             (Some(b), Some(l)) if alive => {
@@ -504,7 +509,7 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
                 l2.name = b.name.clone();
                 match (&ch.working_before, &ch.working_after) {
                     // Revert only what the operation changed; later work stays.
-                    (Some(before), Some(after)) if repo.p.has_state(after) => {
+                    (Some(before), Some(after)) => {
                         let cur = repo.scan(&l2)?;
                         let later: BTreeSet<String> = changes::file_changes(&repo.state_src(after)?, &cur.path)?
                             .into_iter()
