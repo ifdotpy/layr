@@ -344,11 +344,13 @@ impl<'a> Repo<'a> {
         Ok(self.p.state_path(id))
     }
 
+    /// Every command that reads the tree of a state comes here (`state_root`, `state_src`). A
+    /// state that retention evicted comes back from a store remote that holds it.
     fn check_state(&self, id: &str) -> Result<()> {
         if !self.p.has_state(id) {
             match self.p.db.state_flags(id)? {
                 Some((_, true)) => bail!("state {} was deleted by retention", ids::short(id)),
-                Some(_) => bail!("state {} is not on this machine (run layr fetch <remote>)", ids::short(id)),
+                Some(_) => crate::store_remote::restore_state(self, id)?,
                 None => bail!("unknown state {}", ids::short(id)),
             }
         }

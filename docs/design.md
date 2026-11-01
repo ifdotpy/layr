@@ -140,6 +140,32 @@ below it (`Repo::foreign_base`, read from the `line.create` record). Only the st
 merge or a fast-forward of another line later is a deliberate choice. `--include-base <lines>`
 pushes them; it must name each line, so a flag added blindly does not cover them.
 
+### State eviction and fetch on demand
+
+A state that a store remote holds does not need its tree on this machine. `gc` evicts it: the
+tree goes, the state record stays, and `present` becomes false. The record keeps the state's id,
+parents and kind, so history, `diff` and `line new` still name it. Its tree comes back when a
+command reads it.
+
+- Recoverable: a successful `layr push <store-remote>` record names the state
+  (`Repo::store_copies`, `state_ids_sent`). Git commits do not count: a git remote lacks
+  the ignored files and the signed records that a state can hold.
+- Kept on disk even when recoverable: a line head, the newest automatic state of a line, a state
+  with caches, a state that a cache overlay names, and a base that a state on disk needs. On APFS
+  a base is a thin layer that a layer chain of a remaining state reads (`thin::delete_states`).
+  The older states of a head's chain therefore stay until the chain is replaced.
+- Not recoverable: the state stays as before (`gc` deletes it, and its record says so).
+- Fetch on demand: `Repo::check_state` is the entry for every read of a tree (`state_root`,
+  `state_src`). A state that is not on disk goes to `store_remote::restore_state`, which tries the
+  store remotes that hold it and restores the tree (`reader::restore_states`). The machine keys come
+  from the trusted records of the project, and the publish step takes the project lock unless the
+  command holds it.
+- Offline: when no remote gives the tree, the command fails with the state, the remote name and the
+  reason. Run the command again when the remote is reachable.
+- Periodic gc: Linux runs `gc` hourly in `layr daemon`. macOS runs `layr gc --all-projects -q` every
+  six hours from `packaging/launchd/ws.layr.gc.plist`.
+- Not done: fetch back from a git remote (a commit as a state). Git-only states stay on disk.
+
 ## 5. Warm caches
 
 Planned: caches become overlays with properties ([cache overlays](cache-overlays.md)). This

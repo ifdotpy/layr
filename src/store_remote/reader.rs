@@ -351,6 +351,94 @@ pub(super) fn wanted(state: &crate::model::StateRec, opts: &Options) -> bool {
     }
 }
 
+/// Write one missing state of the store into the project and return the files written. The
+/// publish step takes the project lock unless this process holds it already.
+fn restore_one(
+    repo: &Repo,
+    reader: &mut Reader<'_>,
+    states: &BTreeMap<String, String>,
+    state: &crate::model::StateRec,
+) -> Result<usize> {
+    let id = state.id.clone();
+    let attempt = &states[&id];
+    let (header, _, tree) = reader.tree(&id, &attempt)?;
+    let stage = repo.p.work_dir().join(crate::ids::new_id());
+    if header.btrfs.as_ref().is_some_and(|identity| identity.uuid != state.subvol) {
+        bail!("tree btrfs identity differs from the signed state");
+    }
+    let mut base = None;
+    for parent in state.parents.iter().chain(state.derived_from.iter()) {
+        if let Some(attempt) = states.get(parent).filter(|_| repo.p.has_state(parent)) {
+            let (_, _, parent_tree) = reader.tree(parent, attempt)?;
+            repo.snapshot_state(parent, &stage, false)?;
+            base = Some(parent_tree);
+            break;
+        }
+    }
+    if base.is_none() {
+        crate::storage::create_subvolume(&stage)?;
+    }
+    let result = (|| -> Result<usize> {
+        let n = reader.restore_over(&tree, base.as_ref(), &stage)?;
+        let _lock = (!repo.p.holds_lock()).then(|| repo.p.lock()).transpose()?;
+        let destination = repo.p.state_path(&id);
+        if destination.exists() {
+            repo.p.db.set_present(&id, true)?;
+            return Ok(0);
+        }
+        // btrfs cannot rename a read-only subvolume. Seal it under the project lock.
+        crate::fsutil::rename_tree(&stage, &destination)?;
+        let publish = (|| -> Result<()> {
+            #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+            {
+                use std::os::fd::AsFd;
+                let (uuid, transid) = header.btrfs.as_ref().map(|i| (i.uuid.as_str(), i.transid)).unwrap_or((&state.subvol, 0));
+                let file = std::fs::File::open(&destination)?;
+                crate::sys::subvol_set_received(file.as_fd(), *uuid::Uuid::parse_str(uuid)?.as_bytes(), transid)?;
+            }
+            crate::storage::set_readonly(&destination)?;
+            repo.p.db.set_present(&id, true)?;
+            Ok(())
+        })();
+        if publish.is_err() {
+            let _ = crate::storage::delete_tree(&destination);
+        }
+        publish?;
+        Ok(n)
+    })();
+    if stage.exists() {
+        let _ = crate::storage::delete_tree(&stage);
+    }
+    result
+}
+
+/// Restore the listed states that are not on this machine, from the store's own trees. The
+/// machine keys come from this project's trusted records, so no record segment is read.
+pub(super) fn restore_states(store: &Store, repo: &Repo, ids: &[String]) -> Result<usize> {
+    let descriptor = store.descriptor()?;
+    let identity = store.identity(&descriptor, None)?;
+    let mut keys = BTreeMap::new();
+    for (machine, hex_key) in repo.p.db.trusted_keys()? {
+        let bytes: [u8; 32] =
+            hex::decode(&hex_key)?.try_into().map_err(|_| anyhow::anyhow!("trusted key of {machine} is not 32 bytes"))?;
+        keys.insert(machine, VerifyingKey::from_bytes(&bytes)?);
+    }
+    let states = attempts(&store.backend)?;
+    let mut reader = Reader::new(&store.backend, &identity, &keys);
+    let mut files = 0;
+    for id in ids {
+        if repo.p.has_state(id) {
+            continue;
+        }
+        if !states.contains_key(id) {
+            bail!("the store has no tree of state {id}");
+        }
+        let state = repo.state(id)?;
+        files += restore_one(repo, &mut reader, &states, &state)?;
+    }
+    Ok(files)
+}
+
 pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Options) -> Result<Report> {
     let _fetch = crate::trace::span("store fetch");
     let descriptor = store.descriptor()?;
@@ -411,57 +499,7 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
     }
     for state in super::writer::parents_first(missing)? {
         let id = state.id.clone();
-        let attempt = &states[&id];
-        let (header, _, tree) = reader.tree(&id, &attempt)?;
-        let stage = repo.p.work_dir().join(crate::ids::new_id());
-        if header.btrfs.as_ref().is_some_and(|identity| identity.uuid != state.subvol) {
-            bail!("tree btrfs identity differs from the signed state");
-        }
-        let mut base = None;
-        for parent in state.parents.iter().chain(state.derived_from.iter()) {
-            if let Some(attempt) = states.get(parent).filter(|_| repo.p.has_state(parent)) {
-                let (_, _, parent_tree) = reader.tree(parent, attempt)?;
-                repo.snapshot_state(parent, &stage, false)?;
-                base = Some(parent_tree);
-                break;
-            }
-        }
-        if base.is_none() {
-            crate::storage::create_subvolume(&stage)?;
-        }
-        let result = (|| -> Result<usize> {
-            let n = reader.restore_over(&tree, base.as_ref(), &stage)?;
-            let _lock = repo.p.lock()?;
-            let destination = repo.p.state_path(&id);
-            if destination.exists() {
-                repo.p.db.set_present(&id, true)?;
-                return Ok(0);
-            }
-            // btrfs cannot rename a read-only subvolume. Seal it under the project lock.
-            crate::fsutil::rename_tree(&stage, &destination)?;
-            let publish = (|| -> Result<()> {
-                #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
-                {
-                    use std::os::fd::AsFd;
-                    let (uuid, transid) =
-                        header.btrfs.as_ref().map(|i| (i.uuid.as_str(), i.transid)).unwrap_or((&state.subvol, 0));
-                    let file = std::fs::File::open(&destination)?;
-                    crate::sys::subvol_set_received(file.as_fd(), *uuid::Uuid::parse_str(uuid)?.as_bytes(), transid)?;
-                }
-                crate::storage::set_readonly(&destination)?;
-                repo.p.db.set_present(&id, true)?;
-                Ok(())
-            })();
-            if publish.is_err() {
-                let _ = crate::storage::delete_tree(&destination);
-            }
-            publish?;
-            Ok(n)
-        })();
-        if stage.exists() {
-            let _ = crate::storage::delete_tree(&stage);
-        }
-        report.files += result?;
+        report.files += restore_one(repo, &mut reader, &states, &state)?;
         report.states += 1;
         report.state_ids.push(id.clone());
     }

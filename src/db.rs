@@ -1096,6 +1096,20 @@ impl Db {
         v.into_iter().map(|l| Ok(crate::oplog::parse_line(&l, None)?.record)).collect()
     }
 
+    /// The records with one operation name, oldest first.
+    pub fn records_with_op(&self, op: &str) -> Result<Vec<Record>> {
+        let mut st = self.conn.prepare("SELECT raw FROM records WHERE op=?1 ORDER BY time, machine, seq")?;
+        let v = st.query_map(params![op], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+        v.into_iter().map(|l| Ok(crate::oplog::parse_line(&l, None)?.record)).collect()
+    }
+
+    /// The trusted machines and their public keys (hex).
+    pub fn trusted_keys(&self) -> Result<Vec<(String, String)>> {
+        let mut st = self.conn.prepare("SELECT machine, public_key FROM trusted")?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     pub fn records_since(&self, time: i64) -> Result<Vec<Record>> {
         let mut st = self.conn.prepare("SELECT raw FROM records WHERE time>=?1 ORDER BY time")?;
         let v = st.query_map(params![time], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
