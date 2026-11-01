@@ -20,14 +20,33 @@ fn index_file(root: &Path) -> PathBuf {
     root.join("line-paths.json")
 }
 
+/// The project file of moved paths, below the project's `meta` folder.
+fn paths_file_in(meta: &Path) -> PathBuf {
+    meta.join("line-paths.json")
+}
+
 /// The moved folders of the whole store (empty when none).
 pub fn index(root: &Path) -> Vec<Entry> {
     std::fs::read(index_file(root)).ok().and_then(|d| serde_json::from_slice(&d).ok()).unwrap_or_default()
 }
 
+/// Every moved folder the store records: the index and each project's own file.
+#[cfg_attr(not(all(target_os = "linux", not(feature = "overlayfs"))), allow(dead_code))]
+pub fn moved_folders(root: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = index(root).into_iter().map(|e| e.path).collect();
+    for dir in std::fs::read_dir(root.join("projects")).into_iter().flatten().flatten() {
+        if let Ok(data) = std::fs::read(paths_file_in(&dir.path().join("meta"))) {
+            if let Ok(map) = serde_json::from_slice::<BTreeMap<String, PathBuf>>(&data) {
+                out.extend(map.into_values());
+            }
+        }
+    }
+    out
+}
+
 impl Project<'_> {
     fn paths_file(&self) -> PathBuf {
-        self.meta_dir().join("line-paths.json")
+        paths_file_in(&self.meta_dir())
     }
 
     fn moved_paths(&self) -> BTreeMap<String, PathBuf> {

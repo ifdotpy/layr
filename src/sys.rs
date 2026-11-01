@@ -213,6 +213,27 @@ pub fn subvol_set_received(fd: BorrowedFd, uuid: [u8; 16], transid: u64) -> io::
     ioctl_ptr(fd, 0xc0c8_9425, &mut args)
 }
 
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+const INO_LOOKUP: libc::c_ulong = 0xd000_9412;
+
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+#[repr(C)]
+struct InoLookupArgs {
+    treeid: u64,
+    objectid: u64,
+    name: [u8; 4080],
+}
+
+/// The id of the subvolume that holds `fd`, for a folder of any depth (`btrfs inspect-internal
+/// rootid`). The top-level subvolume has id 5.
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+pub fn subvol_id(fd: BorrowedFd) -> io::Result<u64> {
+    // Object 256 is the first free inode: the root folder of the subvolume.
+    let mut a = Box::new(InoLookupArgs { treeid: 0, objectid: 256, name: [0; 4080] });
+    ioctl_ptr(fd, INO_LOOKUP, &mut *a)?;
+    Ok(a.treeid)
+}
+
 pub struct RawSubvolInfo {
     pub tree_id: u64,
     pub generation: u64,

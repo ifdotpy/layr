@@ -93,12 +93,29 @@ cargo install --git https://github.com/ifdotpy/layr layr
 
 | Platform | Store on | Notes |
 |---|---|---|
-| Linux | btrfs (a loop file works) | Needs `btrfs-progs`, `git`, `zstd`. Run the service as root: `sudo layr daemon &` |
+| Linux | btrfs (a loop file works) | Needs `btrfs-progs`, `git`, `zstd`. Run the service with systemd ([Linux service](#linux-service)) |
 | macOS | any APFS folder, also on the default volume | Set `LAYR_ROOT` to a folder, for example `~/Projects/layr-store`. Commands run as you; the root service is optional ([details](docs/apfs.md)) |
 | Linux | ext4 or XFS, through OverlayFS | Build with `--features overlayfs`; needs root mount permission ([details](docs/overlayfs-backend.md)) |
 
 All three keep the same store and record formats, so machines on different platforms sync with
 each other.
+
+### Linux service
+
+Install the root service unit (it runs `layr daemon` as root):
+
+```sh
+sudo install -m 0755 "$(command -v layr)" /usr/local/bin/layr
+sudo install -m 0644 packaging/systemd/layr.service /etc/systemd/system/layr.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now layr
+```
+
+The unit has `RequiresMountsFor=/var/lib/layr`. Keep it when the store is a separate mount: systemd
+then waits for that mount before it starts layr.
+
+layr refuses a store that sits in the root subvolume, because a system snapshot rollback would
+empty it. Put the store in its own subvolume: [Btrfs root snapshots](docs/btrfs-root-snapshots.md).
 
 ## Quick start
 
@@ -175,6 +192,7 @@ Layr talks to it as an ordinary remote.
 ## Documentation
 
 [Commands](docs/commands.md) ·
+[Btrfs root snapshots](docs/btrfs-root-snapshots.md) ·
 [Review and delivery](docs/review.md) ·
 [Merging](docs/merge.md) ·
 [Remotes](docs/remotes.md) ·

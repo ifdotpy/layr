@@ -1,0 +1,14 @@
+[Unit]
+Description=layr service (root daemon for the btrfs store)
+Documentation=https://github.com/ifdotpy/layr/blob/main/docs/btrfs-root-snapshots.md
+After=local-fs.target
+# Start after the file system that holds the store. Needed when the store is a separate mount.
+RequiresMountsFor=/var/lib/layr
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/layr daemon
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
