@@ -10,7 +10,8 @@ l line new -q work
 cd "$LAYR_ROOT/projects/busy/lines/work" || exit 1
 mkdir -p data && for i in $(seq 1 50); do printf '%s\n' "$i" > "data/f$i"; done
 printf 'start\n' > hot.txt
-(while :; do date +%s%N > hot.txt; done) &
+# A tight loop without external commands: every round of the copy sees a new version.
+(n=0; while :; do n=$((n + 1)); echo "$n" > hot.txt; echo "$n" > hot2.txt; echo "$n" > data/f1; done) &
 WRITER=$!
 trap 'kill $WRITER 2>/dev/null' EXIT
 sleep 1
