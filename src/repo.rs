@@ -900,24 +900,12 @@ impl<'a> Repo<'a> {
         let base_scan = base.scan(true)?;
         let d = crate::thin::diff(&base_scan, &|k| base.path(k), &new, &w, self.since_of(line, &base_id))?;
         // Nothing changed since the previous save: the save under the lock makes no state.
-<<<<<<< head
         if !self.thin_changed(&base, &w, &d)?
             || (base_id != prev && self.p.has_state(&prev) && {
                 let p = self.state_src(&prev)?;
-                !self.thin_changed(&p, &w, &crate::thin::diff(&p.scan(true)?, &|k| p.path(k), &new, &w)?)?
+                !self.thin_changed(&p, &w, &crate::thin::diff(&p.scan(true)?, &|k| p.path(k), &new, &w, self.since_of(line, &prev))?)?
             })
         {
-||||||| base
-        if !self.thin_changed(&base, &w, &d)? || (base_id != prev && self.p.has_state(&prev) && {
-            let p = self.state_src(&prev)?;
-            !self.thin_changed(&p, &w, &crate::thin::diff(&p.scan(true)?, &|k| p.path(k), &new, &w)?)?
-        }) {
-=======
-        if !self.thin_changed(&base, &w, &d)? || (base_id != prev && self.p.has_state(&prev) && {
-            let p = self.state_src(&prev)?;
-            !self.thin_changed(&p, &w, &crate::thin::diff(&p.scan(true)?, &|k| p.path(k), &new, &w, self.since_of(line, &prev))?)?
-        }) {
->>>>>>> origin/main
             return Ok(());
         }
         let path = self.p.work_dir().join(format!("prepared-save-{}", ids::new_id()));

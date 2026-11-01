@@ -504,7 +504,13 @@ pub fn diff(
         let dir = new.get(k).is_some_and(|e| e.meta.ftype == FType::Dir);
         if dir && (!old.contains_key(k) || d.removed.contains(k)) && !ancestors(k).any(|a| d.whole.contains(a)) {
             let below = format!("{k}/");
-            if !special.iter().any(|s| s.starts_with(&below)) {
+            // One clone would copy the content of a nested layer (a cache) too.
+            let has_layer = |k: &String| {
+                std::iter::once((k, &new[k])).chain(new.range(below.clone()..).take_while(|(p, _)| p.starts_with(&below))).any(
+                    |(p, e)| e.meta.ftype == FType::Dir && apfs::is_subvolume(&new_root.join(p)),
+                )
+            };
+            if !special.iter().any(|s| s.starts_with(&below)) && !has_layer(k) {
                 d.whole.insert(k.clone());
             }
         }
