@@ -108,10 +108,13 @@ LAYR_TRACE=1 $T/layr daemon --socket $LAYR_SOCKET --tick 1 > $T/daemon2.log 2>&1
 DPID=$!
 expected=$(find "$P" -mindepth 1 -maxdepth 1 -type d | wc -l)
 first=0
+# One line can take several comparisons in a cycle: the cycle ends when the count stops growing.
+prev=-1
 for i in $(seq 1 100); do
     first=$(grep -c "send --no-data" "$T/daemon2.log")
-    [ "$first" -ge "$expected" ] && break
-    sleep 0.1
+    [ "$first" -ge "$expected" ] && [ "$first" = "$prev" ] && break
+    prev=$first
+    sleep 0.3
 done
 ok "the daemon completes its first comparison cycle" test "$first" -ge "$expected"
 sleep 1.2

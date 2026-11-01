@@ -1039,8 +1039,10 @@ fn pushed_work(repo: &Repo, id: &str) -> Result<bool> {
     if s.kind != StateKind::Auto || !s.caches.is_empty() || !repo.p.has_state(id) {
         return Ok(false);
     }
+    // The parent holds all the work of the state when only ignored files (build output) differ;
+    // the parent stays as long as anything names it, pushed or not.
     let Some(parent) = s.parents.first() else { return Ok(false) };
-    if repo.p.db.git_commit_of(parent)?.is_none() || !repo.p.has_state(parent) {
+    if !repo.p.has_state(parent) {
         return Ok(false);
     }
     Ok(repo.unsaved_paths(parent, &s)?.is_empty())
