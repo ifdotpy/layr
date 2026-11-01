@@ -667,7 +667,18 @@ fn has_xattrs(path: &Path) -> Result<bool> {
 
 #[cfg(not(target_os = "macos"))]
 fn has_xattrs(path: &Path) -> Result<bool> {
-    let names = rustix::fs::listxattr(path, Vec::new())?;
+    let mut size = 1024;
+    let names = loop {
+        let mut buf = vec![0u8; size];
+        match rustix::fs::listxattr(path, &mut buf[..]) {
+            Ok(len) => {
+                buf.truncate(len);
+                break buf;
+            }
+            Err(rustix::io::Errno::RANGE) if size < 1 << 20 => size *= 4,
+            Err(e) => return Err(e.into()),
+        }
+    };
     Ok(names.split(|b| *b == 0).any(|name| !name.is_empty() && name != OS_MARKER))
 }
 
