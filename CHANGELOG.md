@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.14.0](https://github.com/ifdotpy/layr/compare/v0.13.1...v0.14.0) (2026-11-01)
+
+
+### Features
+
+* **save:** Name the files a save leaves out ([#123](https://github.com/ifdotpy/layr/issues/123)) ([9402906](https://github.com/ifdotpy/layr/commit/94029062978bb0c2165c549900392d8b83893166))
+
+
+### Bug Fixes
+
+* **daemon:** read the busy answer when the hello write fails ([#124](https://github.com/ifdotpy/layr/issues/124)) ([14fea72](https://github.com/ifdotpy/layr/commit/14fea722ef636ac2da9da3754823f3b0a99e498d))
+
+
+### Performance
+
+* **status:** Compare the live folder once for all overlap bases ([#125](https://github.com/ifdotpy/layr/issues/125)) ([9e105ed](https://github.com/ifdotpy/layr/commit/9e105ed992b6bd3355c64800ff75a8253a34de8e))
+
 ## [0.13.1](https://github.com/ifdotpy/layr/compare/v0.13.0...v0.13.1) (2026-11-01)
 
 
