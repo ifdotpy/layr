@@ -1142,6 +1142,8 @@ pub fn run_gc(ctx: &Ctx, repo: &Repo, dry: bool) -> Result<Vec<String>> {
     }
     let removed: Vec<String> = delete.iter().chain(evict.iter()).cloned().collect();
     let gone = repo.p.delete_states(&removed);
+    // Saved overlap compares of states that are gone (radar.rs).
+    let _ = repo.prune_compares();
     // An evicted state keeps its record and reads as not present. A state whose tree stays as a
     // base of another state on disk keeps its present flag.
     for id in &evict {
