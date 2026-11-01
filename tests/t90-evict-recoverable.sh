@@ -38,6 +38,10 @@ dashed() {
 }
 on_disk() { [ -e "$P/states/$(dashed "$1")" ] || [ -e "$P/deltas/$(dashed "$1")" ]; }
 trees() { find "$P/states" "$P/deltas" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l | tr -d ' '; }
+# The default is off: gc keeps a state that the store holds.
+ok "gc with gc.evict off runs" l gc -q
+ok "a store-held state stays on disk with gc.evict off" on_disk "$t1"
+l config gc.evict on >/dev/null
 before=$(trees)
 
 ok "gc runs" l gc -q
