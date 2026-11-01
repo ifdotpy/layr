@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.11.0](https://github.com/ifdotpy/layr/compare/v0.10.0...v0.11.0) (2026-11-01)
+
+
+### ⚠ BREAKING CHANGES
+
+* **gc:** run dedup only with --dedup ([#108](https://github.com/ifdotpy/layr/issues/108))
+
+### Bug Fixes
+
+* **gc:** run dedup only with --dedup ([#108](https://github.com/ifdotpy/layr/issues/108)) ([aed868e](https://github.com/ifdotpy/layr/commit/aed868ece9002f4d9e57082b8d798ca5a0142735))
+* **save:** Keep cache folders out of new states ([#109](https://github.com/ifdotpy/layr/issues/109)) ([505bf32](https://github.com/ifdotpy/layr/commit/505bf3282ae56dbb2b0a732ced966c7c3911fa98))
+
 ## [0.10.0](https://github.com/ifdotpy/layr/compare/v0.9.3...v0.10.0) (2026-11-01)
 
 
