@@ -149,12 +149,14 @@ mod imp {
         )
     }
 
-    /// A folder that is a plain folder with no content. A rollback leaves exactly this.
+    /// A folder that is a plain folder with no content on btrfs. A rollback leaves exactly this.
+    /// Other file systems have no subvolumes to lose, so a plain folder there is not a rollback.
     fn emptied(path: &Path) -> bool {
         let Ok(meta) = std::fs::symlink_metadata(path) else {
             return false;
         };
         meta.is_dir()
+            && crate::storage::is_supported(path)
             && !crate::storage::is_subvolume(path)
             && std::fs::read_dir(path).map(|mut entries| entries.next().is_none()).unwrap_or(false)
     }
