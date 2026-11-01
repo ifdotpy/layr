@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.13.0](https://github.com/ifdotpy/layr/compare/v0.12.0...v0.13.0) (2026-11-01)
+
+
+### Features
+
+* **gc:** Track state owners in shadow mode ([#115](https://github.com/ifdotpy/layr/issues/115)) ([82e1850](https://github.com/ifdotpy/layr/commit/82e18503e6dcc39597d6551c98fe7664762ae780))
+* **retest:** sweep cargo targets to the live unit set ([#107](https://github.com/ifdotpy/layr/issues/107)) ([00ab356](https://github.com/ifdotpy/layr/commit/00ab356fcc17d2734bf986dfe174f14254155086))
+
+
+### Bug Fixes
+
+* **gc:** Evict states only with gc.evict on ([#119](https://github.com/ifdotpy/layr/issues/119)) ([ab23eee](https://github.com/ifdotpy/layr/commit/ab23eee92e1a39ad6eed7e8ea0b7457d0d4ebb32))
+* **retest:** keep the project rustflags ([#114](https://github.com/ifdotpy/layr/issues/114)) ([50d223d](https://github.com/ifdotpy/layr/commit/50d223d518b3bbeedefb68132e3b24c10a515c0d))
+
 ## [0.12.0](https://github.com/ifdotpy/layr/compare/v0.11.0...v0.12.0) (2026-11-01)
 
 
