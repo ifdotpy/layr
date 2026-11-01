@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.10.0](https://github.com/ifdotpy/layr/compare/v0.9.3...v0.10.0) (2026-11-01)
+
+
+### Features
+
+* **btrfs:** Refuse stores that a root snapshot rollback would empty ([#105](https://github.com/ifdotpy/layr/issues/105)) ([00592a3](https://github.com/ifdotpy/layr/commit/00592a300941ded6895832903600983f19e1291c))
+* **retest:** doctor flags absolute rerun-if-changed paths ([#102](https://github.com/ifdotpy/layr/issues/102)) ([021aba4](https://github.com/ifdotpy/layr/commit/021aba4364d90f6f81edffbe91d01d027a6e5b66))
+
+
+### Bug Fixes
+
+* **gc:** Drop automatic states that differ from their parent only in ignored files ([#104](https://github.com/ifdotpy/layr/issues/104)) ([b114949](https://github.com/ifdotpy/layr/commit/b114949686a30a9f8cca10beb9bff247cbfc6a74))
+* **overlays:** Delete a line's cache overlay lines with it; no present-but-missing states ([#106](https://github.com/ifdotpy/layr/issues/106)) ([5e72027](https://github.com/ifdotpy/layr/commit/5e72027a6ce4dd719f36eab5d00aedcf87fc401f))
+
 ## [0.9.3](https://github.com/ifdotpy/layr/compare/v0.9.2...v0.9.3) (2026-11-01)
 
 
