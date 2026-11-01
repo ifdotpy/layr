@@ -40,19 +40,21 @@ before_inode=$(inode target/debug/same.o)
 before_other=$(cksum < target/debug/other.o)
 
 # 1. A dry run reports the bytes and changes nothing.
-out=$(l gc -n)
+out=$(l gc -n --dedup)
 has "dry run reports what it would share" "would share" "$out"
 case "$out" in *"would share 0 B"*) FAIL=$((FAIL + 1)); echo "FAIL dry run counted no bytes: $out" ;; *) PASS=$((PASS + 1)); echo "PASS dry run counted bytes" ;; esac
 eq "dry run keeps the inode" "$before_inode" "$(inode target/debug/same.o)"
 eq "dry run keeps the mtime" "$before_mtime" "$(mtime target/debug/same.o)"
 
-# 2. --no-dedup does not touch the files and prints no dedup line.
-out=$(l gc --no-dedup)
-case "$out" in *"shared"*) FAIL=$((FAIL + 1)); echo "FAIL --no-dedup prints a dedup line" ;; *) PASS=$((PASS + 1)); echo "PASS --no-dedup prints no dedup line" ;; esac
-eq "--no-dedup keeps the inode" "$before_inode" "$(inode target/debug/same.o)"
-
-# 3. gc shares the copy; content, mtime and mode stay; other content is untouched.
+# 2. Plain gc shares nothing: its dry run prints no share line, and its run keeps the inode.
+out=$(l gc -n)
+case "$out" in *"would share"*) FAIL=$((FAIL + 1)); echo "FAIL plain gc -n prints a share line: $out" ;; *) PASS=$((PASS + 1)); echo "PASS plain gc -n prints no share line" ;; esac
 out=$(l gc)
+case "$out" in *"shared"*) FAIL=$((FAIL + 1)); echo "FAIL plain gc prints a share line: $out" ;; *) PASS=$((PASS + 1)); echo "PASS plain gc prints no share line" ;; esac
+eq "plain gc keeps the inode" "$before_inode" "$(inode target/debug/same.o)"
+
+# 3. gc --dedup shares the copy; content, mtime and mode stay; other content is untouched.
+out=$(l gc --dedup)
 has "gc reports the shared bytes" "shared " "$out"
 has "only the file of its own overlay is shared" "in 1 cache file(s)" "$out"
 has "gc reports the time" " s" "$out"
@@ -67,8 +69,8 @@ if [ "$(uname -s)" = Darwin ]; then
 fi
 eq "no temporary file is left" "" "$(ls -a target/debug | grep layr-dedup)"
 
-# 4. A second gc finds nothing new to share.
-out=$(l gc)
+# 4. A second gc --dedup finds nothing new to share.
+out=$(l gc --dedup)
 has "a second gc shares nothing more" "shared 0 B" "$out"
 
 finish

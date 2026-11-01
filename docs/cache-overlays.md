@@ -86,7 +86,7 @@ plain folder; `save --caches` says so.
 | `layr overlay repair <overlay>` | In the current line, the folder of that folder overlay: a plain folder becomes a cache again; a cache with versioned files becomes a plain folder. |
 | `layr overlay list` | Also shows, for each folder overlay in a line, the state of its folder, its size on disk and its saved state (was `layr cache list -v`). |
 | `layr cache add\|remove\|list\|repair\|pull` | Removed. Section 15 names the replacements. |
-| `layr gc [-n] [--no-dedup]` | Also applies `history` to overlay lines and `gc lru:<size>` to working folders, then shares equal cache content (section 16). |
+| `layr gc [-n] [--dedup]` | Also applies `history` to overlay lines and `gc lru:<size>` to working folders. With `--dedup`, also shares equal cache content (section 16). |
 | `layr overlay remote add <overlay> <remote> <git URL>` | The overlay's history goes to its own git repository (section 7). Refused for a cache overlay. |
 | `layr push [--dry-run]` | Pushes every layer to each of its remotes (section 7). `--dry-run` lists layer, remote and size. |
 
@@ -361,10 +361,10 @@ The lines that carry caches are unchanged:
 ## 16. Deduplication in `gc`
 
 A clone of a cache folder stops sharing as soon as a build tool writes a whole new file, even when
-the new file equals the old one. `layr gc` shares such content again, on APFS and on btrfs.
+the new file equals the old one. `layr gc --dedup` shares such content again, on APFS and on btrfs.
 
-- `layr gc` runs it by default and prints `shared <bytes> of disk in <n> cache file(s), <seconds> s` (physical bytes freed, and the wall clock of the pass).
-  `layr gc -n` changes nothing and prints `would share ...`. `--no-dedup` skips it.
+- `layr gc --dedup` runs it and prints `shared <bytes> of disk in <n> cache file(s), <seconds> s` (physical bytes freed, and the wall clock of the pass).
+  `layr gc -n --dedup` changes nothing and prints `would share ...`. Plain `layr gc` does not run it and prints no share line.
 - Scope: one cache overlay at a time (`target` and `.layr-retest` never share with each other, and projects never do). In an overlay: the files in the folders of folder overlays in the working folders of the lines of the
   project. Their content is matched with the files of cache states (`states/<id>@<path>`) and of
   cache overlay states of the project. Those states are read-only, so they are sources only: gc
