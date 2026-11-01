@@ -1071,6 +1071,10 @@ pub fn run_gc(ctx: &Ctx, repo: &Repo, dry: bool) -> Result<Vec<String>> {
     }
     let deleted = repo.p.delete_states(&delete);
     let caches = trash_excess_caches(repo)?;
+    // Cache overlay lines of deleted lines: their states go below (docs/cache-overlays.md).
+    if let Err(e) = repo.drop_orphan_cache_lines(ctx) {
+        eprintln!("warning: cache overlay lines of deleted lines stay until the next gc: {e:#}");
+    }
     // Overlays with a history limit and folder overlays with an LRU limit (docs/cache-overlays.md).
     for name in repo.overlay_names()? {
         repo.after_overlay_move(ctx, &name);
@@ -1228,7 +1232,7 @@ pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
             outln!(ctx, "records: {err:#}");
         }
     }
-    // Snapshots without a record (a crash between the snapshot and the record).
+    // Snapshots without a record: a save that stopped between its snapshot and its record.
     for e in std::fs::read_dir(repo.p.states_dir())?.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
         let id = name.split('@').next().unwrap_or(&name).to_string();
@@ -1238,7 +1242,7 @@ pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 btrfs::delete_tree(&e.path())?;
                 outln!(ctx, "deleted snapshot without record: {name}");
             } else {
-                outln!(ctx, "snapshot without record: {name} (use --repair)");
+                outln!(ctx, "snapshot without record (leftover of an interrupted save): {name} (use --repair)");
             }
         }
     }
@@ -1248,7 +1252,9 @@ pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
     for id in ids_v {
         if !repo.p.has_state(&id) {
             problems += 1;
-            outln!(ctx, "state {} is marked present but missing", ids::short(&id));
+            let deleted = repo.p.db.state(&id)?.and_then(|s| s.line).is_some_and(|l| repo.p.db.line_deleted(&l).unwrap_or(false));
+            let note = if deleted { " (of a deleted line)" } else { "" };
+            outln!(ctx, "state {} is marked present but missing{note}", ids::short(&id));
             if a.has("--repair") {
                 repo.p.db.set_present(&id, false)?;
             }
@@ -1310,8 +1316,19 @@ fn fsck_overlays(ctx: &Ctx, repo: &Repo, repair: bool) -> Result<usize> {
         for l in o.lines()? {
             if !o.p.has_state(&l.head) {
                 problems += 1;
-                outln!(ctx, "overlay {name}: the head of line {} is missing", l.name);
+                let deleted = match l.name.strip_prefix("line-") {
+                    Some(id) => repo.p.db.line_deleted(id)?,
+                    None => false,
+                };
+                let note = if deleted { " (of a deleted line)" } else { "" };
+                outln!(ctx, "overlay {name}: the head of line {}{note} is missing", l.name);
             }
+        }
+    }
+    // Cache overlay lines of deleted lines go (also when their heads exist), as at gc.
+    if repair {
+        for (name, line) in repo.drop_orphan_cache_lines(ctx)? {
+            outln!(ctx, "overlay {name}: deleted line {line} (of a deleted line)");
         }
     }
     for l in repo.lines()? {

@@ -14,7 +14,7 @@ use crate::ctx::Ctx;
 use crate::fsutil;
 use crate::ids;
 use crate::ignore_rules::Rules;
-use crate::model::{Line, StateKind, StateRec};
+use crate::model::{Line, LineChange, Record, StateKind, StateRec};
 use crate::overlay::{files_of, MergeKind, Mode, Props};
 use crate::repo::Repo;
 use crate::storage as btrfs;
@@ -125,6 +125,51 @@ impl<'a> Repo<'a> {
 
     pub fn folder_overlay_of(&self, folder: &str) -> Result<Option<String>> {
         Ok(self.folder_overlays()?.into_iter().find(|(_, f)| f == folder).map(|(n, _)| n))
+    }
+
+    /// Delete the cache overlay lines (`line-<id>`) of deleted project lines: a deleted line keeps
+    /// no caches (docs/cache-overlays.md). Their states go at the next `gc`. Returns the overlay
+    /// and the line name of each deleted overlay line. The caller holds the project lock.
+    pub fn drop_orphan_cache_lines(&self, ctx: &Ctx) -> Result<Vec<(String, String)>> {
+        let mut out = Vec::new();
+        if self.p.is_overlay() {
+            return Ok(out);
+        }
+        for name in self.overlay_names()? {
+            if !self.overlay_setting(&name, "cache")?.and_then(|v| v.as_bool()).unwrap_or(false) {
+                continue;
+            }
+            // An overlay that is not on this machine has no lines to delete here.
+            if !self.p.store.project_dir(&format!("{}%{name}", self.p.name))?.exists() {
+                continue;
+            }
+            let orepo = self.overlay_repo(&name)?;
+            let _lock = orepo.p.lock()?;
+            let mut orphans = Vec::new();
+            for ol in orepo.p.db.lines()? {
+                if let Some(id) = ol.name.strip_prefix("line-") {
+                    if self.p.db.line_deleted(id)? {
+                        orphans.push(ol);
+                    }
+                }
+            }
+            for ol in orphans {
+                let mut rec = Record::new("line.delete");
+                rec.lines.insert(
+                    ol.id.clone(),
+                    LineChange {
+                        before: Some(orepo.line_state(&ol, &ol.head)),
+                        after: None,
+                        working_before: None,
+                        working_after: None,
+                    },
+                );
+                rec.data = serde_json::json!({"name": ol.name});
+                orepo.commit_record(ctx, rec)?;
+                out.push((name.clone(), ol.name.clone()));
+            }
+        }
+        Ok(out)
     }
 
     /// The cache overlay of `folder`, made when missing. The caller holds the project lock.

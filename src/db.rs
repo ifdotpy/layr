@@ -10,6 +10,13 @@ use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
+/// Test hook: the next `with_tx` reports an error after its COMMIT succeeded (sqlite can report
+/// an error after the commit point, on a full disk).
+#[cfg(test)]
+thread_local! {
+    pub(crate) static FAIL_AFTER_COMMIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 pub struct Db {
     pub conn: Connection,
     /// The derived tables were dropped by a schema upgrade: the project rebuilds them.
@@ -211,7 +218,16 @@ impl Db {
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
         match f() {
             Ok(v) => {
-                self.conn.execute_batch("COMMIT")?;
+                // A failed COMMIT (a full disk) can leave the transaction open: roll it back so the
+                // next write can begin. After a COMMIT that did happen, ROLLBACK does nothing.
+                if let Err(e) = self.conn.execute_batch("COMMIT") {
+                    let _ = self.conn.execute_batch("ROLLBACK");
+                    return Err(e.into());
+                }
+                #[cfg(test)]
+                if FAIL_AFTER_COMMIT.with(|f| f.replace(false)) {
+                    anyhow::bail!("injected: COMMIT reported an error after the commit point");
+                }
                 Ok(v)
             }
             Err(e) => {
@@ -677,6 +693,13 @@ impl Db {
                 Self::line_row,
             )
             .optional()?)
+    }
+
+    /// True when the project line `id` is deleted (its row is kept with the deleted flag).
+    pub fn line_deleted(&self, id: &str) -> Result<bool> {
+        let deleted: Option<i64> =
+            self.conn.query_row("SELECT deleted FROM lines WHERE id=?1", params![id], |r| r.get(0)).optional()?;
+        Ok(deleted == Some(1))
     }
 
     pub fn line_by_id(&self, id: &str) -> Result<Option<Line>> {
