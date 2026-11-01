@@ -165,7 +165,7 @@ pub(crate) fn make_overlay(
             "overlay": {"project": repo.p.id, "name": name, "mode": mode.name(), "hidden": hidden},
         });
         let op = Project::create_overlay(&ctx.store, &pname, &ctx.actor(), config)?;
-        let orepo = Repo { p: op };
+        let orepo = Repo { p: op, ctx: Some(ctx) };
         // The first state of every overlay line: an empty tree.
         let id = ids::new_id();
         let dst = orepo.p.state_path(&id);

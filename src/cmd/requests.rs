@@ -386,6 +386,7 @@ mod tests {
                 id: ids::new_id(),
                 db: crate::db::Db::open(&dir.join("meta/db/layr.sqlite")).unwrap(),
             },
+            ctx: None,
         };
         let key = SigningKey::from_bytes(&[7; 32]);
         let mut record = Record::new("project");

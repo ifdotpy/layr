@@ -626,6 +626,51 @@ fn content(root: &Path, path: &str, mode: &str) -> Result<Vec<u8>> {
     Ok(data)
 }
 
+/// Why the store format cannot restore this tree exactly, or None. The format keeps file content,
+/// symbolic links and git-like modes (`format.rs`). It keeps no extended attributes, ACLs, hard
+/// links, empty folders or nested subvolumes, so retention must not evict a tree that has them.
+pub fn format_gap(root: &Path) -> Result<Option<&'static str>> {
+    use std::os::unix::fs::MetadataExt;
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(folder) = pending.pop() {
+        let mut entries = 0;
+        for entry in std::fs::read_dir(&folder)? {
+            let path = entry?.path();
+            entries += 1;
+            let meta = std::fs::symlink_metadata(&path)?;
+            if meta.is_dir() {
+                if crate::storage::is_subvolume(&path) {
+                    return Ok(Some("a nested subvolume"));
+                }
+                pending.push(path.clone());
+            } else if meta.is_file() && meta.nlink() > 1 {
+                return Ok(Some("a hard link"));
+            }
+            if !meta.file_type().is_symlink() && has_xattrs(&path)? {
+                return Ok(Some("extended attributes or an ACL"));
+            }
+        }
+        if entries == 0 && folder != root {
+            return Ok(Some("an empty folder"));
+        }
+    }
+    Ok(None)
+}
+
+/// macOS sets `com.apple.provenance` on every new file. It is not user data, so it does not count.
+const OS_MARKER: &[u8] = b"com.apple.provenance";
+
+#[cfg(target_os = "macos")]
+fn has_xattrs(path: &Path) -> Result<bool> {
+    Ok(crate::sys::apfs_xattrs(path)?.iter().any(|(name, _)| name != OS_MARKER) || crate::sys::apfs_acl_text(path)?.is_some())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn has_xattrs(path: &Path) -> Result<bool> {
+    let names = rustix::fs::listxattr(path, Vec::new())?;
+    Ok(names.split(|b| *b == 0).any(|name| !name.is_empty() && name != OS_MARKER))
+}
+
 /// Fail on unreadable folders or non-UTF-8 names rather than omit their files.
 fn walk_state(root: &Path, visit: &mut dyn FnMut(&str, &fsutil::Meta) -> Result<bool>) -> Result<()> {
     let mut pending = vec![root.to_path_buf()];
@@ -1022,7 +1067,7 @@ mod tests {
                 cache = id;
             }
         }
-        let repo = Repo { p: project };
+        let repo = Repo { p: project, ctx: None };
         let report = push(&store, &ctx, &repo, &Options::default()).unwrap();
         assert_eq!(report.states, 3);
         assert!(report.omitted.contains(&format!("cache state {cache} of ref caches/test: use --caches")));
@@ -1073,7 +1118,7 @@ mod tests {
                 parents = vec![if n == 1 { first.clone().unwrap() } else { id }];
             }
         }
-        Repo { p: project }
+        Repo { p: project, ctx: None }
     }
 
     #[test]
@@ -1585,6 +1630,8 @@ mod tests {
     fn two_initializers_never_publish_different_slot_identities() {
         let root = std::env::temp_dir().join(crate::ids::new_id());
         std::fs::create_dir_all(&root).unwrap();
+        // The shared local store must be initialized before a configure writes its read marker (`mark_read`).
+        let _initialized = context(&root);
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
         let threads: Vec<_> = (0..2)
             .map(|number| {
@@ -1804,5 +1851,37 @@ mod tests {
         std::fs::write(source.join("notes.txt"), b"portable file bytes\n").unwrap();
         upload_state(&store, &descriptor, &state_id, &source, None, &mut BTreeMap::new(), None, None).unwrap();
         std::fs::remove_dir_all(local).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod format_gap_tests {
+    use super::format_gap;
+
+    #[test]
+    fn a_plain_tree_has_no_format_gap() -> anyhow::Result<()> {
+        let root = std::env::temp_dir().join(format!("layr-gap-plain-{}", crate::ids::new_id()));
+        std::fs::create_dir_all(root.join("src/sub"))?;
+        std::fs::write(root.join("src/sub/file.txt"), b"content")?;
+        std::os::unix::fs::symlink("src/sub/file.txt", root.join("link"))?;
+        let gap = format_gap(&root);
+        std::fs::remove_dir_all(&root)?;
+        assert_eq!(gap?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn an_empty_folder_or_a_hard_link_is_a_gap() -> anyhow::Result<()> {
+        let root = std::env::temp_dir().join(format!("layr-gap-{}", crate::ids::new_id()));
+        std::fs::create_dir_all(root.join("empty"))?;
+        std::fs::write(root.join("file"), b"content")?;
+        let empty = format_gap(&root)?;
+        std::fs::remove_dir(root.join("empty"))?;
+        std::fs::hard_link(root.join("file"), root.join("alias"))?;
+        let linked = format_gap(&root);
+        std::fs::remove_dir_all(&root)?;
+        assert_eq!(empty, Some("an empty folder"));
+        assert_eq!(linked?, Some("a hard link"));
+        Ok(())
     }
 }

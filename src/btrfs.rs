@@ -88,6 +88,14 @@ pub fn delete_subvolume(path: &Path) -> Result<()> {
 }
 
 /// Make a subvolume read-only (a writable snapshot becomes a state after its changes).
+/// Give a restored or received subvolume the received UUID and transaction of its signed state,
+/// the identity that `recv` checks for a later send.
+pub fn mark_received(path: &Path, uuid: &str, transid: u64) -> Result<()> {
+    let file = File::open(path)?;
+    sys::subvol_set_received(file.as_fd(), *uuid::Uuid::parse_str(uuid)?.as_bytes(), transid)?;
+    Ok(())
+}
+
 pub fn set_readonly(path: &Path) -> Result<()> {
     let f = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let flags = sys::subvol_flags(f.as_fd())?;

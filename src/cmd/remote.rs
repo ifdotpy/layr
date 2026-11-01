@@ -1121,7 +1121,7 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let name = a.pos.get(1).cloned().unwrap_or_else(|| url.trim_end_matches('/').rsplit('/').next().unwrap_or("project").into());
     // Remove a new project if store open or clone fails.
     let p = crate::store::Project::create_empty(&ctx.store, &name)?;
-    let mut repo = Repo { p };
+    let mut repo = Repo { p, ctx: Some(ctx) };
     let result = (|| -> Result<i32> {
         let mut store = store_remote::open(url, &repo)?;
         store.use_public_access(a.has("--public"));

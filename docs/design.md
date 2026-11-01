@@ -149,8 +149,15 @@ parents and kind, so history, `diff` and `line new` still name it. Its tree come
 command reads it.
 
 - Recoverable: a successful `layr push <store-remote>` record names the state
-  (`Repo::store_copies`, `state_ids_sent`). Git commits do not count: a git remote lacks
-  the ignored files and the signed records that a state can hold.
+  (`Repo::store_copies`, `state_ids_sent`). A copy counts only while the remote under the recorded
+  name still has the recorded URL, and this machine has read that store with its own key (a fetch,
+  a restore or the creation of the store). Changing or removing the remote ends the guarantee.
+  Git commits do not count: a git remote lacks the ignored files and the signed records that a
+  state can hold.
+- Not evicted: a tree that the store format cannot restore exactly. The format keeps content,
+  symbolic links and git-like modes, not extended attributes, ACLs, hard links, empty folders or
+  nested subvolumes (`store_remote::restorable`). macOS marks every new file with
+  `com.apple.provenance`; that name does not count.
 - Kept on disk even when recoverable: a line head, the newest automatic state of a line, a state
   with caches, a state that a cache overlay names, and a base that a state on disk needs. On APFS
   a base is a thin layer that a layer chain of a remaining state reads (`thin::delete_states`).
