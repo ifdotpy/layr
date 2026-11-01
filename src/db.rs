@@ -23,7 +23,7 @@ pub struct Db {
     pub stale: bool,
 }
 
-const SCHEMA: &str = r#"
+pub(crate) const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS records (id TEXT PRIMARY KEY, machine TEXT, seq INTEGER, time INTEGER, op TEXT, actor_uid INTEGER, raw TEXT);
 CREATE INDEX IF NOT EXISTS records_time ON records(time);
 CREATE UNIQUE INDEX IF NOT EXISTS records_seq ON records(machine, seq);
@@ -53,6 +53,10 @@ CREATE INDEX IF NOT EXISTS attestations_subject ON attestations(subject, kind, o
 CREATE TABLE IF NOT EXISTS queue_entries (id TEXT PRIMARY KEY, rec TEXT, deleted INTEGER DEFAULT 0, ord TEXT);
 CREATE TABLE IF NOT EXISTS attestation_revocations (id TEXT, target TEXT, machine TEXT, uid INTEGER, ord TEXT, PRIMARY KEY(id,target));
 CREATE INDEX IF NOT EXISTS records_legacy_evidence ON records(op) WHERE op IN ('approve','approve.withdraw','check');
+CREATE TABLE IF NOT EXISTS owners (state TEXT, kind TEXT, holder TEXT, PRIMARY KEY(state, kind, holder));
+CREATE INDEX IF NOT EXISTS owners_kind_holder ON owners(kind, holder);
+CREATE TABLE IF NOT EXISTS free_queue (state TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS bases (state TEXT PRIMARY KEY, base TEXT);
 "#;
 
 /// The records that older binaries wrote as evidence (`import_legacy_evidence`).
@@ -60,7 +64,7 @@ const LEGACY_OPS: &str = "op IN ('approve','approve.withdraw','check')";
 
 /// Version of the derived tables. Records never change shape; a database with an older version
 /// drops its derived tables, creates them new and rebuilds them from the records.
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 const DERIVED: &[&str] = &[
     "states",
@@ -81,6 +85,7 @@ const DERIVED: &[&str] = &[
     "attestations",
     "attestation_revocations",
     "queue_entries",
+    "owners",
 ];
 
 /// Derived tables of older versions, dropped on migration.
@@ -90,6 +95,7 @@ impl Db {
     /// Open the database. Returns it and whether the derived tables must be rebuilt.
     pub fn open(path: &Path) -> Result<Db> {
         let conn = Connection::open(path)?;
+        conn.set_prepared_statement_cache_capacity(crate::owners::OWNERS_STATEMENTS);
         conn.pragma_update(None, "journal_mode", "WAL")?;
         // FULL: a committed record survives a power loss. The database has its own subvolume,
         // so this fsync costs a few milliseconds even right after a snapshot.
@@ -244,7 +250,7 @@ impl Db {
              DELETE FROM tags; DELETE FROM remote_refs; DELETE FROM git_map; DELETE FROM exports; DELETE FROM checks;
              DELETE FROM machines; DELETE FROM config;
              DELETE FROM trusted; DELETE FROM approvals; DELETE FROM refs; DELETE FROM ref_history;
-             DELETE FROM attestations; DELETE FROM attestation_revocations; DELETE FROM queue_entries;",
+             DELETE FROM attestations; DELETE FROM attestation_revocations; DELETE FROM queue_entries; DELETE FROM owners;",
         )?;
         Ok(())
     }
@@ -302,7 +308,7 @@ impl Db {
     /// machines are kept under `<key>@<machine>`.
     pub fn derive(&self, rec: &Record, state_present: &dyn Fn(&str) -> bool, local: &str) -> Result<()> {
         let tx = &self.conn;
-        let ord = format!("{:016}:{}:{:012}", rec.time.max(0), rec.machine, rec.seq);
+        let ord = crate::owners::record_ord(rec);
         let foreign = rec.machine != local;
         for s in &rec.states {
             // A state id names one state forever: a second record with the same id is refused
@@ -334,6 +340,8 @@ impl Db {
             for (i, p) in s.parents.iter().enumerate() {
                 tx.execute("INSERT OR IGNORE INTO parents(state, parent, ord) VALUES(?1,?2,?3)", params![s.id, p, i as i64])?;
             }
+            // Owners may name the state before its record arrives: it holds its parents now.
+            self.owners_state_made(&s.id)?;
         }
         for (id, ch) in &rec.lines {
             // Heads per machine: each machine's own records, in its order.
@@ -600,6 +608,7 @@ impl Db {
                 )?;
             }
         }
+        self.owners_after(rec, &ord, foreign)?;
         Ok(())
     }
 
