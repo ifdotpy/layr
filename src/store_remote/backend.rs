@@ -404,6 +404,33 @@ impl Backend {
         }
     }
 
+    /// Temporary files of puts that stopped (`.put-*`) and are older than `cutoff` (Unix seconds).
+    /// Nothing lists them, so only this finds them. Deletes them unless `dry`; returns their keys.
+    pub fn stale_temporaries(&self, cutoff: i64, dry: bool) -> Result<Vec<String>> {
+        let mut out = match self {
+            Self::File(root, uid, gid) => crate::privs::as_user_fs(*uid, *gid, || {
+                let mut out = Vec::new();
+                if root.exists() {
+                    sweep_temporaries(root, root, cutoff, dry, &mut out)?;
+                }
+                Ok(out)
+            })?,
+            // A prefix is a folder of the base store: its temporary files are there too.
+            Self::Prefix(base, _) => base.stale_temporaries(cutoff, dry)?,
+            Self::Epoch(epoch) => {
+                let mut out = Vec::new();
+                for backend in [&epoch.root, &epoch.current].into_iter().chain(epoch.history.iter().map(|(b, _)| b)) {
+                    out.extend(backend.stale_temporaries(cutoff, dry)?);
+                }
+                out
+            }
+            Self::S3(_) | Self::Gateway(_) => Vec::new(),
+        };
+        out.sort();
+        out.dedup();
+        Ok(out)
+    }
+
     pub fn delete(&self, key: &str) -> Result<()> {
         check_key(key)?;
         match self {
@@ -433,6 +460,33 @@ impl Backend {
             }),
         }
     }
+}
+
+fn sweep_temporaries(root: &Path, dir: &Path, cutoff: i64, dry: bool, out: &mut Vec<String>) -> Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let m = fs::symlink_metadata(&path)?;
+        if m.file_type().is_symlink() {
+            continue;
+        }
+        if m.is_dir() {
+            sweep_temporaries(root, &path, cutoff, dry, out)?;
+            continue;
+        }
+        if !entry.file_name().to_string_lossy().starts_with(".put-") {
+            continue;
+        }
+        let modified = m.modified()?.duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64;
+        if modified >= cutoff {
+            continue;
+        }
+        let key = path.strip_prefix(root)?.to_str().context("non-UTF-8 remote object")?.to_string();
+        if dry || fs::remove_file(&path).is_ok() {
+            out.push(key);
+        }
+    }
+    Ok(())
 }
 
 fn walk(root: &Path, dir: &Path, prefix: &str, out: &mut Vec<Object>) -> Result<()> {
@@ -629,5 +683,52 @@ mod epoch_tests {
         assert_eq!(current.get("claims/one.json").unwrap().unwrap(), b"claim");
         assert!(root.get("requests/one.json").unwrap().is_none());
         std::fs::remove_dir_all(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod temporary_tests {
+    use super::*;
+    use std::time::{Duration, SystemTime};
+
+    fn dir(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("layr-put-{name}-{}", crate::ids::new_id()));
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn temporaries(folder: &Path) -> usize {
+        fs::read_dir(folder).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with(".put-")).count()
+    }
+
+    /// The source cannot be read, so the copy fails after the temporary file exists.
+    #[test]
+    fn a_failed_put_leaves_no_temporary_file() {
+        let root = dir("failed");
+        let backend = Backend::file(root.clone());
+        let unreadable = fs::File::options().write(true).create(true).truncate(true).open(root.join("source")).unwrap();
+        assert!(backend.put_file_new("obj/one", unreadable).is_err());
+        assert_eq!(temporaries(&root.join("obj")), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Temporary files older than the cutoff go; young ones and objects stay.
+    #[test]
+    fn stale_temporary_files_go_after_a_day() {
+        let root = dir("stale");
+        fs::create_dir_all(root.join("a")).unwrap();
+        let old = root.join("a/.put-old");
+        fs::write(&old, b"x").unwrap();
+        let file = fs::File::options().write(true).open(&old).unwrap();
+        file.set_times(fs::FileTimes::new().set_modified(SystemTime::now() - Duration::from_secs(25 * 3600))).unwrap();
+        fs::write(root.join("a/.put-new"), b"x").unwrap();
+        fs::write(root.join("a/object"), b"x").unwrap();
+        let cutoff = chrono::Utc::now().timestamp() - 86400;
+        assert_eq!(Backend::file(root.clone()).stale_temporaries(cutoff, true).unwrap(), vec!["a/.put-old".to_string()]);
+        assert!(old.exists(), "a dry run changes nothing");
+        assert_eq!(Backend::file(root.clone()).stale_temporaries(cutoff, false).unwrap(), vec!["a/.put-old".to_string()]);
+        assert!(!old.exists());
+        assert!(root.join("a/.put-new").exists() && root.join("a/object").exists());
+        fs::remove_dir_all(root).unwrap();
     }
 }

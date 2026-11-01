@@ -1372,6 +1372,9 @@ impl<'a> Repo<'a> {
             for p in btrfs::take_prepared() {
                 let _ = self.p.trash(&p);
             }
+            for p in PREPARED_SAVES.with(|p| std::mem::take(&mut *p.borrow_mut())) {
+                let _ = self.p.trash(&p.path);
+            }
         }
     }
 

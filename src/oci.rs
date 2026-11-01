@@ -417,15 +417,69 @@ fn pack(
         compressed.inner.sync_all()?;
         let size = compressed.inner.metadata()?.len();
         let hash = format!("sha256:{}", hex::encode(compressed.hash.finalize()));
-        fs::rename(&tmp, cache.blob_path(&hash)?)?;
+        let blob = cache.blob_path(&hash)?;
+        // A blob that a state owns is never removed here: only a blob this call made is.
+        let fresh = !blob.exists();
+        fs::rename(&tmp, &blob)?;
         let layer = CachedLayer { descriptor: Descriptor { media_type: media.into(), digest: hash, size }, diff_id };
-        fsutil::atomic_write(&record, &serde_json::to_vec(&layer)?, 0o600)?;
+        let recorded =
+            serde_json::to_vec(&layer).map_err(anyhow::Error::from).and_then(|b| fsutil::atomic_write(&record, &b, 0o600));
+        if let Err(e) = recorded {
+            if fresh {
+                let _ = fs::remove_file(&blob);
+            }
+            return Err(e);
+        }
         Ok(layer)
     })();
     if tmp.exists() {
         let _ = fs::remove_file(&tmp);
     }
     result
+}
+
+/// Digests named by the index files (`layers`, `manifests`): the text holds them as `sha256:<hex>`.
+fn named_digests(dir: &Path, out: &mut BTreeSet<String>) -> Result<()> {
+    for e in fs::read_dir(dir)?.flatten() {
+        let path = e.path();
+        let m = fs::symlink_metadata(&path)?;
+        if m.is_dir() {
+            named_digests(&path, out)?;
+        } else if m.is_file() {
+            let text = String::from_utf8_lossy(&fs::read(&path)?).into_owned();
+            for part in text.split("sha256:").skip(1) {
+                let hex: String = part.chars().take(64).collect();
+                if hex.len() == 64 && hex.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)) {
+                    out.insert(hex);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Removes the blobs of the cache that nothing names (a failed export leaves them) and that are
+/// older than `age`. Named: the manifest indexes and the derived states (their blobs are in the
+/// states). A layer record names a blob only as a cache: its blob may go, the layer is built again.
+pub fn prune_blobs(cache: &Cache, age: std::time::Duration) -> Result<usize> {
+    let mut named = BTreeSet::new();
+    named_digests(&cache.root.join("manifests"), &mut named)?;
+    for e in fs::read_dir(cache.root.join("derived"))?.flatten() {
+        named.insert(e.file_name().to_string_lossy().into_owned());
+    }
+    let mut removed = 0;
+    for e in fs::read_dir(cache.root.join("blobs"))?.flatten() {
+        let m = fs::symlink_metadata(e.path())?;
+        let old = m.modified()?.elapsed().is_ok_and(|t| t > age);
+        if m.is_file()
+            && old
+            && !named.contains(&e.file_name().to_string_lossy().into_owned())
+            && fs::remove_file(e.path()).is_ok()
+        {
+            removed += 1;
+        }
+    }
+    Ok(removed)
 }
 
 fn manifest(cache: &Cache, config: Descriptor, layers: Vec<Descriptor>, diff_ids: Vec<String>) -> Result<Artifact> {
@@ -940,5 +994,61 @@ platform = { os = "linux", arch = "amd64" }
         for v in ["../prod", "line-a/b", "", ".x", "-x"] {
             assert!(!valid_tag(v), "{v}");
         }
+    }
+}
+
+#[cfg(test)]
+mod leak_tests {
+    use super::*;
+
+    /// A layer record that cannot be written (a folder under its name) fails the layer after its
+    /// blob is written. No blob of the failed layer may stay in the cache.
+    #[test]
+    fn a_failed_layer_leaves_no_blob() {
+        let dir = std::env::temp_dir().join(format!("layr-oci-leak-{}", crate::ids::new_id()));
+        let cache = Cache::open(&dir.join("oci")).unwrap();
+        let tree_dir = dir.join("tree");
+        fs::create_dir_all(&tree_dir).unwrap();
+        let tree = Tree::open(&tree_dir).unwrap();
+        let selected = vec![Entry { path: "app".into(), mode: 0o644, kind: b'0', size: 1, content: "x".into() }];
+        let replacements = BTreeMap::from([("app".to_string(), b"x".to_vec())]);
+        let key =
+            digest(&serde_json::to_vec(&("oci-layer-v1", &selected, &replacements, None::<(&str, &str)>, "media")).unwrap());
+        fs::create_dir_all(cache.root.join("layers").join(digest_hex(&key).unwrap())).unwrap();
+        assert!(pack(&tree, &selected, &replacements, &cache, "media", None).is_err());
+        assert_eq!(fs::read_dir(cache.root.join("blobs")).unwrap().count(), 0);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Blobs that a manifest index or a derived state names stay; an old blob that nothing names
+    /// goes; a young one stays (an export may still be writing it); a layer record names a blob
+    /// only as a cache, so its blob goes when nothing else names it.
+    #[test]
+    fn prune_removes_only_old_unnamed_blobs() {
+        let dir = std::env::temp_dir().join(format!("layr-oci-prune-{}", crate::ids::new_id()));
+        let cache = Cache::open(&dir).unwrap();
+        let (manifest, derived, orphan, young, recorded) =
+            (digest(b"manifest"), digest(b"derived"), digest(b"orphan"), digest(b"young"), digest(b"recorded"));
+        let index = cache.root.join("manifests/images/app");
+        fs::create_dir_all(&index).unwrap();
+        fs::write(index.join("x"), format!("{{\"artifact\":{{\"manifest\":{{\"digest\":\"{manifest}\"}}}}}}")).unwrap();
+        fs::write(cache.root.join("derived").join(digest_hex(&derived).unwrap()), b"state-id").unwrap();
+        fs::write(cache.root.join("layers").join("record"), format!("{{\"descriptor\":{{\"digest\":\"{recorded}\"}}}}")).unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
+        for d in [&manifest, &derived, &orphan, &recorded] {
+            let path = cache.root.join("blobs").join(digest_hex(d).unwrap());
+            fs::write(&path, b"blob").unwrap();
+            fs::File::options().write(true).open(&path).unwrap().set_times(fs::FileTimes::new().set_modified(old)).unwrap();
+        }
+        fs::write(cache.root.join("blobs").join(digest_hex(&young).unwrap()), b"blob").unwrap();
+        let removed = prune_blobs(&cache, std::time::Duration::from_secs(3600)).unwrap();
+        assert_eq!(removed, 2);
+        let left: BTreeSet<String> = fs::read_dir(cache.root.join("blobs"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(left, [manifest, derived, young].iter().map(|d| digest_hex(d).unwrap().to_string()).collect());
+        fs::remove_dir_all(dir).unwrap();
     }
 }

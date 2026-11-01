@@ -75,8 +75,12 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
     for l in lines {
         repo.authorize_line(ctx, &l, crate::repo::LineOp::Save)?;
         if a.has("--caches") {
-            prepare_caches(repo, &l, a.get("--cache"))?;
-        } else {
+            // A cache copy that a later cache fails to make leaves the earlier ones in the work folder.
+            if let Err(e) = prepare_caches(repo, &l, a.get("--cache")) {
+                repo.discard_prepared();
+                return Err(e);
+            }
+        } else if !a.has("--force") {
             repo.prepare_save(&l)?;
         }
         let _lock = repo.p.lock()?;
@@ -141,10 +145,8 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 }
             }
         }
-        #[cfg(target_os = "macos")]
-        for p in btrfs::take_prepared() {
-            repo.p.trash(&p)?;
-        }
+        // Layers and snapshots that the save did not take (an unchanged folder, or --force).
+        repo.discard_prepared();
     }
     Ok(0)
 }
@@ -200,27 +202,33 @@ pub fn record_caches(
     shared: bool,
 ) -> Result<BTreeMap<String, String>> {
     let (mut caches, mut made) = (BTreeMap::new(), Vec::new());
-    for p in paths {
-        let cp = fsutil::safe_join(w, p)?;
-        let name = format!("{state}@{}", p.replace('/', "%2F"));
-        if !crate::model::is_cache_name(&name, state) {
-            continue;
+    // Any error of the loop, also after an earlier snapshot of this call, removes the snapshots
+    // this call made: no record names them.
+    let taken = (|| -> Result<()> {
+        for p in paths {
+            let cp = fsutil::safe_join(w, p)?;
+            let name = format!("{state}@{}", p.replace('/', "%2F"));
+            if !crate::model::is_cache_name(&name, state) {
+                continue;
+            }
+            let snap = repo.p.cache_path(state, &name);
+            if snap.exists() {
+                caches.insert(p.clone(), name);
+            } else if btrfs::is_subvolume(&cp) {
+                btrfs::snapshot(&cp, &snap, true)?;
+                made.push(snap);
+                caches.insert(p.clone(), name);
+            }
         }
-        let snap = repo.p.cache_path(state, &name);
-        if snap.exists() {
-            caches.insert(p.clone(), name);
-        } else if btrfs::is_subvolume(&cp) {
-            btrfs::snapshot(&cp, &snap, true)?;
-            made.push(snap);
-            caches.insert(p.clone(), name);
-        }
-    }
+        Ok(())
+    })();
     let undo = |e: anyhow::Error| {
         for snap in &made {
             let _ = btrfs::delete_tree(snap);
         }
         e
     };
+    taken.map_err(undo)?;
     // Nothing to record when the state already names each of them (a repeated save). A state
     // whose record lost some (an older layr replaced its caches) gets them back.
     let known = repo.state(state).map_err(undo)?.caches;
@@ -1182,6 +1190,16 @@ pub fn run_gc(ctx: &Ctx, repo: &Repo, dry: bool) -> Result<Vec<String>> {
             }
         }
     }
+    // OCI blobs that no export names (a failed export), and saved scans of removed or changed
+    // trees. Every gc path runs them: the daemon, overlay projects and the command.
+    if repo.p.meta_dir().join("oci").is_dir() {
+        let age = std::time::Duration::from_secs(3600);
+        if let Err(e) = crate::oci::Cache::for_repo(repo).and_then(|c| crate::oci::prune_blobs(&c, age)) {
+            eprintln!("warning: unnamed OCI blobs stay until the next gc: {e:#}");
+        }
+    }
+    #[cfg(target_os = "macos")]
+    crate::storage::prune_saved_scans(&repo.p.dir)?;
     Ok(removed)
 }
 
@@ -1251,18 +1269,15 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let spec = Spec::new().flag("-n|--dry-run").flag("-q|--quiet").flag("--dedup").flag("--all-projects");
     let a = parse(&spec, args)?;
     if a.has("--all-projects") {
-        return gc_all_projects(ctx, a.has("-n"), a.has("-q"));
+        let code = gc_all_projects(ctx, a.has("-n"), a.has("-q"))?;
+        print_trash_errors(&ctx.store);
+        return Ok(code);
     }
     let h = here(ctx)?;
     h.repo.require(ctx, "gc")?;
     let v = run_gc(ctx, &h.repo, a.has("-n"))?;
     // After the project lock is released: hashing and comparing cache files takes long.
     let shared = if a.has("--dedup") { Some(crate::dedup::run(&h.repo, a.has("-n"))?) } else { None };
-    // Saved scans of removed or changed trees go too.
-    #[cfg(target_os = "macos")]
-    if !a.has("-n") {
-        crate::storage::prune_saved_scans(&h.repo.p.dir)?;
-    }
     if !a.has("-q") {
         let verb = if a.has("-n") { "would delete" } else { "deleted" };
         outln!(ctx, "{verb} {} state(s)", v.len());
@@ -1281,7 +1296,21 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
             outln!(ctx, "{verb} {} of disk in {} cache file(s), {:.1} s", human_size(r.bytes), r.files, r.seconds);
         }
     }
+    print_trash_errors(&ctx.store);
     Ok(0)
+}
+
+/// Print the trash entries that the last emptying could not delete (`<store>/trash.errors`).
+fn print_trash_errors(store: &crate::store::Store) {
+    let path = store.root.join("trash.errors");
+    let Ok(text) = std::fs::read_to_string(&path) else { return };
+    if text.is_empty() {
+        return;
+    }
+    eprintln!("warning: {} trash entries could not be deleted ({}):", text.lines().count(), path.display());
+    for line in text.lines() {
+        eprintln!("\t{line}");
+    }
 }
 
 pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
@@ -1315,14 +1344,27 @@ pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
     for e in std::fs::read_dir(repo.p.states_dir())?.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
         let id = name.split('@').next().unwrap_or(&name).to_string();
-        if repo.p.db.state(&id)?.is_none() {
-            problems += 1;
-            if a.has("--repair") {
-                btrfs::delete_tree(&e.path())?;
-                outln!(ctx, "deleted snapshot without record: {name}");
-            } else {
-                outln!(ctx, "snapshot without record (leftover of an interrupted save): {name} (use --repair)");
+        match repo.p.db.state(&id)? {
+            None => {
+                problems += 1;
+                if a.has("--repair") {
+                    btrfs::delete_tree(&e.path())?;
+                    outln!(ctx, "deleted snapshot without record: {name}");
+                } else {
+                    outln!(ctx, "snapshot without record (leftover of an interrupted save): {name} (use --repair)");
+                }
             }
+            // A cache snapshot that its state does not name: a save stopped before its record.
+            Some(s) if name.contains('@') && !s.caches.values().any(|n| *n == name) => {
+                problems += 1;
+                if a.has("--repair") {
+                    btrfs::delete_tree(&e.path())?;
+                    outln!(ctx, "deleted cache snapshot without record: {name}");
+                } else {
+                    outln!(ctx, "cache snapshot without record (leftover of an interrupted save): {name} (use --repair)");
+                }
+            }
+            Some(_) => {}
         }
     }
     let mut st = repo.p.db.conn.prepare("SELECT id FROM states WHERE present=1")?;
@@ -2241,5 +2283,55 @@ pub(crate) fn human_size(n: u64) -> String {
         format!("{n} B")
     } else {
         format!("{v:.1} {}", units[i])
+    }
+}
+
+#[cfg(test)]
+mod record_caches_tests {
+    use super::*;
+    use crate::ctx::Caller;
+    use crate::model::Actor;
+
+    /// A cache snapshot that a later failure of the same call leaves unnamed is removed.
+    #[test]
+    fn a_failed_call_removes_the_snapshots_it_made() -> Result<()> {
+        // Snapshots need the subvolume file system: the APFS (or btrfs) test root, as in storage tests.
+        let Some(base) = std::env::var_os("LAYR_APFS_TEST_ROOT").or_else(|| std::env::var_os("LAYR_OVERLAYFS_TEST_ROOT")) else {
+            eprintln!("skipped: set LAYR_APFS_TEST_ROOT to a subvolume file system");
+            return Ok(());
+        };
+        let dir = std::path::PathBuf::from(base).join(format!("layr-record-caches-{}", ids::new_id()));
+        let ctx = Ctx {
+            store: crate::store::Store::open(&dir)?,
+            caller: Caller::from_uid(0),
+            cwd: dir.clone(),
+            env: std::collections::HashMap::from([("LAYR_PROJECT".into(), "p".into())]),
+            out: std::cell::RefCell::new(Box::new(std::io::sink())),
+        };
+        let project_dir = ctx.store.projects_dir().join("p");
+        std::fs::create_dir_all(project_dir.join("meta/db"))?;
+        std::fs::create_dir(project_dir.join("states"))?;
+        let id = ids::new_id();
+        let p = Project {
+            store: &ctx.store,
+            name: "p".into(),
+            dir: project_dir.clone(),
+            id: id.clone(),
+            db: crate::db::Db::open(&project_dir.join("meta/db/layr.sqlite"))?,
+        };
+        let mut rec = crate::model::Record::new("project");
+        rec.data = serde_json::json!({"id": id, "name": "p", "config": {}});
+        p.append(rec, &Actor { uid: 0, name: "root".into(), session: None })?;
+        let repo = Repo { p };
+        let work = dir.join("work");
+        std::fs::create_dir_all(&work)?;
+        crate::storage::create_subvolume(&work.join("a"))?;
+        let state = ids::new_id();
+        // The first cache is snapshotted; the second path escapes the working folder and fails.
+        let paths = ["a".to_string(), "../escape".to_string()];
+        assert!(record_caches(&ctx, &repo, &state, &work, &paths, false).is_err());
+        assert_eq!(std::fs::read_dir(repo.p.states_dir())?.count(), 0, "the failed call leaves no snapshot");
+        std::fs::remove_dir_all(dir).ok();
+        Ok(())
     }
 }
