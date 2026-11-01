@@ -813,7 +813,7 @@ fn import_one(
     // On a store volume that ignores case, README and Readme would become one file. The earlier
     // state passed this check: only the entries of changed folders can collide.
     fsutil::refuse_case_collisions(&repo.p.work_dir(), changes.names.iter().map(|n| n.as_str()))?;
-    let work = repo.p.work_dir().join(ids::new_id());
+    let work = repo.p.work_dir().join(crate::store::temp_name());
     let res = (|| -> Result<StateRec> {
         let (name, email, msg, time) = commit_info(raw);
         // A state with a base and few changes is a thin layer: its cost follows the changes.
@@ -906,7 +906,7 @@ fn work_tree(repo: &Repo, src: &crate::repo::Snap, paths: &[String], keep: &mut 
         if src.is_complete() {
             return Ok(src.bottom().to_path_buf());
         }
-        let t = crate::repo::Temp { path: repo.p.scan_dir().join(ids::new_id()) };
+        let t = crate::repo::Temp { path: repo.p.scan_dir().join(crate::store::temp_name()) };
         crate::thin::extract(src, paths.iter().map(|p| p.as_str()), &t.path)?;
         let p = t.path.clone();
         keep.push(t);

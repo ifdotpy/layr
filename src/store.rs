@@ -340,6 +340,21 @@ const TRASH_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
 fn trash_budget() -> std::time::Duration {
     std::env::var("LAYR_TRASH_BUDGET_MS").ok().and_then(|v| v.parse().ok()).map_or(TRASH_BUDGET, std::time::Duration::from_millis)
 }
+/// Name of a temporary object of `meta/work` or `meta/scan`. It ends with the pid of its creator:
+/// a copy keeps the times of its source, so the age of the copy says nothing about when it was made.
+pub fn temp_name() -> String {
+    format!("{}.{}", crate::ids::new_id(), std::process::id())
+}
+
+/// For a name from `temp_name`: whether its creator is gone. None for a name without a pid (an
+/// older layr), which cleanup judges by age.
+pub fn creator_gone(name: &str) -> Option<bool> {
+    use rustix::process::{test_kill_process, Pid};
+    let pid: i32 = name.rsplit_once('.')?.1.parse().ok().filter(|p| *p > 0)?;
+    let Some(pid) = Pid::from_raw(pid) else { return Some(false) };
+    Some(matches!(test_kill_process(pid), Err(e) if e == rustix::io::Errno::SRCH))
+}
+
 /// Set by `layr gc`: it empties the whole trash.
 pub static EMPTY_TRASH_FULLY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -1110,5 +1125,18 @@ mod tests {
         for bad in ["sap%", "%keys", "sap%keys%x", "sap%../x", "../sap%keys", "sap/x"] {
             assert!(store.project_dir(bad).is_err(), "{bad}");
         }
+    }
+}
+
+#[cfg(test)]
+mod temp_name_tests {
+    use super::{creator_gone, temp_name};
+
+    #[test]
+    fn a_temporary_name_tells_its_creator() {
+        assert_eq!(creator_gone(&temp_name()), Some(false), "this process is alive");
+        assert_eq!(creator_gone("11111111-2222-3333-4444-555555555555.2000000000"), Some(true));
+        assert_eq!(creator_gone("keep"), None, "a name without a pid keeps the age rule");
+        assert_eq!(creator_gone("prepared-11111111-2222-3333-4444-555555555555"), None);
     }
 }

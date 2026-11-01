@@ -61,6 +61,17 @@ if [ "$(uname -s)" = Darwin ]; then
     ok "gc --all-projects removes a stale saved scan" test ! -e "$stale"
 fi
 
+# A temporary object of meta/work: its creator decides, not the age of a copy (a copy keeps the
+# times of its source). A creator that is alive keeps it; a creator that is gone loses it.
+old_time=$(date -d '2 hours ago' +%Y%m%d%H%M 2>/dev/null || date -v-2H +%Y%m%d%H%M)
+alive="$P/meta/work/11111111-2222-3333-4444-555555555556.$$"
+gone="$P/meta/work/11111111-2222-3333-4444-555555555557.2000000000"
+mkdir -p "$alive" "$gone"; touch "$alive/f" "$gone/f"
+touch -t "$old_time" "$alive" "$gone"
+(cd "$P/lines/main" && "$LAYR" gc -q)
+ok "gc keeps a temporary object whose creator is alive, however old" test -e "$alive"
+ok "gc removes a temporary object whose creator is gone" test ! -e "$gone"
+
 # A temporary clone of a dead dedup run (.layr-dedup-<pid>, no live process has that pid).
 : > a-cache/.layr-dedup-2000000000
 l gc --dedup -q

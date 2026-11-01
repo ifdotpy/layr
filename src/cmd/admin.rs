@@ -1174,17 +1174,20 @@ pub fn run_gc(ctx: &Ctx, repo: &Repo, dry: bool) -> Result<Vec<String>> {
         rec.data = serde_json::json!({"deleted": deleted, "caches": caches});
         repo.commit_record(ctx, rec)?;
     }
-    // Old temporary snapshots.
+    // Temporary objects whose creator is gone, and old ones without a creator pid. A live
+    // creator keeps its object: a copy has the times of its source, so its age says nothing.
     for d in [repo.p.scan_dir(), repo.p.work_dir()] {
         if let Ok(rd) = std::fs::read_dir(&d) {
             for e in rd.flatten() {
-                let old = e
-                    .metadata()
-                    .ok()
-                    .and_then(|m| m.modified().ok())
-                    .map(|t| t.elapsed().map(|x| x.as_secs() > 3600).unwrap_or(false))
-                    .unwrap_or(false);
-                if old {
+                let name = e.file_name().to_string_lossy().into_owned();
+                let stale = crate::store::creator_gone(&name).unwrap_or_else(|| {
+                    e.metadata()
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                        .map(|t| t.elapsed().map(|x| x.as_secs() > 3600).unwrap_or(false))
+                        .unwrap_or(false)
+                });
+                if stale {
                     let _ = repo.p.trash(&e.path());
                 }
             }
@@ -1621,7 +1624,7 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let repo = Repo { p };
     let res = (|| -> Result<(String, String)> {
         let _lock = repo.p.lock()?;
-        let work = repo.p.work_dir().join(ids::new_id());
+        let work = repo.p.work_dir().join(crate::store::temp_name());
         btrfs::create_subvolume(&work)?;
         let cleanup = crate::repo::Temp { path: work.clone() };
         let mut parents = Vec::new();
@@ -1673,7 +1676,7 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
                         .collect();
                     // Copy as the caller, then freeze the bytes used by both the HEAD import
                     // and the folder content. A source edit cannot race the blob comparison.
-                    let tmp = repo.p.work_dir().join(ids::new_id());
+                    let tmp = repo.p.work_dir().join(crate::store::temp_name());
                     btrfs::create_subvolume(&tmp)?;
                     let _t2 = crate::repo::Temp { path: tmp.clone() };
                     copy_folder(ctx, &src, &tmp, a.has("--include-ignored"), Some(&tracked))?;

@@ -616,7 +616,7 @@ fn register_layer(ctx: &crate::ctx::Ctx, repo: &Repo, cache: &Cache, source: &st
         state.id
     } else {
         let src = cache.blob_path(&layer.digest)?;
-        let work = repo.p.work_dir().join(crate::ids::new_id());
+        let work = repo.p.work_dir().join(crate::store::temp_name());
         crate::storage::create_subvolume(&work)?;
         let cleanup = crate::repo::Temp { path: work.clone() };
         fsutil::copy_entry(

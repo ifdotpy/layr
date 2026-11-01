@@ -362,7 +362,7 @@ fn restore_one(
     let id = state.id.clone();
     let attempt = &states[&id];
     let (header, _, tree) = reader.tree(&id, &attempt)?;
-    let stage = repo.p.work_dir().join(crate::ids::new_id());
+    let stage = repo.p.work_dir().join(crate::store::temp_name());
     if header.btrfs.as_ref().is_some_and(|identity| identity.uuid != state.subvol) {
         bail!("tree btrfs identity differs from the signed state");
     }
