@@ -466,6 +466,11 @@ Run in the root folder of a layr line that is also the cargo project root.
     `cargo metadata` and the files in `target/retest/debug/deps` or `target/debug/deps`; it does not run
     `cargo nextest list`, which builds). For a crate with two or more integration test binaries: one
     binary (`autotests = false`, one `tests/main.rs`) saves the size of all but the largest and one link each.
+  - Build script output (`target/debug/build/*/output`, and the same under `target/retest/debug`): a
+    `cargo:rerun-if-changed=` (or `cargo::`) value that is an absolute path under the project root is a
+    warning. Each line has its own absolute path, so cargo marks the build script dirty in every new
+    line and rebuilds all crates after it, although `target/` is warm. Print a path relative to
+    `CARGO_MANIFEST_DIR`. Without build output, it says `build once to check build script paths`.
   - Records: count, and the age of the newest (warning above 14 days). Size of `target/retest`
     (warning above 20 GB).
 
