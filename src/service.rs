@@ -623,4 +623,16 @@ mod version_tests {
         }
         Ok(())
     }
+
+    #[test]
+    fn a_busy_answer_is_read_when_the_hello_write_fails() -> Result<()> {
+        // A busy daemon writes "B" and closes without reading the request. The client's hello
+        // write then fails with a broken pipe, but the answer is already queued for reading.
+        let (client, server) = UnixStream::pair()?;
+        (&server).write_all(b"B")?;
+        drop(server);
+        let error = negotiate(&client).unwrap_err().to_string();
+        assert!(error.contains("busy"), "{error}");
+        Ok(())
+    }
 }
