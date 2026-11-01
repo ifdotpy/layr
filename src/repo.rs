@@ -501,6 +501,7 @@ impl<'a> Repo<'a> {
             let src = self.state_src(base)?;
             let dst = self.p.delta_path(&id);
             crate::thin::write_layer(&src.at("")?, &dst, &crate::thin::Diff::default(), base, false, None)?;
+            self.p.db.record_base(&id, base)?;
             return self.describe_state(ctx, id, kind, parents, message, line);
         }
         self.new_state(ctx, &self.state_root(base)?, kind, parents, message, line)
@@ -566,9 +567,13 @@ impl<'a> Repo<'a> {
             let head = self.state_src(base)?;
             let dst = self.p.delta_path(&id);
             match crate::thin::snapshot_over(&head, base, &w, &dst, false) {
-                Ok(Some(_)) => return self.describe_state(ctx, id, StateKind::Auto, parents, message, Some(line)),
+                Ok(Some(_)) => {
+                    self.p.db.record_base(&id, base)?;
+                    return self.describe_state(ctx, id, StateKind::Auto, parents, message, Some(line));
+                }
                 Ok(None) => {
                     crate::thin::write_layer(&head.at("")?, &dst, &crate::thin::Diff::default(), base, false, None)?;
+                    self.p.db.record_base(&id, base)?;
                     return self.describe_state(ctx, id, StateKind::Auto, parents, message, Some(line));
                 }
                 // Hard links need a complete tree.
