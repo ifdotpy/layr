@@ -726,6 +726,7 @@ impl<'a> Project<'a> {
         let dir = store.project_dir(name)?;
         let db = Db::open(&db_file(&dir))?;
         let mut p = Project { store, name: name.to_string(), dir, id: String::new(), db };
+        p.finish_schema_upgrade()?;
         p.id = p.project_id().unwrap_or_default();
         Ok(p)
     }
@@ -739,11 +740,7 @@ impl<'a> Project<'a> {
         }
         let db = Db::open(&db_file(&dir))?;
         let mut p = Project { store, name: name.to_string(), dir, id: String::new(), db };
-        if p.db.stale {
-            // A schema upgrade: derived tables come back from the records.
-            p.rebuild_index()?;
-            p.db.mark_current()?;
-        }
+        p.finish_schema_upgrade()?;
         crate::rootcheck::check_project(&p)?;
         p.id = p.project_id()?;
         #[cfg(target_os = "macos")]
@@ -806,23 +803,37 @@ impl<'a> Project<'a> {
         move |id: &str| self.has_state(id)
     }
 
-    /// Rebuild the derived tables from the records.
-    pub fn rebuild_index(&self) -> Result<()> {
-        let present = self.state_present();
-        self.db.with_tx(|| {
-            self.db.clear_derived()?;
-            for line in self.db.all_lines()? {
-                let s = oplog::parse_line(&line, None)?;
-                self.db.derive(&s.record, &present, &self.store.machine.id)?;
-            }
-            Ok(())
-        })?;
-        for (id, deleted) in self.db.present_states()? {
-            if deleted || !self.has_state(&id) {
-                self.db.set_present(&id, false)?;
-            }
+    /// A schema upgrade left the derived tables old: they come back from the records. Another
+    /// process may have rebuilt them already.
+    fn finish_schema_upgrade(&mut self) -> Result<()> {
+        if self.db.stale {
+            self.rebuild_derived(true)?;
+            self.db.stale = false;
         }
         Ok(())
+    }
+
+    /// Rebuild the derived tables from the records.
+    pub fn rebuild_index(&self) -> Result<()> {
+        self.rebuild_derived(false).map(|_| ())
+    }
+
+    /// One rebuild transaction (`Db::rebuild`): replay every record, then mark the states that
+    /// have no local folder as absent.
+    fn rebuild_derived(&self, only_older: bool) -> Result<bool> {
+        let present = self.state_present();
+        self.db.rebuild(only_older, |db| {
+            for line in db.all_lines()? {
+                let s = oplog::parse_line(&line, None)?;
+                db.derive(&s.record, &present, &self.store.machine.id)?;
+            }
+            for (id, deleted) in db.present_states()? {
+                if deleted || !self.has_state(&id) {
+                    db.set_present(&id, false)?;
+                }
+            }
+            Ok(())
+        })
     }
 
     /// Write a record: sign it and store it with its derived rows in one transaction.

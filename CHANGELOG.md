@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.13.1](https://github.com/ifdotpy/layr/compare/v0.13.0...v0.13.1) (2026-11-01)
+
+
+### Bug Fixes
+
+* **db:** Rebuild derived tables in one transaction ([#122](https://github.com/ifdotpy/layr/issues/122)) ([ee03be1](https://github.com/ifdotpy/layr/commit/ee03be12490789a9d777dc67494bcbbb0211c6b9))
+* Remove temporary data on failure paths ([#117](https://github.com/ifdotpy/layr/issues/117)) ([c6434f9](https://github.com/ifdotpy/layr/commit/c6434f94c78c529a162e82fa4da517b0c80eec76))
+
+
+### Performance
+
+* **status:** Cache overlap compares of saved states ([#118](https://github.com/ifdotpy/layr/issues/118)) ([2ee9c62](https://github.com/ifdotpy/layr/commit/2ee9c6204f13afb0ef75552bd3e888070f70c508))
+
 ## [0.13.0](https://github.com/ifdotpy/layr/compare/v0.12.0...v0.13.0) (2026-11-01)
 
 
