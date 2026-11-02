@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.16.0](https://github.com/ifdotpy/layr/compare/v0.15.0...v0.16.0) (2026-11-02)
+
+
+### ⚠ BREAKING CHANGES
+
+* **store:** Upgrade an unversioned store with the same format on open ([#132](https://github.com/ifdotpy/layr/issues/132))
+
+### Features
+
+* **store:** Upgrade an unversioned store with the same format on open ([#132](https://github.com/ifdotpy/layr/issues/132)) ([07b710d](https://github.com/ifdotpy/layr/commit/07b710d59c038cdcc0032128ea75a7897e3274ac))
+
+
+### Bug Fixes
+
+* **git:** Delete a removed remote's tracking refs ([#138](https://github.com/ifdotpy/layr/issues/138)) ([81928b8](https://github.com/ifdotpy/layr/commit/81928b8b4a88ed89ad48ec87ea9f52bb7c473c6f))
+
 ## [0.15.0](https://github.com/ifdotpy/layr/compare/v0.14.2...v0.15.0) (2026-11-02)
 
 
