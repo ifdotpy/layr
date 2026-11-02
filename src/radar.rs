@@ -42,8 +42,8 @@ pub struct Overlap {
 
 /// A change between two trees, before the caller's ignore and hidden filters.
 #[derive(Clone, Serialize, Deserialize)]
-struct Found {
-    path: String,
+pub(crate) struct Found {
+    pub(crate) path: String,
     old_path: Option<String>,
     is_dir: bool,
     /// Milliseconds of the new file, 0 when there is none.
@@ -64,7 +64,7 @@ struct SavedCompare {
 
 /// The real changes between two trees. Paths that `skip_path` or `rules` ignore are left out
 /// before the content compare, so ignored build output costs no content reads.
-fn compare(base: &(impl Src + ?Sized), child: &(impl Src + ?Sized), rules: &Rules) -> Result<Vec<Found>> {
+pub(crate) fn compare(base: &(impl Src + ?Sized), child: &(impl Src + ?Sized), rules: &Rules) -> Result<Vec<Found>> {
     let mut out = Vec::new();
     for change in changes::candidates(base, child)? {
         let is_dir = change.new.as_ref().or(change.old.as_ref()).is_some_and(|m| m.is_dir());
@@ -82,7 +82,7 @@ fn compare(base: &(impl Src + ?Sized), child: &(impl Src + ?Sized), rules: &Rule
 }
 
 /// The test of `compare` for one path: whether the path changed from `base` to `live`.
-fn recheck(base: &(impl Src + ?Sized), live: &(impl Src + ?Sized), rules: &Rules, path: &str) -> Result<Option<Found>> {
+pub(crate) fn recheck(base: &(impl Src + ?Sized), live: &(impl Src + ?Sized), rules: &Rules, path: &str) -> Result<Option<Found>> {
     let old = fsutil::lmeta(base, path);
     let new = fsutil::lmeta(live, path);
     if old.is_none() && new.is_none() {
