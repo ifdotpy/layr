@@ -107,6 +107,36 @@ the line tables, not variable info. The variables apply to `target/retest` only.
 and not the caller, for the same reason as `CARGO_INCREMENTAL`. `LAYR_RETEST_LINE_TABLES=0` leaves
 the project's own level.
 
+## Profile files and build scripts
+
+Without `--target`, cargo applies `RUSTFLAGS` (and the project rustflags) to build scripts too, so
+build scripts are instrumented. A build script that runs without `LLVM_PROFILE_FILE` writes
+`default_<hash>_0_<pid>.profraw` into its package folder, which is the project. The leak came from
+the sweep listings (`cargo build --features ...` of a standard command): they compile and run a build
+script that the test run did not build, and they had no `LLVM_PROFILE_FILE`. Reproduced 2026-11-02:
+a `sweep` command with a feature and a `build.rs` gave `removed 1 stray .profraw file(s)` before the
+fix, and none after.
+
+Rules (`src/main.rs`, `profile_scratch` and `cargo_profile_file`):
+
+- Every cargo call of the instrumented build sets `LLVM_PROFILE_FILE` to
+  `target/retest/profraw/other/%p.profraw`: the list phase, the build, the run and the sweep listings.
+  The wrapper still sets its own value for each test.
+- The scratch folder `target/retest/profraw` is deleted when a run ends, on every exit (a guard), and
+  after each sweep listing.
+- The stray cleanup at the end of a run stays. It only catches a child that clears its environment.
+
+Build scripts stay instrumented. Measured:
+
+- A `[host] rustflags` value in a config file did not reach the build script or the bin of a probe
+  package on stable cargo 1.99.1. The build script got `-C instrument-coverage` from `RUSTFLAGS`
+  and no host flag. So config does not keep the flags off build scripts.
+- Cost: `cargo build` of a one-file package with an empty build script, 0.45 to 0.61 s without the
+  flags and 0.54 to 0.69 s with them (two pairs, one build script rebuild each). About 0.08 s per
+  build script rebuild. Records never use build scripts, so nothing is lost.
+- Not tried: `--target <host>` keeps the flags off build scripts, but it moves every output folder
+  that the tool reads (`target/retest/debug`), so it was not changed.
+
 ## Sweeping stale build output
 
 Cargo never removes the output of an old unit. A unit is one compiled crate, test binary or build
@@ -741,8 +771,9 @@ errors). The rule instead:
   `target/retest/debug/<name>`). So code that runs only in a child process is in the record of the
   test that started the child. With one profile file only the test binary is exported: the one
   process was the test itself.
-- `cargo nextest list` and `run` have `LLVM_PROFILE_FILE=<profile dir>/other/%p.profraw`, so the list
-  phase and build scripts write no file in the project.
+- Every cargo call of the instrumented build has `LLVM_PROFILE_FILE=<profile dir>/other/%p.profraw`, so
+  the list phase, the build scripts and the sweep listings write no file in the project (see "Profile
+  files and build scripts").
 - Limit: a child started with a cleared environment writes `default_*.profraw` in its working
   folder. After the run the tool deletes every `.profraw` file outside `target/` that is newer than
   the start of the run, and prints how many. That coverage is lost: code that only that child ran
@@ -790,7 +821,8 @@ the old chain is not used again. The end to end test shows it with a test that r
 - `crates/layr-retest/tests/e2e.rs`: runs `layr retest ...` (the `layr` built from this repository must be first in `PATH`), with a temporary `LAYR_ROOT`, a tiny project with three tests. Runs:
   no record, no change, change of one function, a new uncalled function, a change of a data file,
   full run with a contradiction. About 10 s. Needs `layr`, `cargo-nextest` and `llvm-tools`.
-  Also: `doctor` on the tiny project, and `init` twice. Unit tests: `init.rs` (idempotent edits), `doctor.rs` (the rules).
+  Also: `doctor` on the tiny project, `init` twice, and `build_scripts_write_no_profile_into_the_project`
+  (a `build.rs` and a sweep listing that compiles the build script: no stray file, no scratch folder). Unit tests: `init.rs` (idempotent edits), `doctor.rs` (the rules).
   Run: `cargo nextest run -p layr-retest`.
 
 ### Not done
