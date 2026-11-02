@@ -103,6 +103,13 @@ fn has_layout(root: &Path) -> Result<bool> {
     }
 }
 
+/// A folder that is not a layr store: not empty, no machine identity and no marker. The marker
+/// is read again here: a concurrent first open writes it and then starts the machine folder, so a
+/// caller that found no marker a moment ago can see that half-made store.
+fn foreign(root: &Path) -> Result<bool> {
+    Ok(!empty(root)? && !has_layout(root)? && marker(root)?.is_none())
+}
+
 fn unmarked_error() -> anyhow::Error {
     anyhow::anyhow!(
         "incompatible store: format 0 (no version marker, no machine/id); this binary uses {}",
@@ -144,8 +151,13 @@ impl Guard {
             return Ok(Self { _file: file });
         }
         // No marker. A folder that is not a layr store is refused before the lock file is created.
-        if !empty(root)? && !has_layout(root)? {
+        // A concurrent first open can write the marker and start the machine folder between the
+        // check above and this one: read the marker again before refusing.
+        if foreign(root)? {
             return Err(unmarked_error());
+        }
+        if marker(root)?.is_some() {
+            return Self::open(root);
         }
         // Concurrent first opens queue on the exclusive lease. The first one writes the marker,
         // and the others find it. A concurrent initializer's temporary marker is not store data.
@@ -228,4 +240,24 @@ pub fn run(root: &Path, args: &[String]) -> Result<i32> {
         }
     }
     Ok(0)
+}
+
+#[cfg(test)]
+mod race_tests {
+    use super::*;
+
+    /// A store that a concurrent first open is making (marker written, machine folder without its
+    /// id yet) is not a foreign folder; a folder with other files and no marker is.
+    #[test]
+    fn a_half_made_store_is_not_foreign() {
+        let root = std::env::temp_dir().join(format!("layr-marker-race-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("machine")).unwrap();
+        fs::write(root.join(MARKER), serde_json::to_vec(&Version::binary()).unwrap()).unwrap();
+        assert!(!foreign(&root).unwrap(), "a marker and a machine folder without its id is a store being made");
+        fs::remove_file(root.join(MARKER)).unwrap();
+        fs::write(root.join("notes.txt"), b"x").unwrap();
+        assert!(foreign(&root).unwrap(), "other files and no marker is a foreign folder");
+        fs::remove_dir_all(&root).unwrap();
+    }
 }
