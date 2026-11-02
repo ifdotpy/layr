@@ -1,7 +1,8 @@
 #!/bin/bash
-# gc and saved work: the undo window and the automatic-state rules do not keep an automatic
-# state whose parent a push holds and whose files that are not ignored equal it (only build
-# output differs). An automatic state with unsaved work stays for the undo window.
+# gc and saved work (docs/ownership.md): no rule keeps the build output of pushed work. An
+# automatic state goes when its ring (retention.auto, undo.ops) drops it, pushed or not, and a
+# deleted line frees its automatic states in the delete. An automatic state with unsaved work
+# stays while the undo ring names it. `gc` is a check: it exits 0 on a clean store.
 . "$(dirname "$0")/lib.sh"
 
 R=$T/remote.git; U=$T/up
@@ -10,9 +11,13 @@ git clone -q $R $U 2>/dev/null; cd $U
 echo one > a.txt; echo 'target/' > .gitignore; git add -A; git commit -qm one; git push -q origin main
 l git clone $R p -q >/dev/null
 M=$LAYR_ROOT/projects/p/lines
+DB=$LAYR_ROOT/projects/p/meta/db/layr.sqlite
+[ -f "$DB" ] || DB=$LAYR_ROOT/projects/p/meta/layr.sqlite
 cd $M/main || exit 1
 id() { printf %s "$1" | awk '{print $NF}'; }
 short() { printf %s "$1" | cut -c1-7; }
+# present <display id>: 1 when the state is present in the database.
+present() { python3 -c 'import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); r=c.execute("select present from states where display=?", (sys.argv[2],)).fetchone(); print(r[0] if r else "missing")' "$DB" "$1"; }
 
 # A line whose work went out, with build output in its automatic states.
 l line new -q w origin/main >/dev/null
@@ -40,14 +45,14 @@ echo unsaved > a.txt
 unsaved=$(id "$(l save)")
 
 cd $M/main || exit 1
-plan=$(l gc -n)
-has "an older automatic state with pushed work and build output goes" "$(short $built)" "$plan"
-no "the newest automatic state of a live line stays" sh -c "printf %s \"\$1\" | grep -q $(short $built2)" _ "$plan"
+eq "gc check is clean with pushed work and build output" 0 "$(l gc >/dev/null 2>&1; echo $?)"
+eq "the newest automatic state of a live line stays" 1 "$(present "$built2")"
+eq "an older automatic state with pushed work stays inside the rings" 1 "$(present "$built")"
+
 l line delete -D w u np -q >/dev/null
-plan=$(l gc -n)
-has "after the line is deleted, its last automatic state goes too" "$(short $built2)" "$plan"
-has "a deleted line's build-output state goes even when its work was never pushed" "$(short $npbuilt)" "$plan"
-no "an automatic state with unsaved work stays in the undo window" sh -c "printf %s \"\$1\" | grep -q $(short $unsaved)" _ "$plan"
-l gc -q
+eq "a deleted line frees its older automatic state, pushed work or not" 0 "$(present "$built")"
+eq "a deleted line keeps its final working state in the undo.deleted ring" 1 "$(present "$npbuilt")"
+eq "an automatic state with unsaved work stays in the undo ring" 1 "$(present "$unsaved")"
+l gc --repair -q
 eq "fsck is clean after gc" 0 "$(l fsck >/dev/null 2>&1; echo $?)"
 finish

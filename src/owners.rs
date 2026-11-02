@@ -1,7 +1,8 @@
-//! Owners of states, phase 1 (shadow mode). The table `owners(state, kind, holder)` says why a
-//! state is kept. `Db::derive` keeps it current for every record. No command frees a state by it
-//! yet: `layr gc` still frees by its retention plan and prints how the two differ, and `layr fsck`
-//! checks the table against a replay of the records. Rules: docs/ownership.md.
+//! Owners of states. The table `owners(state, kind, holder)` says why a state is kept, and
+//! `Db::derive` keeps it current for every record. A state that loses its last owner is dead:
+//! `states.present=0`, `states.deleted=1`, and a row in `free_queue`. The storage goes in the free
+//! step after the command (`free.rs`). `layr gc` checks the table against a replay of the records
+//! and `layr gc --repair` rebuilds it. Rules: docs/ownership.md.
 //!
 //! Every write goes through `set_owners`, which adds before it removes. A state that gains its
 //! first owner holds its parents, derived source and conflict sources; a state that loses its last
@@ -29,6 +30,20 @@ pub const KEY_UNDO_DELETED: &str = "undo.deleted";
 
 /// One owner: (state, kind, holder).
 pub type Row = (String, String, String);
+
+thread_local! {
+    /// True while a replay runs (`fill_only`): owners are filled and no state is freed.
+    static FILL_ONLY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `f` with freeing off. A rebuild replays the records this way: it fills the owners, and
+/// the states that the replay leaves unowned stay (`layr gc` reports them, `--repair` frees them).
+pub fn fill_only<T>(f: impl FnOnce() -> T) -> T {
+    let was = FILL_ONLY.with(|c| c.replace(true));
+    let v = f();
+    FILL_ONLY.with(|c| c.set(was));
+    v
+}
 
 /// The sort key of a record (time, machine, sequence number). Unique per record.
 pub fn record_ord(rec: &Record) -> String {
@@ -93,6 +108,16 @@ impl Db {
         self.conn.prepare_cached(sql)?.query_row(p, f)
     }
 
+    /// True when a row of this kind and holder exists.
+    pub fn holder_exists(&self, kind: &str, holder: &str) -> Result<bool> {
+        Ok(self.one("SELECT EXISTS(SELECT 1 FROM owners WHERE kind=?1 AND holder=?2)", params![kind, holder], |r| r.get(0))?)
+    }
+
+    /// True when at least one owner names the state (a pin counts).
+    pub fn is_owned(&self, state: &str) -> Result<bool> {
+        self.owners_live(state)
+    }
+
     fn owners_live(&self, state: &str) -> Result<bool> {
         Ok(self.one("SELECT EXISTS(SELECT 1 FROM owners WHERE state=?1)", params![state], |r| r.get(0))?)
     }
@@ -143,12 +168,26 @@ impl Db {
         Ok(())
     }
 
-    /// Remove rows. A state that loses its last owner releases the rows it holds.
+    /// A state lost its last owner: it is dead, and the free step (`free.rs`) moves its storage
+    /// after the commit. Nothing is freed by a replay (`fill_only`).
+    fn mark_dead(&self, state: &str) -> Result<()> {
+        if FILL_ONLY.with(|c| c.get()) {
+            return Ok(());
+        }
+        let n = self.exec("UPDATE states SET present=0, deleted=1 WHERE id=?1", params![state])?;
+        if n > 0 {
+            self.exec("INSERT OR IGNORE INTO free_queue(state) VALUES(?1)", params![state])?;
+        }
+        Ok(())
+    }
+
+    /// Remove rows. A state that loses its last owner is dead and releases the rows it holds.
     fn remove_rows(&self, rows: Vec<Row>) -> Result<()> {
         let mut work = rows;
         while let Some((s, k, h)) = work.pop() {
             let n = self.exec("DELETE FROM owners WHERE state=?1 AND kind=?2 AND holder=?3", params![s, k, h])?;
             if n > 0 && !self.owners_live(&s)? {
+                self.mark_dead(&s)?;
                 let mut st = self.cached(
                     "SELECT state, kind, holder FROM owners WHERE holder=?1 AND kind IN ('parent','derived','conflict')",
                 )?;
@@ -207,7 +246,8 @@ impl Db {
             let target: Vec<String> = heads.get(&h).cloned().into_iter().collect();
             self.set_owners("head", &h, &target)?;
         }
-        let keep = self.ring_size(KEY_AUTO, AUTO_RING_DEFAULT);
+        // At least one: the newest automatic state of a live line always stays (docs/ownership.md).
+        let keep = self.ring_size(KEY_AUTO, AUTO_RING_DEFAULT).max(1);
         let autos = if alive {
             let mut st = self.cached("SELECT id FROM states WHERE line=?1 AND kind=?2 ORDER BY time DESC, id DESC LIMIT ?3")?;
             let v = st
@@ -329,17 +369,36 @@ impl Db {
                 lines.insert(line.to_string());
             }
         }
-        for line in &lines {
-            self.sync_line(line)?;
-        }
-        for (holder, named) in undo_entries(rec, ord) {
-            self.set_owners("undo", &holder, &named)?;
-            let line = holder.split('|').next().unwrap_or_default().to_string();
-            self.trim_undo(&line)?;
-        }
+        // Adds before releases: the rings of this record take their owners first, so a state that
+        // the record keeps (a deleted line's final state) never looks dead in between. A state that
+        // was dead in between would be queued for freeing and would miss the command's counts.
         let deleted = deleted_entry(rec, ord);
         for (holder, named) in &deleted {
             self.set_owners("deleted", holder, named)?;
+        }
+        let undo = undo_entries(rec, ord);
+        // A deleted line keeps no undo record of its earlier operations: `undo` of the delete (the
+        // `deleted` ring) brings back its final state only. Its other states are freed here.
+        for (line, ch) in &rec.lines {
+            if ch.before.is_some() && ch.after.is_none() {
+                let (lo, hi) = span(line, '|');
+                let own = format!("{line}|{ord}");
+                for h in self.holders("undo", &lo, &hi)? {
+                    if h != own {
+                        self.set_owners("undo", &h, &[])?;
+                    }
+                }
+            }
+        }
+        for (holder, named) in &undo {
+            self.set_owners("undo", holder, named)?;
+        }
+        for line in &lines {
+            self.sync_line(line)?;
+        }
+        for (holder, _) in &undo {
+            let line = holder.split('|').next().unwrap_or_default().to_string();
+            self.trim_undo(&line)?;
         }
         if !deleted.is_empty() {
             self.trim_deleted()?;
@@ -356,6 +415,25 @@ impl Db {
             "import" | "remote.ref" => {
                 if let Some(name) = d["ref"].as_str() {
                     self.sync_remote_ref(name)?;
+                }
+            }
+            "push" => {
+                // A state that a store remote receives is kept by it (`store` owner). The store never
+                // deletes a state it holds, so the owner is never released.
+                if d["result"].as_str() == Some("success") {
+                    if let Some(url) = d["url"].as_str() {
+                        if matches!(crate::cmd::remote::kind(url), Ok(crate::cmd::remote::Kind::Store)) {
+                            let remote = d["remote"].as_str().unwrap_or_default().to_string();
+                            let rows: Vec<Row> = d["state_ids_sent"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .filter_map(|v| v.as_str())
+                                .map(|s| (s.to_string(), "store".to_string(), remote.clone()))
+                                .collect();
+                            self.add_rows(rows)?;
+                        }
+                    }
                 }
             }
             "export" => {
@@ -443,18 +521,22 @@ impl Db {
         let mem = Db { conn: Connection::open_in_memory()?, stale: false };
         mem.conn.set_prepared_statement_cache_capacity(OWNERS_STATEMENTS);
         mem.conn.execute_batch(SCHEMA)?;
-        for raw in self.all_lines()? {
-            let rec = crate::oplog::parse_line(&raw, None)?.record;
-            mem.insert_record(&rec, &raw)?;
-            mem.derive(&rec, &|_| true, local)?;
-        }
+        fill_only(|| -> Result<()> {
+            for raw in self.all_lines()? {
+                let rec = crate::oplog::parse_line(&raw, None)?.record;
+                mem.insert_record(&rec, &raw)?;
+                mem.derive(&rec, &|_| true, local)?;
+            }
+            Ok(())
+        })?;
         mem.owner_rows()
     }
 
-    /// The rows missing from and extra in the stored table, against a recomputation.
+    /// The rows missing from and extra in the stored table, against a recomputation. Pins are
+    /// local (no record makes them), so they are not compared.
     pub fn owners_diff(&self, want: &[Row]) -> Result<(Vec<Row>, Vec<Row>)> {
         let want: BTreeSet<Row> = want.iter().cloned().collect();
-        let have: BTreeSet<Row> = self.owner_rows()?.into_iter().collect();
+        let have: BTreeSet<Row> = self.owner_rows()?.into_iter().filter(|r| r.1 != "pin").collect();
         Ok((want.difference(&have).cloned().collect(), have.difference(&want).cloned().collect()))
     }
 
@@ -487,30 +569,86 @@ impl Db {
         })
     }
 
-    /// Shadow mode: the states that the plan frees and owners keep (with the kinds that keep them),
-    /// and the present states that the plan keeps and no owner names.
-    pub fn owners_difference(&self, keep: &BTreeSet<String>, freed: &[String]) -> Result<(Vec<(String, String)>, Vec<String>)> {
-        let mut owned: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        let mut st = self.cached("SELECT state, kind FROM owners")?;
-        for row in st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
-            let (state, kind) = row?;
-            owned.entry(state).or_default().insert(kind);
-        }
-        let mut frees: Vec<(String, String)> = freed
-            .iter()
-            .filter_map(|s| owned.get(s).map(|k| (s.clone(), k.iter().cloned().collect::<Vec<_>>().join(","))))
-            .collect();
-        frees.sort();
-        frees.dedup();
-        let mut unowned: Vec<String> = self
-            .present_states()?
-            .into_iter()
-            .map(|(id, _)| id)
-            .filter(|id| keep.contains(id) && !owned.contains_key(id))
-            .collect();
-        unowned.sort();
-        Ok((frees, unowned))
+    /// The states in the free queue: dead states whose storage may still be on disk.
+    pub fn queued_frees(&self) -> Result<Vec<String>> {
+        let mut st = self.cached("SELECT state FROM free_queue ORDER BY state")?;
+        let v = st.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+        Ok(v)
     }
+
+    /// Remove states from the free queue (their storage is gone, or they are live again).
+    pub fn dequeue_frees(&self, states: &[String]) -> Result<()> {
+        self.with_tx(|| {
+            for s in states {
+                self.exec("DELETE FROM free_queue WHERE state=?1", params![s])?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Present states that no owner names. Only a replay of an old database or a crash leaves them.
+    pub fn leaked_states(&self) -> Result<Vec<String>> {
+        let mut st = self.cached(
+            "SELECT id FROM states WHERE present=1 AND deleted=0 AND id NOT IN (SELECT state FROM owners) ORDER BY id",
+        )?;
+        let v = st.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+        Ok(v)
+    }
+
+    /// Mark present states dead (`gc --repair`: their owners are gone).
+    pub fn free_leaks(&self, states: &[String]) -> Result<()> {
+        self.with_tx(|| {
+            for s in states {
+                self.mark_dead(s)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Pin a state for a command that reads it outside the store lock (`free.rs`). Returns false
+    /// when the state has no owner: nothing frees it, so there is nothing to keep. A state that is
+    /// queued for freeing is refused: the reader must fail, not read a state that goes.
+    pub fn pin_add(&self, state: &str, holder: &str) -> Result<bool> {
+        self.with_tx(|| {
+            if !self.owners_live(state)? {
+                let queued: bool =
+                    self.one("SELECT EXISTS(SELECT 1 FROM free_queue WHERE state=?1)", params![state], |r| r.get(0))?;
+                anyhow::ensure!(!queued, "state {} was freed by another layr command; read it again", ids_short(state));
+                return Ok(false);
+            }
+            self.exec("INSERT OR IGNORE INTO owners(state, kind, holder) VALUES(?1,'pin',?2)", params![state, holder])?;
+            Ok(true)
+        })
+    }
+
+    /// Release a pin. A state that loses its last owner is dead (the next free step frees it).
+    pub fn pin_remove(&self, state: &str, holder: &str) -> Result<()> {
+        self.with_tx(|| self.remove_rows(vec![(state.to_string(), "pin".into(), holder.to_string())]))
+    }
+
+    /// Holders of pins (`pid:start`), for the check of dead processes.
+    pub fn pin_holders(&self) -> Result<Vec<String>> {
+        self.all_holders("pin")
+    }
+
+    /// Release every pin of one holder (its process is gone).
+    pub fn release_holder(&self, holder: &str) -> Result<()> {
+        self.with_tx(|| {
+            let mut st = self.cached("SELECT state FROM owners WHERE kind='pin' AND holder=?1")?;
+            let rows: Vec<Row> = st
+                .query_map(params![holder], |r| r.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .map(|s| (s, "pin".to_string(), holder.to_string()))
+                .collect();
+            drop(st);
+            self.remove_rows(rows)
+        })
+    }
+}
+
+fn ids_short(id: &str) -> String {
+    id.chars().take(8).collect()
 }
 
 #[cfg(test)]

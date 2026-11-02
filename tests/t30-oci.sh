@@ -65,7 +65,7 @@ CHART=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["chart"])' "$
 ok "the first push uploads blobs" python3 -c 'import json,sys; assert json.loads(sys.argv[1])["uploaded_blobs"] > 0' "$FIRST"
 printf 'uncommitted\n' > bin/app
 DERIVED_BEFORE=$(l ref list derived/oci-layer-v1/ --json)
-l gc -q
+l gc --repair -q
 ok "Core refs keep derived layer blobs through GC" python3 -c 'import json,pathlib,sys; assert all((pathlib.Path(sys.argv[1])/r["target"]/"blob").is_file() for r in json.loads(sys.argv[2]))' "$LAYR_ROOT/projects/oci/states" "$DERIVED_BEFORE"
 SECOND=$(l push --runnable app external main --json)
 eq "repeat export reuses Core derived states" "$DERIVED_BEFORE" "$(l ref list derived/oci-layer-v1/ --json)"

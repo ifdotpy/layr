@@ -238,7 +238,8 @@ impl Db {
                 self.conn.execute_batch(&format!("DROP TABLE IF EXISTS {t}"))?;
             }
             self.conn.execute_batch(SCHEMA)?;
-            replay(self)?;
+            // The replay fills the owners and frees nothing (the upgrade rule, docs/ownership.md).
+            crate::owners::fill_only(|| replay(self))?;
             // Test only (tests/t95-schema-rebuild-readers.sh): hold the transaction open.
             if let Some(ms) = std::env::var("LAYR_TEST_REBUILD_HOLD_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
                 eprintln!("test: rebuild held for {ms} ms");
@@ -1163,12 +1164,6 @@ impl Db {
         let mut st = self.conn.prepare("SELECT machine, public_key FROM trusted")?;
         let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
-    }
-
-    pub fn records_since(&self, time: i64) -> Result<Vec<Record>> {
-        let mut st = self.conn.prepare("SELECT raw FROM records WHERE time>=?1 ORDER BY time")?;
-        let v = st.query_map(params![time], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
-        v.into_iter().map(|l| Ok(crate::oplog::parse_line(&l, None)?.record)).collect()
     }
 
     pub fn max_seqs(&self) -> Result<Vec<(String, u64)>> {

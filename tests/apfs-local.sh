@@ -36,7 +36,7 @@ ok "protected merge accepts the expected state" l merge topic --expect "$head"
 eq "main receives the file" "topic" "$(cat result.txt)"
 ok "state signatures and snapshots pass fsck" l fsck
 l line delete -D -q warm
-ok "gc can remove obsolete APFS trees" l gc -q
+ok "gc can remove obsolete APFS trees" l gc --repair -q
 ok "states remain valid after gc" l fsck
 cd "$P/topic" || exit 1
 printf 'private value\n' > private.env
