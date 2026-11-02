@@ -37,7 +37,7 @@ impl Version {
     }
 }
 
-/// The shared lease prevents a format upgrade while a command or daemon holds a store.
+/// The shared lease prevents a store from changing format while a command or daemon holds it.
 pub struct Guard {
     _file: File,
 }
@@ -86,11 +86,49 @@ fn empty(root: &Path) -> Result<bool> {
     Ok(true)
 }
 
-fn legacy_error() -> anyhow::Error {
+/// Format 0 is a store without a marker. Its data has the layout of format 1: no change of the
+/// layout came with the marker. Every store writes its machine identity at the first open, so
+/// that file tells a layr store from another folder. Checked before any write.
+fn has_layout(root: &Path) -> Result<bool> {
+    match fs::symlink_metadata(root.join("machine")) {
+        Ok(dir) if dir.is_dir() => {}
+        Ok(_) => return Ok(false),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e.into()),
+    }
+    match fs::symlink_metadata(root.join("machine").join("id")) {
+        Ok(file) => Ok(file.is_file()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn unmarked_error() -> anyhow::Error {
     anyhow::anyhow!(
-        "incompatible store: format 0 (unversioned layr, unknown build); this binary uses {}. Use 'layr store-version --upgrade' explicitly",
+        "incompatible store: format 0 (no version marker, no machine/id); this binary uses {}",
         Version::binary().description()
     )
+}
+
+fn unwritable_error() -> anyhow::Error {
+    anyhow::anyhow!(
+        "incompatible store: format 0 (no version marker) is not writable, so its marker cannot be written; give write access to the store root and run the command again; this binary uses {}",
+        Version::binary().description()
+    )
+}
+
+/// Name the fix when the first open of an unmarked store cannot write its marker or lock file.
+fn writable(error: anyhow::Error) -> anyhow::Error {
+    let denied = error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied || e.raw_os_error() == Some(libc::EROFS))
+    });
+    if denied {
+        unwritable_error()
+    } else {
+        error
+    }
 }
 
 impl Guard {
@@ -105,24 +143,27 @@ impl Guard {
             binary.require_compatible(&stored, "store")?;
             return Ok(Self { _file: file });
         }
-        let create_lock = empty(root)?;
-        if !create_lock && !root.join(LOCK).try_exists()? {
-            return Err(legacy_error());
+        // No marker. A folder that is not a layr store is refused before the lock file is created.
+        if !empty(root)? && !has_layout(root)? {
+            return Err(unmarked_error());
         }
-        // A concurrent initializer can have its temporary marker present already.
-        // Wait on its existing lease before classifying the root as legacy.
-        // An unversioned legacy root never gets a new lock from an ordinary open.
-        let file = lock_file(root, create_lock)?;
+        // Concurrent first opens queue on the exclusive lease. The first one writes the marker,
+        // and the others find it. A concurrent initializer's temporary marker is not store data.
+        let file = lock_file(root, true).map_err(writable)?;
         rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)?;
         match marker(root)? {
             Some(stored) => binary.require_compatible(&stored, "store")?,
             None => {
-                if !empty(root)? {
-                    return Err(legacy_error());
+                if !empty(root)? && !has_layout(root)? {
+                    return Err(unmarked_error());
                 }
-                crate::fsutil::atomic_write(&root.join(MARKER), &serde_json::to_vec(&binary)?, 0o644)?;
+                crate::fsutil::atomic_write(&root.join(MARKER), &serde_json::to_vec(&binary)?, 0o644).map_err(writable)?;
             }
         }
+        // The marker exists now, so every later open takes the shared lease of a marked store.
+        rustix::fs::flock(&file, rustix::fs::FlockOperation::LockShared)?;
+        let stored = marker(root)?.context("the store version disappeared; refuse access")?;
+        binary.require_compatible(&stored, "store")?;
         Ok(Self { _file: file })
     }
 
@@ -154,56 +195,27 @@ pub struct Report {
 pub fn inspect(root: &Path) -> Result<Report> {
     let binary = Version::binary();
     let store = marker(root)?;
-    let (state, compatible) = match &store {
-        Some(stored) if stored.format == binary.format => ("compatible", true),
-        Some(_) => ("incompatible", false),
+    let (state, compatible, upgrade) = match &store {
+        Some(stored) if stored.format == binary.format => ("compatible", true, None),
+        Some(_) => ("incompatible", false, None),
         None => match fs::metadata(root) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => ("absent", true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => ("absent", true, None),
             Err(e) => return Err(e.into()),
-            Ok(_) if empty(root)? => ("empty", true),
-            Ok(_) => ("legacy", false),
+            Ok(_) if empty(root)? => ("empty", true, None),
+            // The next open writes the marker (when the store is writable).
+            Ok(_) if has_layout(root)? => {
+                ("unmarked", true, Some(Upgrade { metadata_only: true, from_format: 0, to_format: FORMAT }))
+            }
+            Ok(_) => ("incompatible", false, None),
         },
-    };
-    let upgrade = if state == "legacy" || store.as_ref().is_some_and(|stored| stored.format == 0) {
-        Some(Upgrade { metadata_only: true, from_format: 0, to_format: FORMAT })
-    } else {
-        None
     };
     Ok(Report { binary, store, compatible, state, upgrade })
 }
 
-fn upgrade(root: &Path) -> Result<()> {
-    let report = inspect(root)?;
-    if report.state == "absent" {
-        bail!("the store does not exist; run a layr command to create it");
-    }
-    if report.state == "empty" {
-        bail!("the store is empty; run a normal layr command to initialize it");
-    }
-    if let Some(stored) = &report.store {
-        if stored.format != 0 && stored.format != FORMAT {
-            Version::binary().require_compatible(stored, "store")?;
-        }
-    }
-    let file = lock_file(root, true)?;
-    rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive)
-        .context("the store is in use; stop all layr commands and daemons before the format upgrade")?;
-    // Recheck after the lease. Never downgrade a store that changed while we waited.
-    if let Some(stored) = marker(root)? {
-        if stored.format != 0 {
-            return Version::binary().require_compatible(&stored, "store");
-        }
-    }
-    crate::fsutil::atomic_write(&root.join(MARKER), &serde_json::to_vec(&Version::binary())?, 0o644)
-}
-
 pub fn run(root: &Path, args: &[String]) -> Result<i32> {
-    let options = crate::args::parse(&crate::args::Spec::new().flag("--json").flag("--upgrade"), args)?;
+    let options = crate::args::parse(&crate::args::Spec::new().flag("--json"), args)?;
     if !options.pos.is_empty() || !options.paths.is_empty() {
-        bail!("usage: layr store-version [--json] [--upgrade]");
-    }
-    if options.has("--upgrade") {
-        upgrade(root)?;
+        bail!("usage: layr store-version [--json]");
     }
     let report = inspect(root)?;
     if options.has("--json") {
