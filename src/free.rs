@@ -35,6 +35,10 @@ pub fn finish(store: &Store) {
         Err(_) => return,
     };
     for name in names {
+        // A project without pending work is not opened: an open prints its trace (LAYR_TRACE).
+        if !pending(store, &name) {
+            continue;
+        }
         let Ok(p) = Project::open(store, &name) else { continue };
         if std::env::var_os("LAYR_TEST_EXIT_AFTER_COMMIT").is_some() && !p.db.queued_frees().unwrap_or_default().is_empty() {
             eprintln!("test: exit after the commit, before the free step of {name}");
@@ -48,6 +52,19 @@ pub fn finish(store: &Store) {
     if let Ok(mut opened) = OPENED.lock() {
         opened.retain(|(root, _)| *root != store.root);
     }
+}
+
+/// True when a project has queued states or pins to release. Reads the database directly.
+fn pending(store: &Store, name: &str) -> bool {
+    let Ok(dir) = store.project_dir(name) else { return false };
+    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY;
+    let Ok(conn) = rusqlite::Connection::open_with_flags(crate::store::db_file(&dir), flags) else { return false };
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM free_queue) OR EXISTS(SELECT 1 FROM owners WHERE kind='pin')",
+        [],
+        |r| r.get::<_, bool>(0),
+    )
+    .unwrap_or(false)
 }
 
 /// Move the storage of every dead queued state of a project to the trash. A state that a live

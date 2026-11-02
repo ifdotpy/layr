@@ -74,7 +74,8 @@ pub fn undo_entries(rec: &Record, ord: &str) -> Vec<(String, Vec<String>)> {
         .collect()
 }
 
-/// The deleted-line entry of a record that deletes a line: its final head and staged work.
+/// The deleted-line entry of a record that deletes a line: its final head, its last working state
+/// and the staged state (`staged_state` of the record's data).
 pub fn deleted_entry(rec: &Record, ord: &str) -> Vec<(String, Vec<String>)> {
     rec.lines
         .iter()
@@ -83,6 +84,7 @@ pub fn deleted_entry(rec: &Record, ord: &str) -> Vec<(String, Vec<String>)> {
             let before = ch.before.as_ref()?;
             let mut named = vec![before.head.clone()];
             named.extend(ch.working_before.clone());
+            named.extend(rec.data["staged_state"].as_str().map(str::to_string));
             Some((format!("{ord}|{line}"), named))
         })
         .collect()
