@@ -149,6 +149,9 @@ no 'expired refs stop resolving' l rev-parse leases/test
 ok 'GC removes expired refs' l gc --repair
 eq 'expired refs have a signed delete transition' None "$(l ref log leases/test --json | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["after"])')"
 l ref delete pins/live >/dev/null
+# A newer automatic state: the newest one always stays (docs/ownership.md, rule 3).
+l config thin.chain 1 >/dev/null
+echo newer >> notes.txt; l save -q
 l gc --repair >/dev/null
 no 'an attestation does not prevent subject GC' l show "$AUTO":notes.txt
 ok 'reindex preserves core metadata' l reindex -q

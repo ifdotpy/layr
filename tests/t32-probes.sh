@@ -150,6 +150,8 @@ l reset --hard "$AUTO" >/dev/null
 COLLECT_VIEW=$(l view save --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["view_id"])')
 l probe run "views/$COLLECT_VIEW" --probe files --json >/dev/null
 l reset --hard "$VIEW_STATE" >/dev/null
+# A newer automatic state: the newest one always stays (docs/ownership.md, rule 3).
+printf 'newer\n' > newer.txt; l save -q
 l gc --repair -q
 no "probe ViewId provenance does not retain source snapshots" l show "$AUTO":source-only.txt
 COLLECTED=$(l probe diff "views/$COLLECT_VIEW" "views/$COLLECT_VIEW" --json)
