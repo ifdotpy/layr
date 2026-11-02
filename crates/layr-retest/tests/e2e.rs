@@ -4,7 +4,7 @@
 //! `cargo nextest`, the registry package `hex` 0.4 in the cargo cache (the test runs offline), `cargo nextest` and the `llvm-tools` rustup component. The store is a temp
 //! folder with its own LAYR_ROOT. Takes about 10 s.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -587,10 +587,64 @@ fn sweep_keeps_the_units_of_the_other_standard_commands() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-/// The listing of a standard command compiles units: the sweep does not sweep that folder, and
-/// removes nothing there, not even units that are not live.
+/// Modification times of the output files of a profile folder: a build that compiles a unit writes its
+/// `.rlib`, `.rmeta`, objects and binaries in `deps`, `build` and `examples`. Left out: the files directly in
+/// the folder (cargo re-links the uplifted binary `debug/<bin>` to the command it runs, with no compile),
+/// cargo's fingerprint folder, the incremental sessions (the sweep prunes them), the lock files,
+/// `invoked.timestamp` and the dep-info files (`.d`, rewritten by cargo on a build with nothing to compile).
+fn output_times(debug: &Path) -> BTreeMap<PathBuf, std::time::SystemTime> {
+    let mut out = BTreeMap::new();
+    let mut todo = vec![debug.to_path_buf()];
+    while let Some(dir) = todo.pop() {
+        for e in std::fs::read_dir(&dir).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                if p.file_name().is_some_and(|n| n != ".fingerprint" && n != "incremental") {
+                    todo.push(p);
+                }
+            } else if p.parent() != Some(debug) && p.file_name().is_some_and(|n| {
+                let n = n.to_string_lossy();
+                n != "invoked.timestamp" && !n.starts_with(".cargo-") && !n.ends_with(".d")
+            }) {
+                out.insert(p.clone(), p.metadata().unwrap().modified().unwrap());
+            }
+        }
+    }
+    out
+}
+
+/// Asserts that the sweep wrote no output file: every file that is left has its modification time from
+/// `before`. A removed file is not a write: cargo removes the output of a stale unit before it stops.
+fn assert_no_output_written(debug: &Path, before: &BTreeMap<PathBuf, std::time::SystemTime>, err: &str) {
+    let written: Vec<_> = output_times(debug).into_iter().filter(|(p, t)| before.get(p) != Some(t)).map(|(p, _)| p).collect();
+    assert!(written.is_empty(), "written or created:\n{written:?}\n{err}");
+}
+
+/// Runs cargo in `dir` with the target folder `target` and the variables `env`, and returns its stderr.
+fn cargo_in(dir: &Path, target: &Path, env: &[(&str, &str)], args: &[&str]) -> String {
+    let o = Command::new("cargo")
+        .args(args)
+        .current_dir(dir)
+        .env_remove("RUSTFLAGS")
+        .env("CARGO_TARGET_DIR", target)
+        .env("CARGO_NET_OFFLINE", "true")
+        .envs(env.iter().copied())
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "cargo {args:?} failed:\n{}", String::from_utf8_lossy(&o.stderr));
+    String::from_utf8_lossy(&o.stderr).into_owned()
+}
+
+/// Rewrites the body of `a` in `lib-a`. A change of the source makes the units of `lib-a` stale.
+fn set_lib_a(ws: &Path, body: &str) {
+    let src = format!("pub fn a() -> i32 {{\n    {body}\n}}\n\n#[cfg(test)]\nmod tests {{\n    #[test]\n    fn t() {{\n        assert_eq!(super::a(), 1);\n    }}\n}}\n");
+    std::fs::write(ws.join("lib-a/src/lib.rs"), src).unwrap();
+}
+
+/// The listing of a standard command finds a unit that is not fresh: the sweep stops at that unit,
+/// compiles nothing, and removes nothing from the folder. The next build of the command makes it sweepable.
 #[test]
-fn sweep_skips_a_folder_whose_listing_compiled() {
+fn sweep_skips_a_folder_with_a_unit_that_is_not_fresh() {
     let tmp = std::env::temp_dir().canonicalize().unwrap().join(format!("layr-retest-sweep-skip-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     let ws = tmp.join("ws");
@@ -603,17 +657,134 @@ fn sweep_skips_a_folder_whose_listing_compiled() {
     // A stale unit that a sweep would remove, if it swept this folder.
     cargo(&ws, &["build", "--workspace", "--tests", "--bins", "--features", "lib-a/extra"]);
     let before = entries(&debug, ".fingerprint");
+    let times = output_times(&debug);
 
-    // The second standard command was never built: its listing compiles it, so nothing is swept.
+    // The second standard command was never built: it is not fresh, so nothing is swept.
     let err = sweep_cmd(&ws, &[]);
-    assert!(err.contains("sweep skipped") && err.contains("compiled"), "{err}");
-    let after = entries(&debug, ".fingerprint");
-    assert!(before.is_subset(&after), "a unit was removed:\n{err}");
+    assert!(err.contains("sweep skipped") && err.contains("not fresh") && err.contains("run the standard build first"), "{err}");
+    assert!(before.is_subset(&entries(&debug, ".fingerprint")), "a unit was removed:\n{err}");
+    assert_no_output_written(&debug, &times, &err);
 
-    // The next sweep, with the second command built, sweeps the stale unit.
+    // The second command built: the next sweep removes the stale unit.
+    cargo(&ws, &["build", "-p", "app", "--features", "app-only", "--tests"]);
+    let before_sweep = entries(&debug, ".fingerprint");
     let err = sweep_cmd(&ws, &[]);
-    assert!(err.contains("swept"), "{err}");
-    assert!(entries(&debug, ".fingerprint").len() < after.len());
+    assert!(err.contains("swept target, freed"), "{err}");
+    assert!(entries(&debug, ".fingerprint").len() < before_sweep.len());
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// A source change makes `target/debug` stale. The sweep skips it with the reason, and compiles nothing.
+#[test]
+fn sweep_skips_a_stale_target_and_compiles_nothing() {
+    let tmp = std::env::temp_dir().canonicalize().unwrap().join(format!("layr-retest-sweep-stale-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let ws = tmp.join("ws");
+    sweep_workspace(&ws, "sweep = [[\"build\", \"--workspace\", \"--tests\", \"--bins\"]]");
+    let build = ["build", "--workspace", "--tests", "--bins"];
+    let debug = ws.join("target/debug");
+    cargo(&ws, &build);
+    set_lib_a(&ws, "1 + 0");
+    let times = output_times(&debug);
+
+    let err = sweep_cmd(&ws, &[]);
+    assert!(err.contains("sweep skipped") && err.contains("run the standard build first"), "{err}");
+    assert_no_output_written(&debug, &times, &err);
+
+    // The standard build makes the folder fresh, and then the sweep runs.
+    cargo(&ws, &build);
+    let err = sweep_cmd(&ws, &[]);
+    assert!(err.contains("swept target, freed"), "{err}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// Another cargo holds the build lock of the folder: the sweep skips it at once and does not wait for that cargo.
+#[test]
+fn sweep_skips_a_busy_build_lock_without_waiting() {
+    let tmp = std::env::temp_dir().canonicalize().unwrap().join(format!("layr-retest-sweep-busy-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let ws = tmp.join("ws");
+    sweep_workspace(&ws, "sweep = [[\"build\", \"--workspace\", \"--tests\", \"--bins\"]]");
+    let debug = ws.join("target/debug");
+    cargo(&ws, &["build", "--workspace", "--tests", "--bins"]);
+    let held = std::fs::File::options().append(true).open(debug.join(".cargo-lock")).unwrap();
+    held.lock().unwrap();
+    let times = output_times(&debug);
+
+    let err = sweep_cmd(&ws, &[]);
+    assert!(err.contains("build lock busy"), "{err}");
+    drop(held);
+    assert_no_output_written(&debug, &times, &err);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// Without a `retest` command, `target/retest` is left as it is: no listing, no compile, no new folder.
+#[test]
+fn sweep_leaves_target_retest_alone_without_a_retest_command() {
+    let tmp = std::env::temp_dir().canonicalize().unwrap().join(format!("layr-retest-sweep-noretest-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let ws = tmp.join("ws");
+    sweep_workspace(&ws, "sweep = [[\"build\", \"--workspace\", \"--tests\", \"--bins\"]]");
+    let build = ["build", "--workspace", "--tests", "--bins"];
+    // The retest build comes first: a source change after it makes `target/retest` stale, and leaves `target` fresh.
+    cargo_in(&ws, &ws.join("target/retest"), &[], &build);
+    set_lib_a(&ws, "1 + 0");
+    cargo(&ws, &build);
+    let retest = ws.join("target/retest/debug");
+    let times = output_times(&retest);
+
+    let err = sweep_cmd(&ws, &[]);
+    assert!(err.contains("target/retest: no sweep command; left as is"), "{err}");
+    assert_eq!(output_times(&retest), times, "target/retest was compiled or changed");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// Without a `sweep` list and without `target/retest`, a sweep creates nothing and compiles nothing.
+#[test]
+fn sweep_never_creates_target_retest() {
+    let tmp = std::env::temp_dir().canonicalize().unwrap().join(format!("layr-retest-sweep-create-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let ws = tmp.join("ws");
+    sweep_workspace(&ws, "sweep = [[\"build\", \"--workspace\", \"--tests\", \"--bins\"]]");
+    let build = ["build", "--workspace", "--tests", "--bins"];
+    cargo(&ws, &build);
+    let times = output_times(&ws.join("target/debug"));
+
+    sweep_cmd(&ws, &[]);
+    assert!(!ws.join("target/retest").exists());
+    assert_eq!(output_times(&ws.join("target/debug")), times, "the sweep wrote or removed a file");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// A `retest` command sweeps `target/retest` with the sweep list and the retest list, under the
+/// environment of the retest build: a unit that neither list names goes, and the next retest build compiles nothing.
+#[test]
+fn sweep_sweeps_target_retest_with_a_retest_command() {
+    let tmp = std::env::temp_dir().canonicalize().unwrap().join(format!("layr-retest-sweep-retest-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let ws = tmp.join("ws");
+    sweep_workspace(
+        &ws,
+        "sweep = [[\"build\", \"--workspace\", \"--tests\", \"--bins\"]]\nretest = [[\"test\", \"--workspace\", \"--no-run\"]]",
+    );
+    // The variables that `layr retest` gives its cargo calls, so that the unit hashes match the sweep.
+    let env = [
+        ("RUSTFLAGS", "-C instrument-coverage"),
+        ("CARGO_INCREMENTAL", "1"),
+        ("CARGO_PROFILE_DEV_DEBUG", "line-tables-only"),
+        ("CARGO_PROFILE_TEST_DEBUG", "line-tables-only"),
+    ];
+    let retest = ws.join("target/retest");
+    cargo_in(&ws, &retest, &env, &["build", "--workspace", "--tests", "--bins"]);
+    cargo_in(&ws, &retest, &env, &["test", "--workspace", "--no-run"]);
+    cargo_in(&ws, &retest, &env, &["build", "--workspace", "--tests", "--bins", "--features", "lib-a/extra"]);
+    let units = entries(&retest.join("debug"), ".fingerprint");
+
+    let err = sweep_cmd(&ws, &[]);
+    assert!(err.contains("swept target/retest, freed"), "{err}");
+    assert!(entries(&retest.join("debug"), ".fingerprint").len() < units.len(), "the feature unit stays");
+    let err = cargo_in(&ws, &retest, &env, &["test", "--workspace", "--no-run"]);
+    assert!(!err.contains("Compiling"), "the retest build compiled:\n{err}");
     let _ = std::fs::remove_dir_all(&tmp);
 }
 

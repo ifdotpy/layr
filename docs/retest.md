@@ -144,6 +144,8 @@ script run. Its name ends in a 16 hex digit hash (`name-<hash>`). A new feature 
 a new toolchain or a focused command leaves the files of the units that no later build uses.
 
 `layr retest sweep [--dry-run]` removes them. `layr retest run` sweeps after its build with the same rule.
+`layr retest sweep` never compiles: it stops at the first unit that is not fresh and skips that folder (see
+"Freshness").
 
 ### Live set
 
@@ -154,21 +156,26 @@ are in the root `Cargo.toml` of the workspace:
 [workspace.metadata.layr-retest]
 env = { RUSTUP_TOOLCHAIN = "1.99.1-aarch64-apple-darwin", RUSTC_WRAPPER = "", CARGO_INCREMENTAL = "0" }
 sweep = [["build", "--workspace", "--exclude", "studio-native-client", "--tests", "--bins", "--examples", "--locked"]]
+retest = [["test", "--workspace", "--no-run"]]
 ```
 
-- `sweep` lists cargo commands without `cargo`. The sweep adds `--message-format json` (nextest:
-  `--cargo-message-format json`) and runs each command in the target folder with `env`. A command that is
-  built already only lists its units. A command that is not built yet compiles first.
-- The hashes come from cargo's messages: every artifact, fresh or not, and every build script run.
+- `sweep` lists cargo commands without `cargo`. It runs each command in `target` with `env`, as a listing
+  (see "Freshness"). The listing adds `-v --message-format json`. A command whose units are not all fresh
+  skips the folder; the listing never builds a unit that is not fresh.
+- `retest` (optional) lists the commands of the retest build. `layr retest sweep` sweeps `target/retest` with
+  `sweep` and `retest` under the environment of `run`. Without `retest`, `target/retest` is left as it is and the
+  sweep prints `target/retest: no sweep command; left as is`. The sweep never creates `target/retest`.
+- The hashes come from cargo's messages: every artifact and every build script run.
   Cargo names a bin or an example only by its copy in `debug` (`debug/app`). The sweep matches a copy
   to its hashed file by size and modification time. With no match, every hashed file of that name is live.
 - `env` sets the variables that change the unit hashes (toolchain, wrapper, incremental). It is applied
   over the environment of the caller.
 - `layr retest run` adds its own command (`test --no-run` and its arguments) to the list. A focused run
   does not remove the units of the standard commands, and the units it built stay.
-- Without a `sweep` list, `layr retest run` skips the sweep and `layr retest sweep` stops. Nothing is removed.
-- `target/retest` is swept with the same list and the environment of `run` (instrumented RUSTFLAGS, debug
-  info, incremental). It is swept only when it exists.
+- Without a `sweep` list, `layr retest run` skips the sweep and `layr retest sweep` prints a skip. Nothing is
+  removed, and both exit 0.
+- `layr retest run` sweeps `target/retest` with the `sweep` and `retest` lists and its own command, under the
+  environment of `run` (instrumented RUSTFLAGS, debug info, incremental). The run needs no `retest` list.
 
 ### What goes
 
@@ -194,16 +201,47 @@ Two name forms carry a build id: `<crate>-<hash>.<cgu>.<build>.rcgu.o`, and `<cr
 A first version parsed the cgu index as the build id and removed the current objects of integration tests,
 so cargo rebuilt the workspace crates on the next build. Test: `deps_keeps_object_names_without_a_build_id`.
 The e2e test `sweep_removes_the_units_that_no_standard_command_uses` checks one build per unit after an edit.
+The e2e tests `sweep_skips_a_stale_target_and_compiles_nothing`, `sweep_skips_a_folder_with_a_unit_that_is_not_fresh`,
+`sweep_skips_a_busy_build_lock_without_waiting` and `sweep_leaves_target_retest_alone_without_a_retest_command` check the
+freshness rules.
+
+### Freshness
+
+The sweep never compiles. Before it removes anything, each listing checks that every unit of its commands
+is fresh, with no build:
+
+- The listing runs `cargo <command> -v --message-format json` with `CARGO_BUILD_JOBS=1`, in its own process
+  group. The status lines of `-v` name a unit before cargo acts on it: `Dirty <package>: <reason>` for a unit
+  that is not fresh, and `Compiling` or `Running` for a build step. The first such line stops the listing:
+  the group is killed.
+- A `Blocking ... directory` line (another cargo holds the lock of the folder) also stops the listing. The
+  listing never waits for that cargo. A wait for the shared package cache is short and does not stop it.
+- A JSON `compiler-artifact` with `fresh: false` also stops it. It comes after cargo has built that unit,
+  so it is a fallback for a cargo whose status text differs. Then one unit is built.
+- A stopped folder is skipped with `sweep skipped: a unit is not fresh (<status line>); run the standard
+  build first`. The other folder is still swept. The exit code is 0.
+- Measured on 2026-11-02 with cargo 1.99.1, a two-crate test workspace: a stop at 0.11 to 0.18 s. A fresh
+  listing of the same workspace: 0.1 s. A tree of Studio's size was not measured.
+
+What a stopped listing can still change:
+
+- Cargo removes the previous output of the first stale unit before it runs that unit's build step. The stop
+  can come after that removal (measured: the `.rlib` of a stale crate was removed in every run). The next build
+  compiles that unit anyway, because it was stale. No new output file is written.
+- Cargo writes its fingerprint marker files, and it creates the fingerprint folder of a unit that was never built.
+- A listing that names an uplifted binary (`debug/<bin>`) re-links it to the unit of the command. A standard
+  `cargo build` does the same.
 
 ### Safety
 
 - Every target is listed before any removal. A failing command in any target changes nothing.
-- A sweep never sweeps a folder whose listing compiled a unit: cargo's JSON shows `fresh: false` for it. The
-  folder is skipped and the output says why. The listing itself still runs cargo, so that one build is
-  spent. A sweep of a folder that was built with the same commands costs seconds and compiles nothing.
-- The sweep holds cargo's build lock (`debug/.cargo-lock`) during the removal and does not wait for it.
-  A busy lock skips that folder. A listing runs before the lock: a cargo that finishes between the two
-  can lose its newest units, and the next build compiles them again.
+- A folder that is not fresh is not swept. The next build of its commands makes it fresh, and then the sweep
+  removes its stale units.
+- The removal holds cargo's build lock (`debug/.cargo-lock`) and does not wait for it. A busy lock skips that
+  folder. A listing that ran before the lock can lose the newest units of a cargo that finishes between the two;
+  the next build compiles them again.
+- Exit codes: 0 for a skip (no `sweep` list, no `retest` list, a stale or busy folder), 1 for a failing cargo
+  command, 2 for a usage error.
 - An empty live set removes nothing.
 - `--dry-run` prints the bytes that a sweep would free and removes nothing.
 - An uplifted dylib (`target/debug/lib<name>.dylib`, no hashed copy in `deps`) keeps the units that hold its
@@ -212,11 +250,10 @@ The e2e test `sweep_removes_the_units_that_no_standard_command_uses` checks one 
   Test: `live_units_keeps_the_marked_units_of_an_uplifted_dylib`.
 - Output: `swept <folder>, freed N MB`, and the time of the whole command.
 
-### Listing that compiles
+### Listing of a command that was never built
 
-A listing that compiles a unit cannot be checked for the live set, so its folder is not swept. The
-`run` sweep follows the same rule: a standard command that was never built in `target/retest` (for
-example `--examples` when the test build did not compile them) skips the sweep of that run.
+A command whose units are not built yet (for example `--examples` when the test build did not compile them)
+is not fresh. The `run` sweep and `layr retest sweep` skip the folder, as in "Freshness".
 
 ### Studio measurement (2026-11-01)
 
