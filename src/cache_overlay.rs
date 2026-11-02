@@ -251,6 +251,7 @@ impl<'a> Repo<'a> {
         line: &Line,
         paths: &[String],
         shared: bool,
+        project_state: &str,
     ) -> Result<Vec<(String, String, String)>> {
         let w = self.working(line);
         let mut out = Vec::new();
@@ -298,6 +299,7 @@ impl<'a> Repo<'a> {
                     cache_by: Some(ctx.caller.uid),
                     cache_shared: shared,
                     cache_platform: Some(self.cache_key(&name, &w)?),
+                    cache_of: Some(project_state.to_string()),
                 };
                 if let Err(e) = crate::overlay::move_overlay_line(&orepo, ctx, "commit", &ol, &id, vec![st]) {
                     let _ = btrfs::delete_tree(&dst);
