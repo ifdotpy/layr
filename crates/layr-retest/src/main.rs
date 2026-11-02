@@ -73,6 +73,28 @@ fn profile_dir(dir: &Path, binary_id: &str, test: &str) -> PathBuf {
     dir.join(clean(binary_id)).join(clean(test))
 }
 
+/// The scratch folder of the raw profiles of the instrumented build in `target`. It is deleted after
+/// each run and after each sweep. The one owner of its path.
+fn profile_scratch(target: &Path) -> PathBuf {
+    target.join("profraw")
+}
+
+/// `LLVM_PROFILE_FILE` of every cargo call that retest makes with the instrumented flags. Cargo runs
+/// build scripts in these calls (the listings of the sweep too), and a build script without this
+/// variable writes `default_*.profraw` into its package folder, which is the project.
+fn cargo_profile_file(target: &Path) -> PathBuf {
+    profile_scratch(target).join("other/%p.profraw")
+}
+
+/// Deletes the scratch folder of a run when the run ends, on every exit.
+struct Scratch(PathBuf);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// Cargo target runner. In the run phase nextest sets the test name; the list phase has none.
 fn wrap(args: &[String]) -> Result<i32> {
     let args = args.strip_prefix(&["--".to_string()]).unwrap_or(args);
@@ -364,6 +386,7 @@ fn live_units(root: &Path, target: &Path, env: &[(String, String)], commands: &[
     for args in commands {
         let mut c = Command::new("cargo");
         c.args(listing(args)).current_dir(root).env("CARGO_TARGET_DIR", target).envs(env.iter().map(|(k, v)| (k, v)));
+        c.env("LLVM_PROFILE_FILE", cargo_profile_file(target));
         let o = c.stderr(Stdio::inherit()).output().with_context(|| format!("cannot start cargo {}", args.join(" ")))?;
         if !o.status.success() {
             bail!("cargo {} failed", args.join(" "));
@@ -372,6 +395,7 @@ fn live_units(root: &Path, target: &Path, env: &[(String, String)], commands: &[
         all.live.extend(l.live);
         all.built.extend(l.built);
     }
+    let _ = std::fs::remove_dir_all(profile_scratch(target));
     Ok(all)
 }
 
@@ -654,8 +678,9 @@ fn run(args: &[String]) -> Result<i32> {
     }
     // Build the instrumented tests and list them.
     let target = root.join("target/retest");
-    let profdir = target.join("profraw");
+    let profdir = profile_scratch(&target);
     let _ = std::fs::remove_dir_all(&profdir);
+    let _scratch = Scratch(profdir.clone());
     let exe = std::env::current_exe()?;
     let tools = (llvm_tool("llvm-profdata")?, llvm_tool("llvm-cov")?);
     let runner_var = format!("CARGO_TARGET_{}_RUNNER", rustc_host()?.to_uppercase().replace('-', "_"));
@@ -664,7 +689,7 @@ fn run(args: &[String]) -> Result<i32> {
         let mut c = Command::new("cargo");
         c.args(first).args(extra);
         // Cargo, build scripts and the list phase write here; the wrapper gives each test its own folder.
-        c.env("LLVM_PROFILE_FILE", profdir.join("other/%p.profraw"));
+        c.env("LLVM_PROFILE_FILE", cargo_profile_file(&target));
         c.env(PROFDATA_VAR, &tools.0);
         c.env("CARGO_TARGET_DIR", &target).env(PROFILE_DIR_VAR, &profdir);
         c.env(&runner_var, format!("{} retest wrap --", exe.display())).env("NEXTEST_EXPERIMENTAL_LIBTEST_JSON", "1");
@@ -827,7 +852,6 @@ fn run(args: &[String]) -> Result<i32> {
     lap.mark("record");
     save_records();
     lap.mark("save caches");
-    let _ = std::fs::remove_dir_all(&profdir);
     let failed = results.values().filter(|ok| !**ok).count();
     eprintln!(
         "layr-retest: ran {}, passed {}, failed {}, skipped {}; record {}; {:.1}s{}",
