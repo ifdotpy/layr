@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.2](https://github.com/ifdotpy/layr/compare/v0.14.1...v0.14.2) (2026-11-02)
+
+
+### Bug Fixes
+
+* **retest:** keep coverage profiles out of the source tree ([#129](https://github.com/ifdotpy/layr/issues/129)) ([4617c4d](https://github.com/ifdotpy/layr/commit/4617c4d9195c3b55802f858a318541d10e718f5f))
+
 ## [0.14.1](https://github.com/ifdotpy/layr/compare/v0.14.0...v0.14.1) (2026-11-02)
 
 
