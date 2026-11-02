@@ -164,10 +164,10 @@ ls "$BR/projects/x/states" | sort > "$T/after-states"
 eq "sync never removes a peer state" "" "$(comm -23 "$T/before-states" "$T/after-states")"
 eq "the deleted line is absent on B" "" "$(B line list | grep doomed || true)"
 l config undo.ops 0
-l config undo.deleted 0
 l config retention.auto 0
 l gc --repair >/dev/null
-no "local gc removes the unreachable local state" test -e "$retained_dir"
+# The deleted line's final state stays while the undo.deleted ring holds it (docs/ownership.md).
+ok "local gc keeps the deleted line's final state in the undo.deleted ring" test -e "$retained_dir"
 ok "local gc leaves the other snapshot" test -d "$BR/projects/x/states/$(basename "$retained_dir")"
 # Send the signed gc record. B must keep its own bytes and ignore the foreign deletion flag.
 l sync peer --command -- "${transport[@]}"
