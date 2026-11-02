@@ -746,6 +746,17 @@ impl Db {
         Ok(v)
     }
 
+    /// The present states of a cache overlay that name the project state they were saved with
+    /// (`cache_of`), newest first: (state, project state).
+    pub fn cache_states(&self) -> Result<Vec<(String, String)>> {
+        let mut st = self.conn.prepare(
+            "SELECT id, json_extract(rec, '$.cache_of') FROM states
+             WHERE present=1 AND deleted=0 AND json_extract(rec, '$.cache_of') IS NOT NULL ORDER BY time DESC",
+        )?;
+        let v = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?.collect::<Result<Vec<_>, _>>()?;
+        Ok(v)
+    }
+
     /// The newest local states, by time, whose folders the rollback check looks at.
     #[cfg_attr(not(all(target_os = "linux", not(feature = "overlayfs"))), allow(dead_code))]
     pub fn newest_present_states(&self, n: usize) -> Result<Vec<String>> {
