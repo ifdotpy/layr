@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.0](https://github.com/ifdotpy/layr/compare/v0.14.2...v0.15.0) (2026-11-02)
+
+
+### Features
+
+* **merge:** add --caches-only to take a line's caches ([#133](https://github.com/ifdotpy/layr/issues/133)) ([a255309](https://github.com/ifdotpy/layr/commit/a255309476846cac8fdd556bdaf3226cd204b399))
+
 ## [0.14.2](https://github.com/ifdotpy/layr/compare/v0.14.1...v0.14.2) (2026-11-02)
 
 

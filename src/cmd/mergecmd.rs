@@ -691,6 +691,7 @@ pub fn merge(ctx: &Ctx, args: &[String]) -> Result<i32> {
         .flag("--continue")
         .flag("--no-edit")
         .flag("--no-save")
+        .flag("--caches-only")
         .removed("--no-commit", "--no-save")
         .flag("-q|--quiet")
         .flag("--stat")
@@ -707,6 +708,9 @@ pub fn merge(ctx: &Ctx, args: &[String]) -> Result<i32> {
         return Err(exit(1, "layr merges never stop on a conflict: fix the files and run 'layr save -m <message>'."));
     }
     let rev = a.pos.first().ok_or_else(|| exit(128, "usage: layr merge <rev> [--expect <state>]"))?.clone();
+    if a.has("--caches-only") {
+        return caches_only(ctx, &h.repo, &line, &rev, a.has("-q"));
+    }
     let before = line.head.clone();
     let code = merge_rev(ctx, &h.repo, &line, &rev, &a);
     discard_prepared(&h.repo);
@@ -747,6 +751,69 @@ pub fn merge(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
     }
     Ok(code)
+}
+
+/// `merge <line> --caches-only`: the caches of a line, with no tree change and no merge commit.
+/// A protected line takes them only when its rule allows and the source caches name a project
+/// state whose changes the target already holds (a squash merge passes).
+fn caches_only(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str, quiet: bool) -> Result<i32> {
+    let theirs = repo.p.db.line_by_name(rev)?.ok_or_else(|| exit(1, format!("error: '{rev}' is not a line")))?;
+    let theirs = repo.localize(theirs)?;
+    // No head moves, so the reviewed-state rule of a protected line does not apply.
+    repo.authorize_line(ctx, line, crate::repo::LineOp::Merge { expect: true, hint: None })?;
+    let lock = repo.p.lock()?;
+    let line = repo.line(&line.id)?;
+    if let Some(rule) = repo.policy().rule_for(&line.name) {
+        if !merge_met_rule(repo, &rule, &line.head, &line.head, &theirs.head)? {
+            let reason = "checks and approvals do not allow them";
+            return Err(exit(1, format!("error: caches of '{rev}' refused: line '{}' {reason}", line.name)));
+        }
+        if let Some(reason) = caches_contained(repo, &line, &theirs)? {
+            return Err(exit(1, format!("error: caches of '{rev}' refused: {reason}")));
+        }
+    }
+    // The copies of build output take minutes: they hold only the lock of each cache overlay.
+    drop(lock);
+    let taken = repo.pull_caches(ctx, &line, &crate::cache_overlay::Source::Line(&theirs))?;
+    for (p, id) in &taken {
+        if !quiet {
+            outln!(ctx, "Merged cache {p}: {}", ids::short(id));
+        }
+    }
+    Ok(0)
+}
+
+/// The squash-safe check of a protected target: for each cache of the source, the changes from
+/// the base to the project state the cache was saved with must hold the same content in the
+/// target head. None when they do; else the reason, naming the first path that differs.
+fn caches_contained(repo: &Repo, line: &Line, theirs: &Line) -> Result<Option<String>> {
+    let rules = crate::ignore_rules::Rules::new(&repo.working(line));
+    let head = repo.state_src(&line.head)?;
+    for (name, _) in repo.folder_overlays()? {
+        // The newest cache of the source line: the head of its overlay line (`cache_source`).
+        let info = repo.need_overlay(&name)?;
+        let orepo = repo.overlay_repo(&name)?;
+        let Some(ol) = orepo.p.db.line_by_name(&Repo::overlay_line_name(&info, &theirs.id, theirs.owner))? else {
+            continue;
+        };
+        let Some(saved) = orepo.p.db.state(&ol.head)?.and_then(|s| s.cache_of) else {
+            return Ok(Some(format!(
+                "the cache of {} names no project state; run `layr save --caches` in {} first",
+                theirs.name, theirs.name
+            )));
+        };
+        let Some(base) = repo.merge_base(&saved, &line.head)? else {
+            return Ok(Some(format!("the cache of {} and line '{}' have no common state", theirs.name, line.name)));
+        };
+        let (base, saved) = (repo.state_src(&base)?, repo.state_src(&saved)?);
+        for found in crate::radar::compare(&base, &saved, &rules)? {
+            if crate::radar::recheck(&saved, &head, &rules, &found.path)?.is_some() {
+                let (path, name) = (&found.path, &theirs.name);
+                return Ok(Some(format!("'{path}' differs from the saved state of the cache of {name}")));
+            }
+        }
+    }
+    Ok(None)
 }
 
 #[derive(Debug)]
@@ -1414,6 +1481,7 @@ mod approval_tests {
             cache_by: None,
             cache_shared: false,
             cache_platform: None,
+            cache_of: None,
         };
         let base = state(StateKind::Commit, vec![]);
         let derived = state(StateKind::Derived, vec![]);

@@ -538,6 +538,7 @@ impl<'a> Repo<'a> {
             cache_by: None,
             cache_shared: false,
             cache_platform: None,
+            cache_of: None,
         })
     }
 
@@ -633,6 +634,7 @@ impl<'a> Repo<'a> {
             cache_by: None,
             cache_shared: false,
             cache_platform: None,
+            cache_of: None,
         })
     }
 
@@ -3161,6 +3163,7 @@ mod cache_platform_tests {
                 cache_by: None,
                 cache_shared: false,
                 cache_platform: None,
+                cache_of: None,
             });
             p.append(rec, &ctx.actor()).unwrap();
             let repo = Repo::open(&ctx, "p").unwrap();
@@ -3275,6 +3278,7 @@ mod commit_record_tests {
             cache_by: None,
             cache_shared: false,
             cache_platform: None,
+            cache_of: None,
         });
         crate::db::FAIL_AFTER_COMMIT.with(|f| f.set(true));
         assert!(repo.commit_record(&ctx, rec).is_err());
