@@ -688,6 +688,7 @@ mod tests {
             cache_by: None,
             cache_shared: false,
             cache_platform: None,
+            cache_of: None,
         }
     }
 

@@ -126,7 +126,7 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
                     record_caches(ctx, repo, &s.id, &repo.working(&l), &caches, shared)?;
                     // The line's caches as cache overlays (docs/cache-overlays.md): new lines from
                     // this line take them, whatever state the line's name selects.
-                    for (p, name, id) in repo.save_cache_overlays(ctx, &l, &caches, shared)? {
+                    for (p, name, id) in repo.save_cache_overlays(ctx, &l, &caches, shared, &s.id)? {
                         if !a.has("-q") {
                             outln!(ctx, "{p}: overlay {name} {}", ids::short(&id));
                         }

@@ -394,3 +394,20 @@ the new file equals the old one. `layr gc --dedup` shares such content again, on
 - The block pass is plain code with tests on every platform. The ioctl runs on btrfs only: its
   test is `tests/t72-gc-dedup.sh` in the Linux job. On a file system without `FIDEDUPERANGE` the
   pass ends without a change.
+
+## 17. `merge <line> --caches-only`
+
+`layr merge <line> --caches-only` brings the caches of a line into the current line. It runs only
+the cache step of `merge`: no file changes, no merge commit, and the head does not move. The
+taken states are written as overlay line records, so their owners follow the overlay lines.
+
+- `StateRec.cache_of` (new) names the project state whose working folder a cache snapshot was
+  taken with. `save --caches` sets it. It creates no owner. A cache without it (an older save, or
+  a union state) cannot pass a protected target.
+- A protected target takes the caches only when its rule allows (checks and approvals of the
+  head, as for a merge) and the squash-safe check passes: for each cache of the source, the
+  changes from the merge base of the saved state and the target head to the saved state must
+  hold the same content in the target head. Ignored paths and `skip_path` paths are not compared.
+  A refusal names the first path that differs.
+- An unprotected target takes the caches without the check.
+- Test: `tests/t101-merge-caches-only.sh` (macOS and Linux CI, OverlayFS on ext4 and XFS).
