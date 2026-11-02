@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.1](https://github.com/ifdotpy/layr/compare/v0.14.0...v0.14.1) (2026-11-02)
+
+
+### Bug Fixes
+
+* **init:** Read the source as the caller and write the store as root ([#128](https://github.com/ifdotpy/layr/issues/128)) ([2d7d575](https://github.com/ifdotpy/layr/commit/2d7d57522e57913b355855afad68be3f57c24a01))
+
 ## [0.14.0](https://github.com/ifdotpy/layr/compare/v0.13.1...v0.14.0) (2026-11-01)
 
 
