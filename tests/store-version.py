@@ -38,16 +38,12 @@ absent = root / "absent"
 report = inspect(absent)
 assert report["state"] == "absent" and report["compatible"] and report["store"] is None
 assert report["upgrade"] is None
-run(absent, "store-version", "--upgrade", code=128)
-assert not absent.exists(), "inspection and a refused upgrade create no root"
+assert not absent.exists(), "inspection creates no root"
 store = root / "store"
 store.mkdir(exist_ok=True)
 before = tree(store)
 assert inspect(store)["state"] == "empty"
 assert inspect(store)["upgrade"] is None
-result = run(store, "store-version", "--upgrade", code=128)
-assert "the store is empty" in result.stderr
-assert tree(store) == before, "an empty-root upgrade creates no marker or lock"
 assert tree(store) == before, "inspection creates no marker or lock"
 run(store, "--version")
 run(store, "--help")
@@ -83,36 +79,22 @@ for number in (0, 2, 999):
             assert text in result.stderr, (text, result.stderr)
         assert tree(store) == before, "incompatible access changed the store"
     assert not inspect(store)["compatible"]
-    assert inspect(store)["upgrade"] == ({"metadataOnly": True, "fromFormat": 0, "toFormat": 1} if number == 0 else None)
+    assert inspect(store)["upgrade"] is None
     assert tree(store) == before
-    if number > 1:
-        run(store, "store-version", "--upgrade", code=128)
-        assert tree(store) == before, "upgrade must not downgrade a future store"
 print("PASS incompatible reads, writes, and downgrades fail before mutation", flush=True)
+marker.write_text(json.dumps(current))
+assert inspect(store)["compatible"]
 
-legacy = root / "legacy"
-legacy.mkdir()
-(legacy / "evidence").write_text("legacy bytes\n")
-before = tree(legacy)
-assert inspect(legacy)["state"] == "legacy"
-assert inspect(legacy)["upgrade"] == {"metadataOnly": True, "fromFormat": 0, "toFormat": 1}
-result = run(legacy, "projects", code=128)
-assert "format 0" in result.stderr and "--upgrade" in result.stderr
-assert tree(legacy) == before
-run(legacy, "store-version", "--upgrade")
-assert inspect(legacy)["compatible"] and (legacy / "evidence").read_text() == "legacy bytes\n"
-print("PASS legacy stores require an explicit upgrade", flush=True)
-
-marker.write_text(json.dumps(dict(current, format=0)))
-with (store / ".layr-version.lock").open("r+") as lease:
-    fcntl.flock(lease, fcntl.LOCK_SH)
-    before = tree(store)
-    result = run(store, "store-version", "--upgrade", code=128)
-    assert "in use" in result.stderr
-    assert tree(store) == before
-run(store, "store-version", "--upgrade")
-assert inspect(store)["store"] == current
-print("PASS an active writer blocks a format upgrade", flush=True)
+# A folder without the layr machine identity is not a store. It is refused and not changed.
+foreign = root / "foreign"
+foreign.mkdir()
+(foreign / "evidence").write_text("other bytes\n")
+before = tree(foreign)
+assert inspect(foreign)["state"] == "incompatible" and inspect(foreign)["upgrade"] is None
+result = run(foreign, "projects", code=128)
+assert "format 0" in result.stderr and "no machine/id" in result.stderr, result.stderr
+assert tree(foreign) == before, "a folder that is not a store is not changed"
+print("PASS a folder without a layr machine identity is refused", flush=True)
 
 # Revalidate the marker after a blocked lease. The old preflight is insufficient.
 with (store / ".layr-version.lock").open("r+") as lease:
@@ -137,7 +119,7 @@ with (store / ".layr-version.lock").open("r+") as lease:
             proc.communicate()
 print("PASS a different format cannot enter after the lease wait", flush=True)
 
-# A marker's temporary file is not legacy store data. Wait for its writer.
+# A marker's temporary file is not store data. Wait for its writer.
 initializing = root / "initializing"
 initializing.mkdir()
 with (initializing / ".layr-version.lock").open("w+") as lease:
@@ -175,4 +157,4 @@ marker.symlink_to(outside)
 run(store, "projects", code=128)
 assert outside.read_text() == json.dumps(current)
 print("PASS malformed and symlink markers refuse access", flush=True)
-print("t53-store-version.sh: 8 passed, 0 failed")
+print("t53-store-version.sh: 7 passed, 0 failed")
