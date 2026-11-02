@@ -616,3 +616,47 @@ fn sweep_skips_a_folder_whose_listing_compiled() {
     assert!(entries(&debug, ".fingerprint").len() < after.len());
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// The sweep lists a standard command with a feature that the test run never built. Its listing
+/// compiles the build script of the project and runs it. Cargo gives that run no profile file of its
+/// own: the script wrote `default_*.profraw` into the project, and the stray cleanup removed it at the
+/// end of the run. No file may reach the project, and the scratch folder of the profiles is gone.
+#[test]
+fn build_scripts_write_no_profile_into_the_project() {
+    let tmp = std::env::temp_dir().canonicalize().unwrap().join(format!("layr-retest-buildrs-{}", std::process::id()));
+    let src = tmp.join("src-project");
+    std::fs::create_dir_all(src.join("src")).unwrap();
+    std::fs::write(
+        src.join("Cargo.toml"),
+        "[package]\nname = \"bsc\"\nversion = \"0.1.0\"\nedition = \"2021\"\nbuild = \"build.rs\"\n\n[features]\nextra = []\n\n[workspace]\n\n[workspace.metadata.layr-retest]\nsweep = [[\"build\", \"--features\", \"extra\"]]\n",
+    )
+    .unwrap();
+    std::fs::write(src.join("build.rs"), "fn main() {\n    println!(\"cargo:rerun-if-changed=build.rs\");\n}\n").unwrap();
+    std::fs::write(
+        src.join("src/lib.rs"),
+        "pub fn a() -> i32 {\n    1\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn ta() {\n        assert_eq!(super::a(), 1);\n    }\n}\n",
+    )
+    .unwrap();
+    std::fs::write(src.join(".layrattributes"), ".layr-retest regenerable\ntarget regenerable\n").unwrap();
+    std::fs::write(src.join(".gitignore"), "/target\n/.layr-retest\n").unwrap();
+    sh(&src, &tmp.join("unused"), "cargo", &["generate-lockfile", "--offline"]);
+    let root = tmp.join("store");
+    sh(&tmp, &root, "layr", &["init", "app", "--from", src.to_str().unwrap()]);
+    sh(&root.join("projects/app/lines/main"), &root, "layr", &["line", "new", "work"]);
+    let line = root.join("projects/app/lines/work");
+
+    let err = retest(&line, &root, &["run"]);
+    assert!(err.contains("passed 1, failed 0"), "{err}");
+    assert!(!err.contains("stray"), "{err}");
+    let stray: Vec<_> = walk(&line).into_iter().filter(|p| p.extension().is_some_and(|e| e == "profraw")).collect();
+    assert!(stray.is_empty(), "{stray:?}");
+    assert!(!line.join("target/retest/profraw").exists());
+
+    sh(&line, &root, "layr", &["retest", "sweep"]);
+    let stray: Vec<_> = walk(&line).into_iter().filter(|p| p.extension().is_some_and(|e| e == "profraw")).collect();
+    assert!(stray.is_empty(), "{stray:?}");
+    assert!(!line.join("target/retest/profraw").exists());
+
+    let _ = Command::new("chflags").args(["-R", "nouchg"]).arg(&tmp).status();
+    let _ = std::fs::remove_dir_all(&tmp);
+}
