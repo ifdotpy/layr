@@ -3,6 +3,8 @@
 # first open, with no extra command. A folder that is not a layr store, a store that is not
 # writable, and parallel first opens are checked too.
 . "$(dirname "$0")/lib.sh"
+# Stores under the test root: on Linux, init creates btrfs subvolumes, so the root is the btrfs mount.
+ROOTFS=$LAYR_ROOT
 unset LAYR_ROOT
 export LAYR_DIRECT=1
 
@@ -16,8 +18,8 @@ same_identity() { # same_identity <store>: the marker equals the binary identity
     "$LAYR" --root "$1" store-version --json | python3 -c 'import json,sys; r=json.load(sys.stdin); m=json.load(open(sys.argv[1])); sys.exit(0 if r["store"] == r["binary"] == m else 1)' "$1/store-version.json"
 }
 
-S=$T/auto
-r "$S" init demo -q >/dev/null 2>&1
+S=$ROOTFS/auto
+ok "init creates a project in a new store" r "$S" init demo -q
 ok "a new store writes its marker" test -f "$S/store-version.json"
 
 rm "$S/store-version.json"
@@ -38,8 +40,8 @@ eq "a folder without a layr machine identity is refused" 128 "$rc"
 has "the refusal names the missing machine identity" "no machine/id" "$out"
 eq "the refused folder is not changed" "$before" "$(find "$F" | sort)"
 
-P=$T/parallel
-r "$P" init demo -q >/dev/null 2>&1
+P=$ROOTFS/parallel
+ok "init creates a project in the parallel store" r "$P" init demo -q
 rm "$P/store-version.json"
 pids=()
 for i in 1 2 3 4 5 6 7 8; do
@@ -62,8 +64,8 @@ no "an explicit format 0 marker is refused, not upgraded" r "$P" projects
 if [ "$(id -u)" = 0 ]; then
     echo "SKIP a store that is not writable (root ignores permission bits)"
 else
-    W=$T/readonly
-    r "$W" init demo -q >/dev/null 2>&1
+    W=$ROOTFS/readonly
+    ok "init creates a project in the read-only store" r "$W" init demo -q
     rm "$W/store-version.json"
     before=$(find "$W" | sort)
     chmod u-w "$W"
