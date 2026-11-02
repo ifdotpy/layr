@@ -249,8 +249,11 @@ Built on 2026-10-27: folder overlays and caches as cache overlays. Tests:
   line's overlay line. Each state records the user, the platform (`<os>-<arch>`) and whether the
   line is protected, with the rules of `design.md` section 5 for who may take it.
 - `line new X <line>` takes the newest cache state of that line (dogfood item 10).
-  `line new X <state>` takes the newest cache of the line that made the state, or of the line of
-  its nearest ancestor that has one (item 21). A cache overlay goes into a new line only while
+  `line new X <state>` takes the cache of the state, else of its nearest ancestor that has one
+  (item 21). For each state on that walk it takes first the newest cache saved with it
+  (`cache_of`; a cache saved with an automatic state counts for its parent, the line head), and
+  else the newest cache of the line that made the state. A state imported from Git has no line,
+  so without `cache_of` the walk ends at an old state of another line and takes its old cache. A cache overlay goes into a new line only while
   its folder is a cache path there (`regenerable`) and the ignore rules ignore it.
   Without a cache overlay state, the old caches of the state apply as before.
 - `layr merge <line>` then brings the merged line's caches into the target (section 5): a

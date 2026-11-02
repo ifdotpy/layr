@@ -325,8 +325,10 @@ impl<'a> Repo<'a> {
     }
 
     /// The cache state of overlay `name` that a line of `uid` takes: the newest cache of the
-    /// source line, or for a state the newest cache of the line that made it or of the line of its
-    /// nearest ancestor that has one.
+    /// source line, or for a state the cache of the nearest ancestor (the state itself first):
+    /// the newest cache saved with that state (`cache_of`), else the newest cache of the line that
+    /// made it. A state imported from git has no line, so without `cache_of` the walk would reach
+    /// an old state of some line and take its old cache.
     pub fn cache_source(&self, name: &str, from: &Source, uid: u32, key: &str) -> Result<Option<String>> {
         let info = self.need_overlay(name)?;
         let orepo = self.overlay_repo(name)?;
@@ -334,6 +336,23 @@ impl<'a> Repo<'a> {
             let Some(ol) = orepo.p.db.line_by_name(&format!("line-{line_id}"))? else { return Ok(None) };
             Ok(self.usable_cache(&orepo, &info.root, &ol.head, uid, key)?.then_some(ol.head))
         };
+        // The newest usable cache saved with each project state. `save --caches` on a line with
+        // no named change saves with an automatic state over the head: that cache counts for the
+        // head too.
+        let mut saved_with: std::collections::HashMap<String, String> = Default::default();
+        for (id, of) in orepo.p.db.cache_states()? {
+            if !self.usable_cache(&orepo, &info.root, &id, uid, key)? {
+                continue;
+            }
+            if let Some(st) = self.p.db.state(&of)? {
+                if st.kind == crate::model::StateKind::Auto {
+                    if let Some(parent) = st.parents.first() {
+                        saved_with.entry(parent.clone()).or_insert_with(|| id.clone());
+                    }
+                }
+            }
+            saved_with.entry(of).or_insert(id);
+        }
         let start = match from {
             Source::Line(l) => {
                 if let Some(s) = of_line(&l.id)? {
@@ -349,6 +368,9 @@ impl<'a> Repo<'a> {
         while let Some(id) = q.pop_front() {
             if seen.len() >= SEARCH || !seen.insert(id.clone()) {
                 continue;
+            }
+            if let Some(s) = saved_with.get(&id) {
+                return Ok(Some(s.clone()));
             }
             let Some(rec) = self.p.db.state(&id)? else { continue };
             if let Some(l) = &rec.line {
