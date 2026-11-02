@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.16.1](https://github.com/ifdotpy/layr/compare/v0.16.0...v0.16.1) (2026-11-02)
+
+
+### Bug Fixes
+
+* **caches:** A line from a state takes the cache saved with it ([#142](https://github.com/ifdotpy/layr/issues/142)) ([584b0d9](https://github.com/ifdotpy/layr/commit/584b0d9fb9a733fba06a35424416adb64bc5afd3))
+* **retest:** sweep only configured dirs and never compile ([#141](https://github.com/ifdotpy/layr/issues/141)) ([a38756d](https://github.com/ifdotpy/layr/commit/a38756dcbe6bc121da725298d85fd800af7d012a))
+* **store:** Read the marker again before refusing a half-made store ([#144](https://github.com/ifdotpy/layr/issues/144)) ([fd8cb5b](https://github.com/ifdotpy/layr/commit/fd8cb5bcfd95218396634a035ba9cb5f9ba11429))
+
 ## [0.16.0](https://github.com/ifdotpy/layr/compare/v0.15.0...v0.16.0) (2026-11-02)
 
 
