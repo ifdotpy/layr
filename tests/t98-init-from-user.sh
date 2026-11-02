@@ -18,6 +18,8 @@ trap 'kill $DPID 2>/dev/null; cleanup' EXIT
 for i in $(seq 1 50); do [ -S $LAYR_SOCKET ] && break; sleep 0.1; done
 as() { local u=$1; shift; runuser -u $u -- env LAYR_SOCKET=$LAYR_SOCKET PATH=/usr/bin:/bin "$@"; }
 L=$T/layr
+# The user runs commands from a folder it can enter (the checkout of the runner is closed to it).
+cd $T
 
 # The user's folder: closed to others, a private file, a hard link pair and a link.
 S=$T/u1-src
