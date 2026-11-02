@@ -387,6 +387,18 @@ impl Repo<'_> {
 
     pub fn overlaps(&self, ctx: &Ctx, line: &Line) -> Result<Vec<Overlap>> {
         self.can_read(ctx)?;
+        // The lines are read first, and their heads pinned for the command: the compares read those
+        // heads and their merge bases (ancestors of the heads). A free step of another command
+        // cannot remove them while the compares run.
+        // The compared lines: other lines of this machine with a working folder, read before the pins.
+        let lines: Vec<Line> = self
+            .lines()?
+            .into_iter()
+            .filter(|o| o.id != line.id && o.machine == self.p.store.machine.id && self.working(o).exists())
+            .collect();
+        let mut heads: Vec<&str> = lines.iter().map(|l| l.head.as_str()).collect();
+        heads.push(line.head.as_str());
+        self.hold(self.pin(&heads)?);
         // Taking the working folder tree is costly; do it only when another line needs it.
         let mut ours: Option<(Option<crate::repo::Temp>, PathBuf)> = None;
         let ignored = Rules::new(&self.working(line));
@@ -395,10 +407,7 @@ impl Repo<'_> {
         let mut work = Work::default();
         let mut plans: Vec<OtherPlan> = Vec::new();
         // Step 1, on this thread: the live parts and the state lookups (`Repo` is not `Sync`).
-        for other in self.lines()? {
-            if other.id == line.id || other.machine != self.p.store.machine.id || !self.working(&other).exists() {
-                continue;
-            }
+        for other in lines {
             let base = match self.merge_base(&line.head, &other.head)? {
                 Some(base) => base,
                 None => continue,

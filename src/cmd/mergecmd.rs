@@ -851,6 +851,10 @@ pub fn merge_queued(
         Err(error) => return (Err(error), None),
     };
     let queue = QueuedMerge { entry, expected_head, attempts, run_probes, probes: Default::default() };
+    match repo.pin(&[&entry.state, expected_head]) {
+        Ok(pin) => repo.hold(pin),
+        Err(error) => return (Err(error), None),
+    }
     let result = (|| {
         let source = repo.source_state(&entry.state)?;
         if !source.conflicts.is_empty() {
@@ -934,6 +938,9 @@ fn merge_rev_inner(
         _ => None,
     };
     repo.authorize_line(ctx, line, crate::repo::LineOp::Merge { expect, hint: hint.as_deref() })?;
+    if queue.is_none() {
+        repo.hold(repo.pin(&[&revs::resolve(repo, Some(line), rev)?])?);
+    }
     #[cfg(target_os = "macos")]
     if queue.is_none() {
         let _ = prepare_merge(ctx, repo, line, rev);
@@ -1210,6 +1217,8 @@ fn pick(ctx: &Ctx, args: &[String], revert: bool) -> Result<i32> {
             picks.push(revs::resolve(repo, Some(&line), r)?);
         }
     }
+    let picked: Vec<&str> = picks.iter().map(String::as_str).collect();
+    repo.hold(repo.pin(&picked)?);
     // The merge of each picked state onto the head (base and theirs swapped for an invert).
     let pair = |p: &str| -> Result<(String, String)> {
         let parent = repo.state(p)?.parents.first().cloned().ok_or_else(|| exit(128, format!("fatal: {} has no parent", ids::short(p))))?;
@@ -1338,6 +1347,7 @@ pub fn rebase(ctx: &Ctx, args: &[String]) -> Result<i32> {
         Some(o) => revs::resolve(repo, Some(&line), o)?,
         None => upstream.clone(),
     };
+    repo.hold(repo.pin(&[&line.head, &upstream, &onto])?);
     #[cfg(target_os = "macos")]
     let prepared = (line.head.clone(), prepare_replay(ctx, repo, &line, &upstream, &onto).unwrap_or_default());
     #[cfg(not(target_os = "macos"))]

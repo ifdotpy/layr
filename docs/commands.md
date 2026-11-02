@@ -213,7 +213,9 @@ A state that a live thin layer (APFS) uses as its base keeps its storage until t
 `packaging/launchd/ws.layr.gc.plist`).
 
 Test only (tests/t99-ownership-free.sh): `LAYR_TEST_EXIT_AFTER_COMMIT=1` exits with status 86
-after a commit that queued states, before the free step. It is not for use otherwise.
+after a commit that queued states, before the free step. Test only (tests/t100-pin-reads.sh):
+`LAYR_TEST_PIN_HOLD_MS=<ms>` sleeps once per process after its pins are taken. Neither is for use
+otherwise.
 
 Revisions: `head`, `@`, `head~2`, `head^2`, line names, `line@machine`, tags, `origin/main`,
 state id prefixes, git commit ids (full or a prefix of at least 4 digits), `park@{n}`, `head@{n}`

@@ -104,17 +104,29 @@ frees a state that a local owner holds: owners are per state, not per machine.
 
 ## Pins
 
-A command that reads a state outside the store lock pins it: a row `pin` with holder
-`<pid>:<process start>` (`free::pin`, an RAII guard). A pin only counts for a state that has
-another owner. A state that no owner names, or that is queued for freeing, is refused: the reader
-fails with "was freed by another layr command; read it again". A pinned state that loses its other
-owners stays live until the pin ends. The end of the pin marks the state dead when no other owner
-remains, and the free step of that command frees it. Pins of dead processes are released by the
-next free step and by `gc --repair`.
+A command that reads a saved state while the store lock may be free pins it: a row `pin` with holder
+`<pid>:<process start>`. `free::pin` takes the pins of a set of states (`Repo::pin`), and
+`Repo::hold` keeps them until the command ends (`free::finish`). A pin counts only for a state that
+has another owner. A state that no owner names, or that a free step already queued, is refused:
+the reader fails with "state X was freed: no line, ref, tag or undo record keeps it", and it never
+reads the content of a freed state. A pinned state that loses its other owners stays until the pin
+ends; the end of the command marks it dead, and the free step of that command frees it. Pins of dead
+processes are released by the next free step and by `gc --repair`. A pinned state also keeps its
+ancestors, because its parent rows stay.
 
-Covered: the checks that `try` and `layr try --check` run (the state under test). Not yet
-covered: the source states of merge and pick, `line new` from a state, prepared saves and the
-overlap compares of `status`. A free step that runs during such a read can remove the state.
+Covered (each call site pins its states for the whole command):
+- save and every write command (`prepare_save`: the head and the save base), save with caches;
+- merge (the source), merge queue entries (the source and the expected head), pick and revert (the
+  picked states), replay (the head, the upstream and the onto state), undo (every state the record
+  names);
+- `line new` (the start state and the source head, with its caches);
+- status and the other overlap compares (`overlaps`: every compared head, read before the pins);
+- diff, show and log (the revisions they name and the line head);
+- `try` and checks (the state under test).
+
+Test: tests/t100-pin-reads.sh. The test hook `LAYR_TEST_PIN_HOLD_MS` (test only) sleeps once per
+process after its pins are taken, so a second process can drop the last owner of a state that the
+reader holds.
 
 ## Temporary objects
 
@@ -200,6 +212,8 @@ the replay fills the owners, and `layr gc` reports the states that no owner name
 
 ## Tests
 
+- tests/t100-pin-reads.sh: a merge source, a save base and an overlap compare stay on disk while
+  their reader runs, and go after it.
 - tests/t99-ownership-free.sh: line delete frees its states in that command, the `undo.deleted`
   ring, the auto ring, `undo.ops`, the crash between commit and move, a pinned read, the time keys,
   `gc` check and repair.

@@ -76,6 +76,7 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
         repo.authorize_line(ctx, &l, crate::repo::LineOp::Save)?;
         if a.has("--caches") {
             // A cache copy that a later cache fails to make leaves the earlier ones in the work folder.
+            repo.hold(repo.pin(&[&l.head, &repo.save_base(&l)?])?);
             if let Err(e) = prepare_caches(repo, &l, a.get("--cache")) {
                 repo.discard_prepared();
                 return Err(e);
@@ -366,6 +367,10 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
             ));
         }
     }
+    // The states that the undo reads stay on disk while it runs (every line's entry of the record).
+    let named: Vec<String> = crate::owners::undo_entries(&r, &crate::owners::record_ord(&r)).into_iter().flat_map(|(_, v)| v).collect();
+    let named: Vec<&str> = named.iter().map(String::as_str).collect();
+    repo.hold(repo.pin(&named)?);
     // Permissions: undo changes every line the operation changed, so the caller must be allowed
     // to change each of them. An operation without lines (tags, groups) needs the admin or the
     // user who made it.
@@ -845,7 +850,7 @@ fn run_check_in(
     view: Option<&crate::overlay::View>,
 ) -> Result<i32> {
     // The check runs outside the store lock on this state: a free step must not remove it meanwhile.
-    let _pin = crate::free::pin(&repo.p, state)?;
+    let _pin = repo.pin(&[state])?;
     let layers = view.map(|v| v.layers.as_slice()).unwrap_or(&[]);
     with_try_copy(ctx, repo, state, layers, keep, |dir| {
         if !quiet {

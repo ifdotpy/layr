@@ -26,6 +26,7 @@ pub fn register(store: &Store, name: &str) {
 /// (the queue keeps the states). Test only: `LAYR_TEST_EXIT_AFTER_COMMIT` exits with status 86
 /// here, before any storage moves, when a queue is not empty (tests/t99-ownership-free.sh).
 pub fn finish(store: &Store) {
+    release_held();
     let names: Vec<String> = match OPENED.lock() {
         Ok(mut opened) => {
             let names = opened.iter().filter(|(root, _)| *root == store.root).map(|(_, n)| n.clone()).collect();
@@ -154,27 +155,69 @@ fn process_start(pid: u32) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
-/// A pin of a state for this process. The state stays on disk until the guard goes.
-pub struct Pin<'p, 'a> {
-    p: &'p Project<'a>,
-    state: String,
+/// Pins of states that a command reads outside the store lock, or under it while another process
+/// may free them (docs/ownership.md, "Pins"). A guard owns the database path, so a command can
+/// hold its pins (`hold`) until its end. Released when the guard goes.
+pub struct Pin {
+    db: PathBuf,
     holder: String,
-    pinned: bool,
+    states: Vec<String>,
 }
 
-/// Pin a state that a reader uses outside the store lock. Fails when another command freed it.
-pub fn pin<'p, 'a>(p: &'p Project<'a>, state: &str) -> Result<Pin<'p, 'a>> {
+/// Pin states for this process. A state with no owner needs no pin (nothing frees it). A state
+/// that another command already freed makes the call fail: the reader must read it again.
+pub fn pin(p: &Project, states: &[&str]) -> Result<Pin> {
     let holder = self_holder();
-    let pinned = p.db.pin_add(state, &holder)?;
-    Ok(Pin { p, state: state.to_string(), holder, pinned })
+    let mut guard = Pin { db: crate::store::db_file(&p.dir), holder: holder.clone(), states: Vec::new() };
+    for state in states {
+        // On a refusal the guard built so far is dropped, which releases its pins.
+        if p.db.pin_add(state, &holder)? {
+            guard.states.push(state.to_string());
+        }
+    }
+    hold_for_tests();
+    Ok(guard)
 }
 
-impl Drop for Pin<'_, '_> {
+thread_local! {
+    /// The pins of the command that runs in this thread: released at its end (`finish`).
+    static HELD: std::cell::RefCell<Vec<Pin>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Keep a pin until the command ends (`finish`), so every read of the command stays protected.
+pub fn hold(pin: Pin) {
+    if !pin.states.is_empty() {
+        HELD.with(|h| h.borrow_mut().push(pin));
+    }
+}
+
+/// Release the pins of this command now.
+fn release_held() {
+    let pins = HELD.with(|h| std::mem::take(&mut *h.borrow_mut()));
+    drop(pins);
+}
+
+/// Test only (tests/t_pin_free.sh): `LAYR_TEST_PIN_HOLD_MS` sleeps once per process after its
+/// first pins, so a second process can free the pinned states while this one holds them.
+fn hold_for_tests() {
+    static HELD_ONCE: std::sync::Once = std::sync::Once::new();
+    let Some(ms) = std::env::var("LAYR_TEST_PIN_HOLD_MS").ok().and_then(|v| v.parse::<u64>().ok()) else { return };
+    HELD_ONCE.call_once(|| std::thread::sleep(std::time::Duration::from_millis(ms)));
+}
+
+impl Drop for Pin {
     fn drop(&mut self) {
-        if self.pinned {
-            if let Err(e) = self.p.db.pin_remove(&self.state, &self.holder) {
-                eprintln!("layr: cannot release the pin of {}: {e:#}", self.state);
+        if self.states.is_empty() {
+            return;
+        }
+        let released = crate::db::Db::open(&self.db).and_then(|db| {
+            for state in &self.states {
+                db.pin_remove(state, &self.holder)?;
             }
+            Ok(())
+        });
+        if let Err(e) = released {
+            eprintln!("layr: cannot release the pins of this command: {e:#}");
         }
     }
 }
