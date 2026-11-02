@@ -30,7 +30,9 @@ chmod 600 $S/sub/b.txt
 chown -R layr-u1 $S
 chmod 700 $S
 
-ok "a user imports a folder through the daemon" as layr-u1 $L init p1 --from $S -q
+out=$(as layr-u1 $L init p1 --from $S -q 2>&1)
+eq "a user imports a folder through the daemon" "0 " "$? $(echo "$out" | grep -i -m1 -E 'error|fatal|denied')"
+[ -n "$out" ] && echo "init output: $out" && tail -5 $T/daemon.log
 W=$LAYR_ROOT/projects/p1/lines/main
 eq "the file content is imported" hello "$(cat $W/a.txt 2>&1)"
 eq "a private file of the user is imported" private "$(cat $W/sub/b.txt 2>&1)"
