@@ -494,7 +494,8 @@ pub fn read_link(root: &(impl Src + ?Sized), rel: &str) -> Result<String> {
 /// content is never read into memory as a whole.
 pub const MAX_TEXT: u64 = 64 << 20;
 
-fn open_regular(p: &Path) -> Result<File> {
+/// Open a regular file read only. A link is not followed and a FIFO does not block the open.
+pub fn open_regular(p: &Path) -> Result<File> {
     let f = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -560,6 +561,42 @@ pub fn entry_bytes(root: &(impl Src + ?Sized), rel: &str) -> Result<Vec<u8>> {
 
 fn open_ro(p: &Path) -> Result<File> {
     OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(p).with_context(|| format!("open {}", p.display()))
+}
+
+/// Copy an open regular file to `dst_root/dst_rel` with the rights of this process. The source
+/// path is not opened again: a daemon that runs as root copies only what the caller opened with
+/// its own rights (`open_regular` as the caller), and the store folders need not be open to it.
+pub fn copy_open_file(src: &File, dst_root: &Path, dst_rel: &str) -> Result<()> {
+    let m = src.metadata()?;
+    refuse_case_clash(dst_root, dst_rel)?;
+    let t = crate::tree::Tree::open(dst_root)?;
+    t.mkdirs_for(dst_rel, None)?;
+    #[cfg(target_os = "macos")]
+    let cloned = t.clone_new_file(src, dst_rel)?;
+    #[cfg(not(target_os = "macos"))]
+    let cloned: Option<File> = None;
+    let d = match cloned {
+        Some(d) => d,
+        None => {
+            let d = t.create(dst_rel, m.mode() & 0o7777)?;
+            if crate::storage::clone_file(src, &d).is_err() {
+                d.set_len(0)?;
+                let (mut from, mut to) = (src.try_clone()?, d.try_clone()?);
+                from.seek(SeekFrom::Start(0))?;
+                std::io::copy(&mut from, &mut to)?;
+            }
+            d
+        }
+    };
+    d.set_permissions(fs::Permissions::from_mode(m.mode() & 0o7777))?;
+    set_mtime(&d, m.mtime(), m.mtime_nsec())
+}
+
+/// Make the link `dst_root/dst_rel` pointing at `target` with the rights of this process.
+pub fn put_symlink(dst_root: &Path, dst_rel: &str, target: &Path) -> Result<()> {
+    refuse_case_clash(dst_root, dst_rel)?;
+    let t = crate::tree::Tree::open(dst_root)?;
+    t.symlink(dst_rel, &target.to_string_lossy())
 }
 
 thread_local! {

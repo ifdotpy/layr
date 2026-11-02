@@ -1610,12 +1610,10 @@ fn copy_folder(
         match link.and_then(|k| first.get(&k).map(|f| (k, f.clone()))) {
             Some((_, f)) => {
                 fsutil::make_parents(dst, &rel, None)?;
-                crate::privs::as_caller_fs(ctx, || {
-                    Ok(std::fs::hard_link(fsutil::safe_join(dst, &f)?, fsutil::safe_join(dst, &rel)?)?)
-                })?;
+                std::fs::hard_link(fsutil::safe_join(dst, &f)?, fsutil::safe_join(dst, &rel)?)?;
             }
             None => {
-                crate::privs::as_caller_fs(ctx, || fsutil::copy_entry(src, &rel, dst, &rel, None))?;
+                copy_from_caller(ctx, src, rel, dst)?;
                 if let Some(k) = link {
                     first.insert(k, rel.clone());
                 }
@@ -1628,6 +1626,19 @@ fn copy_folder(
         fsutil::set_mode(dst, rel, m.mode)?;
     }
     Ok(n)
+}
+
+/// Copy one file or link of the caller's folder into the store: read with the caller's rights,
+/// write with ours. The daemon runs as root, and the store folders are closed to the caller.
+fn copy_from_caller(ctx: &Ctx, src: &std::path::Path, rel: &str, dst: &std::path::Path) -> Result<()> {
+    let path = fsutil::safe_join(src, rel)?;
+    let m = crate::privs::as_caller_fs(ctx, || Ok(std::fs::symlink_metadata(&path)?))?;
+    if m.file_type().is_symlink() {
+        let target = crate::privs::as_caller_fs(ctx, || Ok(std::fs::read_link(&path)?))?;
+        return fsutil::put_symlink(dst, rel, &target);
+    }
+    let file = crate::privs::as_caller_fs(ctx, || fsutil::open_regular(&path))?;
+    fsutil::copy_open_file(&file, dst, rel)
 }
 
 fn caller_git(ctx: &Ctx, dir: &std::path::Path, args: &[&str]) -> Result<std::process::Output> {
