@@ -581,32 +581,41 @@ impl Tree {
         list_fd(&d)
     }
 
-    /// Names of the folders in `rel_dir`, not of links or files. The type comes with the listing
-    /// (no stat per entry; a filesystem that gives no type is checked with one stat). A name that
-    /// is not UTF-8 is left out: it cannot match a pattern, and a walk must not guess its path.
-    pub fn list_dirs(&self, rel_dir: &str) -> Result<Vec<String>> {
-        let d = openat2(&self.root, rel_dir, OFlags::RDONLY | OFlags::DIRECTORY)?;
-        let mut out = Vec::new();
-        for e in rustix::fs::Dir::read_from(&d)? {
-            let e = e?;
-            let name = e.file_name().to_bytes();
-            if name == b"." || name == b".." {
-                continue;
-            }
-            let Ok(name) = std::str::from_utf8(name) else { continue };
-            let is_dir = match e.file_type() {
-                rustix::fs::FileType::Directory => true,
-                rustix::fs::FileType::Unknown => {
-                    let rel = if rel_dir.is_empty() { name.to_string() } else { format!("{rel_dir}/{name}") };
-                    self.stat(&rel).is_some_and(|m| m.is_dir())
+    /// Walk the folders below the root. `visit(rel, entries)` gets each folder's entries (name, and
+    /// whether it is a folder; a link is no folder) and returns the names of the child folders to
+    /// enter. Each entered folder is opened once, from its parent's descriptor (no path walk), and
+    /// the type comes with the listing (one stat only for a filesystem that gives no type). A name
+    /// that is not UTF-8 is left out.
+    pub fn walk_folders(&self, mut visit: impl FnMut(&str, &[(String, bool)]) -> Vec<String>) -> Result<()> {
+        let mut stack = vec![(String::new(), rustix::io::dup(&self.root)?)];
+        while let Some((rel, fd)) = stack.pop() {
+            let mut entries = Vec::new();
+            for e in rustix::fs::Dir::read_from(&fd)? {
+                let e = e?;
+                let name = e.file_name().to_bytes();
+                if name == b"." || name == b".." {
+                    continue;
                 }
-                _ => false,
-            };
-            if is_dir {
-                out.push(name.to_string());
+                let Ok(name) = std::str::from_utf8(name) else { continue };
+                let is_dir = match e.file_type() {
+                    rustix::fs::FileType::Directory => true,
+                    rustix::fs::FileType::Unknown => {
+                        let child = if rel.is_empty() { name.to_string() } else { format!("{rel}/{name}") };
+                        self.stat(&child).is_some_and(|m| m.is_dir())
+                    }
+                    _ => false,
+                };
+                entries.push((name.to_string(), is_dir));
+            }
+            for name in visit(&rel, &entries) {
+                let child = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
+                let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+                if let Ok(cfd) = rustix::fs::openat(&fd, name.as_str(), flags, Mode::empty()) {
+                    stack.push((child, cfd));
+                }
             }
         }
-        Ok(out)
+        Ok(())
     }
 
     pub fn create_subvolume(&self, rel: &str) -> Result<()> {

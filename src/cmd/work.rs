@@ -981,6 +981,7 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     // Cache folders become layers, and their copies are made, before the lock (rule 90).
     if !stacked {
+        crate::repo::clear_regenerable_memo();
         h.repo.restore_caches(&line)?;
         h.repo.prepare_cache_states(&line)?;
     }
