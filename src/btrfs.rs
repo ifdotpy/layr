@@ -363,13 +363,14 @@ pub(crate) fn copy_total(path: &Path) -> Result<u64> {
 }
 
 /// Copies a project to another btrfs file system (`src/project_copy.rs`). Each subvolume goes
-/// with `btrfs send` and `btrfs receive`: a snapshot whose origin was copied before is sent
-/// with `-p`, and every other send names the copied read-only snapshots with `-c`, so the
-/// receiver shares the extents.
+/// with `btrfs send` and `btrfs receive`. Sending with clone sources (`-c`) or a parent (`-p`)
+/// fails for sibling snapshots ("parent determination failed"), so each subvolume is sent whole
+/// and then its files that have the same extents as an earlier copy are reflinked from it.
 pub(crate) struct Copier {
     root: PathBuf,
-    /// (uuid, path in the source) of each read-only subvolume that the copy has received.
-    sent: Vec<(String, PathBuf)>,
+    /// The extents (logical, physical, length) of each file content already copied, with the
+    /// copy of its first file. A file with the same extents shares that copy.
+    seen: std::collections::HashMap<Vec<(u64, u64, u64)>, PathBuf>,
     /// (device, inode) -> the first copy of a hard-linked file.
     links: std::collections::HashMap<(u64, u64), PathBuf>,
     serial: u64,
@@ -382,7 +383,7 @@ impl Copier {
         if tmp.exists() {
             delete_tree(&tmp)?;
         }
-        Ok(Copier { root: src_root.to_path_buf(), sent: Vec::new(), links: Default::default(), serial: 0 })
+        Ok(Copier { root: src_root.to_path_buf(), seen: Default::default(), links: Default::default(), serial: 0 })
     }
 
     pub(crate) fn native_subvolume(&self, path: &Path) -> bool {
@@ -450,22 +451,11 @@ impl Copier {
             snapshot(src, &snap, true)?;
             (snap, Some(dir))
         };
-        // Clone sources share the extents: the receiver clones them. btrfs send fails with
-        // "parent determination failed" when a cache overlay state uses a state of an overlay as
-        // clone source. Overlay states are therefore sent alone and are no clone source, as
-        // replication sends caches.
-        let overlay = src.ancestors().skip(1).any(|a| {
-            a.file_name().is_some_and(|n| n == "overlays") && a.parent().and_then(|p| p.file_name()).is_some_and(|n| n == "meta")
-        });
-        let clones: Vec<PathBuf> = if overlay { Vec::new() } else { self.sent.iter().map(|(_, p)| p.clone()).collect() };
         let inbox = dst.parent().context("subvolume target has no parent")?.join(format!(".layr-copy-in-{serial}"));
         fs::create_dir(&inbox).with_context(|| format!("create {}", inbox.display()))?;
         let mut sender = Command::new("btrfs");
-        sender.arg("send").arg("-q");
-        for c in &clones {
-            sender.arg("-c").arg(c);
-        }
-        sender.arg(&send).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+        sender.arg("send").arg("-q").arg(&send);
+        sender.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
         let mut sending = sender.spawn().context("start btrfs send")?;
         let pipe = sending.stdout.take().context("btrfs send has no output")?;
         let received = Command::new("btrfs")
@@ -478,9 +468,8 @@ impl Copier {
         let sent = sending.wait_with_output().context("wait for btrfs send")?;
         if !received.status.success() || !sent.status.success() {
             bail!(
-                "btrfs send of {} (clone sources {:?}) failed: {}{}",
+                "btrfs send of {} failed: {}{}",
                 src.display(),
-                clones,
                 String::from_utf8_lossy(&sent.stderr).trim(),
                 String::from_utf8_lossy(&received.stderr).trim()
             );
@@ -490,6 +479,7 @@ impl Copier {
         set_writable(&inbox.join(&name))?;
         fs::rename(inbox.join(&name), dst).with_context(|| format!("place {}", dst.display()))?;
         fs::remove_dir(&inbox)?;
+        self.share_files(src, dst)?;
         for rel in nested_subvolumes(src)? {
             let target = dst.join(&rel);
             // The send leaves an empty folder where a nested subvolume is.
@@ -500,13 +490,53 @@ impl Copier {
         }
         if info.readonly {
             set_readonly(dst)?;
-            if !overlay {
-                self.sent.push((info.uuid.clone(), src.to_path_buf()));
-            }
         }
         if let Some(dir) = temp {
             delete_tree(&send)?;
             fs::remove_dir(&dir)?;
+        }
+        Ok(())
+    }
+
+    /// Reflink the files of a received subvolume that have the same extents as an earlier copy.
+    /// The extents are compared with their physical addresses, so equal extents hold equal data.
+    fn share_files(&mut self, src: &Path, dst: &Path) -> Result<()> {
+        let mut stack = vec![PathBuf::new()];
+        while let Some(rel) = stack.pop() {
+            for e in fs::read_dir(src.join(&rel))? {
+                let e = e?;
+                let m = e.metadata()?;
+                let child = rel.join(e.file_name());
+                if m.is_dir() {
+                    if !is_subvolume(&src.join(&child)) {
+                        stack.push(child);
+                    }
+                } else if m.is_file() {
+                    self.share_file(&src.join(&child), &dst.join(&child))?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn share_file(&mut self, src: &Path, dst: &Path) -> Result<()> {
+        // Only plain extents: inline and encoded data have no physical address to compare.
+        const LAST: u32 = 0x1;
+        const SHARED: u32 = 0x2000;
+        let extents = crate::sys::fiemap_full(&File::open(src).with_context(|| format!("open {}", src.display()))?)
+            .with_context(|| format!("extents of {}", src.display()))?;
+        if extents.is_empty() || extents.iter().any(|e| e.3 & !(LAST | SHARED) != 0) {
+            return Ok(());
+        }
+        let key: Vec<(u64, u64, u64)> = extents.iter().map(|&(logical, physical, len, _)| (logical, physical, len)).collect();
+        match self.seen.get(&key) {
+            Some(first) => {
+                let (from, to) = (File::open(first)?, fs::OpenOptions::new().write(true).open(dst)?);
+                clone_file(&from, &to).with_context(|| format!("share {}", dst.display()))?;
+            }
+            None => {
+                self.seen.insert(key, dst.to_path_buf());
+            }
         }
         Ok(())
     }

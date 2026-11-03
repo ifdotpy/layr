@@ -1506,6 +1506,56 @@ pub fn apfs_space_read(dir: BorrowedFd<'_>, buf: &mut Vec<u8>) -> io::Result<Vec
     }
 }
 
+/// Every extent of an open file (`FIEMAP`): logical offset, physical address, length and the
+/// flags of the extent (`FIEMAP_EXTENT_*`). Used to find files with the same data.
+#[cfg(target_os = "linux")]
+pub fn fiemap_full(file: &std::fs::File) -> io::Result<Vec<(u64, u64, u64, u32)>> {
+    const FS_IOC_FIEMAP: libc::c_ulong = 0xC020_660B;
+    const EXTENT_LAST: u32 = 0x1;
+    const COUNT: usize = 256;
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct Extent {
+        logical: u64,
+        physical: u64,
+        length: u64,
+        reserved64: [u64; 2],
+        flags: u32,
+        reserved: [u32; 3],
+    }
+    #[repr(C)]
+    struct Map {
+        start: u64,
+        length: u64,
+        flags: u32,
+        mapped: u32,
+        count: u32,
+        reserved: u32,
+        extents: [Extent; COUNT],
+    }
+    let mut out = Vec::new();
+    let mut start = 0u64;
+    loop {
+        let mut map = Map { start, length: u64::MAX - start, flags: 0, mapped: 0, count: COUNT as u32, reserved: 0, extents: [Extent::default(); COUNT] };
+        // SAFETY: the descriptor is live and `map` is a valid fiemap buffer with room for COUNT extents.
+        if unsafe { libc::ioctl(file.as_raw_fd(), FS_IOC_FIEMAP as _, &mut map as *mut Map) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mapped = (map.mapped as usize).min(COUNT);
+        if mapped == 0 {
+            return Ok(out);
+        }
+        for e in &map.extents[..mapped] {
+            out.push((e.logical, e.physical, e.length, e.flags));
+            if e.flags & EXTENT_LAST != 0 {
+                return Ok(out);
+            }
+        }
+        let last = map.extents[mapped - 1];
+        start = last.logical + last.length;
+    }
+}
+
 /// The extents of an open file (`FIEMAP`): physical address, length, and whether another file
 /// or snapshot shares it (`FIEMAP_EXTENT_SHARED`). btrfs, XFS and ext4.
 #[cfg(target_os = "linux")]
