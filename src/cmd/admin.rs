@@ -508,6 +508,8 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
             exit(1, format!("error: cannot undo, no file changed: {e:#} (undo window: {} days)", repo.p.config_u64("undo.days", 7)))
         })?;
     }
+    // The lines with their restored head: their .git folders follow it after the record is made.
+    let mut restored: Vec<Line> = Vec::new();
     for (lid, ch, cur, alive, cur_state) in lines {
         let mut wb = None;
         match (&ch.before, &cur) {
@@ -541,6 +543,9 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
                     (None, _) => {}
                 }
                 repo.drop_stage(&l2)?;
+                let mut back = l2.clone();
+                back.head = b.head.clone();
+                restored.push(back);
             }
             (Some(b), _) => {
                 // The line was deleted: make it again from its last content.
@@ -561,6 +566,7 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
                     machine: repo.p.store.machine.id.clone(),
                 };
                 repo.materialize(&l, &src, &w)?;
+                restored.push(l.clone());
                 if let Some(staged) = r.data.get("staged_state").and_then(|v| v.as_str()) {
                     // The index of the deleted line comes back with it.
                     repo.snapshot_state(staged, &repo.p.stage_path(&l.id), false)?;
@@ -591,6 +597,13 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
         crate::overlay::move_overlay_line(&o, ctx, "undo", ol, parent, Vec::new())?;
     }
     let done = repo.commit_record(ctx, rec)?;
+    // The .git folder of each restored line points at its restored head, as after every other move
+    // of a head (repo::move_head). A failure only warns: the undo is done.
+    for line in &restored {
+        if let Err(e) = crate::gitbridge::refresh_git_folder(repo, line) {
+            eprintln!("warning: .git folder of line {} not updated: {e:#}", line.name);
+        }
+    }
     crate::gitbridge::sync_store_access(repo)?;
     outln!(
         ctx,
