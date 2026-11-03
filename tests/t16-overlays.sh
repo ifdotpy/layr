@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: overlayfs
 # Overlays (docs/overlays.md): files with their own readers and history, shown in the lines of
 # their readers and nowhere else. A private loader of one user, a project key for a group,
 # follow mode with branch and merge, the commit split by layer.

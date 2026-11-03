@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos overlayfs
 # A schema rebuild must not show empty derived tables to other commands (src/db.rs, Db::rebuild).
 # The project is set to schema version 6. The first command rebuilds it and holds the rebuild
 # transaction open for 5 s with LAYR_TEST_REBUILD_HOLD_MS (test only). Concurrent commands must

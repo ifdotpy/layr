@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos overlayfs
 # Freeing by owners (docs/ownership.md): a state is freed by the command that drops its last
 # owner. Covers the line delete, the count rings (retention.auto, undo.ops, undo.deleted), the
 # crash between commit and move, a pinned read, the removed time keys and gc check and repair.

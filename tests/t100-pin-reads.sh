@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos overlayfs
 # Pins (docs/ownership.md, "Pins"): a command that reads saved states keeps them on disk until it
 # ends, though another command frees their last owner meanwhile. Test hook: LAYR_TEST_PIN_HOLD_MS
 # makes the reader sleep once its pins are taken (test only). Each case: the reader holds its pins;

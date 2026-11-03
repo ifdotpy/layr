@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos apfs-case overlayfs
 # Basic work in a line: init, status, diff, add, commit, log, show, rev-parse, rm, mv,
 # restore, reset, clean, partial staging with apply --cached.
 . "$(dirname "$0")/lib.sh"

@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos overlayfs
 # Plain save decides "is there a change" by what status reports (content, type, link target,
 # executable bit, added and removed files) on every backend: a new time, a new mode that keeps
 # the executable bit, or an empty folder make no automatic state.

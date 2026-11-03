@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos overlayfs
 # Export states to folders, with APFS name rules.
 . "$(dirname "$0")/lib.sh"
 

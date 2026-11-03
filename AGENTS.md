@@ -5,6 +5,9 @@
   with `layr git push`. In Studio, use the Layr workspace mode for chats of this project.
 - Never run layr tests as root, and never in OrbStack or another VM that shares the host home
   folder. Integration test stores live under `$TMPDIR` with their own `LAYR_ROOT`.
+- A new integration test picks its CI jobs on line 2 of its file: `# ci: macos overlayfs` (tags:
+  `macos`, `macos-plain` (without LAYR_TEST_DIRECT_MAIN), `apfs-case`, `overlayfs`). The btrfs job runs every test. Do not add test names to the
+  workflow files.
 - Write everything in this repository in English.
 - Pull requests merge by squash. Give each pull request a Conventional Commit title:
   `<type>(<scope>): <Summary>`, with a type from `feat`, `fix`, `perf`, `revert`, `docs`, `test`,

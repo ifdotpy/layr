@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos overlayfs
 # Owners (docs/ownership.md): after each step the owners table equals a replay of the records
 # (fsck and gc check agree), no present state lacks an owner (a leak), and undo of the line
 # delete works. The step list is the one of the shadow phase (#115).

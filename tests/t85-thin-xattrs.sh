@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos
 # A thin automatic state carries a changed extended attribute or ACL of an entry that looks
 # equal to the base (same type, mode, size and times): an empty file, a folder, and a file
 # with the same data. Another file changes, so the save makes a state.

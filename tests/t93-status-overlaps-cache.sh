@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos overlayfs
 # `layr status` lists the overlaps with the other live lines. The compare of two saved states is
 # cached in the project's meta folder: a second status makes fewer candidate compares, a saved
 # state of one line changes its overlaps (new key), and a corrupt cache entry is ignored.
