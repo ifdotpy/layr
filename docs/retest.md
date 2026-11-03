@@ -203,17 +203,26 @@ live set does not name goes. The live set names:
 - the newest object build of each live owner (a unit hash, or an unhashed crate);
 - the dep-info `<output>.d` of a listed output in the profile folder;
 - cargo's lock files (`.cargo-lock`, `.cargo-build-lock`, `.cargo-artifact-lock`);
-- each `incremental/<crate>-<id>` folder that a kept output is hard-linked to, with its newest finalized
-  session and that session's lock file.
+- each `incremental/<crate>-<id>` folder that a kept output is hard-linked to, with its newest finalized session
+  and that session's lock file. For a crate with a live test binary, bin or example and no link, the newest such
+  folder (see "Other profiles"). rustc names the lock `s-<time>-<id>.lock`, the session name without its hash.
 
 Everything else goes: uplifted copies that no listing names, stale bins and examples, unhashed objects of
 other builds, outputs of units that no command lists, orphan incremental folders, and other files. Entries
 go whole, so no live unit loses a file. The removal frees the bytes of an inode only when all its links go.
 
-Links from a unit to its incremental folder: rustc hard-links the object files of a session to the outputs in
-`deps`. The sweep reads the shared inodes. Measured on Studio: each live owner's objects link to exactly one
-folder, and no text file (fingerprint, dep-info, `.d`) names the folder, since its name carries a base-36 id,
-not the cargo hash.
+Links from a unit to its incremental folder (both need no compile):
+
+- Library: the newest session of a library holds `metadata.rmeta`, hard-linked to `deps/lib<crate>-<hash>.rmeta`
+  (link count 2). The sweep keeps the folder through that link, so a library built without debug info keeps its
+  folder. Measured 2026-11-03 on a test workspace with `debug = 0`.
+- Object files: rustc hard-links the object files of a session to the outputs in `deps`. This needs debug info.
+
+The folder name carries rustc's stable crate id (base-36), not the cargo hash, and no text file names it.
+
+Lock: the sweep keeps the lock of the kept session. Without it rustc cannot reuse the object files of that session:
+measured 2026-11-03, a one-line change after a sweep rebuilt both units of a library with debug info off, and with the
+lock put back the unchanged unit was reused (same inode). Test: `sweep_keeps_the_incremental_session_of_a_library_without_debug_info`.
 
 ### Other profiles
 
@@ -223,11 +232,22 @@ A folder is swept when any profile folder in it has a fingerprint folder (a buil
 listed profiles are `target/debug` and, with a `retest` list, `target/retest/debug`; `target/wasm32-unknown-unknown`
 is not listed, so the sweep leaves it as it is.
 
-Limit: a bin in a profile without debug info keeps no object files in `deps`. Its incremental folder has no
-link (see "Live set"), so the sweep removes it and a later build of that bin cannot reuse it. Set
-`[profile.release] debug = 1` to keep the link. The layr project sets it. A `studio-native-client` output (for
-example `deps/libstudio_native_client.a`) is not listed, because the sweep list excludes that crate, so the sweep
-removes it. A build that needs it compiles it again.
+Limit: a test binary, bin or example built without debug info has no link to its incremental folder (no object
+file, no `metadata.rmeta`). For each crate with a live one of these, the sweep keeps only the newest unlinked folder of
+that crate and removes the others, so at most one such folder per crate stays. Two trade-offs:
+
+- A bin and a test binary of the same crate, both live and both without debug info, share that one folder. One of them
+  recompiles after a sweep.
+- A non-live build of the same crate that ran last (for example a focused command with other features) can be the
+  newest folder. Then the live folder is removed, and the next standard build recompiles once.
+
+Set `debug = 1` for that profile to keep the object link. The layr project sets `[profile.release] debug = 1`.
+
+A `studio-native-client` output (for example `deps/libstudio_native_client.a`) is not listed, because the sweep
+list excludes that crate, so the sweep removes it. A build that needs it compiles it again.
+
+Known limit: the sweep needs every listed command to be fresh. A command with a stale unit makes the sweep skip
+that folder (see "Freshness"), so run the standard build before the sweep.
 
 ### Object files
 
@@ -735,10 +755,12 @@ Run in the root folder of a layr line that is also the cargo project root.
     `target/debug` path or by an env variable whose name has a word `BIN`, `BINARY`, `EXE` or `EXECUTABLE`, or is a bin target name.
     That bin is not instrumented, so a change of it forces full runs. Use `env!("CARGO_BIN_EXE_<name>")`.
   - The number of test targets (lib, bin, integration), the size of the integration test binaries (from
-    `cargo metadata` and the files in `target/retest/debug/deps` or `target/debug/deps`; it does not run
+    `cargo metadata` and the files in the `deps` folder of every profile folder: `target/<profile>`,
+    `target/<triple>/<profile>` and `target/retest/<profile>`; it does not run
     `cargo nextest list`, which builds). For a crate with two or more integration test binaries: one
     binary (`autotests = false`, one `tests/main.rs`) saves the size of all but the largest and one link each.
-  - Build script output (`build/*/output` in every profile folder under `target/` and `target/retest/`):
+  - Build script output (`build/*/output` in every profile folder: `target/<profile>`, `target/<triple>/<profile>`
+    and `target/retest/<profile>`):
     - A `cargo:rerun-if-changed=` (or `cargo::`) value that is an absolute path under the project root is a
       warning. Each line has its own absolute path, so cargo marks the build script dirty in every new
       line and rebuilds all crates after it, although `target/` is warm. Print a path relative to

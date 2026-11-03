@@ -656,11 +656,10 @@ impl<'a> Project<'a> {
         Self::create_in(store, name, actor, config)
     }
 
+    /// Make a new project folder. A path that exists (a partial folder too) is refused and left
+    /// unchanged. A failure after this call made the folder removes the whole folder.
     fn create_in(store: &'a Store, name: &str, actor: &Actor, config: serde_json::Value) -> Result<Project<'a>> {
         let dir = store.project_dir(name)?;
-        if db_file(&dir).exists() {
-            bail!("project '{name}' already exists");
-        }
         if !crate::storage::is_supported(&store.projects_dir()) {
             #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
             bail!("{} is not on btrfs", store.projects_dir().display());
@@ -669,25 +668,43 @@ impl<'a> Project<'a> {
             #[cfg(feature = "overlayfs")]
             bail!("OverlayFS requires a local store and mount permission");
         }
-        mkdir_mode(&dir, 0o755)?;
-        mkdir_mode(&dir.join("states"), 0o700)?;
-        mkdir_mode(&dir.join("deltas"), 0o700)?;
-        mkdir_mode(&dir.join("lines"), 0o711)?;
-        mkdir_mode(&dir.join("meta"), 0o700)?;
-        for d in ["stage", "scan", "work"] {
-            mkdir_mode(&dir.join("meta").join(d), 0o700)?;
+        if let Some(parent) = dir.parent() {
+            fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
         }
-        if !dir.join("meta").join("db").exists() {
+        // The exclusive create decides who owns the folder: only a successful create is ours.
+        match fs::create_dir(&dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                bail!("{} already exists; nothing was changed", dir.display())
+            }
+            Err(e) => return Err(e.into()),
+        }
+        let made = (|| -> Result<Project<'a>> {
+            mkdir_mode(&dir, 0o755)?;
+            mkdir_mode(&dir.join("states"), 0o700)?;
+            mkdir_mode(&dir.join("deltas"), 0o700)?;
+            mkdir_mode(&dir.join("lines"), 0o711)?;
+            mkdir_mode(&dir.join("meta"), 0o700)?;
+            for d in ["stage", "scan", "work"] {
+                mkdir_mode(&dir.join("meta").join(d), 0o700)?;
+            }
             crate::storage::create_subvolume(&dir.join("meta").join("db"))?;
             std::fs::set_permissions(dir.join("meta").join("db"), fs::Permissions::from_mode(0o700))?;
+            let id = ids::new_id();
+            let db = Db::open(&db_file(&dir))?;
+            let p = Project { store, name: name.to_string(), dir: dir.clone(), id: id.clone(), db };
+            let mut rec = Record::new("project");
+            rec.data = serde_json::json!({"name": name, "id": id, "config": config});
+            p.append(rec, actor)?;
+            Ok(p)
+        })();
+        match made {
+            Ok(p) => Ok(p),
+            Err(e) => {
+                let _ = crate::storage::delete_tree(&dir);
+                Err(e)
+            }
         }
-        let id = ids::new_id();
-        let db = Db::open(&db_file(&dir))?;
-        let p = Project { store, name: name.to_string(), dir, id: id.clone(), db };
-        let mut rec = Record::new("project");
-        rec.data = serde_json::json!({"name": name, "id": id, "config": config});
-        p.append(rec, actor)?;
-        Ok(p)
     }
 
     /// Folders of a project without records (for a restore or a replica).
