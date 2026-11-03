@@ -70,7 +70,7 @@ RESULT=$(l probe run main --probe files --json)
 ok "the exact argv and subject reuse the output state" python3 -c 'import json,sys; assert json.loads(sys.argv[1])[0]["reused"]' "$RESULT"
 eq "reuse does not create a second derived state" "$REFS" "$(l ref list derived/probe-v1/ --json)"
 ok "outputs have derived kind, context, source, and no source history" python3 -c 'import json,sqlite3,sys; d=sqlite3.connect(sys.argv[1]); refs=json.loads(sys.argv[2]); rows=[json.loads(d.execute("select rec from states where id=?",(r["target"],)).fetchone()[0]) for r in refs]; assert len(rows)==3; assert all(r["kind"]=="derived" and r["context"].startswith("probe-v1/") and r["derived_from"]==sys.argv[3] and not r["parents"] and not r.get("line") for r in rows)' "$LAYR_ROOT/projects/probes/meta/db/layr.sqlite" "$REFS" "$SUBJECT"
-l gc -q
+l gc --repair -q
 ok "derived refs retain outputs through GC" python3 -c 'import json,pathlib,sys; assert all((pathlib.Path(sys.argv[1])/r["target"]).is_dir() for r in json.loads(sys.argv[2]))' "$LAYR_ROOT/projects/probes/states" "$REFS"
 l attest revoke main >/dev/null
 REVOKED=$(l probe run main --probe files --json)
@@ -142,8 +142,7 @@ ok "change show lists view results instead of selecting a view" python3 -c 'impo
 has "human change show gives the explicit view diff command" 'use layr probe diff views/<a> views/<b>' "$(l change show "$VIEW_CHANGE")"
 # A ViewId is provenance, not a source retention root.
 l config retention.auto 0
-l config retention.hours 0
-l config undo.days 0
+l config undo.ops 0
 printf 'collect me\n' > source-only.txt
 l save -q
 AUTO=$(l rev-parse 'head@{0}')
@@ -151,7 +150,9 @@ l reset --hard "$AUTO" >/dev/null
 COLLECT_VIEW=$(l view save --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["view_id"])')
 l probe run "views/$COLLECT_VIEW" --probe files --json >/dev/null
 l reset --hard "$VIEW_STATE" >/dev/null
-l gc -q
+# A newer automatic state: the newest one always stays (docs/ownership.md, rule 3).
+printf 'newer\n' > newer.txt; l save -q
+l gc --repair -q
 no "probe ViewId provenance does not retain source snapshots" l show "$AUTO":source-only.txt
 COLLECTED=$(l probe diff "views/$COLLECT_VIEW" "views/$COLLECT_VIEW" --json)
 ok "stored outputs still compare after source collection" python3 -c 'import json,sys; b=json.loads(sys.argv[1]); assert b["base_source"]==b["head_source"]=="source collected"; assert next(r for r in b["probes"] if r["probe"]=="files")["status"]=="unchanged"; assert next(r for r in b["probes"] if r["probe"]=="identity")["status"]=="not run"' "$COLLECTED"

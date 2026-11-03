@@ -116,7 +116,7 @@ cd "$T"
 l init gcviews --from "$T/src" -q >/dev/null
 G=$LAYR_ROOT/projects/gcviews/lines
 cd "$G/main"
-l config retention.auto 0; l config retention.hours 0; l config undo.days 0
+l config retention.auto 0; l config undo.ops 0
 l line new -q temporary
 cd "$G/temporary"
 echo temporary > code
@@ -128,10 +128,12 @@ cd "$G/main"
 l line delete -D temporary -q >/dev/null
 l reset -q --hard head
 l ref set pins/view-old "views/$OLD_ID" >/dev/null
-l gc -q
+# The deleted line's final state stays in the undo.deleted ring: empty it, so only the pin keeps the state.
+l config undo.deleted 0 >/dev/null
+l gc --repair -q
 ok "a pin preserves the shared state of a view" l view "views/$OLD_ID" --json
 l ref delete pins/view-old >/dev/null
-l gc -q
+l gc --repair -q
 has "full resolution names a collected shared state" "view $OLD_ID refers to a collected state $OLD_STATE" "$(l view "views/$OLD_ID" 2>&1)"
 no "branch refuses a collected view" l line new gone "views/$OLD_ID" -q
 no "try refuses a collected view" l try -q "views/$OLD_ID" -- true

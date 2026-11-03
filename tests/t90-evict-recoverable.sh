@@ -39,12 +39,16 @@ dashed() {
 on_disk() { [ -e "$P/states/$(dashed "$1")" ] || [ -e "$P/deltas/$(dashed "$1")" ]; }
 trees() { find "$P/states" "$P/deltas" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l | tr -d ' '; }
 # The default is off: gc keeps a state that the store holds.
-ok "gc with gc.evict off runs" l gc -q
+ok "gc with gc.evict off runs" l gc --repair -q
 ok "a store-held state stays on disk with gc.evict off" on_disk "$t1"
 l config gc.evict on >/dev/null
+# The deleted line keeps its final state while an undo record or the undo.deleted ring names it
+# (a local copy owner). With both rings empty, only the store copy is left, and eviction takes it.
+l config undo.deleted 0 >/dev/null
+l config undo.ops 0 >/dev/null
 before=$(trees)
 
-ok "gc runs" l gc -q
+ok "gc runs" l gc --repair -q
 ok "gc removes trees" test "$(trees)" -lt "$before"
 no "a deleted line's final state is evicted" on_disk "$t1"
 ok "the head keeps its tree" on_disk "$s3"
@@ -64,7 +68,7 @@ ok "gc --all-projects runs" l gc --all-projects -q
 l line delete -D x -q >/dev/null
 
 # Offline: the copy is on the store remote, which cannot be reached (the URL stays the same).
-ok "gc evicts again" l gc -q
+ok "gc evicts again" l gc --repair -q
 no "the evicted state is not on disk" on_disk "$t1"
 mv "$T/archive" "$T/archive.away"
 no "reading the evicted state offline fails" l show "$t1:notes.txt"

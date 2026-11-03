@@ -1,7 +1,7 @@
 #!/bin/bash
-# Owners in shadow mode (docs/ownership.md, phase 1). After each step the owners table equals a
-# replay of the records (fsck), and gc --dry-run prints how its plan differs from the owners. The
-# plan still decides what goes, so the difference lines explain each difference, not a failure.
+# Owners (docs/ownership.md): after each step the owners table equals a replay of the records
+# (fsck and gc check agree), no present state lacks an owner (a leak), and undo of the line
+# delete works. The step list is the one of the shadow phase (#115).
 . "$(dirname "$0")/lib.sh"
 
 sample $T/src
@@ -9,17 +9,13 @@ l init o --from $T/src -q >/dev/null
 P=$LAYR_ROOT/projects/o/lines
 cd $P/main
 
-# check <step>: fsck finds no problem, and gc --dry-run prints both difference lines.
+# check <step>: fsck finds no problem, and gc check exits 0 (no leak, no difference).
 check() {
     eq "fsck after $1" "0 problem(s)" "$(l fsck | tail -1)"
-    local plan
-    plan=$(l gc --dry-run)
-    has "gc difference (frees) after $1" "owners: plan frees" "$plan"
-    has "gc difference (keeps) after $1" "owners: plan keeps" "$plan"
-    printf '%s\n' "$plan" | grep -E '^(owners|	)' | sed "s/^/  $1: /"
+    eq "gc check after $1" 0 "$(l gc >/dev/null 2>&1; echo $?)"
 }
 
-# A table that differs from the records is a problem: fsck counts it, and --repair rewrites it.
+# The owners table file: the database of the project.
 db=$LAYR_ROOT/projects/o/meta/db/layr.sqlite
 [ -f "$db" ] || db=$LAYR_ROOT/projects/o/meta/layr.sqlite
 
@@ -61,7 +57,7 @@ check "park"
 l park pop >/dev/null
 check "park pop"
 
-# A row that the records do not give is found and repaired.
+# A row that the records do not give is a difference: fsck counts it, and --repair rewrites it.
 cd $P/main
 sqlite3 "$db" "INSERT INTO owners(state, kind, holder) VALUES('01999999-0000-7000-8000-000000000000', 'tag', 'stray')"
 eq "fsck finds a stray owner" "1 problem(s)" "$(l fsck | tail -1)"

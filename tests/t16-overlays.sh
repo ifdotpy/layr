@@ -282,7 +282,7 @@ tst=$(ms as layr-o1 $L --project big --line stacked status --porcelain)
 echo "INFO status of the clean stacked line: ${tst} ms"
 eq "fsck of the large project" "0 problem(s)" "$(l --project big fsck | tail -1)"
 
-ok "gc" l --project sap gc -q
+ok "gc" l --project sap gc --repair -q
 eq "main still shows its overlays after gc" "" "$(in_line layr-o1 main status --porcelain)"
 eq "fsck is clean at the end" "0 problem(s)" "$(l --project sap fsck | tail -1)"
 ok "reindex" l --project sap reindex

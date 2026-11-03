@@ -66,17 +66,17 @@ l git remote add origin $T/r.git; l git push -q origin t1
 has "undo of a push is refused" "cannot be undone" "$(l undo "$(l op log --all -n 1 | awk '{print $1}')" 2>&1)"
 
 # Retention: keep 3 automatic states per line, then gc.
-l config retention.auto 3; l config retention.hours 0
+l config retention.auto 3
 for i in 1 2 3 4 5 6; do echo $i > auto.txt; l save -q; done
 n_before=$(l log --auto --format=%h | wc -l)
-l config undo.days 0
-ok "gc runs" l gc -q
+l config undo.ops 0
+ok "gc runs" l gc --repair -q
 n_after=$(l log --auto --format=%h -n 100 | while read h; do l show -s --format=%h $h >/dev/null 2>&1 && echo $h; done | wc -l)
 ok "gc deletes old automatic states" test "$n_after" -lt "$n_before"
 eq "line history stays" "initial state" "$(l log --format=%s | tail -1)"
 ok "tagged and pushed states stay" l show -s head
 # The undo window is over: an operation whose states are gone cannot be undone.
-has "undo after retention explains" "retention" "$(l undo --force $R2 2>&1)"
+has "undo after the rings explains" "cannot undo" "$(l undo --force $R2 2>&1)"
 eq "fsck is clean" "0 problem(s)" "$(l fsck | tail -1)"
 # A snapshot without a record (a crash between the two steps) is found and removed.
 btrfs subvolume snapshot -r $P/main $LAYR_ROOT/projects/u/states/01999999-0000-7000-8000-000000000000 >/dev/null

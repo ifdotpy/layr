@@ -16,7 +16,7 @@ echo changed >> notes.txt
 l save -a -m one -q >/dev/null 2>&1
 cd $P/main || exit 1
 ok "the line with a cache overlay line is deleted" l line delete -D w
-l gc -q >/dev/null 2>&1
+l gc --repair -q >/dev/null 2>&1
 eq "fsck after delete and gc finds no problem" "0 problem(s)" "$(l fsck 2>&1 | tail -1)"
 eq "fsck names no overlay head of the deleted line" "" "$(l fsck 2>&1 | grep 'head of line')"
 
