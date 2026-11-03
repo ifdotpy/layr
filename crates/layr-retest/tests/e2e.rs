@@ -942,14 +942,30 @@ fn sweep_skips_a_busy_build_lock_without_waiting() {
     let err = sweep_cmd(&ws, &[]);
     assert!(err.contains("build lock busy"), "{err}");
     // CI sets CARGO_TERM_COLOR=always. Escape codes in front of cargo's wait line must not hide the busy lock.
-    let o = Command::new("layr")
+    let mut child = Command::new("layr")
         .args(["retest", "sweep"])
         .current_dir(&ws)
         .env("LAYR_ROOT", ws.join("unused-store"))
         .env("CARGO_TERM_COLOR", "always")
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .unwrap();
-    let colored = String::from_utf8_lossy(&o.stderr).into_owned();
+    // A sweep that waits for the lock never ends: fail at the deadline instead of hanging the run.
+    let start = std::time::Instant::now();
+    let status = loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            break s;
+        }
+        if start.elapsed() > std::time::Duration::from_secs(60) {
+            let _ = child.kill();
+            panic!("the sweep waited for the busy build lock with CARGO_TERM_COLOR=always");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    let mut colored = String::new();
+    std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut colored).unwrap();
+    assert!(status.success(), "{colored}");
     assert!(colored.contains("build lock busy"), "{colored}");
     drop(held);
     assert_no_output_written(&debug, &times, &err);
