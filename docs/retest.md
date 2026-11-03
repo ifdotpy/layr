@@ -752,8 +752,8 @@ Run in the root folder of a layr line that is also the cargo project root.
     `target/<triple>/<profile>` and `target/retest/<profile>`; it does not run
     `cargo nextest list`, which builds). For a crate with two or more integration test binaries: one
     binary (`autotests = false`, one `tests/main.rs`) saves the size of all but the largest and one link each.
-<<<<<<< head
-  - Build script output (`build/*/output` in every profile folder under `target/` and `target/retest/`):
+  - Build script output (`build/*/output` in every profile folder: `target/<profile>`, `target/<triple>/<profile>`
+    and `target/retest/<profile>`):
     - A `cargo:rerun-if-changed=` (or `cargo::`) value that is an absolute path under the project root is a
       warning. Each line has its own absolute path, so cargo marks the build script dirty in every new
       line and rebuilds all crates after it, although `target/` is warm. Print a path relative to
@@ -762,19 +762,6 @@ Run in the root folder of a layr line that is also the cargo project root.
       Each line has its own `.git`, so the same rebuild happens. It prints the fix: take the version from
       the build environment (for example an env var set by the release build) instead of watching `.git`.
     - Without build output, it says `build once to check build script paths`.
-||||||| base
-  - Build script output (`target/debug/build/*/output`, and the same under `target/retest/debug`): a
-    `cargo:rerun-if-changed=` (or `cargo::`) value that is an absolute path under the project root is a
-    warning. Each line has its own absolute path, so cargo marks the build script dirty in every new
-    line and rebuilds all crates after it, although `target/` is warm. Print a path relative to
-    `CARGO_MANIFEST_DIR`. Without build output, it says `build once to check build script paths`.
-=======
-  - Build script output (`build/*/output` of every profile folder, as in the rule above): a
-    `cargo:rerun-if-changed=` (or `cargo::`) value that is an absolute path under the project root is a
-    warning. Each line has its own absolute path, so cargo marks the build script dirty in every new
-    line and rebuilds all crates after it, although `target/` is warm. Print a path relative to
-    `CARGO_MANIFEST_DIR`. Without build output, it says `build once to check build script paths`.
->>>>>>> d48a4e9
   - Records: count, and the age of the newest (warning above 14 days). Size of `target/retest`
     (warning above 20 GB).
 

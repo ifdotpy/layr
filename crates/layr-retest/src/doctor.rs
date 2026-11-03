@@ -135,15 +135,15 @@ fn rust_files(dir: &Path, v: &mut Vec<PathBuf>) {
     }
 }
 
-/// Every profile folder under `target`: a folder that holds `.fingerprint`, at most three levels down
-/// (`target/debug`, `target/<triple>/release`, `target/retest/debug`). A profile folder is not searched further.
-pub fn profile_dirs(target: &Path) -> Vec<PathBuf> {
+/// The profile folders under `root/target`: a folder with cargo's build output (`build` or `.fingerprint`), at most
+/// three levels down (`target/debug`, `target/<triple>/release`, `target/retest/debug`). A profile folder is not searched further.
+pub fn profile_dirs(root: &Path) -> Vec<PathBuf> {
     fn walk(dir: &Path, depth: u32, out: &mut Vec<PathBuf>) {
         let Ok(rd) = std::fs::read_dir(dir) else { return };
         let mut dirs: Vec<PathBuf> = rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
         dirs.sort();
         for p in dirs {
-            if p.join(".fingerprint").is_dir() {
+            if p.join("build").is_dir() || p.join(".fingerprint").is_dir() {
                 out.push(p);
             } else if depth < 3 {
                 walk(&p, depth + 1, out);
@@ -151,14 +151,14 @@ pub fn profile_dirs(target: &Path) -> Vec<PathBuf> {
         }
     }
     let mut out = Vec::new();
-    walk(target, 1, &mut out);
+    walk(&root.join("target"), 1, &mut out);
     out
 }
 
 /// The newest executable `<name>-<hash>` in the `deps` folder of any profile folder under `target`.
 fn test_binary_size(root: &Path, name: &str) -> Option<u64> {
     let stem = name.replace('-', "_");
-    profile_dirs(&root.join("target"))
+    profile_dirs(root)
         .iter()
         .filter_map(|p| std::fs::read_dir(p.join("deps")).ok())
         .flatten()
@@ -238,36 +238,13 @@ pub fn dot_git_rerun_paths(target_dir: &Path) -> (Vec<(String, String)>, bool) {
     rerun_paths(target_dir, |v| Path::new(v).components().any(|c| c.as_os_str() == ".git"))
 }
 
-/// The profile folders with build script output: `target/<profile>` and `target/retest/<profile>`.
-fn profile_dirs(root: &Path) -> Vec<PathBuf> {
-    let mut v: Vec<PathBuf> = [root.join("target"), root.join("target/retest")]
-        .iter()
-        .filter_map(|base| std::fs::read_dir(base).ok())
-        .flat_map(|rd| rd.flatten().map(|e| e.path()))
-        .filter(|p| p.join("build").is_dir())
-        .collect();
-    v.sort();
-    v
-}
-
 fn rerun_checks(root: &Path, f: &mut Vec<Finding>) {
     let canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let mut seen = false;
     let mut bad = false;
-<<<<<<< head
     let mut reported: Vec<String> = Vec::new();
     for d in profile_dirs(root) {
         let (mut abs, s) = absolute_rerun_paths(&d, root);
-||||||| base
-    let mut reported: Vec<(String, String)> = Vec::new();
-    for dir in ["target/debug", "target/retest/debug"] {
-        let d = root.join(dir);
-        let (mut hits, s) = absolute_rerun_paths(&d, root);
-=======
-    let mut reported: Vec<(String, String)> = Vec::new();
-    for d in profile_dirs(&root.join("target")) {
-        let (mut hits, s) = absolute_rerun_paths(&d, root);
->>>>>>> d48a4e9
         if canon != root {
             abs.extend(absolute_rerun_paths(&d, &canon).0);
         }
@@ -490,22 +467,22 @@ mod tests {
     }
 
     #[test]
-    fn profile_dirs_finds_every_profile_folder() {
-        let t = std::env::temp_dir().join(format!("layr-doctor-profiles-{}", std::process::id()));
+    fn profile_dirs_finds_triple_and_retest_profiles_and_no_deeper() {
+        let t = std::env::temp_dir().join(format!("layr-doctor-triples-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&t);
-        for p in ["debug", "release", "aarch64-x/release", "retest/debug", "retest/aarch64-x/release"] {
-            std::fs::create_dir_all(t.join(p).join(".fingerprint")).unwrap();
+        let target = t.join("target");
+        for p in ["debug", "aarch64-x/release", "retest/debug", "retest/aarch64-x/release"] {
+            std::fs::create_dir_all(target.join(p).join(".fingerprint")).unwrap();
         }
-        std::fs::create_dir_all(t.join("retest/notes/deps")).unwrap();
-        std::fs::create_dir_all(t.join("doc/crate/src")).unwrap();
-        let got: BTreeSet<String> = profile_dirs(&t).iter().map(|p| p.strip_prefix(&t).unwrap().display().to_string()).collect();
+        // Not a profile: a folder with no build output, and a profile below the third level.
+        std::fs::create_dir_all(target.join("retest/notes/deps")).unwrap();
+        std::fs::create_dir_all(target.join("a/b/c/release/.fingerprint")).unwrap();
+        let got: BTreeSet<String> =
+            profile_dirs(&t).iter().map(|p| p.strip_prefix(&target).unwrap().display().to_string()).collect();
         let _ = std::fs::remove_dir_all(&t);
-        let want: BTreeSet<String> = ["debug", "release", "aarch64-x/release", "retest/debug", "retest/aarch64-x/release"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        assert_eq!(got.difference(&want).count(), 0, "{got:?}");
-        assert_eq!(want.difference(&got).count(), 0, "{got:?}");
+        let want: BTreeSet<String> =
+            ["debug", "aarch64-x/release", "retest/debug", "retest/aarch64-x/release"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(got, want);
     }
 
     #[test]
