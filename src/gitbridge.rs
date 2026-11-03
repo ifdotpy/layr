@@ -1068,6 +1068,7 @@ fn repair_cache(repo: &Repo) -> Result<bool> {
         return Ok(false);
     }
     let damaged = repo.p.dir.join(format!("git-damaged-{}", ids::new_id()));
+    forget_objects();
     std::fs::rename(&s, &damaged)?;
     std::fs::set_permissions(&damaged, std::fs::Permissions::from_mode(0o700))?;
     VERIFIED_OBJECTS.with(|objects| objects.borrow_mut().retain(|(path, _)| path != &s));
@@ -2255,4 +2256,154 @@ pub fn install_pack(repo: &Repo, pack: &[u8]) -> Result<()> {
         bail!("git unpack-objects failed: {}", String::from_utf8_lossy(&out.stderr).trim());
     }
     Ok(())
+}
+
+// ----- changes of many commits in one object reader -----
+//
+// `log -p` and `show` read the changes of every commit of a range. One process per commit (diff-tree,
+// cat-file) costs more than the diffs. This reader keeps one `cat-file --batch` process for the
+// command and walks the trees of each commit itself (the import walk, `walk_trees`, with both sides).
+
+thread_local! {
+    /// The object reader of this thread, with the store it reads.
+    static OBJECTS: std::cell::RefCell<Option<(PathBuf, CatFile)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `f` with the object reader of the project's git store (one `cat-file --batch` process).
+fn with_objects<T>(repo: &Repo, f: impl FnOnce(&mut CatFile) -> Result<T>) -> Result<T> {
+    let s = store(repo);
+    OBJECTS.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if slot.as_ref().map(|(path, _)| path != &s).unwrap_or(true) {
+            *slot = Some((s.clone(), CatFile::new(&s)?));
+        }
+        let (_, cat) = slot.as_mut().context("object reader")?;
+        f(cat)
+    })
+}
+
+/// True when a read can take the state's changes: its tree is on disk, or it is an imported state
+/// whose commit is known (the record names it). Reads no git object; a missing object shows when the
+/// read happens.
+pub fn readable(repo: &Repo, state: &str) -> Result<bool> {
+    Ok(repo.p.has_state(state) || imported_commit(repo, state)?.is_some())
+}
+
+/// Forgets the object reader (the store changed on disk: a damaged cache went aside).
+fn forget_objects() {
+    OBJECTS.with(|cell| cell.borrow_mut().take());
+}
+
+/// One changed file of a commit against its base: the (mode, object id) of each side, None when
+/// the side has no file there (absent, a folder, or a submodule).
+struct Delta {
+    path: String,
+    old: Option<(String, String)>,
+    new: Option<(String, String)>,
+}
+
+fn file_side(e: Option<&TreeEntry>) -> Option<(String, String)> {
+    e.filter(|e| !e.is_tree() && !e.is_link()).map(|e| (e.mode.clone(), e.oid.clone()))
+}
+
+/// The files that differ between two trees, below `prefix` (`old`/`new` None: the side is empty).
+fn tree_deltas(cat: &mut CatFile, old: Option<&str>, new: Option<&str>, prefix: &str, out: &mut Vec<Delta>) -> Result<()> {
+    let before = match old {
+        Some(o) => parse_tree(&cat.object(o, "tree")?)?,
+        None => BTreeMap::new(),
+    };
+    let now = match new {
+        Some(n) => parse_tree(&cat.object(n, "tree")?)?,
+        None => BTreeMap::new(),
+    };
+    let names: BTreeSet<&String> = before.keys().chain(now.keys()).collect();
+    for name in names {
+        let (o, e) = (before.get(name), now.get(name));
+        if o == e {
+            continue;
+        }
+        let path = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
+        let o_tree = o.filter(|x| x.is_tree()).map(|x| x.oid.as_str());
+        let e_tree = e.filter(|x| x.is_tree()).map(|x| x.oid.as_str());
+        if o_tree.is_some() || e_tree.is_some() {
+            tree_deltas(cat, o_tree, e_tree, &path, out)?;
+        }
+        let (old_side, new_side) = (file_side(o), file_side(e));
+        if old_side != new_side {
+            out.push(Delta { path, old: old_side, new: new_side });
+        }
+    }
+    Ok(())
+}
+
+/// The bytes of the changed files of one side, held in memory, by path.
+pub struct GitFiles {
+    files: BTreeMap<String, Vec<u8>>,
+}
+
+impl GitFiles {
+    /// The bytes of the file at `path`; empty when the side has no file there.
+    pub fn bytes(&self, path: &str) -> Result<Vec<u8>> {
+        Ok(self.files.get(path).cloned().unwrap_or_default())
+    }
+}
+
+/// The changes of `new` against `old` (its first parent; None for the first commit), and the bytes
+/// of the changed files on both sides, held in memory. No folder is written and no tree is built.
+pub struct Sides {
+    pub old: GitFiles,
+    pub new: GitFiles,
+    pub changes: Vec<crate::changes::Change>,
+}
+
+/// Metadata of a changed file of a git side: the type and mode of its tree entry, and its size.
+fn git_meta(mode: &str, size: usize) -> crate::fsutil::Meta {
+    use crate::fsutil::{FType, Meta};
+    Meta {
+        ftype: if mode == "120000" { FType::Symlink } else { FType::File },
+        mode: if mode == "100755" { 0o755 } else { 0o644 },
+        size: size as u64,
+        ino: 0,
+        uid: 0,
+        gid: 0,
+        mtime: 0,
+    }
+}
+
+pub fn sides_of(repo: &Repo, old: Option<&str>, new: &str) -> Result<Sides> {
+    let (deltas, blobs) = with_objects(repo, |cat| {
+        let new_tree = tree_id(&cat.object(new, "commit")?)?.to_string();
+        let old_tree = match old {
+            Some(o) => Some(tree_id(&cat.object(o, "commit")?)?.to_string()),
+            None => None,
+        };
+        let mut deltas = Vec::new();
+        tree_deltas(cat, old_tree.as_deref(), Some(&new_tree), "", &mut deltas)?;
+        deltas.sort_by(|a, b| a.path.cmp(&b.path));
+        let mut blobs: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        for d in &deltas {
+            for (_, oid) in d.old.iter().chain(d.new.iter()) {
+                if !blobs.contains_key(oid) {
+                    blobs.insert(oid.clone(), cat.object(oid, "blob")?);
+                }
+            }
+        }
+        Ok((deltas, blobs))
+    })?;
+    let (mut old_files, mut new_files) = (BTreeMap::new(), BTreeMap::new());
+    let mut changes = Vec::new();
+    for d in &deltas {
+        let old_meta = d.old.as_ref().map(|(mode, oid)| {
+            let data = &blobs[oid];
+            old_files.insert(d.path.clone(), data.clone());
+            git_meta(mode, data.len())
+        });
+        let new_meta = d.new.as_ref().map(|(mode, oid)| {
+            let data = &blobs[oid];
+            new_files.insert(d.path.clone(), data.clone());
+            git_meta(mode, data.len())
+        });
+        changes.push(crate::changes::Change { path: d.path.clone(), old_path: None, old: old_meta, new: new_meta, ranges: None });
+    }
+    Ok(Sides { old: GitFiles { files: old_files }, new: GitFiles { files: new_files }, changes })
 }

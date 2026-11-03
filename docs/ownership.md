@@ -129,8 +129,14 @@ Owners and freeing:
   until nothing more goes, so a base goes after its layers. `layr gc -n --repair` lists them.
   The record stays.
 
-Costs: a build reads the changed Git trees and writes the changed files. A pair read from git
-writes the changed files of both sides to a temporary folder, and removes it after the read.
+Costs: a build reads the changed Git trees and writes the changed files. A read from git keeps one
+object reader (`cat-file --batch`) for the command and walks the trees of each commit itself, so the
+history of a range costs one process, not one per commit. `log` and `show` hold the changed files of
+both sides in memory. `diff` between two imported states writes the changed files of both sides to a
+temporary folder, which it removes after the diff.
+
+Renames: a read from git shows a moved file as a deletion and an addition, as a built tree does. Git
+would show a rename.
 
 ## Records from other machines
 

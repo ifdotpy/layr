@@ -571,29 +571,56 @@ fn pair_of(repo: &Repo, a: &str, b: &str) -> Result<(Snap, Snap, Vec<Temp>)> {
     Ok((repo.state_src(a)?, repo.state_src(b)?, Vec::new()))
 }
 
-/// The changes of a state against its first parent, and the two sides (see `pair_of`).
-fn state_changes(repo: &Repo, s: &StateRec) -> Result<(Snap, Vec<Temp>, Snap, Vec<Change>)> {
+/// One side of a comparison: a tree, or the bytes of an imported state read from git.
+pub enum Entries {
+    Tree(Snap),
+    Git(crate::gitbridge::GitFiles),
+}
+
+impl diff::Contents for Entries {
+    fn bytes(&self, path: &str) -> Result<Vec<u8>> {
+        match self {
+            Entries::Tree(root) => fsutil::entry_bytes(root, path),
+            Entries::Git(files) => files.bytes(path),
+        }
+    }
+}
+
+/// The sides of a state against its first parent, when the state is an imported state and its parent
+/// (if any) is an imported state: read from git objects (`gitbridge::sides_of`). The trees on disk are
+/// not needed, so a present state builds nothing either.
+fn git_sides(repo: &Repo, s: &StateRec) -> Result<Option<crate::gitbridge::Sides>> {
+    let Some(new) = crate::gitbridge::imported_commit(repo, &s.id)? else { return Ok(None) };
+    let old = match s.parents.first() {
+        None => None,
+        Some(p) => match crate::gitbridge::imported_commit(repo, p)? {
+            Some(c) => Some(c),
+            None => return Ok(None),
+        },
+    };
+    // Without the Git objects, the trees are read below (a store remote may hold them).
+    Ok(crate::gitbridge::sides_of(repo, old.as_deref(), &new).ok())
+}
+
+/// The changes of a state against its first parent, and the two sides.
+fn state_changes(repo: &Repo, s: &StateRec) -> Result<(Entries, Entries, Vec<Change>)> {
     repo.source_state(&s.id)?;
+    if let Some(sides) = git_sides(repo, s)? {
+        let changes = sides.changes.into_iter().filter(|c| !skip_path(&c.path)).collect();
+        return Ok((Entries::Git(sides.old), Entries::Git(sides.new), changes));
+    }
+    let root = repo.state_src(&s.id)?;
     match s.parents.first() {
         Some(p) => {
-            let (pr, root, keep) = pair_of(repo, p, &s.id)?;
+            let pr = repo.state_src(p)?;
             let v = changes::file_changes(&pr, &root)?.into_iter().filter(|c| !skip_path(&c.path)).collect();
             let v = changes::with_renames(&pr, &root, v);
-            Ok((pr, keep, root, v))
+            Ok((Entries::Tree(pr), Entries::Tree(root), v))
         }
         None => {
-            if !repo.p.has_state(&s.id) {
-                if let Some(c) = crate::gitbridge::imported_commit(repo, &s.id)? {
-                    if let Ok(p) = crate::gitbridge::sparse_pair(repo, None, &c) {
-                        let v = all_files(&p.new)?;
-                        return Ok((p.old, p.keep, p.new, v));
-                    }
-                }
-            }
-            let root = repo.state_src(&s.id)?;
             let e = empty_root()?;
             let v = all_files(&root)?;
-            Ok((snap(&e.path), vec![e], root, v))
+            Ok((Entries::Tree(snap(&e.path)), Entries::Tree(root), v))
         }
     }
 }
@@ -804,7 +831,7 @@ pub fn show(ctx: &Ctx, args: &[String]) -> Result<i32> {
         if a.has("-s") {
             continue;
         }
-        let (old, _keep, new, list) = state_changes(repo, &s)?;
+        let (old, new, list) = state_changes(repo, &s)?;
         let list: Vec<Change> = list.into_iter().filter(|c| matches(&specs, &c.path)).collect();
         if list.is_empty() {
             continue;
@@ -966,10 +993,10 @@ pub fn log(ctx: &Ctx, args: &[String]) -> Result<i32> {
             if specs.is_empty() {
                 return Ok(vec![String::new()]);
             }
-            if !repo.tree_available(&s.id) {
+            if !crate::gitbridge::readable(repo, &s.id)? {
                 return Ok(Vec::new());
             }
-            let (_o, _t, _n, list) = state_changes(repo, s)?;
+            let (_o, _n, list) = state_changes(repo, s)?;
             Ok(list.into_iter().flat_map(|c| std::iter::once(c.path).chain(c.old_path)).collect())
         },
         |path| specs.is_empty() || matches(&specs, path),
@@ -1021,8 +1048,8 @@ pub fn log(ctx: &Ctx, args: &[String]) -> Result<i32> {
             !a.has("--format"),
         )?;
         first = false;
-        if want_diff && repo.tree_available(&s.id) {
-            let (old, _t, new, list) = state_changes(repo, s)?;
+        if want_diff && crate::gitbridge::readable(repo, &s.id)? {
+            let (old, new, list) = state_changes(repo, s)?;
             let list: Vec<Change> = list.into_iter().filter(|c| matches(&specs, &c.path)).collect();
             if !list.is_empty() {
                 if blank {

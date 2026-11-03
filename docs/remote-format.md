@@ -24,8 +24,9 @@ No object is replaced. There are no mutable store refs.
 ## Git packs
 
 An imported state (`import` kind, `docs/ownership.md`, "States imported from Git") may have no tree
-on the machine that pushes. Its commit still has to be buildable offline on a clone. A push
-therefore also writes the Git objects of the imported commits that the remote does not list yet:
+on the machine that pushes. For such a state the Git pack below replaces the tree: the store holds
+the Git objects, and a clone builds the state from them offline. A push therefore also writes the Git
+objects of the imported commits that the remote does not list yet:
 
 - `git/<sha256>.pack.age`: the objects of those commits, as one `git pack-objects` pack, encrypted.
   The name is the SHA-256 of the unencrypted pack.
@@ -41,6 +42,9 @@ A fetch or clone reads each commits list. For each pack whose commits the local 
 decrypts the pack, checks its SHA-256 against the name, and adds its objects to the local Git store as
 loose objects (`git unpack-objects`), as a restored import writes them. A state whose tree is missing
 then builds from these objects (`docs/ownership.md`).
+
+Secret checks: a push checks the states it uploads (trees that layr made, and built imports). The Git
+objects of unbuilt imports, in a pack, are not checked by that push. They are the project's Git history.
 
 Compatibility: the format stays version 2. The `git/` objects are additive. Older readers ignore them.
 A store written before this section has no `git/` objects. A clone of it reads an imported state only
@@ -83,6 +87,8 @@ The machine key comes from its first signed record, as in peer replication.
 Records retain their existing signatures over their exact record bytes. Segments do not rewrite records.
 New record fields, refs, and attestations travel inside these records without a separate store format.
 Live line heads and live refs require their target states and ancestors, including Auto states without `--auto`.
+For an imported state the Git pack (section "Git packs") replaces its tree. Trees are required for
+states that layr made (named saves, automatic states, merges, and the other kinds that are not imports).
 Cache states require `--caches`, even when a live ref targets them. An omitted target is named in the report.
 Derived states travel as ordinary states.
 Readers validate the contiguous sequence prefix, project identity, signatures, and local trust before they import records.

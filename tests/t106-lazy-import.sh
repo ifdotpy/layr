@@ -38,12 +38,12 @@ eq "a fetch of 50 commits builds no tree" "$before" "$(trees)"
 eq "the fetch imported the 50 new commits" 250 "$(l log --json origin/main | wc -l | tr -d ' ')"
 
 # Reads of imported states come from git: a log with diffs, a file and a diff build no tree.
-start=$(date +%s)
+now() { python3 -c 'import time; print(time.time())'; }
+start=$(now)
 l log -p > $T/logp.out
-elapsed=$(( $(date +%s) - start ))
+lazy_seconds=$(python3 -c "print($(now) - $start)")
 has "log -p shows the diff of commit 10" "+change 10" "$(cat $T/logp.out)"
 eq "log -p over the 200 commits builds no tree" 1 "$(trees)"
-ok "log -p over the 200 commits finishes fast (under 90 s)" test "$elapsed" -lt 90
 
 git -C $U show $C10:big.txt > $T/git10.out
 l show $C10:big.txt > $T/show10.out
@@ -83,5 +83,15 @@ ok "a freed state reads again with the same content" cmp -s $T/d3031.out $T/d303
 l try -q $C30 -- true
 ok "the freed state is built again on the next command that needs it" test "$(trees)" -gt 2
 ok "built states were more than the tip" test "$built" -gt 1
+
+# The same log with every tree on disk (the tree path, as before the change) in the same run. The
+# log that reads from git must take at most three times as long.
+for c in $C; do l try -q $c -- true; done
+ok "every commit of the history has its tree on disk (at least 200 entries)" test "$(trees)" -ge 200
+start=$(now)
+l log -p > $T/logp-built.out
+built_seconds=$(python3 -c "print($(now) - $start)")
+ok "log -p from git takes at most 3x the tree path ($lazy_seconds s against $built_seconds s)" python3 -c "import sys; sys.exit(0 if $lazy_seconds <= 3 * $built_seconds else 1)"
+ok "the log from git equals the log from trees" cmp -s <(sed -E 's/^state [0-9a-f]+$/state X/; s/^Date: .*/Date: X/' $T/logp.out) <(sed -E 's/^state [0-9a-f]+$/state X/; s/^Date: .*/Date: X/' $T/logp-built.out)
 
 finish
