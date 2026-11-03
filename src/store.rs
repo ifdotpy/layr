@@ -358,6 +358,16 @@ pub fn creator_gone(name: &str) -> Option<bool> {
 /// Set by `layr gc`: it empties the whole trash.
 pub static EMPTY_TRASH_FULLY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Empty the trash after a free step (`free.rs`) that runs without the store lock: in the
+/// background, or within the test budget when one is set or the start fails.
+pub fn kick_trash(dir: &Path) {
+    if std::env::var_os("LAYR_TRASH_BUDGET_MS").is_some() || !spawn_trash_emptier(dir) {
+        let budget = trash_budget();
+        let _t = crate::trace::span(format!("empty trash ({} ms)", budget.as_millis()));
+        empty_trash(dir, Some(budget));
+    }
+}
+
 /// Delete what is in the trash, for at most `budget` (`None`: all of it; a started delete of
 /// one file or folder is not cut). A big tree is deleted entry by entry, so the budget holds
 /// for it too. Two processes may work on one tree: an entry that is gone is not an error.
@@ -583,8 +593,8 @@ impl<'a> Project<'a> {
     /// (`thin::delete_states`). A state kept as a base counts as handled, as in `delete_state`.
     pub fn delete_states(&self, ids: &[String]) -> Vec<String> {
         #[cfg(target_os = "macos")]
-        if crate::thin::delete_states(self, ids).is_ok() {
-            return ids.to_vec();
+        if let Ok(gone) = crate::thin::delete_states(self, ids) {
+            return ids.iter().filter(|id| gone.contains(id.as_str())).cloned().collect();
         }
         ids.iter().filter(|id| self.delete_state(id).is_ok()).cloned().collect()
     }
@@ -646,11 +656,10 @@ impl<'a> Project<'a> {
         Self::create_in(store, name, actor, config)
     }
 
+    /// Make a new project folder. A path that exists (a partial folder too) is refused and left
+    /// unchanged. A failure after this call made the folder removes the whole folder.
     fn create_in(store: &'a Store, name: &str, actor: &Actor, config: serde_json::Value) -> Result<Project<'a>> {
         let dir = store.project_dir(name)?;
-        if db_file(&dir).exists() {
-            bail!("project '{name}' already exists");
-        }
         if !crate::storage::is_supported(&store.projects_dir()) {
             #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
             bail!("{} is not on btrfs", store.projects_dir().display());
@@ -659,25 +668,43 @@ impl<'a> Project<'a> {
             #[cfg(feature = "overlayfs")]
             bail!("OverlayFS requires a local store and mount permission");
         }
-        mkdir_mode(&dir, 0o755)?;
-        mkdir_mode(&dir.join("states"), 0o700)?;
-        mkdir_mode(&dir.join("deltas"), 0o700)?;
-        mkdir_mode(&dir.join("lines"), 0o711)?;
-        mkdir_mode(&dir.join("meta"), 0o700)?;
-        for d in ["stage", "scan", "work"] {
-            mkdir_mode(&dir.join("meta").join(d), 0o700)?;
+        if let Some(parent) = dir.parent() {
+            fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
         }
-        if !dir.join("meta").join("db").exists() {
+        // The exclusive create decides who owns the folder: only a successful create is ours.
+        match fs::create_dir(&dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                bail!("{} already exists; nothing was changed", dir.display())
+            }
+            Err(e) => return Err(e.into()),
+        }
+        let made = (|| -> Result<Project<'a>> {
+            mkdir_mode(&dir, 0o755)?;
+            mkdir_mode(&dir.join("states"), 0o700)?;
+            mkdir_mode(&dir.join("deltas"), 0o700)?;
+            mkdir_mode(&dir.join("lines"), 0o711)?;
+            mkdir_mode(&dir.join("meta"), 0o700)?;
+            for d in ["stage", "scan", "work"] {
+                mkdir_mode(&dir.join("meta").join(d), 0o700)?;
+            }
             crate::storage::create_subvolume(&dir.join("meta").join("db"))?;
             std::fs::set_permissions(dir.join("meta").join("db"), fs::Permissions::from_mode(0o700))?;
+            let id = ids::new_id();
+            let db = Db::open(&db_file(&dir))?;
+            let p = Project { store, name: name.to_string(), dir: dir.clone(), id: id.clone(), db };
+            let mut rec = Record::new("project");
+            rec.data = serde_json::json!({"name": name, "id": id, "config": config});
+            p.append(rec, actor)?;
+            Ok(p)
+        })();
+        match made {
+            Ok(p) => Ok(p),
+            Err(e) => {
+                let _ = crate::storage::delete_tree(&dir);
+                Err(e)
+            }
         }
-        let id = ids::new_id();
-        let db = Db::open(&db_file(&dir))?;
-        let p = Project { store, name: name.to_string(), dir, id: id.clone(), db };
-        let mut rec = Record::new("project");
-        rec.data = serde_json::json!({"name": name, "id": id, "config": config});
-        p.append(rec, actor)?;
-        Ok(p)
     }
 
     /// Folders of a project without records (for a restore or a replica).
@@ -743,6 +770,7 @@ impl<'a> Project<'a> {
         p.finish_schema_upgrade()?;
         crate::rootcheck::check_project(&p)?;
         p.id = p.project_id()?;
+        crate::free::register(store, name);
         #[cfg(target_os = "macos")]
         if crate::apfs_commit::pending(&p)? {
             // Wait for a live commit, or recover the index after an interrupted one.

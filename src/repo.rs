@@ -349,6 +349,7 @@ impl<'a> Repo<'a> {
     /// Every command that reads the tree of a state comes here (`state_root`, `state_src`). A
     /// state that retention evicted comes back from a store remote that holds it.
     fn check_state(&self, id: &str) -> Result<()> {
+<<<<<<< head
         if self.p.has_state(id) {
             return Ok(());
         }
@@ -373,8 +374,35 @@ impl<'a> Repo<'a> {
                 }
             })?,
             None => bail!("unknown state {}", ids::short(id)),
+||||||| base
+        if !self.p.has_state(id) {
+            match self.p.db.state_flags(id)? {
+                Some((_, true)) => bail!("state {} was deleted by retention", ids::short(id)),
+                Some(_) => crate::store_remote::restore_state(self, id)?,
+                None => bail!("unknown state {}", ids::short(id)),
+            }
+=======
+        if !self.p.has_state(id) {
+            match self.p.db.state_flags(id)? {
+                Some((_, true)) => bail!("state {} was freed: no line, ref, tag or undo record keeps it", ids::short(id)),
+                Some(_) => crate::store_remote::restore_state(self, id)?,
+                None => bail!("unknown state {}", ids::short(id)),
+            }
+>>>>>>> origin/main
         }
         Ok(())
+    }
+
+    /// A state to read without a complete copy: on APFS its layers, elsewhere its folder.
+    /// Pin saved states that a command reads (`free::pin`): they stay on disk until the guard goes.
+    /// Fails clearly for a state that another command freed (read it again).
+    pub fn pin(&self, states: &[&str]) -> Result<crate::free::Pin> {
+        crate::free::pin(&self.p, states)
+    }
+
+    /// Keep pins until the command ends (`free::hold`).
+    pub fn hold(&self, pin: crate::free::Pin) {
+        crate::free::hold(pin)
     }
 
     /// A state to read without a complete copy: on APFS its layers, elsewhere its folder.
@@ -924,8 +952,16 @@ impl<'a> Repo<'a> {
     /// every other command of the project. Under the lock `save` scans the folder again and
     /// takes this layer with one rename when the folder, the head and the previous state did
     /// not change; else it writes the state as before.
-    #[cfg(target_os = "macos")]
+    /// The reads of a save before its lock: the head and the save base are pinned for the rest of
+    /// the command (`hold`), then the automatic state is written (APFS).
     pub fn prepare_save(&self, line: &Line) -> Result<()> {
+        let prev = self.save_base(line)?;
+        self.hold(self.pin(&[&line.head, &prev])?);
+        self.prepare_save_layer(line)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn prepare_save_layer(&self, line: &Line) -> Result<()> {
         let w = self.working(line);
         if !w.exists() || !self.private_paths(line)?.is_empty() || !self.thin_line(line)? {
             return Ok(());
@@ -964,7 +1000,7 @@ impl<'a> Repo<'a> {
         Ok(())
     }
     #[cfg(not(target_os = "macos"))]
-    pub fn prepare_save(&self, _line: &Line) -> Result<()> {
+    fn prepare_save_layer(&self, _line: &Line) -> Result<()> {
         Ok(())
     }
 
@@ -1684,6 +1720,11 @@ impl<'a> Repo<'a> {
     /// that its owner reads (docs/overlays.md).
     pub fn create_line_from(&self, ctx: &Ctx, name: &str, start: &str, owner: u32, source: Option<&Line>) -> Result<Line> {
         check_name("line", name)?;
+        // The start state and its caches (their snapshots go with the state) stay for the command.
+        self.hold(self.pin(&[start])?);
+        if let Some(s) = source {
+            self.hold(self.pin(&[&s.head])?);
+        }
         self.source_state(start)?;
         if self.p.db.line_by_name(name)?.is_some() {
             bail!("a line named '{name}' already exists");

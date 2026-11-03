@@ -101,6 +101,7 @@ It must refuse a developer binary that has no `store-version` command.
 Studio can require equal package versions as its own policy.
 Layr itself enforces only the local format number.
 
-The build identity comes from `git describe --always --dirty --exclude '*'`.
-A source archive can supply `LAYR_BUILD_ID` at build time.
-Without either source, the identity is `unknown`.
+The build identity and date come from `LAYR_BUILD_ID` and `LAYR_BUILD_DATE` at build time.
+A release build sets both, for example `LAYR_BUILD_ID=$(git rev-parse --short HEAD)
+LAYR_BUILD_DATE=$(date +%F) cargo build --release`. Without them, both are `dev`.
+The build never reads `.git`: a watch of `.git/HEAD` rebuilt the binary in every new layr line.

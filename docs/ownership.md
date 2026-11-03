@@ -2,7 +2,9 @@
 
 This page is part of the [Layr documentation](../README.md#documentation).
 
-Status: accepted 2026-11-01. Implementation follows the phases at the end.
+Status: implemented. Accepted 2026-11-01; the owners table came first (#115, shadow mode), and
+freeing is the default behavior since 2026-11-02. There is no flag and no mode: the old
+retention plan is gone.
 
 ## Why
 
@@ -40,7 +42,8 @@ operation that drops its last owner. No walk decides what lives; `gc` only check
 | `undo` | line id | the states that its newest `undo.ops` records name (default 20): before and after heads, working states, states made by the record | a record of the line | the ring overflows |
 | `deleted` | project | the final state and staged state of the newest `undo.deleted` deleted lines (default 5) | line delete | the ring overflows, `undo` of the delete |
 | `overlay` | overlay name + line | a project state that a cache overlay head or record names | overlay save | overlay head moves, overlay line delete |
-| `pin` | process id | a state a running command reads (a prepared copy, a merge source) | command start | command end; a dead process is released by repair |
+| `store` | store remote name | a state that a successful push to a store remote sent | push | never while eviction is off (the store keeps every state it receives) |
+| `pin` | `<pid>:<process start>` | a state that a command reads outside the store lock (a check or `try` copy) | pin start (only when the state has another owner) | pin end; a dead process is released by the next free step and by `gc --repair` |
 
 Rules:
 
@@ -50,39 +53,51 @@ Rules:
 2. `ref` expiry is the only time rule left. An expired ref is released by the next command that
    reads or writes refs, and by `gc --repair`.
 3. A newest automatic state of each live line always has an `auto` owner (ring size at least 1).
+4. A deleted line keeps no `undo` record of its earlier operations. Its `undo` owners go in the
+   line delete, so its automatic states and saved records are freed by that command. `undo` of
+   the delete still works through the `deleted` ring (its final and staged states).
+5. Pins are owners that no record makes. The owners check does not compare them.
 
 ## When a state is freed
 
-A record that removes the last owner of a state frees it in the same SQLite transaction that
-applies the record (`Db::derive`). Freeing a state releases its `parent`, `derived` and
-`conflict` owners, so a chain that nothing else holds is freed in the same transaction, in one
-pass from the child to its ancestors (a queue, no recursion).
+A record that removes the last owner of a state marks the state dead in the same SQLite
+transaction that applies the record (`Db::derive`, `owners.rs`): `states.present=0`,
+`states.deleted=1`, and a row in `free_queue(state)`. Freeing a state releases its `parent`,
+`derived` and `conflict` owners, so a chain that nothing else holds is marked in the same
+transaction (a queue, no recursion).
 
-The transaction only marks states dead (`states.present = 0`, `states.dead = 1`) and adds them
-to `free_queue(state)`. After the commit and after the store lock, the command moves each
-queued state's storage to the trash and removes it from the queue. A crash between the commit and
-the move leaves the state in `free_queue`; the next command or `gc --repair` finishes it. Moving
-to the trash twice is harmless.
+The free step (`free.rs`) runs at the end of every command that opened a project. It takes the
+project lock for its check and its move (re-read the queue, skip a state that is owned again, move
+the rest to the trash); only the trash emptying runs after the lock. A state that a command names
+again before the check is kept (tests/t109-free-recheck.sh). It moves the
+storage of each queued state that still has no owner to the trash (`Project::delete_states`),
+after the COMMIT and after the store lock is released, then empties the trash in the background.
+A crash between the commit and the move leaves the state in `free_queue`. The next command, or
+`gc --repair`, finishes it. Moving a state to the trash twice is harmless. `LAYR_TEST_EXIT_AFTER_COMMIT`
+(tests only) exits at this point to test the crash case.
+
+A replay (a rebuild of the derived tables, and the owners of `gc` check) runs with freeing off
+(`owners::fill_only`). The replay only fills owners.
+
+Before a line delete, its final state gets a complete tree (APFS, `thin::make_keyframe`). The
+`deleted` ring keeps that state, and as a thin layer it would keep every automatic state under it.
 
 ## Storage that a live state needs
 
 On APFS a thin state is a layer over a base state (`src/thin.rs`). A dead state whose storage is
-the base of a live state's layer keeps its storage until no live layer uses it. Track this as a
-separate storage edge `bases(state, base)`, written when a layer is made:
-
-- Freeing a state with no live dependent layer moves its storage to the trash.
-- Freeing a state that is still a base keeps its storage and marks it `dead`. When the last
-  dependent layer is freed or re-based (keyframe, the existing upkeep), the base storage goes.
-- btrfs and OverlayFS states have no layer bases; the table stays empty there.
+the base of a live state's layer keeps its storage until no live layer uses it. The free step
+asks the layers on disk (`thin::delete_states`), so a dead base stays queued and goes when its last
+dependent layer goes, or when a keyframe (the existing upkeep, `layr gc --repair`) re-bases that
+layer. The `bases(state, base)` table records each layer's base. btrfs and OverlayFS states have
+no layer bases; the table stays empty there.
 
 ## States that a store remote holds
 
-A state that a layr store remote holds (a push record names it; the store never deletes complete
-states) keeps its record when its local storage goes. Its storage has a weaker kind of owner:
-only `head`, `auto`, `undo`, `deleted`, `park`, `overlay`, `pin` and `bases` keep the local
-copy. `parent`, `derived`, `ref`, `tag`, `remote-ref` and `export` keep the record but not the
-copy. Reading such a state fetches it back (`Repo::check_state`, as in #111). Git is never a
-source.
+A state that a store remote received (a successful push to a store remote) has a `store` owner.
+While eviction is off (`gc.evict`, the default) the owner is strong: the state stays with its
+history. With `gc.evict on`, `gc --repair` evicts a state whose only owners are the weak kinds
+(`parent`, `derived`, `conflict`, `ref`, `tag`, `remote-ref`, `export`, `store`): the tree goes, the
+record stays, and a read fetches it back. Git is never a source.
 
 ## States imported from Git
 
@@ -144,6 +159,35 @@ Peer sync and store fetch import records from other machines. They go through th
 `Db::derive`, so they add and release owners the same way. A record from another machine never
 frees a state that a local owner holds: owners are per state, not per machine.
 
+## Pins
+
+A command that reads a saved state while the store lock may be free pins it: a row `pin` with holder
+`<pid>:<process start>`. `free::pin` takes the pins of a set of states (`Repo::pin`), and
+`Repo::hold` keeps them until the command ends (`free::finish`). A pin counts only for a state that
+has another owner. A state that no owner names, or that a free step already queued, is refused:
+the reader fails with "state X was freed: no line, ref, tag or undo record keeps it", and it never
+reads the content of a freed state. A pinned state that loses its other owners stays until the pin
+ends; the end of the command marks it dead, and the free step of that command frees it. Pins of dead
+processes are released by the next free step and by `gc --repair`. A pinned state also keeps its
+ancestors, because its parent rows stay.
+
+A reader of an UNOWNED state (an old leftover) is not pinned, by design: pinning it would count as an
+owner and keep it. Only an explicit `gc --repair` racing such a read can remove it.
+
+Covered (each call site pins its states for the whole command):
+- save and every write command (`prepare_save`: the head and the save base), save with caches;
+- merge (the source), merge queue entries (the source and the expected head), pick and revert (the
+  picked states), replay (the head, the upstream and the onto state), undo (every state the record
+  names);
+- `line new` (the start state and the source head, with its caches);
+- status and the other overlap compares (`overlaps`: every compared head, read before the pins);
+- diff, show and log (the revisions they name and the line head);
+- `try` and checks (the state under test).
+
+Test: tests/t100-pin-reads.sh. The test hook `LAYR_TEST_PIN_HOLD_MS` (test only) sleeps once per
+process after its pins are taken, so a second process can drop the last owner of a state that the
+reader holds.
+
 ## Temporary objects
 
 A crash must not leave space that nothing owns. Every temporary path that layr makes on the
@@ -195,14 +239,15 @@ show them.
 
 ## gc
 
-`layr gc` becomes a check and repair:
+`layr gc` is a check. It recomputes the owners from the records, compares them with the table
+(pins excluded) and lists the present states that no owner names (leaks). It prints one line with
+the leaks and their bytes, and exits 1 when anything differs.
 
-- `layr gc` (check): recompute owners from the records into a temporary table, compare with
-  `owners`, and print the difference: leaks (dead by the recomputation but live in `owners`) and
-  missing owners (live by the recomputation but dead or missing). Exit 1 when they differ.
-- `layr gc --repair`: replace `owners` with the recomputation, finish `free_queue`, empty the
-  trash, release pins of dead processes and expired refs.
-- `layr fsck` runs the check.
+`layr gc --repair` replaces the table with the replay (live pins kept), marks the leaked states
+dead, releases expired refs, trims cache snapshots beyond `retention.caches`, runs the existing
+cache and overlay upkeep, runs the free step, and empties the trash. `layr gc -n --repair` only
+prints what it would free. `gc --dedup` is unchanged. `layr fsck` runs the same check, and
+`fsck --repair` rebuilds the table.
 
 The imported-state free step (section "States imported from Git") is in `gc --repair` before
 PR #135. It uses the owners table in shadow mode and does not depend on #135.
@@ -215,19 +260,26 @@ PR #135. It uses the owners table in shadow mode and does not depend on #135.
 | `undo.ops` | 20 | records per line | operations of a line that `layr undo` can reverse |
 | `undo.deleted` | 5 | lines per project | deleted lines that `layr undo` can bring back |
 
-## Phases
+`undo.days` and `retention.hours` are removed. Setting either fails with the name of its
+replacement. Ring sizes are counts. The first open of an old database does not free anything:
+the replay fills the owners, and `layr gc` reports the states that no owner names.
 
-1. **Owners table, shadow mode.** Add `owners`, `free_queue`, `bases`; fill them from the records
-   (`layr reindex` and on open of an old database); keep them current in `Db::derive`. Nothing is
-   freed by them yet. `layr gc` prints the difference between its current plan and the owners
-   model and still uses its current plan. Test: on every test store the two agree, or each
-   difference is explained in this page.
-2. **Release on operation.** Behind `storage.ownership = on` (project config, default off):
-   records free states as described, `gc` becomes check and repair. Test: a line delete frees its
-   unique states in that command; a ring overflow frees the oldest automatic state; `undo` within
-   the rings works; a crash test (kill between commit and trash move) leaves no leak after the
-   next command.
-3. **Default on.** Remove the time settings and the old plan. Document the change in
-   docs/commands.md.
+## Upgrade
 
-Each phase is one PR and works on APFS, btrfs and OverlayFS.
+- A database that already has the owners table (since #115) keeps working as it is. Freeing starts
+  with the next operation that drops an owner.
+- A database from before #115 is rebuilt from the records with freeing off (`owners::fill_only`).
+  States that the replay leaves unowned stay on disk.
+- `layr gc` prints how many states and bytes `layr gc --repair` would free. The first repair
+  frees them. No command frees them all at open.
+
+## Tests
+
+- tests/t100-pin-reads.sh: a merge source, a save base and an overlap compare stay on disk while
+  their reader runs, and go after it.
+- tests/t99-ownership-free.sh: line delete frees its states in that command, the `undo.deleted`
+  ring, the auto ring, `undo.ops`, the crash between commit and move, a pinned read, the time keys,
+  `gc` check and repair.
+- tests/apfs-ownership-bases.sh (APFS only): a dead base of a live thin layer keeps its storage and
+  goes with the layer.
+- tests/t92-owners-shadow.sh: the owners table equals the replay after each step.

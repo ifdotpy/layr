@@ -85,6 +85,8 @@ only, so this does not change the caller's builds. It is set by the tool and not
 because the callers (a gate script) set `CARGO_INCREMENTAL=0` for their plain builds, and a second
 variable per caller would be easy to forget. `LAYR_RETEST_INCREMENTAL=0` leaves the caller's value.
 The first incremental build of a crate is slower than a non-incremental one; the gain is on later builds.
+A rustc wrapper such as sccache (set in `~/.cargo/config.toml`) refuses incremental compilation, so the tool also
+clears `RUSTC_WRAPPER` for those calls. The gate does the same for its command.
 
 ### Measurements 2026-10-31
 
@@ -201,25 +203,51 @@ live set does not name goes. The live set names:
 - the newest object build of each live owner (a unit hash, or an unhashed crate);
 - the dep-info `<output>.d` of a listed output in the profile folder;
 - cargo's lock files (`.cargo-lock`, `.cargo-build-lock`, `.cargo-artifact-lock`);
-- each `incremental/<crate>-<id>` folder that a kept output is hard-linked to, with its newest finalized
-  session and that session's lock file.
+- each `incremental/<crate>-<id>` folder that a kept output is hard-linked to, with its newest finalized session
+  and that session's lock file. For a crate with a live test binary, bin or example and no link, the newest such
+  folder (see "Other profiles"). rustc names the lock `s-<time>-<id>.lock`, the session name without its hash.
 
 Everything else goes: uplifted copies that no listing names, stale bins and examples, unhashed objects of
 other builds, outputs of units that no command lists, orphan incremental folders, and other files. Entries
 go whole, so no live unit loses a file. The removal frees the bytes of an inode only when all its links go.
 
-Links from a unit to its incremental folder: rustc hard-links the object files of a session to the outputs in
-`deps`. The sweep reads the shared inodes. Measured on Studio: each live owner's objects link to exactly one
-folder, and no text file (fingerprint, dep-info, `.d`) names the folder, since its name carries a base-36 id,
-not the cargo hash.
+Links from a unit to its incremental folder (both need no compile):
+
+- Library: the newest session of a library holds `metadata.rmeta`, hard-linked to `deps/lib<crate>-<hash>.rmeta`
+  (link count 2). The sweep keeps the folder through that link, so a library built without debug info keeps its
+  folder. Measured 2026-11-03 on a test workspace with `debug = 0`.
+- Object files: rustc hard-links the object files of a session to the outputs in `deps`. This needs debug info.
+
+The folder name carries rustc's stable crate id (base-36), not the cargo hash, and no text file names it.
+
+Lock: the sweep keeps the lock of the kept session. Without it rustc cannot reuse the object files of that session:
+measured 2026-11-03, a one-line change after a sweep rebuilt both units of a library with debug info off, and with the
+lock put back the unchanged unit was reused (same inode). Test: `sweep_keeps_the_incremental_session_of_a_library_without_debug_info`.
 
 ### Other profiles
 
-A profile folder is swept only when a configured command lists an output in it. In Studio that is
-`target/debug` and, with a `retest` list, `target/retest/debug`. `target/release` and `target/wasm32-unknown-unknown`
-are not built by the sweep list, so the sweep leaves them as they are. A `studio-native-client` output (for
-example `deps/libstudio_native_client.a`) is not listed, because the sweep list excludes that crate, so the sweep
-removes it. A build that needs it compiles it again.
+A profile folder is swept only when a configured command lists an output in it. The profile is named by the
+listing, so a project that builds only `target/release` is swept (test: `sweep_sweeps_a_release_only_target`).
+A folder is swept when any profile folder in it has a fingerprint folder (a build wrote it). In Studio the
+listed profiles are `target/debug` and, with a `retest` list, `target/retest/debug`; `target/wasm32-unknown-unknown`
+is not listed, so the sweep leaves it as it is.
+
+Limit: a test binary, bin or example built without debug info has no link to its incremental folder (no object
+file, no `metadata.rmeta`). For each crate with a live one of these, the sweep keeps only the newest unlinked folder of
+that crate and removes the others, so at most one such folder per crate stays. Two trade-offs:
+
+- A bin and a test binary of the same crate, both live and both without debug info, share that one folder. One of them
+  recompiles after a sweep.
+- A non-live build of the same crate that ran last (for example a focused command with other features) can be the
+  newest folder. Then the live folder is removed, and the next standard build recompiles once.
+
+Set `debug = 1` for that profile to keep the object link. The layr project sets `[profile.release] debug = 1`.
+
+A `studio-native-client` output (for example `deps/libstudio_native_client.a`) is not listed, because the sweep
+list excludes that crate, so the sweep removes it. A build that needs it compiles it again.
+
+Known limit: the sweep needs every listed command to be fresh. A command with a stale unit makes the sweep skip
+that folder (see "Freshness"), so run the standard build before the sweep.
 
 ### Object files
 
@@ -711,7 +739,7 @@ Run in the root folder of a layr line that is also the cargo project root.
   - Adds a `regenerable` line to `.layrattributes` for each cache folder of the project that it finds: `target` (cargo),
     `node_modules` (pnpm) and `.layr-retest` (records of cargo, vitest, jest or pytest). Each line is added once.
   - Adds `.layr-retest` to `.gitignore` when the project has a test tool.
-  - Adds the keys `sweep` (`build --workspace --all-targets --locked`) and `env` (`CARGO_INCREMENTAL = "1"`) to
+  - Adds the keys `sweep` (`build --workspace --all-targets --locked`) and `env` (`CARGO_INCREMENTAL = "1"`, `RUSTC_WRAPPER = ""`) to
     `[workspace.metadata.layr-retest]` in `Cargo.toml` when they are missing. A package-only manifest gets a
     `[workspace]` table, so that cargo reads the metadata. A key that the project set keeps its value.
   - Saves each cache folder that exists and is not a cache overlay yet: `layr save --caches --cache <folder>`.
@@ -727,14 +755,20 @@ Run in the root folder of a layr line that is also the cargo project root.
     `target/debug` path or by an env variable whose name has a word `BIN`, `BINARY`, `EXE` or `EXECUTABLE`, or is a bin target name.
     That bin is not instrumented, so a change of it forces full runs. Use `env!("CARGO_BIN_EXE_<name>")`.
   - The number of test targets (lib, bin, integration), the size of the integration test binaries (from
-    `cargo metadata` and the files in `target/retest/debug/deps` or `target/debug/deps`; it does not run
+    `cargo metadata` and the files in the `deps` folder of every profile folder: `target/<profile>`,
+    `target/<triple>/<profile>` and `target/retest/<profile>`; it does not run
     `cargo nextest list`, which builds). For a crate with two or more integration test binaries: one
     binary (`autotests = false`, one `tests/main.rs`) saves the size of all but the largest and one link each.
-  - Build script output (`target/debug/build/*/output`, and the same under `target/retest/debug`): a
-    `cargo:rerun-if-changed=` (or `cargo::`) value that is an absolute path under the project root is a
-    warning. Each line has its own absolute path, so cargo marks the build script dirty in every new
-    line and rebuilds all crates after it, although `target/` is warm. Print a path relative to
-    `CARGO_MANIFEST_DIR`. Without build output, it says `build once to check build script paths`.
+  - Build script output (`build/*/output` in every profile folder: `target/<profile>`, `target/<triple>/<profile>`
+    and `target/retest/<profile>`):
+    - A `cargo:rerun-if-changed=` (or `cargo::`) value that is an absolute path under the project root is a
+      warning. Each line has its own absolute path, so cargo marks the build script dirty in every new
+      line and rebuilds all crates after it, although `target/` is warm. Print a path relative to
+      `CARGO_MANIFEST_DIR`.
+    - A value with a `.git` component, relative or absolute (for example `../../.git/HEAD`), is a warning.
+      Each line has its own `.git`, so the same rebuild happens. It prints the fix: take the version from
+      the build environment (for example an env var set by the release build) instead of watching `.git`.
+    - Without build output, it says `build once to check build script paths`.
   - Records: count, and the age of the newest (warning above 14 days). Size of `target/retest`
     (warning above 20 GB).
 

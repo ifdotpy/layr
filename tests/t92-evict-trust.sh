@@ -28,16 +28,19 @@ make_state() { # make_state <name> <remote>
     l line delete -D "$1" -q
 }
 
+# The rings of deleted lines and operations keep a local copy (docs/ownership.md): empty them, so
+# only the store copies hold these states.
+l config undo.deleted 0 >/dev/null; l config undo.ops 0 >/dev/null
 make_state control archive
 control=$STATE
-ok "gc evicts a copy of an unchanged remote" l gc -q
+ok "gc evicts a copy of an unchanged remote" l gc --repair -q
 no "the state with an unchanged remote is evicted" on_disk "$control"
 
 l remote add moved "file://$T/moved" --paper-key-out "$T/paper-moved" >/dev/null
 make_state changed moved
 changed=$STATE
 l config cloud.remote.moved.url "file://$T/elsewhere" >/dev/null
-ok "gc runs after the URL changed" l gc -q
+ok "gc runs after the URL changed" l gc --repair -q
 ok "the state of a changed URL is not evicted" on_disk "$changed"
 has "the state of a changed URL still reads from this machine" "changed" "$(l show "$changed:notes.txt")"
 
@@ -45,7 +48,7 @@ l remote add gone "file://$T/gone" --paper-key-out "$T/paper-gone" >/dev/null
 make_state removed gone
 removed=$STATE
 l remote remove gone >/dev/null
-ok "gc runs after the remote was removed" l gc -q
+ok "gc runs after the remote was removed" l gc --repair -q
 ok "the state of a removed remote is not evicted" on_disk "$removed"
 has "the state of a removed remote still reads from this machine" "removed" "$(l show "$removed:notes.txt")"
 finish

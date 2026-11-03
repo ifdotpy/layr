@@ -74,7 +74,7 @@ ok "main keeps its build output at its new head" in_line layr-admin main save -q
 as layr-u2 $L --project w line delete -D -q a1
 l --project w config retention.caches 0
 n_before=$(ls $LAYR_ROOT/projects/w/states | grep -c @)
-l --project w gc -q
+l --project w gc --repair -q
 n_after=$(ls $LAYR_ROOT/projects/w/states | grep -c @)
 ok "gc deletes the caches of old states" test "$n_after" -lt "$n_before"
 as layr-u1 $L --project w line new -q a4 main

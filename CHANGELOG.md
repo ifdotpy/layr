@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.18.1](https://github.com/ifdotpy/layr/compare/v0.18.0...v0.18.1) (2026-11-03)
+
+
+### Bug Fixes
+
+* **build:** Take the build identity from the environment, never from .git ([#159](https://github.com/ifdotpy/layr/issues/159)) ([76c1fd6](https://github.com/ifdotpy/layr/commit/76c1fd6e52b94e300f58bcf44a1cbc9733865e41))
+* **undo:** Point the line's .git at the restored head ([#163](https://github.com/ifdotpy/layr/issues/163)) ([7dddfd7](https://github.com/ifdotpy/layr/commit/7dddfd721c0d715b1414caf3f6c05c36b750721c))
+
+## [0.18.0](https://github.com/ifdotpy/layr/compare/v0.17.0...v0.18.0) (2026-11-03)
+
+
+### Features
+
+* **retest:** doctor flags build scripts that watch .git ([#160](https://github.com/ifdotpy/layr/issues/160)) ([bb0b37b](https://github.com/ifdotpy/layr/commit/bb0b37b6f427cf4ee4978cdd70505ed802761e38))
+
+
+### Bug Fixes
+
+* **init:** Leave no partial project after a failed init ([#155](https://github.com/ifdotpy/layr/issues/155)) ([f1580ad](https://github.com/ifdotpy/layr/commit/f1580add4ceb776d87f7f1f8b3f25501ec9af61d))
+* **retest:** keep incremental sessions and their locks for live units; doctor checks every profile ([#162](https://github.com/ifdotpy/layr/issues/162)) ([34c2780](https://github.com/ifdotpy/layr/commit/34c278049f38b8f42df426daa44e14a2c36ab096))
+
+## [0.17.0](https://github.com/ifdotpy/layr/compare/v0.16.2...v0.17.0) (2026-11-03)
+
+
+### Features
+
+* layr follow, and the daemon on macOS ([#148](https://github.com/ifdotpy/layr/issues/148)) ([1aaf38d](https://github.com/ifdotpy/layr/commit/1aaf38de979823c0c3f258134015cacfaa622445))
+* **retest:** init sets up a project, one build env, and a gate runner ([#149](https://github.com/ifdotpy/layr/issues/149)) ([7c3b58c](https://github.com/ifdotpy/layr/commit/7c3b58cd7d9be7147c6f4646ec58f5c14c3e412b))
+
+
+### Bug Fixes
+
+* **daemon:** Do not log a closed connection after hello as a bad request ([#156](https://github.com/ifdotpy/layr/issues/156)) ([0686bff](https://github.com/ifdotpy/layr/commit/0686bff8fb5625b359f3a7a431347c956657232e)), closes [#154](https://github.com/ifdotpy/layr/issues/154)
+* **gc:** Evict only restorable states from a current store copy ([#120](https://github.com/ifdotpy/layr/issues/120)) ([2edb169](https://github.com/ifdotpy/layr/commit/2edb169bcbc2cea81b74c0e507989180f2fd4eb7))
+* **retest:** sweep removes everything outside the live set ([#153](https://github.com/ifdotpy/layr/issues/153)) ([74394ee](https://github.com/ifdotpy/layr/commit/74394ee29eb053ae15fbbe42f69f527d8a1aac01))
+* Stop undo before file changes when a state is missing; keep line paths consistent on a failed move ([#147](https://github.com/ifdotpy/layr/issues/147)) ([e121697](https://github.com/ifdotpy/layr/commit/e121697a75f8c4d4c1d1dbe7e5fb8998f0d3e0b5))
+
 ## [0.16.2](https://github.com/ifdotpy/layr/compare/v0.16.1...v0.16.2) (2026-11-03)
 
 
