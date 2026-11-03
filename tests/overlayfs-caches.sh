@@ -2,8 +2,6 @@
 # Cache content, snapshots and transfer on an isolated OverlayFS test store.
 : "${LAYR_OVERLAYFS_TEST_ROOT:?Set an isolated test directory}"
 . "$(dirname "$0")/lib.sh"
-# TEMP (#184 diagnosis): trace the overlay decisions to the log.
-export LAYR_TRACE=1
 
 sample "$T/src"
 l init cachetest --from "$T/src" -q >/dev/null

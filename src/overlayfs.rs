@@ -38,6 +38,10 @@ struct Entry {
     plain: bool,
     #[serde(default)]
     restore_cache: bool,
+    /// A layer over a saved state, taken by a new line (`snapshot`). It is a mount in its
+    /// writable parent, so `recover` must not migrate it like an older nested cache mount.
+    #[serde(default)]
+    taken: bool,
 }
 #[derive(Default, Serialize, Deserialize)]
 struct Registry {
@@ -343,14 +347,13 @@ pub fn recover(root: &Path) -> Result<()> {
         if e.plain {
             continue;
         }
-        let was = mounted(path)?;
-        let _t = crate::trace::span(format!("overlay recover {} mounted={was} plain={}", path.display(), e.plain));
-        if !was {
+        if !mounted(path)? {
             fs::create_dir_all(path)?;
             state.mount(path, e)?;
         }
     }
-    // Upgrade old nested cache mounts after their parent mounts exist.
+    // Upgrade old nested cache mounts after their parent mounts exist (not a layer taken from a
+    // saved state: that is a mount on purpose).
     let caches: Vec<_> = state
         .registry
         .trees
@@ -358,6 +361,7 @@ pub fn recover(root: &Path) -> Result<()> {
         .filter(|(p, e)| {
             !e.info.readonly
                 && !e.plain
+                && !e.taken
                 && state
                     .registry
                     .trees
@@ -445,6 +449,7 @@ pub fn create_subvolume(path: &Path) -> Result<()> {
         hard_links: false,
         bases: Vec::new(),
         restore_cache: false,
+        taken: false,
         plain: state.registry.trees.iter().any(|(p, e)| path.starts_with(p) && !e.info.readonly && !e.plain),
     };
     fs::create_dir(&path)?;
@@ -838,6 +843,7 @@ pub fn snapshot(src: &Path, dst: &Path, readonly: bool) -> Result<()> {
             bases,
             plain,
             restore_cache: false,
+            taken: !readonly && !plain && parent.info.readonly,
         })
     })();
     let mut entry = match published {
@@ -861,8 +867,6 @@ pub fn snapshot(src: &Path, dst: &Path, readonly: bool) -> Result<()> {
     }
     state.registry.trees.insert(dst.clone(), entry.clone());
     state.save()?;
-    let mounted_now = mounted(&dst).unwrap_or(false);
-    let _t = crate::trace::span(format!("overlay snapshot {} mounted after publish={mounted_now}", dst.display()));
     if let Err(e) = state.mount(&dst, &entry) {
         state.registry.trees.remove(&dst);
         state.save()?;
@@ -1008,9 +1012,6 @@ fn rename_tree_using(from: &Path, to: &Path, allow_mount: bool, rename: impl FnO
     let _t = crate::trace::span(format!("overlay move {} -> {}: managed_root={managed_root} nested_entries={nested}", from.display(), to.display()));
     let moved: Result<()> =
         if managed_root { sys::overlay_mount(Some(&from), &to, None, libc::MS_MOVE, None).map_err(Into::into) } else { rename() };
-    if let Err(e) = &moved {
-        crate::trace::span(format!("overlay move FAILED: {e:#}"));
-    }
     if let Err(e) = moved {
         state.registry.pending_move = None;
         state.save()?;

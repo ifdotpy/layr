@@ -1350,7 +1350,6 @@ pub fn overlay_mount(
 }
 #[cfg(feature = "overlayfs")]
 pub fn overlay_unmount(path: &std::path::Path) -> io::Result<()> {
-    let _trace = crate::trace::span(format!("overlay UNMOUNT {}", path.display()));
     let p = overlay_path(path)?;
     // SAFETY: p is a terminated path. Never use lazy detach for managed data.
     if unsafe { libc::umount2(p.as_ptr(), 0) } == 0 {

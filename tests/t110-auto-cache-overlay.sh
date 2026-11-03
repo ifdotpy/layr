@@ -5,8 +5,6 @@
 # the layer is kept by layr itself. A new line from a state still starts warm (the cache overlay
 # is taken), for the same user.
 . "$(dirname "$0")/lib.sh"
-# TEMP (#184 diagnosis): trace the overlay decisions to the log.
-export LAYR_TRACE=1
 
 S=$T/src
 rm -rf $S && mkdir -p $S/src
@@ -76,15 +74,10 @@ states_of_cache() { ls "$LAYR_ROOT/projects/r/meta/overlays/cache.target/states"
 states_before=$(states_of_cache)
 before=$(store_bytes)
 l line new -q warm2 main
-echo "info: mountinfo after warm2: $(grep -c 'warm2/target' /proc/self/mountinfo)"
 l line new -q warm3 main
-echo "info: mountinfo after warm3: $(grep -c 'warm2/target' /proc/self/mountinfo)"
 after=$(store_bytes)
-echo "info: mountinfo after du: $(grep -c 'warm2/target' /proc/self/mountinfo)"
 echo "info: store growth of two new lines from main: $((after - before)) bytes"
 echo "info: layr du after the two new lines:"; l du 2>&1 | sed "s/^/info: /"
-echo "info: id $(id -u) owners: $(stat -c "%u:%g %a %n" $P/target/blob.bin $LAYR_ROOT/projects/r/lines/warm2/target/blob.bin 2>&1 | tr "\n" " ")"; mountpoint -q $LAYR_ROOT/projects/r/lines/warm2/target && echo "info: warm2 target is a mount"
-echo "info: mounts under warm2: $(grep -c warm2 /proc/self/mountinfo 2>/dev/null)"; grep warm2 /proc/self/mountinfo 2>/dev/null | sed "s/^/info: /" | cut -c1-220
 ok "two new lines from main add under 1 MiB of store growth" test $((after - before)) -lt 1048576
 eq "two new lines from main make no cache state" "$states_before" "$(states_of_cache)"
 cd $LAYR_ROOT/projects/r/lines/warm2 || exit 1
