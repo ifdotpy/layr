@@ -481,6 +481,7 @@ impl Copier {
         fs::rename(inbox.join(&name), dst).with_context(|| format!("place {}", dst.display()))?;
         fs::remove_dir(&inbox)?;
         self.share_files(src, dst)?;
+        self.restore_folders(src, dst)?;
         for rel in nested_subvolumes(src)? {
             let target = dst.join(&rel);
             // The send leaves an empty folder where a nested subvolume is.
@@ -495,6 +496,35 @@ impl Copier {
         if let Some(dir) = temp {
             delete_tree(&send)?;
             fs::remove_dir(&dir)?;
+        }
+        Ok(())
+    }
+
+    /// Create the folders of a received subvolume that `btrfs send` left out. A folder that holds a
+    /// nested subvolume's place in a snapshot (a state's `.git`) is an empty folder in the source,
+    /// and the send does not carry it. Nested subvolumes are left to `subvolume`.
+    fn restore_folders(&mut self, src: &Path, dst: &Path) -> Result<()> {
+        let mut stack = vec![PathBuf::new()];
+        while let Some(rel) = stack.pop() {
+            for e in fs::read_dir(src.join(&rel))? {
+                let e = e?;
+                if !e.file_type()?.is_dir() {
+                    continue;
+                }
+                let child = rel.join(e.file_name());
+                if is_subvolume(&src.join(&child)) {
+                    continue;
+                }
+                let (s_path, d_path) = (src.join(&child), dst.join(&child));
+                if fs::symlink_metadata(&d_path).is_err() {
+                    fs::create_dir(&d_path).with_context(|| format!("create {}", d_path.display()))?;
+                    let m = fs::symlink_metadata(&s_path)?;
+                    std::os::unix::fs::lchown(&d_path, Some(m.uid()), Some(m.gid()))
+                        .with_context(|| format!("owner of {}", d_path.display()))?;
+                    crate::fsutil::copy_metadata(&File::open(&s_path)?, &File::open(&d_path)?)?;
+                }
+                stack.push(child);
+            }
         }
         Ok(())
     }

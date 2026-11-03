@@ -26,7 +26,14 @@ new_volume() {
         return 0
     fi
     if [ -n "${LAYR_OVERLAYFS_TEST_ROOT:-}" ]; then
-        mkdir -p "$mp" # the test root is already a file system of the build (ext4 or XFS)
+        # OverlayFS: a second file system of the same type as the test root, mounted by this test
+        # (a folder of the test root would be the same file system, which a move refuses).
+        local type
+        type=$(findmnt -n -o FSTYPE -T "$T")
+        truncate -s 2G "$mp.img" || return 1
+        if [ "$type" = xfs ]; then mkfs.xfs -q -f "$mp.img"; else mkfs.ext4 -q -F "$mp.img"; fi || return 1
+        mkdir -p "$mp" && mount -o loop "$mp.img" "$mp" || return 1
+        mount --make-private "$mp" || return 1
         return 0
     fi
     new_fs "$mp" 2G
