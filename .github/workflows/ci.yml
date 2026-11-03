@@ -102,6 +102,8 @@ jobs:
     # sets CARGO_INCREMENTAL=0 only when the variable is unset.
     env:
       CARGO_INCREMENTAL: "1"
+      # Run layr in direct mode, as the user. Without it, Linux forwards to a root service at /run/layr/layr.sock.
+      LAYR_DIRECT: "1"
     steps:
       - uses: actions/checkout@v4
       # The toolchain pin also pins llvm-tools, which must match the LLVM of rustc.
