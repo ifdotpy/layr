@@ -71,6 +71,12 @@ fn not_found(e: &std::io::Error) -> bool {
     matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory)
 }
 
+/// True when a failed copy call found an entry of the source missing: a writer removed it during
+/// the copy.
+fn vanished(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<std::io::Error>().is_some_and(not_found)
+}
+
 fn parent_of(rel: &str) -> &str {
     rel.rfind('/').map(|i| &rel[..i]).unwrap_or("")
 }
@@ -456,8 +462,12 @@ pub fn diff(
                 d.write.insert(k.clone());
             }
             Some(o) => {
-                let link = || Ok(fs::read_link(old_path(k)?)? == fs::read_link(new_root.join(k))?);
-                if !same(o, e, link)? {
+                let link = || {
+                    let old_link = fs::read_link(old_path(k)?).with_context(|| format!("read the link {k} of the base"))?;
+                    let new_link = fs::read_link(new_root.join(k)).with_context(|| format!("read the link {k} of the source"))?;
+                    Ok(old_link == new_link)
+                };
+                if !same(o, e, link).with_context(|| format!("compare {k} with the base"))? {
                     d.write.insert(k.clone());
                 } else {
                     if e.fingerprint.6 >= since - 1 {
@@ -539,9 +549,10 @@ pub fn write_layer(
                 base: Some(base.to_string()),
             },
         )?;
-        set_removed(dst, &d.removed)?;
-        add_entries(src, dst, d.write.iter().map(|s| s.as_str()), d.removed.iter().map(|s| s.as_str()), &d.whole, gone)?;
-        copy_dir_meta(src, dst, true)?;
+        set_removed(dst, &d.removed).with_context(|| format!("write the removed paths of {}", dst.display()))?;
+        add_entries(src, dst, d.write.iter().map(|s| s.as_str()), d.removed.iter().map(|s| s.as_str()), &d.whole, gone)
+            .with_context(|| format!("copy {} entries of {} to {}", d.write.len(), src.display(), dst.display()))?;
+        copy_dir_meta(src, dst, true).with_context(|| format!("copy the metadata of {}", src.display()))?;
         if !writable {
             apfs::seal(dst, true, false)?;
         }
@@ -610,18 +621,18 @@ pub fn add_entries<'a>(
         container(&mut dirs, k)?;
         let to = dst.join(k);
         let copied = (|| -> Result<()> {
-            let from = crate::fsutil::safe_join(src, k)?;
-            let m = fs::symlink_metadata(&from)?;
+            let from = crate::fsutil::safe_join(src, k).with_context(|| format!("find {k} in the source"))?;
+            let m = fs::symlink_metadata(&from).with_context(|| format!("stat {k} in the source"))?;
             if crate::fsutil::exact_metadata(&to, k).is_some() {
-                open_parent(dst, k)?;
-                apfs::delete_tree(&to)?;
+                open_parent(dst, k).with_context(|| format!("open the folder of {k} in the layer"))?;
+                apfs::delete_tree(&to).with_context(|| format!("remove the old {k} from the layer"))?;
             }
             if m.is_dir() && whole.contains(k) && !holds_layer(src, k, &write) {
                 // A new folder: one clone copies its content (layer rule 5 holds, as the
                 // content is all new). A clone keeps the folder's own mode, so open it for the
                 // metadata step below.
                 crate::sys::apfs_clone(&from, &to).with_context(|| format!("clone {}", from.display()))?;
-                crate::sys::apfs_immutable(&to, false)?;
+                crate::sys::apfs_immutable(&to, false).with_context(|| format!("unlock {k} in the layer"))?;
                 let below = format!("{k}/");
                 let complete = write
                     .iter()
@@ -635,22 +646,24 @@ pub fn add_entries<'a>(
                 }
                 dirs.insert(k.to_string());
             } else if m.is_dir() {
-                fs::create_dir(&to)?;
+                fs::create_dir(&to).with_context(|| format!("create folder {k} in the layer"))?;
                 dirs.insert(k.to_string());
             } else if m.is_file() {
                 crate::sys::apfs_clone(&from, &to).with_context(|| format!("clone {}", from.display()))?;
-                crate::sys::apfs_immutable(&to, false)?;
+                crate::sys::apfs_immutable(&to, false).with_context(|| format!("unlock {k} in the layer"))?;
             } else if m.file_type().is_symlink() {
-                clone_entry(&from, &to, &m)?;
+                // False: the link went away between the stat and the read.
+                if !clone_entry(&from, &to, &m).with_context(|| format!("copy link {k} to the layer"))? {
+                    return Err(std::io::Error::from(ErrorKind::NotFound).into());
+                }
             } else {
                 bail!("cannot snapshot special file {}", from.display());
             }
             Ok(())
         })();
         if let Err(e) = copied {
-            let left = crate::fsutil::safe_join(src, k).ok().and_then(|f| fs::symlink_metadata(f).ok()).is_none();
             match gone.as_deref_mut() {
-                Some(g) if left => {
+                Some(g) if vanished(&e) => {
                     let _ = apfs::delete_tree(&to);
                     g.insert(k.to_string());
                 }
@@ -662,10 +675,17 @@ pub fn add_entries<'a>(
         let from = crate::fsutil::safe_join(src, d).ok();
         let is_dir = from.as_ref().is_some_and(|f| fs::symlink_metadata(f).map(|m| m.is_dir()).unwrap_or(false));
         let copied = match &from {
-            Some(f) if is_dir => copy_dir_meta(f, &dst.join(d), false),
+            Some(f) if is_dir => {
+                copy_dir_meta(f, &dst.join(d), false).with_context(|| format!("copy the metadata of folder {d}"))
+            }
             _ => Ok(()),
         };
-        let left = from.as_ref().and_then(|f| fs::symlink_metadata(f).ok()).is_none();
+        // A failed copy says whether the writer removed the folder. Otherwise the folder must be
+        // gone now (a folder removed and made again is copied again by the next round).
+        let left = match &copied {
+            Err(e) => vanished(e),
+            Ok(()) => from.as_ref().and_then(|f| fs::symlink_metadata(f).ok()).is_none(),
+        };
         match gone.as_deref_mut() {
             // The folder went away during the last copy: so did all of its content.
             Some(g) if left => {
@@ -997,17 +1017,17 @@ pub(crate) fn resync(src: &Path, dst: &Path, paths: &BTreeSet<String>) -> Result
         if !crate::fsutil::exact_metadata(&dst.join(parent_of(p)), parent_of(p)).is_some_and(|m| m.is_dir()) {
             continue;
         }
-        open_parent(dst, p)?;
+        open_parent(dst, p).with_context(|| format!("open the folder of {p} in the copy"))?;
         dirs.insert(parent_of(p).to_string());
         if old.is_some() {
-            apfs::delete_tree(&at)?;
+            apfs::delete_tree(&at).with_context(|| format!("remove the old {p} from the copy"))?;
         }
         if let Some((f, m)) = from {
             if m.is_dir() {
-                apfs::copy_subtree(&f, &at)?;
+                apfs::copy_subtree(&f, &at).with_context(|| format!("copy folder {p} again"))?;
                 whole.push(p.clone());
             } else if m.is_file() || m.file_type().is_symlink() {
-                clone_entry(&f, &at, &m)?;
+                clone_entry(&f, &at, &m).with_context(|| format!("copy {p} again"))?;
             } else {
                 bail!("cannot snapshot special file {}", f.display());
             }
@@ -1020,7 +1040,7 @@ pub(crate) fn resync(src: &Path, dst: &Path, paths: &BTreeSet<String>) -> Result
         if crate::fsutil::exact_metadata(&f, d).is_some_and(|m| m.is_dir())
             && crate::fsutil::exact_metadata(&t, d).is_some_and(|m| m.is_dir())
         {
-            copy_dir_meta(&f, &t, d.is_empty())?;
+            copy_dir_meta(&f, &t, d.is_empty()).with_context(|| format!("copy the metadata of folder {d} again"))?;
         }
     }
     Ok(())
@@ -1089,10 +1109,11 @@ pub fn write_checked_scan(
             return Ok(None);
         }
         let wrote = write_layer(src, dst, &d, base_id, true, None);
-        let after = apfs::scan_with_data(src, true)?;
+        let after = apfs::scan_with_data(src, true).with_context(|| format!("scan {} after the copy", src.display()))?;
         if let Err(e) = wrote {
-            // A file that went away during the copy is a change; anything else is an error.
-            if after == before {
+            // An entry that went away during the copy is a change: the next round copies again.
+            // Another error fails the copy when the source did not change.
+            if after == before && !vanished(&e) {
                 return Err(e);
             }
             settle(round);
