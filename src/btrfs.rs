@@ -239,8 +239,9 @@ pub fn send_no_data(parent: &Path, child: &Path) -> Result<Vec<crate::stream::En
         let kept = tee.copy.take();
         drop(tee);
         let sent = writer.join().map_err(|_| anyhow!("metadata stream thread failed"))?;
-        let entries = result.context("read metadata stream")?;
+        // A failed send closes the pipe, so the read fails too. Report the send error, which has the cause.
         sent.context("send metadata stream")?;
+        let entries = result.context("read metadata stream")?;
         Ok::<_, anyhow::Error>((entries, kept))
     })?;
     if let (Some(cache), Some(data)) = (cache, kept) {

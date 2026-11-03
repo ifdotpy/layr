@@ -26,6 +26,8 @@ fn sh(dir: &Path, root: &Path, prog: &str, args: &[&str]) -> (String, String) {
         .env_remove("RUSTFLAGS")
         .env_remove("CARGO_TARGET_DIR")
         .env("CARGO_NET_OFFLINE", "true")
+        // The assertions match plain text. CI sets CARGO_TERM_COLOR=always, which puts escape codes inside test names.
+        .env("CARGO_TERM_COLOR", "never")
         .output()
         .unwrap();
     let (out, err) = (String::from_utf8_lossy(&o.stdout).into_owned(), String::from_utf8_lossy(&o.stderr).into_owned());
@@ -661,6 +663,36 @@ fn sweep_workspace(dir: &Path, sweep: &str) {
     std::fs::write(dir.join("app/src/main.rs"), "fn main() {\n    println!(\"{}\", lib_a::a());\n}\n").unwrap();
 }
 
+/// Finalized incremental sessions of each incremental folder of a profile folder (`s-*`, not a lock or a working folder).
+fn sessions_per_folder(debug: &Path) -> BTreeMap<String, usize> {
+    entries(debug, "incremental")
+        .into_iter()
+        .map(|f| {
+            let n = entries(&debug.join("incremental"), &f).into_iter().filter(|e| e.starts_with("s-") && !e.ends_with(".lock") && !e.ends_with("-working")).count();
+            (f, n)
+        })
+        .collect()
+}
+
+/// Hard-link counts and inode numbers of the files under `dir`, for a failure message.
+fn link_table(dir: &Path) -> String {
+    use std::os::unix::fs::MetadataExt;
+    let mut out = Vec::new();
+    let mut todo = vec![dir.to_path_buf()];
+    while let Some(d) = todo.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                todo.push(p);
+            } else if let Ok(m) = p.metadata() {
+                out.push(format!("{} ino={} nlink={} mtime={}", p.strip_prefix(dir).unwrap_or(&p).display(), m.ino(), m.nlink(), m.mtime()));
+            }
+        }
+    }
+    out.sort();
+    out.join("\n")
+}
+
 /// Names of the entries of `dir/sub`.
 fn entries(dir: &Path, sub: &str) -> BTreeSet<String> {
     std::fs::read_dir(dir.join(sub)).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect()
@@ -727,8 +759,15 @@ fn sweep_removes_the_units_that_no_standard_command_uses() {
     assert!(err.contains("would free"), "{err}");
     assert_eq!(entries(&debug, "deps"), before);
 
-    // Before the sweep, the changed unit has object files of two builds.
-    assert!(object_builds(&debug).values().any(|b| b.len() > 1), "{:?}", object_builds(&debug));
+    // Before the sweep, the changed unit has object files of two builds: in `deps` (macOS, split debug info
+    // `unpacked`), or as two finalized incremental sessions of its folder (Linux, `off`: no object file in `deps`).
+    assert!(
+        object_builds(&debug).values().any(|b| b.len() > 1) || sessions_per_folder(&debug).values().any(|n| *n > 1),
+        "{:?}\ndeps: {:?}\nincremental: {:?}",
+        object_builds(&debug),
+        entries(&debug, "deps"),
+        entries(&debug, "incremental")
+    );
 
     let err = sweep_cmd(&ws, &[]);
     assert!(err.contains("swept"), "{err}");
@@ -737,6 +776,7 @@ fn sweep_removes_the_units_that_no_standard_command_uses() {
     // The one exception: a live unit keeps only the object files of its newest build.
     let builds = object_builds(&debug);
     assert!(builds.values().all(|b| b.len() == 1), "{builds:?}");
+    assert!(sessions_per_folder(&debug).values().all(|n| *n <= 1), "{:?}", sessions_per_folder(&debug));
 
     let err = cargo(&ws, &build);
     assert!(!err.contains("Compiling"), "the next build compiled:\n{err}");
@@ -939,6 +979,32 @@ fn sweep_skips_a_busy_build_lock_without_waiting() {
 
     let err = sweep_cmd(&ws, &[]);
     assert!(err.contains("build lock busy"), "{err}");
+    // CI sets CARGO_TERM_COLOR=always. Escape codes in front of cargo's wait line must not hide the busy lock.
+    let mut child = Command::new("layr")
+        .args(["retest", "sweep"])
+        .current_dir(&ws)
+        .env("LAYR_ROOT", ws.join("unused-store"))
+        .env("CARGO_TERM_COLOR", "always")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    // A sweep that waits for the lock never ends: fail at the deadline instead of hanging the run.
+    let start = std::time::Instant::now();
+    let status = loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            break s;
+        }
+        if start.elapsed() > std::time::Duration::from_secs(60) {
+            let _ = child.kill();
+            panic!("the sweep waited for the busy build lock with CARGO_TERM_COLOR=always");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    let mut colored = String::new();
+    std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut colored).unwrap();
+    assert!(status.success(), "{colored}");
+    assert!(colored.contains("build lock busy"), "{colored}");
     drop(held);
     assert_no_output_written(&debug, &times, &err);
     let _ = std::fs::remove_dir_all(&tmp);
@@ -1198,7 +1264,15 @@ fn sweep_keeps_the_incremental_folder_of_a_dylib_dev_dependency() {
 
     let err = sweep_cmd(&ws, &[]);
     assert!(err.contains("swept target, freed"), "{err}");
-    assert_eq!(dy_folders(), live, "the sweep removed or kept the wrong incremental folder of a dylib unit");
+    assert_eq!(
+        dy_folders(),
+        live,
+        "the sweep removed or kept the wrong incremental folder of a dylib unit\n{err}\ndeps: {:?}\nincremental: {:?}\n--- debug links:\n{}\n--- incremental links:\n{}",
+        entries(&debug, "deps"),
+        entries(&debug, "incremental"),
+        link_table(&debug.join("deps")).lines().chain(link_table(&debug).lines().filter(|l| !l.contains('/'))).collect::<Vec<_>>().join("\n"),
+        link_table(&debug.join("incremental"))
+    );
     for f in &live {
         let session = entries(&debug.join("incremental").join(f), "");
         assert_eq!(session.iter().filter(|n| n.starts_with("s-") && !n.ends_with(".lock")).count(), 1, "{session:?}");
