@@ -113,6 +113,22 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest@0.9.146
+      # layr-retest finds llvm-profdata in the sysroot of the active toolchain. Add the component
+      # there if the action did not, and fail here instead of in the tests.
+      - name: Check the llvm-tools of the active toolchain
+        run: |
+          rustup component add llvm-tools
+          bin="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin"
+          test -x "$bin/llvm-profdata"
+          test -x "$bin/llvm-cov"
+      # The e2e tests resolve `hex` offline from the cargo cache, and a new runner has no cache.
+      - name: Fetch hex 0.4 into the cargo cache
+        run: |
+          dir="$(mktemp -d)"
+          cargo new --quiet "$dir/fetch"
+          cd "$dir/fetch"
+          cargo add --quiet hex@0.4
+          cargo fetch
       # A layr store on Linux needs btrfs. The test folder is a btrfs loop file owned by the runner user.
       - name: Create the btrfs test folder (Linux)
         if: runner.os == 'Linux'

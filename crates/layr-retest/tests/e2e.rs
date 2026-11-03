@@ -26,6 +26,8 @@ fn sh(dir: &Path, root: &Path, prog: &str, args: &[&str]) -> (String, String) {
         .env_remove("RUSTFLAGS")
         .env_remove("CARGO_TARGET_DIR")
         .env("CARGO_NET_OFFLINE", "true")
+        // The assertions match plain text. CI sets CARGO_TERM_COLOR=always, which puts escape codes inside test names.
+        .env("CARGO_TERM_COLOR", "never")
         .output()
         .unwrap();
     let (out, err) = (String::from_utf8_lossy(&o.stdout).into_owned(), String::from_utf8_lossy(&o.stderr).into_owned());
@@ -939,6 +941,16 @@ fn sweep_skips_a_busy_build_lock_without_waiting() {
 
     let err = sweep_cmd(&ws, &[]);
     assert!(err.contains("build lock busy"), "{err}");
+    // CI sets CARGO_TERM_COLOR=always. Escape codes in front of cargo's wait line must not hide the busy lock.
+    let o = Command::new("layr")
+        .args(["retest", "sweep"])
+        .current_dir(&ws)
+        .env("LAYR_ROOT", ws.join("unused-store"))
+        .env("CARGO_TERM_COLOR", "always")
+        .output()
+        .unwrap();
+    let colored = String::from_utf8_lossy(&o.stderr).into_owned();
+    assert!(colored.contains("build lock busy"), "{colored}");
     drop(held);
     assert_no_output_written(&debug, &times, &err);
     let _ = std::fs::remove_dir_all(&tmp);

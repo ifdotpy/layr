@@ -419,6 +419,9 @@ fn list_units(root: &Path, target: &Path, env: &[(String, String)], args: &[Stri
     let mut c = Command::new("cargo");
     c.args(listing(args)).current_dir(root).env("CARGO_TARGET_DIR", target).env("CARGO_BUILD_JOBS", "1");
     c.envs(env.iter().map(|(k, v)| (k, v))).env("LLVM_PROFILE_FILE", cargo_profile_file(target));
+    // The stop lines are matched at the start of cargo's stderr. A color setting (CARGO_TERM_COLOR=always,
+    // as in CI) puts escape codes in front of them, so the listing would wait for a busy lock.
+    c.env("CARGO_TERM_COLOR", "never");
     c.process_group(0).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = c.spawn().with_context(|| format!("cannot start cargo {}", args.join(" ")))?;
     let (out, err) = (child.stdout.take().context("cargo stdout")?, child.stderr.take().context("cargo stderr")?);

@@ -559,8 +559,12 @@ mod tests {
         read_dir(dir).iter().map(name_of).collect()
     }
 
+    /// A new folder for each call. `cargo test` runs the tests of this binary in one process, so the
+    /// process id alone does not separate two tests that use the same name.
     fn tempdir(n: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!("layr-retest-sweep-{n}-{}", std::process::id()));
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let k = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let p = std::env::temp_dir().join(format!("layr-retest-sweep-{n}-{}-{k}", std::process::id()));
         let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).unwrap();
         p
