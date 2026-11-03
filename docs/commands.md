@@ -115,12 +115,12 @@ folder get the current time, as `git checkout` gives them, so build tools that c
 `reset <rev>` without `--hard` moves the head and keeps the files (mixed, as in git). It lists the
 files that now differ from the new head and names `layr reset --hard <rev>`, which changes them.
 
-`undo` with no id reverses the newest record of the caller's operations on the line, an automatic
-save included. Undo of an automatic save puts the working folder back to the state the save changed
-from, keeps the head and the stage, and keeps the paths that later work changed. Automatic saves
-that record no such state (older layr versions, cache and staging saves) are skipped. `undo` of an undo redoes that operation,
-as always, so a second `undo` after an undo of a save redoes the save. Use `undo <id>` for an older
-record. `pick` on a line with uncommitted work prints the kept files: `kept N uncommitted file(s):`
+`layr undo` reverses the newest operation of the line, an automatic save too. A second `layr undo`
+reverses that undo. Name an operation id to reverse an older one. Undo of an automatic save puts the
+working folder back to the state the save changed from, keeps the head and the stage, and keeps the
+paths that later work changed. Automatic saves that record no such state (older layr versions, cache
+and staging saves) are skipped by `undo` with no id.
+`pick` on a line with uncommitted work prints the kept files: `kept N uncommitted file(s):`
 and up to 20 names, then `and N more`.
 
 `save -m <message>` makes a named state. `--message` is the long form of `-m`.
