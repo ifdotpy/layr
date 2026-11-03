@@ -39,15 +39,16 @@ counts prove equal data. Folder sizes are not compared, because they count one l
 | Named save without staged changes (`--allow-empty`, `--amend`) | The line head |
 | Automatic state | The line head |
 | Index | The line head |
-| Import of a Git commit | The state of its first parent |
+| Build of an imported state (`build_tree`) | The nearest imported ancestor on disk, or none (a complete tree) |
 
 Automatic states never use other automatic states as a base. Retention can delete them freely.
 Merges, received states and lines with overlays keep complete trees.
 
-An import writes only the paths that differ between the commit and its first parent, read from the
-Git trees that differ. Its cost follows the changes, not the size of the tree. A commit without a parent, and every
-commit after `thin.chain` layers (default 32), makes a complete tree. A fetch holds the
-project lock for one commit at a time.
+An import writes records only. A build of an imported state writes only the paths that differ between
+the commit and its nearest imported ancestor on disk, read from the Git trees that differ. Its cost
+follows the changes, not the size of the tree. A commit without such an ancestor, and every commit
+after `thin.chain` layers (default 32), makes a complete tree. A fetch holds the project lock for one
+commit at a time.
 
 A state that is the base of another state stays on disk until that state goes.
 This is also true when `gc` deletes its record. A later `gc` deletes it.

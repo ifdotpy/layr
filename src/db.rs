@@ -888,6 +888,32 @@ impl Db {
         raw.map(|s| Ok(serde_json::from_str(&s)?)).transpose()
     }
 
+    /// True when the record of an imported state holds its Git objects (`git_import`), without
+    /// parsing them.
+    pub fn has_git_import(&self, state: &str) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM records WHERE op='import' AND json_extract(raw, '$.r.data.state')=?1 AND json_type(raw, '$.r.data.git')='object')",
+            params![state],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// The Git commits of the imported states, sorted.
+    pub fn import_commits(&self) -> Result<Vec<String>> {
+        let mut st = self.conn.prepare(
+            "SELECT DISTINCT g.gcommit FROM git_map g JOIN states s ON s.id=g.state WHERE s.kind='import' ORDER BY g.gcommit",
+        )?;
+        let v = st.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+        Ok(v)
+    }
+
+    /// The base states of the thin layers that are on disk (`bases` rows of present layers).
+    pub fn present_layer_bases(&self) -> Result<Vec<String>> {
+        let mut st = self.conn.prepare("SELECT DISTINCT b.base FROM bases b JOIN states s ON s.id=b.state WHERE s.present=1")?;
+        let v = st.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+        Ok(v)
+    }
+
     pub fn state_of_commit(&self, prefix: &str) -> Result<Vec<String>> {
         if prefix.len() == 40 {
             let mut st = self.conn.prepare("SELECT DISTINCT state FROM git_map WHERE gcommit=?1")?;
