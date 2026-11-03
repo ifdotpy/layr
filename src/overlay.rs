@@ -559,6 +559,11 @@ impl<'a> Repo<'a> {
         if crate::store::check_name("overlay", name).is_err() {
             return Ok(None);
         }
+        // A removed cache overlay (`layr overlay remove`) is gone, also from the history of its own
+        // project, which would otherwise name it again.
+        if self.p.db.overlay_config(&format!("overlay.{name}.removed"))?.is_some() {
+            return Ok(None);
+        }
         let mut value = self.p.db.overlay_config(&format!("overlay.{name}"))?;
         if value.is_none() {
             if let Ok(op) = self.overlay_project(name) {
