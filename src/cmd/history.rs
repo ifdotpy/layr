@@ -904,7 +904,7 @@ pub fn log(ctx: &Ctx, args: &[String]) -> Result<i32> {
             if specs.is_empty() {
                 return Ok(vec![String::new()]);
             }
-            if !repo.p.has_state(&s.id) {
+            if !repo.tree_available(&s.id) {
                 return Ok(Vec::new());
             }
             let (_o, _t, _n, list) = state_changes(repo, s)?;
@@ -959,7 +959,7 @@ pub fn log(ctx: &Ctx, args: &[String]) -> Result<i32> {
             !a.has("--format"),
         )?;
         first = false;
-        if want_diff && repo.p.has_state(&s.id) {
+        if want_diff && repo.tree_available(&s.id) {
             let (old, _t, new, list) = state_changes(repo, s)?;
             let list: Vec<Change> = list.into_iter().filter(|c| matches(&specs, &c.path)).collect();
             if !list.is_empty() {

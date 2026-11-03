@@ -347,12 +347,21 @@ impl<'a> Repo<'a> {
     /// Every command that reads the tree of a state comes here (`state_root`, `state_src`). A
     /// state that retention evicted comes back from a store remote that holds it.
     fn check_state(&self, id: &str) -> Result<()> {
-        if !self.p.has_state(id) {
-            match self.p.db.state_flags(id)? {
-                Some((_, true)) => bail!("state {} was deleted by retention", ids::short(id)),
-                Some(_) => crate::store_remote::restore_state(self, id)?,
-                None => bail!("unknown state {}", ids::short(id)),
-            }
+        if self.p.has_state(id) {
+            return Ok(());
+        }
+        // An imported state is built from git (docs/ownership.md, "States imported from Git"). A
+        // copy on a store remote is the fallback when git cannot give the objects.
+        if crate::gitbridge::buildable(self, id) {
+            return crate::gitbridge::build_tree(self, id, None).or_else(|e| {
+                crate::store_remote::restore_state(self, id)
+                    .map_err(|_| e.context(format!("cannot build state {} from Git", ids::short(id))))
+            });
+        }
+        match self.p.db.state_flags(id)? {
+            Some((_, true)) => bail!("state {} was deleted by retention", ids::short(id)),
+            Some(_) => crate::store_remote::restore_state(self, id)?,
+            None => bail!("unknown state {}", ids::short(id)),
         }
         Ok(())
     }
@@ -520,7 +529,23 @@ impl<'a> Repo<'a> {
             dst = self.p.delta_path(&id);
         }
         let info = btrfs::subvol_info(&dst)?;
-        Ok(StateRec {
+        Ok(self.state_record(ctx, id, kind, parents, message, line, info.uuid))
+    }
+
+    /// The record of a state whose snapshot has the UUID `subvol`. Empty `subvol`: a state with no
+    /// tree on this machine (an imported state until `gitbridge::build_tree`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn state_record(
+        &self,
+        ctx: &Ctx,
+        id: String,
+        kind: StateKind,
+        parents: Vec<String>,
+        message: &str,
+        line: Option<&Line>,
+        subvol: String,
+    ) -> StateRec {
+        StateRec {
             id,
             kind,
             change_id: (kind == StateKind::Commit).then(ids::new_id),
@@ -528,7 +553,7 @@ impl<'a> Repo<'a> {
             context: None,
             parents: if kind.auxiliary() { Vec::new() } else { parents },
             line: if kind.auxiliary() { None } else { line.map(|l| l.id.clone()) },
-            subvol: info.uuid,
+            subvol,
             author: ctx.author(),
             message: message.to_string(),
             time: ids::now_ms(),
@@ -539,7 +564,12 @@ impl<'a> Repo<'a> {
             cache_shared: false,
             cache_platform: None,
             cache_of: None,
-        })
+        }
+    }
+
+    /// True when the tree of a state can be read now or built from git (`gitbridge::buildable`).
+    pub fn tree_available(&self, id: &str) -> bool {
+        self.p.has_state(id) || crate::gitbridge::buildable(self, id)
     }
 
     /// An automatic state of a line's working content. For a line with overlays the snapshot
@@ -932,7 +962,7 @@ impl<'a> Repo<'a> {
     /// only got new times, such as the working folder after a named state.
     fn changed_since_save_base(&self, line: &Line, id: &str) -> Result<bool> {
         let prev = self.save_base(line)?;
-        if !self.p.has_state(&prev) {
+        if !self.tree_available(&prev) {
             return Ok(true);
         }
         let base = self.state_src(&prev)?;
@@ -960,7 +990,7 @@ impl<'a> Repo<'a> {
                 let head_scan = head.scan(true)?;
                 let head_diff = crate::thin::diff(&head_scan, &|k| head.path(k), &new, &w, 0)?;
                 self.thin_changed(&head, &w, &head_diff)?
-            } else if self.p.has_state(&prev) {
+            } else if self.tree_available(&prev) {
                 let base = self.state_src(&prev)?;
                 self.thin_changed(&base, &w, &crate::thin::diff(&base.scan(true)?, &|k| base.path(k), &new, &w, self.since_of(line, &prev))?)?
             } else {

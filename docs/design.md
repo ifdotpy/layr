@@ -51,7 +51,8 @@ that the machine itself enforces, and regenerable caches.
 
 The cost is the reason git stays at the edge. layr has its own store: the backends are btrfs on Linux,
 APFS on macOS and OverlayFS on ext4 or XFS, while editors, hosts and CI systems read git. layr imports from git, pushes states as
-git commits, and exports plain folders; it does not try to be git on disk.
+git commits, and exports plain folders; it does not try to be git on disk. An imported commit is a
+state record; its tree is built from git when it is read (`docs/ownership.md`).
 
 ## 2. Why a root service
 

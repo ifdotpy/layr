@@ -231,8 +231,17 @@ fn present_caches(p: &Project) -> Result<BTreeSet<String>> {
         .collect())
 }
 
+/// The states this side can send as btrfs streams. A tree built from git (an imported state, with
+/// an empty signed `subvol`) has the UUID of this machine's snapshot, which no signed record names,
+/// so the receiver would refuse it. Such a state reaches a peer as its record only.
 fn present(p: &Project) -> Result<BTreeSet<String>> {
-    Ok(p.db.present_states()?.into_iter().filter(|(_, d)| !d).map(|(id, _)| id).filter(|id| p.has_state(id)).collect())
+    let mut out = BTreeSet::new();
+    for (id, deleted) in p.db.present_states()? {
+        if !deleted && p.has_state(&id) && p.db.state(&id)?.is_some_and(|s| !s.subvol.is_empty()) {
+            out.insert(id);
+        }
+    }
+    Ok(out)
 }
 
 /// Records this side has beyond the peer's sequence numbers, as stored lines.

@@ -84,6 +84,40 @@ copy. `parent`, `derived`, `ref`, `tag`, `remote-ref` and `export` keep the reco
 copy. Reading such a state fetches it back (`Repo::check_state`, as in #111). Git is never a
 source.
 
+## States imported from Git
+
+An imported commit is a state record without a tree. The `import` record holds the exact Git
+objects of the commit, and the state keeps the mapped parents. Git is the source of imported
+states: the bare Git repository of the project (`<project>/git`) holds the objects that build
+their trees. Git is never written by a read.
+
+- `init --from` and `init --git` build the tree of the commit that the new line starts at.
+- `layr git fetch` writes records only. Its commits have no tree until a command reads one.
+- A read of a state without a tree builds it (`Repo::check_state` calls `gitbridge::build_tree`).
+  The base is the nearest imported ancestor with a tree on disk (breadth first, first parent
+  first). The tree is that base plus the changed paths: a thin layer over the base on APFS, a
+  snapshot of the base with the changed paths elsewhere. Without a base it is the full tree of
+  the commit. The built state is present; the normal rules apply to it.
+- When git cannot give the objects, a copy on a store remote is the fallback (`store_remote`).
+- A machine without the Git objects of a commit cannot build its state. Its record stays, and
+  the state reads only through a store remote that holds it.
+
+Owners and freeing:
+
+- Tree owners keep the tree: `head`, `auto`, `undo`, `deleted`, `park`, `overlay`, `pin`, and
+  `conflict` (a conflict needs the trees of its base, ours and theirs). The base of a present
+  thin layer keeps its tree too.
+- Record owners keep only the record: `parent`, `derived`, `ref`, `tag`, `remote-ref` and
+  `export`. Such a state can lose its tree and is built again on the next read.
+- Until the owners model frees states on the operation that drops the last owner (PR #135),
+  `layr gc --repair` frees the trees of imported states that no tree owner keeps. It repeats
+  until nothing more goes, so a base goes after its layers. `layr gc -n --repair` lists them.
+  The record stays, and the state is built again on the next read.
+
+Costs: a build reads the changed Git trees and writes the changed files. A state whose nearest
+base is far away costs more. `layr log -p` and `layr log <path>` read every commit's tree, so on a
+long history they build each one (`Repo::tree_available`).
+
 ## Records from other machines
 
 Peer sync and store fetch import records from other machines. They go through the same
@@ -149,6 +183,9 @@ show them.
 - `layr gc --repair`: replace `owners` with the recomputation, finish `free_queue`, empty the
   trash, release pins of dead processes and expired refs.
 - `layr fsck` runs the check.
+
+The imported-state free step (section "States imported from Git") is in `gc --repair` before
+PR #135. It uses the owners table in shadow mode and does not depend on #135.
 
 ## Configuration
 

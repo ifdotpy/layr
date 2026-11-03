@@ -10,7 +10,7 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | history       | `log [--json]`, `show`, `blame`, `grep`, `ls-files`, `rev-parse`, `merge-base`                        |
 | lines         | `line new <name> [<rev>] [--count N] [--json]`, `line list [--json]`, `line delete`, `line rename`, `line move`, `tag`, `merge [--expect]`, `pick`, `invert`, `replay`, `adopt` |
 | access        | `access [list|grant [--until <30m|2h|1d>]|revoke|deny|allow|check]`, `protect [<pattern> --update <role> --check <names> --path <path>=<role> --approvals <n> --approvers <principals> --direct --rewrite <role> --no-expect | --remove]`, `approve [--withdraw] <state>`, `attest <kind> <rev> [--payload <file>]`, `attestations <rev> [--kind <kind>] [--json]` |
-| safety        | `undo`, `op log`, `save`, `try <state> -- <cmd>`, `try <state> --check <name>`, `bisect list [--json]`, `bisect run [--good <rev>] [--bad <rev>] [--auto] [--ref-log <ref>] [--json] -- <cmd>`, `gc [-n] [--dedup]`, `du [<line>...] [--json]`, `du --store [--json]`, `fsck`, `reindex` |
+| safety        | `undo`, `op log`, `save`, `try <state> -- <cmd>`, `try <state> --check <name>`, `bisect list [--json]`, `bisect run [--good <rev>] [--bad <rev>] [--auto] [--ref-log <ref>] [--json] -- <cmd>`, `gc [-n] [--dedup] [--repair]`, `du [<line>...] [--json]`, `du --store [--json]`, `fsck`, `reindex` |
 | Git bridge    | `git remote`, `git fetch`, `git pull`, `git push [--squash] [--include-base <lines>]`, `git clone`, `git sync`                             |
 | remotes       | `remote add\|list\|self\|remove\|trust`, `remote public <remote> on\|off`, `sync <remote>`, `push <remote>`, `push [--dry-run]` (every layer to each of its remotes), `overlay remote add\|list\|remove`, `fetch <remote>`, `pull <remote>`, `clone <url>` |
 | OCI           | `push <oci-remote> <rev> [--runnable <name>] [--json]`, `access token <principal> [--until <duration>]`, `access token --revoke <principal>` |
@@ -187,6 +187,11 @@ files that are not ignored equal the parent (pushed or not; the parent stays whi
 state differs only in build output, which a build makes again, so a deleted line frees its space at
 the next `gc`. The newest automatic state of a live line always stays. `gc` compares these states
 before it takes the store lock.
+
+`gc --repair` also frees the trees of imported states that no line head, park entry, overlay, undo
+record or auto state needs, and that git builds again. The record stays; the next read builds the
+tree (`docs/ownership.md`, "States imported from Git"). `gc -n --repair` lists them. A plain `gc`
+does not free them.
 
 `gc` evicts a state that a store remote holds (a successful `layr push <store-remote>` names it)
 only when the project config `gc.evict` is `on` (`layr config gc.evict on`; default `off`). With
