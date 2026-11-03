@@ -204,7 +204,8 @@ live set does not name goes. The live set names:
 - the dep-info `<output>.d` of a listed output in the profile folder;
 - cargo's lock files (`.cargo-lock`, `.cargo-build-lock`, `.cargo-artifact-lock`);
 - each `incremental/<crate>-<id>` folder that a kept output is hard-linked to, with its newest finalized session
-  and that session's lock file. rustc names the lock `s-<time>-<id>.lock`, the session name without its hash.
+  and that session's lock file. For a crate with a live test binary, bin or example and no link, the newest such
+  folder (see "Other profiles"). rustc names the lock `s-<time>-<id>.lock`, the session name without its hash.
 
 Everything else goes: uplifted copies that no listing names, stale bins and examples, unhashed objects of
 other builds, outputs of units that no command lists, orphan incremental folders, and other files. Entries
@@ -231,10 +232,16 @@ A folder is swept when any profile folder in it has a fingerprint folder (a buil
 listed profiles are `target/debug` and, with a `retest` list, `target/retest/debug`; `target/wasm32-unknown-unknown`
 is not listed, so the sweep leaves it as it is.
 
-Limit: a bin, test binary or example built without debug info keeps no object files in `deps`, and it has no
-`metadata.rmeta`. Its incremental folder has no link (see "Links"), so the sweep removes it and a later build of that
-unit cannot reuse it. Set `debug = 1` for that profile to keep the object link (the layr project sets
-`[profile.release] debug = 1`).
+Limit: a test binary, bin or example built without debug info has no link to its incremental folder (no object
+file, no `metadata.rmeta`). For each crate with a live one of these, the sweep keeps only the newest unlinked folder of
+that crate and removes the others, so at most one such folder per crate stays. Two trade-offs:
+
+- A bin and a test binary of the same crate, both live and both without debug info, share that one folder. One of them
+  recompiles after a sweep.
+- A non-live build of the same crate that ran last (for example a focused command with other features) can be the
+  newest folder. Then the live folder is removed, and the next standard build recompiles once.
+
+Set `debug = 1` for that profile to keep the object link. The layr project sets `[profile.release] debug = 1`.
 
 A `studio-native-client` output (for example `deps/libstudio_native_client.a`) is not listed, because the sweep
 list excludes that crate, so the sweep removes it. A build that needs it compiles it again.
