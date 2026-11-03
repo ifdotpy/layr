@@ -3,7 +3,11 @@
 # Reboot on OverlayFS: a layer taken from a saved cache state is mounted again by the next command,
 # with its files and its taken flag, also after its source line is deleted (the state's owner keeps
 # it). A layer that cannot be mounted again fails the command with a clear message.
-: "${LAYR_OVERLAYFS_TEST_ROOT:?Set an isolated test directory}"
+# The btrfs CI job runs every test: this one needs an OverlayFS run (the registry, its mounts).
+if [ -z "${LAYR_OVERLAYFS_TEST_ROOT:-}" ]; then
+    echo "t117-overlayfs-reboot.sh: 0 passed, 0 failed (not an OverlayFS run)"
+    exit 0
+fi
 . "$(dirname "$0")/lib.sh"
 
 # The registry entry of a path: "taken" flag and the lower object id, from the store's registry.
