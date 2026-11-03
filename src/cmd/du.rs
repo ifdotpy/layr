@@ -82,7 +82,6 @@ pub fn du(ctx: &Ctx, args: &[String]) -> Result<i32> {
     Ok(0)
 }
 
-<<<<<<< head
 /// The child folders of a folder, by name, sorted.
 fn child_dirs(p: &Path) -> Result<Vec<(String, PathBuf)>> {
     let mut v = Vec::new();
@@ -123,14 +122,13 @@ fn project_parts(
         }
     }
     Ok(())
-||||||| base
-=======
+}
+
 /// True when the error says that a path is gone (ENOENT): a trash entry that the emptier removed
 /// during the walk. Other errors are not vanished.
 fn vanished(e: &anyhow::Error) -> bool {
     e.downcast_ref::<std::io::Error>().is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound)
         || e.downcast_ref::<rustix::io::Errno>() == Some(&rustix::io::Errno::NOENT)
->>>>>>> origin/main
 }
 
 /// The parts of a store: each line folder, each other folder of a project (states, deltas, git,
@@ -257,7 +255,7 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
                 let u = next.fetch_add(1, Ordering::Relaxed);
                 let Some((i, path)) = units.get(u) else { break };
                 let i = *i;
-                let in_trash = parts[i].0 == "trash";
+                let in_trash = parts[i].0 == "trash" || parts[i].0.ends_with(": trash");
                 let mut own = 0u64;
                 let mut local: HashMap<u64, u64> = HashMap::new();
                 let walked = crate::storage::visit_space(path, &mut |h| {
