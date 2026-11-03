@@ -163,7 +163,10 @@ impl Store {
         mkdir_mode(&root.join("projects"), 0o755)?;
         version_guard.ready(root)?;
         // Every volume folder must hold the identity file of this store (checked when used).
-        Ok(Store { root: root.to_path_buf(), machine: Machine { id, name, key }, _version_guard: Some(version_guard) })
+        let store = Store { root: root.to_path_buf(), machine: Machine { id, name, key }, _version_guard: Some(version_guard) };
+        // A `project move` that stopped midway is finished or rolled back before the command runs.
+        crate::project_move::recover(&store);
+        Ok(store)
     }
 
     /// The volume configuration of the store, read now (`volumes.rs`).
@@ -870,6 +873,17 @@ impl<'a> Project<'a> {
         let f = fs::OpenOptions::new().create(true).write(true).truncate(false).open(self.meta_dir().join("lock"))?;
         let asked = std::time::Instant::now();
         rustix::fs::flock(&f, rustix::fs::FlockOperation::LockExclusive)?;
+        // `project move` may have taken the folder away while this call waited for the lock. The
+        // lock then belongs to the old folder: refuse, the caller runs the command again.
+        {
+            use std::os::unix::fs::MetadataExt;
+            let here = fs::symlink_metadata(self.meta_dir().join("lock")).ok();
+            let locked = f.metadata().ok();
+            let same = here.zip(locked).is_some_and(|(a, b)| a.ino() == b.ino() && a.dev() == b.dev());
+            if !same {
+                bail!("project '{}' moved while this command waited; run the command again", self.name);
+            }
+        }
         HELD_LOCKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if let Ok(mut held) = HELD_PROJECTS.lock() {
             held.push(self.meta_dir());

@@ -42,6 +42,7 @@ mod person;
 mod privs;
 mod probes;
 mod project_copy;
+mod project_move;
 mod radar;
 mod recv;
 mod repo;

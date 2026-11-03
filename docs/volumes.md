@@ -4,8 +4,8 @@ A volume is a file system that holds projects. The store root is the volume `mai
 volumes let one store place projects on several disks, for example active projects on a fast
 SSD and archives on a large HDD.
 
-Part A (this document, `layr volume` and `init --volume`) places projects. Part B
-(`layr project move`) moves a project between volumes. Part B is not built yet.
+`layr volume` and `init --volume` place projects. `layr project move` moves a project between
+volumes (see Project move).
 
 ## Model
 
@@ -79,20 +79,32 @@ The same checks as for the store root, once per volume path:
 - OverlayFS build: ext4 or XFS.
 - All volumes of a store use the backend of the build.
 
-## Part B: project move (how it uses this)
+## Project move
 
-Part B needs these from part A:
+`layr project move <project> <volume>` moves a project with its lines, states, overlays and git
+objects. Steps (`src/project_move.rs`):
 
-- `volumes::Layout` for the source and target folders, and `Layout::ready` for both volumes.
-- `volumes::assign`-style write of `project-volumes.json` under `.volumes.lock`, as the last
-  step of the move. The switch is one atomic write.
-- The move closes the project for every writer, the daemon included: `layr follow`, the free
-  queue, pins and `gc --repair`. A pass that starts during the copy is copied again before the
-  switch, or the move refuses and retries.
-- Absolute paths that follow the move: the moved-line index (`meta/line-paths.json` and the
-  store index `line-paths.json`), the Git bridge store, `.git` folders of lines and cache overlay
-  folders. The project file and the index are rewritten in the same switch.
-- Free space: the target needs the project size after the copy (shared extents counted once),
-  plus the source trash until its delete finishes.
-- Tests: a move between two file systems runs in the Linux CI job (root, loop devices) and on
-  two APFS images on macOS.
+1. A journal `<root>/project-moves/<project>.json` names the source and the target. A store-wide
+   lock `project-moves/.lock` covers the move.
+2. The project lock of the source is held for the whole move. Commands on the project wait.
+3. `project_copy::copy_project` copies the folder to `<target>/projects/<project>` and verifies
+   it. The copied lines point their git objects (`.git/objects/info/alternates`) at the new folder.
+4. The commit: `volumes::reassign` writes the project -> volume record in one atomic write.
+5. The moved line folders get the new git objects path, the old folder goes to the trash of its
+   volume, and the journal is removed.
+
+Recovery runs at every store open. A journal whose move lock is free belongs to a dead process:
+
+- The record names the target: step 5 runs.
+- The record names the source: the target copy goes to the trash, and a rerun copies again.
+
+A command that waited for the project lock while the folder moved refuses and asks for a rerun.
+
+Refused (nothing changes): an unknown project, volume or overlay, a volume that cannot be used, a
+folder of the same name on the target, a process whose working folder is in the project (Linux and
+macOS), and a moved line folder that is not on the target file system. `line move` keeps a line on
+the file system of its project, so a project with a moved line cannot move.
+
+Not built: moving several projects in one call; a free space check for the source trash (the
+trash needs no space on the target); the verification of the copy by state IDs (the copy verifies
+the tree and the database rows itself).
