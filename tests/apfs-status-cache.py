@@ -89,7 +89,10 @@ try:
     same('a changed .gitignore compares all', fast=False)
     run(work, 'add', '-A')
     run(work, 'save', '-qm', 'all')
-    same('status after commit compares all', fast=False)
+    # A named save computes the status that it names the left out files from (t96), and saves
+    # it as `layr status` does. The next status reuses that saved status; it must still equal
+    # the full comparison, which `same` checks.
+    same('status after commit reuses the status of the save', fast=True)
     same('clean after commit')
     # Two names of one file inside the line: a write through one name changes both.
     os.link(work / 'd0/sub1/f10', work / 'second-name')

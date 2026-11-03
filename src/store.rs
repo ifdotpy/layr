@@ -276,7 +276,7 @@ impl Drop for Lock {
             let fully = EMPTY_TRASH_FULLY.load(std::sync::atomic::Ordering::SeqCst);
             if fully {
                 let _t = crate::trace::span("empty trash (all)");
-                empty_trash(&self.trash, None);
+                empty_all(&self.trash);
             } else if std::env::var_os("LAYR_TRASH_BUDGET_MS").is_some() || !spawn_trash_emptier(&self.trash) {
                 let budget = trash_budget();
                 let _t = crate::trace::span(format!("empty trash ({} ms)", budget.as_millis()));
@@ -340,6 +340,21 @@ const TRASH_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
 fn trash_budget() -> std::time::Duration {
     std::env::var("LAYR_TRASH_BUDGET_MS").ok().and_then(|v| v.parse().ok()).map_or(TRASH_BUDGET, std::time::Duration::from_millis)
 }
+/// Name of a temporary object of `meta/work` or `meta/scan`. It ends with the pid of its creator:
+/// a copy keeps the times of its source, so the age of the copy says nothing about when it was made.
+pub fn temp_name() -> String {
+    format!("{}.{}", crate::ids::new_id(), std::process::id())
+}
+
+/// For a name from `temp_name`: whether its creator is gone. None for a name without a pid (an
+/// older layr), which cleanup judges by age.
+pub fn creator_gone(name: &str) -> Option<bool> {
+    use rustix::process::{test_kill_process, Pid};
+    let pid: i32 = name.rsplit_once('.')?.1.parse().ok().filter(|p| *p > 0)?;
+    let Some(pid) = Pid::from_raw(pid) else { return Some(false) };
+    Some(matches!(test_kill_process(pid), Err(e) if e == rustix::io::Errno::SRCH))
+}
+
 /// Set by `layr gc`: it empties the whole trash.
 pub static EMPTY_TRASH_FULLY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -371,29 +386,44 @@ pub fn empty_trash_process(dir: &Path) -> anyhow::Result<()> {
         Err(rustix::io::Errno::WOULDBLOCK) => return Ok(()),
         Err(e) => return Err(e.into()),
     }
-    // Trees that commands move here while it runs go too.
+    empty_all(dir);
+    Ok(())
+}
+
+/// Delete the trash until a pass deletes nothing: trees that commands move here while it runs go
+/// too, and a path that cannot be deleted stays. Its line goes to `<store>/trash.errors`, which
+/// the next run replaces. Returns those lines.
+pub fn empty_all(dir: &Path) -> Vec<String> {
     loop {
-        empty_trash(dir, None);
-        if fs::read_dir(dir).map(|mut rd| rd.next().is_none()).unwrap_or(true) {
-            return Ok(());
+        let (deleted, failed) = empty_trash(dir, None);
+        if deleted == 0 || fs::read_dir(dir).map(|mut rd| rd.next().is_none()).unwrap_or(true) {
+            if let Some(store) = dir.parent() {
+                let _ = fs::write(store.join("trash.errors"), failed.iter().map(|line| format!("{line}\n")).collect::<String>());
+            }
+            return failed;
         }
     }
 }
 
-pub fn empty_trash(dir: &Path, budget: Option<std::time::Duration>) {
+/// One pass over the trash, for at most `budget`. Returns the number of trees deleted and a
+/// `path: error` line for each path that stayed.
+pub fn empty_trash(dir: &Path, budget: Option<std::time::Duration>) -> (usize, Vec<String>) {
     let deadline = budget.map(|b| std::time::Instant::now() + b);
     let late = || deadline.is_some_and(|d| std::time::Instant::now() >= d);
+    let (mut deleted, mut failed) = (0, Vec::new());
     if let Ok(rd) = fs::read_dir(dir) {
         for e in rd.flatten() {
-            if late() || !empty_tree(&e.path(), &late) {
-                return;
+            if late() || !empty_tree(&e.path(), &late, &mut deleted, &mut failed) {
+                break;
             }
         }
     }
+    (deleted, failed)
 }
 
-/// Delete `path`; false when the budget ended before it was gone.
-fn empty_tree(path: &Path, late: &dyn Fn() -> bool) -> bool {
+/// Delete `path`, and what is in it first. Counts each tree deleted and records each failure;
+/// false when the budget ended before `path` was gone.
+fn empty_tree(path: &Path, late: &dyn Fn() -> bool, deleted: &mut usize, failed: &mut Vec<String>) -> bool {
     #[cfg(not(target_os = "macos"))]
     let _ = late;
     #[cfg(target_os = "macos")]
@@ -408,12 +438,18 @@ fn empty_tree(path: &Path, late: &dyn Fn() -> bool) -> bool {
                     if late() {
                         return false;
                     }
-                    empty_tree(&e.path(), late);
+                    empty_tree(&e.path(), late, deleted, failed);
                 }
             }
         }
     }
-    let _ = crate::storage::delete_tree(path);
+    if fs::symlink_metadata(path).is_err() {
+        return true;
+    }
+    match crate::storage::delete_tree(path) {
+        Ok(()) => *deleted += 1,
+        Err(e) => failed.push(format!("{}: {e:#}", path.display())),
+    }
     true
 }
 
@@ -690,6 +726,7 @@ impl<'a> Project<'a> {
         let dir = store.project_dir(name)?;
         let db = Db::open(&db_file(&dir))?;
         let mut p = Project { store, name: name.to_string(), dir, id: String::new(), db };
+        p.finish_schema_upgrade()?;
         p.id = p.project_id().unwrap_or_default();
         Ok(p)
     }
@@ -703,11 +740,7 @@ impl<'a> Project<'a> {
         }
         let db = Db::open(&db_file(&dir))?;
         let mut p = Project { store, name: name.to_string(), dir, id: String::new(), db };
-        if p.db.stale {
-            // A schema upgrade: derived tables come back from the records.
-            p.rebuild_index()?;
-            p.db.mark_current()?;
-        }
+        p.finish_schema_upgrade()?;
         crate::rootcheck::check_project(&p)?;
         p.id = p.project_id()?;
         #[cfg(target_os = "macos")]
@@ -770,23 +803,37 @@ impl<'a> Project<'a> {
         move |id: &str| self.has_state(id)
     }
 
-    /// Rebuild the derived tables from the records.
-    pub fn rebuild_index(&self) -> Result<()> {
-        let present = self.state_present();
-        self.db.with_tx(|| {
-            self.db.clear_derived()?;
-            for line in self.db.all_lines()? {
-                let s = oplog::parse_line(&line, None)?;
-                self.db.derive(&s.record, &present, &self.store.machine.id)?;
-            }
-            Ok(())
-        })?;
-        for (id, deleted) in self.db.present_states()? {
-            if deleted || !self.has_state(&id) {
-                self.db.set_present(&id, false)?;
-            }
+    /// A schema upgrade left the derived tables old: they come back from the records. Another
+    /// process may have rebuilt them already.
+    fn finish_schema_upgrade(&mut self) -> Result<()> {
+        if self.db.stale {
+            self.rebuild_derived(true)?;
+            self.db.stale = false;
         }
         Ok(())
+    }
+
+    /// Rebuild the derived tables from the records.
+    pub fn rebuild_index(&self) -> Result<()> {
+        self.rebuild_derived(false).map(|_| ())
+    }
+
+    /// One rebuild transaction (`Db::rebuild`): replay every record, then mark the states that
+    /// have no local folder as absent.
+    fn rebuild_derived(&self, only_older: bool) -> Result<bool> {
+        let present = self.state_present();
+        self.db.rebuild(only_older, |db| {
+            for line in db.all_lines()? {
+                let s = oplog::parse_line(&line, None)?;
+                db.derive(&s.record, &present, &self.store.machine.id)?;
+            }
+            for (id, deleted) in db.present_states()? {
+                if deleted || !self.has_state(&id) {
+                    db.set_present(&id, false)?;
+                }
+            }
+            Ok(())
+        })
     }
 
     /// Write a record: sign it and store it with its derived rows in one transaction.
@@ -1098,5 +1145,18 @@ mod tests {
         for bad in ["sap%", "%keys", "sap%keys%x", "sap%../x", "../sap%keys", "sap/x"] {
             assert!(store.project_dir(bad).is_err(), "{bad}");
         }
+    }
+}
+
+#[cfg(test)]
+mod temp_name_tests {
+    use super::{creator_gone, temp_name};
+
+    #[test]
+    fn a_temporary_name_tells_its_creator() {
+        assert_eq!(creator_gone(&temp_name()), Some(false), "this process is alive");
+        assert_eq!(creator_gone("11111111-2222-3333-4444-555555555555.2000000000"), Some(true));
+        assert_eq!(creator_gone("keep"), None, "a name without a pid keeps the age rule");
+        assert_eq!(creator_gone("prepared-11111111-2222-3333-4444-555555555555"), None);
     }
 }

@@ -352,7 +352,7 @@ pub fn run(ctx: &Ctx, repo: &Repo, input: &Input, selected: Option<&str>) -> Res
             let code = crate::cmd::admin::try_command(ctx, repo, &input.state, &probe.run, dir, &env, true)?;
             // Freeze outputs before root reads them; the command may have left a child process.
             let snapshot = repo.temp_snapshot(dir, true)?;
-            let work = repo.p.work_dir().join(crate::ids::new_id());
+            let work = repo.p.work_dir().join(crate::store::temp_name());
             crate::storage::create_subvolume(&work)?;
             let cleanup = Temp { path: work.clone() };
             collect(&Tree::open(&snapshot.path)?, &Tree::open(&work)?, &probe.outputs, code != 0)?;

@@ -61,6 +61,10 @@ pub mod git {
                 repo.require(ctx, "remote")?;
                 let _lock = repo.p.lock()?;
                 set_config(ctx, repo, &format!("remote.{n}.url"), serde_json::Value::Null)?;
+                gitbridge::drop_remote_refs(repo, n)?;
+                let mut rec = Record::new("remote.remove");
+                rec.data = serde_json::json!({"remote": n});
+                repo.commit_record(ctx, rec)?;
                 Ok(0)
             }
             "get-url" => {

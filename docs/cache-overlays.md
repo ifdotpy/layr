@@ -249,10 +249,15 @@ Built on 2026-10-27: folder overlays and caches as cache overlays. Tests:
   line's overlay line. Each state records the user, the platform (`<os>-<arch>`) and whether the
   line is protected, with the rules of `design.md` section 5 for who may take it.
 - `line new X <line>` takes the newest cache state of that line (dogfood item 10).
-  `line new X <state>` takes the newest cache of the line that made the state, or of the line of
-  its nearest ancestor that has one (item 21). A cache overlay goes into a new line only while
+  `line new X <state>` takes the cache of the state, else of its nearest ancestor that has one
+  (item 21). For each state on that walk it takes first the newest cache saved with it
+  (`cache_of`; a cache saved with an automatic state counts for its parent, the line head), and
+  else the newest cache of the line that made the state. A state imported from Git has no line,
+  so without `cache_of` the walk ends at an old state of another line and takes its old cache. A cache overlay goes into a new line only while
   its folder is a cache path there (`regenerable`) and the ignore rules ignore it.
-  Without a cache overlay state, the old caches of the state apply as before.
+  Without a cache overlay state, the old caches of the state apply as before. With one, the
+  cache overlay state replaces an old cache of the state (`states/<id>@<folder>`) or a copy the
+  state holds: the new line gets the newest cache overlay state.
 - `layr merge <line>` then brings the merged line's caches into the target (section 5): a
   fast-forward of the target's overlay line, or a `union-theirs` state; the incoming files are
   copied over the target's folder; an empty folder gets one snapshot. A failure here is a
@@ -394,3 +399,20 @@ the new file equals the old one. `layr gc --dedup` shares such content again, on
 - The block pass is plain code with tests on every platform. The ioctl runs on btrfs only: its
   test is `tests/t72-gc-dedup.sh` in the Linux job. On a file system without `FIDEDUPERANGE` the
   pass ends without a change.
+
+## 17. `merge <line> --caches-only`
+
+`layr merge <line> --caches-only` brings the caches of a line into the current line. It runs only
+the cache step of `merge`: no file changes, no merge commit, and the head does not move. The
+taken states are written as overlay line records, so their owners follow the overlay lines.
+
+- `StateRec.cache_of` (new) names the project state whose working folder a cache snapshot was
+  taken with. `save --caches` sets it. It creates no owner. A cache without it (an older save, or
+  a union state) cannot pass a protected target.
+- A protected target takes the caches only when its rule allows (checks and approvals of the
+  head, as for a merge) and the squash-safe check passes: for each cache of the source, the
+  changes from the merge base of the saved state and the target head to the saved state must
+  hold the same content in the target head. Ignored paths and `skip_path` paths are not compared.
+  A refusal names the first path that differs.
+- An unprotected target takes the caches without the check.
+- Test: `tests/t101-merge-caches-only.sh` (macOS and Linux CI, OverlayFS on ext4 and XFS).

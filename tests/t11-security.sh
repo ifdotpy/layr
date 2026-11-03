@@ -124,13 +124,16 @@ l --project s access grant '*' reader
 eq "with a role for everyone it is open again" "755" "$(stat -c %a $LAYR_ROOT/projects/s/git)"
 
 # 8. Limits of the service.
-runuser -u layr-admin -- python3 - "$LAYR_SOCKET" <<'PY' &
+# The three held connections are all queued before the status call; the service accepts in order.
+: > $T/held && chmod 666 $T/held
+runuser -u layr-admin -- python3 - "$LAYR_SOCKET" $T/held <<'PY' &
 import socket, sys, time
 s = [socket.socket(socket.AF_UNIX) for _ in range(3)]
 for x in s: x.connect(sys.argv[1])
+open(sys.argv[2], 'w').write('held')
 time.sleep(4)
 PY
-sleep 1
+for i in $(seq 1 100); do [ -s $T/held ] && break; sleep 0.1; done
 has "a user over the limit gets a busy answer" "busy" "$(as layr-admin $L status 2>&1)"
 sleep 12
 eq "silent clients time out and free their places" "0" "$(cd $P/main && as layr-admin $L status -s >/dev/null 2>&1; echo $?)"

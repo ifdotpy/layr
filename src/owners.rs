@@ -353,6 +353,11 @@ impl Db {
                     self.sync_tag(name)?;
                 }
             }
+            "remote.remove" => {
+                if let Some(remote) = d["remote"].as_str() {
+                    self.clear_remote_refs_of(remote)?;
+                }
+            }
             "import" | "remote.ref" => {
                 if let Some(name) = d["ref"].as_str() {
                     self.sync_remote_ref(name)?;
@@ -400,6 +405,16 @@ impl Db {
             .into_iter()
             .collect();
         self.set_owners("tag", name, &target)
+    }
+
+    /// The refs of a removed remote have no owner.
+    fn clear_remote_refs_of(&self, remote: &str) -> Result<()> {
+        let mut st = self.conn.prepare("SELECT name FROM remote_refs WHERE substr(name, 1, length(?1)+1)=?1||'/'")?;
+        let names = st.query_map(params![remote], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<String>>>()?;
+        for name in names {
+            self.set_owners("remote-ref", &name, &Vec::<String>::new())?;
+        }
+        Ok(())
     }
 
     fn sync_remote_ref(&self, name: &str) -> Result<()> {
@@ -550,6 +565,7 @@ mod tests {
             cache_by: None,
             cache_shared: false,
             cache_platform: None,
+            cache_of: None,
         }
     }
 
