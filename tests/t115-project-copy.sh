@@ -116,7 +116,12 @@ S=$("$LAYR" __project-space $P); C=$("$LAYR" __project-space $D/p)
 NS=$(echo "$S" | j need); TS=$(echo "$S" | j total); NC=$(echo "$C" | j need)
 echo "space: source need $NS total $TS, copy need $NC"
 ok "the copy keeps the sharing (under 1.5x the source)" test "$NC" -le "$((NS * 3 / 2))"
-ok "the copy is far below a flattened copy" test "$((NC * 2))" -lt "$TS"
+# ext4 has no extent sharing: its layers are shared by folder, not by extent.
+if [ "$(findmnt -n -o FSTYPE -T "$D" 2>/dev/null)" = ext4 ]; then
+    echo "SKIP far below a flattened copy (ext4 shares layers, not extents)"
+else
+    ok "the copy is far below a flattened copy" test "$((NC * 2))" -lt "$TS"
+fi
 
 if [ "$OWNED" = 1 ]; then
     eq "the copy keeps the owner" "1234:4321" "$(stat -c %u:%g $D/p/lines/w2/notes.txt)"
@@ -135,14 +140,18 @@ no "a changed file fails the verification" "$LAYR" __project-verify $P $D/p
 cp $T/notes.good $D/p/lines/w1/notes.txt
 ok "the restored copy verifies" "$LAYR" __project-verify $P $D/p
 
-# An interrupted copy leaves a marked target; the next call finishes it.
-out=$(LAYR_TEST_COPY_EXIT_AFTER=5 "$LAYR" __project-copy $P $D/killed 2>&1); rc=$?
+# An interrupted copy leaves a marked target; the next call finishes it. A registry holds one
+# copy of a project (its writable layers are mounted once), so this uses a second, small project.
+mkdir -p $T/src2 && echo small > $T/src2/notes.txt
+l init q --from $T/src2 -q >/dev/null
+Q=$LAYR_ROOT/projects/q
+out=$(LAYR_TEST_COPY_EXIT_AFTER=2 "$LAYR" __project-copy $Q $D/killed 2>&1); rc=$?
 eq "the interrupted copy exits with an error" 3 "$rc"
 ok "the interrupted target is marked" test -e $D/killed/.layr-copy-in-progress
-no "the interrupted copy does not verify" "$LAYR" __project-verify $P $D/killed
-check "the next call finishes the copy" "$LAYR" __project-copy $P $D/killed
+no "the interrupted copy does not verify" "$LAYR" __project-verify $Q $D/killed
+check "the next call finishes the copy" "$LAYR" __project-copy $Q $D/killed
 no "the finished copy has no marker" test -e $D/killed/.layr-copy-in-progress
-check "the finished copy verifies" "$LAYR" __project-verify $P $D/killed
+check "the finished copy verifies" "$LAYR" __project-verify $Q $D/killed
 
 echo "$(basename "$0"): copy ${COPY_MS:-?} ms, verify ${VERIFY_MS:-?} ms; $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

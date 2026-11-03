@@ -1765,6 +1765,17 @@ struct Files {
 }
 
 impl Files {
+    /// A layer folder was renamed: the copies inside it now have new paths.
+    fn moved(&mut self, from: &Path, to: &Path) {
+        let relocate = |p: &mut PathBuf| {
+            if let Ok(rest) = p.strip_prefix(from) {
+                *p = to.join(rest);
+            }
+        };
+        self.seen.values_mut().for_each(relocate);
+        self.links.values_mut().for_each(relocate);
+    }
+
     fn copy(&mut self, src: &Path, dst: &Path, m: &fs::Metadata) -> Result<()> {
         if m.nlink() > 1 {
             if let Some(first) = self.links.get(&(m.dev(), m.ino())) {
@@ -1922,6 +1933,7 @@ impl Copier {
         }
         set_meta(&source, &temp, &fs::symlink_metadata(&source)?)?;
         fs::rename(&temp, &target).with_context(|| format!("publish layer {id}"))?;
+        self.files.moved(&temp, &target);
         self.objects.insert(id.to_string());
         Ok(())
     }
