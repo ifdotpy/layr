@@ -73,7 +73,16 @@ pub fn follow(ctx: &Ctx, args: &[String]) -> Result<i32> {
 /// Run one pass now and print its result. Exit 1 when the pass failed.
 fn finish(ctx: &Ctx, repo: &Repo, line: &Line) -> Result<i32> {
     let last = repo.follow_pass(ctx, line, true)?.ok_or_else(|| exit(1, "internal: an explicit pass stayed quiet"))?;
-    report(ctx, repo, line, &last)
+    let code = report(ctx, repo, line, &last)?;
+    warn_without_daemon(repo);
+    Ok(code)
+}
+
+/// One line when no daemon of this user serves the store: the passes then run only by hand.
+fn warn_without_daemon(repo: &Repo) {
+    if let Some(text) = follow::daemon_warning(&repo.p.store.root) {
+        eprintln!("{text}");
+    }
 }
 
 fn report(ctx: &Ctx, repo: &Repo, line: &Line, last: &Last) -> Result<i32> {
@@ -89,6 +98,7 @@ fn show(ctx: &Ctx, repo: &Repo, line: &Line) -> Result<i32> {
         Some(target) => {
             outln!(ctx, "Following {target} on line {}", line.name);
             outln!(ctx, "{}", describe(follow::last_result(repo, line)?.as_ref()));
+            warn_without_daemon(repo);
         }
     }
     Ok(0)
