@@ -14,7 +14,7 @@ printf built > target/output
 l save -q --caches
 l line new -q warm
 eq "the new line has the saved cache" built "$(cat "$P/warm/target/output")"
-no "the new cache is not a mount" mountpoint -q "$P/warm/target"
+ok "the new cache is a mount over the saved state (no copy)" mountpoint -q "$P/warm/target"
 printf changed > "$P/warm/target/output"
 eq "the source cache remains unchanged" built "$(cat target/output)"
 eq "cache changes do not enter status" "" "$(cd "$P/warm" && l status -s)"
@@ -33,6 +33,6 @@ new_fs "$T/peer" 2G
 ok "sync transfers saved caches" peer_exchange sync cachetest -q --caches -- env LAYR_ROOT="$T/peer/store" "$LAYR" serve-peer cachetest
 env LAYR_ROOT="$T/peer/store" "$LAYR" --project cachetest adopt main >/dev/null
 eq "the peer restores the saved cache" rebuilt "$(cat "$T/peer/store/projects/cachetest/lines/main/target/output")"
-no "the peer cache is not mounted" mountpoint -q "$T/peer/store/projects/cachetest/lines/main/target"
+ok "the peer cache is a mount over the saved state" mountpoint -q "$T/peer/store/projects/cachetest/lines/main/target"
 ok "snapshots and signatures remain valid" l fsck
 finish
