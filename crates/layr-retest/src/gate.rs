@@ -206,7 +206,7 @@ pub fn run(args: &[String]) -> Result<i32> {
     let cargo = root.join("Cargo.toml").is_file();
     let env = gate_env(&root)?;
     if cargo {
-        match with_env(Command::new("cargo").args(["fetch", "--locked"]), &env).status() {
+        match with_env(crate::cargo_cmd().args(["fetch", "--locked"]), &env).status() {
             Ok(s) if s.success() => {}
             Ok(s) => eprintln!("layr-retest gate: cargo fetch failed ({s}); the command may miss new crates"),
             Err(e) => eprintln!("layr-retest gate: cannot start cargo fetch: {e}; the command may miss new crates"),

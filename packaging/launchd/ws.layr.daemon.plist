@@ -1,9 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!-- The layr daemon as your user on macOS: runs the layr follow passes on its tick. No root.
-     Install: cp this file to ~/Library/LaunchAgents/, then
+     Install: cp this file to ~/Library/LaunchAgents/, set LAYR_ROOT (below), then
        launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ws.layr.daemon.plist
-     Logs: ~/Library/Logs/layr-daemon.log. See docs/follow.md. -->
+     LAYR_ROOT must be the store that your layr commands use. launchd gives the daemon no shell
+     environment, so without this key it opens the default store, ~/Library/Application Support/layr.
+     The install step sets the key to your store path:
+       plutil -replace EnvironmentVariables.LAYR_ROOT -string "$LAYR_ROOT" ~/Library/LaunchAgents/ws.layr.daemon.plist
+     The value below is the default store of a user at /Users/you. Logs: ~/Library/Logs/layr-daemon.log.
+     See docs/follow.md. -->
 <plist version="1.0">
 <dict>
     <key>Label</key>
@@ -14,6 +19,11 @@
         <string>-c</string>
         <string>exec "$HOME/.local/bin/layr" daemon &gt;&gt;"$HOME/Library/Logs/layr-daemon.log" 2&gt;&amp;1</string>
     </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>LAYR_ROOT</key>
+        <string>/Users/you/Library/Application Support/layr</string>
+    </dict>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>

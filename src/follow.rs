@@ -38,6 +38,37 @@ pub fn split(target: &str) -> Option<(&str, &str)> {
     (!remote.is_empty() && !branch.is_empty()).then_some((remote, branch))
 }
 
+const NO_DAEMON: &str = "warning: no layr daemon runs for this store; follow passes run only on `layr follow --run`";
+const OLDER_DAEMON: &str = "warning: the layr daemon runs an older build; restart it";
+
+/// The socket of the daemon of this user: the user socket on macOS (LaunchAgent), the service
+/// socket elsewhere. The same rules as `service::daemon`.
+fn daemon_socket() -> PathBuf {
+    if cfg!(target_os = "macos") && std::env::var_os("LAYR_SOCKET").is_none() {
+        return PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join("Library/Caches/layr/layr.sock");
+    }
+    crate::service::socket_path()
+}
+
+/// The warning for a line of the store `root` when no daemon of this user serves that store, or
+/// None. A busy daemon is not reported. A daemon that does not report its store root is an older
+/// build, and its store is unknown.
+pub fn daemon_warning(root: &Path) -> Option<&'static str> {
+    match crate::service::hello(&daemon_socket()) {
+        crate::service::Hello::Busy => None,
+        crate::service::Hello::Absent => Some(NO_DAEMON),
+        crate::service::Hello::Running { root: None } => Some(OLDER_DAEMON),
+        crate::service::Hello::Running { root: Some(served) } => (!same_store(&served, root)).then_some(NO_DAEMON),
+    }
+}
+
+fn same_store(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a == b,
+    }
+}
+
 /// A remote state that a pass could not merge into a line head. The daemon tick does not try
 /// the same pair again: it tries when the remote state or the line head changes, or on an
 /// explicit `layr follow`.

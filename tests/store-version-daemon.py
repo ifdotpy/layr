@@ -36,7 +36,10 @@ def request(version, hello=False):
             sock.sendall(struct.pack("!I", len(packet)) + packet)
             assert exact(sock, 1) == b"V"
             length = struct.unpack("!I", exact(sock, 4))[0]
-            assert json.loads(exact(sock, length)) == current
+            # The reply is the version plus the store root of the daemon.
+            reply = json.loads(exact(sock, length))
+            assert {k: reply[k] for k in current} == current, reply
+            assert Path(reply["root"]).resolve() == store.resolve(), reply
         payload = {"argv": ["init", "must-not-exist", "-q"], "env": {}}
         if version is not None:
             payload["version"] = version
