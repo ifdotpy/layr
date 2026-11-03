@@ -991,11 +991,15 @@ fn owners_check(repo: &Repo) -> Result<OwnersCheck> {
     Ok(OwnersCheck { want, missing, extra, leaks })
 }
 
-/// The apparent size of the storage of states (trees and thin layers).
+/// The bytes that only the storage of these states holds (as `layr du` counts them): clones that
+/// other states or lines share are not counted, so the number is what freeing them gives back
+/// (blocks shared only among these states are left out, so it is a lower bound).
 fn states_bytes(repo: &Repo, states: &[String]) -> u64 {
     states
         .iter()
-        .map(|s| crate::cache_overlay::tree_size(&repo.p.state_path(s)) + crate::cache_overlay::tree_size(&repo.p.delta_path(s)))
+        .flat_map(|s| [repo.p.state_path(s), repo.p.delta_path(s)])
+        .filter(|p| p.exists())
+        .filter_map(|p| crate::storage::space(&p).ok().map(|s| s.unique))
         .sum()
 }
 
@@ -1358,12 +1362,9 @@ fn drop_built_imports(repo: &Repo, dry: bool) -> Result<Vec<String>> {
             .map(|(state, _, _)| state)
             .collect();
         let bases: BTreeSet<String> = repo.p.db.present_layer_bases()?.into_iter().collect();
-        let mut round = Vec::new();
-        for (id, _) in repo.p.db.present_states()? {
-            if !kept.contains(&id) && !bases.contains(&id) && crate::gitbridge::buildable(repo, &id) {
-                round.push(id);
-            }
-        }
+        let candidates: Vec<String> =
+            repo.p.db.present_states()?.into_iter().map(|(id, _)| id).filter(|id| !kept.contains(id) && !bases.contains(id)).collect();
+        let round: Vec<String> = crate::gitbridge::buildable_set(repo, &candidates)?.into_iter().collect();
         if round.is_empty() {
             break;
         }
