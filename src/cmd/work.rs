@@ -1457,6 +1457,42 @@ pub fn record_working(ctx: &Ctx, repo: &Repo, line: &Line, op: &str, working_bef
     Ok(())
 }
 
+/// `reset --hard <state>` when the tree of the state is the tree of the head and the working
+/// folder matches the head (APFS): only the head moves, no file is touched. Returns false, with
+/// nothing changed, in every other case.
+#[cfg(target_os = "macos")]
+fn reset_same_tree(ctx: &Ctx, repo: &Repo, line: &Line, target: &str) -> Result<bool> {
+    let _t = crate::trace::span("reset same tree");
+    repo.authorize_line(ctx, line, crate::repo::LineOp::Direct)?;
+    let _lock = repo.p.lock()?;
+    let line = repo.line(&line.id)?;
+    if repo.current_stage(&line)?.is_some() {
+        return Ok(false);
+    }
+    let w = repo.working(&line);
+    let head = repo.head_src(&line)?;
+    let tree = repo.state_src(target)?;
+    // Equal trees: no entry differs (the root folder is not state content).
+    if changes::candidates(&head, &tree)?.iter().any(|x| !x.path.is_empty() && !skip_path(&x.path)) {
+        return Ok(false);
+    }
+    // The working folder matches the head: a local change needs the full reset. The walk for
+    // overlay folders (`cache_paths`) runs only when the working folder has a change.
+    let local = changes::file_changes(&head, &w)?;
+    if !local.is_empty() {
+        let regen = repo.cache_paths(&w);
+        let keep = |p: &str| !skip_path(p) && !regen.iter().any(|r| p == r || p.starts_with(&format!("{r}/")));
+        if local.iter().any(|x| keep(&x.path) || x.old_path.as_deref().is_some_and(keep)) {
+            return Ok(false);
+        }
+    }
+    let _c = crate::trace::span("reset: check move");
+    repo.check_move(ctx, &line, target)?;
+    drop(_c);
+    repo.move_head(ctx, "reset", &line, target, vec![], None, serde_json::json!({"mode": "hard"}))?;
+    Ok(true)
+}
+
 pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let spec = Spec::new().flag("--soft").flag("--mixed").flag("--hard").flag("--keep").flag("--merge").flag("-q|--quiet");
     let a = parse(&spec, args)?;
@@ -1477,6 +1513,15 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
         return restore_impl(ctx, &h, &line, &specs, true, false, Some(src), false, false);
     }
     let target = revs::resolve(&h.repo, Some(&line), pos.first().map(|s| s.as_str()).unwrap_or("head"))?;
+    // APFS: an equal tree with a clean working folder moves only the head (`reset_same_tree`).
+    #[cfg(target_os = "macos")]
+    if a.has("--hard") && !a.has("--soft") && h.repo.layers(&line)?.is_empty() && reset_same_tree(ctx, &h.repo, &line, &target)? {
+        if !a.has("-q") {
+            let s = h.repo.state(&target)?;
+            outln!(ctx, "head is now at {} {}", ids::short(&target), s.message.lines().next().unwrap_or(""));
+        }
+        return Ok(0);
+    }
     // APFS: the copy of the working folder and the tree of the target go before the store lock
     // (minutes under it in a large project). The working folder is never under the lock.
     #[cfg(target_os = "macos")]

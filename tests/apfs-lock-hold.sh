@@ -166,7 +166,11 @@ printf 'picked\n' > pk.txt && l add pk.txt && l save -qm pk
 pk=$(l rev-parse head)
 cd "$P/rp-work" || exit 1
 trace=$(LAYR_TRACE=1 l pick "$pk" 2>&1)
-has "pick merges before the lock" "prepare pick" "$trace"
+# A pick without a merge (t113) writes a thin layer under the lock; any other pick merges before it.
+case "$trace" in
+    *"pick visits"*) has "pick takes the thin path" "pick visits" "$trace" ;;
+    *) has "pick merges before the lock" "prepare pick" "$trace" ;;
+esac
 eq "pick copies no tree under the lock" "" "$(locked "$trace" | grep -E "$copies")"
 eq "pick brings the file" "picked" "$(cat pk.txt)"
 trace=$(LAYR_TRACE=1 l undo 2>&1)
