@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.19.0](https://github.com/ifdotpy/layr/compare/v0.18.1...v0.19.0) (2026-11-03)
+
+
+### ⚠ BREAKING CHANGES
+
+* **gc:** Free states when their last owner goes ([#135](https://github.com/ifdotpy/layr/issues/135))
+
+### Features
+
+* **gc:** Free states when their last owner goes ([#135](https://github.com/ifdotpy/layr/issues/135)) ([5d611f7](https://github.com/ifdotpy/layr/commit/5d611f718bc5f84903eb3006901cea5bdbf578ce))
+
+
+### Bug Fixes
+
+* **git:** Keep imported history as records and build trees from git on read ([#157](https://github.com/ifdotpy/layr/issues/157)) ([854aa70](https://github.com/ifdotpy/layr/commit/854aa7069ebefa2dc428bbba71d5e4f00eea781a))
+
+## [0.18.1](https://github.com/ifdotpy/layr/compare/v0.18.0...v0.18.1) (2026-11-03)
+
+
+### Bug Fixes
+
+* **build:** Take the build identity from the environment, never from .git ([#159](https://github.com/ifdotpy/layr/issues/159)) ([76c1fd6](https://github.com/ifdotpy/layr/commit/76c1fd6e52b94e300f58bcf44a1cbc9733865e41))
+* **undo:** Point the line's .git at the restored head ([#163](https://github.com/ifdotpy/layr/issues/163)) ([7dddfd7](https://github.com/ifdotpy/layr/commit/7dddfd721c0d715b1414caf3f6c05c36b750721c))
+
 ## [0.18.0](https://github.com/ifdotpy/layr/compare/v0.17.0...v0.18.0) (2026-11-03)
 
 

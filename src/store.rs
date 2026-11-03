@@ -358,6 +358,16 @@ pub fn creator_gone(name: &str) -> Option<bool> {
 /// Set by `layr gc`: it empties the whole trash.
 pub static EMPTY_TRASH_FULLY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Empty the trash after a free step (`free.rs`) that runs without the store lock: in the
+/// background, or within the test budget when one is set or the start fails.
+pub fn kick_trash(dir: &Path) {
+    if std::env::var_os("LAYR_TRASH_BUDGET_MS").is_some() || !spawn_trash_emptier(dir) {
+        let budget = trash_budget();
+        let _t = crate::trace::span(format!("empty trash ({} ms)", budget.as_millis()));
+        empty_trash(dir, Some(budget));
+    }
+}
+
 /// Delete what is in the trash, for at most `budget` (`None`: all of it; a started delete of
 /// one file or folder is not cut). A big tree is deleted entry by entry, so the budget holds
 /// for it too. Two processes may work on one tree: an entry that is gone is not an error.
@@ -583,8 +593,8 @@ impl<'a> Project<'a> {
     /// (`thin::delete_states`). A state kept as a base counts as handled, as in `delete_state`.
     pub fn delete_states(&self, ids: &[String]) -> Vec<String> {
         #[cfg(target_os = "macos")]
-        if crate::thin::delete_states(self, ids).is_ok() {
-            return ids.to_vec();
+        if let Ok(gone) = crate::thin::delete_states(self, ids) {
+            return ids.iter().filter(|id| gone.contains(id.as_str())).cloned().collect();
         }
         ids.iter().filter(|id| self.delete_state(id).is_ok()).cloned().collect()
     }
@@ -760,6 +770,7 @@ impl<'a> Project<'a> {
         p.finish_schema_upgrade()?;
         crate::rootcheck::check_project(&p)?;
         p.id = p.project_id()?;
+        crate::free::register(store, name);
         #[cfg(target_os = "macos")]
         if crate::apfs_commit::pending(&p)? {
             // Wait for a live commit, or recover the index after an interrupted one.

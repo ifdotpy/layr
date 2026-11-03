@@ -606,6 +606,7 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
             report.omitted.push(format!("cache snapshot {name}: legacy cache, use a peer remote or save it as a cache state"));
         }
     }
+    super::gitpack::push(store, repo, opts, &mut report)?;
     Ok(report)
 }
 

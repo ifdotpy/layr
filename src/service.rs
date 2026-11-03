@@ -333,7 +333,7 @@ pub fn run_as(argv: Vec<String>, caller: Caller, cwd: PathBuf, env: HashMap<Stri
     let ctx = Ctx { store, caller, cwd, env, out: std::cell::RefCell::new(out) };
     let r = crate::cmd::run(&ctx, &argv);
     let _ = ctx.out.borrow_mut().flush();
-    match r {
+    let code = match r {
         Ok(c) => c,
         Err(e) => {
             if let Some(x) = e.downcast_ref::<crate::cmd::Exit>() {
@@ -346,7 +346,10 @@ pub fn run_as(argv: Vec<String>, caller: Caller, cwd: PathBuf, env: HashMap<Stri
                 128
             }
         }
-    }
+    };
+    // The free step: after the commit and the store lock (docs/ownership.md).
+    crate::free::finish(&ctx.store);
+    code
 }
 
 /// The time of the last periodic check of each line that found no change, in the project's meta
@@ -422,7 +425,7 @@ fn periodic(root: &Path, hourly: bool) {
             if let Ok(_lock) = repo.p.lock() {
                 let _ = crate::gitbridge::sync_store_access(&repo);
             }
-            let _ = crate::cmd::admin::run_gc(&ctx, &repo, false);
+            let _ = crate::cmd::admin::gc_repair_quiet(&ctx, &repo);
         }
     }
 }

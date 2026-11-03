@@ -4,6 +4,7 @@ pub(crate) mod backend;
 pub(crate) mod browse;
 pub(crate) mod epochs;
 pub(crate) mod gateway;
+mod gitpack;
 mod index;
 mod legacy;
 pub(crate) mod overlays;
@@ -38,6 +39,8 @@ pub struct Options {
 pub struct Report {
     pub records: usize,
     pub states: usize,
+    /// Git packs (`git/`) that a push wrote or a fetch installed.
+    pub git_packs: usize,
     #[serde(skip)]
     pub state_ids: Vec<String>,
     #[serde(skip)]
@@ -178,6 +181,30 @@ pub fn store_copies(repo: &Repo) -> Result<std::collections::BTreeMap<String, Ve
 
 /// Restore a state that is not on this machine from a store remote that holds it. Fails with the
 /// reason when no remote gives it (for example, when the remote is offline).
+/// Install the Git objects that the store remotes of the project hold (`gitpack`). Used when the
+/// local Git cache is lost: an imported state has no tree to rebuild its commits from. Returns the
+/// number of packs installed.
+pub fn restore_git_objects(ctx: &Ctx, repo: &Repo) -> Result<usize> {
+    let mut names: Vec<String> = repo
+        .p
+        .db
+        .config_all()?
+        .into_iter()
+        .filter_map(|(key, _)| key.strip_prefix("cloud.remote.").and_then(|k| k.strip_suffix(".url")).map(str::to_owned))
+        .collect();
+    names.sort();
+    names.dedup();
+    let mut installed = 0;
+    for name in names {
+        let mut store = open_named(&name, repo)?;
+        store.connect(ctx)?;
+        let descriptor = store.descriptor()?;
+        let identity = store.identity(&descriptor, None)?;
+        installed += gitpack::fetch(&store, repo, &identity)?;
+    }
+    Ok(installed)
+}
+
 pub fn restore_state(repo: &Repo, id: &str) -> Result<()> {
     let names = store_copies(repo)?.remove(id).unwrap_or_default();
     if names.is_empty() {

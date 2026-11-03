@@ -98,7 +98,9 @@ has 'refusal names proposed ID' "$original_tip" "$out"
 eq 'refusal keeps mirror unchanged' "$new_tip" "$(git -C "$R" rev-parse main)"
 l git push --force -q github main
 eq 'explicit force permits rewind' "$original_tip" "$(git -C "$R" rev-parse main)"
-# Kill before the first 128-state index checkpoint, then recover from immutable remote trees.
+# Kill before the first index checkpoint, then recover from immutable remote trees. The states
+# that layr made (eight named saves on top of the import) are the trees: an imported state is
+# sent as its Git pack instead.
 K=$T/retry-source
 mkdir -p "$K"
 git -C "$K" init -q -b main
@@ -109,6 +111,11 @@ for n in $(seq 1 64); do
 done
 l git clone "$K" retry -q >/dev/null
 cd "$LAYR_ROOT/projects/retry/lines/main"
+for n in $(seq 1 8); do
+    printf 'save %s\n' "$n" > payload
+    l add payload
+    l save -qm "save $n"
+done
 l remote add archive "file://$T/retry-archive" --paper-key-out "$T/retry-paper" >/dev/null
 export RETRY_ARCHIVE=$T/retry-archive RETRY_BINARY=$LAYR RETRY_LOG=$T/retry-push.log
 python3 - <<'PYCODE'
@@ -126,14 +133,14 @@ with open(os.environ['RETRY_LOG'],'wb') as log:
   p.kill();p.wait()
   raise AssertionError('push did not reach the interruption point')
 complete=list(root.glob('states/**/*.tree.age'))
-assert 4<=len(complete)<64,len(complete)
+assert 4<=len(complete)<9,len(complete)
 before={str(f.relative_to(root)):hashlib.sha256(f.read_bytes()).hexdigest() for f in root.rglob('*') if f.is_file()}
 subprocess.run([os.environ['RETRY_BINARY'],'push','archive','-q'],check=True)
 for path,digest in before.items():
  assert hashlib.sha256((root/path).read_bytes()).hexdigest()==digest,path
 complete=list(root.glob('states/**/*.tree.age'))
-assert len(complete)==64,len(complete)
-assert len({f.parent.name for f in complete})==64,'a retry duplicated a committed state'
+assert len(complete)==9,len(complete)
+assert len({f.parent.name for f in complete})==9,'a retry duplicated a committed state'
 print('PASS killed push resumes without replacing or duplicating committed objects')
 PYCODE
 PASS=$((PASS+1))
