@@ -4,6 +4,15 @@ Status: first version built (2026-10-28): the Rust adapter, and the vitest, jest
 agreed with the owner on 2026-10-28. Prototype measurements are in the last section. See
 "First version" for the command line, the record format and what is not done.
 
+## Switch a project on
+
+In the root folder of a layr line that is the cargo project root (or the pnpm, vitest, jest or pytest root):
+
+1. `layr retest init` sets up the project. It is safe to run twice. Details: "Command line".
+2. `layr retest gate -- <your gate command>` runs the gate command with the project build env, one gate at a time on the machine.
+
+The project keeps its own commands (`pnpm install`, `--offline`, the results folder) inside the gate command.
+
 ## Goal
 
 A test that passed must not run again while the code it executed stays the same, in any line.
@@ -620,21 +629,41 @@ Run in the root folder of a layr line that is also the cargo project root.
      failed and were skipped.
   Before step 4 the fast path of "No build when nothing can change" can end the run.
   Every step prints `layr-retest: step <name>: <seconds>s`.
-  The nextest arguments after `--` go to both `list` and `run`. Use them to select packages
+  The build of `run` uses the project env (see `gate`). The nextest arguments after `--` go to both `list` and `run`. Use them to select packages
   (`-p`, `--workspace`). Do not put `-E` there.
 - `layr retest wrap -- <test binary> <args>` is the cargo target runner that `run` installs
   (`CARGO_TARGET_<TRIPLE>_RUNNER`, set to `<layr> retest wrap --`). With `NEXTEST_TEST_NAME` set it sets `LLVM_PROFILE_FILE` to
   `$LAYR_RETEST_PROFILE_DIR/<binary id>/<test>.profraw` (names cleaned to letters, digits and
   `_-.`), then runs the test, merges its raw profiles and returns its exit code (see "Raw profile disk"). In the list phase it sets no profile and execs the test.
 
+- `layr retest gate [--name <n>] [--max-load <n>] -- <command...>` runs a gate command the same way for every project.
+  It replaces a project wrapper script. Steps:
+  1. Lock: the folder `/tmp/layr-retest-gate.lock` (files `pid` and `owner`), taken in one step, so one gate runs
+     at a time on the machine. A waiting gate prints the pid and the owner of the holder. A lock whose pid is
+     not alive is removed (a crashed gate). `LAYR_RETEST_GATE_LOCK` names another path. Ctrl-C does not remove
+     the lock; the next gate does. Two gates that reap the same dead lock at the same instant can both win.
+  2. Load: waits while the 1-minute load is at or above `--max-load` (default 60), at most 10 minutes. Then it starts.
+  3. Env: `[workspace.metadata.layr-retest] env` (none without `Cargo.toml`). The command runs with it, with
+     `RUSTC_WRAPPER` empty and `CARGO_TARGET_DIR` removed.
+  4. `cargo fetch --locked` in a cargo project. A failure prints a warning and the gate goes on.
+  5. The command. Its output goes to the terminal.
+  6. `layr retest sweep` in a cargo project. The last line says `sweep ok`, `sweep skipped` or `sweep failed`.
+     A failed sweep does not change the gate's exit status.
+  7. The lock is released. The exit status is the status of the command.
 - `layr retest init [--yes]` makes a project ready. It is safe to run twice.
-  - Finds a cargo project, and vitest, jest or pytest projects.
+  - Finds a cargo project (`Cargo.toml`), pnpm (`pnpm-lock.yaml`), and vitest, jest or pytest projects.
+  - Adds a `regenerable` line to `.layrattributes` for each cache folder of the project that it finds: `target` (cargo),
+    `node_modules` (pnpm) and `.layr-retest` (records of cargo, vitest, jest or pytest). Each line is added once.
+  - Adds `.layr-retest` to `.gitignore` when the project has a test tool.
+  - Adds the keys `sweep` (`build --workspace --all-targets --locked`) and `env` (`CARGO_INCREMENTAL = "1"`) to
+    `[workspace.metadata.layr-retest]` in `Cargo.toml` when they are missing. A package-only manifest gets a
+    `[workspace]` table, so that cargo reads the metadata. A key that the project set keeps its value.
+  - Saves each cache folder that exists and is not a cache overlay yet: `layr save --caches --cache <folder>`.
+    It does nothing for a folder that is already an overlay. Outside a layr line the save fails, and the exit code is 1.
   - Checks `cargo-nextest` and the `llvm-tools` rustup component of the active toolchain. A missing one
     prints its install command (`cargo install cargo-nextest --locked`, `rustup component add llvm-tools`);
     `--yes` runs it. Exit code 1 if one is still missing.
-  - Adds `target regenerable` and `.layr-retest regenerable` to `.layrattributes`, and `.layr-retest`
-    to `.gitignore`, when missing.
-  - Prints the gate command: `layr retest run -- --workspace` (or `--tool vitest|jest|pytest`).
+  - Prints the next step: `layr retest gate -- <your gate command>`.
 - `layr retest doctor` reads and never writes. It prints `ok:` or `warn:` lines with numbers; exit code 0
   when there is no warning, else 1.
   - Tools present, and the LLVM major version of `llvm-profdata` equals that of `rustc`.
@@ -858,7 +887,8 @@ the old chain is not used again. The end to end test shows it with a test that r
 - `crates/layr-retest/tests/e2e.rs`: runs `layr retest ...` (the `layr` built from this repository must be first in `PATH`), with a temporary `LAYR_ROOT`, a tiny project with three tests. Runs:
   no record, no change, change of one function, a new uncalled function, a change of a data file,
   full run with a contradiction. About 10 s. Needs `layr`, `cargo-nextest` and `llvm-tools`.
-  Also: `doctor` on the tiny project, `init` twice, and `build_scripts_write_no_profile_into_the_project`
+  Also: `doctor` on the tiny project, `init` twice in a line (cargo and pnpm folders), the project env of `run` and
+  `sweep`, the gate (one gate at a time, a stale lock, the env, the exit status), and `build_scripts_write_no_profile_into_the_project`
   (a `build.rs` and a sweep listing that compiles the build script: no stray file, no scratch folder). Unit tests: `init.rs` (idempotent edits), `doctor.rs` (the rules).
   Run: `cargo nextest run -p layr-retest`.
 
