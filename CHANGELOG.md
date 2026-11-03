@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.16.2](https://github.com/ifdotpy/layr/compare/v0.16.1...v0.16.2) (2026-11-03)
+
+
+### Bug Fixes
+
+* **caches:** The newest cache overlay state wins over an old cache of the state ([#145](https://github.com/ifdotpy/layr/issues/145)) ([f8a3d55](https://github.com/ifdotpy/layr/commit/f8a3d558b2139f4a14e9400fc2a30eacefe08fa2))
+
 ## [0.16.1](https://github.com/ifdotpy/layr/compare/v0.16.0...v0.16.1) (2026-11-02)
 
 
