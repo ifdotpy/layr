@@ -42,11 +42,7 @@ mod person;
 mod privs;
 mod probes;
 mod project_copy;
-<<<<<<< head
 mod project_move;
-||||||| base
-=======
->>>>>>> origin/main
 mod radar;
 mod recv;
 mod repo;
