@@ -135,8 +135,7 @@ ok 'a merge gets a new ChangeId' test -n "$MC" -a "$MC" != "$C"
 eq 'a merge does not replace the source change identity' "$REB" "$(l rev-parse changes/$C)"
 # Auto states without line history roots demonstrate live and expired ref retention.
 l config retention.auto 0
-l config retention.hours 0
-l config undo.days 0
+l config undo.ops 0
 echo detached >> notes.txt
 l save -q
 AUTO=$(l rev-parse 'head@{0}')
@@ -147,10 +146,13 @@ ok 'live refs survive GC' l gc
 ok 'pinned auto state remains readable' l show "$AUTO":notes.txt
 sleep 2
 no 'expired refs stop resolving' l rev-parse leases/test
-ok 'GC removes expired refs' l gc
+ok 'GC removes expired refs' l gc --repair
 eq 'expired refs have a signed delete transition' None "$(l ref log leases/test --json | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["after"])')"
 l ref delete pins/live >/dev/null
-l gc >/dev/null
+# A newer automatic state: the newest one always stays (docs/ownership.md, rule 3).
+l config thin.chain 1 >/dev/null
+echo newer >> notes.txt; l save -q
+l gc --repair >/dev/null
 no 'an attestation does not prevent subject GC' l show "$AUTO":notes.txt
 ok 'reindex preserves core metadata' l reindex -q
 eq 'reindex preserves current ref' "$S2" "$(l rev-parse env/prod)"

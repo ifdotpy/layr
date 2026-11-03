@@ -121,6 +121,6 @@ eq "a large folder that the saved state ignores gives no overlap" "shared.txt bi
 # gc removes an unreadable entry.
 cd $P/mine || exit 1
 printf 'junk' > $CACHE/junk.json
-l gc -q >/dev/null 2>&1
+l gc --repair -q >/dev/null 2>&1
 eq "gc removes an unreadable compare entry" 0 "$(test -e $CACHE/junk.json && echo 1 || echo 0)"
 finish

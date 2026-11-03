@@ -8,11 +8,22 @@ use similar::{capture_diff_slices, Algorithm, DiffOp};
 use layr_model::diff::split_lines;
 pub use layr_model::diff::{patch, FileDiff, Side};
 
-pub fn side_of(root: &(impl fsutil::Src + ?Sized), path: &str, meta: &Meta) -> Result<Side> {
+/// The bytes of the files of one side of a comparison: a folder tree, or content held in memory.
+pub trait Contents {
+    fn bytes(&self, path: &str) -> Result<Vec<u8>>;
+}
+
+impl<T: fsutil::Src + ?Sized> Contents for T {
+    fn bytes(&self, path: &str) -> Result<Vec<u8>> {
+        fsutil::entry_bytes(self, path)
+    }
+}
+
+pub fn side_of(root: &(impl Contents + ?Sized), path: &str, meta: &Meta) -> Result<Side> {
     let big = (meta.ftype == FType::File && meta.size > fsutil::MAX_TEXT).then_some(meta.size);
     let data = match meta.ftype {
         _ if big.is_some() => Vec::new(),
-        FType::File | FType::Symlink => fsutil::entry_bytes(root, path)?,
+        FType::File | FType::Symlink => root.bytes(path)?,
         _ => Vec::new(),
     };
     Ok(Side { path: path.to_string(), mode: meta.git_mode(), data, big })
@@ -20,8 +31,8 @@ pub fn side_of(root: &(impl fsutil::Src + ?Sized), path: &str, meta: &Meta) -> R
 
 /// Build file diffs for a change list between two roots.
 pub fn file_diffs(
-    old_root: &(impl fsutil::Src + ?Sized),
-    new_root: &(impl fsutil::Src + ?Sized),
+    old_root: &(impl Contents + ?Sized),
+    new_root: &(impl Contents + ?Sized),
     changes: &[Change],
 ) -> Result<Vec<FileDiff>> {
     let mut v = Vec::new();

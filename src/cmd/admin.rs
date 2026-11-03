@@ -76,6 +76,7 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
         repo.authorize_line(ctx, &l, crate::repo::LineOp::Save)?;
         if a.has("--caches") {
             // A cache copy that a later cache fails to make leaves the earlier ones in the work folder.
+            repo.hold(repo.pin(&[&l.head, &repo.save_base(&l)?])?);
             if let Err(e) = prepare_caches(repo, &l, a.get("--cache")) {
                 repo.discard_prepared();
                 return Err(e);
@@ -346,6 +347,30 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
     if NOT_UNDOABLE.contains(&r.op.as_str()) {
         return Err(exit(1, format!("error: operation '{}' has nothing to undo", operation_name(&r.op))));
     }
+    // An operation with lines is undoable while its undo entry is in the undo.ops ring of its
+    // lines (docs/ownership.md). Past the ring, its states may be freed: say so, do not guess.
+    let ord = crate::owners::record_ord(&r);
+    let entries = crate::owners::undo_entries(&r, &ord);
+    if !entries.is_empty() {
+        let mut in_ring = false;
+        for (holder, _) in &entries {
+            in_ring |= repo.p.db.holder_exists("undo", holder)?;
+        }
+        if !in_ring {
+            return Err(exit(
+                1,
+                format!(
+                    "error: cannot undo: operation {} is past the newest {} operations of its line (undo.ops)",
+                    ids::short(&r.id),
+                    repo.p.config_u64("undo.ops", crate::owners::UNDO_OPS_DEFAULT as u64)
+                ),
+            ));
+        }
+    }
+    // The states that the undo reads stay on disk while it runs (every line's entry of the record).
+    let named: Vec<String> = crate::owners::undo_entries(&r, &crate::owners::record_ord(&r)).into_iter().flat_map(|(_, v)| v).collect();
+    let named: Vec<&str> = named.iter().map(String::as_str).collect();
+    repo.hold(repo.pin(&named)?);
     // Permissions: undo changes every line the operation changed, so the caller must be allowed
     // to change each of them. An operation without lines (tags, groups) needs the admin or the
     // user who made it.
@@ -505,7 +530,13 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
     needed.extend(["final_state", "staged_state"].iter().filter_map(|k| r.data.get(*k)?.as_str().map(str::to_string)));
     for s in &needed {
         repo.state_src(s).map_err(|e| {
-            exit(1, format!("error: cannot undo, no file changed: {e:#} (undo window: {} days)", repo.p.config_u64("undo.days", 7)))
+            exit(
+                1,
+                format!(
+                    "error: cannot undo, no file changed: {e:#} (the newest {} operations of a line can be undone)",
+                    repo.p.config_u64("undo.ops", crate::owners::UNDO_OPS_DEFAULT as u64)
+                ),
+            )
         })?;
     }
     // The lines with their restored head: their .git folders follow it after the record is made.
@@ -846,6 +877,8 @@ fn run_check_in(
     json: bool,
     view: Option<&crate::overlay::View>,
 ) -> Result<i32> {
+    // The check runs outside the store lock on this state: a free step must not remove it meanwhile.
+    let _pin = repo.pin(&[state])?;
     let layers = view.map(|v| v.layers.as_slice()).unwrap_or(&[]);
     with_try_copy(ctx, repo, state, layers, keep, |dir| {
         if !quiet {
@@ -935,298 +968,233 @@ pub fn try_command(
     Ok(status.code().unwrap_or(128))
 }
 
-/// Retention. Kept: line heads and their history, tags, remote refs, park entries, the newest
-/// export per branch, conflict sources, automatic states (the newest N per line and
-/// one per hour for a day), and every state that a record inside the undo window names.
-/// The automatic-state and undo-window rules do not keep an automatic state that a push already
-/// holds (`pushed_work`): only build output would go, and a build makes it again.
-/// `pushed` caches `pushed_work` answers: states never change, so a plan before the store lock
-/// answers most of them for the plan under it.
-/// Returns `(keep, delete, evict)`. `delete` holds the states nothing keeps and no store holds:
-/// their trees and records go. `evict` holds the states a store remote holds whose trees go
-/// while their records stay (`store_remote::restore_state` brings them back). A recoverable
-/// state stays on disk when it is a line head, the newest automatic state of a line, a state
-/// with caches, a state a cache overlay names, or (through `thin::delete_states`) a base that a
-/// state on disk needs. `evict` is empty unless `gc.evict` is on (`Project::gc_evicts`). With it
-/// off, a state that a store remote holds is kept with its history, so nothing is deleted for it.
-pub fn retention_plan(repo: &Repo, pushed: &mut BTreeMap<String, bool>) -> Result<(BTreeSet<String>, Vec<String>, Vec<String>)> {
+/// The owners check (docs/ownership.md): the stored table against a replay of the records, and
+/// the present states that no owner names (leaks). Pins are local and not compared.
+pub struct OwnersCheck {
+    /// The replay of the records: every owner row it gives.
+    pub want: Vec<crate::owners::Row>,
+    pub missing: Vec<crate::owners::Row>,
+    pub extra: Vec<crate::owners::Row>,
+    pub leaks: Vec<String>,
+}
+
+impl OwnersCheck {
+    fn clean(&self) -> bool {
+        self.missing.is_empty() && self.extra.is_empty() && self.leaks.is_empty()
+    }
+}
+
+fn owners_check(repo: &Repo) -> Result<OwnersCheck> {
+    let want = repo.p.db.recomputed_owners(&repo.p.store.machine.id)?;
+    let (missing, extra) = repo.p.db.owners_diff(&want)?;
+    let leaks = repo.p.db.leaked_states()?;
+    Ok(OwnersCheck { want, missing, extra, leaks })
+}
+
+/// The apparent size of the storage of states (trees and thin layers).
+fn states_bytes(repo: &Repo, states: &[String]) -> u64 {
+    states
+        .iter()
+        .map(|s| crate::cache_overlay::tree_size(&repo.p.state_path(s)) + crate::cache_overlay::tree_size(&repo.p.delta_path(s)))
+        .sum()
+}
+
+/// Run a read-only check in one read transaction (a snapshot in WAL mode). It takes no store
+/// lock: a lock would empty the trash at its end, which a check must not do.
+fn snapshot<T>(repo: &Repo, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    repo.p.db.conn.execute_batch("BEGIN")?;
+    let v = f();
+    let _ = repo.p.db.conn.execute_batch("COMMIT");
+    v
+}
+
+/// `layr gc` (check): exit 1 when the table and the records differ, or a state has no owner.
+/// The lines name what `layr gc --repair` does.
+fn check(ctx: &Ctx, repo: &Repo, quiet: bool) -> Result<i32> {
+    let c = snapshot(repo, || owners_check(repo))?;
+    if !quiet {
+        outln!(ctx, "owners: {} missing, {} extra", c.missing.len(), c.extra.len());
+        for (s, k, h) in c.missing.iter().take(5) {
+            outln!(ctx, "\tmissing: {} {k} {h}", ids::short(s));
+        }
+        for (s, k, h) in c.extra.iter().take(5) {
+            outln!(ctx, "\textra: {} {k} {h}", ids::short(s));
+        }
+    }
+    if !c.leaks.is_empty() {
+        let bytes = states_bytes(repo, &c.leaks);
+        outln!(
+            ctx,
+            "leaks: {} state(s), {} would be freed by `layr gc --repair`",
+            c.leaks.len(),
+            human_size(bytes)
+        );
+    }
+    if c.clean() {
+        if !quiet {
+            outln!(ctx, "owners ok");
+        }
+        return Ok(0);
+    }
+    Ok(1)
+}
+
+/// Eviction (`gc.evict on`, docs/ownership.md, "States that a store remote holds"): a state that a
+/// store remote holds loses its local tree when no strong local owner keeps it. Its record stays;
+/// a read fetches the tree back. A state that a cache overlay names, a state with caches, and
+/// the bases of layers that stay are kept. Off by default: nothing is evicted then.
+fn evict_stored(repo: &Repo) -> Result<Vec<String>> {
+    if !repo.p.gc_evicts() {
+        return Ok(vec![]);
+    }
     let db = &repo.p.db;
-    let mut held = |id: &str| -> Result<bool> {
-        if let Some(v) = pushed.get(id) {
-            return Ok(*v);
-        }
-        let v = pushed_work(repo, id)?;
-        pushed.insert(id.to_string(), v);
-        Ok(v)
-    };
-    let mut roots: Vec<String> = Vec::new();
-    let now = ids::now_ms();
-    let keep_auto = repo.p.config_u64("retention.auto", 50) as usize;
-    let hourly = repo.p.config_u64("retention.hours", 24) as i64;
-    let undo_days = repo.p.config_u64("undo.days", 7) as i64;
-    let mut keep: BTreeSet<String> = BTreeSet::new();
-    // States that stay on disk even when a store holds them.
-    let mut must: BTreeSet<String> = BTreeSet::new();
-    for l in db.lines()? {
-        roots.push(l.head.clone());
-        must.insert(l.head.clone());
-        for (_, h) in db.line_heads(&l.id)? {
-            must.insert(h.clone());
-            roots.push(h);
-        }
-        let autos = db.line_states(&l.id, StateKind::Auto)?;
-        let mut buckets: BTreeSet<i64> = BTreeSet::new();
-        for (i, s) in autos.iter().enumerate() {
-            // The newest automatic state of a line stays: it is the line's latest undo point.
-            if i == 0 {
-                must.insert(s.id.clone());
-            }
-            if i > 0 && held(&s.id)? {
-                continue;
-            }
-            if i < keep_auto {
-                keep.insert(s.id.clone());
-            } else if now - s.time < hourly * 3600 * 1000 && buckets.insert(s.time / 3_600_000) {
-                keep.insert(s.id.clone());
-            }
-        }
-        for s in db.line_states(&l.id, StateKind::Stash)? {
-            roots.push(s.id);
-        }
-    }
-    for r in db.refs("", now)? {
-        roots.push(r.target);
-    }
-    for (_, s, _) in db.tags()? {
-        roots.push(s);
-    }
-    for (_, s, _) in db.remote_refs()? {
-        roots.push(s);
-    }
-    let mut newest_export: BTreeMap<(String, String), String> = BTreeMap::new();
-    for (_, st, remote, branch, _, _) in db.exports()? {
-        newest_export.insert((remote, branch), st);
-    }
-    roots.extend(newest_export.into_values());
-    for r in db.records_since(now - undo_days * 86400 * 1000)? {
-        if let Some(v) = r.data.get("ref_change") {
-            let ch: crate::model::RefChange = serde_json::from_value(v.clone())?;
-            for position in [ch.before, ch.after].into_iter().flatten() {
-                if position.expires_at.map(|t| t > now).unwrap_or(true) {
-                    keep.insert(position.target);
-                }
-            }
-        }
-        for s in &r.states {
-            if !held(&s.id)? {
-                keep.insert(s.id.clone());
-            }
-        }
-        for ch in r.lines.values() {
-            for x in [ch.before.as_ref().map(|b| b.head.clone()), ch.after.as_ref().map(|b| b.head.clone())].into_iter().flatten() {
-                keep.insert(x);
-            }
-            for x in [ch.working_before.clone(), ch.working_after.clone()].into_iter().flatten() {
-                if !held(&x)? {
-                    keep.insert(x);
-                }
-            }
-        }
-    }
-    let copies = crate::store_remote::store_copies(repo)?;
-    let evict_on = repo.p.gc_evicts();
-    if !evict_on {
-        // With eviction off, a state that a store holds is a root: it stays with its history.
-        for (id, _) in db.present_states()? {
-            if copies.contains_key(&id) {
-                roots.push(id);
-            }
-        }
-    }
-    // History of every root.
-    let mut stack = roots;
-    while let Some(x) = stack.pop() {
-        if !keep.insert(x.clone()) && repo.p.has_state(&x) {
-            // Already kept: its parents were or will be visited from the first insert.
-        }
-        if let Some(s) = db.state(&x)? {
-            for p in s.parents.iter().chain(s.derived_from.iter()) {
-                if !keep.contains(p) {
-                    stack.push(p.clone());
-                }
-            }
-            for c in &s.conflicts {
-                for y in [&c.base, &c.ours, &c.theirs].into_iter().flatten() {
-                    keep.insert(y.clone());
-                }
-            }
-        }
-    }
-    // States reachable from kept states (an automatic state's parent is a state).
-    let kept: Vec<String> = keep.iter().cloned().collect();
-    for k in kept {
-        if let Some(s) = db.state(&k)? {
-            let mut stack: Vec<String> = s.parents.iter().chain(s.derived_from.iter()).cloned().collect();
-            while let Some(p) = stack.pop() {
-                if keep.insert(p.clone()) {
-                    if let Some(ps) = db.state(&p)? {
-                        stack.extend(ps.parents);
-                        stack.extend(ps.derived_from);
-                    }
-                }
-            }
-        }
-    }
-    // A cache overlay names project states through its heads and records. An error here stops the
-    // plan: nothing is evicted on a guess.
+    // A cache overlay names project states through its heads and records: they stay.
+    let mut named: BTreeSet<String> = BTreeSet::new();
     for name in repo.overlay_names()? {
         let overlay = repo.overlay_repo(&name)?;
         for line in overlay.p.db.lines()? {
-            must.insert(line.head);
+            named.insert(line.head);
         }
         for raw in overlay.p.db.all_lines()? {
             for token in raw.split(|c: char| !c.is_ascii_hexdigit()).filter(|t| t.len() == 32) {
-                if db.state(token)?.is_some() {
-                    must.insert(token.to_string());
-                }
+                named.insert(token.to_string());
             }
         }
     }
-    let mut delete = Vec::new();
+    let mut st = db.conn.prepare(
+        "SELECT s.id FROM states s WHERE s.present=1 AND s.deleted=0
+         AND EXISTS (SELECT 1 FROM owners o WHERE o.state=s.id AND o.kind='store')
+         AND NOT EXISTS (SELECT 1 FROM owners o WHERE o.state=s.id
+            AND o.kind IN ('head','auto','undo','deleted','park','overlay','pin'))",
+    )?;
+    let rows: Vec<String> = st.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
+    drop(st);
+    let copies = crate::store_remote::store_copies(repo)?;
     let mut evict = Vec::new();
-    for (id, _) in db.present_states()? {
-        // A state whose tree the store format cannot restore exactly stays on disk.
-        if !keep.contains(&id) {
-            if !copies.contains_key(&id) {
-                delete.push(id);
-            } else if evict_on && crate::store_remote::restorable(repo, &id)? {
-                evict.push(id);
-            }
-        } else if evict_on
-            && copies.contains_key(&id)
-            && !must.contains(&id)
-            && repo.p.has_state(&id)
-            && db.state(&id)?.is_some_and(|s| s.caches.is_empty())
-            && crate::store_remote::restorable(repo, &id)?
-        {
+    for id in rows {
+        let plain = db.state(&id)?.is_some_and(|s| s.caches.is_empty());
+        // A copy counts only on the store the remote names now and readable here (`store_copies`),
+        // and only a tree that the store format can restore exactly goes (`restorable`).
+        if plain && !named.contains(&id) && copies.contains_key(&id) && crate::store_remote::restorable(repo, &id)? {
             evict.push(id);
         }
     }
-    Ok((keep, delete, evict))
+    let gone = repo.p.delete_states(&evict);
+    for id in &evict {
+        if gone.contains(id) && !repo.p.has_state(id) {
+            db.set_present(id, false)?;
+        }
+    }
+    Ok(gone)
 }
 
-/// True for an automatic state without caches whose parent has a git commit (pushed or imported)
-/// and whose paths that are not ignored equal that parent: a push holds all its work.
-fn pushed_work(repo: &Repo, id: &str) -> Result<bool> {
-    let Some(s) = repo.p.db.state(id)? else { return Ok(false) };
-    if s.kind != StateKind::Auto || !s.caches.is_empty() || !repo.p.has_state(id) {
-        return Ok(false);
-    }
-    // The parent holds all the work of the state when only ignored files (build output) differ;
-    // the parent stays as long as anything names it, pushed or not.
-    let Some(parent) = s.parents.first() else { return Ok(false) };
-    if !repo.p.has_state(parent) {
-        return Ok(false);
-    }
-    Ok(repo.unsaved_paths(parent, &s)?.is_empty())
+/// The periodic repair of a project (`service.rs`): it prints nothing.
+pub fn gc_repair_quiet(ctx: &Ctx, repo: &Repo) -> Result<usize> {
+    repair_project(ctx, repo, false, true, false)
 }
 
-/// Shadow mode (docs/ownership.md): how the owners table differs from the plan. Frees nothing.
-fn owners_difference(ctx: &Ctx, repo: &Repo, keep: &BTreeSet<String>, delete: &[String]) -> Result<()> {
-    let (frees, unowned) = repo.p.db.owners_difference(keep, delete)?;
-    outln!(ctx, "owners: plan frees {} state(s) that owners keep", frees.len());
-    for (id, kinds) in frees.iter().take(10) {
-        outln!(ctx, "\t{} kept by {kinds}", ids::short(id));
+/// Replace the owners table with the replay of the records (live pins kept) and mark the leaked
+/// states dead. Returns the leaks. The caller holds the project lock.
+/// `free` frees the leaked states too. Only an explicit `gc --repair` does: a state that a command
+/// has recorded but not yet given an owner looks like a leak for a moment (a periodic pass would
+/// free it under the command).
+pub fn repair_table(repo: &Repo, free: bool) -> Result<Vec<String>> {
+    let c = owners_check(repo)?;
+    let mut want = c.want.clone();
+    for (state, kind, holder) in repo.p.db.owner_rows()?.into_iter().filter(|r| r.1 == "pin") {
+        if crate::free::holder_alive(&holder) {
+            want.push((state, kind, holder));
+        }
     }
-    outln!(ctx, "owners: plan keeps {} state(s) that no owner names", unowned.len());
-    for id in unowned.iter().take(10) {
-        outln!(ctx, "\t{}", ids::short(id));
+    repo.p.db.replace_owners(&want)?;
+    let leaks = repo.p.db.leaked_states()?;
+    if free {
+        repo.p.db.free_leaks(&leaks)?;
     }
-    Ok(())
+    Ok(leaks)
 }
 
-pub fn run_gc(ctx: &Ctx, repo: &Repo, dry: bool) -> Result<Vec<String>> {
-    // The comparisons of automatic states with their parents take seconds to minutes: a first
-    // plan without the lock makes them, and the plan under the lock reuses them.
-    let mut pushed = BTreeMap::new();
-    let (keep, delete, evict) = retention_plan(repo, &mut pushed)?;
+/// `layr gc --repair`: the owners table becomes the replay (plus the live pins), the leaked
+/// states are freed, expired refs are released and the side caches are trimmed. The storage of
+/// the freed states moves after the lock (`free::finish_project`), then the trash is emptied.
+/// With `dry`, nothing changes: it prints what it would free.
+fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) -> Result<usize> {
     if dry {
-        owners_difference(ctx, repo, &keep, &delete)?;
-        return Ok(delete.into_iter().chain(evict).collect());
-    }
-    let _lock = repo.p.lock()?;
-    let (keep, delete, evict) = retention_plan(repo, &mut pushed)?;
-    owners_difference(ctx, repo, &keep, &delete)?;
-    for expired in repo.p.db.expired_refs(ids::now_ms())? {
-        let mut rec = Record::new("ref.expire");
-        rec.data = serde_json::json!({"ref_change": crate::model::RefChange { name:expired.name.clone(),before:Some(expired),after:None }});
-        repo.commit_record(ctx, rec)?;
-    }
-    // Cache snapshots of a state that goes (deleted or evicted) go with it: `excess_caches` only
-    // looks at present states.
-    for id in delete.iter().chain(evict.iter()) {
-        let s = repo.p.db.state(id)?;
-        if let Some(s) = &s {
-            for snap in s.caches.values() {
-                let _ = repo.p.trash(&repo.p.cache_path(id, snap));
+        let c = snapshot(repo, || owners_check(repo))?;
+        let queued: Vec<String> = repo.p.db.queued_frees()?;
+        let bytes = states_bytes(repo, &c.leaks);
+        if !quiet {
+            outln!(ctx, "would delete {} state(s), {}", c.leaks.len() + queued.len(), human_size(bytes));
+            for id in c.leaks.iter().take(50) {
+                outln!(ctx, "\t{}", ids::short(id));
+            }
+            let caches = excess_caches(repo)?;
+            outln!(ctx, "would delete {} cache(s)", caches.len());
+            for (_, name) in caches.iter().take(50) {
+                outln!(ctx, "\t{name}");
             }
         }
+        return Ok(c.leaks.len());
     }
-    let removed: Vec<String> = delete.iter().chain(evict.iter()).cloned().collect();
-    let gone = repo.p.delete_states(&removed);
-    // Saved overlap compares of states that are gone (radar.rs).
-    let _ = repo.prune_compares();
-    // An evicted state keeps its record and reads as not present. A state whose tree stays as a
-    // base of another state on disk keeps its present flag.
-    for id in &evict {
-        if !repo.p.has_state(id) {
-            repo.p.db.set_present(id, false)?;
+    let leaks = {
+        let _lock = repo.p.lock()?;
+        let leaks = repair_table(repo, free)?;
+        evict_stored(repo)?;
+        for expired in repo.p.db.expired_refs(ids::now_ms())? {
+            let mut rec = Record::new("ref.expire");
+            rec.data = serde_json::json!({"ref_change": crate::model::RefChange { name:expired.name.clone(),before:Some(expired),after:None }});
+            repo.commit_record(ctx, rec)?;
         }
-    }
-    // Only the states that nothing can fetch are named by the gc record (`deleted`).
-    let deleted: Vec<String> = delete.iter().filter(|id| gone.contains(id)).cloned().collect();
-    let caches = trash_excess_caches(repo)?;
-    // Cache overlay lines of deleted lines: their states go below (docs/cache-overlays.md).
-    if let Err(e) = repo.drop_orphan_cache_lines(ctx) {
-        eprintln!("warning: cache overlay lines of deleted lines stay until the next gc: {e:#}");
-    }
-    // Overlays with a history limit and folder overlays with an LRU limit (docs/cache-overlays.md).
-    for name in repo.overlay_names()? {
-        repo.after_overlay_move(ctx, &name);
-    }
-    if let Err(e) = repo.cache_gc_lru() {
-        eprintln!("warning: cache size limits not applied: {e:#}");
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let lines = repo.lines()?;
-        let heads: BTreeSet<String> = lines.iter().map(|l| l.head.clone()).collect();
-        let done = crate::thin::upkeep(&repo.p, &heads)?;
-        // Saved statuses of lines that are gone.
-        let ids: BTreeSet<String> = lines.iter().map(|l| format!("{}.cache", l.id)).collect();
-        if let Ok(rd) = std::fs::read_dir(repo.p.meta_dir().join("status")) {
-            for e in rd.flatten() {
-                if !ids.contains(&e.file_name().to_string_lossy().into_owned()) {
-                    let _ = std::fs::remove_file(e.path());
+        // Cache snapshots beyond `retention.caches` (build output; the states stay).
+        let caches = trash_excess_caches(repo)?;
+        if !caches.is_empty() {
+            let mut rec = Record::new("gc");
+            rec.data = serde_json::json!({"deleted": [], "caches": caches});
+            repo.commit_record(ctx, rec)?;
+        }
+        // Cache overlay lines of deleted lines: their states go below (docs/cache-overlays.md).
+        if let Err(e) = repo.drop_orphan_cache_lines(ctx) {
+            eprintln!("warning: cache overlay lines of deleted lines stay until the next gc: {e:#}");
+        }
+        // Overlays with a history limit and folder overlays with an LRU limit (docs/cache-overlays.md).
+        for name in repo.overlay_names()? {
+            repo.after_overlay_move(ctx, &name);
+        }
+        if let Err(e) = repo.cache_gc_lru() {
+            eprintln!("warning: cache size limits not applied: {e:#}");
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let lines = repo.lines()?;
+            let heads: BTreeSet<String> = lines.iter().map(|l| l.head.clone()).collect();
+            let done = crate::thin::upkeep(&repo.p, &heads)?;
+            // Saved statuses of lines that are gone.
+            let ids: BTreeSet<String> = lines.iter().map(|l| format!("{}.cache", l.id)).collect();
+            if let Ok(rd) = std::fs::read_dir(repo.p.meta_dir().join("status")) {
+                for e in rd.flatten() {
+                    if !ids.contains(&e.file_name().to_string_lossy().into_owned()) {
+                        let _ = std::fs::remove_file(e.path());
+                    }
                 }
             }
+            if done.views + done.keyframes + done.deleted > 0 {
+                eprintln!(
+                    "thin states: {} view(s) removed, {} complete tree(s) made, {} kept base(s) deleted",
+                    done.views, done.keyframes, done.deleted
+                );
+            }
         }
-        if done.views + done.keyframes + done.deleted > 0 {
-            eprintln!(
-                "thin states: {} view(s) removed, {} complete tree(s) made, {} kept base(s) deleted",
-                done.views, done.keyframes, done.deleted
-            );
+        repo.prune_all_bases()?;
+        if crate::gitbridge::has_store(repo) {
+            crate::gitbridge::prune_indexes(repo)?;
         }
-    }
-    repo.prune_all_bases()?;
-    if crate::gitbridge::has_store(repo) {
-        crate::gitbridge::prune_indexes(repo)?;
-    }
-    if !deleted.is_empty() || !caches.is_empty() {
-        let mut rec = Record::new("gc");
-        rec.data = serde_json::json!({"deleted": deleted, "caches": caches});
-        repo.commit_record(ctx, rec)?;
-    }
+        // Saved overlap compares of states that are gone (radar.rs).
+        let _ = repo.prune_compares();
+        leaks
+    };
+    // The storage of the freed states: the leaks above and states that died before this repair.
+    let freed = crate::free::finish_project(&repo.p)?;
+    crate::store::empty_trash(&repo.p.store.trash_dir(), None);
     // Temporary objects whose creator is gone, and old ones without a creator pid. A live
     // creator keeps its object: a copy has the times of its source, so its age says nothing.
     for d in [repo.p.scan_dir(), repo.p.work_dir()] {
@@ -1256,7 +1224,10 @@ pub fn run_gc(ctx: &Ctx, repo: &Repo, dry: bool) -> Result<Vec<String>> {
     }
     #[cfg(target_os = "macos")]
     crate::storage::prune_saved_scans(&repo.p.dir)?;
-    Ok(removed)
+    if !quiet {
+        outln!(ctx, "freed {freed} state(s), {} leaked", leaks.len());
+    }
+    Ok(freed)
 }
 
 /// Cache snapshots (build output) are large and only the newest ones warm new lines: they stay
@@ -1302,10 +1273,10 @@ fn gc_all_projects(ctx: &Ctx, dry: bool, quiet: bool) -> Result<i32> {
     for name in ctx.store.project_names()?.into_iter().filter(|n| !n.contains('%')) {
         let result = Repo::open(ctx, &name).and_then(|repo| {
             repo.require(ctx, "gc")?;
-            run_gc(ctx, &repo, dry)
+            repair_project(ctx, &repo, dry, true, false)
         });
         match result {
-            Ok(removed) if !quiet => outln!(ctx, "{name}: {} state(s)", removed.len()),
+            Ok(freed) if !quiet => outln!(ctx, "{name}: {freed} state(s)"),
             Ok(_) => {}
             Err(e) => {
                 eprintln!("layr gc ({name}): {e:#}");
@@ -1321,7 +1292,7 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if args.iter().any(|v| v == "--remote" || v.starts_with("--remote=")) {
         return crate::store_remote::command(ctx, "gc", args);
     }
-    let spec = Spec::new().flag("-n|--dry-run").flag("-q|--quiet").flag("--dedup").flag("--all-projects");
+    let spec = Spec::new().flag("-n|--dry-run").flag("-q|--quiet").flag("--repair").flag("--dedup").flag("--all-projects");
     let a = parse(&spec, args)?;
     if a.has("--all-projects") {
         let code = gc_all_projects(ctx, a.has("-n"), a.has("-q"))?;
@@ -1330,29 +1301,90 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let h = here(ctx)?;
     h.repo.require(ctx, "gc")?;
-    let v = run_gc(ctx, &h.repo, a.has("-n"))?;
+    let code = if a.has("--repair") {
+        repair_project(ctx, &h.repo, a.has("-n"), a.has("-q"), true)?;
+        // Trees of imported states that no strong owner keeps: git builds them again on read.
+        let built = repair_built(&h.repo, a.has("-n"))?;
+        if !a.has("-q") {
+            let verb = if a.has("-n") { "would free" } else { "freed" };
+            outln!(ctx, "{verb} {} built Git state(s) (rebuilt on read)", built.len());
+            for id in built.iter().take(50) {
+                outln!(ctx, "\t{}", ids::short(id));
+            }
+        }
+        0
+    } else {
+        check(ctx, &h.repo, a.has("-q"))?
+    };
     // After the project lock is released: hashing and comparing cache files takes long.
     let shared = if a.has("--dedup") { Some(crate::dedup::run(&h.repo, a.has("-n"))?) } else { None };
     if !a.has("-q") {
-        let verb = if a.has("-n") { "would delete" } else { "deleted" };
-        outln!(ctx, "{verb} {} state(s)", v.len());
-        for id in v.iter().take(50) {
-            outln!(ctx, "\t{}", ids::short(id));
-        }
-        if a.has("-n") {
-            let caches = excess_caches(&h.repo)?;
-            outln!(ctx, "would delete {} cache(s)", caches.len());
-            for (_, name) in caches.iter().take(50) {
-                outln!(ctx, "\t{name}");
-            }
-        }
         if let Some(r) = shared {
             let verb = if a.has("-n") { "would share" } else { "shared" };
             outln!(ctx, "{verb} {} of disk in {} cache file(s), {:.1} s", human_size(r.bytes), r.files, r.seconds);
         }
     }
     print_trash_errors(&ctx.store);
-    Ok(0)
+    Ok(code)
+}
+
+/// Owner kinds that keep the tree of a state (docs/ownership.md, "Storage that a live state
+/// needs"). `parent`, `derived`, `ref`, `tag`, `remote-ref` and `export` keep only the record.
+/// `conflict` is kept too: a conflict needs the trees of its base, ours and theirs.
+const TREE_OWNERS: [&str; 8] = ["head", "auto", "undo", "deleted", "park", "overlay", "pin", "conflict"];
+
+/// `gc --repair`: frees the trees of imported states that no owner keeps, and that git can build
+/// again (`gitbridge::build_tree`). A dry run lists them and frees nothing.
+fn repair_built(repo: &Repo, dry: bool) -> Result<Vec<String>> {
+    let _lock = (!dry).then(|| repo.p.lock()).transpose()?;
+    let freed = drop_built_imports(repo, dry)?;
+    if !dry && !freed.is_empty() {
+        repo.prune_all_bases()?;
+    }
+    Ok(freed)
+}
+
+/// Rounds of freeing: a round frees the states that no owner keeps and no present layer uses as
+/// its base. A base is freed in a later round, after its layers went.
+fn drop_built_imports(repo: &Repo, dry: bool) -> Result<Vec<String>> {
+    let mut freed = Vec::new();
+    loop {
+        let kept: BTreeSet<String> = repo
+            .p
+            .db
+            .owner_rows()?
+            .into_iter()
+            .filter(|(_, kind, _)| TREE_OWNERS.contains(&kind.as_str()))
+            .map(|(state, _, _)| state)
+            .collect();
+        let bases: BTreeSet<String> = repo.p.db.present_layer_bases()?.into_iter().collect();
+        let mut round = Vec::new();
+        for (id, _) in repo.p.db.present_states()? {
+            if !kept.contains(&id) && !bases.contains(&id) && crate::gitbridge::buildable(repo, &id) {
+                round.push(id);
+            }
+        }
+        if round.is_empty() {
+            break;
+        }
+        if dry {
+            freed.extend(round);
+            break;
+        }
+        repo.p.delete_states(&round);
+        let mut gone = Vec::new();
+        for id in round {
+            if !repo.p.has_state(&id) {
+                repo.p.db.set_present(&id, false)?;
+                gone.push(id);
+            }
+        }
+        if gone.is_empty() {
+            break;
+        }
+        freed.extend(gone);
+    }
+    Ok(freed)
 }
 
 /// Print the trash entries that the last emptying could not delete (`<store>/trash.errors`).
@@ -1395,21 +1427,21 @@ pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
             outln!(ctx, "records: {err:#}");
         }
     }
-    // Owners (shadow mode, docs/ownership.md): the table must equal the replay of the records.
-    let want = repo.p.db.recomputed_owners(&repo.p.store.machine.id)?;
-    let (missing, extra) = repo.p.db.owners_diff(&want)?;
-    if !missing.is_empty() || !extra.is_empty() {
+    // Owners (docs/ownership.md): the table must equal the replay of the records, and every
+    // present state needs an owner. The same check as `layr gc`.
+    let c = owners_check(repo)?;
+    if !c.clean() {
         problems += 1;
-        outln!(ctx, "owners differ from the records: {} missing, {} extra", missing.len(), extra.len());
-        for (s, k, h) in missing.iter().take(5) {
+        outln!(ctx, "owners differ from the records: {} missing, {} extra, {} leaked", c.missing.len(), c.extra.len(), c.leaks.len());
+        for (s, k, h) in c.missing.iter().take(5) {
             outln!(ctx, "\tmissing: {} {k} {h}", ids::short(s));
         }
-        for (s, k, h) in extra.iter().take(5) {
+        for (s, k, h) in c.extra.iter().take(5) {
             outln!(ctx, "\textra: {} {k} {h}", ids::short(s));
         }
         if a.has("--repair") {
-            repo.p.db.replace_owners(&want)?;
-            outln!(ctx, "owners rewritten from the records");
+            repair_table(repo, true)?;
+            outln!(ctx, "owners rewritten from the records; leaked states marked for freeing");
         }
     }
     // Snapshots without a record: a save that stopped between its snapshot and its record.
@@ -1736,7 +1768,9 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 .find(|(b, _)| b == &format!("origin/{branch}") || b.ends_with(&format!("/{branch}")))
                 .map(|x| x.1.clone());
             let state = state.ok_or_else(|| exit(128, format!("fatal: remote has no branch '{branch}'")))?;
-            let (st, _) = crate::gitbridge::import_commit(ctx, &repo, &state, &format!("origin/{branch}"), owner, None)?;
+            let (st, _) = crate::gitbridge::import_commit(ctx, &repo, &state, &format!("origin/{branch}"), owner)?;
+            // The line starts at this commit: its tree is built now (the others are built on read).
+            crate::gitbridge::build_tree(&repo, &st, None)?;
             drop(cleanup);
             return finish(st);
         }
@@ -1779,8 +1813,9 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
                     let _t2 = crate::repo::Temp { path: tmp.clone() };
                     copy_folder(ctx, &src, &tmp, a.has("--include-ignored"), Some(&tracked))?;
                     let snap = repo.temp_snapshot(&tmp, true)?;
-                    let (st, _) =
-                        crate::gitbridge::import_commit(ctx, &repo, &head, &format!("local/{branch}"), owner, Some(&snap.path))?;
+                    let (st, _) = crate::gitbridge::import_commit(ctx, &repo, &head, &format!("local/{branch}"), owner)?;
+                    // The line starts at the HEAD commit: its tree is built now, from the folder copy.
+                    crate::gitbridge::build_tree(&repo, &st, Some(&snap.path))?;
                     parents.push(st.clone());
                     // The folder content on top (unsaved changes, if any).
                     btrfs::delete_tree(&work)?;
@@ -1885,7 +1920,16 @@ fn default_branch(repo: &Repo) -> Option<String> {
     names.first().map(|s| s.to_string())
 }
 
+/// Settings that the owners model replaced (docs/ownership.md): the replacement is named.
+pub const REMOVED_KEYS: &[(&str, &str)] = &[
+    ("undo.days", "undo.ops (records per line, default 20)"),
+    ("retention.hours", "retention.auto (automatic states per line, default 10)"),
+];
+
 pub fn set_config(ctx: &Ctx, repo: &Repo, key: &str, value: serde_json::Value) -> Result<()> {
+    if let Some((_, new)) = REMOVED_KEYS.iter().find(|(old, _)| *old == key) {
+        return Err(exit(1, format!("error: {key} was removed; use {new}")));
+    }
     if key == Project::GC_EVICT_KEY &&!value.is_null() && !matches!(value.as_str(), Some("on" | "off")) {
         return Err(exit(1, format!("{key} is on or off")));
     }

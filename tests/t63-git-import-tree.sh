@@ -37,9 +37,6 @@ git push -q origin --all
 cd $P/main
 l git fetch -q origin
 eq "every commit is imported" "$(git -C $U rev-list --count main)" "$(l log --format=%s origin/main | wc -l | tr -d ' ')"
-if [ "$(uname -s)" = Darwin ]; then
-    ok "imported states are thin layers over their parents" test "$(ls $LAYR_ROOT/projects/it/deltas | wc -l)" -ge 8
-fi
 
 # The tree of a line made from an imported state, as `git ls-tree -r` lists it.
 listing() { # listing <folder>: "mode oid path" of files and links, "160000 - path" of empty folders
@@ -60,6 +57,10 @@ for c in $(git -C $U rev-list main side side2 | sort -u); do
     (cd $P/main && l line new -q chk$n $c) || { echo "FAIL line for $c"; FAIL=$((FAIL + 1)); continue; }
     eq "tree of imported commit $(git -C $U log -1 --format=%s $c) equals git ls-tree" "$(expected $c)" "$(listing $P/chk$n | sort -k3)"
 done
+# Imported commits are records; a tree is built when a line reads it, as a thin layer on APFS.
+if [ "$(uname -s)" = Darwin ]; then
+    ok "built imported states are thin layers over their parents" test "$(ls $LAYR_ROOT/projects/it/deltas | wc -l)" -ge 8
+fi
 
 # A second fetch builds on states that earlier layers hold.
 cd $U; git checkout -q main; echo late > late.txt; git add late.txt; git commit -qm late; git push -q origin main

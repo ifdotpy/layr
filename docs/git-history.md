@@ -2,15 +2,21 @@
 
 `layr git clone`, `layr init --git`, and `layr git fetch` import every commit
 reachable from each selected branch. Each imported commit has an `import` state
-with the same ordered parents and file tree. Merges remain merges. Repeating an
-import reuses completed states.
+with the same ordered parents. Merges remain merges. Repeating an import reuses
+completed states. An import writes records only. The file tree of an imported
+state is built from git when a command reads it, and the line that starts at a
+commit builds it at once (`docs/ownership.md`, "States imported from Git").
 
 An import record contains the original commit ID and base64-encoded raw commit
 object, including author, committer, timezones, signatures, encoding headers and
 message bytes. It also contains raw tree objects absent from its first parent's
 tree. Existing signed records and age encryption carry this metadata through
 store push, fetch and clone. File content uses the existing state transfer path.
-The local bare Git repository is a cache of these objects.
+The local bare Git repository holds the objects that build the trees of imported
+states. It is the source of those trees, not a cache of the state files. A store
+push sends the Git objects of the imported commits as Git packs, and a fetch or
+clone installs them, so a clone builds imported states without the Git remote
+(`docs/remote-format.md`, "Git packs").
 
 On another machine, the bridge restores the tree objects, recreates missing blobs
 from state files, and checks their Git hashes before writing the original commit

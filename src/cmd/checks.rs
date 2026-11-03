@@ -293,7 +293,7 @@ fn scan(ctx: &Ctx, repo: &Repo, privileged_only: bool) -> Result<Scan> {
             continue;
         }
         // Collected sources have metadata but cannot be executed. Never attest them as passing.
-        if !repo.p.has_state(&state) {
+        if !repo.tree_available(&state) {
             eprintln!("layr checks: source unavailable for {state} ({name})");
             continue;
         }

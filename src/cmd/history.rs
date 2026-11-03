@@ -176,12 +176,32 @@ fn is_rev(repo: &Repo, line: Option<&Line>, s: &str) -> bool {
     revs::resolve(repo, line, s).is_ok()
 }
 
+/// Pin the saved states that a read names (and the head of its line): they stay on disk for the
+/// command, so a free step of another command cannot remove them while the read runs. A name that
+/// does not resolve is left to the read's own error.
+fn pin_revs(repo: &Repo, line: Option<&Line>, names: &[String]) -> Result<crate::free::Pin> {
+    let mut ids: Vec<String> = line.map(|l| vec![l.head.clone()]).unwrap_or_default();
+    for name in names {
+        let rev = name.split_once(':').map_or(name.as_str(), |(r, _)| r);
+        let rev = if rev.is_empty() { "head" } else { rev };
+        for part in rev.split("...").flat_map(|s| s.split("..")) {
+            let part = if part.is_empty() { "head" } else { part };
+            if let Ok(id) = revs::resolve(repo, line, part) {
+                ids.push(id);
+            }
+        }
+    }
+    let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+    repo.pin(&refs)
+}
+
 pub fn diff(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let a = parse(&diff_spec(), args)?;
     let h = here(ctx)?;
     let repo = &h.repo;
     let line = h.line.clone();
     let (revs_v, paths) = split_revs(repo, line.as_ref(), &a)?;
+    repo.hold(pin_revs(repo, line.as_ref(), &revs_v)?);
     for rev in &revs_v {
         for part in rev.split("...").flat_map(|s| s.split("..")) {
             let id = revs::resolve(repo, line.as_ref(), if part.is_empty() { "head" } else { part })?;
@@ -192,10 +212,7 @@ pub fn diff(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let cached = a.has("--cached");
     let opts = DiffOpts::from(&a, true)?;
     let mut keep: Vec<Temp> = Vec::new();
-    let resolve = |r: &str| -> Result<Snap> {
-        let id = revs::resolve(repo, line.as_ref(), if r.is_empty() { "head" } else { r })?;
-        repo.state_src(&id)
-    };
+    let resolve_id = |r: &str| revs::resolve(repo, line.as_ref(), if r.is_empty() { "head" } else { r });
     // (old root, new root, new side is the working content, index for tracked check)
     let mut index_root: Option<Snap> = None;
     let needs_working_view = revs_v.is_empty() || (revs_v.len() == 1 && !revs_v[0].contains(".."));
@@ -226,9 +243,13 @@ pub fn diff(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 let xi = revs::resolve(repo, line.as_ref(), if x.is_empty() { "head" } else { x })?;
                 let yi = revs::resolve(repo, line.as_ref(), if y.is_empty() { "head" } else { y })?;
                 let b = repo.merge_base(&xi, &yi)?.ok_or_else(|| anyhow::anyhow!("no merge base"))?;
-                (repo.state_src(&b)?, repo.state_src(&yi)?, false)
+                let (o, n, k) = pair_of(repo, &b, &yi)?;
+                keep.extend(k);
+                (o, n, false)
             } else if let Some((x, y)) = r.split_once("..") {
-                (resolve(x)?, resolve(y)?, false)
+                let (o, n, k) = pair_of(repo, &resolve_id(x)?, &resolve_id(y)?)?;
+                keep.extend(k);
+                (o, n, false)
             } else if let Some(filtered) = &filtered {
                 let l = h.line()?;
                 let id = revs::resolve(repo, line.as_ref(), r)?;
@@ -266,7 +287,11 @@ pub fn diff(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 }
             }
         }
-        _ => (resolve(&revs_v[0])?, resolve(&revs_v[1])?, false),
+        _ => {
+            let (o, n, k) = pair_of(repo, &resolve_id(&revs_v[0])?, &resolve_id(&revs_v[1])?)?;
+            keep.extend(k);
+            (o, n, false)
+        }
     };
     // The files of quiet overlays stay out of a diff of the working content or the index.
     let quiet_paths = match (&line, revs_v.len()) {
@@ -552,20 +577,90 @@ fn medium(s: &StateRec, decor: &Decor, date_style: &str, kind_note: bool, human:
 }
 
 /// Changes of a state against its first parent (all files for a root state).
-fn state_changes(repo: &Repo, s: &StateRec) -> Result<(Snap, Option<Temp>, Snap, Vec<Change>)> {
+/// The two sides of a comparison of two states. Imported states that are not on disk are read from
+/// git (`gitbridge::sparse_pair`): the sides hold the paths that differ, and no tree is built.
+fn pair_of(repo: &Repo, a: &str, b: &str) -> Result<(Snap, Snap, Vec<Temp>)> {
+    if !(repo.p.has_state(a) && repo.p.has_state(b)) {
+        if let (Some(ca), Some(cb)) = (crate::gitbridge::imported_commit(repo, a)?, crate::gitbridge::imported_commit(repo, b)?) {
+            // Without the Git objects (a store remote holds the trees), the trees are read below.
+            if let Ok(p) = crate::gitbridge::sparse_pair(repo, Some(&ca), &cb) {
+                return Ok((p.old, p.new, p.keep));
+            }
+        }
+    }
+    Ok((repo.state_src(a)?, repo.state_src(b)?, Vec::new()))
+}
+
+/// One side of a comparison: a tree, or the bytes of an imported state read from git.
+pub enum Entries {
+    Tree(Snap),
+    Git(crate::gitbridge::GitFiles),
+}
+
+impl diff::Contents for Entries {
+    fn bytes(&self, path: &str) -> Result<Vec<u8>> {
+        match self {
+            Entries::Tree(root) => fsutil::entry_bytes(root, path),
+            Entries::Git(files) => files.bytes(path),
+        }
+    }
+}
+
+/// The sides of a state against its first parent, when the state is an imported state and its parent
+/// (if any) is an imported state: read from git objects (`gitbridge::sides_of`). The trees on disk are
+/// not needed, so a present state builds nothing either.
+fn git_sides(repo: &Repo, s: &StateRec) -> Result<Option<crate::gitbridge::Sides>> {
+    let Some(new) = crate::gitbridge::imported_commit(repo, &s.id)? else { return Ok(None) };
+    let old = match s.parents.first() {
+        None => None,
+        Some(p) => match crate::gitbridge::imported_commit(repo, p)? {
+            Some(c) => Some(c),
+            None => return Ok(None),
+        },
+    };
+    // Without the Git objects, the trees are read below (a store remote may hold them).
+    Ok(crate::gitbridge::sides_of(repo, old.as_deref(), &new).ok())
+}
+
+/// The changes of a state against its first parent, and the two sides.
+fn state_changes(repo: &Repo, s: &StateRec) -> Result<(Entries, Entries, Vec<Change>)> {
     repo.source_state(&s.id)?;
+    if let Some(sides) = git_sides(repo, s)? {
+        let changes = sides.changes.into_iter().filter(|c| !skip_path(&c.path)).collect();
+        return Ok((Entries::Git(sides.old), Entries::Git(sides.new), changes));
+    }
     let root = repo.state_src(&s.id)?;
     match s.parents.first() {
         Some(p) => {
             let pr = repo.state_src(p)?;
             let v = changes::file_changes(&pr, &root)?.into_iter().filter(|c| !skip_path(&c.path)).collect();
             let v = changes::with_renames(&pr, &root, v);
-            Ok((pr, None, root, v))
+            Ok((Entries::Tree(pr), Entries::Tree(root), v))
         }
         None => {
             let e = empty_root()?;
             let v = all_files(&root)?;
-            Ok((snap(&e.path), Some(e), root, v))
+            Ok((Entries::Tree(snap(&e.path)), Entries::Tree(root), v))
+        }
+    }
+}
+
+/// `layr show <rev>:<path>` of an imported state that is not on disk: the entry is read from git.
+fn show_git_entry(repo: &Repo, ctx: &Ctx, commit: &str, r: &str, rv: &str, p: &str) -> Result<()> {
+    use crate::gitbridge::Entry;
+    use std::io::Write;
+    match crate::gitbridge::entry(repo, commit, p)? {
+        Entry::Missing => Err(exit(128, format!("fatal: path '{p}' does not exist in '{rv}'"))),
+        Entry::Dir(names) => {
+            outln!(ctx, "tree {r}\n");
+            for (n, d) in names.iter().filter(|(n, _)| !(p.is_empty() && n == ".git")) {
+                outln!(ctx, "{n}{}", if *d { "/" } else { "" });
+            }
+            Ok(())
+        }
+        Entry::File(data) | Entry::Link(data) => {
+            let _ = ctx.out.borrow_mut().write_all(&data);
+            Ok(())
         }
     }
 }
@@ -665,6 +760,7 @@ pub fn show(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if revs_v.is_empty() {
         revs_v.push("head".into());
     }
+    repo.hold(pin_revs(repo, line.as_ref(), &revs_v)?);
     let specs = h.specs(&a.paths)?;
     let decor = Decor::load_with_head(repo, line.as_ref(), "HEAD")?;
     let date_style = a.get("--date").unwrap_or("default").to_string();
@@ -674,6 +770,20 @@ pub fn show(ctx: &Ctx, args: &[String]) -> Result<i32> {
     for r in revs_v {
         // <rev>:<path> and :<path> (index).
         if let Some((rv, path)) = r.split_once(':') {
+            // An imported state that is not on disk: its entry is read from git, no tree is built.
+            if !rv.is_empty() {
+                let id = revs::resolve(repo, line.as_ref(), rv)?;
+                if let Some(commit) = crate::gitbridge::unbuilt_commit(repo, &id)? {
+                    let p = if path.starts_with("./") || path.starts_with("../") {
+                        super::normalize(&h.loc.sub, path)?
+                    } else {
+                        path.trim_start_matches('/').to_string()
+                    };
+                    show_git_entry(repo, ctx, &commit, &r, rv, &p)?;
+                    first = false;
+                    continue;
+                }
+            }
             let root_path: PathBuf;
             let mut _keep = Vec::new();
             if rv.is_empty() {
@@ -742,7 +852,7 @@ pub fn show(ctx: &Ctx, args: &[String]) -> Result<i32> {
         if a.has("-s") {
             continue;
         }
-        let (old, _t, new, list) = state_changes(repo, &s)?;
+        let (old, new, list) = state_changes(repo, &s)?;
         let list: Vec<Change> = list.into_iter().filter(|c| matches(&specs, &c.path)).collect();
         if list.is_empty() {
             continue;
@@ -809,6 +919,7 @@ pub fn log(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let repo = &h.repo;
     let line = h.line.clone();
     let (revs_v, paths) = split_revs(repo, line.as_ref(), &a)?;
+    repo.hold(pin_revs(repo, line.as_ref(), &revs_v)?);
     let specs = h.specs(&paths)?;
     let mut include: Vec<String> = Vec::new();
     let mut exclude: BTreeSet<String> = BTreeSet::new();
@@ -904,10 +1015,10 @@ pub fn log(ctx: &Ctx, args: &[String]) -> Result<i32> {
             if specs.is_empty() {
                 return Ok(vec![String::new()]);
             }
-            if !repo.p.has_state(&s.id) {
+            if !crate::gitbridge::readable(repo, &s.id)? {
                 return Ok(Vec::new());
             }
-            let (_o, _t, _n, list) = state_changes(repo, s)?;
+            let (_o, _n, list) = state_changes(repo, s)?;
             Ok(list.into_iter().flat_map(|c| std::iter::once(c.path).chain(c.old_path)).collect())
         },
         |path| specs.is_empty() || matches(&specs, path),
@@ -959,8 +1070,8 @@ pub fn log(ctx: &Ctx, args: &[String]) -> Result<i32> {
             !a.has("--format"),
         )?;
         first = false;
-        if want_diff && repo.p.has_state(&s.id) {
-            let (old, _t, new, list) = state_changes(repo, s)?;
+        if want_diff && crate::gitbridge::readable(repo, &s.id)? {
+            let (old, new, list) = state_changes(repo, s)?;
             let list: Vec<Change> = list.into_iter().filter(|c| matches(&specs, &c.path)).collect();
             if !list.is_empty() {
                 if blank {
@@ -1178,15 +1289,25 @@ pub fn blame(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let mut cur = Some(start.clone());
     while let Some(id) = cur {
         let s = repo.state(&id)?;
-        // Read through the layers of a thin state: no view of each state of the history.
-        let root = match repo.state_src(&id) {
-            Ok(r) => r,
-            Err(_) => break,
+        // A state that is not on disk: its file is read from git. Otherwise the file is read through
+        // the layers of a thin state, with no view of each state of the history.
+        let (size, data) = match crate::gitbridge::unbuilt_commit(repo, &id)? {
+            Some(commit) => match crate::gitbridge::entry(repo, &commit, &path)? {
+                crate::gitbridge::Entry::File(d) | crate::gitbridge::Entry::Link(d) => (Some(d.len() as u64), Some(d)),
+                _ => (None, None),
+            },
+            None => {
+                let root = match repo.state_src(&id) {
+                    Ok(r) => r,
+                    Err(_) => break,
+                };
+                (fsutil::lmeta(&root, &path).map(|m| m.size), fsutil::read_file(&root, &path).ok())
+            }
         };
-        if versions.is_empty() && fsutil::lmeta(&root, &path).map(|m| m.size > fsutil::MAX_TEXT).unwrap_or(false) {
+        if versions.is_empty() && size.map(|n| n > fsutil::MAX_TEXT).unwrap_or(false) {
             return Err(too_large());
         }
-        match fsutil::read_file(&root, &path) {
+        match data.ok_or(()) {
             Ok(d) => {
                 if versions.last().map(|v| v.1 != d).unwrap_or(true) {
                     held += d.len() as u64;
@@ -1200,7 +1321,7 @@ pub fn blame(ctx: &Ctx, args: &[String]) -> Result<i32> {
                     }
                 }
             }
-            Err(_) => break,
+            Err(()) => break,
         }
         cur = s.parents.first().cloned();
     }
@@ -1296,6 +1417,27 @@ fn search_root(repo: &Repo, line: Option<&Line>, rev: Option<&str>) -> Result<(P
     }
 }
 
+/// A temporary folder with the ignore files (`.gitignore`, `.layrignore`) of a git commit, where the
+/// ignore rules of `grep` read them. Removed when the returned guard drops.
+fn ignore_folder(repo: &Repo, commit: &str) -> Result<Temp> {
+    let dir = repo.p.scan_dir().join(crate::store::temp_name());
+    std::fs::create_dir_all(&dir)?;
+    let guard = Temp { path: dir.clone() };
+    let ignores: Vec<(String, String)> = crate::gitbridge::regular_files(repo, commit)?
+        .into_iter()
+        .filter(|(p, _)| p.ends_with(".gitignore") || p.ends_with(".layrignore"))
+        .collect();
+    let oids: Vec<String> = ignores.iter().map(|(_, o)| o.clone()).collect();
+    for ((path, _), data) in ignores.iter().zip(crate::gitbridge::blobs(repo, &oids)?) {
+        let target = dir.join(path);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&target, data)?;
+    }
+    Ok(guard)
+}
+
 pub fn grep(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let spec = Spec::new()
         .flag("-n|--line-number")
@@ -1366,23 +1508,47 @@ pub fn grep(ctx: &Ctx, args: &[String]) -> Result<i32> {
     } else {
         None
     };
-    let (root, _t, index) = if let Some(filtered) = filtered {
+    // An imported state that is not on disk: its files are read from git, and only its ignore files
+    // go to a temporary folder (the rules read them from a folder). No tree is built.
+    let git_commit = match (&rev, filtered.is_some(), a.has("--cached")) {
+        (Some(r), false, false) => {
+            let id = revs::resolve(repo, line.as_ref(), r)?;
+            crate::gitbridge::unbuilt_commit(repo, &id)?
+        }
+        _ => None,
+    };
+    let (root, _t, index, from_git) = if let Some(commit) = &git_commit {
+        let ignore = ignore_folder(repo, commit)?;
+        (ignore.path.clone(), vec![ignore], None, Some(commit.clone()))
+    } else if let Some(filtered) = filtered {
         let root = filtered.path.clone();
-        (root.clone(), vec![filtered], Some(root))
+        (root.clone(), vec![filtered], Some(root), None)
     } else if a.has("--cached") {
         let l = h.line()?;
         let (idx, t) = repo.index_view(l)?;
         let mut keep: Vec<Temp> = t.into_iter().collect();
         let idx = repo.complete(idx, &mut keep)?;
-        (idx, keep, None)
+        (idx, keep, None, None)
     } else {
-        search_root(repo, line.as_ref(), rev.as_deref())?
+        let (r, t, i) = search_root(repo, line.as_ref(), rev.as_deref())?;
+        (r, t, i, None)
     };
     let rules = crate::ignore_rules::Rules::new(&root);
     let prefix = rev.as_ref().map(|r| format!("{r}:")).unwrap_or_default();
     let maxc: usize = a.get("-m").map(|v| v.parse()).transpose()?.unwrap_or(usize::MAX);
     let mut found = false;
     let mut files = Vec::new();
+    // Git blobs of the files of a state that is not on disk, by path.
+    let mut blob_of: HashMap<String, String> = HashMap::new();
+    if let Some(commit) = &from_git {
+        for (path, oid) in crate::gitbridge::regular_files(repo, commit)? {
+            if !skip_path(&path) && !rules.ignored(&path, false) && matches(&specs, &path) {
+                blob_of.insert(path.clone(), oid);
+                files.push(path);
+            }
+        }
+    }
+    if from_git.is_none() {
     fsutil::walk(&root, "", &mut |rel, m| {
         if skip_path(rel) {
             return Ok(false);
@@ -1408,11 +1574,31 @@ pub fn grep(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         Ok(true)
     })?;
+    }
     let sep = if a.has("-z") { "\0" } else { ":" };
-    for f in files {
-        let data = match fsutil::read_file(&root, &f) {
-            Ok(d) => d,
-            Err(_) => continue,
+    // Files of a git state come in batches of blobs, not one process per file.
+    let listed = files.clone();
+    let mut cache: HashMap<String, Vec<u8>> = HashMap::new();
+    for (idx, f) in files.into_iter().enumerate() {
+        let data = match &from_git {
+            Some(_) => {
+                if !cache.contains_key(&f) {
+                    let end = (idx + 256).min(listed.len());
+                    let batch = &listed[idx..end];
+                    let oids: Vec<String> = batch.iter().map(|p| blob_of[p].clone()).collect();
+                    for (p, d) in batch.iter().zip(crate::gitbridge::blobs(repo, &oids)?) {
+                        cache.insert(p.clone(), d);
+                    }
+                }
+                match cache.remove(&f) {
+                    Some(d) => d,
+                    None => continue,
+                }
+            }
+            None => match fsutil::read_file(&root, &f) {
+                Ok(d) => d,
+                Err(_) => continue,
+            },
         };
         let shown = format!("{prefix}{}", if rev.is_some() { f.clone() } else { h.rel(&f) });
         if fsutil::is_binary(&data) {

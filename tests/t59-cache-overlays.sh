@@ -66,7 +66,7 @@ l line new warm2 rel >/dev/null
 eq "a new line takes the newest cache" bin3 "$(cat $P/warm2/target/debug/x)"
 
 l line delete -D fromstate >/dev/null 2>&1
-l gc -q >/dev/null 2>&1
+l gc --repair -q >/dev/null 2>&1
 eq "gc drops the cache of a deleted line" 3 "$(states cache.target)"
 
 # 5. merge of a line unions its cache into the target.
@@ -92,7 +92,7 @@ head -c 150000 /dev/zero > $P/rel/target/debug/mid
 touch -t 200001010000 $P/rel/target/debug/x
 touch -t 200101010000 $P/rel/target/debug/mid
 ok "set a size limit" l overlay set cache.target --gc lru:400K
-l gc -q >/dev/null 2>&1
+l gc --repair -q >/dev/null 2>&1
 no "the oldest file went" test -e $P/rel/target/debug/x
 no "the next oldest went until the folder fits" test -e $P/rel/target/debug/mid
 ok "the newest file stayed" test -e $P/rel/target/debug/big

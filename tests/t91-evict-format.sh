@@ -42,7 +42,10 @@ make_state attr attribute
 attr_state=$STATE
 cd "$P/lines/main"
 
-ok "gc with gc.evict on runs" l gc -q
+# The rings of deleted lines and operations keep a local copy (docs/ownership.md): empty them, so
+# only the store copy holds the states.
+l config undo.deleted 0 >/dev/null; l config undo.ops 0 >/dev/null
+ok "gc with gc.evict on runs" l gc --repair -q
 no "a plain state is evicted" on_disk "$plain"
 ok "a state with an extended attribute stays on disk" on_disk "$attr_state"
 finish

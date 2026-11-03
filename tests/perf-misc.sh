@@ -41,7 +41,7 @@ done
 eq "later commands empty the trash" "" "$(ls -A "$LAYR_ROOT/trash" 2>/dev/null)"
 mkdir -p "$LAYR_ROOT/trash/again/d"
 for i in $(seq 1 500); do : > "$LAYR_ROOT/trash/again/d/f$i"; done
-LAYR_TRASH_BUDGET_MS=0 l gc -q >/dev/null 2>&1
+LAYR_TRASH_BUDGET_MS=0 l gc --repair -q >/dev/null 2>&1
 eq "gc empties the whole trash" "" "$(ls -A "$LAYR_ROOT/trash" 2>/dev/null)"
 
 finish
