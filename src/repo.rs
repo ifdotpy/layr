@@ -1985,45 +1985,71 @@ impl<'a> Repo<'a> {
     }
 
     /// The cache swap leftovers in the working folders of the project's lines (`gc` reports them).
+    /// No scan of a folder: the candidate caches are the `regenerable` setting, the folder overlays
+    /// and the caches of the cache journals. A leftover sits next to its cache: the line root holds
+    /// the top-level ones (any name), a nested cache is looked for in its parent folder.
     pub fn cache_leftovers(&self) -> Result<Vec<Leftover>> {
         let mut out = Vec::new();
         if self.p.is_overlay() {
             return Ok(out);
         }
+        let mut configured = self.p.config_strings("regenerable");
+        for (_, f) in self.folder_overlays()? {
+            if !configured.contains(&f) {
+                configured.push(f);
+            }
+        }
         for line in self.lines()? {
             let w = self.working(&line);
-            if !w.is_dir() {
+            let Ok(entries) = std::fs::read_dir(&w) else {
                 continue;
-            }
-            let mut caches = self.cache_paths(&w)?;
-            for (_, f) in self.folder_overlays()? {
-                if !caches.contains(&f) {
-                    caches.push(f);
+            };
+            let root: Vec<String> = entries.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+            // Caches of the cache journals of this line (a swap that is not finished, or a crash).
+            let mut caches = configured.clone();
+            let t = Tree::open(&w)?;
+            for name in root.iter().filter(|n| cache_journal_name(n)) {
+                if let Ok(record) = read_cache_replacement(&t, name) {
+                    if !caches.contains(&record.path) {
+                        caches.push(record.path);
+                    }
                 }
             }
-            for cache in caches {
-                let (parent, base) = match cache.rsplit_once('/') {
-                    Some((d, b)) => (d.to_string(), b.to_string()),
-                    None => (String::new(), cache.clone()),
+            let mut found: BTreeSet<String> = BTreeSet::new();
+            for name in &root {
+                if leftover_base(name).is_some() {
+                    found.insert(name.clone());
+                }
+            }
+            for cache in &caches {
+                let Some((parent, base)) = cache.rsplit_once('/') else {
+                    continue;
                 };
-                let dir = if parent.is_empty() { w.clone() } else { w.join(&parent) };
-                let Ok(entries) = std::fs::read_dir(&dir) else {
+                let Ok(entries) = std::fs::read_dir(w.join(parent)) else {
                     continue;
                 };
                 for e in entries.flatten() {
                     let name = e.file_name().to_string_lossy().into_owned();
-                    if !is_leftover_name(&name, &base) || !e.file_type().is_ok_and(|t| t.is_dir()) {
-                        continue;
+                    if is_leftover_name(&name, base) {
+                        found.insert(format!("{parent}/{name}"));
                     }
-                    let path = e.path();
-                    let kept = if std::fs::symlink_metadata(w.join(cache_journal(&cache))).is_ok() {
-                        Some("cache swap not finished".to_string())
-                    } else {
-                        crate::busy::user_of(&path)?.map(|u| format!("in use by pid {} ({})", u.pid, u.name))
-                    };
-                    let rel = if parent.is_empty() { name } else { format!("{parent}/{name}") };
-                    out.push(Leftover { line: line.name.clone(), rel, bytes: tree_bytes(&path), path, kept });
                 }
+            }
+            for rel in found {
+                let path = w.join(&rel);
+                if !std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) {
+                    continue;
+                }
+                // The cache of the leftover: its name without the suffix, in the same folder.
+                let (parent, name) = rel.rsplit_once('/').unwrap_or(("", rel.as_str()));
+                let base = leftover_base(name).unwrap_or(name);
+                let cache = if parent.is_empty() { base.to_string() } else { format!("{parent}/{base}") };
+                let kept = if std::fs::symlink_metadata(w.join(cache_journal(&cache))).is_ok() {
+                    Some("cache swap not finished".to_string())
+                } else {
+                    crate::busy::user_of(&path)?.map(|u| format!("in use by pid {} ({})", u.pid, u.name))
+                };
+                out.push(Leftover { line: line.name.clone(), rel, bytes: tree_bytes(&path), path, kept });
             }
         }
         Ok(out)
@@ -3213,16 +3239,23 @@ pub struct Leftover {
     pub kept: Option<String>,
 }
 
-/// Whether `name` is a leftover of the cache with the base name `base`: the suffix `.layr-old-` or
-/// `.layr-new-` and the short id that `replace_folder` makes (seven lowercase hex digits).
+/// The base name of a leftover: `<base>.layr-old-<id>` or `<base>.layr-new-<id>`, where `<id>` is the
+/// short id that `replace_folder` makes (seven lowercase hex digits). `None` for any other name.
+fn leftover_base(name: &str) -> Option<&str> {
+    for sep in [".layr-old-", ".layr-new-"] {
+        if let Some(pos) = name.rfind(sep) {
+            let id = &name[pos + sep.len()..];
+            if pos > 0 && id.len() == 7 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+                return Some(&name[..pos]);
+            }
+        }
+    }
+    None
+}
+
+/// Whether `name` is a leftover of the cache with the base name `base`.
 fn is_leftover_name(name: &str, base: &str) -> bool {
-    let Some(rest) = name.strip_prefix(base) else {
-        return false;
-    };
-    let Some(id) = rest.strip_prefix(".layr-old-").or_else(|| rest.strip_prefix(".layr-new-")) else {
-        return false;
-    };
-    id.len() == 7 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    leftover_base(name) == Some(base)
 }
 
 /// Whether the tree at `root` has a file, link or other entry that is not a folder at `path` or
@@ -3904,7 +3937,15 @@ mod commit_record_tests {
 
 #[cfg(test)]
 mod leftover_name_tests {
-    use super::is_leftover_name;
+    use super::{is_leftover_name, leftover_base};
+
+    #[test]
+    fn the_base_of_a_swap_name_is_any_folder_name() {
+        assert_eq!(leftover_base("target.layr-old-abc1234"), Some("target"));
+        assert_eq!(leftover_base("a.b.layr-new-0123456"), Some("a.b"));
+        assert_eq!(leftover_base(".layr-old-abc1234"), None);
+        assert_eq!(leftover_base("target.mine"), None);
+    }
 
     #[test]
     fn only_the_swap_names_of_a_cache_are_leftovers() {
