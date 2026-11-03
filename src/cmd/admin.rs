@@ -72,12 +72,18 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
         vec![h.line()?.clone()]
     };
     let msg = a.get("--note").unwrap_or("").to_string();
+    // `--cache <path>` (repeatable) saves only the named cache paths. A big cache (build output)
+    // costs a minute to save.
+    let only: Vec<String> = a.all("--cache").iter().map(|p| p.trim_matches('/').to_string()).collect();
+    if !only.is_empty() && !a.has("--caches") {
+        return Err(exit(2, "--cache selects a cache path for --caches."));
+    }
     for l in lines {
         repo.authorize_line(ctx, &l, crate::repo::LineOp::Save)?;
         if a.has("--caches") {
             // A cache copy that a later cache fails to make leaves the earlier ones in the work folder.
             repo.hold(repo.pin(&[&l.head, &repo.save_base(&l)?])?);
-            if let Err(e) = prepare_caches(repo, &l, a.get("--cache")) {
+            if let Err(e) = prepare_caches(repo, &l, &only) {
                 repo.discard_prepared();
                 return Err(e);
             }
@@ -88,16 +94,14 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let l = repo.line(&l.id)?;
         crate::repo::recover_cache_replacements(&repo.working(&l))?;
         let (mut caches, mut versioned) = if a.has("--caches") { repo.line_cache_paths(&l)? } else { Default::default() };
-        // `--cache <path>` saves one cache only. A big cache (build output) costs a minute to save.
-        if let Some(only) = a.get("--cache") {
-            if !a.has("--caches") {
-                return Err(exit(2, "--cache selects a cache path for --caches."));
+        if !only.is_empty() {
+            if let Some(missing) = only.iter().find(|o| !caches.contains(o) && !versioned.contains(o)) {
+                return Err(exit(1, format!("error: '{missing}' is no cache path of the line (see layr overlay list)")));
             }
-            let only = only.trim_matches('/');
-            caches.retain(|p| p == only);
-            versioned.retain(|p| p == only);
+            caches.retain(|p| only.contains(p));
+            versioned.retain(|p| only.contains(p));
             if caches.is_empty() && versioned.is_empty() {
-                return Err(exit(1, format!("error: '{only}' is no cache path of the line (see layr overlay list)")));
+                return Err(exit(1, format!("error: '{}' is no cache path of the line (see layr overlay list)", only.join("', '"))));
             }
         }
         let st = if a.has("--caches") {
@@ -159,12 +163,12 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
 /// when the head already has it) and one for the cache overlay. Under the lock a conversion finds
 /// a cache already, a snapshot takes a copy with one rename, and unused copies go to the trash.
 /// The files of a cache are build output: a copy from a moment before the lock is as good.
-fn prepare_caches(repo: &Repo, l: &Line, only: Option<&str>) -> Result<()> {
+/// Prepare the copies of the line's caches before the lock; `only` (empty: all) names the paths.
+fn prepare_caches(repo: &Repo, l: &Line, only: &[String]) -> Result<()> {
     let w = repo.working(l);
     let (u, g) = repo.owner_ids(l);
-    let only = only.map(|o| o.trim_matches('/'));
     for p in repo.line_cache_paths(l)?.0 {
-        if only.is_some_and(|o| o != p) {
+        if !only.is_empty() && !only.contains(&p) {
             continue;
         }
         crate::repo::convert_cache(&w, &p, u, g)?;
