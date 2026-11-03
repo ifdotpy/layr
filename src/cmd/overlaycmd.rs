@@ -4,6 +4,7 @@
 use super::{exit, here};
 use crate::access::{parse_principal, show_principal, Policy, Role};
 use crate::args::{parse, Spec};
+use crate::cache_overlay::FolderIn;
 use crate::ctx::Ctx;
 use crate::ids;
 use crate::model::{Record, StateKind, StateRec};
@@ -25,6 +26,7 @@ const USAGE: &str =
        layr overlay use [--add|--remove] <name>... | --none
        layr overlay move [--purge] <name> <path>... | --cancel [<path>...]
        layr overlay repair <overlay>
+       layr overlay remove <cache overlay>
        layr overlay show <name> --json
        layr overlay log <name> --ops [--json]
        layr overlay log|show|diff|grep|ls-files|blame <name> [<args>]
@@ -45,6 +47,7 @@ pub fn overlay(ctx: &Ctx, args: &[String]) -> Result<i32> {
         "use" => use_cmd(ctx, &rest),
         "move" => move_cmd(ctx, &rest),
         "repair" => repair(ctx, &rest),
+        "remove" => remove(ctx, &rest),
         "show" if rest.iter().take_while(|s| s.as_str() != "--").any(|s| s == "--json") => show_json(ctx, &rest),
         "log" if rest.iter().take_while(|s| s.as_str() != "--").any(|s| s == "--ops") => operations(ctx, &rest),
         "log" | "show" | "diff" | "grep" | "ls-files" | "blame" | "rev-parse" => read(ctx, sub, &rest),
@@ -159,6 +162,12 @@ pub(crate) fn make_overlay(
     let owner = ctx.caller.uid;
     let pname = format!("{}%{name}", repo.p.name);
     let dir = ctx.store.project_dir(&pname)?;
+    // A removed cache overlay of this name keeps its folder until gc frees its states; the new
+    // overlay replaces that folder (its states are not kept by any line).
+    let removed = repo.p.db.overlay_config(&format!("overlay.{name}.removed"))?.is_some();
+    if removed && dir.exists() {
+        btrfs::delete_tree(&dir)?;
+    }
     // Only a folder this call made is removed below, so the creation stays outside the cleanup.
     let config = serde_json::json!({
         "access": access_map(owner, readers),
@@ -218,6 +227,9 @@ pub(crate) fn make_overlay(
         // A cache overlay follows the cache paths (`regenerable`, `cache add`) of each line.
         if cache {
             cfg.insert(format!("overlay.{name}.cache"), serde_json::json!(true));
+        }
+        if removed {
+            cfg.insert(format!("overlay.{name}.removed"), serde_json::Value::Null);
         }
         rec.data = serde_json::json!({"name": name, "parent":repo.p.id, "config": cfg});
         if hidden {
@@ -356,14 +368,18 @@ struct InLine {
     saved: Option<String>,
 }
 
-fn folder_in_line(repo: &Repo, l: &crate::model::Line, name: &str, folder: &str, versioned: bool) -> InLine {
+/// The state of a line's folder in `overlay list` and `overlay repair` (one rule for both).
+pub(crate) const NOT_CACHE_PATH: &str = "not a cache path in this line";
+
+fn folder_in_line(repo: &Repo, l: &crate::model::Line, name: &str, folder: &str, kind: FolderIn) -> InLine {
     let cp = repo.working(l).join(folder);
-    let state = match (versioned, btrfs::is_subvolume(&cp)) {
-        (true, true) => format!("not a cache: has versioned files (run layr overlay repair {name})"),
-        (true, false) => crate::cmd::admin::VERSIONED.to_string(),
-        (false, true) => "cache".to_string(),
-        (false, false) if cp.exists() => format!("plain folder (run layr overlay repair {name})"),
-        (false, false) => "absent".to_string(),
+    let state = match (kind, btrfs::is_subvolume(&cp)) {
+        (FolderIn::Versioned, true) => format!("not a cache: has versioned files (run layr overlay repair {name})"),
+        (FolderIn::Versioned, false) => crate::cmd::admin::VERSIONED.to_string(),
+        (FolderIn::Other, _) => NOT_CACHE_PATH.to_string(),
+        (FolderIn::Cache, true) => "cache".to_string(),
+        (FolderIn::Cache, false) if cp.exists() => format!("plain folder (run layr overlay repair {name})"),
+        (FolderIn::Cache, false) => "absent".to_string(),
     };
     let size = (state == "cache").then(|| crate::cache_overlay::tree_size(&cp));
     let saved = repo
@@ -383,11 +399,6 @@ fn list(ctx: &Ctx, args: &[String]) -> Result<i32> {
         Some(l) => repo.layers(l)?.into_iter().map(|x| x.overlay).collect(),
         None => BTreeSet::new(),
     };
-    // The versioned folders of the line: a folder overlay there is no cache.
-    let versioned = match &h.line {
-        Some(l) => repo.line_cache_paths(l)?.1,
-        None => Vec::new(),
-    };
     for name in repo.visible_overlay_names(ctx)? {
         let info = match repo.overlay_info(&name)? {
             Some(i) => i,
@@ -399,7 +410,10 @@ fn list(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let props = repo.overlay_props(&name)?;
         let folder = repo.overlay_setting(&name, "folder")?.and_then(|v| v.as_str().map(str::to_owned));
         let line_state = match (&h.line, &folder) {
-            (Some(l), Some(f)) => Some(folder_in_line(repo, l, &name, f, versioned.contains(f))),
+            (Some(l), Some(f)) => {
+                let kind = repo.folder_kind(l, f)?;
+                Some(folder_in_line(repo, l, &name, f, kind))
+            }
             _ => None,
         };
         if a.has("--json") {
@@ -464,18 +478,95 @@ fn repair(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let l = repo.line(&l.id)?;
     let (u, g) = repo.owner_ids(&l);
     crate::repo::recover_cache_replacements(&repo.working(&l))?;
-    let (caches, versioned) = repo.line_cache_paths(&l)?;
-    if versioned.contains(&folder) {
-        if crate::repo::uncache(&repo.working(&l), &folder, u, g)? {
-            outln!(ctx, "{folder}: {}", crate::cmd::admin::VERSIONED_AGAIN);
+    match repo.folder_kind(&l, &folder)? {
+        FolderIn::Versioned => {
+            if crate::repo::uncache(&repo.working(&l), &folder, u, g)? {
+                outln!(ctx, "{folder}: {}", crate::cmd::admin::VERSIONED_AGAIN);
+            }
         }
-    } else if caches.contains(&folder) {
-        if crate::repo::convert_cache(&repo.working(&l), &folder, u, g)? {
-            outln!(ctx, "{folder}: a cache again");
+        FolderIn::Cache => {
+            if crate::repo::convert_cache(&repo.working(&l), &folder, u, g)? {
+                outln!(ctx, "{folder}: a cache again");
+            }
         }
-    } else {
-        return Err(exit(1, format!("error: {folder} is no cache path of this line (regenerable)")));
+        FolderIn::Other => outln!(ctx, "{folder}: {NOT_CACHE_PATH}"),
     }
+    Ok(0)
+}
+
+/// `layr overlay remove <name>`: remove a cache overlay from the project (docs/cache-overlays.md,
+/// section 18). The record drops the overlay from the project and from every line's stack; the
+/// cache folders of the working folders become plain folders with their files. Its states go at gc.
+fn remove(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    let a = parse(&Spec::new(), args)?;
+    let name = match a.pos.as_slice() {
+        [name] => name.clone(),
+        _ => return Err(exit(128, "usage: layr overlay remove <cache overlay>")),
+    };
+    let h = here(ctx)?;
+    let repo = &h.repo;
+    let info = visible_info(ctx, repo, &name)?;
+    let cache = repo.overlay_setting(&name, "cache")?.and_then(|v| v.as_bool()).unwrap_or(false);
+    if !cache {
+        return Err(exit(
+            1,
+            format!("error: overlay '{name}' is a versioned overlay: remove takes cache overlays only (its files are history)"),
+        ));
+    }
+    let orepo = repo.overlay_repo(&name)?;
+    if !orepo.is_admin(ctx) {
+        return Err(exit(1, format!("permission denied: only the owner of overlay '{name}' removes it")));
+    }
+    crate::overlay_managers::of(repo, &name)?.require(&ctx.store.machine.id)?;
+    let folder = repo.overlay_setting(&name, "folder")?.and_then(|v| v.as_str().map(str::to_owned));
+    let _lock = repo.p.lock()?;
+    // The overlay's settings go (null deletes a setting); the marker keeps its root for gc. The
+    // marker is a string, not an object: an object would read as an overlay of that name.
+    let prefix = format!("overlay.{name}");
+    let mut cfg = serde_json::Map::new();
+    for (key, _) in repo.p.db.config_all()? {
+        let base = key.split('@').next().unwrap_or("").to_string();
+        if base == prefix || base.starts_with(&format!("{prefix}.")) {
+            cfg.insert(base, serde_json::Value::Null);
+        }
+    }
+    cfg.insert(format!("overlay.{name}.removed"), serde_json::json!(info.root));
+    let mut rec = Record::new("config");
+    rec.data = serde_json::json!({"config": cfg});
+    repo.commit_record(ctx, rec)?;
+    // The stacks of the lines drop the overlay, and pending moves into it are cancelled.
+    for line in repo.lines()? {
+        let layers = repo.layers(&line)?;
+        if layers.iter().any(|l| l.overlay == name) {
+            let kept: Vec<Layer> = layers.into_iter().filter(|l| l.overlay != name).collect();
+            let mut rec = Record::new("overlay.use");
+            rec.data = serde_json::json!({"stack": repo.public_stack_data(&line.id, &kept)?});
+            repo.commit_record(ctx, rec)?;
+        }
+        if line.machine == ctx.store.machine.id {
+            let mut pending = repo.pending_moves(&line);
+            if pending.values().any(|o| *o == name) {
+                pending.retain(|_, o| *o != name);
+                repo.set_pending_moves(&line, &pending)?;
+            }
+        }
+    }
+    // The cache folders of the working folders of this machine become plain folders with their files.
+    if let Some(folder) = folder {
+        for line in repo.lines()? {
+            let w = repo.working(&line);
+            if line.machine != ctx.store.machine.id || !w.exists() {
+                continue;
+            }
+            if repo.authorize_line(ctx, &line, crate::repo::LineOp::Save).is_err() {
+                eprintln!("warning: line {} keeps {folder} as a cache: its owner saves it as a plain folder", line.name);
+                continue;
+            }
+            let (u, g) = repo.owner_ids(&line);
+            crate::repo::uncache(&w, &folder, u, g)?;
+        }
+    }
+    outln!(ctx, "Removed cache overlay {name}");
     Ok(0)
 }
 
