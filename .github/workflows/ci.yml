@@ -90,3 +90,44 @@ jobs:
       - name: Detach the test volume
         if: always()
         run: hdiutil detach /Volumes/LayrCI || true
+  # `cargo test` at the root runs only the root package. These crates have their own tests,
+  # and layr-retest's e2e test runs the built `layr` from PATH with a temporary store.
+  crates:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      # The toolchain pin also pins llvm-tools, which must match the LLVM of rustc.
+      - name: Install the pinned Rust toolchain and llvm-tools
+        uses: dtolnay/rust-toolchain@1.97.0
+        with:
+          components: llvm-tools
+      - name: Install the pinned cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.146
+      # A layr store on Linux needs btrfs. The test folder is a btrfs loop file owned by the runner user.
+      - name: Create the btrfs test folder (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq btrfs-progs
+          truncate -s 4G "$RUNNER_TEMP/crates.img"
+          mkfs.btrfs -q -f "$RUNNER_TEMP/crates.img"
+          sudo mkdir /var/tmp/layr-crates
+          sudo mount -o loop "$RUNNER_TEMP/crates.img" /var/tmp/layr-crates
+          sudo chown "$(id -u):$(id -g)" /var/tmp/layr-crates
+          echo "TMPDIR=/var/tmp/layr-crates" >> "$GITHUB_ENV"
+      - name: Build layr and put it on PATH
+        run: |
+          cargo build --locked
+          echo "$PWD/target/debug" >> "$GITHUB_PATH"
+      - name: Set a fresh LAYR_ROOT
+        run: echo "LAYR_ROOT=$(mktemp -d "${TMPDIR:-$RUNNER_TEMP}/layr-root.XXXXXX")" >> "$GITHUB_ENV"
+      - name: Test layr-retest
+        run: cargo test --locked -p layr-retest
+      - name: Test layr-model and layr-store
+        run: cargo test --locked -p layr-model -p layr-store
