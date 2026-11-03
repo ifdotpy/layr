@@ -264,7 +264,6 @@ pub fn undo_last_of(ctx: &Ctx, repo: &Repo, line: &Line, ops: &[&str]) -> Result
 const NOT_UNDOABLE: &[&str] = &[
     "line.adopt",
     "machine.trust",
-    "save",
     "save.caches",
     "save.layers",
     "check",
@@ -289,6 +288,15 @@ const NOT_UNDOABLE: &[&str] = &[
     "overlay.use",
 ];
 
+/// True when `layr undo` reverses the operation. An automatic save is one only when it names the
+/// working state it changes from (`working_before`); saves made before that have none.
+fn undoable(r: &Record) -> bool {
+    match r.op.as_str() {
+        "save" => r.data.get("working_before").is_some(),
+        op => !NOT_UNDOABLE.contains(&op),
+    }
+}
+
 pub fn undo(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let spec = Spec::new().flag("-f|--force").flag("-n|--dry-run");
     let a = parse(&spec, args)?;
@@ -308,7 +316,7 @@ pub fn undo(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 if r.actor.uid == ctx.caller.uid
                     && r.actor.session == session
                     && local
-                    && !NOT_UNDOABLE.contains(&r.op.as_str())
+                    && undoable(&r)
                     && !repo.p.db.undone(&r.id)?
                 {
                     found = Some(r.id.clone());
@@ -348,7 +356,7 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
     if r.op == "export" {
         return Err(exit(1, "error: a push cannot be undone here: the state is on the remote. Run invert ('layr invert <state>' then 'layr git push')."));
     }
-    if NOT_UNDOABLE.contains(&r.op.as_str()) {
+    if !undoable(&r) {
         return Err(exit(1, format!("error: operation '{}' has nothing to undo", operation_name(&r.op))));
     }
     // An operation with lines is undoable while its undo entry is in the undo.ops ring of its
@@ -375,6 +383,9 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
     let named: Vec<String> = crate::owners::undo_entries(&r, &crate::owners::record_ord(&r)).into_iter().flat_map(|(_, v)| v).collect();
     let named: Vec<&str> = named.iter().map(String::as_str).collect();
     repo.hold(repo.pin(&named)?);
+    if r.op == "save" {
+        return undo_save(ctx, repo, &r, force);
+    }
     // Permissions: undo changes every line the operation changed, so the caller must be allowed
     // to change each of them. An operation without lines (tags, groups) needs the admin or the
     // user who made it.
@@ -409,10 +420,74 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
     r2
 }
 
+/// Undo an automatic save: the working folder goes back to the state that the save changed from.
+/// The head, the stage and the paths that later work changed stay. The undo record keeps the head,
+/// so a later undo of it redoes the save.
+fn undo_save(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
+    let lid = r.data["line"].as_str().unwrap_or("").to_string();
+    let head = r.data["head"].as_str().unwrap_or("").to_string();
+    let before = r.data["working_before"].as_str().unwrap_or("").to_string();
+    let after = r.data["working_after"].as_str().unwrap_or("").to_string();
+    let probe = repo.p.db.line_by_id(&lid)?.ok_or_else(|| exit(1, "error: the line of this save no longer exists"))?;
+    repo.authorize_line(ctx, &probe, crate::repo::LineOp::Rewrite)?;
+    let _lock = repo.p.lock()?;
+    if repo.p.db.line_by_name(&probe.name)?.map(|l| l.id) != Some(lid.clone()) {
+        return Err(exit(1, "error: the line of this save no longer exists"));
+    }
+    let line = repo.line(&lid)?;
+    if !force && line.head != head {
+        return Err(exit(
+            1,
+            "error: the line changed after this operation; undo the later operations first (layr op log), or use --force",
+        ));
+    }
+    for s in [&before, &after] {
+        repo.state_src(s).map_err(|e| exit(1, format!("error: cannot undo, no file changed: {e:#}")))?;
+    }
+    let wb = repo.working_state(ctx, &line, "before undo")?;
+    revert_working(repo, &line, &before, &after, force)?;
+    let mut rec = Record::new("undo");
+    rec.data = serde_json::json!({"undo": r.id, "op": r.op, "keep_stage": true});
+    let now = repo.line_state(&line, &line.head);
+    rec.lines.insert(
+        lid.clone(),
+        LineChange { before: Some(now.clone()), after: Some(now), working_before: wb, working_after: Some(before) },
+    );
+    let done = repo.commit_record(ctx, rec)?;
+    crate::gitbridge::sync_store_access(repo)?;
+    outln!(
+        ctx,
+        "Undid {} {} ({}); undo it with 'layr undo {}'",
+        short_op(&r.id),
+        operation_name(&r.op),
+        fmt_time(r.time),
+        short_op(&done.id)
+    );
+    Ok(0)
+}
+
+/// Revert the working changes of an operation (from `after` to `before`). Only what the operation
+/// changed goes back: a path that later work changed keeps its content.
+fn revert_working(repo: &Repo, line: &Line, before: &str, after: &str, force: bool) -> Result<()> {
+    let cur = repo.scan(line)?;
+    let later: BTreeSet<String> = changes::file_changes(&repo.state_src(after)?, &cur.path)?
+        .into_iter()
+        .flat_map(|c| [Some(c.path.clone()), c.old_path.clone()])
+        .flatten()
+        .collect();
+    repo.apply_delta(&repo.state_root(after)?, &repo.state_root(before)?, &repo.working(line), repo.own(line), &later, force)?;
+    Ok(())
+}
+
 fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
     let _lock = repo.p.lock()?;
     let mut rec = Record::new("undo");
     rec.data = serde_json::json!({"undo": r.id, "op": r.op});
+    // An undo of an automatic save keeps the stage, and so does its undo.
+    let keep_stage = r.data["keep_stage"].as_bool() == Some(true);
+    if keep_stage {
+        rec.data["keep_stage"] = serde_json::json!(true);
+    }
     if let Some(value) = r.data.get("ref_change") {
         let ch: crate::model::RefChange = serde_json::from_value(value.clone())?;
         let current = repo.p.db.ref_value(&ch.name, ids::now_ms())?;
@@ -558,26 +633,13 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
                 l2.name = b.name.clone();
                 match (&ch.working_before, &ch.working_after) {
                     // Revert only what the operation changed; later work stays.
-                    (Some(before), Some(after)) => {
-                        let cur = repo.scan(&l2)?;
-                        let later: BTreeSet<String> = changes::file_changes(&repo.state_src(after)?, &cur.path)?
-                            .into_iter()
-                            .flat_map(|c| [Some(c.path.clone()), c.old_path.clone()])
-                            .flatten()
-                            .collect();
-                        repo.apply_delta(
-                            &repo.state_root(after)?,
-                            &repo.state_root(before)?,
-                            &repo.working(&l2),
-                            repo.own(&l2),
-                            &later,
-                            force,
-                        )?;
-                    }
+                    (Some(before), Some(after)) => revert_working(repo, &l2, before, after, force)?,
                     (Some(before), _) => restore_working(repo, &l2, before)?,
                     (None, _) => {}
                 }
-                repo.drop_stage(&l2)?;
+                if !keep_stage {
+                    repo.drop_stage(&l2)?;
+                }
                 let mut back = l2.clone();
                 back.head = b.head.clone();
                 restored.push(back);
@@ -995,11 +1057,15 @@ fn owners_check(repo: &Repo) -> Result<OwnersCheck> {
     Ok(OwnersCheck { want, missing, extra, leaks })
 }
 
-/// The apparent size of the storage of states (trees and thin layers).
+/// The bytes that only the storage of these states holds (as `layr du` counts them): clones that
+/// other states or lines share are not counted, so the number is what freeing them gives back
+/// (blocks shared only among these states are left out, so it is a lower bound).
 fn states_bytes(repo: &Repo, states: &[String]) -> u64 {
     states
         .iter()
-        .map(|s| crate::cache_overlay::tree_size(&repo.p.state_path(s)) + crate::cache_overlay::tree_size(&repo.p.delta_path(s)))
+        .flat_map(|s| [repo.p.state_path(s), repo.p.delta_path(s)])
+        .filter(|p| p.exists())
+        .filter_map(|p| crate::storage::space(&p).ok().map(|s| s.unique))
         .sum()
 }
 
@@ -1362,12 +1428,9 @@ fn drop_built_imports(repo: &Repo, dry: bool) -> Result<Vec<String>> {
             .map(|(state, _, _)| state)
             .collect();
         let bases: BTreeSet<String> = repo.p.db.present_layer_bases()?.into_iter().collect();
-        let mut round = Vec::new();
-        for (id, _) in repo.p.db.present_states()? {
-            if !kept.contains(&id) && !bases.contains(&id) && crate::gitbridge::buildable(repo, &id) {
-                round.push(id);
-            }
-        }
+        let candidates: Vec<String> =
+            repo.p.db.present_states()?.into_iter().map(|(id, _)| id).filter(|id| !kept.contains(id) && !bases.contains(id)).collect();
+        let round: Vec<String> = crate::gitbridge::buildable_set(repo, &candidates)?.into_iter().collect();
         if round.is_empty() {
             break;
         }

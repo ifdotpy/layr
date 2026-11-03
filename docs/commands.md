@@ -17,7 +17,7 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | records       | `op export`, `op import` (JSONL) |
 | copies        | `export <folder>`                                                                              |
 | views         | `view [<rev or line>] [--json]`, `view save [<line>] [--json]`, `view show <id> [--json]` |
-| overlays      | `overlay create <name> [--readers <principals>] [--mode shared\|follow] [--hidden] [--history all\|last\|<N>] [--quiet] [--merge three-way\|union-theirs] [--gc none\|lru:<size>]`, `overlay set <name> <properties>`, `overlay list [--json]`, `overlay show-to-project <name>`, `overlay readers`, `overlay use [--add\|--remove\|--none] <names>`, `overlay move [--purge] <name> <paths>`, `overlay repair <overlay>`, `overlay log\|show\|diff\|grep\|ls-files <name>` |
+| overlays      | `overlay create <name> [--readers <principals>] [--mode shared\|follow] [--hidden] [--history all\|last\|<N>] [--quiet] [--merge three-way\|union-theirs] [--gc none\|lru:<size>]`, `overlay set <name> <properties>`, `overlay list [--json]`, `overlay show-to-project <name>`, `overlay readers`, `overlay use [--add\|--remove\|--none] <names>`, `overlay move [--purge] <name> <paths>`, `overlay repair <overlay>`, `overlay remove <cache overlay>` (removes a cache overlay from the project; see cache-overlays.md section 18), `overlay log\|show\|diff\|grep\|ls-files <name>` |
 | refs          | `ref set <name> <rev> [--expect <rev>] [--ttl <dur>]`, `ref list [<prefix>]`, `ref log <name>`, `ref delete <name> [--expect <rev>]` |
 | queue         | `queue add <rev> [--into <line>]`, `queue list [--into <line>] [--json]`, `queue remove <entry>`, `queue run [--into <line>]` |
 | follow        | `follow <remote>/<branch>`, `follow --run`, `follow --tick`, `follow`, `follow --remove` ([layr follow](follow.md)) |
@@ -114,6 +114,14 @@ folder get the current time, as `git checkout` gives them, so build tools that c
 
 `reset <rev>` without `--hard` moves the head and keeps the files (mixed, as in git). It lists the
 files that now differ from the new head and names `layr reset --hard <rev>`, which changes them.
+
+`layr undo` reverses the newest operation of the line, an automatic save too. A second `layr undo`
+reverses that undo. Name an operation id to reverse an older one. Undo of an automatic save puts the
+working folder back to the state the save changed from, keeps the head and the stage, and keeps the
+paths that later work changed. Automatic saves that record no such state (older layr versions, cache
+and staging saves) are skipped by `undo` with no id.
+`pick` on a line with uncommitted work prints the kept files: `kept N uncommitted file(s):`
+and up to 20 names, then `and N more`.
 
 `save -m <message>` makes a named state. `--message` is the long form of `-m`.
 `save -F <file>` reads the message from a file. `--file` is the long form of `-F`.
