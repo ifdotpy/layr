@@ -1235,6 +1235,25 @@ fn pick(ctx: &Ctx, args: &[String], revert: bool) -> Result<i32> {
         let parent = repo.state(p)?.parents.first().cloned().ok_or_else(|| exit(128, format!("fatal: {} has no parent", ids::short(p))))?;
         Ok(if revert { (p.to_string(), parent) } else { (parent, p.to_string()) })
     };
+    // APFS: a pick that needs no merge is a thin layer and a write of its paths (`thin_pick`).
+    // The picks it does not take go on to the merge below.
+    #[cfg(target_os = "macos")]
+    if !revert {
+        let mut done = 0;
+        for p in &picks {
+            let cur = repo.line(&line.id)?;
+            let Some(sid) = thin_pick(ctx, repo, &cur, p, a.has("-x"))? else { break };
+            done += 1;
+            if !a.has("-q") {
+                let subject = repo.state(&sid)?.message.lines().next().unwrap_or("").to_string();
+                outln!(ctx, "[{} {}] {}", cur.name, ids::short(&sid), subject);
+            }
+        }
+        picks.drain(..done);
+        if picks.is_empty() {
+            return Ok(0);
+        }
+    }
     #[cfg(target_os = "macos")]
     let prepared = (|| -> Result<Vec<PreparedStep>> {
         let _t = crate::trace::span("prepare pick");
@@ -1324,6 +1343,160 @@ fn pick(ctx: &Ctx, args: &[String], revert: bool) -> Result<i32> {
     })();
     discard_prepared(repo);
     r
+}
+
+/// Leaves a pick to the merge; the trace names the reason.
+#[cfg(target_os = "macos")]
+fn declined(reason: &str) -> Result<Option<String>> {
+    let _t = crate::trace::span(format!("thin pick declined: {reason}"));
+    Ok(None)
+}
+
+/// The APFS pick without a merge (the common case): the change of the picked state over its
+/// parent is a thin layer over the head, and only the changed paths are written to the working
+/// folder. No tree is copied. Returns false, with nothing changed, when the merge is needed: the
+/// head changed the same paths, a folder or an attributes file changed, the working folder has
+/// local changes, or the state is not a thin layer over its parent.
+#[cfg(target_os = "macos")]
+fn thin_pick(ctx: &Ctx, repo: &Repo, line: &Line, pick: &str, picked_from: bool) -> Result<Option<String>> {
+    let _t = crate::trace::span("thin pick");
+    let c = repo.state(pick)?;
+    let [base] = c.parents.as_slice() else { return declined("parents"); };
+    let base = base.clone();
+    // A thin picked state holds its change in its own layer (when that layer sits on `base`); a
+    // complete one (saved with caches) is read through its change set.
+    let own_layer = repo.p.delta_path(pick);
+    let complete = repo.p.state_path(pick);
+    let thin = !complete.is_dir() && own_layer.is_dir() && crate::storage::subvol_info(&own_layer)?.base.as_deref() == Some(base.as_str());
+    if !thin && !complete.is_dir() {
+        return declined("own layer");
+    }
+    repo.authorize_line(ctx, line, crate::repo::LineOp::Direct)?;
+    let _lock = repo.p.lock()?;
+    let line = repo.line(&line.id)?;
+    if repo.current_stage(&line)?.is_some() {
+        return declined("stage");
+    }
+    let w = repo.working(&line);
+    let head_src = repo.head_src(&line)?;
+    // Local changes go through the merge. Overlay folders are not part of the head: the walk for
+    // them (`cache_paths`) runs only when the working folder has a change.
+    let local = changes::file_changes(&head_src, &w)?;
+    if !local.is_empty() {
+        let regen = repo.cache_paths(&w);
+        let keep = |p: &str| !skip_path(p) && !regen.iter().any(|r| p == r || p.starts_with(&format!("{r}/")));
+        if local.iter().any(|x| keep(&x.path) || x.old_path.as_deref().is_some_and(keep)) {
+            return declined("local change");
+        }
+    }
+    let base_src = repo.state_src(&base)?;
+    let pick_src = repo.state_src(pick)?;
+    let cands = changes::candidates(&base_src, &pick_src)?;
+    if cands.iter().any(|x| x.old.as_ref().is_some_and(|m| m.is_dir()) || x.new.as_ref().is_some_and(|m| m.is_dir())) {
+        return declined("directory change");
+    }
+    let theirs: Vec<changes::Change> =
+        changes::without_moves(changes::file_changes_of(&base_src, &pick_src, cands)?).into_iter().filter(|x| !skip_path(&x.path)).collect();
+    let attributes = |p: &str| p.ends_with(".layrattributes") || p.ends_with(".gitattributes");
+    // Only a derive rule changes the merge of other paths; the merge reads the root attributes.
+    let mut derive = false;
+    for s in [&head_src as &dyn crate::fsutil::Src, &pick_src] {
+        for n in [".layrattributes", ".gitattributes"] {
+            if let Ok(text) = s.at(n).and_then(|p| Ok(std::fs::read_to_string(p).unwrap_or_default())) {
+                derive |= text.contains("derive");
+            }
+        }
+    }
+    if derive || theirs.iter().any(|x| attributes(&x.path) || x.old_path.as_deref().is_some_and(attributes)) {
+        return declined("attributes");
+    }
+    let mut ours: Vec<String> = Vec::new();
+    if line.head != base {
+        for x in changes::without_moves(changes::file_changes(&base_src, &head_src)?) {
+            ours.push(x.path);
+        }
+    }
+    let overlaps = |a: &str, b: &str| a == b || a.starts_with(&format!("{b}/")) || b.starts_with(&format!("{a}/"));
+    for x in &theirs {
+        if ours.iter().any(|o| overlaps(&x.path, o)) {
+            return declined("overlap");
+        }
+    }
+    let _t = crate::trace::span(format!("pick visits {} paths", theirs.len()));
+    // The layer of the picked state already holds exactly its change over `base`: it becomes the
+    // layer of the new state over the head.
+    let (src, diff) = if thin {
+        let mut write = std::collections::BTreeSet::new();
+        crate::fsutil::walk(&own_layer, "", &mut |p, _| {
+            if !p.is_empty() {
+                write.insert(p.to_string());
+            }
+            Ok(true)
+        })?;
+        (own_layer.clone(), crate::thin::Diff { write, removed: crate::thin::removed_of(&own_layer)?, whole: Default::default() })
+    } else {
+        // The change set of the picked state over `base`, read from its complete tree.
+        let mut write = std::collections::BTreeSet::new();
+        let mut removed = std::collections::BTreeSet::new();
+        for x in &theirs {
+            if x.new.is_some() {
+                write.insert(x.path.clone());
+            } else {
+                removed.insert(x.path.clone());
+            }
+            if let Some(o) = &x.old_path {
+                removed.insert(o.clone());
+            }
+        }
+        (complete.clone(), crate::thin::Diff { write, removed, whole: Default::default() })
+    };
+    let id = ids::new_id();
+    let dst = repo.p.delta_path(&id);
+    crate::thin::write_layer(&src, &dst, &diff, &line.head, false, None)?;
+    let message = if picked_from {
+        format!("{}\n\n(picked from state {})", c.message, ids::display(pick))
+    } else {
+        c.message.clone()
+    };
+    let mut st = repo.describe_state(ctx, id.clone(), StateKind::Commit, vec![line.head.clone()], &message, Some(&line))?;
+    st.author = c.author.clone();
+    st.change_id = c.change_id.clone();
+    let states = std::slice::from_ref(&st);
+    let fail = |e: anyhow::Error| {
+        repo.discard_states(states);
+        e
+    };
+    if let Err(e) = repo.check_move(ctx, &line, &id) {
+        return Err(fail(e));
+    }
+    // The working folder takes the paths of the change (removals first, as a folder can replace
+    // a file). Each path is read from the layer that holds it in the new tree.
+    let view = crate::thin::Layered::of_state(&repo.p, &id)?;
+    let own = repo.own(&line);
+    let work = (|| -> Result<()> {
+        for x in &theirs {
+            for gone in x.old_path.iter().chain(x.new.is_none().then_some(&x.path)) {
+                if view.find(gone)?.is_none() {
+                    crate::fsutil::remove_entry(&w, gone)?;
+                }
+            }
+        }
+        for x in theirs.iter().filter(|x| x.new.is_some()) {
+            crate::fsutil::copy_work_entry(&view, &x.path, &w, &x.path, own)?;
+        }
+        Ok(())
+    })();
+    if let Err(e) = work {
+        return Err(fail(e));
+    }
+    let data = serde_json::json!({"source": pick, "version": crate::model::VersionOperation {
+        state: id.clone(), kind: "pick".into(), source: pick.into(),
+        target_line: Some(line.id.clone()), target_head: line.head.clone(),
+    }});
+    // The working folder was clean, so its content before the pick is the head: undo reverts the
+    // working content of the pick with it (deleted files come back).
+    repo.move_head(ctx, "cherry-pick", &line, &id, vec![st], Some(line.head.clone()), data)?;
+    Ok(Some(id))
 }
 
 /// The uncommitted paths that a pick kept: the names of the first 20, then the count of the rest.
