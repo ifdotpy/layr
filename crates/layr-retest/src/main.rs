@@ -382,7 +382,9 @@ fn hash_env(root: &Path) -> Result<Vec<(String, String)>> {
     let (var, value) = rustflags::env_with_flags(&env_of, &files, &rustc_host()?, &["-C", "instrument-coverage"])?;
     let mut env = vec![(var, value)];
     if std::env::var(INCREMENTAL_VAR).as_deref() != Ok("0") {
+        // A rustc wrapper such as sccache refuses incremental compilation, so the wrapper is cleared with it.
         env.push(("CARGO_INCREMENTAL".to_string(), "1".to_string()));
+        env.push(("RUSTC_WRAPPER".to_string(), String::new()));
     }
     env.extend(debug_vars(std::env::var(LINE_TABLES_VAR).ok().as_deref()).into_iter().map(|(k, v)| (k.to_string(), v.to_string())));
     Ok(env)
@@ -526,6 +528,12 @@ fn sweep_after_build(root: &Path, target: &Path, hash: &[(String, String)], own:
     }
 }
 
+/// Whether a build wrote a profile folder in `target` (`<target>/<profile>/.fingerprint`, any profile). The
+/// listing names the profiles itself, so a folder with only a release or a custom profile is swept too.
+fn built(target: &Path) -> bool {
+    std::fs::read_dir(target).into_iter().flatten().flatten().any(|e| e.path().join(".fingerprint").is_dir())
+}
+
 /// `layr retest sweep [--dry-run]`: remove the units that the commands of the workspace do not use.
 /// `target` takes the `sweep` list. `target/retest` takes the `sweep` and `retest` lists under the
 /// environment of the retest build, and is left as it is without a `retest` list. Every folder is
@@ -558,7 +566,7 @@ fn sweep_cmd(args: &[String]) -> Result<i32> {
     let mut lists = Vec::new();
     for (target, env, commands) in folders {
         let name = target.strip_prefix(&root).unwrap_or(&target).display().to_string();
-        if !target.join("debug").is_dir() {
+        if !built(&target) {
             continue;
         }
         let Some(commands) = commands else {
