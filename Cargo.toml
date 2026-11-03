@@ -2,6 +2,10 @@
 members = ["crates/layr-store", "crates/layr-model", "crates/layr-retest"]
 resolver = "2"
 
+[workspace.metadata.layr-retest]
+sweep = [["build", "--release", "--locked"], ["test", "--release", "--locked", "--no-run"]]
+env = { CARGO_INCREMENTAL = "1", RUSTC_WRAPPER = "" }
+
 [package]
 name = "layr"
 version = "0.17.0"

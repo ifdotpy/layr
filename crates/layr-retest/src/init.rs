@@ -10,8 +10,9 @@ use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, Value};
 
 /// Standard build of a cargo project: the default `sweep` of `[workspace.metadata.layr-retest]`.
 const SWEEP_DEFAULT: &[&str] = &["build", "--workspace", "--all-targets", "--locked"];
-/// Default `env` of `[workspace.metadata.layr-retest]`: incremental compilation, faster for a small change.
-const ENV_DEFAULT: &[(&str, &str)] = &[("CARGO_INCREMENTAL", "1")];
+/// Default `env` of `[workspace.metadata.layr-retest]`: incremental compilation, faster for a small change. A rustc
+/// wrapper (such as sccache, set in `~/.cargo/config.toml`) refuses incremental compilation, so it is cleared.
+const ENV_DEFAULT: &[(&str, &str)] = &[("CARGO_INCREMENTAL", "1"), ("RUSTC_WRAPPER", "")];
 
 /// What the project folder uses.
 #[derive(Debug, Default, PartialEq)]
@@ -300,7 +301,7 @@ mod tests {
         assert_eq!(added, ["sweep", "env"]);
         assert!(out.contains("[workspace.metadata.layr-retest]"), "{out}");
         assert!(out.contains("sweep = [[\"build\", \"--workspace\", \"--all-targets\", \"--locked\"]]"), "{out}");
-        assert!(out.contains("env = { CARGO_INCREMENTAL = \"1\" }"), "{out}");
+        assert!(out.contains("env = { CARGO_INCREMENTAL = \"1\", RUSTC_WRAPPER = \"\" }"), "{out}");
         assert_eq!(add_retest_config(&out).unwrap(), None, "a second run changes nothing");
     }
 

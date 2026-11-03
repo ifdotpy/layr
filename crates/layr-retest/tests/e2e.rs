@@ -585,7 +585,8 @@ fn gate_applies_the_project_env_and_returns_the_command_status() {
     .unwrap();
     std::fs::write(bad.join("src/lib.rs"), "").unwrap();
     cargo(&bad, &["generate-lockfile"]);
-    std::fs::create_dir_all(bad.join("target/debug")).unwrap();
+    // A folder that a build wrote: it has a profile folder with a fingerprint folder.
+    std::fs::create_dir_all(bad.join("target/debug/.fingerprint")).unwrap();
     let out = gate_child(&bad, &lock, &["--", "true"]).wait_with_output().unwrap();
     let err = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(0), "{err}");
@@ -774,6 +775,44 @@ fn sweep_keeps_the_units_of_the_other_standard_commands() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+/// A project whose standard commands build the release profile only (no `target/debug`): the sweep sweeps
+/// `target/release`, keeps the incremental data of the live units, and the next build compiles nothing.
+#[test]
+fn sweep_sweeps_a_release_only_target() {
+    let tmp = std::env::temp_dir().canonicalize().unwrap().join(format!("layr-retest-sweep-release-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let ws = tmp.join("ws");
+    sweep_workspace(&ws, "sweep = [[\"build\", \"--release\", \"--workspace\"]]\nenv = { CARGO_INCREMENTAL = \"1\", RUSTC_WRAPPER = \"\" }");
+    // The layr project's release profile (`debug = 1`): the objects of a bin stay in `deps` and link it to its incremental data.
+    let manifest = std::fs::read_to_string(ws.join("Cargo.toml")).unwrap();
+    std::fs::write(ws.join("Cargo.toml"), manifest + "\n[profile.release]\ndebug = 1\n").unwrap();
+    // The machine may set a rustc wrapper (sccache), which refuses incremental compilation.
+    let (env, target) = ([("CARGO_INCREMENTAL", "1"), ("RUSTC_WRAPPER", "")], ws.join("target"));
+    let release = target.join("release");
+    let build = ["build", "--release", "--workspace"];
+
+    cargo_in(&ws, &target, &env, &build);
+    let (units, outputs, inc) = (entries(&release, ".fingerprint"), hashes(&release, "deps"), entries(&release, "incremental"));
+
+    cargo_in(&ws, &target, &env, &["build", "--release", "--workspace", "--features", "lib-a/extra"]);
+    assert!(entries(&release, ".fingerprint").len() > units.len());
+    // A changed function keeps the unit hash: the build writes new object files of the same unit.
+    set_lib_a(&ws, "1 + 0");
+    cargo_in(&ws, &target, &env, &build);
+
+    let err = sweep_cmd(&ws, &[]);
+    assert!(err.contains("swept"), "the release folder was not swept:\n{err}");
+    assert_eq!(entries(&release, ".fingerprint"), units, "a non-live unit stays");
+    assert_eq!(hashes(&release, "deps"), outputs, "a unit of the feature build stays, or a live unit lost its newest files");
+    assert_eq!(entries(&release, "incremental"), inc, "the incremental data of a live unit was removed");
+    let builds = object_builds(&release);
+    assert!(builds.values().all(|b| b.len() == 1), "{builds:?}");
+
+    let err = cargo_in(&ws, &target, &env, &build);
+    assert!(!err.contains("Compiling"), "the next build compiled:\n{err}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 /// Modification times of the output files of a profile folder: a build that compiles a unit writes its
 /// `.rlib`, `.rmeta`, objects and binaries in `deps`, `build` and `examples`. Left out: the files directly in
 /// the folder (cargo re-links the uplifted binary `debug/<bin>` to the command it runs, with no compile),
@@ -952,12 +991,13 @@ fn sweep_sweeps_target_retest_with_a_retest_command() {
     let ws = tmp.join("ws");
     sweep_workspace(
         &ws,
-        "sweep = [[\"build\", \"--workspace\", \"--tests\", \"--bins\"]]\nretest = [[\"test\", \"--workspace\", \"--no-run\"]]",
+        "sweep = [[\"build\", \"--workspace\", \"--tests\", \"--bins\"]]\nretest = [[\"test\", \"--workspace\", \"--no-run\"]]\nenv = { RUSTC_WRAPPER = \"\" }",
     );
     // The variables that `layr retest` gives its cargo calls, so that the unit hashes match the sweep.
     let env = [
         ("RUSTFLAGS", "-C instrument-coverage"),
         ("CARGO_INCREMENTAL", "1"),
+        ("RUSTC_WRAPPER", ""),
         ("CARGO_PROFILE_DEV_DEBUG", "line-tables-only"),
         ("CARGO_PROFILE_TEST_DEBUG", "line-tables-only"),
     ];
