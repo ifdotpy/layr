@@ -223,6 +223,13 @@ impl Layout {
         self.names().into_iter().filter_map(|v| self.ready(&v).ok().map(|p| (v, p.join("projects")))).collect()
     }
 
+    /// The configured paths of the volumes other than `main`, usable or not. The OverlayFS
+    /// registry needs every one: a tree under an unusable volume must still find the store home.
+    #[cfg_attr(not(feature = "overlayfs"), allow(dead_code))]
+    pub fn volume_paths(&self) -> Vec<PathBuf> {
+        self.volumes.values().cloned().collect()
+    }
+
     /// The paths of the volumes other than `main` that can be used.
     pub fn ready_volume_paths(&self) -> Vec<PathBuf> {
         self.volumes.keys().filter_map(|v| self.ready(v).ok()).collect()
