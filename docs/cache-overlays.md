@@ -441,7 +441,7 @@ versioned overlay is refused: its files are history.
 - The cache folder of each line on this machine becomes a plain folder with its files. A line
   that the caller may not save keeps its nested cache, and the command warns.
 - A new `save --caches` of the folder makes a new overlay of that name.
-- The states of the removed overlay are freed by the next `layr gc`, as the states of a deleted
+- The states of the removed overlay are freed by the next `layr gc --repair`, as the states of a deleted
   line are. No line keeps them, so gc deletes all of them except the empty first state. Until gc runs, `layr undo` can restore the overlay. There is no `gc --repair` flag.
 - A plain folder that stays `regenerable` in a line becomes a cache again at the line's next
   snapshot, as any regenerable folder does. To keep it plain, remove `regenerable` from
