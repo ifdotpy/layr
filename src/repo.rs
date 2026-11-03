@@ -1917,6 +1917,7 @@ impl<'a> Repo<'a> {
         }
         let (t, regenerable, ignored) = (Tree::open(&w)?, Rules::attribute(&w, "regenerable"), Rules::new(&w));
         let mut head = None;
+        let mut stage = None;
         let mut out = Vec::new();
         for p in paths {
             let Some(m) = t.stat(&p) else { continue };
@@ -1928,8 +1929,12 @@ impl<'a> Repo<'a> {
             }
             if head.is_none() {
                 head = Some(self.state_root(&line.head)?);
+                stage = Some(self.current_stage(line)?);
             }
-            if !holds_files(head.as_ref().unwrap(), &p) {
+            // A file that the head or the stage (`add -f`) versions makes the folder no cache.
+            let versioned = holds_files(head.as_ref().unwrap(), &p)
+                || stage.as_ref().unwrap().as_ref().is_some_and(|s| holds_files(s, &p));
+            if !versioned {
                 out.push(p);
             }
         }
@@ -1969,6 +1974,7 @@ impl<'a> Repo<'a> {
             }
         }
         let mut head = None;
+        let mut stage = None;
         let mut out = Vec::new();
         for p in candidates {
             let cp = fsutil::safe_join(&w, &p)?;
@@ -1977,8 +1983,9 @@ impl<'a> Repo<'a> {
             }
             if head.is_none() {
                 head = Some(self.state_root(&line.head)?);
+                stage = Some(self.current_stage(line)?);
             }
-            if holds_files(head.as_ref().unwrap(), &p) {
+            if holds_files(head.as_ref().unwrap(), &p) || stage.as_ref().unwrap().as_ref().is_some_and(|s| holds_files(s, &p)) {
                 continue;
             }
             let name = match self.folder_overlay_of(&p)? {

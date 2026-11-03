@@ -26,7 +26,8 @@ for i in $(seq 1 20); do
     l save -q >/dev/null || { echo "FAIL: automatic save $i"; exit 1; }
 done
 
-# The store grows by the tracked changes and one live target copy (55 MB), not 20 copies.
+# The store grows by the tracked changes, one live target (55 MB) and at most one first cache state
+# (50 MB, a copy on overlayfs, a clone on APFS and btrfs). Not 20 copies: that is over 1 GB.
 store_bytes() {
     # "store total   50.3 MiB" in `layr du --store`; convert to bytes.
     l du --store | awk '/^store total/ { v = $(NF-1); u = $NF;
@@ -35,7 +36,7 @@ store_bytes() {
 }
 l gc --repair -q >/dev/null 2>&1
 growth=$(store_bytes)
-limit=$((100 * 1048576))  # live target 55 MB; 20 copies would be over 1 GB
+limit=$((130 * 1048576))  # live target 55 MB + first cache state 50 MB; baseline is about 150 MB
 if [ "$growth" -lt "$limit" ]; then
     echo "ok 1 store grows by about one live target copy ($growth bytes)"
     PASS=$((PASS + 1))
