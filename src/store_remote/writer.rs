@@ -1032,7 +1032,7 @@ mod tests {
         store
             .configure(&ctx, &super::super::ConfigureOptions { paper_key_out: Some(root.join("paper")), ..Default::default() })
             .unwrap();
-        let dir = ctx.store.projects_dir().join("p");
+        let dir = ctx.store.project_dir("p").unwrap();
         std::fs::create_dir_all(dir.join("meta/db")).unwrap();
         std::fs::create_dir_all(dir.join("states")).unwrap();
         let project = crate::store::Project {
@@ -1096,7 +1096,7 @@ mod tests {
 
     fn branch_fixture<'a>(ctx: &'a Ctx, store: &Store) -> Repo<'a> {
         use crate::model::{Record, StateRec};
-        let dir = ctx.store.projects_dir().join("p");
+        let dir = ctx.store.project_dir("p").unwrap();
         let existing = dir.join("meta/db/layr.sqlite").exists();
         std::fs::create_dir_all(dir.join("meta/db")).unwrap();
         std::fs::create_dir_all(dir.join("states")).unwrap();

@@ -1264,7 +1264,7 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) ->
     };
     // The storage of the freed states: the leaks above and states that died before this repair.
     let freed = crate::free::finish_project(&repo.p)?;
-    crate::store::empty_trash(&repo.p.store.trash_dir(), None);
+    crate::store::empty_trash(&repo.p.trash_dir()?, None);
     // Temporary objects whose creator is gone, and old ones without a creator pid. A live
     // creator keeps its object: a copy has the times of its source, so its age says nothing.
     for d in [repo.p.scan_dir(), repo.p.work_dir()] {
@@ -1340,6 +1340,12 @@ pub fn trash_excess_caches(repo: &Repo) -> Result<Vec<String>> {
 /// project that fails does not stop the others; the exit code is 1 then.
 fn gc_all_projects(ctx: &Ctx, dry: bool, quiet: bool) -> Result<i32> {
     let mut code = 0;
+    // A project on a volume that cannot be used is skipped: nothing is deleted for it.
+    for (project, volume, reason) in ctx.store.layout()?.missing() {
+        if !project.contains('%') {
+            eprintln!("layr gc: skipped project {project} (volume '{volume}' is not usable): {reason}");
+        }
+    }
     for name in ctx.store.project_names()?.into_iter().filter(|n| !n.contains('%')) {
         let result = Repo::open(ctx, &name).and_then(|repo| {
             repo.require(ctx, "gc")?;
@@ -1456,14 +1462,19 @@ fn drop_built_imports(repo: &Repo, dry: bool) -> Result<Vec<String>> {
 
 /// Print the trash entries that the last emptying could not delete (`<store>/trash.errors`).
 fn print_trash_errors(store: &crate::store::Store) {
-    let path = store.root.join("trash.errors");
-    let Ok(text) = std::fs::read_to_string(&path) else { return };
-    if text.is_empty() {
-        return;
-    }
-    eprintln!("warning: {} trash entries could not be deleted ({}):", text.lines().count(), path.display());
-    for line in text.lines() {
-        eprintln!("\t{line}");
+    // Each volume keeps its own report beside its trash.
+    let mut roots = vec![store.root.clone()];
+    roots.extend(store.layout().map(|l| l.ready_volume_paths()).unwrap_or_default());
+    for root in roots {
+        let path = root.join("trash.errors");
+        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        if text.is_empty() {
+            continue;
+        }
+        eprintln!("warning: {} trash entries could not be deleted ({}):", text.lines().count(), path.display());
+        for line in text.lines() {
+            eprintln!("\t{line}");
+        }
     }
 }
 
@@ -1777,12 +1788,15 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
         .value("-b|--branch")
         .value("--line")
         .value("--owner")
+        .value("--volume")
         .flag("--include-ignored")
         .value("-m|--message")
         .flag("-q|--quiet");
     let a = parse(&spec, args)?;
-    let name =
-        a.pos.first().ok_or_else(|| exit(128, "usage: layr init <project> [--from <folder> | --git <url>] [--line main]"))?;
+    let name = a
+        .pos
+        .first()
+        .ok_or_else(|| exit(128, "usage: layr init <project> [--from <folder> | --git <url>] [--line main] [--volume <name>]"))?;
     let line_name = a.get("--line").unwrap_or("main").to_string();
     let owner = match a.get("--owner") {
         Some(o) if ctx.caller.is_root() => o.parse::<u32>().or_else(|_| -> Result<u32> {
@@ -1806,9 +1820,10 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     // Project::create makes the folder or fails without changing an existing one. From here on,
     // the failure cleanup below removes the folder that this call made.
-    let p = Project::create(
+    let p = Project::create_on(
         &ctx.store,
         name,
+        a.get("--volume"),
         &actor,
         serde_json::json!({"access": {format!("user:{owner}"): "admin"}, "protect": {"main": {}}}),
     )?;
@@ -2525,7 +2540,7 @@ mod record_caches_tests {
             env: std::collections::HashMap::from([("LAYR_PROJECT".into(), "p".into())]),
             out: std::cell::RefCell::new(Box::new(std::io::sink())),
         };
-        let project_dir = ctx.store.projects_dir().join("p");
+        let project_dir = ctx.store.project_dir("p").unwrap();
         std::fs::create_dir_all(project_dir.join("meta/db"))?;
         std::fs::create_dir(project_dir.join("states"))?;
         let id = ids::new_id();
