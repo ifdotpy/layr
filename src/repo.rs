@@ -1926,14 +1926,14 @@ impl<'a> Repo<'a> {
 
     /// The cache paths of the machine setting and of the folders that `.layrattributes` files in
     /// the working folder `w` make regenerable.
-    pub fn cache_paths(&self, w: &Path) -> Vec<String> {
+    pub fn cache_paths(&self, w: &Path) -> Result<Vec<String>> {
         let mut paths = self.p.config_strings("regenerable");
-        for p in regenerable_memo(w) {
+        for p in regenerable_memo(w)? {
             if !paths.contains(&p) {
                 paths.push(p);
             }
         }
-        paths
+        Ok(paths)
     }
 
     /// Cache paths of the line that are plain folders now, so that a snapshot would put their
@@ -1953,7 +1953,7 @@ impl<'a> Repo<'a> {
                 paths.push(f);
             }
         }
-        for f in regenerable_memo(&w) {
+        for f in regenerable_memo(&w)? {
             if !paths.contains(&f) {
                 paths.push(f);
             }
@@ -2011,7 +2011,7 @@ impl<'a> Repo<'a> {
             return Ok(Vec::new());
         }
         let mut candidates = self.p.config_strings("regenerable");
-        for f in regenerable_memo(&w) {
+        for f in regenerable_memo(&w)? {
             if !candidates.contains(&f) {
                 candidates.push(f);
             }
@@ -2096,7 +2096,7 @@ impl<'a> Repo<'a> {
     /// folder holds files in the head of the line. Such a folder is versioned: never a cache.
     pub fn line_cache_paths(&self, line: &Line) -> Result<(Vec<String>, Vec<String>)> {
         let head = self.state_root(&line.head)?;
-        Ok(self.cache_paths(&self.working(line)).into_iter().partition(|p| !holds_files(&head, p)))
+        Ok(self.cache_paths(&self.working(line))?.into_iter().partition(|p| !holds_files(&head, p)))
     }
 
     /// The cache paths that `state` or its ancestors saved (the search of `warm_cache`).
@@ -2548,12 +2548,12 @@ pub(crate) fn give_tree(root: &Path, uid: u32, gid: u32) -> Result<()> {
 /// a walk (`regenerable_by_walk`): the walk enters the folders that the root `.gitignore` does not
 /// ignore, so it may enter a folder that a nested rule file ignores. Such a folder and its children
 /// are no candidate, as in the scan. A folder is no candidate when an ignored folder is above it.
-pub fn regenerable_folders(w: &Path) -> Vec<String> {
+pub fn regenerable_folders(w: &Path) -> Result<Vec<String>> {
     // macOS: the save scans the working folder anyway, and that scan lists every entry, so the
     // folders come from it: a walk of 3k folders cost 200 ms here, against a 20 ms budget.
     #[cfg(target_os = "macos")]
     if let Ok(scan) = btrfs::scan_with_data(w, true) {
-        return regenerable_in_scan(w, &scan);
+        return Ok(regenerable_in_scan(w, &scan));
     }
     regenerable_by_walk(w)
 }
@@ -2592,13 +2592,13 @@ fn regenerable_in_scan(w: &Path, scan: &BTreeMap<String, btrfs::ScanEntry>) -> V
 }
 
 /// `regenerable_folders` by a walk of the folders (the other systems, and a scan that fails).
-fn regenerable_by_walk(w: &Path) -> Vec<String> {
+fn regenerable_by_walk(w: &Path) -> Result<Vec<String>> {
     let _t = crate::trace::span("regenerable walk");
-    let Ok(t) = Tree::open(w) else { return Vec::new() };
+    let t = Tree::open(w)?;
     let root_only = Rules::limited(w, None, std::collections::HashSet::from([String::new()]));
     let mut rule_dirs = std::collections::HashSet::from([String::new()]);
     let mut children = Vec::new();
-    let walked = t.walk_folders(|dir, entries| {
+    t.walk_folders(|dir, entries| {
         let mut enter = Vec::new();
         for (name, is_dir) in entries {
             if matches!(name.as_str(), ".gitignore" | ".layrignore" | ".layrattributes") {
@@ -2615,9 +2615,6 @@ fn regenerable_by_walk(w: &Path) -> Vec<String> {
         }
         enter
     });
-    if walked.is_err() {
-        return Vec::new();
-    }
     let (regenerable, ignored) = (
         Rules::limited(w, Some("regenerable"), rule_dirs.clone()),
         Rules::limited(w, None, rule_dirs),
@@ -2632,7 +2629,7 @@ fn regenerable_by_walk(w: &Path) -> Vec<String> {
         })
         .collect();
     found.sort();
-    found
+    Ok(found)
 }
 
 thread_local! {
@@ -2642,17 +2639,17 @@ thread_local! {
 
 /// `regenerable_folders`, once per command: the save paths ask several times (before the store
 /// lock and under it). `clear_regenerable_memo` starts a new command.
-pub fn regenerable_memo(w: &Path) -> Vec<String> {
+pub fn regenerable_memo(w: &Path) -> Result<Vec<String>> {
     REGENERABLE.with(|m| {
         let mut m = m.borrow_mut();
         if let Some((path, found)) = m.as_ref() {
             if path == w {
-                return found.clone();
+                return Ok(found.clone());
             }
         }
-        let found = regenerable_folders(w);
+        let found = regenerable_folders(w)?;
         *m = Some((w.to_path_buf(), found.clone()));
-        found
+        Ok(found)
     })
 }
 
@@ -3076,19 +3073,44 @@ pub fn holds_files(root: &Path, path: &str) -> bool {
 }
 
 #[cfg(test)]
+mod regenerable_walk_tests {
+    use super::*;
+
+    #[test]
+    fn the_walk_finds_the_regenerable_folders_the_ignore_rules_ignore() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("layr-regen-walk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for d in ["a/target/debug", "a/src", "b/node_modules/pkg", "b/keep", "c/dist", "d/target", "e/build/target/x"] {
+            std::fs::create_dir_all(root.join(d))?;
+        }
+        std::fs::write(root.join(".gitignore"), "target/\nnode_modules/\ndist/\nbuild/\n")?;
+        std::fs::write(root.join(".layrattributes"), "target regenerable\n")?;
+        std::fs::write(root.join("b/.layrattributes"), "node_modules regenerable\n")?;
+        std::fs::write(root.join("c/.layrattributes"), "dist regenerable\n")?;
+        // `build` is ignored by a nested .gitignore, so the target below it is no candidate.
+        std::fs::write(root.join("e/.gitignore"), "build/\n")?;
+        let found = regenerable_by_walk(&root)?;
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(found, vec!["a/target", "b/node_modules", "c/dist", "d/target"]);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
 mod regenerable_memo_tests {
     use super::*;
 
     #[test]
-    fn a_new_command_does_not_read_the_list_of_an_earlier_command() {
+    fn a_new_command_does_not_read_the_list_of_an_earlier_command() -> Result<()> {
         let w = Path::new("/layr-test/regenerable-memo/w");
         set_regenerable_memo(w, vec!["target".to_string()]);
         assert!(regenerable_memo_is_set());
         // The same path gives the list it holds, with no walk, inside one command.
-        assert_eq!(regenerable_memo(w), vec!["target".to_string()]);
+        assert_eq!(regenerable_memo(w)?, vec!["target".to_string()]);
         // The dispatcher (`cmd::run`, `service::run_as`) starts every command with `begin_command`.
         begin_command();
         assert!(!regenerable_memo_is_set());
+        Ok(())
     }
 }
 

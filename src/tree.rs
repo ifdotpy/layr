@@ -587,7 +587,8 @@ impl Tree {
     /// the type comes with the listing (one stat only for a filesystem that gives no type). A name
     /// that is not UTF-8 is left out.
     pub fn walk_folders(&self, mut visit: impl FnMut(&str, &[(String, bool)]) -> Vec<String>) -> Result<()> {
-        let mut stack = vec![(String::new(), rustix::io::dup(&self.root)?)];
+        // The root descriptor is O_PATH on Linux (no reads): open the folder again to read it.
+        let mut stack = vec![(String::new(), openat2(&self.root, "", OFlags::RDONLY | OFlags::DIRECTORY)?)];
         while let Some((rel, fd)) = stack.pop() {
             let mut entries = Vec::new();
             for e in rustix::fs::Dir::read_from(&fd)? {
