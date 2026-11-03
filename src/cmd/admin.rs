@@ -1838,6 +1838,8 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let (l, state) = match res {
         Ok(x) => x,
         Err(e) => {
+            // Close the database first: an open file keeps its overlay mount busy (OverlayFS).
+            drop(repo);
             // Remove the folder this call made, with its subvolumes. The error of the step is kept.
             if let Err(c) = btrfs::delete_tree(&dir) {
                 return Err(e.context(format!("cannot remove {}: {c:#}", dir.display())));
