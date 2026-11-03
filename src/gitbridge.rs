@@ -1,7 +1,8 @@
 //! The remote bridge to git, and the `.git` folder of each line for tools that call git.
 //!
 //! The project git object store is `<project>/git` (a bare repository, readable by the readers).
-//! Import maps the full Git DAG to states and keeps exact commit/tree objects in encrypted records.
+//! Import maps the full Git DAG to states: each commit is a record with its exact commit/tree
+//! objects (encrypted records). The tree of a state is built from git when it is read (`build_tree`).
 //! Export restores imported objects; for new states it builds a git tree
 //! from the tree of the previous mapped commit plus the changed paths, makes one commit with
 //! fixed author and committer data, records the exact commit id, then pushes it. After a lost
@@ -692,34 +693,21 @@ fn clone_matching_blob(
 /// lock, so the lines show that it still runs.
 const IMPORT_PROGRESS_EVERY: usize = 50;
 
-/// Import the entire reachable DAG, parents first. A retry reuses completed imports.
-pub fn import_commit(
-    ctx: &Ctx,
-    repo: &Repo,
-    commit: &str,
-    refname: &str,
-    author_uid: u32,
-    source: Option<&Path>,
-) -> Result<(String, bool)> {
-    import_commit_with(ctx, repo, commit, refname, author_uid, source, false)
+/// Import the entire reachable DAG, parents first. A retry reuses completed imports. Each commit
+/// becomes a state record without a tree (`import_one`); its tree is built from git when a command
+/// reads it (`build_tree`, through `Repo::check_state`).
+pub fn import_commit(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str, author_uid: u32) -> Result<(String, bool)> {
+    import_commit_with(ctx, repo, commit, refname, author_uid, false)
 }
 
 /// `import_commit` for a caller that holds no project lock: the import takes it for one commit
 /// at a time, so other commands of the store wait for one commit, not for the whole import.
 pub fn import_commit_unlocked(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str, author_uid: u32) -> Result<(String, bool)> {
-    import_commit_with(ctx, repo, commit, refname, author_uid, None, true)
+    import_commit_with(ctx, repo, commit, refname, author_uid, true)
 }
 
-fn import_commit_with(
-    ctx: &Ctx,
-    repo: &Repo,
-    commit: &str,
-    refname: &str,
-    author_uid: u32,
-    source: Option<&Path>,
-    take_lock: bool,
-) -> Result<(String, bool)> {
-    match import_commit_once(ctx, repo, commit, refname, author_uid, source, take_lock) {
+fn import_commit_with(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str, author_uid: u32, take_lock: bool) -> Result<(String, bool)> {
+    match import_commit_once(ctx, repo, commit, refname, author_uid, take_lock) {
         Ok(value) => Ok(value),
         Err(error) => {
             if !repair_cache(repo)? {
@@ -727,20 +715,12 @@ fn import_commit_with(
             }
             let remote = refname.split_once('/').context("import ref has no remote")?.0;
             fetch(ctx, repo, remote)?;
-            import_commit_once(ctx, repo, commit, refname, author_uid, source, take_lock)
+            import_commit_once(ctx, repo, commit, refname, author_uid, take_lock)
         }
     }
 }
 
-fn import_commit_once(
-    ctx: &Ctx,
-    repo: &Repo,
-    commit: &str,
-    refname: &str,
-    author_uid: u32,
-    source: Option<&Path>,
-    take_lock: bool,
-) -> Result<(String, bool)> {
+fn import_commit_once(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str, author_uid: u32, take_lock: bool) -> Result<(String, bool)> {
     let s = init_store(repo)?;
     let revs = git_out(&s, &["rev-list", "--topo-order", "--reverse", "--parents", commit])?;
     let mut states = BTreeMap::new();
@@ -753,11 +733,13 @@ fn import_commit_once(
         let git_parents: Vec<&str> = fields.collect();
         let mapped_state = || -> Result<Option<String>> {
             for st in repo.p.db.state_of_commit(oid)? {
-                if repo.p.has_state(&st) {
-                    // Earlier versions imported only the tip; reimport those states as a full DAG.
-                    if repo.state(&st)?.kind != StateKind::Import || repo.p.db.git_import(&st)?.is_some() {
-                        return Ok(Some(st));
-                    }
+                // An imported state is mapped by its record, which holds the Git objects of the
+                // commit (earlier versions imported only the tip and their records lack them).
+                // Other states are mapped when their tree is on disk.
+                let Some(rec) = repo.p.db.state(&st)? else { continue };
+                let mapped = if rec.kind == StateKind::Import { repo.p.db.has_git_import(&st)? } else { repo.p.has_state(&st) };
+                if mapped {
+                    return Ok(Some(st));
                 }
             }
             Ok(None)
@@ -778,10 +760,9 @@ fn import_commit_once(
                     .iter()
                     .map(|p| states.get(*p).cloned().ok_or_else(|| anyhow!("Git parent {p} was not imported")))
                     .collect::<Result<_>>()?;
-                let prev = parents.first().zip(git_parents.first()).map(|(st, c)| (st.clone(), c.to_string()));
                 let raw = cat.object(oid, "commit")?;
                 let (objects, changes) = import_changes(&raw, git_parents.first().copied(), &mut cat)?;
-                let st = import_one(ctx, repo, &s, &mut cat, oid, &raw, refname, parents, prev, objects, changes, source)?;
+                let st = import_one(ctx, repo, oid, &raw, refname, parents, objects, changes)?;
                 fresh |= oid == commit;
                 imported += 1;
                 if imported % IMPORT_PROGRESS_EVERY == 0 {
@@ -796,79 +777,145 @@ fn import_commit_once(
     Ok((states.remove(commit).context("Git tip was not imported")?, fresh))
 }
 
+/// Record one imported commit as a state without a tree. The record holds the exact Git objects
+/// of the commit (`GitImport`); the tree is built from git on the first read (`build_tree`).
+#[allow(clippy::too_many_arguments)]
 fn import_one(
     ctx: &Ctx,
     repo: &Repo,
-    s: &Path,
-    cat: &mut CatFile,
     commit: &str,
     raw: &[u8],
     refname: &str,
     parents: Vec<String>,
-    prev: Option<(String, String)>,
     objects: GitImport,
     changes: Changes,
-    source: Option<&Path>,
 ) -> Result<String> {
     // On a store volume that ignores case, README and Readme would become one file. The earlier
     // state passed this check: only the entries of changed folders can collide.
     fsutil::refuse_case_collisions(&repo.p.work_dir(), changes.names.iter().map(|n| n.as_str()))?;
-    let work = repo.p.work_dir().join(crate::store::temp_name());
-    let res = (|| -> Result<StateRec> {
-        let (name, email, msg, time) = commit_info(raw);
-        // A state with a base and few changes is a thin layer: its cost follows the changes.
-        let layer = match &prev {
-            Some((pst, _)) => thin_import(repo, cat, &changes, &work, pst, source)?,
-            None => None,
-        };
-        let mut st = match layer {
-            Some(id) => repo.describe_state(ctx, id, StateKind::Import, parents, &msg, None)?,
-            None => {
-                match &prev {
-                    Some((pst, _)) => {
-                        repo.snapshot_state(pst, &work, false)?;
-                        let paths: Vec<String> =
-                            changes.write.iter().map(|w| w.0.clone()).chain(changes.removed.iter().cloned()).collect();
-                        materialize(s, commit, &work, Some(&paths), None, source)?;
-                    }
-                    None => {
-                        crate::storage::create_subvolume(&work)?;
-                        materialize(s, commit, &work, None, None, source)?;
-                    }
-                }
-                repo.new_state(ctx, &work, StateKind::Import, parents, &msg, None)?
-            }
-        };
-        st.author = crate::model::Author { name, email, uid: 0, session: None };
-        st.time = time.max(1);
-        Ok(st)
-    })();
-    let _ = crate::storage::delete_tree(&work);
-    let st = res?;
+    let (name, email, msg, time) = commit_info(raw);
+    let mut st = repo.state_record(ctx, ids::new_id(), StateKind::Import, parents, &msg, None, String::new());
+    st.author = crate::model::Author { name, email, uid: 0, session: None };
+    st.time = time.max(1);
     let mut rec = Record::new("import");
     rec.states.push(st.clone());
     rec.data = serde_json::json!({"ref": refname, "commit": commit, "state": st.id, "git": objects});
     repo.commit_record(ctx, rec)?;
-    // Indexes are built lazily for line heads, not for every historical commit.
     Ok(st.id)
 }
 
-/// A thin layer of the changes over the state `base` of the first parent, written from the
-/// changed files only. `None` when the chain of `base` is long enough for a complete tree
+/// The Git commit of an imported state that the store holds: the commit its record names, not a
+/// squash commit.
+fn stored_commit(repo: &Repo, state: &str) -> Result<Option<String>> {
+    let squash = repo.p.db.squash_commits_of(state)?;
+    let s = store(repo);
+    for c in repo.p.db.git_commits_of(state)?.into_iter().filter(|c| !squash.contains(c)) {
+        if git_out(&s, &["cat-file", "-e", &format!("{c}^{{commit}}")]).is_ok() {
+            return Ok(Some(c));
+        }
+    }
+    Ok(None)
+}
+
+/// True when `state` is an imported state that `build_tree` can build: its record holds the Git
+/// objects, and the store holds its commit.
+pub fn buildable(repo: &Repo, state: &str) -> bool {
+    let imported = matches!(repo.p.db.state(state), Ok(Some(s)) if s.kind == StateKind::Import);
+    imported
+        && has_store(repo)
+        && repo.p.db.has_git_import(state).unwrap_or(false)
+        && stored_commit(repo, state).ok().flatten().is_some()
+}
+
+/// The nearest imported ancestor of `state` whose tree is on disk, with its commit. Breadth first,
+/// so the first parent wins a tie.
+fn nearest_built_import(repo: &Repo, state: &str) -> Result<Option<(String, String)>> {
+    let mut seen = BTreeSet::new();
+    let mut queue: std::collections::VecDeque<String> = repo.state(state)?.parents.into();
+    while let Some(id) = queue.pop_front() {
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        let Some(s) = repo.p.db.state(&id)? else { continue };
+        if s.kind == StateKind::Import && repo.p.has_state(&id) {
+            if let Some(c) = stored_commit(repo, &id)? {
+                return Ok(Some((id, c)));
+            }
+        }
+        queue.extend(s.parents);
+    }
+    Ok(None)
+}
+
+/// Build the tree of an imported state from git and mark it present. The tree is a thin layer
+/// over the nearest imported ancestor on disk, holding the changed paths (APFS), or a copy of that
+/// ancestor with the changed paths (other file systems). Without such an ancestor it is the full
+/// tree of the commit. `source` is a folder with the content of the commit (`init --from`); its
+/// files are cloned where their bytes match the Git objects. The caller holds the project lock, or
+/// this function takes it.
+pub fn build_tree(repo: &Repo, state: &str, source: Option<&Path>) -> Result<()> {
+    let _lock = (!repo.p.holds_lock()).then(|| repo.p.lock()).transpose()?;
+    if repo.p.has_state(state) {
+        return Ok(());
+    }
+    let rec = repo.state(state)?;
+    if rec.kind != StateKind::Import {
+        bail!("state {} is not an imported state", ids::short(state));
+    }
+    let commit = stored_commit(repo, state)?
+        .with_context(|| format!("state {} has no Git commit in the store", ids::short(state)))?;
+    let s = store(repo);
+    let _t = crate::trace::span(format!("build {} from git", ids::short(state)));
+    let mut cat = CatFile::new(&s)?;
+    let raw = cat.object(&commit, "commit")?;
+    let base = nearest_built_import(repo, state)?;
+    let (_, changes) = import_changes(&raw, base.as_ref().map(|(_, c)| c.as_str()), &mut cat)?;
+    let work = repo.p.work_dir().join(crate::store::temp_name());
+    let made = (|| -> Result<()> {
+        match &base {
+            Some((b, _)) => {
+                if thin_build(repo, &mut cat, &changes, &work, b, source, state)? {
+                    return Ok(());
+                }
+                repo.snapshot_state(b, &work, false)?;
+                let paths: Vec<String> =
+                    changes.write.iter().map(|w| w.0.clone()).chain(changes.removed.iter().cloned()).collect();
+                materialize(&s, &commit, &work, Some(&paths), None, source)?;
+            }
+            None => {
+                crate::storage::create_subvolume(&work)?;
+                materialize(&s, &commit, &work, None, None, source)?;
+            }
+        }
+        crate::storage::snapshot(&work, &repo.p.state_path(state), true)
+    })();
+    let _ = crate::storage::delete_tree(&work);
+    if let Err(e) = made {
+        let _ = crate::storage::delete_tree(&repo.p.state_path(state));
+        let _ = crate::storage::delete_tree(&repo.p.delta_path(state));
+        return Err(e);
+    }
+    repo.p.db.set_present(state, true)?;
+    Ok(())
+}
+
+/// A thin layer of the changes over the state `base`, written from the changed files only, as the
+/// tree of `state`. False when the chain of `base` is long enough for a complete tree
 /// (`thin.chain`), so reads stay short, and for a project that keeps complete trees.
 #[cfg(target_os = "macos")]
-fn thin_import(
+fn thin_build(
     repo: &Repo,
     cat: &mut CatFile,
     changes: &Changes,
     work: &Path,
     base: &str,
     source: Option<&Path>,
-) -> Result<Option<String>> {
+    state: &str,
+) -> Result<bool> {
     let max = repo.p.config_u64("thin.chain", crate::thin::MAX_CHAIN) as usize;
     let len = crate::thin::chain_len(&repo.p, base);
     if repo.p.is_overlay() || len == 0 || len >= max {
-        return Ok(None);
+        return Ok(false);
     }
     std::fs::create_dir(work)?;
     std::fs::set_permissions(work, std::fs::Permissions::from_mode(0o755))?;
@@ -881,16 +928,20 @@ fn thin_import(
         let data = cat.object(oid, "blob")?;
         place_blob(work, mode, path, &data, None, source.as_ref())?;
     }
-    let d = crate::thin::Diff { write: changes.write.iter().map(|w| w.0.clone()).collect(), removed: changes.removed.clone(), whole: Default::default() };
-    let id = ids::new_id();
-    crate::thin::write_layer(work, &repo.p.delta_path(&id), &d, base, false, None)?;
-    repo.p.db.record_base(&id, base)?;
-    Ok(Some(id))
+    let d = crate::thin::Diff {
+        write: changes.write.iter().map(|w| w.0.clone()).collect(),
+        removed: changes.removed.clone(),
+        whole: Default::default(),
+    };
+    crate::thin::write_layer(work, &repo.p.delta_path(state), &d, base, false, None)?;
+    repo.p.db.record_base(state, base)?;
+    Ok(true)
 }
 
 #[cfg(not(target_os = "macos"))]
-fn thin_import(_: &Repo, _: &mut CatFile, _: &Changes, _: &Path, _: &str, _: Option<&Path>) -> Result<Option<String>> {
-    Ok(None)
+#[allow(clippy::too_many_arguments)]
+fn thin_build(_: &Repo, _: &mut CatFile, _: &Changes, _: &Path, _: &str, _: Option<&Path>, _: &str) -> Result<bool> {
+    Ok(false)
 }
 
 /// Removes the given paths from an index before they are added again. A copied index keeps the
@@ -1017,6 +1068,7 @@ fn repair_cache(repo: &Repo) -> Result<bool> {
         return Ok(false);
     }
     let damaged = repo.p.dir.join(format!("git-damaged-{}", ids::new_id()));
+    forget_objects();
     std::fs::rename(&s, &damaged)?;
     std::fs::set_permissions(&damaged, std::fs::Permissions::from_mode(0o700))?;
     VERIFIED_OBJECTS.with(|objects| objects.borrow_mut().retain(|(path, _)| path != &s));
@@ -1302,14 +1354,11 @@ pub fn commit_of(repo: &Repo, state: &str) -> Result<Option<String>> {
 /// The commit that a record names for a state (import, push, git-sync), if it is in the store.
 /// A squash commit is never one: it has the parent of an earlier export, not the history.
 fn recorded_commit(repo: &Repo, state: &str) -> Result<Option<String>> {
-    let squash = repo.p.db.squash_commits_of(state)?;
-    for c in repo.p.db.git_commits_of(state)?.into_iter().filter(|c| !squash.contains(c)) {
-        if git_out(&store(repo), &["cat-file", "-e", &format!("{c}^{{commit}}")]).is_ok() {
-            check_commit(repo, &c)?;
-            return Ok(Some(c));
-        }
+    let commit = stored_commit(repo, state)?;
+    if let Some(c) = &commit {
+        check_commit(repo, c)?;
     }
-    Ok(None)
+    Ok(commit)
 }
 
 /// The ref of the history commit of a state: the commit `export_history` makes for it, with the
@@ -1647,9 +1696,20 @@ pub fn push(ctx: &Ctx, repo: &Repo, url: &str, commit: &str, branch: &str, force
         if !repair_cache(repo)? {
             return Err(error);
         }
+        // The damaged cache went aside. Imported states have no trees to rebuild their commits from,
+        // so the Git remotes of the project give the objects back (git is the source).
+        let mut remotes: Vec<String> = repo.p.db.remote_refs()?.into_iter().filter_map(|(name, _, _)| name.split('/').next().map(str::to_owned)).collect();
+        remotes.sort();
+        remotes.dedup();
+        for remote in remotes {
+            if repo.p.config_value(&format!("remote.{remote}.url"))?.is_some() {
+                fetch(ctx, repo, &remote)?;
+            }
+        }
+        crate::store_remote::restore_git_objects(ctx, repo)?;
         let mut rebuilt = false;
         for state in repo.p.db.state_of_commit(commit)? {
-            if repo.p.has_state(&state) && export_history(repo, &state)?.0 == commit {
+            if repo.tree_available(&state) && export_history(repo, &state)?.0 == commit {
                 rebuilt = true;
                 break;
             }
@@ -1906,4 +1966,444 @@ pub fn check_git_head(repo: &Repo, line: &Line) -> Result<()> {
         );
     }
     Ok(())
+}
+
+// ----- reads of imported states from git -----
+//
+// An imported state keeps its record. Its tree is on disk only when a command needs it (`build_tree`).
+// A read that needs only the changes or some files takes them from the git objects instead: a
+// diff, a file, a listing or a search builds no tree. These functions own that read.
+
+/// The git commit of an imported state, whether its tree is on disk or not.
+pub fn imported_commit(repo: &Repo, state: &str) -> Result<Option<String>> {
+    match repo.p.db.state(state)? {
+        Some(s) if s.kind == StateKind::Import => {
+            let squash = repo.p.db.squash_commits_of(state)?;
+            Ok(repo.p.db.git_commits_of(state)?.into_iter().find(|c| !squash.contains(c)))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// The git commit of an imported state whose tree is not on disk: a read takes it from git.
+pub fn unbuilt_commit(repo: &Repo, state: &str) -> Result<Option<String>> {
+    if repo.p.has_state(state) {
+        return Ok(None);
+    }
+    imported_commit(repo, state)
+}
+
+/// True when `state` is an imported state whose record holds Git objects but whose commit the git
+/// store lacks (a machine that got the record without the Git pack).
+pub fn missing_objects(repo: &Repo, state: &str) -> bool {
+    let imported = matches!(repo.p.db.state(state), Ok(Some(s)) if s.kind == StateKind::Import);
+    imported && repo.p.db.has_git_import(state).unwrap_or(false) && stored_commit(repo, state).ok().flatten().is_none()
+}
+
+/// Two folders that hold the paths where commits `old` and `new` differ, with their bytes from the
+/// git store. Both folders hold the same paths, so a comparison of them finds the same changes as a
+/// comparison of the two full trees. `old` None: the first commit, against an empty folder.
+pub struct Pair {
+    pub old: crate::repo::Snap,
+    pub new: crate::repo::Snap,
+    pub keep: Vec<crate::repo::Temp>,
+}
+
+pub fn sparse_pair(repo: &Repo, old: Option<&str>, new: &str) -> Result<Pair> {
+    let s = store(repo);
+    let mut args = vec!["diff-tree", "-r", "-z", "--no-renames", "--no-commit-id"];
+    if old.is_none() {
+        args.push("--root");
+    }
+    args.extend(old);
+    args.push(new);
+    // Raw records: ":<old mode> <new mode> <old id> <new id> <status>" NUL "<path>" NUL.
+    let out = git_out_bytes(&s, &args)?;
+    let mut fields = out.split(|b| *b == 0);
+    let mut changes: Vec<(String, Side, Side)> = Vec::new();
+    while let Some(meta) = fields.next() {
+        if meta.is_empty() {
+            continue;
+        }
+        let meta = String::from_utf8_lossy(meta).into_owned();
+        let meta = meta.strip_prefix(':').context("bad diff-tree record")?;
+        let path = String::from_utf8_lossy(fields.next().context("diff-tree record without a path")?).into_owned();
+        let f: Vec<&str> = meta.split_whitespace().collect();
+        if f.len() != 5 {
+            bail!("bad diff-tree record for {path}");
+        }
+        changes.push((path, Side { mode: f[0].to_string(), id: f[2].to_string() }, Side { mode: f[1].to_string(), id: f[3].to_string() }));
+    }
+    let zero = "0".repeat(40);
+    let mut ids: Vec<String> = Vec::new();
+    for (_, o, n) in &changes {
+        for side in [o, n] {
+            if side.mode != "160000" && side.id != zero {
+                ids.push(side.id.clone());
+            }
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    let data: BTreeMap<String, Vec<u8>> = ids.iter().cloned().zip(blobs(repo, &ids)?).collect();
+    let mut keep = Vec::new();
+    for _ in 0..2 {
+        keep.push(crate::repo::Temp { path: scratch_folder(repo)? });
+    }
+    for (path, o, n) in &changes {
+        for (side, dst) in [(o, &keep[0].path), (n, &keep[1].path)] {
+            if side.id == zero {
+                continue;
+            }
+            if side.mode == "160000" {
+                fsutil::make_parents(dst, &format!("{path}/x"), None)?;
+                continue;
+            }
+            let bytes = data.get(&side.id).with_context(|| format!("Git object {} is missing", side.id))?;
+            place_blob(dst, &side.mode, path, bytes, None, None)?;
+        }
+    }
+    // `btrfs send` sends read-only subvolumes only.
+    #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+    for k in &keep {
+        crate::storage::set_readonly(&k.path)?;
+    }
+    Ok(Pair { old: crate::repo::snap(&keep[0].path), new: crate::repo::snap(&keep[1].path), keep })
+}
+
+/// An empty folder for one side of a sparse pair. On btrfs it is a subvolume: a comparison of two
+/// trees sends them (`btrfs send`), and that needs subvolumes.
+fn scratch_folder(repo: &Repo) -> Result<PathBuf> {
+    let path = repo.p.scan_dir().join(crate::store::temp_name());
+    #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+    crate::storage::create_subvolume(&path)?;
+    #[cfg(not(all(target_os = "linux", not(feature = "overlayfs"))))]
+    std::fs::create_dir_all(&path)?;
+    Ok(path)
+}
+
+/// One side of a raw diff record: the mode and the object id that git prints for it.
+struct Side {
+    mode: String,
+    id: String,
+}
+
+/// Output of a git command as bytes.
+fn git_out_bytes(git_dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
+    let out = base_cmd(git_dir).args(args).stdin(Stdio::null()).output().context("run git")?;
+    if !out.status.success() {
+        bail!("git {} failed: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(out.stdout)
+}
+
+/// What a path of an imported commit is.
+pub enum Entry {
+    Missing,
+    /// The names of a folder, and whether each is a folder (submodules count as folders).
+    Dir(Vec<(String, bool)>),
+    File(Vec<u8>),
+    Link(Vec<u8>),
+}
+
+/// The entry at `path` of `commit` ("" is the root), read from the git objects.
+pub fn entry(repo: &Repo, commit: &str, path: &str) -> Result<Entry> {
+    let s = store(repo);
+    let path = path.trim_matches('/');
+    if path.is_empty() {
+        return Ok(Entry::Dir(folder_names(&s, &format!("{commit}^{{tree}}"))?));
+    }
+    let out = git_out_bytes(&s, &["ls-tree", "-z", "--full-tree", commit, "--", path])?;
+    let Some(rec) = out.split(|b| *b == 0).find(|r| !r.is_empty()) else { return Ok(Entry::Missing) };
+    let rec = String::from_utf8_lossy(rec).into_owned();
+    let (meta, _) = rec.split_once('\t').context("bad Git tree entry")?;
+    let fields: Vec<&str> = meta.split(' ').collect();
+    match (fields[0], fields[1]) {
+        ("040000", _) | (_, "tree") => Ok(Entry::Dir(folder_names(&s, fields[2])?)),
+        (_, "commit") => Ok(Entry::Dir(Vec::new())),
+        ("120000", _) => Ok(Entry::Link(git_out_bytes(&s, &["cat-file", "blob", fields[2]])?)),
+        _ => Ok(Entry::File(git_out_bytes(&s, &["cat-file", "blob", fields[2]])?)),
+    }
+}
+
+fn folder_names(s: &Path, tree: &str) -> Result<Vec<(String, bool)>> {
+    let out = git_out_bytes(s, &["ls-tree", "-z", tree])?;
+    let mut names = Vec::new();
+    for rec in out.split(|b| *b == 0).filter(|r| !r.is_empty()) {
+        let rec = String::from_utf8_lossy(rec).into_owned();
+        let (meta, name) = rec.split_once('\t').context("bad Git tree entry")?;
+        let is_dir = meta.split(' ').nth(1).is_some_and(|t| t == "tree" || t == "commit");
+        names.push((name.to_string(), is_dir));
+    }
+    names.sort();
+    Ok(names)
+}
+
+/// Every regular file of `commit` (no links, no submodules): path and blob id.
+pub fn regular_files(repo: &Repo, commit: &str) -> Result<Vec<(String, String)>> {
+    let out = git_out_bytes(&store(repo), &["ls-tree", "-r", "-z", "--full-tree", commit])?;
+    let mut files = Vec::new();
+    for rec in out.split(|b| *b == 0).filter(|r| !r.is_empty()) {
+        let rec = String::from_utf8_lossy(rec).into_owned();
+        let (meta, path) = rec.split_once('\t').context("bad Git tree entry")?;
+        let fields: Vec<&str> = meta.split(' ').collect();
+        if fields[0] == "100644" || fields[0] == "100755" {
+            files.push((path.to_string(), fields[2].to_string()));
+        }
+    }
+    Ok(files)
+}
+
+/// The contents of blobs, in the order of `oids`, through one `cat-file --batch`.
+pub fn blobs(repo: &Repo, oids: &[String]) -> Result<Vec<Vec<u8>>> {
+    let s = store(repo);
+    let mut child = base_cmd(&s).args(["cat-file", "--batch"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?;
+    let mut input = child.stdin.take().context("cat-file has no input")?;
+    let ids = oids.to_vec();
+    let writer = std::thread::spawn(move || -> std::io::Result<()> {
+        for id in ids {
+            writeln!(input, "{id}")?;
+        }
+        Ok(())
+    });
+    let mut stdout = std::io::BufReader::new(child.stdout.take().context("cat-file has no output")?);
+    let mut out = Vec::with_capacity(oids.len());
+    for oid in oids {
+        let mut header = String::new();
+        stdout.read_line(&mut header)?;
+        let size: usize = header.split_whitespace().nth(2).and_then(|x| x.parse().ok()).with_context(|| format!("bad cat-file header for {oid}: {header}"))?;
+        let mut data = vec![0u8; size];
+        stdout.read_exact(&mut data)?;
+        let mut nl = [0u8; 1];
+        stdout.read_exact(&mut nl)?;
+        out.push(data);
+    }
+    writer.join().map_err(|_| anyhow!("cat-file writer failed"))??;
+    child.wait()?;
+    Ok(out)
+}
+
+// ----- packs of the git store (store remote, docs/remote-format.md "Git packs") -----
+
+/// The commits that the git store holds of `commits`, in order.
+pub fn has_commits(repo: &Repo, commits: &[String]) -> Result<Vec<bool>> {
+    if commits.is_empty() {
+        return Ok(Vec::new());
+    }
+    let s = init_store(repo)?;
+    let mut child = base_cmd(&s).args(["cat-file", "--batch-check"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?;
+    let mut input = child.stdin.take().context("cat-file has no input")?;
+    let ids = commits.to_vec();
+    let writer = std::thread::spawn(move || -> std::io::Result<()> {
+        for id in ids {
+            writeln!(input, "{id}")?;
+        }
+        Ok(())
+    });
+    let out = child.wait_with_output()?;
+    writer.join().map_err(|_| anyhow!("cat-file writer failed"))??;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() != commits.len() {
+        bail!("git cat-file answered {} lines for {} commits", lines.len(), commits.len());
+    }
+    // "<id> commit <size>" for a commit, "<id> missing" otherwise.
+    Ok(lines.iter().map(|l| l.split_whitespace().nth(1) == Some("commit")).collect())
+}
+
+/// A pack of the objects of `new` that `covered` does not reach: the objects of the commits a remote
+/// store lacks, without the ones it already has.
+pub fn pack_commits(repo: &Repo, new: &[String], covered: &[String]) -> Result<Vec<u8>> {
+    let s = store(repo);
+    let mut child = base_cmd(&s)
+        .args(["pack-objects", "--stdout", "--revs", "-q"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut input = child.stdin.take().context("pack-objects has no input")?;
+    let lines: Vec<String> = new.iter().cloned().chain(covered.iter().map(|c| format!("^{c}"))).collect();
+    let writer = std::thread::spawn(move || -> std::io::Result<()> {
+        for line in lines {
+            writeln!(input, "{line}")?;
+        }
+        Ok(())
+    });
+    let out = child.wait_with_output()?;
+    writer.join().map_err(|_| anyhow!("pack-objects writer failed"))??;
+    if !out.status.success() {
+        bail!("git pack-objects failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(out.stdout)
+}
+
+/// Add the objects of a pack to the git store as loose objects, as a restored import writes them
+/// (`write_object`). A pack of a whole history is unpacked this way too.
+pub fn install_pack(repo: &Repo, pack: &[u8]) -> Result<()> {
+    let s = init_store(repo)?;
+    let mut child = base_cmd(&s)
+        .args(["unpack-objects", "-q"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    {
+        let mut input = child.stdin.take().context("unpack-objects has no input")?;
+        input.write_all(pack)?;
+    }
+    let out = child.wait_with_output()?;
+    if !out.status.success() {
+        bail!("git unpack-objects failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(())
+}
+
+// ----- changes of many commits in one object reader -----
+//
+// `log -p` and `show` read the changes of every commit of a range. One process per commit (diff-tree,
+// cat-file) costs more than the diffs. This reader keeps one `cat-file --batch` process for the
+// command and walks the trees of each commit itself (the import walk, `walk_trees`, with both sides).
+
+thread_local! {
+    /// The object reader of this thread, with the store it reads.
+    static OBJECTS: std::cell::RefCell<Option<(PathBuf, CatFile)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `f` with the object reader of the project's git store (one `cat-file --batch` process).
+fn with_objects<T>(repo: &Repo, f: impl FnOnce(&mut CatFile) -> Result<T>) -> Result<T> {
+    let s = store(repo);
+    OBJECTS.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if slot.as_ref().map(|(path, _)| path != &s).unwrap_or(true) {
+            *slot = Some((s.clone(), CatFile::new(&s)?));
+        }
+        let (_, cat) = slot.as_mut().context("object reader")?;
+        f(cat)
+    })
+}
+
+/// True when a read can take the state's changes: its tree is on disk, or it is an imported state
+/// whose commit is known (the record names it). Reads no git object; a missing object shows when the
+/// read happens.
+pub fn readable(repo: &Repo, state: &str) -> Result<bool> {
+    Ok(repo.p.has_state(state) || imported_commit(repo, state)?.is_some())
+}
+
+/// Forgets the object reader (the store changed on disk: a damaged cache went aside).
+fn forget_objects() {
+    OBJECTS.with(|cell| cell.borrow_mut().take());
+}
+
+/// One changed file of a commit against its base: the (mode, object id) of each side, None when
+/// the side has no file there (absent, a folder, or a submodule).
+struct Delta {
+    path: String,
+    old: Option<(String, String)>,
+    new: Option<(String, String)>,
+}
+
+fn file_side(e: Option<&TreeEntry>) -> Option<(String, String)> {
+    e.filter(|e| !e.is_tree() && !e.is_link()).map(|e| (e.mode.clone(), e.oid.clone()))
+}
+
+/// The files that differ between two trees, below `prefix` (`old`/`new` None: the side is empty).
+fn tree_deltas(cat: &mut CatFile, old: Option<&str>, new: Option<&str>, prefix: &str, out: &mut Vec<Delta>) -> Result<()> {
+    let before = match old {
+        Some(o) => parse_tree(&cat.object(o, "tree")?)?,
+        None => BTreeMap::new(),
+    };
+    let now = match new {
+        Some(n) => parse_tree(&cat.object(n, "tree")?)?,
+        None => BTreeMap::new(),
+    };
+    let names: BTreeSet<&String> = before.keys().chain(now.keys()).collect();
+    for name in names {
+        let (o, e) = (before.get(name), now.get(name));
+        if o == e {
+            continue;
+        }
+        let path = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
+        let o_tree = o.filter(|x| x.is_tree()).map(|x| x.oid.as_str());
+        let e_tree = e.filter(|x| x.is_tree()).map(|x| x.oid.as_str());
+        if o_tree.is_some() || e_tree.is_some() {
+            tree_deltas(cat, o_tree, e_tree, &path, out)?;
+        }
+        let (old_side, new_side) = (file_side(o), file_side(e));
+        if old_side != new_side {
+            out.push(Delta { path, old: old_side, new: new_side });
+        }
+    }
+    Ok(())
+}
+
+/// The bytes of the changed files of one side, held in memory, by path.
+pub struct GitFiles {
+    files: BTreeMap<String, Vec<u8>>,
+}
+
+impl GitFiles {
+    /// The bytes of the file at `path`; empty when the side has no file there.
+    pub fn bytes(&self, path: &str) -> Result<Vec<u8>> {
+        Ok(self.files.get(path).cloned().unwrap_or_default())
+    }
+}
+
+/// The changes of `new` against `old` (its first parent; None for the first commit), and the bytes
+/// of the changed files on both sides, held in memory. No folder is written and no tree is built.
+pub struct Sides {
+    pub old: GitFiles,
+    pub new: GitFiles,
+    pub changes: Vec<crate::changes::Change>,
+}
+
+/// Metadata of a changed file of a git side: the type and mode of its tree entry, and its size.
+fn git_meta(mode: &str, size: usize) -> crate::fsutil::Meta {
+    use crate::fsutil::{FType, Meta};
+    Meta {
+        ftype: if mode == "120000" { FType::Symlink } else { FType::File },
+        mode: if mode == "100755" { 0o755 } else { 0o644 },
+        size: size as u64,
+        ino: 0,
+        uid: 0,
+        gid: 0,
+        mtime: 0,
+    }
+}
+
+pub fn sides_of(repo: &Repo, old: Option<&str>, new: &str) -> Result<Sides> {
+    let (deltas, blobs) = with_objects(repo, |cat| {
+        let new_tree = tree_id(&cat.object(new, "commit")?)?.to_string();
+        let old_tree = match old {
+            Some(o) => Some(tree_id(&cat.object(o, "commit")?)?.to_string()),
+            None => None,
+        };
+        let mut deltas = Vec::new();
+        tree_deltas(cat, old_tree.as_deref(), Some(&new_tree), "", &mut deltas)?;
+        deltas.sort_by(|a, b| a.path.cmp(&b.path));
+        let mut blobs: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        for d in &deltas {
+            for (_, oid) in d.old.iter().chain(d.new.iter()) {
+                if !blobs.contains_key(oid) {
+                    blobs.insert(oid.clone(), cat.object(oid, "blob")?);
+                }
+            }
+        }
+        Ok((deltas, blobs))
+    })?;
+    let (mut old_files, mut new_files) = (BTreeMap::new(), BTreeMap::new());
+    let mut changes = Vec::new();
+    for d in &deltas {
+        let old_meta = d.old.as_ref().map(|(mode, oid)| {
+            let data = &blobs[oid];
+            old_files.insert(d.path.clone(), data.clone());
+            git_meta(mode, data.len())
+        });
+        let new_meta = d.new.as_ref().map(|(mode, oid)| {
+            let data = &blobs[oid];
+            new_files.insert(d.path.clone(), data.clone());
+            git_meta(mode, data.len())
+        });
+        changes.push(crate::changes::Change { path: d.path.clone(), old_path: None, old: old_meta, new: new_meta, ranges: None });
+    }
+    Ok(Sides { old: GitFiles { files: old_files }, new: GitFiles { files: new_files }, changes })
 }

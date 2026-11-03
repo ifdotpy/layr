@@ -10,6 +10,7 @@ The decisions in `remote-design.md` define this format. Desk v1 stores remain re
 - `records/<machine UUID>/<first>-<last>.age`: exact signed JSONL records. Sequence numbers have 20 decimal digits.
 - `states/<state UUID>/<attempt>.tree.age`: a header line and one zstd frame, encrypted with age.
 - `states/<state UUID>/<attempt>.<part>.data.age`: concatenated zstd frames, encrypted with age. Parts have four decimal digits.
+- `git/<sha256>.pack.age` and `git/<sha256>.commits.age`: Git objects of imported commits (section "Git packs").
 
 An attempt has eight lowercase hexadecimal digits from the operating system random source.
 The first complete attempt in name order represents a state.
@@ -19,6 +20,36 @@ The part size target is 16 MiB. A larger frame has a separate part, same as Desk
 S3 objects above 256 MiB use multipart upload. Multipart completion uses `If-None-Match: *`.
 All other object writes also use `If-None-Match: *` or atomic exclusive publication for a folder.
 No object is replaced. There are no mutable store refs.
+
+## Git packs
+
+An imported state (`import` kind, `docs/ownership.md`, "States imported from Git") may have no tree
+on the machine that pushes. For such a state the Git pack below replaces the tree: the store holds
+the Git objects, and a clone builds the state from them offline. A push therefore also writes the Git
+objects of the imported commits that the remote does not list yet:
+
+- `git/<sha256>.pack.age`: the objects of those commits, as one `git pack-objects` pack, encrypted.
+  The name is the SHA-256 of the unencrypted pack.
+- `git/<sha256>.commits.age`: `{"format":1,"commits":["<40 hex>", ...]}` for the commits the pack adds,
+  encrypted. It is written after the pack, so a pack without this object is an unfinished upload.
+
+A push lists the `git/*.commits.age` objects, takes the union of their commits as already listed, and
+packs the other imported commits with the listed commits as exclusions. Its pack is therefore
+incremental: it holds only the objects that the remote does not have. Both objects use
+`If-None-Match: *`, as all store writes.
+
+A fetch or clone reads each commits list. For each pack whose commits the local Git store lacks, it
+decrypts the pack, checks its SHA-256 against the name, and adds its objects to the local Git store as
+loose objects (`git unpack-objects`), as a restored import writes them. A state whose tree is missing
+then builds from these objects (`docs/ownership.md`).
+
+Secret checks: a push checks the states it uploads (trees that layr made, and built imports). The Git
+objects of unbuilt imports, in a pack, are not checked by that push. They are the project's Git history.
+
+Compatibility: the format stays version 2. The `git/` objects are additive. Older readers ignore them.
+A store written before this section has no `git/` objects. A clone of it reads an imported state only
+when the state has a tree on the store; otherwise the read fails and names the missing Git pack. The
+next push from a machine with the Git objects writes the pack.
 
 ## Encoding and signatures
 
@@ -56,6 +87,8 @@ The machine key comes from its first signed record, as in peer replication.
 Records retain their existing signatures over their exact record bytes. Segments do not rewrite records.
 New record fields, refs, and attestations travel inside these records without a separate store format.
 Live line heads and live refs require their target states and ancestors, including Auto states without `--auto`.
+For an imported state the Git pack (section "Git packs") replaces its tree. Trees are required for
+states that layr made (named saves, automatic states, merges, and the other kinds that are not imports).
 Cache states require `--caches`, even when a live ref targets them. An omitted target is named in the report.
 Derived states travel as ordinary states.
 Readers validate the contiguous sequence prefix, project identity, signatures, and local trust before they import records.
