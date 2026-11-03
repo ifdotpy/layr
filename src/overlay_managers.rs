@@ -17,7 +17,7 @@ pub fn of(repo: &Repo, name: &str) -> Result<Authority> {
 
 pub fn validate_import(project: &crate::store::Project, incoming: &[String]) -> Result<()> {
     let Some((parent, name)) = project.name.split_once('%') else { return Ok(()) };
-    let repo = Repo { p: crate::store::Project::open(project.store, parent)? };
+    let repo = Repo { p: crate::store::Project::open(project.store, parent)?, ctx: None };
     let mut lines: BTreeSet<String> = project.export_jsonl()?.lines().map(str::to_owned).collect();
     lines.extend(incoming.iter().cloned());
     let id = if project.id.is_empty() {

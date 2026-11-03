@@ -177,6 +177,9 @@ pub fn status(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
 
     outln!(ctx, "On line {}", line.name);
+    if let Some(s) = super::followcmd::status_line(&h.repo, &line)? {
+        outln!(ctx, "{s}");
+    }
     if !overlaps.is_empty() {
         outln!(ctx, "Overlaps with other live lines:");
         for overlap in &overlaps {

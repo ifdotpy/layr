@@ -389,13 +389,9 @@ fn restore_one(
         // btrfs cannot rename a read-only subvolume. Seal it under the project lock.
         crate::fsutil::rename_tree(&stage, &destination)?;
         let publish = (|| -> Result<()> {
-            #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
-            {
-                use std::os::fd::AsFd;
-                let (uuid, transid) = header.btrfs.as_ref().map(|i| (i.uuid.as_str(), i.transid)).unwrap_or((&state.subvol, 0));
-                let file = std::fs::File::open(&destination)?;
-                crate::sys::subvol_set_received(file.as_fd(), *uuid::Uuid::parse_str(uuid)?.as_bytes(), transid)?;
-            }
+            // Every backend gives the restored tree the identity of its signed state (a send names it).
+            let transid = header.btrfs.as_ref().map_or(0, |i| i.transid);
+            crate::storage::mark_received(&destination, &state.subvol, transid)?;
             crate::storage::set_readonly(&destination)?;
             repo.p.db.set_present(&id, true)?;
             Ok(())

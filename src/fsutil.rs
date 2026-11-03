@@ -835,6 +835,9 @@ fn copy_entry_impl(
             d2.set_len(0)?;
             std::io::copy(&mut s2, &mut d2)?;
         }
+        // Linux clones and copies carry no attributes: keep the user ones, as an APFS clone does.
+        #[cfg(target_os = "linux")]
+        copy_user_xattrs(&s, d)?;
         Ok(())
     };
     // An index file is never written in place: a failed copy would lose the staged version,
@@ -845,14 +848,17 @@ fn copy_entry_impl(
             // inode stays, and moves are found by inode. Elsewhere the new file gets a new inode.
             #[cfg(target_os = "linux")]
             if old.metadata()?.nlink() == 1 && rustix::fs::ioctl_ficlone(&old, &s).is_ok() {
+                #[cfg(target_os = "linux")]
+                copy_user_xattrs(&s, &old)?;
                 return finish(&old);
             }
             return t.replace_file_atomic(dst_rel, |d| {
-                fill(d)?;
+                // The old file's attributes come first: the source's user attributes replace them.
                 #[cfg(target_os = "linux")]
                 let _ = copy_xattrs(&old, d);
                 #[cfg(not(target_os = "linux"))]
                 let _ = &old;
+                fill(d)?;
                 finish(d)
             });
         }
@@ -903,6 +909,23 @@ pub fn copy_xattrs(src: &File, dst: &File) -> Result<()> {
         if directory && name == b"com.layr.subvolume" {
             continue;
         }
+        let size = rustix::fs::fgetxattr(src, name, &mut [] as &mut [u8])?;
+        let mut value = vec![0; size];
+        let size = rustix::fs::fgetxattr(src, name, value.as_mut_slice())?;
+        rustix::fs::fsetxattr(dst, name, &value[..size], rustix::fs::XattrFlags::empty())?;
+    }
+    Ok(())
+}
+
+/// Copy the user attributes and POSIX ACLs of a file into a new stage file. Layer markers
+/// (`trusted.*`) are not copied: the storage writes its own. Security labels are not copied
+/// either: setting one can need privileges, and the policy labels new files.
+#[cfg(target_os = "linux")]
+fn copy_user_xattrs(src: &File, dst: &File) -> Result<()> {
+    let size = rustix::fs::flistxattr(src, &mut [] as &mut [u8])?;
+    let mut names = vec![0; size];
+    let size = rustix::fs::flistxattr(src, names.as_mut_slice())?;
+    for name in names[..size].split(|b| *b == 0).filter(|n| n.starts_with(b"user.") || n.starts_with(b"system.posix_acl_")) {
         let size = rustix::fs::fgetxattr(src, name, &mut [] as &mut [u8])?;
         let mut value = vec![0; size];
         let size = rustix::fs::fgetxattr(src, name, value.as_mut_slice())?;

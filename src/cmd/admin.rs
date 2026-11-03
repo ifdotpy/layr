@@ -1082,10 +1082,11 @@ pub fn retention_plan(repo: &Repo, pushed: &mut BTreeMap<String, bool>) -> Resul
     let mut delete = Vec::new();
     let mut evict = Vec::new();
     for (id, _) in db.present_states()? {
+        // A state whose tree the store format cannot restore exactly stays on disk.
         if !keep.contains(&id) {
             if !copies.contains_key(&id) {
                 delete.push(id);
-            } else if evict_on {
+            } else if evict_on && crate::store_remote::restorable(repo, &id)? {
                 evict.push(id);
             }
         } else if evict_on
@@ -1093,6 +1094,7 @@ pub fn retention_plan(repo: &Repo, pushed: &mut BTreeMap<String, bool>) -> Resul
             && !must.contains(&id)
             && repo.p.has_state(&id)
             && db.state(&id)?.is_some_and(|s| s.caches.is_empty())
+            && crate::store_remote::restorable(repo, &id)?
         {
             evict.push(id);
         }
@@ -1280,9 +1282,8 @@ pub fn trash_excess_caches(repo: &Repo) -> Result<Vec<String>> {
     Ok(out)
 }
 
-/// `layr gc --all-projects`: the retention of every project of the store, for a periodic run
-/// (`packaging/launchd/ws.layr.gc.plist`). A project that fails does not stop the others; the
-/// exit code is 1 then.
+/// `layr gc --all-projects`: the retention of every project of the store, for a run by hand. A
+/// project that fails does not stop the others; the exit code is 1 then.
 fn gc_all_projects(ctx: &Ctx, dry: bool, quiet: bool) -> Result<i32> {
     let mut code = 0;
     for name in ctx.store.project_names()?.into_iter().filter(|n| !n.contains('%')) {
@@ -1757,7 +1758,7 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
         &actor,
         serde_json::json!({"access": {format!("user:{owner}"): "admin"}, "protect": {"main": {}}}),
     )?;
-    let repo = Repo { p };
+    let repo = Repo { p, ctx: Some(ctx) };
     let res = (|| -> Result<(String, String)> {
         let _lock = repo.p.lock()?;
         let work = repo.p.work_dir().join(crate::store::temp_name());
@@ -2467,7 +2468,7 @@ mod record_caches_tests {
         let mut rec = crate::model::Record::new("project");
         rec.data = serde_json::json!({"id": id, "name": "p", "config": {}});
         p.append(rec, &Actor { uid: 0, name: "root".into(), session: None })?;
-        let repo = Repo { p };
+        let repo = Repo { p, ctx: None };
         let work = dir.join("work");
         std::fs::create_dir_all(&work)?;
         crate::storage::create_subvolume(&work.join("a"))?;

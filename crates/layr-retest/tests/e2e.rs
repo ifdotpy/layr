@@ -1018,3 +1018,153 @@ fn build_scripts_write_no_profile_into_the_project() {
     let _ = Command::new("chflags").args(["-R", "nouchg"]).arg(&tmp).status();
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// Runs `cargo <args> --message-format json` in `dir` and returns the stdout (the unit messages) and stderr.
+fn cargo_json(dir: &Path, target: &Path, args: &[&str]) -> (String, String) {
+    let o = Command::new("cargo")
+        .args(args)
+        .arg("--message-format")
+        .arg("json")
+        .current_dir(dir)
+        .env_remove("RUSTFLAGS")
+        .env("CARGO_TARGET_DIR", target)
+        .env("CARGO_NET_OFFLINE", "true")
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "cargo {args:?} failed:\n{}", String::from_utf8_lossy(&o.stderr));
+    (String::from_utf8_lossy(&o.stdout).into_owned(), String::from_utf8_lossy(&o.stderr).into_owned())
+}
+
+/// Writes `n` bytes to `p`, creating the folders of `p`.
+fn put(p: &Path, n: usize) {
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    std::fs::write(p, vec![b'x'; n]).unwrap();
+}
+
+/// Every kind of stale output at once: the outputs of a feature build, an orphan incremental folder, an unhashed
+/// `.a` and unhashed objects of crates that no command lists, a stale top-level bin, a stale example and its copy.
+/// After the sweep, only the outputs that the standard command names are left, and its next build compiles nothing.
+#[test]
+fn sweep_leaves_only_the_outputs_that_the_standard_command_names() {
+    let tmp = std::env::temp_dir().canonicalize().unwrap().join(format!("layr-retest-sweep-allow-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let ws = tmp.join("ws");
+    sweep_workspace(&ws, "sweep = [[\"build\", \"--workspace\", \"--tests\", \"--bins\", \"--examples\"]]");
+    std::fs::create_dir_all(ws.join("app/examples")).unwrap();
+    std::fs::write(ws.join("app/examples/demo.rs"), "fn main() {}\n").unwrap();
+    let build = ["build", "--workspace", "--tests", "--bins", "--examples"];
+    let debug = ws.join("target/debug");
+
+    cargo(&ws, &build);
+    // A feature build: its units are not listed by the standard command.
+    cargo(&ws, &["build", "--workspace", "--tests", "--bins", "--examples", "--features", "lib-a/extra"]);
+    // A changed source: the standard units build again, so a live unit has the objects of two builds.
+    std::fs::write(ws.join("lib-a/src/lib.rs"), std::fs::read_to_string(ws.join("lib-a/src/lib.rs")).unwrap().replace("    1\n", "    1 + 0\n")).unwrap();
+    cargo(&ws, &build);
+
+    // Garbage that no command lists.
+    put(&debug.join("libgone.a"), 4096);
+    put(&debug.join("deps/libgone-0123456789abcdef.a"), 4096);
+    put(&debug.join("deps/lib_a.0abc.0deadbe.rcgu.o"), 100);
+    put(&debug.join("stale-bin"), 100);
+    put(&debug.join("examples/stale-ex"), 100);
+    put(&debug.join("examples/stale-ex-0123456789abcdef"), 100);
+    put(&debug.join("incremental/orphan-zz9/s-1-2-abc/x.o"), 100);
+    put(&debug.join("incremental/orphan-zz9/s-1-2-abc.lock"), 0);
+
+    let err = sweep_cmd(&ws, &[]);
+    assert!(err.contains("swept target, freed"), "{err}");
+
+    for gone in ["libgone.a", "deps/libgone-0123456789abcdef.a", "deps/lib_a.0abc.0deadbe.rcgu.o", "stale-bin", "examples/stale-ex", "examples/stale-ex-0123456789abcdef", "incremental/orphan-zz9"] {
+        assert!(!debug.join(gone).exists(), "{gone} stays");
+    }
+    // The outputs that the standard command names, and the hashes of its units.
+    let (msgs, _) = cargo_json(&ws, &ws.join("target"), &build);
+    let mut listed = BTreeSet::new();
+    for line in msgs.lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()) {
+        if line["reason"] == "compiler-artifact" {
+            assert_eq!(line["fresh"], true, "{line}");
+            for f in line["filenames"].as_array().unwrap().iter().filter_map(|f| f.as_str()).chain(line["executable"].as_str()) {
+                listed.insert(f.to_string());
+            }
+        }
+    }
+    assert!(!listed.is_empty());
+    for f in &listed {
+        assert!(Path::new(f).exists(), "a listed output is gone: {f}");
+    }
+    // Every file of the profile folder is a listed output, cargo's lock, or an entry of a listed unit.
+    let hash = |n: &str| n.split('.').next().unwrap().rsplit_once('-').map(|(_, h)| h.to_string()).filter(|h| h.len() == 16);
+    let live: BTreeSet<String> = listed.iter().filter_map(|f| hash(Path::new(f).file_name().unwrap().to_str().unwrap())).collect();
+    // A hashed file of a unit (a bin has a copy in the folder and a hashed file in `deps`) stays with its fingerprint.
+    let fingerprints: BTreeSet<String> = entries(&debug, ".fingerprint").iter().filter_map(|n| hash(n)).collect();
+    for sub in ["", "deps", "examples"] {
+        for e in std::fs::read_dir(debug.join(sub)).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                continue;
+            }
+            let name = e.file_name().to_string_lossy().into_owned();
+            let ok = listed.contains(p.to_str().unwrap()) || name.starts_with(".cargo-") || (name.ends_with(".d") && listed.contains(p.with_extension("").to_str().unwrap())) || hash(&name).is_some_and(|h| fingerprints.contains(&h));
+            assert!(ok, "{} stays but no listed unit needs it", p.display());
+        }
+    }
+    // Every incremental folder that stays keeps one finalized session.
+    for e in std::fs::read_dir(debug.join("incremental")).unwrap().flatten() {
+        let sessions = entries(&e.path(), "").into_iter().filter(|n| n.starts_with("s-") && !n.ends_with(".lock")).count();
+        assert_eq!(sessions, 1, "{:?}", e.path());
+    }
+
+    let err = cargo(&ws, &build);
+    assert!(!err.contains("Compiling"), "the next build compiled:\n{err}");
+    let err = sweep_cmd(&ws, &["--dry-run"]);
+    assert!(err.contains("would free 0.0 MB"), "a second sweep frees something:\n{err}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// A dylib used as a dev-dependency has an unhashed output (`libdy.dylib`) and unhashed objects. Its incremental
+/// folder belongs to the live unit: a feature build of the dylib leaves a second folder, which the sweep removes.
+/// The next build compiles nothing.
+#[test]
+fn sweep_keeps_the_incremental_folder_of_a_dylib_dev_dependency() {
+    let tmp = std::env::temp_dir().canonicalize().unwrap().join(format!("layr-retest-sweep-dylib-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let ws = tmp.join("ws");
+    std::fs::create_dir_all(ws.join("dy/src")).unwrap();
+    std::fs::create_dir_all(ws.join("app/src")).unwrap();
+    std::fs::write(
+        ws.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"dy\", \"app\"]\nresolver = \"2\"\n\n[workspace.metadata.layr-retest]\nsweep = [[\"build\", \"--workspace\", \"--tests\"]]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        ws.join("dy/Cargo.toml"),
+        "[package]\nname = \"dy\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\ncrate-type = [\"dylib\"]\n\n[features]\nextra = []\n",
+    )
+    .unwrap();
+    std::fs::write(ws.join("dy/src/lib.rs"), "pub fn d() -> i32 {\n    2\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {\n        assert_eq!(super::d(), 2);\n    }\n}\n").unwrap();
+    std::fs::write(ws.join("app/Cargo.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dev-dependencies]\ndy = { path = \"../dy\" }\n").unwrap();
+    std::fs::write(ws.join("app/src/lib.rs"), "#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {\n        assert_eq!(1 + 1, 2);\n    }\n}\n").unwrap();
+    let build = ["build", "--workspace", "--tests"];
+    let debug = ws.join("target/debug");
+    let dy_folders = || -> BTreeSet<String> { entries(&debug, "incremental").into_iter().filter(|n| n.starts_with("dy-")).collect() };
+
+    cargo(&ws, &build);
+    let live = dy_folders();
+    // The feature build of the dylib replaces its output and objects; the standard build builds it again.
+    cargo(&ws, &["build", "-p", "dy", "--features", "extra", "--tests"]);
+    assert!(dy_folders().len() > live.len(), "{:?}", dy_folders());
+    cargo(&ws, &build);
+
+    let err = sweep_cmd(&ws, &[]);
+    assert!(err.contains("swept target, freed"), "{err}");
+    assert_eq!(dy_folders(), live, "the sweep removed or kept the wrong incremental folder of a dylib unit");
+    for f in &live {
+        let session = entries(&debug.join("incremental").join(f), "");
+        assert_eq!(session.iter().filter(|n| n.starts_with("s-") && !n.ends_with(".lock")).count(), 1, "{session:?}");
+    }
+
+    let err = cargo(&ws, &build);
+    assert!(!err.contains("Compiling"), "the next build compiled:\n{err}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}

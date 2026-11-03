@@ -15,7 +15,7 @@ mod tools;
 use anyhow::{bail, Context, Result};
 use record::{test_key, FileCov, Record, TestRec};
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -399,8 +399,8 @@ fn listing(args: &[String]) -> Vec<String> {
 
 /// What the listing of the units of one folder found.
 enum Listed {
-    /// Every unit is fresh: the live unit hashes.
-    Fresh(BTreeSet<String>),
+    /// Every unit is fresh: the live set of each profile folder.
+    Fresh(sweep::Plans),
     /// A unit is not fresh, named by cargo's status line or by its target. Nothing was built past it.
     NotFresh(String),
     /// Another cargo holds the build lock of the folder: the listing stopped before it waited for that cargo.
@@ -462,28 +462,34 @@ fn list_units(root: &Path, target: &Path, env: &[(String, String)], args: &[Stri
     if !status.with_context(|| format!("cannot wait for cargo {}", args.join(" ")))?.success() {
         bail!("cargo {} failed", args.join(" "));
     }
-    Ok(Listed::Fresh(sweep::live_units(&target.join("debug"), lines.join("\n").as_bytes())))
+    Ok(Listed::Fresh(sweep::plan(target, lines.join("\n").as_bytes())?))
 }
 
 /// The live units of the target folder `target`: the units that every command of `commands` uses, each
 /// run with `env`. Stops at the first command whose units are not fresh.
 fn live_units(root: &Path, target: &Path, env: &[(String, String)], commands: &[Vec<String>]) -> Result<Listed> {
-    let mut live = BTreeSet::new();
+    let mut live = sweep::Plans::new();
     for args in commands {
         match list_units(root, target, env, args)? {
-            Listed::Fresh(units) => live.extend(units),
+            Listed::Fresh(units) => sweep::merge(&mut live, units),
             stale => return Ok(stale),
         }
     }
     Ok(Listed::Fresh(live))
 }
 
-/// Sweep the profile folder `debug` under cargo's lock. `None` when the lock is busy. A dry run counts only.
-fn sweep_folder(debug: &Path, live: &BTreeSet<String>, dry: bool) -> Result<Option<u64>> {
-    if dry {
-        return Ok(Some(sweep::sweep_units(debug, live, true)));
+/// Sweeps each profile folder of `plans` under its cargo lock. Returns the freed bytes and the number of
+/// profile folders skipped because their lock is busy. A dry run counts only.
+fn sweep_plans(plans: &sweep::Plans, dry: bool) -> Result<(u64, usize)> {
+    let (mut freed, mut busy) = (0, 0);
+    for (profile, live) in plans {
+        let n = if dry { Some(sweep::sweep(profile, live, true)) } else { sweep::locked(profile, || sweep::sweep(profile, live, false))? };
+        match n {
+            Some(n) => freed += n,
+            None => busy += 1,
+        }
     }
-    sweep::locked(debug, || sweep::sweep_units(debug, live, false))
+    Ok((freed, busy))
 }
 
 /// The sweep after a retest build: the live units of the standard commands, the retest commands and the
@@ -509,13 +515,13 @@ fn sweep_after_build(root: &Path, target: &Path, hash: &[(String, String)], own:
         Err(e) => return eprintln!("layr-retest: sweep skipped, nothing removed: {e:#}"),
     };
     let listed = t.elapsed().as_secs_f32();
-    match sweep_folder(&target.join("debug"), &live, false) {
-        Ok(Some(n)) => eprintln!(
+    match sweep_plans(&live, false) {
+        Ok((n, 0)) => eprintln!(
             "layr-retest: swept stale build output, freed {:.1} MB (artifact list {listed:.2}s, sweep {:.2}s)",
             n as f64 / 1e6,
             t.elapsed().as_secs_f32() - listed
         ),
-        Ok(None) => eprintln!("layr-retest: sweep skipped (build lock busy)"),
+        Ok((_, busy)) => eprintln!("layr-retest: sweep skipped (build lock busy in {busy} profile folder(s))"),
         Err(e) => eprintln!("layr-retest: sweep skipped: {e:#}"),
     }
 }
@@ -560,7 +566,7 @@ fn sweep_cmd(args: &[String]) -> Result<i32> {
             continue;
         };
         match live_units(&root, &target, &env, &commands) {
-            Ok(Listed::Fresh(live)) => lists.push((name, target, live)),
+            Ok(Listed::Fresh(live)) => lists.push((name, live)),
             Ok(Listed::NotFresh(why)) => eprintln!("layr-retest: {name}: sweep skipped: a unit is not fresh ({why}); run the standard build first"),
             Ok(Listed::Busy) => eprintln!("layr-retest: {name}: sweep skipped (build lock busy)"),
             Err(e) => {
@@ -569,11 +575,14 @@ fn sweep_cmd(args: &[String]) -> Result<i32> {
             }
         }
     }
-    for (name, target, live) in lists {
-        match sweep_folder(&target.join("debug"), &live, dry)? {
-            Some(n) if dry => eprintln!("layr-retest: {name}: would free {:.1} MB", n as f64 / 1e6),
-            Some(n) => eprintln!("layr-retest: swept {name}, freed {:.1} MB", n as f64 / 1e6),
-            None => eprintln!("layr-retest: {name}: sweep skipped (build lock busy)"),
+    for (name, live) in lists {
+        let (n, busy) = sweep_plans(&live, dry)?;
+        if busy > 0 {
+            eprintln!("layr-retest: {name}: sweep skipped (build lock busy in {busy} profile folder(s))");
+        }
+        match dry {
+            true => eprintln!("layr-retest: {name}: would free {:.1} MB", n as f64 / 1e6),
+            false => eprintln!("layr-retest: swept {name}, freed {:.1} MB", n as f64 / 1e6),
         }
     }
     eprintln!("layr-retest: sweep took {:.2}s", t0.elapsed().as_secs_f32());

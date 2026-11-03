@@ -20,6 +20,7 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | overlays      | `overlay create <name> [--readers <principals>] [--mode shared\|follow] [--hidden] [--history all\|last\|<N>] [--quiet] [--merge three-way\|union-theirs] [--gc none\|lru:<size>]`, `overlay set <name> <properties>`, `overlay list [--json]`, `overlay show-to-project <name>`, `overlay readers`, `overlay use [--add\|--remove\|--none] <names>`, `overlay move [--purge] <name> <paths>`, `overlay repair <overlay>`, `overlay log\|show\|diff\|grep\|ls-files <name>` |
 | refs          | `ref set <name> <rev> [--expect <rev>] [--ttl <dur>]`, `ref list [<prefix>]`, `ref log <name>`, `ref delete <name> [--expect <rev>]` |
 | queue         | `queue add <rev> [--into <line>]`, `queue list [--into <line>] [--json]`, `queue remove <entry>`, `queue run [--into <line>]` |
+| follow        | `follow <remote>/<branch>`, `follow --run`, `follow --tick`, `follow`, `follow --remove` ([layr follow](follow.md)) |
 | tests         | `retest run [--full] [--save] [--tool vitest\|jest\|pytest] [-- <nextest args>]`, `retest init [--yes]`, `retest doctor` (see `docs/retest.md`) |
 | probes        | `probe run <rev> [--probe <name>] [--json]`, `probe diff <base> <head> [--json]` |
 | changes       | `comment <change> <text> [--version vN] [--path <path>] [--line N] [--reply-to <id>] [--json]`, `change list`, `change show <id>`, `change log <id>`, `change diff <id> [--from vN] [--to vM]` |
@@ -188,6 +189,7 @@ state differs only in build output, which a build makes again, so a deleted line
 the next `gc`. The newest automatic state of a live line always stays. `gc` compares these states
 before it takes the store lock.
 
+<<<<<<< head
 `gc --repair` also frees the trees of imported states that no line head, park entry, overlay, undo
 record or auto state needs, and that git builds again. The record stays; the next read builds the
 tree (`docs/ownership.md`, "States imported from Git"). `gc -n --repair` lists them. A plain `gc`
@@ -195,12 +197,19 @@ does not free them.
 
 `gc` evicts a state that a store remote holds (a successful `layr push <store-remote>` names it)
 only when the project config `gc.evict` is `on` (`layr config gc.evict on`; default `off`). With
+||||||| base
+`gc` evicts a state that a store remote holds (a successful `layr push <store-remote>` names it)
+only when the project config `gc.evict` is `on` (`layr config gc.evict on`; default `off`). With
+=======
+`gc` evicts a state that a store remote holds (a successful `layr push <store-remote>` names it,
+the remote still has the recorded URL, and this machine reads that store) only when the project
+config `gc.evict` is `on` (`layr config gc.evict on`; default `off`). With
+>>>>>>> origin/main
 `off`, such a state is kept with its history and nothing is deleted for it. With `on`, its tree goes,
 its record stays, and the next command that reads the tree fetches it back from that remote. A recoverable state stays on disk when it is a line head, the newest automatic state of a
 line, a state with caches, a state that a cache overlay names, or a base of a thin layer chain that
 a state on disk needs. Without a reachable remote, a command that needs the tree fails and names the
-remote. `gc --all-projects` runs `gc` for every project (macOS periodic run:
-`packaging/launchd/ws.layr.gc.plist`). See [design.md](design.md#state-eviction-and-fetch-on-demand).
+remote. `gc --all-projects` runs `gc` for every project (see [design.md](design.md#state-eviction-and-fetch-on-demand)).
 
 Reads of imported states (`log -p`, `log <path>`, `show`, `diff`, `blame`, `grep <rev>`) take the
 bytes from Git and build no tree. `line new`, `try`, `bisect run` and `reset --hard` build the tree

@@ -436,7 +436,8 @@ impl<'a> Repo<'a> {
     /// folder overlay, a fast-forward of the line's overlay line, or a `union-theirs` state; the
     /// files of the incoming state are copied over the line's folder (a missing or empty folder
     /// gets one snapshot). The caller holds the project lock. Returns folder and new state.
-    pub fn pull_caches(&self, ctx: &Ctx, line: &Line, from: &Source) -> Result<Vec<(String, String)>> {
+    /// Folders in `skip` keep their caches (a follow pass takes each folder from one line only).
+    pub fn pull_caches(&self, ctx: &Ctx, line: &Line, from: &Source, skip: &BTreeSet<String>) -> Result<Vec<(String, String)>> {
         let mut out = Vec::new();
         if self.p.is_overlay() {
             return Ok(out);
@@ -446,6 +447,9 @@ impl<'a> Repo<'a> {
         let own = self.own(line);
         let shared = self.policy().rule_for(&line.name).is_some();
         for (name, folder) in self.folder_overlays()? {
+            if skip.contains(&folder) {
+                continue;
+            }
             let key = self.cache_key(&name, &w)?;
             let Some(sid) = self.cache_source(&name, from, uid, &key)? else { continue };
             let info = self.need_overlay(&name)?;
@@ -499,6 +503,12 @@ impl<'a> Repo<'a> {
             out.push((folder, made));
         }
         Ok(out)
+    }
+
+    /// Hook after a folder cache of a line changed by a follow pass (`follow.rs`): a language
+    /// adapter may prune stale build output of `folder` here. Core stays language-free: no-op.
+    pub fn prune_cache(&self, _folder: &str) -> Result<()> {
+        Ok(())
     }
 
     /// `gc lru:<size>` of the folder overlays: in the working folder of each line, delete the

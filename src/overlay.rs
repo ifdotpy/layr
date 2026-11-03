@@ -702,7 +702,7 @@ impl<'a> Repo<'a> {
     }
 
     pub fn overlay_repo(&self, name: &str) -> Result<Repo<'a>> {
-        Ok(Repo { p: self.overlay_project(name)? })
+        Ok(Repo { p: self.overlay_project(name)?, ctx: self.ctx })
     }
 
     /// The user reads the overlay: the reader role in its policy (its owner is its admin).
