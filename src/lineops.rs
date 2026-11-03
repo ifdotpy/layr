@@ -261,7 +261,7 @@ impl Repo<'_> {
             || !self.cache_paths(&working)?.is_empty()
             || !self.cache_paths(&self.state_root(target)?)?.is_empty()
             || !self.state(target)?.caches.is_empty()
-            || line_in_use(&working)?
+            || crate::busy::user_of(&working)?.is_some()
         {
             return Ok(false);
         }
@@ -317,35 +317,6 @@ impl Repo<'_> {
     pub fn reset_snapshot(&self, _ctx: &Ctx, _line: &Line, _target: &str) -> Result<bool> {
         Ok(false)
     }
-}
-
-/// An active process can retain a directory, an open file or a mapped file across a swap.
-#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
-fn line_in_use(root: &Path) -> Result<bool> {
-    for entry in std::fs::read_dir("/proc")?.flatten() {
-        if entry.file_name().to_string_lossy().parse::<u32>().is_err() {
-            continue;
-        }
-        let process = entry.path();
-        for name in ["cwd", "root"] {
-            if std::fs::read_link(process.join(name)).is_ok_and(|p| p.starts_with(root)) {
-                return Ok(true);
-            }
-        }
-        if let Ok(fds) = std::fs::read_dir(process.join("fd")) {
-            for fd in fds.flatten() {
-                if std::fs::read_link(fd.path()).is_ok_and(|p| p.starts_with(root)) {
-                    return Ok(true);
-                }
-            }
-        }
-        if let Ok(maps) = std::fs::read_to_string(process.join("maps")) {
-            if maps.lines().filter_map(|line| line.split_whitespace().nth(5)).any(|p| Path::new(p).starts_with(root)) {
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
 }
 
 #[cfg(test)]
