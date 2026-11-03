@@ -679,7 +679,9 @@ fn has_xattrs(path: &Path) -> Result<bool> {
             Err(e) => return Err(e.into()),
         }
     };
-    Ok(names.split(|b| *b == 0).any(|name| !name.is_empty() && name != OS_MARKER))
+    // Overlay trees mark every file with `trusted.layr.origin` (its file identity). Layr writes it
+    // on each copy, so a restored tree gets it again: it does not count.
+    Ok(names.split(|b| *b == 0).any(|name| !name.is_empty() && name != OS_MARKER && name != b"trusted.layr.origin"))
 }
 
 /// Fail on unreadable folders or non-UTF-8 names rather than omit their files.
