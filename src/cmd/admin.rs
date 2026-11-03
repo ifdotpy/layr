@@ -1650,7 +1650,7 @@ fn fsck_overlays(ctx: &Ctx, repo: &Repo, repair: bool) -> Result<usize> {
         // cache folders where the state may have files).
         let base = repo.head_tree(&l)?;
         let fresh = repo.assemble(&l, &l.head, &layers)?;
-        let caches = repo.cache_paths(&repo.working(&l));
+        let caches = repo.cache_paths(&repo.working(&l))?;
         let in_cache = |p: &str| caches.iter().any(|c| p == c || p.starts_with(&format!("{c}/")));
         let diff: Vec<String> = changes::file_changes(&base, &fresh.path)?
             .into_iter()

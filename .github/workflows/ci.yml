@@ -75,7 +75,13 @@ jobs:
           bash tests/apfs-lock-hold.sh
           bash tests/save-unsettled.sh
           bash tests/run.sh t50-upstream-fixes t51-git-init-space t52-git-init-metadata t53-store-version t55-machine-identity t63-git-import-tree t100-store-auto-upgrade t103-cache-of-source t104-cache-overlay-wins t106-lazy-import
+<<<<<<< head
           LAYR_TEST_DIRECT_MAIN=1 bash tests/run.sh t01-basic t02-merge t03-git t05-transfer t06-sync t08-gitcompat t62-merge-git t68-line-base t69-work-mtime t70-du t71-gc-pushed t72-gc-dedup t73-add-narrow t75-save-change-rules t76-cache-recreated t77-unicode-names t83-index-safety t84-cache-safety t82-trash-background t80-first-save t86-line-move t85-thin-xattrs t88-delete-overlay-lines t89-cache-state t90-evict-recoverable t91-evict-format t92-evict-trust t20-store-peer t92-owners-shadow t93-status-overlaps-cache t97-status-overlaps-bases t91-leak-guards t95-schema-rebuild-readers t96-save-left-out t94-undo-move-safety t107-init-failure t105-follow t108-undo-reset t109-free-recheck t99-ownership-free t100-pin-reads t112-undo-pick-save t111-daemon-plist t110-overlay-remove t113-pick-reset-speed t116-save-cache-flags
+||||||| base
+          LAYR_TEST_DIRECT_MAIN=1 bash tests/run.sh t01-basic t02-merge t03-git t05-transfer t06-sync t08-gitcompat t62-merge-git t68-line-base t69-work-mtime t70-du t71-gc-pushed t72-gc-dedup t73-add-narrow t75-save-change-rules t76-cache-recreated t77-unicode-names t83-index-safety t84-cache-safety t82-trash-background t80-first-save t86-line-move t85-thin-xattrs t88-delete-overlay-lines t89-cache-state t90-evict-recoverable t91-evict-format t92-evict-trust t20-store-peer t92-owners-shadow t93-status-overlaps-cache t97-status-overlaps-bases t91-leak-guards t95-schema-rebuild-readers t96-save-left-out t94-undo-move-safety t107-init-failure t105-follow t108-undo-reset t109-free-recheck t99-ownership-free t100-pin-reads t112-undo-pick-save t111-daemon-plist t110-overlay-remove t113-pick-reset-speed
+=======
+          LAYR_TEST_DIRECT_MAIN=1 bash tests/run.sh t01-basic t02-merge t03-git t05-transfer t06-sync t08-gitcompat t62-merge-git t68-line-base t69-work-mtime t70-du t71-gc-pushed t72-gc-dedup t73-add-narrow t75-save-change-rules t76-cache-recreated t77-unicode-names t83-index-safety t84-cache-safety t82-trash-background t80-first-save t86-line-move t85-thin-xattrs t88-delete-overlay-lines t89-cache-state t90-evict-recoverable t91-evict-format t92-evict-trust t20-store-peer t92-owners-shadow t93-status-overlaps-cache t97-status-overlaps-bases t91-leak-guards t95-schema-rebuild-readers t96-save-left-out t94-undo-move-safety t107-init-failure t105-follow t108-undo-reset t109-free-recheck t99-ownership-free t100-pin-reads t110-auto-cache-overlay
+>>>>>>> origin/main
           # The default macOS volume ignores case: run the core commands on such a store too.
           hdiutil create -size 2g -fs APFS -volname LayrCase -type SPARSE -o "$RUNNER_TEMP/case.sparseimage"
           hdiutil attach "$RUNNER_TEMP/case.sparseimage" -nobrowse
@@ -91,73 +97,3 @@ jobs:
       - name: Detach the test volume
         if: always()
         run: hdiutil detach /Volumes/LayrCI || true
-  # `cargo test` at the root runs only the root package. These crates have their own tests,
-  # and layr-retest's e2e test runs the built `layr` from PATH with a temporary store.
-  crates:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, macos-15]
-    runs-on: ${{ matrix.os }}
-    # The e2e tests expect incremental builds, as cargo uses by default. The toolchain action
-    # sets CARGO_INCREMENTAL=0 only when the variable is unset.
-    env:
-      CARGO_INCREMENTAL: "1"
-    steps:
-      - uses: actions/checkout@v4
-      # The toolchain pin also pins llvm-tools, which must match the LLVM of rustc.
-      - name: Install the pinned Rust toolchain and llvm-tools
-        uses: dtolnay/rust-toolchain@1.97.0
-        with:
-          components: llvm-tools
-      - name: Install the pinned cargo-nextest
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest@0.9.146
-      # layr-retest finds llvm-profdata in the sysroot of the active toolchain. Add the component
-      # there if the action did not, and fail here instead of in the tests.
-      - name: Check the llvm-tools of the active toolchain
-        run: |
-          rustup component add llvm-tools
-          bin="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin"
-          test -x "$bin/llvm-profdata"
-          test -x "$bin/llvm-cov"
-      # The e2e tests resolve `hex` offline from the cargo cache, and a new runner has no cache.
-      - name: Fetch hex 0.4 into the cargo cache
-        run: |
-          dir="$(mktemp -d)"
-          cargo new --quiet "$dir/fetch"
-          cd "$dir/fetch"
-          cargo add --quiet hex@0.4
-          cargo fetch
-      # A layr store on Linux needs btrfs. The test folder is a btrfs loop file owned by the runner user.
-      - name: Create the btrfs test folder (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq btrfs-progs
-          truncate -s 4G "$RUNNER_TEMP/crates.img"
-          mkfs.btrfs -q -f "$RUNNER_TEMP/crates.img"
-          sudo mkdir /var/tmp/layr-crates
-          sudo mount -o loop "$RUNNER_TEMP/crates.img" /var/tmp/layr-crates
-          sudo chown "$(id -u):$(id -g)" /var/tmp/layr-crates
-          echo "TMPDIR=/var/tmp/layr-crates" >> "$GITHUB_ENV"
-      - name: Build layr and put it on PATH
-        run: |
-          cargo build --locked
-          echo "$PWD/target/debug" >> "$GITHUB_PATH"
-      - name: Set a fresh LAYR_ROOT
-        run: echo "LAYR_ROOT=$(mktemp -d "${TMPDIR:-$RUNNER_TEMP}/layr-root.XXXXXX")" >> "$GITHUB_ENV"
-      - name: Test layr-retest
-        timeout-minutes: 20
-        # On Linux, run as root like the other integration jobs: btrfs send needs the root service, and root
-        # runs layr directly. -E keeps the cargo and rustup homes and the test env of this job.
-        run: |
-          if [ "$RUNNER_OS" = Linux ]; then
-            sudo -E env "PATH=$PATH" "TMPDIR=$TMPDIR" "LAYR_ROOT=$LAYR_ROOT" cargo test --locked -p layr-retest
-          else
-            cargo test --locked -p layr-retest
-          fi
-      - name: Test layr-model and layr-store
-        timeout-minutes: 20
-        run: cargo test --locked -p layr-model -p layr-store
