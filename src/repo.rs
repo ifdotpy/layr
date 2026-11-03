@@ -939,7 +939,6 @@ impl<'a> Repo<'a> {
     /// The reads of a save before its lock: the head and the save base are pinned for the rest of
     /// the command (`hold`), then the automatic state is written (APFS).
     pub fn prepare_save(&self, line: &Line) -> Result<()> {
-        clear_regenerable_memo();
         let prev = self.save_base(line)?;
         self.hold(self.pin(&[&line.head, &prev])?);
         // One scan of the working folder serves the candidates and the save layer below (macOS).
@@ -1495,7 +1494,6 @@ impl<'a> Repo<'a> {
     /// Drop what a command prepared before the lock and did not take: a status, and prepared
     /// snapshot copies (to the trash). Call after the lock.
     pub fn discard_prepared(&self) {
-        clear_regenerable_memo();
         #[cfg(target_os = "macos")]
         {
             PREPARED_STATUS.with(|p| p.borrow_mut().take());
@@ -2546,9 +2544,10 @@ pub(crate) fn give_tree(root: &Path, uid: u32, gid: u32) -> Result<()> {
 /// that the ignore rules ignore. A regenerable folder that is not ignored is no cache: its files
 /// are in history, and a cache must not hide them.
 ///
-/// One listing per folder that the root `.gitignore` does not ignore; the folders that hold a rule
-/// file come from the same listings, so the rules read only those (no stat per folder). A folder
-/// below an ignored folder that a nested rule file ignores is not entered: build output is not read.
+/// On macOS the folders come from the save's scan (`regenerable_in_scan`). Elsewhere they come from
+/// a walk (`regenerable_by_walk`): the walk enters the folders that the root `.gitignore` does not
+/// ignore, so it may enter a folder that a nested rule file ignores. Such a folder and its children
+/// are no candidate, as in the scan. A folder is no candidate when an ignored folder is above it.
 pub fn regenerable_folders(w: &Path) -> Vec<String> {
     // macOS: the save scans the working folder anyway, and that scan lists every entry, so the
     // folders come from it: a walk of 3k folders cost 200 ms here, against a 20 ms budget.
@@ -2623,8 +2622,15 @@ fn regenerable_by_walk(w: &Path) -> Vec<String> {
         Rules::limited(w, Some("regenerable"), rule_dirs.clone()),
         Rules::limited(w, None, rule_dirs),
     );
-    let mut found: Vec<String> =
-        children.into_iter().filter(|rel| regenerable.ignored(rel, true) && ignored.ignored(rel, true)).collect();
+    let mut found: Vec<String> = children
+        .into_iter()
+        .filter(|rel| {
+            let parent = rel.rsplit_once('/').map(|(p, _)| p).unwrap_or("");
+            (parent.is_empty() || !ignored.ignored(parent, true))
+                && regenerable.ignored(rel, true)
+                && ignored.ignored(rel, true)
+        })
+        .collect();
     found.sort();
     found
 }
@@ -2651,14 +2657,25 @@ pub fn regenerable_memo(w: &Path) -> Vec<String> {
 }
 
 /// Set the regenerable folders of the command for the working folder `w` (from a scan).
-#[cfg(target_os = "macos")]
 pub fn set_regenerable_memo(w: &Path, found: Vec<String>) {
     REGENERABLE.with(|m| *m.borrow_mut() = Some((w.to_path_buf(), found)));
 }
 
-/// Forget the regenerable folders of the command that ended.
+/// Forget the regenerable folders. The dispatcher calls `begin_command` at the start of every
+/// command (CLI and daemon), so no command reads the list of an earlier one. A save clears it after
+/// its state, because a command can save twice (and a merge can change `.layrattributes`).
 pub fn clear_regenerable_memo() {
     REGENERABLE.with(|m| *m.borrow_mut() = None);
+}
+
+/// Start a command: its regenerable folders are its own.
+pub fn begin_command() {
+    clear_regenerable_memo();
+}
+
+/// Whether a list of regenerable folders is held (for tests).
+pub fn regenerable_memo_is_set() -> bool {
+    REGENERABLE.with(|m| m.borrow().is_some())
 }
 
 /// Create an empty nested subvolume for a regenerable cache at `path` in the working folder.
@@ -3056,6 +3073,23 @@ pub fn holds_files(root: &Path, path: &str) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod regenerable_memo_tests {
+    use super::*;
+
+    #[test]
+    fn a_new_command_does_not_read_the_list_of_an_earlier_command() {
+        let w = Path::new("/layr-test/regenerable-memo/w");
+        set_regenerable_memo(w, vec!["target".to_string()]);
+        assert!(regenerable_memo_is_set());
+        // The same path gives the list it holds, with no walk, inside one command.
+        assert_eq!(regenerable_memo(w), vec!["target".to_string()]);
+        // The dispatcher (`cmd::run`, `service::run_as`) starts every command with `begin_command`.
+        begin_command();
+        assert!(!regenerable_memo_is_set());
+    }
 }
 
 #[cfg(test)]
