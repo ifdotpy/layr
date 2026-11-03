@@ -41,6 +41,7 @@ mod overlay_managers;
 mod person;
 mod privs;
 mod probes;
+mod project_copy;
 mod radar;
 mod recv;
 mod repo;
@@ -82,6 +83,9 @@ fn main() {
             std::process::exit(1);
         }
         return;
+    }
+    if let Some(code) = project_copy::hidden(&argv) {
+        std::process::exit(code);
     }
     if argv.first().map(String::as_str) == Some("__registry-http") {
         let result = (|| -> anyhow::Result<()> {

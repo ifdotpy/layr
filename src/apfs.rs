@@ -2107,3 +2107,154 @@ pub fn space(path: &Path) -> Result<crate::fsutil::Space> {
 pub fn visit_space(path: &Path, f: &mut dyn FnMut(&crate::fsutil::Held)) -> Result<()> {
     crate::fsutil::apfs_visit(path, f)
 }
+
+/// Bytes that a copy of `path` occupies on another APFS volume: the private bytes of each file,
+/// plus each clone key (shared data) once. Clones inside the copy stay clones.
+pub(crate) fn copy_need(path: &Path) -> Result<u64> {
+    let mut own = 0u64;
+    let mut keys: HashMap<u64, u64> = HashMap::new();
+    visit_space(path, &mut |h| {
+        own += h.own;
+        for &(key, size) in h.shared {
+            keys.entry(key).or_insert(size);
+        }
+    })?;
+    Ok(own + keys.values().sum::<u64>())
+}
+
+/// Allocated bytes of `path` with shared data counted per file (the size of a flattened copy).
+pub(crate) fn copy_total(path: &Path) -> Result<u64> {
+    let mut total = 0u64;
+    visit_space(path, &mut |h| total += h.alloc)?;
+    Ok(total)
+}
+
+/// Copies a project to another APFS volume (`src/project_copy.rs`). Data is copied once; a file
+/// that shares its data (clone id and generation) with a copy already made is cloned from it.
+#[derive(Default)]
+pub(crate) struct Copier {
+    /// Clone id -> the copies made so far, with their physical extents. Equal extents prove equal
+    /// data; the clone id only narrows the search (the generation count differs between clones).
+    shared: HashMap<u64, Vec<(Vec<(u64, u64, u64)>, PathBuf)>>,
+    /// (device, inode) -> the first copy of a file with several names.
+    links: HashMap<(u64, u64), PathBuf>,
+    /// Sealed entries of the source, children before their folders.
+    seals: Vec<PathBuf>,
+}
+
+/// Give the copy the owner and group of the source (the copy runs as the owner or as root).
+fn own(dst: &Path, m: &fs::Metadata) -> Result<()> {
+    std::os::unix::fs::lchown(dst, Some(m.uid()), Some(m.gid())).with_context(|| format!("owner of {}", dst.display()))
+}
+
+fn sealed(m: &fs::Metadata) -> bool {
+    use std::os::macos::fs::MetadataExt as MacMetadataExt;
+    m.st_flags() & libc::UF_IMMUTABLE != 0
+}
+
+impl Copier {
+    pub(crate) fn new(_src_root: &Path, _dst_root: &Path) -> Result<Copier> {
+        Ok(Copier::default())
+    }
+
+    /// APFS has no subvolumes to send: a layer marker is copied with its folder.
+    pub(crate) fn native_subvolume(&self, _path: &Path) -> bool {
+        false
+    }
+
+    pub(crate) fn subvolume(&mut self, src: &Path, _dst: &Path) -> Result<()> {
+        bail!("APFS copies {} as a folder", src.display())
+    }
+
+    /// Create the folder `dst` for `src`; its metadata follows in `dir_close`.
+    pub(crate) fn shell_dir(&mut self, _src: &Path, dst: &Path) -> Result<()> {
+        fs::create_dir(dst).with_context(|| format!("create {}", dst.display()))
+    }
+
+    /// Copy the metadata of a folder after its entries (times last, as `copy_tree`).
+    pub(crate) fn dir_close(&mut self, src: &Path, dst: &Path, m: &fs::Metadata) -> Result<()> {
+        crate::sys::apfs_copy_metadata(src, dst).with_context(|| format!("copy metadata {}", dst.display()))?;
+        crate::sys::apfs_immutable(dst, false)?;
+        keep_birthtime(m, dst)?;
+        // The owner first: a change of owner clears the set-id bits of the mode.
+        own(dst, m)?;
+        fs::set_permissions(dst, fs::Permissions::from_mode(m.mode() & 0o7777))?;
+        crate::fsutil::set_mtime(&File::open(dst)?, m.mtime(), m.mtime_nsec())?;
+        if sealed(m) {
+            self.seals.push(dst.to_path_buf());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn file(&mut self, src: &Path, dst: &Path, m: &fs::Metadata) -> Result<()> {
+        let link = (m.dev(), m.ino());
+        if m.nlink() > 1 {
+            if let Some(first) = self.links.get(&link) {
+                fs::hard_link(first, dst).with_context(|| format!("link {}", dst.display()))?;
+                if sealed(m) {
+                    self.seals.push(dst.to_path_buf());
+                }
+                return Ok(());
+            }
+        }
+        let identity = crate::sys::apfs_data_identity(src).with_context(|| format!("identity {}", src.display()))?;
+        // Only data with a clone id can be shared; its physical extents prove the sharing.
+        let extents = match identity.clone_id {
+            Some(_) => crate::sys::apfs_extents(&File::open(src)?, m.len()),
+            None => None,
+        };
+        let same = match (identity.clone_id, &extents) {
+            (Some(id), Some(extents)) => self.shared.get(&id).and_then(|copies| copies.iter().find(|(e, _)| e == extents)).map(|(_, p)| p.clone()),
+            _ => None,
+        };
+        let cloned = match same {
+            Some(first) => {
+                crate::sys::apfs_clone(&first, dst).with_context(|| format!("clone {}", dst.display()))?;
+                true
+            }
+            None => false,
+        };
+        if !cloned {
+            let mut from = File::open(src).with_context(|| format!("open {}", src.display()))?;
+            let mut to = fs::OpenOptions::new().write(true).create_new(true).open(dst).with_context(|| format!("create {}", dst.display()))?;
+            io::copy(&mut from, &mut to).with_context(|| format!("copy {}", src.display()))?;
+        }
+        crate::sys::apfs_copy_metadata(src, dst).with_context(|| format!("copy metadata {}", dst.display()))?;
+        crate::sys::apfs_immutable(dst, false)?;
+        keep_birthtime(m, dst)?;
+        own(dst, m)?;
+        fs::set_permissions(dst, fs::Permissions::from_mode(m.mode() & 0o7777))?;
+        crate::fsutil::set_mtime(&File::open(dst)?, m.mtime(), m.mtime_nsec())?;
+        if let (Some(id), Some(extents), false) = (identity.clone_id, extents, cloned) {
+            self.shared.entry(id).or_default().push((extents, dst.to_path_buf()));
+        }
+        if m.nlink() > 1 {
+            self.links.insert(link, dst.to_path_buf());
+        }
+        if sealed(m) {
+            self.seals.push(dst.to_path_buf());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn symlink(&mut self, src: &Path, dst: &Path, m: &fs::Metadata) -> Result<()> {
+        std::os::unix::fs::symlink(fs::read_link(src)?, dst).with_context(|| format!("link {}", dst.display()))?;
+        crate::sys::apfs_copy_metadata(src, dst).with_context(|| format!("copy metadata {}", dst.display()))?;
+        crate::sys::apfs_immutable(dst, false)?;
+        keep_birthtime(m, dst)?;
+        own(dst, m)
+    }
+
+    /// Seal the copied entries as the source is sealed (children before folders).
+    pub(crate) fn finish(self) -> Result<()> {
+        for path in &self.seals {
+            crate::sys::apfs_immutable(path, true)?;
+        }
+        Ok(())
+    }
+}
+
+/// APFS has no layer registry: nothing to verify beyond the tree.
+pub(crate) fn verify_registry(_src: &Path, _dst: &Path) -> Result<()> {
+    Ok(())
+}
