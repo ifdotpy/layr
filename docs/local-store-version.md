@@ -8,7 +8,7 @@ This file is independent of the encrypted remote store format.
 ```
 
 `format` controls compatibility.
-`version` and `build` identify the binary that creates or explicitly upgrades the marker.
+`version` and `build` identify the binary that creates the marker.
 Later compatible binaries do not replace this identity.
 Different package versions or build identities can use the same format.
 
@@ -46,12 +46,12 @@ A malformed or unreadable marker returns status 128.
 | --- | --- | --- |
 | `absent` | The root does not exist. | Yes, the first normal command can create it. |
 | `empty` | The root contains no store data. | Yes, the first normal command can initialize it. |
-| `legacy` | The root contains data but has no marker. | No. |
+| `unmarked` | The root has no marker and has the layout of format 1 (a machine identity). | Yes, the next open writes the marker. |
 | `compatible` | Both format numbers are equal. | Yes. |
-| `incompatible` | The format numbers differ. | No. |
+| `incompatible` | The format numbers differ, or the root has no marker and no machine identity. | No. |
 
-`store` is null for absent, empty, and legacy roots.
-Legacy roots and explicit format 0 markers report this supported upgrade:
+`store` is null for absent, empty, and unmarked roots.
+An unmarked root reports the marker write that the next open makes:
 
 ```json
 {"metadataOnly":true,"fromFormat":0,"toFormat":1}
@@ -59,29 +59,24 @@ Legacy roots and explicit format 0 markers report this supported upgrade:
 
 Other states report `upgrade: null`.
 This classification describes changes to the version marker and its lock file.
-The explicit upgrade does not change machine identity files or project data.
+Writing the marker does not change machine identity files or project data.
 
-## Upgrade explicitly
+## Unmarked stores (format 0)
 
-Stop all commands and daemons that use the store.
-Then run:
+A store without a marker is format 0.
+Its layout is the same as format 1, so no data changes.
+The first command that opens it writes the marker. No extra step is needed.
 
-```sh
-layr --root /path/to/store store-version --upgrade
-```
-
-The command adopts a nonempty unversioned store as format 1.
-An absent or empty root refuses this command without a write.
-A normal command initializes an empty root.
-It also accepts an explicit format 0 marker.
-It preserves the existing store data and records the current binary identity.
-The project database retains its existing schema migration mechanism.
-The command refuses other incompatible formats and never downgrades a newer store.
+- A root without `machine/id` is not a layr store. It is refused, and no file changes.
+- The marker is written under the exclusive lease, through a temporary file and a rename.
+- Parallel first commands wait for the lease. The first one writes the marker, and the others find it.
+- A root that is not writable is refused. Give write access to the store root and run the command again.
+- An explicit marker with another format is refused. It is never rewritten.
 
 Every open store holds a shared lease on `.layr-version.lock`.
 The daemon holds this lease for its lifetime.
-An upgrade requires an exclusive lease and refuses an active store.
-The binary rechecks the marker after it acquires the lease.
+The first open of an unmarked store takes the exclusive lease only to write the marker.
+It rechecks the marker after it acquires the lease.
 Store initialization also holds an exclusive `.layr-machine.lock` lease through the identity read.
 It applies even when a format marker already exists.
 Complete identity files publish once through an atomic hard link.
@@ -99,7 +94,7 @@ A new client refuses an older daemon that has no version exchange.
 Older binaries that ignore this marker cannot enforce the guard.
 Upgrade all binaries and daemons before they share the store.
 The marker cannot stop a binary that never reads it.
-An explicit upgrade cannot detect an active older binary that takes no version lease.
+The marker write cannot detect an active older binary that takes no version lease.
 
 Studio must inspect its bundled and developer binaries before it shares a root.
 It must refuse a developer binary that has no `store-version` command.

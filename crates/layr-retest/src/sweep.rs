@@ -53,31 +53,25 @@ fn outputs(debug: &Path) -> Vec<Output> {
     v
 }
 
-/// What a listing of cargo's JSON names: the live unit hashes, and the artifacts that the listing
-/// itself compiled (`fresh: false`). A folder with built artifacts is not swept: its live set would
-/// have been produced by a build that the sweep did not check.
-pub struct Listing {
-    pub live: BTreeSet<String>,
-    pub built: Vec<String>,
+/// The target name of a `--message-format json` line that is a unit which is not fresh (`fresh: false`).
+/// A listing that reports one has built that unit, so its live set is not a fact about the build.
+pub fn not_fresh(line: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(line).ok()?;
+    let stale = v["reason"] == "compiler-artifact" && v["fresh"].as_bool() == Some(false);
+    stale.then(|| v["target"]["name"].as_str().unwrap_or("?").to_string())
 }
 
-/// Unit hashes that cargo names in a `--message-format json` output: every artifact, fresh or not,
-/// and every build script run. Cargo names a bin or an example only by its copy in `debug` (`debug/app`);
+/// Unit hashes that cargo names in a `--message-format json` output: every artifact and every build
+/// script run. Cargo names a bin or an example only by its copy in `debug` (`debug/app`);
 /// a copy is matched to its `deps` or `examples` file by size and modification time. When no file
 /// matches, every output file of that name is live: a unit that may be live is never removed.
-pub fn live_units(debug: &Path, messages: &[u8]) -> Listing {
+pub fn live_units(debug: &Path, messages: &[u8]) -> BTreeSet<String> {
     let mut live = BTreeSet::new();
-    let mut built = Vec::new();
     let mut copies: Vec<(PathBuf, String)> = Vec::new();
     for line in String::from_utf8_lossy(messages).lines() {
         let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
         let paths: Vec<&str> = match v["reason"].as_str() {
-            Some("compiler-artifact") => {
-                if v["fresh"].as_bool() == Some(false) {
-                    built.push(v["target"]["name"].as_str().unwrap_or("?").to_string());
-                }
-                v["filenames"].as_array().into_iter().flatten().filter_map(Value::as_str).chain(v["executable"].as_str()).collect()
-            }
+            Some("compiler-artifact") => v["filenames"].as_array().into_iter().flatten().filter_map(Value::as_str).chain(v["executable"].as_str()).collect(),
             // `build/<package>-<hash>/out`: the hash is in the folder of the out dir.
             Some("build-script-executed") => v["out_dir"].as_str().into_iter().collect(),
             _ => continue,
@@ -96,7 +90,7 @@ pub fn live_units(debug: &Path, messages: &[u8]) -> Listing {
         }
     }
     if copies.is_empty() {
-        return Listing { live, built };
+        return live;
     }
     let outputs = outputs(debug);
     for (c, target) in copies {
@@ -111,7 +105,7 @@ pub fn live_units(debug: &Path, messages: &[u8]) -> Listing {
             live.extend(same.iter().map(|o| o.hash.clone()));
         }
     }
-    Listing { live, built }
+    live
 }
 
 /// The hashes of the `.fingerprint` folders that hold the marker file of the target `target`
@@ -359,7 +353,7 @@ mod tests {
         ];
         let mut msgs: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
         msgs.push("not json".into());
-        let live = live_units(&debug, msgs.join("\n").as_bytes()).live;
+        let live = live_units(&debug, msgs.join("\n").as_bytes());
         assert_eq!(live.into_iter().collect::<Vec<_>>(), vec![H3, H4, H5, H6, H7].into_iter().map(String::from).collect::<Vec<_>>());
     }
 
@@ -372,7 +366,7 @@ mod tests {
         touch(&debug.join(format!(".fingerprint/other-{H3}/lib-other")), 1);
         let d = debug.display().to_string();
         let msg = serde_json::json!({"reason": "compiler-artifact", "target": {"name": "dy_lib"}, "filenames": [format!("{d}/libdy_lib.dylib")], "executable": null});
-        let live = live_units(&debug, msg.to_string().as_bytes()).live;
+        let live = live_units(&debug, msg.to_string().as_bytes());
         assert!(live.contains(H1) && live.contains(H2) && !live.contains(H3), "{live:?}");
         std::fs::remove_dir_all(debug.parent().unwrap()).unwrap();
     }
@@ -385,19 +379,17 @@ mod tests {
         touch(&debug.join(format!("deps/app-{H4}")), 5);
         let d = debug.display().to_string();
         let msg = serde_json::json!({"reason": "compiler-artifact", "filenames": [format!("{d}/app")], "executable": format!("{d}/app")});
-        let live = live_units(&debug, msg.to_string().as_bytes()).live;
+        let live = live_units(&debug, msg.to_string().as_bytes());
         assert!(live.contains(H3) && live.contains(H4), "{live:?}");
     }
 
     #[test]
-    fn live_units_reports_what_the_listing_built() {
-        let debug = PathBuf::from("/t/debug");
+    fn not_fresh_names_only_a_unit_that_is_not_fresh() {
         let fresh = serde_json::json!({"reason": "compiler-artifact", "target": {"name": "a"}, "fresh": true, "filenames": [format!("/t/debug/deps/liba-{H1}.rlib")]});
-        assert!(live_units(&debug, fresh.to_string().as_bytes()).built.is_empty());
+        assert_eq!(not_fresh(&fresh.to_string()), None);
         let built = serde_json::json!({"reason": "compiler-artifact", "target": {"name": "b"}, "fresh": false, "filenames": [format!("/t/debug/deps/libb-{H2}.rlib")]});
-        let l = live_units(&debug, built.to_string().as_bytes());
-        assert_eq!(l.built, vec!["b".to_string()]);
-        assert!(l.live.contains(H2));
+        assert_eq!(not_fresh(&built.to_string()), Some("b".to_string()));
+        assert_eq!(not_fresh("Compiling b v0.1.0"), None);
     }
 
     #[test]

@@ -529,6 +529,17 @@ impl Db {
                     params![s("name"), rec.time, ord],
                 )?;
             }
+            "remote.remove" => {
+                // The refs of the removed remote become tombstones (state NULL), so an older import
+                // record that arrives later cannot bring them back.
+                if let Some(remote) = s("remote") {
+                    tx.execute(
+                        "UPDATE remote_refs SET state=NULL, gcommit=NULL, time=?2, ord=?3
+                         WHERE substr(name, 1, length(?1)+1)=?1||'/' AND ord < ?3",
+                        params![remote, rec.time, ord],
+                    )?;
+                }
+            }
             "import" | "remote.ref" => {
                 if let (Some(name), Some(st)) = (s("ref"), s("state")) {
                     tx.execute(
@@ -736,6 +747,17 @@ impl Db {
         Ok(v)
     }
 
+    /// The present states of a cache overlay that name the project state they were saved with
+    /// (`cache_of`), newest first: (state, project state).
+    pub fn cache_states(&self) -> Result<Vec<(String, String)>> {
+        let mut st = self.conn.prepare(
+            "SELECT id, json_extract(rec, '$.cache_of') FROM states
+             WHERE present=1 AND deleted=0 AND json_extract(rec, '$.cache_of') IS NOT NULL ORDER BY time DESC",
+        )?;
+        let v = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?.collect::<Result<Vec<_>, _>>()?;
+        Ok(v)
+    }
+
     /// The newest local states, by time, whose folders the rollback check looks at.
     #[cfg_attr(not(all(target_os = "linux", not(feature = "overlayfs"))), allow(dead_code))]
     pub fn newest_present_states(&self, n: usize) -> Result<Vec<String>> {
@@ -809,12 +831,12 @@ impl Db {
     pub fn remote_ref(&self, name: &str) -> Result<Option<(String, Option<String>)>> {
         Ok(self
             .conn
-            .query_row("SELECT state, gcommit FROM remote_refs WHERE name=?1", params![name], |r| Ok((r.get(0)?, r.get(1)?)))
+            .query_row("SELECT state, gcommit FROM remote_refs WHERE name=?1 AND state IS NOT NULL", params![name], |r| Ok((r.get(0)?, r.get(1)?)))
             .optional()?)
     }
 
     pub fn remote_refs(&self) -> Result<Vec<(String, String, Option<String>)>> {
-        let mut st = self.conn.prepare("SELECT name, state, gcommit FROM remote_refs ORDER BY name")?;
+        let mut st = self.conn.prepare("SELECT name, state, gcommit FROM remote_refs WHERE state IS NOT NULL ORDER BY name")?;
         let v = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<Result<Vec<_>, _>>()?;
         Ok(v)
     }

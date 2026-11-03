@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.16.2](https://github.com/ifdotpy/layr/compare/v0.16.1...v0.16.2) (2026-11-03)
+
+
+### Bug Fixes
+
+* **caches:** The newest cache overlay state wins over an old cache of the state ([#145](https://github.com/ifdotpy/layr/issues/145)) ([f8a3d55](https://github.com/ifdotpy/layr/commit/f8a3d558b2139f4a14e9400fc2a30eacefe08fa2))
+
+## [0.16.1](https://github.com/ifdotpy/layr/compare/v0.16.0...v0.16.1) (2026-11-02)
+
+
+### Bug Fixes
+
+* **caches:** A line from a state takes the cache saved with it ([#142](https://github.com/ifdotpy/layr/issues/142)) ([584b0d9](https://github.com/ifdotpy/layr/commit/584b0d9fb9a733fba06a35424416adb64bc5afd3))
+* **retest:** sweep only configured dirs and never compile ([#141](https://github.com/ifdotpy/layr/issues/141)) ([a38756d](https://github.com/ifdotpy/layr/commit/a38756dcbe6bc121da725298d85fd800af7d012a))
+* **store:** Read the marker again before refusing a half-made store ([#144](https://github.com/ifdotpy/layr/issues/144)) ([fd8cb5b](https://github.com/ifdotpy/layr/commit/fd8cb5bcfd95218396634a035ba9cb5f9ba11429))
+
+## [0.16.0](https://github.com/ifdotpy/layr/compare/v0.15.0...v0.16.0) (2026-11-02)
+
+
+### ⚠ BREAKING CHANGES
+
+* **store:** Upgrade an unversioned store with the same format on open ([#132](https://github.com/ifdotpy/layr/issues/132))
+
+### Features
+
+* **store:** Upgrade an unversioned store with the same format on open ([#132](https://github.com/ifdotpy/layr/issues/132)) ([07b710d](https://github.com/ifdotpy/layr/commit/07b710d59c038cdcc0032128ea75a7897e3274ac))
+
+
+### Bug Fixes
+
+* **git:** Delete a removed remote's tracking refs ([#138](https://github.com/ifdotpy/layr/issues/138)) ([81928b8](https://github.com/ifdotpy/layr/commit/81928b8b4a88ed89ad48ec87ea9f52bb7c473c6f))
+
 ## [0.15.0](https://github.com/ifdotpy/layr/compare/v0.14.2...v0.15.0) (2026-11-02)
 
 

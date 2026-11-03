@@ -1,5 +1,6 @@
 """Exercise version negotiation and refusal through the real daemon socket."""
 import array
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -68,8 +69,12 @@ for hello in (False, True):
     assert not (store / "projects/must-not-exist").exists()
     code, error = request(dict(current, version="another-version", build="another-build"), hello)
     assert code == 0, error
-print("PASS the daemon refuses different formats and legacy clients before work", flush=True)
-result = subprocess.run([binary, "store-version", "--upgrade"], env=env, capture_output=True, text=True)
-assert result.returncode == 128 and "in use" in result.stderr, result.stderr
+print("PASS the daemon refuses different formats and unguarded clients before work", flush=True)
+with (store / ".layr-version.lock").open("r+") as lease:
+    try:
+        fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        raise AssertionError("the daemon does not hold the format lease")
+    except BlockingIOError:
+        pass
 print("PASS the daemon holds its format lease for its lifetime", flush=True)
 print("t54-store-version-daemon.sh: 2 passed, 0 failed")

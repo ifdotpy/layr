@@ -332,11 +332,24 @@ fn debug_vars(opt_out: Option<&str>) -> Vec<(&'static str, &'static str)> {
 }
 
 /// Settings of `[workspace.metadata.layr-retest]` in the root `Cargo.toml`: `sweep` lists the standard
-/// build commands (cargo arguments without `cargo`), and `env` sets the variables that change the unit
-/// hashes of those builds (for example the toolchain of a gate).
+/// build commands (cargo arguments without `cargo`), `retest` lists the commands of the retest build
+/// (`target/retest`), and `env` sets the variables that change the unit hashes of those builds (for
+/// example the toolchain of a gate).
 struct SweepConfig {
     env: Vec<(String, String)>,
     commands: Vec<Vec<String>>,
+    retest: Vec<Vec<String>>,
+}
+
+/// The cargo commands under `key` (`sweep` or `retest`): an array of arrays of strings.
+fn command_list(cfg: &Value, key: &str) -> Result<Vec<Vec<String>>> {
+    let mut commands = Vec::new();
+    for c in cfg[key].as_array().into_iter().flatten() {
+        let args = c.as_array().with_context(|| format!("{key}: each command is an array of strings"))?;
+        let strings = args.iter().map(|a| a.as_str().map(String::from).with_context(|| format!("{key}: each argument is a string")));
+        commands.push(strings.collect::<Result<Vec<_>>>()?);
+    }
+    Ok(commands)
 }
 
 /// Reads the sweep settings of the workspace at `root`. `None` when it has no `sweep` list.
@@ -344,17 +357,14 @@ fn sweep_config(root: &Path) -> Result<Option<SweepConfig>> {
     let meta: Value =
         serde_json::from_slice(&output(Command::new("cargo").args(["metadata", "--no-deps", "--format-version", "1"]).current_dir(root))?)?;
     let cfg = &meta["metadata"]["layr-retest"];
-    let Some(list) = cfg["sweep"].as_array() else { return Ok(None) };
-    let mut commands = Vec::new();
-    for c in list {
-        let args = c.as_array().context("sweep: each command is an array of strings")?;
-        commands.push(args.iter().map(|a| a.as_str().map(String::from).context("sweep: each argument is a string")).collect::<Result<Vec<_>>>()?);
+    if cfg["sweep"].as_array().is_none() {
+        return Ok(None);
     }
     let mut env = Vec::new();
     for (k, v) in cfg["env"].as_object().into_iter().flatten() {
         env.push((k.clone(), v.as_str().context("sweep env: each value is a string")?.to_string()));
     }
-    Ok(Some(SweepConfig { env, commands }))
+    Ok(Some(SweepConfig { env, commands: command_list(cfg, "sweep")?, retest: command_list(cfg, "retest")? }))
 }
 
 /// The environment that changes the unit hashes of the retest build: the instrumented rustflags (the
@@ -372,37 +382,94 @@ fn hash_env(root: &Path) -> Result<Vec<(String, String)>> {
     Ok(env)
 }
 
-/// The cargo arguments that make cargo print the units of the build as JSON. Nextest forwards its own flag.
+/// The cargo arguments of a listing: `-v` names each unit that is not fresh before cargo compiles or runs
+/// it, and `--message-format json` names the units. Both go before a `--` that ends the cargo arguments.
 fn listing(args: &[String]) -> Vec<String> {
-    let flag = if args.first().is_some_and(|a| a == "nextest") { "--cargo-message-format" } else { "--message-format" };
-    args.iter().cloned().chain([flag.to_string(), "json".to_string()]).collect()
+    let at = args.iter().position(|a| a == "--").unwrap_or(args.len());
+    let mut out = args.to_vec();
+    out.splice(at..at, ["-v", "--message-format", "json"].map(String::from));
+    out
+}
+
+/// What the listing of the units of one folder found.
+enum Listed {
+    /// Every unit is fresh: the live unit hashes.
+    Fresh(BTreeSet<String>),
+    /// A unit is not fresh, named by cargo's status line or by its target. Nothing was built past it.
+    NotFresh(String),
+    /// Another cargo holds the build lock of the folder: the listing stopped before it waited for that cargo.
+    Busy,
+}
+
+/// Lists the units of `args` in the target folder `target` without building them. `CARGO_BUILD_JOBS=1`, and
+/// the listing stops at the first unit that is not fresh. Cargo's `-v` prints `Dirty` for such a unit
+/// before it compiles or runs anything, so the stop comes before a build step. The JSON `fresh: false` is
+/// a second stop, for a cargo whose status text differs (cargo then builds that one unit). A `Blocking ...
+/// directory` line means that another cargo holds a lock of the folder: the listing stops instead of waiting
+/// for it. The listing runs in its own process group, and a stop kills the group. Any other failure is an error.
+fn list_units(root: &Path, target: &Path, env: &[(String, String)], args: &[String]) -> Result<Listed> {
+    let mut c = Command::new("cargo");
+    c.args(listing(args)).current_dir(root).env("CARGO_TARGET_DIR", target).env("CARGO_BUILD_JOBS", "1");
+    c.envs(env.iter().map(|(k, v)| (k, v))).env("LLVM_PROFILE_FILE", cargo_profile_file(target));
+    c.process_group(0).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = c.spawn().with_context(|| format!("cannot start cargo {}", args.join(" ")))?;
+    let (out, err) = (child.stdout.take().context("cargo stdout")?, child.stderr.take().context("cargo stderr")?);
+    let pid = child.id();
+    let stop: Mutex<Option<Listed>> = Mutex::new(None);
+    let halt = |why: Listed| {
+        let mut first = stop.lock().unwrap();
+        if first.is_none() {
+            *first = Some(why);
+            // A negative pid names the process group of the listing.
+            let _ = Command::new("kill").args(["-KILL", "--", &format!("-{pid}")]).status();
+        }
+    };
+    let (lines, status) = std::thread::scope(|s| {
+        s.spawn(|| {
+            for line in BufReader::new(err).lines().map_while(Result::ok) {
+                let t = line.trim_start();
+                // A wait for a folder's lock stops the listing. A wait for the shared package cache is short: it waits.
+                if t.starts_with("Blocking ") && t.contains("directory") {
+                    halt(Listed::Busy);
+                } else if ["Dirty ", "Compiling ", "Running "].iter().any(|p| t.starts_with(p)) {
+                    halt(Listed::NotFresh(t.to_string()));
+                }
+            }
+        });
+        let lines = s.spawn(|| {
+            let mut lines = Vec::new();
+            for line in BufReader::new(out).lines().map_while(Result::ok) {
+                if let Some(name) = sweep::not_fresh(&line) {
+                    halt(Listed::NotFresh(format!("{name} is not fresh")));
+                }
+                lines.push(line);
+            }
+            lines
+        });
+        let status = child.wait();
+        (lines.join().unwrap_or_default(), status)
+    });
+    let _ = std::fs::remove_dir_all(profile_scratch(target));
+    if let Some(stopped) = stop.into_inner().unwrap_or(None) {
+        return Ok(stopped);
+    }
+    if !status.with_context(|| format!("cannot wait for cargo {}", args.join(" ")))?.success() {
+        bail!("cargo {} failed", args.join(" "));
+    }
+    Ok(Listed::Fresh(sweep::live_units(&target.join("debug"), lines.join("\n").as_bytes())))
 }
 
 /// The live units of the target folder `target`: the units that every command of `commands` uses, each
-/// run with `env`, and the units that a listing compiled. A listing does not sweep a folder it compiled
-/// in. Any failing command fails all.
-fn live_units(root: &Path, target: &Path, env: &[(String, String)], commands: &[Vec<String>]) -> Result<sweep::Listing> {
-    let mut all = sweep::Listing { live: BTreeSet::new(), built: Vec::new() };
+/// run with `env`. Stops at the first command whose units are not fresh.
+fn live_units(root: &Path, target: &Path, env: &[(String, String)], commands: &[Vec<String>]) -> Result<Listed> {
+    let mut live = BTreeSet::new();
     for args in commands {
-        let mut c = Command::new("cargo");
-        c.args(listing(args)).current_dir(root).env("CARGO_TARGET_DIR", target).envs(env.iter().map(|(k, v)| (k, v)));
-        c.env("LLVM_PROFILE_FILE", cargo_profile_file(target));
-        let o = c.stderr(Stdio::inherit()).output().with_context(|| format!("cannot start cargo {}", args.join(" ")))?;
-        if !o.status.success() {
-            bail!("cargo {} failed", args.join(" "));
+        match list_units(root, target, env, args)? {
+            Listed::Fresh(units) => live.extend(units),
+            stale => return Ok(stale),
         }
-        let l = sweep::live_units(&target.join("debug"), &o.stdout);
-        all.live.extend(l.live);
-        all.built.extend(l.built);
     }
-    let _ = std::fs::remove_dir_all(profile_scratch(target));
-    Ok(all)
-}
-
-/// The reason a folder is not swept, when its listing compiled units.
-fn built_reason(built: &[String]) -> Option<String> {
-    let first = built.first()?;
-    Some(format!("the listing compiled {} unit(s), first: {first}; run the standard build first", built.len()))
+    Ok(Listed::Fresh(live))
 }
 
 /// Sweep the profile folder `debug` under cargo's lock. `None` when the lock is busy. A dry run counts only.
@@ -413,8 +480,8 @@ fn sweep_folder(debug: &Path, live: &BTreeSet<String>, dry: bool) -> Result<Opti
     sweep::locked(debug, || sweep::sweep_units(debug, live, false))
 }
 
-/// The sweep after a retest build: the live units of the standard commands and of the run's own command
-/// (`own`), in `target/retest`. A failure skips the sweep and removes nothing.
+/// The sweep after a retest build: the live units of the standard commands, the retest commands and the
+/// run's own command (`own`), in `target/retest`. A folder with a unit that is not fresh is not swept.
 fn sweep_after_build(root: &Path, target: &Path, hash: &[(String, String)], own: Vec<String>) {
     let t = std::time::Instant::now();
     let cfg = match sweep_config(root) {
@@ -425,15 +492,16 @@ fn sweep_after_build(root: &Path, target: &Path, hash: &[(String, String)], own:
     let mut env = hash.to_vec();
     env.extend(cfg.env.iter().cloned());
     let mut commands = cfg.commands;
+    commands.extend(cfg.retest);
     commands.push(own);
-    let listing = match live_units(root, target, &env, &commands) {
-        Ok(l) => l,
+    let live = match live_units(root, target, &env, &commands) {
+        Ok(Listed::Fresh(live)) => live,
+        Ok(Listed::NotFresh(why)) => {
+            return eprintln!("layr-retest: sweep skipped: a unit is not fresh ({why}); run the standard build first")
+        }
+        Ok(Listed::Busy) => return eprintln!("layr-retest: sweep skipped (build lock busy)"),
         Err(e) => return eprintln!("layr-retest: sweep skipped, nothing removed: {e:#}"),
     };
-    if let Some(why) = built_reason(&listing.built) {
-        return eprintln!("layr-retest: sweep skipped: {why}");
-    }
-    let live = listing.live;
     let listed = t.elapsed().as_secs_f32();
     match sweep_folder(&target.join("debug"), &live, false) {
         Ok(Some(n)) => eprintln!(
@@ -446,9 +514,11 @@ fn sweep_after_build(root: &Path, target: &Path, hash: &[(String, String)], own:
     }
 }
 
-/// `layr retest sweep [--dry-run]`: remove the units that the standard commands of the workspace do not
-/// use, from `target/debug` and, when it exists, `target/retest/debug`. Every folder is listed before any
-/// removal: one failing command changes nothing.
+/// `layr retest sweep [--dry-run]`: remove the units that the commands of the workspace do not use.
+/// `target` takes the `sweep` list. `target/retest` takes the `sweep` and `retest` lists under the
+/// environment of the retest build, and is left as it is without a `retest` list. Every folder is
+/// listed before any removal. A folder with a unit that is not fresh is skipped, and no listing compiles.
+/// A missing `sweep` list and a skipped folder exit 0; a failing cargo exits 1.
 fn sweep_cmd(args: &[String]) -> Result<i32> {
     let dry = match args {
         [] => false,
@@ -461,30 +531,38 @@ fn sweep_cmd(args: &[String]) -> Result<i32> {
     let t0 = std::time::Instant::now();
     let root = std::env::current_dir()?;
     let Some(cfg) = sweep_config(&root)? else {
-        eprintln!("layr-retest: no sweep list: add `sweep = [[\"build\", ...]]` under [workspace.metadata.layr-retest] in Cargo.toml");
-        return Ok(2);
+        eprintln!("layr-retest: sweep skipped: no `sweep` list under [workspace.metadata.layr-retest] in Cargo.toml");
+        return Ok(0);
     };
-    let folders = [(root.join("target"), Vec::new()), (root.join("target/retest"), hash_env(&root)?)];
+    let mut retest_env = hash_env(&root)?;
+    retest_env.extend(cfg.env.iter().cloned());
+    let mut retest_commands = cfg.commands.clone();
+    retest_commands.extend(cfg.retest.iter().cloned());
+    let folders = [
+        (root.join("target"), cfg.env.clone(), Some(cfg.commands.clone())),
+        (root.join("target/retest"), retest_env, (!cfg.retest.is_empty()).then_some(retest_commands)),
+    ];
     let mut lists = Vec::new();
-    for (target, env) in folders {
+    for (target, env, commands) in folders {
+        let name = target.strip_prefix(&root).unwrap_or(&target).display().to_string();
         if !target.join("debug").is_dir() {
             continue;
         }
-        let mut env = env;
-        env.extend(cfg.env.iter().cloned());
-        match live_units(&root, &target, &env, &cfg.commands) {
-            Ok(l) => match built_reason(&l.built) {
-                Some(why) => eprintln!("layr-retest: {}: sweep skipped: {why}", target.strip_prefix(&root).unwrap_or(&target).display()),
-                None => lists.push((target, l.live)),
-            },
+        let Some(commands) = commands else {
+            eprintln!("layr-retest: {name}: no sweep command; left as is");
+            continue;
+        };
+        match live_units(&root, &target, &env, &commands) {
+            Ok(Listed::Fresh(live)) => lists.push((name, target, live)),
+            Ok(Listed::NotFresh(why)) => eprintln!("layr-retest: {name}: sweep skipped: a unit is not fresh ({why}); run the standard build first"),
+            Ok(Listed::Busy) => eprintln!("layr-retest: {name}: sweep skipped (build lock busy)"),
             Err(e) => {
                 eprintln!("layr-retest: sweep skipped, nothing changed: {e:#}");
                 return Ok(1);
             }
         }
     }
-    for (target, live) in lists {
-        let name = target.strip_prefix(&root).unwrap_or(&target).display().to_string();
+    for (name, target, live) in lists {
         match sweep_folder(&target.join("debug"), &live, dry)? {
             Some(n) if dry => eprintln!("layr-retest: {name}: would free {:.1} MB", n as f64 / 1e6),
             Some(n) => eprintln!("layr-retest: swept {name}, freed {:.1} MB", n as f64 / 1e6),
