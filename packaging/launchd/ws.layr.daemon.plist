@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The layr daemon as your user on macOS: runs the layr follow passes on its tick. No root.
+     Install: cp this file to ~/Library/LaunchAgents/, then
+       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ws.layr.daemon.plist
+     Logs: ~/Library/Logs/layr-daemon.log. See docs/follow.md. -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>ws.layr.daemon</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/sh</string>
+        <string>-c</string>
+        <string>exec "$HOME/.local/bin/layr" daemon &gt;&gt;"$HOME/Library/Logs/layr-daemon.log" 2&gt;&amp;1</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

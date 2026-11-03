@@ -182,9 +182,14 @@ fn limit(var: &str, default: usize) -> usize {
     std::env::var(var).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
-fn read_request(sock: &UnixStream) -> Result<(serde_json::Value, Vec<OwnedFd>)> {
+/// Read one request. `None`: the client closed the connection without sending a byte, which is a
+/// normal end of the connection, not a bad request.
+fn read_request(sock: &UnixStream) -> Result<Option<(serde_json::Value, Vec<OwnedFd>)>> {
     let mut first = vec![0u8; 65536];
     let (n, fds) = recv_with_fds(sock, &mut first)?;
+    if n == 0 {
+        return Ok(None);
+    }
     if n < 4 {
         bail!("bad request");
     }
@@ -204,7 +209,7 @@ fn read_request(sock: &UnixStream) -> Result<(serde_json::Value, Vec<OwnedFd>)> 
         }
         req.extend_from_slice(&more[..k]);
     }
-    Ok((serde_json::from_slice(&req)?, fds))
+    Ok(Some((serde_json::from_slice(&req)?, fds)))
 }
 
 /// Child process: serve one request, then exit.
@@ -213,7 +218,9 @@ fn handle(sock: UnixStream, root: &Path, registry_uids: &[u32]) -> i32 {
         let (uid, _gid, _pid) = peer_uid(&sock)?;
         // A client that does not send its request in time does not hold a process.
         sock.set_read_timeout(Some(std::time::Duration::from_secs(10)))?;
-        let (v, fds) = read_request(&sock)?;
+        let Some((v, fds)) = read_request(&sock)? else {
+            return Ok(0);
+        };
         let (v, fds) = if v.get("hello") == Some(&serde_json::Value::Bool(true)) {
             if !fds.is_empty() {
                 bail!("the version request must not contain descriptors");
@@ -223,7 +230,11 @@ fn handle(sock: UnixStream, root: &Path, registry_uids: &[u32]) -> i32 {
             packet.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
             packet.extend_from_slice(&bytes);
             (&sock).write_all(&packet)?;
-            read_request(&sock)?
+            // A client that reads the version and closes sends no command: that is not an error.
+            let Some(next) = read_request(&sock)? else {
+                return Ok(0);
+            };
+            next
         } else {
             (v, fds)
         };
@@ -377,17 +388,29 @@ fn periodic(root: &Path, hourly: bool) {
     }
 }
 
+/// The socket of a daemon that runs as a user (macOS LaunchAgent): in the user's caches folder.
+fn user_socket_path() -> PathBuf {
+    std::env::var_os("LAYR_SOCKET")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join("Library/Caches/layr/layr.sock"))
+}
+
+/// `layr daemon [--socket <path>] [--tick <seconds>]`. Root serves every local user (Linux, or
+/// macOS run as root). On macOS a daemon may run as its user (a LaunchAgent): it serves only that
+/// uid, switches no user and runs no periodic gc or state freeing, only the follow tick.
 pub fn daemon(args: &[String]) -> Result<i32> {
-    if !rustix::process::geteuid().is_root() {
+    let own = rustix::process::geteuid().as_raw();
+    let user_mode = own != 0 && cfg!(target_os = "macos");
+    if own != 0 && !user_mode {
         bail!("layr daemon must run as root");
     }
-    let mut sock = socket_path();
-    let mut tick = 60u64;
+    let mut sock: Option<PathBuf> = None;
+    let mut tick = if user_mode { 120u64 } else { 60u64 };
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--socket" => {
-                sock = PathBuf::from(args.get(i + 1).ok_or_else(|| anyhow!("--socket needs a path"))?);
+                sock = Some(PathBuf::from(args.get(i + 1).ok_or_else(|| anyhow!("--socket needs a path"))?));
                 i += 1;
             }
             "--tick" => {
@@ -398,9 +421,10 @@ pub fn daemon(args: &[String]) -> Result<i32> {
         }
         i += 1;
     }
+    let sock = sock.unwrap_or_else(|| if user_mode { user_socket_path() } else { socket_path() });
     let root = crate::store::default_root();
     #[cfg(target_os = "macos")]
-    {
+    if !user_mode {
         let existing = root.ancestors().find(|p| p.exists()).context("store has no existing parent")?;
         if !crate::sys::apfs_owners_enabled(existing)? {
             bail!("the APFS service requires a volume with ownership enabled (diskutil enableOwnership <volume>)");
@@ -429,12 +453,13 @@ pub fn daemon(args: &[String]) -> Result<i32> {
         }
         std::fs::remove_file(&sock)?;
     }
-    let registry_listeners = crate::oci::registry::listeners(&root)?;
+    // The OCI registry serves other users: a user daemon has none.
+    let registry_listeners = if user_mode { Vec::new() } else { crate::oci::registry::listeners(&root)? };
     let registry_uids: Vec<u32> = registry_listeners.iter().map(|(_, _, user)| user.uid).collect();
     let listener = UnixListener::bind(&sock)?;
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o666))?;
+        std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(if user_mode { 0o600 } else { 0o666 }))?;
     }
     eprintln!("layr service: listening on {} (store {})", sock.display(), root.display());
     let mut last_hourly: i64 = 0;
@@ -463,6 +488,11 @@ pub fn daemon(args: &[String]) -> Result<i32> {
         if ready > 0 && pfd[0].revents().contains(rustix::event::PollFlags::IN) {
             if let Ok((conn, _)) = listener.accept() {
                 let uid = peer_uid(&conn).map(|x| x.0).unwrap_or(u32::MAX);
+                if user_mode && uid != own {
+                    eprintln!("layr daemon: refused a request from uid {uid}");
+                    drop(conn);
+                    continue;
+                }
                 let mine = children.values().filter(|u| **u == uid).count();
                 if children.len() >= max_total || (uid != 0 && mine >= max_per_user) {
                     let _ = (&conn).write_all(b"B");
@@ -518,7 +548,12 @@ pub fn daemon(args: &[String]) -> Result<i32> {
             match crate::sys::fork() {
                 Ok(crate::sys::Fork::Child) => {
                     drop(listener);
-                    periodic(&root, hourly);
+                    if user_mode {
+                        crate::follow::tick(&root, Caller::from_uid(own));
+                    } else {
+                        periodic(&root, hourly);
+                        crate::follow::tick(&root, Caller::from_uid(0));
+                    }
                     std::process::exit(0);
                 }
                 Ok(crate::sys::Fork::Parent(pid)) => {
@@ -572,6 +607,26 @@ mod connect_tests {
 }
 
 #[cfg(test)]
+mod request_tests {
+    use super::*;
+
+    #[test]
+    fn a_closed_connection_is_no_request_and_a_short_one_is_bad() -> Result<()> {
+        let (client, server) = UnixStream::pair()?;
+        drop(client);
+        assert!(read_request(&server)?.is_none(), "EOF before any byte is a normal close");
+        for n in 1..4 {
+            let (mut client, server) = UnixStream::pair()?;
+            client.write_all(&vec![0u8; n])?;
+            drop(client);
+            let err = read_request(&server).err().context("a short request must fail")?;
+            assert_eq!(err.to_string(), "bad request", "{n} bytes before EOF");
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
 mod version_tests {
     use super::*;
 
@@ -580,7 +635,7 @@ mod version_tests {
         for format in [crate::store_version::FORMAT, crate::store_version::FORMAT + 1] {
             let (client, server) = UnixStream::pair()?;
             let thread = std::thread::spawn(move || -> Result<()> {
-                let (hello, fds) = read_request(&server)?;
+                let (hello, fds) = read_request(&server)?.context("no request")?;
                 assert_eq!(hello, serde_json::json!({"hello": true}));
                 assert!(fds.is_empty());
                 let mut version = crate::store_version::Version::binary();
@@ -615,7 +670,7 @@ mod version_tests {
         for answer in [b'R', b'B'] {
             let (client, server) = UnixStream::pair()?;
             let thread = std::thread::spawn(move || -> Result<()> {
-                let (hello, fds) = read_request(&server)?;
+                let (hello, fds) = read_request(&server)?.context("no request")?;
                 assert_eq!(hello, serde_json::json!({"hello": true}));
                 assert!(fds.is_empty());
                 (&server).write_all(&[answer])?;
