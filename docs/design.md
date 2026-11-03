@@ -142,8 +142,9 @@ pushes them; it must name each line, so a flag added blindly does not cover them
 
 ### State eviction and fetch on demand
 
-A state that a store remote holds does not need its tree on this machine. `gc` evicts it: the
-tree goes, the state record stays, and `present` becomes false. The record keeps the state's id,
+A state that a store remote holds does not need its tree on this machine. With the project config
+`gc.evict` set to `on` (default `off`), `gc` evicts it: the tree goes, the state record stays, and
+`present` becomes false. With `off`, `gc` keeps such a state on disk. The record keeps the state's id,
 parents and kind, so history, `diff` and `line new` still name it. Its tree comes back when a
 command reads it.
 

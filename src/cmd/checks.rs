@@ -315,7 +315,7 @@ fn scan(ctx: &Ctx, repo: &Repo, privileged_only: bool) -> Result<Scan> {
             let (code, log, truncated): (i32, Vec<u8>, bool) = {
                 bail!("automatic checks require Linux");
             };
-            let work = repo.p.work_dir().join(crate::ids::new_id());
+            let work = repo.p.work_dir().join(crate::store::temp_name());
             crate::storage::create_subvolume(&work)?;
             let cleanup = crate::repo::Temp { path: work.clone() };
             std::fs::write(work.join("check.log"), &log)?;

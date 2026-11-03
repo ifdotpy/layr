@@ -359,6 +359,10 @@ impl Project {
             "tag.delete" => {
                 self.tags.remove(&str_at("name"));
             }
+            "remote.remove" => {
+                let prefix = format!("{}/", str_at("remote"));
+                self.remote_refs.retain(|name, _| !name.starts_with(&prefix));
+            }
             "import" | "remote.ref" => {
                 if d["ref"].is_string() && d["state"].is_string() {
                     self.remote_refs.insert(str_at("ref"), d.clone());

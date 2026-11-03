@@ -1,5 +1,102 @@
 # Changelog
 
+## [0.16.2](https://github.com/ifdotpy/layr/compare/v0.16.1...v0.16.2) (2026-11-03)
+
+
+### Bug Fixes
+
+* **caches:** The newest cache overlay state wins over an old cache of the state ([#145](https://github.com/ifdotpy/layr/issues/145)) ([f8a3d55](https://github.com/ifdotpy/layr/commit/f8a3d558b2139f4a14e9400fc2a30eacefe08fa2))
+
+## [0.16.1](https://github.com/ifdotpy/layr/compare/v0.16.0...v0.16.1) (2026-11-02)
+
+
+### Bug Fixes
+
+* **caches:** A line from a state takes the cache saved with it ([#142](https://github.com/ifdotpy/layr/issues/142)) ([584b0d9](https://github.com/ifdotpy/layr/commit/584b0d9fb9a733fba06a35424416adb64bc5afd3))
+* **retest:** sweep only configured dirs and never compile ([#141](https://github.com/ifdotpy/layr/issues/141)) ([a38756d](https://github.com/ifdotpy/layr/commit/a38756dcbe6bc121da725298d85fd800af7d012a))
+* **store:** Read the marker again before refusing a half-made store ([#144](https://github.com/ifdotpy/layr/issues/144)) ([fd8cb5b](https://github.com/ifdotpy/layr/commit/fd8cb5bcfd95218396634a035ba9cb5f9ba11429))
+
+## [0.16.0](https://github.com/ifdotpy/layr/compare/v0.15.0...v0.16.0) (2026-11-02)
+
+
+### ⚠ BREAKING CHANGES
+
+* **store:** Upgrade an unversioned store with the same format on open ([#132](https://github.com/ifdotpy/layr/issues/132))
+
+### Features
+
+* **store:** Upgrade an unversioned store with the same format on open ([#132](https://github.com/ifdotpy/layr/issues/132)) ([07b710d](https://github.com/ifdotpy/layr/commit/07b710d59c038cdcc0032128ea75a7897e3274ac))
+
+
+### Bug Fixes
+
+* **git:** Delete a removed remote's tracking refs ([#138](https://github.com/ifdotpy/layr/issues/138)) ([81928b8](https://github.com/ifdotpy/layr/commit/81928b8b4a88ed89ad48ec87ea9f52bb7c473c6f))
+
+## [0.15.0](https://github.com/ifdotpy/layr/compare/v0.14.2...v0.15.0) (2026-11-02)
+
+
+### Features
+
+* **merge:** add --caches-only to take a line's caches ([#133](https://github.com/ifdotpy/layr/issues/133)) ([a255309](https://github.com/ifdotpy/layr/commit/a255309476846cac8fdd556bdaf3226cd204b399))
+
+## [0.14.2](https://github.com/ifdotpy/layr/compare/v0.14.1...v0.14.2) (2026-11-02)
+
+
+### Bug Fixes
+
+* **retest:** keep coverage profiles out of the source tree ([#129](https://github.com/ifdotpy/layr/issues/129)) ([4617c4d](https://github.com/ifdotpy/layr/commit/4617c4d9195c3b55802f858a318541d10e718f5f))
+
+## [0.14.1](https://github.com/ifdotpy/layr/compare/v0.14.0...v0.14.1) (2026-11-02)
+
+
+### Bug Fixes
+
+* **init:** Read the source as the caller and write the store as root ([#128](https://github.com/ifdotpy/layr/issues/128)) ([2d7d575](https://github.com/ifdotpy/layr/commit/2d7d57522e57913b355855afad68be3f57c24a01))
+
+## [0.14.0](https://github.com/ifdotpy/layr/compare/v0.13.1...v0.14.0) (2026-11-01)
+
+
+### Features
+
+* **save:** Name the files a save leaves out ([#123](https://github.com/ifdotpy/layr/issues/123)) ([9402906](https://github.com/ifdotpy/layr/commit/94029062978bb0c2165c549900392d8b83893166))
+
+
+### Bug Fixes
+
+* **daemon:** read the busy answer when the hello write fails ([#124](https://github.com/ifdotpy/layr/issues/124)) ([14fea72](https://github.com/ifdotpy/layr/commit/14fea722ef636ac2da9da3754823f3b0a99e498d))
+
+
+### Performance
+
+* **status:** Compare the live folder once for all overlap bases ([#125](https://github.com/ifdotpy/layr/issues/125)) ([9e105ed](https://github.com/ifdotpy/layr/commit/9e105ed992b6bd3355c64800ff75a8253a34de8e))
+
+## [0.13.1](https://github.com/ifdotpy/layr/compare/v0.13.0...v0.13.1) (2026-11-01)
+
+
+### Bug Fixes
+
+* **db:** Rebuild derived tables in one transaction ([#122](https://github.com/ifdotpy/layr/issues/122)) ([ee03be1](https://github.com/ifdotpy/layr/commit/ee03be12490789a9d777dc67494bcbbb0211c6b9))
+* Remove temporary data on failure paths ([#117](https://github.com/ifdotpy/layr/issues/117)) ([c6434f9](https://github.com/ifdotpy/layr/commit/c6434f94c78c529a162e82fa4da517b0c80eec76))
+
+
+### Performance
+
+* **status:** Cache overlap compares of saved states ([#118](https://github.com/ifdotpy/layr/issues/118)) ([2ee9c62](https://github.com/ifdotpy/layr/commit/2ee9c6204f13afb0ef75552bd3e888070f70c508))
+
+## [0.13.0](https://github.com/ifdotpy/layr/compare/v0.12.0...v0.13.0) (2026-11-01)
+
+
+### Features
+
+* **gc:** Track state owners in shadow mode ([#115](https://github.com/ifdotpy/layr/issues/115)) ([82e1850](https://github.com/ifdotpy/layr/commit/82e18503e6dcc39597d6551c98fe7664762ae780))
+* **retest:** sweep cargo targets to the live unit set ([#107](https://github.com/ifdotpy/layr/issues/107)) ([00ab356](https://github.com/ifdotpy/layr/commit/00ab356fcc17d2734bf986dfe174f14254155086))
+
+
+### Bug Fixes
+
+* **gc:** Evict states only with gc.evict on ([#119](https://github.com/ifdotpy/layr/issues/119)) ([ab23eee](https://github.com/ifdotpy/layr/commit/ab23eee92e1a39ad6eed7e8ea0b7457d0d4ebb32))
+* **retest:** keep the project rustflags ([#114](https://github.com/ifdotpy/layr/issues/114)) ([50d223d](https://github.com/ifdotpy/layr/commit/50d223d518b3bbeedefb68132e3b24c10a515c0d))
+
 ## [0.12.0](https://github.com/ifdotpy/layr/compare/v0.11.0...v0.12.0) (2026-11-01)
 
 

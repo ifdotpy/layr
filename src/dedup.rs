@@ -65,8 +65,24 @@ pub struct Report {
     pub seconds: f64,
 }
 
-/// The regular files below `root` that are worth a hash. Links are not followed.
-fn collect(root: &Path, target: bool, out: &mut Vec<Entry>) {
+/// The process id of a temporary clone `.layr-dedup-<pid>` (see `apfs::replace`).
+fn temp_pid(name: &std::ffi::OsStr) -> Option<i32> {
+    let pid: i32 = name.to_str()?.strip_prefix(".layr-dedup-")?.parse().ok()?;
+    (pid > 0).then_some(pid)
+}
+
+/// True when the process `pid` is gone. A process that exists under another user is alive.
+fn process_gone(pid: i32) -> bool {
+    use rustix::process::{test_kill_process, Pid};
+    match Pid::from_raw(pid) {
+        Some(p) => matches!(test_kill_process(p), Err(e) if e == rustix::io::Errno::SRCH),
+        None => false,
+    }
+}
+
+/// The regular files below `root` that are worth a hash. Links are not followed. A run that
+/// died left its temporary clone (`.layr-dedup-<pid>`) behind: it goes unless `dry`.
+fn collect(root: &Path, target: bool, dry: bool, out: &mut Vec<Entry>) {
     match fs::symlink_metadata(root) {
         Ok(m) if m.is_dir() => {}
         _ => return,
@@ -79,6 +95,8 @@ fn collect(root: &Path, target: bool, out: &mut Vec<Entry>) {
             let Ok(m) = fs::symlink_metadata(&path) else { continue };
             if m.is_dir() {
                 stack.push(path);
+            } else if m.is_file() && !dry && temp_pid(&e.file_name()).is_some_and(process_gone) {
+                let _ = fs::remove_file(&path);
             } else if m.is_file() && m.nlink() == 1 && m.size() >= MIN_FILE {
                 out.push(Entry { path, stamp: Stamp::of(&m), target });
             }
@@ -342,8 +360,8 @@ mod apfs {
         }
         let name = format!(".layr-dedup-{}", std::process::id());
         let tmp = dup.path.with_file_name(&name);
-        crate::sys::apfs_clone_at(cf.as_fd(), dir.as_fd(), &name)?;
         let r = (|| -> Result<bool> {
+            crate::sys::apfs_clone_at(cf.as_fd(), dir.as_fd(), &name)?;
             let df = open_plain(&dup.path)?;
             let dm = df.metadata()?;
             if Stamp::of(&dm) != dup.stamp {
@@ -383,19 +401,19 @@ pub fn run(repo: &Repo, dry: bool) -> Result<Report> {
         let mut entries = Vec::new();
         for line in repo.lines()? {
             if let Ok(cp) = fsutil::safe_join(&repo.working(&line), &folder) {
-                collect(&cp, true, &mut entries);
+                collect(&cp, true, dry, &mut entries);
             }
         }
         if let Ok(orepo) = repo.overlay_repo(&name) {
             for (id, _) in orepo.p.db.present_states()? {
-                collect(&orepo.p.state_path(&id), false, &mut entries);
+                collect(&orepo.p.state_path(&id), false, dry, &mut entries);
             }
         }
         let snap = format!("@{}", folder.replace('/', "%2F"));
         for (id, _) in &states {
             if let Some(s) = repo.p.db.state(id)? {
                 for n in s.caches.values().filter(|n| n.ends_with(&snap)) {
-                    collect(&repo.p.cache_path(id, n), false, &mut entries);
+                    collect(&repo.p.cache_path(id, n), false, dry, &mut entries);
                 }
             }
         }
@@ -443,6 +461,25 @@ mod tests {
         fs::remove_dir_all(&d).unwrap();
     }
 
+    /// A run that died between its clone and its rename leaves `.layr-dedup-<pid>` behind. The
+    /// next pass removes it, but only when it is not a dry run and only for a dead process.
+    #[test]
+    fn a_dead_run_leaves_no_temporary_clone() {
+        let d = std::env::temp_dir().join(format!("layr-dedup-dead-{}", crate::ids::new_id()));
+        fs::create_dir_all(&d).unwrap();
+        let dead = d.join(".layr-dedup-2000000000");
+        let live = d.join(format!(".layr-dedup-{}", std::process::id()));
+        fs::write(&dead, vec![0u8; 5000]).unwrap();
+        fs::write(&live, vec![0u8; 5000]).unwrap();
+        let mut out = Vec::new();
+        collect(&d, true, true, &mut out);
+        assert!(dead.exists(), "a dry run changes nothing");
+        collect(&d, true, false, &mut out);
+        assert!(!dead.exists());
+        assert!(live.exists(), "a live run keeps its clone");
+        fs::remove_dir_all(&d).unwrap();
+    }
+
     #[test]
     fn collect_skips_links_small_files_and_hard_links() {
         let d = std::env::temp_dir().join(format!("layr-dedup-collect-{}", std::process::id()));
@@ -454,11 +491,11 @@ mod tests {
         fs::hard_link(d.join("linked"), d.join("linked2")).unwrap();
         std::os::unix::fs::symlink(d.join("sub/big"), d.join("link")).unwrap();
         let mut out = Vec::new();
-        collect(&d, true, &mut out);
+        collect(&d, true, false, &mut out);
         assert_eq!(out.len(), 1);
         assert!(out[0].path.ends_with("sub/big"));
         let mut via_link = Vec::new();
-        collect(&d.join("link"), true, &mut via_link);
+        collect(&d.join("link"), true, false, &mut via_link);
         assert!(via_link.is_empty(), "a link as the root is not followed");
         fs::remove_dir_all(&d).unwrap();
     }

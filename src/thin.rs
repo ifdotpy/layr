@@ -1140,7 +1140,7 @@ pub fn complete_tree(p: &Project, id: &str) -> Result<PathBuf> {
     }
     let layered = Layered::of_state(p, id)?;
     let info = apfs::subvol_info(&delta)?;
-    let tmp = p.work_dir().join(crate::ids::new_id());
+    let tmp = p.work_dir().join(crate::store::temp_name());
     layered.materialize(&tmp, true)?;
     let made = (|| -> Result<()> {
         apfs::write_info(&tmp, &SubvolInfo { base: None, readonly: true, ..info })?;

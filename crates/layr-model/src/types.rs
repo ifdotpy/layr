@@ -95,6 +95,10 @@ pub struct StateRec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(rename = "layer_platform", alias = "cache_platform")]
     pub cache_platform: Option<String>,
+    /// The project state whose working folder this cache snapshot was taken with. None: an
+    /// older save, or a merge state of cache overlays. Read by `merge --caches-only`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_of: Option<String>,
 }
 
 pub const REF_PREFIXES: &[&str] = &["env/", "release/", "pins/", "holds/", "leases/", "caches/", "derived/"];

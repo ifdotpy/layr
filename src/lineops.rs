@@ -128,7 +128,7 @@ impl Repo<'_> {
                 machine: self.p.store.machine.id.clone(),
             })
             .collect();
-        let tmps: Vec<PathBuf> = lines.iter().map(|_| self.p.work_dir().join(ids::new_id())).collect();
+        let tmps: Vec<PathBuf> = lines.iter().map(|_| self.p.work_dir().join(crate::store::temp_name())).collect();
         let result = (|| -> Result<Vec<Record>> {
             snapshots(&self.state_root(start)?, &tmps)?;
             let mut recs = Vec::new();

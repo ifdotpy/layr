@@ -386,7 +386,7 @@ impl<'a> Repo<'a> {
             if tree.is_complete() {
                 return Ok(tree.bottom().to_path_buf());
             }
-            let t = Temp { path: self.p.scan_dir().join(ids::new_id()) };
+            let t = Temp { path: self.p.scan_dir().join(crate::store::temp_name()) };
             tree.materialize(&t.path, true)?;
             btrfs::write_info(
                 &t.path,
@@ -499,6 +499,7 @@ impl<'a> Repo<'a> {
             let src = self.state_src(base)?;
             let dst = self.p.delta_path(&id);
             crate::thin::write_layer(&src.at("")?, &dst, &crate::thin::Diff::default(), base, false, None)?;
+            self.p.db.record_base(&id, base)?;
             return self.describe_state(ctx, id, kind, parents, message, line);
         }
         self.new_state(ctx, &self.state_root(base)?, kind, parents, message, line)
@@ -537,6 +538,7 @@ impl<'a> Repo<'a> {
             cache_by: None,
             cache_shared: false,
             cache_platform: None,
+            cache_of: None,
         })
     }
 
@@ -564,9 +566,13 @@ impl<'a> Repo<'a> {
             let head = self.state_src(base)?;
             let dst = self.p.delta_path(&id);
             match crate::thin::snapshot_over(&head, base, &w, &dst, false) {
-                Ok(Some(_)) => return self.describe_state(ctx, id, StateKind::Auto, parents, message, Some(line)),
+                Ok(Some(_)) => {
+                    self.p.db.record_base(&id, base)?;
+                    return self.describe_state(ctx, id, StateKind::Auto, parents, message, Some(line));
+                }
                 Ok(None) => {
                     crate::thin::write_layer(&head.at("")?, &dst, &crate::thin::Diff::default(), base, false, None)?;
+                    self.p.db.record_base(&id, base)?;
                     return self.describe_state(ctx, id, StateKind::Auto, parents, message, Some(line));
                 }
                 // Hard links need a complete tree.
@@ -628,6 +634,7 @@ impl<'a> Repo<'a> {
             cache_by: None,
             cache_shared: false,
             cache_platform: None,
+            cache_of: None,
         })
     }
 
@@ -733,13 +740,13 @@ impl<'a> Repo<'a> {
     }
 
     pub fn temp_snapshot(&self, src: &Path, readonly: bool) -> Result<Temp> {
-        let dst = self.p.scan_dir().join(ids::new_id());
+        let dst = self.p.scan_dir().join(crate::store::temp_name());
         btrfs::snapshot(src, &dst, readonly)?;
         Ok(Temp { path: dst })
     }
 
     pub fn temp_work(&self, src: &Path) -> Result<Temp> {
-        let dst = self.p.work_dir().join(ids::new_id());
+        let dst = self.p.work_dir().join(crate::store::temp_name());
         btrfs::snapshot(src, &dst, false)?;
         Ok(Temp { path: dst })
     }
@@ -750,7 +757,7 @@ impl<'a> Repo<'a> {
         if !w.exists() {
             bail!("line '{}' has no working folder on this machine", line.name);
         }
-        let dst = self.p.scan_dir().join(ids::new_id());
+        let dst = self.p.scan_dir().join(crate::store::temp_name());
         btrfs::scan_snapshot(&w, &dst)?;
         Ok(Temp { path: dst })
     }
@@ -783,7 +790,7 @@ impl<'a> Repo<'a> {
                 }
             }
         }
-        let dst = self.p.scan_dir().join(ids::new_id());
+        let dst = self.p.scan_dir().join(crate::store::temp_name());
         btrfs::create_subvolume(&dst)?;
         let t = Temp { path: dst };
         btrfs::copy_selected(&w, &t.path, &paths)?;
@@ -900,7 +907,7 @@ impl<'a> Repo<'a> {
         }) {
             return Ok(());
         }
-        let path = self.p.work_dir().join(format!("prepared-save-{}", ids::new_id()));
+        let path = self.p.work_dir().join(format!("prepared-save-{}", crate::store::temp_name()));
         std::fs::create_dir_all(self.p.work_dir())?;
         match crate::thin::write_checked_scan(&w, &base, &base_scan, &new, &d, &path, &base_id, false) {
             Ok(Some(scan)) => {
@@ -1130,7 +1137,7 @@ impl<'a> Repo<'a> {
         #[cfg(target_os = "macos")]
         if crate::thin::is_thin(&p) {
             let tree = self.stage_tree(line, &p)?;
-            let tmp = self.p.work_dir().join(ids::new_id());
+            let tmp = self.p.work_dir().join(crate::store::temp_name());
             tree.materialize(&tmp, false)?;
             let done = (|| -> Result<()> {
                 let info = btrfs::SubvolInfo {
@@ -1371,6 +1378,9 @@ impl<'a> Repo<'a> {
             PREPARED_STATUS.with(|p| p.borrow_mut().take());
             for p in btrfs::take_prepared() {
                 let _ = self.p.trash(&p);
+            }
+            for p in PREPARED_SAVES.with(|p| std::mem::take(&mut *p.borrow_mut())) {
+                let _ = self.p.trash(&p.path);
             }
         }
     }
@@ -1705,7 +1715,7 @@ impl<'a> Repo<'a> {
         if dst.exists() {
             bail!("{} already exists", dst.display());
         }
-        let tmp = self.p.work_dir().join(ids::new_id());
+        let tmp = self.p.work_dir().join(crate::store::temp_name());
         self.snapshot_state(state, &tmp, false)?;
         let r = self
             .put_layers(&tmp, layers, self.own(line))
@@ -3153,6 +3163,7 @@ mod cache_platform_tests {
                 cache_by: None,
                 cache_shared: false,
                 cache_platform: None,
+                cache_of: None,
             });
             p.append(rec, &ctx.actor()).unwrap();
             let repo = Repo::open(&ctx, "p").unwrap();
@@ -3267,6 +3278,7 @@ mod commit_record_tests {
             cache_by: None,
             cache_shared: false,
             cache_platform: None,
+            cache_of: None,
         });
         crate::db::FAIL_AFTER_COMMIT.with(|f| f.set(true));
         assert!(repo.commit_record(&ctx, rec).is_err());

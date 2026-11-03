@@ -120,6 +120,19 @@ files that now differ from the new head and names `layr reset --hard <rev>`, whi
 The signed operation records its actor, version kind, source state, target line, and target head.
 `replay` and `pick` record the same version fields. Old states need no migration.
 
+After a named save makes a state, `save` prints on stderr the files that it left out. It prints
+nothing when none are left out. `-q` does not hide these lines.
+
+- `not saved (untracked): <paths>` names the files that are neither ignored nor in the new state.
+  A new folder that holds only untracked files is named once, as `dir/`.
+- `not saved (modified, not added): <paths>` names tracked files whose working content differs
+  from the new state. `save -a` stages all tracked changes, so this line normally appears only
+  for `save -m` without `-a`.
+
+Each line shows at most 20 paths, then `and N more`. Ignored files, quiet overlay paths and cache
+overlay folders are never named. Automatic saves print no such lines. To save the left out files,
+use `layr add <path>` and save again.
+
 Named saves also accept these options:
 
 - `-a` or `--all` includes changes to tracked files.
@@ -175,9 +188,10 @@ state differs only in build output, which a build makes again, so a deleted line
 the next `gc`. The newest automatic state of a live line always stays. `gc` compares these states
 before it takes the store lock.
 
-`gc` evicts a state that a store remote holds (a successful `layr push <store-remote>` names it):
-its tree goes, its record stays, and the next command that reads the tree fetches it back from that
-remote. A recoverable state stays on disk when it is a line head, the newest automatic state of a
+`gc` evicts a state that a store remote holds (a successful `layr push <store-remote>` names it)
+only when the project config `gc.evict` is `on` (`layr config gc.evict on`; default `off`). With
+`off`, such a state is kept with its history and nothing is deleted for it. With `on`, its tree goes,
+its record stays, and the next command that reads the tree fetches it back from that remote. A recoverable state stays on disk when it is a line head, the newest automatic state of a
 line, a state with caches, a state that a cache overlay names, or a base of a thin layer chain that
 a state on disk needs. Without a reachable remote, a command that needs the tree fails and names the
 remote. `gc --all-projects` runs `gc` for every project (macOS periodic run:

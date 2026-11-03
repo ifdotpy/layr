@@ -362,7 +362,7 @@ fn restore_one(
     let id = state.id.clone();
     let attempt = &states[&id];
     let (header, _, tree) = reader.tree(&id, &attempt)?;
-    let stage = repo.p.work_dir().join(crate::ids::new_id());
+    let stage = repo.p.work_dir().join(crate::store::temp_name());
     if header.btrfs.as_ref().is_some_and(|identity| identity.uuid != state.subvol) {
         bail!("tree btrfs identity differs from the signed state");
     }
@@ -605,6 +605,8 @@ pub(super) fn gc(store: &Store, dry_run: bool) -> Result<Vec<String>> {
     }
     let cutoff = chrono::Utc::now().timestamp() - 86400;
     let mut deleted = Vec::new();
+    // Temporary files of puts that stopped: no listing shows them.
+    deleted.extend(store.backend.stale_temporaries(cutoff, dry_run)?);
     let release_objects = store.backend.list("files/")?;
     if !release_objects.is_empty() {
         let model = super::release::model(&descriptor.project, &records, &store.machine)?;

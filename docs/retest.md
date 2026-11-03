@@ -107,37 +107,174 @@ the line tables, not variable info. The variables apply to `target/retest` only.
 and not the caller, for the same reason as `CARGO_INCREMENTAL`. `LAYR_RETEST_LINE_TABLES=0` leaves
 the project's own level.
 
+## Profile files and build scripts
+
+Without `--target`, cargo applies `RUSTFLAGS` (and the project rustflags) to build scripts too, so
+build scripts are instrumented. A build script that runs without `LLVM_PROFILE_FILE` writes
+`default_<hash>_0_<pid>.profraw` into its package folder, which is the project. The leak came from
+the sweep listings (`cargo build --features ...` of a standard command): they compile and run a build
+script that the test run did not build, and they had no `LLVM_PROFILE_FILE`. Reproduced 2026-11-02:
+a `sweep` command with a feature and a `build.rs` gave `removed 1 stray .profraw file(s)` before the
+fix, and none after.
+
+Rules (`src/main.rs`, `profile_scratch` and `cargo_profile_file`):
+
+- Every cargo call of the instrumented build sets `LLVM_PROFILE_FILE` to
+  `target/retest/profraw/other/%p.profraw`: the list phase, the build, the run and the sweep listings.
+  The wrapper still sets its own value for each test.
+- The scratch folder `target/retest/profraw` is deleted when a run ends, on every exit (a guard), and
+  after each sweep listing.
+- The stray cleanup at the end of a run stays. It only catches a child that clears its environment.
+
+Build scripts stay instrumented. Measured:
+
+- A `[host] rustflags` value in a config file did not reach the build script or the bin of a probe
+  package on stable cargo 1.99.1. The build script got `-C instrument-coverage` from `RUSTFLAGS`
+  and no host flag. So config does not keep the flags off build scripts.
+- Cost: `cargo build` of a one-file package with an empty build script, 0.45 to 0.61 s without the
+  flags and 0.54 to 0.69 s with them (two pairs, one build script rebuild each). About 0.08 s per
+  build script rebuild. Records never use build scripts, so nothing is lost.
+- Not tried: `--target <host>` keeps the flags off build scripts, but it moves every output folder
+  that the tool reads (`target/retest/debug`), so it was not changed.
+
 ## Sweeping stale build output
 
-Cargo never removes the files of older hashes. A new feature set, a changed flag or a new toolchain
-leaves `.rlib`, `.rmeta`, `.d` and test binaries with the old hash in `target/retest/debug/deps`,
-and every incremental build of a crate leaves a new set of `.rcgu.o` object files there (macOS
-keeps them next to the binary). The sweep runs right after the build, inside the same run.
+Cargo never removes the output of an old unit. A unit is one compiled crate, test binary or build
+script run. Its name ends in a 16 hex digit hash (`name-<hash>`). A new feature set, a changed flag,
+a new toolchain or a focused command leaves the files of the units that no later build uses.
 
-Rules:
+`layr retest sweep [--dry-run]` removes them. `layr retest run` sweeps after its build with the same rule.
+`layr retest sweep` never compiles: it stops at the first unit that is not fresh and skips that folder (see
+"Freshness").
 
-- Live files: the tool runs `cargo test --no-run --message-format json` with the same environment and
-  arguments (a no-op: every file is fresh). Every file of a `compiler-artifact` message is live. If
-  that call fails, or lists nothing, there is no sweep.
-- In `debug/deps`, a file whose name has a 16 digit hex cargo hash (`name-<hash>[.ext]`, with or
-  without the `lib` prefix) is removed when no live file has the same `name-hash`. All files of one
-  `name-hash` live or go together (`.rlib`, `.rmeta`, `.d`, the binary, `.dSYM`). Files without a
-  cargo hash stay.
-- Object files `name-hash.<unit>.<build>.rcgu.o`: of each `name-hash`, only the build that has the
-  newest object file stays.
-- In `debug/incremental/<crate>-<hash>`, only the newest finalized session folder and its `.lock`
-  file stay. A crate folder without a finalized session stays as it is.
-- Lock: the sweep takes cargo's own build lock (`debug/.cargo-lock`, `flock`) without waiting. If
-  another cargo of this target holds it, the sweep is skipped. No cargo can start in the target while the
-  sweep holds the lock.
-- Only `target/retest/debug/deps` and `target/retest/debug/incremental` are touched. `.fingerprint`
-  and `build` stay (small).
-- It prints `swept stale build output, freed N MB`. Only files with one hard link count: an object
-  file is also a link in the incremental folder and counts when its last link goes.
+### Live set
 
-A run with other package selection (`-- -p foo`) treats the files of the other packages as stale and
-removes them; the next run with the full selection builds them again. Keep one selection per line.
-The early exit "no build" does not sweep: nothing was built.
+The live set is the set of unit hashes that the standard build commands use in this tree. The commands
+are in the root `Cargo.toml` of the workspace:
+
+```toml
+[workspace.metadata.layr-retest]
+env = { RUSTUP_TOOLCHAIN = "1.99.1-aarch64-apple-darwin", RUSTC_WRAPPER = "", CARGO_INCREMENTAL = "0" }
+sweep = [["build", "--workspace", "--exclude", "studio-native-client", "--tests", "--bins", "--examples", "--locked"]]
+retest = [["test", "--workspace", "--no-run"]]
+```
+
+- `sweep` lists cargo commands without `cargo`. It runs each command in `target` with `env`, as a listing
+  (see "Freshness"). The listing adds `-v --message-format json`. A command whose units are not all fresh
+  skips the folder; the listing never builds a unit that is not fresh.
+- `retest` (optional) lists the commands of the retest build. `layr retest sweep` sweeps `target/retest` with
+  `sweep` and `retest` under the environment of `run`. Without `retest`, `target/retest` is left as it is and the
+  sweep prints `target/retest: no sweep command; left as is`. The sweep never creates `target/retest`.
+- The hashes come from cargo's messages: every artifact and every build script run.
+  Cargo names a bin or an example only by its copy in `debug` (`debug/app`). The sweep matches a copy
+  to its hashed file by size and modification time. With no match, every hashed file of that name is live.
+- `env` sets the variables that change the unit hashes (toolchain, wrapper, incremental). It is applied
+  over the environment of the caller.
+- `layr retest run` adds its own command (`test --no-run` and its arguments) to the list. A focused run
+  does not remove the units of the standard commands, and the units it built stay.
+- Without a `sweep` list, `layr retest run` skips the sweep and `layr retest sweep` prints a skip. Nothing is
+  removed, and both exit 0.
+- `layr retest run` sweeps `target/retest` with the `sweep` and `retest` lists and its own command, under the
+  environment of `run` (instrumented RUSTFLAGS, debug info, incremental). The run needs no `retest` list.
+
+### What goes
+
+A unit that the live set does not name goes whole:
+
+- its entries in `debug/.fingerprint` and `debug/build` (with `out/`),
+- its files and folders with the hash in `debug/deps` and `debug/examples` (`.rlib`, `.rmeta`, `.d`,
+  object files, test binaries, `.dSYM`).
+
+No file of a live unit goes, with one exception (next section). In `debug/incremental` only the newest
+finalized session of each crate folder stays. The folder names are not cargo hashes, so this rule is per
+folder. Names without a cargo hash stay.
+
+### Object files
+
+Each build writes a new set of object files (`<crate>-<hash>.<cgu>.<build>.rcgu.o`, macOS keeps them
+for the debug info) for the same unit hash. A source change keeps the unit hash, so the old sets pile up.
+Cargo does not use them. The one exception to "no file of a live unit goes": for each live unit, only
+the object files of its newest build stay (newest modification time). This rule was measured and tested in
+PR #80, and it is restored here. Its test is `deps_keeps_only_the_newest_object_build_of_a_live_unit`.
+Two name forms carry a build id: `<crate>-<hash>.<cgu>.<build>.rcgu.o`, and `<crate>-<hash>.<crate>.<id>-cgu.<n>.rcgu.o`
+(one `<id>` for all codegen units of a compile; the Studio crates use this form). Other names stay.
+A first version parsed the cgu index as the build id and removed the current objects of integration tests,
+so cargo rebuilt the workspace crates on the next build. Test: `deps_keeps_object_names_without_a_build_id`.
+The e2e test `sweep_removes_the_units_that_no_standard_command_uses` checks one build per unit after an edit.
+The e2e tests `sweep_skips_a_stale_target_and_compiles_nothing`, `sweep_skips_a_folder_with_a_unit_that_is_not_fresh`,
+`sweep_skips_a_busy_build_lock_without_waiting` and `sweep_leaves_target_retest_alone_without_a_retest_command` check the
+freshness rules.
+
+### Freshness
+
+The sweep never compiles. Before it removes anything, each listing checks that every unit of its commands
+is fresh, with no build:
+
+- The listing runs `cargo <command> -v --message-format json` with `CARGO_BUILD_JOBS=1`, in its own process
+  group. The status lines of `-v` name a unit before cargo acts on it: `Dirty <package>: <reason>` for a unit
+  that is not fresh, and `Compiling` or `Running` for a build step. The first such line stops the listing:
+  the group is killed.
+- A `Blocking ... directory` line (another cargo holds the lock of the folder) also stops the listing. The
+  listing never waits for that cargo. A wait for the shared package cache is short and does not stop it.
+- A JSON `compiler-artifact` with `fresh: false` also stops it. It comes after cargo has built that unit,
+  so it is a fallback for a cargo whose status text differs. Then one unit is built.
+- A stopped folder is skipped with `sweep skipped: a unit is not fresh (<status line>); run the standard
+  build first`. The other folder is still swept. The exit code is 0.
+- Measured on 2026-11-02 with cargo 1.99.1, a two-crate test workspace: a stop at 0.11 to 0.18 s. A fresh
+  listing of the same workspace: 0.1 s. A tree of Studio's size was not measured.
+
+What a stopped listing can still change:
+
+- Cargo removes the previous output of the first stale unit before it runs that unit's build step. The stop
+  can come after that removal (measured: the `.rlib` of a stale crate was removed in every run). The next build
+  compiles that unit anyway, because it was stale. No new output file is written.
+- Cargo writes its fingerprint marker files, and it creates the fingerprint folder of a unit that was never built.
+- A listing that names an uplifted binary (`debug/<bin>`) re-links it to the unit of the command. A standard
+  `cargo build` does the same.
+
+### Safety
+
+- Every target is listed before any removal. A failing command in any target changes nothing.
+- A folder that is not fresh is not swept. The next build of its commands makes it fresh, and then the sweep
+  removes its stale units.
+- The removal holds cargo's build lock (`debug/.cargo-lock`) and does not wait for it. A busy lock skips that
+  folder. A listing that ran before the lock can lose the newest units of a cargo that finishes between the two;
+  the next build compiles them again.
+- Exit codes: 0 for a skip (no `sweep` list, no `retest` list, a stale or busy folder), 1 for a failing cargo
+  command, 2 for a usage error.
+- An empty live set removes nothing.
+- `--dry-run` prints the bytes that a sweep would free and removes nothing.
+- An uplifted dylib (`target/debug/lib<name>.dylib`, no hashed copy in `deps`) keeps the units that hold its
+  marker file (`lib-<name>`, `bin-<name>`, `example-<name>` or `test-<name>`) in `.fingerprint`. Without this
+  rule the sweep removed the dylib's unit, and the next build recompiled the crates that depend on it.
+  Test: `live_units_keeps_the_marked_units_of_an_uplifted_dylib`.
+- Output: `swept <folder>, freed N MB`, and the time of the whole command.
+
+### Listing of a command that was never built
+
+A command whose units are not built yet (for example `--examples` when the test build did not compile them)
+is not fresh. The `run` sweep and `layr retest sweep` skip the folder, as in "Freshness".
+
+### Studio measurement (2026-11-01)
+
+Studio `sweep-check` line from origin/main (`target` of about 53 GB apparent size, `du`). Gate build:
+`cargo build --workspace --exclude studio-native-client --tests --bins --examples --locked` with
+`RUSTUP_TOOLCHAIN=1.99.1-aarch64-apple-darwin RUSTC_WRAPPER= CARGO_INCREMENTAL=0`.
+
+| Step | Result |
+| --- | --- |
+| Gate build after the base change | 6 crates compiled, 142 s |
+| Dry run, first after the #114 rustflags change | retest folder listing compiled 535 units (702 s), then the target sweep freed 0 MB |
+| Sweep (warm) | 2.6 s: `target` freed 0 MB, `target/retest` freed 13,247 MB |
+| Build after sweep | 0 crates compiled |
+| One-line change, build | 6 crates compiled, 162 s; `target/debug` du +54 MB, no new object sets |
+| Dry run before the change sweep | retest listing compiled 22 units (170 s), so that folder was not swept in the dry run |
+| Sweep after the change (warm) | 1.4 s, freed 0 MB; `target/debug` du back to the size before the change |
+| Build after the change sweep | 0 crates compiled |
+
+The timed sweeps are the warm ones. The long times came from cargo's listing compiling a folder that was
+stale, which the sweep then skips. Freed sizes count files with one hard link; APFS clones are not
+counted, so `du` changes differ from the freed value.
 
 ### Measurements 2026-10-31 (debug info and sweep)
 
@@ -671,8 +808,9 @@ errors). The rule instead:
   `target/retest/debug/<name>`). So code that runs only in a child process is in the record of the
   test that started the child. With one profile file only the test binary is exported: the one
   process was the test itself.
-- `cargo nextest list` and `run` have `LLVM_PROFILE_FILE=<profile dir>/other/%p.profraw`, so the list
-  phase and build scripts write no file in the project.
+- Every cargo call of the instrumented build has `LLVM_PROFILE_FILE=<profile dir>/other/%p.profraw`, so
+  the list phase, the build scripts and the sweep listings write no file in the project (see "Profile
+  files and build scripts").
 - Limit: a child started with a cleared environment writes `default_*.profraw` in its working
   folder. After the run the tool deletes every `.profraw` file outside `target/` that is newer than
   the start of the run, and prints how many. That coverage is lost: code that only that child ran
@@ -720,7 +858,8 @@ the old chain is not used again. The end to end test shows it with a test that r
 - `crates/layr-retest/tests/e2e.rs`: runs `layr retest ...` (the `layr` built from this repository must be first in `PATH`), with a temporary `LAYR_ROOT`, a tiny project with three tests. Runs:
   no record, no change, change of one function, a new uncalled function, a change of a data file,
   full run with a contradiction. About 10 s. Needs `layr`, `cargo-nextest` and `llvm-tools`.
-  Also: `doctor` on the tiny project, and `init` twice. Unit tests: `init.rs` (idempotent edits), `doctor.rs` (the rules).
+  Also: `doctor` on the tiny project, `init` twice, and `build_scripts_write_no_profile_into_the_project`
+  (a `build.rs` and a sweep listing that compiles the build script: no stray file, no scratch folder). Unit tests: `init.rs` (idempotent edits), `doctor.rs` (the rules).
   Run: `cargo nextest run -p layr-retest`.
 
 ### Not done

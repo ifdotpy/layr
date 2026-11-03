@@ -19,11 +19,11 @@ thread_local! {
 
 pub struct Db {
     pub conn: Connection,
-    /// The derived tables were dropped by a schema upgrade: the project rebuilds them.
+    /// The derived tables are from an older schema: `rebuild` replaces them before use.
     pub stale: bool,
 }
 
-const SCHEMA: &str = r#"
+pub(crate) const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS records (id TEXT PRIMARY KEY, machine TEXT, seq INTEGER, time INTEGER, op TEXT, actor_uid INTEGER, raw TEXT);
 CREATE INDEX IF NOT EXISTS records_time ON records(time);
 CREATE UNIQUE INDEX IF NOT EXISTS records_seq ON records(machine, seq);
@@ -53,6 +53,10 @@ CREATE INDEX IF NOT EXISTS attestations_subject ON attestations(subject, kind, o
 CREATE TABLE IF NOT EXISTS queue_entries (id TEXT PRIMARY KEY, rec TEXT, deleted INTEGER DEFAULT 0, ord TEXT);
 CREATE TABLE IF NOT EXISTS attestation_revocations (id TEXT, target TEXT, machine TEXT, uid INTEGER, ord TEXT, PRIMARY KEY(id,target));
 CREATE INDEX IF NOT EXISTS records_legacy_evidence ON records(op) WHERE op IN ('approve','approve.withdraw','check');
+CREATE TABLE IF NOT EXISTS owners (state TEXT, kind TEXT, holder TEXT, PRIMARY KEY(state, kind, holder));
+CREATE INDEX IF NOT EXISTS owners_kind_holder ON owners(kind, holder);
+CREATE TABLE IF NOT EXISTS free_queue (state TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS bases (state TEXT PRIMARY KEY, base TEXT);
 "#;
 
 /// The records that older binaries wrote as evidence (`import_legacy_evidence`).
@@ -60,7 +64,7 @@ const LEGACY_OPS: &str = "op IN ('approve','approve.withdraw','check')";
 
 /// Version of the derived tables. Records never change shape; a database with an older version
 /// drops its derived tables, creates them new and rebuilds them from the records.
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 const DERIVED: &[&str] = &[
     "states",
@@ -81,6 +85,7 @@ const DERIVED: &[&str] = &[
     "attestations",
     "attestation_revocations",
     "queue_entries",
+    "owners",
 ];
 
 /// Derived tables of older versions, dropped on migration.
@@ -90,20 +95,24 @@ impl Db {
     /// Open the database. Returns it and whether the derived tables must be rebuilt.
     pub fn open(path: &Path) -> Result<Db> {
         let conn = Connection::open(path)?;
+        conn.set_prepared_statement_cache_capacity(crate::owners::OWNERS_STATEMENTS);
         conn.pragma_update(None, "journal_mode", "WAL")?;
         // FULL: a committed record survives a power loss. The database has its own subvolume,
         // so this fsync costs a few milliseconds even right after a snapshot.
         conn.pragma_update(None, "synchronous", "FULL")?;
         conn.busy_timeout(std::time::Duration::from_secs(30))?;
-        // One write transaction: another process (the service's periodic pass) may open a
-        // project that `init` is creating. Without it, the other process saw the new tables
-        // before the version and took the database for an old one: it dropped the derived
-        // tables, and `init` failed with "no such table: states".
         // A current schema needs no write lock: one read transaction decides, so read commands
         // do not wait for a writer.
-        let current = Self::schema_is_current(&conn)?;
-        let stale = if current {
+        // An old schema with records is not touched here: its derived tables stay as they are,
+        // complete, for other processes to read until `rebuild` commits the new ones.
+        // One write transaction otherwise: another process (the service's periodic pass) may open
+        // a project that `init` is creating. Without it, the other process saw the new tables
+        // before the version and took the database for an old one: it dropped the derived
+        // tables, and `init` failed with "no such table: states".
+        let stale = if Self::schema_is_current(&conn)? {
             false
+        } else if Self::is_old_with_records(&conn)? {
+            true
         } else {
             conn.execute_batch("BEGIN IMMEDIATE")?;
             let opened = Self::prepare(&conn);
@@ -116,7 +125,10 @@ impl Db {
             opened.map_err(|e| e.context(path.display().to_string()))?
         };
         let db = Db { conn, stale };
-        db.import_legacy_evidence()?;
+        // A stale database gets its legacy evidence from the rebuild (`derive`).
+        if !stale {
+            db.import_legacy_evidence()?;
+        }
         Ok(db)
     }
 
@@ -175,25 +187,27 @@ impl Db {
         })
     }
 
-    /// Create or upgrade the schema inside the open transaction. Returns whether the derived
-    /// tables must be rebuilt from the records.
-    fn prepare(conn: &Connection) -> Result<bool> {
+    /// True when the schema version is older and the database holds records to rebuild from.
+    /// A database that a concurrent `init` is creating has the tables but no record yet.
+    fn is_old_with_records(conn: &Connection) -> Result<bool> {
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        // Only a database that holds records has derived tables to rebuild. A database that a
-        // concurrent `init` is creating has the tables but no record yet.
-        let has_records: bool =
+        Ok(version < SCHEMA_VERSION && Self::holds_records(conn)?)
+    }
+
+    fn holds_records(conn: &Connection) -> Result<bool> {
+        let has_table: bool =
             conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='records'", [], |r| {
                 r.get::<_, i64>(0)
-            })? > 0
-                && conn.query_row("SELECT EXISTS(SELECT 1 FROM records)", [], |r| r.get::<_, bool>(0))?;
+            })? > 0;
+        Ok(has_table && conn.query_row("SELECT EXISTS(SELECT 1 FROM records)", [], |r| r.get::<_, bool>(0))?)
+    }
+
+    /// Create or upgrade the schema inside the open transaction. Returns true when the database
+    /// is old and holds records: the derived tables are left as they are for `rebuild`.
+    fn prepare(conn: &Connection) -> Result<bool> {
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if version < SCHEMA_VERSION {
-            if has_records {
-                // The project rebuilds the derived tables and only then writes the version
-                // (`mark_current`): a failed rebuild is tried again on the next open.
-                for t in DERIVED.iter().chain(RETIRED) {
-                    conn.execute_batch(&format!("DROP TABLE IF EXISTS {t}"))?;
-                }
-                conn.execute_batch(SCHEMA)?;
+            if Self::holds_records(conn)? {
                 return Ok(true);
             }
             conn.execute_batch(SCHEMA)?;
@@ -206,14 +220,64 @@ impl Db {
         Ok(false)
     }
 
-    /// Run `f` in one write transaction (`BEGIN IMMEDIATE`): all or nothing.
-    /// Write the schema version after the derived tables were rebuilt.
-    pub fn mark_current(&mut self) -> Result<()> {
-        self.conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-        self.stale = false;
-        Ok(())
+    /// Rebuild the derived tables in one write transaction: drop them, create them, `replay` the
+    /// records, write the schema version, COMMIT. Other processes read the old tables until the
+    /// COMMIT, and a failure or a crash rolls the whole rebuild back. With `only_older`, nothing
+    /// is done when the database is current already (another process rebuilt it); returns false.
+    pub fn rebuild(&self, only_older: bool, replay: impl FnOnce(&Db) -> Result<()>) -> Result<bool> {
+        self.begin_rebuild()?;
+        let done = (|| -> Result<bool> {
+            let version: i64 = self.conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+            if only_older && version >= SCHEMA_VERSION {
+                if version > SCHEMA_VERSION {
+                    anyhow::bail!("written by a newer layr (schema {version})");
+                }
+                return Ok(false);
+            }
+            for t in DERIVED.iter().chain(RETIRED) {
+                self.conn.execute_batch(&format!("DROP TABLE IF EXISTS {t}"))?;
+            }
+            self.conn.execute_batch(SCHEMA)?;
+            replay(self)?;
+            // Test only (tests/t95-schema-rebuild-readers.sh): hold the transaction open.
+            if let Some(ms) = std::env::var("LAYR_TEST_REBUILD_HOLD_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
+                eprintln!("test: rebuild held for {ms} ms");
+                std::thread::sleep(std::time::Duration::from_millis(ms));
+            }
+            self.conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            Ok(true)
+        })();
+        let result = done.and_then(|rebuilt| {
+            self.conn.execute_batch("COMMIT")?;
+            Ok(rebuilt)
+        });
+        if result.is_err() {
+            let _ = self.conn.execute_batch("ROLLBACK");
+        }
+        result
     }
 
+    /// Start the write transaction of a rebuild. Another process may hold the write lock for
+    /// minutes under load: wait and retry, and print one line after a few seconds.
+    fn begin_rebuild(&self) -> Result<()> {
+        self.conn.busy_timeout(std::time::Duration::from_secs(3))?;
+        let mut told = false;
+        let begun = loop {
+            match self.conn.execute_batch("BEGIN IMMEDIATE") {
+                Err(e) if e.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy) => {
+                    if !told {
+                        eprintln!("waiting for the database rebuild");
+                        told = true;
+                    }
+                }
+                other => break other,
+            }
+        };
+        self.conn.busy_timeout(std::time::Duration::from_secs(30))?;
+        begun.map_err(Into::into)
+    }
+
+    /// Run `f` in one write transaction (`BEGIN IMMEDIATE`): all or nothing.
     pub fn with_tx<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
         match f() {
@@ -235,18 +299,6 @@ impl Db {
                 Err(e)
             }
         }
-    }
-
-    /// Delete all derived rows (records stay).
-    pub fn clear_derived(&self) -> Result<()> {
-        self.conn.execute_batch(
-            "DELETE FROM states; DELETE FROM parents; DELETE FROM lines; DELETE FROM line_heads;
-             DELETE FROM tags; DELETE FROM remote_refs; DELETE FROM git_map; DELETE FROM exports; DELETE FROM checks;
-             DELETE FROM machines; DELETE FROM config;
-             DELETE FROM trusted; DELETE FROM approvals; DELETE FROM refs; DELETE FROM ref_history;
-             DELETE FROM attestations; DELETE FROM attestation_revocations; DELETE FROM queue_entries;",
-        )?;
-        Ok(())
     }
 
     /// Insert a stored record line. Returns false if the record exists already.
@@ -302,7 +354,7 @@ impl Db {
     /// machines are kept under `<key>@<machine>`.
     pub fn derive(&self, rec: &Record, state_present: &dyn Fn(&str) -> bool, local: &str) -> Result<()> {
         let tx = &self.conn;
-        let ord = format!("{:016}:{}:{:012}", rec.time.max(0), rec.machine, rec.seq);
+        let ord = crate::owners::record_ord(rec);
         let foreign = rec.machine != local;
         for s in &rec.states {
             // A state id names one state forever: a second record with the same id is refused
@@ -334,6 +386,8 @@ impl Db {
             for (i, p) in s.parents.iter().enumerate() {
                 tx.execute("INSERT OR IGNORE INTO parents(state, parent, ord) VALUES(?1,?2,?3)", params![s.id, p, i as i64])?;
             }
+            // Owners may name the state before its record arrives: it holds its parents now.
+            self.owners_state_made(&s.id)?;
         }
         for (id, ch) in &rec.lines {
             // Heads per machine: each machine's own records, in its order.
@@ -474,6 +528,17 @@ impl Db {
                     params![s("name"), rec.time, ord],
                 )?;
             }
+            "remote.remove" => {
+                // The refs of the removed remote become tombstones (state NULL), so an older import
+                // record that arrives later cannot bring them back.
+                if let Some(remote) = s("remote") {
+                    tx.execute(
+                        "UPDATE remote_refs SET state=NULL, gcommit=NULL, time=?2, ord=?3
+                         WHERE substr(name, 1, length(?1)+1)=?1||'/' AND ord < ?3",
+                        params![remote, rec.time, ord],
+                    )?;
+                }
+            }
             "import" | "remote.ref" => {
                 if let (Some(name), Some(st)) = (s("ref"), s("state")) {
                     tx.execute(
@@ -600,6 +665,7 @@ impl Db {
                 )?;
             }
         }
+        self.owners_after(rec, &ord, foreign)?;
         Ok(())
     }
 
@@ -680,6 +746,17 @@ impl Db {
         Ok(v)
     }
 
+    /// The present states of a cache overlay that name the project state they were saved with
+    /// (`cache_of`), newest first: (state, project state).
+    pub fn cache_states(&self) -> Result<Vec<(String, String)>> {
+        let mut st = self.conn.prepare(
+            "SELECT id, json_extract(rec, '$.cache_of') FROM states
+             WHERE present=1 AND deleted=0 AND json_extract(rec, '$.cache_of') IS NOT NULL ORDER BY time DESC",
+        )?;
+        let v = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?.collect::<Result<Vec<_>, _>>()?;
+        Ok(v)
+    }
+
     /// The newest local states, by time, whose folders the rollback check looks at.
     #[cfg_attr(not(all(target_os = "linux", not(feature = "overlayfs"))), allow(dead_code))]
     pub fn newest_present_states(&self, n: usize) -> Result<Vec<String>> {
@@ -753,12 +830,12 @@ impl Db {
     pub fn remote_ref(&self, name: &str) -> Result<Option<(String, Option<String>)>> {
         Ok(self
             .conn
-            .query_row("SELECT state, gcommit FROM remote_refs WHERE name=?1", params![name], |r| Ok((r.get(0)?, r.get(1)?)))
+            .query_row("SELECT state, gcommit FROM remote_refs WHERE name=?1 AND state IS NOT NULL", params![name], |r| Ok((r.get(0)?, r.get(1)?)))
             .optional()?)
     }
 
     pub fn remote_refs(&self) -> Result<Vec<(String, String, Option<String>)>> {
-        let mut st = self.conn.prepare("SELECT name, state, gcommit FROM remote_refs ORDER BY name")?;
+        let mut st = self.conn.prepare("SELECT name, state, gcommit FROM remote_refs WHERE state IS NOT NULL ORDER BY name")?;
         let v = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<Result<Vec<_>, _>>()?;
         Ok(v)
     }
@@ -1193,7 +1270,104 @@ mod tests {
         let db = Db::open(&path).unwrap();
         assert!(db.stale);
         let kept: i64 = db.conn.query_row("SELECT COUNT(*) FROM states", [], |r| r.get(0)).unwrap();
+        assert_eq!(kept, 1, "the old derived rows stay until the rebuild commits");
+        assert!(db.rebuild(true, |_| Ok(())).unwrap());
+        let kept: i64 = db.conn.query_row("SELECT COUNT(*) FROM states", [], |r| r.get(0)).unwrap();
         assert_eq!(kept, 0, "derived rows are rebuilt from the records");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An old-schema database (version 6) with one record, one state and one line.
+    fn old_database(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("layr-db-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("layr.sqlite");
+        let old = Connection::open(&path).unwrap();
+        old.execute_batch(SCHEMA).unwrap();
+        old.execute("INSERT INTO records(id, raw) VALUES('r', '{}')", []).unwrap();
+        old.execute("INSERT INTO states(id, display, kind) VALUES('s', 's', 'commit')", []).unwrap();
+        old.execute("INSERT INTO lines(id, name) VALUES('l', 'main')", []).unwrap();
+        old.pragma_update(None, "user_version", 6).unwrap();
+        path
+    }
+
+    fn count_rows(conn: &Connection, table: &str) -> i64 {
+        conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn a_failed_rebuild_keeps_the_old_tables_and_version() {
+        let path = old_database("failed-rebuild");
+        let db = Db::open(&path).unwrap();
+        assert!(db.rebuild(true, |_| anyhow::bail!("replay failed")).is_err());
+        let reader = Connection::open(&path).unwrap();
+        assert_eq!((count_rows(&reader, "states"), count_rows(&reader, "lines")), (1, 1));
+        let version: i64 = reader.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, 6, "the next open retries the rebuild");
+        assert!(Db::open(&path).unwrap().stale);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn readers_see_the_old_rows_while_the_rebuild_transaction_is_open() {
+        let path = old_database("rebuild-readers");
+        let db = Db::open(&path).unwrap();
+        let reader = Connection::open(&path).unwrap();
+        let mut seen = None;
+        assert!(db
+            .rebuild(true, |_| {
+                seen = Some((count_rows(&reader, "states"), count_rows(&reader, "lines")));
+                Ok(())
+            })
+            .unwrap());
+        assert_eq!(seen, Some((1, 1)), "the reader sees the complete old tables");
+        assert_eq!(count_rows(&reader, "states"), 0, "the rebuilt tables are visible after the COMMIT");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_rebuild_waits_for_another_writer_without_failing() {
+        let path = old_database("rebuild-waits");
+        let db = Db::open(&path).unwrap();
+        let (locked, held) = std::sync::mpsc::channel();
+        let writer_path = path.clone();
+        let writer = std::thread::spawn(move || {
+            let other = Connection::open(&writer_path).unwrap();
+            other.execute_batch("BEGIN IMMEDIATE").unwrap();
+            locked.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_secs(4));
+            other.execute_batch("COMMIT").unwrap();
+        });
+        held.recv().unwrap();
+        assert!(db.rebuild(true, |_| Ok(())).unwrap(), "the rebuild runs after the other writer commits");
+        writer.join().unwrap();
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn other_readers_keep_the_old_rows_until_the_rebuild_commits() {
+        // Opening an old database must not drop its derived tables: another process reads them
+        // until the rebuild commits (it would see empty lines and fail with "not in a layr line").
+        let dir = std::env::temp_dir().join(format!("layr-db-readers-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("layr.sqlite");
+        let old = Connection::open(&path).unwrap();
+        old.execute_batch(SCHEMA).unwrap();
+        old.execute("INSERT INTO records(id, raw) VALUES('r', '{}')", []).unwrap();
+        old.execute("INSERT INTO states(id, display, kind) VALUES('s', 's', 'commit')", []).unwrap();
+        old.execute("INSERT INTO lines(id, name) VALUES('l', 'main')", []).unwrap();
+        old.pragma_update(None, "user_version", 6).unwrap();
+        drop(old);
+        let db = Db::open(&path).unwrap();
+        assert!(db.stale);
+        let reader = Connection::open(&path).unwrap();
+        let count =
+            |table: &str| -> i64 { reader.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0)).unwrap() };
+        assert_eq!((count("states"), count("lines")), (1, 1), "the old rows stay visible");
+        drop(reader);
+        drop(db);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1221,6 +1395,7 @@ mod tests {
             cache_by: None,
             cache_shared: false,
             cache_platform: None,
+            cache_of: None,
         });
         r
     }

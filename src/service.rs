@@ -103,16 +103,23 @@ pub fn forward(argv: &[String]) -> Result<i32> {
 
 /// Exchange versions on the same connection before a client sends a command or descriptors.
 fn negotiate(sock: &UnixStream) -> Result<()> {
-    sock.set_read_timeout(Some(std::time::Duration::from_secs(10)))?;
+    // A busy daemon writes "B" and closes at once. macOS then refuses the timeout on the closed
+    // socket, and the write fails too. The answer is still read; a closed socket never waits.
+    let _ = sock.set_read_timeout(Some(std::time::Duration::from_secs(10)));
     let request = br#"{"hello":true}"#;
     let mut packet = (request.len() as u32).to_be_bytes().to_vec();
     packet.extend_from_slice(request);
-    (&*sock).write_all(&packet)?;
+    // The write error is reported only when no answer is queued.
+    let sent = (&*sock).write_all(&packet);
     let mut kind = [0];
-    (&*sock).read_exact(&mut kind).context("the daemon did not return its store format")?;
+    if let Err(e) = (&*sock).read_exact(&mut kind) {
+        sent?;
+        return Err(e).context("the daemon did not return its store format");
+    }
     if kind[0] == b'B' {
         bail!("the layr service is busy (too many running requests); try again");
     }
+    sent?;
     if kind[0] != b'V' {
         bail!(
             "incompatible daemon: unknown store format (unguarded layr); this binary uses {}. Upgrade the daemon",
@@ -621,6 +628,18 @@ mod version_tests {
             drop(client);
             thread.join().unwrap()?;
         }
+        Ok(())
+    }
+
+    #[test]
+    fn a_busy_answer_is_read_when_the_hello_write_fails() -> Result<()> {
+        // A busy daemon writes "B" and closes without reading the request. The client's hello
+        // write then fails with a broken pipe, but the answer is already queued for reading.
+        let (client, server) = UnixStream::pair()?;
+        (&server).write_all(b"B")?;
+        drop(server);
+        let error = negotiate(&client).unwrap_err().to_string();
+        assert!(error.contains("busy"), "{error}");
         Ok(())
     }
 }

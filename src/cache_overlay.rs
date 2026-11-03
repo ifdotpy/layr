@@ -251,6 +251,7 @@ impl<'a> Repo<'a> {
         line: &Line,
         paths: &[String],
         shared: bool,
+        project_state: &str,
     ) -> Result<Vec<(String, String, String)>> {
         let w = self.working(line);
         let mut out = Vec::new();
@@ -298,6 +299,7 @@ impl<'a> Repo<'a> {
                     cache_by: Some(ctx.caller.uid),
                     cache_shared: shared,
                     cache_platform: Some(self.cache_key(&name, &w)?),
+                    cache_of: Some(project_state.to_string()),
                 };
                 if let Err(e) = crate::overlay::move_overlay_line(&orepo, ctx, "commit", &ol, &id, vec![st]) {
                     let _ = btrfs::delete_tree(&dst);
@@ -323,8 +325,10 @@ impl<'a> Repo<'a> {
     }
 
     /// The cache state of overlay `name` that a line of `uid` takes: the newest cache of the
-    /// source line, or for a state the newest cache of the line that made it or of the line of its
-    /// nearest ancestor that has one.
+    /// source line, or for a state the cache of the nearest ancestor (the state itself first):
+    /// the newest cache saved with that state (`cache_of`), else the newest cache of the line that
+    /// made it. A state imported from git has no line, so without `cache_of` the walk would reach
+    /// an old state of some line and take its old cache.
     pub fn cache_source(&self, name: &str, from: &Source, uid: u32, key: &str) -> Result<Option<String>> {
         let info = self.need_overlay(name)?;
         let orepo = self.overlay_repo(name)?;
@@ -332,6 +336,23 @@ impl<'a> Repo<'a> {
             let Some(ol) = orepo.p.db.line_by_name(&format!("line-{line_id}"))? else { return Ok(None) };
             Ok(self.usable_cache(&orepo, &info.root, &ol.head, uid, key)?.then_some(ol.head))
         };
+        // The newest usable cache saved with each project state. `save --caches` on a line with
+        // no named change saves with an automatic state over the head: that cache counts for the
+        // head too.
+        let mut saved_with: std::collections::HashMap<String, String> = Default::default();
+        for (id, of) in orepo.p.db.cache_states()? {
+            if !self.usable_cache(&orepo, &info.root, &id, uid, key)? {
+                continue;
+            }
+            if let Some(st) = self.p.db.state(&of)? {
+                if st.kind == crate::model::StateKind::Auto {
+                    if let Some(parent) = st.parents.first() {
+                        saved_with.entry(parent.clone()).or_insert_with(|| id.clone());
+                    }
+                }
+            }
+            saved_with.entry(of).or_insert(id);
+        }
         let start = match from {
             Source::Line(l) => {
                 if let Some(s) = of_line(&l.id)? {
@@ -348,6 +369,9 @@ impl<'a> Repo<'a> {
             if seen.len() >= SEARCH || !seen.insert(id.clone()) {
                 continue;
             }
+            if let Some(s) = saved_with.get(&id) {
+                return Ok(Some(s.clone()));
+            }
             let Some(rec) = self.p.db.state(&id)? else { continue };
             if let Some(l) = &rec.line {
                 if let Some(s) = of_line(l)? {
@@ -360,8 +384,9 @@ impl<'a> Repo<'a> {
     }
 
     /// Put the cache overlays into the new working folder `w` of `line` (made from `start`, or
-    /// from the line `source`): each folder overlay whose folder the ignore rules ignore and the
-    /// state does not hold gets a writable snapshot of its cache state, and the line gets an
+    /// from the line `source`): each folder overlay whose folder the ignore rules ignore gets a
+    /// writable snapshot of its cache state unless the state holds files there (it replaces an old
+    /// cache of the state), and the line gets an
     /// overlay line at that state. Returns the folders that got a cache.
     pub fn take_caches(&self, ctx: &Ctx, line: &Line, start: &str, source: Option<&Line>, w: &Path) -> Result<Vec<String>> {
         let mut taken = Vec::new();
@@ -372,7 +397,11 @@ impl<'a> Repo<'a> {
         let (uid, gid) = self.owner_ids(line);
         let (regenerable, setting) = (Rules::attribute(w, "regenerable"), self.p.config_strings("regenerable"));
         for (name, folder) in self.folder_overlays()? {
-            if crate::repo::holds_files(w, &folder) || !ignored.ignored(&folder, true) {
+            // Versioned files win: a folder that the start state holds files in comes from the
+            // state. Otherwise the cache below replaces what the folder holds now: an old cache
+            // of the state (`states/<id>@<folder>`, applied before), else the line would start
+            // with that stale copy.
+            if !ignored.ignored(&folder, true) || crate::repo::holds_files(&self.state_root(start)?, &folder) {
                 continue;
             }
             // A cache overlay only while the folder is a cache path of the new line (its

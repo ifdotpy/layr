@@ -75,8 +75,12 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
     for l in lines {
         repo.authorize_line(ctx, &l, crate::repo::LineOp::Save)?;
         if a.has("--caches") {
-            prepare_caches(repo, &l, a.get("--cache"))?;
-        } else {
+            // A cache copy that a later cache fails to make leaves the earlier ones in the work folder.
+            if let Err(e) = prepare_caches(repo, &l, a.get("--cache")) {
+                repo.discard_prepared();
+                return Err(e);
+            }
+        } else if !a.has("--force") {
             repo.prepare_save(&l)?;
         }
         let _lock = repo.p.lock()?;
@@ -122,7 +126,7 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
                     record_caches(ctx, repo, &s.id, &repo.working(&l), &caches, shared)?;
                     // The line's caches as cache overlays (docs/cache-overlays.md): new lines from
                     // this line take them, whatever state the line's name selects.
-                    for (p, name, id) in repo.save_cache_overlays(ctx, &l, &caches, shared)? {
+                    for (p, name, id) in repo.save_cache_overlays(ctx, &l, &caches, shared, &s.id)? {
                         if !a.has("-q") {
                             outln!(ctx, "{p}: overlay {name} {}", ids::short(&id));
                         }
@@ -141,10 +145,8 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 }
             }
         }
-        #[cfg(target_os = "macos")]
-        for p in btrfs::take_prepared() {
-            repo.p.trash(&p)?;
-        }
+        // Layers and snapshots that the save did not take (an unchanged folder, or --force).
+        repo.discard_prepared();
     }
     Ok(0)
 }
@@ -200,27 +202,33 @@ pub fn record_caches(
     shared: bool,
 ) -> Result<BTreeMap<String, String>> {
     let (mut caches, mut made) = (BTreeMap::new(), Vec::new());
-    for p in paths {
-        let cp = fsutil::safe_join(w, p)?;
-        let name = format!("{state}@{}", p.replace('/', "%2F"));
-        if !crate::model::is_cache_name(&name, state) {
-            continue;
+    // Any error of the loop, also after an earlier snapshot of this call, removes the snapshots
+    // this call made: no record names them.
+    let taken = (|| -> Result<()> {
+        for p in paths {
+            let cp = fsutil::safe_join(w, p)?;
+            let name = format!("{state}@{}", p.replace('/', "%2F"));
+            if !crate::model::is_cache_name(&name, state) {
+                continue;
+            }
+            let snap = repo.p.cache_path(state, &name);
+            if snap.exists() {
+                caches.insert(p.clone(), name);
+            } else if btrfs::is_subvolume(&cp) {
+                btrfs::snapshot(&cp, &snap, true)?;
+                made.push(snap);
+                caches.insert(p.clone(), name);
+            }
         }
-        let snap = repo.p.cache_path(state, &name);
-        if snap.exists() {
-            caches.insert(p.clone(), name);
-        } else if btrfs::is_subvolume(&cp) {
-            btrfs::snapshot(&cp, &snap, true)?;
-            made.push(snap);
-            caches.insert(p.clone(), name);
-        }
-    }
+        Ok(())
+    })();
     let undo = |e: anyhow::Error| {
         for snap in &made {
             let _ = btrfs::delete_tree(snap);
         }
         e
     };
+    taken.map_err(undo)?;
     // Nothing to record when the state already names each of them (a repeated save). A state
     // whose record lost some (an older layr replaced its caches) gets them back.
     let known = repo.state(state).map_err(undo)?.caches;
@@ -922,7 +930,8 @@ pub fn try_command(
 /// while their records stay (`store_remote::restore_state` brings them back). A recoverable
 /// state stays on disk when it is a line head, the newest automatic state of a line, a state
 /// with caches, a state a cache overlay names, or (through `thin::delete_states`) a base that a
-/// state on disk needs.
+/// state on disk needs. `evict` is empty unless `gc.evict` is on (`Project::gc_evicts`). With it
+/// off, a state that a store remote holds is kept with its history, so nothing is deleted for it.
 pub fn retention_plan(repo: &Repo, pushed: &mut BTreeMap<String, bool>) -> Result<(BTreeSet<String>, Vec<String>, Vec<String>)> {
     let db = &repo.p.db;
     let mut held = |id: &str| -> Result<bool> {
@@ -1007,6 +1016,16 @@ pub fn retention_plan(repo: &Repo, pushed: &mut BTreeMap<String, bool>) -> Resul
             }
         }
     }
+    let copies = crate::store_remote::store_copies(repo)?;
+    let evict_on = repo.p.gc_evicts();
+    if !evict_on {
+        // With eviction off, a state that a store holds is a root: it stays with its history.
+        for (id, _) in db.present_states()? {
+            if copies.contains_key(&id) {
+                roots.push(id);
+            }
+        }
+    }
     // History of every root.
     let mut stack = roots;
     while let Some(x) = stack.pop() {
@@ -1056,17 +1075,17 @@ pub fn retention_plan(repo: &Repo, pushed: &mut BTreeMap<String, bool>) -> Resul
             }
         }
     }
-    let copies = crate::store_remote::store_copies(repo)?;
     let mut delete = Vec::new();
     let mut evict = Vec::new();
     for (id, _) in db.present_states()? {
         if !keep.contains(&id) {
-            if copies.contains_key(&id) {
-                evict.push(id);
-            } else {
+            if !copies.contains_key(&id) {
                 delete.push(id);
+            } else if evict_on {
+                evict.push(id);
             }
-        } else if copies.contains_key(&id)
+        } else if evict_on
+            && copies.contains_key(&id)
             && !must.contains(&id)
             && repo.p.has_state(&id)
             && db.state(&id)?.is_some_and(|s| s.caches.is_empty())
@@ -1093,16 +1112,32 @@ fn pushed_work(repo: &Repo, id: &str) -> Result<bool> {
     Ok(repo.unsaved_paths(parent, &s)?.is_empty())
 }
 
+/// Shadow mode (docs/ownership.md): how the owners table differs from the plan. Frees nothing.
+fn owners_difference(ctx: &Ctx, repo: &Repo, keep: &BTreeSet<String>, delete: &[String]) -> Result<()> {
+    let (frees, unowned) = repo.p.db.owners_difference(keep, delete)?;
+    outln!(ctx, "owners: plan frees {} state(s) that owners keep", frees.len());
+    for (id, kinds) in frees.iter().take(10) {
+        outln!(ctx, "\t{} kept by {kinds}", ids::short(id));
+    }
+    outln!(ctx, "owners: plan keeps {} state(s) that no owner names", unowned.len());
+    for id in unowned.iter().take(10) {
+        outln!(ctx, "\t{}", ids::short(id));
+    }
+    Ok(())
+}
+
 pub fn run_gc(ctx: &Ctx, repo: &Repo, dry: bool) -> Result<Vec<String>> {
     // The comparisons of automatic states with their parents take seconds to minutes: a first
     // plan without the lock makes them, and the plan under the lock reuses them.
     let mut pushed = BTreeMap::new();
-    let (_keep, delete, evict) = retention_plan(repo, &mut pushed)?;
+    let (keep, delete, evict) = retention_plan(repo, &mut pushed)?;
     if dry {
+        owners_difference(ctx, repo, &keep, &delete)?;
         return Ok(delete.into_iter().chain(evict).collect());
     }
     let _lock = repo.p.lock()?;
-    let (_keep, delete, evict) = retention_plan(repo, &mut pushed)?;
+    let (keep, delete, evict) = retention_plan(repo, &mut pushed)?;
+    owners_difference(ctx, repo, &keep, &delete)?;
     for expired in repo.p.db.expired_refs(ids::now_ms())? {
         let mut rec = Record::new("ref.expire");
         rec.data = serde_json::json!({"ref_change": crate::model::RefChange { name:expired.name.clone(),before:Some(expired),after:None }});
@@ -1120,6 +1155,8 @@ pub fn run_gc(ctx: &Ctx, repo: &Repo, dry: bool) -> Result<Vec<String>> {
     }
     let removed: Vec<String> = delete.iter().chain(evict.iter()).cloned().collect();
     let gone = repo.p.delete_states(&removed);
+    // Saved overlap compares of states that are gone (radar.rs).
+    let _ = repo.prune_compares();
     // An evicted state keeps its record and reads as not present. A state whose tree stays as a
     // base of another state on disk keeps its present flag.
     for id in &evict {
@@ -1171,22 +1208,35 @@ pub fn run_gc(ctx: &Ctx, repo: &Repo, dry: bool) -> Result<Vec<String>> {
         rec.data = serde_json::json!({"deleted": deleted, "caches": caches});
         repo.commit_record(ctx, rec)?;
     }
-    // Old temporary snapshots.
+    // Temporary objects whose creator is gone, and old ones without a creator pid. A live
+    // creator keeps its object: a copy has the times of its source, so its age says nothing.
     for d in [repo.p.scan_dir(), repo.p.work_dir()] {
         if let Ok(rd) = std::fs::read_dir(&d) {
             for e in rd.flatten() {
-                let old = e
-                    .metadata()
-                    .ok()
-                    .and_then(|m| m.modified().ok())
-                    .map(|t| t.elapsed().map(|x| x.as_secs() > 3600).unwrap_or(false))
-                    .unwrap_or(false);
-                if old {
+                let name = e.file_name().to_string_lossy().into_owned();
+                let stale = crate::store::creator_gone(&name).unwrap_or_else(|| {
+                    e.metadata()
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                        .map(|t| t.elapsed().map(|x| x.as_secs() > 3600).unwrap_or(false))
+                        .unwrap_or(false)
+                });
+                if stale {
                     let _ = repo.p.trash(&e.path());
                 }
             }
         }
     }
+    // OCI blobs that no export names (a failed export), and saved scans of removed or changed
+    // trees. Every gc path runs them: the daemon, overlay projects and the command.
+    if repo.p.meta_dir().join("oci").is_dir() {
+        let age = std::time::Duration::from_secs(3600);
+        if let Err(e) = crate::oci::Cache::for_repo(repo).and_then(|c| crate::oci::prune_blobs(&c, age)) {
+            eprintln!("warning: unnamed OCI blobs stay until the next gc: {e:#}");
+        }
+    }
+    #[cfg(target_os = "macos")]
+    crate::storage::prune_saved_scans(&repo.p.dir)?;
     Ok(removed)
 }
 
@@ -1256,18 +1306,15 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let spec = Spec::new().flag("-n|--dry-run").flag("-q|--quiet").flag("--dedup").flag("--all-projects");
     let a = parse(&spec, args)?;
     if a.has("--all-projects") {
-        return gc_all_projects(ctx, a.has("-n"), a.has("-q"));
+        let code = gc_all_projects(ctx, a.has("-n"), a.has("-q"))?;
+        print_trash_errors(&ctx.store);
+        return Ok(code);
     }
     let h = here(ctx)?;
     h.repo.require(ctx, "gc")?;
     let v = run_gc(ctx, &h.repo, a.has("-n"))?;
     // After the project lock is released: hashing and comparing cache files takes long.
     let shared = if a.has("--dedup") { Some(crate::dedup::run(&h.repo, a.has("-n"))?) } else { None };
-    // Saved scans of removed or changed trees go too.
-    #[cfg(target_os = "macos")]
-    if !a.has("-n") {
-        crate::storage::prune_saved_scans(&h.repo.p.dir)?;
-    }
     if !a.has("-q") {
         let verb = if a.has("-n") { "would delete" } else { "deleted" };
         outln!(ctx, "{verb} {} state(s)", v.len());
@@ -1286,7 +1333,21 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
             outln!(ctx, "{verb} {} of disk in {} cache file(s), {:.1} s", human_size(r.bytes), r.files, r.seconds);
         }
     }
+    print_trash_errors(&ctx.store);
     Ok(0)
+}
+
+/// Print the trash entries that the last emptying could not delete (`<store>/trash.errors`).
+fn print_trash_errors(store: &crate::store::Store) {
+    let path = store.root.join("trash.errors");
+    let Ok(text) = std::fs::read_to_string(&path) else { return };
+    if text.is_empty() {
+        return;
+    }
+    eprintln!("warning: {} trash entries could not be deleted ({}):", text.lines().count(), path.display());
+    for line in text.lines() {
+        eprintln!("\t{line}");
+    }
 }
 
 pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
@@ -1316,18 +1377,48 @@ pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
             outln!(ctx, "records: {err:#}");
         }
     }
+    // Owners (shadow mode, docs/ownership.md): the table must equal the replay of the records.
+    let want = repo.p.db.recomputed_owners(&repo.p.store.machine.id)?;
+    let (missing, extra) = repo.p.db.owners_diff(&want)?;
+    if !missing.is_empty() || !extra.is_empty() {
+        problems += 1;
+        outln!(ctx, "owners differ from the records: {} missing, {} extra", missing.len(), extra.len());
+        for (s, k, h) in missing.iter().take(5) {
+            outln!(ctx, "\tmissing: {} {k} {h}", ids::short(s));
+        }
+        for (s, k, h) in extra.iter().take(5) {
+            outln!(ctx, "\textra: {} {k} {h}", ids::short(s));
+        }
+        if a.has("--repair") {
+            repo.p.db.replace_owners(&want)?;
+            outln!(ctx, "owners rewritten from the records");
+        }
+    }
     // Snapshots without a record: a save that stopped between its snapshot and its record.
     for e in std::fs::read_dir(repo.p.states_dir())?.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
         let id = name.split('@').next().unwrap_or(&name).to_string();
-        if repo.p.db.state(&id)?.is_none() {
-            problems += 1;
-            if a.has("--repair") {
-                btrfs::delete_tree(&e.path())?;
-                outln!(ctx, "deleted snapshot without record: {name}");
-            } else {
-                outln!(ctx, "snapshot without record (leftover of an interrupted save): {name} (use --repair)");
+        match repo.p.db.state(&id)? {
+            None => {
+                problems += 1;
+                if a.has("--repair") {
+                    btrfs::delete_tree(&e.path())?;
+                    outln!(ctx, "deleted snapshot without record: {name}");
+                } else {
+                    outln!(ctx, "snapshot without record (leftover of an interrupted save): {name} (use --repair)");
+                }
             }
+            // A cache snapshot that its state does not name: a save stopped before its record.
+            Some(s) if name.contains('@') && !s.caches.values().any(|n| *n == name) => {
+                problems += 1;
+                if a.has("--repair") {
+                    btrfs::delete_tree(&e.path())?;
+                    outln!(ctx, "deleted cache snapshot without record: {name}");
+                } else {
+                    outln!(ctx, "cache snapshot without record (leftover of an interrupted save): {name} (use --repair)");
+                }
+            }
+            Some(_) => {}
         }
     }
     let mut st = repo.p.db.conn.prepare("SELECT id FROM states WHERE present=1")?;
@@ -1465,6 +1556,9 @@ pub fn reindex(ctx: &Ctx, _args: &[String]) -> Result<i32> {
     h.repo.require(ctx, "fsck")?;
     let _lock = h.repo.p.lock()?;
     h.repo.p.rebuild_index()?;
+    // Layer bases exist on APFS only: elsewhere the table stays empty.
+    #[cfg(target_os = "macos")]
+    h.repo.p.db.replace_bases(&crate::thin::bases(&h.repo.p)?)?;
     let n: i64 = h.repo.p.db.conn.query_row("SELECT COUNT(*) FROM records", [], |r| r.get(0))?;
     outln!(ctx, "index rebuilt from {n} records");
     if !h.repo.p.is_overlay() {
@@ -1521,12 +1615,10 @@ fn copy_folder(
         match link.and_then(|k| first.get(&k).map(|f| (k, f.clone()))) {
             Some((_, f)) => {
                 fsutil::make_parents(dst, &rel, None)?;
-                crate::privs::as_caller_fs(ctx, || {
-                    Ok(std::fs::hard_link(fsutil::safe_join(dst, &f)?, fsutil::safe_join(dst, &rel)?)?)
-                })?;
+                std::fs::hard_link(fsutil::safe_join(dst, &f)?, fsutil::safe_join(dst, &rel)?)?;
             }
             None => {
-                crate::privs::as_caller_fs(ctx, || fsutil::copy_entry(src, &rel, dst, &rel, None))?;
+                copy_from_caller(ctx, src, rel, dst)?;
                 if let Some(k) = link {
                     first.insert(k, rel.clone());
                 }
@@ -1539,6 +1631,19 @@ fn copy_folder(
         fsutil::set_mode(dst, rel, m.mode)?;
     }
     Ok(n)
+}
+
+/// Copy one file or link of the caller's folder into the store: read with the caller's rights,
+/// write with ours. The daemon runs as root, and the store folders are closed to the caller.
+fn copy_from_caller(ctx: &Ctx, src: &std::path::Path, rel: &str, dst: &std::path::Path) -> Result<()> {
+    let path = fsutil::safe_join(src, rel)?;
+    let m = crate::privs::as_caller_fs(ctx, || Ok(std::fs::symlink_metadata(&path)?))?;
+    if m.file_type().is_symlink() {
+        let target = crate::privs::as_caller_fs(ctx, || Ok(std::fs::read_link(&path)?))?;
+        return fsutil::put_symlink(dst, rel, &target);
+    }
+    let file = crate::privs::as_caller_fs(ctx, || fsutil::open_regular(&path))?;
+    fsutil::copy_open_file(&file, dst, rel)
 }
 
 fn caller_git(ctx: &Ctx, dir: &std::path::Path, args: &[&str]) -> Result<std::process::Output> {
@@ -1584,7 +1689,7 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let repo = Repo { p };
     let res = (|| -> Result<(String, String)> {
         let _lock = repo.p.lock()?;
-        let work = repo.p.work_dir().join(ids::new_id());
+        let work = repo.p.work_dir().join(crate::store::temp_name());
         btrfs::create_subvolume(&work)?;
         let cleanup = crate::repo::Temp { path: work.clone() };
         let mut parents = Vec::new();
@@ -1636,7 +1741,7 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
                         .collect();
                     // Copy as the caller, then freeze the bytes used by both the HEAD import
                     // and the folder content. A source edit cannot race the blob comparison.
-                    let tmp = repo.p.work_dir().join(ids::new_id());
+                    let tmp = repo.p.work_dir().join(crate::store::temp_name());
                     btrfs::create_subvolume(&tmp)?;
                     let _t2 = crate::repo::Temp { path: tmp.clone() };
                     copy_folder(ctx, &src, &tmp, a.has("--include-ignored"), Some(&tracked))?;
@@ -1746,6 +1851,9 @@ fn default_branch(repo: &Repo) -> Option<String> {
 }
 
 pub fn set_config(ctx: &Ctx, repo: &Repo, key: &str, value: serde_json::Value) -> Result<()> {
+    if key == Project::GC_EVICT_KEY &&!value.is_null() && !matches!(value.as_str(), Some("on" | "off")) {
+        return Err(exit(1, format!("{key} is on or off")));
+    }
     if !repo.p.is_overlay() {
         if let Some(rest) = key.strip_prefix("overlay.") {
             let name = rest.split('.').next().unwrap_or("");
@@ -2246,5 +2354,55 @@ pub(crate) fn human_size(n: u64) -> String {
         format!("{n} B")
     } else {
         format!("{v:.1} {}", units[i])
+    }
+}
+
+#[cfg(test)]
+mod record_caches_tests {
+    use super::*;
+    use crate::ctx::Caller;
+    use crate::model::Actor;
+
+    /// A cache snapshot that a later failure of the same call leaves unnamed is removed.
+    #[test]
+    fn a_failed_call_removes_the_snapshots_it_made() -> Result<()> {
+        // Snapshots need the subvolume file system: the APFS (or btrfs) test root, as in storage tests.
+        let Some(base) = std::env::var_os("LAYR_APFS_TEST_ROOT").or_else(|| std::env::var_os("LAYR_OVERLAYFS_TEST_ROOT")) else {
+            eprintln!("skipped: set LAYR_APFS_TEST_ROOT to a subvolume file system");
+            return Ok(());
+        };
+        let dir = std::path::PathBuf::from(base).join(format!("layr-record-caches-{}", ids::new_id()));
+        let ctx = Ctx {
+            store: crate::store::Store::open(&dir)?,
+            caller: Caller::from_uid(0),
+            cwd: dir.clone(),
+            env: std::collections::HashMap::from([("LAYR_PROJECT".into(), "p".into())]),
+            out: std::cell::RefCell::new(Box::new(std::io::sink())),
+        };
+        let project_dir = ctx.store.projects_dir().join("p");
+        std::fs::create_dir_all(project_dir.join("meta/db"))?;
+        std::fs::create_dir(project_dir.join("states"))?;
+        let id = ids::new_id();
+        let p = Project {
+            store: &ctx.store,
+            name: "p".into(),
+            dir: project_dir.clone(),
+            id: id.clone(),
+            db: crate::db::Db::open(&project_dir.join("meta/db/layr.sqlite"))?,
+        };
+        let mut rec = crate::model::Record::new("project");
+        rec.data = serde_json::json!({"id": id, "name": "p", "config": {}});
+        p.append(rec, &Actor { uid: 0, name: "root".into(), session: None })?;
+        let repo = Repo { p };
+        let work = dir.join("work");
+        std::fs::create_dir_all(&work)?;
+        crate::storage::create_subvolume(&work.join("a"))?;
+        let state = ids::new_id();
+        // The first cache is snapshotted; the second path escapes the working folder and fails.
+        let paths = ["a".to_string(), "../escape".to_string()];
+        assert!(record_caches(&ctx, &repo, &state, &work, &paths, false).is_err());
+        assert_eq!(std::fs::read_dir(repo.p.states_dir())?.count(), 0, "the failed call leaves no snapshot");
+        std::fs::remove_dir_all(dir).ok();
+        Ok(())
     }
 }

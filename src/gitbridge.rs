@@ -813,7 +813,7 @@ fn import_one(
     // On a store volume that ignores case, README and Readme would become one file. The earlier
     // state passed this check: only the entries of changed folders can collide.
     fsutil::refuse_case_collisions(&repo.p.work_dir(), changes.names.iter().map(|n| n.as_str()))?;
-    let work = repo.p.work_dir().join(ids::new_id());
+    let work = repo.p.work_dir().join(crate::store::temp_name());
     let res = (|| -> Result<StateRec> {
         let (name, email, msg, time) = commit_info(raw);
         // A state with a base and few changes is a thin layer: its cost follows the changes.
@@ -884,6 +884,7 @@ fn thin_import(
     let d = crate::thin::Diff { write: changes.write.iter().map(|w| w.0.clone()).collect(), removed: changes.removed.clone(), whole: Default::default() };
     let id = ids::new_id();
     crate::thin::write_layer(work, &repo.p.delta_path(&id), &d, base, false, None)?;
+    repo.p.db.record_base(&id, base)?;
     Ok(Some(id))
 }
 
@@ -906,7 +907,7 @@ fn work_tree(repo: &Repo, src: &crate::repo::Snap, paths: &[String], keep: &mut 
         if src.is_complete() {
             return Ok(src.bottom().to_path_buf());
         }
-        let t = crate::repo::Temp { path: repo.p.scan_dir().join(ids::new_id()) };
+        let t = crate::repo::Temp { path: repo.p.scan_dir().join(crate::store::temp_name()) };
         crate::thin::extract(src, paths.iter().map(|p| p.as_str()), &t.path)?;
         let p = t.path.clone();
         keep.push(t);
@@ -1734,14 +1735,7 @@ pub fn make_git_folder(repo: &Repo, line: &Line, state: &str, w: &Path) -> Resul
         Some((_, c)) => std::fs::write(g.join("HEAD"), format!("{c}\n"))?,
         None => std::fs::write(g.join("HEAD"), "ref: refs/heads/main\n")?,
     }
-    let refs =
-        git_out(&s, &["for-each-ref", "--format=%(objectname) %(refname)", "refs/tags", "refs/remotes"]).unwrap_or_default();
-    let mut packed = String::from("# pack-refs with: peeled fully-peeled sorted \n");
-    for l in refs.lines() {
-        packed.push_str(l);
-        packed.push('\n');
-    }
-    std::fs::write(g.join("packed-refs"), packed)?;
+    std::fs::write(g.join("packed-refs"), packed_refs_text(repo).unwrap_or_else(|_| PACKED_HEADER.to_string()))?;
     if let Some((ast, _)) = &anc {
         let idx = index_path(repo, ast);
         if idx.exists() {
@@ -1765,6 +1759,60 @@ pub fn make_git_folder(repo: &Repo, line: &Line, state: &str, w: &Path) -> Resul
     // Read only for git: a git write needs lock files and new objects; layr writes through descriptors.
     fsutil::git_writable(w, false);
     Ok(())
+}
+
+const PACKED_HEADER: &str = "# pack-refs with: peeled fully-peeled sorted \n";
+
+/// The `packed-refs` of a `.git` folder: the tags and remote refs of the bridge store.
+fn packed_refs_text(repo: &Repo) -> Result<String> {
+    let refs = git_out(&store(repo), &["for-each-ref", "--format=%(objectname) %(refname)", "refs/tags", "refs/remotes"])?;
+    let mut packed = String::from(PACKED_HEADER);
+    for l in refs.lines() {
+        packed.push_str(l);
+        packed.push('\n');
+    }
+    Ok(packed)
+}
+
+/// Delete the tracking refs of a removed remote (`refs/remotes/<remote>/*`) from the bridge store.
+/// Then rewrite the `packed-refs` of every line, so no line lists or exports them.
+pub fn drop_remote_refs(repo: &Repo, remote: &str) -> Result<()> {
+    if !has_store(repo) {
+        return Ok(());
+    }
+    let s = store(repo);
+    for r in git_out(&s, &["for-each-ref", "--format=%(refname)", &format!("refs/remotes/{remote}/")])?.lines() {
+        git_out(&s, &["update-ref", "-d", r])?;
+    }
+    for line in repo.lines()? {
+        if let Err(e) = refresh_packed_refs(repo, &line) {
+            eprintln!("warning: .git folder of line {} not updated: {e:#}", line.name);
+        }
+    }
+    Ok(())
+}
+
+/// Rewrite the `packed-refs` of a line's `.git` folder when it differs from the bridge store. A
+/// folder the line owner made is left alone.
+pub fn refresh_packed_refs(repo: &Repo, line: &Line) -> Result<()> {
+    let w = repo.working(line);
+    let dir = match fsutil::open_dir_nofollow(&w.join(".git")) {
+        Ok(d) => d,
+        Err(_) => return Ok(()),
+    };
+    if !fsutil::is_layer(&w, ".git", &fsutil::meta_of(&dir.metadata()?)) {
+        return Ok(());
+    }
+    let want = packed_refs_text(repo)?;
+    let cur = fsutil::read_at(&dir, "packed-refs").map(|c| String::from_utf8_lossy(&c).into_owned()).unwrap_or_default();
+    if cur == want {
+        return Ok(());
+    }
+    fsutil::git_writable(&w, true);
+    let own = Some(repo.owner_ids(line));
+    let r = fsutil::replace_at(&dir, "packed-refs", &mut |f| Ok((&*f).write_all(want.as_bytes())?), own);
+    fsutil::git_writable(&w, false);
+    r
 }
 
 /// Point the `.git` folder of a line at the commit of its head (`line_commit`) after every move
