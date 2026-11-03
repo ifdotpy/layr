@@ -4,6 +4,10 @@
 # A failed `line move` leaves the line at its old path with its unsaved work, and the store index
 # is a copy of the project files (a missing index entry is found from the project file).
 . "$(dirname "$0")/lib.sh"
+# The store sits in a folder of the test file system, so that a folder beside it is on the same
+# file system (on btrfs the store root is the mount point itself, see t86-line-move).
+FS=$LAYR_ROOT
+export LAYR_ROOT=$FS/store; mkdir -p $LAYR_ROOT
 
 sample "$T/source"
 # One project per check: a broken state in one check must not hide the next check's result.
@@ -79,11 +83,14 @@ eq "the later edit is kept" "later" "$(tail -1 notes.txt)"
 # project file has the new path; the move must roll back both and leave the line at its old path.
 new_project moved
 l line new -q w >/dev/null
-W=$T/outside/work
-mkdir -p "$T/outside"
+W=$FS/outside/work
+mkdir -p "$FS/outside"
 echo unsaved >> "$P/lines/w/notes.txt"
 mkdir "$LAYR_ROOT/line-paths.json"
 no "the move fails when the index cannot be written" l line move w "$W"
+# The refusal is the index write, not the path: a path refusal would pass the check above too.
+out=$(l line move w "$W" 2>&1)
+no "the failure is not a path refusal" grep -q "another file system\|inside the store\|already exists\|does not exist" <<<"$out"
 rmdir "$LAYR_ROOT/line-paths.json"
 no "the failed move leaves no folder at the new path" test -e "$W"
 ok "the working folder is at the old path" test -f "$P/lines/w/notes.txt"
@@ -95,7 +102,7 @@ no "the project file does not record the failed path" grep -q "$W" "$P/meta/line
 # folder still finds its line.
 new_project indexed
 l line new -q w >/dev/null
-W=$T/outside/indexed-work
+W=$FS/outside/indexed-work
 echo unsaved >> "$P/lines/w/notes.txt"
 ok "line move" l line move w "$W"
 ok "the folder is at the new path" test -f "$W/notes.txt"
