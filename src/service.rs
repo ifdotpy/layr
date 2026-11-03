@@ -182,9 +182,14 @@ fn limit(var: &str, default: usize) -> usize {
     std::env::var(var).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
-fn read_request(sock: &UnixStream) -> Result<(serde_json::Value, Vec<OwnedFd>)> {
+/// Read one request. `None`: the client closed the connection without sending a byte, which is a
+/// normal end of the connection, not a bad request.
+fn read_request(sock: &UnixStream) -> Result<Option<(serde_json::Value, Vec<OwnedFd>)>> {
     let mut first = vec![0u8; 65536];
     let (n, fds) = recv_with_fds(sock, &mut first)?;
+    if n == 0 {
+        return Ok(None);
+    }
     if n < 4 {
         bail!("bad request");
     }
@@ -204,7 +209,7 @@ fn read_request(sock: &UnixStream) -> Result<(serde_json::Value, Vec<OwnedFd>)> 
         }
         req.extend_from_slice(&more[..k]);
     }
-    Ok((serde_json::from_slice(&req)?, fds))
+    Ok(Some((serde_json::from_slice(&req)?, fds)))
 }
 
 /// Child process: serve one request, then exit.
@@ -213,7 +218,9 @@ fn handle(sock: UnixStream, root: &Path, registry_uids: &[u32]) -> i32 {
         let (uid, _gid, _pid) = peer_uid(&sock)?;
         // A client that does not send its request in time does not hold a process.
         sock.set_read_timeout(Some(std::time::Duration::from_secs(10)))?;
-        let (v, fds) = read_request(&sock)?;
+        let Some((v, fds)) = read_request(&sock)? else {
+            return Ok(0);
+        };
         let (v, fds) = if v.get("hello") == Some(&serde_json::Value::Bool(true)) {
             if !fds.is_empty() {
                 bail!("the version request must not contain descriptors");
@@ -223,7 +230,11 @@ fn handle(sock: UnixStream, root: &Path, registry_uids: &[u32]) -> i32 {
             packet.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
             packet.extend_from_slice(&bytes);
             (&sock).write_all(&packet)?;
-            read_request(&sock)?
+            // A client that reads the version and closes sends no command: that is not an error.
+            let Some(next) = read_request(&sock)? else {
+                return Ok(0);
+            };
+            next
         } else {
             (v, fds)
         };
@@ -572,6 +583,26 @@ mod connect_tests {
 }
 
 #[cfg(test)]
+mod request_tests {
+    use super::*;
+
+    #[test]
+    fn a_closed_connection_is_no_request_and_a_short_one_is_bad() -> Result<()> {
+        let (client, server) = UnixStream::pair()?;
+        drop(client);
+        assert!(read_request(&server)?.is_none(), "EOF before any byte is a normal close");
+        for n in 1..4 {
+            let (mut client, server) = UnixStream::pair()?;
+            client.write_all(&vec![0u8; n])?;
+            drop(client);
+            let err = read_request(&server).err().context("a short request must fail")?;
+            assert_eq!(err.to_string(), "bad request", "{n} bytes before EOF");
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
 mod version_tests {
     use super::*;
 
@@ -580,7 +611,7 @@ mod version_tests {
         for format in [crate::store_version::FORMAT, crate::store_version::FORMAT + 1] {
             let (client, server) = UnixStream::pair()?;
             let thread = std::thread::spawn(move || -> Result<()> {
-                let (hello, fds) = read_request(&server)?;
+                let (hello, fds) = read_request(&server)?.context("no request")?;
                 assert_eq!(hello, serde_json::json!({"hello": true}));
                 assert!(fds.is_empty());
                 let mut version = crate::store_version::Version::binary();
@@ -615,7 +646,7 @@ mod version_tests {
         for answer in [b'R', b'B'] {
             let (client, server) = UnixStream::pair()?;
             let thread = std::thread::spawn(move || -> Result<()> {
-                let (hello, fds) = read_request(&server)?;
+                let (hello, fds) = read_request(&server)?.context("no request")?;
                 assert_eq!(hello, serde_json::json!({"hello": true}));
                 assert!(fds.is_empty());
                 (&server).write_all(&[answer])?;
