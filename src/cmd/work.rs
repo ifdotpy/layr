@@ -979,10 +979,18 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if a.has("-a") && !stacked {
         add(ctx, &["-u".to_string()])?;
     }
+    // Cache folders become layers, and their copies are made, before the lock (rule 90).
+    if !stacked {
+        h.repo.restore_caches(&line)?;
+        h.repo.prepare_cache_states(&line)?;
+    }
     let _lock = h.repo.p.lock()?;
     let line = h.repo.line(&line.id)?;
     crate::gitbridge::check_git_head(&h.repo, &line)?;
     crate::repo::recover_cache_replacements(&h.repo.working(&line))?;
+    if !stacked {
+        h.repo.save_first_cache_states(ctx, &line)?;
+    }
     if a.has("-a") && !stacked && !cfg!(target_os = "macos") {
         let (st, scan, _it, _index) = h.repo.status_light(&line)?;
         let paths: BTreeSet<String> = st.unstaged.iter().map(|c| c.path.clone()).collect();
@@ -1472,7 +1480,7 @@ fn reset_same_tree(ctx: &Ctx, repo: &Repo, line: &Line, target: &str) -> Result<
     // overlay folders (`cache_paths`) runs only when the working folder has a change.
     let local = changes::file_changes(&head, &w)?;
     if !local.is_empty() {
-        let regen = repo.cache_paths(&w);
+        let regen = repo.cache_paths(&w)?;
         let keep = |p: &str| !skip_path(p) && !regen.iter().any(|r| p == r || p.starts_with(&format!("{r}/")));
         if local.iter().any(|x| keep(&x.path) || x.old_path.as_deref().is_some_and(keep)) {
             return Ok(false);

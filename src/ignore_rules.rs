@@ -14,6 +14,8 @@ pub struct Rules {
     /// For `.layrattributes`: the attribute whose patterns this matcher holds.
     attribute: Option<&'static str>,
     cache: RefCell<HashMap<String, Option<Gitignore>>>,
+    /// The folders (relative to root, "" is the root) whose rule files are read. None: every folder.
+    dirs: Option<std::collections::HashSet<String>>,
     /// The layers of a thin state: rule files are read from the layer that holds them.
     #[cfg(target_os = "macos")]
     layers: Option<crate::thin::Layered>,
@@ -26,6 +28,22 @@ impl Rules {
             files: &[".gitignore", ".layrignore"],
             attribute: None,
             cache: RefCell::new(HashMap::new()),
+            dirs: None,
+            #[cfg(target_os = "macos")]
+            layers: None,
+        }
+    }
+
+    /// The ignore rules (`attribute` None) or the rules of `attribute`, read only in the folders
+    /// `dirs`. A walk that lists the folders knows which hold rule files, so no other folder costs
+    /// a stat for them.
+    pub fn limited(root: &Path, attribute: Option<&'static str>, dirs: std::collections::HashSet<String>) -> Rules {
+        Rules {
+            root: root.to_path_buf(),
+            files: if attribute.is_some() { &[".layrattributes"] } else { &[".gitignore", ".layrignore"] },
+            attribute,
+            cache: RefCell::new(HashMap::new()),
+            dirs: Some(dirs),
             #[cfg(target_os = "macos")]
             layers: None,
         }
@@ -70,12 +88,16 @@ impl Rules {
             files: &[".layrattributes"],
             attribute: Some(name),
             cache: RefCell::new(HashMap::new()),
+            dirs: None,
             #[cfg(target_os = "macos")]
             layers: None,
         }
     }
 
     fn matcher(&self, dir: &str) -> Option<Gitignore> {
+        if self.dirs.as_ref().is_some_and(|d| !d.contains(dir)) {
+            return None;
+        }
         if let Some(m) = self.cache.borrow().get(dir) {
             return m.clone();
         }
