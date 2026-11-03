@@ -236,6 +236,7 @@ pub const COMMANDS: &[&str] = &[
 ];
 
 pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
+    crate::repo::begin_command();
     let (cmd, rest) = match argv.first() {
         Some(c) => (c.as_str(), &argv[1..]),
         None => {

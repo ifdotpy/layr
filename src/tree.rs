@@ -581,6 +581,44 @@ impl Tree {
         list_fd(&d)
     }
 
+    /// Walk the folders below the root. `visit(rel, entries)` gets each folder's entries (name, and
+    /// whether it is a folder; a link is no folder) and returns the names of the child folders to
+    /// enter. Each entered folder is opened once, from its parent's descriptor (no path walk), and
+    /// the type comes with the listing (one stat only for a filesystem that gives no type). A name
+    /// that is not UTF-8 is left out.
+    pub fn walk_folders(&self, mut visit: impl FnMut(&str, &[(String, bool)]) -> Vec<String>) -> Result<()> {
+        // The root descriptor is O_PATH on Linux (no reads): open the folder again to read it.
+        let mut stack = vec![(String::new(), openat2(&self.root, "", OFlags::RDONLY | OFlags::DIRECTORY)?)];
+        while let Some((rel, fd)) = stack.pop() {
+            let mut entries = Vec::new();
+            for e in rustix::fs::Dir::read_from(&fd)? {
+                let e = e?;
+                let name = e.file_name().to_bytes();
+                if name == b"." || name == b".." {
+                    continue;
+                }
+                let Ok(name) = std::str::from_utf8(name) else { continue };
+                let is_dir = match e.file_type() {
+                    rustix::fs::FileType::Directory => true,
+                    rustix::fs::FileType::Unknown => {
+                        let child = if rel.is_empty() { name.to_string() } else { format!("{rel}/{name}") };
+                        self.stat(&child).is_some_and(|m| m.is_dir())
+                    }
+                    _ => false,
+                };
+                entries.push((name.to_string(), is_dir));
+            }
+            for name in visit(&rel, &entries) {
+                let child = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
+                let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+                if let Ok(cfd) = rustix::fs::openat(&fd, name.as_str(), flags, Mode::empty()) {
+                    stack.push((child, cfd));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn create_subvolume(&self, rel: &str) -> Result<()> {
         #[cfg(feature = "overlayfs")]
         {

@@ -240,8 +240,8 @@ impl Repo<'_> {
         if ctx.cwd.starts_with(&working)
             || self.is_stacked(line)?
             || !self.pending_moves(line).is_empty()
-            || !self.cache_paths(&working).is_empty()
-            || !self.cache_paths(&self.state_root(target)?).is_empty()
+            || !self.cache_paths(&working)?.is_empty()
+            || !self.cache_paths(&self.state_root(target)?)?.is_empty()
             || !self.state(target)?.caches.is_empty()
             || line_in_use(&working)?
         {
