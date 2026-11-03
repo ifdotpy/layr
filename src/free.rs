@@ -118,7 +118,7 @@ fn free_queued(p: &Project) -> Result<Vec<String>> {
     Ok(gone)
 }
 
-/// Test only (tests/t105-free-recheck.sh): `LAYR_TEST_FREE_PAUSE_MS` pauses the free step before
+/// Test only (tests/t109-free-recheck.sh): `LAYR_TEST_FREE_PAUSE_MS` pauses the free step before
 /// its lock, so another command can re-own a queued state first.
 fn hold_before_free() {
     let Some(ms) = std::env::var("LAYR_TEST_FREE_PAUSE_MS").ok().and_then(|v| v.parse::<u64>().ok()) else { return };

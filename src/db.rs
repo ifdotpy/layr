@@ -1188,6 +1188,13 @@ impl Db {
         Ok(rows)
     }
 
+    /// The records from `time` on, oldest first (`layr follow` reads its exports of the last days).
+    pub fn records_since(&self, time: i64) -> Result<Vec<Record>> {
+        let mut st = self.conn.prepare("SELECT raw FROM records WHERE time>=?1 ORDER BY time")?;
+        let v = st.query_map(params![time], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+        v.into_iter().map(|l| Ok(crate::oplog::parse_line(&l, None)?.record)).collect()
+    }
+
     pub fn max_seqs(&self) -> Result<Vec<(String, u64)>> {
         let mut st = self.conn.prepare("SELECT machine, MAX(seq) FROM records GROUP BY machine")?;
         let v = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64)))?.collect::<Result<Vec<_>, _>>()?;

@@ -67,16 +67,8 @@ ok "line new starts from a state fetched back" l line new -q x "$t1"
 ok "gc --all-projects runs" l gc --all-projects -q
 l line delete -D x -q >/dev/null
 
-<<<<<<< head
-# Offline: the copy is on the store remote, which cannot be reached.
-ok "gc evicts again" l gc --repair -q
-||||||| base
-# Offline: the copy is on the store remote, which cannot be reached.
-ok "gc evicts again" l gc -q
-=======
 # Offline: the copy is on the store remote, which cannot be reached (the URL stays the same).
-ok "gc evicts again" l gc -q
->>>>>>> origin/main
+ok "gc evicts again" l gc --repair -q
 no "the evicted state is not on disk" on_disk "$t1"
 mv "$T/archive" "$T/archive.away"
 no "reading the evicted state offline fails" l show "$t1:notes.txt"

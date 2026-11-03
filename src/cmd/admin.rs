@@ -517,35 +517,6 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
                 "error: the line changed after this operation; undo the later operations first (layr op log), or use --force",
             ));
         }
-<<<<<<< head
-        // Required states must still exist (retention can delete old automatic states).
-        for s in [ch.before.as_ref().map(|b| b.head.clone()), ch.working_before.clone()].into_iter().flatten() {
-            if !repo.p.has_state(&s) {
-                return Err(exit(
-                    1,
-                    format!(
-                        "error: cannot undo: state {} was freed (the newest {} operations of a line can be undone)",
-                        ids::short(&s),
-                        repo.p.config_u64("undo.ops", crate::owners::UNDO_OPS_DEFAULT as u64)
-                    ),
-                ));
-            }
-        }
-||||||| base
-        // Required states must still exist (retention can delete old automatic states).
-        for s in [ch.before.as_ref().map(|b| b.head.clone()), ch.working_before.clone()].into_iter().flatten() {
-            if !repo.p.has_state(&s) {
-                return Err(exit(
-                    1,
-                    format!(
-                        "error: cannot undo: state {} was deleted by retention (undo window: {} days)",
-                        ids::short(&s),
-                        repo.p.config_u64("undo.days", 7)
-                    ),
-                ));
-            }
-        }
-=======
         lines.push((lid, ch, cur, alive, cur_state));
     }
     let mut needed: Vec<String> = Vec::new();
@@ -559,11 +530,16 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
     needed.extend(["final_state", "staged_state"].iter().filter_map(|k| r.data.get(*k)?.as_str().map(str::to_string)));
     for s in &needed {
         repo.state_src(s).map_err(|e| {
-            exit(1, format!("error: cannot undo, no file changed: {e:#} (undo window: {} days)", repo.p.config_u64("undo.days", 7)))
+            exit(
+                1,
+                format!(
+                    "error: cannot undo, no file changed: {e:#} (the newest {} operations of a line can be undone)",
+                    repo.p.config_u64("undo.ops", crate::owners::UNDO_OPS_DEFAULT as u64)
+                ),
+            )
         })?;
     }
     for (lid, ch, cur, alive, cur_state) in lines {
->>>>>>> origin/main
         let mut wb = None;
         match (&ch.before, &cur) {
             (Some(b), Some(l)) if alive => {
@@ -1080,42 +1056,13 @@ fn evict_stored(repo: &Repo) -> Result<Vec<String>> {
     )?;
     let rows: Vec<String> = st.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
     drop(st);
+    let copies = crate::store_remote::store_copies(repo)?;
     let mut evict = Vec::new();
-<<<<<<< head
     for id in rows {
         let plain = db.state(&id)?.is_some_and(|s| s.caches.is_empty());
-        if plain && !named.contains(&id) {
-||||||| base
-    for (id, _) in db.present_states()? {
-        if !keep.contains(&id) {
-            if !copies.contains_key(&id) {
-                delete.push(id);
-            } else if evict_on {
-                evict.push(id);
-            }
-        } else if evict_on
-            && copies.contains_key(&id)
-            && !must.contains(&id)
-            && repo.p.has_state(&id)
-            && db.state(&id)?.is_some_and(|s| s.caches.is_empty())
-        {
-=======
-    for (id, _) in db.present_states()? {
-        // A state whose tree the store format cannot restore exactly stays on disk.
-        if !keep.contains(&id) {
-            if !copies.contains_key(&id) {
-                delete.push(id);
-            } else if evict_on && crate::store_remote::restorable(repo, &id)? {
-                evict.push(id);
-            }
-        } else if evict_on
-            && copies.contains_key(&id)
-            && !must.contains(&id)
-            && repo.p.has_state(&id)
-            && db.state(&id)?.is_some_and(|s| s.caches.is_empty())
-            && crate::store_remote::restorable(repo, &id)?
-        {
->>>>>>> origin/main
+        // A copy counts only on the store the remote names now and readable here (`store_copies`),
+        // and only a tree that the store format can restore exactly goes (`restorable`).
+        if plain && !named.contains(&id) && copies.contains_key(&id) && crate::store_remote::restorable(repo, &id)? {
             evict.push(id);
         }
     }

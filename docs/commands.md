@@ -180,7 +180,6 @@ extent), and belongs to a part when no other part references it. The last lines 
 several parts share and the store total. It reads every file's metadata (on Linux it opens each
 file), so a large store takes minutes; 4 workers share the folders of `states` and `deltas`.
 
-<<<<<<< head
 Storage is freed when a state loses its last owner (docs/ownership.md). A command that drops
 the last owner of a state moves its storage to the trash after its commit and after the store
 lock, so `line delete`, a save past the rings, and a moved head free space in that command. A
@@ -205,58 +204,22 @@ Keys that keep states (count rings, `layr config <key> <n>`):
 
 `retention.hours` and `undo.days` were removed: setting one fails and names its replacement. An
 operation past `undo.ops` cannot be undone: `layr undo` says that the states of the operation
-were freed. A state that a store remote holds (a successful `layr push <store-remote>`) is kept
-while eviction is off (the default). With `gc.evict on`, `gc --repair` evicts such a state: its tree
+were freed. A state that a store remote holds (a successful `layr push <store-remote>` names it, the remote
+still has the recorded URL, and this machine reads that store) is kept while eviction is off (the
+default). With `gc.evict on`, `gc --repair` evicts such a state: its tree
 goes when no local owner of the strong kinds (head, auto, undo, deleted, park, overlay, pin) names
-it and no cache or cache overlay needs it. Its record stays, and a read fetches the tree back.
+it, no cache or cache overlay needs it, and the store format can restore its tree exactly. Its record stays, and a read fetches the tree back.
 
 A state that a live thin layer (APFS) uses as its base keeps its storage until that layer goes.
 `gc --all-projects` repairs the owners table and finishes the free queue for every project, but frees no
 leaked state: a state that a command has recorded and not yet given an owner looks like a leak for a
-moment. Only `gc --repair` frees leaks (the daemon runs the same repair without freeing leaks; macOS periodic run:
-`packaging/launchd/ws.layr.gc.plist`).
+moment. Only `gc --repair` frees leaks (the Linux daemon runs the same repair without freeing leaks; the
+macOS user daemon runs no gc).
 
 Test only (tests/t99-ownership-free.sh): `LAYR_TEST_EXIT_AFTER_COMMIT=1` exits with status 86
 after a commit that queued states, before the free step. Test only (tests/t100-pin-reads.sh):
 `LAYR_TEST_PIN_HOLD_MS=<ms>` sleeps once per process after its pins are taken. Neither is for use
 otherwise.
-||||||| base
-`gc` deletes the states that nothing keeps. Line heads and their history, tags, refs, park entries
-and conflict sources stay. The newest `retention.auto` (50) automatic states of each line, one per
-hour for `retention.hours` (24), and every state that a record of the last `undo.days` (7) names
-stay too, except an automatic state whose work its parent already holds: it has no caches and its
-files that are not ignored equal the parent (pushed or not; the parent stays while anything names it). Such a
-state differs only in build output, which a build makes again, so a deleted line frees its space at
-the next `gc`. The newest automatic state of a live line always stays. `gc` compares these states
-before it takes the store lock.
-
-`gc` evicts a state that a store remote holds (a successful `layr push <store-remote>` names it)
-only when the project config `gc.evict` is `on` (`layr config gc.evict on`; default `off`). With
-`off`, such a state is kept with its history and nothing is deleted for it. With `on`, its tree goes,
-its record stays, and the next command that reads the tree fetches it back from that remote. A recoverable state stays on disk when it is a line head, the newest automatic state of a
-line, a state with caches, a state that a cache overlay names, or a base of a thin layer chain that
-a state on disk needs. Without a reachable remote, a command that needs the tree fails and names the
-remote. `gc --all-projects` runs `gc` for every project (macOS periodic run:
-`packaging/launchd/ws.layr.gc.plist`). See [design.md](design.md#state-eviction-and-fetch-on-demand).
-=======
-`gc` deletes the states that nothing keeps. Line heads and their history, tags, refs, park entries
-and conflict sources stay. The newest `retention.auto` (50) automatic states of each line, one per
-hour for `retention.hours` (24), and every state that a record of the last `undo.days` (7) names
-stay too, except an automatic state whose work its parent already holds: it has no caches and its
-files that are not ignored equal the parent (pushed or not; the parent stays while anything names it). Such a
-state differs only in build output, which a build makes again, so a deleted line frees its space at
-the next `gc`. The newest automatic state of a live line always stays. `gc` compares these states
-before it takes the store lock.
-
-`gc` evicts a state that a store remote holds (a successful `layr push <store-remote>` names it,
-the remote still has the recorded URL, and this machine reads that store) only when the project
-config `gc.evict` is `on` (`layr config gc.evict on`; default `off`). With
-`off`, such a state is kept with its history and nothing is deleted for it. With `on`, its tree goes,
-its record stays, and the next command that reads the tree fetches it back from that remote. A recoverable state stays on disk when it is a line head, the newest automatic state of a
-line, a state with caches, a state that a cache overlay names, or a base of a thin layer chain that
-a state on disk needs. Without a reachable remote, a command that needs the tree fails and names the
-remote. `gc --all-projects` runs `gc` for every project (see [design.md](design.md#state-eviction-and-fetch-on-demand)).
->>>>>>> origin/main
 
 Revisions: `head`, `@`, `head~2`, `head^2`, line names, `line@machine`, tags, `origin/main`,
 state id prefixes, git commit ids (full or a prefix of at least 4 digits), `park@{n}`, `head@{n}`
