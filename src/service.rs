@@ -433,7 +433,10 @@ pub fn daemon(args: &[String]) -> Result<i32> {
             bail!("the APFS service requires a volume with ownership enabled (diskutil enableOwnership <volume>)");
         }
         use std::os::unix::fs::MetadataExt;
-        for path in [&root, &root.join("machine"), &root.join("projects")] {
+        let mut paths = vec![root.clone(), root.join("machine"), root.join("projects")];
+        // The projects of the other volumes are store folders too.
+        paths.extend(crate::volumes::Layout::for_root(&root)?.ready_projects_dirs().into_iter().map(|(_, p)| p));
+        for path in &paths {
             if let Ok(m) = std::fs::symlink_metadata(path) {
                 if !m.is_dir() || m.uid() != 0 || m.mode() & 0o022 != 0 {
                     bail!(

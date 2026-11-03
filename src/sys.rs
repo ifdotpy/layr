@@ -579,6 +579,37 @@ fn cpath(path: &std::path::Path) -> io::Result<CString> {
     use std::os::unix::ffi::OsStrExt;
     CString::new(path.as_os_str().as_bytes()).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in path"))
 }
+/// The name of the file system at `path`, as `layr volume list` shows it (`apfs`, `btrfs`,
+/// `ext4`, `xfs`). Other file systems show their type number.
+#[cfg(target_os = "macos")]
+pub fn fs_type_name(path: &std::path::Path) -> io::Result<String> {
+    let path = cpath(path)?;
+    // SAFETY: statfs initializes a valid native structure; path is NUL-terminated.
+    unsafe {
+        let mut stat: libc::statfs = std::mem::zeroed();
+        if libc::statfs(path.as_ptr(), &mut stat) != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(CStr::from_ptr(stat.f_fstypename.as_ptr()).to_string_lossy().into_owned())
+    }
+}
+
+/// The name of the file system at `path`, as `layr volume list` shows it (`apfs`, `btrfs`,
+/// `ext4`, `xfs`). Other file systems show their type number.
+#[cfg(target_os = "linux")]
+pub fn fs_type_name(path: &std::path::Path) -> io::Result<String> {
+    let st = rustix::fs::statfs(path)?;
+    let magic = st.f_type as i64;
+    Ok(match magic {
+        0x9123_683E => "btrfs".into(),
+        0xEF53 => "ext4".into(),
+        0x5846_5342 => "xfs".into(),
+        0x794C_7630 => "overlayfs".into(),
+        0x0102_1994 => "tmpfs".into(),
+        other => format!("fs-type-{other:#x}"),
+    })
+}
+
 #[cfg(target_os = "macos")]
 pub fn apfs_supported(path: &std::path::Path) -> bool {
     let Ok(path) = cpath(path) else {

@@ -1471,7 +1471,7 @@ mod approval_tests {
             env: std::collections::HashMap::new(),
             out: std::cell::RefCell::new(Box::new(std::io::sink())),
         };
-        let project_dir = ctx.store.projects_dir().join("p");
+        let project_dir = ctx.store.project_dir("p").unwrap();
         std::fs::create_dir_all(project_dir.join("meta/db")).unwrap();
         let project_id = crate::ids::new_id();
         let p = Project {

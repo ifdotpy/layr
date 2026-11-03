@@ -10,7 +10,7 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | history       | `log [--json]`, `show`, `blame`, `grep`, `ls-files`, `rev-parse`, `merge-base`                        |
 | lines         | `line new <name> [<rev>] [--count N] [--json]`, `line list [--json]`, `line delete`, `line rename`, `line move`, `tag`, `merge [--expect]`, `pick`, `invert`, `replay`, `adopt` |
 | access        | `access [list|grant [--until <30m|2h|1d>]|revoke|deny|allow|check]`, `protect [<pattern> --update <role> --check <names> --path <path>=<role> --approvals <n> --approvers <principals> --direct --rewrite <role> --no-expect | --remove]`, `approve [--withdraw] <state>`, `attest <kind> <rev> [--payload <file>]`, `attestations <rev> [--kind <kind>] [--json]` |
-| safety        | `undo`, `op log`, `save`, `try <state> -- <cmd>`, `try <state> --check <name>`, `bisect list [--json]`, `bisect run [--good <rev>] [--bad <rev>] [--auto] [--ref-log <ref>] [--json] -- <cmd>`, `gc [-n] [--repair] [--dedup]`, `du [<line>...] [--json]`, `du --store [--json]`, `fsck`, `reindex` |
+| safety        | `undo`, `op log`, `save`, `try <state> -- <cmd>`, `try <state> --check <name>`, `bisect list [--json]`, `bisect run [--good <rev>] [--bad <rev>] [--auto] [--ref-log <ref>] [--json] -- <cmd>`, `gc [-n] [--repair] [--dedup]`, `du [<line>...] [--json]`, `du --store [--json]`, `du --volumes [--json]`, `fsck`, `reindex` |
 | Git bridge    | `git remote`, `git fetch`, `git pull`, `git push [--squash] [--include-base <lines>]`, `git clone`, `git sync`                             |
 | remotes       | `remote add\|list\|self\|remove\|trust`, `remote public <remote> on\|off`, `sync <remote>`, `push <remote>`, `push [--dry-run]` (every layer to each of its remotes), `overlay remote add\|list\|remove`, `fetch <remote>`, `pull <remote>`, `clone <url>` |
 | OCI           | `push <oci-remote> <rev> [--runnable <name>] [--json]`, `access token <principal> [--until <duration>]`, `access token --revoke <principal>` |
@@ -26,7 +26,8 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | changes       | `comment <change> <text> [--version vN] [--path <path>] [--line N] [--reply-to <id>] [--json]`, `change list`, `change show <id>`, `change log <id>`, `change diff <id> [--from vN] [--to vM]` |
 | requests      | `request <kind> ... --person [--remote <name>] [--expires <epoch-ms>]`, `requests apply [--remote <name>] [--json]` |
 | person        | `person keys [--paper-key-out <path>] [--site <url>] [--store <url>]`, `person show [--json]`, `person accept`, `access person-key <login> <public-key>` |
-| setup         | `init [--allow-root-snapshots]`, `projects`, `config`, `daemon [--allow-root-snapshots]`                             |
+| setup         | `init [--allow-root-snapshots] [--volume <name>]`, `projects`, `config`, `daemon [--allow-root-snapshots]`                             |
+| volumes       | `volume add <name> <path>`, `volume list [--json]`, `volume remove <name>`, `volume default <name>`, `clone <url> [<project>] --volume <name>`, `git clone <url> [<project>] --volume <name>` ([volumes](volumes.md)) |
 
 `init` and `daemon` refuse a store in the root subvolume, because a system snapshot rollback would empty it. `--allow-root-snapshots` or `LAYR_ALLOW_ROOT_SNAPSHOTS=1` overrides the check. See [Btrfs root snapshots](btrfs-root-snapshots.md).
 

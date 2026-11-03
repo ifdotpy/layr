@@ -273,6 +273,12 @@ index `line-paths.json` maps a path to project and line id, so a command finds i
 current folder without opening every project. `Repo::working` reads the path; nothing else builds
 line folder paths. On OverlayFS the registry also manages the folders outside the store.
 
+### Volumes
+
+A project can live on another file system of the machine (`layr volume add`). The volume map is
+machine data, and `volumes::Layout` is the one resolver of a project folder. The model, identity
+checks and the part of `project move` that rests on them are in [volumes](volumes.md).
+
 ## 6. What is not in layr
 
 - Choosing between several attempts at one task, and marking the others stale: a workflow of

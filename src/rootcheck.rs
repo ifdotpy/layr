@@ -90,15 +90,20 @@ mod imp {
         out
     }
 
-    /// Refuse a store, projects folder or moved line folder that the root subvolume or a snapper
-    /// config covers. Runs before the store folder is created.
-    pub fn check_store(root: &Path) -> Result<()> {
+    /// Refuse a store, projects folder, volume or moved line folder that the root subvolume or a
+    /// snapper config covers. `volumes` are the usable volumes other than the store root. Runs
+    /// before the store folder is created.
+    pub fn check_store(root: &Path, volumes: &[PathBuf]) -> Result<()> {
         if allowed() || place(root)?.is_none() {
             return Ok(());
         }
         let base_folder = std::env::var_os(ROOT_PATH_VAR).map(PathBuf::from).unwrap_or_else(|| "/".into());
         let base = place(&base_folder)?;
         let mut folders = vec![("store folder", root.to_path_buf()), ("projects folder", root.join("projects"))];
+        for volume in volumes {
+            folders.push(("volume folder", volume.clone()));
+            folders.push(("projects folder of a volume", volume.join("projects")));
+        }
         // A moved folder that no longer exists cannot be a subvolume of the root.
         folders
             .extend(crate::linepaths::moved_folders(root).into_iter().filter(|p| p.exists()).map(|p| ("moved line folder", p)));
@@ -192,9 +197,9 @@ mod imp {
 mod imp {
     use crate::store::Project;
     use anyhow::Result;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
-    pub fn check_store(_root: &Path) -> Result<()> {
+    pub fn check_store(_root: &Path, _volumes: &[PathBuf]) -> Result<()> {
         Ok(())
     }
 

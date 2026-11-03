@@ -3193,7 +3193,7 @@ mod cache_platform_tests {
             env: std::collections::HashMap::from([("LAYR_PROJECT".into(), "p".into())]),
             out: std::cell::RefCell::new(Box::new(std::io::sink())),
         };
-        let project_dir = ctx.store.projects_dir().join("p");
+        let project_dir = ctx.store.project_dir("p").unwrap();
         std::fs::create_dir_all(project_dir.join("meta/db")).unwrap();
         std::fs::create_dir(project_dir.join("states")).unwrap();
         let id = ids::new_id();
@@ -3308,7 +3308,7 @@ mod commit_record_tests {
             env: std::collections::HashMap::from([("LAYR_PROJECT".into(), "p".into())]),
             out: std::cell::RefCell::new(Box::new(std::io::sink())),
         };
-        let project_dir = ctx.store.projects_dir().join("p");
+        let project_dir = ctx.store.project_dir("p").unwrap();
         std::fs::create_dir_all(project_dir.join("meta/db"))?;
         std::fs::create_dir(project_dir.join("states"))?;
         let id = ids::new_id();
