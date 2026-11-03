@@ -209,7 +209,9 @@ goes when no local owner of the strong kinds (head, auto, undo, deleted, park, o
 it and no cache or cache overlay needs it. Its record stays, and a read fetches the tree back.
 
 A state that a live thin layer (APFS) uses as its base keeps its storage until that layer goes.
-`gc --all-projects` runs `gc --repair` for every project (macOS periodic run:
+`gc --all-projects` repairs the owners table and finishes the free queue for every project, but frees no
+leaked state: a state that a command has recorded and not yet given an owner looks like a leak for a
+moment. Only `gc --repair` frees leaks (the daemon runs the same repair without freeing leaks; macOS periodic run:
 `packaging/launchd/ws.layr.gc.plist`).
 
 Test only (tests/t99-ownership-free.sh): `LAYR_TEST_EXIT_AFTER_COMMIT=1` exits with status 86

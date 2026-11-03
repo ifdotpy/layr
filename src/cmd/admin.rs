@@ -1059,12 +1059,15 @@ fn evict_stored(repo: &Repo) -> Result<Vec<String>> {
 
 /// The periodic repair of a project (`service.rs`): it prints nothing.
 pub fn gc_repair_quiet(ctx: &Ctx, repo: &Repo) -> Result<usize> {
-    repair_project(ctx, repo, false, true)
+    repair_project(ctx, repo, false, true, false)
 }
 
 /// Replace the owners table with the replay of the records (live pins kept) and mark the leaked
 /// states dead. Returns the leaks. The caller holds the project lock.
-pub fn repair_table(repo: &Repo) -> Result<Vec<String>> {
+/// `free` frees the leaked states too. Only an explicit `gc --repair` does: a state that a command
+/// has recorded but not yet given an owner looks like a leak for a moment (a periodic pass would
+/// free it under the command).
+pub fn repair_table(repo: &Repo, free: bool) -> Result<Vec<String>> {
     let c = owners_check(repo)?;
     let mut want = c.want.clone();
     for (state, kind, holder) in repo.p.db.owner_rows()?.into_iter().filter(|r| r.1 == "pin") {
@@ -1074,7 +1077,9 @@ pub fn repair_table(repo: &Repo) -> Result<Vec<String>> {
     }
     repo.p.db.replace_owners(&want)?;
     let leaks = repo.p.db.leaked_states()?;
-    repo.p.db.free_leaks(&leaks)?;
+    if free {
+        repo.p.db.free_leaks(&leaks)?;
+    }
     Ok(leaks)
 }
 
@@ -1082,7 +1087,7 @@ pub fn repair_table(repo: &Repo) -> Result<Vec<String>> {
 /// states are freed, expired refs are released and the side caches are trimmed. The storage of
 /// the freed states moves after the lock (`free::finish_project`), then the trash is emptied.
 /// With `dry`, nothing changes: it prints what it would free.
-fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool) -> Result<usize> {
+fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) -> Result<usize> {
     if dry {
         let c = snapshot(repo, || owners_check(repo))?;
         let queued: Vec<String> = repo.p.db.queued_frees()?;
@@ -1102,7 +1107,7 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool) -> Result<usiz
     }
     let leaks = {
         let _lock = repo.p.lock()?;
-        let leaks = repair_table(repo)?;
+        let leaks = repair_table(repo, free)?;
         evict_stored(repo)?;
         for expired in repo.p.db.expired_refs(ids::now_ms())? {
             let mut rec = Record::new("ref.expire");
@@ -1238,7 +1243,7 @@ fn gc_all_projects(ctx: &Ctx, dry: bool, quiet: bool) -> Result<i32> {
     for name in ctx.store.project_names()?.into_iter().filter(|n| !n.contains('%')) {
         let result = Repo::open(ctx, &name).and_then(|repo| {
             repo.require(ctx, "gc")?;
-            repair_project(ctx, &repo, dry, true)
+            repair_project(ctx, &repo, dry, true, false)
         });
         match result {
             Ok(freed) if !quiet => outln!(ctx, "{name}: {freed} state(s)"),
@@ -1267,7 +1272,7 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let h = here(ctx)?;
     h.repo.require(ctx, "gc")?;
     let code = if a.has("--repair") {
-        repair_project(ctx, &h.repo, a.has("-n"), a.has("-q"))?;
+        repair_project(ctx, &h.repo, a.has("-n"), a.has("-q"), true)?;
         0
     } else {
         check(ctx, &h.repo, a.has("-q"))?
@@ -1337,7 +1342,7 @@ pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
             outln!(ctx, "\textra: {} {k} {h}", ids::short(s));
         }
         if a.has("--repair") {
-            repair_table(repo)?;
+            repair_table(repo, true)?;
             outln!(ctx, "owners rewritten from the records; leaked states marked for freeing");
         }
     }
