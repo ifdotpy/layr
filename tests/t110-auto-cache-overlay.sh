@@ -66,6 +66,18 @@ W=$LAYR_ROOT/projects/r/lines/warm
 ok "a new line from such a state starts warm" test -f $W/target/blob.bin
 eq "its cache has the build output" "$blob_sum" "$(cksum < $W/target/blob.bin)"
 
+# Two more new lines from main take the saved cache: no store growth until they build (OverlayFS
+# copies would show here: a line must not save a cache that nobody changed).
+cd $P || exit 1
+before=$(store_bytes)
+l line new -q warm2 main
+l line new -q warm3 main
+after=$(store_bytes)
+ok "two new lines from main add no store growth" test $((after - before)) -lt 1048576
+cd $LAYR_ROOT/projects/r/lines/warm2 || exit 1
+ok "and they start warm" test -f target/blob.bin
+cd $P || exit 1
+
 # A named save makes the first cache state too, with no automatic save before it.
 N=$T/named
 rm -rf $N && mkdir -p $N/src
