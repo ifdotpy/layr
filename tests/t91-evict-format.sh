@@ -42,6 +42,20 @@ make_state attr attribute
 attr_state=$STATE
 cd "$P/lines/main"
 
+# DIAG (temporary, remove before merge)
+diag() {
+    echo "DIAG tree $1"
+    find "$1" -ls 2>&1 | head -40 | sed 's/^/DIAG /' || true
+    if [ "$(uname -s)" = Darwin ]; then xattr -l "$1/notes.txt" 2>&1 | sed 's/^/DIAG xattr /' || true
+    else getfattr -R -d -m - "$1" 2>&1 | head -40 | sed 's/^/DIAG /' || true; fi
+}
+echo "DIAG gc.evict=$(l config gc.evict 2>&1 || true)"
+echo "DIAG working copy notes.txt xattrs:"; getfattr -d -m - "$P/lines/main/notes.txt" 2>&1 | sed 's/^/DIAG /' || true
+diag "$P/states/$(dashed "$plain")"
+diag "$P/states/$(dashed "$attr_state")"
+find "$P/meta" -path '*remote-stores*' -name read 2>&1 | sed 's/^/DIAG marker /' || true
+# END DIAG
+
 ok "gc with gc.evict on runs" l gc -q
 no "a plain state is evicted" on_disk "$plain"
 ok "a state with an extended attribute stays on disk" on_disk "$attr_state"
