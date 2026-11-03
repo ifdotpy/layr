@@ -1648,14 +1648,30 @@ pub fn visit_space(path: &Path, f: &mut dyn FnMut(&crate::fsutil::Held)) -> Resu
     crate::fsutil::fiemap_visit(path, f)
 }
 
-/// Bytes that a copy of `path` occupies on another file system: each distinct extent once.
+/// Bytes that a copy of `path` occupies on another file system: each distinct extent once. The
+/// layer folders of the project's trees count too: a mounted view shows them, but a file that
+/// an upper layer hides is only in its layer.
 pub(crate) fn copy_need(path: &Path) -> Result<u64> {
-    let mut keys: std::collections::HashMap<u64, u64> = Default::default();
+    let src = absolute(path)?;
+    let mut keys: HashMap<u64, u64> = Default::default();
     crate::fsutil::fiemap_visit(path, &mut |h| {
         for &(key, size) in h.shared {
             keys.entry(key).or_insert(size);
         }
     })?;
+    let state = lock(&src)?;
+    for e in state.registry.trees.iter().filter(|(p, _)| p.starts_with(&src)).map(|(_, e)| e) {
+        for id in entry_objects(e) {
+            let folder = state.home.join("objects").join(&id);
+            if folder.is_dir() {
+                crate::fsutil::fiemap_visit(&folder, &mut |h| {
+                    for &(key, size) in h.shared {
+                        keys.entry(key).or_insert(size);
+                    }
+                })?;
+            }
+        }
+    }
     Ok(keys.values().sum())
 }
 
@@ -1666,33 +1682,320 @@ pub(crate) fn copy_total(path: &Path) -> Result<u64> {
     Ok(total)
 }
 
-/// Project copies on OverlayFS are not implemented yet: the layers must be copied with their
-/// mounts (`project_copy.rs`), and no flattened copy is made instead.
-pub(crate) struct Copier;
+/// The layer folders of a tree: its lower layers and its upper layer.
+fn entry_objects(e: &Entry) -> Vec<String> {
+    let mut ids = vec![e.lower.clone(), e.info.uuid.clone()];
+    ids.extend(e.bases.iter().cloned());
+    ids.retain(|id| !id.is_empty());
+    ids.sort();
+    ids.dedup();
+    ids
+}
 
-impl Copier {
-    pub(crate) fn new(_src_root: &Path) -> Result<Copier> {
-        bail!("copying a project on OverlayFS is not implemented yet")
+/// The registry key of a tree in a copy: the same path below the copy root.
+fn copied_key(key: &Path, src: &Path, dst: &Path) -> Result<PathBuf> {
+    Ok(dst.join(key.strip_prefix(src).context("registry entry outside the project")?))
+}
+
+/// The registry of the copy is the nearest registry above `dst`. A target without one gets a
+/// registry at its mount point (the copy's own store root for OverlayFS).
+fn target_home(dst: &Path) -> Result<PathBuf> {
+    for p in dst.ancestors() {
+        let home = p.join(".layr-overlayfs");
+        if home.is_dir() {
+            return Ok(home);
+        }
     }
-    pub(crate) fn native_subvolume(&self, _path: &Path) -> bool {
-        false
+    let mounts = fs::read_to_string("/proc/self/mountinfo")?;
+    let root = mounts
+        .lines()
+        .filter_map(|l| l.split_whitespace().nth(4))
+        .map(PathBuf::from)
+        .filter(|m| dst.starts_with(m))
+        .max_by_key(|m| m.components().count())
+        .context("no mount point for the copy target")?;
+    let home = root.join(".layr-overlayfs");
+    private_dir(&home)?;
+    private_dir(&home.join("objects"))?;
+    if !home.join("registry.json").exists() {
+        crate::fsutil::atomic_write(&home.join("registry.json"), &serde_json::to_vec(&Registry::default())?, 0o600)?;
     }
-    pub(crate) fn shell_dir(&mut self, _src: &Path, _dst: &Path) -> Result<()> {
-        bail!("copying a project on OverlayFS is not implemented yet")
+    Ok(home)
+}
+
+/// Owner, mode, extended attributes and time of a copied entry (the time last, after the entries
+/// of a folder). Overlay attributes (`trusted.overlay.*`) are copied too: they define the layer.
+fn set_meta(src: &Path, dst: &Path, m: &fs::Metadata) -> Result<()> {
+    set_owner(dst, m)?;
+    if m.file_type().is_symlink() {
+        return Ok(());
     }
-    pub(crate) fn dir_close(&mut self, _src: &Path, _dst: &Path, _m: &fs::Metadata) -> Result<()> {
-        bail!("copying a project on OverlayFS is not implemented yet")
+    fs::set_permissions(dst, fs::Permissions::from_mode(m.mode() & 0o7777))?;
+    for (name, value) in sys::overlay_xattrs(src)? {
+        sys::overlay_attribute(dst, &std::ffi::CString::new(name)?, Some(&value))?;
     }
-    pub(crate) fn file(&mut self, _src: &Path, _dst: &Path, _m: &fs::Metadata) -> Result<()> {
-        bail!("copying a project on OverlayFS is not implemented yet")
-    }
-    pub(crate) fn symlink(&mut self, _src: &Path, _dst: &Path, _m: &fs::Metadata) -> Result<()> {
-        bail!("copying a project on OverlayFS is not implemented yet")
-    }
-    pub(crate) fn subvolume(&mut self, _src: &Path, _dst: &Path) -> Result<()> {
-        bail!("copying a project on OverlayFS is not implemented yet")
-    }
-    pub(crate) fn finish(self) -> Result<()> {
+    sys::overlay_mtime(dst, m.mtime(), m.mtime_nsec())?;
+    Ok(())
+}
+
+fn set_owner(dst: &Path, m: &fs::Metadata) -> Result<()> {
+    rustix::fs::chownat(
+        rustix::fs::CWD,
+        dst,
+        Some(rustix::fs::Uid::from_raw(m.uid())),
+        Some(rustix::fs::Gid::from_raw(m.gid())),
+        rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+    )
+    .with_context(|| format!("owner of {}", dst.display()))?;
+    Ok(())
+}
+
+/// Regular files of a copy. A file with the same extents as an earlier copy shares that copy
+/// when the target file system can reflink (XFS, btrfs); other file systems copy the data.
+#[derive(Default)]
+struct Files {
+    seen: HashMap<Vec<(u64, u64, u64)>, PathBuf>,
+    links: HashMap<(u64, u64), PathBuf>,
+}
+
+impl Files {
+    fn copy(&mut self, src: &Path, dst: &Path, m: &fs::Metadata) -> Result<()> {
+        if m.nlink() > 1 {
+            if let Some(first) = self.links.get(&(m.dev(), m.ino())) {
+                fs::hard_link(first, dst).with_context(|| format!("link {}", dst.display()))?;
+                return Ok(());
+            }
+        }
+        let from = File::open(src).with_context(|| format!("open {}", src.display()))?;
+        let key = crate::project_copy::plain_extents(&from);
+        let shared = key.as_ref().and_then(|k| self.seen.get(k).cloned());
+        let to = fs::OpenOptions::new().write(true).create_new(true).open(dst).with_context(|| format!("create {}", dst.display()))?;
+        match &shared {
+            Some(first) => clone_file(&File::open(first)?, &to).with_context(|| format!("share {}", dst.display()))?,
+            None => clone_file(&from, &to).with_context(|| format!("copy {}", src.display()))?,
+        }
+        if let (None, Some(k)) = (shared, key) {
+            self.seen.insert(k, dst.to_path_buf());
+        }
+        if m.nlink() > 1 {
+            self.links.insert((m.dev(), m.ino()), dst.to_path_buf());
+        }
         Ok(())
     }
+}
+
+/// A project copy on OverlayFS (`src/project_copy.rs`). The mounted trees are not walked: their
+/// layer folders (lower and upper) are copied once each, and the registry of the copy names
+/// them. The copy is mounted at the end, so it is readable like the source.
+pub(crate) struct Copier {
+    src_root: PathBuf,
+    dst_root: PathBuf,
+    src_home: PathBuf,
+    dst_home: PathBuf,
+    /// The registry entries of the source project.
+    entries: BTreeMap<PathBuf, Entry>,
+    /// Source trees that are mounts (not plain folders).
+    mounted: HashSet<PathBuf>,
+    /// Source trees whose copy is registered (or copied as a plain folder).
+    done: HashSet<PathBuf>,
+    /// Source trees copied as plain folders (their registry entry is plain in the copy).
+    plain_copies: HashSet<PathBuf>,
+    /// Layer folders already in the copy.
+    objects: HashSet<String>,
+    /// The registry entries of the copy.
+    registered: BTreeMap<PathBuf, Entry>,
+    files: Files,
+}
+
+impl Copier {
+    pub(crate) fn new(src_root: &Path, dst_root: &Path) -> Result<Copier> {
+        let src = absolute(src_root)?;
+        let dst = absolute(dst_root)?;
+        let state = lock(&src)?;
+        let entries: BTreeMap<PathBuf, Entry> =
+            state.registry.trees.iter().filter(|(p, _)| p.starts_with(&src)).map(|(p, e)| (p.clone(), e.clone())).collect();
+        let src_home = state.home.clone();
+        drop(state);
+        let dst_home = target_home(&dst)?;
+        let mounted = entries.iter().filter(|(_, e)| !e.plain).map(|(p, _)| p.clone()).collect();
+        Ok(Copier {
+            src_root: src,
+            dst_root: dst,
+            src_home,
+            dst_home,
+            entries,
+            mounted,
+            done: HashSet::new(),
+            plain_copies: HashSet::new(),
+            objects: HashSet::new(),
+            registered: BTreeMap::new(),
+            files: Files::default(),
+        })
+    }
+
+    /// A mounted tree is copied from its layers, not from its view.
+    pub(crate) fn native_subvolume(&self, path: &Path) -> bool {
+        self.mounted.contains(path) && !self.plain_copies.contains(path)
+    }
+
+    /// The folder of a mounted tree that is copied as a plain folder (the database).
+    pub(crate) fn shell_dir(&mut self, src: &Path, dst: &Path) -> Result<()> {
+        if self.mounted.contains(src) {
+            self.plain_copies.insert(src.to_path_buf());
+        }
+        fs::create_dir(dst).with_context(|| format!("create {}", dst.display()))
+    }
+
+    pub(crate) fn dir_close(&mut self, src: &Path, dst: &Path, m: &fs::Metadata) -> Result<()> {
+        set_meta(src, dst, m)
+    }
+
+    pub(crate) fn file(&mut self, src: &Path, dst: &Path, m: &fs::Metadata) -> Result<()> {
+        self.files.copy(src, dst, m)?;
+        set_meta(src, dst, m)
+    }
+
+    pub(crate) fn symlink(&mut self, src: &Path, dst: &Path, m: &fs::Metadata) -> Result<()> {
+        std::os::unix::fs::symlink(fs::read_link(src)?, dst).with_context(|| format!("link {}", dst.display()))?;
+        crate::fsutil::copy_symlink_xattrs(src, dst)?;
+        set_owner(dst, m)
+    }
+
+    /// The mount point of a tree: its layers are copied and the tree is registered.
+    pub(crate) fn subvolume(&mut self, src: &Path, dst: &Path) -> Result<()> {
+        self.register(src)?;
+        fs::create_dir(dst).with_context(|| format!("create {}", dst.display()))
+    }
+
+    /// Register one source tree in the copy. Its layers are copied first.
+    fn register(&mut self, key: &Path) -> Result<()> {
+        if !self.done.insert(key.to_path_buf()) {
+            return Ok(());
+        }
+        let entry = self.entries.get(key).context("unknown registry entry")?.clone();
+        if !entry.plain {
+            for id in entry_objects(&entry) {
+                if self.src_home.join("objects").join(&id).is_dir() {
+                    self.copy_object(&id)?;
+                } else if id == entry.lower {
+                    bail!("layer {id} of {} is missing in the source", key.display());
+                }
+            }
+        }
+        let dst_key = copied_key(key, &self.src_root, &self.dst_root)?;
+        let entry = if self.plain_copies.contains(key) { Entry { plain: true, ..entry } } else { entry };
+        self.registered.insert(dst_key, entry);
+        Ok(())
+    }
+
+    /// Copy one layer folder into the copy, once. It is complete under its own name, or absent.
+    fn copy_object(&mut self, id: &str) -> Result<()> {
+        if self.objects.contains(id) {
+            return Ok(());
+        }
+        let objects = self.dst_home.join("objects");
+        let target = objects.join(id);
+        if target.is_dir() {
+            // Renamed into place only when complete: a layer of this copy or of an earlier one.
+            self.objects.insert(id.to_string());
+            return Ok(());
+        }
+        let source = self.src_home.join("objects").join(id);
+        let temp = objects.join(format!("{id}.tmp"));
+        if temp.exists() {
+            fs::remove_dir_all(&temp)?;
+        }
+        fs::DirBuilder::new().mode(0o700).create(&temp)?;
+        for child in fs::read_dir(&source)? {
+            let child = child?;
+            let name = child.file_name().to_string_lossy().into_owned();
+            if name == "work" || name == "upper-pending" || name.ends_with(".tmp") {
+                continue;
+            }
+            self.copy_node(&child.path(), &temp.join(child.file_name()))?;
+        }
+        set_meta(&source, &temp, &fs::symlink_metadata(&source)?)?;
+        fs::rename(&temp, &target).with_context(|| format!("publish layer {id}"))?;
+        self.objects.insert(id.to_string());
+        Ok(())
+    }
+
+    /// Copy one entry of a layer folder, with its content (directories recursively).
+    fn copy_node(&mut self, src: &Path, dst: &Path) -> Result<()> {
+        let m = fs::symlink_metadata(src).with_context(|| format!("stat {}", src.display()))?;
+        let kind = m.file_type();
+        if kind.is_dir() {
+            fs::create_dir(dst).with_context(|| format!("create {}", dst.display()))?;
+            for child in fs::read_dir(src)? {
+                let child = child?;
+                self.copy_node(&child.path(), &dst.join(child.file_name()))?;
+            }
+            set_meta(src, dst, &m)
+        } else if kind.is_symlink() {
+            std::os::unix::fs::symlink(fs::read_link(src)?, dst).with_context(|| format!("link {}", dst.display()))?;
+            crate::fsutil::copy_symlink_xattrs(src, dst)?;
+            set_owner(dst, &m)
+        } else if kind.is_file() {
+            self.files.copy(src, dst, &m)?;
+            set_meta(src, dst, &m)
+        } else if std::os::unix::fs::FileTypeExt::is_char_device(&kind) && m.rdev() == 0 {
+            // An overlay whiteout: a character device with device number 0.
+            rustix::fs::mknodat(rustix::fs::CWD, dst, rustix::fs::FileType::CharacterDevice, rustix::fs::Mode::empty(), 0)
+                .with_context(|| format!("whiteout {}", dst.display()))?;
+            set_meta(src, dst, &m)
+        } else {
+            bail!("cannot copy special file {}", src.display())
+        }
+    }
+
+    /// Register the trees that the walk did not reach (nested in a mount), write the registry of
+    /// the copy and mount its trees.
+    pub(crate) fn finish(mut self) -> Result<()> {
+        let rest: Vec<PathBuf> = self.entries.keys().filter(|k| !self.done.contains(*k)).cloned().collect();
+        for key in rest {
+            self.register(&key)?;
+        }
+        {
+            let mut state = lock_at(self.dst_home.clone())?;
+            for (key, entry) in std::mem::take(&mut self.registered) {
+                state.registry.trees.insert(key, entry);
+            }
+            state.save()?;
+        }
+        let root = self.dst_home.parent().context("registry without a folder")?.to_path_buf();
+        recover(&root)
+    }
+}
+
+/// The registry entries of a copy match the source, with their paths below the copy root.
+/// A database folder is a plain folder in the copy (its content is a fresh copy of the database).
+pub(crate) fn verify_registry(src: &Path, dst: &Path) -> Result<()> {
+    let src = absolute(src)?;
+    let dst = absolute(dst)?;
+    let s = lock(&src)?;
+    let d = lock(&dst)?;
+    let mut expected: BTreeMap<PathBuf, serde_json::Value> = BTreeMap::new();
+    for (key, entry) in s.registry.trees.iter().filter(|(p, _)| p.starts_with(&src)) {
+        let mut entry = entry.clone();
+        if key.ends_with("meta/db") {
+            entry.plain = true;
+        }
+        expected.insert(copied_key(key, &src, &dst)?, serde_json::to_value(&entry)?);
+    }
+    let actual: BTreeMap<PathBuf, serde_json::Value> = d
+        .registry
+        .trees
+        .iter()
+        .filter(|(p, _)| p.starts_with(&dst))
+        .map(|(p, e)| -> Result<(PathBuf, serde_json::Value)> { Ok((p.clone(), serde_json::to_value(e)?)) })
+        .collect::<Result<_>>()?;
+    if expected.keys().ne(actual.keys()) {
+        bail!("the copy has {} registry entries, the source {}", actual.len(), expected.len());
+    }
+    for (key, value) in &expected {
+        if actual.get(key) != Some(value) {
+            bail!("registry entry {} differs", key.display());
+        }
+    }
+    Ok(())
 }

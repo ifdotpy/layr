@@ -377,7 +377,7 @@ pub(crate) struct Copier {
 }
 
 impl Copier {
-    pub(crate) fn new(src_root: &Path) -> Result<Copier> {
+    pub(crate) fn new(src_root: &Path, _dst_root: &Path) -> Result<Copier> {
         // Snapshots left by an interrupted copy of this project.
         let tmp = src_root.join("meta").join(crate::project_copy::TMP);
         if tmp.exists() {
@@ -401,8 +401,9 @@ impl Copier {
 
     pub(crate) fn dir_close(&mut self, src: &Path, dst: &Path, m: &fs::Metadata) -> Result<()> {
         let to = File::open(dst)?;
-        crate::fsutil::copy_metadata(&File::open(src)?, &to)?;
-        std::os::unix::fs::lchown(dst, Some(m.uid()), Some(m.gid())).with_context(|| format!("owner of {}", dst.display()))
+        // The owner first: a change of owner clears the set-id bits of the mode.
+        std::os::unix::fs::lchown(dst, Some(m.uid()), Some(m.gid())).with_context(|| format!("owner of {}", dst.display()))?;
+        crate::fsutil::copy_metadata(&File::open(src)?, &to)
     }
 
     pub(crate) fn file(&mut self, src: &Path, dst: &Path, m: &fs::Metadata) -> Result<()> {
@@ -420,9 +421,9 @@ impl Copier {
             .open(dst)
             .with_context(|| format!("create {}", dst.display()))?;
         std::io::copy(&mut from, &mut to).with_context(|| format!("copy {}", src.display()))?;
-        crate::fsutil::copy_metadata(&from, &to)?;
         rustix::fs::fchown(&to, Some(rustix::fs::Uid::from_raw(m.uid())), Some(rustix::fs::Gid::from_raw(m.gid())))
             .with_context(|| format!("owner of {}", dst.display()))?;
+        crate::fsutil::copy_metadata(&from, &to)?;
         if m.nlink() > 1 {
             self.links.insert(link, dst.to_path_buf());
         }
@@ -570,4 +571,9 @@ fn nested_subvolumes(root: &Path) -> Result<Vec<PathBuf>> {
     }
     out.sort();
     Ok(out)
+}
+
+/// btrfs has no layer registry: nothing to verify beyond the tree.
+pub(crate) fn verify_registry(_src: &Path, _dst: &Path) -> Result<()> {
+    Ok(())
 }

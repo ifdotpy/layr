@@ -2142,13 +2142,18 @@ pub(crate) struct Copier {
     seals: Vec<PathBuf>,
 }
 
+/// Give the copy the owner and group of the source (the copy runs as the owner or as root).
+fn own(dst: &Path, m: &fs::Metadata) -> Result<()> {
+    std::os::unix::fs::lchown(dst, Some(m.uid()), Some(m.gid())).with_context(|| format!("owner of {}", dst.display()))
+}
+
 fn sealed(m: &fs::Metadata) -> bool {
     use std::os::macos::fs::MetadataExt as MacMetadataExt;
     m.st_flags() & libc::UF_IMMUTABLE != 0
 }
 
 impl Copier {
-    pub(crate) fn new(_src_root: &Path) -> Result<Copier> {
+    pub(crate) fn new(_src_root: &Path, _dst_root: &Path) -> Result<Copier> {
         Ok(Copier::default())
     }
 
@@ -2171,6 +2176,8 @@ impl Copier {
         crate::sys::apfs_copy_metadata(src, dst).with_context(|| format!("copy metadata {}", dst.display()))?;
         crate::sys::apfs_immutable(dst, false)?;
         keep_birthtime(m, dst)?;
+        // The owner first: a change of owner clears the set-id bits of the mode.
+        own(dst, m)?;
         fs::set_permissions(dst, fs::Permissions::from_mode(m.mode() & 0o7777))?;
         crate::fsutil::set_mtime(&File::open(dst)?, m.mtime(), m.mtime_nsec())?;
         if sealed(m) {
@@ -2215,6 +2222,7 @@ impl Copier {
         crate::sys::apfs_copy_metadata(src, dst).with_context(|| format!("copy metadata {}", dst.display()))?;
         crate::sys::apfs_immutable(dst, false)?;
         keep_birthtime(m, dst)?;
+        own(dst, m)?;
         fs::set_permissions(dst, fs::Permissions::from_mode(m.mode() & 0o7777))?;
         crate::fsutil::set_mtime(&File::open(dst)?, m.mtime(), m.mtime_nsec())?;
         if let (Some(id), Some(extents), false) = (identity.clone_id, extents, cloned) {
@@ -2233,7 +2241,8 @@ impl Copier {
         std::os::unix::fs::symlink(fs::read_link(src)?, dst).with_context(|| format!("link {}", dst.display()))?;
         crate::sys::apfs_copy_metadata(src, dst).with_context(|| format!("copy metadata {}", dst.display()))?;
         crate::sys::apfs_immutable(dst, false)?;
-        keep_birthtime(m, dst)
+        keep_birthtime(m, dst)?;
+        own(dst, m)
     }
 
     /// Seal the copied entries as the source is sealed (children before folders).
@@ -2243,4 +2252,9 @@ impl Copier {
         }
         Ok(())
     }
+}
+
+/// APFS has no layer registry: nothing to verify beyond the tree.
+pub(crate) fn verify_registry(_src: &Path, _dst: &Path) -> Result<()> {
+    Ok(())
 }

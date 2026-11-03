@@ -52,7 +52,10 @@ pub struct CopyReport {
     pub overlays: usize,
     /// Bytes that the copy occupies on the target (shared extents counted once).
     pub need: u64,
-    pub elapsed_ms: u128,
+    /// Time to copy the project (without the verification).
+    pub copy_ms: u128,
+    /// Time to verify the copy (`verify_copy`), which reads every file.
+    pub verify_ms: u128,
 }
 
 #[derive(Default)]
@@ -130,10 +133,15 @@ pub fn copy_project(src: &Path, dst: &Path, mut progress: impl FnMut(Step)) -> R
         fs::create_dir(&dst).with_context(|| format!("create {}", dst.display()))?;
     }
     File::create(dst.join(MARKER)).context("mark the copy as unfinished")?.sync_all()?;
-    let mut copier = storage::Copier::new(&src)?;
+    let mut copier = storage::Copier::new(&src, &dst)?;
     let mut sink = Sink { progress: &mut progress, counts: Counts::default() };
     walk(&mut copier, &src, &dst, &mut Vec::new(), &mut sink)?;
     copier.finish()?;
+    let copy_ms = started.elapsed().as_millis();
+    // A failed verification leaves the target marked: the next call removes and copies again.
+    let verified = Instant::now();
+    compare_copy(&src, &dst).context("the copy does not match the source")?;
+    let verify_ms = verified.elapsed().as_millis();
     fs::remove_file(dst.join(MARKER)).context("finish the copy")?;
     File::open(&dst)?.sync_all()?;
     Ok(CopyReport {
@@ -142,7 +150,8 @@ pub fn copy_project(src: &Path, dst: &Path, mut progress: impl FnMut(Step)) -> R
         lines: sink.counts.lines,
         overlays: sink.counts.overlays,
         need,
-        elapsed_ms: started.elapsed().as_millis(),
+        copy_ms,
+        verify_ms,
     })
 }
 
@@ -173,6 +182,20 @@ fn prepare_target(dst: &Path) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// The plain extents of a file as (logical offset, physical address, length), for comparing its
+/// content. None when the file has none (empty, inline or encoded data) or the file system does
+/// not report extents.
+#[cfg(target_os = "linux")]
+pub(crate) fn plain_extents(file: &File) -> Option<Vec<(u64, u64, u64)>> {
+    const LAST: u32 = 0x1;
+    const SHARED: u32 = 0x2000;
+    let extents = crate::sys::fiemap_full(file).ok()?;
+    if extents.is_empty() || extents.iter().any(|e| e.3 & !(LAST | SHARED) != 0) {
+        return None;
+    }
+    Some(extents.iter().map(|&(logical, physical, len, _)| (logical, physical, len)).collect())
 }
 
 /// Copy the folder `src` (a project or a part of one) into `dst`, entry by entry.
@@ -245,10 +268,16 @@ fn vacuum_into(src: &Path, dst: &Path) -> Result<()> {
 /// (records count, newest record, line heads, states). The source is only read.
 pub fn verify_copy(src: &Path, dst: &Path) -> Result<()> {
     ensure!(!dst.join(MARKER).exists(), "the copy is not finished: {} exists", dst.join(MARKER).display());
+    compare_copy(src, dst)
+}
+
+/// The comparison of `verify_copy`, also run by `copy_project` before the marker is removed.
+fn compare_copy(src: &Path, dst: &Path) -> Result<()> {
     let mut rel = Vec::new();
     let mut stats = Stats::default();
     compare_dir(src, dst, &mut rel, &mut stats).with_context(|| format!("verify {}", dst.display()))?;
     ensure!(stats.databases > 0, "the source has no database");
+    storage::verify_registry(src, dst).with_context(|| format!("verify the registry of {}", dst.display()))?;
     Ok(())
 }
 
@@ -264,7 +293,8 @@ fn compare_dir(s: &Path, d: &Path, rel: &mut Vec<String>, stats: &mut Stats) -> 
         let mut set = BTreeSet::new();
         for e in fs::read_dir(p).with_context(|| format!("read {}", p.display()))? {
             let name = e?.file_name().to_string_lossy().into_owned();
-            let skipped = rel.as_slice() == ["meta"] && (name == TMP || name.starts_with("layr.sqlite-"));
+            let skipped = (rel.is_empty() && name == MARKER)
+                || (rel.as_slice() == ["meta"] && (name == TMP || name.starts_with("layr.sqlite-")));
             if !skipped {
                 set.insert(name);
             }
@@ -288,6 +318,7 @@ fn compare_entry(s: &Path, d: &Path, rel: &mut Vec<String>, stats: &mut Stats) -
     let dm = fs::symlink_metadata(d)?;
     if is_database(rel) {
         ensure!(dm.is_dir(), "{} is not a folder in the copy", rel.join("/"));
+        ensure!(sm.uid() == dm.uid() && sm.gid() == dm.gid(), "{}: owner differs", rel.join("/"));
         stats.databases += 1;
         return compare_db(&s.join("layr.sqlite"), &d.join("layr.sqlite"), &rel.join("/"));
     }
@@ -296,6 +327,22 @@ fn compare_entry(s: &Path, d: &Path, rel: &mut Vec<String>, stats: &mut Stats) -
         return compare_db(s, d, &rel.join("/"));
     }
     ensure!(sm.file_type() == dm.file_type(), "{}: different type", rel.join("/"));
+    ensure!(
+        sm.uid() == dm.uid() && sm.gid() == dm.gid(),
+        "{}: owner {}:{} differs from {}:{}",
+        rel.join("/"),
+        dm.uid(),
+        dm.gid(),
+        sm.uid(),
+        sm.gid()
+    );
+    ensure!(
+        sm.file_type().is_symlink() || sm.mode() & 0o7777 == dm.mode() & 0o7777,
+        "{}: mode {:o} differs from {:o}",
+        rel.join("/"),
+        dm.mode() & 0o7777,
+        sm.mode() & 0o7777
+    );
     if sm.is_dir() {
         compare_dir(s, d, rel, stats)
     } else if sm.file_type().is_symlink() {

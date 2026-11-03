@@ -21,6 +21,14 @@ if [ "$(uname -s)" = Darwin ]; then
     hdiutil create -size 1g -fs APFS -volname "LayrCopy$$" -type SPARSE -o "$T/dst" >/dev/null 2>&1 || exit 1
     D=$(attach_image "$T/dst.sparseimage") || exit 1
     MOUNTED="$D"
+elif [ -n "${LAYR_OVERLAYFS_TEST_ROOT:-}" ]; then
+    # OverlayFS: a second file system of the same type as the test root, mounted by this test.
+    type=$(findmnt -n -o FSTYPE -T "$T")
+    truncate -s 1G "$T/dst.img"
+    if [ "$type" = xfs ]; then mkfs.xfs -q -f "$T/dst.img"; else mkfs.ext4 -q -F "$T/dst.img"; fi
+    mkdir -p "$D"
+    mount -o loop "$T/dst.img" "$D" || exit 1
+    mount --make-private "$D" || exit 1
 else
     new_fs "$D" 2G
 fi
@@ -49,11 +57,12 @@ ok "the 50 MB cache is an overlay" l overlay list
 j() { python3 -c "import json,sys; print(json.load(sys.stdin)['$1'])"; }
 
 # A check that prints the output of its command when it fails.
-check() { # check <description> <command...>
+check() { # check <description> <command...>: the output is printed (CI logs keep the timings)
     local d=$1 out rc
     shift
     out=$("$@" 2>&1); rc=$?
-    if [ "$rc" -eq 0 ]; then PASS=$((PASS + 1)); echo "PASS $d"; else FAIL=$((FAIL + 1)); echo "FAIL $d"; echo "  output: $out"; fi
+    echo "  output: $out"
+    if [ "$rc" -eq 0 ]; then PASS=$((PASS + 1)); echo "PASS $d"; else FAIL=$((FAIL + 1)); echo "FAIL $d"; fi
 }
 
 # Refusals change nothing.
@@ -82,7 +91,14 @@ else
     echo "SKIP too little space (checked on macOS only)"
 fi
 
-# The copy and its verification.
+# Owners: a root copy keeps the owner and group of each file (the check needs root).
+OWNED=0
+if [ "$(id -u)" = 0 ]; then
+    OWNED=1
+    chown 1234:4321 $P/lines/w2/notes.txt
+fi
+
+# The copy and its verification (copy_project verifies the copy too).
 check "copy the project" "$LAYR" __project-copy $P $D/p
 no "the copy has no unfinished marker" test -e $D/p/.layr-copy-in-progress
 check "verify the copy" "$LAYR" __project-verify $P $D/p
@@ -95,6 +111,16 @@ NS=$(echo "$S" | j need); TS=$(echo "$S" | j total); NC=$(echo "$C" | j need)
 echo "space: source need $NS total $TS, copy need $NC"
 ok "the copy keeps the sharing (under 1.5x the source)" test "$NC" -le "$((NS * 3 / 2))"
 ok "the copy is far below a flattened copy" test "$((NC * 2))" -lt "$TS"
+
+if [ "$OWNED" = 1 ]; then
+    eq "the copy keeps the owner" "1234:4321" "$(stat -c %u:%g $D/p/lines/w2/notes.txt)"
+    chown 999:999 $D/p/lines/w2/notes.txt
+    no "a changed owner fails the verification" "$LAYR" __project-verify $P $D/p
+    chown 1234:4321 $D/p/lines/w2/notes.txt
+    ok "the restored owner verifies" "$LAYR" __project-verify $P $D/p
+else
+    echo "SKIP owners kept (needs root)"
+fi
 
 # A changed file makes the verification fail.
 cp $D/p/lines/w1/notes.txt $T/notes.good
