@@ -341,19 +341,89 @@ fn doomed(profile: &Path, live: &Live) -> Vec<PathBuf> {
         }
     }
     let inodes: BTreeSet<(u64, u64)> = kept.iter().filter_map(|p| ino(p)).collect();
-    for e in read_dir(&profile.join(INCREMENTAL)) {
-        let path = e.path();
-        let linked = is_dir(&path) && files_under(&path).iter().any(|f| ino(f).is_some_and(|i| inodes.contains(&i)));
-        let session = if linked { newest_session(&path) } else { None };
-        match session {
-            None => out.push(path),
-            Some(keep) => {
-                for x in read_dir(&path) {
-                    let n = name_of(&x);
-                    if n.strip_suffix(".lock").unwrap_or(&n) != keep {
-                        out.push(x.path());
-                    }
-                }
+    // A folder that no kept output links to is kept only for a live test binary, bin or example of its crate, and then
+    // only the newest of them, and only when no linked folder of that crate is a test binary, bin or example.
+    // Without this, an unlinked folder of each build (a unit built without debug info) would stay.
+    let exes = live_exe_crates(profile, live);
+    let folders: Vec<(PathBuf, bool)> = read_dir(&profile.join(INCREMENTAL))
+        .iter()
+        .map(|e| {
+            let path = e.path();
+            let linked = is_dir(&path) && files_under(&path).iter().any(|f| ino(f).is_some_and(|i| inodes.contains(&i)));
+            (path, linked)
+        })
+        .collect();
+    let exe_linked: BTreeSet<String> = folders
+        .iter()
+        .filter(|(path, linked)| *linked && newest_session(path).is_some() && !is_library_folder(path))
+        .filter_map(|(path, _)| crate_of_folder(path))
+        .collect();
+    let mut unlinked: BTreeMap<String, Vec<(SystemTime, PathBuf)>> = BTreeMap::new();
+    let mut to_prune: Vec<PathBuf> = Vec::new();
+    for (path, linked) in folders {
+        if linked {
+            to_prune.push(path);
+            continue;
+        }
+        match crate_of_folder(&path) {
+            Some(c) if is_dir(&path) && exes.contains(&c) && !exe_linked.contains(&c) => {
+                let t = path.metadata().and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
+                unlinked.entry(c).or_default().push((t, path));
+            }
+            _ => out.push(path),
+        }
+    }
+    for (_, mut folders) in unlinked {
+        folders.sort();
+        let (_, newest) = folders.pop().unwrap();
+        out.extend(folders.into_iter().map(|(_, p)| p));
+        to_prune.push(newest);
+    }
+    for path in to_prune {
+        prune_folder(path, &mut out);
+    }
+    out
+}
+
+/// Keeps the newest finalized session of an incremental folder, with its lock, and removes the rest.
+/// A folder without a finalized session goes whole.
+fn prune_folder(path: PathBuf, out: &mut Vec<PathBuf>) {
+    let Some(keep) = newest_session(&path) else {
+        out.push(path);
+        return;
+    };
+    // rustc names the lock of a finalized session by the session name without its hash (`s-<time>-<id>.lock`).
+    for x in read_dir(&path) {
+        let n = name_of(&x);
+        let lock_of_keep = n.strip_suffix(".lock").is_some_and(|stem| keep.starts_with(stem));
+        if n != keep && !lock_of_keep {
+            out.push(x.path());
+        }
+    }
+}
+
+/// The crate of an incremental folder: its name without the id (`lib_a-<id>` is `lib_a`).
+fn crate_of_folder(folder: &Path) -> Option<String> {
+    file_name(folder)?.rsplit_once('-').map(|(c, _)| c.to_string())
+}
+
+/// Whether the newest session of an incremental folder is a library's: a library session holds `metadata.rmeta`.
+fn is_library_folder(folder: &Path) -> bool {
+    newest_session(folder).is_some_and(|s| folder.join(s).join("metadata.rmeta").is_file())
+}
+
+/// Crate names of the live test binaries, bins and examples: `deps/<name>-<hash>` or `examples/<name>-<hash>` with no
+/// extension and a live hash. The crate name of a hashed file uses `_`, like its incremental folder.
+fn live_exe_crates(profile: &Path, live: &Live) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for folder in OUTPUT_FOLDERS {
+        for e in read_dir(&profile.join(folder)) {
+            let name = name_of(&e);
+            if name.contains('.') || !unit_hash(&name).is_some_and(|h| live.hashes.contains(h)) {
+                continue;
+            }
+            if let Some((c, _)) = name.rsplit_once('-') {
+                out.insert(c.replace('-', "_"));
             }
         }
     }
@@ -690,6 +760,44 @@ mod tests {
         sweep(&debug, &live, false);
         assert_eq!(names(&inc), BTreeSet::from(["lib_a-keep".to_string()]));
         assert_eq!(names(&inc.join("lib_a-keep")), BTreeSet::from(["s-1-aa-bb".to_string(), "s-1-aa-bb.lock".to_string()]));
+        std::fs::remove_dir_all(debug.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn incremental_session_keeps_the_lock_that_rustc_names_by_the_session_prefix() {
+        let (debug, live, _) = fake_debug("lock");
+        let inc = debug.join("incremental");
+        // rustc names the lock of a finalized session `s-<time>-<id>.lock`, and the session `s-<time>-<id>-<hash>`.
+        // Without the lock, the next build cannot reuse the object files of the session.
+        touch(&inc.join("lib_a-keep/s-1-aa-bb/x.o"), 3);
+        touch(&inc.join("lib_a-keep/s-1-aa.lock"), 0);
+        touch(&inc.join("lib_a-keep/s-0-zz.lock"), 0);
+        touch(&inc.join("lib_a-keep/s-0-zz-cc/x.o"), 3);
+        at(&inc.join("lib_a-keep/s-0-zz-cc"), 10);
+        at(&inc.join("lib_a-keep/s-1-aa-bb"), 20);
+        // The link of the kept folder: the library's metadata is hard-linked to its rmeta in deps.
+        std::fs::create_dir_all(debug.join("deps")).unwrap();
+        touch(&debug.join("deps/liblib_a-0123456789abcdef.rmeta"), 4);
+        std::fs::hard_link(debug.join("deps/liblib_a-0123456789abcdef.rmeta"), inc.join("lib_a-keep/s-1-aa-bb/metadata.rmeta"))
+            .unwrap();
+        sweep(&debug, &live, false);
+        assert_eq!(names(&inc.join("lib_a-keep")), BTreeSet::from(["s-1-aa-bb".to_string(), "s-1-aa.lock".to_string()]));
+        std::fs::remove_dir_all(debug.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn sweep_keeps_only_the_newest_unlinked_folder_of_a_live_exe_crate() {
+        let (debug, live, _) = fake_debug("exe");
+        let inc = debug.join("incremental");
+        // `app` is a live bin: its hashed output has no extension, so it names the crate.
+        touch(&debug.join(format!("deps/app-{H1}")), 3);
+        touch(&inc.join("app-old/s-1-aa/x.o"), 3);
+        touch(&inc.join("app-new/s-1-bb/x.o"), 3);
+        touch(&inc.join("other-cc/s-1-cc/x.o"), 3);
+        at(&inc.join("app-old"), 10);
+        at(&inc.join("app-new"), 20);
+        sweep(&debug, &live, false);
+        assert_eq!(names(&inc), BTreeSet::from(["app-new".to_string()]));
         std::fs::remove_dir_all(debug.parent().unwrap()).unwrap();
     }
 

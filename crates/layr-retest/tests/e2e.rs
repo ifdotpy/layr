@@ -1208,3 +1208,124 @@ fn sweep_keeps_the_incremental_folder_of_a_dylib_dev_dependency() {
     assert!(!err.contains("Compiling"), "the next build compiled:\n{err}");
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// Inode of each object file of the newest finalized session of `lib-a` (`incremental/lib_a-<id>/s-*`).
+fn newest_session_objects(debug: &Path) -> BTreeMap<String, u64> {
+    use std::os::unix::fs::MetadataExt;
+    let folder = std::fs::read_dir(debug.join("incremental"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("lib_a-")))
+        .unwrap();
+    let session = std::fs::read_dir(&folder)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| {
+            p.is_dir()
+                && p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with("s-") && !n.to_string_lossy().ends_with("-working"))
+        })
+        .max_by_key(|p| p.metadata().unwrap().modified().unwrap())
+        .unwrap();
+    std::fs::read_dir(session)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|x| x == "o"))
+        .map(|p| (p.file_name().unwrap().to_string_lossy().into_owned(), p.metadata().unwrap().ino()))
+        .collect()
+}
+
+/// A library with two modules and `debug = 0`: cargo keeps no object file in `deps`, so no file links the
+/// incremental session of the library to its unit. The sweep keeps that session, and the build after a change
+/// of one module reuses the object file of the other (the same inode in both sessions).
+#[test]
+fn sweep_keeps_the_incremental_session_of_a_library_without_debug_info() {
+    let tmp = std::env::temp_dir().canonicalize().unwrap().join(format!("layr-retest-sweep-nodebug-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let ws = tmp.join("ws");
+    std::fs::create_dir_all(ws.join("lib-a/src")).unwrap();
+    std::fs::write(
+        ws.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"lib-a\"]\nresolver = \"2\"\n\n[profile.dev]\ndebug = 0\n\n[workspace.metadata.layr-retest]\nsweep = [[\"build\", \"--workspace\", \"--lib\"]]\nenv = { CARGO_INCREMENTAL = \"1\", RUSTC_WRAPPER = \"\" }\n",
+    )
+    .unwrap();
+    std::fs::write(ws.join("lib-a/Cargo.toml"), "[package]\nname = \"lib-a\"\nversion = \"0.1.0\"\nedition = \"2021\"\n")
+        .unwrap();
+    std::fs::write(ws.join("lib-a/src/lib.rs"), "pub mod x;\npub mod y;\n").unwrap();
+    std::fs::write(ws.join("lib-a/src/x.rs"), "pub fn fx() -> i32 {\n    1\n}\n").unwrap();
+    std::fs::write(ws.join("lib-a/src/y.rs"), "pub fn fy() -> i32 {\n    2\n}\n").unwrap();
+    let (env, target) = ([("CARGO_INCREMENTAL", "1"), ("RUSTC_WRAPPER", "")], ws.join("target"));
+    let debug = target.join("debug");
+    let build = ["build", "--workspace", "--lib"];
+
+    cargo_in(&ws, &target, &env, &build);
+    let folders = entries(&debug, "incremental");
+    assert!(folders.iter().any(|f| f.starts_with("lib_a-")), "{folders:?}");
+    assert!(entries(&debug, "deps").iter().all(|n| !n.ends_with(".o")), "this test needs a build without object files in deps");
+    let before = newest_session_objects(&debug);
+
+    sweep_cmd(&ws, &[]);
+    assert_eq!(entries(&debug, "incremental"), folders, "the incremental session of a live library was removed");
+
+    std::fs::write(ws.join("lib-a/src/x.rs"), "pub fn fx() -> i32 {\n    1 + 0\n}\n").unwrap();
+    cargo_in(&ws, &target, &env, &build);
+    let after = newest_session_objects(&debug);
+    let reused = after.values().filter(|i| before.values().any(|j| j == *i)).count();
+    assert!(
+        reused >= 1,
+        "the build after the change reused no object file of the previous session:\nbefore {before:?}\nafter {after:?}"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// The test binary of `lib-a` built with `debug = 0`: no object file and no `metadata.rmeta` link it to its incremental
+/// folder. The sweep keeps the newest folder of the crate. After two changes and two sweeps one folder of the crate
+/// remains, and the next build reuses its object files.
+#[test]
+fn sweep_keeps_one_incremental_folder_of_a_test_binary_without_debug_info() {
+    let tmp = std::env::temp_dir().canonicalize().unwrap().join(format!("layr-retest-sweep-exe-nodebug-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let ws = tmp.join("ws");
+    std::fs::create_dir_all(ws.join("lib-a/src")).unwrap();
+    std::fs::write(
+        ws.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"lib-a\"]\nresolver = \"2\"\n\n[profile.dev]\ndebug = 0\n\n[workspace.metadata.layr-retest]\nsweep = [[\"build\", \"--workspace\", \"--tests\"]]\nenv = { CARGO_INCREMENTAL = \"1\", RUSTC_WRAPPER = \"\" }\n",
+    )
+    .unwrap();
+    std::fs::write(ws.join("lib-a/Cargo.toml"), "[package]\nname = \"lib-a\"\nversion = \"0.1.0\"\nedition = \"2021\"\n")
+        .unwrap();
+    std::fs::write(ws.join("lib-a/src/lib.rs"), "pub mod x;\npub mod y;\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {\n        assert_eq!(super::x::fx() + super::y::fy(), 3);\n    }\n}\n").unwrap();
+    std::fs::write(ws.join("lib-a/src/x.rs"), "pub fn fx() -> i32 {\n    1\n}\n").unwrap();
+    std::fs::write(ws.join("lib-a/src/y.rs"), "pub fn fy() -> i32 {\n    2\n}\n").unwrap();
+    let (env, target) = ([("CARGO_INCREMENTAL", "1"), ("RUSTC_WRAPPER", "")], ws.join("target"));
+    let debug = target.join("debug");
+    let build = ["build", "--workspace", "--tests"];
+    let crate_folders =
+        || -> BTreeSet<String> { entries(&debug, "incremental").into_iter().filter(|n| n.starts_with("lib_a-")).collect() };
+    let change_x =
+        |body: &str| std::fs::write(ws.join("lib-a/src/x.rs"), format!("pub fn fx() -> i32 {{\n    {body}\n}}\n")).unwrap();
+
+    cargo_in(&ws, &target, &env, &build);
+    assert_eq!(crate_folders().len(), 1, "{:?}", crate_folders());
+    sweep_cmd(&ws, &[]);
+    assert_eq!(crate_folders().len(), 1, "the incremental folder of the live test binary was removed");
+
+    change_x("1 + 0");
+    cargo_in(&ws, &target, &env, &build);
+    sweep_cmd(&ws, &[]);
+    change_x("1 + 0 + 0");
+    let before = newest_session_objects(&debug);
+    cargo_in(&ws, &target, &env, &build);
+    sweep_cmd(&ws, &[]);
+    assert_eq!(crate_folders().len(), 1, "two sweeps left {:?}", crate_folders());
+
+    change_x("1 + 0 + 0 + 0");
+    cargo_in(&ws, &target, &env, &build);
+    let after = newest_session_objects(&debug);
+    let reused = after.values().filter(|i| before.values().any(|j| j == *i)).count();
+    assert!(
+        reused >= 1,
+        "the build after the change reused no object file of the previous session:\nbefore {before:?}\nafter {after:?}"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
