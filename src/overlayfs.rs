@@ -1647,3 +1647,52 @@ pub fn space(path: &Path) -> Result<crate::fsutil::Space> {
 pub fn visit_space(path: &Path, f: &mut dyn FnMut(&crate::fsutil::Held)) -> Result<()> {
     crate::fsutil::fiemap_visit(path, f)
 }
+
+/// Bytes that a copy of `path` occupies on another file system: each distinct extent once.
+pub(crate) fn copy_need(path: &Path) -> Result<u64> {
+    let mut keys: std::collections::HashMap<u64, u64> = Default::default();
+    crate::fsutil::fiemap_visit(path, &mut |h| {
+        for &(key, size) in h.shared {
+            keys.entry(key).or_insert(size);
+        }
+    })?;
+    Ok(keys.values().sum())
+}
+
+/// Allocated bytes of `path` with shared data counted per file.
+pub(crate) fn copy_total(path: &Path) -> Result<u64> {
+    let mut total = 0u64;
+    crate::fsutil::fiemap_visit(path, &mut |h| total += h.alloc)?;
+    Ok(total)
+}
+
+/// Project copies on OverlayFS are not implemented yet: the layers must be copied with their
+/// mounts (`project_copy.rs`), and no flattened copy is made instead.
+pub(crate) struct Copier;
+
+impl Copier {
+    pub(crate) fn new(_src_root: &Path) -> Result<Copier> {
+        bail!("copying a project on OverlayFS is not implemented yet")
+    }
+    pub(crate) fn native_subvolume(&self, _path: &Path) -> bool {
+        false
+    }
+    pub(crate) fn shell_dir(&mut self, _src: &Path, _dst: &Path) -> Result<()> {
+        bail!("copying a project on OverlayFS is not implemented yet")
+    }
+    pub(crate) fn dir_close(&mut self, _src: &Path, _dst: &Path, _m: &fs::Metadata) -> Result<()> {
+        bail!("copying a project on OverlayFS is not implemented yet")
+    }
+    pub(crate) fn file(&mut self, _src: &Path, _dst: &Path, _m: &fs::Metadata) -> Result<()> {
+        bail!("copying a project on OverlayFS is not implemented yet")
+    }
+    pub(crate) fn symlink(&mut self, _src: &Path, _dst: &Path, _m: &fs::Metadata) -> Result<()> {
+        bail!("copying a project on OverlayFS is not implemented yet")
+    }
+    pub(crate) fn subvolume(&mut self, _src: &Path, _dst: &Path) -> Result<()> {
+        bail!("copying a project on OverlayFS is not implemented yet")
+    }
+    pub(crate) fn finish(self) -> Result<()> {
+        Ok(())
+    }
+}

@@ -82,6 +82,13 @@ jobs:
           LAYR_APFS_TEST_ROOT=/Volumes/LayrCase LAYR_TEST_DIRECT_MAIN=1 bash tests/run.sh t01-basic t02-merge t03-git
           LAYR_APFS_TEST_ROOT=/Volumes/LayrCase python3 tests/apfs-thin.py --binary "$LAYR" --root /Volumes/LayrCase
           sudo env LAYR="$LAYR" LAYR_APFS_TEST_ROOT="$LAYR_APFS_TEST_ROOT" LAYR_APFS_TEST_USER="$(whoami)" bash tests/apfs-service.sh
+      - name: Project copy test (APFS)
+        env:
+          LAYR_APFS_TEST_ROOT: /Volumes/LayrCI
+          LAYR_TRASH_BUDGET_MS: "2000"
+        run: |
+          export PATH="$(brew --prefix coreutils)/libexec/gnubin:$(brew --prefix gnu-sed)/libexec/gnubin:$PATH"
+          LAYR_TEST_DIRECT_MAIN=1 LAYR="$PWD/target/debug/layr" bash tests/run.sh t115-project-copy
       - name: Report APFS test failures
         if: failure()
         run: |
