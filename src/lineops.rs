@@ -70,6 +70,8 @@ pub(crate) struct PreparedLines {
     lines: Vec<Line>,
     tmps: Vec<PathBuf>,
     recs: Vec<Record>,
+    /// The line that the lines start from (its caches are taken at commit, see `commit_prepared_lines`).
+    source: Option<Line>,
 }
 
 impl Repo<'_> {
@@ -144,7 +146,6 @@ impl Repo<'_> {
                 };
                 self.put_layers(tmp, &layers, self.own(line))?;
                 self.prepare_at(line, start, tmp)?;
-                self.take_caches(ctx, line, start, source, tmp)?;
                 let mut rec = Record::new("line.create");
                 rec.data = serde_json::json!({"name": line.name, "start": start});
                 if !layers.is_empty() {
@@ -167,7 +168,7 @@ impl Repo<'_> {
             }
             Ok(recs)
         })();
-        let prepared = PreparedLines { start: start.to_string(), lines, tmps, recs: Vec::new() };
+        let prepared = PreparedLines { start: start.to_string(), lines, tmps, recs: Vec::new(), source: source.cloned() };
         match result {
             Ok(recs) => Ok(PreparedLines { recs, ..prepared }),
             Err(e) => {
@@ -191,13 +192,16 @@ impl Repo<'_> {
     /// state is still there, then moves each prepared folder into place and records the line.
     pub(crate) fn commit_prepared_lines(&self, ctx: &Ctx, prepared: PreparedLines) -> Result<Vec<Line>> {
         let _t = crate::trace::span("record lines");
-        let PreparedLines { start, lines, tmps, recs } = prepared;
+        let PreparedLines { start, lines, tmps, recs, source } = prepared;
         let result = (|| -> Result<()> {
             let names: Vec<String> = lines.iter().map(|l| l.name.clone()).collect();
             self.check_names_free(&names)?;
             self.source_state(&start)?;
             for ((line, tmp), rec) in lines.iter().zip(&tmps).zip(recs) {
                 crate::fsutil::rename_tree(tmp, self.working(line))?;
+                // The caches are taken in the folder's final place: a mount under a folder that is
+                // moved (OverlayFS MS_MOVE) does not follow the move.
+                self.take_caches(ctx, line, &start, source.as_ref(), &self.working(line))?;
                 self.commit_record(ctx, rec)?;
             }
             Ok(())
