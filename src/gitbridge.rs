@@ -2047,9 +2047,7 @@ pub fn sparse_pair(repo: &Repo, old: Option<&str>, new: &str) -> Result<Pair> {
     let data: BTreeMap<String, Vec<u8>> = ids.iter().cloned().zip(blobs(repo, &ids)?).collect();
     let mut keep = Vec::new();
     for _ in 0..2 {
-        let path = repo.p.scan_dir().join(crate::store::temp_name());
-        std::fs::create_dir_all(&path)?;
-        keep.push(crate::repo::Temp { path });
+        keep.push(crate::repo::Temp { path: scratch_folder(repo)? });
     }
     for (path, o, n) in &changes {
         for (side, dst) in [(o, &keep[0].path), (n, &keep[1].path)] {
@@ -2064,7 +2062,23 @@ pub fn sparse_pair(repo: &Repo, old: Option<&str>, new: &str) -> Result<Pair> {
             place_blob(dst, &side.mode, path, bytes, None, None)?;
         }
     }
+    // `btrfs send` sends read-only subvolumes only.
+    #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+    for k in &keep {
+        crate::storage::set_readonly(&k.path)?;
+    }
     Ok(Pair { old: crate::repo::snap(&keep[0].path), new: crate::repo::snap(&keep[1].path), keep })
+}
+
+/// An empty folder for one side of a sparse pair. On btrfs it is a subvolume: a comparison of two
+/// trees sends them (`btrfs send`), and that needs subvolumes.
+fn scratch_folder(repo: &Repo) -> Result<PathBuf> {
+    let path = repo.p.scan_dir().join(crate::store::temp_name());
+    #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+    crate::storage::create_subvolume(&path)?;
+    #[cfg(not(all(target_os = "linux", not(feature = "overlayfs"))))]
+    std::fs::create_dir_all(&path)?;
+    Ok(path)
 }
 
 /// One side of a raw diff record: the mode and the object id that git prints for it.

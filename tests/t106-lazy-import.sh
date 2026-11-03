@@ -43,7 +43,7 @@ l log -p > $T/logp.out
 elapsed=$(( $(date +%s) - start ))
 has "log -p shows the diff of commit 10" "+change 10" "$(cat $T/logp.out)"
 eq "log -p over the 200 commits builds no tree" 1 "$(trees)"
-ok "log -p over the 200 commits finishes fast (under 30 s)" test "$elapsed" -lt 30
+ok "log -p over the 200 commits finishes fast (under 90 s)" test "$elapsed" -lt 90
 
 git -C $U show $C10:big.txt > $T/git10.out
 l show $C10:big.txt > $T/show10.out

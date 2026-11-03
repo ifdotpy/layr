@@ -391,7 +391,10 @@ fn restore_one(
         let publish = (|| -> Result<()> {
             // Every backend gives the restored tree the identity of its signed state (a send names it).
             let transid = header.btrfs.as_ref().map_or(0, |i| i.transid);
-            crate::storage::mark_received(&destination, &state.subvol, transid)?;
+            // A tree that the source built from git has no signed UUID (`subvol` is empty): it gets a
+            // fresh one here, since no record names its snapshot.
+            let received = if state.subvol.is_empty() { crate::ids::new_id() } else { state.subvol.clone() };
+            crate::storage::mark_received(&destination, &received, transid)?;
             crate::storage::set_readonly(&destination)?;
             repo.p.db.set_present(&id, true)?;
             Ok(())
