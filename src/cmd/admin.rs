@@ -2390,7 +2390,7 @@ mod record_caches_tests {
         let mut rec = crate::model::Record::new("project");
         rec.data = serde_json::json!({"id": id, "name": "p", "config": {}});
         p.append(rec, &Actor { uid: 0, name: "root".into(), session: None })?;
-        let repo = Repo { p };
+        let repo = Repo { p, ctx: None };
         let work = dir.join("work");
         std::fs::create_dir_all(&work)?;
         crate::storage::create_subvolume(&work.join("a"))?;
