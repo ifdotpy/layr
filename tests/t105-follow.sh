@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos overlayfs
 # layr follow (docs/follow.md): a line keeps a remote branch. A pass fast-forwards main; unsaved
 # work skips it; a conflicting remote change leaves main unchanged and the error shows in
 # `layr follow`; the caches of a line that was squash-merged on the remote come to main; `--remove`

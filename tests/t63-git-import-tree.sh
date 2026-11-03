@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos-plain
 # An imported state is built from its parent state and the commit's changes. Its tree equals
 # `git ls-tree -r` of the commit for edits, mode changes, renames, deletes (also of whole
 # folders), file/folder swaps, links, submodules and merges, across layer chains that a short

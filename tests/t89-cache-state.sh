@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos overlayfs
 # A cache folder (regenerable, ignored) stays out of the states of its line: neither the save that
 # makes it a cache, nor an automatic save after a commit. On APFS a new folder is copied with one
 # clone, so a cache that is a nested layer must not come along with its content.

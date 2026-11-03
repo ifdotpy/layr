@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos overlayfs
 # `layr du`: the disk space of each line and the part that only that line holds, on every
 # backend (APFS private size, btrfs and XFS/ext4 shared extents, OverlayFS upper layers).
 . "$(dirname "$0")/lib.sh"

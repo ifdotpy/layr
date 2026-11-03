@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos
 # Merge in a git-backed project: files changed only on the fetched main are taken, a two-sided
 # conflict is listed, a merge never carries open conflict markers on, and a save refuses
 # conflict markers unless asked.

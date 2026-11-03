@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos apfs-case overlayfs
 # The remote bridge: clone, fetch, pull, push (one commit per task), a repeated push, a lost
 # response after the push, the .git folder for tools, a rejected push.
 . "$(dirname "$0")/lib.sh"

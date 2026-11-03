@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos
 # `layr gc` shares equal content between cache folders (docs/cache-overlays.md, "Deduplication"):
 # APFS clones whole files, btrfs shares blocks with FIDEDUPERANGE. One user, so it runs on
 # macOS and on Linux.

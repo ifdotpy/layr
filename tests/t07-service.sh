@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: overlayfs
 # The root service: users as clients, permissions of lines, states and the log,
 # review of an exact state with `layr try`, automatic states while processes run.
 . "$(dirname "$0")/lib.sh"

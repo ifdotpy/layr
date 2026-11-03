@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: overlayfs
 # A normal user runs `init --from` through the root daemon. The daemon reads the folder with the
 # user's rights and writes the store as root: the store folders are closed to the user.
 . "$(dirname "$0")/lib.sh"

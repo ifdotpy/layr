@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: overlayfs macos-plain
 # An imported history keeps its records; a tree is built from git when a command reads it
 # (docs/ownership.md, "States imported from Git"). A 200-commit history whose 1 MB file changes
 # in every commit costs about one tree on disk, not one per commit.

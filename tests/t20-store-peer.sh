@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos
 # A store restore retains the identity needed by incremental peer streams.
 . "$(dirname "$0")/lib.sh"
 set -e

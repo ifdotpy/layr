@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos overlayfs
 # The index (stage) keeps staged content:
 # 1. a reading command never deletes an index that looks stale (another command may have
 #    written it for a newer head), 2. `rm` refuses a staged version that differs from both the

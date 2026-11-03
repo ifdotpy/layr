@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos apfs-case overlayfs
 # The merge engine through `layr merge`: tree cases, text merge, conflicts, drivers, block
 # merge, fast-forward, squash, --expect, cherry-pick, revert, rebase.
 . "$(dirname "$0")/lib.sh"
