@@ -355,12 +355,6 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
     if !undoable(&r) {
         return Err(exit(1, format!("error: operation '{}' has nothing to undo", operation_name(&r.op))));
     }
-<<<<<<< head
-    if r.op == "save" {
-        return undo_save(ctx, repo, &r, force);
-    }
-||||||| base
-=======
     // An operation with lines is undoable while its undo entry is in the undo.ops ring of its
     // lines (docs/ownership.md). Past the ring, its states may be freed: say so, do not guess.
     let ord = crate::owners::record_ord(&r);
@@ -385,7 +379,9 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
     let named: Vec<String> = crate::owners::undo_entries(&r, &crate::owners::record_ord(&r)).into_iter().flat_map(|(_, v)| v).collect();
     let named: Vec<&str> = named.iter().map(String::as_str).collect();
     repo.hold(repo.pin(&named)?);
->>>>>>> origin/main
+    if r.op == "save" {
+        return undo_save(ctx, repo, &r, force);
+    }
     // Permissions: undo changes every line the operation changed, so the caller must be allowed
     // to change each of them. An operation without lines (tags, groups) needs the admin or the
     // user who made it.
