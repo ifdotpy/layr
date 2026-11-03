@@ -1,7 +1,7 @@
 //! Metadata operations for the portable send-stream implementation.
 #[cfg(target_os = "macos")]
 pub use crate::sys::{
-    apfs_attribute as attribute, apfs_clear_acl as clear_acl, apfs_has_acl as has_acl, apfs_mtime as mtime,
+    apfs_attribute as attribute, apfs_has_acl as has_acl, apfs_mtime as mtime,
     apfs_publish as publish, apfs_remove_attribute as remove_attribute, apfs_xattrs as xattrs,
 };
 #[cfg(feature = "overlayfs")]
