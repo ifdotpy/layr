@@ -663,6 +663,17 @@ fn sweep_workspace(dir: &Path, sweep: &str) {
     std::fs::write(dir.join("app/src/main.rs"), "fn main() {\n    println!(\"{}\", lib_a::a());\n}\n").unwrap();
 }
 
+/// Finalized incremental sessions of each incremental folder of a profile folder (`s-*`, not a lock or a working folder).
+fn sessions_per_folder(debug: &Path) -> BTreeMap<String, usize> {
+    entries(debug, "incremental")
+        .into_iter()
+        .map(|f| {
+            let n = entries(&debug.join("incremental"), &f).into_iter().filter(|e| e.starts_with("s-") && !e.ends_with(".lock") && !e.ends_with("-working")).count();
+            (f, n)
+        })
+        .collect()
+}
+
 /// Hard-link counts and inode numbers of the files under `dir`, for a failure message.
 fn link_table(dir: &Path) -> String {
     use std::os::unix::fs::MetadataExt;
@@ -748,9 +759,10 @@ fn sweep_removes_the_units_that_no_standard_command_uses() {
     assert!(err.contains("would free"), "{err}");
     assert_eq!(entries(&debug, "deps"), before);
 
-    // Before the sweep, the changed unit has object files of two builds.
+    // Before the sweep, the changed unit has object files of two builds: in `deps` (macOS, split debug info
+    // `unpacked`), or as two finalized incremental sessions of its folder (Linux, `off`: no object file in `deps`).
     assert!(
-        object_builds(&debug).values().any(|b| b.len() > 1),
+        object_builds(&debug).values().any(|b| b.len() > 1) || sessions_per_folder(&debug).values().any(|n| *n > 1),
         "{:?}\ndeps: {:?}\nincremental: {:?}",
         object_builds(&debug),
         entries(&debug, "deps"),
@@ -764,6 +776,7 @@ fn sweep_removes_the_units_that_no_standard_command_uses() {
     // The one exception: a live unit keeps only the object files of its newest build.
     let builds = object_builds(&debug);
     assert!(builds.values().all(|b| b.len() == 1), "{builds:?}");
+    assert!(sessions_per_folder(&debug).values().all(|n| *n <= 1), "{:?}", sessions_per_folder(&debug));
 
     let err = cargo(&ws, &build);
     assert!(!err.contains("Compiling"), "the next build compiled:\n{err}");
