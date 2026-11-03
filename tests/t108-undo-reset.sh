@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos overlayfs
 # Undo refreshes the .git folder of a line with its restored head: after undo of a pick and then of
 # a reset, the line's .git/HEAD is the git commit of the restored head, the files and the status
 # are the restored ones, and a later merge does not refuse with the .git/HEAD hint. The undo of

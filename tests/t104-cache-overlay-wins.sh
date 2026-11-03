@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: overlayfs macos-plain
 # A new line takes the newest cache overlay state, also when an older cache of the state
 # (`states/<id>@<folder>`, the mechanism before cache overlays) is there: protected main saves its
 # caches twice at the same head; the state keeps its first cache, the overlay gets the second.

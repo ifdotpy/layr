@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos
 # `layr add one-file` in a tree of 5000 files scans and compares only that path (and the ignore
 # files above it), and it keeps deletes, type changes and moves right. A rewrite with equal
 # bytes is no change. LAYR_TRACE reports the entries a path scan visited.

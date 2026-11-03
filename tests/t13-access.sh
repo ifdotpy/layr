@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: overlayfs
 # Who may do what (docs/design.md, section 3): roles, deny rules, owners of lines, protected
 # lines with checks on the merge result; configured commands run as the caller; push keeps the
 # history.

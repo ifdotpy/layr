@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.20.0](https://github.com/ifdotpy/layr/compare/v0.19.1...v0.20.0) (2026-11-03)
+
+
+### Features
+
+* **overlay:** Remove a cache overlay; list and repair agree on lines without its cache path ([#168](https://github.com/ifdotpy/layr/issues/168)) ([776d9ca](https://github.com/ifdotpy/layr/commit/776d9ca4af9e746a70e53d50885d7710bb8b7ae4))
+* **store:** Volumes: place projects on several file systems ([#176](https://github.com/ifdotpy/layr/issues/176)) ([b49c711](https://github.com/ifdotpy/layr/commit/b49c71133ca286cf2eee3ed72aa085130f44478b))
+
+
+### Bug Fixes
+
+* **cache:** keep regenerable folders out of states without save --caches ([#178](https://github.com/ifdotpy/layr/issues/178)) ([a930bc0](https://github.com/ifdotpy/layr/commit/a930bc09a832103f54a06888cb9974fcb6d6f155))
+* **save:** Save every cache that --cache names ([#175](https://github.com/ifdotpy/layr/issues/175)) ([f424905](https://github.com/ifdotpy/layr/commit/f424905ded7b28d7384ba366ef31f6b5d8a0ee2a))
+
+
+### Performance
+
+* Pick only the changed paths; reset to an equal tree moves only the head ([#172](https://github.com/ifdotpy/layr/issues/172)) ([c25f574](https://github.com/ifdotpy/layr/commit/c25f5742c49301ae8de7d1146e52873a56479d81))
+
 ## [0.19.1](https://github.com/ifdotpy/layr/compare/v0.19.0...v0.19.1) (2026-11-03)
 
 

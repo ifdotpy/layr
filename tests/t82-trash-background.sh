@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos overlayfs
 # The trash is emptied by a background process after a command: the command does not wait for
 # the deletion, the trash still goes away, and gc empties it at once.
 . "$(dirname "$0")/lib.sh"

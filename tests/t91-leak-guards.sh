@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos overlayfs
 # Failure paths leave no temporary data: a cache copy that fails (save --caches), a forced save,
 # a trash entry that cannot be deleted, saved scans of every gc path, a stray cache snapshot
 # (fsck), and a temporary clone of a dead dedup run.

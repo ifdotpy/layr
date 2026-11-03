@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos overlayfs
 # Eviction keeps a state whose tree the store format cannot restore exactly, such as one with an
 # extended attribute. A plain state is still evicted. (Hard links and empty folders do not reach a
 # state through save on APFS; `format_gap_tests` in src/store_remote/writer.rs covers them.)

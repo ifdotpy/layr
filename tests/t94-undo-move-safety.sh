@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos overlayfs
 # Undo loads every state it needs before it changes a file: a state that a store remote holds
 # comes back from it, and a state that cannot load stops the undo with the files unchanged.
 # A failed `line move` leaves the line at its old path with its unsaved work, and the store index

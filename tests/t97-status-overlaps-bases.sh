@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos overlayfs
 # `layr status` compares our live folder once per call, not once per merge base. Each base gets
 # the saved compare of the base and our head, combined with one live compare of our head. The
 # overlaps equal the direct compare: the rows below are the 0.13.1 output. LAYR_OLD=<0.13.1 binary>

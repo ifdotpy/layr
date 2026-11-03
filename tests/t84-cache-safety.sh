@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos overlayfs
 # A folder becomes a cache by a copy (save --caches, overlay repair). The copy never deletes a
 # folder it did not make, and never copies a name that is not UTF-8 wrongly.
 . "$(dirname "$0")/lib.sh"

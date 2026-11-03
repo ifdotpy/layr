@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos overlayfs
 # An automatic save is an operation that `undo` reverses: the newest record of the line is undone
 # first. The working folder goes back to the state the save changed from; the head and the earlier
 # pick stay. A second undo undoes that undo (the save comes back), as for every operation. A pick

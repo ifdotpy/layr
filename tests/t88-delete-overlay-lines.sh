@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos overlayfs
 # A deleted line takes its cache overlay lines with it: gc and fsck then find no leftover head.
 # A save that cannot write its snapshot leaves no record and no snapshot.
 . "$(dirname "$0")/lib.sh"

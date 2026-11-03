@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos overlayfs
 # `layr pick` writes only the paths of the change, and `layr reset --hard` to a state with the tree
 # of the head moves only the head. Results stay exact: a pick that edits, adds, deletes and renames
 # files gives the tree of the change; a pick that conflicts still conflicts; an equal-tree reset

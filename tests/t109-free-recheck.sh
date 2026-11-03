@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos overlayfs
 # The free step checks and moves a queued state under the project lock (docs/ownership.md, "When a
 # state is freed"). A state queued for freeing that another command re-owns before the free step
 # keeps its storage. Test hook: LAYR_TEST_FREE_PAUSE_MS pauses the free step of the first command

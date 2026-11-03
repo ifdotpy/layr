@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos overlayfs
 # Eviction: gc removes the tree of a state that a store remote holds and keeps its record. The
 # next command that reads the tree fetches it back. Offline, the command names the remote that
 # holds it. A base of a line's layer chain and a state with unsaved work stay on disk.
