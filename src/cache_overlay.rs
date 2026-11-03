@@ -65,6 +65,17 @@ pub fn tree_size(root: &Path) -> u64 {
     total
 }
 
+/// What a folder of a folder overlay is in one line (`FolderIn` in `Repo::folder_kind`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FolderIn {
+    /// A cache path with no versioned files in the head: the overlay's cache applies.
+    Cache,
+    /// A cache path whose folder holds versioned files in the head: no cache.
+    Versioned,
+    /// Not a cache path of the line.
+    Other,
+}
+
 /// Where a line takes caches from.
 pub enum Source<'s> {
     Line(&'s Line),
@@ -127,6 +138,85 @@ impl<'a> Repo<'a> {
         Ok(self.folder_overlays()?.into_iter().find(|(_, f)| f == folder).map(|(n, _)| n))
     }
 
+    /// Whether `folder` is a cache path of the working folder `w`: the machine setting names it, or
+    /// a `.layrattributes` file marks it regenerable and the ignore rules ignore it. The folder may
+    /// be absent (docs/cache-overlays.md, section 3).
+    pub fn is_cache_path(&self, folder: &str, w: &Path) -> bool {
+        self.p.config_strings("regenerable").iter().any(|p| p == folder)
+            || (Rules::attribute(w, "regenerable").ignored(folder, true) && Rules::new(w).ignored(folder, true))
+    }
+
+    /// Whether folder overlay `name` takes part in the working folder `w`. A cache overlay only
+    /// where its folder is a cache path of the line; other folder overlays always do.
+    pub fn applies_in(&self, name: &str, folder: &str, w: &Path) -> Result<bool> {
+        let cache = self.overlay_setting(name, "cache")?.and_then(|v| v.as_bool()).unwrap_or(false);
+        Ok(!cache || self.is_cache_path(folder, w))
+    }
+
+    /// What `folder` is in `line`: a cache path, a cache path that holds versioned files in the head
+    /// (not a cache), or no cache path of the line.
+    pub fn folder_kind(&self, line: &Line, folder: &str) -> Result<FolderIn> {
+        if !self.is_cache_path(folder, &self.working(line)) {
+            return Ok(FolderIn::Other);
+        }
+        let head = self.state_root(&line.head)?;
+        Ok(if crate::repo::holds_files(&head, folder) { FolderIn::Versioned } else { FolderIn::Cache })
+    }
+
+    /// The cache overlays that `overlay remove` removed and that gc has not freed yet, with their
+    /// empty first state. The setting `overlay.<name>.removed` holds that state's id as a string.
+    pub fn removed_overlays(&self) -> Result<Vec<(String, String)>> {
+        let mut out = BTreeSet::new();
+        if self.p.is_overlay() {
+            return Ok(Vec::new());
+        }
+        for (key, value) in self.p.db.config_all()? {
+            let base = key.split('@').next().unwrap_or("");
+            if let Some(name) = base.strip_prefix("overlay.").and_then(|s| s.strip_suffix(".removed")) {
+                let root: String = serde_json::from_str(&value)?;
+                out.insert((name.to_string(), root));
+            }
+        }
+        Ok(out.into_iter().collect())
+    }
+
+    /// Free the states of a removed cache overlay: no line of it is kept, so its states go, except
+    /// its empty first state. Like the states of a deleted line, they go at gc (docs/cache-overlays.md).
+    /// The caller holds the project lock.
+    fn free_removed_overlay(&self, ctx: &Ctx, name: &str, root: &str) -> Result<()> {
+        if !self.p.store.project_dir(&format!("{}%{name}", self.p.name))?.exists() {
+            return Ok(());
+        }
+        let orepo = self.overlay_repo(name)?;
+        let _lock = orepo.p.lock()?;
+        for ol in orepo.p.db.lines()? {
+            let mut rec = Record::new("line.delete");
+            rec.lines.insert(
+                ol.id.clone(),
+                LineChange {
+                    before: Some(orepo.line_state(&ol, &ol.head)),
+                    after: None,
+                    working_before: None,
+                    working_after: None,
+                },
+            );
+            rec.data = serde_json::json!({"name": ol.name});
+            orepo.commit_record(ctx, rec)?;
+        }
+        let mut deleted = Vec::new();
+        for (id, _) in orepo.p.db.present_states()? {
+            if id != root && orepo.p.delete_state(&id)? {
+                deleted.push(id);
+            }
+        }
+        if !deleted.is_empty() {
+            let mut rec = Record::new("gc");
+            rec.data = serde_json::json!({"deleted": deleted, "overlay": name, "removed": true});
+            orepo.commit_record(ctx, rec)?;
+        }
+        Ok(())
+    }
+
     /// Delete the cache overlay lines (`line-<id>`) of deleted project lines: a deleted line keeps
     /// no caches (docs/cache-overlays.md). Their states go at the next `gc`. Returns the overlay
     /// and the line name of each deleted overlay line. The caller holds the project lock.
@@ -134,6 +224,9 @@ impl<'a> Repo<'a> {
         let mut out = Vec::new();
         if self.p.is_overlay() {
             return Ok(out);
+        }
+        for (name, root) in self.removed_overlays()? {
+            self.free_removed_overlay(ctx, &name, &root)?;
         }
         for name in self.overlay_names()? {
             if !self.overlay_setting(&name, "cache")?.and_then(|v| v.as_bool()).unwrap_or(false) {
@@ -399,7 +492,6 @@ impl<'a> Repo<'a> {
         self.hold(self.pin(&held)?);
         let ignored = Rules::new(w);
         let (uid, gid) = self.owner_ids(line);
-        let (regenerable, setting) = (Rules::attribute(w, "regenerable"), self.p.config_strings("regenerable"));
         for (name, folder) in self.folder_overlays()? {
             // Versioned files win: a folder that the start state holds files in comes from the
             // state. Otherwise the cache below replaces what the folder holds now: an old cache
@@ -408,10 +500,7 @@ impl<'a> Repo<'a> {
             if !ignored.ignored(&folder, true) || crate::repo::holds_files(&self.state_root(start)?, &folder) {
                 continue;
             }
-            // A cache overlay only while the folder is a cache path of the new line (its
-            // `.layrattributes` still marks it, or the machine setting names it).
-            let is_cache = self.overlay_setting(&name, "cache")?.and_then(|v| v.as_bool()).unwrap_or(false);
-            if is_cache && !setting.contains(&folder) && !regenerable.ignored(&folder, true) {
+            if !self.applies_in(&name, &folder, w)? {
                 continue;
             }
             let from = match source {
@@ -457,7 +546,7 @@ impl<'a> Repo<'a> {
         let own = self.own(line);
         let shared = self.policy().rule_for(&line.name).is_some();
         for (name, folder) in self.folder_overlays()? {
-            if skip.contains(&folder) {
+            if skip.contains(&folder) || !self.applies_in(&name, &folder, &w)? {
                 continue;
             }
             let key = self.cache_key(&name, &w)?;
@@ -531,6 +620,9 @@ impl<'a> Repo<'a> {
             let Some(limit) = self.overlay_props(&name)?.gc_lru else { continue };
             for line in self.lines()? {
                 let w = self.working(&line);
+                if !self.applies_in(&name, &folder, &w)? {
+                    continue;
+                }
                 let Ok(cp) = fsutil::safe_join(&w, &folder) else { continue };
                 if !btrfs::is_subvolume(&cp) {
                     continue;

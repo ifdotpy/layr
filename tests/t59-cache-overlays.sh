@@ -116,7 +116,8 @@ cd $P/rel
 rm -rf target; mkdir -p target/debug; echo tool > target/debug/x
 eq "overlay repair makes the plain folder a cache again" "target: a cache again" "$(l overlay repair cache.target)"
 eq "and keeps its files" "tool" "$(cat target/debug/x)"
-has "repair of a folder that is no cache path fails" "is no cache path" "$(l overlay repair deps 2>&1 || true)"
+ok "repair of a folder that is no cache path exits 0" l overlay repair deps
+has "repair of a folder that is no cache path is a no-op with its reason" "not a cache path in this line" "$(l overlay repair deps 2>&1)"
 cd $P/main
 
 # 9. A protected line takes caches only with a merge that met its protection.
