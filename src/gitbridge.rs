@@ -817,6 +817,35 @@ fn stored_commit(repo: &Repo, state: &str) -> Result<Option<String>> {
     Ok(None)
 }
 
+/// The states of `states` that `build_tree` can build (`buildable`), checked with one `git cat-file`
+/// process for all of them: one process per state took minutes on a long imported history.
+pub fn buildable_set(repo: &Repo, states: &[String]) -> Result<BTreeSet<String>> {
+    let mut out = BTreeSet::new();
+    if states.is_empty() || !has_store(repo) {
+        return Ok(out);
+    }
+    let mut cat: Option<CatFile> = None;
+    for state in states {
+        let imported = matches!(repo.p.db.state(state), Ok(Some(s)) if s.kind == StateKind::Import);
+        if !imported || !repo.p.db.has_git_import(state).unwrap_or(false) {
+            continue;
+        }
+        let squash = repo.p.db.squash_commits_of(state)?;
+        for c in repo.p.db.git_commits_of(state)?.into_iter().filter(|c| !squash.contains(c)) {
+            let cat = match &mut cat {
+                Some(c) => c,
+                None => cat.insert(CatFile::new(&store(repo))?),
+            };
+            // A missing object answers "<oid> missing" and the process stays usable.
+            if cat.object(&c, "commit").is_ok() {
+                out.insert(state.clone());
+                break;
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// True when `state` is an imported state that `build_tree` can build: its record holds the Git
 /// objects, and the store holds its commit.
 pub fn buildable(repo: &Repo, state: &str) -> bool {
