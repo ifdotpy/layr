@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.18.1](https://github.com/ifdotpy/layr/compare/v0.18.0...v0.18.1) (2026-11-03)
+
+
+### Bug Fixes
+
+* **build:** Take the build identity from the environment, never from .git ([#159](https://github.com/ifdotpy/layr/issues/159)) ([76c1fd6](https://github.com/ifdotpy/layr/commit/76c1fd6e52b94e300f58bcf44a1cbc9733865e41))
+* **undo:** Point the line's .git at the restored head ([#163](https://github.com/ifdotpy/layr/issues/163)) ([7dddfd7](https://github.com/ifdotpy/layr/commit/7dddfd721c0d715b1414caf3f6c05c36b750721c))
+
 ## [0.18.0](https://github.com/ifdotpy/layr/compare/v0.17.0...v0.18.0) (2026-11-03)
 
 
