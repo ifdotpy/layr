@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.19.0](https://github.com/ifdotpy/layr/compare/v0.18.1...v0.19.0) (2026-11-03)
+
+
+### ⚠ BREAKING CHANGES
+
+* **gc:** Free states when their last owner goes ([#135](https://github.com/ifdotpy/layr/issues/135))
+
+### Features
+
+* **gc:** Free states when their last owner goes ([#135](https://github.com/ifdotpy/layr/issues/135)) ([5d611f7](https://github.com/ifdotpy/layr/commit/5d611f718bc5f84903eb3006901cea5bdbf578ce))
+
+
+### Bug Fixes
+
+* **git:** Keep imported history as records and build trees from git on read ([#157](https://github.com/ifdotpy/layr/issues/157)) ([854aa70](https://github.com/ifdotpy/layr/commit/854aa7069ebefa2dc428bbba71d5e4f00eea781a))
+
 ## [0.18.1](https://github.com/ifdotpy/layr/compare/v0.18.0...v0.18.1) (2026-11-03)
 
 
