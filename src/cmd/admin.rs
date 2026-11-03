@@ -1303,6 +1303,15 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
     h.repo.require(ctx, "gc")?;
     let code = if a.has("--repair") {
         repair_project(ctx, &h.repo, a.has("-n"), a.has("-q"), true)?;
+        // Trees of imported states that no strong owner keeps: git builds them again on read.
+        let built = repair_built(&h.repo, a.has("-n"))?;
+        if !a.has("-q") {
+            let verb = if a.has("-n") { "would free" } else { "freed" };
+            outln!(ctx, "{verb} {} built Git state(s) (rebuilt on read)", built.len());
+            for id in built.iter().take(50) {
+                outln!(ctx, "\t{}", ids::short(id));
+            }
+        }
         0
     } else {
         check(ctx, &h.repo, a.has("-q"))?
@@ -1317,6 +1326,65 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     print_trash_errors(&ctx.store);
     Ok(code)
+}
+
+/// Owner kinds that keep the tree of a state (docs/ownership.md, "Storage that a live state
+/// needs"). `parent`, `derived`, `ref`, `tag`, `remote-ref` and `export` keep only the record.
+/// `conflict` is kept too: a conflict needs the trees of its base, ours and theirs.
+const TREE_OWNERS: [&str; 8] = ["head", "auto", "undo", "deleted", "park", "overlay", "pin", "conflict"];
+
+/// `gc --repair`: frees the trees of imported states that no owner keeps, and that git can build
+/// again (`gitbridge::build_tree`). A dry run lists them and frees nothing.
+fn repair_built(repo: &Repo, dry: bool) -> Result<Vec<String>> {
+    let _lock = (!dry).then(|| repo.p.lock()).transpose()?;
+    let freed = drop_built_imports(repo, dry)?;
+    if !dry && !freed.is_empty() {
+        repo.prune_all_bases()?;
+    }
+    Ok(freed)
+}
+
+/// Rounds of freeing: a round frees the states that no owner keeps and no present layer uses as
+/// its base. A base is freed in a later round, after its layers went.
+fn drop_built_imports(repo: &Repo, dry: bool) -> Result<Vec<String>> {
+    let mut freed = Vec::new();
+    loop {
+        let kept: BTreeSet<String> = repo
+            .p
+            .db
+            .owner_rows()?
+            .into_iter()
+            .filter(|(_, kind, _)| TREE_OWNERS.contains(&kind.as_str()))
+            .map(|(state, _, _)| state)
+            .collect();
+        let bases: BTreeSet<String> = repo.p.db.present_layer_bases()?.into_iter().collect();
+        let mut round = Vec::new();
+        for (id, _) in repo.p.db.present_states()? {
+            if !kept.contains(&id) && !bases.contains(&id) && crate::gitbridge::buildable(repo, &id) {
+                round.push(id);
+            }
+        }
+        if round.is_empty() {
+            break;
+        }
+        if dry {
+            freed.extend(round);
+            break;
+        }
+        repo.p.delete_states(&round);
+        let mut gone = Vec::new();
+        for id in round {
+            if !repo.p.has_state(&id) {
+                repo.p.db.set_present(&id, false)?;
+                gone.push(id);
+            }
+        }
+        if gone.is_empty() {
+            break;
+        }
+        freed.extend(gone);
+    }
+    Ok(freed)
 }
 
 /// Print the trash entries that the last emptying could not delete (`<store>/trash.errors`).
@@ -1700,7 +1768,9 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 .find(|(b, _)| b == &format!("origin/{branch}") || b.ends_with(&format!("/{branch}")))
                 .map(|x| x.1.clone());
             let state = state.ok_or_else(|| exit(128, format!("fatal: remote has no branch '{branch}'")))?;
-            let (st, _) = crate::gitbridge::import_commit(ctx, &repo, &state, &format!("origin/{branch}"), owner, None)?;
+            let (st, _) = crate::gitbridge::import_commit(ctx, &repo, &state, &format!("origin/{branch}"), owner)?;
+            // The line starts at this commit: its tree is built now (the others are built on read).
+            crate::gitbridge::build_tree(&repo, &st, None)?;
             drop(cleanup);
             return finish(st);
         }
@@ -1743,8 +1813,9 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
                     let _t2 = crate::repo::Temp { path: tmp.clone() };
                     copy_folder(ctx, &src, &tmp, a.has("--include-ignored"), Some(&tracked))?;
                     let snap = repo.temp_snapshot(&tmp, true)?;
-                    let (st, _) =
-                        crate::gitbridge::import_commit(ctx, &repo, &head, &format!("local/{branch}"), owner, Some(&snap.path))?;
+                    let (st, _) = crate::gitbridge::import_commit(ctx, &repo, &head, &format!("local/{branch}"), owner)?;
+                    // The line starts at the HEAD commit: its tree is built now, from the folder copy.
+                    crate::gitbridge::build_tree(&repo, &st, Some(&snap.path))?;
                     parents.push(st.clone());
                     // The folder content on top (unsaved changes, if any).
                     btrfs::delete_tree(&work)?;

@@ -193,6 +193,11 @@ expired refs and dead pins, trims cache snapshots beyond `retention.caches`, and
 trash. `gc -n --repair` prints what it would free. `fsck` runs the same check, and
 `fsck --repair` rebuilds the table. `gc --dedup` shares identical cache files and is unchanged.
 
+`gc --repair` also frees the trees of imported states that no line head, park entry, overlay, undo
+record or auto state needs, and that git builds again. The record stays; the next read builds the
+tree (`docs/ownership.md`, "States imported from Git"). `gc -n --repair` lists them. A plain `gc`
+only checks.
+
 Keys that keep states (count rings, `layr config <key> <n>`):
 
 | key | default | keeps |
@@ -220,6 +225,10 @@ Test only (tests/t99-ownership-free.sh): `LAYR_TEST_EXIT_AFTER_COMMIT=1` exits w
 after a commit that queued states, before the free step. Test only (tests/t100-pin-reads.sh):
 `LAYR_TEST_PIN_HOLD_MS=<ms>` sleeps once per process after its pins are taken. Neither is for use
 otherwise.
+
+Reads of imported states (`log -p`, `log <path>`, `show`, `diff`, `blame`, `grep <rev>`) take the
+bytes from Git and build no tree. `line new`, `try`, `bisect run` and `reset --hard` build the tree
+they need (`docs/ownership.md`, "States imported from Git").
 
 Revisions: `head`, `@`, `head~2`, `head^2`, line names, `line@machine`, tags, `origin/main`,
 state id prefixes, git commit ids (full or a prefix of at least 4 digits), `park@{n}`, `head@{n}`
