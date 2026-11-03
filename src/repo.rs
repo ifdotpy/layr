@@ -1080,10 +1080,12 @@ impl<'a> Repo<'a> {
                 }
             };
             st.running = running || crate::fsutil::take_unsettled();
+            // The working content the save changes from: undo of the save goes back to it.
+            let before = self.recorded_working(line)?;
             let mut rec = Record::new("save");
             rec.states.extend(earlier);
             rec.states.push(st.clone());
-            rec.data = serde_json::json!({"line": line.id});
+            rec.data = serde_json::json!({"line": line.id, "head": line.head, "working_before": before, "working_after": st.id});
             self.commit_record(ctx, rec)?;
             return Ok(Some(st));
         }
@@ -1102,11 +1104,31 @@ impl<'a> Repo<'a> {
                 return Ok(None);
             }
         }
+        // The working content the save changes from: undo of the save goes back to it.
+        let before = self.recorded_working(line)?;
         let mut rec = Record::new("save");
         rec.states.push(st.clone());
-        rec.data = serde_json::json!({"line": line.id});
+        rec.data = serde_json::json!({"line": line.id, "head": line.head, "working_before": before, "working_after": st.id});
         self.commit_record(ctx, rec)?;
         Ok(Some(st))
+    }
+
+    /// The working content that the newest record of `line` left in the working folder: the state
+    /// of an automatic save, the working state of a record, else the head. Undo of a save reverts
+    /// its changes to this content. Reads at most 50 records, newest first.
+    pub fn recorded_working(&self, line: &Line) -> Result<String> {
+        for r in self.p.db.records_naming(&line.id, 50)? {
+            if let Some(ch) = r.lines.get(&line.id) {
+                let head = ch.after.as_ref().map(|s| s.head.clone());
+                return Ok(ch.working_after.clone().or(head).unwrap_or_else(|| line.head.clone()));
+            }
+            if r.op == "save" && r.data["line"].as_str() == Some(line.id.as_str()) {
+                if let Some(w) = r.data["working_after"].as_str() {
+                    return Ok(w.to_string());
+                }
+            }
+        }
+        Ok(line.head.clone())
     }
 
     /// The state that `save --caches` gives a line's caches to: on a protected line with no
@@ -1140,7 +1162,8 @@ impl<'a> Repo<'a> {
         st.running = running;
         let mut rec = Record::new("save");
         rec.states.push(st.clone());
-        rec.data = serde_json::json!({"line": line.id});
+        // The working state this record leaves: the next save of the line changes from it.
+        rec.data = serde_json::json!({"line": line.id, "working_after": st.id});
         self.commit_record(ctx, rec)?;
         Ok(st)
     }
