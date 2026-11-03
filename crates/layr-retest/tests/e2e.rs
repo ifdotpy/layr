@@ -730,7 +730,13 @@ fn sweep_removes_the_units_that_no_standard_command_uses() {
     assert_eq!(entries(&debug, "deps"), before);
 
     // Before the sweep, the changed unit has object files of two builds.
-    assert!(object_builds(&debug).values().any(|b| b.len() > 1), "{:?}", object_builds(&debug));
+    assert!(
+        object_builds(&debug).values().any(|b| b.len() > 1),
+        "{:?}\ndeps: {:?}\nincremental: {:?}",
+        object_builds(&debug),
+        entries(&debug, "deps"),
+        entries(&debug, "incremental")
+    );
 
     let err = sweep_cmd(&ws, &[]);
     assert!(err.contains("swept"), "{err}");
@@ -1226,7 +1232,13 @@ fn sweep_keeps_the_incremental_folder_of_a_dylib_dev_dependency() {
 
     let err = sweep_cmd(&ws, &[]);
     assert!(err.contains("swept target, freed"), "{err}");
-    assert_eq!(dy_folders(), live, "the sweep removed or kept the wrong incremental folder of a dylib unit");
+    assert_eq!(
+        dy_folders(),
+        live,
+        "the sweep removed or kept the wrong incremental folder of a dylib unit\n{err}\ndeps: {:?}\nincremental: {:?}",
+        entries(&debug, "deps"),
+        entries(&debug, "incremental")
+    );
     for f in &live {
         let session = entries(&debug.join("incremental").join(f), "");
         assert_eq!(session.iter().filter(|n| n.starts_with("s-") && !n.ends_with(".lock")).count(), 1, "{session:?}");
