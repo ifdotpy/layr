@@ -66,7 +66,10 @@ transaction that applies the record (`Db::derive`, `owners.rs`): `states.present
 `derived` and `conflict` owners, so a chain that nothing else holds is marked in the same
 transaction (a queue, no recursion).
 
-The free step (`free.rs`) runs at the end of every command that opened a project. It moves the
+The free step (`free.rs`) runs at the end of every command that opened a project. It takes the
+project lock for its check and its move (re-read the queue, skip a state that is owned again, move
+the rest to the trash); only the trash emptying runs after the lock. A state that a command names
+again before the check is kept (tests/t105-free-recheck.sh). It moves the
 storage of each queued state that still has no owner to the trash (`Project::delete_states`),
 after the COMMIT and after the store lock is released, then empties the trash in the background.
 A crash between the commit and the move leaves the state in `free_queue`. The next command, or
@@ -113,6 +116,9 @@ reads the content of a freed state. A pinned state that loses its other owners s
 ends; the end of the command marks it dead, and the free step of that command frees it. Pins of dead
 processes are released by the next free step and by `gc --repair`. A pinned state also keeps its
 ancestors, because its parent rows stay.
+
+A reader of an UNOWNED state (an old leftover) is not pinned, by design: pinning it would count as an
+owner and keep it. Only an explicit `gc --repair` racing such a read can remove it.
 
 Covered (each call site pins its states for the whole command):
 - save and every write command (`prepare_save`: the head and the save base), save with caches;

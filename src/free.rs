@@ -72,11 +72,25 @@ fn pending(store: &Store, name: &str) -> bool {
 /// thin layer still uses as its base stays queued: it goes when that layer goes (APFS). Returns
 /// the number of states whose storage went.
 pub fn finish_project(p: &Project) -> Result<usize> {
-    release_dead_pins(p)?;
-    let queued = p.db.queued_frees()?;
-    if queued.is_empty() {
-        return Ok(0);
+    hold_before_free();
+    // The check and the move run under the project lock: a command that re-owns a queued state
+    // (an undo, a fetch, a ref) either finishes before the check, or waits and finds the state
+    // here. Only the trash emptying runs after the lock.
+    let gone = {
+        // A caller that already holds the lock (it is not taken twice: a second lock would wait).
+        let _lock = if p.holds_lock() { None } else { Some(p.lock()?) };
+        release_dead_pins(p)?;
+        free_queued(p)?
+    };
+    if !gone.is_empty() {
+        crate::store::kick_trash(&p.store.trash_dir());
     }
+    Ok(gone.len())
+}
+
+/// The check and the move of the queued states. The caller holds the project lock.
+fn free_queued(p: &Project) -> Result<Vec<String>> {
+    let queued = p.db.queued_frees()?;
     let mut dead = Vec::new();
     for state in queued {
         if p.db.is_owned(&state)? {
@@ -90,7 +104,7 @@ pub fn finish_project(p: &Project) -> Result<usize> {
         }
     }
     if dead.is_empty() {
-        return Ok(0);
+        return Ok(Vec::new());
     }
     for state in &dead {
         if let Some(s) = p.db.state(state)? {
@@ -101,10 +115,14 @@ pub fn finish_project(p: &Project) -> Result<usize> {
     }
     let gone = p.delete_states(&dead);
     p.db.dequeue_frees(&gone)?;
-    if !gone.is_empty() {
-        crate::store::kick_trash(&p.store.trash_dir());
-    }
-    Ok(gone.len())
+    Ok(gone)
+}
+
+/// Test only (tests/t105-free-recheck.sh): `LAYR_TEST_FREE_PAUSE_MS` pauses the free step before
+/// its lock, so another command can re-own a queued state first.
+fn hold_before_free() {
+    let Some(ms) = std::env::var("LAYR_TEST_FREE_PAUSE_MS").ok().and_then(|v| v.parse::<u64>().ok()) else { return };
+    std::thread::sleep(std::time::Duration::from_millis(ms));
 }
 
 /// Release the pins of processes that are gone (a crash inside a pinned read).
