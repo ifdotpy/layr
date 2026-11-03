@@ -134,6 +134,14 @@ fn merge_raw(profdata: &Path, dir: &Path) -> Result<usize> {
     Ok(raws.len())
 }
 
+/// A cargo command of this tool. Cargo's color comes from the user's env (`CARGO_TERM_COLOR=always` puts escape
+/// codes in front of its status lines), so the tool sets it. Its parsers match those lines at their start.
+fn cargo_cmd() -> Command {
+    let mut c = Command::new("cargo");
+    c.env("CARGO_TERM_COLOR", "never");
+    c
+}
+
 fn output(cmd: &mut Command) -> Result<Vec<u8>> {
     let o = cmd.output().with_context(|| format!("cannot start {:?}", cmd.get_program()))?;
     if !o.status.success() {
@@ -359,7 +367,7 @@ fn command_list(cfg: &Value, key: &str) -> Result<Vec<Vec<String>>> {
 /// Reads the retest settings of the workspace at `root`. Missing settings are empty.
 fn sweep_config(root: &Path) -> Result<SweepConfig> {
     let meta: Value =
-        serde_json::from_slice(&output(Command::new("cargo").args(["metadata", "--no-deps", "--format-version", "1"]).current_dir(root))?)?;
+        serde_json::from_slice(&output(cargo_cmd().args(["metadata", "--no-deps", "--format-version", "1"]).current_dir(root))?)?;
     let cfg = &meta["metadata"]["layr-retest"];
     let mut env = Vec::new();
     for (k, v) in cfg["env"].as_object().into_iter().flatten() {
@@ -416,9 +424,11 @@ enum Listed {
 /// directory` line means that another cargo holds a lock of the folder: the listing stops instead of waiting
 /// for it. The listing runs in its own process group, and a stop kills the group. Any other failure is an error.
 fn list_units(root: &Path, target: &Path, env: &[(String, String)], args: &[String]) -> Result<Listed> {
-    let mut c = Command::new("cargo");
+    let mut c = cargo_cmd();
     c.args(listing(args)).current_dir(root).env("CARGO_TARGET_DIR", target).env("CARGO_BUILD_JOBS", "1");
     c.envs(env.iter().map(|(k, v)| (k, v))).env("LLVM_PROFILE_FILE", cargo_profile_file(target));
+    // The project's env may set a color too: the listing must not depend on it, so it is set last.
+    c.env("CARGO_TERM_COLOR", "never");
     c.process_group(0).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = c.spawn().with_context(|| format!("cannot start cargo {}", args.join(" ")))?;
     let (out, err) = (child.stdout.take().context("cargo stdout")?, child.stderr.take().context("cargo stderr")?);
@@ -600,7 +610,7 @@ fn sweep_cmd(args: &[String]) -> Result<i32> {
 /// Name and source file of every target of the workspace with the crate type `kind`.
 fn kind_targets(kind: &str) -> Result<Vec<(String, String)>> {
     let meta: Value =
-        serde_json::from_slice(&output(Command::new("cargo").args(["metadata", "--no-deps", "--format-version", "1"]))?)?;
+        serde_json::from_slice(&output(cargo_cmd().args(["metadata", "--no-deps", "--format-version", "1"]))?)?;
     let targets = meta["packages"].as_array().into_iter().flatten().flat_map(|p| p["targets"].as_array().into_iter().flatten());
     Ok(targets
         .filter(|t| t["kind"].as_array().is_some_and(|k| k.iter().any(|k| k == kind)))
@@ -789,7 +799,7 @@ fn run(args: &[String]) -> Result<i32> {
     let hash = hash_env(&root)?;
     let project_env = sweep_config(&root)?.env;
     let cargo = |first: &[&str]| {
-        let mut c = Command::new("cargo");
+        let mut c = cargo_cmd();
         c.args(first).args(extra);
         // Cargo, build scripts and the list phase write here; the wrapper gives each test its own folder.
         c.env("LLVM_PROFILE_FILE", cargo_profile_file(&target));

@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Length of the hash that cargo appends to the name of a unit.
 const HASH_LEN: usize = 16;
@@ -345,11 +345,13 @@ fn doomed(profile: &Path, live: &Live) -> Vec<PathBuf> {
     // only the newest of them, and only when no linked folder of that crate is a test binary, bin or example.
     // Without this, an unlinked folder of each build (a unit built without debug info) would stay.
     let exes = live_exe_crates(profile, live);
+    let invoked = invocations(profile);
     let folders: Vec<(PathBuf, bool)> = read_dir(&profile.join(INCREMENTAL))
         .iter()
         .map(|e| {
             let path = e.path();
-            let linked = is_dir(&path) && files_under(&path).iter().any(|f| ino(f).is_some_and(|i| inodes.contains(&i)));
+            let by_link = files_under(&path).iter().any(|f| ino(f).is_some_and(|i| inodes.contains(&i)));
+            let linked = is_dir(&path) && (by_link || session_of_live_unit(&path, &invoked, live));
             (path, linked)
         })
         .collect();
@@ -400,6 +402,41 @@ fn prune_folder(path: PathBuf, out: &mut Vec<PathBuf>) {
             out.push(x.path());
         }
     }
+}
+
+/// Every unit of the profile folder: its crate (as its incremental folder names it, `lib_a`), its hash, and its
+/// `invoked.timestamp`. Cargo writes that file when it starts a unit's compiler, and rustc starts the unit's
+/// incremental session just after, on its own clock.
+fn invocations(profile: &Path) -> Vec<(String, String, SystemTime)> {
+    let mut out = Vec::new();
+    for e in read_dir(&profile.join(".fingerprint")) {
+        let name = name_of(&e);
+        let (Some(hash), Some(base)) = (unit_hash(&name), unit_base(&name)) else { continue };
+        if let Ok(t) = e.path().join("invoked.timestamp").metadata().and_then(|m| m.modified()) {
+            out.push((base.replace('-', "_"), hash.to_string(), t));
+        }
+    }
+    out
+}
+
+/// The start of an incremental session: rustc names it `s-<base36 microseconds>-<id>-<hash>`.
+fn session_start(session: &str) -> Option<SystemTime> {
+    let micros = u64::from_str_radix(session.strip_prefix("s-")?.split('-').next()?, 36).ok()?;
+    Some(UNIX_EPOCH + Duration::from_micros(micros))
+}
+
+/// A session belongs to the unit whose invocation is the latest one before the session start, in the same crate.
+/// A later unit of the crate starts its own session after its own invocation, so the nearest one is the owner.
+/// Without a hard link, this is how an incremental folder is matched to a live unit. It keeps a folder only when
+/// the owner of one of its sessions is live. The bound only stops an unrelated old invocation from owning a session.
+const MAX_SESSION_LAG: Duration = Duration::from_secs(60);
+
+fn session_of_live_unit(folder: &Path, invoked: &[(String, String, SystemTime)], live: &Live) -> bool {
+    let Some(c) = crate_of_folder(folder) else { return false };
+    read_dir(folder).iter().filter_map(|e| session_start(&name_of(e))).any(|s| {
+        let owner = invoked.iter().filter(|(k, _, t)| *k == c && *t <= s).max_by_key(|(_, _, t)| *t);
+        owner.is_some_and(|(_, h, t)| live.hashes.contains(h) && s.duration_since(*t).is_ok_and(|d| d <= MAX_SESSION_LAG))
+    })
 }
 
 /// The crate of an incremental folder: its name without the id (`lib_a-<id>` is `lib_a`).
@@ -559,8 +596,12 @@ mod tests {
         read_dir(dir).iter().map(name_of).collect()
     }
 
+    /// A new folder for each call. `cargo test` runs the tests of this binary in one process, so the
+    /// process id alone does not separate two tests that use the same name.
     fn tempdir(n: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!("layr-retest-sweep-{n}-{}", std::process::id()));
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let k = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let p = std::env::temp_dir().join(format!("layr-retest-sweep-{n}-{}-{k}", std::process::id()));
         let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).unwrap();
         p
@@ -809,6 +850,43 @@ mod tests {
         assert_eq!(freed_by(&[d.join("a")]), 0);
         assert_eq!(freed_by(&[d.join("a"), d.join("b")]), 10);
         std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// Base 36 digits of `n`, as rustc writes the start of a session name.
+    fn b36(mut n: u64) -> String {
+        let digits = b"0123456789abcdefghijklmnopqrstuvwxyz";
+        let mut out = Vec::new();
+        loop {
+            out.push(digits[(n % 36) as usize]);
+            n /= 36;
+            if n == 0 {
+                break;
+            }
+        }
+        out.reverse();
+        String::from_utf8(out).unwrap()
+    }
+
+    /// A session belongs to the latest invocation before it in its crate. Only a live owner keeps the folder.
+    #[test]
+    fn session_belongs_to_the_latest_invocation_before_it() {
+        let t = tempdir("owner");
+        let debug = t.join("debug");
+        let (live_hash, feature_hash) = (H1, H2);
+        for (h, secs) in [(live_hash, 100u64), (feature_hash, 200)] {
+            let inv = debug.join(format!(".fingerprint/dy-{h}/invoked.timestamp"));
+            touch(&inv, 0);
+            at(&inv, secs);
+        }
+        // Each session starts 0.2 s after the invocation of its unit.
+        let session = |secs: u64| format!("s-{}-0-x", b36((secs * 1_000_000) + 200_000));
+        touch(&debug.join(format!("incremental/dy-aaaa/{}/dep-graph.bin", session(100))), 1);
+        touch(&debug.join(format!("incremental/dy-bbbb/{}/dep-graph.bin", session(200))), 1);
+        let live = Live { hashes: BTreeSet::from([live_hash.to_string()]), ..Default::default() };
+        let invoked = invocations(&debug);
+        assert!(session_of_live_unit(&debug.join("incremental/dy-aaaa"), &invoked, &live));
+        assert!(!session_of_live_unit(&debug.join("incremental/dy-bbbb"), &invoked, &live));
+        std::fs::remove_dir_all(&t).unwrap();
     }
 
     #[test]

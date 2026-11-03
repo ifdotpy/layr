@@ -132,7 +132,7 @@ pub struct Missing {
 
 pub fn missing_tools() -> Vec<Missing> {
     let mut v = Vec::new();
-    let nextest = Command::new("cargo").args(["nextest", "--version"]).output().is_ok_and(|o| o.status.success());
+    let nextest = crate::cargo_cmd().args(["nextest", "--version"]).output().is_ok_and(|o| o.status.success());
     if !nextest {
         v.push(Missing { what: "cargo-nextest", install: "cargo install cargo-nextest --locked" });
     }
