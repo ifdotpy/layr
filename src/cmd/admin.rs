@@ -471,23 +471,10 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
         }
         _ => {}
     }
-    // Every state the undo reads loads before the first file changes. A state that cannot load
-    // stops the undo here with no file changed; a state that a store remote holds comes back
-    // from it (`state_src`).
-    let mut needed: Vec<String> = Vec::new();
-    for ch in r.lines.values() {
-        needed.extend(
-            [ch.before.as_ref().map(|b| b.head.clone()), ch.working_before.clone(), ch.working_after.clone()]
-                .into_iter()
-                .flatten(),
-        );
-    }
-    needed.extend(["final_state", "staged_state"].iter().filter_map(|k| r.data.get(*k)?.as_str().map(str::to_string)));
-    for s in &needed {
-        repo.state_src(s).map_err(|e| {
-            exit(1, format!("error: cannot undo, no file changed: {e:#} (undo window: {} days)", repo.p.config_u64("undo.days", 7)))
-        })?;
-    }
+    // Every check and every read of the undo runs before the first file changes: each line must
+    // still be where the operation left it, and each state must load. A failure stops the undo
+    // with no file changed; a state that a store remote holds comes back from it (`state_src`).
+    let mut lines = Vec::new();
     for (lid, ch) in &r.lines {
         let cur = repo.p.db.line_by_id(lid)?;
         let cur_state = cur
@@ -505,6 +492,23 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
                 "error: the line changed after this operation; undo the later operations first (layr op log), or use --force",
             ));
         }
+        lines.push((lid, ch, cur, alive, cur_state));
+    }
+    let mut needed: Vec<String> = Vec::new();
+    for ch in r.lines.values() {
+        needed.extend(
+            [ch.before.as_ref().map(|b| b.head.clone()), ch.working_before.clone(), ch.working_after.clone()]
+                .into_iter()
+                .flatten(),
+        );
+    }
+    needed.extend(["final_state", "staged_state"].iter().filter_map(|k| r.data.get(*k)?.as_str().map(str::to_string)));
+    for s in &needed {
+        repo.state_src(s).map_err(|e| {
+            exit(1, format!("error: cannot undo, no file changed: {e:#} (undo window: {} days)", repo.p.config_u64("undo.days", 7)))
+        })?;
+    }
+    for (lid, ch, cur, alive, cur_state) in lines {
         let mut wb = None;
         match (&ch.before, &cur) {
             (Some(b), Some(l)) if alive => {
