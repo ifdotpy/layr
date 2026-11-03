@@ -512,6 +512,7 @@ impl<'a> Repo<'a> {
             let info = self.need_overlay(&name)?;
             let orepo = self.overlay_repo(&name)?;
             orepo.hold(orepo.pin(&[sid.as_str()])?);
+            let _t = crate::trace::span(format!("take_caches {folder} of line {} from state {sid} (line {})", line.name, line.id));
             let cp = fsutil::safe_join(w, &folder)?;
             if cp.symlink_metadata().is_ok() {
                 fsutil::remove_entry(w, &folder)?;

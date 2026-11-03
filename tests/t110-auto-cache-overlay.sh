@@ -4,6 +4,8 @@
 # the layer is kept by layr itself. A new line from a state still starts warm (the cache overlay
 # is taken), for the same user.
 . "$(dirname "$0")/lib.sh"
+# TEMP (#184 diagnosis): trace the overlay decisions to the log.
+export LAYR_TRACE=1
 
 S=$T/src
 rm -rf $S && mkdir -p $S/src
