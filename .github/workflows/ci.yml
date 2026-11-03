@@ -98,6 +98,10 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-15]
     runs-on: ${{ matrix.os }}
+    # The e2e tests expect incremental builds, as cargo uses by default. The toolchain action
+    # sets CARGO_INCREMENTAL=0 only when the variable is unset.
+    env:
+      CARGO_INCREMENTAL: "1"
     steps:
       - uses: actions/checkout@v4
       # The toolchain pin also pins llvm-tools, which must match the LLVM of rustc.
@@ -128,6 +132,8 @@ jobs:
       - name: Set a fresh LAYR_ROOT
         run: echo "LAYR_ROOT=$(mktemp -d "${TMPDIR:-$RUNNER_TEMP}/layr-root.XXXXXX")" >> "$GITHUB_ENV"
       - name: Test layr-retest
+        timeout-minutes: 20
         run: cargo test --locked -p layr-retest
       - name: Test layr-model and layr-store
+        timeout-minutes: 20
         run: cargo test --locked -p layr-model -p layr-store
