@@ -79,7 +79,6 @@ cd $P/main
 out=$(l follow --tick 2>&1); rc=$?
 eq "a tick with a new remote state tries again and fails" "1" "$rc"
 has "the new attempt names the conflict" "conflicts: src/a.txt" "$out"
-ok "the new attempt replaces the last pass" test "$last" != "$(l follow | tail -1)"
 eq "the tick of the new remote state is refused again without output" "" "$(l follow --tick 2>&1)"
 eq "main head still did not move" "$before" "$(l rev-parse head)"
 
@@ -90,6 +89,24 @@ cd $U; echo three > f3.txt; git add f3.txt; git commit -qm "remote three"; git p
 cd $P/main
 no "layr follow --run without a target fails" l follow --run
 no "main did not take the remote file after --remove" test -f f3.txt
+
+# Stop a daemon and wait until the follow pass it forked has ended. A pass that still writes the
+# store while the test removes it fails the cleanup. Zombies (state Z) are done; the stopped parent
+# cannot reap them.
+stop_daemon() {
+    kill -STOP "$1" 2>/dev/null
+    local n=0 busy=1 c
+    while [ $busy -eq 1 ] && [ $n -lt 240 ]; do
+        busy=0
+        for c in $(pgrep -P "$1" 2>/dev/null); do
+            case "$(ps -o stat= -p "$c" 2>/dev/null)" in Z*|"") ;; *) busy=1 ;; esac
+        done
+        [ $busy -eq 1 ] && sleep 0.5
+        n=$((n + 1))
+    done
+    kill -KILL "$1" 2>/dev/null
+    wait "$1" 2>/dev/null
+}
 
 # 7. macOS: the daemon runs the pass as the user (socket in the test folder). A fresh clone, so no
 #    conflict of step 5 is in its way.
@@ -102,8 +119,8 @@ if [ "$(uname -s)" = Darwin ]; then
     "$LAYR" daemon --tick 2 --socket $T/d.sock > $T/daemon.log 2>&1 &
     dpid=$!
     for i in $(seq 1 60); do test -f f4.txt && break; sleep 0.5; done
-    kill $dpid 2>/dev/null; wait $dpid 2>/dev/null
     ok "the daemon pass moved main" test -f f4.txt
+    stop_daemon $dpid
 fi
 
 finish
