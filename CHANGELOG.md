@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.19.1](https://github.com/ifdotpy/layr/compare/v0.19.0...v0.19.1) (2026-11-03)
+
+
+### Bug Fixes
+
+* **daemon:** Set the store in the LaunchAgent; follow warns without a daemon ([#166](https://github.com/ifdotpy/layr/issues/166)) ([e56e3be](https://github.com/ifdotpy/layr/commit/e56e3be29510fc7598f65a6d2513526aa73d13bf))
+* **undo:** Undo the newest operation, an automatic save too; pick names kept files ([#170](https://github.com/ifdotpy/layr/issues/170)) ([b22717d](https://github.com/ifdotpy/layr/commit/b22717da68fc044d3812e981f27d9b49c1745308))
+
+
+### Performance
+
+* **gc:** Check imported states with one git process; report the bytes that freeing gives back ([#179](https://github.com/ifdotpy/layr/issues/179)) ([1a553b3](https://github.com/ifdotpy/layr/commit/1a553b34e712c0c9e42a227b8ad8a9bc244d02d5))
+
 ## [0.19.0](https://github.com/ifdotpy/layr/compare/v0.18.1...v0.19.0) (2026-11-03)
 
 
