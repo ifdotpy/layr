@@ -136,7 +136,7 @@ try:
         (work / 'd5' / f'f{500 + n}').write_bytes(f'commit {n}\n'.encode())
         run(work, 'save', '-qam', f'step {n}')
     before = tree(work)
-    run(work, 'gc')
+    run(work, 'gc', '--repair')
     h = head(work)
     assert (project / 'states' / h).is_dir() and not (project / 'deltas' / h).exists()
     assert not (project / 'states' / h1).exists(), 'gc keeps an unused view'

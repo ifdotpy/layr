@@ -69,7 +69,7 @@ for name in storefront-screens quiet strict; do l probe run "$BASE" --probe "$na
 RUN=$(l probe run "$BASE" --probe storefront-screens --json)
 ok 'screens reuse the stored result' python3 -c 'import json,sys; assert json.loads(sys.argv[1])[0]["reused"]' "$RUN"
 OUTPUT=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])[0]["output_state"])' "$RUN")
-l gc -q
+l gc --repair -q
 ok 'derived states retain PNG and structure files after GC' test -f "$LAYR_ROOT/projects/screens/states/$OUTPUT/out/screens/_checkout@1280.png"
 ok 'the HTML snapshot stays beside its PNG' test -f "$LAYR_ROOT/projects/screens/states/$OUTPUT/out/screens/_checkout@1280.html"
 SAME=$(l probe diff "$BASE" "$BASE" --json)

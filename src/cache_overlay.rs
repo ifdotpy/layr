@@ -393,6 +393,10 @@ impl<'a> Repo<'a> {
         if self.p.is_overlay() {
             return Ok(taken);
         }
+        // The start state (its caches are read) and the source head stay for the command.
+        let mut held = vec![start];
+        held.extend(source.map(|s| s.head.as_str()));
+        self.hold(self.pin(&held)?);
         let ignored = Rules::new(w);
         let (uid, gid) = self.owner_ids(line);
         let (regenerable, setting) = (Rules::attribute(w, "regenerable"), self.p.config_strings("regenerable"));
@@ -418,6 +422,7 @@ impl<'a> Repo<'a> {
             let Some(sid) = self.cache_source(&name, &from, uid, &key)? else { continue };
             let info = self.need_overlay(&name)?;
             let orepo = self.overlay_repo(&name)?;
+            orepo.hold(orepo.pin(&[sid.as_str()])?);
             let cp = fsutil::safe_join(w, &folder)?;
             if cp.symlink_metadata().is_ok() {
                 fsutil::remove_entry(w, &folder)?;
@@ -442,6 +447,11 @@ impl<'a> Repo<'a> {
         if self.p.is_overlay() {
             return Ok(out);
         }
+        let source_head = match from {
+            Source::Line(l) => l.head.clone(),
+            Source::State(s) => s.to_string(),
+        };
+        self.hold(self.pin(&[line.head.as_str(), source_head.as_str()])?);
         let w = self.working(line);
         let (uid, gid) = self.owner_ids(line);
         let own = self.own(line);
@@ -454,6 +464,7 @@ impl<'a> Repo<'a> {
             let Some(sid) = self.cache_source(&name, from, uid, &key)? else { continue };
             let info = self.need_overlay(&name)?;
             let orepo = self.overlay_repo(&name)?;
+            orepo.hold(orepo.pin(&[sid.as_str()])?);
             let ol_name = Repo::overlay_line_name(&info, &line.id, line.owner);
             let made = {
                 let _lock = orepo.p.lock()?;

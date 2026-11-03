@@ -120,13 +120,13 @@ HELD=$(l rev-parse head)
 HOLD=$(l queue add head --into destination --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 cd ../main
 l line delete -D held-source >/dev/null
-l config undo.days 0; l config retention.auto 0; l config retention.hours 0
+l config undo.ops 0; l config undo.deleted 0; l config retention.auto 0
 ok 'GC keeps a pending queue source' l gc
 ok 'the held source stays readable' l show "$HELD":held.txt
 l queue remove "$HOLD" >/dev/null
-l gc >/dev/null
+l gc --repair >/dev/null
 no 'removal releases an unreachable source' l show "$HELD":held.txt
-l config undo.days 7
+l config undo.ops 20
 # Enabled queues run after add, and existing pending entries run on a daemon tick.
 l line new -q automatic
 l line new -q automatic-source automatic

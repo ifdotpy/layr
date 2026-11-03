@@ -152,7 +152,8 @@ echo retained > retained.txt
 l add retained.txt
 l save -qm retained
 retained=$(l rev-parse head)
-retained_dir=$(ls -d "$A/states/"*"-${retained:0:12}")
+# APFS keeps a thin state under deltas/, so both folders are searched.
+retained_dir=$(ls -d "$A/states/"*"-${retained:0:12}" "$A/deltas/"*"-${retained:0:12}" 2>/dev/null | head -1)
 cd "$A/lines/main"
 l sync peer --command -- "${transport[@]}"
 ls "$BR/projects/x/states" | sort > "$T/before-states"
@@ -163,12 +164,12 @@ l sync peer --command -- "${transport[@]}"
 ls "$BR/projects/x/states" | sort > "$T/after-states"
 eq "sync never removes a peer state" "" "$(comm -23 "$T/before-states" "$T/after-states")"
 eq "the deleted line is absent on B" "" "$(B line list | grep doomed || true)"
-l config undo.days 0
+l config undo.ops 0
 l config retention.auto 0
-l config retention.hours 0
-l gc >/dev/null
-no "local gc removes the unreachable local state" test -e "$retained_dir"
-ok "local gc leaves the other snapshot" test -d "$BR/projects/x/states/$(basename "$retained_dir")"
+l gc --repair >/dev/null
+# The deleted line's final state stays while the undo.deleted ring holds it (docs/ownership.md).
+ok "local gc keeps the deleted line's final state in the undo.deleted ring" test -e "$retained_dir"
+ok "local gc leaves the other snapshot" test -d "$BR/projects/x/states/$(basename "$retained_dir")" -o -d "$BR/projects/x/deltas/$(basename "$retained_dir")"
 # Send the signed gc record. B must keep its own bytes and ignore the foreign deletion flag.
 l sync peer --command -- "${transport[@]}"
 eq "the peer still reads the state after the foreign gc record" retained "$(B show "$retained:retained.txt")"
@@ -183,6 +184,11 @@ ok "sync after recovery succeeds and transfers no states" python3 - "$T/repeat-s
 import json,sys
 d=json.load(open(sys.argv[1])); assert d['states_sent']==0 and d['states_received']==0
 CHECK
+# A new state on the peer: the next sync moves it, so the op log has a sync that received bytes.
+echo fresh-op > "$BR/projects/x/lines/main/fresh-op.txt"
+B add fresh-op.txt >/dev/null
+B save -qm fresh-op >/dev/null
+ok "sync brings a new state of the peer" l sync peer --command -- "${transport[@]}"
 l op log --json > "$T/sync-ops.jsonl"
 ok "the normal op log shows completed sync results" python3 - "$T/sync-ops.jsonl" <<'CHECK'
 import json,sys

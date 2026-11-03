@@ -36,11 +36,13 @@ drop_tree() {
         elif [ "$(stat -f -c %T "$d" 2>/dev/null)" = btrfs ]; then
             btrfs subvolume delete "$d" >/dev/null
         else
+            # OverlayFS: a state is a mount (the CI job runs as root).
+            if mountpoint -q "$d" 2>/dev/null; then umount "$d" 2>/dev/null || umount -l "$d"; fi
             rm -rf "$d"
         fi
     done
-    # On OverlayFS a state is a mount that rm does not drop: gc evicts the copy the store holds.
-    if on_disk "$1"; then l config gc.evict on >/dev/null; l gc -q >/dev/null; fi
+    # A state that is still on disk: gc evicts the copy the store holds, if no owner keeps it.
+    if on_disk "$1"; then l config gc.evict on >/dev/null; l gc --repair -q >/dev/null; fi
 }
 tree_sum() { (cd "$1" && find . -path ./.git -prune -o -type f -print | sort | xargs cksum); }
 
@@ -60,7 +62,7 @@ eq "the head is the state before the amend" "$two" "$(l rev-parse head)"
 ok "the fetched state is on disk again" on_disk "$two"
 has "the amended change is now uncommitted" "notes.txt" "$(l status --short)"
 
-# (b) Undo of a restore whose after state is deleted by retention. The undo must stop before it
+# (b) Undo of a restore whose states are freed (past the undo ring). The undo must stop before it
 # changes a file: the old code fell back to a full restore, which dropped the later edit.
 new_project restored
 echo one >> notes.txt; l save -a -m one -q
@@ -69,8 +71,8 @@ echo two >> notes.txt; l save -a -m two -q
 l restore --source "$one" -- notes.txt >/dev/null
 restore_op=$(l op log -n 1 | awk '{print $1}')
 echo later >> notes.txt
-l config undo.days 0 >/dev/null; l config retention.auto 0 >/dev/null; l config retention.hours 0 >/dev/null
-l gc -q >/dev/null
+# The undo ring holds no operation any more: the states of the restore are freed.
+l config undo.ops 0 >/dev/null; l gc --repair -q >/dev/null
 tree_sum "$P/lines/main" > "$T/sum.before"
 out=$(l undo "$restore_op" 2>&1); rc=$?
 eq "undo stops with exit 1 when the after state cannot load" 1 "$rc"
