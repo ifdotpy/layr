@@ -59,9 +59,9 @@ eq "remove names no overlay of the folder any more" "" "$(cd $P/a && name_of)"
 l line new fresh main >/dev/null
 eq "a new line has no cache folder" "" "$(ls $P/fresh/.layr-retest 2>/dev/null)"
 
-# 6. The states of the removed overlay are freed by gc; only its empty first state stays.
+# 6. The states of the removed overlay are freed by gc --repair; only its empty first state stays.
 ok "the overlay had states to free" test "$states_before" -gt 1
-l gc -q >/dev/null
+l gc --repair -q >/dev/null
 eq "gc frees the states of the removed overlay" "1" "$(ls "$O/$name/states" | wc -l | tr -d ' ')"
 
 # 7. A new save --caches of the folder makes a cache overlay again.
