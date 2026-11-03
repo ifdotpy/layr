@@ -202,6 +202,10 @@ a state on disk needs. Without a reachable remote, a command that needs the tree
 remote. `gc --all-projects` runs `gc` for every project (macOS periodic run:
 `packaging/launchd/ws.layr.gc.plist`). See [design.md](design.md#state-eviction-and-fetch-on-demand).
 
+Reads of imported states (`log -p`, `log <path>`, `show`, `diff`, `blame`, `grep <rev>`) take the
+bytes from Git and build no tree. `line new`, `try`, `bisect run` and `reset --hard` build the tree
+they need (`docs/ownership.md`, "States imported from Git").
+
 Revisions: `head`, `@`, `head~2`, `head^2`, line names, `line@machine`, tags, `origin/main`,
 state id prefixes, git commit ids (full or a prefix of at least 4 digits), `park@{n}`, `head@{n}`
 (auto states, newest first). Every command that takes a revision takes a git commit id.

@@ -37,33 +37,51 @@ before=$(trees); l git fetch -q origin
 eq "a fetch of 50 commits builds no tree" "$before" "$(trees)"
 eq "the fetch imported the 50 new commits" 250 "$(l log --json origin/main | wc -l | tr -d ' ')"
 
+# Reads of imported states come from git: a log with diffs, a file and a diff build no tree.
+start=$(date +%s)
+l log -p > $T/logp.out
+elapsed=$(( $(date +%s) - start ))
+has "log -p shows the diff of commit 10" "+change 10" "$(cat $T/logp.out)"
+eq "log -p over the 200 commits builds no tree" 1 "$(trees)"
+ok "log -p over the 200 commits finishes fast (under 30 s)" test "$elapsed" -lt 30
+
 git -C $U show $C10:big.txt > $T/git10.out
 l show $C10:big.txt > $T/show10.out
 ok "layr show of commit 10 gives its file" cmp -s $T/show10.out $T/git10.out
+eq "show of commit 10 builds no tree" 1 "$(trees)"
 
 l diff $C10 $C20 > $T/d1020.out
 has "layr diff of commits 10 and 20 names the changed file" "big.txt" "$(cat $T/d1020.out)"
+eq "diff of commits 10 and 20 builds no tree" 1 "$(trees)"
 
 l line new -q old $C10 >/dev/null
 ok "line new at commit 10 has its file" cmp -s $P/lines/old/big.txt $T/git10.out
 (cd $P/lines/old && find . -path ./.git -prune -o -type f -print | sed 's|^\./||' | sort) > $T/old.files
 git -C $U ls-tree -r --name-only $C10 | sort > $T/git.files
 eq "line new at commit 10 has the files of that commit" "$(cat $T/git.files)" "$(cat $T/old.files)"
+# The same diff from two built trees gives the same output as the diff read from git.
+l line new -q chk20 $C20 >/dev/null
+l diff $C10 $C20 > $T/d1020b.out
+ok "diff of built states equals the diff read from git" cmp -s $T/d1020.out $T/d1020b.out
 
 CMD='! grep -qx "change 130" big.txt'
 RESULT=$(l bisect run --json --good $C10 --bad head -- sh -c "$CMD")
 eq "bisect over the imported range finds commit 130" "$(l rev-parse $C130)" "$(l rev-parse "$(printf '%s' "$RESULT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["state"])')")"
 
-# Built states that no line names are freed by gc --repair and built again on the next read.
+# A state built for a command that needs its tree (try) is freed by gc --repair and built again.
 l diff $C30 $C31 > $T/d3031.out
 has "layr diff of commits 30 and 31 names the changed file" "big.txt" "$(cat $T/d3031.out)"
+l try -q $C30 -- true
+l try -q $C31 -- true
 built=$(trees)
 l gc --repair -q
-eq "gc --repair frees built states that no line names" 2 "$(trees)"
+# The two states that try built have no owner: they go. Heads and undo records keep theirs.
+ok "gc --repair frees the built states that no owner keeps" test "$(trees)" -le $((built - 2))
 ok "the tip and the old line keep their trees" test "$(l log --json | wc -l | tr -d ' ')" -eq 200
 l diff $C30 $C31 > $T/d3031b.out
 ok "a freed state reads again with the same content" cmp -s $T/d3031.out $T/d3031b.out
-ok "the rebuilt states are on disk again" test "$(trees)" -gt 2
+l try -q $C30 -- true
+ok "the freed state is built again on the next command that needs it" test "$(trees)" -gt 2
 ok "built states were more than the tip" test "$built" -gt 1
 
 finish

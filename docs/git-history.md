@@ -13,7 +13,10 @@ message bytes. It also contains raw tree objects absent from its first parent's
 tree. Existing signed records and age encryption carry this metadata through
 store push, fetch and clone. File content uses the existing state transfer path.
 The local bare Git repository holds the objects that build the trees of imported
-states. It is the source of those trees, not a cache of the state files.
+states. It is the source of those trees, not a cache of the state files. A store
+push sends the Git objects of the imported commits as Git packs, and a fetch or
+clone installs them, so a clone builds imported states without the Git remote
+(`docs/remote-format.md`, "Git packs").
 
 On another machine, the bridge restores the tree objects, recreates missing blobs
 from state files, and checks their Git hashes before writing the original commit

@@ -473,6 +473,7 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
         omitted: omitted_cache_refs(repo, opts)?,
         ..Default::default()
     };
+    report.git_packs = super::gitpack::fetch(store, repo, &identity)?;
     let required = required_states(repo, &records.lines, opts)?;
     let states = attempts(&store.backend)?;
     let mut reader = Reader::new(&store.backend, &identity, &records.keys);

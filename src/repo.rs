@@ -360,7 +360,16 @@ impl<'a> Repo<'a> {
         }
         match self.p.db.state_flags(id)? {
             Some((_, true)) => bail!("state {} was deleted by retention", ids::short(id)),
-            Some(_) => crate::store_remote::restore_state(self, id)?,
+            Some(_) => crate::store_remote::restore_state(self, id).map_err(|e| {
+                if crate::gitbridge::missing_objects(self, id) {
+                    e.context(format!(
+                        "state {} is an imported Git commit whose Git objects are not on this machine; fetch from a store remote that holds its Git pack",
+                        ids::short(id)
+                    ))
+                } else {
+                    e
+                }
+            })?,
             None => bail!("unknown state {}", ids::short(id)),
         }
         Ok(())

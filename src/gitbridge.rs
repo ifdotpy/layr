@@ -1695,6 +1695,17 @@ pub fn push(ctx: &Ctx, repo: &Repo, url: &str, commit: &str, branch: &str, force
         if !repair_cache(repo)? {
             return Err(error);
         }
+        // The damaged cache went aside. Imported states have no trees to rebuild their commits from,
+        // so the Git remotes of the project give the objects back (git is the source).
+        let mut remotes: Vec<String> = repo.p.db.remote_refs()?.into_iter().filter_map(|(name, _, _)| name.split('/').next().map(str::to_owned)).collect();
+        remotes.sort();
+        remotes.dedup();
+        for remote in remotes {
+            if repo.p.config_value(&format!("remote.{remote}.url"))?.is_some() {
+                fetch(ctx, repo, &remote)?;
+            }
+        }
+        crate::store_remote::restore_git_objects(ctx, repo)?;
         let mut rebuilt = false;
         for state in repo.p.db.state_of_commit(commit)? {
             if repo.tree_available(&state) && export_history(repo, &state)?.0 == commit {
@@ -1952,6 +1963,282 @@ pub fn check_git_head(repo: &Repo, line: &Line) -> Result<()> {
              and then:\n  layr save -a -m \"<message>\"\n\
              Use layr merge, layr git fetch and layr save instead of git."
         );
+    }
+    Ok(())
+}
+
+// ----- reads of imported states from git -----
+//
+// An imported state keeps its record. Its tree is on disk only when a command needs it (`build_tree`).
+// A read that needs only the changes or some files takes them from the git objects instead: a
+// diff, a file, a listing or a search builds no tree. These functions own that read.
+
+/// The git commit of an imported state, whether its tree is on disk or not.
+pub fn imported_commit(repo: &Repo, state: &str) -> Result<Option<String>> {
+    match repo.p.db.state(state)? {
+        Some(s) if s.kind == StateKind::Import => {
+            let squash = repo.p.db.squash_commits_of(state)?;
+            Ok(repo.p.db.git_commits_of(state)?.into_iter().find(|c| !squash.contains(c)))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// The git commit of an imported state whose tree is not on disk: a read takes it from git.
+pub fn unbuilt_commit(repo: &Repo, state: &str) -> Result<Option<String>> {
+    if repo.p.has_state(state) {
+        return Ok(None);
+    }
+    imported_commit(repo, state)
+}
+
+/// True when `state` is an imported state whose record holds Git objects but whose commit the git
+/// store lacks (a machine that got the record without the Git pack).
+pub fn missing_objects(repo: &Repo, state: &str) -> bool {
+    let imported = matches!(repo.p.db.state(state), Ok(Some(s)) if s.kind == StateKind::Import);
+    imported && repo.p.db.has_git_import(state).unwrap_or(false) && stored_commit(repo, state).ok().flatten().is_none()
+}
+
+/// Two folders that hold the paths where commits `old` and `new` differ, with their bytes from the
+/// git store. Both folders hold the same paths, so a comparison of them finds the same changes as a
+/// comparison of the two full trees. `old` None: the first commit, against an empty folder.
+pub struct Pair {
+    pub old: crate::repo::Snap,
+    pub new: crate::repo::Snap,
+    pub keep: Vec<crate::repo::Temp>,
+}
+
+pub fn sparse_pair(repo: &Repo, old: Option<&str>, new: &str) -> Result<Pair> {
+    let s = store(repo);
+    let mut args = vec!["diff-tree", "-r", "-z", "--no-renames", "--no-commit-id"];
+    if old.is_none() {
+        args.push("--root");
+    }
+    args.extend(old);
+    args.push(new);
+    // Raw records: ":<old mode> <new mode> <old id> <new id> <status>" NUL "<path>" NUL.
+    let out = git_out_bytes(&s, &args)?;
+    let mut fields = out.split(|b| *b == 0);
+    let mut changes: Vec<(String, Side, Side)> = Vec::new();
+    while let Some(meta) = fields.next() {
+        if meta.is_empty() {
+            continue;
+        }
+        let meta = String::from_utf8_lossy(meta).into_owned();
+        let meta = meta.strip_prefix(':').context("bad diff-tree record")?;
+        let path = String::from_utf8_lossy(fields.next().context("diff-tree record without a path")?).into_owned();
+        let f: Vec<&str> = meta.split_whitespace().collect();
+        if f.len() != 5 {
+            bail!("bad diff-tree record for {path}");
+        }
+        changes.push((path, Side { mode: f[0].to_string(), id: f[2].to_string() }, Side { mode: f[1].to_string(), id: f[3].to_string() }));
+    }
+    let zero = "0".repeat(40);
+    let mut ids: Vec<String> = Vec::new();
+    for (_, o, n) in &changes {
+        for side in [o, n] {
+            if side.mode != "160000" && side.id != zero {
+                ids.push(side.id.clone());
+            }
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    let data: BTreeMap<String, Vec<u8>> = ids.iter().cloned().zip(blobs(repo, &ids)?).collect();
+    let mut keep = Vec::new();
+    for _ in 0..2 {
+        let path = repo.p.scan_dir().join(crate::store::temp_name());
+        std::fs::create_dir_all(&path)?;
+        keep.push(crate::repo::Temp { path });
+    }
+    for (path, o, n) in &changes {
+        for (side, dst) in [(o, &keep[0].path), (n, &keep[1].path)] {
+            if side.id == zero {
+                continue;
+            }
+            if side.mode == "160000" {
+                fsutil::make_parents(dst, &format!("{path}/x"), None)?;
+                continue;
+            }
+            let bytes = data.get(&side.id).with_context(|| format!("Git object {} is missing", side.id))?;
+            place_blob(dst, &side.mode, path, bytes, None, None)?;
+        }
+    }
+    Ok(Pair { old: crate::repo::snap(&keep[0].path), new: crate::repo::snap(&keep[1].path), keep })
+}
+
+/// One side of a raw diff record: the mode and the object id that git prints for it.
+struct Side {
+    mode: String,
+    id: String,
+}
+
+/// Output of a git command as bytes.
+fn git_out_bytes(git_dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
+    let out = base_cmd(git_dir).args(args).stdin(Stdio::null()).output().context("run git")?;
+    if !out.status.success() {
+        bail!("git {} failed: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(out.stdout)
+}
+
+/// What a path of an imported commit is.
+pub enum Entry {
+    Missing,
+    /// The names of a folder, and whether each is a folder (submodules count as folders).
+    Dir(Vec<(String, bool)>),
+    File(Vec<u8>),
+    Link(Vec<u8>),
+}
+
+/// The entry at `path` of `commit` ("" is the root), read from the git objects.
+pub fn entry(repo: &Repo, commit: &str, path: &str) -> Result<Entry> {
+    let s = store(repo);
+    let path = path.trim_matches('/');
+    if path.is_empty() {
+        return Ok(Entry::Dir(folder_names(&s, &format!("{commit}^{{tree}}"))?));
+    }
+    let out = git_out_bytes(&s, &["ls-tree", "-z", "--full-tree", commit, "--", path])?;
+    let Some(rec) = out.split(|b| *b == 0).find(|r| !r.is_empty()) else { return Ok(Entry::Missing) };
+    let rec = String::from_utf8_lossy(rec).into_owned();
+    let (meta, _) = rec.split_once('\t').context("bad Git tree entry")?;
+    let fields: Vec<&str> = meta.split(' ').collect();
+    match (fields[0], fields[1]) {
+        ("040000", _) | (_, "tree") => Ok(Entry::Dir(folder_names(&s, fields[2])?)),
+        (_, "commit") => Ok(Entry::Dir(Vec::new())),
+        ("120000", _) => Ok(Entry::Link(git_out_bytes(&s, &["cat-file", "blob", fields[2]])?)),
+        _ => Ok(Entry::File(git_out_bytes(&s, &["cat-file", "blob", fields[2]])?)),
+    }
+}
+
+fn folder_names(s: &Path, tree: &str) -> Result<Vec<(String, bool)>> {
+    let out = git_out_bytes(s, &["ls-tree", "-z", tree])?;
+    let mut names = Vec::new();
+    for rec in out.split(|b| *b == 0).filter(|r| !r.is_empty()) {
+        let rec = String::from_utf8_lossy(rec).into_owned();
+        let (meta, name) = rec.split_once('\t').context("bad Git tree entry")?;
+        let is_dir = meta.split(' ').nth(1).is_some_and(|t| t == "tree" || t == "commit");
+        names.push((name.to_string(), is_dir));
+    }
+    names.sort();
+    Ok(names)
+}
+
+/// Every regular file of `commit` (no links, no submodules): path and blob id.
+pub fn regular_files(repo: &Repo, commit: &str) -> Result<Vec<(String, String)>> {
+    let out = git_out_bytes(&store(repo), &["ls-tree", "-r", "-z", "--full-tree", commit])?;
+    let mut files = Vec::new();
+    for rec in out.split(|b| *b == 0).filter(|r| !r.is_empty()) {
+        let rec = String::from_utf8_lossy(rec).into_owned();
+        let (meta, path) = rec.split_once('\t').context("bad Git tree entry")?;
+        let fields: Vec<&str> = meta.split(' ').collect();
+        if fields[0] == "100644" || fields[0] == "100755" {
+            files.push((path.to_string(), fields[2].to_string()));
+        }
+    }
+    Ok(files)
+}
+
+/// The contents of blobs, in the order of `oids`, through one `cat-file --batch`.
+pub fn blobs(repo: &Repo, oids: &[String]) -> Result<Vec<Vec<u8>>> {
+    let s = store(repo);
+    let mut child = base_cmd(&s).args(["cat-file", "--batch"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?;
+    let mut input = child.stdin.take().context("cat-file has no input")?;
+    let ids = oids.to_vec();
+    let writer = std::thread::spawn(move || -> std::io::Result<()> {
+        for id in ids {
+            writeln!(input, "{id}")?;
+        }
+        Ok(())
+    });
+    let mut stdout = std::io::BufReader::new(child.stdout.take().context("cat-file has no output")?);
+    let mut out = Vec::with_capacity(oids.len());
+    for oid in oids {
+        let mut header = String::new();
+        stdout.read_line(&mut header)?;
+        let size: usize = header.split_whitespace().nth(2).and_then(|x| x.parse().ok()).with_context(|| format!("bad cat-file header for {oid}: {header}"))?;
+        let mut data = vec![0u8; size];
+        stdout.read_exact(&mut data)?;
+        let mut nl = [0u8; 1];
+        stdout.read_exact(&mut nl)?;
+        out.push(data);
+    }
+    writer.join().map_err(|_| anyhow!("cat-file writer failed"))??;
+    child.wait()?;
+    Ok(out)
+}
+
+// ----- packs of the git store (store remote, docs/remote-format.md "Git packs") -----
+
+/// The commits that the git store holds of `commits`, in order.
+pub fn has_commits(repo: &Repo, commits: &[String]) -> Result<Vec<bool>> {
+    if commits.is_empty() {
+        return Ok(Vec::new());
+    }
+    let s = init_store(repo)?;
+    let mut child = base_cmd(&s).args(["cat-file", "--batch-check"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?;
+    let mut input = child.stdin.take().context("cat-file has no input")?;
+    let ids = commits.to_vec();
+    let writer = std::thread::spawn(move || -> std::io::Result<()> {
+        for id in ids {
+            writeln!(input, "{id}")?;
+        }
+        Ok(())
+    });
+    let out = child.wait_with_output()?;
+    writer.join().map_err(|_| anyhow!("cat-file writer failed"))??;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() != commits.len() {
+        bail!("git cat-file answered {} lines for {} commits", lines.len(), commits.len());
+    }
+    // "<id> commit <size>" for a commit, "<id> missing" otherwise.
+    Ok(lines.iter().map(|l| l.split_whitespace().nth(1) == Some("commit")).collect())
+}
+
+/// A pack of the objects of `new` that `covered` does not reach: the objects of the commits a remote
+/// store lacks, without the ones it already has.
+pub fn pack_commits(repo: &Repo, new: &[String], covered: &[String]) -> Result<Vec<u8>> {
+    let s = store(repo);
+    let mut child = base_cmd(&s)
+        .args(["pack-objects", "--stdout", "--revs", "-q"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut input = child.stdin.take().context("pack-objects has no input")?;
+    let lines: Vec<String> = new.iter().cloned().chain(covered.iter().map(|c| format!("^{c}"))).collect();
+    let writer = std::thread::spawn(move || -> std::io::Result<()> {
+        for line in lines {
+            writeln!(input, "{line}")?;
+        }
+        Ok(())
+    });
+    let out = child.wait_with_output()?;
+    writer.join().map_err(|_| anyhow!("pack-objects writer failed"))??;
+    if !out.status.success() {
+        bail!("git pack-objects failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(out.stdout)
+}
+
+/// Add the objects of a pack to the git store as loose objects, as a restored import writes them
+/// (`write_object`). A pack of a whole history is unpacked this way too.
+pub fn install_pack(repo: &Repo, pack: &[u8]) -> Result<()> {
+    let s = init_store(repo)?;
+    let mut child = base_cmd(&s)
+        .args(["unpack-objects", "-q"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    {
+        let mut input = child.stdin.take().context("unpack-objects has no input")?;
+        input.write_all(pack)?;
+    }
+    let out = child.wait_with_output()?;
+    if !out.status.success() {
+        bail!("git unpack-objects failed: {}", String::from_utf8_lossy(&out.stderr).trim());
     }
     Ok(())
 }

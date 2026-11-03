@@ -897,6 +897,15 @@ impl Db {
         )?)
     }
 
+    /// The Git commits of the imported states, sorted.
+    pub fn import_commits(&self) -> Result<Vec<String>> {
+        let mut st = self.conn.prepare(
+            "SELECT DISTINCT g.gcommit FROM git_map g JOIN states s ON s.id=g.state WHERE s.kind='import' ORDER BY g.gcommit",
+        )?;
+        let v = st.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+        Ok(v)
+    }
+
     /// The base states of the thin layers that are on disk (`bases` rows of present layers).
     pub fn present_layer_bases(&self) -> Result<Vec<String>> {
         let mut st = self.conn.prepare("SELECT DISTINCT b.base FROM bases b JOIN states s ON s.id=b.state WHERE s.present=1")?;

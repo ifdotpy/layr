@@ -88,19 +88,34 @@ source.
 
 An imported commit is a state record without a tree. The `import` record holds the exact Git
 objects of the commit, and the state keeps the mapped parents. Git is the source of imported
-states: the bare Git repository of the project (`<project>/git`) holds the objects that build
-their trees. Git is never written by a read.
+states: the bare Git repository of the project (`<project>/git`) holds the objects of their
+commits and blobs. A read never writes Git.
+
+Reads that need only changes or some files take them from Git and build no tree
+(`gitbridge::sparse_pair`, `gitbridge::entry`, `gitbridge::regular_files`):
+
+- `log -p`, `log <path>`, `show <rev>` and `diff` between two imported states (or an imported
+  state and its parent). Both sides hold only the paths that differ, filled from git objects, so
+  the usual comparison runs on them.
+- `show <rev>:<path>`, `blame` and `grep <pattern> <rev>` read the entry, the file or the blobs
+  from git. `grep` writes only the ignore files of the commit to a temporary folder.
+
+Commands that need a full tree on disk build it (`Repo::check_state` calls `gitbridge::build_tree`):
+`line new`, `try`, `bisect run`, `restore --source` and `reset --hard` to an imported state, and
+anything else that opens the tree. The build takes the nearest imported ancestor with a tree on
+disk (breadth first, first parent first). The tree is that base plus the changed paths: a thin
+layer over the base on APFS, a snapshot of the base with the changed paths elsewhere. Without a
+base it is the full tree of the commit. The built state is present; the normal rules apply to it.
 
 - `init --from` and `init --git` build the tree of the commit that the new line starts at.
-- `layr git fetch` writes records only. Its commits have no tree until a command reads one.
-- A read of a state without a tree builds it (`Repo::check_state` calls `gitbridge::build_tree`).
-  The base is the nearest imported ancestor with a tree on disk (breadth first, first parent
-  first). The tree is that base plus the changed paths: a thin layer over the base on APFS, a
-  snapshot of the base with the changed paths elsewhere. Without a base it is the full tree of
-  the commit. The built state is present; the normal rules apply to it.
-- When git cannot give the objects, a copy on a store remote is the fallback (`store_remote`).
-- A machine without the Git objects of a commit cannot build its state. Its record stays, and
-  the state reads only through a store remote that holds it.
+- `layr git fetch` writes records only. Its commits have no tree.
+- Git objects come from the local Git store. A store remote keeps them as Git packs
+  (`docs/remote-format.md`, "Git packs"): a push sends the objects of the commits the remote lacks,
+  and a fetch or clone installs them. A machine with no Git objects and no pack cannot build an
+  imported state. Its record stays, and the read names the missing Git pack.
+- When the local Git store is damaged, it is moved aside. The project's git remotes and the
+  store remotes that hold packs give the objects back, and then the commits are exported again.
+- A copy on a store remote with a tree is the fallback when git cannot give the objects.
 
 Owners and freeing:
 
@@ -108,15 +123,14 @@ Owners and freeing:
   `conflict` (a conflict needs the trees of its base, ours and theirs). The base of a present
   thin layer keeps its tree too.
 - Record owners keep only the record: `parent`, `derived`, `ref`, `tag`, `remote-ref` and
-  `export`. Such a state can lose its tree and is built again on the next read.
+  `export`. Such a state can lose its tree and is built again on the next command that needs it.
 - Until the owners model frees states on the operation that drops the last owner (PR #135),
   `layr gc --repair` frees the trees of imported states that no tree owner keeps. It repeats
   until nothing more goes, so a base goes after its layers. `layr gc -n --repair` lists them.
-  The record stays, and the state is built again on the next read.
+  The record stays.
 
-Costs: a build reads the changed Git trees and writes the changed files. A state whose nearest
-base is far away costs more. `layr log -p` and `layr log <path>` read every commit's tree, so on a
-long history they build each one (`Repo::tree_available`).
+Costs: a build reads the changed Git trees and writes the changed files. A pair read from git
+writes the changed files of both sides to a temporary folder, and removes it after the read.
 
 ## Records from other machines
 
