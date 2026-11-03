@@ -1173,6 +1173,15 @@ impl Db {
         v.into_iter().map(|l| Ok(crate::oplog::parse_line(&l, None)?.record)).collect()
     }
 
+    /// The newest records whose text names `needle` (a line id), newest first, at most `limit`.
+    pub fn records_naming(&self, needle: &str, limit: usize) -> Result<Vec<Record>> {
+        let mut st = self.conn.prepare("SELECT raw FROM records WHERE instr(raw, ?1) > 0 ORDER BY time DESC, seq DESC LIMIT ?2")?;
+        let v = st
+            .query_map(params![needle, limit as i64], |r| r.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        v.into_iter().map(|l| Ok(crate::oplog::parse_line(&l, None)?.record)).collect()
+    }
+
     /// The records with one operation name, oldest first.
     pub fn records_with_op(&self, op: &str) -> Result<Vec<Record>> {
         let mut st = self.conn.prepare("SELECT raw FROM records WHERE op=?1 ORDER BY time, machine, seq")?;
