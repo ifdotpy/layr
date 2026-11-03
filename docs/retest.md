@@ -203,17 +203,25 @@ live set does not name goes. The live set names:
 - the newest object build of each live owner (a unit hash, or an unhashed crate);
 - the dep-info `<output>.d` of a listed output in the profile folder;
 - cargo's lock files (`.cargo-lock`, `.cargo-build-lock`, `.cargo-artifact-lock`);
-- each `incremental/<crate>-<id>` folder that a kept output is hard-linked to, with its newest finalized
-  session and that session's lock file.
+- each `incremental/<crate>-<id>` folder that a kept output is hard-linked to, with its newest finalized session
+  and that session's lock file. rustc names the lock `s-<time>-<id>.lock`, the session name without its hash.
 
 Everything else goes: uplifted copies that no listing names, stale bins and examples, unhashed objects of
 other builds, outputs of units that no command lists, orphan incremental folders, and other files. Entries
 go whole, so no live unit loses a file. The removal frees the bytes of an inode only when all its links go.
 
-Links from a unit to its incremental folder: rustc hard-links the object files of a session to the outputs in
-`deps`. The sweep reads the shared inodes. Measured on Studio: each live owner's objects link to exactly one
-folder, and no text file (fingerprint, dep-info, `.d`) names the folder, since its name carries a base-36 id,
-not the cargo hash.
+Links from a unit to its incremental folder (both need no compile):
+
+- Library: the newest session of a library holds `metadata.rmeta`, hard-linked to `deps/lib<crate>-<hash>.rmeta`
+  (link count 2). The sweep keeps the folder through that link, so a library built without debug info keeps its
+  folder. Measured 2026-11-03 on a test workspace with `debug = 0`.
+- Object files: rustc hard-links the object files of a session to the outputs in `deps`. This needs debug info.
+
+The folder name carries rustc's stable crate id (base-36), not the cargo hash, and no text file names it.
+
+Lock: the sweep keeps the lock of the kept session. Without it rustc cannot reuse the object files of that session:
+measured 2026-11-03, a one-line change after a sweep rebuilt both units of a library with debug info off, and with the
+lock put back the unchanged unit was reused (same inode). Test: `sweep_keeps_the_incremental_session_of_a_library_without_debug_info`.
 
 ### Other profiles
 
@@ -223,11 +231,16 @@ A folder is swept when any profile folder in it has a fingerprint folder (a buil
 listed profiles are `target/debug` and, with a `retest` list, `target/retest/debug`; `target/wasm32-unknown-unknown`
 is not listed, so the sweep leaves it as it is.
 
-Limit: a bin in a profile without debug info keeps no object files in `deps`. Its incremental folder has no
-link (see "Live set"), so the sweep removes it and a later build of that bin cannot reuse it. Set
-`[profile.release] debug = 1` to keep the link. The layr project sets it. A `studio-native-client` output (for
-example `deps/libstudio_native_client.a`) is not listed, because the sweep list excludes that crate, so the sweep
-removes it. A build that needs it compiles it again.
+Limit: a bin, test binary or example built without debug info keeps no object files in `deps`, and it has no
+`metadata.rmeta`. Its incremental folder has no link (see "Links"), so the sweep removes it and a later build of that
+unit cannot reuse it. Set `debug = 1` for that profile to keep the object link (the layr project sets
+`[profile.release] debug = 1`).
+
+A `studio-native-client` output (for example `deps/libstudio_native_client.a`) is not listed, because the sweep
+list excludes that crate, so the sweep removes it. A build that needs it compiles it again.
+
+Known limit: the sweep needs every listed command to be fresh. A command with a stale unit makes the sweep skip
+that folder (see "Freshness"), so run the standard build before the sweep.
 
 ### Object files
 
@@ -735,9 +748,11 @@ Run in the root folder of a layr line that is also the cargo project root.
     `target/debug` path or by an env variable whose name has a word `BIN`, `BINARY`, `EXE` or `EXECUTABLE`, or is a bin target name.
     That bin is not instrumented, so a change of it forces full runs. Use `env!("CARGO_BIN_EXE_<name>")`.
   - The number of test targets (lib, bin, integration), the size of the integration test binaries (from
-    `cargo metadata` and the files in `target/retest/debug/deps` or `target/debug/deps`; it does not run
+    `cargo metadata` and the files in the `deps` folder of every profile folder: `target/<profile>`,
+    `target/<triple>/<profile>` and `target/retest/<profile>`; it does not run
     `cargo nextest list`, which builds). For a crate with two or more integration test binaries: one
     binary (`autotests = false`, one `tests/main.rs`) saves the size of all but the largest and one link each.
+<<<<<<< head
   - Build script output (`build/*/output` in every profile folder under `target/` and `target/retest/`):
     - A `cargo:rerun-if-changed=` (or `cargo::`) value that is an absolute path under the project root is a
       warning. Each line has its own absolute path, so cargo marks the build script dirty in every new
@@ -747,6 +762,19 @@ Run in the root folder of a layr line that is also the cargo project root.
       Each line has its own `.git`, so the same rebuild happens. It prints the fix: take the version from
       the build environment (for example an env var set by the release build) instead of watching `.git`.
     - Without build output, it says `build once to check build script paths`.
+||||||| base
+  - Build script output (`target/debug/build/*/output`, and the same under `target/retest/debug`): a
+    `cargo:rerun-if-changed=` (or `cargo::`) value that is an absolute path under the project root is a
+    warning. Each line has its own absolute path, so cargo marks the build script dirty in every new
+    line and rebuilds all crates after it, although `target/` is warm. Print a path relative to
+    `CARGO_MANIFEST_DIR`. Without build output, it says `build once to check build script paths`.
+=======
+  - Build script output (`build/*/output` of every profile folder, as in the rule above): a
+    `cargo:rerun-if-changed=` (or `cargo::`) value that is an absolute path under the project root is a
+    warning. Each line has its own absolute path, so cargo marks the build script dirty in every new
+    line and rebuilds all crates after it, although `target/` is warm. Print a path relative to
+    `CARGO_MANIFEST_DIR`. Without build output, it says `build once to check build script paths`.
+>>>>>>> d48a4e9
   - Records: count, and the age of the newest (warning above 14 days). Size of `target/retest`
     (warning above 20 GB).
 

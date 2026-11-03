@@ -348,9 +348,11 @@ fn doomed(profile: &Path, live: &Live) -> Vec<PathBuf> {
         match session {
             None => out.push(path),
             Some(keep) => {
+                // rustc names the lock of a finalized session by the session name without its hash (`s-<time>-<id>.lock`).
                 for x in read_dir(&path) {
                     let n = name_of(&x);
-                    if n.strip_suffix(".lock").unwrap_or(&n) != keep {
+                    let lock_of_keep = n.strip_suffix(".lock").is_some_and(|stem| keep.starts_with(stem));
+                    if n != keep && !lock_of_keep {
                         out.push(x.path());
                     }
                 }
@@ -690,6 +692,28 @@ mod tests {
         sweep(&debug, &live, false);
         assert_eq!(names(&inc), BTreeSet::from(["lib_a-keep".to_string()]));
         assert_eq!(names(&inc.join("lib_a-keep")), BTreeSet::from(["s-1-aa-bb".to_string(), "s-1-aa-bb.lock".to_string()]));
+        std::fs::remove_dir_all(debug.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn incremental_session_keeps_the_lock_that_rustc_names_by_the_session_prefix() {
+        let (debug, live, _) = fake_debug("lock");
+        let inc = debug.join("incremental");
+        // rustc names the lock of a finalized session `s-<time>-<id>.lock`, and the session `s-<time>-<id>-<hash>`.
+        // Without the lock, the next build cannot reuse the object files of the session.
+        touch(&inc.join("lib_a-keep/s-1-aa-bb/x.o"), 3);
+        touch(&inc.join("lib_a-keep/s-1-aa.lock"), 0);
+        touch(&inc.join("lib_a-keep/s-0-zz.lock"), 0);
+        touch(&inc.join("lib_a-keep/s-0-zz-cc/x.o"), 3);
+        at(&inc.join("lib_a-keep/s-0-zz-cc"), 10);
+        at(&inc.join("lib_a-keep/s-1-aa-bb"), 20);
+        // The link of the kept folder: the library's metadata is hard-linked to its rmeta in deps.
+        std::fs::create_dir_all(debug.join("deps")).unwrap();
+        touch(&debug.join("deps/liblib_a-0123456789abcdef.rmeta"), 4);
+        std::fs::hard_link(debug.join("deps/liblib_a-0123456789abcdef.rmeta"), inc.join("lib_a-keep/s-1-aa-bb/metadata.rmeta"))
+            .unwrap();
+        sweep(&debug, &live, false);
+        assert_eq!(names(&inc.join("lib_a-keep")), BTreeSet::from(["s-1-aa-bb".to_string(), "s-1-aa.lock".to_string()]));
         std::fs::remove_dir_all(debug.parent().unwrap()).unwrap();
     }
 

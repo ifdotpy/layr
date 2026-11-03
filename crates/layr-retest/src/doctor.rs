@@ -135,21 +135,41 @@ fn rust_files(dir: &Path, v: &mut Vec<PathBuf>) {
     }
 }
 
-/// The newest executable `<name>-<hash>` in the deps folder of the instrumented or the plain build.
+/// Every profile folder under `target`: a folder that holds `.fingerprint`, at most three levels down
+/// (`target/debug`, `target/<triple>/release`, `target/retest/debug`). A profile folder is not searched further.
+pub fn profile_dirs(target: &Path) -> Vec<PathBuf> {
+    fn walk(dir: &Path, depth: u32, out: &mut Vec<PathBuf>) {
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        let mut dirs: Vec<PathBuf> = rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+        dirs.sort();
+        for p in dirs {
+            if p.join(".fingerprint").is_dir() {
+                out.push(p);
+            } else if depth < 3 {
+                walk(&p, depth + 1, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(target, 1, &mut out);
+    out
+}
+
+/// The newest executable `<name>-<hash>` in the `deps` folder of any profile folder under `target`.
 fn test_binary_size(root: &Path, name: &str) -> Option<u64> {
     let stem = name.replace('-', "_");
-    ["target/retest/debug/deps", "target/debug/deps"].iter().find_map(|d| {
-        std::fs::read_dir(root.join(d))
-            .ok()?
-            .flatten()
-            .filter(|e| {
-                let f = e.file_name().to_string_lossy().into_owned();
-                f.strip_prefix(&format!("{stem}-")).is_some_and(|h| h.len() == 16 && h.chars().all(|c| c.is_ascii_hexdigit()))
-            })
-            .filter_map(|e| e.metadata().ok().filter(|m| m.is_file()).map(|m| (m.modified().ok(), m.len())))
-            .max()
-            .map(|m| m.1)
-    })
+    profile_dirs(&root.join("target"))
+        .iter()
+        .filter_map(|p| std::fs::read_dir(p.join("deps")).ok())
+        .flatten()
+        .flatten()
+        .filter(|e| {
+            let f = e.file_name().to_string_lossy().into_owned();
+            f.strip_prefix(&format!("{stem}-")).is_some_and(|h| h.len() == 16 && h.chars().all(|c| c.is_ascii_hexdigit()))
+        })
+        .filter_map(|e| e.metadata().ok().filter(|m| m.is_file()).map(|m| (m.modified().ok(), m.len())))
+        .max()
+        .map(|m| m.1)
 }
 
 fn tool_checks(f: &mut Vec<Finding>) {
@@ -234,9 +254,20 @@ fn rerun_checks(root: &Path, f: &mut Vec<Finding>) {
     let canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let mut seen = false;
     let mut bad = false;
+<<<<<<< head
     let mut reported: Vec<String> = Vec::new();
     for d in profile_dirs(root) {
         let (mut abs, s) = absolute_rerun_paths(&d, root);
+||||||| base
+    let mut reported: Vec<(String, String)> = Vec::new();
+    for dir in ["target/debug", "target/retest/debug"] {
+        let d = root.join(dir);
+        let (mut hits, s) = absolute_rerun_paths(&d, root);
+=======
+    let mut reported: Vec<(String, String)> = Vec::new();
+    for d in profile_dirs(&root.join("target")) {
+        let (mut hits, s) = absolute_rerun_paths(&d, root);
+>>>>>>> d48a4e9
         if canon != root {
             abs.extend(absolute_rerun_paths(&d, &canon).0);
         }
@@ -377,6 +408,7 @@ pub fn run(args: &[String]) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     fn bins() -> Vec<String> {
         vec!["layr-server".into()]
@@ -437,6 +469,60 @@ mod tests {
         assert!(seen);
         assert_eq!(hits, vec![("bad".to_string(), format!("{}/schema/api.json", root.display()))]);
         assert!(!absolute_rerun_paths(&t.join("none"), &root).1);
+    }
+
+    /// A line whose only profile is `target/release`: the build script of a crate prints an absolute path
+    /// of the project, and the test binary of a test is in `target/release/deps`.
+    fn release_only_root(n: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("layr-doctor-release-{n}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let rel = root.join("target/release");
+        std::fs::create_dir_all(rel.join(".fingerprint")).unwrap();
+        std::fs::create_dir_all(rel.join("build/pkg-0a1b2c3d4e5f6a7b")).unwrap();
+        std::fs::create_dir_all(rel.join("deps")).unwrap();
+        std::fs::write(
+            rel.join("build/pkg-0a1b2c3d4e5f6a7b/output"),
+            format!("cargo:rerun-if-changed={}/schema/api.json\n", root.display()),
+        )
+        .unwrap();
+        std::fs::write(rel.join("deps/tname-0123456789abcdef"), vec![0u8; 1234]).unwrap();
+        root
+    }
+
+    #[test]
+    fn profile_dirs_finds_every_profile_folder() {
+        let t = std::env::temp_dir().join(format!("layr-doctor-profiles-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        for p in ["debug", "release", "aarch64-x/release", "retest/debug", "retest/aarch64-x/release"] {
+            std::fs::create_dir_all(t.join(p).join(".fingerprint")).unwrap();
+        }
+        std::fs::create_dir_all(t.join("retest/notes/deps")).unwrap();
+        std::fs::create_dir_all(t.join("doc/crate/src")).unwrap();
+        let got: BTreeSet<String> = profile_dirs(&t).iter().map(|p| p.strip_prefix(&t).unwrap().display().to_string()).collect();
+        let _ = std::fs::remove_dir_all(&t);
+        let want: BTreeSet<String> = ["debug", "release", "aarch64-x/release", "retest/debug", "retest/aarch64-x/release"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(got.difference(&want).count(), 0, "{got:?}");
+        assert_eq!(want.difference(&got).count(), 0, "{got:?}");
+    }
+
+    #[test]
+    fn rerun_rule_reads_a_release_only_target() {
+        let root = release_only_root("rerun");
+        let mut f = Vec::new();
+        rerun_checks(&root, &mut f);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(f.iter().any(|x| x.warn && x.text.contains("absolute rerun-if-changed")), "{f:?}");
+    }
+
+    #[test]
+    fn test_size_rule_reads_a_release_only_target() {
+        let root = release_only_root("size");
+        let size = test_binary_size(&root, "tname");
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(size, Some(1234));
     }
 
     #[test]
