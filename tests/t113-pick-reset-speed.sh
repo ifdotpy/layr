@@ -91,4 +91,62 @@ eq "equal-tree reset back keeps the time of a file" "$OLD" "$(mt keep.txt)"
 echo dirty > keep.txt
 l reset -q --hard "$BASE"
 eq "reset --hard with a local edit restores the content" "keep" "$(cat keep.txt)"
+
+# Undo right after a fast pick restores the head, the files and the line git HEAD.
+l line new -q undo "$BASE"
+cd $M/undo || exit 1
+echo other > other.txt
+l add other.txt >/dev/null && l save -qm other3 >/dev/null
+UNDO_HEAD=$(l rev-parse head)
+UNDO_GIT=$(cat .git/HEAD)
+mkdir -p $T/undo-before && (tar cf - --exclude=.git . | tar xf - -C $T/undo-before)
+LAYR_TRACE=1 l pick -q "$CHANGE" 2> $T/trace-undo.txt
+if [ "$(uname -s)" = Darwin ]; then
+    has "the undo case is a fast pick" "pick visits" "$(cat $T/trace-undo.txt)"
+fi
+l undo >/dev/null
+eq "undo restores the head" "$UNDO_HEAD" "$(l rev-parse head)"
+eq "undo restores the git HEAD" "$UNDO_GIT" "$(cat .git/HEAD)"
+eq "undo restores the files" "" "$(diff -r -x .git $T/undo-before $M/undo)"
+eq "status after undo is clean" "" "$(l status -s)"
+
+# A fast pick on a line with local changes takes the merge path.
+l line new -q dirty "$BASE"
+cd $M/dirty || exit 1
+echo other > other.txt
+l add other.txt >/dev/null && l save -qm other4 >/dev/null
+echo local > other.txt
+LAYR_TRACE=1 l pick -q "$CHANGE" 2> $T/trace-dirty.txt
+if [ "$(uname -s)" = Darwin ]; then
+    has "a pick with local changes takes the merge path" "declined: local change" "$(cat $T/trace-dirty.txt)"
+fi
+eq "the local edit stays in the file" "local" "$(cat other.txt)"
+eq "the picked edit is in the work folder" "changed" "$(cat notes.txt)"
+
+# A pick of a complete state saved with caches keeps the overlays and passes fsck.
+l line new -q attrs "$BASE"
+cd $M/attrs || exit 1
+printf 'node_modules regenerable\n' > .layrattributes
+printf 'node_modules/\n' >> .gitignore
+l add .layrattributes .gitignore >/dev/null && l save -qm attributes >/dev/null
+ATTRS=$(l rev-parse head)
+l line new -q cached "$ATTRS"
+cd $M/cached || exit 1
+mkdir -p node_modules && echo cache > node_modules/pkg.js
+l save -q --caches >/dev/null
+echo changed-cache > notes.txt
+l save -qam cached-change >/dev/null
+CACHED=$(l rev-parse head)
+l line new -q cdst "$ATTRS"
+cd $M/cdst || exit 1
+echo other > other.txt
+l add other.txt >/dev/null && l save -qm other5 >/dev/null
+LAYR_TRACE=1 l pick -q "$CACHED" 2> $T/trace-cache.txt
+if [ "$(uname -s)" = Darwin ]; then
+    has "the cache case is a fast pick" "pick visits" "$(cat $T/trace-cache.txt)"
+fi
+ok "fsck passes after that pick" l fsck
+eq "the cache content stays" "cache" "$(cat node_modules/pkg.js)"
+has "the cache overlay is listed" "node_modules" "$(l overlay list)"
+eq "the picked edit is in the work folder" "changed-cache" "$(cat notes.txt)"
 finish

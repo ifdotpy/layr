@@ -1489,7 +1489,9 @@ fn thin_pick(ctx: &Ctx, repo: &Repo, line: &Line, pick: &str, picked_from: bool)
         state: id.clone(), kind: "pick".into(), source: pick.into(),
         target_line: Some(line.id.clone()), target_head: line.head.clone(),
     }});
-    repo.move_head(ctx, "cherry-pick", &line, &id, vec![st], None, data)?;
+    // The working folder was clean, so its content before the pick is the head: undo reverts the
+    // working content of the pick with it (deleted files come back).
+    repo.move_head(ctx, "cherry-pick", &line, &id, vec![st], Some(line.head.clone()), data)?;
     Ok(Some(id))
 }
 
