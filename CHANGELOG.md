@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.17.0](https://github.com/ifdotpy/layr/compare/v0.16.2...v0.17.0) (2026-11-03)
+
+
+### Features
+
+* layr follow, and the daemon on macOS ([#148](https://github.com/ifdotpy/layr/issues/148)) ([1aaf38d](https://github.com/ifdotpy/layr/commit/1aaf38de979823c0c3f258134015cacfaa622445))
+* **retest:** init sets up a project, one build env, and a gate runner ([#149](https://github.com/ifdotpy/layr/issues/149)) ([7c3b58c](https://github.com/ifdotpy/layr/commit/7c3b58cd7d9be7147c6f4646ec58f5c14c3e412b))
+
+
+### Bug Fixes
+
+* **daemon:** Do not log a closed connection after hello as a bad request ([#156](https://github.com/ifdotpy/layr/issues/156)) ([0686bff](https://github.com/ifdotpy/layr/commit/0686bff8fb5625b359f3a7a431347c956657232e)), closes [#154](https://github.com/ifdotpy/layr/issues/154)
+* **gc:** Evict only restorable states from a current store copy ([#120](https://github.com/ifdotpy/layr/issues/120)) ([2edb169](https://github.com/ifdotpy/layr/commit/2edb169bcbc2cea81b74c0e507989180f2fd4eb7))
+* **retest:** sweep removes everything outside the live set ([#153](https://github.com/ifdotpy/layr/issues/153)) ([74394ee](https://github.com/ifdotpy/layr/commit/74394ee29eb053ae15fbbe42f69f527d8a1aac01))
+* Stop undo before file changes when a state is missing; keep line paths consistent on a failed move ([#147](https://github.com/ifdotpy/layr/issues/147)) ([e121697](https://github.com/ifdotpy/layr/commit/e121697a75f8c4d4c1d1dbe7e5fb8998f0d3e0b5))
+
 ## [0.16.2](https://github.com/ifdotpy/layr/compare/v0.16.1...v0.16.2) (2026-11-03)
 
 
