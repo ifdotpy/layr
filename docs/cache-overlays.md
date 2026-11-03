@@ -255,7 +255,9 @@ Built on 2026-10-27: folder overlays and caches as cache overlays. Tests:
   else the newest cache of the line that made the state. A state imported from Git has no line,
   so without `cache_of` the walk ends at an old state of another line and takes its old cache. A cache overlay goes into a new line only while
   its folder is a cache path there (`regenerable`) and the ignore rules ignore it.
-  Without a cache overlay state, the old caches of the state apply as before.
+  Without a cache overlay state, the old caches of the state apply as before. With one, the
+  cache overlay state replaces an old cache of the state (`states/<id>@<folder>`) or a copy the
+  state holds: the new line gets the newest cache overlay state.
 - `layr merge <line>` then brings the merged line's caches into the target (section 5): a
   fast-forward of the target's overlay line, or a `union-theirs` state; the incoming files are
   copied over the target's folder; an empty folder gets one snapshot. A failure here is a

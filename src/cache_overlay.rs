@@ -384,8 +384,9 @@ impl<'a> Repo<'a> {
     }
 
     /// Put the cache overlays into the new working folder `w` of `line` (made from `start`, or
-    /// from the line `source`): each folder overlay whose folder the ignore rules ignore and the
-    /// state does not hold gets a writable snapshot of its cache state, and the line gets an
+    /// from the line `source`): each folder overlay whose folder the ignore rules ignore gets a
+    /// writable snapshot of its cache state unless the state holds files there (it replaces an old
+    /// cache of the state), and the line gets an
     /// overlay line at that state. Returns the folders that got a cache.
     pub fn take_caches(&self, ctx: &Ctx, line: &Line, start: &str, source: Option<&Line>, w: &Path) -> Result<Vec<String>> {
         let mut taken = Vec::new();
@@ -396,7 +397,11 @@ impl<'a> Repo<'a> {
         let (uid, gid) = self.owner_ids(line);
         let (regenerable, setting) = (Rules::attribute(w, "regenerable"), self.p.config_strings("regenerable"));
         for (name, folder) in self.folder_overlays()? {
-            if crate::repo::holds_files(w, &folder) || !ignored.ignored(&folder, true) {
+            // Versioned files win: a folder that the start state holds files in comes from the
+            // state. Otherwise the cache below replaces what the folder holds now: an old cache
+            // of the state (`states/<id>@<folder>`, applied before), else the line would start
+            // with that stale copy.
+            if !ignored.ignored(&folder, true) || crate::repo::holds_files(&self.state_root(start)?, &folder) {
                 continue;
             }
             // A cache overlay only while the folder is a cache path of the new line (its
