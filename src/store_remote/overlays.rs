@@ -594,7 +594,7 @@ pub(super) fn fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, repor
             op.import_lines(&records.lines, crate::store::Trust::All)?;
             op.reload_id()?;
         }
-        let mut orepo = Repo { p: op };
+        let mut orepo = Repo { p: op, ctx: None };
         for (machine, key) in &records.keys {
             crate::cmd::replicate::trust(ctx, &orepo.p, machine, &hex::encode(key.to_bytes()))?;
         }
