@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.18.0](https://github.com/ifdotpy/layr/compare/v0.17.0...v0.18.0) (2026-11-03)
+
+
+### Features
+
+* **retest:** doctor flags build scripts that watch .git ([#160](https://github.com/ifdotpy/layr/issues/160)) ([bb0b37b](https://github.com/ifdotpy/layr/commit/bb0b37b6f427cf4ee4978cdd70505ed802761e38))
+
+
+### Bug Fixes
+
+* **init:** Leave no partial project after a failed init ([#155](https://github.com/ifdotpy/layr/issues/155)) ([f1580ad](https://github.com/ifdotpy/layr/commit/f1580add4ceb776d87f7f1f8b3f25501ec9af61d))
+* **retest:** keep incremental sessions and their locks for live units; doctor checks every profile ([#162](https://github.com/ifdotpy/layr/issues/162)) ([34c2780](https://github.com/ifdotpy/layr/commit/34c278049f38b8f42df426daa44e14a2c36ab096))
+
 ## [0.17.0](https://github.com/ifdotpy/layr/compare/v0.16.2...v0.17.0) (2026-11-03)
 
 
