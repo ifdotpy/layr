@@ -863,7 +863,18 @@ fn copy_entry_impl(
             });
         }
     }
-    let (d, cloned) = match t.open_write(dst_rel)? {
+    let existing = t.open_write(dst_rel)?;
+    // A file with another link (cargo hard-links an uplifted library to its deps file) gets a new
+    // inode by rename: a write in place would change the content and time of every other link.
+    if let Some(old) = &existing {
+        if old.metadata()?.nlink() > 1 {
+            return t.replace_file_atomic(dst_rel, |d| {
+                fill(d)?;
+                finish(d)
+            });
+        }
+    }
+    let (d, cloned) = match existing {
         Some(d) => {
             d.set_len(0)?;
             (d, false)
@@ -1388,8 +1399,30 @@ mod range_tests {
 
 #[cfg(test)]
 mod write_tests {
-    use super::{atomic_write, cache_write};
+    use super::{atomic_write, cache_write, copy_entry};
     use std::fs;
+    use std::os::unix::fs::MetadataExt;
+
+    /// A copy over a file with a second link (cargo hard-links an uplifted library to its deps
+    /// file) must leave the other link as it was: the copied file is a new inode.
+    #[test]
+    fn a_copy_over_a_hard_link_leaves_the_other_link() {
+        let dir = std::env::temp_dir().join(format!("layr-copy-link-{}", crate::ids::new_id()));
+        let (src, dst) = (dir.join("src"), dir.join("dst"));
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dst).unwrap();
+        fs::write(src.join("lib"), b"new content").unwrap();
+        fs::write(dst.join("lib"), b"old content").unwrap();
+        fs::hard_link(dst.join("lib"), dst.join("deps")).unwrap();
+        let before = fs::metadata(dst.join("deps")).unwrap();
+        copy_entry(src.as_path(), "lib", &dst, "lib", None).unwrap();
+        assert_eq!(fs::read(dst.join("lib")).unwrap(), b"new content");
+        assert_eq!(fs::read(dst.join("deps")).unwrap(), b"old content");
+        let after = fs::metadata(dst.join("deps")).unwrap();
+        assert_eq!((after.mtime(), after.mtime_nsec()), (before.mtime(), before.mtime_nsec()));
+        assert_eq!(fs::metadata(dst.join("lib")).unwrap().nlink(), 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     /// A rename onto a non-empty folder fails after the temporary file exists. The failed write
     /// must leave no `.<name>.tmp-*` file behind, for the durable and the cache write alike.
