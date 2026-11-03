@@ -343,7 +343,9 @@ pub fn recover(root: &Path) -> Result<()> {
         if e.plain {
             continue;
         }
-        if !mounted(path)? {
+        let was = mounted(path)?;
+        let _t = crate::trace::span(format!("overlay recover {} mounted={was} plain={}", path.display(), e.plain));
+        if !was {
             fs::create_dir_all(path)?;
             state.mount(path, e)?;
         }
@@ -859,6 +861,8 @@ pub fn snapshot(src: &Path, dst: &Path, readonly: bool) -> Result<()> {
     }
     state.registry.trees.insert(dst.clone(), entry.clone());
     state.save()?;
+    let mounted_now = mounted(&dst).unwrap_or(false);
+    let _t = crate::trace::span(format!("overlay snapshot {} mounted after publish={mounted_now}", dst.display()));
     if let Err(e) = state.mount(&dst, &entry) {
         state.registry.trees.remove(&dst);
         state.save()?;

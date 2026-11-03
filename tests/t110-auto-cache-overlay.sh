@@ -76,8 +76,11 @@ states_of_cache() { ls "$LAYR_ROOT/projects/r/meta/overlays/cache.target/states"
 states_before=$(states_of_cache)
 before=$(store_bytes)
 l line new -q warm2 main
+echo "info: mountinfo after warm2: $(grep -c 'warm2/target' /proc/self/mountinfo)"
 l line new -q warm3 main
+echo "info: mountinfo after warm3: $(grep -c 'warm2/target' /proc/self/mountinfo)"
 after=$(store_bytes)
+echo "info: mountinfo after du: $(grep -c 'warm2/target' /proc/self/mountinfo)"
 echo "info: store growth of two new lines from main: $((after - before)) bytes"
 echo "info: layr du after the two new lines:"; l du 2>&1 | sed "s/^/info: /"
 echo "info: id $(id -u) owners: $(stat -c "%u:%g %a %n" $P/target/blob.bin $LAYR_ROOT/projects/r/lines/warm2/target/blob.bin 2>&1 | tr "\n" " ")"; mountpoint -q $LAYR_ROOT/projects/r/lines/warm2/target && echo "info: warm2 target is a mount"
