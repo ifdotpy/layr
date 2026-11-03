@@ -759,6 +759,7 @@ pub fn merge(ctx: &Ctx, args: &[String]) -> Result<i32> {
 fn caches_only(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str, quiet: bool) -> Result<i32> {
     let theirs = repo.p.db.line_by_name(rev)?.ok_or_else(|| exit(1, format!("error: '{rev}' is not a line")))?;
     let theirs = repo.localize(theirs)?;
+    repo.hold(repo.pin(&[&theirs.head, &line.head])?);
     // No head moves, so the reviewed-state rule of a protected line does not apply.
     repo.authorize_line(ctx, line, crate::repo::LineOp::Merge { expect: true, hint: None })?;
     let lock = repo.p.lock()?;
@@ -796,12 +797,14 @@ fn caches_contained(repo: &Repo, line: &Line, theirs: &Line) -> Result<Option<St
         let Some(ol) = orepo.p.db.line_by_name(&Repo::overlay_line_name(&info, &theirs.id, theirs.owner))? else {
             continue;
         };
+        orepo.hold(orepo.pin(&[ol.head.as_str()])?);
         let Some(saved) = orepo.p.db.state(&ol.head)?.and_then(|s| s.cache_of) else {
             return Ok(Some(format!(
                 "the cache of {} names no project state; run `layr save --caches` in {} first",
                 theirs.name, theirs.name
             )));
         };
+        repo.hold(repo.pin(&[saved.as_str()])?);
         let Some(base) = repo.merge_base(&saved, &line.head)? else {
             return Ok(Some(format!("the cache of {} and line '{}' have no common state", theirs.name, line.name)));
         };
