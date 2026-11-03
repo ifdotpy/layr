@@ -1316,7 +1316,7 @@ pub fn fiemap_visit(root: &Path, f: &mut dyn FnMut(&Held)) -> Result<()> {
         let entries = match fs::read_dir(dir) {
             Ok(v) => v,
             Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Ok(()),
-            Err(e) => return Err(anyhow!("{}: {e}", dir.display())),
+            Err(e) => return Err(e).with_context(|| dir.display().to_string()),
         };
         for e in entries {
             let e = e?;
@@ -1334,7 +1334,7 @@ pub fn fiemap_visit(root: &Path, f: &mut dyn FnMut(&Held)) -> Result<()> {
                         f(&Held { alloc, own, exclusive: 0, shared: &shared });
                     }
                     Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {}
-                    Err(err) => return Err(anyhow!("{}: {err}", e.path().display())),
+                    Err(err) => return Err(err).with_context(|| e.path().display().to_string()),
                 }
             }
         }

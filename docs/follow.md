@@ -50,10 +50,22 @@ A failed cache step does not undo the merge. Its text is part of the result.
 
 ## Install on macOS
 
+    # The store your layr commands use. Empty means the default store:
+    export LAYR_ROOT="${LAYR_ROOT:-$HOME/Library/Application Support/layr}"
     cp packaging/launchd/ws.layr.daemon.plist ~/Library/LaunchAgents/
+    plutil -replace EnvironmentVariables.LAYR_ROOT -string "$LAYR_ROOT" ~/Library/LaunchAgents/ws.layr.daemon.plist
     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ws.layr.daemon.plist
 
+`LAYR_ROOT` must be the store your commands use. launchd gives the daemon no shell environment; without
+it the daemon opens `~/Library/Application Support/layr`, and `layr follow` passes do nothing for your
+store. After an earlier install, stop the agent first (below) and bootstrap again.
+The daemon log's first line names the store (`... (store <root>)`).
+
 Logs: `~/Library/Logs/layr-daemon.log`. Stop: `launchctl bootout gui/$(id -u)/ws.layr.daemon`.
+
+`layr follow` prints one warning line when no daemon of this user serves the store: none runs, or
+a daemon serves another store (follow passes then run only on `layr follow --run`). A daemon
+built before the store root was reported prints `the layr daemon runs an older build; restart it`.
 
 ## Linux
 
