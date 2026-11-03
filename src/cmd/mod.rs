@@ -7,6 +7,7 @@ pub mod branch;
 pub mod change;
 pub mod checks;
 pub mod du;
+pub mod followcmd;
 pub mod history;
 pub mod layerpush;
 pub mod mergecmd;
@@ -208,6 +209,7 @@ Remotes:
 Git bridge:
    git remote, fetch, pull, push, clone, sync
    queue add/list/remove/run
+   follow [<remote>/<branch> | --run | --remove]
 Overlays (files with their own readers and history, shown in lines):
    overlay create, set, list, readers, use, move, remote, log, show, diff, grep, ls-files
 Projects and machines:
@@ -229,7 +231,7 @@ pub const COMMANDS: &[&str] = &[
     "checks", "ref", "release", "queue", "request", "requests", "view", "attest", "attestations", "change", "comment", "probe",
     "gc", "du", "fsck", "reindex", "init", "projects", "machines", "debug", "config", "cache", "layer", "remote", "fetch", "pull",
     "push", "git-sync", "git", "clone", "overlay", "export", "sync", "serve-peer", "worktree", "branch", "commit", "stash",
-    "cherry-pick", "rebase", "revert", "checkout", "switch", "person", "mount", "daemon",
+    "cherry-pick", "rebase", "revert", "checkout", "switch", "person", "mount", "daemon", "follow",
 ];
 
 pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
@@ -330,6 +332,7 @@ pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
         "config" => admin::config(ctx, &rest),
         "layer" => Err(exit(1, "this command was removed; use 'layr overlay list'")),
         "remote" => remote::remote(ctx, &rest),
+        "follow" => followcmd::follow(ctx, &rest),
         "fetch" => remote::fetch(ctx, &rest),
         "pull" => remote::pull(ctx, &rest),
         "push" => remote::push(ctx, &rest),

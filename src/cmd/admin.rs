@@ -1271,9 +1271,8 @@ pub fn trash_excess_caches(repo: &Repo) -> Result<Vec<String>> {
     Ok(out)
 }
 
-/// `layr gc --all-projects`: the retention of every project of the store, for a periodic run
-/// (`packaging/launchd/ws.layr.gc.plist`). A project that fails does not stop the others; the
-/// exit code is 1 then.
+/// `layr gc --all-projects`: the retention of every project of the store, for a run by hand. A
+/// project that fails does not stop the others; the exit code is 1 then.
 fn gc_all_projects(ctx: &Ctx, dry: bool, quiet: bool) -> Result<i32> {
     let mut code = 0;
     for name in ctx.store.project_names()?.into_iter().filter(|n| !n.contains('%')) {
