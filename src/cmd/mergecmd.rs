@@ -1345,7 +1345,6 @@ fn pick(ctx: &Ctx, args: &[String], revert: bool) -> Result<i32> {
     r
 }
 
-<<<<<<< head
 /// Leaves a pick to the merge; the trace names the reason.
 #[cfg(target_os = "macos")]
 fn declined(reason: &str) -> Result<Option<String>> {
@@ -1498,8 +1497,8 @@ fn thin_pick(ctx: &Ctx, repo: &Repo, line: &Line, pick: &str, picked_from: bool)
     // working content of the pick with it (deleted files come back).
     repo.move_head(ctx, "cherry-pick", &line, &id, vec![st], Some(line.head.clone()), data)?;
     Ok(Some(id))
-||||||| base
-=======
+}
+
 /// The uncommitted paths that a pick kept: the names of the first 20, then the count of the rest.
 fn kept_message(paths: &std::collections::BTreeSet<String>) -> String {
     let names: Vec<&str> = paths.iter().take(20).map(String::as_str).collect();
@@ -1509,7 +1508,6 @@ fn kept_message(paths: &std::collections::BTreeSet<String>) -> String {
         text.push_str(&format!(", and {more} more"));
     }
     text
->>>>>>> origin/main
 }
 
 pub fn cherry_pick(ctx: &Ctx, args: &[String]) -> Result<i32> {
