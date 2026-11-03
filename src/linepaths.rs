@@ -136,7 +136,8 @@ pub fn register(root: &Path) {
 pub fn register_with(root: &Path, extra: Option<&Path>) {
     #[cfg(feature = "overlayfs")]
     {
-        let mut folders: Vec<PathBuf> = index(root).into_iter().map(|e| e.path).collect();
+        // The project files are the authority: a store whose index lacks an entry still opens.
+        let mut folders = moved_folders(root);
         folders.extend(extra.map(Path::to_path_buf));
         crate::storage::set_external(root, folders);
     }

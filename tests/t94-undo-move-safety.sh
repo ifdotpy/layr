@@ -35,6 +35,8 @@ drop_tree() {
             rm -rf "$d"
         fi
     done
+    # On OverlayFS a state is a mount that rm does not drop: gc evicts the copy the store holds.
+    if on_disk "$1"; then l config gc.evict on >/dev/null; l gc -q >/dev/null; fi
 }
 tree_sum() { (cd "$1" && find . -path ./.git -prune -o -type f -print | sort | xargs cksum); }
 
