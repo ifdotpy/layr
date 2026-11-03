@@ -100,7 +100,12 @@ if [ "$(id -u)" = 0 ]; then
 fi
 
 # The copy and its verification (copy_project verifies the copy too).
-check "copy the project" "$LAYR" __project-copy $P $D/p
+out=$("$LAYR" __project-copy $P $D/p 2>&1); rc=$?
+echo "  output: $out"
+if [ "$rc" -eq 0 ]; then PASS=$((PASS + 1)); echo "PASS copy the project"; else FAIL=$((FAIL + 1)); echo "FAIL copy the project"; fi
+# The timings go into the last line: run.sh prints only that line for a passing file.
+COPY_MS=$(echo "$out" | j copy_ms 2>/dev/null)
+VERIFY_MS=$(echo "$out" | j verify_ms 2>/dev/null)
 no "the copy has no unfinished marker" test -e $D/p/.layr-copy-in-progress
 check "verify the copy" "$LAYR" __project-verify $P $D/p
 no "the source has no temporary snapshots" test -e $P/meta/.layr-copy-tmp
@@ -139,4 +144,5 @@ check "the next call finishes the copy" "$LAYR" __project-copy $P $D/killed
 no "the finished copy has no marker" test -e $D/killed/.layr-copy-in-progress
 check "the finished copy verifies" "$LAYR" __project-verify $P $D/killed
 
-finish
+echo "$(basename "$0"): copy ${COPY_MS:-?} ms, verify ${VERIFY_MS:-?} ms; $PASS passed, $FAIL failed"
+[ "$FAIL" -eq 0 ]

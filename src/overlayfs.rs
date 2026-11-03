@@ -1724,7 +1724,8 @@ fn target_home(dst: &Path) -> Result<PathBuf> {
 }
 
 /// Owner, mode, extended attributes and time of a copied entry (the time last, after the entries
-/// of a folder). Overlay attributes (`trusted.overlay.*`) are copied too: they define the layer.
+/// of a folder). Overlay attributes (`trusted.overlay.*`) are copied too: opaque and redirect
+/// define the layer. The origin handle is left out (see below).
 fn set_meta(src: &Path, dst: &Path, m: &fs::Metadata) -> Result<()> {
     set_owner(dst, m)?;
     if m.file_type().is_symlink() {
@@ -1732,6 +1733,11 @@ fn set_meta(src: &Path, dst: &Path, m: &fs::Metadata) -> Result<()> {
     }
     fs::set_permissions(dst, fs::Permissions::from_mode(m.mode() & 0o7777))?;
     for (name, value) in sys::overlay_xattrs(src)? {
+        // The origin is a file handle of the source file system: stale on the copy, and the
+        // mount rebuilds it (index=on) instead of reading it.
+        if name == b"trusted.overlay.origin" {
+            continue;
+        }
         sys::overlay_attribute(dst, &std::ffi::CString::new(name)?, Some(&value))?;
     }
     sys::overlay_mtime(dst, m.mtime(), m.mtime_nsec())?;
