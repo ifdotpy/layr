@@ -2614,7 +2614,7 @@ fn regenerable_by_walk(w: &Path) -> Result<Vec<String>> {
             children.push(rel);
         }
         enter
-    });
+    })?;
     let (regenerable, ignored) = (
         Rules::limited(w, Some("regenerable"), rule_dirs.clone()),
         Rules::limited(w, None, rule_dirs),
@@ -2671,6 +2671,7 @@ pub fn begin_command() {
 }
 
 /// Whether a list of regenerable folders is held (for tests).
+#[cfg(test)]
 pub fn regenerable_memo_is_set() -> bool {
     REGENERABLE.with(|m| m.borrow().is_some())
 }
@@ -3101,6 +3102,27 @@ mod regenerable_memo_tests {
     use super::*;
 
     #[test]
+    #[test]
+    fn a_folder_the_walk_cannot_read_is_an_error_not_a_short_list() -> Result<()> {
+        // Root reads every folder: the test needs a folder that its owner cannot open.
+        if rustix::process::geteuid().is_root() {
+            return Ok(());
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("layr-regen-unreadable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("locked/target"))?;
+        std::fs::create_dir_all(root.join("a/target"))?;
+        std::fs::write(root.join(".gitignore"), "target/\n")?;
+        std::fs::write(root.join(".layrattributes"), "target regenerable\n")?;
+        std::fs::set_permissions(root.join("locked"), std::fs::Permissions::from_mode(0o000))?;
+        let found = regenerable_by_walk(&root);
+        std::fs::set_permissions(root.join("locked"), std::fs::Permissions::from_mode(0o755))?;
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(found.is_err(), "the walk returned a short list: {found:?}");
+        Ok(())
+    }
+
     fn a_new_command_does_not_read_the_list_of_an_earlier_command() -> Result<()> {
         let w = Path::new("/layr-test/regenerable-memo/w");
         set_regenerable_memo(w, vec!["target".to_string()]);
