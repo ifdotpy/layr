@@ -395,6 +395,12 @@ fn hash_env(root: &Path) -> Result<Vec<(String, String)>> {
         env.push(("RUSTC_WRAPPER".to_string(), String::new()));
     }
     env.extend(debug_vars(std::env::var(LINE_TABLES_VAR).ok().as_deref()).into_iter().map(|(k, v)| (k.to_string(), v.to_string())));
+    // macOS keeps the codegen objects of each unit in `deps` (`unpacked` is its default split-debuginfo). The sweep
+    // finds the live incremental folders by hard links to those objects, and Linux (`off`) keeps none. So the
+    // units build with `unpacked` on every OS.
+    for profile in ["DEV", "TEST"] {
+        env.push((format!("CARGO_PROFILE_{profile}_SPLIT_DEBUGINFO"), "unpacked".to_string()));
+    }
     Ok(env)
 }
 
