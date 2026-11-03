@@ -450,18 +450,14 @@ impl Copier {
             snapshot(src, &snap, true)?;
             (snap, Some(dir))
         };
-        // Clone sources share the extents: the receiver clones them. btrfs send cannot use the
-        // parent of a cache overlay state as a clone source ("parent determination failed"), so
-        // that one source is left out for overlay states.
+        // Clone sources share the extents: the receiver clones them. btrfs send fails with
+        // "parent determination failed" when a cache overlay state uses a state of an overlay as
+        // clone source. Overlay states are therefore sent alone and are no clone source, as
+        // replication sends caches.
         let overlay = src.ancestors().skip(1).any(|a| {
             a.file_name().is_some_and(|n| n == "overlays") && a.parent().and_then(|p| p.file_name()).is_some_and(|n| n == "meta")
         });
-        let clones: Vec<PathBuf> = self
-            .sent
-            .iter()
-            .filter(|(u, _)| !(overlay && Some(u.as_str()) == info.parent_uuid.as_deref()))
-            .map(|(_, p)| p.clone())
-            .collect();
+        let clones: Vec<PathBuf> = if overlay { Vec::new() } else { self.sent.iter().map(|(_, p)| p.clone()).collect() };
         let inbox = dst.parent().context("subvolume target has no parent")?.join(format!(".layr-copy-in-{serial}"));
         fs::create_dir(&inbox).with_context(|| format!("create {}", inbox.display()))?;
         let mut sender = Command::new("btrfs");
@@ -504,7 +500,9 @@ impl Copier {
         }
         if info.readonly {
             set_readonly(dst)?;
-            self.sent.push((info.uuid.clone(), src.to_path_buf()));
+            if !overlay {
+                self.sent.push((info.uuid.clone(), src.to_path_buf()));
+            }
         }
         if let Some(dir) = temp {
             delete_tree(&send)?;
