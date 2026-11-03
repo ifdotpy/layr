@@ -227,12 +227,19 @@ pub fn move_project(store: &Store, project: &str, volume: &str) -> Result<Moved>
         bail!("{} already exists; nothing was changed", dst.display());
     }
 
+    let _t = crate::trace::begin(format!("project move {project}: move lock"));
     let _moves = move_lock(root, true)?;
+    drop(_t);
+    let _t = crate::trace::begin(format!("project move {project}: open the project"));
     let handle = Project::open(store, project)?;
+    drop(_t);
+    let _t = crate::trace::begin(format!("project move {project}: project lock"));
     let _lock = handle.lock()?;
+    drop(_t);
     let moved = handle.moved_paths();
     let mut watch = vec![src.clone()];
     watch.extend(moved.values().cloned());
+    let _t = crate::trace::begin(format!("project move {project}: working folders in use"));
     if let Some((pid, path)) = in_use(&watch)? {
         bail!("project '{project}' is in use: process {pid} works in {}; stop it and run the move again", path.display());
     }
@@ -253,7 +260,9 @@ pub fn move_project(store: &Store, project: &str, volume: &str) -> Result<Moved>
     fsutil::atomic_write(&journal_of(root, project), &serde_json::to_vec(&journal)?, 0o600)?;
 
     let copied = (|| -> Result<CopyReport> {
+        let _t = crate::trace::begin(format!("project move {project}: copy and verify"));
         let copy = project_copy::copy_project(&src, &dst, |_| {})?;
+        let _t = crate::trace::begin(format!("project move {project}: git objects of the copy"));
         rewrite_lines(&dst, &objects_of(&src), &objects_of(&dst))?;
         Ok(copy)
     })();
@@ -267,6 +276,7 @@ pub fn move_project(store: &Store, project: &str, volume: &str) -> Result<Moved>
     };
     hook("copy");
 
+    let _t = crate::trace::begin(format!("project move {project}: switch record"));
     if let Err(e) = volumes::reassign(root, machine, project, volume) {
         // The commit may have happened before the error: only a record that still names the source rolls back.
         if Layout::load(root, machine)?.volume_of(project) != volume {
@@ -291,12 +301,16 @@ fn finish(root: &Path, machine: &str, project: &str, from: &str, to: &str, src: 
     // The target must be usable: the project lives there now.
     layout.ready(to)?;
     // The target folder is live now: its project lock covers the rewrite.
+    let _t = crate::trace::begin(format!("project move {project}: target project lock"));
     let _lock = lock_folder(dst)?;
+    drop(_t);
+    let _t = crate::trace::begin(format!("project move {project}: git objects of moved lines"));
     let (old, new) = (objects_of(src), objects_of(dst));
     rewrite_lines(dst, &old, &new)?;
     for line in moved_folders(dst) {
         rewrite_alternates(&line, &old, &new)?;
     }
+    let _t = crate::trace::begin(format!("project move {project}: remove the old folder"));
     if fs::symlink_metadata(src).is_ok() {
         let from_root = layout.ready(from).with_context(|| format!("the old folder of '{project}' stays until its volume is ready"))?;
         to_trash(&from_root, src)?;
@@ -327,6 +341,7 @@ fn recover_all(store: &Store) -> Result<()> {
         return Ok(());
     }
     // A move that runs holds the lock: its journal is not ours to resolve.
+    let _t = crate::trace::begin("project move recovery: check the journals");
     let Some(_moves) = move_lock(&store.root, false)? else { return Ok(()) };
     for path in journals {
         if let Err(e) = resolve(store, &path) {

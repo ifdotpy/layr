@@ -6,6 +6,8 @@
 # the switch finishes on the next command. Two more file systems: APFS images on macOS (attached as the user),
 # loop file systems on Linux (CI runs as root).
 . "$(dirname "$0")/lib.sh"
+# The move's steps print their start and end (LAYR_TRACE): a hang shows where it stops.
+export LAYR_TRACE=1
 
 if [ "$(uname -s)" = Darwin ]; then
     # Images and mount points live outside the test root: hdiutil cannot mount an image at a
@@ -112,7 +114,7 @@ no "an overlay is refused" l project move "p%target" fast
 ok "the refusals leave the project on main" test -d $P/lines/main
 eq "the refusals leave no record" "" "$(record_of p)"
 mkdir -p $FAST/projects/p
-out=$(cd $T && l project move p fast 2>&1); rc=$?
+out=$(set -o pipefail; cd $T && l project move p fast 2>&1 | tee /dev/stderr); rc=$?
 eq "a target with a folder of the same name is refused" 1 "$([ "$rc" -ne 0 ] && echo 1 || echo 0)"
 has "the refusal says it exists" "already exists" "$out"
 rm -rf $FAST/projects/p
@@ -120,7 +122,7 @@ rm -rf $FAST/projects/p
 # A folder in use by a live process is refused.
 (cd $P/lines/c && exec sleep 60) & BUSY=$!
 sleep 1
-out=$(cd $T && l project move p fast 2>&1); rc=$?
+out=$(set -o pipefail; cd $T && l project move p fast 2>&1 | tee /dev/stderr); rc=$?
 ok "a folder in use is refused" test "$rc" -ne 0
 has "the refusal names the process" "in use" "$out"
 kill $BUSY 2>/dev/null; wait $BUSY 2>/dev/null
@@ -130,11 +132,11 @@ ok "the refused move leaves the project on main" test -d $P/lines/main
 # A volume that is not mounted is refused by name.
 l volume add slow "$SLOW" >/dev/null
 mkdir -p $SLOW/projects/p
-out=$(cd $T && l project move p slow 2>&1); rc=$?
+out=$(set -o pipefail; cd $T && l project move p slow 2>&1 | tee /dev/stderr); rc=$?
 ok "a target with a folder of the same name on another volume is refused" test "$rc" -ne 0
 rm -rf $SLOW/projects/p
 unmount slow
-out=$(cd $T && l project move p slow 2>&1); rc=$?
+out=$(set -o pipefail; cd $T && l project move p slow 2>&1 | tee /dev/stderr); rc=$?
 ok "a volume that is not mounted is refused" test "$rc" -ne 0
 has "the refusal names the volume" "volume 'slow'" "$out"
 remount slow
@@ -144,7 +146,7 @@ ok "the volume is usable again" l volume list
 NS=$("$LAYR" __project-space $P | json "d['need']")
 
 # The move.
-out=$(cd $T && l project move p fast 2>&1); rc=$?
+out=$(set -o pipefail; cd $T && l project move p fast 2>&1 | tee /dev/stderr); rc=$?
 eq "the move succeeds" 0 "$rc"
 has "the move reports the volumes" "from volume main to fast" "$out"
 ok "the old folder is gone" test ! -e $P
@@ -177,7 +179,7 @@ cd $T || exit 1
 # A crash after the copy: the project stays on main; the next command rolls back; a rerun completes.
 clone_project q || exit 1
 Q=$LAYR_ROOT/projects/q
-out=$(cd $T && LAYR_TEST_MOVE_EXIT_AFTER=copy "$LAYR" project move q fast 2>&1); rc=$?
+out=$(set -o pipefail; cd $T && LAYR_TEST_MOVE_EXIT_AFTER=copy "$LAYR" project move q fast 2>&1 | tee /dev/stderr); rc=$?
 eq "a crash after the copy exits" 3 "$rc"
 ok "the copy is on fast" test -d $FAST/projects/q
 ok "the project folder is intact on main" test -d $Q/lines/main
@@ -187,7 +189,7 @@ out=$(cd $Q/lines/main && l status 2>&1); rc=$?
 eq "the project works on main after the crash" 0 "$rc"
 no "the next command removes the partial copy" test -e $FAST/projects/q
 no "the next command removes the journal" test -e $LAYR_ROOT/project-moves/q.json
-out=$(cd $T && l project move q fast 2>&1); rc=$?
+out=$(set -o pipefail; cd $T && l project move q fast 2>&1 | tee /dev/stderr); rc=$?
 eq "a rerun completes the move" 0 "$rc"
 no "the old folder of q is gone" test -e $Q
 eq "the record names fast after the rerun" "fast" "$(record_of q)"
@@ -196,7 +198,7 @@ ok "q works on fast" sh -c "cd $FAST/projects/q/lines/main && $LAYR status >/dev
 # A crash after the switch: the next command finishes the move (the old folder goes).
 clone_project r || exit 1
 Rd=$LAYR_ROOT/projects/r
-out=$(cd $T && LAYR_TEST_MOVE_EXIT_AFTER=switch "$LAYR" project move r fast 2>&1); rc=$?
+out=$(set -o pipefail; cd $T && LAYR_TEST_MOVE_EXIT_AFTER=switch "$LAYR" project move r fast 2>&1 | tee /dev/stderr); rc=$?
 eq "a crash after the switch exits" 3 "$rc"
 eq "the record names fast after the switch" "fast" "$(record_of r)"
 ok "the old folder is still there before the next command" test -d $Rd

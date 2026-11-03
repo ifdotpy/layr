@@ -33,6 +33,16 @@ impl Drop for Span {
     }
 }
 
+/// Like `span`, and with `LAYR_TRACE` also prints the start: a step that never ends shows its
+/// start line, which `span` alone cannot show.
+pub fn begin(name: impl Into<String>) -> Option<Span> {
+    let name = name.into();
+    if std::env::var_os("LAYR_TRACE").is_some() {
+        eprintln!("trace begin {name}");
+    }
+    span(name)
+}
+
 /// Forget the kept steps (the store lock was just taken).
 pub fn reset() {
     STEPS.with(|s| s.borrow_mut().clear());

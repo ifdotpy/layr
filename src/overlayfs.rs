@@ -74,7 +74,7 @@ fn private_dir(path: &Path) -> Result<()> {
 fn lock_at(home: PathBuf) -> Result<Locked> {
     let lock = fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(home.join("lock"))?;
     {
-        let _wait = crate::trace::span("OverlayFS registry lock wait");
+        let _wait = crate::trace::begin(format!("OverlayFS registry lock wait {}", home.display()));
         rustix::fs::flock(&lock, rustix::fs::FlockOperation::LockExclusive)?;
     }
     let held = crate::trace::span("OverlayFS registry lock held");
@@ -101,15 +101,21 @@ fn external_home(path: &Path) -> Option<PathBuf> {
     e.1.iter().any(|f| path.starts_with(f)).then(|| e.0.clone())
 }
 fn lock(path: &Path) -> Result<Locked> {
+    lock_at(home_of(path)?)
+}
+/// The registry folder that manages `path`: the store's for a folder outside the store that
+/// `set_external` names, else the nearest folder with a registry. Two paths with the same
+/// folder share one lock, so a caller takes that lock once.
+fn home_of(path: &Path) -> Result<PathBuf> {
     if let Some(home) = external_home(&absolute(path)?) {
         private_dir(&home)?;
-        return lock_at(home);
+        return Ok(home);
     }
     for parent in absolute(path)?.ancestors() {
         let home = parent.join(".layr-overlayfs");
         if home.is_dir() {
             private_dir(&home)?;
-            return lock_at(home);
+            return Ok(home);
         }
     }
     bail!("no OverlayFS registry for {}", path.display())
@@ -1700,6 +1706,11 @@ fn copied_key(key: &Path, src: &Path, dst: &Path) -> Result<PathBuf> {
 /// The registry of the copy is the nearest registry above `dst`. A target without one gets a
 /// registry at its mount point (the copy's own store root for OverlayFS).
 fn target_home(dst: &Path) -> Result<PathBuf> {
+    // A volume that the store registry manages: its trees are registered there (see `lock`).
+    if let Some(home) = external_home(&absolute(dst)?) {
+        private_dir(&home)?;
+        return Ok(home);
+    }
     for p in dst.ancestors() {
         let home = p.join(".layr-overlayfs");
         if home.is_dir() {
@@ -1990,8 +2001,15 @@ impl Copier {
 pub(crate) fn verify_registry(src: &Path, dst: &Path) -> Result<()> {
     let src = absolute(src)?;
     let dst = absolute(dst)?;
-    let s = lock(&src)?;
-    let d = lock(&dst)?;
+    // One lock per registry folder: a copy on a volume that the store registry manages shares the
+    // source's lock, and a second flock on the same file from this process would wait forever.
+    let (src_home, dst_home) = (home_of(&src)?, home_of(&dst)?);
+    let s = lock_at(src_home.clone())?;
+    let other = if dst_home == src_home { None } else { Some(lock_at(dst_home)?) };
+    let dst_trees = match &other {
+        Some(d) => &d.registry.trees,
+        None => &s.registry.trees,
+    };
     let mut expected: BTreeMap<PathBuf, serde_json::Value> = BTreeMap::new();
     for (key, entry) in s.registry.trees.iter().filter(|(p, _)| p.starts_with(&src)) {
         let mut entry = entry.clone();
@@ -2000,9 +2018,7 @@ pub(crate) fn verify_registry(src: &Path, dst: &Path) -> Result<()> {
         }
         expected.insert(copied_key(key, &src, &dst)?, serde_json::to_value(&entry)?);
     }
-    let actual: BTreeMap<PathBuf, serde_json::Value> = d
-        .registry
-        .trees
+    let actual: BTreeMap<PathBuf, serde_json::Value> = dst_trees
         .iter()
         .filter(|(p, _)| p.starts_with(&dst))
         .map(|(p, e)| -> Result<(PathBuf, serde_json::Value)> { Ok((p.clone(), serde_json::to_value(e)?)) })
