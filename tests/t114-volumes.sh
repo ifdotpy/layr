@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos overlayfs
 # Volumes (`layr volume`): projects on file systems other than the store root. Two more file
 # systems: APFS images attached here as the user on macOS, loop file systems on Linux (CI runs as
 # root). A wrong identity or an unmounted volume refuses only its own projects.
