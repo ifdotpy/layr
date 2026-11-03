@@ -1,4 +1,8 @@
 //! Local store compatibility. This version is independent of encrypted remote formats.
+//!
+//! The volume files (`volumes.json`, `project-volumes.json` and each volume's `layr-volume.json`)
+//! carry their own `format`, checked when they are read (`volumes.rs`). A store without them stays
+//! at this format: no migration.
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};

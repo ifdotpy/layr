@@ -212,6 +212,7 @@ Layr talks to it as an ordinary remote.
 ## Documentation
 
 [Commands](docs/commands.md) ·
+[Volumes](docs/volumes.md) ·
 [Btrfs root snapshots](docs/btrfs-root-snapshots.md) ·
 [Review and delivery](docs/review.md) ·
 [Merging](docs/merge.md) ·

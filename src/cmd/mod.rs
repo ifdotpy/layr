@@ -22,6 +22,7 @@ pub mod replicate;
 pub mod requests;
 pub mod transfer;
 pub mod view;
+pub mod volume;
 pub mod work;
 
 use crate::ctx::{Ctx, Loc};
@@ -231,10 +232,11 @@ pub const COMMANDS: &[&str] = &[
     "checks", "ref", "release", "queue", "request", "requests", "view", "attest", "attestations", "change", "comment", "probe",
     "gc", "du", "fsck", "reindex", "init", "projects", "machines", "debug", "config", "cache", "layer", "remote", "fetch", "pull",
     "push", "git-sync", "git", "clone", "overlay", "export", "sync", "serve-peer", "worktree", "branch", "commit", "stash",
-    "cherry-pick", "rebase", "revert", "checkout", "switch", "person", "mount", "daemon", "follow",
+    "cherry-pick", "rebase", "revert", "checkout", "switch", "person", "mount", "daemon", "follow", "volume",
 ];
 
 pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
+    crate::repo::begin_command();
     let (cmd, rest) = match argv.first() {
         Some(c) => (c.as_str(), &argv[1..]),
         None => {
@@ -333,6 +335,7 @@ pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
         "layer" => Err(exit(1, "this command was removed; use 'layr overlay list'")),
         "remote" => remote::remote(ctx, &rest),
         "follow" => followcmd::follow(ctx, &rest),
+        "volume" => volume::volume(ctx, &rest),
         "fetch" => remote::fetch(ctx, &rest),
         "pull" => remote::pull(ctx, &rest),
         "push" => remote::push(ctx, &rest),

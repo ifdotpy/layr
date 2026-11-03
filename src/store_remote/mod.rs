@@ -983,7 +983,7 @@ mod pin_tests {
             env: Default::default(),
             out: std::cell::RefCell::new(Box::new(Vec::<u8>::new())),
         };
-        let dir = ctx.store.projects_dir().join("p");
+        let dir = ctx.store.project_dir("p").unwrap();
         std::fs::create_dir_all(dir.join("meta/db")).unwrap();
         let project_id = crate::ids::new_id();
         let mut repo = Repo {

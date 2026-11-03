@@ -83,7 +83,7 @@ pub fn finish_project(p: &Project) -> Result<usize> {
         free_queued(p)?
     };
     if !gone.is_empty() {
-        crate::store::kick_trash(&p.store.trash_dir());
+        crate::store::kick_trash(&p.trash_dir()?);
     }
     Ok(gone.len())
 }

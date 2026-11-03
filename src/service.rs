@@ -322,6 +322,7 @@ fn handle(sock: UnixStream, root: &Path, registry_uids: &[u32]) -> i32 {
 
 /// Run a command for a caller and return its exit code (errors are printed to stderr).
 pub fn run_as(argv: Vec<String>, caller: Caller, cwd: PathBuf, env: HashMap<String, String>, root: &Path) -> i32 {
+    crate::repo::begin_command();
     let store = match Store::open(root) {
         Ok(s) => s,
         Err(e) => {
@@ -472,7 +473,10 @@ pub fn daemon(args: &[String]) -> Result<i32> {
             bail!("the APFS service requires a volume with ownership enabled (diskutil enableOwnership <volume>)");
         }
         use std::os::unix::fs::MetadataExt;
-        for path in [&root, &root.join("machine"), &root.join("projects")] {
+        let mut paths = vec![root.clone(), root.join("machine"), root.join("projects")];
+        // The projects of the other volumes are store folders too.
+        paths.extend(crate::volumes::Layout::for_root(&root)?.ready_projects_dirs().into_iter().map(|(_, p)| p));
+        for path in &paths {
             if let Ok(m) = std::fs::symlink_metadata(path) {
                 if !m.is_dir() || m.uid() != 0 || m.mode() & 0o022 != 0 {
                     bail!(

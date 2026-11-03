@@ -439,7 +439,7 @@ pub mod git {
     }
 
     pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
-        let spec = Spec::new().value("-b|--branch").value("--owner").flag("-q|--quiet").value("--depth");
+        let spec = Spec::new().value("-b|--branch").value("--owner").value("--volume").flag("-q|--quiet").value("--depth");
         let a = parse(&spec, args)?;
         let url = a.pos.first().ok_or_else(|| exit(128, "usage: layr git clone <url> [<project>]"))?.clone();
         let name = match a.pos.get(1) {
@@ -454,6 +454,10 @@ pub mod git {
         if let Some(o) = a.get("--owner") {
             v.push("--owner".into());
             v.push(o.into());
+        }
+        if let Some(volume) = a.get("--volume") {
+            v.push("--volume".into());
+            v.push(volume.into());
         }
         if a.has("-q") {
             v.push("-q".into());
@@ -1107,6 +1111,7 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
         &Spec::new()
             .value("--paper-key")
             .value("--desk-prefix")
+            .value("--volume")
             .flag("--public")
             .flag("--auto")
             .flag("--caches")
@@ -1124,7 +1129,7 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let name = a.pos.get(1).cloned().unwrap_or_else(|| url.trim_end_matches('/').rsplit('/').next().unwrap_or("project").into());
     // Remove a new project if store open or clone fails.
-    let p = crate::store::Project::create_empty(&ctx.store, &name)?;
+    let p = crate::store::Project::create_empty_on(&ctx.store, &name, a.get("--volume"))?;
     let mut repo = Repo { p, ctx: Some(ctx) };
     let result = (|| -> Result<i32> {
         let mut store = store_remote::open(url, &repo)?;

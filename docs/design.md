@@ -202,7 +202,13 @@ is valid for a state, so it never decides that by itself:
   plain folder. A new line takes a regenerable folder only warm, while its `.layrattributes`
   still marks it, and takes a folder with files from its state, even when an ancestor saved it
   as a cache.
-- Caches come only from `layr save --caches`, the explicit choice of someone who may save the
+- A regenerable cache folder is a layer from the first command that sees it, so its files never go
+  into a state, on every file system, whether or not `save --caches` ever ran. Any save (automatic
+  or named), `line new` and every state-making command first turn each such folder into a layer
+  (before the store lock, the copy on btrfs; a marker on APFS). The first save of each cache also
+  saves the first cache state of the line (the cache overlay `cache.<folder>`), so a new line from
+  a state of the line starts warm. Later saves do not copy the cache; `save --caches` refreshes it.
+- `save --caches`, the explicit choice of someone who may save the
   line. It first turns the regenerable folders into caches, so their files stay out of the state. On a
   protected line with no changes since its head (ignored files do not count), it gives the caches
   to the head, so the next lines from that head start warm; else to a new automatic state. A
@@ -272,6 +278,12 @@ record: `meta/line-paths.json` of the project maps line id to path (the owner), 
 index `line-paths.json` maps a path to project and line id, so a command finds its line from the
 current folder without opening every project. `Repo::working` reads the path; nothing else builds
 line folder paths. On OverlayFS the registry also manages the folders outside the store.
+
+### Volumes
+
+A project can live on another file system of the machine (`layr volume add`). The volume map is
+machine data, and `volumes::Layout` is the one resolver of a project folder. The model, identity
+checks and the part of `project move` that rests on them are in [volumes](volumes.md).
 
 ## 6. What is not in layr
 
