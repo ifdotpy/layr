@@ -1084,7 +1084,7 @@ pub fn file_identity(path: &Path) -> Result<Vec<u8>> {
         Err(e) => Err(e.into()),
     }
 }
-pub fn mark_received(path: &Path, uuid: &str) -> Result<()> {
+pub fn mark_received(path: &Path, uuid: &str, _transid: u64) -> Result<()> {
     uuid::Uuid::parse_str(uuid)?;
     let path = absolute(path)?;
     let mut s = lock(&path)?;

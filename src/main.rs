@@ -24,6 +24,7 @@ mod owners;
 mod dedup;
 mod diff;
 mod disk;
+mod follow;
 mod fsutil;
 mod gitbridge;
 mod ids;

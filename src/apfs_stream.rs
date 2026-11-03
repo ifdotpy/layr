@@ -638,7 +638,7 @@ pub fn receive(src: &mut dyn Read, dir: &Path, expected: &crate::recv::Expect) -
             Ok(())
         }
         finish(&root, &modes, &times)?;
-        crate::storage::mark_received(&root, expected.uuid)?;
+        crate::storage::mark_received(&root, expected.uuid, 0)?;
         // An immutable directory cannot be renamed on macOS. Publish inside the locked store,
         // then seal before returning success; remove the tree if sealing fails.
         let target = dir.join(expected.name);

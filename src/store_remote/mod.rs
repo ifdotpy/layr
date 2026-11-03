@@ -152,13 +152,18 @@ pub fn open_named(name: &str, repo: &Repo) -> Result<Store> {
 }
 
 /// The store remotes whose successful push records name each state: state id to remote names.
-/// A state a store holds is recoverable from it (`restore_state`).
+/// A state a store holds is recoverable from it (`restore_state`). A copy counts only while the
+/// remote under the recorded name still has the recorded URL, and this machine has read that store
+/// with its own key (`mark_read`). Removing or changing the remote ends the guarantee.
 pub fn store_copies(repo: &Repo) -> Result<std::collections::BTreeMap<String, Vec<String>>> {
     let mut copies: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
     for rec in repo.p.db.records_with_op("push")? {
         let data = &rec.data;
         let (Some(name), Some(url)) = (data["remote"].as_str(), data["url"].as_str()) else { continue };
         if data["result"] != "success" || !matches!(crate::cmd::remote::kind(url), Ok(crate::cmd::remote::Kind::Store)) {
+            continue;
+        }
+        if crate::cmd::remote::remote_url(repo, name).ok().as_deref() != Some(url) || !store_dir(repo, url).join("read").is_file() {
             continue;
         }
         for id in data["state_ids_sent"].as_array().into_iter().flatten().filter_map(|v| v.as_str()) {
@@ -178,10 +183,35 @@ pub fn restore_state(repo: &Repo, id: &str) -> Result<()> {
     if names.is_empty() {
         bail!("state {} is not on this machine (run layr fetch <remote>)", crate::ids::short(id));
     }
+    let ctx = repo.ctx.context("restore needs a command context")?;
+    restore_from_remotes(
+        ctx,
+        &names,
+        id,
+        |name| open_named(name, repo),
+        |store, ctx| store.connect(ctx),
+        |store| reader::restore_states(store, repo, &[id.to_string()]).map(|_| ()),
+    )
+}
+
+/// Try each remote that holds the state, in order. Each one is opened, connected with the same
+/// path as fetch (`connect` sets the credentials, the gateway user and the epoch) and read.
+fn restore_from_remotes<S, C>(
+    ctx: &C,
+    names: &[String],
+    id: &str,
+    mut open: impl FnMut(&str) -> Result<S>,
+    mut connect: impl FnMut(&mut S, &C) -> Result<()>,
+    mut read: impl FnMut(&S) -> Result<()>,
+) -> Result<()> {
     let mut errors = Vec::new();
-    for name in &names {
-        match open_named(name, repo).and_then(|store| reader::restore_states(&store, repo, &[id.to_string()])) {
-            Ok(_) => return Ok(()),
+    for name in names {
+        let attempt = open(name).and_then(|mut store| {
+            connect(&mut store, ctx)?;
+            read(&store)
+        });
+        match attempt {
+            Ok(()) => return Ok(()),
             Err(e) => errors.push(format!("{name}: {e:#}")),
         }
     }
@@ -193,15 +223,43 @@ pub fn restore_state(repo: &Repo, id: &str) -> Result<()> {
     )
 }
 
+/// The folder of local state for the store at `url` (the same folder `open_with_pin` uses).
+fn store_dir(repo: &Repo, url: &str) -> PathBuf {
+    repo.p.meta_dir().join("remote-stores").join(hex::encode(Sha256::digest(url.as_bytes())))
+}
+
+/// Records that this machine read the store with its own key. `store_copies` counts a copy only
+/// for a store this machine can read.
+fn mark_read(dir: &std::path::Path) -> Result<()> {
+    std::fs::create_dir_all(dir)?;
+    std::fs::write(dir.join("read"), b"")?;
+    Ok(())
+}
+
+/// True when the store format restores the tree of this state exactly (`writer::format_gap`).
+/// Retention evicts only such a state. It checks the layers on disk and does not build a complete
+/// tree (`thin::complete_tree` would copy one), so a thin state is checked layer by layer.
+pub fn restorable(repo: &Repo, id: &str) -> Result<bool> {
+    #[cfg(target_os = "macos")]
+    let roots: Vec<std::path::PathBuf> = crate::thin::Layered::of_state(&repo.p, id)?.layers.into_iter().map(|layer| layer.root).collect();
+    #[cfg(not(target_os = "macos"))]
+    let roots = vec![repo.p.state_path(id)];
+    for root in roots {
+        if writer::format_gap(&root)?.is_some() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 fn open_with_pin(url: &str, repo: &Repo, pin: Option<StorePin>) -> Result<Store> {
-    let hash = hex::encode(Sha256::digest(url.as_bytes()));
     Ok(Store {
         backend: Backend::open(url)?,
         url: url.to_string(),
         project: repo.p.id.clone(),
         machine: repo.p.store.machine.id.clone(),
         key: repo.p.store.machine.key.clone(),
-        dir: repo.p.meta_dir().join("remote-stores").join(hash),
+        dir: store_dir(repo, url),
         paper_key_text: None,
         person: None,
         pin,
@@ -369,6 +427,8 @@ impl Store {
             let (file, recipient) = writer::initialize(self, ctx, path)?;
             (Some(file), recipient)
         };
+        // The paper key that this machine just made opens the store: it is read access (`mark_read`).
+        mark_read(&self.dir)?;
         self.pin_descriptor()?;
         self.pin.as_mut().expect("initialized store pin").paper_recipient = Some(paper_recipient);
         Ok(Configured { created: true, recovery_key_file: file })
@@ -511,7 +571,10 @@ impl Store {
         self.public_reader.store(false, std::sync::atomic::Ordering::SeqCst);
         if !self.force_public || self.layer.is_some() {
             match self.own_identity(descriptor, paper) {
-                Ok(identity) => return Ok(identity),
+                Ok(identity) => {
+                    mark_read(&self.dir)?;
+                    return Ok(identity);
+                }
                 Err(error) => {
                     if self.layer.is_some() {
                         return Err(error);
@@ -904,6 +967,7 @@ mod pin_tests {
                 id: project_id.clone(),
                 db: crate::db::Db::open(&dir.join("meta/db/layr.sqlite")).unwrap(),
             },
+            ctx: None,
         };
         let mut record = Record::new("project");
         record.data = serde_json::json!({"id":project_id,"name":"p","config":{}});
@@ -949,5 +1013,70 @@ mod pin_tests {
         assert!(error.contains(&project_id) && error.contains(&other_project), "{error}");
         drop(repo);
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod restore_tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn restore_connects_before_it_reads() -> Result<()> {
+        let log = RefCell::new(Vec::new());
+        restore_from_remotes(
+            &(),
+            &names(&["archive"]),
+            "0123abcd",
+            |name| Ok(name.to_string()),
+            |store, _ctx| {
+                log.borrow_mut().push(format!("connect {store}"));
+                Ok(())
+            },
+            |store| {
+                log.borrow_mut().push(format!("read {store}"));
+                Ok(())
+            },
+        )?;
+        assert_eq!(*log.borrow(), ["connect archive", "read archive"]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_failed_connect_skips_the_read_and_tries_the_next_remote() -> Result<()> {
+        let reads = RefCell::new(Vec::new());
+        restore_from_remotes(
+            &(),
+            &names(&["first", "second"]),
+            "0123abcd",
+            |name| Ok(name.to_string()),
+            |store, _ctx| if store == "first" { bail!("no credentials") } else { Ok(()) },
+            |store| {
+                reads.borrow_mut().push(store.clone());
+                Ok(())
+            },
+        )?;
+        assert_eq!(*reads.borrow(), ["second"]);
+        Ok(())
+    }
+
+    #[test]
+    fn every_failed_remote_is_named_in_the_error() {
+        let err = restore_from_remotes(
+            &(),
+            &names(&["first", "second"]),
+            "0123abcd",
+            |name| Ok(name.to_string()),
+            |store, _ctx| bail!("offline {store}"),
+            |_| Ok(()),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("first: offline first") && err.contains("second: offline second"), "{err}");
+        assert!(err.contains("not on this machine"), "{err}");
     }
 }

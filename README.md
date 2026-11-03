@@ -117,6 +117,20 @@ then waits for that mount before it starts layr.
 layr refuses a store that sits in the root subvolume, because a system snapshot rollback would
 empty it. Put the store in its own subvolume: [Btrfs root snapshots](docs/btrfs-root-snapshots.md).
 
+The daemon also runs `layr follow` passes on its tick: every followed line is kept at its remote
+branch ([layr follow](docs/follow.md)).
+
+### macOS daemon
+
+`layr follow` passes run in a LaunchAgent as your user. It needs no root:
+
+```sh
+cp packaging/launchd/ws.layr.daemon.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ws.layr.daemon.plist
+```
+
+Logs go to `~/Library/Logs/layr-daemon.log`. Details: [layr follow](docs/follow.md#install-on-macos).
+
 ## Quick start
 
 ```sh

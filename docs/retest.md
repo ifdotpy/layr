@@ -4,6 +4,15 @@ Status: first version built (2026-10-28): the Rust adapter, and the vitest, jest
 agreed with the owner on 2026-10-28. Prototype measurements are in the last section. See
 "First version" for the command line, the record format and what is not done.
 
+## Switch a project on
+
+In the root folder of a layr line that is the cargo project root (or the pnpm, vitest, jest or pytest root):
+
+1. `layr retest init` sets up the project. It is safe to run twice. Details: "Command line".
+2. `layr retest gate -- <your gate command>` runs the gate command with the project build env, one gate at a time on the machine.
+
+The project keeps its own commands (`pnpm install`, `--offline`, the results folder) inside the gate command.
+
 ## Goal
 
 A test that passed must not run again while the code it executed stays the same, in any line.
@@ -76,6 +85,8 @@ only, so this does not change the caller's builds. It is set by the tool and not
 because the callers (a gate script) set `CARGO_INCREMENTAL=0` for their plain builds, and a second
 variable per caller would be easy to forget. `LAYR_RETEST_INCREMENTAL=0` leaves the caller's value.
 The first incremental build of a crate is slower than a non-incremental one; the gain is on later builds.
+A rustc wrapper such as sccache (set in `~/.cargo/config.toml`) refuses incremental compilation, so the tool also
+clears `RUSTC_WRAPPER` for those calls. The gate does the same for its command.
 
 ### Measurements 2026-10-31
 
@@ -165,9 +176,9 @@ retest = [["test", "--workspace", "--no-run"]]
 - `retest` (optional) lists the commands of the retest build. `layr retest sweep` sweeps `target/retest` with
   `sweep` and `retest` under the environment of `run`. Without `retest`, `target/retest` is left as it is and the
   sweep prints `target/retest: no sweep command; left as is`. The sweep never creates `target/retest`.
-- The hashes come from cargo's messages: every artifact and every build script run.
-  Cargo names a bin or an example only by its copy in `debug` (`debug/app`). The sweep matches a copy
-  to its hashed file by size and modification time. With no match, every hashed file of that name is live.
+- The live set comes from cargo's messages: every artifact and every build script run. A bin or an example
+  is named only by its copy (`debug/app`); the sweep matches the copy to its hashed file by size and
+  modification time. A library with an unhashed output is live with its crate (see "What goes").
 - `env` sets the variables that change the unit hashes (toolchain, wrapper, incremental). It is applied
   over the environment of the caller.
 - `layr retest run` adds its own command (`test --no-run` and its arguments) to the list. A focused run
@@ -179,31 +190,54 @@ retest = [["test", "--workspace", "--no-run"]]
 
 ### What goes
 
-A unit that the live set does not name goes whole:
+The sweep works on an allowlist. Every entry of a swept profile folder (`target/<...>/<profile>`) that the
+live set does not name goes. The live set names:
 
-- its entries in `debug/.fingerprint` and `debug/build` (with `out/`),
-- its files and folders with the hash in `debug/deps` and `debug/examples` (`.rlib`, `.rmeta`, `.d`,
-  object files, test binaries, `.dSYM`).
+- each output that cargo lists (`filenames`, `executable`, the `out_dir` of a build script), by its path
+  in the profile folder;
+- each live unit hash: its entries in `.fingerprint` and `build` (with `out/`), and its files and folders
+  with that hash in `deps` and `examples` (`.rlib`, `.rmeta`, `.d`, object files, test binaries, `.dSYM`);
+- each live crate with unhashed outputs (`deps/libcrate.rlib`, `libcrate.dylib`): the newest unit of that
+  crate in `.fingerprint` (the marker `lib-<crate>`, newest `invoked.timestamp`), with its files `lib<crate>.*`
+  and `<crate>.d` in `deps`;
+- the newest object build of each live owner (a unit hash, or an unhashed crate);
+- the dep-info `<output>.d` of a listed output in the profile folder;
+- cargo's lock files (`.cargo-lock`, `.cargo-build-lock`, `.cargo-artifact-lock`);
+- each `incremental/<crate>-<id>` folder that a kept output is hard-linked to, with its newest finalized
+  session and that session's lock file.
 
-No file of a live unit goes, with one exception (next section). In `debug/incremental` only the newest
-finalized session of each crate folder stays. The folder names are not cargo hashes, so this rule is per
-folder. Names without a cargo hash stay.
+Everything else goes: uplifted copies that no listing names, stale bins and examples, unhashed objects of
+other builds, outputs of units that no command lists, orphan incremental folders, and other files. Entries
+go whole, so no live unit loses a file. The removal frees the bytes of an inode only when all its links go.
+
+Links from a unit to its incremental folder: rustc hard-links the object files of a session to the outputs in
+`deps`. The sweep reads the shared inodes. Measured on Studio: each live owner's objects link to exactly one
+folder, and no text file (fingerprint, dep-info, `.d`) names the folder, since its name carries a base-36 id,
+not the cargo hash.
+
+### Other profiles
+
+A profile folder is swept only when a configured command lists an output in it. The profile is named by the
+listing, so a project that builds only `target/release` is swept (test: `sweep_sweeps_a_release_only_target`).
+A folder is swept when any profile folder in it has a fingerprint folder (a build wrote it). In Studio the
+listed profiles are `target/debug` and, with a `retest` list, `target/retest/debug`; `target/wasm32-unknown-unknown`
+is not listed, so the sweep leaves it as it is.
+
+Limit: a bin in a profile without debug info keeps no object files in `deps`. Its incremental folder has no
+link (see "Live set"), so the sweep removes it and a later build of that bin cannot reuse it. Set
+`[profile.release] debug = 1` to keep the link. The layr project sets it. A `studio-native-client` output (for
+example `deps/libstudio_native_client.a`) is not listed, because the sweep list excludes that crate, so the sweep
+removes it. A build that needs it compiles it again.
 
 ### Object files
 
-Each build writes a new set of object files (`<crate>-<hash>.<cgu>.<build>.rcgu.o`, macOS keeps them
-for the debug info) for the same unit hash. A source change keeps the unit hash, so the old sets pile up.
-Cargo does not use them. The one exception to "no file of a live unit goes": for each live unit, only
-the object files of its newest build stay (newest modification time). This rule was measured and tested in
-PR #80, and it is restored here. Its test is `deps_keeps_only_the_newest_object_build_of_a_live_unit`.
-Two name forms carry a build id: `<crate>-<hash>.<cgu>.<build>.rcgu.o`, and `<crate>-<hash>.<crate>.<id>-cgu.<n>.rcgu.o`
-(one `<id>` for all codegen units of a compile; the Studio crates use this form). Other names stay.
-A first version parsed the cgu index as the build id and removed the current objects of integration tests,
-so cargo rebuilt the workspace crates on the next build. Test: `deps_keeps_object_names_without_a_build_id`.
-The e2e test `sweep_removes_the_units_that_no_standard_command_uses` checks one build per unit after an edit.
-The e2e tests `sweep_skips_a_stale_target_and_compiles_nothing`, `sweep_skips_a_folder_with_a_unit_that_is_not_fresh`,
-`sweep_skips_a_busy_build_lock_without_waiting` and `sweep_leaves_target_retest_alone_without_a_retest_command` check the
-freshness rules.
+Each build writes a new set of object files (`<crate>-<hash>.<cgu>.<build>.rcgu.o`, and for unhashed
+crates `<crate>.<cgu>.<build>.rcgu.o`) for the same unit. A source change keeps the unit hash, so the old
+sets pile up. Cargo does not use them. For each live owner, only the files of its newest build stay (newest
+modification time). Two name forms carry a build id: `<crate>-<hash>.<cgu>.<build>.rcgu.o`, and
+`<crate>-<hash>.<crate>.<id>-cgu.<n>.rcgu.o` (one `<id>` for all codegen units of a compile; the Studio crates use
+this form). A name with no build id is not an object of a known build and goes with the rest of the allowlist.
+Test: `sweep_keeps_the_newest_object_build_of_each_live_owner`.
 
 ### Freshness
 
@@ -244,16 +278,55 @@ What a stopped listing can still change:
   command, 2 for a usage error.
 - An empty live set removes nothing.
 - `--dry-run` prints the bytes that a sweep would free and removes nothing.
-- An uplifted dylib (`target/debug/lib<name>.dylib`, no hashed copy in `deps`) keeps the units that hold its
-  marker file (`lib-<name>`, `bin-<name>`, `example-<name>` or `test-<name>`) in `.fingerprint`. Without this
-  rule the sweep removed the dylib's unit, and the next build recompiled the crates that depend on it.
-  Test: `live_units_keeps_the_marked_units_of_an_uplifted_dylib`.
+- A dylib used as a dev-dependency has an unhashed output (`libdy.dylib`) and unhashed objects. Its
+  fingerprint is the newest `lib-<crate>` unit, and its incremental folder is the one linked to the newest
+  objects. A feature build of the dylib leaves a second folder that the sweep removes. Tests:
+  `sweep_keeps_the_incremental_folder_of_a_dylib_dev_dependency` (e2e) and
+  `plan_names_the_outputs_of_the_messages_per_profile` (unit).
 - Output: `swept <folder>, freed N MB`, and the time of the whole command.
 
 ### Listing of a command that was never built
 
 A command whose units are not built yet (for example `--examples` when the test build did not compile them)
 is not fresh. The `run` sweep and `layr retest sweep` skip the folder, as in "Freshness".
+
+### Studio measurement (2026-11-03, sweep allowlist)
+
+Throwaway line from origin/main (`8dafcde`) of Studio, gate environment (`CARGO_BUILD_JOBS=8`,
+`CARGO_INCREMENTAL=1`, no wrapper, toolchain 1.99.1), gate build
+`cargo build --workspace --exclude studio-native-client --tests --bins --examples --locked`. The line started
+from a warm `target` (24.6 GB by `du`).
+
+| Step | Crates compiled | `du -sk target` | Sweep |
+| --- | --- | --- | --- |
+| Gate build | 0 | 24,645,448 KB | |
+| Dry run | | | would free 2733.6 MB |
+| Sweep 1 | | 21,974,188 KB | freed 2733.6 MB |
+| Build after sweep 1 | 0 | | |
+| One-line change (comment) in `request-signing`, build | 12, 187 s | 26,444,172 KB | |
+| Sweep 2 | | 22,211,160 KB | freed 4320.3 MB |
+| Build after sweep 2 | 0 | | |
+
+Sweep 1 by kind (unique inodes, MiB, one name per file):
+
+- top-level files, 33 files, 1768.4: the four runtime rlib copies (`libstudio_runtime_services.rlib` 857.6,
+  `libstudio_runtime_http.rlib` 506.0, `libstudio_runtime_store.rlib` 152.1, `libstudio_runtime_schema.rlib` 86.8),
+  `studio-native-client` 76.1, and smaller uplifted copies;
+- `deps`, unhashed other, 7 files, 380.4: `libstudio_native_client.a` 310.5 and `.rlib` 67.8;
+- `incremental`, 755 files, 358.8: orphan crate folders;
+- `deps`, unhashed objects, 92 files, 99.1;
+- `examples`, unhashed other, 4 files, 0.3.
+
+Total 2606.9 MiB, equal to the dry run (2733.6 MB). Hashed `deps` counts did not change (1762 files), so the
+earlier sweep had already removed the dead hashed units. The unexplained bytes are the unhashed and uplifted
+files. The four runtime rlib copies (about 1.6 GiB) are byte-identical in size and time to their hashed `deps`
+rlibs. They are separate inodes, so `du` counts them, and no cargo listing names them. The writer is not
+identified. The sweep removes them, and the next build compiles nothing.
+
+Sweep 2 by kind (unique inodes, MiB): `deps` hashed 5919 files 4079.0 (older object builds of the 12
+rebuilt units), `deps` unhashed objects 256 files 22.5, `examples` hashed 454 files 15.3, incremental 108 files 3.1.
+The build of the change wrote about 4.5 GB of new object files; the sweep removed the older builds. The net growth
+of the change is 231 MiB.
 
 ### Studio measurement (2026-11-01)
 
@@ -620,21 +693,41 @@ Run in the root folder of a layr line that is also the cargo project root.
      failed and were skipped.
   Before step 4 the fast path of "No build when nothing can change" can end the run.
   Every step prints `layr-retest: step <name>: <seconds>s`.
-  The nextest arguments after `--` go to both `list` and `run`. Use them to select packages
+  The build of `run` uses the project env (see `gate`). The nextest arguments after `--` go to both `list` and `run`. Use them to select packages
   (`-p`, `--workspace`). Do not put `-E` there.
 - `layr retest wrap -- <test binary> <args>` is the cargo target runner that `run` installs
   (`CARGO_TARGET_<TRIPLE>_RUNNER`, set to `<layr> retest wrap --`). With `NEXTEST_TEST_NAME` set it sets `LLVM_PROFILE_FILE` to
   `$LAYR_RETEST_PROFILE_DIR/<binary id>/<test>.profraw` (names cleaned to letters, digits and
   `_-.`), then runs the test, merges its raw profiles and returns its exit code (see "Raw profile disk"). In the list phase it sets no profile and execs the test.
 
+- `layr retest gate [--name <n>] [--max-load <n>] -- <command...>` runs a gate command the same way for every project.
+  It replaces a project wrapper script. Steps:
+  1. Lock: the folder `/tmp/layr-retest-gate.lock` (files `pid` and `owner`), taken in one step, so one gate runs
+     at a time on the machine. A waiting gate prints the pid and the owner of the holder. A lock whose pid is
+     not alive is removed (a crashed gate). `LAYR_RETEST_GATE_LOCK` names another path. Ctrl-C does not remove
+     the lock; the next gate does. Two gates that reap the same dead lock at the same instant can both win.
+  2. Load: waits while the 1-minute load is at or above `--max-load` (default 60), at most 10 minutes. Then it starts.
+  3. Env: `[workspace.metadata.layr-retest] env` (none without `Cargo.toml`). The command runs with it, with
+     `RUSTC_WRAPPER` empty and `CARGO_TARGET_DIR` removed.
+  4. `cargo fetch --locked` in a cargo project. A failure prints a warning and the gate goes on.
+  5. The command. Its output goes to the terminal.
+  6. `layr retest sweep` in a cargo project. The last line says `sweep ok`, `sweep skipped` or `sweep failed`.
+     A failed sweep does not change the gate's exit status.
+  7. The lock is released. The exit status is the status of the command.
 - `layr retest init [--yes]` makes a project ready. It is safe to run twice.
-  - Finds a cargo project, and vitest, jest or pytest projects.
+  - Finds a cargo project (`Cargo.toml`), pnpm (`pnpm-lock.yaml`), and vitest, jest or pytest projects.
+  - Adds a `regenerable` line to `.layrattributes` for each cache folder of the project that it finds: `target` (cargo),
+    `node_modules` (pnpm) and `.layr-retest` (records of cargo, vitest, jest or pytest). Each line is added once.
+  - Adds `.layr-retest` to `.gitignore` when the project has a test tool.
+  - Adds the keys `sweep` (`build --workspace --all-targets --locked`) and `env` (`CARGO_INCREMENTAL = "1"`, `RUSTC_WRAPPER = ""`) to
+    `[workspace.metadata.layr-retest]` in `Cargo.toml` when they are missing. A package-only manifest gets a
+    `[workspace]` table, so that cargo reads the metadata. A key that the project set keeps its value.
+  - Saves each cache folder that exists and is not a cache overlay yet: `layr save --caches --cache <folder>`.
+    It does nothing for a folder that is already an overlay. Outside a layr line the save fails, and the exit code is 1.
   - Checks `cargo-nextest` and the `llvm-tools` rustup component of the active toolchain. A missing one
     prints its install command (`cargo install cargo-nextest --locked`, `rustup component add llvm-tools`);
     `--yes` runs it. Exit code 1 if one is still missing.
-  - Adds `target regenerable` and `.layr-retest regenerable` to `.layrattributes`, and `.layr-retest`
-    to `.gitignore`, when missing.
-  - Prints the gate command: `layr retest run -- --workspace` (or `--tool vitest|jest|pytest`).
+  - Prints the next step: `layr retest gate -- <your gate command>`.
 - `layr retest doctor` reads and never writes. It prints `ok:` or `warn:` lines with numbers; exit code 0
   when there is no warning, else 1.
   - Tools present, and the LLVM major version of `llvm-profdata` equals that of `rustc`.
@@ -645,11 +738,15 @@ Run in the root folder of a layr line that is also the cargo project root.
     `cargo metadata` and the files in `target/retest/debug/deps` or `target/debug/deps`; it does not run
     `cargo nextest list`, which builds). For a crate with two or more integration test binaries: one
     binary (`autotests = false`, one `tests/main.rs`) saves the size of all but the largest and one link each.
-  - Build script output (`target/debug/build/*/output`, and the same under `target/retest/debug`): a
-    `cargo:rerun-if-changed=` (or `cargo::`) value that is an absolute path under the project root is a
-    warning. Each line has its own absolute path, so cargo marks the build script dirty in every new
-    line and rebuilds all crates after it, although `target/` is warm. Print a path relative to
-    `CARGO_MANIFEST_DIR`. Without build output, it says `build once to check build script paths`.
+  - Build script output (`build/*/output` in every profile folder under `target/` and `target/retest/`):
+    - A `cargo:rerun-if-changed=` (or `cargo::`) value that is an absolute path under the project root is a
+      warning. Each line has its own absolute path, so cargo marks the build script dirty in every new
+      line and rebuilds all crates after it, although `target/` is warm. Print a path relative to
+      `CARGO_MANIFEST_DIR`.
+    - A value with a `.git` component, relative or absolute (for example `../../.git/HEAD`), is a warning.
+      Each line has its own `.git`, so the same rebuild happens. It prints the fix: take the version from
+      the build environment (for example an env var set by the release build) instead of watching `.git`.
+    - Without build output, it says `build once to check build script paths`.
   - Records: count, and the age of the newest (warning above 14 days). Size of `target/retest`
     (warning above 20 GB).
 
@@ -858,7 +955,8 @@ the old chain is not used again. The end to end test shows it with a test that r
 - `crates/layr-retest/tests/e2e.rs`: runs `layr retest ...` (the `layr` built from this repository must be first in `PATH`), with a temporary `LAYR_ROOT`, a tiny project with three tests. Runs:
   no record, no change, change of one function, a new uncalled function, a change of a data file,
   full run with a contradiction. About 10 s. Needs `layr`, `cargo-nextest` and `llvm-tools`.
-  Also: `doctor` on the tiny project, `init` twice, and `build_scripts_write_no_profile_into_the_project`
+  Also: `doctor` on the tiny project, `init` twice in a line (cargo and pnpm folders), the project env of `run` and
+  `sweep`, the gate (one gate at a time, a stale lock, the env, the exit status), and `build_scripts_write_no_profile_into_the_project`
   (a `build.rs` and a sweep listing that compiles the build script: no stray file, no scratch folder). Unit tests: `init.rs` (idempotent edits), `doctor.rs` (the rules).
   Run: `cargo nextest run -p layr-retest`.
 

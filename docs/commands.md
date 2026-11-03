@@ -20,6 +20,7 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | overlays      | `overlay create <name> [--readers <principals>] [--mode shared\|follow] [--hidden] [--history all\|last\|<N>] [--quiet] [--merge three-way\|union-theirs] [--gc none\|lru:<size>]`, `overlay set <name> <properties>`, `overlay list [--json]`, `overlay show-to-project <name>`, `overlay readers`, `overlay use [--add\|--remove\|--none] <names>`, `overlay move [--purge] <name> <paths>`, `overlay repair <overlay>`, `overlay log\|show\|diff\|grep\|ls-files <name>` |
 | refs          | `ref set <name> <rev> [--expect <rev>] [--ttl <dur>]`, `ref list [<prefix>]`, `ref log <name>`, `ref delete <name> [--expect <rev>]` |
 | queue         | `queue add <rev> [--into <line>]`, `queue list [--into <line>] [--json]`, `queue remove <entry>`, `queue run [--into <line>]` |
+| follow        | `follow <remote>/<branch>`, `follow --run`, `follow --tick`, `follow`, `follow --remove` ([layr follow](follow.md)) |
 | tests         | `retest run [--full] [--save] [--tool vitest\|jest\|pytest] [-- <nextest args>]`, `retest init [--yes]`, `retest doctor` (see `docs/retest.md`) |
 | probes        | `probe run <rev> [--probe <name>] [--json]`, `probe diff <base> <head> [--json]` |
 | changes       | `comment <change> <text> [--version vN] [--path <path>] [--line N] [--reply-to <id>] [--json]`, `change list`, `change show <id>`, `change log <id>`, `change diff <id> [--from vN] [--to vM]` |
@@ -179,6 +180,7 @@ extent), and belongs to a part when no other part references it. The last lines 
 several parts share and the store total. It reads every file's metadata (on Linux it opens each
 file), so a large store takes minutes; 4 workers share the folders of `states` and `deltas`.
 
+<<<<<<< head
 Storage is freed when a state loses its last owner (docs/ownership.md). A command that drops
 the last owner of a state moves its storage to the trash after its commit and after the store
 lock, so `line delete`, a save past the rings, and a moved head free space in that command. A
@@ -218,6 +220,43 @@ Test only (tests/t99-ownership-free.sh): `LAYR_TEST_EXIT_AFTER_COMMIT=1` exits w
 after a commit that queued states, before the free step. Test only (tests/t100-pin-reads.sh):
 `LAYR_TEST_PIN_HOLD_MS=<ms>` sleeps once per process after its pins are taken. Neither is for use
 otherwise.
+||||||| base
+`gc` deletes the states that nothing keeps. Line heads and their history, tags, refs, park entries
+and conflict sources stay. The newest `retention.auto` (50) automatic states of each line, one per
+hour for `retention.hours` (24), and every state that a record of the last `undo.days` (7) names
+stay too, except an automatic state whose work its parent already holds: it has no caches and its
+files that are not ignored equal the parent (pushed or not; the parent stays while anything names it). Such a
+state differs only in build output, which a build makes again, so a deleted line frees its space at
+the next `gc`. The newest automatic state of a live line always stays. `gc` compares these states
+before it takes the store lock.
+
+`gc` evicts a state that a store remote holds (a successful `layr push <store-remote>` names it)
+only when the project config `gc.evict` is `on` (`layr config gc.evict on`; default `off`). With
+`off`, such a state is kept with its history and nothing is deleted for it. With `on`, its tree goes,
+its record stays, and the next command that reads the tree fetches it back from that remote. A recoverable state stays on disk when it is a line head, the newest automatic state of a
+line, a state with caches, a state that a cache overlay names, or a base of a thin layer chain that
+a state on disk needs. Without a reachable remote, a command that needs the tree fails and names the
+remote. `gc --all-projects` runs `gc` for every project (macOS periodic run:
+`packaging/launchd/ws.layr.gc.plist`). See [design.md](design.md#state-eviction-and-fetch-on-demand).
+=======
+`gc` deletes the states that nothing keeps. Line heads and their history, tags, refs, park entries
+and conflict sources stay. The newest `retention.auto` (50) automatic states of each line, one per
+hour for `retention.hours` (24), and every state that a record of the last `undo.days` (7) names
+stay too, except an automatic state whose work its parent already holds: it has no caches and its
+files that are not ignored equal the parent (pushed or not; the parent stays while anything names it). Such a
+state differs only in build output, which a build makes again, so a deleted line frees its space at
+the next `gc`. The newest automatic state of a live line always stays. `gc` compares these states
+before it takes the store lock.
+
+`gc` evicts a state that a store remote holds (a successful `layr push <store-remote>` names it,
+the remote still has the recorded URL, and this machine reads that store) only when the project
+config `gc.evict` is `on` (`layr config gc.evict on`; default `off`). With
+`off`, such a state is kept with its history and nothing is deleted for it. With `on`, its tree goes,
+its record stays, and the next command that reads the tree fetches it back from that remote. A recoverable state stays on disk when it is a line head, the newest automatic state of a
+line, a state with caches, a state that a cache overlay names, or a base of a thin layer chain that
+a state on disk needs. Without a reachable remote, a command that needs the tree fails and names the
+remote. `gc --all-projects` runs `gc` for every project (see [design.md](design.md#state-eviction-and-fetch-on-demand)).
+>>>>>>> origin/main
 
 Revisions: `head`, `@`, `head~2`, `head^2`, line names, `line@machine`, tags, `origin/main`,
 state id prefixes, git commit ids (full or a prefix of at least 4 digits), `park@{n}`, `head@{n}`

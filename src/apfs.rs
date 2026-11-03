@@ -2086,7 +2086,8 @@ mod tests {
     }
 }
 
-pub fn mark_received(path: &Path, uuid: &str) -> Result<()> {
+/// Give a restored or received tree the identity of its signed state. `transid` is for btrfs only.
+pub fn mark_received(path: &Path, uuid: &str, _transid: u64) -> Result<()> {
     let mut info = subvol_info(path)?;
     info.received_uuid = Some(uuid.to_owned());
     let mode = fs::symlink_metadata(path)?.mode() & 0o7777;

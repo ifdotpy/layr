@@ -532,7 +532,7 @@ fn approval_count(repo: &Repo, rule: &crate::access::Rule, head: &str, theirs: &
 /// line's protection, with no bypass: each required check passed on the new head, and `theirs`
 /// has the required approvals. Only such a merge carries the source line's caches
 /// (docs/cache-overlays.md, section 5): a cache holds code that review does not see.
-fn merge_met_rule(repo: &Repo, rule: &crate::access::Rule, before: &str, after: &str, theirs: &str) -> Result<bool> {
+pub(crate) fn merge_met_rule(repo: &Repo, rule: &crate::access::Rule, before: &str, after: &str, theirs: &str) -> Result<bool> {
     for name in &rule.check {
         let Some(cmd) = repo.p.config_value(&format!("check.{name}"))?.and_then(|v| v.as_str().map(str::to_owned)) else {
             return Ok(false);
@@ -739,7 +739,8 @@ pub fn merge(ctx: &Ctx, args: &[String]) -> Result<i32> {
             // overlay: the commands of the project do not wait for them.
             drop(lock);
             let _t = crate::trace::span("merge caches");
-            for (p, id) in h.repo.pull_caches(ctx, &line, &crate::cache_overlay::Source::Line(&theirs))? {
+            let none = std::collections::BTreeSet::new();
+            for (p, id) in h.repo.pull_caches(ctx, &line, &crate::cache_overlay::Source::Line(&theirs), &none)? {
                 if !a.has("-q") {
                     outln!(ctx, "Merged cache {p}: {}", ids::short(&id));
                 }
@@ -775,7 +776,8 @@ fn caches_only(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str, quiet: bool) -> R
     }
     // The copies of build output take minutes: they hold only the lock of each cache overlay.
     drop(lock);
-    let taken = repo.pull_caches(ctx, &line, &crate::cache_overlay::Source::Line(&theirs))?;
+    let none = std::collections::BTreeSet::new();
+    let taken = repo.pull_caches(ctx, &line, &crate::cache_overlay::Source::Line(&theirs), &none)?;
     for (p, id) in &taken {
         if !quiet {
             outln!(ctx, "Merged cache {p}: {}", ids::short(id));
@@ -787,7 +789,7 @@ fn caches_only(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str, quiet: bool) -> R
 /// The squash-safe check of a protected target: for each cache of the source, the changes from
 /// the base to the project state the cache was saved with must hold the same content in the
 /// target head. None when they do; else the reason, naming the first path that differs.
-fn caches_contained(repo: &Repo, line: &Line, theirs: &Line) -> Result<Option<String>> {
+pub(crate) fn caches_contained(repo: &Repo, line: &Line, theirs: &Line) -> Result<Option<String>> {
     let rules = crate::ignore_rules::Rules::new(&repo.working(line));
     let head = repo.state_src(&line.head)?;
     for (name, _) in repo.folder_overlays()? {
@@ -916,6 +918,10 @@ fn finish_queued(
         ovl,
     )
 }
+
+/// Internal flag of `merge_rev`: a merge with conflicts is discarded and returns an error, and the
+/// line keeps its head. A follow pass sets it; a user merge never does.
+pub(crate) const REFUSE_CONFLICTS: &str = "--refuse-conflicts";
 
 pub fn merge_rev(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str, a: &crate::args::Parsed) -> Result<i32> {
     merge_rev_inner(ctx, repo, line, rev, a, None)
@@ -1122,11 +1128,13 @@ fn merge_rev_inner(
     let (state, out) = merge_states(ctx, repo, &line, &base, &head, &theirs, &label, parents, &message)?;
     let sid = state.id.clone();
     let nconf = out.conflicts.len();
-    if queue.is_some() && nconf > 0 {
+    // A queued merge and a follow pass (`REFUSE_CONFLICTS`) never leave a merge with conflicts.
+    if (queue.is_some() || a.has(REFUSE_CONFLICTS)) && nconf > 0 {
         let paths = out.conflicts.iter().map(|c| c.path.as_str()).collect::<Vec<_>>().join(", ");
         repo.discard_states(std::slice::from_ref(&state));
         ovl.discard(repo);
-        return Err(exit(1, format!("queued merge has conflicts: {paths}")));
+        let what = if queue.is_some() { "queued merge" } else { "merge" };
+        return Err(exit(1, format!("{what} has conflicts: {paths}")));
     }
     let mut states = vec![state];
     if let Err(e) = check_paths(ctx, repo, &line, rule.as_ref(), &head, &sid)
@@ -1506,7 +1514,7 @@ mod approval_tests {
         let mut record = Record::new("state");
         record.states = vec![derived.clone()];
         p.append(record, &ctx.actor()).unwrap();
-        let repo = Repo { p };
+        let repo = Repo { p, ctx: None };
         let line = Line {
             id: crate::ids::new_id(),
             name: "main".into(),

@@ -3,6 +3,7 @@
 
 mod deps;
 mod doctor;
+mod gate;
 mod init;
 mod parse;
 mod record;
@@ -14,7 +15,7 @@ mod tools;
 use anyhow::{bail, Context, Result};
 use record::{test_key, FileCov, Record, TestRec};
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -53,11 +54,12 @@ pub fn main(args: &[String]) -> Result<i32> {
         Some("wrap") => wrap(&args[1..]),
         Some("run") => run(&args[1..]),
         Some("init") => init::run(&args[1..]),
+        Some("gate") => gate::run(&args[1..]),
         Some("doctor") => doctor::run(&args[1..]),
         Some("sweep") => sweep_cmd(&args[1..]),
         _ => {
             eprintln!(
-                "usage: layr retest run [--full] [--save] [--tool vitest|jest|pytest] [-- <nextest args>]\n       layr retest init [--yes]\n       layr retest doctor\n       layr retest sweep [--dry-run]\n       layr retest wrap -- <test binary> <args>"
+                "usage: layr retest run [--full] [--save] [--tool vitest|jest|pytest] [-- <nextest args>]\n       layr retest gate [--name <n>] [--max-load <n>] -- <command...>\n       layr retest init [--yes]\n       layr retest doctor\n       layr retest sweep [--dry-run]\n       layr retest wrap -- <test binary> <args>"
             );
             Ok(2)
         }
@@ -333,10 +335,12 @@ fn debug_vars(opt_out: Option<&str>) -> Vec<(&'static str, &'static str)> {
 
 /// Settings of `[workspace.metadata.layr-retest]` in the root `Cargo.toml`: `sweep` lists the standard
 /// build commands (cargo arguments without `cargo`), `retest` lists the commands of the retest build
-/// (`target/retest`), and `env` sets the variables that change the unit hashes of those builds (for
-/// example the toolchain of a gate).
+/// (`target/retest`), and `env` is the build env of every cargo call of retest and of the gate.
+/// `env` is the one owner of the project's build env: `run`, `sweep` and `gate` apply it.
 struct SweepConfig {
     env: Vec<(String, String)>,
+    /// The `sweep` list is set. Without it the sweep does nothing.
+    listed: bool,
     commands: Vec<Vec<String>>,
     retest: Vec<Vec<String>>,
 }
@@ -352,19 +356,21 @@ fn command_list(cfg: &Value, key: &str) -> Result<Vec<Vec<String>>> {
     Ok(commands)
 }
 
-/// Reads the sweep settings of the workspace at `root`. `None` when it has no `sweep` list.
-fn sweep_config(root: &Path) -> Result<Option<SweepConfig>> {
+/// Reads the retest settings of the workspace at `root`. Missing settings are empty.
+fn sweep_config(root: &Path) -> Result<SweepConfig> {
     let meta: Value =
         serde_json::from_slice(&output(Command::new("cargo").args(["metadata", "--no-deps", "--format-version", "1"]).current_dir(root))?)?;
     let cfg = &meta["metadata"]["layr-retest"];
-    if cfg["sweep"].as_array().is_none() {
-        return Ok(None);
-    }
     let mut env = Vec::new();
     for (k, v) in cfg["env"].as_object().into_iter().flatten() {
-        env.push((k.clone(), v.as_str().context("sweep env: each value is a string")?.to_string()));
+        env.push((k.clone(), v.as_str().context("env: each value is a string")?.to_string()));
     }
-    Ok(Some(SweepConfig { env, commands: command_list(cfg, "sweep")?, retest: command_list(cfg, "retest")? }))
+    Ok(SweepConfig {
+        env,
+        listed: cfg["sweep"].as_array().is_some(),
+        commands: command_list(cfg, "sweep")?,
+        retest: command_list(cfg, "retest")?,
+    })
 }
 
 /// The environment that changes the unit hashes of the retest build: the instrumented rustflags (the
@@ -376,7 +382,9 @@ fn hash_env(root: &Path) -> Result<Vec<(String, String)>> {
     let (var, value) = rustflags::env_with_flags(&env_of, &files, &rustc_host()?, &["-C", "instrument-coverage"])?;
     let mut env = vec![(var, value)];
     if std::env::var(INCREMENTAL_VAR).as_deref() != Ok("0") {
+        // A rustc wrapper such as sccache refuses incremental compilation, so the wrapper is cleared with it.
         env.push(("CARGO_INCREMENTAL".to_string(), "1".to_string()));
+        env.push(("RUSTC_WRAPPER".to_string(), String::new()));
     }
     env.extend(debug_vars(std::env::var(LINE_TABLES_VAR).ok().as_deref()).into_iter().map(|(k, v)| (k.to_string(), v.to_string())));
     Ok(env)
@@ -393,8 +401,8 @@ fn listing(args: &[String]) -> Vec<String> {
 
 /// What the listing of the units of one folder found.
 enum Listed {
-    /// Every unit is fresh: the live unit hashes.
-    Fresh(BTreeSet<String>),
+    /// Every unit is fresh: the live set of each profile folder.
+    Fresh(sweep::Plans),
     /// A unit is not fresh, named by cargo's status line or by its target. Nothing was built past it.
     NotFresh(String),
     /// Another cargo holds the build lock of the folder: the listing stopped before it waited for that cargo.
@@ -456,28 +464,34 @@ fn list_units(root: &Path, target: &Path, env: &[(String, String)], args: &[Stri
     if !status.with_context(|| format!("cannot wait for cargo {}", args.join(" ")))?.success() {
         bail!("cargo {} failed", args.join(" "));
     }
-    Ok(Listed::Fresh(sweep::live_units(&target.join("debug"), lines.join("\n").as_bytes())))
+    Ok(Listed::Fresh(sweep::plan(target, lines.join("\n").as_bytes())?))
 }
 
 /// The live units of the target folder `target`: the units that every command of `commands` uses, each
 /// run with `env`. Stops at the first command whose units are not fresh.
 fn live_units(root: &Path, target: &Path, env: &[(String, String)], commands: &[Vec<String>]) -> Result<Listed> {
-    let mut live = BTreeSet::new();
+    let mut live = sweep::Plans::new();
     for args in commands {
         match list_units(root, target, env, args)? {
-            Listed::Fresh(units) => live.extend(units),
+            Listed::Fresh(units) => sweep::merge(&mut live, units),
             stale => return Ok(stale),
         }
     }
     Ok(Listed::Fresh(live))
 }
 
-/// Sweep the profile folder `debug` under cargo's lock. `None` when the lock is busy. A dry run counts only.
-fn sweep_folder(debug: &Path, live: &BTreeSet<String>, dry: bool) -> Result<Option<u64>> {
-    if dry {
-        return Ok(Some(sweep::sweep_units(debug, live, true)));
+/// Sweeps each profile folder of `plans` under its cargo lock. Returns the freed bytes and the number of
+/// profile folders skipped because their lock is busy. A dry run counts only.
+fn sweep_plans(plans: &sweep::Plans, dry: bool) -> Result<(u64, usize)> {
+    let (mut freed, mut busy) = (0, 0);
+    for (profile, live) in plans {
+        let n = if dry { Some(sweep::sweep(profile, live, true)) } else { sweep::locked(profile, || sweep::sweep(profile, live, false))? };
+        match n {
+            Some(n) => freed += n,
+            None => busy += 1,
+        }
     }
-    sweep::locked(debug, || sweep::sweep_units(debug, live, false))
+    Ok((freed, busy))
 }
 
 /// The sweep after a retest build: the live units of the standard commands, the retest commands and the
@@ -485,8 +499,8 @@ fn sweep_folder(debug: &Path, live: &BTreeSet<String>, dry: bool) -> Result<Opti
 fn sweep_after_build(root: &Path, target: &Path, hash: &[(String, String)], own: Vec<String>) {
     let t = std::time::Instant::now();
     let cfg = match sweep_config(root) {
-        Ok(Some(c)) => c,
-        Ok(None) => return eprintln!("layr-retest: sweep skipped: no `sweep` list under [workspace.metadata.layr-retest] in Cargo.toml"),
+        Ok(c) if c.listed => c,
+        Ok(_) => return eprintln!("layr-retest: sweep skipped: no `sweep` list under [workspace.metadata.layr-retest] in Cargo.toml"),
         Err(e) => return eprintln!("layr-retest: sweep skipped: {e:#}"),
     };
     let mut env = hash.to_vec();
@@ -503,15 +517,21 @@ fn sweep_after_build(root: &Path, target: &Path, hash: &[(String, String)], own:
         Err(e) => return eprintln!("layr-retest: sweep skipped, nothing removed: {e:#}"),
     };
     let listed = t.elapsed().as_secs_f32();
-    match sweep_folder(&target.join("debug"), &live, false) {
-        Ok(Some(n)) => eprintln!(
+    match sweep_plans(&live, false) {
+        Ok((n, 0)) => eprintln!(
             "layr-retest: swept stale build output, freed {:.1} MB (artifact list {listed:.2}s, sweep {:.2}s)",
             n as f64 / 1e6,
             t.elapsed().as_secs_f32() - listed
         ),
-        Ok(None) => eprintln!("layr-retest: sweep skipped (build lock busy)"),
+        Ok((_, busy)) => eprintln!("layr-retest: sweep skipped (build lock busy in {busy} profile folder(s))"),
         Err(e) => eprintln!("layr-retest: sweep skipped: {e:#}"),
     }
+}
+
+/// Whether a build wrote a profile folder in `target` (`<target>/<profile>/.fingerprint`, any profile). The
+/// listing names the profiles itself, so a folder with only a release or a custom profile is swept too.
+fn built(target: &Path) -> bool {
+    std::fs::read_dir(target).into_iter().flatten().flatten().any(|e| e.path().join(".fingerprint").is_dir())
 }
 
 /// `layr retest sweep [--dry-run]`: remove the units that the commands of the workspace do not use.
@@ -530,10 +550,11 @@ fn sweep_cmd(args: &[String]) -> Result<i32> {
     };
     let t0 = std::time::Instant::now();
     let root = std::env::current_dir()?;
-    let Some(cfg) = sweep_config(&root)? else {
+    let cfg = sweep_config(&root)?;
+    if !cfg.listed {
         eprintln!("layr-retest: sweep skipped: no `sweep` list under [workspace.metadata.layr-retest] in Cargo.toml");
         return Ok(0);
-    };
+    }
     let mut retest_env = hash_env(&root)?;
     retest_env.extend(cfg.env.iter().cloned());
     let mut retest_commands = cfg.commands.clone();
@@ -545,7 +566,7 @@ fn sweep_cmd(args: &[String]) -> Result<i32> {
     let mut lists = Vec::new();
     for (target, env, commands) in folders {
         let name = target.strip_prefix(&root).unwrap_or(&target).display().to_string();
-        if !target.join("debug").is_dir() {
+        if !built(&target) {
             continue;
         }
         let Some(commands) = commands else {
@@ -553,7 +574,7 @@ fn sweep_cmd(args: &[String]) -> Result<i32> {
             continue;
         };
         match live_units(&root, &target, &env, &commands) {
-            Ok(Listed::Fresh(live)) => lists.push((name, target, live)),
+            Ok(Listed::Fresh(live)) => lists.push((name, live)),
             Ok(Listed::NotFresh(why)) => eprintln!("layr-retest: {name}: sweep skipped: a unit is not fresh ({why}); run the standard build first"),
             Ok(Listed::Busy) => eprintln!("layr-retest: {name}: sweep skipped (build lock busy)"),
             Err(e) => {
@@ -562,11 +583,14 @@ fn sweep_cmd(args: &[String]) -> Result<i32> {
             }
         }
     }
-    for (name, target, live) in lists {
-        match sweep_folder(&target.join("debug"), &live, dry)? {
-            Some(n) if dry => eprintln!("layr-retest: {name}: would free {:.1} MB", n as f64 / 1e6),
-            Some(n) => eprintln!("layr-retest: swept {name}, freed {:.1} MB", n as f64 / 1e6),
-            None => eprintln!("layr-retest: {name}: sweep skipped (build lock busy)"),
+    for (name, live) in lists {
+        let (n, busy) = sweep_plans(&live, dry)?;
+        if busy > 0 {
+            eprintln!("layr-retest: {name}: sweep skipped (build lock busy in {busy} profile folder(s))");
+        }
+        match dry {
+            true => eprintln!("layr-retest: {name}: would free {:.1} MB", n as f64 / 1e6),
+            false => eprintln!("layr-retest: swept {name}, freed {:.1} MB", n as f64 / 1e6),
         }
     }
     eprintln!("layr-retest: sweep took {:.2}s", t0.elapsed().as_secs_f32());
@@ -763,6 +787,7 @@ fn run(args: &[String]) -> Result<i32> {
     let tools = (llvm_tool("llvm-profdata")?, llvm_tool("llvm-cov")?);
     let runner_var = format!("CARGO_TARGET_{}_RUNNER", rustc_host()?.to_uppercase().replace('-', "_"));
     let hash = hash_env(&root)?;
+    let project_env = sweep_config(&root)?.env;
     let cargo = |first: &[&str]| {
         let mut c = Command::new("cargo");
         c.args(first).args(extra);
@@ -771,7 +796,7 @@ fn run(args: &[String]) -> Result<i32> {
         c.env(PROFDATA_VAR, &tools.0);
         c.env("CARGO_TARGET_DIR", &target).env(PROFILE_DIR_VAR, &profdir);
         c.env(&runner_var, format!("{} retest wrap --", exe.display())).env("NEXTEST_EXPERIMENTAL_LIBTEST_JSON", "1");
-        c.envs(hash.iter().map(|(k, v)| (k, v)));
+        c.envs(hash.iter().chain(project_env.iter()).map(|(k, v)| (k, v)));
         c
     };
     let nextest = |sub: &[&str]| {

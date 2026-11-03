@@ -174,11 +174,10 @@ fn tool_checks(f: &mut Vec<Finding>) {
     }
 }
 
-/// Absolute `rerun-if-changed` paths under `root` in the build script outputs of `target_dir`
-/// (`<target_dir>/build/<package>-<hash>/output`). Returns `(package, path)`, and whether any
-/// build output was read. Every line has its own absolute path, so such a path makes cargo
-/// rebuild the build script and all crates after it in each new line.
-pub fn absolute_rerun_paths(target_dir: &Path, root: &Path) -> (Vec<(String, String)>, bool) {
+/// The `rerun-if-changed` values of the build script outputs in `target_dir`
+/// (`<target_dir>/build/<package>-<hash>/output`) that `want` accepts. Returns `(package, path)`
+/// without duplicates, and whether any build output was read.
+fn rerun_paths(target_dir: &Path, want: impl Fn(&str) -> bool) -> (Vec<(String, String)>, bool) {
     let mut hits = Vec::new();
     let mut seen = false;
     let Ok(rd) = std::fs::read_dir(target_dir.join("build")) else { return (hits, seen) };
@@ -194,7 +193,7 @@ pub fn absolute_rerun_paths(target_dir: &Path, root: &Path) -> (Vec<(String, Str
             else {
                 continue;
             };
-            if Path::new(v).is_absolute() && Path::new(v).starts_with(root) {
+            if want(v) {
                 let hit = (package.clone(), v.to_string());
                 if !hits.contains(&hit) {
                     hits.push(hit);
@@ -205,35 +204,70 @@ pub fn absolute_rerun_paths(target_dir: &Path, root: &Path) -> (Vec<(String, Str
     (hits, seen)
 }
 
+/// Absolute `rerun-if-changed` paths under `root` in the build script outputs of `target_dir`.
+/// Every line has its own absolute path, so such a path makes cargo rebuild the build script and
+/// all crates after it in each new line.
+pub fn absolute_rerun_paths(target_dir: &Path, root: &Path) -> (Vec<(String, String)>, bool) {
+    rerun_paths(target_dir, |v| Path::new(v).is_absolute() && Path::new(v).starts_with(root))
+}
+
+/// `rerun-if-changed` paths with a `.git` component (relative or absolute) in the build script
+/// outputs of `target_dir`. Each layr line has its own `.git`, so such a path rebuilds the build
+/// script and all crates after it in each new line.
+pub fn dot_git_rerun_paths(target_dir: &Path) -> (Vec<(String, String)>, bool) {
+    rerun_paths(target_dir, |v| Path::new(v).components().any(|c| c.as_os_str() == ".git"))
+}
+
+/// The profile folders with build script output: `target/<profile>` and `target/retest/<profile>`.
+fn profile_dirs(root: &Path) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = [root.join("target"), root.join("target/retest")]
+        .iter()
+        .filter_map(|base| std::fs::read_dir(base).ok())
+        .flat_map(|rd| rd.flatten().map(|e| e.path()))
+        .filter(|p| p.join("build").is_dir())
+        .collect();
+    v.sort();
+    v
+}
+
 fn rerun_checks(root: &Path, f: &mut Vec<Finding>) {
     let canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let mut seen = false;
     let mut bad = false;
-    let mut reported: Vec<(String, String)> = Vec::new();
-    for dir in ["target/debug", "target/retest/debug"] {
-        let d = root.join(dir);
-        let (mut hits, s) = absolute_rerun_paths(&d, root);
+    let mut reported: Vec<String> = Vec::new();
+    for d in profile_dirs(root) {
+        let (mut abs, s) = absolute_rerun_paths(&d, root);
         if canon != root {
-            hits.extend(absolute_rerun_paths(&d, &canon).0);
+            abs.extend(absolute_rerun_paths(&d, &canon).0);
         }
+        let (git, _) = dot_git_rerun_paths(&d);
         seen |= s;
-        for (package, path) in hits {
+        let texts = abs
+            .into_iter()
+            .map(|(package, path)| {
+                format!(
+                    "{package}: build script prints an absolute rerun-if-changed path {path}; \
+                     print a path relative to CARGO_MANIFEST_DIR (an absolute path rebuilds it in every new line)"
+                )
+            })
+            .chain(git.into_iter().map(|(package, path)| {
+                format!(
+                    "{package}: build script watches {path} in .git, which rebuilds it in every new line; \
+                     take the version from the build environment (for example an env var set by the release build) instead of watching .git"
+                )
+            }));
+        for text in texts {
             bad = true;
-            if !reported.contains(&(package.clone(), path.clone())) {
-                reported.push((package.clone(), path.clone()));
-            } else {
-                continue;
+            if !reported.contains(&text) {
+                reported.push(text.clone());
+                f.push(warn(text));
             }
-            f.push(warn(format!(
-                "{package}: build script prints an absolute rerun-if-changed path {path}; \
-                 print a path relative to CARGO_MANIFEST_DIR (an absolute path rebuilds it in every new line)"
-            )));
         }
     }
     if !seen {
         f.push(ok("build once to check build script paths"));
     } else if !bad {
-        f.push(ok("no build script prints an absolute rerun-if-changed path"));
+        f.push(ok("no build script prints an absolute rerun-if-changed path or a path in .git"));
     }
 }
 
@@ -403,6 +437,49 @@ mod tests {
         assert!(seen);
         assert_eq!(hits, vec![("bad".to_string(), format!("{}/schema/api.json", root.display()))]);
         assert!(!absolute_rerun_paths(&t.join("none"), &root).1);
+    }
+
+    #[test]
+    fn flags_rerun_paths_inside_git_dir() {
+        let t = std::env::temp_dir().join(format!("layr-doctor-dotgit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        let target = t.join("target").join("debug");
+        let b = target.join("build");
+        for (dir, body) in [
+            ("layr-lib-1a2b", "cargo:rerun-if-changed=src/lib.rs\n"),
+            ("layr-version-3c4d", "cargo:rerun-if-changed=../../.git/HEAD\ncargo::rerun-if-changed=../../.git/refs/heads/main\n"),
+        ] {
+            std::fs::create_dir_all(b.join(dir)).unwrap();
+            std::fs::write(b.join(dir).join("output"), body).unwrap();
+        }
+        let (hits, seen) = dot_git_rerun_paths(&target);
+        let _ = std::fs::remove_dir_all(&t);
+        assert!(seen);
+        assert_eq!(
+            hits,
+            vec![
+                ("layr-version".to_string(), "../../.git/HEAD".to_string()),
+                ("layr-version".to_string(), "../../.git/refs/heads/main".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn profile_dirs_lists_every_profile_with_build_output() {
+        let t = std::env::temp_dir().join(format!("layr-doctor-profiles-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        let target = t.join("target");
+        for d in [
+            target.join("debug").join("build"),
+            target.join("release").join("build"),
+            target.join("retest").join("debug").join("build"),
+            target.join("retest").join("deps"),
+        ] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let got = profile_dirs(&t);
+        let _ = std::fs::remove_dir_all(&t);
+        assert_eq!(got, vec![target.join("debug"), target.join("release"), target.join("retest").join("debug"),]);
     }
 
     #[test]

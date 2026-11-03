@@ -390,7 +390,8 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
     }
     let _queue_lock = if r.data.get("queue_change").is_some() { Some(super::queue::require_lock(repo)?) } else { None };
     // Before the lock: the automatic state of each line's folder and the trees that the undo
-    // reads (seconds to minutes each under the lock). Errors only lose the preparation.
+    // reads (seconds to minutes each under the lock). Errors only lose the preparation; the
+    // states are loaded again under the lock, where an error stops the undo.
     for (lid, ch) in &r.lines {
         if let Ok(Some(l)) = repo.p.db.line_by_id(lid) {
             let _ = repo.prepare_save(&l);
@@ -495,6 +496,10 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
         }
         _ => {}
     }
+    // Every check and every read of the undo runs before the first file changes: each line must
+    // still be where the operation left it, and each state must load. A failure stops the undo
+    // with no file changed; a state that a store remote holds comes back from it (`state_src`).
+    let mut lines = Vec::new();
     for (lid, ch) in &r.lines {
         let cur = repo.p.db.line_by_id(lid)?;
         let cur_state = cur
@@ -512,6 +517,7 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
                 "error: the line changed after this operation; undo the later operations first (layr op log), or use --force",
             ));
         }
+<<<<<<< head
         // Required states must still exist (retention can delete old automatic states).
         for s in [ch.before.as_ref().map(|b| b.head.clone()), ch.working_before.clone()].into_iter().flatten() {
             if !repo.p.has_state(&s) {
@@ -525,6 +531,39 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
                 ));
             }
         }
+||||||| base
+        // Required states must still exist (retention can delete old automatic states).
+        for s in [ch.before.as_ref().map(|b| b.head.clone()), ch.working_before.clone()].into_iter().flatten() {
+            if !repo.p.has_state(&s) {
+                return Err(exit(
+                    1,
+                    format!(
+                        "error: cannot undo: state {} was deleted by retention (undo window: {} days)",
+                        ids::short(&s),
+                        repo.p.config_u64("undo.days", 7)
+                    ),
+                ));
+            }
+        }
+=======
+        lines.push((lid, ch, cur, alive, cur_state));
+    }
+    let mut needed: Vec<String> = Vec::new();
+    for ch in r.lines.values() {
+        needed.extend(
+            [ch.before.as_ref().map(|b| b.head.clone()), ch.working_before.clone(), ch.working_after.clone()]
+                .into_iter()
+                .flatten(),
+        );
+    }
+    needed.extend(["final_state", "staged_state"].iter().filter_map(|k| r.data.get(*k)?.as_str().map(str::to_string)));
+    for s in &needed {
+        repo.state_src(s).map_err(|e| {
+            exit(1, format!("error: cannot undo, no file changed: {e:#} (undo window: {} days)", repo.p.config_u64("undo.days", 7)))
+        })?;
+    }
+    for (lid, ch, cur, alive, cur_state) in lines {
+>>>>>>> origin/main
         let mut wb = None;
         match (&ch.before, &cur) {
             (Some(b), Some(l)) if alive => {
@@ -537,7 +576,7 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
                 l2.name = b.name.clone();
                 match (&ch.working_before, &ch.working_after) {
                     // Revert only what the operation changed; later work stays.
-                    (Some(before), Some(after)) if repo.p.has_state(after) => {
+                    (Some(before), Some(after)) => {
                         let cur = repo.scan(&l2)?;
                         let later: BTreeSet<String> = changes::file_changes(&repo.state_src(after)?, &cur.path)?
                             .into_iter()
@@ -1042,9 +1081,41 @@ fn evict_stored(repo: &Repo) -> Result<Vec<String>> {
     let rows: Vec<String> = st.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
     drop(st);
     let mut evict = Vec::new();
+<<<<<<< head
     for id in rows {
         let plain = db.state(&id)?.is_some_and(|s| s.caches.is_empty());
         if plain && !named.contains(&id) {
+||||||| base
+    for (id, _) in db.present_states()? {
+        if !keep.contains(&id) {
+            if !copies.contains_key(&id) {
+                delete.push(id);
+            } else if evict_on {
+                evict.push(id);
+            }
+        } else if evict_on
+            && copies.contains_key(&id)
+            && !must.contains(&id)
+            && repo.p.has_state(&id)
+            && db.state(&id)?.is_some_and(|s| s.caches.is_empty())
+        {
+=======
+    for (id, _) in db.present_states()? {
+        // A state whose tree the store format cannot restore exactly stays on disk.
+        if !keep.contains(&id) {
+            if !copies.contains_key(&id) {
+                delete.push(id);
+            } else if evict_on && crate::store_remote::restorable(repo, &id)? {
+                evict.push(id);
+            }
+        } else if evict_on
+            && copies.contains_key(&id)
+            && !must.contains(&id)
+            && repo.p.has_state(&id)
+            && db.state(&id)?.is_some_and(|s| s.caches.is_empty())
+            && crate::store_remote::restorable(repo, &id)?
+        {
+>>>>>>> origin/main
             evict.push(id);
         }
     }
@@ -1235,9 +1306,8 @@ pub fn trash_excess_caches(repo: &Repo) -> Result<Vec<String>> {
     Ok(out)
 }
 
-/// `layr gc --all-projects`: the retention of every project of the store, for a periodic run
-/// (`packaging/launchd/ws.layr.gc.plist`). A project that fails does not stop the others; the
-/// exit code is 1 then.
+/// `layr gc --all-projects`: the retention of every project of the store, for a run by hand. A
+/// project that fails does not stop the others; the exit code is 1 then.
 fn gc_all_projects(ctx: &Ctx, dry: bool, quiet: bool) -> Result<i32> {
     let mut code = 0;
     for name in ctx.store.project_names()?.into_iter().filter(|n| !n.contains('%')) {
@@ -1638,7 +1708,7 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
         &actor,
         serde_json::json!({"access": {format!("user:{owner}"): "admin"}, "protect": {"main": {}}}),
     )?;
-    let repo = Repo { p };
+    let repo = Repo { p, ctx: Some(ctx) };
     let res = (|| -> Result<(String, String)> {
         let _lock = repo.p.lock()?;
         let work = repo.p.work_dir().join(crate::store::temp_name());
@@ -2354,7 +2424,7 @@ mod record_caches_tests {
         let mut rec = crate::model::Record::new("project");
         rec.data = serde_json::json!({"id": id, "name": "p", "config": {}});
         p.append(rec, &Actor { uid: 0, name: "root".into(), session: None })?;
-        let repo = Repo { p };
+        let repo = Repo { p, ctx: None };
         let work = dir.join("work");
         std::fs::create_dir_all(&work)?;
         crate::storage::create_subvolume(&work.join("a"))?;

@@ -385,24 +385,212 @@ fn workspace_dylib_is_an_export_object() {
 #[test]
 fn init_is_idempotent() {
     let tmp = std::env::temp_dir().canonicalize().unwrap().join(format!("layr-retest-init-{}", std::process::id()));
-    std::fs::create_dir_all(&tmp).unwrap();
-    std::fs::write(tmp.join("Cargo.toml"), "[package]\nname = \"p\"\nversion = \"0.1.0\"\n").unwrap();
-    std::fs::write(tmp.join(".gitignore"), "/target").unwrap();
+    let _ = std::fs::remove_dir_all(&tmp);
+    let src = tmp.join("src-project");
+    std::fs::create_dir_all(src.join("src")).unwrap();
+    std::fs::write(src.join("Cargo.toml"), "[package]\nname = \"p\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+    std::fs::write(src.join("src/lib.rs"), "").unwrap();
+    std::fs::write(src.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
+    std::fs::write(src.join(".gitignore"), "/target\n/node_modules\n").unwrap();
+    sh(&src, &tmp.join("unused"), "cargo", &["generate-lockfile", "--offline"]);
+    let root = tmp.join("store");
+    sh(&tmp, &root, "layr", &["init", "app", "--from", src.to_str().unwrap()]);
+    sh(&root.join("projects/app/lines/main"), &root, "layr", &["line", "new", "work"]);
+    let line = root.join("projects/app/lines/work");
+    // The cache folders exist in the line, as after a build and an install.
+    std::fs::create_dir_all(line.join("target/debug")).unwrap();
+    std::fs::write(line.join("target/debug/marker"), "x").unwrap();
+    std::fs::create_dir_all(line.join("node_modules/pkg")).unwrap();
+    std::fs::write(line.join("node_modules/pkg/index.js"), "x").unwrap();
     let init = || {
-        let o = Command::new("layr").args(["retest", "init"]).current_dir(&tmp).env("LAYR_ROOT", tmp.join("unused")).output().unwrap();
+        let o = Command::new("layr").args(["retest", "init"]).current_dir(&line).env("LAYR_ROOT", &root).output().unwrap();
         (o.status.code(), String::from_utf8_lossy(&o.stdout).into_owned())
     };
+    let overlay_folders = || {
+        let (out, _) = sh(&line, &root, "layr", &["overlay", "list", "--json"]);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let mut f: Vec<String> = v.as_array().unwrap().iter().map(|o| o["folder"].as_str().unwrap().to_string()).collect();
+        f.sort();
+        f
+    };
+    let files = || {
+        let read = |p: &str| std::fs::read_to_string(line.join(p)).unwrap();
+        (read(".layrattributes"), read("Cargo.toml"), read(".gitignore"))
+    };
+
     let (code, out) = init();
     assert_eq!(code, Some(0), "{out}");
-    assert!(out.contains("layr retest run -- --workspace"), "{out}");
-    let attrs = std::fs::read_to_string(tmp.join(".layrattributes")).unwrap();
-    let ignore = std::fs::read_to_string(tmp.join(".gitignore")).unwrap();
-    assert_eq!(attrs, "target regenerable\n.layr-retest regenerable\n");
-    assert_eq!(ignore, "/target\n.layr-retest\n");
+    assert!(out.contains("layr retest gate -- <your gate command>"), "{out}");
+    assert!(out.contains("target: saved as cache overlay") && out.contains("node_modules: saved as cache overlay"), "{out}");
+    assert_eq!(overlay_folders(), ["node_modules", "target"]);
+    let (attrs, manifest, ignore) = files();
+    assert_eq!(attrs, "target regenerable\nnode_modules regenerable\n.layr-retest regenerable\n");
+    assert_eq!(ignore, "/target\n/node_modules\n.layr-retest\n");
+    assert!(
+        manifest.contains("[workspace.metadata.layr-retest]") && manifest.contains("CARGO_INCREMENTAL = \"1\""),
+        "{manifest}"
+    );
+    assert!(manifest.contains("sweep = [[\"build\", \"--workspace\", \"--all-targets\", \"--locked\"]]"), "{manifest}");
+
+    // Second run: nothing changes, no cache is saved again.
     let (code, out) = init();
     assert_eq!(code, Some(0), "{out}");
-    assert_eq!(std::fs::read_to_string(tmp.join(".layrattributes")).unwrap(), attrs);
-    assert_eq!(std::fs::read_to_string(tmp.join(".gitignore")).unwrap(), ignore);
+    assert!(out.contains("target: already a cache overlay") && !out.contains("saved as cache overlay"), "{out}");
+    assert_eq!(overlay_folders(), ["node_modules", "target"]);
+    assert_eq!(files(), (attrs, manifest, ignore));
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// A project in a layr line. `files` are written to the source, which becomes the `main` line of the project.
+fn new_line(name: &str, files: &[(&str, &str)]) -> (PathBuf, PathBuf, PathBuf) {
+    let tmp = std::env::temp_dir().canonicalize().unwrap().join(format!("layr-retest-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let src = tmp.join("src-project");
+    for (path, text) in files {
+        let p = src.join(path);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    }
+    std::fs::write(src.join(".layrattributes"), ".layr-retest regenerable\ntarget regenerable\n").unwrap();
+    std::fs::write(src.join(".gitignore"), "/target\n/.layr-retest\n").unwrap();
+    sh(&src, &tmp.join("unused"), "cargo", &["generate-lockfile", "--offline"]);
+    let root = tmp.join("store");
+    sh(&tmp, &root, "layr", &["init", "app", "--from", src.to_str().unwrap()]);
+    sh(&root.join("projects/app/lines/main"), &root, "layr", &["line", "new", "work"]);
+    let line = root.join("projects/app/lines/work");
+    (tmp, root, line)
+}
+
+/// A build script that sets the cfg `e2e_flag` when `LAYR_E2E_FLAG` is in the build environment.
+const ENV_BUILD: &str = "fn main() {\n    println!(\"cargo:rerun-if-env-changed=LAYR_E2E_FLAG\");\n    println!(\"cargo:rustc-check-cfg=cfg(e2e_flag)\");\n    if std::env::var_os(\"LAYR_E2E_FLAG\").is_some() {\n        println!(\"cargo:rustc-cfg=e2e_flag\");\n    }\n}\n";
+/// A library that does not build without the cfg of `ENV_BUILD`.
+const ENV_LIB: &str = "#[cfg(not(e2e_flag))]\ncompile_error!(\"LAYR_E2E_FLAG did not reach the build\");\n\npub fn a() -> i32 {\n    1\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn ta() {\n        assert_eq!(super::a(), 1);\n    }\n}\n";
+/// The project env sets `LAYR_E2E_FLAG`, the one variable that `ENV_BUILD` needs.
+const ENV_TOML: &str = "[package]\nname = \"envp\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n\n[workspace.metadata.layr-retest]\nsweep = [[\"test\", \"--workspace\", \"--no-run\"]]\nenv = { LAYR_E2E_FLAG = \"1\" }\n";
+
+#[test]
+fn run_applies_the_project_env() {
+    // Without the env of `[workspace.metadata.layr-retest]`, the build fails and `retest` exits with an error.
+    let (tmp, root, line) = new_line("run-env", &[("Cargo.toml", ENV_TOML), ("build.rs", ENV_BUILD), ("src/lib.rs", ENV_LIB)]);
+    let err = retest(&line, &root, &["run"]);
+    assert!(err.contains("passed 1, failed 0"), "{err}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn sweep_applies_the_project_env() {
+    let tmp = std::env::temp_dir().canonicalize().unwrap().join(format!("layr-retest-sweep-env-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let dir = tmp.join("project");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("Cargo.toml"), ENV_TOML).unwrap();
+    std::fs::write(dir.join("build.rs"), ENV_BUILD).unwrap();
+    std::fs::write(dir.join("src/lib.rs"), ENV_LIB).unwrap();
+    cargo(&dir, &["generate-lockfile"]);
+    // The standard build runs with the project env. The sweep must list the same units, or it skips the folder.
+    cargo_in(&dir, &dir.join("target"), &[("LAYR_E2E_FLAG", "1")], &["test", "--workspace", "--no-run"]);
+    let err = sweep_cmd(&dir, &[]);
+    assert!(err.contains("swept target"), "{err}");
+    assert!(!err.contains("sweep skipped"), "{err}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// `layr retest gate` in `dir`, with the lock at `lock` and no load wait.
+fn gate_child(dir: &Path, lock: &Path, args: &[&str]) -> std::process::Child {
+    let mut all = vec!["retest", "gate", "--max-load", "100000"];
+    all.extend_from_slice(args);
+    Command::new("layr")
+        .args(all)
+        .current_dir(dir)
+        .env("LAYR_ROOT", dir.join("unused-store"))
+        .env("LAYR_RETEST_GATE_LOCK", lock)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+#[test]
+fn gate_runs_one_gate_at_a_time() {
+    let tmp = std::env::temp_dir().canonicalize().unwrap().join(format!("layr-retest-gate-lock-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let lock = tmp.join("gate.lock");
+    let marker = tmp.join("first-done");
+    let first =
+        gate_child(&tmp, &lock, &["--name", "first", "--", "sh", "-c", &format!("sleep 3 && touch '{}'", marker.display())]);
+    let t = std::time::Instant::now();
+    while !lock.join("pid").is_file() {
+        assert!(t.elapsed() < std::time::Duration::from_secs(20), "the first gate took no lock");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    // The second gate's command passes only when the first gate's command has finished.
+    let second = gate_child(&tmp, &lock, &["--name", "second", "--", "sh", "-c", &format!("test -f '{}'", marker.display())]);
+    let second = second.wait_with_output().unwrap();
+    let first = first.wait_with_output().unwrap();
+    let err = String::from_utf8_lossy(&second.stderr);
+    assert!(err.contains("waiting for the gate lock") && err.contains("first"), "{err}");
+    assert!(first.status.success(), "{}", String::from_utf8_lossy(&first.stderr));
+    assert!(second.status.success(), "{err}");
+    assert!(!lock.exists(), "the lock is released at the end");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn gate_reaps_the_lock_of_a_dead_process() {
+    let tmp = std::env::temp_dir().canonicalize().unwrap().join(format!("layr-retest-gate-stale-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let lock = tmp.join("gate.lock");
+    let mut dead = Command::new("true").spawn().unwrap();
+    let pid = dead.id();
+    dead.wait().unwrap();
+    std::fs::create_dir_all(&lock).unwrap();
+    std::fs::write(lock.join("pid"), pid.to_string()).unwrap();
+    std::fs::write(lock.join("owner"), "crashed-gate").unwrap();
+    let out = gate_child(&tmp, &lock, &["--", "true"]).wait_with_output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    assert!(err.contains("reaped") && err.contains("crashed-gate"), "{err}");
+    assert!(!lock.exists());
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn gate_applies_the_project_env_and_returns_the_command_status() {
+    let tmp = std::env::temp_dir().canonicalize().unwrap().join(format!("layr-retest-gate-env-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let good = tmp.join("good");
+    std::fs::create_dir_all(good.join("src")).unwrap();
+    std::fs::write(good.join("Cargo.toml"), ENV_TOML).unwrap();
+    std::fs::write(good.join("build.rs"), ENV_BUILD).unwrap();
+    std::fs::write(good.join("src/lib.rs"), ENV_LIB).unwrap();
+    cargo(&good, &["generate-lockfile"]);
+    let lock = tmp.join("gate.lock");
+    // The command sees the project env, no CARGO_TARGET_DIR and a cleared RUSTC_WRAPPER. Its status is 7.
+    let check = "test \"$LAYR_E2E_FLAG\" = 1 && test -z \"${CARGO_TARGET_DIR+x}\" && test \"${RUSTC_WRAPPER-unset}\" = \"\" && exit 7; exit 1";
+    let out = gate_child(&good, &lock, &["--", "sh", "-c", check]).wait_with_output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(7), "{err}");
+    assert!(err.contains("sweep ok"), "{err}");
+    assert!(!lock.exists());
+
+    // A failing sweep is logged and does not change the status of the command.
+    let bad = tmp.join("bad");
+    std::fs::create_dir_all(bad.join("src")).unwrap();
+    std::fs::write(
+        bad.join("Cargo.toml"),
+        ENV_TOML.replace("sweep = [[\"test\", \"--workspace\", \"--no-run\"]]", "sweep = [[\"no-such-cargo-command\"]]"),
+    )
+    .unwrap();
+    std::fs::write(bad.join("src/lib.rs"), "").unwrap();
+    cargo(&bad, &["generate-lockfile"]);
+    // A folder that a build wrote: it has a profile folder with a fingerprint folder.
+    std::fs::create_dir_all(bad.join("target/debug/.fingerprint")).unwrap();
+    let out = gate_child(&bad, &lock, &["--", "true"]).wait_with_output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert!(err.contains("sweep failed"), "{err}");
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
@@ -587,6 +775,44 @@ fn sweep_keeps_the_units_of_the_other_standard_commands() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+/// A project whose standard commands build the release profile only (no `target/debug`): the sweep sweeps
+/// `target/release`, keeps the incremental data of the live units, and the next build compiles nothing.
+#[test]
+fn sweep_sweeps_a_release_only_target() {
+    let tmp = std::env::temp_dir().canonicalize().unwrap().join(format!("layr-retest-sweep-release-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let ws = tmp.join("ws");
+    sweep_workspace(&ws, "sweep = [[\"build\", \"--release\", \"--workspace\"]]\nenv = { CARGO_INCREMENTAL = \"1\", RUSTC_WRAPPER = \"\" }");
+    // The layr project's release profile (`debug = 1`): the objects of a bin stay in `deps` and link it to its incremental data.
+    let manifest = std::fs::read_to_string(ws.join("Cargo.toml")).unwrap();
+    std::fs::write(ws.join("Cargo.toml"), manifest + "\n[profile.release]\ndebug = 1\n").unwrap();
+    // The machine may set a rustc wrapper (sccache), which refuses incremental compilation.
+    let (env, target) = ([("CARGO_INCREMENTAL", "1"), ("RUSTC_WRAPPER", "")], ws.join("target"));
+    let release = target.join("release");
+    let build = ["build", "--release", "--workspace"];
+
+    cargo_in(&ws, &target, &env, &build);
+    let (units, outputs, inc) = (entries(&release, ".fingerprint"), hashes(&release, "deps"), entries(&release, "incremental"));
+
+    cargo_in(&ws, &target, &env, &["build", "--release", "--workspace", "--features", "lib-a/extra"]);
+    assert!(entries(&release, ".fingerprint").len() > units.len());
+    // A changed function keeps the unit hash: the build writes new object files of the same unit.
+    set_lib_a(&ws, "1 + 0");
+    cargo_in(&ws, &target, &env, &build);
+
+    let err = sweep_cmd(&ws, &[]);
+    assert!(err.contains("swept"), "the release folder was not swept:\n{err}");
+    assert_eq!(entries(&release, ".fingerprint"), units, "a non-live unit stays");
+    assert_eq!(hashes(&release, "deps"), outputs, "a unit of the feature build stays, or a live unit lost its newest files");
+    assert_eq!(entries(&release, "incremental"), inc, "the incremental data of a live unit was removed");
+    let builds = object_builds(&release);
+    assert!(builds.values().all(|b| b.len() == 1), "{builds:?}");
+
+    let err = cargo_in(&ws, &target, &env, &build);
+    assert!(!err.contains("Compiling"), "the next build compiled:\n{err}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 /// Modification times of the output files of a profile folder: a build that compiles a unit writes its
 /// `.rlib`, `.rmeta`, objects and binaries in `deps`, `build` and `examples`. Left out: the files directly in
 /// the folder (cargo re-links the uplifted binary `debug/<bin>` to the command it runs, with no compile),
@@ -765,12 +991,13 @@ fn sweep_sweeps_target_retest_with_a_retest_command() {
     let ws = tmp.join("ws");
     sweep_workspace(
         &ws,
-        "sweep = [[\"build\", \"--workspace\", \"--tests\", \"--bins\"]]\nretest = [[\"test\", \"--workspace\", \"--no-run\"]]",
+        "sweep = [[\"build\", \"--workspace\", \"--tests\", \"--bins\"]]\nretest = [[\"test\", \"--workspace\", \"--no-run\"]]\nenv = { RUSTC_WRAPPER = \"\" }",
     );
     // The variables that `layr retest` gives its cargo calls, so that the unit hashes match the sweep.
     let env = [
         ("RUSTFLAGS", "-C instrument-coverage"),
         ("CARGO_INCREMENTAL", "1"),
+        ("RUSTC_WRAPPER", ""),
         ("CARGO_PROFILE_DEV_DEBUG", "line-tables-only"),
         ("CARGO_PROFILE_TEST_DEBUG", "line-tables-only"),
     ];
@@ -829,5 +1056,155 @@ fn build_scripts_write_no_profile_into_the_project() {
     assert!(!line.join("target/retest/profraw").exists());
 
     let _ = Command::new("chflags").args(["-R", "nouchg"]).arg(&tmp).status();
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// Runs `cargo <args> --message-format json` in `dir` and returns the stdout (the unit messages) and stderr.
+fn cargo_json(dir: &Path, target: &Path, args: &[&str]) -> (String, String) {
+    let o = Command::new("cargo")
+        .args(args)
+        .arg("--message-format")
+        .arg("json")
+        .current_dir(dir)
+        .env_remove("RUSTFLAGS")
+        .env("CARGO_TARGET_DIR", target)
+        .env("CARGO_NET_OFFLINE", "true")
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "cargo {args:?} failed:\n{}", String::from_utf8_lossy(&o.stderr));
+    (String::from_utf8_lossy(&o.stdout).into_owned(), String::from_utf8_lossy(&o.stderr).into_owned())
+}
+
+/// Writes `n` bytes to `p`, creating the folders of `p`.
+fn put(p: &Path, n: usize) {
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    std::fs::write(p, vec![b'x'; n]).unwrap();
+}
+
+/// Every kind of stale output at once: the outputs of a feature build, an orphan incremental folder, an unhashed
+/// `.a` and unhashed objects of crates that no command lists, a stale top-level bin, a stale example and its copy.
+/// After the sweep, only the outputs that the standard command names are left, and its next build compiles nothing.
+#[test]
+fn sweep_leaves_only_the_outputs_that_the_standard_command_names() {
+    let tmp = std::env::temp_dir().canonicalize().unwrap().join(format!("layr-retest-sweep-allow-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let ws = tmp.join("ws");
+    sweep_workspace(&ws, "sweep = [[\"build\", \"--workspace\", \"--tests\", \"--bins\", \"--examples\"]]");
+    std::fs::create_dir_all(ws.join("app/examples")).unwrap();
+    std::fs::write(ws.join("app/examples/demo.rs"), "fn main() {}\n").unwrap();
+    let build = ["build", "--workspace", "--tests", "--bins", "--examples"];
+    let debug = ws.join("target/debug");
+
+    cargo(&ws, &build);
+    // A feature build: its units are not listed by the standard command.
+    cargo(&ws, &["build", "--workspace", "--tests", "--bins", "--examples", "--features", "lib-a/extra"]);
+    // A changed source: the standard units build again, so a live unit has the objects of two builds.
+    std::fs::write(ws.join("lib-a/src/lib.rs"), std::fs::read_to_string(ws.join("lib-a/src/lib.rs")).unwrap().replace("    1\n", "    1 + 0\n")).unwrap();
+    cargo(&ws, &build);
+
+    // Garbage that no command lists.
+    put(&debug.join("libgone.a"), 4096);
+    put(&debug.join("deps/libgone-0123456789abcdef.a"), 4096);
+    put(&debug.join("deps/lib_a.0abc.0deadbe.rcgu.o"), 100);
+    put(&debug.join("stale-bin"), 100);
+    put(&debug.join("examples/stale-ex"), 100);
+    put(&debug.join("examples/stale-ex-0123456789abcdef"), 100);
+    put(&debug.join("incremental/orphan-zz9/s-1-2-abc/x.o"), 100);
+    put(&debug.join("incremental/orphan-zz9/s-1-2-abc.lock"), 0);
+
+    let err = sweep_cmd(&ws, &[]);
+    assert!(err.contains("swept target, freed"), "{err}");
+
+    for gone in ["libgone.a", "deps/libgone-0123456789abcdef.a", "deps/lib_a.0abc.0deadbe.rcgu.o", "stale-bin", "examples/stale-ex", "examples/stale-ex-0123456789abcdef", "incremental/orphan-zz9"] {
+        assert!(!debug.join(gone).exists(), "{gone} stays");
+    }
+    // The outputs that the standard command names, and the hashes of its units.
+    let (msgs, _) = cargo_json(&ws, &ws.join("target"), &build);
+    let mut listed = BTreeSet::new();
+    for line in msgs.lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()) {
+        if line["reason"] == "compiler-artifact" {
+            assert_eq!(line["fresh"], true, "{line}");
+            for f in line["filenames"].as_array().unwrap().iter().filter_map(|f| f.as_str()).chain(line["executable"].as_str()) {
+                listed.insert(f.to_string());
+            }
+        }
+    }
+    assert!(!listed.is_empty());
+    for f in &listed {
+        assert!(Path::new(f).exists(), "a listed output is gone: {f}");
+    }
+    // Every file of the profile folder is a listed output, cargo's lock, or an entry of a listed unit.
+    let hash = |n: &str| n.split('.').next().unwrap().rsplit_once('-').map(|(_, h)| h.to_string()).filter(|h| h.len() == 16);
+    let live: BTreeSet<String> = listed.iter().filter_map(|f| hash(Path::new(f).file_name().unwrap().to_str().unwrap())).collect();
+    // A hashed file of a unit (a bin has a copy in the folder and a hashed file in `deps`) stays with its fingerprint.
+    let fingerprints: BTreeSet<String> = entries(&debug, ".fingerprint").iter().filter_map(|n| hash(n)).collect();
+    for sub in ["", "deps", "examples"] {
+        for e in std::fs::read_dir(debug.join(sub)).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                continue;
+            }
+            let name = e.file_name().to_string_lossy().into_owned();
+            let ok = listed.contains(p.to_str().unwrap()) || name.starts_with(".cargo-") || (name.ends_with(".d") && listed.contains(p.with_extension("").to_str().unwrap())) || hash(&name).is_some_and(|h| fingerprints.contains(&h));
+            assert!(ok, "{} stays but no listed unit needs it", p.display());
+        }
+    }
+    // Every incremental folder that stays keeps one finalized session.
+    for e in std::fs::read_dir(debug.join("incremental")).unwrap().flatten() {
+        let sessions = entries(&e.path(), "").into_iter().filter(|n| n.starts_with("s-") && !n.ends_with(".lock")).count();
+        assert_eq!(sessions, 1, "{:?}", e.path());
+    }
+
+    let err = cargo(&ws, &build);
+    assert!(!err.contains("Compiling"), "the next build compiled:\n{err}");
+    let err = sweep_cmd(&ws, &["--dry-run"]);
+    assert!(err.contains("would free 0.0 MB"), "a second sweep frees something:\n{err}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// A dylib used as a dev-dependency has an unhashed output (`libdy.dylib`) and unhashed objects. Its incremental
+/// folder belongs to the live unit: a feature build of the dylib leaves a second folder, which the sweep removes.
+/// The next build compiles nothing.
+#[test]
+fn sweep_keeps_the_incremental_folder_of_a_dylib_dev_dependency() {
+    let tmp = std::env::temp_dir().canonicalize().unwrap().join(format!("layr-retest-sweep-dylib-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let ws = tmp.join("ws");
+    std::fs::create_dir_all(ws.join("dy/src")).unwrap();
+    std::fs::create_dir_all(ws.join("app/src")).unwrap();
+    std::fs::write(
+        ws.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"dy\", \"app\"]\nresolver = \"2\"\n\n[workspace.metadata.layr-retest]\nsweep = [[\"build\", \"--workspace\", \"--tests\"]]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        ws.join("dy/Cargo.toml"),
+        "[package]\nname = \"dy\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\ncrate-type = [\"dylib\"]\n\n[features]\nextra = []\n",
+    )
+    .unwrap();
+    std::fs::write(ws.join("dy/src/lib.rs"), "pub fn d() -> i32 {\n    2\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {\n        assert_eq!(super::d(), 2);\n    }\n}\n").unwrap();
+    std::fs::write(ws.join("app/Cargo.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dev-dependencies]\ndy = { path = \"../dy\" }\n").unwrap();
+    std::fs::write(ws.join("app/src/lib.rs"), "#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {\n        assert_eq!(1 + 1, 2);\n    }\n}\n").unwrap();
+    let build = ["build", "--workspace", "--tests"];
+    let debug = ws.join("target/debug");
+    let dy_folders = || -> BTreeSet<String> { entries(&debug, "incremental").into_iter().filter(|n| n.starts_with("dy-")).collect() };
+
+    cargo(&ws, &build);
+    let live = dy_folders();
+    // The feature build of the dylib replaces its output and objects; the standard build builds it again.
+    cargo(&ws, &["build", "-p", "dy", "--features", "extra", "--tests"]);
+    assert!(dy_folders().len() > live.len(), "{:?}", dy_folders());
+    cargo(&ws, &build);
+
+    let err = sweep_cmd(&ws, &[]);
+    assert!(err.contains("swept target, freed"), "{err}");
+    assert_eq!(dy_folders(), live, "the sweep removed or kept the wrong incremental folder of a dylib unit");
+    for f in &live {
+        let session = entries(&debug.join("incremental").join(f), "");
+        assert_eq!(session.iter().filter(|n| n.starts_with("s-") && !n.ends_with(".lock")).count(), 1, "{session:?}");
+    }
+
+    let err = cargo(&ws, &build);
+    assert!(!err.contains("Compiling"), "the next build compiled:\n{err}");
     let _ = std::fs::remove_dir_all(&tmp);
 }
