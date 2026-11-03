@@ -349,7 +349,6 @@ impl<'a> Repo<'a> {
     /// Every command that reads the tree of a state comes here (`state_root`, `state_src`). A
     /// state that retention evicted comes back from a store remote that holds it.
     fn check_state(&self, id: &str) -> Result<()> {
-<<<<<<< head
         if self.p.has_state(id) {
             return Ok(());
         }
@@ -362,7 +361,7 @@ impl<'a> Repo<'a> {
             });
         }
         match self.p.db.state_flags(id)? {
-            Some((_, true)) => bail!("state {} was deleted by retention", ids::short(id)),
+            Some((_, true)) => bail!("state {} was freed: no line, ref, tag or undo record keeps it", ids::short(id)),
             Some(_) => crate::store_remote::restore_state(self, id).map_err(|e| {
                 if crate::gitbridge::missing_objects(self, id) {
                     e.context(format!(
@@ -374,21 +373,6 @@ impl<'a> Repo<'a> {
                 }
             })?,
             None => bail!("unknown state {}", ids::short(id)),
-||||||| base
-        if !self.p.has_state(id) {
-            match self.p.db.state_flags(id)? {
-                Some((_, true)) => bail!("state {} was deleted by retention", ids::short(id)),
-                Some(_) => crate::store_remote::restore_state(self, id)?,
-                None => bail!("unknown state {}", ids::short(id)),
-            }
-=======
-        if !self.p.has_state(id) {
-            match self.p.db.state_flags(id)? {
-                Some((_, true)) => bail!("state {} was freed: no line, ref, tag or undo record keeps it", ids::short(id)),
-                Some(_) => crate::store_remote::restore_state(self, id)?,
-                None => bail!("unknown state {}", ids::short(id)),
-            }
->>>>>>> origin/main
         }
         Ok(())
     }

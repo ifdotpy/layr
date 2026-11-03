@@ -1292,13 +1292,7 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if args.iter().any(|v| v == "--remote" || v.starts_with("--remote=")) {
         return crate::store_remote::command(ctx, "gc", args);
     }
-<<<<<<< head
-    let spec = Spec::new().flag("-n|--dry-run").flag("-q|--quiet").flag("--dedup").flag("--all-projects").flag("--repair");
-||||||| base
-    let spec = Spec::new().flag("-n|--dry-run").flag("-q|--quiet").flag("--dedup").flag("--all-projects");
-=======
     let spec = Spec::new().flag("-n|--dry-run").flag("-q|--quiet").flag("--repair").flag("--dedup").flag("--all-projects");
->>>>>>> origin/main
     let a = parse(&spec, args)?;
     if a.has("--all-projects") {
         let code = gc_all_projects(ctx, a.has("-n"), a.has("-q"))?;
@@ -1307,57 +1301,24 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let h = here(ctx)?;
     h.repo.require(ctx, "gc")?;
-<<<<<<< head
-    let v = run_gc(ctx, &h.repo, a.has("-n"))?;
-    let built = if a.has("--repair") { repair_built(&h.repo, a.has("-n"))? } else { Vec::new() };
-||||||| base
-    let v = run_gc(ctx, &h.repo, a.has("-n"))?;
-=======
     let code = if a.has("--repair") {
         repair_project(ctx, &h.repo, a.has("-n"), a.has("-q"), true)?;
-        0
-    } else {
-        check(ctx, &h.repo, a.has("-q"))?
-    };
->>>>>>> origin/main
-    // After the project lock is released: hashing and comparing cache files takes long.
-    let shared = if a.has("--dedup") { Some(crate::dedup::run(&h.repo, a.has("-n"))?) } else { None };
-    if !a.has("-q") {
-<<<<<<< head
-        let verb = if a.has("-n") { "would delete" } else { "deleted" };
-        outln!(ctx, "{verb} {} state(s)", v.len());
-        for id in v.iter().take(50) {
-            outln!(ctx, "\t{}", ids::short(id));
-        }
-        if a.has("--repair") {
+        // Trees of imported states that no strong owner keeps: git builds them again on read.
+        let built = repair_built(&h.repo, a.has("-n"))?;
+        if !a.has("-q") {
             let verb = if a.has("-n") { "would free" } else { "freed" };
             outln!(ctx, "{verb} {} built Git state(s) (rebuilt on read)", built.len());
             for id in built.iter().take(50) {
                 outln!(ctx, "\t{}", ids::short(id));
             }
         }
-        if a.has("-n") {
-            let caches = excess_caches(&h.repo)?;
-            outln!(ctx, "would delete {} cache(s)", caches.len());
-            for (_, name) in caches.iter().take(50) {
-                outln!(ctx, "\t{name}");
-            }
-        }
-||||||| base
-        let verb = if a.has("-n") { "would delete" } else { "deleted" };
-        outln!(ctx, "{verb} {} state(s)", v.len());
-        for id in v.iter().take(50) {
-            outln!(ctx, "\t{}", ids::short(id));
-        }
-        if a.has("-n") {
-            let caches = excess_caches(&h.repo)?;
-            outln!(ctx, "would delete {} cache(s)", caches.len());
-            for (_, name) in caches.iter().take(50) {
-                outln!(ctx, "\t{name}");
-            }
-        }
-=======
->>>>>>> origin/main
+        0
+    } else {
+        check(ctx, &h.repo, a.has("-q"))?
+    };
+    // After the project lock is released: hashing and comparing cache files takes long.
+    let shared = if a.has("--dedup") { Some(crate::dedup::run(&h.repo, a.has("-n"))?) } else { None };
+    if !a.has("-q") {
         if let Some(r) = shared {
             let verb = if a.has("-n") { "would share" } else { "shared" };
             outln!(ctx, "{verb} {} of disk in {} cache file(s), {:.1} s", human_size(r.bytes), r.files, r.seconds);

@@ -10,13 +10,7 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | history       | `log [--json]`, `show`, `blame`, `grep`, `ls-files`, `rev-parse`, `merge-base`                        |
 | lines         | `line new <name> [<rev>] [--count N] [--json]`, `line list [--json]`, `line delete`, `line rename`, `line move`, `tag`, `merge [--expect]`, `pick`, `invert`, `replay`, `adopt` |
 | access        | `access [list|grant [--until <30m|2h|1d>]|revoke|deny|allow|check]`, `protect [<pattern> --update <role> --check <names> --path <path>=<role> --approvals <n> --approvers <principals> --direct --rewrite <role> --no-expect | --remove]`, `approve [--withdraw] <state>`, `attest <kind> <rev> [--payload <file>]`, `attestations <rev> [--kind <kind>] [--json]` |
-<<<<<<< head
-| safety        | `undo`, `op log`, `save`, `try <state> -- <cmd>`, `try <state> --check <name>`, `bisect list [--json]`, `bisect run [--good <rev>] [--bad <rev>] [--auto] [--ref-log <ref>] [--json] -- <cmd>`, `gc [-n] [--dedup] [--repair]`, `du [<line>...] [--json]`, `du --store [--json]`, `fsck`, `reindex` |
-||||||| base
-| safety        | `undo`, `op log`, `save`, `try <state> -- <cmd>`, `try <state> --check <name>`, `bisect list [--json]`, `bisect run [--good <rev>] [--bad <rev>] [--auto] [--ref-log <ref>] [--json] -- <cmd>`, `gc [-n] [--dedup]`, `du [<line>...] [--json]`, `du --store [--json]`, `fsck`, `reindex` |
-=======
 | safety        | `undo`, `op log`, `save`, `try <state> -- <cmd>`, `try <state> --check <name>`, `bisect list [--json]`, `bisect run [--good <rev>] [--bad <rev>] [--auto] [--ref-log <ref>] [--json] -- <cmd>`, `gc [-n] [--repair] [--dedup]`, `du [<line>...] [--json]`, `du --store [--json]`, `fsck`, `reindex` |
->>>>>>> origin/main
 | Git bridge    | `git remote`, `git fetch`, `git pull`, `git push [--squash] [--include-base <lines>]`, `git clone`, `git sync`                             |
 | remotes       | `remote add\|list\|self\|remove\|trust`, `remote public <remote> on\|off`, `sync <remote>`, `push <remote>`, `push [--dry-run]` (every layer to each of its remotes), `overlay remote add\|list\|remove`, `fetch <remote>`, `pull <remote>`, `clone <url>` |
 | OCI           | `push <oci-remote> <rev> [--runnable <name>] [--json]`, `access token <principal> [--until <duration>]`, `access token --revoke <principal>` |
@@ -186,48 +180,6 @@ extent), and belongs to a part when no other part references it. The last lines 
 several parts share and the store total. It reads every file's metadata (on Linux it opens each
 file), so a large store takes minutes; 4 workers share the folders of `states` and `deltas`.
 
-<<<<<<< head
-`gc` deletes the states that nothing keeps. Line heads and their history, tags, refs, park entries
-and conflict sources stay. The newest `retention.auto` (50) automatic states of each line, one per
-hour for `retention.hours` (24), and every state that a record of the last `undo.days` (7) names
-stay too, except an automatic state whose work its parent already holds: it has no caches and its
-files that are not ignored equal the parent (pushed or not; the parent stays while anything names it). Such a
-state differs only in build output, which a build makes again, so a deleted line frees its space at
-the next `gc`. The newest automatic state of a live line always stays. `gc` compares these states
-before it takes the store lock.
-
-`gc --repair` also frees the trees of imported states that no line head, park entry, overlay, undo
-record or auto state needs, and that git builds again. The record stays; the next read builds the
-tree (`docs/ownership.md`, "States imported from Git"). `gc -n --repair` lists them. A plain `gc`
-does not free them.
-
-`gc` evicts a state that a store remote holds (a successful `layr push <store-remote>` names it,
-the remote still has the recorded URL, and this machine reads that store) only when the project
-config `gc.evict` is `on` (`layr config gc.evict on`; default `off`). With
-`off`, such a state is kept with its history and nothing is deleted for it. With `on`, its tree goes,
-its record stays, and the next command that reads the tree fetches it back from that remote. A recoverable state stays on disk when it is a line head, the newest automatic state of a
-line, a state with caches, a state that a cache overlay names, or a base of a thin layer chain that
-a state on disk needs. Without a reachable remote, a command that needs the tree fails and names the
-remote. `gc --all-projects` runs `gc` for every project (see [design.md](design.md#state-eviction-and-fetch-on-demand)).
-||||||| base
-`gc` deletes the states that nothing keeps. Line heads and their history, tags, refs, park entries
-and conflict sources stay. The newest `retention.auto` (50) automatic states of each line, one per
-hour for `retention.hours` (24), and every state that a record of the last `undo.days` (7) names
-stay too, except an automatic state whose work its parent already holds: it has no caches and its
-files that are not ignored equal the parent (pushed or not; the parent stays while anything names it). Such a
-state differs only in build output, which a build makes again, so a deleted line frees its space at
-the next `gc`. The newest automatic state of a live line always stays. `gc` compares these states
-before it takes the store lock.
-
-`gc` evicts a state that a store remote holds (a successful `layr push <store-remote>` names it,
-the remote still has the recorded URL, and this machine reads that store) only when the project
-config `gc.evict` is `on` (`layr config gc.evict on`; default `off`). With
-`off`, such a state is kept with its history and nothing is deleted for it. With `on`, its tree goes,
-its record stays, and the next command that reads the tree fetches it back from that remote. A recoverable state stays on disk when it is a line head, the newest automatic state of a
-line, a state with caches, a state that a cache overlay names, or a base of a thin layer chain that
-a state on disk needs. Without a reachable remote, a command that needs the tree fails and names the
-remote. `gc --all-projects` runs `gc` for every project (see [design.md](design.md#state-eviction-and-fetch-on-demand)).
-=======
 Storage is freed when a state loses its last owner (docs/ownership.md). A command that drops
 the last owner of a state moves its storage to the trash after its commit and after the store
 lock, so `line delete`, a save past the rings, and a moved head free space in that command. A
@@ -240,6 +192,11 @@ finds any. It prints one line with the number of leaked states and their bytes, 
 expired refs and dead pins, trims cache snapshots beyond `retention.caches`, and empties the
 trash. `gc -n --repair` prints what it would free. `fsck` runs the same check, and
 `fsck --repair` rebuilds the table. `gc --dedup` shares identical cache files and is unchanged.
+
+`gc --repair` also frees the trees of imported states that no line head, park entry, overlay, undo
+record or auto state needs, and that git builds again. The record stays; the next read builds the
+tree (`docs/ownership.md`, "States imported from Git"). `gc -n --repair` lists them. A plain `gc`
+only checks.
 
 Keys that keep states (count rings, `layr config <key> <n>`):
 
@@ -268,7 +225,6 @@ Test only (tests/t99-ownership-free.sh): `LAYR_TEST_EXIT_AFTER_COMMIT=1` exits w
 after a commit that queued states, before the free step. Test only (tests/t100-pin-reads.sh):
 `LAYR_TEST_PIN_HOLD_MS=<ms>` sleeps once per process after its pins are taken. Neither is for use
 otherwise.
->>>>>>> origin/main
 
 Reads of imported states (`log -p`, `log <path>`, `show`, `diff`, `blame`, `grep <rev>`) take the
 bytes from Git and build no tree. `line new`, `try`, `bisect run` and `reset --hard` build the tree
