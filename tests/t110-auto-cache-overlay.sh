@@ -76,6 +76,7 @@ l line new -q warm2 main
 l line new -q warm3 main
 after=$(store_bytes)
 echo "info: store growth of two new lines from main: $((after - before)) bytes"
+echo "info: layr du after the two new lines:"; l du 2>&1 | sed "s/^/info: /"
 ok "two new lines from main add under 1 MiB of store growth" test $((after - before)) -lt 1048576
 eq "two new lines from main make no cache state" "$states_before" "$(states_of_cache)"
 cd $LAYR_ROOT/projects/r/lines/warm2 || exit 1
