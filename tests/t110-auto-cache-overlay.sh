@@ -77,6 +77,7 @@ l line new -q warm3 main
 after=$(store_bytes)
 echo "info: store growth of two new lines from main: $((after - before)) bytes"
 echo "info: layr du after the two new lines:"; l du 2>&1 | sed "s/^/info: /"
+echo "info: id $(id -u) owners: $(stat -c "%u:%g %a %n" $P/target/blob.bin $LAYR_ROOT/projects/r/lines/warm2/target/blob.bin 2>&1 | tr "\n" " ")"; mountpoint -q $LAYR_ROOT/projects/r/lines/warm2/target && echo "info: warm2 target is a mount"
 ok "two new lines from main add under 1 MiB of store growth" test $((after - before)) -lt 1048576
 eq "two new lines from main make no cache state" "$states_before" "$(states_of_cache)"
 cd $LAYR_ROOT/projects/r/lines/warm2 || exit 1
