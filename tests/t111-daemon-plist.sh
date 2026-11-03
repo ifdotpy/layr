@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos overlayfs
 # The macOS LaunchAgent sets LAYR_ROOT, so the daemon serves the store that the user's commands use
 # (packaging/launchd). `layr follow` warns when no daemon of this user serves the store: none runs,
 # a daemon serves another store, or the daemon is an older build that does not report its store.

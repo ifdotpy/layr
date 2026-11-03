@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos overlayfs
 # `save --caches --cache a --cache b` saves every named cache path, not only the last one.
 . "$(dirname "$0")/lib.sh"
 
