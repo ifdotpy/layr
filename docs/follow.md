@@ -6,6 +6,7 @@
 
 - `layr follow <remote>/<branch>`: store the target, run one pass now.
 - `layr follow --run`: run one pass now (the target must exist).
+- `layr follow --tick`: run the pass the daemon runs (a refused remote state is not retried).
 - `layr follow`: print the target and the result of the last pass.
 - `layr follow --remove`: remove the target. The line keeps its files.
 
@@ -22,7 +23,9 @@
 3. Stop when the line has unsaved work (result: `skipped: unsaved work`). Nothing is saved for it.
 4. Merge the remote state with `--expect <fetched state>`. A fast-forward when possible. The merge
    runs with `--refuse-conflicts`: a conflict discards the merge result, and the line keeps its head.
-   Any error keeps the head too.
+   Any error keeps the head too. A failed merge records the pair (fetched remote state, line head).
+   A tick then skips the pair without output and without a new record, until the remote state or
+   the line head changes. `layr follow` and `--run` always try.
 5. Caches, only after a merge:
    - Candidate lines: lines with an `export` record to that remote in the last 14 days, newest
      export first. A line is a candidate through the state of its export.

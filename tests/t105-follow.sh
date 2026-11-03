@@ -69,6 +69,20 @@ eq "the working file keeps the local content" local "$(cat src/a.txt)"
 has "layr follow shows the conflict error" "conflicts: src/a.txt" "$(l follow 2>&1)"
 eq "status shows no merge in progress" "" "$(l status -s | grep UU)"
 
+# 5b. A tick (the daemon's pass) does not retry the remote state that the conflict refused: no
+#     output, and the last pass keeps its time. A new remote commit is tried again.
+last=$(l follow | tail -1)
+eq "a tick with the same remote state prints nothing" "" "$(l follow --tick 2>&1)"
+eq "a tick with the same remote state does not run the pass" "$last" "$(l follow | tail -1)"
+cd $U; echo remote-two > src/a.txt; git commit -qam "remote a again"; git push -q origin main
+cd $P/main
+out=$(l follow --tick 2>&1); rc=$?
+eq "a tick with a new remote state tries again and fails" "1" "$rc"
+has "the new attempt names the conflict" "conflicts: src/a.txt" "$out"
+ok "the new attempt replaces the last pass" test "$last" != "$(l follow | tail -1)"
+eq "the tick of the new remote state is refused again without output" "" "$(l follow --tick 2>&1)"
+eq "main head still did not move" "$before" "$(l rev-parse head)"
+
 # 6. Remove the target: no pass runs, and a run without a target fails.
 ok "layr follow --remove succeeds" l follow --remove
 has "after --remove the line follows nothing" "Not following on line main" "$(l follow 2>&1)"

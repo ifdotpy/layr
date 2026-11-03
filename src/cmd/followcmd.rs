@@ -11,12 +11,25 @@ use crate::repo::{LineOp, Repo};
 use anyhow::Result;
 
 pub fn follow(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let spec = Spec::new().flag("--run").flag("--remove");
+    let spec = Spec::new().flag("--run").flag("--remove").flag("--tick");
     let a = parse(&spec, args)?;
     let h = here(ctx)?;
     let repo = &h.repo;
     let line = h.line()?.clone();
-    let usage = || exit(128, "usage: layr follow [<remote>/<branch> | --run | --remove]");
+    let usage = || exit(128, "usage: layr follow [<remote>/<branch> | --run | --tick | --remove]");
+    if a.has("--tick") {
+        // The daemon's pass for this line: a refused remote state is not retried.
+        if a.has("--run") || a.has("--remove") || !a.pos.is_empty() {
+            return Err(usage());
+        }
+        if follow::target(repo, &line)?.is_none() {
+            return Err(exit(1, format!("line '{}' follows no branch: layr follow <remote>/<branch>", line.name)));
+        }
+        return match repo.follow_pass(ctx, &line, false)? {
+            None => Ok(0),
+            Some(last) => report(ctx, repo, &line, &last),
+        };
+    }
     if a.has("--remove") {
         if a.has("--run") || !a.pos.is_empty() {
             return Err(usage());
@@ -59,7 +72,11 @@ pub fn follow(ctx: &Ctx, args: &[String]) -> Result<i32> {
 
 /// Run one pass now and print its result. Exit 1 when the pass failed.
 fn finish(ctx: &Ctx, repo: &Repo, line: &Line) -> Result<i32> {
-    let last = repo.follow_pass(ctx, line)?;
+    let last = repo.follow_pass(ctx, line, true)?.ok_or_else(|| exit(1, "internal: an explicit pass stayed quiet"))?;
+    report(ctx, repo, line, &last)
+}
+
+fn report(ctx: &Ctx, repo: &Repo, line: &Line, last: &Last) -> Result<i32> {
     let target = follow::target(repo, line)?.unwrap_or_default();
     outln!(ctx, "{target}: {}", last.text);
     Ok(if last.ok { 0 } else { 1 })

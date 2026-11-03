@@ -209,7 +209,7 @@ Remotes:
 Git bridge:
    git remote, fetch, pull, push, clone, sync
    queue add/list/remove/run
-   follow [<remote>/<branch> | --run | --remove]
+   follow [<remote>/<branch> | --run | --tick | --remove]
 Overlays (files with their own readers and history, shown in lines):
    overlay create, set, list, readers, use, move, remote, log, show, diff, grep, ls-files
 Projects and machines:

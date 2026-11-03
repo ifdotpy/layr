@@ -38,6 +38,17 @@ pub fn split(target: &str) -> Option<(&str, &str)> {
     (!remote.is_empty() && !branch.is_empty()).then_some((remote, branch))
 }
 
+/// A remote state that a pass could not merge into a line head. The daemon tick does not try
+/// the same pair again: it tries when the remote state or the line head changes, or on an
+/// explicit `layr follow`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Refused {
+    /// The fetched remote state.
+    pub remote: String,
+    /// The line head at the failed pass.
+    pub line: String,
+}
+
 /// The result of the last pass of a line.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Last {
@@ -46,6 +57,9 @@ pub struct Last {
     pub ok: bool,
     /// What the pass did, or the error. Example: `fast-forward to 1a2b3c4d`.
     pub text: String,
+    /// Set when the merge failed: the pair that the next tick does not retry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused: Option<Refused>,
 }
 
 /// The follow target of a line, `<remote>/<branch>`.
@@ -100,40 +114,61 @@ impl<'a> Repo<'a> {
     /// the fetch and the cache save are the commands, which run in that folder. Takes the project
     /// lock only where it reads or writes records; the merge takes its own. The result is recorded
     /// and returned; an error of the pass is the result (`ok` false), not an `Err`.
-    pub fn follow_pass(&self, ctx: &Ctx, line: &Line) -> Result<Last> {
+    /// `explicit`: a user command. A tick (`explicit` false) does not retry a refused pair and
+    /// then returns None, with nothing recorded and nothing to report.
+    pub fn follow_pass(&self, ctx: &Ctx, line: &Line, explicit: bool) -> Result<Option<Last>> {
         if !ctx.cwd.starts_with(self.working(line)) {
             bail!("follow pass of '{}' runs in its working folder", line.name);
         }
+        let refused = last_result(self, line)?.and_then(|l| l.refused);
+        let mut pending = None;
         let outcome = match target(self, line)?.as_deref().and_then(split) {
             None => Err(anyhow::anyhow!("line '{}' follows no branch", line.name)),
-            Some((remote, branch)) => self.follow_once(ctx, line, remote, branch),
+            Some((remote, branch)) => self.follow_once(ctx, line, remote, branch, explicit, refused.as_ref(), &mut pending),
         };
         let last = match outcome {
-            Ok(text) => Last { time: ids::now_ms(), ok: true, text },
-            Err(e) => Last { time: ids::now_ms(), ok: false, text: format!("{e:#}") },
+            Ok(Some(text)) => Last { time: ids::now_ms(), ok: true, text, refused: None },
+            Ok(None) => return Ok(None),
+            Err(e) => Last { time: ids::now_ms(), ok: false, text: format!("{e:#}"), refused: pending },
         };
         let _lock = self.p.lock()?;
         let mut all = last_results(self)?;
         all.insert(line.id.clone(), last.clone());
         crate::fsutil::atomic_write(&results_path(self), &serde_json::to_vec(&all)?, 0o600)?;
-        Ok(last)
+        Ok(Some(last))
     }
 
-    fn follow_once(&self, ctx: &Ctx, line: &Line, remote: &str, branch: &str) -> Result<String> {
+    /// The text of a pass that ran, or None for a tick that skips a refused pair. `pending` receives
+    /// the pair before the merge, so a failed merge can record it.
+    #[allow(clippy::too_many_arguments)]
+    fn follow_once(
+        &self,
+        ctx: &Ctx,
+        line: &Line,
+        remote: &str,
+        branch: &str,
+        explicit: bool,
+        refused: Option<&Refused>,
+        pending: &mut Option<Refused>,
+    ) -> Result<Option<String>> {
         let rb = format!("{remote}/{branch}");
         remote::git::fetch(ctx, &[remote.to_string(), branch.to_string(), "-q".to_string()])?;
         let fetched = revs::resolve(self, Some(line), &rb)?;
         let head = self.line(&line.id)?.head;
         if fetched == head || self.is_ancestor(&fetched, &head)? {
-            return Ok("up to date".into());
+            return Ok(Some("up to date".into()));
+        }
+        if !explicit && refused.is_some_and(|r| r.remote == fetched && r.line == head) {
+            return Ok(None);
         }
         {
             let _lock = self.p.lock()?;
             let st = self.locked_status(&self.line(&line.id)?)?.0;
             if has_unsaved(&st) {
-                return Ok("skipped: unsaved work".into());
+                return Ok(Some("skipped: unsaved work".into()));
             }
         }
+        *pending = Some(Refused { remote: fetched.clone(), line: head.clone() });
         let mut args = crate::args::Parsed::default();
         args.values.insert("--expect".into(), vec![fetched.clone()]);
         args.flags.insert("-q".into(), 1);
@@ -148,7 +183,7 @@ impl<'a> Repo<'a> {
         if let Err(e) = self.follow_caches(ctx, line, remote) {
             text.push_str(&format!("; caches not taken: {e:#}"));
         }
-        Ok(text)
+        Ok(Some(text))
     }
 
     /// The caches after a merge (docs/cache-overlays.md). Per folder overlay, the newest candidate
@@ -247,7 +282,7 @@ pub fn tick(root: &Path, caller: Caller) {
                 if line.machine != repo.p.store.machine.id {
                     return Ok(None);
                 }
-                repo.follow_pass(ctx, &line).map(Some)
+                repo.follow_pass(ctx, &line, false)
             });
             match pass {
                 Ok(Some(last)) if !last.ok => eprintln!("layr follow ({name}/{}): {}", line.name, last.text),
