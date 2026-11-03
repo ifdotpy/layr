@@ -36,10 +36,12 @@ drop_tree() {
         elif [ "$(stat -f -c %T "$d" 2>/dev/null)" = btrfs ]; then
             btrfs subvolume delete "$d" >/dev/null
         else
+            # OverlayFS: a state is a mount (the CI job runs as root).
+            if mountpoint -q "$d" 2>/dev/null; then umount "$d" 2>/dev/null || umount -l "$d"; fi
             rm -rf "$d"
         fi
     done
-    # On OverlayFS a state is a mount that rm does not drop: gc evicts the copy the store holds.
+    # A state that is still on disk: gc evicts the copy the store holds, if no owner keeps it.
     if on_disk "$1"; then l config gc.evict on >/dev/null; l gc --repair -q >/dev/null; fi
 }
 tree_sum() { (cd "$1" && find . -path ./.git -prune -o -type f -print | sort | xargs cksum); }
