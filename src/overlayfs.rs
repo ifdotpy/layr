@@ -789,7 +789,11 @@ pub fn snapshot(src: &Path, dst: &Path, readonly: bool) -> Result<()> {
         }
         let parent = state.registry.trees.get(&src).context("snapshot source is unmanaged")?.clone();
         let nested = nested_trees(&state.registry, &src);
-        let plain = !readonly && state.registry.trees.iter().any(|(p, e)| dst.starts_with(p) && !e.info.readonly && !e.plain);
+        // A writable copy of a saved state (a cache taken by a new line) is a layer over the state's
+        // lower layers: no copy at line new. Only a writable snapshot of a writable tree copies.
+        let plain = !readonly
+            && !parent.info.readonly
+            && state.registry.trees.iter().any(|(p, e)| dst.starts_with(p) && !e.info.readonly && !e.plain);
         (state.home.clone(), parent, nested, plain, Building::begin(&state.home)?)
     };
     let copied = copy_snapshot(&home, &nested, &src, &dst, readonly, plain, &parent, &build);

@@ -66,9 +66,8 @@ W=$LAYR_ROOT/projects/r/lines/warm
 ok "a new line from such a state starts warm" test -f $W/target/blob.bin
 eq "its cache has the build output" "$blob_sum" "$(cksum < $W/target/blob.bin)"
 
-# Two more new lines from main take the saved cache: no new cache state until they build (a line
-# must not save a cache that nobody changed). The bytes that `line new` writes are printed only:
-# OverlayFS copies a taken cache into the line folder (take_caches), so they are not checked here.
+# Two more new lines from main take the saved cache: no new cache state, and no copy of the cache
+# (OverlayFS mounts the taken state as the lower layer of the line's cache folder).
 cd $P || exit 1
 states_of_cache() { ls "$LAYR_ROOT/projects/r/meta/overlays/cache.target/states" | wc -l; }
 states_before=$(states_of_cache)
@@ -76,11 +75,17 @@ before=$(store_bytes)
 l line new -q warm2 main
 l line new -q warm3 main
 after=$(store_bytes)
-echo "info: store growth of two new lines from main: $((after - before)) bytes"
+ok "two new lines from main add under 1 MiB of store growth" test $((after - before)) -lt 1048576
 eq "two new lines from main make no cache state" "$states_before" "$(states_of_cache)"
 cd $LAYR_ROOT/projects/r/lines/warm2 || exit 1
 ok "and they start warm" test -f target/blob.bin
 cd $P || exit 1
+# Release: deleting a new line drops its cache (the mount on OverlayFS) and keeps main's cache.
+l line delete -D warm2 >/dev/null
+l line delete -D warm3 >/dev/null
+ok "deleting the new lines removes their folders" sh -c "! test -e $LAYR_ROOT/projects/r/lines/warm2 && ! test -e $LAYR_ROOT/projects/r/lines/warm3"
+ok "main keeps its cache after they are gone" test -f $P/target/blob.bin
+ok "the free step runs after the release" l gc --repair -q
 
 # A named save makes the first cache state too, with no automatic save before it.
 N=$T/named
