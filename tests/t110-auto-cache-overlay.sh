@@ -66,14 +66,18 @@ W=$LAYR_ROOT/projects/r/lines/warm
 ok "a new line from such a state starts warm" test -f $W/target/blob.bin
 eq "its cache has the build output" "$blob_sum" "$(cksum < $W/target/blob.bin)"
 
-# Two more new lines from main take the saved cache: no store growth until they build (OverlayFS
-# copies would show here: a line must not save a cache that nobody changed).
+# Two more new lines from main take the saved cache: no new cache state until they build (a line
+# must not save a cache that nobody changed). The bytes that `line new` writes are printed only:
+# OverlayFS copies a taken cache into the line folder (take_caches), so they are not checked here.
 cd $P || exit 1
+states_of_cache() { ls "$LAYR_ROOT/projects/r/meta/overlays/cache.target/states" | wc -l; }
+states_before=$(states_of_cache)
 before=$(store_bytes)
 l line new -q warm2 main
 l line new -q warm3 main
 after=$(store_bytes)
-ok "two new lines from main add no store growth" test $((after - before)) -lt 1048576
+echo "info: store growth of two new lines from main: $((after - before)) bytes"
+eq "two new lines from main make no cache state" "$states_before" "$(states_of_cache)"
 cd $LAYR_ROOT/projects/r/lines/warm2 || exit 1
 ok "and they start warm" test -f target/blob.bin
 cd $P || exit 1
