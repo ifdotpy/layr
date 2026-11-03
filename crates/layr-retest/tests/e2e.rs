@@ -663,6 +663,25 @@ fn sweep_workspace(dir: &Path, sweep: &str) {
     std::fs::write(dir.join("app/src/main.rs"), "fn main() {\n    println!(\"{}\", lib_a::a());\n}\n").unwrap();
 }
 
+/// Hard-link counts and inode numbers of the files under `dir`, for a failure message.
+fn link_table(dir: &Path) -> String {
+    use std::os::unix::fs::MetadataExt;
+    let mut out = Vec::new();
+    let mut todo = vec![dir.to_path_buf()];
+    while let Some(d) = todo.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                todo.push(p);
+            } else if let Ok(m) = p.metadata() {
+                out.push(format!("{} ino={} nlink={} mtime={}", p.strip_prefix(dir).unwrap_or(&p).display(), m.ino(), m.nlink(), m.mtime()));
+            }
+        }
+    }
+    out.sort();
+    out.join("\n")
+}
+
 /// Names of the entries of `dir/sub`.
 fn entries(dir: &Path, sub: &str) -> BTreeSet<String> {
     std::fs::read_dir(dir.join(sub)).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect()
@@ -1235,9 +1254,11 @@ fn sweep_keeps_the_incremental_folder_of_a_dylib_dev_dependency() {
     assert_eq!(
         dy_folders(),
         live,
-        "the sweep removed or kept the wrong incremental folder of a dylib unit\n{err}\ndeps: {:?}\nincremental: {:?}",
+        "the sweep removed or kept the wrong incremental folder of a dylib unit\n{err}\ndeps: {:?}\nincremental: {:?}\n--- debug links:\n{}\n--- incremental links:\n{}",
         entries(&debug, "deps"),
-        entries(&debug, "incremental")
+        entries(&debug, "incremental"),
+        link_table(&debug.join("deps")).lines().chain(link_table(&debug).lines().filter(|l| !l.contains('/'))).collect::<Vec<_>>().join("\n"),
+        link_table(&debug.join("incremental"))
     );
     for f in &live {
         let session = entries(&debug.join("incremental").join(f), "");
