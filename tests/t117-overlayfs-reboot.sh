@@ -5,7 +5,7 @@
 # it). A layer that cannot be mounted again fails the command with a clear message.
 # The btrfs CI job runs every test: this one needs an OverlayFS run (the registry, its mounts).
 if [ -z "${LAYR_OVERLAYFS_TEST_ROOT:-}" ]; then
-    echo "t117-overlayfs-reboot.sh: 0 passed, 0 failed (not an OverlayFS run)"
+    echo "t117-overlayfs-reboot.sh: not an OverlayFS run, 0 passed, 0 failed"
     exit 0
 fi
 . "$(dirname "$0")/lib.sh"
