@@ -74,14 +74,14 @@ pub fn follow(ctx: &Ctx, args: &[String]) -> Result<i32> {
 fn finish(ctx: &Ctx, repo: &Repo, line: &Line) -> Result<i32> {
     let last = repo.follow_pass(ctx, line, true)?.ok_or_else(|| exit(1, "internal: an explicit pass stayed quiet"))?;
     let code = report(ctx, repo, line, &last)?;
-    warn_without_daemon();
+    warn_without_daemon(repo);
     Ok(code)
 }
 
-/// One line when no daemon listens on this user's socket: the passes then run only by hand.
-fn warn_without_daemon() {
-    if !follow::daemon_listening() {
-        eprintln!("warning: no layr daemon runs for this store; follow passes run only on `layr follow --run`");
+/// One line when no daemon of this user serves the store: the passes then run only by hand.
+fn warn_without_daemon(repo: &Repo) {
+    if let Some(text) = follow::daemon_warning(&repo.p.store.root) {
+        eprintln!("{text}");
     }
 }
 
@@ -98,7 +98,7 @@ fn show(ctx: &Ctx, repo: &Repo, line: &Line) -> Result<i32> {
         Some(target) => {
             outln!(ctx, "Following {target} on line {}", line.name);
             outln!(ctx, "{}", describe(follow::last_result(repo, line)?.as_ref()));
-            warn_without_daemon();
+            warn_without_daemon(repo);
         }
     }
     Ok(0)

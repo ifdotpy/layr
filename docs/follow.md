@@ -63,8 +63,9 @@ The daemon log's first line names the store (`... (store <root>)`).
 
 Logs: `~/Library/Logs/layr-daemon.log`. Stop: `launchctl bootout gui/$(id -u)/ws.layr.daemon`.
 
-Without a daemon on the user socket, `layr follow` prints one warning line: follow passes run only
-on `layr follow --run`. A daemon on another store does not trigger it.
+`layr follow` prints one warning line when no daemon of this user serves the store: none runs, or
+a daemon serves another store (follow passes then run only on `layr follow --run`). A daemon
+built before the store root was reported prints `the layr daemon runs an older build; restart it`.
 
 ## Linux
 

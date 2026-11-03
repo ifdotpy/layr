@@ -1,14 +1,23 @@
 #!/bin/bash
 # The macOS LaunchAgent sets LAYR_ROOT, so the daemon serves the store that the user's commands use
-# (packaging/launchd). `layr follow` warns once when no daemon listens on the user socket. The
-# daemon checks run on macOS (a user daemon); the plist and the warning run everywhere.
+# (packaging/launchd). `layr follow` warns when no daemon of this user serves the store: none runs,
+# a daemon serves another store, or the daemon is an older build that does not report its store.
+# The daemon checks run on both systems (on Linux the daemon runs as root, as in t07). The plist
+# checks run on macOS only. The socket is in the test folder, never the real one.
 . "$(dirname "$0")/lib.sh"
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 PLIST=$ROOT/packaging/launchd/ws.layr.daemon.plist
-WARN='warning: no layr daemon runs for this store; follow passes run only on `layr follow --run`'
-# The user socket is in the test HOME, so no real daemon answers.
+NO_DAEMON='warning: no layr daemon runs for this store; follow passes run only on `layr follow --run`'
+OLDER='warning: the layr daemon runs an older build; restart it'
 mkdir -p $T/home
+if [ "$(uname -s)" = Darwin ]; then
+    export HOME=$T/home
+    SOCK=$T/home/Library/Caches/layr/layr.sock
+else
+    export LAYR_SOCKET=$T/home/layr.sock
+    SOCK=$LAYR_SOCKET
+fi
 hl() { env HOME=$T/home "$LAYR" "$@"; }
 
 # Stop a daemon and wait for the follow passes it forked (as in t105).
@@ -25,6 +34,12 @@ stop_daemon() {
     done
     kill -KILL "$1" 2>/dev/null
     wait "$1" 2>/dev/null
+}
+
+# Wait for a socket file (a daemon or the fake service below) to appear.
+wait_socket() {
+    for i in $(seq 1 40); do [ -S "$1" ] && return 0; sleep 0.25; done
+    return 1
 }
 
 if [ "$(uname -s)" = Darwin ]; then
@@ -45,32 +60,65 @@ l git clone $R gm -q >/dev/null
 P=$LAYR_ROOT/projects/gm/lines
 cd $P/main
 
-# No daemon: the warning is printed once, when the target is set and when it is shown.
+# 1. No socket: the warning is printed once, when the target is set, shown, or passed by hand.
 out=$(hl follow origin/main 2>&1)
-has "follow warns when no daemon listens" "$WARN" "$out"
+has "follow warns when no daemon listens" "$NO_DAEMON" "$out"
 eq "the warning is printed once" 1 "$(printf '%s\n' "$out" | grep -c 'no layr daemon runs')"
 out=$(hl follow 2>&1)
-has "follow shows the warning too" "$WARN" "$out"
+has "follow shows the warning too" "$NO_DAEMON" "$out"
 out=$(hl follow --run 2>&1)
-has "follow --run warns when no daemon listens" "$WARN" "$out"
+has "follow --run warns when no daemon listens" "$NO_DAEMON" "$out"
 
-if [ "$(uname -s)" = Darwin ]; then
-    sock=$T/home/Library/Caches/layr/layr.sock
-    env HOME=$T/home "$LAYR" daemon --tick 60 > $T/daemon.log 2>&1 &
-    dpid=$!
-    for i in $(seq 1 40); do [ -S "$sock" ] && break; sleep 0.25; done
-    ok "the daemon listens on the user socket" test -S "$sock"
-    has "the daemon's first log line names the store" "(store $LAYR_ROOT)" "$(head -1 $T/daemon.log)"
-    out=$(hl follow 2>&1)
-    eq "follow does not warn while a daemon listens" 0 "$(printf '%s\n' "$out" | grep -c 'no layr daemon runs')"
-    cd $U; echo two > b.txt; git add b.txt; git commit -qm "remote two"; git push -q origin main
-    cd $P/main
-    ok "a pass with the daemon running succeeds" hl follow --run
-    ok "the pass fast-forwarded main" test -f b.txt
-    stop_daemon $dpid
-    # The daemon was killed, so its socket file stays behind and refuses connections.
-    out=$(hl follow 2>&1)
-    has "a socket file without a daemon warns" "$WARN" "$out"
-fi
+# 2. An older daemon: its hello reply has no store root, so the store is unknown.
+rm -f "$SOCK"
+python3 - "$SOCK" > $T/fake.log 2>&1 <<'PY' &
+import json, os, socket, sys
+path = sys.argv[1]
+os.makedirs(os.path.dirname(path), exist_ok=True)
+s = socket.socket(socket.AF_UNIX)
+s.bind(path)
+s.listen(8)
+while True:
+    c, _ = s.accept()
+    b = json.dumps({"format": 1, "version": "0.0.0", "build": "older"}).encode()
+    c.sendall(b"V" + len(b).to_bytes(4, "big") + b)
+    c.close()
+PY
+fpid=$!
+wait_socket "$SOCK"
+out=$(hl follow 2>&1)
+has "an older daemon is reported" "$OLDER" "$out"
+eq "an older daemon is not reported as absent" 0 "$(printf '%s\n' "$out" | grep -c 'no layr daemon runs')"
+kill -KILL $fpid 2>/dev/null; wait $fpid 2>/dev/null
+rm -f "$SOCK"
+
+# 3. A daemon on another store: its hello reply names that store, not the one of the line.
+rm -f "$SOCK"
+env LAYR_ROOT=$T/other-store "$LAYR" daemon --tick 60 > $T/other.log 2>&1 &
+opid=$!
+wait_socket "$SOCK"
+has "the other daemon names its store in the log" "(store $T/other-store)" "$(head -1 $T/other.log)"
+out=$(hl follow 2>&1)
+has "a daemon on another store is reported" "$NO_DAEMON" "$out"
+stop_daemon $opid
+rm -f "$SOCK"
+
+# 4. A daemon on the store of the line: no warning, and the passes run.
+"$LAYR" daemon --tick 60 > $T/daemon.log 2>&1 &
+dpid=$!
+wait_socket "$SOCK"
+ok "the daemon listens on the user socket" test -S "$SOCK"
+has "the daemon's first log line names the store" "(store $LAYR_ROOT)" "$(head -1 $T/daemon.log)"
+out=$(hl follow 2>&1)
+eq "follow does not warn while the daemon serves its store" 0 "$(printf '%s\n' "$out" | grep -c 'layr daemon')"
+cd $U; echo two > b.txt; git add b.txt; git commit -qm "remote two"; git push -q origin main
+cd $P/main
+ok "a pass with the daemon running succeeds" hl follow --run
+ok "the pass fast-forwarded main" test -f b.txt
+stop_daemon $dpid
+
+# 5. The daemon was killed: its socket file stays behind and refuses connections.
+out=$(hl follow 2>&1)
+has "a socket file without a daemon warns" "$NO_DAEMON" "$out"
 
 finish
