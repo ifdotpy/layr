@@ -1000,8 +1000,13 @@ fn rename_tree_using(from: &Path, to: &Path, allow_mount: bool, rename: impl FnO
     }
     state.registry.pending_move = Some((from.clone(), to.clone()));
     state.save()?;
+    let nested = state.registry.trees.keys().filter(|p| p.starts_with(&from) && **p != from).count();
+    let _t = crate::trace::span(format!("overlay move {} -> {}: managed_root={managed_root} nested_entries={nested}", from.display(), to.display()));
     let moved: Result<()> =
         if managed_root { sys::overlay_mount(Some(&from), &to, None, libc::MS_MOVE, None).map_err(Into::into) } else { rename() };
+    if let Err(e) = &moved {
+        crate::trace::span(format!("overlay move FAILED: {e:#}"));
+    }
     if let Err(e) = moved {
         state.registry.pending_move = None;
         state.save()?;
