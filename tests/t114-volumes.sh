@@ -29,15 +29,17 @@ new_volume() {
     new_fs "$mp" 2G
 }
 
-# unmount <name> and remount <name>: an unmounted volume is a folder with no identity file.
+# unmount <name> and remount <name>. On the OverlayFS build the folder cannot be moved away: its
+# line mounts stay on the old path ("Device or resource busy"). There, a volume that is not
+# mounted is a folder with no identity file, which is the same refusal.
 unmount() {
     if [ "$(uname -s)" = Darwin ]; then hdiutil detach "$VOLS/$1" >/dev/null 2>&1 || hdiutil detach -force "$VOLS/$1" >/dev/null 2>&1
-    elif [ -n "${LAYR_OVERLAYFS_TEST_ROOT:-}" ]; then mv "$VOLS/$1" "$VOLS/$1.away"
+    elif [ -n "${LAYR_OVERLAYFS_TEST_ROOT:-}" ]; then mv "$VOLS/$1/layr-volume.json" "$VOLS/$1/layr-volume.away"
     else umount "$VOLS/$1"; fi
 }
 remount() {
     if [ "$(uname -s)" = Darwin ]; then hdiutil attach -nobrowse -mountpoint "$VOLS/$1" "$VOLS/$1.sparseimage" >/dev/null 2>&1
-    elif [ -n "${LAYR_OVERLAYFS_TEST_ROOT:-}" ]; then mv "$VOLS/$1.away" "$VOLS/$1"
+    elif [ -n "${LAYR_OVERLAYFS_TEST_ROOT:-}" ]; then mv "$VOLS/$1/layr-volume.away" "$VOLS/$1/layr-volume.json"
     else mount -o loop,user_subvol_rm_allowed "$VOLS/$1.img" "$VOLS/$1"; fi
 }
 detach_all() {
