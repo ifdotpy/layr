@@ -38,6 +38,21 @@ pub fn split(target: &str) -> Option<(&str, &str)> {
     (!remote.is_empty() && !branch.is_empty()).then_some((remote, branch))
 }
 
+/// The socket of the daemon of this user: the user socket on macOS (LaunchAgent), the service
+/// socket elsewhere. The same rules as `service::daemon`.
+fn daemon_socket() -> PathBuf {
+    if cfg!(target_os = "macos") && std::env::var_os("LAYR_SOCKET").is_none() {
+        return PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join("Library/Caches/layr/layr.sock");
+    }
+    crate::service::socket_path()
+}
+
+/// True when a daemon accepts connections on its socket. A busy daemon accepts too. A socket file
+/// without a daemon refuses, so it counts as absent.
+pub fn daemon_listening() -> bool {
+    std::os::unix::net::UnixStream::connect(daemon_socket()).is_ok()
+}
+
 /// A remote state that a pass could not merge into a line head. The daemon tick does not try
 /// the same pair again: it tries when the remote state or the line head changes, or on an
 /// explicit `layr follow`.
