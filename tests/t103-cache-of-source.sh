@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: overlayfs macos-plain
 # A new line from a state takes the cache saved with that state (`cache_of`). A state imported
 # from git has no line: the old rule walked to the nearest ancestor that a line made (here a line
 # that pushed its commit) and took that line's old cache.

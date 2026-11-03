@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos overlayfs
 # A tool deletes a cache and makes a plain folder (cargo clean). The next plain save makes it a
 # cache again first: its files never enter a state.
 . "$(dirname "$0")/lib.sh"

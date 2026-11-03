@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: overlayfs macos-plain
 # A store without a version marker (format 0) with the layout of format 1 gets its marker on the
 # first open, with no extra command. A folder that is not a layr store, a store that is not
 # writable, and parallel first opens are checked too.

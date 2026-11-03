@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: overlayfs
 # Regressions from the security review (2026-10-09): commands as root through merge drivers,
 # links inside lines, child process environment, peer trust, record order,
 # limits of the service.

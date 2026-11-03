@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos
 # Files that a command writes into the working folder get the current time, as `git checkout`
 # gives them: build tools compare times, and a file with the old time of its state looks older
 # than build output of other content (a false test pass). Files that stay keep their time.

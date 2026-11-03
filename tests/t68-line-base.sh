@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos
 # State ids and git commits: `log` shows the git commit of a state, `rev-parse --git` prints it,
 # and every revision argument takes a git commit. A mixed reset names the files it kept. A line
 # never starts on unsaved work of an automatic state, and a push refuses the unpushed states of

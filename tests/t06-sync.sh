@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos overlayfs
 # Replication between two machines (two btrfs file systems, two stores): records, states,
 # a live move of a line with its working content, divergence, signatures.
 . "$(dirname "$0")/lib.sh"

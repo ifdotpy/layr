@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos overlayfs
 # Output formats: the same edits in a git checkout and in a layr line give the same output.
 . "$(dirname "$0")/lib.sh"
 

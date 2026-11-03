@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos overlayfs
 # A named save (save -m, with or without -a) names on stderr the files it left out: untracked
 # files (a new folder as dir/) and tracked files whose working content differs from the new state.
 # An ignored file, a cache folder and a clean save name nothing; more than 20 paths end in "and N more".

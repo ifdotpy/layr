@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos overlayfs
 # Eviction trusts a store copy only while the remote under the recorded name still has the recorded
 # URL. A removed remote or a changed URL ends the guarantee: the state is not evicted.
 . "$(dirname "$0")/lib.sh"

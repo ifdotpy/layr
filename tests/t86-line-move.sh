@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos overlayfs
 # `layr line move`: a line's working folder at a chosen path outside the store (same file system),
 # on every backend. Daily commands work from the moved folder and its subfolders.
 . "$(dirname "$0")/lib.sh"

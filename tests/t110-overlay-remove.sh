@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos overlayfs
 # Cache overlays and their removal (docs/cache-overlays.md, sections 3 and 7). A cache overlay
 # applies only in lines where its folder is a cache path: `overlay list` and `overlay repair` agree
 # there and saves ignore it. `overlay remove` drops a cache overlay from the project; a versioned

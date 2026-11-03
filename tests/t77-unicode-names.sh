@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos overlayfs
 # Names that differ only in Unicode normalization (cafe with a combining accent, and the
 # precomposed form) are two files on btrfs, ext4 and XFS, but one entry on APFS, also on a
 # case-sensitive volume. Writing both there would lose one: the write is refused first.

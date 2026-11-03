@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos overlayfs
 # #174: a folder that .layrattributes marks regenerable, and the ignore rules ignore, is a cache
 # from the first automatic save. Its files stay out of every state without `save --caches`, and
 # the layer is kept by layr itself. A new line from a state still starts warm (the cache overlay

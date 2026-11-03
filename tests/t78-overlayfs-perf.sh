@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: overlayfs
 # OverlayFS cost contracts: a long save in one project does not hold up another project,
 # a clean status reads no file content, and a send with a parent is incremental.
 if [ -z "${LAYR_OVERLAYFS_TEST_ROOT:-}" ]; then

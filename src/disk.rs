@@ -409,15 +409,14 @@ fn resolve_remote(remote: &str) -> Result<(String, Option<StorePin>)> {
         return Ok((remote.into(), None));
     }
     let root = crate::store::default_root();
+    let layout = crate::volumes::Layout::for_root(&root)?;
     let mut project = std::env::var("LAYR_PROJECT").ok();
     if project.is_none() {
         let cwd = std::env::current_dir()?;
-        if let Ok(relative) = cwd.strip_prefix(root.join("projects")) {
-            project = relative.components().next().map(|part| part.as_os_str().to_string_lossy().into_owned());
-        }
+        project = crate::volumes::project_of_path(&layout, &cwd);
     }
     if let Some(project) = project {
-        let path = root.join("projects").join(project);
+        let path = layout.project_dir(&project)?;
         let db = rusqlite::Connection::open_with_flags(crate::store::db_file(&path), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         use rusqlite::OptionalExtension;
         let value: Option<String> = db

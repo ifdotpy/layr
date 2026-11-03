@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos overlayfs
 # A failed init leaves no project folder. init never uses a project folder that exists.
 . "$(dirname "$0")/lib.sh"
 

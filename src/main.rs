@@ -69,6 +69,7 @@ mod sys;
 mod thin;
 mod trace;
 mod tree;
+mod volumes;
 
 use std::collections::HashMap;
 

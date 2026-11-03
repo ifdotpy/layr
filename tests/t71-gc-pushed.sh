@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos overlayfs
 # gc and saved work (docs/ownership.md): no rule keeps the build output of pushed work. An
 # automatic state goes when its ring (retention.auto, undo.ops) drops it, pushed or not, and a
 # deleted line frees its automatic states in the delete. An automatic state with unsaved work

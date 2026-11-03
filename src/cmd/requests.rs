@@ -376,7 +376,7 @@ mod tests {
             env: Default::default(),
             out: std::cell::RefCell::new(Box::new(std::io::sink())),
         };
-        let dir = ctx.store.projects_dir().join("p");
+        let dir = ctx.store.project_dir("p").unwrap();
         std::fs::create_dir_all(dir.join("meta/db")).unwrap();
         let repo = Repo {
             p: crate::store::Project {

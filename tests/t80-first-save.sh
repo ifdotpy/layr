@@ -1,4 +1,5 @@
 #!/bin/bash
+# ci: macos
 # The first automatic save after a big new folder (an install into a line) copies the folder with
 # one clone, not one clone per file, and the next save copies only what changed since. The
 # state keeps every file. APFS keeps thin layers; other backends skip this test.

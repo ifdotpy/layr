@@ -13,7 +13,13 @@ use std::sync::Mutex;
 const WORKERS: usize = 4;
 
 pub fn du(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let a = parse(&Spec::new().flag("--json").flag("--store"), args)?;
+    let a = parse(&Spec::new().flag("--json").flag("--store").flag("--volumes"), args)?;
+    if a.has("--volumes") {
+        if !a.pos.is_empty() {
+            bail!("usage: layr du --volumes [--json]");
+        }
+        return volumes_report(ctx, &ctx.store.root, a.has("--json"));
+    }
     let h = here(ctx)?;
     if a.has("--store") {
         if !a.pos.is_empty() {
@@ -76,6 +82,48 @@ pub fn du(ctx: &Ctx, args: &[String]) -> Result<i32> {
     Ok(0)
 }
 
+/// The child folders of a folder, by name, sorted.
+fn child_dirs(p: &Path) -> Result<Vec<(String, PathBuf)>> {
+    let mut v = Vec::new();
+    for e in std::fs::read_dir(p)? {
+        let e = e?;
+        if e.file_type()?.is_dir() {
+            v.push((e.file_name().to_string_lossy().into_owned(), e.path()));
+        }
+    }
+    v.sort();
+    Ok(v)
+}
+
+/// The parts of the projects of one volume: each line folder, each other folder of a project
+/// (states, deltas, git, meta). `label` names the volume in the rows (empty for `main`).
+fn project_parts(
+    projects: &Path,
+    moved: &[crate::linepaths::Entry],
+    label: &str,
+    out: &mut Vec<(String, PathBuf)>,
+) -> Result<()> {
+    for (project, ppath) in child_dirs(projects)? {
+        // Lines moved out of the store (`layr line move`) are listed with the others.
+        for e in moved.iter().filter(|e| e.project == project && e.path.is_dir()) {
+            let db = crate::db::Db::open(&crate::store::db_file(&ppath));
+            if let Some(l) = db.ok().and_then(|db| db.line_by_id(&e.line).ok().flatten()) {
+                out.push((format!("{label}{project}/lines/{}", l.name), e.path.clone()));
+            }
+        }
+        for (part, path) in child_dirs(&ppath)? {
+            if part == "lines" {
+                for (line, path) in child_dirs(&path)? {
+                    out.push((format!("{label}{project}/lines/{line}"), path));
+                }
+            } else {
+                out.push((format!("{label}{project}/{part}"), path));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// True when the error says that a path is gone (ENOENT): a trash entry that the emptier removed
 /// during the walk. Other errors are not vanished.
 fn vanished(e: &anyhow::Error) -> bool {
@@ -84,21 +132,11 @@ fn vanished(e: &anyhow::Error) -> bool {
 }
 
 /// The parts of a store: each line folder, each other folder of a project (states, deltas, git,
-/// meta), and each folder at the top (trash).
+/// meta), and each folder at the top (trash). The other volumes contribute their projects and trash.
 fn parts(root: &Path) -> Result<Vec<(String, PathBuf)>> {
     let mut out = Vec::new();
-    let dirs = |p: &Path| -> Result<Vec<(String, PathBuf)>> {
-        let mut v = Vec::new();
-        for e in std::fs::read_dir(p)? {
-            let e = e?;
-            if e.file_type()?.is_dir() {
-                v.push((e.file_name().to_string_lossy().into_owned(), e.path()));
-            }
-        }
-        v.sort();
-        Ok(v)
-    };
-    for (name, path) in dirs(root)? {
+    let moved = crate::linepaths::index(root);
+    for (name, path) in child_dirs(root)? {
         // The OverlayFS registry holds layers (a part of their own) and the upper layers of
         // lines, which belong to the lines.
         if name == ".layr-overlayfs" {
@@ -109,27 +147,69 @@ fn parts(root: &Path) -> Result<Vec<(String, PathBuf)>> {
             out.push((name, path));
             continue;
         }
-        let moved = crate::linepaths::index(root);
-        for (project, ppath) in dirs(&path)? {
-            // Lines moved out of the store (`layr line move`) are listed with the others.
-            for e in moved.iter().filter(|e| e.project == project && e.path.is_dir()) {
-                let db = crate::db::Db::open(&crate::store::db_file(&ppath));
-                if let Some(l) = db.ok().and_then(|db| db.line_by_id(&e.line).ok().flatten()) {
-                    out.push((format!("{project}/lines/{}", l.name), e.path.clone()));
-                }
-            }
-            for (part, path) in dirs(&ppath)? {
-                if part == "lines" {
-                    for (line, path) in dirs(&path)? {
-                        out.push((format!("{project}/lines/{line}"), path));
-                    }
-                } else {
-                    out.push((format!("{project}/{part}"), path));
-                }
-            }
+        project_parts(&path, &moved, "", &mut out)?;
+    }
+    let layout = crate::volumes::Layout::for_root(root)?;
+    for (volume, projects) in layout.ready_projects_dirs().into_iter().filter(|(v, _)| v != crate::volumes::MAIN) {
+        let label = format!("volume {volume}: ");
+        project_parts(&projects, &moved, &label, &mut out)?;
+        if let Some(trash) = projects.parent().map(|v| v.join("trash")).filter(|t| t.is_dir()) {
+            out.push((format!("{label}trash"), trash));
+        }
+    }
+    for name in layout.names() {
+        if let Err(e) = layout.ready(&name) {
+            eprintln!("warning: {e:#}; its projects are not counted");
         }
     }
     Ok(out)
+}
+
+/// `layr du --volumes`: the bytes of the projects on each volume, and the volume state.
+fn volumes_report(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
+    let layout = crate::volumes::Layout::for_root(root)?;
+    let mut rows: Vec<(String, Option<usize>, Option<u64>, PathBuf, String)> = Vec::new();
+    for name in layout.names() {
+        let path = layout.path_of(&name).unwrap_or_default();
+        match layout.ready(&name) {
+            Ok(_) => {
+                let projects = layout.projects_folder(&name)?;
+                let count = child_dirs(&projects)?.iter().filter(|(_, p)| crate::store::db_file(p).is_file()).count();
+                let total = match crate::storage::space(&projects) {
+                    Ok(space) => Some(space.total),
+                    Err(e) => {
+                        eprintln!("warning: volume '{name}': {e:#}");
+                        None
+                    }
+                };
+                rows.push((name, Some(count), total, path, "ok".into()));
+            }
+            Err(e) => rows.push((name, None, None, path, format!("{e:#}"))),
+        }
+    }
+    if json {
+        let v: Vec<_> = rows
+            .iter()
+            .map(|(name, count, total, path, status)| {
+                serde_json::json!({"volume": name, "projects": count, "total": total, "path": path, "status": status})
+            })
+            .collect();
+        outln!(ctx, "{}", serde_json::to_string(&v)?);
+        return Ok(0);
+    }
+    let size = super::admin::human_size;
+    let width = rows.iter().map(|r| r.0.len()).max().unwrap_or(6).max(6);
+    outln!(ctx, "{:<width$}  {:>8}  {:>10}  {}", "volume", "projects", "total", "path");
+    for (name, count, total, path, status) in &rows {
+        let count = count.map(|c| c.to_string()).unwrap_or_else(|| "-".into());
+        let total = total.map(size).unwrap_or_else(|| "-".into());
+        outln!(ctx, "{:<width$}  {:>8}  {:>10}  {}", name, count, total, path.display());
+        if status != "ok" {
+            outln!(ctx, "\t{status}");
+        }
+    }
+    outln!(ctx, "total: bytes of the project folders of each volume (APFS and btrfs count shared data once).");
+    Ok(0)
 }
 
 /// What one part holds alone: bytes that no other file shares, and shared data that no other
@@ -175,7 +255,7 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
                 let u = next.fetch_add(1, Ordering::Relaxed);
                 let Some((i, path)) = units.get(u) else { break };
                 let i = *i;
-                let in_trash = parts[i].0 == "trash";
+                let in_trash = parts[i].0 == "trash" || parts[i].0.ends_with(": trash");
                 let mut own = 0u64;
                 let mut local: HashMap<u64, u64> = HashMap::new();
                 let walked = crate::storage::visit_space(path, &mut |h| {

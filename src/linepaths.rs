@@ -39,11 +39,14 @@ pub fn moved_folders(root: &Path) -> Vec<PathBuf> {
 /// The moved folders of every project file of the store (the authority, see `set_moved_path`).
 fn project_entries(root: &Path) -> Vec<Entry> {
     let mut out = Vec::new();
-    for dir in std::fs::read_dir(root.join("projects")).into_iter().flatten().flatten() {
-        let Ok(data) = std::fs::read(paths_file_in(&dir.path().join("meta"))) else { continue };
-        let Ok(map) = serde_json::from_slice::<BTreeMap<String, PathBuf>>(&data) else { continue };
-        let project = dir.file_name().to_string_lossy().into_owned();
-        out.extend(map.into_iter().map(|(line, path)| Entry { path, project: project.clone(), line }));
+    let Ok(layout) = crate::volumes::Layout::for_root(root) else { return out };
+    for (_, projects) in layout.ready_projects_dirs() {
+        for dir in std::fs::read_dir(projects).into_iter().flatten().flatten() {
+            let Ok(data) = std::fs::read(paths_file_in(&dir.path().join("meta"))) else { continue };
+            let Ok(map) = serde_json::from_slice::<BTreeMap<String, PathBuf>>(&data) else { continue };
+            let project = dir.file_name().to_string_lossy().into_owned();
+            out.extend(map.into_iter().map(|(line, path)| Entry { path, project: project.clone(), line }));
+        }
     }
     out
 }
@@ -138,6 +141,11 @@ pub fn register_with(root: &Path, extra: Option<&Path>) {
     {
         // The project files are the authority: a store whose index lacks an entry still opens.
         let mut folders = moved_folders(root);
+        // The volumes that hold projects are outside the store folder too. All of them, usable
+        // or not: an unusable volume (unmounted, wrong identity) must not break the registry.
+        if let Ok(layout) = crate::volumes::Layout::for_root(root) {
+            folders.extend(layout.volume_paths());
+        }
         folders.extend(extra.map(Path::to_path_buf));
         crate::storage::set_external(root, folders);
     }
