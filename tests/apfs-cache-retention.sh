@@ -49,9 +49,9 @@ build topic 4
 build topic 5
 eq "a higher limit keeps more caches" "3" "$(caches)"
 l config retention.caches 1
-has "gc --dry-run lists the caches" "would delete 2 cache(s)" "$(l gc --dry-run)"
+has "gc --dry-run lists the caches" "would delete 2 cache(s)" "$(l gc --repair --dry-run)"
 eq "a dry run deletes no cache" "3" "$(caches)"
-ok "gc" l gc -q
+ok "gc" l gc --repair -q
 eq "gc keeps one cache" "1" "$(caches)"
 
 # 3. line delete drops the caches that only the deleted line's head kept.

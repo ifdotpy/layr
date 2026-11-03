@@ -18,6 +18,6 @@ for i in $(seq 1 200); do [ -z "$(ls -A "$LAYR_ROOT/trash" 2>/dev/null)" ] && br
 eq "a background process empties the trash" "" "$(ls -A "$LAYR_ROOT/trash" 2>/dev/null)"
 ok "the command took well under the time to delete 6000 files in it (${ms} ms)" test "$ms" -lt 5000
 fill again
-l gc -q >/dev/null 2>&1
+l gc --repair -q >/dev/null 2>&1
 eq "gc empties the whole trash at once" "" "$(ls -A "$LAYR_ROOT/trash" 2>/dev/null)"
 finish

@@ -244,6 +244,15 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
             }
             let l = repo.line(&l.id)?;
             let last = repo.working_state(ctx, &l, "before line delete")?;
+            // The final state stays in the `deleted` ring. As a thin layer it would keep every
+            // automatic state under it, so it gets a complete tree first (APFS): the line's
+            // automatic states go in this command (docs/ownership.md).
+            #[cfg(target_os = "macos")]
+            if let Some(id) = &last {
+                if repo.p.delta_path(id).is_dir() {
+                    crate::thin::make_keyframe(&repo.p, id)?;
+                }
+            }
             // A staged version may exist nowhere else: keep it as a state, so `undo` restores the index.
             let staged = staged_state(ctx, repo, &l)?;
             // Record first, then delete the folder: the content is in the saved state.
