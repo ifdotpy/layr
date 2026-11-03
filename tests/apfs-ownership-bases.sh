@@ -26,7 +26,8 @@ A=$(dashed "$a"); B=$(dashed "$b")
 present() { python3 -c 'import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); r=c.execute("select present from states where display=?", (sys.argv[2],)).fetchone(); print(r[0] if r else "missing")' "$DB" "$1"; }
 on_disk() { [ -e "$P/states/$1" ] || [ -e "$P/deltas/$1" ]; }
 
-eq "the older automatic state is not present (the ring dropped it)" 0 "$(present "$a")"
+# The newest save names the state it changes from (its undo reads it), so that state stays.
+eq "the state before the newest save stays present (undo of the save reads it)" 1 "$(present "$a")"
 ok "the dead base keeps its storage while the live layer uses it" on_disk "$A"
 ok "the live state is a thin layer over the dead base" test -d "$P/deltas/$B"
 cd $P/lines/main || exit 1

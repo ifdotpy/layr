@@ -76,6 +76,13 @@ pub fn du(ctx: &Ctx, args: &[String]) -> Result<i32> {
     Ok(0)
 }
 
+/// True when the error says that a path is gone (ENOENT): a trash entry that the emptier removed
+/// during the walk. Other errors are not vanished.
+fn vanished(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<std::io::Error>().is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+        || e.downcast_ref::<rustix::io::Errno>() == Some(&rustix::io::Errno::NOENT)
+}
+
 /// The parts of a store: each line folder, each other folder of a project (states, deltas, git,
 /// meta), and each folder at the top (trash).
 fn parts(root: &Path) -> Result<Vec<(String, PathBuf)>> {
@@ -168,6 +175,7 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
                 let u = next.fetch_add(1, Ordering::Relaxed);
                 let Some((i, path)) = units.get(u) else { break };
                 let i = *i;
+                let in_trash = parts[i].0 == "trash";
                 let mut own = 0u64;
                 let mut local: HashMap<u64, u64> = HashMap::new();
                 let walked = crate::storage::visit_space(path, &mut |h| {
@@ -179,6 +187,8 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
                 });
                 let mut result = results[i].lock().unwrap();
                 match walked {
+                    // The emptier removed this entry during the walk: it holds nothing now.
+                    Err(e) if in_trash && vanished(&e) => {}
                     Err(e) => *result = Err(e),
                     Ok(()) => {
                         let mut all = keys.lock().unwrap();
@@ -236,4 +246,24 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
     outln!(ctx, "{:<width$}  {:>10}", "store total", size(total));
     outln!(ctx, "frees: bytes that only this part holds; deleting it frees them.");
     Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::vanished;
+    use std::path::PathBuf;
+
+    #[test]
+    fn a_removed_path_is_vanished_and_other_errors_are_not() {
+        let dir = PathBuf::from(std::env::temp_dir()).join(format!("layr-du-walk-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("file");
+        std::fs::write(&file, b"x").unwrap();
+        let gone = dir.join("entry-gone");
+        let missing = crate::storage::visit_space(&gone, &mut |_: &crate::fsutil::Held| {}).unwrap_err();
+        let not_dir = crate::storage::visit_space(&file, &mut |_: &crate::fsutil::Held| {}).unwrap_err();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(vanished(&missing), "a missing entry must be vanished: {missing:#}");
+        assert!(!vanished(&not_dir), "a file that is not a folder must still warn: {not_dir:#}");
+    }
 }
