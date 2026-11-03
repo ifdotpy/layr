@@ -377,17 +377,29 @@ fn periodic(root: &Path, hourly: bool) {
     }
 }
 
+/// The socket of a daemon that runs as a user (macOS LaunchAgent): in the user's caches folder.
+fn user_socket_path() -> PathBuf {
+    std::env::var_os("LAYR_SOCKET")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join("Library/Caches/layr/layr.sock"))
+}
+
+/// `layr daemon [--socket <path>] [--tick <seconds>]`. Root serves every local user (Linux, or
+/// macOS run as root). On macOS a daemon may run as its user (a LaunchAgent): it serves only that
+/// uid, switches no user and runs no periodic gc or state freeing, only the follow tick.
 pub fn daemon(args: &[String]) -> Result<i32> {
-    if !rustix::process::geteuid().is_root() {
+    let own = rustix::process::geteuid().as_raw();
+    let user_mode = own != 0 && cfg!(target_os = "macos");
+    if own != 0 && !user_mode {
         bail!("layr daemon must run as root");
     }
-    let mut sock = socket_path();
-    let mut tick = 60u64;
+    let mut sock: Option<PathBuf> = None;
+    let mut tick = if user_mode { 120u64 } else { 60u64 };
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--socket" => {
-                sock = PathBuf::from(args.get(i + 1).ok_or_else(|| anyhow!("--socket needs a path"))?);
+                sock = Some(PathBuf::from(args.get(i + 1).ok_or_else(|| anyhow!("--socket needs a path"))?));
                 i += 1;
             }
             "--tick" => {
@@ -398,9 +410,10 @@ pub fn daemon(args: &[String]) -> Result<i32> {
         }
         i += 1;
     }
+    let sock = sock.unwrap_or_else(|| if user_mode { user_socket_path() } else { socket_path() });
     let root = crate::store::default_root();
     #[cfg(target_os = "macos")]
-    {
+    if !user_mode {
         let existing = root.ancestors().find(|p| p.exists()).context("store has no existing parent")?;
         if !crate::sys::apfs_owners_enabled(existing)? {
             bail!("the APFS service requires a volume with ownership enabled (diskutil enableOwnership <volume>)");
@@ -429,12 +442,13 @@ pub fn daemon(args: &[String]) -> Result<i32> {
         }
         std::fs::remove_file(&sock)?;
     }
-    let registry_listeners = crate::oci::registry::listeners(&root)?;
+    // The OCI registry serves other users: a user daemon has none.
+    let registry_listeners = if user_mode { Vec::new() } else { crate::oci::registry::listeners(&root)? };
     let registry_uids: Vec<u32> = registry_listeners.iter().map(|(_, _, user)| user.uid).collect();
     let listener = UnixListener::bind(&sock)?;
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o666))?;
+        std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(if user_mode { 0o600 } else { 0o666 }))?;
     }
     eprintln!("layr service: listening on {} (store {})", sock.display(), root.display());
     let mut last_hourly: i64 = 0;
@@ -463,6 +477,11 @@ pub fn daemon(args: &[String]) -> Result<i32> {
         if ready > 0 && pfd[0].revents().contains(rustix::event::PollFlags::IN) {
             if let Ok((conn, _)) = listener.accept() {
                 let uid = peer_uid(&conn).map(|x| x.0).unwrap_or(u32::MAX);
+                if user_mode && uid != own {
+                    eprintln!("layr daemon: refused a request from uid {uid}");
+                    drop(conn);
+                    continue;
+                }
                 let mine = children.values().filter(|u| **u == uid).count();
                 if children.len() >= max_total || (uid != 0 && mine >= max_per_user) {
                     let _ = (&conn).write_all(b"B");
@@ -518,7 +537,12 @@ pub fn daemon(args: &[String]) -> Result<i32> {
             match crate::sys::fork() {
                 Ok(crate::sys::Fork::Child) => {
                     drop(listener);
-                    periodic(&root, hourly);
+                    if user_mode {
+                        crate::follow::tick(&root, Caller::from_uid(own));
+                    } else {
+                        periodic(&root, hourly);
+                        crate::follow::tick(&root, Caller::from_uid(0));
+                    }
                     std::process::exit(0);
                 }
                 Ok(crate::sys::Fork::Parent(pid)) => {
