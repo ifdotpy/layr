@@ -759,7 +759,7 @@ pub fn serve(ctx: &Ctx, args: &[String]) -> Result<i32> {
         bail!("invalid peer direction");
     }
     let pid = hello["project_id"].as_str().unwrap_or("").to_string();
-    let exists = crate::store::db_file(&ctx.store.projects_dir().join(&name)).is_file();
+    let exists = ctx.store.project_dir(&name).is_ok_and(|dir| crate::store::db_file(&dir).is_file());
     if !exists && direction == "fetch" {
         w.json(&json!({"op": "error", "message": "the peer project does not exist"}))?;
         bail!("the peer project does not exist");
@@ -1086,13 +1086,13 @@ mod tests {
         assert_eq!(std::fs::read_to_string(peer_state(&ids[0]).join("payload")).unwrap(), "auxiliary payload");
         // Fetch must use the same policy, and the server must traverse auxiliary states.
         for id in &ids {
-            btrfs::delete_tree(&ctx.store.projects_dir().join("p/states").join(id)).unwrap();
+            btrfs::delete_tree(&ctx.store.project_dir("p").unwrap().join("states").join(id)).unwrap();
         }
         exchange(&ctx, &command, "fetch", false, false, true, false).unwrap();
-        assert!(!ctx.store.projects_dir().join("p/states").join(&ids[0]).exists());
-        assert!(ctx.store.projects_dir().join("p/states").join(&ids[1]).join("payload").exists());
+        assert!(!ctx.store.project_dir("p").unwrap().join("states").join(&ids[0]).exists());
+        assert!(ctx.store.project_dir("p").unwrap().join("states").join(&ids[1]).join("payload").exists());
         exchange(&ctx, &command, "fetch", false, true, true, false).unwrap();
-        assert!(ctx.store.projects_dir().join("p/states").join(&ids[0]).join("payload").exists());
+        assert!(ctx.store.project_dir("p").unwrap().join("states").join(&ids[0]).join("payload").exists());
     }
 
     #[test]
@@ -1100,7 +1100,7 @@ mod tests {
         use crate::model::{Author, Record};
         let dir = std::env::temp_dir().join(format!("layr-peer-refs-{}", ids::new_id()));
         let store = crate::store::Store::open(&dir).unwrap();
-        let project_dir = store.projects_dir().join("p");
+        let project_dir = store.project_dir("p").unwrap();
         std::fs::create_dir_all(project_dir.join("meta/db")).unwrap();
         std::fs::create_dir(project_dir.join("states")).unwrap();
         let p = Project {

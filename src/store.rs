@@ -24,6 +24,7 @@ use crate::db::Db;
 use crate::ids;
 use crate::model::{Actor, Record};
 use crate::oplog;
+use crate::volumes::{self, Layout};
 use anyhow::{anyhow, bail, Context, Result};
 use ed25519_dalek::SigningKey;
 use std::fs;
@@ -55,7 +56,7 @@ pub fn default_root() -> PathBuf {
     })
 }
 
-fn mkdir_mode(p: &Path, mode: u32) -> Result<()> {
+pub(crate) fn mkdir_mode(p: &Path, mode: u32) -> Result<()> {
     if !p.exists() {
         fs::create_dir_all(p).with_context(|| format!("mkdir {}", p.display()))?;
     }
@@ -115,7 +116,10 @@ impl Store {
         // A refused store is not created, so the resolution comes first.
         let root = resolve_root(root)?;
         let root = root.as_path();
-        crate::rootcheck::check_store(root)?;
+        // The volume files are read before anything is written. A volume that cannot be used
+        // (unmounted, or another store's) is not checked here: only its projects are refused.
+        let layout = Layout::load(root, "")?;
+        crate::rootcheck::check_store(root, &layout.ready_volume_paths())?;
         if !root.exists() {
             mkdir_mode(root, 0o755)?;
         }
@@ -158,37 +162,55 @@ impl Store {
         drop(machine_lock);
         mkdir_mode(&root.join("projects"), 0o755)?;
         version_guard.ready(root)?;
+        // Every volume folder must hold the identity file of this store (checked when used).
         Ok(Store { root: root.to_path_buf(), machine: Machine { id, name, key }, _version_guard: Some(version_guard) })
     }
 
-    pub fn projects_dir(&self) -> PathBuf {
-        self.root.join("projects")
+    /// The volume configuration of the store, read now (`volumes.rs`).
+    pub fn layout(&self) -> Result<Layout> {
+        Layout::load(&self.root, &self.machine.id)
     }
 
     /// The folder of a project. An overlay is the internal project `<project>%<overlay>`, kept
-    /// below the project's private `meta` folder.
+    /// below the project's private `meta` folder. Refused when the project's volume cannot be used.
     pub fn project_dir(&self, name: &str) -> Result<PathBuf> {
-        match name.split_once('%') {
-            Some((p, o)) => {
-                check_name("project", p)?;
-                check_name("overlay", o)?;
-                Ok(self.projects_dir().join(p).join("meta").join("overlays").join(o))
-            }
-            None => {
-                check_name("project", name)?;
-                Ok(self.projects_dir().join(name))
-            }
-        }
+        self.layout()?.project_dir(name)
     }
 
+    /// The root folder of the volume that holds a project (`main`: the store root).
+    pub fn volume_root(&self, name: &str) -> Result<PathBuf> {
+        let layout = self.layout()?;
+        layout.ready(&layout.volume_of(name.split('%').next().unwrap_or(name)))
+    }
+
+    /// Record the volume of a new project (`volumes::assign`). True when this call recorded it.
+    /// An overlay has no record of its own: it lives with its project.
+    pub fn place_project(&self, name: &str, volume: Option<&str>) -> Result<bool> {
+        if name.contains('%') {
+            return Ok(false);
+        }
+        volumes::assign(&self.root, &self.machine.id, name, volume).map(|(_, added)| added)
+    }
+
+    /// Remove the record of a project that `place_project` recorded and whose create failed.
+    pub fn unplace_project(&self, name: &str) {
+        let _ = volumes::unassign(&self.root, name);
+    }
+
+    /// The names of the projects that can be used: a project on a volume that is not usable
+    /// (unmounted, or not this store's) is left out, so every command skips it.
     pub fn project_names(&self) -> Result<Vec<String>> {
+        let layout = self.layout()?;
         let mut v = Vec::new();
-        for e in fs::read_dir(self.projects_dir())?.flatten() {
-            if db_file(&e.path()).is_file() {
-                v.push(e.file_name().to_string_lossy().into_owned());
+        for (_, projects) in layout.ready_projects_dirs() {
+            for e in fs::read_dir(&projects)?.flatten() {
+                if db_file(&e.path()).is_file() {
+                    v.push(e.file_name().to_string_lossy().into_owned());
+                }
             }
         }
         v.sort();
+        v.dedup();
         Ok(v)
     }
 }
@@ -233,7 +255,6 @@ pub struct Lock {
     since: std::time::Instant,
     waited: std::time::Duration,
     log: PathBuf,
-    trash: PathBuf,
     /// The project name, for `LAYR_TRACE`.
     project: String,
     /// The meta folder of the project whose lock this is (`Project::holds_lock`).
@@ -272,15 +293,17 @@ impl Drop for Lock {
             // Deleting build output takes minutes: it runs after the last lock, so other
             // commands do not wait for it, and in a process of its own, so this command does
             // not wait either. `layr gc` empties it at once; LAYR_TRASH_BUDGET_MS (tests) or a
-            // failed start spend a bounded time here instead.
-            let fully = EMPTY_TRASH_FULLY.load(std::sync::atomic::Ordering::SeqCst);
-            if fully {
-                let _t = crate::trace::span("empty trash (all)");
-                empty_all(&self.trash);
-            } else if std::env::var_os("LAYR_TRASH_BUDGET_MS").is_some() || !spawn_trash_emptier(&self.trash) {
-                let budget = trash_budget();
-                let _t = crate::trace::span(format!("empty trash ({} ms)", budget.as_millis()));
-                empty_trash(&self.trash, Some(budget));
+            // failed start spend a bounded time here instead. Each volume of the locks has its trash.
+            let dirs = LOCK_TRASH.lock().map(|mut d| std::mem::take(&mut *d)).unwrap_or_default();
+            for dir in dirs {
+                if EMPTY_TRASH_FULLY.load(std::sync::atomic::Ordering::SeqCst) {
+                    let _t = crate::trace::span("empty trash (all)");
+                    empty_all(&dir);
+                } else if std::env::var_os("LAYR_TRASH_BUDGET_MS").is_some() || !spawn_trash_emptier(&dir) {
+                    let budget = trash_budget();
+                    let _t = crate::trace::span(format!("empty trash ({} ms)", budget.as_millis()));
+                    empty_trash(&dir, Some(budget));
+                }
             }
         }
         if held < SLOW_LOCK && self.waited < SLOW_LOCK {
@@ -309,10 +332,9 @@ impl Drop for Lock {
     }
 }
 
-/// Delete what is in the trash, without a store lock. A tree that another process is deleting
-/// at the same time may fail; the next process deletes the rest.
-/// The trash of the store whose lock this process holds (`Store::trash_dir`).
-static LOCK_TRASH: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+/// The trash folders (one per volume) of the project locks this process holds. The last lock
+/// empties them.
+static LOCK_TRASH: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
 
 /// Delete a temporary tree. Under a store lock on APFS it only moves to the trash, which the
 /// last lock empties: a copy of a working folder took seconds to delete, and every other
@@ -320,7 +342,13 @@ static LOCK_TRASH: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(Non
 pub fn discard_tree(path: &Path) {
     #[cfg(target_os = "macos")]
     if HELD_LOCKS.load(std::sync::atomic::Ordering::SeqCst) > 0 {
-        let dir = LOCK_TRASH.lock().ok().and_then(|d| d.clone());
+        // The trash of the volume that holds `path`: the one whose volume folder is its longest prefix.
+        let dir = LOCK_TRASH.lock().ok().and_then(|dirs| {
+            dirs.iter()
+                .filter(|d| d.parent().is_some_and(|volume| path.starts_with(volume)))
+                .max_by_key(|d| d.components().count())
+                .cloned()
+        });
         if let (Some(dir), Some(name)) = (dir, path.file_name()) {
             if fs::symlink_metadata(path).is_err() {
                 return;
@@ -463,15 +491,6 @@ fn empty_tree(path: &Path, late: &dyn Fn() -> bool, deleted: &mut usize, failed:
     true
 }
 
-impl Store {
-    /// Trees that left a project of the store and that no record or command reads any more
-    /// (APFS). Under a lock a command only renames a tree here; `Lock` deletes them after the
-    /// last lock of the process.
-    pub fn trash_dir(&self) -> PathBuf {
-        self.root.join("trash")
-    }
-}
-
 impl<'a> Project<'a> {
     pub fn states_dir(&self) -> PathBuf {
         self.dir.join("states")
@@ -481,6 +500,13 @@ impl<'a> Project<'a> {
     }
     pub fn meta_dir(&self) -> PathBuf {
         self.dir.join("meta")
+    }
+    /// The trash of this project's volume: trees that left a project and that no record or command
+    /// reads any more. Under a lock a command only renames a tree here (same file system); the
+    /// last `Lock` empties it.
+    pub fn trash_dir(&self) -> Result<PathBuf> {
+        let layout = self.store.layout()?;
+        layout.trash_of(&layout.volume_of(&self.name))
     }
     /// True when this process holds the lock of this project (taking it again would wait forever).
     pub fn holds_lock(&self) -> bool {
@@ -511,7 +537,7 @@ impl<'a> Project<'a> {
         self.dir.join("deltas")
     }
     /// Remove the tree `path` of this project. On APFS deleting build output takes minutes, so
-    /// under a lock the tree is only renamed into the store's trash, which `Lock` empties after
+    /// under a lock the tree is only renamed into the trash of its volume, which `Lock` empties after
     /// the last lock. A tree that cannot move, and any tree on the other file systems (whose
     /// snapshots delete at once), is deleted in place.
     pub fn trash(&self, path: &Path) -> Result<()> {
@@ -521,7 +547,7 @@ impl<'a> Project<'a> {
             if fs::symlink_metadata(path).is_err() {
                 return Ok(());
             }
-            let dir = self.store.trash_dir();
+            let dir = self.trash_dir()?;
             let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             let to = dir.join(format!("{name}.{}", crate::ids::new_id()));
             match fs::create_dir_all(&dir).map_err(anyhow::Error::from).and_then(|_| crate::storage::move_tree(path, &to)) {
@@ -543,7 +569,7 @@ impl<'a> Project<'a> {
             }
             // What needs a search or a file by file delete waits for the end of the last lock.
             if HELD_LOCKS.load(std::sync::atomic::Ordering::SeqCst) > 0 {
-                let dir = self.store.trash_dir();
+                let dir = self.trash_dir()?;
                 let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 let to = dir.join(format!("{name}.{}", crate::ids::new_id()));
                 if fs::create_dir_all(&dir).is_ok() && crate::storage::move_tree(path, &to).is_ok() {
@@ -643,9 +669,22 @@ impl<'a> Project<'a> {
         self.name.contains('%')
     }
 
+    /// A new project on the default volume (the tests make most of their projects this way).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn create(store: &'a Store, name: &str, actor: &Actor, config: serde_json::Value) -> Result<Project<'a>> {
+        Self::create_on(store, name, None, actor, config)
+    }
+
+    /// A new project on the named volume (`None`: the default volume).
+    pub fn create_on(
+        store: &'a Store,
+        name: &str,
+        volume: Option<&str>,
+        actor: &Actor,
+        config: serde_json::Value,
+    ) -> Result<Project<'a>> {
         check_name("project", name)?;
-        Self::create_in(store, name, actor, config)
+        Self::create_in(store, name, volume, actor, config)
     }
 
     /// The internal project of an overlay, `<project>%<overlay>` (`layr overlay create` only).
@@ -653,18 +692,36 @@ impl<'a> Project<'a> {
         if !name.contains('%') {
             bail!("not an overlay name: {name}");
         }
-        Self::create_in(store, name, actor, config)
+        Self::create_in(store, name, None, actor, config)
+    }
+
+    /// Record the volume of the project, then make its folder. A failure removes the record
+    /// again when this call made it.
+    fn create_in(
+        store: &'a Store,
+        name: &str,
+        volume: Option<&str>,
+        actor: &Actor,
+        config: serde_json::Value,
+    ) -> Result<Project<'a>> {
+        let added = store.place_project(name, volume)?;
+        let result = Self::create_folder(store, name, actor, config);
+        if result.is_err() && added {
+            store.unplace_project(name);
+        }
+        result
     }
 
     /// Make a new project folder. A path that exists (a partial folder too) is refused and left
     /// unchanged. A failure after this call made the folder removes the whole folder.
-    fn create_in(store: &'a Store, name: &str, actor: &Actor, config: serde_json::Value) -> Result<Project<'a>> {
+    fn create_folder(store: &'a Store, name: &str, actor: &Actor, config: serde_json::Value) -> Result<Project<'a>> {
         let dir = store.project_dir(name)?;
-        if !crate::storage::is_supported(&store.projects_dir()) {
+        let volume_root = store.volume_root(name)?;
+        if !crate::storage::is_supported(&volume_root) {
             #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
-            bail!("{} is not on btrfs", store.projects_dir().display());
+            bail!("{} is not on btrfs", volume_root.display());
             #[cfg(target_os = "macos")]
-            bail!("{} is not on APFS", store.projects_dir().display());
+            bail!("{} is not on APFS", volume_root.display());
             #[cfg(feature = "overlayfs")]
             bail!("OverlayFS requires a local store and mount permission");
         }
@@ -709,8 +766,18 @@ impl<'a> Project<'a> {
 
     /// Folders of a project without records (for a restore or a replica).
     pub fn create_empty(store: &'a Store, name: &str) -> Result<Project<'a>> {
+        Self::create_empty_on(store, name, None)
+    }
+
+    /// Folders of a project without records on the named volume (`None`: the default volume).
+    pub fn create_empty_on(store: &'a Store, name: &str, volume: Option<&str>) -> Result<Project<'a>> {
         check_name("project", name)?;
-        Self::create_empty_in(store, name)
+        let added = store.place_project(name, volume)?;
+        let result = Self::create_empty_in(store, name);
+        if result.is_err() && added {
+            store.unplace_project(name);
+        }
+        result
     }
 
     pub fn create_empty_overlay(store: &'a Store, name: &str) -> Result<Project<'a>> {
@@ -725,11 +792,12 @@ impl<'a> Project<'a> {
         if db_file(&dir).exists() {
             bail!("project '{name}' already exists");
         }
-        if !crate::storage::is_supported(&store.projects_dir()) {
+        let volume_root = store.volume_root(name)?;
+        if !crate::storage::is_supported(&volume_root) {
             #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
-            bail!("{} is not on btrfs", store.projects_dir().display());
+            bail!("{} is not on btrfs", volume_root.display());
             #[cfg(target_os = "macos")]
-            bail!("{} is not on APFS", store.projects_dir().display());
+            bail!("{} is not on APFS", volume_root.display());
             #[cfg(feature = "overlayfs")]
             bail!("OverlayFS requires a local store and mount permission");
         }
@@ -797,6 +865,8 @@ impl<'a> Project<'a> {
     }
 
     pub fn lock(&self) -> Result<Lock> {
+        // Resolved before the lock is taken: a failure here must not leave a count behind.
+        let trash = self.trash_dir()?;
         let f = fs::OpenOptions::new().create(true).write(true).truncate(false).open(self.meta_dir().join("lock"))?;
         let asked = std::time::Instant::now();
         rustix::fs::flock(&f, rustix::fs::FlockOperation::LockExclusive)?;
@@ -807,8 +877,10 @@ impl<'a> Project<'a> {
         if std::env::var_os("LAYR_TRACE").is_some() {
             eprintln!("trace {:>8.1} ms  store lock taken: {}", asked.elapsed().as_secs_f64() * 1000.0, self.name);
         }
-        if let Ok(mut d) = LOCK_TRASH.lock() {
-            *d = Some(self.store.trash_dir());
+        if let Ok(mut dirs) = LOCK_TRASH.lock() {
+            if !dirs.contains(&trash) {
+                dirs.push(trash);
+            }
         }
         let lock = Lock {
             f: Some(f),
@@ -818,7 +890,6 @@ impl<'a> Project<'a> {
             },
             waited: asked.elapsed(),
             log: self.meta_dir().join("lock-slow.log"),
-            trash: self.store.trash_dir(),
             project: self.name.clone(),
             meta: self.meta_dir(),
         };

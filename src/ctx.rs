@@ -123,18 +123,22 @@ impl Ctx {
     }
 
     fn loc_in_store(&self, path: &Path) -> Option<Loc> {
-        let projects = self.store.projects_dir();
-        let projects = projects.canonicalize().unwrap_or(projects);
-        let rel = path.strip_prefix(&projects).ok()?;
-        let comps: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
-        if comps.is_empty() {
-            return None;
+        // The projects folder of every volume: a line can be on any of them.
+        let layout = self.store.layout().ok()?;
+        for (_, projects) in layout.projects_dirs() {
+            let projects = projects.canonicalize().unwrap_or(projects);
+            let Ok(rel) = path.strip_prefix(&projects) else { continue };
+            let comps: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+            if comps.is_empty() {
+                return None;
+            }
+            let project = comps[0].clone();
+            if comps.len() >= 3 && comps[1] == "lines" {
+                return Some(Loc { project, line: Some(comps[2].clone()), sub: comps[3..].join("/") });
+            }
+            return Some(Loc { project, line: None, sub: String::new() });
         }
-        let project = comps[0].clone();
-        if comps.len() >= 3 && comps[1] == "lines" {
-            return Some(Loc { project, line: Some(comps[2].clone()), sub: comps[3..].join("/") });
-        }
-        Some(Loc { project, line: None, sub: String::new() })
+        None
     }
 
     fn sub_in_line(&self, project: &str, line: Option<&str>) -> Option<String> {

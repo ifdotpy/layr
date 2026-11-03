@@ -17,9 +17,15 @@ fn value(db: &rusqlite::Connection, key: &str) -> Result<Option<serde_json::Valu
 
 pub(super) fn known(home: &Path) -> Result<Vec<Known>> {
     let mut stores = BTreeMap::<String, Known>::new();
-    let projects = crate::store::default_root().join("projects");
-    if let Ok(dirs) = std::fs::read_dir(projects) {
-        let mut dirs: Vec<_> = dirs.collect::<std::io::Result<_>>()?;
+    let layout = crate::volumes::Layout::for_root(&crate::store::default_root())?;
+    let mut all = Vec::new();
+    for (_, projects) in layout.ready_projects_dirs() {
+        if let Ok(dirs) = std::fs::read_dir(projects) {
+            all.extend(dirs.collect::<std::io::Result<Vec<_>>>()?);
+        }
+    }
+    {
+        let mut dirs = all;
         dirs.sort_by_key(|e| e.file_name());
         for entry in dirs {
             // The caller can only discover metadata that its filesystem access permits.
@@ -110,18 +116,13 @@ pub(super) fn profile_env(remote: &str, url: &str, home: &Path, env: &mut HashMa
         return Ok(());
     }
     if !env.get("AWS_PROFILE").is_some_and(|v| !v.is_empty()) {
-        let project = std::env::var("LAYR_PROJECT").ok().or_else(|| {
-            std::env::current_dir()
-                .ok()?
-                .strip_prefix(crate::store::default_root().join("projects"))
-                .ok()?
-                .components()
-                .next()
-                .map(|p| p.as_os_str().to_string_lossy().into_owned())
-        });
+        let layout = crate::volumes::Layout::for_root(&crate::store::default_root())?;
+        let project = std::env::var("LAYR_PROJECT")
+            .ok()
+            .or_else(|| crate::volumes::project_of_path(&layout, &std::env::current_dir().ok()?));
         if let Some(project) = project.filter(|_| !remote.contains("://")) {
             let db = rusqlite::Connection::open_with_flags(
-                crate::store::db_file(&crate::store::default_root().join("projects").join(project)),
+                crate::store::db_file(&layout.project_dir(&project)?),
                 rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
             )?;
             if let Some(profile) =
