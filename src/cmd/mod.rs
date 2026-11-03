@@ -363,7 +363,7 @@ mod tests {
     #[test]
     fn version_line_names_the_build() {
         let shape = format!(
-            r"^layr version {} \((unknown|[0-9a-f]{{7,40}}(-dirty)?) (unknown|\d{{4}}-\d{{2}}-\d{{2}})\)$",
+            r"^layr version {} \((dev|[0-9a-f]{{7,40}}) (dev|\d{{4}}-\d{{2}}-\d{{2}})\)$",
             regex::escape(env!("CARGO_PKG_VERSION"))
         );
         let line = version_line();
