@@ -202,7 +202,13 @@ is valid for a state, so it never decides that by itself:
   plain folder. A new line takes a regenerable folder only warm, while its `.layrattributes`
   still marks it, and takes a folder with files from its state, even when an ancestor saved it
   as a cache.
-- Caches come only from `layr save --caches`, the explicit choice of someone who may save the
+- A regenerable cache folder is a layer from the first command that sees it, so its files never go
+  into a state, on every file system, whether or not `save --caches` ever ran. Any save (automatic
+  or named), `line new` and every state-making command first turn each such folder into a layer
+  (before the store lock, the copy on btrfs; a marker on APFS). The first save of each cache also
+  saves the first cache state of the line (the cache overlay `cache.<folder>`), so a new line from
+  a state of the line starts warm. Later saves do not copy the cache; `save --caches` refreshes it.
+- `save --caches`, the explicit choice of someone who may save the
   line. It first turns the regenerable folders into caches, so their files stay out of the state. On a
   protected line with no changes since its head (ignored files do not count), it gives the caches
   to the head, so the next lines from that head start warm; else to a new automatic state. A

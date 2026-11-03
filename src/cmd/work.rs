@@ -979,10 +979,18 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if a.has("-a") && !stacked {
         add(ctx, &["-u".to_string()])?;
     }
+    // Cache folders become layers, and their copies are made, before the lock (rule 90).
+    if !stacked {
+        h.repo.restore_caches(&line)?;
+        h.repo.prepare_cache_states(&line)?;
+    }
     let _lock = h.repo.p.lock()?;
     let line = h.repo.line(&line.id)?;
     crate::gitbridge::check_git_head(&h.repo, &line)?;
     crate::repo::recover_cache_replacements(&h.repo.working(&line))?;
+    if !stacked {
+        h.repo.save_first_cache_states(ctx, &line)?;
+    }
     if a.has("-a") && !stacked && !cfg!(target_os = "macos") {
         let (st, scan, _it, _index) = h.repo.status_light(&line)?;
         let paths: BTreeSet<String> = st.unstaged.iter().map(|c| c.path.clone()).collect();

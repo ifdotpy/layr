@@ -941,6 +941,9 @@ impl<'a> Repo<'a> {
     pub fn prepare_save(&self, line: &Line) -> Result<()> {
         let prev = self.save_base(line)?;
         self.hold(self.pin(&[&line.head, &prev])?);
+        // Cache folders become layers before the lock: a copy (btrfs) must not run under it.
+        self.restore_caches(line)?;
+        self.prepare_cache_states(line)?;
         self.prepare_save_layer(line)
     }
 
@@ -1003,6 +1006,20 @@ impl<'a> Repo<'a> {
     /// Save the working content as an automatic state if it changed since the previous one.
     /// The caller holds the project lock.
     pub fn save(&self, ctx: &Ctx, line: &Line, message: &str, running: bool, force: bool) -> Result<Option<StateRec>> {
+        let st = self.save_working(ctx, line, message, running, force)?;
+        // A cache folder that has no cache overlay state on this line yet gets its first one
+        // (the cache of the line, as `save --caches` makes it). A failure keeps the state.
+        let of = match &st {
+            Some(s) => s.id.clone(),
+            None => self.save_base(line)?,
+        };
+        if let Err(e) = self.save_cache_states(ctx, line, &of) {
+            eprintln!("warning: cache overlay of line {} not saved: {e:#}", line.name);
+        }
+        Ok(st)
+    }
+
+    fn save_working(&self, ctx: &Ctx, line: &Line, message: &str, running: bool, force: bool) -> Result<Option<StateRec>> {
         let _t = crate::trace::span("save working state");
         let w = self.working(line);
         if !w.exists() {
@@ -1876,10 +1893,11 @@ impl<'a> Repo<'a> {
         paths
     }
 
-    /// Cache paths of the line that a tool made again as plain folders (`cargo clean` removes
-    /// `target/` and a build makes it again), so that a snapshot would put their files into a
-    /// state. Only paths that were caches can be such: the machine setting and the folder
-    /// overlays. A folder that the head versions is no cache.
+    /// Cache paths of the line that are plain folders now, so that a snapshot would put their
+    /// files into a state: a tool made them again (`cargo clean` removes `target/` and a build
+    /// makes it again), or no cache was made yet. The candidates are the machine setting, the
+    /// folder overlays and the folders that `.layrattributes` makes regenerable (and the ignore
+    /// rules ignore). A folder that the head versions is no cache.
     fn plain_caches(&self, line: &Line) -> Result<Vec<String>> {
         let w = self.working(line);
         if self.p.is_overlay() {
@@ -1888,6 +1906,11 @@ impl<'a> Repo<'a> {
         let setting = self.p.config_strings("regenerable");
         let mut paths = setting.clone();
         for (_, f) in self.folder_overlays()? {
+            if !paths.contains(&f) {
+                paths.push(f);
+            }
+        }
+        for f in regenerable_folders(&w) {
             if !paths.contains(&f) {
                 paths.push(f);
             }
@@ -1929,6 +1952,94 @@ impl<'a> Repo<'a> {
             convert_cache(&w, &p, u, g)?;
         }
         Ok(())
+    }
+
+    /// The cache folders of a line that are layers now but have no cache overlay state on this
+    /// line yet. `save_cache_states` makes that first state, so a new line from a state of this
+    /// line starts warm, without `save --caches`.
+    fn unsaved_cache_layers(&self, line: &Line) -> Result<Vec<String>> {
+        let w = self.working(line);
+        if self.p.is_overlay() {
+            return Ok(Vec::new());
+        }
+        let mut candidates = self.p.config_strings("regenerable");
+        for f in regenerable_folders(&w) {
+            if !candidates.contains(&f) {
+                candidates.push(f);
+            }
+        }
+        let mut head = None;
+        let mut out = Vec::new();
+        for p in candidates {
+            let cp = fsutil::safe_join(&w, &p)?;
+            if !btrfs::is_subvolume(&cp) {
+                continue;
+            }
+            if head.is_none() {
+                head = Some(self.state_root(&line.head)?);
+            }
+            if holds_files(head.as_ref().unwrap(), &p) {
+                continue;
+            }
+            let name = match self.folder_overlay_of(&p)? {
+                Some(n) => n,
+                None => crate::cache_overlay::cache_overlay_name(&p),
+            };
+            if !self.overlay_line_has_state(&name, line)? {
+                out.push(p);
+            }
+        }
+        Ok(out)
+    }
+
+    /// True when the cache overlay `name` has a state on the overlay line of `line`.
+    fn overlay_line_has_state(&self, name: &str, line: &Line) -> Result<bool> {
+        let Some(info) = self.overlay_info(name)? else { return Ok(false) };
+        let orepo = self.overlay_repo(name)?;
+        let line_name = Repo::overlay_line_name(&info, &line.id, line.owner);
+        Ok(orepo.p.db.line_by_name(&line_name)?.is_some_and(|ol| ol.head != info.root))
+    }
+
+    /// Before the lock (APFS): the copy that the first cache state of each unsaved cache takes
+    /// under the lock with one rename (`save_cache_overlays`), as `save --caches` makes it.
+    pub fn prepare_cache_states(&self, line: &Line) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        {
+            let w = self.working(line);
+            for p in self.unsaved_cache_layers(line)? {
+                btrfs::prepare_snapshot(&fsutil::safe_join(&w, &p)?, &self.p.work_dir(), true)?;
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = line;
+        Ok(())
+    }
+
+    /// For a command that makes no automatic state (a named save): the first cache states of the
+    /// line, saved with its save base. A failure is a warning. The caller holds the project lock.
+    pub fn save_first_cache_states(&self, ctx: &Ctx, line: &Line) -> Result<()> {
+        let of = self.save_base(line)?;
+        if let Err(e) = self.save_cache_states(ctx, line, &of) {
+            eprintln!("warning: cache overlay of line {} not saved: {e:#}", line.name);
+        }
+        Ok(())
+    }
+
+    /// The first cache state of each cache folder of `line` that has none (`unsaved_cache_layers`),
+    /// saved with the automatic state `of`. The caller holds the project lock.
+    fn save_cache_states(&self, ctx: &Ctx, line: &Line, of: &str) -> Result<()> {
+        let paths = self.unsaved_cache_layers(line)?;
+        if paths.is_empty() {
+            return Ok(());
+        }
+        let shared = self.policy().rule_for(&line.name).is_some();
+        let made = self.save_cache_overlays(ctx, line, &paths, shared, of);
+        // Copies that no snapshot took (prepared before the lock) go to the trash.
+        #[cfg(target_os = "macos")]
+        for p in btrfs::take_prepared() {
+            let _ = self.p.trash(&p);
+        }
+        made.map(|_| ())
     }
 
     /// The cache paths of a line (`cache_paths`) in two lists: the caches, and the paths whose
@@ -2390,23 +2501,22 @@ pub fn regenerable_folders(w: &Path) -> Vec<String> {
     let mut found = Vec::new();
     let mut stack = vec![String::new()];
     while let Some(dir) = stack.pop() {
-        for name in t.list(&dir).unwrap_or_default() {
+        // Folders only, from the listing: a walk of every save must not stat every file.
+        for name in t.list_dirs(&dir).unwrap_or_default() {
             let rel = if dir.is_empty() { name } else { format!("{dir}/{name}") };
             if rel == ".git" {
                 continue;
             }
-            match t.stat(&rel) {
-                Some(m) if m.is_dir() => {
-                    if regenerable.ignored(&rel, true) {
-                        if ignored.ignored(&rel, true) {
-                            found.push(rel);
-                        }
-                    } else if !fsutil::is_layer(w, &rel, &m) {
-                        // Another subvolume (a cache of the machine setting) is not entered.
-                        stack.push(rel);
-                    }
+            if regenerable.ignored(&rel, true) {
+                if ignored.ignored(&rel, true) {
+                    found.push(rel);
                 }
-                _ => {}
+            } else if !ignored.ignored(&rel, true) {
+                // An ignored folder is not entered: a walk of every save must not read build
+                // output. Another subvolume (a cache) is not entered either.
+                if t.stat(&rel).is_some_and(|m| !fsutil::is_layer(w, &rel, &m)) {
+                    stack.push(rel);
+                }
             }
         }
     }
