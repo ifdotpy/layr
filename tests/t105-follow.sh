@@ -5,6 +5,10 @@
 # stops it. On macOS the daemon runs the same pass as the user. One user, so it runs on macOS and
 # on Linux (the daemon part on macOS only).
 . "$(dirname "$0")/lib.sh"
+# layr follow probes the user socket: keep it in the test folder, never the real one. macOS reads
+# it under HOME; on Linux the tests run as root (direct mode), so LAYR_SOCKET is safe.
+mkdir -p $T/home
+if [ "$(uname -s)" = Darwin ]; then export HOME=$T/home; else export LAYR_SOCKET=$T/service.sock; fi
 
 R=$T/remote.git; U=$T/up
 git init -q --bare -b main $R

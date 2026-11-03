@@ -1316,10 +1316,25 @@ fn pick(ctx: &Ctx, args: &[String], revert: bool) -> Result<i32> {
             outln!(ctx, "[{} {}] {}", line.name, ids::short(&sid), message.lines().next().unwrap_or(""));
         }
     }
+    // The uncommitted work that the pick left in the folder: an agent checks this line, not `status`.
+    if !local.is_empty() {
+        outln!(ctx, "{}", kept_message(&local));
+    }
     Ok(code)
     })();
     discard_prepared(repo);
     r
+}
+
+/// The uncommitted paths that a pick kept: the names of the first 20, then the count of the rest.
+fn kept_message(paths: &std::collections::BTreeSet<String>) -> String {
+    let names: Vec<&str> = paths.iter().take(20).map(String::as_str).collect();
+    let more = paths.len() - names.len();
+    let mut text = format!("kept {} uncommitted file(s): {}", paths.len(), names.join(", "));
+    if more > 0 {
+        text.push_str(&format!(", and {more} more"));
+    }
+    text
 }
 
 pub fn cherry_pick(ctx: &Ctx, args: &[String]) -> Result<i32> {

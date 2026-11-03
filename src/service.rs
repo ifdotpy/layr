@@ -141,6 +141,42 @@ fn negotiate(sock: &UnixStream) -> Result<()> {
     Ok(())
 }
 
+/// What a daemon on a socket answers to a hello. A hello sends no request.
+pub enum Hello {
+    /// No daemon accepts on the socket (none, stale socket file, or refused).
+    Absent,
+    /// A daemon accepted but gave no version reply (busy or closing).
+    Busy,
+    /// A daemon. `root` is its store root; None from a build that does not report it.
+    Running { root: Option<PathBuf> },
+}
+
+/// Ask the daemon on `path` for its store root (the reply of `handle`, read as `negotiate` does).
+pub fn hello(path: &Path) -> Hello {
+    let Ok(sock) = UnixStream::connect(path) else { return Hello::Absent };
+    let _ = sock.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+    let request = br#"{"hello":true}"#;
+    let mut packet = (request.len() as u32).to_be_bytes().to_vec();
+    packet.extend_from_slice(request);
+    // A busy daemon closes at once, so the write may fail; its answer is still read.
+    let _ = (&sock).write_all(&packet);
+    let mut kind = [0u8; 1];
+    if (&sock).read_exact(&mut kind).is_err() || kind[0] != b'V' {
+        return Hello::Busy;
+    }
+    let mut length = [0u8; 4];
+    if (&sock).read_exact(&mut length).is_err() {
+        return Hello::Busy;
+    }
+    let size = u32::from_be_bytes(length) as usize;
+    let mut bytes = vec![0u8; size.min(4096)];
+    if size > 4096 || (&sock).read_exact(&mut bytes).is_err() {
+        return Hello::Busy;
+    }
+    let root = serde_json::from_slice::<serde_json::Value>(&bytes).ok().and_then(|v| v["root"].as_str().map(PathBuf::from));
+    Hello::Running { root }
+}
+
 /// Why a client could not connect, and what to do. The service opens its socket to every local
 /// user (mode 0666 in a 0755 folder) and decides each request by the caller's uid; so a refused
 /// connection comes from the client's side or from a missing service, never from a role.
@@ -225,7 +261,10 @@ fn handle(sock: UnixStream, root: &Path, registry_uids: &[u32]) -> i32 {
             if !fds.is_empty() {
                 bail!("the version request must not contain descriptors");
             }
-            let bytes = serde_json::to_vec(&crate::store_version::Version::binary())?;
+            // The store root lets a client see which store this daemon serves (layr follow).
+            let mut hello = serde_json::to_value(crate::store_version::Version::binary())?;
+            hello["root"] = root.to_string_lossy().into_owned().into();
+            let bytes = serde_json::to_vec(&hello)?;
             let mut packet = vec![b'V'];
             packet.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
             packet.extend_from_slice(&bytes);

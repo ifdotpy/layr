@@ -69,6 +69,10 @@ pub fn undo_entries(rec: &Record, ord: &str) -> Vec<(String, Vec<String>)> {
                 named.extend([&ch.before, &ch.after].into_iter().flatten().map(|h| h.head.clone()));
                 named.extend([&ch.working_before, &ch.working_after].into_iter().flatten().cloned());
             }
+            // An automatic save: undo reads the working state it changes from.
+            if rec.op == "save" {
+                named.extend(["working_before", "working_after"].iter().filter_map(|k| rec.data[*k].as_str().map(str::to_string)));
+            }
             (format!("{line}|{ord}"), named)
         })
         .collect()

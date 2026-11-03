@@ -125,9 +125,15 @@ branch ([layr follow](docs/follow.md)).
 `layr follow` passes run in a LaunchAgent as your user. It needs no root:
 
 ```sh
+# The store your layr commands use. Empty means the default store:
+export LAYR_ROOT="${LAYR_ROOT:-$HOME/Library/Application Support/layr}"
 cp packaging/launchd/ws.layr.daemon.plist ~/Library/LaunchAgents/
+plutil -replace EnvironmentVariables.LAYR_ROOT -string "$LAYR_ROOT" ~/Library/LaunchAgents/ws.layr.daemon.plist
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ws.layr.daemon.plist
 ```
+
+The daemon must see the same store as your commands (`LAYR_ROOT`). After an earlier install, stop
+the agent first: `launchctl bootout gui/$(id -u)/ws.layr.daemon`.
 
 Logs go to `~/Library/Logs/layr-daemon.log`. Details: [layr follow](docs/follow.md#install-on-macos).
 
