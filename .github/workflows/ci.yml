@@ -102,8 +102,6 @@ jobs:
     # sets CARGO_INCREMENTAL=0 only when the variable is unset.
     env:
       CARGO_INCREMENTAL: "1"
-      # Run layr in direct mode, as the user. Without it, Linux forwards to a root service at /run/layr/layr.sock.
-      LAYR_DIRECT: "1"
     steps:
       - uses: actions/checkout@v4
       # The toolchain pin also pins llvm-tools, which must match the LLVM of rustc.
@@ -151,7 +149,14 @@ jobs:
         run: echo "LAYR_ROOT=$(mktemp -d "${TMPDIR:-$RUNNER_TEMP}/layr-root.XXXXXX")" >> "$GITHUB_ENV"
       - name: Test layr-retest
         timeout-minutes: 20
-        run: cargo test --locked -p layr-retest
+        # On Linux, run as root like the other integration jobs: btrfs send needs the root service, and root
+        # runs layr directly. -E keeps the cargo and rustup homes and the test env of this job.
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo -E env "PATH=$PATH" cargo test --locked -p layr-retest
+          else
+            cargo test --locked -p layr-retest
+          fi
       - name: Test layr-model and layr-store
         timeout-minutes: 20
         run: cargo test --locked -p layr-model -p layr-store
