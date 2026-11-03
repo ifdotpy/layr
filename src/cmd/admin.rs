@@ -1686,14 +1686,29 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
         None => ctx.caller.uid,
     };
     let actor = ctx.actor();
+    // A missing source is an error, not an empty project. Checked before the project folder exists.
+    if let Some(from) = a.get("--from") {
+        let src = if from.starts_with('/') { std::path::PathBuf::from(from) } else { ctx.cwd.join(from) };
+        if !crate::privs::as_caller_fs(ctx, || Ok(src.is_dir()))? {
+            return Err(exit(128, format!("fatal: not a folder: {}", src.display())));
+        }
+    }
+    // Project::create makes the folder or fails without changing an existing one. From here on,
+    // the failure cleanup below removes the folder that this call made.
     let p = Project::create(
         &ctx.store,
         name,
         &actor,
         serde_json::json!({"access": {format!("user:{owner}"): "admin"}, "protect": {"main": {}}}),
     )?;
+    let dir = p.dir.clone();
     let repo = Repo { p, ctx: Some(ctx) };
-    let res = (|| -> Result<(String, String)> {
+    // The last step of every path: the line of the new state. Runs under the project lock.
+    let finish = |state: String| -> Result<(Line, String)> {
+        let l = repo.create_line(ctx, &line_name, &state, owner)?;
+        Ok((l, state))
+    };
+    let res = (|| -> Result<(Line, String)> {
         let _lock = repo.p.lock()?;
         let work = repo.p.work_dir().join(crate::store::temp_name());
         btrfs::create_subvolume(&work)?;
@@ -1711,7 +1726,7 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let state = state.ok_or_else(|| exit(128, format!("fatal: remote has no branch '{branch}'")))?;
             let (st, _) = crate::gitbridge::import_commit(ctx, &repo, &state, &format!("origin/{branch}"), owner, None)?;
             drop(cleanup);
-            return Ok((st, branch));
+            return finish(st);
         }
         if let Some(from) = a.get("--from") {
             let src = if from.starts_with('/') { std::path::PathBuf::from(from) } else { ctx.cwd.join(from) };
@@ -1803,7 +1818,7 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
                     changed |= !copies.is_empty() || !directories.is_empty() || !gone.is_empty();
                     if !changed {
                         drop(cleanup);
-                        return Ok((st, branch));
+                        return finish(st);
                     }
                     msg = "unsaved changes of the imported folder".into();
                 } else {
@@ -1818,18 +1833,18 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
         rec.states.push(st.clone());
         repo.commit_record(ctx, rec)?;
         drop(cleanup);
-        Ok((st.id, line_name.clone()))
+        finish(st.id)
     })();
-    let (state, _branch) = match res {
+    let (l, state) = match res {
         Ok(x) => x,
         Err(e) => {
-            let _ = btrfs::delete_tree(&repo.p.dir.join("states"));
-            let _ = std::fs::remove_dir_all(&repo.p.dir);
+            // Remove the folder this call made, with its subvolumes. The error of the step is kept.
+            if let Err(c) = btrfs::delete_tree(&dir) {
+                return Err(e.context(format!("cannot remove {}: {c:#}", dir.display())));
+            }
             return Err(e);
         }
     };
-    let _lock = repo.p.lock()?;
-    let l = repo.create_line(ctx, &line_name, &state, owner)?;
     if !a.has("-q") {
         outln!(
             ctx,
