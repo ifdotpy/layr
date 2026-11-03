@@ -611,9 +611,10 @@ impl Tree {
             for name in visit(&rel, &entries) {
                 let child = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
                 let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-                if let Ok(cfd) = rustix::fs::openat(&fd, name.as_str(), flags, Mode::empty()) {
-                    stack.push((child, cfd));
-                }
+                // A folder that cannot be opened is an error: a walk must not return a short list.
+                let cfd = rustix::fs::openat(&fd, name.as_str(), flags, Mode::empty())
+                    .map_err(|e| anyhow::anyhow!("open folder {child}: {e}"))?;
+                stack.push((child, cfd));
             }
         }
         Ok(())

@@ -798,7 +798,7 @@ mod tests {
         let error = send(&root, None, &mut Vec::new()).unwrap_err();
         assert!(error.to_string().contains("access control lists"));
         crate::storage::set_writable(&root)?;
-        crate::stream_fs::clear_acl(&root.join("file"))?;
+        crate::sys::apfs_clear_acl(&root.join("file"))?;
         assert!(!crate::stream_fs::has_acl(&root.join("file"))?);
         Ok(())
     }

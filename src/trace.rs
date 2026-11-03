@@ -21,6 +21,11 @@ pub fn span(name: impl Into<String>) -> Option<Span> {
     Some(Span { name: name.into(), start: Instant::now() })
 }
 
+/// A span whose name is built only when `LAYR_TRACE` is set (a name that needs a `format!` on a hot path).
+pub fn named(name: impl FnOnce() -> String) -> Option<Span> {
+    std::env::var_os("LAYR_TRACE").map(|_| Span { name: name(), start: Instant::now() })
+}
+
 impl Drop for Span {
     fn drop(&mut self) {
         let ms = self.start.elapsed().as_secs_f64() * 1000.0;
