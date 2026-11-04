@@ -79,6 +79,10 @@ pub fn here(ctx: &Ctx) -> Result<Here<'_>> {
         Some(n) => Some(repo.line(n)?),
         None => None,
     };
+    // The local ignore file of the line applies also where a command scans a copy of the folder.
+    if let Some(l) = &line {
+        crate::ignore_rules::set_line_exclude(Some(repo.working(l).join(crate::ignore_rules::LOCAL_EXCLUDE)));
+    }
     Ok(Here { repo, line, loc })
 }
 

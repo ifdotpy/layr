@@ -13,6 +13,18 @@ use std::sync::Arc;
 /// setting `ignore.local` fills it in the `.git` folder of each line.
 pub const LOCAL_EXCLUDE: &str = ".git/info/exclude";
 
+/// The local ignore file of the line of this command (`set_line_exclude`). A command often scans a
+/// snapshot of the line folder, which has no `.git` (a nested subvolume on btrfs, the upper folder
+/// on OverlayFS), so the rules of a tree without its own `.git/info/exclude` read this one.
+static LINE_EXCLUDE: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+/// Name the local ignore file of the line of this command (`LINE_EXCLUDE`).
+pub fn set_line_exclude(path: Option<PathBuf>) {
+    if let Ok(mut l) = LINE_EXCLUDE.lock() {
+        *l = path;
+    }
+}
+
 pub struct Rules {
     root: PathBuf,
     files: &'static [&'static str],
@@ -109,10 +121,15 @@ impl Rules {
     fn local_exclude(&self) -> Option<&PathBuf> {
         self.local
             .get_or_init(|| {
-                let path = self.root.join(LOCAL_EXCLUDE);
                 // An empty file (each line's `.git` has one) adds no rule and no matcher.
-                let rules = std::fs::metadata(&path).is_ok_and(|m| m.is_file() && m.len() > 0);
-                (self.attribute.is_none() && rules).then_some(path)
+                let rules = |p: &Path| std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.len() > 0);
+                let own = self.root.join(LOCAL_EXCLUDE);
+                let path = if self.root.join(".git").exists() {
+                    own
+                } else {
+                    LINE_EXCLUDE.lock().ok().and_then(|l| l.clone()).unwrap_or(own)
+                };
+                (self.attribute.is_none() && rules(&path)).then_some(path)
             })
             .as_ref()
     }
