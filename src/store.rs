@@ -658,6 +658,15 @@ impl<'a> Project<'a> {
         let layout = self.store.layout()?;
         layout.trash_of(&layout.volume_of(&self.name))
     }
+    /// Move a tree to an already prepared trash directory without deleting it on failure.
+    /// This is safe to call under a project lock; cleanup happens after the lock.
+    pub fn move_to_trash(&self, path: &Path, trash: &Path) -> Result<()> {
+        let to = trash.join(format!("gc.{}", crate::ids::new_id()));
+        #[cfg(feature = "overlayfs")]
+        return crate::storage::rename_tree(path, &to);
+        #[cfg(not(feature = "overlayfs"))]
+        crate::storage::move_tree(path, &to)
+    }
     /// True when this process holds the lock of this project (taking it again would wait forever).
     pub fn holds_lock(&self) -> bool {
         HELD_PROJECTS.lock().map(|held| held.contains(&self.meta_dir())).unwrap_or(false)
