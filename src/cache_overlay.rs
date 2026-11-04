@@ -109,6 +109,23 @@ pub fn other_platform(platform: Option<&str>) -> bool {
     platform.is_some_and(|p| p != base && !p.starts_with(&format!("{base}-")))
 }
 
+#[cfg(not(target_os = "macos"))]
+pub struct RemovedOverlayPlan {
+    name: String,
+    mark: (i64, i64),
+    lines: Vec<Line>,
+    states: Vec<(String, PathBuf, fsutil::EntryIdentity)>,
+}
+
+#[cfg(not(target_os = "macos"))]
+fn removed_state_candidates(dir: &Path, root: &str, ids: Vec<String>) -> Vec<(String, PathBuf, fsutil::EntryIdentity)> {
+    ids.into_iter().filter(|id| id != root && crate::model::is_uuid(id)).filter_map(|id| {
+        let path = dir.join(&id);
+        let identity = fsutil::EntryIdentity::of(&path)?;
+        Some((id, path, identity))
+    }).collect()
+}
+
 impl<'a> Repo<'a> {
     /// The key files of overlay `name` (`overlay.<name>.key-files`).
     pub fn key_files(&self, name: &str) -> Result<Vec<String>> {
@@ -247,6 +264,48 @@ impl<'a> Repo<'a> {
     pub fn free_removed_overlays(&self, ctx: &Ctx) -> Result<()> {
         for (name, root) in self.removed_overlays()? {
             self.free_removed_overlay(ctx, &name, &root)?;
+        }
+        Ok(())
+    }
+
+    /// Collect removed-overlay lines and states without the project lock. The parent
+    /// records mark is checked by repair; each overlay has its own independent mark.
+    #[cfg(not(target_os = "macos"))]
+    pub fn plan_removed_overlays(&self) -> Result<Vec<RemovedOverlayPlan>> {
+        let mut plans = Vec::new();
+        for (name, root) in self.removed_overlays()? {
+            if !self.p.store.project_dir(&format!("{}%{name}", self.p.name))?.exists() { continue; }
+            let overlay = self.overlay_repo(&name)?;
+            let mark = overlay.p.db.records_mark()?;
+            let lines = overlay.p.db.lines()?;
+            let ids = overlay.p.db.present_states()?.into_iter().map(|(id, _)| id).collect();
+            let states = removed_state_candidates(&overlay.p.states_dir(), &root, ids);
+            plans.push(RemovedOverlayPlan { name, mark, lines, states });
+        }
+        Ok(plans)
+    }
+
+    /// The parent lock and unchanged parent records mark are held by repair. Each
+    /// overlay is locked before checking its mark, committing line deletes and
+    /// moving the unchanged planned state trees to prepared trash.
+    #[cfg(not(target_os = "macos"))]
+    pub fn commit_removed_overlays(&self, ctx: &Ctx, plans: Vec<RemovedOverlayPlan>, trash: &Path) -> Result<()> {
+        for plan in plans {
+            let overlay = self.overlay_repo(&plan.name)?;
+            let _lock = overlay.p.lock()?;
+            if overlay.p.db.records_mark()? != plan.mark { continue; }
+            self.drop_overlay_lines(ctx, &overlay, &plan.name, &plan.lines)?;
+            let mut deleted = Vec::new();
+            for (id, path, identity) in plan.states {
+                if fsutil::EntryIdentity::of(&path).as_ref() == Some(&identity)
+                    && overlay.p.move_to_trash(&path, trash).is_ok()
+                { deleted.push(id); }
+            }
+            if !deleted.is_empty() {
+                let mut rec = Record::new("gc");
+                rec.data = serde_json::json!({"deleted": deleted, "overlay": plan.name, "removed": true});
+                overlay.commit_record(ctx, rec)?;
+            }
         }
         Ok(())
     }
@@ -839,6 +898,21 @@ mod tests {
         assert!(other_platform(Some("plan9-mips")));
         assert!(other_platform(Some(&format!("{base}x-0011"))));
         let _ = std::fs::remove_dir_all(&w);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn removed_overlay_plan_keeps_root_and_missing_states() {
+        let dir = std::env::temp_dir().join(format!("layr-removed-plan-{}", crate::ids::new_id()));
+        let root = crate::ids::new_id();
+        let state = crate::ids::new_id();
+        let missing = crate::ids::new_id();
+        std::fs::create_dir_all(dir.join(&root)).unwrap();
+        std::fs::create_dir_all(dir.join(&state)).unwrap();
+        let candidates = removed_state_candidates(&dir, &root, vec![root.clone(), state.clone(), missing]);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].0, state);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

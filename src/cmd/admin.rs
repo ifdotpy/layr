@@ -1399,6 +1399,12 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) ->
     }
     // Plan outside the project lock. A changed record invalidates the entire plan: retry
     // without the lock rather than replaying records while other commands wait.
+    #[cfg(not(target_os = "macos"))]
+    let removed_trash = {
+        let path = repo.p.trash_dir()?;
+        std::fs::create_dir_all(&path)?;
+        path
+    };
     let mut attempts = 0;
     let (leaks, indexes, compares, lru) = loop {
         attempts += 1;
@@ -1410,6 +1416,8 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) ->
             })?
         };
         let overlays = repo.overlay_plan();
+        #[cfg(not(target_os = "macos"))]
+        let removed = repo.plan_removed_overlays();
         let indexes = crate::gitbridge::plan_prune_indexes(repo)?;
         let compares = repo.plan_prune_compares()?;
         let lru = repo.plan_cache_gc_lru()?;
@@ -1435,8 +1443,16 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) ->
         }
         // Cache overlay lines of deleted lines (their states go below), and overlays with a
         // history limit (docs/cache-overlays.md).
+        // APFS needs a filesystem-wide thin-base dependency scan before removing
+        // any state; retain its existing path until that dependency snapshot can be checked.
+        #[cfg(target_os = "macos")]
         if let Err(e) = repo.free_removed_overlays(ctx) {
             eprintln!("warning: removed cache overlays stay until the next gc: {e:#}");
+        }
+        #[cfg(not(target_os = "macos"))]
+        match removed.and_then(|p| repo.commit_removed_overlays(ctx, p, &removed_trash)) {
+            Ok(()) => {},
+            Err(e) => eprintln!("warning: removed cache overlays stay until the next gc: {e:#}"),
         }
         match overlays {
             Ok(plan) => repo.commit_overlay_plan(ctx, plan),
