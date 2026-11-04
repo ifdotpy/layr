@@ -218,7 +218,7 @@ impl<'a> Repo<'a> {
     }
 
     /// Delete the cache overlay lines (`line-<id>`) of deleted project lines: a deleted line keeps
-    /// no caches (docs/cache-overlays.md). Their states go at the next `gc`. Returns the overlay
+    /// no caches (docs/cache-overlays.md). Their states go at once (`apply_history`). Returns the overlay
     /// and the line name of each deleted overlay line. The caller holds the project lock.
     pub fn drop_orphan_cache_lines(&self, ctx: &Ctx) -> Result<Vec<(String, String)>> {
         let mut out = Vec::new();
@@ -235,9 +235,17 @@ impl<'a> Repo<'a> {
                 continue;
             }
             let orepo = self.overlay_repo(&name)?;
-            let _lock = orepo.p.lock()?;
-            let orphans = self.orphan_cache_lines(&orepo)?;
-            out.extend(self.drop_overlay_lines(ctx, &orepo, &name, &orphans)?);
+            let dropped = {
+                let _lock = orepo.p.lock()?;
+                let orphans = self.orphan_cache_lines(&orepo)?;
+                self.drop_overlay_lines(ctx, &orepo, &name, &orphans)?
+            };
+            // Their states go at once: `history` keeps only the heads of the overlay lines that stay
+            // and the states that lines show (it takes the overlay's lock itself).
+            if !dropped.is_empty() {
+                self.apply_history(ctx, &name)?;
+            }
+            out.extend(dropped);
         }
         Ok(out)
     }
