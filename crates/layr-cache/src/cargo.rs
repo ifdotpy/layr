@@ -2,7 +2,7 @@
 //! commands. The listing of their units compiles nothing, and it is the live set that `sweep` keeps.
 //! `prune` applies that to a `target` folder next to `Cargo.toml`. See docs/cache-overlays.md.
 
-use crate::{kill_group, run, skip, sweep};
+use crate::{kill_group, run, skip, sweep, wait_child};
 use anyhow::{anyhow, bail, Context, Result};
 use layr_adapter::{CacheAdapter, Host, Outcome};
 use serde_json::Value;
@@ -10,8 +10,7 @@ use std::io::{BufRead, BufReader};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Mutex};
+use std::sync::{Arc, Mutex};
 
 /// The scratch folder of the raw profiles of the instrumented build in `target`. It is deleted after
 /// each run and after each sweep. The one owner of its path.
@@ -45,6 +44,13 @@ pub(crate) fn host_cargo(host: &dyn Host) -> Result<Command> {
     Ok(with_color(host.command("cargo").map_err(|e| anyhow!("cannot run cargo: {e}"))?))
 }
 
+/// `cargo metadata --no-deps` of the workspace at `root`. The host's time limit applies.
+pub fn metadata(host: &dyn Host, root: &Path) -> Result<Value> {
+    let mut cmd = host_cargo(host)?;
+    cmd.args(["metadata", "--no-deps", "--format-version", "1"]).current_dir(root);
+    Ok(serde_json::from_slice(&run(&mut cmd, Some(host.deadline())).context("cargo metadata")?)?)
+}
+
 /// Settings of `[workspace.metadata.layr-retest]` in the root `Cargo.toml`: `sweep` lists the standard
 /// build commands (cargo arguments without `cargo`), `retest` lists the commands of the retest build
 /// (`target/retest`), and `env` is the build env of every cargo call of retest and of the gate.
@@ -73,9 +79,7 @@ fn command_list(cfg: &Value, key: &str) -> Result<Vec<Vec<String>>> {
 /// the listing then runs cargo with the default env of a build. A default that the build does not use changes the
 /// unit hashes (release is not incremental by default), so `init` writes the env into the manifest instead.
 pub fn settings(host: &dyn Host, root: &Path) -> Result<Settings> {
-    let mut cmd = host_cargo(host)?;
-    cmd.args(["metadata", "--no-deps", "--format-version", "1"]).current_dir(root);
-    let meta: Value = serde_json::from_slice(&run(&mut cmd, Some(host.deadline())).context("cargo metadata")?)?;
+    let meta = metadata(host, root)?;
     let cfg = &meta["metadata"]["layr-retest"];
     let mut env: Vec<(String, String)> = match cfg["env"].as_object() {
         Some(obj) => obj
@@ -125,7 +129,69 @@ pub enum Listed {
     /// A unit is not fresh, named by cargo's status line or by its target. Nothing was built past it.
     NotFresh(String),
     /// Another cargo holds the build lock of the folder: the listing stopped before it waited for that cargo.
-    Busy,
+    /// The text names the process that holds the lock (see `lock_holder`).
+    Busy(String),
+}
+
+/// The process that holds the lock file `lock`, named by pid and command. `except` is the pid of the waiting
+/// cargo, which also has the file open. `lsof` finds the holder on macOS and Linux, and `/proc/locks` on Linux.
+/// The text says `unknown` when neither finds a process.
+pub fn lock_holder(lock: &Path, except: u32) -> String {
+    let mut pids: std::collections::BTreeSet<u32> = Default::default();
+    if let Ok(o) = Command::new("lsof").arg("-t").arg(lock).stderr(Stdio::null()).output() {
+        pids.extend(String::from_utf8_lossy(&o.stdout).lines().filter_map(|l| l.trim().parse::<u32>().ok()));
+    }
+    pids.extend(proc_locks(lock));
+    pids.remove(&except);
+    if pids.is_empty() {
+        return format!("unknown (lsof and /proc/locks name no process for {})", lock.display());
+    }
+    let named: Vec<String> = pids.iter().map(|p| format!("pid {p} ({})", command_name(*p))).collect();
+    named.join(", ")
+}
+
+/// The pids that hold a flock on the inode of `lock`, from `/proc/locks`. Empty without that file.
+fn proc_locks(lock: &Path) -> Vec<u32> {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(ino) = std::fs::metadata(lock).map(|m| m.ino()) else { return Vec::new() };
+    let table = std::fs::read_to_string("/proc/locks").unwrap_or_default();
+    table
+        .lines()
+        .filter_map(|l| {
+            // `1: FLOCK  ADVISORY  WRITE 1234 08:01:131 0 EOF`: the pid, then major:minor:inode.
+            let f: Vec<&str> = l.split_whitespace().collect();
+            let (pid, id) = (f.get(4)?, f.get(5)?);
+            let inode: u64 = id.rsplit(':').next()?.parse().ok()?;
+            (inode == ino).then(|| pid.parse().ok()).flatten()
+        })
+        .collect()
+}
+
+/// The command name of `pid`, or `?`.
+fn command_name(pid: u32) -> String {
+    let out = Command::new("ps").args(["-o", "comm=", "-p", &pid.to_string()]).output().ok();
+    out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).filter(|s| !s.is_empty()).unwrap_or_else(|| "?".into())
+}
+
+/// The cargo home of a command: the last `CARGO_HOME` of its env, else the env of this process, else `~/.cargo`.
+fn cargo_home(env: &[(String, String)]) -> PathBuf {
+    let set = |v: &str| (!v.is_empty()).then(|| PathBuf::from(v));
+    env.iter()
+        .rev()
+        .find(|(k, _)| k == "CARGO_HOME")
+        .and_then(|(_, v)| set(v))
+        .or_else(|| std::env::var("CARGO_HOME").ok().and_then(|v| set(&v)))
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo")))
+        .unwrap_or_else(|| PathBuf::from(".cargo"))
+}
+
+/// Records `why` as the stop of a listing, unless an earlier stop came first, and kills the group.
+fn halt(stop: &Mutex<Option<Listed>>, pid: u32, why: Listed) {
+    let mut first = stop.lock().unwrap();
+    if first.is_none() {
+        *first = Some(why);
+        kill_group(pid);
+    }
 }
 
 /// Lists the units of `args` in the target folder `target` without building them. `CARGO_BUILD_JOBS=1`, and
@@ -133,7 +199,9 @@ pub enum Listed {
 /// before it compiles or runs anything, so the stop comes before a build step. The JSON `fresh: false` is
 /// a second stop, for a cargo whose status text differs (cargo then builds that one unit). A `Blocking ...
 /// directory` line means that another cargo holds a lock of the folder: the listing stops instead of waiting
-/// for it. The listing runs in its own process group, and a stop kills the group. Any other failure is an error.
+/// for it, and names the holder. Other waits (the package cache) are waited for, and the time limit of the
+/// host ends them: the group is killed and the listing is an error that names the holder. The listing runs in
+/// its own process group. Any other failure is an error.
 pub fn list_units(host: &dyn Host, root: &Path, target: &Path, env: &[(String, String)], args: &[String]) -> Result<Listed> {
     let mut c = host_cargo(host)?;
     c.args(listing(args)).current_dir(root).env("CARGO_TARGET_DIR", target).env("CARGO_BUILD_JOBS", "1");
@@ -144,61 +212,71 @@ pub fn list_units(host: &dyn Host, root: &Path, target: &Path, env: &[(String, S
     let mut c = with_color(c);
     c.process_group(0).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = c.spawn().with_context(|| format!("cannot start cargo {}", args.join(" ")))?;
-    let (out, err) = (child.stdout.take().context("cargo stdout")?, child.stderr.take().context("cargo stderr")?);
     let pid = child.id();
-    let stop: Mutex<Option<Listed>> = Mutex::new(None);
-    let halt = |why: Listed| {
-        let mut first = stop.lock().unwrap();
-        if first.is_none() {
-            *first = Some(why);
-            kill_group(pid);
-        }
-    };
-    // The time limit of the host: the group is killed at the deadline, and the listing is an error.
-    let until = host.deadline();
-    let late = std::sync::Arc::new(AtomicBool::new(false));
-    let (done, waiting) = mpsc::channel::<()>();
-    let timer_late = late.clone();
-    let (lines, status) = std::thread::scope(|s| {
-        s.spawn(move || {
-            if let Err(mpsc::RecvTimeoutError::Timeout) = waiting.recv_timeout(until.saturating_duration_since(std::time::Instant::now())) {
-                timer_late.store(true, Ordering::SeqCst);
-                kill_group(pid);
-            }
+    let (out, err) = (child.stdout.take().context("cargo stdout")?, child.stderr.take().context("cargo stderr")?);
+    let stop: Arc<Mutex<Option<Listed>>> = Arc::default();
+    let waited: Arc<Mutex<Option<String>>> = Arc::default();
+    let (lines_tx, lines_rx) = std::sync::mpsc::channel::<Vec<String>>();
+    let (errs_tx, errs_rx) = std::sync::mpsc::channel::<()>();
+    {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            let lines: Vec<String> = BufReader::new(out)
+                .lines()
+                .map_while(Result::ok)
+                .inspect(|line| {
+                    if let Some(name) = sweep::not_fresh(line) {
+                        halt(&stop, pid, Listed::NotFresh(format!("{name} is not fresh")));
+                    }
+                })
+                .collect();
+            let _ = lines_tx.send(lines);
         });
-        s.spawn(|| {
+    }
+    {
+        let (stop, waited) = (stop.clone(), waited.clone());
+        let lock_dir = target.join(profile_of(args));
+        let home = cargo_home(env);
+        std::thread::spawn(move || {
             for line in BufReader::new(err).lines().map_while(Result::ok) {
                 let t = line.trim_start();
-                // A wait for a folder's lock stops the listing. A wait for the shared package cache is short: it waits.
                 if t.starts_with("Blocking ") && t.contains("directory") {
-                    halt(Listed::Busy);
+                    let holder = lock_holder(&lock_dir.join(".cargo-lock"), pid);
+                    halt(&stop, pid, Listed::Busy(holder));
+                } else if t.starts_with("Blocking ") {
+                    let holder = if t.contains("package cache") {
+                        lock_holder(&home.join(".package-cache"), pid)
+                    } else {
+                        "unknown (layr does not know this lock)".to_string()
+                    };
+                    eprintln!("layr-retest: cargo waits: {t}; holder: {holder}");
+                    *waited.lock().unwrap() = Some(format!("{t}; holder: {holder}"));
                 } else if ["Dirty ", "Compiling ", "Running "].iter().any(|p| t.starts_with(p)) {
-                    halt(Listed::NotFresh(t.to_string()));
+                    halt(&stop, pid, Listed::NotFresh(t.to_string()));
                 }
             }
+            let _ = errs_tx.send(());
         });
-        let lines = s.spawn(|| {
-            let mut lines = Vec::new();
-            for line in BufReader::new(out).lines().map_while(Result::ok) {
-                if let Some(name) = sweep::not_fresh(&line) {
-                    halt(Listed::NotFresh(format!("{name} is not fresh")));
-                }
-                lines.push(line);
-            }
-            lines
-        });
-        let status = child.wait();
-        drop(done);
-        (lines.join().unwrap_or_default(), status)
-    });
+    }
+    let (status, late) = wait_child(&mut child, Some(host.deadline())).with_context(|| format!("cannot wait for cargo {}", args.join(" ")))?;
     let _ = std::fs::remove_dir_all(profile_scratch(target));
-    if let Some(stopped) = stop.into_inner().unwrap_or(None) {
+    if let Some(stopped) = stop.lock().unwrap().take() {
         return Ok(stopped);
     }
-    if late.load(Ordering::SeqCst) {
-        bail!("the cargo listing reached its time limit");
+    if late {
+        let why = waited.lock().unwrap().take().unwrap_or_default();
+        bail!("the cargo listing of {} reached its time limit while it waited: {why}", args.join(" "));
     }
-    if !status.with_context(|| format!("cannot wait for cargo {}", args.join(" ")))?.success() {
+    // The readers finish before the stop is final: a line that was read after the exit can still stop the listing.
+    let lines = lines_rx.recv_timeout(std::time::Duration::from_secs(5)).ok();
+    let errs_done = errs_rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok();
+    if let Some(stopped) = stop.lock().unwrap().take() {
+        return Ok(stopped);
+    }
+    let (Some(lines), true) = (lines, errs_done) else {
+        bail!("the cargo listing of {} kept its output open; a process outside its group holds it", args.join(" "));
+    };
+    if !status.success() {
         bail!("cargo {} failed", args.join(" "));
     }
     Ok(Listed::Fresh(sweep::plan(target, lines.join("\n").as_bytes())?))
@@ -326,7 +404,7 @@ fn prune_in(host: &dyn Host, root: &Path, target: &Path) -> Result<Outcome> {
                 busy += b;
             }
             Listed::NotFresh(why) => kept.push(format!("{profile}: a unit is not fresh ({why})")),
-            Listed::Busy => kept.push(format!("{profile}: build lock busy")),
+            Listed::Busy(holder) => kept.push(format!("{profile}: build lock busy (holder: {holder})")),
         }
     }
     if fresh == 0 {
