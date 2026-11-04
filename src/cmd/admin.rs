@@ -2008,6 +2008,9 @@ fn caller_git(ctx: &Ctx, dir: &std::path::Path, args: &[&str]) -> Result<std::pr
 }
 
 pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    if args.iter().any(|a| a == "--from-git") {
+        return init_from_git(ctx, args);
+    }
     let spec = Spec::new()
         .value("--from")
         .value("--git")
@@ -2022,7 +2025,7 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let name = a
         .pos
         .first()
-        .ok_or_else(|| exit(128, "usage: layr init <project> [--from <folder> | --git <url>] [--line main] [--volume <name>]"))?;
+        .ok_or_else(|| exit(128, "usage: layr init <project> [--from <folder> | --git <url>] [--line main] [--volume <name>], or layr init [<project>] --from-git <checkout>"))?;
     let line_name = a.get("--line").unwrap_or("main").to_string();
     let owner = match a.get("--owner") {
         Some(o) if ctx.caller.is_root() => o.parse::<u32>().or_else(|_| -> Result<u32> {
@@ -2214,6 +2217,185 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
         outln!(ctx, "{}", repo.working(&l).display());
     }
     Ok(0)
+}
+
+/// `layr init [<project>] --from-git <checkout>`: a project from a Git checkout, in place. The
+/// history comes from the folder (no network): its branches as `local/<branch>`, the branches of
+/// its `origin` as `origin/<branch>` (imported on first use), and the line of its current branch
+/// starts at HEAD. Ignored `target` (next to Cargo.toml) and `node_modules` (next to package.json)
+/// folders move into the line and become its caches. Then the checkout is kept as
+/// `<checkout>.before-layr` and the line moves to the checkout's path. A Cargo workspace gets
+/// `layr retest init`. Refused: uncommitted changes, more than one worktree, another file system.
+fn init_from_git(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    let spec = Spec::new().value("--from-git").value("--line").value("--volume").flag("-q|--quiet");
+    let a = parse(&spec, args)?;
+    let usage = "usage: layr init [<project>] --from-git <checkout> [--line <name>]";
+    let from = a.get("--from-git").ok_or_else(|| exit(128, usage))?;
+    let src = if from.starts_with('/') { std::path::PathBuf::from(from) } else { ctx.cwd.join(from) };
+    let src = crate::privs::as_caller_fs(ctx, || Ok(src.canonicalize()?)).map_err(|_| exit(128, format!("fatal: not a folder: {from}")))?;
+    let git_text = |args: &[&str]| -> Result<String> {
+        let out = caller_git(ctx, &src, args)?;
+        if !out.status.success() {
+            bail!("git {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
+    };
+    // Checks before anything changes.
+    let top = git_text(&["rev-parse", "--show-toplevel"]).map_err(|_| exit(128, format!("fatal: {} is not a Git checkout", src.display())))?;
+    if std::path::Path::new(&top).canonicalize().ok().as_deref() != Some(src.as_path()) {
+        return Err(exit(128, format!("fatal: {} is inside the checkout {top}; give its top folder", src.display())));
+    }
+    let dirty = git_text(&["status", "--porcelain"])?;
+    if !dirty.is_empty() {
+        return Err(exit(
+            1,
+            format!(
+                "error: {} has uncommitted changes ({} path(s)); commit or stash them, then run the command again",
+                src.display(),
+                dirty.lines().count()
+            ),
+        ));
+    }
+    let worktrees: Vec<String> =
+        git_text(&["worktree", "list", "--porcelain"])?.lines().filter_map(|l| l.strip_prefix("worktree ").map(String::from)).collect();
+    if worktrees.len() > 1 {
+        return Err(exit(
+            1,
+            format!(
+                "error: the checkout has {} more worktree(s) ({}); save their work to branches and remove them (git worktree remove), then run the command again",
+                worktrees.len() - 1,
+                worktrees[1..].join(", ")
+            ),
+        ));
+    }
+    let backup = src.with_file_name(format!("{}.before-layr", src.file_name().unwrap_or_default().to_string_lossy()));
+    if backup.exists() {
+        return Err(exit(1, format!("error: {} exists; move it away first", backup.display())));
+    }
+    {
+        use std::os::unix::fs::MetadataExt;
+        let store_dev = std::fs::metadata(ctx.store.root.join("projects"))?.dev();
+        if std::fs::metadata(&src)?.dev() != store_dev {
+            return Err(exit(
+                1,
+                format!("error: {} is on another file system than the layr store; the line can stay only on the store's file system", src.display()),
+            ));
+        }
+    }
+    let name = a.pos.first().cloned().unwrap_or_else(|| src.file_name().unwrap_or_default().to_string_lossy().into_owned());
+    let branch = git_text(&["rev-parse", "--abbrev-ref", "HEAD"])?;
+    let line_name = a.get("--line").map(String::from).unwrap_or_else(|| {
+        if branch == "HEAD" || crate::store::check_name("line", &branch).is_err() { "main".to_string() } else { branch.clone() }
+    });
+    let caches = git_caches(ctx, &src)?;
+
+    // The project and its line, from the folder and its history (the `--from` path).
+    let mut init_args = vec![name.clone(), "--from".into(), src.to_string_lossy().into_owned(), "--line".into(), line_name.clone(), "-q".into()];
+    if let Some(v) = a.get("--volume") {
+        init_args.extend(["--volume".into(), v.to_string()]);
+    }
+    init(ctx, &init_args)?;
+    let repo = Repo::open(ctx, &name)?;
+    let line = repo.line(&line_name)?;
+    let w = repo.working(&line);
+    let tracking = crate::gitbridge::fetch_tracking(ctx, &repo, &src, "origin").unwrap_or_default();
+    // The folder of the `local` remote is the kept checkout.
+    set_config(ctx, &repo, "remote.local.url", serde_json::json!(backup.to_string_lossy()))?;
+    if !caches.is_empty() {
+        set_config(ctx, &repo, "regenerable", serde_json::json!(caches))?;
+        for c in &caches {
+            let dst = w.join(c);
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            crate::fsutil::rename_tree(&src.join(c), &dst)?;
+        }
+    }
+    let layr = std::env::current_exe()?;
+    // In a line folder a command finds its line; elsewhere it needs the project.
+    let run = |dir: &std::path::Path, args: &[&str]| -> Result<()> {
+        let mut command = std::process::Command::new(&layr);
+        command.args(args).current_dir(dir);
+        if !dir.starts_with(&w) && !dir.starts_with(&src) {
+            command.env("LAYR_PROJECT", &name);
+        }
+        let out = command.output()?;
+        if !out.status.success() {
+            bail!("layr {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
+        }
+        Ok(())
+    };
+    if !caches.is_empty() {
+        if let Err(e) = run(&w, &["save", "--caches", "-q"]) {
+            eprintln!("warning: the caches stay plain folders of the line: {e:#}");
+        }
+    }
+    // In place: the checkout is kept beside, and the line takes its path.
+    std::fs::rename(&src, &backup)?;
+    if let Err(e) = run(&ctx.store.root, &["line", "move", &line_name, &src.to_string_lossy()]) {
+        let _ = std::fs::rename(&backup, &src);
+        return Err(e.context(format!("the line stays at {}; the checkout is back at {}", w.display(), src.display())));
+    }
+    if src.join("Cargo.toml").is_file() {
+        if let Err(e) = run(&src, &["retest", "init", "--yes"]) {
+            eprintln!("warning: layr retest init failed; run it in {}: {e:#}", src.display());
+        }
+    }
+    if !a.has("-q") {
+        let locals = git_text(&["-C", &backup.to_string_lossy(), "for-each-ref", "--format=%(refname:strip=2)", "refs/heads/"]).unwrap_or_default();
+        outln!(ctx, "Project {name}: line {line_name} at {} (Git HEAD {})", src.display(), &git_text(&["-C", &backup.to_string_lossy(), "rev-parse", "--short", "HEAD"]).unwrap_or_default());
+        outln!(ctx, "Local branches: {}", locals.lines().map(|b| format!("local/{b}")).collect::<Vec<_>>().join(", "));
+        outln!(ctx, "Branches of origin: {} (imported on first use)", tracking.iter().filter(|(n, _)| !n.ends_with("/HEAD")).count());
+        if !caches.is_empty() {
+            outln!(ctx, "Caches kept: {}", caches.join(", "));
+        }
+        outln!(ctx, "The Git checkout is kept at {}; remove it when the line works.", backup.display());
+    }
+    Ok(0)
+}
+
+/// The cache folders of a checkout: ignored `target` folders next to a Cargo.toml and ignored
+/// `node_modules` folders next to a package.json, at most three levels deep, not inside another.
+fn git_caches(ctx: &Ctx, src: &std::path::Path) -> Result<Vec<String>> {
+    let mut found = Vec::new();
+    fn scan(dir: &std::path::Path, rel: &str, depth: usize, out: &mut Vec<String>) {
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        for e in rd.flatten() {
+            let Ok(t) = e.file_type() else { continue };
+            if !t.is_dir() {
+                continue;
+            }
+            let n = e.file_name().to_string_lossy().into_owned();
+            let r = if rel.is_empty() { n.clone() } else { format!("{rel}/{n}") };
+            let marker = match n.as_str() {
+                "target" => Some("Cargo.toml"),
+                "node_modules" => Some("package.json"),
+                _ => None,
+            };
+            if let Some(m) = marker {
+                if dir.join(m).is_file() {
+                    out.push(r);
+                }
+                continue;
+            }
+            if n == ".git" || depth == 0 {
+                continue;
+            }
+            scan(&e.path(), &r, depth - 1, out);
+        }
+    }
+    crate::privs::as_caller_fs(ctx, || {
+        scan(src, "", 3, &mut found);
+        Ok(())
+    })?;
+    let mut out = Vec::new();
+    for c in found {
+        if caller_git(ctx, src, &["check-ignore", "-q", &c])?.status.success() {
+            out.push(c);
+        }
+    }
+    out.sort();
+    Ok(out)
 }
 
 fn default_branch(repo: &Repo) -> Option<String> {
