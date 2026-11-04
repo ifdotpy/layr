@@ -47,6 +47,27 @@ printf '/target\n' > "$SRC/.gitignore"
 l init p --from "$SRC" $OWNER_ARG -q >/dev/null
 P=$LAYR_ROOT/projects/p/lines
 units() { ls "$1/debug/.fingerprint" 2>/dev/null | wc -l | tr -d ' '; }
+# times_mismatch <source target> <copy target>: the files of deps and .fingerprint that both have, whose
+# modification times differ (a count, and the first names).
+times_mismatch() {
+    python3 - "$1" "$2" <<'PYTIMES'
+import os, sys
+src, dst = sys.argv[1], sys.argv[2]
+bad = []
+for sub in ("debug/deps", "debug/.fingerprint"):
+    for root, _, files in os.walk(os.path.join(src, sub)):
+        for n in files:
+            s = os.path.join(root, n)
+            d = os.path.join(dst, os.path.relpath(s, src))
+            if os.path.islink(s) or not os.path.isfile(d):
+                continue
+            if os.stat(s).st_mtime_ns != os.stat(d).st_mtime_ns:
+                bad.append(os.path.relpath(s, src))
+print(len(bad))
+for b in bad[:3]:
+    print("differs:", b, file=sys.stderr)
+PYTIMES
+}
 new_line() { l line new $OWNER_ARG "$@" >/dev/null; }
 
 cd "$P/main"
@@ -56,10 +77,8 @@ if [ "$(id -u)" != 0 ]; then l protect main --remove >/dev/null 2>&1 || true; fi
 cb "$P/main" build --workspace -q >/dev/null
 base=$(units $P/main/target)
 [ "$base" -gt 0 ] && { PASS=$((PASS + 1)); echo "PASS the standard build made units ($base)"; } || { FAIL=$((FAIL + 1)); echo "FAIL the standard build made no units: the owner cannot build"; cb "$P/main" build --workspace 2>&1 | tail -20; }
-# `other` is made before main has a cache: a merge then takes main's cache into an empty folder (a snapshot,
-# which keeps the file times). A merge into a folder that already has a cache is a union, see docs.
-new_line other main
 (cd "$P/main" && l save --caches -q)
+new_line other main
 
 # 1. Stale units in the saved cache of main: prune is off while they are saved.
 ok "the owner sets prune=none on the cache" l overlay set cache.target --prune none
@@ -87,6 +106,11 @@ if [ "$merged" != "$base" ]; then
     (cd "$P/other" && owned env CARGO_NET_OFFLINE=true RUSTC_WRAPPER= cargo build --workspace -v 2>&1 | head -12) || true
 fi
 eq "merge --caches-only removes the stale units" "$base" "$merged"
+# The union copies main's cache into the folder that already has one: the copied times are the source's
+# (cargo compares them). The mismatch count is over the files that both caches have.
+eq "the union merge keeps the times of the cache" "0" "$(times_mismatch $P/main/target $P/other/target)"
+rebuilt=$(cb "$P/other" build --workspace)
+case "$rebuilt" in *Compiling*) FAIL=$((FAIL + 1)); echo "FAIL the next build after the union merge compiled" ;; *) PASS=$((PASS + 1)); echo "PASS the next build after the union merge compiles nothing" ;; esac
 
 # 4. prune=none keeps the folder: a new line from the stale cache keeps its stale units.
 ok "the owner sets prune=none again" l overlay set cache.target --prune none

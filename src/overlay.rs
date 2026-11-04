@@ -313,6 +313,27 @@ impl Ops {
         for p in &self.puts {
             fsutil::copy_entry(src, p, dst, p, own)?;
         }
+        // The times last: an entry made by a copy changes the time of its folder. Cargo compares the times of the
+        // cache, so every copied entry gets the source's time, on every file system (union and snapshot alike).
+        for p in &self.puts {
+            fsutil::keep_times(&src.join(p), &dst.join(p))?;
+        }
+        // Folders too (a file copy changes the time of the folder it is in, so folders come last).
+        let mut folders = Vec::new();
+        fsutil::walk(src, "", &mut |rel, m| {
+            if skip_path(rel) {
+                return Ok(false);
+            }
+            if m.is_dir() && !rel.is_empty() {
+                folders.push(rel.to_string());
+            }
+            Ok(true)
+        })?;
+        for f in &folders {
+            if dst.join(f).is_dir() {
+                fsutil::keep_times(&src.join(f), &dst.join(f))?;
+            }
+        }
         Ok(())
     }
 }
