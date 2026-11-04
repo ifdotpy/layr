@@ -55,6 +55,13 @@ pub fn git_out(git_dir: &Path, args: &[&str]) -> Result<String> {
 /// of lines on this machine. Only the store folder decides: everything below it is readable by
 /// whoever enters it (`open_content`).
 pub fn sync_store_access(repo: &Repo) -> Result<()> {
+    sync_store_access_with(repo, &[])
+}
+
+/// `sync_store_access` that also admits `extra_owners`: the owners of lines that are about to be
+/// recorded. A command calls it before its store lock, so the lines it will create are not in
+/// `repo.lines()` yet.
+pub fn sync_store_access_with(repo: &Repo, extra_owners: &[u32]) -> Result<()> {
     let s = store(repo);
     if !s.join("objects").is_dir() {
         return Ok(());
@@ -67,6 +74,7 @@ pub fn sync_store_access(repo: &Repo) -> Result<()> {
         return Ok(());
     }
     let mut uids: std::collections::BTreeSet<u32> = users.into_iter().collect();
+    uids.extend(extra_owners.iter().copied());
     for l in repo.lines()? {
         if l.machine == repo.p.store.machine.id {
             uids.insert(l.owner);

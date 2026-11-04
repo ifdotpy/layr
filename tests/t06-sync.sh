@@ -27,13 +27,13 @@ eq "the moved line has the uncommitted work" "not committed" "$(cat $BR/projects
 cd $BR/projects/x/lines/main && B add moving.txt && B save -qm "on B"
 cd $A/main && echo 2 >> notes.txt && l save -qam "on A"
 peer_exchange sync x -q -- $(peer)
-eq "both machines are known" "2" "$(l remote list | grep -v '^remote' | wc -l)"
+eq "both machines are known" "2" "$(l remote list | grep -v '^remote' | wc -l | tr -d ' ')"
 MB=$(l remote list | grep -v -e '^\*' -e '^remote' | awk '{print $1}')
 eq "the local head stays local" "on A" "$(l log -1 --format=%s)"
 eq "the other head is line@machine" "on B" "$(l log -1 --format=%s main@$MB)"
 rm moving.txt
 l merge -q main@$MB
-eq "the heads are joined by a merge" "2" "$(l show -s --format=%p head | wc -w)"
+eq "the heads are joined by a merge" "2" "$(l show -s --format=%p head | wc -w | tr -d ' ')"
 ok "with the work of B" test -f moving.txt
 cd $BR/projects/x/lines/main
 eq "B sees A's head as main@A" "on A" "$(B log -1 --format=%s main@$(l --project x remote list | grep '^\*' | awk '{print $2}'))"
@@ -74,7 +74,7 @@ eq "another project id is refused" "128" "$(peer_exchange sync x -q -- env LAYR_
 # Records also travel as JSONL (export and import), checked like a sync.
 new_fs $T/d 2G
 l op export > $T/records.jsonl
-eq "export holds every record" "$(l op log --all -n 100000 | wc -l)" "$(wc -l < $T/records.jsonl)"
+eq "export holds every record" "$(l op log --all -n 100000 | wc -l | tr -d ' ')" "$(wc -l < $T/records.jsonl | tr -d ' ')"
 cd $A/main
 python3 - $T/records.jsonl <<'PY'
 import sys
@@ -83,5 +83,5 @@ lines[3] = lines[3].replace('"seq":4', '"seq":4 ')
 open(sys.argv[1] + ".bad", "w").write("\n".join(lines) + "\n")
 PY
 no "import refuses a changed record" l op import $T/records.jsonl.bad
-eq "a valid import adds nothing new here" "imported 0 new record(s) of $(wc -l < $T/records.jsonl)" "$(l op import $T/records.jsonl)"
+eq "a valid import adds nothing new here" "imported 0 new record(s) of $(wc -l < $T/records.jsonl | tr -d ' ')" "$(l op import $T/records.jsonl)"
 finish

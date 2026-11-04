@@ -11,15 +11,18 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 PLIST=$ROOT/packaging/launchd/ws.layr.daemon.plist
 NO_DAEMON='warning: no layr daemon runs for this store; follow passes run only on `layr follow --run`'
 OLDER='warning: the layr daemon runs an older build; restart it'
-mkdir -p $T/home
+# The socket path must stay under 104 bytes (AF_UNIX on macOS): a short home folder there.
 if [ "$(uname -s)" = Darwin ]; then
-    export HOME=$T/home
-    SOCK=$T/home/Library/Caches/layr/layr.sock
+    HOMEDIR=$(mktemp -d /tmp/layr-home.XXXXXX)
+    export HOME=$HOMEDIR
+    SOCK=$HOMEDIR/Library/Caches/layr/layr.sock
 else
-    export LAYR_SOCKET=$T/home/layr.sock
+    HOMEDIR=$T/home
+    mkdir -p $HOMEDIR
+    export LAYR_SOCKET=$HOMEDIR/layr.sock
     SOCK=$LAYR_SOCKET
 fi
-hl() { env HOME=$T/home "$LAYR" "$@"; }
+hl() { env HOME=$HOMEDIR "$LAYR" "$@"; }
 
 # Stop a daemon and wait for the follow passes it forked (as in t105).
 stop_daemon() {
@@ -122,4 +125,6 @@ stop_daemon $dpid
 out=$(hl follow 2>&1)
 has "a socket file without a daemon warns" "$NO_DAEMON" "$out"
 
+# The short home folder of the Darwin branch is not under $T: remove it here.
+if [ "$(uname -s)" = Darwin ]; then rm -rf "$HOMEDIR"; fi
 finish
