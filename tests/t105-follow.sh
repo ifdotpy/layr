@@ -1,7 +1,7 @@
 #!/bin/bash
 # ci: macos overlayfs
 # layr follow (docs/follow.md): a line keeps a remote branch. A pass fast-forwards main; unsaved
-# work skips it; a conflicting remote change leaves main unchanged and the error shows in
+# work skips it, an untracked file does not; a conflicting remote change leaves main unchanged and the error shows in
 # `layr follow`; the caches of a line that was squash-merged on the remote come to main; `--remove`
 # stops it. On macOS the daemon runs the same pass as the user. One user, so it runs on macOS and
 # on Linux (the daemon part on macOS only).
@@ -46,6 +46,26 @@ no "the remote file did not come with the skipped pass" test -f f2.txt
 echo other > src/b.txt
 ok "the next pass takes the remote change once the work is clean" l follow --run
 ok "main has the second remote file" test -f f2.txt
+
+# 3b. An untracked file is not unsaved work: the pass merges and keeps it out of the state. A remote
+#     file at the same path is refused, and the local file stays.
+mkdir -p .tool; echo lock > .tool/run.lock
+cd $U; echo untracked > f2b.txt; git add f2b.txt; git commit -qm "remote beside untracked"; git push -q origin main
+cd $P/main
+out=$(l follow --run 2>&1)
+no "an untracked file does not skip the pass" grep -q "unsaved work" <<<"$out"
+ok "the pass with an untracked file takes the remote change" test -f f2b.txt
+eq "the untracked file stays" lock "$(cat .tool/run.lock)"
+no "the untracked file is not in the merged state" grep -q "run.lock" <<<"$(l ls-files)"
+cd $U; mkdir -p .tool; echo theirs > .tool/run.lock; git add .tool/run.lock; git commit -qm "remote lock"; git push -q origin main
+cd $P/main
+before=$(l rev-parse head)
+l follow --run >/dev/null 2>&1
+eq "a remote file at an untracked path does not move main" "$before" "$(l rev-parse head)"
+eq "the untracked file keeps the local content" lock "$(cat .tool/run.lock)"
+rm -rf .tool
+ok "the pass takes the remote file once the local one is gone" l follow --run
+eq "main has the remote file at that path" theirs "$(cat .tool/run.lock)"
 
 # 4. Caches of a squash-merged line. feat saves caches and pushes its branch; the remote squash-merges
 #    the same change into main. The pass takes the caches of feat into main.
