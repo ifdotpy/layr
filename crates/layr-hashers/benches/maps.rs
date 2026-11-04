@@ -36,7 +36,7 @@ fn test<K: Hash + Eq + Clone, B: BuildHasher + Clone>(label: &str, shape: &str, 
 fn all<K: Hash + Eq + Clone>(shape: &str, keys: &[K]) {
     test("std", shape, keys, std::collections::hash_map::RandomState::new());
     test("fx", shape, keys, BuildHasherDefault::<FxHasher>::default());
-    test("rapid", shape, keys, rapidhash::fast::RandomState::default());
+    test("rapid", shape, keys, BuildHasherDefault::<rapidhash::fast::RapidHasher<'static>>::default());
     test("fold", shape, keys, foldhash::fast::RandomState::default());
 }
 fn main() {

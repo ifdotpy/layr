@@ -11,6 +11,12 @@ pub use sha2::Sha256 as ContentAddress;
 /// Rapidhash for transient, non-adversarial in-memory keys only; never use for security or persistence.
 pub type FastNonCryptographic = rapidhash::v3::RapidStreamHasherV3<'static>;
 
+/// Fast deterministic map hashing for trusted local keys, never peer-controlled inputs.
+pub use rustc_hash::FxHasher as FastMapHasher;
+pub type FastBuildHasher = std::hash::BuildHasherDefault<FastMapHasher>;
+pub type FastMap<K, V> = std::collections::HashMap<K, V, FastBuildHasher>;
+pub type FastSet<K> = std::collections::HashSet<K, FastBuildHasher>;
+
 /// Generic streaming and one-shot interface, statically dispatched and inlined.
 pub trait PurposeHasher: Sized {
     type Output: AsRef<[u8]>;

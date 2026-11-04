@@ -1463,7 +1463,7 @@ pub fn commit_layers(
         roots.push(r.state_root(&l.state)?);
         orepos.push(r);
     }
-    let by_name: BTreeMap<&str, usize> = layers.iter().enumerate().map(|(i, l)| (l.overlay.as_str(), i)).collect();
+    let by_name: layr_hashers::FastMap<&str, usize> = layers.iter().enumerate().map(|(i, l)| (l.overlay.as_str(), i)).collect();
     let mut pending = BTreeMap::new();
     for (p, o) in repo.pending_moves(line) {
         match by_name.get(o.as_str()) {

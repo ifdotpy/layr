@@ -9,7 +9,8 @@ use crate::storage as btrfs;
 use crate::stream;
 use anyhow::Result;
 use layr_hashers::{FastCryptographic, PurposeHasher};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use layr_hashers::{FastMap, FastSet};
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -255,12 +256,12 @@ pub fn with_renames(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), v
     let read_parent = |p: &str| crate::fsutil::read_file(parent, p).ok();
     let read_child = |p: &str| crate::fsutil::read_file(child, p).ok();
     let mut pairs: Vec<(usize, usize)> = Vec::new();
-    let mut used_d: HashSet<usize> = HashSet::new();
-    let mut used_a: HashSet<usize> = HashSet::new();
+    let mut used_d: FastSet<usize> = FastSet::default();
+    let mut used_a: FastSet<usize> = FastSet::default();
     // Exact: same size and same bytes. Each candidate is read and hashed once; the chosen pair
     // is compared byte by byte.
     let hash = |bytes: &[u8]| <FastCryptographic as PurposeHasher>::hash(bytes);
-    let mut by_key: HashMap<(u64, [u8; 32]), Vec<usize>> = HashMap::new();
+    let mut by_key: FastMap<(u64, [u8; 32]), Vec<usize>> = FastMap::default();
     let del_sizes: HashSet<u64> = dels.iter().map(|&d| v[d].old.as_ref().unwrap().size).collect();
     let add_sizes: HashSet<u64> = adds.iter().map(|&a| v[a].new.as_ref().unwrap().size).collect();
     for &d in &dels {
