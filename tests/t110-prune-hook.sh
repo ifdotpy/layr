@@ -24,6 +24,18 @@ base=$(units target)
 l save --caches -q
 l line new other main >/dev/null
 
+# The hook runs as the line's owner, and the root owner is never pruned. Under root (the Linux CI job runs
+# every test as root) the lines are root-owned, so the checks below are the refusal, and the rest of the
+# file (non-root owners) is skipped.
+if [ "$(id -u)" = 0 ]; then
+    cargo_quiet build --workspace --features extra -q >/dev/null
+    stale=$(units target)
+    l save --caches -q
+    l line new fresh main >/dev/null
+    eq "a root-owned line keeps its stale units (root is never pruned)" "$stale" "$(units $P/fresh/target)"
+    finish
+fi
+
 # 1. Stale units in the saved cache of main: prune is off while they are saved.
 ok "the owner sets prune=none on the cache" l overlay set cache.target --prune none
 cargo_quiet build --workspace --features extra -q >/dev/null
