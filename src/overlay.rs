@@ -239,7 +239,7 @@ pub struct OverlayPlan {
 struct OverlayClean {
     name: String,
     /// The records of the overlay project when the plan read it (`Db::records_mark`).
-    mark: (i64, i64),
+    mark: i64,
     /// Cache overlay lines of deleted lines.
     orphans: Vec<Line>,
     keep_n: Option<usize>,

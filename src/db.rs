@@ -337,10 +337,11 @@ impl Db {
         Ok(v)
     }
 
-    /// The number of records and the newest row. Records are only added, so an equal mark means
-    /// no record came in: everything derived from the records is unchanged.
-    pub fn records_mark(&self) -> Result<(i64, i64)> {
-        Ok(self.conn.query_row("SELECT count(*), coalesce(max(rowid), 0) FROM records", [], |r| Ok((r.get(0)?, r.get(1)?)))?)
+    /// The newest rowid. Records are only added (INSERT OR IGNORE, no delete or replace), and
+    /// SQLite gives a new row max(rowid) + 1, so an equal mark means no record came in:
+    /// everything derived from the records is unchanged. max(rowid) is one B-tree lookup.
+    pub fn records_mark(&self) -> Result<i64> {
+        Ok(self.conn.query_row("SELECT coalesce(max(rowid), 0) FROM records", [], |r| r.get(0))?)
     }
 
     /// All stored lines in apply order.
@@ -1586,6 +1587,27 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(SCHEMA).unwrap();
         Db { conn, stale: false }
+    }
+
+    #[test]
+    fn records_mark_tracks_successful_inserts_including_late_records() {
+        let db = memory();
+        let mut first = Record::new("test");
+        first.id = "first".into();
+        first.machine = "a".into();
+        first.seq = 1;
+        first.time = 100;
+        assert_eq!(db.records_mark().unwrap(), 0);
+        assert!(db.insert_record(&first, "first").unwrap());
+        let mark = db.records_mark().unwrap();
+        assert!(!db.insert_record(&first, "duplicate").unwrap());
+        assert_eq!(db.records_mark().unwrap(), mark);
+        let mut late = first.clone();
+        late.id = "late".into();
+        late.machine = "b".into();
+        late.time = 1;
+        assert!(db.insert_record(&late, "late").unwrap());
+        assert!(db.records_mark().unwrap() > mark);
     }
 
     #[test]
