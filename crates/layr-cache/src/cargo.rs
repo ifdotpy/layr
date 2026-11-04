@@ -2,14 +2,14 @@
 //! commands. The listing of their units compiles nothing, and it is the live set that `sweep` keeps.
 //! `prune` applies that to a `target` folder next to `Cargo.toml`. See docs/cache-overlays.md.
 
-use crate::{exec, kill_group, skip, sweep};
-use anyhow::{bail, Context, Result};
+use crate::{kill_group, run, skip, sweep};
+use anyhow::{anyhow, bail, Context, Result};
 use layr_adapter::{CacheAdapter, Host, Outcome};
 use serde_json::Value;
 use std::io::{BufRead, BufReader};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Mutex};
 
@@ -24,6 +24,16 @@ pub fn profile_scratch(target: &Path) -> PathBuf {
 /// variable writes `default_*.profraw` into its package folder, which is the project.
 pub fn cargo_profile_file(target: &Path) -> PathBuf {
     profile_scratch(target).join("other/%p.profraw")
+}
+
+/// The cargo command of this adapter. Cargo's color comes from the user's env (`CARGO_TERM_COLOR=always` puts
+/// escape codes in front of its status lines), and the listing matches those lines at their start. So every cargo
+/// command of this adapter sets the color to `never`. The listing sets it again after the project's env (see
+/// `list_units`), so no project setting can change it. The same rule is in layr-retest (`cargo_cmd`).
+pub(crate) fn cargo_cmd(host: &dyn Host) -> Result<Command> {
+    let mut c = host.command("cargo").map_err(|e| anyhow!("cannot run cargo: {e}"))?;
+    c.env("CARGO_TERM_COLOR", "never");
+    Ok(c)
 }
 
 /// Settings of `[workspace.metadata.layr-retest]` in the root `Cargo.toml`: `sweep` lists the standard
@@ -52,9 +62,9 @@ fn command_list(cfg: &Value, key: &str) -> Result<Vec<Vec<String>>> {
 
 /// Reads the retest settings of the workspace at `root`. Missing settings are empty.
 pub fn settings(host: &dyn Host, root: &Path) -> Result<Settings> {
-    let meta: Value = serde_json::from_slice(&exec(host, "cargo", |c| {
-        c.args(["metadata", "--no-deps", "--format-version", "1"]).current_dir(root)
-    })?)?;
+    let mut cmd = cargo_cmd(host)?;
+    cmd.args(["metadata", "--no-deps", "--format-version", "1"]).current_dir(root);
+    let meta: Value = serde_json::from_slice(&run(&mut cmd, Some(host.deadline())).context("cargo metadata")?)?;
     let cfg = &meta["metadata"]["layr-retest"];
     let mut env = Vec::new();
     for (k, v) in cfg["env"].as_object().into_iter().flatten() {
@@ -94,9 +104,11 @@ pub enum Listed {
 /// directory` line means that another cargo holds a lock of the folder: the listing stops instead of waiting
 /// for it. The listing runs in its own process group, and a stop kills the group. Any other failure is an error.
 pub fn list_units(host: &dyn Host, root: &Path, target: &Path, env: &[(String, String)], args: &[String]) -> Result<Listed> {
-    let mut c = host.command("cargo").map_err(|e| anyhow::anyhow!("cannot run cargo: {e}"))?;
+    let mut c = cargo_cmd(host)?;
     c.args(listing(args)).current_dir(root).env("CARGO_TARGET_DIR", target).env("CARGO_BUILD_JOBS", "1");
     c.envs(env.iter().map(|(k, v)| (k, v))).env("LLVM_PROFILE_FILE", cargo_profile_file(target));
+    // Set last: the project's env cannot turn the color back on (see `cargo_cmd`).
+    c.env("CARGO_TERM_COLOR", "never");
     c.process_group(0).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = c.spawn().with_context(|| format!("cannot start cargo {}", args.join(" ")))?;
     let (out, err) = (child.stdout.take().context("cargo stdout")?, child.stderr.take().context("cargo stderr")?);

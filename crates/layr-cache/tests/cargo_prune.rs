@@ -149,3 +149,26 @@ fn skips_a_folder_that_is_not_named_target_and_a_target_without_output() {
         other => panic!("expected a skip, got {other:?}"),
     }
 }
+
+/// The user's env may set `CARGO_TERM_COLOR=always`: cargo then puts escape codes in front of its status lines.
+/// The listing must still see the `Blocking` line of a busy build lock, and skip within its deadline.
+#[test]
+fn a_busy_build_lock_skips_within_the_deadline_even_with_colors() {
+    let dir = tmp("busy-color");
+    let target = project(&dir, Some("sweep = [[\"build\", \"--workspace\"]]"));
+    cargo_in(&dir, &target, &["build", "--workspace"]);
+    // Another cargo holds the build lock of the profile folder.
+    let lock = std::fs::File::options().write(true).open(target.join("debug/.cargo-lock")).unwrap();
+    rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
+    std::env::set_var("CARGO_TERM_COLOR", "always");
+
+    let started = std::time::Instant::now();
+    let deadline = std::time::Duration::from_secs(10);
+    let outcome = cargo::prune(&layr_cache::LocalHost::new(deadline), &target);
+    std::env::remove_var("CARGO_TERM_COLOR");
+    match outcome {
+        Outcome::Skipped { reason } => assert!(reason.contains("build lock busy"), "{reason}"),
+        other => panic!("expected a skip, got {other:?}"),
+    }
+    assert!(started.elapsed() < deadline - std::time::Duration::from_secs(2), "the sweep waited for the deadline: {:?}", started.elapsed());
+}
