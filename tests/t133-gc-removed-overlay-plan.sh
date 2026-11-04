@@ -42,7 +42,8 @@ touch "$T/wait/go.1"
 wait "$pid"
 eq "repair retries successfully" 0 "$?"
 ok "changed records force a new plan" test "$(grep -c 'trace begin repair: plan' "$T/retry.err")" -ge 2
-ok "recreated overlay survives" l overlay list | grep -q cache.target
+l overlay list > "$T/overlays"
+ok "recreated overlay survives" grep -q cache.target "$T/overlays"
 ok "owners match after recreation" l gc -q
 held=$(awk '/store lock held: p$/ { if ($2 > m) m = $2 } END { print int(m) }' "$T/repair.err")
 ok "project lock held less than 2 seconds ($held ms)" test "$held" -lt 2000
