@@ -1,6 +1,6 @@
 use layr_hashers::{ContentAddress, FastCryptographic, FastNonCryptographic, GitCompatible, PurposeHasher};
 use std::{
-    hash::Hasher,
+    hash::{BuildHasher, Hasher},
     hint::black_box,
     time::{Duration, Instant},
 };
@@ -38,6 +38,9 @@ fn run<H: PurposeHasher>(name: &str, data: &[u8]) {
     println!("{name},{},{one:.1},{stream:.1}", data.len());
 }
 fn main() {
+    for size in [8, 64, 4096, 1 << 20] {
+        alternatives(&vec![42; size]);
+    }
     println!("hasher,bytes,one-shot MB/s,stream MB/s");
     for size in [64, 4096, 1 << 20, 100 << 20] {
         let data = vec![42; size];
@@ -67,4 +70,38 @@ fn main() {
         );
         println!("compare,{size},blake3-direct={direct:.1},blake3-generic={generic:.1},default-hasher={standard:.1}");
     }
+}
+
+#[allow(dead_code)]
+fn alternatives(data: &[u8]) {
+    let size = data.len();
+    let rapid = measure(
+        || {
+            black_box(rapidhash::v3::rapidhash_v3(black_box(data)));
+        },
+        size,
+    );
+    let fold = measure(
+        || {
+            let mut h = foldhash::fast::FixedState::default().build_hasher();
+            h.write(black_box(data));
+            black_box(h.finish());
+        },
+        size,
+    );
+    let xxh = measure(
+        || {
+            black_box(xxhash_rust::xxh3::xxh3_64(black_box(data)));
+        },
+        size,
+    );
+    let standard = measure(
+        || {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            h.write(black_box(data));
+            black_box(h.finish());
+        },
+        size,
+    );
+    println!("alternatives,{size},rapid={rapid:.1},fold={fold:.1},xxh3={xxh:.1},default={standard:.1}");
 }

@@ -9,6 +9,10 @@ publish = false
 sha1 = "0.10"
 sha2 = "0.10"
 blake3 = "1"
+rapidhash = "4.5"
+
+[dev-dependencies]
+foldhash = "0.1"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [[bench]]

@@ -11,11 +11,7 @@ pub fn is_binary(data: &[u8]) -> bool {
 }
 
 fn git_blob_id(data: &[u8]) -> String {
-    use layr_hashers::{Digest, GitCompatible};
-    let mut hash = GitCompatible::new();
-    hash.update(format!("blob {}\0", data.len()).as_bytes());
-    hash.update(data);
-    hex::encode(hash.finalize())
+    hex::encode(layr_hashers::git_blob_id(data))
 }
 
 /// One side of a file in a diff.

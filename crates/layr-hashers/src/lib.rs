@@ -8,8 +8,8 @@ pub use sha1::Sha1 as GitCompatible;
 pub use sha2::Digest;
 /// Stable SHA-256 for persisted content, protocol digests, and HMAC.
 pub use sha2::Sha256 as ContentAddress;
-/// XXH3 for transient, non-adversarial in-memory keys only; never use for security or persistence.
-pub use xxhash_rust::xxh3::Xxh3 as FastNonCryptographic;
+/// Rapidhash for transient, non-adversarial in-memory keys only; never use for security or persistence.
+pub type FastNonCryptographic = rapidhash::v3::RapidStreamHasherV3<'static>;
 
 /// Generic streaming and one-shot interface, statically dispatched and inlined.
 pub trait PurposeHasher: Sized {
@@ -23,6 +23,20 @@ pub trait PurposeHasher: Sized {
         hasher.update(bytes);
         hasher.finish()
     }
+}
+
+/// Start a Git blob hash with the Git object header for a known byte length.
+pub fn git_blob_hasher(len: u64) -> GitCompatible {
+    let mut hash = <GitCompatible as Digest>::new();
+    Digest::update(&mut hash, format!("blob {len}\0").as_bytes());
+    hash
+}
+
+/// Compute the Git blob object ID of a byte slice.
+pub fn git_blob_id(bytes: &[u8]) -> [u8; 20] {
+    let mut hash = git_blob_hasher(bytes.len() as u64);
+    Digest::update(&mut hash, bytes);
+    hash.finalize().into()
 }
 
 macro_rules! digest_hasher {
@@ -69,19 +83,19 @@ impl PurposeHasher for FastNonCryptographic {
     type Output = [u8; 8];
     #[inline]
     fn new() -> Self {
-        Self::new()
+        Self::new(&rapidhash::v3::DEFAULT_RAPID_SECRETS)
     }
     #[inline]
     fn update(&mut self, bytes: &[u8]) {
-        self.update(bytes);
+        self.write(bytes);
     }
     #[inline]
     fn finish(self) -> Self::Output {
-        self.digest().to_le_bytes()
+        rapidhash::v3::RapidStreamHasherV3::finish(&self).to_le_bytes()
     }
     #[inline]
     fn hash(bytes: &[u8]) -> Self::Output {
-        xxhash_rust::xxh3::xxh3_64(bytes).to_le_bytes()
+        rapidhash::v3::rapidhash_v3(bytes).to_le_bytes()
     }
 }
 
@@ -109,10 +123,27 @@ mod tests {
     where
         H::Output: PartialEq + std::fmt::Debug,
     {
-        let mut h = H::new();
-        h.update(b"a");
-        h.update(b"bc");
-        assert_eq!(h.finish(), H::hash(b"abc"));
+        for size in [0, 1, 8, 64, 111, 112, 113, 1024, 4096, 65537] {
+            let bytes: Vec<u8> = (0..size).map(|n| (n * 31) as u8).collect();
+            let expected = H::hash(&bytes);
+            for chunk in [1, 7, 64, 112, 4096, 65536] {
+                let mut h = H::new();
+                for part in bytes.chunks(chunk) {
+                    h.update(part);
+                }
+                assert_eq!(h.finish(), expected, "size {size}, chunk {chunk}");
+            }
+        }
+    }
+    #[test]
+    fn git_blob_golden() {
+        assert_eq!(
+            git_blob_id(b"hello\n"),
+            [
+                0xce, 0x01, 0x36, 0x25, 0x03, 0x0b, 0xa8, 0xdb, 0xa9, 0x06, 0xf7, 0x56, 0x96, 0x7f, 0x9e, 0x9c, 0xa3, 0x94, 0x46,
+                0x4a
+            ]
+        );
     }
     #[test]
     fn streaming_matches() {
