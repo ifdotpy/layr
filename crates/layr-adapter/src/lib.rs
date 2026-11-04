@@ -24,6 +24,13 @@ pub trait CacheAdapter: Send + Sync {
     /// Prunes `folder`. It never compiles, never runs a package script and never uses the network. A stale or
     /// failing state returns `Outcome::Skipped` and leaves the folder as it was.
     fn prune(&self, host: &dyn Host, folder: &Path) -> Outcome;
+    /// Puts `folder` back in the state before an interrupted `prune` (its processes were stopped at the hard
+    /// limit). Ok(true): it restored a copy. Ok(false): there is nothing to restore. Err: the folder may be
+    /// changed and is not restored. Runs no process, so it needs no host.
+    fn recover(&self, folder: &Path) -> Result<bool, String> {
+        let _ = folder;
+        Ok(false)
+    }
 }
 
 /// What an adapter did to a folder.

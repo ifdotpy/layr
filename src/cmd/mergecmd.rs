@@ -740,7 +740,11 @@ pub fn merge(ctx: &Ctx, args: &[String]) -> Result<i32> {
             drop(lock);
             let _t = crate::trace::span("merge caches");
             let none = std::collections::BTreeSet::new();
-            for (p, id) in h.repo.pull_caches(ctx, &line, &crate::cache_overlay::Source::Line(&theirs), &none)? {
+            let pulled = h.repo.pull_caches(ctx, &line, &crate::cache_overlay::Source::Line(&theirs), &none)?;
+            for (p, _) in &pulled {
+                h.repo.prune_cache_folder(&line, p);
+            }
+            for (p, id) in pulled {
                 if !a.has("-q") {
                     outln!(ctx, "Merged cache {p}: {}", ids::short(&id));
                 }
@@ -778,6 +782,9 @@ fn caches_only(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str, quiet: bool) -> R
     drop(lock);
     let none = std::collections::BTreeSet::new();
     let taken = repo.pull_caches(ctx, &line, &crate::cache_overlay::Source::Line(&theirs), &none)?;
+    for (p, _) in &taken {
+        repo.prune_cache_folder(&line, p);
+    }
     for (p, id) in &taken {
         if !quiet {
             outln!(ctx, "Merged cache {p}: {}", ids::short(id));

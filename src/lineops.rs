@@ -147,11 +147,22 @@ impl Repo<'_> {
                 };
                 self.put_layers(tmp, &layers, self.own(line))?;
                 self.prepare_at(line, start, tmp)?;
+<<<<<<< head
                 // On OverlayFS the caches are taken after the folder move (`commit_prepared_lines`): a
                 // mount under a moved folder is lost by MS_MOVE. Elsewhere a take is a snapshot taken
                 // before the store lock.
                 #[cfg(not(feature = "overlayfs"))]
                 self.take_caches(ctx, line, start, source, tmp)?;
+||||||| base
+                self.take_caches(ctx, line, start, source, tmp)?;
+=======
+                for folder in self.take_caches(ctx, line, start, source, tmp)? {
+                    // The new line's folder is `tmp` until the commit moves it into place.
+                    if let Some(name) = self.folder_overlay_of(&folder)? {
+                        self.prune_cache_at(line, &name, &folder, tmp);
+                    }
+                }
+>>>>>>> ed0bab8
                 let mut rec = Record::new("line.create");
                 rec.data = serde_json::json!({"name": line.name, "start": start});
                 if !layers.is_empty() {

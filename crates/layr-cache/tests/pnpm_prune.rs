@@ -197,3 +197,45 @@ fn skips_a_folder_without_a_lockfile_or_with_another_name() {
     }
     assert!(tree(&nm) == before);
 }
+
+/// The deadline stops pnpm mid-run: its process is killed, the copy is put back, and node_modules is unchanged.
+/// (50 ms is shorter than a pnpm start, so the run stops before pnpm finishes whatever the machine.)
+#[test]
+fn a_deadline_stops_pnpm_and_leaves_node_modules_unchanged() {
+    use layr_cache::LocalHost;
+    let dir = tmp("deadline");
+    tarball(&dir, "pkg-a", None);
+    tarball(&dir, "pkg-b", None);
+    project(&dir, &["pkg-a", "pkg-b"]);
+    write_manifest(&dir, &["\"pkg-a\":\"file:./pkg-a-1.0.0.tgz\"".to_string()]);
+    pnpm_ok(&dir, &["install", "--lockfile-only", "--reporter=silent"]);
+    let nm = dir.join("node_modules");
+    let before = tree(&nm);
+
+    match pnpm::prune(&LocalHost::new(std::time::Duration::from_millis(50)), &nm) {
+        Outcome::Skipped { .. } => {}
+        other => panic!("expected a skip, got {other:?}"),
+    }
+    assert!(tree(&nm) == before, "node_modules changed");
+    assert!(!nm.join("node_modules.layr-prune").exists() && !dir.join("node_modules.layr-prune").exists());
+}
+
+/// After a hard kill, recovery puts the copy back: node_modules is the copy, and the copy is gone.
+#[test]
+fn recover_puts_the_copy_back_after_a_hard_kill() {
+    use layr_adapter::CacheAdapter;
+    let dir = tmp("recover");
+    tarball(&dir, "pkg-a", None);
+    project(&dir, &["pkg-a"]);
+    let nm = dir.join("node_modules");
+    let before = tree(&nm);
+    // What an interrupted prune leaves: the copy, and a damaged folder.
+    std::process::Command::new("cp").args(["-R"]).arg(&nm).arg(dir.join("node_modules.layr-prune")).status().unwrap();
+    std::fs::remove_dir_all(nm.join(".pnpm")).unwrap();
+    assert!(!nm.join("pkg-a").exists());
+
+    assert_eq!(layr_cache::pnpm::Pnpm.recover(&nm), Ok(true));
+    assert!(tree(&nm) == before, "node_modules is not the copy");
+    assert!(!dir.join("node_modules.layr-prune").exists());
+    assert_eq!(layr_cache::pnpm::Pnpm.recover(&nm), Ok(false), "nothing left to restore");
+}

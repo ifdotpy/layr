@@ -218,10 +218,11 @@ impl<'a> Repo<'a> {
     }
 
     /// The caches after a merge (docs/cache-overlays.md). Per folder overlay, the newest candidate
-    /// whose work the line now holds takes it. Then `prune_cache` per folder and `save --caches`.
+    /// whose work the line now holds takes it. Then each folder it took is pruned, and `save --caches` saves them.
     fn follow_caches(&self, ctx: &Ctx, line: &Line, remote: &str) -> Result<()> {
         let folders: BTreeSet<String> = self.folder_overlays()?.into_iter().map(|(_, f)| f).collect();
         let mut done = BTreeSet::new();
+        let mut taken: Vec<String> = Vec::new();
         for cand in self.cache_sources(remote)? {
             if done.len() == folders.len() {
                 break;
@@ -250,11 +251,13 @@ impl<'a> Repo<'a> {
             }
             let now = self.line(&line.id)?;
             for (_, folder) in self.pull_caches(ctx, &now, &Source::Line(&theirs), &done)? {
-                done.insert(folder);
+                done.insert(folder.clone());
+                taken.push(folder);
             }
         }
-        for folder in &folders {
-            self.prune_cache(folder)?;
+        // Before `save --caches`: the caches that it saves are the pruned ones.
+        for folder in &taken {
+            self.prune_cache_folder(line, folder);
         }
         // The caches of the line as cache overlays, as `layr save --caches` makes them.
         admin::save(ctx, &["--caches".to_string(), "-q".to_string()])?;

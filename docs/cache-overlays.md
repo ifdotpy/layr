@@ -505,27 +505,51 @@ line and prints `<folder>: pruned with <adapter>, freed <N> MB` or `<folder>: sk
 
 ```rust
 impl Repo {
-    pub fn prune_cache(&self, line: &Line, overlay: &str, folder: &str)
+    pub fn prune_cache(&self, line: &Line, overlay: &str, folder: &str)  // never fails; logs one line
 }
 ```
 
-- It reads the `prune` property of `overlay`, then runs the adapter that the binary registered
-  under that name (or the detecting adapter when unset). The folder is `working(line)/folder`.
-- The adapter runs in its own thread, as the line owner (`privs::as_user_fs`). Its processes run as
-  the owner, with a clean environment and the owner's tool folders on `PATH`.
-- A root owner is never pruned.
-- Time limit: `cache_hook::HOOK_LIMIT` (120 s). The adapter stops its processes at the limit. Core
-  stops waiting 10 s later and logs a timeout.
-- Failure: a skipped, timed out or failing hook writes one log line to stderr. It never fails the
-  command. The function returns nothing.
-- The call sites run after the caches of a line are put in place, and before `save --caches`:
-  - `take_caches` (`line new`, the new line gets a copy of the cache): after the overlay locks are
-    released.
-  - `pull_caches` (`merge`, `merge --caches-only`, a follow pass): after the folders are merged.
-  - `save --caches` runs after that in a follow pass, so the saved caches are the pruned ones.
-- Locks: the hook runs inside the lock of its caller. `pull_caches` expects the project lock. A
-  prune can take up to the time limit, so the project lock is held that long. Moving the hook out of
-  the caller's lock needs a change to the callers; not done here.
+Core also has `prune_cache_folder(line, folder)` (the overlay is looked up from the folder) and
+`prune_cache_at(..., root)` (for `line new`, whose folder is not at the line's path yet).
+
+Process model:
+
+- The adapter runs in a worker process: the layr binary started with `__cache-hook`, as the line
+  owner (`privs::command_as`). The worker is its own process group. The adapter's processes (cargo,
+  pnpm) stay in that group.
+- Soft limit: `cache_hook::HOOK_LIMIT`, 120 s. It is the adapter's own deadline. The adapter stops its
+  processes at it, restores or skips the folder, and reports. This is the normal path.
+- Hard limit: the soft limit plus 10 s. At the hard limit the parent kills the worker's whole process
+  group. Then a recovery worker (`recover`, 30 s) runs on the folder. The pnpm adapter puts its copy back.
+  The cargo adapter has nothing to restore: its sweep removes nothing before the listing succeeds.
+- If recovery fails or times out, core marks the folder damaged. A save skips a damaged folder with a
+  line that says so. A prune of the folder that succeeds clears the mark. The mark file is
+  `meta/line-locks/<line id>.damaged`.
+- Root owner: never pruned.
+- Environment of the worker: the owner's home, and `PATH` of the owner's tool folders. A process that
+  is not root also keeps its own `PATH`. The root service never passes its own `PATH` on.
+
+Locks:
+
+- The hook holds the line's prune lock (`meta/line-locks/<line id>`, flock) while it runs. Hooks of
+  one line run one at a time.
+- The hook never holds the project (store) lock. Each call site drops the project lock before it
+  calls the hook. The call sites are: `line new` (the caches are taken before the commit, which runs
+  under the project lock), `merge --caches-only`, the merge path, a follow pass, and `save --caches`
+  (the prune runs before its project lock).
+- A cache overlay's own lock is taken only by the copy steps, never during a hook.
+
+Call sites, each before its next step:
+
+| Command | Hook | Next step |
+| --- | --- | --- |
+| `layr line new` | after `take_caches`, on the new working folder | commit of the line |
+| `layr merge <line> --caches-only` | after `pull_caches` | the caches are in the line |
+| `layr merge <line>` (cache part) | after `pull_caches` | the caches are in the line |
+| follow pass (`follow_caches`) | after `pull_caches`, for each folder taken | `save --caches` |
+| `layr save --caches` | in `prepare_caches`, after the cache is made a cache folder | the snapshot of the cache and the save |
+
+`init` takes no caches (a new project has no folder overlays), so it has no call site.
 
 ### 18.6 Tests
 

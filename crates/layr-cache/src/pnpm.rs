@@ -31,6 +31,15 @@ impl CacheAdapter for Pnpm {
     fn prune(&self, host: &dyn Host, folder: &Path) -> Outcome {
         prune(host, folder)
     }
+
+    fn recover(&self, folder: &Path) -> Result<bool, String> {
+        let Some(root) = folder.parent() else { return Err("no project folder".into()) };
+        let copy_path = root.join("node_modules.layr-prune");
+        if !copy_path.exists() {
+            return Ok(false);
+        }
+        restore(folder, &copy_path).map(|_| true).map_err(|e| format!("{e:#}"))
+    }
 }
 
 /// Prunes `folder`, a `node_modules` folder. Any failure restores the folder and skips it.
@@ -40,8 +49,11 @@ pub fn prune(host: &dyn Host, folder: &Path) -> Outcome {
         return skip("pnpm needs a folder named node_modules next to pnpm-lock.yaml");
     };
     let copy_path = root.join("node_modules.layr-prune");
+    // A copy that an interrupted prune left: put it back first, so the folder is the state before that prune.
     if copy_path.exists() {
-        return skip(format!("{} is left from an earlier run: remove it first", copy_path.display()));
+        if let Err(e) = restore(folder, &copy_path) {
+            return skip(format!("cannot restore node_modules from its copy: {e:#}"));
+        }
     }
     let before = sweep::tree_bytes(folder);
     if let Err(e) = copy(host, folder, &copy_path) {

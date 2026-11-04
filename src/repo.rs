@@ -1790,6 +1790,7 @@ impl<'a> Repo<'a> {
         };
         self.materialize_with(&line, start, &dst, &layers, true)?;
         let res = (|| -> Result<Record> {
+            // Not pruned: this path runs under the project lock, and only `init` uses it, which takes no caches.
             self.take_caches(ctx, &line, start, source, &dst)?;
             let mut rec = Record::new("line.create");
             rec.lines.insert(
