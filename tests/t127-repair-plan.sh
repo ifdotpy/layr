@@ -1,8 +1,8 @@
 #!/bin/bash
 # ci: macos overlayfs
 # gc --repair reads the records and the overlays before the project lock (#194). A save and a line
-# delete that run while it waits after its plan (LAYR_TEST_REPAIR_PAUSE_MS) are not blocked, and
-# the repair reads again under the lock: it keeps the new cache state and drops the cache lines
+# delete that run while it waits after its plan (LAYR_TEST_REPAIR_WAIT) are not blocked, and
+# the repair retries its plan outside the lock: it keeps the new cache state and drops the cache lines
 # of the deleted line.
 . "$(dirname "$0")/lib.sh"
 
@@ -31,22 +31,41 @@ l gc --repair -q >/dev/null 2>&1
 before_t=$(states cache.target)
 before_b=$(states cache.build)
 
-# The repair waits after its plan. Meanwhile line a saves a new cache and line c is deleted.
-LAYR_TEST_REPAIR_PAUSE_MS=4000 LAYR_TRACE=1 l gc --repair -q 2>$T/repair.err &
+# The repair waits after each plan N (planned.N) until the test writes go.N.
+W=$T/wait
+planned() { # planned <n>: wait until the repair has made plan n
+    for _ in $(seq 1 600); do [ -e "$W/planned.$1" ] && return 0; sleep 0.1; done
+    echo "FATAL: the repair made no plan $1" >&2; kill $pid 2>/dev/null; exit 1
+}
+
+# After plan 1, line a saves a new cache and line c is deleted.
+mkdir -p $W && touch $W/go.2 $W/go.3
+LAYR_TEST_REPAIR_WAIT=$W LAYR_TRACE=1 l gc --repair -q 2>$T/repair.err &
 pid=$!
-sleep 1
+planned 1
 cd $P/a || exit 1
 echo a.3 > target/x; echo a.3 > build/y
 l save --caches -q
 cd $P/main || exit 1
 l line delete -D c >/dev/null 2>&1
 ok "the save and the line delete finish while the repair waits" kill -0 $pid
+touch $W/go.1
 wait $pid
 eq "the repair succeeds" 0 "$?"
+ok "the changed project makes a second plan" test "$(grep -c "trace begin repair: plan" $T/repair.err)" -ge 2
 
-# The pause is not under the project lock.
+# The wait is not under the project lock.
 held=$(awk '/store lock held: p$/ { if ($2 > m) m = $2 } END { print int(m) }' $T/repair.err)
-ok "the repair holds the project lock less than its pause ($held ms)" test "$held" -lt 4000
+ok "the repair holds the project lock less than 2 s ($held ms)" test "$held" -lt 2000
+
+# A stale plan causes a second replay, after the first lock was released. The trace's
+# begin and end markers bound each replay, so no project-lock release can occur inside it.
+ok "the stale plan is retried outside the project lock" awk '
+    /trace begin repair: plan/ { if (planning || (plans && !released)) exit 1; planning=1; plans++; released=0 }
+    /ms  repair: plan$/ { if (!planning) exit 1; planning=0 }
+    /store lock held: p$/ { if (planning) exit 1; released=1 }
+    END { if (plans < 2 || planning) exit 1 }
+' "$T/repair.err"
 
 # The repair used the project as it was under the lock: the new cache of a stays, its old one and
 # the caches of c go.
@@ -60,4 +79,22 @@ ok "the owners table matches the records" l gc -q
 # A second repair with nothing new changes nothing.
 l gc --repair -q >/dev/null 2>&1
 eq "a second repair keeps the target states" "$((before_t - 1))" "$(states cache.target)"
+# Invalidate every attempt. The explicit command must stop after three plans and tell the
+# caller to retry, rather than doing a replay under the lock.
+rm -rf $W && mkdir -p $W
+LAYR_TEST_REPAIR_WAIT=$W LAYR_TRACE=1 l gc --repair -q 2>$T/busy.err &
+pid=$!
+for n in 1 2 3; do
+    planned $n
+    cd "$P/a" || exit 1
+    echo "busy.$n" > notes.txt
+    l save -q
+    cd "$P/main" || exit 1
+    touch $W/go.$n
+done
+wait "$pid" && rc=0 || rc=$?
+ok "a busy project makes explicit repair fail" test "$rc" -ne 0
+ok "the failure asks the caller to retry" grep -q 'project changed during the command; run it again' "$T/busy.err"
+eq "repair stops after three plans" 3 "$(grep -c 'trace begin repair: plan' "$T/busy.err")"
+ok "owners still match after skipped repair" l gc -q
 finish
