@@ -1,6 +1,6 @@
 //! Git patch rendering from caller-supplied bytes and modes. No I/O.
 
-use similar::{capture_diff_slices, get_diff_ratio, group_diff_ops, Algorithm, DiffOp};
+use similar::{capture_diff_slices, diff_ratio, group_diff_ops, Algorithm, DiffOp};
 
 /// Files above this bound use binary patch output without content reads.
 pub const MAX_TEXT: u64 = 64 << 20;
@@ -75,7 +75,7 @@ impl FileDiff {
                 }
                 let (a, b) = (split_lines(&o.data), split_lines(&n.data));
                 let ops = capture_diff_slices(Algorithm::Myers, &a, &b);
-                (get_diff_ratio(&ops, a.len(), b.len()) * 100.0) as u32
+                (diff_ratio(&ops, a.len(), b.len()) * 100.0) as u32
             }
             _ => 0,
         }

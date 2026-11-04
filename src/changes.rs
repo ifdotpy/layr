@@ -304,7 +304,7 @@ pub fn with_renames(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), v
                 };
                 let (x, y) = (split(&dd), split(&ad));
                 let ops = similar::capture_diff_slices(similar::Algorithm::Myers, &x, &y);
-                let r = similar::get_diff_ratio(&ops, x.len(), y.len());
+                let r = similar::diff_ratio(&ops, x.len(), y.len());
                 if r >= 0.5 {
                     scored.push((r, d, a));
                 }
