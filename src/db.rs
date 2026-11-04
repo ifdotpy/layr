@@ -26,15 +26,6 @@ pub struct Db {
     pub stale: bool,
 }
 
-thread_local! {
-    /// Only set around a command whose callers do not mutate project databases.
-    static METADATA_READ: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-pub fn set_metadata_read(read: bool) {
-    METADATA_READ.with(|mode| mode.set(read));
-}
-
 pub(crate) const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS records (id TEXT PRIMARY KEY, machine TEXT, seq INTEGER, time INTEGER, op TEXT, actor_uid INTEGER, raw TEXT);
 CREATE INDEX IF NOT EXISTS records_time ON records(time);
@@ -106,17 +97,20 @@ const RETIRED: &[&str] = &["slots", "mirrors", "groups", "group_lines"];
 impl Db {
     /// Open the database. Returns it and whether the derived tables must be rebuilt.
     pub fn open(path: &Path) -> Result<Db> {
-        if METADATA_READ.with(|mode| mode.get()) {
+        Self::open_for(path, false)
+    }
+
+    pub fn open_for(path: &Path, read: bool) -> Result<Db> {
+        if read {
             // A stale schema or legacy evidence still needs the normal upgrade path. Failure to
             // open a WAL read-only (e.g. after a crash) likewise leaves recovery to that path.
             if let Ok(conn) = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY) {
                 conn.busy_timeout(std::time::Duration::from_secs(30))?;
+                conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
                 let current = Self::schema_is_current(&conn).unwrap_or(false);
-                let legacy = conn
-                    .query_row(&format!("SELECT EXISTS(SELECT 1 FROM records WHERE {LEGACY_OPS})"), [], |r| r.get::<_, bool>(0))
-                    .unwrap_or(true);
+                let legacy = conn.prepare_cached(&format!("SELECT EXISTS(SELECT 1 FROM records WHERE {LEGACY_OPS})"))
+                    .and_then(|mut stmt| stmt.query_row([], |r| r.get::<_, bool>(0))).unwrap_or(true);
                 if current && !legacy {
-                    conn.set_prepared_statement_cache_capacity(crate::owners::OWNERS_STATEMENTS);
                     return Ok(Db { conn, stale: false });
                 }
             }
@@ -190,8 +184,8 @@ impl Db {
         // Most projects have no records from the old evidence format. Avoid preparing the
         // considerably larger compatibility query in that common case. The partial index
         // records_legacy_evidence makes this probe independent of the project's history size.
-        let has_legacy: bool =
-            self.conn.query_row(&format!("SELECT EXISTS(SELECT 1 FROM records WHERE {LEGACY_OPS})"), [], |r| r.get(0))?;
+        let has_legacy: bool = self.conn.prepare_cached(&format!("SELECT EXISTS(SELECT 1 FROM records WHERE {LEGACY_OPS})"))?
+            .query_row([], |r| r.get(0))?;
         if !has_legacy {
             return Ok(());
         }
@@ -926,14 +920,8 @@ impl Db {
     pub fn remote_ref(&self, name: &str) -> Result<Option<(String, Option<String>)>> {
         Ok(self
             .conn
-<<<<<<< head
-            .query_row("SELECT state, gcommit FROM remote_refs WHERE name=?1 AND state IS NOT NULL", params![name], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })
-=======
             .prepare_cached("SELECT state, gcommit FROM remote_refs WHERE name=?1 AND state IS NOT NULL")?
             .query_row(params![name], |r| Ok((r.get(0)?, r.get(1)?)))
->>>>>>> origin/perf/sqlite-stmt-cache
             .optional()?)
     }
 
@@ -1681,19 +1669,15 @@ mod tests {
         let path = std::env::temp_dir().join(format!("layr-db-metadata-{}", std::process::id()));
         let db = Db::open(&path).unwrap();
         drop(db);
-        set_metadata_read(true);
-        let db = Db::open(&path).unwrap();
+        let db = Db::open_for(&path, true).unwrap();
         assert!(db.conn.execute("INSERT INTO free_queue VALUES ('x')", []).is_err());
         drop(db);
-        set_metadata_read(false);
         let db = Db::open(&path).unwrap();
         db.conn.pragma_update(None, "user_version", SCHEMA_VERSION - 1).unwrap();
         drop(db);
-        set_metadata_read(true);
-        let db = Db::open(&path).unwrap();
+        let db = Db::open_for(&path, true).unwrap();
         assert!(db.conn.execute("INSERT INTO free_queue VALUES ('x')", []).is_ok());
         drop(db);
-        set_metadata_read(false);
         let _ = std::fs::remove_file(path);
     }
 

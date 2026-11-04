@@ -325,11 +325,9 @@ pub fn run_as(argv: Vec<String>, caller: Caller, cwd: PathBuf, env: HashMap<Stri
     crate::repo::begin_command();
     let metadata_read = crate::cmd::metadata_read(&argv);
     let skip_free = metadata_read || argv.first().is_some_and(|arg| arg == "status");
-    crate::db::set_metadata_read(metadata_read);
     let store = match Store::open_for(root, metadata_read) {
         Ok(s) => s,
         Err(e) => {
-            crate::db::set_metadata_read(false);
             eprintln!("fatal: cannot open the layr store {}: {e:#}", root.display());
             return 128;
         }
@@ -358,7 +356,6 @@ pub fn run_as(argv: Vec<String>, caller: Caller, cwd: PathBuf, env: HashMap<Stri
     } else {
         crate::free::finish(&ctx.store);
     }
-    crate::db::set_metadata_read(false);
     code
 }
 

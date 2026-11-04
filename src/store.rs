@@ -40,6 +40,7 @@ pub struct Machine {
 pub struct Store {
     pub root: PathBuf,
     pub machine: Machine,
+    pub(crate) metadata_read: bool,
     _version_guard: Option<crate::store_version::Guard>,
 }
 
@@ -194,7 +195,7 @@ impl Store {
         mkdir_mode(&root.join("projects"), 0o755)?;
         version_guard.ready(root)?;
         // Every volume folder must hold the identity file of this store (checked when used).
-        let store = Store { root: root.to_path_buf(), machine: Machine { id, name, key }, _version_guard: Some(version_guard) };
+        let store = Store { root: root.to_path_buf(), machine: Machine { id, name, key }, metadata_read: read, _version_guard: Some(version_guard) };
         // A volume with its own OverlayFS registry (a project moved there) is recovered too.
         #[cfg(feature = "overlayfs")]
         for volume in store.layout()?.ready_volume_paths() {
@@ -1000,7 +1001,7 @@ impl<'a> Project<'a> {
     /// Open a project that may not have its records yet.
     pub fn open_partial(store: &'a Store, name: &str) -> Result<Project<'a>> {
         let dir = store.project_dir(name)?;
-        let db = Db::open(&db_file(&dir))?;
+        let db = Db::open_for(&db_file(&dir), store.metadata_read)?;
         let mut p = Project { store, name: name.to_string(), dir, id: String::new(), db };
         p.finish_schema_upgrade()?;
         p.id = p.project_id().unwrap_or_default();
@@ -1014,7 +1015,7 @@ impl<'a> Project<'a> {
         if !db_file(&dir).is_file() {
             bail!("project '{name}' not found");
         }
-        let db = Db::open(&db_file(&dir))?;
+        let db = Db::open_for(&db_file(&dir), store.metadata_read)?;
         let mut p = Project { store, name: name.to_string(), dir, id: String::new(), db };
         p.finish_schema_upgrade()?;
         crate::rootcheck::check_project(&p)?;
@@ -1482,6 +1483,7 @@ mod tests {
         let store = Store {
             root: PathBuf::from("/s"),
             machine: Machine { id: String::new(), name: String::new(), key },
+            metadata_read: false,
             _version_guard: None,
         };
         assert_eq!(store.project_dir("sap").unwrap(), PathBuf::from("/s/projects/sap"));
