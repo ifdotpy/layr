@@ -9,10 +9,11 @@ mod parse;
 mod record;
 mod rustflags;
 mod select;
-mod sweep;
 mod tools;
 
 use anyhow::{bail, Context, Result};
+use layr_cache::cargo::{built, cargo_profile_file, live_units, profile_scratch, settings, sweep_plans, Listed};
+use layr_cache::output;
 use record::{test_key, FileCov, Record, TestRec};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -57,9 +58,10 @@ pub fn main(args: &[String]) -> Result<i32> {
         Some("gate") => gate::run(&args[1..]),
         Some("doctor") => doctor::run(&args[1..]),
         Some("sweep") => sweep_cmd(&args[1..]),
+        Some("prune") => prune_cmd(&args[1..]),
         _ => {
             eprintln!(
-                "usage: layr retest run [--full] [--save] [--tool vitest|jest|pytest] [-- <nextest args>]\n       layr retest gate [--name <n>] [--max-load <n>] -- <command...>\n       layr retest init [--yes]\n       layr retest doctor\n       layr retest sweep [--dry-run]\n       layr retest wrap -- <test binary> <args>"
+                "usage: layr retest run [--full] [--save] [--tool vitest|jest|pytest] [-- <nextest args>]\n       layr retest gate [--name <n>] [--max-load <n>] -- <command...>\n       layr retest init [--yes]\n       layr retest doctor\n       layr retest sweep [--dry-run]\n       layr retest prune <folder> [--adapter cargo|pnpm|none]\n       layr retest wrap -- <test binary> <args>"
             );
             Ok(2)
         }
@@ -73,19 +75,6 @@ fn profile_dir(dir: &Path, binary_id: &str, test: &str) -> PathBuf {
         s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' { c } else { '_' }).collect()
     };
     dir.join(clean(binary_id)).join(clean(test))
-}
-
-/// The scratch folder of the raw profiles of the instrumented build in `target`. It is deleted after
-/// each run and after each sweep. The one owner of its path.
-fn profile_scratch(target: &Path) -> PathBuf {
-    target.join("profraw")
-}
-
-/// `LLVM_PROFILE_FILE` of every cargo call that retest makes with the instrumented flags. Cargo runs
-/// build scripts in these calls (the listings of the sweep too), and a build script without this
-/// variable writes `default_*.profraw` into its package folder, which is the project.
-fn cargo_profile_file(target: &Path) -> PathBuf {
-    profile_scratch(target).join("other/%p.profraw")
 }
 
 /// Deletes the scratch folder of a run when the run ends, on every exit.
@@ -134,6 +123,7 @@ fn merge_raw(profdata: &Path, dir: &Path) -> Result<usize> {
     Ok(raws.len())
 }
 
+<<<<<<< head
 /// A cargo command of this tool. Cargo's color comes from the user's env (`CARGO_TERM_COLOR=always` puts escape
 /// codes in front of its status lines), so the tool sets it. Its parsers match those lines at their start.
 fn cargo_cmd() -> Command {
@@ -150,6 +140,17 @@ fn output(cmd: &mut Command) -> Result<Vec<u8>> {
     Ok(o.stdout)
 }
 
+||||||| base
+fn output(cmd: &mut Command) -> Result<Vec<u8>> {
+    let o = cmd.output().with_context(|| format!("cannot start {:?}", cmd.get_program()))?;
+    if !o.status.success() {
+        bail!("{:?} failed: {}", cmd.get_program(), String::from_utf8_lossy(&o.stderr).trim());
+    }
+    Ok(o.stdout)
+}
+
+=======
+>>>>>>> 63b8129
 /// Runs the layr CLI as a process of this executable (the `layr` that runs `layr retest`).
 fn layr(args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output(Command::new(std::env::current_exe()?).args(args))?).into_owned())
@@ -341,6 +342,7 @@ fn debug_vars(opt_out: Option<&str>) -> Vec<(&'static str, &'static str)> {
     vec![("CARGO_PROFILE_DEV_DEBUG", "line-tables-only"), ("CARGO_PROFILE_TEST_DEBUG", "line-tables-only")]
 }
 
+<<<<<<< head
 /// Settings of `[workspace.metadata.layr-retest]` in the root `Cargo.toml`: `sweep` lists the standard
 /// build commands (cargo arguments without `cargo`), `retest` lists the commands of the retest build
 /// (`target/retest`), and `env` is the build env of every cargo call of retest and of the gate.
@@ -381,6 +383,49 @@ fn sweep_config(root: &Path) -> Result<SweepConfig> {
     })
 }
 
+||||||| base
+/// Settings of `[workspace.metadata.layr-retest]` in the root `Cargo.toml`: `sweep` lists the standard
+/// build commands (cargo arguments without `cargo`), `retest` lists the commands of the retest build
+/// (`target/retest`), and `env` is the build env of every cargo call of retest and of the gate.
+/// `env` is the one owner of the project's build env: `run`, `sweep` and `gate` apply it.
+struct SweepConfig {
+    env: Vec<(String, String)>,
+    /// The `sweep` list is set. Without it the sweep does nothing.
+    listed: bool,
+    commands: Vec<Vec<String>>,
+    retest: Vec<Vec<String>>,
+}
+
+/// The cargo commands under `key` (`sweep` or `retest`): an array of arrays of strings.
+fn command_list(cfg: &Value, key: &str) -> Result<Vec<Vec<String>>> {
+    let mut commands = Vec::new();
+    for c in cfg[key].as_array().into_iter().flatten() {
+        let args = c.as_array().with_context(|| format!("{key}: each command is an array of strings"))?;
+        let strings = args.iter().map(|a| a.as_str().map(String::from).with_context(|| format!("{key}: each argument is a string")));
+        commands.push(strings.collect::<Result<Vec<_>>>()?);
+    }
+    Ok(commands)
+}
+
+/// Reads the retest settings of the workspace at `root`. Missing settings are empty.
+fn sweep_config(root: &Path) -> Result<SweepConfig> {
+    let meta: Value =
+        serde_json::from_slice(&output(Command::new("cargo").args(["metadata", "--no-deps", "--format-version", "1"]).current_dir(root))?)?;
+    let cfg = &meta["metadata"]["layr-retest"];
+    let mut env = Vec::new();
+    for (k, v) in cfg["env"].as_object().into_iter().flatten() {
+        env.push((k.clone(), v.as_str().context("env: each value is a string")?.to_string()));
+    }
+    Ok(SweepConfig {
+        env,
+        listed: cfg["sweep"].as_array().is_some(),
+        commands: command_list(cfg, "sweep")?,
+        retest: command_list(cfg, "retest")?,
+    })
+}
+
+=======
+>>>>>>> 63b8129
 /// The environment that changes the unit hashes of the retest build: the instrumented rustflags (the
 /// flags that cargo reads for the project, with `-C instrument-coverage` appended), incremental
 /// compilation and the debug info level. The sweep lists the units under the same values.
@@ -398,6 +443,7 @@ fn hash_env(root: &Path) -> Result<Vec<(String, String)>> {
     Ok(env)
 }
 
+<<<<<<< head
 /// The cargo arguments of a listing: `-v` names each unit that is not fresh before cargo compiles or runs
 /// it, and `--message-format json` names the units. Both go before a `--` that ends the cargo arguments.
 fn listing(args: &[String]) -> Vec<String> {
@@ -504,11 +550,118 @@ fn sweep_plans(plans: &sweep::Plans, dry: bool) -> Result<(u64, usize)> {
     Ok((freed, busy))
 }
 
+||||||| base
+/// The cargo arguments of a listing: `-v` names each unit that is not fresh before cargo compiles or runs
+/// it, and `--message-format json` names the units. Both go before a `--` that ends the cargo arguments.
+fn listing(args: &[String]) -> Vec<String> {
+    let at = args.iter().position(|a| a == "--").unwrap_or(args.len());
+    let mut out = args.to_vec();
+    out.splice(at..at, ["-v", "--message-format", "json"].map(String::from));
+    out
+}
+
+/// What the listing of the units of one folder found.
+enum Listed {
+    /// Every unit is fresh: the live set of each profile folder.
+    Fresh(sweep::Plans),
+    /// A unit is not fresh, named by cargo's status line or by its target. Nothing was built past it.
+    NotFresh(String),
+    /// Another cargo holds the build lock of the folder: the listing stopped before it waited for that cargo.
+    Busy,
+}
+
+/// Lists the units of `args` in the target folder `target` without building them. `CARGO_BUILD_JOBS=1`, and
+/// the listing stops at the first unit that is not fresh. Cargo's `-v` prints `Dirty` for such a unit
+/// before it compiles or runs anything, so the stop comes before a build step. The JSON `fresh: false` is
+/// a second stop, for a cargo whose status text differs (cargo then builds that one unit). A `Blocking ...
+/// directory` line means that another cargo holds a lock of the folder: the listing stops instead of waiting
+/// for it. The listing runs in its own process group, and a stop kills the group. Any other failure is an error.
+fn list_units(root: &Path, target: &Path, env: &[(String, String)], args: &[String]) -> Result<Listed> {
+    let mut c = Command::new("cargo");
+    c.args(listing(args)).current_dir(root).env("CARGO_TARGET_DIR", target).env("CARGO_BUILD_JOBS", "1");
+    c.envs(env.iter().map(|(k, v)| (k, v))).env("LLVM_PROFILE_FILE", cargo_profile_file(target));
+    c.process_group(0).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = c.spawn().with_context(|| format!("cannot start cargo {}", args.join(" ")))?;
+    let (out, err) = (child.stdout.take().context("cargo stdout")?, child.stderr.take().context("cargo stderr")?);
+    let pid = child.id();
+    let stop: Mutex<Option<Listed>> = Mutex::new(None);
+    let halt = |why: Listed| {
+        let mut first = stop.lock().unwrap();
+        if first.is_none() {
+            *first = Some(why);
+            // A negative pid names the process group of the listing.
+            let _ = Command::new("kill").args(["-KILL", "--", &format!("-{pid}")]).status();
+        }
+    };
+    let (lines, status) = std::thread::scope(|s| {
+        s.spawn(|| {
+            for line in BufReader::new(err).lines().map_while(Result::ok) {
+                let t = line.trim_start();
+                // A wait for a folder's lock stops the listing. A wait for the shared package cache is short: it waits.
+                if t.starts_with("Blocking ") && t.contains("directory") {
+                    halt(Listed::Busy);
+                } else if ["Dirty ", "Compiling ", "Running "].iter().any(|p| t.starts_with(p)) {
+                    halt(Listed::NotFresh(t.to_string()));
+                }
+            }
+        });
+        let lines = s.spawn(|| {
+            let mut lines = Vec::new();
+            for line in BufReader::new(out).lines().map_while(Result::ok) {
+                if let Some(name) = sweep::not_fresh(&line) {
+                    halt(Listed::NotFresh(format!("{name} is not fresh")));
+                }
+                lines.push(line);
+            }
+            lines
+        });
+        let status = child.wait();
+        (lines.join().unwrap_or_default(), status)
+    });
+    let _ = std::fs::remove_dir_all(profile_scratch(target));
+    if let Some(stopped) = stop.into_inner().unwrap_or(None) {
+        return Ok(stopped);
+    }
+    if !status.with_context(|| format!("cannot wait for cargo {}", args.join(" ")))?.success() {
+        bail!("cargo {} failed", args.join(" "));
+    }
+    Ok(Listed::Fresh(sweep::plan(target, lines.join("\n").as_bytes())?))
+}
+
+/// The live units of the target folder `target`: the units that every command of `commands` uses, each
+/// run with `env`. Stops at the first command whose units are not fresh.
+fn live_units(root: &Path, target: &Path, env: &[(String, String)], commands: &[Vec<String>]) -> Result<Listed> {
+    let mut live = sweep::Plans::new();
+    for args in commands {
+        match list_units(root, target, env, args)? {
+            Listed::Fresh(units) => sweep::merge(&mut live, units),
+            stale => return Ok(stale),
+        }
+    }
+    Ok(Listed::Fresh(live))
+}
+
+/// Sweeps each profile folder of `plans` under its cargo lock. Returns the freed bytes and the number of
+/// profile folders skipped because their lock is busy. A dry run counts only.
+fn sweep_plans(plans: &sweep::Plans, dry: bool) -> Result<(u64, usize)> {
+    let (mut freed, mut busy) = (0, 0);
+    for (profile, live) in plans {
+        let n = if dry { Some(sweep::sweep(profile, live, true)) } else { sweep::locked(profile, || sweep::sweep(profile, live, false))? };
+        match n {
+            Some(n) => freed += n,
+            None => busy += 1,
+        }
+    }
+    Ok((freed, busy))
+}
+
+=======
+>>>>>>> 63b8129
 /// The sweep after a retest build: the live units of the standard commands, the retest commands and the
 /// run's own command (`own`), in `target/retest`. A folder with a unit that is not fresh is not swept.
 fn sweep_after_build(root: &Path, target: &Path, hash: &[(String, String)], own: Vec<String>) {
     let t = std::time::Instant::now();
-    let cfg = match sweep_config(root) {
+    let cfg = match settings(root) {
         Ok(c) if c.listed => c,
         Ok(_) => return eprintln!("layr-retest: sweep skipped: no `sweep` list under [workspace.metadata.layr-retest] in Cargo.toml"),
         Err(e) => return eprintln!("layr-retest: sweep skipped: {e:#}"),
@@ -538,10 +691,22 @@ fn sweep_after_build(root: &Path, target: &Path, hash: &[(String, String)], own:
     }
 }
 
-/// Whether a build wrote a profile folder in `target` (`<target>/<profile>/.fingerprint`, any profile). The
-/// listing names the profiles itself, so a folder with only a release or a custom profile is swept too.
-fn built(target: &Path) -> bool {
-    std::fs::read_dir(target).into_iter().flatten().flatten().any(|e| e.path().join(".fingerprint").is_dir())
+/// `layr retest prune <folder> [--adapter <name>]`: runs the cache adapter of `folder` by hand (layr-cache). Without
+/// `--adapter` the adapter is detected from the folder. Prints what it did. A skipped folder exits 0.
+fn prune_cmd(args: &[String]) -> Result<i32> {
+    let (folder, setting) = match args {
+        [folder] => (folder, None),
+        [folder, flag, name] if flag == "--adapter" => (folder, Some(name.as_str())),
+        _ => {
+            eprintln!("usage: layr retest prune <folder> [--adapter cargo|pnpm|none]");
+            return Ok(2);
+        }
+    };
+    match layr_cache::prune(setting, &std::env::current_dir()?.join(folder))? {
+        layr_cache::Outcome::Pruned { adapter, freed } => println!("{folder}: pruned with {adapter}, freed {:.1} MB", freed as f64 / 1e6),
+        layr_cache::Outcome::Skipped { reason } => println!("{folder}: skipped: {reason}"),
+    }
+    Ok(0)
 }
 
 /// `layr retest sweep [--dry-run]`: remove the units that the commands of the workspace do not use.
@@ -560,7 +725,7 @@ fn sweep_cmd(args: &[String]) -> Result<i32> {
     };
     let t0 = std::time::Instant::now();
     let root = std::env::current_dir()?;
-    let cfg = sweep_config(&root)?;
+    let cfg = settings(&root)?;
     if !cfg.listed {
         eprintln!("layr-retest: sweep skipped: no `sweep` list under [workspace.metadata.layr-retest] in Cargo.toml");
         return Ok(0);
@@ -797,7 +962,7 @@ fn run(args: &[String]) -> Result<i32> {
     let tools = (llvm_tool("llvm-profdata")?, llvm_tool("llvm-cov")?);
     let runner_var = format!("CARGO_TARGET_{}_RUNNER", rustc_host()?.to_uppercase().replace('-', "_"));
     let hash = hash_env(&root)?;
-    let project_env = sweep_config(&root)?.env;
+    let project_env = settings(&root)?.env;
     let cargo = |first: &[&str]| {
         let mut c = cargo_cmd();
         c.args(first).args(extra);

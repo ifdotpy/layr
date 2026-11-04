@@ -1481,6 +1481,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "layr-cache"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde_json",
+]
+
+[[package]]
 name = "layr-model"
 version = "0.1.0"
 dependencies = [
@@ -1504,6 +1512,7 @@ name = "layr-retest"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "layr-cache",
  "serde",
  "serde_json",
  "toml 0.8.23",

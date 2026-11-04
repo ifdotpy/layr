@@ -430,6 +430,7 @@ taken states are written as overlay line records, so their owners follow the ove
 - An unprotected target takes the caches without the check.
 - Test: `tests/t101-merge-caches-only.sh` (macOS and Linux CI, OverlayFS on ext4 and XFS).
 
+<<<<<<< head
 ## 18. Removing a cache overlay
 
 `layr overlay remove <name>` removes a cache overlay from the project. The owner runs it. A
@@ -447,3 +448,126 @@ versioned overlay is refused: its files are history.
   snapshot, as any regenerable folder does. To keep it plain, remove `regenerable` from
   `.layrattributes` or from the machine setting first.
 - Test: `tests/t110-overlay-remove.sh`.
+||||||| base
+=======
+## 18. Pruning cache folders
+
+A cache folder of a line (`target`, `node_modules`) keeps the build output of old dependencies. A
+language adapter removes that output and keeps the live set, the entries that the project's
+standard commands still need. The adapters are in the crate `crates/layr-cache`. Core calls them
+through one function (section 18.4). Status: the adapters are built and tested. Core does not
+call them yet: `Repo::prune_cache` (`src/cache_overlay.rs`) is a no-op until the ownership work
+wires it. The overlay property `prune` is a spec for core (section 18.5).
+
+### 18.1 Adapters
+
+| Name | Folder | Project file next to it | Live set | Work |
+| --- | --- | --- | --- | --- |
+| `cargo` | `target` | `Cargo.toml` | the units of the `sweep` list of `[workspace.metadata.layr-retest]` | lists the units (no compile), then removes the other entries (`sweep.rs`, section "Sweeping stale build output" of `docs/retest.md`) |
+| `pnpm` | `node_modules` | `pnpm-lock.yaml` | the packages of the lockfile | `pnpm install --frozen-lockfile --offline --ignore-scripts`, then `pnpm prune --ignore-scripts` |
+
+Rules every adapter keeps:
+
+- Offline. An adapter never uses the network: a package that the store lacks fails the step.
+- Compiles nothing and runs no lifecycle script.
+- A stale or failing state skips the folder. The result names the reason.
+- The `pnpm` adapter copies `node_modules` with copy-on-write (`cp -cRp` on macOS, `cp -a
+  --reflink=auto` elsewhere) before its first step, and puts the copy back when a step fails. The
+  folder is unchanged after a skip. pnpm alone can leave new empty folders behind a missing package.
+- The `cargo` adapter removes nothing before its listing succeeds. Cargo's freshness check can
+  remove the outputs of the one unit that is not fresh before the listing stops. The next build
+  rebuilds that unit anyway. No other entry is removed.
+- A busy cargo build lock skips its profile folder. The other profile folders of the same `target`
+  are already swept.
+
+### 18.2 Choosing an adapter
+
+Without a setting, the folder name and its project file choose the adapter (table 18.1). The
+parent folder of the cache folder is the project folder. A `target` without `Cargo.toml`, or a
+`node_modules` without `pnpm-lock.yaml`, has no adapter and is left as it is.
+
+### 18.3 Command by hand
+
+`layr retest prune <folder> [--adapter cargo|pnpm|none]` runs the adapter of a folder in the
+current line and prints `<folder>: pruned with <adapter>, freed <N> MB` or `<folder>: skipped:
+<reason>`. A skip exits 0.
+
+### 18.4 Entry point for core
+
+```rust
+pub fn layr_cache::prune(setting: Option<&str>, folder: &Path) -> anyhow::Result<Outcome>
+
+pub enum Outcome {
+    Pruned { adapter: &'static str, freed: u64 },
+    Skipped { reason: String },
+}
+```
+
+Inputs:
+
+- `setting`: the overlay property `prune` of the cache overlay of `folder`. `None` detects the
+  adapter (18.2). `Some("none")` does nothing and returns `Skipped`. `Some("cargo")` or
+  `Some("pnpm")` runs that adapter, which still skips a folder that does not fit it.
+- `folder`: the absolute path of the cache folder in the working copy of the line
+  (`working(line).join(folder)`). The project folder is its parent.
+
+Outputs and errors:
+
+- `Ok(Outcome::Pruned)`: the folder lost its stale entries. `freed` is in bytes.
+- `Ok(Outcome::Skipped)`: the folder is unchanged. Every stale state, failed command and busy lock
+  is a skip, not an error.
+- `Err`: only a setting that is not `none` and not an adapter name (`layr_cache::ADAPTERS`).
+  Core checks the setting when it reads the overlay property, so this error does not occur in
+  practice.
+
+### 18.5 Integration contract for `Repo::prune_cache` (layr session)
+
+The current stub is `fn prune_cache(&self, folder: &str) -> Result<()>` in `src/cache_overlay.rs`.
+It has no line and no overlay name. The adapters need both, so the signature changes with the
+wiring. Proposed:
+
+```rust
+fn prune_cache(&self, line: &Line, overlay: &str, folder: &str) -> Result<()>
+```
+
+What the function does:
+
+1. Reads the `prune` property of `overlay` (section 18.6). `None` when unset.
+2. Calls `layr_cache::prune(setting, &self.working(line).join(folder))`.
+3. Prints the outcome in the output of the command (`Pruned` with the freed bytes, `Skipped` with
+   the reason). A `Skipped` outcome or an error from the adapter never fails the command.
+
+Call sites: after the line takes the caches of `folder` (`follow_caches` in `src/follow.rs`, and
+the paths of `merge`, `merge --caches-only` and `line new`) and before `save --caches`, so that the
+saved caches are the pruned ones. The line's working copy must hold the project files
+(`Cargo.toml`, `pnpm-lock.yaml`), which it does when the line is checked out.
+
+Constraints:
+
+- The `pnpm` adapter does not lock the folder. Core runs the hook in the line under the line
+  lock, so no other pnpm call of the same folder runs at the same time.
+- The hook must not hold the store lock for the whole adapter run. A `pnpm` run takes seconds on
+  a large `node_modules`.
+- The `cargo` adapter takes cargo's build lock of each profile folder without waiting.
+
+### 18.6 Overlay property `prune` (spec for core, not implemented)
+
+- Name: `prune`. Values: `cargo`, `pnpm`, `none`. Unset means auto (18.2).
+- Setting: `overlay.<name>.prune`, like the other properties (section 2).
+- `layr overlay set <name> --prune <cargo|pnpm|none>`. Other values are refused. `--prune` without
+  a value, or a value `auto`, unsets the property.
+- Core validates the value against `layr_cache::ADAPTERS` and `none`. It must not copy the names.
+- Places: `Props` and `PROPS` in `src/overlay.rs` (field, `from_settings`, `value`, `describe`,
+  `to_json`), and `props_spec` and `props_of` in `src/cmd/overlaycmd.rs`.
+- Test: a case in `tests/t58-overlay-properties.sh`.
+
+### 18.7 Tests
+
+- `crates/layr-cache/tests/cargo_prune.rs`: a stale unit is removed and the next build compiles
+  nothing; a stale standard unit skips the folder; a project without a sweep list is skipped.
+- `crates/layr-cache/tests/pnpm_prune.rs`: a removed package is gone from `node_modules` and
+  `.pnpm` with an address that refuses connections as the registry; a lockfile that needs a missing
+  package and a stale lockfile skip the folder, which stays unchanged; no lifecycle script runs.
+- `crates/layr-cache/tests/dispatch.rs`: detection, `none`, and an unknown name.
+- `crates/layr-retest/tests/e2e.rs`: `layr retest prune target` runs the cargo adapter.
+>>>>>>> b948645

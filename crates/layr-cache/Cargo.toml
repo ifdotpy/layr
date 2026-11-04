@@ -1,0 +1,11 @@
+[package]
+name = "layr-cache"
+version = "0.1.0"
+edition = "2021"
+description = "Language adapters that prune layr cache folders to the live set"
+license = "MIT"
+publish = false
+
+[dependencies]
+anyhow = "1"
+serde_json = "1"

@@ -503,6 +503,13 @@ pub fn sweep(profile: &Path, live: &Live, dry: bool) -> u64 {
     freed
 }
 
+/// Bytes of the files under `p`, each inode counted once. A hard link of a file counts its bytes once.
+pub fn tree_bytes(p: &Path) -> u64 {
+    let mut out = BTreeMap::new();
+    visit(p, &mut out);
+    out.values().map(|(_, _, len)| len).sum()
+}
+
 /// Bytes that removing `paths` frees: a file frees its bytes when every link to its inode is in `paths`.
 fn freed_by(paths: &[PathBuf]) -> u64 {
     // (dev, ino) -> (links removed, links in total, bytes)

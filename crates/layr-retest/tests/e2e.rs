@@ -1403,3 +1403,27 @@ fn sweep_keeps_one_incremental_folder_of_a_test_binary_without_debug_info() {
     );
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// `layr retest prune target` runs the cargo adapter by hand. The units of the feature build go, and the next
+/// standard build compiles nothing.
+#[test]
+fn prune_command_runs_the_cargo_adapter_by_hand() {
+    let tmp = std::env::temp_dir().canonicalize().unwrap().join(format!("layr-retest-prune-cli-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let ws = tmp.join("ws");
+    let build = ["build", "--workspace", "--tests", "--bins"];
+    sweep_workspace(&ws, "sweep = [[\"build\", \"--workspace\", \"--tests\", \"--bins\"]]");
+    cargo(&ws, &build);
+    let debug = ws.join("target/debug");
+    let units = entries(&debug, ".fingerprint");
+    cargo(&ws, &["build", "--workspace", "--tests", "--bins", "--features", "lib-a/extra"]);
+    assert!(entries(&debug, ".fingerprint").len() > units.len());
+
+    let (out, _) = sh(&ws, &ws.join("unused-store"), "layr", &["retest", "prune", "target"]);
+    assert!(out.contains("target: pruned with cargo"), "{out}");
+    assert_eq!(entries(&debug, ".fingerprint"), units, "a non-live unit stays");
+
+    let err = cargo(&ws, &build);
+    assert!(!err.contains("Compiling"), "the next build compiled:\n{err}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}

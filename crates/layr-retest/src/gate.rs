@@ -155,7 +155,7 @@ fn with_env<'a>(cmd: &'a mut Command, env: &[(String, String)]) -> &'a mut Comma
 
 /// The env of the gate: the project's `env` (none without `Cargo.toml`), and `RUSTC_WRAPPER` cleared.
 fn gate_env(root: &Path) -> Result<Vec<(String, String)>> {
-    let mut env = if root.join("Cargo.toml").is_file() { crate::sweep_config(root)?.env } else { Vec::new() };
+    let mut env = if root.join("Cargo.toml").is_file() { layr_cache::cargo::settings(root)?.env } else { Vec::new() };
     env.push(("RUSTC_WRAPPER".to_string(), String::new()));
     Ok(env)
 }
