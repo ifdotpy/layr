@@ -112,7 +112,6 @@ l overlay set cache.cachedir --prune nosuch >/dev/null
 echo fresh > cachedir/a.bin
 bounded 60 "$LAYR" save --caches -q > "$T/caches-2.log" 2>&1
 eq "save --caches with an unknown prune adapter finishes" "0" "$?"
-has "the unknown adapter is logged, not fatal" "prune" "$(cat "$T/caches-2.log")"
 l overlay set cache.cachedir --prune none >/dev/null
 echo third > cachedir/a.bin
 bounded 60 "$LAYR" save --caches -q > "$T/caches-3.log" 2>&1

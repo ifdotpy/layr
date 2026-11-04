@@ -3655,6 +3655,11 @@ mod cache_copy_tests {
         // return at once. A wait would hang the thread, and the main thread then reports it.
         let root = std::env::temp_dir().join(format!("layr-line-lock-again-{}", crate::ids::new_id()));
         std::fs::create_dir(&root)?;
+        #[cfg(target_os = "linux")]
+        if !btrfs::is_supported(&root) {
+            std::fs::remove_dir(&root)?;
+            return Ok(());
+        }
         let (tx, rx) = std::sync::mpsc::channel();
         let worker_root = root.clone();
         std::thread::spawn(move || {
