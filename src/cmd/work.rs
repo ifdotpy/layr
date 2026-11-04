@@ -1233,7 +1233,7 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
     };
     // On APFS the state, its tree and the changes were made before the lock.
     #[cfg(target_os = "macos")]
-    let NamedPrepared { head_root, mut pending, mut state, new_root, checks, .. } =
+    let NamedPrepared { head_root, mut pending, mut state, checks, .. } =
         prepared.take().ok_or_else(|| anyhow::anyhow!("internal error: named save was not prepared"))?;
     #[cfg(target_os = "macos")]
     let (staged, cleared) = checks.ok_or_else(|| anyhow::anyhow!("internal error: named save has no checks"))?;

@@ -19,6 +19,8 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 use std::time::Instant;
 
 /// Marks a target folder that a copy has not finished.
@@ -277,14 +279,16 @@ fn compare_copy(src: &Path, dst: &Path) -> Result<()> {
     let mut stats = Stats::default();
     compare_dir(src, dst, &mut rel, &mut stats).with_context(|| format!("verify {}", dst.display()))?;
     ensure!(stats.databases > 0, "the source has no database");
+    compare_contents(&stats.files).with_context(|| format!("verify {}", dst.display()))?;
     storage::verify_registry(src, dst).with_context(|| format!("verify the registry of {}", dst.display()))?;
     Ok(())
 }
 
 #[derive(Default)]
 struct Stats {
-    files: u64,
-    bytes: u64,
+    /// The regular files of the source and the copy (with their path in the project), whose content the walk
+    /// leaves to `compare_contents`.
+    files: Vec<(PathBuf, PathBuf, String)>,
     databases: usize,
 }
 
@@ -352,25 +356,69 @@ fn compare_entry(s: &Path, d: &Path, rel: &mut Vec<String>, stats: &mut Stats) -
         ensure!(sm.is_file(), "{}: special file", rel.join("/"));
         ensure!(sm.len() == dm.len(), "{}: size {} differs from {}", rel.join("/"), sm.len(), dm.len());
         ensure!(sm.mode() & 0o7777 == dm.mode() & 0o7777, "{}: mode differs", rel.join("/"));
-        ensure!(hash_file(s)? == hash_file(d)?, "{}: content differs", rel.join("/"));
-        stats.files += 1;
-        stats.bytes += sm.len();
+        stats.files.push((s.to_path_buf(), d.to_path_buf(), rel.join("/")));
         Ok(())
     }
 }
 
-fn hash_file(path: &Path) -> Result<[u8; 32]> {
-    let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
-    let mut hasher = FastCryptographic::new();
-    let mut buf = vec![0u8; 1 << 20];
-    loop {
-        let n = file.read(&mut buf)?;
-        if n == 0 {
-            break;
+/// Compares the bytes of each pair of files, on up to four threads: the work is reading, and the files are many.
+/// The first difference or error wins, and the other threads stop.
+fn compare_contents(files: &[(PathBuf, PathBuf, String)]) -> Result<()> {
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 4).min(files.len().max(1));
+    let next = AtomicUsize::new(0);
+    let failed: Mutex<Option<anyhow::Error>> = Mutex::new(None);
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(|| {
+                let (mut a, mut b) = (vec![0u8; 1 << 20], vec![0u8; 1 << 20]);
+                while failed.lock().map(|f| f.is_none()).unwrap_or(false) {
+                    let Some((s, d, rel)) = files.get(next.fetch_add(1, Ordering::Relaxed)) else { return };
+                    let r = same_content(s, d, &mut a, &mut b)
+                        .and_then(|same| if same { Ok(()) } else { Err(anyhow::anyhow!("{rel}: content differs")) });
+                    if let Err(e) = r {
+                        if let Ok(mut f) = failed.lock() {
+                            f.get_or_insert(e);
+                        }
+                    }
+                }
+            });
         }
-        hasher.update(&buf[..n]);
+    });
+    match failed.into_inner() {
+        Ok(None) => Ok(()),
+        Ok(Some(e)) => Err(e),
+        Err(_) => bail!("a comparison thread failed"),
     }
-    Ok(*hasher.finalize().as_bytes())
+}
+
+/// Whether the files `s` and `d` hold the same bytes. `a` and `b` are the read buffers (of one size).
+fn same_content(s: &Path, d: &Path, a: &mut [u8], b: &mut [u8]) -> Result<bool> {
+    let mut fs_ = File::open(s).with_context(|| format!("open {}", s.display()))?;
+    let mut fd = File::open(d).with_context(|| format!("open {}", d.display()))?;
+    loop {
+        let n = read_full(&mut fs_, a).with_context(|| format!("read {}", s.display()))?;
+        let m = read_full(&mut fd, b).with_context(|| format!("read {}", d.display()))?;
+        if n != m || a[..n] != b[..m] {
+            return Ok(false);
+        }
+        if n < a.len() {
+            return Ok(true);
+        }
+    }
+}
+
+/// Reads until `buf` is full or the file ends. Returns the bytes read.
+fn read_full(f: &mut File, buf: &mut [u8]) -> std::io::Result<usize> {
+    let mut n = 0;
+    while n < buf.len() {
+        match f.read(&mut buf[n..]) {
+            Ok(0) => break,
+            Ok(k) => n += k,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(n)
 }
 
 fn compare_db(s: &Path, d: &Path, name: &str) -> Result<()> {
