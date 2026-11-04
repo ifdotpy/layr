@@ -22,6 +22,15 @@ pub fn register(store: &Store, name: &str) {
     }
 }
 
+/// Forget projects opened by a metadata-only command. Such commands do not create pins or
+/// queue frees; a later mutating command will still process any existing queue.
+pub fn finish_read(store: &Store) {
+    release_held();
+    if let Ok(mut opened) = OPENED.lock() {
+        opened.retain(|(root, _)| *root != store.root);
+    }
+}
+
 /// The free step of the projects that this command opened. Errors wait for the next command
 /// (the queue keeps the states). Test only: `LAYR_TEST_EXIT_AFTER_COMMIT` exits with status 86
 /// here, before any storage moves, when a queue is not empty (tests/t99-ownership-free.sh).
@@ -60,11 +69,9 @@ fn pending(store: &Store, name: &str) -> bool {
     let Ok(dir) = store.project_dir(name) else { return false };
     let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY;
     let Ok(conn) = rusqlite::Connection::open_with_flags(crate::store::db_file(&dir), flags) else { return false };
-    conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM free_queue) OR EXISTS(SELECT 1 FROM owners WHERE kind='pin')",
-        [],
-        |r| r.get::<_, bool>(0),
-    )
+    conn.query_row("SELECT EXISTS(SELECT 1 FROM free_queue) OR EXISTS(SELECT 1 FROM owners WHERE kind='pin')", [], |r| {
+        r.get::<_, bool>(0)
+    })
     .unwrap_or(false)
 }
 

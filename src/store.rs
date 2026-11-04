@@ -112,6 +112,10 @@ pub fn resolve_root(root: &Path) -> Result<PathBuf> {
 
 impl Store {
     pub fn open(root: &Path) -> Result<Store> {
+        Self::open_for(root, false)
+    }
+
+    pub fn open_for(root: &Path, read: bool) -> Result<Store> {
         // Resolve aliases once at the store boundary. Paths inside a line still refuse links.
         // A refused store is not created, so the resolution comes first.
         let root = resolve_root(root)?;
@@ -123,7 +127,7 @@ impl Store {
         if !root.exists() {
             mkdir_mode(root, 0o755)?;
         }
-        let version_guard = crate::store_version::Guard::open(root)?;
+        let version_guard = crate::store_version::Guard::open_for(root, read)?;
         #[cfg(not(feature = "overlayfs"))]
         if root.join(".layr-overlayfs").exists() {
             bail!("this store requires a layr build with the overlayfs feature");
@@ -131,17 +135,44 @@ impl Store {
         crate::linepaths::register(root);
         #[cfg(feature = "overlayfs")]
         crate::storage::recover(root)?;
-        let machine_lock = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(root.join(".layr-machine.lock"))?;
-        anyhow::ensure!(machine_lock.metadata()?.is_file(), "the machine initialization lock is not a regular file");
-        rustix::fs::flock(&machine_lock, rustix::fs::FlockOperation::LockExclusive)?;
+        // Identity is initialized under the exclusive lease, with the key published last.
+        // An existing key under a shared lease therefore means the identity is complete.
         let mdir = root.join("machine");
+        let shared = if read {
+            fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(root.join(".layr-machine.lock"))
+                .ok()
+                .and_then(|file| {
+                    if !file.metadata().ok()?.is_file() {
+                        return None;
+                    }
+                    rustix::fs::flock(&file, rustix::fs::FlockOperation::LockShared).ok()?;
+                    if mdir.join("key").exists() {
+                        Some(file)
+                    } else {
+                        None
+                    }
+                })
+        } else {
+            None
+        };
+        let machine_lock = if let Some(file) = shared {
+            file
+        } else {
+            let file = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(root.join(".layr-machine.lock"))?;
+            anyhow::ensure!(file.metadata()?.is_file(), "the machine initialization lock is not a regular file");
+            rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)?;
+            file
+        };
         // Recheck only under the lease. The ID and key must belong to the same initialization.
         if !mdir.join("key").exists() {
             if root.join("projects").is_dir() && fs::read_dir(root.join("projects"))?.next().is_some() {

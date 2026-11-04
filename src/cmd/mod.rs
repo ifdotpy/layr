@@ -14,6 +14,7 @@ pub mod mergecmd;
 pub mod oci;
 pub mod overlaycmd;
 pub mod probe;
+pub mod project;
 pub mod queue;
 pub mod refs;
 pub mod release;
@@ -22,7 +23,6 @@ pub mod replicate;
 pub mod requests;
 pub mod transfer;
 pub mod view;
-pub mod project;
 pub mod volume;
 pub mod work;
 
@@ -30,6 +30,34 @@ use crate::ctx::{Ctx, Loc};
 use crate::model::Line;
 use crate::repo::Repo;
 use anyhow::{bail, Result};
+
+/// Commands that only inspect metadata and do not create or retain pins.
+pub fn metadata_read(argv: &[String]) -> bool {
+    match argv.first().map(String::as_str) {
+        // Other rev-parse forms may populate the git object store.
+        Some("rev-parse") => argv.len() == 2 && argv[1] == "head",
+        Some("op") => matches!(argv.get(1).map(String::as_str), None | Some("log" | "show" | "export")),
+        Some("overlay") => matches!(argv.get(1).map(String::as_str), None | Some("list")),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod metadata_read_tests {
+    use super::metadata_read;
+
+    #[test]
+    fn only_metadata_commands_use_the_read_path() {
+        let read = |args: &[&str]| metadata_read(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert!(read(&["rev-parse", "head"]));
+        assert!(read(&["op", "log", "--json"]));
+        assert!(read(&["overlay", "list", "--json"]));
+        assert!(!read(&["rev-parse", "head^{tree}"]));
+        assert!(!read(&["op", "import"]));
+        assert!(!read(&["overlay", "create"]));
+        assert!(!read(&["status"])); // Some status forms retain pins and create snapshots.
+    }
+}
 
 /// An error with a specific exit code (git uses 1 for "not done", 128 for fatal errors).
 #[derive(Debug)]

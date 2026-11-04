@@ -323,9 +323,12 @@ fn handle(sock: UnixStream, root: &Path, registry_uids: &[u32]) -> i32 {
 /// Run a command for a caller and return its exit code (errors are printed to stderr).
 pub fn run_as(argv: Vec<String>, caller: Caller, cwd: PathBuf, env: HashMap<String, String>, root: &Path) -> i32 {
     crate::repo::begin_command();
-    let store = match Store::open(root) {
+    let metadata_read = crate::cmd::metadata_read(&argv);
+    crate::db::set_metadata_read(metadata_read);
+    let store = match Store::open_for(root, metadata_read) {
         Ok(s) => s,
         Err(e) => {
+            crate::db::set_metadata_read(false);
             eprintln!("fatal: cannot open the layr store {}: {e:#}", root.display());
             return 128;
         }
@@ -349,7 +352,12 @@ pub fn run_as(argv: Vec<String>, caller: Caller, cwd: PathBuf, env: HashMap<Stri
         }
     };
     // The free step: after the commit and the store lock (docs/ownership.md).
-    crate::free::finish(&ctx.store);
+    if metadata_read {
+        crate::free::finish_read(&ctx.store);
+    } else {
+        crate::free::finish(&ctx.store);
+    }
+    crate::db::set_metadata_read(false);
     code
 }
 
