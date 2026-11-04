@@ -66,6 +66,13 @@ for sub in ("debug/deps", "debug/.fingerprint"):
 print(len(bad))
 for b in bad[:3]:
     print("differs:", b, file=sys.stderr)
+    print("  working copy of the source:", os.stat(os.path.join(src, b)).st_mtime_ns, file=sys.stderr)
+    print("  copy in the line:          ", os.stat(os.path.join(dst, b)).st_mtime_ns, file=sys.stderr)
+    states = os.environ.get("LAYR_CACHE_STATES", "")
+    for st in sorted(os.listdir(states)) if states and os.path.isdir(states) else []:
+        f = os.path.join(states, st, b)
+        if os.path.isfile(f):
+            print("  cache state", st[:12], os.stat(f).st_mtime_ns, file=sys.stderr)
 PYTIMES
 }
 new_line() { l line new $OWNER_ARG "$@" >/dev/null; }
@@ -108,7 +115,7 @@ fi
 eq "merge --caches-only removes the stale units" "$base" "$merged"
 # The union copies main's cache into the folder that already has one: the copied times are the source's
 # (cargo compares them). The mismatch count is over the files that both caches have.
-eq "the union merge keeps the times of the cache" "0" "$(times_mismatch $P/main/target $P/other/target)"
+LAYR_CACHE_STATES=$LAYR_ROOT/projects/p/meta/overlays/cache.target/states eq "the union merge keeps the times of the cache" "0" "$(times_mismatch $P/main/target $P/other/target)"
 rebuilt=$(cb "$P/other" build --workspace)
 case "$rebuilt" in *Compiling*) FAIL=$((FAIL + 1)); echo "FAIL the next build after the union merge compiled" ;; *) PASS=$((PASS + 1)); echo "PASS the next build after the union merge compiles nothing" ;; esac
 
