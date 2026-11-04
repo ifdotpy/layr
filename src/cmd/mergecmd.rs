@@ -1038,28 +1038,12 @@ fn merge_rev_inner(
     }
     let rule = repo.authorize_line(ctx, line, crate::repo::LineOp::Merge { expect, hint: hint.as_deref() })?;
     // The automatic save of the working folder is a record: its project lock covers that one step.
-    let w = {
-        let mut result = None;
-        for attempt in 1..=3 {
-            #[cfg(not(target_os = "macos"))]
-            repo.prepare_save(line, true)?;
-            let saved = {
-                let _commit = repo.p.lock()?;
-                repo.working_state(ctx, line, if queue.is_some() { "before a queued merge" } else { "before a layr command" })
-            };
-            #[cfg(not(target_os = "macos"))]
-            repo.discard_prepared();
-            match saved {
-                Err(ref e) if e.is::<crate::repo::SaveMoved>() && attempt < 3 => {
-                    if repo.line(&line.id)? != *line {
-                        return Err(target_moved(&line.name));
-                    }
-                }
-                saved => { result = Some(saved?); break; }
-            }
-        }
-        result.expect("a save attempt always returns or retries")
-    };
+    let (lock, w, _) = repo.retry_prepared_save(line, false, !cfg!(target_os = "macos"), |_, _| Ok(()), |current| {
+        repo.working_state(ctx, current, if queue.is_some() { "before a queued merge" } else { "before a layr command" })
+    })?;
+    drop(lock);
+    #[cfg(not(target_os = "macos"))]
+    repo.discard_prepared();
     let checks = rule.as_ref().map(|r| r.check.clone()).unwrap_or_default();
     let settled = Settled {
         expect,

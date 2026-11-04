@@ -53,4 +53,50 @@ wait "$pid" 2>/dev/null || true
 ok 'the daemon reports its project lock holds' grep -q 'store lock held: p$' "$T/daemon.log"
 held=$(awk '/store lock held: p$/ { if ($2 > m) m = $2 } END { print int(m) }' "$T/daemon.log")
 ok "project lock hold remains below 2 seconds ($held ms)" test "$held" -lt 2000
+# A foreground pre-command save uses the same preparation. Three intervening automatic
+# saves invalidate it; the fourth attempt uses the original locked save.
+unset LAYR_SOCKET
+export LAYR_DIRECT=1
+W=$T/foreground-wait
+mkdir -p "$W"
+LAYR_TEST_AUTO_SAVE_WAIT="$W" LAYR_TRACE=1 l rm --cached notes.txt >"$T/fallback.log" 2>&1 &
+fg=$!
+for n in 1 2 3; do
+    for _ in $(seq 1 600); do [ -e "$W/planned.$n" ] && break; sleep 0.1; done
+    ok "foreground preparation $n reached" test -e "$W/planned.$n"
+    printf 'change %s\n' "$n" > retry.txt
+    l save --note "race $n" -q
+    touch "$W/go.$n"
+done
+wait "$fg" && rc=0 || rc=$?
+eq "foreground save falls back after three races" 0 "$rc"
+ok "locked fallback is traced" grep -q 'save: locked fallback' "$T/fallback.log"
+l add notes.txt
+
+# A copied private overlay file must stay out of the automatic state; this also exercises
+# comparison of the filtered, read-only snapshot on btrfs.
+printf 'private content\n' > private.txt
+l overlay create secret -q
+l overlay move secret private.txt >/dev/null
+l save -qm private
+cp private.txt private-copy.txt
+printf 'ordinary\n' > visible.txt
+ok "pre-command save handles an overlay and copied private file" l rm --cached notes.txt
+no "automatic state excludes copied private content" l show 'head@{0}:private-copy.txt'
+ok "automatic state keeps ordinary content" l show 'head@{0}:visible.txt'
+
+# Crash in the middle of the two cache-directory renames, then enter a pre-command save.
+sample "$T/crash-src"
+printf 'cache regenerable\n' > "$T/crash-src/.layrattributes"
+l init crash --from "$T/crash-src" -q >/dev/null
+cd "$LAYR_ROOT/projects/crash/lines/main" || exit 1
+l protect main --remove >/dev/null 2>&1 || true
+l overlay create cache.cache --folder cache --history last --quiet --merge union-theirs -q
+mkdir cache
+printf 'preserved\n' > cache/data
+LAYR_TEST_CACHE_CRASH=between-renames l overlay repair cache.cache >"$T/crash.log" 2>&1 && crash_rc=0 || crash_rc=$?
+eq "fixture exits between cache renames" 86 "$crash_rc"
+ok "pre-command save recovers the interrupted cache replacement" l rm --cached notes.txt
+eq "recovery preserves cache contents" preserved "$(cat cache/data)"
+no "recovery removes its journal" sh -c 'ls .layr-cache-replace-*.json >/dev/null 2>&1'
 finish
