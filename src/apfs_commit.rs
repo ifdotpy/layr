@@ -253,6 +253,33 @@ fn is_tree(path: &Path, subvol: &str, device: u64, inode: u64) -> Result<bool> {
     Ok(m.is_dir() && m.dev() == device && m.ino() == inode && storage::subvol_info(path)?.uuid == subvol)
 }
 
+/// Copy the ACLs of the entries of `stage` to the same entries of `tree`. A copy of a tree keeps
+/// the data, the extended attributes and the times, but not every ACL: a save keeps an ACL that a
+/// file got in its stage (the layer of a thin stage has it), as the moved stage did before.
+fn copy_acls(stage: &Path, tree: &Path) -> Result<()> {
+    let mut pending = vec![PathBuf::new()];
+    while let Some(rel) = pending.pop() {
+        let src = stage.join(&rel);
+        let dst = tree.join(&rel);
+        let Ok(m) = fs::symlink_metadata(&src) else { continue };
+        // A link's ACL is not copied; an entry the copy lacks is not an entry of the save.
+        if m.file_type().is_symlink() || fs::symlink_metadata(&dst).is_err() {
+            continue;
+        }
+        if crate::sys::apfs_has_acl(&src)? {
+            let from = fs::File::open(&src)?;
+            let to = fs::File::open(&dst)?;
+            crate::sys::apfs_copy_acl_fd(std::os::fd::AsFd::as_fd(&from), std::os::fd::AsFd::as_fd(&to))?;
+        }
+        if m.is_dir() {
+            for e in fs::read_dir(&src)? {
+                pending.push(rel.join(e?.file_name()));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Where the state of a save goes: a thin state in `deltas/`, a complete one in `states/`.
 fn state_target(p: &Project, state: &str, thin: bool) -> PathBuf {
     if thin {
@@ -337,15 +364,17 @@ impl<'p, 's> PendingCommit<'p, 's> {
             in_pending: true,
             active: true,
         };
-        // A failure from here on removes the folder (Drop).
-        storage::snapshot(&stage, &tree, true)?;
+        // A failure from here on removes the folder (Drop). The copy is made writable so its ACLs
+        // can be set, and it is sealed read-only below.
+        storage::snapshot(&stage, &tree, false)?;
+        copy_acls(&stage, &tree)?;
         let mut tinfo = storage::subvol_info(&tree)?;
         if thin {
             tinfo.base = sinfo.base.clone();
-            storage::set_writable(&tree)?;
             storage::write_info(&tree, &tinfo)?;
-            storage::set_readonly(&tree)?;
         }
+        storage::set_readonly(&tree)?;
+        let tinfo = storage::subvol_info(&tree)?;
         let tm = fs::symlink_metadata(&tree)?;
         journal.tree_subvol = tinfo.uuid.clone();
         journal.tree_device = tm.dev();
