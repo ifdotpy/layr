@@ -40,7 +40,7 @@ operation that drops its last owner. No walk decides what lives; `gc` only check
 | `park` | line id + index | a park entry | `park` | `park pop`, `park drop`, `park clear` |
 | `auto` | line id | its newest `retention.auto` automatic states (default 10) | a new automatic state | the ring overflows, line delete |
 | `undo` | line id | the states that its newest `undo.ops` records name (default 20): before and after heads, working states, states made by the record | a record of the line | the ring overflows |
-| `deleted` | project | the final state and staged state of the newest `undo.deleted` deleted lines (default 5) | line delete | the ring overflows, `undo` of the delete |
+| `deleted` | project | the final state and staged state of the newest `undo.deleted` deleted lines (default 5) | line delete | the ring overflows (with the `undo` owner of the delete record), `undo` of the delete |
 | `overlay` | overlay name + line | a project state that a cache overlay head or record names | overlay save | overlay head moves, overlay line delete |
 | `store` | store remote name | a state that a successful push to a store remote sent | push | never while eviction is off (the store keeps every state it receives) |
 | `pin` | `<pid>:<process start>` | a state that a command reads outside the store lock (a check or `try` copy) | pin start (only when the state has another owner) | pin end; a dead process is released by the next free step and by `gc --repair` |
@@ -53,9 +53,11 @@ Rules:
 2. `ref` expiry is the only time rule left. An expired ref is released by the next command that
    reads or writes refs, and by `gc --repair`.
 3. A newest automatic state of each live line always has an `auto` owner (ring size at least 1).
-4. A deleted line keeps no `undo` record of its earlier operations. Its `undo` owners go in the
-   line delete, so its automatic states and saved records are freed by that command. `undo` of
-   the delete still works through the `deleted` ring (its final and staged states).
+4. A deleted line keeps no `undo` owner of its earlier operations. The `undo` owner of its delete
+   record lives exactly as long as the matching `deleted` owner `{ord}|{line}`: when the ring drops
+   the line, both go, and the final state is freed when no other owner holds it. A ring change
+   (`resync_rings`), the replay (`layr reindex`, the first open of a database) and a line delete apply
+   the same rule (`owners::undo_allowed`). `undo` of the delete works while both owners exist.
 5. Pins are owners that no record makes. The owners check does not compare them.
 
 ## When a state is freed
@@ -260,6 +262,10 @@ again under its lock. `layr gc -n --repair` only prints what it would free. `gc 
 The imported-state free step (section "States imported from Git") is in `gc --repair` before
 PR #135. It uses the owners table in shadow mode and does not depend on #135.
 
+The check also reports stale `undo` owners: owners of a deleted line whose delete record is outside
+the `deleted` ring (a store written before rule 4, or a leftover). It prints their count and the bytes
+of the states that the repair frees. `layr gc -n --repair` lists the states the repair would free.
+
 ## Configuration
 
 | key | default | unit | meaning |
@@ -291,3 +297,6 @@ the replay fills the owners, and `layr gc` reports the states that no owner name
 - tests/apfs-ownership-bases.sh (APFS only): a dead base of a live thin layer keeps its storage and
   goes with the layer.
 - tests/t92-owners-shadow.sh: the owners table equals the replay after each step.
+- tests/t120-deleted-line-owners.sh: a deleted line's final state is freed when the `undo.deleted` ring
+  drops it; a ring change gives a deleted line no earlier undo; undo inside the ring works; gc reports
+  and repairs the stale undo owners of a store made before the rule.

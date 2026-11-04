@@ -284,7 +284,9 @@ Built on 2026-10-27: folder overlays and caches as cache overlays. Tests:
 - `layr cache list -v` (removed in section 15) showed the size of each cache folder and the overlay state
   the line saved; `overlay list` shows both.
 - `gc` applies `gc=lru:<size>` to the folder of each line (the newer of access and change time;
-  apparent sizes) and deletes the cache states of deleted lines.
+  apparent sizes) and deletes the cache states of deleted lines. LRU scans without locks, then
+  takes each line lock while deleting planned files whose identity, size and times still match.
+  Files changed or added during the scan wait for a later pass; it never holds the project lock.
 - `line delete` also deletes the cache overlay lines (`line-<id>`) of the line. `undo` of that delete
   restores the line but not its cache overlay lines: the next `save --caches` makes new ones. `gc`
   and `fsck --repair` remove cache overlay lines of deleted lines that older versions left behind.

@@ -18,7 +18,7 @@ use crate::model::{Line, LineChange, Record, StateKind, StateRec};
 use crate::overlay::{files_of, MergeKind, Mode, Props};
 use crate::repo::Repo;
 use crate::storage as btrfs;
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -107,6 +107,23 @@ pub fn platform_key(w: &Path, key_files: &[String]) -> String {
 pub fn other_platform(platform: Option<&str>) -> bool {
     let base = crate::model::cache_platform();
     platform.is_some_and(|p| p != base && !p.starts_with(&format!("{base}-")))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub struct RemovedOverlayPlan {
+    name: String,
+    mark: (i64, i64),
+    lines: Vec<Line>,
+    states: Vec<(String, PathBuf, fsutil::EntryIdentity)>,
+}
+
+#[cfg(not(target_os = "macos"))]
+fn removed_state_candidates(dir: &Path, root: &str, ids: Vec<String>) -> Vec<(String, PathBuf, fsutil::EntryIdentity)> {
+    ids.into_iter().filter(|id| id != root && crate::model::is_uuid(id)).filter_map(|id| {
+        let path = dir.join(&id);
+        let identity = fsutil::EntryIdentity::of(&path)?;
+        Some((id, path, identity))
+    }).collect()
 }
 
 impl<'a> Repo<'a> {
@@ -247,6 +264,52 @@ impl<'a> Repo<'a> {
     pub fn free_removed_overlays(&self, ctx: &Ctx) -> Result<()> {
         for (name, root) in self.removed_overlays()? {
             self.free_removed_overlay(ctx, &name, &root)?;
+        }
+        Ok(())
+    }
+
+    /// Collect removed-overlay lines and states without the project lock. The parent
+    /// records mark is checked by repair; each overlay has its own independent mark.
+    #[cfg(not(target_os = "macos"))]
+    pub fn plan_removed_overlays(&self) -> Result<Vec<RemovedOverlayPlan>> {
+        let mut plans = Vec::new();
+        for (name, root) in self.removed_overlays()? {
+            if !self.p.store.project_dir(&format!("{}%{name}", self.p.name))?.exists() { continue; }
+            let overlay = self.overlay_repo(&name)?;
+            let mark = overlay.p.db.records_mark()?;
+            let lines = overlay.p.db.lines()?;
+            let ids = overlay.p.db.present_states()?.into_iter().map(|(id, _)| id).collect();
+            let states = removed_state_candidates(&overlay.p.states_dir(), &root, ids);
+            plans.push(RemovedOverlayPlan { name, mark, lines, states });
+        }
+        Ok(plans)
+    }
+
+    /// The parent lock and unchanged parent records mark are held by repair. Each
+    /// overlay is locked before checking its mark, committing line deletes and
+    /// moving the unchanged planned state trees to prepared trash.
+    #[cfg(not(target_os = "macos"))]
+    pub fn commit_removed_overlays(&self, ctx: &Ctx, plans: Vec<RemovedOverlayPlan>, trash: &Path) -> Result<()> {
+        for plan in plans {
+            let overlay = self.overlay_repo(&plan.name)?;
+            let _lock = overlay.p.lock()?;
+            if overlay.p.db.records_mark()? != plan.mark { continue; }
+            self.drop_overlay_lines(ctx, &overlay, &plan.name, &plan.lines)?;
+            let mut deleted = Vec::new();
+            let mut failure = None;
+            for (id, path, identity) in plan.states {
+                if fsutil::EntryIdentity::of(&path).as_ref() != Some(&identity) { continue; }
+                match overlay.p.move_to_trash(&path, trash).with_context(|| format!("remove overlay state {}", path.display())) {
+                    Ok(()) => deleted.push(id),
+                    Err(e) => { if failure.is_none() { failure = Some(e); } }
+                }
+            }
+            if !deleted.is_empty() {
+                let mut rec = Record::new("gc");
+                rec.data = serde_json::json!({"deleted": deleted, "overlay": plan.name, "removed": true});
+                overlay.commit_record(ctx, rec)?;
+            }
+            if let Some(e) = failure { return Err(e); }
         }
         Ok(())
     }
@@ -706,56 +769,99 @@ impl<'a> Repo<'a> {
         crate::fsutil::atomic_write(&path, &serde_json::to_vec(&all)?, 0o600)
     }
 
-    /// `gc lru:<size>` of the folder overlays: in the working folder of each line, delete the
-    /// files of the folder that were used least recently (the newer of access and change time)
-    /// until the folder is at most the size. Returns the deleted bytes.
-    pub fn cache_gc_lru(&self) -> Result<u64> {
-        let mut freed = 0;
+    /// Walk working cache folders and choose LRU candidates without locks.
+    pub fn plan_cache_gc_lru(&self) -> Result<Vec<LruPlan>> {
+        let mut plans = Vec::new();
         for (name, folder) in self.folder_overlays()? {
             let Some(limit) = self.overlay_props(&name)?.gc_lru else { continue };
             for line in self.lines()? {
                 let w = self.working(&line);
-                if !self.applies_in(&name, &folder, &w)? {
-                    continue;
-                }
-                let Ok(cp) = fsutil::safe_join(&w, &folder) else { continue };
-                if !btrfs::is_subvolume(&cp) {
-                    continue;
-                }
-                freed += lru_trim(&cp, limit)?;
+                if !self.applies_in(&name, &folder, &w)? { continue; }
+                let Ok(root) = fsutil::safe_join(&w, &folder) else { continue };
+                if !btrfs::is_subvolume(&root) { continue; }
+                let files = plan_lru(&root, limit)?;
+                plans.push(LruPlan { line, name: name.clone(), folder: folder.clone(), root, limit, files });
             }
+        }
+        Ok(plans)
+    }
+
+    /// A cache trim writes a line's working folder, so it holds only that line's lock.
+    pub fn finish_cache_gc_lru(&self, plans: Vec<LruPlan>) -> Result<u64> {
+        let mut freed = 0;
+        for plan in plans {
+            let _line_lock = self.line_lock(&plan.line)?;
+            if self.line(&plan.line.id).ok().as_ref() != Some(&plan.line)
+                || self.overlay_props(&plan.name)?.gc_lru != Some(plan.limit)
+                || self.folder_overlay_of(&plan.folder)?.as_deref() != Some(plan.name.as_str())
+                || !self.applies_in(&plan.name, &plan.folder, &self.working(&plan.line))?
+                || !btrfs::is_subvolume(&plan.root)
+            { continue; }
+            freed += apply_lru(&plan.root, plan.files);
         }
         Ok(freed)
     }
 }
 
-/// Delete the least recently used files below `root` until their sizes add up to `limit` at most.
-pub fn lru_trim(root: &Path, limit: u64) -> Result<u64> {
-    use std::os::unix::fs::MetadataExt;
-    let mut files: Vec<(i64, u64, String)> = Vec::new();
+pub struct LruPlan {
+    line: Line,
+    name: String,
+    folder: String,
+    root: std::path::PathBuf,
+    limit: u64,
+    files: Vec<LruFile>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LruStamp(u64, u64, u64, i64, i64, i64, i64, i64, i64);
+
+impl LruStamp {
+    fn of(path: &Path) -> Option<Self> {
+        use std::os::unix::fs::MetadataExt;
+        let m = std::fs::symlink_metadata(path).ok()?;
+        if m.is_dir() { return None; }
+        Some(Self(m.dev(), m.ino(), m.size(), m.mtime(), m.mtime_nsec(), m.ctime(), m.ctime_nsec(), m.atime(), m.atime_nsec()))
+    }
+}
+
+struct LruFile { rel: String, stamp: LruStamp }
+
+fn plan_lru(root: &Path, limit: u64) -> Result<Vec<LruFile>> {
+    let mut files = Vec::new();
     let mut total = 0u64;
-    fsutil::walk(root, "", &mut |rel, m| {
-        if !m.is_dir() {
-            let used = std::fs::symlink_metadata(root.join(rel)).map(|x| x.atime().max(x.mtime())).unwrap_or(0);
-            files.push((used, m.size, rel.to_string()));
-            total += m.size;
+    fsutil::walk(root, "", &mut |rel, _| {
+        // Classify and stamp the same metadata observation: the walk's earlier
+        // observation can have been replaced by a directory.
+        if let Some(stamp) = LruStamp::of(&root.join(rel)) {
+            total = total.saturating_add(stamp.2);
+            files.push((stamp.7.max(stamp.3), rel.to_string(), stamp));
         }
         Ok(true)
     })?;
-    if total <= limit {
-        return Ok(0);
+    files.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+    let mut planned = Vec::new();
+    for (_, rel, stamp) in files {
+        if total <= limit { break; }
+        total = total.saturating_sub(stamp.2);
+        planned.push(LruFile { rel, stamp });
     }
-    files.sort();
+    Ok(planned)
+}
+
+fn apply_lru(root: &Path, files: Vec<LruFile>) -> u64 {
     let mut freed = 0;
-    for (_, size, rel) in files {
-        if total - freed <= limit {
-            break;
-        }
-        if fsutil::remove_entry(root, &rel).is_ok() {
-            freed += size;
-        }
+    let Ok(tree) = crate::tree::Tree::open(root) else { return 0 };
+    for file in files {
+        if LruStamp::of(&root.join(&file.rel)).as_ref() == Some(&file.stamp)
+            && tree.unlink_file(&file.rel).is_ok()
+        { freed += file.stamp.2; }
     }
-    Ok(freed)
+    freed
+}
+
+#[cfg(test)]
+fn lru_trim(root: &Path, limit: u64) -> Result<u64> {
+    Ok(apply_lru(root, plan_lru(root, limit)?))
 }
 
 #[cfg(test)]
@@ -798,6 +904,52 @@ mod tests {
         assert!(other_platform(Some("plan9-mips")));
         assert!(other_platform(Some(&format!("{base}x-0011"))));
         let _ = std::fs::remove_dir_all(&w);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn removed_overlay_plan_keeps_root_and_missing_states() {
+        let dir = std::env::temp_dir().join(format!("layr-removed-plan-{}", crate::ids::new_id()));
+        let root = crate::ids::new_id();
+        let state = crate::ids::new_id();
+        let missing = crate::ids::new_id();
+        std::fs::create_dir_all(dir.join(&root)).unwrap();
+        std::fs::create_dir_all(dir.join(&state)).unwrap();
+        let candidates = removed_state_candidates(&dir, &root, vec![root.clone(), state.clone(), missing]);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].0, state);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn lru_plan_keeps_changed_and_new_files() {
+        let root = std::env::temp_dir().join(format!("layr-lru-plan-{}", crate::ids::new_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("old"), b"old").unwrap();
+        let plan = plan_lru(&root, 0).unwrap();
+        std::fs::rename(root.join("old"), root.join("moved")).unwrap();
+        std::fs::write(root.join("old"), b"replacement").unwrap();
+        std::fs::write(root.join("new"), b"new").unwrap();
+        assert_eq!(apply_lru(&root, plan), 0);
+        assert_eq!(std::fs::read(root.join("old")).unwrap(), b"replacement");
+        assert!(root.join("new").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn lru_keeps_a_file_replaced_by_a_populated_directory() {
+        let root = std::env::temp_dir().join(format!("layr-lru-dir-{}", crate::ids::new_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("entry"), b"old").unwrap();
+        let plan = plan_lru(&root, 0).unwrap();
+        std::fs::remove_file(root.join("entry")).unwrap();
+        std::fs::create_dir(root.join("entry")).unwrap();
+        std::fs::write(root.join("entry/child"), b"keep").unwrap();
+        assert!(LruStamp::of(&root.join("entry")).is_none());
+        assert_eq!(apply_lru(&root, plan), 0);
+        assert!(crate::tree::Tree::open(&root).unwrap().unlink_file("entry").is_err());
+        assert_eq!(std::fs::read(root.join("entry/child")).unwrap(), b"keep");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

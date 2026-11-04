@@ -415,14 +415,18 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
             in_ring |= repo.p.db.holder_exists("undo", holder)?;
         }
         if !in_ring {
-            return Err(exit(
-                1,
+            let past = if r.op == "line.delete" {
                 format!(
-                    "error: cannot undo: operation {} is past the newest {} operations of its line (undo.ops)",
-                    ids::short(&r.id),
+                    "the newest {} deleted lines (undo.deleted)",
+                    repo.p.config_u64("undo.deleted", crate::owners::UNDO_DELETED_DEFAULT as u64)
+                )
+            } else {
+                format!(
+                    "the newest {} operations of its line (undo.ops)",
                     repo.p.config_u64("undo.ops", crate::owners::UNDO_OPS_DEFAULT as u64)
-                ),
-            ));
+                )
+            };
+            return Err(exit(1, format!("error: cannot undo: operation {} is past {past}", ids::short(&r.id))));
         }
     }
     // The states that the undo reads stay on disk while it runs (every line's entry of the record).
@@ -1187,20 +1191,35 @@ pub fn try_command(
 pub struct OwnersCheck {
     pub missing: Vec<crate::owners::Row>,
     pub extra: Vec<crate::owners::Row>,
-    pub leaks: Vec<String>,
+    /// Undo owners of deleted lines outside the deleted ring (`owners::stale_undo_rows`).
+    pub stale: Vec<crate::owners::Row>,
+    /// The present states that `gc --repair` frees: no row of the replay or a live pin names them.
+    pub freed: Vec<String>,
 }
 
 impl OwnersCheck {
     fn clean(&self) -> bool {
-        self.missing.is_empty() && self.extra.is_empty() && self.leaks.is_empty()
+        self.missing.is_empty() && self.extra.is_empty() && self.freed.is_empty()
     }
 }
 
 fn owners_check(repo: &Repo) -> Result<OwnersCheck> {
     let want = repo.p.db.recomputed_owners(&repo.p.store.machine.id)?;
     let (missing, extra) = repo.p.db.owners_diff(&want)?;
-    let leaks = repo.p.db.leaked_states()?;
-    Ok(OwnersCheck { missing, extra, leaks })
+    let stale = repo.p.db.stale_undo_rows()?;
+    let freed = repo.p.db.unowned_by(&kept_rows(repo, &want)?)?;
+    Ok(OwnersCheck { missing, extra, stale, freed })
+}
+
+/// The owner rows that a repair keeps: the replay plus the pins of live processes.
+fn kept_rows(repo: &Repo, want: &[crate::owners::Row]) -> Result<Vec<crate::owners::Row>> {
+    let mut rows = want.to_vec();
+    for (state, kind, holder) in repo.p.db.owner_rows()?.into_iter().filter(|r| r.1 == "pin") {
+        if crate::free::holder_alive(&holder) {
+            rows.push((state, kind, holder));
+        }
+    }
+    Ok(rows)
 }
 
 /// The bytes that only the storage of these states holds (as `layr du` counts them): clones that
@@ -1250,9 +1269,19 @@ fn check(ctx: &Ctx, repo: &Repo, quiet: bool) -> Result<i32> {
             outln!(ctx, "\textra: {} {k} {h}", ids::short(s));
         }
     }
-    if !c.leaks.is_empty() {
-        let bytes = states_bytes(repo, &c.leaks);
-        outln!(ctx, "leaks: {} state(s), {} would be freed by `layr gc --repair`", c.leaks.len(), human_size(bytes));
+    if !c.stale.is_empty() {
+        let freed: BTreeSet<&String> = c.freed.iter().collect();
+        let held: Vec<String> = c.stale.iter().map(|r| r.0.clone()).filter(|s| freed.contains(s)).collect();
+        outln!(
+            ctx,
+            "stale undo: {} owner(s) of deleted lines outside undo.deleted, holding {} that `layr gc --repair` frees",
+            c.stale.len(),
+            human_size(states_bytes(repo, &held))
+        );
+    }
+    if !c.freed.is_empty() {
+        let bytes = states_bytes(repo, &c.freed);
+        outln!(ctx, "leaks: {} state(s), {} would be freed by `layr gc --repair`", c.freed.len(), human_size(bytes));
     }
     if c.clean() {
         if !quiet {
@@ -1324,7 +1353,11 @@ pub fn gc_repair_quiet(ctx: &Ctx, repo: &Repo) -> Result<usize> {
 /// free it under the command).
 /// `diff` is `owners_diff` against the replay when the caller made it with no record added
 /// since (the rows that records make are the same); `None` replays here.
-pub fn repair_table(repo: &Repo, free: bool, diff: Option<(Vec<crate::owners::Row>, Vec<crate::owners::Row>)>) -> Result<Vec<String>> {
+pub fn repair_table(
+    repo: &Repo,
+    free: bool,
+    diff: Option<(Vec<crate::owners::Row>, Vec<crate::owners::Row>)>,
+) -> Result<Vec<String>> {
     let (missing, extra) = match diff {
         Some(d) => d,
         None => repo.p.db.owners_diff(&repo.p.db.recomputed_owners(&repo.p.store.machine.id)?)?,
@@ -1350,10 +1383,10 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) ->
     if dry {
         let c = snapshot(repo, || owners_check(repo))?;
         let queued: Vec<String> = repo.p.db.queued_frees()?;
-        let bytes = states_bytes(repo, &c.leaks);
+        let bytes = states_bytes(repo, &c.freed);
         if !quiet {
-            outln!(ctx, "would delete {} state(s), {}", c.leaks.len() + queued.len(), human_size(bytes));
-            for id in c.leaks.iter().take(50) {
+            outln!(ctx, "would delete {} state(s), {}", c.freed.len() + queued.len(), human_size(bytes));
+            for id in c.freed.iter().take(50) {
                 outln!(ctx, "\t{}", ids::short(id));
             }
             let caches = excess_caches(repo)?;
@@ -1362,12 +1395,18 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) ->
                 outln!(ctx, "\t{name}");
             }
         }
-        return Ok(c.leaks.len());
+        return Ok(c.freed.len());
     }
     // Plan outside the project lock. A changed record invalidates the entire plan: retry
     // without the lock rather than replaying records while other commands wait.
+    #[cfg(not(target_os = "macos"))]
+    let removed_trash = {
+        let path = repo.p.trash_dir()?;
+        std::fs::create_dir_all(&path)?;
+        path
+    };
     let mut attempts = 0;
-    let leaks = loop {
+    let (leaks, indexes, compares, lru) = loop {
         attempts += 1;
         let (mark, diff) = {
             let _t = crate::trace::begin("repair: plan");
@@ -1377,6 +1416,11 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) ->
             })?
         };
         let overlays = repo.overlay_plan();
+        #[cfg(not(target_os = "macos"))]
+        let removed = repo.plan_removed_overlays();
+        let indexes = crate::gitbridge::plan_prune_indexes(repo)?;
+        let compares = repo.plan_prune_compares()?;
+        let lru = repo.plan_cache_gc_lru()?;
         // Test hook (tests/t127-repair-plan.sh): after plan N, write `planned.N` in the folder and
         // wait for `go.N`, so a test changes the project between the plan and the lock.
         test_plan_wait("LAYR_TEST_REPAIR_WAIT", attempts)?;
@@ -1389,6 +1433,9 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) ->
         }
         let leaks = repair_table(repo, free, Some(diff))?;
         evict_stored(repo)?;
+        // Keep one record per ref: ref_history keys entries by record id, and owners
+        // replay synchronizes the single ref_change in each record. Batching requires
+        // a compatible record format and replay/schema migration first.
         for expired in repo.p.db.expired_refs(ids::now_ms())? {
             let mut rec = Record::new("ref.expire");
             rec.data = serde_json::json!({"ref_change": crate::model::RefChange { name:expired.name.clone(),before:Some(expired),after:None }});
@@ -1396,19 +1443,27 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) ->
         }
         // Cache overlay lines of deleted lines (their states go below), and overlays with a
         // history limit (docs/cache-overlays.md).
+        // APFS needs a filesystem-wide thin-base dependency scan before removing
+        // any state; retain its existing path until that dependency snapshot can be checked.
+        #[cfg(target_os = "macos")]
         if let Err(e) = repo.free_removed_overlays(ctx) {
             eprintln!("warning: removed cache overlays stay until the next gc: {e:#}");
+        }
+        #[cfg(not(target_os = "macos"))]
+        match removed.and_then(|p| repo.commit_removed_overlays(ctx, p, &removed_trash)) {
+            Ok(()) => {},
+            Err(e) => eprintln!("warning: removed cache overlays stay until the next gc: {e:#}"),
         }
         match overlays {
             Ok(plan) => repo.commit_overlay_plan(ctx, plan),
             Err(e) => eprintln!("warning: overlays: old states stay until the next gc: {e:#}"),
         }
-        // Folder overlays with an LRU limit.
-        if let Err(e) = repo.cache_gc_lru() {
-            eprintln!("warning: cache size limits not applied: {e:#}");
-        }
         #[cfg(target_os = "macos")]
         {
+            // Upkeep walks thin-layer dependencies and can make keyframes of current
+            // heads. Moving it out of this lock needs a dependency snapshot that is
+            // checked against concurrent layer creation and head changes; leaving it
+            // here preserves bases until that protocol can be verified on APFS.
             let lines = repo.lines()?;
             let heads: BTreeSet<String> = lines.iter().map(|l| l.head.clone()).collect();
             let done = crate::thin::upkeep(&repo.p, &heads)?;
@@ -1428,13 +1483,15 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) ->
                 );
             }
         }
-        if crate::gitbridge::has_store(repo) {
-            crate::gitbridge::prune_indexes(repo)?;
-        }
-        // Saved overlap compares of states that are gone (radar.rs).
-        let _ = repo.prune_compares();
-        break leaks;
+        let indexes = crate::gitbridge::check_prune_indexes(repo, indexes)?;
+        let compares = repo.check_prune_compares(compares)?;
+        break (leaks, indexes, compares, lru);
     };
+    crate::gitbridge::finish_prune_indexes(indexes);
+    compares.finish();
+    if let Err(e) = repo.finish_cache_gc_lru(lru) {
+        eprintln!("warning: cache size limits not applied: {e:#}");
+    }
     prune_retention(ctx, repo, true)?;
     // The storage of the freed states: the leaks above and states that died before this repair.
     let freed = crate::free::finish_project(&repo.p)?;
@@ -1549,11 +1606,14 @@ struct CacheCandidate {
 
 fn cache_candidates(repo: &Repo, caches: Vec<(String, String)>) -> Vec<CacheCandidate> {
     use std::os::unix::fs::MetadataExt;
-    caches.into_iter().filter_map(|(id, name)| {
-        let path = repo.p.cache_path(&id, &name);
-        let m = std::fs::symlink_metadata(&path).ok()?;
-        Some(CacheCandidate { path, name, identity: (m.dev(), m.ino(), m.ctime(), m.ctime_nsec()) })
-    }).collect()
+    caches
+        .into_iter()
+        .filter_map(|(id, name)| {
+            let path = repo.p.cache_path(&id, &name);
+            let m = std::fs::symlink_metadata(&path).ok()?;
+            Some(CacheCandidate { path, name, identity: (m.dev(), m.ino(), m.ctime(), m.ctime_nsec()) })
+        })
+        .collect()
 }
 
 /// The GC plan uses rename-only trash; callers already holding the lock retain the ordinary
@@ -1791,7 +1851,7 @@ pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
             "owners differ from the records: {} missing, {} extra, {} leaked",
             c.missing.len(),
             c.extra.len(),
-            c.leaks.len()
+            c.freed.len()
         );
         for (s, k, h) in c.missing.iter().take(5) {
             outln!(ctx, "\tmissing: {} {k} {h}", ids::short(s));
