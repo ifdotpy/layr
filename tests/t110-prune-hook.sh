@@ -75,7 +75,7 @@ rebuilt=$(cb "$P/fresh" build --workspace)
 case "$rebuilt" in *Compiling*) FAIL=$((FAIL + 1)); echo "FAIL the next build of the new line compiled" ;; *) PASS=$((PASS + 1)); echo "PASS the next build of the new line compiles nothing" ;; esac
 
 # 3. `merge --caches-only` prunes the cache it takes from main.
-(cd "$P/other" && l merge main --caches-only -q >/dev/null 2>&1)
+(cd "$P/other" && l merge main --caches-only -q)
 eq "merge --caches-only removes the stale units" "$base" "$(units $P/other/target)"
 
 # 4. prune=none keeps the folder: a new line from the stale cache keeps its stale units.

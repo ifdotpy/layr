@@ -412,6 +412,11 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
         };
         let lines = repo.commit_prepared_lines(ctx, prepared)?;
         drop(lock);
+        // The caches of the new lines are pruned in place, after the project lock: the hook runs as the owner,
+        // which cannot read the temporary folders that the lines were made in.
+        for l in &lines {
+            repo.prune_line_caches(l)?;
+        }
         if a.get("--count").is_some() {
             if a.has("--json") {
                 outln!(ctx, "{}", serde_json::to_string(&lines.iter().map(|line| line_json(repo, line)).collect::<Vec<_>>())?);
