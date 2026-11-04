@@ -706,56 +706,97 @@ impl<'a> Repo<'a> {
         crate::fsutil::atomic_write(&path, &serde_json::to_vec(&all)?, 0o600)
     }
 
-    /// `gc lru:<size>` of the folder overlays: in the working folder of each line, delete the
-    /// files of the folder that were used least recently (the newer of access and change time)
-    /// until the folder is at most the size. Returns the deleted bytes.
-    pub fn cache_gc_lru(&self) -> Result<u64> {
-        let mut freed = 0;
+    /// Walk working cache folders and choose LRU candidates without locks.
+    pub fn plan_cache_gc_lru(&self) -> Result<Vec<LruPlan>> {
+        let mut plans = Vec::new();
         for (name, folder) in self.folder_overlays()? {
             let Some(limit) = self.overlay_props(&name)?.gc_lru else { continue };
             for line in self.lines()? {
                 let w = self.working(&line);
-                if !self.applies_in(&name, &folder, &w)? {
-                    continue;
-                }
-                let Ok(cp) = fsutil::safe_join(&w, &folder) else { continue };
-                if !btrfs::is_subvolume(&cp) {
-                    continue;
-                }
-                freed += lru_trim(&cp, limit)?;
+                if !self.applies_in(&name, &folder, &w)? { continue; }
+                let Ok(root) = fsutil::safe_join(&w, &folder) else { continue };
+                if !btrfs::is_subvolume(&root) { continue; }
+                let files = plan_lru(&root, limit)?;
+                plans.push(LruPlan { line, name: name.clone(), folder: folder.clone(), root, limit, files });
             }
+        }
+        Ok(plans)
+    }
+
+    /// A cache trim writes a line's working folder, so it holds only that line's lock.
+    pub fn finish_cache_gc_lru(&self, plans: Vec<LruPlan>) -> Result<u64> {
+        let mut freed = 0;
+        for plan in plans {
+            let _line_lock = self.line_lock(&plan.line)?;
+            if self.line(&plan.line.id).ok().as_ref() != Some(&plan.line)
+                || self.overlay_props(&plan.name)?.gc_lru != Some(plan.limit)
+                || self.folder_overlay_of(&plan.folder)?.as_deref() != Some(plan.name.as_str())
+                || !self.applies_in(&plan.name, &plan.folder, &self.working(&plan.line))?
+                || !btrfs::is_subvolume(&plan.root)
+            { continue; }
+            freed += apply_lru(&plan.root, plan.files);
         }
         Ok(freed)
     }
 }
 
-/// Delete the least recently used files below `root` until their sizes add up to `limit` at most.
-pub fn lru_trim(root: &Path, limit: u64) -> Result<u64> {
-    use std::os::unix::fs::MetadataExt;
-    let mut files: Vec<(i64, u64, String)> = Vec::new();
+pub struct LruPlan {
+    line: Line,
+    name: String,
+    folder: String,
+    root: std::path::PathBuf,
+    limit: u64,
+    files: Vec<LruFile>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LruStamp(u64, u64, u64, i64, i64, i64, i64, i64, i64);
+
+impl LruStamp {
+    fn of(path: &Path) -> Option<Self> {
+        use std::os::unix::fs::MetadataExt;
+        let m = std::fs::symlink_metadata(path).ok()?;
+        Some(Self(m.dev(), m.ino(), m.size(), m.mtime(), m.mtime_nsec(), m.ctime(), m.ctime_nsec(), m.atime(), m.atime_nsec()))
+    }
+}
+
+struct LruFile { rel: String, stamp: LruStamp }
+
+fn plan_lru(root: &Path, limit: u64) -> Result<Vec<LruFile>> {
+    let mut files = Vec::new();
     let mut total = 0u64;
     fsutil::walk(root, "", &mut |rel, m| {
         if !m.is_dir() {
-            let used = std::fs::symlink_metadata(root.join(rel)).map(|x| x.atime().max(x.mtime())).unwrap_or(0);
-            files.push((used, m.size, rel.to_string()));
-            total += m.size;
+            if let Some(stamp) = LruStamp::of(&root.join(rel)) {
+                total = total.saturating_add(stamp.2);
+                files.push((stamp.7.max(stamp.3), rel.to_string(), stamp));
+            }
         }
         Ok(true)
     })?;
-    if total <= limit {
-        return Ok(0);
+    files.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+    let mut planned = Vec::new();
+    for (_, rel, stamp) in files {
+        if total <= limit { break; }
+        total = total.saturating_sub(stamp.2);
+        planned.push(LruFile { rel, stamp });
     }
-    files.sort();
+    Ok(planned)
+}
+
+fn apply_lru(root: &Path, files: Vec<LruFile>) -> u64 {
     let mut freed = 0;
-    for (_, size, rel) in files {
-        if total - freed <= limit {
-            break;
-        }
-        if fsutil::remove_entry(root, &rel).is_ok() {
-            freed += size;
-        }
+    for file in files {
+        if LruStamp::of(&root.join(&file.rel)).as_ref() == Some(&file.stamp)
+            && fsutil::remove_entry(root, &file.rel).is_ok()
+        { freed += file.stamp.2; }
     }
-    Ok(freed)
+    freed
+}
+
+#[cfg(test)]
+fn lru_trim(root: &Path, limit: u64) -> Result<u64> {
+    Ok(apply_lru(root, plan_lru(root, limit)?))
 }
 
 #[cfg(test)]
@@ -798,6 +839,21 @@ mod tests {
         assert!(other_platform(Some("plan9-mips")));
         assert!(other_platform(Some(&format!("{base}x-0011"))));
         let _ = std::fs::remove_dir_all(&w);
+    }
+
+    #[test]
+    fn lru_plan_keeps_changed_and_new_files() {
+        let root = std::env::temp_dir().join(format!("layr-lru-plan-{}", crate::ids::new_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("old"), b"old").unwrap();
+        let plan = plan_lru(&root, 0).unwrap();
+        std::fs::rename(root.join("old"), root.join("moved")).unwrap();
+        std::fs::write(root.join("old"), b"replacement").unwrap();
+        std::fs::write(root.join("new"), b"new").unwrap();
+        assert_eq!(apply_lru(&root, plan), 0);
+        assert_eq!(std::fs::read(root.join("old")).unwrap(), b"replacement");
+        assert!(root.join("new").exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

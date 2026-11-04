@@ -1400,7 +1400,7 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) ->
     // Plan outside the project lock. A changed record invalidates the entire plan: retry
     // without the lock rather than replaying records while other commands wait.
     let mut attempts = 0;
-    let (leaks, indexes, compares) = loop {
+    let (leaks, indexes, compares, lru) = loop {
         attempts += 1;
         let (mark, diff) = {
             let _t = crate::trace::begin("repair: plan");
@@ -1412,6 +1412,7 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) ->
         let overlays = repo.overlay_plan();
         let indexes = crate::gitbridge::plan_prune_indexes(repo)?;
         let compares = repo.plan_prune_compares()?;
+        let lru = repo.plan_cache_gc_lru()?;
         // Test hook (tests/t127-repair-plan.sh): after plan N, write `planned.N` in the folder and
         // wait for `go.N`, so a test changes the project between the plan and the lock.
         test_plan_wait("LAYR_TEST_REPAIR_WAIT", attempts)?;
@@ -1441,10 +1442,6 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) ->
             Ok(plan) => repo.commit_overlay_plan(ctx, plan),
             Err(e) => eprintln!("warning: overlays: old states stay until the next gc: {e:#}"),
         }
-        // Folder overlays with an LRU limit.
-        if let Err(e) = repo.cache_gc_lru() {
-            eprintln!("warning: cache size limits not applied: {e:#}");
-        }
         #[cfg(target_os = "macos")]
         {
             // Upkeep walks thin-layer dependencies and can make keyframes of current
@@ -1472,10 +1469,13 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) ->
         }
         let indexes = crate::gitbridge::check_prune_indexes(repo, indexes)?;
         let compares = repo.check_prune_compares(compares)?;
-        break (leaks, indexes, compares);
+        break (leaks, indexes, compares, lru);
     };
     crate::gitbridge::finish_prune_indexes(indexes);
     compares.finish();
+    if let Err(e) = repo.finish_cache_gc_lru(lru) {
+        eprintln!("warning: cache size limits not applied: {e:#}");
+    }
     prune_retention(ctx, repo, true)?;
     // The storage of the freed states: the leaks above and states that died before this repair.
     let freed = crate::free::finish_project(&repo.p)?;
