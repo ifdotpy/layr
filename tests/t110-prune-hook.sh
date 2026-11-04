@@ -76,7 +76,15 @@ case "$rebuilt" in *Compiling*) FAIL=$((FAIL + 1)); echo "FAIL the next build of
 
 # 3. `merge --caches-only` prunes the cache it takes from main.
 (cd "$P/other" && l merge main --caches-only -q)
-eq "merge --caches-only removes the stale units" "$base" "$(units $P/other/target)"
+merged=$(units $P/other/target)
+if [ "$merged" != "$base" ]; then
+    # Diagnostics for a failure: who owns the entries that the merge copied, and what the owner's listing sees.
+    echo "DIAG other target units $merged, expected $base"
+    ls -lan "$P/other/target/debug/.fingerprint" 2>&1 | head -12
+    ls -lan "$P/other/target/debug" 2>&1 | head -20
+    (cd "$P/other" && owned env CARGO_NET_OFFLINE=true RUSTC_WRAPPER= cargo build --workspace -v 2>&1 | head -12) || true
+fi
+eq "merge --caches-only removes the stale units" "$base" "$merged"
 
 # 4. prune=none keeps the folder: a new line from the stale cache keeps its stale units.
 ok "the owner sets prune=none again" l overlay set cache.target --prune none
