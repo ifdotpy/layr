@@ -50,6 +50,22 @@ kill $DPID 2>/dev/null; wait $DPID 2>/dev/null
 has "the daemon deletes them" "deleted 1 dead cache state(s)" "$(cat "$T/daemon.log")"
 has "then nothing is unreachable" "unreachable cache data: 0 object(s), 0 bytes" "$(l fsck --caches --remote archive 2>&1)"
 
+# A reader removal starts a new key epoch. Its push writes the caches there; nothing reads the old
+# epoch now, so the push deletes the cache states in it.
+ov=$(l overlay list 2>/dev/null | awk '{print $1}' | grep -m1 '^cache')
+r1=machine:$(uuidgen | tr 'A-Z' 'a-z')
+r2=machine:$(uuidgen | tr 'A-Z' 'a-z')
+l overlay readers "$ov" "$r1" "$r2" >/dev/null 2>&1
+l push archive -q --caches >/dev/null 2>&1
+epochs() { find "$T/archive/overlays" -path '*/epochs/*' -name '*.tree.age' | sed 's|.*/epochs/\([^/]*\)/.*|\1|' | sort -u | wc -l | tr -d ' '; }
+eq "one epoch has cache states before the key change" 1 "$(epochs)"
+l overlay readers "$ov" "$r2" >/dev/null 2>&1
+out=$(l push archive -q --caches 2>&1)
+has "the push names the deleted states of the old epoch" "of older key epochs" "$out"
+eq "only the new epoch has cache states" 1 "$(epochs)"
+eq "and it has the kept states" 2 "$(trees)"
+has "nothing is unreachable" "unreachable cache data: 0 object(s)" "$(l fsck --caches --remote archive 2>&1)"
+
 mkdir -p "$T/b"
 env LAYR_ROOT="$T/b/store" LAYR_PAPER_KEY_FILE="$T/paper.txt" "$LAYR" clone "file://$T/archive" p >/dev/null 2>&1
 Q=$T/b/store/projects/p/lines

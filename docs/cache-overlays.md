@@ -171,8 +171,12 @@ There are two kinds of remote:
   flight on another machine reuses its parts). The daemon runs the same pass for each store remote
   of each project every hour, so a remote that nobody pushes to loses its dead caches too (a remote
   that cannot be reached is tried at the next pass). `layr fsck --caches --remote <name>` lists what
-  the pass would delete (exit 1 when there is something); `layr gc --remote <name>` runs it. The
-  pass covers the current key epoch of each overlay.
+  the pass would delete (exit 1 when there is something); `layr gc --remote <name>` runs it. A
+  key change (a reader removal, a closer access mode) starts a new key epoch, and a reader takes
+  only the newest published key: once the key of the new epoch is published, the push and the pass
+  delete all cache states of the older epochs whose keys were in the same key listing. An epoch
+  whose key is not published yet (a key change in flight) stays. Records and slots of an old
+  epoch stay; they are small.
 - A **git remote** takes one layer. The shared set goes to the project's git remotes (`origin`),
   as today. An overlay goes to its own git repository: `layr overlay remote add <overlay> <url>`
   records `overlay.<name>.git.<remote>` in the overlay's own records, so only its readers see the

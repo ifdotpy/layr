@@ -4,7 +4,7 @@ use crate::{ctx::Ctx, model::Record, oplog, repo::Repo, store::Project};
 use anyhow::{bail, Context, Result};
 use ed25519_dalek::VerifyingKey;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) struct LayerAccess {
     pub recipient: String,
@@ -335,6 +335,7 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
     }
     let parent_lines: Vec<_> = repo.p.export_jsonl()?.lines().map(str::to_owned).collect();
     let mut authorities = crate::overlay_managers::from_lines(&repo.p.id, &parent_lines, &trusted)?;
+    let listed = key_epochs(&objects);
     let (remote, refused) =
         published_objects(&store.backend, &repo.p.id, &descriptor.recipient, &trusted, &authorities, objects)?;
     report.omitted.extend(refused);
@@ -471,7 +472,8 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
         }
         if let Some(identity) = &identity {
             if access_mode == layr_store::epochs::Mode::Service {
-                let recipient = store.service_recipient(repo)?.context("service overlay requires a configured service recipient")?;
+                let recipient =
+                    store.service_recipient(repo)?.context("service overlay requires a configured service recipient")?;
                 scoped.backend.put_new("slots/service.age", keys::seal_slot(identity, &recipient)?)?;
             }
             if access_mode == layr_store::epochs::Mode::Public {
@@ -500,8 +502,66 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
             published.line.as_bytes().to_vec()
         };
         store.backend.put_new(&published.object(), body)?;
+        // The key of this epoch is published: the caches of the older epochs have no reader now.
+        if repo.overlay_setting(&name, "cache")?.and_then(|v| v.as_bool()).unwrap_or(false) {
+            let swept = sweep_old_epochs(store, &orepo.p.id, &published.key.epoch, &listed, false)?;
+            if !swept.trees.is_empty() || !swept.parts.is_empty() {
+                eprintln!(
+                    "layr: overlay {name}: deleted {} cache state(s) and {} part(s) of older key epochs in the remote",
+                    swept.trees.len(),
+                    swept.parts.len()
+                );
+            }
+        }
     }
     Ok(())
+}
+
+/// The overlay and epoch of each overlay key object in `objects` (`overlays/<overlay>/keys/<epoch>-<record>.<ext>`).
+fn key_epochs(objects: &[super::backend::Object]) -> BTreeSet<(String, String)> {
+    objects
+        .iter()
+        .filter_map(|o| {
+            let parts: Vec<_> = o.key.split('/').collect();
+            let epoch = parts.get(3)?.get(..36).filter(|_| parts[3].as_bytes().get(36) == Some(&b'-'))?;
+            (parts.len() == 4 && parts[0] == "overlays" && parts[2] == "keys" && crate::model::is_uuid(epoch))
+                .then(|| (parts[1].to_owned(), epoch.to_owned()))
+        })
+        .collect()
+}
+
+/// Delete (with `dry_run`: only list) the cache states of the overlay `overlay` in its key epochs
+/// that `listed` names and that are not `current`. A reader takes only the newest published key, so
+/// nothing reads these states. `listed` comes from the key listing that chose `current`: an epoch
+/// whose key a manager publishes after that listing, or whose key is not published yet (a rotation
+/// in flight), is never touched. The records and slots of an old epoch stay; they are small.
+fn sweep_old_epochs(
+    store: &Store,
+    overlay: &str,
+    current: &str,
+    listed: &BTreeSet<(String, String)>,
+    dry_run: bool,
+) -> Result<super::sweep::Swept> {
+    let mut swept = super::sweep::Swept::default();
+    for (_, epoch) in listed.iter().filter(|(o, e)| o == overlay && e != current) {
+        let prefix = format!("overlays/{overlay}/epochs/{epoch}/states/");
+        let (trees, parts): (Vec<_>, Vec<_>) =
+            store.backend.list(&prefix)?.into_iter().map(|o| o.key).partition(|k| k.ends_with(".tree.age"));
+        // Parts first, then the trees, as in `sweep::sweep`.
+        for key in &parts {
+            if !dry_run {
+                store.backend.delete(key)?;
+            }
+        }
+        for key in &trees {
+            if !dry_run {
+                store.backend.delete(key)?;
+            }
+        }
+        swept.parts.extend(parts);
+        swept.trees.extend(trees);
+    }
+    Ok(swept)
 }
 
 /// The age identity of the layer `published` of the overlay project `overlay`: from its slot in the
@@ -540,8 +600,8 @@ fn sweep_layer(repo: &Repo, name: &str, orepo: &Repo, scoped: &Store, dry_run: b
 }
 
 /// Delete (with `dry_run`: only list) the dead cache states of each cache overlay of `repo` in the
-/// store `store`, in the current epoch of each overlay. An overlay that this machine cannot read is
-/// skipped.
+/// store `store`: the dead states of the current epoch of each overlay, and all cache states of its
+/// older epochs. The current epoch of an overlay that this machine cannot read is skipped.
 pub(super) fn sweep_caches(store: &Store, ctx: &Ctx, repo: &Repo, dry_run: bool) -> Result<Vec<(String, super::sweep::Swept)>> {
     let descriptor = store.root_descriptor()?;
     let trusted = trusted_keys(repo)?;
@@ -558,15 +618,23 @@ pub(super) fn sweep_caches(store: &Store, ctx: &Ctx, repo: &Repo, dry_run: bool)
     }
     let parent_lines: Vec<_> = repo.p.export_jsonl()?.lines().map(str::to_owned).collect();
     let authorities = crate::overlay_managers::from_lines(&repo.p.id, &parent_lines, &trusted)?;
+    let listed = key_epochs(&objects);
     let (remote, _) = published_objects(&store.backend, &repo.p.id, &descriptor.recipient, &trusted, &authorities, objects)?;
     let mut out = Vec::new();
     for name in names {
         let Some(published) = remote.get(&name) else { continue };
         let orepo = repo.overlay_repo(&name)?;
-        let Some(identity) = layer_identity(store, &orepo.p.id, published)? else { continue };
+        let old = sweep_old_epochs(store, &orepo.p.id, &published.key.epoch, &listed, dry_run)?;
+        let Some(identity) = layer_identity(store, &orepo.p.id, published)? else {
+            out.push((name.clone(), old));
+            continue;
+        };
         let scoped = layer(store, published, Some(identity))?;
         let _lock = orepo.p.lock()?;
-        out.push((name.clone(), sweep_layer(repo, &name, &orepo, &scoped, dry_run)?));
+        let mut swept = sweep_layer(repo, &name, &orepo, &scoped, dry_run)?;
+        swept.trees.extend(old.trees);
+        swept.parts.extend(old.parts);
+        out.push((name.clone(), swept));
     }
     Ok(out)
 }
