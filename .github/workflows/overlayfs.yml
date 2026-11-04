@@ -69,6 +69,7 @@ jobs:
 <<<<<<< head
 <<<<<<< head
 <<<<<<< head
+<<<<<<< head
           sudo env LAYR_OVERLAYFS_TEST_ROOT="$LAYR_OVERLAYFS_TEST_ROOT" LAYR="$LAYR" bash tests/run.sh --tag overlayfs
 ||||||| base
           sudo env LAYR_OVERLAYFS_TEST_ROOT="$LAYR_OVERLAYFS_TEST_ROOT" LAYR="$LAYR" bash tests/run.sh t01-basic t02-merge t03-git t05-transfer t06-sync t07-service t08-gitcompat t11-security t13-access t16-overlays t70-du t71-gc-pushed t75-save-change-rules t76-cache-recreated t77-unicode-names t78-overlayfs-perf t83-index-safety t84-cache-safety t82-trash-background t86-line-move t88-delete-overlay-lines t89-cache-state t90-evict-recoverable t91-evict-format t92-evict-trust t92-owners-shadow t93-status-overlaps-cache t97-status-overlaps-bases t91-leak-guards t95-schema-rebuild-readers t96-save-left-out t98-init-from-user t100-store-auto-upgrade t103-cache-of-source t104-cache-overlay-wins t94-undo-move-safety t107-init-failure t105-follow t108-undo-reset t109-free-recheck t99-ownership-free t100-pin-reads t106-lazy-import t110-auto-cache-overlay t112-undo-pick-save t111-daemon-plist t110-overlay-remove t113-pick-reset-speed t116-save-cache-flags
@@ -85,6 +86,9 @@ jobs:
 ||||||| base
 =======
 >>>>>>> 599844d
+||||||| base
+=======
+>>>>>>> b9a712b
 <<<<<<< head
           sudo env LAYR_OVERLAYFS_TEST_ROOT="$LAYR_OVERLAYFS_TEST_ROOT" LAYR="$LAYR" bash tests/run.sh t01-basic t02-merge t03-git t05-transfer t06-sync t07-service t08-gitcompat t11-security t13-access t16-overlays t70-du t71-gc-pushed t75-save-change-rules t76-cache-recreated t77-unicode-names t78-overlayfs-perf t83-index-safety t84-cache-safety t82-trash-background t86-line-move t88-delete-overlay-lines t89-cache-state t90-evict-recoverable t91-evict-format t92-evict-trust t92-owners-shadow t93-status-overlaps-cache t97-status-overlaps-bases t91-leak-guards t95-schema-rebuild-readers t96-save-left-out t98-init-from-user t100-store-auto-upgrade t103-cache-of-source t104-cache-overlay-wins t94-undo-move-safety t107-init-failure t105-follow t108-undo-reset t109-free-recheck t99-ownership-free t100-pin-reads t106-lazy-import t110-auto-cache-overlay t112-undo-pick-save t111-daemon-plist t110-overlay-remove t113-pick-reset-speed t116-save-cache-flags
 ||||||| base
@@ -102,6 +106,9 @@ jobs:
 ||||||| base
 =======
 >>>>>>> 86b6eab
+||||||| base
+=======
+>>>>>>> a7018ad
 <<<<<<< head
           sudo env LAYR_OVERLAYFS_TEST_ROOT="$LAYR_OVERLAYFS_TEST_ROOT" LAYR="$LAYR" bash tests/run.sh t01-basic t02-merge t03-git t05-transfer t06-sync t07-service t08-gitcompat t11-security t13-access t16-overlays t70-du t71-gc-pushed t75-save-change-rules t76-cache-recreated t77-unicode-names t78-overlayfs-perf t83-index-safety t84-cache-safety t82-trash-background t86-line-move t88-delete-overlay-lines t89-cache-state t90-evict-recoverable t91-evict-format t92-evict-trust t92-owners-shadow t93-status-overlaps-cache t97-status-overlaps-bases t91-leak-guards t95-schema-rebuild-readers t96-save-left-out t98-init-from-user t100-store-auto-upgrade t103-cache-of-source t104-cache-overlay-wins t94-undo-move-safety t107-init-failure t105-follow t108-undo-reset t109-free-recheck t99-ownership-free t100-pin-reads t106-lazy-import t110-auto-cache-overlay
 ||||||| base
@@ -119,6 +126,9 @@ jobs:
 ||||||| base
 =======
 >>>>>>> f682917
+||||||| base
+=======
+>>>>>>> c51abb0
 <<<<<<< head
           sudo env LAYR_OVERLAYFS_TEST_ROOT="$LAYR_OVERLAYFS_TEST_ROOT" LAYR="$LAYR" bash tests/run.sh t01-basic t02-merge t03-git t05-transfer t06-sync t07-service t08-gitcompat t11-security t13-access t16-overlays t70-du t71-gc-pushed t75-save-change-rules t76-cache-recreated t77-unicode-names t78-overlayfs-perf t83-index-safety t84-cache-safety t82-trash-background t86-line-move t88-delete-overlay-lines t89-cache-state t90-evict-recoverable t91-evict-format t92-evict-trust t92-owners-shadow t93-status-overlaps-cache t97-status-overlaps-bases t91-leak-guards t95-schema-rebuild-readers t96-save-left-out t98-init-from-user t100-store-auto-upgrade t103-cache-of-source t104-cache-overlay-wins t94-undo-move-safety t107-init-failure t105-follow t108-undo-reset t109-free-recheck t99-ownership-free t100-pin-reads t106-lazy-import t112-undo-pick-save t111-daemon-plist t110-overlay-remove t113-pick-reset-speed
 ||||||| base
@@ -345,9 +355,26 @@ jobs:
 >>>>>>> 7f1b150
 =======
 >>>>>>> 38644e5
+<<<<<<< head
 >>>>>>> f682917
+<<<<<<< head
 >>>>>>> 86b6eab
+<<<<<<< head
 >>>>>>> 599844d
+||||||| base
+=======
+||||||| base
+=======
+||||||| base
+=======
+||||||| base
+          sudo env "PATH=$PATH" LAYR_OVERLAYFS_TEST_ROOT="$LAYR_OVERLAYFS_TEST_ROOT" LAYR="$LAYR" bash tests/run.sh t01-basic t02-merge t03-git t05-transfer t06-sync t07-service t08-gitcompat t11-security t13-access t16-overlays t70-du t71-gc-pushed t75-save-change-rules t76-cache-recreated t77-unicode-names t78-overlayfs-perf t83-index-safety t84-cache-safety t82-trash-background t86-line-move t88-delete-overlay-lines t89-cache-state t90-evict-recoverable t91-evict-format t92-evict-trust t92-owners-shadow t93-status-overlaps-cache t97-status-overlaps-bases t91-leak-guards t95-schema-rebuild-readers t96-save-left-out t98-init-from-user t100-store-auto-upgrade t103-cache-of-source t104-cache-overlay-wins t94-undo-move-safety t107-init-failure t105-follow t108-undo-reset t110-prune-hook
+=======
+          sudo env "PATH=$PATH" LAYR_OVERLAYFS_TEST_ROOT="$LAYR_OVERLAYFS_TEST_ROOT" LAYR="$LAYR" bash tests/run.sh t01-basic t02-merge t03-git t05-transfer t06-sync t07-service t08-gitcompat t11-security t13-access t16-overlays t70-du t71-gc-pushed t75-save-change-rules t76-cache-recreated t77-unicode-names t78-overlayfs-perf t83-index-safety t84-cache-safety t82-trash-background t86-line-move t88-delete-overlay-lines t89-cache-state t90-evict-recoverable t91-evict-format t92-evict-trust t92-owners-shadow t93-status-overlaps-cache t97-status-overlaps-bases t91-leak-guards t95-schema-rebuild-readers t96-save-left-out t98-init-from-user t100-store-auto-upgrade t103-cache-of-source t104-cache-overlay-wins t94-undo-move-safety t107-init-failure t105-follow t108-undo-reset t109-free-recheck t99-ownership-free t100-pin-reads t106-lazy-import t112-undo-pick-save t111-daemon-plist t110-overlay-remove t110-prune-hook
+>>>>>>> 8f5c054
+>>>>>>> c51abb0
+>>>>>>> a7018ad
+>>>>>>> b9a712b
       - name: Unmount the test filesystem
         if: always()
         run: sudo umount -R "/var/tmp/layr-overlayfs-ci" || true
