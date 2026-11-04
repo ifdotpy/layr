@@ -105,6 +105,8 @@ Unsaved changes in other lines appear after `layr save`.
 Project read access and overlay reader rules apply. Unreadable private paths stay hidden.
 Short and porcelain status output keeps its existing format.
 Radar writes no permanent records. A later event API can expose these results.
+Its caches under `meta/overlap-compares` and `meta/overlap-live` hold saved compares. The live
+compare of a line is reused while the working folder scan is the same. `layr gc` removes stale entries.
 
 
 ### Queue probe limits

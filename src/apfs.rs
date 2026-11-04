@@ -1500,23 +1500,35 @@ fn candidates_scanned_with(
             c.old_path = Some(src.clone());
         }
     }
+    let both_files = |c: &crate::changes::Change| {
+        c.old_path.is_none() && c.old.as_ref().is_some_and(|m| m.is_file()) && c.new.as_ref().is_some_and(|m| m.is_file())
+    };
+    let shared_at = |p: &str| {
+        let (old, new) = (&a[p], &b[p]);
+        old.fingerprint.0 == new.fingerprint.0
+            && old.meta.size == new.meta.size
+            && old.data.zip(new.data).is_some_and(|(a, b)| {
+                a.generation.is_some() && b.generation.is_some() && a.clone_id.is_some() && a.clone_id == b.clone_id
+            })
+    };
+    // The exact ranges of the files that are not shared are read on threads: a file costs its own reads.
+    let mut ranged: BTreeMap<String, Vec<(u64, u64)>> = BTreeMap::new();
+    if exact {
+        let todo: Vec<String> = changes.iter().filter(|(p, c)| both_files(c) && !shared_at(p)).map(|(p, _)| p.clone()).collect();
+        let found = changed_ranges_all(parent, child, &todo)?;
+        ranged = todo.into_iter().zip(found).collect();
+    }
     let mut read: Vec<String> = Vec::new();
     for (p, c) in &mut changes {
-        if c.old_path.is_none() && c.old.as_ref().is_some_and(|m| m.is_file()) && c.new.as_ref().is_some_and(|m| m.is_file()) {
-            let old = &a[p];
-            let new = &b[p];
-            let shared = old.fingerprint.0 == new.fingerprint.0
-                && old.meta.size == new.meta.size
-                && old.data.zip(new.data).is_some_and(|(a, b)| {
-                    a.generation.is_some() && b.generation.is_some() && a.clone_id.is_some() && a.clone_id == b.clone_id
-                });
+        if both_files(c) {
+            let shared = shared_at(p);
             if !shared {
                 read.push(p.clone());
             }
             c.ranges = if shared {
                 Some(Vec::new())
             } else if exact {
-                Some(changed_ranges(parent, child, p)?)
+                ranged.remove(p.as_str())
             } else {
                 same_content(parent, child, p)?.then(Vec::new)
             };
@@ -1563,6 +1575,27 @@ fn same_content(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), rel: 
         }
     }
     Ok(true)
+}
+
+/// `changed_ranges` of each path, on up to four threads. The results keep the order of `paths`,
+/// and the first error in that order is returned.
+fn changed_ranges_all(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), paths: &[String]) -> Result<Vec<Vec<(u64, u64)>>> {
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 4);
+    if threads == 1 || paths.len() < 64 {
+        return paths.iter().map(|p| changed_ranges(parent, child, p)).collect();
+    }
+    let chunk = paths.len().div_ceil(threads);
+    std::thread::scope(|scope| {
+        let jobs: Vec<_> = paths
+            .chunks(chunk)
+            .map(|part| scope.spawn(move || part.iter().map(|p| changed_ranges(parent, child, p)).collect::<Result<Vec<_>>>()))
+            .collect();
+        let mut out = Vec::with_capacity(paths.len());
+        for job in jobs {
+            out.extend(job.join().map_err(|_| anyhow::anyhow!("changed ranges thread panicked"))??);
+        }
+        Ok(out)
+    })
 }
 
 // Compare fixed blocks when APFS cannot report changed extents. Adjacent blocks coalesce.
