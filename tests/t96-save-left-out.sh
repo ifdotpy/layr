@@ -3,6 +3,7 @@
 # A named save (save -m, with or without -a) names on stderr the files it left out: untracked
 # files (a new folder as dir/) and tracked files whose working content differs from the new state.
 # An ignored file, a cache folder and a clean save name nothing; more than 20 paths end in "and N more".
+# The summary on stdout counts the lines of the saved state.
 . "$(dirname "$0")/lib.sh"
 
 sample $T/src
@@ -21,8 +22,9 @@ l save --caches -q >/dev/null
 
 # A clean save: a modified file, added and saved; nothing is left out.
 echo more >> notes.txt; l add notes.txt >/dev/null
-l save -m clean 2> $err >/dev/null
+l save -m clean 2> $err > $T/save-out.txt
 eq "a save that leaves nothing out prints nothing" "" "$(cat $err)"
+has "the summary counts the added line" "1 file changed, 1 insertion(+)" "$(cat $T/save-out.txt)"
 
 # A new file and a modified file that is not added; only notes.txt is added.
 echo new > added.txt; echo more >> src/main.rs
