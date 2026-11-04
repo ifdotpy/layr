@@ -10,7 +10,10 @@
 . "$(dirname "$0")/lib.sh"
 
 if [ "$(id -u)" = 0 ]; then
-    OWN=layr-u1
+    # The owner is the user who started the job (sudo sets SUDO_USER): its home holds the toolchain that cargo
+    # needs. Without sudo, a test user.
+    OWN=${SUDO_USER:-layr-u1}
+    [ "$OWN" = root ] && OWN=layr-u1
     id $OWN >/dev/null 2>&1 || useradd -m $OWN
     chmod 755 $T $LAYR_ROOT
     # The owner runs the binary from the test folder (the checkout of the runner is not readable by the user).
@@ -50,7 +53,7 @@ cd "$P/main"
 l protect main --remove >/dev/null 2>&1 || true
 cb "$P/main" build --workspace -q >/dev/null
 base=$(units $P/main/target)
-[ "$base" -gt 0 ] && { PASS=$((PASS + 1)); echo "PASS the standard build made units ($base)"; } || { FAIL=$((FAIL + 1)); echo "FAIL the standard build made no units: the owner cannot build"; }
+[ "$base" -gt 0 ] && { PASS=$((PASS + 1)); echo "PASS the standard build made units ($base)"; } || { FAIL=$((FAIL + 1)); echo "FAIL the standard build made no units: the owner cannot build"; cb "$P/main" build --workspace 2>&1 | tail -20; }
 (cd "$P/main" && l save --caches -q)
 new_line other main
 
