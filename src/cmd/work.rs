@@ -989,9 +989,7 @@ fn prepare_named_save<'p, 's>(
     let parents = if amend { head.parents.clone() } else { vec![line.head.clone()] };
     let stage = repo.current_stage(line)?;
     let pending = match &stage {
-        Some(stage) => Some(crate::apfs_commit::PendingCommit::prepare(&repo.p, &line.id, |dst| {
-            repo.stage_tree(line, stage)?.materialize(dst, true)
-        })?),
+        Some(_) => Some(crate::apfs_commit::PendingCommit::prepare(&repo.p, &line.id)?),
         None => None,
     };
     if pending.is_some() {
@@ -1006,6 +1004,8 @@ fn prepare_named_save<'p, 's>(
         state.change_id = head.change_id.clone();
     }
     let new_root = match &pending {
+        // A thin clone is a layer over the head, as the stage was (`stage_tree`).
+        Some(pc) if pc.thin => crate::thin::Layered::over(&pc.tree, repo.head_src(line)?)?,
         Some(pc) => crate::repo::snap(&pc.tree),
         None => repo.state_src(&state.id)?,
     };

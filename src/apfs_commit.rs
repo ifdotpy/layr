@@ -185,6 +185,10 @@ struct PendingJournal {
     tree_subvol: String,
     tree_device: u64,
     tree_inode: u64,
+    /// The stage is a thin layer over the head: the state is a layer too (`deltas/<state>`), as
+    /// before the pending folders.
+    #[serde(default)]
+    thin: bool,
 }
 
 const PENDING_JOURNAL: &str = "journal.json";
@@ -249,6 +253,15 @@ fn is_tree(path: &Path, subvol: &str, device: u64, inode: u64) -> Result<bool> {
     Ok(m.is_dir() && m.dev() == device && m.ino() == inode && storage::subvol_info(path)?.uuid == subvol)
 }
 
+/// Where the state of a save goes: a thin state in `deltas/`, a complete one in `states/`.
+fn state_target(p: &Project, state: &str, thin: bool) -> PathBuf {
+    if thin {
+        p.delta_path(state)
+    } else {
+        p.state_path(state)
+    }
+}
+
 /// A named save's index, cloned before the project lock (`save -m`). The clone waits in
 /// `meta/pending/<state>/tree` with its journal beside it, and the stage stays where it is. Under the
 /// lock, `publish` renames the clone into the state. The caller then records the save and drops the
@@ -263,6 +276,8 @@ pub struct PendingCommit<'p, 's> {
     pub tree: PathBuf,
     /// The subvolume UUID of the clone: the `subvol` of the state record.
     pub subvol: String,
+    /// The clone is a thin layer over the head (a stage that was a layer).
+    pub thin: bool,
     journal: PendingJournal,
     /// The clone is still in the pending folder (not published).
     in_pending: bool,
@@ -270,10 +285,10 @@ pub struct PendingCommit<'p, 's> {
 }
 
 impl<'p, 's> PendingCommit<'p, 's> {
-    /// Clone the stage of `line` with `clone`, which writes the complete tree to the path it is given
-    /// (the view of the stage, so a thin stage is complete too). Call with the line lock held and
-    /// without the project lock.
-    pub fn prepare(project: &'p Project<'s>, line: &str, clone: impl FnOnce(&Path) -> Result<()>) -> Result<Self> {
+    /// Clone the stage of `line`. A stage that is a thin layer gives a thin clone: the entries of the
+    /// layer and its base, as the stage has them. Call with the line lock held and without the
+    /// project lock.
+    pub fn prepare(project: &'p Project<'s>, line: &str) -> Result<Self> {
         let _t = crate::trace::span("APFS clone index");
         if !model::is_uuid(line) {
             bail!("APFS index state requires a valid line");
@@ -284,6 +299,7 @@ impl<'p, 's> PendingCommit<'p, 's> {
         if !sm.is_dir() || sinfo.readonly {
             bail!("APFS index must be a writable tree");
         }
+        let thin = sinfo.base.is_some();
         let id = ids::new_id();
         let root = pending_root(project);
         fs::create_dir_all(&root)?;
@@ -304,17 +320,33 @@ impl<'p, 's> PendingCommit<'p, 's> {
             tree_subvol: String::new(),
             tree_device: 0,
             tree_inode: 0,
+            thin,
         };
         fsutil::atomic_write(&tmp.join(PENDING_JOURNAL), &serde_json::to_vec(&journal)?, 0o600)?;
         let dir = pending_dir(project, &id);
         fs::rename(&tmp, &dir)?;
         sync_parent(&dir)?;
         let tree = dir.join(PENDING_TREE);
-        let mut prepared = Self { project, id: id.clone(), tree: tree.clone(), subvol: String::new(), journal: journal.clone(), in_pending: true, active: true };
+        let mut prepared = Self {
+            project,
+            id: id.clone(),
+            tree: tree.clone(),
+            subvol: String::new(),
+            thin,
+            journal: journal.clone(),
+            in_pending: true,
+            active: true,
+        };
         // A failure from here on removes the folder (Drop).
-        clone(&tree)?;
+        storage::snapshot(&stage, &tree, true)?;
+        let mut tinfo = storage::subvol_info(&tree)?;
+        if thin {
+            tinfo.base = sinfo.base.clone();
+            storage::set_writable(&tree)?;
+            storage::write_info(&tree, &tinfo)?;
+            storage::set_readonly(&tree)?;
+        }
         let tm = fs::symlink_metadata(&tree)?;
-        let tinfo = storage::subvol_info(&tree)?;
         journal.tree_subvol = tinfo.uuid.clone();
         journal.tree_device = tm.dev();
         journal.tree_inode = tm.ino();
@@ -335,7 +367,7 @@ impl<'p, 's> PendingCommit<'p, 's> {
         if !is_tree(&self.tree, &j.tree_subvol, j.tree_device, j.tree_inode)? {
             bail!("APFS index clone changed: {}", self.tree.display());
         }
-        let state = self.project.state_path(&self.id);
+        let state = state_target(self.project, &self.id, self.thin);
         if exists(&state)? {
             bail!("state {} exists before its save", crate::ids::short(&self.id));
         }
@@ -385,7 +417,7 @@ impl Drop for PendingCommit<'_, '_> {
 /// Recovery of one pending save, with the project lock held.
 fn recover_pending(p: &Project, dir: &Path, j: &PendingJournal) -> Result<()> {
     let tree = dir.join(PENDING_TREE);
-    let state = p.state_path(&j.state);
+    let state = state_target(p, &j.state, j.thin);
     if p.db.state(&j.state)?.is_some() {
         // Committed: the clone becomes the state, and the stage it was cloned from is dropped.
         if exists(&tree)? {
@@ -503,7 +535,7 @@ mod tests {
         let line = ids::new_id();
         let inode = stage(&p, &line)?;
         let old_info = storage::subvol_info(&p.stage_path(&line))?;
-        let pc = PendingCommit::prepare(&p, &line, |dst| storage::snapshot(&p.stage_path(&line), dst, true))?;
+        let pc = PendingCommit::prepare(&p, &line)?;
         // The stage is untouched by the clone.
         assert_eq!(fs::metadata(p.stage_path(&line))?.ino(), inode);
         assert_eq!(storage::subvol_info(&p.stage_path(&line))?.uuid, old_info.uuid);
@@ -535,7 +567,7 @@ mod tests {
             let p = Project::create(&store, "p", &actor(), serde_json::json!({}))?;
             let _lock = p.lock()?;
             stage_inode = stage(&p, &line)?;
-            let mut pc = PendingCommit::prepare(&p, &line, |dst| storage::snapshot(&p.stage_path(&line), dst, true))?;
+            let mut pc = PendingCommit::prepare(&p, &line)?;
             id = pc.id.clone();
             let clone_inode = fs::metadata(&pc.tree)?.ino();
             assert!(pc.publish()?);
@@ -568,7 +600,7 @@ mod tests {
                 let p = Project::create(&store, "p", &actor(), serde_json::json!({}))?;
                 let _lock = p.lock()?;
                 stage_inode = stage(&p, &line)?;
-                let mut pc = PendingCommit::prepare(&p, &line, |dst| storage::snapshot(&p.stage_path(&line), dst, true))?;
+                let mut pc = PendingCommit::prepare(&p, &line)?;
                 if phase >= 1 {
                     assert!(pc.publish()?);
                 }
@@ -604,7 +636,7 @@ mod tests {
             let p = Project::create(&store, "p", &actor(), serde_json::json!({}))?;
             let _lock = p.lock()?;
             stage(&p, &line)?;
-            let mut pc = PendingCommit::prepare(&p, &line, |dst| storage::snapshot(&p.stage_path(&line), dst, true))?;
+            let mut pc = PendingCommit::prepare(&p, &line)?;
             id = pc.id.clone();
             clone_inode = fs::metadata(&pc.tree)?.ino();
             assert!(pc.publish()?);
@@ -634,7 +666,7 @@ mod tests {
         let _lock = p.lock()?;
         let line = ids::new_id();
         stage(&p, &line)?;
-        let mut pc = PendingCommit::prepare(&p, &line, |dst| storage::snapshot(&p.stage_path(&line), dst, true))?;
+        let mut pc = PendingCommit::prepare(&p, &line)?;
         assert!(pc.publish()?);
         let state = p.state_path(&pc.id);
         die(&pending_dir(&p, &pc.id));
@@ -662,7 +694,7 @@ mod tests {
             let p = Project::create(&store, "p", &actor(), serde_json::json!({}))?;
             let _lock = p.lock()?;
             stage_inode = stage(&p, &line)?;
-            let pc = PendingCommit::prepare(&p, &line, |dst| storage::snapshot(&p.stage_path(&line), dst, true))?;
+            let pc = PendingCommit::prepare(&p, &line)?;
             let path = pending_dir(&p, &pc.id).join(PENDING_JOURNAL);
             let mut j: PendingJournal = serde_json::from_slice(&fs::read(&path)?)?;
             j.holder = format!("{}:Mon Jan  1 00:00:00 1990", std::process::id());
