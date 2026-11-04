@@ -106,6 +106,17 @@ echo bin-gone-more > target/debug/x; l save --caches -q
 gone_head=$(l rev-parse 'head@{0}'); cd $P/main
 P_ROOT=$LAYR_ROOT/projects/gm
 ok "the cache state of gone was on the disk" test -e "$P_ROOT/states/$(dashed "$gone_head")" -o -e "$P_ROOT/deltas/$(dashed "$gone_head")"
+# OverlayFS (Linux) mounts each tree of its registry again when the store opens: drop the entry first.
+reg=$LAYR_ROOT/.layr-overlayfs/registry.json
+if [ -f "$reg" ]; then
+    python3 - "$reg" "$(dashed "$gone_head")" <<'PY'
+import json, sys
+path, uuid = sys.argv[1], sys.argv[2]
+r = json.load(open(path))
+r["trees"] = {k: v for k, v in r["trees"].items() if uuid not in k}
+json.dump(r, open(path, "w"))
+PY
+fi
 for d in "$P_ROOT/states/$(dashed "$gone_head")" "$P_ROOT/deltas/$(dashed "$gone_head")"; do
     [ -e "$d" ] || continue
     # A saved state on OverlayFS (Linux) is a read-only mount, maybe stacked.
