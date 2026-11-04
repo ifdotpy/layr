@@ -144,11 +144,27 @@ fn writable(error: anyhow::Error) -> anyhow::Error {
 
 impl Guard {
     pub fn open(root: &Path) -> Result<Self> {
+        Self::open_for(root, false)
+    }
+
+    pub fn open_for(root: &Path, read: bool) -> Result<Self> {
         let binary = Version::binary();
         if let Some(stored) = marker(root)? {
             // Refuse before opening a lock file or changing machine/project data.
             binary.require_compatible(&stored, "store")?;
-            let file = lock_file(root, true)?;
+            let file = if read {
+                // An existing version lease needs only a read descriptor for a shared flock.
+                // Missing leases still go through the normal initialization path.
+                let file = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(root.join(LOCK));
+                match file {
+                    Ok(file) if file.metadata()?.is_file() => file,
+                    Ok(_) => bail!("the store version lock is not a regular file"),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => lock_file(root, true)?,
+                    Err(e) => return Err(e).context("open the store version lock"),
+                }
+            } else {
+                lock_file(root, true)?
+            };
             rustix::fs::flock(&file, rustix::fs::FlockOperation::LockShared)?;
             let stored = marker(root)?.context("the store version disappeared; refuse access")?;
             binary.require_compatible(&stored, "store")?;

@@ -568,7 +568,11 @@ impl Db {
 
     /// The owners that the stored records give: a replay into a temporary database.
     pub fn recomputed_owners(&self, local: &str) -> Result<Vec<Row>> {
+<<<<<<< head
         let mem = Db { conn: Connection::open_in_memory()?, stale: false };
+=======
+        let mem = Db { conn: Connection::open_in_memory()?.into(), stale: false };
+>>>>>>> origin/perf/startup-cpu
         mem.conn.set_prepared_statement_cache_capacity(crate::db::STATEMENT_CACHE_CAPACITY);
         mem.conn.execute_batch(SCHEMA)?;
         fill_only(|| -> Result<()> {
@@ -749,7 +753,7 @@ mod tests {
     fn memory() -> Db {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(SCHEMA).unwrap();
-        Db { conn, stale: false }
+        Db { conn: conn.into(), stale: false }
     }
 
     fn state(id: &str, kind: StateKind, line: Option<&str>, parents: Vec<String>) -> StateRec {
