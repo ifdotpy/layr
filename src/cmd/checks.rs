@@ -653,7 +653,13 @@ fn execute(
     let private =
         crate::repo::Temp { path: std::path::PathBuf::from(format!("/private/var/tmp/layr-check-{}", crate::ids::new_id())) };
     std::fs::DirBuilder::new().mode(0o700).create(&private.path)?;
-    let status = std::process::Command::new("/bin/cp").args(["-cR", "--"]).arg(dir.join(".")).arg(&private.path).status()?;
+    // A clone needs one volume; a store on another volume (a disk image) takes a plain copy.
+    let same_volume = std::fs::metadata(dir)?.dev() == std::fs::metadata(&private.path)?.dev();
+    let status = std::process::Command::new("/bin/cp")
+        .args([if same_volume { "-cR" } else { "-R" }, "--"])
+        .arg(dir.join("."))
+        .arg(&private.path)
+        .status()?;
     if !status.success() {
         bail!("cannot prepare private macOS check folder");
     }
