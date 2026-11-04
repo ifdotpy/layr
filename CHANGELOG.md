@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.26.0](https://github.com/ifdotpy/layr/compare/v0.25.0...v0.26.0) (2026-11-04)
+
+
+### Features
+
+* **cache:** environment and toolchain in the cache key, named mismatches ([#260](https://github.com/ifdotpy/layr/issues/260)) ([dd6eb6c](https://github.com/ifdotpy/layr/commit/dd6eb6c6ef54696fe811ec0a564860eb47691086))
+* **cache:** fsck --caches reports the cache data that nothing keeps ([#268](https://github.com/ifdotpy/layr/issues/268)) ([8cd57d4](https://github.com/ifdotpy/layr/commit/8cd57d458478a19bf676a0204618e8b5094098ec))
+* **cache:** one cache overlay line per line and platform ([#259](https://github.com/ifdotpy/layr/issues/259)) ([e727b45](https://github.com/ifdotpy/layr/commit/e727b45879d347dd482d3a767baa9095a9ed99cb))
+* **project:** delete a project without lines ([#258](https://github.com/ifdotpy/layr/issues/258)) ([fdfc8f4](https://github.com/ifdotpy/layr/commit/fdfc8f4c6a6da18f3667be0a580c1ec5504b2a74))
+* **remote:** keep file times in store trees ([#262](https://github.com/ifdotpy/layr/issues/262)) ([e39850c](https://github.com/ifdotpy/layr/commit/e39850c75c2f223702ebb15e3cbd4ad088460f7b))
+* **retest:** doctor names compiled-in paths and gives the run-time form ([#261](https://github.com/ifdotpy/layr/issues/261)) ([5fc91d9](https://github.com/ifdotpy/layr/commit/5fc91d981640767f89cca8568b887633c6f46227))
+
+
+### Bug Fixes
+
+* **cache:** line delete deletes the line's cache states at once ([#264](https://github.com/ifdotpy/layr/issues/264)) ([93f0054](https://github.com/ifdotpy/layr/commit/93f00548f7621c0aa6b85a5d7ee224d7084dc980))
+* **follow:** one source line with an error no longer stops the cache step ([#263](https://github.com/ifdotpy/layr/issues/263)) ([144fd8d](https://github.com/ifdotpy/layr/commit/144fd8d6ed6ec0622cb0fe92bfbdbd8d8b65657f))
+
 ## [0.25.0](https://github.com/ifdotpy/layr/compare/v0.24.0...v0.25.0) (2026-11-04)
 
 
