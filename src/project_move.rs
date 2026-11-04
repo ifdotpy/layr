@@ -1,4 +1,5 @@
-//! `layr project move <project> <volume>`: move a project to another volume (docs/volumes.md).
+//! `layr project move <project> <volume>`: move a project to another volume (docs/volumes.md), and
+//! `layr project delete <project>`: remove a project without lines (`delete_project`).
 //!
 //! Steps, under the move lock `project-moves/.lock` and the project lock of the source:
 //! 1. The journal `project-moves/<project>.json` names the source and the target volume.
@@ -302,6 +303,46 @@ pub fn move_project(store: &Store, project: &str, volume: &str) -> Result<Moved>
         eprintln!("layr: project '{project}' is on volume '{volume}'; the old folder is removed later ({e:#})");
     }
     Ok(Moved { from, to: volume.into(), copy })
+}
+
+/// `layr project delete`: remove a project that has no lines, with its overlays, history and git
+/// objects, through the trash of its volume. The caller checked the admin role.
+pub fn delete_project(store: &Store, project: &str) -> Result<()> {
+    let root = store.root.as_path();
+    let dir = store.project_dir(project)?;
+    if !db_file(&dir).is_file() {
+        bail!("project '{project}' not found");
+    }
+    // A move holds this lock from its start to its end: no move runs while the folder goes.
+    let _moves = move_lock(root, true)?;
+    if journal_of(root, project).exists() {
+        bail!("project '{project}' is moving to another volume; run any layr command to finish the move, then delete it");
+    }
+    let handle = Project::open(store, project)?;
+    let _lock = handle.lock()?;
+    let lines = handle.db.lines()?;
+    if !lines.is_empty() {
+        let names: Vec<&str> = lines.iter().map(|l| l.name.as_str()).collect();
+        bail!("project '{project}' has {} line(s): {}; delete them first (layr line delete)", names.len(), names.join(", "));
+    }
+    if let Some((pid, path)) = in_use(std::slice::from_ref(&dir))? {
+        bail!("project '{project}' is in use: process {pid} works in {}; stop it and run the delete again", path.display());
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(mount) = mount_in(&dir)? {
+        bail!("project '{project}' has a mount at {}; nothing was deleted", mount.display());
+    }
+    to_trash(&store.volume_root(project)?, &dir)?;
+    volumes::unassign(root, project)
+}
+
+/// A mount point in `dir`: a rename would carry it into the trash.
+#[cfg(target_os = "linux")]
+fn mount_in(dir: &Path) -> Result<Option<PathBuf>> {
+    let dir = fs::canonicalize(dir)?;
+    let mounts = fs::read_to_string("/proc/self/mountinfo")?;
+    // Field 5 is the mount point, with a space written as `\040`.
+    Ok(mounts.lines().filter_map(|l| l.split(' ').nth(4)).map(|p| PathBuf::from(p.replace("\\040", " "))).find(|p| p.starts_with(&dir)))
 }
 
 /// Step 4: the project lives on `to`. Points the git objects of the moved lines at the new folder,
