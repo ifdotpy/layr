@@ -8,8 +8,10 @@ use std::path::Path;
 use std::process::Command;
 use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, Value};
 
-/// Standard build of a cargo project: the default `sweep` of `[workspace.metadata.layr-retest]`.
-const SWEEP_DEFAULT: &[&str] = &["build", "--workspace", "--all-targets", "--locked"];
+/// The standard commands of a cargo project: the default `sweep` of `[workspace.metadata.layr-retest]`. The debug
+/// build, the test build and the release build. A profile folder that no command lists is never swept.
+const SWEEP_DEFAULT: &[&[&str]] =
+    &[&["build", "--locked"], &["test", "--locked", "--no-run"], &["build", "--release", "--locked"]];
 /// Default `env` of `[workspace.metadata.layr-retest]`: incremental compilation, faster for a small change. A rustc
 /// wrapper (such as sccache, set in `~/.cargo/config.toml`) refuses incremental compilation, so it is cleared.
 const ENV_DEFAULT: &[(&str, &str)] = &[("CARGO_INCREMENTAL", "1"), ("RUSTC_WRAPPER", "")];
@@ -55,13 +57,26 @@ pub fn add_line(text: &str, entry: &str, accept: &[&str]) -> Option<String> {
     Some(format!("{text}{nl}{entry}\n"))
 }
 
-/// Edit a file, creating it when missing. Returns whether it changed.
-fn ensure(path: &Path, entry: &str, accept: &[&str]) -> Result<bool> {
+/// Edit a file, creating it when missing. Returns whether it needs the change. `write` false (a protected line)
+/// leaves the file as it is.
+fn ensure(path: &Path, entry: &str, accept: &[&str], write: bool) -> Result<bool> {
     let old = std::fs::read_to_string(path).unwrap_or_default();
     match add_line(&old, entry, accept) {
-        Some(new) => std::fs::write(path, new).map(|_| true).map_err(Into::into),
+        Some(new) if write => std::fs::write(path, new).map(|_| true).map_err(Into::into),
+        Some(_) => Ok(true),
         None => Ok(false),
     }
+}
+
+/// The current line, from `layr line list`.
+fn current_line() -> Option<String> {
+    let (_, lines, _) = layr_all(&["line", "list"]).ok()?;
+    lines.lines().find_map(|l| l.strip_prefix("* ")).map(|l| l.trim().to_string())
+}
+
+/// Whether `line` has a protection rule (`layr protect` lists one rule per line, the line name first).
+fn protected(line: &str) -> bool {
+    layr_all(&["protect"]).is_ok_and(|(_, out, _)| out.lines().any(|l| l.split('\t').next() == Some(line)))
 }
 
 /// `text` with the keys of `[workspace.metadata.layr-retest]` that are missing (`sweep`, `env`) added. A key
@@ -84,12 +99,14 @@ pub fn add_retest_config(text: &str) -> Result<Option<(String, Vec<&'static str>
         .context("[workspace.metadata.layr-retest] is not a table")?;
     let mut added = Vec::new();
     if !cfg.contains_key("sweep") {
-        let mut command = Array::new();
-        for a in SWEEP_DEFAULT {
-            command.push(*a);
-        }
         let mut sweep = Array::new();
-        sweep.push(command);
+        for c in SWEEP_DEFAULT {
+            let mut command = Array::new();
+            for a in *c {
+                command.push(*a);
+            }
+            sweep.push(Value::Array(command));
+        }
         cfg.insert("sweep", Item::Value(Value::Array(sweep)));
         added.push("sweep");
     }
@@ -105,9 +122,10 @@ pub fn add_retest_config(text: &str) -> Result<Option<(String, Vec<&'static str>
 }
 
 /// Edits the manifest at `path` with [`add_retest_config`]. Returns the added keys, if any.
-fn add_retest_config_file(path: &Path) -> Result<Option<Vec<&'static str>>> {
+fn add_retest_config_file(path: &Path, write: bool) -> Result<Option<Vec<&'static str>>> {
     let text = std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
     match add_retest_config(&text)? {
+        Some((_, added)) if !write => Ok(Some(added)),
         Some((new, added)) => {
             std::fs::write(path, new).with_context(|| format!("cannot write {}", path.display()))?;
             Ok(Some(added))
@@ -170,10 +188,16 @@ pub fn run(args: &[String]) -> Result<i32> {
             }
             println!("installing {}: {}", m.what, m.install);
             let mut w = m.install.split_whitespace();
-            let ok = Command::new(w.next().unwrap()).args(w).status().is_ok_and(|s| s.success());
-            if !ok {
-                println!("install failed: {}", m.install);
-                code = 1;
+            match Command::new(w.next().unwrap()).args(w).status() {
+                Ok(s) if s.success() => {}
+                Ok(s) => {
+                    println!("install failed: `{}` exited with {s} (its output is above)", m.install);
+                    code = 1;
+                }
+                Err(e) => {
+                    println!("install failed: cannot run `{}`: {e}", m.install);
+                    code = 1;
+                }
             }
         }
     }
@@ -189,30 +213,61 @@ pub fn run(args: &[String]) -> Result<i32> {
     if f.tests() {
         folders.push(RECORD_DIR);
     }
+    // A protected line takes files only through a merge: init writes no file there and names the files that need
+    // the change.
+    let line = current_line();
+    let guarded = line.as_deref().is_some_and(protected);
+    let write = !guarded;
+    let added = if write { "added" } else { "needs" };
+    // The files that init changed. A line takes them from a state, so they are saved once (printed below).
+    let mut edited: Vec<&str> = Vec::new();
     for folder in &folders {
-        let changed = ensure(&root.join(".layrattributes"), &format!("{folder} regenerable"), &[])?;
+        let changed = ensure(&root.join(".layrattributes"), &format!("{folder} regenerable"), &[], write)?;
         println!(
             ".layrattributes: {}",
-            if changed { format!("added `{folder} regenerable`") } else { format!("`{folder} regenerable` present") }
+            if changed { format!("{added} `{folder} regenerable`") } else { format!("`{folder} regenerable` present") }
         );
+        if changed && !edited.contains(&".layrattributes") {
+            edited.push(".layrattributes");
+        }
     }
     if f.tests() {
-        let changed = ensure(&root.join(".gitignore"), RECORD_DIR, &["/.layr-retest", ".layr-retest/", "/.layr-retest/"])?;
-        println!(".gitignore: {}", if changed { format!("added `{RECORD_DIR}`") } else { format!("`{RECORD_DIR}` present") });
+        let changed = ensure(&root.join(".gitignore"), RECORD_DIR, &["/.layr-retest", ".layr-retest/", "/.layr-retest/"], write)?;
+        println!(".gitignore: {}", if changed { format!("{added} `{RECORD_DIR}`") } else { format!("`{RECORD_DIR}` present") });
+        if changed {
+            edited.push(".gitignore");
+        }
     }
     if f.cargo {
-        match add_retest_config_file(&root.join("Cargo.toml"))? {
-            Some(keys) => println!("Cargo.toml: added {} to [workspace.metadata.layr-retest]", keys.join(", ")),
+        match add_retest_config_file(&root.join("Cargo.toml"), write)? {
+            Some(keys) => {
+                println!("Cargo.toml: {added} {} in [workspace.metadata.layr-retest]", keys.join(", "));
+                edited.push("Cargo.toml");
+            }
             None => println!("Cargo.toml: [workspace.metadata.layr-retest] keys present"),
         }
     }
+    if !edited.is_empty() && guarded {
+        let name = line.as_deref().unwrap_or("main");
+        println!("line {name} is protected, so init changed no file. Run init in a line, save, and merge:");
+        println!("      layr line new retest-init {name} && cd ../retest-init && layr retest init");
+        println!("      layr add {} && layr save -m \"retest init\"", edited.join(" "));
+        code = 1;
+    } else if !edited.is_empty() {
+        println!("save: layr add {} && layr save -m \"retest init\"", edited.join(" "));
+        println!("      (lines take the caches only after this save; in a protected main, save in a line and merge)");
+    }
 
-    // Save each cache folder that exists and is not a cache overlay yet. A new line then starts warm.
+    // A cache folder that exists is saved now as a cache overlay, so a new line starts warm. A folder made later
+    // becomes one at the next `layr save` (the layer's own rule, no init needed).
     let present: Vec<&str> = folders.iter().copied().filter(|f| root.join(f).is_dir()).collect();
     for folder in folders.iter().filter(|f| !present.contains(*f)) {
-        println!("{folder}: not there yet, not saved; run `layr retest init` again after a build or an install");
+        println!("{folder}: not there yet; the next `layr save` after a build makes it a cache");
     }
-    if !present.is_empty() {
+    if guarded && !present.is_empty() {
+        // A protected line refuses a save; its follow pass saves the caches after each merge.
+        println!("caches: line {} is protected; the follow pass saves its caches", line.as_deref().unwrap_or("main"));
+    } else if !present.is_empty() {
         match cache_folders() {
             Err(e) => {
                 println!("cache folders not saved, this is not a layr line: {e:#}");
@@ -235,9 +290,57 @@ pub fn run(args: &[String]) -> Result<i32> {
             }
         }
     }
+    follow_main(&mut code)?;
     println!("next: layr retest gate -- <your gate command>");
     println!("      layr retest doctor checks the project");
     Ok(code)
+}
+
+/// Runs layr: success, stdout and stderr. (`crate::layr` returns the stdout of a success only.)
+fn layr_all(args: &[&str]) -> Result<(bool, String, String)> {
+    let out = Command::new(std::env::current_exe()?).args(args).output().context("cannot run layr")?;
+    Ok((
+        out.status.success(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    ))
+}
+
+/// Sets the target `origin/main` of the main line when the project has an `origin` remote, and runs its first pass.
+/// Idempotent: a main line that already follows it is left alone. Other lines get no target. Sets `code` to 1 when
+/// the pass fails.
+fn follow_main(code: &mut i32) -> Result<()> {
+    let (_, lines, _) = layr_all(&["line", "list"])?;
+    let Some(current) = lines.lines().find_map(|l| l.strip_prefix("* ")).map(str::trim) else {
+        println!("follow: cannot read the current line; run `layr retest init` in the main line");
+        return Ok(());
+    };
+    if current != "main" {
+        println!("follow: line {current} is not main; run `layr retest init` in main to follow origin/main");
+        return Ok(());
+    }
+    let (_, remotes, _) = layr_all(&["git", "remote"])?;
+    if !remotes.lines().any(|r| r.trim() == "origin") {
+        println!("follow: no git remote origin; main follows nothing");
+        return Ok(());
+    }
+    let (_, show, _) = layr_all(&["follow"])?;
+    if show.lines().any(|l| l.trim() == "Following origin/main on line main") {
+        println!("follow: main already follows origin/main");
+        return Ok(());
+    }
+    let (ok, out, err) = layr_all(&["follow", "origin/main"])?;
+    print!("{out}");
+    if ok {
+        println!("follow: main follows origin/main");
+    } else {
+        println!("follow: origin/main not set: {}", err.trim());
+        *code = 1;
+    }
+    if err.contains("no layr daemon runs") {
+        println!("follow: no daemon runs, so passes run only by hand; install it: docs/follow.md (Install on macOS, Linux)");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -274,10 +377,13 @@ mod tests {
         let d = std::env::temp_dir().join(format!("layr-retest-init-{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         let p = d.join(".layrattributes");
-        assert!(ensure(&p, "target regenerable", &[]).unwrap());
-        assert!(ensure(&p, "node_modules regenerable", &[]).unwrap());
-        assert!(!ensure(&p, "target regenerable", &[]).unwrap());
-        assert!(!ensure(&p, "node_modules regenerable", &[]).unwrap());
+        assert!(ensure(&p, "target regenerable", &[], true).unwrap());
+        assert!(ensure(&p, "node_modules regenerable", &[], true).unwrap());
+        assert!(!ensure(&p, "target regenerable", &[], true).unwrap());
+        assert!(!ensure(&p, "node_modules regenerable", &[], true).unwrap());
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "target regenerable\nnode_modules regenerable\n");
+        // A protected line: the change is reported, the file stays.
+        assert!(ensure(&p, ".layr-retest regenerable", &[], false).unwrap());
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "target regenerable\nnode_modules regenerable\n");
         std::fs::remove_dir_all(&d).unwrap();
     }
@@ -300,7 +406,12 @@ mod tests {
         let (out, added) = add_retest_config("[package]\nname = \"p\"\nversion = \"0.1.0\"\n").unwrap().unwrap();
         assert_eq!(added, ["sweep", "env"]);
         assert!(out.contains("[workspace.metadata.layr-retest]"), "{out}");
-        assert!(out.contains("sweep = [[\"build\", \"--workspace\", \"--all-targets\", \"--locked\"]]"), "{out}");
+        assert!(
+            out.contains(
+                "sweep = [[\"build\", \"--locked\"], [\"test\", \"--locked\", \"--no-run\"], [\"build\", \"--release\", \"--locked\"]]"
+            ),
+            "{out}"
+        );
         assert!(out.contains("env = { CARGO_INCREMENTAL = \"1\", RUSTC_WRAPPER = \"\" }"), "{out}");
         assert_eq!(add_retest_config(&out).unwrap(), None, "a second run changes nothing");
     }

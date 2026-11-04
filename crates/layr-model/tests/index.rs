@@ -97,11 +97,11 @@ fn bad_head_watermark_unknown_signer_and_missing_record_use_full_verified_load()
 }
 
 fn tree(bytes: &[u8], mode: &str) -> format::Tree {
-    use sha2::{Digest, Sha256};
+    use layr_hashers::{ContentAddress, Digest};
     format::Tree {
         files: BTreeMap::from([(
             "file".into(),
-            format::Entry(mode.into(), bytes.len() as u64, hex::encode(Sha256::digest(bytes)), vec![]),
+            format::Entry(mode.into(), bytes.len() as u64, hex::encode(ContentAddress::digest(bytes)), vec![]),
         )]),
     }
 }

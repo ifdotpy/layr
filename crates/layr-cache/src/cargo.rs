@@ -351,6 +351,76 @@ pub fn built(target: &Path) -> bool {
     std::fs::read_dir(target).into_iter().flatten().flatten().any(|e| e.path().join(".fingerprint").is_dir())
 }
 
+/// A top-level folder of `target` that no `sweep` command makes (another `--target` triple, a custom profile, `doc`)
+/// goes when no build wrote into it for this time.
+const UNLISTED_AGE: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 3600);
+
+/// The top-level folders of `target` that the `sweep` commands make: their profile folders and their `--target`
+/// triples. `retest` (layr-retest) and the profile scratch folder are kept too.
+fn listed_dirs(commands: &[Vec<String>]) -> std::collections::BTreeSet<String> {
+    let mut out: std::collections::BTreeSet<String> = ["retest".to_string()].into();
+    out.extend(profile_scratch(Path::new("")).file_name().map(|n| n.to_string_lossy().into_owned()));
+    for args in commands {
+        out.insert(profile_of(args));
+        let own = &args[..args.iter().position(|a| a == "--").unwrap_or(args.len())];
+        for (i, a) in own.iter().enumerate() {
+            if a == "--target" {
+                out.extend(own.get(i + 1).cloned());
+            } else if let Some(t) = a.strip_prefix("--target=") {
+                out.insert(t.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// The newest modification time of `dir`, its entries and their entries. A build writes there (cargo's
+/// `.cargo-lock` and `.fingerprint`, the files of `doc`), so it tells when a build last used the folder.
+fn newest_write(dir: &Path) -> std::time::SystemTime {
+    let time = |p: &Path| std::fs::symlink_metadata(p).and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
+    let mut newest = time(dir);
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        newest = newest.max(time(&e.path()));
+        if e.file_type().is_ok_and(|t| t.is_dir()) {
+            for f in std::fs::read_dir(e.path()).into_iter().flatten().flatten() {
+                newest = newest.max(time(&f.path()));
+            }
+        }
+    }
+    newest
+}
+
+/// The top-level folders of `target` that no listed command makes and that no build wrote into for
+/// `UNLISTED_AGE` before `now`. Files and symbolic links at the top level stay.
+pub fn stale_unlisted(target: &Path, commands: &[Vec<String>], now: std::time::SystemTime) -> Vec<PathBuf> {
+    let listed = listed_dirs(commands);
+    let mut out = Vec::new();
+    for e in std::fs::read_dir(target).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if listed.contains(&name) || !e.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        if now.duration_since(newest_write(&e.path())).is_ok_and(|age| age >= UNLISTED_AGE) {
+            out.push(e.path());
+        }
+    }
+    out.sort();
+    out
+}
+
+/// The bytes of the files under `dir` (symbolic links are not followed).
+fn size_of(dir: &Path) -> u64 {
+    let mut n = 0;
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        match e.file_type() {
+            Ok(t) if t.is_dir() => n += size_of(&e.path()),
+            Ok(t) if t.is_file() => n += e.metadata().map(|m| m.len()).unwrap_or(0),
+            _ => {}
+        }
+    }
+    n
+}
+
 /// The cargo adapter for `target`: removes the entries that the `sweep` list does not need. The folder must be
 /// named `target` and have a `Cargo.toml` next to it. A unit that is not fresh, a busy build lock or any other
 /// failure skips the folder. A busy lock skips only its profile folder: the others are already swept.
@@ -377,6 +447,31 @@ impl CacheAdapter for Cargo {
     fn prune(&self, host: &dyn Host, folder: &Path) -> Outcome {
         prune(host, folder)
     }
+
+    fn warm(&self, host: &dyn Host, folder: &Path) -> Result<(), String> {
+        warm(host, folder).map_err(|e| format!("{e:#}"))
+    }
+}
+
+/// Builds the `sweep` commands of the project into `target`, with the project env. It may fetch crates (a merged
+/// change can add a dependency). A failed build leaves `target` consistent: cargo writes each output whole.
+pub fn warm(host: &dyn Host, target: &Path) -> Result<()> {
+    let named = target.file_name().is_some_and(|n| n == "target");
+    let Some(root) = target.parent().filter(|r| named && r.join("Cargo.toml").is_file()) else {
+        bail!("cargo needs a folder named target next to Cargo.toml");
+    };
+    let cfg = settings(host, root)?;
+    if !cfg.listed {
+        bail!("no `sweep` list under [workspace.metadata.layr-retest] in Cargo.toml");
+    }
+    for args in &cfg.commands {
+        let mut c = host_cargo(host)?;
+        c.args(args).current_dir(root).env("CARGO_TARGET_DIR", target).envs(cfg.env.iter().map(|(k, v)| (k, v)));
+        // The color again after the project's env: the parsers of later steps read plain text.
+        c.env("CARGO_TERM_COLOR", "never");
+        run(&mut c, Some(host.deadline())).with_context(|| format!("cargo {}", args.join(" ")))?;
+    }
+    Ok(())
 }
 
 fn prune_in(host: &dyn Host, root: &Path, target: &Path) -> Result<Outcome> {
@@ -405,6 +500,13 @@ fn prune_in(host: &dyn Host, root: &Path, target: &Path) -> Result<Outcome> {
             }
             Listed::NotFresh(why) => kept.push(format!("{profile}: a unit is not fresh ({why})")),
             Listed::Busy(holder) => kept.push(format!("{profile}: build lock busy (holder: {holder})")),
+        }
+    }
+    // The folders that no listed command makes have no live set: an old one goes (issue #195).
+    for dir in stale_unlisted(target, &cfg.commands, std::time::SystemTime::now()) {
+        let n = size_of(&dir);
+        if std::fs::remove_dir_all(&dir).is_ok() {
+            freed += n;
         }
     }
     if fresh == 0 {

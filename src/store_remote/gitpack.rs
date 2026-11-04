@@ -17,7 +17,7 @@ use super::{keys, Options, Report, Store};
 use crate::gitbridge;
 use crate::repo::Repo;
 use anyhow::{bail, Context, Result};
-use sha2::{Digest, Sha256};
+use layr_hashers::{ContentAddress, Digest};
 use std::collections::BTreeSet;
 
 const PACK: &str = ".pack.age";
@@ -85,7 +85,7 @@ pub(super) fn push(store: &Store, repo: &Repo, opts: &Options, report: &mut Repo
         .filter_map(|(c, present)| present.then_some(c))
         .collect();
     let pack = gitbridge::pack_commits(repo, &new, &covered)?;
-    let name = hex::encode(Sha256::digest(&pack));
+    let name = hex::encode(ContentAddress::digest(&pack));
     store.backend.put_new(&format!("git/{name}{PACK}"), keys::encrypt(&descriptor.recipient, &pack)?)?;
     let list = serde_json::to_vec(&serde_json::json!({"format": 1, "commits": new}))?;
     store.backend.put_new(&format!("git/{name}{COMMITS}"), keys::encrypt(&descriptor.recipient, &list)?)?;
@@ -108,7 +108,7 @@ pub(super) fn fetch(store: &Store, repo: &Repo, identity: &str) -> Result<usize>
         let body = store.backend.get(&pack_key)?.with_context(|| format!("store remote lacks {pack_key}"))?;
         let pack = keys::decrypt(identity, &body)?;
         let name = stem.strip_prefix("git/").unwrap_or(stem);
-        if hex::encode(Sha256::digest(&pack)) != name {
+        if hex::encode(ContentAddress::digest(&pack)) != name {
             bail!("Git pack {pack_key} does not match its name");
         }
         gitbridge::install_pack(repo, &pack)?;

@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.23.0](https://github.com/ifdotpy/layr/compare/v0.22.2...v0.23.0) (2026-11-04)
+
+
+### Features
+
+* **retest:** init sets up follow, the sweep list and warm thin caches ([#197](https://github.com/ifdotpy/layr/issues/197)) ([e5eb0c5](https://github.com/ifdotpy/layr/commit/e5eb0c523156e24553c39a9e4cb2f4f062c7e22a))
+
+
+### Bug Fixes
+
+* **git:** Import a fetched branch on first use, and update the git refs of lines after a fetch ([#231](https://github.com/ifdotpy/layr/issues/231)) ([18ab954](https://github.com/ifdotpy/layr/commit/18ab954964c1c7a804436d8d9e69a22e69ae2df8))
+* **save:** Run the checks of a named save once, and finish it after the lock ([#224](https://github.com/ifdotpy/layr/issues/224)) ([520bf68](https://github.com/ifdotpy/layr/commit/520bf68e1e728f007475b3b7ecc0f39b21edcfa3))
+
+
+### Performance
+
+* **hash:** Purpose-named hashers crate; BLAKE3 for local checks, Fx for local maps ([#234](https://github.com/ifdotpy/layr/issues/234)) ([94daee4](https://github.com/ifdotpy/layr/commit/94daee49ace44e6265c21dd843fda7527077cbfc))
+
+## [0.22.2](https://github.com/ifdotpy/layr/compare/v0.22.1...v0.22.2) (2026-11-04)
+
+
+### Bug Fixes
+
+* **cache:** prune removes target folders that no sweep command makes after a week ([#217](https://github.com/ifdotpy/layr/issues/217)) ([12a1dd9](https://github.com/ifdotpy/layr/commit/12a1dd99c1499614e82bd8d8daa95f21107d764b))
+* **gc:** Free the states of deleted lines when they leave the undo ring ([#212](https://github.com/ifdotpy/layr/issues/212)) ([cdf9c9b](https://github.com/ifdotpy/layr/commit/cdf9c9ba1d998c17b6126ec13483b7b159f6c070))
+* **gc:** Plan gc --repair again instead of replaying under the project lock ([#215](https://github.com/ifdotpy/layr/issues/215)) ([50bcdaf](https://github.com/ifdotpy/layr/commit/50bcdaf841a0918554db8cb7fe25a5301247e80d)), closes [#194](https://github.com/ifdotpy/layr/issues/194)
+* **retest:** bound cargo listings and e2e processes by a time limit ([#208](https://github.com/ifdotpy/layr/issues/208)) ([90799c7](https://github.com/ifdotpy/layr/commit/90799c75549599477fa67971066b847dc158872a))
+
+
+### Performance
+
+* **db:** Cache prepared SQLite statements ([#216](https://github.com/ifdotpy/layr/issues/216)) ([42d2407](https://github.com/ifdotpy/layr/commit/42d24076d4872de0688a0f7854e2814724efbfee)), closes [#194](https://github.com/ifdotpy/layr/issues/194)
+* **line:** Add only the late changes when a line delete finds its folder changed ([#218](https://github.com/ifdotpy/layr/issues/218)) ([1d9507a](https://github.com/ifdotpy/layr/commit/1d9507acc833bb83324b9c6100feddcaf45ff9f5)), closes [#194](https://github.com/ifdotpy/layr/issues/194)
+* **line:** Start a new line at the state it read, without a retry ([#214](https://github.com/ifdotpy/layr/issues/214)) ([49a706f](https://github.com/ifdotpy/layr/commit/49a706f92eaf55a17059b1a092c4b0907779e374))
+* **save:** Snapshot the folder and compare it with the head before the lock in save --caches ([43ebdfe](https://github.com/ifdotpy/layr/commit/43ebdfe34b3f5379dc76a96387999e8c73aad0fb)), closes [#194](https://github.com/ifdotpy/layr/issues/194)
+* **save:** Snapshot the folder before the project lock in save --caches ([#223](https://github.com/ifdotpy/layr/issues/223)) ([43ebdfe](https://github.com/ifdotpy/layr/commit/43ebdfe34b3f5379dc76a96387999e8c73aad0fb))
+
 ## [0.22.1](https://github.com/ifdotpy/layr/compare/v0.22.0...v0.22.1) (2026-11-04)
 
 

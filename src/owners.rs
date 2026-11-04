@@ -20,9 +20,6 @@ pub const AUTO_RING_DEFAULT: usize = 10;
 pub const UNDO_OPS_DEFAULT: usize = 20;
 pub const UNDO_DELETED_DEFAULT: usize = 5;
 
-/// Statement cache size of a connection that runs the owners code (it has about 20 statements).
-pub const OWNERS_STATEMENTS: usize = 64;
-
 /// Config keys of the rings. `retention.auto` is also read by `gc`, which keeps 50 when unset.
 pub const KEY_AUTO: &str = "retention.auto";
 pub const KEY_UNDO_OPS: &str = "undo.ops";
@@ -71,7 +68,8 @@ pub fn undo_entries(rec: &Record, ord: &str) -> Vec<(String, Vec<String>)> {
             }
             // An automatic save: undo reads the working state it changes from.
             if rec.op == "save" {
-                named.extend(["working_before", "working_after"].iter().filter_map(|k| rec.data[*k].as_str().map(str::to_string)));
+                named
+                    .extend(["working_before", "working_after"].iter().filter_map(|k| rec.data[*k].as_str().map(str::to_string)));
             }
             (format!("{line}|{ord}"), named)
         })
@@ -503,7 +501,8 @@ impl Db {
     fn sync_ref(&self, name: &str) -> Result<()> {
         let target: Vec<String> = self
             .conn
-            .query_row("SELECT target FROM refs WHERE name=?1 AND deleted=0", params![name], |r| r.get::<_, Option<String>>(0))
+            .prepare_cached("SELECT target FROM refs WHERE name=?1 AND deleted=0")?
+            .query_row(params![name], |r| r.get::<_, Option<String>>(0))
             .optional()?
             .flatten()
             .into_iter()
@@ -514,7 +513,8 @@ impl Db {
     fn sync_tag(&self, name: &str) -> Result<()> {
         let target: Vec<String> = self
             .conn
-            .query_row("SELECT state FROM tags WHERE name=?1 AND deleted=0", params![name], |r| r.get::<_, Option<String>>(0))
+            .prepare_cached("SELECT state FROM tags WHERE name=?1 AND deleted=0")?
+            .query_row(params![name], |r| r.get::<_, Option<String>>(0))
             .optional()?
             .flatten()
             .into_iter()
@@ -524,7 +524,7 @@ impl Db {
 
     /// The refs of a removed remote have no owner.
     fn clear_remote_refs_of(&self, remote: &str) -> Result<()> {
-        let mut st = self.conn.prepare("SELECT name FROM remote_refs WHERE substr(name, 1, length(?1)+1)=?1||'/'")?;
+        let mut st = self.conn.prepare_cached("SELECT name FROM remote_refs WHERE substr(name, 1, length(?1)+1)=?1||'/'")?;
         let names = st.query_map(params![remote], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<String>>>()?;
         for name in names {
             self.set_owners("remote-ref", &name, &Vec::<String>::new())?;
@@ -535,7 +535,8 @@ impl Db {
     fn sync_remote_ref(&self, name: &str) -> Result<()> {
         let target: Vec<String> = self
             .conn
-            .query_row("SELECT state FROM remote_refs WHERE name=?1", params![name], |r| r.get::<_, Option<String>>(0))
+            .prepare_cached("SELECT state FROM remote_refs WHERE name=?1")?
+            .query_row(params![name], |r| r.get::<_, Option<String>>(0))
             .optional()?
             .flatten()
             .into_iter()
@@ -547,11 +548,8 @@ impl Db {
     fn sync_export(&self, remote: &str, branch: &str) -> Result<()> {
         let target: Vec<String> = self
             .conn
-            .query_row(
-                "SELECT state FROM exports WHERE remote=?1 AND branch=?2 ORDER BY ord DESC LIMIT 1",
-                params![remote, branch],
-                |r| r.get::<_, Option<String>>(0),
-            )
+            .prepare_cached("SELECT state FROM exports WHERE remote=?1 AND branch=?2 ORDER BY ord DESC LIMIT 1")?
+            .query_row(params![remote, branch], |r| r.get::<_, Option<String>>(0))
             .optional()?
             .flatten()
             .into_iter()
@@ -571,7 +569,7 @@ impl Db {
     /// The owners that the stored records give: a replay into a temporary database.
     pub fn recomputed_owners(&self, local: &str) -> Result<Vec<Row>> {
         let mem = Db { conn: Connection::open_in_memory()?, stale: false };
-        mem.conn.set_prepared_statement_cache_capacity(OWNERS_STATEMENTS);
+        mem.conn.set_prepared_statement_cache_capacity(crate::db::STATEMENT_CACHE_CAPACITY);
         mem.conn.execute_batch(SCHEMA)?;
         fill_only(|| -> Result<()> {
             for raw in self.all_lines()? {
@@ -659,9 +657,8 @@ impl Db {
 
     /// Present states that no owner names. Only a replay of an old database or a crash leaves them.
     pub fn leaked_states(&self) -> Result<Vec<String>> {
-        let mut st = self.cached(
-            "SELECT id FROM states WHERE present=1 AND deleted=0 AND id NOT IN (SELECT state FROM owners) ORDER BY id",
-        )?;
+        let mut st = self
+            .cached("SELECT id FROM states WHERE present=1 AND deleted=0 AND id NOT IN (SELECT state FROM owners) ORDER BY id")?;
         let v = st.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
         Ok(v)
     }

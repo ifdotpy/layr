@@ -463,6 +463,9 @@ Crates:
 
 ### 18.1 Adapters
 
+The follow pass also runs each adapter's build (`warm`) before the prune (docs/follow.md): cargo builds
+the `sweep` list with the project env, pnpm runs `pnpm install --frozen-lockfile` (online).
+
 | Name | Folder | Project file next to it | Live set | Work |
 | --- | --- | --- | --- | --- |
 | `cargo` | `target` | `Cargo.toml` | the units of the `sweep` list of `[workspace.metadata.layr-retest]` | lists the units (no compile), then removes the other entries (section "Sweeping stale build output" of `docs/retest.md`) |
@@ -588,3 +591,24 @@ sweep`.
   `save --caches` of the line prunes them; `prune=none`; an unknown adapter name; cargo missing for the owner;
   a root-owned line. Through the binary.
   Root (btrfs) on Linux, and macOS APFS, as the other `tests/t*.sh` files.
+
+## 20. Source file times
+
+Build tools compare file times: cargo builds a crate again when a source file is newer than its
+build output. A line from a state, a merge and a follow pass write source files with the time of
+the write (as `git checkout` does), so a warm cache looked stale and one or more crates compiled.
+
+- A cache save (`save --caches`, the follow pass, a local merge) writes `.layr-times` into each
+  cache folder before the snapshot: path, time, size and content hash (git blob id) of each tracked
+  file of the working copy (the ignore rules keep it). It runs before the project lock.
+- The file goes with the cache: snapshots, copies and overlay layers carry it, and it goes away
+  with the cache state. No other record holds it.
+- A line that takes caches (`line new`, `merge`, the follow pass, `merge --caches-only`) gives each
+  tracked file whose size and content hash equal the recorded ones the recorded time back. A file
+  with other bytes keeps the time of its write, so the tool builds it again.
+- This is safe by content: the build output is current for the bytes it was built from, whatever
+  the time. Two caches that recorded other bytes for one file leave its time; with equal bytes the
+  file gets the older time.
+- Cost: one walk and one hash of the tracked files per save and per take (Studio, about 4,100
+  files and 118 MB: measured in the PR). A take reads only files of the recorded size whose time
+  differs.

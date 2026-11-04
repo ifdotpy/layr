@@ -173,6 +173,22 @@ fn a_busy_build_lock_skips_within_the_deadline_even_with_colors() {
     assert!(started.elapsed() < deadline - std::time::Duration::from_secs(2), "the sweep waited for the deadline: {:?}", started.elapsed());
 }
 
+#[test]
+fn warm_builds_the_sweep_commands_so_the_next_build_compiles_nothing() {
+    let dir = tmp("warm");
+    let target = project(&dir, Some("sweep = [[\"build\", \"--workspace\"], [\"test\", \"--workspace\", \"--no-run\"]]"));
+    cargo::warm(&host(), &target).unwrap();
+    for args in [&["build", "--workspace"][..], &["test", "--workspace", "--no-run"]] {
+        let stderr = cargo_in(&dir, &target, args);
+        assert!(!stderr.contains("Compiling"), "{args:?}: {stderr}");
+    }
+    // A project without a sweep list has nothing to build.
+    let bare = tmp("warm-bare");
+    let t = project(&bare, None);
+    assert!(cargo::warm(&host(), &t).is_err());
+    assert!(!t.exists(), "nothing was built");
+}
+
 /// A helper process that takes an exclusive flock on `path` and prints `locked`. It is killed on drop.
 struct Holder {
     child: std::process::Child,
@@ -290,4 +306,52 @@ fn listing_past_its_time_limit_is_killed_and_names_the_holder() {
     assert!(started.elapsed() < std::time::Duration::from_secs(30), "{:?}", started.elapsed());
     drop(holder);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Sets the modification time of `path` and of everything under it to 2001-01-01.
+fn make_old(path: &Path) {
+    let st = Command::new("find").arg(path).args(["-exec", "touch", "-h", "-t", "200101010000", "{}", "+"]).status().unwrap();
+    assert!(st.success());
+}
+
+#[test]
+fn an_unlisted_folder_goes_only_when_no_build_wrote_it_for_a_week() {
+    let target = tmp("unlisted").join("target");
+    for d in ["debug/deps", "release/deps", "retest/debug", "profraw/other", "x86_64-unknown-linux-gnu/debug", "doc/prunews", "custom/deps", "aarch64-apple-darwin/debug"] {
+        std::fs::create_dir_all(target.join(d)).unwrap();
+        std::fs::write(target.join(d).join("f"), "x").unwrap();
+    }
+    std::fs::write(target.join("CACHEDIR.TAG"), "x").unwrap();
+    let commands: Vec<Vec<String>> = [vec!["build"], vec!["build", "--release"], vec!["build", "--target", "aarch64-apple-darwin"]]
+        .iter()
+        .map(|c| c.iter().map(|s| s.to_string()).collect())
+        .collect();
+    let now = std::time::SystemTime::now();
+    assert!(cargo::stale_unlisted(&target, &commands, now).is_empty(), "a folder written now stays");
+    let week = std::time::Duration::from_secs(8 * 24 * 3600);
+    let stale: Vec<String> = cargo::stale_unlisted(&target, &commands, now + week)
+        .iter()
+        .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(stale, ["custom", "doc", "x86_64-unknown-linux-gnu"]);
+}
+
+#[test]
+fn prune_removes_an_old_unlisted_folder_and_keeps_a_new_one() {
+    let dir = tmp("unlisted-prune");
+    let target = project(&dir, Some("sweep = [[\"build\", \"--workspace\"]]"));
+    cargo_in(&dir, &target, &["build", "--workspace"]);
+    for d in ["doc/prunews", "x86_64-unknown-linux-gnu/debug"] {
+        std::fs::create_dir_all(target.join(d)).unwrap();
+        std::fs::write(target.join(d).join("big"), vec![0u8; 4096]).unwrap();
+    }
+    make_old(&target.join("doc"));
+    match prune(None, &target).unwrap().1 {
+        Outcome::Pruned { freed } => assert!(freed >= 4096, "freed {freed}"),
+        other => panic!("expected a prune, got {other:?}"),
+    }
+    assert!(!target.join("doc").exists(), "the old unlisted folder goes");
+    assert!(target.join("x86_64-unknown-linux-gnu/debug/big").exists(), "a folder a build wrote this week stays");
+    let stderr = cargo_in(&dir, &target, &["build", "--workspace"]);
+    assert!(!stderr.contains("Compiling"), "{stderr}");
 }

@@ -155,6 +155,10 @@ pub fn retest_host() -> LocalHost {
 
 /// Kills the process `pid` and the process group named by it (a child that is a group leader).
 pub(crate) fn kill_group(pid: u32) {
-    let _ = Command::new("kill").args(["-KILL", "--", &format!("-{pid}")]).status();
-    let _ = Command::new("kill").args(["-KILL", &pid.to_string()]).status();
+    // The group kill fails when the child is not a group leader; then the process alone is killed. A kill of a
+    // process that already exited prints nothing.
+    let group = Command::new("kill").args(["-KILL", "--", &format!("-{pid}")]).stderr(Stdio::null()).status();
+    if !group.is_ok_and(|s| s.success()) {
+        let _ = Command::new("kill").args(["-KILL", &pid.to_string()]).stderr(Stdio::null()).status();
+    }
 }

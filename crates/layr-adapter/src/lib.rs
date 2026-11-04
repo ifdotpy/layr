@@ -24,6 +24,14 @@ pub trait CacheAdapter: Send + Sync {
     /// Prunes `folder`. It never compiles, never runs a package script and never uses the network. A stale or
     /// failing state returns `Outcome::Skipped` and leaves the folder as it was.
     fn prune(&self, host: &dyn Host, folder: &Path) -> Outcome;
+    /// Builds the project's standard commands into `folder`, so that the folder matches the line's files. A follow
+    /// pass runs it before the prune and the save, so lines from the followed line start warm after a change that
+    /// came without a cache. Ok: the build ran. Err: the reason it did not (the folder stays consistent). The
+    /// default has no build.
+    fn warm(&self, host: &dyn Host, folder: &Path) -> Result<(), String> {
+        let _ = (host, folder);
+        Err("the adapter has no build".to_string())
+    }
     /// Puts `folder` back in the state before an interrupted `prune` (its processes were stopped at the hard
     /// limit). Ok(true): it restored a copy. Ok(false): there is nothing to restore. Err: the folder may be
     /// changed and is not restored. Runs no process, so it needs no host.

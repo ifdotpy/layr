@@ -44,8 +44,8 @@ pub fn cache_overlay_name(folder: &str) -> String {
     if crate::store::check_name("overlay", &name).is_ok() {
         return name;
     }
-    use sha2::Digest;
-    format!("cache.{}", &hex::encode(sha2::Sha256::digest(folder.as_bytes()))[..12])
+    use layr_hashers::Digest;
+    format!("cache.{}", &hex::encode(layr_hashers::ContentAddress::digest(folder.as_bytes()))[..12])
 }
 
 /// The properties of a cache overlay (docs/cache-overlays.md, section 2).
@@ -90,8 +90,8 @@ pub fn platform_key(w: &Path, key_files: &[String]) -> String {
     if key_files.is_empty() {
         return base;
     }
-    use sha2::Digest;
-    let mut h = sha2::Sha256::new();
+    use layr_hashers::Digest;
+    let mut h = layr_hashers::ContentAddress::new();
     for f in key_files {
         let data = fsutil::safe_join(w, f).ok().and_then(|p| std::fs::read(p).ok()).unwrap_or_default();
         h.update((f.len() as u64).to_le_bytes());
@@ -350,6 +350,17 @@ impl<'a> Repo<'a> {
         }
     }
 
+    /// The user a new cache state records as its maker (`cache_by`): the caller, or the line owner when root
+    /// saves an owner's line (the owner's tools made the files; root may act for any user, so the cache is
+    /// trusted no wider than the owner's own).
+    fn cache_maker(&self, ctx: &Ctx, line: &Line) -> u32 {
+        if ctx.caller.uid == 0 {
+            self.owner_ids(line).0
+        } else {
+            ctx.caller.uid
+        }
+    }
+
     /// Save the nested layers at `paths` of the line's working folder as new states of their
     /// cache overlays, on the overlay line of this line. `shared`: saved on a protected line, so
     /// lines of other users may take them. The caller holds the project lock. Returns the folder,
@@ -405,7 +416,7 @@ impl<'a> Repo<'a> {
                     running: false,
                     conflicts: Vec::new(),
                     caches: Default::default(),
-                    cache_by: Some(ctx.caller.uid),
+                    cache_by: Some(self.cache_maker(ctx, line)),
                     cache_shared: shared,
                     cache_platform: Some(self.cache_key(&name, &w)?),
                     cache_of: Some(project_state.to_string()),
@@ -541,6 +552,10 @@ impl<'a> Repo<'a> {
             orepo.ensure_overlay_line(ctx, &Repo::overlay_line_name(&info, &line.id, line.owner), &sid, line.owner)?;
             taken.push(folder);
         }
+        // The new files have the time of the checkout; the ones the caches were built from get their time back.
+        if let Err(e) = crate::source_times::apply(w, &taken) {
+            eprintln!("warning: source file times of the caches not set: {e:#}");
+        }
         Ok(taken)
     }
 
@@ -586,7 +601,7 @@ impl<'a> Repo<'a> {
                 } else {
                     let mut st =
                         crate::overlay::union_state(&orepo, ctx, &ol, &ol.head, &sid, &format!("cache {folder}: union"))?;
-                    st.cache_by = Some(ctx.caller.uid);
+                    st.cache_by = Some(self.cache_maker(ctx, line));
                     st.cache_shared = shared;
                     st.cache_platform = Some(key.clone());
                     (st.id.clone(), vec![st])
@@ -641,6 +656,41 @@ impl<'a> Repo<'a> {
                 self.prune_folder(line, overlay.as_deref(), folder, &root);
             }
             Err(e) => eprintln!("layr: prune {folder}: not pruned: {e:#}"),
+        }
+    }
+
+    /// The build hook (`warm`) for `folder` of `line`: the adapter of its overlay (the `prune` property names it)
+    /// builds the project's standard commands into the folder. It never fails: the outcome is one log line.
+    pub fn warm_cache_folder(&self, line: &Line, folder: &str) {
+        let (uid, _) = self.owner_ids(line);
+        let setting = match self.folder_overlay_of(folder).and_then(|o| o.map(|name| self.overlay_props(&name)).transpose()) {
+            Ok(props) => props.and_then(|p| p.prune),
+            Err(e) => return eprintln!("layr: build {folder}: not built: {e:#}"),
+        };
+        let path = match fsutil::safe_join(&self.working(line), folder) {
+            Ok(p) => p,
+            Err(e) => return eprintln!("layr: build {folder}: not built: {e:#}"),
+        };
+        let _line = match self.prune_lock(line) {
+            Ok(f) => f,
+            Err(e) => return eprintln!("layr: build {folder}: not built: {e:#}"),
+        };
+        let _t = crate::trace::named(|| format!("warm {folder} of line {}", line.name));
+        let done = crate::cache_hook::run_mode(
+            crate::cache_hook::Mode::Warm,
+            setting.as_deref(),
+            &path,
+            uid,
+            crate::cache_hook::WARM_LIMIT,
+        );
+        // Only a damage is recorded here: a mark from an earlier prune stays until a prune succeeds.
+        if !done.folder_ok {
+            if let Err(e) = self.set_damaged(line, folder, true) {
+                eprintln!("layr: build {folder}: cannot record the damaged state: {e:#}");
+            }
+        }
+        if !done.log.is_empty() {
+            eprintln!("layr: build {}", done.log);
         }
     }
 

@@ -8,7 +8,7 @@
 use super::Credentials;
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
-use sha1::{Digest, Sha1};
+use layr_hashers::{Digest, GitCompatible};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
@@ -275,7 +275,7 @@ fn oidc_error(what: &str, status: u16, reply: &Value) -> anyhow::Error {
 
 impl Sso {
     fn cache_path(&self) -> Result<PathBuf> {
-        Ok(home(&self.env)?.join(".aws/sso/cache").join(format!("{}.json", hex::encode(Sha1::digest(&self.cache_key)))))
+        Ok(home(&self.env)?.join(".aws/sso/cache").join(format!("{}.json", hex::encode(GitCompatible::digest(&self.cache_key)))))
     }
 
     fn cached(&self) -> Option<Value> {
