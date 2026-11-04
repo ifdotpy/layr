@@ -218,8 +218,10 @@ fn prepare_steps(
 fn prepare_replay(ctx: &Ctx, repo: &Repo, line: &Line, upstream: &str, onto: &str) -> Result<Vec<PreparedStep>> {
     let _t = crate::trace::span("prepare replay");
     repo.prepare_status(line)?;
-    let Some(base) = repo.merge_base(&line.head, upstream)? else { return Ok(Vec::new()) };
-    let mut chain = repo.first_parent_chain(&line.head, Some(&base))?;
+    if repo.merge_base(&line.head, upstream)?.is_none() {
+        return Ok(Vec::new());
+    }
+    let mut chain = repo.first_parents_since(&line.head, upstream)?;
     chain.reverse();
     let mut list = Vec::new();
     for p in chain {
@@ -1279,7 +1281,7 @@ fn pick(ctx: &Ctx, args: &[String], revert: bool) -> Result<i32> {
         if let Some((x, y)) = r.split_once("..") {
             let xi = revs::resolve(repo, Some(&line), x)?;
             let yi = revs::resolve(repo, Some(&line), y)?;
-            let mut chain = repo.first_parent_chain(&yi, Some(&xi))?;
+            let mut chain = repo.first_parents_since(&yi, &xi)?;
             chain.reverse();
             picks.extend(chain);
         } else {
@@ -1674,12 +1676,12 @@ fn replay_locked(
     if !st.clean() {
         return Err(exit(1, "error: cannot replay: you have unstaged or staged changes.\nPlease save or park them."));
     }
-    let base = repo.merge_base(&line.head, &upstream)?.ok_or_else(|| exit(128, "fatal: no common ancestor"))?;
+    repo.merge_base(&line.head, &upstream)?.ok_or_else(|| exit(128, "fatal: no common ancestor"))?;
     if repo.is_ancestor(&upstream, &line.head)? && onto == upstream {
         outln!(ctx, "Current line {} is up to date.", line.name);
         return Ok(0);
     }
-    let mut chain = repo.first_parent_chain(&line.head, Some(&base))?;
+    let mut chain = repo.first_parents_since(&line.head, &upstream)?;
     chain.reverse();
     let target_line = repo.p.db.line_by_name(a.get("--onto").unwrap_or(up))?.map(|l| l.id).or(repo.state(&onto)?.line);
     let mut cur = onto.clone();
@@ -1687,10 +1689,11 @@ fn replay_locked(
     let mut conflicts = 0;
     for p in &chain {
         let c = repo.state(p)?;
-        if c.parents.len() > 1 {
-            continue;
-        }
-        let parent = c.parents[0].clone();
+        let parent = match c.parents.as_slice() {
+            [parent] => parent.clone(),
+            [] => return Err(exit(128, format!("fatal: cannot replay {}: it has no parent", ids::short(p)))),
+            _ => continue,
+        };
         #[cfg(target_os = "macos")]
         hand_over(&mut steps, &line, &parent, &cur, p, &ids::short(p));
         let (mut s, out) = merge_states(ctx, repo, &line, &parent, &cur, p, &ids::short(p), vec![cur.clone()], &c.message)?;

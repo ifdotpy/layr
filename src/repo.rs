@@ -2715,15 +2715,23 @@ impl<'a> Repo<'a> {
     }
 
     /// Commits reachable from `id` by first parents.
-    pub fn first_parent_chain(&self, id: &str, stop: Option<&str>) -> Result<Vec<String>> {
+    pub fn first_parent_chain(&self, id: &str) -> Result<Vec<String>> {
+        self.first_parents_until(id, &BTreeSet::new())
+    }
+
+    /// The first-parent chain of `id` down to the first state that `upstream` has, newest first: the states of
+    /// `upstream..id` on the first-parent path. A merge of `upstream` into the line puts their merge base on a
+    /// second parent, so a stop at the merge base alone would pass it and reach the root.
+    pub fn first_parents_since(&self, id: &str, upstream: &str) -> Result<Vec<String>> {
+        self.first_parents_until(id, &self.ancestors(upstream)?.into_iter().collect())
+    }
+
+    fn first_parents_until(&self, id: &str, known: &BTreeSet<String>) -> Result<Vec<String>> {
         let mut v = Vec::new();
         let mut cur = Some(id.to_string());
-        while let Some(c) = cur {
-            if Some(c.as_str()) == stop {
-                break;
-            }
-            v.push(c.clone());
+        while let Some(c) = cur.filter(|c| !known.contains(c)) {
             cur = self.p.db.state(&c)?.and_then(|s| s.parents.first().cloned());
+            v.push(c);
         }
         Ok(v)
     }
