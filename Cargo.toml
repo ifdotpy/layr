@@ -13,7 +13,7 @@ env = { CARGO_INCREMENTAL = "1", RUSTC_WRAPPER = "" }
 
 [package]
 name = "layr"
-version = "0.22.1"
+version = "0.22.2"
 edition = "2021"
 description = "Local version control on btrfs, APFS and OverlayFS"
 license = "MIT"
