@@ -14,8 +14,8 @@ use std::sync::Arc;
 pub const LOCAL_EXCLUDE: &str = ".git/info/exclude";
 
 /// The local ignore file of the line of this command (`set_line_exclude`). A command often scans a
-/// snapshot of the line folder, which has no `.git` (a nested subvolume on btrfs, the upper folder
-/// on OverlayFS), so the rules of a tree without its own `.git/info/exclude` read this one.
+/// snapshot of the line folder, which has no `.git` or an empty one (a nested subvolume on btrfs, the
+/// upper folder on OverlayFS), so the rules of a tree without its own `.git/info` read this one.
 static LINE_EXCLUDE: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
 
 /// Name the local ignore file of the line of this command (`LINE_EXCLUDE`).
@@ -124,7 +124,9 @@ impl Rules {
                 // An empty file (each line's `.git` has one) adds no rule and no matcher.
                 let rules = |p: &Path| std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.len() > 0);
                 let own = self.root.join(LOCAL_EXCLUDE);
-                let path = if self.root.join(".git").exists() {
+                // A snapshot keeps a nested `.git` subvolume as an empty folder: only a `.git/info`
+                // folder makes the tree's own file the one to read.
+                let path = if self.root.join(".git/info").is_dir() {
                     own
                 } else {
                     LINE_EXCLUDE.lock().ok().and_then(|l| l.clone()).unwrap_or(own)
