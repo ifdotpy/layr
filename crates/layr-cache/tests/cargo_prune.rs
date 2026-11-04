@@ -44,13 +44,17 @@ fn cargo_in(dir: &Path, target: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&o.stderr).into_owned()
 }
 
-/// Every file and folder under `dir`, as paths relative to it.
+/// Every file and folder under `dir`, as paths relative to it. Cargo's own cache of the rustc version
+/// (`.rustc_info.json`) is left out: any cargo call can write it, the listing of a prune too.
 fn names(dir: &Path) -> BTreeSet<PathBuf> {
     let mut out = BTreeSet::new();
     let mut todo = vec![dir.to_path_buf()];
     while let Some(d) = todo.pop() {
         for e in std::fs::read_dir(&d).unwrap().flatten() {
             let p = e.path();
+            if e.file_name() == ".rustc_info.json" {
+                continue;
+            }
             out.insert(p.strip_prefix(dir).unwrap().to_path_buf());
             if p.is_dir() {
                 todo.push(p);
