@@ -1441,10 +1441,6 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) ->
     }
     // Plan outside the project lock. A changed record invalidates the entire plan: retry
     // without the lock rather than replaying records while other commands wait.
-<<<<<<< head
-    let mut attempts = 0;
-    let leaks = loop {
-=======
     #[cfg(not(target_os = "macos"))]
     let removed_trash = {
         let path = repo.p.trash_dir()?;
@@ -1453,7 +1449,6 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) ->
     };
     let mut attempts = 0;
     let (leaks, indexes, compares, lru) = loop {
->>>>>>> origin/perf/gc-lock-rest
         attempts += 1;
         let (mark, diff) = {
             let _t = crate::trace::begin("repair: plan");
@@ -1463,18 +1458,6 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) ->
             })?
         };
         let overlays = repo.overlay_plan();
-<<<<<<< head
-        // Test hook (tests/t127-repair-plan.sh): after plan N, write `planned.N` in the folder and
-        // wait for `go.N`, so a test changes the project between the plan and the lock.
-        if let Some(dir) = std::env::var_os("LAYR_TEST_REPAIR_WAIT").map(std::path::PathBuf::from) {
-            std::fs::write(dir.join(format!("planned.{attempts}")), b"")?;
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-            while !dir.join(format!("go.{attempts}")).exists() {
-                anyhow::ensure!(std::time::Instant::now() < deadline, "test hook: no go.{attempts}");
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-        }
-=======
         #[cfg(not(target_os = "macos"))]
         let removed = repo.plan_removed_overlays();
         let indexes = crate::gitbridge::plan_prune_indexes(repo)?;
@@ -1483,7 +1466,6 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) ->
         // Test hook (tests/t127-repair-plan.sh): after plan N, write `planned.N` in the folder and
         // wait for `go.N`, so a test changes the project between the plan and the lock.
         test_plan_wait("LAYR_TEST_REPAIR_WAIT", attempts)?;
->>>>>>> origin/perf/gc-lock-rest
         let _lock = repo.p.lock()?;
         if repo.p.db.records_mark()? != mark {
             if attempts < 3 {
@@ -1509,14 +1491,11 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) ->
         if let Err(e) = repo.free_removed_overlays(ctx) {
             eprintln!("warning: removed cache overlays stay until the next gc: {e:#}");
         }
-<<<<<<< head
-=======
         #[cfg(not(target_os = "macos"))]
         match removed.and_then(|p| repo.commit_removed_overlays(ctx, p, &removed_trash)) {
             Ok(()) => {},
             Err(e) => eprintln!("warning: removed cache overlays stay until the next gc: {e:#}"),
         }
->>>>>>> origin/perf/gc-lock-rest
         match overlays {
             Ok(plan) => repo.commit_overlay_plan(ctx, plan),
             Err(e) => eprintln!("warning: overlays: old states stay until the next gc: {e:#}"),
@@ -1546,19 +1525,9 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) ->
                 );
             }
         }
-<<<<<<< head
-        repo.prune_all_bases()?;
-        if crate::gitbridge::has_store(repo) {
-            crate::gitbridge::prune_indexes(repo)?;
-        }
-        // Saved overlap compares of states that are gone (radar.rs).
-        let _ = repo.prune_compares();
-        break leaks;
-=======
         let indexes = crate::gitbridge::check_prune_indexes(repo, indexes)?;
         let compares = repo.check_prune_compares(compares)?;
         break (leaks, indexes, compares, lru);
->>>>>>> origin/perf/gc-lock-rest
     };
     crate::gitbridge::finish_prune_indexes(indexes);
     compares.finish();

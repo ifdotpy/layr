@@ -450,12 +450,6 @@ fn periodic(root: &Path, hourly: bool) {
             if let Err(e) = crate::cmd::admin::gc_repair_quiet(&ctx, &repo) {
                 eprintln!("layr periodic repair ({name}): {e:#}");
             }
-<<<<<<< head
-            if let Err(e) = crate::cmd::admin::gc_repair_quiet(&ctx, &repo) {
-                eprintln!("layr periodic repair ({name}): {e:#}");
-            }
-=======
->>>>>>> origin/perf/gc-lock-rest
         }
     }
 }
