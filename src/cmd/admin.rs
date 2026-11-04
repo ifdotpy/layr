@@ -204,21 +204,16 @@ fn prepare_caches(repo: &Repo, l: &Line, only: &[String]) -> Result<()> {
         if !only.is_empty() && !only.contains(&p) {
             continue;
         }
-<<<<<<< head
         if let Err(e) = crate::repo::convert_cache(&w, &p, u, g) {
-            // A refused folder is refused again under the lock, where the save reports it.
+            // A refused folder is refused again under the lock, where the save reports it. It is
+            // not pruned either: a process writes to it.
             if e.downcast_ref::<crate::repo::CacheRefused>().is_none() {
                 return Err(e);
             }
             continue;
         }
-||||||| base
-        crate::repo::convert_cache(&w, &p, u, g)?;
-=======
-        crate::repo::convert_cache(&w, &p, u, g)?;
         // Pruned before the copy and the save: the state keeps the pruned cache (docs/cache-overlays.md, section 19).
         repo.prune_cache_folder(l, &p);
->>>>>>> origin/main
         #[cfg(target_os = "macos")]
         prepare_cache_copy(repo, l, &w, &p)?;
     }
