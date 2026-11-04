@@ -2,7 +2,7 @@
 //! Runs `layr retest ...`. Needs the `layr` built from this repository first in PATH
 //! (`cargo build -p layr`, then `target/debug` first in PATH),
 //! `cargo nextest`, the registry package `hex` 0.4 in the cargo cache (the test runs offline), `cargo nextest` and the `llvm-tools` rustup component. The store is a temp
-//! folder with its own LAYR_ROOT, and every `layr` child runs with LAYR_DIRECT=1: without it a
+//! folder with its own LAYR_ROOT, and every test-launched `layr` command runs with LAYR_DIRECT=1: without it a
 //! client of a normal user forwards to the system daemon, which uses its own store. Takes about 10 s.
 
 use std::collections::{BTreeMap, BTreeSet};
