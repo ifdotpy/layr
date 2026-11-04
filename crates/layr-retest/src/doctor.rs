@@ -172,6 +172,29 @@ fn test_binary_size(root: &Path, name: &str) -> Option<u64> {
         .map(|m| m.1)
 }
 
+/// A variable that changes the unit hash of a build: the incremental flag, the flags, and the profile and build
+/// settings of cargo. The sweep keeps the units of the project env only (`[workspace.metadata.layr-retest] env`).
+fn hash_var(name: &str) -> bool {
+    matches!(name, "CARGO_INCREMENTAL" | "RUSTFLAGS" | "CARGO_ENCODED_RUSTFLAGS" | "RUSTC_WRAPPER" | "RUSTC_WORKSPACE_WRAPPER")
+        || name.starts_with("CARGO_PROFILE_")
+        || name.starts_with("CARGO_BUILD_")
+}
+
+/// A warning for each hash variable of the shell env whose value is not the value of the project env. Builds
+/// from that shell make units that the sweep does not keep (docs/cache-overlays.md, section 19).
+fn shell_env_findings(shell: &[(String, String)], project: &[(String, String)]) -> Vec<Finding> {
+    let keep = "builds from this shell make units that the sweep does not keep (docs/cache-overlays.md, section 19)";
+    shell
+        .iter()
+        .filter(|(k, _)| hash_var(k))
+        .filter_map(|(k, v)| match project.iter().find(|(pk, _)| pk == k) {
+            Some((_, pv)) if pv == v => None,
+            Some((_, pv)) => Some(warn(format!("shell sets {k}={v}, the project env sets {k}={pv}: {keep}"))),
+            None => Some(warn(format!("shell sets {k}={v}, the project env does not: {keep}"))),
+        })
+        .collect()
+}
+
 fn tool_checks(f: &mut Vec<Finding>) {
     match out(layr_cache::cargo::cargo_cmd().args(["nextest", "--version"])) {
         Some(v) => f.push(ok(format!("cargo-nextest: {}", v.lines().next().unwrap_or("").trim()))),
@@ -286,6 +309,10 @@ pub fn check(root: &Path) -> Vec<Finding> {
         return f;
     }
     tool_checks(&mut f);
+    if let Ok(cfg) = layr_cache::cargo::settings(&crate::retest_host(), root) {
+        let shell: Vec<(String, String)> = std::env::vars().collect();
+        f.extend(shell_env_findings(&shell, &cfg.env));
+    }
 
     let meta: Option<Value> = out(layr_cache::cargo::cargo_cmd().args(["metadata", "--no-deps", "--format-version", "1"]))
         .and_then(|s| serde_json::from_str(&s).ok());
@@ -543,6 +570,27 @@ mod tests {
         let got = profile_dirs(&t);
         let _ = std::fs::remove_dir_all(&t);
         assert_eq!(got, vec![target.join("debug"), target.join("release"), target.join("retest").join("debug"),]);
+    }
+
+    #[test]
+    fn warns_on_a_shell_hash_var_that_differs_from_the_project_env() {
+        let project = vec![("CARGO_INCREMENTAL".to_string(), "1".to_string())];
+        let shell = vec![
+            ("CARGO_INCREMENTAL".to_string(), "0".to_string()),
+            ("CARGO_PROFILE_DEV_DEBUG".to_string(), "2".to_string()),
+            ("HOME".to_string(), "/x".to_string()),
+        ];
+        let f = shell_env_findings(&shell, &project);
+        assert_eq!(f.len(), 2, "{f:?}");
+        assert!(f.iter().all(|x| x.warn));
+        assert!(f[0].text.contains("project env sets CARGO_INCREMENTAL=1"), "{}", f[0].text);
+    }
+
+    #[test]
+    fn same_value_as_the_project_env_is_fine() {
+        let project = vec![("CARGO_INCREMENTAL".to_string(), "1".to_string())];
+        let shell = vec![("CARGO_INCREMENTAL".to_string(), "1".to_string())];
+        assert!(shell_env_findings(&shell, &project).is_empty());
     }
 
     #[test]

@@ -549,7 +549,25 @@ Call sites, each before its next step:
 
 `init` takes no caches (a new project has no folder overlays), so it has no call site.
 
-### 18.6 Tests
+### 18.6 Build env and the live set
+
+The cargo live set is the set of units that the `sweep` commands make with the project env. The
+project env is `env` in `[workspace.metadata.layr-retest]`. Without an `env` key it is
+`CARGO_INCREMENTAL=1` and `RUSTC_WRAPPER=` (the default of `layr retest init`). `layr retest gate`
+builds with this env, and the hook lists the units with it. The worker process starts with a
+cleared env, so the listing never reads the shell env.
+
+Cargo's unit hash depends on the incremental flag, the flags, and the profile and build settings.
+A build with another value in the shell makes units with other hashes. The sweep does not keep those
+units, and it removes them. This is correct: they are not the standard units. Such a build costs a
+rebuild after the next prune.
+
+`layr retest doctor` warns when the shell env sets one of these variables to a value that differs
+from the project env: `CARGO_INCREMENTAL`, `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`, `RUSTC_WRAPPER`,
+`RUSTC_WORKSPACE_WRAPPER`, and any `CARGO_PROFILE_*` or `CARGO_BUILD_*`. To keep a unit of a
+shell build, put the same value in the project env.
+
+### 18.7 Tests
 
 - `src/cache_hook.rs` unit tests: a named adapter prunes and logs; `none` keeps the folder; an unknown
   name is logged; a failing adapter logs its reason; a slow adapter is cut off at the limit; the root

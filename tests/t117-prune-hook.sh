@@ -34,14 +34,17 @@ else
     owned() { "$@"; }
     OWNER_ARG=""
 fi
+# PENV: the project env of the metadata below (`[workspace.metadata.layr-retest] env`). Every cargo call of this
+# test uses it, so the standard units are the ones the sweep keeps. A build with another env makes other units.
+PENV="CARGO_INCREMENTAL=1 RUSTC_WRAPPER="
 # cb <folder> <cargo args...>: cargo in a line folder, as the owner of the line.
-cb() { local dir=$1; shift; (cd "$dir" && owned env CARGO_NET_OFFLINE=true RUSTC_WRAPPER= CARGO_INCREMENTAL=1 cargo "$@" 2>&1); }
+cb() { local dir=$1; shift; (cd "$dir" && owned env CARGO_NET_OFFLINE=true $PENV cargo "$@" 2>&1); }
 
 # A cargo project. The standard build is `build --workspace`; `--features extra` makes stale units.
 cd /tmp || exit 1
 SRC=$T/src
 rm -rf "$SRC"; mkdir -p "$SRC/src"
-printf '[package]\nname = "prunehook"\nversion = "0.1.0"\nedition = "2021"\n\n[features]\nextra = []\n\n[workspace]\n\n[workspace.metadata.layr-retest]\nsweep = [["build", "--workspace"]]\n' > "$SRC/Cargo.toml"
+printf '[package]\nname = "prunehook"\nversion = "0.1.0"\nedition = "2021"\n\n[features]\nextra = []\n\n[workspace]\n\n[workspace.metadata.layr-retest]\nsweep = [["build", "--workspace"]]\nenv = { CARGO_INCREMENTAL = "1", RUSTC_WRAPPER = "" }\n' > "$SRC/Cargo.toml"
 echo 'pub fn a() -> i32 {' > "$SRC/src/lib.rs"; echo '    1' >> "$SRC/src/lib.rs"; echo '}' >> "$SRC/src/lib.rs"
 echo 'target regenerable' > "$SRC/.layrattributes"
 printf '/target\n' > "$SRC/.gitignore"
@@ -82,6 +85,22 @@ cd "$P/main"
 # A cache that root saves belongs to root: another user takes it only from a protected line (its caches are shared).
 # So on a root run main stays protected, and on a user run the protection is removed for direct saves.
 if [ "$(id -u)" != 0 ]; then l protect main --remove >/dev/null 2>&1 || true; fi
+# DIAG: the cargo env of the job and of the owner, the cargo and rustc versions, the cargo config files, and
+# whether a build with CARGO_INCREMENTAL unset is incremental (a throwaway crate, not a line).
+echo "DIAG job env: $(env | grep -E '^(CARGO|RUST)' | tr '\n' ' ')"
+echo "DIAG owner env: $(owned env | grep -E '^(CARGO|RUST)' | tr '\n' ' ')"
+echo "DIAG cargo -vV: $(owned cargo -vV 2>&1 | tr '\n' ' ')"
+echo "DIAG user: job $(id -un) owner $(owned id -un 2>&1)"
+OWN_HOME=$(getent passwd "$OWN" | cut -d: -f6 2>/dev/null || echo "$HOME")
+for f in /etc/environment /root/.cargo/config.toml /root/.cargo/config "$OWN_HOME/.cargo/config.toml" "$OWN_HOME/.cargo/config" /usr/local/cargo/config.toml "${OWN_CARGO_HOME:-/nonexistent}/config.toml"; do
+    [ -f "$f" ] && echo "DIAG config $f: $(tr '\n' ' ' < "$f" | cut -c1-300)"
+done
+PROBE="$T/incr-probe"
+owned sh -c "mkdir -p '$PROBE/src' && printf '[package]\nname = \"probe\"\nversion = \"0.1.0\"\nedition = \"2021\"\n' > '$PROBE/Cargo.toml' && echo 'pub fn a() {}' > '$PROBE/src/lib.rs'"
+for mode in unset 1; do
+    if [ $mode = unset ]; then E="env -u CARGO_INCREMENTAL"; else E="env CARGO_INCREMENTAL=1"; fi
+    echo "DIAG incremental flag, CARGO_INCREMENTAL $mode: $(owned sh -c "cd '$PROBE' && rm -rf target && $E RUSTC_WRAPPER= cargo build -v 2>&1 | grep -o -- '-C incremental=[^ ]*' | head -1")"
+done
 cb "$P/main" build --workspace -q >/dev/null
 base=$(units $P/main/target)
 [ "$base" -gt 0 ] && { PASS=$((PASS + 1)); echo "PASS the standard build made units ($base)"; } || { FAIL=$((FAIL + 1)); echo "FAIL the standard build made no units: the owner cannot build"; cb "$P/main" build --workspace 2>&1 | tail -20; }
@@ -99,9 +118,9 @@ ok "the owner sets prune=none for the sweep check" l overlay set cache.target --
 ok "the owner sets prune to auto after the sweep check" l overlay set cache.target --prune auto
 (cd "$P/other3/target" && find . | sort) > "$T/names-before3"
 # Cargo's own reason for the merged unit, before the prune runs: the dirty, fresh and compiling lines of a plain -v build.
-(cd "$P/other3" && owned env CARGO_NET_OFFLINE=true RUSTC_WRAPPER= CARGO_BUILD_JOBS=1 cargo build --workspace -v 2>&1 | grep -m 6 -E "Dirty|Fresh|Compiling|dirty|stale" | cut -c1-400) | sed 's/^/DIAG reason: /' || true
+(cd "$P/other3" && owned env CARGO_NET_OFFLINE=true $PENV CARGO_BUILD_JOBS=1 cargo build --workspace -v 2>&1 | grep -m 6 -E "Dirty|Fresh|Compiling|dirty|stale" | cut -c1-400) | sed 's/^/DIAG reason: /' || true
 # The artifact names of the library in the listing that the prune uses (json), as the sweep reads them.
-(cd "$P/other3" && owned env CARGO_NET_OFFLINE=true RUSTC_WRAPPER= CARGO_BUILD_JOBS=1 CARGO_TARGET_DIR=target cargo build --workspace -v --message-format json 2>/dev/null | python3 -c "
+(cd "$P/other3" && owned env CARGO_NET_OFFLINE=true $PENV CARGO_BUILD_JOBS=1 CARGO_TARGET_DIR=target cargo build --workspace -v --message-format json 2>/dev/null | python3 -c "
 import sys, json
 for line in sys.stdin:
     try: v = json.loads(line)
@@ -143,7 +162,7 @@ if [ "$merged" != "$base" ]; then
     # Diagnostics for a failure: who owns the entries that the merge copied, and what the owner's listing sees.
     echo "DIAG other target units $merged, expected $base"
     ls -lan "$P/other/target/debug/.fingerprint" 2>&1 | head -12
-    (cd "$P/other" && owned env CARGO_NET_OFFLINE=true RUSTC_WRAPPER= cargo build --workspace -v 2>&1 | head -12) || true
+    (cd "$P/other" && owned env CARGO_NET_OFFLINE=true $PENV cargo build --workspace -v 2>&1 | head -12) || true
 fi
 eq "merge --caches-only removes the stale units" "$base" "$merged"
 # The union copies main's cache into the folder that already has one: the copied times are the source's
