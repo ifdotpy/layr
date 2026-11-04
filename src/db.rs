@@ -101,6 +101,10 @@ impl Db {
     }
 
     pub fn open_for(path: &Path, read: bool) -> Result<Db> {
+        Self::open_inner(path, read).with_context(|| format!("open database {}", path.display()))
+    }
+
+    fn open_inner(path: &Path, read: bool) -> Result<Db> {
         if read {
             // Only a stale schema, legacy records, or a WAL that SQLite explicitly says needs
             // recovery may use the writable path. Other failures must reach the caller.
@@ -119,7 +123,7 @@ impl Db {
                 Ok(Some(db)) => return Ok(db),
                 Ok(None) => {},
                 Err(error) if Self::needs_wal_recovery(&error) => {},
-                Err(error) => return Err(error).with_context(|| format!("open metadata database {}", path.display())),
+                Err(error) => return Err(error).context("read-only open"),
             }
         }
         let conn = Connection::open(path)?;
@@ -1762,6 +1766,26 @@ mod tests {
         other.data = serde_json::json!({"attestation":Attestation {format:1,attestation_id:other.id.clone(),subject:Subject{kind:"state".into(),id:state.into()},change_id:None,kind:"revoke".into(),payload_digest:"0".repeat(64),payload_ref:None,signer:machine.into(),time:2},"revokes":[first.id]});
         db.derive(&other, &|_| true, machine).unwrap();
         assert_eq!(db.approvals(state).unwrap(), vec![(0, 1)]);
+    }
+    #[test]
+    fn failing_upgrade_reports_the_database_path() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("layr-db-upgrade-error-{}", crate::ids::new_id()));
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("stale.sqlite");
+        let db = Db::open(&path)?;
+        db.conn.pragma_update(None, "user_version", SCHEMA_VERSION - 1)?;
+        drop(db);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444))?;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555))?;
+        let result = Db::open_for(&path, true);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755))?;
+        std::fs::remove_dir_all(&dir)?;
+        // Root may write anyway; then there is no error to check.
+        if let Err(error) = result {
+            assert!(format!("{error:#}").contains("stale.sqlite"), "{error:#}");
+        }
+        Ok(())
     }
     #[test]
     fn metadata_open_reports_corrupt_and_missing_databases() -> Result<()> {
