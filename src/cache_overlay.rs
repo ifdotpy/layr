@@ -634,6 +634,7 @@ impl<'a> Repo<'a> {
                 head
             };
             self.after_overlay_move(ctx, &name);
+            self.relocate_caches(line, std::slice::from_ref(&folder), &w);
             out.push((folder, made));
         }
         Ok(out)
@@ -691,6 +692,39 @@ impl<'a> Repo<'a> {
         }
         if !done.log.is_empty() {
             eprintln!("layr: build {}", done.log);
+        }
+    }
+
+    /// The relocation hook for the cache folders `folders` of `line` in `root` (its working folder, or the folder
+    /// that becomes it): they came from another path. The adapter of each makes stale the outputs that name the old
+    /// path. It never fails: the outcome is one log line on stderr, none when nothing changed.
+    pub fn relocate_caches(&self, line: &Line, folders: &[String], root: &Path) {
+        let (uid, _) = self.owner_ids(line);
+        let working = self.working(line);
+        for folder in folders {
+            let setting = match self.folder_overlay_of(folder).and_then(|o| o.map(|name| self.overlay_props(&name)).transpose()) {
+                Ok(props) => props.and_then(|p| p.prune),
+                Err(e) => {
+                    eprintln!("layr: relocate {folder}: not relocated: {e:#}");
+                    continue;
+                }
+            };
+            let paths = fsutil::safe_join(root, folder).and_then(|p| Ok((p, fsutil::safe_join(&working, folder)?)));
+            let (path, at) = match paths {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("layr: relocate {folder}: not relocated: {e:#}");
+                    continue;
+                }
+            };
+            if !path.is_dir() {
+                continue;
+            }
+            let _t = crate::trace::named(|| format!("relocate {folder} of line {}", line.name));
+            let done = crate::cache_hook::relocate(setting.as_deref(), &path, &at, uid);
+            if !done.log.is_empty() {
+                eprintln!("layr: relocate {}", done.log);
+            }
         }
     }
 

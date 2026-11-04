@@ -451,6 +451,10 @@ impl CacheAdapter for Cargo {
     fn warm(&self, host: &dyn Host, folder: &Path) -> Result<(), String> {
         warm(host, folder).map_err(|e| format!("{e:#}"))
     }
+
+    fn relocated(&self, folder: &Path, at: &Path) -> Result<usize, String> {
+        crate::relocate::relocate(folder, at).map_err(|e| format!("{e:#}"))
+    }
 }
 
 /// Builds the `sweep` commands of the project into `target`, with the project env. It may fetch crates (a merged

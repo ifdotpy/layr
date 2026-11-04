@@ -474,6 +474,15 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
         };
         let lines = repo.commit_prepared_lines(ctx, prepared)?;
         drop(lock);
+        // On OverlayFS the caches came under the lock (`commit_prepared_lines`); elsewhere `prepare_named_lines`
+        // relocated them.
+        #[cfg(feature = "overlayfs")]
+        if let Ok(overlays) = repo.folder_overlays() {
+            let folders: Vec<String> = overlays.into_iter().map(|(_, f)| f).collect();
+            for l in &lines {
+                repo.relocate_caches(l, &folders, &repo.working(l));
+            }
+        }
         if a.get("--count").is_some() {
             if a.has("--json") {
                 outln!(ctx, "{}", serde_json::to_string(&lines.iter().map(|line| line_json(repo, line)).collect::<Vec<_>>())?);

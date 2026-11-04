@@ -5,6 +5,7 @@
 
 pub mod cargo;
 pub mod pnpm;
+pub mod relocate;
 pub mod sweep;
 
 use anyhow::{anyhow, bail, Context, Result};

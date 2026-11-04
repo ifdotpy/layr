@@ -30,14 +30,17 @@ pub const WARM_LIMIT: Duration = Duration::from_secs(30 * 60);
 const GRACE: Duration = Duration::from_secs(10);
 /// The time limit of a recovery worker (it only restores a copy), and the time the parent waits for it.
 const RECOVER_LIMIT: Duration = Duration::from_secs(30);
+/// The time limit of a relocation worker (it reads dep-info files and removes fingerprints).
+const RELOCATE_LIMIT: Duration = Duration::from_secs(60);
 /// The argument that starts the worker in the layr binary (`main`).
 pub const WORKER_ARG: &str = "__cache-hook";
-/// The worker's environment (its parameters): the mode (`prune` or `recover`), the setting (`-` for none),
-/// the folder and the limit in ms.
+/// The worker's environment (its parameters): the mode (`prune`, `warm`, `recover` or `relocate`), the setting
+/// (`-` for none), the folder, the limit in ms, and for `relocate` the path where the folder is used.
 const ENV_MODE: &str = "LAYR_CACHE_HOOK_MODE";
 const ENV_SETTING: &str = "LAYR_CACHE_HOOK_SETTING";
 const ENV_FOLDER: &str = "LAYR_CACHE_HOOK_FOLDER";
 const ENV_LIMIT_MS: &str = "LAYR_CACHE_HOOK_LIMIT_MS";
+const ENV_AT: &str = "LAYR_CACHE_HOOK_AT";
 /// The line in the worker's stdout that carries its report, so the parent finds it among other output.
 const REPORT_MARK: &str = "LAYR-CACHE-HOOK ";
 
@@ -53,7 +56,8 @@ fn registered() -> &'static [Box<dyn CacheAdapter>] {
     ADAPTERS.get().map(|v| v.as_slice()).unwrap_or(&[])
 }
 
-/// What a worker reports. `folder_ok` is false when the folder may be changed and was not restored.
+/// What a worker reports. `folder_ok` is false when the folder may be changed and was not restored. `freed`: the
+/// bytes that a prune freed; for a relocation, the number of units that it made stale.
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct Report {
     pub adapter: String,
@@ -142,6 +146,40 @@ pub fn run_mode(mode: Mode, setting: Option<&str>, folder: &Path, uid: u32, limi
         Mode::Prune => run_with(&launch, &[], setting, folder, uid, limit, limit + GRACE),
         Mode::Warm => warm_with(&launch, &[], setting, folder, uid, limit, limit + GRACE),
     }
+}
+
+/// The relocation hook (`CacheAdapter::relocated`) for `folder` of a line of owner `uid`: the folder came from
+/// another path, and it is used at `at` from now on. It runs for every owner (root too) and with the hook off
+/// (`prune=none`): it only makes stale the outputs that name the old place. The log is empty when nothing changed.
+pub fn relocate(setting: Option<&str>, folder: &Path, at: &Path, uid: u32) -> Done {
+    let setting = setting.filter(|s| *s != "none");
+    let applies = match setting {
+        Some(name) => registered().iter().any(|a| a.name() == name),
+        None => registered().iter().any(|a| a.detects(folder)),
+    };
+    if !applies {
+        return Done { log: String::new(), folder_ok: true };
+    }
+    let launch = Launch { exe: std::env::current_exe().unwrap_or_else(|_| "layr".into()), args: vec![WORKER_ARG.into()] };
+    relocate_with(&launch, &[], setting, folder, at, uid)
+}
+
+/// `relocate` with the worker started by `launch` and extra environment for it. A failure changes no file that a
+/// build needs: a removed fingerprint only makes a unit build again.
+pub fn relocate_with(launch: &Launch, env: &[(&str, &str)], setting: Option<&str>, folder: &Path, at: &Path, uid: u32) -> Done {
+    let shown = at.display();
+    let at_text = at.display().to_string();
+    let mut env = env.to_vec();
+    env.push((ENV_AT, &at_text));
+    let log = match execute(launch, &env, "relocate", setting, folder, uid, RELOCATE_LIMIT, RELOCATE_LIMIT + GRACE) {
+        Run::Report(r) if !r.reason.is_empty() => format!("{shown}: not relocated with {}: {}", r.adapter, r.reason),
+        Run::Report(r) if r.freed == 0 => String::new(),
+        Run::Report(r) => format!("{shown}: {} units named the old path; the next build makes them again", r.freed),
+        Run::Start(e) => format!("{shown}: not relocated: cannot start the cache hook: {e}"),
+        Run::Failed(e) => format!("{shown}: not relocated: {e}"),
+        Run::Killed => format!("{shown}: not relocated: timed out after {} s", RELOCATE_LIMIT.as_secs()),
+    };
+    Done { log, folder_ok: true }
 }
 
 /// The build of the standard commands in a worker. After a stop at the hard limit the adapter's `recover` runs,
@@ -294,6 +332,7 @@ pub fn worker_with(adapters: &'static [Box<dyn CacheAdapter>]) -> i32 {
     let limit = Duration::from_millis(var(ENV_LIMIT_MS).parse().unwrap_or(0));
     let report = match var(ENV_MODE).as_str() {
         "recover" => recover_here(adapters, setting.as_deref(), &folder),
+        "relocate" => relocate_here(adapters, setting.as_deref(), &folder, Path::new(&var(ENV_AT))),
         "warm" => warm_here(adapters, setting.as_deref(), &folder, limit),
         _ => prune_here(adapters, setting.as_deref(), &folder, limit),
     };
@@ -347,6 +386,19 @@ fn recover_here(adapters: &'static [Box<dyn CacheAdapter>], setting: Option<&str
         Ok(restored) => Report { adapter: found.name().into(), pruned: false, freed: 0, restored, folder_ok: true, reason: String::new() },
         Err(reason) => Report { adapter: found.name().into(), pruned: false, freed: 0, restored: false, folder_ok: false, reason },
     }
+}
+
+/// Runs the adapter's `relocated` on `folder`, used at `at`. `freed` in the report is the number of stale units.
+fn relocate_here(adapters: &'static [Box<dyn CacheAdapter>], setting: Option<&str>, folder: &Path, at: &Path) -> Report {
+    let found = match find(adapters, setting, folder) {
+        Ok(a) => a,
+        Err(reason) => return Report { adapter: setting.unwrap_or("-").into(), pruned: false, freed: 0, restored: false, folder_ok: true, reason },
+    };
+    let (freed, reason) = match found.relocated(folder, at) {
+        Ok(n) => (n as u64, String::new()),
+        Err(reason) => (0, reason),
+    };
+    Report { adapter: found.name().into(), pruned: false, freed, restored: false, folder_ok: true, reason }
 }
 
 #[cfg(test)]

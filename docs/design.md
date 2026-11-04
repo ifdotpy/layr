@@ -272,7 +272,9 @@ is valid for a state, so it never decides that by itself:
 
 A cache helps only a tool that checks its own output and accepts a new path, because every line
 has its own folder. Cargo's `target` does: Cargo compares fingerprints and rebuilds what a change
-or the new path made stale. A Python virtual environment does not: its scripts keep the absolute
+or the new path made stale, except a path that rustc compiled in (`env!("CARGO_BIN_EXE_<bin>")`,
+`env!("CARGO_MANIFEST_DIR")`). The cargo adapter makes those units stale when a line takes the cache
+(docs/cache-overlays.md, relocation). A Python virtual environment does not: its scripts keep the absolute
 path of the folder where it was made, so in a copy they run the interpreter and packages of the
 original line. pnpm links packages by relative paths, but the scripts in `node_modules/.bin` set
 `NODE_PATH` to absolute paths of the original folder. Xcode and SwiftPM do not reuse build

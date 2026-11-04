@@ -555,6 +555,29 @@ the next `save --caches` of its line.
 
 `init` takes no caches (a new project has no folder overlays), so it has no call site.
 
+Relocation is a second hook, `CacheAdapter::relocated(folder, at)`. It runs where a line takes a cache that
+was built at another path, and `at` is the path where the folder is used from now on:
+
+| Command | When |
+| --- | --- |
+| `layr line new` | after the take of each cache folder, before the project lock (OverlayFS: after the project lock) |
+| `layr merge`, `merge --caches-only`, a follow pass | in `pull_caches`, after each folder is in place |
+
+The worker runs it as the owner, root too, also with `prune=none`, with a 60 s limit. It runs no process
+and never fails a command. The cargo adapter reads the dep-info files (`<profile>/deps/*.d`). The first
+rule of each names the place of its build. A unit built at another place goes stale when its dep-info
+names a path of that place that rustc compiled in, or that cargo compares by its absolute path:
+
+- `env-dep:CARGO_BIN_EXE_<bin>` (a test runs the binary of the other line);
+- another `env-dep` with a path of the old place out of the old target folder (`CARGO_MANIFEST_DIR`);
+- a source of the old place out of the old target folder (`clippy.toml`, `include_str!` of a file out of
+  the package).
+
+The adapter removes the fingerprint folder of such a unit, so the next build makes it again. A path in the
+old target folder (`OUT_DIR`) does not make a unit stale: that content was copied with the folder, and
+cargo finds it relative to the target folder. On the target folder of Studio (1,845 units) the pass takes
+0.18 s.
+
 ### 18.6 Build env, profiles and the live set
 
 The live set is the set of units that the `sweep` commands of `[workspace.metadata.layr-retest]` make
