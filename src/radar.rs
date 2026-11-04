@@ -113,7 +113,12 @@ pub(crate) fn compare(base: &(impl Src + ?Sized), child: &(impl Src + ?Sized), r
 }
 
 /// The test of `compare` for one path: whether the path changed from `base` to `live`.
-pub(crate) fn recheck(base: &(impl Src + ?Sized), live: &(impl Src + ?Sized), rules: &Rules, path: &str) -> Result<Option<Found>> {
+pub(crate) fn recheck(
+    base: &(impl Src + ?Sized),
+    live: &(impl Src + ?Sized),
+    rules: &Rules,
+    path: &str,
+) -> Result<Option<Found>> {
     let old = fsutil::lmeta(base, path);
     let new = fsutil::lmeta(live, path);
     if old.is_none() && new.is_none() {
@@ -338,40 +343,75 @@ struct LayerPlan {
     job: usize,
 }
 
+enum CompareRef {
+    Line(String),
+    States(String, String),
+    Invalid,
+}
+
+pub struct ComparePrune(Vec<(PathBuf, crate::fsutil::EntryIdentity, CompareRef)>);
+
+impl ComparePrune {
+    pub fn finish(self) -> usize {
+        self.0.into_iter().filter(|(path, id, _)| id.remove_if_unchanged(path)).count()
+    }
+}
+
 impl Repo<'_> {
     /// The saved state compares of this project (the states live in this project's store).
     fn compare_dir(&self) -> PathBuf {
         self.p.meta_dir().join(COMPARE_DIR)
     }
 
-    /// The saved live compares of lines that are gone. Called by `gc`.
-    fn prune_live(&self) -> Result<usize> {
-        let Ok(entries) = std::fs::read_dir(self.p.meta_dir().join(LIVE_DIR)) else { return Ok(0) };
+    /// Plan saved compares without holding the project lock.
+    pub fn plan_prune_compares(&self) -> Result<ComparePrune> {
         let lines: BTreeSet<String> = self.p.db.lines()?.into_iter().map(|l| format!("{}.json", l.id)).collect();
-        let mut removed = 0;
-        for e in entries.flatten() {
-            if !lines.contains(&e.file_name().to_string_lossy().to_string()) && std::fs::remove_file(e.path()).is_ok() {
-                removed += 1;
+        let mut entries = Vec::new();
+        if let Ok(rd) = std::fs::read_dir(self.p.meta_dir().join(LIVE_DIR)) {
+            for e in rd.flatten() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if !lines.contains(&name) {
+                    if let Some(id) = crate::fsutil::EntryIdentity::of(&e.path()) {
+                        entries.push((e.path(), id, CompareRef::Line(name)));
+                    }
+                }
             }
         }
-        Ok(removed)
+        if let Ok(rd) = std::fs::read_dir(self.compare_dir()) {
+            for e in rd.flatten() {
+                let Some(id) = crate::fsutil::EntryIdentity::of(&e.path()) else { continue };
+                let saved = std::fs::read(e.path()).ok().and_then(|b| serde_json::from_slice::<SavedCompare>(&b).ok());
+                let refs = match saved {
+                    Some(s) if s.format == COMPARE_FORMAT => CompareRef::States(s.base, s.theirs),
+                    _ => CompareRef::Invalid,
+                };
+                if !self.keep_compare(&refs, &lines) {
+                    entries.push((e.path(), id, refs));
+                }
+            }
+        }
+        Ok(ComparePrune(entries))
     }
 
-    /// Remove the saved compares whose states are gone, and the unreadable ones. Called by `gc`.
-    pub fn prune_compares(&self) -> Result<usize> {
-        let _ = self.prune_live();
-        let Ok(entries) = std::fs::read_dir(self.compare_dir()) else { return Ok(0) };
-        let mut removed = 0;
-        for e in entries.flatten() {
-            let kept = std::fs::read(e.path())
-                .ok()
-                .and_then(|b| serde_json::from_slice::<SavedCompare>(&b).ok())
-                .is_some_and(|s| s.format == COMPARE_FORMAT && self.p.has_state(&s.base) && self.p.has_state(&s.theirs));
-            if !kept && std::fs::remove_file(e.path()).is_ok() {
-                removed += 1;
-            }
+    fn keep_compare(&self, refs: &CompareRef, lines: &BTreeSet<String>) -> bool {
+        match refs {
+            CompareRef::Line(name) => lines.contains(name),
+            CompareRef::States(base, theirs) => self.p.has_state(base) && self.p.has_state(theirs),
+            CompareRef::Invalid => false,
         }
-        Ok(removed)
+    }
+
+    /// Recheck the references and file identities under the project lock.
+    pub fn check_prune_compares(&self, plan: ComparePrune) -> Result<ComparePrune> {
+        let lines: BTreeSet<String> = self.p.db.lines()?.into_iter().map(|l| format!("{}.json", l.id)).collect();
+        Ok(ComparePrune(
+            plan.0
+                .into_iter()
+                .filter(|(path, id, refs)| {
+                    !self.keep_compare(refs, &lines) && crate::fsutil::EntryIdentity::of(path).as_ref() == Some(id)
+                })
+                .collect(),
+        ))
     }
 
     fn radar_hidden(&self, ctx: &Ctx, line: &Line) -> Result<BTreeSet<String>> {
