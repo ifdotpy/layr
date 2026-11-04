@@ -1138,8 +1138,14 @@ impl<'a> Repo<'a> {
         let base = self.state_src(&base_id)?;
         let base_scan = base.scan(true)?;
         let d = crate::thin::diff(&base_scan, &|k| base.path(k), &new, &w, self.since_of(line, &base_id))?;
-        // Nothing changed since the previous save: the save under the lock makes no state.
-        if !self.thin_changed(&base, &w, &d)?
+        // Nothing changed since the previous save: the save under the lock makes no state. With the
+        // same base as the save, that is recorded with the scan, so the lock only compares the scan.
+        let changed_base = self.thin_changed(&base, &w, &d)?;
+        if !changed_base && base_id == prev {
+            set_prepared_clean(&line.id, &line.head, &prev, &new);
+            return Ok(());
+        }
+        if !changed_base
             || (base_id != prev && self.p.has_state(&prev) && {
                 let p = self.state_src(&prev)?;
                 !self.thin_changed(
@@ -1214,8 +1220,21 @@ impl<'a> Repo<'a> {
             // working folder serves the comparison and the layer over the head.
             let prev = self.save_base(line)?;
             let new = btrfs::scan_with_data(&w, true)?;
+            // A layer prepared for this head, base and content was written only because the folder
+            // changed (`prepare_save_layer` writes nothing else). The comparison below would repeat
+            // that under the lock, with a read of the stored metadata of every entry.
+            #[cfg(target_os = "macos")]
+            if prepared_unchanged(&line.id, &line.head, &prev, &new) {
+                return Ok(None);
+            }
+            #[cfg(target_os = "macos")]
+            let prepared_change = prepared_matches(&line.id, &line.head, &prev, &new);
+            #[cfg(not(target_os = "macos"))]
+            let prepared_change = false;
             let head = self.state_src(&line.head)?;
-            let changed = if prev == line.head {
+            let changed = if prepared_change {
+                true
+            } else if prev == line.head {
                 let head_scan = head.scan(true)?;
                 let head_diff = crate::thin::diff(&head_scan, &|k| head.path(k), &new, &w, 0)?;
                 self.thin_changed(&head, &w, &head_diff)?
@@ -1663,6 +1682,7 @@ impl<'a> Repo<'a> {
         #[cfg(target_os = "macos")]
         {
             PREPARED_STATUS.with(|p| p.borrow_mut().take());
+            PREPARED_CLEAN.with(|p| p.borrow_mut().clear());
             for p in btrfs::take_prepared() {
                 let _ = self.p.trash(&p);
             }
@@ -4291,6 +4311,41 @@ struct PreparedSave {
 #[cfg(target_os = "macos")]
 thread_local! {
     static PREPARED_SAVES: std::cell::RefCell<Vec<PreparedSave>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+/// The folder of a line that `prepare_save` found unchanged since its save base: head, base, scan.
+#[cfg(target_os = "macos")]
+struct PreparedClean {
+    line: String,
+    head: String,
+    prev: String,
+    scan: BTreeMap<String, btrfs::ScanEntry>,
+}
+
+#[cfg(target_os = "macos")]
+thread_local! {
+    static PREPARED_CLEAN: std::cell::RefCell<Vec<PreparedClean>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(target_os = "macos")]
+fn set_prepared_clean(line: &str, head: &str, prev: &str, scan: &BTreeMap<String, btrfs::ScanEntry>) {
+    PREPARED_CLEAN.with(|p| {
+        let mut p = p.borrow_mut();
+        p.retain(|x| x.line != line);
+        p.push(PreparedClean { line: line.into(), head: head.into(), prev: prev.into(), scan: scan.clone() });
+    });
+}
+
+/// True when `prepare_save` found this head, base and content unchanged (the lock need not compare
+/// the stored metadata again). The entry is kept until the command ends.
+#[cfg(target_os = "macos")]
+fn prepared_unchanged(line: &str, head: &str, prev: &str, scan: &BTreeMap<String, btrfs::ScanEntry>) -> bool {
+    PREPARED_CLEAN.with(|p| p.borrow().iter().any(|x| x.line == line && x.head == head && x.prev == prev && x.scan == *scan))
+}
+
+/// True when a layer prepared for `line` has this head, base and content (not taken).
+#[cfg(target_os = "macos")]
+fn prepared_matches(line: &str, head: &str, prev: &str, scan: &BTreeMap<String, btrfs::ScanEntry>) -> bool {
+    PREPARED_SAVES.with(|p| p.borrow().iter().any(|x| x.line == line && x.head == head && x.prev == prev && x.scan == *scan))
 }
 #[cfg(target_os = "macos")]
 fn take_prepared_save(line: &str) -> Option<PreparedSave> {
