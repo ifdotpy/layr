@@ -1473,3 +1473,19 @@ mod temp_name_tests {
         assert_eq!(creator_gone("prepared-11111111-2222-3333-4444-555555555555"), None);
     }
 }
+
+/// Test only (tests/t125-save-line-lock.sh): `LAYR_TEST_SAVE_PAUSE_MS` keeps a named save this long
+/// after its clone, before the project lock, so a test can run other commands meanwhile.
+pub fn test_pause() {
+    if let Some(ms) = std::env::var("LAYR_TEST_SAVE_PAUSE_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+}
+
+/// Test only (tests/t124-save-crash.sh): `LAYR_TEST_SAVE_KILL=<point>` kills this process with
+/// SIGKILL at that point of a named save, as a power loss or a crash would. Other runs pass.
+pub fn failpoint(point: &str) {
+    if std::env::var("LAYR_TEST_SAVE_KILL").ok().as_deref() == Some(point) {
+        let _ = rustix::process::kill_process(rustix::process::getpid(), rustix::process::Signal::KILL);
+    }
+}

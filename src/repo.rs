@@ -1468,7 +1468,7 @@ impl<'a> Repo<'a> {
 
     /// The tree of a staging line: a thin layer over the head, or a complete tree.
     #[cfg(target_os = "macos")]
-    fn stage_tree(&self, line: &Line, stage: &Path) -> Result<Snap> {
+    pub fn stage_tree(&self, line: &Line, stage: &Path) -> Result<Snap> {
         if crate::thin::is_thin(stage) {
             crate::thin::Layered::over(stage, self.head_src(line)?)
         } else {
@@ -1503,7 +1503,8 @@ impl<'a> Repo<'a> {
     pub fn drop_stage(&self, line: &Line) -> Result<()> {
         let p = self.p.stage_path(&line.id);
         if p.exists() {
-            btrfs::delete_tree(&p)?;
+            // Under the project lock the stage is only renamed into the trash (emptied after the lock).
+            self.p.trash(&p)?;
         }
         let _ = std::fs::remove_file(self.stage_base_file(line));
         Ok(())
