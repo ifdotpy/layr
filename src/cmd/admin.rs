@@ -229,6 +229,7 @@ fn refuse(e: anyhow::Error, refusals: &mut Vec<String>) -> Result<()> {
 fn prepare_caches(repo: &Repo, l: &Line, only: &[String]) -> Result<Vec<String>> {
     let w = repo.working(l);
     let (u, g) = repo.owner_ids(l);
+    let mut ready = Vec::new();
     let mut refused = Vec::new();
     for p in repo.line_cache_paths(l)?.0 {
         if !only.is_empty() && !only.contains(&p) {
@@ -245,8 +246,16 @@ fn prepare_caches(repo: &Repo, l: &Line, only: &[String]) -> Result<Vec<String>>
         }
         // Pruned before the copy and the save: the state keeps the pruned cache (docs/cache-overlays.md, section 19).
         repo.prune_cache_folder(l, &p);
-        #[cfg(target_os = "macos")]
-        prepare_cache_copy(repo, l, &w, &p)?;
+        ready.push(p);
+    }
+    // The source times that the caches saw go with them (docs/cache-overlays.md, section 20). A failure costs a build
+    // only, so it is a warning.
+    if let Err(e) = crate::source_times::record(&w, &ready) {
+        eprintln!("warning: source file times of the caches not recorded: {e:#}");
+    }
+    #[cfg(target_os = "macos")]
+    for p in &ready {
+        prepare_cache_copy(repo, l, &w, p)?;
     }
     Ok(refused)
 }

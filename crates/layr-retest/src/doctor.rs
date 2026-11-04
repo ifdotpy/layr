@@ -204,8 +204,13 @@ fn prune_findings(root: &Path) -> Vec<Finding> {
         return Vec::new();
     };
     let target = root.join("target");
-    if !cfg.listed || !layr_cache::cargo::built(&target) {
+    if !cfg.listed {
         return Vec::new();
+    }
+    if !layr_cache::cargo::built(&target) {
+        let build: Vec<String> = cfg.commands.iter().map(|a| format!("cargo {}", a.join(" "))).collect();
+        let text = format!("prune: no build output in target, so the sweep commands never ran; run `{}`", build.join("` and `"));
+        return vec![warn(text)];
     }
     let mut env = cfg.env.clone();
     env.push(("CARGO_NET_OFFLINE".to_string(), "true".to_string()));
@@ -415,7 +420,7 @@ pub fn check(root: &Path) -> Vec<Finding> {
         .filter_map(|e| e.metadata().ok()?.modified().ok())
         .collect();
     match recs.iter().max() {
-        None => f.push(warn("no record in .layr-retest: the first `layr retest run` is a full run")),
+        None => f.push(ok("no record in .layr-retest yet: the first `layr retest run` is a full run")),
         Some(t) => {
             let age = t.elapsed().map(|d| d.as_secs()).unwrap_or(0);
             let text = format!("{} records, newest is {} old", recs.len(), fmt_age(age));

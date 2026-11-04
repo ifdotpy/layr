@@ -8,8 +8,10 @@ use std::path::Path;
 use std::process::Command;
 use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, Value};
 
-/// Standard build of a cargo project: the default `sweep` of `[workspace.metadata.layr-retest]`.
-const SWEEP_DEFAULT: &[&str] = &["build", "--workspace", "--all-targets", "--locked"];
+/// The standard commands of a cargo project: the default `sweep` of `[workspace.metadata.layr-retest]`. The debug
+/// build, the test build and the release build. A profile folder that no command lists is never swept.
+const SWEEP_DEFAULT: &[&[&str]] =
+    &[&["build", "--locked"], &["test", "--locked", "--no-run"], &["build", "--release", "--locked"]];
 /// Default `env` of `[workspace.metadata.layr-retest]`: incremental compilation, faster for a small change. A rustc
 /// wrapper (such as sccache, set in `~/.cargo/config.toml`) refuses incremental compilation, so it is cleared.
 const ENV_DEFAULT: &[(&str, &str)] = &[("CARGO_INCREMENTAL", "1"), ("RUSTC_WRAPPER", "")];
@@ -84,12 +86,14 @@ pub fn add_retest_config(text: &str) -> Result<Option<(String, Vec<&'static str>
         .context("[workspace.metadata.layr-retest] is not a table")?;
     let mut added = Vec::new();
     if !cfg.contains_key("sweep") {
-        let mut command = Array::new();
-        for a in SWEEP_DEFAULT {
-            command.push(*a);
-        }
         let mut sweep = Array::new();
-        sweep.push(command);
+        for c in SWEEP_DEFAULT {
+            let mut command = Array::new();
+            for a in *c {
+                command.push(*a);
+            }
+            sweep.push(Value::Array(command));
+        }
         cfg.insert("sweep", Item::Value(Value::Array(sweep)));
         added.push("sweep");
     }
@@ -189,28 +193,44 @@ pub fn run(args: &[String]) -> Result<i32> {
     if f.tests() {
         folders.push(RECORD_DIR);
     }
+    // The files that init changed. A line takes them from a state, so they are saved once (printed below).
+    let mut edited: Vec<&str> = Vec::new();
     for folder in &folders {
         let changed = ensure(&root.join(".layrattributes"), &format!("{folder} regenerable"), &[])?;
         println!(
             ".layrattributes: {}",
             if changed { format!("added `{folder} regenerable`") } else { format!("`{folder} regenerable` present") }
         );
+        if changed && !edited.contains(&".layrattributes") {
+            edited.push(".layrattributes");
+        }
     }
     if f.tests() {
         let changed = ensure(&root.join(".gitignore"), RECORD_DIR, &["/.layr-retest", ".layr-retest/", "/.layr-retest/"])?;
         println!(".gitignore: {}", if changed { format!("added `{RECORD_DIR}`") } else { format!("`{RECORD_DIR}` present") });
+        if changed {
+            edited.push(".gitignore");
+        }
     }
     if f.cargo {
         match add_retest_config_file(&root.join("Cargo.toml"))? {
-            Some(keys) => println!("Cargo.toml: added {} to [workspace.metadata.layr-retest]", keys.join(", ")),
+            Some(keys) => {
+                println!("Cargo.toml: added {} to [workspace.metadata.layr-retest]", keys.join(", "));
+                edited.push("Cargo.toml");
+            }
             None => println!("Cargo.toml: [workspace.metadata.layr-retest] keys present"),
         }
     }
+    if !edited.is_empty() {
+        println!("save: layr add {} && layr save -m \"retest init\"", edited.join(" "));
+        println!("      (lines take the caches only after this save; in a protected main, save in a line and merge)");
+    }
 
-    // Save each cache folder that exists and is not a cache overlay yet. A new line then starts warm.
+    // A cache folder that exists is saved now as a cache overlay, so a new line starts warm. A folder made later
+    // becomes one at the next `layr save` (the layer's own rule, no init needed).
     let present: Vec<&str> = folders.iter().copied().filter(|f| root.join(f).is_dir()).collect();
     for folder in folders.iter().filter(|f| !present.contains(*f)) {
-        println!("{folder}: not there yet, not saved; run `layr retest init` again after a build or an install");
+        println!("{folder}: not there yet; the next `layr save` after a build makes it a cache");
     }
     if !present.is_empty() {
         match cache_folders() {
@@ -235,9 +255,57 @@ pub fn run(args: &[String]) -> Result<i32> {
             }
         }
     }
+    follow_main(&mut code)?;
     println!("next: layr retest gate -- <your gate command>");
     println!("      layr retest doctor checks the project");
     Ok(code)
+}
+
+/// Runs layr: success, stdout and stderr. (`crate::layr` returns the stdout of a success only.)
+fn layr_all(args: &[&str]) -> Result<(bool, String, String)> {
+    let out = Command::new(std::env::current_exe()?).args(args).output().context("cannot run layr")?;
+    Ok((
+        out.status.success(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    ))
+}
+
+/// Sets the target `origin/main` of the main line when the project has an `origin` remote, and runs its first pass.
+/// Idempotent: a main line that already follows it is left alone. Other lines get no target. Sets `code` to 1 when
+/// the pass fails.
+fn follow_main(code: &mut i32) -> Result<()> {
+    let (_, lines, _) = layr_all(&["line", "list"])?;
+    let Some(current) = lines.lines().find_map(|l| l.strip_prefix("* ")).map(str::trim) else {
+        println!("follow: cannot read the current line; run `layr retest init` in the main line");
+        return Ok(());
+    };
+    if current != "main" {
+        println!("follow: line {current} is not main; run `layr retest init` in main to follow origin/main");
+        return Ok(());
+    }
+    let (_, remotes, _) = layr_all(&["git", "remote"])?;
+    if !remotes.lines().any(|r| r.trim() == "origin") {
+        println!("follow: no git remote origin; main follows nothing");
+        return Ok(());
+    }
+    let (_, show, _) = layr_all(&["follow"])?;
+    if show.lines().any(|l| l.trim() == "Following origin/main on line main") {
+        println!("follow: main already follows origin/main");
+        return Ok(());
+    }
+    let (ok, out, err) = layr_all(&["follow", "origin/main"])?;
+    print!("{out}");
+    if ok {
+        println!("follow: main follows origin/main");
+    } else {
+        println!("follow: origin/main not set: {}", err.trim());
+        *code = 1;
+    }
+    if err.contains("no layr daemon runs") {
+        println!("follow: no daemon runs, so passes run only by hand; install it: docs/follow.md (Install on macOS, Linux)");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -300,7 +368,12 @@ mod tests {
         let (out, added) = add_retest_config("[package]\nname = \"p\"\nversion = \"0.1.0\"\n").unwrap().unwrap();
         assert_eq!(added, ["sweep", "env"]);
         assert!(out.contains("[workspace.metadata.layr-retest]"), "{out}");
-        assert!(out.contains("sweep = [[\"build\", \"--workspace\", \"--all-targets\", \"--locked\"]]"), "{out}");
+        assert!(
+            out.contains(
+                "sweep = [[\"build\", \"--locked\"], [\"test\", \"--locked\", \"--no-run\"], [\"build\", \"--release\", \"--locked\"]]"
+            ),
+            "{out}"
+        );
         assert!(out.contains("env = { CARGO_INCREMENTAL = \"1\", RUSTC_WRAPPER = \"\" }"), "{out}");
         assert_eq!(add_retest_config(&out).unwrap(), None, "a second run changes nothing");
     }
