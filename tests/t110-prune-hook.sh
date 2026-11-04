@@ -34,6 +34,7 @@ if [ "$(id -u)" = 0 ]; then
     l line new fresh main >/dev/null
     eq "a root-owned line keeps its stale units (root is never pruned)" "$stale" "$(units $P/fresh/target)"
     finish
+    exit $?
 fi
 
 # 1. Stale units in the saved cache of main: prune is off while they are saved.
