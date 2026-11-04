@@ -941,6 +941,12 @@ impl<'a> Project<'a> {
     /// The differences between the `bases` table and the layers on disk, one line each. Empty
     /// when they agree. `gc --repair` makes the table match the disk.
     pub fn layer_bases_differences(&self) -> Result<Vec<String>> {
+        Ok(self.layer_bases_check()?.1)
+    }
+
+    /// The layers on disk and the differences from the table (see `layer_bases_differences`). The
+    /// layers are read once: `gc` repairs the table with the same map.
+    pub fn layer_bases_check(&self) -> Result<(std::collections::BTreeMap<String, String>, Vec<String>)> {
         let disk = self.layer_bases_on_disk()?;
         let rows = self.db.bases_rows()?;
         let short = crate::ids::short;
@@ -959,7 +965,7 @@ impl<'a> Project<'a> {
                 out.push(format!("stale row: layer {} is not on disk", short(state)));
             }
         }
-        Ok(out)
+        Ok((disk, out))
     }
 
     /// The base of each thin layer on disk. Layers exist on APFS only.

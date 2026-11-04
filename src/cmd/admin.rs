@@ -1435,10 +1435,10 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
         check(ctx, &h.repo, a.has("-q"))?
     };
     // The table of thin-layer bases must match the layers on disk (`gc --repair` rewrites it).
-    let bases_diff = h.repo.p.layer_bases_differences()?;
+    let (disk_bases, bases_diff) = h.repo.p.layer_bases_check()?;
     if a.has("--repair") && !a.has("-n") && !bases_diff.is_empty() {
         let _lock = if h.repo.p.holds_lock() { None } else { Some(h.repo.p.lock()?) };
-        h.repo.p.db.replace_bases(&h.repo.p.layer_bases_on_disk()?)?;
+        h.repo.p.db.replace_bases(&disk_bases)?;
     }
     if !a.has("-q") || !bases_diff.is_empty() {
         let verb = if a.has("--repair") && !a.has("-n") { "repaired" } else { "differ" };
