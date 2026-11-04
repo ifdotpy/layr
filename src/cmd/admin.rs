@@ -1202,7 +1202,7 @@ fn evict_stored(repo: &Repo) -> Result<Vec<String>> {
 
 /// The periodic repair of a project (`service.rs`): it prints nothing.
 pub fn gc_repair_quiet(ctx: &Ctx, repo: &Repo) -> Result<usize> {
-    repair_project(ctx, repo, false, true, false)
+    repair_project(ctx, repo, false, true, false, None)
 }
 
 /// Replace the owners table with the replay of the records (live pins kept) and mark the leaked
@@ -1230,7 +1230,7 @@ pub fn repair_table(repo: &Repo, free: bool) -> Result<Vec<String>> {
 /// states are freed, expired refs are released and the side caches are trimmed. The storage of
 /// the freed states moves after the lock (`free::finish_project`), then the trash is emptied.
 /// With `dry`, nothing changes: it prints what it would free.
-fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) -> Result<usize> {
+fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool, bases_read: Option<&BTreeMap<String, String>>) -> Result<usize> {
     if dry {
         let c = snapshot(repo, || owners_check(repo))?;
         let queued: Vec<String> = repo.p.db.queued_frees()?;
@@ -1279,7 +1279,7 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) ->
         {
             let lines = repo.lines()?;
             let heads: BTreeSet<String> = lines.iter().map(|l| l.head.clone()).collect();
-            let done = crate::thin::upkeep(&repo.p, &heads)?;
+            let done = crate::thin::upkeep_with(&repo.p, &heads, bases_read)?;
             // Saved statuses of lines that are gone.
             let ids: BTreeSet<String> = lines.iter().map(|l| format!("{}.cache", l.id)).collect();
             if let Ok(rd) = std::fs::read_dir(repo.p.meta_dir().join("status")) {
@@ -1391,7 +1391,7 @@ fn gc_all_projects(ctx: &Ctx, dry: bool, quiet: bool) -> Result<i32> {
     for name in ctx.store.project_names()?.into_iter().filter(|n| !n.contains('%')) {
         let result = Repo::open(ctx, &name).and_then(|repo| {
             repo.require(ctx, "gc")?;
-            repair_project(ctx, &repo, dry, true, false)
+            repair_project(ctx, &repo, dry, true, false, None)
         });
         match result {
             Ok(freed) if !quiet => outln!(ctx, "{name}: {freed} state(s)"),
@@ -1419,8 +1419,10 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let h = here(ctx)?;
     h.repo.require(ctx, "gc")?;
+    // The layers on disk, read once: the bases check, the repair and the thin-state upkeep share them.
+    let (disk_bases, bases_diff) = h.repo.p.layer_bases_check()?;
     let code = if a.has("--repair") {
-        repair_project(ctx, &h.repo, a.has("-n"), a.has("-q"), true)?;
+        repair_project(ctx, &h.repo, a.has("-n"), a.has("-q"), true, Some(&disk_bases))?;
         // Trees of imported states that no strong owner keeps: git builds them again on read.
         let built = repair_built(&h.repo, a.has("-n"))?;
         if !a.has("-q") {
@@ -1435,10 +1437,12 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
         check(ctx, &h.repo, a.has("-q"))?
     };
     // The table of thin-layer bases must match the layers on disk (`gc --repair` rewrites it).
-    let (disk_bases, bases_diff) = h.repo.p.layer_bases_check()?;
     if a.has("--repair") && !a.has("-n") && !bases_diff.is_empty() {
         let _lock = if h.repo.p.holds_lock() { None } else { Some(h.repo.p.lock()?) };
-        h.repo.p.db.replace_bases(&disk_bases)?;
+        // Only the layers that are still there: a layer that the repair removed has no folder.
+        let live: BTreeMap<String, String> =
+            disk_bases.iter().filter(|(state, _)| h.repo.p.delta_path(state).is_dir()).map(|(s, b)| (s.clone(), b.clone())).collect();
+        h.repo.p.db.replace_bases(&live)?;
     }
     if !a.has("-q") || !bases_diff.is_empty() {
         let verb = if a.has("--repair") && !a.has("-n") { "repaired" } else { "differ" };

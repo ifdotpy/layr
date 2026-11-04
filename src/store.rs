@@ -1024,6 +1024,13 @@ impl<'a> Project<'a> {
             let line = oplog::sign_line(&rec, &m.key)?;
             self.db.insert_record(&rec, &line)?;
             self.db.derive(&rec, &present, &m.id)?;
+            // A state whose thin layer is on disk: its base row, in this transaction (thin.rs).
+            #[cfg(target_os = "macos")]
+            for state in &rec.states {
+                if let Some(base) = crate::thin::layer_base(self, &state.id)? {
+                    self.db.record_base(&state.id, &base)?;
+                }
+            }
             Ok(())
         })?;
         Ok(rec)

@@ -20,6 +20,11 @@ eq "gc -n leaves the row" "1" "$(sqlite3 "$db" 'SELECT COUNT(*) FROM bases')"
 l gc --repair -q >/dev/null 2>&1
 eq "gc --repair removes the stale row" "0" "$(sqlite3 "$db" 'SELECT COUNT(*) FROM bases')"
 eq "after repair there is no difference" "0" "$(l gc -n 2>&1 | grep 'layer bases' | awk '{print $3}')"
+# Saves make thin layers: every layer gets its row when the state is recorded.
+cd $LAYR_ROOT/projects/b/lines/main || exit 1
+for i in 1 2 3; do echo "$i" > saved.txt; l save -q; done
+eq "after saves the table names every layer" "layer bases: 0 difference(s), differ" "$(l gc -n 2>&1 | grep 'layer bases')"
+
 # An upgrade backup older than 14 days: gc names it with its size; --repair removes it.
 dbdir=$(dirname "$db")
 old="$dbdir/$(basename "$db").schema-5.bak"
