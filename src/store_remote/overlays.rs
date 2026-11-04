@@ -477,6 +477,22 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
             }
         }
         merge(report, writer::push_locked(&scoped, ctx, &orepo, opts)?, &name, "push");
+        // The push makes the old caches of the overlay dead on the remote too: delete them now.
+        if repo.overlay_setting(&name, "cache")?.and_then(|v| v.as_bool()).unwrap_or(false) {
+            if let Some(kept) = repo.cache_kept(&name)? {
+                let known = |id: &str| orepo.p.db.state(id).ok().flatten().is_some();
+                let parent = |id: &str| orepo.p.db.state(id).ok().flatten().and_then(|s| s.parents.first().cloned());
+                let swept = super::sweep::sweep(&scoped, &kept, &known, &parent, false)?;
+                if !swept.trees.is_empty() {
+                    eprintln!(
+                        "layr: overlay {name}: deleted {} dead cache state(s) and {} part(s) ({} bytes) in the remote",
+                        swept.trees.len(),
+                        swept.parts.len(),
+                        swept.bytes
+                    );
+                }
+            }
+        }
         if let Some(identity) = &identity {
             if access_mode == layr_store::epochs::Mode::Service {
                 let recipient = store.service_recipient(repo)?.context("service overlay requires a configured service recipient")?;

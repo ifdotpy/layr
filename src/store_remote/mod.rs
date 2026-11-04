@@ -11,6 +11,7 @@ pub(crate) mod overlays;
 mod public;
 mod push_cache;
 mod push_journal;
+pub(crate) mod sweep;
 pub(crate) mod reader;
 mod release;
 mod writer;

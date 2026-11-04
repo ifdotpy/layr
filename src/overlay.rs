@@ -1235,8 +1235,35 @@ impl<'a> Repo<'a> {
     /// The states of overlay `name` (project `orepo`) beyond its history limit `keep_n` that no
     /// line uses. It only reads.
     fn history_excess(&self, orepo: &Repo, name: &str, keep_n: usize, lines: &[Line], stacks: &BTreeMap<String, Vec<Layer>>) -> Result<Vec<String>> {
-        let Some(info) = self.overlay_info(name)? else {
+        let Some(keep) = self.history_kept(orepo, name, keep_n, lines, stacks)? else {
             return Ok(Vec::new());
+        };
+        Ok(orepo.p.db.present_states()?.into_iter().map(|(id, _)| id).filter(|id| !keep.contains(id)).collect())
+    }
+
+    /// The states of cache overlay `name` that its records keep, on every machine and platform (the
+    /// states need not be on this machine): the newest `history` states of the overlay line of each
+    /// live line, the states that lines show, and the empty first state. A store remote keeps the
+    /// trees of these states and of states it does not know yet (`store_remote::sweep`). None: no
+    /// such overlay.
+    pub fn cache_kept(&self, name: &str) -> Result<Option<BTreeSet<String>>> {
+        let keep_n = self.overlay_props(name)?.history.map_or(usize::MAX, |n| n as usize);
+        let orepo = self.overlay_repo(name)?;
+        let lines = self.lines()?;
+        let stacks = self.stacks(&lines)?;
+        self.history_kept(&orepo, name, keep_n, &lines, &stacks)
+    }
+
+    fn history_kept(
+        &self,
+        orepo: &Repo,
+        name: &str,
+        keep_n: usize,
+        lines: &[Line],
+        stacks: &BTreeMap<String, Vec<Layer>>,
+    ) -> Result<Option<BTreeSet<String>>> {
+        let Some(info) = self.overlay_info(name)? else {
+            return Ok(None);
         };
         let mut keep: BTreeSet<String> = BTreeSet::from([info.root.clone()]);
         // A cache overlay keeps nothing for a line that is gone (docs/cache-overlays.md).
@@ -1258,7 +1285,7 @@ impl<'a> Repo<'a> {
                 keep.insert(l.state.clone());
             }
         }
-        Ok(orepo.p.db.present_states()?.into_iter().map(|(id, _)| id).filter(|id| !keep.contains(id)).collect())
+        Ok(Some(keep))
     }
 
     /// Delete the states `excess` of the overlay project `orepo` that are still present, and

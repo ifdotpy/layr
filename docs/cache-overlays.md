@@ -162,7 +162,13 @@ There are two kinds of remote:
 - A **layr remote** (a store: `file://`, `s3://`, `layr+https://`; or a peer: `ssh://`) takes the
   whole repository: the shared set and every overlay, each overlay encrypted for its readers, as
   [overlay sync](overlay-sync-design.md) decides. Cache overlays travel too. A receiving machine
-  imports a cache state only for its own platform.
+  imports a cache state only for its own platform. A store remote keeps only the cache states that
+  the records keep (`src/store_remote/sweep.rs`): the push of a cache overlay deletes the trees of
+  the states that its records know and do not keep (beyond `history` on each line and platform, of
+  deleted lines), and the data parts that no kept tree links, parts first. A tree stays when its
+  state is not known here yet (another machine pushed it), when a kept tree is a delta of it, or
+  when it is the nearest pushed ancestor of a kept state whose tree is not there yet (a push in
+  flight on another machine reuses its parts).
 - A **git remote** takes one layer. The shared set goes to the project's git remotes (`origin`),
   as today. An overlay goes to its own git repository: `layr overlay remote add <overlay> <url>`
   records `overlay.<name>.git.<remote>` in the overlay's own records, so only its readers see the
