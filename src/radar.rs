@@ -236,7 +236,7 @@ impl StateCompare {
     fn new(dir: &Path, base_id: &str, theirs_id: &str, base: Snap, theirs: Snap) -> StateCompare {
         let mut h = Sha1::new();
         h.update(format!("{COMPARE_FORMAT}\n{base_id}\n{theirs_id}"));
-        let file = dir.join(format!("{:x}.json", h.finalize()));
+        let file = dir.join(format!("{}.json", hex::encode(h.finalize())));
         StateCompare { file, base_id: base_id.to_string(), theirs_id: theirs_id.to_string(), base, theirs }
     }
 
