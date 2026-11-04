@@ -1280,9 +1280,23 @@ fn states_bytes(repo: &Repo, states: &[String]) -> u64 {
 /// lock: a lock would empty the trash at its end, which a check must not do.
 fn snapshot<T>(repo: &Repo, f: impl FnOnce() -> Result<T>) -> Result<T> {
     repo.p.db.conn.execute_batch("BEGIN")?;
-    let v = f();
-    let _ = repo.p.db.conn.execute_batch("COMMIT");
-    v
+    match f() {
+        Ok(value) => {
+            if let Err(commit) = repo.p.db.conn.execute_batch("COMMIT") {
+                if let Err(rollback) = repo.p.db.conn.execute_batch("ROLLBACK") {
+                    return Err(anyhow::anyhow!("snapshot commit failed: {commit}; rollback failed: {rollback}"));
+                }
+                return Err(commit.into());
+            }
+            Ok(value)
+        }
+        Err(error) => {
+            if let Err(rollback) = repo.p.db.conn.execute_batch("ROLLBACK") {
+                return Err(error.context(format!("snapshot rollback failed: {rollback}")));
+            }
+            Err(error)
+        }
+    }
 }
 
 /// Test hook: pause after plan N until the test creates go.N in the named directory.

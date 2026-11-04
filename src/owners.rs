@@ -31,8 +31,8 @@ pub type Row = (String, String, String);
 thread_local! {
     /// True while a replay runs (`fill_only`): owners are filled and no state is freed.
     static FILL_ONLY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// A full replay defers remote-ref and ring synchronization until all records are derived.
-    static BATCH_REPLAY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Compact entries for records seen by the current full replay, in apply order.
+    static REPLAY_RING_ENTRIES: std::cell::RefCell<Option<Vec<RingEntries>>> = const { std::cell::RefCell::new(None) };
     static REPLAY_REMOTE_REFS: std::cell::RefCell<Option<BTreeMap<String, Vec<String>>>> = const { std::cell::RefCell::new(None) };
 }
 
@@ -152,8 +152,8 @@ impl Db {
         self.holder_exists("deleted", &format!("{ord}|{line}"))
     }
 
-    fn ring_size(&self, key: &str, default: usize) -> usize {
-        self.config(key).ok().flatten().and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(default)
+    fn ring_size(&self, key: &str, default: usize) -> Result<usize> {
+        Ok(self.config(key)?.and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(default))
     }
 
     /// The rows that a state holds: its parents, its derived source and its conflict sources.
@@ -272,7 +272,7 @@ impl Db {
             self.set_owners("head", &h, &target)?;
         }
         // At least one: the newest automatic state of a live line always stays (docs/ownership.md).
-        let keep = self.ring_size(KEY_AUTO, AUTO_RING_DEFAULT).max(1);
+        let keep = self.ring_size(KEY_AUTO, AUTO_RING_DEFAULT)?.max(1);
         let autos = if alive {
             let mut st = self.cached("SELECT id FROM states WHERE line=?1 AND kind=?2 ORDER BY time DESC, id DESC LIMIT ?3")?;
             let v = st
@@ -320,7 +320,7 @@ impl Db {
 
     /// Keep the newest undo records of a line (`undo.ops`).
     fn trim_undo(&self, line: &str) -> Result<()> {
-        let keep = self.ring_size(KEY_UNDO_OPS, UNDO_OPS_DEFAULT);
+        let keep = self.ring_size(KEY_UNDO_OPS, UNDO_OPS_DEFAULT)?;
         let (lo, hi) = span(line, '|');
         let holders = self.holders("undo", &lo, &hi)?;
         for h in holders.iter().take(holders.len().saturating_sub(keep)) {
@@ -331,7 +331,7 @@ impl Db {
 
     /// Keep the newest deleted lines (`undo.deleted`).
     fn trim_deleted(&self) -> Result<()> {
-        let keep = self.ring_size(KEY_UNDO_DELETED, UNDO_DELETED_DEFAULT);
+        let keep = self.ring_size(KEY_UNDO_DELETED, UNDO_DELETED_DEFAULT)?;
         let holders = self.all_holders("deleted")?;
         for h in holders.iter().take(holders.len().saturating_sub(keep)) {
             self.release_deleted(h)?;
@@ -507,8 +507,14 @@ impl Db {
                 .get("config")
                 .and_then(|v| v.as_object())
                 .is_some_and(|c| [KEY_AUTO, KEY_UNDO_OPS, KEY_UNDO_DELETED].iter().any(|k| c.contains_key(*k)));
-            if ring_key && !BATCH_REPLAY.with(|c| c.get()) {
-                self.resync_rings()?;
+            if ring_key {
+                let replay = REPLAY_RING_ENTRIES.with(|entries| {
+                    entries.borrow().as_ref().map(|entries| self.resync_rings_from(entries))
+                });
+                match replay {
+                    Some(result) => result?,
+                    None => self.resync_rings()?,
+                }
             }
         }
         Ok(())
@@ -603,29 +609,31 @@ impl Db {
         // `derive` performs many writes per record and expects a caller transaction.  Without
         // one, every statement commits independently, repeatedly walking SQLite's page cache.
         mem.with_tx(|| fill_only(|| -> Result<()> {
-            struct ReplayGuard(bool, Option<BTreeMap<String, Vec<String>>>);
+            struct ReplayGuard(Option<Vec<RingEntries>>, Option<BTreeMap<String, Vec<String>>>);
             impl Drop for ReplayGuard {
                 fn drop(&mut self) {
-                    BATCH_REPLAY.with(|c| c.set(self.0));
+                    REPLAY_RING_ENTRIES.with(|c| { c.replace(self.0.take()); });
                     REPLAY_REMOTE_REFS.with(|c| { c.replace(self.1.take()); });
                 }
             }
             let _guard = ReplayGuard(
-                BATCH_REPLAY.with(|c| c.replace(true)),
+                REPLAY_RING_ENTRIES.with(|c| c.replace(Some(Vec::new()))),
                 REPLAY_REMOTE_REFS.with(|c| c.replace(Some(BTreeMap::new()))),
             );
-            let mut entries = Vec::new();
             for raw in self.all_lines()? {
                 let rec = crate::oplog::parse_line(&raw, None)?.record;
                 // Retain only ring entries from the decoded record. The temporary records table
                 // is not queried, so neither JSON copies nor its expression indexes are needed.
                 let entry = ring_entries(&rec);
                 if !entry.0.is_empty() || !entry.1.is_empty() {
-                    entries.push(entry);
+                    REPLAY_RING_ENTRIES.with(|entries| -> Result<()> {
+                        let mut entries = entries.borrow_mut();
+                        entries.as_mut().ok_or_else(|| anyhow::anyhow!("missing replay ring entries"))?.push(entry);
+                        Ok(())
+                    })?;
                 }
                 mem.derive(&rec, &|_| true, local)?;
             }
-            mem.resync_rings_from(&entries)?;
             let refs = REPLAY_REMOTE_REFS.with(|c| c.take()).ok_or_else(|| anyhow::anyhow!("missing replay remote refs"))?;
             for (name, target) in refs {
                 mem.set_owners("remote-ref", &name, &target)?;
@@ -852,6 +860,47 @@ mod tests {
 
     fn owners_of(db: &Db, kind: &str, holder: &str) -> Vec<String> {
         db.holder_states(kind, holder).unwrap().into_iter().collect()
+    }
+
+    #[test]
+    fn invalid_ring_configuration_is_reported() -> Result<()> {
+        let db = memory();
+        db.conn.execute("INSERT INTO config(key,value,ord) VALUES(?1,?2,?3)", params![KEY_UNDO_OPS, "not json", "1"])?;
+        assert!(db.ring_size(KEY_UNDO_OPS, UNDO_OPS_DEFAULT).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn replay_preserves_undo_pruning_after_line_restoration() -> Result<()> {
+        let source = memory();
+        let mut save = record(1, "save");
+        save.states.push(state(&id(1), StateKind::Commit, Some(LINE), vec![]));
+        save.lines.insert(LINE.into(), LineChange {
+            before: None, after: Some(head(&id(1))), working_before: None, working_after: Some(id(1)),
+        });
+        let mut delete = record(2, "line.delete");
+        delete.lines.insert(LINE.into(), LineChange {
+            before: Some(head(&id(1))), after: None, working_before: Some(id(1)), working_after: None,
+        });
+        let mut restore = record(3, "undo");
+        restore.lines.insert(LINE.into(), LineChange {
+            before: None, after: Some(head(&id(1))), working_before: None, working_after: Some(id(1)),
+        });
+        let mut initial_config = record(0, "config");
+        initial_config.data = serde_json::json!({"config": {"undo.ops": 10}});
+        fill_only(|| {
+            for r in [&initial_config, &save, &delete, &restore] { apply(&source, r); }
+        });
+        let earlier = format!("{LINE}|{}", record_ord(&save));
+        assert!(owners_of(&source, "undo", &earlier).is_empty());
+        assert_eq!(source.owner_rows()?, source.recomputed_owners(MACHINE)?);
+        // A subsequent ring-size change really does rebuild from history at that point.
+        let mut later_config = record(4, "config");
+        later_config.data = serde_json::json!({"config": {"undo.ops": 20}});
+        fill_only(|| apply(&source, &later_config));
+        assert!(!owners_of(&source, "undo", &earlier).is_empty());
+        assert_eq!(source.owner_rows()?, source.recomputed_owners(MACHINE)?);
+        Ok(())
     }
 
     #[test]
