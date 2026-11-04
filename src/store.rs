@@ -1159,6 +1159,18 @@ impl<'a> Project<'a> {
         if project.is_empty() {
             bail!("project id unknown: the project has no records yet");
         }
+        // A command that moves or deletes a line of this machine holds its line lock, so no other
+        // command moves that head between its read and its commit. Debug builds (the test suites)
+        // check it here, where every local record goes.
+        if cfg!(debug_assertions) && !self.is_overlay() {
+            for (id, ch) in &rec.lines {
+                let local = self.db.line_by_id(id)?.is_some_and(|l| l.machine == m.id);
+                let held = HELD_LINES.lock().map(|h| h.contains(&(self.meta_dir(), id.clone()))).unwrap_or(false);
+                if ch.before.is_some() && local && !held {
+                    bail!("internal error: record '{}' changes line {id} without its line lock", rec.op);
+                }
+            }
+        }
         self.db.with_tx(|| {
             let mut seq = self.db.last_seq(&m.id)?;
             if seq == 0 {
