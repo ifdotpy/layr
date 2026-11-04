@@ -108,13 +108,13 @@ pub fn prepare_open() -> Result<()> {
     })
 }
 
-pub fn insert_if_missing(path: &Path, identity: (u64, u64), read: bool, db: &Db) -> Result<()> {
+pub fn insert_if_missing(path: &Path, identity: (u64, u64), schema: (i64, i64), read: bool, db: &Db) -> Result<()> {
     CACHE.with(|cache| {
         let mut cache = cache.try_borrow_mut().context("overlay handle cache already borrowed")?;
         if let Some(cache) = cache.as_mut() {
             if cache.entries.contains_key(path) { return Ok(()); }
             cache.clock = cache.clock.wrapping_add(1);
-            cache.entries.insert(path.to_path_buf(), Entry { pid: std::process::id(), identity, schema: Db::cache_schema_cookie(&db.conn)?, read, used: cache.clock, conn: Some(db.conn.clone()) });
+            cache.entries.insert(path.to_path_buf(), Entry { pid: std::process::id(), identity, schema, read, used: cache.clock, conn: Some(db.conn.clone()) });
         }
         Ok(())
     })
@@ -137,17 +137,41 @@ mod tests {
         for path in &paths {
             prepare_open()?;
             let db = Db::open(path)?;
-            insert_if_missing(path, identity(path)?, false, &db)?;
+            insert_if_missing(path, identity(path)?, Db::validated_cache_cookie(&db.conn)?, false, &db)?;
         }
         assert!(get(&paths[0], false)?.is_none());
         let checked_out = get(&paths[1], false)?.context("missing second db")?;
         prepare_open()?;
         assert!(get(&paths[1], false).is_err());
         let reopened = Db::open(&paths[0])?;
-        insert_if_missing(&paths[0], identity(&paths[0])?, false, &reopened)?;
+        insert_if_missing(&paths[0], identity(&paths[0])?, Db::validated_cache_cookie(&reopened.conn)?, false, &reopened)?;
         let value: String = reopened.conn.query_row("SELECT value FROM config WHERE key='test'", [], |r| r.get(0))?;
         assert_eq!(value, "0");
         drop((checked_out, reopened, command));
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn schema_change_between_validation_and_insertion_is_not_cached_as_valid() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("layr-schema-insert-race-{}", crate::ids::new_id()));
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("db");
+        let command = Command::with_capacity(2);
+        let db = Db::open(&path)?;
+        let validated = Db::validated_cache_cookie(&db.conn)?;
+        let other = rusqlite::Connection::open(&path)?;
+        other.pragma_update(None, "user_version", crate::db::SCHEMA_VERSION + 1)?;
+        drop(other);
+        insert_if_missing(&path, identity(&path)?, validated, false, &db)?;
+        drop(db);
+        assert!(get(&path, false)?.is_none());
+        let error = match Db::open_for(&path, false) {
+            Ok(_) => anyhow::bail!("newer schema unexpectedly opened"),
+            Err(error) => error,
+        };
+        assert!(format!("{error:#}").contains("newer layr"));
+        drop(command);
         std::fs::remove_dir_all(dir)?;
         Ok(())
     }
@@ -159,7 +183,7 @@ mod tests {
         let path = dir.join("db");
         let command = Command::with_capacity(2);
         let db = Db::open(&path)?;
-        insert_if_missing(&path, identity(&path)?, false, &db)?;
+        insert_if_missing(&path, identity(&path)?, Db::validated_cache_cookie(&db.conn)?, false, &db)?;
         drop(db);
         let other = rusqlite::Connection::open(&path)?;
         other.pragma_update(None, "user_version", 0)?;
@@ -169,7 +193,7 @@ mod tests {
         assert!(!migrated.stale);
         let version: i64 = migrated.conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         assert_eq!(version, crate::db::SCHEMA_VERSION);
-        insert_if_missing(&path, identity(&path)?, false, &migrated)?;
+        insert_if_missing(&path, identity(&path)?, Db::validated_cache_cookie(&migrated.conn)?, false, &migrated)?;
         drop(migrated);
         let other = rusqlite::Connection::open(&path)?;
         other.execute_batch("DROP INDEX records_time")?;
@@ -195,7 +219,7 @@ mod tests {
         let other = Db::open(&replacement)?;
         drop(other);
         std::fs::rename(&replacement, &path)?;
-        insert_if_missing(&path, validated, false, &db)?;
+        insert_if_missing(&path, validated, Db::validated_cache_cookie(&db.conn)?, false, &db)?;
         drop(db);
         assert!(get(&path, false)?.is_none());
         drop(command);
@@ -211,7 +235,7 @@ mod tests {
         let replacement = dir.join("replacement");
         let command = Command::begin();
         let db = Db::open(&path)?;
-        insert_if_missing(&path, identity(&path)?, false, &db)?;
+        insert_if_missing(&path, identity(&path)?, Db::validated_cache_cookie(&db.conn)?, false, &db)?;
         drop(db);
         let other = Db::open(&replacement)?;
         drop(other);
@@ -238,7 +262,7 @@ mod tests {
         let path = dir.join("db");
         let _command = Command::begin();
         let db = Db::open(&path)?;
-        insert_if_missing(&path, identity(&path)?, false, &db)?;
+        insert_if_missing(&path, identity(&path)?, Db::validated_cache_cookie(&db.conn)?, false, &db)?;
         assert!(get(&path, false).is_err());
         db.conn.execute_batch("BEGIN")?;
         drop(db);

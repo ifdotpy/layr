@@ -185,30 +185,42 @@ impl Db {
                     | rusqlite::ffi::SQLITE_READONLY_CANTINIT | rusqlite::ffi::SQLITE_CANTOPEN_DIRTYWAL))
     }
 
+    /// Validate schema and capture its cookies within one SQLite read snapshot.
+    pub(crate) fn validated_cache_cookie(conn: &Connection) -> Result<(i64, i64)> {
+        conn.execute_batch("BEGIN")?;
+        let checked = (|| -> Result<(i64, i64)> {
+            if !Self::schema_current_in_snapshot(conn)? {
+                anyhow::bail!("database schema changed while opening; retry the command");
+            }
+            Self::cache_schema_cookie(conn)
+        })();
+        let committed = conn.execute_batch("COMMIT");
+        let cookies = checked?;
+        committed?;
+        Ok(cookies)
+    }
+
     /// True when the version is current and every table and index of the schema exists.
     fn schema_is_current(conn: &Connection) -> Result<bool> {
         conn.execute_batch("BEGIN")?;
-        let checked = (|| -> Result<bool> {
-            let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-            if version != SCHEMA_VERSION {
-                return Ok(false);
-            }
-            let wanted: Vec<&str> = SCHEMA
-                .lines()
-                .filter_map(|l| l.split(" IF NOT EXISTS ").nth(1))
-                .filter_map(|l| l.split([' ', '(']).next())
-                .collect();
-            let have: i64 = conn.query_row(
-                &format!("SELECT COUNT(*) FROM sqlite_master WHERE name IN ({})", vec!["?"; wanted.len()].join(",")),
-                rusqlite::params_from_iter(wanted.iter()),
-                |r| r.get(0),
-            )?;
-            Ok(have as usize == wanted.len())
-        })();
+        let checked = Self::schema_current_in_snapshot(conn);
         let committed = conn.execute_batch("COMMIT");
         let current = checked?;
         committed?;
         Ok(current)
+    }
+
+    fn schema_current_in_snapshot(conn: &Connection) -> Result<bool> {
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version != SCHEMA_VERSION { return Ok(false); }
+        let wanted: Vec<&str> = SCHEMA.lines()
+            .filter_map(|l| l.split(" IF NOT EXISTS ").nth(1))
+            .filter_map(|l| l.split([' ', '(']).next()).collect();
+        let have: i64 = conn.query_row(
+            &format!("SELECT COUNT(*) FROM sqlite_master WHERE name IN ({})", vec!["?"; wanted.len()].join(",")),
+            rusqlite::params_from_iter(wanted.iter()), |r| r.get(0),
+        )?;
+        Ok(have as usize == wanted.len())
     }
 
     /// Older binaries can still add legacy records. Import their evidence: only when a record

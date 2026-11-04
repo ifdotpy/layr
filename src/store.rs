@@ -1022,6 +1022,7 @@ impl<'a> Project<'a> {
             Some(crate::overlay_handles::identity(&path)?)
         } else { None };
         let cached = if overlay { crate::overlay_handles::get(&path, read)? } else { None };
+        let was_cached = cached.is_some();
         let db = match cached {
             Some(db) => db,
             None => {
@@ -1038,7 +1039,10 @@ impl<'a> Project<'a> {
                 if crate::overlay_handles::identity(&path)? != identity {
                     bail!("overlay database {} changed while opening", path.display());
                 }
-                crate::overlay_handles::insert_if_missing(&path, identity, read, &p.db)?;
+                if !was_cached {
+                    let schema = Db::validated_cache_cookie(&p.db.conn)?;
+                    crate::overlay_handles::insert_if_missing(&path, identity, schema, read, &p.db)?;
+                }
             }
             if crate::overlay_handles::active() {
                 crate::free::register_overlay(store, name);

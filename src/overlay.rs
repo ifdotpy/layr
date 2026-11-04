@@ -31,7 +31,7 @@ use crate::repo::{skip_path, Repo, Temp};
 use crate::storage as btrfs;
 use crate::store::Project;
 use crate::tree::Tree;
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -233,6 +233,18 @@ pub struct OverlayPlan {
     lines: Vec<Line>,
     stacks: BTreeMap<String, Vec<Layer>>,
     overlays: Vec<OverlayClean>,
+}
+
+/// Run every planned overlay even when another fails; report all named failures afterwards.
+fn commit_each_overlay<T>(items: impl IntoIterator<Item = (String, T)>, mut commit: impl FnMut(T) -> Result<()>) -> Result<()> {
+    let mut errors = Vec::new();
+    for (name, item) in items {
+        if let Err(error) = commit(item) {
+            errors.push(format!("repair overlay '{name}': {error:#}"));
+        }
+    }
+    if !errors.is_empty() { bail!("{}", errors.join("; ")); }
+    Ok(())
 }
 
 /// One overlay of an `OverlayPlan`.
@@ -1322,19 +1334,16 @@ impl<'a> Repo<'a> {
     /// in since the plan was made (the lines and stacks are the same). An overlay whose own records
     /// changed is read again under its lock. A failure leaves old states for the next gc.
     pub fn commit_overlay_plan(&self, ctx: &Ctx, plan: OverlayPlan) -> Result<()> {
-        let mut errors = Vec::new();
+        if crate::overlay_handles::active() {
+            let items = plan.overlays.into_iter().map(|c| (c.name.clone(), c));
+            return commit_each_overlay(items, |c| self.commit_overlay_clean(ctx, c, &plan.lines, &plan.stacks));
+        }
         for c in plan.overlays {
             let name = c.name.clone();
-            if let Err(error) = self.commit_overlay_clean(ctx, c, &plan.lines, &plan.stacks)
-                .with_context(|| format!("repair overlay '{name}'")) {
-                if crate::overlay_handles::active() {
-                    errors.push(format!("{error:#}"));
-                } else {
-                    eprintln!("warning: overlay '{name}': old states stay until the next gc: {error:#}");
-                }
+            if let Err(error) = self.commit_overlay_clean(ctx, c, &plan.lines, &plan.stacks) {
+                eprintln!("warning: overlay '{name}': old states stay until the next gc: {error:#}");
             }
         }
-        if !errors.is_empty() { bail!("{}", errors.join("; ")); }
         Ok(())
     }
 
@@ -1681,6 +1690,23 @@ pub fn set_layers(ctx: &Ctx, repo: &Repo, line: &Line, layers: &[Layer], force: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_commit_pass_reports_all_failures_and_processes_other_overlays() -> Result<()> {
+        let mut seen = Vec::new();
+        let items = ["bad-one", "good", "bad-two"].into_iter().map(|name| (name.to_string(), name));
+        let error = match commit_each_overlay(items, |name| {
+            seen.push(name);
+            if name.starts_with("bad") { bail!("failed") } else { Ok(()) }
+        }) {
+            Ok(()) => bail!("expected errors"),
+            Err(error) => error,
+        };
+        let message = format!("{error:#}");
+        assert!(message.contains("bad-one") && message.contains("bad-two"));
+        assert_eq!(seen, ["bad-one", "good", "bad-two"]);
+        Ok(())
+    }
 
     #[test]
     fn hidden_stacks_match_uncached_when_the_cache_is_smaller() -> Result<()> {
