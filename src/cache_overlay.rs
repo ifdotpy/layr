@@ -655,7 +655,9 @@ impl<'a> Repo<'a> {
         if let Err(e) = self.set_damaged(line, folder, !done.folder_ok) {
             eprintln!("layr: prune {folder}: cannot record the damaged state: {e:#}");
         }
-        eprintln!("layr: prune {}", done.log);
+        if !done.log.is_empty() {
+            eprintln!("layr: prune {}", done.log);
+        }
     }
 
     /// The lock of one line for the cache hook. The hooks of a line run one at a time. It is a file of the

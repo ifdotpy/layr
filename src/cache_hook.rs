@@ -107,9 +107,18 @@ fn owner_path(uid: u32) -> String {
 /// Runs the hook for `folder` of a line of owner `uid`, with the registered adapters. `setting` is the overlay
 /// property: `None` detects the adapter, `none` turns the hook off.
 pub fn run(setting: Option<&str>, folder: &Path, uid: u32, limit: Duration) -> Done {
-    // The root owner is never pruned: the hook runs as the owner, and the owner is not root.
-    if uid == 0 {
-        return Done { log: format!("{}: not pruned: the line owner is root", folder.display()), folder_ok: true };
+    let quiet = Done { log: String::new(), folder_ok: true };
+    // Nothing to do, so nothing is started or logged: the hook is off, the owner is root (the hook runs as the
+    // owner, and root is never pruned), or no adapter applies to the folder.
+    if setting == Some("none") || uid == 0 {
+        return quiet;
+    }
+    match setting {
+        Some(name) if !registered().iter().any(|a| a.name() == name) => {
+            return Done { log: format!("{}: not pruned: unknown prune adapter '{name}'", folder.display()), folder_ok: true };
+        }
+        None if !registered().iter().any(|a| a.detects(folder)) => return quiet,
+        _ => {}
     }
     let launch = Launch { exe: std::env::current_exe().unwrap_or_else(|_| "layr".into()), args: vec![WORKER_ARG.into()] };
     run_with(&launch, &[], setting, folder, uid, limit, limit + GRACE)
@@ -119,7 +128,9 @@ pub fn run(setting: Option<&str>, folder: &Path, uid: u32, limit: Duration) -> D
 enum Run {
     /// The worker printed its report.
     Report(Report),
-    /// The worker ended without a report, or its start failed.
+    /// The worker never started (the owner cannot run it): nothing ran, the folder is as it was.
+    Start(String),
+    /// The worker ended without a report: it may have changed the folder.
     Failed(String),
     /// The worker was still running at the wait: its process group was killed.
     Killed,
@@ -139,14 +150,14 @@ fn execute(launch: &Launch, env: &[(&str, &str)], mode: &str, setting: Option<&s
     let mut cmd = Command::new(&launch.exe);
     cmd.args(&launch.args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
     if let Err(e) = privs::command_as(&mut cmd, uid, &vars) {
-        return Run::Failed(format!("{e:#}"));
+        return Run::Start(format!("{e:#}"));
     }
     // The worker is a group leader: its adapter's processes stay in this group (see `WorkerHost`).
     use std::os::unix::process::CommandExt;
     cmd.process_group(0);
     let child = match cmd.spawn() {
         Ok(c) => c,
-        Err(e) => return Run::Failed(format!("cannot start the cache hook: {e}")),
+        Err(e) => return Run::Start(e.to_string()),
     };
     let pid = child.id();
     let (tx, rx) = mpsc::channel();
@@ -179,6 +190,7 @@ pub fn run_with(launch: &Launch, env: &[(&str, &str)], setting: Option<&str>, fo
     }
     match execute(launch, env, "prune", setting, folder, uid, limit, wait) {
         Run::Report(r) => Done { log: describe(folder, &r), folder_ok: r.folder_ok },
+        Run::Start(e) => Done { log: format!("{shown}: not pruned: cannot start the cache hook: {e}"), folder_ok: true },
         Run::Failed(e) => Done { log: format!("{shown}: not pruned: {e}"), folder_ok: false },
         Run::Killed => {
             // The hard limit passed: the processes of the hook are stopped. Put the folder back, or report it damaged.
@@ -193,7 +205,7 @@ pub fn run_with(launch: &Launch, env: &[(&str, &str)], setting: Option<&str>, fo
                     folder_ok: true,
                 },
                 Run::Report(r) => Done { log: damaged(folder, &r.reason), folder_ok: false },
-                Run::Failed(e) => Done { log: damaged(folder, &e), folder_ok: false },
+                Run::Start(e) | Run::Failed(e) => Done { log: damaged(folder, &e), folder_ok: false },
                 Run::Killed => Done { log: damaged(folder, "the recovery timed out"), folder_ok: false },
             }
         }
@@ -407,14 +419,31 @@ mod tests {
         assert!(done.folder_ok);
     }
 
-    /// Checked at the production entry: the root owner is refused whatever user runs the tests (CI runs as root).
+    /// Checked at the production entry, and silent: the root owner is never pruned, whatever user runs the tests.
     #[test]
     fn the_root_owner_is_never_pruned() {
         let dir = folder("root");
         let done = run(Some("ok"), &dir, 0, Duration::from_secs(5));
-        assert!(done.log.contains("the line owner is root"), "{}", done.log);
-        assert!(done.folder_ok);
+        assert!(done.log.is_empty() && done.folder_ok);
         assert_eq!(names(&dir), vec!["kept.txt".to_string()]);
+    }
+
+    /// A folder that no adapter applies to is left alone, silently, without starting a worker.
+    #[test]
+    fn a_folder_without_an_adapter_is_silent() {
+        let dir = folder("silent");
+        let done = run(None, &dir, me(), Duration::from_secs(5));
+        assert!(done.log.is_empty() && done.folder_ok);
+    }
+
+    /// A worker that cannot start leaves the folder as it was: the folder is not marked damaged.
+    #[test]
+    fn a_worker_that_cannot_start_does_not_damage_the_folder() {
+        let dir = folder("start");
+        let launch = Launch { exe: PathBuf::from("/nonexistent/layr-worker"), args: vec![] };
+        let done = run_with(&launch, &[], Some("ok"), &dir, me(), Duration::from_secs(5), Duration::from_secs(20));
+        assert!(done.log.contains("cannot start the cache hook"), "{}", done.log);
+        assert!(done.folder_ok);
     }
 
     /// The adapter sleeps past the limit: the parent stops the worker at the hard limit and reports a timeout.
