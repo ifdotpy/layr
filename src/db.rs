@@ -5,7 +5,7 @@
 
 use crate::ids;
 use crate::model::{Attestation, Line, QueueChange, QueueEntry, Record, RefChange, RefState, StateKind, StateRec, Subject};
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -102,17 +102,24 @@ impl Db {
 
     pub fn open_for(path: &Path, read: bool) -> Result<Db> {
         if read {
-            // A stale schema or legacy evidence still needs the normal upgrade path. Failure to
-            // open a WAL read-only (e.g. after a crash) likewise leaves recovery to that path.
-            if let Ok(conn) = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY) {
+            // Only a stale schema, legacy records, or a WAL that SQLite explicitly says needs
+            // recovery may use the writable path. Other failures must reach the caller.
+            let opened = (|| -> Result<Option<Db>> {
+                let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
                 conn.busy_timeout(std::time::Duration::from_secs(30))?;
                 conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
-                let current = Self::schema_is_current(&conn).unwrap_or(false);
-                let legacy = conn.prepare_cached(&format!("SELECT EXISTS(SELECT 1 FROM records WHERE {LEGACY_OPS})"))
-                    .and_then(|mut stmt| stmt.query_row([], |r| r.get::<_, bool>(0))).unwrap_or(true);
-                if current && !legacy {
-                    return Ok(Db { conn: conn.into(), stale: false });
+                if !Self::schema_is_current(&conn)? {
+                    return Ok(None);
                 }
+                let legacy = conn.prepare_cached(&format!("SELECT EXISTS(SELECT 1 FROM records WHERE {LEGACY_OPS})"))?
+                    .query_row([], |r| r.get::<_, bool>(0))?;
+                Ok(if legacy { None } else { Some(Db { conn: conn.into(), stale: false }) })
+            })();
+            match opened {
+                Ok(Some(db)) => return Ok(db),
+                Ok(None) => {},
+                Err(error) if Self::needs_wal_recovery(&error) => {},
+                Err(error) => return Err(error).with_context(|| format!("open metadata database {}", path.display())),
             }
         }
         let conn = Connection::open(path)?;
@@ -153,6 +160,14 @@ impl Db {
         Ok(db)
     }
 
+    /// SQLite reports these extended codes when a read-only WAL needs writable recovery.
+    fn needs_wal_recovery(error: &anyhow::Error) -> bool {
+        matches!(error.downcast_ref::<rusqlite::Error>(),
+            Some(rusqlite::Error::SqliteFailure(code, _))
+                if matches!(code.extended_code, rusqlite::ffi::SQLITE_READONLY_RECOVERY
+                    | rusqlite::ffi::SQLITE_READONLY_CANTINIT | rusqlite::ffi::SQLITE_CANTOPEN_DIRTYWAL))
+    }
+
     /// True when the version is current and every table and index of the schema exists.
     fn schema_is_current(conn: &Connection) -> Result<bool> {
         conn.execute_batch("BEGIN")?;
@@ -173,8 +188,10 @@ impl Db {
             )?;
             Ok(have as usize == wanted.len())
         })();
-        let _ = conn.execute_batch("COMMIT");
-        checked
+        let committed = conn.execute_batch("COMMIT");
+        let current = checked?;
+        committed?;
+        Ok(current)
     }
 
     /// Older binaries can still add legacy records. Import their evidence: only when a record
@@ -1746,6 +1763,44 @@ mod tests {
         db.derive(&other, &|_| true, machine).unwrap();
         assert_eq!(db.approvals(state).unwrap(), vec![(0, 1)]);
     }
+    #[test]
+    fn metadata_open_reports_corrupt_and_missing_databases() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("layr-db-metadata-errors-{}", crate::ids::new_id()));
+        std::fs::create_dir_all(&dir)?;
+        let corrupt = dir.join("corrupt.sqlite");
+        std::fs::write(&corrupt, b"not a sqlite database")?;
+        let error = match Db::open_for(&corrupt, true) {
+            Ok(_) => anyhow::bail!("corrupt database opened"),
+            Err(error) => error,
+        };
+        assert!(format!("{error:#}").contains("corrupt.sqlite"));
+        assert_eq!(std::fs::read(&corrupt)?, b"not a sqlite database");
+        let missing = dir.join("missing.sqlite");
+        assert!(Db::open_for(&missing, true).is_err());
+        assert!(!missing.exists());
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn metadata_open_reads_current_database_and_falls_back_for_old_schema() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("layr-db-metadata-{}", crate::ids::new_id()));
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("layr.sqlite");
+        drop(Db::open(&path)?);
+        let db = Db::open_for(&path, true)?;
+        assert!(db.conn.execute("CREATE TABLE should_not_write (id INTEGER)", []).is_err());
+        drop(db);
+        let conn = Connection::open(&path)?;
+        conn.pragma_update(None, "user_version", 0)?;
+        drop(conn);
+        let db = Db::open_for(&path, true)?;
+        assert!(db.conn.execute("CREATE TABLE can_write (id INTEGER)", []).is_ok());
+        drop(db);
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
     #[test]
     fn opening_a_current_database_takes_no_write_lock_and_still_imports_late_records() {
         let dir = std::env::temp_dir().join(format!("layr-db-open-{}", crate::ids::new_id()));
