@@ -22,8 +22,8 @@ pub fn register(store: &Store, name: &str) {
     }
 }
 
-/// Forget projects opened by a metadata-only command. Such commands do not create pins or
-/// queue frees; a later mutating command will still process any existing queue.
+/// Release any read pins and forget projects opened by a read command. A later mutating
+/// command will process the queue, including any frees created by releasing those pins.
 pub fn finish_read(store: &Store) {
     release_held();
     if let Ok(mut opened) = OPENED.lock() {
