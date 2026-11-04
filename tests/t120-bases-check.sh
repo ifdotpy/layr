@@ -25,6 +25,17 @@ cd $LAYR_ROOT/projects/b/lines/main || exit 1
 for i in 1 2 3; do echo "$i" > saved.txt; l save -q; done
 eq "after saves the table names every layer" "layer bases: 0 difference(s), differ" "$(l gc -n 2>&1 | grep 'layer bases')"
 
+# A layer made while gc --repair waits after its read of the disk keeps its row: the repair changes
+# only the rows that differed in that read.
+sqlite3 "$db" "INSERT INTO bases(state, base) VALUES('01a1ffff-0000-7000-8000-000000000003', '01a1ffff-0000-7000-8000-000000000004')"
+LAYR_TEST_GC_PAUSE_MS=3000 l gc --repair -q >/dev/null 2>&1 &
+pid=$!
+sleep 1
+echo 4 > saved.txt; l save -q
+wait $pid
+eq "the repair succeeds" 0 "$?"
+eq "a layer made during the repair keeps its row" "layer bases: 0 difference(s), differ" "$(l gc -n 2>&1 | grep 'layer bases')"
+
 # An upgrade backup older than 14 days: gc names it with its size; --repair removes it.
 dbdir=$(dirname "$db")
 old="$dbdir/$(basename "$db").schema-5.bak"

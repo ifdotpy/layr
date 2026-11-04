@@ -1542,6 +1542,11 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
     h.repo.require(ctx, "gc")?;
     // The layers on disk, read once: the bases check, the repair and the thin-state upkeep share them.
     let (disk_bases, bases_diff) = h.repo.p.layer_bases_check()?;
+    // Test hook (tests/t120-bases-check.sh): wait after the read of the layers, so a test can make
+    // a layer before the repair of the table.
+    if let Some(ms) = std::env::var("LAYR_TEST_GC_PAUSE_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
     let code = if a.has("--repair") {
         repair_project(ctx, &h.repo, a.has("-n"), a.has("-q"), true, Some(&disk_bases))?;
         // Trees of imported states that no strong owner keeps: git builds them again on read.
@@ -1557,13 +1562,21 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
     } else {
         check(ctx, &h.repo, a.has("-q"))?
     };
-    // The table of thin-layer bases must match the layers on disk (`gc --repair` rewrites it).
+    // The table of thin-layer bases must match the layers on disk (`gc --repair` repairs it). The
+    // disk was read before the lock: a command may have made or removed a layer since. Only the
+    // rows that differ from that read change, and only while the disk still agrees with it: the row
+    // of a layer made since stays, a row is removed only while its layer is still not on disk.
     if a.has("--repair") && !a.has("-n") && !bases_diff.is_empty() {
         let _lock = if h.repo.p.holds_lock() { None } else { Some(h.repo.p.lock()?) };
-        // Only the layers that are still there: a layer that the repair removed has no folder.
-        let live: BTreeMap<String, String> =
-            disk_bases.iter().filter(|(state, _)| h.repo.p.delta_path(state).is_dir()).map(|(s, b)| (s.clone(), b.clone())).collect();
-        h.repo.p.db.replace_bases(&live)?;
+        let rows = h.repo.p.db.bases_rows()?;
+        let set: BTreeMap<String, String> = disk_bases
+            .iter()
+            .filter(|(state, base)| rows.get(*state) != Some(*base) && h.repo.p.delta_path(state).is_dir())
+            .map(|(s, b)| (s.clone(), b.clone()))
+            .collect();
+        let gone: Vec<String> =
+            rows.keys().filter(|state| !disk_bases.contains_key(*state) && !h.repo.p.delta_path(state).is_dir()).cloned().collect();
+        h.repo.p.db.fix_bases(&set, &gone)?;
     }
     if !a.has("-q") || !bases_diff.is_empty() {
         let verb = if a.has("--repair") && !a.has("-n") { "repaired" } else { "differ" };

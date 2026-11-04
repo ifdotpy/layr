@@ -586,6 +586,19 @@ impl Db {
     }
 
     /// Replace the layer bases with the ones found on disk (`layr reindex`).
+    /// Set the base rows `set` and remove the rows of the layers `gone`, in one transaction.
+    pub fn fix_bases(&self, set: &BTreeMap<String, String>, gone: &[String]) -> Result<()> {
+        self.with_tx(|| {
+            for (state, base) in set {
+                self.record_base(state, base)?;
+            }
+            for state in gone {
+                self.exec("DELETE FROM bases WHERE state=?1", params![state])?;
+            }
+            Ok(())
+        })
+    }
+
     pub fn replace_bases(&self, bases: &BTreeMap<String, String>) -> Result<()> {
         self.with_tx(|| {
             self.exec("DELETE FROM bases", [])?;
