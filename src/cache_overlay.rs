@@ -334,6 +334,17 @@ impl<'a> Repo<'a> {
         }
     }
 
+    /// The user a new cache state records as its maker (`cache_by`): the caller, or the line owner when root
+    /// saves an owner's line (the owner's tools made the files; root may act for any user, so the cache is
+    /// trusted no wider than the owner's own).
+    fn cache_maker(&self, ctx: &Ctx, line: &Line) -> u32 {
+        if ctx.caller.uid == 0 {
+            self.owner_ids(line).0
+        } else {
+            ctx.caller.uid
+        }
+    }
+
     /// Save the nested layers at `paths` of the line's working folder as new states of their
     /// cache overlays, on the overlay line of this line. `shared`: saved on a protected line, so
     /// lines of other users may take them. The caller holds the project lock. Returns the folder,
@@ -389,7 +400,7 @@ impl<'a> Repo<'a> {
                     running: false,
                     conflicts: Vec::new(),
                     caches: Default::default(),
-                    cache_by: Some(ctx.caller.uid),
+                    cache_by: Some(self.cache_maker(ctx, line)),
                     cache_shared: shared,
                     cache_platform: Some(self.cache_key(&name, &w)?),
                     cache_of: Some(project_state.to_string()),
@@ -574,7 +585,7 @@ impl<'a> Repo<'a> {
                 } else {
                     let mut st =
                         crate::overlay::union_state(&orepo, ctx, &ol, &ol.head, &sid, &format!("cache {folder}: union"))?;
-                    st.cache_by = Some(ctx.caller.uid);
+                    st.cache_by = Some(self.cache_maker(ctx, line));
                     st.cache_shared = shared;
                     st.cache_platform = Some(key.clone());
                     (st.id.clone(), vec![st])
