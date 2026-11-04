@@ -88,6 +88,14 @@ git add -A && git commit -qm base && git push -q origin main
 ly init proj --git $R $OWNER_ARG -q >/dev/null 2>&1 || { echo "FATAL: layr init --git failed" >&2; exit 1; }
 P=$LAYR_ROOT/projects/proj/lines
 
+# In protected main before the merge, init changes no file and says how to bring the files in.
+before_main=$(cd $P/main && cat Cargo.toml .gitignore .layrattributes 2>/dev/null | cksum)
+guard=$(cd $P/main && ly retest init 2>&1); guard_rc=$?
+has "init in a protected main names the way through a line" "is protected, so init changed no file" "$guard"
+eq "init in a protected main exits 1 while files need the change" 1 "$guard_rc"
+eq "init in a protected main writes no file" "$before_main" "$(cd $P/main && cat Cargo.toml .gitignore .layrattributes 2>/dev/null | cksum)"
+has "init in main sets the follow target" "follow: main follows origin/main" "$guard"
+
 # The init files come in through a line and a merge: main is protected.
 (cd $P/main && ly line new setup main $OWNER_ARG >/dev/null 2>&1)
 cd $P/setup || exit 1
@@ -104,7 +112,7 @@ ly merge setup --expect "$setup_head" >/dev/null 2>&1 || fail "the merge of the 
 
 # In main: the follow target, the sweep list, and a second init that changes nothing.
 main_init=$(ly retest init 2>&1)
-has "init in main sets the follow target" "follow: main follows origin/main" "$main_init"
+has "init in main after the merge keeps the follow target" "follow: main already follows origin/main" "$main_init"
 has "the follow target is in layr follow" "Following origin/main on line main" "$(ly follow 2>&1)"
 has "the sweep list covers the three standard commands" 'sweep = [["build", "--locked"], ["test", "--locked", "--no-run"], ["build", "--release", "--locked"]]' "$(cat Cargo.toml)"
 before_files=$(cat Cargo.toml .layrattributes .gitignore | cksum)
