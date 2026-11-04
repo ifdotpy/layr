@@ -173,7 +173,7 @@ fn test_binary_size(root: &Path, name: &str) -> Option<u64> {
 }
 
 fn tool_checks(f: &mut Vec<Finding>) {
-    match out(crate::cargo_cmd().args(["nextest", "--version"])) {
+    match out(layr_cache::cargo::cargo_cmd().args(["nextest", "--version"])) {
         Some(v) => f.push(ok(format!("cargo-nextest: {}", v.lines().next().unwrap_or("").trim()))),
         None => f.push(warn("cargo-nextest is missing; run: cargo install cargo-nextest --locked")),
     }
@@ -287,7 +287,7 @@ pub fn check(root: &Path) -> Vec<Finding> {
     }
     tool_checks(&mut f);
 
-    let meta: Option<Value> = out(crate::cargo_cmd().args(["metadata", "--no-deps", "--format-version", "1"]))
+    let meta: Option<Value> = out(layr_cache::cargo::cargo_cmd().args(["metadata", "--no-deps", "--format-version", "1"]))
         .and_then(|s| serde_json::from_str(&s).ok());
     let Some(meta) = meta else {
         f.push(warn("cargo metadata failed; fix the workspace first"));

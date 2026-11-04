@@ -1427,3 +1427,33 @@ fn prune_command_runs_the_cargo_adapter_by_hand() {
     assert!(!err.contains("Compiling"), "the next build compiled:\n{err}");
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// `cargo test` builds the lib and the lib's test binary of one crate at the same time, each with its own
+/// incremental folder. After a feature build, the sweep keeps the folders of the standard build (a swap of two
+/// folders must not delete a live one), removes only what the standard command does not need, and the next
+/// standard build compiles nothing.
+#[test]
+fn sweep_keeps_the_folders_of_a_lib_and_its_test_build() {
+    let tmp = std::env::temp_dir().canonicalize().unwrap().join(format!("layr-retest-lib-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let ws = tmp.join("ws");
+    sweep_workspace(&ws, "sweep = [[\"test\", \"--workspace\", \"--no-run\"]]");
+    let debug = ws.join("target/debug");
+    cargo(&ws, &["test", "--workspace", "--no-run"]);
+    let standard = entries(&debug, "incremental");
+    assert!(!standard.is_empty(), "no incremental folder after the standard build");
+
+    cargo(&ws, &["test", "--workspace", "--no-run", "--features", "lib-a/extra"]);
+    let with_feature = entries(&debug, "incremental");
+    assert!(with_feature.len() > standard.len(), "the feature build made no new incremental folder");
+
+    let err = sweep_cmd(&ws, &[]);
+    assert!(err.contains("swept"), "{err}");
+    let after = entries(&debug, "incremental");
+    assert!(standard.is_subset(&after), "the sweep removed a folder of the standard build: {standard:?} -> {after:?}");
+    assert!(after.is_subset(&with_feature), "{after:?}");
+
+    let err = cargo(&ws, &["test", "--workspace", "--no-run"]);
+    assert!(!err.contains("Compiling"), "the next build compiled:\n{err}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
