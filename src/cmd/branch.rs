@@ -211,6 +211,9 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
             if current.as_ref().map(|c| c.id == l.id).unwrap_or(false) {
                 return Err(exit(1, format!("error: cannot delete line '{name}' used as the current folder")));
             }
+            // No other command moves the line while it is deleted (issue #194).
+            let _line_lock = repo.line_lock(&l)?;
+            let l = repo.line(name)?;
             if a.has("-d") && !a.has("-f") {
                 let into = current.as_ref().map(|c| c.head.clone());
                 let merged = match &into {
@@ -328,7 +331,9 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
         crate::store::check_name("line", &new)?;
         let l = repo.line(&old)?;
         repo.authorize_line(ctx, &l, crate::repo::LineOp::Manage)?;
+        let _line_lock = repo.line_lock(&l)?;
         let _lock = repo.p.lock()?;
+        let l = repo.line(&old)?;
         if repo.p.db.line_by_name(&new)?.is_some() {
             return Err(exit(128, format!("fatal: a line named '{new}' already exists")));
         }
@@ -589,7 +594,9 @@ pub fn adopt(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let name = a.pos.first().ok_or_else(|| exit(128, "usage: layr adopt <line> [--state <rev>|--head]"))?;
     let l = repo.line(name)?;
     repo.authorize_line(ctx, &l, crate::repo::LineOp::Manage)?;
+    let _line_lock = repo.line_lock(&l)?;
     let _lock = repo.p.lock()?;
+    let l = repo.line(name)?;
     let w = repo.working(&l);
     if w.exists() {
         return Err(exit(1, format!("line '{name}' already has a working folder here: {}", w.display())));
