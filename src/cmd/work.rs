@@ -1065,6 +1065,10 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
         None => None,
     };
     #[cfg(target_os = "macos")]
+    if promotion.is_some() {
+        crate::apfs_commit::failpoint("promoted");
+    }
+    #[cfg(target_os = "macos")]
     let mut state = if let Some(p) = &promotion {
         h.repo.describe_state(ctx, p.id.clone(), StateKind::Commit, parents, &message, Some(&line))?
     } else {
@@ -1160,11 +1164,13 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
             target_head: line.head.clone(),
         })?;
     }
+    crate::apfs_commit::failpoint("before-record");
     let rec = {
         let _t = crate::trace::span("move head");
         h.repo.move_head(ctx, "commit", &line, &state.id, vec![state.clone()], None, data)
     };
     rec?;
+    crate::apfs_commit::failpoint("after-record");
     #[cfg(target_os = "macos")]
     if let Some(p) = promotion.take() {
         p.finish()?;

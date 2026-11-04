@@ -24,6 +24,14 @@ struct Journal {
     thin: bool,
 }
 
+/// Test only (tests/t124-save-crash.sh): `LAYR_TEST_SAVE_KILL=<point>` kills this process with
+/// SIGKILL at that point of a named save, as a power loss or a crash would. Other runs pass.
+pub fn failpoint(point: &str) {
+    if std::env::var("LAYR_TEST_SAVE_KILL").ok().as_deref() == Some(point) {
+        let _ = rustix::process::kill_process(rustix::process::getpid(), rustix::process::Signal::KILL);
+    }
+}
+
 fn journal_path(p: &Project) -> PathBuf {
     p.meta_dir().join("apfs-index-commit.json")
 }
