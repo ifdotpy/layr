@@ -658,6 +658,15 @@ impl<'a> Project<'a> {
         let layout = self.store.layout()?;
         layout.trash_of(&layout.volume_of(&self.name))
     }
+    /// Move a tree to an already prepared trash directory without deleting it on failure.
+    /// This is safe to call under a project lock; cleanup happens after the lock.
+    pub fn move_to_trash(&self, path: &Path, trash: &Path) -> Result<()> {
+        let to = trash.join(format!("gc.{}", crate::ids::new_id()));
+        #[cfg(feature = "overlayfs")]
+        return crate::storage::rename_tree(path, &to);
+        #[cfg(not(feature = "overlayfs"))]
+        crate::storage::move_tree(path, &to)
+    }
     /// True when this process holds the lock of this project (taking it again would wait forever).
     pub fn holds_lock(&self) -> bool {
         HELD_PROJECTS.lock().map(|held| held.contains(&self.meta_dir())).unwrap_or(false)
@@ -698,9 +707,7 @@ impl<'a> Project<'a> {
                 return Ok(());
             }
             let dir = self.trash_dir()?;
-            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            let to = dir.join(format!("{name}.{}", crate::ids::new_id()));
-            match fs::create_dir_all(&dir).map_err(anyhow::Error::from).and_then(|_| crate::storage::move_tree(path, &to)) {
+            match fs::create_dir_all(&dir).map_err(anyhow::Error::from).and_then(|_| self.move_to_trash(path, &dir)) {
                 Ok(()) => return Ok(()),
                 Err(e) => {
                     let _t = crate::trace::span(format!("delete in place ({e:#}) {}", path.display()));
@@ -720,9 +727,7 @@ impl<'a> Project<'a> {
             // What needs a search or a file by file delete waits for the end of the last lock.
             if HELD_LOCKS.load(std::sync::atomic::Ordering::SeqCst) > 0 {
                 let dir = self.trash_dir()?;
-                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                let to = dir.join(format!("{name}.{}", crate::ids::new_id()));
-                if fs::create_dir_all(&dir).is_ok() && crate::storage::move_tree(path, &to).is_ok() {
+                if fs::create_dir_all(&dir).is_ok() && self.move_to_trash(path, &dir).is_ok() {
                     return Ok(());
                 }
             }

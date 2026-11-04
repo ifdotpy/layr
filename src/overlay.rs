@@ -35,6 +35,15 @@ use anyhow::{anyhow, bail, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+/// A base selected for removal and its identity at the time of the scan.
+pub struct ObsoleteBase {
+    path: PathBuf,
+    device: u64,
+    inode: u64,
+    changed: i64,
+    changed_ns: i64,
+}
+
 pub use layr_model::validation::{is_view_id, Layer, View};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1125,25 +1134,51 @@ impl<'a> Repo<'a> {
         self.prune_bases(line, Some(&path), 60)
     }
 
-    /// Delete the bases of every line that are not its current one (older than a minute), and
-    /// those of deleted lines (`gc`).
-    pub fn prune_all_bases(&self) -> Result<()> {
+    /// Find obsolete bases without holding the project lock. The caller validates the project
+    /// records mark before applying this list; identities guard against a replaced path.
+    pub fn plan_prune_bases(&self) -> Result<Vec<ObsoleteBase>> {
+        use std::os::unix::fs::MetadataExt;
         if self.p.is_overlay() || !self.p.base_dir().exists() {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let lines = self.lines()?;
-        let live: BTreeSet<String> = lines.iter().map(|l| l.id.clone()).collect();
-        for l in &lines {
-            let layers = self.layers(l)?;
-            let keep = (!layers.is_empty()).then(|| self.base_path(l, &l.head, &layers));
-            self.prune_bases(l, keep.as_deref(), 60)?;
-        }
-        for e in std::fs::read_dir(self.p.base_dir())?.flatten() {
-            let name = e.file_name().to_string_lossy().into_owned();
-            let id = name.split('@').next().unwrap_or("").to_string();
-            if !live.contains(&id) {
-                let _ = btrfs::delete_tree(&e.path());
+        let stacks = self.stacks(&lines)?;
+        let mut keep = BTreeSet::new();
+        let mut live = BTreeSet::new();
+        for line in &lines {
+            live.insert(line.id.clone());
+            if let Some(layers) = stacks.get(&line.id).filter(|layers| !layers.is_empty()) {
+                keep.insert(self.base_path(line, &line.head, layers));
             }
+        }
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+        let mut out = Vec::new();
+        for e in std::fs::read_dir(self.p.base_dir())?.flatten() {
+            let path = e.path();
+            if keep.contains(&path) {
+                continue;
+            }
+            let name = e.file_name().to_string_lossy().into_owned();
+            let id = name.split('@').next().unwrap_or("");
+            let Ok(m) = std::fs::symlink_metadata(&path) else { continue };
+            if live.contains(id) && now - m.ctime() < 60 {
+                continue;
+            }
+            out.push(ObsoleteBase { path, device: m.dev(), inode: m.ino(), changed: m.ctime(), changed_ns: m.ctime_nsec() });
+        }
+        Ok(out)
+    }
+
+    /// Move the unchanged planned bases to trash. The caller holds the project lock and checked
+    /// the records mark; deletion itself happens after the lock.
+    pub fn commit_prune_bases(&self, bases: &[ObsoleteBase], trash: &Path) -> Result<()> {
+        use std::os::unix::fs::MetadataExt;
+        for base in bases {
+            let Ok(m) = std::fs::symlink_metadata(&base.path) else { continue };
+            if (m.dev(), m.ino(), m.ctime(), m.ctime_nsec()) != (base.device, base.inode, base.changed, base.changed_ns) {
+                continue;
+            }
+            self.p.move_to_trash(&base.path, trash)?;
         }
         Ok(())
     }
