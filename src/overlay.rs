@@ -230,8 +230,6 @@ pub fn show_size(n: u64) -> String {
 
 /// The overlay pass of `gc --repair`, read without locks (`Repo::overlay_plan`).
 pub struct OverlayPlan {
-    lines: Vec<Line>,
-    stacks: BTreeMap<String, Vec<Layer>>,
     overlays: Vec<OverlayClean>,
 }
 
@@ -1187,7 +1185,14 @@ impl<'a> Repo<'a> {
 
     /// The states of overlay `name` (project `orepo`) beyond its history limit `keep_n` that no
     /// line uses. It only reads.
-    fn history_excess(&self, orepo: &Repo, name: &str, keep_n: usize, lines: &[Line], stacks: &BTreeMap<String, Vec<Layer>>) -> Result<Vec<String>> {
+    fn history_excess(
+        &self,
+        orepo: &Repo,
+        name: &str,
+        keep_n: usize,
+        lines: &[Line],
+        stacks: &BTreeMap<String, Vec<Layer>>,
+    ) -> Result<Vec<String>> {
         let Some(info) = self.overlay_info(name)? else {
             return Ok(Vec::new());
         };
@@ -1252,7 +1257,7 @@ impl<'a> Repo<'a> {
                 overlays.push(c);
             }
         }
-        Ok(OverlayPlan { lines, stacks, overlays })
+        Ok(OverlayPlan { overlays })
     }
 
     fn overlay_clean(&self, name: &str, lines: &[Line], stacks: &BTreeMap<String, Vec<Layer>>) -> Result<Option<OverlayClean>> {
@@ -1274,27 +1279,22 @@ impl<'a> Repo<'a> {
 
     /// Apply an overlay plan. The caller holds the project lock, and no record of the project came
     /// in since the plan was made (the lines and stacks are the same). An overlay whose own records
-    /// changed is read again under its lock. A failure leaves old states for the next gc.
+    /// changed is left for the next gc. A failure leaves old states for the next gc.
     pub fn commit_overlay_plan(&self, ctx: &Ctx, plan: OverlayPlan) {
         for c in plan.overlays {
             let name = c.name.clone();
-            if let Err(e) = self.commit_overlay_clean(ctx, c, &plan.lines, &plan.stacks) {
+            if let Err(e) = self.commit_overlay_clean(ctx, c) {
                 eprintln!("warning: overlay '{name}': old states stay until the next gc: {e:#}");
             }
         }
     }
 
-    fn commit_overlay_clean(&self, ctx: &Ctx, c: OverlayClean, lines: &[Line], stacks: &BTreeMap<String, Vec<Layer>>) -> Result<()> {
+    fn commit_overlay_clean(&self, ctx: &Ctx, c: OverlayClean) -> Result<()> {
         let orepo = self.overlay_repo(&c.name)?;
         let _lock = orepo.p.lock()?;
-        let c = if orepo.p.db.records_mark()? == c.mark {
-            c
-        } else {
-            match self.overlay_clean(&c.name, lines, stacks)? {
-                Some(c) => c,
-                None => return Ok(()),
-            }
-        };
+        if orepo.p.db.records_mark()? != c.mark {
+            return Ok(());
+        }
         self.drop_overlay_lines(ctx, &orepo, &c.name, &c.orphans)?;
         // The states of the dropped lines are dead now; `delete_excess` skips them.
         if let Some(keep_n) = c.keep_n {
@@ -1671,7 +1671,13 @@ mod tests {
         assert_eq!(parse_gc("lru"), None);
         assert_eq!(MergeKind::parse("union-theirs"), Some(MergeKind::UnionTheirs));
         assert_eq!(MergeKind::parse("ours"), None);
-        let p = Props { history: Some(1), quiet: true, merge: MergeKind::UnionTheirs, gc_lru: Some(20 << 30), prune: Some("pnpm".into()) };
+        let p = Props {
+            history: Some(1),
+            quiet: true,
+            merge: MergeKind::UnionTheirs,
+            gc_lru: Some(20 << 30),
+            prune: Some("pnpm".into()),
+        };
         let values: BTreeMap<&str, serde_json::Value> = PROPS.iter().map(|k| (*k, p.value(k))).collect();
         assert_eq!(Props::from_settings(|k| values.get(k).cloned().filter(|v| !v.is_null())), p);
         assert_eq!(p.describe(), ["history=last", "quiet", "merge=union-theirs", "gc=lru:20G", "prune=pnpm"]);
