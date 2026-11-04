@@ -65,29 +65,18 @@ pub fn sync_store_access_periodic(repo: &Repo) -> Result<()> {
     if !s.join("objects").is_dir() {
         return Ok(());
     }
-    open_content(&s)?;
+    if !content_shared(&s) {
+        let _lock = repo.p.lock()?;
+        return sync_store_access(repo);
+    }
     for _ in 0..3 {
         let mark = repo.p.db.records_mark()?;
-        let (everyone, users, groups) = repo.policy().readers();
-        let mut uids: std::collections::BTreeSet<u32> = users.into_iter().collect();
-        for line in repo.lines()? {
-            if line.machine == repo.p.store.machine.id {
-                uids.insert(line.owner);
-            }
-        }
-        uids.remove(&0);
-        let uids: Vec<_> = uids.into_iter().collect();
-        let gids: Vec<_> = groups.into_iter().collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+        let access = store_principals(repo, &[])?;
         let _lock = repo.p.lock()?;
         if repo.p.db.records_mark()? != mark {
             continue;
         }
-        if everyone {
-            std::fs::set_permissions(&s, std::fs::Permissions::from_mode(0o755))?;
-            return remove_acl(&s);
-        }
-        std::fs::set_permissions(&s, std::fs::Permissions::from_mode(0o750))?;
-        return set_acl(&s, &uids, &gids);
+        return apply_store_access(&s, access);
     }
     Ok(())
 }
@@ -101,12 +90,11 @@ pub fn sync_store_access_with(repo: &Repo, extra_owners: &[u32]) -> Result<()> {
         return Ok(());
     }
     open_content(&s)?;
+    apply_store_access(&s, store_principals(repo, extra_owners)?)
+}
+
+fn store_principals(repo: &Repo, extra_owners: &[u32]) -> Result<(bool, Vec<u32>, Vec<u32>)> {
     let (everyone, users, groups) = repo.policy().readers();
-    if everyone {
-        std::fs::set_permissions(&s, std::fs::Permissions::from_mode(0o755))?;
-        let _ = remove_acl(&s);
-        return Ok(());
-    }
     let mut uids: std::collections::BTreeSet<u32> = users.into_iter().collect();
     uids.extend(extra_owners.iter().copied());
     for l in repo.lines()? {
@@ -116,8 +104,16 @@ pub fn sync_store_access_with(repo: &Repo, extra_owners: &[u32]) -> Result<()> {
     }
     uids.remove(&0);
     let gids: std::collections::BTreeSet<u32> = groups.into_iter().collect();
-    std::fs::set_permissions(&s, std::fs::Permissions::from_mode(0o750))?;
-    set_acl(&s, &uids.into_iter().collect::<Vec<_>>(), &gids.into_iter().collect::<Vec<_>>())
+    Ok((everyone, uids.into_iter().collect(), gids.into_iter().collect()))
+}
+
+fn apply_store_access(s: &Path, (everyone, uids, gids): (bool, Vec<u32>, Vec<u32>)) -> Result<()> {
+    if everyone {
+        std::fs::set_permissions(s, std::fs::Permissions::from_mode(0o755))?;
+        return remove_acl(s);
+    }
+    std::fs::set_permissions(s, std::fs::Permissions::from_mode(0o750))?;
+    set_acl(s, &uids, &gids)
 }
 
 /// `core.sharedRepository` of the store: git makes its files 0644 (objects 0444) and its folders
@@ -129,7 +125,7 @@ const SHARED: &str = "0644";
 /// (`core.sharedRepository`); a store without that setting, written under the umask of the
 /// service by an earlier layr, gets read access for its folders and files once.
 fn open_content(s: &Path) -> Result<()> {
-    if git_out(s, &["config", "--get", "core.sharedRepository"]).map(|v| v.trim() == SHARED).unwrap_or(false) {
+    if content_shared(s) {
         return Ok(());
     }
     let mut modes = Vec::new();
@@ -149,6 +145,10 @@ fn open_content(s: &Path) -> Result<()> {
     }
     git_out(s, &["config", "core.sharedRepository", SHARED])?;
     Ok(())
+}
+
+fn content_shared(s: &Path) -> bool {
+    git_out(s, &["config", "--get", "core.sharedRepository"]).map(|v| v.trim() == SHARED).unwrap_or(false)
 }
 
 fn acl_entry(buf: &mut Vec<u8>, tag: u16, perm: u16, id: u32) {

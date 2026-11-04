@@ -402,34 +402,28 @@ fn periodic(root: &Path, hourly: bool) {
                 if now - last >= interval {
                     let result = (|| -> anyhow::Result<_> {
                         let _line_lock = repo.line_lock(&l)?;
-                        for attempt in 1..=3 {
-                            let line = repo.line(&l.id)?;
-                            repo.prepare_save(&line, true)?;
-                            if let Some(dir) = std::env::var_os("LAYR_TEST_PERIODIC_WAIT").map(PathBuf::from) {
-                                let key = format!("{}.{}", line.name, attempt);
-                                std::fs::write(dir.join(format!("planned.{key}")), b"")?;
-                                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-                                while !dir.join(format!("go.{key}")).exists() {
-                                    anyhow::ensure!(std::time::Instant::now() < deadline, "test hook: no go.{key}");
-                                    std::thread::sleep(std::time::Duration::from_millis(20));
-                                }
-                            }
-                            let result = {
-                                let _lock = repo.p.lock()?;
-                                repo.save(&ctx, &line, "periodic", true, false)
-                            };
-                            repo.discard_prepared();
-                            if result.is_ok() {
+                        let (lock, saved, attempt) = repo.retry_prepared_save(
+                            &l, true, true,
+                            |attempt, line| {
                                 if let Some(dir) = std::env::var_os("LAYR_TEST_PERIODIC_WAIT").map(PathBuf::from) {
-                                    std::fs::write(dir.join(format!("committed.{}.{attempt}", line.name)), b"")?;
+                                    let key = format!("{}.{}", line.name, attempt);
+                                    std::fs::write(dir.join(format!("planned.{key}")), b"")?;
+                                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+                                    while !dir.join(format!("go.{key}")).exists() {
+                                        anyhow::ensure!(std::time::Instant::now() < deadline, "test hook: no go.{key}");
+                                        std::thread::sleep(std::time::Duration::from_millis(20));
+                                    }
                                 }
-                            }
-                            match result {
-                                Err(ref e) if e.is::<crate::repo::SaveMoved>() && attempt < 3 => continue,
-                                result => return result,
-                            }
+                                Ok(())
+                            },
+                            |line| repo.save(&ctx, line, "periodic", true, false),
+                        )?;
+                        drop(lock);
+                        repo.discard_prepared();
+                        if let Some(dir) = std::env::var_os("LAYR_TEST_PERIODIC_WAIT").map(PathBuf::from) {
+                            std::fs::write(dir.join(format!("committed.{}.{attempt}", l.name)), b"")?;
                         }
-                        unreachable!()
+                        Ok(saved)
                     })();
                     match result {
                         Ok(None) => {

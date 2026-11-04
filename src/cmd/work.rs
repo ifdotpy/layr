@@ -302,29 +302,11 @@ fn untracked_list(st: &Status, mode: &str) -> Vec<String> {
 pub struct ChangeLocks(pub crate::store::LineLock, pub crate::store::Lock);
 
 fn commit_prepared_working(ctx: &Ctx, repo: &Repo, line: &Line, op: crate::repo::LineOp) -> Result<(crate::store::Lock, Option<String>)> {
-    for attempt in 1..=3 {
-        let current = repo.line(&line.id)?;
-        if current != *line {
-            return Err(crate::repo::SaveMoved.into());
-        }
-        repo.authorize_line(ctx, &current, op)?;
-        repo.prepare_save(&current, true)?;
-        let lock = repo.p.lock()?;
-        match repo.working_state(ctx, &current, "before a layr command") {
-            Ok(w) => return Ok((lock, w)),
-            Err(e) if e.is::<crate::repo::SaveMoved>() && attempt < 3 => {
-                drop(lock);
-                repo.discard_prepared();
-            }
-            Err(e) => {
-                drop(lock);
-                #[cfg(not(target_os = "macos"))]
-                repo.discard_prepared();
-                return Err(e);
-            }
-        }
-    }
-    unreachable!()
+    repo.authorize_line(ctx, line, op)?;
+    let (lock, value, _) = repo.retry_prepared_save(line, false, true, |_, _| Ok(()), |current| {
+        repo.working_state(ctx, current, "before a layr command")
+    })?;
+    Ok((lock, value))
 }
 
 /// Lock the line and the project and save the working content (snapshot rule 2). For the commands

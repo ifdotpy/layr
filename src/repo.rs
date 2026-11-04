@@ -734,26 +734,7 @@ impl<'a> Repo<'a> {
         let dst = self.p.state_path(&id);
         btrfs::snapshot(&w, &dst, false)?;
         let made = (|| -> Result<btrfs::SubvolInfo> {
-            let t = Tree::open(&dst)?;
-            for p in &private {
-                if t.stat(p).is_some() {
-                    t.remove(p)?;
-                }
-            }
-            drop(t);
-            btrfs::set_readonly(&dst)?;
-            // An overlay file under another name leaves too: moved from an overlay path, or a
-            // new file with the content of an overlay file (a copy, an editor's extra copy).
-            let copies = self.private_copies(line, &dst, &private)?;
-            if !copies.is_empty() {
-                btrfs::set_writable(&dst)?;
-                let t = Tree::open(&dst)?;
-                for p in &copies {
-                    t.remove(p)?;
-                }
-                drop(t);
-                btrfs::set_readonly(&dst)?;
-            }
+            self.filter_private_snapshot(line, &dst, &private)?;
             btrfs::subvol_info(&dst)
         })();
         let info = match made {
@@ -793,6 +774,24 @@ impl<'a> Repo<'a> {
 
     /// Files of a snapshot of the working folder that hold an overlay file under another name:
     /// moved from a path in `private`, or new with the same content as one of them.
+    fn filter_private_snapshot(&self, line: &Line, snap: &Path, private: &BTreeSet<String>) -> Result<()> {
+        let tree = Tree::open(snap)?;
+        for path in private {
+            if tree.stat(path).is_some() { tree.remove(path)?; }
+        }
+        drop(tree);
+        btrfs::set_readonly(snap)?;
+        let copies = self.private_copies(line, snap, private)?;
+        if !copies.is_empty() {
+            btrfs::set_writable(snap)?;
+            let tree = Tree::open(snap)?;
+            for path in copies { tree.remove(&path)?; }
+            drop(tree);
+            btrfs::set_readonly(snap)?;
+        }
+        Ok(())
+    }
+
     fn private_copies(&self, line: &Line, snap: &Path, private: &BTreeSet<String>) -> Result<Vec<String>> {
         let base = self.head_tree(line)?;
         let mut by_size: std::collections::HashMap<u64, Vec<&String>> = std::collections::HashMap::new();
@@ -1034,6 +1033,47 @@ impl<'a> Repo<'a> {
         })
     }
 
+    /// Prepare without the project lock and retry stale inputs. Foreground callers can use the
+    /// original locked save after three races; a periodic pass defers until the next tick.
+    pub fn retry_prepared_save<T>(
+        &self, line: &Line, periodic: bool, prepare: bool,
+        mut planned: impl FnMut(usize, &Line) -> Result<()>,
+        mut commit: impl FnMut(&Line) -> Result<T>,
+    ) -> Result<(crate::store::Lock, T, usize)> {
+        for attempt in 1..=3 {
+            let current = self.line(&line.id)?;
+            if !periodic && current != *line { return Err(SaveMoved.into()); }
+            if prepare { self.prepare_save(&current, true)?; }
+            planned(attempt, &current)?;
+            if !periodic {
+                if let Some(dir) = std::env::var_os("LAYR_TEST_AUTO_SAVE_WAIT").map(PathBuf::from) {
+                    std::fs::write(dir.join(format!("planned.{attempt}")), b"")?;
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+                    while !dir.join(format!("go.{attempt}")).exists() {
+                        anyhow::ensure!(std::time::Instant::now() < deadline, "test hook: no go.{attempt}");
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                }
+            }
+            let lock = self.p.lock()?;
+            match commit(&current) {
+                Ok(value) => return Ok((lock, value, attempt)),
+                Err(e) if e.is::<SaveMoved>() => {
+                    drop(lock);
+                    self.discard_prepared();
+                    if attempt == 3 && periodic { return Err(e); }
+                }
+                Err(e) => { drop(lock); self.discard_prepared(); return Err(e); }
+            }
+        }
+        let current = self.line(&line.id)?;
+        if current != *line { return Err(SaveMoved.into()); }
+        let _t = crate::trace::span("save: locked fallback");
+        let lock = self.p.lock()?;
+        let value = commit(&current)?;
+        Ok((lock, value, 4))
+    }
+
     /// The state that the layer of the next automatic state goes over (APFS): the previous
     /// automatic state over this head, so a save copies only what changed since that save, not
     /// every change since the head (a whole node_modules at each save took minutes). A chain of
@@ -1107,6 +1147,10 @@ impl<'a> Repo<'a> {
     /// `checked` opts the caller into the full-tree checked commit on Linux. Other callers retain
     /// their existing save path until they can retry a moved preparation without holding the lock.
     pub fn prepare_save(&self, line: &Line, checked: bool) -> Result<()> {
+        if checked && self.working(line).exists() {
+            let _lock = self.p.lock()?;
+            recover_cache_replacements(&self.working(line))?;
+        }
         let prev = self.save_base(line)?;
         self.hold(self.pin(&[&line.head, &prev])?);
         // One scan of the working folder serves the candidates and the save layer below (macOS).
@@ -1129,13 +1173,13 @@ impl<'a> Repo<'a> {
         if let Some(scan) = known {
             // No folder was converted, so the scan still describes the working folder.
             let w = self.working(line);
-            return btrfs::with_known_scan(&w, &scan, || self.prepare_save_layer(line, checked));
+            return btrfs::with_known_scan(&w, &scan, || self.prepare_save_layer(line, checked, &prev));
         }
-        self.prepare_save_layer(line, checked)
+        self.prepare_save_layer(line, checked, &prev)
     }
 
     #[cfg(target_os = "macos")]
-    fn prepare_save_layer(&self, line: &Line, checked: bool) -> Result<()> {
+    fn prepare_save_layer(&self, line: &Line, checked: bool, prev: &str) -> Result<()> {
         let _ = checked;
         let w = self.working(line);
         if !w.exists() || !self.private_paths(line)?.is_empty() || !self.thin_line(line)? {
@@ -1146,7 +1190,6 @@ impl<'a> Repo<'a> {
             return Ok(());
         }
         let _t = crate::trace::span("prepare save");
-        let prev = self.save_base(line)?;
         let new = btrfs::scan_with_data(&w, true)?;
         let base_id = self.save_layer_base(line, &prev);
         let base = self.state_src(&base_id)?;
@@ -1176,7 +1219,7 @@ impl<'a> Repo<'a> {
         match crate::thin::write_checked_scan(&w, &base, &base_scan, &new, &d, &path, &base_id, false) {
             Ok(Some(scan)) => {
                 PREPARED_SAVES.with(|p| {
-                    p.borrow_mut().push(PreparedSave { line: line.id.clone(), head: line.head.clone(), prev, scan, path })
+                    p.borrow_mut().push(PreparedSave { line: line.id.clone(), head: line.head.clone(), prev: prev.to_string(), scan, path })
                 });
             }
             Ok(None) => self.p.trash(&path)?,
@@ -1187,7 +1230,7 @@ impl<'a> Repo<'a> {
         Ok(())
     }
     #[cfg(not(target_os = "macos"))]
-    fn prepare_save_layer(&self, line: &Line, checked: bool) -> Result<()> {
+    fn prepare_save_layer(&self, line: &Line, checked: bool, prev: &str) -> Result<()> {
         if !checked {
             return Ok(());
         }
@@ -1196,7 +1239,6 @@ impl<'a> Repo<'a> {
             return Ok(());
         }
         let _t = crate::trace::span("prepare save");
-        let prev = self.save_base(line)?;
         let working = self.recorded_working(line)?;
         let overlay_marks = self.overlay_marks()?;
         let layers = self.layers(line)?;
@@ -1206,20 +1248,8 @@ impl<'a> Repo<'a> {
             self.scan(line)?
         } else {
             let tree = self.temp_work(&w)?;
-            let t = Tree::open(&tree.path)?;
-            for p in &private {
-                if t.stat(p).is_some() {
-                    t.remove(p)?;
-                }
-            }
-            drop(t);
-            let copies = self.private_copies(line, &tree.path, &private)?;
-            let t = Tree::open(&tree.path)?;
-            for p in copies {
-                t.remove(&p)?;
-            }
-            drop(t);
-            self.temp_snapshot(&tree.path, true)?
+            self.filter_private_snapshot(line, &tree.path, &private)?;
+            tree
         };
         let changed = if self.tree_available(&prev) {
             let base = self.state_src(&prev)?;
@@ -1232,7 +1262,7 @@ impl<'a> Repo<'a> {
         PREPARED_FULL_SAVES.with(|s| {
             let mut s = s.borrow_mut();
             s.retain(|p| p.line != line.id);
-            s.push(PreparedFullSave { line: line.id.clone(), input: line.clone(), path: w, layers, pending, overlay_marks, prev, working, base_present, tree, changed });
+            s.push(PreparedFullSave { line: line.id.clone(), input: line.clone(), path: w, layers, pending, overlay_marks, prev: prev.to_string(), working, base_present, tree, changed });
         });
         Ok(())
     }
@@ -1285,6 +1315,7 @@ impl<'a> Repo<'a> {
                     || self.save_base(&current)? != prepared.prev
                     || self.recorded_working(&current)? != prepared.working
                     || self.p.has_state(&prepared.prev) != prepared.base_present
+                    || has_cache_replacement(&prepared.path)?
                 {
                     PREPARED_FULL_SAVES.with(|s| s.borrow_mut().push(prepared));
                     return Err(SaveMoved.into());
@@ -3569,6 +3600,11 @@ pub(crate) fn recover_cache_replacements(w: &Path) -> Result<()> {
     Ok(())
 }
 
+fn has_cache_replacement(w: &Path) -> Result<bool> {
+    let t = Tree::open(w)?;
+    Ok(t.list("")?.iter().any(|name| cache_journal_name(name) && name.ends_with(".json")))
+}
+
 /// Replace the folder at `path` with a copy of its files in a new subvolume or plain folder.
 fn replace_folder(t: &Tree, path: &str, subvolume: bool, uid: u32, gid: u32) -> Result<()> {
     recover_cache_replacement(t, path)?;
@@ -3627,6 +3663,9 @@ fn replace_folder(t: &Tree, path: &str, subvolume: bool, uid: u32, gid: u32) -> 
     #[cfg(test)]
     crate::tree::cache_test_pause();
     t.rename_directory_checked(path, &old, &record.source)?;
+    if std::env::var("LAYR_TEST_CACHE_CRASH").as_deref() == Ok("between-renames") {
+        std::process::exit(86);
+    }
     #[cfg(test)]
     crate::tree::cache_test_fault("between-renames");
     // The copy before it becomes the cache: nobody writes to it by name until the next rename.
