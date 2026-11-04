@@ -118,13 +118,15 @@ fn move_folder(from: &Path, to: &Path) -> Result<()> {
 }
 
 /// Remove a folder of a volume through that volume's trash (a rename on the same file system).
-fn to_trash(volume_root: &Path, folder: &Path) -> Result<()> {
+/// Returns the folder in the trash.
+fn to_trash(volume_root: &Path, folder: &Path) -> Result<PathBuf> {
     let trash = volume_root.join("trash");
     fs::create_dir_all(&trash).context("create the trash of the volume")?;
     let name = folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    move_folder(folder, &trash.join(format!("{name}.{}", ids::new_id())))?;
+    let to = trash.join(format!("{name}.{}", ids::new_id()));
+    move_folder(folder, &to)?;
     kick_trash(&trash);
-    Ok(())
+    Ok(to)
 }
 
 /// The lock file of a project folder, taken and held by the caller (`Project::lock` for a
@@ -198,7 +200,7 @@ fn discard_copy(target_root: &Path, dst: &Path) -> Result<()> {
     if fs::symlink_metadata(dst).is_err() {
         return Ok(());
     }
-    to_trash(target_root, dst)
+    to_trash(target_root, dst).map(|_| ())
 }
 
 /// Move a project to `volume`. Refused: an unknown project, volume or overlay, a volume that
@@ -328,8 +330,17 @@ pub fn delete_project(store: &Store, project: &str) -> Result<()> {
     if let Some((pid, path)) = in_use(std::slice::from_ref(&dir))? {
         bail!("project '{project}' is in use: process {pid} works in {}; stop it and run the delete again", path.display());
     }
-    to_trash(&store.volume_root(project)?, &dir)?;
-    volumes::unassign(root, project)
+    let gone = to_trash(&store.volume_root(project)?, &dir)?;
+    volumes::unassign(root, project)?;
+    // On OverlayFS the folder holds managed mounts (`meta/db`), which the trash emptier does not
+    // remove: delete it now, as `Project::trash` does, once the project's database is closed.
+    drop(_lock);
+    drop(handle);
+    #[cfg(feature = "overlayfs")]
+    storage::delete_tree(&gone)?;
+    #[cfg(not(feature = "overlayfs"))]
+    let _ = gone;
+    Ok(())
 }
 
 /// Step 4: the project lives on `to`. Points the git objects of the moved lines at the new folder,
