@@ -1976,6 +1976,9 @@ pub fn make_git_folder(repo: &Repo, line: &Line, state: &str, w: &Path) -> Resul
             }
         }
     }
+    if let Some((_, c)) = &anc {
+        std::fs::write(g.join(INDEX_OF), format!("{c}\n"))?;
+    }
     let (u, gid) = repo.owner_ids(line);
     let mut paths = Vec::new();
     fsutil::walk(&g, "", &mut |rel, _| {
@@ -2086,7 +2089,10 @@ pub fn refresh_git_folder(repo: &Repo, line: &Line) -> Result<()> {
     let cur = fsutil::read_at(&dir, "HEAD").map(|c| String::from_utf8_lossy(&c).trim().to_string()).unwrap_or_default();
     let c = line_commit(repo, &line.head)?;
     let w = repo.working(line);
-    if cur == c {
+    // HEAD is written before the index: a command killed between the two leaves HEAD at the commit
+    // and the old index, so the folder is complete only when INDEX_OF also names it (feedback item 62).
+    let indexed = fsutil::read_at(&dir, INDEX_OF).map(|c| String::from_utf8_lossy(&c).trim().to_string()).unwrap_or_default();
+    if cur == c && indexed == c {
         fsutil::git_writable(&w, false);
         return Ok(());
     }
@@ -2096,10 +2102,14 @@ pub fn refresh_git_folder(repo: &Repo, line: &Line) -> Result<()> {
     r
 }
 
+/// The file of a line's `.git` folder that names the commit whose index layr wrote last. Git ignores it.
+const INDEX_OF: &str = "layr-index";
+
 fn write_git_folder(repo: &Repo, line: &Line, dir: &std::fs::File, c: &str) -> Result<()> {
     let own = Some(repo.owner_ids(line));
     let head = format!("{c}\n");
     fsutil::replace_at(dir, "HEAD", &mut |f| Ok((&*f).write_all(head.as_bytes())?), own)?;
+    crate::store::failpoint("git-folder-half");
     // The index of the head state: its stat data matches files copied from that state.
     let idx = index_path(repo, &line.head);
     if idx.exists() {
@@ -2118,6 +2128,7 @@ fn write_git_folder(repo: &Repo, line: &Line, dir: &std::fs::File, c: &str) -> R
     } else {
         fsutil::unlink_at(dir, "index");
     }
+    fsutil::replace_at(dir, INDEX_OF, &mut |f| Ok((&*f).write_all(head.as_bytes())?), own)?;
     Ok(())
 }
 
