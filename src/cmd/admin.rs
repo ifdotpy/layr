@@ -1184,8 +1184,6 @@ pub fn try_command(
 /// The owners check (docs/ownership.md): the stored table against a replay of the records, and
 /// the present states that no owner names (leaks). Pins are local and not compared.
 pub struct OwnersCheck {
-    /// The replay of the records: every owner row it gives.
-    pub want: Vec<crate::owners::Row>,
     pub missing: Vec<crate::owners::Row>,
     pub extra: Vec<crate::owners::Row>,
     pub leaks: Vec<String>,
@@ -1201,7 +1199,7 @@ fn owners_check(repo: &Repo) -> Result<OwnersCheck> {
     let want = repo.p.db.recomputed_owners(&repo.p.store.machine.id)?;
     let (missing, extra) = repo.p.db.owners_diff(&want)?;
     let leaks = repo.p.db.leaked_states()?;
-    Ok(OwnersCheck { want, missing, extra, leaks })
+    Ok(OwnersCheck { missing, extra, leaks })
 }
 
 /// The bytes that only the storage of these states holds (as `layr du` counts them): clones that
@@ -1310,15 +1308,19 @@ pub fn gc_repair_quiet(ctx: &Ctx, repo: &Repo) -> Result<usize> {
 /// `free` frees the leaked states too. Only an explicit `gc --repair` does: a state that a command
 /// has recorded but not yet given an owner looks like a leak for a moment (a periodic pass would
 /// free it under the command).
-pub fn repair_table(repo: &Repo, free: bool) -> Result<Vec<String>> {
-    let c = owners_check(repo)?;
-    let mut want = c.want.clone();
-    for (state, kind, holder) in repo.p.db.owner_rows()?.into_iter().filter(|r| r.1 == "pin") {
-        if crate::free::holder_alive(&holder) {
-            want.push((state, kind, holder));
+/// `diff` is `owners_diff` against the replay when the caller made it with no record added
+/// since (the rows that records make are the same); `None` replays here.
+pub fn repair_table(repo: &Repo, free: bool, diff: Option<(Vec<crate::owners::Row>, Vec<crate::owners::Row>)>) -> Result<Vec<String>> {
+    let (missing, extra) = match diff {
+        Some(d) => d,
+        None => repo.p.db.owners_diff(&repo.p.db.recomputed_owners(&repo.p.store.machine.id)?)?,
+    };
+    repo.p.db.apply_owners_diff(&missing, &extra)?;
+    for holder in repo.p.db.pin_holders()? {
+        if !crate::free::holder_alive(&holder) {
+            repo.p.db.release_holder(&holder)?;
         }
     }
-    repo.p.db.replace_owners(&want)?;
     let leaks = repo.p.db.leaked_states()?;
     if free {
         repo.p.db.free_leaks(&leaks)?;
@@ -1348,9 +1350,26 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) ->
         }
         return Ok(c.leaks.len());
     }
+    // The slow reads go before the lock (#194): the replay of the records and the overlay pass.
+    // Under the lock they are used when no record came in meanwhile (an equal records mark);
+    // else they are made again there.
+    let (mark, diff) = {
+        let _t = crate::trace::span("repair: plan");
+        snapshot(repo, || {
+            let want = repo.p.db.recomputed_owners(&repo.p.store.machine.id)?;
+            Ok((repo.p.db.records_mark()?, repo.p.db.owners_diff(&want)?))
+        })?
+    };
+    let overlays = repo.overlay_plan();
+    // Test hook (tests/t127-repair-plan.sh): wait after the plan, so a test can change the
+    // project before the lock.
+    if let Some(ms) = std::env::var("LAYR_TEST_REPAIR_PAUSE_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
     let leaks = {
         let _lock = repo.p.lock()?;
-        let leaks = repair_table(repo, free)?;
+        let fresh = repo.p.db.records_mark()? == mark;
+        let leaks = repair_table(repo, free, fresh.then_some(diff))?;
         evict_stored(repo)?;
         for expired in repo.p.db.expired_refs(ids::now_ms())? {
             let mut rec = Record::new("ref.expire");
@@ -1364,14 +1383,16 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) ->
             rec.data = serde_json::json!({"deleted": [], "caches": caches});
             repo.commit_record(ctx, rec)?;
         }
-        // Cache overlay lines of deleted lines: their states go below (docs/cache-overlays.md).
-        if let Err(e) = repo.drop_orphan_cache_lines(ctx) {
-            eprintln!("warning: cache overlay lines of deleted lines stay until the next gc: {e:#}");
+        // Cache overlay lines of deleted lines (their states go below), and overlays with a
+        // history limit (docs/cache-overlays.md).
+        if let Err(e) = repo.free_removed_overlays(ctx) {
+            eprintln!("warning: removed cache overlays stay until the next gc: {e:#}");
         }
-        // Overlays with a history limit and folder overlays with an LRU limit (docs/cache-overlays.md).
-        for name in repo.overlay_names()? {
-            repo.after_overlay_move(ctx, &name);
+        match overlays.ok().filter(|_| fresh).map(Ok).unwrap_or_else(|| repo.overlay_plan()) {
+            Ok(plan) => repo.commit_overlay_plan(ctx, plan),
+            Err(e) => eprintln!("warning: overlays: old states stay until the next gc: {e:#}"),
         }
+        // Folder overlays with an LRU limit.
         if let Err(e) = repo.cache_gc_lru() {
             eprintln!("warning: cache size limits not applied: {e:#}");
         }
@@ -1695,7 +1716,7 @@ pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
             outln!(ctx, "\textra: {} {k} {h}", ids::short(s));
         }
         if a.has("--repair") {
-            repair_table(repo, true)?;
+            repair_table(repo, true, None)?;
             outln!(ctx, "owners rewritten from the records; leaked states marked for freeing");
         }
     }
