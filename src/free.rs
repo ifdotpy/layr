@@ -7,7 +7,7 @@
 
 use crate::store::{Project, Store};
 use anyhow::Result;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
@@ -15,11 +15,30 @@ use std::sync::{Mutex, OnceLock};
 // remain on their owning thread. The uncommon cross-thread case opens a fresh read connection.
 static PROJECTS: Mutex<BTreeSet<(PathBuf, String)>> = Mutex::new(BTreeSet::new());
 
+struct Retained {
+    pid: u32,
+    key: (PathBuf, String),
+    conn: Option<std::rc::Rc<rusqlite::Connection>>,
+}
+
+impl Retained {
+    fn take_for(mut self, key: &(PathBuf, String), pid: u32) -> Option<std::rc::Rc<rusqlite::Connection>> {
+        if self.pid == pid && &self.key == key { self.conn.take() } else { None }
+    }
+}
+
+impl Drop for Retained {
+    fn drop(&mut self) {
+        if self.pid != std::process::id() {
+            // SQLite forbids even closing a connection inherited from a forked parent.
+            if let Some(conn) = self.conn.take() { std::mem::forget(conn); }
+        }
+    }
+}
+
 thread_local! {
-    /// Retain each project's connection until after pins are released, so the free check sees
-    /// the latest committed queue without paying for another SQLite open.
-    static OPENED: std::cell::RefCell<BTreeMap<(PathBuf, String), std::rc::Rc<rusqlite::Connection>>> =
-        const { std::cell::RefCell::new(BTreeMap::new()) };
+    /// At most one connection per thread: project enumeration must not retain every database.
+    static OPENED: std::cell::RefCell<Option<Retained>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -35,6 +54,15 @@ mod pending_tests {
         conn.execute("INSERT INTO owners VALUES ('pin')", []).unwrap();
         assert!(super::pending(&conn));
     }
+
+    #[test]
+    fn inherited_connection_is_neither_returned_nor_closed() {
+        let conn = std::rc::Rc::new(rusqlite::Connection::open_in_memory().unwrap());
+        let key = (std::path::PathBuf::from("/store"), "p".to_string());
+        let retained = super::Retained { pid: std::process::id().wrapping_add(1), key: key.clone(), conn: Some(conn.clone()) };
+        assert!(retained.take_for(&key, std::process::id()).is_none());
+        assert_eq!(std::rc::Rc::strong_count(&conn), 2); // The inherited handle was forgotten.
+    }
 }
 
 /// Called when a project opens: its queue is checked at the end of the command.
@@ -42,7 +70,16 @@ pub fn register(store: &Store, name: &str, conn: std::rc::Rc<rusqlite::Connectio
     if let Ok(mut projects) = PROJECTS.lock() {
         projects.insert((store.root.clone(), name.to_string()));
     }
-    OPENED.with(|opened| { opened.borrow_mut().insert((store.root.clone(), name.to_string()), conn); });
+    OPENED.with(|opened| {
+        *opened.borrow_mut() = Some(Retained { pid: std::process::id(), key: (store.root.clone(), name.to_string()), conn: Some(conn) });
+    });
+}
+
+/// The daemon's registry setup opens projects before forking. Release those handles in the
+/// parent, and do not leave startup registrations for its request children.
+pub fn discard_startup() {
+    OPENED.with(|opened| { opened.borrow_mut().take(); });
+    if let Ok(mut projects) = PROJECTS.lock() { projects.clear(); }
 }
 
 /// The free step of the projects that this command opened. Errors wait for the next command
@@ -59,7 +96,13 @@ pub fn finish(store: &Store) {
         Err(_) => return,
     };
     for (root, name) in projects {
-        let conn = OPENED.with(|opened| opened.borrow_mut().remove(&(root, name.clone())));
+        let key = (root, name.clone());
+        let conn = OPENED.with(|opened| {
+            let mut opened = opened.borrow_mut();
+            if opened.as_ref().is_some_and(|entry| entry.pid != std::process::id() || entry.key == key) {
+                opened.take().and_then(|entry| entry.take_for(&key, std::process::id()))
+            } else { None }
+        });
         // A project without pending work is not opened: an open prints its trace (LAYR_TRACE).
         let has_pending = if let Some(conn) = conn {
             pending(&conn)
@@ -81,7 +124,7 @@ pub fn finish(store: &Store) {
         }
     }
     // Opening the projects above registered them again: they are done.
-    OPENED.with(|opened| opened.borrow_mut().retain(|(root, _), _| *root != store.root));
+    OPENED.with(|opened| { opened.borrow_mut().take(); });
     if let Ok(mut projects) = PROJECTS.lock() {
         projects.retain(|(root, _)| *root != store.root);
     }

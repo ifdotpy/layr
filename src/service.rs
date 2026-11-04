@@ -502,6 +502,7 @@ pub fn daemon(args: &[String]) -> Result<i32> {
     }
     // The OCI registry serves other users: a user daemon has none.
     let registry_listeners = if user_mode { Vec::new() } else { crate::oci::registry::listeners(&root)? };
+    crate::free::discard_startup();
     let registry_uids: Vec<u32> = registry_listeners.iter().map(|(_, _, user)| user.uid).collect();
     let listener = UnixListener::bind(&sock)?;
     {
