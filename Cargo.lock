@@ -1527,6 +1527,7 @@ dependencies = [
  "blake3",
  "foldhash",
  "rapidhash",
+ "rustc-hash 2.1.3",
  "sha1",
  "sha2 0.10.9",
  "xxhash-rust",
@@ -2633,6 +2634,7 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.2.17",
  "digest 0.10.7",
+ "sha2-asm",
 ]
 
 [[package]]
@@ -2644,6 +2646,15 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.3.1",
  "digest 0.11.3",
+]
+
+[[package]]
+name = "sha2-asm"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b845214d6175804686b2bd482bcffe96651bb2d1200742b712003504a2dac1ab"
+dependencies = [
+ "cc",
 ]
 
 [[package]]

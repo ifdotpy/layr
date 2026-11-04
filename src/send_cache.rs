@@ -159,11 +159,14 @@ mod tests {
         }
         let dir = std::env::temp_dir().join(format!("layr-send-cache-key-{}", crate::ids::new_id()));
         std::fs::create_dir(&dir).unwrap();
-        std::fs::write(dir.join(hex::encode(old.finalize())), b"old entry").unwrap();
+        let old_name = hex::encode(old.finalize());
+        std::fs::write(dir.join(&old_name), b"old entry").unwrap();
         let cache = Cache { dir: dir.clone(), name: cache_name(&ids) };
+        assert_ne!(cache.name, old_name);
         assert!(cache.read().is_none());
         cache.write(b"new entry").unwrap();
         assert_eq!(cache.read().as_deref(), Some(&b"new entry"[..]));
+        assert_eq!(std::fs::read(dir.join(old_name)).unwrap(), b"old entry");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

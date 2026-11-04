@@ -123,16 +123,30 @@ mod tests {
     where
         H::Output: PartialEq + std::fmt::Debug,
     {
-        for size in [0, 1, 8, 64, 111, 112, 113, 1024, 4096, 65537] {
+        for size in [0, 1, 8, 64, 111, 112, 113, 224, 336, 1024, 4096, 65537] {
             let bytes: Vec<u8> = (0..size).map(|n| (n * 31) as u8).collect();
             let expected = H::hash(&bytes);
             for chunk in [1, 7, 64, 112, 4096, 65536] {
                 let mut h = H::new();
+                h.update(&[]);
                 for part in bytes.chunks(chunk) {
                     h.update(part);
+                    h.update(&[]);
                 }
                 assert_eq!(h.finish(), expected, "size {size}, chunk {chunk}");
             }
+            let mut h = H::new();
+            let mut at = 0;
+            for chunk in [1, 7, 112, 3, 224, 13, 4096].into_iter().cycle() {
+                if at == bytes.len() {
+                    break;
+                }
+                let end = (at + chunk).min(bytes.len());
+                h.update(&bytes[at..end]);
+                h.update(&[]);
+                at = end;
+            }
+            assert_eq!(h.finish(), expected, "irregular size {size}");
         }
     }
     #[test]
