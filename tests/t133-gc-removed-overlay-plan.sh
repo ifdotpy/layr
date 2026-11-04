@@ -27,6 +27,23 @@ wait "$pid"
 eq "repair succeeds" 0 "$?"
 eq "only the root state remains" 1 "$(ls "$O/states" | wc -l | tr -d ' ')"
 ok "owners match" l gc -q
+# Recreate the same overlay after planning: the changed parent mark forces a retry.
+l save --caches -q
+l overlay remove cache.target
+rm -rf "$T/wait" && mkdir -p "$T/wait"
+touch "$T/wait/go.2" "$T/wait/go.3"
+LAYR_TEST_REPAIR_WAIT="$T/wait" LAYR_TRACE=1 l gc --repair -q 2>"$T/retry.err" &
+pid=$!
+for _ in $(seq 1 600); do [ -e "$T/wait/planned.1" ] && break; sleep 0.1; done
+ok "second repair planned" test -e "$T/wait/planned.1"
+printf new > target/file
+ok "foreground recreates removed overlay" l save --caches -q
+touch "$T/wait/go.1"
+wait "$pid"
+eq "repair retries successfully" 0 "$?"
+ok "changed records force a new plan" test "$(grep -c 'trace begin repair: plan' "$T/retry.err")" -ge 2
+ok "recreated overlay survives" l overlay list | grep -q cache.target
+ok "owners match after recreation" l gc -q
 held=$(awk '/store lock held: p$/ { if ($2 > m) m = $2 } END { print int(m) }' "$T/repair.err")
 ok "project lock held less than 2 seconds ($held ms)" test "$held" -lt 2000
 finish
