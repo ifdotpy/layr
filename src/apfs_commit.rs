@@ -575,6 +575,11 @@ mod tests {
         assert_eq!(fs::read(pc.tree.join("file"))?, b"staged bytes");
         assert_eq!(fs::metadata(pc.tree.join("file"))?.ino(), fs::metadata(pc.tree.join("alias"))?.ino());
         assert!(pc.tree.join("file").exists());
+        // Readers of the index that do not use the inode: the data identity (an APFS clone shares the
+        // extents) and the move identity (the creation time, kept by a clone; the inode is not used).
+        let stage_file = p.stage_path(&line).join("file");
+        assert_eq!(crate::sys::apfs_data_identity(&stage_file)?.clone_id, crate::sys::apfs_data_identity(&pc.tree.join("file"))?.clone_id);
+        assert_eq!(storage::file_identity(&stage_file)?, storage::file_identity(&pc.tree.join("file"))?);
         let dir = pending_dir(&p, &pc.id);
         drop(pc);
         assert!(!dir.exists());
