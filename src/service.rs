@@ -419,6 +419,11 @@ fn periodic(root: &Path, hourly: bool) {
                                 repo.save(&ctx, &line, "periodic", true, false)
                             };
                             repo.discard_prepared();
+                            if result.is_ok() {
+                                if let Some(dir) = std::env::var_os("LAYR_TEST_PERIODIC_WAIT").map(PathBuf::from) {
+                                    std::fs::write(dir.join(format!("committed.{}.{attempt}", line.name)), b"")?;
+                                }
+                            }
                             match result {
                                 Err(ref e) if e.is::<crate::repo::SaveMoved>() && attempt < 3 => continue,
                                 result => return result,

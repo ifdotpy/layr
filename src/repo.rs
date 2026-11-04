@@ -1104,6 +1104,8 @@ impl<'a> Repo<'a> {
     /// not change; else it writes the state as before.
     /// The reads of a save before its lock: the head and the save base are pinned for the rest of
     /// the command (`hold`), then the automatic state is written (APFS).
+    /// `checked` opts the caller into the full-tree checked commit on Linux. Other callers retain
+    /// their existing save path until they can retry a moved preparation without holding the lock.
     pub fn prepare_save(&self, line: &Line, checked: bool) -> Result<()> {
         let prev = self.save_base(line)?;
         self.hold(self.pin(&[&line.head, &prev])?);
@@ -1196,14 +1198,29 @@ impl<'a> Repo<'a> {
         let _t = crate::trace::span("prepare save");
         let prev = self.save_base(line)?;
         let working = self.recorded_working(line)?;
+        let overlay_marks = self.save_overlay_marks()?;
         let layers = self.layers(line)?;
+        let pending = self.pending_moves(line);
         let private = self.private_paths(line)?;
-        // Overlay projects have their own records and can change without moving the parent
-        // line. Use the existing path until their private paths have a checked commit token.
-        if !layers.is_empty() || !private.is_empty() {
-            return Ok(());
-        }
-        let tree = self.scan(line)?;
+        let tree = if private.is_empty() {
+            self.scan(line)?
+        } else {
+            let tree = self.temp_work(&w)?;
+            let t = Tree::open(&tree.path)?;
+            for p in &private {
+                if t.stat(p).is_some() {
+                    t.remove(p)?;
+                }
+            }
+            drop(t);
+            let copies = self.private_copies(line, &tree.path, &private)?;
+            let t = Tree::open(&tree.path)?;
+            for p in copies {
+                t.remove(&p)?;
+            }
+            drop(t);
+            self.temp_snapshot(&tree.path, true)?
+        };
         let changed = if self.tree_available(&prev) {
             let base = self.state_src(&prev)?;
             changes::file_changes(&base, &tree.path)?.into_iter().any(|c| !skip_path(&c.path))
@@ -1215,7 +1232,7 @@ impl<'a> Repo<'a> {
         PREPARED_FULL_SAVES.with(|s| {
             let mut s = s.borrow_mut();
             s.retain(|p| p.line != line.id);
-            s.push(PreparedFullSave { line: line.id.clone(), input: line.clone(), path: w, layers, prev, working, base_present, tree, changed });
+            s.push(PreparedFullSave { line: line.id.clone(), input: line.clone(), path: w, layers, pending, overlay_marks, prev, working, base_present, tree, changed });
         });
         Ok(())
     }
@@ -1258,8 +1275,13 @@ impl<'a> Repo<'a> {
                 s.iter().position(|p| p.line == line.id).map(|i| s.remove(i))
             });
             if let Some(prepared) = prepared {
+                let Some(_overlay_locks) = self.lock_save_overlays(&prepared.overlay_marks)? else {
+                    PREPARED_FULL_SAVES.with(|s| s.borrow_mut().push(prepared));
+                    return Err(SaveMoved.into());
+                };
                 let current = self.line(&line.id)?;
                 if current != prepared.input || self.working(&current) != prepared.path || self.layers(&current)? != prepared.layers
+                    || self.pending_moves(&current) != prepared.pending
                     || self.save_base(&current)? != prepared.prev
                     || self.recorded_working(&current)? != prepared.working
                     || self.p.has_state(&prepared.prev) != prepared.base_present
@@ -4387,6 +4409,8 @@ struct PreparedFullSave {
     input: Line,
     path: PathBuf,
     layers: Vec<crate::overlay::Layer>,
+    pending: BTreeMap<String, String>,
+    overlay_marks: crate::overlay::SaveOverlayMarks,
     prev: String,
     working: String,
     base_present: bool,

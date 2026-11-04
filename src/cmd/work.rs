@@ -304,6 +304,9 @@ pub struct ChangeLocks(pub crate::store::LineLock, pub crate::store::Lock);
 fn commit_prepared_working(ctx: &Ctx, repo: &Repo, line: &Line, op: crate::repo::LineOp) -> Result<(crate::store::Lock, Option<String>)> {
     for attempt in 1..=3 {
         let current = repo.line(&line.id)?;
+        if current != *line {
+            return Err(crate::repo::SaveMoved.into());
+        }
         repo.authorize_line(ctx, &current, op)?;
         repo.prepare_save(&current, true)?;
         let lock = repo.p.lock()?;
