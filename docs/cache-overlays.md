@@ -168,7 +168,11 @@ There are two kinds of remote:
   deleted lines), and the data parts that no kept tree links, parts first. A tree stays when its
   state is not known here yet (another machine pushed it), when a kept tree is a delta of it, or
   when it is the nearest pushed ancestor of a kept state whose tree is not there yet (a push in
-  flight on another machine reuses its parts).
+  flight on another machine reuses its parts). The daemon runs the same pass for each store remote
+  of each project every hour, so a remote that nobody pushes to loses its dead caches too (a remote
+  that cannot be reached is tried at the next pass). `layr fsck --caches --remote <name>` lists what
+  the pass would delete (exit 1 when there is something); `layr gc --remote <name>` runs it. The
+  pass covers the current key epoch of each overlay.
 - A **git remote** takes one layer. The shared set goes to the project's git remotes (`origin`),
   as today. An overlay goes to its own git repository: `layr overlay remote add <overlay> <url>`
   records `overlay.<name>.git.<remote>` in the overlay's own records, so only its readers see the

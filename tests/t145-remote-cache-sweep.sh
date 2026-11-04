@@ -32,9 +32,27 @@ l push archive -q --caches >/dev/null 2>&1
 eq "after the line delete and a push its cache state is gone from the remote" 2 "$(trees)"
 eq "and its data part too" "$first_parts" "$(parts)"
 
+# fsck --caches --remote reports dead cache states that a push has not deleted yet; the daemon's
+# pass deletes them in a remote that nobody pushes to.
+for i in 4 5; do head -c 20000 /dev/urandom > target/big$i; l save --caches -q; done
+l push archive -q --caches >/dev/null 2>&1
+echo changed > target/big5; l save --caches -q
+l line new y main >/dev/null 2>&1
+(cd "$P/y" && head -c 20000 /dev/urandom > target/yonly && l save --caches -q && l push archive -q --caches >/dev/null 2>&1)
+l line delete -D y >/dev/null
+out=$(l fsck --caches --remote archive 2>&1); rc=$?
+eq "fsck --caches --remote exits 1 with dead states" 1 "$rc"
+has "it names them" "1 unreachable cache state(s)" "$out"
+"$LAYR" daemon --tick 1 --socket "$T/d.sock" > "$T/daemon.log" 2>&1 &
+DPID=$!
+for _ in $(seq 1 100); do grep -q "deleted" "$T/daemon.log" 2>/dev/null && break; sleep 0.2; done
+kill $DPID 2>/dev/null; wait $DPID 2>/dev/null
+has "the daemon deletes them" "deleted 1 dead cache state(s)" "$(cat "$T/daemon.log")"
+has "then nothing is unreachable" "unreachable cache data: 0 object(s), 0 bytes" "$(l fsck --caches --remote archive 2>&1)"
+
 mkdir -p "$T/b"
 env LAYR_ROOT="$T/b/store" LAYR_PAPER_KEY_FILE="$T/paper.txt" "$LAYR" clone "file://$T/archive" p >/dev/null 2>&1
 Q=$T/b/store/projects/p/lines
 (cd "$Q/main" && env LAYR_ROOT="$T/b/store" "$LAYR" line new far main >/dev/null 2>&1)
-ok "a clone still starts warm" cmp -s "$P/main/target/big3" "$Q/far/target/big3"
+ok "a clone still starts warm" cmp -s "$P/main/target/big4" "$Q/far/target/big4"
 finish

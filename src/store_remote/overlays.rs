@@ -435,27 +435,7 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
             }
             published
         };
-        let mut identity = if store.backend.can_read() {
-            open_identity(
-                &store.backend.scoped(&published.prefix())?,
-                &published.key,
-                Some((&store.machine, &store.key)),
-                store.person.as_ref(),
-                store.paper_key_text.as_deref(),
-            )?
-        } else {
-            None
-        };
-        if identity.is_none() {
-            let path = local_key(store, &orepo.p.id, &published.key.epoch);
-            if path.exists() {
-                let opened = keys::open_machine_slot(&std::fs::read(path)?, &store.key)?;
-                if keys::recipient_of(&opened)? != published.key.recipient {
-                    bail!("local overlay key differs from its signed recipient");
-                }
-                identity = Some(opened);
-            }
-        }
+        let identity = layer_identity(store, &orepo.p.id, &published)?;
         let scoped = layer(store, &published, identity.clone())?;
         if let Some(identity) = &identity {
             for principal in readers.keys() {
@@ -479,18 +459,14 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
         merge(report, writer::push_locked(&scoped, ctx, &orepo, opts)?, &name, "push");
         // The push makes the old caches of the overlay dead on the remote too: delete them now.
         if repo.overlay_setting(&name, "cache")?.and_then(|v| v.as_bool()).unwrap_or(false) {
-            if let Some(kept) = repo.cache_kept(&name)? {
-                let known = |id: &str| orepo.p.db.state(id).ok().flatten().is_some();
-                let parent = |id: &str| orepo.p.db.state(id).ok().flatten().and_then(|s| s.parents.first().cloned());
-                let swept = super::sweep::sweep(&scoped, &kept, &known, &parent, false)?;
-                if !swept.trees.is_empty() {
-                    eprintln!(
-                        "layr: overlay {name}: deleted {} dead cache state(s) and {} part(s) ({} bytes) in the remote",
-                        swept.trees.len(),
-                        swept.parts.len(),
-                        swept.bytes
-                    );
-                }
+            let swept = sweep_layer(repo, &name, &orepo, &scoped, false)?;
+            if !swept.trees.is_empty() {
+                eprintln!(
+                    "layr: overlay {name}: deleted {} dead cache state(s) and {} part(s) ({} bytes) in the remote",
+                    swept.trees.len(),
+                    swept.parts.len(),
+                    swept.bytes
+                );
             }
         }
         if let Some(identity) = &identity {
@@ -526,6 +502,73 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
         store.backend.put_new(&published.object(), body)?;
     }
     Ok(())
+}
+
+/// The age identity of the layer `published` of the overlay project `overlay`: from its slot in the
+/// store, else from this machine's local key file. None: this machine cannot read the layer.
+fn layer_identity(store: &Store, overlay: &str, published: &Published) -> Result<Option<String>> {
+    let mut identity = if store.backend.can_read() {
+        open_identity(
+            &store.backend.scoped(&published.prefix())?,
+            &published.key,
+            Some((&store.machine, &store.key)),
+            store.person.as_ref(),
+            store.paper_key_text.as_deref(),
+        )?
+    } else {
+        None
+    };
+    if identity.is_none() {
+        let path = local_key(store, overlay, &published.key.epoch);
+        if path.exists() {
+            let opened = keys::open_machine_slot(&std::fs::read(path)?, &store.key)?;
+            if keys::recipient_of(&opened)? != published.key.recipient {
+                bail!("local overlay key differs from its signed recipient");
+            }
+            identity = Some(opened);
+        }
+    }
+    Ok(identity)
+}
+
+/// The sweep of the layer `scoped` of cache overlay `name` (`sweep::sweep`) with the live set of the records.
+fn sweep_layer(repo: &Repo, name: &str, orepo: &Repo, scoped: &Store, dry_run: bool) -> Result<super::sweep::Swept> {
+    let Some(kept) = repo.cache_kept(name)? else { return Ok(Default::default()) };
+    let known = |id: &str| orepo.p.db.state(id).ok().flatten().is_some();
+    let parent = |id: &str| orepo.p.db.state(id).ok().flatten().and_then(|s| s.parents.first().cloned());
+    super::sweep::sweep(scoped, &kept, &known, &parent, dry_run)
+}
+
+/// Delete (with `dry_run`: only list) the dead cache states of each cache overlay of `repo` in the
+/// store `store`, in the current epoch of each overlay. An overlay that this machine cannot read is
+/// skipped.
+pub(super) fn sweep_caches(store: &Store, ctx: &Ctx, repo: &Repo, dry_run: bool) -> Result<Vec<(String, super::sweep::Swept)>> {
+    let descriptor = store.root_descriptor()?;
+    let trusted = trusted_keys(repo)?;
+    let mut objects = Vec::new();
+    let mut names = Vec::new();
+    for name in repo.visible_overlay_names(ctx)? {
+        if !repo.overlay_setting(&name, "cache")?.and_then(|v| v.as_bool()).unwrap_or(false) {
+            continue;
+        }
+        if let Ok(overlay) = repo.overlay_repo(&name) {
+            objects.extend(store.backend.list(&format!("overlays/{}/keys/", overlay.p.id))?);
+            names.push(name);
+        }
+    }
+    let parent_lines: Vec<_> = repo.p.export_jsonl()?.lines().map(str::to_owned).collect();
+    let authorities = crate::overlay_managers::from_lines(&repo.p.id, &parent_lines, &trusted)?;
+    let (remote, _) = published_objects(&store.backend, &repo.p.id, &descriptor.recipient, &trusted, &authorities, objects)?;
+    let mut out = Vec::new();
+    for name in names {
+        let Some(published) = remote.get(&name) else { continue };
+        let orepo = repo.overlay_repo(&name)?;
+        let Some(identity) = layer_identity(store, &orepo.p.id, published)? else { continue };
+        let scoped = layer(store, published, Some(identity))?;
+        let _lock = orepo.p.lock()?;
+        out.push((name.clone(), sweep_layer(repo, &name, &orepo, &scoped, dry_run)?));
+    }
+    Ok(out)
 }
 
 pub(super) fn fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report: &mut Report) -> Result<()> {
