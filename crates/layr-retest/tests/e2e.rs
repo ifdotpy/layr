@@ -1428,6 +1428,69 @@ fn prune_command_runs_the_cargo_adapter_by_hand() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+/// Each profile folder is pruned on its own. The source changes, so the release units are stale (nobody builds
+/// release again) and the prune keeps `target/release`. The debug folder is fresh after the debug build: its garbage
+/// (a feature build) goes, and the next debug build compiles nothing.
+#[test]
+fn prune_keeps_a_stale_release_folder_and_prunes_debug() {
+    let tmp = std::env::temp_dir().canonicalize().unwrap().join(format!("layr-retest-profiles-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let ws = tmp.join("ws");
+    sweep_workspace(&ws, "sweep = [[\"build\", \"--workspace\"], [\"build\", \"--release\", \"--workspace\"]]");
+    let (debug, release) = (ws.join("target/debug"), ws.join("target/release"));
+    cargo(&ws, &["build", "--workspace"]);
+    cargo(&ws, &["build", "--release", "--workspace"]);
+    let standard = entries(&debug, ".fingerprint");
+    let release_units = entries(&release, ".fingerprint");
+    cargo(&ws, &["build", "--workspace", "--features", "lib-a/extra"]);
+    let with_extra = entries(&debug, ".fingerprint");
+    let garbage: Vec<_> = with_extra.iter().filter(|u| !standard.contains(*u)).cloned().collect();
+    assert!(!garbage.is_empty(), "the feature build made no debug unit");
+
+    // The source changes: the release units are stale, the debug build makes the debug units fresh again.
+    std::fs::write(
+        ws.join("lib-a/src/lib.rs"),
+        "pub fn a() -> i32 {\n    2\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {\n        assert_eq!(super::a(), 2);\n    }\n}\n",
+    )
+    .unwrap();
+    cargo(&ws, &["build", "--workspace"]);
+
+    let (out, _) = sh(&ws, &ws.join("unused-store"), "layr", &["retest", "prune", "target"]);
+    assert!(out.contains("target: pruned with cargo"), "debug was not pruned:\n{out}");
+    let debug_after = entries(&debug, ".fingerprint");
+    assert!(garbage.iter().all(|u| !debug_after.contains(u)), "a debug garbage unit stays");
+    assert_eq!(debug_after, standard, "the debug folder is not the standard set");
+    assert_eq!(entries(&release, ".fingerprint"), release_units, "the stale release folder was changed");
+
+    let err = cargo(&ws, &["build", "--workspace"]);
+    assert!(!err.contains("Compiling"), "the next debug build compiled:\n{err}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// A fresh release build is swept too: after the install build (`--release`) and its prune, the old release
+/// variants are gone, and the next release build compiles nothing. A release folder that no command lists stays
+/// as it is, so the release command must be in the list.
+#[test]
+fn prune_sweeps_a_fresh_release_folder() {
+    let tmp = std::env::temp_dir().canonicalize().unwrap().join(format!("layr-retest-release-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let ws = tmp.join("ws");
+    sweep_workspace(&ws, "sweep = [[\"build\", \"--release\", \"--workspace\"]]");
+    let release = ws.join("target/release");
+    cargo(&ws, &["build", "--release", "--workspace"]);
+    let standard = entries(&release, ".fingerprint");
+    cargo(&ws, &["build", "--release", "--workspace", "--features", "lib-a/extra"]);
+    assert!(entries(&release, ".fingerprint").len() > standard.len(), "the feature build made no release unit");
+
+    let (out, _) = sh(&ws, &ws.join("unused-store"), "layr", &["retest", "prune", "target"]);
+    assert!(out.contains("target: pruned with cargo"), "release was not pruned:\n{out}");
+    assert_eq!(entries(&release, ".fingerprint"), standard, "the release folder keeps its garbage");
+
+    let err = cargo(&ws, &["build", "--release", "--workspace"]);
+    assert!(!err.contains("Compiling"), "the next release build compiled:\n{err}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 /// `cargo test` builds the lib and the lib's test binary of one crate at the same time, each with its own
 /// incremental folder. After a feature build, the sweep keeps the folders of the standard build (a swap of two
 /// folders must not delete a live one), removes only what the standard command does not need, and the next

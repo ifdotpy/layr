@@ -550,23 +550,26 @@ the next `save --caches` of its line.
 
 `init` takes no caches (a new project has no folder overlays), so it has no call site.
 
-### 18.6 Build env and the live set
+### 18.6 Build env, profiles and the live set
 
-The cargo live set is the set of units that the `sweep` commands make with the project env. The
-project env is `env` in `[workspace.metadata.layr-retest]`. Without an `env` key it is
-`CARGO_INCREMENTAL=1` and `RUSTC_WRAPPER=` (the default of `layr retest init`). `layr retest gate`
-builds with this env, and the hook lists the units with it. The worker process starts with a
-cleared env, so the listing never reads the shell env.
+The live set is the set of units that the `sweep` commands of `[workspace.metadata.layr-retest]` make
+with the project env (`env`). `layr retest init` writes `env = { CARGO_INCREMENTAL = "1", RUSTC_WRAPPER = "" }`
+into the manifest. A manifest without `env` gives the listing the default env of cargo: a build in the
+shell with another env (for example `CARGO_INCREMENTAL=1` in release, where it is off by default) makes units
+with other hashes, and those are not kept.
 
-Cargo's unit hash depends on the incremental flag, the flags, and the profile and build settings.
-A build with another value in the shell makes units with other hashes. The sweep does not keep those
-units, and it removes them. This is correct: they are not the standard units. Such a build costs a
-rebuild after the next prune.
+Each profile folder is pruned on its own. The commands of a profile (`--release` is `release`,
+`--profile <name>` is that name, `dev` and `test` are `debug`, and the default is `debug`) list the units
+of that folder only. A stale command of one profile keeps that folder. The other profiles are still pruned.
+A profile folder that no command lists is not touched.
 
-`layr retest doctor` warns when the shell env sets one of these variables to a value that differs
-from the project env: `CARGO_INCREMENTAL`, `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`, `RUSTC_WRAPPER`,
-`RUSTC_WORKSPACE_WRAPPER`, and any `CARGO_PROFILE_*` or `CARGO_BUILD_*`. To keep a unit of a
-shell build, put the same value in the project env.
+The listing never compiles. It runs cargo with a `RUSTC_WRAPPER` that refuses every compile (it passes
+the version and target probes through). A unit that is not fresh stops the listing of its profile before any
+build step. The wrapper is not part of a unit's hash.
+
+`layr retest doctor` names each profile that is skipped: `prune skipped for <profile>: unit <unit> is not
+fresh for the standard commands; build with `cargo <args>` or add it to [workspace.metadata.layr-retest]
+sweep`.
 
 ### 18.7 Tests
 

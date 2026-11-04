@@ -69,13 +69,9 @@ fn command_list(cfg: &Value, key: &str) -> Result<Vec<Vec<String>>> {
     Ok(commands)
 }
 
-/// The build env of a project without an `env` setting: the default of `layr-retest init`. Cargo's unit hash
-/// depends on the incremental flag, so the listing must not take the flag from the ambient env of the worker
-/// (the worker starts with a cleared env): a listing with another flag names other units than the build does.
-pub const DEFAULT_ENV: &[(&str, &str)] = &[("CARGO_INCREMENTAL", "1"), ("RUSTC_WRAPPER", "")];
-
-/// Reads the retest settings of the workspace at `root`. Missing settings are empty, except `env`, which is
-/// `DEFAULT_ENV` when the manifest has no `env` key.
+/// Reads the retest settings of the workspace at `root`. Missing settings are empty. A missing `env` is empty too:
+/// the listing then runs cargo with the default env of a build. A default that the build does not use changes the
+/// unit hashes (release is not incremental by default), so `init` writes the env into the manifest instead.
 pub fn settings(host: &dyn Host, root: &Path) -> Result<Settings> {
     let mut cmd = host_cargo(host)?;
     cmd.args(["metadata", "--no-deps", "--format-version", "1"]).current_dir(root);
@@ -86,7 +82,7 @@ pub fn settings(host: &dyn Host, root: &Path) -> Result<Settings> {
             .iter()
             .map(|(k, v)| Ok((k.clone(), v.as_str().context("env: each value is a string")?.to_string())))
             .collect::<Result<_>>()?,
-        None => DEFAULT_ENV.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+        None => Vec::new(),
     };
     Ok(Settings {
         env,
@@ -94,6 +90,23 @@ pub fn settings(host: &dyn Host, root: &Path) -> Result<Settings> {
         commands: command_list(cfg, "sweep")?,
         retest: command_list(cfg, "retest")?,
     })
+}
+
+/// The `RUSTC_WRAPPER` of a listing: it refuses every compile, so a listing never builds. Cargo asks the wrapper
+/// for the version and the target information (they pass through), and a compile emits outputs (`--emit`), which it
+/// refuses. Cargo prints `Dirty` before it compiles a unit, but a unit before the stale one can still compile before
+/// the listing stops; the wrapper stops that too. The wrapper is not part of a unit's hash (a fresh unit stays fresh).
+fn no_compile_wrapper() -> Result<std::path::PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    const SCRIPT: &str = "#!/bin/sh\ncase \" $* \" in *\" --emit\"*) exit 1 ;; esac\nexec \"$@\"\n";
+    let path = std::env::temp_dir().join(format!("layr-nocompile-{}.sh", rustix::process::getuid().as_raw()));
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(SCRIPT) {
+        let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+        std::fs::write(&tmp, SCRIPT).with_context(|| format!("cannot write {}", tmp.display()))?;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
+        std::fs::rename(&tmp, &path)?;
+    }
+    Ok(path)
 }
 
 /// The cargo arguments of a listing: `-v` names each unit that is not fresh before cargo compiles or runs
@@ -125,6 +138,8 @@ pub fn list_units(host: &dyn Host, root: &Path, target: &Path, env: &[(String, S
     let mut c = host_cargo(host)?;
     c.args(listing(args)).current_dir(root).env("CARGO_TARGET_DIR", target).env("CARGO_BUILD_JOBS", "1");
     c.envs(env.iter().map(|(k, v)| (k, v))).env("LLVM_PROFILE_FILE", cargo_profile_file(target));
+    // Set after the project's env: the listing must not compile, whatever the project's wrapper is.
+    c.env("RUSTC_WRAPPER", no_compile_wrapper()?);
     // Set last: the project's env cannot turn the color back on (see `cargo_cmd`).
     let mut c = with_color(c);
     c.process_group(0).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -202,6 +217,38 @@ pub fn live_units(host: &dyn Host, root: &Path, target: &Path, env: &[(String, S
     Ok(Listed::Fresh(live))
 }
 
+/// The profile folder that a cargo command builds into: `--profile <name>` (`dev` and `test` are `debug`, `bench`
+/// is `release`), `--release` is `release`, and the default is `debug`. Only the cargo arguments count (before `--`).
+pub fn profile_of(args: &[String]) -> String {
+    let own = &args[..args.iter().position(|a| a == "--").unwrap_or(args.len())];
+    let named = own.iter().position(|a| a == "--profile").and_then(|i| own.get(i + 1)).cloned().or_else(|| {
+        own.iter().find_map(|a| a.strip_prefix("--profile=")).map(String::from)
+    });
+    match named.as_deref() {
+        Some("dev") | Some("test") => "debug".to_string(),
+        Some("bench") => "release".to_string(),
+        Some(p) => p.to_string(),
+        None if own.iter().any(|a| a == "--release") => "release".to_string(),
+        None => "debug".to_string(),
+    }
+}
+
+/// The live units of each profile folder, listed on its own: the commands of one profile name only that profile's
+/// units. A profile whose command is not fresh is `NotFresh` (its folder is kept), and the other profiles still
+/// count, so a stale release command does not block the debug folder.
+pub fn live_by_profile(host: &dyn Host, root: &Path, target: &Path, env: &[(String, String)], commands: &[Vec<String>]) -> Result<Vec<(String, Vec<Vec<String>>, Listed)>> {
+    let mut groups: std::collections::BTreeMap<String, Vec<Vec<String>>> = std::collections::BTreeMap::new();
+    for args in commands {
+        groups.entry(profile_of(args)).or_default().push(args.clone());
+    }
+    let mut out = Vec::new();
+    for (profile, cmds) in groups {
+        let listed = live_units(host, root, target, env, &cmds)?;
+        out.push((profile, cmds, listed));
+    }
+    Ok(out)
+}
+
 /// Sweeps each profile folder of `plans` under its cargo lock. Returns the freed bytes and the number of
 /// profile folders skipped because their lock is busy. A dry run counts only.
 pub fn sweep_plans(plans: &sweep::Plans, dry: bool) -> Result<(u64, usize)> {
@@ -265,12 +312,27 @@ fn prune_in(host: &dyn Host, root: &Path, target: &Path) -> Result<Outcome> {
     // The listings must not reach the network: a unit whose crate is not in the cargo cache fails the listing.
     let mut env = cfg.env;
     env.push(("CARGO_NET_OFFLINE".to_string(), "true".to_string()));
-    Ok(match live_units(host, root, target, &env, &cfg.commands)? {
-        Listed::Fresh(live) => match sweep_plans(&live, false)? {
-            (_, busy) if busy > 0 => skip(format!("build lock busy in {busy} profile folder(s)")),
-            (freed, _) => Outcome::Pruned { freed },
-        },
-        Listed::NotFresh(why) => skip(format!("a unit is not fresh ({why}); run the standard build first")),
-        Listed::Busy => skip("build lock busy"),
-    })
+    // Each profile folder is pruned on its own: a stale command of one profile keeps only that folder.
+    let mut freed = 0;
+    let mut busy = 0;
+    let mut fresh = 0;
+    let mut kept = Vec::new();
+    for (profile, _, listed) in live_by_profile(host, root, target, &env, &cfg.commands)? {
+        match listed {
+            Listed::Fresh(live) => {
+                fresh += 1;
+                let (n, b) = sweep_plans(&live, false)?;
+                freed += n;
+                busy += b;
+            }
+            Listed::NotFresh(why) => kept.push(format!("{profile}: a unit is not fresh ({why})")),
+            Listed::Busy => kept.push(format!("{profile}: build lock busy")),
+        }
+    }
+    if fresh == 0 {
+        return Ok(skip(format!("no profile folder is fresh: {}; run the standard build first", kept.join("; "))));
+    }
+    // A busy lock keeps its profile folder (the others are swept), as the module doc says.
+    let _ = busy;
+    Ok(Outcome::Pruned { freed })
 }

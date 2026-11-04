@@ -195,6 +195,45 @@ fn shell_env_findings(shell: &[(String, String)], project: &[(String, String)]) 
         .collect()
 }
 
+/// Whether the cargo prune can run on `root`: every `sweep` command of the project must be fresh in `target`. A
+/// stale unit makes the prune skip the folder at each save, and the garbage stays. The check lists the units
+/// without building (cargo stops at the first unit that is not fresh) and names the unit and the command.
+fn prune_findings(root: &Path) -> Vec<Finding> {
+    let host = crate::retest_host();
+    let Ok(cfg) = layr_cache::cargo::settings(&host, root) else {
+        return Vec::new();
+    };
+    let target = root.join("target");
+    if !cfg.listed || !layr_cache::cargo::built(&target) {
+        return Vec::new();
+    }
+    let mut env = cfg.env.clone();
+    env.push(("CARGO_NET_OFFLINE".to_string(), "true".to_string()));
+    let mut out = Vec::new();
+    let groups = match layr_cache::cargo::live_by_profile(&host, root, &target, &env, &cfg.commands) {
+        Ok(g) => g,
+        Err(e) => return vec![warn(format!("prune skipped: {e:#}"))],
+    };
+    for (profile, cmds, listed) in groups {
+        match listed {
+            layr_cache::cargo::Listed::NotFresh(why) => {
+                let unit = why.trim_start_matches("Compiling ").trim_start_matches("Dirty ");
+                let build: Vec<String> = cmds.iter().map(|a| format!("cargo {}", a.join(" "))).collect();
+                out.push(warn(format!(
+                    "prune skipped for {profile}: unit {unit} is not fresh for the standard commands; build with `{}` or add it to [workspace.metadata.layr-retest] sweep",
+                    build.join("` and `")
+                )));
+            }
+            layr_cache::cargo::Listed::Busy => out.push(ok(format!("prune: the {profile} build lock is busy; the check is skipped"))),
+            layr_cache::cargo::Listed::Fresh(_) => {}
+        }
+    }
+    if out.is_empty() {
+        out.push(ok("prune: the standard commands are fresh in every profile folder"));
+    }
+    out
+}
+
 fn tool_checks(f: &mut Vec<Finding>) {
     match out(layr_cache::cargo::cargo_cmd().args(["nextest", "--version"])) {
         Some(v) => f.push(ok(format!("cargo-nextest: {}", v.lines().next().unwrap_or("").trim()))),
@@ -313,6 +352,7 @@ pub fn check(root: &Path) -> Vec<Finding> {
         let shell: Vec<(String, String)> = std::env::vars().collect();
         f.extend(shell_env_findings(&shell, &cfg.env));
     }
+    f.extend(prune_findings(root));
 
     let meta: Option<Value> = out(layr_cache::cargo::cargo_cmd().args(["metadata", "--no-deps", "--format-version", "1"]))
         .and_then(|s| serde_json::from_str(&s).ok());
