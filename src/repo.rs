@@ -3650,6 +3650,39 @@ mod cache_copy_tests {
     }
 
     #[test]
+    fn a_line_lock_taken_again_in_the_same_process_does_not_wait() -> Result<()> {
+        // The cache hook takes the line lock of its line while a command may hold it: the second take must
+        // return at once. A wait would hang the thread, and the main thread then reports it.
+        let root = std::env::temp_dir().join(format!("layr-line-lock-again-{}", crate::ids::new_id()));
+        std::fs::create_dir(&root)?;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker_root = root.clone();
+        std::thread::spawn(move || {
+            let result = (|| -> Result<()> {
+                let ctx = cache_command_context(&worker_root)?;
+                let run = |ctx: &crate::ctx::Ctx, args: &[&str]| {
+                    crate::cmd::run(ctx, &args.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+                };
+                anyhow::ensure!(run(&ctx, &["init", "concurrent", "-q"])? == 0, "init failed");
+                let repo = Repo::open(&ctx, "concurrent")?;
+                let line = repo.line("main")?;
+                let first = repo.line_lock(&line)?;
+                let second = repo.p.line_lock(&line.id, &line.name)?;
+                drop(second);
+                drop(first);
+                Ok(())
+            })();
+            let _ = tx.send(result.map_err(|e| format!("{e:#}")));
+        });
+        let outcome = rx.recv_timeout(std::time::Duration::from_secs(60));
+        let _ = std::fs::remove_dir_all(&root);
+        match outcome {
+            Ok(result) => result.map_err(anyhow::Error::msg),
+            Err(_) => anyhow::bail!("the second take of the line lock waited"),
+        }
+    }
+
+    #[test]
     fn overlay_list_does_not_recover_an_active_replacement() -> Result<()> {
         let root = std::env::temp_dir().join(format!("layr-cache-list-{}", crate::ids::new_id()));
         std::fs::create_dir(&root)?;

@@ -81,4 +81,41 @@ eq "the saved state has the merged file" "a" "$(l show head:a.txt)"
 eq "the saved state has the user's edit" "local edit" "$(l show head:notes.txt | tail -1)"
 eq "the saved state has the added file" "mine" "$(l show head:mine.txt)"
 
+# 4. The cache hook takes the line lock of its line. `save --caches` with a prune adapter set, and with
+# prune=none, finishes: the hook does not wait for a second file lock of the same line.
+# bounded <seconds> <command...>: the exit code of the command, or 124 when it runs longer.
+bounded() {
+    local secs=$1; shift
+    "$@" &
+    local pid=$! i=0
+    while kill -0 "$pid" 2>/dev/null; do
+        i=$((i + 1))
+        if [ "$i" -gt $((secs * 5)) ]; then
+            kill "$pid" 2>/dev/null
+            wait "$pid" 2>/dev/null
+            return 124
+        fi
+        sleep 0.2
+    done
+    wait "$pid"
+}
+l line new -q k main
+cd "$P/k" || exit 1
+printf 'cachedir/\n' >> .gitignore
+printf 'cachedir regenerable\n' > .layrattributes
+l add -A && l save -qm attributes
+mkdir -p cachedir && echo stale > cachedir/a.bin
+bounded 60 "$LAYR" save --caches -q > "$T/caches-1.log" 2>&1
+eq "save --caches makes the cache overlay" "0" "$?"
+has "the overlay of the folder exists" "folder=cachedir" "$(l overlay list)"
+l overlay set cache.cachedir --prune nosuch >/dev/null
+echo fresh > cachedir/a.bin
+bounded 60 "$LAYR" save --caches -q > "$T/caches-2.log" 2>&1
+eq "save --caches with an unknown prune adapter finishes" "0" "$?"
+has "the unknown adapter is logged, not fatal" "prune" "$(cat "$T/caches-2.log")"
+l overlay set cache.cachedir --prune none >/dev/null
+echo third > cachedir/a.bin
+bounded 60 "$LAYR" save --caches -q > "$T/caches-3.log" 2>&1
+eq "save --caches with prune none finishes" "0" "$?"
+eq "prune none keeps the folder content" "third" "$(cat cachedir/a.bin)"
 finish
