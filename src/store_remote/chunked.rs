@@ -264,6 +264,17 @@ impl<'a> Writer<'a> {
         self.by_sha
     }
 
+    /// A file that the walk takes from the pushed tree without reading it: its chunks count as
+    /// reused, so `finish` checks that the store still has them.
+    pub(crate) fn reuse(&mut self, sha: &str, ids: &[String]) {
+        for id in ids {
+            if !self.written.contains(id) {
+                self.reused.insert(id.clone());
+            }
+        }
+        self.by_sha.entry(sha.to_string()).or_insert_with(|| ids.to_vec());
+    }
+
     /// The chunk ids of a file, after its new chunks are queued for upload.
     pub(crate) fn file(&mut self, sha: &str, data: &[u8]) -> Result<Vec<String>> {
         if let Some(ids) = self.by_sha.get(sha).cloned() {
@@ -448,7 +459,8 @@ impl<'a> Reader<'a> {
         Ok(())
     }
 
-    fn chunk(&mut self, id: &str) -> Result<Vec<u8>> {
+    /// Appends chunk `id` to `out`, which may not pass `size` bytes.
+    fn append(&mut self, id: &str, out: &mut Vec<u8>, size: u64) -> Result<()> {
         // A release may move a chunk after this reader listed the packs: list once more.
         for attempt in 0..2 {
             let Some(place) = self.places(attempt == 1)?.get(id).cloned() else {
@@ -460,22 +472,22 @@ impl<'a> Reader<'a> {
             let Some(data) = self.packs.get(&place.pack) else {
                 continue;
             };
+            if out.len() as u64 + place.length > size {
+                bail!("chunks exceed their file size");
+            }
             let start = usize::try_from(place.offset)?;
             let end = usize::try_from(place.offset + place.length)?;
-            return Ok(data.get(start..end).context("chunk is outside its pack")?.to_vec());
+            out.extend_from_slice(data.get(start..end).context("chunk is outside its pack")?);
+            return Ok(());
         }
         bail!("chunk {id} is not in the store")
     }
 
     /// The content of a chunked file. The caller checks its size and SHA-256 against the tree.
     pub(crate) fn file(&mut self, ids: &[String], size: u64) -> Result<Vec<u8>> {
-        let mut data = Vec::new();
+        let mut data = Vec::with_capacity(usize::try_from(size).unwrap_or(0).min(64 << 20));
         for id in ids {
-            let chunk = self.chunk(id)?;
-            if data.len() as u64 + chunk.len() as u64 > size {
-                bail!("chunks exceed their file size");
-            }
-            data.extend(chunk);
+            self.append(id, &mut data, size)?;
         }
         Ok(data)
     }

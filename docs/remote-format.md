@@ -150,16 +150,25 @@ machines. Source states keep frames.
   the next files. It keeps a local copy of the indexes it writes. A reader loads a missing pack
   together with the next packs of its restore order, in parallel.
 
-Measured with `layr push --caches` to a `file://` store on macOS: a cargo `target/debug` (8728
-files, 2286 MiB), then the same folder after a merge that rebuilt the workspace (4076 MiB).
+- Push manifest: a file whose path, mode, size and modification time (nanoseconds) equal its
+  entry in the pushed tree of the nearest pushed ancestor keeps that entry, and the walk does not
+  read it, as git and rsync trust their stat data. This works for frames and chunks, also when a
+  history limit deleted the ancestor here, because the pushed tree names the times (`times`). A
+  reused chunked entry counts as reused for the check before the tree publishes.
+  `LAYR_PUSH_REHASH=1` reads every file again.
+
+Measured with `layr push --caches` to a `file://` store on macOS. Base: a cargo `target/debug`
+(2.2 GiB). Small: the same folder after a merge of a few changes (453 files differ). Big: after
+every workspace crate was rebuilt (1930 more files differ).
 
 | | frames (0.25.0) | chunks |
 | --- | --- | --- |
-| first push | 566 MiB, 19 s | 400 MiB, 18 s |
-| next push | 468 MiB, 14 s | 322 MiB, 22 s |
-| clone and a warm line | 35 s | 38 s |
+| first push | 546 MiB, 19 to 20 s | 382 MiB, 22 s |
+| next push, small | 37 MiB, 12 s | 20 MiB, 5 s |
+| next push, big | 166 MiB, 20 s | 104 MiB, 7 s |
+| clone, warm page cache (3 runs, alternating) | 17.6, 8.3, 7.2 s | 29.9, 10.4, 7.5 s |
 
-The walk reads and hashes every cache file on APFS in both cases (15 s of the next push).
+The next push reads only changed files (8322 of 8700 files unread for big).
 
 ## Keys and recovery
 

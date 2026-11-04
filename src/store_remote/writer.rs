@@ -580,6 +580,9 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
         let root = repo.state_root(&state.id)?;
         // A base that a history limit deleted here (docs/cache-overlays.md) cannot be compared:
         // the state goes up as a complete tree.
+        // The pushed tree of the nearest ancestor names the size, time and content of each file
+        // (`manifest` in `upload_state_journal`), also when a history limit deleted it here.
+        let manifest = base.as_ref().map(|(_, pushed)| pushed.tree.clone());
         let base = base.filter(|(id, _)| repo.p.has_state(id));
         if let Some((id, _)) = &base {
             repo.hold(repo.pin(&[id.as_str()])?);
@@ -593,6 +596,7 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
             base.as_ref(),
             &mut hashes,
             &mut chunk_hashes,
+            manifest.as_ref(),
             base_root.as_deref(),
             btrfs_identity(&root, &state.subvol),
             Some(&mut journal),
@@ -740,6 +744,7 @@ fn upload_state_journal(
     base: Option<&(String, Pushed)>,
     hashes: &mut ContentHashes,
     chunk_hashes: &mut BTreeMap<String, Vec<String>>,
+    manifest: Option<&Tree>,
     base_root: Option<&Path>,
     btrfs: Option<format::BtrfsIdentity>,
     mut journal: Option<&mut super::push_journal::Journal>,
@@ -800,8 +805,11 @@ fn upload_state_journal(
             chunks.remove(&change.path);
         }
     }
-    // Read and SHA-256 time of the walk, for `LAYR_TRACE`.
+    // Read and SHA-256 time of the walk, and files taken from the manifest, for `LAYR_TRACE`.
     let mut walk_time = (std::time::Duration::ZERO, std::time::Duration::ZERO);
+    let mut unread = 0usize;
+    // `LAYR_PUSH_REHASH=1` reads every file again, whatever the manifest says.
+    let manifest = manifest.filter(|_| std::env::var_os("LAYR_PUSH_REHASH").is_none());
     let mut visit = |path: &str, meta: &fsutil::Meta| -> Result<bool> {
         if crate::repo::skip_path(path) {
             return Ok(false);
@@ -816,13 +824,34 @@ fn upload_state_journal(
             bail!("state has a special file: {path}");
         }
         let mode = format!("{:o}", meta.git_mode());
+        let time = file_time(root, path);
+        // A file with the path, mode, size and time (in nanoseconds) of the pushed tree has its
+        // content: the walk takes the entry without reading the file, as git and rsync do with
+        // their stat data. A chunked entry needs this push's chunker, or it is read again.
+        if let (Some(old_tree), Some(time)) = (manifest, time) {
+            if let Some(old) = old_tree.files.get(path).filter(|old| {
+                old.0 == mode && old.1 == meta.size && old_tree.times.get(path) == Some(&time)
+            }) {
+                let ids = old_tree.chunks.get(path);
+                if ids.is_none() || chunker.is_some() {
+                    if let (Some(ids), Some(chunker)) = (ids, chunker.as_mut()) {
+                        chunker.reuse(&old.2, ids);
+                        chunks.insert(path.to_string(), ids.clone());
+                    }
+                    files.insert(path.to_string(), old.clone());
+                    times.insert(path.to_string(), time);
+                    unread += 1;
+                    return Ok(true);
+                }
+            }
+        }
         let started = std::time::Instant::now();
         let data = content(root, path, &mode)?;
         let read = started.elapsed();
         let sha = hex::encode(ContentAddress::digest(&data));
         walk_time.0 += read;
         walk_time.1 += started.elapsed() - read;
-        if let Some(time) = file_time(root, path) {
+        if let Some(time) = time {
             times.insert(path.to_string(), time);
         }
         if let Some(chunker) = chunker.as_mut().filter(|_| !data.is_empty()) {
@@ -895,6 +924,7 @@ fn upload_state_journal(
     if std::env::var_os("LAYR_TRACE").is_some() {
         eprintln!("trace {:>8.1} ms  store walk read", walk_time.0.as_secs_f64() * 1000.0);
         eprintln!("trace {:>8.1} ms  store walk sha256", walk_time.1.as_secs_f64() * 1000.0);
+        eprintln!("trace {unread:>8} files store walk unread (manifest)");
     }
     if !current.is_empty() {
         if let Some(journal) = journal.as_deref_mut() {
@@ -974,7 +1004,8 @@ fn upload_state(
     btrfs: Option<format::BtrfsIdentity>,
 ) -> Result<(Pushed, usize, u64)> {
     let mut index = ContentHashes { entries: std::mem::take(hashes), ..Default::default() };
-    let result = upload_state_journal(store, descriptor, state, root, base, &mut index, &mut BTreeMap::new(), base_root, btrfs, None);
+    let result =
+        upload_state_journal(store, descriptor, state, root, base, &mut index, &mut BTreeMap::new(), None, base_root, btrfs, None);
     *hashes = index.entries;
     result
 }
