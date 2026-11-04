@@ -2,7 +2,8 @@
 # ci: macos overlayfs
 # A cargo cache works at any path when no crate compiles a path of its folder in: the tests read
 # CARGO_MANIFEST_DIR and CARGO_BIN_EXE_<bin> at run time (cargo and nextest set both when an integration
-# test runs). A line at another path builds nothing again after it takes the cache. `layr retest doctor`
+# test runs). A line at another path, and a clone in another store, build nothing again after they take
+# the cache. `layr retest doctor`
 # names each line that compiles a path in.
 #
 # The lines belong to the user that runs cargo: on a root run (the Linux CI job) the user who started the job.
@@ -67,6 +68,21 @@ out=$(cb "$P/w" test --workspace -- --nocapture)
 no "a line at another path compiles nothing" grep -q "Compiling" <<<"$out"
 has "its test reads its own binary" "BIN=$P/w/target/debug/x" "$out"
 has "its test reads its own folder" "DIR=$P/w" "$out"
+
+# A clone in another store at another path builds nothing again: the store keeps the file times
+# (docs/remote-format.md), so cargo finds the restored cache fresh. One user: a root run has no owner
+# of the clone's lines here.
+if [ "$(id -u)" != 0 ]; then
+    l remote add archive "file://$T/archive" --paper-key-out $T/paper.txt >/dev/null 2>&1
+    l push archive -q --caches >/dev/null 2>&1
+    mkdir -p $T/b
+    env LAYR_ROOT=$T/b/store LAYR_PAPER_KEY_FILE=$T/paper.txt $LAYR clone "file://$T/archive" p >/dev/null 2>&1
+    Q=$T/b/store/projects/p/lines
+    (cd $Q/main && env LAYR_ROOT=$T/b/store $LAYR line new far main >/dev/null 2>&1)
+    out=$(cb "$Q/far" test --workspace -- --nocapture)
+    no "a line of a clone in another store compiles nothing" grep -q "Compiling" <<<"$out"
+    has "its test reads its own binary" "BIN=$Q/far/target/debug/x" "$out"
+fi
 
 # doctor names a line that compiles a path in.
 printf '#[test]\nfn d() {\n    let _ = env!("CARGO_MANIFEST_DIR");\n}\n' > "$P/w/tests/compiled.rs"
