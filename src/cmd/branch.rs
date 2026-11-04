@@ -474,9 +474,8 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
         };
         let lines = repo.commit_prepared_lines(ctx, prepared)?;
         drop(lock);
-        // On OverlayFS the caches came under the lock (`commit_prepared_lines`); elsewhere `prepare_named_lines`
-        // relocated them.
-        #[cfg(feature = "overlayfs")]
+        // The caches of the new lines name the place of their build: relocate them at the place of the line. The
+        // relocation runs as the line owner, who cannot enter the store's work folder before the move.
         if let Ok(overlays) = repo.folder_overlays() {
             let folders: Vec<String> = overlays.into_iter().map(|(_, f)| f).collect();
             for l in &lines {

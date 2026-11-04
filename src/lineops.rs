@@ -154,8 +154,6 @@ impl Repo<'_> {
                 // before the store lock, and it runs first so `prepare_at` does not copy the folder again.
                 #[cfg(not(feature = "overlayfs"))]
                 let cached = self.take_caches(ctx, line, start, source, tmp)?;
-                #[cfg(not(feature = "overlayfs"))]
-                self.relocate_caches(line, &cached, tmp);
                 #[cfg(feature = "overlayfs")]
                 let cached: Vec<String> = Vec::new();
                 self.prepare_at(line, start, tmp, &cached)?;

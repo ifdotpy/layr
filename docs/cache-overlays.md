@@ -560,7 +560,7 @@ was built at another path, and `at` is the path where the folder is used from no
 
 | Command | When |
 | --- | --- |
-| `layr line new` | after the take of each cache folder, before the project lock (OverlayFS: after the project lock) |
+| `layr line new` | after the project lock, when the line folder is in place (the owner cannot enter the store's work folder) |
 | `layr merge`, `merge --caches-only`, a follow pass | in `pull_caches`, after each folder is in place |
 
 The worker runs it as the owner, root too, also with `prune=none`, with a 60 s limit. It runs no process
