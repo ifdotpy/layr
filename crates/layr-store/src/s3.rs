@@ -8,7 +8,7 @@ pub struct Object {
 use anyhow::{anyhow, bail, Context, Result};
 use reqwest::blocking::Client;
 use reqwest::Method;
-use sha2::{Digest, Sha256};
+use layr_hashers::{ContentAddress, Digest};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// The time limit of a call without a body, and the base of one with a body.
@@ -87,7 +87,7 @@ impl S3 {
         body: Vec<u8>,
         limit: Duration,
     ) -> Result<reqwest::blocking::Response> {
-        let payload = if body.is_empty() { EMPTY_SHA256.to_string() } else { hex::encode(Sha256::digest(&body)) };
+        let payload = if body.is_empty() { EMPTY_SHA256.to_string() } else { hex::encode(ContentAddress::digest(&body)) };
         self.request_body(method, key, query, headers, body.into(), &payload, limit)
     }
 
@@ -153,7 +153,7 @@ impl S3 {
     pub fn put_file_new(&self, key: &str, mut file: std::fs::File) -> Result<bool> {
         use std::io::{Read, Seek, SeekFrom};
         let length = file.metadata()?.len();
-        let mut digest = Sha256::new();
+        let mut digest = ContentAddress::new();
         let mut buffer = [0u8; 65536];
         loop {
             let n = file.read(&mut buffer)?;

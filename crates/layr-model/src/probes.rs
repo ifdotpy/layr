@@ -3,7 +3,7 @@ use crate::{screenshots, Project, StateKind, Subject};
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
+use layr_hashers::{ContentAddress, Digest};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -109,7 +109,7 @@ fn files(input: &BTreeMap<String, Vec<u8>>) -> BTreeMap<String, FileData> {
             } else {
                 None
             };
-            (path.clone(), FileData { size: bytes.len() as u64, sha256: hex::encode(Sha256::digest(bytes)), text })
+            (path.clone(), FileData { size: bytes.len() as u64, sha256: hex::encode(ContentAddress::digest(bytes)), text })
         })
         .collect()
 }

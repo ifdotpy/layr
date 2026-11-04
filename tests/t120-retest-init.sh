@@ -88,6 +88,7 @@ git add -A && git commit -qm base && git push -q origin main
 ly init proj --git $R $OWNER_ARG -q >/dev/null 2>&1 || { echo "FATAL: layr init --git failed" >&2; exit 1; }
 P=$LAYR_ROOT/projects/proj/lines
 
+<<<<<<< head
 # In protected main before the merge, init changes no file and says how to bring the files in.
 before_main=$(cd $P/main && cat Cargo.toml .gitignore .layrattributes 2>/dev/null | cksum)
 guard=$(cd $P/main && ly retest init 2>&1); guard_rc=$?
@@ -113,6 +114,26 @@ ly merge setup --expect "$setup_head" >/dev/null 2>&1 || fail "the merge of the 
 # In main: the follow target, the sweep list, and a second init that changes nothing.
 main_init=$(ly retest init 2>&1)
 has "init in main after the merge keeps the follow target" "follow: main already follows origin/main" "$main_init"
+||||||| base
+=======
+# The init files come in through a line and a merge: main is protected.
+(cd $P/main && ly line new setup main $OWNER_ARG >/dev/null 2>&1)
+cd $P/setup || exit 1
+init_out=$(ly retest init 2>&1); init_rc=$?
+# Missing cargo-nextest or llvm-tools (not on every runner) is reported by init with exit 1; the files are still changed.
+if [ "$init_rc" -eq 0 ] || echo "$init_out" | grep -q '^missing '; then PASS=$((PASS + 1)); echo "PASS init runs (exit $init_rc: 0, or only missing tools reported)"; else fail "init failed: $init_out"; fi
+ly add .layrattributes Cargo.toml .gitignore >/dev/null 2>&1
+ly save -m "retest init" >/dev/null 2>&1 || fail "the save of the init files failed"
+setup_head=$(ly rev-parse head)
+cd $P/main || exit 1
+ly merge setup --expect "$setup_head" >/dev/null 2>&1 || fail "the merge of the init files into main failed"
+# The remote has the init files too: the follow pass of main then sees a fast-forward.
+(cd $P/main && ly git push origin main >/dev/null 2>&1) || fail "push of main to the remote failed"
+
+# In main: the follow target, the sweep list, and a second init that changes nothing.
+main_init=$(ly retest init 2>&1)
+has "init in main sets the follow target" "follow: main follows origin/main" "$main_init"
+>>>>>>> origin-https/main
 has "the follow target is in layr follow" "Following origin/main on line main" "$(ly follow 2>&1)"
 has "the sweep list covers the three standard commands" 'sweep = [["build", "--locked"], ["test", "--locked", "--no-run"], ["build", "--release", "--locked"]]' "$(cat Cargo.toml)"
 before_files=$(cat Cargo.toml .layrattributes .gitignore | cksum)

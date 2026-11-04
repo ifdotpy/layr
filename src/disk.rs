@@ -9,7 +9,7 @@ mod webdav;
 use crate::store_remote::browse::{Access, Browse, Entry};
 use crate::store_remote::StorePin;
 use anyhow::{bail, Context, Result};
-use sha2::{Digest, Sha256};
+use layr_hashers::{ContentAddress, Digest};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
@@ -49,7 +49,7 @@ pub fn line_folder(name: &str) -> String {
 fn text(bytes: Vec<u8>, time: i64) -> Node {
     Node::File {
         size: bytes.len() as u64,
-        etag: hex::encode(Sha256::digest(&bytes)),
+        etag: hex::encode(ContentAddress::digest(&bytes)),
         time,
         content: Content::Text(Arc::new(bytes)),
     }
@@ -275,7 +275,7 @@ impl Cache {
         }
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
-        if hex::encode(Sha256::digest(&bytes)) != hash {
+        if hex::encode(ContentAddress::digest(&bytes)) != hash {
             std::fs::remove_file(path)?;
             return Ok(None);
         }
@@ -838,7 +838,7 @@ mod tests {
     fn cache_checks_hashes_and_enforces_its_size_limit() {
         let dir = std::env::temp_dir().join(format!("layr-disk-cache-{}", crate::ids::new_id()));
         let cache = Cache::open(dir.clone(), 5).unwrap();
-        let hash = |data: &[u8]| hex::encode(Sha256::digest(data));
+        let hash = |data: &[u8]| hex::encode(ContentAddress::digest(data));
         cache.put(&hash(b"abc"), b"abc").unwrap();
         assert_eq!(cache.get(&hash(b"abc")).unwrap().unwrap(), b"abc");
         std::fs::write(dir.join(hash(b"abc")), b"bad").unwrap();
@@ -855,11 +855,11 @@ mod tests {
 #[cfg(test)]
 mod partial_tests {
     use super::Cache;
-    use sha2::{Digest, Sha256};
+    use layr_hashers::{ContentAddress, Digest};
     use std::time::{Duration, SystemTime};
 
     fn hash(data: &[u8]) -> String {
-        hex::encode(Sha256::digest(data))
+        hex::encode(ContentAddress::digest(data))
     }
 
     fn partials(dir: &std::path::Path) -> Vec<String> {

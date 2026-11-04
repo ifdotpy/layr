@@ -111,3 +111,5 @@ The measured binary predates the final service permission checks.
 Raw data: [1,000 files](../benchmarks/results/apfs-complete-1000.json)
 and [10,000 files](../benchmarks/results/apfs-complete-10000.json).
 
+
+For purpose-specific hashing, see [layr-hashers](../crates/layr-hashers/README.md).

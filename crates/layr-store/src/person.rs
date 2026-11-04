@@ -28,7 +28,7 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
+use layr_hashers::ContentAddress;
 
 /// A person's signing identity, encrypted with the existing age key helpers.
 /// The secret seed is only returned in memory; persist `sealed`, never the seed.
@@ -88,11 +88,11 @@ pub fn login_name(login: &str) -> bool {
 
 /// The v2 slot name binds one login to one public person key.
 pub fn slot_name(login: &str, recipient: &str) -> Result<String> {
-    use sha2::Digest;
+    use layr_hashers::Digest;
     if !login_name(login) || !keys::valid_recipient(recipient) {
         bail!("invalid person login or recipient");
     }
-    let fingerprint = hex::encode(sha2::Sha256::digest(recipient.as_bytes()));
+    let fingerprint = hex::encode(layr_hashers::ContentAddress::digest(recipient.as_bytes()));
     Ok(format!("person-{login}-{}.age", &fingerprint[..16]))
 }
 
@@ -207,12 +207,12 @@ impl Index {
 
 /// HMAC-SHA256 with the index key: HMAC-SHA256(secret, INDEX_HEADER), where `secret` is the
 /// X25519 secret of the person identity.
-fn index_mac(identity: &str) -> Result<Hmac<Sha256>> {
+fn index_mac(identity: &str) -> Result<Hmac<ContentAddress>> {
     let secret = keys::secret_of_identity(identity)?;
-    let mut derive = Hmac::<Sha256>::new_from_slice(&secret).expect("any key");
+    let mut derive = Hmac::<ContentAddress>::new_from_slice(&secret).expect("any key");
     derive.update(INDEX_HEADER.as_bytes());
     let key = derive.finalize().into_bytes();
-    Ok(Hmac::<Sha256>::new_from_slice(&key).expect("any key"))
+    Ok(Hmac::<ContentAddress>::new_from_slice(&key).expect("any key"))
 }
 
 /// The index, with its MAC, encrypted to the person recipient.
