@@ -16,7 +16,8 @@ if [ "$(id -u)" = 0 ]; then
     # The owner runs the binary from the test folder (the checkout of the runner is not readable by the user).
     cp "$LAYR" "$T/layr" && chmod 755 "$T/layr" && LAYR=$T/layr
     # Cargo of the owner: the cargo of this machine, with a cargo home that the owner can write.
-    REAL_CARGO=$(rustup which cargo 2>/dev/null || command -v cargo)
+    REAL_CARGO=$(rustup which cargo 2>/dev/null || command -v cargo || true)
+    [ -n "$REAL_CARGO" ] || { echo "FATAL: no cargo for the test owner (run with the PATH of the runner)" >&2; exit 1; }
     TOOLS=$(dirname "$REAL_CARGO")
     OWN_CARGO_HOME=$(mktemp -d /tmp/layr-cargo-home.XXXXXX) && chmod 777 "$OWN_CARGO_HOME"
     printf '#!/bin/sh\nexport PATH=%s:/usr/bin:/bin\nexport CARGO_HOME=%s\nexec %s "$@"\n' "$TOOLS" "$OWN_CARGO_HOME" "$REAL_CARGO" > /usr/local/bin/cargo
@@ -49,6 +50,7 @@ cd "$P/main"
 l protect main --remove >/dev/null 2>&1 || true
 cb "$P/main" build --workspace -q >/dev/null
 base=$(units $P/main/target)
+[ "$base" -gt 0 ] && { PASS=$((PASS + 1)); echo "PASS the standard build made units ($base)"; } || { FAIL=$((FAIL + 1)); echo "FAIL the standard build made no units: the owner cannot build"; }
 (cd "$P/main" && l save --caches -q)
 new_line other main
 
