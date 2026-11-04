@@ -17,6 +17,9 @@ thread_local! {
     pub(crate) static FAIL_AFTER_COMMIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// Enough room for the distinct database and ownership statements used in a replay.
+pub(crate) const STATEMENT_CACHE_CAPACITY: usize = 256;
+
 pub struct Db {
     pub conn: Connection,
     /// The derived tables are from an older schema: `rebuild` replaces them before use.
@@ -95,7 +98,7 @@ impl Db {
     /// Open the database. Returns it and whether the derived tables must be rebuilt.
     pub fn open(path: &Path) -> Result<Db> {
         let conn = Connection::open(path)?;
-        conn.set_prepared_statement_cache_capacity(crate::owners::OWNERS_STATEMENTS);
+        conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
         conn.pragma_update(None, "journal_mode", "WAL")?;
         // FULL: a committed record survives a power loss. The database has its own subvolume,
         // so this fsync costs a few milliseconds even right after a snapshot.
@@ -227,7 +230,7 @@ impl Db {
     pub fn rebuild(&self, only_older: bool, replay: impl FnOnce(&Db) -> Result<()>) -> Result<bool> {
         self.begin_rebuild()?;
         let done = (|| -> Result<bool> {
-            let version: i64 = self.conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+            let version: i64 = self.conn.prepare_cached("PRAGMA user_version")?.query_row([], |r| r.get(0))?;
             if only_older && version >= SCHEMA_VERSION {
                 if version > SCHEMA_VERSION {
                     anyhow::bail!("written by a newer layr (schema {version})");
@@ -304,22 +307,26 @@ impl Db {
 
     /// Insert a stored record line. Returns false if the record exists already.
     pub fn insert_record(&self, rec: &Record, line: &str) -> Result<bool> {
-        let n = self.conn.execute(
-            "INSERT OR IGNORE INTO records(id, machine, seq, time, op, actor_uid, raw) VALUES(?1,?2,?3,?4,?5,?6,?7)",
-            params![rec.id, rec.machine, rec.seq as i64, rec.time, rec.op, rec.actor.uid as i64, line],
-        )?;
+        let n = self
+            .conn
+            .prepare_cached(
+                "INSERT OR IGNORE INTO records(id, machine, seq, time, op, actor_uid, raw) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            )?
+            .execute(params![rec.id, rec.machine, rec.seq as i64, rec.time, rec.op, rec.actor.uid as i64, line])?;
         Ok(n > 0)
     }
 
     pub fn last_seq(&self, machine: &str) -> Result<u64> {
-        let v: Option<i64> =
-            self.conn.query_row("SELECT MAX(seq) FROM records WHERE machine=?1", params![machine], |r| r.get(0))?;
+        let v: Option<i64> = self
+            .conn
+            .prepare_cached("SELECT MAX(seq) FROM records WHERE machine=?1")?
+            .query_row(params![machine], |r| r.get(0))?;
         Ok(v.unwrap_or(0) as u64)
     }
 
     /// Stored lines of one machine after a sequence number, in order.
     pub fn lines_after(&self, machine: &str, seq: u64) -> Result<Vec<String>> {
-        let mut st = self.conn.prepare("SELECT raw FROM records WHERE machine=?1 AND seq>?2 ORDER BY seq")?;
+        let mut st = self.conn.prepare_cached("SELECT raw FROM records WHERE machine=?1 AND seq>?2 ORDER BY seq")?;
         let v = st.query_map(params![machine, seq as i64], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
         Ok(v)
     }
@@ -327,19 +334,29 @@ impl Db {
     pub fn record_line(&self, machine: &str, seq: u64) -> Result<Option<String>> {
         Ok(self
             .conn
-            .query_row("SELECT raw FROM records WHERE machine=?1 AND seq=?2", params![machine, seq as i64], |r| r.get(0))
+            .prepare_cached("SELECT raw FROM records WHERE machine=?1 AND seq=?2")?
+            .query_row(params![machine, seq as i64], |r| r.get(0))
             .optional()?)
     }
 
     pub fn record_machines(&self) -> Result<Vec<String>> {
-        let mut st = self.conn.prepare("SELECT DISTINCT machine FROM records ORDER BY machine")?;
+        let mut st = self.conn.prepare_cached("SELECT DISTINCT machine FROM records ORDER BY machine")?;
         let v = st.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
         Ok(v)
     }
 
+    /// The number of records and the newest row. Records are only added, so an equal mark means
+    /// no record came in: everything derived from the records is unchanged.
+    pub fn records_mark(&self) -> Result<(i64, i64)> {
+        Ok(self
+            .conn
+            .prepare_cached("SELECT count(*), coalesce(max(rowid), 0) FROM records")?
+            .query_row([], |r| Ok((r.get(0)?, r.get(1)?)))?)
+    }
+
     /// All stored lines in apply order.
     pub fn all_lines(&self) -> Result<Vec<String>> {
-        let mut st = self.conn.prepare("SELECT raw FROM records ORDER BY time, machine, seq")?;
+        let mut st = self.conn.prepare_cached("SELECT raw FROM records ORDER BY time, machine, seq")?;
         let v = st.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
         Ok(v)
     }
@@ -361,31 +378,33 @@ impl Db {
             // A state id names one state forever: a second record with the same id is refused
             // (the import checks this before; here it is a guard).
             let exists: bool =
-                tx.query_row("SELECT COUNT(*) FROM states WHERE id=?1", params![s.id], |r| r.get::<_, i64>(0))? > 0;
+                tx.prepare_cached("SELECT COUNT(*) FROM states WHERE id=?1")?.query_row(params![s.id], |r| r.get::<_, i64>(0))?
+                    > 0;
             if exists {
                 anyhow::bail!("state {} is named by two records", s.id);
             }
             let present = state_present(&s.id);
-            tx.execute(
+            tx.prepare_cached(
                 "INSERT INTO states(id, display, kind, line, time, rec, present, machine) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
-                params![
-                    s.id,
-                    ids::display(&s.id),
-                    kind_str(s.kind),
-                    s.line,
-                    s.time,
-                    serde_json::to_string(s)?,
-                    present as i64,
-                    rec.machine
-                ],
-            )?;
+            )?
+            .execute(params![
+                s.id,
+                ids::display(&s.id),
+                kind_str(s.kind),
+                s.line,
+                s.time,
+                serde_json::to_string(s)?,
+                present as i64,
+                rec.machine
+            ])?;
             for p in &s.parents {
                 if self.state(p)?.map(|p| p.kind.auxiliary()).unwrap_or(false) {
                     anyhow::bail!("source history cannot have a cache or derived parent");
                 }
             }
             for (i, p) in s.parents.iter().enumerate() {
-                tx.execute("INSERT OR IGNORE INTO parents(state, parent, ord) VALUES(?1,?2,?3)", params![s.id, p, i as i64])?;
+                tx.prepare_cached("INSERT OR IGNORE INTO parents(state, parent, ord) VALUES(?1,?2,?3)")?
+                    .execute(params![s.id, p, i as i64])?;
             }
             // Owners may name the state before its record arrives: it holds its parents now.
             self.owners_state_made(&s.id)?;
@@ -396,105 +415,112 @@ impl Db {
                 if self.state(&a.head)?.map(|s| s.kind.auxiliary()).unwrap_or(false) {
                     anyhow::bail!("line head cannot be a cache or derived state");
                 }
-                tx.execute(
+                tx.prepare_cached(
                     "INSERT INTO line_heads(line, machine, head, time, ord) VALUES(?1,?2,?3,?4,?5)
                      ON CONFLICT(line, machine) DO UPDATE SET head=?3, time=?4, ord=?5 WHERE excluded.ord > line_heads.ord",
-                    params![id, rec.machine, a.head, rec.time, ord],
-                )?;
+                )?
+                .execute(params![id, rec.machine, a.head, rec.time, ord])?;
             }
             let row_machine: Option<String> =
-                tx.query_row("SELECT machine FROM lines WHERE id=?1", params![id], |r| r.get(0)).optional()?;
+                tx.prepare_cached("SELECT machine FROM lines WHERE id=?1")?.query_row(params![id], |r| r.get(0)).optional()?;
             if foreign && row_machine.as_deref() == Some(local) {
                 continue;
             }
             match &ch.after {
                 Some(a) => {
-                    tx.execute(
+                    tx.prepare_cached(
                         "INSERT INTO lines(id, name, owner, machine, head, deleted, time, ord) VALUES(?1,?2,?3,?4,?5,0,?6,?7)
                          ON CONFLICT(id) DO UPDATE SET name=?2, owner=?3, machine=?4, head=?5, deleted=0, time=?6, ord=?7
                          WHERE excluded.ord > lines.ord OR (lines.machine <> ?4 AND ?4 = ?8)",
-                        params![id, a.name, a.owner as i64, a.machine, a.head, rec.time, ord, local],
-                    )?;
+                    )?
+                    .execute(params![
+                        id,
+                        a.name,
+                        a.owner as i64,
+                        a.machine,
+                        a.head,
+                        rec.time,
+                        ord,
+                        local
+                    ])?;
                 }
                 None => {
-                    tx.execute(
+                    tx.prepare_cached(
                         "INSERT INTO lines(id, name, owner, machine, head, deleted, time, ord) VALUES(?1,'',0,?3,'',1,?2,?4)
                          ON CONFLICT(id) DO UPDATE SET deleted=1, time=?2, ord=?4 WHERE excluded.ord > lines.ord",
-                        params![id, rec.time, rec.machine, ord],
-                    )?;
+                    )?
+                    .execute(params![id, rec.time, rec.machine, ord])?;
                 }
             }
         }
         if let Some(value) = rec.data.get("queue_change") {
             let change: QueueChange = serde_json::from_value(value.clone())?;
-            tx.execute(
+            tx.prepare_cached(
                 "INSERT INTO queue_entries(id,rec,deleted,ord) VALUES(?1,?2,?3,?4)
                 ON CONFLICT(id) DO UPDATE SET rec=?2,deleted=?3,ord=?4 WHERE excluded.ord>queue_entries.ord",
-                params![
-                    change.id,
-                    change.after.as_ref().map(serde_json::to_string).transpose()?,
-                    change.after.is_none() as i64,
-                    ord
-                ],
-            )?;
+            )?
+            .execute(params![
+                change.id,
+                change.after.as_ref().map(serde_json::to_string).transpose()?,
+                change.after.is_none() as i64,
+                ord
+            ])?;
         }
         self.derive_attestation(rec, !foreign)?;
         if !foreign {
             if let Some(a) = rec.data.get("attestation") {
                 if a["kind"] == "revoke" {
                     for id in rec.data["revokes"].as_array().into_iter().flatten().filter_map(|v| v.as_str()) {
-                        tx.execute("UPDATE approvals SET withdrawn=1 WHERE id=?1 AND uid=?2", params![id, rec.actor.uid as i64])?;
+                        tx.prepare_cached("UPDATE approvals SET withdrawn=1 WHERE id=?1 AND uid=?2")?
+                            .execute(params![id, rec.actor.uid as i64])?;
                     }
                 }
                 if a["kind"] == "approval"
                     && rec.data.get("declassify").is_none()
                     && !a["signer"].as_str().is_some_and(|s| s.starts_with("person:"))
                 {
-                    tx.execute(
-                        "INSERT OR IGNORE INTO approvals(id,state,uid,time) VALUES(?1,?2,?3,?4)",
-                        params![rec.id, a["subject"]["id"].as_str(), rec.actor.uid as i64, rec.time],
-                    )?;
+                    tx.prepare_cached("INSERT OR IGNORE INTO approvals(id,state,uid,time) VALUES(?1,?2,?3,?4)")?
+                        .execute(params![rec.id, a["subject"]["id"].as_str(), rec.actor.uid as i64, rec.time])?;
                 }
             }
         }
         if let Some(v) = rec.data.get("ref_change") {
             let ch: RefChange = serde_json::from_value(v.clone())?;
-            tx.execute(
-                "INSERT OR IGNORE INTO ref_history(id,name,rec,ord) VALUES(?1,?2,?3,?4)",
-                params![rec.id, ch.name, serde_json::to_string(&ch)?, ord],
-            )?;
-            tx.execute(
+            tx.prepare_cached("INSERT OR IGNORE INTO ref_history(id,name,rec,ord) VALUES(?1,?2,?3,?4)")?.execute(params![
+                rec.id,
+                ch.name,
+                serde_json::to_string(&ch)?,
+                ord
+            ])?;
+            tx.prepare_cached(
                 "INSERT INTO refs(name,target,expires_at,deleted,ord) VALUES(?1,?2,?3,?4,?5)
                 ON CONFLICT(name) DO UPDATE SET target=?2,expires_at=?3,deleted=?4,ord=?5 WHERE excluded.ord > refs.ord",
-                params![
-                    ch.name,
-                    ch.after.as_ref().map(|v| &v.target),
-                    ch.after.as_ref().and_then(|v| v.expires_at),
-                    ch.after.is_none() as i64,
-                    ord
-                ],
-            )?;
+            )?
+            .execute(params![
+                ch.name,
+                ch.after.as_ref().map(|v| &v.target),
+                ch.after.as_ref().and_then(|v| v.expires_at),
+                ch.after.is_none() as i64,
+                ord
+            ])?;
         }
         let d = &rec.data;
         let s = |k: &str| d.get(k).and_then(|v| v.as_str()).map(|x| x.to_string());
         match rec.op.as_str() {
             "machine" => {
-                tx.execute(
-                    "INSERT OR IGNORE INTO machines(id, name, public_key) VALUES(?1,?2,?3)",
-                    params![rec.machine, s("name"), s("public_key")],
-                )?;
+                tx.prepare_cached("INSERT OR IGNORE INTO machines(id, name, public_key) VALUES(?1,?2,?3)")?.execute(params![
+                    rec.machine,
+                    s("name"),
+                    s("public_key")
+                ])?;
                 if !foreign {
-                    tx.execute(
-                        "INSERT OR IGNORE INTO trusted(machine, public_key, by) VALUES(?1,?2,?1)",
-                        params![rec.machine, s("public_key")],
-                    )?;
+                    tx.prepare_cached("INSERT OR IGNORE INTO trusted(machine, public_key, by) VALUES(?1,?2,?1)")?
+                        .execute(params![rec.machine, s("public_key")])?;
                 }
             }
             "machine.trust" => {
-                tx.execute(
-                    "INSERT OR IGNORE INTO trusted(machine, public_key, by) VALUES(?1,?2,?3)",
-                    params![s("machine"), s("public_key"), rec.machine],
-                )?;
+                tx.prepare_cached("INSERT OR IGNORE INTO trusted(machine, public_key, by) VALUES(?1,?2,?3)")?
+                    .execute(params![s("machine"), s("public_key"), rec.machine])?;
             }
             "project"
             | "config"
@@ -507,90 +533,104 @@ impl Db {
                     for (k, v) in obj {
                         let key = if foreign && local_key(k) { format!("{k}@{}", rec.machine) } else { k.clone() };
                         let val = if v.is_null() { None } else { Some(v.to_string()) };
-                        tx.execute(
+                        tx.prepare_cached(
                             "INSERT INTO config(key, value, ord) VALUES(?1,?2,?3)
                              ON CONFLICT(key) DO UPDATE SET value=?2, ord=?3 WHERE excluded.ord > config.ord",
-                            params![key, val, ord],
-                        )?;
+                        )?
+                        .execute(params![key, val, ord])?;
                     }
                 }
             }
             "tag" => {
-                tx.execute(
-                    "INSERT INTO tags(name, state, message, time, deleted, ord) VALUES(?1,?2,?3,?4,0,?5)
-                     ON CONFLICT(name) DO UPDATE SET state=?2, message=?3, time=?4, deleted=0, ord=?5 WHERE excluded.ord > tags.ord",
+                tx.prepare_cached("INSERT INTO tags(name, state, message, time, deleted, ord) VALUES(?1,?2,?3,?4,0,?5)
+                     ON CONFLICT(name) DO UPDATE SET state=?2, message=?3, time=?4, deleted=0, ord=?5 WHERE excluded.ord > tags.ord")?.execute(
                     params![s("name"), s("state"), s("message"), rec.time, ord],
                 )?;
             }
             "tag.delete" => {
-                tx.execute(
+                tx.prepare_cached(
                     "INSERT INTO tags(name, state, message, time, deleted, ord) VALUES(?1,NULL,NULL,?2,1,?3)
                      ON CONFLICT(name) DO UPDATE SET deleted=1, time=?2, ord=?3 WHERE excluded.ord > tags.ord",
-                    params![s("name"), rec.time, ord],
-                )?;
+                )?
+                .execute(params![s("name"), rec.time, ord])?;
             }
             "remote.remove" => {
                 // The refs of the removed remote become tombstones (state NULL), so an older import
                 // record that arrives later cannot bring them back.
                 if let Some(remote) = s("remote") {
-                    tx.execute(
+                    tx.prepare_cached(
                         "UPDATE remote_refs SET state=NULL, gcommit=NULL, time=?2, ord=?3
                          WHERE substr(name, 1, length(?1)+1)=?1||'/' AND ord < ?3",
-                        params![remote, rec.time, ord],
-                    )?;
+                    )?
+                    .execute(params![remote, rec.time, ord])?;
                 }
             }
             "import" | "remote.ref" => {
                 if let (Some(name), Some(st)) = (s("ref"), s("state")) {
-                    tx.execute(
-                        "INSERT INTO remote_refs(name, state, gcommit, time, ord) VALUES(?1,?2,?3,?4,?5)
-                         ON CONFLICT(name) DO UPDATE SET state=?2, gcommit=?3, time=?4, ord=?5 WHERE excluded.ord > remote_refs.ord",
+                    tx.prepare_cached("INSERT INTO remote_refs(name, state, gcommit, time, ord) VALUES(?1,?2,?3,?4,?5)
+                         ON CONFLICT(name) DO UPDATE SET state=?2, gcommit=?3, time=?4, ord=?5 WHERE excluded.ord > remote_refs.ord")?.execute(
                         params![name, st, s("commit"), rec.time, ord],
                     )?;
                 }
                 if let (Some(st), Some(c)) = (s("state"), s("commit")) {
-                    tx.execute("INSERT OR IGNORE INTO git_map(state, gcommit) VALUES(?1,?2)", params![st, c])?;
+                    tx.prepare_cached("INSERT OR IGNORE INTO git_map(state, gcommit) VALUES(?1,?2)")?.execute(params![st, c])?;
                 }
             }
             "export" => {
-                tx.execute(
+                tx.prepare_cached(
                     "INSERT INTO exports(id, state, remote, branch, gcommit, status, time, ord) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
                      ON CONFLICT(id) DO UPDATE SET state=?2, remote=?3, branch=?4, gcommit=?5, status=?6, time=?7, ord=?8
                      WHERE excluded.ord > exports.ord",
-                    params![s("export"), s("state"), s("remote"), s("branch"), s("commit"), s("status"), rec.time, ord],
-                )?;
+                )?
+                .execute(params![
+                    s("export"),
+                    s("state"),
+                    s("remote"),
+                    s("branch"),
+                    s("commit"),
+                    s("status"),
+                    rec.time,
+                    ord
+                ])?;
                 if let (Some(st), Some(c)) = (s("state"), s("commit")) {
-                    tx.execute("INSERT OR IGNORE INTO git_map(state, gcommit) VALUES(?1,?2)", params![st, c])?;
+                    tx.prepare_cached("INSERT OR IGNORE INTO git_map(state, gcommit) VALUES(?1,?2)")?.execute(params![st, c])?;
                 }
                 // The commits made for the ancestors of the exported state.
                 if let Some(m) = d.get("commits").and_then(|v| v.as_object()) {
                     for (st, c) in m {
                         if let Some(c) = c.as_str() {
-                            tx.execute("INSERT OR IGNORE INTO git_map(state, gcommit) VALUES(?1,?2)", params![st, c])?;
+                            tx.prepare_cached("INSERT OR IGNORE INTO git_map(state, gcommit) VALUES(?1,?2)")?
+                                .execute(params![st, c])?;
                         }
                     }
                 }
                 if s("status").as_deref() == Some("pushed") {
                     if let (Some(r), Some(b), Some(st), Some(c)) = (s("remote"), s("branch"), s("state"), s("commit")) {
-                        tx.execute(
-                            "INSERT INTO remote_refs(name, state, gcommit, time, ord) VALUES(?1,?2,?3,?4,?5)
-                             ON CONFLICT(name) DO UPDATE SET state=?2, gcommit=?3, time=?4, ord=?5 WHERE excluded.ord > remote_refs.ord",
+                        tx.prepare_cached("INSERT INTO remote_refs(name, state, gcommit, time, ord) VALUES(?1,?2,?3,?4,?5)
+                             ON CONFLICT(name) DO UPDATE SET state=?2, gcommit=?3, time=?4, ord=?5 WHERE excluded.ord > remote_refs.ord")?.execute(
                             params![format!("{r}/{b}"), st, c, rec.time, ord],
                         )?;
                     }
                 }
             }
             "check" => {
-                tx.execute(
+                tx.prepare_cached(
                     "INSERT OR IGNORE INTO checks(id, state, command, exit, time, actor) VALUES(?1,?2,?3,?4,?5,?6)",
-                    params![rec.id, s("state"), s("command"), d.get("exit").and_then(|v| v.as_i64()), rec.time, rec.actor.name],
-                )?;
+                )?
+                .execute(params![
+                    rec.id,
+                    s("state"),
+                    s("command"),
+                    d.get("exit").and_then(|v| v.as_i64()),
+                    rec.time,
+                    rec.actor.name
+                ])?;
             }
             "gc" => {
                 if let Some(arr) = d.get("deleted").and_then(|v| v.as_array()) {
                     for id in arr.iter().filter_map(|v| v.as_str()) {
                         if !foreign && !state_present(id) {
-                            tx.execute("UPDATE states SET deleted=1, present=0 WHERE id=?1", params![id])?;
+                            tx.prepare_cached("UPDATE states SET deleted=1, present=0 WHERE id=?1")?.execute(params![id])?;
                         }
                     }
                 }
@@ -601,7 +641,8 @@ impl Db {
                 // never drops one that an earlier record of the state gave it.
                 if let Some(st) = s("state") {
                     let row: Option<(String, String)> = tx
-                        .query_row("SELECT rec, machine FROM states WHERE id=?1", params![st], |r| Ok((r.get(0)?, r.get(1)?)))
+                        .prepare_cached("SELECT rec, machine FROM states WHERE id=?1")?
+                        .query_row(params![st], |r| Ok((r.get(0)?, r.get(1)?)))
                         .optional()?;
                     if let Some((raw, machine)) = row {
                         if machine == rec.machine {
@@ -632,26 +673,22 @@ impl Db {
                             }
                             v["layer_by"] = serde_json::json!(rec.actor.uid);
                             v["layer_shared"] = serde_json::json!(d.get("shared").and_then(|x| x.as_bool()).unwrap_or(false));
-                            tx.execute("UPDATE states SET rec=?2 WHERE id=?1", params![st, v.to_string()])?;
+                            tx.prepare_cached("UPDATE states SET rec=?2 WHERE id=?1")?.execute(params![st, v.to_string()])?;
                         }
                     }
                 }
             }
             // Approvals name users of this machine: only local records count.
             "approve" if !foreign && s("state").map(|x| crate::model::is_uuid(&x)).unwrap_or(false) => {
-                tx.execute(
-                    "INSERT OR IGNORE INTO approvals(id, state, uid, time) VALUES(?1,?2,?3,?4)",
-                    params![rec.id, s("state"), rec.actor.uid as i64, rec.time],
-                )?;
+                tx.prepare_cached("INSERT OR IGNORE INTO approvals(id, state, uid, time) VALUES(?1,?2,?3,?4)")?
+                    .execute(params![rec.id, s("state"), rec.actor.uid as i64, rec.time])?;
             }
             "approve.withdraw" if !foreign => {
-                tx.execute(
-                    "UPDATE approvals SET withdrawn=1 WHERE state=?1 AND uid=?2",
-                    params![s("state"), rec.actor.uid as i64],
-                )?;
+                tx.prepare_cached("UPDATE approvals SET withdrawn=1 WHERE state=?1 AND uid=?2")?
+                    .execute(params![s("state"), rec.actor.uid as i64])?;
             }
             "stash.drop" => {
-                tx.execute("UPDATE states SET dropped=1 WHERE id=?1", params![s("state")])?;
+                tx.prepare_cached("UPDATE states SET dropped=1 WHERE id=?1")?.execute(params![s("state")])?;
             }
             _ => {}
         }
@@ -659,11 +696,11 @@ impl Db {
         if let Some(st) = d.get("stack") {
             if let (Some(line), Some(layers)) = (st.get("line").and_then(|v| v.as_str()), st.get("layers")) {
                 let key = if foreign { format!("stack.{line}@{}", rec.machine) } else { format!("stack.{line}") };
-                tx.execute(
+                tx.prepare_cached(
                     "INSERT INTO config(key, value, ord) VALUES(?1,?2,?3)
                      ON CONFLICT(key) DO UPDATE SET value=?2, ord=?3 WHERE excluded.ord > config.ord",
-                    params![key, layers.to_string(), ord],
-                )?;
+                )?
+                .execute(params![key, layers.to_string(), ord])?;
             }
         }
         self.owners_after(rec, &ord, foreign)?;
@@ -673,19 +710,23 @@ impl Db {
     /// The subvolume UUID of a cache snapshot, from the signed save.caches record.
     pub fn cache_uuid(&self, state: &str, name: &str) -> Result<Option<String>> {
         let raw: Option<String> =
-            self.conn.query_row("SELECT rec FROM states WHERE id=?1", params![state], |r| r.get(0)).optional()?;
+            self.conn.prepare_cached("SELECT rec FROM states WHERE id=?1")?.query_row(params![state], |r| r.get(0)).optional()?;
         Ok(raw
             .and_then(|r| serde_json::from_str::<serde_json::Value>(&r).ok())
             .and_then(|v| v["layer_uuids"][name].as_str().or_else(|| v["cache_uuids"][name].as_str()).map(|s| s.to_string())))
     }
 
     pub fn trusted(&self, machine: &str) -> Result<Option<String>> {
-        Ok(self.conn.query_row("SELECT public_key FROM trusted WHERE machine=?1", params![machine], |r| r.get(0)).optional()?)
+        Ok(self
+            .conn
+            .prepare_cached("SELECT public_key FROM trusted WHERE machine=?1")?
+            .query_row(params![machine], |r| r.get(0))
+            .optional()?)
     }
 
     pub fn state(&self, id: &str) -> Result<Option<StateRec>> {
         let raw: Option<String> =
-            self.conn.query_row("SELECT rec FROM states WHERE id=?1", params![id], |r| r.get(0)).optional()?;
+            self.conn.prepare_cached("SELECT rec FROM states WHERE id=?1")?.query_row(params![id], |r| r.get(0)).optional()?;
         Ok(match raw {
             Some(r) => Some(serde_json::from_str(&r)?),
             None => None,
@@ -694,7 +735,7 @@ impl Db {
 
     /// Every state id, with whether it is auxiliary (cache or derived): one query for a history walk.
     pub fn state_auxiliary(&self) -> Result<Vec<(String, bool)>> {
-        let mut st = self.conn.prepare("SELECT id, kind IN (?1, ?2) FROM states")?;
+        let mut st = self.conn.prepare_cached("SELECT id, kind IN (?1, ?2) FROM states")?;
         let v = st
             .query_map(params![kind_str(StateKind::Cache), kind_str(StateKind::Derived)], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0))
@@ -705,7 +746,7 @@ impl Db {
 
     /// Every parent edge (state, parent), each state's parents in order: one query for a history walk.
     pub fn parent_edges(&self) -> Result<Vec<(String, String)>> {
-        let mut st = self.conn.prepare("SELECT state, parent FROM parents ORDER BY state, ord")?;
+        let mut st = self.conn.prepare_cached("SELECT state, parent FROM parents ORDER BY state, ord")?;
         let v = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?.collect::<Result<Vec<_>, _>>()?;
         Ok(v)
     }
@@ -713,30 +754,27 @@ impl Db {
     pub fn state_flags(&self, id: &str) -> Result<Option<(bool, bool)>> {
         Ok(self
             .conn
-            .query_row("SELECT present, deleted FROM states WHERE id=?1", params![id], |r| {
-                Ok((r.get::<_, i64>(0)? != 0, r.get::<_, i64>(1)? != 0))
-            })
+            .prepare_cached("SELECT present, deleted FROM states WHERE id=?1")?
+            .query_row(params![id], |r| Ok((r.get::<_, i64>(0)? != 0, r.get::<_, i64>(1)? != 0)))
             .optional()?)
     }
 
     pub fn set_present(&self, id: &str, present: bool) -> Result<()> {
-        self.conn.execute(
-            "UPDATE states SET present=?2, deleted=CASE WHEN ?2=1 THEN 0 ELSE deleted END WHERE id=?1",
-            params![id, present as i64],
-        )?;
+        self.conn
+            .prepare_cached("UPDATE states SET present=?2, deleted=CASE WHEN ?2=1 THEN 0 ELSE deleted END WHERE id=?1")?
+            .execute(params![id, present as i64])?;
         Ok(())
     }
 
     pub fn states_by_prefix(&self, prefix: &str) -> Result<Vec<String>> {
-        let mut st = self.conn.prepare("SELECT id FROM states WHERE display LIKE ?1 || '%' LIMIT 3")?;
+        let mut st = self.conn.prepare_cached("SELECT id FROM states WHERE display LIKE ?1 || '%' LIMIT 3")?;
         let v = st.query_map(params![prefix], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
         Ok(v)
     }
 
     /// Users of this machine whose approval of the exact subject still stands.
     pub fn approvals(&self, state: &str) -> Result<Vec<(u32, i64)>> {
-        let mut st = self.conn.prepare(
-            "SELECT a.uid,MAX(json_extract(a.rec,'$.time')) FROM attestations a
+        let mut st = self.conn.prepare_cached("SELECT a.uid,MAX(json_extract(a.rec,'$.time')) FROM attestations a
             WHERE (a.local=1 OR EXISTS (SELECT 1 FROM approvals p WHERE p.id=a.id)) AND a.subject=?1 AND a.kind='approval' AND json_extract(a.rec,'$.signer') NOT LIKE 'person:%'
             AND NOT EXISTS (SELECT 1 FROM records scoped WHERE scoped.id=a.id AND json_type(scoped.raw,'$.r.data.declassify') IS NOT NULL) AND NOT EXISTS
             (SELECT 1 FROM attestation_revocations r WHERE r.target=a.id AND r.machine=a.machine AND r.uid=a.uid AND r.ord>a.ord)
@@ -748,19 +786,20 @@ impl Db {
 
     /// The machine that made a state.
     pub fn state_machine(&self, id: &str) -> Result<Option<String>> {
-        Ok(self.conn.query_row("SELECT machine FROM states WHERE id=?1", params![id], |r| r.get(0)).optional()?)
+        Ok(self.conn.prepare_cached("SELECT machine FROM states WHERE id=?1")?.query_row(params![id], |r| r.get(0)).optional()?)
     }
 
     /// The state whose signed record names subvolume `uuid`.
     pub fn state_by_subvol(&self, uuid: &str) -> Result<Option<String>> {
         Ok(self
             .conn
-            .query_row("SELECT id FROM states WHERE json_extract(rec, '$.subvol')=?1 LIMIT 1", params![uuid], |r| r.get(0))
+            .prepare_cached("SELECT id FROM states WHERE json_extract(rec, '$.subvol')=?1 LIMIT 1")?
+            .query_row(params![uuid], |r| r.get(0))
             .optional()?)
     }
 
     pub fn present_states(&self) -> Result<Vec<(String, bool)>> {
-        let mut st = self.conn.prepare("SELECT id, deleted FROM states WHERE present=1")?;
+        let mut st = self.conn.prepare_cached("SELECT id, deleted FROM states WHERE present=1")?;
         let v = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0)))?.collect::<Result<Vec<_>, _>>()?;
         Ok(v)
     }
@@ -768,7 +807,7 @@ impl Db {
     /// The present states of a cache overlay that name the project state they were saved with
     /// (`cache_of`), newest first: (state, project state).
     pub fn cache_states(&self) -> Result<Vec<(String, String)>> {
-        let mut st = self.conn.prepare(
+        let mut st = self.conn.prepare_cached(
             "SELECT id, json_extract(rec, '$.cache_of') FROM states
              WHERE present=1 AND deleted=0 AND json_extract(rec, '$.cache_of') IS NOT NULL ORDER BY time DESC",
         )?;
@@ -779,7 +818,8 @@ impl Db {
     /// The newest local states, by time, whose folders the rollback check looks at.
     #[cfg_attr(not(all(target_os = "linux", not(feature = "overlayfs"))), allow(dead_code))]
     pub fn newest_present_states(&self, n: usize) -> Result<Vec<String>> {
-        let mut st = self.conn.prepare("SELECT id FROM states WHERE present=1 AND deleted=0 ORDER BY time DESC LIMIT ?1")?;
+        let mut st =
+            self.conn.prepare_cached("SELECT id FROM states WHERE present=1 AND deleted=0 ORDER BY time DESC LIMIT ?1")?;
         let v = st.query_map(params![n as i64], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
         Ok(v)
     }
@@ -791,36 +831,37 @@ impl Db {
     pub fn line_by_name(&self, name: &str) -> Result<Option<Line>> {
         Ok(self
             .conn
-            .query_row(
+            .prepare_cached(
                 "SELECT id, name, owner, machine, head FROM lines WHERE name=?1 AND deleted=0 ORDER BY time DESC LIMIT 1",
-                params![name],
-                Self::line_row,
-            )
+            )?
+            .query_row(params![name], Self::line_row)
             .optional()?)
     }
 
     /// True when the project line `id` is deleted (its row is kept with the deleted flag).
     pub fn line_deleted(&self, id: &str) -> Result<bool> {
         let deleted: Option<i64> =
-            self.conn.query_row("SELECT deleted FROM lines WHERE id=?1", params![id], |r| r.get(0)).optional()?;
+            self.conn.prepare_cached("SELECT deleted FROM lines WHERE id=?1")?.query_row(params![id], |r| r.get(0)).optional()?;
         Ok(deleted == Some(1))
     }
 
     pub fn line_by_id(&self, id: &str) -> Result<Option<Line>> {
         Ok(self
             .conn
-            .query_row("SELECT id, name, owner, machine, head FROM lines WHERE id=?1", params![id], Self::line_row)
+            .prepare_cached("SELECT id, name, owner, machine, head FROM lines WHERE id=?1")?
+            .query_row(params![id], Self::line_row)
             .optional()?)
     }
 
     pub fn lines(&self) -> Result<Vec<Line>> {
-        let mut st = self.conn.prepare("SELECT id, name, owner, machine, head FROM lines WHERE deleted=0 ORDER BY name")?;
+        let mut st =
+            self.conn.prepare_cached("SELECT id, name, owner, machine, head FROM lines WHERE deleted=0 ORDER BY name")?;
         let v = st.query_map([], Self::line_row)?.collect::<Result<Vec<_>, _>>()?;
         Ok(v)
     }
 
     pub fn line_heads(&self, line: &str) -> Result<Vec<(String, String)>> {
-        let mut st = self.conn.prepare("SELECT machine, head FROM line_heads WHERE line=?1")?;
+        let mut st = self.conn.prepare_cached("SELECT machine, head FROM line_heads WHERE line=?1")?;
         let v = st
             .query_map(params![line], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
             .collect::<Result<Vec<_>, _>>()?;
@@ -829,7 +870,7 @@ impl Db {
 
     /// States of a kind for a line, newest first.
     pub fn line_states(&self, line: &str, kind: StateKind) -> Result<Vec<StateRec>> {
-        let mut st = self.conn.prepare(
+        let mut st = self.conn.prepare_cached(
             "SELECT rec FROM states WHERE line=?1 AND kind=?2 AND deleted=0 AND dropped=0 ORDER BY time DESC, id DESC",
         )?;
         let v = st.query_map(params![line, kind_str(kind)], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
@@ -837,11 +878,15 @@ impl Db {
     }
 
     pub fn tag(&self, name: &str) -> Result<Option<String>> {
-        Ok(self.conn.query_row("SELECT state FROM tags WHERE name=?1 AND deleted=0", params![name], |r| r.get(0)).optional()?)
+        Ok(self
+            .conn
+            .prepare_cached("SELECT state FROM tags WHERE name=?1 AND deleted=0")?
+            .query_row(params![name], |r| r.get(0))
+            .optional()?)
     }
 
     pub fn tags(&self) -> Result<Vec<(String, String, Option<String>)>> {
-        let mut st = self.conn.prepare("SELECT name, state, message FROM tags WHERE deleted=0 ORDER BY name")?;
+        let mut st = self.conn.prepare_cached("SELECT name, state, message FROM tags WHERE deleted=0 ORDER BY name")?;
         let v = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<Result<Vec<_>, _>>()?;
         Ok(v)
     }
@@ -849,23 +894,29 @@ impl Db {
     pub fn remote_ref(&self, name: &str) -> Result<Option<(String, Option<String>)>> {
         Ok(self
             .conn
-            .query_row("SELECT state, gcommit FROM remote_refs WHERE name=?1 AND state IS NOT NULL", params![name], |r| Ok((r.get(0)?, r.get(1)?)))
+            .prepare_cached("SELECT state, gcommit FROM remote_refs WHERE name=?1 AND state IS NOT NULL")?
+            .query_row(params![name], |r| Ok((r.get(0)?, r.get(1)?)))
             .optional()?)
     }
 
     pub fn remote_refs(&self) -> Result<Vec<(String, String, Option<String>)>> {
-        let mut st = self.conn.prepare("SELECT name, state, gcommit FROM remote_refs WHERE state IS NOT NULL ORDER BY name")?;
+        let mut st =
+            self.conn.prepare_cached("SELECT name, state, gcommit FROM remote_refs WHERE state IS NOT NULL ORDER BY name")?;
         let v = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<Result<Vec<_>, _>>()?;
         Ok(v)
     }
 
     pub fn git_commit_of(&self, state: &str) -> Result<Option<String>> {
-        Ok(self.conn.query_row("SELECT gcommit FROM git_map WHERE state=?1 LIMIT 1", params![state], |r| r.get(0)).optional()?)
+        Ok(self
+            .conn
+            .prepare_cached("SELECT gcommit FROM git_map WHERE state=?1 LIMIT 1")?
+            .query_row(params![state], |r| r.get(0))
+            .optional()?)
     }
 
     /// One Git commit of each state that has one.
     pub fn git_map(&self) -> Result<std::collections::HashMap<String, String>> {
-        let mut st = self.conn.prepare("SELECT state, gcommit FROM git_map")?;
+        let mut st = self.conn.prepare_cached("SELECT state, gcommit FROM git_map")?;
         let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
         let mut map = std::collections::HashMap::new();
         for row in rows {
@@ -877,7 +928,7 @@ impl Db {
 
     /// Every Git commit that `git_map` holds for a state, squash commits included.
     pub fn git_commits_of(&self, state: &str) -> Result<Vec<String>> {
-        let mut st = self.conn.prepare("SELECT gcommit FROM git_map WHERE state=?1")?;
+        let mut st = self.conn.prepare_cached("SELECT gcommit FROM git_map WHERE state=?1")?;
         let rows = st.query_map(params![state], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -885,8 +936,7 @@ impl Db {
     /// The squash commits (`push --squash`) named by the exports of a state. Records written
     /// before the `squash` flag name their squash commit by a parent; the flag is absent there.
     pub fn squash_commits_of(&self, state: &str) -> Result<Vec<String>> {
-        let mut st = self.conn.prepare(
-            "SELECT json_extract(raw, '$.r.data.commit') FROM records WHERE op='export' AND json_extract(raw, '$.r.data.state')=?1
+        let mut st = self.conn.prepare_cached("SELECT json_extract(raw, '$.r.data.commit') FROM records WHERE op='export' AND json_extract(raw, '$.r.data.state')=?1
              AND (json_extract(raw, '$.r.data.squash')=1 OR json_type(raw, '$.r.data.parent')='text')",
         )?;
         let rows = st.query_map(params![state], |r| r.get::<_, Option<String>>(0))?.collect::<Result<Vec<_>, _>>()?;
@@ -894,13 +944,12 @@ impl Db {
     }
 
     pub fn has_git_history(&self) -> Result<bool> {
-        Ok(self.conn.query_row("SELECT EXISTS(SELECT 1 FROM git_map)", [], |r| r.get(0))?)
+        Ok(self.conn.prepare_cached("SELECT EXISTS(SELECT 1 FROM git_map)")?.query_row([], |r| r.get(0))?)
     }
 
     /// Exact Git objects are part of the signed import record, never a machine-local cache.
     pub fn git_import(&self, state: &str) -> Result<Option<serde_json::Value>> {
-        let raw: Option<String> = self.conn.query_row(
-            "SELECT json_extract(raw, '$.r.data.git') FROM records WHERE op='import' AND json_extract(raw, '$.r.data.state')=?1 AND json_type(raw, '$.r.data.git')='object' LIMIT 1",
+        let raw: Option<String> = self.conn.prepare_cached("SELECT json_extract(raw, '$.r.data.git') FROM records WHERE op='import' AND json_extract(raw, '$.r.data.state')=?1 AND json_type(raw, '$.r.data.git')='object' LIMIT 1")?.query_row(
             params![state], |r| r.get(0),
         ).optional()?;
         raw.map(|s| Ok(serde_json::from_str(&s)?)).transpose()
@@ -909,8 +958,7 @@ impl Db {
     /// True when the record of an imported state holds its Git objects (`git_import`), without
     /// parsing them.
     pub fn has_git_import(&self, state: &str) -> Result<bool> {
-        Ok(self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM records WHERE op='import' AND json_extract(raw, '$.r.data.state')=?1 AND json_type(raw, '$.r.data.git')='object')",
+        Ok(self.conn.prepare_cached("SELECT EXISTS(SELECT 1 FROM records WHERE op='import' AND json_extract(raw, '$.r.data.state')=?1 AND json_type(raw, '$.r.data.git')='object')")?.query_row(
             params![state],
             |r| r.get(0),
         )?)
@@ -918,7 +966,7 @@ impl Db {
 
     /// The Git commits of the imported states, sorted.
     pub fn import_commits(&self) -> Result<Vec<String>> {
-        let mut st = self.conn.prepare(
+        let mut st = self.conn.prepare_cached(
             "SELECT DISTINCT g.gcommit FROM git_map g JOIN states s ON s.id=g.state WHERE s.kind='import' ORDER BY g.gcommit",
         )?;
         let v = st.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
@@ -927,23 +975,24 @@ impl Db {
 
     /// The base states of the thin layers that are on disk (`bases` rows of present layers).
     pub fn present_layer_bases(&self) -> Result<Vec<String>> {
-        let mut st = self.conn.prepare("SELECT DISTINCT b.base FROM bases b JOIN states s ON s.id=b.state WHERE s.present=1")?;
+        let mut st =
+            self.conn.prepare_cached("SELECT DISTINCT b.base FROM bases b JOIN states s ON s.id=b.state WHERE s.present=1")?;
         let v = st.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
         Ok(v)
     }
 
     pub fn state_of_commit(&self, prefix: &str) -> Result<Vec<String>> {
         if prefix.len() == 40 {
-            let mut st = self.conn.prepare("SELECT DISTINCT state FROM git_map WHERE gcommit=?1")?;
+            let mut st = self.conn.prepare_cached("SELECT DISTINCT state FROM git_map WHERE gcommit=?1")?;
             return Ok(st.query_map(params![prefix], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?);
         }
-        let mut st = self.conn.prepare("SELECT DISTINCT state FROM git_map WHERE gcommit LIKE ?1 || '%' LIMIT 3")?;
+        let mut st = self.conn.prepare_cached("SELECT DISTINCT state FROM git_map WHERE gcommit LIKE ?1 || '%' LIMIT 3")?;
         let v = st.query_map(params![prefix], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
         Ok(v)
     }
 
     pub fn exports(&self) -> Result<Vec<(String, String, String, String, String, String)>> {
-        let mut st = self.conn.prepare("SELECT id, state, remote, branch, gcommit, status FROM exports ORDER BY time")?;
+        let mut st = self.conn.prepare_cached("SELECT id, state, remote, branch, gcommit, status FROM exports ORDER BY time")?;
         let v = st
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?
             .collect::<Result<Vec<_>, _>>()?;
@@ -952,7 +1001,7 @@ impl Db {
 
     /// Active value declassifications, across all state subjects in this project.
     pub fn declassifications(&self) -> Result<Vec<Record>> {
-        let mut st = self.conn.prepare("SELECT r.raw FROM attestations a JOIN records r ON r.id=a.id
+        let mut st = self.conn.prepare_cached("SELECT r.raw FROM attestations a JOIN records r ON r.id=a.id
             WHERE a.kind='approval' AND json_extract(r.raw,'$.r.data.declassify') IS NOT NULL
             AND NOT EXISTS (SELECT 1 FROM attestation_revocations v WHERE v.target=a.id AND v.machine=a.machine AND v.uid=a.uid AND v.ord>a.ord)")?;
         let raw = st.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
@@ -960,7 +1009,7 @@ impl Db {
     }
 
     pub fn checks(&self, state: &str) -> Result<Vec<(String, i64, i64, String)>> {
-        let mut st = self.conn.prepare("SELECT COALESCE(json_extract(r.raw,'$.r.data.check.command'),json_extract(r.raw,'$.r.data.command')),
+        let mut st = self.conn.prepare_cached("SELECT COALESCE(json_extract(r.raw,'$.r.data.check.command'),json_extract(r.raw,'$.r.data.command')),
             COALESCE(json_extract(r.raw,'$.r.data.check.exit'),json_extract(r.raw,'$.r.data.exit'),-1),r.time,json_extract(r.raw,'$.r.actor.name')
             FROM attestations a JOIN records r ON r.id=a.id WHERE a.subject=?1 AND a.kind='check'
             AND NOT EXISTS (SELECT 1 FROM attestation_revocations v WHERE v.target=a.id AND v.machine=a.machine AND v.uid=a.uid AND v.ord>a.ord)
@@ -975,7 +1024,7 @@ impl Db {
 
     /// Match command arguments, not their display text. With no requested exit, use the newest result.
     pub fn check_exit(&self, state: &str, argv: &[String], wanted_exit: Option<i64>) -> Result<Option<i64>> {
-        let mut statement=self.conn.prepare("SELECT COALESCE(json_extract(r.raw,'$.r.data.check'),json_extract(r.raw,'$.r.data'))
+        let mut statement=self.conn.prepare_cached("SELECT COALESCE(json_extract(r.raw,'$.r.data.check'),json_extract(r.raw,'$.r.data'))
             FROM attestations a JOIN records r ON r.id=a.id WHERE a.subject=?1 AND a.kind='check'
             AND NOT EXISTS (SELECT 1 FROM attestation_revocations v WHERE v.target=a.id AND v.machine=a.machine AND v.uid=a.uid AND v.ord>a.ord)
             ORDER BY a.ord DESC")?;
@@ -1030,8 +1079,7 @@ impl Db {
         };
         if let Some(a) = a {
             let signer = if a.signer.starts_with("person:") { &a.signer } else { &rec.machine };
-            self.conn.execute(
-                "INSERT INTO attestations(id,subject,kind,rec,machine,uid,ord,local) VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(id) DO UPDATE SET local=MAX(attestations.local,excluded.local)",
+            self.conn.prepare_cached("INSERT INTO attestations(id,subject,kind,rec,machine,uid,ord,local) VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(id) DO UPDATE SET local=MAX(attestations.local,excluded.local)")?.execute(
                 params![
                     a.attestation_id,
                     a.subject.id,
@@ -1044,17 +1092,18 @@ impl Db {
                 ],
             )?;
             if rec.op == "approve.withdraw" {
-                self.conn.execute("INSERT OR IGNORE INTO attestation_revocations(id,target,machine,uid,ord)
-                    SELECT ?1,id,?2,?3,?4 FROM attestations WHERE subject=?5 AND kind='approval' AND machine=?2 AND uid=?3 AND ord<?4",
+                self.conn.prepare_cached("INSERT OR IGNORE INTO attestation_revocations(id,target,machine,uid,ord)
+                    SELECT ?1,id,?2,?3,?4 FROM attestations WHERE subject=?5 AND kind='approval' AND machine=?2 AND uid=?3 AND ord<?4")?.execute(
                     params![a.attestation_id,rec.machine,rec.actor.uid as i64,ord,a.subject.id])?;
             }
             if a.kind == "revoke" {
                 for id in rec.data["revokes"].as_array().into_iter().flatten().filter_map(|v| v.as_str()) {
-                    self.conn.execute(
-                        "INSERT OR IGNORE INTO attestation_revocations(id,target,machine,uid,ord)
+                    self.conn
+                        .prepare_cached(
+                            "INSERT OR IGNORE INTO attestation_revocations(id,target,machine,uid,ord)
                          SELECT ?1,?2,?3,?4,?5 FROM attestations WHERE id=?2 AND subject=?6",
-                        params![a.attestation_id, id, signer, rec.actor.uid as i64, ord, a.subject.id],
-                    )?;
+                        )?
+                        .execute(params![a.attestation_id, id, signer, rec.actor.uid as i64, ord, a.subject.id])?;
                 }
             }
         }
@@ -1062,26 +1111,30 @@ impl Db {
     }
 
     pub fn attestation(&self, id: &str) -> Result<Option<Attestation>> {
-        let raw: Option<String> =
-            self.conn.query_row("SELECT rec FROM attestations WHERE id=?1", params![id], |r| r.get(0)).optional()?;
+        let raw: Option<String> = self
+            .conn
+            .prepare_cached("SELECT rec FROM attestations WHERE id=?1")?
+            .query_row(params![id], |r| r.get(0))
+            .optional()?;
         raw.map(|r| Ok(serde_json::from_str(&r)?)).transpose()
     }
 
     pub fn attestations(&self, subject: &str, kind: Option<&str>) -> Result<Vec<Attestation>> {
-        let mut st =
-            self.conn.prepare("SELECT rec FROM attestations WHERE subject=?1 AND (?2 IS NULL OR kind=?2) ORDER BY ord,id")?;
+        let mut st = self
+            .conn
+            .prepare_cached("SELECT rec FROM attestations WHERE subject=?1 AND (?2 IS NULL OR kind=?2) ORDER BY ord,id")?;
         let raw = st.query_map(params![subject, kind], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
         raw.into_iter().map(|r| Ok(serde_json::from_str(&r)?)).collect()
     }
 
     pub fn own_attestations(&self, subject: &str, machine: &str, uid: u32, kind: Option<&str>) -> Result<Vec<String>> {
-        let mut st = self.conn.prepare("SELECT id FROM attestations WHERE subject=?1 AND machine=?2 AND uid=?3 AND (?4 IS NULL OR kind=?4) AND kind<>'revoke'")?;
+        let mut st = self.conn.prepare_cached("SELECT id FROM attestations WHERE subject=?1 AND machine=?2 AND uid=?3 AND (?4 IS NULL OR kind=?4) AND kind<>'revoke'")?;
         let v = st.query_map(params![subject, machine, uid as i64, kind], |r| r.get(0))?.collect::<Result<Vec<_>, _>>()?;
         Ok(v)
     }
 
     pub fn refs(&self, prefix: &str, now: i64) -> Result<Vec<RefState>> {
-        let mut st = self.conn.prepare("SELECT name,target,expires_at FROM refs WHERE deleted=0 AND substr(name,1,length(?1))=?1 AND (expires_at IS NULL OR expires_at>?2) ORDER BY name")?;
+        let mut st = self.conn.prepare_cached("SELECT name,target,expires_at FROM refs WHERE deleted=0 AND substr(name,1,length(?1))=?1 AND (expires_at IS NULL OR expires_at>?2) ORDER BY name")?;
         let v = st
             .query_map(params![prefix, now], |r| Ok(RefState { name: r.get(0)?, target: r.get(1)?, expires_at: r.get(2)? }))?
             .collect::<Result<Vec<_>, _>>()?;
@@ -1093,8 +1146,9 @@ impl Db {
     }
 
     pub fn expired_refs(&self, now: i64) -> Result<Vec<RefState>> {
-        let mut st =
-            self.conn.prepare("SELECT name,target,expires_at FROM refs WHERE deleted=0 AND expires_at<=?1 ORDER BY name")?;
+        let mut st = self
+            .conn
+            .prepare_cached("SELECT name,target,expires_at FROM refs WHERE deleted=0 AND expires_at<=?1 ORDER BY name")?;
         let v = st
             .query_map(params![now], |r| Ok(RefState { name: r.get(0)?, target: r.get(1)?, expires_at: r.get(2)? }))?
             .collect::<Result<Vec<_>, _>>()?;
@@ -1102,13 +1156,13 @@ impl Db {
     }
 
     pub fn ref_log(&self, name: &str) -> Result<Vec<RefChange>> {
-        let mut st = self.conn.prepare("SELECT rec FROM ref_history WHERE name=?1 ORDER BY ord DESC,id DESC")?;
+        let mut st = self.conn.prepare_cached("SELECT rec FROM ref_history WHERE name=?1 ORDER BY ord DESC,id DESC")?;
         let raw = st.query_map(params![name], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
         raw.into_iter().map(|r| Ok(serde_json::from_str(&r)?)).collect()
     }
 
     pub fn queue_entries(&self, target: Option<&str>) -> Result<Vec<QueueEntry>> {
-        let mut st=self.conn.prepare("SELECT rec FROM queue_entries WHERE deleted=0 AND (?1 IS NULL OR json_extract(rec,'$.target_line')=?1) ORDER BY json_extract(rec,'$.time'),id")?;
+        let mut st=self.conn.prepare_cached("SELECT rec FROM queue_entries WHERE deleted=0 AND (?1 IS NULL OR json_extract(rec,'$.target_line')=?1) ORDER BY json_extract(rec,'$.time'),id")?;
         let rows = st.query_map(params![target], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
         rows.into_iter().map(|raw| Ok(serde_json::from_str(&raw)?)).collect()
     }
@@ -1116,19 +1170,21 @@ impl Db {
     pub fn queue_entry(&self, id: &str) -> Result<Option<QueueEntry>> {
         let raw: Option<String> = self
             .conn
-            .query_row("SELECT rec FROM queue_entries WHERE id=?1 AND deleted=0", params![id], |r| r.get(0))
+            .prepare_cached("SELECT rec FROM queue_entries WHERE id=?1 AND deleted=0")?
+            .query_row(params![id], |r| r.get(0))
             .optional()?;
         raw.map(|raw| Ok(serde_json::from_str(&raw)?)).transpose()
     }
 
     pub fn change_versions(&self, id: &str) -> Result<Vec<StateRec>> {
-        let mut st = self.conn.prepare("SELECT rec FROM states WHERE json_extract(rec,'$.change_id')=?1 ORDER BY time,id")?;
+        let mut st =
+            self.conn.prepare_cached("SELECT rec FROM states WHERE json_extract(rec,'$.change_id')=?1 ORDER BY time,id")?;
         let raw = st.query_map(params![id], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
         raw.into_iter().map(|r| Ok(serde_json::from_str(&r)?)).collect()
     }
 
     pub fn changes(&self) -> Result<Vec<String>> {
-        let mut st = self.conn.prepare("SELECT DISTINCT json_extract(rec,'$.change_id') FROM states WHERE json_extract(rec,'$.change_id') IS NOT NULL ORDER BY 1")?;
+        let mut st = self.conn.prepare_cached("SELECT DISTINCT json_extract(rec,'$.change_id') FROM states WHERE json_extract(rec,'$.change_id') IS NOT NULL ORDER BY 1")?;
         let v = st.query_map([], |r| r.get(0))?.collect::<Result<Vec<_>, _>>()?;
         Ok(v)
     }
@@ -1136,7 +1192,8 @@ impl Db {
     pub fn config(&self, key: &str) -> Result<Option<serde_json::Value>> {
         let v: Option<String> = self
             .conn
-            .query_row("SELECT value FROM config WHERE key=?1", params![key], |r| r.get::<_, Option<String>>(0))
+            .prepare_cached("SELECT value FROM config WHERE key=?1")?
+            .query_row(params![key], |r| r.get::<_, Option<String>>(0))
             .optional()?
             .flatten();
         Ok(match v {
@@ -1146,26 +1203,29 @@ impl Db {
     }
 
     pub fn config_all(&self) -> Result<Vec<(String, String)>> {
-        let mut st = self.conn.prepare("SELECT key, value FROM config WHERE value IS NOT NULL ORDER BY key")?;
+        let mut st = self.conn.prepare_cached("SELECT key, value FROM config WHERE value IS NOT NULL ORDER BY key")?;
         let v = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<Vec<_>, _>>()?;
         Ok(v)
     }
 
     /// Overlay policy and metadata follow their signed records across machines.
     pub fn overlay_config(&self, key: &str) -> Result<Option<serde_json::Value>> {
+        // `key` and `key@<machine>`. The range ('@' to 'A') reads the primary key index; a
+        // `substr` test read the whole table on every call.
         let value: Option<Option<String>> = self
             .conn
-            .query_row(
-                "SELECT value FROM config WHERE key=?1 OR substr(key,1,length(?1)+1)=?1||'@' ORDER BY ord DESC LIMIT 1",
-                params![key],
-                |row| row.get(0),
-            )
+            .prepare_cached("SELECT value FROM config WHERE key=?1 OR (key>=?1||'@' AND key<?1||'A') ORDER BY ord DESC LIMIT 1")?
+            .query_row(params![key], |row| row.get(0))
             .optional()?;
         value.flatten().map(|value| serde_json::from_str(&value).map_err(Into::into)).transpose()
     }
 
     pub fn machine_key(&self, id: &str) -> Result<Option<String>> {
-        Ok(self.conn.query_row("SELECT public_key FROM machines WHERE id=?1", params![id], |r| r.get(0)).optional()?)
+        Ok(self
+            .conn
+            .prepare_cached("SELECT public_key FROM machines WHERE id=?1")?
+            .query_row(params![id], |r| r.get(0))
+            .optional()?)
     }
 
     /// A machine by its short id (the display form, random part first), full id or a unique name.
@@ -1184,14 +1244,14 @@ impl Db {
     }
 
     pub fn machines(&self) -> Result<Vec<(String, String)>> {
-        let mut st = self.conn.prepare("SELECT id, COALESCE(name, '') FROM machines ORDER BY id")?;
+        let mut st = self.conn.prepare_cached("SELECT id, COALESCE(name, '') FROM machines ORDER BY id")?;
         let v = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<Vec<_>, _>>()?;
         Ok(v)
     }
 
     pub fn record(&self, id: &str) -> Result<Option<Record>> {
         let raw: Option<String> =
-            self.conn.query_row("SELECT raw FROM records WHERE id=?1", params![id], |r| r.get(0)).optional()?;
+            self.conn.prepare_cached("SELECT raw FROM records WHERE id=?1")?.query_row(params![id], |r| r.get(0)).optional()?;
         match raw {
             Some(l) => Ok(Some(crate::oplog::parse_line(&l, None)?.record)),
             None => Ok(None),
@@ -1200,7 +1260,7 @@ impl Db {
 
     /// The head a line was created at, from its `line.create` record.
     pub fn line_start(&self, line: &str) -> Result<Option<String>> {
-        let mut st = self.conn.prepare("SELECT raw FROM records WHERE op='line.create' AND instr(raw, ?1) > 0")?;
+        let mut st = self.conn.prepare_cached("SELECT raw FROM records WHERE op='line.create' AND instr(raw, ?1) > 0")?;
         let v = st.query_map(params![line], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
         for l in v {
             let rec = crate::oplog::parse_line(&l, None)?.record;
@@ -1213,53 +1273,51 @@ impl Db {
 
     /// Records newest first.
     pub fn records(&self, limit: usize) -> Result<Vec<Record>> {
-        let mut st = self.conn.prepare("SELECT raw FROM records ORDER BY time DESC, seq DESC LIMIT ?1")?;
+        let mut st = self.conn.prepare_cached("SELECT raw FROM records ORDER BY time DESC, seq DESC LIMIT ?1")?;
         let v = st.query_map(params![limit as i64], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
         v.into_iter().map(|l| Ok(crate::oplog::parse_line(&l, None)?.record)).collect()
     }
 
     /// The newest records whose text names `needle` (a line id), newest first, at most `limit`.
     pub fn records_naming(&self, needle: &str, limit: usize) -> Result<Vec<Record>> {
-        let mut st = self.conn.prepare("SELECT raw FROM records WHERE instr(raw, ?1) > 0 ORDER BY time DESC, seq DESC LIMIT ?2")?;
-        let v = st
-            .query_map(params![needle, limit as i64], |r| r.get::<_, String>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut st =
+            self.conn.prepare_cached("SELECT raw FROM records WHERE instr(raw, ?1) > 0 ORDER BY time DESC, seq DESC LIMIT ?2")?;
+        let v = st.query_map(params![needle, limit as i64], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
         v.into_iter().map(|l| Ok(crate::oplog::parse_line(&l, None)?.record)).collect()
     }
 
     /// The records with one operation name, oldest first.
     pub fn records_with_op(&self, op: &str) -> Result<Vec<Record>> {
-        let mut st = self.conn.prepare("SELECT raw FROM records WHERE op=?1 ORDER BY time, machine, seq")?;
+        let mut st = self.conn.prepare_cached("SELECT raw FROM records WHERE op=?1 ORDER BY time, machine, seq")?;
         let v = st.query_map(params![op], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
         v.into_iter().map(|l| Ok(crate::oplog::parse_line(&l, None)?.record)).collect()
     }
 
     /// The trusted machines and their public keys (hex).
     pub fn trusted_keys(&self) -> Result<Vec<(String, String)>> {
-        let mut st = self.conn.prepare("SELECT machine, public_key FROM trusted")?;
+        let mut st = self.conn.prepare_cached("SELECT machine, public_key FROM trusted")?;
         let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
 
     /// The records from `time` on, oldest first (`layr follow` reads its exports of the last days).
     pub fn records_since(&self, time: i64) -> Result<Vec<Record>> {
-        let mut st = self.conn.prepare("SELECT raw FROM records WHERE time>=?1 ORDER BY time")?;
+        let mut st = self.conn.prepare_cached("SELECT raw FROM records WHERE time>=?1 ORDER BY time")?;
         let v = st.query_map(params![time], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
         v.into_iter().map(|l| Ok(crate::oplog::parse_line(&l, None)?.record)).collect()
     }
 
     pub fn max_seqs(&self) -> Result<Vec<(String, u64)>> {
-        let mut st = self.conn.prepare("SELECT machine, MAX(seq) FROM records GROUP BY machine")?;
+        let mut st = self.conn.prepare_cached("SELECT machine, MAX(seq) FROM records GROUP BY machine")?;
         let v = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64)))?.collect::<Result<Vec<_>, _>>()?;
         Ok(v)
     }
 
     pub fn undone(&self, id: &str) -> Result<bool> {
-        let n: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM records WHERE op='undo' AND json_extract(raw, '$.r.data.undo')=?1",
-            params![id],
-            |r| r.get(0),
-        )?;
+        let n: i64 = self
+            .conn
+            .prepare_cached("SELECT COUNT(*) FROM records WHERE op='undo' AND json_extract(raw, '$.r.data.undo')=?1")?
+            .query_row(params![id], |r| r.get(0))?;
         Ok(n > 0)
     }
 }
@@ -1660,10 +1718,13 @@ mod tests {
             r.op = op.into();
             r.data = serde_json::json!({"state":state,"command":"true","exit":0});
             let raw = crate::oplog::sign_line(&r, &key).unwrap();
-            Connection::open(&path).unwrap().execute(
-                "INSERT INTO records(id, machine, seq, time, op, actor_uid, raw) VALUES(?1,?2,?3,?4,?5,?6,?7)",
-                params![r.id, r.machine, r.seq as i64, r.time, r.op, r.actor.uid as i64, raw],
-            ).unwrap();
+            Connection::open(&path)
+                .unwrap()
+                .execute(
+                    "INSERT INTO records(id, machine, seq, time, op, actor_uid, raw) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                    params![r.id, r.machine, r.seq as i64, r.time, r.op, r.actor.uid as i64, raw],
+                )
+                .unwrap();
         };
         late(1, "approve");
         assert_eq!(Db::open(&path).unwrap().attestations(state, None).unwrap().len(), 1);

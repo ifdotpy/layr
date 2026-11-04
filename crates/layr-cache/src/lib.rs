@@ -9,12 +9,10 @@ pub mod sweep;
 
 use anyhow::{anyhow, bail, Context, Result};
 use layr_adapter::{CacheAdapter, Host};
-use std::io;
+use std::io::{self, Read};
 use std::path::Path;
-use std::process::{Command, Stdio};
-use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 pub use layr_adapter::Outcome;
@@ -88,37 +86,71 @@ pub fn output(cmd: &mut Command) -> Result<Vec<u8>> {
     run(cmd, None)
 }
 
+/// Time the output pipes get after their command ended. A pipe that is still open then belongs to a process
+/// outside the command's group, so the command fails instead of waiting for it.
+const PIPE_GRACE: Duration = Duration::from_secs(5);
+
+/// Reads `pipe` to its end on a thread. The bytes arrive on the returned channel.
+pub(crate) fn drain(pipe: Option<impl Read + Send + 'static>) -> mpsc::Receiver<Vec<u8>> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = pipe {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        let _ = tx.send(buf);
+    });
+    rx
+}
+
+/// The bytes of a pipe that `drain` reads, after its command ended.
+pub(crate) fn pipe_end(rx: &mpsc::Receiver<Vec<u8>>, program: &str) -> Result<Vec<u8>> {
+    rx.recv_timeout(PIPE_GRACE).map_err(|_| {
+        anyhow!("{program}: a pipe stayed open after the command ended; a process outside its group holds it")
+    })
+}
+
+/// Waits for `child`. At `until` its process group is killed. Returns the status and whether the limit passed.
+/// Without a limit it waits for the child.
+pub(crate) fn wait_child(child: &mut Child, until: Option<Instant>) -> Result<(ExitStatus, bool)> {
+    let Some(until) = until else { return Ok((child.wait()?, false)) };
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok((status, false));
+        }
+        if Instant::now() >= until {
+            kill_group(child.id());
+            return Ok((child.wait()?, true));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// The stdout of a command that stops at `until`: its process group is killed then, and the run is an error.
-/// A failed command is an error with its stderr. The command reads no input.
+/// A failed command is an error with its stderr. The command reads no input. The run does not wait for a pipe
+/// that a process outside the group keeps open: after the command ended, the pipes get `PIPE_GRACE`.
 pub fn run(cmd: &mut Command, until: Option<Instant>) -> Result<Vec<u8>> {
     let program = cmd.get_program().to_string_lossy().into_owned();
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let child = cmd.spawn().with_context(|| format!("cannot start {program}"))?;
-    let pid = child.id();
-    let late = Arc::new(AtomicBool::new(false));
-    let (done, waiting) = mpsc::channel::<()>();
-    let timer = until.map(|t| {
-        let late = late.clone();
-        std::thread::spawn(move || {
-            if let Err(RecvTimeoutError::Timeout) = waiting.recv_timeout(t.saturating_duration_since(Instant::now())) {
-                late.store(true, Ordering::SeqCst);
-                kill_group(pid);
-            }
-        })
-    });
-    let out = child.wait_with_output();
-    drop(done);
-    if let Some(timer) = timer {
-        let _ = timer.join();
-    }
-    let out = out.with_context(|| format!("cannot wait for {program}"))?;
-    if late.load(Ordering::SeqCst) {
+    let mut child = cmd.spawn().with_context(|| format!("cannot start {program}"))?;
+    let (out, err) = (drain(child.stdout.take()), drain(child.stderr.take()));
+    let (status, late) = wait_child(&mut child, until).with_context(|| format!("cannot wait for {program}"))?;
+    if late {
         bail!("{program} reached its time limit");
     }
-    if !out.status.success() {
-        bail!("{program} failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+    let stdout = pipe_end(&out, &program)?;
+    let stderr = pipe_end(&err, &program)?;
+    if !status.success() {
+        bail!("{program} failed: {}", String::from_utf8_lossy(&stderr).trim());
     }
-    Ok(out.stdout)
+    Ok(stdout)
+}
+
+/// The host of the retest commands: the cargo listings and metadata stop at the limit. `LAYR_RETEST_CARGO_TIMEOUT`
+/// (seconds) sets it, and the default is 600.
+pub fn retest_host() -> LocalHost {
+    let secs = std::env::var("LAYR_RETEST_CARGO_TIMEOUT").ok().and_then(|s| s.parse().ok()).unwrap_or(600);
+    LocalHost::new(Duration::from_secs(secs))
 }
 
 /// Kills the process `pid` and the process group named by it (a child that is a group leader).

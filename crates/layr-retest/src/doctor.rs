@@ -229,7 +229,7 @@ fn prune_findings(root: &Path) -> Vec<Finding> {
                     build.join("` and `")
                 )));
             }
-            layr_cache::cargo::Listed::Busy => out.push(ok(format!("prune: the {profile} build lock is busy; the check is skipped"))),
+            layr_cache::cargo::Listed::Busy(_) => out.push(ok(format!("prune: the {profile} build lock is busy; the check is skipped"))),
             layr_cache::cargo::Listed::Fresh(_) => {}
         }
     }
@@ -359,8 +359,7 @@ pub fn check(root: &Path) -> Vec<Finding> {
     }
     f.extend(prune_findings(root));
 
-    let meta: Option<Value> = out(layr_cache::cargo::cargo_cmd().args(["metadata", "--no-deps", "--format-version", "1"]))
-        .and_then(|s| serde_json::from_str(&s).ok());
+    let meta: Option<Value> = layr_cache::cargo::metadata(&crate::retest_host(), root).ok();
     let Some(meta) = meta else {
         f.push(warn("cargo metadata failed; fix the workspace first"));
         return f;

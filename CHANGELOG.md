@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.1](https://github.com/ifdotpy/layr/compare/v0.22.0...v0.22.1) (2026-11-04)
+
+
+### Performance
+
+* **gc:** Plan gc --repair before the project lock and read overlays once ([#210](https://github.com/ifdotpy/layr/issues/210)) ([0c9ef96](https://github.com/ifdotpy/layr/commit/0c9ef9694b36aa1beef0790134aac0b23f6f9940)), closes [#194](https://github.com/ifdotpy/layr/issues/194)
+
 ## [0.22.0](https://github.com/ifdotpy/layr/compare/v0.21.0...v0.22.0) (2026-11-04)
 
 
