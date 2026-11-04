@@ -1016,12 +1016,42 @@ impl<'a> Project<'a> {
         if !db_file(&dir).is_file() {
             bail!("project '{name}' not found");
         }
-        let db = Db::open_for(&db_file(&dir), read)?;
+        let path = db_file(&dir);
+        let overlay = name.contains('%');
+        let identity = if overlay && crate::overlay_handles::active() {
+            Some(crate::overlay_handles::identity(&path)?)
+        } else { None };
+        let cached = if overlay { crate::overlay_handles::get(&path, read)? } else { None };
+        let was_cached = cached.is_some();
+        let db = match cached {
+            Some(db) => db,
+            None => {
+                if overlay { crate::overlay_handles::prepare_open()?; }
+                Db::open_for(&path, read)?
+            }
+        };
         let mut p = Project { store, name: name.to_string(), dir, id: String::new(), db };
         p.finish_schema_upgrade()?;
         crate::rootcheck::check_project(&p)?;
         p.id = p.project_id()?;
-        crate::free::register(store, name, p.db.conn.clone());
+        if overlay {
+            if let Some(identity) = identity {
+                if crate::overlay_handles::identity(&path)? != identity {
+                    bail!("overlay database {} changed while opening", path.display());
+                }
+                if !was_cached {
+                    let schema = Db::validated_cache_cookie(&p.db.conn)?;
+                    crate::overlay_handles::insert_if_missing(&path, identity, schema, read, &p.db)?;
+                }
+            }
+            if crate::overlay_handles::active() {
+                crate::free::register_overlay(store, name);
+            } else {
+                crate::free::register(store, name, p.db.conn.clone());
+            }
+        } else {
+            crate::free::register(store, name, p.db.conn.clone());
+        }
         #[cfg(target_os = "macos")]
         if crate::apfs_commit::pending(&p)? {
             // Wait for a live commit, or recover the index after an interrupted one.

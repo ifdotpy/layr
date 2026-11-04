@@ -264,6 +264,16 @@ pub const COMMANDS: &[&str] = &[
     "cherry-pick", "rebase", "revert", "checkout", "switch", "person", "mount", "daemon", "follow", "volume", "project",
 ];
 
+/// Commands audited for exclusive, command-scoped overlay database leases. Expand this switch
+/// only after auditing nested overlay opens and error propagation in the added command.
+pub fn cache_overlay_handles(argv: &[String]) -> bool {
+    match (argv.first().map(String::as_str), argv.get(1).map(String::as_str)) {
+        (Some("gc"), _) => argv.iter().any(|arg| arg == "--repair"),
+        (Some("overlay"), Some("list")) => true,
+        _ => false,
+    }
+}
+
 pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
     crate::repo::begin_command();
     let (cmd, rest) = match argv.first() {

@@ -1417,6 +1417,18 @@ pub fn repair_table(repo: &Repo, free: bool, diff: Option<(Vec<crate::owners::Ro
 /// states are freed, expired refs are released and the side caches are trimmed. The storage of
 /// the freed states moves after the lock (`free::finish_project`), then the trash is emptied.
 /// With `dry`, nothing changes: it prints what it would free.
+/// Legacy periodic repair warns about overlay upkeep errors and continues with the other passes.
+fn uncached_overlay_upkeep(
+    removed: impl FnOnce() -> Result<()>,
+    planned: impl FnOnce() -> Result<()>,
+    lru: impl FnOnce() -> Result<u64>,
+    mut warn: impl FnMut(String),
+) {
+    if let Err(e) = removed() { warn(format!("warning: removed cache overlays stay until the next gc: {e:#}")); }
+    if let Err(e) = planned() { warn(format!("warning: overlays: old states stay until the next gc: {e:#}")); }
+    if let Err(e) = lru() { warn(format!("warning: cache size limits not applied: {e:#}")); }
+}
+
 fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) -> Result<usize> {
     if dry {
         let c = snapshot(repo, || owners_check(repo))?;
@@ -1481,16 +1493,17 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) ->
         }
         // Cache overlay lines of deleted lines (their states go below), and overlays with a
         // history limit (docs/cache-overlays.md).
-        if let Err(e) = repo.free_removed_overlays(ctx) {
-            eprintln!("warning: removed cache overlays stay until the next gc: {e:#}");
-        }
-        match overlays {
-            Ok(plan) => repo.commit_overlay_plan(ctx, plan),
-            Err(e) => eprintln!("warning: overlays: old states stay until the next gc: {e:#}"),
-        }
-        // Folder overlays with an LRU limit.
-        if let Err(e) = repo.cache_gc_lru() {
-            eprintln!("warning: cache size limits not applied: {e:#}");
+        if crate::overlay_handles::active() {
+            repo.free_removed_overlays(ctx)?;
+            repo.commit_overlay_plan(ctx, overlays?)?;
+            repo.cache_gc_lru()?;
+        } else {
+            uncached_overlay_upkeep(
+                || repo.free_removed_overlays(ctx),
+                || overlays.and_then(|plan| repo.commit_overlay_plan(ctx, plan)),
+                || repo.cache_gc_lru(),
+                |message| eprintln!("{message}"),
+            );
         }
         #[cfg(target_os = "macos")]
         {
@@ -2803,6 +2816,45 @@ pub(crate) fn human_size(n: u64) -> String {
         format!("{n} B")
     } else {
         format!("{v:.1} {}", units[i])
+    }
+}
+
+#[cfg(test)]
+mod overlay_upkeep_tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    #[test]
+    fn uncached_periodic_repair_warns_and_continues_after_removed_overlay_fails() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("layr-repair-removed-{}", ids::new_id()));
+        let ctx = Ctx {
+            store: crate::store::Store::open(&dir)?,
+            caller: crate::ctx::Caller::from_uid(0),
+            cwd: dir.clone(),
+            env: Default::default(),
+            out: RefCell::new(Box::new(std::io::sink())),
+        };
+        let project_dir = ctx.store.project_dir("p")?;
+        std::fs::create_dir_all(project_dir.join("meta/db"))?;
+        let db = crate::db::Db::open(&crate::store::db_file(&project_dir))?;
+        db.conn.execute("INSERT INTO config(key,value,ord) VALUES ('overlay.missing.removed', ?1, '1')", [serde_json::to_string("root")?])?;
+        std::fs::create_dir_all(ctx.store.project_dir("p%missing")?)?;
+        let repo = Repo { p: Project { store: &ctx.store, name: "p".into(), dir: project_dir, id: "parent".into(), db }, ctx: None };
+        let calls = RefCell::new(Vec::new());
+        let mut warnings = Vec::new();
+        uncached_overlay_upkeep(
+            || { calls.borrow_mut().push("removed"); repo.free_removed_overlays(&ctx) },
+            || { calls.borrow_mut().push("planned"); Ok(()) },
+            || { calls.borrow_mut().push("lru"); Ok(0) },
+            |warning| warnings.push(warning),
+        );
+        assert_eq!(*calls.borrow(), ["removed", "planned", "lru"]);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("warning:") && warnings[0].contains("missing"));
+        drop(repo);
+        drop(ctx);
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
     }
 }
 
