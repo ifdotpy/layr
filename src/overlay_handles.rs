@@ -10,6 +10,7 @@ use std::rc::Rc;
 struct Entry {
     pid: u32,
     identity: (u64, u64),
+    schema: (i64, i64),
     read: bool,
     used: u64,
     conn: Option<Rc<rusqlite::Connection>>,
@@ -77,7 +78,8 @@ pub fn get(path: &Path, read: bool) -> Result<Option<Db>> {
                 if !conn.is_autocommit() {
                     bail!("overlay database {} has an open transaction", path.display());
                 }
-                if entry.identity == id && (read || !entry.read) {
+                if entry.identity == id && (read || !entry.read)
+                    && Db::cache_schema_cookie(conn)? == entry.schema && !Db::cache_has_legacy(conn)? {
                     entry.used = cache.clock;
                     return Ok(Some(Db { conn: conn.clone(), stale: false }));
                 }
@@ -106,13 +108,13 @@ pub fn prepare_open() -> Result<()> {
     })
 }
 
-pub fn insert_if_missing(path: &Path, read: bool, db: &Db) -> Result<()> {
+pub fn insert_if_missing(path: &Path, identity: (u64, u64), read: bool, db: &Db) -> Result<()> {
     CACHE.with(|cache| {
         let mut cache = cache.try_borrow_mut().context("overlay handle cache already borrowed")?;
         if let Some(cache) = cache.as_mut() {
             if cache.entries.contains_key(path) { return Ok(()); }
             cache.clock = cache.clock.wrapping_add(1);
-            cache.entries.insert(path.to_path_buf(), Entry { pid: std::process::id(), identity: identity(path)?, read, used: cache.clock, conn: Some(db.conn.clone()) });
+            cache.entries.insert(path.to_path_buf(), Entry { pid: std::process::id(), identity, schema: Db::cache_schema_cookie(&db.conn)?, read, used: cache.clock, conn: Some(db.conn.clone()) });
         }
         Ok(())
     })
@@ -135,17 +137,68 @@ mod tests {
         for path in &paths {
             prepare_open()?;
             let db = Db::open(path)?;
-            insert_if_missing(path, false, &db)?;
+            insert_if_missing(path, identity(path)?, false, &db)?;
         }
         assert!(get(&paths[0], false)?.is_none());
         let checked_out = get(&paths[1], false)?.context("missing second db")?;
         prepare_open()?;
         assert!(get(&paths[1], false).is_err());
         let reopened = Db::open(&paths[0])?;
-        insert_if_missing(&paths[0], false, &reopened)?;
+        insert_if_missing(&paths[0], identity(&paths[0])?, false, &reopened)?;
         let value: String = reopened.conn.query_row("SELECT value FROM config WHERE key='test'", [], |r| r.get(0))?;
         assert_eq!(value, "0");
         drop((checked_out, reopened, command));
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn changed_schema_invalidates_the_cache_and_uses_normal_migration() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("layr-overlay-schema-{}", crate::ids::new_id()));
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("db");
+        let command = Command::with_capacity(2);
+        let db = Db::open(&path)?;
+        insert_if_missing(&path, identity(&path)?, false, &db)?;
+        drop(db);
+        let other = rusqlite::Connection::open(&path)?;
+        other.pragma_update(None, "user_version", 0)?;
+        drop(other);
+        assert!(get(&path, false)?.is_none());
+        let migrated = Db::open_for(&path, false)?;
+        assert!(!migrated.stale);
+        let version: i64 = migrated.conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        assert_eq!(version, crate::db::SCHEMA_VERSION);
+        insert_if_missing(&path, identity(&path)?, false, &migrated)?;
+        drop(migrated);
+        let other = rusqlite::Connection::open(&path)?;
+        other.execute_batch("DROP INDEX records_time")?;
+        drop(other);
+        assert!(get(&path, false)?.is_none());
+        let repaired = Db::open_for(&path, false)?;
+        let exists: bool = repaired.conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='records_time')", [], |r| r.get(0))?;
+        assert!(exists);
+        drop((repaired, command));
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn replacement_between_validation_and_insertion_keeps_the_validated_identity() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("layr-overlay-insert-race-{}", crate::ids::new_id()));
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("db");
+        let replacement = dir.join("replacement");
+        let command = Command::with_capacity(2);
+        let db = Db::open(&path)?;
+        let validated = identity(&path)?;
+        let other = Db::open(&replacement)?;
+        drop(other);
+        std::fs::rename(&replacement, &path)?;
+        insert_if_missing(&path, validated, false, &db)?;
+        drop(db);
+        assert!(get(&path, false)?.is_none());
+        drop(command);
         std::fs::remove_dir_all(dir)?;
         Ok(())
     }
@@ -158,7 +211,7 @@ mod tests {
         let replacement = dir.join("replacement");
         let command = Command::begin();
         let db = Db::open(&path)?;
-        insert_if_missing(&path, false, &db)?;
+        insert_if_missing(&path, identity(&path)?, false, &db)?;
         drop(db);
         let other = Db::open(&replacement)?;
         drop(other);
@@ -172,7 +225,7 @@ mod tests {
     #[test]
     fn inherited_entry_is_not_closed() -> Result<()> {
         let conn = Rc::new(rusqlite::Connection::open_in_memory()?);
-        let entry = Entry { pid: std::process::id().wrapping_add(1), identity: (0, 0), read: false, used: 0, conn: Some(conn.clone()) };
+        let entry = Entry { pid: std::process::id().wrapping_add(1), identity: (0, 0), schema: (0, 0), read: false, used: 0, conn: Some(conn.clone()) };
         drop(entry);
         assert_eq!(Rc::strong_count(&conn), 2);
         Ok(())
@@ -185,7 +238,7 @@ mod tests {
         let path = dir.join("db");
         let _command = Command::begin();
         let db = Db::open(&path)?;
-        insert_if_missing(&path, false, &db)?;
+        insert_if_missing(&path, identity(&path)?, false, &db)?;
         assert!(get(&path, false).is_err());
         db.conn.execute_batch("BEGIN")?;
         drop(db);

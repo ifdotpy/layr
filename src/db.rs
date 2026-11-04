@@ -164,6 +164,19 @@ impl Db {
         Ok(db)
     }
 
+    /// A schema change cookie changes on DDL even when user_version is left unchanged.
+    pub(crate) fn cache_schema_cookie(conn: &Connection) -> Result<(i64, i64)> {
+        let schema = conn.query_row("PRAGMA schema_version", [], |r| r.get(0))?;
+        let version = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        Ok((schema, version))
+    }
+
+    /// Legacy records require the ordinary open path, which imports or rebuilds their evidence.
+    pub(crate) fn cache_has_legacy(conn: &Connection) -> Result<bool> {
+        Ok(conn.prepare_cached(&format!("SELECT EXISTS(SELECT 1 FROM records WHERE {LEGACY_OPS})"))?
+            .query_row([], |r| r.get(0))?)
+    }
+
     /// SQLite reports these extended codes when a read-only WAL needs writable recovery.
     fn needs_wal_recovery(error: &anyhow::Error) -> bool {
         matches!(error.downcast_ref::<rusqlite::Error>(),

@@ -1038,8 +1038,8 @@ impl<'a> Project<'a> {
                 if crate::overlay_handles::identity(&path)? != identity {
                     bail!("overlay database {} changed while opening", path.display());
                 }
+                crate::overlay_handles::insert_if_missing(&path, identity, read, &p.db)?;
             }
-            crate::overlay_handles::insert_if_missing(&path, read, &p.db)?;
             if crate::overlay_handles::active() {
                 crate::free::register_overlay(store, name);
             } else {

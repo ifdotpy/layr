@@ -740,6 +740,9 @@ impl<'a> Repo<'a> {
         for entry in std::fs::read_dir(self.p.dir.join("meta/overlays")).into_iter().flatten().flatten() {
             names.insert(entry.file_name().to_string_lossy().into_owned());
         }
+        if !crate::overlay_handles::active() {
+            return Ok(names.into_iter().filter(|n| self.overlay_info(n).ok().flatten().is_some()).collect());
+        }
         let mut found = Vec::new();
         for name in names {
             if self.overlay_info(&name)?.is_some() { found.push(name); }
@@ -748,6 +751,12 @@ impl<'a> Repo<'a> {
     }
 
     pub fn visible_overlay_names(&self, ctx: &Ctx) -> Result<Vec<String>> {
+        if !crate::overlay_handles::active() {
+            return Ok(self.overlay_names()?.into_iter().filter(|name| {
+                !self.overlay_info(name).ok().flatten().is_some_and(|i| i.hidden)
+                    || self.reads_overlay(name, ctx.caller.uid, ctx.caller.gid).unwrap_or(false)
+            }).collect());
+        }
         let mut visible = Vec::new();
         for name in self.overlay_names()? {
             if !self.overlay_info(&name)?.is_some_and(|i| i.hidden)
@@ -1313,11 +1322,19 @@ impl<'a> Repo<'a> {
     /// in since the plan was made (the lines and stacks are the same). An overlay whose own records
     /// changed is read again under its lock. A failure leaves old states for the next gc.
     pub fn commit_overlay_plan(&self, ctx: &Ctx, plan: OverlayPlan) -> Result<()> {
+        let mut errors = Vec::new();
         for c in plan.overlays {
             let name = c.name.clone();
-            self.commit_overlay_clean(ctx, c, &plan.lines, &plan.stacks)
-                .with_context(|| format!("repair overlay '{name}'"))?;
+            if let Err(error) = self.commit_overlay_clean(ctx, c, &plan.lines, &plan.stacks)
+                .with_context(|| format!("repair overlay '{name}'")) {
+                if crate::overlay_handles::active() {
+                    errors.push(format!("{error:#}"));
+                } else {
+                    eprintln!("warning: overlay '{name}': old states stay until the next gc: {error:#}");
+                }
+            }
         }
+        if !errors.is_empty() { bail!("{}", errors.join("; ")); }
         Ok(())
     }
 
