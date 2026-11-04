@@ -667,6 +667,12 @@ impl<'a> Repo<'a> {
             uid,
             crate::cache_hook::WARM_LIMIT,
         );
+        // Only a damage is recorded here: a mark from an earlier prune stays until a prune succeeds.
+        if !done.folder_ok {
+            if let Err(e) = self.set_damaged(line, folder, true) {
+                eprintln!("layr: build {folder}: cannot record the damaged state: {e:#}");
+            }
+        }
         if !done.log.is_empty() {
             eprintln!("layr: build {}", done.log);
         }

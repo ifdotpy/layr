@@ -144,8 +144,8 @@ pub fn run_mode(mode: Mode, setting: Option<&str>, folder: &Path, uid: u32, limi
     }
 }
 
-/// The build of the standard commands in a worker. A killed build leaves the folder consistent (a build tool
-/// writes its outputs whole), so a timeout needs no recovery.
+/// The build of the standard commands in a worker. After a stop at the hard limit the adapter's `recover` runs,
+/// as after a prune (cargo has nothing to restore; pnpm puts its copy back).
 #[allow(clippy::too_many_arguments)]
 pub fn warm_with(launch: &Launch, env: &[(&str, &str)], setting: Option<&str>, folder: &Path, uid: u32, limit: Duration, wait: Duration) -> Done {
     let shown = folder.display();
@@ -154,7 +154,19 @@ pub fn warm_with(launch: &Launch, env: &[(&str, &str)], setting: Option<&str>, f
         Run::Report(r) => format!("{shown}: not built with {}: {}", r.adapter, r.reason),
         Run::Start(e) => format!("{shown}: not built: cannot start the cache hook: {e}"),
         Run::Failed(e) => format!("{shown}: not built: {e}"),
-        Run::Killed => format!("{shown}: not built: timed out after {} s, processes stopped", limit.as_secs()),
+        Run::Killed => {
+            // A stopped install can leave a half folder (pnpm): the adapter puts its copy back, as after a prune.
+            let restore = execute(launch, env, "recover", setting, folder, uid, RECOVER_LIMIT, RECOVER_LIMIT + GRACE);
+            return match restore {
+                Run::Report(r) if r.folder_ok => Done {
+                    log: format!("{shown}: not built: timed out after {} s, processes stopped", limit.as_secs()),
+                    folder_ok: true,
+                },
+                Run::Report(r) => Done { log: damaged(folder, &r.reason), folder_ok: false },
+                Run::Start(e) | Run::Failed(e) => Done { log: damaged(folder, &e), folder_ok: false },
+                Run::Killed => Done { log: damaged(folder, "the recovery timed out"), folder_ok: false },
+            };
+        }
     };
     Done { log, folder_ok: true }
 }
