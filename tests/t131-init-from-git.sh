@@ -35,7 +35,9 @@ ok "no project was made by the refused calls" test ! -e "$LAYR_ROOT/projects/co"
 cd $T || exit 1
 # Direct: the test helper `l` expects the line main in the store, and this one moves.
 out=$("$LAYR" init co --from-git $T/co 2>&1)
-eq "init succeeds" 0 "$?"
+rc=$?
+[ $rc -eq 0 ] || printf '%s\n' "$out"
+eq "init succeeds" 0 "$rc"
 has "it names the kept checkout" "co.before-layr" "$out"
 ok "the checkout is kept beside" test -d $T/co.before-layr/.git
 cd $T/co || exit 1
