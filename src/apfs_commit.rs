@@ -119,8 +119,14 @@ pub fn recover(p: &Project) -> Result<()> {
             // A save of a live process (this one too) is not recovered: it is in progress.
             Some(j) if crate::free::holder_alive(&j.holder) => {}
             Some(j) => recover_pending(p, &dir, &j)?,
-            // No readable journal: the folder cannot be a save in progress.
-            None => p.trash(&dir)?,
+            // No readable journal: a temporary folder of a creator that is still running is in progress
+            // (the journal is written right after the folder appears). Any other folder is removed.
+            None => {
+                let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+                if crate::store::creator_gone(name) == Some(true) {
+                    p.trash(&dir)?;
+                }
+            }
         }
     }
     Ok(())
@@ -332,7 +338,8 @@ impl<'p, 's> PendingCommit<'p, 's> {
         fs::create_dir_all(&root)?;
         // The journal is complete before the folder appears under its state name: a folder without a
         // journal is never a save in progress.
-        let tmp = root.join(format!(".{id}"));
+        // A temporary folder named by its creator (`<id>.<pid>`): recovery leaves it while that process runs.
+        let tmp = root.join(crate::store::temp_name());
         fs::create_dir(&tmp)?;
         let mut journal = PendingJournal {
             version: 1,
@@ -759,6 +766,30 @@ mod tests {
         let p = Project::open(&store, "p")?;
         assert!(!pending(&p)?);
         assert_eq!(fs::metadata(p.stage_path(&line))?.ino(), stage_inode);
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a case-sensitive APFS test volume"]
+    fn recovery_keeps_a_temporary_folder_of_a_live_creator_and_removes_a_dead_one() -> Result<()> {
+        let s = Sandbox::new();
+        let store = Store::open(&s.0.join("store"))?;
+        let p = Project::create(&store, "p", &actor(), serde_json::json!({}))?;
+        let _lock = p.lock()?;
+        let root = pending_root(&p);
+        fs::create_dir_all(&root)?;
+        // A folder made by this process, before its journal exists (the window of `prepare`).
+        let live = root.join(format!("{}.{}", ids::new_id(), std::process::id()));
+        fs::create_dir(&live)?;
+        // A folder of a process that is gone, without a journal.
+        let mut child = std::process::Command::new("true").spawn()?;
+        child.wait()?;
+        let dead = root.join(format!("{}.{}", ids::new_id(), child.id()));
+        fs::create_dir(&dead)?;
+        recover(&p)?;
+        assert!(live.is_dir(), "a live creator's temporary folder is kept");
+        assert!(!dead.exists(), "a dead creator's temporary folder is removed");
+        fs::remove_dir(&live)?;
         Ok(())
     }
 }
