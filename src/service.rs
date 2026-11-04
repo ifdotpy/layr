@@ -324,7 +324,6 @@ fn handle(sock: UnixStream, root: &Path, registry_uids: &[u32]) -> i32 {
 pub fn run_as(argv: Vec<String>, caller: Caller, cwd: PathBuf, env: HashMap<String, String>, root: &Path) -> i32 {
     crate::repo::begin_command();
     let metadata_read = crate::cmd::metadata_read(&argv);
-    let skip_free = metadata_read || argv.first().is_some_and(|arg| arg == "status");
     let store = match Store::open_for(root, metadata_read) {
         Ok(s) => s,
         Err(e) => {
@@ -351,11 +350,7 @@ pub fn run_as(argv: Vec<String>, caller: Caller, cwd: PathBuf, env: HashMap<Stri
         }
     };
     // The free step: after the commit and the store lock (docs/ownership.md).
-    if skip_free {
-        crate::free::finish_read(&ctx.store);
-    } else {
-        crate::free::finish(&ctx.store);
-    }
+    crate::free::finish(&ctx.store);
     code
 }
 

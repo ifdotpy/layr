@@ -21,7 +21,7 @@ thread_local! {
 pub(crate) const STATEMENT_CACHE_CAPACITY: usize = 256;
 
 pub struct Db {
-    pub conn: Connection,
+    pub conn: std::rc::Rc<Connection>,
     /// The derived tables are from an older schema: `rebuild` replaces them before use.
     pub stale: bool,
 }
@@ -111,7 +111,7 @@ impl Db {
                 let legacy = conn.prepare_cached(&format!("SELECT EXISTS(SELECT 1 FROM records WHERE {LEGACY_OPS})"))
                     .and_then(|mut stmt| stmt.query_row([], |r| r.get::<_, bool>(0))).unwrap_or(true);
                 if current && !legacy {
-                    return Ok(Db { conn, stale: false });
+                    return Ok(Db { conn: conn.into(), stale: false });
                 }
             }
         }
@@ -145,7 +145,7 @@ impl Db {
             }
             opened.map_err(|e| e.context(path.display().to_string()))?
         };
-        let db = Db { conn, stale };
+        let db = Db { conn: conn.into(), stale };
         // A stale database gets its legacy evidence from the rebuild (`derive`).
         if !stale {
             db.import_legacy_evidence()?;
@@ -1661,7 +1661,7 @@ mod tests {
     fn memory() -> Db {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(SCHEMA).unwrap();
-        Db { conn, stale: false }
+        Db { conn: conn.into(), stale: false }
     }
 
     #[test]

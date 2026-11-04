@@ -1009,18 +1009,22 @@ impl<'a> Project<'a> {
     }
 
     pub fn open(store: &'a Store, name: &str) -> Result<Project<'a>> {
+        Self::open_for(store, name, store.metadata_read)
+    }
+
+    pub(crate) fn open_for(store: &'a Store, name: &str, read: bool) -> Result<Project<'a>> {
         let _t = crate::trace::span("open project");
         let dir = store.project_dir(name)?;
         crate::rootcheck::check_project_folder(&dir)?;
         if !db_file(&dir).is_file() {
             bail!("project '{name}' not found");
         }
-        let db = Db::open_for(&db_file(&dir), store.metadata_read)?;
+        let db = Db::open_for(&db_file(&dir), read)?;
         let mut p = Project { store, name: name.to_string(), dir, id: String::new(), db };
         p.finish_schema_upgrade()?;
         crate::rootcheck::check_project(&p)?;
         p.id = p.project_id()?;
-        crate::free::register(store, name);
+        crate::free::register(store, name, p.db.conn.clone());
         #[cfg(target_os = "macos")]
         if crate::apfs_commit::pending(&p)? {
             // Wait for a live commit, or recover the index after an interrupted one.

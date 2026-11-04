@@ -37,7 +37,6 @@ pub fn metadata_read(argv: &[String]) -> bool {
         // Other rev-parse forms may populate the git object store.
         Some("rev-parse") => argv.len() == 2 && argv[1] == "head",
         Some("op") => matches!(argv.get(1).map(String::as_str), None | Some("log" | "show" | "export")),
-        Some("overlay") => matches!(argv.get(1).map(String::as_str), None | Some("list")),
         _ => false,
     }
 }
@@ -51,7 +50,7 @@ mod metadata_read_tests {
         let read = |args: &[&str]| metadata_read(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>());
         assert!(read(&["rev-parse", "head"]));
         assert!(read(&["op", "log", "--json"]));
-        assert!(read(&["overlay", "list", "--json"]));
+        assert!(!read(&["overlay", "list", "--json"]));
         assert!(!read(&["rev-parse", "head^{tree}"]));
         assert!(!read(&["op", "import"]));
         assert!(!read(&["overlay", "create"]));

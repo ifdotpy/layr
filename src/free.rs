@@ -7,28 +7,42 @@
 
 use crate::store::{Project, Store};
 use anyhow::Result;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
-/// Projects this process opened: `(store root, project name)`. `finish` frees their queues when
-/// the command ends and forgets them.
-static OPENED: Mutex<BTreeSet<(PathBuf, String)>> = Mutex::new(BTreeSet::new());
+// Keep the process-wide set for projects opened on other threads; SQLite connections themselves
+// remain on their owning thread. The uncommon cross-thread case opens a fresh read connection.
+static PROJECTS: Mutex<BTreeSet<(PathBuf, String)>> = Mutex::new(BTreeSet::new());
 
-/// Called when a project opens: its queue is checked at the end of the command.
-pub fn register(store: &Store, name: &str) {
-    if let Ok(mut opened) = OPENED.lock() {
-        opened.insert((store.root.clone(), name.to_string()));
+thread_local! {
+    /// Retain each project's connection until after pins are released, so the free check sees
+    /// the latest committed queue without paying for another SQLite open.
+    static OPENED: std::cell::RefCell<BTreeMap<(PathBuf, String), std::rc::Rc<rusqlite::Connection>>> =
+        const { std::cell::RefCell::new(BTreeMap::new()) };
+}
+
+#[cfg(test)]
+mod pending_tests {
+    #[test]
+    fn pending_checks_the_current_queue_and_pins() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE free_queue(state TEXT); CREATE TABLE owners(kind TEXT);").unwrap();
+        assert!(!super::pending(&conn));
+        conn.execute("INSERT INTO free_queue VALUES ('s')", []).unwrap();
+        assert!(super::pending(&conn));
+        conn.execute("DELETE FROM free_queue", []).unwrap();
+        conn.execute("INSERT INTO owners VALUES ('pin')", []).unwrap();
+        assert!(super::pending(&conn));
     }
 }
 
-/// Release any read pins and forget projects opened by a read command. A later mutating
-/// command will process the queue, including any frees created by releasing those pins.
-pub fn finish_read(store: &Store) {
-    release_held();
-    if let Ok(mut opened) = OPENED.lock() {
-        opened.retain(|(root, _)| *root != store.root);
+/// Called when a project opens: its queue is checked at the end of the command.
+pub fn register(store: &Store, name: &str, conn: std::rc::Rc<rusqlite::Connection>) {
+    if let Ok(mut projects) = PROJECTS.lock() {
+        projects.insert((store.root.clone(), name.to_string()));
     }
+    OPENED.with(|opened| { opened.borrow_mut().insert((store.root.clone(), name.to_string()), conn); });
 }
 
 /// The free step of the projects that this command opened. Errors wait for the next command
@@ -36,20 +50,28 @@ pub fn finish_read(store: &Store) {
 /// here, before any storage moves, when a queue is not empty (tests/t99-ownership-free.sh).
 pub fn finish(store: &Store) {
     release_held();
-    let names: Vec<String> = match OPENED.lock() {
-        Ok(mut opened) => {
-            let names = opened.iter().filter(|(root, _)| *root == store.root).map(|(_, n)| n.clone()).collect();
-            opened.retain(|(root, _)| *root != store.root);
-            names
+    let projects = match PROJECTS.lock() {
+        Ok(mut projects) => {
+            let keys: Vec<_> = projects.iter().filter(|(root, _)| *root == store.root).cloned().collect();
+            for key in &keys { projects.remove(key); }
+            keys
         }
         Err(_) => return,
     };
-    for name in names {
+    for (root, name) in projects {
+        let conn = OPENED.with(|opened| opened.borrow_mut().remove(&(root, name.clone())));
         // A project without pending work is not opened: an open prints its trace (LAYR_TRACE).
-        if !pending(store, &name) {
+        let has_pending = if let Some(conn) = conn {
+            pending(&conn)
+        } else {
+            store.project_dir(&name).ok().and_then(|dir| {
+                rusqlite::Connection::open_with_flags(crate::store::db_file(&dir), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()
+            }).is_some_and(|conn| pending(&conn))
+        };
+        if !has_pending {
             continue;
         }
-        let Ok(p) = Project::open(store, &name) else { continue };
+        let Ok(p) = Project::open_for(store, &name, false) else { continue };
         if std::env::var_os("LAYR_TEST_EXIT_AFTER_COMMIT").is_some() && !p.db.queued_frees().unwrap_or_default().is_empty() {
             eprintln!("test: exit after the commit, before the free step of {name}");
             std::process::exit(86);
@@ -59,22 +81,16 @@ pub fn finish(store: &Store) {
         }
     }
     // Opening the projects above registered them again: they are done.
-    if let Ok(mut opened) = OPENED.lock() {
-        opened.retain(|(root, _)| *root != store.root);
+    OPENED.with(|opened| opened.borrow_mut().retain(|(root, _), _| *root != store.root));
+    if let Ok(mut projects) = PROJECTS.lock() {
+        projects.retain(|(root, _)| *root != store.root);
     }
 }
 
 /// True when a project has queued states or pins to release. Reads the database directly.
-fn pending(store: &Store, name: &str) -> bool {
-    let Ok(dir) = store.project_dir(name) else { return false };
-    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY;
-    let Ok(conn) = rusqlite::Connection::open_with_flags(crate::store::db_file(&dir), flags) else { return false };
-    conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM free_queue) OR EXISTS(SELECT 1 FROM owners WHERE kind='pin')",
-        [],
-        |r| r.get::<_, bool>(0),
-    )
-    .unwrap_or(false)
+fn pending(conn: &rusqlite::Connection) -> bool {
+    conn.prepare_cached("SELECT EXISTS(SELECT 1 FROM free_queue) OR EXISTS(SELECT 1 FROM owners WHERE kind='pin')")
+        .and_then(|mut stmt| stmt.query_row([], |r| r.get::<_, bool>(0))).unwrap_or(false)
 }
 
 /// Move the storage of every dead queued state of a project to the trash. A state that a live
