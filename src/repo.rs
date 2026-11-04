@@ -972,18 +972,20 @@ impl<'a> Repo<'a> {
         Ok(None)
     }
 
-    /// `line delete`, under the project lock: records the prepared state when the line head and the
-    /// working folder are the ones it was made from. Else the state is discarded and the caller
+    /// `line delete`, under the project lock: records the prepared state when the line head is the
+    /// one it was made from. When the working folder changed since (a build writes into it), the
+    /// prepared state stays as an automatic state and the state under the lock copies only what
+    /// changed since it, as a named save does. A moved head discards the state, and the caller
     /// prepares again. Without a prepared state, the lock makes the working state as before.
     pub fn record_final_state(&self, ctx: &Ctx, line: &Line, prepared: &mut Option<FinalPrepared>) -> Result<FinalState> {
         #[cfg(target_os = "macos")]
         if let Some(pre) = prepared.take() {
             let w = self.working(line);
-            let same = line.head == pre.head && w.exists() && btrfs::scan_with_data(&w, true)? == pre.scan;
-            if !same {
+            if line.head != pre.head || !w.exists() {
                 self.p.delete_state(&pre.id)?;
                 return Ok(FinalState::Moved);
             }
+            let changed = btrfs::scan_with_data(&w, true)? != pre.scan;
             let mut st = self.describe_state(ctx, pre.id.clone(), StateKind::Auto, vec![line.head.clone()], "before line delete", Some(line))?;
             st.running = crate::fsutil::take_unsettled();
             let before = self.recorded_working(line)?;
@@ -991,11 +993,13 @@ impl<'a> Repo<'a> {
             rec.states.push(st.clone());
             rec.data = serde_json::json!({"line": line.id, "head": line.head, "working_before": before, "working_after": st.id});
             self.commit_record(ctx, rec)?;
-            if let Err(e) = self.save_cache_states(ctx, line, &st.id) {
-                eprintln!("warning: cache overlay of line {} not saved: {e:#}", line.name);
+            if !changed {
+                if let Err(e) = self.save_cache_states(ctx, line, &st.id) {
+                    eprintln!("warning: cache overlay of line {} not saved: {e:#}", line.name);
+                }
+                clear_regenerable_memo();
+                return Ok(FinalState::Recorded(Some(st.id)));
             }
-            clear_regenerable_memo();
-            return Ok(FinalState::Recorded(Some(st.id)));
         }
         #[cfg(not(target_os = "macos"))]
         let _ = prepared;
@@ -1356,13 +1360,87 @@ impl<'a> Repo<'a> {
     /// The state that `save --caches` gives a line's caches to: on a protected line with no
     /// changes since its head, the head, so the next lines made from that head start warm; else a
     /// new automatic state. Only a protected line gives caches to a state that other lines share,
-    /// so such a state never holds a cache that only its maker may use.
-    pub fn caches_state(&self, ctx: &Ctx, line: &Line, message: &str, running: bool, caches: &[String]) -> Result<StateRec> {
+    /// so such a state never holds a cache that only its maker may use. The caller holds the
+    /// project lock. `prepared` (`prepare_caches_state`) is used when the head, the cache paths
+    /// and the working folder are the ones it was made from; else the work is done here.
+    pub fn caches_state(
+        &self,
+        ctx: &Ctx,
+        line: &Line,
+        message: &str,
+        running: bool,
+        caches: &[String],
+        prepared: Option<PreparedCaches>,
+    ) -> Result<StateRec> {
         let w = self.working(line);
         if !w.exists() {
+            if let Some(p) = prepared {
+                self.discard_states(std::slice::from_ref(&p.st));
+            }
             return Err(crate::cmd::exit(1, format!("error: the line '{}' has no working folder", line.name)));
         }
-        let mut st = self.working_snapshot(ctx, line, vec![line.head.clone()], message)?;
+        #[cfg(target_os = "macos")]
+        let fresh = match prepared {
+            Some(p) if p.head == line.head && p.caches == caches && btrfs::scan_with_data(&w, true)? == p.scan => Some(p),
+            Some(p) => {
+                self.discard_states(std::slice::from_ref(&p.st));
+                None
+            }
+            None => None,
+        };
+        // Off APFS nothing is prepared (`prepare_caches_state`).
+        #[cfg(not(target_os = "macos"))]
+        let fresh = prepared;
+        let (mut st, same) = match fresh {
+            Some(p) => (p.st, p.same),
+            None => self.caches_snapshot(ctx, line, message, caches)?,
+        };
+        if same {
+            self.discard_states(std::slice::from_ref(&st));
+            return self.state(&line.head);
+        }
+        st.running = running;
+        let mut rec = Record::new("save");
+        rec.states.push(st.clone());
+        // The working state this record leaves: the next save of the line changes from it.
+        rec.data = serde_json::json!({"line": line.id, "working_after": st.id});
+        self.commit_record(ctx, rec)?;
+        Ok(st)
+    }
+
+    /// `save --caches` before the project lock (issue #194): the snapshot of the working folder and
+    /// its compare with the head, with the scan of the folder before them. The command holds the
+    /// line lock. Off APFS a snapshot costs little under the lock: None.
+    pub fn prepare_caches_state(&self, ctx: &Ctx, line: &Line, message: &str, caches: &[String]) -> Result<Option<PreparedCaches>> {
+        #[cfg(target_os = "macos")]
+        {
+            let w = self.working(line);
+            if !w.exists() {
+                return Ok(None);
+            }
+            let _t = crate::trace::span("prepare caches state");
+            let scan = btrfs::scan_with_data(&w, true)?;
+            let (st, same) = self.caches_snapshot(ctx, line, message, caches)?;
+            Ok(Some(PreparedCaches { head: line.head.clone(), caches: caches.to_vec(), scan, st, same }))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (ctx, line, message, caches);
+            Ok(None)
+        }
+    }
+
+    /// Drop a prepared state that the command did not take.
+    pub fn discard_prepared_caches(&self, prepared: Option<PreparedCaches>) {
+        if let Some(p) = prepared {
+            self.discard_states(std::slice::from_ref(&p.st));
+        }
+    }
+
+    /// The snapshot of the working folder for `caches_state`, not recorded, and true when it has
+    /// no changes since the head on a protected line (the caches then go to the head).
+    fn caches_snapshot(&self, ctx: &Ctx, line: &Line, message: &str, caches: &[String]) -> Result<(StateRec, bool)> {
+        let st = self.working_snapshot(ctx, line, vec![line.head.clone()], message)?;
         if let Some(head) = self.p.db.state(&line.head)? {
             if self.policy().rule_for(&line.name).is_some() && self.p.has_state(&head.id) {
                 let base = self.state_src(&head.id)?;
@@ -1375,19 +1453,10 @@ impl<'a> Repo<'a> {
                 let changed = changes::file_changes(&base, &made)?
                     .into_iter()
                     .any(|c| !skip_path(&c.path) && !in_cache(&c.path) && !rules.ignored(&c.path, false));
-                if !changed {
-                    self.discard_states(std::slice::from_ref(&st));
-                    return Ok(head);
-                }
+                return Ok((st, !changed));
             }
         }
-        st.running = running;
-        let mut rec = Record::new("save");
-        rec.states.push(st.clone());
-        // The working state this record leaves: the next save of the line changes from it.
-        rec.data = serde_json::json!({"line": line.id, "working_after": st.id});
-        self.commit_record(ctx, rec)?;
-        Ok(st)
+        Ok((st, false))
     }
 
     // ----- staging -----
@@ -4278,6 +4347,17 @@ struct PreparedStatus {
 #[cfg(target_os = "macos")]
 thread_local! {
     static PREPARED_STATUS: std::cell::RefCell<Option<PreparedStatus>> = const { std::cell::RefCell::new(None) };
+}
+
+/// `save --caches` work made before the project lock (`Repo::prepare_caches_state`), APFS only.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub struct PreparedCaches {
+    head: String,
+    caches: Vec<String>,
+    #[cfg(target_os = "macos")]
+    scan: BTreeMap<String, btrfs::ScanEntry>,
+    st: StateRec,
+    same: bool,
 }
 
 /// The automatic state that `line delete` prepares before the lock (`prepare_final_state`).

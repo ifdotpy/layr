@@ -350,7 +350,7 @@ fn sweep_after_build(root: &Path, target: &Path, hash: &[(String, String)], own:
         Ok(Listed::NotFresh(why)) => {
             return eprintln!("layr-retest: sweep skipped: a unit is not fresh ({why}); run the standard build first")
         }
-        Ok(Listed::Busy) => return eprintln!("layr-retest: sweep skipped (build lock busy)"),
+        Ok(Listed::Busy(holder)) => return eprintln!("layr-retest: sweep skipped (build lock busy; holder: {holder})"),
         Err(e) => return eprintln!("layr-retest: sweep skipped, nothing removed: {e:#}"),
     };
     let listed = t.elapsed().as_secs_f32();
@@ -365,9 +365,9 @@ fn sweep_after_build(root: &Path, target: &Path, hash: &[(String, String)], own:
     }
 }
 
-/// The host of the retest commands: this process runs them, and each command has an hour.
+/// The host of the retest commands: this process runs them, and each cargo command has a time limit (layr-cache).
 fn retest_host() -> layr_cache::LocalHost {
-    layr_cache::LocalHost::new(std::time::Duration::from_secs(3600))
+    layr_cache::retest_host()
 }
 
 /// `layr retest prune <folder> [--adapter <name>]`: runs the cache adapter of `folder` by hand (layr-cache). Without
@@ -430,7 +430,7 @@ fn sweep_cmd(args: &[String]) -> Result<i32> {
         match live_units(&retest_host(), &root, &target, &env, &commands) {
             Ok(Listed::Fresh(live)) => lists.push((name, live)),
             Ok(Listed::NotFresh(why)) => eprintln!("layr-retest: {name}: sweep skipped: a unit is not fresh ({why}); run the standard build first"),
-            Ok(Listed::Busy) => eprintln!("layr-retest: {name}: sweep skipped (build lock busy)"),
+            Ok(Listed::Busy(holder)) => eprintln!("layr-retest: {name}: sweep skipped (build lock busy; holder: {holder})"),
             Err(e) => {
                 eprintln!("layr-retest: sweep skipped, nothing changed: {e:#}");
                 return Ok(1);
@@ -453,8 +453,7 @@ fn sweep_cmd(args: &[String]) -> Result<i32> {
 
 /// Name and source file of every target of the workspace with the crate type `kind`.
 fn kind_targets(kind: &str) -> Result<Vec<(String, String)>> {
-    let meta: Value =
-        serde_json::from_slice(&output(layr_cache::cargo::cargo_cmd().args(["metadata", "--no-deps", "--format-version", "1"]))?)?;
+    let meta = layr_cache::cargo::metadata(&retest_host(), &std::env::current_dir()?)?;
     let targets = meta["packages"].as_array().into_iter().flatten().flat_map(|p| p["targets"].as_array().into_iter().flatten());
     Ok(targets
         .filter(|t| t["kind"].as_array().is_some_and(|k| k.iter().any(|k| k == kind)))
