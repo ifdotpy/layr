@@ -98,10 +98,19 @@ ok "the owner sets prune=none for the sweep check" l overlay set cache.target --
 (cd "$P/other3" && l merge main --caches-only -q >/dev/null 2>&1)
 ok "the owner sets prune to auto after the sweep check" l overlay set cache.target --prune auto
 (cd "$P/other3/target" && find . | sort) > "$T/names-before3"
-# Cargo's own reason for the merged unit (the listing of the prune, before it runs): the lines that say dirty or stale.
-(cd "$P/other3" && owned env CARGO_NET_OFFLINE=true RUSTC_WRAPPER= CARGO_LOG=cargo::core::compiler::fingerprint=info CARGO_BUILD_JOBS=1 CARGO_TARGET_DIR=target cargo build --workspace -v --message-format json 2>&1 | grep -m 14 -i -E "dirty|stale|fresh|compiling" | cut -c1-500) | sed 's/^/DIAG listing: /' || true
+# Cargo's own reason for the merged unit, before the prune runs: the dirty, fresh and compiling lines of a plain -v build.
+(cd "$P/other3" && owned env CARGO_NET_OFFLINE=true RUSTC_WRAPPER= CARGO_BUILD_JOBS=1 cargo build --workspace -v 2>&1 | grep -m 6 -E "Dirty|Fresh|Compiling|dirty|stale" | cut -c1-400) | sed 's/^/DIAG reason: /' || true
+# The artifact names of the library in the listing that the prune uses (json), as the sweep reads them.
+(cd "$P/other3" && owned env CARGO_NET_OFFLINE=true RUSTC_WRAPPER= CARGO_BUILD_JOBS=1 CARGO_TARGET_DIR=target cargo build --workspace -v --message-format json 2>/dev/null | python3 -c "
+import sys, json
+for line in sys.stdin:
+    try: v = json.loads(line)
+    except Exception: continue
+    if v.get('reason') == 'compiler-artifact' and v['target']['kind'] == ['lib']:
+        print('DIAG listing artifacts: fresh=%s %s' % (v.get('fresh'), [f.split('/')[-1] for f in v.get('filenames', [])]))
+") || true
 for d in main other3; do python3 -c "import os,sys; print('DIAG mtime', sys.argv[1], os.stat(sys.argv[2]).st_mtime_ns, sys.argv[2])" $d "$P/$d/src/lib.rs"; done
-(cd "$P/other3" && l retest prune target) > "$T/prune-out3" 2>&1 || true
+(cd "$P/other3" && owned env CARGO_NET_OFFLINE=true "$LAYR" retest prune target) > "$T/prune-out3" 2>&1 || true
 (cd "$P/other3/target" && find . | sort) > "$T/names-after3"
 echo "DIAG prune output: $(cat "$T/prune-out3" | tr '\n' ' ')"
 echo "DIAG removed by the sweep: $(comm -23 "$T/names-before3" "$T/names-after3" | head -20 | tr '\n' ' ')"
