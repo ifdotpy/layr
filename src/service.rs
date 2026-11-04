@@ -344,6 +344,9 @@ pub fn run_as(argv: Vec<String>, caller: Caller, cwd: PathBuf, env: HashMap<Stri
                 x.0
             } else {
                 eprintln!("fatal: {e:#}");
+                if disk_full(&e) {
+                    eprintln!("{}", disk_full_hint(root));
+                }
                 128
             }
         }
@@ -351,6 +354,31 @@ pub fn run_as(argv: Vec<String>, caller: Caller, cwd: PathBuf, env: HashMap<Stri
     // The free step: after the commit and the store lock (docs/ownership.md).
     crate::free::finish(&ctx.store);
     code
+}
+
+/// True when `e` comes from a full disk: ENOSPC, or SQLite that cannot grow its file or its shared
+/// memory (a few MB free are enough for neither).
+fn disk_full(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        if let Some(io) = c.downcast_ref::<std::io::Error>() {
+            return io.raw_os_error() == Some(rustix::io::Errno::NOSPC.raw_os_error());
+        }
+        if let Some(rusqlite::Error::SqliteFailure(f, _)) = c.downcast_ref::<rusqlite::Error>() {
+            // SQLITE_IOERR_SHMSIZE: the shared memory of the write-ahead log cannot grow.
+            return f.code == rusqlite::ErrorCode::DiskFull || f.extended_code == 4874;
+        }
+        false
+    })
+}
+
+/// What to do when the disk of the store is full, with its free space.
+fn disk_full_hint(root: &Path) -> String {
+    let free = rustix::fs::statvfs(root).map(|s| s.f_bavail.saturating_mul(s.f_frsize) / (1 << 20)).ok();
+    let free = free.map(|mb| format!(" ({mb} MB free)")).unwrap_or_default();
+    format!(
+        "hint: the disk of the layr store {} is full{free}. Free some space first (layr needs about 20 MB to run a command), then run the command again; 'layr gc --repair' frees old caches.",
+        root.display()
+    )
 }
 
 /// The time of the last periodic check of each line that found no change, in the project's meta
@@ -744,5 +772,22 @@ mod version_tests {
         let error = negotiate(&client).unwrap_err().to_string();
         assert!(error.contains("busy"), "{error}");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod disk_full_tests {
+    use super::disk_full;
+
+    #[test]
+    fn a_full_disk_is_named_from_io_and_sqlite_errors() {
+        let nospc = std::io::Error::from_raw_os_error(rustix::io::Errno::NOSPC.raw_os_error());
+        assert!(disk_full(&anyhow::Error::new(nospc).context("clone a tree")));
+        let shm = rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(4874), None);
+        assert!(disk_full(&anyhow::Error::new(shm)));
+        let full = rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(13), None);
+        assert!(disk_full(&anyhow::Error::new(full)));
+        let other = std::io::Error::from_raw_os_error(rustix::io::Errno::ACCESS.raw_os_error());
+        assert!(!disk_full(&anyhow::Error::new(other)));
     }
 }
