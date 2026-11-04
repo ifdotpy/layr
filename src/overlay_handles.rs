@@ -11,6 +11,7 @@ struct Entry {
     pid: u32,
     identity: (u64, u64),
     read: bool,
+    used: u64,
     conn: Option<Rc<rusqlite::Connection>>,
 }
 
@@ -22,15 +23,29 @@ impl Drop for Entry {
     }
 }
 
+struct Cache {
+    entries: HashMap<PathBuf, Entry>,
+    capacity: usize,
+    clock: u64,
+}
+
 thread_local! {
-    static CACHE: RefCell<Option<HashMap<PathBuf, Entry>>> = const { RefCell::new(None) };
+    static CACHE: RefCell<Option<Cache>> = const { RefCell::new(None) };
 }
 
 /// Starts a cache for one command. Dropping it releases every connection.
 pub struct Command;
 impl Command {
     pub fn begin() -> Self {
-        CACHE.with(|cache| *cache.borrow_mut() = Some(HashMap::new()));
+        // SQLite may hold the database, WAL and shared-memory descriptors. A quarter of the
+        // soft limit bounds cached descriptors while leaving room for files and active commands.
+        let limit = rustix::process::getrlimit(rustix::process::Resource::Nofile).current.unwrap_or(u64::MAX);
+        let capacity = (limit / 4).clamp(1, 1024) as usize;
+        Self::with_capacity(capacity)
+    }
+
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
+        CACHE.with(|cache| *cache.borrow_mut() = Some(Cache { entries: HashMap::new(), capacity, clock: 0 }));
         Self
     }
 }
@@ -52,7 +67,8 @@ pub fn get(path: &Path, read: bool) -> Result<Option<Db>> {
         let mut cache = cache.try_borrow_mut().context("overlay handle cache already borrowed")?;
         let Some(cache) = cache.as_mut() else { return Ok(None) };
         let id = identity(path)?;
-        if let Some(entry) = cache.get(path) {
+        cache.clock = cache.clock.wrapping_add(1);
+        if let Some(entry) = cache.entries.get_mut(path) {
             if entry.pid == std::process::id() {
                 let conn = entry.conn.as_ref().context("missing overlay connection")?;
                 if Rc::strong_count(conn) != 1 {
@@ -62,12 +78,31 @@ pub fn get(path: &Path, read: bool) -> Result<Option<Db>> {
                     bail!("overlay database {} has an open transaction", path.display());
                 }
                 if entry.identity == id && (read || !entry.read) {
+                    entry.used = cache.clock;
                     return Ok(Some(Db { conn: conn.clone(), stale: false }));
                 }
             }
         }
-        cache.remove(path);
+        cache.entries.remove(path);
         Ok(None)
+    })
+}
+
+/// Make room before opening a database, when doing so may allocate several descriptors.
+pub fn prepare_open() -> Result<()> {
+    CACHE.with(|cache| {
+        let mut cache = cache.try_borrow_mut().context("overlay handle cache already borrowed")?;
+        let Some(cache) = cache.as_mut() else { return Ok(()) };
+        while cache.entries.len() >= cache.capacity {
+            let victim = cache.entries.iter()
+                .filter(|(_, entry)| entry.pid != std::process::id()
+                    || entry.conn.as_ref().is_some_and(|conn| Rc::strong_count(conn) == 1 && conn.is_autocommit()))
+                .min_by_key(|(_, entry)| entry.used)
+                .map(|(path, _)| path.clone())
+                .context("all overlay database handles are checked out or in a transaction")?;
+            cache.entries.remove(&victim);
+        }
+        Ok(())
     })
 }
 
@@ -75,8 +110,9 @@ pub fn insert_if_missing(path: &Path, read: bool, db: &Db) -> Result<()> {
     CACHE.with(|cache| {
         let mut cache = cache.try_borrow_mut().context("overlay handle cache already borrowed")?;
         if let Some(cache) = cache.as_mut() {
-            if cache.contains_key(path) { return Ok(()); }
-            cache.insert(path.to_path_buf(), Entry { pid: std::process::id(), identity: identity(path)?, read, conn: Some(db.conn.clone()) });
+            if cache.entries.contains_key(path) { return Ok(()); }
+            cache.clock = cache.clock.wrapping_add(1);
+            cache.entries.insert(path.to_path_buf(), Entry { pid: std::process::id(), identity: identity(path)?, read, used: cache.clock, conn: Some(db.conn.clone()) });
         }
         Ok(())
     })
@@ -85,6 +121,34 @@ pub fn insert_if_missing(path: &Path, read: bool, db: &Db) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn small_capacity_evicts_idle_handles_and_reopens_with_same_data() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("layr-overlay-lru-{}", crate::ids::new_id()));
+        std::fs::create_dir_all(&dir)?;
+        let paths: Vec<_> = (0..3).map(|n| dir.join(format!("db{n}"))).collect();
+        for (n, path) in paths.iter().enumerate() {
+            let db = Db::open(path)?;
+            db.conn.execute("INSERT INTO config(key,value,ord) VALUES ('test',?1,'1')", [n.to_string()])?;
+        }
+        let command = Command::with_capacity(2);
+        for path in &paths {
+            prepare_open()?;
+            let db = Db::open(path)?;
+            insert_if_missing(path, false, &db)?;
+        }
+        assert!(get(&paths[0], false)?.is_none());
+        let checked_out = get(&paths[1], false)?.context("missing second db")?;
+        prepare_open()?;
+        assert!(get(&paths[1], false).is_err());
+        let reopened = Db::open(&paths[0])?;
+        insert_if_missing(&paths[0], false, &reopened)?;
+        let value: String = reopened.conn.query_row("SELECT value FROM config WHERE key='test'", [], |r| r.get(0))?;
+        assert_eq!(value, "0");
+        drop((checked_out, reopened, command));
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
 
     #[test]
     fn replacement_invalidates_cached_handle() -> Result<()> {
@@ -108,7 +172,7 @@ mod tests {
     #[test]
     fn inherited_entry_is_not_closed() -> Result<()> {
         let conn = Rc::new(rusqlite::Connection::open_in_memory()?);
-        let entry = Entry { pid: std::process::id().wrapping_add(1), identity: (0, 0), read: false, conn: Some(conn.clone()) };
+        let entry = Entry { pid: std::process::id().wrapping_add(1), identity: (0, 0), read: false, used: 0, conn: Some(conn.clone()) };
         drop(entry);
         assert_eq!(Rc::strong_count(&conn), 2);
         Ok(())
@@ -128,7 +192,7 @@ mod tests {
         assert!(get(&path, false).is_err());
         CACHE.with(|cache| -> Result<()> {
             let cache = cache.borrow();
-            let entry = cache.as_ref().and_then(|entries| entries.get(&path)).context("missing entry")?;
+            let entry = cache.as_ref().and_then(|cache| cache.entries.get(&path)).context("missing entry")?;
             entry.conn.as_ref().context("missing connection")?.execute_batch("ROLLBACK")?;
             Ok(())
         })?;

@@ -1022,7 +1022,13 @@ impl<'a> Project<'a> {
             Some(crate::overlay_handles::identity(&path)?)
         } else { None };
         let cached = if overlay { crate::overlay_handles::get(&path, read)? } else { None };
-        let db = match cached { Some(db) => db, None => Db::open_for(&path, read)? };
+        let db = match cached {
+            Some(db) => db,
+            None => {
+                if overlay { crate::overlay_handles::prepare_open()?; }
+                Db::open_for(&path, read)?
+            }
+        };
         let mut p = Project { store, name: name.to_string(), dir, id: String::new(), db };
         p.finish_schema_upgrade()?;
         crate::rootcheck::check_project(&p)?;

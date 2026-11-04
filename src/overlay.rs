@@ -628,11 +628,19 @@ impl<'a> Repo<'a> {
             let owned;
             let op = if let Some(op) = overlay {
                 Some(op)
-            } else if self.p.store.project_dir(&format!("{}%{name}", self.p.name))?.try_exists()? {
-                owned = self.overlay_project(name)?;
-                Some(&owned)
+            } else if crate::overlay_handles::active() {
+                if self.p.store.project_dir(&format!("{}%{name}", self.p.name))?.try_exists()? {
+                    owned = self.overlay_project(name)?;
+                    Some(&owned)
+                } else {
+                    None
+                }
             } else {
-                None
+                owned = match self.overlay_project(name) {
+                    Ok(op) => op,
+                    Err(_) => return Ok(None),
+                };
+                Some(&owned)
             };
             if let Some(op) = op {
                 if op.db.overlay_config("overlay")?.is_some_and(|v| v["project"] == self.p.id && v["name"] == name) {
@@ -827,33 +835,43 @@ impl<'a> Repo<'a> {
 
     /// The overlays a line shows, bottom first.
     pub fn layers(&self, line: &Line) -> Result<Vec<Layer>> {
-        let hidden = self.hidden_overlays()?;
-        self.layers_with(line, &hidden)
+        let hidden = self.hidden_layers(std::slice::from_ref(line))?;
+        self.layers_with(line, hidden.get(&line.id).map(Vec::as_slice).unwrap_or_default())
     }
 
-    /// The stacks of many lines (line id to layers). The overlays are read once, not once per line.
+    /// The stacks of many lines (line id to layers). Each hidden project is opened once and
+    /// released before opening the next, even when the cache is smaller than the overlay set.
     pub fn stacks(&self, lines: &[Line]) -> Result<BTreeMap<String, Vec<Layer>>> {
-        let hidden = self.hidden_overlays()?;
-        lines.iter().map(|l| Ok((l.id.clone(), self.layers_with(l, &hidden)?))).collect()
+        let hidden = self.hidden_layers(lines)?;
+        lines.iter().map(|line| {
+            let additions = hidden.get(&line.id).map(Vec::as_slice).unwrap_or_default();
+            Ok((line.id.clone(), self.layers_with(line, additions)?))
+        }).collect()
     }
 
-    /// The hidden overlays of the project with their projects. Empty in an overlay project.
-    fn hidden_overlays(&self) -> Result<Vec<(String, Info, Project<'a>)>> {
+    fn hidden_layers(&self, lines: &[Line]) -> Result<BTreeMap<String, Vec<(u64, Layer)>>> {
+        let mut hidden: BTreeMap<String, Vec<(u64, Layer)>> = BTreeMap::new();
         if self.p.is_overlay() {
-            return Ok(Vec::new());
+            return Ok(hidden);
         }
-        let mut out = Vec::new();
         for name in self.overlay_names()? {
             let info = self.need_overlay(&name)?;
-            if info.hidden {
-                let op = self.overlay_project(&name)?;
-                out.push((name, info, op));
+            if !info.hidden { continue; }
+            let op = self.overlay_project(&name)?;
+            for line in lines {
+                if !Self::project_reads(&op, line.owner) { continue; }
+                let selection = op.db.overlay_config(&format!("hidden.stack.{}", line.id))?;
+                if selection.as_ref().is_some_and(|s| s["enabled"] == false) { continue; }
+                if let Some(ol) = op.db.line_by_name(&Self::overlay_line_name(&info, &line.id, line.owner))? {
+                    let position = selection.as_ref().and_then(|s| s["position"].as_u64()).unwrap_or(u64::MAX);
+                    hidden.entry(line.id.clone()).or_default().push((position, Layer { overlay: name.clone(), state: ol.head }));
+                }
             }
         }
-        Ok(out)
+        Ok(hidden)
     }
 
-    fn layers_with(&self, line: &Line, hidden_overlays: &[(String, Info, Project<'a>)]) -> Result<Vec<Layer>> {
+    fn layers_with(&self, line: &Line, hidden: &[(u64, Layer)]) -> Result<Vec<Layer>> {
         let key = stack_key(&line.id);
         let value = if line.machine == self.p.store.machine.id {
             self.p.config_value(&key)?
@@ -865,25 +883,10 @@ impl<'a> Repo<'a> {
             None => self.p.db.overlay_config(&key)?,
         };
         let mut layers: Vec<Layer> = value.map(serde_json::from_value).transpose()?.unwrap_or_default();
-        if !self.p.is_overlay() {
-            let mut hidden = Vec::new();
-            for (name, info, op) in hidden_overlays {
-                if !Self::project_reads(op, line.owner) {
-                    continue;
-                }
-                let selection = op.db.overlay_config(&format!("hidden.stack.{}", line.id))?;
-                if selection.as_ref().is_some_and(|s| s["enabled"] == false) {
-                    continue;
-                }
-                if let Some(ol) = op.db.line_by_name(&Self::overlay_line_name(info, &line.id, line.owner))? {
-                    let position = selection.as_ref().and_then(|s| s["position"].as_u64()).unwrap_or(u64::MAX);
-                    hidden.push((position, Layer { overlay: name.clone(), state: ol.head }));
-                }
-            }
-            hidden.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.overlay.cmp(&b.1.overlay)));
-            for (position, layer) in hidden {
-                layers.insert((position as usize).min(layers.len()), layer);
-            }
+        let mut hidden = hidden.to_vec();
+        hidden.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.overlay.cmp(&b.1.overlay)));
+        for (position, layer) in hidden {
+            layers.insert((position as usize).min(layers.len()), layer);
         }
         Ok(layers)
     }
@@ -1661,6 +1664,37 @@ pub fn set_layers(ctx: &Ctx, repo: &Repo, line: &Line, layers: &[Layer], force: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hidden_stacks_match_uncached_when_the_cache_is_smaller() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("layr-hidden-lru-{}", crate::ids::new_id()));
+        let store = crate::store::Store::open(&dir)?;
+        let parent_dir = store.project_dir("p")?;
+        std::fs::create_dir_all(parent_dir.join("meta/db"))?;
+        let db = crate::db::Db::open(&crate::store::db_file(&parent_dir))?;
+        for name in ["a", "b", "c", "d"] {
+            let overlay_dir = store.project_dir(&format!("p%{name}"))?;
+            std::fs::create_dir_all(overlay_dir.join("meta/db"))?;
+            let overlay = crate::db::Db::open(&crate::store::db_file(&overlay_dir))?;
+            let raw = serde_json::json!({"r":{"data":{"id":name}}}).to_string();
+            overlay.conn.execute("INSERT INTO records(id,op,time,raw) VALUES (?1,'project',0,?2)", (name, raw))?;
+            overlay.conn.execute("INSERT INTO lines(id,name,owner,machine,head,deleted,time) VALUES (?1,'user-0',0,'other',?2,0,0)", (name, format!("head-{name}")))?;
+            let descriptor = serde_json::json!({"hidden":true,"owner":0,"mode":"shared","root":"root"}).to_string();
+            db.conn.execute("INSERT INTO config(key,value,ord) VALUES (?1,?2,'1')", (format!("overlay.{name}"), descriptor))?;
+        }
+        let repo = Repo { p: Project { store: &store, name: "p".into(), dir: parent_dir, id: "parent".into(), db }, ctx: None };
+        let line = Line { id: "line".into(), name: "main".into(), head: "head".into(), owner: 0, machine: store.machine.id.clone() };
+        let expected = repo.layers(&line)?;
+        assert_eq!(expected.len(), 4);
+        let command = crate::overlay_handles::Command::with_capacity(2);
+        let actual = repo.layers(&line)?;
+        assert_eq!(actual, expected);
+        drop(command);
+        drop(repo);
+        drop(store);
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
 
     #[test]
     fn the_base_key_names_the_head_and_the_stack() {
