@@ -149,7 +149,7 @@ impl Store {
             }
             mkdir_mode(&mdir, 0o700)?;
             let id = ids::new_id();
-            let key = SigningKey::generate(&mut rand::rngs::OsRng);
+            let key = SigningKey::generate(&mut rand::rand_core::UnwrapErr(rand::rngs::SysRng));
             create_machine_file(&mdir.join("id"), id.as_bytes())?;
             create_machine_file(&mdir.join("name"), hostname().as_bytes())?;
             create_machine_file(&mdir.join("key"), hex::encode(key.to_bytes()).as_bytes())?;

@@ -41,13 +41,13 @@ anyhow = "1"
 age = { version = "0.12", features = ["ssh"] }
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
-ed25519-dalek = { version = "2", features = ["rand_core"] }
+ed25519-dalek = { version = "3", features = ["rand_core"] }
 hex = "0.4"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 hmac = "0.13"
 ignore = "0.4"
 libc = "0.2"
-rand = "0.8"
+rand = "0.10"
 regex = "1"
 rustix = { version = "1", features = ["fs", "net", "process", "thread", "event", "stdio", "pipe", "termios"] }
 rusqlite = { version = "0.41", features = ["bundled"] }

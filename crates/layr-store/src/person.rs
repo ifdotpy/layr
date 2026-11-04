@@ -39,7 +39,7 @@ pub struct SigningKeys {
 
 #[cfg(feature = "native")]
 pub fn make_signing_keys(recipient: &str) -> Result<SigningKeys> {
-    let key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+    let key = ed25519_dalek::SigningKey::generate(&mut rand::rand_core::UnwrapErr(rand::rngs::SysRng));
     Ok(SigningKeys {
         public_key: hex::encode(key.verifying_key().to_bytes()),
         sealed: keys::encrypt(recipient, &key.to_bytes())?,

@@ -17,7 +17,7 @@ layr-hashers = { path = "../layr-hashers" }
 hex = "0.4"
 similar = "3"
 layr-store = { path = "../layr-store", default-features = false }
-ed25519-dalek = "2"
+ed25519-dalek = "3"
 
 [dev-dependencies]
 layr-store = { path = "../layr-store" }

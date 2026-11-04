@@ -5,7 +5,7 @@ use crate::fsutil;
 use crate::repo::{Repo, Snap};
 use anyhow::{bail, Context, Result};
 use hmac::{Hmac, KeyInit, Mac};
-use rand::RngCore;
+use rand::TryRng;
 use layr_hashers::ContentAddress;
 use std::collections::{BTreeSet, VecDeque};
 use std::fs::OpenOptions;
@@ -75,7 +75,7 @@ fn project_key(repo: &Repo) -> Result<Vec<u8>> {
     let path = repo.p.meta_dir().join("secrets.key");
     if !path.exists() {
         let mut key = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut key);
+        rand::rngs::SysRng.try_fill_bytes(&mut key).expect("system random source");
         let temporary = repo.p.meta_dir().join(format!(".secrets-key-{}", crate::ids::new_id()));
         let mut f =
             OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(&temporary)?;

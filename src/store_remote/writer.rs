@@ -7,7 +7,7 @@ use super::{
 };
 use crate::{ctx::Ctx, fsutil, oplog, repo::Repo};
 use anyhow::{bail, Context, Result};
-use rand::RngCore;
+use rand::TryRng;
 use serde::{Deserialize, Serialize};
 use layr_hashers::{ContentAddress, Digest};
 use std::collections::{BTreeMap, BTreeSet};
@@ -736,7 +736,7 @@ fn upload_state_journal(
     let started = std::time::Instant::now();
     let started_at = push_now();
     let mut random = [0u8; 4];
-    rand::rngs::OsRng.fill_bytes(&mut random);
+    rand::rngs::SysRng.try_fill_bytes(&mut random).expect("system random source");
     let attempt = hex::encode(random);
     #[cfg(test)]
     let attempt = if PUSH_DETERMINISTIC.with(|enabled| enabled.get()) {

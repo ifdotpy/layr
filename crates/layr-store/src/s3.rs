@@ -537,8 +537,8 @@ mod tests {
         let identity = super::super::keys::generate_identity();
         let recipient = super::super::keys::recipient_of(&identity).unwrap();
         let mut plaintext = vec![0u8; 11 << 20];
-        use rand::RngCore;
-        rand::rngs::OsRng.fill_bytes(&mut plaintext);
+        use rand::TryRng;
+        rand::rngs::SysRng.try_fill_bytes(&mut plaintext).expect("system random source");
         let ciphertext = super::super::keys::encrypt(&recipient, &plaintext).unwrap();
         let object = s3.key("multipart.age");
         assert!(s3.multipart(&object, ciphertext.clone(), 5 << 20).unwrap());

@@ -132,7 +132,7 @@ fn push_report(ctx: &Ctx, url: &str, rev: &str, runnable: Option<&str>, remote: 
 pub fn token(ctx: &Ctx, args: &[String]) -> Result<i32> {
     use crate::access::parse_principal;
     use crate::oci::registry::TokenRecord;
-    use rand::RngCore;
+    use rand::TryRng;
     use std::collections::BTreeMap;
     let a = parse(&Spec::new().flag("--revoke").value("--until").flag("--json"), args)?;
     if a.pos.len() != 1 {
@@ -167,7 +167,7 @@ pub fn token(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let until = crate::ids::now_ms().checked_add(duration).ok_or_else(|| exit(128, "token expiry is too large"))?;
     let mut bytes = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    rand::rngs::SysRng.try_fill_bytes(&mut bytes).expect("system random source");
     let token = hex::encode(bytes);
     tokens.insert(oci::digest(token.as_bytes()), TokenRecord { uid, machine: ctx.store.machine.id.clone(), until });
     super::admin::set_config(ctx, &h.repo, "registry.tokens", serde_json::to_value(tokens)?)?;
