@@ -67,10 +67,19 @@ fn hash_all(w: &Path, rels: &[&str]) -> Vec<Option<String>> {
     std::thread::scope(|s| {
         let parts: Vec<_> = rels
             .chunks(chunk)
-            .map(|part| s.spawn(move || part.iter().map(|rel| fsutil::git_blob_id_file(w, rel).ok()).collect::<Vec<_>>()))
+            .map(|part| s.spawn(move || part.iter().map(|rel| hash_file(&w.join(rel))).collect::<Vec<_>>()))
             .collect();
         parts.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
     })
+}
+
+/// The git blob id of one file. Source files are small, so the file is read whole.
+fn hash_file(p: &Path) -> Option<String> {
+    let m = std::fs::symlink_metadata(p).ok()?;
+    if !m.is_file() {
+        return None;
+    }
+    Some(fsutil::git_blob_id(&std::fs::read(p).ok()?))
 }
 
 fn encode(files: &BTreeMap<String, Entry>) -> Vec<u8> {
@@ -254,4 +263,29 @@ mod tests {
         m.insert("a b/c d.rs".to_string(), Entry { sec: 1, nsec: 2, size: 3, hash: "h".into() });
         assert_eq!(decode(std::str::from_utf8(&encode(&m)).unwrap()), m);
     }
+}
+
+/// The cost on a real working folder: `LAYR_TIMES_BENCH=<folder> cargo test --bin layr times_bench -- --ignored
+/// --nocapture`. It records into a temp folder and applies to a copy of nothing (reads only).
+#[cfg(test)]
+#[test]
+#[ignore]
+fn times_bench() {
+    let Some(w) = std::env::var_os("LAYR_TIMES_BENCH") else { return };
+    let w = std::path::PathBuf::from(w);
+    let t = std::time::Instant::now();
+    let files = collect(&w).unwrap();
+    let rec = t.elapsed();
+    let data = encode(&files);
+    let t = std::time::Instant::now();
+    let want = decode(std::str::from_utf8(&data).unwrap());
+    // The apply reads: one stat per file; all times differ (the worst case: a checkout), so all are hashed.
+    let rels: Vec<&str> = want.keys().map(|k| k.as_str()).collect();
+    for r in &rels {
+        let _ = std::fs::symlink_metadata(w.join(r));
+    }
+    let _ = hash_all(&w, &rels);
+    let app = t.elapsed();
+    let bytes: u64 = files.values().map(|e| e.size).sum();
+    eprintln!("files {} bytes {} record {:?} apply-worst {:?} manifest {} bytes", files.len(), bytes, rec, app, data.len());
 }

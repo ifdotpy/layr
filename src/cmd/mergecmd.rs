@@ -813,7 +813,7 @@ pub fn merge(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let r = (|| -> Result<()> {
             let theirs = h.repo.localize(theirs)?;
             let now = h.repo.line(&line.id)?;
-            let (taken, refused) = h.repo.take_follow_caches(ctx, &now, vec![theirs], Some(&before))?;
+            let (taken, refused) = h.repo.take_follow_caches(ctx, &now, vec![theirs], Some(&before), false)?;
             if !a.has("-q") {
                 for (p, id) in &taken {
                     outln!(ctx, "Merged cache {p}: {}", ids::short(id));

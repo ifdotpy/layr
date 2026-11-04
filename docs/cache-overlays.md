@@ -463,6 +463,9 @@ Crates:
 
 ### 18.1 Adapters
 
+The follow pass also runs each adapter's build (`warm`) before the prune (docs/follow.md): cargo builds
+the `sweep` list with the project env, pnpm runs `pnpm install --frozen-lockfile` (online).
+
 | Name | Folder | Project file next to it | Live set | Work |
 | --- | --- | --- | --- | --- |
 | `cargo` | `target` | `Cargo.toml` | the units of the `sweep` list of `[workspace.metadata.layr-retest]` | lists the units (no compile), then removes the other entries (section "Sweeping stale build output" of `docs/retest.md`) |

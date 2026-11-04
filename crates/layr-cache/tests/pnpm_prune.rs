@@ -239,3 +239,28 @@ fn recover_puts_the_copy_back_after_a_hard_kill() {
     assert!(!dir.join("node_modules.layr-prune").exists());
     assert_eq!(layr_cache::pnpm::Pnpm.recover(&nm), Ok(false), "nothing left to restore");
 }
+
+#[test]
+fn warm_installs_a_package_that_a_merge_added_and_a_failure_keeps_node_modules() {
+    let dir = tmp("warm");
+    tarball(&dir, "pkg-a", None);
+    tarball(&dir, "pkg-b", None);
+    project(&dir, &["pkg-a"]);
+    let nm = dir.join("node_modules");
+    // A merged change adds pkg-b to package.json and the lockfile; node_modules does not have it yet.
+    write_manifest(&dir, &["\"pkg-a\":\"file:./pkg-a-1.0.0.tgz\"".to_string(), "\"pkg-b\":\"file:./pkg-b-1.0.0.tgz\"".to_string()]);
+    pnpm_ok(&dir, &["install", "--lockfile-only", "--reporter=silent"]);
+    assert!(nm.join("pkg-b").symlink_metadata().is_err());
+    pnpm::warm(&host(), &nm).unwrap();
+    assert_eq!(std::fs::read_to_string(nm.join("pkg-b/index.js")).unwrap(), "module.exports = \"pkg-b\";\n");
+    assert!(!dir.join("node_modules.layr-prune").exists(), "the copy is removed");
+
+    // A lockfile that needs a tarball that is gone: the install fails and node_modules stays as it was.
+    tarball(&dir, "pkg-c", None);
+    write_manifest(&dir, &["\"pkg-a\":\"file:./pkg-a-1.0.0.tgz\"".to_string(), "\"pkg-c\":\"file:./pkg-c-1.0.0.tgz\"".to_string()]);
+    pnpm_ok(&dir, &["install", "--lockfile-only", "--reporter=silent"]);
+    std::fs::remove_file(dir.join("pkg-c-1.0.0.tgz")).unwrap();
+    let before = tree(&nm);
+    assert!(pnpm::warm(&host(), &nm).is_err());
+    assert!(tree(&nm) == before, "node_modules changed");
+}

@@ -131,6 +131,17 @@ has "the follow pass of main fast-forwards to the squash merge" "fast-forward to
 n=$(compiled $P/t3 build --locked)
 eq "a new line from main compiles 0 crates after the follow pass (a code change)" 0 "$n"
 
+# 1b. A change that comes without a line (a merge on the remote of a branch that no line here pushed): the follow pass
+#     builds the standard commands in main before it saves the caches, so a new line from main compiles 0 crates.
+cd $U && git pull -q origin main
+printf 'pub fn a() -> i32 {\n    2 - 1\n}\n' > crates/a/src/lib.rs && git add crates/a/src && git commit -qm "a: from the remote" && git push -q origin main || fail "the remote change failed"
+tick=$(cd $P/main && ly follow --tick 2>&1)
+echo "$tick" | grep -i "build\|prune" | sed 's/^/FOLLOW: /'
+has "the follow pass builds the cache folder" "built with cargo" "$tick"
+(cd $P/main && ly line new t5 main $OWNER_ARG >/dev/null 2>&1)
+eq "after a remote change without a line, a new line from main compiles 0 crates" 0 "$(compiled $P/t5 build --locked)"
+eq "and 0 test crates" 0 "$(compiled $P/t5 test --locked --no-run)"
+
 # 2. A local merge into protected main takes and saves the caches of the line (as the follow pass does). A docs change
 #    keeps every crate file, so a new line from main compiles 0 crates.
 (cd $P/main && ly line new w main $OWNER_ARG >/dev/null 2>&1)
