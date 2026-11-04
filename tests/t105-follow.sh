@@ -108,6 +108,8 @@ P_ROOT=$LAYR_ROOT/projects/gm
 ok "the cache state of gone was on the disk" test -e "$P_ROOT/states/$(dashed "$gone_head")" -o -e "$P_ROOT/deltas/$(dashed "$gone_head")"
 for d in "$P_ROOT/states/$(dashed "$gone_head")" "$P_ROOT/deltas/$(dashed "$gone_head")"; do
     [ -e "$d" ] || continue
+    # A saved state on OverlayFS (Linux) is a read-only mount, maybe stacked.
+    while command -v mountpoint >/dev/null && mountpoint -q "$d"; do umount "$d" || break; done
     chflags -R nouchg,noschg "$d" 2>/dev/null; chattr -R -i "$d" 2>/dev/null; chmod -R u+w "$d" 2>/dev/null
     rm -rf "$d" 2>/dev/null
     # A read-only btrfs snapshot (Linux) goes only through btrfs.
