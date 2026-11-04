@@ -225,9 +225,7 @@ impl<'a> Repo<'a> {
         if self.p.is_overlay() {
             return Ok(out);
         }
-        for (name, root) in self.removed_overlays()? {
-            self.free_removed_overlay(ctx, &name, &root)?;
-        }
+        self.free_removed_overlays(ctx)?;
         for name in self.overlay_names()? {
             if !self.overlay_setting(&name, "cache")?.and_then(|v| v.as_bool()).unwrap_or(false) {
                 continue;
@@ -238,29 +236,47 @@ impl<'a> Repo<'a> {
             }
             let orepo = self.overlay_repo(&name)?;
             let _lock = orepo.p.lock()?;
-            let mut orphans = Vec::new();
-            for ol in orepo.p.db.lines()? {
-                if let Some(id) = ol.name.strip_prefix("line-") {
-                    if self.p.db.line_deleted(id)? {
-                        orphans.push(ol);
-                    }
+            let orphans = self.orphan_cache_lines(&orepo)?;
+            out.extend(self.drop_overlay_lines(ctx, &orepo, &name, &orphans)?);
+        }
+        Ok(out)
+    }
+
+    /// Free the states of the cache overlays that `overlay remove` removed. The caller holds the
+    /// project lock.
+    pub fn free_removed_overlays(&self, ctx: &Ctx) -> Result<()> {
+        for (name, root) in self.removed_overlays()? {
+            self.free_removed_overlay(ctx, &name, &root)?;
+        }
+        Ok(())
+    }
+
+    /// The lines of the cache overlay project `orepo` whose project line is deleted. It only reads.
+    pub fn orphan_cache_lines(&self, orepo: &Repo) -> Result<Vec<Line>> {
+        let mut orphans = Vec::new();
+        for ol in orepo.p.db.lines()? {
+            if let Some(id) = ol.name.strip_prefix("line-") {
+                if self.p.db.line_deleted(id)? {
+                    orphans.push(ol);
                 }
             }
-            for ol in orphans {
-                let mut rec = Record::new("line.delete");
-                rec.lines.insert(
-                    ol.id.clone(),
-                    LineChange {
-                        before: Some(orepo.line_state(&ol, &ol.head)),
-                        after: None,
-                        working_before: None,
-                        working_after: None,
-                    },
-                );
-                rec.data = serde_json::json!({"name": ol.name});
-                orepo.commit_record(ctx, rec)?;
-                out.push((name.clone(), ol.name.clone()));
-            }
+        }
+        Ok(orphans)
+    }
+
+    /// Delete these lines of the overlay project `orepo`. Returns the overlay and line names. The
+    /// caller holds the locks of the project and of the overlay project.
+    pub fn drop_overlay_lines(&self, ctx: &Ctx, orepo: &Repo, name: &str, lines: &[Line]) -> Result<Vec<(String, String)>> {
+        let mut out = Vec::new();
+        for ol in lines {
+            let mut rec = Record::new("line.delete");
+            rec.lines.insert(
+                ol.id.clone(),
+                LineChange { before: Some(orepo.line_state(ol, &ol.head)), after: None, working_before: None, working_after: None },
+            );
+            rec.data = serde_json::json!({"name": ol.name});
+            orepo.commit_record(ctx, rec)?;
+            out.push((name.to_string(), ol.name.clone()));
         }
         Ok(out)
     }
