@@ -115,7 +115,8 @@ fi
 eq "merge --caches-only removes the stale units" "$base" "$merged"
 # The union copies main's cache into the folder that already has one: the copied times are the source's
 # (cargo compares them). The mismatch count is over the files that both caches have.
-LAYR_CACHE_STATES=$LAYR_ROOT/projects/p/meta/overlays/cache.target/states eq "the union merge keeps the times of the cache" "0" "$(times_mismatch $P/main/target $P/other/target)"
+export LAYR_CACHE_STATES=$LAYR_ROOT/projects/p/meta/overlays/cache.target/states
+eq "the union merge keeps the times of the cache" "0" "$(times_mismatch $P/main/target $P/other/target)"
 rebuilt=$(cb "$P/other" build --workspace)
 case "$rebuilt" in *Compiling*) FAIL=$((FAIL + 1)); echo "FAIL the next build after the union merge compiled" ;; *) PASS=$((PASS + 1)); echo "PASS the next build after the union merge compiles nothing" ;; esac
 
