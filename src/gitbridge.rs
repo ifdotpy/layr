@@ -1964,7 +1964,9 @@ pub fn make_git_folder(repo: &Repo, line: &Line, state: &str, w: &Path) -> Resul
         g.join("config"),
         "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n\tcheckStat = minimal\n\ttrustctime = false\n\tlogallrefupdates = false\n",
     )?;
-    std::fs::write(g.join("info/exclude"), "")?;
+    // The project's local ignore patterns (`ignore.local`, from `init --from-git`): git and layr read them.
+    let local: Vec<String> = repo.p.config_value("ignore.local")?.and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
+    std::fs::write(g.join("info/exclude"), local.iter().map(|p| format!("{p}\n")).collect::<String>())?;
     // The state's own commit; if it cannot be made, the nearest commit a record names.
     let anc = match line_commit(repo, state) {
         Ok(c) => Some((state.to_string(), c)),
