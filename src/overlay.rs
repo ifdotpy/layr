@@ -242,9 +242,8 @@ pub struct OverlayPlan {
     overlays: Vec<OverlayClean>,
 }
 
-/// Marks of local overlay records used by a save prepared outside the project lock.
-#[cfg(not(target_os = "macos"))]
-pub type SaveOverlayMarks = Vec<(String, serde_json::Value)>;
+/// Marks of local overlay records read outside the project lock.
+pub type OverlayMarks = Vec<(String, serde_json::Value)>;
 
 /// One overlay of an `OverlayPlan`.
 struct OverlayClean {
@@ -476,8 +475,7 @@ fn base_key(head: &str, layers: &[Layer]) -> String {
 }
 
 impl<'a> Repo<'a> {
-    #[cfg(not(target_os = "macos"))]
-    pub fn save_overlay_marks(&self) -> Result<SaveOverlayMarks> {
+    pub fn overlay_marks(&self) -> Result<OverlayMarks> {
         let mut names = self.overlay_names()?;
         names.sort();
         let mut marks = Vec::new();
@@ -490,15 +488,14 @@ impl<'a> Repo<'a> {
         Ok(marks)
     }
 
-    /// Caller holds the project lock. Hold overlay locks through the checked commit.
-    #[cfg(not(target_os = "macos"))]
-    pub fn lock_save_overlays(&self, marks: &SaveOverlayMarks) -> Result<Option<Vec<crate::store::Lock>>> {
+    /// Caller holds the project lock. Hold the returned overlay locks through the checked commit.
+    pub fn lock_overlays_checked(&self, marks: &OverlayMarks) -> Result<Option<Vec<crate::store::Lock>>> {
         let mut locks = Vec::new();
         for (name, _) in marks {
             let overlay = self.overlay_repo(name)?;
             locks.push(overlay.p.lock()?);
         }
-        if self.save_overlay_marks()? != *marks {
+        if self.overlay_marks()? != *marks {
             return Ok(None);
         }
         Ok(Some(locks))

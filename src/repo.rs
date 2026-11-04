@@ -1198,7 +1198,7 @@ impl<'a> Repo<'a> {
         let _t = crate::trace::span("prepare save");
         let prev = self.save_base(line)?;
         let working = self.recorded_working(line)?;
-        let overlay_marks = self.save_overlay_marks()?;
+        let overlay_marks = self.overlay_marks()?;
         let layers = self.layers(line)?;
         let pending = self.pending_moves(line);
         let private = self.private_paths(line)?;
@@ -1275,7 +1275,7 @@ impl<'a> Repo<'a> {
                 s.iter().position(|p| p.line == line.id).map(|i| s.remove(i))
             });
             if let Some(prepared) = prepared {
-                let Some(_overlay_locks) = self.lock_save_overlays(&prepared.overlay_marks)? else {
+                let Some(_overlay_locks) = self.lock_overlays_checked(&prepared.overlay_marks)? else {
                     PREPARED_FULL_SAVES.with(|s| s.borrow_mut().push(prepared));
                     return Err(SaveMoved.into());
                 };
@@ -4410,7 +4410,7 @@ struct PreparedFullSave {
     path: PathBuf,
     layers: Vec<crate::overlay::Layer>,
     pending: BTreeMap<String, String>,
-    overlay_marks: crate::overlay::SaveOverlayMarks,
+    overlay_marks: crate::overlay::OverlayMarks,
     prev: String,
     working: String,
     base_present: bool,

@@ -1484,14 +1484,7 @@ fn prune_retention(ctx: &Ctx, repo: &Repo, trim_caches: bool) -> Result<()> {
             let _t = crate::trace::begin("retention: plan");
             snapshot(repo, || {
                 let mark = repo.p.db.records_mark()?;
-                let mut overlays = Vec::new();
-                for name in repo.overlay_names()? {
-                    if repo.p.store.project_dir(&format!("{}%{name}", repo.p.name))?.exists() {
-                        let overlay = repo.overlay_repo(&name)?;
-                        let overlay_mark = overlay.p.db.records_mark()?;
-                        overlays.push((overlay, overlay_mark));
-                    }
-                }
+                let overlays = repo.overlay_marks()?;
                 let caches = if trim_caches { excess_caches(repo)? } else { Vec::new() };
                 Ok((mark, overlays, caches, repo.plan_prune_bases()?))
             })?
@@ -1506,18 +1499,9 @@ fn prune_retention(ctx: &Ctx, repo: &Repo, trim_caches: bool) -> Result<()> {
         }
         // Hidden overlay heads and selections can change without a project record. Lock and
         // check those projects too, so a base selected above cannot become the current base.
-        let mut overlay_locks = Vec::new();
-        let mut stale = false;
-        for (overlay, mark) in &overlays {
-            overlay_locks.push(overlay.p.lock()?);
-            if overlay.p.db.records_mark()? != *mark {
-                stale = true;
-                break;
-            }
-        }
-        if stale {
+        let Some(_overlay_locks) = repo.lock_overlays_checked(&overlays)? else {
             continue;
-        }
+        };
         let removed = apply_cache_candidates(repo, paths, Some(&trash))?;
         if !removed.is_empty() {
             let mut rec = Record::new("gc");
