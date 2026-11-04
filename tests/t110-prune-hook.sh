@@ -105,18 +105,19 @@ case "$rebuilt" in *Compiling*) FAIL=$((FAIL + 1)); echo "FAIL the next build of
 # 3. `merge --caches-only` prunes the cache it takes from main.
 (cd "$P/other" && l merge main --caches-only -q)
 merged=$(units $P/other/target)
+# The times are compared before any cargo runs in the line: a cargo run rewrites the files it compiles.
+export LAYR_CACHE_STATES=$LAYR_ROOT/projects/p/meta/overlays/cache.target/states
+mismatch=$(times_mismatch $P/main/target $P/other/target)
 if [ "$merged" != "$base" ]; then
     # Diagnostics for a failure: who owns the entries that the merge copied, and what the owner's listing sees.
     echo "DIAG other target units $merged, expected $base"
     ls -lan "$P/other/target/debug/.fingerprint" 2>&1 | head -12
-    ls -lan "$P/other/target/debug" 2>&1 | head -20
     (cd "$P/other" && owned env CARGO_NET_OFFLINE=true RUSTC_WRAPPER= cargo build --workspace -v 2>&1 | head -12) || true
 fi
 eq "merge --caches-only removes the stale units" "$base" "$merged"
 # The union copies main's cache into the folder that already has one: the copied times are the source's
 # (cargo compares them). The mismatch count is over the files that both caches have.
-export LAYR_CACHE_STATES=$LAYR_ROOT/projects/p/meta/overlays/cache.target/states
-eq "the union merge keeps the times of the cache" "0" "$(times_mismatch $P/main/target $P/other/target)"
+eq "the union merge keeps the times of the cache" "0" "$mismatch"
 rebuilt=$(cb "$P/other" build --workspace)
 case "$rebuilt" in *Compiling*) FAIL=$((FAIL + 1)); echo "FAIL the next build after the union merge compiled" ;; *) PASS=$((PASS + 1)); echo "PASS the next build after the union merge compiles nothing" ;; esac
 
