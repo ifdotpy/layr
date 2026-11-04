@@ -19,11 +19,15 @@ pub const ALLOW_FLAG: &str = "--allow-root-snapshots";
 
 /// Remove the override flag from `argv` and set the override variable for this process. The
 /// process that opens the store must be the one that receives the flag.
-pub fn take_allow_flag(argv: &mut Vec<String>) {
+/// # Safety
+/// Call only before the process starts any other threads.
+#[allow(unsafe_code)]
+pub unsafe fn take_allow_flag(argv: &mut Vec<String>) {
     let before = argv.len();
     argv.retain(|arg| arg != ALLOW_FLAG);
     if argv.len() != before {
-        std::env::set_var(ALLOW_VAR, "1");
+        // SAFETY: the caller guarantees that no other threads are running.
+        unsafe { std::env::set_var(ALLOW_VAR, "1") };
     }
 }
 

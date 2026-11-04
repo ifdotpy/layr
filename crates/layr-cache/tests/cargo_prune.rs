@@ -154,18 +154,24 @@ fn skips_a_folder_that_is_not_named_target_and_a_target_without_output() {
 /// The listing must still see the `Blocking` line of a busy build lock, and skip within its deadline.
 #[test]
 fn a_busy_build_lock_skips_within_the_deadline_even_with_colors() {
+    const CHILD: &str = "LAYR_CARGO_COLOR_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "a_busy_build_lock_skips_within_the_deadline_even_with_colors", "--nocapture"])
+            .env(CHILD, "1").env("CARGO_TERM_COLOR", "always").status().unwrap();
+        assert!(status.success(), "isolated color test failed");
+        return;
+    }
     let dir = tmp("busy-color");
     let target = project(&dir, Some("sweep = [[\"build\", \"--workspace\"]]"));
     cargo_in(&dir, &target, &["build", "--workspace"]);
     // Another cargo holds the build lock of the profile folder.
     let lock = std::fs::File::options().write(true).open(target.join("debug/.cargo-lock")).unwrap();
     rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
-    std::env::set_var("CARGO_TERM_COLOR", "always");
 
     let started = std::time::Instant::now();
     let deadline = std::time::Duration::from_secs(10);
     let outcome = cargo::prune(&layr_cache::LocalHost::new(deadline), &target);
-    std::env::remove_var("CARGO_TERM_COLOR");
     match outcome {
         Outcome::Skipped { reason } => assert!(reason.contains("build lock busy"), "{reason}"),
         other => panic!("expected a skip, got {other:?}"),

@@ -157,11 +157,11 @@ impl Ctx {
 
 #[macro_export]
 macro_rules! outln {
-    ($ctx:expr) => { $ctx.print("\n") };
-    ($ctx:expr, $($t:tt)*) => { $ctx.print(&format!("{}\n", format!($($t)*))) };
+    ($ctx:expr_2021) => { $ctx.print("\n") };
+    ($ctx:expr_2021, $($t:tt)*) => { $ctx.print(&format!("{}\n", format!($($t)*))) };
 }
 
 #[macro_export]
 macro_rules! out {
-    ($ctx:expr, $($t:tt)*) => { $ctx.print(&format!($($t)*)) };
+    ($ctx:expr_2021, $($t:tt)*) => { $ctx.print(&format!($($t)*)) };
 }

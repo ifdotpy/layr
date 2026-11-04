@@ -5,8 +5,11 @@ use std::io::Read;
 use std::path::Path;
 
 #[cfg(all(test, target_os = "macos"))]
+static TEST_SERVICE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+#[cfg(all(test, target_os = "macos"))]
 pub(super) fn test_service() {
-    std::env::set_var("LAYR_TEST_KEYCHAIN_SERVICE", format!("ws.layr.mount.test.{}", std::process::id()));
+    TEST_SERVICE.get_or_init(|| format!("ws.layr.mount.test.{}", std::process::id()));
 }
 
 pub fn account(url: &str) -> String {
@@ -16,6 +19,10 @@ pub fn account(url: &str) -> String {
 
 #[cfg(target_os = "macos")]
 fn service() -> String {
+    #[cfg(test)]
+    if let Some(service) = TEST_SERVICE.get() {
+        return service.clone();
+    }
     #[cfg(test)]
     if let Ok(service) = std::env::var("LAYR_TEST_KEYCHAIN_SERVICE") {
         assert!(service.starts_with("ws.layr.mount.test."));

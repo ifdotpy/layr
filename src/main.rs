@@ -78,6 +78,7 @@ use std::collections::HashMap;
 
 mod cache_hook;
 
+#[allow(unsafe_code)]
 fn main() {
     // The cache adapters of the binary (issue #167). Core reaches them only through `cache_hook`.
     cache_hook::register(layr_cache::adapters());
@@ -138,15 +139,18 @@ fn main() {
                 argv.drain(..2);
             }
             "--root" if argv.len() > 1 => {
-                std::env::set_var("LAYR_ROOT", &argv[1]);
+                // SAFETY: global options are parsed at startup, before this process starts threads.
+                unsafe { std::env::set_var("LAYR_ROOT", &argv[1]) };
                 argv.drain(..2);
             }
             "--project" if argv.len() > 1 => {
-                std::env::set_var("LAYR_PROJECT", &argv[1]);
+                // SAFETY: global options are parsed at startup, before this process starts threads.
+                unsafe { std::env::set_var("LAYR_PROJECT", &argv[1]) };
                 argv.drain(..2);
             }
             "--line" if argv.len() > 1 => {
-                std::env::set_var("LAYR_LINE", &argv[1]);
+                // SAFETY: global options are parsed at startup, before this process starts threads.
+                unsafe { std::env::set_var("LAYR_LINE", &argv[1]) };
                 argv.drain(..2);
             }
             "--no-pager" | "--no-optional-locks" | "-P" => {
@@ -186,7 +190,8 @@ fn main() {
     }
     if matches!(argv.first().map(String::as_str), Some("init" | "daemon")) {
         // Before the store opens: the override applies to the process that opens the store.
-        rootcheck::take_allow_flag(&mut argv);
+        // SAFETY: this runs during startup, before any threads are started.
+        unsafe { rootcheck::take_allow_flag(&mut argv) };
     }
     if let Some(command) = argv.first() {
         if !cmd::COMMANDS.contains(&command.as_str()) {

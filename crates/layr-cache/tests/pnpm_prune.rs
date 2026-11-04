@@ -10,21 +10,23 @@ fn host() -> LocalHost {
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::Once;
-
-/// The pnpm environment of the test process. The store is a folder of the temp dir, not the user's store.
-fn env_once() {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        let store = std::env::temp_dir().join("layr-cache-pnpm-test-store");
-        std::env::set_var("pnpm_config_store_dir", store);
-        std::env::set_var("pnpm_config_registry", "http://127.0.0.1:9/");
-        std::env::set_var("npm_config_registry", "http://127.0.0.1:9/");
-    });
+// Each test runs in a fresh process so pnpm's inherited environment is set before
+// the test harness starts any threads. No test mutates the process environment.
+fn isolated(name: &str) -> bool {
+    const CHILD: &str = "LAYR_PNPM_TEST_CHILD";
+    if std::env::var_os(CHILD).is_some() { return false; }
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", name, "--nocapture"])
+        .env(CHILD, "1")
+        .env("pnpm_config_store_dir", std::env::temp_dir().join("layr-cache-pnpm-test-store"))
+        .env("pnpm_config_registry", "http://127.0.0.1:9/")
+        .env("npm_config_registry", "http://127.0.0.1:9/")
+        .status().unwrap();
+    assert!(status.success(), "isolated pnpm test failed: {name}");
+    true
 }
 
 fn tmp(name: &str) -> PathBuf {
-    env_once();
     let base = std::env::temp_dir().canonicalize().unwrap().join(format!("layr-cache-pnpm-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     std::fs::create_dir_all(&base).unwrap();
@@ -32,7 +34,6 @@ fn tmp(name: &str) -> PathBuf {
 }
 
 fn pnpm(dir: &Path, args: &[&str]) -> Output {
-    env_once();
     let o = Command::new("pnpm").args(args).current_dir(dir).stdin(Stdio::null()).output().unwrap();
     o
 }
@@ -113,6 +114,7 @@ fn virtual_store(nm: &Path, prefix: &str) -> Vec<String> {
 
 #[test]
 fn removes_a_package_that_the_lockfile_no_longer_has() {
+    if isolated("removes_a_package_that_the_lockfile_no_longer_has") { return; }
     let dir = tmp("removed");
     tarball(&dir, "pkg-a", None);
     let marker = dir.join("ran-uninstall");
@@ -138,6 +140,7 @@ fn removes_a_package_that_the_lockfile_no_longer_has() {
 
 #[test]
 fn skips_a_lockfile_that_needs_a_package_the_store_lacks_and_leaves_node_modules_unchanged() {
+    if isolated("skips_a_lockfile_that_needs_a_package_the_store_lacks_and_leaves_node_modules_unchanged") { return; }
     let dir = tmp("missing");
     tarball(&dir, "pkg-a", None);
     tarball(&dir, "pkg-b", None);
@@ -162,6 +165,7 @@ fn skips_a_lockfile_that_needs_a_package_the_store_lacks_and_leaves_node_modules
 
 #[test]
 fn skips_a_stale_lockfile_and_leaves_node_modules_unchanged() {
+    if isolated("skips_a_stale_lockfile_and_leaves_node_modules_unchanged") { return; }
     let dir = tmp("stale");
     tarball(&dir, "pkg-a", None);
     tarball(&dir, "pkg-b", None);
@@ -180,6 +184,7 @@ fn skips_a_stale_lockfile_and_leaves_node_modules_unchanged() {
 
 #[test]
 fn skips_a_folder_without_a_lockfile_or_with_another_name() {
+    if isolated("skips_a_folder_without_a_lockfile_or_with_another_name") { return; }
     let dir = tmp("nolock");
     tarball(&dir, "pkg-a", None);
     project(&dir, &["pkg-a"]);
@@ -202,6 +207,7 @@ fn skips_a_folder_without_a_lockfile_or_with_another_name() {
 /// (50 ms is shorter than a pnpm start, so the run stops before pnpm finishes whatever the machine.)
 #[test]
 fn a_deadline_stops_pnpm_and_leaves_node_modules_unchanged() {
+    if isolated("a_deadline_stops_pnpm_and_leaves_node_modules_unchanged") { return; }
     use layr_cache::LocalHost;
     let dir = tmp("deadline");
     tarball(&dir, "pkg-a", None);
@@ -223,6 +229,7 @@ fn a_deadline_stops_pnpm_and_leaves_node_modules_unchanged() {
 /// After a hard kill, recovery puts the copy back: node_modules is the copy, and the copy is gone.
 #[test]
 fn recover_puts_the_copy_back_after_a_hard_kill() {
+    if isolated("recover_puts_the_copy_back_after_a_hard_kill") { return; }
     use layr_adapter::CacheAdapter;
     let dir = tmp("recover");
     tarball(&dir, "pkg-a", None);

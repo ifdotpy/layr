@@ -789,14 +789,14 @@ pub fn show(ctx: &Ctx, args: &[String]) -> Result<i32> {
             if rv.is_empty() {
                 let l = h.line()?;
                 repo.check_view(ctx, l)?;
-                if let Some(filtered) = repo.filtered_view(ctx, l)? {
+                match repo.filtered_view(ctx, l)? { Some(filtered) => {
                     root_path = filtered.path.clone();
                     _keep.push(filtered);
-                } else {
+                } _ => {
                     let (idx, t) = repo.index_view(l)?;
                     _keep.extend(t);
                     root_path = repo.complete(idx, &mut _keep)?;
-                }
+                }}
             } else {
                 let id = revs::resolve(repo, line.as_ref(), rv)?;
                 root_path = repo.state_root(&id)?;

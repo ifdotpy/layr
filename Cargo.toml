@@ -1,6 +1,10 @@
 [workspace]
 members = ["crates/layr-store", "crates/layr-model", "crates/layr-retest", "crates/layr-cache", "crates/layr-adapter"]
-resolver = "2"
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.89"
 
 [workspace.metadata.layr-retest]
 # The standard commands of the project: the debug builds that the lines and CI run, and the release build that
@@ -14,7 +18,8 @@ env = { CARGO_INCREMENTAL = "1", RUSTC_WRAPPER = "" }
 [package]
 name = "layr"
 version = "0.22.1"
-edition = "2021"
+edition.workspace = true
+rust-version.workspace = true
 description = "Local version control on btrfs, APFS and OverlayFS"
 license = "MIT"
 publish = false

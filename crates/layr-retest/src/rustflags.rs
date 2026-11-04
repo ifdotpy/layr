@@ -91,7 +91,7 @@ mod tests {
         vec![toml::from_str(text).unwrap()]
     }
 
-    fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+    fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> + use<> {
         let map: Vec<(String, String)> = pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
         move |k: &str| map.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone())
     }
