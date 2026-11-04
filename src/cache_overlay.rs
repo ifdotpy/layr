@@ -20,7 +20,7 @@ use crate::repo::Repo;
 use crate::storage as btrfs;
 use anyhow::{bail, Result};
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// A folder path as a folder overlay keeps it: relative, without `.`, `..` or empty parts, not
 /// `.git`.
@@ -50,7 +50,7 @@ pub fn cache_overlay_name(folder: &str) -> String {
 
 /// The properties of a cache overlay (docs/cache-overlays.md, section 2).
 pub fn cache_props() -> Props {
-    Props { history: Some(1), quiet: true, merge: MergeKind::UnionTheirs, gc_lru: None }
+    Props { history: Some(1), quiet: true, merge: MergeKind::UnionTheirs, gc_lru: None, prune: None }
 }
 
 /// The apparent size of the files below `root` (not following links, not entering other layers).
@@ -518,7 +518,7 @@ impl<'a> Repo<'a> {
                 fsutil::remove_entry(w, &folder)?;
             }
             fsutil::make_parents(w, &folder, Some((uid, gid)))?;
-            btrfs::snapshot(&orepo.p.state_path(&sid), &cp, false)?;
+            btrfs::cache_snapshot(&orepo.p.state_path(&sid), &cp)?;
             crate::repo::give_tree(&cp, uid, gid)?;
             let _lock = orepo.p.lock()?;
             orepo.ensure_overlay_line(ctx, &Repo::overlay_line_name(&info, &line.id, line.owner), &sid, line.owner)?;
@@ -530,7 +530,8 @@ impl<'a> Repo<'a> {
     /// Bring the caches of `from` into the line (`merge` of a line): for each
     /// folder overlay, a fast-forward of the line's overlay line, or a `union-theirs` state; the
     /// files of the incoming state are copied over the line's folder (a missing or empty folder
-    /// gets one snapshot). The caller holds the project lock. Returns folder and new state.
+    /// gets one snapshot). The caller holds no project lock: each folder takes its cache overlay's
+    /// lock only, and the caller prunes the folders it gets (`prune_cache_folder`). Returns folder and new state.
     /// Folders in `skip` keep their caches (a follow pass takes each folder from one line only).
     pub fn pull_caches(&self, ctx: &Ctx, line: &Line, from: &Source, skip: &BTreeSet<String>) -> Result<Vec<(String, String)>> {
         let mut out = Vec::new();
@@ -606,10 +607,90 @@ impl<'a> Repo<'a> {
         Ok(out)
     }
 
-    /// Hook after a folder cache of a line changed by a follow pass (`follow.rs`): a language
-    /// adapter may prune stale build output of `folder` here. Core stays language-free: no-op.
-    pub fn prune_cache(&self, _folder: &str) -> Result<()> {
-        Ok(())
+    /// The cache adapter hook (issue #167, docs/cache-overlays.md section 19) for `folder`, a folder cache of
+    /// `line` that is in its working copy now. Core runs the adapter that the `prune` property of `overlay`
+    /// names. It never fails: the outcome is one log line on stderr.
+    pub fn prune_cache(&self, line: &Line, overlay: &str, folder: &str) {
+        let root = self.working(line);
+        self.prune_folder(line, Some(overlay), folder, &root);
+    }
+
+    /// The hook for a folder that the caller has in the working copy: the overlay is looked up from the folder
+    /// (no overlay yet: the adapter is detected).
+    pub fn prune_cache_folder(&self, line: &Line, folder: &str) {
+        match self.folder_overlay_of(folder) {
+            Ok(overlay) => {
+                let root = self.working(line);
+                self.prune_folder(line, overlay.as_deref(), folder, &root);
+            }
+            Err(e) => eprintln!("layr: prune {folder}: not pruned: {e:#}"),
+        }
+    }
+
+    fn prune_folder(&self, line: &Line, overlay: Option<&str>, folder: &str, root: &Path) {
+        let (uid, _) = self.owner_ids(line);
+        let setting = match overlay {
+            Some(name) => match self.overlay_props(name) {
+                Ok(p) => p.prune,
+                Err(e) => return eprintln!("layr: prune {folder}: not pruned: {e:#}"),
+            },
+            None => None,
+        };
+        let path = match fsutil::safe_join(root, folder) {
+            Ok(p) => p,
+            Err(e) => return eprintln!("layr: prune {folder}: not pruned: {e:#}"),
+        };
+        // The line lock is held while the hook runs. The project (store) lock is not: no caller holds it here.
+        let _line = match self.prune_lock(line) {
+            Ok(f) => f,
+            Err(e) => return eprintln!("layr: prune {folder}: not pruned: {e:#}"),
+        };
+        let done = crate::cache_hook::run(setting.as_deref(), &path, uid, crate::cache_hook::HOOK_LIMIT);
+        if let Err(e) = self.set_damaged(line, folder, !done.folder_ok) {
+            eprintln!("layr: prune {folder}: cannot record the damaged state: {e:#}");
+        }
+        if !done.log.is_empty() {
+            eprintln!("layr: prune {}", done.log);
+        }
+    }
+
+    /// The lock of one line for the cache hook. The hooks of a line run one at a time. It is a file of the
+    /// project's meta folder, and it is not the project lock.
+    fn prune_lock(&self, line: &Line) -> Result<std::fs::File> {
+        let dir = self.p.meta_dir().join("line-locks");
+        std::fs::create_dir_all(&dir)?;
+        let f = std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(dir.join(&line.id))?;
+        rustix::fs::flock(&f, rustix::fs::FlockOperation::LockExclusive)?;
+        Ok(f)
+    }
+
+    /// The cache folders of `line` that an interrupted hook left damaged. A save skips them: a prune of a folder
+    /// that succeeds clears its mark.
+    pub fn damaged_folders(&self, line: &Line) -> Result<BTreeSet<String>> {
+        match std::fs::read(self.damaged_file(line)) {
+            Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BTreeSet::new()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn damaged_file(&self, line: &Line) -> PathBuf {
+        self.p.meta_dir().join("line-locks").join(format!("{}.damaged", line.id))
+    }
+
+    /// Marks `folder` damaged, or clears its mark. The caller holds the line's prune lock.
+    fn set_damaged(&self, line: &Line, folder: &str, damaged: bool) -> Result<()> {
+        let mut all = self.damaged_folders(line)?;
+        let changed = if damaged { all.insert(folder.to_string()) } else { all.remove(folder) };
+        if !changed {
+            return Ok(());
+        }
+        let path = self.damaged_file(line);
+        if all.is_empty() {
+            let _ = std::fs::remove_file(&path);
+            return Ok(());
+        }
+        crate::fsutil::atomic_write(&path, &serde_json::to_vec(&all)?, 0o600)
     }
 
     /// `gc lru:<size>` of the folder overlays: in the working folder of each line, delete the

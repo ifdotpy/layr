@@ -832,7 +832,8 @@ pub fn merge(ctx: &Ctx, args: &[String]) -> Result<i32> {
             drop(lock);
             let _t = crate::trace::span("merge caches");
             let none = std::collections::BTreeSet::new();
-            for (p, id) in h.repo.pull_caches(ctx, &line, &crate::cache_overlay::Source::Line(&theirs), &none)? {
+            let pulled = h.repo.pull_caches(ctx, &line, &crate::cache_overlay::Source::Line(&theirs), &none)?;
+            for (p, id) in pulled {
                 if !a.has("-q") {
                     outln!(ctx, "Merged cache {p}: {}", ids::short(&id));
                 }

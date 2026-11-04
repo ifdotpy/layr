@@ -2,7 +2,8 @@
 //!
 //! The changes of our live folder against a merge base are the combination of two parts: the
 //! compare of the base with our head (a saved state compare, cached under the owning project's
-//! `meta/` folder) and one compare of our head with the live folder, which runs once per call.
+//! `meta/` folder) and one compare of our head with the live folder. The live compare is saved per
+//! line for the scan of the folder it read (`live_compare`), so an unchanged folder costs no compare.
 //! A path that both parts changed is checked again against the base. Inside a saved compare, the
 //! ignore rules of the saved state skip ignored paths before any content compare. The caller's
 //! ignore rules and hidden paths run after the cache on every call.
@@ -28,6 +29,10 @@ const COMPARE_FORMAT: u32 = 3;
 /// The folder under `meta/` that holds the saved state compares. `gc` removes the entries whose
 /// states are gone.
 const COMPARE_DIR: &str = "overlap-compares";
+/// The folder under `meta/` that holds the saved compares of a line's head with its live folder.
+const LIVE_DIR: &str = "overlap-live";
+/// Format of the saved live compares. Bump it when `compare` changes its results.
+const LIVE_FORMAT: u32 = 1;
 /// Threads that compare saved states at once.
 const COMPARE_THREADS: usize = 4;
 
@@ -60,6 +65,32 @@ struct SavedCompare {
     base: String,
     theirs: String,
     found: Vec<Found>,
+}
+
+/// The compare of a line's head with its live folder, saved for the scan it was made from.
+#[derive(Serialize, Deserialize)]
+struct SavedLive {
+    format: u32,
+    head: String,
+    digest: String,
+    found: Vec<Found>,
+}
+
+fn write_live(file: &Path, saved: &SavedLive) -> Result<()> {
+    std::fs::create_dir_all(file.parent().ok_or_else(|| anyhow!("live compare folder"))?)?;
+    crate::fsutil::atomic_write(file, &serde_json::to_vec(saved)?, 0o600)
+}
+
+/// A digest of every entry of a scan: the path, the metadata, the data identity and the birth.
+#[cfg(target_os = "macos")]
+fn scan_digest(live: &Path) -> Result<String> {
+    use sha1::{Digest, Sha1};
+    let scan = crate::storage::scan_shared(live, true)?;
+    let mut h = Sha1::new();
+    for (path, e) in scan.iter() {
+        h.update(format!("{path}|{:?}|{:?}|{:?}|{:?}\n", e.fingerprint, e.meta, e.data, e.birth).as_bytes());
+    }
+    Ok(hex::encode(h.finalize()))
 }
 
 /// The real changes between two trees. Paths that `skip_path` or `rules` ignore are left out
@@ -269,6 +300,8 @@ fn run_compares(jobs: &[StateCompare]) -> Result<Vec<Vec<Found>>> {
 /// The state compares and live compares of one `overlaps` call. Each one runs once.
 #[derive(Default)]
 struct Work {
+    /// Our head as a tree, read once for the whole call. `None` when it is unreadable.
+    head_src: Option<Snap>,
     /// The saved compares: base -> their head, our base -> head, and overlay layers.
     jobs: Vec<StateCompare>,
     /// Our saved compare per merge base: the index in `jobs`.
@@ -285,8 +318,9 @@ struct Work {
 struct OtherPlan {
     name: String,
     owner: u32,
-    /// The merge base with this line. `our_job` is our compare against it.
+    /// The merge base with this line, as a tree. `our_job` is our compare against it.
     base: String,
+    base_src: Snap,
     our_job: Option<usize>,
     their_private: BTreeSet<String>,
     hidden: BTreeSet<String>,
@@ -310,8 +344,22 @@ impl Repo<'_> {
         self.p.meta_dir().join(COMPARE_DIR)
     }
 
+    /// The saved live compares of lines that are gone. Called by `gc`.
+    fn prune_live(&self) -> Result<usize> {
+        let Ok(entries) = std::fs::read_dir(self.p.meta_dir().join(LIVE_DIR)) else { return Ok(0) };
+        let lines: BTreeSet<String> = self.p.db.lines()?.into_iter().map(|l| format!("{}.json", l.id)).collect();
+        let mut removed = 0;
+        for e in entries.flatten() {
+            if !lines.contains(&e.file_name().to_string_lossy().to_string()) && std::fs::remove_file(e.path()).is_ok() {
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+
     /// Remove the saved compares whose states are gone, and the unreadable ones. Called by `gc`.
     pub fn prune_compares(&self) -> Result<usize> {
+        let _ = self.prune_live();
         let Ok(entries) = std::fs::read_dir(self.compare_dir()) else { return Ok(0) };
         let mut removed = 0;
         for e in entries.flatten() {
@@ -360,13 +408,45 @@ impl Repo<'_> {
         if work.head_live.is_none() {
             work.head_live = Some(match self.state_src(&line.head) {
                 Ok(head) => {
-                    let _t = crate::trace::span("overlap live compare");
-                    Some(compare(&head, live, rules)?)
+                    let found = self.live_compare(line, &head, live, rules)?;
+                    work.head_src = Some(head);
+                    Some(found)
                 }
                 Err(_) => None,
             });
         }
         Ok(())
+    }
+
+    /// `compare` of our head with the live folder, saved per line. A saved compare is used only
+    /// when the head and the scan of the folder (every path, its metadata and data identity) are
+    /// the same. The compare reads only those, so the result is the same. Other platforms compare.
+    fn live_compare(&self, line: &Line, head: &Snap, live: &Path, rules: &Rules) -> Result<Vec<Found>> {
+        #[cfg(target_os = "macos")]
+        let digest = {
+            let _t = crate::trace::span("overlap live digest");
+            Some(scan_digest(live)?)
+        };
+        #[cfg(not(target_os = "macos"))]
+        let digest: Option<String> = None;
+        let file = self.p.meta_dir().join(LIVE_DIR).join(format!("{}.json", line.id));
+        if let Some(digest) = &digest {
+            let saved = std::fs::read(&file).ok().and_then(|raw| serde_json::from_slice::<SavedLive>(&raw).ok());
+            if let Some(saved) = saved.filter(|s| s.format == LIVE_FORMAT && s.head == line.head && s.digest == *digest) {
+                let _t = crate::trace::span("overlap live saved");
+                return Ok(saved.found);
+            }
+        }
+        let found = {
+            let _t = crate::trace::span("overlap live compare");
+            compare(head, live, rules)?
+        };
+        if let Some(digest) = digest {
+            // A file that cannot be written only costs the next status a compare.
+            let saved = SavedLive { format: LIVE_FORMAT, head: line.head.clone(), digest, found: found.clone() };
+            let _ = write_live(&file, &saved);
+        }
+        Ok(found)
     }
 
     /// The saved compare of a merge base -> our head, once per base. `None` when our head is
@@ -375,11 +455,11 @@ impl Repo<'_> {
         if let Some(job) = work.ours_jobs.get(base) {
             return Ok(Some(*job));
         }
-        if !matches!(work.head_live, Some(Some(_))) {
+        let (true, Some(head)) = (matches!(work.head_live, Some(Some(_))), work.head_src.clone()) else {
             return Ok(None);
-        }
+        };
         let job = work.jobs.len();
-        let state = StateCompare::new(&self.compare_dir(), base, &line.head, self.state_src(base)?, self.state_src(&line.head)?);
+        let state = StateCompare::new(&self.compare_dir(), base, &line.head, self.state_src(base)?, head);
         work.jobs.push(state);
         work.ours_jobs.insert(base.to_string(), job);
         Ok(Some(job))
@@ -406,12 +486,16 @@ impl Repo<'_> {
         let our_private = self.private_paths(line)?;
         let mut work = Work::default();
         let mut plans: Vec<OtherPlan> = Vec::new();
+        // The merge bases of all lines come from one read of the history.
+        let history = if lines.is_empty() { None } else { Some(self.history()?) };
         // Step 1, on this thread: the live parts and the state lookups (`Repo` is not `Sync`).
+        let step1 = crate::trace::span("overlap step 1");
         for other in lines {
-            let base = match self.merge_base(&line.head, &other.head)? {
-                Some(base) => base,
-                None => continue,
+            let found = match history.as_ref().and_then(|h| h.merge_base(&line.head, &other.head)) {
+                Some(found) => found,
+                None => self.merge_base(&line.head, &other.head)?,
             };
+            let Some(base) = found else { continue };
             let root = match self.state_src(&base) {
                 Ok(root) => root,
                 Err(_) => continue,
@@ -429,12 +513,13 @@ impl Repo<'_> {
             let hidden = self.radar_hidden(ctx, &other)?;
             let their_private = self.private_paths(&other)?;
             let job = work.jobs.len();
-            work.jobs.push(StateCompare::new(&self.compare_dir(), &base, &state.id, root, theirs));
+            work.jobs.push(StateCompare::new(&self.compare_dir(), &base, &state.id, root.clone(), theirs));
             let layers = self.overlay_plans(ctx, line, &other, ours_root, &mut work)?;
             plans.push(OtherPlan {
                 name: other.name.clone(),
                 owner: other.owner,
                 base,
+                base_src: root,
                 our_job,
                 their_private,
                 hidden,
@@ -443,12 +528,14 @@ impl Repo<'_> {
                 layers,
             });
         }
+        drop(step1);
         // Step 2: the saved state compares, in parallel.
         let found = {
             let _t = crate::trace::span("status overlap compares");
             run_compares(&work.jobs)?
         };
         // Step 3, on this thread: our changes per base and the caller's filters, in the order of the lines.
+        let _step3 = crate::trace::span("overlap step 3");
         let mut overlaps = Vec::new();
         if let Some((_, ours_root)) = ours.as_ref() {
             let overlay_rules = Rules::new(ours_root);
@@ -456,12 +543,15 @@ impl Repo<'_> {
             let mut layer_keys: BTreeMap<(String, String), BTreeMap<String, i64>> = BTreeMap::new();
             for p in &plans {
                 if !ours_keys.contains_key(&p.base) {
-                    let base_src = self.state_src(&p.base)?;
+                    let base_src = p.base_src.clone();
                     let parts = match (p.our_job, work.head_live.as_ref().and_then(|h| h.as_ref())) {
                         (Some(j), Some(live)) => Some((found[j].as_slice(), live.as_slice())),
                         _ => None,
                     };
-                    let changed = changes_vs_base(&base_src, ours_root, &ignored, parts)?;
+                    let changed = {
+                        let _t = crate::trace::span("overlap ours changes");
+                        changes_vs_base(&base_src, ours_root, &ignored, parts)?
+                    };
                     ours_keys.insert(p.base.clone(), visible(&changed, &our_private, &ignored));
                 }
                 let our_paths = &ours_keys[&p.base];

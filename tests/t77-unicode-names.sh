@@ -4,6 +4,10 @@
 # precomposed form) are two files on btrfs, ext4 and XFS, but one entry on APFS, also on a
 # case-sensitive volume. Writing both there would lose one: the write is refused first.
 . "$(dirname "$0")/lib.sh"
+if ! case_sensitive; then
+    echo "t77-unicode-names.sh: refuses to run: $T is on a case-insensitive volume. Set LAYR_APFS_TEST_ROOT to a case-sensitive APFS volume." >&2
+    exit 1
+fi
 
 R=$T/remote.git
 git init -q --bare -b main $R
