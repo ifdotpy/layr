@@ -440,56 +440,8 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
             }
             published
         };
-<<<<<<< head
-        let mut identity = if store.backend.can_read() {
-            open_identity(
-                &store.backend.scoped(&published.prefix())?,
-                &published.key,
-                Some((&store.machine, &store.key)),
-                store.person.as_ref(),
-                store.paper_key_text.as_deref(),
-            )?
-        } else {
-            None
-        };
-        if identity.is_none() {
-            let path = local_key(store, &orepo.p.id, &published.key.epoch);
-            if path.exists() {
-                let opened = keys::open_machine_slot(&std::fs::read(path)?, &store.key)?;
-                if keys::recipient_of(&opened)? != published.key.recipient {
-                    bail!("local overlay key differs from its signed recipient");
-                }
-                identity = Some(opened);
-            }
-        }
-        let scoped = layer(store, &published, identity.clone(), repo.need_overlay(&name)?.cache)?;
-||||||| base
-        let mut identity = if store.backend.can_read() {
-            open_identity(
-                &store.backend.scoped(&published.prefix())?,
-                &published.key,
-                Some((&store.machine, &store.key)),
-                store.person.as_ref(),
-                store.paper_key_text.as_deref(),
-            )?
-        } else {
-            None
-        };
-        if identity.is_none() {
-            let path = local_key(store, &orepo.p.id, &published.key.epoch);
-            if path.exists() {
-                let opened = keys::open_machine_slot(&std::fs::read(path)?, &store.key)?;
-                if keys::recipient_of(&opened)? != published.key.recipient {
-                    bail!("local overlay key differs from its signed recipient");
-                }
-                identity = Some(opened);
-            }
-        }
-        let scoped = layer(store, &published, identity.clone())?;
-=======
         let identity = layer_identity(store, &orepo.p.id, &published)?;
-        let scoped = layer(store, &published, identity.clone())?;
->>>>>>> origin/main
+        let scoped = layer(store, &published, identity.clone(), repo.need_overlay(&name)?.cache)?;
         if let Some(identity) = &identity {
             for principal in readers.keys() {
                 if let Some(machine) = principal.strip_prefix("machine:") {
@@ -681,7 +633,7 @@ pub(super) fn sweep_caches(store: &Store, ctx: &Ctx, repo: &Repo, dry_run: bool)
             out.push((name.clone(), old));
             continue;
         };
-        let scoped = layer(store, published, Some(identity))?;
+        let scoped = layer(store, published, Some(identity), repo.need_overlay(&name)?.cache)?;
         let _lock = orepo.p.lock()?;
         let mut swept = sweep_layer(repo, &name, &orepo, &scoped, dry_run)?;
         swept.trees.extend(old.trees);
