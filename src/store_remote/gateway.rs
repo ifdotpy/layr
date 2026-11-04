@@ -118,6 +118,7 @@ impl Gateway {
         }
         let path = format!("/v1/p/{project}/");
         base.set_path(&path);
+        layr_store::init_tls();
         let http = Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
@@ -243,6 +244,7 @@ impl Gateway {
         if certificates.is_empty() {
             bail!("gateway CA file has no certificates");
         }
+        layr_store::init_tls();
         let mut builder = Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())

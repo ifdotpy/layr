@@ -498,6 +498,7 @@ mod unit {
         .unwrap();
         let profile = Profile::load_with_env("work", &env).unwrap();
         assert_eq!(profile.region.as_deref(), Some("eu-central-1"));
+        crate::init_tls();
         let credentials = profile.credentials(&reqwest::blocking::Client::new()).unwrap();
         assert!(
             credentials.key_id == "test-key"
@@ -596,6 +597,7 @@ mod unit {
         sso.write_cache(&json!({"accessToken":"old-token","expiresAt":format_time(now()+Duration::from_secs(30)),"refreshToken":"old-refresh","clientId":"client","clientSecret":"secret","registrationExpiresAt":format_time(now()+Duration::from_secs(3600))})).unwrap();
         // A refresh replaces a public old cache with a private file.
         std::fs::set_permissions(sso.cache_path().unwrap(), std::fs::Permissions::from_mode(0o644)).unwrap();
+        crate::init_tls();
         let keys = profile.credentials(&reqwest::blocking::Client::new()).unwrap();
         assert!(keys.key_id == "role-key" && keys.secret == "role-secret" && keys.token.as_deref() == Some("role-token"));
         refresh.join().unwrap();
@@ -614,6 +616,7 @@ mod unit {
         let profile = Profile::load_with_env("default", &env).unwrap();
         let Kind::Sso(sso) = &profile.kind else { panic!("expected SSO") };
         assert_eq!(sso.cache_key, "https://example.com/start");
+        crate::init_tls();
         let http = reqwest::blocking::Client::new();
         assert!(profile.credentials(&http).unwrap_err().is::<SignInNeeded>());
         sso.write_cache(&json!({"accessToken":"expired","expiresAt":"2000-01-01T00:00:00Z"})).unwrap();
@@ -640,7 +643,7 @@ mod unit {
         let profile = Profile::load_with_env("work", &env).unwrap();
         let mut shown = false;
         profile
-            .login(&reqwest::blocking::Client::new(), |page, code| {
+            .login(&{ crate::init_tls(); reqwest::blocking::Client::new() }, |page, code| {
                 assert_eq!(page, "https://example.com/device");
                 assert_eq!(code, "TEST-CODE");
                 shown = true;

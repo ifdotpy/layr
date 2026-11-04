@@ -48,6 +48,7 @@ pub struct S3 {
 impl S3 {
     /// `endpoint` (`http://127.0.0.1:9000`) replaces AWS with a path-style test store.
     pub fn new(bucket: &str, region: &str, credentials: Credentials, endpoint: Option<&str>) -> Result<Self> {
+        crate::init_tls();
         let http = Client::builder()
             .user_agent("layr")
             .redirect(reqwest::redirect::Policy::none())

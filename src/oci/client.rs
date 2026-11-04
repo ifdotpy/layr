@@ -39,6 +39,7 @@ impl Registry {
         }
         let mut base = u;
         base.set_path("/");
+        layr_store::init_tls();
         let http = Client::builder()
             .timeout(Duration::from_secs(300))
             .connect_timeout(Duration::from_secs(15))
