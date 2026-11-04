@@ -21,17 +21,26 @@ mkdir -p other
 printf removed > other/result
 l save --caches -q || exit 1
 l overlay remove cache.other >/dev/null || exit 1
+# A replica can know a public overlay descriptor before receiving its project.
+python3 - "$LAYR_ROOT/projects/p/meta/db/layr.sqlite" <<'PYFIXTURE'
+import json, os, sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as db:
+    value = {'hidden': False, 'owner': os.getuid(), 'mode': 'follow', 'root': ''}
+    db.execute('INSERT INTO config(key, value, ord) VALUES (?, ?, ?)',
+               ('overlay.offline', json.dumps(value), 'fixture'))
+PYFIXTURE
 l overlay list --json > "$T/list.json" || exit 1
 ok "overlay list JSON matches the golden fields" python3 - "$T/list.json" <<'PY'
 import json, sys
 with open(sys.argv[1]) as f:
     rows = json.load(f)
-assert [r['name'] for r in rows] == ['cache.target', 'private', 'public'], rows
+assert [r['name'] for r in rows] == ['cache.target', 'offline', 'private', 'public'], rows
 by_name = {r['name']: r for r in rows}
 for row in rows:
     assert set(row) == {'name', 'mode', 'hidden', 'owner', 'readers', 'shown', 'properties', 'folder', 'state', 'size', 'saved'}, row
     assert isinstance(row['owner'], int) and isinstance(row['readers'], list), row
     assert row['mode'] == 'follow', row
+assert by_name['offline']['readers'] == [] and by_name['offline']['saved'] is None, by_name['offline']
 assert by_name['private']['hidden'] and by_name['private']['shown'], by_name['private']
 assert by_name['private']['properties'] == {'history': 3, 'quiet': False, 'merge': 'three-way', 'gc': 'none', 'prune': 'auto'}
 assert not by_name['public']['hidden'] and by_name['public']['shown'], by_name['public']

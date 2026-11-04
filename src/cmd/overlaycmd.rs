@@ -12,7 +12,7 @@ use crate::overlay::{Layer, MergeKind, Mode, Props, PROPS};
 use crate::repo::Repo;
 use crate::storage as btrfs;
 use crate::store::{check_name, Project};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
 
 const USAGE: &str =
@@ -387,7 +387,7 @@ struct InLine {
 /// The state of a line's folder in `overlay list` and `overlay repair` (one rule for both).
 pub(crate) const NOT_CACHE_PATH: &str = "not a cache path in this line";
 
-fn folder_in_line(repo: &Repo, op: &Project, l: &crate::model::Line, name: &str, folder: &str, kind: FolderIn) -> Result<InLine> {
+fn folder_in_line(repo: &Repo, op: Option<&Project>, l: &crate::model::Line, name: &str, folder: &str, kind: FolderIn) -> Result<InLine> {
     let cp = repo.working(l).join(folder);
     let state = match (kind, btrfs::is_subvolume(&cp)) {
         (FolderIn::Versioned, true) => format!("not a cache: has versioned files (run layr overlay repair {name})"),
@@ -398,13 +398,32 @@ fn folder_in_line(repo: &Repo, op: &Project, l: &crate::model::Line, name: &str,
         (FolderIn::Cache, false) => "absent".to_string(),
     };
     let size = (state == "cache").then(|| crate::cache_overlay::tree_size(&cp));
-    let saved = op.db.line_by_name(&format!("line-{}", l.id))?.map(|ol| ids::short(&ol.head));
+    let saved = op.map(|p| p.db.line_by_name(&format!("line-{}", l.id)))
+        .transpose()?.flatten().map(|ol| ids::short(&ol.head));
     Ok(InLine { state, size, saved })
 }
 
+/// A public descriptor can arrive before its local overlay project is fetched.
+fn listing_project<'a>(store: &'a crate::store::Store, project: &str, name: &str) -> Result<Option<Project<'a>>> {
+    let full = format!("{project}%{name}");
+    let dir = store.project_dir(&full).with_context(|| format!("locate overlay '{name}'"))?;
+    if !dir.try_exists().with_context(|| format!("locate overlay '{name}'"))? {
+        return Ok(None);
+    }
+    Project::open_for(store, &full, true).with_context(|| format!("open overlay '{name}'")).map(Some)
+}
+
+fn listing_settings_db<'a>(parent: &'a crate::db::Db, overlay: Option<&'a crate::db::Db>, name: &str, hidden: bool) -> Result<&'a crate::db::Db> {
+    if hidden {
+        overlay.with_context(|| format!("hidden overlay '{name}' has no local project"))
+    } else {
+        Ok(parent)
+    }
+}
+
 /// Read all listing settings from the project that owns them, using one overlay handle.
-fn listing_settings(parent: &crate::db::Db, overlay: &crate::db::Db, name: &str, hidden: bool) -> Result<(Props, Option<String>)> {
-    let settings = if hidden { overlay } else { parent };
+fn listing_settings(parent: &crate::db::Db, overlay: Option<&crate::db::Db>, name: &str, hidden: bool) -> Result<(Props, Option<String>)> {
+    let settings = listing_settings_db(parent, overlay, name, hidden)?;
     let get = |suffix: &str| settings.overlay_config(&format!("overlay.{name}.{suffix}"));
     let mut values = BTreeMap::new();
     for prop in PROPS {
@@ -431,15 +450,17 @@ fn list(ctx: &Ctx, args: &[String]) -> Result<i32> {
             Some(i) => i,
             None => continue,
         };
-        let op = Project::open_for(repo.p.store, &format!("{}%{name}", repo.p.name), true)?;
-        let readers = reader_list(&op);
+        let op = listing_project(repo.p.store, &repo.p.name, &name)?;
+        let readers = op.as_ref().map(reader_list).unwrap_or_default();
         let mark = if shown.contains(&name) { "* " } else { "  " };
         let owner = crate::ctx::Caller::from_uid(info.owner).user;
-        let (props, folder) = listing_settings(&repo.p.db, &op.db, &name, info.hidden)?;
+        let (props, folder) = listing_settings(&repo.p.db, op.as_ref().map(|p| &p.db), &name, info.hidden)
+            .with_context(|| format!("read settings for overlay '{name}'"))?;
         let line_state = match (&h.line, &folder) {
             (Some(l), Some(f)) => {
                 let kind = repo.folder_kind(l, f)?;
-                Some(folder_in_line(repo, &op, l, &name, f, kind)?)
+                Some(folder_in_line(repo, op.as_ref(), l, &name, f, kind)
+                    .with_context(|| format!("read saved line for overlay '{name}'"))?)
             }
             _ => None,
         };
@@ -455,8 +476,9 @@ fn list(ctx: &Ctx, args: &[String]) -> Result<i32> {
             if let Some(f) = &folder {
                 described.insert(0, format!("folder={f}"));
             }
-            let settings = if info.hidden { &op.db } else { &repo.p.db };
-            let keys = settings.overlay_config(&format!("overlay.{name}.key-files"))?
+            let settings = listing_settings_db(&repo.p.db, op.as_ref().map(|p| &p.db), &name, info.hidden)?;
+            let keys = settings.overlay_config(&format!("overlay.{name}.key-files"))
+                .with_context(|| format!("read key files for overlay '{name}'"))?
                 .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok()).unwrap_or_default();
             if !keys.is_empty() {
                 described.push(format!("key-files={}", keys.join(",")));
@@ -1212,6 +1234,24 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn listing_handles_an_absent_overlay_and_reports_broken_projects() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("layr-list-project-{}", ids::new_id()));
+        let store = crate::store::Store::open(&dir)?;
+        assert!(listing_project(&store, "p", "offline")?.is_none());
+        let overlay_dir = store.project_dir("p%broken")?.join("meta/db");
+        std::fs::create_dir_all(&overlay_dir)?;
+        std::fs::write(overlay_dir.join("layr.sqlite"), b"not a sqlite database")?;
+        let error = match listing_project(&store, "p", "broken") {
+            Ok(_) => anyhow::bail!("corrupt overlay opened"),
+            Err(error) => error,
+        };
+        assert!(format!("{error:#}").contains("overlay 'broken'"));
+        drop(store);
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
     fn listing_settings_reads_public_and_hidden_sources() -> Result<()> {
         let dir = std::env::temp_dir().join(format!("layr-list-settings-{}", ids::new_id()));
         std::fs::create_dir_all(&dir)?;
@@ -1228,15 +1268,19 @@ mod tests {
         ] {
             db.conn.execute("INSERT INTO config (key, value, ord) VALUES (?1, ?2, ?3)", (key, value, ord))?;
         }
-        let (public, folder) = listing_settings(&parent, &overlay, "public", false)?;
+        let (missing_public, missing_folder) = listing_settings(&parent, None, "public", false)?;
+        assert_eq!(missing_public.history, Some(4));
+        assert_eq!(missing_folder.as_deref(), Some("target"));
+        assert!(listing_settings(&parent, None, "private", true).is_err());
+        let (public, folder) = listing_settings(&parent, Some(&overlay), "public", false)?;
         assert_eq!(public.history, Some(4));
         assert_eq!(folder.as_deref(), Some("target"));
-        let (private, folder) = listing_settings(&parent, &overlay, "private", true)?;
+        let (private, folder) = listing_settings(&parent, Some(&overlay), "private", true)?;
         assert_eq!(private.history, Some(3));
         assert!(private.quiet);
         assert_eq!(folder, None);
         overlay.conn.execute("UPDATE config SET value = 'invalid' WHERE key = 'overlay.private.history'", [])?;
-        assert!(listing_settings(&parent, &overlay, "private", true).is_err());
+        assert!(listing_settings(&parent, Some(&overlay), "private", true).is_err());
         drop((parent, overlay));
         std::fs::remove_dir_all(dir)?;
         Ok(())
