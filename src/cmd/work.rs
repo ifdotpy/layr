@@ -1292,6 +1292,9 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if !a.has("-q") {
         let root = if parents_empty(&state) { " (root-state)" } else { "" };
         outln!(ctx, "[{}{} {}] {}", line.name, root, ids::short(&state.id), message.lines().next().unwrap_or(""));
+        // `publish` moved the clone into the state folder: read the saved state.
+        #[cfg(target_os = "macos")]
+        let new_root = h.repo.state_src(&state.id)?;
         let staged = changes::with_renames(&head_root, &new_root, staged);
         print_summary(ctx, &head_root, &new_root, &staged)?;
         for c in &cleared {
