@@ -208,15 +208,23 @@ impl<'a> Repo<'a> {
         let after = self.line(&line.id)?.head;
         let short = ids::short(&fetched);
         let mut text = if after == fetched { format!("fast-forward to {short}") } else { format!("merged {short}") };
-        if let Err(e) = self.follow_caches(ctx, line, remote, &head) {
-            text.push_str(&format!("; caches not taken: {e:#}"));
+        match self.follow_caches(ctx, line, remote, &head) {
+            Ok((taken, Some(reason))) if taken.is_empty() => text.push_str(&format!("; no cache taken: {reason}")),
+            Ok(_) => {}
+            Err(e) => text.push_str(&format!("; caches not taken: {e:#}")),
         }
         Ok(Some(text))
     }
 
     /// The caches after a merge (docs/cache-overlays.md): the candidates of `remote`, newest first.
-    fn follow_caches(&self, ctx: &Ctx, line: &Line, remote: &str, before: &str) -> Result<()> {
-        self.take_follow_caches(ctx, line, self.cache_sources(remote)?, Some(before), true).map(|_| ())
+    fn follow_caches(
+        &self,
+        ctx: &Ctx,
+        line: &Line,
+        remote: &str,
+        before: &str,
+    ) -> Result<(Vec<(String, String)>, Option<String>)> {
+        self.take_follow_caches(ctx, line, self.cache_sources(remote)?, Some(before), true)
     }
 
     /// Takes the caches of `sources` (newest first) into `line`, then saves them as `save --caches` does (prune,
@@ -244,31 +252,18 @@ impl<'a> Repo<'a> {
             if cand.id == line.id {
                 continue;
             }
-            let theirs = self.localize(cand)?;
-            // The rule of a protected line and the squash-safe content check (#133) must pass.
-            let refused = {
-                let _lock = self.p.lock()?;
-                let now = self.line(&line.id)?;
-                let mut reason = None;
-                if let Some(rule) = self.policy().rule_for(&now.name) {
-                    if !mergecmd::merge_met_rule(self, &rule, before.unwrap_or(&now.head), &now.head, &theirs.head)? {
-                        reason = Some("checks and approvals do not allow them".to_string());
+            // An error of one candidate (its state is not on this machine, say) refuses only that candidate: the
+            // others, the build and the save still run.
+            let name = cand.name.clone();
+            match self.take_candidate_caches(ctx, line, cand, before, &done) {
+                Ok(Ok(pulled)) => {
+                    for (folder, state) in pulled {
+                        done.insert(folder.clone());
+                        taken.push((folder, state));
                     }
                 }
-                match reason {
-                    Some(r) => Some(r),
-                    None => mergecmd::caches_contained(self, &now, &theirs)?,
-                }
-            };
-            if refused.is_some() {
-                refusal = refused;
-                continue;
-            }
-            let now = self.line(&line.id)?;
-            let _t = crate::trace::span("merge caches");
-            for (folder, state) in self.pull_caches(ctx, &now, &Source::Line(&theirs), &done)? {
-                done.insert(folder.clone());
-                taken.push((folder, state));
+                Ok(Err(reason)) => refusal = Some(reason),
+                Err(e) => refusal = Some(format!("{name}: {e:#}")),
             }
         }
         // The merge wrote the changed files with a new time; the ones the taken caches were built from get their time
@@ -287,6 +282,39 @@ impl<'a> Repo<'a> {
         // Prunes each taken folder, then saves the caches of the line.
         admin::save(ctx, &["--caches".to_string(), "-q".to_string()])?;
         Ok((taken, refusal))
+    }
+
+    /// The caches of one candidate: the folders pulled, or the reason it is refused. The rule of a protected line and
+    /// the squash-safe content check (#133) must pass.
+    fn take_candidate_caches(
+        &self,
+        ctx: &Ctx,
+        line: &Line,
+        cand: Line,
+        before: Option<&str>,
+        done: &BTreeSet<String>,
+    ) -> Result<std::result::Result<Vec<(String, String)>, String>> {
+        let theirs = self.localize(cand)?;
+        let refused = {
+            let _lock = self.p.lock()?;
+            let now = self.line(&line.id)?;
+            let mut reason = None;
+            if let Some(rule) = self.policy().rule_for(&now.name) {
+                if !mergecmd::merge_met_rule(self, &rule, before.unwrap_or(&now.head), &now.head, &theirs.head)? {
+                    reason = Some("checks and approvals do not allow them".to_string());
+                }
+            }
+            match reason {
+                Some(r) => Some(r),
+                None => mergecmd::caches_contained(self, &now, &theirs)?,
+            }
+        };
+        if let Some(r) = refused {
+            return Ok(Err(r));
+        }
+        let now = self.line(&line.id)?;
+        let _t = crate::trace::span("merge caches");
+        Ok(Ok(self.pull_caches(ctx, &now, &Source::Line(&theirs), done)?))
     }
 
     /// Lines with an export to `remote` in the last 14 days, newest export first. An export names

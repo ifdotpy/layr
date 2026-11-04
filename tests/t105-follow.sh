@@ -82,6 +82,46 @@ ok "main has the file of the squash-merged line" test -f feat.txt
 eq "main has the caches of the squash-merged line" bin-feat "$(cat target/debug/x 2>/dev/null)"
 has "the cache folder is an overlay of main" "target" "$(l overlay list 2>&1)"
 
+# 4b. A source line whose state is not on this machine (evicted, no store copy) refuses only itself: the
+#     pass takes the caches of the next source, then builds and saves. good pushes first, gone pushes
+#     last, so gone is the first candidate.
+dashed() {
+    local d=$1 u
+    u="${d:20:12}${d:12:8}${d:0:12}"
+    printf '%s-%s-%s-%s-%s' "${u:0:8}" "${u:8:4}" "${u:12:4}" "${u:16:4}" "${u:20:12}"
+}
+for n in good gone; do
+    l line new $n main >/dev/null
+    cd $P/$n
+    echo $n > $n.txt; l add $n.txt; l save -m "$n work" -q
+    rm -rf target; mkdir -p target/debug; echo bin-$n > target/debug/x
+    l save --caches -q
+    l git push -q origin HEAD:refs/heads/$n >/dev/null 2>&1
+    cd $P/main
+done
+# gone saves its caches once more on a state that it did not push.
+cd $P/gone; echo more > more.txt; l add more.txt; l save -m "gone more" -q
+echo bin-gone-more > target/debug/x; l save --caches -q
+# The cache names the automatic state of that save.
+gone_head=$(l rev-parse 'head@{0}'); cd $P/main
+P_ROOT=$LAYR_ROOT/projects/gm
+ok "the cache state of gone was on the disk" test -e "$P_ROOT/states/$(dashed "$gone_head")" -o -e "$P_ROOT/deltas/$(dashed "$gone_head")"
+for d in "$P_ROOT/states/$(dashed "$gone_head")" "$P_ROOT/deltas/$(dashed "$gone_head")"; do
+    [ -e "$d" ] || continue
+    chflags -R nouchg,noschg "$d" 2>/dev/null; chattr -R -i "$d" 2>/dev/null; chmod -R u+w "$d" 2>/dev/null
+    rm -rf "$d" 2>/dev/null
+    # A read-only btrfs snapshot (Linux) goes only through btrfs.
+    [ -e "$d" ] && btrfs property set -ts "$d" ro false 2>/dev/null && btrfs subvolume delete "$d" >/dev/null 2>&1
+done
+no "the state of gone is gone from the disk" test -e "$P_ROOT/states/$(dashed "$gone_head")" -o -e "$P_ROOT/deltas/$(dashed "$gone_head")"
+cd $U; git pull -q origin main; echo good > good.txt; echo gone > gone.txt; echo more > more.txt; git add good.txt gone.txt more.txt
+git commit -qm "squash good and gone"; git push -q origin main
+cd $P/main
+out=$(l follow --run 2>&1)
+has "the pass with a missing source state merges" "fast-forward" "$out"
+no "a missing source state does not stop the cache step" grep -q "caches not taken" <<<"$out"
+eq "main has the caches of the next source" bin-good "$(cat target/debug/x 2>/dev/null)"
+
 # 5. A conflicting remote change: main keeps its head, and the error shows in layr follow.
 echo local > src/a.txt; l save -a -m "local a" -q
 cd $U; echo remote > src/a.txt; git commit -qam "remote a"; git push -q origin main
