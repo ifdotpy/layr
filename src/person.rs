@@ -486,8 +486,8 @@ pub fn run(args: &[String]) -> Result<i32> {
                     };
                     index.set(pin.clone());
                     let previous = record["index"].as_str().map(|data| B64.decode(data)).transpose()?.map(|data| {
-                        use sha2::Digest;
-                        hex::encode(sha2::Sha256::digest(data))
+                        use layr_hashers::Digest;
+                        hex::encode(layr_hashers::ContentAddress::digest(data))
                     });
                     gateway.person_call(
                         Method::PUT,

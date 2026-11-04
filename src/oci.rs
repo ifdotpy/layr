@@ -10,7 +10,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use flate2::{Compression, GzBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
+use layr_hashers::{ContentAddress, Digest};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{Read, Write};
@@ -170,7 +170,7 @@ pub fn valid_component(s: &str) -> Result<()> {
 }
 
 pub fn digest(data: &[u8]) -> String {
-    format!("sha256:{}", hex::encode(Sha256::digest(data)))
+    format!("sha256:{}", hex::encode(ContentAddress::digest(data)))
 }
 
 pub fn digest_hex(s: &str) -> Result<&str> {
@@ -283,7 +283,7 @@ fn entries(tree: &Tree) -> Result<Vec<Entry>> {
                         .map_err(|_| anyhow!("OCI export requires UTF-8 symbolic-link targets"))?,
                 ),
                 FType::File => {
-                    let mut h = Sha256::new();
+                    let mut h = ContentAddress::new();
                     std::io::copy(&mut tree.open_read(&p)?, &mut HashSink(&mut h))?;
                     (b'0', m.size, hex::encode(h.finalize()))
                 }
@@ -305,7 +305,7 @@ fn entries(tree: &Tree) -> Result<Vec<Entry>> {
     Ok(out)
 }
 
-struct HashSink<'a>(&'a mut Sha256);
+struct HashSink<'a>(&'a mut ContentAddress);
 impl Write for HashSink<'_> {
     fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
         self.0.update(b);
@@ -318,7 +318,7 @@ impl Write for HashSink<'_> {
 
 struct HashWriter<W> {
     inner: W,
-    hash: Sha256,
+    hash: ContentAddress,
 }
 impl<W: Write> Write for HashWriter<W> {
     fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
@@ -382,9 +382,9 @@ fn pack(
     let tmp = cache.root.join(format!("layer-{}", crate::ids::new_id()));
     let result = (|| -> Result<CachedLayer> {
         let output = File::create(&tmp)?;
-        let compressed = HashWriter { inner: output, hash: Sha256::new() };
+        let compressed = HashWriter { inner: output, hash: ContentAddress::new() };
         let gz = GzBuilder::new().mtime(0).operating_system(255).write(compressed, Compression::new(6));
-        let uncompressed = HashWriter { inner: gz, hash: Sha256::new() };
+        let uncompressed = HashWriter { inner: gz, hash: ContentAddress::new() };
         let mut tar = tar::Builder::new(uncompressed);
         for e in selected {
             let tar_path = match rename {

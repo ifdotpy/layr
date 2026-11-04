@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/layr-store", "crates/layr-model", "crates/layr-retest", "crates/layr-cache", "crates/layr-adapter"]
+members = ["crates/layr-store", "crates/layr-model", "crates/layr-retest", "crates/layr-cache", "crates/layr-adapter", "crates/layr-hashers"]
 resolver = "2"
 
 [workspace.metadata.layr-retest]
@@ -50,8 +50,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde_yaml = "0.9"
-sha1 = "0.10"
-sha2 = "0.10"
+layr-hashers = { path = "crates/layr-hashers" }
 similar = "2"
 tar = "0.4"
 toml = "0.8"

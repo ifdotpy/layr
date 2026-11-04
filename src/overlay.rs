@@ -459,9 +459,9 @@ pub fn split(base: &Path, new: &Path, shared: &Path, roots: &[PathBuf], pending:
 
 /// The key of a line's base: its head and stack.
 fn base_key(head: &str, layers: &[Layer]) -> String {
-    use sha2::Digest;
+    use layr_hashers::Digest;
     let text = serde_json::json!({"head": head, "layers": layers}).to_string();
-    hex::encode(sha2::Sha256::digest(text.as_bytes()))[..16].to_string()
+    hex::encode(layr_hashers::ContentAddress::digest(text.as_bytes()))[..16].to_string()
 }
 
 impl<'a> Repo<'a> {
@@ -1719,12 +1719,12 @@ mod view_tests {
 
     #[test]
     fn view_identity_uses_exact_canonical_bytes_and_stack_order() {
-        use sha2::{Digest, Sha256};
+        use layr_hashers::{ContentAddress, Digest};
         let view = View::new(SHARED.into(), vec![Layer { overlay: "keys".into(), state: OVERLAY.into() }]);
         let expected =
             format!("{{\"format\":1,\"shared\":\"{SHARED}\",\"layers\":[{{\"overlay\":\"keys\",\"state\":\"{OVERLAY}\"}}]}}");
         assert_eq!(serde_json::to_string(&view).unwrap(), expected);
-        assert_eq!(view.id().unwrap(), hex::encode(Sha256::digest(expected.as_bytes())));
+        assert_eq!(view.id().unwrap(), hex::encode(ContentAddress::digest(expected.as_bytes())));
         assert_eq!(view.id().unwrap().len(), 64);
         let mut two = view.clone();
         two.layers.push(Layer { overlay: "config".into(), state: SHARED.into() });

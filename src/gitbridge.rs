@@ -418,8 +418,8 @@ impl CatFile {
         self.output.read_exact(&mut data)?;
         let mut newline = [0];
         self.output.read_exact(&mut newline)?;
-        use sha1::{Digest, Sha1};
-        let mut hash = Sha1::new();
+        use layr_hashers::{Digest, GitCompatible};
+        let mut hash = GitCompatible::new();
         hash.update(format!("{} {}\0", fields[1], data.len()).as_bytes());
         hash.update(&data);
         if hex::encode(hash.finalize()) != oid {
@@ -1292,9 +1292,9 @@ fn check_reachable(repo: &Repo, commit: &str) -> Result<()> {
 /// Git objects are a derived local cache. Validate the exact object identity before publishing.
 fn write_object(s: &Path, kind: &str, data: &[u8], expected: &str) -> Result<()> {
     let _write = crate::trace::span("Git write object");
-    use sha1::{Digest, Sha1};
+    use layr_hashers::{Digest, GitCompatible};
     let header = format!("{kind} {}\0", data.len());
-    let mut hash = Sha1::new();
+    let mut hash = GitCompatible::new();
     hash.update(header.as_bytes());
     hash.update(data);
     let oid = hex::encode(hash.finalize());
