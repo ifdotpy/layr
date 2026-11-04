@@ -4,7 +4,7 @@
 
 use crate::{kill_group, run, skip, sweep, wait_child};
 use anyhow::{anyhow, bail, Context, Result};
-use layr_adapter::{CacheAdapter, Host, Outcome};
+use layr_adapter::{CacheAdapter, Host, Outcome, Toolchain};
 use serde_json::Value;
 use std::io::{BufRead, BufReader};
 use std::os::unix::process::CommandExt;
@@ -73,6 +73,39 @@ fn command_list(cfg: &Value, key: &str) -> Result<Vec<Vec<String>>> {
         commands.push(strings.collect::<Result<Vec<_>>>()?);
     }
     Ok(commands)
+}
+
+/// The environment variables that change cargo's unit hashes or the code that rustc and build scripts make
+/// (docs/cache-overlays.md, section 6).
+const KEY_ENV: &[&str] = &[
+    "RUSTFLAGS",
+    "CARGO_ENCODED_RUSTFLAGS",
+    "RUSTDOCFLAGS",
+    "CARGO_INCREMENTAL",
+    "CARGO_PROFILE_DEV_DEBUG",
+    "CARGO_PROFILE_RELEASE_DEBUG",
+    "CARGO_BUILD_TARGET",
+    "RUSTC_WRAPPER",
+    "RUSTC_WORKSPACE_WRAPPER",
+    "MACOSX_DEPLOYMENT_TARGET",
+    "IPHONEOS_DEPLOYMENT_TARGET",
+    "CC",
+    "CXX",
+    "CFLAGS",
+    "CXXFLAGS",
+    "LDFLAGS",
+    "AR",
+];
+
+/// The `env` table of `[workspace.metadata.layr-retest]` in `<root>/Cargo.toml`, read without cargo: the env that
+/// retest and the gate pin for every cargo call. Empty when the file or the table is missing or bad.
+pub fn pinned_env(root: &Path) -> Vec<(String, String)> {
+    let Ok(text) = std::fs::read_to_string(root.join("Cargo.toml")) else { return Vec::new() };
+    let Ok(doc) = text.parse::<toml::Table>() else { return Vec::new() };
+    let env = doc.get("workspace").and_then(|w| w.get("metadata")).and_then(|m| m.get("layr-retest")).and_then(|r| r.get("env"));
+    env.and_then(|e| e.as_table())
+        .map(|t| t.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect())
+        .unwrap_or_default()
 }
 
 /// Reads the retest settings of the workspace at `root`. Missing settings are empty. A missing `env` is empty too:
@@ -450,6 +483,19 @@ impl CacheAdapter for Cargo {
 
     fn warm(&self, host: &dyn Host, folder: &Path) -> Result<(), String> {
         warm(host, folder).map_err(|e| format!("{e:#}"))
+    }
+
+    fn key_env(&self) -> &'static [&'static str] {
+        KEY_ENV
+    }
+
+    fn pinned_env(&self, folder: &Path) -> Vec<(String, String)> {
+        folder.parent().map(pinned_env).unwrap_or_default()
+    }
+
+    fn toolchain_command(&self) -> Option<Toolchain> {
+        // rustup takes the toolchain from these files (or its default); `rustc -vV` names the exact build.
+        Some(Toolchain { program: "rustc", args: &["-vV"], files: &["rust-toolchain.toml", "rust-toolchain"] })
     }
 
     fn relocated(&self, folder: &Path, at: &Path) -> Result<usize, String> {

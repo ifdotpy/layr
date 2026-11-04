@@ -216,7 +216,13 @@ Git bridge:
 Overlays (files with their own readers and history, shown in lines):
    overlay create, set, list, readers, use, move, remote, log, show, diff, grep, ls-files
 Projects and machines:
+<<<<<<< head
    init [--allow-root-snapshots], projects, config, cache, export, gc, du [<line>...] [--json], fsck [--caches], reindex,
+||||||| base
+   init [--allow-root-snapshots], projects, config, cache, export, gc, du [<line>...] [--json], fsck, reindex,
+=======
+   init [--allow-root-snapshots], projects, project delete <project>, config, cache, export, gc, du [<line>...] [--json], fsck, reindex,
+>>>>>>> origin-https/main
    daemon [--allow-root-snapshots]
 
 Lines are folders: <root>/projects/<project>/lines/<line>. Run commands inside a line folder.

@@ -1,10 +1,11 @@
 //! `layr project move <project> <volume>`: move a project to another volume (docs/volumes.md).
+//! `layr project delete <project>`: remove a project without lines.
 use crate::args::{parse, Spec};
 use crate::ctx::Ctx;
 use crate::project_move;
 use anyhow::{bail, Result};
 
-const USAGE: &str = "usage: layr project move <project> <volume>";
+const USAGE: &str = "usage: layr project move <project> <volume>\n       layr project delete <project>";
 
 pub fn project(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let (cmd, rest) = args.split_first().map(|(c, r)| (c.as_str(), r)).unwrap_or(("", &[]));
@@ -22,6 +23,21 @@ pub fn project(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 moved.copy.lines,
                 moved.copy.overlays
             );
+            Ok(0)
+        }
+        "delete" => {
+            let a = parse(&Spec::new().flag("-q|--quiet"), rest)?;
+            let [project] = a.pos.as_slice() else { bail!(USAGE) };
+            if project.contains('%') {
+                bail!("'{project}' is an overlay; it goes with its project (layr overlay remove removes a cache overlay)");
+            }
+            if !crate::repo::Repo::open(ctx, project)?.is_admin(ctx) {
+                bail!("permission denied: only an admin of project '{project}' deletes it");
+            }
+            project_move::delete_project(&ctx.store, project)?;
+            if !a.has("-q") {
+                outln!(ctx, "deleted project {project}");
+            }
             Ok(0)
         }
         _ => bail!(USAGE),
