@@ -163,7 +163,17 @@ impl Store {
         mkdir_mode(&root.join("projects"), 0o755)?;
         version_guard.ready(root)?;
         // Every volume folder must hold the identity file of this store (checked when used).
-        Ok(Store { root: root.to_path_buf(), machine: Machine { id, name, key }, _version_guard: Some(version_guard) })
+        let store = Store { root: root.to_path_buf(), machine: Machine { id, name, key }, _version_guard: Some(version_guard) };
+        // A volume with its own OverlayFS registry (a project moved there) is recovered too.
+        #[cfg(feature = "overlayfs")]
+        for volume in store.layout()?.ready_volume_paths() {
+            if volume.join(".layr-overlayfs").is_dir() {
+                crate::storage::recover(&volume)?;
+            }
+        }
+        // A `project move` that stopped midway is finished or rolled back before the command runs.
+        crate::project_move::recover(&store);
+        Ok(store)
     }
 
     /// The volume configuration of the store, read now (`volumes.rs`).
@@ -1062,6 +1072,17 @@ impl<'a> Project<'a> {
         // Test only (tests/t121-lock-holder.sh): `LAYR_TEST_LOCK_HOLD_MS` keeps the lock this long.
         if let Some(ms) = std::env::var("LAYR_TEST_LOCK_HOLD_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
             std::thread::sleep(std::time::Duration::from_millis(ms));
+        }
+        // `project move` may have taken the folder away while this call waited for the lock. The
+        // lock then belongs to the old folder: refuse, the caller runs the command again.
+        {
+            use std::os::unix::fs::MetadataExt;
+            let here = fs::symlink_metadata(self.meta_dir().join("lock")).ok();
+            let locked = f.metadata().ok();
+            let same = here.zip(locked).is_some_and(|(a, b)| a.ino() == b.ino() && a.dev() == b.dev());
+            if !same {
+                bail!("project '{}' moved while this command waited; run the command again", self.name);
+            }
         }
         HELD_LOCKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if let Ok(mut held) = HELD_PROJECTS.lock() {

@@ -335,6 +335,26 @@ pub fn unassign(root: &Path, project: &str) -> Result<()> {
     Ok(())
 }
 
+/// Point a project at another volume: the commit of `project move`. The project folder must
+/// already be complete on `target`. One atomic write under the volume lock; `main` removes the
+/// record. Refused when `target` cannot be used.
+pub fn reassign(root: &Path, machine: &str, project: &str, target: &str) -> Result<()> {
+    let _lock = lock(root)?;
+    let layout = Layout::load(root, machine)?;
+    layout.ready(target)?;
+    let mut file = match read_json::<ProjectsFile>(&root.join(PROJECTS_FILE))? {
+        Some(f) => f,
+        None => ProjectsFile { format: FORMAT, projects: BTreeMap::new() },
+    };
+    if target == MAIN {
+        file.projects.remove(project);
+    } else {
+        file.projects.insert(project.to_string(), target.to_string());
+    }
+    file.format = FORMAT;
+    save_projects(root, &file)
+}
+
 /// Register a new volume at `path` (which must exist). `backend` checks the file system of the
 /// build. Creates the identity file and the `projects` and `trash` folders. Returns the canonical path.
 pub fn add(root: &Path, machine: &str, name: &str, path: &Path, backend: impl FnOnce(&Path) -> Result<()>) -> Result<PathBuf> {
