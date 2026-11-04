@@ -15,7 +15,7 @@
 //! Nothing here fails a command: the result is one log line.
 
 use crate::privs;
-use layr_adapter::{CacheAdapter, Host, Outcome};
+use layr_adapter::{CacheAdapter, Host, Outcome, Toolchain};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -32,6 +32,8 @@ const GRACE: Duration = Duration::from_secs(10);
 const RECOVER_LIMIT: Duration = Duration::from_secs(30);
 /// The time limit of a relocation worker (it reads dep-info files and removes fingerprints).
 const RELOCATE_LIMIT: Duration = Duration::from_secs(60);
+/// The time limit of a toolchain command (`owner_output`): a toolchain manager may install a toolchain first.
+const OUTPUT_LIMIT: Duration = Duration::from_secs(60);
 /// The argument that starts the worker in the layr binary (`main`).
 pub const WORKER_ARG: &str = "__cache-hook";
 /// The worker's environment (its parameters): the mode (`prune`, `warm`, `recover` or `relocate`), the setting
@@ -338,6 +340,65 @@ pub fn worker_with(adapters: &'static [Box<dyn CacheAdapter>]) -> i32 {
     };
     println!("{REPORT_MARK}{}", serde_json::to_string(&report).unwrap_or_default());
     0
+}
+
+/// The adapter of `folder` for its cache key: the one that the overlay property `prune` names, or the one that
+/// detects the folder (also when the property turns the prune off).
+pub fn adapter_for(setting: Option<&str>, folder: &Path) -> Option<&'static dyn CacheAdapter> {
+    find(registered(), setting.filter(|s| *s != "none"), folder).ok()
+}
+
+/// Outputs of `toolchain_output`, by command, selecting files and user: one run per command.
+static OUTPUTS: std::sync::Mutex<Vec<((String, Vec<(String, Vec<u8>)>, u32), Option<String>)>> = std::sync::Mutex::new(Vec::new());
+
+/// The standard output of the toolchain command `t` for the files in `dir`, run as `uid` with the owner's search
+/// path, in an empty folder with copies of the files that select the toolchain (`dir` may be a folder that the
+/// owner cannot enter, such as the store's work folder). None when it fails or runs longer than `OUTPUT_LIMIT`.
+/// One run per command: a toolchain does not change during it.
+pub fn toolchain_output(t: &Toolchain, dir: &Path, uid: u32) -> Option<String> {
+    let files: Vec<(String, Vec<u8>)> =
+        t.files.iter().filter_map(|f| std::fs::read(dir.join(f)).ok().map(|d| (f.to_string(), d))).collect();
+    let id = (format!("{} {}", t.program, t.args.join(" ")), files.clone(), uid);
+    if let Some((_, out)) = OUTPUTS.lock().ok()?.iter().find(|(k, _)| *k == id) {
+        return out.clone();
+    }
+    let run = std::env::temp_dir().join(format!("layr-toolchain-{}", crate::ids::new_id()));
+    let out = (|| {
+        std::fs::create_dir(&run).ok()?;
+        for (name, data) in &files {
+            std::fs::write(run.join(name), data).ok()?;
+        }
+        if rustix::process::geteuid().is_root() {
+            let gid = privs::user(uid).ok()?.gid;
+            for p in std::iter::once(run.clone()).chain(files.iter().map(|(n, _)| run.join(n))) {
+                std::os::unix::fs::chown(&p, Some(uid), Some(gid)).ok()?;
+            }
+        }
+        let mut cmd = Command::new(t.program);
+        cmd.args(t.args).current_dir(&run).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+        privs::command_as(&mut cmd, uid, &[("PATH".into(), owner_path(uid))]).ok()?;
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+        let child = cmd.spawn().ok()?;
+        let pid = child.id();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(child.wait_with_output());
+        });
+        match rx.recv_timeout(OUTPUT_LIMIT) {
+            Ok(Ok(o)) if o.status.success() => Some(String::from_utf8_lossy(&o.stdout).into_owned()),
+            Ok(_) => None,
+            Err(_) => {
+                kill_group(pid);
+                None
+            }
+        }
+    })();
+    let _ = std::fs::remove_dir_all(&run);
+    if let Ok(mut outputs) = OUTPUTS.lock() {
+        outputs.push((id, out.clone()));
+    }
+    out
 }
 
 /// The adapter for a folder: the one named by the setting, or the one that detects the folder.

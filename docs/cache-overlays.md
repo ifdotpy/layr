@@ -138,10 +138,26 @@ with `platform` records a key in each state:
 <os>-<arch>[-<hash>]
 ```
 
-`<hash>` is the first 16 hex digits of the SHA-256 of the files that the setting
-`overlay.<name>.key-files` lists, from the line's working folder at the save (for example
-`["Cargo.lock", "rust-toolchain.toml"]`). layr does not know toolchains; the program on top names
-the files that select a toolchain. A missing file counts as empty.
+`<hash>` is the first 16 hex digits of the SHA-256 of the key parts, each a name and a short hash
+of its value (a missing file or an unset variable is `-`):
+
+- `file:<path>`: each file that the setting `overlay.<name>.key-files` lists, from the line's
+  working folder (for example `["Cargo.lock", "rust-toolchain.toml"]`).
+- `env:<NAME>`: each environment variable that changes a build in the folder. The folder's cache
+  adapter names them (cargo: `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`, `RUSTDOCFLAGS`,
+  `CARGO_INCREMENTAL`, `CARGO_PROFILE_*_DEBUG`, `CARGO_BUILD_TARGET`, `RUSTC_WRAPPER`,
+  `RUSTC_WORKSPACE_WRAPPER`, `MACOSX_DEPLOYMENT_TARGET`, `IPHONEOS_DEPLOYMENT_TARGET`, `CC`, `CXX`,
+  `CFLAGS`, `CXXFLAGS`, `LDFLAGS`, `AR`), and the project setting `cache.key-env` (a JSON array)
+  adds names. A value that the project pins for its builds wins over the caller's (cargo: the `env`
+  table of `[workspace.metadata.layr-retest]`, which retest and the gate apply).
+- `toolchain`: the output of the adapter's toolchain command (cargo: `rustc -vV`), run as the line
+  owner in an empty folder with copies of the files that select the toolchain
+  (`rust-toolchain.toml`, `rust-toolchain`). One run per command.
+
+Each cache state records its parts by name (`cache_key_parts`). A line that does not take the cache
+of its source line names the parts that differ, for example `target: the cache of line main is not
+taken (state 1a2b3c4): the key differs in env:MACOSX_DEPLOYMENT_TARGET`. A cache saved by an older
+layr has no parts; its key differs once.
 
 - `line new` and merges take a state only when its key equals the key of the target
   line (computed in that line at that time).
