@@ -33,8 +33,6 @@ const COMPARE_DIR: &str = "overlap-compares";
 const LIVE_DIR: &str = "overlap-live";
 /// Format of the saved live compares. Bump it when `compare` changes its results.
 const LIVE_FORMAT: u32 = 1;
-/// Threads that compare saved states at once.
-const COMPARE_THREADS: usize = 4;
 
 #[derive(Debug, Serialize)]
 pub struct Overlap {
@@ -272,7 +270,7 @@ impl StateCompare {
     }
 }
 
-/// Run the state compares on up to `COMPARE_THREADS` threads. The results keep the order of `jobs`.
+/// Run the state compares on a limited number of I/O threads. The results keep the order of `jobs`.
 fn run_compares(jobs: &[StateCompare]) -> Result<Vec<Vec<Found>>> {
     let next = AtomicUsize::new(0);
     let worker = || -> Result<Vec<(usize, Vec<Found>)>> {
@@ -285,7 +283,7 @@ fn run_compares(jobs: &[StateCompare]) -> Result<Vec<Vec<Found>>> {
     };
     let mut out: Vec<Option<Vec<Found>>> = jobs.iter().map(|_| None).collect();
     std::thread::scope(|s| -> Result<()> {
-        let handles: Vec<_> = (0..COMPARE_THREADS.min(jobs.len())).map(|_| s.spawn(worker)).collect();
+        let handles: Vec<_> = (0..crate::parallel::io_threads().min(jobs.len())).map(|_| s.spawn(worker)).collect();
         for h in handles {
             let done = h.join().map_err(|_| anyhow!("status overlap compare panicked"))??;
             for (i, found) in done {
