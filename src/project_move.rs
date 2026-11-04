@@ -328,21 +328,8 @@ pub fn delete_project(store: &Store, project: &str) -> Result<()> {
     if let Some((pid, path)) = in_use(std::slice::from_ref(&dir))? {
         bail!("project '{project}' is in use: process {pid} works in {}; stop it and run the delete again", path.display());
     }
-    #[cfg(target_os = "linux")]
-    if let Some(mount) = mount_in(&dir)? {
-        bail!("project '{project}' has a mount at {}; nothing was deleted", mount.display());
-    }
     to_trash(&store.volume_root(project)?, &dir)?;
     volumes::unassign(root, project)
-}
-
-/// A mount point in `dir`: a rename would carry it into the trash.
-#[cfg(target_os = "linux")]
-fn mount_in(dir: &Path) -> Result<Option<PathBuf>> {
-    let dir = fs::canonicalize(dir)?;
-    let mounts = fs::read_to_string("/proc/self/mountinfo")?;
-    // Field 5 is the mount point, with a space written as `\040`.
-    Ok(mounts.lines().filter_map(|l| l.split(' ').nth(4)).map(|p| PathBuf::from(p.replace("\\040", " "))).find(|p| p.starts_with(&dir)))
 }
 
 /// Step 4: the project lives on `to`. Points the git objects of the moved lines at the new folder,
