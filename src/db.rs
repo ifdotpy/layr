@@ -5,9 +5,9 @@
 
 use crate::ids;
 use crate::model::{Attestation, Line, QueueChange, QueueEntry, Record, RefChange, RefState, StateKind, StateRec, Subject};
-use anyhow::{anyhow, Result};
-use rusqlite::{params, Connection, OptionalExtension};
+use anyhow::{anyhow, Context, Result};
 use layr_hashers::{ContentAddress, Digest};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 
 /// Test hook: the next `with_tx` reports an error after its COMMIT succeeded (sqlite can report
@@ -21,7 +21,7 @@ thread_local! {
 pub(crate) const STATEMENT_CACHE_CAPACITY: usize = 256;
 
 pub struct Db {
-    pub conn: Connection,
+    pub conn: std::rc::Rc<Connection>,
     /// The derived tables are from an older schema: `rebuild` replaces them before use.
     pub stale: bool,
 }
@@ -97,6 +97,35 @@ const RETIRED: &[&str] = &["slots", "mirrors", "groups", "group_lines"];
 impl Db {
     /// Open the database. Returns it and whether the derived tables must be rebuilt.
     pub fn open(path: &Path) -> Result<Db> {
+        Self::open_for(path, false)
+    }
+
+    pub fn open_for(path: &Path, read: bool) -> Result<Db> {
+        Self::open_inner(path, read).with_context(|| format!("open database {}", path.display()))
+    }
+
+    fn open_inner(path: &Path, read: bool) -> Result<Db> {
+        if read {
+            // Only a stale schema, legacy records, or a WAL that SQLite explicitly says needs
+            // recovery may use the writable path. Other failures must reach the caller.
+            let opened = (|| -> Result<Option<Db>> {
+                let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+                conn.busy_timeout(std::time::Duration::from_secs(30))?;
+                conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
+                if !Self::schema_is_current(&conn)? {
+                    return Ok(None);
+                }
+                let legacy = conn.prepare_cached(&format!("SELECT EXISTS(SELECT 1 FROM records WHERE {LEGACY_OPS})"))?
+                    .query_row([], |r| r.get::<_, bool>(0))?;
+                Ok(if legacy { None } else { Some(Db { conn: conn.into(), stale: false }) })
+            })();
+            match opened {
+                Ok(Some(db)) => return Ok(db),
+                Ok(None) => {},
+                Err(error) if Self::needs_wal_recovery(&error) => {},
+                Err(error) => return Err(error).context("read-only open"),
+            }
+        }
         let conn = Connection::open(path)?;
         conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
         conn.pragma_update(None, "journal_mode", "WAL")?;
@@ -127,12 +156,20 @@ impl Db {
             }
             opened.map_err(|e| e.context(path.display().to_string()))?
         };
-        let db = Db { conn, stale };
+        let db = Db { conn: conn.into(), stale };
         // A stale database gets its legacy evidence from the rebuild (`derive`).
         if !stale {
             db.import_legacy_evidence()?;
         }
         Ok(db)
+    }
+
+    /// SQLite reports these extended codes when a read-only WAL needs writable recovery.
+    fn needs_wal_recovery(error: &anyhow::Error) -> bool {
+        matches!(error.downcast_ref::<rusqlite::Error>(),
+            Some(rusqlite::Error::SqliteFailure(code, _))
+                if matches!(code.extended_code, rusqlite::ffi::SQLITE_READONLY_RECOVERY
+                    | rusqlite::ffi::SQLITE_READONLY_CANTINIT | rusqlite::ffi::SQLITE_CANTOPEN_DIRTYWAL))
     }
 
     /// True when the version is current and every table and index of the schema exists.
@@ -155,14 +192,24 @@ impl Db {
             )?;
             Ok(have as usize == wanted.len())
         })();
-        let _ = conn.execute_batch("COMMIT");
-        checked
+        let committed = conn.execute_batch("COMMIT");
+        let current = checked?;
+        committed?;
+        Ok(current)
     }
 
     /// Older binaries can still add legacy records. Import their evidence: only when a record
     /// is not yet in the attestations (or a withdraw lacks a revocation of an earlier approval)
     /// the import takes the write lock; a read command finds nothing to do and takes none.
     fn import_legacy_evidence(&self) -> Result<()> {
+        // Most projects have no records from the old evidence format. Avoid preparing the
+        // considerably larger compatibility query in that common case. The partial index
+        // records_legacy_evidence makes this probe independent of the project's history size.
+        let has_legacy: bool = self.conn.prepare_cached(&format!("SELECT EXISTS(SELECT 1 FROM records WHERE {LEGACY_OPS})"))?
+            .query_row([], |r| r.get(0))?;
+        if !has_legacy {
+            return Ok(());
+        }
         let pending: bool = self.conn.query_row(
             &format!(
                 "SELECT EXISTS(SELECT 1 FROM records r WHERE {LEGACY_OPS} AND (
@@ -1635,7 +1682,24 @@ mod tests {
     fn memory() -> Db {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(SCHEMA).unwrap();
-        Db { conn, stale: false }
+        Db { conn: conn.into(), stale: false }
+    }
+
+    #[test]
+    fn metadata_open_is_read_only_but_old_schemas_still_use_upgrade_path() {
+        let path = std::env::temp_dir().join(format!("layr-db-metadata-{}", std::process::id()));
+        let db = Db::open(&path).unwrap();
+        drop(db);
+        let db = Db::open_for(&path, true).unwrap();
+        assert!(db.conn.execute("INSERT INTO free_queue VALUES ('x')", []).is_err());
+        drop(db);
+        let db = Db::open(&path).unwrap();
+        db.conn.pragma_update(None, "user_version", SCHEMA_VERSION - 1).unwrap();
+        drop(db);
+        let db = Db::open_for(&path, true).unwrap();
+        assert!(db.conn.execute("INSERT INTO free_queue VALUES ('x')", []).is_ok());
+        drop(db);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -1703,6 +1767,64 @@ mod tests {
         db.derive(&other, &|_| true, machine).unwrap();
         assert_eq!(db.approvals(state).unwrap(), vec![(0, 1)]);
     }
+    #[test]
+    fn failing_upgrade_reports_the_database_path() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("layr-db-upgrade-error-{}", crate::ids::new_id()));
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("stale.sqlite");
+        let db = Db::open(&path)?;
+        db.conn.pragma_update(None, "user_version", SCHEMA_VERSION - 1)?;
+        drop(db);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444))?;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555))?;
+        let result = Db::open_for(&path, true);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755))?;
+        std::fs::remove_dir_all(&dir)?;
+        // Root may write anyway; then there is no error to check.
+        if let Err(error) = result {
+            assert!(format!("{error:#}").contains("stale.sqlite"), "{error:#}");
+        }
+        Ok(())
+    }
+    #[test]
+    fn metadata_open_reports_corrupt_and_missing_databases() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("layr-db-metadata-errors-{}", crate::ids::new_id()));
+        std::fs::create_dir_all(&dir)?;
+        let corrupt = dir.join("corrupt.sqlite");
+        std::fs::write(&corrupt, b"not a sqlite database")?;
+        let error = match Db::open_for(&corrupt, true) {
+            Ok(_) => anyhow::bail!("corrupt database opened"),
+            Err(error) => error,
+        };
+        assert!(format!("{error:#}").contains("corrupt.sqlite"));
+        assert_eq!(std::fs::read(&corrupt)?, b"not a sqlite database");
+        let missing = dir.join("missing.sqlite");
+        assert!(Db::open_for(&missing, true).is_err());
+        assert!(!missing.exists());
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn metadata_open_reads_current_database_and_falls_back_for_old_schema() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("layr-db-metadata-{}", crate::ids::new_id()));
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("layr.sqlite");
+        drop(Db::open(&path)?);
+        let db = Db::open_for(&path, true)?;
+        assert!(db.conn.execute("CREATE TABLE should_not_write (id INTEGER)", []).is_err());
+        drop(db);
+        let conn = Connection::open(&path)?;
+        conn.pragma_update(None, "user_version", 0)?;
+        drop(conn);
+        let db = Db::open_for(&path, true)?;
+        assert!(db.conn.execute("CREATE TABLE can_write (id INTEGER)", []).is_ok());
+        drop(db);
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
     #[test]
     fn opening_a_current_database_takes_no_write_lock_and_still_imports_late_records() {
         let dir = std::env::temp_dir().join(format!("layr-db-open-{}", crate::ids::new_id()));

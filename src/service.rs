@@ -323,7 +323,8 @@ fn handle(sock: UnixStream, root: &Path, registry_uids: &[u32]) -> i32 {
 /// Run a command for a caller and return its exit code (errors are printed to stderr).
 pub fn run_as(argv: Vec<String>, caller: Caller, cwd: PathBuf, env: HashMap<String, String>, root: &Path) -> i32 {
     crate::repo::begin_command();
-    let store = match Store::open(root) {
+    let metadata_read = crate::cmd::metadata_read(&argv);
+    let store = match Store::open_for(root, metadata_read) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("fatal: cannot open the layr store {}: {e:#}", root.display());
@@ -503,6 +504,7 @@ pub fn daemon(args: &[String]) -> Result<i32> {
     }
     // The OCI registry serves other users: a user daemon has none.
     let registry_listeners = if user_mode { Vec::new() } else { crate::oci::registry::listeners(&root)? };
+    crate::free::discard_startup();
     let registry_uids: Vec<u32> = registry_listeners.iter().map(|(_, _, user)| user.uid).collect();
     let listener = UnixListener::bind(&sock)?;
     {

@@ -117,7 +117,7 @@ impl Ctx {
     fn loc_moved(&self, path: &Path) -> Option<Loc> {
         let (e, sub) = crate::linepaths::find(&self.store, path)?;
         let dir = self.store.project_dir(&e.project).ok()?;
-        let db = crate::db::Db::open(&crate::store::db_file(&dir)).ok()?;
+        let db = crate::db::Db::open_for(&crate::store::db_file(&dir), self.store.metadata_read).ok()?;
         let line = db.line_by_id(&e.line).ok()??;
         Some(Loc { project: e.project, line: Some(line.name), sub })
     }

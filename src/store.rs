@@ -40,6 +40,7 @@ pub struct Machine {
 pub struct Store {
     pub root: PathBuf,
     pub machine: Machine,
+    pub(crate) metadata_read: bool,
     _version_guard: Option<crate::store_version::Guard>,
 }
 
@@ -112,6 +113,10 @@ pub fn resolve_root(root: &Path) -> Result<PathBuf> {
 
 impl Store {
     pub fn open(root: &Path) -> Result<Store> {
+        Self::open_for(root, false)
+    }
+
+    pub fn open_for(root: &Path, read: bool) -> Result<Store> {
         // Resolve aliases once at the store boundary. Paths inside a line still refuse links.
         // A refused store is not created, so the resolution comes first.
         let root = resolve_root(root)?;
@@ -123,7 +128,7 @@ impl Store {
         if !root.exists() {
             mkdir_mode(root, 0o755)?;
         }
-        let version_guard = crate::store_version::Guard::open(root)?;
+        let version_guard = crate::store_version::Guard::open_for(root, read)?;
         #[cfg(not(feature = "overlayfs"))]
         if root.join(".layr-overlayfs").exists() {
             bail!("this store requires a layr build with the overlayfs feature");
@@ -131,17 +136,44 @@ impl Store {
         crate::linepaths::register(root);
         #[cfg(feature = "overlayfs")]
         crate::storage::recover(root)?;
-        let machine_lock = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(root.join(".layr-machine.lock"))?;
-        anyhow::ensure!(machine_lock.metadata()?.is_file(), "the machine initialization lock is not a regular file");
-        rustix::fs::flock(&machine_lock, rustix::fs::FlockOperation::LockExclusive)?;
+        // Identity is initialized under the exclusive lease, with the key published last.
+        // An existing key under a shared lease therefore means the identity is complete.
         let mdir = root.join("machine");
+        let shared = if read {
+            fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(root.join(".layr-machine.lock"))
+                .ok()
+                .and_then(|file| {
+                    if !file.metadata().ok()?.is_file() {
+                        return None;
+                    }
+                    rustix::fs::flock(&file, rustix::fs::FlockOperation::LockShared).ok()?;
+                    if mdir.join("key").exists() {
+                        Some(file)
+                    } else {
+                        None
+                    }
+                })
+        } else {
+            None
+        };
+        let machine_lock = if let Some(file) = shared {
+            file
+        } else {
+            let file = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(root.join(".layr-machine.lock"))?;
+            anyhow::ensure!(file.metadata()?.is_file(), "the machine initialization lock is not a regular file");
+            rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)?;
+            file
+        };
         // Recheck only under the lease. The ID and key must belong to the same initialization.
         if !mdir.join("key").exists() {
             if root.join("projects").is_dir() && fs::read_dir(root.join("projects"))?.next().is_some() {
@@ -163,7 +195,7 @@ impl Store {
         mkdir_mode(&root.join("projects"), 0o755)?;
         version_guard.ready(root)?;
         // Every volume folder must hold the identity file of this store (checked when used).
-        let store = Store { root: root.to_path_buf(), machine: Machine { id, name, key }, _version_guard: Some(version_guard) };
+        let store = Store { root: root.to_path_buf(), machine: Machine { id, name, key }, metadata_read: read, _version_guard: Some(version_guard) };
         // A volume with its own OverlayFS registry (a project moved there) is recovered too.
         #[cfg(feature = "overlayfs")]
         for volume in store.layout()?.ready_volume_paths() {
@@ -337,10 +369,7 @@ fn waiting_message(meta: &Path) -> String {
         return PLAIN.to_string();
     }
     let secs = (ids::now_ms() - holder["since_ms"].as_i64().unwrap_or(0)).max(0) / 1000;
-    format!(
-        "layr: waiting for the project lock: held by '{}' (pid {pid}) for {secs} s",
-        holder["command"].as_str().unwrap_or("")
-    )
+    format!("layr: waiting for the project lock: held by '{}' (pid {pid}) for {secs} s", holder["command"].as_str().unwrap_or(""))
 }
 
 /// True when a process with this pid exists (it may belong to another user).
@@ -969,7 +998,7 @@ impl<'a> Project<'a> {
     /// Open a project that may not have its records yet.
     pub fn open_partial(store: &'a Store, name: &str) -> Result<Project<'a>> {
         let dir = store.project_dir(name)?;
-        let db = Db::open(&db_file(&dir))?;
+        let db = Db::open_for(&db_file(&dir), store.metadata_read)?;
         let mut p = Project { store, name: name.to_string(), dir, id: String::new(), db };
         p.finish_schema_upgrade()?;
         p.id = p.project_id().unwrap_or_default();
@@ -977,18 +1006,22 @@ impl<'a> Project<'a> {
     }
 
     pub fn open(store: &'a Store, name: &str) -> Result<Project<'a>> {
+        Self::open_for(store, name, store.metadata_read)
+    }
+
+    pub(crate) fn open_for(store: &'a Store, name: &str, read: bool) -> Result<Project<'a>> {
         let _t = crate::trace::span("open project");
         let dir = store.project_dir(name)?;
         crate::rootcheck::check_project_folder(&dir)?;
         if !db_file(&dir).is_file() {
             bail!("project '{name}' not found");
         }
-        let db = Db::open(&db_file(&dir))?;
+        let db = Db::open_for(&db_file(&dir), read)?;
         let mut p = Project { store, name: name.to_string(), dir, id: String::new(), db };
         p.finish_schema_upgrade()?;
         crate::rootcheck::check_project(&p)?;
         p.id = p.project_id()?;
-        crate::free::register(store, name);
+        crate::free::register(store, name, p.db.conn.clone());
         #[cfg(target_os = "macos")]
         if crate::apfs_commit::pending(&p)? {
             // Wait for a live commit, or recover the index after an interrupted one.
@@ -1451,6 +1484,7 @@ mod tests {
         let store = Store {
             root: PathBuf::from("/s"),
             machine: Machine { id: String::new(), name: String::new(), key },
+            metadata_read: false,
             _version_guard: None,
         };
         assert_eq!(store.project_dir("sap").unwrap(), PathBuf::from("/s/projects/sap"));
