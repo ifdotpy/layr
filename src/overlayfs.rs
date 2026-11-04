@@ -791,6 +791,11 @@ pub fn scan_snapshot(src: &Path, dst: &Path) -> Result<()> {
     snapshot(src, dst, true)
 }
 
+/// A writable copy of a cache folder (see the APFS and btrfs versions).
+pub fn cache_snapshot(src: &Path, dst: &Path) -> Result<()> {
+    snapshot(src, dst, false)
+}
+
 pub fn snapshot(src: &Path, dst: &Path, readonly: bool) -> Result<()> {
     let src = absolute(src)?;
     let dst = absolute(dst)?;

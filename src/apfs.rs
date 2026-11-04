@@ -910,6 +910,7 @@ fn clone_complete_with(
     // a layer. The work follows the tree without its nested layers, not their size.
     let nested: BTreeSet<&str> = nested_layers(src, entries).into_iter().map(|p| p.as_str()).collect();
     if nested.is_empty() {
+        let _t = crate::trace::span("APFS clone root");
         crate::sys::apfs_clone(src, dst)?;
     } else {
         let _t = crate::trace::span(format!("APFS clone around {} nested layers", nested.len()));
@@ -927,6 +928,7 @@ fn clone_complete_with(
     if readonly {
         crate::sys::apfs_immutable(dst, false)?;
     } else {
+        let _t = crate::trace::span("APFS unseal copy");
         seal(dst, false, false)?;
     }
     // A folder clone gives the folders the time of the clone; a btrfs snapshot keeps them.
@@ -1004,6 +1006,13 @@ pub fn snapshot(src: &Path, dst: &Path, readonly: bool) -> Result<()> {
 /// hard links (for example pnpm's node_modules) is still cloned at once.
 pub fn scan_snapshot(src: &Path, dst: &Path) -> Result<()> {
     snapshot_with(src, dst, true, false)
+}
+
+/// A writable copy of a cache folder, cloned at once. Hard links become separate files: build
+/// output has many (cargo links each binary into `target/debug`), and a copy that keeps them
+/// copies every file one by one. A cache is regenerable, so only the links are lost.
+pub fn cache_snapshot(src: &Path, dst: &Path) -> Result<()> {
+    snapshot_with(src, dst, false, false)
 }
 
 /// A copy of a tree made before a store lock (`prepare_snapshot`).

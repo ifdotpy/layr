@@ -1845,7 +1845,7 @@ impl<'a> Repo<'a> {
         self.snapshot_state(state, &tmp, false)?;
         let r = self
             .put_layers(&tmp, layers, self.own(line))
-            .and_then(|_| self.prepare_at(line, state, &tmp))
+            .and_then(|_| self.prepare_at(line, state, &tmp, &[]))
             .and_then(|_| {
                 if base && !layers.is_empty() {
                     let view = self.temp_snapshot(&tmp, true)?;
@@ -1860,7 +1860,9 @@ impl<'a> Repo<'a> {
         r
     }
 
-    pub(crate) fn prepare_at(&self, line: &Line, state: &str, w: &Path) -> Result<()> {
+    /// `cached`: folders that the caller already took from a cache (`take_caches`); they are not
+    /// copied again from a warm cache.
+    pub(crate) fn prepare_at(&self, line: &Line, state: &str, w: &Path, cached: &[String]) -> Result<()> {
         let (uid, gid) = self.owner_ids(line);
         let root_meta = std::fs::symlink_metadata(w)?;
         if root_meta.uid() != uid {
@@ -1903,7 +1905,7 @@ impl<'a> Repo<'a> {
         for (i, path) in paths.iter().enumerate() {
             // Versioned files win: a folder that holds files of the state comes from the state,
             // also when a record of an older layr lists it as a cache.
-            if holds_files(w, path) {
+            if holds_files(w, path) || cached.contains(path) {
                 continue;
             }
             let cp = fsutil::safe_join(w, path)?;
@@ -1912,7 +1914,7 @@ impl<'a> Repo<'a> {
                     fsutil::remove_entry(w, path)?;
                 }
                 fsutil::make_parents(w, path, Some((uid, gid)))?;
-                btrfs::snapshot(&src, &cp, false)?;
+                btrfs::cache_snapshot(&src, &cp)?;
                 // The copy shares its blocks; only its files change owner.
                 give_tree(&cp, uid, gid)?;
                 continue;
@@ -2527,6 +2529,7 @@ fn prune_empty_parents(target: &Path, to: &Path, rel: &str) -> Result<()> {
 /// Give every entry of a tree (a new cache copy, still private) to `uid:gid`, without following
 /// links and without entering nested subvolumes.
 pub(crate) fn give_tree(root: &Path, uid: u32, gid: u32) -> Result<()> {
+    let _t = crate::trace::span(format!("give tree {}", root.display()));
     let mut paths = Vec::new();
     fsutil::walk(root, "", &mut |rel, m| {
         if m.uid != uid || m.gid != gid {
