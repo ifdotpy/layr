@@ -1145,7 +1145,7 @@ impl<'a> Project<'a> {
             let locked = f.metadata().ok();
             let same = here.zip(locked).is_some_and(|(a, b)| a.ino() == b.ino() && a.dev() == b.dev());
             if !same {
-                bail!("project '{}' moved while this command waited; run the command again", self.name);
+                bail!("project '{}' moved or was deleted while this command waited; run the command again", self.name);
             }
         }
         HELD_LOCKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
