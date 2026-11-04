@@ -60,11 +60,12 @@ impl TreeCache {
     }
 
     pub(super) fn record_upload(&self, bytes: u64) -> Result<()> {
-        let previous: u64 = self.0.query_row("SELECT bytes FROM usage WHERE id=1", [], |row| row.get(0))?;
+        let previous: i64 = self.0.query_row("SELECT bytes FROM usage WHERE id=1", [], |row| row.get(0))?;
+        let previous = u64::try_from(previous)?;
         let total = previous.saturating_add(bytes).min(i64::MAX as u64);
         let limit = (total / 32).clamp(BASE_BYTES as u64, MAX_BYTES as u64) / PAGE_SIZE as u64;
-        self.0.pragma_update(None, "max_page_count", limit)?;
-        self.0.execute("UPDATE usage SET bytes=?1 WHERE id=1", [total])?;
+        self.0.pragma_update(None, "max_page_count", i64::try_from(limit)?)?;
+        self.0.execute("UPDATE usage SET bytes=?1 WHERE id=1", [i64::try_from(total)?])?;
         Ok(())
     }
 

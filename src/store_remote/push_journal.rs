@@ -63,7 +63,7 @@ impl Journal {
             CREATE TABLE IF NOT EXISTS completed (state TEXT PRIMARY KEY, attempt TEXT NOT NULL, depth INTEGER NOT NULL) WITHOUT ROWID;
             CREATE TABLE IF NOT EXISTS pending (object TEXT PRIMARY KEY, state TEXT NOT NULL, attempt TEXT NOT NULL, entries BLOB NOT NULL, modified INTEGER) WITHOUT ROWID;")?;
         if db.query_row("SELECT count(*) FROM pragma_table_info('pending') WHERE name='modified'", [], |row| {
-            row.get::<_, usize>(0)
+            row.get::<_, i64>(0)
         })? == 0
         {
             db.execute_batch("ALTER TABLE pending RENAME COLUMN created TO modified; UPDATE pending SET modified=NULL;")?;
@@ -84,7 +84,7 @@ impl Journal {
     pub fn completed(&self) -> Result<Vec<Completed>> {
         let mut query = self.db.prepare("SELECT state, attempt, depth FROM completed")?;
         let completed = query
-            .query_map([], |row| Ok(Completed { state: row.get(0)?, attempt: row.get(1)?, depth: row.get(2)? }))?
+            .query_map([], |row| Ok(Completed { state: row.get(0)?, attempt: row.get(1)?, depth: usize::try_from(row.get::<_, i64>(2)?).map_err(|e| rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Integer, Box::new(e)))? }))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(completed)
     }
@@ -177,7 +177,7 @@ impl Journal {
     ) -> Result<()> {
         self.transaction(true, false, |tx| {
             Self::insert_hashes(tx, hashes)?;
-            tx.execute("INSERT OR REPLACE INTO completed VALUES (?1,?2,?3)", params![state, attempt, depth])?;
+            tx.execute("INSERT OR REPLACE INTO completed VALUES (?1,?2,?3)", params![state, attempt, i64::try_from(depth)?])?;
             tx.execute("DELETE FROM pending WHERE state=?1 AND attempt=?2", params![state, attempt])?;
             for object in protected {
                 tx.execute("DELETE FROM pending WHERE object=?1", [object])?;
