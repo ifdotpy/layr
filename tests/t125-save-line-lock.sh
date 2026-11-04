@@ -4,7 +4,7 @@
 # #194). An `add` in the same line waits for the save and is not lost; an `add` in another line does
 # not wait. Test hook: LAYR_TEST_SAVE_PAUSE_MS keeps the save open after its clone.
 # The index clone is an APFS operation: other systems run no checks here.
-[ "$(uname -s)" = Darwin ] || { echo "$(basename "$0"): 0 passed, 0 failed (APFS only)"; exit 0; }
+[ "$(uname -s)" = Darwin ] || { echo "$(basename "$0") (APFS only): 0 passed, 0 failed"; exit 0; }
 . "$(dirname "$0")/lib.sh"
 
 sample "$T/src"

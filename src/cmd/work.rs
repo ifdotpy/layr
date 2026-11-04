@@ -995,8 +995,8 @@ fn prepare_named_save<'p, 's>(
         None => None,
     };
     if pending.is_some() {
-        crate::apfs_commit::failpoint("pending-cloned");
-        crate::apfs_commit::test_pause();
+        crate::store::failpoint("pending-cloned");
+        crate::store::test_pause();
     }
     let mut state = match &pending {
         Some(pc) => repo.state_record(ctx, pc.id.clone(), StateKind::Commit, parents, message, Some(line), pc.subvol.clone()),
@@ -1216,19 +1216,19 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
             return Err(exit(1, format!("error: the staging content of line {} changed during the save; run it again", line.name)));
         }
     }
-    crate::apfs_commit::failpoint("pending-renamed");
-    crate::apfs_commit::failpoint("before-record");
+    crate::store::failpoint("pending-renamed");
+    crate::store::failpoint("before-record");
     let rec = {
         let _t = crate::trace::span("move head");
         h.repo.move_head(ctx, "commit", &line, &state.id, vec![state.clone()], None, data)
     };
     rec?;
-    crate::apfs_commit::failpoint("after-record");
+    crate::store::failpoint("after-record");
     {
         let _t = crate::trace::span("drop stage");
         h.repo.drop_stage(&line)?;
     }
-    crate::apfs_commit::failpoint("after-drop");
+    crate::store::failpoint("after-drop");
     #[cfg(target_os = "macos")]
     if let Some(pc) = pending.take() {
         pc.finish()?;

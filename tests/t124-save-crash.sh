@@ -5,7 +5,7 @@
 # clone; a save killed after its record keeps the state and drops the stage. In every case no pending
 # folder or journal is left. Test hook: LAYR_TEST_SAVE_KILL=<point> (SIGKILL there).
 # The index clone is an APFS operation: other systems run no checks here.
-[ "$(uname -s)" = Darwin ] || { echo "$(basename "$0"): 0 passed, 0 failed (APFS only)"; exit 0; }
+[ "$(uname -s)" = Darwin ] || { echo "$(basename "$0") (APFS only): 0 passed, 0 failed"; exit 0; }
 . "$(dirname "$0")/lib.sh"
 
 sample "$T/src"
