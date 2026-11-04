@@ -173,7 +173,6 @@ fn a_busy_build_lock_skips_within_the_deadline_even_with_colors() {
     assert!(started.elapsed() < deadline - std::time::Duration::from_secs(2), "the sweep waited for the deadline: {:?}", started.elapsed());
 }
 
-<<<<<<< head
 #[test]
 fn warm_builds_the_sweep_commands_so_the_next_build_compiles_nothing() {
     let dir = tmp("warm");
@@ -188,8 +187,8 @@ fn warm_builds_the_sweep_commands_so_the_next_build_compiles_nothing() {
     let t = project(&bare, None);
     assert!(cargo::warm(&host(), &t).is_err());
     assert!(!t.exists(), "nothing was built");
-||||||| base
-=======
+}
+
 /// A helper process that takes an exclusive flock on `path` and prints `locked`. It is killed on drop.
 struct Holder {
     child: std::process::Child,
@@ -355,5 +354,4 @@ fn prune_removes_an_old_unlisted_folder_and_keeps_a_new_one() {
     assert!(target.join("x86_64-unknown-linux-gnu/debug/big").exists(), "a folder a build wrote this week stays");
     let stderr = cargo_in(&dir, &target, &["build", "--workspace"]);
     assert!(!stderr.contains("Compiling"), "{stderr}");
->>>>>>> retest-init-all
 }
