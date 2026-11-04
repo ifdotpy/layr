@@ -1006,33 +1006,17 @@ impl<'a> Project<'a> {
     }
 
     pub fn open(store: &'a Store, name: &str) -> Result<Project<'a>> {
-<<<<<<< head
-        Self::open_for(store, name, false)
-    }
-
-    /// Open for a metadata-only command, using a read-only database when it is current.
-    pub fn open_metadata(store: &'a Store, name: &str) -> Result<Project<'a>> {
-        Self::open_for(store, name, true)
-    }
-
-    fn open_for(store: &'a Store, name: &str, metadata: bool) -> Result<Project<'a>> {
-=======
         Self::open_for(store, name, store.metadata_read)
     }
 
     pub(crate) fn open_for(store: &'a Store, name: &str, read: bool) -> Result<Project<'a>> {
->>>>>>> origin/perf/startup-cpu
         let _t = crate::trace::span("open project");
         let dir = store.project_dir(name)?;
         crate::rootcheck::check_project_folder(&dir)?;
         if !db_file(&dir).is_file() {
             bail!("project '{name}' not found");
         }
-<<<<<<< head
-        let db = if metadata { Db::open_metadata(&db_file(&dir))? } else { Db::open(&db_file(&dir))? };
-=======
         let db = Db::open_for(&db_file(&dir), read)?;
->>>>>>> origin/perf/startup-cpu
         let mut p = Project { store, name: name.to_string(), dir, id: String::new(), db };
         p.finish_schema_upgrade()?;
         crate::rootcheck::check_project(&p)?;

@@ -153,24 +153,6 @@ impl Db {
         Ok(db)
     }
 
-    /// Open an existing, current database for metadata reads, falling back to the normal
-    /// recovery and migration path when it needs writes.
-    pub fn open_metadata(path: &Path) -> Result<Db> {
-        if let Ok(conn) = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY) {
-            conn.busy_timeout(std::time::Duration::from_secs(30))?;
-            conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
-            let current = Self::schema_is_current(&conn).unwrap_or(false);
-            let legacy = conn
-                .prepare_cached(&format!("SELECT EXISTS(SELECT 1 FROM records WHERE {LEGACY_OPS})"))
-                .and_then(|mut stmt| stmt.query_row([], |r| r.get::<_, bool>(0)))
-                .unwrap_or(true);
-            if current && !legacy {
-                return Ok(Db { conn, stale: false });
-            }
-        }
-        Self::open(path)
-    }
-
     /// True when the version is current and every table and index of the schema exists.
     fn schema_is_current(conn: &Connection) -> Result<bool> {
         conn.execute_batch("BEGIN")?;
@@ -1770,13 +1752,13 @@ mod tests {
         std::fs::create_dir_all(&dir)?;
         let path = dir.join("layr.sqlite");
         drop(Db::open(&path)?);
-        let db = Db::open_metadata(&path)?;
+        let db = Db::open_for(&path, true)?;
         assert!(db.conn.execute("CREATE TABLE should_not_write (id INTEGER)", []).is_err());
         drop(db);
         let conn = Connection::open(&path)?;
         conn.pragma_update(None, "user_version", 0)?;
         drop(conn);
-        let db = Db::open_metadata(&path)?;
+        let db = Db::open_for(&path, true)?;
         assert!(db.conn.execute("CREATE TABLE can_write (id INTEGER)", []).is_ok());
         drop(db);
         std::fs::remove_dir_all(dir)?;

@@ -431,7 +431,7 @@ fn list(ctx: &Ctx, args: &[String]) -> Result<i32> {
             Some(i) => i,
             None => continue,
         };
-        let op = Project::open_metadata(repo.p.store, &format!("{}%{name}", repo.p.name))?;
+        let op = Project::open_for(repo.p.store, &format!("{}%{name}", repo.p.name), true)?;
         let readers = reader_list(&op);
         let mark = if shown.contains(&name) { "* " } else { "  " };
         let owner = crate::ctx::Caller::from_uid(info.owner).user;
