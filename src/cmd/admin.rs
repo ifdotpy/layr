@@ -1423,6 +1423,9 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) ->
         }
         let leaks = repair_table(repo, free, Some(diff))?;
         evict_stored(repo)?;
+        // Keep one record per ref: ref_history keys entries by record id, and owners
+        // replay synchronizes the single ref_change in each record. Batching requires
+        // a compatible record format and replay/schema migration first.
         for expired in repo.p.db.expired_refs(ids::now_ms())? {
             let mut rec = Record::new("ref.expire");
             rec.data = serde_json::json!({"ref_change": crate::model::RefChange { name:expired.name.clone(),before:Some(expired),after:None }});
@@ -1443,6 +1446,10 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) ->
         }
         #[cfg(target_os = "macos")]
         {
+            // Upkeep walks thin-layer dependencies and can make keyframes of current
+            // heads. Moving it out of this lock needs a dependency snapshot that is
+            // checked against concurrent layer creation and head changes; leaving it
+            // here preserves bases until that protocol can be verified on APFS.
             let lines = repo.lines()?;
             let heads: BTreeSet<String> = lines.iter().map(|l| l.head.clone()).collect();
             let done = crate::thin::upkeep(&repo.p, &heads)?;
