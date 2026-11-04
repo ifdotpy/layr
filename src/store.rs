@@ -1067,8 +1067,12 @@ impl<'a> Project<'a> {
         let trash = self.trash_dir()?;
         let f = fs::OpenOptions::new().create(true).write(true).truncate(false).open(self.meta_dir().join("lock"))?;
         let asked = std::time::Instant::now();
-<<<<<<< head
-        rustix::fs::flock(&f, rustix::fs::FlockOperation::LockExclusive)?;
+        flock_with_notice(&f, &self.meta_dir())?;
+        write_lock_holder(&self.meta_dir());
+        // Test only (tests/t121-lock-holder.sh): `LAYR_TEST_LOCK_HOLD_MS` keeps the lock this long.
+        if let Some(ms) = std::env::var("LAYR_TEST_LOCK_HOLD_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+        }
         // `project move` may have taken the folder away while this call waited for the lock. The
         // lock then belongs to the old folder: refuse, the caller runs the command again.
         {
@@ -1079,15 +1083,6 @@ impl<'a> Project<'a> {
             if !same {
                 bail!("project '{}' moved while this command waited; run the command again", self.name);
             }
-||||||| base
-        rustix::fs::flock(&f, rustix::fs::FlockOperation::LockExclusive)?;
-=======
-        flock_with_notice(&f, &self.meta_dir())?;
-        write_lock_holder(&self.meta_dir());
-        // Test only (tests/t121-lock-holder.sh): `LAYR_TEST_LOCK_HOLD_MS` keeps the lock this long.
-        if let Some(ms) = std::env::var("LAYR_TEST_LOCK_HOLD_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
-            std::thread::sleep(std::time::Duration::from_millis(ms));
->>>>>>> origin/main
         }
         HELD_LOCKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if let Ok(mut held) = HELD_PROJECTS.lock() {

@@ -233,6 +233,16 @@ pub fn move_project(store: &Store, project: &str, volume: &str) -> Result<Moved>
     let _t = crate::trace::begin(format!("project move {project}: open the project"));
     let handle = Project::open(store, project)?;
     drop(_t);
+    // Line locks come first (`Project::line_lock` refuses one under the project lock): every line
+    // in id order, the order that undo uses. No line command runs while the folder moves.
+    let _t = crate::trace::begin(format!("project move {project}: line locks"));
+    let mut lines = handle.db.lines()?;
+    lines.sort_by(|a, b| a.id.cmp(&b.id));
+    let mut line_locks = Vec::new();
+    for line in &lines {
+        line_locks.push(handle.line_lock(&line.id, &line.name)?);
+    }
+    drop(_t);
     let _t = crate::trace::begin(format!("project move {project}: project lock"));
     let _lock = handle.lock()?;
     drop(_t);
