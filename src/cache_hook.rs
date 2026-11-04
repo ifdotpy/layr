@@ -107,6 +107,10 @@ fn owner_path(uid: u32) -> String {
 /// Runs the hook for `folder` of a line of owner `uid`, with the registered adapters. `setting` is the overlay
 /// property: `None` detects the adapter, `none` turns the hook off.
 pub fn run(setting: Option<&str>, folder: &Path, uid: u32, limit: Duration) -> Done {
+    // The root owner is never pruned: the hook runs as the owner, and the owner is not root.
+    if uid == 0 {
+        return Done { log: format!("{}: not pruned: the line owner is root", folder.display()), folder_ok: true };
+    }
     let launch = Launch { exe: std::env::current_exe().unwrap_or_else(|_| "layr".into()), args: vec![WORKER_ARG.into()] };
     run_with(&launch, &[], setting, folder, uid, limit, limit + GRACE)
 }
@@ -172,9 +176,6 @@ pub fn run_with(launch: &Launch, env: &[(&str, &str)], setting: Option<&str>, fo
     let shown = folder.display();
     if setting == Some("none") {
         return Done { log: format!("{shown}: prune is off"), folder_ok: true };
-    }
-    if uid == 0 {
-        return Done { log: format!("{shown}: not pruned: the line owner is root"), folder_ok: true };
     }
     match execute(launch, env, "prune", setting, folder, uid, limit, wait) {
         Run::Report(r) => Done { log: describe(folder, &r), folder_ok: r.folder_ok },
@@ -406,10 +407,14 @@ mod tests {
         assert!(done.folder_ok);
     }
 
+    /// Checked at the production entry: the root owner is refused whatever user runs the tests (CI runs as root).
     #[test]
     fn the_root_owner_is_never_pruned() {
         let dir = folder("root");
-        assert!(hook("ok", &dir, 0, 5000, 20000).log.contains("the line owner is root"));
+        let done = run(Some("ok"), &dir, 0, Duration::from_secs(5));
+        assert!(done.log.contains("the line owner is root"), "{}", done.log);
+        assert!(done.folder_ok);
+        assert_eq!(names(&dir), vec!["kept.txt".to_string()]);
     }
 
     /// The adapter sleeps past the limit: the parent stops the worker at the hard limit and reports a timeout.
