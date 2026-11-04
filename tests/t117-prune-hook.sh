@@ -87,6 +87,12 @@ base=$(units $P/main/target)
 [ "$base" -gt 0 ] && { PASS=$((PASS + 1)); echo "PASS the standard build made units ($base)"; } || { FAIL=$((FAIL + 1)); echo "FAIL the standard build made no units: the owner cannot build"; cb "$P/main" build --workspace 2>&1 | tail -20; }
 (cd "$P/main" && l save --caches -q)
 new_line other main
+# The union copy alone, with the prune off: if the times are right here, a prune of the merged cache rewrote them.
+new_line other2 main
+ok "the owner sets prune=none for the union check" l overlay set cache.target --prune none
+(cd "$P/other2" && l merge main --caches-only -q >/dev/null 2>&1)
+eq "the union copy keeps the times without a prune" "0" "$(times_mismatch $P/main/target $P/other2/target)"
+ok "the owner sets prune to auto after the union check" l overlay set cache.target --prune auto
 
 # 1. Stale units in the saved cache of main: prune is off while they are saved.
 ok "the owner sets prune=none on the cache" l overlay set cache.target --prune none
