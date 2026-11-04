@@ -213,16 +213,12 @@ pub fn run(args: &[String]) -> Result<i32> {
     if f.tests() {
         folders.push(RECORD_DIR);
     }
-<<<<<<< head
-||||||| base
-=======
     // A protected line takes files only through a merge: init writes no file there and names the files that need
     // the change.
     let line = current_line();
     let guarded = line.as_deref().is_some_and(protected);
     let write = !guarded;
     let added = if write { "added" } else { "needs" };
->>>>>>> origin-https/main
     // The files that init changed. A line takes them from a state, so they are saved once (printed below).
     let mut edited: Vec<&str> = Vec::new();
     for folder in &folders {
@@ -236,42 +232,21 @@ pub fn run(args: &[String]) -> Result<i32> {
         }
     }
     if f.tests() {
-<<<<<<< head
-        let changed = ensure(&root.join(".gitignore"), RECORD_DIR, &["/.layr-retest", ".layr-retest/", "/.layr-retest/"])?;
-        println!(".gitignore: {}", if changed { format!("added `{RECORD_DIR}`") } else { format!("`{RECORD_DIR}` present") });
-||||||| base
-        let changed = ensure(&root.join(".gitignore"), RECORD_DIR, &["/.layr-retest", ".layr-retest/", "/.layr-retest/"])?;
-        println!(".gitignore: {}", if changed { format!("added `{RECORD_DIR}`") } else { format!("`{RECORD_DIR}` present") });
-=======
         let changed = ensure(&root.join(".gitignore"), RECORD_DIR, &["/.layr-retest", ".layr-retest/", "/.layr-retest/"], write)?;
         println!(".gitignore: {}", if changed { format!("{added} `{RECORD_DIR}`") } else { format!("`{RECORD_DIR}` present") });
->>>>>>> origin-https/main
         if changed {
             edited.push(".gitignore");
         }
     }
     if f.cargo {
-<<<<<<< head
-        match add_retest_config_file(&root.join("Cargo.toml"))? {
-            Some(keys) => {
-                println!("Cargo.toml: added {} to [workspace.metadata.layr-retest]", keys.join(", "));
-||||||| base
-        match add_retest_config_file(&root.join("Cargo.toml"))? {
-            Some(keys) => println!("Cargo.toml: added {} to [workspace.metadata.layr-retest]", keys.join(", ")),
-=======
         match add_retest_config_file(&root.join("Cargo.toml"), write)? {
             Some(keys) => {
                 println!("Cargo.toml: {added} {} in [workspace.metadata.layr-retest]", keys.join(", "));
->>>>>>> origin-https/main
                 edited.push("Cargo.toml");
             }
             None => println!("Cargo.toml: [workspace.metadata.layr-retest] keys present"),
         }
     }
-<<<<<<< head
-    if !edited.is_empty() {
-||||||| base
-=======
     if !edited.is_empty() && guarded {
         let name = line.as_deref().unwrap_or("main");
         println!("line {name} is protected, so init changed no file. Run init in a line, save, and merge:");
@@ -279,7 +254,6 @@ pub fn run(args: &[String]) -> Result<i32> {
         println!("      layr add {} && layr save -m \"retest init\"", edited.join(" "));
         code = 1;
     } else if !edited.is_empty() {
->>>>>>> origin-https/main
         println!("save: layr add {} && layr save -m \"retest init\"", edited.join(" "));
         println!("      (lines take the caches only after this save; in a protected main, save in a line and merge)");
     }

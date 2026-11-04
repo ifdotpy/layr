@@ -74,10 +74,6 @@ impl CacheAdapter for Pnpm {
         warm_with(&PNPM, host, folder).map_err(|e| format!("{e:#}"))
     }
 
-    fn warm(&self, host: &dyn Host, folder: &Path) -> Result<(), String> {
-        warm(host, folder).map_err(|e| format!("{e:#}"))
-    }
-
     fn recover(&self, folder: &Path) -> Result<bool, String> {
         recover_with(folder)
     }
@@ -106,41 +102,7 @@ impl CacheAdapter for Npm {
     }
 }
 
-<<<<<<< head
 /// The pnpm prune (`prune_with` for pnpm).
-||||||| base
-/// Prunes `folder`, a `node_modules` folder. Any failure restores the folder and skips it.
-=======
-/// The install of a warm step: online (a merged change can add a package) and with the lifecycle scripts, as the
-/// project's own install runs.
-const WARM: &[&str] = &["install", "--frozen-lockfile", "--reporter=silent"];
-
-/// Installs the lockfile into `folder`, a `node_modules` folder. The folder is copied first and restored on a
-/// failure, as in `prune`; `recover` puts the copy back after a stop at the hard limit.
-pub fn warm(host: &dyn Host, folder: &Path) -> Result<()> {
-    let named = folder.file_name().is_some_and(|n| n == "node_modules");
-    let Some(root) = folder.parent().filter(|r| named && r.join("pnpm-lock.yaml").is_file()) else {
-        anyhow::bail!("pnpm needs a folder named node_modules next to pnpm-lock.yaml");
-    };
-    let copy_path = root.join("node_modules.layr-prune");
-    if copy_path.exists() {
-        restore(folder, &copy_path).context("cannot restore node_modules from its copy")?;
-    }
-    if folder.exists() {
-        copy(host, folder, &copy_path).context("cannot copy node_modules")?;
-    }
-    if let Err(e) = exec(host, "pnpm", |c| c.args(WARM).current_dir(root)) {
-        if copy_path.exists() {
-            restore(folder, &copy_path).with_context(|| format!("pnpm install: {e:#}; restoring node_modules failed"))?;
-        }
-        return Err(e.context("pnpm install"));
-    }
-    let _ = std::fs::remove_dir_all(&copy_path);
-    Ok(())
-}
-
-/// Prunes `folder`, a `node_modules` folder. Any failure restores the folder and skips it.
->>>>>>> origin-https/main
 pub fn prune(host: &dyn Host, folder: &Path) -> Outcome {
     prune_with(&PNPM, host, folder)
 }
