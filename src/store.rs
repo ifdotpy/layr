@@ -274,12 +274,96 @@ static HELD_PROJECTS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec
 const SLOW_LOCK: std::time::Duration = std::time::Duration::from_secs(1);
 /// The log starts again above this size (bytes).
 const SLOW_LOCK_LOG_MAX: u64 = 1 << 20;
+/// A command that waits this long for the project lock prints the lock holder, once.
+const LOCK_NOTICE_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
+/// The holder of a project lock, written beside `meta/lock` while the lock is held (JSON: pid,
+/// command, line, start in ms). A waiting command reads it; a crashed holder leaves it stale.
+const LOCK_HOLDER: &str = "lock.holder";
+/// The line of this command, for the holder file (`set_holder_line`).
+static HOLDER_LINE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Name the line of this command in the holder file of the project locks it takes.
+pub fn set_holder_line(line: Option<&str>) {
+    if let Ok(mut l) = HOLDER_LINE.lock() {
+        *l = line.map(str::to_string);
+    }
+}
+
+/// Take the exclusive lock of `f`. A command that has to wait prints the lock holder once,
+/// when the wait passes `LOCK_NOTICE_AFTER`.
+fn flock_with_notice(f: &fs::File, meta: &Path) -> Result<()> {
+    use rustix::fs::FlockOperation;
+    match rustix::fs::flock(f, FlockOperation::NonBlockingLockExclusive) {
+        Ok(()) => return Ok(()),
+        Err(rustix::io::Errno::WOULDBLOCK) => {}
+        Err(e) => return Err(e.into()),
+    }
+    // The helper thread prints while the blocking wait below holds this thread.
+    let (done, waiting) = std::sync::mpsc::channel::<()>();
+    let meta = meta.to_path_buf();
+    let notice = std::thread::spawn(move || {
+        if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) = waiting.recv_timeout(LOCK_NOTICE_AFTER) {
+            eprintln!("{}", waiting_message(&meta));
+        }
+    });
+    let locked = rustix::fs::flock(f, FlockOperation::LockExclusive);
+    let _ = done.send(());
+    let _ = notice.join();
+    locked.map_err(Into::into)
+}
+
+/// The notice for a waiting command: the live holder of `meta/lock.holder`. A holder whose pid is
+/// gone is named by nothing; its file is removed when the file still holds what was read.
+fn waiting_message(meta: &Path) -> String {
+    const PLAIN: &str = "layr: waiting for the project lock";
+    let path = meta.join(LOCK_HOLDER);
+    let Ok(text) = fs::read_to_string(&path) else { return PLAIN.to_string() };
+    let Ok(holder) = serde_json::from_str::<serde_json::Value>(&text) else { return PLAIN.to_string() };
+    let pid = holder["pid"].as_i64().unwrap_or(0) as i32;
+    if !pid_alive(pid) {
+        if fs::read_to_string(&path).ok().as_deref() == Some(text.as_str()) {
+            let _ = fs::remove_file(&path);
+        }
+        return PLAIN.to_string();
+    }
+    let secs = (ids::now_ms() - holder["since_ms"].as_i64().unwrap_or(0)).max(0) / 1000;
+    format!(
+        "layr: waiting for the project lock: held by '{}' (pid {pid}) for {secs} s",
+        holder["command"].as_str().unwrap_or("")
+    )
+}
+
+/// True when a process with this pid exists (it may belong to another user).
+fn pid_alive(pid: i32) -> bool {
+    use rustix::process::{test_kill_process, Pid};
+    let Some(pid) = Pid::from_raw(pid) else { return false };
+    !matches!(test_kill_process(pid), Err(e) if e == rustix::io::Errno::SRCH)
+}
+
+/// Write `meta/lock.holder` for this process, which holds the lock. Best effort: a lock never
+/// fails for the holder file.
+fn write_lock_holder(meta: &Path) {
+    let command: String = format!("layr {}", std::env::args().skip(1).collect::<Vec<_>>().join(" ")).chars().take(200).collect();
+    let line = HOLDER_LINE.lock().ok().and_then(|l| l.clone());
+    let holder = serde_json::json!({
+        "pid": std::process::id(),
+        "command": command,
+        "line": line,
+        "since_ms": ids::now_ms(),
+    });
+    let tmp = meta.join(format!("{LOCK_HOLDER}.tmp"));
+    if fs::write(&tmp, holder.to_string()).is_ok() {
+        let _ = fs::rename(&tmp, meta.join(LOCK_HOLDER));
+    }
+}
 
 impl Drop for Lock {
     fn drop(&mut self) {
         let held = self.since.elapsed();
         // The steps of the hold, before the trash work after it adds its own.
         let steps = crate::trace::slowest(3);
+        // The holder is still this process: no other command writes the file under the lock.
+        let _ = fs::remove_file(self.meta.join(LOCK_HOLDER));
         drop(self.f.take());
         if std::env::var_os("LAYR_TRACE").is_some() {
             eprintln!("trace {:>8.1} ms  store lock held: {}", held.as_secs_f64() * 1000.0, self.project);
@@ -869,7 +953,12 @@ impl<'a> Project<'a> {
         let trash = self.trash_dir()?;
         let f = fs::OpenOptions::new().create(true).write(true).truncate(false).open(self.meta_dir().join("lock"))?;
         let asked = std::time::Instant::now();
-        rustix::fs::flock(&f, rustix::fs::FlockOperation::LockExclusive)?;
+        flock_with_notice(&f, &self.meta_dir())?;
+        write_lock_holder(&self.meta_dir());
+        // Test only (tests/t121-lock-holder.sh): `LAYR_TEST_LOCK_HOLD_MS` keeps the lock this long.
+        if let Some(ms) = std::env::var("LAYR_TEST_LOCK_HOLD_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+        }
         HELD_LOCKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if let Ok(mut held) = HELD_PROJECTS.lock() {
             held.push(self.meta_dir());

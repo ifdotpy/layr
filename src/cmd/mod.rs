@@ -72,6 +72,7 @@ impl<'a> Here<'a> {
 
 pub fn here(ctx: &Ctx) -> Result<Here<'_>> {
     let loc = ctx.locate()?;
+    crate::store::set_holder_line(loc.line.as_deref());
     let repo = Repo::open(ctx, &loc.project)?;
     let line = match &loc.line {
         Some(n) => Some(repo.line(n)?),
