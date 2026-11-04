@@ -7,16 +7,8 @@ use crate::ids;
 use crate::model::{Attestation, Line, QueueChange, QueueEntry, Record, RefChange, RefState, StateKind, StateRec, Subject};
 use anyhow::{anyhow, Result};
 use rusqlite::{params, Connection, OptionalExtension};
-<<<<<<< head
-use sha2::{Digest, Sha256};
-use std::path::{Path, PathBuf};
-||||||| base
-use sha2::{Digest, Sha256};
-use std::path::Path;
-=======
 use layr_hashers::{ContentAddress, Digest};
-use std::path::Path;
->>>>>>> origin-https/main
+use std::path::{Path, PathBuf};
 
 /// Test hook: the next `with_tx` reports an error after its COMMIT succeeded (sqlite can report
 /// an error after the commit point, on a full disk).
