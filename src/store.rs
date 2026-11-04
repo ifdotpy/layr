@@ -337,10 +337,7 @@ fn waiting_message(meta: &Path) -> String {
         return PLAIN.to_string();
     }
     let secs = (ids::now_ms() - holder["since_ms"].as_i64().unwrap_or(0)).max(0) / 1000;
-    format!(
-        "layr: waiting for the project lock: held by '{}' (pid {pid}) for {secs} s",
-        holder["command"].as_str().unwrap_or("")
-    )
+    format!("layr: waiting for the project lock: held by '{}' (pid {pid}) for {secs} s", holder["command"].as_str().unwrap_or(""))
 }
 
 /// True when a process with this pid exists (it may belong to another user).
@@ -977,13 +974,22 @@ impl<'a> Project<'a> {
     }
 
     pub fn open(store: &'a Store, name: &str) -> Result<Project<'a>> {
+        Self::open_for(store, name, false)
+    }
+
+    /// Open for a metadata-only command, using a read-only database when it is current.
+    pub fn open_metadata(store: &'a Store, name: &str) -> Result<Project<'a>> {
+        Self::open_for(store, name, true)
+    }
+
+    fn open_for(store: &'a Store, name: &str, metadata: bool) -> Result<Project<'a>> {
         let _t = crate::trace::span("open project");
         let dir = store.project_dir(name)?;
         crate::rootcheck::check_project_folder(&dir)?;
         if !db_file(&dir).is_file() {
             bail!("project '{name}' not found");
         }
-        let db = Db::open(&db_file(&dir))?;
+        let db = if metadata { Db::open_metadata(&db_file(&dir))? } else { Db::open(&db_file(&dir))? };
         let mut p = Project { store, name: name.to_string(), dir, id: String::new(), db };
         p.finish_schema_upgrade()?;
         crate::rootcheck::check_project(&p)?;

@@ -6,8 +6,8 @@
 use crate::ids;
 use crate::model::{Attestation, Line, QueueChange, QueueEntry, Record, RefChange, RefState, StateKind, StateRec, Subject};
 use anyhow::{anyhow, Result};
-use rusqlite::{params, Connection, OptionalExtension};
 use layr_hashers::{ContentAddress, Digest};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 
 /// Test hook: the next `with_tx` reports an error after its COMMIT succeeded (sqlite can report
@@ -133,6 +133,24 @@ impl Db {
             db.import_legacy_evidence()?;
         }
         Ok(db)
+    }
+
+    /// Open an existing, current database for metadata reads, falling back to the normal
+    /// recovery and migration path when it needs writes.
+    pub fn open_metadata(path: &Path) -> Result<Db> {
+        if let Ok(conn) = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY) {
+            conn.busy_timeout(std::time::Duration::from_secs(30))?;
+            conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
+            let current = Self::schema_is_current(&conn).unwrap_or(false);
+            let legacy = conn
+                .prepare_cached(&format!("SELECT EXISTS(SELECT 1 FROM records WHERE {LEGACY_OPS})"))
+                .and_then(|mut stmt| stmt.query_row([], |r| r.get::<_, bool>(0)))
+                .unwrap_or(true);
+            if current && !legacy {
+                return Ok(Db { conn, stale: false });
+            }
+        }
+        Self::open(path)
     }
 
     /// True when the version is current and every table and index of the schema exists.
@@ -1703,6 +1721,25 @@ mod tests {
         db.derive(&other, &|_| true, machine).unwrap();
         assert_eq!(db.approvals(state).unwrap(), vec![(0, 1)]);
     }
+    #[test]
+    fn metadata_open_reads_current_database_and_falls_back_for_old_schema() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("layr-db-metadata-{}", crate::ids::new_id()));
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("layr.sqlite");
+        drop(Db::open(&path)?);
+        let db = Db::open_metadata(&path)?;
+        assert!(db.conn.execute("CREATE TABLE should_not_write (id INTEGER)", []).is_err());
+        drop(db);
+        let conn = Connection::open(&path)?;
+        conn.pragma_update(None, "user_version", 0)?;
+        drop(conn);
+        let db = Db::open_metadata(&path)?;
+        assert!(db.conn.execute("CREATE TABLE can_write (id INTEGER)", []).is_ok());
+        drop(db);
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
     #[test]
     fn opening_a_current_database_takes_no_write_lock_and_still_imports_late_records() {
         let dir = std::env::temp_dir().join(format!("layr-db-open-{}", crate::ids::new_id()));
