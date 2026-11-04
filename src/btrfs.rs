@@ -71,6 +71,11 @@ pub fn scan_snapshot(src: &Path, dst: &Path) -> Result<()> {
     snapshot(src, dst, true)
 }
 
+/// A writable copy of a cache folder: a subvolume snapshot, which is O(1) and keeps every link.
+pub fn cache_snapshot(src: &Path, dst: &Path) -> Result<()> {
+    snapshot(src, dst, false)
+}
+
 pub fn snapshot(src: &Path, dst: &Path, readonly: bool) -> Result<()> {
     let _t = crate::trace::span(format!("snapshot {}", dst.display()));
     let s = File::open(src).with_context(|| format!("open {}", src.display()))?;

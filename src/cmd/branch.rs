@@ -4,7 +4,7 @@ use super::{exit, here};
 use crate::args::{parse, Spec};
 use crate::ctx::{Caller, Ctx};
 use crate::ids;
-use crate::model::{LineChange, Record, StateKind};
+use crate::model::{Line, LineChange, Record, StateKind};
 use crate::revs;
 use anyhow::Result;
 
@@ -324,26 +324,34 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
     }
     if !a.pos.is_empty() && !a.has("-l") {
         let name = &a.pos[0];
-        let start = match a.pos.get(1) {
-            Some(r) => revs::resolve(repo, current.as_ref(), r)?,
-            None => match &current {
-                Some(c) => c.head.clone(),
-                None => match repo.p.db.line_by_name("main")? {
-                    Some(m) => m.head,
-                    None => return Err(exit(128, "fatal: give a start revision")),
+        // The start state: the revision, or the head of the current line (or of main). The command
+        // reads it again under the project lock, before the commit (see the loop below).
+        let resolve_start = || -> Result<String> {
+            Ok(match a.pos.get(1) {
+                Some(r) => revs::resolve(repo, current.as_ref(), r)?,
+                None => match &current {
+                    Some(c) => repo.p.db.line_by_id(&c.id)?.map_or_else(|| c.head.clone(), |l| l.head),
+                    None => match repo.p.db.line_by_name("main")? {
+                        Some(m) => m.head,
+                        None => return Err(exit(128, "fatal: give a start revision")),
+                    },
                 },
-            },
+            })
         };
         // A line made from a line (its name, or the current line) shows the overlays of that line
         // that its owner reads; a line made from a state shows none.
-        let source = match a.pos.get(1) {
-            Some(r) => repo.p.db.line_by_name(r)?.map(|l| repo.localize(l)).transpose()?,
-            None => match &current {
-                Some(c) => Some(c.clone()),
-                None => repo.p.db.line_by_name("main")?.map(|l| repo.localize(l)).transpose()?,
-            },
-        }
-        .filter(|l| l.head == start);
+        let source_of = |start: &str| -> Result<Option<Line>> {
+            Ok(match a.pos.get(1) {
+                Some(r) => repo.p.db.line_by_name(r)?.map(|l| repo.localize(l)).transpose()?,
+                None => match &current {
+                    Some(c) => repo.p.db.line_by_id(&c.id)?.map(|l| repo.localize(l)).transpose()?,
+                    None => repo.p.db.line_by_name("main")?.map(|l| repo.localize(l)).transpose()?,
+                },
+            }
+            .filter(|l| l.head == start))
+        };
+        let mut start = resolve_start()?;
+        let mut source = source_of(&start)?;
         let explicit_view = match a.pos.get(1) {
             Some(rev) if rev.starts_with("views/") => Some(revs::resolve_view(repo, current.as_ref(), rev)?),
             Some(rev) if rev.starts_with("attestations/") => {
@@ -388,30 +396,60 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
         if owner == 0 && !ctx.caller.is_root() {
             return Err(exit(128, "fatal: only root can create a line owned by root"));
         }
-        // The tree clone, .git folder and caches are made before the lock; under it the command
-        // checks the names and the start state, moves the folders into place and records them.
+        // The tree clone, .git folder and caches are made before the lock. Under it the command
+        // checks that the start did not move, then moves the folders into place and records them.
+        // A moved start is prepared again, at most three times.
         let view = explicit_view.as_ref();
-        let (names, from, from_line) = match a.get("--count") {
-            Some(count) => {
-                let count = count.parse::<usize>().map_err(|_| exit(128, "--count must be a positive integer"))?;
-                (repo.batch_line_names(name, count)?, start.clone(), source.as_ref())
+        let mut attempt = 1;
+        let lines = loop {
+            let (names, from, from_line) = match a.get("--count") {
+                Some(count) => {
+                    let count = count.parse::<usize>().map_err(|_| exit(128, "--count must be a positive integer"))?;
+                    (repo.batch_line_names(name, count)?, start.clone(), source.as_ref())
+                }
+                // A single line made from a view starts at the view's shared state, from no line.
+                None => match view {
+                    Some(v) => (vec![name.to_string()], v.shared.clone(), None),
+                    None => (vec![name.to_string()], start.clone(), source.as_ref()),
+                },
+            };
+            let prepared = repo.prepare_named_lines(ctx, names, &from, owner, from_line, view)?;
+            // Test hook: wait after the prepare step, so a test can move the start before the commit.
+            if let Some(ms) = std::env::var("LAYR_TEST_LINE_NEW_PAUSE_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
+                std::thread::sleep(std::time::Duration::from_millis(ms));
             }
-            // A single line made from a view starts at the view's shared state, from no line.
-            None => match view {
-                Some(v) => (vec![name.to_string()], v.shared.clone(), None),
-                None => (vec![name.to_string()], start.clone(), source.as_ref()),
-            },
-        };
-        let prepared = repo.prepare_named_lines(ctx, names, &from, owner, from_line, view)?;
-        let lock = match repo.p.lock() {
-            Ok(l) => l,
-            Err(e) => {
-                repo.discard_prepared_lines(prepared);
-                return Err(e);
+            let lock = match repo.p.lock() {
+                Ok(l) => l,
+                Err(e) => {
+                    repo.discard_prepared_lines(prepared);
+                    return Err(e);
+                }
+            };
+            // The start must still be the state that was prepared. A view start is not re-read.
+            if view.is_none() {
+                let now = resolve_start()?;
+                if now != start {
+                    drop(lock);
+                    repo.discard_prepared_lines(prepared);
+                    if attempt == 3 {
+                        let (was, shown) = (ids::short(&start), ids::short(&now));
+                        return Err(exit(1, format!("error: the start of line '{name}' moved during the command (head {was} -> {shown}); run it again")));
+                    }
+                    if repo.state(&now)?.kind == StateKind::Auto {
+                        let shown = ids::short(&now);
+                        let msg = format!("error: line '{name}' start moved to an automatic state ({shown}); run it again");
+                        return Err(exit(1, msg));
+                    }
+                    attempt += 1;
+                    start = now;
+                    source = source_of(&start)?;
+                    continue;
+                }
             }
+            let lines = repo.commit_prepared_lines(ctx, prepared)?;
+            drop(lock);
+            break lines;
         };
-        let lines = repo.commit_prepared_lines(ctx, prepared)?;
-        drop(lock);
         if a.get("--count").is_some() {
             if a.has("--json") {
                 outln!(ctx, "{}", serde_json::to_string(&lines.iter().map(|line| line_json(repo, line)).collect::<Vec<_>>())?);

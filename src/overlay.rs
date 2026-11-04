@@ -561,7 +561,7 @@ impl<'a> Repo<'a> {
         self.check_view_read(ctx, view)?;
         let assembled = self.assemble(line, &view.shared, &view.layers)?;
         let work = self.temp_work(&assembled.path)?;
-        self.prepare_at(line, &view.shared, &work.path)?;
+        self.prepare_at(line, &view.shared, &work.path, &[])?;
         crate::fsutil::rename_tree(&work.path, dst)
     }
 
