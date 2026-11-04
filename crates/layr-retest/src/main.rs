@@ -51,6 +51,7 @@ const IGNORE_FILES: &str = r"(/\.rustup/|/rustc/|/target/)";
 
 /// Entry point of `layr retest <sub> ...`: `args` are the words after `retest`. Returns the exit code.
 pub fn main(args: &[String]) -> Result<i32> {
+    tools_on_path();
     match args.first().map(String::as_str) {
         Some("wrap") => wrap(&args[1..]),
         Some("run") => run(&args[1..]),
@@ -64,6 +65,35 @@ pub fn main(args: &[String]) -> Result<i32> {
                 "usage: layr retest run [--full] [--save] [--tool vitest|jest|pytest] [-- <nextest args>]\n       layr retest gate [--name <n>] [--max-load <n>] -- <command...>\n       layr retest init [--yes]\n       layr retest doctor\n       layr retest sweep [--dry-run]\n       layr retest prune <folder> [--adapter cargo|pnpm|none]\n       layr retest wrap -- <test binary> <args>"
             );
             Ok(2)
+        }
+    }
+}
+
+/// Puts the folder of the Rust tools first on PATH when `cargo` is not on it (a daemon, a GUI app, or rustup from
+/// Homebrew, which keeps its proxies in its own folder). The folders tried: the rustup proxy folders of Homebrew
+/// and of `~/.cargo/bin`, then the toolchain folder that `rustup which cargo` names. Each later cargo, rustc and
+/// rustup call of retest then finds the same tools. Called once, before any command starts a thread.
+fn tools_on_path() {
+    let path = std::env::var("PATH").unwrap_or_default();
+    let has = |d: &Path| d.join("cargo").is_file();
+    if std::env::split_paths(&path).any(|d| has(&d)) {
+        return;
+    }
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    let proxies = [PathBuf::from("/opt/homebrew/opt/rustup/bin"), PathBuf::from("/usr/local/opt/rustup/bin"), home.join(".cargo/bin")];
+    let found = proxies.iter().find(|d| has(d)).cloned().or_else(|| {
+        // rustup on PATH or in a proxy folder, without a cargo proxy next to it: its active toolchain's folder.
+        let rustups = std::env::split_paths(&path).chain(proxies.iter().cloned()).map(|d| d.join("rustup"));
+        rustups.filter(|r| r.is_file()).find_map(|r| {
+            let out = Command::new(r).args(["which", "cargo"]).output().ok()?;
+            let cargo = PathBuf::from(String::from_utf8(out.stdout).ok()?.trim());
+            out.status.success().then(|| cargo.parent().map(Path::to_path_buf)).flatten()
+        })
+    });
+    if let Some(dir) = found {
+        let joined = std::env::join_paths(std::iter::once(dir).chain(std::env::split_paths(&path)));
+        if let Ok(p) = joined {
+            std::env::set_var("PATH", p);
         }
     }
 }
