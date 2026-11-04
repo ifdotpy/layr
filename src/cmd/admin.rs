@@ -2106,7 +2106,8 @@ fn copy_from_caller(ctx: &Ctx, src: &std::path::Path, rel: &str, dst: &std::path
 fn caller_git(ctx: &Ctx, dir: &std::path::Path, args: &[&str]) -> Result<std::process::Output> {
     let mut command = std::process::Command::new("git");
     command.arg("-c").arg("safe.directory=*").arg("-C").arg(dir).args(args);
-    crate::privs::command_as(&mut command, ctx.caller.uid, &[])?;
+    // The caller's choice of git configuration (the global file and its excludes) applies, as in their shell.
+    crate::privs::command_as(&mut command, ctx.caller.uid, &crate::privs::pick_env(ctx, &["GIT_CONFIG_GLOBAL", "XDG_CONFIG_HOME"]))?;
     Ok(command.output()?)
 }
 
