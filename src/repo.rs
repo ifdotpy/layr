@@ -1326,7 +1326,12 @@ impl<'a> Repo<'a> {
                 let before = self.recorded_working(&current)?;
                 let id = ids::new_id();
                 let tree = prepared.tree.as_ref().ok_or_else(|| anyhow::anyhow!("prepared save has no snapshot"))?;
+                // The prepared snapshot is read-only for the compare (btrfs send needs that), and a
+                // read-only subvolume cannot move to another folder (EROFS): make it writable for
+                // the rename, then read-only again in its place as a state.
+                btrfs::set_writable(&tree.path)?;
                 crate::fsutil::rename_tree(&tree.path, self.p.state_path(&id))?;
+                btrfs::set_readonly(&self.p.state_path(&id))?;
                 let mut st = match self.describe_state(ctx, id.clone(), StateKind::Auto, vec![current.head.clone()], message, Some(&current)) {
                     Ok(st) => st,
                     Err(e) => { let _ = self.p.delete_state(&id); return Err(e); }
