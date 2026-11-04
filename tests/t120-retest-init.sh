@@ -101,11 +101,11 @@ second=$(ly retest init 2>&1)
 has "a second init keeps the follow target" "follow: main already follows origin/main" "$second"
 eq "a second init changes no file" "$before_files" "$(cat Cargo.toml .layrattributes .gitignore | cksum)"
 
-# A warm line: the standard builds, then one save. The save makes target a cache overlay with no save --caches (#178).
-(cd $P/main && ly line new warm main $OWNER_ARG >/dev/null 2>&1)
-std $P/warm
-(cd $P/warm && ly save >/dev/null 2>&1) || fail "the save after the first build failed"
-has "the save after the first build makes target a cache overlay" "cache.target" "$(ly overlay list)"
+# The caches come from main, which stays protected. A cache that a root run saves belongs to root, and other users take
+# it only from a protected line (t117). So main builds, then its caches are saved.
+std $P/main
+(cd $P/main && ly save --caches >/dev/null 2>&1) || fail "save --caches of main failed"
+has "save --caches of main makes target a cache overlay" "cache.target" "$(ly overlay list)"
 
 # 1. A new line from main compiles no crate on its first build.
 (cd $P/main && ly line new t1 main $OWNER_ARG >/dev/null 2>&1)
@@ -122,13 +122,14 @@ std $P/t1
 (cd $P/t1 && ly save --caches >/dev/null 2>&1) || fail "save --caches of the line failed"
 merged=$(cd $P/t1 && ly rev-parse head)
 cd $P/main && ly merge t1 --expect "$merged" >/dev/null 2>&1 || fail "the merge of t1 into main failed"
-# The merge prunes the cache it takes: each incremental crate folder keeps one session.
-eq "after the merge, main keeps one incremental session per crate folder" "$(folders $P/main/target)" "$(sessions $P/main/target)"
 out=$(cb $P/main build --locked)
 n=$(echo "$out" | grep -c '^ *Compiling ')
 eq "main compiles the changed crate only (one crate)" 1 "$n"
 has "main compiles crate b" "Compiling b " "$out"
 std $P/main
+(cd $P/main && ly save --caches >/dev/null 2>&1) || fail "save --caches of main after the merge failed"
+# After save --caches, the prune leaves each incremental crate folder one session.
+eq "main keeps one incremental session per crate folder after its save" "$(folders $P/main/target)" "$(sessions $P/main/target)"
 
 # 3. Twenty saves with builds in a line: the store grows by the tracked changes and one live cache, not 20 copies.
 (cd $P/main && ly line new t2 main $OWNER_ARG >/dev/null 2>&1)
