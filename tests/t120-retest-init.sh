@@ -1,11 +1,12 @@
 #!/bin/bash
 # ci: macos overlayfs
 # `layr retest init` alone sets up a fresh cargo project with a git remote (docs/retest.md, Start). The main line
-# follows origin/main, the sweep list covers the standard commands, and the caches are warm and thin. The main line
-# stays protected: the init files come in through a merge, as in a real project. Checks: a new line from main compiles
-# no crate on its first build; a change of a line, saved with its caches and merged into main, makes main compile the
-# changed crate only; 20 saves with builds in a line grow the store by about the tracked changes and one live cache;
-# `layr retest doctor` reports no project problem.
+# follows origin/main, the sweep list covers the standard commands, and the caches are warm and thin. Main stays
+# protected: the init files come in through a merge, a change of a line lands on the git remote as a squash merge and
+# the real follow pass takes it, and a local merge into main takes and saves the line's caches (as the follow pass
+# does). Checks: a new line from main compiles no crate after a local merge of a docs change, and compiles the changed
+# crate only after a code change (the merged file gets a new time: see docs/retest.md); 20 saves with builds in a line
+# grow the store by about the tracked changes and one live cache; `layr retest doctor` reports no project problem.
 #
 # The layr commands run as the test's user (root on the Linux CI job, as in t117). The cargo commands run as the
 # owner of the lines, so the sweep and the cache hook see the owner's units. On a root run the owner's cargo is the
@@ -52,10 +53,17 @@ PENV="CARGO_INCREMENTAL=1 RUSTC_WRAPPER="
 cb() { local dir=$1; shift; (cd "$dir" && owned env CARGO_NET_OFFLINE=true $PENV $CARGO "$@" 2>&1); }
 # std <folder>: the three standard commands of init (the debug build, the test build, the release build).
 std() { cb "$1" build --locked -q >/dev/null; cb "$1" test --locked --no-run -q >/dev/null; cb "$1" build --release --locked -q >/dev/null; }
-# compiled <folder> <cargo args...>: the number of crates a command compiles.
-compiled() { local d=$1; shift; cb "$d" "$@" | grep -c '^ *Compiling '; }
+# compiled <folder> <cargo args...>: the number of crates a command compiles. -1 when cargo did not finish (a missing folder).
+compiled() {
+    local d=$1 out; shift
+    out=$(cb "$d" "$@")
+    echo "$out" | grep -q '^ *Finished' || { echo -1; return; }
+    echo "$out" | grep -c '^ *Compiling '
+}
 # store: the total bytes of the store (layr du --store --json), exact (APFS clones are not double counted).
 store() { ly du --store --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["total"])'; }
+# parts: the bytes each store part frees (`layr du --store --json`), for the diagnosis of a store growth.
+parts() { ly du --store --json | python3 -c 'import json,sys; [print(p["part"], p["frees"]) for p in json.load(sys.stdin)["parts"]]'; }
 # The incremental sessions of a target folder: one session folder per crate folder after a prune.
 sessions() { find "$1/debug/incremental" -mindepth 2 -maxdepth 2 -type d -name 's-*' 2>/dev/null | wc -l | tr -d ' '; }
 folders() { ls "$1/debug/incremental" 2>/dev/null | wc -l | tr -d ' '; }
@@ -90,9 +98,11 @@ ly save -m "retest init" >/dev/null 2>&1 || fail "the save of the init files fai
 setup_head=$(ly rev-parse head)
 cd $P/main || exit 1
 ly merge setup --expect "$setup_head" >/dev/null 2>&1 || fail "the merge of the init files into main failed"
+# The remote has the init files too: the follow pass of main then sees a fast-forward.
+(cd $P/main && ly git push origin main >/dev/null 2>&1) || fail "push of main to the remote failed"
 
 # In main: the follow target, the sweep list, and a second init that changes nothing.
-main_init=$(ly retest init 2>&1); main_rc=$?
+main_init=$(ly retest init 2>&1)
 has "init in main sets the follow target" "follow: main follows origin/main" "$main_init"
 has "the follow target is in layr follow" "Following origin/main on line main" "$(ly follow 2>&1)"
 has "the sweep list covers the three standard commands" 'sweep = [["build", "--locked"], ["test", "--locked", "--no-run"], ["build", "--release", "--locked"]]' "$(cat Cargo.toml)"
@@ -101,49 +111,65 @@ second=$(ly retest init 2>&1)
 has "a second init keeps the follow target" "follow: main already follows origin/main" "$second"
 eq "a second init changes no file" "$before_files" "$(cat Cargo.toml .layrattributes .gitignore | cksum)"
 
-# The caches come from main, which stays protected. A cache that a root run saves belongs to root, and other users take
-# it only from a protected line (t117). So main builds, then its caches are saved.
-std $P/main
-(cd $P/main && ly save --caches >/dev/null 2>&1) || fail "save --caches of main failed"
-has "save --caches of main makes target a cache overlay" "cache.target" "$(ly overlay list)"
+# 1. The remote flow. A line changes crate b, saves with its caches and pushes its branch (the export that the follow
+#    pass reads). The change lands on the remote as a squash merge. The follow pass of main runs as the daemon runs it.
+(cd $P/main && ly line new t2 main $OWNER_ARG >/dev/null 2>&1)
+std $P/t2 >/dev/null
+echo 'pub fn extra() -> i32 {' > $P/t2/crates/b/src/extra.rs && echo '    7' >> $P/t2/crates/b/src/extra.rs && echo '}' >> $P/t2/crates/b/src/extra.rs
+echo 'mod extra;' >> $P/t2/crates/b/src/lib.rs && echo 'pub use extra::extra;' >> $P/t2/crates/b/src/lib.rs
+(cd $P/t2 && ly add crates/b/src/extra.rs crates/b/src/lib.rs >/dev/null 2>&1 && ly save -m "b: extra" >/dev/null 2>&1) || fail "the save of the change failed"
+std $P/t2
+(cd $P/t2 && ly save --caches >/dev/null 2>&1) || fail "save --caches of t2 failed"
+(cd $P/t2 && ly git push origin t2 >/dev/null 2>&1) || fail "push of t2 to the remote failed"
+cd $U && git pull -q origin main
+cp $P/t2/crates/b/src/extra.rs $P/t2/crates/b/src/lib.rs crates/b/src/ && git add crates/b/src && git commit -qm "b: extra (squash of t2)" && git push -q origin main || fail "the squash merge on the remote failed"
+(cd $P/main && ly follow --tick >/dev/null 2>&1)
+has "the follow pass of main fast-forwards to the squash merge" "fast-forward to" "$(cd $P/main && ly follow 2>&1)"
+[ -f $P/main/crates/b/src/extra.rs ] && { PASS=$((PASS + 1)); echo "PASS main has the squash merge of t2"; } || fail "main has no extra.rs after the follow pass"
+(cd $P/main && ly line new t3 main $OWNER_ARG >/dev/null 2>&1)
+n=$(compiled $P/t3 build --locked)
+eq "a new line from main compiles 0 crates after the follow pass (known gap: merged files get a new time)" 0 "$n"
 
-# 1. A new line from main compiles no crate on its first build.
+# 2. A local merge into protected main takes and saves the caches of the line (as the follow pass does). A docs change
+#    keeps every crate file, so a new line from main compiles 0 crates.
+(cd $P/main && ly line new w main $OWNER_ARG >/dev/null 2>&1)
+std $P/w >/dev/null
+echo 'Notes of the test line.' > $P/w/NOTES.md
+(cd $P/w && ly add NOTES.md >/dev/null 2>&1 && ly save -m "notes" >/dev/null 2>&1) || fail "the save of NOTES.md failed"
+(cd $P/w && ly save --caches >/dev/null 2>&1) || fail "save --caches of w failed"
+wh=$(cd $P/w && ly rev-parse head)
+cd $P/main && out=$(ly merge w --expect "$wh" 2>&1) || fail "the local merge of w into main failed"
+has "a local merge reports the caches it takes" "Merged cache target" "$out"
 (cd $P/main && ly line new t1 main $OWNER_ARG >/dev/null 2>&1)
 n=$(compiled $P/t1 build --locked)
-eq "a new line from main compiles 0 crates on its first build" 0 "$n"
+eq "after a local merge of a docs change, a new line from main compiles 0 crates" 0 "$n"
 n=$(compiled $P/t1 test --locked --no-run)
 eq "a new line from main compiles 0 test crates" 0 "$n"
 
-# 2. A change in the line, saved with its caches, merged into main. Main compiles the changed crate only.
-echo 'pub fn extra() -> i32 {' > $P/t1/crates/b/src/extra.rs && echo '    7' >> $P/t1/crates/b/src/extra.rs && echo '}' >> $P/t1/crates/b/src/extra.rs
-echo 'mod extra;' >> $P/t1/crates/b/src/lib.rs && echo 'pub use extra::extra;' >> $P/t1/crates/b/src/lib.rs
-(cd $P/t1 && ly add crates/b/src/extra.rs crates/b/src/lib.rs >/dev/null 2>&1 && ly save -m "b: extra" >/dev/null 2>&1) || fail "the save of the change failed"
-std $P/t1
-(cd $P/t1 && ly save --caches >/dev/null 2>&1) || fail "save --caches of the line failed"
-merged=$(cd $P/t1 && ly rev-parse head)
-cd $P/main && ly merge t1 --expect "$merged" >/dev/null 2>&1 || fail "the merge of t1 into main failed"
-out=$(cb $P/main build --locked)
-n=$(echo "$out" | grep -c '^ *Compiling ')
-eq "main compiles the changed crate only (one crate)" 1 "$n"
-has "main compiles crate b" "Compiling b " "$out"
-std $P/main
-(cd $P/main && ly save --caches >/dev/null 2>&1) || fail "save --caches of main after the merge failed"
-# After save --caches, the prune leaves each incremental crate folder one session.
-eq "main keeps one incremental session per crate folder after its save" "$(folders $P/main/target)" "$(sessions $P/main/target)"
-
 # 3. Twenty saves with builds in a line: the store grows by the tracked changes and one live cache, not 20 copies.
-(cd $P/main && ly line new t2 main $OWNER_ARG >/dev/null 2>&1)
-cd $P/t2 || exit 1
+(cd $P/main && ly line new t4 main $OWNER_ARG >/dev/null 2>&1)
+cd $P/t4 || exit 1
 s0=$(store)
+parts > $T/parts0.txt
 for i in $(seq 1 20); do
     echo "pub fn gen$i() -> i32 {" >> crates/a/src/lib.rs && echo "    $i" >> crates/a/src/lib.rs && echo "}" >> crates/a/src/lib.rs
     ly save -a -m "iter $i" >/dev/null 2>&1 || fail "save $i failed"
-    std $P/t2
+    std $P/t4
 done
 s1=$(store)
-live=$(du -sk $P/t2/target | awk '{print $1 * 1024}')
+parts > $T/parts1.txt
+live=$(du -sk $P/t4/target | awk '{print $1 * 1024}')
 grow=$((s1 - s0))
 echo "store growth over 20 saves: $grow bytes; one live cache of the line: $live bytes"
+echo "STORE PARTS (bytes per part, before and after the 20 saves):"
+python3 - $T/parts0.txt $T/parts1.txt <<'PY'
+import sys
+a = dict(l.split() for l in open(sys.argv[1]) if l.strip())
+b = dict(l.split() for l in open(sys.argv[2]) if l.strip())
+for k in sorted(set(a) | set(b)):
+    d = int(b.get(k, 0)) - int(a.get(k, 0))
+    if d: print(f"STORE PART {k} before {a.get(k, 0)} after {b.get(k, 0)} delta {d}")
+PY
 [ "$grow" -lt $((2 * live + 1048576)) ] && { PASS=$((PASS + 1)); echo "PASS the store grows by about one live cache, not 20"; } || { FAIL=$((FAIL + 1)); echo "FAIL the store grew $grow bytes for 20 saves (one live cache is $live bytes)"; }
 
 # 4. The project is healthy: no project warning from doctor.

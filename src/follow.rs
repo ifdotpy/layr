@@ -211,18 +211,33 @@ impl<'a> Repo<'a> {
         let after = self.line(&line.id)?.head;
         let short = ids::short(&fetched);
         let mut text = if after == fetched { format!("fast-forward to {short}") } else { format!("merged {short}") };
-        if let Err(e) = self.follow_caches(ctx, line, remote) {
+        if let Err(e) = self.follow_caches(ctx, line, remote, &head) {
             text.push_str(&format!("; caches not taken: {e:#}"));
         }
         Ok(Some(text))
     }
 
-    /// The caches after a merge (docs/cache-overlays.md). Per folder overlay, the newest candidate
-    /// whose work the line now holds takes it. Then each folder it took is pruned, and `save --caches` saves them.
-    fn follow_caches(&self, ctx: &Ctx, line: &Line, remote: &str) -> Result<()> {
+    /// The caches after a merge (docs/cache-overlays.md): the candidates of `remote`, newest first.
+    fn follow_caches(&self, ctx: &Ctx, line: &Line, remote: &str, before: &str) -> Result<()> {
+        self.take_follow_caches(ctx, line, self.cache_sources(remote)?, Some(before)).map(|_| ())
+    }
+
+    /// Takes the caches of `sources` (newest first) into `line`, then saves them as `save --caches` does (prune,
+    /// then save). The follow pass and a local merge both use it. `before` is the head before the merge: the rule
+    /// of a protected line is checked against it. Returns the folder and the state of each cache taken, and the reason
+    /// a candidate was refused (the last one).
+    pub(crate) fn take_follow_caches(
+        &self,
+        ctx: &Ctx,
+        line: &Line,
+        sources: Vec<Line>,
+        before: Option<&str>,
+    ) -> Result<(Vec<(String, String)>, Option<String>)> {
         let folders: BTreeSet<String> = self.folder_overlays()?.into_iter().map(|(_, f)| f).collect();
         let mut done = BTreeSet::new();
-        for cand in self.cache_sources(remote)? {
+        let mut taken = Vec::new();
+        let mut refusal = None;
+        for cand in sources {
             if done.len() == folders.len() {
                 break;
             }
@@ -236,7 +251,7 @@ impl<'a> Repo<'a> {
                 let now = self.line(&line.id)?;
                 let mut reason = None;
                 if let Some(rule) = self.policy().rule_for(&now.name) {
-                    if !mergecmd::merge_met_rule(self, &rule, &now.head, &now.head, &theirs.head)? {
+                    if !mergecmd::merge_met_rule(self, &rule, before.unwrap_or(&now.head), &now.head, &theirs.head)? {
                         reason = Some("checks and approvals do not allow them".to_string());
                     }
                 }
@@ -246,17 +261,19 @@ impl<'a> Repo<'a> {
                 }
             };
             if refused.is_some() {
+                refusal = refused;
                 continue;
             }
             let now = self.line(&line.id)?;
-            for (_, folder) in self.pull_caches(ctx, &now, &Source::Line(&theirs), &done)? {
-                done.insert(folder);
+            let _t = crate::trace::span("merge caches");
+            for (folder, state) in self.pull_caches(ctx, &now, &Source::Line(&theirs), &done)? {
+                done.insert(folder.clone());
+                taken.push((folder, state));
             }
         }
-        // The caches of the line as cache overlays, as `layr save --caches` makes them. It prunes every cache
-        // folder of the line before it saves it (prepare_caches): the taken folders are pruned there, once.
+        // Prunes each taken folder, then saves the caches of the line.
         admin::save(ctx, &["--caches".to_string(), "-q".to_string()])?;
-        Ok(())
+        Ok((taken, refusal))
     }
 
     /// Lines with an export to `remote` in the last 14 days, newest export first. An export names

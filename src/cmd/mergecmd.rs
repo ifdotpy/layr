@@ -807,35 +807,19 @@ pub fn merge(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let code = merge_rev(ctx, &h.repo, &line, &rev, &a);
     discard_prepared(&h.repo);
     let code = code?;
-    // The caches of a merged line go with it (docs/cache-overlays.md, section 5). They are
-    // regenerable: a failure is reported and never undoes the merge.
+    // The caches of a merged line go with it, taken and saved as the follow pass does (docs/cache-overlays.md,
+    // section 5). They are regenerable: a failure is reported and never undoes the merge.
     if let Some(theirs) = h.repo.p.db.line_by_name(&rev)? {
         let r = (|| -> Result<()> {
             let theirs = h.repo.localize(theirs)?;
-            let lock = h.repo.p.lock()?;
-            let line = h.repo.line(&line.id)?;
-            // A protected line takes caches only with a merge that met its protection.
-            if let Some(rule) = h.repo.policy().rule_for(&line.name) {
-                if !merge_met_rule(&h.repo, &rule, &before, &line.head, &theirs.head)? {
-                    if !a.has("-q") {
-                        outln!(
-                            ctx,
-                            "Caches of '{rev}' not merged: the merge did not pass the checks and approvals of line '{}'",
-                            line.name
-                        );
-                    }
-                    return Ok(());
+            let now = h.repo.line(&line.id)?;
+            let (taken, refused) = h.repo.take_follow_caches(ctx, &now, vec![theirs], Some(&before))?;
+            if !a.has("-q") {
+                for (p, id) in &taken {
+                    outln!(ctx, "Merged cache {p}: {}", ids::short(id));
                 }
-            }
-            // The copies of build output take minutes. They hold only the lock of each cache
-            // overlay: the commands of the project do not wait for them.
-            drop(lock);
-            let _t = crate::trace::span("merge caches");
-            let none = std::collections::BTreeSet::new();
-            let pulled = h.repo.pull_caches(ctx, &line, &crate::cache_overlay::Source::Line(&theirs), &none)?;
-            for (p, id) in pulled {
-                if !a.has("-q") {
-                    outln!(ctx, "Merged cache {p}: {}", ids::short(&id));
+                if let (true, Some(reason)) = (taken.is_empty(), refused) {
+                    outln!(ctx, "Caches of '{rev}' not merged: {reason}");
                 }
             }
             Ok(())
