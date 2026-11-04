@@ -74,8 +74,6 @@ for t in "${files[@]}"; do
         failed=1
         continue
     fi
-    # TEMPORARY (#213): the free space after each test, to find the test that fills the runner.
-    echo "  free: $(df -Pk "${TMPDIR:-/var/tmp}" | awk 'NR==2 {print int($4/1024)}') MiB after $t"
     case "$summary" in
         *", 0 failed") echo "$summary" ;;
         *) printf '%s\n' "$out"; failed=1 ;;
