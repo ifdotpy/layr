@@ -343,9 +343,10 @@ pub fn worker_with(adapters: &'static [Box<dyn CacheAdapter>]) -> i32 {
 }
 
 /// The adapter of `folder` for its cache key: the one that the overlay property `prune` names, or the one that
-/// detects the folder (also when the property turns the prune off).
+/// detects the folder (also when the property turns the prune off or names no known adapter): the key does not
+/// depend on the prune setting.
 pub fn adapter_for(setting: Option<&str>, folder: &Path) -> Option<&'static dyn CacheAdapter> {
-    find(registered(), setting.filter(|s| *s != "none"), folder).ok()
+    find(registered(), setting.filter(|s| *s != "none"), folder).or_else(|_| find(registered(), None, folder)).ok()
 }
 
 /// Outputs of `toolchain_output`, by command, selecting files and user: one run per command.

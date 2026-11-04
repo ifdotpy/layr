@@ -113,10 +113,36 @@ fn file_parts(w: &Path, key_files: &[String]) -> BTreeMap<String, String> {
     key_files.iter().map(|f| (format!("file:{f}"), read(f).map_or("-".to_string(), |d| short_hash(&d)))).collect()
 }
 
-/// The names of the parts in which `ours` and `theirs` differ.
+/// The names of the parts in which `ours` and `theirs` differ. A toolchain that one side could not
+/// name (`-`: no toolchain command for that user, such as root without rustc) is no difference.
 pub fn key_differences(ours: &BTreeMap<String, String>, theirs: &BTreeMap<String, String>) -> Vec<String> {
     let names: BTreeSet<&String> = ours.keys().chain(theirs.keys()).collect();
-    names.into_iter().filter(|n| ours.get(*n) != theirs.get(*n)).cloned().collect()
+    let unknown = |v: Option<&String>| v.is_none_or(|v| v == "-");
+    names
+        .into_iter()
+        .filter(|n| ours.get(*n) != theirs.get(*n))
+        .filter(|n| !(n.as_str() == "toolchain" && (unknown(ours.get(*n)) || unknown(theirs.get(*n)))))
+        .cloned()
+        .collect()
+}
+
+/// The cache key of a line (`Repo::cache_key`): the platform key and its parts.
+pub struct CacheKey {
+    pub key: String,
+    pub parts: BTreeMap<String, String>,
+}
+
+impl CacheKey {
+    /// Whether a cache state with this platform key and these parts fits: the same platform, and
+    /// equal parts (`key_differences`); a state without parts (an older layr) by its whole key.
+    pub fn fits(&self, platform: Option<&str>, parts: &BTreeMap<String, String>) -> bool {
+        if parts.is_empty() {
+            return platform == Some(self.key.as_str());
+        }
+        let base = crate::model::cache_platform();
+        let ours = self.key == base || self.key.starts_with(&format!("{base}-"));
+        ours && !other_platform(platform) && platform.is_some() && key_differences(&self.parts, parts).is_empty()
+    }
 }
 
 /// A state of a cache overlay made on another operating system or processor: a machine never
@@ -139,7 +165,7 @@ impl<'a> Repo<'a> {
     /// the key files, the environment that changes the build in the folder (the values that the project
     /// pins, else the caller's), and the output of the toolchain command, both named by the folder's
     /// cache adapter (docs/cache-overlays.md, section 6).
-    pub fn cache_key(&self, ctx: &Ctx, name: &str, w: &Path, uid: u32) -> Result<(String, BTreeMap<String, String>)> {
+    pub fn cache_key(&self, ctx: &Ctx, name: &str, w: &Path, uid: u32) -> Result<CacheKey> {
         let mut parts = file_parts(w, &self.key_files(name)?);
         let folder = self.overlay_setting(name, "folder")?.and_then(|v| v.as_str().map(str::to_owned));
         if let Some(path) = folder.and_then(|f| fsutil::safe_join(w, &f).ok()) {
@@ -159,7 +185,7 @@ impl<'a> Repo<'a> {
                 }
             }
         }
-        Ok((platform_key_of(&parts), parts))
+        Ok(CacheKey { key: platform_key_of(&parts), parts })
     }
 
     /// The folder overlays of the project: name and folder.
@@ -422,7 +448,7 @@ impl<'a> Repo<'a> {
             let name = self.ensure_cache_overlay(ctx, p)?;
             let info = self.need_overlay(&name)?;
             let orepo = self.overlay_repo(&name)?;
-            let (key, parts) = self.cache_key(ctx, &name, &w, line.owner)?;
+            let CacheKey { key, parts } = self.cache_key(ctx, &name, &w, line.owner)?;
             let id = ids::new_id();
             {
                 let _lock = orepo.p.lock()?;
@@ -476,13 +502,13 @@ impl<'a> Repo<'a> {
     /// A state of overlay `name` that a line of `uid` may show: on this machine, saved on this
     /// platform, and made by `uid` or on a protected line (a cache holds code that review does not
     /// see). The empty first state is no cache.
-    fn usable_cache(&self, orepo: &Repo, root: &str, id: &str, uid: u32, key: &str) -> Result<bool> {
+    fn usable_cache(&self, orepo: &Repo, root: &str, id: &str, uid: u32, key: &CacheKey) -> Result<bool> {
         if id == root || !orepo.p.has_state(id) {
             return Ok(false);
         }
         let Some(st) = orepo.p.db.state(id)? else { return Ok(false) };
         let allowed = uid == 0 || st.cache_shared || st.cache_by == Some(uid);
-        Ok(allowed && st.cache_platform.as_deref() == Some(key))
+        Ok(allowed && key.fits(st.cache_platform.as_deref(), &st.cache_key_parts))
     }
 
     /// Says why a line takes no cache of overlay `name` (folder `folder`) from the line `from`: the
@@ -516,7 +542,7 @@ impl<'a> Repo<'a> {
     /// the newest cache saved with that state (`cache_of`), else the newest cache of the line that
     /// made it. A state imported from git has no line, so without `cache_of` the walk would reach
     /// an old state of some line and take its old cache.
-    pub fn cache_source(&self, name: &str, from: &Source, uid: u32, key: &str) -> Result<Option<String>> {
+    pub fn cache_source(&self, name: &str, from: &Source, uid: u32, key: &CacheKey) -> Result<Option<String>> {
         let info = self.need_overlay(name)?;
         let orepo = self.overlay_repo(name)?;
         let of_line = |line_id: &str| -> Result<Option<String>> {
@@ -601,9 +627,9 @@ impl<'a> Repo<'a> {
                 Some(s) => Source::Line(s),
                 None => Source::State(start),
             };
-            let (key, parts) = self.cache_key(ctx, &name, w, uid)?;
+            let key = self.cache_key(ctx, &name, w, uid)?;
             let Some(sid) = self.cache_source(&name, &from, uid, &key)? else {
-                self.report_key_miss(&name, &folder, &from, uid, &parts);
+                self.report_key_miss(&name, &folder, &from, uid, &key.parts);
                 continue;
             };
             let info = self.need_overlay(&name)?;
@@ -653,9 +679,9 @@ impl<'a> Repo<'a> {
             if skip.contains(&folder) || !self.applies_in(&name, &folder, &w)? {
                 continue;
             }
-            let (key, parts) = self.cache_key(ctx, &name, &w, uid)?;
+            let key = self.cache_key(ctx, &name, &w, uid)?;
             let Some(sid) = self.cache_source(&name, from, uid, &key)? else {
-                self.report_key_miss(&name, &folder, from, uid, &parts);
+                self.report_key_miss(&name, &folder, from, uid, &key.parts);
                 continue;
             };
             let info = self.need_overlay(&name)?;
@@ -676,8 +702,8 @@ impl<'a> Repo<'a> {
                         crate::overlay::union_state(&orepo, ctx, &ol, &ol.head, &sid, &format!("cache {folder}: union"))?;
                     st.cache_by = Some(self.cache_maker(ctx, line));
                     st.cache_shared = shared;
-                    st.cache_platform = Some(key.clone());
-                    st.cache_key_parts = parts.clone();
+                    st.cache_platform = Some(key.key.clone());
+                    st.cache_key_parts = key.parts.clone();
                     (st.id.clone(), vec![st])
                 };
                 // The working folder first: a failure leaves the overlay line where it was.
@@ -932,6 +958,19 @@ mod tests {
         let odd = cache_overlay_name("a b/c");
         assert!(odd.starts_with("cache.") && odd.len() == 18, "{odd}");
         assert_eq!(cache_props().describe(), ["history=last", "quiet", "merge=union-theirs"]);
+    }
+
+    #[test]
+    fn an_unknown_toolchain_is_no_difference() {
+        let parts = |t: &str, env: &str| BTreeMap::from([("toolchain".to_string(), t.to_string()), ("env:CC".to_string(), env.to_string())]);
+        assert!(key_differences(&parts("aa", "x"), &parts("-", "x")).is_empty(), "root without rustc");
+        assert_eq!(key_differences(&parts("aa", "x"), &parts("bb", "x")), ["toolchain"]);
+        assert_eq!(key_differences(&parts("-", "x"), &parts("-", "y")), ["env:CC"]);
+        let ours = CacheKey { key: platform_key_of(&parts("aa", "x")), parts: parts("aa", "x") };
+        let base = crate::model::cache_platform();
+        assert!(ours.fits(Some(&format!("{base}-0123456789abcdef")), &parts("-", "x")));
+        assert!(!ours.fits(Some("plan9-mips-0123456789abcdef"), &parts("aa", "x")), "another platform");
+        assert!(!ours.fits(Some(&base), &BTreeMap::new()), "an older state compares its whole key");
     }
 
     #[test]
