@@ -497,7 +497,7 @@ fn scan_parallel(dir: File, root: &Path, out: &mut BTreeMap<String, ScanEntry>) 
         busy: usize,
         error: Option<anyhow::Error>,
     }
-    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 4);
+    let threads = crate::parallel::io_threads();
     let root_dir = Arc::new(dir);
     let queue =
         Mutex::new(Queue { jobs: vec![Job { parent: None, name: String::new(), rel: String::new() }], busy: 0, error: None });
@@ -867,10 +867,10 @@ pub(crate) fn seal(path: &Path, readonly: bool, for_delete: bool) -> Result<()> 
     Ok(())
 }
 
-/// Run `f` for each item with up to four threads; the first error wins.
+/// Run `f` for each item on up to `parallel::io_threads()` threads; the first error wins.
 fn each_parallel<T: Sync>(items: &[T], f: impl Fn(&T) -> Result<()> + Sync) -> Result<()> {
-    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 4);
-    if items.len() < 64 || threads == 1 {
+    let threads = crate::parallel::io_threads();
+    if items.len() < crate::parallel::MIN_IO_ITEMS || threads == 1 {
         return items.iter().try_for_each(|p| f(p));
     }
     let chunk = items.len().div_ceil(threads);
@@ -1424,7 +1424,7 @@ fn candidates_scanned_with(
             .filter(|(p, x)| !p.is_empty() && x.meta.is_file() && b.get(*p).is_some_and(|y| y.meta.is_file()) && unchanged(p))
             .map(|(p, _)| p)
             .collect();
-        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 4);
+        let threads = crate::parallel::io_threads();
         let stored_differ: Vec<&String> = std::thread::scope(|scope| {
             let jobs: Vec<_> = same_data
                 .chunks(same_data.len().div_ceil(threads).max(1))
@@ -1591,11 +1591,11 @@ fn same_content(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), rel: 
     Ok(true)
 }
 
-/// `changed_ranges` of each path, on up to four threads. The results keep the order of `paths`,
+/// `changed_ranges` of each path, on up to `parallel::io_threads()` threads. The results keep the order of `paths`,
 /// and the first error in that order is returned.
 fn changed_ranges_all(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), paths: &[String]) -> Result<Vec<Vec<(u64, u64)>>> {
-    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 4);
-    if threads == 1 || paths.len() < 64 {
+    let threads = crate::parallel::io_threads();
+    if threads == 1 || paths.len() < crate::parallel::MIN_IO_ITEMS {
         return paths.iter().map(|p| changed_ranges(parent, child, p)).collect();
     }
     let chunk = paths.len().div_ceil(threads);

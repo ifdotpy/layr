@@ -4,6 +4,7 @@
 #![deny(unsafe_code)]
 
 mod busy;
+mod parallel;
 #[macro_use]
 mod ctx;
 mod access;

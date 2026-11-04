@@ -510,7 +510,7 @@ pub fn diff(
     // Extended attributes and ACLs are not in the scan: read them for the entries that look equal.
     // An unreadable entry differs. Threads share the work, as the scan does.
     let _t = crate::trace::span(format!("thin stored metadata of {} entries", equal.len()));
-    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 4);
+    let threads = crate::parallel::io_threads();
     let differ: Vec<&str> = std::thread::scope(|scope| {
         let jobs: Vec<_> = equal
             .chunks(equal.len().div_ceil(threads).max(1))

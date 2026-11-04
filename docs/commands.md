@@ -29,6 +29,8 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | setup         | `init [--allow-root-snapshots] [--volume <name>]`, `projects`, `config`, `daemon [--allow-root-snapshots]`                             |
 | volumes       | `volume add <name> <path>`, `volume list [--json]`, `volume remove <name>`, `volume default <name>`, `project move <project> <volume>`, `clone <url> [<project>] --volume <name>`, `git clone <url> [<project>] --volume <name>` ([volumes](volumes.md)) |
 
+`LAYR_THREADS` controls worker concurrency; see [Parallelism](performance.md#parallelism).
+
 `init` and `daemon` refuse a store in the root subvolume, because a system snapshot rollback would empty it. `--allow-root-snapshots` or `LAYR_ALLOW_ROOT_SNAPSHOTS=1` overrides the check. See [Btrfs root snapshots](btrfs-root-snapshots.md).
 
 Person signing-key pins are machine-local: enrollment pins them on the executor, and an admin can later run `layr access person-key <login> <public-key>` there.
