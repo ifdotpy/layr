@@ -92,6 +92,8 @@ new_line other2 main
 ok "the owner sets prune=none for the union check" l overlay set cache.target --prune none
 (cd "$P/other2" && l merge main --caches-only -q >/dev/null 2>&1)
 eq "the union copy keeps the times without a prune" "0" "$(times_mismatch $P/main/target $P/other2/target)"
+# Why cargo treats the merged standard unit as dirty (a diagnostic: the reason cargo prints for the first dirty unit).
+echo "DIAG cargo on the merged line without prune: $(cb "$P/other2" build --workspace -v 2>&1 | grep -m2 -E 'Dirty|Fresh' | tr '\n' ' ')"
 ok "the owner sets prune to auto after the union check" l overlay set cache.target --prune auto
 
 # 1. Stale units in the saved cache of main: prune is off while they are saved.
