@@ -6,7 +6,7 @@ This page is part of the [Layr documentation](../README.md#documentation).
 
 Layr chooses its worker count from the CPUs available to the process, including affinity and
 container limits. Set `LAYR_THREADS` to a positive integer to override it; `1` selects sequential
-work. Invalid or zero values use the detected count. The value is read once, when parallel work first needs it.
+work. The caller's value counts, also for a command that the daemon runs. Invalid or zero values use the detected count. The value is read once, when parallel work first needs it.
 APFS and thin metadata scans, disk usage walks, and radar comparisons cap concurrent filesystem
 work at four workers to limit I/O contention. Btrfs snapshot batches cap submissions at eight to
 bound the I/O queue while allowing shared transaction commits. Small APFS batches stay sequential.

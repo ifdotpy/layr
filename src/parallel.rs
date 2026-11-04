@@ -9,13 +9,25 @@ const SNAPSHOT_IO_LIMIT: usize = 8;
 #[cfg(target_os = "macos")]
 pub const MIN_IO_ITEMS: usize = 64;
 
+static THREADS: OnceLock<usize> = OnceLock::new();
+
+fn parse(value: Option<&str>) -> Option<usize> {
+    value.and_then(|s| s.parse::<usize>().ok()).filter(|&n| n > 0)
+}
+
+/// Take `LAYR_THREADS` from the caller of a command. The daemon runs each request in its own
+/// forked process with the caller's environment in `Ctx.env`, not in the process environment.
+pub fn configure(caller_value: Option<&str>) {
+    if let Some(n) = parse(caller_value) {
+        let _ = THREADS.set(n);
+    }
+}
+
+/// Worker count: `LAYR_THREADS` of the caller (see `configure`) or of this process, else the
+/// CPUs available to the process (affinity and container limits included).
 pub fn threads() -> usize {
-    static THREADS: OnceLock<usize> = OnceLock::new();
     *THREADS.get_or_init(|| {
-        std::env::var("LAYR_THREADS")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .filter(|&n| n > 0)
+        parse(std::env::var("LAYR_THREADS").ok().as_deref())
             .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1))
     })
 }
