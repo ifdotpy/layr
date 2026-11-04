@@ -160,6 +160,17 @@ impl Db {
     /// is not yet in the attestations (or a withdraw lacks a revocation of an earlier approval)
     /// the import takes the write lock; a read command finds nothing to do and takes none.
     fn import_legacy_evidence(&self) -> Result<()> {
+        // Most projects have no records from the old evidence format. Avoid preparing the
+        // considerably larger compatibility query in that common case. The partial index
+        // records_legacy_evidence makes this probe independent of the project's history size.
+        let has_legacy: bool = self.conn.query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM records WHERE {LEGACY_OPS})"),
+            [],
+            |r| r.get(0),
+        )?;
+        if !has_legacy {
+            return Ok(());
+        }
         let pending: bool = self.conn.query_row(
             &format!(
                 "SELECT EXISTS(SELECT 1 FROM records r WHERE {LEGACY_OPS} AND (
