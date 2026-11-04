@@ -244,6 +244,7 @@ impl<'a> Reader<'a> {
             if base
                 .and_then(|b| b.files.get(path))
                 .is_some_and(|old| (old.0.as_str(), old.1, old.2.as_str()) == (entry.0.as_str(), entry.1, entry.2.as_str()))
+                && base.and_then(|b| b.times.get(path)) == tree.times.get(path)
             {
                 continue;
             }
@@ -259,6 +260,10 @@ impl<'a> Reader<'a> {
                 use std::io::Write;
                 let mut file = target.create(path, if entry.0 == "100755" { 0o755 } else { 0o644 })?;
                 file.write_all(&data)?;
+                // The time of the source file: a build tool compares it (`Tree::times`).
+                if let Some(ns) = tree.times.get(path) {
+                    file.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_nanos(*ns))?;
+                }
             }
             written += 1;
         }
@@ -743,7 +748,7 @@ mod tests {
             hex::encode(ContentAddress::digest(content)),
             vec![format::Link(STATE.into(), "0123abcd".into(), 0, 0, frame.len() as u64, "full".into())],
         );
-        let tree = Tree { files: BTreeMap::from([("a.txt".into(), entry.clone())]) };
+        let tree = Tree { files: BTreeMap::from([("a.txt".into(), entry.clone())]), times: BTreeMap::new() };
         let canonical = tree.canonical().unwrap();
         let mut header = Header {
             v: 2,
