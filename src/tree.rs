@@ -199,6 +199,13 @@ impl Tree {
         remove_at(&d, n)
     }
 
+    /// Unlink a non-directory entry without traversing symbolic-link parents.
+    pub fn unlink_file(&self, rel: &str) -> Result<()> {
+        let (dir, name) = self.parent(rel)?;
+        rustix::fs::unlinkat(&dir, name, AtFlags::empty()).with_context(|| format!("unlink {rel}"))?;
+        Ok(())
+    }
+
     /// Remove a folder only if it is empty. Returns true if removed.
     pub fn rmdir(&self, rel: &str) -> bool {
         match self.parent(rel) {

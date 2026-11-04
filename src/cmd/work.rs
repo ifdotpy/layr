@@ -301,6 +301,14 @@ fn untracked_list(st: &Status, mode: &str) -> Vec<String> {
 /// The line lock is taken first.
 pub struct ChangeLocks(pub crate::store::LineLock, pub crate::store::Lock);
 
+fn commit_prepared_working(ctx: &Ctx, repo: &Repo, line: &Line, op: crate::repo::LineOp) -> Result<(crate::store::Lock, Option<String>)> {
+    repo.authorize_line(ctx, line, op)?;
+    let (lock, value, _) = repo.retry_prepared_save(line, false, true, |_, _| Ok(()), |current| {
+        repo.working_state(ctx, current, "before a layr command")
+    })?;
+    Ok((lock, value))
+}
+
 /// Lock the line and the project and save the working content (snapshot rule 2). For the commands
 /// whose records are written under the project lock they hold: stash, clean, rm and mv.
 pub fn begin_change(ctx: &Ctx, repo: &Repo, line: &Line) -> Result<(ChangeLocks, Option<String>)> {
@@ -314,9 +322,7 @@ pub fn begin(ctx: &Ctx, repo: &Repo, line: &Line, op: crate::repo::LineOp) -> Re
     let line = repo.line(&line.id)?;
     repo.authorize_line(ctx, &line, op)?;
     // The copy of changed files goes before the project lock; under it the save takes it by a rename.
-    repo.prepare_save(&line)?;
-    let lock = repo.p.lock()?;
-    let w = repo.working_state(ctx, &line, "before a layr command")?;
+    let (lock, w) = commit_prepared_working(ctx, repo, &line, op)?;
     Ok((ChangeLocks(line_lock, lock), w))
 }
 
@@ -333,11 +339,10 @@ pub fn begin_line(
     let line_lock = repo.line_lock(line)?;
     let line = repo.line(&line.id)?;
     repo.authorize_line(ctx, &line, op)?;
-    repo.prepare_save(&line)?;
-    let w = {
-        let _commit = repo.p.lock()?;
-        repo.working_state(ctx, &line, "before a layr command")?
-    };
+    let (lock, w) = commit_prepared_working(ctx, repo, &line, op)?;
+    drop(lock);
+    #[cfg(not(target_os = "macos"))]
+    repo.discard_prepared();
     Ok((line_lock, w))
 }
 

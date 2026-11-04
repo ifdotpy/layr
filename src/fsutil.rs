@@ -11,6 +11,22 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// Identity of an entry observed while planning maintenance. A replaced or modified
+/// entry is left for a later pass.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EntryIdentity(pub u64, pub u64, pub i64, pub i64);
+
+impl EntryIdentity {
+    pub fn of(path: &Path) -> Option<Self> {
+        let m = fs::symlink_metadata(path).ok()?;
+        Some(Self(m.dev(), m.ino(), m.ctime(), m.ctime_nsec()))
+    }
+
+    pub fn remove_if_unchanged(&self, path: &Path) -> bool {
+        Self::of(path).as_ref() == Some(self) && fs::remove_file(path).is_ok()
+    }
+}
+
 static UNSETTLED: AtomicBool = AtomicBool::new(false);
 
 /// A copy of `src` could not settle: writers changed it in every round, so its files come from
@@ -214,10 +230,7 @@ fn refuse_case_clash_apfs(root: &Path, rel: &str) -> Result<()> {
                 continue;
             }
             let parent = done.rsplit_once('/').map(|(p, _)| format!("{p}/")).unwrap_or_default();
-            bail!(
-                "{done} and {parent}{stored} {}",
-                clash_reason(sensitive)
-            );
+            bail!("{done} and {parent}{stored} {}", clash_reason(sensitive));
         }
         if fs::symlink_metadata(&path).is_err() {
             break;
@@ -351,10 +364,7 @@ fn refuse_remaining_clashes(dst: &Path, gone: &[&str], write: &[&str]) -> Result
                 let other = if parent.is_empty() { stored } else { format!("{parent}/{stored}") };
                 // After the removals, nothing but empty folders may stay there.
                 if !holds_no_files(dst, &other, &leaves) {
-                    bail!(
-                        "{done} and {other} {}",
-                        clash_reason(sensitive)
-                    );
+                    bail!("{done} and {other} {}", clash_reason(sensitive));
                 }
                 break;
             }
@@ -1236,7 +1246,9 @@ pub fn git_writable(w: &Path, writable: bool) {
         let _ = rustix::fs::fchmod(&g, mode);
     }
     for s in subs {
-        if let Ok(fd) = rustix::fs::openat(&g, s, OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty()) {
+        if let Ok(fd) =
+            rustix::fs::openat(&g, s, OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty())
+        {
             let _ = rustix::fs::fchmod(&fd, mode);
         }
     }
@@ -1377,6 +1389,22 @@ pub fn fiemap_space(root: &Path) -> Result<Space> {
 mod range_tests {
     use super::{copy_index_entry, merged_ranges};
     use std::fs;
+
+    #[test]
+    fn planned_entry_does_not_remove_a_replacement() {
+        let root = std::env::temp_dir().join(format!("layr-gc-entry-{}", crate::ids::new_id()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("entry");
+        fs::write(&path, b"old").unwrap();
+        let identity = super::EntryIdentity::of(&path).unwrap();
+        fs::rename(&path, root.join("old")).unwrap();
+        fs::write(&path, b"replacement").unwrap();
+        assert!(!identity.remove_if_unchanged(&path));
+        assert_eq!(fs::read(&path).unwrap(), b"replacement");
+        let replacement = super::EntryIdentity::of(&path).unwrap();
+        assert!(replacement.remove_if_unchanged(&path));
+        fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn ranges_merge_and_clip() {
