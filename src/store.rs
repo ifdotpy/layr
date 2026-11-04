@@ -298,6 +298,16 @@ pub fn set_holder_line(line: Option<&str>) {
         *l = line.map(str::to_string);
     }
 }
+/// The command of this process for the holder file (`set_holder_command`). Without it, the process arguments: a
+/// request process of the service has the arguments of `layr daemon`.
+static HOLDER_COMMAND: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Name the command (its arguments without `layr`) in the holder file of the project locks it takes.
+pub fn set_holder_command(argv: &[String]) {
+    if let Ok(mut c) = HOLDER_COMMAND.lock() {
+        *c = Some(format!("layr {}", argv.join(" ")));
+    }
+}
 
 /// Take the exclusive lock of `f`. A command that has to wait prints the lock holder once,
 /// when the wait passes `LOCK_NOTICE_AFTER`.
@@ -353,7 +363,9 @@ fn pid_alive(pid: i32) -> bool {
 /// Write `meta/lock.holder` for this process, which holds the lock. Best effort: a lock never
 /// fails for the holder file.
 fn write_lock_holder(meta: &Path) {
-    let command: String = format!("layr {}", std::env::args().skip(1).collect::<Vec<_>>().join(" ")).chars().take(200).collect();
+    let command = HOLDER_COMMAND.lock().ok().and_then(|c| c.clone());
+    let command = command.unwrap_or_else(|| format!("layr {}", std::env::args().skip(1).collect::<Vec<_>>().join(" ")));
+    let command: String = command.chars().take(200).collect();
     let line = HOLDER_LINE.lock().ok().and_then(|l| l.clone());
     let holder = serde_json::json!({
         "pid": std::process::id(),
