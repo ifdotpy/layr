@@ -1066,8 +1066,8 @@ pub fn build_tree(repo: &Repo, state: &str, source: Option<&Path>) -> Result<()>
     if rec.kind != StateKind::Import {
         bail!("state {} is not an imported state", ids::short(state));
     }
-    let commit = stored_commit(repo, state)?
-        .with_context(|| format!("state {} has no Git commit in the store", ids::short(state)))?;
+    let commit =
+        stored_commit(repo, state)?.with_context(|| format!("state {} has no Git commit in the store", ids::short(state)))?;
     let s = store(repo);
     let _t = crate::trace::span(format!("build {} from git", ids::short(state)));
     let mut cat = CatFile::new(&s)?;
@@ -1837,30 +1837,46 @@ fn keep_index(repo: &Repo, state: &str, idx: &Path, inherited: bool) -> Result<(
 /// Remove kept indexes that nothing needs soon: a state keeps its index while it is the head of
 /// a line or a record names its commit (imports and exports). Others are made again when needed
 /// (`line_commit`). Leftover temporary files of an interrupted write go after an hour.
-pub fn prune_indexes(repo: &Repo) -> Result<usize> {
+/// Index entries observed without the project lock.
+pub struct IndexPrune(Vec<(PathBuf, String, fsutil::EntryIdentity)>);
+
+pub fn plan_prune_indexes(repo: &Repo) -> Result<IndexPrune> {
     let dir = store(repo).join("layr-index");
-    let rd = match std::fs::read_dir(&dir) {
-        Ok(rd) => rd,
-        Err(_) => return Ok(0),
-    };
+    let Ok(rd) = std::fs::read_dir(dir) else { return Ok(IndexPrune(Vec::new())) };
     let heads: BTreeSet<String> = repo.p.db.lines()?.into_iter().map(|l| l.head).collect();
-    let mut n = 0;
+    let mut entries = Vec::new();
     for e in rd.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
         let remove = if name.ends_with(".tmp") {
-            e.metadata()
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .map(|t| t.elapsed().map(|x| x.as_secs() > 3600).unwrap_or(false))
-                .unwrap_or(false)
+            e.metadata().ok().and_then(|m| m.modified().ok()).is_some_and(|t| t.elapsed().is_ok_and(|x| x.as_secs() > 3600))
         } else {
-            !heads.contains(&name) && repo.p.db.git_commit_of(&name)?.is_none()
+            !heads.contains(&name) && !repo.p.has_state(&name) && repo.p.db.git_commit_of(&name)?.is_none()
         };
-        if remove && std::fs::remove_file(e.path()).is_ok() {
-            n += 1;
+        if remove {
+            if let Some(identity) = fsutil::EntryIdentity::of(&e.path()) {
+                entries.push((e.path(), name, identity));
+            }
         }
     }
-    Ok(n)
+    Ok(IndexPrune(entries))
+}
+
+/// Validate planned state references under the project lock; no directory walk here.
+pub fn check_prune_indexes(repo: &Repo, plan: IndexPrune) -> Result<IndexPrune> {
+    let heads: BTreeSet<String> = repo.p.db.lines()?.into_iter().map(|l| l.head).collect();
+    let mut entries = Vec::new();
+    for (path, name, identity) in plan.0 {
+        if (name.ends_with(".tmp") || (!heads.contains(&name) && !repo.p.has_state(&name) && repo.p.db.git_commit_of(&name)?.is_none()))
+            && fsutil::EntryIdentity::of(&path).as_ref() == Some(&identity)
+        {
+            entries.push((path, name, identity));
+        }
+    }
+    Ok(IndexPrune(entries))
+}
+
+pub fn finish_prune_indexes(plan: IndexPrune) -> usize {
+    plan.0.into_iter().filter(|(path, _, identity)| identity.remove_if_unchanged(path)).count()
 }
 
 /// The commit that the `.git` folder of a line shows for `state`: the commit that `layr git push`
@@ -1902,7 +1918,8 @@ pub fn push(ctx: &Ctx, repo: &Repo, url: &str, commit: &str, branch: &str, force
         }
         // The damaged cache went aside. Imported states have no trees to rebuild their commits from,
         // so the Git remotes of the project give the objects back (git is the source).
-        let mut remotes: Vec<String> = repo.p.db.remote_refs()?.into_iter().filter_map(|(name, _, _)| name.split('/').next().map(str::to_owned)).collect();
+        let mut remotes: Vec<String> =
+            repo.p.db.remote_refs()?.into_iter().filter_map(|(name, _, _)| name.split('/').next().map(str::to_owned)).collect();
         remotes.sort();
         remotes.dedup();
         for remote in remotes {
@@ -2236,7 +2253,11 @@ pub fn sparse_pair(repo: &Repo, old: Option<&str>, new: &str) -> Result<Pair> {
         if f.len() != 5 {
             bail!("bad diff-tree record for {path}");
         }
-        changes.push((path, Side { mode: f[0].to_string(), id: f[2].to_string() }, Side { mode: f[1].to_string(), id: f[3].to_string() }));
+        changes.push((
+            path,
+            Side { mode: f[0].to_string(), id: f[2].to_string() },
+            Side { mode: f[1].to_string(), id: f[3].to_string() },
+        ));
     }
     let zero = "0".repeat(40);
     let mut ids: Vec<String> = Vec::new();
@@ -2375,7 +2396,11 @@ pub fn blobs(repo: &Repo, oids: &[String]) -> Result<Vec<Vec<u8>>> {
     for oid in oids {
         let mut header = String::new();
         stdout.read_line(&mut header)?;
-        let size: usize = header.split_whitespace().nth(2).and_then(|x| x.parse().ok()).with_context(|| format!("bad cat-file header for {oid}: {header}"))?;
+        let size: usize = header
+            .split_whitespace()
+            .nth(2)
+            .and_then(|x| x.parse().ok())
+            .with_context(|| format!("bad cat-file header for {oid}: {header}"))?;
         let mut data = vec![0u8; size];
         stdout.read_exact(&mut data)?;
         let mut nl = [0u8; 1];
@@ -2445,12 +2470,8 @@ pub fn pack_commits(repo: &Repo, new: &[String], covered: &[String]) -> Result<V
 /// (`write_object`). A pack of a whole history is unpacked this way too.
 pub fn install_pack(repo: &Repo, pack: &[u8]) -> Result<()> {
     let s = init_store(repo)?;
-    let mut child = base_cmd(&s)
-        .args(["unpack-objects", "-q"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()?;
+    let mut child =
+        base_cmd(&s).args(["unpack-objects", "-q"]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn()?;
     {
         let mut input = child.stdin.take().context("unpack-objects has no input")?;
         input.write_all(pack)?;

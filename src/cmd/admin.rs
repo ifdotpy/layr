@@ -1281,12 +1281,7 @@ fn check(ctx: &Ctx, repo: &Repo, quiet: bool) -> Result<i32> {
     }
     if !c.freed.is_empty() {
         let bytes = states_bytes(repo, &c.freed);
-        outln!(
-            ctx,
-            "leaks: {} state(s), {} would be freed by `layr gc --repair`",
-            c.freed.len(),
-            human_size(bytes)
-        );
+        outln!(ctx, "leaks: {} state(s), {} would be freed by `layr gc --repair`", c.freed.len(), human_size(bytes));
     }
     if c.clean() {
         if !quiet {
@@ -1358,7 +1353,11 @@ pub fn gc_repair_quiet(ctx: &Ctx, repo: &Repo) -> Result<usize> {
 /// free it under the command).
 /// `diff` is `owners_diff` against the replay when the caller made it with no record added
 /// since (the rows that records make are the same); `None` replays here.
-pub fn repair_table(repo: &Repo, free: bool, diff: Option<(Vec<crate::owners::Row>, Vec<crate::owners::Row>)>) -> Result<Vec<String>> {
+pub fn repair_table(
+    repo: &Repo,
+    free: bool,
+    diff: Option<(Vec<crate::owners::Row>, Vec<crate::owners::Row>)>,
+) -> Result<Vec<String>> {
     let (missing, extra) = match diff {
         Some(d) => d,
         None => repo.p.db.owners_diff(&repo.p.db.recomputed_owners(&repo.p.store.machine.id)?)?,
@@ -1401,7 +1400,7 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) ->
     // Plan outside the project lock. A changed record invalidates the entire plan: retry
     // without the lock rather than replaying records while other commands wait.
     let mut attempts = 0;
-    let leaks = loop {
+    let (leaks, indexes, compares) = loop {
         attempts += 1;
         let (mark, diff) = {
             let _t = crate::trace::begin("repair: plan");
@@ -1411,6 +1410,8 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) ->
             })?
         };
         let overlays = repo.overlay_plan();
+        let indexes = crate::gitbridge::plan_prune_indexes(repo)?;
+        let compares = repo.plan_prune_compares()?;
         // Test hook (tests/t127-repair-plan.sh): after plan N, write `planned.N` in the folder and
         // wait for `go.N`, so a test changes the project between the plan and the lock.
         test_plan_wait("LAYR_TEST_REPAIR_WAIT", attempts)?;
@@ -1469,13 +1470,12 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) ->
                 );
             }
         }
-        if crate::gitbridge::has_store(repo) {
-            crate::gitbridge::prune_indexes(repo)?;
-        }
-        // Saved overlap compares of states that are gone (radar.rs).
-        let _ = repo.prune_compares();
-        break leaks;
+        let indexes = crate::gitbridge::check_prune_indexes(repo, indexes)?;
+        let compares = repo.check_prune_compares(compares)?;
+        break (leaks, indexes, compares);
     };
+    crate::gitbridge::finish_prune_indexes(indexes);
+    compares.finish();
     prune_retention(ctx, repo, true)?;
     // The storage of the freed states: the leaks above and states that died before this repair.
     let freed = crate::free::finish_project(&repo.p)?;
@@ -1590,11 +1590,14 @@ struct CacheCandidate {
 
 fn cache_candidates(repo: &Repo, caches: Vec<(String, String)>) -> Vec<CacheCandidate> {
     use std::os::unix::fs::MetadataExt;
-    caches.into_iter().filter_map(|(id, name)| {
-        let path = repo.p.cache_path(&id, &name);
-        let m = std::fs::symlink_metadata(&path).ok()?;
-        Some(CacheCandidate { path, name, identity: (m.dev(), m.ino(), m.ctime(), m.ctime_nsec()) })
-    }).collect()
+    caches
+        .into_iter()
+        .filter_map(|(id, name)| {
+            let path = repo.p.cache_path(&id, &name);
+            let m = std::fs::symlink_metadata(&path).ok()?;
+            Some(CacheCandidate { path, name, identity: (m.dev(), m.ino(), m.ctime(), m.ctime_nsec()) })
+        })
+        .collect()
 }
 
 /// The GC plan uses rename-only trash; callers already holding the lock retain the ordinary
@@ -1827,7 +1830,13 @@ pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let c = owners_check(repo)?;
     if !c.clean() {
         problems += 1;
-        outln!(ctx, "owners differ from the records: {} missing, {} extra, {} leaked", c.missing.len(), c.extra.len(), c.freed.len());
+        outln!(
+            ctx,
+            "owners differ from the records: {} missing, {} extra, {} leaked",
+            c.missing.len(),
+            c.extra.len(),
+            c.freed.len()
+        );
         for (s, k, h) in c.missing.iter().take(5) {
             outln!(ctx, "\tmissing: {} {k} {h}", ids::short(s));
         }
