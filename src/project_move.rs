@@ -1,4 +1,5 @@
-//! `layr project move <project> <volume>`: move a project to another volume (docs/volumes.md).
+//! `layr project move <project> <volume>`: move a project to another volume (docs/volumes.md), and
+//! `layr project delete <project>`: remove a project without lines (`delete_project`).
 //!
 //! Steps, under the move lock `project-moves/.lock` and the project lock of the source:
 //! 1. The journal `project-moves/<project>.json` names the source and the target volume.
@@ -117,13 +118,15 @@ fn move_folder(from: &Path, to: &Path) -> Result<()> {
 }
 
 /// Remove a folder of a volume through that volume's trash (a rename on the same file system).
-fn to_trash(volume_root: &Path, folder: &Path) -> Result<()> {
+/// Returns the folder in the trash.
+fn to_trash(volume_root: &Path, folder: &Path) -> Result<PathBuf> {
     let trash = volume_root.join("trash");
     fs::create_dir_all(&trash).context("create the trash of the volume")?;
     let name = folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    move_folder(folder, &trash.join(format!("{name}.{}", ids::new_id())))?;
+    let to = trash.join(format!("{name}.{}", ids::new_id()));
+    move_folder(folder, &to)?;
     kick_trash(&trash);
-    Ok(())
+    Ok(to)
 }
 
 /// The lock file of a project folder, taken and held by the caller (`Project::lock` for a
@@ -197,7 +200,7 @@ fn discard_copy(target_root: &Path, dst: &Path) -> Result<()> {
     if fs::symlink_metadata(dst).is_err() {
         return Ok(());
     }
-    to_trash(target_root, dst)
+    to_trash(target_root, dst).map(|_| ())
 }
 
 /// Move a project to `volume`. Refused: an unknown project, volume or overlay, a volume that
@@ -302,6 +305,42 @@ pub fn move_project(store: &Store, project: &str, volume: &str) -> Result<Moved>
         eprintln!("layr: project '{project}' is on volume '{volume}'; the old folder is removed later ({e:#})");
     }
     Ok(Moved { from, to: volume.into(), copy })
+}
+
+/// `layr project delete`: remove a project that has no lines, with its overlays, history and git
+/// objects, through the trash of its volume. The caller checked the admin role.
+pub fn delete_project(store: &Store, project: &str) -> Result<()> {
+    let root = store.root.as_path();
+    let dir = store.project_dir(project)?;
+    if !db_file(&dir).is_file() {
+        bail!("project '{project}' not found");
+    }
+    // A move holds this lock from its start to its end: no move runs while the folder goes.
+    let _moves = move_lock(root, true)?;
+    if journal_of(root, project).exists() {
+        bail!("project '{project}' is moving to another volume; run any layr command to finish the move, then delete it");
+    }
+    let handle = Project::open(store, project)?;
+    let _lock = handle.lock()?;
+    let lines = handle.db.lines()?;
+    if !lines.is_empty() {
+        let names: Vec<&str> = lines.iter().map(|l| l.name.as_str()).collect();
+        bail!("project '{project}' has {} line(s): {}; delete them first (layr line delete)", names.len(), names.join(", "));
+    }
+    if let Some((pid, path)) = in_use(std::slice::from_ref(&dir))? {
+        bail!("project '{project}' is in use: process {pid} works in {}; stop it and run the delete again", path.display());
+    }
+    let gone = to_trash(&store.volume_root(project)?, &dir)?;
+    volumes::unassign(root, project)?;
+    // On OverlayFS the folder holds managed mounts (`meta/db`), which the trash emptier does not
+    // remove: delete it now, as `Project::trash` does, once the project's database is closed.
+    drop(_lock);
+    drop(handle);
+    #[cfg(feature = "overlayfs")]
+    storage::delete_tree(&gone)?;
+    #[cfg(not(feature = "overlayfs"))]
+    let _ = gone;
+    Ok(())
 }
 
 /// Step 4: the project lives on `to`. Points the git objects of the moved lines at the new folder,
