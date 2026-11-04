@@ -5,10 +5,15 @@
 # branches of the checkout and of its origin resolve, ignored target and node_modules folders stay
 # as caches, and the checkout is kept beside. A dirty checkout and extra worktrees are refused.
 . "$(dirname "$0")/lib.sh"
+# The checkout must be on the store's file system and out of the store. lib.sh may mount the store folder
+# (btrfs), so the store moves one folder down, and the checkouts are beside it in B.
+B=$LAYR_ROOT
+export LAYR_ROOT=$B/store
+mkdir -p "$LAYR_ROOT"
 
-git init -q --bare $T/origin.git
-git clone -q $T/origin.git $T/co 2>/dev/null
-cd $T/co || exit 1
+git init -q --bare $B/origin.git
+git clone -q $B/origin.git $B/co 2>/dev/null
+cd $B/co || exit 1
 mkdir -p rs web && printf '[package]\nname = "x"\n' > rs/Cargo.toml && echo '{}' > web/package.json
 printf 'target/\nnode_modules/\n' > .gitignore
 echo a > a.txt
@@ -22,31 +27,31 @@ echo built > rs/target/debug/x; echo dep > web/node_modules/dep/index.js
 
 # Refused: uncommitted changes, then an extra worktree.
 echo dirty >> a.txt
-no "a checkout with uncommitted changes is refused" l init co --from-git $T/co
-out=$(l init co --from-git $T/co 2>&1)
+no "a checkout with uncommitted changes is refused" l init co --from-git $B/co
+out=$(l init co --from-git $B/co 2>&1)
 has "the refusal says what to do" "commit, stash or move" "$out"
 has "the refusal names the path" "a.txt" "$out"
 git checkout -q a.txt
-git worktree add -q $T/wt2 wip 2>/dev/null
-has "an extra worktree is refused" "git worktree remove" "$(l init co --from-git $T/co 2>&1)"
-git worktree remove $T/wt2
+git worktree add -q $B/wt2 wip 2>/dev/null
+has "an extra worktree is refused" "git worktree remove" "$(l init co --from-git $B/co 2>&1)"
+git worktree remove $B/wt2
 ok "no project was made by the refused calls" test ! -e "$LAYR_ROOT/projects/co"
 
-cd $T || exit 1
+cd $B || exit 1
 # Direct: the test helper `l` expects the line main in the store, and this one moves.
-out=$("$LAYR" init co --from-git $T/co 2>&1)
+out=$("$LAYR" init co --from-git $B/co 2>&1)
 rc=$?
 [ $rc -eq 0 ] || printf '%s\n' "$out"
 eq "init succeeds" 0 "$rc"
 has "it names the kept checkout" "co.before-layr" "$out"
-ok "the checkout is kept beside" test -d $T/co.before-layr/.git
-cd $T/co || exit 1
+ok "the checkout is kept beside" test -d $B/co.before-layr/.git
+cd $B/co || exit 1
 has "the folder is the line main" "On line main" "$(l status 2>&1)"
-eq "the line starts at the Git HEAD" "$(git -C $T/co.before-layr rev-parse HEAD)" "$(l rev-parse --git head)"
+eq "the line starts at the Git HEAD" "$(git -C $B/co.before-layr rev-parse HEAD)" "$(l rev-parse --git head)"
 eq "the working folder is clean" "" "$(l status --short)"
-eq "origin is the checkout's origin" "$T/origin.git" "$(l git remote get-url origin)"
-eq "a branch of origin resolves" "$(git -C $T/origin.git rev-parse feat/remote)" "$(l rev-parse --git origin/feat/remote)"
-eq "an unpushed local branch resolves" "$(git -C $T/co.before-layr rev-parse wip)" "$(l rev-parse --git local/wip)"
+eq "origin is the checkout's origin" "$B/origin.git" "$(l git remote get-url origin)"
+eq "a branch of origin resolves" "$(git -C $B/origin.git rev-parse feat/remote)" "$(l rev-parse --git origin/feat/remote)"
+eq "an unpushed local branch resolves" "$(git -C $B/co.before-layr rev-parse wip)" "$(l rev-parse --git local/wip)"
 eq "the target cache is kept" built "$(cat rs/target/debug/x)"
 eq "the node_modules cache is kept" dep "$(cat web/node_modules/dep/index.js)"
 has "rs/target is a cache overlay" "folder=rs/target" "$(l overlay list 2>&1)"

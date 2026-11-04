@@ -2363,7 +2363,8 @@ fn init_from_git(ctx: &Ctx, args: &[String]) -> Result<i32> {
             if let Some(parent) = dst.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            crate::fsutil::rename_tree(&src.join(c), &dst)?;
+            // A plain folder of the checkout: no store manages it yet (`rename_tree` needs one on OverlayFS).
+            std::fs::rename(src.join(c), &dst)?;
         }
     }
     let layr = std::env::current_exe()?;
