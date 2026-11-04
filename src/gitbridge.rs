@@ -326,8 +326,20 @@ pub fn fetch(ctx: &Ctx, repo: &Repo, remote: &str) -> Result<Vec<(String, String
 }
 
 fn fetch_once(ctx: &Ctx, repo: &Repo, remote: &str) -> Result<Vec<(String, String)>> {
-    let s = init_store(repo)?;
     let url = remote_url(repo, remote)?;
+    fetch_refspec(ctx, repo, &url, remote, &format!("+refs/heads/*:refs/remotes/{remote}/*"))
+}
+
+/// The remote-tracking branches of `remote` in a local Git checkout (`refs/remotes/<remote>/*`),
+/// read from the folder, with no network: `layr init --from-git` keeps the branches that the
+/// checkout knows. They are imported on first use.
+pub fn fetch_tracking(ctx: &Ctx, repo: &Repo, checkout: &Path, remote: &str) -> Result<Vec<(String, String)>> {
+    let url = checkout.to_string_lossy().into_owned();
+    fetch_refspec(ctx, repo, &url, remote, &format!("+refs/remotes/{remote}/*:refs/remotes/{remote}/*"))
+}
+
+fn fetch_refspec(ctx: &Ctx, repo: &Repo, url: &str, remote: &str, refspec: &str) -> Result<Vec<(String, String)>> {
+    let s = init_store(repo)?;
     let tmp = std::env::temp_dir().join(format!("layr-fetch-{}", ids::new_id()));
     std::fs::create_dir_all(&tmp)?;
     let out = Command::new("git").args(["init", "--bare", "-q"]).arg(&tmp).output()?;
@@ -358,8 +370,8 @@ fn fetch_once(ctx: &Ctx, repo: &Repo, remote: &str) -> Result<Vec<(String, Strin
     }
     let mut c = base_cmd(&tmp);
     c.args(["fetch", "-q", "--no-tags", "--no-write-fetch-head"])
-        .arg(&url)
-        .arg(format!("+refs/heads/*:refs/remotes/{remote}/*"))
+        .arg(url)
+        .arg(refspec)
         .arg("+refs/tags/*:refs/tags/*");
     as_caller(ctx, &mut c, &tmp)?;
     let out = c.stdin(Stdio::null()).output().context("run git fetch")?;

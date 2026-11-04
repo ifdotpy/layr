@@ -26,10 +26,23 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | changes       | `comment <change> <text> [--version vN] [--path <path>] [--line N] [--reply-to <id>] [--json]`, `change list`, `change show <id>`, `change log <id>`, `change diff <id> [--from vN] [--to vM]` |
 | requests      | `request <kind> ... --person [--remote <name>] [--expires <epoch-ms>]`, `requests apply [--remote <name>] [--json]` |
 | person        | `person keys [--paper-key-out <path>] [--site <url>] [--store <url>]`, `person show [--json]`, `person accept`, `access person-key <login> <public-key>` |
-| setup         | `init [--allow-root-snapshots] [--volume <name>]`, `projects`, `config`, `daemon [--allow-root-snapshots]`                             |
+| setup         | `init [--allow-root-snapshots] [--volume <name>]`, `init [<project>] --from-git <checkout> [--line <name>]`, `projects`, `config`, `daemon [--allow-root-snapshots]`                             |
 | volumes       | `volume add <name> <path>`, `volume list [--json]`, `volume remove <name>`, `volume default <name>`, `project move <project> <volume>`, `clone <url> [<project>] --volume <name>`, `git clone <url> [<project>] --volume <name>` ([volumes](volumes.md)) |
 
 `init` and `daemon` refuse a store in the root subvolume, because a system snapshot rollback would empty it. `--allow-root-snapshots` or `LAYR_ALLOW_ROOT_SNAPSHOTS=1` overrides the check. See [Btrfs root snapshots](btrfs-root-snapshots.md).
+
+`init [<project>] --from-git <checkout>` makes a project from a Git checkout, in place. The
+history comes from the folder, with no network: the local branches resolve as `local/<branch>`
+and the branches of its `origin` as `origin/<branch>` (imported on first use). The project's
+`origin` is the checkout's. The line of the current branch (or `--line`; `main` for a detached
+HEAD) starts at HEAD. Ignored `target` folders next to a `Cargo.toml` and ignored `node_modules`
+folders next to a `package.json` (at most three levels deep) move into the line and become its
+caches (the project setting `regenerable`), so nothing is built again. Then the checkout is kept
+as `<checkout>.before-layr`, and the line moves to the checkout's path (`line move`). For a
+`Cargo.toml` at the top it prints how to run `layr retest init` in a line of its own: the setup
+changes files of the project, and the new line is protected. The command refuses a checkout with
+uncommitted changes, one with more worktrees, a subfolder of a checkout, and a checkout on
+another file system than the store. The project name is the folder name unless given.
 
 Person signing-key pins are machine-local: enrollment pins them on the executor, and an admin can later run `layr access person-key <login> <public-key>` there.
 Pins do not replicate because a trusted writer machine must not replace a person's key and impersonate their approvals.
