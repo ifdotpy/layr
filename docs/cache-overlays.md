@@ -306,6 +306,10 @@ Built on 2026-10-27: folder overlays and caches as cache overlays. Tests:
 - `layr cache pull <line or state>` (removed in section 15): the same for one line, without a merge (item 24).
 - `layr cache list -v` (removed in section 15) showed the size of each cache folder and the overlay state
   the line saved; `overlay list` shows both.
+- `layr fsck --caches` reports the cache data that nothing keeps, by overlay, with its bytes: states
+  beyond `history` or of deleted lines, overlay lines of deleted lines, and cache snapshots beyond
+  `retention.caches`. The operations that make cache data dead delete it, so the report is 0 after
+  them; it exits 1 when it finds some. It only reads.
 - `gc` applies `gc=lru:<size>` to the folder of each line (the newer of access and change time;
   apparent sizes) and deletes the cache states of deleted lines.
 - `line delete` also deletes the cache overlay lines (`line-<id>.<platform>`, all platforms) of the

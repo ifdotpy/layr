@@ -1562,6 +1562,39 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool, ba
 /// Cache snapshots (build output) are large and only the newest ones warm new lines: they stay
 /// for the heads of lines and for the newest `retention.caches` (5) states with caches. The
 /// states themselves stay; only their cache snapshots go. Returns `(state, snapshot name)`.
+/// `layr fsck --caches`: the cache data of this project that nothing keeps, by reason, with its bytes
+/// (apparent sizes). The operations that make cache data dead delete it, so after them the report is
+/// 0 (docs/cache-overlays.md). It only reads. Exit code 1 when it finds any.
+fn fsck_caches(ctx: &Ctx) -> Result<i32> {
+    let h = here(ctx)?;
+    let repo = &h.repo;
+    repo.require(ctx, "fsck")?;
+    let _lock = repo.p.lock()?;
+    let (mut states, mut bytes) = (0usize, 0u64);
+    for name in repo.overlay_names()? {
+        if !repo.overlay_setting(&name, "cache")?.and_then(|v| v.as_bool()).unwrap_or(false) {
+            continue;
+        }
+        if !repo.p.store.project_dir(&format!("{}%{name}", repo.p.name))?.exists() {
+            continue;
+        }
+        let orepo = repo.overlay_repo(&name)?;
+        let orphans = repo.orphan_cache_lines(&orepo)?;
+        let dead = repo.cache_unreachable(&name)?;
+        let size: u64 = dead.iter().map(|id| crate::cache_overlay::tree_size(&orepo.p.state_path(id))).sum();
+        outln!(ctx, "overlay {name}: {} unreachable state(s), {} bytes; {} overlay line(s) of deleted lines", dead.len(), size, orphans.len());
+        states += dead.len() + orphans.len();
+        bytes += size;
+    }
+    let old = excess_caches(repo)?;
+    let size: u64 = old.iter().map(|(id, name)| crate::cache_overlay::tree_size(&repo.p.cache_path(id, name))).sum();
+    outln!(ctx, "cache snapshots beyond retention.caches: {}, {} bytes", old.len(), size);
+    states += old.len();
+    bytes += size;
+    outln!(ctx, "unreachable cache data: {states} item(s), {bytes} bytes");
+    Ok(if states == 0 { 0 } else { 1 })
+}
+
 pub fn excess_caches(repo: &Repo) -> Result<Vec<(String, String)>> {
     let keep_n = repo.p.config_u64("retention.caches", 5) as usize;
     let mut heads: BTreeSet<String> = repo.p.db.lines()?.into_iter().map(|l| l.head).collect();
@@ -1810,6 +1843,9 @@ fn print_trash_errors(store: &crate::store::Store) {
 pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if args.iter().any(|v| v == "--remote" || v.starts_with("--remote=")) {
         return crate::store_remote::command(ctx, "fsck", args);
+    }
+    if args.iter().any(|v| v == "--caches") {
+        return fsck_caches(ctx);
     }
     let spec = Spec::new().flag("--repair");
     let a = parse(&spec, args)?;
