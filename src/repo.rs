@@ -826,13 +826,8 @@ impl<'a> Repo<'a> {
 
     /// Read authenticated records already accepted into the local database.
     pub fn read_model(&self) -> Result<layr_model::Project> {
-        let records = self
-            .p
-            .db
-            .all_lines()?
-            .iter()
-            .map(|line| crate::oplog::parse_line(line, None).map(|s| s.record))
-            .collect::<Result<Vec<_>>>()?;
+        let lines = self.p.db.all_lines()?;
+        let records = decode_records(&lines)?;
         layr_model::Project::from_records(&self.p.id, records, &self.p.store.machine.id)
     }
 
@@ -4465,5 +4460,43 @@ mod owner_walk_tests {
         assert!(!owner_walk_skippable(false, 501, 501, 20, Some(501), (501, 20)));
         // The root has another group than the line: the walk runs.
         assert!(!owner_walk_skippable(true, 501, 501, 20, Some(501), (501, 21)));
+    }
+}
+
+/// Decode accepted records in input order, preserving the first parse error in that order.
+fn decode_records(lines: &[String]) -> Result<Vec<Record>> {
+    let workers = crate::parallel::workers_for(lines.len(), crate::parallel::MIN_RECORDS_PER_WORKER);
+    decode_records_with_workers(lines, workers)
+}
+
+fn decode_records_with_workers(lines: &[String], workers: usize) -> Result<Vec<Record>> {
+    use rayon::prelude::*;
+
+    let parse = |line: &String| crate::oplog::parse_line(line, None).map(|signed| signed.record);
+    if let Some(pool) = crate::parallel::pool(workers) {
+        let decoded: Vec<_> = pool.install(|| lines.par_iter().map(parse).collect());
+        decoded.into_iter().collect()
+    } else {
+        lines.iter().map(parse).collect()
+    }
+}
+
+#[cfg(test)]
+mod parallel_decode_tests {
+    use super::*;
+
+    #[test]
+    fn parallel_decode_preserves_order_and_first_error() {
+        let make_line = |seq| format!(r#"{{"r":{{"id":"id{seq}","machine":"m","seq":{seq},"time":0,"op":"save","project":"p","actor":{{"uid":1,"name":"n"}}}},"s":""}}"#);
+        let lines: Vec<_> = (0..128).map(make_line).collect();
+        for workers in [1, 2, 4] {
+            let decoded = decode_records_with_workers(&lines, workers).unwrap();
+            assert_eq!(decoded.iter().map(|r| r.seq).collect::<Vec<_>>(), (0..128).collect::<Vec<_>>());
+            let mut bad = lines.clone();
+            bad[3] = "first invalid".into();
+            bad[80] = "{}".into();
+            let expected = crate::oplog::parse_line(&bad[3], None).err().unwrap().to_string();
+            assert_eq!(decode_records_with_workers(&bad, workers).unwrap_err().to_string(), expected);
+        }
     }
 }
