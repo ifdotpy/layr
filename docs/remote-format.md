@@ -146,9 +146,20 @@ machines. Source states keep frames.
 - `layr_store::reader::chunked_file` reads a chunked file from supplied packs and indexes, also in
   WebAssembly.
 
-Measured on a cargo `target/debug` (8728 files, 2286 MiB) and the same folder after a merge that
-rebuilt the workspace: frames needed 565 MiB for the first push and 502 MiB of new data for the
-next. 64 KiB chunks in 4 MiB packs at level 12 needed 389 MiB and 309 MiB.
+- A writer compresses and uploads packs on background threads (one per core), while it chunks
+  the next files. It keeps a local copy of the indexes it writes. A reader loads a missing pack
+  together with the next packs of its restore order, in parallel.
+
+Measured with `layr push --caches` to a `file://` store on macOS: a cargo `target/debug` (8728
+files, 2286 MiB), then the same folder after a merge that rebuilt the workspace (4076 MiB).
+
+| | frames (0.25.0) | chunks |
+| --- | --- | --- |
+| first push | 566 MiB, 19 s | 400 MiB, 18 s |
+| next push | 468 MiB, 14 s | 322 MiB, 22 s |
+| clone and a warm line | 35 s | 38 s |
+
+The walk reads and hashes every cache file on APFS in both cases (15 s of the next push).
 
 ## Keys and recovery
 

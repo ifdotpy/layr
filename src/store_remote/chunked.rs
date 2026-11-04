@@ -8,7 +8,7 @@
 //! lists them to dedup, a reader lists them to find a chunk, and `release` rewrites a pack whose
 //! chunks are partly dead into a new pack before the old one goes.
 
-use super::{backend::Backend, format::Tree, keys, Store};
+use super::{backend::Backend, keys, Store};
 use anyhow::{bail, Context, Result};
 use layr_store::chunks::{self, Builder, Index};
 use std::collections::{BTreeMap, BTreeSet};
@@ -54,15 +54,44 @@ pub(crate) fn index(backend: &Backend, dir: Option<&Path>, identity: &str, pack:
     let bytes =
         backend.decrypted(&chunks::index_name(pack), identity).with_context(|| format!("read chunk index of pack {pack}"))?;
     let index = Index::parse(&bytes)?;
-    if let (Some(dir), Some(cached)) = (dir, cached) {
-        std::fs::create_dir_all(cache_dir(dir))?;
-        crate::fsutil::atomic_write(&cached, &bytes, 0o600)?;
+    if let Some(dir) = dir {
+        remember(dir, pack, &bytes);
     }
     Ok(index)
 }
 
+/// Keeps a copy of a published index. The copy is a cache that the store can rebuild, so it is
+/// written without fsync, and a failed write is ignored.
+fn remember(dir: &Path, pack: &str, bytes: &[u8]) {
+    use std::os::unix::fs::OpenOptionsExt;
+    let folder = cache_dir(dir);
+    let temporary = folder.join(format!(".{pack}.{}", std::process::id()));
+    let written = std::fs::create_dir_all(&folder).and_then(|_| {
+        use std::io::Write;
+        std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&temporary)?.write_all(bytes)
+    });
+    if written.and_then(|_| std::fs::rename(&temporary, folder.join(pack))).is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+}
+
 /// Every published chunk of the layer.
 pub(crate) fn places(backend: &Backend, dir: Option<&Path>, identity: &str) -> Result<Places> {
+    Ok(places_of(&indexes(backend, dir, identity)?))
+}
+
+fn places_of(indexes: &BTreeMap<String, Index>) -> Places {
+    let mut out = Places::new();
+    for (pack, index) in indexes {
+        for (id, offset, length) in &index.chunks {
+            out.entry(id.clone()).or_insert(Place { pack: pack.clone(), offset: *offset, length: *length });
+        }
+    }
+    out
+}
+
+/// The published pack indexes of the layer, by pack.
+fn indexes(backend: &Backend, dir: Option<&Path>, identity: &str) -> Result<BTreeMap<String, Index>> {
     let packs = packs(backend)?;
     // Forget cached indexes of packs that are gone, so the cache does not grow.
     if let Some(Ok(entries)) = dir.map(|dir| std::fs::read_dir(cache_dir(dir))) {
@@ -72,10 +101,16 @@ pub(crate) fn places(backend: &Backend, dir: Option<&Path>, identity: &str) -> R
             }
         }
     }
-    let mut out = Places::new();
-    for pack in packs {
-        for (id, offset, length) in index(backend, dir, identity, &pack)?.chunks {
-            out.entry(id).or_insert(Place { pack: pack.clone(), offset, length });
+    // Indexes are small: fetch the missing ones many at a time.
+    let packs: Vec<String> = packs.into_iter().collect();
+    let mut out = BTreeMap::new();
+    for batch in packs.chunks(64) {
+        let loaded: Vec<Result<Index>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = batch.iter().map(|pack| scope.spawn(move || index(backend, dir, identity, pack))).collect();
+            handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("index read panicked")))).collect()
+        });
+        for (pack, index) in batch.iter().zip(loaded) {
+            out.insert(pack.clone(), index?);
         }
     }
     Ok(out)
@@ -84,7 +119,6 @@ pub(crate) fn places(backend: &Backend, dir: Option<&Path>, identity: &str) -> R
 /// Uploads the chunks of the files of one state.
 pub(crate) struct Writer<'a> {
     store: &'a Store,
-    recipient: String,
     identity: String,
     key: [u8; 32],
     /// Published chunks when the push started.
@@ -96,25 +130,116 @@ pub(crate) struct Writer<'a> {
     /// File content (SHA-256) to its chunk ids, from the base tree and this push.
     by_sha: BTreeMap<String, Vec<String>>,
     builder: Builder,
+    /// Compresses, encrypts and uploads full packs in the background while files are chunked.
+    uploader: Uploader,
     /// Compressed bytes written.
     pub bytes: u64,
     pub packs: usize,
+    /// Time in chunking and ids, and in waits for the upload threads, for `LAYR_TRACE`.
+    split_time: std::time::Duration,
+    wait_time: std::time::Duration,
+}
+
+/// A pool of upload threads. A bounded queue keeps at most two packs per thread in memory.
+struct Uploader {
+    jobs: Option<std::sync::mpsc::SyncSender<Builder>>,
+    results: std::sync::mpsc::Receiver<Result<u64>>,
+    threads: Vec<std::thread::JoinHandle<()>>,
+    sent: usize,
+}
+
+impl Uploader {
+    fn new(backend: &Backend, recipient: &str, dir: &Path) -> Self {
+        let threads = parallel();
+        let (jobs, queue) = std::sync::mpsc::sync_channel::<Builder>(threads);
+        let queue = std::sync::Arc::new(std::sync::Mutex::new(queue));
+        let (done, results) = std::sync::mpsc::channel();
+        let threads = (0..threads)
+            .map(|_| {
+                let (queue, done, backend, recipient, dir) =
+                    (queue.clone(), done.clone(), backend.clone(), recipient.to_string(), dir.to_path_buf());
+                std::thread::spawn(move || loop {
+                    let Ok(builder) = queue.lock().map_err(|_| ()).and_then(|q| q.recv().map_err(|_| ())) else {
+                        return;
+                    };
+                    let _ = done.send(upload(&backend, &recipient, &dir, builder));
+                })
+            })
+            .collect();
+        Self { jobs: Some(jobs), results, threads, sent: 0 }
+    }
+    fn send(&mut self, builder: Builder) -> Result<()> {
+        self.jobs.as_ref().context("uploader is closed")?.send(builder).map_err(|_| anyhow::anyhow!("pack upload threads stopped"))?;
+        self.sent += 1;
+        Ok(())
+    }
+    /// Waits for every sent pack. Returns the bytes and the number of packs.
+    fn wait(&mut self) -> Result<(u64, usize)> {
+        let (mut bytes, mut packs) = (0, 0);
+        let mut first_error = None;
+        while self.sent > 0 {
+            let result = self.results.recv().map_err(|_| anyhow::anyhow!("pack upload threads stopped"))?;
+            self.sent -= 1;
+            match result {
+                Ok(b) => {
+                    bytes += b;
+                    packs += 1;
+                }
+                Err(e) => first_error = first_error.or(Some(e)),
+            }
+        }
+        match first_error {
+            Some(e) => Err(e),
+            None => Ok((bytes, packs)),
+        }
+    }
+}
+
+impl Drop for Uploader {
+    fn drop(&mut self) {
+        self.jobs = None;
+        for thread in self.threads.drain(..) {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// Publishes one pack: the pack first, then its index, which makes it visible.
+fn upload(backend: &Backend, recipient: &str, dir: &Path, builder: Builder) -> Result<u64> {
+    let (frame, index) = builder.finish()?;
+    let pack = crate::ids::new_id();
+    let body = keys::encrypt(recipient, &frame)?;
+    let encoded = index.encode();
+    let index_body = keys::encrypt(recipient, &encoded)?;
+    let bytes = (body.len() + index_body.len()) as u64;
+    if !backend.put_new(&chunks::pack_name(&pack), body)? {
+        bail!("chunk pack {pack} already exists");
+    }
+    if !backend.put_new(&chunks::index_name(&pack), index_body)? {
+        bail!("chunk index {pack} already exists");
+    }
+    remember(dir, &pack, &encoded);
+    Ok(bytes)
+}
+
+/// Packs compressed and uploaded at once: zstd at the pack level takes about 0.1 s per MiB on
+/// one core, so a cache of some GiB needs every core.
+fn parallel() -> usize {
+    std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 16)
 }
 
 impl<'a> Writer<'a> {
-    pub(crate) fn open(store: &'a Store, recipient: &str, identity: &str, key: [u8; 32], base: Option<&Tree>) -> Result<Self> {
+    /// `by_sha` maps file content to the chunk ids of pushed trees; equal files skip chunking.
+    pub(crate) fn open(
+        store: &'a Store,
+        recipient: &str,
+        identity: &str,
+        key: [u8; 32],
+        by_sha: BTreeMap<String, Vec<String>>,
+    ) -> Result<Self> {
         let remote = places(&store.backend, Some(&store.dir), identity)?;
-        let mut by_sha = BTreeMap::new();
-        if let Some(base) = base {
-            for (path, ids) in &base.chunks {
-                if let Some(entry) = base.files.get(path) {
-                    by_sha.insert(entry.2.clone(), ids.clone());
-                }
-            }
-        }
         Ok(Self {
             store,
-            recipient: recipient.to_string(),
             identity: identity.to_string(),
             key,
             remote,
@@ -122,9 +247,21 @@ impl<'a> Writer<'a> {
             reused: BTreeSet::new(),
             by_sha,
             builder: Builder::default(),
+            uploader: Uploader::new(&store.backend, recipient, &store.dir),
             bytes: 0,
             packs: 0,
+            split_time: std::time::Duration::ZERO,
+            wait_time: std::time::Duration::ZERO,
         })
+    }
+
+    /// File content to chunk ids, for the next state of the push.
+    pub(crate) fn into_hashes(self) -> BTreeMap<String, Vec<String>> {
+        if std::env::var_os("LAYR_TRACE").is_some() {
+            eprintln!("trace {:>8.1} ms  store chunk split and ids", self.split_time.as_secs_f64() * 1000.0);
+            eprintln!("trace {:>8.1} ms  store chunk upload wait", self.wait_time.as_secs_f64() * 1000.0);
+        }
+        self.by_sha
     }
 
     /// The chunk ids of a file, after its new chunks are queued for upload.
@@ -139,8 +276,10 @@ impl<'a> Writer<'a> {
             return Ok(ids);
         }
         let mut ids = Vec::new();
-        for chunk in chunks::split(data) {
-            let id = chunks::id(&self.key, chunk);
+        let started = std::time::Instant::now();
+        let pieces: Vec<(String, &[u8])> = chunks::split(data).into_iter().map(|chunk| (chunks::id(&self.key, chunk), chunk)).collect();
+        self.split_time += started.elapsed();
+        for (id, chunk) in pieces {
             self.add(&id, chunk)?;
             ids.push(id);
         }
@@ -159,28 +298,23 @@ impl<'a> Writer<'a> {
         self.builder.add(id.to_string(), chunk);
         self.written.insert(id.to_string());
         if self.builder.full() {
-            self.flush()?;
+            let started = std::time::Instant::now();
+            self.uploader.send(std::mem::take(&mut self.builder))?;
+            self.wait_time += started.elapsed();
         }
         Ok(())
     }
 
-    /// Publishes the open pack: the pack first, then its index, which makes it visible.
+    /// Publishes the open pack and waits until every pack of this push is published.
     pub(crate) fn flush(&mut self) -> Result<()> {
-        if self.builder.is_empty() {
-            return Ok(());
+        let started = std::time::Instant::now();
+        if !self.builder.is_empty() {
+            self.uploader.send(std::mem::take(&mut self.builder))?;
         }
-        let (frame, index) = std::mem::take(&mut self.builder).finish()?;
-        let pack = crate::ids::new_id();
-        let body = keys::encrypt(&self.recipient, &frame)?;
-        let index_body = keys::encrypt(&self.recipient, &index.encode())?;
-        self.bytes += (body.len() + index_body.len()) as u64;
-        if !self.store.backend.put_new(&chunks::pack_name(&pack), body)? {
-            bail!("chunk pack {pack} already exists");
-        }
-        if !self.store.backend.put_new(&chunks::index_name(&pack), index_body)? {
-            bail!("chunk index {pack} already exists");
-        }
-        self.packs += 1;
+        let (bytes, packs) = self.uploader.wait()?;
+        self.wait_time += started.elapsed();
+        self.bytes += bytes;
+        self.packs += packs;
         Ok(())
     }
 
@@ -220,51 +354,110 @@ impl<'a> Writer<'a> {
     }
 }
 
-/// Reads chunked files of a layer. Packs are cached in memory, up to a bound.
+/// Reads chunked files of a layer. Packs are cached in memory, up to a bound. `plan` gives the
+/// order of the chunks that the caller will read; a missing pack then comes with the next packs of
+/// that order, fetched in parallel.
 pub(crate) struct Reader<'a> {
     backend: &'a Backend,
     identity: String,
     places: Option<Places>,
-    packs: BTreeMap<String, std::rc::Rc<Vec<u8>>>,
+    indexes: BTreeMap<String, Index>,
+    packs: BTreeMap<String, std::sync::Arc<Vec<u8>>>,
     pack_bytes: usize,
+    order: Vec<String>,
 }
 
 const READ_CACHE: usize = 256 << 20;
 
 impl<'a> Reader<'a> {
     pub(crate) fn new(backend: &'a Backend, identity: &str) -> Self {
-        Self { backend, identity: identity.to_string(), places: None, packs: BTreeMap::new(), pack_bytes: 0 }
+        Self {
+            backend,
+            identity: identity.to_string(),
+            places: None,
+            indexes: BTreeMap::new(),
+            packs: BTreeMap::new(),
+            pack_bytes: 0,
+            order: Vec::new(),
+        }
     }
 
-    fn pack(&mut self, pack: &str) -> Result<Option<std::rc::Rc<Vec<u8>>>> {
-        if let Some(data) = self.packs.get(pack) {
-            return Ok(Some(data.clone()));
+    fn places(&mut self, fresh: bool) -> Result<&Places> {
+        if self.places.is_none() || fresh {
+            self.indexes = indexes(self.backend, None, &self.identity)?;
+            self.places = Some(places_of(&self.indexes));
         }
-        let index = index(self.backend, None, &self.identity, pack)?;
-        let Some(body) = self.backend.get(&chunks::pack_name(pack))? else {
-            return Ok(None);
-        };
-        let frame = keys::decrypt(&self.identity, &body)?;
-        let data = std::rc::Rc::new(chunks::open_pack(&frame, &index)?);
-        if self.pack_bytes + data.len() > READ_CACHE {
+        Ok(self.places.as_ref().unwrap())
+    }
+
+    /// The chunks that the caller reads next, in order.
+    pub(crate) fn plan<'i>(&mut self, ids: impl IntoIterator<Item = &'i String>) -> Result<()> {
+        let places = self.places(false)?.clone();
+        let mut seen = BTreeSet::new();
+        self.order = ids
+            .into_iter()
+            .filter_map(|id| places.get(id).map(|place| place.pack.clone()))
+            .filter(|pack| seen.insert(pack.clone()))
+            .collect();
+        Ok(())
+    }
+
+    /// Loads `pack` and the packs after it in the plan, as many as run at once and fit the cache.
+    fn load(&mut self, pack: &str) -> Result<()> {
+        let mut batch = vec![pack.to_string()];
+        if let Some(at) = self.order.iter().position(|p| p == pack) {
+            for next in &self.order[at + 1..] {
+                if batch.len() >= parallel() || (batch.len() + 1) * chunks::PACK_LIMIT > READ_CACHE {
+                    break;
+                }
+                if !self.packs.contains_key(next) {
+                    batch.push(next.clone());
+                }
+            }
+        }
+        if self.pack_bytes + batch.len() * chunks::PACK_LIMIT > READ_CACHE {
             self.packs.clear();
             self.pack_bytes = 0;
         }
-        self.pack_bytes += data.len();
-        self.packs.insert(pack.to_string(), data.clone());
-        Ok(Some(data))
+        let (backend, identity, indexes) = (self.backend, self.identity.as_str(), &self.indexes);
+        type Loaded = Result<Option<(String, Vec<u8>)>>;
+        let loaded: Vec<Loaded> = std::thread::scope(|scope| {
+            let handles: Vec<_> = batch
+                .iter()
+                .map(|pack| {
+                    scope.spawn(move || -> Loaded {
+                        let index = match indexes.get(pack) {
+                            Some(index) => index.clone(),
+                            None => index(backend, None, identity, pack)?,
+                        };
+                        let Some(body) = backend.get(&chunks::pack_name(pack))? else {
+                            return Ok(None);
+                        };
+                        Ok(Some((pack.clone(), chunks::open_pack(&keys::decrypt(identity, &body)?, &index)?)))
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("pack read panicked")))).collect()
+        });
+        for result in loaded {
+            if let Some((pack, data)) = result? {
+                self.pack_bytes += data.len();
+                self.packs.insert(pack, std::sync::Arc::new(data));
+            }
+        }
+        Ok(())
     }
 
     fn chunk(&mut self, id: &str) -> Result<Vec<u8>> {
         // A release may move a chunk after this reader listed the packs: list once more.
         for attempt in 0..2 {
-            if self.places.is_none() || attempt == 1 {
-                self.places = Some(places(self.backend, None, &self.identity)?);
-            }
-            let Some(place) = self.places.as_ref().unwrap().get(id).cloned() else {
+            let Some(place) = self.places(attempt == 1)?.get(id).cloned() else {
                 continue;
             };
-            let Some(data) = self.pack(&place.pack)? else {
+            if !self.packs.contains_key(&place.pack) {
+                self.load(&place.pack)?;
+            }
+            let Some(data) = self.packs.get(&place.pack) else {
                 continue;
             };
             let start = usize::try_from(place.offset)?;
@@ -405,7 +598,7 @@ mod tests {
     fn two_packs(store: &Store, identity: &str, recipient: &str) -> (Vec<String>, Vec<String>) {
         let key = chunks::key(identity, "epoch");
         let (one, two) = (noise(300_000, 1), noise(300_000, 2));
-        let mut writer = Writer::open(store, recipient, identity, key, None).unwrap();
+        let mut writer = Writer::open(store, recipient, identity, key, BTreeMap::new()).unwrap();
         let a = writer.file(&sha(&one), &one).unwrap();
         writer.flush().unwrap();
         let b = writer.file(&sha(&two), &two).unwrap();
@@ -455,11 +648,12 @@ mod tests {
         std::fs::create_dir_all(&files).unwrap();
         let data = noise(300_000, 3);
         std::fs::write(files.join("a"), &data).unwrap();
-        let mut first = Writer::open(&store, &recipient, &identity, key, None).unwrap();
+        let mut first = Writer::open(&store, &recipient, &identity, key, BTreeMap::new()).unwrap();
         let ids = first.file(&sha(&data), &data).unwrap();
         first.flush().unwrap();
-        // A second push reuses every chunk, then a deletion releases them before it publishes.
-        let mut second = Writer::open(&store, &recipient, &identity, key, None).unwrap();
+        // A second push knows the file from the first push's tree and reuses every chunk, then a
+        // deletion releases them before it publishes.
+        let mut second = Writer::open(&store, &recipient, &identity, key, first.into_hashes()).unwrap();
         assert_eq!(second.file(&sha(&data), &data).unwrap(), ids);
         assert_eq!(second.packs, 0, "nothing new to write");
         let dead: BTreeSet<String> = ids.iter().cloned().collect();

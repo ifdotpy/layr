@@ -262,6 +262,11 @@ impl<'a> Reader<'a> {
             }
         }
         let mut written = 0;
+        if !tree.chunks.is_empty() {
+            // The chunks in the order of the loop below, so packs load ahead in parallel.
+            let (backend, identity) = (self.backend, self.identity);
+            self.chunks.get_or_insert_with(|| super::chunked::Reader::new(backend, identity)).plan(tree.chunks.values().flatten())?;
+        }
         for (path, entry) in &tree.files {
             if base
                 .and_then(|b| b.files.get(path))

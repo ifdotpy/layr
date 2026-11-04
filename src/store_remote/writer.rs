@@ -486,6 +486,9 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
     drop(stage);
     let stage = crate::trace::span("store collect hashes");
     let mut hashes = ContentHashes { entries: journal.hashes()?, ..Default::default() };
+    // File content to chunk ids from pushed trees, like `hashes` for frames: a cache base is gone
+    // locally after its next save, but its tree still says which files the store holds.
+    let mut chunk_hashes: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let pending = journal.pending()?;
     if !pending.is_empty() || !recovered.is_empty() {
         let started = std::time::Instant::now();
@@ -518,6 +521,7 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
             for entry in tree.files.values() {
                 hashes.seed(entry.2.clone(), entry.3.clone());
             }
+            seed_chunks(&mut chunk_hashes, &tree);
             journal.checkpoint(&id, attempt, depth, &hashes.dirty, &protected)?;
             hashes.dirty.clear();
             index.get_mut(&id).unwrap().depth = depth;
@@ -565,6 +569,7 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
                     for entry in pushed.tree.files.values() {
                         hashes.seed(entry.2.clone(), entry.3.clone());
                     }
+                    seed_chunks(&mut chunk_hashes, &pushed.tree);
                     (id, pushed)
                 })
             }
@@ -587,6 +592,7 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
             &root,
             base.as_ref(),
             &mut hashes,
+            &mut chunk_hashes,
             base_root.as_deref(),
             btrfs_identity(&root, &state.subvol),
             Some(&mut journal),
@@ -733,6 +739,7 @@ fn upload_state_journal(
     root: &Path,
     base: Option<&(String, Pushed)>,
     hashes: &mut ContentHashes,
+    chunk_hashes: &mut BTreeMap<String, Vec<String>>,
     base_root: Option<&Path>,
     btrfs: Option<format::BtrfsIdentity>,
     mut journal: Option<&mut super::push_journal::Journal>,
@@ -758,7 +765,7 @@ fn upload_state_journal(
     // A cache layer that this machine can open goes up as chunks (`chunked`); others as frames.
     let mut chunker = match store.layer.as_ref().and_then(|layer| Some((layer.identity.as_deref()?, layer.chunk_key?))) {
         Some((identity, key)) => {
-            Some(super::chunked::Writer::open(store, &descriptor.recipient, identity, key, base.map(|(_, p)| &p.tree))?)
+            Some(super::chunked::Writer::open(store, &descriptor.recipient, identity, key, std::mem::take(chunk_hashes))?)
         }
         None => None,
     };
@@ -793,6 +800,8 @@ fn upload_state_journal(
             chunks.remove(&change.path);
         }
     }
+    // Read and SHA-256 time of the walk, for `LAYR_TRACE`.
+    let mut walk_time = (std::time::Duration::ZERO, std::time::Duration::ZERO);
     let mut visit = |path: &str, meta: &fsutil::Meta| -> Result<bool> {
         if crate::repo::skip_path(path) {
             return Ok(false);
@@ -807,8 +816,12 @@ fn upload_state_journal(
             bail!("state has a special file: {path}");
         }
         let mode = format!("{:o}", meta.git_mode());
+        let started = std::time::Instant::now();
         let data = content(root, path, &mode)?;
+        let read = started.elapsed();
         let sha = hex::encode(ContentAddress::digest(&data));
+        walk_time.0 += read;
+        walk_time.1 += started.elapsed() - read;
         if let Some(time) = file_time(root, path) {
             times.insert(path.to_string(), time);
         }
@@ -879,6 +892,10 @@ fn upload_state_journal(
         walk_state(root, &mut visit)?;
     }
     drop(visit);
+    if std::env::var_os("LAYR_TRACE").is_some() {
+        eprintln!("trace {:>8.1} ms  store walk read", walk_time.0.as_secs_f64() * 1000.0);
+        eprintln!("trace {:>8.1} ms  store walk sha256", walk_time.1.as_secs_f64() * 1000.0);
+    }
     if !current.is_empty() {
         if let Some(journal) = journal.as_deref_mut() {
             journal.prepare_part(state, &attempt, part, &part_entries)?;
@@ -886,10 +903,11 @@ fn upload_state_journal(
         put_part(store, descriptor, state, &attempt, part, current, &part_entries)?;
         part += 1;
     }
-    if let Some(chunker) = chunker.as_mut() {
+    if let Some(mut chunker) = chunker {
         chunker.finish(root, &chunks, &|root: &Path, path: &str| content(root, path, &files[path].0))?;
         bytes += chunker.bytes;
         frames += chunker.packs;
+        *chunk_hashes = chunker.into_hashes();
     }
     drop(stage);
     let stage = crate::trace::span("store tree encode");
@@ -956,9 +974,18 @@ fn upload_state(
     btrfs: Option<format::BtrfsIdentity>,
 ) -> Result<(Pushed, usize, u64)> {
     let mut index = ContentHashes { entries: std::mem::take(hashes), ..Default::default() };
-    let result = upload_state_journal(store, descriptor, state, root, base, &mut index, base_root, btrfs, None);
+    let result = upload_state_journal(store, descriptor, state, root, base, &mut index, &mut BTreeMap::new(), base_root, btrfs, None);
     *hashes = index.entries;
     result
+}
+
+/// Records which chunks the files of a pushed tree have.
+fn seed_chunks(chunk_hashes: &mut BTreeMap<String, Vec<String>>, tree: &Tree) {
+    for (path, ids) in &tree.chunks {
+        if let Some(entry) = tree.files.get(path) {
+            chunk_hashes.entry(entry.2.clone()).or_insert_with(|| ids.clone());
+        }
+    }
 }
 
 fn btrfs_identity(root: &Path, signed_uuid: &str) -> Option<format::BtrfsIdentity> {
