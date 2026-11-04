@@ -432,7 +432,10 @@ fn init_is_idempotent() {
         manifest.contains("[workspace.metadata.layr-retest]") && manifest.contains("CARGO_INCREMENTAL = \"1\""),
         "{manifest}"
     );
-    assert!(manifest.contains("sweep = [[\"build\", \"--workspace\", \"--all-targets\", \"--locked\"]]"), "{manifest}");
+    assert!(
+        manifest.contains("sweep = [[\"build\", \"--locked\"], [\"test\", \"--locked\", \"--no-run\"], [\"build\", \"--release\", \"--locked\"]]"),
+        "{manifest}"
+    );
 
     // Second run: nothing changes, no cache is saved again.
     let (code, out) = init();
