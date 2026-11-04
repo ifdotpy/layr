@@ -560,5 +560,5 @@ Call sites, each before its next step:
   registry; a lockfile that needs a missing package and a stale lockfile skip the folder, which stays
   unchanged; no lifecycle script runs), `dispatch.rs`.
 - `crates/layr-retest/tests/e2e.rs`: `layr retest prune target` runs the cargo adapter.
-- `tests/t110-prune-hook.sh`: `line new`, `merge --caches-only` and `prune=none` through the binary.
+- `tests/t117-prune-hook.sh`: `line new`, `merge --caches-only` and `prune=none` through the binary.
   Root (btrfs) on Linux, and macOS APFS, as the other `tests/t*.sh` files.

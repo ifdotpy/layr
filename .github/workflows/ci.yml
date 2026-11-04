@@ -73,7 +73,6 @@ jobs:
           bash tests/apfs-cache-retention.sh
           bash tests/apfs-ownership-bases.sh
           bash tests/apfs-lock-hold.sh
-          LAYR="$LAYR" bash tests/t110-prune-hook.sh
           bash tests/save-unsettled.sh
           bash tests/run.sh --tag macos-plain
           LAYR_TEST_DIRECT_MAIN=1 bash tests/run.sh --tag macos
