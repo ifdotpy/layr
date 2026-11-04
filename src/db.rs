@@ -692,6 +692,24 @@ impl Db {
         })
     }
 
+    /// Every state id, with whether it is auxiliary (cache or derived): one query for a history walk.
+    pub fn state_auxiliary(&self) -> Result<Vec<(String, bool)>> {
+        let mut st = self.conn.prepare("SELECT id, kind IN (?1, ?2) FROM states")?;
+        let v = st
+            .query_map(params![kind_str(StateKind::Cache), kind_str(StateKind::Derived)], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(v)
+    }
+
+    /// Every parent edge (state, parent), each state's parents in order: one query for a history walk.
+    pub fn parent_edges(&self) -> Result<Vec<(String, String)>> {
+        let mut st = self.conn.prepare("SELECT state, parent FROM parents ORDER BY state, ord")?;
+        let v = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?.collect::<Result<Vec<_>, _>>()?;
+        Ok(v)
+    }
+
     pub fn state_flags(&self, id: &str) -> Result<Option<(bool, bool)>> {
         Ok(self
             .conn

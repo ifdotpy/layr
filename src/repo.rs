@@ -14,7 +14,7 @@ use crate::storage as btrfs;
 use crate::store::{check_name, Project};
 use crate::tree::Tree;
 use anyhow::{bail, Context, Result};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
@@ -2371,6 +2371,17 @@ impl<'a> Repo<'a> {
         Ok(found)
     }
 
+    /// The parent edges of the project, read once for many merge-base searches (`History`).
+    pub fn history(&self) -> Result<History> {
+        let _t = crate::trace::span("overlap history");
+        let mut parents: HashMap<String, Vec<String>> = HashMap::new();
+        for (state, parent) in self.p.db.parent_edges()? {
+            parents.entry(state).or_default().push(parent);
+        }
+        let auxiliary = self.p.db.state_auxiliary()?.into_iter().filter(|(_, aux)| *aux).map(|(id, _)| id).collect();
+        Ok(History { parents, auxiliary })
+    }
+
     /// The best common ancestor: a common ancestor that is not an ancestor of another one.
     /// One walk finds every state that is a proper ancestor of a common ancestor.
     pub fn merge_base(&self, a: &str, b: &str) -> Result<Option<String>> {
@@ -2399,6 +2410,119 @@ impl<'a> Repo<'a> {
             cur = self.p.db.state(&c)?.and_then(|s| s.parents.first().cloned());
         }
         Ok(v)
+    }
+}
+
+/// The parent edges and the auxiliary states of a project in memory (`Repo::history`). Its merge
+/// bases equal `Repo::merge_base`, which reads one state per step of the walk.
+pub struct History {
+    parents: HashMap<String, Vec<String>>,
+    auxiliary: HashSet<String>,
+}
+
+impl History {
+    /// All ancestors of the `seeds` (including them), breadth first, as `Repo::ancestors_of`.
+    /// `None` when the walk reaches an auxiliary state: `Repo::merge_base` then refuses it.
+    fn ancestors<'s>(&'s self, seeds: Vec<&'s str>) -> Option<Vec<&'s str>> {
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut order = Vec::new();
+        let mut queue: VecDeque<&str> = seeds.into();
+        while let Some(x) = queue.pop_front() {
+            if !seen.insert(x) {
+                continue;
+            }
+            if self.auxiliary.contains(x) {
+                return None;
+            }
+            order.push(x);
+            if let Some(parents) = self.parents.get(x) {
+                queue.extend(parents.iter().map(String::as_str));
+            }
+        }
+        Some(order)
+    }
+
+    /// The merge base of `a` and `b`, as `Repo::merge_base`. `None` when a walk reaches an auxiliary state.
+    pub fn merge_base(&self, a: &str, b: &str) -> Option<Option<String>> {
+        let aa = self.ancestors(vec![a])?;
+        let bs: HashSet<&str> = self.ancestors(vec![b])?.into_iter().collect();
+        let common: Vec<&str> = aa.into_iter().filter(|x| bs.contains(x)).collect();
+        let seeds: Vec<&str> = common.iter().flat_map(|c| self.parents.get(*c).into_iter().flatten().map(String::as_str)).collect();
+        let below: HashSet<&str> = self.ancestors(seeds)?.into_iter().collect();
+        Some(common.into_iter().find(|c| !below.contains(c)).map(str::to_string))
+    }
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+
+    /// The walk of `Repo::merge_base` over a parent map: the reference that `History` must equal.
+    fn reference_merge_base(parents: &HashMap<String, Vec<String>>, a: &str, b: &str) -> Option<String> {
+        let ancestors = |seeds: Vec<String>| {
+            let mut seen = BTreeSet::new();
+            let mut order = Vec::new();
+            let mut q: VecDeque<String> = seeds.into();
+            while let Some(x) = q.pop_front() {
+                if !seen.insert(x.clone()) {
+                    continue;
+                }
+                order.push(x.clone());
+                for p in parents.get(&x).into_iter().flatten() {
+                    q.push_back(p.clone());
+                }
+            }
+            order
+        };
+        let aa = ancestors(vec![a.to_string()]);
+        let bs: BTreeSet<String> = ancestors(vec![b.to_string()]).into_iter().collect();
+        let common: Vec<String> = aa.into_iter().filter(|x| bs.contains(x)).collect();
+        let below: BTreeSet<String> = ancestors(common.iter().flat_map(|c| parents.get(c).cloned().unwrap_or_default()).collect())
+            .into_iter()
+            .collect();
+        common.into_iter().find(|c| !below.contains(c))
+    }
+
+    fn history(parents: &HashMap<String, Vec<String>>) -> History {
+        History { parents: parents.clone(), auxiliary: HashSet::new() }
+    }
+
+    /// Random histories with merges, criss-cross merges included: every pair gives the reference
+    /// merge base, also when the heads are the same state or a root.
+    #[test]
+    fn history_merge_bases_equal_the_reference_walk() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        for round in 0..150 {
+            let n = 2 + next(28) as usize;
+            let ids: Vec<String> = (0..n).map(|i| format!("r{round}-{i:02}")).collect();
+            let mut parents: HashMap<String, Vec<String>> = HashMap::new();
+            for i in 1..n {
+                let count = 1 + next(2) as usize;
+                let picked: Vec<String> = (0..count).map(|_| ids[next(i as u64) as usize].clone()).collect();
+                parents.insert(ids[i].clone(), picked);
+            }
+            let h = history(&parents);
+            for a in &ids {
+                for b in &ids {
+                    assert_eq!(h.merge_base(a, b), Some(reference_merge_base(&parents, a, b)), "round {round}: {a} {b}");
+                }
+            }
+        }
+    }
+
+    /// A walk that reaches an auxiliary state gives no answer, so the caller uses `Repo::merge_base`.
+    #[test]
+    fn an_auxiliary_state_in_the_walk_gives_no_answer() {
+        let parents = HashMap::from([("top".to_string(), vec!["cache".to_string()]), ("cache".to_string(), vec![])]);
+        let h = History { parents, auxiliary: HashSet::from(["cache".to_string()]) };
+        assert_eq!(h.merge_base("top", "top"), None);
+        assert_eq!(h.merge_base("cache", "cache"), None);
     }
 }
 
