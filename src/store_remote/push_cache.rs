@@ -24,6 +24,9 @@ const NODE_LIMIT: usize = 64 << 20;
 struct Node {
     files: BTreeMap<String, Entry>,
     dirs: BTreeMap<String, String>,
+    /// `Tree::times` of the files of this folder. Left out when empty, so older nodes keep their hashes.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    times: BTreeMap<String, u64>,
 }
 
 pub(super) struct TreeCache(Connection);
@@ -84,7 +87,11 @@ impl TreeCache {
         let mut dirs: BTreeMap<&str, Node> = BTreeMap::from([("", Node::default())]);
         for (path, entry) in &tree.files {
             let (parent, name) = path.rsplit_once('/').unwrap_or(("", path));
-            dirs.entry(parent).or_default().files.insert(name.to_string(), entry.clone());
+            let node = dirs.entry(parent).or_default();
+            node.files.insert(name.to_string(), entry.clone());
+            if let Some(time) = tree.times.get(path) {
+                node.times.insert(name.to_string(), *time);
+            }
             let mut ancestor = parent;
             while !ancestor.is_empty() {
                 ancestor = ancestor.rsplit_once('/').map_or("", |(parent, _)| parent);
@@ -139,6 +146,9 @@ impl TreeCache {
             for (name, entry) in node.files {
                 tree.files.insert(format!("{prefix}{name}"), entry);
             }
+            for (name, time) in node.times {
+                tree.times.insert(format!("{prefix}{name}"), time);
+            }
             for (name, child) in node.dirs {
                 pending.push((format!("{prefix}{name}/"), child));
             }
@@ -190,6 +200,11 @@ mod tests {
         assert_eq!(cache.0.query_row("SELECT count(*) FROM nodes", [], |row| row.get::<_, usize>(0)).unwrap(), 13);
         assert_eq!(cache.get(&first).unwrap(), tree(0));
         assert_eq!(cache.get(&second).unwrap(), tree(99));
+        // File times come back with their files.
+        let mut timed = tree(5);
+        timed.times.insert("dir3/file4".into(), 1_793_820_425_267_530_733);
+        let third = cache.put(&timed).unwrap();
+        assert_eq!(cache.get(&third).unwrap(), timed);
         cache.0.execute("UPDATE nodes SET data=x'00' WHERE hash=?1", [hex::decode(&second).unwrap()]).unwrap();
         assert!(cache.get(&second).is_err());
         drop(cache);

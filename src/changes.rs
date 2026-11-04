@@ -190,6 +190,18 @@ pub fn file_changes(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -
     file_changes_of(parent, child, candidates_equal(parent, child)?)
 }
 
+/// `file_changes`, and the files whose metadata changed while their content stayed equal (a new
+/// modification time, for example). A store push keeps their new times (`Tree::times`).
+pub fn file_changes_and_touched(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<(Vec<Change>, Vec<String>)> {
+    let list = candidates_equal(parent, child)?;
+    let files = |m: &Option<fsutil::Meta>| m.as_ref().is_some_and(|m| !m.is_dir());
+    let both: Vec<String> = list.iter().filter(|c| files(&c.old) && files(&c.new)).map(|c| c.path.clone()).collect();
+    let changes = file_changes_of(parent, child, list)?;
+    let changed: std::collections::HashSet<&str> = changes.iter().map(|c| c.path.as_str()).collect();
+    let touched = both.into_iter().filter(|p| !changed.contains(p.as_str())).collect();
+    Ok((changes, touched))
+}
+
 /// File level changes of a candidate list (`file_changes`).
 pub fn file_changes_of(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), list: Vec<Change>) -> Result<Vec<Change>> {
     let mut out = Vec::new();

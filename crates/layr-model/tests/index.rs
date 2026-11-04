@@ -103,12 +103,13 @@ fn tree(bytes: &[u8], mode: &str) -> format::Tree {
             "file".into(),
             format::Entry(mode.into(), bytes.len() as u64, hex::encode(ContentAddress::digest(bytes)), vec![]),
         )]),
+        times: BTreeMap::new(),
     }
 }
 #[test]
 fn paths_cover_mode_changes_deletion_and_recreation_without_unrelated_blobs() -> Result<()> {
     let (_, project, _) = fixture();
-    let empty = format::Tree { files: BTreeMap::new() };
+    let empty = format::Tree::default();
     let t2 = tree(b"first\nshared\n", "100644");
     let t3 = tree(b"first\nshared\n", "100755");
     let t4 = tree(b"last\nshared\n", "100755");
