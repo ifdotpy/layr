@@ -1,15 +1,10 @@
 [workspace]
-<<<<<<< head
-members = ["crates/layr-store", "crates/layr-model", "crates/layr-retest", "crates/layr-cache", "crates/layr-adapter"]
+members = ["crates/layr-store", "crates/layr-model", "crates/layr-retest", "crates/layr-cache", "crates/layr-adapter", "crates/layr-hashers"]
 resolver = "3"
 
 [workspace.package]
 edition = "2024"
 rust-version = "1.89"
-=======
-members = ["crates/layr-store", "crates/layr-model", "crates/layr-retest", "crates/layr-cache", "crates/layr-adapter", "crates/layr-hashers"]
-resolver = "2"
->>>>>>> origin/main
 
 [workspace.metadata.layr-retest]
 # The standard commands of the project: the debug builds that the lines and CI run, and the release build that
@@ -22,14 +17,9 @@ env = { CARGO_INCREMENTAL = "1", RUSTC_WRAPPER = "" }
 
 [package]
 name = "layr"
-<<<<<<< head
-version = "0.22.1"
+version = "0.22.2"
 edition.workspace = true
 rust-version.workspace = true
-=======
-version = "0.22.2"
-edition = "2021"
->>>>>>> origin/main
 description = "Local version control on btrfs, APFS and OverlayFS"
 license = "MIT"
 publish = false
@@ -65,14 +55,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "query", "rustls"] }
 serde_yaml = "0.9"
-<<<<<<< head
-sha1 = "0.11"
-sha2 = "0.11"
-similar = "3"
-=======
 layr-hashers = { path = "crates/layr-hashers" }
-similar = "2"
->>>>>>> origin/main
+similar = "3"
 tar = "0.4"
 toml = "1"
 unicode-normalization = "0.1"

@@ -39,7 +39,7 @@ impl TreeCache {
                  CREATE TABLE IF NOT EXISTS nodes (hash BLOB PRIMARY KEY, data BLOB NOT NULL) WITHOUT ROWID;
                  CREATE TABLE IF NOT EXISTS usage (id INTEGER PRIMARY KEY, bytes INTEGER NOT NULL);
                  INSERT OR IGNORE INTO usage VALUES (1, 0);",
-                MAX_BYTES / PAGE_SIZE
+                (MAX_BYTES / PAGE_SIZE) as i64
             ))?;
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
@@ -184,11 +184,11 @@ mod tests {
         let mut cache = TreeCache::open(&dir).unwrap();
         let first = cache.put(&tree(0)).unwrap();
         assert_eq!(cache.get(&first).unwrap(), tree(0));
-        let count = || cache.0.query_row("SELECT count(*) FROM nodes", [], |row| row.get::<_, usize>(0)).unwrap();
+        let count = || cache.0.query_row("SELECT count(*) FROM nodes", [], |row| row.get::<_, i64>(0)).unwrap();
         assert_eq!(count(), 11);
         assert_eq!(cache.put(&tree(0)).unwrap(), first);
         let second = cache.put(&tree(99)).unwrap();
-        assert_eq!(cache.0.query_row("SELECT count(*) FROM nodes", [], |row| row.get::<_, usize>(0)).unwrap(), 13);
+        assert_eq!(cache.0.query_row("SELECT count(*) FROM nodes", [], |row| row.get::<_, i64>(0)).unwrap(), 13);
         assert_eq!(cache.get(&first).unwrap(), tree(0));
         assert_eq!(cache.get(&second).unwrap(), tree(99));
         cache.0.execute("UPDATE nodes SET data=x'00' WHERE hash=?1", [hex::decode(&second).unwrap()]).unwrap();
@@ -203,20 +203,20 @@ mod tests {
         let cache = TreeCache::open(&dir).unwrap();
         cache.record_upload(64 << 20).unwrap();
         assert_eq!(
-            cache.0.pragma_query_value(None, "max_page_count", |row| row.get::<_, usize>(0)).unwrap(),
-            (2 << 20) / PAGE_SIZE
+            cache.0.pragma_query_value(None, "max_page_count", |row| row.get::<_, i64>(0)).unwrap(),
+            ((2 << 20) / PAGE_SIZE) as i64
         );
         cache.0.execute("DELETE FROM nodes", []).unwrap();
         drop(cache);
         let cache = TreeCache::open(&dir).unwrap();
         assert_eq!(
-            cache.0.pragma_query_value(None, "max_page_count", |row| row.get::<_, usize>(0)).unwrap(),
-            (2 << 20) / PAGE_SIZE
+            cache.0.pragma_query_value(None, "max_page_count", |row| row.get::<_, i64>(0)).unwrap(),
+            ((2 << 20) / PAGE_SIZE) as i64
         );
         cache.record_upload(1 << 30).unwrap();
         assert_eq!(
-            cache.0.pragma_query_value(None, "max_page_count", |row| row.get::<_, usize>(0)).unwrap(),
-            MAX_BYTES / PAGE_SIZE
+            cache.0.pragma_query_value(None, "max_page_count", |row| row.get::<_, i64>(0)).unwrap(),
+            (MAX_BYTES / PAGE_SIZE) as i64
         );
         drop(cache);
         std::fs::remove_dir_all(dir).unwrap();

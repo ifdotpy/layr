@@ -3,13 +3,8 @@
 
 pub mod profile;
 
-<<<<<<< head
 use hmac::{Hmac, KeyInit, Mac};
-use sha2::{Digest, Sha256};
-=======
-use hmac::{Hmac, Mac};
 use layr_hashers::{ContentAddress, Digest};
->>>>>>> origin/main
 
 /// The SHA-256 of an empty payload.
 pub const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";

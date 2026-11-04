@@ -875,15 +875,15 @@ dependencies = [
 
 [[package]]
 name = "foldhash"
-<<<<<<< head
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
-=======
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
->>>>>>> origin/main
+
+[[package]]
+name = "foldhash"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "form_urlencoded"
@@ -1066,7 +1066,7 @@ version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
 dependencies = [
- "foldhash",
+ "foldhash 0.2.0",
 ]
 
 [[package]]
@@ -1075,7 +1075,7 @@ version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 dependencies = [
- "foldhash",
+ "foldhash 0.2.0",
 ]
 
 [[package]]
@@ -1668,11 +1668,6 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
-<<<<<<< head
- "sha1",
- "sha2 0.11.1",
-=======
->>>>>>> origin/main
  "similar",
  "tar",
  "toml 1.2.0+spec-1.1.0",
@@ -1699,11 +1694,11 @@ name = "layr-hashers"
 version = "0.1.0"
 dependencies = [
  "blake3",
- "foldhash",
+ "foldhash 0.1.5",
  "rapidhash",
- "rustc-hash 2.1.3",
+ "rustc-hash",
  "sha1",
- "sha2 0.10.9",
+ "sha2 0.11.1",
  "xxhash-rust",
 ]
 
@@ -1721,11 +1716,6 @@ dependencies = [
  "quick-xml",
  "serde",
  "serde_json",
-<<<<<<< head
- "sha1",
- "sha2 0.11.1",
-=======
->>>>>>> origin/main
  "similar",
  "toml 1.2.0+spec-1.1.0",
 ]
@@ -1755,22 +1745,13 @@ dependencies = [
  "ed25519-dalek",
  "getrandom 0.2.17",
  "hex",
-<<<<<<< head
  "hmac 0.13.0",
-=======
- "hmac",
  "layr-hashers",
->>>>>>> origin/main
  "rand 0.8.8",
  "reqwest",
  "ruzstd",
  "serde",
  "serde_json",
-<<<<<<< head
- "sha1",
- "sha2 0.11.1",
-=======
->>>>>>> origin/main
  "ssh-key",
  "uuid",
  "zstd-safe",
@@ -2879,7 +2860,6 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.2.17",
  "digest 0.10.7",
- "sha2-asm",
 ]
 
 [[package]]
@@ -2894,7 +2874,6 @@ dependencies = [
 ]
 
 [[package]]
-<<<<<<< head
 name = "sha3"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2902,14 +2881,6 @@ checksum = "77fd7028345d415a4034cf8777cd4f8ab1851274233b45f84e3d955502d93874"
 dependencies = [
  "digest 0.10.7",
  "keccak",
-=======
-name = "sha2-asm"
-version = "0.6.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b845214d6175804686b2bd482bcffe96651bb2d1200742b712003504a2dac1ab"
-dependencies = [
- "cc",
->>>>>>> origin/main
 ]
 
 [[package]]
