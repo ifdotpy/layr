@@ -7,13 +7,14 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 pub struct Rules {
     root: PathBuf,
     files: &'static [&'static str],
     /// For `.layrattributes`: the attribute whose patterns this matcher holds.
     attribute: Option<&'static str>,
-    cache: RefCell<HashMap<String, Option<Gitignore>>>,
+    cache: RefCell<HashMap<String, Option<Arc<Gitignore>>>>,
     /// The folders (relative to root, "" is the root) whose rule files are read. None: every folder.
     dirs: Option<std::collections::HashSet<String>>,
     /// The layers of a thin state: rule files are read from the layer that holds them.
@@ -94,7 +95,7 @@ impl Rules {
         }
     }
 
-    fn matcher(&self, dir: &str) -> Option<Gitignore> {
+    fn matcher(&self, dir: &str) -> Option<Arc<Gitignore>> {
         if self.dirs.as_ref().is_some_and(|d| !d.contains(dir)) {
             return None;
         }
@@ -132,7 +133,7 @@ impl Rules {
                 any = true;
             }
         }
-        let m = if any { b.build().ok() } else { None };
+        let m = if any { b.build().ok().map(Arc::new) } else { None };
         self.cache.borrow_mut().insert(dir.to_string(), m.clone());
         m
     }

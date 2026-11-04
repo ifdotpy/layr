@@ -121,6 +121,9 @@ impl Repo<'_> {
         let _t = crate::trace::span("prepare lines");
         self.check_names_free(&names)?;
         self.source_state(start)?;
+        // The store's git folder and its ACL: a walk of the whole store, so it runs here, without
+        // the lock. It admits the owner of the lines that the commit records.
+        crate::gitbridge::sync_store_access_with(self, &[owner])?;
         let lines: Vec<Line> = names
             .into_iter()
             .map(|name| Line {
@@ -146,12 +149,14 @@ impl Repo<'_> {
                     }
                 };
                 self.put_layers(tmp, &layers, self.own(line))?;
-                self.prepare_at(line, start, tmp)?;
                 // On OverlayFS the caches are taken after the folder move (`commit_prepared_lines`): a
                 // mount under a moved folder is lost by MS_MOVE. Elsewhere a take is a snapshot taken
-                // before the store lock.
+                // before the store lock, and it runs first so `prepare_at` does not copy the folder again.
                 #[cfg(not(feature = "overlayfs"))]
-                self.take_caches(ctx, line, start, source, tmp)?;
+                let cached = self.take_caches(ctx, line, start, source, tmp)?;
+                #[cfg(feature = "overlayfs")]
+                let cached: Vec<String> = Vec::new();
+                self.prepare_at(line, start, tmp, &cached)?;
                 let mut rec = Record::new("line.create");
                 rec.data = serde_json::json!({"name": line.name, "start": start});
                 if !layers.is_empty() {
@@ -243,7 +248,7 @@ impl Repo<'_> {
             }
             return Err(e);
         }
-        crate::gitbridge::sync_store_access(self)?;
+        // The store access was synced in `prepare_named_lines`, without the lock.
         Ok(lines)
     }
 
@@ -261,7 +266,7 @@ impl Repo<'_> {
             || !self.cache_paths(&working)?.is_empty()
             || !self.cache_paths(&self.state_root(target)?)?.is_empty()
             || !self.state(target)?.caches.is_empty()
-            || line_in_use(&working)?
+            || crate::busy::user_of(&working)?.is_some()
         {
             return Ok(false);
         }
@@ -286,7 +291,7 @@ impl Repo<'_> {
             return Ok(false);
         }
         let replacement = self.temp_work(&self.state_root(target)?)?;
-        self.prepare_at(line, target, &replacement.path)?;
+        self.prepare_at(line, target, &replacement.path, &[])?;
         // Preserve the existing Git folder, including local settings and object links.
         crate::storage::delete_tree(&replacement.path.join(".git"))?;
         let has_git = git.symlink_metadata().is_ok();
@@ -317,35 +322,6 @@ impl Repo<'_> {
     pub fn reset_snapshot(&self, _ctx: &Ctx, _line: &Line, _target: &str) -> Result<bool> {
         Ok(false)
     }
-}
-
-/// An active process can retain a directory, an open file or a mapped file across a swap.
-#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
-fn line_in_use(root: &Path) -> Result<bool> {
-    for entry in std::fs::read_dir("/proc")?.flatten() {
-        if entry.file_name().to_string_lossy().parse::<u32>().is_err() {
-            continue;
-        }
-        let process = entry.path();
-        for name in ["cwd", "root"] {
-            if std::fs::read_link(process.join(name)).is_ok_and(|p| p.starts_with(root)) {
-                return Ok(true);
-            }
-        }
-        if let Ok(fds) = std::fs::read_dir(process.join("fd")) {
-            for fd in fds.flatten() {
-                if std::fs::read_link(fd.path()).is_ok_and(|p| p.starts_with(root)) {
-                    return Ok(true);
-                }
-            }
-        }
-        if let Ok(maps) = std::fs::read_to_string(process.join("maps")) {
-            if maps.lines().filter_map(|line| line.split_whitespace().nth(5)).any(|p| Path::new(p).starts_with(root)) {
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
 }
 
 #[cfg(test)]

@@ -227,9 +227,13 @@ state is freed:
   or unreferenced objects collected (`git count-objects`);
 - OCI derived refs: a `ref` owner with an expiry (`oci.retention`, default 30 days), not `None`.
 
-Quarantine data (`git-damaged-*`, `*.layr-old-*`) is never freed automatically: it can hold the
-only copy. `layr gc` lists it with its size and age, and `layr gc --drop-quarantine <path>`
-removes one after the owner looked at it.
+Quarantine data (`git-damaged-*`) is never freed automatically: it can hold the only copy. `layr gc`
+lists it with its size and age, and `layr gc --drop-quarantine <path>` removes one after the owner
+looked at it.
+
+Cache swap leftovers (`<cache>.layr-old-<id>`, `<cache>.layr-new-<id>`) are cache data, not quarantine.
+`layr gc` lists them with their size; `layr gc --repair` moves them to the trash unless a process uses
+them or their swap is not finished.
 
 ## Trash
 
