@@ -1987,6 +1987,77 @@ impl<'a> Repo<'a> {
         Ok(out)
     }
 
+    /// The cache swap leftovers in the working folders of the project's lines (`gc` reports them).
+    /// No scan of a folder: the candidate caches are the `regenerable` setting, the folder overlays
+    /// and the caches of the cache journals. A leftover sits next to its cache: the line root holds
+    /// the top-level ones (any name), a nested cache is looked for in its parent folder.
+    pub fn cache_leftovers(&self) -> Result<Vec<Leftover>> {
+        let mut out = Vec::new();
+        if self.p.is_overlay() {
+            return Ok(out);
+        }
+        let mut configured = self.p.config_strings("regenerable");
+        for (_, f) in self.folder_overlays()? {
+            if !configured.contains(&f) {
+                configured.push(f);
+            }
+        }
+        for line in self.lines()? {
+            let w = self.working(&line);
+            let Ok(entries) = std::fs::read_dir(&w) else {
+                continue;
+            };
+            let root: Vec<String> = entries.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+            // Caches of the cache journals of this line (a swap that is not finished, or a crash).
+            let mut caches = configured.clone();
+            let t = Tree::open(&w)?;
+            for name in root.iter().filter(|n| cache_journal_name(n)) {
+                if let Ok(record) = read_cache_replacement(&t, name) {
+                    if !caches.contains(&record.path) {
+                        caches.push(record.path);
+                    }
+                }
+            }
+            let mut found: BTreeSet<String> = BTreeSet::new();
+            for name in &root {
+                if leftover_base(name).is_some() {
+                    found.insert(name.clone());
+                }
+            }
+            for cache in &caches {
+                let Some((parent, base)) = cache.rsplit_once('/') else {
+                    continue;
+                };
+                let Ok(entries) = std::fs::read_dir(w.join(parent)) else {
+                    continue;
+                };
+                for e in entries.flatten() {
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    if is_leftover_name(&name, base) {
+                        found.insert(format!("{parent}/{name}"));
+                    }
+                }
+            }
+            for rel in found {
+                let path = w.join(&rel);
+                if !std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) {
+                    continue;
+                }
+                // The cache of the leftover: its name without the suffix, in the same folder.
+                let (parent, name) = rel.rsplit_once('/').unwrap_or(("", rel.as_str()));
+                let base = leftover_base(name).unwrap_or(name);
+                let cache = if parent.is_empty() { base.to_string() } else { format!("{parent}/{base}") };
+                let kept = if std::fs::symlink_metadata(w.join(cache_journal(&cache))).is_ok() {
+                    Some("cache swap not finished".to_string())
+                } else {
+                    crate::busy::user_of(&path)?.map(|u| format!("in use by pid {} ({})", u.pid, u.name))
+                };
+                out.push(Leftover { line: line.name.clone(), rel, bytes: tree_bytes(&path), path, kept });
+            }
+        }
+        Ok(out)
+    }
+
     /// Make the cache paths that a tool made again as plain folders caches again, before a
     /// snapshot of the working folder. The caller holds the project lock.
     pub fn restore_caches(&self, line: &Line) -> Result<()> {
@@ -2000,7 +2071,15 @@ impl<'a> Repo<'a> {
                 btrfs::mark_cache(&fsutil::safe_join(&w, &p)?)?;
             }
             #[cfg(not(target_os = "macos"))]
-            convert_cache(&w, &p, u, g)?;
+            {
+                if let Err(e) = convert_cache(&w, &p, u, g) {
+                    // In use, or written while copied: the folder stays plain (ignored), the next save tries again.
+                    if e.downcast_ref::<CacheRefused>().is_none() {
+                        return Err(e);
+                    }
+                    let _t = crate::trace::span(format!("cache {p} not converted: {e}"));
+                }
+            }
         }
         Ok(())
     }
@@ -2792,6 +2871,7 @@ const CARRY_ROUNDS: usize = 5;
 
 #[cfg(test)]
 thread_local! {
+    static COPY_HOOK: std::cell::RefCell<Option<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(None) };
     static CARRY_HOOK: std::cell::RefCell<Option<Box<dyn FnMut(usize, &str)>>> = const { std::cell::RefCell::new(None) };
 }
 
@@ -2800,7 +2880,14 @@ thread_local! {
 /// that is new or changed since `seen` (the state before the copy) to the new folder, in rounds,
 /// until a scan finds nothing changed. Entries removed in the old folder stay in the new one.
 /// Returns whether the old folder is settled: only then may it be deleted.
-fn carry_changes(t: &Tree, old: &str, new: &str, own: Option<(u32, u32)>, mut seen: Manifest) -> Result<bool> {
+fn carry_changes(
+    t: &Tree,
+    old: &str,
+    new: &str,
+    own: Option<(u32, u32)>,
+    mut seen: Manifest,
+    carried: &mut std::collections::BTreeSet<String>,
+) -> Result<bool> {
     for round in 0..=CARRY_ROUNDS {
         #[cfg(test)]
         CARRY_HOOK.with(|h| h.borrow_mut().as_mut().map(|f| f(round, old)));
@@ -2815,6 +2902,7 @@ fn carry_changes(t: &Tree, old: &str, new: &str, own: Option<(u32, u32)>, mut se
         }
         let (mut linked, mut made) = (std::collections::HashMap::new(), Vec::new());
         for rel in changed {
+            carried.insert(rel.clone());
             let (s, d) = (format!("{old}/{rel}"), format!("{new}/{rel}"));
             let is_dir = now[rel].is_dir();
             match t.stat(&d) {
@@ -2852,6 +2940,7 @@ pub fn convert_cache(w: &Path, path: &str, uid: u32, gid: u32) -> Result<bool> {
     if !m.is_dir() || fsutil::is_layer(w, path, &m) {
         return Ok(false);
     }
+    refuse_busy(w, path)?;
     replace_folder(&t, path, true, uid, gid)?;
     Ok(true)
 }
@@ -2865,6 +2954,7 @@ pub fn uncache(w: &Path, path: &str, uid: u32, gid: u32) -> Result<bool> {
         Some(m) if fsutil::is_layer(w, path, &m) => {}
         _ => return Ok(false),
     }
+    refuse_busy(w, path)?;
     replace_folder(&t, path, false, uid, gid)?;
     Ok(true)
 }
@@ -2945,7 +3035,8 @@ fn recover_cache_replacement(t: &Tree, path: &str) -> Result<()> {
                 t.remove(&old)?;
             } else {
                 eprintln!(
-                    "layr: {path} was written by another process while it was copied; the previous folder is kept at {old}"
+                    "layr: {path} was written by another process while it was copied; the previous folder is kept at {old} ({})",
+                    crate::cmd::admin::human_size(tree_bytes(&t.path.join(&old)))
                 );
             }
         } else {
@@ -3016,6 +3107,8 @@ fn replace_folder(t: &Tree, path: &str, subvolume: bool, uid: u32, gid: u32) -> 
         crate::tree::cache_test_fault("copy-incomplete");
         copy_tree(t, path, &tmp, Some((uid, gid)), &mut std::collections::HashMap::new())?;
         t.copy_directory_metadata(path, &tmp)?;
+        #[cfg(test)]
+        COPY_HOOK.with(|h| h.borrow_mut().as_mut().map(|f| f()));
         Ok(seen)
     })();
     let seen = match copy {
@@ -3027,24 +3120,146 @@ fn replace_folder(t: &Tree, path: &str, subvolume: bool, uid: u32, gid: u32) -> 
     };
     record.replacement = Some(t.directory_record(&tmp)?);
     t.publish_private_file(&journal, &serde_json::to_vec(&record)?)?;
+    // A write to the folder since the scan makes the copy incomplete: discard it, do not swap.
+    match scan_differs(t, path, &seen) {
+        Ok(false) => {}
+        Ok(true) => {
+            recover_cache_replacement(t, path)?;
+            return Err(CacheRefused::Changed { path: path.to_string() }.into());
+        }
+        Err(error) => {
+            recover_cache_replacement(t, path)?;
+            return Err(error);
+        }
+    }
     #[cfg(test)]
     crate::tree::cache_test_pause();
     t.rename_directory_checked(path, &old, &record.source)?;
     #[cfg(test)]
     crate::tree::cache_test_fault("between-renames");
+    // The copy before it becomes the cache: nobody writes to it by name until the next rename.
+    let baseline = {
+        let mut m = Manifest::new();
+        scan_tree(t, &tmp, "", &mut m).ok().map(|()| m)
+    };
     t.rename_directory_checked(&tmp, path, record.replacement.as_ref().unwrap())?;
     t.chown(path, uid, gid)?;
+    let mut carried = std::collections::BTreeSet::new();
     // An error here (a name that is not UTF-8, a read-only folder) leaves the old folder in place.
-    let settled = carry_changes(t, &old, path, Some((uid, gid)), seen).unwrap_or_else(|error| {
+    let settled = carry_changes(t, &old, path, Some((uid, gid)), seen, &mut carried).unwrap_or_else(|error| {
         eprintln!("layr: cannot carry late writes of {path}: {error:#}");
         false
     });
     if settled {
         record.settled = true;
         t.publish_private_file(&journal, &serde_json::to_vec(&record)?)?;
+    } else if let Some(baseline) = baseline {
+        // The old folder holds every write. The copy takes its place back when no process wrote to it.
+        let mut now = Manifest::new();
+        if scan_tree(t, path, "", &mut now).is_ok() && !writes_since(&baseline, &now, &carried) {
+            return swap_back(t, path, &tmp, &old, &journal, &record);
+        }
     }
     recover_cache_replacement(t, path)?;
     Ok(())
+}
+
+/// The old folder becomes the cache again, and the copy is deleted (the new folder got no write).
+fn swap_back(t: &Tree, path: &str, tmp: &str, old: &str, journal: &str, record: &CacheReplacement) -> Result<()> {
+    t.rename_directory_checked(path, tmp, record.replacement.as_ref().unwrap())?;
+    t.rename_directory_checked(old, path, &record.source)?;
+    t.remove(tmp)?;
+    t.remove(journal)?;
+    t.sync_parent(journal)
+}
+
+/// Whether the folder at `dir` differs from the scan `seen` (a write since the scan).
+fn scan_differs(t: &Tree, dir: &str, seen: &Manifest) -> Result<bool> {
+    let mut now = Manifest::new();
+    scan_tree(t, dir, "", &mut now)?;
+    Ok(now != *seen)
+}
+
+/// Whether an entry that carry did not write differs between two scans of the new folder.
+fn writes_since(baseline: &Manifest, now: &Manifest, carried: &std::collections::BTreeSet<String>) -> bool {
+    baseline.keys().chain(now.keys()).filter(|k| !carried.contains(*k)).any(|k| baseline.get(k) != now.get(k))
+}
+
+/// A cache folder that was not made a cache: a process uses it, or it was written while it was
+/// copied. The automatic save skips it; `save --caches` and `overlay repair` report it.
+#[derive(Debug)]
+pub enum CacheRefused {
+    Busy { path: String, pid: u32, name: String },
+    Changed { path: String },
+}
+
+impl std::fmt::Display for CacheRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Busy { path, pid, name } => {
+                write!(f, "{path}: not made a cache: in use by pid {pid} ({name}); run again when the build ends")
+            }
+            Self::Changed { path } => {
+                write!(f, "{path}: not made a cache: written while it was copied; run again when the build ends")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CacheRefused {}
+
+/// Refuse a folder that a process uses: a copy and a swap would lose the writes that come later.
+fn refuse_busy(w: &Path, path: &str) -> Result<()> {
+    if let Some(user) = crate::busy::user_of(&fsutil::safe_join(w, path)?)? {
+        return Err(CacheRefused::Busy { path: path.to_string(), pid: user.pid, name: user.name }.into());
+    }
+    Ok(())
+}
+
+/// Allocated bytes of a folder tree (links are not followed).
+pub fn tree_bytes(path: &Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(m) = std::fs::symlink_metadata(path) else {
+        return 0;
+    };
+    if !m.is_dir() {
+        return m.blocks() * 512;
+    }
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    entries.flatten().map(|e| tree_bytes(&e.path())).sum()
+}
+
+/// A folder that a cache swap left: `<cache path>.layr-old-<id>` (the previous folder, kept while
+/// a process wrote to it) or `<cache path>.layr-new-<id>` (a copy that did not become the cache).
+pub struct Leftover {
+    pub line: String,
+    /// The path in the working folder of the line.
+    pub rel: String,
+    pub path: PathBuf,
+    pub bytes: u64,
+    /// Why `gc --repair` keeps it: a process uses it, or the swap of its cache is not finished.
+    pub kept: Option<String>,
+}
+
+/// The base name of a leftover: `<base>.layr-old-<id>` or `<base>.layr-new-<id>`, where `<id>` is the
+/// short id that `replace_folder` makes (seven lowercase hex digits). `None` for any other name.
+fn leftover_base(name: &str) -> Option<&str> {
+    for sep in [".layr-old-", ".layr-new-"] {
+        if let Some(pos) = name.rfind(sep) {
+            let id = &name[pos + sep.len()..];
+            if pos > 0 && id.len() == 7 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+                return Some(&name[..pos]);
+            }
+        }
+    }
+    None
+}
+
+/// Whether `name` is a leftover of the cache with the base name `base`.
+fn is_leftover_name(name: &str, base: &str) -> bool {
+    leftover_base(name) == Some(base)
 }
 
 /// Whether the tree at `root` has a file, link or other entry that is not a folder at `path` or
@@ -3418,8 +3633,49 @@ mod cache_copy_tests {
     }
 
     #[test]
+    fn a_write_during_the_copy_discards_the_copy() -> Result<()> {
+        let root = scratch_cache("copy-write")?;
+        let base = root.clone();
+        COPY_HOOK.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || std::fs::write(base.join("cache/a"), "during the copy").unwrap()));
+        });
+        let result = replace_plain(&root);
+        COPY_HOOK.with(|h| *h.borrow_mut() = None);
+        let err = result.expect_err("a copy that a write changed is refused");
+        assert!(matches!(err.downcast_ref::<CacheRefused>(), Some(CacheRefused::Changed { .. })), "{err:#}");
+        assert_eq!(std::fs::read_to_string(root.join("cache/a"))?, "during the copy");
+        assert_eq!(siblings(&root, "cache.layr-"), Vec::<String>::new());
+        assert!(!root.join(cache_journal("cache")).exists());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn an_old_folder_that_keeps_changing_is_kept() -> Result<()> {
         let root = scratch_cache("unsettled")?;
+        CARRY_HOOK.with(|h| {
+            let base = root.clone();
+            *h.borrow_mut() = Some(Box::new(move |round, old| {
+                std::fs::write(base.join(old).join("a"), "x".repeat(round + 10)).unwrap();
+                // A process that opened the new folder by its name writes there: the old folder cannot take its place.
+                std::fs::write(base.join("cache").join("by-name"), round.to_string()).unwrap();
+            }));
+        });
+        let result = replace_plain(&root);
+        CARRY_HOOK.with(|h| *h.borrow_mut() = None);
+        result?;
+        let kept = siblings(&root, "cache.layr-old-");
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert_eq!(std::fs::read_to_string(root.join(&kept[0]).join("a"))?, "x".repeat(CARRY_ROUNDS + 10));
+        assert_eq!(std::fs::read_to_string(root.join("cache/sub/b"))?, "two");
+        assert!(!root.join(cache_journal("cache")).exists());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn an_old_folder_that_keeps_changing_is_swapped_back_when_the_copy_got_no_write() -> Result<()> {
+        let root = scratch_cache("swapped-back")?;
         CARRY_HOOK.with(|h| {
             let base = root.clone();
             *h.borrow_mut() = Some(Box::new(move |round, old| {
@@ -3429,9 +3685,9 @@ mod cache_copy_tests {
         let result = replace_plain(&root);
         CARRY_HOOK.with(|h| *h.borrow_mut() = None);
         result?;
-        let kept = siblings(&root, "cache.layr-old-");
-        assert_eq!(kept.len(), 1, "{kept:?}");
-        assert_eq!(std::fs::read_to_string(root.join(&kept[0]).join("a"))?, "x".repeat(CARRY_ROUNDS + 10));
+        // The old folder holds every write: it is the cache again, and no folder is left beside it.
+        assert_eq!(siblings(&root, "cache.layr-"), Vec::<String>::new());
+        assert_eq!(std::fs::read_to_string(root.join("cache/a"))?, "x".repeat(CARRY_ROUNDS + 10));
         assert_eq!(std::fs::read_to_string(root.join("cache/sub/b"))?, "two");
         assert!(!root.join(cache_journal("cache")).exists());
         std::fs::remove_dir_all(root)?;
@@ -3680,5 +3936,29 @@ mod commit_record_tests {
         assert!(repo.p.db.state(&state)?.is_some(), "the database holds the record");
         assert!(repo.p.has_state(&state), "a state that the record names keeps its snapshot");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod leftover_name_tests {
+    use super::{is_leftover_name, leftover_base};
+
+    #[test]
+    fn the_base_of_a_swap_name_is_any_folder_name() {
+        assert_eq!(leftover_base("target.layr-old-abc1234"), Some("target"));
+        assert_eq!(leftover_base("a.b.layr-new-0123456"), Some("a.b"));
+        assert_eq!(leftover_base(".layr-old-abc1234"), None);
+        assert_eq!(leftover_base("target.mine"), None);
+    }
+
+    #[test]
+    fn only_the_swap_names_of_a_cache_are_leftovers() {
+        assert!(is_leftover_name("target.layr-old-abc1234", "target"));
+        assert!(is_leftover_name("target.layr-new-0123456", "target"));
+        assert!(!is_leftover_name("target.mine", "target"));
+        assert!(!is_leftover_name("target.layr-old-abc123", "target"));
+        assert!(!is_leftover_name("target.layr-old-ABC1234", "target"));
+        assert!(!is_leftover_name("target.layr-old-abc1234x", "target"));
+        assert!(!is_leftover_name("other.layr-old-abc1234", "target"));
     }
 }

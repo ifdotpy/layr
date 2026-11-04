@@ -78,6 +78,8 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if !only.is_empty() && !a.has("--caches") {
         return Err(exit(2, "--cache selects a cache path for --caches."));
     }
+    // Folders that a process uses (or that changed while copied): refused, the others go on.
+    let mut refusals: Vec<String> = Vec::new();
     for l in lines {
         repo.authorize_line(ctx, &l, crate::repo::LineOp::Save)?;
         if a.has("--caches") {
@@ -121,14 +123,23 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
             // its files.
             let (u, g) = repo.owner_ids(&l);
             for p in &versioned {
-                let again = crate::repo::uncache(&repo.working(&l), p, u, g)?;
-                if !a.has("-q") {
-                    outln!(ctx, "{p}: {}", if again { VERSIONED_AGAIN } else { VERSIONED });
+                match crate::repo::uncache(&repo.working(&l), p, u, g) {
+                    Ok(again) => {
+                        if !a.has("-q") {
+                            outln!(ctx, "{p}: {}", if again { VERSIONED_AGAIN } else { VERSIONED });
+                        }
+                    }
+                    Err(e) => refuse(e, &mut refusals)?,
                 }
             }
+            let mut refused = Vec::new();
             for p in &caches {
-                crate::repo::convert_cache(&repo.working(&l), p, u, g)?;
+                if let Err(e) = crate::repo::convert_cache(&repo.working(&l), p, u, g) {
+                    refuse(e, &mut refusals)?;
+                    refused.push(p.clone());
+                }
             }
+            caches.retain(|p| !refused.contains(p));
             Some(repo.caches_state(ctx, &l, &msg, a.has("--running"), &caches)?)
         } else {
             repo.save(ctx, &l, &msg, a.has("--running"), a.has("--force"))?
@@ -163,7 +174,19 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
         // Layers and snapshots that the save did not take (an unchanged folder, or --force).
         repo.discard_prepared();
     }
+    if !refusals.is_empty() {
+        return Err(exit(1, refusals.join("\n")));
+    }
     Ok(0)
+}
+
+/// Keep the message of a folder that a process uses (the other folders go on). Other errors stop the save.
+fn refuse(e: anyhow::Error, refusals: &mut Vec<String>) -> Result<()> {
+    if e.downcast_ref::<crate::repo::CacheRefused>().is_none() {
+        return Err(e);
+    }
+    refusals.push(e.to_string());
+    Ok(())
 }
 
 /// A cache folder that a tool made as a plain folder becomes a cache by a copy of all its files,
@@ -181,7 +204,14 @@ fn prepare_caches(repo: &Repo, l: &Line, only: &[String]) -> Result<()> {
         if !only.is_empty() && !only.contains(&p) {
             continue;
         }
-        crate::repo::convert_cache(&w, &p, u, g)?;
+        if let Err(e) = crate::repo::convert_cache(&w, &p, u, g) {
+            // A refused folder is refused again under the lock, where the save reports it. It is
+            // not pruned either: a process writes to it.
+            if e.downcast_ref::<crate::repo::CacheRefused>().is_none() {
+                return Err(e);
+            }
+            continue;
+        }
         // Pruned before the copy and the save: the state keeps the pruned cache (docs/cache-overlays.md, section 19).
         repo.prune_cache_folder(l, &p);
         #[cfg(target_os = "macos")]
@@ -1404,6 +1434,7 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
     } else {
         check(ctx, &h.repo, a.has("-q"))?
     };
+    leftovers(ctx, &h.repo, a.has("--repair"), a.has("-n"), a.has("-q"))?;
     // After the project lock is released: hashing and comparing cache files takes long.
     let shared = if a.has("--dedup") { Some(crate::dedup::run(&h.repo, a.has("-n"))?) } else { None };
     if !a.has("-q") {
@@ -1414,6 +1445,28 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     print_trash_errors(&ctx.store);
     Ok(code)
+}
+
+/// The folders that a cache swap left (`<cache>.layr-old-<id>`, `<cache>.layr-new-<id>`): `gc`
+/// reports them with their size; `gc --repair` moves them to the trash, unless a process uses them
+/// or the swap is not finished (the next save finishes it).
+fn leftovers(ctx: &Ctx, repo: &Repo, repair: bool, dry: bool, quiet: bool) -> Result<()> {
+    for l in repo.cache_leftovers()? {
+        let size = human_size(l.bytes);
+        let state = match &l.kept {
+            Some(why) => format!("kept ({why})"),
+            None if repair && dry => "would remove".to_string(),
+            None if repair => {
+                repo.p.trash(&l.path)?;
+                "removed".to_string()
+            }
+            None => "leftover (layr gc --repair removes it)".to_string(),
+        };
+        if !quiet {
+            outln!(ctx, "{state}: {}: {} ({size})", l.line, l.rel);
+        }
+    }
+    Ok(())
 }
 
 /// Owner kinds that keep the tree of a state (docs/ownership.md, "Storage that a live state
