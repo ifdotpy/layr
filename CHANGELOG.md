@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.23.0](https://github.com/ifdotpy/layr/compare/v0.22.2...v0.23.0) (2026-11-04)
+
+
+### Features
+
+* **retest:** init sets up follow, the sweep list and warm thin caches ([#197](https://github.com/ifdotpy/layr/issues/197)) ([e5eb0c5](https://github.com/ifdotpy/layr/commit/e5eb0c523156e24553c39a9e4cb2f4f062c7e22a))
+
+
+### Bug Fixes
+
+* **git:** Import a fetched branch on first use, and update the git refs of lines after a fetch ([#231](https://github.com/ifdotpy/layr/issues/231)) ([18ab954](https://github.com/ifdotpy/layr/commit/18ab954964c1c7a804436d8d9e69a22e69ae2df8))
+* **save:** Run the checks of a named save once, and finish it after the lock ([#224](https://github.com/ifdotpy/layr/issues/224)) ([520bf68](https://github.com/ifdotpy/layr/commit/520bf68e1e728f007475b3b7ecc0f39b21edcfa3))
+
+
+### Performance
+
+* **hash:** Purpose-named hashers crate; BLAKE3 for local checks, Fx for local maps ([#234](https://github.com/ifdotpy/layr/issues/234)) ([94daee4](https://github.com/ifdotpy/layr/commit/94daee49ace44e6265c21dd843fda7527077cbfc))
+
 ## [0.22.2](https://github.com/ifdotpy/layr/compare/v0.22.1...v0.22.2) (2026-11-04)
 
 
