@@ -130,14 +130,11 @@ pub fn last_result(repo: &Repo, line: &Line) -> Result<Option<Last>> {
     Ok(last_results(repo)?.remove(&line.id))
 }
 
-/// Unsaved work: a change, an untracked file or a conflict in the working folder. Ignored files
-/// (build output and caches) are not unsaved work.
+/// Unsaved work: a change or a conflict in the working folder. Untracked files are not unsaved work: the
+/// merge keeps them and refuses a state that writes one of their paths. Ignored files (build output and
+/// caches) are not unsaved work either.
 fn has_unsaved(st: &Status) -> bool {
-    !(st.staged.is_empty()
-        && st.unstaged.is_empty()
-        && st.untracked.is_empty()
-        && st.untracked_dirs.is_empty()
-        && st.conflicts.is_empty())
+    !(st.staged.is_empty() && st.unstaged.is_empty() && st.conflicts.is_empty())
 }
 
 impl<'a> Repo<'a> {
