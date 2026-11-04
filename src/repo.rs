@@ -972,18 +972,20 @@ impl<'a> Repo<'a> {
         Ok(None)
     }
 
-    /// `line delete`, under the project lock: records the prepared state when the line head and the
-    /// working folder are the ones it was made from. Else the state is discarded and the caller
+    /// `line delete`, under the project lock: records the prepared state when the line head is the
+    /// one it was made from. When the working folder changed since (a build writes into it), the
+    /// prepared state stays as an automatic state and the state under the lock copies only what
+    /// changed since it, as a named save does. A moved head discards the state, and the caller
     /// prepares again. Without a prepared state, the lock makes the working state as before.
     pub fn record_final_state(&self, ctx: &Ctx, line: &Line, prepared: &mut Option<FinalPrepared>) -> Result<FinalState> {
         #[cfg(target_os = "macos")]
         if let Some(pre) = prepared.take() {
             let w = self.working(line);
-            let same = line.head == pre.head && w.exists() && btrfs::scan_with_data(&w, true)? == pre.scan;
-            if !same {
+            if line.head != pre.head || !w.exists() {
                 self.p.delete_state(&pre.id)?;
                 return Ok(FinalState::Moved);
             }
+            let changed = btrfs::scan_with_data(&w, true)? != pre.scan;
             let mut st = self.describe_state(ctx, pre.id.clone(), StateKind::Auto, vec![line.head.clone()], "before line delete", Some(line))?;
             st.running = crate::fsutil::take_unsettled();
             let before = self.recorded_working(line)?;
@@ -991,11 +993,13 @@ impl<'a> Repo<'a> {
             rec.states.push(st.clone());
             rec.data = serde_json::json!({"line": line.id, "head": line.head, "working_before": before, "working_after": st.id});
             self.commit_record(ctx, rec)?;
-            if let Err(e) = self.save_cache_states(ctx, line, &st.id) {
-                eprintln!("warning: cache overlay of line {} not saved: {e:#}", line.name);
+            if !changed {
+                if let Err(e) = self.save_cache_states(ctx, line, &st.id) {
+                    eprintln!("warning: cache overlay of line {} not saved: {e:#}", line.name);
+                }
+                clear_regenerable_memo();
+                return Ok(FinalState::Recorded(Some(st.id)));
             }
-            clear_regenerable_memo();
-            return Ok(FinalState::Recorded(Some(st.id)));
         }
         #[cfg(not(target_os = "macos"))]
         let _ = prepared;
