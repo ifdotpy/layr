@@ -226,13 +226,38 @@ fn fetched_refs(ctx: &Ctx, tmp: &Path, remote: &str) -> Result<Vec<(String, Stri
     Ok(refs)
 }
 
+/// The lock of the Git refs of a project: one fetch writes its refs at a time. No project lock.
+fn fetch_write_lock(repo: &Repo) -> Result<std::fs::File> {
+    let f = std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(repo.p.meta_dir().join("git-refs.lock"))?;
+    rustix::fs::flock(&f, rustix::fs::FlockOperation::LockExclusive)?;
+    Ok(f)
+}
+
+/// True when `ancestor` is an ancestor of (or equal to) `descendant` in the Git store.
+fn is_ancestor(store: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
+    Ok(base_cmd(store)
+        .args(["merge-base", "--is-ancestor", ancestor, descendant])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?
+        .success())
+}
+
 /// Import objects through a pipe. Root never opens the temporary repository that belongs to
-/// the caller, so links or alternates in it cannot make root read another path.
-fn import_fetched(ctx: &Ctx, store: &Path, tmp: &Path, refs: &[(String, String)]) -> Result<()> {
+/// the caller, so links or alternates in it cannot make root read another path. Runs under the
+/// Git refs lock, not the project lock. Returns the refs to record: a ref that would move back to
+/// an older commit (a concurrent fetch stored a newer one) keeps the newer commit.
+fn import_fetched(ctx: &Ctx, repo: &Repo, store: &Path, tmp: &Path, refs: &[(String, String)]) -> Result<Vec<(String, String)>> {
     if refs.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
-    let known = git_out(store, &["for-each-ref", "--format=%(objectname)"])?;
+    let _refs_lock = fetch_write_lock(repo)?;
+    let current: BTreeMap<String, String> = git_out(store, &["for-each-ref", "--format=%(objectname) %(refname)"])?
+        .lines()
+        .filter_map(|l| l.split_once(' '))
+        .map(|(oid, name)| (name.to_string(), oid.to_string()))
+        .collect();
     let mut pack = base_cmd(tmp);
     pack.args(["pack-objects", "--stdout", "--revs", "--thin"])
         .stdin(Stdio::piped())
@@ -255,7 +280,7 @@ fn import_fetched(ctx: &Ctx, store: &Path, tmp: &Path, refs: &[(String, String)]
         for (_, oid) in refs {
             writeln!(input, "{oid}")?;
         }
-        for oid in known.lines().filter(|s| !s.is_empty()) {
+        for oid in current.values() {
             writeln!(input, "^{oid}")?;
         }
         Ok(())
@@ -268,12 +293,20 @@ fn import_fetched(ctx: &Ctx, store: &Path, tmp: &Path, refs: &[(String, String)]
         bail!("cannot import fetched git objects");
     }
 
+    let mut out = Vec::with_capacity(refs.len());
+    for (name, oid) in refs {
+        let keep = match current.get(name) {
+            Some(cur) if cur != oid && is_ancestor(store, oid, cur)? => cur.clone(),
+            _ => oid.clone(),
+        };
+        out.push((name.clone(), keep));
+    }
     let mut update = base_cmd(store);
     update.args(["update-ref", "--stdin"]).stdin(Stdio::piped()).stderr(Stdio::piped());
     let mut update = update.spawn()?;
     {
         let input = update.stdin.as_mut().ok_or_else(|| anyhow!("git update-ref has no input"))?;
-        for (name, oid) in refs {
+        for (name, oid) in &out {
             writeln!(input, "update {name} {oid}")?;
         }
     }
@@ -282,11 +315,12 @@ fn import_fetched(ctx: &Ctx, store: &Path, tmp: &Path, refs: &[(String, String)]
     if !output.status.success() {
         bail!("cannot update fetched refs: {}", String::from_utf8_lossy(&output.stderr).trim());
     }
-    Ok(())
+    Ok(out)
 }
 
 /// `git fetch` of a remote into the store. Network access runs as the caller, into a temporary
 /// repository that borrows the store objects; the service then imports a pack through a pipe.
+/// No project lock is held here.
 pub fn fetch(ctx: &Ctx, repo: &Repo, remote: &str) -> Result<Vec<(String, String)>> {
     cache_retry(repo, || fetch_once(ctx, repo, remote))
 }
@@ -333,11 +367,9 @@ fn fetch_once(ctx: &Ctx, repo: &Repo, remote: &str) -> Result<Vec<(String, Strin
         let _ = std::fs::remove_dir_all(&tmp);
         bail!("git fetch {url} failed: {}", String::from_utf8_lossy(&out.stderr).trim());
     }
+    test_sleep("LAYR_TEST_FETCH_SLEEP_MS");
     let refs = fetched_refs(ctx, &tmp, remote);
-    let r = refs.and_then(|refs| {
-        import_fetched(ctx, &s, &tmp, &refs)?;
-        Ok(refs)
-    });
+    let r = refs.and_then(|refs| import_fetched(ctx, repo, &s, &tmp, &refs));
     let _ = std::fs::remove_dir_all(&tmp);
     let prefix = format!("refs/remotes/");
     Ok(r?.into_iter().filter_map(|(name, oid)| name.strip_prefix(&prefix).map(|name| (name.to_string(), oid))).collect())
@@ -697,71 +729,124 @@ fn clone_matching_blob(
     Ok(true)
 }
 
-/// Commits imported between two progress lines on standard error. A long import holds the store
-/// lock, so the lines show that it still runs.
+/// Commits imported between two progress lines on standard error. A long import prints them, so a
+/// user sees that it still runs.
 const IMPORT_PROGRESS_EVERY: usize = 50;
+/// Records written per project lock hold of an import. A hold then lasts a few milliseconds.
+const IMPORT_CHUNK: usize = 16;
+
+/// A remote ref or a commit moved while an import was planned. The caller plans again.
+#[derive(Debug)]
+pub struct Moved(pub String);
+
+impl std::fmt::Display for Moved {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Moved {}
+
+/// The records of one import, planned with no project lock. `commit_import` writes them.
+pub struct ImportPlan {
+    /// Each planned record with the Git commit it imports, parents first.
+    records: Vec<(String, Record)>,
+    /// The Git commit that was asked for, its state, and the remote ref to move (if any).
+    commit: String,
+    tip: String,
+    refname: String,
+}
 
 /// Import the entire reachable DAG, parents first. A retry reuses completed imports. Each commit
-/// becomes a state record without a tree (`import_one`); its tree is built from git when a command
-/// reads it (`build_tree`, through `Repo::check_state`).
+/// becomes a state record without a tree; its tree is built from git when a command reads it
+/// (`build_tree`, through `Repo::check_state`).
 pub fn import_commit(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str, author_uid: u32) -> Result<(String, bool)> {
-    import_commit_with(ctx, repo, commit, refname, author_uid, false)
+    let _ = author_uid; // Git author metadata is preserved; the record actor remains the caller.
+    import_with_repair(ctx, repo, commit, refname, None)
 }
 
-/// `import_commit` for a caller that holds no project lock: the import takes it for one commit
-/// at a time, so other commands of the store wait for one commit, not for the whole import.
-pub fn import_commit_unlocked(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str, author_uid: u32) -> Result<(String, bool)> {
-    import_commit_with(ctx, repo, commit, refname, author_uid, true)
+/// Import `commit` as the new tip of the remote ref `refname`, which holds `prev` (a state, or none).
+/// The ref update is written only while the ref still holds `prev`; otherwise the import fails with
+/// `Moved` and the caller plans it again.
+pub fn import_ref(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str, prev: Option<String>) -> Result<String> {
+    import_with_repair(ctx, repo, commit, refname, Some(prev)).map(|(st, _)| st)
 }
 
-fn import_commit_with(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str, author_uid: u32, take_lock: bool) -> Result<(String, bool)> {
-    match import_commit_once(ctx, repo, commit, refname, author_uid, take_lock) {
+/// `guard`: `None` for an import with no remote ref to move, `Some(prev)` for a remote ref that
+/// holds `prev` (`import_ref`).
+fn import_with_repair(
+    ctx: &Ctx,
+    repo: &Repo,
+    commit: &str,
+    refname: &str,
+    guard: Option<Option<String>>,
+) -> Result<(String, bool)> {
+    match import_planned(ctx, repo, commit, refname, guard.clone()) {
         Ok(value) => Ok(value),
         Err(error) => {
-            if !repair_cache(repo)? {
+            if error.is::<Moved>() || !repair_cache(repo)? {
                 return Err(error);
             }
             let remote = refname.split_once('/').context("import ref has no remote")?.0;
             fetch(ctx, repo, remote)?;
-            import_commit_once(ctx, repo, commit, refname, author_uid, take_lock)
+            import_planned(ctx, repo, commit, refname, guard)
         }
     }
 }
 
-fn import_commit_once(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str, author_uid: u32, take_lock: bool) -> Result<(String, bool)> {
+fn import_planned(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str, guard: Option<Option<String>>) -> Result<(String, bool)> {
+    let plan = plan_import(ctx, repo, commit, refname)?;
+    test_sleep("LAYR_TEST_PLAN_SLEEP_MS");
+    commit_import(ctx, repo, plan, guard)
+}
+
+/// Test hook: sleep for the milliseconds named by `var` (tests hold a phase open to race another command).
+fn test_sleep(var: &str) {
+    if let Some(ms) = std::env::var(var).ok().and_then(|v| v.parse::<u64>().ok()) {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+}
+
+/// The remote-tracking refs of `remote` in the Git store, named as `fetch` returns them. A retried
+/// import plans from these, so a concurrent fetch's newer tip is used.
+pub fn stored_remote_refs(repo: &Repo, remote: &str) -> Result<Vec<(String, String)>> {
+    let out = git_out(&store(repo), &["for-each-ref", "--format=%(objectname) %(refname)", &format!("refs/remotes/{remote}/")])?;
+    Ok(out
+        .lines()
+        .filter_map(|l| l.split_once(' '))
+        .filter_map(|(oid, name)| name.strip_prefix("refs/remotes/").map(|n| (n.to_string(), oid.to_string())))
+        .collect())
+}
+
+/// The state of a Git commit that the store maps (an imported state, or a state with a tree here).
+fn mapped_state(repo: &Repo, oid: &str) -> Result<Option<String>> {
+    for st in repo.p.db.state_of_commit(oid)? {
+        // An imported state is mapped by its record, which holds the Git objects of the commit
+        // (earlier versions imported only the tip and their records lack them). Other states are
+        // mapped when their tree is on disk.
+        let Some(rec) = repo.p.db.state(&st)? else { continue };
+        let mapped = if rec.kind == StateKind::Import { repo.p.db.has_git_import(&st)? } else { repo.p.has_state(&st) };
+        if mapped {
+            return Ok(Some(st));
+        }
+    }
+    Ok(None)
+}
+
+/// Plan the records of the commits of `commit` that are not imported yet. Reads the Git objects and
+/// the records only: no project lock, no write.
+pub fn plan_import(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str) -> Result<ImportPlan> {
     let s = init_store(repo)?;
     let revs = git_out(&s, &["rev-list", "--topo-order", "--reverse", "--parents", commit])?;
-    let mut states = BTreeMap::new();
+    let mut states: BTreeMap<String, String> = BTreeMap::new();
     let mut cat = CatFile::new(&s)?;
-    let mut fresh = false;
+    let mut records = Vec::new();
     let mut imported = 0usize;
     for line in revs.lines() {
         let mut fields = line.split_whitespace();
         let oid = fields.next().context("empty Git revision")?;
         let git_parents: Vec<&str> = fields.collect();
-        let mapped_state = || -> Result<Option<String>> {
-            for st in repo.p.db.state_of_commit(oid)? {
-                // An imported state is mapped by its record, which holds the Git objects of the
-                // commit (earlier versions imported only the tip and their records lack them).
-                // Other states are mapped when their tree is on disk.
-                let Some(rec) = repo.p.db.state(&st)? else { continue };
-                let mapped = if rec.kind == StateKind::Import { repo.p.db.has_git_import(&st)? } else { repo.p.has_state(&st) };
-                if mapped {
-                    return Ok(Some(st));
-                }
-            }
-            Ok(None)
-        };
-        let mut mapped = mapped_state()?;
-        // Hold the lock from the second look to the record: a concurrent import of the same
-        // commit then finds the state instead of making another one.
-        let mut _lock = None;
-        if mapped.is_none() && take_lock {
-            let _t = crate::trace::span("import lock");
-            _lock = Some(repo.p.lock()?);
-            mapped = mapped_state()?;
-        }
-        let state = match mapped {
+        let state = match mapped_state(repo, oid)? {
             Some(st) => st,
             None => {
                 let parents: Vec<String> = git_parents
@@ -770,8 +855,8 @@ fn import_commit_once(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str, autho
                     .collect::<Result<_>>()?;
                 let raw = cat.object(oid, "commit")?;
                 let (objects, changes) = import_changes(&raw, git_parents.first().copied(), &mut cat)?;
-                let st = import_one(ctx, repo, oid, &raw, refname, parents, objects, changes)?;
-                fresh |= oid == commit;
+                let (st, rec) = import_record(ctx, repo, oid, &raw, refname, parents, objects, changes)?;
+                records.push((oid.to_string(), rec));
                 imported += 1;
                 if imported % IMPORT_PROGRESS_EVERY == 0 {
                     eprintln!("layr: imported {imported} commits of {refname}");
@@ -781,14 +866,62 @@ fn import_commit_once(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str, autho
         };
         states.insert(oid.to_string(), state);
     }
-    let _ = author_uid; // Git author metadata is preserved; the record actor remains the caller.
-    Ok((states.remove(commit).context("Git tip was not imported")?, fresh))
+    Ok(ImportPlan {
+        records,
+        commit: commit.to_string(),
+        tip: states.remove(commit).context("Git tip was not imported")?,
+        refname: refname.to_string(),
+    })
+}
+
+/// Write a plan in chunks of `IMPORT_CHUNK` records. Each chunk holds the project lock for its
+/// writes only. With a guard, the remote ref must still hold the expected state before each chunk,
+/// and it ends at the tip. A commit that another command imported meanwhile is `Moved`, so the
+/// records never repeat it. Returns the tip state and whether this plan imported the tip.
+pub fn commit_import(ctx: &Ctx, repo: &Repo, plan: ImportPlan, guard: Option<Option<String>>) -> Result<(String, bool)> {
+    let fresh = plan.records.iter().any(|(oid, _)| *oid == plan.commit);
+    let ImportPlan { records, commit, tip, refname } = plan;
+    let mut expected: Option<String> = guard.clone().flatten();
+    let mut pending = records.into_iter();
+    loop {
+        let _lock = (!repo.p.holds_lock()).then(|| repo.p.lock()).transpose()?;
+        if guard.is_some() {
+            let current = repo.p.db.remote_ref(&refname)?.map(|r| r.0);
+            if current != expected {
+                bail_moved(format!("remote ref {refname} moved during the fetch; run it again"))?;
+            }
+        }
+        let mut written = 0;
+        while written < IMPORT_CHUNK {
+            let Some((oid, rec)) = pending.next() else { break };
+            if mapped_state(repo, &oid)?.is_some() {
+                bail_moved(format!("commit {} of {refname} was imported by another command; run it again", &oid[..10]))?;
+            }
+            let st = rec.states.first().map(|s| s.id.clone()).unwrap_or_default();
+            repo.commit_record(ctx, rec)?;
+            expected = Some(st);
+            written += 1;
+        }
+        if written == IMPORT_CHUNK {
+            continue;
+        }
+        if guard.is_some() && expected.as_deref() != Some(tip.as_str()) {
+            let mut rec = Record::new("remote.ref");
+            rec.data = serde_json::json!({"ref": refname, "state": tip, "commit": commit});
+            repo.commit_record(ctx, rec)?;
+        }
+        return Ok((tip, fresh));
+    }
+}
+
+fn bail_moved(message: String) -> Result<()> {
+    Err(Moved(message).into())
 }
 
 /// Record one imported commit as a state without a tree. The record holds the exact Git objects
 /// of the commit (`GitImport`); the tree is built from git on the first read (`build_tree`).
 #[allow(clippy::too_many_arguments)]
-fn import_one(
+fn import_record(
     ctx: &Ctx,
     repo: &Repo,
     commit: &str,
@@ -797,7 +930,7 @@ fn import_one(
     parents: Vec<String>,
     objects: GitImport,
     changes: Changes,
-) -> Result<String> {
+) -> Result<(String, Record)> {
     // On a store volume that ignores case, README and Readme would become one file. The earlier
     // state passed this check: only the entries of changed folders can collide.
     fsutil::refuse_case_collisions(&repo.p.work_dir(), changes.names.iter().map(|n| n.as_str()))?;
@@ -806,10 +939,10 @@ fn import_one(
     st.author = crate::model::Author { name, email, uid: 0, session: None };
     st.time = time.max(1);
     let mut rec = Record::new("import");
-    rec.states.push(st.clone());
-    rec.data = serde_json::json!({"ref": refname, "commit": commit, "state": st.id, "git": objects});
-    repo.commit_record(ctx, rec)?;
-    Ok(st.id)
+    let id = st.id.clone();
+    rec.states.push(st);
+    rec.data = serde_json::json!({"ref": refname, "commit": commit, "state": id, "git": objects});
+    Ok((id, rec))
 }
 
 /// The Git commit of an imported state that the store holds: the commit its record names, not a
