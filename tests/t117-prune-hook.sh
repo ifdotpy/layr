@@ -31,6 +31,10 @@ if [ "$(id -u)" = 0 ]; then
     OWNER_ARG="--owner $OWN"
 else
     OWN=$(id -un)
+    # The cargo of this machine: rustup's proxy, or the one on PATH. The runner may have no cargo on PATH.
+    REAL_CARGO=$(rustup which cargo 2>/dev/null || command -v cargo || true)
+    [ -n "$REAL_CARGO" ] || { echo "FATAL: no cargo found (install rustup or add its bin folder to PATH)" >&2; exit 1; }
+    export PATH="$(dirname "$REAL_CARGO"):$PATH"
     owned() { "$@"; }
     OWNER_ARG=""
 fi
