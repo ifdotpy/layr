@@ -8,7 +8,7 @@ license = "MIT"
 
 [features]
 default = ["native"]
-native = ["dep:chrono", "dep:rand", "dep:reqwest", "dep:zstd-safe", "ed25519-dalek/rand_core", "uuid/v7"]
+native = ["dep:rustls", "dep:chrono", "dep:rand", "dep:reqwest", "dep:zstd-safe", "ed25519-dalek/rand_core", "uuid/v7"]
 wasm = ["dep:getrandom", "dep:ruzstd"]
 
 [dependencies]
@@ -28,6 +28,8 @@ hmac = "0.13"
 rand = { version = "0.10", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
-reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "query", "rustls"], optional = true }
+# Select the same ring provider as the previous reqwest release.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "query", "rustls-no-provider"], optional = true }
 layr-hashers = { path = "../layr-hashers" }
 uuid = "1"
