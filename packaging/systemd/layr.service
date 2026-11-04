@@ -9,6 +9,10 @@ RequiresMountsFor=/var/lib/layr
 Type=simple
 ExecStart=/usr/local/bin/layr daemon
 Restart=on-failure
+# SIGTERM goes to the service only: it takes no new request and waits up to 80 s for the running
+# ones (src/service.rs STOP_WAIT). Processes that still run when it exits get SIGKILL.
+KillMode=mixed
+TimeoutStopSec=90
 
 [Install]
 WantedBy=multi-user.target
