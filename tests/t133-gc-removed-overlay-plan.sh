@@ -45,6 +45,7 @@ ok "changed records force a new plan" test "$(grep -c 'trace begin repair: plan'
 l overlay list > "$T/overlays"
 ok "recreated overlay survives" grep -q cache.target "$T/overlays"
 ok "owners match after recreation" l gc -q
+ok "project lock trace has a sample" grep -q 'store lock held: p$' "$T/repair.err"
 held=$(awk '/store lock held: p$/ { if ($2 > m) m = $2 } END { print int(m) }' "$T/repair.err")
 ok "project lock held less than 2 seconds ($held ms)" test "$held" -lt 2000
 finish

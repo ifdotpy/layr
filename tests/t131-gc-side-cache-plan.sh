@@ -31,6 +31,7 @@ ok "stale compare removed" test ! -e "$C/stale"
 eq "replacement index kept" replacement "$(cat "$I/replaced")"
 eq "replacement compare kept" replacement "$(cat "$C/replaced")"
 ok "owners match" l gc -q
+ok "project lock trace has a sample" grep -q 'store lock held: p$' "$T/repair.err"
 held=$(awk '/store lock held: p$/ { if ($2 > m) m = $2 } END { print int(m) }' "$T/repair.err")
 ok "project lock held less than 2 seconds ($held ms)" test "$held" -lt 2000
 finish

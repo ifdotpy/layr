@@ -18,7 +18,7 @@ use crate::model::{Line, LineChange, Record, StateKind, StateRec};
 use crate::overlay::{files_of, MergeKind, Mode, Props};
 use crate::repo::Repo;
 use crate::storage as btrfs;
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -296,16 +296,20 @@ impl<'a> Repo<'a> {
             if overlay.p.db.records_mark()? != plan.mark { continue; }
             self.drop_overlay_lines(ctx, &overlay, &plan.name, &plan.lines)?;
             let mut deleted = Vec::new();
+            let mut failure = None;
             for (id, path, identity) in plan.states {
-                if fsutil::EntryIdentity::of(&path).as_ref() == Some(&identity)
-                    && overlay.p.move_to_trash(&path, trash).is_ok()
-                { deleted.push(id); }
+                if fsutil::EntryIdentity::of(&path).as_ref() != Some(&identity) { continue; }
+                match overlay.p.move_to_trash(&path, trash).with_context(|| format!("remove overlay state {}", path.display())) {
+                    Ok(()) => deleted.push(id),
+                    Err(e) => { if failure.is_none() { failure = Some(e); } }
+                }
             }
             if !deleted.is_empty() {
                 let mut rec = Record::new("gc");
                 rec.data = serde_json::json!({"deleted": deleted, "overlay": plan.name, "removed": true});
                 overlay.commit_record(ctx, rec)?;
             }
+            if let Some(e) = failure { return Err(e); }
         }
         Ok(())
     }
@@ -815,6 +819,7 @@ impl LruStamp {
     fn of(path: &Path) -> Option<Self> {
         use std::os::unix::fs::MetadataExt;
         let m = std::fs::symlink_metadata(path).ok()?;
+        if m.is_dir() { return None; }
         Some(Self(m.dev(), m.ino(), m.size(), m.mtime(), m.mtime_nsec(), m.ctime(), m.ctime_nsec(), m.atime(), m.atime_nsec()))
     }
 }
@@ -824,12 +829,12 @@ struct LruFile { rel: String, stamp: LruStamp }
 fn plan_lru(root: &Path, limit: u64) -> Result<Vec<LruFile>> {
     let mut files = Vec::new();
     let mut total = 0u64;
-    fsutil::walk(root, "", &mut |rel, m| {
-        if !m.is_dir() {
-            if let Some(stamp) = LruStamp::of(&root.join(rel)) {
-                total = total.saturating_add(stamp.2);
-                files.push((stamp.7.max(stamp.3), rel.to_string(), stamp));
-            }
+    fsutil::walk(root, "", &mut |rel, _| {
+        // Classify and stamp the same metadata observation: the walk's earlier
+        // observation can have been replaced by a directory.
+        if let Some(stamp) = LruStamp::of(&root.join(rel)) {
+            total = total.saturating_add(stamp.2);
+            files.push((stamp.7.max(stamp.3), rel.to_string(), stamp));
         }
         Ok(true)
     })?;
@@ -845,9 +850,10 @@ fn plan_lru(root: &Path, limit: u64) -> Result<Vec<LruFile>> {
 
 fn apply_lru(root: &Path, files: Vec<LruFile>) -> u64 {
     let mut freed = 0;
+    let Ok(tree) = crate::tree::Tree::open(root) else { return 0 };
     for file in files {
         if LruStamp::of(&root.join(&file.rel)).as_ref() == Some(&file.stamp)
-            && fsutil::remove_entry(root, &file.rel).is_ok()
+            && tree.unlink_file(&file.rel).is_ok()
         { freed += file.stamp.2; }
     }
     freed
@@ -927,6 +933,22 @@ mod tests {
         assert_eq!(apply_lru(&root, plan), 0);
         assert_eq!(std::fs::read(root.join("old")).unwrap(), b"replacement");
         assert!(root.join("new").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn lru_keeps_a_file_replaced_by_a_populated_directory() {
+        let root = std::env::temp_dir().join(format!("layr-lru-dir-{}", crate::ids::new_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("entry"), b"old").unwrap();
+        let plan = plan_lru(&root, 0).unwrap();
+        std::fs::remove_file(root.join("entry")).unwrap();
+        std::fs::create_dir(root.join("entry")).unwrap();
+        std::fs::write(root.join("entry/child"), b"keep").unwrap();
+        assert!(LruStamp::of(&root.join("entry")).is_none());
+        assert_eq!(apply_lru(&root, plan), 0);
+        assert!(crate::tree::Tree::open(&root).unwrap().unlink_file("entry").is_err());
+        assert_eq!(std::fs::read(root.join("entry/child")).unwrap(), b"keep");
         std::fs::remove_dir_all(root).unwrap();
     }
 

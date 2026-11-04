@@ -32,6 +32,7 @@ ok "unchanged old cache removed" test ! -e target/stale
 eq "replacement kept" replacement "$(cat target/replaced)"
 eq "new file kept" new "$(cat target/new)"
 ok "owners match" l gc -q
+ok "project lock trace has a sample" grep -q 'store lock held: p$' "$T/repair.err"
 held=$(awk '/store lock held: p$/ { if ($2 > m) m = $2 } END { print int(m) }' "$T/repair.err")
 ok "project lock held less than 2 seconds ($held ms)" test "$held" -lt 2000
 finish

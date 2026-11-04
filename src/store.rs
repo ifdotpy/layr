@@ -661,6 +661,12 @@ impl<'a> Project<'a> {
     /// Move a tree to an already prepared trash directory without deleting it on failure.
     /// This is safe to call under a project lock; cleanup happens after the lock.
     pub fn move_to_trash(&self, path: &Path, trash: &Path) -> Result<()> {
+        // Read-only btrfs subvolumes cannot be renamed across directories. The
+        // destroy ioctl returns promptly; the kernel cleans their content later.
+        #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+        if crate::storage::is_subvolume(path) && crate::storage::destroy_known(path, &self.nested_hints(path))? {
+            return Ok(());
+        }
         let to = trash.join(format!("gc.{}", crate::ids::new_id()));
         #[cfg(feature = "overlayfs")]
         return crate::storage::rename_tree(path, &to);
