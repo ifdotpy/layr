@@ -2363,8 +2363,7 @@ fn init_from_git(ctx: &Ctx, args: &[String]) -> Result<i32> {
             if let Some(parent) = dst.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            // A plain folder of the checkout: no store manages it yet (`rename_tree` needs one on OverlayFS).
-            std::fs::rename(src.join(c), &dst)?;
+            move_folder(&src.join(c), &dst)?;
         }
     }
     let layr = std::env::current_exe()?;
@@ -2411,6 +2410,45 @@ fn init_from_git(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
     }
     Ok(0)
+}
+
+/// Moves the plain folder `from` (no store manages it yet) to `to` on the same file system: a rename. When `to` is
+/// in a mounted line folder (OverlayFS gives EXDEV), a copy that keeps modes and times (cargo compares them; the
+/// file system makes a reflink where it can), then the removal of `from`.
+fn move_folder(from: &std::path::Path, to: &std::path::Path) -> Result<()> {
+    match std::fs::rename(from, to) {
+        Ok(()) => return Ok(()),
+        Err(e) if e.raw_os_error() == Some(rustix::io::Errno::XDEV.raw_os_error()) => {}
+        Err(e) => return Err(anyhow::Error::new(e).context(format!("move {} to {}", from.display(), to.display()))),
+    }
+    if let Err(e) = copy_keeping_times(from, to) {
+        let _ = std::fs::remove_dir_all(to);
+        return Err(e.context(format!("copy {} to {}", from.display(), to.display())));
+    }
+    std::fs::remove_dir_all(from)?;
+    Ok(())
+}
+
+/// Copies `from` to the new path `to`: folders, files and links, with modes and times.
+fn copy_keeping_times(from: &std::path::Path, to: &std::path::Path) -> Result<()> {
+    let m = std::fs::symlink_metadata(from)?;
+    if m.file_type().is_symlink() {
+        std::os::unix::fs::symlink(std::fs::read_link(from)?, to)?;
+        return Ok(());
+    }
+    if m.is_dir() {
+        std::fs::create_dir(to)?;
+        for e in std::fs::read_dir(from)? {
+            let e = e?;
+            copy_keeping_times(&e.path(), &to.join(e.file_name()))?;
+        }
+    } else if m.is_file() {
+        crate::fsutil::copy_regular(from, to)?;
+    } else {
+        bail!("cannot copy the special file {}", from.display());
+    }
+    std::fs::set_permissions(to, m.permissions())?;
+    crate::fsutil::keep_times(from, to)
 }
 
 /// The cache folders of a checkout: ignored `target` folders next to a Cargo.toml and ignored
@@ -3032,5 +3070,31 @@ mod record_caches_tests {
         assert_eq!(std::fs::read_dir(repo.p.states_dir())?.count(), 0, "the failed call leaves no snapshot");
         std::fs::remove_dir_all(dir).ok();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod move_folder_tests {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    #[test]
+    fn a_copy_keeps_files_links_modes_and_times() {
+        let base = std::env::temp_dir().join(format!("layr-move-folder-{}", crate::ids::new_id()));
+        let from = base.join("target");
+        std::fs::create_dir_all(from.join("debug/deps")).unwrap();
+        std::fs::write(from.join("debug/x"), b"bin").unwrap();
+        std::fs::set_permissions(from.join("debug/x"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::os::unix::fs::symlink("x", from.join("debug/link")).unwrap();
+        let old = std::fs::File::open(from.join("debug/x")).unwrap();
+        crate::fsutil::set_mtime(&old, 1_000_000_000, 5).unwrap();
+        let to = base.join("copy");
+        super::copy_keeping_times(&from, &to).unwrap();
+        let m = std::fs::metadata(to.join("debug/x")).unwrap();
+        assert_eq!(std::fs::read(to.join("debug/x")).unwrap(), b"bin");
+        assert_eq!(m.mode() & 0o777, 0o755);
+        assert_eq!((m.mtime(), m.mtime_nsec()), (1_000_000_000, 5));
+        assert_eq!(std::fs::read_link(to.join("debug/link")).unwrap(), std::path::PathBuf::from("x"));
+        assert!(to.join("debug/deps").is_dir());
+        std::fs::remove_dir_all(&base).unwrap();
     }
 }
