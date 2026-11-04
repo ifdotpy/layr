@@ -6,12 +6,12 @@ This page is part of the [Layr documentation](../README.md#documentation).
 
 Layr chooses its worker count from the CPUs available to the process, including affinity and
 container limits. Set `LAYR_THREADS` to a positive integer to override it; `1` selects sequential
-work. The caller's value counts, also for a command that the daemon runs. Invalid or zero values use the detected count. The value is read once, when parallel work first needs it.
+work. The caller's value counts, also for a command that the daemon runs. Invalid or zero values use the detected count. The value is read once per command process.
 For work that supports size scaling, Layr divides the number of work units by a measured minimum
 per worker, rounding down and clamping the result between one and the configured worker count.
-Record decoding uses 100,000 records per worker; smaller histories run serially. The worker pool
-is created only for a parallel job. On Linux with glibc, large parallel jobs also tune allocator
-arenas and memory thresholds in the command process to reduce contention.
+Record decoding uses 100,000 records per worker and starts parallel work at 200,000 records when
+at least two workers are configured. The worker pool is created only for a parallel job. On Linux
+with glibc, each command process sets its allocator arena cap once to its configured worker count.
 APFS and thin metadata scans, disk usage walks, and radar comparisons cap concurrent filesystem
 work at four workers to limit I/O contention. Btrfs snapshot batches cap submissions at eight to
 bound the I/O queue while allowing shared transaction commits. Small APFS batches stay sequential.

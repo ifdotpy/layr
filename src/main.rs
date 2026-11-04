@@ -236,6 +236,8 @@ fn main() {
         || rustix::process::geteuid().is_root()
         || std::env::var("LAYR_DIRECT").map(|v| v == "1").unwrap_or(false);
     let code = if direct {
+        // No threads have started in the direct command process.
+        parallel::initialize_allocator();
         let uid = rustix::process::getuid().as_raw();
         let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
         let env: HashMap<String, String> = std::env::vars().collect();

@@ -826,8 +826,10 @@ impl<'a> Repo<'a> {
 
     /// Read authenticated records already accepted into the local database.
     pub fn read_model(&self) -> Result<layr_model::Project> {
-        let lines = self.p.db.all_lines()?;
-        let records = decode_records(&lines)?;
+        let records = {
+            let lines = self.p.db.all_lines()?;
+            decode_records(&lines)?
+        };
         layr_model::Project::from_records(&self.p.id, records, &self.p.store.machine.id)
     }
 
@@ -4463,7 +4465,8 @@ mod owner_walk_tests {
     }
 }
 
-/// Decode accepted records in input order, preserving the first parse error in that order.
+/// Decode accepted records in input order, preserving the first returned parse error in that order.
+/// Panics are not part of this error-ordering guarantee.
 fn decode_records(lines: &[String]) -> Result<Vec<Record>> {
     let workers = crate::parallel::workers_for(lines.len(), crate::parallel::MIN_RECORDS_PER_WORKER);
     decode_records_with_workers(lines, workers)

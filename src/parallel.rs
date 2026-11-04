@@ -48,22 +48,29 @@ pub fn pool(workers: usize) -> Option<rayon::ThreadPool> {
     if workers <= 1 {
         return None;
     }
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    tune_parallel_allocator(workers);
     rayon::ThreadPoolBuilder::new().num_threads(workers).build().ok()
 }
 
-/// Glibc's default allocator settings can contend heavily on allocation-heavy jobs.
-/// Daemon requests run in their own child process, so the settings apply to that command only.
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
-#[allow(unsafe_code)]
-fn tune_parallel_allocator(workers: usize) {
-    // SAFETY: mallopt accepts integer parameters and synchronizes allocator configuration itself.
-    unsafe {
-        libc::mallopt(libc::M_MMAP_THRESHOLD, 32 * 1024 * 1024);
-        libc::mallopt(libc::M_TRIM_THRESHOLD, 512 * 1024 * 1024);
-        libc::mallopt(libc::M_ARENA_MAX, workers.min(i32::MAX as usize) as i32);
+/// Initialize the process-wide allocator policy before starting any threads.
+/// Called once in a direct command or a forked daemon request after configuring its caller.
+pub fn initialize_allocator() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        static INIT: OnceLock<()> = OnceLock::new();
+        INIT.get_or_init(|| {
+            // SAFETY: the caller invokes this while the command process is single-threaded,
+            // before any worker is started. Glibc synchronizes the allocator afterward.
+            #[allow(unsafe_code)]
+            unsafe {
+                libc::mallopt(libc::M_ARENA_MAX, arena_limit(threads()));
+            }
+        });
     }
+}
+
+#[cfg(any(test, all(target_os = "linux", target_env = "gnu")))]
+fn arena_limit(workers: usize) -> i32 {
+    workers.clamp(1, i32::MAX as usize) as i32
 }
 
 pub fn io_threads() -> usize {
@@ -83,6 +90,13 @@ mod tests {
         assert_eq!(workers_for(199, 100), 1);
         assert_eq!(workers_for(200, 100), 2.min(threads()));
         assert_eq!(workers_for(usize::MAX, 1), threads());
+    }
+
+    #[test]
+    fn arena_limit_is_positive_and_fits_glibc() {
+        assert_eq!(arena_limit(0), 1);
+        assert_eq!(arena_limit(8), 8);
+        assert_eq!(arena_limit(usize::MAX), i32::MAX);
     }
 
     #[test]
