@@ -27,7 +27,8 @@ wait "$pid"
 eq "repair succeeds" 0 "$?"
 eq "only the root state remains" 1 "$(ls "$O/states" | wc -l | tr -d ' ')"
 ok "owners match" l gc -q
-# Recreate the same overlay after planning: the changed parent mark forces a retry.
+# Recreate the same overlay after planning: the overlay records change (not the parent records),
+# so the removed-overlay check under the lock keeps the recreated overlay.
 l save --caches -q
 l overlay remove cache.target
 rm -rf "$T/wait" && mkdir -p "$T/wait"
@@ -40,8 +41,7 @@ printf new > target/file
 ok "foreground recreates removed overlay" l save --caches -q
 touch "$T/wait/go.1"
 wait "$pid"
-eq "repair retries successfully" 0 "$?"
-ok "changed records force a new plan" test "$(grep -c 'trace begin repair: plan' "$T/retry.err")" -ge 2
+eq "repair succeeds after the overlay was recreated" 0 "$?"
 l overlay list > "$T/overlays"
 ok "recreated overlay survives" grep -q cache.target "$T/overlays"
 ok "owners match after recreation" l gc -q
