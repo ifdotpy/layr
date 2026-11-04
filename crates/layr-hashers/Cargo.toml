@@ -1,0 +1,16 @@
+[package]
+name = "layr-hashers"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[dependencies]
+sha1 = "0.10"
+sha2 = "0.10"
+blake3 = "1"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+[[bench]]
+name = "throughput"
+harness = false

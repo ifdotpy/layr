@@ -1471,7 +1471,6 @@ dependencies = [
  "age",
  "anyhow",
  "base64 0.22.1",
- "blake3",
  "chrono",
  "ed25519-dalek",
  "flate2",
@@ -1480,6 +1479,7 @@ dependencies = [
  "ignore",
  "layr-adapter",
  "layr-cache",
+ "layr-hashers",
  "layr-model",
  "layr-retest",
  "layr-store",
@@ -1493,8 +1493,6 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
- "sha1",
- "sha2 0.10.9",
  "similar",
  "tar",
  "toml 0.8.23",
@@ -1517,6 +1515,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "layr-hashers"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "sha1",
+ "sha2 0.10.9",
+ "xxhash-rust",
+]
+
+[[package]]
 name = "layr-model"
 version = "0.1.0"
 dependencies = [
@@ -1525,12 +1533,11 @@ dependencies = [
  "hex",
  "html5gum",
  "image",
+ "layr-hashers",
  "layr-store",
  "quick-xml",
  "serde",
  "serde_json",
- "sha1",
- "sha2 0.10.9",
  "similar",
  "toml 0.8.23",
 ]
@@ -1561,13 +1568,12 @@ dependencies = [
  "getrandom 0.2.17",
  "hex",
  "hmac",
+ "layr-hashers",
  "rand 0.8.8",
  "reqwest",
  "ruzstd",
  "serde",
  "serde_json",
- "sha1",
- "sha2 0.10.9",
  "ssh-key",
  "uuid",
  "zstd-safe",
@@ -3423,6 +3429,12 @@ dependencies = [
  "libc",
  "rustix",
 ]
+
+[[package]]
+name = "xxhash-rust"
+version = "0.8.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "550a2b930b62486a393c52d5c3b84bff264b28aa437ed64694d31e93b1757af7"
 
 [[package]]
 name = "yoke"

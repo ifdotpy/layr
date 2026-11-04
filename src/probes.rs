@@ -8,7 +8,7 @@ use crate::tree::Tree;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
+use layr_hashers::{ContentAddress, Digest};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::Path;
@@ -439,7 +439,7 @@ fn files(root: &Path) -> Result<BTreeMap<String, FileData>> {
             }
         } else if m.ftype == FType::File {
             let mut file = tree.open_read(path)?;
-            let mut hash = Sha256::new();
+            let mut hash = ContentAddress::new();
             let mut bytes = Vec::new();
             let mut buf = [0; 65536];
             loop {

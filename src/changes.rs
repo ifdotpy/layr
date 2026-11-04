@@ -8,7 +8,7 @@ use crate::fsutil::{self, Meta, Src};
 use crate::storage as btrfs;
 use crate::stream;
 use anyhow::Result;
-use sha2::{Digest, Sha256};
+use layr_hashers::{FastCryptographic, PurposeHasher};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
@@ -259,7 +259,7 @@ pub fn with_renames(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), v
     let mut used_a: HashSet<usize> = HashSet::new();
     // Exact: same size and same bytes. Each candidate is read and hashed once; the chosen pair
     // is compared byte by byte.
-    let hash = |bytes: &[u8]| -> [u8; 32] { Sha256::digest(bytes).into() };
+    let hash = |bytes: &[u8]| <FastCryptographic as PurposeHasher>::hash(bytes);
     let mut by_key: HashMap<(u64, [u8; 32]), Vec<usize>> = HashMap::new();
     let del_sizes: HashSet<u64> = dels.iter().map(|&d| v[d].old.as_ref().unwrap().size).collect();
     let add_sizes: HashSet<u64> = adds.iter().map(|&a| v[a].new.as_ref().unwrap().size).collect();

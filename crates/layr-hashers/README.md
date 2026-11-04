@@ -1,0 +1,7 @@
+# Choosing a hasher
+
+Use `GitCompatible` for Git SHA-1 object IDs and compatibility with existing SHA-1 formats. Use `ContentAddress` for stable SHA-256 content addresses, cryptographic protocols and HMAC; these outputs are part of stored formats and must not change. `FastCryptographic` is BLAKE3 for disposable local integrity checks or explicitly versioned local caches. `FastNonCryptographic` is XXH3 for transient, non-adversarial in-memory keys only: it is neither collision-resistant nor a stable persisted format.
+
+`PurposeHasher` provides generic, statically dispatched one-shot and streaming operations with fixed-size outputs. The compatibility types also expose RustCrypto's `Digest` API. The implementations use their dependencies' runtime hardware detection; no machine-specific compiler flags are needed. BLAKE3 currently runs on one thread: a future parallel entry point should be wired to Layr's shared parallelism policy before enabling parallel updates, not create its own thread pool.
+
+Run `cargo bench -p layr-hashers --bench throughput` to compare sizes, streaming, generic dispatch, and direct calls. Measurements are machine and workload dependent.

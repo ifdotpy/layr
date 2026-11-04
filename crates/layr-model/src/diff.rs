@@ -11,8 +11,8 @@ pub fn is_binary(data: &[u8]) -> bool {
 }
 
 fn git_blob_id(data: &[u8]) -> String {
-    use sha1::{Digest, Sha1};
-    let mut hash = Sha1::new();
+    use layr_hashers::{Digest, GitCompatible};
+    let mut hash = GitCompatible::new();
     hash.update(format!("blob {}\0", data.len()).as_bytes());
     hash.update(data);
     hex::encode(hash.finalize())

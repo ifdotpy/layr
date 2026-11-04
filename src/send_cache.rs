@@ -1,7 +1,7 @@
 //! Disposable metadata streams for immutable states. No records depend on this cache.
 
 use crate::{fsutil, model, sys};
-use sha2::{Digest, Sha256};
+use layr_hashers::{FastCryptographic, PurposeHasher};
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::os::fd::AsFd;
@@ -40,19 +40,19 @@ impl Cache {
             let _ = fs::DirBuilder::new().mode(0o700).create(&dir);
         }
         trusted(&dir)?;
-        let mut hash = Sha256::new();
-        hash.update(b"layr-no-data-v1");
+        let mut hash = FastCryptographic::new();
+        hash.update(b"layr-no-data-v2");
         for file in [p, c] {
             if sys::subvol_flags(file.as_fd()).ok()? & sys::SUBVOL_RDONLY == 0 {
                 return None;
             }
             let info = sys::subvol_info(file.as_fd()).ok()?;
-            hash.update(sys::filesystem_uuid(file.as_fd()).ok()?);
-            hash.update(info.uuid);
-            hash.update(info.generation.to_le_bytes());
-            hash.update(info.ctransid.to_le_bytes());
+            hash.update(&sys::filesystem_uuid(file.as_fd()).ok()?);
+            hash.update(&info.uuid);
+            hash.update(&info.generation.to_le_bytes());
+            hash.update(&info.ctransid.to_le_bytes());
         }
-        Some(Self { dir, name: hex::encode(hash.finalize()) })
+        Some(Self { dir, name: hex::encode(hash.finalize().as_bytes()) })
     }
 
     pub fn read(&self) -> Option<Vec<u8>> {
@@ -64,7 +64,7 @@ impl Cache {
         }
         let mut data = Vec::new();
         f.take(MAX_ENTRY + 1).read_to_end(&mut data).ok()?;
-        if data.len() as u64 != len || Sha256::digest(&data[32..])[..] != data[..32] {
+        if data.len() as u64 != len || <FastCryptographic as PurposeHasher>::hash(&data[32..])[..] != data[..32] {
             return None;
         }
         Some(data.split_off(32))
@@ -76,7 +76,7 @@ impl Cache {
             return Ok(());
         }
         // The checksum needs no lock.
-        let mut saved = Sha256::digest(data).to_vec();
+        let mut saved = <FastCryptographic as PurposeHasher>::hash(data).to_vec();
         saved.extend_from_slice(data);
         // This cache is disposable. Publish atomically, but do not force a disk transaction.
         // A partial write after a crash fails the checksum and causes a fresh stream. The write
@@ -121,5 +121,30 @@ impl Cache {
         })();
         let _ = fs::remove_file(&tmp);
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use layr_hashers::{ContentAddress, Digest};
+
+    #[test]
+    fn checksum_roundtrip_rejects_corruption_and_old_format() {
+        let dir = std::env::temp_dir().join(format!("layr-send-cache-{}", crate::ids::new_id()));
+        std::fs::create_dir(&dir).unwrap();
+        let cache = Cache { dir: dir.clone(), name: "entry".into() };
+        cache.write(b"stream").unwrap();
+        assert_eq!(cache.read().as_deref(), Some(&b"stream"[..]));
+        let mut old = ContentAddress::digest(b"stream").to_vec();
+        old.extend_from_slice(b"stream");
+        std::fs::write(dir.join("entry"), old).unwrap();
+        assert!(cache.read().is_none());
+        cache.write(b"stream").unwrap();
+        let mut bad = std::fs::read(dir.join("entry")).unwrap();
+        *bad.last_mut().unwrap() ^= 1;
+        std::fs::write(dir.join("entry"), bad).unwrap();
+        assert!(cache.read().is_none());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

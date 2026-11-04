@@ -1779,11 +1779,11 @@ impl<'a> Repo<'a> {
     /// overlays, or a complete index.
     #[cfg(target_os = "macos")]
     fn status_key(&self, line: &Line, work: &Path, stage: &Option<PathBuf>) -> Result<Option<String>> {
-        use sha1::{Digest, Sha1};
+        use layr_hashers::{Digest, GitCompatible};
         if self.p.is_overlay() || !self.layers(line)?.is_empty() {
             return Ok(None);
         }
-        let mut h = Sha1::new();
+        let mut h = GitCompatible::new();
         let w = std::fs::symlink_metadata(work)?;
         h.update(format!("{}|{}|{}|{}|", line.head, w.dev(), w.ino(), work.display()));
         if let Some(s) = stage {
@@ -3365,8 +3365,8 @@ struct CacheReplacement {
 const CACHE_JOURNAL_PREFIX: &str = ".layr-cache-replace-";
 
 fn cache_journal(path: &str) -> String {
-    use sha2::Digest;
-    format!("{CACHE_JOURNAL_PREFIX}{}.json", hex::encode(sha2::Sha256::digest(path.as_bytes())))
+    use layr_hashers::Digest;
+    format!("{CACHE_JOURNAL_PREFIX}{}.json", hex::encode(layr_hashers::ContentAddress::digest(path.as_bytes())))
 }
 
 fn cache_journal_name(name: &str) -> bool {
