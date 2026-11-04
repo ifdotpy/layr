@@ -1426,26 +1426,37 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) ->
         }
         return Ok(c.freed.len());
     }
-    // The slow reads go before the lock (#194): the replay of the records and the overlay pass.
-    // Under the lock they are used when no record came in meanwhile (an equal records mark);
-    // else they are made again there.
-    let (mark, diff) = {
-        let _t = crate::trace::span("repair: plan");
-        snapshot(repo, || {
-            let want = repo.p.db.recomputed_owners(&repo.p.store.machine.id)?;
-            Ok((repo.p.db.records_mark()?, repo.p.db.owners_diff(&want)?))
-        })?
-    };
-    let overlays = repo.overlay_plan();
-    // Test hook (tests/t127-repair-plan.sh): wait after the plan, so a test can change the
-    // project before the lock.
-    if let Some(ms) = std::env::var("LAYR_TEST_REPAIR_PAUSE_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
-        std::thread::sleep(std::time::Duration::from_millis(ms));
-    }
-    let leaks = {
+    // Plan outside the project lock. A changed record invalidates the entire plan: retry
+    // without the lock rather than replaying records while other commands wait.
+    let mut attempts = 0;
+    let leaks = loop {
+        attempts += 1;
+        let (mark, diff) = {
+            let _t = crate::trace::begin("repair: plan");
+            snapshot(repo, || {
+                let want = repo.p.db.recomputed_owners(&repo.p.store.machine.id)?;
+                Ok((repo.p.db.records_mark()?, repo.p.db.owners_diff(&want)?))
+            })?
+        };
+        let overlays = repo.overlay_plan();
+        // Test hook (tests/t127-repair-plan.sh): after plan N, write `planned.N` in the folder and
+        // wait for `go.N`, so a test changes the project between the plan and the lock.
+        if let Some(dir) = std::env::var_os("LAYR_TEST_REPAIR_WAIT").map(std::path::PathBuf::from) {
+            std::fs::write(dir.join(format!("planned.{attempts}")), b"")?;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            while !dir.join(format!("go.{attempts}")).exists() {
+                anyhow::ensure!(std::time::Instant::now() < deadline, "test hook: no go.{attempts}");
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
         let _lock = repo.p.lock()?;
-        let fresh = repo.p.db.records_mark()? == mark;
-        let leaks = repair_table(repo, free, fresh.then_some(diff))?;
+        if repo.p.db.records_mark()? != mark {
+            if attempts < 3 {
+                continue;
+            }
+            anyhow::bail!("project changed during the command; run it again");
+        }
+        let leaks = repair_table(repo, free, Some(diff))?;
         evict_stored(repo)?;
         for expired in repo.p.db.expired_refs(ids::now_ms())? {
             let mut rec = Record::new("ref.expire");
@@ -1464,7 +1475,7 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) ->
         if let Err(e) = repo.free_removed_overlays(ctx) {
             eprintln!("warning: removed cache overlays stay until the next gc: {e:#}");
         }
-        match overlays.ok().filter(|_| fresh).map(Ok).unwrap_or_else(|| repo.overlay_plan()) {
+        match overlays {
             Ok(plan) => repo.commit_overlay_plan(ctx, plan),
             Err(e) => eprintln!("warning: overlays: old states stay until the next gc: {e:#}"),
         }
@@ -1499,7 +1510,7 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) ->
         }
         // Saved overlap compares of states that are gone (radar.rs).
         let _ = repo.prune_compares();
-        leaks
+        break leaks;
     };
     // The storage of the freed states: the leaks above and states that died before this repair.
     let freed = crate::free::finish_project(&repo.p)?;
