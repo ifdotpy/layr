@@ -106,7 +106,9 @@ fn decode(text: &str) -> BTreeMap<String, Entry> {
 /// folder. Called before the snapshot of a cache save, outside the project lock.
 pub fn record(w: &Path, folders: &[String]) -> Result<()> {
     let dirs: Vec<_> = folders.iter().map(|f| fsutil::safe_join(w, f)).collect::<Result<_>>()?;
-    let dirs: Vec<_> = dirs.into_iter().filter(|d| d.is_dir()).collect();
+    // An empty folder holds no build output, so it needs no times (and stays empty).
+    let holds = |d: &std::path::Path| std::fs::read_dir(d).is_ok_and(|mut r| r.any(|e| e.is_ok_and(|e| e.file_name() != FILE)));
+    let dirs: Vec<_> = dirs.into_iter().filter(|d| d.is_dir() && holds(d)).collect();
     if dirs.is_empty() {
         return Ok(());
     }
@@ -202,6 +204,7 @@ mod tests {
         std::fs::write(w.join("src/b.rs"), "fn b() {}\n").unwrap();
         set(&w.join("src/a.rs"), 1_000_000_000);
         set(&w.join("src/b.rs"), 1_000_000_000);
+        std::fs::write(w.join("target/out"), "built").unwrap();
         record(&w, &["target".to_string()]).unwrap();
         let text = std::fs::read_to_string(w.join("target").join(FILE)).unwrap();
         assert!(text.contains(" src/a.rs\n") && !text.contains("target/"), "{text}");
@@ -222,6 +225,8 @@ mod tests {
         let w = tmp("two");
         std::fs::create_dir_all(w.join("node_modules")).unwrap();
         std::fs::write(w.join(".gitignore"), "/target\n/node_modules\n").unwrap();
+        std::fs::write(w.join("target/out"), "built").unwrap();
+        std::fs::write(w.join("node_modules/out"), "built").unwrap();
         std::fs::write(w.join("src/a.rs"), "one\n").unwrap();
         set(&w.join("src/a.rs"), 1_000_000_000);
         record(&w, &["target".to_string()]).unwrap();
@@ -231,6 +236,15 @@ mod tests {
         set(&w.join("src/a.rs"), 1_200_000_000);
         assert_eq!(apply(&w, &["target".to_string(), "node_modules".to_string()]).unwrap(), 0);
         assert_eq!(mtime(&w.join("src/a.rs")), (1_200_000_000, 0));
+        let _ = std::fs::remove_dir_all(&w);
+    }
+
+    #[test]
+    fn an_empty_cache_folder_gets_no_times() {
+        let w = tmp("empty");
+        std::fs::write(w.join("src/a.rs"), "a\n").unwrap();
+        record(&w, &["target".to_string()]).unwrap();
+        assert!(!w.join("target").join(FILE).exists());
         let _ = std::fs::remove_dir_all(&w);
     }
 
