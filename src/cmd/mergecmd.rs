@@ -371,6 +371,9 @@ struct Settled<'a> {
     source: &'a str,
     /// The check commands of the line's rule, by name.
     commands: Vec<(String, String)>,
+    /// The name the merge was asked for, when it is not a queued state. The commit resolves it again:
+    /// a source that moved while the merge waited for the project lock is refused.
+    rev: Option<String>,
 }
 
 /// The check commands of a rule: each name with its command. An undefined name is an error.
@@ -395,6 +398,22 @@ fn resolve_commands(repo: &Repo, line: &Line, checks: &[String]) -> Result<Vec<(
 /// The checks of a merge, read again under the project lock before the records: the rule of the
 /// line, the check commands and, for a merge of another state, the approvals of the source.
 fn settled_now(ctx: &Ctx, repo: &Repo, now: &Line, head: &str, candidate: &str, s: &Settled<'_>) -> Result<()> {
+    if let Some(rev) = &s.rev {
+        let at = revs::resolve(repo, Some(now), rev)?;
+        if at != s.source {
+            if s.expect {
+                return Err(exit(
+                    1,
+                    format!(
+                        "error: {rev} is at {} but --expect names {}: the line changed after the review; review the new state first",
+                        ids::short(&at),
+                        ids::short(s.source)
+                    ),
+                ));
+            }
+            return Err(crate::repo::line_moved(rev, s.source, &at));
+        }
+    }
     let rule = repo.authorize_line(ctx, now, crate::repo::LineOp::Merge { expect: s.expect, hint: None })?;
     if rule.as_ref() != s.rule {
         return Err(exit(1, "merge protection changed during checks; run the merge again"));
@@ -1023,7 +1042,13 @@ fn merge_rev_inner(
         repo.working_state(ctx, line, if queue.is_some() { "before a queued merge" } else { "before a layr command" })?
     };
     let checks = rule.as_ref().map(|r| r.check.clone()).unwrap_or_default();
-    let settled = Settled { expect, rule: rule.as_ref(), source: &theirs, commands: resolve_commands(repo, line, &checks)? };
+    let settled = Settled {
+        expect,
+        rule: rule.as_ref(),
+        source: &theirs,
+        commands: resolve_commands(repo, line, &checks)?,
+        rev: queue.is_none().then(|| rev.to_string()),
+    };
     let head = line.head.clone();
     let label = theirs_line.as_ref().map(|l| l.name.clone()).unwrap_or_else(|| rev.to_string());
     let message = a.get("-m").map(|s| s.to_string()).unwrap_or_else(|| {
