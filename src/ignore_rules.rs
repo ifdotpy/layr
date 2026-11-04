@@ -9,12 +9,18 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// The local ignore file of a working folder: not versioned, read by git and layr. The project
+/// setting `ignore.local` fills it in the `.git` folder of each line.
+pub const LOCAL_EXCLUDE: &str = ".git/info/exclude";
+
 pub struct Rules {
     root: PathBuf,
     files: &'static [&'static str],
     /// For `.layrattributes`: the attribute whose patterns this matcher holds.
     attribute: Option<&'static str>,
     cache: RefCell<HashMap<String, Option<Arc<Gitignore>>>>,
+    /// `local_exclude`, looked up once.
+    local: std::cell::OnceCell<Option<PathBuf>>,
     /// The folders (relative to root, "" is the root) whose rule files are read. None: every folder.
     dirs: Option<std::collections::HashSet<String>>,
     /// The layers of a thin state: rule files are read from the layer that holds them.
@@ -29,6 +35,7 @@ impl Rules {
             files: &[".gitignore", ".layrignore"],
             attribute: None,
             cache: RefCell::new(HashMap::new()),
+            local: std::cell::OnceCell::new(),
             dirs: None,
             #[cfg(target_os = "macos")]
             layers: None,
@@ -44,6 +51,7 @@ impl Rules {
             files: if attribute.is_some() { &[".layrattributes"] } else { &[".gitignore", ".layrignore"] },
             attribute,
             cache: RefCell::new(HashMap::new()),
+            local: std::cell::OnceCell::new(),
             dirs: Some(dirs),
             #[cfg(target_os = "macos")]
             layers: None,
@@ -89,14 +97,28 @@ impl Rules {
             files: &[".layrattributes"],
             attribute: Some(name),
             cache: RefCell::new(HashMap::new()),
+            local: std::cell::OnceCell::new(),
             dirs: None,
             #[cfg(target_os = "macos")]
             layers: None,
         }
     }
 
+    /// The local exclude file of the working folder, when it has one (`LOCAL_EXCLUDE`). It is read
+    /// from the folder itself: a state, and the layers of one, have no `.git`.
+    fn local_exclude(&self) -> Option<&PathBuf> {
+        self.local
+            .get_or_init(|| {
+                let path = self.root.join(LOCAL_EXCLUDE);
+                // An empty file (each line's `.git` has one) adds no rule and no matcher.
+                let rules = std::fs::metadata(&path).is_ok_and(|m| m.is_file() && m.len() > 0);
+                (self.attribute.is_none() && rules).then_some(path)
+            })
+            .as_ref()
+    }
+
     fn matcher(&self, dir: &str) -> Option<Arc<Gitignore>> {
-        if self.dirs.as_ref().is_some_and(|d| !d.contains(dir)) {
+        if self.dirs.as_ref().is_some_and(|d| !d.contains(dir)) && !(dir.is_empty() && self.local_exclude().is_some()) {
             return None;
         }
         if let Some(m) = self.cache.borrow().get(dir) {
@@ -105,6 +127,12 @@ impl Rules {
         let base = if dir.is_empty() { self.root.clone() } else { self.root.join(dir) };
         let mut b = GitignoreBuilder::new(&base);
         let mut any = false;
+        // The local excludes of a working folder (`.git/info/exclude`), as git reads them: below the
+        // root's rule files, which come after them and win. A state has no `.git`.
+        if let Some(path) = dir.is_empty().then(|| self.local_exclude()).flatten() {
+            b.add(path);
+            any = true;
+        }
         for name in self.files {
             let rel = if dir.is_empty() { name.to_string() } else { format!("{dir}/{name}") };
             if self.is_file(&rel) {
