@@ -44,7 +44,8 @@ A cache is an ordinary overlay with properties. No separate cache concept remain
   The project setting `regenerable` (`layr config regenerable '["<path>"]'`) names cache paths for
   every line; a new line gets an empty cache of such a path at once.
 - Each line has its own overlay line in a follow overlay (`line-<line id>`). So **a line has
-  caches**, not a state: `line new X <line>` takes the newest cache of that line.
+  caches**, not a state: `line new X <line>` takes the newest cache of that line. A cache overlay
+  has one overlay line per line and platform (`line-<line id>.<os>-<arch>`, section 6).
 
 ## 3. Folder overlays
 
@@ -145,6 +146,12 @@ the files that select a toolchain. A missing file counts as empty.
 
 - `line new` and merges take a state only when its key equals the key of the target
   line (computed in that line at that time).
+- A line has one overlay line per platform: `line-<line id>.<os>-<arch>`. A `save --caches` on
+  one platform makes a state of that platform's overlay line, so it does not replace the cache of
+  another platform, and `history` applies per platform. `line new`, merges and follow passes read
+  the overlay line of their own platform. An overlay line of layr 0.24 and older (`line-<line id>`)
+  takes the name of its head's platform at its first write; until then a read takes it when its
+  head has this platform.
 - Remotes (section 7): a layr remote carries the states of every platform; a receiving machine
   imports only the states of its own `<os>-<arch>`.
 
@@ -285,7 +292,7 @@ Built on 2026-10-27: folder overlays and caches as cache overlays. Tests:
   the line saved; `overlay list` shows both.
 - `gc` applies `gc=lru:<size>` to the folder of each line (the newer of access and change time;
   apparent sizes) and deletes the cache states of deleted lines.
-- `line delete` also deletes the cache overlay lines (`line-<id>`) of the line. `undo` of that delete
+- `line delete` also deletes the cache overlay lines (`line-<id>.<platform>`, all platforms) of the line. `undo` of that delete
   restores the line but not its cache overlay lines: the next `save --caches` makes new ones. `gc`
   and `fsck --repair` remove cache overlay lines of deleted lines that older versions left behind.
   `fsck` marks such a problem "(of a deleted line)".
