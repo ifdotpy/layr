@@ -747,19 +747,35 @@ fn upload_state_journal(
     let delta_root = base_root.filter(|base| crate::storage::is_subvolume(base) && crate::storage::is_subvolume(root));
     let mut files =
         if delta_root.is_some() { base.map(|(_, p)| p.tree.files.clone()).unwrap_or_default() } else { BTreeMap::new() };
+    let mut times =
+        if delta_root.is_some() { base.map(|(_, p)| p.tree.times.clone()).unwrap_or_default() } else { BTreeMap::new() };
     let mut current = Vec::new();
     let mut part_entries = Vec::new();
     let mut part = 0;
     let mut frames = 0;
     let mut bytes = 0;
     let stage = crate::trace::span("store walk and frames");
-    let changed = delta_root.map(|base| crate::changes::file_changes(base, root)).transpose()?;
+    let (changed, touched) = match delta_root {
+        Some(base) => {
+            let (changes, touched) = crate::changes::file_changes_and_touched(base, root)?;
+            (Some(changes), touched)
+        }
+        None => (None, Vec::new()),
+    };
+    // Equal content with a new time: the tree keeps the file and takes the new time.
+    for path in &touched {
+        if let Some(time) = file_time(root, path) {
+            times.insert(path.clone(), time);
+        }
+    }
     if let Some(changes) = &changed {
         for change in changes {
             if let Some(old) = &change.old_path {
                 files.remove(old);
+                times.remove(old);
             }
             files.remove(&change.path);
+            times.remove(&change.path);
         }
     }
     let mut visit = |path: &str, meta: &fsutil::Meta| -> Result<bool> {
@@ -778,6 +794,9 @@ fn upload_state_journal(
         let mode = format!("{:o}", meta.git_mode());
         let data = content(root, path, &mode)?;
         let sha = hex::encode(ContentAddress::digest(&data));
+        if let Some(time) = file_time(root, path) {
+            times.insert(path.to_string(), time);
+        }
         if let Some(chain) = hashes.get(&sha) {
             files.insert(path.to_string(), Entry(mode, data.len() as u64, sha, chain.clone()));
             return Ok(true);
@@ -848,7 +867,7 @@ fn upload_state_journal(
     }
     drop(stage);
     let stage = crate::trace::span("store tree encode");
-    let tree = Tree { files };
+    let tree = Tree { files, times };
     let canonical_tree = tree.canonical()?;
     let delta_base = base.filter(|(_, p)| p.depth + 1 < format::FULL_TREE_EVERY);
     let encoded_base;
@@ -970,6 +989,13 @@ fn put_part(
     let _ = entries;
     push_failpoint("after_part", state);
     Ok(())
+}
+
+/// The modification time of `path` in the tree `root`, in nanoseconds since the epoch (`Tree::times`).
+fn file_time(root: &Path, path: &str) -> Option<u64> {
+    let meta = std::fs::symlink_metadata(fsutil::safe_join(root, path).ok()?).ok()?;
+    let since = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
+    u64::try_from(since.as_nanos()).ok()
 }
 
 #[cfg(test)]
@@ -1617,7 +1643,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let id = crate::ids::new_id();
         let pushed =
-            Pushed { attempt: "0123abcd".into(), tree: Tree { files: BTreeMap::new() }, depth: 0, canonical: Vec::new() };
+            Pushed { attempt: "0123abcd".into(), tree: Tree::default(), depth: 0, canonical: Vec::new() };
         let legacy = BTreeMap::from([(id.clone(), pushed)]);
         std::fs::write(root.join("pushed.json"), serde_json::to_vec(&legacy).unwrap()).unwrap();
         let index = load_index(&root).unwrap();

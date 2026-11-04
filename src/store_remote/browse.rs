@@ -276,7 +276,9 @@ impl Browse {
                 if selection.as_ref().is_some_and(|v| v["enabled"] == false) {
                     continue;
                 }
-                if let Some(ol) = overlay.line_by_name(&format!("line-{}", line.id))? {
+                // A cache overlay has an overlay line per platform; this machine shows its own.
+                let own = crate::overlay::cache_line_name(&line.id);
+                if let Some(ol) = overlay.line_by_name(&own)?.or(overlay.line_by_name(&format!("line-{}", line.id))?) {
                     let position = selection.as_ref().and_then(|v| v["position"].as_u64()).unwrap_or(u64::MAX);
                     hidden.push((position, crate::overlay::Layer { overlay: name.clone(), state: ol.head }));
                 }

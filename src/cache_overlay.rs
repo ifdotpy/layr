@@ -263,7 +263,7 @@ impl<'a> Repo<'a> {
     pub fn orphan_cache_lines(&self, orepo: &Repo) -> Result<Vec<Line>> {
         let mut orphans = Vec::new();
         for ol in orepo.p.db.lines()? {
-            if let Some(id) = ol.name.strip_prefix("line-") {
+            if let Some(id) = crate::overlay::line_of_overlay_line(&ol.name) {
                 if self.p.db.line_deleted(id)? {
                     orphans.push(ol);
                 }
@@ -461,7 +461,15 @@ impl<'a> Repo<'a> {
         let info = self.need_overlay(name)?;
         let orepo = self.overlay_repo(name)?;
         let of_line = |line_id: &str| -> Result<Option<String>> {
-            let Some(ol) = orepo.p.db.line_by_name(&format!("line-{line_id}"))? else { return Ok(None) };
+            let name = crate::overlay::cache_line_name(line_id);
+            // A line that no write moved to its platform name yet (`ensure_overlay_line`) has the old name.
+            let ol = match orepo.p.db.line_by_name(&name)? {
+                Some(ol) => ol,
+                None => match orepo.unnamed_platform_line(&name)? {
+                    Some(ol) => ol,
+                    None => return Ok(None),
+                },
+            };
             Ok(self.usable_cache(&orepo, &info.root, &ol.head, uid, key)?.then_some(ol.head))
         };
         // The newest usable cache saved with each project state. `save --caches` on a line with

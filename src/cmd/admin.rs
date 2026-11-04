@@ -1948,7 +1948,7 @@ fn fsck_overlays(ctx: &Ctx, repo: &Repo, repair: bool) -> Result<usize> {
         for l in o.lines()? {
             if !o.p.has_state(&l.head) {
                 problems += 1;
-                let deleted = match l.name.strip_prefix("line-") {
+                let deleted = match crate::overlay::line_of_overlay_line(&l.name) {
                     Some(id) => repo.p.db.line_deleted(id)?,
                     None => false,
                 };

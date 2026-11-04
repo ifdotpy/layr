@@ -8,5 +8,9 @@ pub use layr_model::validation::{is_cache_name, is_ref, is_uuid, validate};
 /// saved on (`StateRec::cache_platform`); build output in it, such as a Rust `target` folder, is
 /// made for that platform.
 pub fn cache_platform() -> String {
+    // Test only (tests/t138-cache-platform-lines.sh): `LAYR_TEST_PLATFORM` acts as another platform.
+    if let Ok(p) = std::env::var("LAYR_TEST_PLATFORM") {
+        return p;
+    }
     format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
 }
