@@ -672,7 +672,7 @@ impl Db {
         Ok(out)
     }
 
-    /// The present states that none of `rows` names: what `replace_owners(rows)` leaves unowned,
+    /// The present states that none of `rows` names: what a repair to `rows` leaves unowned,
     /// so `gc --repair` frees them.
     pub fn unowned_by(&self, rows: &[Row]) -> Result<Vec<String>> {
         let named: BTreeSet<&str> = rows.iter().map(|r| r.0.as_str()).collect();

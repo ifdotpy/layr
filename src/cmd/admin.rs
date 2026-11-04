@@ -1205,10 +1205,9 @@ impl OwnersCheck {
 fn owners_check(repo: &Repo) -> Result<OwnersCheck> {
     let want = repo.p.db.recomputed_owners(&repo.p.store.machine.id)?;
     let (missing, extra) = repo.p.db.owners_diff(&want)?;
-<<<<<<< head
     let stale = repo.p.db.stale_undo_rows()?;
     let freed = repo.p.db.unowned_by(&kept_rows(repo, &want)?)?;
-    Ok(OwnersCheck { want, missing, extra, stale, freed })
+    Ok(OwnersCheck { missing, extra, stale, freed })
 }
 
 /// The owner rows that a repair keeps: the replay plus the pins of live processes.
@@ -1220,13 +1219,6 @@ fn kept_rows(repo: &Repo, want: &[crate::owners::Row]) -> Result<Vec<crate::owne
         }
     }
     Ok(rows)
-||||||| base
-    let leaks = repo.p.db.leaked_states()?;
-    Ok(OwnersCheck { want, missing, extra, leaks })
-=======
-    let leaks = repo.p.db.leaked_states()?;
-    Ok(OwnersCheck { missing, extra, leaks })
->>>>>>> origin/main
 }
 
 /// The bytes that only the storage of these states holds (as `layr du` counts them): clones that
@@ -1263,7 +1255,6 @@ fn check(ctx: &Ctx, repo: &Repo, quiet: bool) -> Result<i32> {
             outln!(ctx, "\textra: {} {k} {h}", ids::short(s));
         }
     }
-<<<<<<< head
     if !c.stale.is_empty() {
         let freed: BTreeSet<&String> = c.freed.iter().collect();
         let held: Vec<String> = c.stale.iter().map(|r| r.0.clone()).filter(|s| freed.contains(s)).collect();
@@ -1282,20 +1273,6 @@ fn check(ctx: &Ctx, repo: &Repo, quiet: bool) -> Result<i32> {
             c.freed.len(),
             human_size(bytes)
         );
-||||||| base
-    if !c.leaks.is_empty() {
-        let bytes = states_bytes(repo, &c.leaks);
-        outln!(
-            ctx,
-            "leaks: {} state(s), {} would be freed by `layr gc --repair`",
-            c.leaks.len(),
-            human_size(bytes)
-        );
-=======
-    if !c.leaks.is_empty() {
-        let bytes = states_bytes(repo, &c.leaks);
-        outln!(ctx, "leaks: {} state(s), {} would be freed by `layr gc --repair`", c.leaks.len(), human_size(bytes));
->>>>>>> origin/main
     }
     if c.clean() {
         if !quiet {
@@ -1365,21 +1342,6 @@ pub fn gc_repair_quiet(ctx: &Ctx, repo: &Repo) -> Result<usize> {
 /// `free` frees the leaked states too. Only an explicit `gc --repair` does: a state that a command
 /// has recorded but not yet given an owner looks like a leak for a moment (a periodic pass would
 /// free it under the command).
-<<<<<<< head
-pub fn repair_table(repo: &Repo, free: bool) -> Result<Vec<String>> {
-    let c = owners_check(repo)?;
-    repo.p.db.replace_owners(&kept_rows(repo, &c.want)?)?;
-||||||| base
-pub fn repair_table(repo: &Repo, free: bool) -> Result<Vec<String>> {
-    let c = owners_check(repo)?;
-    let mut want = c.want.clone();
-    for (state, kind, holder) in repo.p.db.owner_rows()?.into_iter().filter(|r| r.1 == "pin") {
-        if crate::free::holder_alive(&holder) {
-            want.push((state, kind, holder));
-        }
-    }
-    repo.p.db.replace_owners(&want)?;
-=======
 /// `diff` is `owners_diff` against the replay when the caller made it with no record added
 /// since (the rows that records make are the same); `None` replays here.
 pub fn repair_table(repo: &Repo, free: bool, diff: Option<(Vec<crate::owners::Row>, Vec<crate::owners::Row>)>) -> Result<Vec<String>> {
@@ -1393,7 +1355,6 @@ pub fn repair_table(repo: &Repo, free: bool, diff: Option<(Vec<crate::owners::Ro
             repo.p.db.release_holder(&holder)?;
         }
     }
->>>>>>> origin/main
     let leaks = repo.p.db.leaked_states()?;
     if free {
         repo.p.db.free_leaks(&leaks)?;
@@ -1775,19 +1736,7 @@ pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let c = owners_check(repo)?;
     if !c.clean() {
         problems += 1;
-<<<<<<< head
         outln!(ctx, "owners differ from the records: {} missing, {} extra, {} leaked", c.missing.len(), c.extra.len(), c.freed.len());
-||||||| base
-        outln!(ctx, "owners differ from the records: {} missing, {} extra, {} leaked", c.missing.len(), c.extra.len(), c.leaks.len());
-=======
-        outln!(
-            ctx,
-            "owners differ from the records: {} missing, {} extra, {} leaked",
-            c.missing.len(),
-            c.extra.len(),
-            c.leaks.len()
-        );
->>>>>>> origin/main
         for (s, k, h) in c.missing.iter().take(5) {
             outln!(ctx, "\tmissing: {} {k} {h}", ids::short(s));
         }
