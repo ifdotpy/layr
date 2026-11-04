@@ -607,7 +607,7 @@ impl<'a> Repo<'a> {
         Ok(out)
     }
 
-    /// The cache adapter hook (issue #167, docs/cache-overlays.md section 18) for `folder`, a folder cache of
+    /// The cache adapter hook (issue #167, docs/cache-overlays.md section 19) for `folder`, a folder cache of
     /// `line` that is in its working copy now. Core runs the adapter that the `prune` property of `overlay`
     /// names. It never fails: the outcome is one log line on stderr.
     pub fn prune_cache(&self, line: &Line, overlay: &str, folder: &str) {

@@ -182,7 +182,7 @@ fn prepare_caches(repo: &Repo, l: &Line, only: &[String]) -> Result<()> {
             continue;
         }
         crate::repo::convert_cache(&w, &p, u, g)?;
-        // Pruned before the copy and the save: the state keeps the pruned cache (docs/cache-overlays.md, section 18).
+        // Pruned before the copy and the save: the state keeps the pruned cache (docs/cache-overlays.md, section 19).
         repo.prune_cache_folder(l, &p);
         #[cfg(target_os = "macos")]
         prepare_cache_copy(repo, l, &w, &p)?;

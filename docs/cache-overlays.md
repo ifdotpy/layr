@@ -71,18 +71,6 @@ A folder overlay must be ignored by the ignore rules and must not hold files of 
 state, as for caches today (`design.md` section 5). A folder that holds versioned files stays a
 plain folder; `save --caches` says so.
 
-A cache overlay applies only in a line where its folder is a cache path: the folder is named by the
-machine setting `regenerable`, or a `.layrattributes` file marks it `regenerable` and the ignore
-rules ignore it. The folder may be absent. Other lines ignore the overlay:
-
-- `overlay list` shows `not a cache path in this line` for it, with no repair hint.
-- `overlay repair` of it exits 0 and prints the same message. It changes nothing.
-- A line's `line new`, `merge`, `follow` and `gc lru:<size>` skip the folder.
-- A plain `save` and `save --caches` of another line do not touch it.
-
-The `overlay list` and `overlay repair` rule covers every folder overlay. The skip rule covers
-cache overlays only: a folder overlay made with `overlay create --folder` is not skipped.
-
 ## 4. Commands
 
 | Command | Effect |
@@ -95,8 +83,7 @@ cache overlays only: a folder overlay made with `overlay create --folder` is not
 | `layr line new <name> <line>` | The new line takes the newest state of each cache overlay of the source line. |
 | `layr line new <name> <state>` | The new line takes, for each cache overlay, the newest state saved at that state or at its nearest ancestor (the rule of `warm_cache` today). It prints `no cache for <path>` when there is none. |
 | `layr merge <line>` | Merges each follow overlay of the source line, with the overlay's `merge` property. A cache overlay unions the files into the target's folder. |
-| `layr overlay repair <overlay>` | In the current line, the folder of that folder overlay: a plain folder becomes a cache again; a cache with versioned files becomes a plain folder. In a line where the folder is no cache path, it prints `not a cache path in this line` and exits 0 (section 3). |
-| `layr overlay remove <cache overlay>` | Removes the cache overlay from the project (section 18). Refuses a versioned overlay. |
+| `layr overlay repair <overlay>` | In the current line, the folder of that folder overlay: a plain folder becomes a cache again; a cache with versioned files becomes a plain folder. |
 | `layr overlay list` | Also shows, for each folder overlay in a line, the state of its folder, its size on disk and its saved state (was `layr cache list -v`). |
 | `layr cache add\|remove\|list\|repair\|pull` | Removed. Section 15 names the replacements. |
 | `layr gc [-n] [--dedup]` | Also applies `history` to overlay lines and `gc lru:<size>` to working folders. With `--dedup`, also shares equal cache content (section 16). |
@@ -430,27 +417,7 @@ taken states are written as overlay line records, so their owners follow the ove
 - An unprotected target takes the caches without the check.
 - Test: `tests/t101-merge-caches-only.sh` (macOS and Linux CI, OverlayFS on ext4 and XFS).
 
-<<<<<<< head
-## 18. Removing a cache overlay
-
-`layr overlay remove <name>` removes a cache overlay from the project. The owner runs it. A
-versioned overlay is refused: its files are history.
-
-- The record is a `config` record. It clears the overlay's settings and keeps its empty first
-  state id in `overlay.<name>.removed`. Other machines and `layr undo` see it.
-- The overlay leaves the stack of every line, and pending moves into it are cancelled.
-- The cache folder of each line on this machine becomes a plain folder with its files. A line
-  that the caller may not save keeps its nested cache, and the command warns.
-- A new `save --caches` of the folder makes a new overlay of that name.
-- The states of the removed overlay are freed by the next `layr gc --repair`, as the states of a deleted
-  line are. No line keeps them, so gc deletes all of them except the empty first state. Until gc runs, `layr undo` can restore the overlay.
-- A plain folder that stays `regenerable` in a line becomes a cache again at the line's next
-  snapshot, as any regenerable folder does. To keep it plain, remove `regenerable` from
-  `.layrattributes` or from the machine setting first.
-- Test: `tests/t110-overlay-remove.sh`.
-||||||| base
-=======
-## 18. Pruning cache folders
+## 19. Pruning cache folders
 
 A cache folder of a line (`target`, `node_modules`) keeps the build output of old dependencies. A
 cache adapter removes that output and keeps the live set: the entries that the project's standard
@@ -562,10 +529,5 @@ Call sites, each before its next step:
   registry; a lockfile that needs a missing package and a stale lockfile skip the folder, which stays
   unchanged; no lifecycle script runs), `dispatch.rs`.
 - `crates/layr-retest/tests/e2e.rs`: `layr retest prune target` runs the cargo adapter.
-<<<<<<< head
->>>>>>> b948645
-||||||| base
-=======
 - `tests/t110-prune-hook.sh`: `line new`, `merge --caches-only` and `prune=none` through the binary.
   Root (btrfs) on Linux, and macOS APFS, as the other `tests/t*.sh` files.
->>>>>>> 0ef6ee8

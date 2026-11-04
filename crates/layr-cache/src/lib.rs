@@ -1,7 +1,7 @@
 //! The cache adapters: the cargo and pnpm adapters that prune a cache folder of a line to its live
 //! set. They implement the interface of `layr-adapter`. The binary registers `adapters()` at startup.
 //! An adapter works offline and compiles nothing. A stale or failing folder is skipped and left unchanged.
-//! See docs/cache-overlays.md, section 18.
+//! See docs/cache-overlays.md, section 19.
 
 pub mod cargo;
 pub mod pnpm;

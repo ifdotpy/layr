@@ -1,5 +1,5 @@
 #!/bin/bash
-# The cache adapter hook (issue #167, docs/cache-overlays.md section 18). The hook prunes the cache folders
+# The cache adapter hook (issue #167, docs/cache-overlays.md section 19). The hook prunes the cache folders
 # that `line new`, `merge --caches-only`, a merge, a follow pass and `save --caches` take, to the live set of the
 # cargo adapter, before the next step. `prune=none` keeps a folder. An unknown adapter name is logged and does
 # not fail the command.
