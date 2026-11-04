@@ -33,7 +33,9 @@
      export first. A line is a candidate through the state of its export.
    - For each candidate, in order: a protected line needs its merge rule (`merge_met_rule`), and the
      squash-safe content check (`caches_contained`, #133) must pass. Then `pull_caches` takes the
-     folders that the candidate has and no earlier candidate took.
+     folders that the candidate has and no earlier candidate took. An error of one candidate (its
+     cache names a state that is not on this machine, say) refuses only that candidate. When no
+     candidate gave a cache, the result names the last refusal (`no cache taken: ...`).
    - The tracked files get the source times that the taken caches recorded (`.layr-times`,
      docs/cache-overlays.md section 20).
    - The build: the adapter of each folder overlay builds the project's standard commands into the
