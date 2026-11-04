@@ -969,6 +969,22 @@ pub fn set_mtime(f: &File, sec: i64, nsec: i64) -> Result<()> {
     Ok(())
 }
 
+/// Gives `dst` (a file or a folder) the access and modification times of `src`. A symbolic link is left as it is.
+/// A copy keeps the times on some file systems only: cargo compares them, so a copied cache keeps them everywhere.
+pub fn keep_times(src: &Path, dst: &Path) -> Result<()> {
+    let m = fs::symlink_metadata(src).with_context(|| format!("stat {}", src.display()))?;
+    if m.file_type().is_symlink() {
+        return Ok(());
+    }
+    let d = File::open(dst).with_context(|| format!("open {}", dst.display()))?;
+    let ts = rustix::fs::Timestamps {
+        last_access: rustix::fs::Timespec { tv_sec: m.atime(), tv_nsec: m.atime_nsec() as _ },
+        last_modification: rustix::fs::Timespec { tv_sec: m.mtime(), tv_nsec: m.mtime_nsec() as _ },
+    };
+    rustix::fs::futimens(&d, &ts)?;
+    Ok(())
+}
+
 /// Write bytes as a new file at `root/rel` (replacing what is there), with a mode and owner.
 pub fn write_file(root: &Path, rel: &str, data: &[u8], mode: u32, own: Option<(u32, u32)>) -> Result<()> {
     write_file_from(root, rel, &mut &data[..], mode, own)

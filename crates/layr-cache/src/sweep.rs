@@ -106,7 +106,10 @@ pub fn plan(target: &Path, messages: &[u8]) -> Result<Plans> {
                             live.hashes.insert(h);
                         }
                         None if lib => {
+                            // The unit of an unhashed library is the one whose output has the same size and time
+                            // (matched below). The crate is live too, for its object files.
                             live.crates.insert(name.clone());
+                            copies.push(Pending { profile, path: p, name: name.clone(), marker });
                         }
                         None => copies.push(Pending { profile, path: p, name: name.clone(), marker }),
                     }
@@ -124,6 +127,8 @@ pub fn plan(target: &Path, messages: &[u8]) -> Result<Plans> {
         }
     }
     let mut outputs_of: BTreeMap<PathBuf, Vec<Output>> = BTreeMap::new();
+    // Libraries whose unhashed output matched one unit: the newest-unit rule below does not apply to them.
+    let mut matched: BTreeSet<(PathBuf, String)> = BTreeSet::new();
     for c in copies {
         let outputs = outputs_of.entry(c.profile.clone()).or_insert_with(|| outputs(&c.profile));
         let m = c.path.metadata().with_context(|| format!("cannot read the output {}", c.path.display()))?;
@@ -131,15 +136,24 @@ pub fn plan(target: &Path, messages: &[u8]) -> Result<Plans> {
         let same: Vec<&Output> = outputs.iter().filter(|o| o.len == m.len() && o.mtime == (m.mtime(), m.mtime_nsec())).collect();
         if same.is_empty() {
             // No file matches: the outputs of that name and every unit of its kind stay.
-            let base = c.name.replace('-', "_");
-            live.hashes.extend(outputs.iter().filter(|o| unit_base(&o.name).is_some_and(|b| b == base)).map(|o| o.hash.clone()));
-            live.hashes.extend(marked(&c.profile, c.marker, &base).into_iter().map(|(h, _)| h));
+            // A library with no matching file takes the newest-unit rule below, not every unit of its name.
+            if c.marker != "lib" {
+                let base = c.name.replace('-', "_");
+                live.hashes.extend(outputs.iter().filter(|o| unit_base(&o.name).is_some_and(|b| b == base)).map(|o| o.hash.clone()));
+                live.hashes.extend(marked(&c.profile, c.marker, &base).into_iter().map(|(h, _)| h));
+            }
         } else {
             live.hashes.extend(same.iter().map(|o| o.hash.clone()));
+            if c.marker == "lib" {
+                matched.insert((c.profile.clone(), c.name.clone()));
+            }
         }
     }
     for (profile, live) in plans.iter_mut() {
         for name in live.crates.clone() {
+            if matched.contains(&(profile.clone(), name.clone())) {
+                continue;
+            }
             // The newest unit of the crate is the one whose build wrote the unhashed output.
             let newest = marked(profile, "lib", &name).into_iter().max_by_key(|(_, t)| *t);
             live.hashes.extend(newest.map(|(h, _)| h));
@@ -501,6 +515,13 @@ pub fn sweep(profile: &Path, live: &Live, dry: bool) -> u64 {
         }
     }
     freed
+}
+
+/// Bytes of the files under `p`, each inode counted once. A hard link of a file counts its bytes once.
+pub fn tree_bytes(p: &Path) -> u64 {
+    let mut out = BTreeMap::new();
+    visit(p, &mut out);
+    out.values().map(|(_, _, len)| len).sum()
 }
 
 /// Bytes that removing `paths` frees: a file frees its bytes when every link to its inode is in `paths`.

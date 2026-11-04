@@ -104,6 +104,16 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 return Err(exit(1, format!("error: '{}' is no cache path of the line (see layr overlay list)", only.join("', '"))));
             }
         }
+        if a.has("--caches") {
+            // A folder that an interrupted prune left damaged is not saved until a prune of it succeeds.
+            let damaged = repo.damaged_folders(&l)?;
+            for p in caches.iter().filter(|p| damaged.contains(*p)) {
+                if !a.has("-q") {
+                    outln!(ctx, "{p}: skipped: damaged by an interrupted prune; run layr save --caches again to prune it");
+                }
+            }
+            caches.retain(|p| !damaged.contains(p));
+        }
         let st = if a.has("--caches") {
             // A cache folder that a tool made again as a plain folder becomes a cache first, so
             // its files stay out of the state. A folder with versioned files is no cache; one
@@ -172,6 +182,8 @@ fn prepare_caches(repo: &Repo, l: &Line, only: &[String]) -> Result<()> {
             continue;
         }
         crate::repo::convert_cache(&w, &p, u, g)?;
+        // Pruned before the copy and the save: the state keeps the pruned cache (docs/cache-overlays.md, section 19).
+        repo.prune_cache_folder(l, &p);
         #[cfg(target_os = "macos")]
         prepare_cache_copy(repo, l, &w, &p)?;
     }
