@@ -222,28 +222,59 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
                     return Err(exit(1, format!("error: the line '{name}' is not fully merged.\nIf you are sure you want to delete it, run 'layr line delete -D {name}'.")));
                 }
             }
-            repo.prepare_save(&l)?;
-            let _lock = repo.p.lock()?;
-            // Automatic states leave overlay files out: uncommitted changes of them would be lost.
-            if !a.has("-f") && repo.is_stacked(&l)? && repo.working(&l).exists() {
-                let private = repo.private_paths(&l)?;
-                let (st, _scan, _it, _idx) = repo.status(&l)?;
-                let changed = st
-                    .staged
-                    .iter()
-                    .chain(st.unstaged.iter())
-                    .flat_map(|c| [Some(c.path.clone()), c.old_path.clone()])
-                    .flatten()
-                    .any(|p| private.contains(&p));
-                if changed || !repo.pending_moves(&l).is_empty() {
-                    return Err(exit(
-                        1,
-                        format!("error: line '{name}' has unsaved changes of overlay files, which automatic states do not keep; save them, or delete the line with -f"),
-                    ));
+            // The working state is prepared before the lock; under it the record and the renames only
+            // (issue #194). A moved head or folder prepares it again, up to three times.
+            let (_lock, l, last) = {
+                let mut attempt = 0;
+                loop {
+                    attempt += 1;
+                    let mut prepared = repo.prepare_final_state(&l)?;
+                    let lock = match repo.p.lock() {
+                        Ok(lock) => lock,
+                        Err(e) => {
+                            repo.discard_final_state(prepared);
+                            return Err(e);
+                        }
+                    };
+                    let checked = (|| -> Result<(crate::repo::FinalState, crate::model::Line)> {
+                        // Automatic states leave overlay files out: uncommitted changes of them would be lost.
+                        if !a.has("-f") && repo.is_stacked(&l)? && repo.working(&l).exists() {
+                            let private = repo.private_paths(&l)?;
+                            let (st, _scan, _it, _idx) = repo.status(&l)?;
+                            let changed = st
+                                .staged
+                                .iter()
+                                .chain(st.unstaged.iter())
+                                .flat_map(|c| [Some(c.path.clone()), c.old_path.clone()])
+                                .flatten()
+                                .any(|p| private.contains(&p));
+                            if changed || !repo.pending_moves(&l).is_empty() {
+                                return Err(exit(
+                                    1,
+                                    format!("error: line '{name}' has unsaved changes of overlay files, which automatic states do not keep; save them, or delete the line with -f"),
+                                ));
+                            }
+                        }
+                        let fresh = repo.line(&l.id)?;
+                        let state = repo.record_final_state(ctx, &fresh, &mut prepared)?;
+                        Ok((state, fresh))
+                    })();
+                    match checked {
+                        Err(e) => {
+                            repo.discard_final_state(prepared.take());
+                            return Err(e);
+                        }
+                        Ok((crate::repo::FinalState::Recorded(last), fresh)) => break (lock, fresh, last),
+                        Ok((crate::repo::FinalState::Moved, _)) if attempt < 3 => drop(lock),
+                        Ok((crate::repo::FinalState::Moved, fresh)) => {
+                            return Err(exit(
+                                1,
+                                format!("line {name} moved during the command (head {} -> {}); run it again", ids::short(&l.head), ids::short(&fresh.head)),
+                            ))
+                        }
+                    }
                 }
-            }
-            let l = repo.line(&l.id)?;
-            let last = repo.working_state(ctx, &l, "before line delete")?;
+            };
             // The final state stays in the `deleted` ring. As a thin layer it would keep every
             // automatic state under it, so it gets a complete tree first (APFS): the line's
             // automatic states go in this command (docs/ownership.md).

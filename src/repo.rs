@@ -948,6 +948,71 @@ impl<'a> Repo<'a> {
 
     /// The id of a state equal to the working content: a new automatic state, or the previous
     /// automatic state (or head) when nothing changed. The caller holds the project lock.
+    /// `line delete`, before the project lock: the automatic state of the working folder, made as
+    /// far as possible without the lock (issue #194). On APFS its layer goes to a new id and its
+    /// complete tree is made here, since the final state of a deleted line keeps no layer. None when
+    /// the folder has nothing to save, and always off APFS (the lock then makes the state as before).
+    pub fn prepare_final_state(&self, line: &Line) -> Result<Option<FinalPrepared>> {
+        self.prepare_save(line)?;
+        #[cfg(target_os = "macos")]
+        {
+            let Some(pre) = take_prepared_save(&line.id) else { return Ok(None) };
+            let id = ids::new_id();
+            if let Err(e) = btrfs::move_tree(&pre.path, &self.p.delta_path(&id)) {
+                let _ = self.p.trash(&pre.path);
+                return Err(e);
+            }
+            if let Err(e) = crate::thin::complete_tree(&self.p, &id) {
+                let _ = self.p.delete_state(&id);
+                return Err(e);
+            }
+            return Ok(Some(FinalPrepared { id, head: pre.head, scan: pre.scan }));
+        }
+        #[cfg(not(target_os = "macos"))]
+        Ok(None)
+    }
+
+    /// `line delete`, under the project lock: records the prepared state when the line head and the
+    /// working folder are the ones it was made from. Else the state is discarded and the caller
+    /// prepares again. Without a prepared state, the lock makes the working state as before.
+    pub fn record_final_state(&self, ctx: &Ctx, line: &Line, prepared: &mut Option<FinalPrepared>) -> Result<FinalState> {
+        #[cfg(target_os = "macos")]
+        if let Some(pre) = prepared.take() {
+            let w = self.working(line);
+            let same = line.head == pre.head && w.exists() && btrfs::scan_with_data(&w, true)? == pre.scan;
+            if !same {
+                self.p.delete_state(&pre.id)?;
+                return Ok(FinalState::Moved);
+            }
+            let mut st = self.describe_state(ctx, pre.id.clone(), StateKind::Auto, vec![line.head.clone()], "before line delete", Some(line))?;
+            st.running = crate::fsutil::take_unsettled();
+            let before = self.recorded_working(line)?;
+            let mut rec = Record::new("save");
+            rec.states.push(st.clone());
+            rec.data = serde_json::json!({"line": line.id, "head": line.head, "working_before": before, "working_after": st.id});
+            self.commit_record(ctx, rec)?;
+            if let Err(e) = self.save_cache_states(ctx, line, &st.id) {
+                eprintln!("warning: cache overlay of line {} not saved: {e:#}", line.name);
+            }
+            clear_regenerable_memo();
+            return Ok(FinalState::Recorded(Some(st.id)));
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = prepared;
+        Ok(FinalState::Recorded(self.working_state(ctx, line, "before line delete")?))
+    }
+
+    /// Discards a prepared state that is not recorded (a failed command, or moved inputs). Under the
+    /// project lock the delete is a rename; the state would otherwise stay as an unowned leak.
+    pub fn discard_final_state(&self, prepared: Option<FinalPrepared>) {
+        #[cfg(target_os = "macos")]
+        if let Some(pre) = prepared {
+            let _ = self.p.delete_state(&pre.id);
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = prepared;
+    }
+
     pub fn working_state(&self, ctx: &Ctx, line: &Line, message: &str) -> Result<Option<String>> {
         if !self.working(line).exists() {
             return Ok(None);
@@ -4192,6 +4257,26 @@ struct PreparedStatus {
 #[cfg(target_os = "macos")]
 thread_local! {
     static PREPARED_STATUS: std::cell::RefCell<Option<PreparedStatus>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The automatic state that `line delete` prepares before the lock (`prepare_final_state`).
+#[cfg(target_os = "macos")]
+pub struct FinalPrepared {
+    id: String,
+    head: String,
+    scan: BTreeMap<String, btrfs::ScanEntry>,
+}
+
+/// Off APFS nothing is prepared.
+#[cfg(not(target_os = "macos"))]
+pub struct FinalPrepared;
+
+/// The outcome of `record_final_state`.
+pub enum FinalState {
+    /// The state of the working folder (None: no folder).
+    Recorded(Option<String>),
+    /// The head or the folder moved since the state was prepared: prepare it again.
+    Moved,
 }
 
 /// An automatic state layer written before a store lock (`Repo::prepare_save`).
