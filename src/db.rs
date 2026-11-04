@@ -338,8 +338,8 @@ impl Db {
     }
 
     /// The newest rowid. Records are only added (INSERT OR IGNORE, no delete or replace), and
-    /// SQLite gives a new row max(rowid) + 1, so an equal mark means no record came in:
-    /// everything derived from the records is unchanged. max(rowid) is one B-tree lookup.
+    /// SQLite gives a new row max(rowid) + 1, so within one database an equal mark means no
+    /// record was committed in between. max(rowid) is one B-tree lookup.
     pub fn records_mark(&self) -> Result<i64> {
         Ok(self.conn.query_row("SELECT coalesce(max(rowid), 0) FROM records", [], |r| r.get(0))?)
     }
