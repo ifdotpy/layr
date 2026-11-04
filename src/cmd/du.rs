@@ -9,8 +9,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 
-/// Lines read at the same time: the walks read only metadata, so a few in parallel are enough.
-const WORKERS: usize = 4;
 
 pub fn du(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let a = parse(&Spec::new().flag("--json").flag("--store").flag("--volumes"), args)?;
@@ -46,7 +44,7 @@ pub fn du(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let next = std::sync::atomic::AtomicUsize::new(0);
     let results: Vec<std::sync::Mutex<Option<Result<Space>>>> = lines.iter().map(|_| Default::default()).collect();
     std::thread::scope(|s| {
-        for _ in 0..WORKERS.min(lines.len()) {
+        for _ in 0..crate::parallel::io_threads().min(lines.len()) {
             s.spawn(|| loop {
                 let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let Some((_, path)) = lines.get(i) else { break };
@@ -250,7 +248,7 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
     let keys: Mutex<HashMap<u64, (usize, u64)>> = Mutex::new(HashMap::new());
     let results: Vec<Mutex<Result<PartSpace>>> = parts.iter().map(|_| Mutex::new(Ok(PartSpace::default()))).collect();
     std::thread::scope(|s| {
-        for _ in 0..WORKERS.min(units.len()) {
+        for _ in 0..crate::parallel::io_threads().min(units.len()) {
             s.spawn(|| loop {
                 let u = next.fetch_add(1, Ordering::Relaxed);
                 let Some((i, path)) = units.get(u) else { break };

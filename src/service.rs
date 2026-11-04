@@ -323,6 +323,7 @@ fn handle(sock: UnixStream, root: &Path, registry_uids: &[u32]) -> i32 {
 /// Run a command for a caller and return its exit code (errors are printed to stderr).
 pub fn run_as(argv: Vec<String>, caller: Caller, cwd: PathBuf, env: HashMap<String, String>, root: &Path) -> i32 {
     crate::repo::begin_command();
+    crate::parallel::configure(env.get("LAYR_THREADS").map(String::as_str));
     let store = match Store::open(root) {
         Ok(s) => s,
         Err(e) => {

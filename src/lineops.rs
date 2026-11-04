@@ -25,7 +25,7 @@ fn batch_names(prefix: &str, count: usize) -> Result<Vec<String>> {
 fn snapshots(src: &Path, destinations: &[PathBuf]) -> Result<()> {
     #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
     {
-        let workers = destinations.len().min(8);
+        let workers = destinations.len().min(crate::parallel::snapshot_threads());
         let barrier = std::sync::Barrier::new(workers);
         std::thread::scope(|scope| {
             let handles: Vec<_> = (0..workers)
