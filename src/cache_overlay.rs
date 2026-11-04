@@ -525,6 +525,10 @@ impl<'a> Repo<'a> {
             orepo.ensure_overlay_line(ctx, &Repo::overlay_line_name(&info, &line.id, line.owner), &sid, line.owner)?;
             taken.push(folder);
         }
+        // The new files have the time of the checkout; the ones the caches were built from get their time back.
+        if let Err(e) = crate::source_times::apply(w, &taken) {
+            eprintln!("warning: source file times of the caches not set: {e:#}");
+        }
         Ok(taken)
     }
 

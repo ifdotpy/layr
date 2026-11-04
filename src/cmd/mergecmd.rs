@@ -855,6 +855,10 @@ fn caches_only(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str, quiet: bool) -> R
     drop(lock);
     let none = std::collections::BTreeSet::new();
     let taken = repo.pull_caches(ctx, &line, &crate::cache_overlay::Source::Line(&theirs), &none)?;
+    let folders: Vec<String> = taken.iter().map(|(f, _)| f.clone()).collect();
+    if let Err(e) = crate::source_times::apply(&repo.working(&line), &folders) {
+        eprintln!("warning: source file times of the caches not set: {e:#}");
+    }
     for (p, id) in &taken {
         if !quiet {
             outln!(ctx, "Merged cache {p}: {}", ids::short(id));

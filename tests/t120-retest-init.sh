@@ -4,8 +4,9 @@
 # follows origin/main, the sweep list covers the standard commands, and the caches are warm and thin. Main stays
 # protected: the init files come in through a merge, a change of a line lands on the git remote as a squash merge and
 # the real follow pass takes it, and a local merge into main takes and saves the line's caches (as the follow pass
-# does). Checks: a new line from main compiles no crate after a local merge of a docs change, and compiles the changed
-# crate only after a code change (the merged file gets a new time: see docs/retest.md); 20 saves with builds in a line
+# does). Checks: a new line from main compiles no crate after the follow pass of a code change and after a local merge
+# (the caches carry the source file times: docs/cache-overlays.md, section 20), a file changed after the cache save
+# is built again; 20 saves with builds in a line
 # grow the store by about the tracked changes and one live cache; `layr retest doctor` reports no project problem.
 #
 # The layr commands run as the test's user (root on the Linux CI job, as in t117). The cargo commands run as the
@@ -128,7 +129,7 @@ has "the follow pass of main fast-forwards to the squash merge" "fast-forward to
 [ -f $P/main/crates/b/src/extra.rs ] && { PASS=$((PASS + 1)); echo "PASS main has the squash merge of t2"; } || fail "main has no extra.rs after the follow pass"
 (cd $P/main && ly line new t3 main $OWNER_ARG >/dev/null 2>&1)
 n=$(compiled $P/t3 build --locked)
-eq "a new line from main compiles 0 crates after the follow pass (known gap: merged files get a new time)" 0 "$n"
+eq "a new line from main compiles 0 crates after the follow pass (a code change)" 0 "$n"
 
 # 2. A local merge into protected main takes and saves the caches of the line (as the follow pass does). A docs change
 #    keeps every crate file, so a new line from main compiles 0 crates.
@@ -138,7 +139,8 @@ echo 'Notes of the test line.' > $P/w/NOTES.md
 (cd $P/w && ly add NOTES.md >/dev/null 2>&1 && ly save -m "notes" >/dev/null 2>&1) || fail "the save of NOTES.md failed"
 (cd $P/w && ly save --caches >/dev/null 2>&1) || fail "save --caches of w failed"
 wh=$(cd $P/w && ly rev-parse head)
-cd $P/main && out=$(ly merge w --expect "$wh" 2>&1) || fail "the local merge of w into main failed"
+cd $P/main && out=$(LAYR_TRACE=1 ly merge w --expect "$wh" 2>&1) || fail "the local merge of w into main failed"
+[ -n "$out" ] && echo "$out" | grep -iE "cache" | sed "s/^/MERGE TRACE: /" | head -30
 echo "$out" | sed 's/^/MERGE OUTPUT: /'
 has "a local merge reports the caches it takes" "Merged cache target" "$out"
 (cd $P/main && ly line new t1 main $OWNER_ARG >/dev/null 2>&1)
@@ -146,6 +148,15 @@ n=$(compiled $P/t1 build --locked)
 eq "after a local merge of a docs change, a new line from main compiles 0 crates" 0 "$n"
 n=$(compiled $P/t1 test --locked --no-run)
 eq "a new line from main compiles 0 test crates" 0 "$n"
+
+# 2b. Negative: a crate file changed after the caches were saved keeps its new time, so cargo rebuilds crate a for a
+#     line from that change. The caches are the project's; their project state is not the change.
+(cd $P/main && ly line new neg main $OWNER_ARG >/dev/null 2>&1)
+echo 'pub fn changed() -> i32 {' >> $P/neg/crates/a/src/lib.rs && echo '    3' >> $P/neg/crates/a/src/lib.rs && echo '}' >> $P/neg/crates/a/src/lib.rs
+(cd $P/neg && ly save -a -m "a: changed after the caches" >/dev/null 2>&1) || fail "the save of the change failed"
+(cd $P/main && ly line new negl neg $OWNER_ARG >/dev/null 2>&1)
+out=$(cb $P/negl build --locked)
+has "a line from a change after the cache save compiles crate a (the time of the write is kept)" "Compiling a " "$out"
 
 # 3. Twenty saves with builds in a line: the store grows by the tracked changes and one live cache, not 20 copies.
 (cd $P/main && ly line new t4 main $OWNER_ARG >/dev/null 2>&1)
@@ -174,7 +185,7 @@ PY
 [ "$grow" -lt $((2 * live + 1048576)) ] && { PASS=$((PASS + 1)); echo "PASS the store grows by about one live cache, not 20"; } || { FAIL=$((FAIL + 1)); echo "FAIL the store grew $grow bytes for 20 saves (one live cache is $live bytes)"; }
 
 # 4. The project is healthy: no project warning from doctor.
-cd $P/main || exit 1
+cd $P/t4 || exit 1
 doctor=$(ly retest doctor 2>&1)
 echo "$doctor" | sed 's/^/DOCTOR: /'
 no "doctor reports no prune warning" sh -c 'echo "$1" | grep -q "warn: prune"' _ "$doctor"
