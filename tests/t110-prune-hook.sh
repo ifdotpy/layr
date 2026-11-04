@@ -50,7 +50,9 @@ units() { ls "$1/debug/.fingerprint" 2>/dev/null | wc -l | tr -d ' '; }
 new_line() { l line new $OWNER_ARG "$@" >/dev/null; }
 
 cd "$P/main"
-l protect main --remove >/dev/null 2>&1 || true
+# A cache that root saves belongs to root: another user takes it only from a protected line (its caches are shared).
+# So on a root run main stays protected, and on a user run the protection is removed for direct saves.
+if [ "$(id -u)" != 0 ]; then l protect main --remove >/dev/null 2>&1 || true; fi
 cb "$P/main" build --workspace -q >/dev/null
 base=$(units $P/main/target)
 [ "$base" -gt 0 ] && { PASS=$((PASS + 1)); echo "PASS the standard build made units ($base)"; } || { FAIL=$((FAIL + 1)); echo "FAIL the standard build made no units: the owner cannot build"; cb "$P/main" build --workspace 2>&1 | tail -20; }
