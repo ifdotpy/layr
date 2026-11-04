@@ -300,6 +300,8 @@ fn run_compares(jobs: &[StateCompare]) -> Result<Vec<Vec<Found>>> {
 /// The state compares and live compares of one `overlaps` call. Each one runs once.
 #[derive(Default)]
 struct Work {
+    /// Our head as a tree, read once for the whole call. `None` when it is unreadable.
+    head_src: Option<Snap>,
     /// The saved compares: base -> their head, our base -> head, and overlay layers.
     jobs: Vec<StateCompare>,
     /// Our saved compare per merge base: the index in `jobs`.
@@ -316,8 +318,9 @@ struct Work {
 struct OtherPlan {
     name: String,
     owner: u32,
-    /// The merge base with this line. `our_job` is our compare against it.
+    /// The merge base with this line, as a tree. `our_job` is our compare against it.
     base: String,
+    base_src: Snap,
     our_job: Option<usize>,
     their_private: BTreeSet<String>,
     hidden: BTreeSet<String>,
@@ -404,7 +407,11 @@ impl Repo<'_> {
     fn our_head_live(&self, line: &Line, live: &Path, rules: &Rules, work: &mut Work) -> Result<()> {
         if work.head_live.is_none() {
             work.head_live = Some(match self.state_src(&line.head) {
-                Ok(head) => Some(self.live_compare(line, &head, live, rules)?),
+                Ok(head) => {
+                    let found = self.live_compare(line, &head, live, rules)?;
+                    work.head_src = Some(head);
+                    Some(found)
+                }
                 Err(_) => None,
             });
         }
@@ -448,11 +455,11 @@ impl Repo<'_> {
         if let Some(job) = work.ours_jobs.get(base) {
             return Ok(Some(*job));
         }
-        if !matches!(work.head_live, Some(Some(_))) {
+        let (true, Some(head)) = (matches!(work.head_live, Some(Some(_))), work.head_src.clone()) else {
             return Ok(None);
-        }
+        };
         let job = work.jobs.len();
-        let state = StateCompare::new(&self.compare_dir(), base, &line.head, self.state_src(base)?, self.state_src(&line.head)?);
+        let state = StateCompare::new(&self.compare_dir(), base, &line.head, self.state_src(base)?, head);
         work.jobs.push(state);
         work.ours_jobs.insert(base.to_string(), job);
         Ok(Some(job))
@@ -506,12 +513,13 @@ impl Repo<'_> {
             let hidden = self.radar_hidden(ctx, &other)?;
             let their_private = self.private_paths(&other)?;
             let job = work.jobs.len();
-            work.jobs.push(StateCompare::new(&self.compare_dir(), &base, &state.id, root, theirs));
+            work.jobs.push(StateCompare::new(&self.compare_dir(), &base, &state.id, root.clone(), theirs));
             let layers = self.overlay_plans(ctx, line, &other, ours_root, &mut work)?;
             plans.push(OtherPlan {
                 name: other.name.clone(),
                 owner: other.owner,
                 base,
+                base_src: root,
                 our_job,
                 their_private,
                 hidden,
@@ -535,7 +543,7 @@ impl Repo<'_> {
             let mut layer_keys: BTreeMap<(String, String), BTreeMap<String, i64>> = BTreeMap::new();
             for p in &plans {
                 if !ours_keys.contains_key(&p.base) {
-                    let base_src = self.state_src(&p.base)?;
+                    let base_src = p.base_src.clone();
                     let parts = match (p.our_job, work.head_live.as_ref().and_then(|h| h.as_ref())) {
                         (Some(j), Some(live)) => Some((found[j].as_slice(), live.as_slice())),
                         _ => None,
