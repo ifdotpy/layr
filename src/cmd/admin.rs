@@ -1583,9 +1583,20 @@ fn prune_retention(ctx: &Ctx, repo: &Repo, trim_caches: bool) -> Result<()> {
             let _t = crate::trace::begin("retention: plan");
             snapshot(repo, || {
                 let mark = repo.p.db.records_mark()?;
-                let overlays = repo.overlay_marks()?;
                 let caches = if trim_caches { excess_caches(repo)? } else { Vec::new() };
-                Ok((mark, overlays, caches, repo.plan_prune_bases()?))
+                let mut bases = repo.plan_prune_bases()?;
+                // Overlay heads affect only which bases are current. With no bases to remove,
+                // cache retention has no overlay dependencies and needs no overlay locks.
+                let overlays = if bases.is_empty() {
+                    None
+                } else {
+                    // Take the marks before the scan that supplies candidates: a hidden head
+                    // can change without changing the project record mark.
+                    let marks = repo.overlay_marks()?;
+                    bases = repo.plan_prune_bases()?;
+                    Some(marks)
+                };
+                Ok((mark, overlays, caches, bases))
             })?
         };
         let states: Vec<&str> = caches.iter().map(|(id, _)| id.as_str()).collect();
@@ -1598,8 +1609,11 @@ fn prune_retention(ctx: &Ctx, repo: &Repo, trim_caches: bool) -> Result<()> {
         }
         // Hidden overlay heads and selections can change without a project record. Lock and
         // check those projects too, so a base selected above cannot become the current base.
-        let Some(_overlay_locks) = repo.lock_overlays_checked(&overlays)? else {
-            continue;
+        let _overlay_locks = if let Some(overlays) = &overlays {
+            let Some(locks) = repo.lock_overlays_checked(overlays)? else { continue };
+            locks
+        } else {
+            Vec::new()
         };
         let removed = apply_cache_candidates(repo, paths, Some(&trash))?;
         if !removed.is_empty() {

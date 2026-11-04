@@ -490,13 +490,30 @@ impl<'a> Repo<'a> {
 
     /// Caller holds the project lock. Hold the returned overlay locks through the checked commit.
     pub fn lock_overlays_checked(&self, marks: &OverlayMarks) -> Result<Option<Vec<crate::store::Lock>>> {
+        let mut overlays = Vec::new();
         let mut locks = Vec::new();
         for (name, _) in marks {
             let overlay = self.overlay_repo(name)?;
             locks.push(overlay.p.lock()?);
+            overlays.push(overlay);
         }
-        if self.overlay_marks()? != *marks {
+        // Check the set as well as each mark: an overlay can appear or disappear between
+        // planning and locking. Reuse the open databases instead of reopening them all.
+        let mut names = self.overlay_names()?;
+        names.sort();
+        let mut present = Vec::new();
+        for name in names {
+            if self.p.store.project_dir(&format!("{}%{name}", self.p.name))?.exists() {
+                present.push(name);
+            }
+        }
+        if present.len() != marks.len() || present.iter().zip(marks).any(|(name, (planned, _))| name != planned) {
             return Ok(None);
+        }
+        for (overlay, (_, mark)) in overlays.iter().zip(marks) {
+            if serde_json::to_value(overlay.p.db.records_mark()?)? != *mark {
+                return Ok(None);
+            }
         }
         Ok(Some(locks))
     }
@@ -1337,6 +1354,11 @@ impl<'a> Repo<'a> {
             Some(n) => self.history_excess(&orepo, name, n, lines, stacks)?,
             None => Vec::new(),
         };
+        // An empty plan has nothing to commit, even if the overlay changes later. Leave new
+        // candidates for the next pass without opening and locking this overlay under the lock.
+        if orphans.is_empty() && excess.is_empty() {
+            return Ok(None);
+        }
         Ok(Some(OverlayClean { name: name.to_string(), mark, orphans, keep_n, excess }))
     }
 

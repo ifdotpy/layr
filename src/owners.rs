@@ -571,14 +571,16 @@ impl Db {
         let mem = Db { conn: Connection::open_in_memory()?, stale: false };
         mem.conn.set_prepared_statement_cache_capacity(crate::db::STATEMENT_CACHE_CAPACITY);
         mem.conn.execute_batch(SCHEMA)?;
-        fill_only(|| -> Result<()> {
+        // `derive` performs many writes per record and expects a caller transaction.  Without
+        // one, every statement commits independently, repeatedly walking SQLite's page cache.
+        mem.with_tx(|| fill_only(|| -> Result<()> {
             for raw in self.all_lines()? {
                 let rec = crate::oplog::parse_line(&raw, None)?.record;
                 mem.insert_record(&rec, &raw)?;
                 mem.derive(&rec, &|_| true, local)?;
             }
             Ok(())
-        })?;
+        }))?;
         mem.owner_rows()
     }
 
