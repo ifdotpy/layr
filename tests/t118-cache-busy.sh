@@ -24,13 +24,12 @@ sample $T/src
 l init cb --from $T/src -q >/dev/null
 P=$LAYR_ROOT/projects/cb/lines
 cd $P/main
-l config regenerable '["target"]'
+# Line w is made before target is a cache: its target is a plain folder. (A line made from a cache
+# gets a cache layer, and rm -rf keeps the layer mounted on OverlayFS.) The busy check looks at
+# plain folders; a cache layer is saved as it is.
 l line new -q w
+l config regenerable '["target"]'
 W=$P/w
-cd $W
-
-# cargo clean, then a build: the cache of the line (made by line new) goes, and the build makes
-# target again as a plain folder. The busy check looks at plain folders; a cache layer is saved as it is.
 cd $W
 rm -rf target
 mkdir -p target/debug
