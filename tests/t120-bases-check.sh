@@ -20,4 +20,13 @@ eq "gc -n leaves the row" "1" "$(sqlite3 "$db" 'SELECT COUNT(*) FROM bases')"
 l gc --repair -q >/dev/null 2>&1
 eq "gc --repair removes the stale row" "0" "$(sqlite3 "$db" 'SELECT COUNT(*) FROM bases')"
 eq "after repair there is no difference" "0" "$(l gc -n 2>&1 | grep 'layer bases' | awk '{print $3}')"
+# An upgrade backup older than 14 days: gc names it with its size; --repair removes it.
+dbdir=$(dirname "$db")
+old="$dbdir/$(basename "$db").schema-5.bak"
+cp "$db" "$old"
+touch -t 202001010000 "$old"
+eq "gc -n names the old backup" "1" "$(l gc -n 2>&1 | grep -c 'old upgrade backup')"
+ok "gc -n keeps the old backup" test -f "$old"
+l gc --repair -q >/dev/null 2>&1
+ok "gc --repair removes the old backup" test ! -f "$old"
 finish

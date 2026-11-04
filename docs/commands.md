@@ -207,6 +207,31 @@ record or auto state needs, and that git builds again. The record stays; the nex
 tree (`docs/ownership.md`, "States imported from Git"). `gc -n --repair` lists them. A plain `gc`
 only checks.
 
+`gc` also compares the `bases` table (the base of each thin layer) with the layers on disk, and prints
+each difference. `gc --repair` makes the table match the disk.
+
+### Schema upgrades and their backups
+
+A layr upgrade that changes the schema rebuilds the derived tables from the records. Before the
+rebuild changes anything, it keeps a copy of the project database: `VACUUM INTO` a temporary name
+in the database folder (`meta/db/`), renamed to `layr.sqlite.schema-<old>.bak`. The `<old>` is the
+schema version before the upgrade. Only the newest backup is kept. The rebuild prints one line:
+`database backup: <path> (schema <old>, before the upgrade)`. The copy needs the same space as the
+database (a 400 MB database needs 400 MB more until the backup goes).
+
+`gc` lists each backup older than 14 days with its size; `gc --repair` removes them.
+
+To roll back to the old layr:
+
+1. Stop the service and the daemon (`launchctl unload` or `systemctl stop` for the layr unit).
+2. Install the old layr binary (the one that wrote the backup's schema version).
+3. In the database folder, remove `layr.sqlite-wal` and `layr.sqlite-shm` if they exist. Then move the
+   new database aside and rename the backup into place:
+   `mv layr.sqlite layr.sqlite.upgraded` and `mv layr.sqlite.schema-<old>.bak layr.sqlite`.
+4. Start the service. Check `layr status` and `layr line list`.
+
+The backup has the records up to the upgrade. Changes made after the upgrade are lost on rollback.
+
 Keys that keep states (count rings, `layr config <key> <n>`):
 
 | key | default | keeps |

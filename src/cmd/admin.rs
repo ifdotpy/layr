@@ -1447,6 +1447,17 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
             outln!(ctx, "\t{line}");
         }
     }
+    // Upgrade backups (schema changes, src/db.rs) older than 14 days. --repair removes them.
+    let db_file = crate::store::db_file(&h.repo.p.dir);
+    let old_backups = crate::db::old_upgrade_backups(&db_file, 14)?;
+    for (path, bytes, days) in &old_backups {
+        outln!(ctx, "old upgrade backup: {} ({:.1} MiB, {days} days old)", path.display(), *bytes as f64 / 1_048_576.0);
+    }
+    if a.has("--repair") && !a.has("-n") {
+        for (path, _, _) in &old_backups {
+            std::fs::remove_file(path)?;
+        }
+    }
     leftovers(ctx, &h.repo, a.has("--repair"), a.has("-n"), a.has("-q"))?;
     // After the project lock is released: hashing and comparing cache files takes long.
     let shared = if a.has("--dedup") { Some(crate::dedup::run(&h.repo, a.has("-n"))?) } else { None };
