@@ -92,6 +92,16 @@ new_line other2 main
 ok "the owner sets prune=none for the union check" l overlay set cache.target --prune none
 (cd "$P/other2" && l merge main --caches-only -q >/dev/null 2>&1)
 eq "the union copy keeps the times without a prune" "0" "$(times_mismatch $P/main/target $P/other2/target)"
+# Which entries the sweep removes from a merged cache (a diagnostic: the names removed by the prune command).
+new_line other3 main
+ok "the owner sets prune=none for the sweep check" l overlay set cache.target --prune none
+(cd "$P/other3" && l merge main --caches-only -q >/dev/null 2>&1)
+ok "the owner sets prune to auto after the sweep check" l overlay set cache.target --prune auto
+(cd "$P/other3/target" && find . | sort) > "$T/names-before3"
+(cd "$P/other3" && l retest prune target) > "$T/prune-out3" 2>&1 || true
+(cd "$P/other3/target" && find . | sort) > "$T/names-after3"
+echo "DIAG prune output: $(cat "$T/prune-out3" | tr '\n' ' ')"
+echo "DIAG removed by the sweep: $(comm -23 "$T/names-before3" "$T/names-after3" | head -20 | tr '\n' ' ')"
 # Why cargo treats the merged standard unit as dirty (a diagnostic: the reason cargo prints for the first dirty unit).
 echo "DIAG cargo on the merged line without prune: $(cb "$P/other2" build --workspace -v 2>&1 | grep -m2 -E 'Dirty|Fresh' | tr '\n' ' ')"
 ok "the owner sets prune to auto after the union check" l overlay set cache.target --prune auto
