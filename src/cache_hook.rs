@@ -24,6 +24,8 @@ use std::time::{Duration, Instant};
 
 /// The soft limit of one hook: the adapter stops its processes at it and skips or restores the folder.
 pub const HOOK_LIMIT: Duration = Duration::from_secs(120);
+/// The soft limit of one build of the standard commands (`warm`): a build of a large project takes minutes.
+pub const WARM_LIMIT: Duration = Duration::from_secs(30 * 60);
 /// The hard limit is the soft limit plus this grace: the parent kills the worker's process group then.
 const GRACE: Duration = Duration::from_secs(10);
 /// The time limit of a recovery worker (it only restores a copy), and the time the parent waits for it.
@@ -110,6 +112,18 @@ fn owner_path(uid: u32) -> String {
 /// Runs the hook for `folder` of a line of owner `uid`, with the registered adapters. `setting` is the overlay
 /// property: `None` detects the adapter, `none` turns the hook off.
 pub fn run(setting: Option<&str>, folder: &Path, uid: u32, limit: Duration) -> Done {
+    run_mode(Mode::Prune, setting, folder, uid, limit)
+}
+
+/// The hook's work: a prune, or a build of the standard commands (`warm`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Prune,
+    Warm,
+}
+
+/// `run` for `mode`.
+pub fn run_mode(mode: Mode, setting: Option<&str>, folder: &Path, uid: u32, limit: Duration) -> Done {
     let quiet = Done { log: String::new(), folder_ok: true };
     // Nothing to do, so nothing is started or logged: the hook is off, the owner is root (the hook runs as the
     // owner, and root is never pruned), or no adapter applies to the folder.
@@ -124,7 +138,25 @@ pub fn run(setting: Option<&str>, folder: &Path, uid: u32, limit: Duration) -> D
         _ => {}
     }
     let launch = Launch { exe: std::env::current_exe().unwrap_or_else(|_| "layr".into()), args: vec![WORKER_ARG.into()] };
-    run_with(&launch, &[], setting, folder, uid, limit, limit + GRACE)
+    match mode {
+        Mode::Prune => run_with(&launch, &[], setting, folder, uid, limit, limit + GRACE),
+        Mode::Warm => warm_with(&launch, &[], setting, folder, uid, limit, limit + GRACE),
+    }
+}
+
+/// The build of the standard commands in a worker. A killed build leaves the folder consistent (a build tool
+/// writes its outputs whole), so a timeout needs no recovery.
+#[allow(clippy::too_many_arguments)]
+pub fn warm_with(launch: &Launch, env: &[(&str, &str)], setting: Option<&str>, folder: &Path, uid: u32, limit: Duration, wait: Duration) -> Done {
+    let shown = folder.display();
+    let log = match execute(launch, env, "warm", setting, folder, uid, limit, wait) {
+        Run::Report(r) if r.pruned => format!("{shown}: built with {}", r.adapter),
+        Run::Report(r) => format!("{shown}: not built with {}: {}", r.adapter, r.reason),
+        Run::Start(e) => format!("{shown}: not built: cannot start the cache hook: {e}"),
+        Run::Failed(e) => format!("{shown}: not built: {e}"),
+        Run::Killed => format!("{shown}: not built: timed out after {} s, processes stopped", limit.as_secs()),
+    };
+    Done { log, folder_ok: true }
 }
 
 /// What one worker run ended with.
@@ -250,6 +282,7 @@ pub fn worker_with(adapters: &'static [Box<dyn CacheAdapter>]) -> i32 {
     let limit = Duration::from_millis(var(ENV_LIMIT_MS).parse().unwrap_or(0));
     let report = match var(ENV_MODE).as_str() {
         "recover" => recover_here(adapters, setting.as_deref(), &folder),
+        "warm" => warm_here(adapters, setting.as_deref(), &folder, limit),
         _ => prune_here(adapters, setting.as_deref(), &folder, limit),
     };
     println!("{REPORT_MARK}{}", serde_json::to_string(&report).unwrap_or_default());
@@ -275,6 +308,20 @@ fn prune_here(adapters: &'static [Box<dyn CacheAdapter>], setting: Option<&str>,
         Outcome::Pruned { freed } => Report { adapter: found.name().into(), pruned: true, freed, restored: false, folder_ok: true, reason: String::new() },
         Outcome::Skipped { reason } => Report { adapter: found.name().into(), pruned: false, freed: 0, restored: false, folder_ok: true, reason },
     }
+}
+
+/// Runs the adapter's `warm` on `folder` within `limit`. `pruned` in the report means the build ran.
+fn warm_here(adapters: &'static [Box<dyn CacheAdapter>], setting: Option<&str>, folder: &Path, limit: Duration) -> Report {
+    let found = match find(adapters, setting, folder) {
+        Ok(a) => a,
+        Err(reason) => return Report { adapter: setting.unwrap_or("-").into(), pruned: false, freed: 0, restored: false, folder_ok: true, reason },
+    };
+    let host = WorkerHost { until: Instant::now() + limit };
+    let (pruned, reason) = match found.warm(&host, folder) {
+        Ok(()) => (true, String::new()),
+        Err(reason) => (false, reason),
+    };
+    Report { adapter: found.name().into(), pruned, freed: 0, restored: false, folder_ok: true, reason }
 }
 
 /// Runs the adapter's `recover` on `folder` (after its processes were stopped at the hard limit).
@@ -341,6 +388,16 @@ mod tests {
                 _ => Outcome::Pruned { freed: 7 },
             }
         }
+        fn warm(&self, _host: &dyn Host, folder: &Path) -> Result<(), String> {
+            match self.0 {
+                "ok" => std::fs::write(folder.join("built.txt"), "built").map_err(|e| e.to_string()),
+                "slow" => {
+                    std::thread::sleep(Duration::from_secs(3));
+                    Ok(())
+                }
+                _ => Err("no build".into()),
+            }
+        }
         fn recover(&self, folder: &Path) -> Result<bool, String> {
             match self.0 {
                 "hard-restore" if copy_of(folder).exists() => {
@@ -403,6 +460,19 @@ mod tests {
 
     fn hook(setting: &str, dir: &Path, uid: u32, limit_ms: u64, wait_ms: u64) -> Done {
         run_with(&launch(), &TEST_ENV, Some(setting), dir, uid, Duration::from_millis(limit_ms), Duration::from_millis(wait_ms))
+    }
+
+    #[test]
+    fn warm_builds_in_the_worker_and_a_timeout_keeps_the_folder_ok() {
+        let dir = folder("warm");
+        let ms = Duration::from_millis;
+        let done = warm_with(&launch(), &TEST_ENV, Some("ok"), &dir, me(), ms(5000), ms(20000));
+        assert!(done.log.contains("built with ok"), "{}", done.log);
+        assert!(dir.join("built.txt").exists());
+        let done = warm_with(&launch(), &TEST_ENV, Some("fail"), &dir, me(), ms(5000), ms(20000));
+        assert!(done.log.contains("not built with fail: no build"), "{}", done.log);
+        let done = warm_with(&launch(), &TEST_ENV, Some("slow"), &dir, me(), ms(200), ms(500));
+        assert!(done.log.contains("timed out") && done.folder_ok, "{}", done.log);
     }
 
     #[test]

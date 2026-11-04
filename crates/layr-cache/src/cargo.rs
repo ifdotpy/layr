@@ -299,6 +299,31 @@ impl CacheAdapter for Cargo {
     fn prune(&self, host: &dyn Host, folder: &Path) -> Outcome {
         prune(host, folder)
     }
+
+    fn warm(&self, host: &dyn Host, folder: &Path) -> Result<(), String> {
+        warm(host, folder).map_err(|e| format!("{e:#}"))
+    }
+}
+
+/// Builds the `sweep` commands of the project into `target`, with the project env. It may fetch crates (a merged
+/// change can add a dependency). A failed build leaves `target` consistent: cargo writes each output whole.
+pub fn warm(host: &dyn Host, target: &Path) -> Result<()> {
+    let named = target.file_name().is_some_and(|n| n == "target");
+    let Some(root) = target.parent().filter(|r| named && r.join("Cargo.toml").is_file()) else {
+        bail!("cargo needs a folder named target next to Cargo.toml");
+    };
+    let cfg = settings(host, root)?;
+    if !cfg.listed {
+        bail!("no `sweep` list under [workspace.metadata.layr-retest] in Cargo.toml");
+    }
+    for args in &cfg.commands {
+        let mut c = host_cargo(host)?;
+        c.args(args).current_dir(root).env("CARGO_TARGET_DIR", target).envs(cfg.env.iter().map(|(k, v)| (k, v)));
+        // The color again after the project's env: the parsers of later steps read plain text.
+        c.env("CARGO_TERM_COLOR", "never");
+        run(&mut c, Some(host.deadline())).with_context(|| format!("cargo {}", args.join(" ")))?;
+    }
+    Ok(())
 }
 
 fn prune_in(host: &dyn Host, root: &Path, target: &Path) -> Result<Outcome> {

@@ -632,6 +632,35 @@ impl<'a> Repo<'a> {
         }
     }
 
+    /// The build hook (`warm`) for `folder` of `line`: the adapter of its overlay (the `prune` property names it)
+    /// builds the project's standard commands into the folder. It never fails: the outcome is one log line.
+    pub fn warm_cache_folder(&self, line: &Line, folder: &str) {
+        let (uid, _) = self.owner_ids(line);
+        let setting = match self.folder_overlay_of(folder).and_then(|o| o.map(|name| self.overlay_props(&name)).transpose()) {
+            Ok(props) => props.and_then(|p| p.prune),
+            Err(e) => return eprintln!("layr: build {folder}: not built: {e:#}"),
+        };
+        let path = match fsutil::safe_join(&self.working(line), folder) {
+            Ok(p) => p,
+            Err(e) => return eprintln!("layr: build {folder}: not built: {e:#}"),
+        };
+        let _line = match self.prune_lock(line) {
+            Ok(f) => f,
+            Err(e) => return eprintln!("layr: build {folder}: not built: {e:#}"),
+        };
+        let _t = crate::trace::named(|| format!("warm {folder} of line {}", line.name));
+        let done = crate::cache_hook::run_mode(
+            crate::cache_hook::Mode::Warm,
+            setting.as_deref(),
+            &path,
+            uid,
+            crate::cache_hook::WARM_LIMIT,
+        );
+        if !done.log.is_empty() {
+            eprintln!("layr: build {}", done.log);
+        }
+    }
+
     fn prune_folder(&self, line: &Line, overlay: Option<&str>, folder: &str, root: &Path) {
         let (uid, _) = self.owner_ids(line);
         let setting = match overlay {

@@ -219,11 +219,13 @@ impl<'a> Repo<'a> {
 
     /// The caches after a merge (docs/cache-overlays.md): the candidates of `remote`, newest first.
     fn follow_caches(&self, ctx: &Ctx, line: &Line, remote: &str, before: &str) -> Result<()> {
-        self.take_follow_caches(ctx, line, self.cache_sources(remote)?, Some(before)).map(|_| ())
+        self.take_follow_caches(ctx, line, self.cache_sources(remote)?, Some(before), true).map(|_| ())
     }
 
     /// Takes the caches of `sources` (newest first) into `line`, then saves them as `save --caches` does (prune,
-    /// then save). The follow pass and a local merge both use it. `before` is the head before the merge: the rule
+    /// then save). The follow pass and a local merge both use it. `warm`: the adapters build the standard commands
+    /// into each cache folder before the prune (the follow pass; a change from the remote may come without a
+    /// cache). `before` is the head before the merge: the rule
     /// of a protected line is checked against it. Returns the folder and the state of each cache taken, and the reason
     /// a candidate was refused (the last one).
     pub(crate) fn take_follow_caches(
@@ -232,6 +234,7 @@ impl<'a> Repo<'a> {
         line: &Line,
         sources: Vec<Line>,
         before: Option<&str>,
+        warm: bool,
     ) -> Result<(Vec<(String, String)>, Option<String>)> {
         let folders: BTreeSet<String> = self.folder_overlays()?.into_iter().map(|(_, f)| f).collect();
         let mut done = BTreeSet::new();
@@ -276,6 +279,13 @@ impl<'a> Repo<'a> {
         let folders_taken: Vec<String> = done.iter().cloned().collect();
         if let Err(e) = crate::source_times::apply(&self.working(line), &folders_taken) {
             eprintln!("warning: source file times of the caches not set: {e:#}");
+        }
+        // A change without a cache (a merge on the remote of a branch with no line here) leaves units to build. The
+        // build runs once here, so the lines from this line start warm (docs/follow.md).
+        if warm {
+            for folder in &folders {
+                self.warm_cache_folder(line, folder);
+            }
         }
         // Prunes each taken folder, then saves the caches of the line.
         admin::save(ctx, &["--caches".to_string(), "-q".to_string()])?;

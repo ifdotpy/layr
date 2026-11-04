@@ -32,8 +32,13 @@
    - For each candidate, in order: a protected line needs its merge rule (`merge_met_rule`), and the
      squash-safe content check (`caches_contained`, #133) must pass. Then `pull_caches` takes the
      folders that the candidate has and no earlier candidate took.
-   - `prune_cache(folder)` for each folder overlay (no-op hook, language adapters come later).
-   - `layr save --caches` for the line.
+   - The tracked files get the source times that the taken caches recorded (`.layr-times`,
+     docs/cache-overlays.md section 20).
+   - The build: the adapter of each folder overlay builds the project's standard commands into the
+     folder (`warm`, as the line owner, limit 30 min; cargo: the `sweep` list with the project env). A
+     change that came without a cache (a branch that no line here pushed) is built once here, so the
+     lines from this line start warm. A failed or stopped build is one log line; the save still runs.
+   - `layr save --caches` for the line: it prunes each folder first (the adapter's `prune`).
 6. Record the result in the project meta folder (`follow.json`, this machine only): time, ok, text.
 
 A failed cache step does not undo the merge. Its text is part of the result.

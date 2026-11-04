@@ -172,3 +172,19 @@ fn a_busy_build_lock_skips_within_the_deadline_even_with_colors() {
     }
     assert!(started.elapsed() < deadline - std::time::Duration::from_secs(2), "the sweep waited for the deadline: {:?}", started.elapsed());
 }
+
+#[test]
+fn warm_builds_the_sweep_commands_so_the_next_build_compiles_nothing() {
+    let dir = tmp("warm");
+    let target = project(&dir, Some("sweep = [[\"build\", \"--workspace\"], [\"test\", \"--workspace\", \"--no-run\"]]"));
+    cargo::warm(&host(), &target).unwrap();
+    for args in [&["build", "--workspace"][..], &["test", "--workspace", "--no-run"]] {
+        let stderr = cargo_in(&dir, &target, args);
+        assert!(!stderr.contains("Compiling"), "{args:?}: {stderr}");
+    }
+    // A project without a sweep list has nothing to build.
+    let bare = tmp("warm-bare");
+    let t = project(&bare, None);
+    assert!(cargo::warm(&host(), &t).is_err());
+    assert!(!t.exists(), "nothing was built");
+}
