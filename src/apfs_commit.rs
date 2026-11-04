@@ -133,7 +133,7 @@ pub fn recover(p: &Project) -> Result<()> {
     for (dir, journal) in pending_entries(p)? {
         match journal {
             // A save of a live process (this one too) is not recovered: it is in progress.
-            Some(j) if pid_alive(j.pid) => {}
+            Some(j) if crate::free::holder_alive(&j.holder) => {}
             Some(j) => recover_pending(p, &dir, &j)?,
             // No readable journal: the folder cannot be a save in progress.
             None => p.trash(&dir)?,
@@ -191,8 +191,9 @@ struct PendingJournal {
     project: String,
     line: String,
     state: String,
-    /// The process that makes the save. Recovery leaves the folder of a live process alone.
-    pid: u32,
+    /// The process that makes the save, as `pid:start time` (`free::self_holder`). Recovery leaves
+    /// the folder of a live holder alone; a reused pid does not match the start time.
+    holder: String,
     mode: u32,
     stage_subvol: String,
     stage_device: u64,
@@ -244,6 +245,7 @@ fn read_pending_journal(p: &Project, dir: &Path) -> Result<PendingJournal> {
         || !model::is_uuid(&j.line)
         || !model::is_uuid(&j.state)
         || !model::is_uuid(&j.stage_subvol)
+        || !j.holder.contains(':')
         || (tree_known && !model::is_uuid(&j.tree_subvol))
         || j.mode & !0o7777 != 0
     {
@@ -252,12 +254,6 @@ fn read_pending_journal(p: &Project, dir: &Path) -> Result<PendingJournal> {
     Ok(j)
 }
 
-/// True when a process with this pid exists.
-fn pid_alive(pid: u32) -> bool {
-    use rustix::process::{test_kill_process, Pid};
-    let Some(pid) = i32::try_from(pid).ok().and_then(Pid::from_raw) else { return false };
-    !matches!(test_kill_process(pid), Err(e) if e == rustix::io::Errno::SRCH)
-}
 
 /// True when `path` is the subvolume with this UUID and identity; false when nothing is there.
 fn is_tree(path: &Path, subvol: &str, device: u64, inode: u64) -> Result<bool> {
@@ -316,7 +312,7 @@ impl<'p, 's> PendingCommit<'p, 's> {
             project: project.id.clone(),
             line: line.into(),
             state: id.clone(),
-            pid: std::process::id(),
+            holder: crate::free::self_holder(),
             mode: sm.mode() & 0o7777,
             stage_subvol: sinfo.uuid,
             stage_device: sm.dev(),
@@ -473,7 +469,8 @@ mod tests {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o555))?;
         Ok(fs::metadata(path)?.ino())
     }
-    /// Make the save in `dir` look left by a process that died: its journal names a dead pid.
+    /// Make the save in `dir` look left by a process that died: its journal names a holder whose
+    /// process is gone.
     fn die(dir: &Path) {
         let path = dir.join(PENDING_JOURNAL);
         if !path.exists() {
@@ -482,7 +479,7 @@ mod tests {
         let mut child = std::process::Command::new("true").spawn().unwrap();
         child.wait().unwrap();
         let mut j: PendingJournal = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        j.pid = child.id();
+        j.holder = format!("{}:", child.id());
         fsutil::atomic_write(&path, &serde_json::to_vec(&j).unwrap(), 0o600).unwrap();
     }
     /// The record of a save, as `commit_state` writes it (the record of `move_head` is not needed).
@@ -665,6 +662,32 @@ mod tests {
         assert!(recover(&p).is_err());
         assert_eq!(fs::read(state.join("other"))?, b"keep this");
         assert_eq!(fs::read(keep.join("file"))?, b"staged bytes");
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a case-sensitive APFS test volume"]
+    fn recovery_takes_over_a_reused_pid() -> Result<()> {
+        // The journal names this live pid with another start time: the process that made the
+        // save is gone, and recovery removes its clone.
+        let s = Sandbox::new();
+        let store = Store::open(&s.0.join("store"))?;
+        let line = ids::new_id();
+        let stage_inode;
+        {
+            let p = Project::create(&store, "p", &actor(), serde_json::json!({}))?;
+            let _lock = p.lock()?;
+            stage_inode = stage(&p, &line)?;
+            let pc = PendingCommit::prepare(&p, &line, |dst| storage::snapshot(&p.stage_path(&line), dst, true))?;
+            let path = pending_dir(&p, &pc.id).join(PENDING_JOURNAL);
+            let mut j: PendingJournal = serde_json::from_slice(&fs::read(&path)?)?;
+            j.holder = format!("{}:Mon Jan  1 00:00:00 1990", std::process::id());
+            fsutil::atomic_write(&path, &serde_json::to_vec(&j)?, 0o600)?;
+            std::mem::forget(pc);
+        }
+        let p = Project::open(&store, "p")?;
+        assert!(!pending(&p)?);
+        assert_eq!(fs::metadata(p.stage_path(&line))?.ino(), stage_inode);
         Ok(())
     }
 }
