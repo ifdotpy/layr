@@ -263,12 +263,25 @@ pub mod git {
                 format!("error: line '{}' has no .git folder; commit {} is in the project git store", line.name, &commit[..10]),
             ));
         }
-        let _lock = repo.p.lock()?;
-        gitbridge::refresh_git_folder(repo, &line)?;
+        refresh_line_git(repo, &line)?;
         if !a.has("-q") {
             outln!(ctx, "{} (state {})", commit, ids::short(&state.id));
         }
         Ok(0)
+    }
+
+    /// Write the .git folder of `line` under the line lock, not the project lock. A save may move the
+    /// head meanwhile: the folder then shows an older head, so it is written again (three tries).
+    fn refresh_line_git(repo: &Repo, line: &crate::model::Line) -> Result<()> {
+        for _ in 0..3 {
+            let current = repo.line(&line.id)?;
+            let _line = repo.line_lock(&current)?;
+            gitbridge::refresh_git_folder(repo, &current)?;
+            if repo.line(&line.id)?.head == current.head {
+                return Ok(());
+            }
+        }
+        Err(exit(1, format!("line '{}' moved during the .git refresh; run the command again", line.name)))
     }
 
     pub fn push(ctx: &Ctx, args: &[String]) -> Result<i32> {
@@ -444,15 +457,15 @@ pub mod git {
         }
         let before = gitbridge::ls_remote(ctx, repo, &url, &branch).ok().flatten();
         gitbridge::push(ctx, repo, &url, &commit, &branch, a.has("-f") || a.has("--force-with-lease"))?;
-        // Still under the project lock: the .git folder refresh (git index work) must not race a
-        // head move. Follow-up: move it under the line lock with a head check.
-        let _lock = repo.p.lock()?;
-        let mut rec = Record::new("export");
-        rec.data = serde_json::json!({"export": export_id, "state": state_id, "remote": remote, "branch": branch, "commit": commit, "status": "pushed"});
-        repo.commit_record(ctx, rec)?;
+        {
+            let _lock = repo.p.lock()?;
+            let mut rec = Record::new("export");
+            rec.data = serde_json::json!({"export": export_id, "state": state_id, "remote": remote, "branch": branch, "commit": commit, "status": "pushed"});
+            repo.commit_record(ctx, rec)?;
+        }
         let _ = gitbridge::git_out(&gitbridge::store(repo), &["update-ref", &format!("refs/remotes/{remote}/{branch}"), &commit]);
         if let Some(l) = &line {
-            if let Err(e) = gitbridge::refresh_git_folder(repo, &repo.line(&l.id)?) {
+            if let Err(e) = refresh_line_git(repo, l) {
                 eprintln!("warning: .git folder not updated: {e:#}");
             }
         }

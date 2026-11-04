@@ -334,9 +334,19 @@ fn initialization_failpoint(point: &str) -> Result<()> {
     Ok(())
 }
 
+/// A push runs with no project lock: the uploads are the long part. The states it reads are pinned
+/// (`push_locked`), so gc keeps them. A lock file in the push folder lets one push of this remote run
+/// at a time: its journal and index live there.
 pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options) -> Result<Report> {
-    let _lock = repo.p.lock()?;
+    let _push = push_folder_lock(&store.dir)?;
     push_locked(store, ctx, repo, opts)
+}
+
+fn push_folder_lock(dir: &Path) -> Result<std::fs::File> {
+    std::fs::create_dir_all(dir)?;
+    let f = std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(dir.join("push.lock"))?;
+    rustix::fs::flock(&f, rustix::fs::FlockOperation::LockExclusive)?;
+    Ok(f)
 }
 
 pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options) -> Result<Report> {
@@ -460,6 +470,8 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
                 continue;
             }
         }
+        // Pinned before the trees are read: gc keeps the state until this command ends.
+        repo.hold(repo.pin(&[id.as_str()])?);
         states.push(state);
     }
     states.sort_by(|a, b| (a.time, &a.id).cmp(&(b.time, &b.id)));
@@ -560,6 +572,9 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
         // A base that a history limit deleted here (docs/cache-overlays.md) cannot be compared:
         // the state goes up as a complete tree.
         let base = base.filter(|(id, _)| repo.p.has_state(id));
+        if let Some((id, _)) = &base {
+            repo.hold(repo.pin(&[id.as_str()])?);
+        }
         let base_root = base.as_ref().map(|(id, _)| repo.state_root(id)).transpose()?;
         let (pushed, files, bytes) = upload_state_journal(
             store,
