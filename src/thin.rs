@@ -71,10 +71,42 @@ fn not_found(e: &std::io::Error) -> bool {
     matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory)
 }
 
-/// True when a failed copy call found an entry of the source missing: a writer removed it during
-/// the copy.
-fn vanished(e: &anyhow::Error) -> bool {
-    e.downcast_ref::<std::io::Error>().is_some_and(not_found)
+/// A copy call found an entry of the source missing: a writer removed it during the copy. Only
+/// the calls that read the source make this error. A missing destination is a plain error.
+#[derive(Debug)]
+pub struct SourceGone(pub PathBuf);
+
+impl std::fmt::Display for SourceGone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} went away during the copy", self.0.display())
+    }
+}
+
+impl std::error::Error for SourceGone {}
+
+/// True when a failed copy call found an entry of the source missing.
+pub(crate) fn vanished(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<SourceGone>().is_some()
+}
+
+/// The result of a read of the source entry `path`: a missing entry is `SourceGone`.
+pub(crate) fn read_source<T>(r: std::io::Result<T>, path: &Path) -> Result<T> {
+    r.map_err(|e| if not_found(&e) { SourceGone(path.to_path_buf()).into() } else { anyhow::Error::from(e) })
+}
+
+/// Clone the source entry `from` to `to`. The clone fails with NotFound for a missing source or
+/// a missing destination folder. The destination folder exists here (the layer makes it first),
+/// so a NotFound with an existing destination folder is the source.
+fn clone_from_source(from: &Path, to: &Path) -> Result<()> {
+    crate::sys::apfs_clone(from, to)
+        .map_err(|e| {
+            if not_found(&e) && to.parent().is_some_and(|p| p.is_dir()) {
+                SourceGone(from.to_path_buf()).into()
+            } else {
+                anyhow::Error::from(e)
+            }
+        })
+        .with_context(|| format!("clone {}", from.display()))
 }
 
 fn parent_of(rel: &str) -> &str {
@@ -276,14 +308,15 @@ fn open_parent(root: &Path, rel: &str) -> Result<()> {
 
 /// Give folder `dst` the metadata of folder `src`, except the Layr markers.
 fn copy_dir_meta(src: &Path, dst: &Path, root: bool) -> Result<()> {
-    let m = fs::symlink_metadata(src)?;
+    let m = read_source(fs::symlink_metadata(src), src)?;
     let mode = m.mode() & 0o7777;
     crate::sys::apfs_immutable(dst, false)?;
     let original = fs::symlink_metadata(dst)?.permissions();
     fs::set_permissions(dst, fs::Permissions::from_mode(original.mode() | 0o200))?;
     let copied = (|| -> Result<()> {
         if !root {
-            crate::sys::apfs_copy_metadata(src, dst).with_context(|| format!("copy metadata {}", dst.display()))?;
+            read_source(crate::sys::apfs_copy_metadata(src, dst), src)
+                .with_context(|| format!("copy metadata {}", dst.display()))?;
             crate::sys::apfs_immutable(dst, false)?;
             // copyfile applies the source mode too. Keep this private directory writable
             // until marker removal and all time updates finish.
@@ -310,25 +343,22 @@ fn copy_dir_meta(src: &Path, dst: &Path, root: bool) -> Result<()> {
 /// False when a writer removed the entry before the clone: the callers that copy a live folder
 /// see that change in their next scan (or, in the last round, keep the entry out).
 fn clone_entry(from: &Path, to: &Path, m: &fs::Metadata) -> Result<bool> {
-    let gone = |e: &std::io::Error| e.kind() == ErrorKind::NotFound && fs::symlink_metadata(from).is_err();
     if m.file_type().is_symlink() {
+        // read_link reads only the source: NotFound means the link went away.
         let target = match fs::read_link(from) {
             Ok(t) => t,
-            Err(e) if gone(&e) => return Ok(false),
+            Err(e) if not_found(&e) => return Ok(false),
             Err(e) => return Err(e.into()),
         };
         std::os::unix::fs::symlink(target, to)?;
-        crate::sys::apfs_copy_metadata(from, to).with_context(|| format!("copy metadata {}", to.display()))?;
+        read_source(crate::sys::apfs_copy_metadata(from, to), from).with_context(|| format!("copy metadata {}", to.display()))?;
         crate::sys::apfs_immutable(to, false)?;
         apfs::keep_birthtime(m, to)?;
         crate::sys::apfs_mtime(to, m.mtime(), m.mtime_nsec())?;
         return Ok(true);
     }
-    match crate::sys::apfs_clone(from, to) {
-        Ok(()) => Ok(true),
-        Err(e) if gone(&e) => Ok(false),
-        Err(e) => Err(anyhow::Error::from(e).context(format!("clone {}", from.display()))),
-    }
+    clone_from_source(from, to)?;
+    Ok(true)
 }
 
 /// Apply one layer to a writable complete tree.
@@ -622,7 +652,7 @@ pub fn add_entries<'a>(
         let to = dst.join(k);
         let copied = (|| -> Result<()> {
             let from = crate::fsutil::safe_join(src, k).with_context(|| format!("find {k} in the source"))?;
-            let m = fs::symlink_metadata(&from).with_context(|| format!("stat {k} in the source"))?;
+            let m = read_source(fs::symlink_metadata(&from), &from).with_context(|| format!("stat {k} in the source"))?;
             if crate::fsutil::exact_metadata(&to, k).is_some() {
                 open_parent(dst, k).with_context(|| format!("open the folder of {k} in the layer"))?;
                 apfs::delete_tree(&to).with_context(|| format!("remove the old {k} from the layer"))?;
@@ -631,7 +661,7 @@ pub fn add_entries<'a>(
                 // A new folder: one clone copies its content (layer rule 5 holds, as the
                 // content is all new). A clone keeps the folder's own mode, so open it for the
                 // metadata step below.
-                crate::sys::apfs_clone(&from, &to).with_context(|| format!("clone {}", from.display()))?;
+                clone_from_source(&from, &to)?;
                 crate::sys::apfs_immutable(&to, false).with_context(|| format!("unlock {k} in the layer"))?;
                 let below = format!("{k}/");
                 let complete = write
@@ -649,12 +679,12 @@ pub fn add_entries<'a>(
                 fs::create_dir(&to).with_context(|| format!("create folder {k} in the layer"))?;
                 dirs.insert(k.to_string());
             } else if m.is_file() {
-                crate::sys::apfs_clone(&from, &to).with_context(|| format!("clone {}", from.display()))?;
+                clone_from_source(&from, &to)?;
                 crate::sys::apfs_immutable(&to, false).with_context(|| format!("unlock {k} in the layer"))?;
             } else if m.file_type().is_symlink() {
                 // False: the link went away between the stat and the read.
                 if !clone_entry(&from, &to, &m).with_context(|| format!("copy link {k} to the layer"))? {
-                    return Err(std::io::Error::from(ErrorKind::NotFound).into());
+                    return Err(SourceGone(from.clone()).into());
                 }
             } else {
                 bail!("cannot snapshot special file {}", from.display());
@@ -1630,6 +1660,26 @@ mod tests {
                 }
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a case-sensitive APFS test volume"]
+    fn a_missing_destination_fails_the_copy_and_keeps_the_entry() -> Result<()> {
+        let s = Sandbox::new();
+        let src = s.0.join("work");
+        fs::create_dir(&src)?;
+        fs::write(src.join("x"), b"kept")?;
+        // The destination folder does not exist, so the clone of `x` fails with NotFound on the
+        // destination side. The source entry is still there: the copy fails and `x` is not
+        // left out of the state.
+        let dst = s.0.join("missing").join("layer");
+        let mut gone = BTreeSet::new();
+        let err = add_entries(&src, &dst, ["x"].into_iter(), std::iter::empty(), &BTreeSet::new(), Some(&mut gone))
+            .expect_err("a missing destination must fail the copy");
+        assert!(!vanished(&err), "a destination error is not a source change: {err:?}");
+        assert!(gone.is_empty(), "the entry must not leave the state silently: {gone:?}");
+        assert_eq!(fs::read(src.join("x"))?, b"kept");
         Ok(())
     }
 
