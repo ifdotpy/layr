@@ -121,7 +121,7 @@ pub(crate) fn scan_shared(root: &Path, data: bool) -> Result<Arc<BTreeMap<String
     if let Some(scan) = MEMO.with_borrow(|memo| memo.iter().find(|(r, _)| r == root).map(|(_, s)| s.clone())) {
         return Ok(scan);
     }
-    let m = fs::symlink_metadata(root)?;
+    let m = crate::thin::read_source(fs::symlink_metadata(root), root)?;
     let saved = sealed_scan_file(root, &m);
     if let Some(scan) = saved.as_ref().and_then(|f| decoded(f)) {
         return Ok(scan);

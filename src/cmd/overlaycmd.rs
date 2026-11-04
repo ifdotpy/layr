@@ -267,7 +267,7 @@ fn refuse_folder(repo: &Repo, name: &str) -> Result<()> {
 
 /// The options of overlay properties (docs/cache-overlays.md, section 4).
 fn props_spec(spec: Spec) -> Spec {
-    spec.value("--history").flag("--quiet").flag("--no-quiet").value("--merge").value("--gc").value("--key-files")
+    spec.value("--history").flag("--quiet").flag("--no-quiet").value("--merge").value("--gc").value("--key-files").value("--prune")
 }
 
 /// `--key-files a,b` as the setting value; `none` clears it.
@@ -301,6 +301,16 @@ fn props_of(a: &crate::args::Parsed, base: Props) -> Result<Props> {
     if let Some(v) = a.get("--merge") {
         p.merge =
             MergeKind::parse(v).ok_or_else(|| exit(128, format!("fatal: invalid --merge '{v}' (three-way or union-theirs)")))?;
+    }
+    if let Some(v) = a.get("--prune") {
+        // Core checks the form only. The adapter names come from the registry, and an unknown one is logged at prune time.
+        p.prune = match v {
+            "auto" => None,
+            _ => Some(
+                crate::overlay::prune_name(v)
+                    .ok_or_else(|| exit(128, format!("fatal: invalid --prune '{v}' (an adapter name, none or auto)")))?,
+            ),
+        };
     }
     if let Some(v) = a.get("--gc") {
         p.gc_lru = crate::overlay::parse_gc(v)

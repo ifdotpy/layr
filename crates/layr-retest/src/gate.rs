@@ -155,7 +155,7 @@ fn with_env<'a>(cmd: &'a mut Command, env: &[(String, String)]) -> &'a mut Comma
 
 /// The env of the gate: the project's `env` (none without `Cargo.toml`), and `RUSTC_WRAPPER` cleared.
 fn gate_env(root: &Path) -> Result<Vec<(String, String)>> {
-    let mut env = if root.join("Cargo.toml").is_file() { crate::sweep_config(root)?.env } else { Vec::new() };
+    let mut env = if root.join("Cargo.toml").is_file() { layr_cache::cargo::settings(&layr_cache::LocalHost::new(std::time::Duration::from_secs(3600)), root)?.env } else { Vec::new() };
     env.push(("RUSTC_WRAPPER".to_string(), String::new()));
     Ok(env)
 }
@@ -206,7 +206,7 @@ pub fn run(args: &[String]) -> Result<i32> {
     let cargo = root.join("Cargo.toml").is_file();
     let env = gate_env(&root)?;
     if cargo {
-        match with_env(crate::cargo_cmd().args(["fetch", "--locked"]), &env).status() {
+        match with_env(layr_cache::cargo::cargo_cmd().args(["fetch", "--locked"]), &env).status() {
             Ok(s) if s.success() => {}
             Ok(s) => eprintln!("layr-retest gate: cargo fetch failed ({s}); the command may miss new crates"),
             Err(e) => eprintln!("layr-retest gate: cannot start cargo fetch: {e}; the command may miss new crates"),

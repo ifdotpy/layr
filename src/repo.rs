@@ -1790,6 +1790,7 @@ impl<'a> Repo<'a> {
         };
         self.materialize_with(&line, start, &dst, &layers, true)?;
         let res = (|| -> Result<Record> {
+            // Not pruned: this path runs under the project lock, and only `init` uses it, which takes no caches.
             self.take_caches(ctx, &line, start, source, &dst)?;
             let mut rec = Record::new("line.create");
             rec.lines.insert(
@@ -3102,14 +3103,14 @@ mod regenerable_memo_tests {
     use super::*;
 
     #[test]
-    #[test]
     fn a_folder_the_walk_cannot_read_is_an_error_not_a_short_list() -> Result<()> {
         // Root reads every folder: the test needs a folder that its owner cannot open.
         if rustix::process::geteuid().is_root() {
             return Ok(());
         }
         use std::os::unix::fs::PermissionsExt;
-        let root = std::env::temp_dir().join(format!("layr-regen-unreadable-{}", std::process::id()));
+        // A folder of its own: a leftover of another run or test must not be shared.
+        let root = std::env::temp_dir().join(format!("layr-regen-unreadable-{}", crate::ids::new_id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("locked/target"))?;
         std::fs::create_dir_all(root.join("a/target"))?;
