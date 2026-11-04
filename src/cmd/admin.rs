@@ -229,12 +229,8 @@ fn refuse(e: anyhow::Error, refusals: &mut Vec<String>) -> Result<()> {
 fn prepare_caches(repo: &Repo, l: &Line, only: &[String]) -> Result<Vec<String>> {
     let w = repo.working(l);
     let (u, g) = repo.owner_ids(l);
-<<<<<<< head
     let mut ready = Vec::new();
-||||||| base
-=======
     let mut refused = Vec::new();
->>>>>>> origin-https/main
     for p in repo.line_cache_paths(l)?.0 {
         if !only.is_empty() && !only.contains(&p) {
             continue;
