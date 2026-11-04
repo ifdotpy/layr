@@ -518,8 +518,8 @@ impl<'a> Repo<'a> {
                 fsutil::remove_entry(w, &folder)?;
             }
             fsutil::make_parents(w, &folder, Some((uid, gid)))?;
-            btrfs::cache_snapshot(&orepo.p.state_path(&sid), &cp)?;
-            crate::repo::give_tree(&cp, uid, gid)?;
+            let uniform = btrfs::cache_snapshot(&orepo.p.state_path(&sid), &cp)?;
+            crate::repo::give_cache_tree(&cp, uniform, uid, gid)?;
             let _lock = orepo.p.lock()?;
             orepo.ensure_overlay_line(ctx, &Repo::overlay_line_name(&info, &line.id, line.owner), &sid, line.owner)?;
             taken.push(folder);

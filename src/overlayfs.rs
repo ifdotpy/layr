@@ -792,8 +792,10 @@ pub fn scan_snapshot(src: &Path, dst: &Path) -> Result<()> {
 }
 
 /// A writable copy of a cache folder (see the APFS and btrfs versions).
-pub fn cache_snapshot(src: &Path, dst: &Path) -> Result<()> {
-    snapshot(src, dst, false)
+/// Returns false: every entry needs a check of its owner (see the btrfs version).
+pub fn cache_snapshot(src: &Path, dst: &Path) -> Result<bool> {
+    snapshot(src, dst, false)?;
+    Ok(false)
 }
 
 pub fn snapshot(src: &Path, dst: &Path, readonly: bool) -> Result<()> {

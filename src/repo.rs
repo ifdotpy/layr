@@ -1915,9 +1915,9 @@ impl<'a> Repo<'a> {
                     fsutil::remove_entry(w, path)?;
                 }
                 fsutil::make_parents(w, path, Some((uid, gid)))?;
-                btrfs::cache_snapshot(&src, &cp)?;
+                let uniform = btrfs::cache_snapshot(&src, &cp)?;
                 // The copy shares its blocks; only its files change owner.
-                give_tree(&cp, uid, gid)?;
+                give_cache_tree(&cp, uniform, uid, gid)?;
                 continue;
             }
             if i < fixed {
@@ -2608,6 +2608,18 @@ fn prune_empty_parents(target: &Path, to: &Path, rel: &str) -> Result<()> {
 
 /// Give every entry of a tree (a new cache copy, still private) to `uid:gid`, without following
 /// links and without entering nested subvolumes.
+/// `give_tree` for a cache copy. A copy that is one clone has the owner of its root in every
+/// entry, so when the root already has the owner, nothing needs a walk (1 to 2 s for `node_modules`).
+pub(crate) fn give_cache_tree(root: &Path, uniform: bool, uid: u32, gid: u32) -> Result<()> {
+    if uniform {
+        let m = std::fs::symlink_metadata(root)?;
+        if m.uid() == uid && m.gid() == gid {
+            return Ok(());
+        }
+    }
+    give_tree(root, uid, gid)
+}
+
 pub(crate) fn give_tree(root: &Path, uid: u32, gid: u32) -> Result<()> {
     let _t = crate::trace::span(format!("give tree {}", root.display()));
     let mut paths = Vec::new();
