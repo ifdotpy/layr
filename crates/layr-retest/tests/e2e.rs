@@ -5,8 +5,47 @@
 //! folder with its own LAYR_ROOT. Takes about 10 s.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::Duration;
+
+/// The time limit of one test process. A cold cargo build of the test project fits in it.
+const LIMIT: Duration = Duration::from_secs(1800);
+
+/// Waits for `child` for at most `limit`. The child must start its own process group (see `group`). At the
+/// limit the group is killed, so no child lives on after the test, and the test fails.
+fn finish(child: std::process::Child, limit: Duration) -> std::process::Output {
+    let pid = child.id();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+    match rx.recv_timeout(limit) {
+        Ok(out) => out.unwrap(),
+        Err(_) => {
+            let _ = Command::new("kill").args(["-KILL", "--", &format!("-{pid}")]).status();
+            panic!("a test process ran past {limit:?}; its process group was killed");
+        }
+    }
+}
+
+/// Runs `cmd` in its own process group with the time limit of `finish`. Its stdin is empty.
+fn run_limited(cmd: &mut Command) -> std::process::Output {
+    let child = cmd.process_group(0).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    finish(child, LIMIT)
+}
+
+/// `output()` of a command, limited like `run_limited`.
+trait OutputLimited {
+    fn output_limited(&mut self) -> std::process::Output;
+}
+
+impl OutputLimited for Command {
+    fn output_limited(&mut self) -> std::process::Output {
+        run_limited(self)
+    }
+}
 
 // `tc` reads a file, which coverage cannot track.
 const LIB: &str = "pub fn a() -> i32 {\n    1\n}\n\npub fn b() -> i32 {\n    2\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn ta() {\n        assert_eq!(a(), 1);\n    }\n\n    #[test]\n    fn tb() {\n        assert_eq!(b(), 2);\n    }\n\n    #[test]\n    fn th() {\n        assert_eq!(hex::FromHexError::OddLength.to_string(), \"Odd number of digits\");\n    }\n\n    #[test]\n    fn tc() {\n        assert_eq!(std::fs::read_to_string(\"data.txt\").unwrap(), \"ok\");\n    }\n}\n";
@@ -19,17 +58,17 @@ const HANG: &str = "fn work() -> i32 {\n    1\n}\n\nfn main() {\n    println!(\"
 const HANG_TEST: &str = "use std::io::BufRead;\n\n#[test]\nfn tkill() {\n    let mut c = std::process::Command::new(env!(\"CARGO_BIN_EXE_hang\")).stdout(std::process::Stdio::piped()).spawn().unwrap();\n    let mut line = String::new();\n    std::io::BufReader::new(c.stdout.take().unwrap()).read_line(&mut line).unwrap();\n    assert!(line.starts_with(\"up\"));\n    c.kill().unwrap();\n    c.wait().unwrap();\n}\n";
 
 fn sh(dir: &Path, root: &Path, prog: &str, args: &[&str]) -> (String, String) {
-    let o = Command::new(prog)
-        .args(args)
-        .current_dir(dir)
-        .env("LAYR_ROOT", root)
-        .env_remove("RUSTFLAGS")
-        .env_remove("CARGO_TARGET_DIR")
-        .env("CARGO_NET_OFFLINE", "true")
-        // The assertions match plain text. CI sets CARGO_TERM_COLOR=always, which puts escape codes inside test names.
-        .env("CARGO_TERM_COLOR", "never")
-        .output()
-        .unwrap();
+    let o = run_limited(
+        Command::new(prog)
+            .args(args)
+            .current_dir(dir)
+            .env("LAYR_ROOT", root)
+            .env_remove("RUSTFLAGS")
+            .env_remove("CARGO_TARGET_DIR")
+            .env("CARGO_NET_OFFLINE", "true")
+            // The assertions match plain text. CI sets CARGO_TERM_COLOR=always, which puts escape codes inside test names.
+            .env("CARGO_TERM_COLOR", "never"),
+    );
     let (out, err) = (String::from_utf8_lossy(&o.stdout).into_owned(), String::from_utf8_lossy(&o.stderr).into_owned());
     assert!(o.status.success(), "{prog} {args:?} failed:\n{out}\n{err}");
     (out, err)
@@ -127,7 +166,7 @@ fn runs_only_the_stale_test() {
 
     // 1b. Doctor: the two integration tests are two binaries, which it says; it reads and writes nothing.
     let before = walk(&line).len();
-    let o = Command::new("layr").args(["retest", "doctor"]).current_dir(&line).env("LAYR_ROOT", &root).output().unwrap();
+    let o = Command::new("layr").args(["retest", "doctor"]).current_dir(&line).env("LAYR_ROOT", &root).output_limited();
     let text = String::from_utf8_lossy(&o.stdout);
     assert_eq!(o.status.code(), Some(1), "{text}");
     assert!(text.contains("tiny: 2 integration test binaries"), "{text}");
@@ -220,8 +259,7 @@ fn runs_only_the_stale_test() {
         .env_remove("RUSTFLAGS")
         .env_remove("CARGO_TARGET_DIR")
         .env("CARGO_NET_OFFLINE", "true")
-        .output()
-        .unwrap();
+        .output_limited();
     let err = String::from_utf8_lossy(&o.stderr);
     assert!(!o.status.success(), "{err}");
     assert!(err.contains("6 selected") && err.contains("CONTRADICTION: tiny tests::tc"), "{err}");
@@ -279,8 +317,7 @@ fn vitest_adapter_with_a_fake_tool() {
             .current_dir(&line)
             .env("LAYR_ROOT", &root)
             .env("LAYR_RETEST_VITEST", &fake)
-            .output()
-            .unwrap();
+            .output_limited();
         let _ = std::fs::read_to_string(&log); // the log is read by `calls`
         (o.status.success(), String::from_utf8_lossy(&o.stderr).into_owned())
     };
@@ -405,7 +442,7 @@ fn init_is_idempotent() {
     std::fs::create_dir_all(line.join("node_modules/pkg")).unwrap();
     std::fs::write(line.join("node_modules/pkg/index.js"), "x").unwrap();
     let init = || {
-        let o = Command::new("layr").args(["retest", "init"]).current_dir(&line).env("LAYR_ROOT", &root).output().unwrap();
+        let o = Command::new("layr").args(["retest", "init"]).current_dir(&line).env("LAYR_ROOT", &root).output_limited();
         (o.status.code(), String::from_utf8_lossy(&o.stdout).into_owned())
     };
     let overlay_folders = || {
@@ -509,6 +546,7 @@ fn gate_child(dir: &Path, lock: &Path, args: &[&str]) -> std::process::Child {
         .current_dir(dir)
         .env("LAYR_ROOT", dir.join("unused-store"))
         .env("LAYR_RETEST_GATE_LOCK", lock)
+        .process_group(0)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -531,8 +569,8 @@ fn gate_runs_one_gate_at_a_time() {
     }
     // The second gate's command passes only when the first gate's command has finished.
     let second = gate_child(&tmp, &lock, &["--name", "second", "--", "sh", "-c", &format!("test -f '{}'", marker.display())]);
-    let second = second.wait_with_output().unwrap();
-    let first = first.wait_with_output().unwrap();
+    let second = finish(second, LIMIT);
+    let first = finish(first, LIMIT);
     let err = String::from_utf8_lossy(&second.stderr);
     assert!(err.contains("waiting for the gate lock") && err.contains("first"), "{err}");
     assert!(first.status.success(), "{}", String::from_utf8_lossy(&first.stderr));
@@ -553,7 +591,7 @@ fn gate_reaps_the_lock_of_a_dead_process() {
     std::fs::create_dir_all(&lock).unwrap();
     std::fs::write(lock.join("pid"), pid.to_string()).unwrap();
     std::fs::write(lock.join("owner"), "crashed-gate").unwrap();
-    let out = gate_child(&tmp, &lock, &["--", "true"]).wait_with_output().unwrap();
+    let out = finish(gate_child(&tmp, &lock, &["--", "true"]), LIMIT);
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{err}");
     assert!(err.contains("reaped") && err.contains("crashed-gate"), "{err}");
@@ -574,7 +612,7 @@ fn gate_applies_the_project_env_and_returns_the_command_status() {
     let lock = tmp.join("gate.lock");
     // The command sees the project env, no CARGO_TARGET_DIR and a cleared RUSTC_WRAPPER. Its status is 7.
     let check = "test \"$LAYR_E2E_FLAG\" = 1 && test -z \"${CARGO_TARGET_DIR+x}\" && test \"${RUSTC_WRAPPER-unset}\" = \"\" && exit 7; exit 1";
-    let out = gate_child(&good, &lock, &["--", "sh", "-c", check]).wait_with_output().unwrap();
+    let out = finish(gate_child(&good, &lock, &["--", "sh", "-c", check]), LIMIT);
     let err = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(7), "{err}");
     assert!(err.contains("sweep ok"), "{err}");
@@ -592,7 +630,7 @@ fn gate_applies_the_project_env_and_returns_the_command_status() {
     cargo(&bad, &["generate-lockfile"]);
     // A folder that a build wrote: it has a profile folder with a fingerprint folder.
     std::fs::create_dir_all(bad.join("target/debug/.fingerprint")).unwrap();
-    let out = gate_child(&bad, &lock, &["--", "true"]).wait_with_output().unwrap();
+    let out = finish(gate_child(&bad, &lock, &["--", "true"]), LIMIT);
     let err = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(0), "{err}");
     assert!(err.contains("sweep failed"), "{err}");
@@ -601,7 +639,7 @@ fn gate_applies_the_project_env_and_returns_the_command_status() {
 
 /// Stdout of a tool run, for linkage checks.
 fn sh_out(prog: &str, args: &[&str]) -> String {
-    let o = Command::new(prog).args(args).output().unwrap();
+    let o = run_limited(Command::new(prog).args(args));
     String::from_utf8_lossy(&o.stdout).into_owned()
 }
 
@@ -891,15 +929,15 @@ fn assert_no_output_written(debug: &Path, before: &BTreeMap<PathBuf, std::time::
 
 /// Runs cargo in `dir` with the target folder `target` and the variables `env`, and returns its stderr.
 fn cargo_in(dir: &Path, target: &Path, env: &[(&str, &str)], args: &[&str]) -> String {
-    let o = Command::new("cargo")
-        .args(args)
-        .current_dir(dir)
-        .env_remove("RUSTFLAGS")
-        .env("CARGO_TARGET_DIR", target)
-        .env("CARGO_NET_OFFLINE", "true")
-        .envs(env.iter().copied())
-        .output()
-        .unwrap();
+    let o = run_limited(
+        Command::new("cargo")
+            .args(args)
+            .current_dir(dir)
+            .env_remove("RUSTFLAGS")
+            .env("CARGO_TARGET_DIR", target)
+            .env("CARGO_NET_OFFLINE", "true")
+            .envs(env.iter().copied()),
+    );
     assert!(o.status.success(), "cargo {args:?} failed:\n{}", String::from_utf8_lossy(&o.stderr));
     String::from_utf8_lossy(&o.stderr).into_owned()
 }
@@ -976,38 +1014,29 @@ fn sweep_skips_a_busy_build_lock_without_waiting() {
     sweep_workspace(&ws, "sweep = [[\"build\", \"--workspace\", \"--tests\", \"--bins\"]]");
     let debug = ws.join("target/debug");
     cargo(&ws, &["build", "--workspace", "--tests", "--bins"]);
+    // This test process holds the lock, so its pid is the holder that the sweep must name.
     let held = std::fs::File::options().append(true).open(debug.join(".cargo-lock")).unwrap();
     held.lock().unwrap();
     let times = output_times(&debug);
 
     let err = sweep_cmd(&ws, &[]);
-    assert!(err.contains("build lock busy"), "{err}");
+    assert!(err.contains("build lock busy") && err.contains(&format!("pid {} (", std::process::id())), "{err}");
     // CI sets CARGO_TERM_COLOR=always. Escape codes in front of cargo's wait line must not hide the busy lock.
-    let mut child = Command::new("layr")
+    let child = Command::new("layr")
         .args(["retest", "sweep"])
         .current_dir(&ws)
         .env("LAYR_ROOT", ws.join("unused-store"))
         .env("CARGO_TERM_COLOR", "always")
+        .process_group(0)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    // A sweep that waits for the lock never ends: fail at the deadline instead of hanging the run.
-    let start = std::time::Instant::now();
-    let status = loop {
-        if let Some(s) = child.try_wait().unwrap() {
-            break s;
-        }
-        if start.elapsed() > std::time::Duration::from_secs(60) {
-            let _ = child.kill();
-            panic!("the sweep waited for the busy build lock with CARGO_TERM_COLOR=always");
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    };
-    let mut colored = String::new();
-    std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut colored).unwrap();
+    let out = finish(child, LIMIT);
+    let status = out.status;
+    let colored = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(status.success(), "{colored}");
-    assert!(colored.contains("build lock busy"), "{colored}");
+    assert!(colored.contains("build lock busy") && colored.contains("holder: pid"), "{colored}");
     drop(held);
     assert_no_output_written(&debug, &times, &err);
     let _ = std::fs::remove_dir_all(&tmp);
@@ -1130,16 +1159,16 @@ fn build_scripts_write_no_profile_into_the_project() {
 
 /// Runs `cargo <args> --message-format json` in `dir` and returns the stdout (the unit messages) and stderr.
 fn cargo_json(dir: &Path, target: &Path, args: &[&str]) -> (String, String) {
-    let o = Command::new("cargo")
-        .args(args)
-        .arg("--message-format")
-        .arg("json")
-        .current_dir(dir)
-        .env_remove("RUSTFLAGS")
-        .env("CARGO_TARGET_DIR", target)
-        .env("CARGO_NET_OFFLINE", "true")
-        .output()
-        .unwrap();
+    let o = run_limited(
+        Command::new("cargo")
+            .args(args)
+            .arg("--message-format")
+            .arg("json")
+            .current_dir(dir)
+            .env_remove("RUSTFLAGS")
+            .env("CARGO_TARGET_DIR", target)
+            .env("CARGO_NET_OFFLINE", "true"),
+    );
     assert!(o.status.success(), "cargo {args:?} failed:\n{}", String::from_utf8_lossy(&o.stderr));
     (String::from_utf8_lossy(&o.stdout).into_owned(), String::from_utf8_lossy(&o.stderr).into_owned())
 }

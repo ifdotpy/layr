@@ -211,6 +211,13 @@ Everything else goes: uplifted copies that no listing names, stale bins and exam
 other builds, outputs of units that no command lists, orphan incremental folders, and other files. Entries
 go whole, so no live unit loses a file. The removal frees the bytes of an inode only when all its links go.
 
+Folders of `target` that no `sweep` command makes have no live set: another `--target` triple
+(`target/<triple>`), a custom profile (`target/<name>`), `target/doc`. The cache prune (`save --caches`, the
+follow pass) removes such a folder when no build wrote into it for 7 days: the newest time of the folder, its
+entries and their entries is older (cargo writes `.cargo-lock` and `.fingerprint` there at each build). The profile
+folders and `--target` triples of the `sweep` commands, `target/retest` and `target/profraw` stay, as do files at
+the top of `target` (issue #195). A project that uses such a build every week lists its command in `sweep`.
+
 Links from a unit to its incremental folder (both need no compile):
 
 - Library: the newest session of a library holds `metadata.rmeta`, hard-linked to `deps/lib<crate>-<hash>.rmeta`
