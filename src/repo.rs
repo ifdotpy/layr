@@ -110,6 +110,82 @@ pub fn cache_fits(saved: Option<&str>, local: &str, here: bool) -> bool {
     }
 }
 
+/// A write of the working folder that a command made under its line lock, before its commit. It
+/// keeps the tree that the folder had (`before`) and the tree written (`after`). Dropped without
+/// `commit`, it writes `before` back, so a failed commit leaves the folder as the command found it.
+/// The paths of a command were not changed by the user (the command checked them), so the inverse
+/// write restores exactly their content.
+pub struct WorkingWrite<'a> {
+    repo: &'a Repo<'a>,
+    wdir: PathBuf,
+    before: PathBuf,
+    after: PathBuf,
+    own: Option<(u32, u32)>,
+    view: Option<Temp>,
+    done: bool,
+}
+
+impl<'a> WorkingWrite<'a> {
+    /// `view` is the tree of an overlay view that `after` names (kept for the write back).
+    pub fn new(
+        repo: &'a Repo<'a>,
+        wdir: PathBuf,
+        own: Option<(u32, u32)>,
+        before: PathBuf,
+        after: PathBuf,
+        view: Option<Temp>,
+    ) -> Self {
+        WorkingWrite { repo, wdir, before, after, own, view, done: false }
+    }
+
+    /// Keep the write. Returns the overlay view that the write used, if any.
+    pub fn commit(mut self) -> Option<Temp> {
+        self.done = true;
+        self.view.take()
+    }
+}
+
+impl Drop for WorkingWrite<'_> {
+    fn drop(&mut self) {
+        if self.done {
+            return;
+        }
+        let none = BTreeSet::new();
+        if let Err(e) = self.repo.apply_delta(&self.after, &self.before, &self.wdir, self.own, &none, true) {
+            eprintln!(
+                "error: the working folder of {} could not be put back after a refused command: {e:#}; check it with 'layr status'",
+                self.wdir.display()
+            );
+        }
+    }
+}
+
+/// Delete the states that no record names (a command that failed before its commit).
+pub fn discard_unrecorded(repo: &Repo, states: &[StateRec]) {
+    let unrecorded: Vec<StateRec> =
+        states.iter().filter(|s| repo.p.db.state(&s.id).is_ok_and(|known| known.is_none())).cloned().collect();
+    repo.discard_states(&unrecorded);
+}
+
+/// The error of a command whose line head moved during the command. It names both heads.
+/// `TargetMoved` lets the merge queue retry the entry once.
+pub fn line_moved(name: &str, from: &str, to: &str) -> anyhow::Error {
+    crate::cmd::exit(
+        1,
+        format!(
+            "error: line {name} moved during the command (head {} -> {}); run it again",
+            crate::ids::short(from),
+            crate::ids::short(to)
+        ),
+    )
+    .context(crate::cmd::mergecmd::TargetMoved)
+}
+
+/// The error of a command whose line was deleted during the command.
+pub fn line_gone(name: &str) -> anyhow::Error {
+    crate::cmd::exit(1, format!("error: line {name} was deleted during the command; run it again"))
+}
+
 pub fn skip_path(p: &str) -> bool {
     p == ".git" || p.starts_with(".git/") || cache_journal_name(p)
 }
@@ -604,7 +680,14 @@ impl<'a> Repo<'a> {
 
     /// `working_snapshot` with its thin layer over `base` (APFS): over a state close to the
     /// working content, only the few entries that differ are copied.
-    pub fn working_snapshot_over(&self, ctx: &Ctx, line: &Line, parents: Vec<String>, message: &str, base: &str) -> Result<StateRec> {
+    pub fn working_snapshot_over(
+        &self,
+        ctx: &Ctx,
+        line: &Line,
+        parents: Vec<String>,
+        message: &str,
+        base: &str,
+    ) -> Result<StateRec> {
         let w = self.working(line);
         recover_cache_replacements(&w)?;
         self.restore_caches(line)?;
@@ -865,6 +948,71 @@ impl<'a> Repo<'a> {
 
     /// The id of a state equal to the working content: a new automatic state, or the previous
     /// automatic state (or head) when nothing changed. The caller holds the project lock.
+    /// `line delete`, before the project lock: the automatic state of the working folder, made as
+    /// far as possible without the lock (issue #194). On APFS its layer goes to a new id and its
+    /// complete tree is made here, since the final state of a deleted line keeps no layer. None when
+    /// the folder has nothing to save, and always off APFS (the lock then makes the state as before).
+    pub fn prepare_final_state(&self, line: &Line) -> Result<Option<FinalPrepared>> {
+        self.prepare_save(line)?;
+        #[cfg(target_os = "macos")]
+        {
+            let Some(pre) = take_prepared_save(&line.id) else { return Ok(None) };
+            let id = ids::new_id();
+            if let Err(e) = btrfs::move_tree(&pre.path, &self.p.delta_path(&id)) {
+                let _ = self.p.trash(&pre.path);
+                return Err(e);
+            }
+            if let Err(e) = crate::thin::complete_tree(&self.p, &id) {
+                let _ = self.p.delete_state(&id);
+                return Err(e);
+            }
+            return Ok(Some(FinalPrepared { id, head: pre.head, scan: pre.scan }));
+        }
+        #[cfg(not(target_os = "macos"))]
+        Ok(None)
+    }
+
+    /// `line delete`, under the project lock: records the prepared state when the line head and the
+    /// working folder are the ones it was made from. Else the state is discarded and the caller
+    /// prepares again. Without a prepared state, the lock makes the working state as before.
+    pub fn record_final_state(&self, ctx: &Ctx, line: &Line, prepared: &mut Option<FinalPrepared>) -> Result<FinalState> {
+        #[cfg(target_os = "macos")]
+        if let Some(pre) = prepared.take() {
+            let w = self.working(line);
+            let same = line.head == pre.head && w.exists() && btrfs::scan_with_data(&w, true)? == pre.scan;
+            if !same {
+                self.p.delete_state(&pre.id)?;
+                return Ok(FinalState::Moved);
+            }
+            let mut st = self.describe_state(ctx, pre.id.clone(), StateKind::Auto, vec![line.head.clone()], "before line delete", Some(line))?;
+            st.running = crate::fsutil::take_unsettled();
+            let before = self.recorded_working(line)?;
+            let mut rec = Record::new("save");
+            rec.states.push(st.clone());
+            rec.data = serde_json::json!({"line": line.id, "head": line.head, "working_before": before, "working_after": st.id});
+            self.commit_record(ctx, rec)?;
+            if let Err(e) = self.save_cache_states(ctx, line, &st.id) {
+                eprintln!("warning: cache overlay of line {} not saved: {e:#}", line.name);
+            }
+            clear_regenerable_memo();
+            return Ok(FinalState::Recorded(Some(st.id)));
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = prepared;
+        Ok(FinalState::Recorded(self.working_state(ctx, line, "before line delete")?))
+    }
+
+    /// Discards a prepared state that is not recorded (a failed command, or moved inputs). Under the
+    /// project lock the delete is a rename; the state would otherwise stay as an unowned leak.
+    pub fn discard_final_state(&self, prepared: Option<FinalPrepared>) {
+        #[cfg(target_os = "macos")]
+        if let Some(pre) = prepared {
+            let _ = self.p.delete_state(&pre.id);
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = prepared;
+    }
+
     pub fn working_state(&self, ctx: &Ctx, line: &Line, message: &str) -> Result<Option<String>> {
         if !self.working(line).exists() {
             return Ok(None);
@@ -923,7 +1071,14 @@ impl<'a> Repo<'a> {
 
     /// The layer of an automatic state at `dst`, over `save_layer_base`.
     #[cfg(target_os = "macos")]
-    fn write_save_layer(&self, line: &Line, prev: &str, w: &Path, new: &BTreeMap<String, btrfs::ScanEntry>, dst: &Path) -> Result<()> {
+    fn write_save_layer(
+        &self,
+        line: &Line,
+        prev: &str,
+        w: &Path,
+        new: &BTreeMap<String, btrfs::ScanEntry>,
+        dst: &Path,
+    ) -> Result<()> {
         let base_id = self.save_layer_base(line, prev);
         let base = self.state_src(&base_id)?;
         let base_scan = base.scan(true)?;
@@ -984,10 +1139,16 @@ impl<'a> Repo<'a> {
         let base_scan = base.scan(true)?;
         let d = crate::thin::diff(&base_scan, &|k| base.path(k), &new, &w, self.since_of(line, &base_id))?;
         // Nothing changed since the previous save: the save under the lock makes no state.
-        if !self.thin_changed(&base, &w, &d)? || (base_id != prev && self.p.has_state(&prev) && {
-            let p = self.state_src(&prev)?;
-            !self.thin_changed(&p, &w, &crate::thin::diff(&p.scan(true)?, &|k| p.path(k), &new, &w, self.since_of(line, &prev))?)?
-        }) {
+        if !self.thin_changed(&base, &w, &d)?
+            || (base_id != prev && self.p.has_state(&prev) && {
+                let p = self.state_src(&prev)?;
+                !self.thin_changed(
+                    &p,
+                    &w,
+                    &crate::thin::diff(&p.scan(true)?, &|k| p.path(k), &new, &w, self.since_of(line, &prev))?,
+                )?
+            })
+        {
             return Ok(());
         }
         let path = self.p.work_dir().join(format!("prepared-save-{}", crate::store::temp_name()));
@@ -1060,7 +1221,11 @@ impl<'a> Repo<'a> {
                 self.thin_changed(&head, &w, &head_diff)?
             } else if self.tree_available(&prev) {
                 let base = self.state_src(&prev)?;
-                self.thin_changed(&base, &w, &crate::thin::diff(&base.scan(true)?, &|k| base.path(k), &new, &w, self.since_of(line, &prev))?)?
+                self.thin_changed(
+                    &base,
+                    &w,
+                    &crate::thin::diff(&base.scan(true)?, &|k| base.path(k), &new, &w, self.since_of(line, &prev))?,
+                )?
             } else {
                 true
             };
@@ -1085,7 +1250,8 @@ impl<'a> Repo<'a> {
                     let _t = crate::trace::span("layer over prepared save");
                     let pid = ids::new_id();
                     btrfs::move_tree(&pre.path, &self.p.delta_path(&pid))?;
-                    let s1 = self.describe_state(ctx, pid.clone(), StateKind::Auto, vec![line.head.clone()], message, Some(line))?;
+                    let s1 =
+                        self.describe_state(ctx, pid.clone(), StateKind::Auto, vec![line.head.clone()], message, Some(line))?;
                     let base = self.state_src(&pid)?;
                     let base_scan = base.scan(true)?;
                     let d = crate::thin::diff(&base_scan, &|k| base.path(k), &new, &w, 0)?;
@@ -1979,8 +2145,8 @@ impl<'a> Repo<'a> {
                 stage = Some(self.current_stage(line)?);
             }
             // A file that the head or the stage (`add -f`) versions makes the folder no cache.
-            let versioned = holds_files(head.as_ref().unwrap(), &p)
-                || stage.as_ref().unwrap().as_ref().is_some_and(|s| holds_files(s, &p));
+            let versioned =
+                holds_files(head.as_ref().unwrap(), &p) || stage.as_ref().unwrap().as_ref().is_some_and(|s| holds_files(s, &p));
             if !versioned {
                 out.push(p);
             }
@@ -2243,7 +2409,27 @@ impl<'a> Repo<'a> {
 
     /// Record a new head for a line (and optionally a working state change).
     #[allow(clippy::too_many_arguments)]
+    /// Move the head of `line` to `new_head` and record it, under the project lock.
     pub fn move_head(
+        &self,
+        ctx: &Ctx,
+        op: &str,
+        line: &Line,
+        new_head: &str,
+        states: Vec<StateRec>,
+        working_before: Option<String>,
+        data: serde_json::Value,
+    ) -> Result<Record> {
+        let rec = self.head_record(ctx, op, line, new_head, states, working_before, data)?;
+        let r = self.commit_record(ctx, rec)?;
+        self.after_head_moved(line, new_head);
+        Ok(r)
+    }
+
+    /// The record of a head move, with the snapshot of the working folder after it. No project lock
+    /// is needed: a command that holds the line lock makes it before `commit_line` checks the head.
+    #[allow(clippy::too_many_arguments)]
+    pub fn head_record(
         &self,
         ctx: &Ctx,
         op: &str,
@@ -2270,13 +2456,52 @@ impl<'a> Repo<'a> {
             },
         );
         rec.data = data;
-        let r = self.commit_record(ctx, rec)?;
+        Ok(rec)
+    }
+
+    /// The `.git` folder of a line follows its head. A failure only warns: the move is done.
+    pub fn after_head_moved(&self, line: &Line, new_head: &str) {
         let mut moved = line.clone();
         moved.head = new_head.to_string();
         if let Err(e) = crate::gitbridge::refresh_git_folder(self, &moved) {
             eprintln!("warning: .git folder of line {} not updated: {e:#}", line.name);
         }
-        Ok(r)
+    }
+
+    /// The lock of `line` for a whole command: it moves the head of the line or writes its working
+    /// folder. Take it before anything else, and never under the project lock (store.rs `LineLock`).
+    pub fn line_lock(&self, line: &Line) -> Result<crate::store::LineLock> {
+        self.p.line_lock(&line.id, &line.name)
+    }
+
+    /// Run `commit` under the project lock, after a check that `line` still exists and has the head
+    /// `head` that the caller started from. Only the records and the renames of a command go here.
+    /// The caller holds the line lock, so the head can change only by a command that does not take
+    /// it (line delete, follow, fetch). Such a change is refused: nothing is recorded, and the error
+    /// names the move. The caller undoes its working folder change.
+    pub fn commit_line<T>(&self, line: &Line, head: &str, commit: impl FnOnce(&Line) -> Result<T>) -> Result<T> {
+        if self.p.holds_lock() {
+            bail!("internal error: line {} committed while the project lock is held", line.name);
+        }
+        // Test hooks (tests/t122-line-locks.sh), named by line: a crash after the folder was written
+        // and before the record, and a head that another command moved.
+        let hook = |name: &str| std::env::var(name).ok().is_some_and(|v| v == line.name);
+        if hook("LAYR_TEST_CRASH_BEFORE_COMMIT") {
+            std::process::exit(86);
+        }
+        let _lock = self.p.lock()?;
+        let now = match self.p.db.line_by_id(&line.id)? {
+            Some(l) => self.localize(l)?,
+            None => return Err(line_gone(&line.name)),
+        };
+        if hook("LAYR_TEST_MOVE_HEAD_AT_COMMIT") {
+            let parent = self.state(head).ok().and_then(|s| s.parents.first().cloned()).unwrap_or_else(|| head.to_string());
+            return Err(line_moved(&line.name, head, &parent));
+        }
+        if now.head != head {
+            return Err(line_moved(&line.name, head, &now.head));
+        }
+        commit(&now)
     }
 
     /// A snapshot of the working content right after an operation, so undo can revert only the
@@ -2805,10 +3030,7 @@ fn regenerable_in_scan(w: &Path, scan: &BTreeMap<String, btrfs::ScanEntry>) -> V
             rule_dirs.insert(dir.to_string());
         }
     }
-    let (regenerable, ignored) = (
-        Rules::limited(w, Some("regenerable"), rule_dirs.clone()),
-        Rules::limited(w, None, rule_dirs),
-    );
+    let (regenerable, ignored) = (Rules::limited(w, Some("regenerable"), rule_dirs.clone()), Rules::limited(w, None, rule_dirs));
     let mut found = Vec::new();
     for (rel, e) in scan {
         if rel.is_empty() || !e.meta.is_dir() || rel == ".git" || rel.starts_with(".git/") {
@@ -2850,17 +3072,12 @@ fn regenerable_by_walk(w: &Path) -> Result<Vec<String>> {
         }
         enter
     })?;
-    let (regenerable, ignored) = (
-        Rules::limited(w, Some("regenerable"), rule_dirs.clone()),
-        Rules::limited(w, None, rule_dirs),
-    );
+    let (regenerable, ignored) = (Rules::limited(w, Some("regenerable"), rule_dirs.clone()), Rules::limited(w, None, rule_dirs));
     let mut found: Vec<String> = children
         .into_iter()
         .filter(|rel| {
             let parent = rel.rsplit_once('/').map(|(p, _)| p).unwrap_or("");
-            (parent.is_empty() || !ignored.ignored(parent, true))
-                && regenerable.ignored(rel, true)
-                && ignored.ignored(rel, true)
+            (parent.is_empty() || !ignored.ignored(parent, true)) && regenerable.ignored(rel, true) && ignored.ignored(rel, true)
         })
         .collect();
     found.sort();
@@ -3526,6 +3743,44 @@ mod cache_copy_tests {
     }
 
     #[test]
+    fn a_line_lock_taken_again_in_the_same_process_does_not_wait() -> Result<()> {
+        // The cache hook takes the line lock of its line while a command may hold it: the second take must
+        // return at once. A wait would hang the thread, and the main thread then reports it.
+        let root = std::env::temp_dir().join(format!("layr-line-lock-again-{}", crate::ids::new_id()));
+        std::fs::create_dir(&root)?;
+        #[cfg(target_os = "linux")]
+        if !btrfs::is_supported(&root) {
+            std::fs::remove_dir(&root)?;
+            return Ok(());
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker_root = root.clone();
+        std::thread::spawn(move || {
+            let result = (|| -> Result<()> {
+                let ctx = cache_command_context(&worker_root)?;
+                let run = |ctx: &crate::ctx::Ctx, args: &[&str]| {
+                    crate::cmd::run(ctx, &args.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+                };
+                anyhow::ensure!(run(&ctx, &["init", "concurrent", "-q"])? == 0, "init failed");
+                let repo = Repo::open(&ctx, "concurrent")?;
+                let line = repo.line("main")?;
+                let first = repo.line_lock(&line)?;
+                let second = repo.p.line_lock(&line.id, &line.name)?;
+                drop(second);
+                drop(first);
+                Ok(())
+            })();
+            let _ = tx.send(result.map_err(|e| format!("{e:#}")));
+        });
+        let outcome = rx.recv_timeout(std::time::Duration::from_secs(60));
+        let _ = std::fs::remove_dir_all(&root);
+        match outcome {
+            Ok(result) => result.map_err(anyhow::Error::msg),
+            Err(_) => anyhow::bail!("the second take of the line lock waited"),
+        }
+    }
+
+    #[test]
     fn overlay_list_does_not_recover_an_active_replacement() -> Result<()> {
         let root = std::env::temp_dir().join(format!("layr-cache-list-{}", crate::ids::new_id()));
         std::fs::create_dir(&root)?;
@@ -4002,6 +4257,26 @@ struct PreparedStatus {
 #[cfg(target_os = "macos")]
 thread_local! {
     static PREPARED_STATUS: std::cell::RefCell<Option<PreparedStatus>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The automatic state that `line delete` prepares before the lock (`prepare_final_state`).
+#[cfg(target_os = "macos")]
+pub struct FinalPrepared {
+    id: String,
+    head: String,
+    scan: BTreeMap<String, btrfs::ScanEntry>,
+}
+
+/// Off APFS nothing is prepared.
+#[cfg(not(target_os = "macos"))]
+pub struct FinalPrepared;
+
+/// The outcome of `record_final_state`.
+pub enum FinalState {
+    /// The state of the working folder (None: no folder).
+    Recorded(Option<String>),
+    /// The head or the folder moved since the state was prepared: prepare it again.
+    Moved,
 }
 
 /// An automatic state layer written before a store lock (`Repo::prepare_save`).

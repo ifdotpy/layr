@@ -193,7 +193,13 @@ fn hand_over(steps: &mut Steps, line: &Line, base: &str, ours: &str, theirs: &st
 /// prepared snapshot copy of each result. Copying and merging the trees of every state took
 /// minutes under the lock.
 #[cfg(target_os = "macos")]
-fn prepare_steps(ctx: &Ctx, repo: &Repo, line: &Line, onto: &str, chain: Vec<(String, String, String)>) -> Result<Vec<PreparedStep>> {
+fn prepare_steps(
+    ctx: &Ctx,
+    repo: &Repo,
+    line: &Line,
+    onto: &str,
+    chain: Vec<(String, String, String)>,
+) -> Result<Vec<PreparedStep>> {
     let mut steps: Vec<PreparedStep> = Vec::new();
     for (base, theirs, label) in chain {
         let ours_root = match steps.last() {
@@ -355,7 +361,103 @@ fn plan_overlays(ctx: &Ctx, repo: &Repo, line: &Line, theirs: Option<&Line>, lab
     Ok(m)
 }
 
-/// Move the line to `new_head` and update the working folder in place.
+/// The checks of a merge that ran before its commit, with what they were based on. The commit
+/// reads them again under the project lock (`settled_now`): a change of the rule of the line, or
+/// of a check command, stops the merge.
+struct Settled<'a> {
+    expect: bool,
+    rule: Option<&'a crate::access::Rule>,
+    /// The reviewed source state.
+    source: &'a str,
+    /// The check commands of the line's rule, by name.
+    commands: Vec<(String, String)>,
+    /// The name the merge was asked for, when it is not a queued state. The commit resolves it again:
+    /// a source that moved while the merge waited for the project lock is refused.
+    rev: Option<String>,
+}
+
+/// The check commands of a rule: each name with its command. An undefined name is an error.
+fn resolve_commands(repo: &Repo, line: &Line, checks: &[String]) -> Result<Vec<(String, String)>> {
+    let mut commands = Vec::new();
+    for name in checks {
+        let cmd =
+            repo.p.config_value(&format!("check.{name}"))?.and_then(|v| v.as_str().map(|s| s.to_string())).ok_or_else(|| {
+                exit(
+                    1,
+                    format!(
+                        "error: check '{name}' of line '{}' is not defined (layr config check.{name} '<command>')",
+                        line.name
+                    ),
+                )
+            })?;
+        commands.push((name.clone(), cmd));
+    }
+    Ok(commands)
+}
+
+/// The checks of a merge, read again under the project lock before the records: the rule of the
+/// line, the check commands and, for a merge of another state, the approvals of the source.
+fn settled_now(ctx: &Ctx, repo: &Repo, now: &Line, head: &str, candidate: &str, s: &Settled<'_>) -> Result<()> {
+    if let Some(rev) = &s.rev {
+        let at = revs::resolve(repo, Some(now), rev)?;
+        if at != s.source {
+            if s.expect {
+                return Err(exit(
+                    1,
+                    format!(
+                        "error: {rev} is at {} but --expect names {}: the line changed after the review; review the new state first",
+                        ids::short(&at),
+                        ids::short(s.source)
+                    ),
+                ));
+            }
+            return Err(crate::repo::line_moved(rev, s.source, &at));
+        }
+    }
+    let rule = repo.authorize_line(ctx, now, crate::repo::LineOp::Merge { expect: s.expect, hint: None })?;
+    if rule.as_ref() != s.rule {
+        return Err(exit(1, "merge protection changed during checks; run the merge again"));
+    }
+    for (name, command) in &s.commands {
+        if repo.p.config_value(&format!("check.{name}"))?.and_then(|v| v.as_str().map(str::to_owned)).as_ref() != Some(command) {
+            return Err(exit(1, format!("merge check '{name}' changed during checks; run the merge again")));
+        }
+    }
+    if candidate != head {
+        check_approvals(ctx, repo, now, rule.as_ref(), head, s.source)?;
+    }
+    Ok(())
+}
+
+/// A command's result before its commit: the states it made, the working folder it wrote and the
+/// overlays it moved. Dropped before `done`, it puts the folder back and deletes the states that no
+/// record names. The commit happens only after this guard is complete.
+struct Pending<'a> {
+    repo: &'a Repo<'a>,
+    write: Option<crate::repo::WorkingWrite<'a>>,
+    states: Vec<StateRec>,
+    ovl: Option<&'a OverlayMerge>,
+    done: bool,
+}
+
+impl Drop for Pending<'_> {
+    fn drop(&mut self) {
+        if self.done {
+            return;
+        }
+        // The folder is written back first: its source is the state that the next step deletes.
+        drop(self.write.take());
+        crate::repo::discard_unrecorded(self.repo, &self.states);
+        if let Some(o) = self.ovl {
+            o.discard(self.repo);
+        }
+    }
+}
+
+/// Move the line to `new_head` and update the working folder in place. Under the line lock, which the
+/// caller holds, it checks and writes the folder; under the project lock it checks the line head and
+/// records the move (`Repo::commit_line`). The project lock covers no tree work: the tree of the new
+/// head and the write of the folder come before it, and a failed commit writes the folder back.
 #[allow(clippy::too_many_arguments)]
 fn finish(
     ctx: &Ctx,
@@ -366,25 +468,16 @@ fn finish(
     states: Vec<StateRec>,
     working_before: Option<String>,
     local: &std::collections::BTreeSet<String>,
-    mut data: serde_json::Value,
+    data: serde_json::Value,
     ovl: Option<&OverlayMerge>,
+    queue: Option<&QueuedMerge<'_>>,
+    settled: Option<&Settled<'_>>,
 ) -> Result<Vec<changes::Change>> {
-    let fail = |e: anyhow::Error| {
-        repo.discard_states(&states);
-        if let Some(o) = ovl {
-            o.discard(repo);
-        }
-        e
-    };
-    if let Err(e) = repo.check_move(ctx, line, new_head) {
-        return Err(fail(e));
-    }
+    let op = if queue.is_some() { "queue.result" } else { op };
+    let mut pending = Pending { repo, write: None, states, ovl, done: false };
+    repo.check_move(ctx, line, new_head)?;
     if op == "merge" && new_head != line.head {
-        if let Err(e) =
-            crate::secrets::check_between(ctx, repo, &repo.state_src(&line.head)?, &repo.state_src(new_head)?, &line.head)
-        {
-            return Err(fail(e));
-        }
+        crate::secrets::check_between(ctx, repo, &repo.state_src(&line.head)?, &repo.state_src(new_head)?, &line.head)?;
     }
     // A line with overlays: the full trees of the old and the new head, with the overlays in
     // place, so the update never touches an overlay file it does not change.
@@ -392,28 +485,18 @@ fn finish(
         Some(o) if o.changed() => o.layers.clone(),
         _ => repo.layers(line)?,
     };
-    let view = if layers.is_empty() {
-        None
-    } else {
-        match repo.assemble(line, new_head, &layers) {
-            Ok(v) => Some(v),
-            Err(e) => return Err(fail(e)),
-        }
-    };
+    let view = if layers.is_empty() { None } else { Some(repo.assemble(line, new_head, &layers)?) };
     let old_root = repo.head_tree(line)?;
     let new_root = match &view {
         Some(v) => v.path.clone(),
         None => repo.state_root(new_head)?,
     };
     let wdir = repo.working(line);
-    let applied = match repo.apply_delta(&old_root, &new_root, &wdir, repo.own(line), local, false) {
-        Ok(v) => v,
-        Err(e) => return Err(fail(e)),
-    };
+    let own = repo.own(line);
+    let applied = repo.apply_delta(&old_root, &new_root, &wdir, own, local, false)?;
+    pending.write = Some(crate::repo::WorkingWrite::new(repo, wdir, own, old_root, new_root, view));
+    let mut data = data;
     if let Some(o) = ovl.filter(|o| o.changed()) {
-        if let Err(e) = o.record(ctx, repo) {
-            return Err(fail(e));
-        }
         data["stack"] = repo.public_stack_data(&line.id, &layers)?;
         data["line"] = serde_json::json!(line.id);
         data["overlays"] = serde_json::json!(o
@@ -422,18 +505,39 @@ fn finish(
             .filter(|n| !repo.need_overlay(n).map(|i| i.hidden).unwrap_or(true))
             .collect::<Vec<_>>());
     }
-    repo.move_head(ctx, op, line, new_head, states, working_before, data)?;
+    let mut rec = repo.head_record(ctx, op, line, new_head, pending.states.clone(), working_before, data)?;
+    // The states of the record include the snapshot of the working folder after the move.
+    pending.states = rec.states.clone();
+    let view = repo.commit_line(line, &line.head, |now| {
+        if let Some(q) = queue {
+            rec.data =
+                super::queue::complete_data(repo, q.entry, new_head, q.attempts, q.probes.borrow().clone(), rec.data.clone())?;
+        }
+        match settled {
+            Some(s) => settled_now(ctx, repo, now, &line.head, new_head, s)?,
+            // A pick or a rebase is a direct change of the line: its authorization holds at the commit.
+            None => {
+                repo.authorize_line(ctx, now, crate::repo::LineOp::Direct)?;
+            }
+        }
+        if let Some(o) = ovl.filter(|o| o.changed()) {
+            o.record(ctx, repo)?;
+        }
+        repo.commit_record(ctx, rec)?;
+        Ok(())
+    });
+    if let Err(e) = view {
+        return Err(e);
+    }
+    pending.done = true;
+    let view = pending.write.take().and_then(|w| w.commit());
     if let Some(v) = view {
         repo.install_base(line, v, new_head, &layers)?;
     }
     for name in ovl.filter(|o| o.changed()).map(|o| o.names()).unwrap_or_default() {
         repo.after_overlay_move(ctx, &name);
     }
-    let mut l2 = line.clone();
-    l2.head = new_head.to_string();
-    if let Err(e) = crate::gitbridge::refresh_git_folder(repo, &l2) {
-        eprintln!("warning: .git folder not updated: {e:#}");
-    }
+    repo.after_head_moved(line, new_head);
     Ok(applied)
 }
 
@@ -545,51 +649,30 @@ pub(crate) fn merge_met_rule(repo: &Repo, rule: &crate::access::Rule, before: &s
     Ok(rule.approvals == 0 || approval_count(repo, rule, before, theirs)? as u32 >= rule.approvals)
 }
 
-/// The authorization and reviewed source before the merge releases the project lock.
-struct MergeGuard<'a> {
-    expect: bool,
-    rule: Option<&'a crate::access::Rule>,
-    source: &'a str,
-}
-
-/// Run checks without the project lock. After taking it again, revalidate the target,
-/// permission, protection and check commands before the merge can install its result.
-#[allow(clippy::too_many_arguments)]
+/// Run the checks of a merge on the candidate state. Callers run it without the line lock
+/// (`checks_unlocked`).
 fn run_line_checks(
     ctx: &Ctx,
     repo: &Repo,
     line: &Line,
     head: &str,
     candidate: &str,
-    checks: &[String],
-    guard: &MergeGuard<'_>,
+    settled: &Settled<'_>,
     quiet: bool,
     queue: Option<&QueuedMerge<'_>>,
-) -> Result<(crate::store::Lock, std::collections::BTreeSet<String>)> {
-    let mut commands = Vec::new();
-    for name in checks {
-        let cmd =
-            repo.p.config_value(&format!("check.{name}"))?.and_then(|v| v.as_str().map(|s| s.to_string())).ok_or_else(|| {
-                exit(
-                    1,
-                    format!(
-                        "error: check '{name}' of line '{}' is not defined (layr config check.{name} '<command>')",
-                        line.name
-                    ),
-                )
-            })?;
-        commands.push((name, cmd.clone()));
-        let argv = layr_model::protection::check_argv(&cmd);
+) -> Result<()> {
+    for (name, command) in &settled.commands {
+        let argv = layr_model::protection::check_argv(command);
         let evidence = layr_model::protection::required_check(
             name,
-            Some(&cmd),
+            Some(command),
             repo.p.db.check_exit(candidate, &argv, Some(0))?.is_some(),
             None,
         );
         if evidence.result == layr_model::protection::CheckResult::Passed {
             continue;
         }
-        let code = super::admin::run_check(ctx, repo, candidate, &argv, &cmd, quiet)?;
+        let code = super::admin::run_check(ctx, repo, candidate, &argv, command, quiet)?;
         if code != 0 {
             return Err(exit(
                 1,
@@ -617,26 +700,35 @@ fn run_line_checks(
             anyhow::bail!("{reason}");
         }
     }
-    let lock = repo.p.lock()?;
+    Ok(())
+}
+
+/// Run the checks of a merge without the line lock, then take the lock again. A check may save
+/// this line meanwhile (a concurrent command does, and a queue check can): the lock is not held
+/// then, so neither waits for the other. A head that moved refuses the merge, which the caller
+/// runs again (a queued merge retries once). Returns the local paths that the merge must not
+/// overwrite, read under the lock.
+#[allow(clippy::too_many_arguments)]
+fn checks_unlocked(
+    ctx: &Ctx,
+    repo: &Repo,
+    line: &Line,
+    head: &str,
+    candidate: &str,
+    settled: &Settled<'_>,
+    quiet: bool,
+    queue: Option<&QueuedMerge<'_>>,
+    held: &mut Option<crate::store::LineLock>,
+) -> Result<std::collections::BTreeSet<String>> {
+    held.take();
+    run_line_checks(ctx, repo, line, head, candidate, settled, quiet, queue)?;
+    *held = Some(repo.line_lock(line)?);
     let now = repo.line(&line.id)?;
     if now.head != head {
-        return Err(target_moved(&line.name));
+        return Err(crate::repo::line_moved(&line.name, head, &now.head));
     }
-    let rule = repo.authorize_line(ctx, &now, crate::repo::LineOp::Merge { expect: guard.expect, hint: None })?;
-    if rule.as_ref() != guard.rule {
-        return Err(exit(1, "merge protection changed during checks; run the merge again"));
-    }
-    for (name, command) in commands {
-        if repo.p.config_value(&format!("check.{name}"))?.and_then(|v| v.as_str().map(str::to_owned)).as_ref() != Some(&command) {
-            return Err(exit(1, format!("merge check '{name}' changed during checks; run the merge again")));
-        }
-    }
-    check_paths(ctx, repo, &now, rule.as_ref(), head, candidate)?;
-    if candidate != head {
-        check_approvals(ctx, repo, &now, rule.as_ref(), head, guard.source)?;
-    }
-    let (st, _scan, _it, _idx) = repo.status(&now)?;
-    Ok((lock, local_paths(repo, &now, &st)?))
+    let (st, _scan, _it, _idx) = repo.status(line)?;
+    local_paths(repo, line, &st)
 }
 
 /// Paths a merge must not overwrite: local changes, and in a line with overlays also ignored
@@ -880,46 +972,6 @@ pub fn merge_queued(
     (result, queue.probes.into_inner())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn finish_queued(
-    ctx: &Ctx,
-    repo: &Repo,
-    line: &Line,
-    new_head: &str,
-    states: Vec<StateRec>,
-    working_before: Option<String>,
-    local: &std::collections::BTreeSet<String>,
-    data: serde_json::Value,
-    ovl: Option<&OverlayMerge>,
-    queue: Option<&QueuedMerge<'_>>,
-) -> Result<Vec<changes::Change>> {
-    let data = match queue {
-        Some(q) => match super::queue::complete_data(repo, q.entry, new_head, q.attempts, q.probes.borrow().clone(), data) {
-            Ok(data) => data,
-            Err(error) => {
-                repo.discard_states(&states);
-                if let Some(ovl) = ovl {
-                    ovl.discard(repo);
-                }
-                return Err(error);
-            }
-        },
-        None => data,
-    };
-    finish(
-        ctx,
-        repo,
-        line,
-        if queue.is_some() { "queue.result" } else { "merge" },
-        new_head,
-        states,
-        working_before,
-        local,
-        data,
-        ovl,
-    )
-}
-
 /// Internal flag of `merge_rev`: a merge with conflicts is discarded and returns an error, and the
 /// line keeps its head. A follow pass sets it; a user merge never does.
 pub(crate) const REFUSE_CONFLICTS: &str = "--refuse-conflicts";
@@ -931,11 +983,16 @@ pub fn merge_rev(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str, a: &crate::args
 fn merge_rev_inner(
     ctx: &Ctx,
     repo: &Repo,
-    line: &Line,
+    arg_line: &Line,
     rev: &str,
     a: &crate::args::Parsed,
     queue: Option<&QueuedMerge<'_>>,
 ) -> Result<i32> {
+    // The line lock for the whole merge. The head is read under it, and the project lock is taken
+    // only for the commit points (`commit_line`, the automatic save of the working folder).
+    let mut held = Some(repo.line_lock(arg_line)?);
+    let line_now = repo.line(&arg_line.id)?;
+    let line = &line_now;
     // Pin the expectation before waiting, but resolve the source only under the project lock.
     let want = a
         .get("--expect")
@@ -955,8 +1012,6 @@ fn merge_rev_inner(
     if queue.is_none() {
         let _ = prepare_merge(ctx, repo, line, rev);
     }
-    let lock = repo.p.lock()?;
-    let line = repo.line(&line.id)?;
     if let Some(q) = queue {
         if line.head != q.expected_head {
             return Err(target_moved(&line.name));
@@ -967,7 +1022,7 @@ fn merge_rev_inner(
     }
     let (theirs, theirs_line) = match queue {
         Some(q) => (q.entry.state.clone(), None),
-        None => (revs::resolve(repo, Some(&line), rev)?, repo.p.db.line_by_name(rev)?),
+        None => (revs::resolve(repo, Some(line), rev)?, repo.p.db.line_by_name(rev)?),
     };
     if let Some(want) = want {
         if want != theirs {
@@ -981,9 +1036,20 @@ fn merge_rev_inner(
             ));
         }
     }
-    let rule = repo.authorize_line(ctx, &line, crate::repo::LineOp::Merge { expect, hint: hint.as_deref() })?;
-    let w = repo.working_state(ctx, &line, if queue.is_some() { "before a queued merge" } else { "before a layr command" })?;
-    let guard = MergeGuard { expect, rule: rule.as_ref(), source: &theirs };
+    let rule = repo.authorize_line(ctx, line, crate::repo::LineOp::Merge { expect, hint: hint.as_deref() })?;
+    // The automatic save of the working folder is a record: its project lock covers that one step.
+    let w = {
+        let _commit = repo.p.lock()?;
+        repo.working_state(ctx, line, if queue.is_some() { "before a queued merge" } else { "before a layr command" })?
+    };
+    let checks = rule.as_ref().map(|r| r.check.clone()).unwrap_or_default();
+    let settled = Settled {
+        expect,
+        rule: rule.as_ref(),
+        source: &theirs,
+        commands: resolve_commands(repo, line, &checks)?,
+        rev: queue.is_none().then(|| rev.to_string()),
+    };
     let head = line.head.clone();
     let label = theirs_line.as_ref().map(|l| l.name.clone()).unwrap_or_else(|| rev.to_string());
     let message = a.get("-m").map(|s| s.to_string()).unwrap_or_else(|| {
@@ -1000,16 +1066,14 @@ fn merge_rev_inner(
     let up_to_date = theirs == head || repo.is_ancestor(&theirs, &head)?;
     if up_to_date && theirs_line.as_ref().map(|t| repo.layers(t).map(|v| v.is_empty())).transpose()?.unwrap_or(true) {
         if queue.is_some() {
-            let _relock = if queue.is_some_and(|q| q.run_probes) {
-                drop(lock);
-                Some(run_line_checks(ctx, repo, &line, &head, &head, &[], &guard, true, queue)?.0)
-            } else {
-                None
-            };
-            finish_queued(
+            if queue.is_some_and(|q| q.run_probes) {
+                checks_unlocked(ctx, repo, line, &head, &head, &settled, true, queue, &mut held)?;
+            }
+            finish(
                 ctx,
                 repo,
-                &line,
+                line,
+                "merge",
                 &head,
                 vec![],
                 w,
@@ -1017,6 +1081,7 @@ fn merge_rev_inner(
                 serde_json::json!({"theirs":theirs,"up_to_date":true}),
                 None,
                 queue,
+                Some(&settled),
             )?;
         }
         if !a.has("-q") {
@@ -1024,16 +1089,15 @@ fn merge_rev_inner(
         }
         return Ok(0);
     }
-    let st = repo.locked_status(&line)?.0;
+    let st = repo.locked_status(line)?.0;
     if !st.staged.is_empty() {
         return Err(exit(1, "error: you have staged changes; save or park them before merging."));
     }
     refuse_open_conflicts(&st)?;
-    let mut local = local_paths(repo, &line, &st)?;
+    let mut local = local_paths(repo, line, &st)?;
     let quiet = a.has("-q");
-    let checks = rule.as_ref().map(|r| r.check.clone()).unwrap_or_default();
     // The follow overlays merge with the line: all of them or none.
-    let ovl = plan_overlays(ctx, repo, &line, theirs_line.as_ref(), &label, &message)?;
+    let ovl = plan_overlays(ctx, repo, line, theirs_line.as_ref(), &label, &message)?;
     if queue.is_some() && ovl.conflicts > 0 {
         let paths: Vec<_> = ovl
             .moves
@@ -1068,10 +1132,11 @@ fn merge_rev_inner(
             return Ok(0);
         }
         // Only the overlays changed: the shared set stays.
-        finish_queued(
+        finish(
             ctx,
             repo,
-            &line,
+            line,
+            "merge",
             &head,
             vec![],
             w,
@@ -1079,26 +1144,24 @@ fn merge_rev_inner(
             serde_json::json!({"theirs": theirs, "overlays_only": true}),
             Some(&ovl),
             queue,
+            Some(&settled),
         )?;
         report(ctx);
         return Ok(if ovl.conflicts > 0 { 1 } else { 0 });
     }
     let ff = repo.is_ancestor(&head, &theirs)?;
-    let mut _relock = None;
     let run_probes = queue.is_some_and(|q| q.run_probes);
     if ff && !a.has("--no-ff") && !a.has("--squash") {
-        check_paths(ctx, repo, &line, rule.as_ref(), &head, &theirs)?;
-        check_approvals(ctx, repo, &line, rule.as_ref(), &head, &theirs)?;
+        check_paths(ctx, repo, line, rule.as_ref(), &head, &theirs)?;
+        check_approvals(ctx, repo, line, rule.as_ref(), &head, &theirs)?;
         if !checks.is_empty() || run_probes {
-            drop(lock);
-            let (l, paths) = run_line_checks(ctx, repo, &line, &head, &theirs, &checks, &guard, quiet, queue)?;
-            _relock = Some(l);
-            local = paths;
+            local = checks_unlocked(ctx, repo, line, &head, &theirs, &settled, quiet, queue, &mut held)?;
         }
-        finish_queued(
+        finish(
             ctx,
             repo,
-            &line,
+            line,
+            "merge",
             &theirs,
             vec![],
             w,
@@ -1106,6 +1169,7 @@ fn merge_rev_inner(
             serde_json::json!({"theirs": theirs, "fast_forward": true}),
             Some(&ovl),
             queue,
+            Some(&settled),
         )?;
         if !quiet {
             outln!(ctx, "Updating {}..{}\nFast-forward", ids::short(&head), ids::short(&theirs));
@@ -1126,7 +1190,7 @@ fn merge_rev_inner(
         }
     };
     let parents = if a.has("--squash") { vec![head.clone()] } else { vec![head.clone(), theirs.clone()] };
-    let (state, out) = merge_states(ctx, repo, &line, &base, &head, &theirs, &label, parents, &message)?;
+    let (state, out) = merge_states(ctx, repo, line, &base, &head, &theirs, &label, parents, &message)?;
     let sid = state.id.clone();
     let nconf = out.conflicts.len();
     // A queued merge and a follow pass (`REFUSE_CONFLICTS`) never leave a merge with conflicts.
@@ -1138,8 +1202,8 @@ fn merge_rev_inner(
         return Err(exit(1, format!("{what} has conflicts: {paths}")));
     }
     let mut states = vec![state];
-    if let Err(e) = check_paths(ctx, repo, &line, rule.as_ref(), &head, &sid)
-        .and_then(|_| check_approvals(ctx, repo, &line, rule.as_ref(), &head, &theirs))
+    if let Err(e) = check_paths(ctx, repo, line, rule.as_ref(), &head, &sid)
+        .and_then(|_| check_approvals(ctx, repo, line, rule.as_ref(), &head, &theirs))
     {
         repo.discard_states(&states);
         ovl.discard(repo);
@@ -1157,18 +1221,22 @@ fn merge_rev_inner(
         // The result becomes a state of its own record, so the check runs on exactly the content
         // that the line will take, and a failed result stays for inspection.
         let mut rec = Record::new("merge.candidate");
-        rec.states = std::mem::take(&mut states);
+        rec.states = states.clone();
         rec.data = serde_json::json!({"line": line.id, "theirs": theirs});
-        repo.commit_record(ctx, rec)?;
-        drop(lock);
-        let (l, paths) = run_line_checks(ctx, repo, &line, &head, &sid, &checks, &guard, quiet, queue)?;
-        _relock = Some(l);
-        local = paths;
+        if let Err(e) = repo.commit_line(line, &head, |_| repo.commit_record(ctx, rec).map(|_| ())) {
+            crate::repo::discard_unrecorded(repo, &states);
+            ovl.discard(repo);
+            return Err(e);
+        }
+        // Recorded: the states of the finish below come from the candidate record.
+        states.clear();
+        local = checks_unlocked(ctx, repo, line, &head, &sid, &settled, quiet, queue, &mut held)?;
     }
-    finish_queued(
+    finish(
         ctx,
         repo,
-        &line,
+        line,
+        "merge",
         &sid,
         states,
         w,
@@ -1176,6 +1244,7 @@ fn merge_rev_inner(
         serde_json::json!({"theirs": theirs, "base": base, "squash": a.has("--squash"), "conflicts": nconf}),
         Some(&ovl),
         queue,
+        Some(&settled),
     )?;
     for m in &out.messages {
         outln!(ctx, "{m}");
@@ -1233,7 +1302,12 @@ fn pick(ctx: &Ctx, args: &[String], revert: bool) -> Result<i32> {
     repo.hold(repo.pin(&picked)?);
     // The merge of each picked state onto the head (base and theirs swapped for an invert).
     let pair = |p: &str| -> Result<(String, String)> {
-        let parent = repo.state(p)?.parents.first().cloned().ok_or_else(|| exit(128, format!("fatal: {} has no parent", ids::short(p))))?;
+        let parent = repo
+            .state(p)?
+            .parents
+            .first()
+            .cloned()
+            .ok_or_else(|| exit(128, format!("fatal: {} has no parent", ids::short(p))))?;
         Ok(if revert { (p.to_string(), parent) } else { (parent, p.to_string()) })
     };
     // APFS: a pick that needs no merge is a thin layer and a write of its paths (`thin_pick`).
@@ -1267,80 +1341,82 @@ fn pick(ctx: &Ctx, args: &[String], revert: bool) -> Result<i32> {
     let prepared: Vec<PreparedStep> = Vec::new();
     let head_before = line.head.clone();
     let r = (|| -> Result<i32> {
-    let (_lock, w) = work::begin_change(ctx, repo, &line)?;
-    let mut line = repo.line(&line.id)?;
-    #[cfg_attr(not(target_os = "macos"), allow(unused_mut, unused_variables))]
-    let mut steps: Steps = if line.head == head_before { prepared } else { Vec::new() }.into_iter().peekable();
-    let st = repo.locked_status(&line)?.0;
-    if !st.staged.is_empty() {
-        return Err(exit(1, "error: you have staged changes; save or park them first."));
-    }
-    refuse_open_conflicts(&st)?;
-    let local = st.local_paths();
-    let mut code = 0;
-    let mut first_w = w;
-    for p in picks {
-        let c = repo.state(&p)?;
-        let (base, theirs) = pair(&p)?;
-        let subject = c.message.lines().next().unwrap_or("").to_string();
-        let message = if revert {
-            format!("Invert \"{subject}\"\n\nThis inverts state {}.", ids::display(&p))
-        } else if a.has("-x") {
-            format!("{}\n\n(picked from state {})", c.message, ids::display(&p))
-        } else {
-            c.message.clone()
-        };
-        let label = ids::short(&p);
-        #[cfg(target_os = "macos")]
-        hand_over(&mut steps, &line, &base, &line.head, &theirs, &label);
-        let (mut state, out) =
-            merge_states(ctx, repo, &line, &base, &line.head, &theirs, &label, vec![line.head.clone()], &message)?;
-        if !revert {
-            state.author = c.author.clone();
-            state.change_id = c.change_id.clone();
+        let (_line_lock, w) = work::begin_line(ctx, repo, &line, crate::repo::LineOp::Direct)?;
+        let mut line = repo.line(&line.id)?;
+        #[cfg_attr(not(target_os = "macos"), allow(unused_mut, unused_variables))]
+        let mut steps: Steps = if line.head == head_before { prepared } else { Vec::new() }.into_iter().peekable();
+        let st = repo.locked_status(&line)?.0;
+        if !st.staged.is_empty() {
+            return Err(exit(1, "error: you have staged changes; save or park them first."));
         }
-        let sid = state.id.clone();
-        let n = out.conflicts.len();
-        finish(
-            ctx,
-            repo,
-            &line,
-            if revert { "revert" } else { "cherry-pick" },
-            &sid,
-            vec![state],
-            first_w.take(),
-            &local,
-            if revert {
-                serde_json::json!({"source": p})
+        refuse_open_conflicts(&st)?;
+        let local = st.local_paths();
+        let mut code = 0;
+        let mut first_w = w;
+        for p in picks {
+            let c = repo.state(&p)?;
+            let (base, theirs) = pair(&p)?;
+            let subject = c.message.lines().next().unwrap_or("").to_string();
+            let message = if revert {
+                format!("Invert \"{subject}\"\n\nThis inverts state {}.", ids::display(&p))
+            } else if a.has("-x") {
+                format!("{}\n\n(picked from state {})", c.message, ids::display(&p))
             } else {
-                serde_json::json!({"source":p,"version":crate::model::VersionOperation {
-                    state: sid.clone(), kind: "pick".into(), source: p.clone(),
-                    target_line: Some(line.id.clone()), target_head: line.head.clone(),
-                }})
-            },
-            None,
-        )?;
-        line = repo.line(&line.id)?;
-        for m in &out.messages {
-            outln!(ctx, "{m}");
-        }
-        if n > 0 {
-            outln!(
+                c.message.clone()
+            };
+            let label = ids::short(&p);
+            #[cfg(target_os = "macos")]
+            hand_over(&mut steps, &line, &base, &line.head, &theirs, &label);
+            let (mut state, out) =
+                merge_states(ctx, repo, &line, &base, &line.head, &theirs, &label, vec![line.head.clone()], &message)?;
+            if !revert {
+                state.author = c.author.clone();
+                state.change_id = c.change_id.clone();
+            }
+            let sid = state.id.clone();
+            let n = out.conflicts.len();
+            finish(
                 ctx,
-                "{} {label} left {n} conflict(s) in state {}: fix them and save.",
-                if revert { "Invert of" } else { "Pick of" },
-                ids::short(&sid)
-            );
-            code = 1;
-        } else if !a.has("-q") {
-            outln!(ctx, "[{} {}] {}", line.name, ids::short(&sid), message.lines().next().unwrap_or(""));
+                repo,
+                &line,
+                if revert { "revert" } else { "cherry-pick" },
+                &sid,
+                vec![state],
+                first_w.take(),
+                &local,
+                if revert {
+                    serde_json::json!({"source": p})
+                } else {
+                    serde_json::json!({"source":p,"version":crate::model::VersionOperation {
+                        state: sid.clone(), kind: "pick".into(), source: p.clone(),
+                        target_line: Some(line.id.clone()), target_head: line.head.clone(),
+                    }})
+                },
+                None,
+                None,
+                None,
+            )?;
+            line = repo.line(&line.id)?;
+            for m in &out.messages {
+                outln!(ctx, "{m}");
+            }
+            if n > 0 {
+                outln!(
+                    ctx,
+                    "{} {label} left {n} conflict(s) in state {}: fix them and save.",
+                    if revert { "Invert of" } else { "Pick of" },
+                    ids::short(&sid)
+                );
+                code = 1;
+            } else if !a.has("-q") {
+                outln!(ctx, "[{} {}] {}", line.name, ids::short(&sid), message.lines().next().unwrap_or(""));
+            }
         }
-    }
-    // The uncommitted work that the pick left in the folder: an agent checks this line, not `status`.
-    if !local.is_empty() {
-        outln!(ctx, "{}", kept_message(&local));
-    }
-    Ok(code)
+        // The uncommitted work that the pick left in the folder: an agent checks this line, not `status`.
+        if !local.is_empty() {
+            outln!(ctx, "{}", kept_message(&local));
+        }
+        Ok(code)
     })();
     discard_prepared(repo);
     r
@@ -1362,18 +1438,22 @@ fn declined(reason: &str) -> Result<Option<String>> {
 fn thin_pick(ctx: &Ctx, repo: &Repo, line: &Line, pick: &str, picked_from: bool) -> Result<Option<String>> {
     let _t = crate::trace::span("thin pick");
     let c = repo.state(pick)?;
-    let [base] = c.parents.as_slice() else { return declined("parents"); };
+    let [base] = c.parents.as_slice() else {
+        return declined("parents");
+    };
     let base = base.clone();
     // A thin picked state holds its change in its own layer (when that layer sits on `base`); a
     // complete one (saved with caches) is read through its change set.
     let own_layer = repo.p.delta_path(pick);
     let complete = repo.p.state_path(pick);
-    let thin = !complete.is_dir() && own_layer.is_dir() && crate::storage::subvol_info(&own_layer)?.base.as_deref() == Some(base.as_str());
+    let thin = !complete.is_dir()
+        && own_layer.is_dir()
+        && crate::storage::subvol_info(&own_layer)?.base.as_deref() == Some(base.as_str());
     if !thin && !complete.is_dir() {
         return declined("own layer");
     }
     repo.authorize_line(ctx, line, crate::repo::LineOp::Direct)?;
-    let _lock = repo.p.lock()?;
+    let _line_lock = repo.line_lock(line)?;
     let line = repo.line(&line.id)?;
     if repo.current_stage(&line)?.is_some() {
         return declined("stage");
@@ -1396,8 +1476,10 @@ fn thin_pick(ctx: &Ctx, repo: &Repo, line: &Line, pick: &str, picked_from: bool)
     if cands.iter().any(|x| x.old.as_ref().is_some_and(|m| m.is_dir()) || x.new.as_ref().is_some_and(|m| m.is_dir())) {
         return declined("directory change");
     }
-    let theirs: Vec<changes::Change> =
-        changes::without_moves(changes::file_changes_of(&base_src, &pick_src, cands)?).into_iter().filter(|x| !skip_path(&x.path)).collect();
+    let theirs: Vec<changes::Change> = changes::without_moves(changes::file_changes_of(&base_src, &pick_src, cands)?)
+        .into_iter()
+        .filter(|x| !skip_path(&x.path))
+        .collect();
     let attributes = |p: &str| p.ends_with(".layrattributes") || p.ends_with(".gitattributes");
     // Only a derive rule changes the merge of other paths; the merge reads the root attributes.
     let mut derive = false;
@@ -1454,11 +1536,8 @@ fn thin_pick(ctx: &Ctx, repo: &Repo, line: &Line, pick: &str, picked_from: bool)
     let id = ids::new_id();
     let dst = repo.p.delta_path(&id);
     crate::thin::write_layer(&src, &dst, &diff, &line.head, false, None)?;
-    let message = if picked_from {
-        format!("{}\n\n(picked from state {})", c.message, ids::display(pick))
-    } else {
-        c.message.clone()
-    };
+    let message =
+        if picked_from { format!("{}\n\n(picked from state {})", c.message, ids::display(pick)) } else { c.message.clone() };
     let mut st = repo.describe_state(ctx, id.clone(), StateKind::Commit, vec![line.head.clone()], &message, Some(&line))?;
     st.author = c.author.clone();
     st.change_id = c.change_id.clone();
@@ -1471,9 +1550,22 @@ fn thin_pick(ctx: &Ctx, repo: &Repo, line: &Line, pick: &str, picked_from: bool)
         return Err(fail(e));
     }
     // The working folder takes the paths of the change (removals first, as a folder can replace
-    // a file). Each path is read from the layer that holds it in the new tree.
+    // a file). Each path is read from the layer that holds it in the new tree. A failure after
+    // this point writes each path back from the head.
     let view = crate::thin::Layered::of_state(&repo.p, &id)?;
     let own = repo.own(&line);
+    let undo_work = || -> Result<()> {
+        for x in &theirs {
+            for p in x.old_path.iter().chain(std::iter::once(&x.path)) {
+                if crate::fsutil::lmeta(&head_src, p).is_some() {
+                    crate::fsutil::copy_work_entry(&head_src, p, &w, p, own)?;
+                } else {
+                    crate::fsutil::remove_entry(&w, p)?;
+                }
+            }
+        }
+        Ok(())
+    };
     let work = (|| -> Result<()> {
         for x in &theirs {
             for gone in x.old_path.iter().chain(x.new.is_none().then_some(&x.path)) {
@@ -1488,6 +1580,7 @@ fn thin_pick(ctx: &Ctx, repo: &Repo, line: &Line, pick: &str, picked_from: bool)
         Ok(())
     })();
     if let Err(e) = work {
+        let _ = undo_work();
         return Err(fail(e));
     }
     let data = serde_json::json!({"source": pick, "version": crate::model::VersionOperation {
@@ -1496,7 +1589,21 @@ fn thin_pick(ctx: &Ctx, repo: &Repo, line: &Line, pick: &str, picked_from: bool)
     }});
     // The working folder was clean, so its content before the pick is the head: undo reverts the
     // working content of the pick with it (deleted files come back).
-    repo.move_head(ctx, "cherry-pick", &line, &id, vec![st], Some(line.head.clone()), data)?;
+    let head = line.head.clone();
+    let rec = match repo.head_record(ctx, "cherry-pick", &line, &id, vec![st], Some(line.head.clone()), data) {
+        Ok(rec) => rec,
+        Err(e) => {
+            let _ = undo_work();
+            return Err(e);
+        }
+    };
+    let all_states = rec.states.clone();
+    if let Err(e) = repo.commit_line(&line, &head, |_| repo.commit_record(ctx, rec).map(|_| ())) {
+        let _ = undo_work();
+        crate::repo::discard_unrecorded(repo, &all_states);
+        return Err(e);
+    }
+    repo.after_head_moved(&line, &id);
     Ok(Some(id))
 }
 
@@ -1569,8 +1676,9 @@ fn replay_locked(
     prepared: (String, Vec<PreparedStep>),
 ) -> Result<i32> {
     let (upstream, onto) = (upstream.to_string(), onto.to_string());
-    let (_lock, w) = work::begin_change(ctx, repo, line)?;
+    let (_line_lock, w) = work::begin_line(ctx, repo, line, crate::repo::LineOp::Direct)?;
     let line = repo.line(&line.id)?;
+    let head0 = line.head.clone();
     // The merges prepared before the lock hold when the line did not move.
     #[cfg_attr(not(target_os = "macos"), allow(unused_mut, unused_variables))]
     let mut steps: Steps = if prepared.0 == line.head { prepared.1 } else { Vec::new() }.into_iter().peekable();
@@ -1612,7 +1720,11 @@ fn replay_locked(
             state: s.id.clone(), kind: "replay".into(), source: p.clone(),
             target_line: target_line.clone(), target_head: onto.clone(),
         }});
-        repo.commit_record(ctx, rec)?;
+        let step_states = rec.states.clone();
+        if let Err(e) = repo.commit_line(&line, &head0, |_| repo.commit_record(ctx, rec).map(|_| ())) {
+            crate::repo::discard_unrecorded(repo, &step_states);
+            return Err(e);
+        }
         states.push(s);
     }
     let local = st.local_paths();
@@ -1626,6 +1738,8 @@ fn replay_locked(
         w,
         &local,
         serde_json::json!({"upstream": upstream, "onto": onto, "count": states.len()}),
+        None,
+        None,
         None,
     )?;
     if conflicts > 0 {
