@@ -63,6 +63,10 @@ fn recv_with_fds(sock: &UnixStream, buf: &mut [u8]) -> Result<(usize, Vec<OwnedF
     Ok((r.bytes, fds))
 }
 
+/// The client's error when the service closes the connection without an exit code.
+const ENDED: &str = "the layr service closed the connection before the command finished: the service stopped, or the \
+     request process failed (see the log of the layr service)";
+
 /// Client: run a command through the service. Returns the exit code.
 pub fn forward(argv: &[String]) -> Result<i32> {
     let path = socket_path();
@@ -85,9 +89,9 @@ pub fn forward(argv: &[String]) -> Result<i32> {
         &[std::io::stdin().as_fd(), std::io::stdout().as_fd(), std::io::stderr().as_fd(), dir.as_fd()],
     );
     let mut kind = [0u8; 1];
-    if let Err(e) = (&sock).read_exact(&mut kind) {
+    if (&sock).read_exact(&mut kind).is_err() {
         sent.context("cannot send the request to the layr service")?;
-        return Err(anyhow!("the layr service closed the connection ({e})"));
+        bail!("{ENDED}");
     }
     if kind[0] == b'B' {
         bail!("the layr service is busy (too many running requests); try again");
@@ -97,7 +101,7 @@ pub fn forward(argv: &[String]) -> Result<i32> {
         bail!("unexpected answer from the layr service");
     }
     let mut code = [0u8; 4];
-    (&sock).read_exact(&mut code).context("the layr service closed the connection")?;
+    (&sock).read_exact(&mut code).context(ENDED)?;
     Ok(i32::from_be_bytes(code))
 }
 
@@ -305,7 +309,13 @@ fn handle(sock: UnixStream, root: &Path, registry_uids: &[u32]) -> i32 {
         rustix::process::fchdir(&fds[3]).context("cannot enter the working folder")?;
         drop(fds);
         let cwd = std::env::current_dir()?;
-        Ok(run_as(argv, Caller::from_uid(uid), cwd, env, root))
+        let command = argv.join(" ");
+        // A panic prints its message to the caller's stderr; the caller still gets an exit code.
+        let run = std::panic::AssertUnwindSafe(|| run_as(argv, Caller::from_uid(uid), cwd, env, root));
+        Ok(std::panic::catch_unwind(run).unwrap_or_else(|_| {
+            eprintln!("layr service: `layr {command}` stopped on an internal error (a panic). Please report it.");
+            101
+        }))
     })();
     let code = match res {
         Ok(c) => c,
@@ -324,6 +334,7 @@ fn handle(sock: UnixStream, root: &Path, registry_uids: &[u32]) -> i32 {
 pub fn run_as(argv: Vec<String>, caller: Caller, cwd: PathBuf, env: HashMap<String, String>, root: &Path) -> i32 {
     crate::repo::begin_command();
     crate::store::set_holder_command(&argv);
+    crate::store::panic_point(argv.first().map_or("", String::as_str));
     let store = match Store::open(root) {
         Ok(s) => s,
         Err(e) => {
@@ -472,6 +483,10 @@ fn user_socket_path() -> PathBuf {
 /// `layr daemon [--socket <path>] [--tick <seconds>]`. Root serves every local user (Linux, or
 /// macOS run as root). On macOS a daemon may run as its user (a LaunchAgent): it serves only that
 /// uid, switches no user and runs no periodic gc or state freeing, only the follow tick.
+/// How long a stopping service waits for its running requests. The service managers allow more
+/// (`TimeoutStopSec` of packaging/systemd/layr.service, `ExitTimeOut` of the launchd plist).
+const STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(80);
+
 pub fn daemon(args: &[String]) -> Result<i32> {
     let own = rustix::process::geteuid().as_raw();
     let user_mode = own != 0 && cfg!(target_os = "macos");
@@ -538,6 +553,7 @@ pub fn daemon(args: &[String]) -> Result<i32> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(if user_mode { 0o600 } else { 0o666 }))?;
     }
+    crate::sys::catch_terminate()?;
     eprintln!("layr service: listening on {} (store {})", sock.display(), root.display());
     let mut last_hourly: i64 = 0;
     let mut next = std::time::Instant::now() + std::time::Duration::from_secs(tick);
@@ -547,6 +563,26 @@ pub fn daemon(args: &[String]) -> Result<i32> {
     let mut periodic_child: Option<i32> = None;
     let (max_total, max_per_user) = (limit("LAYR_MAX_REQUESTS", 256), limit("LAYR_MAX_REQUESTS_PER_USER", 32));
     loop {
+        if crate::sys::terminate_requested() {
+            // Stop: take no new request and let the running ones finish (layr#252). A service
+            // manager stops the rest when the service exits.
+            drop(listener);
+            drop(registry_listeners);
+            let _ = std::fs::remove_file(&sock);
+            eprintln!("layr service: stopping after {} running requests", children.len());
+            let deadline = std::time::Instant::now() + STOP_WAIT;
+            while std::time::Instant::now() < deadline {
+                match rustix::process::waitpid(None, rustix::process::WaitOptions::NOHANG) {
+                    Ok(Some((pid, _))) => _ = children.remove(&pid.as_raw_nonzero().get()),
+                    Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+                    Err(_) => break,
+                }
+            }
+            if !children.is_empty() {
+                eprintln!("layr service: {} requests still run after {} s; they stop with the service", children.len(), STOP_WAIT.as_secs());
+            }
+            return Ok(0);
+        }
         // Reap finished children.
         while let Ok(Some((pid, _))) = rustix::process::waitpid(None, rustix::process::WaitOptions::NOHANG) {
             let pid = pid.as_raw_nonzero().get();

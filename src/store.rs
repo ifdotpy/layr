@@ -1598,6 +1598,13 @@ pub fn test_pause() {
     }
 }
 
+/// Test only (tests/t136-service-stop.sh): `LAYR_TEST_PANIC=<command>` panics at the start of that command.
+pub fn panic_point(command: &str) {
+    if std::env::var("LAYR_TEST_PANIC").ok().as_deref() == Some(command) {
+        panic!("test panic in {command}");
+    }
+}
+
 /// Test only (tests/t124-save-crash.sh): `LAYR_TEST_SAVE_KILL=<point>` kills this process with
 /// SIGKILL at that point of a named save, as a power loss or a crash would. Other runs pass.
 pub fn failpoint(point: &str) {
