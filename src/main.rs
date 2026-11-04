@@ -74,7 +74,11 @@ mod volumes;
 
 use std::collections::HashMap;
 
+mod cache_hook;
+
 fn main() {
+    // The cache adapters of the binary (issue #167). Core reaches them only through `cache_hook`.
+    cache_hook::register(layr_cache::adapters());
     let mut argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.first().map(String::as_str) == Some("__empty-trash") && argv.len() == 2 {
         // The trash of a store, emptied in the background after a command (`store::Lock`).

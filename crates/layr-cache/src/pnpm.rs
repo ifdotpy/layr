@@ -5,10 +5,10 @@
 //!    folder is copied first and restored on any failure.
 //! 2. `pnpm prune`: removes the packages that the lockfile no longer has, from `node_modules` and `.pnpm`.
 
-use crate::{output, skip, sweep, Outcome};
+use crate::{exec, skip, sweep};
 use anyhow::{Context, Result};
+use layr_adapter::{CacheAdapter, Host, Outcome};
 use std::path::Path;
-use std::process::{Command, Stdio};
 
 /// The pnpm commands of a prune, in order.
 const STEPS: [&[&str]; 2] = [
@@ -16,8 +16,25 @@ const STEPS: [&[&str]; 2] = [
     &["prune", "--ignore-scripts", "--reporter=silent"],
 ];
 
+/// The pnpm adapter (`layr-adapter`): `node_modules` next to `pnpm-lock.yaml`.
+pub struct Pnpm;
+
+impl CacheAdapter for Pnpm {
+    fn name(&self) -> &'static str {
+        "pnpm"
+    }
+
+    fn detects(&self, folder: &Path) -> bool {
+        folder.file_name().is_some_and(|n| n == "node_modules") && folder.parent().is_some_and(|r| r.join("pnpm-lock.yaml").is_file())
+    }
+
+    fn prune(&self, host: &dyn Host, folder: &Path) -> Outcome {
+        prune(host, folder)
+    }
+}
+
 /// Prunes `folder`, a `node_modules` folder. Any failure restores the folder and skips it.
-pub fn prune(folder: &Path) -> Outcome {
+pub fn prune(host: &dyn Host, folder: &Path) -> Outcome {
     let named = folder.file_name().is_some_and(|n| n == "node_modules");
     let Some(root) = folder.parent().filter(|r| named && r.join("pnpm-lock.yaml").is_file()) else {
         return skip("pnpm needs a folder named node_modules next to pnpm-lock.yaml");
@@ -27,11 +44,11 @@ pub fn prune(folder: &Path) -> Outcome {
         return skip(format!("{} is left from an earlier run: remove it first", copy_path.display()));
     }
     let before = sweep::tree_bytes(folder);
-    if let Err(e) = copy(folder, &copy_path) {
+    if let Err(e) = copy(host, folder, &copy_path) {
         return skip(format!("cannot copy node_modules: {e:#}"));
     }
     for args in STEPS {
-        if let Err(e) = run(root, args) {
+        if let Err(e) = exec(host, "pnpm", |c| c.args(args).current_dir(root)) {
             return match restore(folder, &copy_path) {
                 Ok(()) => skip(format!("pnpm {}: {e:#}; node_modules unchanged", args[0])),
                 Err(r) => skip(format!(
@@ -45,25 +62,19 @@ pub fn prune(folder: &Path) -> Outcome {
     let freed = before.saturating_sub(sweep::tree_bytes(folder));
     // A copy that stays behind is reported by the check at the start of the next prune.
     let _ = std::fs::remove_dir_all(&copy_path);
-    Outcome::Pruned { adapter: "pnpm", freed }
-}
-
-/// Runs one pnpm command in the project folder `root`. The command reads no input and has no network.
-fn run(root: &Path, args: &[&str]) -> Result<()> {
-    let mut cmd = Command::new("pnpm");
-    cmd.args(args).current_dir(root).stdin(Stdio::null()).env("pnpm_config_offline", "true");
-    output(&mut cmd).map(drop)
+    Outcome::Pruned { freed }
 }
 
 /// A copy-on-write copy of `src` at `dst`, with its times and modes. A failed copy leaves nothing behind.
-fn copy(src: &Path, dst: &Path) -> Result<()> {
-    let mut cmd = Command::new("cp");
-    if cfg!(target_os = "macos") {
-        cmd.args(["-cRp"]);
-    } else {
-        cmd.args(["-a", "--reflink=auto"]);
-    }
-    let made = output(cmd.arg(src).arg(dst)).map(drop);
+fn copy(host: &dyn Host, src: &Path, dst: &Path) -> Result<()> {
+    let made = exec(host, "cp", |c| {
+        if cfg!(target_os = "macos") {
+            c.args(["-cRp"]).arg(src).arg(dst)
+        } else {
+            c.args(["-a", "--reflink=auto"]).arg(src).arg(dst)
+        }
+    })
+    .map(drop);
     if made.is_err() {
         let _ = std::fs::remove_dir_all(dst);
     }

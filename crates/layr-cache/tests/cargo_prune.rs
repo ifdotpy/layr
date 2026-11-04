@@ -1,6 +1,10 @@
 //! The cargo adapter on a real cargo project. Offline: the project has no dependencies.
 
-use layr_cache::{cargo, prune, Outcome};
+use layr_cache::{cargo, prune, LocalHost, Outcome};
+
+fn host() -> LocalHost {
+    LocalHost::new(std::time::Duration::from_secs(600))
+}
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -67,9 +71,8 @@ fn removes_a_stale_unit_and_the_next_build_compiles_nothing() {
     let with_feature = names(&target);
     assert!(with_feature.len() > standard.len());
 
-    match prune(None, &target).unwrap() {
-        Outcome::Pruned { adapter, freed } => {
-            assert_eq!(adapter, "cargo");
+    match prune(None, &target).unwrap().1 {
+        Outcome::Pruned { freed } => {
             assert!(freed > 0);
         }
         other => panic!("expected a prune, got {other:?}"),
@@ -107,7 +110,7 @@ fn skips_a_folder_with_a_stale_standard_unit_and_keeps_the_feature_unit() {
     let before = names(&target);
     let standard = unit_hash(&target, false);
 
-    match prune(None, &target).unwrap() {
+    match prune(None, &target).unwrap().1 {
         Outcome::Skipped { reason } => assert!(reason.contains("not fresh"), "{reason}"),
         other => panic!("expected a skip, got {other:?}"),
     }
@@ -125,7 +128,7 @@ fn skips_a_project_without_a_sweep_list() {
     let target = project(&dir, None);
     cargo_in(&dir, &target, &["build", "--workspace"]);
     let before = names(&target);
-    match prune(None, &target).unwrap() {
+    match prune(None, &target).unwrap().1 {
         Outcome::Skipped { reason } => assert!(reason.contains("sweep"), "{reason}"),
         other => panic!("expected a skip, got {other:?}"),
     }
@@ -137,11 +140,11 @@ fn skips_a_folder_that_is_not_named_target_and_a_target_without_output() {
     let dir = tmp("names");
     let target = project(&dir, Some("sweep = [[\"build\", \"--workspace\"]]"));
     std::fs::create_dir_all(dir.join("out")).unwrap();
-    match cargo::prune(&dir.join("out")) {
+    match cargo::prune(&host(), &dir.join("out")) {
         Outcome::Skipped { reason } => assert!(reason.contains("named target"), "{reason}"),
         other => panic!("expected a skip, got {other:?}"),
     }
-    match cargo::prune(&target) {
+    match cargo::prune(&host(), &target) {
         Outcome::Skipped { reason } => assert!(reason.contains("no build output"), "{reason}"),
         other => panic!("expected a skip, got {other:?}"),
     }

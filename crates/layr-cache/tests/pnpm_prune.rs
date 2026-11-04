@@ -2,7 +2,11 @@
 //! projects need no registry. The registry of every pnpm call is an address that refuses connections:
 //! a call that reaches the network fails.
 
-use layr_cache::{pnpm, prune, Outcome};
+use layr_cache::{pnpm, prune, LocalHost, Outcome};
+
+fn host() -> LocalHost {
+    LocalHost::new(std::time::Duration::from_secs(600))
+}
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -119,9 +123,8 @@ fn removes_a_package_that_the_lockfile_no_longer_has() {
     let nm = dir.join("node_modules");
     assert!(nm.join("pkg-b").exists());
 
-    match prune(None, &nm).unwrap() {
-        Outcome::Pruned { adapter, freed } => {
-            assert_eq!(adapter, "pnpm");
+    match prune(None, &nm).unwrap().1 {
+        Outcome::Pruned { freed } => {
             assert!(freed > 0);
         }
         other => panic!("expected a prune, got {other:?}"),
@@ -150,7 +153,7 @@ fn skips_a_lockfile_that_needs_a_package_the_store_lacks_and_leaves_node_modules
     let nm = dir.join("node_modules");
     let before = tree(&nm);
 
-    match prune(None, &nm).unwrap() {
+    match prune(None, &nm).unwrap().1 {
         Outcome::Skipped { reason } => assert!(reason.contains("pnpm install"), "{reason}"),
         other => panic!("expected a skip, got {other:?}"),
     }
@@ -168,7 +171,7 @@ fn skips_a_stale_lockfile_and_leaves_node_modules_unchanged() {
     let nm = dir.join("node_modules");
     let before = tree(&nm);
 
-    match prune(None, &nm).unwrap() {
+    match prune(None, &nm).unwrap().1 {
         Outcome::Skipped { .. } => {}
         other => panic!("expected a skip, got {other:?}"),
     }
@@ -183,12 +186,12 @@ fn skips_a_folder_without_a_lockfile_or_with_another_name() {
     std::fs::remove_file(dir.join("pnpm-lock.yaml")).unwrap();
     let nm = dir.join("node_modules");
     let before = tree(&nm);
-    match pnpm::prune(&nm) {
+    match pnpm::prune(&host(), &nm) {
         Outcome::Skipped { reason } => assert!(reason.contains("pnpm-lock.yaml"), "{reason}"),
         other => panic!("expected a skip, got {other:?}"),
     }
     std::fs::create_dir_all(dir.join("out")).unwrap();
-    match pnpm::prune(&dir.join("out")) {
+    match pnpm::prune(&host(), &dir.join("out")) {
         Outcome::Skipped { reason } => assert!(reason.contains("node_modules"), "{reason}"),
         other => panic!("expected a skip, got {other:?}"),
     }

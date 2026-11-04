@@ -2,14 +2,16 @@
 //! commands. The listing of their units compiles nothing, and it is the live set that `sweep` keeps.
 //! `prune` applies that to a `target` folder next to `Cargo.toml`. See docs/cache-overlays.md.
 
-use crate::{output, skip, sweep, Outcome};
+use crate::{exec, kill_group, skip, sweep};
 use anyhow::{bail, Context, Result};
+use layr_adapter::{CacheAdapter, Host, Outcome};
 use serde_json::Value;
 use std::io::{BufRead, BufReader};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::Mutex;
+use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Mutex};
 
 /// The scratch folder of the raw profiles of the instrumented build in `target`. It is deleted after
 /// each run and after each sweep. The one owner of its path.
@@ -49,10 +51,10 @@ fn command_list(cfg: &Value, key: &str) -> Result<Vec<Vec<String>>> {
 }
 
 /// Reads the retest settings of the workspace at `root`. Missing settings are empty.
-pub fn settings(root: &Path) -> Result<Settings> {
-    let meta: Value = serde_json::from_slice(&output(
-        Command::new("cargo").args(["metadata", "--no-deps", "--format-version", "1"]).current_dir(root),
-    )?)?;
+pub fn settings(host: &dyn Host, root: &Path) -> Result<Settings> {
+    let meta: Value = serde_json::from_slice(&exec(host, "cargo", |c| {
+        c.args(["metadata", "--no-deps", "--format-version", "1"]).current_dir(root)
+    })?)?;
     let cfg = &meta["metadata"]["layr-retest"];
     let mut env = Vec::new();
     for (k, v) in cfg["env"].as_object().into_iter().flatten() {
@@ -91,8 +93,8 @@ pub enum Listed {
 /// a second stop, for a cargo whose status text differs (cargo then builds that one unit). A `Blocking ...
 /// directory` line means that another cargo holds a lock of the folder: the listing stops instead of waiting
 /// for it. The listing runs in its own process group, and a stop kills the group. Any other failure is an error.
-pub fn list_units(root: &Path, target: &Path, env: &[(String, String)], args: &[String]) -> Result<Listed> {
-    let mut c = Command::new("cargo");
+pub fn list_units(host: &dyn Host, root: &Path, target: &Path, env: &[(String, String)], args: &[String]) -> Result<Listed> {
+    let mut c = host.command("cargo").map_err(|e| anyhow::anyhow!("cannot run cargo: {e}"))?;
     c.args(listing(args)).current_dir(root).env("CARGO_TARGET_DIR", target).env("CARGO_BUILD_JOBS", "1");
     c.envs(env.iter().map(|(k, v)| (k, v))).env("LLVM_PROFILE_FILE", cargo_profile_file(target));
     c.process_group(0).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -104,11 +106,21 @@ pub fn list_units(root: &Path, target: &Path, env: &[(String, String)], args: &[
         let mut first = stop.lock().unwrap();
         if first.is_none() {
             *first = Some(why);
-            // A negative pid names the process group of the listing.
-            let _ = Command::new("kill").args(["-KILL", "--", &format!("-{pid}")]).status();
+            kill_group(pid);
         }
     };
+    // The time limit of the host: the group is killed at the deadline, and the listing is an error.
+    let until = host.deadline();
+    let late = std::sync::Arc::new(AtomicBool::new(false));
+    let (done, waiting) = mpsc::channel::<()>();
+    let timer_late = late.clone();
     let (lines, status) = std::thread::scope(|s| {
+        s.spawn(move || {
+            if let Err(mpsc::RecvTimeoutError::Timeout) = waiting.recv_timeout(until.saturating_duration_since(std::time::Instant::now())) {
+                timer_late.store(true, Ordering::SeqCst);
+                kill_group(pid);
+            }
+        });
         s.spawn(|| {
             for line in BufReader::new(err).lines().map_while(Result::ok) {
                 let t = line.trim_start();
@@ -131,11 +143,15 @@ pub fn list_units(root: &Path, target: &Path, env: &[(String, String)], args: &[
             lines
         });
         let status = child.wait();
+        drop(done);
         (lines.join().unwrap_or_default(), status)
     });
     let _ = std::fs::remove_dir_all(profile_scratch(target));
     if let Some(stopped) = stop.into_inner().unwrap_or(None) {
         return Ok(stopped);
+    }
+    if late.load(Ordering::SeqCst) {
+        bail!("the cargo listing reached its time limit");
     }
     if !status.with_context(|| format!("cannot wait for cargo {}", args.join(" ")))?.success() {
         bail!("cargo {} failed", args.join(" "));
@@ -145,10 +161,10 @@ pub fn list_units(root: &Path, target: &Path, env: &[(String, String)], args: &[
 
 /// The live units of the target folder `target`: the units that every command of `commands` uses, each
 /// run with `env`. Stops at the first command whose units are not fresh.
-pub fn live_units(root: &Path, target: &Path, env: &[(String, String)], commands: &[Vec<String>]) -> Result<Listed> {
+pub fn live_units(host: &dyn Host, root: &Path, target: &Path, env: &[(String, String)], commands: &[Vec<String>]) -> Result<Listed> {
     let mut live = sweep::Plans::new();
     for args in commands {
-        match list_units(root, target, env, args)? {
+        match list_units(host, root, target, env, args)? {
             Listed::Fresh(units) => sweep::merge(&mut live, units),
             stale => return Ok(stale),
         }
@@ -183,16 +199,33 @@ pub fn built(target: &Path) -> bool {
 /// The cargo adapter for `target`: removes the entries that the `sweep` list does not need. The folder must be
 /// named `target` and have a `Cargo.toml` next to it. A unit that is not fresh, a busy build lock or any other
 /// failure skips the folder. A busy lock skips only its profile folder: the others are already swept.
-pub fn prune(target: &Path) -> Outcome {
+pub fn prune(host: &dyn Host, target: &Path) -> Outcome {
     let named = target.file_name().is_some_and(|n| n == "target");
     let Some(root) = target.parent().filter(|r| named && r.join("Cargo.toml").is_file()) else {
         return skip("cargo needs a folder named target next to Cargo.toml");
     };
-    prune_in(root, target).unwrap_or_else(|e| skip(format!("{e:#}")))
+    prune_in(host, root, target).unwrap_or_else(|e| skip(format!("{e:#}")))
 }
 
-fn prune_in(root: &Path, target: &Path) -> Result<Outcome> {
-    let cfg = settings(root)?;
+/// The cargo adapter (`layr-adapter`): `target` next to `Cargo.toml`.
+pub struct Cargo;
+
+impl CacheAdapter for Cargo {
+    fn name(&self) -> &'static str {
+        "cargo"
+    }
+
+    fn detects(&self, folder: &Path) -> bool {
+        folder.file_name().is_some_and(|n| n == "target") && folder.parent().is_some_and(|r| r.join("Cargo.toml").is_file())
+    }
+
+    fn prune(&self, host: &dyn Host, folder: &Path) -> Outcome {
+        prune(host, folder)
+    }
+}
+
+fn prune_in(host: &dyn Host, root: &Path, target: &Path) -> Result<Outcome> {
+    let cfg = settings(host, root)?;
     if !cfg.listed {
         return Ok(skip("no `sweep` list under [workspace.metadata.layr-retest] in Cargo.toml"));
     }
@@ -202,10 +235,10 @@ fn prune_in(root: &Path, target: &Path) -> Result<Outcome> {
     // The listings must not reach the network: a unit whose crate is not in the cargo cache fails the listing.
     let mut env = cfg.env;
     env.push(("CARGO_NET_OFFLINE".to_string(), "true".to_string()));
-    Ok(match live_units(root, target, &env, &cfg.commands)? {
+    Ok(match live_units(host, root, target, &env, &cfg.commands)? {
         Listed::Fresh(live) => match sweep_plans(&live, false)? {
             (_, busy) if busy > 0 => skip(format!("build lock busy in {busy} profile folder(s)")),
-            (freed, _) => Outcome::Pruned { adapter: "cargo", freed },
+            (freed, _) => Outcome::Pruned { freed },
         },
         Listed::NotFresh(why) => skip(format!("a unit is not fresh ({why}); run the standard build first")),
         Listed::Busy => skip("build lock busy"),

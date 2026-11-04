@@ -661,7 +661,7 @@ fn sweep_plans(plans: &sweep::Plans, dry: bool) -> Result<(u64, usize)> {
 /// run's own command (`own`), in `target/retest`. A folder with a unit that is not fresh is not swept.
 fn sweep_after_build(root: &Path, target: &Path, hash: &[(String, String)], own: Vec<String>) {
     let t = std::time::Instant::now();
-    let cfg = match settings(root) {
+    let cfg = match settings(&retest_host(), root) {
         Ok(c) if c.listed => c,
         Ok(_) => return eprintln!("layr-retest: sweep skipped: no `sweep` list under [workspace.metadata.layr-retest] in Cargo.toml"),
         Err(e) => return eprintln!("layr-retest: sweep skipped: {e:#}"),
@@ -671,7 +671,7 @@ fn sweep_after_build(root: &Path, target: &Path, hash: &[(String, String)], own:
     let mut commands = cfg.commands;
     commands.extend(cfg.retest);
     commands.push(own);
-    let live = match live_units(root, target, &env, &commands) {
+    let live = match live_units(&retest_host(), root, target, &env, &commands) {
         Ok(Listed::Fresh(live)) => live,
         Ok(Listed::NotFresh(why)) => {
             return eprintln!("layr-retest: sweep skipped: a unit is not fresh ({why}); run the standard build first")
@@ -691,6 +691,11 @@ fn sweep_after_build(root: &Path, target: &Path, hash: &[(String, String)], own:
     }
 }
 
+/// The host of the retest commands: this process runs them, and each command has an hour.
+fn retest_host() -> layr_cache::LocalHost {
+    layr_cache::LocalHost::new(std::time::Duration::from_secs(3600))
+}
+
 /// `layr retest prune <folder> [--adapter <name>]`: runs the cache adapter of `folder` by hand (layr-cache). Without
 /// `--adapter` the adapter is detected from the folder. Prints what it did. A skipped folder exits 0.
 fn prune_cmd(args: &[String]) -> Result<i32> {
@@ -703,8 +708,8 @@ fn prune_cmd(args: &[String]) -> Result<i32> {
         }
     };
     match layr_cache::prune(setting, &std::env::current_dir()?.join(folder))? {
-        layr_cache::Outcome::Pruned { adapter, freed } => println!("{folder}: pruned with {adapter}, freed {:.1} MB", freed as f64 / 1e6),
-        layr_cache::Outcome::Skipped { reason } => println!("{folder}: skipped: {reason}"),
+        (adapter, layr_cache::Outcome::Pruned { freed }) => println!("{folder}: pruned with {adapter}, freed {:.1} MB", freed as f64 / 1e6),
+        (_, layr_cache::Outcome::Skipped { reason }) => println!("{folder}: skipped: {reason}"),
     }
     Ok(0)
 }
@@ -725,7 +730,7 @@ fn sweep_cmd(args: &[String]) -> Result<i32> {
     };
     let t0 = std::time::Instant::now();
     let root = std::env::current_dir()?;
-    let cfg = settings(&root)?;
+    let cfg = settings(&retest_host(), &root)?;
     if !cfg.listed {
         eprintln!("layr-retest: sweep skipped: no `sweep` list under [workspace.metadata.layr-retest] in Cargo.toml");
         return Ok(0);
@@ -748,7 +753,7 @@ fn sweep_cmd(args: &[String]) -> Result<i32> {
             eprintln!("layr-retest: {name}: no sweep command; left as is");
             continue;
         };
-        match live_units(&root, &target, &env, &commands) {
+        match live_units(&retest_host(), &root, &target, &env, &commands) {
             Ok(Listed::Fresh(live)) => lists.push((name, live)),
             Ok(Listed::NotFresh(why)) => eprintln!("layr-retest: {name}: sweep skipped: a unit is not fresh ({why}); run the standard build first"),
             Ok(Listed::Busy) => eprintln!("layr-retest: {name}: sweep skipped (build lock busy)"),
@@ -962,7 +967,7 @@ fn run(args: &[String]) -> Result<i32> {
     let tools = (llvm_tool("llvm-profdata")?, llvm_tool("llvm-cov")?);
     let runner_var = format!("CARGO_TARGET_{}_RUNNER", rustc_host()?.to_uppercase().replace('-', "_"));
     let hash = hash_env(&root)?;
-    let project_env = settings(&root)?.env;
+    let project_env = settings(&retest_host(), &root)?.env;
     let cargo = |first: &[&str]| {
         let mut c = cargo_cmd();
         c.args(first).args(extra);

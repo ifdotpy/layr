@@ -100,10 +100,19 @@ pub struct Props {
     pub merge: MergeKind,
     /// `gc lru:<size>`: the size limit in bytes of the overlay in each working folder.
     pub gc_lru: Option<u64>,
+    /// `prune=<name>|none`: the cache adapter that prunes the folder (issue #167). None: detect it.
+    pub prune: Option<String>,
 }
 
 /// The property names, in the order that `overlay list` shows them.
-pub const PROPS: &[&str] = &["history", "quiet", "merge", "gc"];
+pub const PROPS: &[&str] = &["history", "quiet", "merge", "gc", "prune"];
+
+/// The value of `prune=<name>|none`: a lowercase adapter name (letters, digits, `-`), or `none`. An adapter
+/// name is not checked against the adapters here: core has no list of them. An unknown name is logged at prune time.
+pub fn prune_name(s: &str) -> Option<String> {
+    let ok = !s.is_empty() && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    ok.then(|| s.to_string())
+}
 
 /// `all`, `last` or a count of states (at least 1).
 pub fn parse_history(s: &str) -> Option<Option<u32>> {
@@ -156,6 +165,7 @@ impl Props {
                 }
             }
             "gc" => self.gc_lru.map(|n| json!(format!("lru:{n}"))).unwrap_or(json!(null)),
+            "prune" => self.prune.as_ref().map(|n| json!(n)).unwrap_or(json!(null)),
             _ => json!(null),
         }
     }
@@ -170,6 +180,7 @@ impl Props {
         p.quiet = get("quiet").and_then(|v| v.as_bool()).unwrap_or(false);
         p.merge = get("merge").and_then(|v| v.as_str().and_then(MergeKind::parse)).unwrap_or_default();
         p.gc_lru = get("gc").and_then(|v| v.as_str().and_then(parse_gc)).flatten();
+        p.prune = get("prune").and_then(|v| v.as_str().and_then(prune_name));
         p
     }
 
@@ -190,6 +201,9 @@ impl Props {
         if let Some(n) = self.gc_lru {
             out.push(format!("gc=lru:{}", show_size(n)));
         }
+        if let Some(n) = &self.prune {
+            out.push(format!("prune={n}"));
+        }
         out
     }
 
@@ -199,6 +213,7 @@ impl Props {
             "quiet": self.quiet,
             "merge": self.merge.name(),
             "gc": self.gc_lru.map(|n| format!("lru:{n}")).unwrap_or_else(|| "none".into()),
+            "prune": self.prune.clone().unwrap_or_else(|| "auto".into()),
         })
     }
 }
@@ -1507,10 +1522,10 @@ mod tests {
         assert_eq!(parse_gc("lru"), None);
         assert_eq!(MergeKind::parse("union-theirs"), Some(MergeKind::UnionTheirs));
         assert_eq!(MergeKind::parse("ours"), None);
-        let p = Props { history: Some(1), quiet: true, merge: MergeKind::UnionTheirs, gc_lru: Some(20 << 30) };
+        let p = Props { history: Some(1), quiet: true, merge: MergeKind::UnionTheirs, gc_lru: Some(20 << 30), prune: Some("pnpm".into()) };
         let values: BTreeMap<&str, serde_json::Value> = PROPS.iter().map(|k| (*k, p.value(k))).collect();
         assert_eq!(Props::from_settings(|k| values.get(k).cloned().filter(|v| !v.is_null())), p);
-        assert_eq!(p.describe(), ["history=last", "quiet", "merge=union-theirs", "gc=lru:20G"]);
+        assert_eq!(p.describe(), ["history=last", "quiet", "merge=union-theirs", "gc=lru:20G", "prune=pnpm"]);
         // Defaults are no settings at all, and unknown values read as defaults.
         assert!(PROPS.iter().all(|k| Props::default().value(k).is_null()));
         let odd = Props::from_settings(|k| Some(serde_json::json!(if k == "history" { "many" } else { "?" })));

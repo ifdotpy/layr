@@ -50,7 +50,7 @@ pub fn cache_overlay_name(folder: &str) -> String {
 
 /// The properties of a cache overlay (docs/cache-overlays.md, section 2).
 pub fn cache_props() -> Props {
-    Props { history: Some(1), quiet: true, merge: MergeKind::UnionTheirs, gc_lru: None }
+    Props { history: Some(1), quiet: true, merge: MergeKind::UnionTheirs, gc_lru: None, prune: None }
 }
 
 /// The apparent size of the files below `root` (not following links, not entering other layers).
