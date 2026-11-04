@@ -164,6 +164,13 @@ impl Store {
         version_guard.ready(root)?;
         // Every volume folder must hold the identity file of this store (checked when used).
         let store = Store { root: root.to_path_buf(), machine: Machine { id, name, key }, _version_guard: Some(version_guard) };
+        // A volume with its own OverlayFS registry (a project moved there) is recovered too.
+        #[cfg(feature = "overlayfs")]
+        for volume in store.layout()?.ready_volume_paths() {
+            if volume.join(".layr-overlayfs").is_dir() {
+                crate::storage::recover(&volume)?;
+            }
+        }
         // A `project move` that stopped midway is finished or rolled back before the command runs.
         crate::project_move::recover(&store);
         Ok(store)

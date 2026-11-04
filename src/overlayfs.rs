@@ -100,9 +100,15 @@ static EXTERNAL: std::sync::Mutex<(PathBuf, Vec<PathBuf>)> = std::sync::Mutex::n
 pub fn set_external(home_root: &Path, folders: Vec<PathBuf>) {
     *EXTERNAL.lock().unwrap() = (home_root.join(".layr-overlayfs"), folders);
 }
+/// The registry of a folder outside the store: the registry of its volume when the volume has
+/// one (a copy made there, see `target_home`), else the store's registry.
 fn external_home(path: &Path) -> Option<PathBuf> {
     let e = EXTERNAL.lock().unwrap();
-    e.1.iter().any(|f| path.starts_with(f)).then(|| e.0.clone())
+    let folders: Vec<PathBuf> = e.1.iter().filter(|f| path.starts_with(f)).cloned().collect();
+    if folders.is_empty() {
+        return None;
+    }
+    folders.iter().map(|f| f.join(".layr-overlayfs")).find(|h| h.is_dir()).or_else(|| Some(e.0.clone()))
 }
 fn lock(path: &Path) -> Result<Locked> {
     lock_at(home_of(path)?)
@@ -1745,11 +1751,6 @@ fn copied_key(key: &Path, src: &Path, dst: &Path) -> Result<PathBuf> {
 /// The registry of the copy is the nearest registry above `dst`. A target without one gets a
 /// registry at its mount point (the copy's own store root for OverlayFS).
 fn target_home(dst: &Path) -> Result<PathBuf> {
-    // A volume that the store registry manages: its trees are registered there (see `lock`).
-    if let Some(home) = external_home(&absolute(dst)?) {
-        private_dir(&home)?;
-        return Ok(home);
-    }
     for p in dst.ancestors() {
         let home = p.join(".layr-overlayfs");
         if home.is_dir() {
