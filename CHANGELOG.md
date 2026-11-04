@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.21.0](https://github.com/ifdotpy/layr/compare/v0.20.0...v0.21.0) (2026-11-04)
+
+
+### Features
+
+* **cache:** adapters that prune cache folders to the live set ([#169](https://github.com/ifdotpy/layr/issues/169)) ([23ade85](https://github.com/ifdotpy/layr/commit/23ade85ef9b7d067c1e82af78a75283d9c9146f0))
+* **storage:** Copy a project to another file system with its sharing ([#177](https://github.com/ifdotpy/layr/issues/177)) ([055238c](https://github.com/ifdotpy/layr/commit/055238c75419e0147b742fcfa45f734d31959f2b))
+
+
+### Bug Fixes
+
+* **apfs:** Treat an entry that goes away during a thin copy as a change ([#191](https://github.com/ifdotpy/layr/issues/191)) ([b50323f](https://github.com/ifdotpy/layr/commit/b50323f7df4a2363f61a907fda3404d85764c580))
+* **cache:** Never swap a cache folder that a process uses ([#190](https://github.com/ifdotpy/layr/issues/190)) ([ff44c80](https://github.com/ifdotpy/layr/commit/ff44c8073fe0a7a51abc5f53f94ab28a9bdfe076))
+* **cache:** report walk errors in regenerable_by_walk ([#187](https://github.com/ifdotpy/layr/issues/187)) ([826a2bd](https://github.com/ifdotpy/layr/commit/826a2bd49295a8e6fc33aa5bbbf191ed881d7d39))
+* **overlayfs:** take caches as a lower layer, no copy at line new ([#184](https://github.com/ifdotpy/layr/issues/184)) ([a61c7ab](https://github.com/ifdotpy/layr/commit/a61c7ab65afac391ef22416cc9ad5e1ae321581c))
+* **worktree:** Replace a hard-linked file by rename, not by a write in place ([#188](https://github.com/ifdotpy/layr/issues/188)) ([5d1fc13](https://github.com/ifdotpy/layr/commit/5d1fc13cf6054a3f200b9bb8de0e79e0a406cfc8))
+
+
+### Performance
+
+* **line:** copy warm caches once, lock only the commit of line new ([#196](https://github.com/ifdotpy/layr/issues/196)) ([7a43657](https://github.com/ifdotpy/layr/commit/7a436577ebf4d5bcee4199669b4d1f6cccf52a90)), closes [#194](https://github.com/ifdotpy/layr/issues/194)
+
 ## [0.20.0](https://github.com/ifdotpy/layr/compare/v0.19.1...v0.20.0) (2026-11-03)
 
 
