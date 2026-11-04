@@ -4,7 +4,7 @@ use crate::ctx::Ctx;
 use crate::fsutil;
 use crate::repo::{Repo, Snap};
 use anyhow::{bail, Context, Result};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use rand::RngCore;
 use sha2::Sha256;
 use std::collections::{BTreeSet, VecDeque};

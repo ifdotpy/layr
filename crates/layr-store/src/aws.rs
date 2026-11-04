@@ -3,7 +3,7 @@
 
 pub mod profile;
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 
 /// The SHA-256 of an empty payload.
