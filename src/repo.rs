@@ -4069,8 +4069,6 @@ thread_local! {
     static PREPARED_STATUS: std::cell::RefCell<Option<PreparedStatus>> = const { std::cell::RefCell::new(None) };
 }
 
-/// An automatic state layer written before a store lock (`Repo::prepare_save`).
-#[cfg(target_os = "macos")]
 /// The automatic state that `line delete` prepares before the lock (`prepare_final_state`).
 #[cfg(target_os = "macos")]
 pub struct FinalPrepared {
@@ -4091,6 +4089,8 @@ pub enum FinalState {
     Moved,
 }
 
+/// An automatic state layer written before a store lock (`Repo::prepare_save`).
+#[cfg(target_os = "macos")]
 struct PreparedSave {
     line: String,
     head: String,
