@@ -795,12 +795,11 @@ impl Store {
             }
             repo.hold(repo.pin(&[line.head.as_str()])?);
             let mut created = false;
-            {
-                let _line = repo.line_lock(&local)?;
-                if !repo.working(&local).exists() {
-                    repo.materialize(&local, &local.head, &repo.working(&local))?;
-                    created = true;
-                }
+            // Held to the record: no other command moves the line meanwhile (#194).
+            let _line = repo.line_lock(&local)?;
+            if !repo.working(&local).exists() {
+                repo.materialize(&local, &local.head, &repo.working(&local))?;
+                created = true;
             }
             if created {
                 let _lock = repo.p.lock()?;
