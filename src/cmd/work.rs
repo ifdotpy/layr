@@ -962,6 +962,58 @@ pub fn commit(ctx: &Ctx, args: &[String]) -> Result<i32> {
     Ok(code)
 }
 
+/// The part of a named save that runs before the project lock on APFS: the clone of the index, the
+/// state that describes it, and the changes against the head.
+#[cfg(target_os = "macos")]
+struct NamedPrepared<'p, 's> {
+    head_id: String,
+    head_root: crate::repo::Snap,
+    pending: Option<crate::apfs_commit::PendingCommit<'p, 's>>,
+    state: crate::model::StateRec,
+    new_root: crate::repo::Snap,
+    all_changes: Vec<Change>,
+}
+
+/// Clone the index of `line` and compare the clone with the head. Call with the line lock held and
+/// without the project lock. A failure drops the clone (`PendingCommit`) and changes nothing.
+#[cfg(target_os = "macos")]
+fn prepare_named_save<'p, 's>(
+    ctx: &Ctx,
+    repo: &'p Repo<'s>,
+    line: &Line,
+    head: &crate::model::StateRec,
+    message: &str,
+    amend: bool,
+) -> Result<NamedPrepared<'p, 's>> {
+    let head_root = repo.state_src(&line.head)?;
+    let parents = if amend { head.parents.clone() } else { vec![line.head.clone()] };
+    let stage = repo.current_stage(line)?;
+    let pending = match &stage {
+        Some(stage) => Some(crate::apfs_commit::PendingCommit::prepare(&repo.p, &line.id, |dst| {
+            repo.stage_tree(line, stage)?.materialize(dst, true)
+        })?),
+        None => None,
+    };
+    if pending.is_some() {
+        crate::apfs_commit::failpoint("pending-cloned");
+        crate::apfs_commit::test_pause();
+    }
+    let mut state = match &pending {
+        Some(pc) => repo.state_record(ctx, pc.id.clone(), StateKind::Commit, parents, message, Some(line), pc.subvol.clone()),
+        None => repo.same_state(ctx, &line.head, StateKind::Commit, parents, message, Some(line))?,
+    };
+    if amend {
+        state.change_id = head.change_id.clone();
+    }
+    let new_root = match &pending {
+        Some(pc) => crate::repo::snap(&pc.tree),
+        None => repo.state_src(&state.id)?,
+    };
+    // An attribute-only change that `add` staged is a change of the state.
+    let all_changes = crate::storage::with_stored_compare(|| changes::file_changes(&head_root, &new_root))?;
+    Ok(NamedPrepared { head_id: line.head.clone(), head_root, pending, state, new_root, all_changes })
+}
+
 fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let spec = Spec::new()
         .value("-m|--message")
@@ -1017,8 +1069,21 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
         h.repo.restore_caches(&line)?;
         h.repo.prepare_cache_states(&line)?;
     }
+    // `save -m` on APFS: the index is cloned and the new tree compared before the project lock
+    // (issue #194). The line lock, taken above, keeps the stage and the head unchanged to the record.
+    #[cfg(target_os = "macos")]
+    let mut prepared = if stacked { None } else { Some(prepare_named_save(ctx, &h.repo, &line, &head, &message, a.has("--amend"))?) };
     let _lock = h.repo.p.lock()?;
     let line = h.repo.line(&line.id)?;
+    #[cfg(target_os = "macos")]
+    if let Some(np) = &prepared {
+        if line.head != np.head_id {
+            return Err(exit(
+                1,
+                format!("line {} moved during the command (head {} -> {}); run it again", line.name, ids::short(&np.head_id), ids::short(&line.head)),
+            ));
+        }
+    }
     crate::gitbridge::check_git_head(&h.repo, &line)?;
     crate::repo::recover_cache_replacements(&h.repo.working(&line))?;
     if !stacked {
@@ -1056,58 +1121,41 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     // The new state is a snapshot of the staging line (or the head when nothing is staged);
     // its changes against the head say whether there is anything to commit.
-    let head_root = h.repo.state_src(&line.head)?;
-    let parents = if a.has("--amend") { head.parents.clone() } else { vec![line.head.clone()] };
-    let stage = h.repo.current_stage(&line)?;
-    #[cfg(target_os = "macos")]
-    let mut promotion = match &stage {
-        Some(_) => Some(crate::apfs_commit::IndexCommit::prepare(&h.repo.p, &line.id)?),
-        None => None,
-    };
-    #[cfg(target_os = "macos")]
-    if promotion.is_some() {
-        crate::apfs_commit::failpoint("promoted");
-    }
-    #[cfg(target_os = "macos")]
-    let mut state = if let Some(p) = &promotion {
-        h.repo.describe_state(ctx, p.id.clone(), StateKind::Commit, parents, &message, Some(&line))?
-    } else {
-        h.repo.same_state(ctx, &line.head, StateKind::Commit, parents, &message, Some(&line))?
-    };
     #[cfg(not(target_os = "macos"))]
-    let mut state = {
+    let (head_root, mut state, new_root, all_changes) = {
+        let head_root = h.repo.state_src(&line.head)?;
+        let parents = if a.has("--amend") { head.parents.clone() } else { vec![line.head.clone()] };
+        let stage = h.repo.current_stage(&line)?;
         let src = stage.clone().unwrap_or(head_root.clone());
-        h.repo.new_state(ctx, &src, StateKind::Commit, parents, &message, Some(&line))?
-    };
-    if a.has("--amend") {
-        state.change_id = head.change_id.clone();
-    }
-    let new_root = match h.repo.state_src(&state.id) {
-        Ok(r) => r,
-        Err(e) => {
-            h.repo.discard_states(std::slice::from_ref(&state));
-            return Err(e);
+        let mut state = h.repo.new_state(ctx, &src, StateKind::Commit, parents, &message, Some(&line))?;
+        if a.has("--amend") {
+            state.change_id = head.change_id.clone();
         }
+        let new_root = match h.repo.state_src(&state.id) {
+            Ok(r) => r,
+            Err(e) => {
+                h.repo.discard_states(std::slice::from_ref(&state));
+                return Err(e);
+            }
+        };
+        let all_changes: Vec<Change> = match changes::file_changes(&head_root, &new_root) {
+            Ok(v) => v,
+            Err(e) => {
+                h.repo.discard_states(std::slice::from_ref(&state));
+                return Err(e);
+            }
+        };
+        (head_root, state, new_root, all_changes)
     };
-    // An attribute-only change that `add` staged is a change of the state.
+    // On APFS the state, its tree and the changes were made before the lock.
     #[cfg(target_os = "macos")]
-    let compared = crate::storage::with_stored_compare(|| changes::file_changes(&head_root, &new_root));
-    #[cfg(not(target_os = "macos"))]
-    let compared = changes::file_changes(&head_root, &new_root);
-    let all_changes: Vec<Change> = match compared {
-        Ok(v) => v,
-        Err(e) => {
-            h.repo.discard_states(std::slice::from_ref(&state));
-            return Err(e);
-        }
-    };
+    let NamedPrepared { head_root, mut pending, mut state, new_root, all_changes, .. } =
+        prepared.take().ok_or_else(|| anyhow::anyhow!("internal error: named save was not prepared"))?;
     let staged: Vec<Change> = all_changes.iter().filter(|c| !skip_path(&c.path)).cloned().collect();
     if staged.is_empty() && !a.has("--allow-empty") && !a.has("--amend") {
         h.repo.discard_states(std::slice::from_ref(&state));
         #[cfg(target_os = "macos")]
-        if let Some(p) = promotion.take() {
-            p.rollback()?;
-        }
+        drop(pending.take());
         return nothing(&h, &line);
     }
     // A file with a full set of conflict markers is no result of a merge: refuse it unless asked.
@@ -1124,9 +1172,7 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
         if !marked.is_empty() {
             h.repo.discard_states(std::slice::from_ref(&state));
             #[cfg(target_os = "macos")]
-            if let Some(p) = promotion.take() {
-                p.rollback()?;
-            }
+            drop(pending.take());
             return Err(exit(
                 1,
                 format!("error: conflict markers in {}: resolve them, or save with --allow-conflict-markers.", marked.join(", ")),
@@ -1164,6 +1210,13 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
             target_head: line.head.clone(),
         })?;
     }
+    #[cfg(target_os = "macos")]
+    if let Some(pc) = pending.as_mut() {
+        if !pc.publish()? {
+            return Err(exit(1, format!("error: the staging content of line {} changed during the save; run it again", line.name)));
+        }
+    }
+    crate::apfs_commit::failpoint("pending-renamed");
     crate::apfs_commit::failpoint("before-record");
     let rec = {
         let _t = crate::trace::span("move head");
@@ -1171,13 +1224,14 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
     };
     rec?;
     crate::apfs_commit::failpoint("after-record");
-    #[cfg(target_os = "macos")]
-    if let Some(p) = promotion.take() {
-        p.finish()?;
-    }
     {
         let _t = crate::trace::span("drop stage");
         h.repo.drop_stage(&line)?;
+    }
+    crate::apfs_commit::failpoint("after-drop");
+    #[cfg(target_os = "macos")]
+    if let Some(pc) = pending.take() {
+        pc.finish()?;
     }
     if !a.has("-q") {
         let root = if parents_empty(&state) { " (root-state)" } else { "" };
