@@ -97,7 +97,10 @@ impl Host for WorkerHost {
 /// never passes its own `PATH` on.
 fn owner_path(uid: u32) -> String {
     let home = privs::user(uid).map(|u| u.home).unwrap_or_else(|_| "/".into());
-    let defaults = format!("{home}/.cargo/bin:{home}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin");
+    // The rustup of Homebrew keeps cargo in its own folder (the daemon has no shell PATH).
+    let defaults = format!(
+        "{home}/.cargo/bin:{home}/.local/bin:/opt/homebrew/opt/rustup/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+    );
     match std::env::var("PATH") {
         Ok(own) if !rustix::process::geteuid().is_root() => format!("{own}:{defaults}"),
         _ => defaults,
@@ -289,6 +292,12 @@ fn recover_here(adapters: &'static [Box<dyn CacheAdapter>], setting: Option<&str
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn owner_path_has_the_homebrew_rustup_folder() {
+        let p = super::owner_path(rustix::process::getuid().as_raw());
+        assert!(p.split(':').any(|d| d == "/opt/homebrew/opt/rustup/bin"), "{p}");
+    }
+
     use super::*;
     use std::path::PathBuf;
 

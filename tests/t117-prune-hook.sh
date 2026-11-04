@@ -85,58 +85,20 @@ cd "$P/main"
 # A cache that root saves belongs to root: another user takes it only from a protected line (its caches are shared).
 # So on a root run main stays protected, and on a user run the protection is removed for direct saves.
 if [ "$(id -u)" != 0 ]; then l protect main --remove >/dev/null 2>&1 || true; fi
-# DIAG: the cargo env of the job and of the owner, the cargo and rustc versions, the cargo config files, and
-# whether a build with CARGO_INCREMENTAL unset is incremental (a throwaway crate, not a line).
-echo "DIAG job env: $(env | grep -E '^(CARGO|RUST)' | tr '\n' ' ')"
-echo "DIAG owner env: $(owned env | grep -E '^(CARGO|RUST)' | tr '\n' ' ')"
-echo "DIAG cargo -vV: $(owned cargo -vV 2>&1 | tr '\n' ' ')"
-echo "DIAG user: job $(id -un) owner $(owned id -un 2>&1)"
-OWN_HOME=$(getent passwd "$OWN" | cut -d: -f6 2>/dev/null || echo "$HOME")
-for f in /etc/environment /root/.cargo/config.toml /root/.cargo/config "$OWN_HOME/.cargo/config.toml" "$OWN_HOME/.cargo/config" /usr/local/cargo/config.toml "${OWN_CARGO_HOME:-/nonexistent}/config.toml"; do
-    [ -f "$f" ] && echo "DIAG config $f: $(tr '\n' ' ' < "$f" | cut -c1-300)"
-done
-PROBE="$T/incr-probe"
-mkdir -p "$PROBE/src" && printf '[package]\nname = "probe"\nversion = "0.1.0"\nedition = "2021"\n' > "$PROBE/Cargo.toml" && echo 'pub fn a() {}' > "$PROBE/src/lib.rs"
-chown -R "$OWN" "$PROBE" 2>/dev/null || true
-for mode in unset 1; do
-    if [ $mode = unset ]; then E="env -u CARGO_INCREMENTAL"; else E="env CARGO_INCREMENTAL=1"; fi
-    echo "DIAG incremental flag, CARGO_INCREMENTAL $mode: $(owned sh -c "cd '$PROBE' && rm -rf target && $E RUSTC_WRAPPER= cargo build -v 2>&1 | grep -o -- '-C incremental=[^ ]*' | head -1")"
-done
 cb "$P/main" build --workspace -q >/dev/null
 base=$(units $P/main/target)
 [ "$base" -gt 0 ] && { PASS=$((PASS + 1)); echo "PASS the standard build made units ($base)"; } || { FAIL=$((FAIL + 1)); echo "FAIL the standard build made no units: the owner cannot build"; cb "$P/main" build --workspace 2>&1 | tail -20; }
 (cd "$P/main" && l save --caches -q)
-new_line other main
-# The union copy alone, with the prune off: if the times are right here, a prune of the merged cache rewrote them.
+# The times are compared before any cargo runs in a line: a cargo run rewrites the files it compiles.
+export LAYR_CACHE_STATES=$LAYR_ROOT/projects/p/meta/overlays/cache.target/states
+
+# The union copy alone, with the prune off: the copied times are the source's (cargo compares them).
 new_line other2 main
 ok "the owner sets prune=none for the union check" l overlay set cache.target --prune none
 (cd "$P/other2" && l merge main --caches-only -q >/dev/null 2>&1)
 eq "the union copy keeps the times without a prune" "0" "$(times_mismatch $P/main/target $P/other2/target)"
-# Which entries the sweep removes from a merged cache (a diagnostic: the names removed by the prune command).
-new_line other3 main
-ok "the owner sets prune=none for the sweep check" l overlay set cache.target --prune none
-(cd "$P/other3" && l merge main --caches-only -q >/dev/null 2>&1)
-ok "the owner sets prune to auto after the sweep check" l overlay set cache.target --prune auto
-(cd "$P/other3/target" && find . | sort) > "$T/names-before3"
-# Cargo's own reason for the merged unit, before the prune runs: the dirty, fresh and compiling lines of a plain -v build.
-(cd "$P/other3" && owned env CARGO_NET_OFFLINE=true $PENV CARGO_BUILD_JOBS=1 cargo build --workspace -v 2>&1 | grep -m 6 -E "Dirty|Fresh|Compiling|dirty|stale" | cut -c1-400) | sed 's/^/DIAG reason: /' || true
-# The artifact names of the library in the listing that the prune uses (json), as the sweep reads them.
-(cd "$P/other3" && owned env CARGO_NET_OFFLINE=true $PENV CARGO_BUILD_JOBS=1 CARGO_TARGET_DIR=target cargo build --workspace -v --message-format json 2>/dev/null | python3 -c "
-import sys, json
-for line in sys.stdin:
-    try: v = json.loads(line)
-    except Exception: continue
-    if v.get('reason') == 'compiler-artifact' and v['target']['kind'] == ['lib']:
-        print('DIAG listing artifacts: fresh=%s %s' % (v.get('fresh'), [f.split('/')[-1] for f in v.get('filenames', [])]))
-") || true
-for d in main other3; do python3 -c "import os,sys; print('DIAG mtime', sys.argv[1], os.stat(sys.argv[2]).st_mtime_ns, sys.argv[2])" $d "$P/$d/src/lib.rs"; done
-(cd "$P/other3" && owned env CARGO_NET_OFFLINE=true "$LAYR" retest prune target) > "$T/prune-out3" 2>&1 || true
-(cd "$P/other3/target" && find . | sort) > "$T/names-after3"
-echo "DIAG prune output: $(cat "$T/prune-out3" | tr '\n' ' ')"
-echo "DIAG removed by the sweep: $(comm -23 "$T/names-before3" "$T/names-after3" | head -20 | tr '\n' ' ')"
-# Why cargo treats the merged standard unit as dirty (a diagnostic: the reason cargo prints for the first dirty unit).
-echo "DIAG cargo on the merged line without prune: $(cb "$P/other2" build --workspace -v 2>&1 | grep -m2 -E 'Dirty|Fresh' | tr '\n' ' ')"
 ok "the owner sets prune to auto after the union check" l overlay set cache.target --prune auto
+new_line other main
 
 # 1. Stale units in the saved cache of main: prune is off while they are saved.
 ok "the owner sets prune=none on the cache" l overlay set cache.target --prune none
@@ -147,28 +109,25 @@ stale=$(units $P/main/target)
 eq "prune=none keeps the stale units in the working copy" "$stale" "$(units $P/main/target)"
 ok "the owner sets prune to auto" l overlay set cache.target --prune auto
 
-# 2. `line new` prunes the cache it takes.
-new_line fresh main
-eq "line new removes the stale units" "$base" "$(units $P/fresh/target)"
+# 2. `line new` takes the cache as it is: no adapter runs, so the stale units come along. The next save prunes them.
+out=$(l line new $OWNER_ARG fresh main 2>&1)
+no "line new prints no prune line" sh -c "echo \"\$1\" | grep -q 'layr: prune'" _ "$out"
+eq "line new takes the stale units (no prune at take)" "$stale" "$(units $P/fresh/target)"
+(cd "$P/fresh" && l save --caches -q)
+eq "save --caches of the new line prunes its cache" "$base" "$(units $P/fresh/target)"
 rebuilt=$(cb "$P/fresh" build --workspace)
 case "$rebuilt" in *Compiling*) FAIL=$((FAIL + 1)); echo "FAIL the next build of the new line compiled" ;; *) PASS=$((PASS + 1)); echo "PASS the next build of the new line compiles nothing" ;; esac
 
-# 3. `merge --caches-only` prunes the cache it takes from main.
-(cd "$P/other" && l merge main --caches-only -q)
+# 3. `merge --caches-only` takes the units of main into `other` (union), with no prune. The next save of `other`
+# prunes the union to the live set: the saved cache has only the units of the standard build.
+out=$(cd "$P/other" && l merge main --caches-only 2>&1)
+no "merge --caches-only prints no prune line" sh -c "echo \"\$1\" | grep -q 'layr: prune'" _ "$out"
 merged=$(units $P/other/target)
-# The times are compared before any cargo runs in the line: a cargo run rewrites the files it compiles.
-export LAYR_CACHE_STATES=$LAYR_ROOT/projects/p/meta/overlays/cache.target/states
 mismatch=$(times_mismatch $P/main/target $P/other/target)
-if [ "$merged" != "$base" ]; then
-    # Diagnostics for a failure: who owns the entries that the merge copied, and what the owner's listing sees.
-    echo "DIAG other target units $merged, expected $base"
-    ls -lan "$P/other/target/debug/.fingerprint" 2>&1 | head -12
-    (cd "$P/other" && owned env CARGO_NET_OFFLINE=true $PENV cargo build --workspace -v 2>&1 | head -12) || true
-fi
-eq "merge --caches-only removes the stale units" "$base" "$merged"
-# The union copies main's cache into the folder that already has one: the copied times are the source's
-# (cargo compares them). The mismatch count is over the files that both caches have.
+eq "merge --caches-only keeps the units of both sides until the next save" "$stale" "$merged"
 eq "the union merge keeps the times of the cache" "0" "$mismatch"
+(cd "$P/other" && l save --caches -q)
+eq "save --caches after the union merge keeps only the live units" "$base" "$(units $P/other/target)"
 rebuilt=$(cb "$P/other" build --workspace)
 case "$rebuilt" in *Compiling*) FAIL=$((FAIL + 1)); echo "FAIL the next build after the union merge compiled" ;; *) PASS=$((PASS + 1)); echo "PASS the next build after the union merge compiles nothing" ;; esac
 
@@ -177,6 +136,13 @@ ok "the owner sets prune=none again" l overlay set cache.target --prune none
 has "overlay list shows prune=none" "prune=none" "$(l overlay list)"
 new_line keep main
 eq "prune=none keeps the stale units" "$stale" "$(units $P/keep/target)"
+if [ "$(id -u)" = 0 ]; then
+    # Root: a root-owned line is never pruned, by save either.
+    rootout=$(l line new rootline main 2>&1)
+    rootsave=$(cd "$P/rootline" && l save --caches -q 2>&1)
+    eq "a root-owned line keeps the stale units (root is never pruned)" "$stale" "$(units $P/rootline/target)"
+    no "a root-owned line prints no prune line" sh -c "echo \"\$1\" | grep -q 'layr: prune'" _ "$rootsave$rootout"
+fi
 
 # 5. A plain `save --caches` prunes the folder before it saves: the saved cache has no stale units.
 ok "the owner sets prune to auto" l overlay set cache.target --prune auto
@@ -191,18 +157,17 @@ eq "the cache that the save made has no stale units" "$base" "$(units $P/after/t
 ok "the owner sets an adapter name that does not exist" l overlay set cache.target --prune nosuch
 out=$(l line new $OWNER_ARG bad main 2>&1); rc=$?
 eq "line new succeeds with an unknown adapter" "0" "$rc"
-has "the log names the unknown adapter" "unknown prune adapter 'nosuch'" "$out"
 eq "the line is there" "1" "$(l line list | grep -c '^ *bad$' | tr -d ' ')"
+# The hook runs at the save: the log names the unknown adapter, and the save still succeeds.
+out=$(cd "$P/bad" && l save --caches 2>&1); rc=$?
+eq "save --caches succeeds with an unknown adapter" "0" "$rc"
+has "the log names the unknown adapter" "unknown prune adapter 'nosuch'" "$out"
 ok "the owner sets prune to auto again" l overlay set cache.target --prune auto
 
-# 7. Root (only on a root run): a root-owned line is refused. It keeps the stale units, and prints no prune line.
-if [ "$(id -u)" = 0 ]; then
-    l overlay set cache.target --prune none >/dev/null
-    cb "$P/main" build --workspace --features extra -q >/dev/null
-    (cd "$P/main" && l save --caches -q)
-    rootout=$(l line new rootline main 2>&1)
-    eq "a root-owned line keeps the stale units (root is never pruned)" "$(units $P/main/target)" "$(units $P/rootline/target)"
-    no "a root-owned line prints no prune line" sh -c "echo \"\$1\" | grep -q 'layr: prune'" _ "$rootout"
-fi
+# 7. Cargo missing for the owner: the adapter names the reason, and the folder is not pruned.
+ok "the owner sets prune to auto for the cargo-missing check" l overlay set cache.target --prune auto
+(cd "$P/other" && owned env PATH=/nonexistent "$LAYR" retest prune target) > "$T/nocargo" 2>&1 || true
+has "a missing cargo prints the reason" "skipped: cargo metadata: cannot start cargo" "$(cat "$T/nocargo")"
+eq "a missing cargo keeps the units" "$base" "$(units $P/other/target)"
 
 finish

@@ -507,8 +507,8 @@ impl Repo {
 }
 ```
 
-Core also has `prune_cache_folder(line, folder)` (the overlay is looked up from the folder) and
-`prune_cache_at(..., root)` (for `line new`, whose folder is not at the line's path yet).
+Core also has `prune_cache_folder(line, folder)` (the overlay is looked up from the folder). The
+`save --caches` path calls it for each cache folder.
 
 Process model:
 
@@ -532,20 +532,21 @@ Locks:
 - The hook holds the line's prune lock (`meta/line-locks/<line id>`, flock) while it runs. Hooks of
   one line run one at a time.
 - The hook never holds the project (store) lock. Each call site drops the project lock before it
-  calls the hook. The call sites are: `line new` (the caches are taken before the commit, which runs
-  under the project lock), `merge --caches-only`, the merge path, a follow pass, and `save --caches`
-  (the prune runs before its project lock).
+  calls the hook. The only call site is `save --caches` (the prune runs before its project lock).
 - A cache overlay's own lock is taken only by the copy steps, never during a hook.
 
-Call sites, each before its next step:
+The hook runs only where a cache is saved. The caches that a line takes (`line new`, `merge`,
+`merge --caches-only`, a follow pass) come from states that were pruned when they were saved. A
+second prune at take time repeats the cargo listing (up to 120 s) for nothing. So they do not run it.
 
 | Command | Hook | Next step |
 | --- | --- | --- |
-| `layr line new` | after `take_caches`, on the new working folder | commit of the line |
-| `layr merge <line> --caches-only` | after `pull_caches` | the caches are in the line |
-| `layr merge <line>` (cache part) | after `pull_caches` | the caches are in the line |
-| follow pass (`follow_caches`) | after `pull_caches`, for each folder taken | `save --caches` |
-| `layr save --caches` | in `prepare_caches`, after the cache is made a cache folder | the snapshot of the cache and the save |
+| `layr save --caches` | in `prepare_caches`, for each cache folder of the line, after the cache is made a cache folder | the snapshot of the cache and the save |
+
+A follow pass ends with `save --caches`, so it prunes the folders it took, through `prepare_caches`.
+A union merge (`merge --caches-only`, or a merge) leaves the units of both sides in the target folder
+until the next `save --caches` of that line. A cache that was saved before this design is pruned at
+the next `save --caches` of its line.
 
 `init` takes no caches (a new project has no folder overlays), so it has no call site.
 
@@ -578,5 +579,7 @@ shell build, put the same value in the project env.
   registry; a lockfile that needs a missing package and a stale lockfile skip the folder, which stays
   unchanged; no lifecycle script runs), `dispatch.rs`.
 - `crates/layr-retest/tests/e2e.rs`: `layr retest prune target` runs the cargo adapter.
-- `tests/t117-prune-hook.sh`: `line new`, `merge --caches-only` and `prune=none` through the binary.
+- `tests/t117-prune-hook.sh`: `line new` and `merge --caches-only` take the units without a prune; the next
+  `save --caches` of the line prunes them; `prune=none`; an unknown adapter name; cargo missing for the owner;
+  a root-owned line. Through the binary.
   Root (btrfs) on Linux, and macOS APFS, as the other `tests/t*.sh` files.

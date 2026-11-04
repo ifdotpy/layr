@@ -615,14 +615,6 @@ impl<'a> Repo<'a> {
         self.prune_folder(line, Some(overlay), folder, &root);
     }
 
-    /// The hook for every cache folder of a line that is in place (a new line, after its commit).
-    pub fn prune_line_caches(&self, line: &Line) -> Result<()> {
-        for (name, folder) in self.folder_overlays()? {
-            self.prune_cache(line, &name, &folder);
-        }
-        Ok(())
-    }
-
     /// The hook for a folder that the caller has in the working copy: the overlay is looked up from the folder
     /// (no overlay yet: the adapter is detected).
     pub fn prune_cache_folder(&self, line: &Line, folder: &str) {
