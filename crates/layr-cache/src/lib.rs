@@ -1,4 +1,4 @@
-//! The cache adapters: the cargo and pnpm adapters that prune a cache folder of a line to its live
+//! The cache adapters: the cargo, pnpm and npm adapters that prune a cache folder of a line to its live
 //! set. They implement the interface of `layr-adapter`. The binary registers `adapters()` at startup.
 //! An adapter works offline and compiles nothing. A stale or failing folder is skipped and left unchanged.
 //! See docs/cache-overlays.md, section 19.
@@ -21,7 +21,7 @@ pub use layr_adapter::Outcome;
 
 /// The adapters of this crate, for the binary to register.
 pub fn adapters() -> Vec<Box<dyn CacheAdapter>> {
-    vec![Box::new(cargo::Cargo), Box::new(pnpm::Pnpm)]
+    vec![Box::new(cargo::Cargo), Box::new(pnpm::Pnpm), Box::new(pnpm::Npm)]
 }
 
 /// A host for runs in this process: the caller's own user, and a deadline that the caller sets. The
