@@ -333,7 +333,12 @@ fn handle(sock: UnixStream, root: &Path, registry_uids: &[u32]) -> i32 {
 /// Run a command for a caller and return its exit code (errors are printed to stderr).
 pub fn run_as(argv: Vec<String>, caller: Caller, cwd: PathBuf, env: HashMap<String, String>, root: &Path) -> i32 {
     crate::repo::begin_command();
+<<<<<<< head
     crate::store::panic_point(argv.first().map_or("", String::as_str));
+||||||| base
+=======
+    crate::store::set_holder_command(&argv);
+>>>>>>> origin-https/main
     let store = match Store::open(root) {
         Ok(s) => s,
         Err(e) => {

@@ -42,4 +42,20 @@ no "the dead pid is not printed" grep -q "pid $DEAD" "$T/stale.err"
 has "the waiter still prints the plain notice" "waiting for the project lock" "$(cat "$T/stale.err")"
 has "the waiter ran" "stale-waiter" "$(l line list)"
 
+# A command that runs through the service is named by its own command, not by `layr daemon`
+# (layr#252). Root runs every command directly, so this part needs another user.
+if [ "$(id -u)" != 0 ]; then
+    LAYR_TEST_LOCK_HOLD_MS=3000 "$LAYR" daemon --tick 3600 --socket "$T/d.sock" > "$T/daemon.log" 2>&1 &
+    DPID=$!
+    for _ in $(seq 1 100); do [ -S "$T/d.sock" ] && break; sleep 0.1; done
+    LAYR_SOCKET=$T/d.sock "$LAYR" line new -q hold-s main > "$T/svc.log" 2>&1 &
+    SVC=$!
+    for _ in $(seq 1 100); do [ -f "$META/lock.holder" ] && break; sleep 0.1; done
+    l line new -q svc-waiter main 2> "$T/svc-waiter.err"
+    wait $SVC
+    kill $DPID 2>/dev/null; wait $DPID 2>/dev/null
+    has "a service request is named by its command" "held by 'layr line new -q hold-s main'" "$(cat "$T/svc-waiter.err")"
+    no "a service request is not named layr daemon" grep -q "held by 'layr daemon" "$T/svc-waiter.err"
+fi
+
 finish

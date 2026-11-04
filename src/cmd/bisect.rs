@@ -103,7 +103,7 @@ pub fn run(ctx: &Ctx, args: &[String]) -> Result<i32> {
         Some(rev) => crate::revs::resolve(repo, h.line.as_ref(), rev)?,
         None => {
             let history = if positions.is_empty() {
-                repo.first_parent_chain(&h.line()?.head, None)?
+                repo.first_parent_chain(&h.line()?.head)?
             } else {
                 let end = positions.iter().rposition(|s| s == &bad).context("--bad is not a ref position")?;
                 positions[..end].iter().rev().cloned().collect()
