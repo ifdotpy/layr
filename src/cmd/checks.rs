@@ -37,10 +37,17 @@ pub fn validate_config(key: &str, value: &Value) -> Result<()> {
             }
         }
         "checks.platforms" => {
-            for (name, platform) in value.as_object().context("checks.platforms must be an object")? {
+            for (name, entries) in value.as_object().context("checks.platforms must be an object")? {
                 crate::oci::valid_component(name)?;
-                if !matches!(platform.as_str(), Some("linux" | "macos")) {
-                    bail!("check platform must be linux or macos");
+                let list = match entries {
+                    Value::Array(list) if !list.is_empty() => list.iter().collect(),
+                    Value::String(_) => vec![entries],
+                    _ => bail!("checks.platforms maps a check name to a platform or a list of platforms"),
+                };
+                for entry in list {
+                    if !entry.as_str().is_some_and(|e| PLATFORMS.contains(&e)) {
+                        bail!("check platform must be one of {}", PLATFORMS.join(", "));
+                    }
                 }
             }
         }
@@ -60,6 +67,28 @@ pub fn validate_config(key: &str, value: &Value) -> Result<()> {
         _ => bail!("unknown automatic check setting '{key}'"),
     }
     Ok(())
+}
+
+/// The entries of `checks.platforms`: an OS takes any architecture, `<os>-<arch>` only that one.
+const PLATFORMS: [&str; 6] = ["linux", "macos", "linux-x86_64", "linux-aarch64", "macos-x86_64", "macos-aarch64"];
+
+/// The platform of this machine in a check attestation: `<os>-<arch>`, as `macos-aarch64`.
+pub fn platform() -> String {
+    format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
+}
+
+/// Whether the platform `have` (`<os>-<arch>`) meets the entry `want` of `checks.platforms`.
+fn meets(want: &str, have: &str) -> bool {
+    have == want || have.strip_prefix(want).is_some_and(|arch| arch.starts_with('-'))
+}
+
+/// The platform entries of the check `name`; None: one run on any platform.
+fn platforms_of(platforms: &Value, name: &str) -> Vec<Option<String>> {
+    match platforms.get(name) {
+        Some(Value::String(one)) => vec![Some(one.clone())],
+        Some(Value::Array(list)) => list.iter().filter_map(|e| e.as_str().map(|e| Some(e.to_owned()))).collect(),
+        _ => vec![None],
+    }
 }
 
 fn names(key: &str, value: &Value) -> Result<Vec<String>> {
@@ -133,10 +162,18 @@ pub fn local_config(ctx: &Ctx, repo: &Repo, a: &Parsed) -> Result<i32> {
     Ok(0)
 }
 
+const USAGE: &str = "usage: layr checks watch [--once] [--privileged-only] [--interval <seconds>] [--json]\n       layr checks pending [--state <rev>] [--platform <os>-<arch>] [--json]\nTo list check results, use layr attestations.";
+
 pub fn checks(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let a = parse(&Spec::new().flag("--once").flag("--json").flag("--privileged-only").value("--interval"), args)?;
-    if a.pos != ["watch"] || !a.paths.is_empty() {
-        return Err(exit(128, "usage: layr checks watch [--once] [--privileged-only] [--interval <seconds>] [--json]\nTo list check results, use layr attestations."));
+    let a = parse(
+        &Spec::new().flag("--once").flag("--json").flag("--privileged-only").value("--interval").value("--state").value("--platform"),
+        args,
+    )?;
+    if a.pos == ["pending"] && a.paths.is_empty() && !a.has("--once") && !a.has("--privileged-only") && a.get("--interval").is_none() {
+        return pending(ctx, &a);
+    }
+    if a.pos != ["watch"] || !a.paths.is_empty() || a.get("--state").is_some() || a.get("--platform").is_some() {
+        return Err(exit(128, USAGE));
     }
     if !cfg!(any(target_os = "linux", target_os = "macos")) {
         bail!("automatic checks require Linux or macOS");
@@ -188,6 +225,39 @@ pub fn checks(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
 }
 
+/// `checks pending`: the check jobs that no active executor attestation covers for the platform
+/// `--platform` (default: this machine's). A CI job runs only these; a result from another trusted
+/// machine on a matching platform, such as a laptop, counts.
+fn pending(ctx: &Ctx, a: &Parsed) -> Result<i32> {
+    let h = here(ctx)?;
+    h.repo.require(ctx, "try")?;
+    let state = a.get("--state").map(|rev| crate::revs::resolve(&h.repo, h.line.as_ref(), rev)).transpose()?;
+    let have = a.get("--platform").map_or_else(platform, str::to_owned);
+    if !PLATFORMS.iter().any(|p| p.contains('-') && *p == have) {
+        bail!("--platform must be one of {}", PLATFORMS.iter().filter(|p| p.contains('-')).copied().collect::<Vec<_>>().join(", "));
+    }
+    let Plan { jobs, commands, privileged, .. } = plan(&h.repo, state.as_deref())?;
+    let mut out = Vec::new();
+    for (state, name, want) in jobs {
+        if want.as_deref().is_some_and(|want| !meets(want, &have)) {
+            continue;
+        }
+        let argv = layr_model::protection::check_argv(&commands[&name]);
+        let is_privileged = privileged.contains(&name);
+        if !attested(&h.repo, &state, &argv, is_privileged, want.as_deref())? {
+            out.push(json!({"state":state,"name":name,"command":commands[&name],"argv":argv,"privileged":is_privileged,"platform":want}));
+        }
+    }
+    if a.has("--json") {
+        outln!(ctx, "{}", json!({"platform":have,"pending":out}));
+    } else {
+        for job in &out {
+            outln!(ctx, "{}\t{}", job["name"].as_str().unwrap_or(""), job["state"].as_str().unwrap_or(""));
+        }
+    }
+    Ok(0)
+}
+
 fn setting(policy: &layr_model::Project, key: &str, default: Value) -> Result<Value> {
     let value = policy.setting(key).cloned().unwrap_or(default);
     validate_config(key, &value)?;
@@ -200,7 +270,18 @@ struct Scan {
     pending_privileged: usize,
 }
 
-fn scan(ctx: &Ctx, repo: &Repo, privileged_only: bool) -> Result<Scan> {
+/// The check jobs of a project: each state and check name that its policy asks for, once per
+/// platform entry of the check (`checks.platforms`; None: any platform).
+struct Plan {
+    policy: layr_model::Project,
+    main_states: BTreeSet<String>,
+    jobs: BTreeSet<(String, String, Option<String>)>,
+    commands: BTreeMap<String, String>,
+    privileged: BTreeSet<String>,
+}
+
+/// `state`: also plan the change checks (`checks.changes`) of that one state.
+fn plan(repo: &Repo, state: Option<&str>) -> Result<Plan> {
     let records = repo
         .p
         .db
@@ -215,6 +296,11 @@ fn scan(ctx: &Ctx, repo: &Repo, privileged_only: bool) -> Result<Scan> {
     let privileged: BTreeSet<_> =
         names("checks.privileged", &setting(&policy, "checks.privileged", json!([]))?)?.into_iter().collect();
     let mut jobs = BTreeSet::new();
+    if let Some(state) = state {
+        for name in &changes {
+            jobs.insert((state.to_owned(), name.clone()));
+        }
+    }
     for change in repo.p.db.changes()? {
         for state in repo.p.db.change_versions(&change)? {
             for name in &changes {
@@ -248,8 +334,10 @@ fn scan(ctx: &Ctx, repo: &Repo, privileged_only: bool) -> Result<Scan> {
             }
         }
     }
+    if let Some(state) = state {
+        jobs.retain(|(s, _)| s == state);
+    }
     let mut commands = BTreeMap::new();
-    jobs.retain(|(_, name)| platforms.get(name).and_then(Value::as_str).is_none_or(|platform| platform == std::env::consts::OS));
     for (_, name) in &jobs {
         if !commands.contains_key(name) {
             let command = policy
@@ -259,6 +347,34 @@ fn scan(ctx: &Ctx, repo: &Repo, privileged_only: bool) -> Result<Scan> {
             commands.insert(name.clone(), command);
         }
     }
+    let jobs = jobs
+        .into_iter()
+        .flat_map(|(state, name)| platforms_of(&platforms, &name).into_iter().map(move |p| (state.clone(), name.clone(), p)))
+        .collect();
+    Ok(Plan { policy, main_states, jobs, commands, privileged })
+}
+
+/// Whether an active executor check of `state` ran the argv `argv` with the privileged mode
+/// `privileged` on a platform that meets `want` (None: any). A trusted machine signed it, so it
+/// counts on every machine, the laptop and CI alike.
+fn attested(repo: &Repo, state: &str, argv: &[String], privileged: bool, want: Option<&str>) -> Result<bool> {
+    if repo.p.db.check_exit(state, argv, None)?.is_none() {
+        return Ok(false);
+    }
+    let subject = Subject { kind: "state".into(), id: state.to_owned() };
+    Ok(crate::probes::active_checks(repo, &subject)?.into_values().any(|(_, r)| {
+        let check = &r.data["check"];
+        check["executor"] == true
+            && check["argv"] == json!(argv)
+            && check["privileged"] == privileged
+            && check["exit"].as_i64().is_some()
+            && want.is_none_or(|want| check["platform"].as_str().is_some_and(|have| meets(want, have)))
+    }))
+}
+
+fn scan(ctx: &Ctx, repo: &Repo, privileged_only: bool) -> Result<Scan> {
+    let Plan { policy, main_states, jobs, commands, privileged } = plan(repo, None)?;
+    let here = platform();
     let limits = Limits {
         timeout: setting(&policy, "checks.timeout", json!(900))?.as_u64().context("invalid checks.timeout")?,
         memory: setting(&policy, "checks.memory", json!(4_u64 << 30))?.as_u64().context("invalid checks.memory")?,
@@ -274,22 +390,17 @@ fn scan(ctx: &Ctx, repo: &Repo, privileged_only: bool) -> Result<Scan> {
     let mut results = Vec::new();
     let mut pending = 0;
     let mut pending_privileged = 0;
-    for (state, name) in jobs {
+    for (state, name, want) in jobs {
+        if want.as_deref().is_some_and(|want| !meets(want, &here)) {
+            continue;
+        }
         let command = &commands[&name];
         let argv = layr_model::protection::check_argv(command);
         let is_privileged = privileged.contains(&name);
         if privileged_only && !is_privileged {
             continue;
         }
-        let subject = Subject { kind: "state".into(), id: state.clone() };
-        if repo.p.db.check_exit(&state, &argv, None)?.is_some()
-            && crate::probes::active_checks(repo, &subject)?.into_values().any(|(_, r)| {
-                r.data["check"]["executor"] == true
-                    && r.data["check"]["argv"] == json!(argv)
-                    && r.data["check"]["privileged"] == is_privileged
-                    && r.data["check"]["exit"].as_i64().is_some()
-            })
-        {
+        if attested(repo, &state, &argv, is_privileged, want.as_deref())? {
             continue;
         }
         // Collected sources have metadata but cannot be executed. Never attest them as passing.
@@ -326,7 +437,7 @@ fn scan(ctx: &Ctx, repo: &Repo, privileged_only: bool) -> Result<Scan> {
             output.context = Some("check-v1".into());
             let log_ref = format!("derived/check-v1/{}", output.id);
             let result = json!({"name":name,"state":state,"command":command,"argv":argv,"exit":code,
-                "privileged":is_privileged,"executor":true,"log_ref":log_ref,"output_state":output.id,"truncated":truncated,
+                "privileged":is_privileged,"executor":true,"platform":here,"log_ref":log_ref,"output_state":output.id,"truncated":truncated,
                 "duration_ms":started.elapsed().as_millis() as u64,"limits":{"timeout":limits.timeout,"memory":limits.memory,
                     "processes":limits.processes,"log_bytes":limits.log_bytes}});
             let mut record = super::attest::record(repo, &state, "check", &serde_json::to_vec(&result)?)?;
