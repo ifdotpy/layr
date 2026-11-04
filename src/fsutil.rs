@@ -863,7 +863,6 @@ fn copy_entry_impl(
             });
         }
     }
-<<<<<<< head
     let existing = t.open_write(dst_rel)?;
     // A file with another link (cargo hard-links an uplifted library to its deps file) gets a new
     // inode by rename: a write in place would change the content and time of every other link.
@@ -876,20 +875,6 @@ fn copy_entry_impl(
         }
     }
     let (d, cloned) = match existing {
-||||||| base
-    let (d, cloned) = match t.open_write(dst_rel)? {
-=======
-    // A file with another link (cargo hard-links the uplifted library of a unit to its deps file) is replaced
-    // by a new file, not written in place: a write through this name would change the content and the time of
-    // every other link of the inode.
-    if let Some(old) = t.open_write(dst_rel)? {
-        if old.metadata()?.nlink() > 1 {
-            drop(old);
-            t.remove(dst_rel)?;
-        }
-    }
-    let (d, cloned) = match t.open_write(dst_rel)? {
->>>>>>> a0b49c4
         Some(d) => {
             d.set_len(0)?;
             (d, false)
@@ -1452,23 +1437,6 @@ mod write_tests {
         let after = fs::metadata(dst.join("deps")).unwrap();
         assert_eq!((after.mtime(), after.mtime_nsec()), (before.mtime(), before.mtime_nsec()));
         assert_eq!(fs::metadata(dst.join("lib")).unwrap().nlink(), 1);
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    /// A copy over a file with a second link (a hard link, as cargo makes for an uplifted library) must not
-    /// change the other link: the copied file is a new inode.
-    #[test]
-    fn a_copy_over_a_hard_link_leaves_the_other_link() {
-        let dir = std::env::temp_dir().join(format!("layr-copy-link-{}", crate::ids::new_id()));
-        let (src, dst) = (dir.join("src"), dir.join("dst"));
-        fs::create_dir_all(&src).unwrap();
-        fs::create_dir_all(&dst).unwrap();
-        fs::write(src.join("lib"), b"new content").unwrap();
-        fs::write(dst.join("lib"), b"old content").unwrap();
-        fs::hard_link(dst.join("lib"), dst.join("deps")).unwrap();
-        copy_entry(src.as_path(), "lib", &dst, "lib", None).unwrap();
-        assert_eq!(fs::read(dst.join("lib")).unwrap(), b"new content");
-        assert_eq!(fs::read(dst.join("deps")).unwrap(), b"old content");
         fs::remove_dir_all(dir).unwrap();
     }
 
