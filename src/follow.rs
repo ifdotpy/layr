@@ -237,6 +237,8 @@ impl<'a> Repo<'a> {
         let mut done = BTreeSet::new();
         let mut taken = Vec::new();
         let mut refusal = None;
+        let mut suppliers: BTreeSet<String> = BTreeSet::new();
+        let mut supplier: Option<Line> = None;
         for cand in sources {
             if done.len() == folders.len() {
                 break;
@@ -269,11 +271,43 @@ impl<'a> Repo<'a> {
             for (folder, state) in self.pull_caches(ctx, &now, &Source::Line(&theirs), &done)? {
                 done.insert(folder.clone());
                 taken.push((folder, state));
+                suppliers.insert(theirs.id.clone());
+                supplier = Some(theirs.clone());
+            }
+        }
+        // The file times of the merge keep the source's only when every folder came from one source line.
+        if let (Some(theirs), Some(before), 1) = (supplier, before, suppliers.len()) {
+            if !folders.is_empty() && done.len() == folders.len() {
+                self.source_times(line, &theirs, before)?;
             }
         }
         // Prunes each taken folder, then saves the caches of the line.
         admin::save(ctx, &["--caches".to_string(), "-q".to_string()])?;
         Ok((taken, refusal))
+    }
+
+    /// The file time rule after a merge (docs/retest.md, Start). A file that the merge changed keeps the time of the
+    /// same file in `theirs` only when its bytes equal that file. Its caches came from `theirs`, which the caller checks,
+    /// so cargo sees the build as current. Every other changed file keeps the time of the write, so cargo rebuilds it.
+    /// Returns the number of files that kept the source time.
+    pub(crate) fn source_times(&self, line: &Line, theirs: &Line, before: &str) -> Result<usize> {
+        use std::os::unix::fs::MetadataExt;
+        let now = self.line(&line.id)?;
+        let from = self.state_root(before)?;
+        let to = self.state_root(&now.head)?;
+        let (w, tw) = (self.working(&now), self.working(theirs));
+        let mut kept = 0;
+        for c in crate::changes::file_changes(from.as_path(), to.as_path())? {
+            let (src, dst) = (tw.join(&c.path), w.join(&c.path));
+            let (Ok(sm), Ok(dm)) = (std::fs::symlink_metadata(&src), std::fs::symlink_metadata(&dst)) else { continue };
+            if !sm.is_file() || !dm.is_file() || std::fs::read(&src).ok() != std::fs::read(&dst).ok() {
+                continue;
+            }
+            let f = std::fs::File::open(&dst)?;
+            crate::fsutil::set_mtime(&f, sm.mtime(), sm.mtime_nsec())?;
+            kept += 1;
+        }
+        Ok(kept)
     }
 
     /// Lines with an export to `remote` in the last 14 days, newest export first. An export names

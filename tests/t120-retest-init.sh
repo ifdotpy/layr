@@ -63,7 +63,7 @@ compiled() {
 # store: the total bytes of the store (layr du --store --json), exact (APFS clones are not double counted).
 store() { ly du --store --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["total"])'; }
 # parts: the bytes each store part frees (`layr du --store --json`), for the diagnosis of a store growth.
-parts() { ly du --store --json | python3 -c 'import json,sys; [print(p["part"], p["frees"]) for p in json.load(sys.stdin)["parts"]]'; }
+parts() { ly du --store --json | python3 -c 'import json,sys; [print(p["part"] + "\t" + str(p["frees"])) for p in json.load(sys.stdin)["parts"]]'; }
 # The incremental sessions of a target folder: one session folder per crate folder after a prune.
 sessions() { find "$1/debug/incremental" -mindepth 2 -maxdepth 2 -type d -name 's-*' 2>/dev/null | wc -l | tr -d ' '; }
 folders() { ls "$1/debug/incremental" 2>/dev/null | wc -l | tr -d ' '; }
@@ -139,6 +139,7 @@ echo 'Notes of the test line.' > $P/w/NOTES.md
 (cd $P/w && ly save --caches >/dev/null 2>&1) || fail "save --caches of w failed"
 wh=$(cd $P/w && ly rev-parse head)
 cd $P/main && out=$(ly merge w --expect "$wh" 2>&1) || fail "the local merge of w into main failed"
+echo "$out" | sed 's/^/MERGE OUTPUT: /'
 has "a local merge reports the caches it takes" "Merged cache target" "$out"
 (cd $P/main && ly line new t1 main $OWNER_ARG >/dev/null 2>&1)
 n=$(compiled $P/t1 build --locked)
@@ -164,8 +165,8 @@ echo "store growth over 20 saves: $grow bytes; one live cache of the line: $live
 echo "STORE PARTS (bytes per part, before and after the 20 saves):"
 python3 - $T/parts0.txt $T/parts1.txt <<'PY'
 import sys
-a = dict(l.split() for l in open(sys.argv[1]) if l.strip())
-b = dict(l.split() for l in open(sys.argv[2]) if l.strip())
+a = dict(l.rstrip('\n').split('\t') for l in open(sys.argv[1]) if l.strip())
+b = dict(l.rstrip('\n').split('\t') for l in open(sys.argv[2]) if l.strip())
 for k in sorted(set(a) | set(b)):
     d = int(b.get(k, 0)) - int(a.get(k, 0))
     if d: print(f"STORE PART {k} before {a.get(k, 0)} after {b.get(k, 0)} delta {d}")
@@ -175,6 +176,7 @@ PY
 # 4. The project is healthy: no project warning from doctor.
 cd $P/main || exit 1
 doctor=$(ly retest doctor 2>&1)
+echo "$doctor" | sed 's/^/DOCTOR: /'
 no "doctor reports no prune warning" sh -c 'echo "$1" | grep -q "warn: prune"' _ "$doctor"
 no "doctor reports no shell env warning" sh -c 'echo "$1" | grep -q "warn: shell"' _ "$doctor"
 
