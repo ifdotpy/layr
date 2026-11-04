@@ -17,7 +17,7 @@ age = { version = "0.12", features = ["ssh"] }
 bech32 = "0.11"
 bip39 = "2"
 ssh-key = { version = "0.6", features = ["ed25519"] }
-zstd-safe = { version = "7", features = ["std"], optional = true }
+zstd-safe = { version = "8", features = ["std"], optional = true }
 ruzstd = { version = "0.9", optional = true }
 getrandom = { version = "0.2", features = ["js"], optional = true }
 base64 = "0.22"
