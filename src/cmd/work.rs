@@ -1238,7 +1238,7 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
     };
     // On APFS the state, its tree and the changes were made before the lock.
     #[cfg(target_os = "macos")]
-    let NamedPrepared { head_root, mut pending, mut state, new_root, all_changes, checks, .. } =
+    let NamedPrepared { head_root, mut pending, mut state, new_root, checks, .. } =
         prepared.take().ok_or_else(|| anyhow::anyhow!("internal error: named save was not prepared"))?;
     #[cfg(target_os = "macos")]
     let (staged, cleared) = checks.ok_or_else(|| anyhow::anyhow!("internal error: named save has no checks"))?;
@@ -1254,23 +1254,7 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
         state.author.name = n;
         state.author.email = e;
     }
-    // Content conflicts stay listed while the committed file has markers; the commit clears
-    // the other kinds.
-    let mut cleared = Vec::new();
-    for c in &head.conflicts {
-        if (c.kind == "content" || c.kind == "add/add") && conflict_open(&new_root, c)? {
-            state.conflicts.push(c.clone());
-        } else {
-            cleared.push(c.clone());
-        }
-    }
-    let secrets = crate::trace::span("secret check");
-    let checked = crate::secrets::check_changes(ctx, &h.repo, &head_root, &new_root, &line.head, &all_changes);
-    drop(secrets);
-    if let Err(e) = checked {
-        h.repo.discard_states(std::slice::from_ref(&state));
-        return Err(e);
-    }
+    // `named_checks` checked the conflicts and the secrets of this content.
     let mut data = serde_json::json!({"line": line.id});
     if a.has("--amend") {
         data["version"] = serde_json::to_value(crate::model::VersionOperation {
@@ -1301,13 +1285,15 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
         h.repo.drop_stage(&line)?;
     }
     crate::store::failpoint("after-drop");
+    // The output reads the trees: it runs after the project lock is released. The journal of the
+    // pending save goes after it too: the record is the commit, and the recovery of another
+    // command leaves the journal of a live process alone (and finishes it after a crash).
+    drop(lock);
     #[cfg(target_os = "macos")]
     if let Some(pc) = pending.take() {
         let _t = crate::trace::span("finish save");
         pc.finish()?;
     }
-    // The output reads the trees: it runs after the project lock is released.
-    drop(lock);
     if !a.has("-q") {
         let root = if parents_empty(&state) { " (root-state)" } else { "" };
         outln!(ctx, "[{}{} {}] {}", line.name, root, ids::short(&state.id), message.lines().next().unwrap_or(""));

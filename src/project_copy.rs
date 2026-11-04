@@ -13,7 +13,7 @@ use crate::storage;
 use anyhow::{bail, ensure, Context, Result};
 use rusqlite::types::Value;
 use rusqlite::OpenFlags;
-use sha2::{Digest, Sha256};
+use layr_hashers::FastCryptographic;
 use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::Read;
@@ -361,7 +361,7 @@ fn compare_entry(s: &Path, d: &Path, rel: &mut Vec<String>, stats: &mut Stats) -
 
 fn hash_file(path: &Path) -> Result<[u8; 32]> {
     let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
-    let mut hasher = Sha256::new();
+    let mut hasher = FastCryptographic::new();
     let mut buf = vec![0u8; 1 << 20];
     loop {
         let n = file.read(&mut buf)?;
@@ -370,7 +370,7 @@ fn hash_file(path: &Path) -> Result<[u8; 32]> {
         }
         hasher.update(&buf[..n]);
     }
-    Ok(hasher.finalize().into())
+    Ok(*hasher.finalize().as_bytes())
 }
 
 fn compare_db(s: &Path, d: &Path, name: &str) -> Result<()> {
@@ -414,12 +414,12 @@ fn table_digest(c: &rusqlite::Connection, table: &str) -> Result<([u8; 32], usiz
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     rows.sort();
-    let mut hasher = Sha256::new();
+    let mut hasher = FastCryptographic::new();
     for row in &rows {
         hasher.update(row.as_bytes());
         hasher.update(b"\n");
     }
-    Ok((hasher.finalize().into(), rows.len()))
+    Ok((*hasher.finalize().as_bytes(), rows.len()))
 }
 
 /// Hidden test entry points: `__project-copy <src> <dst>`, `__project-verify <src> <dst>` and

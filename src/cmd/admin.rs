@@ -82,27 +82,52 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let mut refusals: Vec<String> = Vec::new();
     for l in lines {
         repo.authorize_line(ctx, &l, crate::repo::LineOp::Save)?;
+        let mut prepared = None;
         if a.has("--caches") {
             // A cache copy that a later cache fails to make leaves the earlier ones in the work folder.
             repo.hold(repo.pin(&[&l.head, &repo.save_base(&l)?])?);
-            if let Err(e) = prepare_caches(repo, &l, &only) {
-                repo.discard_prepared();
-                return Err(e);
-            }
+            let refused = match prepare_caches(repo, &l, &only) {
+                Ok(r) => r,
+                Err(e) => {
+                    repo.discard_prepared();
+                    return Err(e);
+                }
+            };
+            // The snapshot of the folder and its compare with the head, before the lock (#194).
+            prepared = match prepared_caches_state(ctx, repo, &l, &msg, &only, &refused) {
+                Ok(p) => p,
+                Err(e) => {
+                    repo.discard_prepared();
+                    return Err(e);
+                }
+            };
         } else if !a.has("--force") {
             repo.prepare_save(&l, false)?;
         }
-        let _lock = repo.p.lock()?;
+        // Test hook (tests/t128-caches-prepare.sh): wait after the prepare step, so a test can
+        // change the folder before the lock.
+        if let Some(ms) = std::env::var("LAYR_TEST_SAVE_PAUSE_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+        }
+        let _lock = match repo.p.lock() {
+            Ok(lock) => lock,
+            Err(e) => {
+                repo.discard_prepared_caches(prepared);
+                return Err(e);
+            }
+        };
         let l = repo.line(&l.id)?;
         crate::repo::recover_cache_replacements(&repo.working(&l))?;
         let (mut caches, mut versioned) = if a.has("--caches") { repo.line_cache_paths(&l)? } else { Default::default() };
         if !only.is_empty() {
             if let Some(missing) = only.iter().find(|o| !caches.contains(o) && !versioned.contains(o)) {
+                repo.discard_prepared_caches(prepared.take());
                 return Err(exit(1, format!("error: '{missing}' is no cache path of the line (see layr overlay list)")));
             }
             caches.retain(|p| only.contains(p));
             versioned.retain(|p| only.contains(p));
             if caches.is_empty() && versioned.is_empty() {
+                repo.discard_prepared_caches(prepared.take());
                 return Err(exit(
                     1,
                     format!("error: '{}' is no cache path of the line (see layr overlay list)", only.join("', '")),
@@ -143,7 +168,7 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 }
             }
             caches.retain(|p| !refused.contains(p));
-            Some(repo.caches_state(ctx, &l, &msg, a.has("--running"), &caches)?)
+            Some(repo.caches_state(ctx, &l, &msg, a.has("--running"), &caches, prepared.take())?)
         } else {
             repo.save(ctx, &l, &msg, a.has("--running"), a.has("--force"))?
         };
@@ -201,9 +226,11 @@ fn refuse(e: anyhow::Error, refusals: &mut Vec<String>) -> Result<()> {
 /// a cache already, a snapshot takes a copy with one rename, and unused copies go to the trash.
 /// The files of a cache are build output: a copy from a moment before the lock is as good.
 /// Prepare the copies of the line's caches before the lock; `only` (empty: all) names the paths.
-fn prepare_caches(repo: &Repo, l: &Line, only: &[String]) -> Result<()> {
+/// Returns the cache paths that it refused (a process uses them).
+fn prepare_caches(repo: &Repo, l: &Line, only: &[String]) -> Result<Vec<String>> {
     let w = repo.working(l);
     let (u, g) = repo.owner_ids(l);
+    let mut refused = Vec::new();
     for p in repo.line_cache_paths(l)?.0 {
         if !only.is_empty() && !only.contains(&p) {
             continue;
@@ -214,6 +241,7 @@ fn prepare_caches(repo: &Repo, l: &Line, only: &[String]) -> Result<()> {
             if e.downcast_ref::<crate::repo::CacheRefused>().is_none() {
                 return Err(e);
             }
+            refused.push(p);
             continue;
         }
         // Pruned before the copy and the save: the state keeps the pruned cache (docs/cache-overlays.md, section 19).
@@ -221,7 +249,21 @@ fn prepare_caches(repo: &Repo, l: &Line, only: &[String]) -> Result<()> {
         #[cfg(target_os = "macos")]
         prepare_cache_copy(repo, l, &w, &p)?;
     }
-    Ok(())
+    Ok(refused)
+}
+
+/// The cache paths that `save --caches` gives `caches_state` under the lock, read before it:
+/// the cache paths of the line (or `only`), without damaged and refused folders. Then the
+/// state of the folder (`Repo::prepare_caches_state`).
+fn prepared_caches_state(ctx: &Ctx, repo: &Repo, l: &Line, msg: &str, only: &[String], refused: &[String]) -> Result<Option<crate::repo::PreparedCaches>> {
+    let damaged = repo.damaged_folders(l)?;
+    let caches: Vec<String> = repo
+        .line_cache_paths(l)?
+        .0
+        .into_iter()
+        .filter(|p| (only.is_empty() || only.contains(p)) && !damaged.contains(p) && !refused.contains(p))
+        .collect();
+    repo.prepare_caches_state(ctx, l, msg, &caches)
 }
 
 #[cfg(target_os = "macos")]
@@ -1238,9 +1280,23 @@ fn states_bytes(repo: &Repo, states: &[String]) -> u64 {
 /// lock: a lock would empty the trash at its end, which a check must not do.
 fn snapshot<T>(repo: &Repo, f: impl FnOnce() -> Result<T>) -> Result<T> {
     repo.p.db.conn.execute_batch("BEGIN")?;
-    let v = f();
-    let _ = repo.p.db.conn.execute_batch("COMMIT");
-    v
+    match f() {
+        Ok(value) => {
+            if let Err(commit) = repo.p.db.conn.execute_batch("COMMIT") {
+                if let Err(rollback) = repo.p.db.conn.execute_batch("ROLLBACK") {
+                    return Err(anyhow::anyhow!("snapshot commit failed: {commit}; rollback failed: {rollback}"));
+                }
+                return Err(commit.into());
+            }
+            Ok(value)
+        }
+        Err(error) => {
+            if let Err(rollback) = repo.p.db.conn.execute_batch("ROLLBACK") {
+                return Err(error.context(format!("snapshot rollback failed: {rollback}")));
+            }
+            Err(error)
+        }
+    }
 }
 
 /// Test hook: pause after plan N until the test creates go.N in the named directory.
@@ -1541,9 +1597,20 @@ fn prune_retention(ctx: &Ctx, repo: &Repo, trim_caches: bool) -> Result<()> {
             let _t = crate::trace::begin("retention: plan");
             snapshot(repo, || {
                 let mark = repo.p.db.records_mark()?;
-                let overlays = repo.overlay_marks()?;
                 let caches = if trim_caches { excess_caches(repo)? } else { Vec::new() };
-                Ok((mark, overlays, caches, repo.plan_prune_bases()?))
+                let mut bases = repo.plan_prune_bases()?;
+                // Overlay heads affect only which bases are current. With no bases to remove,
+                // cache retention has no overlay dependencies and needs no overlay locks.
+                let overlays = if bases.is_empty() {
+                    None
+                } else {
+                    // Take the marks before the scan that supplies candidates: a hidden head
+                    // can change without changing the project record mark.
+                    let marks = repo.overlay_marks()?;
+                    bases = repo.plan_prune_bases()?;
+                    Some(marks)
+                };
+                Ok((mark, overlays, caches, bases))
             })?
         };
         let states: Vec<&str> = caches.iter().map(|(id, _)| id.as_str()).collect();
@@ -1556,8 +1623,11 @@ fn prune_retention(ctx: &Ctx, repo: &Repo, trim_caches: bool) -> Result<()> {
         }
         // Hidden overlay heads and selections can change without a project record. Lock and
         // check those projects too, so a base selected above cannot become the current base.
-        let Some(_overlay_locks) = repo.lock_overlays_checked(&overlays)? else {
-            continue;
+        let _overlay_locks = if let Some(overlays) = &overlays {
+            let Some(locks) = repo.lock_overlays_checked(overlays)? else { continue };
+            locks
+        } else {
+            Vec::new()
         };
         let removed = apply_cache_candidates(repo, paths, Some(&trash))?;
         if !removed.is_empty() {

@@ -469,9 +469,9 @@ pub fn split(base: &Path, new: &Path, shared: &Path, roots: &[PathBuf], pending:
 
 /// The key of a line's base: its head and stack.
 fn base_key(head: &str, layers: &[Layer]) -> String {
-    use sha2::Digest;
+    use layr_hashers::Digest;
     let text = serde_json::json!({"head": head, "layers": layers}).to_string();
-    hex::encode(sha2::Sha256::digest(text.as_bytes()))[..16].to_string()
+    hex::encode(layr_hashers::ContentAddress::digest(text.as_bytes()))[..16].to_string()
 }
 
 impl<'a> Repo<'a> {
@@ -490,13 +490,30 @@ impl<'a> Repo<'a> {
 
     /// Caller holds the project lock. Hold the returned overlay locks through the checked commit.
     pub fn lock_overlays_checked(&self, marks: &OverlayMarks) -> Result<Option<Vec<crate::store::Lock>>> {
+        let mut overlays = Vec::new();
         let mut locks = Vec::new();
         for (name, _) in marks {
             let overlay = self.overlay_repo(name)?;
             locks.push(overlay.p.lock()?);
+            overlays.push(overlay);
         }
-        if self.overlay_marks()? != *marks {
+        // Check the set as well as each mark: an overlay can appear or disappear between
+        // planning and locking. Reuse the open databases instead of reopening them all.
+        let mut names = self.overlay_names()?;
+        names.sort();
+        let mut present = Vec::new();
+        for name in names {
+            if self.p.store.project_dir(&format!("{}%{name}", self.p.name))?.exists() {
+                present.push(name);
+            }
+        }
+        if present.len() != marks.len() || present.iter().zip(marks).any(|(name, (planned, _))| name != planned) {
             return Ok(None);
+        }
+        for (overlay, (_, mark)) in overlays.iter().zip(marks) {
+            if serde_json::to_value(overlay.p.db.records_mark()?)? != *mark {
+                return Ok(None);
+            }
         }
         Ok(Some(locks))
     }
@@ -1337,6 +1354,11 @@ impl<'a> Repo<'a> {
             Some(n) => self.history_excess(&orepo, name, n, lines, stacks)?,
             None => Vec::new(),
         };
+        // An empty plan has nothing to commit, even if the overlay changes later. Leave new
+        // candidates for the next pass without opening and locking this overlay under the lock.
+        if orphans.is_empty() && excess.is_empty() {
+            return Ok(None);
+        }
         Ok(Some(OverlayClean { name: name.to_string(), mark, orphans, keep_n, excess }))
     }
 
@@ -1788,12 +1810,12 @@ mod view_tests {
 
     #[test]
     fn view_identity_uses_exact_canonical_bytes_and_stack_order() {
-        use sha2::{Digest, Sha256};
+        use layr_hashers::{ContentAddress, Digest};
         let view = View::new(SHARED.into(), vec![Layer { overlay: "keys".into(), state: OVERLAY.into() }]);
         let expected =
             format!("{{\"format\":1,\"shared\":\"{SHARED}\",\"layers\":[{{\"overlay\":\"keys\",\"state\":\"{OVERLAY}\"}}]}}");
         assert_eq!(serde_json::to_string(&view).unwrap(), expected);
-        assert_eq!(view.id().unwrap(), hex::encode(Sha256::digest(expected.as_bytes())));
+        assert_eq!(view.id().unwrap(), hex::encode(ContentAddress::digest(expected.as_bytes())));
         assert_eq!(view.id().unwrap().len(), 64);
         let mut two = view.clone();
         two.layers.push(Layer { overlay: "config".into(), state: SHARED.into() });

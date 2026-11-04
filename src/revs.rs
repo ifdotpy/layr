@@ -190,6 +190,11 @@ fn base_state(repo: &Repo, line: Option<&Line>, name: &str) -> Result<String> {
             return Ok(s);
         }
     }
+    // A branch that a fetch stored but did not import (a fetch imports only the branches that it
+    // wants): it is imported on first use, as `layr git fetch <remote> <branch>` would.
+    if let Some(st) = import_stored_branch(repo, name)? {
+        return Ok(st);
+    }
     if name.len() == 36 && uuid::Uuid::parse_str(name).is_ok() && repo.p.db.state(name)?.is_some() {
         return Ok(name.to_string());
     }
@@ -214,4 +219,20 @@ fn base_state(repo: &Repo, line: Option<&Line>, name: &str) -> Result<String> {
         }
     }
     bail!("unknown revision '{name}'")
+}
+
+/// The state of `<remote>/<branch>` (or `<branch>` of origin when it has a slash) that the Git
+/// store of the project holds from a fetch but layr has not imported: imported now. None for any
+/// other name, and for a command without a context.
+fn import_stored_branch(repo: &Repo, name: &str) -> Result<Option<String>> {
+    let Some(ctx) = repo.ctx else { return Ok(None) };
+    let Some((first, _)) = name.split_once('/') else { return Ok(None) };
+    let full = if crate::gitbridge::remote_url(repo, first).is_ok() { name.to_string() } else { format!("origin/{name}") };
+    let remote = full.split('/').next().unwrap_or("origin");
+    if crate::gitbridge::remote_url(repo, remote).is_err() {
+        return Ok(None);
+    }
+    let stored = crate::gitbridge::stored_remote_refs(repo, remote).unwrap_or_default();
+    let Some((_, commit)) = stored.into_iter().find(|(n, _)| *n == full) else { return Ok(None) };
+    Ok(Some(crate::gitbridge::import_ref(ctx, repo, &commit, &full, None)?))
 }

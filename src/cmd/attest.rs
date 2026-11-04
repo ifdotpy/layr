@@ -7,7 +7,7 @@ use crate::ids;
 use crate::model::{Attestation, Record, Subject, ATTESTATION_KINDS};
 use crate::repo::Repo;
 use anyhow::{bail, Result};
-use sha2::{Digest, Sha256};
+use layr_hashers::{ContentAddress, Digest};
 
 /// The project appender stamps the signer, record id and time before it signs the record.
 pub fn record(repo: &Repo, state: &str, kind: &str, payload: &[u8]) -> Result<Record> {
@@ -31,7 +31,7 @@ fn record_subject(repo: &Repo, subject: Subject, kind: &str, payload: &[u8]) -> 
     let mut rec = Record::new("attest");
     rec.data = serde_json::json!({"attestation": Attestation {
         format: 1, attestation_id: ids::new_id(), subject, change_id,
-        kind: kind.into(), payload_digest: hex::encode(Sha256::digest(payload)),
+        kind: kind.into(), payload_digest: hex::encode(ContentAddress::digest(payload)),
         payload_ref: None, signer: String::new(), time: 0,
     }});
     Ok(rec)

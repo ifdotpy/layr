@@ -20,9 +20,6 @@ pub const AUTO_RING_DEFAULT: usize = 10;
 pub const UNDO_OPS_DEFAULT: usize = 20;
 pub const UNDO_DELETED_DEFAULT: usize = 5;
 
-/// Statement cache size of a connection that runs the owners code (it has about 20 statements).
-pub const OWNERS_STATEMENTS: usize = 64;
-
 /// Config keys of the rings. `retention.auto` is also read by `gc`, which keeps 50 when unset.
 pub const KEY_AUTO: &str = "retention.auto";
 pub const KEY_UNDO_OPS: &str = "undo.ops";
@@ -34,6 +31,9 @@ pub type Row = (String, String, String);
 thread_local! {
     /// True while a replay runs (`fill_only`): owners are filled and no state is freed.
     static FILL_ONLY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Compact entries for records seen by the current full replay, in apply order.
+    static REPLAY_RING_ENTRIES: std::cell::RefCell<Option<Vec<RingEntries>>> = const { std::cell::RefCell::new(None) };
+    static REPLAY_REMOTE_REFS: std::cell::RefCell<Option<BTreeMap<String, Vec<String>>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Run `f` with freeing off. A rebuild replays the records this way: it fills the owners, and
@@ -71,7 +71,8 @@ pub fn undo_entries(rec: &Record, ord: &str) -> Vec<(String, Vec<String>)> {
             }
             // An automatic save: undo reads the working state it changes from.
             if rec.op == "save" {
-                named.extend(["working_before", "working_after"].iter().filter_map(|k| rec.data[*k].as_str().map(str::to_string)));
+                named
+                    .extend(["working_before", "working_after"].iter().filter_map(|k| rec.data[*k].as_str().map(str::to_string)));
             }
             (format!("{line}|{ord}"), named)
         })
@@ -92,6 +93,13 @@ pub fn deleted_entry(rec: &Record, ord: &str) -> Vec<(String, Vec<String>)> {
             Some((format!("{ord}|{line}"), named))
         })
         .collect()
+}
+
+type RingEntries = (Vec<(String, Vec<String>)>, Vec<(String, Vec<String>)>);
+
+fn ring_entries(rec: &Record) -> RingEntries {
+    let ord = record_ord(rec);
+    (deleted_entry(rec, &ord), undo_entries(rec, &ord))
 }
 
 impl Db {
@@ -144,8 +152,8 @@ impl Db {
         self.holder_exists("deleted", &format!("{ord}|{line}"))
     }
 
-    fn ring_size(&self, key: &str, default: usize) -> usize {
-        self.config(key).ok().flatten().and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(default)
+    fn ring_size(&self, key: &str, default: usize) -> Result<usize> {
+        Ok(self.config(key)?.and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(default))
     }
 
     /// The rows that a state holds: its parents, its derived source and its conflict sources.
@@ -264,7 +272,7 @@ impl Db {
             self.set_owners("head", &h, &target)?;
         }
         // At least one: the newest automatic state of a live line always stays (docs/ownership.md).
-        let keep = self.ring_size(KEY_AUTO, AUTO_RING_DEFAULT).max(1);
+        let keep = self.ring_size(KEY_AUTO, AUTO_RING_DEFAULT)?.max(1);
         let autos = if alive {
             let mut st = self.cached("SELECT id FROM states WHERE line=?1 AND kind=?2 ORDER BY time DESC, id DESC LIMIT ?3")?;
             let v = st
@@ -312,7 +320,7 @@ impl Db {
 
     /// Keep the newest undo records of a line (`undo.ops`).
     fn trim_undo(&self, line: &str) -> Result<()> {
-        let keep = self.ring_size(KEY_UNDO_OPS, UNDO_OPS_DEFAULT);
+        let keep = self.ring_size(KEY_UNDO_OPS, UNDO_OPS_DEFAULT)?;
         let (lo, hi) = span(line, '|');
         let holders = self.holders("undo", &lo, &hi)?;
         for h in holders.iter().take(holders.len().saturating_sub(keep)) {
@@ -323,7 +331,7 @@ impl Db {
 
     /// Keep the newest deleted lines (`undo.deleted`).
     fn trim_deleted(&self) -> Result<()> {
-        let keep = self.ring_size(KEY_UNDO_DELETED, UNDO_DELETED_DEFAULT);
+        let keep = self.ring_size(KEY_UNDO_DELETED, UNDO_DELETED_DEFAULT)?;
         let holders = self.all_holders("deleted")?;
         for h in holders.iter().take(holders.len().saturating_sub(keep)) {
             self.release_deleted(h)?;
@@ -355,6 +363,14 @@ impl Db {
     /// Rebuild the undo and deleted rings from the stored records. Used when a ring size changes:
     /// a ring that shrank had dropped its oldest records, which a bigger ring must bring back.
     fn resync_rings(&self) -> Result<()> {
+        let entries = self.all_lines()?.into_iter().map(|raw| {
+            let rec = crate::oplog::parse_line(&raw, None)?.record;
+            Ok(ring_entries(&rec))
+        }).collect::<Result<Vec<_>>>()?;
+        self.resync_rings_from(&entries)
+    }
+
+    fn resync_rings_from(&self, entries: &[RingEntries]) -> Result<()> {
         let mut st = self.cached("SELECT id FROM lines")?;
         let lines = st.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
         drop(st);
@@ -367,16 +383,14 @@ impl Db {
         for h in self.all_holders("deleted")? {
             self.set_owners("deleted", &h, &[])?;
         }
-        for raw in self.all_lines()? {
-            let rec = crate::oplog::parse_line(&raw, None)?.record;
-            let ord = record_ord(&rec);
+        for (deleted, undo) in entries {
             // Deleted owners first: the undo owner of a delete record needs its deleted owner.
-            for (h, named) in deleted_entry(&rec, &ord) {
-                self.set_owners("deleted", &h, &named)?;
+            for (h, named) in deleted {
+                self.set_owners("deleted", h, named)?;
             }
-            for (h, named) in undo_entries(&rec, &ord) {
-                if self.undo_allowed(&h)? {
-                    self.set_owners("undo", &h, &named)?;
+            for (h, named) in undo {
+                if self.undo_allowed(h)? {
+                    self.set_owners("undo", h, named)?;
                 }
             }
         }
@@ -494,7 +508,13 @@ impl Db {
                 .and_then(|v| v.as_object())
                 .is_some_and(|c| [KEY_AUTO, KEY_UNDO_OPS, KEY_UNDO_DELETED].iter().any(|k| c.contains_key(*k)));
             if ring_key {
-                self.resync_rings()?;
+                let replay = REPLAY_RING_ENTRIES.with(|entries| {
+                    entries.borrow().as_ref().map(|entries| self.resync_rings_from(entries))
+                });
+                match replay {
+                    Some(result) => result?,
+                    None => self.resync_rings()?,
+                }
             }
         }
         Ok(())
@@ -503,7 +523,8 @@ impl Db {
     fn sync_ref(&self, name: &str) -> Result<()> {
         let target: Vec<String> = self
             .conn
-            .query_row("SELECT target FROM refs WHERE name=?1 AND deleted=0", params![name], |r| r.get::<_, Option<String>>(0))
+            .prepare_cached("SELECT target FROM refs WHERE name=?1 AND deleted=0")?
+            .query_row(params![name], |r| r.get::<_, Option<String>>(0))
             .optional()?
             .flatten()
             .into_iter()
@@ -514,7 +535,8 @@ impl Db {
     fn sync_tag(&self, name: &str) -> Result<()> {
         let target: Vec<String> = self
             .conn
-            .query_row("SELECT state FROM tags WHERE name=?1 AND deleted=0", params![name], |r| r.get::<_, Option<String>>(0))
+            .prepare_cached("SELECT state FROM tags WHERE name=?1 AND deleted=0")?
+            .query_row(params![name], |r| r.get::<_, Option<String>>(0))
             .optional()?
             .flatten()
             .into_iter()
@@ -524,10 +546,10 @@ impl Db {
 
     /// The refs of a removed remote have no owner.
     fn clear_remote_refs_of(&self, remote: &str) -> Result<()> {
-        let mut st = self.conn.prepare("SELECT name FROM remote_refs WHERE substr(name, 1, length(?1)+1)=?1||'/'")?;
+        let mut st = self.conn.prepare_cached("SELECT name FROM remote_refs WHERE substr(name, 1, length(?1)+1)=?1||'/'")?;
         let names = st.query_map(params![remote], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<String>>>()?;
         for name in names {
-            self.set_owners("remote-ref", &name, &Vec::<String>::new())?;
+            self.assign_remote_ref(&name, Vec::new())?;
         }
         Ok(())
     }
@@ -535,23 +557,34 @@ impl Db {
     fn sync_remote_ref(&self, name: &str) -> Result<()> {
         let target: Vec<String> = self
             .conn
-            .query_row("SELECT state FROM remote_refs WHERE name=?1", params![name], |r| r.get::<_, Option<String>>(0))
+            .prepare_cached("SELECT state FROM remote_refs WHERE name=?1")?
+            .query_row(params![name], |r| r.get::<_, Option<String>>(0))
             .optional()?
             .flatten()
             .into_iter()
             .collect();
-        self.set_owners("remote-ref", name, &target)
+        self.assign_remote_ref(name, target)
+    }
+
+    fn assign_remote_ref(&self, name: &str, target: Vec<String>) -> Result<()> {
+        let deferred = REPLAY_REMOTE_REFS.with(|refs| {
+            let mut refs = refs.borrow_mut();
+            if let Some(refs) = refs.as_mut() {
+                refs.insert(name.to_string(), target.clone());
+                true
+            } else {
+                false
+            }
+        });
+        if deferred { Ok(()) } else { self.set_owners("remote-ref", name, &target) }
     }
 
     /// The newest export of a branch (by record order), whatever its status.
     fn sync_export(&self, remote: &str, branch: &str) -> Result<()> {
         let target: Vec<String> = self
             .conn
-            .query_row(
-                "SELECT state FROM exports WHERE remote=?1 AND branch=?2 ORDER BY ord DESC LIMIT 1",
-                params![remote, branch],
-                |r| r.get::<_, Option<String>>(0),
-            )
+            .prepare_cached("SELECT state FROM exports WHERE remote=?1 AND branch=?2 ORDER BY ord DESC LIMIT 1")?
+            .query_row(params![remote, branch], |r| r.get::<_, Option<String>>(0))
             .optional()?
             .flatten()
             .into_iter()
@@ -571,16 +604,42 @@ impl Db {
     /// The owners that the stored records give: a replay into a temporary database.
     pub fn recomputed_owners(&self, local: &str) -> Result<Vec<Row>> {
         let mem = Db { conn: Connection::open_in_memory()?, stale: false };
-        mem.conn.set_prepared_statement_cache_capacity(OWNERS_STATEMENTS);
+        mem.conn.set_prepared_statement_cache_capacity(crate::db::STATEMENT_CACHE_CAPACITY);
         mem.conn.execute_batch(SCHEMA)?;
-        fill_only(|| -> Result<()> {
+        // `derive` performs many writes per record and expects a caller transaction.  Without
+        // one, every statement commits independently, repeatedly walking SQLite's page cache.
+        mem.with_tx(|| fill_only(|| -> Result<()> {
+            struct ReplayGuard(Option<Vec<RingEntries>>, Option<BTreeMap<String, Vec<String>>>);
+            impl Drop for ReplayGuard {
+                fn drop(&mut self) {
+                    REPLAY_RING_ENTRIES.with(|c| { c.replace(self.0.take()); });
+                    REPLAY_REMOTE_REFS.with(|c| { c.replace(self.1.take()); });
+                }
+            }
+            let _guard = ReplayGuard(
+                REPLAY_RING_ENTRIES.with(|c| c.replace(Some(Vec::new()))),
+                REPLAY_REMOTE_REFS.with(|c| c.replace(Some(BTreeMap::new()))),
+            );
             for raw in self.all_lines()? {
                 let rec = crate::oplog::parse_line(&raw, None)?.record;
-                mem.insert_record(&rec, &raw)?;
+                // Retain only ring entries from the decoded record. The temporary records table
+                // is not queried, so neither JSON copies nor its expression indexes are needed.
+                let entry = ring_entries(&rec);
+                if !entry.0.is_empty() || !entry.1.is_empty() {
+                    REPLAY_RING_ENTRIES.with(|entries| -> Result<()> {
+                        let mut entries = entries.borrow_mut();
+                        entries.as_mut().ok_or_else(|| anyhow::anyhow!("missing replay ring entries"))?.push(entry);
+                        Ok(())
+                    })?;
+                }
                 mem.derive(&rec, &|_| true, local)?;
             }
+            let refs = REPLAY_REMOTE_REFS.with(|c| c.take()).ok_or_else(|| anyhow::anyhow!("missing replay remote refs"))?;
+            for (name, target) in refs {
+                mem.set_owners("remote-ref", &name, &target)?;
+            }
             Ok(())
-        })?;
+        }))?;
         mem.owner_rows()
     }
 
@@ -646,9 +705,8 @@ impl Db {
 
     /// Present states that no owner names. Only a replay of an old database or a crash leaves them.
     pub fn leaked_states(&self) -> Result<Vec<String>> {
-        let mut st = self.cached(
-            "SELECT id FROM states WHERE present=1 AND deleted=0 AND id NOT IN (SELECT state FROM owners) ORDER BY id",
-        )?;
+        let mut st = self
+            .cached("SELECT id FROM states WHERE present=1 AND deleted=0 AND id NOT IN (SELECT state FROM owners) ORDER BY id")?;
         let v = st.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
         Ok(v)
     }
@@ -802,6 +860,141 @@ mod tests {
 
     fn owners_of(db: &Db, kind: &str, holder: &str) -> Vec<String> {
         db.holder_states(kind, holder).unwrap().into_iter().collect()
+    }
+
+    #[test]
+    fn invalid_ring_configuration_is_reported() -> Result<()> {
+        let db = memory();
+        db.conn.execute("INSERT INTO config(key,value,ord) VALUES(?1,?2,?3)", params![KEY_UNDO_OPS, "not json", "1"])?;
+        assert!(db.ring_size(KEY_UNDO_OPS, UNDO_OPS_DEFAULT).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn replay_preserves_undo_pruning_after_line_restoration() -> Result<()> {
+        let source = memory();
+        let mut save = record(1, "save");
+        save.states.push(state(&id(1), StateKind::Commit, Some(LINE), vec![]));
+        save.lines.insert(LINE.into(), LineChange {
+            before: None, after: Some(head(&id(1))), working_before: None, working_after: Some(id(1)),
+        });
+        let mut delete = record(2, "line.delete");
+        delete.lines.insert(LINE.into(), LineChange {
+            before: Some(head(&id(1))), after: None, working_before: Some(id(1)), working_after: None,
+        });
+        let mut restore = record(3, "undo");
+        restore.lines.insert(LINE.into(), LineChange {
+            before: None, after: Some(head(&id(1))), working_before: None, working_after: Some(id(1)),
+        });
+        let mut initial_config = record(0, "config");
+        initial_config.data = serde_json::json!({"config": {"undo.ops": 10}});
+        fill_only(|| {
+            for r in [&initial_config, &save, &delete, &restore] { apply(&source, r); }
+        });
+        let earlier = format!("{LINE}|{}", record_ord(&save));
+        assert!(owners_of(&source, "undo", &earlier).is_empty());
+        assert_eq!(source.owner_rows()?, source.recomputed_owners(MACHINE)?);
+        // A subsequent ring-size change really does rebuild from history at that point.
+        let mut later_config = record(4, "config");
+        later_config.data = serde_json::json!({"config": {"undo.ops": 20}});
+        fill_only(|| apply(&source, &later_config));
+        assert!(!owners_of(&source, "undo", &earlier).is_empty());
+        assert_eq!(source.owner_rows()?, source.recomputed_owners(MACHINE)?);
+        Ok(())
+    }
+
+    #[test]
+    fn batched_replay_matches_incremental_replay_with_refs_and_ring_changes() -> Result<()> {
+        let source = memory();
+        for n in 1..=80 {
+            let mut r = record(n, "save");
+            r.states.push(state(&id(n), StateKind::Auto, Some(LINE), vec![]));
+            r.lines.insert(LINE.into(), LineChange {
+                before: None, after: Some(head(&id(n))), working_before: None, working_after: Some(id(n)),
+            });
+            apply(&source, &r);
+            let mut remote = record(1000 + n, "remote.ref");
+            remote.data = serde_json::json!({"ref": "origin/main", "state": id(n), "commit": format!("c{n}")});
+            apply(&source, &remote);
+        }
+        let mut shrink = record(2000, "config");
+        shrink.data = serde_json::json!({"config": {"undo.ops": 2, "retention.auto": 2}});
+        apply(&source, &shrink);
+        let mut grow = record(2001, "config");
+        grow.data = serde_json::json!({"config": {"undo.ops": 20, "retention.auto": 10}});
+        apply(&source, &grow);
+        let mut remove = record(2002, "remote.remove");
+        remove.data = serde_json::json!({"remote": "origin"});
+        apply(&source, &remove);
+        let mut remote = record(2003, "remote.ref");
+        remote.data = serde_json::json!({"ref": "origin/main", "state": id(7), "commit": "last"});
+        apply(&source, &remote);
+        let mut deleted = record(2004, "line.delete");
+        deleted.lines.insert(LINE.into(), LineChange {
+            before: Some(head(&id(80))), after: None, working_before: Some(id(80)), working_after: None,
+        });
+        apply(&source, &deleted);
+        let mut change = record(2005, "config");
+        change.data = serde_json::json!({"config": {"undo.deleted": 1}});
+        apply(&source, &change);
+        source.pin_add(&id(7), "test-holder")?;
+        let legacy = memory();
+        legacy.with_tx(|| fill_only(|| -> Result<()> {
+            for raw in source.all_lines()? {
+                let rec = crate::oplog::parse_line(&raw, None)?.record;
+                legacy.insert_record(&rec, &raw)?;
+                legacy.derive(&rec, &|_| true, MACHINE)?;
+            }
+            Ok(())
+        }))?;
+        let actual = source.recomputed_owners(MACHINE)?;
+        assert_eq!(legacy.owner_rows()?, actual);
+        let diff = source.owners_diff(&actual)?;
+        assert!(diff.0.is_empty() && diff.1.is_empty(), "owners differ: {diff:?}");
+        Ok(())
+    }
+
+    /// Manual Callgrind fixture: run this ignored test with REPAIR_PROFILE_BASELINE set for
+    /// the original incremental replay, and without it for the batched replay.
+    #[test]
+    #[ignore]
+    fn profile_replay_with_remote_refs_and_rings() -> Result<()> {
+        let source = memory();
+        for n in 1..=500 {
+            let mut save = record(n, "save");
+            save.states.push(state(&id(n), StateKind::Auto, Some(LINE), vec![]));
+            save.lines.insert(LINE.into(), LineChange {
+                before: None, after: Some(head(&id(n))), working_before: None, working_after: Some(id(n)),
+            });
+            apply(&source, &save);
+            let mut remote = record(1000 + n, "remote.ref");
+            remote.data = serde_json::json!({"ref": "origin/main", "state": id(n), "commit": format!("c{n}")});
+            apply(&source, &remote);
+        }
+        for n in 0..3 {
+            let mut config = record(2000 + n, "config");
+            config.data = serde_json::json!({"config": {"undo.ops": 10 + n}});
+            apply(&source, &config);
+        }
+        assert!(source.pin_add(&id(500), "profile")?);
+        let rows = if std::env::var_os("REPAIR_PROFILE_BASELINE").is_some() {
+            let legacy = memory();
+            legacy.conn.set_prepared_statement_cache_capacity(crate::db::STATEMENT_CACHE_CAPACITY);
+            legacy.with_tx(|| fill_only(|| -> Result<()> {
+                for raw in source.all_lines()? {
+                    let rec = crate::oplog::parse_line(&raw, None)?.record;
+                    legacy.insert_record(&rec, &raw)?;
+                    legacy.derive(&rec, &|_| true, MACHINE)?;
+                }
+                Ok(())
+            }))?;
+            legacy.owner_rows()?
+        } else {
+            source.recomputed_owners(MACHINE)?
+        };
+        let diff = source.owners_diff(&rows)?;
+        assert!(diff.0.is_empty() && diff.1.is_empty(), "owners differ: {diff:?}");
+        Ok(())
     }
 
     #[test]

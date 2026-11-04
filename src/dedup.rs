@@ -19,7 +19,7 @@
 use crate::fsutil;
 use crate::repo::Repo;
 use anyhow::Result;
-use sha2::{Digest, Sha256};
+use layr_hashers::{FastCryptographic, PurposeHasher};
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
 use std::io::{self, Read};
@@ -127,7 +127,7 @@ fn read_full(f: &mut File, buf: &mut [u8]) -> io::Result<usize> {
 
 fn hash_file(path: &Path) -> io::Result<[u8; 32]> {
     let mut f = open_plain(path)?;
-    let (mut h, mut buf) = (Sha256::new(), vec![0u8; 1 << 20]);
+    let (mut h, mut buf) = (FastCryptographic::new(), vec![0u8; 1 << 20]);
     loop {
         let n = read_full(&mut f, &mut buf)?;
         if n == 0 {
@@ -135,7 +135,7 @@ fn hash_file(path: &Path) -> io::Result<[u8; 32]> {
         }
         h.update(&buf[..n]);
     }
-    Ok(h.finalize().into())
+    Ok(*h.finalize().as_bytes())
 }
 
 /// Open a regular file without following a link in the last component.
@@ -153,7 +153,7 @@ fn block_hashes(path: &Path) -> io::Result<Vec<[u8; 16]>> {
         if n == 0 {
             break;
         }
-        let d = Sha256::digest(&buf[..n]);
+        let d = <FastCryptographic as PurposeHasher>::hash(&buf[..n]);
         out.push(d[..16].try_into().expect("16 bytes"));
     }
     Ok(out)
