@@ -772,7 +772,8 @@ impl Store {
         only: Option<&std::collections::BTreeSet<String>>,
     ) -> Result<Vec<String>> {
         self.private_dir()?;
-        let _lock = repo.p.lock()?;
+        // The working folders are written with no project lock: each under its line's lock, with the
+        // head pinned. Only the adopt record is written under the project lock, after the folder.
         let lines = repo.p.db.lines()?;
         let mut pending = Vec::new();
         let mut missing = Vec::new();
@@ -789,8 +790,20 @@ impl Store {
                 continue;
             }
             let local = crate::model::Line { machine: repo.p.store.machine.id.clone(), owner: ctx.caller.uid, ..line.clone() };
-            if !repo.working(&local).exists() {
-                repo.materialize(&local, &local.head, &repo.working(&local))?;
+            if repo.working(&local).exists() {
+                continue;
+            }
+            repo.hold(repo.pin(&[line.head.as_str()])?);
+            let mut created = false;
+            {
+                let _line = repo.line_lock(&local)?;
+                if !repo.working(&local).exists() {
+                    repo.materialize(&local, &local.head, &repo.working(&local))?;
+                    created = true;
+                }
+            }
+            if created {
+                let _lock = repo.p.lock()?;
                 let mut record = crate::model::Record::new("line.adopt");
                 record.lines.insert(
                     local.id.clone(),
