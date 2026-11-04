@@ -115,6 +115,15 @@ fn free_queued(p: &Project) -> Result<Vec<String>> {
     }
     let gone = p.delete_states(&dead);
     p.db.dequeue_frees(&gone)?;
+    // Only a state that a layer still uses leaves the queue. A state refused for another reason (a
+    // pin of a reader) stays queued: the next command frees it.
+    let mut held_by_layer = Vec::new();
+    for state in &dead {
+        if !gone.contains(state) && p.db.has_layer_child(state)? {
+            held_by_layer.push(state.clone());
+        }
+    }
+    p.db.dequeue_frees(&held_by_layer)?;
     Ok(gone)
 }
 

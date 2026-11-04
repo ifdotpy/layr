@@ -1256,6 +1256,7 @@ fn drop_state(p: &Project, id: &str, keep_layer: bool) -> Result<()> {
     }
     p.trash(&p.state_path(id))?;
     p.trash(&p.delta_path(id))?;
+    forget_layer(p, id)?;
     let _ = fs::remove_file(view_stamp(p, id));
     Ok(())
 }
@@ -1291,6 +1292,19 @@ pub fn delete_states(p: &Project, ids: &[String]) -> Result<BTreeSet<String>> {
         }
     }
     Ok(gone)
+}
+
+/// Remove the layer of `id` from the bases table. Its base is queued for the free step again when
+/// no other layer is made over it and no owner keeps it (the rule of free.rs).
+fn forget_layer(p: &Project, id: &str) -> Result<()> {
+    let base = p.db.base_of_layer(id)?;
+    p.db.forget_base(id)?;
+    if let Some(base) = base {
+        if !p.db.has_layer_child(&base)? && !p.db.is_owned(&base)? {
+            p.db.queue_free(&base)?;
+        }
+    }
+    Ok(())
 }
 
 /// Delete the trees of a state now, also when other thin states use it as their base: those
@@ -1335,6 +1349,7 @@ pub fn evict_views(p: &Project, keep: &BTreeSet<String>) -> Result<usize> {
 pub fn make_keyframe(p: &Project, id: &str) -> Result<()> {
     complete_tree(p, id)?;
     p.trash(&p.delta_path(id))?;
+    forget_layer(p, id)?;
     let _ = fs::remove_file(view_stamp(p, id));
     Ok(())
 }
@@ -1379,6 +1394,7 @@ pub fn upkeep(p: &Project, heads: &BTreeSet<String>) -> Result<Upkeep> {
     while let Some(id) = queue.pop() {
         p.trash(&p.state_path(id))?;
         p.trash(&p.delta_path(id))?;
+        forget_layer(p, id)?;
         let _ = fs::remove_file(view_stamp(p, id));
         done.deleted += 1;
         if let Some(b) = base_of.get(id) {

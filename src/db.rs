@@ -64,7 +64,7 @@ const LEGACY_OPS: &str = "op IN ('approve','approve.withdraw','check')";
 
 /// Version of the derived tables. Records never change shape; a database with an older version
 /// drops its derived tables, creates them new and rebuilds them from the records.
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 const DERIVED: &[&str] = &[
     "states",
@@ -86,6 +86,7 @@ const DERIVED: &[&str] = &[
     "attestation_revocations",
     "queue_entries",
     "owners",
+    "bases",
 ];
 
 /// Derived tables of older versions, dropped on migration.
@@ -905,6 +906,49 @@ impl Db {
         )?;
         let v = st.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
         Ok(v)
+    }
+
+    /// Fill the base rows of the layers on disk. Runs inside the rebuild transaction (`rebuild`),
+    /// after the table was emptied: a row for every thin layer, and none for a missing one.
+    pub fn fill_bases(&self, bases: &std::collections::BTreeMap<String, String>) -> Result<()> {
+        for (state, base) in bases {
+            self.conn.execute("INSERT OR REPLACE INTO bases(state, base) VALUES(?1, ?2)", rusqlite::params![state, base])?;
+        }
+        Ok(())
+    }
+
+    /// Every row of the `bases` table: layer state to base.
+    pub fn bases_rows(&self) -> Result<std::collections::BTreeMap<String, String>> {
+        let mut st = self.conn.prepare("SELECT state, base FROM bases")?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<std::collections::BTreeMap<_, _>>>()?)
+    }
+
+    /// The base of a thin layer, from its `bases` row.
+    pub fn base_of_layer(&self, state: &str) -> Result<Option<String>> {
+        let mut st = self.conn.prepare("SELECT base FROM bases WHERE state=?1")?;
+        let mut rows = st.query_map(rusqlite::params![state], |r| r.get::<_, String>(0))?;
+        Ok(match rows.next() {
+            Some(b) => Some(b?),
+            None => None,
+        })
+    }
+
+    /// True when a thin layer is made over `base`.
+    pub fn has_layer_child(&self, base: &str) -> Result<bool> {
+        Ok(self.conn.query_row("SELECT EXISTS(SELECT 1 FROM bases WHERE base=?1)", rusqlite::params![base], |r| r.get(0))?)
+    }
+
+    /// Put a dead state in the free queue (its last layer child went).
+    pub fn queue_free(&self, state: &str) -> Result<()> {
+        self.conn.execute("INSERT OR IGNORE INTO free_queue(state) VALUES(?1)", rusqlite::params![state])?;
+        Ok(())
+    }
+
+    /// Remove the base row of a thin layer that was removed from disk.
+    pub fn forget_base(&self, state: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM bases WHERE state=?1", rusqlite::params![state])?;
+        Ok(())
     }
 
     /// The base states of the thin layers that are on disk (`bases` rows of present layers).

@@ -921,6 +921,8 @@ impl<'a> Project<'a> {
     /// have no local folder as absent.
     fn rebuild_derived(&self, only_older: bool) -> Result<bool> {
         let present = self.state_present();
+        // The layer bases are not in the records: they come from disk, read before the rebuild.
+        let bases = self.layer_bases_on_disk()?;
         self.db.rebuild(only_older, |db| {
             for line in db.all_lines()? {
                 let s = oplog::parse_line(&line, None)?;
@@ -931,8 +933,45 @@ impl<'a> Project<'a> {
                     db.set_present(&id, false)?;
                 }
             }
+            db.fill_bases(&bases)?;
             Ok(())
         })
+    }
+
+    /// The differences between the `bases` table and the layers on disk, one line each. Empty
+    /// when they agree. `gc --repair` makes the table match the disk.
+    pub fn layer_bases_differences(&self) -> Result<Vec<String>> {
+        let disk = self.layer_bases_on_disk()?;
+        let rows = self.db.bases_rows()?;
+        let short = crate::ids::short;
+        let mut out = Vec::new();
+        for (state, base) in &disk {
+            match rows.get(state) {
+                None => out.push(format!("missing row: layer {} over {}", short(state), short(base))),
+                Some(row) if row != base => {
+                    out.push(format!("wrong base: layer {} row {} disk {}", short(state), short(row), short(base)))
+                }
+                Some(_) => {}
+            }
+        }
+        for state in rows.keys() {
+            if !disk.contains_key(state) {
+                out.push(format!("stale row: layer {} is not on disk", short(state)));
+            }
+        }
+        Ok(out)
+    }
+
+    /// The base of each thin layer on disk. Layers exist on APFS only.
+    pub(crate) fn layer_bases_on_disk(&self) -> Result<std::collections::BTreeMap<String, String>> {
+        #[cfg(target_os = "macos")]
+        {
+            crate::thin::bases(self)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Ok(std::collections::BTreeMap::new())
+        }
     }
 
     /// Write a record: sign it and store it with its derived rows in one transaction.
