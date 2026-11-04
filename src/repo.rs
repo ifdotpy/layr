@@ -1916,8 +1916,9 @@ impl<'a> Repo<'a> {
                 }
                 fsutil::make_parents(w, path, Some((uid, gid)))?;
                 let uniform = btrfs::cache_snapshot(&src, &cp)?;
-                // The copy shares its blocks; only its files change owner.
-                give_cache_tree(&cp, uniform, uid, gid)?;
+                // The copy shares its blocks; only its files change owner. The saving owner is not
+                // read here, so the walk always runs.
+                give_cache_tree(&cp, uniform, None, uid, gid)?;
                 continue;
             }
             if i < fixed {
@@ -2608,14 +2609,29 @@ fn prune_empty_parents(target: &Path, to: &Path, rel: &str) -> Result<()> {
 
 /// Give every entry of a tree (a new cache copy, still private) to `uid:gid`, without following
 /// links and without entering nested subvolumes.
-/// `give_tree` for a cache copy. A copy that is one clone has the owner of its root in every
-/// entry, so when the root already has the owner, nothing needs a walk (1 to 2 s for `node_modules`).
-pub(crate) fn give_cache_tree(root: &Path, uniform: bool, uid: u32, gid: u32) -> Result<()> {
-    if uniform {
-        let m = std::fs::symlink_metadata(root)?;
-        if m.uid() == uid && m.gid() == gid {
-            return Ok(());
-        }
+/// Whether a cache copy may keep the owners that its clone gave, without a walk. Every condition
+/// is needed:
+/// - `uniform`: the copy is one clone, not a copy file by file;
+/// - the saving line's owner (`source_owner`) is the line owner;
+/// - this process runs as that owner, not as root: a root clone keeps each entry's own owner;
+/// - the root already has the owner and the group.
+pub(crate) fn owner_walk_skippable(
+    uniform: bool,
+    euid: u32,
+    uid: u32,
+    gid: u32,
+    source_owner: Option<u32>,
+    root: (u32, u32),
+) -> bool {
+    uniform && euid != 0 && euid == uid && source_owner == Some(uid) && root == (uid, gid)
+}
+
+/// `give_tree` for a cache copy: the walk is skipped only when `owner_walk_skippable` holds.
+pub(crate) fn give_cache_tree(root: &Path, uniform: bool, source_owner: Option<u32>, uid: u32, gid: u32) -> Result<()> {
+    let m = std::fs::symlink_metadata(root)?;
+    let euid = rustix::process::geteuid().as_raw();
+    if owner_walk_skippable(uniform, euid, uid, gid, source_owner, (m.uid(), m.gid())) {
+        return Ok(());
     }
     give_tree(root, uid, gid)
 }
@@ -3952,6 +3968,7 @@ mod commit_record_tests {
 }
 
 #[cfg(test)]
+<<<<<<< head
 mod leftover_name_tests {
     use super::{is_leftover_name, leftover_base};
 
@@ -3972,5 +3989,27 @@ mod leftover_name_tests {
         assert!(!is_leftover_name("target.layr-old-ABC1234", "target"));
         assert!(!is_leftover_name("target.layr-old-abc1234x", "target"));
         assert!(!is_leftover_name("other.layr-old-abc1234", "target"));
+||||||| base
+=======
+mod owner_walk_tests {
+    use super::owner_walk_skippable;
+
+    #[test]
+    fn the_walk_is_skipped_only_when_every_condition_holds() {
+        // The line owner (501) runs the store, saved the cache and builds in its copy.
+        assert!(owner_walk_skippable(true, 501, 501, 20, Some(501), (501, 20)));
+        // Another owner (502) saved the cache state: the walk runs.
+        assert!(!owner_walk_skippable(true, 501, 501, 20, Some(502), (501, 20)));
+        // The saving owner is not recorded: the walk runs.
+        assert!(!owner_walk_skippable(true, 501, 501, 20, None, (501, 20)));
+        // A root process clones and keeps each entry's own owner: the walk runs.
+        assert!(!owner_walk_skippable(true, 0, 0, 20, Some(0), (0, 20)));
+        // The store runs as another user than the line owner: the walk runs.
+        assert!(!owner_walk_skippable(true, 502, 501, 20, Some(501), (501, 20)));
+        // A copy made file by file: the walk runs.
+        assert!(!owner_walk_skippable(false, 501, 501, 20, Some(501), (501, 20)));
+        // The root has another group than the line: the walk runs.
+        assert!(!owner_walk_skippable(true, 501, 501, 20, Some(501), (501, 21)));
+>>>>>>> bb2c3f2
     }
 }
