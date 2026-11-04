@@ -168,10 +168,12 @@ eq "save --caches succeeds with an unknown adapter" "0" "$rc"
 has "the log names the unknown adapter" "unknown prune adapter 'nosuch'" "$out"
 ok "the owner sets prune to auto again" l overlay set cache.target --prune auto
 
-# 7. Cargo missing for the owner: the adapter names the reason, and the folder is not pruned.
+# 7. A cargo that the owner cannot run: the adapter names the reason, and the folder is not pruned. (retest finds
+#    a rustup install outside PATH, so the check puts a cargo that fails first on PATH.)
 ok "the owner sets prune to auto for the cargo-missing check" l overlay set cache.target --prune auto
-(cd "$P/other" && owned env PATH=/nonexistent "$LAYR" retest prune target) > "$T/nocargo" 2>&1 || true
-has "a missing cargo prints the reason" "skipped: cargo metadata: cannot start cargo" "$(cat "$T/nocargo")"
+mkdir -p "$T/badcargo" && printf '#!/bin/sh\necho "cargo: not installed" >&2\nexit 127\n' > "$T/badcargo/cargo" && chmod 755 "$T/badcargo" "$T/badcargo/cargo"
+(cd "$P/other" && owned env PATH="$T/badcargo:/usr/bin:/bin" "$LAYR" retest prune target) > "$T/nocargo" 2>&1 || true
+has "a missing cargo prints the reason" "skipped: cargo metadata: cargo failed: cargo: not installed" "$(cat "$T/nocargo")"
 eq "a missing cargo keeps the units" "$base" "$(units $P/other/target)"
 
 finish

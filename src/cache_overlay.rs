@@ -44,8 +44,8 @@ pub fn cache_overlay_name(folder: &str) -> String {
     if crate::store::check_name("overlay", &name).is_ok() {
         return name;
     }
-    use sha2::Digest;
-    format!("cache.{}", &hex::encode(sha2::Sha256::digest(folder.as_bytes()))[..12])
+    use layr_hashers::Digest;
+    format!("cache.{}", &hex::encode(layr_hashers::ContentAddress::digest(folder.as_bytes()))[..12])
 }
 
 /// The properties of a cache overlay (docs/cache-overlays.md, section 2).
@@ -90,8 +90,8 @@ pub fn platform_key(w: &Path, key_files: &[String]) -> String {
     if key_files.is_empty() {
         return base;
     }
-    use sha2::Digest;
-    let mut h = sha2::Sha256::new();
+    use layr_hashers::Digest;
+    let mut h = layr_hashers::ContentAddress::new();
     for f in key_files {
         let data = fsutil::safe_join(w, f).ok().and_then(|p| std::fs::read(p).ok()).unwrap_or_default();
         h.update((f.len() as u64).to_le_bytes());

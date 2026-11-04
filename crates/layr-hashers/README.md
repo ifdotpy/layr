@@ -1,0 +1,9 @@
+# Choosing a hasher
+
+Use `GitCompatible` for Git SHA-1 object IDs and compatibility with existing SHA-1 formats. Use `ContentAddress` for stable SHA-256 content addresses, cryptographic protocols and HMAC; these outputs are part of stored formats and must not change. `FastCryptographic` is BLAKE3 for disposable local integrity checks or explicitly versioned local caches. `FastNonCryptographic` is rapidhash v3 for transient, non-adversarial in-memory keys only: it is neither collision-resistant nor a stable persisted format.
+
+For noncryptographic in-memory keys of locally produced data, use `FastMap` and `FastSet` (Fx), or `FastNonCryptographic` for byte streams (rapidhash). Neither is for persisted data or for keys that a peer controls (names, ids or paths from records or remote history): keep `BTreeMap` or the randomized std `HashMap` there. One exception: keys that are cryptographic digests computed locally (e.g. `(size, BLAKE3)` of file contents, even from remote history) may use `FastMap`, because a peer cannot choose the digest bits; equality still compares the full key.
+
+`PurposeHasher` provides generic, statically dispatched one-shot and streaming operations with fixed-size outputs. The compatibility types also expose RustCrypto's `Digest` API. On x86 and x86-64, SHA-1 and SHA-256 detect SHA-NI at runtime; SHA-256 also detects ARMv8 SHA-2 on AArch64, while this SHA-1 version uses its software path there. BLAKE3 dispatches to available SIMD implementations at runtime. Rapidhash uses portable scalar arithmetic and does not need SIMD dispatch. No machine-specific compiler flags are needed. BLAKE3 currently runs on one thread: a future parallel entry point should be wired to Layr's shared parallelism policy before enabling parallel updates, not create its own thread pool.
+
+Run `cargo bench -p layr-hashers --bench throughput` to compare sizes, streaming, generic dispatch, and direct calls. Measurements are machine and workload dependent.
