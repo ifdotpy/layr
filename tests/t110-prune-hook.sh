@@ -56,8 +56,10 @@ if [ "$(id -u)" != 0 ]; then l protect main --remove >/dev/null 2>&1 || true; fi
 cb "$P/main" build --workspace -q >/dev/null
 base=$(units $P/main/target)
 [ "$base" -gt 0 ] && { PASS=$((PASS + 1)); echo "PASS the standard build made units ($base)"; } || { FAIL=$((FAIL + 1)); echo "FAIL the standard build made no units: the owner cannot build"; cb "$P/main" build --workspace 2>&1 | tail -20; }
-(cd "$P/main" && l save --caches -q)
+# `other` is made before main has a cache: a merge then takes main's cache into an empty folder (a snapshot,
+# which keeps the file times). A merge into a folder that already has a cache is a union, see docs.
 new_line other main
+(cd "$P/main" && l save --caches -q)
 
 # 1. Stale units in the saved cache of main: prune is off while they are saved.
 ok "the owner sets prune=none on the cache" l overlay set cache.target --prune none
