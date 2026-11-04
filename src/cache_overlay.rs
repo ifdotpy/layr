@@ -655,14 +655,10 @@ impl<'a> Repo<'a> {
         }
     }
 
-    /// The lock of one line for the cache hook. The hooks of a line run one at a time. It is a file of the
-    /// project's meta folder, and it is not the project lock.
-    fn prune_lock(&self, line: &Line) -> Result<std::fs::File> {
-        let dir = self.p.meta_dir().join("line-locks");
-        std::fs::create_dir_all(&dir)?;
-        let f = std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(dir.join(&line.id))?;
-        rustix::fs::flock(&f, rustix::fs::FlockOperation::LockExclusive)?;
-        Ok(f)
+    /// The lock of one line for the cache hook. The hooks of a line run one at a time. It is the line lock
+    /// (`Project::line_lock`): a command that already holds it in this process takes it again without waiting.
+    fn prune_lock(&self, line: &Line) -> Result<crate::store::LineLock> {
+        self.p.line_lock(&line.id, &line.name)
     }
 
     /// The cache folders of `line` that an interrupted hook left damaged. A save skips them: a prune of a folder

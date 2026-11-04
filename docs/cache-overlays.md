@@ -529,8 +529,10 @@ Process model:
 
 Locks:
 
-- The hook holds the line's prune lock (`meta/line-locks/<line id>`, flock) while it runs. Hooks of
-  one line run one at a time.
+- The hook holds the line lock (`meta/line-locks/<line id>`, flock, `Project::line_lock`) while it
+  runs. Hooks of one line run one at a time. The line lock is reentrant in one process: a command
+  that already holds it (a merge or a save of the line) takes it again without waiting. No other file
+  under `meta/line-locks/` is flocked; `<line id>.damaged` is a plain file written atomically.
 - The hook never holds the project (store) lock. Each call site drops the project lock before it
   calls the hook. The only call site is `save --caches` (the prune runs before its project lock).
 - A cache overlay's own lock is taken only by the copy steps, never during a hook.

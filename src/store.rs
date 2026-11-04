@@ -416,6 +416,62 @@ impl Drop for Lock {
     }
 }
 
+/// The lock of one line (`meta/line-locks/<line id>`). A command that moves the head of a line, or
+/// writes its working folder, holds it for the whole command. It is taken before the project lock,
+/// never under it (a waiter would hold the project lock while a line holder waits for it), and two
+/// lines of one command are taken in id order. Other lines do not wait for it.
+pub struct LineLock {
+    f: Option<fs::File>,
+    /// Meta folder and line id: the key of `HELD_LINES`. None for a nested take in the same process.
+    key: Option<(PathBuf, String)>,
+    since: std::time::Instant,
+    waited: std::time::Duration,
+    log: PathBuf,
+    /// The line name, for `LAYR_TRACE` and `meta/lock-slow.log`.
+    line: String,
+}
+
+/// The line locks this process holds. A second descriptor for one of them would wait for the first.
+static HELD_LINES: std::sync::Mutex<Vec<(PathBuf, String)>> = std::sync::Mutex::new(Vec::new());
+
+impl Drop for LineLock {
+    fn drop(&mut self) {
+        let held = self.since.elapsed();
+        drop(self.f.take());
+        if let Some(key) = self.key.take() {
+            if let Ok(mut held) = HELD_LINES.lock() {
+                if let Some(i) = held.iter().position(|k| *k == key) {
+                    held.remove(i);
+                }
+            }
+        }
+        if std::env::var_os("LAYR_TRACE").is_some() {
+            eprintln!("trace {:>8.1} ms  line lock held: {}", held.as_secs_f64() * 1000.0, self.line);
+        }
+        if held < SLOW_LOCK && self.waited < SLOW_LOCK {
+            return;
+        }
+        let mut command = std::env::args().skip(1).collect::<Vec<_>>().join(" ");
+        command.truncate(300);
+        let line = format!(
+            "{}\t{}\tline={}\twait_ms={}\theld_ms={}\t{}\n",
+            crate::ids::now_ms(),
+            std::process::id(),
+            self.line.replace(['\t', '\n'], " "),
+            self.waited.as_millis(),
+            held.as_millis(),
+            command.replace(['\t', '\n'], " ")
+        );
+        if fs::metadata(&self.log).map(|m| m.len() > SLOW_LOCK_LOG_MAX).unwrap_or(false) {
+            let _ = fs::remove_file(&self.log);
+        }
+        if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&self.log) {
+            use std::io::Write;
+            let _ = f.write_all(line.as_bytes());
+        }
+    }
+}
+
 /// The trash folders (one per volume) of the project locks this process holds. The last lock
 /// empties them.
 static LOCK_TRASH: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
@@ -946,6 +1002,54 @@ impl<'a> Project<'a> {
             })
             .ok();
         id.ok_or_else(|| anyhow!("project record missing"))
+    }
+
+    /// The lock of one line for a whole command (`LineLock`). Taking it under the project lock of
+    /// this process is refused: that order can deadlock with a command that holds the line lock.
+    /// A second take of the same line in this process gives a guard that holds nothing.
+    pub fn line_lock(&self, id: &str, name: &str) -> Result<LineLock> {
+        anyhow::ensure!(!id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'), "invalid line id '{id}'");
+        let meta = self.meta_dir();
+        if HELD_PROJECTS.lock().map(|held| held.contains(&meta)).unwrap_or(false) {
+            bail!("internal error: line '{name}' locked while the project lock is held (line locks come first)");
+        }
+        let log = meta.join("lock-slow.log");
+        let key = (meta.clone(), id.to_string());
+        if HELD_LINES.lock().map(|held| held.contains(&key)).unwrap_or(false) {
+            return Ok(LineLock {
+                f: None,
+                key: None,
+                since: std::time::Instant::now(),
+                waited: Default::default(),
+                log,
+                line: name.to_string(),
+            });
+        }
+        let dir = meta.join("line-locks");
+        fs::create_dir_all(&dir)?;
+        let f = fs::OpenOptions::new().create(true).write(true).truncate(false).open(dir.join(id))?;
+        let asked = std::time::Instant::now();
+        rustix::fs::flock(&f, rustix::fs::FlockOperation::LockExclusive)?;
+        if let Ok(mut held) = HELD_LINES.lock() {
+            held.push(key.clone());
+        }
+        if std::env::var_os("LAYR_TRACE").is_some() {
+            eprintln!("trace {:>8.1} ms  line lock taken: {name}", asked.elapsed().as_secs_f64() * 1000.0);
+        }
+        let guard = LineLock {
+            f: Some(f),
+            key: Some(key),
+            since: std::time::Instant::now(),
+            waited: asked.elapsed(),
+            log,
+            line: name.to_string(),
+        };
+        // Tests hold a line lock for a while (LAYR_TEST_LINE_LOCK_MS), to check that other lines and
+        // other commands of the line wait only as the design says. The hold time includes the sleep.
+        if let Some(ms) = std::env::var("LAYR_TEST_LINE_LOCK_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+        }
+        Ok(guard)
     }
 
     pub fn lock(&self) -> Result<Lock> {
