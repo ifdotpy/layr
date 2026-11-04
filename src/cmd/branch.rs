@@ -223,12 +223,18 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
                 }
             }
             // The working state is prepared before the lock; under it the record and the renames only
-            // (issue #194). A moved head or folder prepares it again, up to three times.
+            // (issue #194). A folder that changed since adds a layer of its changes under the lock; a
+            // moved head prepares again, up to three times.
             let (_lock, l, last) = {
                 let mut attempt = 0;
                 loop {
                     attempt += 1;
                     let mut prepared = repo.prepare_final_state(&l)?;
+                    // Test hook (tests/t123-line-delete-save.sh): wait after the prepare step, so a
+                    // test can write into the folder before the lock.
+                    if let Some(ms) = std::env::var("LAYR_TEST_LINE_DELETE_PAUSE_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
+                        std::thread::sleep(std::time::Duration::from_millis(ms));
+                    }
                     let lock = match repo.p.lock() {
                         Ok(lock) => lock,
                         Err(e) => {
