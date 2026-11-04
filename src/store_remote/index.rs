@@ -85,7 +85,7 @@ pub(super) fn write(store: &Store, repo: &Repo) -> Result<Report> {
                     continue;
                 }
             },
-            None => layr_store::format::Tree { files: BTreeMap::new() },
+            None => layr_store::format::Tree::default(),
         };
         report.paths += usize::from(publish(wrap(Data::Paths(layr_model::index::paths(&state.id, &parent, &tree))))?);
     }

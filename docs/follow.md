@@ -20,7 +20,9 @@
 
 1. Fetch: `layr git fetch <remote> <branch>`.
 2. Stop when the remote state is the line head or an ancestor of it (result: up to date).
-3. Stop when the line has unsaved work (result: `skipped: unsaved work`). Nothing is saved for it.
+3. Stop when the line has unsaved work: a changed file or a conflict (result: `skipped: unsaved work`).
+   Nothing is saved for it. An untracked file is not unsaved work: the merge keeps it out of the state,
+   and refuses a remote state that writes its path (the pair is then recorded as in step 4).
 4. Merge the remote state with `--expect <fetched state>`. A fast-forward when possible. The merge
    runs with `--refuse-conflicts`: a conflict discards the merge result, and the line keeps its head.
    Any error keeps the head too. A failed merge records the pair (fetched remote state, line head).

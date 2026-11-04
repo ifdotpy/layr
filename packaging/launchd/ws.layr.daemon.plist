@@ -28,6 +28,9 @@
     <true/>
     <key>KeepAlive</key>
     <true/>
+    <!-- On a stop the daemon waits up to 80 s for its running requests (src/service.rs STOP_WAIT). -->
+    <key>ExitTimeOut</key>
+    <integer>90</integer>
     <key>ProcessType</key>
     <string>Background</string>
 </dict>

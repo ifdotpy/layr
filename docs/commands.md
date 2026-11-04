@@ -26,10 +26,29 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | changes       | `comment <change> <text> [--version vN] [--path <path>] [--line N] [--reply-to <id>] [--json]`, `change list`, `change show <id>`, `change log <id>`, `change diff <id> [--from vN] [--to vM]` |
 | requests      | `request <kind> ... --person [--remote <name>] [--expires <epoch-ms>]`, `requests apply [--remote <name>] [--json]` |
 | person        | `person keys [--paper-key-out <path>] [--site <url>] [--store <url>]`, `person show [--json]`, `person accept`, `access person-key <login> <public-key>` |
+<<<<<<< head
 | setup         | `init [--allow-root-snapshots] [--volume <name>]`, `projects`, `project delete <project>` (a project without lines, admin only), `config`, `daemon [--allow-root-snapshots]`                             |
+||||||| base
+| setup         | `init [--allow-root-snapshots] [--volume <name>]`, `projects`, `config`, `daemon [--allow-root-snapshots]`                             |
+=======
+| setup         | `init [--allow-root-snapshots] [--volume <name>]`, `init [<project>] --from-git <checkout> [--line <name>]`, `projects`, `config`, `daemon [--allow-root-snapshots]`                             |
+>>>>>>> origin-https/main
 | volumes       | `volume add <name> <path>`, `volume list [--json]`, `volume remove <name>`, `volume default <name>`, `project move <project> <volume>`, `clone <url> [<project>] --volume <name>`, `git clone <url> [<project>] --volume <name>` ([volumes](volumes.md)) |
 
 `init` and `daemon` refuse a store in the root subvolume, because a system snapshot rollback would empty it. `--allow-root-snapshots` or `LAYR_ALLOW_ROOT_SNAPSHOTS=1` overrides the check. See [Btrfs root snapshots](btrfs-root-snapshots.md).
+
+`init [<project>] --from-git <checkout>` makes a project from a Git checkout, in place. The
+history comes from the folder, with no network: the local branches resolve as `local/<branch>`
+and the branches of its `origin` as `origin/<branch>` (imported on first use). The project's
+`origin` is the checkout's. The line of the current branch (or `--line`; `main` for a detached
+HEAD) starts at HEAD. Ignored `target` folders next to a `Cargo.toml` and ignored `node_modules`
+folders next to a `package.json` (at most three levels deep) move into the line and become its
+caches (the project setting `regenerable`), so nothing is built again. Then the checkout is kept
+as `<checkout>.before-layr`, and the line moves to the checkout's path (`line move`). For a
+`Cargo.toml` at the top it prints how to run `layr retest init` in a line of its own: the setup
+changes files of the project, and the new line is protected. The command refuses a checkout with
+uncommitted changes, one with more worktrees, a subfolder of a checkout, and a checkout on
+another file system than the store. The project name is the folder name unless given.
 
 Person signing-key pins are machine-local: enrollment pins them on the executor, and an admin can later run `layr access person-key <login> <public-key>` there.
 Pins do not replicate because a trusted writer machine must not replace a person's key and impersonate their approvals.
@@ -206,6 +225,31 @@ trash. `gc -n --repair` prints what it would free. `fsck` runs the same check, a
 record or auto state needs, and that git builds again. The record stays; the next read builds the
 tree (`docs/ownership.md`, "States imported from Git"). `gc -n --repair` lists them. A plain `gc`
 only checks.
+
+`gc` also compares the `bases` table (the base of each thin layer) with the layers on disk, and prints
+each difference. `gc --repair` makes the table match the disk.
+
+### Schema upgrades and their backups
+
+A layr upgrade that changes the schema rebuilds the derived tables from the records. Before the
+rebuild changes anything, it keeps a copy of the project database: `VACUUM INTO` a temporary name
+in the database folder (`meta/db/`), renamed to `layr.sqlite.schema-<old>.bak`. The `<old>` is the
+schema version before the upgrade. Only the newest backup is kept. The rebuild prints one line:
+`database backup: <path> (schema <old>, before the upgrade)`. The copy needs the same space as the
+database (a 400 MB database needs 400 MB more until the backup goes).
+
+`gc` lists each backup older than 14 days with its size; `gc --repair` removes them.
+
+To roll back to the old layr:
+
+1. Stop the service and the daemon (`launchctl unload` or `systemctl stop` for the layr unit).
+2. Install the old layr binary (the one that wrote the backup's schema version).
+3. In the database folder, remove `layr.sqlite-wal` and `layr.sqlite-shm` if they exist. Then move the
+   new database aside and rename the backup into place:
+   `mv layr.sqlite layr.sqlite.upgraded` and `mv layr.sqlite.schema-<old>.bak layr.sqlite`.
+4. Start the service. Check `layr status` and `layr line list`.
+
+The backup has the records up to the upgrade. Changes made after the upgrade are lost on rollback.
 
 Keys that keep states (count rings, `layr config <key> <n>`):
 

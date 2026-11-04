@@ -15,6 +15,7 @@ db=$LAYR_ROOT/projects/s/meta/db/layr.sqlite
 [ -f "$db" ] || db=$LAYR_ROOT/projects/s/meta/layr.sqlite
 sqlite3 "$db" "PRAGMA user_version = 6"
 eq "project is at schema 6" "6" "$(sqlite3 "$db" 'PRAGMA user_version')"
+records_before=$(sqlite3 "$db" 'SELECT COUNT(*) FROM records')
 
 out=$T/rebuild-out
 mkdir -p "$out"
@@ -36,7 +37,14 @@ for f in holder r1 r2 r3 r4; do
     has "$f lists w" "w" "$(cat "$out/$f.txt")"
     ok "$f has no fatal error" test -z "$(grep -i fatal "$out/$f.txt")"
 done
-eq "project is at schema 7 after the rebuild" "7" "$(sqlite3 "$db" 'PRAGMA user_version')"
+eq "project is at schema 8 after the rebuild" "8" "$(sqlite3 "$db" 'PRAGMA user_version')"
 eq "rebuilt lines are listed" "2" "$(l line list | wc -l | tr -d ' ')"
+# The upgrade kept a copy from before the change: schema 6, with the old rows, the only backup.
+bak="$(dirname "$db")/$(basename "$db").schema-6.bak"
+ok "the backup of schema 6 exists" test -f "$bak"
+eq "the backup has the old schema" "6" "$(sqlite3 "$bak" 'PRAGMA user_version')"
+eq "the backup has the old rows" "$records_before" "$(sqlite3 "$bak" 'SELECT COUNT(*) FROM records')"
+eq "one backup is kept" "1" "$(ls "$(dirname "$db")" | grep -c 'schema-.*\.bak$')"
+has "the rebuild names its backup" "database backup:" "$(cat "$out/holder.txt")"
 
 finish

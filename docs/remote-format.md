@@ -57,8 +57,12 @@ Canonical JSON sorts object keys by Unicode code point. It uses no spaces or fra
 Strings use Python `ensure_ascii` escapes, including lowercase UTF-16 surrogate pairs.
 For example, `{"z":"é","a":1}` becomes `{"a":1,"z":"\u00e9"}`.
 
-A tree is `{"files":{"<path>":["<mode>",size,"<SHA-256>",[links]]}}`.
+A tree is `{"files":{"<path>":["<mode>",size,"<SHA-256>",[links]]},"times":{"<path>":<ns>}}`.
 Modes are `100644`, `100755`, and `120000`.
+`times` holds the modification time of each file in nanoseconds since the epoch; a restore sets it.
+Build tools compare these times (cargo rebuilds a unit whose dependency is newer), so a restored
+cache stays fresh. Each key of `times` is a key of `files`. Trees of layr 0.25 and older have no
+`times` (the key is left out when it is empty); their files get the time of the restore.
 A symlink stores its target bytes as file content.
 A link is `["<state UUID>","<attempt>",part,offset,length,"full"|"delta"]`.
 Offsets address decrypted data parts. A chain starts with the newest frame and ends with one full frame.

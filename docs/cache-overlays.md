@@ -44,7 +44,8 @@ A cache is an ordinary overlay with properties. No separate cache concept remain
   The project setting `regenerable` (`layr config regenerable '["<path>"]'`) names cache paths for
   every line; a new line gets an empty cache of such a path at once.
 - Each line has its own overlay line in a follow overlay (`line-<line id>`). So **a line has
-  caches**, not a state: `line new X <line>` takes the newest cache of that line.
+  caches**, not a state: `line new X <line>` takes the newest cache of that line. A cache overlay
+  has one overlay line per line and platform (`line-<line id>.<os>-<arch>`, section 6).
 
 ## 3. Folder overlays
 
@@ -145,6 +146,12 @@ the files that select a toolchain. A missing file counts as empty.
 
 - `line new` and merges take a state only when its key equals the key of the target
   line (computed in that line at that time).
+- A line has one overlay line per platform: `line-<line id>.<os>-<arch>`. A `save --caches` on
+  one platform makes a state of that platform's overlay line, so it does not replace the cache of
+  another platform, and `history` applies per platform. `line new`, merges and follow passes read
+  the overlay line of their own platform. An overlay line of layr 0.24 and older (`line-<line id>`)
+  takes the name of its head's platform at its first write; until then a read takes it when its
+  head has this platform.
 - Remotes (section 7): a layr remote carries the states of every platform; a receiving machine
   imports only the states of its own `<os>-<arch>`.
 
@@ -285,7 +292,7 @@ Built on 2026-10-27: folder overlays and caches as cache overlays. Tests:
   the line saved; `overlay list` shows both.
 - `gc` applies `gc=lru:<size>` to the folder of each line (the newer of access and change time;
   apparent sizes) and deletes the cache states of deleted lines.
-- `line delete` also deletes the cache overlay lines (`line-<id>`) of the line. `undo` of that delete
+- `line delete` also deletes the cache overlay lines (`line-<id>.<platform>`, all platforms) of the line. `undo` of that delete
   restores the line but not its cache overlay lines: the next `save --caches` makes new ones. `gc`
   and `fsck --repair` remove cache overlay lines of deleted lines that older versions left behind.
   `fsck` marks such a problem "(of a deleted line)".
@@ -554,6 +561,29 @@ until the next `save --caches` of that line. A cache that was saved before this 
 the next `save --caches` of its line.
 
 `init` takes no caches (a new project has no folder overlays), so it has no call site.
+
+Relocation is a second hook, `CacheAdapter::relocated(folder, at)`. It runs where a line takes a cache that
+was built at another path, and `at` is the path where the folder is used from now on:
+
+| Command | When |
+| --- | --- |
+| `layr line new` | after the project lock, when the line folder is in place (the owner cannot enter the store's work folder) |
+| `layr merge`, `merge --caches-only`, a follow pass | in `pull_caches`, after each folder is in place |
+
+The worker runs it as the owner, root too, also with `prune=none`, with a 60 s limit. It runs no process
+and never fails a command. The cargo adapter reads the dep-info files (`<profile>/deps/*.d`). The first
+rule of each names the place of its build. A unit built at another place goes stale when its dep-info
+names a path of that place that rustc compiled in, or that cargo compares by its absolute path:
+
+- `env-dep:CARGO_BIN_EXE_<bin>` (a test runs the binary of the other line);
+- another `env-dep` with a path of the old place out of the old target folder (`CARGO_MANIFEST_DIR`);
+- a source of the old place out of the old target folder (`clippy.toml`, `include_str!` of a file out of
+  the package).
+
+The adapter removes the fingerprint folder of such a unit, so the next build makes it again. A path in the
+old target folder (`OUT_DIR`) does not make a unit stale: that content was copied with the folder, and
+cargo finds it relative to the target folder. On the target folder of Studio (1,845 units) the pass takes
+0.18 s.
 
 ### 18.6 Build env, profiles and the live set
 

@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.25.0](https://github.com/ifdotpy/layr/compare/v0.24.0...v0.25.0) (2026-11-04)
+
+
+### Features
+
+* **init:** Make a project from a Git checkout in place ([#236](https://github.com/ifdotpy/layr/issues/236)) ([ffbf676](https://github.com/ifdotpy/layr/commit/ffbf676b5fb2ba07c35c561f70a788bd76cc9d26))
+
+
+### Bug Fixes
+
+* **cache:** Make stale the cargo units that name the place of their build when a line takes a cache ([#246](https://github.com/ifdotpy/layr/issues/246)) ([eee525f](https://github.com/ifdotpy/layr/commit/eee525fe27b8abdc83216239c7c7ebfa88faf3f4))
+* **cli:** Name a full disk when a command fails on it ([#249](https://github.com/ifdotpy/layr/issues/249)) ([776617c](https://github.com/ifdotpy/layr/commit/776617cf1484cde9e39e9f26c6ff64c1772cf837))
+* **follow:** an untracked file does not skip the pass ([#257](https://github.com/ifdotpy/layr/issues/257)) ([77ba782](https://github.com/ifdotpy/layr/commit/77ba782ed2b2c63531b238b3325a4bb331b1784a))
+* **follow:** an untracked file does not skip the pass; init accepts a root-only cache rule ([77ba782](https://github.com/ifdotpy/layr/commit/77ba782ed2b2c63531b238b3325a4bb331b1784a))
+* **git:** Write the .git folder of a line again when a killed command left its old index ([#250](https://github.com/ifdotpy/layr/issues/250)) ([f54ca0f](https://github.com/ifdotpy/layr/commit/f54ca0f852052ba4c2f8484e16d2dbbb9d5c1c3d))
+* **replay:** stop the chain at the upstream's states after a merge of it ([#253](https://github.com/ifdotpy/layr/issues/253)) ([5d8d09c](https://github.com/ifdotpy/layr/commit/5d8d09c13c5695d419ecb57836cd5e5b1c563b98)), closes [#251](https://github.com/ifdotpy/layr/issues/251)
+* **service:** finish running requests on a stop and report a request panic ([#255](https://github.com/ifdotpy/layr/issues/255)) ([41c6201](https://github.com/ifdotpy/layr/commit/41c620102fe2fa911e7710ffc5533685b43d9cdc))
+* **service:** name a request's command in the project lock holder ([#254](https://github.com/ifdotpy/layr/issues/254)) ([a823059](https://github.com/ifdotpy/layr/commit/a823059f2a82dff9aada4c9f0cd1a9e4d2e1a3e3)), closes [#252](https://github.com/ifdotpy/layr/issues/252)
+
+
+### Performance
+
+* **copy:** Compare the bytes of the copied files on four threads instead of hashing each side ([#247](https://github.com/ifdotpy/layr/issues/247)) ([1b24a20](https://github.com/ifdotpy/layr/commit/1b24a20844397e6c09a459c04a179124edf61f76))
+* **free:** complete bases table, queue only what no layer holds, gc checks the table ([#202](https://github.com/ifdotpy/layr/issues/202)) ([2165940](https://github.com/ifdotpy/layr/commit/2165940086586074bb33cde9fad07f26c9879b9e))
+* **trash:** Empty a folder of many entries on four threads on APFS ([#248](https://github.com/ifdotpy/layr/issues/248)) ([2e709d6](https://github.com/ifdotpy/layr/commit/2e709d6d21faadbd561d38aa0c667e5919500977))
+
 ## [0.24.0](https://github.com/ifdotpy/layr/compare/v0.23.0...v0.24.0) (2026-11-04)
 
 

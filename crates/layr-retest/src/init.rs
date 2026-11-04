@@ -50,7 +50,7 @@ pub fn detect(root: &Path) -> Found {
 /// For `.gitignore`, `accept` lists the other spellings of the same rule.
 pub fn add_line(text: &str, entry: &str, accept: &[&str]) -> Option<String> {
     let words = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
-    if text.lines().any(|l| words(l) == words(entry) || accept.contains(&l.trim())) {
+    if text.lines().any(|l| words(l) == words(entry) || accept.iter().any(|a| words(a) == words(l))) {
         return None;
     }
     let nl = if text.is_empty() || text.ends_with('\n') { "" } else { "\n" };
@@ -222,7 +222,10 @@ pub fn run(args: &[String]) -> Result<i32> {
     // The files that init changed. A line takes them from a state, so they are saved once (printed below).
     let mut edited: Vec<&str> = Vec::new();
     for folder in &folders {
-        let changed = ensure(&root.join(".layrattributes"), &format!("{folder} regenerable"), &[], write)?;
+        // A rule for the root folder only (`/target`) names the same cache folder.
+        let root_only = [format!("/{folder} regenerable"), format!("{folder}/ regenerable"), format!("/{folder}/ regenerable")];
+        let accept: Vec<&str> = root_only.iter().map(String::as_str).collect();
+        let changed = ensure(&root.join(".layrattributes"), &format!("{folder} regenerable"), &accept, write)?;
         println!(
             ".layrattributes: {}",
             if changed { format!("{added} `{folder} regenerable`") } else { format!("`{folder} regenerable` present") }
@@ -363,6 +366,14 @@ mod tests {
     #[test]
     fn spacing_does_not_matter() {
         assert_eq!(add_line("target   regenerable\n", "target regenerable", &[]), None);
+    }
+
+    #[test]
+    fn a_root_only_rule_counts() {
+        let accept = ["/target regenerable", "target/ regenerable", "/target/ regenerable"];
+        assert_eq!(add_line("/target  regenerable\n", "target regenerable", &accept), None);
+        assert_eq!(add_line("/target/ regenerable\n", "target regenerable", &accept), None);
+        assert!(add_line("/targets regenerable\n", "target regenerable", &accept).is_some());
     }
 
     #[test]
