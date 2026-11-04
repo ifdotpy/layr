@@ -69,16 +69,25 @@ fn command_list(cfg: &Value, key: &str) -> Result<Vec<Vec<String>>> {
     Ok(commands)
 }
 
-/// Reads the retest settings of the workspace at `root`. Missing settings are empty.
+/// The build env of a project without an `env` setting: the default of `layr-retest init`. Cargo's unit hash
+/// depends on the incremental flag, so the listing must not take the flag from the ambient env of the worker
+/// (the worker starts with a cleared env): a listing with another flag names other units than the build does.
+pub const DEFAULT_ENV: &[(&str, &str)] = &[("CARGO_INCREMENTAL", "1"), ("RUSTC_WRAPPER", "")];
+
+/// Reads the retest settings of the workspace at `root`. Missing settings are empty, except `env`, which is
+/// `DEFAULT_ENV` when the manifest has no `env` key.
 pub fn settings(host: &dyn Host, root: &Path) -> Result<Settings> {
     let mut cmd = host_cargo(host)?;
     cmd.args(["metadata", "--no-deps", "--format-version", "1"]).current_dir(root);
     let meta: Value = serde_json::from_slice(&run(&mut cmd, Some(host.deadline())).context("cargo metadata")?)?;
     let cfg = &meta["metadata"]["layr-retest"];
-    let mut env = Vec::new();
-    for (k, v) in cfg["env"].as_object().into_iter().flatten() {
-        env.push((k.clone(), v.as_str().context("env: each value is a string")?.to_string()));
-    }
+    let mut env: Vec<(String, String)> = match cfg["env"].as_object() {
+        Some(obj) => obj
+            .iter()
+            .map(|(k, v)| Ok((k.clone(), v.as_str().context("env: each value is a string")?.to_string())))
+            .collect::<Result<_>>()?,
+        None => DEFAULT_ENV.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+    };
     Ok(Settings {
         env,
         listed: cfg["sweep"].as_array().is_some(),
