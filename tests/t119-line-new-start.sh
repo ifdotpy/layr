@@ -1,8 +1,9 @@
 #!/bin/bash
 # ci: macos overlayfs
-# A line new that finds its start moved between the prepare step and the commit prepares again and
-# starts from the new state. The start is a line name; the test moves that line while the new line
-# waits after its prepare step (LAYR_TEST_LINE_NEW_PAUSE_MS).
+# A line new starts at the state that it read, also when the start line moves between the prepare
+# step and the commit: it does not prepare again. The start is pinned, so it stays on disk. The
+# test moves the start line while the new line waits after its prepare step
+# (LAYR_TEST_LINE_NEW_PAUSE_MS).
 . "$(dirname "$0")/lib.sh"
 
 sample $T/src
@@ -30,5 +31,6 @@ new=$(l rev-parse topic)
 wait "$pid"
 eq "the new line is made" 0 "$?"
 ok "the start line moved" test "$old" != "$new"
-eq "the new line starts at the moved head" "$new" "$(l rev-parse w)"
+eq "the new line starts at the head that the command read" "$old" "$(l rev-parse w)"
+eq "the new line has the content of that head" one "$(cat $P/w/notes.txt)"
 finish

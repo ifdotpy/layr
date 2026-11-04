@@ -92,7 +92,7 @@ Overlay and people prefixes are excluded. Public requests never use the authenti
 `/v1/p/project/objects/` routes for object reads and cannot write, collect, or issue tokens.
 The gateway must expose the routes only when a signed public manifest is present.
 
-`line new <name> [<rev>] [--count N]` creates lines. Use `line list`, `line delete <name>`, or `line rename [<old>] <new>` to manage them.
+`line new <name> [<rev>] [--count N]` creates lines. A line starts at the state that `<rev>` names when the command reads it; a save or a fetch that moves that line during the command does not change the start. Use `line list`, `line delete <name>`, or `line rename [<old>] <new>` to manage them.
 A line is a folder. Use `cd` to enter it.
 `line move <line> <path>` keeps the working folder of a line at `<path>`, outside the store, for
 example `~/Projects/app` as the real folder of the line `main`. `line move <line>` without a path

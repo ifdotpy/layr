@@ -125,7 +125,7 @@ eq "gc check exits 0 on a clean store" 0 "$(l gc >/dev/null 2>&1; echo $?)"
 echo x >> notes.txt; l save -qam c1 >/dev/null
 parent=$(q "select state from owners where kind='parent' limit 1")
 exec_sql "delete from owners where state='$parent'"
-has "gc names the leak and what the repair frees" "would be freed by" "$(l gc 2>&1 || true)"
+has "gc names the owner rows that the repair gives back" "missing: " "$(l gc 2>&1 || true)"
 no "gc check exits 1 with a forced leak" l gc
 l gc --repair >/dev/null 2>&1
 eq "gc check exits 0 after the repair" 0 "$(l gc >/dev/null 2>&1; echo $?)"
