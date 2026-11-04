@@ -740,14 +740,19 @@ fn destroy_nested_in(dir: &OwnedFd) -> Result<()> {
         }
         if is_subvol_root(&st, pst.st_dev) {
             remove_at(dir, &child)?;
-        } else { match rustix::fs::openat(
-            dir,
-            child.as_str(),
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        ) { Ok(sub) => {
-            destroy_nested_in(&sub)?;
-        } _ => {}}}
+        } else {
+            // Keep the 2021 temporary lifetime: the directory handle stays alive through the match.
+            #[allow(clippy::single_match)]
+            match rustix::fs::openat(
+                dir,
+                child.as_str(),
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            ) {
+                Ok(sub) => { destroy_nested_in(&sub)?; }
+                _ => {}
+            }
+        }
     }
     Ok(())
 }
