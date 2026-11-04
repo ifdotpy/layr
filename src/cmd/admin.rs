@@ -90,7 +90,7 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 return Err(e);
             }
         } else if !a.has("--force") {
-            repo.prepare_save(&l)?;
+            repo.prepare_save(&l, false)?;
         }
         let _lock = repo.p.lock()?;
         let l = repo.line(&l.id)?;
@@ -175,6 +175,7 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
             }
         }
         // Layers and snapshots that the save did not take (an unchanged folder, or --force).
+        drop(_lock);
         repo.discard_prepared();
     }
     if !refusals.is_empty() {
@@ -459,7 +460,7 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
     // states are loaded again under the lock, where an error stops the undo.
     for (lid, ch) in &r.lines {
         if let Ok(Some(l)) = repo.p.db.line_by_id(lid) {
-            let _ = repo.prepare_save(&l);
+            let _ = repo.prepare_save(&l, false);
         }
         for s in [&ch.working_before, &ch.working_after].into_iter().flatten() {
             let _ = repo.state_root(s);
@@ -495,7 +496,7 @@ fn undo_save(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
     for s in [&before, &after] {
         repo.state_src(s).map_err(|e| exit(1, format!("error: cannot undo, no file changed: {e:#}")))?;
     }
-    repo.prepare_save(&line)?;
+    repo.prepare_save(&line, false)?;
     let wb = save_before_undo(ctx, repo, &line, false)?;
     if let Err(e) = revert_working(repo, &line, &before, &after, force) {
         super::work::put_back(repo, &line, wb.as_deref());
@@ -569,7 +570,7 @@ fn save_before_undo(ctx: &Ctx, repo: &Repo, line: &Line, in_place: bool) -> Resu
     if !in_place {
         return repo.working_state(ctx, line, "before undo");
     }
-    repo.prepare_save(line)?;
+    repo.prepare_save(line, false)?;
     let _commit = repo.p.lock()?;
     repo.working_state(ctx, line, "before undo")
 }
@@ -1242,6 +1243,19 @@ fn snapshot<T>(repo: &Repo, f: impl FnOnce() -> Result<T>) -> Result<T> {
     v
 }
 
+/// Test hook: pause after plan N until the test creates go.N in the named directory.
+fn test_plan_wait(variable: &str, attempt: usize) -> Result<()> {
+    if let Some(dir) = std::env::var_os(variable).map(std::path::PathBuf::from) {
+        std::fs::write(dir.join(format!("planned.{attempt}")), b"")?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !dir.join(format!("go.{attempt}")).exists() {
+            anyhow::ensure!(std::time::Instant::now() < deadline, "test hook: no go.{attempt}");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+    Ok(())
+}
+
 /// `layr gc` (check): exit 1 when the table and the records differ, or a state has no owner.
 /// The lines name what `layr gc --repair` does.
 fn check(ctx: &Ctx, repo: &Repo, quiet: bool) -> Result<i32> {
@@ -1384,37 +1398,34 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) ->
         }
         return Ok(c.freed.len());
     }
-    // The slow reads go before the lock (#194): the replay of the records and the overlay pass.
-    // Under the lock they are used when no record came in meanwhile (an equal records mark);
-    // else they are made again there.
-    let (mark, diff) = {
-        let _t = crate::trace::span("repair: plan");
-        snapshot(repo, || {
-            let want = repo.p.db.recomputed_owners(&repo.p.store.machine.id)?;
-            Ok((repo.p.db.records_mark()?, repo.p.db.owners_diff(&want)?))
-        })?
-    };
-    let overlays = repo.overlay_plan();
-    // Test hook (tests/t127-repair-plan.sh): wait after the plan, so a test can change the
-    // project before the lock.
-    if let Some(ms) = std::env::var("LAYR_TEST_REPAIR_PAUSE_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
-        std::thread::sleep(std::time::Duration::from_millis(ms));
-    }
-    let leaks = {
+    // Plan outside the project lock. A changed record invalidates the entire plan: retry
+    // without the lock rather than replaying records while other commands wait.
+    let mut attempts = 0;
+    let leaks = loop {
+        attempts += 1;
+        let (mark, diff) = {
+            let _t = crate::trace::begin("repair: plan");
+            snapshot(repo, || {
+                let want = repo.p.db.recomputed_owners(&repo.p.store.machine.id)?;
+                Ok((repo.p.db.records_mark()?, repo.p.db.owners_diff(&want)?))
+            })?
+        };
+        let overlays = repo.overlay_plan();
+        // Test hook (tests/t127-repair-plan.sh): after plan N, write `planned.N` in the folder and
+        // wait for `go.N`, so a test changes the project between the plan and the lock.
+        test_plan_wait("LAYR_TEST_REPAIR_WAIT", attempts)?;
         let _lock = repo.p.lock()?;
-        let fresh = repo.p.db.records_mark()? == mark;
-        let leaks = repair_table(repo, free, fresh.then_some(diff))?;
+        if repo.p.db.records_mark()? != mark {
+            if attempts < 3 {
+                continue;
+            }
+            anyhow::bail!("project changed during the command; run it again");
+        }
+        let leaks = repair_table(repo, free, Some(diff))?;
         evict_stored(repo)?;
         for expired in repo.p.db.expired_refs(ids::now_ms())? {
             let mut rec = Record::new("ref.expire");
             rec.data = serde_json::json!({"ref_change": crate::model::RefChange { name:expired.name.clone(),before:Some(expired),after:None }});
-            repo.commit_record(ctx, rec)?;
-        }
-        // Cache snapshots beyond `retention.caches` (build output; the states stay).
-        let caches = trash_excess_caches(repo)?;
-        if !caches.is_empty() {
-            let mut rec = Record::new("gc");
-            rec.data = serde_json::json!({"deleted": [], "caches": caches});
             repo.commit_record(ctx, rec)?;
         }
         // Cache overlay lines of deleted lines (their states go below), and overlays with a
@@ -1422,7 +1433,7 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) ->
         if let Err(e) = repo.free_removed_overlays(ctx) {
             eprintln!("warning: removed cache overlays stay until the next gc: {e:#}");
         }
-        match overlays.ok().filter(|_| fresh).map(Ok).unwrap_or_else(|| repo.overlay_plan()) {
+        match overlays {
             Ok(plan) => repo.commit_overlay_plan(ctx, plan),
             Err(e) => eprintln!("warning: overlays: old states stay until the next gc: {e:#}"),
         }
@@ -1451,14 +1462,14 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) ->
                 );
             }
         }
-        repo.prune_all_bases()?;
         if crate::gitbridge::has_store(repo) {
             crate::gitbridge::prune_indexes(repo)?;
         }
         // Saved overlap compares of states that are gone (radar.rs).
         let _ = repo.prune_compares();
-        leaks
+        break leaks;
     };
+    prune_retention(ctx, repo, true)?;
     // The storage of the freed states: the leaks above and states that died before this repair.
     let freed = crate::free::finish_project(&repo.p)?;
     crate::store::empty_trash(&repo.p.trash_dir()?, None);
@@ -1497,6 +1508,47 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) ->
     Ok(freed)
 }
 
+/// Scan retention candidates without the project lock, then move unchanged candidates into
+/// trash under it. A changed record invalidates the entire plan; never rescan under the lock.
+fn prune_retention(ctx: &Ctx, repo: &Repo, trim_caches: bool) -> Result<()> {
+    let trash = repo.p.trash_dir()?;
+    std::fs::create_dir_all(&trash)?;
+    for attempt in 1..=3 {
+        let (mark, overlays, caches, bases) = {
+            let _t = crate::trace::begin("retention: plan");
+            snapshot(repo, || {
+                let mark = repo.p.db.records_mark()?;
+                let overlays = repo.overlay_marks()?;
+                let caches = if trim_caches { excess_caches(repo)? } else { Vec::new() };
+                Ok((mark, overlays, caches, repo.plan_prune_bases()?))
+            })?
+        };
+        let states: Vec<&str> = caches.iter().map(|(id, _)| id.as_str()).collect();
+        let _pin = repo.pin(&states)?;
+        let paths = cache_candidates(repo, caches);
+        test_plan_wait("LAYR_TEST_RETENTION_WAIT", attempt)?;
+        let _lock = repo.p.lock()?;
+        if repo.p.db.records_mark()? != mark {
+            continue;
+        }
+        // Hidden overlay heads and selections can change without a project record. Lock and
+        // check those projects too, so a base selected above cannot become the current base.
+        let Some(_overlay_locks) = repo.lock_overlays_checked(&overlays)? else {
+            continue;
+        };
+        let removed = apply_cache_candidates(repo, paths, Some(&trash))?;
+        if !removed.is_empty() {
+            let mut rec = Record::new("gc");
+            rec.data = serde_json::json!({"deleted": [], "caches": removed});
+            repo.commit_record(ctx, rec)?;
+        }
+        repo.commit_prune_bases(&bases, &trash)?;
+        return Ok(());
+    }
+    eprintln!("warning: retention inputs changed during three attempts; cleanup deferred until the next gc");
+    Ok(())
+}
+
 /// Cache snapshots (build output) are large and only the newest ones warm new lines: they stay
 /// for the heads of lines and for the newest `retention.caches` (5) states with caches. The
 /// states themselves stay; only their cache snapshots go. Returns `(state, snapshot name)`.
@@ -1523,14 +1575,44 @@ pub fn excess_caches(repo: &Repo) -> Result<Vec<(String, String)>> {
     Ok(out)
 }
 
-/// Move the cache snapshots that retention lets go into the trash. Returns their names.
-pub fn trash_excess_caches(repo: &Repo) -> Result<Vec<String>> {
+struct CacheCandidate {
+    path: std::path::PathBuf,
+    name: String,
+    identity: (u64, u64, i64, i64),
+}
+
+fn cache_candidates(repo: &Repo, caches: Vec<(String, String)>) -> Vec<CacheCandidate> {
+    use std::os::unix::fs::MetadataExt;
+    caches.into_iter().filter_map(|(id, name)| {
+        let path = repo.p.cache_path(&id, &name);
+        let m = std::fs::symlink_metadata(&path).ok()?;
+        Some(CacheCandidate { path, name, identity: (m.dev(), m.ino(), m.ctime(), m.ctime_nsec()) })
+    }).collect()
+}
+
+/// The GC plan uses rename-only trash; callers already holding the lock retain the ordinary
+/// trash policy, including its fallback. Both paths check the planned identity.
+fn apply_cache_candidates(repo: &Repo, candidates: Vec<CacheCandidate>, trash: Option<&Path>) -> Result<Vec<String>> {
+    use std::os::unix::fs::MetadataExt;
     let mut out = Vec::new();
-    for (id, name) in excess_caches(repo)? {
-        repo.p.trash(&repo.p.cache_path(&id, &name))?;
-        out.push(name);
+    for candidate in candidates {
+        let Ok(m) = std::fs::symlink_metadata(&candidate.path) else { continue };
+        if (m.dev(), m.ino(), m.ctime(), m.ctime_nsec()) != candidate.identity {
+            continue;
+        }
+        if let Some(dir) = trash {
+            repo.p.move_to_trash(&candidate.path, dir)?;
+        } else {
+            repo.p.trash(&candidate.path)?;
+        }
+        out.push(candidate.name);
     }
     Ok(out)
+}
+
+/// Move the cache snapshots that retention lets go into the trash. Returns their names.
+pub fn trash_excess_caches(repo: &Repo) -> Result<Vec<String>> {
+    apply_cache_candidates(repo, cache_candidates(repo, excess_caches(repo)?), None)
 }
 
 /// `layr gc --all-projects`: the retention of every project of the store, for a run by hand. A
@@ -1577,7 +1659,7 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let code = if a.has("--repair") {
         repair_project(ctx, &h.repo, a.has("-n"), a.has("-q"), true)?;
         // Trees of imported states that no strong owner keeps: git builds them again on read.
-        let built = repair_built(&h.repo, a.has("-n"))?;
+        let built = repair_built(ctx, &h.repo, a.has("-n"))?;
         if !a.has("-q") {
             let verb = if a.has("-n") { "would free" } else { "freed" };
             outln!(ctx, "{verb} {} built Git state(s) (rebuilt on read)", built.len());
@@ -1631,11 +1713,13 @@ const TREE_OWNERS: [&str; 8] = ["head", "auto", "undo", "deleted", "park", "over
 
 /// `gc --repair`: frees the trees of imported states that no owner keeps, and that git can build
 /// again (`gitbridge::build_tree`). A dry run lists them and frees nothing.
-fn repair_built(repo: &Repo, dry: bool) -> Result<Vec<String>> {
-    let _lock = (!dry).then(|| repo.p.lock()).transpose()?;
-    let freed = drop_built_imports(repo, dry)?;
+fn repair_built(ctx: &Ctx, repo: &Repo, dry: bool) -> Result<Vec<String>> {
+    let freed = {
+        let _lock = (!dry).then(|| repo.p.lock()).transpose()?;
+        drop_built_imports(repo, dry)?
+    };
     if !dry && !freed.is_empty() {
-        repo.prune_all_bases()?;
+        prune_retention(ctx, repo, false)?;
     }
     Ok(freed)
 }

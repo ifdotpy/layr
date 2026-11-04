@@ -35,6 +35,15 @@ use anyhow::{anyhow, bail, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+/// A base selected for removal and its identity at the time of the scan.
+pub struct ObsoleteBase {
+    path: PathBuf,
+    device: u64,
+    inode: u64,
+    changed: i64,
+    changed_ns: i64,
+}
+
 pub use layr_model::validation::{is_view_id, Layer, View};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -230,10 +239,11 @@ pub fn show_size(n: u64) -> String {
 
 /// The overlay pass of `gc --repair`, read without locks (`Repo::overlay_plan`).
 pub struct OverlayPlan {
-    lines: Vec<Line>,
-    stacks: BTreeMap<String, Vec<Layer>>,
     overlays: Vec<OverlayClean>,
 }
+
+/// Marks of local overlay records read outside the project lock.
+pub type OverlayMarks = Vec<(String, serde_json::Value)>;
 
 /// One overlay of an `OverlayPlan`.
 struct OverlayClean {
@@ -465,6 +475,31 @@ fn base_key(head: &str, layers: &[Layer]) -> String {
 }
 
 impl<'a> Repo<'a> {
+    pub fn overlay_marks(&self) -> Result<OverlayMarks> {
+        let mut names = self.overlay_names()?;
+        names.sort();
+        let mut marks = Vec::new();
+        for name in names {
+            if self.p.store.project_dir(&format!("{}%{name}", self.p.name))?.exists() {
+                let overlay = self.overlay_repo(&name)?;
+                marks.push((name, serde_json::to_value(overlay.p.db.records_mark()?)?));
+            }
+        }
+        Ok(marks)
+    }
+
+    /// Caller holds the project lock. Hold the returned overlay locks through the checked commit.
+    pub fn lock_overlays_checked(&self, marks: &OverlayMarks) -> Result<Option<Vec<crate::store::Lock>>> {
+        let mut locks = Vec::new();
+        for (name, _) in marks {
+            let overlay = self.overlay_repo(name)?;
+            locks.push(overlay.p.lock()?);
+        }
+        if self.overlay_marks()? != *marks {
+            return Ok(None);
+        }
+        Ok(Some(locks))
+    }
     pub fn view_of(&self, line: &Line) -> Result<View> {
         let view = View::new(line.head.clone(), self.layers(line)?);
         view.validate()?;
@@ -1096,25 +1131,51 @@ impl<'a> Repo<'a> {
         self.prune_bases(line, Some(&path), 60)
     }
 
-    /// Delete the bases of every line that are not its current one (older than a minute), and
-    /// those of deleted lines (`gc`).
-    pub fn prune_all_bases(&self) -> Result<()> {
+    /// Find obsolete bases without holding the project lock. The caller validates the project
+    /// records mark before applying this list; identities guard against a replaced path.
+    pub fn plan_prune_bases(&self) -> Result<Vec<ObsoleteBase>> {
+        use std::os::unix::fs::MetadataExt;
         if self.p.is_overlay() || !self.p.base_dir().exists() {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let lines = self.lines()?;
-        let live: BTreeSet<String> = lines.iter().map(|l| l.id.clone()).collect();
-        for l in &lines {
-            let layers = self.layers(l)?;
-            let keep = (!layers.is_empty()).then(|| self.base_path(l, &l.head, &layers));
-            self.prune_bases(l, keep.as_deref(), 60)?;
-        }
-        for e in std::fs::read_dir(self.p.base_dir())?.flatten() {
-            let name = e.file_name().to_string_lossy().into_owned();
-            let id = name.split('@').next().unwrap_or("").to_string();
-            if !live.contains(&id) {
-                let _ = btrfs::delete_tree(&e.path());
+        let stacks = self.stacks(&lines)?;
+        let mut keep = BTreeSet::new();
+        let mut live = BTreeSet::new();
+        for line in &lines {
+            live.insert(line.id.clone());
+            if let Some(layers) = stacks.get(&line.id).filter(|layers| !layers.is_empty()) {
+                keep.insert(self.base_path(line, &line.head, layers));
             }
+        }
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+        let mut out = Vec::new();
+        for e in std::fs::read_dir(self.p.base_dir())?.flatten() {
+            let path = e.path();
+            if keep.contains(&path) {
+                continue;
+            }
+            let name = e.file_name().to_string_lossy().into_owned();
+            let id = name.split('@').next().unwrap_or("");
+            let Ok(m) = std::fs::symlink_metadata(&path) else { continue };
+            if live.contains(id) && now - m.ctime() < 60 {
+                continue;
+            }
+            out.push(ObsoleteBase { path, device: m.dev(), inode: m.ino(), changed: m.ctime(), changed_ns: m.ctime_nsec() });
+        }
+        Ok(out)
+    }
+
+    /// Move the unchanged planned bases to trash. The caller holds the project lock and checked
+    /// the records mark; deletion itself happens after the lock.
+    pub fn commit_prune_bases(&self, bases: &[ObsoleteBase], trash: &Path) -> Result<()> {
+        use std::os::unix::fs::MetadataExt;
+        for base in bases {
+            let Ok(m) = std::fs::symlink_metadata(&base.path) else { continue };
+            if (m.dev(), m.ino(), m.ctime(), m.ctime_nsec()) != (base.device, base.inode, base.changed, base.changed_ns) {
+                continue;
+            }
+            self.p.move_to_trash(&base.path, trash)?;
         }
         Ok(())
     }
@@ -1187,7 +1248,14 @@ impl<'a> Repo<'a> {
 
     /// The states of overlay `name` (project `orepo`) beyond its history limit `keep_n` that no
     /// line uses. It only reads.
-    fn history_excess(&self, orepo: &Repo, name: &str, keep_n: usize, lines: &[Line], stacks: &BTreeMap<String, Vec<Layer>>) -> Result<Vec<String>> {
+    fn history_excess(
+        &self,
+        orepo: &Repo,
+        name: &str,
+        keep_n: usize,
+        lines: &[Line],
+        stacks: &BTreeMap<String, Vec<Layer>>,
+    ) -> Result<Vec<String>> {
         let Some(info) = self.overlay_info(name)? else {
             return Ok(Vec::new());
         };
@@ -1252,7 +1320,7 @@ impl<'a> Repo<'a> {
                 overlays.push(c);
             }
         }
-        Ok(OverlayPlan { lines, stacks, overlays })
+        Ok(OverlayPlan { overlays })
     }
 
     fn overlay_clean(&self, name: &str, lines: &[Line], stacks: &BTreeMap<String, Vec<Layer>>) -> Result<Option<OverlayClean>> {
@@ -1274,27 +1342,22 @@ impl<'a> Repo<'a> {
 
     /// Apply an overlay plan. The caller holds the project lock, and no record of the project came
     /// in since the plan was made (the lines and stacks are the same). An overlay whose own records
-    /// changed is read again under its lock. A failure leaves old states for the next gc.
+    /// changed is left for the next gc. A failure leaves old states for the next gc.
     pub fn commit_overlay_plan(&self, ctx: &Ctx, plan: OverlayPlan) {
         for c in plan.overlays {
             let name = c.name.clone();
-            if let Err(e) = self.commit_overlay_clean(ctx, c, &plan.lines, &plan.stacks) {
+            if let Err(e) = self.commit_overlay_clean(ctx, c) {
                 eprintln!("warning: overlay '{name}': old states stay until the next gc: {e:#}");
             }
         }
     }
 
-    fn commit_overlay_clean(&self, ctx: &Ctx, c: OverlayClean, lines: &[Line], stacks: &BTreeMap<String, Vec<Layer>>) -> Result<()> {
+    fn commit_overlay_clean(&self, ctx: &Ctx, c: OverlayClean) -> Result<()> {
         let orepo = self.overlay_repo(&c.name)?;
         let _lock = orepo.p.lock()?;
-        let c = if orepo.p.db.records_mark()? == c.mark {
-            c
-        } else {
-            match self.overlay_clean(&c.name, lines, stacks)? {
-                Some(c) => c,
-                None => return Ok(()),
-            }
-        };
+        if orepo.p.db.records_mark()? != c.mark {
+            return Ok(());
+        }
         self.drop_overlay_lines(ctx, &orepo, &c.name, &c.orphans)?;
         // The states of the dropped lines are dead now; `delete_excess` skips them.
         if let Some(keep_n) = c.keep_n {
@@ -1671,7 +1734,13 @@ mod tests {
         assert_eq!(parse_gc("lru"), None);
         assert_eq!(MergeKind::parse("union-theirs"), Some(MergeKind::UnionTheirs));
         assert_eq!(MergeKind::parse("ours"), None);
-        let p = Props { history: Some(1), quiet: true, merge: MergeKind::UnionTheirs, gc_lru: Some(20 << 30), prune: Some("pnpm".into()) };
+        let p = Props {
+            history: Some(1),
+            quiet: true,
+            merge: MergeKind::UnionTheirs,
+            gc_lru: Some(20 << 30),
+            prune: Some("pnpm".into()),
+        };
         let values: BTreeMap<&str, serde_json::Value> = PROPS.iter().map(|k| (*k, p.value(k))).collect();
         assert_eq!(Props::from_settings(|k| values.get(k).cloned().filter(|v| !v.is_null())), p);
         assert_eq!(p.describe(), ["history=last", "quiet", "merge=union-theirs", "gc=lru:20G", "prune=pnpm"]);

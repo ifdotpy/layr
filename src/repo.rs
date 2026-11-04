@@ -30,6 +30,17 @@ pub struct Repo<'a> {
     pub ctx: Option<&'a Ctx>,
 }
 
+#[derive(Debug)]
+pub struct SaveMoved;
+
+impl std::fmt::Display for SaveMoved {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("line changed during save; run it again")
+    }
+}
+
+impl std::error::Error for SaveMoved {}
+
 /// A complete folder as a tree to read.
 #[cfg(target_os = "macos")]
 pub fn snap(p: &Path) -> Snap {
@@ -953,7 +964,7 @@ impl<'a> Repo<'a> {
     /// complete tree is made here, since the final state of a deleted line keeps no layer. None when
     /// the folder has nothing to save, and always off APFS (the lock then makes the state as before).
     pub fn prepare_final_state(&self, line: &Line) -> Result<Option<FinalPrepared>> {
-        self.prepare_save(line)?;
+        self.prepare_save(line, false)?;
         #[cfg(target_os = "macos")]
         {
             let Some(pre) = take_prepared_save(&line.id) else { return Ok(None) };
@@ -1093,7 +1104,9 @@ impl<'a> Repo<'a> {
     /// not change; else it writes the state as before.
     /// The reads of a save before its lock: the head and the save base are pinned for the rest of
     /// the command (`hold`), then the automatic state is written (APFS).
-    pub fn prepare_save(&self, line: &Line) -> Result<()> {
+    /// `checked` opts the caller into the full-tree checked commit on Linux. Other callers retain
+    /// their existing save path until they can retry a moved preparation without holding the lock.
+    pub fn prepare_save(&self, line: &Line, checked: bool) -> Result<()> {
         let prev = self.save_base(line)?;
         self.hold(self.pin(&[&line.head, &prev])?);
         // One scan of the working folder serves the candidates and the save layer below (macOS).
@@ -1116,13 +1129,14 @@ impl<'a> Repo<'a> {
         if let Some(scan) = known {
             // No folder was converted, so the scan still describes the working folder.
             let w = self.working(line);
-            return btrfs::with_known_scan(&w, &scan, || self.prepare_save_layer(line));
+            return btrfs::with_known_scan(&w, &scan, || self.prepare_save_layer(line, checked));
         }
-        self.prepare_save_layer(line)
+        self.prepare_save_layer(line, checked)
     }
 
     #[cfg(target_os = "macos")]
-    fn prepare_save_layer(&self, line: &Line) -> Result<()> {
+    fn prepare_save_layer(&self, line: &Line, checked: bool) -> Result<()> {
+        let _ = checked;
         let w = self.working(line);
         if !w.exists() || !self.private_paths(line)?.is_empty() || !self.thin_line(line)? {
             return Ok(());
@@ -1173,7 +1187,53 @@ impl<'a> Repo<'a> {
         Ok(())
     }
     #[cfg(not(target_os = "macos"))]
-    fn prepare_save_layer(&self, _line: &Line) -> Result<()> {
+    fn prepare_save_layer(&self, line: &Line, checked: bool) -> Result<()> {
+        if !checked {
+            return Ok(());
+        }
+        let w = self.working(line);
+        if !w.exists() {
+            return Ok(());
+        }
+        let _t = crate::trace::span("prepare save");
+        let prev = self.save_base(line)?;
+        let working = self.recorded_working(line)?;
+        let overlay_marks = self.overlay_marks()?;
+        let layers = self.layers(line)?;
+        let pending = self.pending_moves(line);
+        let private = self.private_paths(line)?;
+        let tree = if private.is_empty() {
+            self.scan(line)?
+        } else {
+            let tree = self.temp_work(&w)?;
+            let t = Tree::open(&tree.path)?;
+            for p in &private {
+                if t.stat(p).is_some() {
+                    t.remove(p)?;
+                }
+            }
+            drop(t);
+            let copies = self.private_copies(line, &tree.path, &private)?;
+            let t = Tree::open(&tree.path)?;
+            for p in copies {
+                t.remove(&p)?;
+            }
+            drop(t);
+            self.temp_snapshot(&tree.path, true)?
+        };
+        let changed = if self.tree_available(&prev) {
+            let base = self.state_src(&prev)?;
+            changes::file_changes(&base, &tree.path)?.into_iter().any(|c| !skip_path(&c.path))
+        } else {
+            true
+        };
+        let base_present = self.p.has_state(&prev);
+        let tree = if changed { Some(tree) } else { None };
+        PREPARED_FULL_SAVES.with(|s| {
+            let mut s = s.borrow_mut();
+            s.retain(|p| p.line != line.id);
+            s.push(PreparedFullSave { line: line.id.clone(), input: line.clone(), path: w, layers, pending, overlay_marks, prev, working, base_present, tree, changed });
+        });
         Ok(())
     }
 
@@ -1208,6 +1268,46 @@ impl<'a> Repo<'a> {
 
     fn save_working(&self, ctx: &Ctx, line: &Line, message: &str, running: bool, force: bool) -> Result<Option<StateRec>> {
         let _t = crate::trace::span("save working state");
+        #[cfg(not(target_os = "macos"))]
+        if !force {
+            let prepared = PREPARED_FULL_SAVES.with(|s| {
+                let mut s = s.borrow_mut();
+                s.iter().position(|p| p.line == line.id).map(|i| s.remove(i))
+            });
+            if let Some(prepared) = prepared {
+                let Some(_overlay_locks) = self.lock_overlays_checked(&prepared.overlay_marks)? else {
+                    PREPARED_FULL_SAVES.with(|s| s.borrow_mut().push(prepared));
+                    return Err(SaveMoved.into());
+                };
+                let current = self.line(&line.id)?;
+                if current != prepared.input || self.working(&current) != prepared.path || self.layers(&current)? != prepared.layers
+                    || self.pending_moves(&current) != prepared.pending
+                    || self.save_base(&current)? != prepared.prev
+                    || self.recorded_working(&current)? != prepared.working
+                    || self.p.has_state(&prepared.prev) != prepared.base_present
+                {
+                    PREPARED_FULL_SAVES.with(|s| s.borrow_mut().push(prepared));
+                    return Err(SaveMoved.into());
+                }
+                if !prepared.changed {
+                    return Ok(None);
+                }
+                let before = self.recorded_working(&current)?;
+                let id = ids::new_id();
+                let tree = prepared.tree.as_ref().ok_or_else(|| anyhow::anyhow!("prepared save has no snapshot"))?;
+                crate::fsutil::rename_tree(&tree.path, self.p.state_path(&id))?;
+                let mut st = match self.describe_state(ctx, id.clone(), StateKind::Auto, vec![current.head.clone()], message, Some(&current)) {
+                    Ok(st) => st,
+                    Err(e) => { let _ = self.p.delete_state(&id); return Err(e); }
+                };
+                st.running = running || crate::fsutil::take_unsettled();
+                let mut rec = Record::new("save");
+                rec.states.push(st.clone());
+                rec.data = serde_json::json!({"line": current.id, "head": current.head, "working_before": before, "working_after": st.id});
+                self.commit_record(ctx, rec)?;
+                return Ok(Some(st));
+            }
+        }
         let w = self.working(line);
         if !w.exists() {
             return Ok(None);
@@ -1680,6 +1780,8 @@ impl<'a> Repo<'a> {
     /// Drop what a command prepared before the lock and did not take: a status, and prepared
     /// snapshot copies (to the trash). Call after the lock.
     pub fn discard_prepared(&self) {
+        #[cfg(not(target_os = "macos"))]
+        PREPARED_FULL_SAVES.with(|p| p.borrow_mut().clear());
         #[cfg(target_os = "macos")]
         {
             PREPARED_STATUS.with(|p| p.borrow_mut().take());
@@ -4301,6 +4403,26 @@ pub enum FinalState {
 }
 
 /// An automatic state layer written before a store lock (`Repo::prepare_save`).
+#[cfg(not(target_os = "macos"))]
+struct PreparedFullSave {
+    line: String,
+    input: Line,
+    path: PathBuf,
+    layers: Vec<crate::overlay::Layer>,
+    pending: BTreeMap<String, String>,
+    overlay_marks: crate::overlay::OverlayMarks,
+    prev: String,
+    working: String,
+    base_present: bool,
+    tree: Option<Temp>,
+    changed: bool,
+}
+
+#[cfg(not(target_os = "macos"))]
+thread_local! {
+    static PREPARED_FULL_SAVES: std::cell::RefCell<Vec<PreparedFullSave>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 #[cfg(target_os = "macos")]
 struct PreparedSave {
     line: String,

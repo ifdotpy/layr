@@ -58,6 +58,40 @@ pub fn sync_store_access(repo: &Repo) -> Result<()> {
     sync_store_access_with(repo, &[])
 }
 
+/// Repair old store contents outside the project lock, then publish access only if the
+/// policy and line owners used to compute it are still current.
+pub fn sync_store_access_periodic(repo: &Repo) -> Result<()> {
+    let s = store(repo);
+    if !s.join("objects").is_dir() {
+        return Ok(());
+    }
+    open_content(&s)?;
+    for _ in 0..3 {
+        let mark = repo.p.db.records_mark()?;
+        let (everyone, users, groups) = repo.policy().readers();
+        let mut uids: std::collections::BTreeSet<u32> = users.into_iter().collect();
+        for line in repo.lines()? {
+            if line.machine == repo.p.store.machine.id {
+                uids.insert(line.owner);
+            }
+        }
+        uids.remove(&0);
+        let uids: Vec<_> = uids.into_iter().collect();
+        let gids: Vec<_> = groups.into_iter().collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+        let _lock = repo.p.lock()?;
+        if repo.p.db.records_mark()? != mark {
+            continue;
+        }
+        if everyone {
+            std::fs::set_permissions(&s, std::fs::Permissions::from_mode(0o755))?;
+            return remove_acl(&s);
+        }
+        std::fs::set_permissions(&s, std::fs::Permissions::from_mode(0o750))?;
+        return set_acl(&s, &uids, &gids);
+    }
+    Ok(())
+}
+
 /// `sync_store_access` that also admits `extra_owners`: the owners of lines that are about to be
 /// recorded. A command calls it before its store lock, so the lines it will create are not in
 /// `repo.lines()` yet.
