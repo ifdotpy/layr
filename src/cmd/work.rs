@@ -297,20 +297,48 @@ fn untracked_list(st: &Status, mode: &str) -> Vec<String> {
     out.into_iter().collect()
 }
 
-/// Lock the project and save the working content (snapshot rule 2).
-pub fn begin_change(ctx: &Ctx, repo: &Repo, line: &Line) -> Result<(crate::store::Lock, Option<String>)> {
+/// The locks of a command that keeps the project lock for all of its records (`begin_change`).
+/// The line lock is taken first.
+pub struct ChangeLocks(pub crate::store::LineLock, pub crate::store::Lock);
+
+/// Lock the line and the project and save the working content (snapshot rule 2). For the commands
+/// whose records are written under the project lock they hold: stash, clean, rm and mv.
+pub fn begin_change(ctx: &Ctx, repo: &Repo, line: &Line) -> Result<(ChangeLocks, Option<String>)> {
     begin(ctx, repo, line, crate::repo::LineOp::Direct)
 }
 
-/// `begin_change` for another kind of change (a merge).
-pub fn begin(ctx: &Ctx, repo: &Repo, line: &Line, op: crate::repo::LineOp) -> Result<(crate::store::Lock, Option<String>)> {
+/// `begin_change` for another kind of change.
+pub fn begin(ctx: &Ctx, repo: &Repo, line: &Line, op: crate::repo::LineOp) -> Result<(ChangeLocks, Option<String>)> {
     repo.authorize_line(ctx, line, op)?;
-    // The copy of changed files goes before the lock; under it the save takes it by a rename.
-    repo.prepare_save(line)?;
-    let lock = repo.p.lock()?;
+    let line_lock = repo.line_lock(line)?;
     let line = repo.line(&line.id)?;
+    repo.authorize_line(ctx, &line, op)?;
+    // The copy of changed files goes before the project lock; under it the save takes it by a rename.
+    repo.prepare_save(&line)?;
+    let lock = repo.p.lock()?;
     let w = repo.working_state(ctx, &line, "before a layr command")?;
-    Ok((lock, w))
+    Ok((ChangeLocks(line_lock, lock), w))
+}
+
+/// `begin` for a command that writes the working folder or moves the head of the line. It holds the
+/// line lock for the whole command (the caller keeps the returned guard) and takes the project lock
+/// only for the automatic save of the working folder: its copy is made before, under the line lock.
+pub fn begin_line(
+    ctx: &Ctx,
+    repo: &Repo,
+    line: &Line,
+    op: crate::repo::LineOp,
+) -> Result<(crate::store::LineLock, Option<String>)> {
+    repo.authorize_line(ctx, line, op)?;
+    let line_lock = repo.line_lock(line)?;
+    let line = repo.line(&line.id)?;
+    repo.authorize_line(ctx, &line, op)?;
+    repo.prepare_save(&line)?;
+    let w = {
+        let _commit = repo.p.lock()?;
+        repo.working_state(ctx, &line, "before a layr command")?
+    };
+    Ok((line_lock, w))
 }
 
 /// Stage paths: move them from the working snapshot (a private copy of this command) into the
@@ -493,6 +521,8 @@ pub fn add(ctx: &Ctx, args: &[String]) -> Result<i32> {
         specs = vec![String::new()];
     }
     h.repo.authorize_line(ctx, &line, crate::repo::LineOp::Direct)?;
+    // The stage and the working folder of the line: no other command of the line writes them meanwhile.
+    let _line_lock = h.repo.line_lock(&line)?;
     // The status and the copy of the named paths read the whole working folder: seconds in a
     // large line. They run before the store lock; under it the copy is used when the head and
     // the staging content did not change, else the read runs again under the lock.
@@ -841,7 +871,7 @@ pub fn apply(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let to_stage = a.has("--cached") || a.has("--index");
     let to_work = !a.has("--cached");
-    let (_lock, _w) = begin_change(ctx, &h.repo, &line)?;
+    let (_line_lock, _w) = begin_line(ctx, &h.repo, &line, crate::repo::LineOp::Direct)?;
     let line = h.repo.line(&line.id)?;
     let own = h.repo.own(&line);
     // The staging line is private to the service (applied as root, then given to the owner);
@@ -973,6 +1003,9 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
     // rule (commit_layers checks it), so a protected line takes commits of its overlays only.
     let op = if stacked { crate::repo::LineOp::Save } else { crate::repo::LineOp::Direct };
     h.repo.authorize_line(ctx, &line, op)?;
+    // The head of the line and its working folder: the line lock holds from here to the end of the
+    // save. A refused save fails before this wait.
+    let _line_lock = h.repo.line_lock(&line)?;
     // -a stages the changed tracked files like `add -u`, which reads the working folder before
     // the store lock (a status of a large line took tens of seconds under it).
     #[cfg(target_os = "macos")]
@@ -1358,7 +1391,7 @@ pub fn restore_impl(
     ours: bool,
     theirs: bool,
 ) -> Result<i32> {
-    let (_lock, w) = begin_change(ctx, &h.repo, line)?;
+    let (_line_lock, w) = begin_line(ctx, &h.repo, line, crate::repo::LineOp::Direct)?;
     let line = h.repo.line(&line.id)?;
     let repo = &h.repo;
     if ours || theirs {
@@ -1385,7 +1418,10 @@ pub fn restore_impl(
         if n == 0 {
             return Err(exit(1, "error: no conflict matches the given paths"));
         }
-        record_working(ctx, repo, &line, "restore", w)?;
+        if let Err(e) = record_working_checked(ctx, repo, &line, "restore", w.clone()) {
+            put_back(repo, &line, w.as_deref());
+            return Err(e);
+        }
         return Ok(0);
     }
     let (index, _it) = repo.index_view(&line)?;
@@ -1435,13 +1471,39 @@ pub fn restore_impl(
         }
     }
     if worktree {
-        record_working(ctx, repo, &line, "restore", w)?;
+        if let Err(e) = record_working_checked(ctx, repo, &line, "restore", w.clone()) {
+            put_back(repo, &line, w.as_deref());
+            return Err(e);
+        }
     }
     Ok(0)
 }
 
-/// Record a change of the working content only (for undo).
+/// Record a change of the working content only (for undo). The caller holds the project lock.
 pub fn record_working(ctx: &Ctx, repo: &Repo, line: &Line, op: &str, working_before: Option<String>) -> Result<()> {
+    let (rec, _) = working_record(ctx, repo, line, op, working_before)?;
+    repo.commit_record(ctx, rec)?;
+    Ok(())
+}
+
+/// `record_working` for a command that holds the line lock only (restore): the snapshot of the
+/// folder is made first, and the record takes the project lock alone.
+pub fn record_working_checked(ctx: &Ctx, repo: &Repo, line: &Line, op: &str, working_before: Option<String>) -> Result<()> {
+    let (rec, states) = working_record(ctx, repo, line, op, working_before)?;
+    let head = line.head.clone();
+    repo.commit_line(line, &head, |_| repo.commit_record(ctx, rec).map(|_| ())).inspect_err(|_| {
+        crate::repo::discard_unrecorded(repo, &states);
+    })
+}
+
+/// The record of a working content change, with the snapshot of the folder after it.
+fn working_record(
+    ctx: &Ctx,
+    repo: &Repo,
+    line: &Line,
+    op: &str,
+    working_before: Option<String>,
+) -> Result<(Record, Vec<crate::model::StateRec>)> {
     let mut rec = Record::new(op);
     let working_after = repo.after_state(ctx, line, op, &mut rec)?;
     rec.lines.insert(
@@ -1453,8 +1515,8 @@ pub fn record_working(ctx: &Ctx, repo: &Repo, line: &Line, op: &str, working_bef
             working_after,
         },
     );
-    repo.commit_record(ctx, rec)?;
-    Ok(())
+    let states = rec.states.clone();
+    Ok((rec, states))
 }
 
 /// `reset --hard <state>` when the tree of the state is the tree of the head and the working
@@ -1463,8 +1525,8 @@ pub fn record_working(ctx: &Ctx, repo: &Repo, line: &Line, op: &str, working_bef
 #[cfg(target_os = "macos")]
 fn reset_same_tree(ctx: &Ctx, repo: &Repo, line: &Line, target: &str) -> Result<bool> {
     let _t = crate::trace::span("reset same tree");
+    let _line_lock = repo.line_lock(line)?;
     repo.authorize_line(ctx, line, crate::repo::LineOp::Direct)?;
-    let _lock = repo.p.lock()?;
     let line = repo.line(&line.id)?;
     if repo.current_stage(&line)?.is_some() {
         return Ok(false);
@@ -1489,7 +1551,10 @@ fn reset_same_tree(ctx: &Ctx, repo: &Repo, line: &Line, target: &str) -> Result<
     let _c = crate::trace::span("reset: check move");
     repo.check_move(ctx, &line, target)?;
     drop(_c);
-    repo.move_head(ctx, "reset", &line, target, vec![], None, serde_json::json!({"mode": "hard"}))?;
+    let head = line.head.clone();
+    let rec = repo.head_record(ctx, "reset", &line, target, vec![], None, serde_json::json!({"mode": "hard"}))?;
+    repo.commit_line(&line, &head, |_| repo.commit_record(ctx, rec).map(|_| ()))?;
+    repo.after_head_moved(&line, target);
     Ok(true)
 }
 
@@ -1522,8 +1587,11 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         return Ok(0);
     }
-    // APFS: the copy of the working folder and the tree of the target go before the store lock
-    // (minutes under it in a large project). The working folder is never under the lock.
+    // The line lock holds for the whole reset: the working folder is written under it, and the
+    // project lock only for the record of the head (`commit_line`).
+    let _line_lock = h.repo.line_lock(&line)?;
+    // APFS: the copy of the working folder and the tree of the target go before the project lock
+    // (minutes under it in a large project). The working folder is never under the project lock.
     #[cfg(target_os = "macos")]
     let prepared = if a.has("--hard") && h.repo.layers(&line)?.is_empty() {
         hard_reset_changes(&h.repo, &line, &h.repo.state_root(&target)?).ok()
@@ -1532,7 +1600,7 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
     };
     #[cfg(not(target_os = "macos"))]
     let prepared: Option<(Temp, Vec<Change>)> = None;
-    let (_lock, w) = begin_change(ctx, &h.repo, &line)?;
+    let (_, w) = begin_line(ctx, &h.repo, &line, crate::repo::LineOp::Direct)?;
     let line = h.repo.line(&line.id)?;
     let repo = &h.repo;
     repo.check_move(ctx, &line, &target)?;
@@ -1553,22 +1621,9 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
         "mixed"
     };
     let (index, _it) = repo.index_view(&line)?;
-    match mode {
-        "soft" => {
-            // Keep the index content, now based on the new head.
-            let mut temps: Vec<Temp> = Vec::new();
-            let index = repo.complete(index, &mut temps)?;
-            let keep = repo.temp_snapshot(&index, true)?;
-            repo.drop_stage(&line)?;
-            let mut l2 = line.clone();
-            l2.head = target.clone();
-            let stage = repo.p.stage_path(&line.id);
-            crate::storage::snapshot(&keep.path, &stage, false)?;
-            repo.mark_stage(&l2)?;
-        }
-        "mixed" => repo.drop_stage(&line)?,
+    // The working folder is written under the line lock. The stage changes follow the commit.
+    let wrote = match mode {
         "hard" => {
-            repo.drop_stage(&line)?;
             if !repo.reset_snapshot(ctx, &line, &target)? {
                 let (_scan, list) = match prepared {
                     Some(p) => p,
@@ -1584,15 +1639,47 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 let write: Vec<&str> = list.iter().filter(|c| c.new.is_some()).map(|c| c.path.as_str()).collect();
                 fsutil::replace_work_entries(&target_root, &wdir, &gone, &write, own)?;
             }
+            true
         }
-        _ => {
+        "keep" => {
             let (st, _scan, _it2, _idx2) = repo.status(&line)?;
             let wdir = repo.working(&line);
             repo.apply_delta(&repo.head_tree(&line)?, &target_root, &wdir, repo.own(&line), &st.local_paths(), false)?;
-            repo.drop_stage(&line)?;
+            true
         }
+        _ => false,
+    };
+    let head = line.head.clone();
+    let rec = repo.head_record(ctx, "reset", &line, &target, vec![], w.clone(), serde_json::json!({"mode": mode}));
+    let committed = rec.and_then(|rec| {
+        let states = rec.states.clone();
+        repo.commit_line(&line, &head, |_| repo.commit_record(ctx, rec).map(|_| ())).inspect_err(|_| {
+            crate::repo::discard_unrecorded(repo, &states);
+        })
+    });
+    if let Err(e) = committed {
+        if wrote {
+            put_back(repo, &line, w.as_deref());
+        }
+        return Err(e);
     }
-    repo.move_head(ctx, "reset", &line, &target, vec![], w, serde_json::json!({"mode": mode}))?;
+    repo.after_head_moved(&line, &target);
+    // The stage follows the head. Its states are kept until the head moved.
+    match mode {
+        "soft" => {
+            // Keep the index content, now based on the new head.
+            let mut temps: Vec<Temp> = Vec::new();
+            let index = repo.complete(index, &mut temps)?;
+            let keep = repo.temp_snapshot(&index, true)?;
+            repo.drop_stage(&line)?;
+            let mut l2 = line.clone();
+            l2.head = target.clone();
+            let stage = repo.p.stage_path(&line.id);
+            crate::storage::snapshot(&keep.path, &stage, false)?;
+            repo.mark_stage(&l2)?;
+        }
+        _ => repo.drop_stage(&line)?,
+    }
     if let Some(v) = target_view {
         repo.install_base(&line, v, &target, &layers)?;
     }
@@ -1603,7 +1690,6 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
     // A mixed reset keeps the files: name the ones that now differ from the new head, as git
     // does, and the command that changes them.
     if mode == "mixed" && !a.has("-q") && target != line.head {
-        drop(_lock);
         let (st, _scan, _it, _idx) = repo.status(&repo.line(&line.id)?)?;
         if !st.unstaged.is_empty() {
             outln!(ctx, "Unstaged changes after reset:");
@@ -1618,6 +1704,15 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
     }
     Ok(0)
+}
+
+/// Put the working folder back to the automatic state `w` that a refused command saved first. A
+/// failure only warns: the command has failed already, and the folder check is in the message.
+pub(crate) fn put_back(repo: &Repo, line: &Line, w: Option<&str>) {
+    let Some(w) = w else { return };
+    if let Err(e) = super::admin::restore_working(repo, line, w) {
+        eprintln!("error: the working folder of {} could not be put back: {e:#}; check it with 'layr status'", line.name);
+    }
 }
 
 /// The changes from the working folder to `target_root` that `reset --hard` applies: every
