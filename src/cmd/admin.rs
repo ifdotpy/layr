@@ -1562,6 +1562,39 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool, ba
 /// Cache snapshots (build output) are large and only the newest ones warm new lines: they stay
 /// for the heads of lines and for the newest `retention.caches` (5) states with caches. The
 /// states themselves stay; only their cache snapshots go. Returns `(state, snapshot name)`.
+/// `layr fsck --caches`: the cache data of this project that nothing keeps, by reason, with its bytes
+/// (apparent sizes). The operations that make cache data dead delete it, so after them the report is
+/// 0 (docs/cache-overlays.md). It only reads. Exit code 1 when it finds any.
+fn fsck_caches(ctx: &Ctx) -> Result<i32> {
+    let h = here(ctx)?;
+    let repo = &h.repo;
+    repo.require(ctx, "fsck")?;
+    let _lock = repo.p.lock()?;
+    let (mut states, mut bytes) = (0usize, 0u64);
+    for name in repo.overlay_names()? {
+        if !repo.overlay_setting(&name, "cache")?.and_then(|v| v.as_bool()).unwrap_or(false) {
+            continue;
+        }
+        if !repo.p.store.project_dir(&format!("{}%{name}", repo.p.name))?.exists() {
+            continue;
+        }
+        let orepo = repo.overlay_repo(&name)?;
+        let orphans = repo.orphan_cache_lines(&orepo)?;
+        let dead = repo.cache_unreachable(&name)?;
+        let size: u64 = dead.iter().map(|id| crate::cache_overlay::tree_size(&orepo.p.state_path(id))).sum();
+        outln!(ctx, "overlay {name}: {} unreachable state(s), {} bytes; {} overlay line(s) of deleted lines", dead.len(), size, orphans.len());
+        states += dead.len() + orphans.len();
+        bytes += size;
+    }
+    let old = excess_caches(repo)?;
+    let size: u64 = old.iter().map(|(id, name)| crate::cache_overlay::tree_size(&repo.p.cache_path(id, name))).sum();
+    outln!(ctx, "cache snapshots beyond retention.caches: {}, {} bytes", old.len(), size);
+    states += old.len();
+    bytes += size;
+    outln!(ctx, "unreachable cache data: {states} item(s), {bytes} bytes");
+    Ok(if states == 0 { 0 } else { 1 })
+}
+
 pub fn excess_caches(repo: &Repo) -> Result<Vec<(String, String)>> {
     let keep_n = repo.p.config_u64("retention.caches", 5) as usize;
     let mut heads: BTreeSet<String> = repo.p.db.lines()?.into_iter().map(|l| l.head).collect();
@@ -1810,6 +1843,9 @@ fn print_trash_errors(store: &crate::store::Store) {
 pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if args.iter().any(|v| v == "--remote" || v.starts_with("--remote=")) {
         return crate::store_remote::command(ctx, "fsck", args);
+    }
+    if args.iter().any(|v| v == "--caches") {
+        return fsck_caches(ctx);
     }
     let spec = Spec::new().flag("--repair");
     let a = parse(&spec, args)?;
@@ -2106,7 +2142,8 @@ fn copy_from_caller(ctx: &Ctx, src: &std::path::Path, rel: &str, dst: &std::path
 fn caller_git(ctx: &Ctx, dir: &std::path::Path, args: &[&str]) -> Result<std::process::Output> {
     let mut command = std::process::Command::new("git");
     command.arg("-c").arg("safe.directory=*").arg("-C").arg(dir).args(args);
-    crate::privs::command_as(&mut command, ctx.caller.uid, &[])?;
+    // The caller's choice of git configuration (the global file and its excludes) applies, as in their shell.
+    crate::privs::command_as(&mut command, ctx.caller.uid, &crate::privs::pick_env(ctx, &["GIT_CONFIG_GLOBAL", "XDG_CONFIG_HOME"]))?;
     Ok(command.output()?)
 }
 
@@ -2393,6 +2430,10 @@ fn init_from_git(ctx: &Ctx, args: &[String]) -> Result<i32> {
         if branch == "HEAD" || crate::store::check_name("line", &branch).is_err() { "main".to_string() } else { branch.clone() }
     });
     let caches = git_caches(ctx, &src)?;
+    // Git ignores files through `.git/info/exclude` and the user's `core.excludesFile` too. The import
+    // reads the checkout's `.git/info/exclude`, so the user's patterns go there first; the project
+    // keeps all of them as `ignore.local` for the `.git` folders of its lines.
+    let local = local_excludes(&src, &git_text(&["config", "--path", "--get", "core.excludesFile"]).unwrap_or_default(), ctx)?;
 
     // The project and its line, from the folder and its history (the `--from` path).
     let mut init_args = vec![name.clone(), "--from".into(), src.to_string_lossy().into_owned(), "--line".into(), line_name.clone(), "-q".into()];
@@ -2404,6 +2445,13 @@ fn init_from_git(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let line = repo.line(&line_name)?;
     let w = repo.working(&line);
     let tracking = crate::gitbridge::fetch_tracking(ctx, &repo, &src, "origin").unwrap_or_default();
+    if !local.is_empty() {
+        set_config(ctx, &repo, "ignore.local", serde_json::json!(local))?;
+        let exclude = w.join(crate::ignore_rules::LOCAL_EXCLUDE);
+        if exclude.parent().is_some_and(|p| p.is_dir()) {
+            std::fs::write(&exclude, local.iter().map(|p| format!("{p}\n")).collect::<String>())?;
+        }
+    }
     // The folder of the `local` remote is the kept checkout.
     set_config(ctx, &repo, "remote.local.url", serde_json::json!(backup.to_string_lossy()))?;
     if !caches.is_empty() {
@@ -2460,6 +2508,44 @@ fn init_from_git(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
     }
     Ok(0)
+}
+
+/// The local ignore patterns of the checkout `src`: its `.git/info/exclude` and the user's excludes file
+/// (`core.excludesFile` = `configured`, else `$XDG_CONFIG_HOME/git/ignore` or `~/.config/git/ignore`). The
+/// user's patterns are added to the checkout's `.git/info/exclude` (once), so the import ignores what git
+/// ignores. Returns the patterns, without comments and blank lines.
+fn local_excludes(src: &std::path::Path, configured: &str, ctx: &Ctx) -> Result<Vec<String>> {
+    let home = ctx.env("HOME").map(std::path::PathBuf::from);
+    let global = if !configured.trim().is_empty() {
+        Some(std::path::PathBuf::from(configured.trim()))
+    } else {
+        ctx.env("XDG_CONFIG_HOME").map(std::path::PathBuf::from).or(home.map(|h| h.join(".config"))).map(|c| c.join("git/ignore"))
+    };
+    let patterns = |text: &str| -> Vec<String> {
+        text.lines().map(str::trim_end).filter(|l| !l.trim().is_empty() && !l.starts_with('#')).map(String::from).collect()
+    };
+    let exclude = src.join(crate::ignore_rules::LOCAL_EXCLUDE);
+    let mut text = std::fs::read_to_string(&exclude).unwrap_or_default();
+    let have = patterns(&text);
+    let add: Vec<String> = global
+        .and_then(|g| std::fs::read_to_string(g).ok())
+        .map(|g| patterns(&g).into_iter().filter(|p| !have.contains(p)).collect())
+        .unwrap_or_default();
+    if !add.is_empty() {
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str("# Added by layr init --from-git from core.excludesFile\n");
+        for p in &add {
+            text.push_str(p);
+            text.push('\n');
+        }
+        if let Some(parent) = exclude.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&exclude, &text)?;
+    }
+    Ok(patterns(&text))
 }
 
 /// Moves the plain folder `from` (no store manages it yet) to `to` on the same file system: a rename. When `to` is

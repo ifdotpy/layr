@@ -139,10 +139,26 @@ with `platform` records a key in each state:
 <os>-<arch>[-<hash>]
 ```
 
-`<hash>` is the first 16 hex digits of the SHA-256 of the files that the setting
-`overlay.<name>.key-files` lists, from the line's working folder at the save (for example
-`["Cargo.lock", "rust-toolchain.toml"]`). layr does not know toolchains; the program on top names
-the files that select a toolchain. A missing file counts as empty.
+`<hash>` is the first 16 hex digits of the SHA-256 of the key parts, each a name and a short hash
+of its value (a missing file or an unset variable is `-`):
+
+- `file:<path>`: each file that the setting `overlay.<name>.key-files` lists, from the line's
+  working folder (for example `["Cargo.lock", "rust-toolchain.toml"]`).
+- `env:<NAME>`: each environment variable that changes a build in the folder. The folder's cache
+  adapter names them (cargo: `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`, `RUSTDOCFLAGS`,
+  `CARGO_INCREMENTAL`, `CARGO_PROFILE_*_DEBUG`, `CARGO_BUILD_TARGET`, `RUSTC_WRAPPER`,
+  `RUSTC_WORKSPACE_WRAPPER`, `MACOSX_DEPLOYMENT_TARGET`, `IPHONEOS_DEPLOYMENT_TARGET`, `CC`, `CXX`,
+  `CFLAGS`, `CXXFLAGS`, `LDFLAGS`, `AR`), and the project setting `cache.key-env` (a JSON array)
+  adds names. A value that the project pins for its builds wins over the caller's (cargo: the `env`
+  table of `[workspace.metadata.layr-retest]`, which retest and the gate apply).
+- `toolchain`: the output of the adapter's toolchain command (cargo: `rustc -vV`), run as the line
+  owner in an empty folder with copies of the files that select the toolchain
+  (`rust-toolchain.toml`, `rust-toolchain`). One run per command.
+
+Each cache state records its parts by name (`cache_key_parts`). A line that does not take the cache
+of its source line names the parts that differ, for example `target: the cache of line main is not
+taken (state 1a2b3c4): the key differs in env:MACOSX_DEPLOYMENT_TARGET`. A cache saved by an older
+layr has no parts; its key differs once.
 
 - `line new` and merges take a state only when its key equals the key of the target
   line (computed in that line at that time).
@@ -162,7 +178,21 @@ There are two kinds of remote:
 - A **layr remote** (a store: `file://`, `s3://`, `layr+https://`; or a peer: `ssh://`) takes the
   whole repository: the shared set and every overlay, each overlay encrypted for its readers, as
   [overlay sync](overlay-sync-design.md) decides. Cache overlays travel too. A receiving machine
-  imports a cache state only for its own platform.
+  imports a cache state only for its own platform. A store remote keeps only the cache states that
+  the records keep (`src/store_remote/sweep.rs`): the push of a cache overlay deletes the trees of
+  the states that its records know and do not keep (beyond `history` on each line and platform, of
+  deleted lines), and the data parts that no kept tree links, parts first. A tree stays when its
+  state is not known here yet (another machine pushed it), when a kept tree is a delta of it, or
+  when it is the nearest pushed ancestor of a kept state whose tree is not there yet (a push in
+  flight on another machine reuses its parts). The daemon runs the same pass for each store remote
+  of each project every hour, so a remote that nobody pushes to loses its dead caches too (a remote
+  that cannot be reached is tried at the next pass). `layr fsck --caches --remote <name>` lists what
+  the pass would delete (exit 1 when there is something); `layr gc --remote <name>` runs it. A
+  key change (a reader removal, a closer access mode) starts a new key epoch, and a reader takes
+  only the newest published key: once the key of the new epoch is published, the push and the pass
+  delete all cache states of the older epochs whose keys were in the same key listing. An epoch
+  whose key is not published yet (a key change in flight) stays. Records and slots of an old
+  epoch stay; they are small.
 - A **git remote** takes one layer. The shared set goes to the project's git remotes (`origin`),
   as today. An overlay goes to its own git repository: `layr overlay remote add <overlay> <url>`
   records `overlay.<name>.git.<remote>` in the overlay's own records, so only its readers see the
@@ -290,11 +320,17 @@ Built on 2026-10-27: folder overlays and caches as cache overlays. Tests:
 - `layr cache pull <line or state>` (removed in section 15): the same for one line, without a merge (item 24).
 - `layr cache list -v` (removed in section 15) showed the size of each cache folder and the overlay state
   the line saved; `overlay list` shows both.
+- `layr fsck --caches` reports the cache data that nothing keeps, by overlay, with its bytes: states
+  beyond `history` or of deleted lines, overlay lines of deleted lines, and cache snapshots beyond
+  `retention.caches`. The operations that make cache data dead delete it, so the report is 0 after
+  them; it exits 1 when it finds some. It only reads.
 - `gc` applies `gc=lru:<size>` to the folder of each line (the newer of access and change time;
   apparent sizes) and deletes the cache states of deleted lines.
-- `line delete` also deletes the cache overlay lines (`line-<id>.<platform>`, all platforms) of the line. `undo` of that delete
-  restores the line but not its cache overlay lines: the next `save --caches` makes new ones. `gc`
-  and `fsck --repair` remove cache overlay lines of deleted lines that older versions left behind.
+- `line delete` also deletes the cache overlay lines (`line-<id>.<platform>`, all platforms) of the
+  line, and their states at once (the overlay's `history` keeps only the heads of the overlay lines
+  that stay and the states that lines show). `undo` of that delete restores the line but not its
+  cache overlay lines: the next `save --caches` makes new ones. `gc` and `fsck --repair` remove cache
+  overlay lines of deleted lines that older versions left behind.
   `fsck` marks such a problem "(of a deleted line)".
 - The secret detector does not read folder overlays: they hold build output.
 

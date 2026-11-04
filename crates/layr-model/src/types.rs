@@ -95,6 +95,11 @@ pub struct StateRec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(rename = "layer_platform", alias = "cache_platform")]
     pub cache_platform: Option<String>,
+    /// The parts of the cache key (`cache_platform`) by name, each a short hash of its value: key
+    /// files (`file:<path>`), environment variables (`env:<name>`) and the toolchain. A line that
+    /// does not take a cache names the parts that differ. Empty: saved by an older layr.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub cache_key_parts: std::collections::BTreeMap<String, String>,
     /// The project state whose working folder this cache snapshot was taken with. None: an
     /// older save, or a merge state of cache overlays. Read by `merge --caches-only`.
     #[serde(default, skip_serializing_if = "Option::is_none")]

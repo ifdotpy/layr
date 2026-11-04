@@ -12,6 +12,7 @@ pub(crate) mod overlays;
 mod public;
 mod push_cache;
 mod push_journal;
+pub(crate) mod sweep;
 pub(crate) mod reader;
 mod release;
 mod writer;
@@ -921,7 +922,8 @@ impl Store {
 
 /// The CLI commands use the same named-remote configuration as push and fetch.
 pub fn command(ctx: &Ctx, operation: &str, args: &[String]) -> Result<i32> {
-    let spec = crate::args::Spec::new().value("--remote").flag("--files").flag("--json").flag("-n|--dry-run").flag("-q|--quiet");
+    let spec =
+        crate::args::Spec::new().value("--remote").flag("--files").flag("--json").flag("-n|--dry-run").flag("-q|--quiet").flag("--caches");
     let a = crate::args::parse(&spec, args)?;
     let name = a.get("--remote").context("name a remote with --remote <name>")?;
     let h = crate::cmd::here(ctx)?;
@@ -929,6 +931,26 @@ pub fn command(ctx: &Ctx, operation: &str, args: &[String]) -> Result<i32> {
     let mut store = open_named(name, &h.repo)?;
     store.connect(ctx)?;
     match operation {
+        "fsck" if a.has("--caches") => {
+            // Read only: what a sweep would delete (`sweep`).
+            let (mut trees, mut bytes) = (0, 0);
+            for (overlay, swept) in overlays::sweep_caches(&store, ctx, &h.repo, true)? {
+                outln!(
+                    ctx,
+                    "remote {name} overlay {overlay}: {} unreachable cache state(s), {} part(s), {} bytes; {} state(s) not known here kept",
+                    swept.trees.len(),
+                    swept.parts.len(),
+                    swept.bytes,
+                    swept.unknown
+                );
+                trees += swept.trees.len() + swept.parts.len();
+                bytes += swept.bytes;
+            }
+            outln!(ctx, "remote {name}: unreachable cache data: {trees} object(s), {bytes} bytes");
+            if trees > 0 {
+                return Ok(1);
+            }
+        }
         "fsck" => {
             let report = store.verify(a.has("--files"))?;
             if a.has("--json") {
@@ -963,6 +985,12 @@ pub fn command(ctx: &Ctx, operation: &str, args: &[String]) -> Result<i32> {
             }
         }
         "gc" => {
+            for (overlay, swept) in overlays::sweep_caches(&store, ctx, &h.repo, a.has("-n"))? {
+                if !a.has("-q") && !swept.trees.is_empty() {
+                    let verb = if a.has("-n") { "would delete" } else { "deleted" };
+                    outln!(ctx, "overlay {overlay}: {verb} {} dead cache state(s), {} bytes", swept.trees.len(), swept.bytes);
+                }
+            }
             let deleted = store.gc(a.has("-n"))?;
             if a.has("--json") {
                 outln!(ctx, "{}", serde_json::to_string(&deleted)?);
@@ -973,6 +1001,55 @@ pub fn command(ctx: &Ctx, operation: &str, args: &[String]) -> Result<i32> {
         _ => bail!("unknown remote store operation"),
     }
     Ok(0)
+}
+
+/// The daemon's pass (docs/cache-overlays.md): for each project of the store at `root` and each of its
+/// store remotes, delete the dead cache states, so a remote that nobody pushes to loses them too. A
+/// remote that cannot be reached now is tried at the next pass.
+pub fn sweep_tick(root: &std::path::Path, caller: crate::ctx::Caller) {
+    let Ok(names) = crate::store::Store::open(root).and_then(|s| s.project_names()) else { return };
+    for project in names.into_iter().filter(|n| !n.contains('%')) {
+        let ctx = Ctx {
+            store: match crate::store::Store::open(root) {
+                Ok(s) => s,
+                Err(_) => return,
+            },
+            caller: caller.clone(),
+            cwd: std::path::PathBuf::from("/"),
+            env: std::collections::HashMap::new(),
+            out: std::cell::RefCell::new(Box::new(std::io::sink())),
+        };
+        let Ok(repo) = Repo::open(&ctx, &project) else { continue };
+        let remotes: Vec<String> = repo
+            .p
+            .db
+            .config_all()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(k, _)| {
+                // A setting of this machine is `<key>@<machine>`.
+                let name = k.split('@').next()?.strip_prefix("cloud.remote.")?.strip_suffix(".url")?.to_string();
+                let url = crate::cmd::remote::remote_url(&repo, &name).ok()?;
+                ["file://", "s3://", "layr+https://"].iter().any(|s| url.starts_with(s)).then_some(name)
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        for remote in remotes {
+            let swept = open_named(&remote, &repo).and_then(|mut store| {
+                store.connect(&ctx)?;
+                overlays::sweep_caches(&store, &ctx, &repo, false)
+            });
+            match swept {
+                Ok(list) => {
+                    for (overlay, s) in list.into_iter().filter(|(_, s)| !s.trees.is_empty()) {
+                        eprintln!("layr daemon: {project} remote {remote} overlay {overlay}: deleted {} dead cache state(s), {} bytes", s.trees.len(), s.bytes);
+                    }
+                }
+                Err(e) => eprintln!("layr daemon: {project} remote {remote}: cache sweep skipped: {e:#}"),
+            }
+        }
+    }
 }
 
 /// Validate the gateway URL before a remote is written to project configuration.

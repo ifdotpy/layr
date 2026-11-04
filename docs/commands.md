@@ -26,7 +26,7 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | changes       | `comment <change> <text> [--version vN] [--path <path>] [--line N] [--reply-to <id>] [--json]`, `change list`, `change show <id>`, `change log <id>`, `change diff <id> [--from vN] [--to vM]` |
 | requests      | `request <kind> ... --person [--remote <name>] [--expires <epoch-ms>]`, `requests apply [--remote <name>] [--json]` |
 | person        | `person keys [--paper-key-out <path>] [--site <url>] [--store <url>]`, `person show [--json]`, `person accept`, `access person-key <login> <public-key>` |
-| setup         | `init [--allow-root-snapshots] [--volume <name>]`, `init [<project>] --from-git <checkout> [--line <name>]`, `projects`, `config`, `daemon [--allow-root-snapshots]`                             |
+| setup         | `init [--allow-root-snapshots] [--volume <name>]`, `init [<project>] --from-git <checkout> [--line <name>]`, `projects`, `project delete <project>` (a project without lines, admin only), `config`, `daemon [--allow-root-snapshots]`                             |
 | volumes       | `volume add <name> <path>`, `volume list [--json]`, `volume remove <name>`, `volume default <name>`, `project move <project> <volume>`, `clone <url> [<project>] --volume <name>`, `git clone <url> [<project>] --volume <name>` ([volumes](volumes.md)) |
 
 `init` and `daemon` refuse a store in the root subvolume, because a system snapshot rollback would empty it. `--allow-root-snapshots` or `LAYR_ALLOW_ROOT_SNAPSHOTS=1` overrides the check. See [Btrfs root snapshots](btrfs-root-snapshots.md).
@@ -43,6 +43,13 @@ as `<checkout>.before-layr`, and the line moves to the checkout's path (`line mo
 changes files of the project, and the new line is protected. The command refuses a checkout with
 uncommitted changes, one with more worktrees, a subfolder of a checkout, and a checkout on
 another file system than the store. The project name is the folder name unless given.
+
+layr ignores what git ignores: the `.gitignore` and `.layrignore` files of the tree, and the
+local file `.git/info/exclude` of a line folder (below the root's rule files, as in git; it never
+goes into a state). `init --from-git` adds the patterns of the user's `core.excludesFile` (or
+`~/.config/git/ignore`) to the checkout's `.git/info/exclude` first, so the import takes no file
+that `git status` did not show, and keeps all local patterns as the project setting `ignore.local`.
+The `.git` folder of each line of the project gets them in its `info/exclude`.
 
 Person signing-key pins are machine-local: enrollment pins them on the executor, and an admin can later run `layr access person-key <login> <public-key>` there.
 Pins do not replicate because a trusted writer machine must not replace a person's key and impersonate their approvals.

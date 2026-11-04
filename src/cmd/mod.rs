@@ -79,6 +79,10 @@ pub fn here(ctx: &Ctx) -> Result<Here<'_>> {
         Some(n) => Some(repo.line(n)?),
         None => None,
     };
+    // The local ignore file of the line applies also where a command scans a copy of the folder.
+    if let Some(l) = &line {
+        crate::ignore_rules::set_line_exclude(Some(repo.working(l).join(crate::ignore_rules::LOCAL_EXCLUDE)));
+    }
     Ok(Here { repo, line, loc })
 }
 
@@ -216,7 +220,7 @@ Git bridge:
 Overlays (files with their own readers and history, shown in lines):
    overlay create, set, list, readers, use, move, remote, log, show, diff, grep, ls-files
 Projects and machines:
-   init [--allow-root-snapshots], projects, config, cache, export, gc, du [<line>...] [--json], fsck, reindex,
+   init [--allow-root-snapshots], projects, project delete <project>, config, cache, export, gc, du [<line>...] [--json], fsck [--caches], reindex,
    daemon [--allow-root-snapshots]
 
 Lines are folders: <root>/projects/<project>/lines/<line>. Run commands inside a line folder.

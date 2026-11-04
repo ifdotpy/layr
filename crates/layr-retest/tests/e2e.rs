@@ -74,12 +74,13 @@ fn sh(dir: &Path, root: &Path, prog: &str, args: &[&str]) -> (String, String) {
     (out, err)
 }
 
-/// The newest record file of a line.
+/// The newest record file of a line (`<state>.json`; the folder is a cache, so layr keeps other files there too,
+/// such as `.layr-times`).
 fn last_record_path(line: &Path) -> PathBuf {
     std::fs::read_dir(line.join(".layr-retest"))
         .unwrap()
         .map(|e| e.unwrap().path())
-        .filter(|p| p.is_file())
+        .filter(|p| p.is_file() && p.extension().is_some_and(|x| x == "json"))
         .max_by_key(|p| p.metadata().unwrap().modified().unwrap())
         .unwrap()
 }

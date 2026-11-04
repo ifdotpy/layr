@@ -15,6 +15,13 @@ pub trait Host {
     fn deadline(&self) -> Instant;
 }
 
+/// The command that names a toolchain (`CacheAdapter::toolchain_command`).
+pub struct Toolchain {
+    pub program: &'static str,
+    pub args: &'static [&'static str],
+    pub files: &'static [&'static str],
+}
+
 /// A cache adapter. It prunes a cache folder of a line to its live set.
 pub trait CacheAdapter: Send + Sync {
     /// The adapter name. It is the value of the overlay property `prune`.
@@ -45,6 +52,23 @@ pub trait CacheAdapter: Send + Sync {
     fn relocated(&self, folder: &Path, at: &Path) -> Result<usize, String> {
         let _ = (folder, at);
         Ok(0)
+    }
+    /// The environment variables that change what a build writes into `folder`. A cache built with other values
+    /// builds again, so their values are parts of the cache key. The default names none.
+    fn key_env(&self) -> &'static [&'static str] {
+        &[]
+    }
+    /// The environment that the project pins for the builds of `folder` (it wins over the caller's), read from the
+    /// project's files. Runs no process. The default pins nothing.
+    fn pinned_env(&self, folder: &Path) -> Vec<(String, String)> {
+        let _ = folder;
+        Vec::new()
+    }
+    /// The command whose output names the toolchain that builds `folder`: the program, its arguments, and the
+    /// files of the folder's parent that select the toolchain. Core runs it as the line owner in an empty folder
+    /// with copies of those files; the output is a part of the cache key. The default has none.
+    fn toolchain_command(&self) -> Option<Toolchain> {
+        None
     }
 }
 
