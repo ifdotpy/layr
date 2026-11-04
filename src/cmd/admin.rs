@@ -414,14 +414,18 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
             in_ring |= repo.p.db.holder_exists("undo", holder)?;
         }
         if !in_ring {
-            return Err(exit(
-                1,
+            let past = if r.op == "line.delete" {
                 format!(
-                    "error: cannot undo: operation {} is past the newest {} operations of its line (undo.ops)",
-                    ids::short(&r.id),
+                    "the newest {} deleted lines (undo.deleted)",
+                    repo.p.config_u64("undo.deleted", crate::owners::UNDO_DELETED_DEFAULT as u64)
+                )
+            } else {
+                format!(
+                    "the newest {} operations of its line (undo.ops)",
                     repo.p.config_u64("undo.ops", crate::owners::UNDO_OPS_DEFAULT as u64)
-                ),
-            ));
+                )
+            };
+            return Err(exit(1, format!("error: cannot undo: operation {} is past {past}", ids::short(&r.id))));
         }
     }
     // The states that the undo reads stay on disk while it runs (every line's entry of the record).
@@ -1186,20 +1190,35 @@ pub fn try_command(
 pub struct OwnersCheck {
     pub missing: Vec<crate::owners::Row>,
     pub extra: Vec<crate::owners::Row>,
-    pub leaks: Vec<String>,
+    /// Undo owners of deleted lines outside the deleted ring (`owners::stale_undo_rows`).
+    pub stale: Vec<crate::owners::Row>,
+    /// The present states that `gc --repair` frees: no row of the replay or a live pin names them.
+    pub freed: Vec<String>,
 }
 
 impl OwnersCheck {
     fn clean(&self) -> bool {
-        self.missing.is_empty() && self.extra.is_empty() && self.leaks.is_empty()
+        self.missing.is_empty() && self.extra.is_empty() && self.freed.is_empty()
     }
 }
 
 fn owners_check(repo: &Repo) -> Result<OwnersCheck> {
     let want = repo.p.db.recomputed_owners(&repo.p.store.machine.id)?;
     let (missing, extra) = repo.p.db.owners_diff(&want)?;
-    let leaks = repo.p.db.leaked_states()?;
-    Ok(OwnersCheck { missing, extra, leaks })
+    let stale = repo.p.db.stale_undo_rows()?;
+    let freed = repo.p.db.unowned_by(&kept_rows(repo, &want)?)?;
+    Ok(OwnersCheck { missing, extra, stale, freed })
+}
+
+/// The owner rows that a repair keeps: the replay plus the pins of live processes.
+fn kept_rows(repo: &Repo, want: &[crate::owners::Row]) -> Result<Vec<crate::owners::Row>> {
+    let mut rows = want.to_vec();
+    for (state, kind, holder) in repo.p.db.owner_rows()?.into_iter().filter(|r| r.1 == "pin") {
+        if crate::free::holder_alive(&holder) {
+            rows.push((state, kind, holder));
+        }
+    }
+    Ok(rows)
 }
 
 /// The bytes that only the storage of these states holds (as `layr du` counts them): clones that
@@ -1236,9 +1255,24 @@ fn check(ctx: &Ctx, repo: &Repo, quiet: bool) -> Result<i32> {
             outln!(ctx, "\textra: {} {k} {h}", ids::short(s));
         }
     }
-    if !c.leaks.is_empty() {
-        let bytes = states_bytes(repo, &c.leaks);
-        outln!(ctx, "leaks: {} state(s), {} would be freed by `layr gc --repair`", c.leaks.len(), human_size(bytes));
+    if !c.stale.is_empty() {
+        let freed: BTreeSet<&String> = c.freed.iter().collect();
+        let held: Vec<String> = c.stale.iter().map(|r| r.0.clone()).filter(|s| freed.contains(s)).collect();
+        outln!(
+            ctx,
+            "stale undo: {} owner(s) of deleted lines outside undo.deleted, holding {} that `layr gc --repair` frees",
+            c.stale.len(),
+            human_size(states_bytes(repo, &held))
+        );
+    }
+    if !c.freed.is_empty() {
+        let bytes = states_bytes(repo, &c.freed);
+        outln!(
+            ctx,
+            "leaks: {} state(s), {} would be freed by `layr gc --repair`",
+            c.freed.len(),
+            human_size(bytes)
+        );
     }
     if c.clean() {
         if !quiet {
@@ -1336,10 +1370,10 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) ->
     if dry {
         let c = snapshot(repo, || owners_check(repo))?;
         let queued: Vec<String> = repo.p.db.queued_frees()?;
-        let bytes = states_bytes(repo, &c.leaks);
+        let bytes = states_bytes(repo, &c.freed);
         if !quiet {
-            outln!(ctx, "would delete {} state(s), {}", c.leaks.len() + queued.len(), human_size(bytes));
-            for id in c.leaks.iter().take(50) {
+            outln!(ctx, "would delete {} state(s), {}", c.freed.len() + queued.len(), human_size(bytes));
+            for id in c.freed.iter().take(50) {
                 outln!(ctx, "\t{}", ids::short(id));
             }
             let caches = excess_caches(repo)?;
@@ -1348,7 +1382,7 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) ->
                 outln!(ctx, "\t{name}");
             }
         }
-        return Ok(c.leaks.len());
+        return Ok(c.freed.len());
     }
     // The slow reads go before the lock (#194): the replay of the records and the overlay pass.
     // Under the lock they are used when no record came in meanwhile (an equal records mark);
@@ -1702,13 +1736,7 @@ pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let c = owners_check(repo)?;
     if !c.clean() {
         problems += 1;
-        outln!(
-            ctx,
-            "owners differ from the records: {} missing, {} extra, {} leaked",
-            c.missing.len(),
-            c.extra.len(),
-            c.leaks.len()
-        );
+        outln!(ctx, "owners differ from the records: {} missing, {} extra, {} leaked", c.missing.len(), c.extra.len(), c.freed.len());
         for (s, k, h) in c.missing.iter().take(5) {
             outln!(ctx, "\tmissing: {} {k} {h}", ids::short(s));
         }
