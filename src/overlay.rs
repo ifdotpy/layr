@@ -31,7 +31,7 @@ use crate::repo::{skip_path, Repo, Temp};
 use crate::storage as btrfs;
 use crate::store::Project;
 use crate::tree::Tree;
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -611,6 +611,10 @@ impl<'a> Repo<'a> {
     // ----- overlays of the project -----
 
     pub fn overlay_info(&self, name: &str) -> Result<Option<Info>> {
+        self.overlay_info_with(name, None)
+    }
+
+    fn overlay_info_with(&self, name: &str, overlay: Option<&Project>) -> Result<Option<Info>> {
         if crate::store::check_name("overlay", name).is_err() {
             return Ok(None);
         }
@@ -621,7 +625,16 @@ impl<'a> Repo<'a> {
         }
         let mut value = self.p.db.overlay_config(&format!("overlay.{name}"))?;
         if value.is_none() {
-            if let Ok(op) = self.overlay_project(name) {
+            let owned;
+            let op = if let Some(op) = overlay {
+                Some(op)
+            } else if self.p.store.project_dir(&format!("{}%{name}", self.p.name))?.try_exists()? {
+                owned = self.overlay_project(name)?;
+                Some(&owned)
+            } else {
+                None
+            };
+            if let Some(op) = op {
                 if op.db.overlay_config("overlay")?.is_some_and(|v| v["project"] == self.p.id && v["name"] == name) {
                     value = op.db.overlay_config(&format!("overlay.{name}"))?;
                 }
@@ -647,18 +660,31 @@ impl<'a> Repo<'a> {
     /// The setting `overlay.<name>.<suffix>`: in the project's records, or for a hidden overlay
     /// in the overlay's own records.
     pub fn overlay_setting(&self, name: &str, suffix: &str) -> Result<Option<serde_json::Value>> {
+        self.overlay_setting_with(name, suffix, None)
+    }
+
+    fn overlay_setting_with(&self, name: &str, suffix: &str, overlay: Option<&Project>) -> Result<Option<serde_json::Value>> {
         let key = format!("overlay.{name}.{suffix}");
-        if self.need_overlay(name)?.hidden {
-            return self.overlay_project(name)?.db.overlay_config(&key);
+        let info = self.overlay_info_with(name, overlay)?
+            .ok_or_else(|| crate::cmd::exit(1, format!("error: no overlay '{name}' in project {}", self.p.name)))?;
+        if info.hidden {
+            return match overlay {
+                Some(op) => op.db.overlay_config(&key),
+                None => self.overlay_project(name)?.db.overlay_config(&key),
+            };
         }
         self.p.db.overlay_config(&key)
     }
 
     /// The properties of an overlay (docs/cache-overlays.md, section 2).
     pub fn overlay_props(&self, name: &str) -> Result<Props> {
+        self.overlay_props_with(name, None)
+    }
+
+    fn overlay_props_with(&self, name: &str, overlay: Option<&Project>) -> Result<Props> {
         let mut values = BTreeMap::new();
         for prop in PROPS {
-            if let Some(v) = self.overlay_setting(name, prop)? {
+            if let Some(v) = self.overlay_setting_with(name, prop, overlay)? {
                 values.insert(*prop, v);
             }
         }
@@ -706,18 +732,22 @@ impl<'a> Repo<'a> {
         for entry in std::fs::read_dir(self.p.dir.join("meta/overlays")).into_iter().flatten().flatten() {
             names.insert(entry.file_name().to_string_lossy().into_owned());
         }
-        Ok(names.into_iter().filter(|n| self.overlay_info(n).ok().flatten().is_some()).collect())
+        let mut found = Vec::new();
+        for name in names {
+            if self.overlay_info(&name)?.is_some() { found.push(name); }
+        }
+        Ok(found)
     }
 
     pub fn visible_overlay_names(&self, ctx: &Ctx) -> Result<Vec<String>> {
-        Ok(self
-            .overlay_names()?
-            .into_iter()
-            .filter(|name| {
-                !self.overlay_info(name).ok().flatten().is_some_and(|i| i.hidden)
-                    || self.reads_overlay(name, ctx.caller.uid, ctx.caller.gid).unwrap_or(false)
-            })
-            .collect())
+        let mut visible = Vec::new();
+        for name in self.overlay_names()? {
+            if !self.overlay_info(&name)?.is_some_and(|i| i.hidden)
+                || self.reads_overlay(&name, ctx.caller.uid, ctx.caller.gid)? {
+                visible.push(name);
+            }
+        }
+        Ok(visible)
     }
 
     /// Only public layers may appear in a parent record.
@@ -1188,12 +1218,12 @@ impl<'a> Repo<'a> {
     /// The states of overlay `name` (project `orepo`) beyond its history limit `keep_n` that no
     /// line uses. It only reads.
     fn history_excess(&self, orepo: &Repo, name: &str, keep_n: usize, lines: &[Line], stacks: &BTreeMap<String, Vec<Layer>>) -> Result<Vec<String>> {
-        let Some(info) = self.overlay_info(name)? else {
+        let Some(info) = self.overlay_info_with(name, Some(&orepo.p))? else {
             return Ok(Vec::new());
         };
         let mut keep: BTreeSet<String> = BTreeSet::from([info.root.clone()]);
         // A cache overlay keeps nothing for a line that is gone (docs/cache-overlays.md).
-        let cache = self.overlay_setting(name, "cache")?.and_then(|v| v.as_bool()).unwrap_or(false);
+        let cache = self.overlay_setting_with(name, "cache", Some(&orepo.p))?.and_then(|v| v.as_bool()).unwrap_or(false);
         let live: BTreeSet<String> = lines.iter().map(|l| format!("line-{}", l.id)).collect();
         for ol in orepo.p.db.lines()? {
             if cache && !live.contains(&ol.name) {
@@ -1261,27 +1291,31 @@ impl<'a> Repo<'a> {
             return Ok(None);
         }
         let orepo = self.overlay_repo(name)?;
+        self.overlay_clean_with(name, lines, stacks, &orepo).map(Some)
+    }
+
+    fn overlay_clean_with(&self, name: &str, lines: &[Line], stacks: &BTreeMap<String, Vec<Layer>>, orepo: &Repo) -> Result<OverlayClean> {
         let mark = orepo.p.db.records_mark()?;
-        let cache = self.overlay_setting(name, "cache")?.and_then(|v| v.as_bool()).unwrap_or(false);
-        let orphans = if cache { self.orphan_cache_lines(&orepo)? } else { Vec::new() };
-        let keep_n = self.overlay_props(name)?.history.map(|n| n as usize);
+        let cache = self.overlay_setting_with(name, "cache", Some(&orepo.p))?.and_then(|v| v.as_bool()).unwrap_or(false);
+        let orphans = if cache { self.orphan_cache_lines(orepo)? } else { Vec::new() };
+        let keep_n = self.overlay_props_with(name, Some(&orepo.p))?.history.map(|n| n as usize);
         let excess = match keep_n {
-            Some(n) => self.history_excess(&orepo, name, n, lines, stacks)?,
+            Some(n) => self.history_excess(orepo, name, n, lines, stacks)?,
             None => Vec::new(),
         };
-        Ok(Some(OverlayClean { name: name.to_string(), mark, orphans, keep_n, excess }))
+        Ok(OverlayClean { name: name.to_string(), mark, orphans, keep_n, excess })
     }
 
     /// Apply an overlay plan. The caller holds the project lock, and no record of the project came
     /// in since the plan was made (the lines and stacks are the same). An overlay whose own records
     /// changed is read again under its lock. A failure leaves old states for the next gc.
-    pub fn commit_overlay_plan(&self, ctx: &Ctx, plan: OverlayPlan) {
+    pub fn commit_overlay_plan(&self, ctx: &Ctx, plan: OverlayPlan) -> Result<()> {
         for c in plan.overlays {
             let name = c.name.clone();
-            if let Err(e) = self.commit_overlay_clean(ctx, c, &plan.lines, &plan.stacks) {
-                eprintln!("warning: overlay '{name}': old states stay until the next gc: {e:#}");
-            }
+            self.commit_overlay_clean(ctx, c, &plan.lines, &plan.stacks)
+                .with_context(|| format!("repair overlay '{name}'"))?;
         }
+        Ok(())
     }
 
     fn commit_overlay_clean(&self, ctx: &Ctx, c: OverlayClean, lines: &[Line], stacks: &BTreeMap<String, Vec<Layer>>) -> Result<()> {
@@ -1290,10 +1324,7 @@ impl<'a> Repo<'a> {
         let c = if orepo.p.db.records_mark()? == c.mark {
             c
         } else {
-            match self.overlay_clean(&c.name, lines, stacks)? {
-                Some(c) => c,
-                None => return Ok(()),
-            }
+            self.overlay_clean_with(&c.name, lines, stacks, &orepo)?
         };
         self.drop_overlay_lines(ctx, &orepo, &c.name, &c.orphans)?;
         // The states of the dropped lines are dead now; `delete_excess` skips them.

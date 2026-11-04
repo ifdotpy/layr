@@ -323,6 +323,7 @@ fn handle(sock: UnixStream, root: &Path, registry_uids: &[u32]) -> i32 {
 /// Run a command for a caller and return its exit code (errors are printed to stderr).
 pub fn run_as(argv: Vec<String>, caller: Caller, cwd: PathBuf, env: HashMap<String, String>, root: &Path) -> i32 {
     crate::repo::begin_command();
+    let _overlay_handles = crate::cmd::cache_overlay_handles(&argv).then(crate::overlay_handles::Command::begin);
     let metadata_read = crate::cmd::metadata_read(&argv);
     let store = match Store::open_for(root, metadata_read) {
         Ok(s) => s,
@@ -350,7 +351,10 @@ pub fn run_as(argv: Vec<String>, caller: Caller, cwd: PathBuf, env: HashMap<Stri
         }
     };
     // The free step: after the commit and the store lock (docs/ownership.md).
-    crate::free::finish(&ctx.store);
+    if let Err(e) = crate::free::finish(&ctx.store) {
+        eprintln!("fatal: free step: {e:#}");
+        return 128;
+    }
     code
 }
 

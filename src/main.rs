@@ -21,6 +21,7 @@ mod changes;
 mod cmd;
 mod db;
 mod free;
+mod overlay_handles;
 mod owners;
 mod dedup;
 mod diff;

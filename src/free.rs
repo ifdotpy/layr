@@ -75,6 +75,13 @@ pub fn register(store: &Store, name: &str, conn: std::rc::Rc<rusqlite::Connectio
     });
 }
 
+/// Register an overlay without retaining another lease on its cached connection.
+pub fn register_overlay(store: &Store, name: &str) {
+    if let Ok(mut projects) = PROJECTS.lock() {
+        projects.insert((store.root.clone(), name.to_string()));
+    }
+}
+
 /// The daemon's registry setup opens projects before forking. Release those handles in the
 /// parent, and do not leave startup registrations for its request children.
 pub fn discard_startup() {
@@ -85,7 +92,7 @@ pub fn discard_startup() {
 /// The free step of the projects that this command opened. Errors wait for the next command
 /// (the queue keeps the states). Test only: `LAYR_TEST_EXIT_AFTER_COMMIT` exits with status 86
 /// here, before any storage moves, when a queue is not empty (tests/t99-ownership-free.sh).
-pub fn finish(store: &Store) {
+pub fn finish(store: &Store) -> Result<()> {
     release_held();
     let projects = match PROJECTS.lock() {
         Ok(mut projects) => {
@@ -93,7 +100,7 @@ pub fn finish(store: &Store) {
             for key in &keys { projects.remove(key); }
             keys
         }
-        Err(_) => return,
+        Err(_) => anyhow::bail!("free project registry lock poisoned"),
     };
     for (root, name) in projects {
         let key = (root, name.clone());
@@ -106,6 +113,12 @@ pub fn finish(store: &Store) {
         // A project without pending work is not opened: an open prints its trace (LAYR_TRACE).
         let has_pending = if let Some(conn) = conn {
             pending(&conn)
+        } else if name.contains('%') && crate::overlay_handles::active() {
+            let path = crate::store::db_file(&store.project_dir(&name)?);
+            match crate::overlay_handles::get(&path, true)? {
+                Some(db) => pending(&db.conn),
+                None => pending(&rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?),
+            }
         } else {
             store.project_dir(&name).ok().and_then(|dir| {
                 rusqlite::Connection::open_with_flags(crate::store::db_file(&dir), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()
@@ -128,6 +141,7 @@ pub fn finish(store: &Store) {
     if let Ok(mut projects) = PROJECTS.lock() {
         projects.retain(|(root, _)| *root != store.root);
     }
+    Ok(())
 }
 
 /// True when a project has queued states or pins to release. Reads the database directly.

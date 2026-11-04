@@ -1481,17 +1481,10 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) ->
         }
         // Cache overlay lines of deleted lines (their states go below), and overlays with a
         // history limit (docs/cache-overlays.md).
-        if let Err(e) = repo.free_removed_overlays(ctx) {
-            eprintln!("warning: removed cache overlays stay until the next gc: {e:#}");
-        }
-        match overlays {
-            Ok(plan) => repo.commit_overlay_plan(ctx, plan),
-            Err(e) => eprintln!("warning: overlays: old states stay until the next gc: {e:#}"),
-        }
+        repo.free_removed_overlays(ctx)?;
+        repo.commit_overlay_plan(ctx, overlays?)?;
         // Folder overlays with an LRU limit.
-        if let Err(e) = repo.cache_gc_lru() {
-            eprintln!("warning: cache size limits not applied: {e:#}");
-        }
+        repo.cache_gc_lru()?;
         #[cfg(target_os = "macos")]
         {
             let lines = repo.lines()?;
