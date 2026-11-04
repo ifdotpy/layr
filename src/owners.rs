@@ -569,7 +569,7 @@ impl Db {
     /// The owners that the stored records give: a replay into a temporary database.
     pub fn recomputed_owners(&self, local: &str) -> Result<Vec<Row>> {
         let mem = Db { conn: Connection::open_in_memory()?, stale: false };
-        mem.conn.set_prepared_statement_cache_capacity(crate::db::STATEMENT_CACHE_CAPACITY);
+        crate::db::configure_connection(&mem.conn)?;
         mem.conn.execute_batch(SCHEMA)?;
         fill_only(|| -> Result<()> {
             for raw in self.all_lines()? {

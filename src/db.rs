@@ -94,11 +94,20 @@ const DERIVED: &[&str] = &[
 /// Derived tables of older versions, dropped on migration.
 const RETIRED: &[&str] = &["slots", "mirrors", "groups", "group_lines"];
 
+/// Keep cached query plans stable across parameter bindings. SQLite 3.54 otherwise
+/// recompiles hot lookups on each binding; this applies to both disk and replay DBs.
+/// The planner cannot specialize plans to individual parameter values in this mode.
+pub(crate) fn configure_connection(conn: &Connection) -> Result<()> {
+    conn.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_ENABLE_QPSG, true)?;
+    conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
+    Ok(())
+}
+
 impl Db {
     /// Open the database. Returns it and whether the derived tables must be rebuilt.
     pub fn open(path: &Path) -> Result<Db> {
         let conn = Connection::open(path)?;
-        conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
+        configure_connection(&conn)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         // FULL: a committed record survives a power loss. The database has its own subvolume,
         // so this fsync costs a few milliseconds even right after a snapshot.
@@ -1348,6 +1357,27 @@ pub fn need<T>(v: Option<T>, what: &str) -> Result<T> {
 mod tests {
     use super::*;
     use crate::model::{Author, StateKind, StateRec};
+
+    #[test]
+    fn cached_line_lookup_does_not_replan_for_each_name() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        configure_connection(&conn)?;
+        conn.execute_batch(SCHEMA)?;
+        for i in 0..32 {
+            conn.execute("INSERT INTO lines(id, name, deleted, time) VALUES(?1, ?1, 0, ?2)",
+                rusqlite::params![format!("line-{i}"), i])?;
+        }
+        let mut stmt = conn.prepare_cached(
+            "SELECT id FROM lines WHERE name=?1 AND deleted=0 ORDER BY time DESC LIMIT 1"
+        )?;
+        for i in 0..32 {
+            let name = format!("line-{i}");
+            let id: String = stmt.query_row([&name], |row| row.get(0))?;
+            assert_eq!(id, name);
+        }
+        assert_eq!(stmt.get_status(rusqlite::StatementStatus::RePrepare), 0);
+        Ok(())
+    }
 
     #[test]
     fn opening_a_database_that_init_is_creating_keeps_its_tables() {
