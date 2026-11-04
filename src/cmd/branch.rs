@@ -317,7 +317,7 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
             crate::gitbridge::sync_store_access(repo)?;
             // The line's head no longer keeps its caches.
             super::admin::trash_excess_caches(repo)?;
-            // Its cache overlay lines go too; their states go at the next gc.
+            // Its cache overlay lines go too, with their states.
             if let Err(e) = repo.drop_orphan_cache_lines(ctx) {
                 eprintln!("warning: cache overlay lines of deleted lines stay until the next gc: {e:#}");
             }
