@@ -144,7 +144,8 @@ l queue add head --into automatic >/dev/null
 l config queue.run automatic
 "$LAYR" daemon --socket "$T/queue.sock" --tick 1 > "$T/daemon.log" 2>&1 &
 DPID=$!
-trap 'kill $DPID 2>/dev/null; cleanup' EXIT
+# The daemon may still write when the trap starts: wait (bounded) for it to exit before the cleanup.
+trap 'kill $DPID 2>/dev/null; for i in $(seq 1 50); do kill -0 $DPID 2>/dev/null || break; sleep 0.1; done; cleanup' EXIT
 for i in $(seq 1 150); do [ "$(l --line automatic rev-parse head)" = "$TICK" ] && break; sleep 0.1; done
 eq 'a daemon tick processes the pending entry' "$TICK" "$(l --line automatic rev-parse head)"
 ok 'the queue index rebuilds' l reindex -q
