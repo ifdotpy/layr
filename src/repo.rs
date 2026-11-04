@@ -1484,7 +1484,8 @@ impl<'a> Repo<'a> {
     pub fn drop_stage(&self, line: &Line) -> Result<()> {
         let p = self.p.stage_path(&line.id);
         if p.exists() {
-            btrfs::delete_tree(&p)?;
+            // Under the project lock the stage is only renamed into the trash (emptied after the lock).
+            self.p.trash(&p)?;
         }
         let _ = std::fs::remove_file(self.stage_base_file(line));
         Ok(())
