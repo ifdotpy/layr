@@ -27,6 +27,26 @@ ok "undo of the delete" l undo
 eq "undo brings the unsaved change back" "unsaved" "$(cat "$P/topic/tracked.txt")"
 eq "undo brings the new files back" "300" "$(ls "$P/topic/bulk" | wc -l | tr -d ' ')"
 
+# A folder that changes after the prepare step (a build writes into it) is not prepared again: the
+# prepared state stays as an automatic state, and the state under the lock adds only the change.
+cd "$P/main" || exit 1
+l line new -q busy
+cd "$P/busy" || exit 1
+mkdir -p bulk && for i in $(seq 1 300); do printf '%s\n' "$i" > "bulk/f$i"; done
+cd "$P/main" || exit 1
+LAYR_TEST_LINE_DELETE_PAUSE_MS=3000 LAYR_TRACE=1 l line delete -D busy 2>"$T/busy.trace" &
+pid=$!
+sleep 1
+printf 'late\n' > "$P/busy/late.txt"
+printf 'changed\n' > "$P/busy/bulk/f1"
+wait $pid
+eq "the busy line is deleted" 0 "$?"
+[ "$(uname -s)" = Darwin ] && eq "the save is prepared once" 1 "$(grep -c "prepare save" "$T/busy.trace")"
+ok "undo of the busy delete" l undo
+eq "undo brings the file written after the prepare back" late "$(cat "$P/busy/late.txt")"
+eq "undo brings the change made after the prepare back" changed "$(cat "$P/busy/bulk/f1")"
+eq "undo brings the prepared files back" 300 "$(ls "$P/busy/bulk" | wc -l | tr -d ' ')"
+
 # A delete of a line without unsaved changes still works and undoes.
 l line new -q clean main
 cd "$P/clean" || exit 1
