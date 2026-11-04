@@ -1385,7 +1385,7 @@ fn evict_stored(repo: &Repo) -> Result<Vec<String>> {
 
 /// The periodic repair of a project (`service.rs`): it prints nothing.
 pub fn gc_repair_quiet(ctx: &Ctx, repo: &Repo) -> Result<usize> {
-    repair_project(ctx, repo, false, true, false)
+    repair_project(ctx, repo, false, true, false, None)
 }
 
 /// Replace the owners table with the replay of the records (live pins kept) and mark the leaked
@@ -1417,7 +1417,7 @@ pub fn repair_table(repo: &Repo, free: bool, diff: Option<(Vec<crate::owners::Ro
 /// states are freed, expired refs are released and the side caches are trimmed. The storage of
 /// the freed states moves after the lock (`free::finish_project`), then the trash is emptied.
 /// With `dry`, nothing changes: it prints what it would free.
-fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) -> Result<usize> {
+fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool, bases_read: Option<&BTreeMap<String, String>>) -> Result<usize> {
     if dry {
         let c = snapshot(repo, || owners_check(repo))?;
         let queued: Vec<String> = repo.p.db.queued_frees()?;
@@ -1496,7 +1496,7 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) ->
         {
             let lines = repo.lines()?;
             let heads: BTreeSet<String> = lines.iter().map(|l| l.head.clone()).collect();
-            let done = crate::thin::upkeep(&repo.p, &heads)?;
+            let done = crate::thin::upkeep_with(&repo.p, &heads, bases_read)?;
             // Saved statuses of lines that are gone.
             let ids: BTreeSet<String> = lines.iter().map(|l| format!("{}.cache", l.id)).collect();
             if let Ok(rd) = std::fs::read_dir(repo.p.meta_dir().join("status")) {
@@ -1608,7 +1608,7 @@ fn gc_all_projects(ctx: &Ctx, dry: bool, quiet: bool) -> Result<i32> {
     for name in ctx.store.project_names()?.into_iter().filter(|n| !n.contains('%')) {
         let result = Repo::open(ctx, &name).and_then(|repo| {
             repo.require(ctx, "gc")?;
-            repair_project(ctx, &repo, dry, true, false)
+            repair_project(ctx, &repo, dry, true, false, None)
         });
         match result {
             Ok(freed) if !quiet => outln!(ctx, "{name}: {freed} state(s)"),
@@ -1636,8 +1636,15 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let h = here(ctx)?;
     h.repo.require(ctx, "gc")?;
+    // The layers on disk, read once: the bases check, the repair and the thin-state upkeep share them.
+    let (disk_bases, bases_diff) = h.repo.p.layer_bases_check()?;
+    // Test hook (tests/t120-bases-check.sh): wait after the read of the layers, so a test can make
+    // a layer before the repair of the table.
+    if let Some(ms) = std::env::var("LAYR_TEST_GC_PAUSE_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
     let code = if a.has("--repair") {
-        repair_project(ctx, &h.repo, a.has("-n"), a.has("-q"), true)?;
+        repair_project(ctx, &h.repo, a.has("-n"), a.has("-q"), true, Some(&disk_bases))?;
         // Trees of imported states that no strong owner keeps: git builds them again on read.
         let built = repair_built(&h.repo, a.has("-n"))?;
         if !a.has("-q") {
@@ -1651,6 +1658,40 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
     } else {
         check(ctx, &h.repo, a.has("-q"))?
     };
+    // The table of thin-layer bases must match the layers on disk (`gc --repair` repairs it). The
+    // disk was read before the lock: a command may have made or removed a layer since. Only the
+    // rows that differ from that read change, and only while the disk still agrees with it: the row
+    // of a layer made since stays, a row is removed only while its layer is still not on disk.
+    if a.has("--repair") && !a.has("-n") && !bases_diff.is_empty() {
+        let _lock = if h.repo.p.holds_lock() { None } else { Some(h.repo.p.lock()?) };
+        let rows = h.repo.p.db.bases_rows()?;
+        let set: BTreeMap<String, String> = disk_bases
+            .iter()
+            .filter(|(state, base)| rows.get(*state) != Some(*base) && h.repo.p.delta_path(state).is_dir())
+            .map(|(s, b)| (s.clone(), b.clone()))
+            .collect();
+        let gone: Vec<String> =
+            rows.keys().filter(|state| !disk_bases.contains_key(*state) && !h.repo.p.delta_path(state).is_dir()).cloned().collect();
+        h.repo.p.db.fix_bases(&set, &gone)?;
+    }
+    if !a.has("-q") || !bases_diff.is_empty() {
+        let verb = if a.has("--repair") && !a.has("-n") { "repaired" } else { "differ" };
+        outln!(ctx, "layer bases: {} difference(s), {verb}", bases_diff.len());
+        for line in bases_diff.iter().take(20) {
+            outln!(ctx, "\t{line}");
+        }
+    }
+    // Upgrade backups (schema changes, src/db.rs) older than 14 days. --repair removes them.
+    let db_file = crate::store::db_file(&h.repo.p.dir);
+    let old_backups = crate::db::old_upgrade_backups(&db_file, 14)?;
+    for (path, bytes, days) in &old_backups {
+        outln!(ctx, "old upgrade backup: {} ({:.1} MiB, {days} days old)", path.display(), *bytes as f64 / 1_048_576.0);
+    }
+    if a.has("--repair") && !a.has("-n") {
+        for (path, _, _) in &old_backups {
+            std::fs::remove_file(path)?;
+        }
+    }
     leftovers(ctx, &h.repo, a.has("--repair"), a.has("-n"), a.has("-q"))?;
     // After the project lock is released: hashing and comparing cache files takes long.
     let shared = if a.has("--dedup") { Some(crate::dedup::run(&h.repo, a.has("-n"))?) } else { None };
@@ -1907,7 +1948,7 @@ fn fsck_overlays(ctx: &Ctx, repo: &Repo, repair: bool) -> Result<usize> {
         for l in o.lines()? {
             if !o.p.has_state(&l.head) {
                 problems += 1;
-                let deleted = match l.name.strip_prefix("line-") {
+                let deleted = match crate::overlay::line_of_overlay_line(&l.name) {
                     Some(id) => repo.p.db.line_deleted(id)?,
                     None => false,
                 };
@@ -2070,6 +2111,9 @@ fn caller_git(ctx: &Ctx, dir: &std::path::Path, args: &[&str]) -> Result<std::pr
 }
 
 pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    if args.iter().any(|a| a == "--from-git") {
+        return init_from_git(ctx, args);
+    }
     let spec = Spec::new()
         .value("--from")
         .value("--git")
@@ -2084,7 +2128,7 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let name = a
         .pos
         .first()
-        .ok_or_else(|| exit(128, "usage: layr init <project> [--from <folder> | --git <url>] [--line main] [--volume <name>]"))?;
+        .ok_or_else(|| exit(128, "usage: layr init <project> [--from <folder> | --git <url>] [--line main] [--volume <name>], or layr init [<project>] --from-git <checkout>"))?;
     let line_name = a.get("--line").unwrap_or("main").to_string();
     let owner = match a.get("--owner") {
         Some(o) if ctx.caller.is_root() => o.parse::<u32>().or_else(|_| -> Result<u32> {
@@ -2276,6 +2320,229 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
         outln!(ctx, "{}", repo.working(&l).display());
     }
     Ok(0)
+}
+
+/// `layr init [<project>] --from-git <checkout>`: a project from a Git checkout, in place. The
+/// history comes from the folder (no network): its branches as `local/<branch>`, the branches of
+/// its `origin` as `origin/<branch>` (imported on first use), and the line of its current branch
+/// starts at HEAD. Ignored `target` (next to Cargo.toml) and `node_modules` (next to package.json)
+/// folders move into the line and become its caches. Then the checkout is kept as
+/// `<checkout>.before-layr` and the line moves to the checkout's path. Refused: uncommitted
+/// changes, more than one worktree, another file system.
+fn init_from_git(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    let spec = Spec::new().value("--from-git").value("--line").value("--volume").flag("-q|--quiet");
+    let a = parse(&spec, args)?;
+    let usage = "usage: layr init [<project>] --from-git <checkout> [--line <name>]";
+    let from = a.get("--from-git").ok_or_else(|| exit(128, usage))?;
+    let src = if from.starts_with('/') { std::path::PathBuf::from(from) } else { ctx.cwd.join(from) };
+    let src = crate::privs::as_caller_fs(ctx, || Ok(src.canonicalize()?)).map_err(|_| exit(128, format!("fatal: not a folder: {from}")))?;
+    let git_text = |args: &[&str]| -> Result<String> {
+        let out = caller_git(ctx, &src, args)?;
+        if !out.status.success() {
+            bail!("git {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
+    };
+    // Checks before anything changes.
+    let top = git_text(&["rev-parse", "--show-toplevel"]).map_err(|_| exit(128, format!("fatal: {} is not a Git checkout", src.display())))?;
+    if std::path::Path::new(&top).canonicalize().ok().as_deref() != Some(src.as_path()) {
+        return Err(exit(128, format!("fatal: {} is inside the checkout {top}; give its top folder", src.display())));
+    }
+    let dirty = git_text(&["status", "--porcelain"])?;
+    if !dirty.is_empty() {
+        let paths: Vec<&str> = dirty.lines().map(|l| l.get(3..).unwrap_or(l)).collect();
+        let more = if paths.len() > 5 { format!(" and {} more", paths.len() - 5) } else { String::new() };
+        return Err(exit(
+            1,
+            format!(
+                "error: {} has uncommitted changes: {}{more}; commit, stash or move them away, then run the command again",
+                src.display(),
+                paths.iter().take(5).copied().collect::<Vec<_>>().join(", ")
+            ),
+        ));
+    }
+    let worktrees: Vec<String> =
+        git_text(&["worktree", "list", "--porcelain"])?.lines().filter_map(|l| l.strip_prefix("worktree ").map(String::from)).collect();
+    if worktrees.len() > 1 {
+        return Err(exit(
+            1,
+            format!(
+                "error: the checkout has {} more worktree(s) ({}); save their work to branches and remove them (git worktree remove), then run the command again",
+                worktrees.len() - 1,
+                worktrees[1..].join(", ")
+            ),
+        ));
+    }
+    let backup = src.with_file_name(format!("{}.before-layr", src.file_name().unwrap_or_default().to_string_lossy()));
+    if backup.exists() {
+        return Err(exit(1, format!("error: {} exists; move it away first", backup.display())));
+    }
+    {
+        use std::os::unix::fs::MetadataExt;
+        let store_dev = std::fs::metadata(ctx.store.root.join("projects"))?.dev();
+        if std::fs::metadata(&src)?.dev() != store_dev {
+            return Err(exit(
+                1,
+                format!("error: {} is on another file system than the layr store; the line can stay only on the store's file system", src.display()),
+            ));
+        }
+    }
+    let name = a.pos.first().cloned().unwrap_or_else(|| src.file_name().unwrap_or_default().to_string_lossy().into_owned());
+    let branch = git_text(&["rev-parse", "--abbrev-ref", "HEAD"])?;
+    let line_name = a.get("--line").map(String::from).unwrap_or_else(|| {
+        if branch == "HEAD" || crate::store::check_name("line", &branch).is_err() { "main".to_string() } else { branch.clone() }
+    });
+    let caches = git_caches(ctx, &src)?;
+
+    // The project and its line, from the folder and its history (the `--from` path).
+    let mut init_args = vec![name.clone(), "--from".into(), src.to_string_lossy().into_owned(), "--line".into(), line_name.clone(), "-q".into()];
+    if let Some(v) = a.get("--volume") {
+        init_args.extend(["--volume".into(), v.to_string()]);
+    }
+    init(ctx, &init_args)?;
+    let repo = Repo::open(ctx, &name)?;
+    let line = repo.line(&line_name)?;
+    let w = repo.working(&line);
+    let tracking = crate::gitbridge::fetch_tracking(ctx, &repo, &src, "origin").unwrap_or_default();
+    // The folder of the `local` remote is the kept checkout.
+    set_config(ctx, &repo, "remote.local.url", serde_json::json!(backup.to_string_lossy()))?;
+    if !caches.is_empty() {
+        set_config(ctx, &repo, "regenerable", serde_json::json!(caches))?;
+        for c in &caches {
+            let dst = w.join(c);
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            move_folder(&src.join(c), &dst)?;
+        }
+    }
+    let layr = std::env::current_exe()?;
+    // In a line folder a command finds its line; elsewhere it needs the project.
+    let run = |dir: &std::path::Path, args: &[&str]| -> Result<()> {
+        let mut command = std::process::Command::new(&layr);
+        command.args(args).current_dir(dir);
+        if !dir.starts_with(&w) && !dir.starts_with(&src) {
+            command.env("LAYR_PROJECT", &name);
+        }
+        let out = command.output()?;
+        if !out.status.success() {
+            bail!("layr {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
+        }
+        Ok(())
+    };
+    if !caches.is_empty() {
+        if let Err(e) = run(&w, &["save", "--caches", "-q"]) {
+            eprintln!("warning: the caches stay plain folders of the line: {e:#}");
+        }
+    }
+    // In place: the checkout is kept beside, and the line takes its path.
+    std::fs::rename(&src, &backup)?;
+    if let Err(e) = run(&ctx.store.root, &["line", "move", &line_name, &src.to_string_lossy()]) {
+        let _ = std::fs::rename(&backup, &src);
+        return Err(e.context(format!("the line stays at {}; the checkout is back at {}", w.display(), src.display())));
+    }
+    if !a.has("-q") {
+        let locals = git_text(&["-C", &backup.to_string_lossy(), "for-each-ref", "--format=%(refname:strip=2)", "refs/heads/"]).unwrap_or_default();
+        outln!(ctx, "Project {name}: line {line_name} at {} (Git HEAD {})", src.display(), &git_text(&["-C", &backup.to_string_lossy(), "rev-parse", "--short", "HEAD"]).unwrap_or_default());
+        outln!(ctx, "Local branches: {}", locals.lines().map(|b| format!("local/{b}")).collect::<Vec<_>>().join(", "));
+        outln!(ctx, "Branches of origin: {} (imported on first use)", tracking.iter().filter(|(n, _)| !n.ends_with("/HEAD")).count());
+        if !caches.is_empty() {
+            outln!(ctx, "Caches kept: {}", caches.join(", "));
+        }
+        outln!(ctx, "The Git checkout is kept at {}; remove it when the line works.", backup.display());
+        // `retest init` changes files of the project, and the line is protected: it runs in a line
+        // of its own, which is merged like any change.
+        if src.join("Cargo.toml").is_file() {
+            outln!(
+                ctx,
+                "A Cargo workspace: set up the checks in a line of their own: layr line new retest-setup {line_name} && cd <its folder> && layr retest init, then merge it."
+            );
+        }
+    }
+    Ok(0)
+}
+
+/// Moves the plain folder `from` (no store manages it yet) to `to` on the same file system: a rename. When `to` is
+/// in a mounted line folder (OverlayFS gives EXDEV), a copy that keeps modes and times (cargo compares them; the
+/// file system makes a reflink where it can), then the removal of `from`.
+fn move_folder(from: &std::path::Path, to: &std::path::Path) -> Result<()> {
+    match std::fs::rename(from, to) {
+        Ok(()) => return Ok(()),
+        Err(e) if e.raw_os_error() == Some(rustix::io::Errno::XDEV.raw_os_error()) => {}
+        Err(e) => return Err(anyhow::Error::new(e).context(format!("move {} to {}", from.display(), to.display()))),
+    }
+    if let Err(e) = copy_keeping_times(from, to) {
+        let _ = std::fs::remove_dir_all(to);
+        return Err(e.context(format!("copy {} to {}", from.display(), to.display())));
+    }
+    std::fs::remove_dir_all(from)?;
+    Ok(())
+}
+
+/// Copies `from` to the new path `to`: folders, files and links, with modes and times.
+fn copy_keeping_times(from: &std::path::Path, to: &std::path::Path) -> Result<()> {
+    let m = std::fs::symlink_metadata(from)?;
+    if m.file_type().is_symlink() {
+        std::os::unix::fs::symlink(std::fs::read_link(from)?, to)?;
+        return Ok(());
+    }
+    if m.is_dir() {
+        std::fs::create_dir(to)?;
+        for e in std::fs::read_dir(from)? {
+            let e = e?;
+            copy_keeping_times(&e.path(), &to.join(e.file_name()))?;
+        }
+    } else if m.is_file() {
+        crate::fsutil::copy_regular(from, to)?;
+    } else {
+        bail!("cannot copy the special file {}", from.display());
+    }
+    std::fs::set_permissions(to, m.permissions())?;
+    crate::fsutil::keep_times(from, to)
+}
+
+/// The cache folders of a checkout: ignored `target` folders next to a Cargo.toml and ignored
+/// `node_modules` folders next to a package.json, at most three levels deep, not inside another.
+fn git_caches(ctx: &Ctx, src: &std::path::Path) -> Result<Vec<String>> {
+    let mut found = Vec::new();
+    fn scan(dir: &std::path::Path, rel: &str, depth: usize, out: &mut Vec<String>) {
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        for e in rd.flatten() {
+            let Ok(t) = e.file_type() else { continue };
+            if !t.is_dir() {
+                continue;
+            }
+            let n = e.file_name().to_string_lossy().into_owned();
+            let r = if rel.is_empty() { n.clone() } else { format!("{rel}/{n}") };
+            let marker = match n.as_str() {
+                "target" => Some("Cargo.toml"),
+                "node_modules" => Some("package.json"),
+                _ => None,
+            };
+            if let Some(m) = marker {
+                if dir.join(m).is_file() {
+                    out.push(r);
+                }
+                continue;
+            }
+            if n == ".git" || depth == 0 {
+                continue;
+            }
+            scan(&e.path(), &r, depth - 1, out);
+        }
+    }
+    crate::privs::as_caller_fs(ctx, || {
+        scan(src, "", 3, &mut found);
+        Ok(())
+    })?;
+    let mut out = Vec::new();
+    for c in found {
+        if caller_git(ctx, src, &["check-ignore", "-q", &c])?.status.success() {
+            out.push(c);
+        }
+    }
+    out.sort();
+    Ok(out)
 }
 
 fn default_branch(repo: &Repo) -> Option<String> {
@@ -2853,5 +3120,31 @@ mod record_caches_tests {
         assert_eq!(std::fs::read_dir(repo.p.states_dir())?.count(), 0, "the failed call leaves no snapshot");
         std::fs::remove_dir_all(dir).ok();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod move_folder_tests {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    #[test]
+    fn a_copy_keeps_files_links_modes_and_times() {
+        let base = std::env::temp_dir().join(format!("layr-move-folder-{}", crate::ids::new_id()));
+        let from = base.join("target");
+        std::fs::create_dir_all(from.join("debug/deps")).unwrap();
+        std::fs::write(from.join("debug/x"), b"bin").unwrap();
+        std::fs::set_permissions(from.join("debug/x"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::os::unix::fs::symlink("x", from.join("debug/link")).unwrap();
+        let old = std::fs::File::open(from.join("debug/x")).unwrap();
+        crate::fsutil::set_mtime(&old, 1_000_000_000, 5).unwrap();
+        let to = base.join("copy");
+        super::copy_keeping_times(&from, &to).unwrap();
+        let m = std::fs::metadata(to.join("debug/x")).unwrap();
+        assert_eq!(std::fs::read(to.join("debug/x")).unwrap(), b"bin");
+        assert_eq!(m.mode() & 0o777, 0o755);
+        assert_eq!((m.mtime(), m.mtime_nsec()), (1_000_000_000, 5));
+        assert_eq!(std::fs::read_link(to.join("debug/link")).unwrap(), std::path::PathBuf::from("x"));
+        assert!(to.join("debug/deps").is_dir());
+        std::fs::remove_dir_all(&base).unwrap();
     }
 }

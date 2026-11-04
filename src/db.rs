@@ -8,7 +8,7 @@ use crate::model::{Attestation, Line, QueueChange, QueueEntry, Record, RefChange
 use anyhow::{anyhow, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use layr_hashers::{ContentAddress, Digest};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Test hook: the next `with_tx` reports an error after its COMMIT succeeded (sqlite can report
 /// an error after the commit point, on a full disk).
@@ -67,7 +67,7 @@ const LEGACY_OPS: &str = "op IN ('approve','approve.withdraw','check')";
 
 /// Version of the derived tables. Records never change shape; a database with an older version
 /// drops its derived tables, creates them new and rebuilds them from the records.
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 const DERIVED: &[&str] = &[
     "states",
@@ -89,7 +89,45 @@ const DERIVED: &[&str] = &[
     "attestation_revocations",
     "queue_entries",
     "owners",
+    "bases",
 ];
+
+/// The backup of a database made before an upgrade from `version`: `<name>.schema-<version>.bak`
+/// in the folder of the database.
+pub fn backup_path(db_path: &Path, version: i64) -> PathBuf {
+    let name = db_path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    db_path.with_file_name(format!("{name}.schema-{version}.bak"))
+}
+
+/// Every upgrade backup of a database (any version), in its folder.
+pub fn upgrade_backups(db_path: &Path) -> Result<Vec<PathBuf>> {
+    let Some(dir) = db_path.parent() else { return Ok(Vec::new()) };
+    let name = db_path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    let prefix = format!("{name}.schema-");
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir(dir) else { return Ok(out) };
+    for e in rd.flatten() {
+        let file = e.file_name().to_string_lossy().into_owned();
+        if file.starts_with(&prefix) && file.ends_with(".bak") {
+            out.push(e.path());
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// Upgrade backups older than `days`, with their size in bytes and their age in days.
+pub fn old_upgrade_backups(db_path: &Path, days: u64) -> Result<Vec<(PathBuf, u64, u64)>> {
+    let mut out = Vec::new();
+    for path in upgrade_backups(db_path)? {
+        let meta = std::fs::metadata(&path)?;
+        let age = meta.modified()?.elapsed().map(|d| d.as_secs() / 86_400).unwrap_or(0);
+        if age > days {
+            out.push((path, meta.len(), age));
+        }
+    }
+    Ok(out)
+}
 
 /// Derived tables of older versions, dropped on migration.
 const RETIRED: &[&str] = &["slots", "mirrors", "groups", "group_lines"];
@@ -228,6 +266,12 @@ impl Db {
     /// COMMIT, and a failure or a crash rolls the whole rebuild back. With `only_older`, nothing
     /// is done when the database is current already (another process rebuilt it); returns false.
     pub fn rebuild(&self, only_older: bool, replay: impl FnOnce(&Db) -> Result<()>) -> Result<bool> {
+        // An upgrade keeps a copy of the database before its first change. The copy is taken
+        // before the write transaction, with VACUUM INTO, which reads a consistent snapshot.
+        let version: i64 = self.conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version > 0 && version < SCHEMA_VERSION {
+            self.backup_before_upgrade(version)?;
+        }
         self.begin_rebuild()?;
         let done = (|| -> Result<bool> {
             let version: i64 = self.conn.prepare_cached("PRAGMA user_version")?.query_row([], |r| r.get(0))?;
@@ -259,6 +303,27 @@ impl Db {
             let _ = self.conn.execute_batch("ROLLBACK");
         }
         result
+    }
+
+    /// Copy the database before its schema upgrade: `VACUUM INTO` a temporary name next to the
+    /// database, then rename it to `<name>.schema-<version>.bak`. Only the newest backup of the
+    /// database is kept. Prints one line that names it.
+    fn backup_before_upgrade(&self, version: i64) -> Result<()> {
+        let Some(db_path) = self.conn.path().map(PathBuf::from) else { return Ok(()) };
+        let final_path = backup_path(&db_path, version);
+        // A process-specific temporary name: several processes may upgrade at once.
+        let temp = final_path.with_extension(format!("bak.{}.tmp", std::process::id()));
+        let _ = std::fs::remove_file(&temp);
+        self.conn.execute("VACUUM INTO ?1", rusqlite::params![temp.to_string_lossy()])?;
+        std::fs::rename(&temp, &final_path)?;
+        // Keep only this backup. Another process may remove or rename one at the same time.
+        for old in upgrade_backups(&db_path)? {
+            if old != final_path {
+                let _ = std::fs::remove_file(&old);
+            }
+        }
+        eprintln!("database backup: {} (schema {version}, before the upgrade)", final_path.display());
+        Ok(())
     }
 
     /// Start the write transaction of a rebuild. Another process may hold the write lock for
@@ -971,6 +1036,49 @@ impl Db {
         )?;
         let v = st.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
         Ok(v)
+    }
+
+    /// Fill the base rows of the layers on disk. Runs inside the rebuild transaction (`rebuild`),
+    /// after the table was emptied: a row for every thin layer, and none for a missing one.
+    pub fn fill_bases(&self, bases: &std::collections::BTreeMap<String, String>) -> Result<()> {
+        for (state, base) in bases {
+            self.conn.execute("INSERT OR REPLACE INTO bases(state, base) VALUES(?1, ?2)", rusqlite::params![state, base])?;
+        }
+        Ok(())
+    }
+
+    /// Every row of the `bases` table: layer state to base.
+    pub fn bases_rows(&self) -> Result<std::collections::BTreeMap<String, String>> {
+        let mut st = self.conn.prepare("SELECT state, base FROM bases")?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<std::collections::BTreeMap<_, _>>>()?)
+    }
+
+    /// The base of a thin layer, from its `bases` row.
+    pub fn base_of_layer(&self, state: &str) -> Result<Option<String>> {
+        let mut st = self.conn.prepare("SELECT base FROM bases WHERE state=?1")?;
+        let mut rows = st.query_map(rusqlite::params![state], |r| r.get::<_, String>(0))?;
+        Ok(match rows.next() {
+            Some(b) => Some(b?),
+            None => None,
+        })
+    }
+
+    /// True when a thin layer is made over `base`.
+    pub fn has_layer_child(&self, base: &str) -> Result<bool> {
+        Ok(self.conn.query_row("SELECT EXISTS(SELECT 1 FROM bases WHERE base=?1)", rusqlite::params![base], |r| r.get(0))?)
+    }
+
+    /// Put a dead state in the free queue (its last layer child went).
+    pub fn queue_free(&self, state: &str) -> Result<()> {
+        self.conn.execute("INSERT OR IGNORE INTO free_queue(state) VALUES(?1)", rusqlite::params![state])?;
+        Ok(())
+    }
+
+    /// Remove the base row of a thin layer that was removed from disk.
+    pub fn forget_base(&self, state: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM bases WHERE state=?1", rusqlite::params![state])?;
+        Ok(())
     }
 
     /// The base states of the thin layers that are on disk (`bases` rows of present layers).

@@ -5,6 +5,7 @@
 //!   subvolume information,
 //!   and `FICLONERANGE`;
 //! - `fork` (the service forks one process per request while it is single threaded);
+//! - the SIGTERM action of the service (it stops after its running requests);
 //! - switching a child process to a user before `exec` (groups, gid, uid);
 //! - `setfsuid`/`setfsgid` (file permission checks as a user, for the current thread);
 //! - user database lookups (`getpwuid_r`, `getpwnam_r`, `getgrouplist`).
@@ -397,9 +398,44 @@ pub fn fork() -> io::Result<Fork> {
     // complete copy of a process with one thread and may run normal Rust code.
     match unsafe { libc::fork() } {
         -1 => Err(io::Error::last_os_error()),
-        0 => Ok(Fork::Child),
+        0 => {
+            // A request process stops on SIGTERM; only the service waits for its requests.
+            set_terminate_action(libc::SIG_DFL)?;
+            Ok(Fork::Child)
+        }
         pid => Ok(Fork::Parent(pid)),
     }
+}
+
+/// Set when the process got SIGTERM after `catch_terminate`.
+static TERMINATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+extern "C" fn on_terminate(_: libc::c_int) {
+    TERMINATE.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Catch SIGTERM: from then on `terminate_requested` tells whether it came. A `fork` child has the default action.
+pub fn catch_terminate() -> io::Result<()> {
+    set_terminate_action(on_terminate as extern "C" fn(libc::c_int) as libc::sighandler_t)
+}
+
+/// Whether SIGTERM came after `catch_terminate`.
+pub fn terminate_requested() -> bool {
+    TERMINATE.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+fn set_terminate_action(handler: libc::sighandler_t) -> io::Result<()> {
+    // SAFETY: the action is a zeroed `sigaction` with the handler and an empty mask. The handler
+    // only stores to an atomic, which is async-signal-safe.
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = handler;
+        libc::sigemptyset(&mut action.sa_mask);
+        if libc::sigaction(libc::SIGTERM, &action, std::ptr::null_mut()) != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
 }
 
 /// Make the child of `cmd` drop to a user before `exec`: its groups, then gid, then uid.

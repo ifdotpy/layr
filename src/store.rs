@@ -623,7 +623,7 @@ pub fn empty_trash(dir: &Path, budget: Option<std::time::Duration>) -> (usize, V
 
 /// Delete `path`, and what is in it first. Counts each tree deleted and records each failure;
 /// false when the budget ended before `path` was gone.
-fn empty_tree(path: &Path, late: &dyn Fn() -> bool, deleted: &mut usize, failed: &mut Vec<String>) -> bool {
+fn empty_tree(path: &Path, late: &(dyn Fn() -> bool + Sync), deleted: &mut usize, failed: &mut Vec<String>) -> bool {
     #[cfg(not(target_os = "macos"))]
     let _ = late;
     #[cfg(target_os = "macos")]
@@ -634,11 +634,9 @@ fn empty_tree(path: &Path, late: &dyn Fn() -> bool, deleted: &mut usize, failed:
             let _ = crate::sys::apfs_immutable(path, false);
             let _ = fs::set_permissions(path, fs::Permissions::from_mode((m.permissions().mode() & 0o7777) | 0o700));
             if let Ok(rd) = fs::read_dir(path) {
-                for e in rd.flatten() {
-                    if late() {
-                        return false;
-                    }
-                    empty_tree(&e.path(), late, deleted, failed);
+                let entries: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+                if !empty_entries(&entries, late, deleted, failed) {
+                    return false;
                 }
             }
         }
@@ -651,6 +649,60 @@ fn empty_tree(path: &Path, late: &dyn Fn() -> bool, deleted: &mut usize, failed:
         Err(e) => failed.push(format!("{}: {e:#}", path.display())),
     }
     true
+}
+
+/// A folder with at least this many entries is emptied on `TRASH_THREADS` threads.
+#[cfg(target_os = "macos")]
+const TRASH_PARALLEL_FROM: usize = 64;
+/// APFS deletes a file in system time of the calling thread: four threads delete a build folder in
+/// half the time of one (40,363 files: 4.7 s to 2.4 s).
+#[cfg(target_os = "macos")]
+const TRASH_THREADS: usize = 4;
+/// True while threads empty a folder: a folder inside their work is emptied by the thread that finds it.
+#[cfg(target_os = "macos")]
+static TRASH_PARALLEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `empty_tree` of each of `entries`. False when the budget ended first.
+#[cfg(target_os = "macos")]
+fn empty_entries(entries: &[PathBuf], late: &(dyn Fn() -> bool + Sync), deleted: &mut usize, failed: &mut Vec<String>) -> bool {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let parallel = entries.len() >= TRASH_PARALLEL_FROM
+        && TRASH_PARALLEL.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok();
+    if !parallel {
+        for e in entries {
+            if late() {
+                return false;
+            }
+            empty_tree(e, late, deleted, failed);
+        }
+        return true;
+    }
+    let next = AtomicUsize::new(0);
+    let results: std::sync::Mutex<(usize, Vec<String>, bool)> = std::sync::Mutex::new((0, Vec::new(), true));
+    std::thread::scope(|scope| {
+        for _ in 0..TRASH_THREADS {
+            scope.spawn(|| {
+                let (mut d, mut f, mut done) = (0, Vec::new(), true);
+                while let Some(e) = entries.get(next.fetch_add(1, Ordering::Relaxed)) {
+                    if late() {
+                        done = false;
+                        break;
+                    }
+                    empty_tree(e, late, &mut d, &mut f);
+                }
+                if let Ok(mut r) = results.lock() {
+                    r.0 += d;
+                    r.1.extend(f);
+                    r.2 &= done;
+                }
+            });
+        }
+    });
+    TRASH_PARALLEL.store(false, Ordering::SeqCst);
+    let (d, f, done) = results.into_inner().unwrap_or_else(|e| e.into_inner());
+    *deleted += d;
+    failed.extend(f);
+    done
 }
 
 impl<'a> Project<'a> {
@@ -1147,6 +1199,8 @@ impl<'a> Project<'a> {
     /// have no local folder as absent.
     fn rebuild_derived(&self, only_older: bool) -> Result<bool> {
         let present = self.state_present();
+        // The layer bases are not in the records: they come from disk, read before the rebuild.
+        let bases = self.layer_bases_on_disk()?;
         self.db.rebuild(only_older, |db| {
             for line in db.all_lines()? {
                 let s = oplog::parse_line(&line, None)?;
@@ -1157,8 +1211,51 @@ impl<'a> Project<'a> {
                     db.set_present(&id, false)?;
                 }
             }
+            db.fill_bases(&bases)?;
             Ok(())
         })
+    }
+
+    /// The differences between the `bases` table and the layers on disk, one line each. Empty
+    /// when they agree. `gc --repair` makes the table match the disk.
+    pub fn layer_bases_differences(&self) -> Result<Vec<String>> {
+        Ok(self.layer_bases_check()?.1)
+    }
+
+    /// The layers on disk and the differences from the table (see `layer_bases_differences`). The
+    /// layers are read once: `gc` repairs the table with the same map.
+    pub fn layer_bases_check(&self) -> Result<(std::collections::BTreeMap<String, String>, Vec<String>)> {
+        let disk = self.layer_bases_on_disk()?;
+        let rows = self.db.bases_rows()?;
+        let short = crate::ids::short;
+        let mut out = Vec::new();
+        for (state, base) in &disk {
+            match rows.get(state) {
+                None => out.push(format!("missing row: layer {} over {}", short(state), short(base))),
+                Some(row) if row != base => {
+                    out.push(format!("wrong base: layer {} row {} disk {}", short(state), short(row), short(base)))
+                }
+                Some(_) => {}
+            }
+        }
+        for state in rows.keys() {
+            if !disk.contains_key(state) {
+                out.push(format!("stale row: layer {} is not on disk", short(state)));
+            }
+        }
+        Ok((disk, out))
+    }
+
+    /// The base of each thin layer on disk. Layers exist on APFS only.
+    pub(crate) fn layer_bases_on_disk(&self) -> Result<std::collections::BTreeMap<String, String>> {
+        #[cfg(target_os = "macos")]
+        {
+            crate::thin::bases(self)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Ok(std::collections::BTreeMap::new())
+        }
     }
 
     /// Write a record: sign it and store it with its derived rows in one transaction.
@@ -1205,6 +1302,13 @@ impl<'a> Project<'a> {
             let line = oplog::sign_line(&rec, &m.key)?;
             self.db.insert_record(&rec, &line)?;
             self.db.derive(&rec, &present, &m.id)?;
+            // A state whose thin layer is on disk: its base row, in this transaction (thin.rs).
+            #[cfg(target_os = "macos")]
+            for state in &rec.states {
+                if let Some(base) = crate::thin::layer_base(self, &state.id)? {
+                    self.db.record_base(&state.id, &base)?;
+                }
+            }
             Ok(())
         })?;
         Ok(rec)
@@ -1494,10 +1598,47 @@ pub fn test_pause() {
     }
 }
 
+/// Test only (tests/t136-service-stop.sh): `LAYR_TEST_PANIC=<command>` panics at the start of that command.
+pub fn panic_point(command: &str) {
+    if std::env::var("LAYR_TEST_PANIC").ok().as_deref() == Some(command) {
+        panic!("test panic in {command}");
+    }
+}
+
 /// Test only (tests/t124-save-crash.sh): `LAYR_TEST_SAVE_KILL=<point>` kills this process with
 /// SIGKILL at that point of a named save, as a power loss or a crash would. Other runs pass.
 pub fn failpoint(point: &str) {
     if std::env::var("LAYR_TEST_SAVE_KILL").ok().as_deref() == Some(point) {
         let _ = rustix::process::kill_process(rustix::process::getpid(), rustix::process::Signal::KILL);
+    }
+}
+
+/// The parallel empty is APFS only; other file systems delete a tree in place (OverlayFS through its registry).
+#[cfg(all(test, target_os = "macos"))]
+mod trash_tests {
+    use super::empty_trash;
+    use std::fs;
+
+    #[test]
+    fn a_folder_of_many_entries_goes_whole_and_a_spent_budget_deletes_nothing() {
+        let dir = std::env::temp_dir().join(format!("layr-trash-{}", crate::ids::new_id()));
+        let tree = dir.join("tree");
+        for i in 0..300 {
+            let sub = tree.join(format!("d{}", i % 3));
+            fs::create_dir_all(&sub).unwrap();
+            fs::write(sub.join(format!("f{i}")), b"x").unwrap();
+        }
+        fs::create_dir_all(tree.join("many")).unwrap();
+        for i in 0..200 {
+            fs::write(tree.join("many").join(format!("g{i}")), b"y").unwrap();
+        }
+        let (deleted, failed) = empty_trash(&dir, Some(std::time::Duration::ZERO));
+        assert_eq!((deleted, failed.len()), (0, 0));
+        assert!(tree.join("many/g0").exists(), "a spent budget deletes nothing");
+        let (deleted, failed) = empty_trash(&dir, None);
+        assert!(failed.is_empty(), "{failed:?}");
+        assert!(deleted > 0);
+        assert!(!tree.exists());
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

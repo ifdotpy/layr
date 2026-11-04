@@ -71,6 +71,11 @@ pub struct Entry(pub String, pub u64, pub String, pub Vec<Link>);
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Tree {
     pub files: BTreeMap<String, Entry>,
+    /// The modification time of each file, in nanoseconds since the epoch. Build tools compare them
+    /// (cargo rebuilds a unit whose dependency is newer), so a restored cache keeps them. Empty in the
+    /// trees of layr 0.25 and older, which restore files with the time of the restore.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub times: BTreeMap<String, u64>,
 }
 
 impl Tree {
@@ -107,13 +112,29 @@ impl Tree {
             }
             out.push_str("]]");
         }
-        out.push_str("}}");
+        out.push('}');
+        if !self.times.is_empty() {
+            out.push_str(",\"times\":{");
+            for (number, (path, time)) in self.times.iter().enumerate() {
+                if number != 0 {
+                    out.push(',');
+                }
+                string(path, &mut out);
+                out.push(':');
+                out.push_str(&time.to_string());
+            }
+            out.push('}');
+        }
+        out.push('}');
         Ok(out.into_bytes())
     }
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         let tree: Self = serde_json::from_slice(bytes)?;
         if tree.canonical()? != bytes {
             bail!("noncanonical tree");
+        }
+        if let Some(path) = tree.times.keys().find(|p| !tree.files.contains_key(*p)) {
+            bail!("tree time of a missing file {path:?}");
         }
         for (path, entry) in &tree.files {
             if !safe_path(path) {
@@ -260,12 +281,18 @@ mod tests {
             ],
         );
         let tree =
-            Tree { files: BTreeMap::from([("plain".into(), entry.clone()), ("caf\u{e9}/\u{1f642}".into(), entry.clone())]) };
+            Tree { files: BTreeMap::from([("plain".into(), entry.clone()), ("caf\u{e9}/\u{1f642}".into(), entry.clone())]), times: BTreeMap::new() };
         assert_eq!(tree.canonical().unwrap(), canonical(&serde_json::to_value(&tree).unwrap()).unwrap());
         Tree::parse(&tree.canonical().unwrap()).unwrap();
-        let escaped = Tree { files: BTreeMap::from([("\n\t\\\"".into(), entry)]) };
+        let escaped = Tree { files: BTreeMap::from([("\n\t\\\"".into(), entry.clone())]), times: BTreeMap::new() };
         assert_eq!(escaped.canonical().unwrap(), canonical(&serde_json::to_value(&escaped).unwrap()).unwrap());
         assert_eq!(Tree::default().canonical().unwrap(), canonical(&serde_json::to_value(Tree::default()).unwrap()).unwrap());
+        // File times: the same bytes as the generic canonical form, and a time needs its file.
+        let timed = Tree { files: BTreeMap::from([("a".into(), entry.clone())]), times: BTreeMap::from([("a".into(), 1_793_820_425_267_530_733)]) };
+        assert_eq!(timed.canonical().unwrap(), canonical(&serde_json::to_value(&timed).unwrap()).unwrap());
+        assert_eq!(Tree::parse(&timed.canonical().unwrap()).unwrap(), timed);
+        let orphan = Tree { files: BTreeMap::from([("a".into(), entry)]), times: BTreeMap::from([("b".into(), 1)]) };
+        assert!(Tree::parse(&orphan.canonical().unwrap()).is_err());
     }
     use super::*;
     const ID: &str = "01a12290-0000-7000-8000-000000000001";

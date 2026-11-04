@@ -72,7 +72,7 @@ mod tests {
         let mut parts = BTreeMap::new();
         parts.insert(link.object(), keys::encrypt(&recipient, &frame).unwrap());
         let entry = format::Entry("100644".into(), data.len() as u64, hex::encode(ContentAddress::digest(data)), vec![link]);
-        let source = format::Tree { files: BTreeMap::from([("file".into(), entry)]) };
+        let source = format::Tree { files: BTreeMap::from([("file".into(), entry)]), times: BTreeMap::new() };
         let canonical = source.canonical().unwrap();
         let mut header = format::Header {
             v: 2,

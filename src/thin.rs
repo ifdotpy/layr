@@ -1216,7 +1216,15 @@ pub fn complete_tree(p: &Project, id: &str) -> Result<PathBuf> {
     Ok(full)
 }
 
-/// The base of each thin state on this machine.
+/// The base of a thin layer on disk, or None when the state has no layer (or a complete tree).
+pub fn layer_base(p: &Project, id: &str) -> Result<Option<String>> {
+    if !p.delta_path(id).is_dir() {
+        return Ok(None);
+    }
+    Ok(apfs::subvol_info(&p.delta_path(id))?.base)
+}
+
+/// The base of each thin layer on this machine.
 pub fn bases(p: &Project) -> Result<BTreeMap<String, String>> {
     let _t = crate::trace::span("thin bases");
     let mut out = BTreeMap::new();
@@ -1256,6 +1264,7 @@ fn drop_state(p: &Project, id: &str, keep_layer: bool) -> Result<()> {
     }
     p.trash(&p.state_path(id))?;
     p.trash(&p.delta_path(id))?;
+    forget_layer(p, id)?;
     let _ = fs::remove_file(view_stamp(p, id));
     Ok(())
 }
@@ -1291,6 +1300,11 @@ pub fn delete_states(p: &Project, ids: &[String]) -> Result<BTreeSet<String>> {
         }
     }
     Ok(gone)
+}
+
+/// Remove the layer of `id` from the bases table.
+fn forget_layer(p: &Project, id: &str) -> Result<()> {
+    p.db.forget_base(id)
 }
 
 /// Delete the trees of a state now, also when other thin states use it as their base: those
@@ -1335,6 +1349,7 @@ pub fn evict_views(p: &Project, keep: &BTreeSet<String>) -> Result<usize> {
 pub fn make_keyframe(p: &Project, id: &str) -> Result<()> {
     complete_tree(p, id)?;
     p.trash(&p.delta_path(id))?;
+    forget_layer(p, id)?;
     let _ = fs::remove_file(view_stamp(p, id));
     Ok(())
 }
@@ -1351,9 +1366,19 @@ pub struct Upkeep {
 /// another thin state still used them and layers that never got a record, remove unused views,
 /// and give a head with a long chain a complete tree. `heads` are the states that lines read now.
 pub fn upkeep(p: &Project, heads: &BTreeSet<String>) -> Result<Upkeep> {
+    upkeep_with(p, heads, None)
+}
+
+/// `upkeep` with the layer bases that the command read already (`bases_read`), if any: a command
+/// that reads the layers once passes them here. A base read before an earlier step of the same
+/// command can be stale; that only keeps a base one more command.
+pub fn upkeep_with(p: &Project, heads: &BTreeSet<String>, bases_read: Option<&BTreeMap<String, String>>) -> Result<Upkeep> {
     let mut done = Upkeep::default();
     // Deleted states that stayed as a base: one walk, then leaves first through a queue.
-    let base_of = bases(p)?;
+    let base_of = match bases_read {
+        Some(read) => read.clone(),
+        None => bases(p)?,
+    };
     let mut refs: BTreeMap<&str, usize> = BTreeMap::new();
     for b in base_of.values() {
         *refs.entry(b.as_str()).or_default() += 1;
@@ -1379,6 +1404,7 @@ pub fn upkeep(p: &Project, heads: &BTreeSet<String>) -> Result<Upkeep> {
     while let Some(id) = queue.pop() {
         p.trash(&p.state_path(id))?;
         p.trash(&p.delta_path(id))?;
+        forget_layer(p, id)?;
         let _ = fs::remove_file(view_stamp(p, id));
         done.deleted += 1;
         if let Some(b) = base_of.get(id) {

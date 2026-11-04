@@ -251,10 +251,23 @@ struct OverlayClean {
 #[derive(Clone, Debug)]
 pub struct Info {
     pub hidden: bool,
+    /// A cache overlay: its lines have an overlay line per platform (`cache_line_name`).
+    pub cache: bool,
     pub owner: u32,
     pub mode: Mode,
     /// The empty first state of the overlay.
     pub root: String,
+}
+
+/// The overlay line of the line `line_id` in a cache overlay: one per platform (`<os>-<arch>`), so a
+/// build on another platform does not replace the cache of this one (docs/cache-overlays.md, section 6).
+pub fn cache_line_name(line_id: &str) -> String {
+    format!("line-{line_id}.{}", crate::model::cache_platform())
+}
+
+/// The project line of a follow overlay line: `line-<id>`, or `line-<id>.<platform>` in a cache overlay.
+pub fn line_of_overlay_line(name: &str) -> Option<&str> {
+    name.strip_prefix("line-").map(|s| s.split('.').next().unwrap_or(s))
 }
 
 /// The settings key of the stack of a line.
@@ -619,13 +632,18 @@ impl<'a> Repo<'a> {
         if self.p.db.overlay_config(&format!("overlay.{name}.removed"))?.is_some() {
             return Ok(None);
         }
+        let cache_key = format!("overlay.{name}.cache");
         let mut value = self.p.db.overlay_config(&format!("overlay.{name}"))?;
+        let mut cache = None;
         if value.is_none() {
             if let Ok(op) = self.overlay_project(name) {
                 if op.db.overlay_config("overlay")?.is_some_and(|v| v["project"] == self.p.id && v["name"] == name) {
                     value = op.db.overlay_config(&format!("overlay.{name}"))?;
+                    cache = op.db.overlay_config(&cache_key)?;
                 }
             }
+        } else {
+            cache = self.p.db.overlay_config(&cache_key)?;
         }
         let v = match value {
             Some(v) if v.is_object() => v,
@@ -633,6 +651,7 @@ impl<'a> Repo<'a> {
         };
         Ok(Some(Info {
             hidden: v["hidden"].as_bool().unwrap_or(false),
+            cache: cache.and_then(|c| c.as_bool()).unwrap_or(false),
             owner: v["owner"].as_u64().unwrap_or(0) as u32,
             mode: v["mode"].as_str().and_then(Mode::parse).unwrap_or(Mode::Shared),
             root: v["root"].as_str().unwrap_or("").to_string(),
@@ -789,6 +808,7 @@ impl<'a> Repo<'a> {
     pub fn overlay_line_name(info: &Info, line_id: &str, owner: u32) -> String {
         match info.mode {
             Mode::Shared => format!("user-{owner}"),
+            Mode::Follow if info.cache => cache_line_name(line_id),
             Mode::Follow => format!("line-{line_id}"),
         }
     }
@@ -1160,10 +1180,37 @@ impl<'a> Repo<'a> {
     /// The overlay line that a line uses for overlay `info`, made at `start` when missing (only
     /// in an overlay's own repository).
     pub fn ensure_overlay_line(&self, ctx: &Ctx, name: &str, start: &str, owner: u32) -> Result<Line> {
-        match self.p.db.line_by_name(name)? {
-            Some(l) => Ok(l),
+        if let Some(l) = self.p.db.line_by_name(name)? {
+            return Ok(l);
+        }
+        match self.unnamed_platform_line(name)? {
+            Some(l) => self.overlay_line_rename(ctx, l, name),
             None => self.overlay_line_create(ctx, name, start, owner),
         }
+    }
+
+    /// The overlay line `line-<id>` of a cache overlay that layr made before the overlay lines had a
+    /// platform, when its head was saved on the platform that `name` (`line-<id>.<platform>`) names.
+    /// `ensure_overlay_line` renames it: the migration of each line happens at its first write.
+    pub fn unnamed_platform_line(&self, name: &str) -> Result<Option<Line>> {
+        let Some((old, platform)) = name.split_once('.') else { return Ok(None) };
+        let Some(l) = self.p.db.line_by_name(old)? else { return Ok(None) };
+        let made_on = self.p.db.state(&l.head)?.and_then(|s| s.cache_platform);
+        let same = made_on.is_none_or(|p| p == platform || p.starts_with(&format!("{platform}-")));
+        Ok(same.then_some(l))
+    }
+
+    fn overlay_line_rename(&self, ctx: &Ctx, l: Line, name: &str) -> Result<Line> {
+        let mut after = self.line_state(&l, &l.head);
+        after.name = name.to_string();
+        let mut rec = Record::new("line.rename");
+        rec.lines.insert(
+            l.id.clone(),
+            LineChange { before: Some(self.line_state(&l, &l.head)), after: Some(after), working_before: None, working_after: None },
+        );
+        rec.data = serde_json::json!({"from": l.name, "to": name});
+        self.p.append(rec, &ctx.actor())?;
+        Ok(Line { name: name.to_string(), ..l })
     }
 
     /// Apply `history=<n>` to overlay `name`: keep the newest n states on the first-parent chain
@@ -1194,9 +1241,9 @@ impl<'a> Repo<'a> {
         let mut keep: BTreeSet<String> = BTreeSet::from([info.root.clone()]);
         // A cache overlay keeps nothing for a line that is gone (docs/cache-overlays.md).
         let cache = self.overlay_setting(name, "cache")?.and_then(|v| v.as_bool()).unwrap_or(false);
-        let live: BTreeSet<String> = lines.iter().map(|l| format!("line-{}", l.id)).collect();
+        let live: BTreeSet<&str> = lines.iter().map(|l| l.id.as_str()).collect();
         for ol in orepo.p.db.lines()? {
-            if cache && !live.contains(&ol.name) {
+            if cache && !line_of_overlay_line(&ol.name).is_some_and(|id| live.contains(id)) {
                 continue;
             }
             let mut at = Some(ol.head.clone());

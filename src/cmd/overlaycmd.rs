@@ -396,7 +396,7 @@ fn folder_in_line(repo: &Repo, l: &crate::model::Line, name: &str, folder: &str,
     let saved = repo
         .overlay_project(name)
         .ok()
-        .and_then(|p| p.db.line_by_name(&format!("line-{}", l.id)).ok().flatten())
+        .and_then(|p| p.db.line_by_name(&crate::overlay::cache_line_name(&l.id)).ok().flatten())
         .map(|ol| ids::short(&ol.head));
     InLine { state, size, saved }
 }
