@@ -27,6 +27,9 @@ struct Node {
     /// `Tree::times` of the files of this folder. Left out when empty, so older nodes keep their hashes.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     times: BTreeMap<String, u64>,
+    /// `Tree::chunks` of the files of this folder, left out when empty for the same reason.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    chunks: BTreeMap<String, Vec<String>>,
 }
 
 pub(super) struct TreeCache(Connection);
@@ -92,6 +95,9 @@ impl TreeCache {
             if let Some(time) = tree.times.get(path) {
                 node.times.insert(name.to_string(), *time);
             }
+            if let Some(ids) = tree.chunks.get(path) {
+                node.chunks.insert(name.to_string(), ids.clone());
+            }
             let mut ancestor = parent;
             while !ancestor.is_empty() {
                 ancestor = ancestor.rsplit_once('/').map_or("", |(parent, _)| parent);
@@ -148,6 +154,9 @@ impl TreeCache {
             }
             for (name, time) in node.times {
                 tree.times.insert(format!("{prefix}{name}"), time);
+            }
+            for (name, ids) in node.chunks {
+                tree.chunks.insert(format!("{prefix}{name}"), ids);
             }
             for (name, child) in node.dirs {
                 pending.push((format!("{prefix}{name}/"), child));

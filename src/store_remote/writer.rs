@@ -38,6 +38,10 @@ impl ContentHashes {
         self.entries.insert(sha, links);
     }
     fn seed(&mut self, sha: String, links: Vec<Link>) {
+        // A chunked file has no frames to reuse (`Tree::chunks`).
+        if links.is_empty() {
+            return;
+        }
         if !self.entries.contains_key(&sha) {
             self.insert(sha, links);
         }
@@ -749,6 +753,15 @@ fn upload_state_journal(
         if delta_root.is_some() { base.map(|(_, p)| p.tree.files.clone()).unwrap_or_default() } else { BTreeMap::new() };
     let mut times =
         if delta_root.is_some() { base.map(|(_, p)| p.tree.times.clone()).unwrap_or_default() } else { BTreeMap::new() };
+    let mut chunks =
+        if delta_root.is_some() { base.map(|(_, p)| p.tree.chunks.clone()).unwrap_or_default() } else { BTreeMap::new() };
+    // A cache layer that this machine can open goes up as chunks (`chunked`); others as frames.
+    let mut chunker = match store.layer.as_ref().and_then(|layer| Some((layer.identity.as_deref()?, layer.chunk_key?))) {
+        Some((identity, key)) => {
+            Some(super::chunked::Writer::open(store, &descriptor.recipient, identity, key, base.map(|(_, p)| &p.tree))?)
+        }
+        None => None,
+    };
     let mut current = Vec::new();
     let mut part_entries = Vec::new();
     let mut part = 0;
@@ -773,9 +786,11 @@ fn upload_state_journal(
             if let Some(old) = &change.old_path {
                 files.remove(old);
                 times.remove(old);
+                chunks.remove(old);
             }
             files.remove(&change.path);
             times.remove(&change.path);
+            chunks.remove(&change.path);
         }
     }
     let mut visit = |path: &str, meta: &fsutil::Meta| -> Result<bool> {
@@ -796,6 +811,12 @@ fn upload_state_journal(
         let sha = hex::encode(ContentAddress::digest(&data));
         if let Some(time) = file_time(root, path) {
             times.insert(path.to_string(), time);
+        }
+        if let Some(chunker) = chunker.as_mut().filter(|_| !data.is_empty()) {
+            let ids = chunker.file(&sha, &data)?;
+            files.insert(path.to_string(), Entry(mode, data.len() as u64, sha, Vec::new()));
+            chunks.insert(path.to_string(), ids);
+            return Ok(true);
         }
         if let Some(chain) = hashes.get(&sha) {
             files.insert(path.to_string(), Entry(mode, data.len() as u64, sha, chain.clone()));
@@ -865,9 +886,14 @@ fn upload_state_journal(
         put_part(store, descriptor, state, &attempt, part, current, &part_entries)?;
         part += 1;
     }
+    if let Some(chunker) = chunker.as_mut() {
+        chunker.finish(root, &chunks, &|root: &Path, path: &str| content(root, path, &files[path].0))?;
+        bytes += chunker.bytes;
+        frames += chunker.packs;
+    }
     drop(stage);
     let stage = crate::trace::span("store tree encode");
-    let tree = Tree { files, times };
+    let tree = Tree { files, times, chunks };
     let canonical_tree = tree.canonical()?;
     let delta_base = base.filter(|(_, p)| p.depth + 1 < format::FULL_TREE_EVERY);
     let encoded_base;

@@ -2,6 +2,7 @@
 
 pub(crate) mod backend;
 pub(crate) mod browse;
+pub(crate) mod chunked;
 pub(crate) mod epochs;
 pub(crate) mod gateway;
 mod gitpack;

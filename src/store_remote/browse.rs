@@ -4,6 +4,8 @@
 pub struct Entry {
     inner: super::format::Entry,
     layer: Option<usize>,
+    /// The chunk ids of a chunked file of a cache layer (`format::Tree::chunks`).
+    chunks: Option<Vec<String>>,
 }
 impl std::ops::Deref for Entry {
     type Target = super::format::Entry;
@@ -264,8 +266,15 @@ impl Browse {
             let (_, _, tree) = decoder.tree(&state.id, &attempts[&state.id])?;
             let machine = db.state_machine(&state.id)?.context("state signer is missing")?;
             let kind = if state.kind == crate::model::StateKind::Auto { "auto" } else { "state" };
-            let mut files: BTreeMap<_, _> =
-                tree.files.into_iter().map(|(path, inner)| (path, Entry { inner, layer: None })).collect();
+            let mut chunks = tree.chunks;
+            let mut files: BTreeMap<_, _> = tree
+                .files
+                .into_iter()
+                .map(|(path, inner)| {
+                    let ids = chunks.remove(&path);
+                    (path, Entry { inner, layer: None, chunks: ids })
+                })
+                .collect();
             // An overlay-only save can move the stack without making a new shared state.
             let stack_machine = if state.id == line.head { &line.machine } else { &machine };
             let stack = db.config(&format!("stack.{}@{}", line.id, stack_machine))?.or(db.config(&format!("stack.{}", line.id))?);
@@ -293,10 +302,12 @@ impl Browse {
                 let Some(attempt) = source.attempts.get(&layer.state) else { continue };
                 let (_, _, tree) =
                     reader::Reader::new(&source.backend, &source.identity, &source.keys).tree(&layer.state, attempt)?;
+                let mut chunks = tree.chunks;
                 for (path, inner) in tree.files {
                     // A higher layer replaces a lower file or directory at the same path.
                     files.retain(|old, _| !old.starts_with(&format!("{path}/")) && !path.starts_with(&format!("{old}/")));
-                    files.insert(path, Entry { inner, layer: Some(index) });
+                    let ids = chunks.remove(&path);
+                    files.insert(path, Entry { inner, layer: Some(index), chunks: ids });
                 }
             }
             lines.push(Line { name: line.name, head: state.id, kind: kind.into(), machine, time: state.time, files });
@@ -318,9 +329,17 @@ impl Browse {
         self.pin.check(&descriptor)?;
         if let Some(index) = entry.layer {
             let layer = self.layers.get(index).context("unknown overlay source")?;
-            reader::Reader::new(&layer.backend, &layer.identity, &layer.keys).read(&entry.inner)
+            let mut reader = reader::Reader::new(&layer.backend, &layer.identity, &layer.keys);
+            match &entry.chunks {
+                Some(ids) => reader.read_chunked(&entry.inner, ids),
+                None => reader.read(&entry.inner),
+            }
         } else {
-            reader::Reader::new(&self.backend, &self.identity, &self.keys).read(&entry.inner)
+            let mut reader = reader::Reader::new(&self.backend, &self.identity, &self.keys);
+            match &entry.chunks {
+                Some(ids) => reader.read_chunked(&entry.inner, ids),
+                None => reader.read(&entry.inner),
+            }
         }
     }
 }

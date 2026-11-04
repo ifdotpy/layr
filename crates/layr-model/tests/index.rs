@@ -104,6 +104,7 @@ fn tree(bytes: &[u8], mode: &str) -> format::Tree {
             format::Entry(mode.into(), bytes.len() as u64, hex::encode(ContentAddress::digest(bytes)), vec![]),
         )]),
         times: BTreeMap::new(),
+        chunks: BTreeMap::new(),
     }
 }
 #[test]

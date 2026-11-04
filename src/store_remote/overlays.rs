@@ -9,6 +9,9 @@ use std::collections::BTreeMap;
 pub(super) struct LayerAccess {
     pub recipient: String,
     pub identity: Option<String>,
+    /// The chunk key of a cache layer whose identity this machine holds (`layr_store::chunks::key`):
+    /// its files go up as content-defined chunks. Without it they go up as frames.
+    pub chunk_key: Option<[u8; 32]>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -272,7 +275,8 @@ pub(crate) fn open_identity(
     Ok(None)
 }
 
-fn layer(store: &Store, published: &Published, identity: Option<String>) -> Result<Store> {
+fn layer(store: &Store, published: &Published, identity: Option<String>, cache: bool) -> Result<Store> {
+    let chunk_key = identity.as_deref().filter(|_| cache).map(|identity| layr_store::chunks::key(identity, &published.key.epoch));
     Ok(Store {
         backend: store.backend.scoped(&published.prefix())?,
         url: store.url.clone(),
@@ -290,7 +294,7 @@ fn layer(store: &Store, published: &Published, identity: Option<String>) -> Resu
         epoch: None,
         epoch_public: false,
         publishing_epoch: false,
-        layer: Some(LayerAccess { recipient: published.key.recipient.clone(), identity }),
+        layer: Some(LayerAccess { recipient: published.key.recipient.clone(), identity, chunk_key }),
     })
 }
 
@@ -456,7 +460,7 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
                 identity = Some(opened);
             }
         }
-        let scoped = layer(store, &published, identity.clone())?;
+        let scoped = layer(store, &published, identity.clone(), repo.need_overlay(&name)?.cache)?;
         if let Some(identity) = &identity {
             for principal in readers.keys() {
                 if let Some(machine) = principal.strip_prefix("machine:") {
@@ -598,7 +602,7 @@ pub(super) fn fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, repor
         for (machine, key) in &records.keys {
             crate::cmd::replicate::trust(ctx, &orepo.p, machine, &hex::encode(key.to_bytes()))?;
         }
-        let mut scoped = layer(store, &published, Some(identity))?;
+        let mut scoped = layer(store, &published, Some(identity), false)?;
         merge(report, reader::fetch(&mut scoped, ctx, &mut orepo, opts)?, &name, "fetch");
     }
     Ok(())
