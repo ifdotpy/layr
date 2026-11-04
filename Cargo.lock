@@ -1458,6 +1458,8 @@ dependencies = [
  "hex",
  "hmac",
  "ignore",
+ "layr-adapter",
+ "layr-cache",
  "layr-model",
  "layr-retest",
  "layr-store",
@@ -1478,6 +1480,20 @@ dependencies = [
  "toml 0.8.23",
  "unicode-normalization",
  "uuid",
+]
+
+[[package]]
+name = "layr-adapter"
+version = "0.1.0"
+
+[[package]]
+name = "layr-cache"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "layr-adapter",
+ "rustix",
+ "serde_json",
 ]
 
 [[package]]
@@ -1504,6 +1520,7 @@ name = "layr-retest"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "layr-cache",
  "serde",
  "serde_json",
  "toml 0.8.23",
