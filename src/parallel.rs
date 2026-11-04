@@ -18,21 +18,21 @@ fn parse(value: Option<&str>) -> Option<usize> {
     value.and_then(|s| s.parse::<usize>().ok()).filter(|&n| n > 0)
 }
 
-/// Take `LAYR_THREADS` from the caller of a command. The daemon runs each request in its own
-/// forked process with the caller's environment in `Ctx.env`, not in the process environment.
-pub fn configure(caller_value: Option<&str>) {
-    if let Some(n) = parse(caller_value) {
-        let _ = THREADS.set(n);
-    }
+fn detected() -> usize {
+    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
 }
 
-/// Worker count: `LAYR_THREADS` of the caller (see `configure`) or of this process, else the
-/// CPUs available to the process (affinity and container limits included).
+/// Take `LAYR_THREADS` from the caller of a command. The daemon runs each request in its own
+/// forked process with the caller's environment in `Ctx.env`, not in the process environment, so
+/// a missing or invalid caller value means the detected count, never the daemon's own setting.
+pub fn configure(caller_value: Option<&str>) {
+    let _ = THREADS.set(parse(caller_value).unwrap_or_else(detected));
+}
+
+/// Worker count: the value set by `configure`, else `LAYR_THREADS` of this process, else the CPUs
+/// available to the process (affinity and container limits included).
 pub fn threads() -> usize {
-    *THREADS.get_or_init(|| {
-        parse(std::env::var("LAYR_THREADS").ok().as_deref())
-            .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1))
-    })
+    *THREADS.get_or_init(|| parse(std::env::var("LAYR_THREADS").ok().as_deref()).unwrap_or_else(detected))
 }
 
 /// Choose workers in proportion to the amount of work, capped by the caller's limit.
