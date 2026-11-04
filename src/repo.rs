@@ -3968,7 +3968,6 @@ mod commit_record_tests {
 }
 
 #[cfg(test)]
-<<<<<<< head
 mod leftover_name_tests {
     use super::{is_leftover_name, leftover_base};
 
@@ -3989,8 +3988,9 @@ mod leftover_name_tests {
         assert!(!is_leftover_name("target.layr-old-ABC1234", "target"));
         assert!(!is_leftover_name("target.layr-old-abc1234x", "target"));
         assert!(!is_leftover_name("other.layr-old-abc1234", "target"));
-||||||| base
-=======
+    }
+}
+
 mod owner_walk_tests {
     use super::owner_walk_skippable;
 
@@ -4010,6 +4010,5 @@ mod owner_walk_tests {
         assert!(!owner_walk_skippable(false, 501, 501, 20, Some(501), (501, 20)));
         // The root has another group than the line: the walk runs.
         assert!(!owner_walk_skippable(true, 501, 501, 20, Some(501), (501, 21)));
->>>>>>> bb2c3f2
     }
 }
