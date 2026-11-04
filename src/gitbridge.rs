@@ -2025,6 +2025,26 @@ pub fn drop_remote_refs(repo: &Repo, remote: &str) -> Result<()> {
 /// Rewrite the `packed-refs` of a line's `.git` folder when it differs from the bridge store. A
 /// folder the line owner made is left alone.
 pub fn refresh_packed_refs(repo: &Repo, line: &Line) -> Result<()> {
+    refresh_packed_refs_to(repo, line, &packed_refs_text(repo)?)
+}
+
+/// After a fetch: the `packed-refs` of the `.git` folder of every line of this machine, so git in a
+/// line sees the remote refs that layr has, not the ones of the line's start. A line that fails
+/// keeps its old refs, with a warning.
+pub fn refresh_all_packed_refs(repo: &Repo) -> Result<()> {
+    let want = packed_refs_text(repo)?;
+    for line in repo.lines()? {
+        if line.machine != repo.p.store.machine.id {
+            continue;
+        }
+        if let Err(e) = refresh_packed_refs_to(repo, &line, &want) {
+            eprintln!("warning: the git refs of line {} stay as they were: {e:#}", line.name);
+        }
+    }
+    Ok(())
+}
+
+fn refresh_packed_refs_to(repo: &Repo, line: &Line, want: &str) -> Result<()> {
     let w = repo.working(line);
     let dir = match fsutil::open_dir_nofollow(&w.join(".git")) {
         Ok(d) => d,
@@ -2033,7 +2053,6 @@ pub fn refresh_packed_refs(repo: &Repo, line: &Line) -> Result<()> {
     if !fsutil::is_layer(&w, ".git", &fsutil::meta_of(&dir.metadata()?)) {
         return Ok(());
     }
-    let want = packed_refs_text(repo)?;
     let cur = fsutil::read_at(&dir, "packed-refs").map(|c| String::from_utf8_lossy(&c).into_owned()).unwrap_or_default();
     if cur == want {
         return Ok(());
