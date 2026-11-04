@@ -88,6 +88,8 @@ ok "automatic state keeps ordinary content" l show 'head@{0}:visible.txt'
 # Crash in the middle of the two cache-directory renames, then enter a pre-command save.
 sample "$T/crash-src"
 printf 'cache regenerable\n' > "$T/crash-src/.layrattributes"
+# A regenerable folder is a cache only when it is ignored too.
+printf 'cache/\n' >> "$T/crash-src/.gitignore"
 l init crash --from "$T/crash-src" -q >/dev/null
 cd "$LAYR_ROOT/projects/crash/lines/main" || exit 1
 l protect main --remove >/dev/null 2>&1 || true
