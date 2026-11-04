@@ -96,7 +96,8 @@ for f in /etc/environment /root/.cargo/config.toml /root/.cargo/config "$OWN_HOM
     [ -f "$f" ] && echo "DIAG config $f: $(tr '\n' ' ' < "$f" | cut -c1-300)"
 done
 PROBE="$T/incr-probe"
-owned sh -c "mkdir -p '$PROBE/src' && printf '[package]\nname = \"probe\"\nversion = \"0.1.0\"\nedition = \"2021\"\n' > '$PROBE/Cargo.toml' && echo 'pub fn a() {}' > '$PROBE/src/lib.rs'"
+mkdir -p "$PROBE/src" && printf '[package]\nname = "probe"\nversion = "0.1.0"\nedition = "2021"\n' > "$PROBE/Cargo.toml" && echo 'pub fn a() {}' > "$PROBE/src/lib.rs"
+chown -R "$OWN" "$PROBE" 2>/dev/null || true
 for mode in unset 1; do
     if [ $mode = unset ]; then E="env -u CARGO_INCREMENTAL"; else E="env CARGO_INCREMENTAL=1"; fi
     echo "DIAG incremental flag, CARGO_INCREMENTAL $mode: $(owned sh -c "cd '$PROBE' && rm -rf target && $E RUSTC_WRAPPER= cargo build -v 2>&1 | grep -o -- '-C incremental=[^ ]*' | head -1")"
@@ -170,6 +171,18 @@ eq "merge --caches-only removes the stale units" "$base" "$merged"
 eq "the union merge keeps the times of the cache" "0" "$mismatch"
 rebuilt=$(cb "$P/other" build --workspace)
 case "$rebuilt" in *Compiling*) FAIL=$((FAIL + 1)); echo "FAIL the next build after the union merge compiled" ;; *) PASS=$((PASS + 1)); echo "PASS the next build after the union merge compiles nothing" ;; esac
+
+# DIAG: the mtime of the library's rlib in `other` at each step of a union merge (prune off, then a manual prune).
+stat_rlib() { python3 -c "import glob,os,sys; [print('DIAG rlib', sys.argv[1], os.stat(f).st_mtime_ns, os.path.basename(f)) for f in sorted(glob.glob(sys.argv[2]))]" "$1" "$2"; }
+ok "the owner sets prune=none for the step diagnostic" l overlay set cache.target --prune none
+stat_rlib "source" "$P/main/target/debug/deps/libprunehook-*.rlib"
+stat_rlib "before merge" "$P/other/target/debug/deps/libprunehook-*.rlib"
+(cd "$P/other" && l merge main --caches-only -q)
+stat_rlib "after merge, prune off" "$P/other/target/debug/deps/libprunehook-*.rlib"
+(cd "$P/other" && owned env CARGO_NET_OFFLINE=true "$LAYR" retest prune target) > "$T/prune-step" 2>&1 || true
+echo "DIAG step prune: $(tr '\n' ' ' < "$T/prune-step")"
+stat_rlib "after manual prune" "$P/other/target/debug/deps/libprunehook-*.rlib"
+ok "the owner sets prune to auto after the step diagnostic" l overlay set cache.target --prune auto
 
 # 4. prune=none keeps the folder: a new line from the stale cache keeps its stale units.
 ok "the owner sets prune=none again" l overlay set cache.target --prune none
