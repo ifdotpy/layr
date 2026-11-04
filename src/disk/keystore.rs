@@ -13,8 +13,8 @@ pub(super) fn test_service() {
 }
 
 pub fn account(url: &str) -> String {
-    use sha2::{Digest, Sha256};
-    hex::encode(Sha256::digest(url.as_bytes()))
+    use layr_hashers::{ContentAddress, Digest};
+    hex::encode(ContentAddress::digest(url.as_bytes()))
 }
 
 #[cfg(target_os = "macos")]

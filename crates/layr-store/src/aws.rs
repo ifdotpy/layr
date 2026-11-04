@@ -3,8 +3,13 @@
 
 pub mod profile;
 
+<<<<<<< head
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
+=======
+use hmac::{Hmac, Mac};
+use layr_hashers::{ContentAddress, Digest};
+>>>>>>> origin/main
 
 /// The SHA-256 of an empty payload.
 pub const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -73,7 +78,7 @@ pub fn amz_date(unix: u64) -> String {
 }
 
 fn hmac(key: &[u8], data: &str) -> Vec<u8> {
-    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC takes any key");
+    let mut mac = Hmac::<ContentAddress>::new_from_slice(key).expect("HMAC takes any key");
     mac.update(data.as_bytes());
     mac.finalize().into_bytes().to_vec()
 }
@@ -107,7 +112,7 @@ pub fn sign(request: &Request, credentials: &Credentials, region: &str, service:
     ]
     .join("\n");
     let scope = format!("{day}/{region}/{service}/aws4_request");
-    let to_sign = format!("AWS4-HMAC-SHA256\n{stamp}\n{scope}\n{}", hex::encode(Sha256::digest(canonical.as_bytes())));
+    let to_sign = format!("AWS4-HMAC-SHA256\n{stamp}\n{scope}\n{}", hex::encode(ContentAddress::digest(canonical.as_bytes())));
     let mut key = format!("AWS4{}", credentials.secret).into_bytes();
     for part in [day, region, service, "aws4_request"] {
         key = hmac(&key, part);

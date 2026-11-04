@@ -13,8 +13,12 @@ quick-xml = "0.42"
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
+<<<<<<< head
 sha2 = "0.11"
 sha1 = "0.11"
+=======
+layr-hashers = { path = "../layr-hashers" }
+>>>>>>> origin/main
 hex = "0.4"
 similar = "3"
 layr-store = { path = "../layr-store", default-features = false }

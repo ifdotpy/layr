@@ -4,7 +4,7 @@ use crate::Record;
 use anyhow::{bail, Context, Result};
 use ed25519_dalek::VerifyingKey;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use layr_hashers::{ContentAddress, Digest};
 use std::collections::{BTreeMap, BTreeSet};
 
 fn parse(line: &str, key: Option<&VerifyingKey>) -> Result<Record> {
@@ -30,7 +30,7 @@ pub struct Change {
 }
 
 pub fn digest(line: &str) -> String {
-    hex::encode(Sha256::digest(line.as_bytes()))
+    hex::encode(ContentAddress::digest(line.as_bytes()))
 }
 
 impl Authority {

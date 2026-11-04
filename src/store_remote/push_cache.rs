@@ -7,7 +7,7 @@ use super::{
 use anyhow::{bail, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use layr_hashers::{ContentAddress, Digest};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
@@ -97,7 +97,7 @@ impl TreeCache {
         let mut root = None;
         while let Some((path, node)) = dirs.pop_last() {
             let bytes = serde_json::to_vec(&node)?;
-            let hash = Sha256::digest(&bytes);
+            let hash = ContentAddress::digest(&bytes);
             let exists = tx.query_row("SELECT 1 FROM nodes WHERE hash=?1", [hash.as_slice()], |_| Ok(())).optional()?.is_some();
             if !exists {
                 tx.execute("INSERT INTO nodes VALUES (?1, ?2)", params![hash.as_slice(), zst::compress(&bytes, None)?])?;
@@ -128,7 +128,7 @@ impl TreeCache {
             }
             let bytes: Vec<u8> = self.0.query_row("SELECT data FROM nodes WHERE hash=?1", [key], |row| row.get(0))?;
             let bytes = zst::decompress_with_limit(&bytes, None, NODE_LIMIT)?;
-            if hex::encode(Sha256::digest(&bytes)) != hash {
+            if hex::encode(ContentAddress::digest(&bytes)) != hash {
                 bail!("invalid local tree cache node");
             }
             let node: Node = serde_json::from_slice(&bytes)?;
@@ -162,7 +162,7 @@ mod tests {
                     Entry(
                         "100644".into(),
                         0,
-                        hex::encode(Sha256::digest(content.to_le_bytes())),
+                        hex::encode(ContentAddress::digest(content.to_le_bytes())),
                         vec![super::super::format::Link(
                             "01a12290-0000-7000-8000-000000000002".into(),
                             "0123abcd".into(),

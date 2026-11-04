@@ -6,14 +6,14 @@ use crate::repo::{Repo, Snap};
 use anyhow::{bail, Context, Result};
 use hmac::{Hmac, KeyInit, Mac};
 use rand::RngCore;
-use sha2::Sha256;
+use layr_hashers::ContentAddress;
 use std::collections::{BTreeSet, VecDeque};
 use std::fs::OpenOptions;
 use std::io::{BufRead, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
-type HmacSha256 = Hmac<Sha256>;
+type HmacSha256 = Hmac<ContentAddress>;
 
 #[derive(Default)]
 struct Index {

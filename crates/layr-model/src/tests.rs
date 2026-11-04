@@ -332,7 +332,7 @@ fn person_evidence(seq: u64, login: &str, key: &ed25519_dalek::SigningKey, withd
             .unwrap();
     let signed = request.sign(key).unwrap();
     let text = String::from_utf8(signed.to_bytes().unwrap()).unwrap();
-    record.data = json!({"request":text,"request_id":request.id,"request_digest":hex::encode(Sha256::digest(text.as_bytes())),"person_key":hex::encode(key.verifying_key().to_bytes()),"attestation":Attestation {format:1,attestation_id:record.id.clone(),subject:Subject{kind:"state".into(),id:subject.into()},change_id:None,kind:if withdraw {"revoke".into()}else{"approval".into()},payload_digest:hex::encode(Sha256::digest(signed.r.get().as_bytes())),payload_ref:None,signer:record.actor.name.clone(),time:record.time}});
+    record.data = json!({"request":text,"request_id":request.id,"request_digest":hex::encode(ContentAddress::digest(text.as_bytes())),"person_key":hex::encode(key.verifying_key().to_bytes()),"attestation":Attestation {format:1,attestation_id:record.id.clone(),subject:Subject{kind:"state".into(),id:subject.into()},change_id:None,kind:if withdraw {"revoke".into()}else{"approval".into()},payload_digest:hex::encode(ContentAddress::digest(signed.r.get().as_bytes())),payload_ref:None,signer:record.actor.name.clone(),time:record.time}});
     validation::validate(&record).unwrap();
     record
 }
@@ -397,7 +397,7 @@ fn person_approvals_survive_executor_scope_and_keep_revocations_separate() {
 
 #[test]
 fn encrypted_person_proof_binds_ciphertext_digest_and_inner_routing() {
-    use sha2::{Digest, Sha256};
+    use layr_hashers::{ContentAddress, Digest};
     let key = ed25519_dalek::SigningKey::from_bytes(&[11; 32]);
     let identity = layr_store::keys::generate_identity();
     let recipient = layr_store::keys::recipient_of(&identity).unwrap();
@@ -405,7 +405,7 @@ fn encrypted_person_proof_binds_ciphertext_digest_and_inner_routing() {
     let inner = record.data["request"].as_str().unwrap();
     let bytes = layr_store::request::seal(inner.as_bytes(), &recipient, &key).unwrap();
     record.data["encrypted_request"] = json!(String::from_utf8(bytes.clone()).unwrap());
-    record.data["request_digest"] = json!(hex::encode(Sha256::digest(&bytes)));
+    record.data["request_digest"] = json!(hex::encode(ContentAddress::digest(&bytes)));
     validation::validate(&record).unwrap();
     let mut changed = record.clone();
     changed.data["request_digest"] = json!("0".repeat(64));
@@ -414,13 +414,13 @@ fn encrypted_person_proof_binds_ciphertext_digest_and_inner_routing() {
     envelope["person"] = json!("bob@example.com");
     changed = record.clone();
     let text = envelope.to_string();
-    changed.data["request_digest"] = json!(hex::encode(Sha256::digest(text.as_bytes())));
+    changed.data["request_digest"] = json!(hex::encode(ContentAddress::digest(text.as_bytes())));
     changed.data["encrypted_request"] = json!(text);
     assert!(validation::validate(&changed).is_err());
     envelope["person"] = json!("ann@example.com");
     envelope["sig"] = json!("0".repeat(128));
     let text = envelope.to_string();
-    changed.data["request_digest"] = json!(hex::encode(Sha256::digest(text.as_bytes())));
+    changed.data["request_digest"] = json!(hex::encode(ContentAddress::digest(text.as_bytes())));
     changed.data["encrypted_request"] = json!(text);
     assert!(validation::validate(&changed).is_err());
 }
@@ -448,7 +448,7 @@ fn a_person_proof_cannot_be_reused_for_another_effect() {
     r.machine = "01a12290-0000-7000-8000-000000000005".into();
     r.actor.uid = u32::MAX;
     r.actor.name = "person:ann@example.com".into();
-    r.data = json!({"request":text,"request_id":id,"request_digest":hex::encode(Sha256::digest(text.as_bytes())),"person_key":hex::encode(key.verifying_key().to_bytes()),"attestation":Attestation { format:1,attestation_id:r.id.clone(),subject:Subject{kind:"state".into(),id:subject.into()},change_id:None,kind:"approval".into(),payload_digest:hex::encode(Sha256::digest(signed.r.get().as_bytes())),payload_ref:None,signer:r.actor.name.clone(),time:r.time }});
+    r.data = json!({"request":text,"request_id":id,"request_digest":hex::encode(ContentAddress::digest(text.as_bytes())),"person_key":hex::encode(key.verifying_key().to_bytes()),"attestation":Attestation { format:1,attestation_id:r.id.clone(),subject:Subject{kind:"state".into(),id:subject.into()},change_id:None,kind:"approval".into(),payload_digest:hex::encode(ContentAddress::digest(signed.r.get().as_bytes())),payload_ref:None,signer:r.actor.name.clone(),time:r.time }});
     validation::validate(&r).unwrap();
     let mut changed = r.clone();
     changed.data["attestation"]["subject"]["id"] = json!(r.id);
