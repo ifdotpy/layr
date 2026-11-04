@@ -19,7 +19,8 @@ cd "$P/main" || exit 1
 trace=$(LAYR_TRACE=1 l line delete -D topic 2>&1)
 no "the line is deleted" test -e "$P/topic"
 has "the lock is taken after the save" "store lock taken" "$trace"
-has "the save is written before the lock" "prepare save" "$trace"
+# The layer written before the lock is an APFS feature (Linux saves a snapshot instead).
+[ "$(uname -s)" = Darwin ] && has "the save is written before the lock" "prepare save" "$trace"
 eq "no prepared layer stays" "" "$(ls -A "$LAYR_ROOT/projects/del/meta/work" 2>/dev/null)"
 
 ok "undo of the delete" l undo
