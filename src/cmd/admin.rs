@@ -82,27 +82,52 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let mut refusals: Vec<String> = Vec::new();
     for l in lines {
         repo.authorize_line(ctx, &l, crate::repo::LineOp::Save)?;
+        let mut prepared = None;
         if a.has("--caches") {
             // A cache copy that a later cache fails to make leaves the earlier ones in the work folder.
             repo.hold(repo.pin(&[&l.head, &repo.save_base(&l)?])?);
-            if let Err(e) = prepare_caches(repo, &l, &only) {
-                repo.discard_prepared();
-                return Err(e);
-            }
+            let refused = match prepare_caches(repo, &l, &only) {
+                Ok(r) => r,
+                Err(e) => {
+                    repo.discard_prepared();
+                    return Err(e);
+                }
+            };
+            // The snapshot of the folder and its compare with the head, before the lock (#194).
+            prepared = match prepared_caches_state(ctx, repo, &l, &msg, &only, &refused) {
+                Ok(p) => p,
+                Err(e) => {
+                    repo.discard_prepared();
+                    return Err(e);
+                }
+            };
         } else if !a.has("--force") {
             repo.prepare_save(&l)?;
         }
-        let _lock = repo.p.lock()?;
+        // Test hook (tests/t128-caches-prepare.sh): wait after the prepare step, so a test can
+        // change the folder before the lock.
+        if let Some(ms) = std::env::var("LAYR_TEST_SAVE_PAUSE_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+        }
+        let _lock = match repo.p.lock() {
+            Ok(lock) => lock,
+            Err(e) => {
+                repo.discard_prepared_caches(prepared);
+                return Err(e);
+            }
+        };
         let l = repo.line(&l.id)?;
         crate::repo::recover_cache_replacements(&repo.working(&l))?;
         let (mut caches, mut versioned) = if a.has("--caches") { repo.line_cache_paths(&l)? } else { Default::default() };
         if !only.is_empty() {
             if let Some(missing) = only.iter().find(|o| !caches.contains(o) && !versioned.contains(o)) {
+                repo.discard_prepared_caches(prepared.take());
                 return Err(exit(1, format!("error: '{missing}' is no cache path of the line (see layr overlay list)")));
             }
             caches.retain(|p| only.contains(p));
             versioned.retain(|p| only.contains(p));
             if caches.is_empty() && versioned.is_empty() {
+                repo.discard_prepared_caches(prepared.take());
                 return Err(exit(
                     1,
                     format!("error: '{}' is no cache path of the line (see layr overlay list)", only.join("', '")),
@@ -143,7 +168,7 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 }
             }
             caches.retain(|p| !refused.contains(p));
-            Some(repo.caches_state(ctx, &l, &msg, a.has("--running"), &caches)?)
+            Some(repo.caches_state(ctx, &l, &msg, a.has("--running"), &caches, prepared.take())?)
         } else {
             repo.save(ctx, &l, &msg, a.has("--running"), a.has("--force"))?
         };
@@ -200,9 +225,11 @@ fn refuse(e: anyhow::Error, refusals: &mut Vec<String>) -> Result<()> {
 /// a cache already, a snapshot takes a copy with one rename, and unused copies go to the trash.
 /// The files of a cache are build output: a copy from a moment before the lock is as good.
 /// Prepare the copies of the line's caches before the lock; `only` (empty: all) names the paths.
-fn prepare_caches(repo: &Repo, l: &Line, only: &[String]) -> Result<()> {
+/// Returns the cache paths that it refused (a process uses them).
+fn prepare_caches(repo: &Repo, l: &Line, only: &[String]) -> Result<Vec<String>> {
     let w = repo.working(l);
     let (u, g) = repo.owner_ids(l);
+    let mut refused = Vec::new();
     for p in repo.line_cache_paths(l)?.0 {
         if !only.is_empty() && !only.contains(&p) {
             continue;
@@ -213,6 +240,7 @@ fn prepare_caches(repo: &Repo, l: &Line, only: &[String]) -> Result<()> {
             if e.downcast_ref::<crate::repo::CacheRefused>().is_none() {
                 return Err(e);
             }
+            refused.push(p);
             continue;
         }
         // Pruned before the copy and the save: the state keeps the pruned cache (docs/cache-overlays.md, section 19).
@@ -220,7 +248,21 @@ fn prepare_caches(repo: &Repo, l: &Line, only: &[String]) -> Result<()> {
         #[cfg(target_os = "macos")]
         prepare_cache_copy(repo, l, &w, &p)?;
     }
-    Ok(())
+    Ok(refused)
+}
+
+/// The cache paths that `save --caches` gives `caches_state` under the lock, read before it:
+/// the cache paths of the line (or `only`), without damaged and refused folders. Then the
+/// state of the folder (`Repo::prepare_caches_state`).
+fn prepared_caches_state(ctx: &Ctx, repo: &Repo, l: &Line, msg: &str, only: &[String], refused: &[String]) -> Result<Option<crate::repo::PreparedCaches>> {
+    let damaged = repo.damaged_folders(l)?;
+    let caches: Vec<String> = repo
+        .line_cache_paths(l)?
+        .0
+        .into_iter()
+        .filter(|p| (only.is_empty() || only.contains(p)) && !damaged.contains(p) && !refused.contains(p))
+        .collect();
+    repo.prepare_caches_state(ctx, l, msg, &caches)
 }
 
 #[cfg(target_os = "macos")]
