@@ -14,7 +14,7 @@ rapidhash = "4.5"
 rustc-hash = "2"
 
 [dev-dependencies]
-foldhash = "0.1"
+foldhash = "0.2"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [[bench]]
