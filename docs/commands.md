@@ -38,8 +38,9 @@ and the branches of its `origin` as `origin/<branch>` (imported on first use). T
 HEAD) starts at HEAD. Ignored `target` folders next to a `Cargo.toml` and ignored `node_modules`
 folders next to a `package.json` (at most three levels deep) move into the line and become its
 caches (the project setting `regenerable`), so nothing is built again. Then the checkout is kept
-as `<checkout>.before-layr`, and the line moves to the checkout's path (`line move`). A
-`Cargo.toml` at the top runs `layr retest init --yes`. The command refuses a checkout with
+as `<checkout>.before-layr`, and the line moves to the checkout's path (`line move`). For a
+`Cargo.toml` at the top it prints how to run `layr retest init` in a line of its own: the setup
+changes files of the project, and the new line is protected. The command refuses a checkout with
 uncommitted changes, one with more worktrees, a subfolder of a checkout, and a checkout on
 another file system than the store. The project name is the folder name unless given.
 

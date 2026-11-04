@@ -2224,8 +2224,8 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
 /// its `origin` as `origin/<branch>` (imported on first use), and the line of its current branch
 /// starts at HEAD. Ignored `target` (next to Cargo.toml) and `node_modules` (next to package.json)
 /// folders move into the line and become its caches. Then the checkout is kept as
-/// `<checkout>.before-layr` and the line moves to the checkout's path. A Cargo workspace gets
-/// `layr retest init`. Refused: uncommitted changes, more than one worktree, another file system.
+/// `<checkout>.before-layr` and the line moves to the checkout's path. Refused: uncommitted
+/// changes, more than one worktree, another file system.
 fn init_from_git(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let spec = Spec::new().value("--from-git").value("--line").value("--volume").flag("-q|--quiet");
     let a = parse(&spec, args)?;
@@ -2247,12 +2247,14 @@ fn init_from_git(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let dirty = git_text(&["status", "--porcelain"])?;
     if !dirty.is_empty() {
+        let paths: Vec<&str> = dirty.lines().map(|l| l.get(3..).unwrap_or(l)).collect();
+        let more = if paths.len() > 5 { format!(" and {} more", paths.len() - 5) } else { String::new() };
         return Err(exit(
             1,
             format!(
-                "error: {} has uncommitted changes ({} path(s)); commit or stash them, then run the command again",
+                "error: {} has uncommitted changes: {}{more}; commit, stash or move them away, then run the command again",
                 src.display(),
-                dirty.lines().count()
+                paths.iter().take(5).copied().collect::<Vec<_>>().join(", ")
             ),
         ));
     }
@@ -2336,11 +2338,6 @@ fn init_from_git(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let _ = std::fs::rename(&backup, &src);
         return Err(e.context(format!("the line stays at {}; the checkout is back at {}", w.display(), src.display())));
     }
-    if src.join("Cargo.toml").is_file() {
-        if let Err(e) = run(&src, &["retest", "init", "--yes"]) {
-            eprintln!("warning: layr retest init failed; run it in {}: {e:#}", src.display());
-        }
-    }
     if !a.has("-q") {
         let locals = git_text(&["-C", &backup.to_string_lossy(), "for-each-ref", "--format=%(refname:strip=2)", "refs/heads/"]).unwrap_or_default();
         outln!(ctx, "Project {name}: line {line_name} at {} (Git HEAD {})", src.display(), &git_text(&["-C", &backup.to_string_lossy(), "rev-parse", "--short", "HEAD"]).unwrap_or_default());
@@ -2350,6 +2347,14 @@ fn init_from_git(ctx: &Ctx, args: &[String]) -> Result<i32> {
             outln!(ctx, "Caches kept: {}", caches.join(", "));
         }
         outln!(ctx, "The Git checkout is kept at {}; remove it when the line works.", backup.display());
+        // `retest init` changes files of the project, and the line is protected: it runs in a line
+        // of its own, which is merged like any change.
+        if src.join("Cargo.toml").is_file() {
+            outln!(
+                ctx,
+                "A Cargo workspace: set up the checks in a line of their own: layr line new retest-setup {line_name} && cd <its folder> && layr retest init, then merge it."
+            );
+        }
     }
     Ok(0)
 }

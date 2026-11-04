@@ -23,7 +23,9 @@ echo built > rs/target/debug/x; echo dep > web/node_modules/dep/index.js
 # Refused: uncommitted changes, then an extra worktree.
 echo dirty >> a.txt
 no "a checkout with uncommitted changes is refused" l init co --from-git $T/co
-has "the refusal says what to do" "commit or stash" "$(l init co --from-git $T/co 2>&1)"
+out=$(l init co --from-git $T/co 2>&1)
+has "the refusal says what to do" "commit, stash or move" "$out"
+has "the refusal names the path" "a.txt" "$out"
 git checkout -q a.txt
 git worktree add -q $T/wt2 wip 2>/dev/null
 has "an extra worktree is refused" "git worktree remove" "$(l init co --from-git $T/co 2>&1)"
