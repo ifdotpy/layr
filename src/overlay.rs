@@ -1232,6 +1232,17 @@ impl<'a> Repo<'a> {
         Self::delete_excess(ctx, &orepo, keep_n, excess)
     }
 
+    /// The present states of cache overlay `name` that nothing keeps: beyond its history limit (all
+    /// states when it has none), not shown by a line, or of a deleted line. `fsck --caches` reports
+    /// them; the operations that make them dead delete them (`apply_history`). It only reads.
+    pub fn cache_unreachable(&self, name: &str) -> Result<Vec<String>> {
+        let keep_n = self.overlay_props(name)?.history.map_or(usize::MAX, |n| n as usize);
+        let orepo = self.overlay_repo(name)?;
+        let lines = self.lines()?;
+        let stacks = self.stacks(&lines)?;
+        self.history_excess(&orepo, name, keep_n, &lines, &stacks)
+    }
+
     /// The states of overlay `name` (project `orepo`) beyond its history limit `keep_n` that no
     /// line uses. It only reads.
     fn history_excess(&self, orepo: &Repo, name: &str, keep_n: usize, lines: &[Line], stacks: &BTreeMap<String, Vec<Layer>>) -> Result<Vec<String>> {
