@@ -121,7 +121,7 @@ pub(crate) fn scan_shared(root: &Path, data: bool) -> Result<Arc<BTreeMap<String
     if let Some(scan) = MEMO.with_borrow(|memo| memo.iter().find(|(r, _)| r == root).map(|(_, s)| s.clone())) {
         return Ok(scan);
     }
-    let m = fs::symlink_metadata(root)?;
+    let m = crate::thin::read_source(fs::symlink_metadata(root), root)?;
     let saved = sealed_scan_file(root, &m);
     if let Some(scan) = saved.as_ref().and_then(|f| decoded(f)) {
         return Ok(scan);
@@ -806,9 +806,14 @@ pub(crate) fn seal(path: &Path, readonly: bool, for_delete: bool) -> Result<()> 
     // One flag change per entry: several threads share them. A folder is opened before its
     // content is read, and sealed after its content.
     let open = |p: &Path| -> Result<bool> {
+        // The mode is read only when a delete needs it: one flag change is the whole cost otherwise.
+        if !for_delete {
+            crate::sys::apfs_immutable(p, false)?;
+            return Ok(false);
+        }
         let m = fs::symlink_metadata(p)?;
         crate::sys::apfs_immutable(p, false)?;
-        if for_delete && m.is_dir() && m.mode() & 0o700 != 0o700 {
+        if m.is_dir() && m.mode() & 0o700 != 0o700 {
             fs::set_permissions(p, fs::Permissions::from_mode((m.mode() & 0o7777) | 0o700))?;
         }
         Ok(m.is_dir())
@@ -831,13 +836,18 @@ pub(crate) fn seal(path: &Path, readonly: bool, for_delete: bool) -> Result<()> 
         return if readonly { Ok(crate::sys::apfs_immutable(path, true)?) } else { open(path).map(|_| ()) };
     }
     if !readonly {
+        // All folders first, then all files in one parallel pass: a level with few entries used to
+        // run serially (a node_modules copy of 47k entries took 8 s). A listing needs no flag change.
+        let (mut dirs, mut files) = (vec![path.to_path_buf()], Vec::new());
         let mut level = vec![path.to_path_buf()];
         while !level.is_empty() {
-            each_parallel(&level, |d| open(d).map(|_| ()))?;
-            let (sub, files) = children(&level)?;
-            each_parallel(&files, |f| open(f).map(|_| ()))?;
+            let (sub, f) = children(&level)?;
+            files.extend(f);
+            dirs.extend(sub.iter().cloned());
             level = sub;
         }
+        each_parallel(&dirs, |d| open(d).map(|_| ()))?;
+        each_parallel(&files, |f| open(f).map(|_| ()))?;
         return Ok(());
     }
     let mut levels = vec![vec![path.to_path_buf()]];
@@ -910,6 +920,7 @@ fn clone_complete_with(
     // a layer. The work follows the tree without its nested layers, not their size.
     let nested: BTreeSet<&str> = nested_layers(src, entries).into_iter().map(|p| p.as_str()).collect();
     if nested.is_empty() {
+        let _t = crate::trace::span("APFS clone root");
         crate::sys::apfs_clone(src, dst)?;
     } else {
         let _t = crate::trace::span(format!("APFS clone around {} nested layers", nested.len()));
@@ -927,6 +938,7 @@ fn clone_complete_with(
     if readonly {
         crate::sys::apfs_immutable(dst, false)?;
     } else {
+        let _t = crate::trace::span("APFS unseal copy");
         seal(dst, false, false)?;
     }
     // A folder clone gives the folders the time of the clone; a btrfs snapshot keeps them.
@@ -1004,6 +1016,17 @@ pub fn snapshot(src: &Path, dst: &Path, readonly: bool) -> Result<()> {
 /// hard links (for example pnpm's node_modules) is still cloned at once.
 pub fn scan_snapshot(src: &Path, dst: &Path) -> Result<()> {
     snapshot_with(src, dst, true, false)
+}
+
+/// A writable copy of a cache folder, cloned at once. Hard links become separate files: build
+/// output has many (cargo links each binary into `target/debug`), and a copy that keeps them
+/// copies every file one by one. A cache is regenerable, so only the links are lost.
+///
+/// Returns true when the copy is one clone. A clone gives every entry the owner of the new folder
+/// (CLONE_NOOWNERCOPY), so the root tells the owner of the whole copy.
+pub fn cache_snapshot(src: &Path, dst: &Path) -> Result<bool> {
+    let scan = copy_snapshot(src, dst, false, false)?;
+    Ok(!needs_file_copies(src, &scan, false))
 }
 
 /// A copy of a tree made before a store lock (`prepare_snapshot`).
@@ -1491,23 +1514,35 @@ fn candidates_scanned_with(
             c.old_path = Some(src.clone());
         }
     }
+    let both_files = |c: &crate::changes::Change| {
+        c.old_path.is_none() && c.old.as_ref().is_some_and(|m| m.is_file()) && c.new.as_ref().is_some_and(|m| m.is_file())
+    };
+    let shared_at = |p: &str| {
+        let (old, new) = (&a[p], &b[p]);
+        old.fingerprint.0 == new.fingerprint.0
+            && old.meta.size == new.meta.size
+            && old.data.zip(new.data).is_some_and(|(a, b)| {
+                a.generation.is_some() && b.generation.is_some() && a.clone_id.is_some() && a.clone_id == b.clone_id
+            })
+    };
+    // The exact ranges of the files that are not shared are read on threads: a file costs its own reads.
+    let mut ranged: BTreeMap<String, Vec<(u64, u64)>> = BTreeMap::new();
+    if exact {
+        let todo: Vec<String> = changes.iter().filter(|(p, c)| both_files(c) && !shared_at(p)).map(|(p, _)| p.clone()).collect();
+        let found = changed_ranges_all(parent, child, &todo)?;
+        ranged = todo.into_iter().zip(found).collect();
+    }
     let mut read: Vec<String> = Vec::new();
     for (p, c) in &mut changes {
-        if c.old_path.is_none() && c.old.as_ref().is_some_and(|m| m.is_file()) && c.new.as_ref().is_some_and(|m| m.is_file()) {
-            let old = &a[p];
-            let new = &b[p];
-            let shared = old.fingerprint.0 == new.fingerprint.0
-                && old.meta.size == new.meta.size
-                && old.data.zip(new.data).is_some_and(|(a, b)| {
-                    a.generation.is_some() && b.generation.is_some() && a.clone_id.is_some() && a.clone_id == b.clone_id
-                });
+        if both_files(c) {
+            let shared = shared_at(p);
             if !shared {
                 read.push(p.clone());
             }
             c.ranges = if shared {
                 Some(Vec::new())
             } else if exact {
-                Some(changed_ranges(parent, child, p)?)
+                ranged.remove(p.as_str())
             } else {
                 same_content(parent, child, p)?.then(Vec::new)
             };
@@ -1554,6 +1589,27 @@ fn same_content(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), rel: 
         }
     }
     Ok(true)
+}
+
+/// `changed_ranges` of each path, on up to four threads. The results keep the order of `paths`,
+/// and the first error in that order is returned.
+fn changed_ranges_all(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), paths: &[String]) -> Result<Vec<Vec<(u64, u64)>>> {
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 4);
+    if threads == 1 || paths.len() < 64 {
+        return paths.iter().map(|p| changed_ranges(parent, child, p)).collect();
+    }
+    let chunk = paths.len().div_ceil(threads);
+    std::thread::scope(|scope| {
+        let jobs: Vec<_> = paths
+            .chunks(chunk)
+            .map(|part| scope.spawn(move || part.iter().map(|p| changed_ranges(parent, child, p)).collect::<Result<Vec<_>>>()))
+            .collect();
+        let mut out = Vec::with_capacity(paths.len());
+        for job in jobs {
+            out.extend(job.join().map_err(|_| anyhow::anyhow!("changed ranges thread panicked"))??);
+        }
+        Ok(out)
+    })
 }
 
 // Compare fixed blocks when APFS cannot report changed extents. Adjacent blocks coalesce.

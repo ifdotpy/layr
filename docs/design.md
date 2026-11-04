@@ -236,6 +236,15 @@ is valid for a state, so it never decides that by itself:
 - Under a lock, layr deletes no large tree on APFS: it renames it into the store's `trash`,
   which the process empties after it releases its last store lock. A wait for or a hold of the
   lock of 1 s or more goes to `meta/lock-slow.log` of the project.
+- A command that moves the head of a line or writes its working folder (`save`, `add`, `merge`,
+  `pick`, `reset`, `restore`, `undo`, `apply`, `rebase`) holds the lock of that line for the whole
+  command: `meta/line-locks/<line id>`. The heavy work (merge, checks, the tree of the new head,
+  the folder write, the git index) runs under that lock only. The project lock comes last, for the
+  records: it checks that the line still has the head the command started from, then records the
+  move (`Repo::commit_line`). A head that moved is refused with `line x moved during the command
+  (head a1b2 -> c3d4); run it again`, and the folder is written back. Other lines do not wait for
+  the command. Order: line locks first (sorted by id), then the project lock; never a line lock
+  under the project lock.
 - A command that saves the working folder first (`save`, `line delete`, and every command that
   starts with an automatic state, such as `restore`, `reset` or `merge`) writes that layer
   before the store lock. Under the lock it scans the folder again and takes the layer with one

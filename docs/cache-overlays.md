@@ -447,3 +447,144 @@ versioned overlay is refused: its files are history.
   snapshot, as any regenerable folder does. To keep it plain, remove `regenerable` from
   `.layrattributes` or from the machine setting first.
 - Test: `tests/t110-overlay-remove.sh`.
+
+## 19. Pruning cache folders
+
+A cache folder of a line (`target`, `node_modules`) keeps the build output of old dependencies. A
+cache adapter removes that output and keeps the live set: the entries that the project's standard
+commands still need. Core stores the overlay property `prune` and runs the adapter; adapters are
+separate crates (issue #167).
+
+Crates:
+
+- `crates/layr-adapter`: the interface (`CacheAdapter`, `Host`, `Outcome`). Core depends on it.
+- `crates/layr-cache`: the cargo and pnpm adapters, and `adapters()`. Core does not depend on it.
+- The binary (`src/main.rs`) registers `layr_cache::adapters()` at startup with `cache_hook::register`.
+
+### 18.1 Adapters
+
+| Name | Folder | Project file next to it | Live set | Work |
+| --- | --- | --- | --- | --- |
+| `cargo` | `target` | `Cargo.toml` | the units of the `sweep` list of `[workspace.metadata.layr-retest]` | lists the units (no compile), then removes the other entries (section "Sweeping stale build output" of `docs/retest.md`) |
+| `pnpm` | `node_modules` | `pnpm-lock.yaml` | the packages of the lockfile | `pnpm install --frozen-lockfile --offline --ignore-scripts`, then `pnpm prune --ignore-scripts` |
+
+Rules every adapter keeps:
+
+- Offline. No network: a package that the store lacks fails the step.
+- Compiles nothing and runs no lifecycle script.
+- A stale or failing state skips the folder. The result names the reason.
+- The `pnpm` adapter copies `node_modules` with copy-on-write (`cp -cRp` on macOS, `cp -a
+  --reflink=auto` elsewhere) before its first step, and puts the copy back when a step fails.
+- The `cargo` adapter removes nothing before its listing succeeds. Cargo's freshness check can
+  remove the outputs of the one unit that is not fresh before the listing stops; the next build
+  rebuilds them.
+- A busy cargo build lock skips its profile folder. The other profile folders are already swept.
+
+### 18.2 Choosing an adapter
+
+Without a setting, the adapter whose `detects` accepts the folder runs: `target` with `Cargo.toml`
+next to it (cargo), or `node_modules` with `pnpm-lock.yaml` next to it (pnpm). The parent folder of
+the cache folder is the project folder.
+
+### 18.3 Command by hand
+
+`layr retest prune <folder> [--adapter cargo|pnpm|none]` runs an adapter on a folder of the current
+line and prints `<folder>: pruned with <adapter>, freed <N> MB` or `<folder>: skipped: <reason>`.
+
+### 18.4 Overlay property `prune`
+
+- Values: an adapter name, `none` (no hook), or `auto` (unset, the default). `overlay list` shows
+  `prune=<name>`.
+- Setting: `overlay.<name>.prune`. Owner only: `layr overlay set <name> --prune <name|none|auto>`.
+- Core checks the form (lowercase letters, digits and `-`). It has no list of adapter names: an
+  unknown name is logged when the hook runs, and the folder is not pruned.
+
+### 18.5 The hook in core
+
+```rust
+impl Repo {
+    pub fn prune_cache(&self, line: &Line, overlay: &str, folder: &str)  // never fails; logs one line
+}
+```
+
+Core also has `prune_cache_folder(line, folder)` (the overlay is looked up from the folder). The
+`save --caches` path calls it for each cache folder.
+
+Process model:
+
+- The adapter runs in a worker process: the layr binary started with `__cache-hook`, as the line
+  owner (`privs::command_as`). The worker is its own process group. The adapter's processes (cargo,
+  pnpm) stay in that group.
+- Soft limit: `cache_hook::HOOK_LIMIT`, 120 s. It is the adapter's own deadline. The adapter stops its
+  processes at it, restores or skips the folder, and reports. This is the normal path.
+- Hard limit: the soft limit plus 10 s. At the hard limit the parent kills the worker's whole process
+  group. Then a recovery worker (`recover`, 30 s) runs on the folder. The pnpm adapter puts its copy back.
+  The cargo adapter has nothing to restore: its sweep removes nothing before the listing succeeds.
+- If recovery fails or times out, core marks the folder damaged. A save skips a damaged folder with a
+  line that says so. A prune of the folder that succeeds clears the mark. The mark file is
+  `meta/line-locks/<line id>.damaged`.
+- Root owner: never pruned.
+- Environment of the worker: the owner's home, and `PATH` of the owner's tool folders. A process that
+  is not root also keeps its own `PATH`. The root service never passes its own `PATH` on.
+
+Locks:
+
+- The hook holds the line lock (`meta/line-locks/<line id>`, flock, `Project::line_lock`) while it
+  runs. Hooks of one line run one at a time. The line lock is reentrant in one process: a command
+  that already holds it (a merge or a save of the line) takes it again without waiting. No other file
+  under `meta/line-locks/` is flocked; `<line id>.damaged` is a plain file written atomically.
+- The hook never holds the project (store) lock. Each call site drops the project lock before it
+  calls the hook. The only call site is `save --caches` (the prune runs before its project lock).
+- A cache overlay's own lock is taken only by the copy steps, never during a hook.
+
+The hook runs only where a cache is saved. The caches that a line takes (`line new`, `merge`,
+`merge --caches-only`, a follow pass) come from states that were pruned when they were saved. A
+second prune at take time repeats the cargo listing (up to 120 s) for nothing. So they do not run it.
+
+| Command | Hook | Next step |
+| --- | --- | --- |
+| `layr save --caches` | in `prepare_caches`, for each cache folder of the line, after the cache is made a cache folder | the snapshot of the cache and the save |
+
+A follow pass ends with `save --caches`, so it prunes the folders it took, through `prepare_caches`.
+A union merge (`merge --caches-only`, or a merge) leaves the units of both sides in the target folder
+until the next `save --caches` of that line. A cache that was saved before this design is pruned at
+the next `save --caches` of its line.
+
+`init` takes no caches (a new project has no folder overlays), so it has no call site.
+
+### 18.6 Build env, profiles and the live set
+
+The live set is the set of units that the `sweep` commands of `[workspace.metadata.layr-retest]` make
+with the project env (`env`). `layr retest init` writes `env = { CARGO_INCREMENTAL = "1", RUSTC_WRAPPER = "" }`
+into the manifest. A manifest without `env` gives the listing the default env of cargo: a build in the
+shell with another env (for example `CARGO_INCREMENTAL=1` in release, where it is off by default) makes units
+with other hashes, and those are not kept.
+
+Each profile folder is pruned on its own. The commands of a profile (`--release` is `release`,
+`--profile <name>` is that name, `dev` and `test` are `debug`, and the default is `debug`) list the units
+of that folder only. A stale command of one profile keeps that folder. The other profiles are still pruned.
+A profile folder that no command lists is not touched.
+
+The listing never compiles. It runs cargo with a `RUSTC_WRAPPER` that refuses every compile (it passes
+the version and target probes through). A unit that is not fresh stops the listing of its profile before any
+build step. The wrapper is not part of a unit's hash.
+
+`layr retest doctor` names each profile that is skipped: `prune skipped for <profile>: unit <unit> is not
+fresh for the standard commands; build with `cargo <args>` or add it to [workspace.metadata.layr-retest]
+sweep`.
+
+### 18.7 Tests
+
+- `src/cache_hook.rs` unit tests: a named adapter prunes and logs; `none` keeps the folder; an unknown
+  name is logged; a failing adapter logs its reason; a slow adapter is cut off at the limit; the root
+  owner is never pruned.
+- `crates/layr-cache/tests/`: `cargo_prune.rs` (a stale unit is removed and the next build compiles
+  nothing; a stale standard unit skips the folder; no sweep list skips), `pnpm_prune.rs` (a removed
+  package is gone from `node_modules` and `.pnpm` with an address that refuses connections as the
+  registry; a lockfile that needs a missing package and a stale lockfile skip the folder, which stays
+  unchanged; no lifecycle script runs), `dispatch.rs`.
+- `crates/layr-retest/tests/e2e.rs`: `layr retest prune target` runs the cargo adapter.
+- `tests/t117-prune-hook.sh`: `line new` and `merge --caches-only` take the units without a prune; the next
+  `save --caches` of the line prunes them; `prune=none`; an unknown adapter name; cargo missing for the owner;
+  a root-owned line. Through the binary.
+  Root (btrfs) on Linux, and macOS APFS, as the other `tests/t*.sh` files.

@@ -16,6 +16,8 @@ else
 fi
 # Stop before any delete: without the folder, "$T/src" would become "/src".
 [ -n "$T" ] && [ -d "$T" ] || { echo "FATAL: cannot create the test folder" >&2; exit 1; }
+# layr prints the canonical path (/private/var on macOS): compare with it.
+T=$(cd "$T" && pwd -P)
 export LAYR_ROOT=$T/store
 # Tests empty the trash in the command itself (bounded), so their cleanup does not race the
 # background emptier; t82 checks the background path.

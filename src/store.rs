@@ -163,7 +163,17 @@ impl Store {
         mkdir_mode(&root.join("projects"), 0o755)?;
         version_guard.ready(root)?;
         // Every volume folder must hold the identity file of this store (checked when used).
-        Ok(Store { root: root.to_path_buf(), machine: Machine { id, name, key }, _version_guard: Some(version_guard) })
+        let store = Store { root: root.to_path_buf(), machine: Machine { id, name, key }, _version_guard: Some(version_guard) };
+        // A volume with its own OverlayFS registry (a project moved there) is recovered too.
+        #[cfg(feature = "overlayfs")]
+        for volume in store.layout()?.ready_volume_paths() {
+            if volume.join(".layr-overlayfs").is_dir() {
+                crate::storage::recover(&volume)?;
+            }
+        }
+        // A `project move` that stopped midway is finished or rolled back before the command runs.
+        crate::project_move::recover(&store);
+        Ok(store)
     }
 
     /// The volume configuration of the store, read now (`volumes.rs`).
@@ -274,12 +284,96 @@ static HELD_PROJECTS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec
 const SLOW_LOCK: std::time::Duration = std::time::Duration::from_secs(1);
 /// The log starts again above this size (bytes).
 const SLOW_LOCK_LOG_MAX: u64 = 1 << 20;
+/// A command that waits this long for the project lock prints the lock holder, once.
+const LOCK_NOTICE_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
+/// The holder of a project lock, written beside `meta/lock` while the lock is held (JSON: pid,
+/// command, line, start in ms). A waiting command reads it; a crashed holder leaves it stale.
+const LOCK_HOLDER: &str = "lock.holder";
+/// The line of this command, for the holder file (`set_holder_line`).
+static HOLDER_LINE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Name the line of this command in the holder file of the project locks it takes.
+pub fn set_holder_line(line: Option<&str>) {
+    if let Ok(mut l) = HOLDER_LINE.lock() {
+        *l = line.map(str::to_string);
+    }
+}
+
+/// Take the exclusive lock of `f`. A command that has to wait prints the lock holder once,
+/// when the wait passes `LOCK_NOTICE_AFTER`.
+fn flock_with_notice(f: &fs::File, meta: &Path) -> Result<()> {
+    use rustix::fs::FlockOperation;
+    match rustix::fs::flock(f, FlockOperation::NonBlockingLockExclusive) {
+        Ok(()) => return Ok(()),
+        Err(rustix::io::Errno::WOULDBLOCK) => {}
+        Err(e) => return Err(e.into()),
+    }
+    // The helper thread prints while the blocking wait below holds this thread.
+    let (done, waiting) = std::sync::mpsc::channel::<()>();
+    let meta = meta.to_path_buf();
+    let notice = std::thread::spawn(move || {
+        if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) = waiting.recv_timeout(LOCK_NOTICE_AFTER) {
+            eprintln!("{}", waiting_message(&meta));
+        }
+    });
+    let locked = rustix::fs::flock(f, FlockOperation::LockExclusive);
+    let _ = done.send(());
+    let _ = notice.join();
+    locked.map_err(Into::into)
+}
+
+/// The notice for a waiting command: the live holder of `meta/lock.holder`. A holder whose pid is
+/// gone is named by nothing; its file is removed when the file still holds what was read.
+fn waiting_message(meta: &Path) -> String {
+    const PLAIN: &str = "layr: waiting for the project lock";
+    let path = meta.join(LOCK_HOLDER);
+    let Ok(text) = fs::read_to_string(&path) else { return PLAIN.to_string() };
+    let Ok(holder) = serde_json::from_str::<serde_json::Value>(&text) else { return PLAIN.to_string() };
+    let pid = holder["pid"].as_i64().unwrap_or(0) as i32;
+    if !pid_alive(pid) {
+        if fs::read_to_string(&path).ok().as_deref() == Some(text.as_str()) {
+            let _ = fs::remove_file(&path);
+        }
+        return PLAIN.to_string();
+    }
+    let secs = (ids::now_ms() - holder["since_ms"].as_i64().unwrap_or(0)).max(0) / 1000;
+    format!(
+        "layr: waiting for the project lock: held by '{}' (pid {pid}) for {secs} s",
+        holder["command"].as_str().unwrap_or("")
+    )
+}
+
+/// True when a process with this pid exists (it may belong to another user).
+fn pid_alive(pid: i32) -> bool {
+    use rustix::process::{test_kill_process, Pid};
+    let Some(pid) = Pid::from_raw(pid) else { return false };
+    !matches!(test_kill_process(pid), Err(e) if e == rustix::io::Errno::SRCH)
+}
+
+/// Write `meta/lock.holder` for this process, which holds the lock. Best effort: a lock never
+/// fails for the holder file.
+fn write_lock_holder(meta: &Path) {
+    let command: String = format!("layr {}", std::env::args().skip(1).collect::<Vec<_>>().join(" ")).chars().take(200).collect();
+    let line = HOLDER_LINE.lock().ok().and_then(|l| l.clone());
+    let holder = serde_json::json!({
+        "pid": std::process::id(),
+        "command": command,
+        "line": line,
+        "since_ms": ids::now_ms(),
+    });
+    let tmp = meta.join(format!("{LOCK_HOLDER}.tmp"));
+    if fs::write(&tmp, holder.to_string()).is_ok() {
+        let _ = fs::rename(&tmp, meta.join(LOCK_HOLDER));
+    }
+}
 
 impl Drop for Lock {
     fn drop(&mut self) {
         let held = self.since.elapsed();
         // The steps of the hold, before the trash work after it adds its own.
         let steps = crate::trace::slowest(3);
+        // The holder is still this process: no other command writes the file under the lock.
+        let _ = fs::remove_file(self.meta.join(LOCK_HOLDER));
         drop(self.f.take());
         if std::env::var_os("LAYR_TRACE").is_some() {
             eprintln!("trace {:>8.1} ms  store lock held: {}", held.as_secs_f64() * 1000.0, self.project);
@@ -321,6 +415,62 @@ impl Drop for Lock {
             held.as_millis(),
             command.replace(['\t', '\n'], " "),
             steps.replace(['\t', '\n'], " ")
+        );
+        if fs::metadata(&self.log).map(|m| m.len() > SLOW_LOCK_LOG_MAX).unwrap_or(false) {
+            let _ = fs::remove_file(&self.log);
+        }
+        if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&self.log) {
+            use std::io::Write;
+            let _ = f.write_all(line.as_bytes());
+        }
+    }
+}
+
+/// The lock of one line (`meta/line-locks/<line id>`). A command that moves the head of a line, or
+/// writes its working folder, holds it for the whole command. It is taken before the project lock,
+/// never under it (a waiter would hold the project lock while a line holder waits for it), and two
+/// lines of one command are taken in id order. Other lines do not wait for it.
+pub struct LineLock {
+    f: Option<fs::File>,
+    /// Meta folder and line id: the key of `HELD_LINES`. None for a nested take in the same process.
+    key: Option<(PathBuf, String)>,
+    since: std::time::Instant,
+    waited: std::time::Duration,
+    log: PathBuf,
+    /// The line name, for `LAYR_TRACE` and `meta/lock-slow.log`.
+    line: String,
+}
+
+/// The line locks this process holds. A second descriptor for one of them would wait for the first.
+static HELD_LINES: std::sync::Mutex<Vec<(PathBuf, String)>> = std::sync::Mutex::new(Vec::new());
+
+impl Drop for LineLock {
+    fn drop(&mut self) {
+        let held = self.since.elapsed();
+        drop(self.f.take());
+        if let Some(key) = self.key.take() {
+            if let Ok(mut held) = HELD_LINES.lock() {
+                if let Some(i) = held.iter().position(|k| *k == key) {
+                    held.remove(i);
+                }
+            }
+        }
+        if std::env::var_os("LAYR_TRACE").is_some() {
+            eprintln!("trace {:>8.1} ms  line lock held: {}", held.as_secs_f64() * 1000.0, self.line);
+        }
+        if held < SLOW_LOCK && self.waited < SLOW_LOCK {
+            return;
+        }
+        let mut command = std::env::args().skip(1).collect::<Vec<_>>().join(" ");
+        command.truncate(300);
+        let line = format!(
+            "{}\t{}\tline={}\twait_ms={}\theld_ms={}\t{}\n",
+            crate::ids::now_ms(),
+            std::process::id(),
+            self.line.replace(['\t', '\n'], " "),
+            self.waited.as_millis(),
+            held.as_millis(),
+            command.replace(['\t', '\n'], " ")
         );
         if fs::metadata(&self.log).map(|m| m.len() > SLOW_LOCK_LOG_MAX).unwrap_or(false) {
             let _ = fs::remove_file(&self.log);
@@ -864,12 +1014,76 @@ impl<'a> Project<'a> {
         id.ok_or_else(|| anyhow!("project record missing"))
     }
 
+    /// The lock of one line for a whole command (`LineLock`). Taking it under the project lock of
+    /// this process is refused: that order can deadlock with a command that holds the line lock.
+    /// A second take of the same line in this process gives a guard that holds nothing.
+    pub fn line_lock(&self, id: &str, name: &str) -> Result<LineLock> {
+        anyhow::ensure!(!id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'), "invalid line id '{id}'");
+        let meta = self.meta_dir();
+        if HELD_PROJECTS.lock().map(|held| held.contains(&meta)).unwrap_or(false) {
+            bail!("internal error: line '{name}' locked while the project lock is held (line locks come first)");
+        }
+        let log = meta.join("lock-slow.log");
+        let key = (meta.clone(), id.to_string());
+        if HELD_LINES.lock().map(|held| held.contains(&key)).unwrap_or(false) {
+            return Ok(LineLock {
+                f: None,
+                key: None,
+                since: std::time::Instant::now(),
+                waited: Default::default(),
+                log,
+                line: name.to_string(),
+            });
+        }
+        let dir = meta.join("line-locks");
+        fs::create_dir_all(&dir)?;
+        let f = fs::OpenOptions::new().create(true).write(true).truncate(false).open(dir.join(id))?;
+        let asked = std::time::Instant::now();
+        rustix::fs::flock(&f, rustix::fs::FlockOperation::LockExclusive)?;
+        if let Ok(mut held) = HELD_LINES.lock() {
+            held.push(key.clone());
+        }
+        if std::env::var_os("LAYR_TRACE").is_some() {
+            eprintln!("trace {:>8.1} ms  line lock taken: {name}", asked.elapsed().as_secs_f64() * 1000.0);
+        }
+        let guard = LineLock {
+            f: Some(f),
+            key: Some(key),
+            since: std::time::Instant::now(),
+            waited: asked.elapsed(),
+            log,
+            line: name.to_string(),
+        };
+        // Tests hold a line lock for a while (LAYR_TEST_LINE_LOCK_MS), to check that other lines and
+        // other commands of the line wait only as the design says. The hold time includes the sleep.
+        if let Some(ms) = std::env::var("LAYR_TEST_LINE_LOCK_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+        }
+        Ok(guard)
+    }
+
     pub fn lock(&self) -> Result<Lock> {
         // Resolved before the lock is taken: a failure here must not leave a count behind.
         let trash = self.trash_dir()?;
         let f = fs::OpenOptions::new().create(true).write(true).truncate(false).open(self.meta_dir().join("lock"))?;
         let asked = std::time::Instant::now();
-        rustix::fs::flock(&f, rustix::fs::FlockOperation::LockExclusive)?;
+        flock_with_notice(&f, &self.meta_dir())?;
+        write_lock_holder(&self.meta_dir());
+        // Test only (tests/t121-lock-holder.sh): `LAYR_TEST_LOCK_HOLD_MS` keeps the lock this long.
+        if let Some(ms) = std::env::var("LAYR_TEST_LOCK_HOLD_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+        }
+        // `project move` may have taken the folder away while this call waited for the lock. The
+        // lock then belongs to the old folder: refuse, the caller runs the command again.
+        {
+            use std::os::unix::fs::MetadataExt;
+            let here = fs::symlink_metadata(self.meta_dir().join("lock")).ok();
+            let locked = f.metadata().ok();
+            let same = here.zip(locked).is_some_and(|(a, b)| a.ino() == b.ino() && a.dev() == b.dev());
+            if !same {
+                bail!("project '{}' moved while this command waited; run the command again", self.name);
+            }
+        }
         HELD_LOCKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if let Ok(mut held) = HELD_PROJECTS.lock() {
             held.push(self.meta_dir());
@@ -1257,5 +1471,21 @@ mod temp_name_tests {
         assert_eq!(creator_gone("11111111-2222-3333-4444-555555555555.2000000000"), Some(true));
         assert_eq!(creator_gone("keep"), None, "a name without a pid keeps the age rule");
         assert_eq!(creator_gone("prepared-11111111-2222-3333-4444-555555555555"), None);
+    }
+}
+
+/// Test only (tests/t125-save-line-lock.sh): `LAYR_TEST_SAVE_PAUSE_MS` keeps a named save this long
+/// after its clone, before the project lock, so a test can run other commands meanwhile.
+pub fn test_pause() {
+    if let Some(ms) = std::env::var("LAYR_TEST_SAVE_PAUSE_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+}
+
+/// Test only (tests/t124-save-crash.sh): `LAYR_TEST_SAVE_KILL=<point>` kills this process with
+/// SIGKILL at that point of a named save, as a power loss or a crash would. Other runs pass.
+pub fn failpoint(point: &str) {
+    if std::env::var("LAYR_TEST_SAVE_KILL").ok().as_deref() == Some(point) {
+        let _ = rustix::process::kill_process(rustix::process::getpid(), rustix::process::Signal::KILL);
     }
 }

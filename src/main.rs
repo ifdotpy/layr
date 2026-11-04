@@ -3,6 +3,7 @@
 // Unsafe code is allowed only in `sys` (system calls without safe wrappers).
 #![deny(unsafe_code)]
 
+mod busy;
 #[macro_use]
 mod ctx;
 mod access;
@@ -42,6 +43,7 @@ mod person;
 mod privs;
 mod probes;
 mod project_copy;
+mod project_move;
 mod radar;
 mod recv;
 mod repo;
@@ -74,7 +76,15 @@ mod volumes;
 
 use std::collections::HashMap;
 
+mod cache_hook;
+
 fn main() {
+    // The cache adapters of the binary (issue #167). Core reaches them only through `cache_hook`.
+    cache_hook::register(layr_cache::adapters());
+    if std::env::args().nth(1).as_deref() == Some(cache_hook::WORKER_ARG) {
+        // The worker of a cache hook: runs one adapter as the line owner (`cache_hook`).
+        std::process::exit(cache_hook::worker());
+    }
     let mut argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.first().map(String::as_str) == Some("__empty-trash") && argv.len() == 2 {
         // The trash of a store, emptied in the background after a command (`store::Lock`).

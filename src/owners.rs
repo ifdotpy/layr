@@ -592,12 +592,18 @@ impl Db {
         Ok((want.difference(&have).cloned().collect(), have.difference(&want).cloned().collect()))
     }
 
-    /// Replace the stored table with rows (`fsck --repair`).
-    pub fn replace_owners(&self, rows: &[Row]) -> Result<()> {
+    /// Make the stored table equal to a replay: add the `missing` rows, remove the `extra` ones
+    /// (`owners_diff` against that replay). Pins are not touched.
+    pub fn apply_owners_diff(&self, missing: &[Row], extra: &[Row]) -> Result<()> {
+        if missing.is_empty() && extra.is_empty() {
+            return Ok(());
+        }
         self.with_tx(|| {
-            self.exec("DELETE FROM owners", [])?;
-            for (s, k, h) in rows {
-                self.exec("INSERT INTO owners(state, kind, holder) VALUES(?1,?2,?3)", params![s, k, h])?;
+            for (s, k, h) in extra {
+                self.exec("DELETE FROM owners WHERE state=?1 AND kind=?2 AND holder=?3", params![s, k, h])?;
+            }
+            for (s, k, h) in missing {
+                self.exec("INSERT OR IGNORE INTO owners(state, kind, holder) VALUES(?1,?2,?3)", params![s, k, h])?;
             }
             Ok(())
         })

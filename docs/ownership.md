@@ -229,9 +229,13 @@ state is freed:
   or unreferenced objects collected (`git count-objects`);
 - OCI derived refs: a `ref` owner with an expiry (`oci.retention`, default 30 days), not `None`.
 
-Quarantine data (`git-damaged-*`, `*.layr-old-*`) is never freed automatically: it can hold the
-only copy. `layr gc` lists it with its size and age, and `layr gc --drop-quarantine <path>`
-removes one after the owner looked at it.
+Quarantine data (`git-damaged-*`) is never freed automatically: it can hold the only copy. `layr gc`
+lists it with its size and age, and `layr gc --drop-quarantine <path>` removes one after the owner
+looked at it.
+
+Cache swap leftovers (`<cache>.layr-old-<id>`, `<cache>.layr-new-<id>`) are cache data, not quarantine.
+`layr gc` lists them with their size; `layr gc --repair` moves them to the trash unless a process uses
+them or their swap is not finished.
 
 ## Trash
 
@@ -245,10 +249,14 @@ show them.
 (pins excluded) and lists the present states that no owner names (leaks). It prints one line with
 the leaks and their bytes, and exits 1 when anything differs.
 
-`layr gc --repair` replaces the table with the replay (live pins kept), marks the leaked states
-dead, releases expired refs, trims cache snapshots beyond `retention.caches`, runs the existing
-cache and overlay upkeep, runs the free step, and empties the trash. `layr gc -n --repair` only
-prints what it would free. `gc --dedup` is unchanged. `layr fsck` runs the same check, and
+`layr gc --repair` makes the table equal to the replay (pins of live processes kept, pins of dead
+ones released), marks the leaked states dead, releases expired refs, trims cache snapshots beyond
+`retention.caches`, runs the existing cache and overlay upkeep, runs the free step, and empties
+the trash. The replay and the overlay pass (cache overlay lines of deleted lines, states beyond
+`history`) are read before the store lock. Under the lock they are used when no record came in
+since (the count and the newest row of `records` are the same), and only their difference is
+written; else they are read again under the lock. An overlay whose own records changed is read
+again under its lock. `layr gc -n --repair` only prints what it would free. `gc --dedup` is unchanged. `layr fsck` runs the same check, and
 `fsck --repair` rebuilds the table.
 
 The imported-state free step (section "States imported from Git") is in `gc --repair` before

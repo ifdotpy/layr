@@ -1,0 +1,9 @@
+[package]
+name = "layr-adapter"
+version = "0.1.0"
+edition = "2021"
+description = "Interface between layr core and the cache adapters (no dependencies)"
+license = "MIT"
+publish = false
+
+[dependencies]

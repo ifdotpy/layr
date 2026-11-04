@@ -388,7 +388,7 @@ for name, label in [('secrets', 'visible'), ('hidden-golden', 'hidden-reader')]:
     show = json.loads((cli / f'overlay-show-{label}.json').read_text())
     ops = json.loads((cli / f'overlay-ops-{label}.json').read_text())
     assert set(show) == {'name', 'hidden', 'access_mode', 'readers', 'managers', 'epochs', 'patterns', 'peers', 'state', 'properties'}
-    assert show['properties'] == {'history': 'all', 'quiet': False, 'merge': 'three-way', 'gc': 'none'}
+    assert show['properties'] == {'history': 'all', 'quiet': False, 'merge': 'three-way', 'gc': 'none', 'prune': 'auto'}
     assert show['access_mode'] == 'private'
     assert show['name'] == name and show['hidden'] == (label == 'hidden-reader')
     access = next(r['data']['config']['access'] for r in reversed(records) if 'access' in r.get('data', {}).get('config', {}))

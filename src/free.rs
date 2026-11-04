@@ -136,7 +136,7 @@ fn release_dead_pins(p: &Project) -> Result<()> {
 }
 
 /// The holder of this process's pins: `pid:start time`.
-fn self_holder() -> String {
+pub fn self_holder() -> String {
     static HOLDER: OnceLock<String> = OnceLock::new();
     HOLDER
         .get_or_init(|| {

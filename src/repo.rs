@@ -14,7 +14,7 @@ use crate::storage as btrfs;
 use crate::store::{check_name, Project};
 use crate::tree::Tree;
 use anyhow::{bail, Context, Result};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
@@ -108,6 +108,82 @@ pub fn cache_fits(saved: Option<&str>, local: &str, here: bool) -> bool {
         Some(p) => p == local,
         None => here,
     }
+}
+
+/// A write of the working folder that a command made under its line lock, before its commit. It
+/// keeps the tree that the folder had (`before`) and the tree written (`after`). Dropped without
+/// `commit`, it writes `before` back, so a failed commit leaves the folder as the command found it.
+/// The paths of a command were not changed by the user (the command checked them), so the inverse
+/// write restores exactly their content.
+pub struct WorkingWrite<'a> {
+    repo: &'a Repo<'a>,
+    wdir: PathBuf,
+    before: PathBuf,
+    after: PathBuf,
+    own: Option<(u32, u32)>,
+    view: Option<Temp>,
+    done: bool,
+}
+
+impl<'a> WorkingWrite<'a> {
+    /// `view` is the tree of an overlay view that `after` names (kept for the write back).
+    pub fn new(
+        repo: &'a Repo<'a>,
+        wdir: PathBuf,
+        own: Option<(u32, u32)>,
+        before: PathBuf,
+        after: PathBuf,
+        view: Option<Temp>,
+    ) -> Self {
+        WorkingWrite { repo, wdir, before, after, own, view, done: false }
+    }
+
+    /// Keep the write. Returns the overlay view that the write used, if any.
+    pub fn commit(mut self) -> Option<Temp> {
+        self.done = true;
+        self.view.take()
+    }
+}
+
+impl Drop for WorkingWrite<'_> {
+    fn drop(&mut self) {
+        if self.done {
+            return;
+        }
+        let none = BTreeSet::new();
+        if let Err(e) = self.repo.apply_delta(&self.after, &self.before, &self.wdir, self.own, &none, true) {
+            eprintln!(
+                "error: the working folder of {} could not be put back after a refused command: {e:#}; check it with 'layr status'",
+                self.wdir.display()
+            );
+        }
+    }
+}
+
+/// Delete the states that no record names (a command that failed before its commit).
+pub fn discard_unrecorded(repo: &Repo, states: &[StateRec]) {
+    let unrecorded: Vec<StateRec> =
+        states.iter().filter(|s| repo.p.db.state(&s.id).is_ok_and(|known| known.is_none())).cloned().collect();
+    repo.discard_states(&unrecorded);
+}
+
+/// The error of a command whose line head moved during the command. It names both heads.
+/// `TargetMoved` lets the merge queue retry the entry once.
+pub fn line_moved(name: &str, from: &str, to: &str) -> anyhow::Error {
+    crate::cmd::exit(
+        1,
+        format!(
+            "error: line {name} moved during the command (head {} -> {}); run it again",
+            crate::ids::short(from),
+            crate::ids::short(to)
+        ),
+    )
+    .context(crate::cmd::mergecmd::TargetMoved)
+}
+
+/// The error of a command whose line was deleted during the command.
+pub fn line_gone(name: &str) -> anyhow::Error {
+    crate::cmd::exit(1, format!("error: line {name} was deleted during the command; run it again"))
 }
 
 pub fn skip_path(p: &str) -> bool {
@@ -604,7 +680,14 @@ impl<'a> Repo<'a> {
 
     /// `working_snapshot` with its thin layer over `base` (APFS): over a state close to the
     /// working content, only the few entries that differ are copied.
-    pub fn working_snapshot_over(&self, ctx: &Ctx, line: &Line, parents: Vec<String>, message: &str, base: &str) -> Result<StateRec> {
+    pub fn working_snapshot_over(
+        &self,
+        ctx: &Ctx,
+        line: &Line,
+        parents: Vec<String>,
+        message: &str,
+        base: &str,
+    ) -> Result<StateRec> {
         let w = self.working(line);
         recover_cache_replacements(&w)?;
         self.restore_caches(line)?;
@@ -865,6 +948,71 @@ impl<'a> Repo<'a> {
 
     /// The id of a state equal to the working content: a new automatic state, or the previous
     /// automatic state (or head) when nothing changed. The caller holds the project lock.
+    /// `line delete`, before the project lock: the automatic state of the working folder, made as
+    /// far as possible without the lock (issue #194). On APFS its layer goes to a new id and its
+    /// complete tree is made here, since the final state of a deleted line keeps no layer. None when
+    /// the folder has nothing to save, and always off APFS (the lock then makes the state as before).
+    pub fn prepare_final_state(&self, line: &Line) -> Result<Option<FinalPrepared>> {
+        self.prepare_save(line)?;
+        #[cfg(target_os = "macos")]
+        {
+            let Some(pre) = take_prepared_save(&line.id) else { return Ok(None) };
+            let id = ids::new_id();
+            if let Err(e) = btrfs::move_tree(&pre.path, &self.p.delta_path(&id)) {
+                let _ = self.p.trash(&pre.path);
+                return Err(e);
+            }
+            if let Err(e) = crate::thin::complete_tree(&self.p, &id) {
+                let _ = self.p.delete_state(&id);
+                return Err(e);
+            }
+            return Ok(Some(FinalPrepared { id, head: pre.head, scan: pre.scan }));
+        }
+        #[cfg(not(target_os = "macos"))]
+        Ok(None)
+    }
+
+    /// `line delete`, under the project lock: records the prepared state when the line head and the
+    /// working folder are the ones it was made from. Else the state is discarded and the caller
+    /// prepares again. Without a prepared state, the lock makes the working state as before.
+    pub fn record_final_state(&self, ctx: &Ctx, line: &Line, prepared: &mut Option<FinalPrepared>) -> Result<FinalState> {
+        #[cfg(target_os = "macos")]
+        if let Some(pre) = prepared.take() {
+            let w = self.working(line);
+            let same = line.head == pre.head && w.exists() && btrfs::scan_with_data(&w, true)? == pre.scan;
+            if !same {
+                self.p.delete_state(&pre.id)?;
+                return Ok(FinalState::Moved);
+            }
+            let mut st = self.describe_state(ctx, pre.id.clone(), StateKind::Auto, vec![line.head.clone()], "before line delete", Some(line))?;
+            st.running = crate::fsutil::take_unsettled();
+            let before = self.recorded_working(line)?;
+            let mut rec = Record::new("save");
+            rec.states.push(st.clone());
+            rec.data = serde_json::json!({"line": line.id, "head": line.head, "working_before": before, "working_after": st.id});
+            self.commit_record(ctx, rec)?;
+            if let Err(e) = self.save_cache_states(ctx, line, &st.id) {
+                eprintln!("warning: cache overlay of line {} not saved: {e:#}", line.name);
+            }
+            clear_regenerable_memo();
+            return Ok(FinalState::Recorded(Some(st.id)));
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = prepared;
+        Ok(FinalState::Recorded(self.working_state(ctx, line, "before line delete")?))
+    }
+
+    /// Discards a prepared state that is not recorded (a failed command, or moved inputs). Under the
+    /// project lock the delete is a rename; the state would otherwise stay as an unowned leak.
+    pub fn discard_final_state(&self, prepared: Option<FinalPrepared>) {
+        #[cfg(target_os = "macos")]
+        if let Some(pre) = prepared {
+            let _ = self.p.delete_state(&pre.id);
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = prepared;
+    }
+
     pub fn working_state(&self, ctx: &Ctx, line: &Line, message: &str) -> Result<Option<String>> {
         if !self.working(line).exists() {
             return Ok(None);
@@ -923,7 +1071,14 @@ impl<'a> Repo<'a> {
 
     /// The layer of an automatic state at `dst`, over `save_layer_base`.
     #[cfg(target_os = "macos")]
-    fn write_save_layer(&self, line: &Line, prev: &str, w: &Path, new: &BTreeMap<String, btrfs::ScanEntry>, dst: &Path) -> Result<()> {
+    fn write_save_layer(
+        &self,
+        line: &Line,
+        prev: &str,
+        w: &Path,
+        new: &BTreeMap<String, btrfs::ScanEntry>,
+        dst: &Path,
+    ) -> Result<()> {
         let base_id = self.save_layer_base(line, prev);
         let base = self.state_src(&base_id)?;
         let base_scan = base.scan(true)?;
@@ -983,11 +1138,23 @@ impl<'a> Repo<'a> {
         let base = self.state_src(&base_id)?;
         let base_scan = base.scan(true)?;
         let d = crate::thin::diff(&base_scan, &|k| base.path(k), &new, &w, self.since_of(line, &base_id))?;
-        // Nothing changed since the previous save: the save under the lock makes no state.
-        if !self.thin_changed(&base, &w, &d)? || (base_id != prev && self.p.has_state(&prev) && {
-            let p = self.state_src(&prev)?;
-            !self.thin_changed(&p, &w, &crate::thin::diff(&p.scan(true)?, &|k| p.path(k), &new, &w, self.since_of(line, &prev))?)?
-        }) {
+        // Nothing changed since the previous save: the save under the lock makes no state. With the
+        // same base as the save, that is recorded with the scan, so the lock only compares the scan.
+        let changed_base = self.thin_changed(&base, &w, &d)?;
+        if !changed_base && base_id == prev {
+            set_prepared_clean(&line.id, &line.head, &prev, &new);
+            return Ok(());
+        }
+        if !changed_base
+            || (base_id != prev && self.p.has_state(&prev) && {
+                let p = self.state_src(&prev)?;
+                !self.thin_changed(
+                    &p,
+                    &w,
+                    &crate::thin::diff(&p.scan(true)?, &|k| p.path(k), &new, &w, self.since_of(line, &prev))?,
+                )?
+            })
+        {
             return Ok(());
         }
         let path = self.p.work_dir().join(format!("prepared-save-{}", crate::store::temp_name()));
@@ -1053,14 +1220,31 @@ impl<'a> Repo<'a> {
             // working folder serves the comparison and the layer over the head.
             let prev = self.save_base(line)?;
             let new = btrfs::scan_with_data(&w, true)?;
+            // A layer prepared for this head, base and content was written only because the folder
+            // changed (`prepare_save_layer` writes nothing else). The comparison below would repeat
+            // that under the lock, with a read of the stored metadata of every entry.
+            #[cfg(target_os = "macos")]
+            if prepared_unchanged(&line.id, &line.head, &prev, &new) {
+                return Ok(None);
+            }
+            #[cfg(target_os = "macos")]
+            let prepared_change = prepared_matches(&line.id, &line.head, &prev, &new);
+            #[cfg(not(target_os = "macos"))]
+            let prepared_change = false;
             let head = self.state_src(&line.head)?;
-            let changed = if prev == line.head {
+            let changed = if prepared_change {
+                true
+            } else if prev == line.head {
                 let head_scan = head.scan(true)?;
                 let head_diff = crate::thin::diff(&head_scan, &|k| head.path(k), &new, &w, 0)?;
                 self.thin_changed(&head, &w, &head_diff)?
             } else if self.tree_available(&prev) {
                 let base = self.state_src(&prev)?;
-                self.thin_changed(&base, &w, &crate::thin::diff(&base.scan(true)?, &|k| base.path(k), &new, &w, self.since_of(line, &prev))?)?
+                self.thin_changed(
+                    &base,
+                    &w,
+                    &crate::thin::diff(&base.scan(true)?, &|k| base.path(k), &new, &w, self.since_of(line, &prev))?,
+                )?
             } else {
                 true
             };
@@ -1085,7 +1269,8 @@ impl<'a> Repo<'a> {
                     let _t = crate::trace::span("layer over prepared save");
                     let pid = ids::new_id();
                     btrfs::move_tree(&pre.path, &self.p.delta_path(&pid))?;
-                    let s1 = self.describe_state(ctx, pid.clone(), StateKind::Auto, vec![line.head.clone()], message, Some(line))?;
+                    let s1 =
+                        self.describe_state(ctx, pid.clone(), StateKind::Auto, vec![line.head.clone()], message, Some(line))?;
                     let base = self.state_src(&pid)?;
                     let base_scan = base.scan(true)?;
                     let d = crate::thin::diff(&base_scan, &|k| base.path(k), &new, &w, 0)?;
@@ -1283,7 +1468,7 @@ impl<'a> Repo<'a> {
 
     /// The tree of a staging line: a thin layer over the head, or a complete tree.
     #[cfg(target_os = "macos")]
-    fn stage_tree(&self, line: &Line, stage: &Path) -> Result<Snap> {
+    pub fn stage_tree(&self, line: &Line, stage: &Path) -> Result<Snap> {
         if crate::thin::is_thin(stage) {
             crate::thin::Layered::over(stage, self.head_src(line)?)
         } else {
@@ -1318,7 +1503,8 @@ impl<'a> Repo<'a> {
     pub fn drop_stage(&self, line: &Line) -> Result<()> {
         let p = self.p.stage_path(&line.id);
         if p.exists() {
-            btrfs::delete_tree(&p)?;
+            // Under the project lock the stage is only renamed into the trash (emptied after the lock).
+            self.p.trash(&p)?;
         }
         let _ = std::fs::remove_file(self.stage_base_file(line));
         Ok(())
@@ -1497,6 +1683,7 @@ impl<'a> Repo<'a> {
         #[cfg(target_os = "macos")]
         {
             PREPARED_STATUS.with(|p| p.borrow_mut().take());
+            PREPARED_CLEAN.with(|p| p.borrow_mut().clear());
             for p in btrfs::take_prepared() {
                 let _ = self.p.trash(&p);
             }
@@ -1790,6 +1977,7 @@ impl<'a> Repo<'a> {
         };
         self.materialize_with(&line, start, &dst, &layers, true)?;
         let res = (|| -> Result<Record> {
+            // Not pruned: this path runs under the project lock, and only `init` uses it, which takes no caches.
             self.take_caches(ctx, &line, start, source, &dst)?;
             let mut rec = Record::new("line.create");
             rec.lines.insert(
@@ -1845,7 +2033,7 @@ impl<'a> Repo<'a> {
         self.snapshot_state(state, &tmp, false)?;
         let r = self
             .put_layers(&tmp, layers, self.own(line))
-            .and_then(|_| self.prepare_at(line, state, &tmp))
+            .and_then(|_| self.prepare_at(line, state, &tmp, &[]))
             .and_then(|_| {
                 if base && !layers.is_empty() {
                     let view = self.temp_snapshot(&tmp, true)?;
@@ -1860,7 +2048,9 @@ impl<'a> Repo<'a> {
         r
     }
 
-    pub(crate) fn prepare_at(&self, line: &Line, state: &str, w: &Path) -> Result<()> {
+    /// `cached`: folders that the caller already took from a cache (`take_caches`); they are not
+    /// copied again from a warm cache.
+    pub(crate) fn prepare_at(&self, line: &Line, state: &str, w: &Path, cached: &[String]) -> Result<()> {
         let (uid, gid) = self.owner_ids(line);
         let root_meta = std::fs::symlink_metadata(w)?;
         if root_meta.uid() != uid {
@@ -1903,7 +2093,7 @@ impl<'a> Repo<'a> {
         for (i, path) in paths.iter().enumerate() {
             // Versioned files win: a folder that holds files of the state comes from the state,
             // also when a record of an older layr lists it as a cache.
-            if holds_files(w, path) {
+            if holds_files(w, path) || cached.contains(path) {
                 continue;
             }
             let cp = fsutil::safe_join(w, path)?;
@@ -1912,9 +2102,10 @@ impl<'a> Repo<'a> {
                     fsutil::remove_entry(w, path)?;
                 }
                 fsutil::make_parents(w, path, Some((uid, gid)))?;
-                btrfs::snapshot(&src, &cp, false)?;
-                // The copy shares its blocks; only its files change owner.
-                give_tree(&cp, uid, gid)?;
+                let uniform = btrfs::cache_snapshot(&src, &cp)?;
+                // The copy shares its blocks; only its files change owner. The saving owner is not
+                // read here, so the walk always runs.
+                give_cache_tree(&cp, uniform, None, uid, gid)?;
                 continue;
             }
             if i < fixed {
@@ -1975,10 +2166,81 @@ impl<'a> Repo<'a> {
                 stage = Some(self.current_stage(line)?);
             }
             // A file that the head or the stage (`add -f`) versions makes the folder no cache.
-            let versioned = holds_files(head.as_ref().unwrap(), &p)
-                || stage.as_ref().unwrap().as_ref().is_some_and(|s| holds_files(s, &p));
+            let versioned =
+                holds_files(head.as_ref().unwrap(), &p) || stage.as_ref().unwrap().as_ref().is_some_and(|s| holds_files(s, &p));
             if !versioned {
                 out.push(p);
+            }
+        }
+        Ok(out)
+    }
+
+    /// The cache swap leftovers in the working folders of the project's lines (`gc` reports them).
+    /// No scan of a folder: the candidate caches are the `regenerable` setting, the folder overlays
+    /// and the caches of the cache journals. A leftover sits next to its cache: the line root holds
+    /// the top-level ones (any name), a nested cache is looked for in its parent folder.
+    pub fn cache_leftovers(&self) -> Result<Vec<Leftover>> {
+        let mut out = Vec::new();
+        if self.p.is_overlay() {
+            return Ok(out);
+        }
+        let mut configured = self.p.config_strings("regenerable");
+        for (_, f) in self.folder_overlays()? {
+            if !configured.contains(&f) {
+                configured.push(f);
+            }
+        }
+        for line in self.lines()? {
+            let w = self.working(&line);
+            let Ok(entries) = std::fs::read_dir(&w) else {
+                continue;
+            };
+            let root: Vec<String> = entries.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+            // Caches of the cache journals of this line (a swap that is not finished, or a crash).
+            let mut caches = configured.clone();
+            let t = Tree::open(&w)?;
+            for name in root.iter().filter(|n| cache_journal_name(n)) {
+                if let Ok(record) = read_cache_replacement(&t, name) {
+                    if !caches.contains(&record.path) {
+                        caches.push(record.path);
+                    }
+                }
+            }
+            let mut found: BTreeSet<String> = BTreeSet::new();
+            for name in &root {
+                if leftover_base(name).is_some() {
+                    found.insert(name.clone());
+                }
+            }
+            for cache in &caches {
+                let Some((parent, base)) = cache.rsplit_once('/') else {
+                    continue;
+                };
+                let Ok(entries) = std::fs::read_dir(w.join(parent)) else {
+                    continue;
+                };
+                for e in entries.flatten() {
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    if is_leftover_name(&name, base) {
+                        found.insert(format!("{parent}/{name}"));
+                    }
+                }
+            }
+            for rel in found {
+                let path = w.join(&rel);
+                if !std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) {
+                    continue;
+                }
+                // The cache of the leftover: its name without the suffix, in the same folder.
+                let (parent, name) = rel.rsplit_once('/').unwrap_or(("", rel.as_str()));
+                let base = leftover_base(name).unwrap_or(name);
+                let cache = if parent.is_empty() { base.to_string() } else { format!("{parent}/{base}") };
+                let kept = if std::fs::symlink_metadata(w.join(cache_journal(&cache))).is_ok() {
+                    Some("cache swap not finished".to_string())
+                } else {
+                    crate::busy::user_of(&path)?.map(|u| format!("in use by pid {} ({})", u.pid, u.name))
+                };
+                out.push(Leftover { line: line.name.clone(), rel, bytes: tree_bytes(&path), path, kept });
             }
         }
         Ok(out)
@@ -1997,7 +2259,15 @@ impl<'a> Repo<'a> {
                 btrfs::mark_cache(&fsutil::safe_join(&w, &p)?)?;
             }
             #[cfg(not(target_os = "macos"))]
-            convert_cache(&w, &p, u, g)?;
+            {
+                if let Err(e) = convert_cache(&w, &p, u, g) {
+                    // In use, or written while copied: the folder stays plain (ignored), the next save tries again.
+                    if e.downcast_ref::<CacheRefused>().is_none() {
+                        return Err(e);
+                    }
+                    let _t = crate::trace::span(format!("cache {p} not converted: {e}"));
+                }
+            }
         }
         Ok(())
     }
@@ -2160,7 +2430,27 @@ impl<'a> Repo<'a> {
 
     /// Record a new head for a line (and optionally a working state change).
     #[allow(clippy::too_many_arguments)]
+    /// Move the head of `line` to `new_head` and record it, under the project lock.
     pub fn move_head(
+        &self,
+        ctx: &Ctx,
+        op: &str,
+        line: &Line,
+        new_head: &str,
+        states: Vec<StateRec>,
+        working_before: Option<String>,
+        data: serde_json::Value,
+    ) -> Result<Record> {
+        let rec = self.head_record(ctx, op, line, new_head, states, working_before, data)?;
+        let r = self.commit_record(ctx, rec)?;
+        self.after_head_moved(line, new_head);
+        Ok(r)
+    }
+
+    /// The record of a head move, with the snapshot of the working folder after it. No project lock
+    /// is needed: a command that holds the line lock makes it before `commit_line` checks the head.
+    #[allow(clippy::too_many_arguments)]
+    pub fn head_record(
         &self,
         ctx: &Ctx,
         op: &str,
@@ -2187,13 +2477,52 @@ impl<'a> Repo<'a> {
             },
         );
         rec.data = data;
-        let r = self.commit_record(ctx, rec)?;
+        Ok(rec)
+    }
+
+    /// The `.git` folder of a line follows its head. A failure only warns: the move is done.
+    pub fn after_head_moved(&self, line: &Line, new_head: &str) {
         let mut moved = line.clone();
         moved.head = new_head.to_string();
         if let Err(e) = crate::gitbridge::refresh_git_folder(self, &moved) {
             eprintln!("warning: .git folder of line {} not updated: {e:#}", line.name);
         }
-        Ok(r)
+    }
+
+    /// The lock of `line` for a whole command: it moves the head of the line or writes its working
+    /// folder. Take it before anything else, and never under the project lock (store.rs `LineLock`).
+    pub fn line_lock(&self, line: &Line) -> Result<crate::store::LineLock> {
+        self.p.line_lock(&line.id, &line.name)
+    }
+
+    /// Run `commit` under the project lock, after a check that `line` still exists and has the head
+    /// `head` that the caller started from. Only the records and the renames of a command go here.
+    /// The caller holds the line lock, so the head can change only by a command that does not take
+    /// it (line delete, follow, fetch). Such a change is refused: nothing is recorded, and the error
+    /// names the move. The caller undoes its working folder change.
+    pub fn commit_line<T>(&self, line: &Line, head: &str, commit: impl FnOnce(&Line) -> Result<T>) -> Result<T> {
+        if self.p.holds_lock() {
+            bail!("internal error: line {} committed while the project lock is held", line.name);
+        }
+        // Test hooks (tests/t122-line-locks.sh), named by line: a crash after the folder was written
+        // and before the record, and a head that another command moved.
+        let hook = |name: &str| std::env::var(name).ok().is_some_and(|v| v == line.name);
+        if hook("LAYR_TEST_CRASH_BEFORE_COMMIT") {
+            std::process::exit(86);
+        }
+        let _lock = self.p.lock()?;
+        let now = match self.p.db.line_by_id(&line.id)? {
+            Some(l) => self.localize(l)?,
+            None => return Err(line_gone(&line.name)),
+        };
+        if hook("LAYR_TEST_MOVE_HEAD_AT_COMMIT") {
+            let parent = self.state(head).ok().and_then(|s| s.parents.first().cloned()).unwrap_or_else(|| head.to_string());
+            return Err(line_moved(&line.name, head, &parent));
+        }
+        if now.head != head {
+            return Err(line_moved(&line.name, head, &now.head));
+        }
+        commit(&now)
     }
 
     /// A snapshot of the working content right after an operation, so undo can revert only the
@@ -2289,6 +2618,17 @@ impl<'a> Repo<'a> {
         Ok(found)
     }
 
+    /// The parent edges of the project, read once for many merge-base searches (`History`).
+    pub fn history(&self) -> Result<History> {
+        let _t = crate::trace::span("overlap history");
+        let mut parents: HashMap<String, Vec<String>> = HashMap::new();
+        for (state, parent) in self.p.db.parent_edges()? {
+            parents.entry(state).or_default().push(parent);
+        }
+        let auxiliary = self.p.db.state_auxiliary()?.into_iter().filter(|(_, aux)| *aux).map(|(id, _)| id).collect();
+        Ok(History { parents, auxiliary })
+    }
+
     /// The best common ancestor: a common ancestor that is not an ancestor of another one.
     /// One walk finds every state that is a proper ancestor of a common ancestor.
     pub fn merge_base(&self, a: &str, b: &str) -> Result<Option<String>> {
@@ -2317,6 +2657,119 @@ impl<'a> Repo<'a> {
             cur = self.p.db.state(&c)?.and_then(|s| s.parents.first().cloned());
         }
         Ok(v)
+    }
+}
+
+/// The parent edges and the auxiliary states of a project in memory (`Repo::history`). Its merge
+/// bases equal `Repo::merge_base`, which reads one state per step of the walk.
+pub struct History {
+    parents: HashMap<String, Vec<String>>,
+    auxiliary: HashSet<String>,
+}
+
+impl History {
+    /// All ancestors of the `seeds` (including them), breadth first, as `Repo::ancestors_of`.
+    /// `None` when the walk reaches an auxiliary state: `Repo::merge_base` then refuses it.
+    fn ancestors<'s>(&'s self, seeds: Vec<&'s str>) -> Option<Vec<&'s str>> {
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut order = Vec::new();
+        let mut queue: VecDeque<&str> = seeds.into();
+        while let Some(x) = queue.pop_front() {
+            if !seen.insert(x) {
+                continue;
+            }
+            if self.auxiliary.contains(x) {
+                return None;
+            }
+            order.push(x);
+            if let Some(parents) = self.parents.get(x) {
+                queue.extend(parents.iter().map(String::as_str));
+            }
+        }
+        Some(order)
+    }
+
+    /// The merge base of `a` and `b`, as `Repo::merge_base`. `None` when a walk reaches an auxiliary state.
+    pub fn merge_base(&self, a: &str, b: &str) -> Option<Option<String>> {
+        let aa = self.ancestors(vec![a])?;
+        let bs: HashSet<&str> = self.ancestors(vec![b])?.into_iter().collect();
+        let common: Vec<&str> = aa.into_iter().filter(|x| bs.contains(x)).collect();
+        let seeds: Vec<&str> = common.iter().flat_map(|c| self.parents.get(*c).into_iter().flatten().map(String::as_str)).collect();
+        let below: HashSet<&str> = self.ancestors(seeds)?.into_iter().collect();
+        Some(common.into_iter().find(|c| !below.contains(c)).map(str::to_string))
+    }
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+
+    /// The walk of `Repo::merge_base` over a parent map: the reference that `History` must equal.
+    fn reference_merge_base(parents: &HashMap<String, Vec<String>>, a: &str, b: &str) -> Option<String> {
+        let ancestors = |seeds: Vec<String>| {
+            let mut seen = BTreeSet::new();
+            let mut order = Vec::new();
+            let mut q: VecDeque<String> = seeds.into();
+            while let Some(x) = q.pop_front() {
+                if !seen.insert(x.clone()) {
+                    continue;
+                }
+                order.push(x.clone());
+                for p in parents.get(&x).into_iter().flatten() {
+                    q.push_back(p.clone());
+                }
+            }
+            order
+        };
+        let aa = ancestors(vec![a.to_string()]);
+        let bs: BTreeSet<String> = ancestors(vec![b.to_string()]).into_iter().collect();
+        let common: Vec<String> = aa.into_iter().filter(|x| bs.contains(x)).collect();
+        let below: BTreeSet<String> = ancestors(common.iter().flat_map(|c| parents.get(c).cloned().unwrap_or_default()).collect())
+            .into_iter()
+            .collect();
+        common.into_iter().find(|c| !below.contains(c))
+    }
+
+    fn history(parents: &HashMap<String, Vec<String>>) -> History {
+        History { parents: parents.clone(), auxiliary: HashSet::new() }
+    }
+
+    /// Random histories with merges, criss-cross merges included: every pair gives the reference
+    /// merge base, also when the heads are the same state or a root.
+    #[test]
+    fn history_merge_bases_equal_the_reference_walk() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        for round in 0..150 {
+            let n = 2 + next(28) as usize;
+            let ids: Vec<String> = (0..n).map(|i| format!("r{round}-{i:02}")).collect();
+            let mut parents: HashMap<String, Vec<String>> = HashMap::new();
+            for i in 1..n {
+                let count = 1 + next(2) as usize;
+                let picked: Vec<String> = (0..count).map(|_| ids[next(i as u64) as usize].clone()).collect();
+                parents.insert(ids[i].clone(), picked);
+            }
+            let h = history(&parents);
+            for a in &ids {
+                for b in &ids {
+                    assert_eq!(h.merge_base(a, b), Some(reference_merge_base(&parents, a, b)), "round {round}: {a} {b}");
+                }
+            }
+        }
+    }
+
+    /// A walk that reaches an auxiliary state gives no answer, so the caller uses `Repo::merge_base`.
+    #[test]
+    fn an_auxiliary_state_in_the_walk_gives_no_answer() {
+        let parents = HashMap::from([("top".to_string(), vec!["cache".to_string()]), ("cache".to_string(), vec![])]);
+        let h = History { parents, auxiliary: HashSet::from(["cache".to_string()]) };
+        assert_eq!(h.merge_base("top", "top"), None);
+        assert_eq!(h.merge_base("cache", "cache"), None);
     }
 }
 
@@ -2526,7 +2979,35 @@ fn prune_empty_parents(target: &Path, to: &Path, rel: &str) -> Result<()> {
 
 /// Give every entry of a tree (a new cache copy, still private) to `uid:gid`, without following
 /// links and without entering nested subvolumes.
+/// Whether a cache copy may keep the owners that its clone gave, without a walk. Every condition
+/// is needed:
+/// - `uniform`: the copy is one clone, not a copy file by file;
+/// - the saving line's owner (`source_owner`) is the line owner;
+/// - this process runs as that owner, not as root: a root clone keeps each entry's own owner;
+/// - the root already has the owner and the group.
+pub(crate) fn owner_walk_skippable(
+    uniform: bool,
+    euid: u32,
+    uid: u32,
+    gid: u32,
+    source_owner: Option<u32>,
+    root: (u32, u32),
+) -> bool {
+    uniform && euid != 0 && euid == uid && source_owner == Some(uid) && root == (uid, gid)
+}
+
+/// `give_tree` for a cache copy: the walk is skipped only when `owner_walk_skippable` holds.
+pub(crate) fn give_cache_tree(root: &Path, uniform: bool, source_owner: Option<u32>, uid: u32, gid: u32) -> Result<()> {
+    let m = std::fs::symlink_metadata(root)?;
+    let euid = rustix::process::geteuid().as_raw();
+    if owner_walk_skippable(uniform, euid, uid, gid, source_owner, (m.uid(), m.gid())) {
+        return Ok(());
+    }
+    give_tree(root, uid, gid)
+}
+
 pub(crate) fn give_tree(root: &Path, uid: u32, gid: u32) -> Result<()> {
+    let _t = crate::trace::span(format!("give tree {}", root.display()));
     let mut paths = Vec::new();
     fsutil::walk(root, "", &mut |rel, m| {
         if m.uid != uid || m.gid != gid {
@@ -2570,10 +3051,7 @@ fn regenerable_in_scan(w: &Path, scan: &BTreeMap<String, btrfs::ScanEntry>) -> V
             rule_dirs.insert(dir.to_string());
         }
     }
-    let (regenerable, ignored) = (
-        Rules::limited(w, Some("regenerable"), rule_dirs.clone()),
-        Rules::limited(w, None, rule_dirs),
-    );
+    let (regenerable, ignored) = (Rules::limited(w, Some("regenerable"), rule_dirs.clone()), Rules::limited(w, None, rule_dirs));
     let mut found = Vec::new();
     for (rel, e) in scan {
         if rel.is_empty() || !e.meta.is_dir() || rel == ".git" || rel.starts_with(".git/") {
@@ -2615,17 +3093,12 @@ fn regenerable_by_walk(w: &Path) -> Result<Vec<String>> {
         }
         enter
     })?;
-    let (regenerable, ignored) = (
-        Rules::limited(w, Some("regenerable"), rule_dirs.clone()),
-        Rules::limited(w, None, rule_dirs),
-    );
+    let (regenerable, ignored) = (Rules::limited(w, Some("regenerable"), rule_dirs.clone()), Rules::limited(w, None, rule_dirs));
     let mut found: Vec<String> = children
         .into_iter()
         .filter(|rel| {
             let parent = rel.rsplit_once('/').map(|(p, _)| p).unwrap_or("");
-            (parent.is_empty() || !ignored.ignored(parent, true))
-                && regenerable.ignored(rel, true)
-                && ignored.ignored(rel, true)
+            (parent.is_empty() || !ignored.ignored(parent, true)) && regenerable.ignored(rel, true) && ignored.ignored(rel, true)
         })
         .collect();
     found.sort();
@@ -2788,6 +3261,7 @@ const CARRY_ROUNDS: usize = 5;
 
 #[cfg(test)]
 thread_local! {
+    static COPY_HOOK: std::cell::RefCell<Option<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(None) };
     static CARRY_HOOK: std::cell::RefCell<Option<Box<dyn FnMut(usize, &str)>>> = const { std::cell::RefCell::new(None) };
 }
 
@@ -2796,7 +3270,14 @@ thread_local! {
 /// that is new or changed since `seen` (the state before the copy) to the new folder, in rounds,
 /// until a scan finds nothing changed. Entries removed in the old folder stay in the new one.
 /// Returns whether the old folder is settled: only then may it be deleted.
-fn carry_changes(t: &Tree, old: &str, new: &str, own: Option<(u32, u32)>, mut seen: Manifest) -> Result<bool> {
+fn carry_changes(
+    t: &Tree,
+    old: &str,
+    new: &str,
+    own: Option<(u32, u32)>,
+    mut seen: Manifest,
+    carried: &mut std::collections::BTreeSet<String>,
+) -> Result<bool> {
     for round in 0..=CARRY_ROUNDS {
         #[cfg(test)]
         CARRY_HOOK.with(|h| h.borrow_mut().as_mut().map(|f| f(round, old)));
@@ -2811,6 +3292,7 @@ fn carry_changes(t: &Tree, old: &str, new: &str, own: Option<(u32, u32)>, mut se
         }
         let (mut linked, mut made) = (std::collections::HashMap::new(), Vec::new());
         for rel in changed {
+            carried.insert(rel.clone());
             let (s, d) = (format!("{old}/{rel}"), format!("{new}/{rel}"));
             let is_dir = now[rel].is_dir();
             match t.stat(&d) {
@@ -2848,6 +3330,7 @@ pub fn convert_cache(w: &Path, path: &str, uid: u32, gid: u32) -> Result<bool> {
     if !m.is_dir() || fsutil::is_layer(w, path, &m) {
         return Ok(false);
     }
+    refuse_busy(w, path)?;
     replace_folder(&t, path, true, uid, gid)?;
     Ok(true)
 }
@@ -2861,6 +3344,7 @@ pub fn uncache(w: &Path, path: &str, uid: u32, gid: u32) -> Result<bool> {
         Some(m) if fsutil::is_layer(w, path, &m) => {}
         _ => return Ok(false),
     }
+    refuse_busy(w, path)?;
     replace_folder(&t, path, false, uid, gid)?;
     Ok(true)
 }
@@ -2941,7 +3425,8 @@ fn recover_cache_replacement(t: &Tree, path: &str) -> Result<()> {
                 t.remove(&old)?;
             } else {
                 eprintln!(
-                    "layr: {path} was written by another process while it was copied; the previous folder is kept at {old}"
+                    "layr: {path} was written by another process while it was copied; the previous folder is kept at {old} ({})",
+                    crate::cmd::admin::human_size(tree_bytes(&t.path.join(&old)))
                 );
             }
         } else {
@@ -3012,6 +3497,8 @@ fn replace_folder(t: &Tree, path: &str, subvolume: bool, uid: u32, gid: u32) -> 
         crate::tree::cache_test_fault("copy-incomplete");
         copy_tree(t, path, &tmp, Some((uid, gid)), &mut std::collections::HashMap::new())?;
         t.copy_directory_metadata(path, &tmp)?;
+        #[cfg(test)]
+        COPY_HOOK.with(|h| h.borrow_mut().as_mut().map(|f| f()));
         Ok(seen)
     })();
     let seen = match copy {
@@ -3023,24 +3510,146 @@ fn replace_folder(t: &Tree, path: &str, subvolume: bool, uid: u32, gid: u32) -> 
     };
     record.replacement = Some(t.directory_record(&tmp)?);
     t.publish_private_file(&journal, &serde_json::to_vec(&record)?)?;
+    // A write to the folder since the scan makes the copy incomplete: discard it, do not swap.
+    match scan_differs(t, path, &seen) {
+        Ok(false) => {}
+        Ok(true) => {
+            recover_cache_replacement(t, path)?;
+            return Err(CacheRefused::Changed { path: path.to_string() }.into());
+        }
+        Err(error) => {
+            recover_cache_replacement(t, path)?;
+            return Err(error);
+        }
+    }
     #[cfg(test)]
     crate::tree::cache_test_pause();
     t.rename_directory_checked(path, &old, &record.source)?;
     #[cfg(test)]
     crate::tree::cache_test_fault("between-renames");
+    // The copy before it becomes the cache: nobody writes to it by name until the next rename.
+    let baseline = {
+        let mut m = Manifest::new();
+        scan_tree(t, &tmp, "", &mut m).ok().map(|()| m)
+    };
     t.rename_directory_checked(&tmp, path, record.replacement.as_ref().unwrap())?;
     t.chown(path, uid, gid)?;
+    let mut carried = std::collections::BTreeSet::new();
     // An error here (a name that is not UTF-8, a read-only folder) leaves the old folder in place.
-    let settled = carry_changes(t, &old, path, Some((uid, gid)), seen).unwrap_or_else(|error| {
+    let settled = carry_changes(t, &old, path, Some((uid, gid)), seen, &mut carried).unwrap_or_else(|error| {
         eprintln!("layr: cannot carry late writes of {path}: {error:#}");
         false
     });
     if settled {
         record.settled = true;
         t.publish_private_file(&journal, &serde_json::to_vec(&record)?)?;
+    } else if let Some(baseline) = baseline {
+        // The old folder holds every write. The copy takes its place back when no process wrote to it.
+        let mut now = Manifest::new();
+        if scan_tree(t, path, "", &mut now).is_ok() && !writes_since(&baseline, &now, &carried) {
+            return swap_back(t, path, &tmp, &old, &journal, &record);
+        }
     }
     recover_cache_replacement(t, path)?;
     Ok(())
+}
+
+/// The old folder becomes the cache again, and the copy is deleted (the new folder got no write).
+fn swap_back(t: &Tree, path: &str, tmp: &str, old: &str, journal: &str, record: &CacheReplacement) -> Result<()> {
+    t.rename_directory_checked(path, tmp, record.replacement.as_ref().unwrap())?;
+    t.rename_directory_checked(old, path, &record.source)?;
+    t.remove(tmp)?;
+    t.remove(journal)?;
+    t.sync_parent(journal)
+}
+
+/// Whether the folder at `dir` differs from the scan `seen` (a write since the scan).
+fn scan_differs(t: &Tree, dir: &str, seen: &Manifest) -> Result<bool> {
+    let mut now = Manifest::new();
+    scan_tree(t, dir, "", &mut now)?;
+    Ok(now != *seen)
+}
+
+/// Whether an entry that carry did not write differs between two scans of the new folder.
+fn writes_since(baseline: &Manifest, now: &Manifest, carried: &std::collections::BTreeSet<String>) -> bool {
+    baseline.keys().chain(now.keys()).filter(|k| !carried.contains(*k)).any(|k| baseline.get(k) != now.get(k))
+}
+
+/// A cache folder that was not made a cache: a process uses it, or it was written while it was
+/// copied. The automatic save skips it; `save --caches` and `overlay repair` report it.
+#[derive(Debug)]
+pub enum CacheRefused {
+    Busy { path: String, pid: u32, name: String },
+    Changed { path: String },
+}
+
+impl std::fmt::Display for CacheRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Busy { path, pid, name } => {
+                write!(f, "{path}: not made a cache: in use by pid {pid} ({name}); run again when the build ends")
+            }
+            Self::Changed { path } => {
+                write!(f, "{path}: not made a cache: written while it was copied; run again when the build ends")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CacheRefused {}
+
+/// Refuse a folder that a process uses: a copy and a swap would lose the writes that come later.
+fn refuse_busy(w: &Path, path: &str) -> Result<()> {
+    if let Some(user) = crate::busy::user_of(&fsutil::safe_join(w, path)?)? {
+        return Err(CacheRefused::Busy { path: path.to_string(), pid: user.pid, name: user.name }.into());
+    }
+    Ok(())
+}
+
+/// Allocated bytes of a folder tree (links are not followed).
+pub fn tree_bytes(path: &Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(m) = std::fs::symlink_metadata(path) else {
+        return 0;
+    };
+    if !m.is_dir() {
+        return m.blocks() * 512;
+    }
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    entries.flatten().map(|e| tree_bytes(&e.path())).sum()
+}
+
+/// A folder that a cache swap left: `<cache path>.layr-old-<id>` (the previous folder, kept while
+/// a process wrote to it) or `<cache path>.layr-new-<id>` (a copy that did not become the cache).
+pub struct Leftover {
+    pub line: String,
+    /// The path in the working folder of the line.
+    pub rel: String,
+    pub path: PathBuf,
+    pub bytes: u64,
+    /// Why `gc --repair` keeps it: a process uses it, or the swap of its cache is not finished.
+    pub kept: Option<String>,
+}
+
+/// The base name of a leftover: `<base>.layr-old-<id>` or `<base>.layr-new-<id>`, where `<id>` is the
+/// short id that `replace_folder` makes (seven lowercase hex digits). `None` for any other name.
+fn leftover_base(name: &str) -> Option<&str> {
+    for sep in [".layr-old-", ".layr-new-"] {
+        if let Some(pos) = name.rfind(sep) {
+            let id = &name[pos + sep.len()..];
+            if pos > 0 && id.len() == 7 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+                return Some(&name[..pos]);
+            }
+        }
+    }
+    None
+}
+
+/// Whether `name` is a leftover of the cache with the base name `base`.
+fn is_leftover_name(name: &str, base: &str) -> bool {
+    leftover_base(name) == Some(base)
 }
 
 /// Whether the tree at `root` has a file, link or other entry that is not a folder at `path` or
@@ -3102,14 +3711,14 @@ mod regenerable_memo_tests {
     use super::*;
 
     #[test]
-    #[test]
     fn a_folder_the_walk_cannot_read_is_an_error_not_a_short_list() -> Result<()> {
         // Root reads every folder: the test needs a folder that its owner cannot open.
         if rustix::process::geteuid().is_root() {
             return Ok(());
         }
         use std::os::unix::fs::PermissionsExt;
-        let root = std::env::temp_dir().join(format!("layr-regen-unreadable-{}", std::process::id()));
+        // A folder of its own: a leftover of another run or test must not be shared.
+        let root = std::env::temp_dir().join(format!("layr-regen-unreadable-{}", crate::ids::new_id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("locked/target"))?;
         std::fs::create_dir_all(root.join("a/target"))?;
@@ -3152,6 +3761,44 @@ mod cache_copy_tests {
             ]),
             out: std::cell::RefCell::new(Box::new(std::io::sink())),
         })
+    }
+
+    #[test]
+    fn a_line_lock_taken_again_in_the_same_process_does_not_wait() -> Result<()> {
+        // The cache hook takes the line lock of its line while a command may hold it: the second take must
+        // return at once. A wait would hang the thread, and the main thread then reports it.
+        let root = std::env::temp_dir().join(format!("layr-line-lock-again-{}", crate::ids::new_id()));
+        std::fs::create_dir(&root)?;
+        #[cfg(target_os = "linux")]
+        if !btrfs::is_supported(&root) {
+            std::fs::remove_dir(&root)?;
+            return Ok(());
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker_root = root.clone();
+        std::thread::spawn(move || {
+            let result = (|| -> Result<()> {
+                let ctx = cache_command_context(&worker_root)?;
+                let run = |ctx: &crate::ctx::Ctx, args: &[&str]| {
+                    crate::cmd::run(ctx, &args.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+                };
+                anyhow::ensure!(run(&ctx, &["init", "concurrent", "-q"])? == 0, "init failed");
+                let repo = Repo::open(&ctx, "concurrent")?;
+                let line = repo.line("main")?;
+                let first = repo.line_lock(&line)?;
+                let second = repo.p.line_lock(&line.id, &line.name)?;
+                drop(second);
+                drop(first);
+                Ok(())
+            })();
+            let _ = tx.send(result.map_err(|e| format!("{e:#}")));
+        });
+        let outcome = rx.recv_timeout(std::time::Duration::from_secs(60));
+        let _ = std::fs::remove_dir_all(&root);
+        match outcome {
+            Ok(result) => result.map_err(anyhow::Error::msg),
+            Err(_) => anyhow::bail!("the second take of the line lock waited"),
+        }
     }
 
     #[test]
@@ -3414,8 +4061,49 @@ mod cache_copy_tests {
     }
 
     #[test]
+    fn a_write_during_the_copy_discards_the_copy() -> Result<()> {
+        let root = scratch_cache("copy-write")?;
+        let base = root.clone();
+        COPY_HOOK.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || std::fs::write(base.join("cache/a"), "during the copy").unwrap()));
+        });
+        let result = replace_plain(&root);
+        COPY_HOOK.with(|h| *h.borrow_mut() = None);
+        let err = result.expect_err("a copy that a write changed is refused");
+        assert!(matches!(err.downcast_ref::<CacheRefused>(), Some(CacheRefused::Changed { .. })), "{err:#}");
+        assert_eq!(std::fs::read_to_string(root.join("cache/a"))?, "during the copy");
+        assert_eq!(siblings(&root, "cache.layr-"), Vec::<String>::new());
+        assert!(!root.join(cache_journal("cache")).exists());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn an_old_folder_that_keeps_changing_is_kept() -> Result<()> {
         let root = scratch_cache("unsettled")?;
+        CARRY_HOOK.with(|h| {
+            let base = root.clone();
+            *h.borrow_mut() = Some(Box::new(move |round, old| {
+                std::fs::write(base.join(old).join("a"), "x".repeat(round + 10)).unwrap();
+                // A process that opened the new folder by its name writes there: the old folder cannot take its place.
+                std::fs::write(base.join("cache").join("by-name"), round.to_string()).unwrap();
+            }));
+        });
+        let result = replace_plain(&root);
+        CARRY_HOOK.with(|h| *h.borrow_mut() = None);
+        result?;
+        let kept = siblings(&root, "cache.layr-old-");
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert_eq!(std::fs::read_to_string(root.join(&kept[0]).join("a"))?, "x".repeat(CARRY_ROUNDS + 10));
+        assert_eq!(std::fs::read_to_string(root.join("cache/sub/b"))?, "two");
+        assert!(!root.join(cache_journal("cache")).exists());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn an_old_folder_that_keeps_changing_is_swapped_back_when_the_copy_got_no_write() -> Result<()> {
+        let root = scratch_cache("swapped-back")?;
         CARRY_HOOK.with(|h| {
             let base = root.clone();
             *h.borrow_mut() = Some(Box::new(move |round, old| {
@@ -3425,9 +4113,9 @@ mod cache_copy_tests {
         let result = replace_plain(&root);
         CARRY_HOOK.with(|h| *h.borrow_mut() = None);
         result?;
-        let kept = siblings(&root, "cache.layr-old-");
-        assert_eq!(kept.len(), 1, "{kept:?}");
-        assert_eq!(std::fs::read_to_string(root.join(&kept[0]).join("a"))?, "x".repeat(CARRY_ROUNDS + 10));
+        // The old folder holds every write: it is the cache again, and no folder is left beside it.
+        assert_eq!(siblings(&root, "cache.layr-"), Vec::<String>::new());
+        assert_eq!(std::fs::read_to_string(root.join("cache/a"))?, "x".repeat(CARRY_ROUNDS + 10));
         assert_eq!(std::fs::read_to_string(root.join("cache/sub/b"))?, "two");
         assert!(!root.join(cache_journal("cache")).exists());
         std::fs::remove_dir_all(root)?;
@@ -3592,6 +4280,26 @@ thread_local! {
     static PREPARED_STATUS: std::cell::RefCell<Option<PreparedStatus>> = const { std::cell::RefCell::new(None) };
 }
 
+/// The automatic state that `line delete` prepares before the lock (`prepare_final_state`).
+#[cfg(target_os = "macos")]
+pub struct FinalPrepared {
+    id: String,
+    head: String,
+    scan: BTreeMap<String, btrfs::ScanEntry>,
+}
+
+/// Off APFS nothing is prepared.
+#[cfg(not(target_os = "macos"))]
+pub struct FinalPrepared;
+
+/// The outcome of `record_final_state`.
+pub enum FinalState {
+    /// The state of the working folder (None: no folder).
+    Recorded(Option<String>),
+    /// The head or the folder moved since the state was prepared: prepare it again.
+    Moved,
+}
+
 /// An automatic state layer written before a store lock (`Repo::prepare_save`).
 #[cfg(target_os = "macos")]
 struct PreparedSave {
@@ -3604,6 +4312,41 @@ struct PreparedSave {
 #[cfg(target_os = "macos")]
 thread_local! {
     static PREPARED_SAVES: std::cell::RefCell<Vec<PreparedSave>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+/// The folder of a line that `prepare_save` found unchanged since its save base: head, base, scan.
+#[cfg(target_os = "macos")]
+struct PreparedClean {
+    line: String,
+    head: String,
+    prev: String,
+    scan: BTreeMap<String, btrfs::ScanEntry>,
+}
+
+#[cfg(target_os = "macos")]
+thread_local! {
+    static PREPARED_CLEAN: std::cell::RefCell<Vec<PreparedClean>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(target_os = "macos")]
+fn set_prepared_clean(line: &str, head: &str, prev: &str, scan: &BTreeMap<String, btrfs::ScanEntry>) {
+    PREPARED_CLEAN.with(|p| {
+        let mut p = p.borrow_mut();
+        p.retain(|x| x.line != line);
+        p.push(PreparedClean { line: line.into(), head: head.into(), prev: prev.into(), scan: scan.clone() });
+    });
+}
+
+/// True when `prepare_save` found this head, base and content unchanged (the lock need not compare
+/// the stored metadata again). The entry is kept until the command ends.
+#[cfg(target_os = "macos")]
+fn prepared_unchanged(line: &str, head: &str, prev: &str, scan: &BTreeMap<String, btrfs::ScanEntry>) -> bool {
+    PREPARED_CLEAN.with(|p| p.borrow().iter().any(|x| x.line == line && x.head == head && x.prev == prev && x.scan == *scan))
+}
+
+/// True when a layer prepared for `line` has this head, base and content (not taken).
+#[cfg(target_os = "macos")]
+fn prepared_matches(line: &str, head: &str, prev: &str, scan: &BTreeMap<String, btrfs::ScanEntry>) -> bool {
+    PREPARED_SAVES.with(|p| p.borrow().iter().any(|x| x.line == line && x.head == head && x.prev == prev && x.scan == *scan))
 }
 #[cfg(target_os = "macos")]
 fn take_prepared_save(line: &str) -> Option<PreparedSave> {
@@ -3676,5 +4419,51 @@ mod commit_record_tests {
         assert!(repo.p.db.state(&state)?.is_some(), "the database holds the record");
         assert!(repo.p.has_state(&state), "a state that the record names keeps its snapshot");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod leftover_name_tests {
+    use super::{is_leftover_name, leftover_base};
+
+    #[test]
+    fn the_base_of_a_swap_name_is_any_folder_name() {
+        assert_eq!(leftover_base("target.layr-old-abc1234"), Some("target"));
+        assert_eq!(leftover_base("a.b.layr-new-0123456"), Some("a.b"));
+        assert_eq!(leftover_base(".layr-old-abc1234"), None);
+        assert_eq!(leftover_base("target.mine"), None);
+    }
+
+    #[test]
+    fn only_the_swap_names_of_a_cache_are_leftovers() {
+        assert!(is_leftover_name("target.layr-old-abc1234", "target"));
+        assert!(is_leftover_name("target.layr-new-0123456", "target"));
+        assert!(!is_leftover_name("target.mine", "target"));
+        assert!(!is_leftover_name("target.layr-old-abc123", "target"));
+        assert!(!is_leftover_name("target.layr-old-ABC1234", "target"));
+        assert!(!is_leftover_name("target.layr-old-abc1234x", "target"));
+        assert!(!is_leftover_name("other.layr-old-abc1234", "target"));
+    }
+}
+
+mod owner_walk_tests {
+    use super::owner_walk_skippable;
+
+    #[test]
+    fn the_walk_is_skipped_only_when_every_condition_holds() {
+        // The line owner (501) runs the store, saved the cache and builds in its copy.
+        assert!(owner_walk_skippable(true, 501, 501, 20, Some(501), (501, 20)));
+        // Another owner (502) saved the cache state: the walk runs.
+        assert!(!owner_walk_skippable(true, 501, 501, 20, Some(502), (501, 20)));
+        // The saving owner is not recorded: the walk runs.
+        assert!(!owner_walk_skippable(true, 501, 501, 20, None, (501, 20)));
+        // A root process clones and keeps each entry's own owner: the walk runs.
+        assert!(!owner_walk_skippable(true, 0, 0, 20, Some(0), (0, 20)));
+        // The store runs as another user than the line owner: the walk runs.
+        assert!(!owner_walk_skippable(true, 502, 501, 20, Some(501), (501, 20)));
+        // A copy made file by file: the walk runs.
+        assert!(!owner_walk_skippable(false, 501, 501, 20, Some(501), (501, 20)));
+        // The root has another group than the line: the walk runs.
+        assert!(!owner_walk_skippable(true, 501, 501, 20, Some(501), (501, 21)));
     }
 }

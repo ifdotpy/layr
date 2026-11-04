@@ -78,6 +78,8 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if !only.is_empty() && !a.has("--caches") {
         return Err(exit(2, "--cache selects a cache path for --caches."));
     }
+    // Folders that a process uses (or that changed while copied): refused, the others go on.
+    let mut refusals: Vec<String> = Vec::new();
     for l in lines {
         repo.authorize_line(ctx, &l, crate::repo::LineOp::Save)?;
         if a.has("--caches") {
@@ -101,8 +103,21 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
             caches.retain(|p| only.contains(p));
             versioned.retain(|p| only.contains(p));
             if caches.is_empty() && versioned.is_empty() {
-                return Err(exit(1, format!("error: '{}' is no cache path of the line (see layr overlay list)", only.join("', '"))));
+                return Err(exit(
+                    1,
+                    format!("error: '{}' is no cache path of the line (see layr overlay list)", only.join("', '")),
+                ));
             }
+        }
+        if a.has("--caches") {
+            // A folder that an interrupted prune left damaged is not saved until a prune of it succeeds.
+            let damaged = repo.damaged_folders(&l)?;
+            for p in caches.iter().filter(|p| damaged.contains(*p)) {
+                if !a.has("-q") {
+                    outln!(ctx, "{p}: skipped: damaged by an interrupted prune; run layr save --caches again to prune it");
+                }
+            }
+            caches.retain(|p| !damaged.contains(p));
         }
         let st = if a.has("--caches") {
             // A cache folder that a tool made again as a plain folder becomes a cache first, so
@@ -111,14 +126,23 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
             // its files.
             let (u, g) = repo.owner_ids(&l);
             for p in &versioned {
-                let again = crate::repo::uncache(&repo.working(&l), p, u, g)?;
-                if !a.has("-q") {
-                    outln!(ctx, "{p}: {}", if again { VERSIONED_AGAIN } else { VERSIONED });
+                match crate::repo::uncache(&repo.working(&l), p, u, g) {
+                    Ok(again) => {
+                        if !a.has("-q") {
+                            outln!(ctx, "{p}: {}", if again { VERSIONED_AGAIN } else { VERSIONED });
+                        }
+                    }
+                    Err(e) => refuse(e, &mut refusals)?,
                 }
             }
+            let mut refused = Vec::new();
             for p in &caches {
-                crate::repo::convert_cache(&repo.working(&l), p, u, g)?;
+                if let Err(e) = crate::repo::convert_cache(&repo.working(&l), p, u, g) {
+                    refuse(e, &mut refusals)?;
+                    refused.push(p.clone());
+                }
             }
+            caches.retain(|p| !refused.contains(p));
             Some(repo.caches_state(ctx, &l, &msg, a.has("--running"), &caches)?)
         } else {
             repo.save(ctx, &l, &msg, a.has("--running"), a.has("--force"))?
@@ -153,7 +177,19 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
         // Layers and snapshots that the save did not take (an unchanged folder, or --force).
         repo.discard_prepared();
     }
+    if !refusals.is_empty() {
+        return Err(exit(1, refusals.join("\n")));
+    }
     Ok(0)
+}
+
+/// Keep the message of a folder that a process uses (the other folders go on). Other errors stop the save.
+fn refuse(e: anyhow::Error, refusals: &mut Vec<String>) -> Result<()> {
+    if e.downcast_ref::<crate::repo::CacheRefused>().is_none() {
+        return Err(e);
+    }
+    refusals.push(e.to_string());
+    Ok(())
 }
 
 /// A cache folder that a tool made as a plain folder becomes a cache by a copy of all its files,
@@ -171,7 +207,16 @@ fn prepare_caches(repo: &Repo, l: &Line, only: &[String]) -> Result<()> {
         if !only.is_empty() && !only.contains(&p) {
             continue;
         }
-        crate::repo::convert_cache(&w, &p, u, g)?;
+        if let Err(e) = crate::repo::convert_cache(&w, &p, u, g) {
+            // A refused folder is refused again under the lock, where the save reports it. It is
+            // not pruned either: a process writes to it.
+            if e.downcast_ref::<crate::repo::CacheRefused>().is_none() {
+                return Err(e);
+            }
+            continue;
+        }
+        // Pruned before the copy and the save: the state keeps the pruned cache (docs/cache-overlays.md, section 19).
+        repo.prune_cache_folder(l, &p);
         #[cfg(target_os = "macos")]
         prepare_cache_copy(repo, l, &w, &p)?;
     }
@@ -384,7 +429,8 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
         }
     }
     // The states that the undo reads stay on disk while it runs (every line's entry of the record).
-    let named: Vec<String> = crate::owners::undo_entries(&r, &crate::owners::record_ord(&r)).into_iter().flat_map(|(_, v)| v).collect();
+    let named: Vec<String> =
+        crate::owners::undo_entries(&r, &crate::owners::record_ord(&r)).into_iter().flat_map(|(_, v)| v).collect();
     let named: Vec<&str> = named.iter().map(String::as_str).collect();
     repo.hold(repo.pin(&named)?);
     if r.op == "save" {
@@ -434,7 +480,8 @@ fn undo_save(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
     let after = r.data["working_after"].as_str().unwrap_or("").to_string();
     let probe = repo.p.db.line_by_id(&lid)?.ok_or_else(|| exit(1, "error: the line of this save no longer exists"))?;
     repo.authorize_line(ctx, &probe, crate::repo::LineOp::Rewrite)?;
-    let _lock = repo.p.lock()?;
+    // The line lock covers the folder; the project lock covers the save before it and the record.
+    let _line_lock = repo.line_lock(&probe)?;
     if repo.p.db.line_by_name(&probe.name)?.map(|l| l.id) != Some(lid.clone()) {
         return Err(exit(1, "error: the line of this save no longer exists"));
     }
@@ -448,16 +495,27 @@ fn undo_save(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
     for s in [&before, &after] {
         repo.state_src(s).map_err(|e| exit(1, format!("error: cannot undo, no file changed: {e:#}")))?;
     }
-    let wb = repo.working_state(ctx, &line, "before undo")?;
-    revert_working(repo, &line, &before, &after, force)?;
+    repo.prepare_save(&line)?;
+    let wb = save_before_undo(ctx, repo, &line, false)?;
+    if let Err(e) = revert_working(repo, &line, &before, &after, force) {
+        super::work::put_back(repo, &line, wb.as_deref());
+        return Err(e);
+    }
     let mut rec = Record::new("undo");
     rec.data = serde_json::json!({"undo": r.id, "op": r.op, "keep_stage": true});
     let now = repo.line_state(&line, &line.head);
     rec.lines.insert(
         lid.clone(),
-        LineChange { before: Some(now.clone()), after: Some(now), working_before: wb, working_after: Some(before) },
+        LineChange { before: Some(now.clone()), after: Some(now), working_before: wb.clone(), working_after: Some(before) },
     );
-    let done = repo.commit_record(ctx, rec)?;
+    let head0 = line.head.clone();
+    let done = match repo.commit_line(&line, &head0, |_| repo.commit_record(ctx, rec)) {
+        Ok(done) => done,
+        Err(e) => {
+            super::work::put_back(repo, &line, wb.as_deref());
+            return Err(e);
+        }
+    };
     crate::gitbridge::sync_store_access(repo)?;
     outln!(
         ctx,
@@ -483,8 +541,52 @@ fn revert_working(repo: &Repo, line: &Line, before: &str, after: &str, force: bo
     Ok(())
 }
 
+/// True when the undo of `r` only moves heads back and writes the working folders of lines that
+/// exist under their names (`undo_locked`). Such an undo takes the line locks for its writes and the
+/// project lock for its checks and its record. Any other undo keeps the project lock for all of it.
+fn undo_in_place(repo: &Repo, r: &Record) -> bool {
+    const OPS: &[&str] = &["save", "commit", "reset", "merge", "cherry-pick", "revert", "rebase", "restore", "clean"];
+    if !OPS.contains(&r.op.as_str()) || r.lines.is_empty() {
+        return false;
+    }
+    if ["ref_change", "queue_change", "overlays"].iter().any(|k| r.data.get(*k).is_some()) {
+        return false;
+    }
+    r.lines.iter().all(|(lid, ch)| {
+        let Some(before) = &ch.before else { return false };
+        match repo.p.db.line_by_id(lid) {
+            Ok(Some(cur)) => {
+                cur.name == before.name && repo.p.db.line_by_name(&cur.name).ok().flatten().is_some_and(|x| x.id == cur.id)
+            }
+            _ => false,
+        }
+    })
+}
+
+/// The automatic save of a line before its undo. An in-place undo takes the project lock for the
+/// save alone (the copy of the folder is made before it); the caller holds no project lock then.
+fn save_before_undo(ctx: &Ctx, repo: &Repo, line: &Line, in_place: bool) -> Result<Option<String>> {
+    if !in_place {
+        return repo.working_state(ctx, line, "before undo");
+    }
+    repo.prepare_save(line)?;
+    let _commit = repo.p.lock()?;
+    repo.working_state(ctx, line, "before undo")
+}
+
 fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
-    let _lock = repo.p.lock()?;
+    let in_place = undo_in_place(repo, r);
+    // The lines of the undo, in id order, for their folders. An in-place undo takes the project lock
+    // for its checks and its record only; any other undo keeps the project lock for all of it.
+    let mut ids: Vec<&String> = r.lines.keys().collect();
+    ids.sort();
+    let mut _line_locks = Vec::new();
+    for lid in ids {
+        if let Some(l) = repo.p.db.line_by_id(lid)? {
+            _line_locks.push(repo.line_lock(&l)?);
+        }
+    }
+    let _lock = if in_place { None } else { Some(repo.p.lock()?) };
     let mut rec = Record::new("undo");
     rec.data = serde_json::json!({"undo": r.id, "op": r.op});
     // An undo of an automatic save keeps the stage, and so does its undo.
@@ -622,14 +724,22 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
             )
         })?;
     }
+    // The heads the checks saw: an in-place undo checks them again under the project lock.
+    let seen: Vec<(String, Option<(String, String)>)> =
+        lines.iter().map(|(lid, _, _, _, cs)| ((*lid).clone(), cs.as_ref().map(|s| (s.name.clone(), s.head.clone())))).collect();
     // The lines with their restored head: their .git folders follow it after the record is made.
     let mut restored: Vec<Line> = Vec::new();
+    // In place: the stage of each line is dropped after the record, and each folder that was
+    // written is saved (`wb`) to put it back if the record is refused.
+    let mut stage_drops: Vec<Line> = Vec::new();
+    let mut written: Vec<(Line, Option<String>)> = Vec::new();
     for (lid, ch, cur, alive, cur_state) in lines {
         let mut wb = None;
         match (&ch.before, &cur) {
             (Some(b), Some(l)) if alive => {
                 // Save the current content, then restore the old pointers and content.
-                wb = repo.working_state(ctx, l, "before undo")?;
+                wb = save_before_undo(ctx, repo, l, in_place)?;
+                written.push((l.clone(), wb.clone()));
                 if b.name != l.name && repo.p.moved_path(&l.id).is_none() {
                     crate::fsutil::rename_tree(repo.p.line_path(&l.name), repo.p.default_line_path(&b.name))?;
                 }
@@ -642,7 +752,11 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
                     (None, _) => {}
                 }
                 if !keep_stage {
-                    repo.drop_stage(&l2)?;
+                    if in_place {
+                        stage_drops.push(l2.clone());
+                    } else {
+                        repo.drop_stage(&l2)?;
+                    }
                 }
                 let mut back = l2.clone();
                 back.head = b.head.clone();
@@ -676,7 +790,7 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
             }
             (None, Some(l)) if alive => {
                 // The operation created the line: delete it (content saved first).
-                wb = repo.working_state(ctx, l, "before undo")?;
+                wb = save_before_undo(ctx, repo, l, in_place)?;
                 repo.p.trash(&repo.working(l))?;
                 repo.drop_stage(l)?;
             }
@@ -697,7 +811,40 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
         let _l = o.p.lock()?;
         crate::overlay::move_overlay_line(&o, ctx, "undo", ol, parent, Vec::new())?;
     }
-    let done = repo.commit_record(ctx, rec)?;
+    let done = if in_place {
+        let states = rec.states.clone();
+        let result = (|| -> Result<Record> {
+            let _commit = repo.p.lock()?;
+            // The heads that the checks saw must still be there: a command that does not take the
+            // line lock (line delete, follow, fetch) may have moved one.
+            for (lid, before) in &seen {
+                let now = repo.p.db.line_by_id(lid)?;
+                match (before, now) {
+                    (Some((name, from)), Some(now)) if &now.head != from => {
+                        return Err(crate::repo::line_moved(name, from, &now.head));
+                    }
+                    (Some((name, _)), None) => return Err(crate::repo::line_gone(name)),
+                    _ => {}
+                }
+            }
+            repo.commit_record(ctx, rec)
+        })();
+        match result {
+            Ok(done) => done,
+            Err(e) => {
+                crate::repo::discard_unrecorded(repo, &states);
+                for (line, wb) in &written {
+                    super::work::put_back(repo, line, wb.as_deref());
+                }
+                return Err(e);
+            }
+        }
+    } else {
+        repo.commit_record(ctx, rec)?
+    };
+    for line in &stage_drops {
+        repo.drop_stage(line)?;
+    }
     // The .git folder of each restored line points at its restored head, as after every other move
     // of a head (repo::move_head). A failure only warns: the undo is done.
     for line in &restored {
@@ -718,7 +865,7 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
 }
 
 /// Make the working folder equal to a state (all paths, untracked and ignored included).
-fn restore_working(repo: &Repo, line: &Line, state: &str) -> Result<()> {
+pub(crate) fn restore_working(repo: &Repo, line: &Line, state: &str) -> Result<()> {
     let target = repo.state_root(state)?;
     let scan = repo.scan(line)?;
     let w = repo.working(line);
@@ -1041,8 +1188,6 @@ pub fn try_command(
 /// The owners check (docs/ownership.md): the stored table against a replay of the records, and
 /// the present states that no owner names (leaks). Pins are local and not compared.
 pub struct OwnersCheck {
-    /// The replay of the records: every owner row it gives.
-    pub want: Vec<crate::owners::Row>,
     pub missing: Vec<crate::owners::Row>,
     pub extra: Vec<crate::owners::Row>,
     /// Undo owners of deleted lines outside the deleted ring (`owners::stale_undo_rows`).
@@ -1060,6 +1205,7 @@ impl OwnersCheck {
 fn owners_check(repo: &Repo) -> Result<OwnersCheck> {
     let want = repo.p.db.recomputed_owners(&repo.p.store.machine.id)?;
     let (missing, extra) = repo.p.db.owners_diff(&want)?;
+<<<<<<< head
     let stale = repo.p.db.stale_undo_rows()?;
     let freed = repo.p.db.unowned_by(&kept_rows(repo, &want)?)?;
     Ok(OwnersCheck { want, missing, extra, stale, freed })
@@ -1074,6 +1220,13 @@ fn kept_rows(repo: &Repo, want: &[crate::owners::Row]) -> Result<Vec<crate::owne
         }
     }
     Ok(rows)
+||||||| base
+    let leaks = repo.p.db.leaked_states()?;
+    Ok(OwnersCheck { want, missing, extra, leaks })
+=======
+    let leaks = repo.p.db.leaked_states()?;
+    Ok(OwnersCheck { missing, extra, leaks })
+>>>>>>> origin/main
 }
 
 /// The bytes that only the storage of these states holds (as `layr du` counts them): clones that
@@ -1110,6 +1263,7 @@ fn check(ctx: &Ctx, repo: &Repo, quiet: bool) -> Result<i32> {
             outln!(ctx, "\textra: {} {k} {h}", ids::short(s));
         }
     }
+<<<<<<< head
     if !c.stale.is_empty() {
         let freed: BTreeSet<&String> = c.freed.iter().collect();
         let held: Vec<String> = c.stale.iter().map(|r| r.0.clone()).filter(|s| freed.contains(s)).collect();
@@ -1128,6 +1282,20 @@ fn check(ctx: &Ctx, repo: &Repo, quiet: bool) -> Result<i32> {
             c.freed.len(),
             human_size(bytes)
         );
+||||||| base
+    if !c.leaks.is_empty() {
+        let bytes = states_bytes(repo, &c.leaks);
+        outln!(
+            ctx,
+            "leaks: {} state(s), {} would be freed by `layr gc --repair`",
+            c.leaks.len(),
+            human_size(bytes)
+        );
+=======
+    if !c.leaks.is_empty() {
+        let bytes = states_bytes(repo, &c.leaks);
+        outln!(ctx, "leaks: {} state(s), {} would be freed by `layr gc --repair`", c.leaks.len(), human_size(bytes));
+>>>>>>> origin/main
     }
     if c.clean() {
         if !quiet {
@@ -1197,9 +1365,35 @@ pub fn gc_repair_quiet(ctx: &Ctx, repo: &Repo) -> Result<usize> {
 /// `free` frees the leaked states too. Only an explicit `gc --repair` does: a state that a command
 /// has recorded but not yet given an owner looks like a leak for a moment (a periodic pass would
 /// free it under the command).
+<<<<<<< head
 pub fn repair_table(repo: &Repo, free: bool) -> Result<Vec<String>> {
     let c = owners_check(repo)?;
     repo.p.db.replace_owners(&kept_rows(repo, &c.want)?)?;
+||||||| base
+pub fn repair_table(repo: &Repo, free: bool) -> Result<Vec<String>> {
+    let c = owners_check(repo)?;
+    let mut want = c.want.clone();
+    for (state, kind, holder) in repo.p.db.owner_rows()?.into_iter().filter(|r| r.1 == "pin") {
+        if crate::free::holder_alive(&holder) {
+            want.push((state, kind, holder));
+        }
+    }
+    repo.p.db.replace_owners(&want)?;
+=======
+/// `diff` is `owners_diff` against the replay when the caller made it with no record added
+/// since (the rows that records make are the same); `None` replays here.
+pub fn repair_table(repo: &Repo, free: bool, diff: Option<(Vec<crate::owners::Row>, Vec<crate::owners::Row>)>) -> Result<Vec<String>> {
+    let (missing, extra) = match diff {
+        Some(d) => d,
+        None => repo.p.db.owners_diff(&repo.p.db.recomputed_owners(&repo.p.store.machine.id)?)?,
+    };
+    repo.p.db.apply_owners_diff(&missing, &extra)?;
+    for holder in repo.p.db.pin_holders()? {
+        if !crate::free::holder_alive(&holder) {
+            repo.p.db.release_holder(&holder)?;
+        }
+    }
+>>>>>>> origin/main
     let leaks = repo.p.db.leaked_states()?;
     if free {
         repo.p.db.free_leaks(&leaks)?;
@@ -1229,9 +1423,26 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) ->
         }
         return Ok(c.freed.len());
     }
+    // The slow reads go before the lock (#194): the replay of the records and the overlay pass.
+    // Under the lock they are used when no record came in meanwhile (an equal records mark);
+    // else they are made again there.
+    let (mark, diff) = {
+        let _t = crate::trace::span("repair: plan");
+        snapshot(repo, || {
+            let want = repo.p.db.recomputed_owners(&repo.p.store.machine.id)?;
+            Ok((repo.p.db.records_mark()?, repo.p.db.owners_diff(&want)?))
+        })?
+    };
+    let overlays = repo.overlay_plan();
+    // Test hook (tests/t127-repair-plan.sh): wait after the plan, so a test can change the
+    // project before the lock.
+    if let Some(ms) = std::env::var("LAYR_TEST_REPAIR_PAUSE_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
     let leaks = {
         let _lock = repo.p.lock()?;
-        let leaks = repair_table(repo, free)?;
+        let fresh = repo.p.db.records_mark()? == mark;
+        let leaks = repair_table(repo, free, fresh.then_some(diff))?;
         evict_stored(repo)?;
         for expired in repo.p.db.expired_refs(ids::now_ms())? {
             let mut rec = Record::new("ref.expire");
@@ -1245,14 +1456,16 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool) ->
             rec.data = serde_json::json!({"deleted": [], "caches": caches});
             repo.commit_record(ctx, rec)?;
         }
-        // Cache overlay lines of deleted lines: their states go below (docs/cache-overlays.md).
-        if let Err(e) = repo.drop_orphan_cache_lines(ctx) {
-            eprintln!("warning: cache overlay lines of deleted lines stay until the next gc: {e:#}");
+        // Cache overlay lines of deleted lines (their states go below), and overlays with a
+        // history limit (docs/cache-overlays.md).
+        if let Err(e) = repo.free_removed_overlays(ctx) {
+            eprintln!("warning: removed cache overlays stay until the next gc: {e:#}");
         }
-        // Overlays with a history limit and folder overlays with an LRU limit (docs/cache-overlays.md).
-        for name in repo.overlay_names()? {
-            repo.after_overlay_move(ctx, &name);
+        match overlays.ok().filter(|_| fresh).map(Ok).unwrap_or_else(|| repo.overlay_plan()) {
+            Ok(plan) => repo.commit_overlay_plan(ctx, plan),
+            Err(e) => eprintln!("warning: overlays: old states stay until the next gc: {e:#}"),
         }
+        // Folder overlays with an LRU limit.
         if let Err(e) = repo.cache_gc_lru() {
             eprintln!("warning: cache size limits not applied: {e:#}");
         }
@@ -1415,6 +1628,7 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
     } else {
         check(ctx, &h.repo, a.has("-q"))?
     };
+    leftovers(ctx, &h.repo, a.has("--repair"), a.has("-n"), a.has("-q"))?;
     // After the project lock is released: hashing and comparing cache files takes long.
     let shared = if a.has("--dedup") { Some(crate::dedup::run(&h.repo, a.has("-n"))?) } else { None };
     if !a.has("-q") {
@@ -1425,6 +1639,28 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     print_trash_errors(&ctx.store);
     Ok(code)
+}
+
+/// The folders that a cache swap left (`<cache>.layr-old-<id>`, `<cache>.layr-new-<id>`): `gc`
+/// reports them with their size; `gc --repair` moves them to the trash, unless a process uses them
+/// or the swap is not finished (the next save finishes it).
+fn leftovers(ctx: &Ctx, repo: &Repo, repair: bool, dry: bool, quiet: bool) -> Result<()> {
+    for l in repo.cache_leftovers()? {
+        let size = human_size(l.bytes);
+        let state = match &l.kept {
+            Some(why) => format!("kept ({why})"),
+            None if repair && dry => "would remove".to_string(),
+            None if repair => {
+                repo.p.trash(&l.path)?;
+                "removed".to_string()
+            }
+            None => "leftover (layr gc --repair removes it)".to_string(),
+        };
+        if !quiet {
+            outln!(ctx, "{state}: {}: {} ({size})", l.line, l.rel);
+        }
+    }
+    Ok(())
 }
 
 /// Owner kinds that keep the tree of a state (docs/ownership.md, "Storage that a live state
@@ -1457,8 +1693,14 @@ fn drop_built_imports(repo: &Repo, dry: bool) -> Result<Vec<String>> {
             .map(|(state, _, _)| state)
             .collect();
         let bases: BTreeSet<String> = repo.p.db.present_layer_bases()?.into_iter().collect();
-        let candidates: Vec<String> =
-            repo.p.db.present_states()?.into_iter().map(|(id, _)| id).filter(|id| !kept.contains(id) && !bases.contains(id)).collect();
+        let candidates: Vec<String> = repo
+            .p
+            .db
+            .present_states()?
+            .into_iter()
+            .map(|(id, _)| id)
+            .filter(|id| !kept.contains(id) && !bases.contains(id))
+            .collect();
         let round: Vec<String> = crate::gitbridge::buildable_set(repo, &candidates)?.into_iter().collect();
         if round.is_empty() {
             break;
@@ -1533,7 +1775,19 @@ pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let c = owners_check(repo)?;
     if !c.clean() {
         problems += 1;
+<<<<<<< head
         outln!(ctx, "owners differ from the records: {} missing, {} extra, {} leaked", c.missing.len(), c.extra.len(), c.freed.len());
+||||||| base
+        outln!(ctx, "owners differ from the records: {} missing, {} extra, {} leaked", c.missing.len(), c.extra.len(), c.leaks.len());
+=======
+        outln!(
+            ctx,
+            "owners differ from the records: {} missing, {} extra, {} leaked",
+            c.missing.len(),
+            c.extra.len(),
+            c.leaks.len()
+        );
+>>>>>>> origin/main
         for (s, k, h) in c.missing.iter().take(5) {
             outln!(ctx, "\tmissing: {} {k} {h}", ids::short(s));
         }
@@ -1541,7 +1795,7 @@ pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
             outln!(ctx, "\textra: {} {k} {h}", ids::short(s));
         }
         if a.has("--repair") {
-            repair_table(repo, true)?;
+            repair_table(repo, true, None)?;
             outln!(ctx, "owners rewritten from the records; leaked states marked for freeing");
         }
     }
@@ -2035,7 +2289,7 @@ pub fn set_config(ctx: &Ctx, repo: &Repo, key: &str, value: serde_json::Value) -
     if let Some((_, new)) = REMOVED_KEYS.iter().find(|(old, _)| *old == key) {
         return Err(exit(1, format!("error: {key} was removed; use {new}")));
     }
-    if key == Project::GC_EVICT_KEY &&!value.is_null() && !matches!(value.as_str(), Some("on" | "off")) {
+    if key == Project::GC_EVICT_KEY && !value.is_null() && !matches!(value.as_str(), Some("on" | "off")) {
         return Err(exit(1, format!("{key} is on or off")));
     }
     if !repo.p.is_overlay() {
