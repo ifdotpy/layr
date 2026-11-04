@@ -1,7 +1,7 @@
 //! Public epoch descriptors contain audience hashes, never reader identities.
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use layr_hashers::{ContentAddress, Digest};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -64,7 +64,7 @@ impl Key {
     }
 }
 pub fn readers_hash(readers: &BTreeMap<String, String>) -> Result<String> {
-    Ok(hex::encode(Sha256::digest(crate::canonical::canonical(&serde_json::to_value(readers)?)?)))
+    Ok(hex::encode(ContentAddress::digest(crate::canonical::canonical(&serde_json::to_value(readers)?)?)))
 }
 
 #[cfg(test)]

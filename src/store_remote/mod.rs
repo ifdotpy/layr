@@ -23,7 +23,7 @@ use anyhow::{bail, Context, Result};
 use backend::Backend;
 use format::Descriptor;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use layr_hashers::{ContentAddress, Digest};
 use std::path::PathBuf;
 
 #[derive(Clone, Default)]
@@ -252,7 +252,7 @@ fn restore_from_remotes<S, C>(
 
 /// The folder of local state for the store at `url` (the same folder `open_with_pin` uses).
 fn store_dir(repo: &Repo, url: &str) -> PathBuf {
-    repo.p.meta_dir().join("remote-stores").join(hex::encode(Sha256::digest(url.as_bytes())))
+    repo.p.meta_dir().join("remote-stores").join(hex::encode(ContentAddress::digest(url.as_bytes())))
 }
 
 /// Records that this machine read the store with its own key. `store_copies` counts a copy only

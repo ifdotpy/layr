@@ -67,6 +67,7 @@ fn hash_all(w: &Path, rels: &[&str]) -> Vec<Option<String>> {
     std::thread::scope(|s| {
         let parts: Vec<_> = rels
             .chunks(chunk)
+<<<<<<< head
             .map(|part| s.spawn(move || part.iter().map(|rel| hash_file(&w.join(rel))).collect::<Vec<_>>()))
             .collect();
         parts.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
@@ -288,4 +289,194 @@ fn times_bench() {
     let app = t.elapsed();
     let bytes: u64 = files.values().map(|e| e.size).sum();
     eprintln!("files {} bytes {} record {:?} apply-worst {:?} manifest {} bytes", files.len(), bytes, rec, app, data.len());
+||||||| base
+=======
+            .map(|part| s.spawn(move || part.iter().map(|rel| fsutil::git_blob_id_file(w, rel).ok()).collect::<Vec<_>>()))
+            .collect();
+        parts.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
+    })
+}
+
+fn encode(files: &BTreeMap<String, Entry>) -> Vec<u8> {
+    let mut out = String::from("layr-times 1\n");
+    for (rel, e) in files {
+        // The path is last: it may hold spaces. A path with a newline is left out.
+        if !rel.contains('\n') {
+            out.push_str(&format!("{} {} {} {} {rel}\n", e.sec, e.nsec, e.size, e.hash));
+        }
+    }
+    out.into_bytes()
+}
+
+fn decode(text: &str) -> BTreeMap<String, Entry> {
+    let mut out = BTreeMap::new();
+    let mut lines = text.lines();
+    if lines.next() != Some("layr-times 1") {
+        return out;
+    }
+    for l in lines {
+        let mut p = l.splitn(5, ' ');
+        let (Some(sec), Some(nsec), Some(size), Some(hash), Some(rel)) = (p.next(), p.next(), p.next(), p.next(), p.next())
+        else {
+            continue;
+        };
+        let (Ok(sec), Ok(nsec), Ok(size)) = (sec.parse(), nsec.parse(), size.parse()) else { continue };
+        out.insert(rel.to_string(), Entry { sec, nsec, size, hash: hash.to_string() });
+    }
+    out
+}
+
+/// Writes `.layr-times` for the tracked files of `w` into each cache folder `folders` (relative to `w`) that is a
+/// folder. Called before the snapshot of a cache save, outside the project lock.
+pub fn record(w: &Path, folders: &[String]) -> Result<()> {
+    let dirs: Vec<_> = folders.iter().map(|f| fsutil::safe_join(w, f)).collect::<Result<_>>()?;
+    // An empty folder holds no build output, so it needs no times (and stays empty).
+    let holds = |d: &std::path::Path| std::fs::read_dir(d).is_ok_and(|mut r| r.any(|e| e.is_ok_and(|e| e.file_name() != FILE)));
+    let dirs: Vec<_> = dirs.into_iter().filter(|d| d.is_dir() && holds(d)).collect();
+    if dirs.is_empty() {
+        return Ok(());
+    }
+    let _t = crate::trace::span("source times: record");
+    let data = encode(&collect(w)?);
+    for d in dirs {
+        fsutil::atomic_write(&d.join(FILE), &data, 0o644)?;
+    }
+    Ok(())
+}
+
+/// Gives the tracked files of `w` the times that the caches in `folders` saw (their `.layr-times`). A file gets a
+/// time only when its size and content hash equal the recorded ones in every cache that records it; with two
+/// caches, it gets the older time. Returns the number of files that got a time.
+pub fn apply(w: &Path, folders: &[String]) -> Result<usize> {
+    let mut want: BTreeMap<String, Option<Entry>> = BTreeMap::new();
+    for f in folders {
+        let Ok(text) = std::fs::read_to_string(fsutil::safe_join(w, f)?.join(FILE)) else { continue };
+        for (rel, e) in decode(&text) {
+            match want.get_mut(&rel) {
+                None => {
+                    want.insert(rel, Some(e));
+                }
+                // Two caches saw other bytes: the file keeps its time.
+                Some(Some(have)) if have.hash != e.hash || have.size != e.size => {
+                    want.insert(rel, None);
+                }
+                Some(Some(have)) => {
+                    if (e.sec, e.nsec) < (have.sec, have.nsec) {
+                        *have = e;
+                    }
+                }
+                Some(None) => {}
+            }
+        }
+    }
+    if want.is_empty() {
+        return Ok(0);
+    }
+    let _t = crate::trace::span("source times: apply");
+    // Only a file of the recorded size and another time is read.
+    let mut cand: Vec<(&str, &Entry)> = Vec::new();
+    for (rel, e) in &want {
+        let Some(e) = e else { continue };
+        let Ok(m) = std::fs::symlink_metadata(w.join(rel)) else { continue };
+        if m.is_file() && m.len() == e.size && (m.mtime(), m.mtime_nsec()) != (e.sec, e.nsec) {
+            cand.push((rel.as_str(), e));
+        }
+    }
+    let hashes = hash_all(w, &cand.iter().map(|(rel, _)| *rel).collect::<Vec<_>>());
+    let mut n = 0;
+    for ((rel, e), hash) in cand.into_iter().zip(hashes) {
+        if hash.as_deref() != Some(e.hash.as_str()) {
+            continue;
+        }
+        let f = std::fs::OpenOptions::new().write(true).open(w.join(rel));
+        // A file the caller cannot write keeps its time.
+        if let Ok(f) = f {
+            if fsutil::set_mtime(&f, e.sec, e.nsec).is_ok() {
+                n += 1;
+            }
+        }
+    }
+    Ok(n)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("layr-source-times-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::create_dir_all(d.join("target")).unwrap();
+        std::fs::write(d.join(".gitignore"), "/target\n").unwrap();
+        d
+    }
+
+    fn mtime(p: &Path) -> (i64, i64) {
+        let m = std::fs::metadata(p).unwrap();
+        (m.mtime(), m.mtime_nsec())
+    }
+
+    fn set(p: &Path, sec: i64) {
+        fsutil::set_mtime(&std::fs::OpenOptions::new().write(true).open(p).unwrap(), sec, 0).unwrap();
+    }
+
+    #[test]
+    fn equal_bytes_get_the_recorded_time_and_other_bytes_keep_theirs() {
+        let w = tmp("apply");
+        std::fs::write(w.join("src/a.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(w.join("src/b.rs"), "fn b() {}\n").unwrap();
+        set(&w.join("src/a.rs"), 1_000_000_000);
+        set(&w.join("src/b.rs"), 1_000_000_000);
+        std::fs::write(w.join("target/out"), "built").unwrap();
+        record(&w, &["target".to_string()]).unwrap();
+        let text = std::fs::read_to_string(w.join("target").join(FILE)).unwrap();
+        assert!(text.contains(" src/a.rs\n") && !text.contains("target/"), "{text}");
+
+        // A checkout writes both files with a new time; b gets other bytes of the same size.
+        std::fs::write(w.join("src/a.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(w.join("src/b.rs"), "fn c() {}\n").unwrap();
+        let b_time = mtime(&w.join("src/b.rs"));
+        assert_eq!(apply(&w, &["target".to_string()]).unwrap(), 1);
+        assert_eq!(mtime(&w.join("src/a.rs")), (1_000_000_000, 0));
+        assert_eq!(mtime(&w.join("src/b.rs")), b_time, "other bytes keep the time of the write");
+        assert_eq!(apply(&w, &["target".to_string()]).unwrap(), 0, "a second apply changes nothing");
+        let _ = std::fs::remove_dir_all(&w);
+    }
+
+    #[test]
+    fn two_caches_that_saw_other_bytes_leave_the_time() {
+        let w = tmp("two");
+        std::fs::create_dir_all(w.join("node_modules")).unwrap();
+        std::fs::write(w.join(".gitignore"), "/target\n/node_modules\n").unwrap();
+        std::fs::write(w.join("target/out"), "built").unwrap();
+        std::fs::write(w.join("node_modules/out"), "built").unwrap();
+        std::fs::write(w.join("src/a.rs"), "one\n").unwrap();
+        set(&w.join("src/a.rs"), 1_000_000_000);
+        record(&w, &["target".to_string()]).unwrap();
+        std::fs::write(w.join("src/a.rs"), "two\n").unwrap();
+        set(&w.join("src/a.rs"), 1_100_000_000);
+        record(&w, &["node_modules".to_string()]).unwrap();
+        set(&w.join("src/a.rs"), 1_200_000_000);
+        assert_eq!(apply(&w, &["target".to_string(), "node_modules".to_string()]).unwrap(), 0);
+        assert_eq!(mtime(&w.join("src/a.rs")), (1_200_000_000, 0));
+        let _ = std::fs::remove_dir_all(&w);
+    }
+
+    #[test]
+    fn an_empty_cache_folder_gets_no_times() {
+        let w = tmp("empty");
+        std::fs::write(w.join("src/a.rs"), "a\n").unwrap();
+        record(&w, &["target".to_string()]).unwrap();
+        assert!(!w.join("target").join(FILE).exists());
+        let _ = std::fs::remove_dir_all(&w);
+    }
+
+    #[test]
+    fn a_path_with_spaces_round_trips() {
+        let mut m = BTreeMap::new();
+        m.insert("a b/c d.rs".to_string(), Entry { sec: 1, nsec: 2, size: 3, hash: "h".into() });
+        assert_eq!(decode(std::str::from_utf8(&encode(&m)).unwrap()), m);
+    }
+>>>>>>> origin-https/main
 }

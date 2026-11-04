@@ -7,7 +7,7 @@ use crate::ids;
 use crate::model::{Attestation, Line, QueueChange, QueueEntry, Record, RefChange, RefState, StateKind, StateRec, Subject};
 use anyhow::{anyhow, Result};
 use rusqlite::{params, Connection, OptionalExtension};
-use sha2::{Digest, Sha256};
+use layr_hashers::{ContentAddress, Digest};
 use std::path::Path;
 
 /// Test hook: the next `with_tx` reports an error after its COMMIT succeeded (sqlite can report
@@ -1069,7 +1069,7 @@ impl Db {
                     _ => "revoke",
                 }
                 .into(),
-                payload_digest: hex::encode(Sha256::digest(serde_json::to_vec(&rec.data).unwrap_or_default())),
+                payload_digest: hex::encode(ContentAddress::digest(serde_json::to_vec(&rec.data).unwrap_or_default())),
                 payload_ref: None,
                 signer: rec.machine.clone(),
                 time: rec.time,

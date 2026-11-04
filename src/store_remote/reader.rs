@@ -8,7 +8,7 @@ use super::{
 use crate::{ctx::Ctx, model::Record, oplog, repo::Repo};
 use anyhow::{bail, Context, Result};
 use ed25519_dalek::VerifyingKey;
-use sha2::{Digest, Sha256};
+use layr_hashers::{ContentAddress, Digest};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug)]
@@ -220,7 +220,7 @@ impl<'a> Reader<'a> {
             let limit = if index == 0 { usize::try_from(entry.1)? } else { zst::LIMIT };
             data = zst::decompress_with_limit(frame, if link.5 == "delta" { Some(&data) } else { None }, limit)?;
         }
-        if data.len() as u64 != entry.1 || hex::encode(Sha256::digest(&data)) != entry.2 {
+        if data.len() as u64 != entry.1 || hex::encode(ContentAddress::digest(&data)) != entry.2 {
             bail!("file size or SHA-256 does not match its tree");
         }
         Ok(data)
@@ -740,7 +740,7 @@ mod tests {
         let entry = Entry(
             "100644".into(),
             content.len() as u64,
-            hex::encode(Sha256::digest(content)),
+            hex::encode(ContentAddress::digest(content)),
             vec![format::Link(STATE.into(), "0123abcd".into(), 0, 0, frame.len() as u64, "full".into())],
         );
         let tree = Tree { files: BTreeMap::from([("a.txt".into(), entry.clone())]) };

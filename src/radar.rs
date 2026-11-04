@@ -16,7 +16,7 @@ use crate::model::Line;
 use crate::repo::{skip_path, Repo, Snap};
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use sha1::{Digest, Sha1};
+use layr_hashers::{Digest, GitCompatible};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -84,9 +84,9 @@ fn write_live(file: &Path, saved: &SavedLive) -> Result<()> {
 /// A digest of every entry of a scan: the path, the metadata, the data identity and the birth.
 #[cfg(target_os = "macos")]
 fn scan_digest(live: &Path) -> Result<String> {
-    use sha1::{Digest, Sha1};
+    use layr_hashers::{Digest, GitCompatible};
     let scan = crate::storage::scan_shared(live, true)?;
-    let mut h = Sha1::new();
+    let mut h = GitCompatible::new();
     for (path, e) in scan.iter() {
         h.update(format!("{path}|{:?}|{:?}|{:?}|{:?}\n", e.fingerprint, e.meta, e.data, e.birth).as_bytes());
     }
@@ -234,7 +234,7 @@ struct StateCompare {
 
 impl StateCompare {
     fn new(dir: &Path, base_id: &str, theirs_id: &str, base: Snap, theirs: Snap) -> StateCompare {
-        let mut h = Sha1::new();
+        let mut h = GitCompatible::new();
         h.update(format!("{COMPARE_FORMAT}\n{base_id}\n{theirs_id}"));
         let file = dir.join(format!("{:x}.json", h.finalize()));
         StateCompare { file, base_id: base_id.to_string(), theirs_id: theirs_id.to_string(), base, theirs }

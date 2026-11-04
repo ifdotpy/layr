@@ -3,7 +3,7 @@
 use crate::{format, keys, zst};
 use anyhow::{bail, Context, Result};
 use ed25519_dalek::VerifyingKey;
-use sha2::{Digest, Sha256};
+use layr_hashers::{ContentAddress, Digest};
 use std::collections::BTreeMap;
 
 /// Decrypt one tree object and verify its header and canonical tree.
@@ -48,7 +48,7 @@ pub fn file(identity: &str, entry: &format::Entry, parts: &BTreeMap<String, Vec<
         let limit = if index == 0 { usize::try_from(entry.1)? } else { zst::LIMIT };
         data = zst::decompress_with_limit(frame, if link.5 == "delta" { Some(&data) } else { None }, limit)?;
     }
-    if data.len() as u64 != entry.1 || hex::encode(Sha256::digest(&data)) != entry.2 {
+    if data.len() as u64 != entry.1 || hex::encode(ContentAddress::digest(&data)) != entry.2 {
         bail!("file size or SHA-256 does not match its tree");
     }
     Ok(data)
@@ -71,7 +71,7 @@ mod tests {
         let link = format::Link(state.into(), attempt.into(), 0, 0, frame.len() as u64, "full".into());
         let mut parts = BTreeMap::new();
         parts.insert(link.object(), keys::encrypt(&recipient, &frame).unwrap());
-        let entry = format::Entry("100644".into(), data.len() as u64, hex::encode(Sha256::digest(data)), vec![link]);
+        let entry = format::Entry("100644".into(), data.len() as u64, hex::encode(ContentAddress::digest(data)), vec![link]);
         let source = format::Tree { files: BTreeMap::from([("file".into(), entry)]) };
         let canonical = source.canonical().unwrap();
         let mut header = format::Header {

@@ -9,7 +9,7 @@ use crate::{ctx::Ctx, fsutil, oplog, repo::Repo};
 use anyhow::{bail, Context, Result};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use layr_hashers::{ContentAddress, Digest};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -740,7 +740,7 @@ fn upload_state_journal(
     let attempt = hex::encode(random);
     #[cfg(test)]
     let attempt = if PUSH_DETERMINISTIC.with(|enabled| enabled.get()) {
-        hex::encode(Sha256::digest(state.as_bytes()))[..8].to_string()
+        hex::encode(ContentAddress::digest(state.as_bytes()))[..8].to_string()
     } else {
         attempt
     };
@@ -777,7 +777,7 @@ fn upload_state_journal(
         }
         let mode = format!("{:o}", meta.git_mode());
         let data = content(root, path, &mode)?;
-        let sha = hex::encode(Sha256::digest(&data));
+        let sha = hex::encode(ContentAddress::digest(&data));
         if let Some(chain) = hashes.get(&sha) {
             files.insert(path.to_string(), Entry(mode, data.len() as u64, sha, chain.clone()));
             return Ok(true);
@@ -792,7 +792,7 @@ fn upload_state_journal(
                     && previous.1 <= format::DELTA_LIMIT as u64
                 {
                     if let Ok(old) = content(base_root, path, &previous.0) {
-                        if !old.is_empty() && hex::encode(Sha256::digest(&old)) == previous.2 {
+                        if !old.is_empty() && hex::encode(ContentAddress::digest(&old)) == previous.2 {
                             let delta = zst::compress(&data, Some(&old))?;
                             if delta.len() < frame.len() {
                                 frame = delta;
@@ -1180,7 +1180,7 @@ mod tests {
                 .into_iter()
                 .map(|object| {
                     let bytes = store.backend.get(&object.key).unwrap().unwrap();
-                    (object.key, Sha256::digest(bytes))
+                    (object.key, ContentAddress::digest(bytes))
                 })
                 .collect();
             assert_eq!(reader::attempts(&store.backend).unwrap().len(), 3);
@@ -1192,7 +1192,7 @@ mod tests {
             assert_eq!(reader::attempts(&store.backend).unwrap().len(), 4);
             assert_eq!(store.backend.list("states/").unwrap().iter().filter(|o| o.key.ends_with(".tree.age")).count(), 4);
             for (key, digest) in before {
-                assert_eq!(Sha256::digest(store.backend.get(&key).unwrap().unwrap()), digest);
+                assert_eq!(ContentAddress::digest(store.backend.get(&key).unwrap().unwrap()), digest);
             }
             store.verify(true).unwrap();
             // A zero-capacity cache must publish byte-for-byte the same compressed object payloads as
@@ -1316,7 +1316,7 @@ mod tests {
                 .into_iter()
                 .filter(|object| damaged.as_deref() != Some(object.key.as_str()))
                 .map(|object| {
-                    let digest = Sha256::digest(store.backend.get(&object.key).unwrap().unwrap());
+                    let digest = ContentAddress::digest(store.backend.get(&object.key).unwrap().unwrap());
                     (object.key, digest)
                 })
                 .collect();
@@ -1328,7 +1328,7 @@ mod tests {
                 }
             }
             for (key, digest) in &before {
-                assert_eq!(&Sha256::digest(store.backend.get(key).unwrap().unwrap()), digest);
+                assert_eq!(&ContentAddress::digest(store.backend.get(key).unwrap().unwrap()), digest);
             }
             assert_eq!(reader::attempts(&store.backend).unwrap().len(), 4);
             store.verify(true).unwrap();
@@ -1517,7 +1517,7 @@ mod tests {
             .unwrap()
             .into_iter()
             .map(|object| {
-                let digest = Sha256::digest(store.backend.get(&object.key).unwrap().unwrap());
+                let digest = ContentAddress::digest(store.backend.get(&object.key).unwrap().unwrap());
                 (object.key, digest)
             })
             .collect();
@@ -1532,7 +1532,7 @@ mod tests {
         std::fs::copy(older, &path).unwrap();
         assert!(invoke(None, "resumed.log").success());
         for (key, digest) in before {
-            assert_eq!(Sha256::digest(store.backend.get(&key).unwrap().unwrap()), digest);
+            assert_eq!(ContentAddress::digest(store.backend.get(&key).unwrap().unwrap()), digest);
         }
         store.verify(true).unwrap();
         assert_eq!(reader::attempts(&store.backend).unwrap().len(), 4);

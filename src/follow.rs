@@ -219,6 +219,7 @@ impl<'a> Repo<'a> {
 
     /// The caches after a merge (docs/cache-overlays.md): the candidates of `remote`, newest first.
     fn follow_caches(&self, ctx: &Ctx, line: &Line, remote: &str, before: &str) -> Result<()> {
+<<<<<<< head
         self.take_follow_caches(ctx, line, self.cache_sources(remote)?, Some(before), true).map(|_| ())
     }
 
@@ -235,6 +236,25 @@ impl<'a> Repo<'a> {
         sources: Vec<Line>,
         before: Option<&str>,
         warm: bool,
+||||||| base
+    /// The caches after a merge (docs/cache-overlays.md). Per folder overlay, the newest candidate
+    /// whose work the line now holds takes it. Then each folder it took is pruned, and `save --caches` saves them.
+    fn follow_caches(&self, ctx: &Ctx, line: &Line, remote: &str) -> Result<()> {
+=======
+        self.take_follow_caches(ctx, line, self.cache_sources(remote)?, Some(before)).map(|_| ())
+    }
+
+    /// Takes the caches of `sources` (newest first) into `line`, then saves them as `save --caches` does (prune,
+    /// then save). The follow pass and a local merge both use it. `before` is the head before the merge: the rule
+    /// of a protected line is checked against it. Returns the folder and the state of each cache taken, and the reason
+    /// a candidate was refused (the last one).
+    pub(crate) fn take_follow_caches(
+        &self,
+        ctx: &Ctx,
+        line: &Line,
+        sources: Vec<Line>,
+        before: Option<&str>,
+>>>>>>> origin-https/main
     ) -> Result<(Vec<(String, String)>, Option<String>)> {
         let folders: BTreeSet<String> = self.folder_overlays()?.into_iter().map(|(_, f)| f).collect();
         let mut done = BTreeSet::new();
@@ -272,6 +292,7 @@ impl<'a> Repo<'a> {
             for (folder, state) in self.pull_caches(ctx, &now, &Source::Line(&theirs), &done)? {
                 done.insert(folder.clone());
                 taken.push((folder, state));
+<<<<<<< head
             }
         }
         // The merge wrote the changed files with a new time; the ones the taken caches were built from get their time
@@ -285,8 +306,25 @@ impl<'a> Repo<'a> {
         if warm {
             for folder in &folders {
                 self.warm_cache_folder(line, folder);
+||||||| base
+            for (_, folder) in self.pull_caches(ctx, &now, &Source::Line(&theirs), &done)? {
+                done.insert(folder);
+=======
+>>>>>>> origin-https/main
             }
         }
+<<<<<<< head
+||||||| base
+        // The caches of the line as cache overlays, as `layr save --caches` makes them. It prunes every cache
+        // folder of the line before it saves it (prepare_caches): the taken folders are pruned there, once.
+=======
+        // The merge wrote the changed files with a new time; the ones the taken caches were built from get their time
+        // back (docs/cache-overlays.md, section 20), before the prune reads them.
+        let folders_taken: Vec<String> = done.iter().cloned().collect();
+        if let Err(e) = crate::source_times::apply(&self.working(line), &folders_taken) {
+            eprintln!("warning: source file times of the caches not set: {e:#}");
+        }
+>>>>>>> origin-https/main
         // Prunes each taken folder, then saves the caches of the line.
         admin::save(ctx, &["--caches".to_string(), "-q".to_string()])?;
         Ok((taken, refusal))

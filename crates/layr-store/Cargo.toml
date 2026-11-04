@@ -7,7 +7,7 @@ license = "MIT"
 
 [features]
 default = ["native"]
-native = ["dep:chrono", "dep:rand", "dep:reqwest", "dep:sha1", "dep:zstd-safe", "ed25519-dalek/rand_core", "uuid/v7"]
+native = ["dep:chrono", "dep:rand", "dep:reqwest", "dep:zstd-safe", "ed25519-dalek/rand_core", "uuid/v7"]
 wasm = ["dep:getrandom", "dep:ruzstd"]
 
 [dependencies]
@@ -28,6 +28,5 @@ rand = { version = "0.8", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"], optional = true }
-sha2 = "0.10"
-sha1 = { version = "0.10", optional = true }
+layr-hashers = { path = "../layr-hashers" }
 uuid = "1"

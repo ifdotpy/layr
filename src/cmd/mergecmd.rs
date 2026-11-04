@@ -813,7 +813,25 @@ pub fn merge(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let r = (|| -> Result<()> {
             let theirs = h.repo.localize(theirs)?;
             let now = h.repo.line(&line.id)?;
+<<<<<<< head
             let (taken, refused) = h.repo.take_follow_caches(ctx, &now, vec![theirs], Some(&before), false)?;
+||||||| base
+            let lock = h.repo.p.lock()?;
+            let line = h.repo.line(&line.id)?;
+            // A protected line takes caches only with a merge that met its protection.
+            if let Some(rule) = h.repo.policy().rule_for(&line.name) {
+                if !merge_met_rule(&h.repo, &rule, &before, &line.head, &theirs.head)? {
+                    if !a.has("-q") {
+                        outln!(
+                            ctx,
+                            "Caches of '{rev}' not merged: the merge did not pass the checks and approvals of line '{}'",
+                            line.name
+                        );
+                    }
+                    return Ok(());
+=======
+            let (taken, refused) = h.repo.take_follow_caches(ctx, &now, vec![theirs], Some(&before))?;
+>>>>>>> origin-https/main
             if !a.has("-q") {
                 for (p, id) in &taken {
                     outln!(ctx, "Merged cache {p}: {}", ids::short(id));
