@@ -90,7 +90,7 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 return Err(e);
             }
         } else if !a.has("--force") {
-            repo.prepare_save(&l)?;
+            repo.prepare_save(&l, false)?;
         }
         let _lock = repo.p.lock()?;
         let l = repo.line(&l.id)?;
@@ -175,6 +175,7 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
             }
         }
         // Layers and snapshots that the save did not take (an unchanged folder, or --force).
+        drop(_lock);
         repo.discard_prepared();
     }
     if !refusals.is_empty() {
@@ -455,7 +456,7 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
     // states are loaded again under the lock, where an error stops the undo.
     for (lid, ch) in &r.lines {
         if let Ok(Some(l)) = repo.p.db.line_by_id(lid) {
-            let _ = repo.prepare_save(&l);
+            let _ = repo.prepare_save(&l, false);
         }
         for s in [&ch.working_before, &ch.working_after].into_iter().flatten() {
             let _ = repo.state_root(s);
@@ -491,7 +492,7 @@ fn undo_save(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
     for s in [&before, &after] {
         repo.state_src(s).map_err(|e| exit(1, format!("error: cannot undo, no file changed: {e:#}")))?;
     }
-    repo.prepare_save(&line)?;
+    repo.prepare_save(&line, false)?;
     let wb = save_before_undo(ctx, repo, &line, false)?;
     if let Err(e) = revert_working(repo, &line, &before, &after, force) {
         super::work::put_back(repo, &line, wb.as_deref());
@@ -565,7 +566,7 @@ fn save_before_undo(ctx: &Ctx, repo: &Repo, line: &Line, in_place: bool) -> Resu
     if !in_place {
         return repo.working_state(ctx, line, "before undo");
     }
-    repo.prepare_save(line)?;
+    repo.prepare_save(line, false)?;
     let _commit = repo.p.lock()?;
     repo.working_state(ctx, line, "before undo")
 }
@@ -1483,14 +1484,7 @@ fn prune_retention(ctx: &Ctx, repo: &Repo, trim_caches: bool) -> Result<()> {
             let _t = crate::trace::begin("retention: plan");
             snapshot(repo, || {
                 let mark = repo.p.db.records_mark()?;
-                let mut overlays = Vec::new();
-                for name in repo.overlay_names()? {
-                    if repo.p.store.project_dir(&format!("{}%{name}", repo.p.name))?.exists() {
-                        let overlay = repo.overlay_repo(&name)?;
-                        let overlay_mark = overlay.p.db.records_mark()?;
-                        overlays.push((overlay, overlay_mark));
-                    }
-                }
+                let overlays = repo.overlay_marks()?;
                 let caches = if trim_caches { excess_caches(repo)? } else { Vec::new() };
                 Ok((mark, overlays, caches, repo.plan_prune_bases()?))
             })?
@@ -1505,18 +1499,9 @@ fn prune_retention(ctx: &Ctx, repo: &Repo, trim_caches: bool) -> Result<()> {
         }
         // Hidden overlay heads and selections can change without a project record. Lock and
         // check those projects too, so a base selected above cannot become the current base.
-        let mut overlay_locks = Vec::new();
-        let mut stale = false;
-        for (overlay, mark) in &overlays {
-            overlay_locks.push(overlay.p.lock()?);
-            if overlay.p.db.records_mark()? != *mark {
-                stale = true;
-                break;
-            }
-        }
-        if stale {
+        let Some(_overlay_locks) = repo.lock_overlays_checked(&overlays)? else {
             continue;
-        }
+        };
         let removed = apply_cache_candidates(repo, paths, Some(&trash))?;
         if !removed.is_empty() {
             let mut rec = Record::new("gc");
