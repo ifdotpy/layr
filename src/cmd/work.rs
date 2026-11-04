@@ -1080,6 +1080,12 @@ fn prepare_named_save<'p, 's>(
     // An attribute-only change that `add` staged is a change of the state.
     let all_changes = crate::storage::with_stored_compare(|| changes::file_changes(&head_root, &new_root))?;
     let checks = named_checks(ctx, repo, head, &mut state, &head_root, &new_root, line, &all_changes, opts)?;
+    // The clone is durable before the project lock: under the lock only the rename and the record.
+    #[cfg(target_os = "macos")]
+    if let (Some(pc), Some(_)) = (&pending, &checks) {
+        pc.sync_tree()?;
+        crate::store::failpoint("pending-synced");
+    }
     Ok(NamedPrepared { head_id: line.head.clone(), head_root, pending, state, new_root, all_changes, checks })
 }
 

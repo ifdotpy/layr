@@ -385,6 +385,26 @@ impl<'p, 's> PendingCommit<'p, 's> {
         Ok(prepared)
     }
 
+    /// Make the clone durable: every file and folder of it is synced. Call before the project lock.
+    /// The line lock keeps the stage, and so the clone, unchanged until `publish`.
+    pub fn sync_tree(&self) -> Result<()> {
+        let _t = crate::trace::span("sync pending clone");
+        let mut pending = vec![self.tree.clone()];
+        while let Some(path) = pending.pop() {
+            let m = fs::symlink_metadata(&path)?;
+            if m.file_type().is_symlink() {
+                continue;
+            }
+            File::open(&path)?.sync_all()?;
+            if m.is_dir() {
+                for e in fs::read_dir(&path)? {
+                    pending.push(e?.path());
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Under the project lock: check that the stage is still the index that was cloned, then rename
     /// the clone into the state. Returns false, and changes nothing, when the stage changed.
     pub fn publish(&mut self) -> Result<bool> {
@@ -401,9 +421,10 @@ impl<'p, 's> PendingCommit<'p, 's> {
             bail!("state {} exists before its save", crate::ids::short(&self.id));
         }
         crate::thin::ensure_parent(&state)?;
-        storage::set_writable(&self.tree)?;
+        // The entries of the clone were sealed before the lock: only its root moves and is sealed again
+        // (a recursive seal would change every entry under the lock).
         move_tree(&self.tree, &state, j.mode)?;
-        storage::set_readonly(&state)?;
+        crate::sys::apfs_immutable(&state, true)?;
         File::open(&state)?.sync_all()?;
         sync_parent(&state)?;
         self.in_pending = false;

@@ -26,7 +26,7 @@ kill_save() { # kill_save <point> <message>
 }
 
 # Killed before the record: no state, the staged file stays staged, the clone is removed.
-for point in pending-cloned pending-renamed before-record; do
+for point in pending-cloned pending-synced pending-renamed before-record; do
     start "$point"
     states=$(ls "$PROJ/states" | wc -l)
     kill_save "$point" "killed $point"
