@@ -57,6 +57,8 @@ eq "an incomplete marker set is saved" "0" "$(l save -qm partial >/dev/null 2>&1
 printf 'a\n<<<<<<< x\nb\n=======\nc\n>>>>>>> y\n' > marked.txt
 l add marked.txt
 eq "the flag allows markers" "0" "$(l save -qm flagged --allow-conflict-markers >/dev/null 2>&1; echo $?)"
+# Each named save keeps the open conflict once (the checks run once per save).
+eq "the open conflict is listed once after two saves" "1" "$(l status 2>&1 | grep -c 'src/f4.txt')"
 
 # Resolve, then the merge takes the incoming file.
 for f in src/f4.txt marked.txt; do sed_inplace -E '/^<<<<<<<|^=======|^>>>>>>>/d' $f; done

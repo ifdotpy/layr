@@ -24,7 +24,7 @@ pub mod validation;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
+use layr_hashers::{ContentAddress, Digest};
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 pub use types::*;
 
@@ -314,7 +314,7 @@ impl Project {
                     _ => "revoke",
                 }
                 .into(),
-                payload_digest: hex::encode(Sha256::digest(serde_json::to_vec(d).unwrap_or_default())),
+                payload_digest: hex::encode(ContentAddress::digest(serde_json::to_vec(d).unwrap_or_default())),
                 payload_ref: None,
                 signer: r.machine.clone(),
                 time: r.time,

@@ -1121,20 +1121,15 @@ impl Drop for TempGuard<'_> {
 
 /// The git blob id of some bytes.
 pub fn git_blob_id(data: &[u8]) -> String {
-    use sha1::{Digest, Sha1};
-    let mut h = Sha1::new();
-    h.update(format!("blob {}\0", data.len()).as_bytes());
-    h.update(data);
-    hex::encode(h.finalize())
+    hex::encode(layr_hashers::git_blob_id(data))
 }
 
 /// The git blob id of a regular file, read in pieces (any size).
 pub fn git_blob_id_file(root: &(impl Src + ?Sized), rel: &str) -> Result<String> {
-    use sha1::{Digest, Sha1};
+    use layr_hashers::Digest;
     let mut f = open_regular(&root.at(rel)?)?;
     let len = f.metadata()?.len();
-    let mut h = Sha1::new();
-    h.update(format!("blob {len}\0").as_bytes());
+    let mut h = layr_hashers::git_blob_hasher(len);
     let mut buf = vec![0u8; 1 << 20];
     let mut n_total = 0u64;
     loop {

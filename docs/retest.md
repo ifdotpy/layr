@@ -4,14 +4,14 @@ Status: first version built (2026-10-28): the Rust adapter, and the vitest, jest
 agreed with the owner on 2026-10-28. Prototype measurements are in the last section. See
 "First version" for the command line, the record format and what is not done.
 
-## Switch a project on
+## Start
 
-In the root folder of a layr line that is the cargo project root (or the pnpm, vitest, jest or pytest root):
-
-1. `layr retest init` sets up the project. It is safe to run twice. Details: "Command line".
-2. `layr retest gate -- <your gate command>` runs the gate command with the project build env, one gate at a time on the machine.
-
-The project keeps its own commands (`pnpm install`, `--offline`, the results folder) inside the gate command.
+```sh
+layr init <project> --from <folder>     # or: layr git clone <url> <project>
+cd <project>/lines/main
+layr retest init                        # then save the files it names: layr add ... && layr save -m "retest init"
+layr retest gate -- <your gate command>
+```
 
 ## Goal
 
@@ -210,6 +210,13 @@ live set does not name goes. The live set names:
 Everything else goes: uplifted copies that no listing names, stale bins and examples, unhashed objects of
 other builds, outputs of units that no command lists, orphan incremental folders, and other files. Entries
 go whole, so no live unit loses a file. The removal frees the bytes of an inode only when all its links go.
+
+Folders of `target` that no `sweep` command makes have no live set: another `--target` triple
+(`target/<triple>`), a custom profile (`target/<name>`), `target/doc`. The cache prune (`save --caches`, the
+follow pass) removes such a folder when no build wrote into it for 7 days: the newest time of the folder, its
+entries and their entries is older (cargo writes `.cargo-lock` and `.fingerprint` there at each build). The profile
+folders and `--target` triples of the `sweep` commands, `target/retest` and `target/profraw` stay, as do files at
+the top of `target` (issue #195). A project that uses such a build every week lists its command in `sweep`.
 
 Links from a unit to its incremental folder (both need no compile):
 

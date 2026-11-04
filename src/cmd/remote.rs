@@ -150,6 +150,7 @@ pub mod git {
         let only = a.pos.get(1).cloned();
         let refs = gitbridge::fetch(ctx, repo, &remote)?;
         let done = import_after_fetch(ctx, repo, &remote, &refs, only.as_deref())?;
+        gitbridge::refresh_all_packed_refs(repo)?;
         if !a.has("-q") {
             let url = gitbridge::remote_url(repo, &remote)?;
             if !done.is_empty() {
@@ -160,7 +161,7 @@ pub mod git {
                     ctx,
                     " {} {:<20} -> {} (state {})",
                     if new { "* [new]" } else { "  " },
-                    name.split('/').nth(1).unwrap_or(&name),
+                    name.split_once('/').map_or(name.as_str(), |(_, branch)| branch),
                     name,
                     ids::short(&st)
                 );
@@ -182,6 +183,7 @@ pub mod git {
         let line = h.line()?.clone();
         let remote = a.pos.first().cloned().unwrap_or_else(|| "origin".into());
         let refs = gitbridge::fetch(ctx, &h.repo, &remote)?;
+        gitbridge::refresh_all_packed_refs(&h.repo)?;
         let branch = match a.pos.get(1) {
             Some(b) => b.clone(),
             None => {

@@ -10,7 +10,7 @@ use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
+use layr_hashers::{ContentAddress, Digest};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Deserialize)]
@@ -68,7 +68,7 @@ fn message(prefix: &str, header: &Header, canonical: &[u8]) -> String {
         header.state,
         header.time,
         header.tree,
-        hex::encode(Sha256::digest(canonical))
+        hex::encode(ContentAddress::digest(canonical))
     )
 }
 
@@ -267,7 +267,7 @@ pub(super) fn import(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Optio
             // Core stamps the attestation id, signer and time at append.
             let evidence = serde_json::json!({"desk_seq":seq,"desk_attempt":attempt,"source_url":store.url,
                 "desk_prefix":policy.prefix,"unsigned":!policy.signed(seq)});
-            let digest = hex::encode(Sha256::digest(serde_json::to_vec(&evidence)?));
+            let digest = hex::encode(ContentAddress::digest(serde_json::to_vec(&evidence)?));
             let mut attestation = Record::new("attestation");
             attestation.data = serde_json::json!({"attestation":{"format":1,"attestation_id":crate::ids::new_id(),
                 "kind":"import","subject":{"kind":"state","id":state.id},"payload_digest":digest,
@@ -357,7 +357,7 @@ fn read(store: &Store, identity: &str, entry: &Entry) -> Result<Vec<u8>> {
             if index == 0 { usize::try_from(entry.1)? } else { zst::LIMIT },
         )?;
     }
-    if data.len() as u64 != entry.1 || hex::encode(Sha256::digest(&data)) != entry.2 {
+    if data.len() as u64 != entry.1 || hex::encode(ContentAddress::digest(&data)) != entry.2 {
         bail!("Desk file size or SHA-256 mismatch");
     }
     Ok(data)
@@ -409,7 +409,7 @@ mod tests {
             message("proj", &h, canonical),
             format!(
                 "layr-desk tree v1\nproj\n12\n0a1b2c3d\nst1\n1791700000\ndelta\n11.99887766\n{}",
-                hex::encode(Sha256::digest(canonical))
+                hex::encode(ContentAddress::digest(canonical))
             )
         );
         assert!(policy.check(&h, canonical).is_err());
@@ -451,8 +451,8 @@ mod tests {
         let new = b"an old Desk state\nnew bytes\n";
         let full = zst::compress(old, None).unwrap();
         let delta = zst::compress(new, Some(old)).unwrap();
-        let first = serde_json::json!({"files":{"a":["100644",old.len(),hex::encode(Sha256::digest(old)),[[1,"0123abcd",0,0,full.len(),"full"]]]}});
-        let second = serde_json::json!({"files":{"a":["100644",new.len(),hex::encode(Sha256::digest(new)),[[2,"0123abcd",0,0,delta.len(),"delta"],[1,"0123abcd",0,0,full.len(),"full"]]]}});
+        let first = serde_json::json!({"files":{"a":["100644",old.len(),hex::encode(ContentAddress::digest(old)),[[1,"0123abcd",0,0,full.len(),"full"]]]}});
+        let second = serde_json::json!({"files":{"a":["100644",new.len(),hex::encode(ContentAddress::digest(new)),[[2,"0123abcd",0,0,delta.len(),"delta"],[1,"0123abcd",0,0,full.len(),"full"]]]}});
         let first = super::super::canonical::canonical(&first).unwrap();
         let second = super::super::canonical::canonical(&second).unwrap();
         for (seq, data, tree, base) in [(1, &full, &first, None), (2, &delta, &second, Some((1, "0123abcd")))] {
@@ -533,7 +533,7 @@ mod tests {
         for (seq, content) in [(1, b"Desk first state\n".as_slice()), (2, b"Desk final state\n".as_slice())] {
             let frame = zst::compress(content, None).unwrap();
             backend.put_new(&name(seq, "0123abcd", Some(0)), keys::encrypt(&recipient, &frame).unwrap()).unwrap();
-            let tree = serde_json::json!({"files":{"notes.txt":["100644",content.len(),hex::encode(Sha256::digest(content)),[[seq,"0123abcd",0,0,frame.len(),"full"]]]}});
+            let tree = serde_json::json!({"files":{"notes.txt":["100644",content.len(),hex::encode(ContentAddress::digest(content)),[[seq,"0123abcd",0,0,frame.len(),"full"]]]}});
             let canonical = super::super::canonical::canonical(&tree).unwrap();
             let mut header = serde_json::json!({"v":1,"seq":seq,"attempt":"0123abcd","state":format!("Desk source {seq}"),"time":seq,"tree":"full","base":null,"parts":1});
             if seq >= 2 {

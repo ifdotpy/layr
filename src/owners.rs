@@ -131,6 +131,17 @@ impl Db {
         Ok(deleted == Some(0))
     }
 
+    /// Whether an `undo` owner `{line}|{ord}` may exist. A deleted line keeps an undo owner only for
+    /// its delete record, and only while the `deleted` ring keeps that record's `deleted` owner
+    /// `{ord}|{line}`. Other lines keep all their undo owners.
+    fn undo_allowed(&self, holder: &str) -> Result<bool> {
+        let Some((line, ord)) = holder.split_once('|') else { return Ok(true) };
+        if !self.line_deleted(line)? {
+            return Ok(true);
+        }
+        self.holder_exists("deleted", &format!("{ord}|{line}"))
+    }
+
     fn ring_size(&self, key: &str, default: usize) -> usize {
         self.config(key).ok().flatten().and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(default)
     }
@@ -313,7 +324,28 @@ impl Db {
         let keep = self.ring_size(KEY_UNDO_DELETED, UNDO_DELETED_DEFAULT);
         let holders = self.all_holders("deleted")?;
         for h in holders.iter().take(holders.len().saturating_sub(keep)) {
-            self.set_owners("deleted", h, &[])?;
+            self.release_deleted(h)?;
+        }
+        Ok(())
+    }
+
+    /// Release a `deleted` owner and the `undo` owner of its delete record: both live as long as
+    /// the line is in the deleted ring.
+    fn release_deleted(&self, holder: &str) -> Result<()> {
+        self.set_owners("deleted", holder, &[])?;
+        if let Some((ord, line)) = holder.split_once('|') {
+            self.set_owners("undo", &format!("{line}|{ord}"), &[])?;
+        }
+        Ok(())
+    }
+
+    /// Release the undo owners of a deleted line that `undo_allowed` refuses (its earlier operations).
+    fn prune_undo(&self, line: &str) -> Result<()> {
+        let (lo, hi) = span(line, '|');
+        for h in self.holders("undo", &lo, &hi)? {
+            if !self.undo_allowed(&h)? {
+                self.set_owners("undo", &h, &[])?;
+            }
         }
         Ok(())
     }
@@ -336,11 +368,14 @@ impl Db {
         for raw in self.all_lines()? {
             let rec = crate::oplog::parse_line(&raw, None)?.record;
             let ord = record_ord(&rec);
-            for (h, named) in undo_entries(&rec, &ord) {
-                self.set_owners("undo", &h, &named)?;
-            }
+            // Deleted owners first: the undo owner of a delete record needs its deleted owner.
             for (h, named) in deleted_entry(&rec, &ord) {
                 self.set_owners("deleted", &h, &named)?;
+            }
+            for (h, named) in undo_entries(&rec, &ord) {
+                if self.undo_allowed(&h)? {
+                    self.set_owners("undo", &h, &named)?;
+                }
             }
         }
         let mut st = self.cached("SELECT DISTINCT substr(holder, 1, instr(holder, '|') - 1) FROM owners WHERE kind='undo'")?;
@@ -381,21 +416,17 @@ impl Db {
             self.set_owners("deleted", holder, named)?;
         }
         let undo = undo_entries(rec, ord);
-        // A deleted line keeps no undo record of its earlier operations: `undo` of the delete (the
-        // `deleted` ring) brings back its final state only. Its other states are freed here.
-        for (line, ch) in &rec.lines {
-            if ch.before.is_some() && ch.after.is_none() {
-                let (lo, hi) = span(line, '|');
-                let own = format!("{line}|{ord}");
-                for h in self.holders("undo", &lo, &hi)? {
-                    if h != own {
-                        self.set_owners("undo", &h, &[])?;
-                    }
-                }
+        // A deleted line keeps no undo owner of its earlier operations (`undo_allowed`): `undo` of
+        // the delete works while the `deleted` ring keeps the delete record's owners.
+        for (holder, named) in &undo {
+            if self.undo_allowed(holder)? {
+                self.set_owners("undo", holder, named)?;
             }
         }
-        for (holder, named) in &undo {
-            self.set_owners("undo", holder, named)?;
+        for line in &lines {
+            if self.line_deleted(line)? {
+                self.prune_undo(line)?;
+            }
         }
         for line in &lines {
             self.sync_line(line)?;
@@ -617,6 +648,34 @@ impl Db {
             .cached("SELECT id FROM states WHERE present=1 AND deleted=0 AND id NOT IN (SELECT state FROM owners) ORDER BY id")?;
         let v = st.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
         Ok(v)
+    }
+
+    /// The `undo` owners that `undo_allowed` refuses: a deleted line outside the deleted ring. A
+    /// store written before the rule keeps them; `gc --repair` releases them.
+    pub fn stale_undo_rows(&self) -> Result<Vec<Row>> {
+        let rows: Vec<Row> = {
+            let mut st = self.cached("SELECT state, kind, holder FROM owners WHERE kind='undo' ORDER BY state, holder")?;
+            let v = st
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?
+                .collect::<Result<Vec<Row>, _>>()?;
+            v
+        };
+        let mut out = Vec::new();
+        for row in rows {
+            if !self.undo_allowed(&row.2)? {
+                out.push(row);
+            }
+        }
+        Ok(out)
+    }
+
+    /// The present states that none of `rows` names: what a repair to `rows` leaves unowned,
+    /// so `gc --repair` frees them.
+    pub fn unowned_by(&self, rows: &[Row]) -> Result<Vec<String>> {
+        let named: BTreeSet<&str> = rows.iter().map(|r| r.0.as_str()).collect();
+        let mut st = self.cached("SELECT id FROM states WHERE present=1 AND deleted=0 ORDER BY id")?;
+        let all = st.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+        Ok(all.into_iter().filter(|s| !named.contains(s.as_str())).collect())
     }
 
     /// Mark present states dead (`gc --repair`: their owners are gone).
@@ -856,5 +915,82 @@ mod tests {
         assert_eq!(reverse.owner_rows().unwrap(), want, "arrival order does not change the owners");
         // The parent of the newest state is kept by it.
         assert!(owners_of(&forward, "parent", &b).contains(&a));
+    }
+
+    /// A save of `line`: its head stays `head`, and `working` is its new automatic state.
+    fn save_on(db: &Db, seq: u64, line: &str, head_id: String, working: String) {
+        let mut r = record(seq, "save");
+        r.states.push(state(&working, StateKind::Auto, Some(line), vec![]));
+        r.lines.insert(
+            line.into(),
+            LineChange { before: None, after: Some(head(&head_id)), working_before: None, working_after: Some(working) },
+        );
+        apply(db, &r);
+    }
+
+    /// The delete of `line`: its final head and its last working state are its final state.
+    fn delete_of(db: &Db, seq: u64, line: &str, head_id: String, working: String) -> Record {
+        let mut del = record(seq, "line.delete");
+        del.lines.insert(
+            line.into(),
+            LineChange {
+                before: Some(head(&head_id)),
+                after: None,
+                working_before: Some(working),
+                working_after: None,
+            },
+        );
+        apply(db, &del);
+        del
+    }
+
+    /// A config record that sets one ring size (a ring change runs `resync_rings`).
+    fn set_ring(db: &Db, seq: u64, key: &str, value: u64) {
+        let mut r = record(seq, "config");
+        r.data = serde_json::json!({"config": {key: value}});
+        apply(db, &r);
+    }
+
+    const LINE2: &str = "01a12290-0000-7000-8000-00000000ffff";
+
+    #[test]
+    fn a_deleted_line_releases_its_undo_owner_when_the_deleted_ring_drops_it() {
+        let db = memory();
+        set_ring(&db, 1, KEY_UNDO_DELETED, 1);
+        save_on(&db, 2, LINE, id(1), id(2));
+        let del = delete_of(&db, 3, LINE, id(1), id(2));
+        let undo_of_delete = format!("{LINE}|{}", record_ord(&del));
+        let deleted_of_line = format!("{}|{LINE}", record_ord(&del));
+        assert!(!owners_of(&db, "undo", &undo_of_delete).is_empty(), "the delete keeps its undo owner");
+        assert!(!owners_of(&db, "deleted", &deleted_of_line).is_empty(), "the delete keeps its deleted owner");
+        assert!(db.is_owned(&id(2)).unwrap());
+        // A second deleted line pushes the first one out of the ring of one.
+        save_on(&db, 4, LINE2, id(5), id(6));
+        delete_of(&db, 5, LINE2, id(5), id(6));
+        assert!(owners_of(&db, "deleted", &deleted_of_line).is_empty(), "the deleted owner left the ring");
+        assert!(owners_of(&db, "undo", &undo_of_delete).is_empty(), "the undo owner of the delete goes with it");
+        assert!(!db.is_owned(&id(2)).unwrap(), "the final state of the line has no owner");
+        assert_eq!(db.queued_frees().unwrap().iter().filter(|s| *s == &id(2)).count(), 1, "the final state is queued for freeing");
+    }
+
+    #[test]
+    fn a_ring_change_gives_a_deleted_line_no_undo_of_its_earlier_operations() {
+        let db = memory();
+        save_on(&db, 1, LINE, id(1), id(2));
+        save_on(&db, 2, LINE, id(1), id(3));
+        let del = delete_of(&db, 3, LINE, id(1), id(3));
+        let undo_of_delete = format!("{LINE}|{}", record_ord(&del));
+        let earlier = [format!("{LINE}|{}", record_ord(&record(1, "save"))), format!("{LINE}|{}", record_ord(&record(2, "save")))];
+        for h in &earlier {
+            assert!(owners_of(&db, "undo", h).is_empty(), "the delete released the earlier undo {h}");
+        }
+        // A ring change replays the records: the deleted line must not get its earlier undo back.
+        set_ring(&db, 4, KEY_UNDO_OPS, UNDO_OPS_DEFAULT as u64 + 1);
+        for h in &earlier {
+            assert!(owners_of(&db, "undo", h).is_empty(), "the ring change gave back the earlier undo {h}");
+        }
+        let line_undo: Vec<String> = db.all_holders("undo").unwrap().into_iter().filter(|h| h.starts_with(LINE)).collect();
+        assert_eq!(line_undo, vec![undo_of_delete], "only the undo of the delete record stays");
+        assert_eq!(db.owner_rows().unwrap(), db.recomputed_owners(MACHINE).unwrap(), "the replay agrees");
     }
 }

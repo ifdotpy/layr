@@ -10,7 +10,7 @@ use crate::{
 use anyhow::{bail, Context, Result};
 use layr_store::request::{self, Action, Request, Sealed, Signed};
 use serde_json::json;
-use sha2::{Digest, Sha256};
+use layr_hashers::{ContentAddress, Digest};
 
 pub fn request(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let a = parse(
@@ -89,7 +89,7 @@ pub fn request(ctx: &Ctx, args: &[String]) -> Result<i32> {
 }
 
 fn digest(bytes: &[u8]) -> String {
-    hex::encode(Sha256::digest(bytes))
+    hex::encode(ContentAddress::digest(bytes))
 }
 
 enum ClaimState {

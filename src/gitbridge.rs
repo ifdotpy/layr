@@ -418,8 +418,8 @@ impl CatFile {
         self.output.read_exact(&mut data)?;
         let mut newline = [0];
         self.output.read_exact(&mut newline)?;
-        use sha1::{Digest, Sha1};
-        let mut hash = Sha1::new();
+        use layr_hashers::{Digest, GitCompatible};
+        let mut hash = GitCompatible::new();
         hash.update(format!("{} {}\0", fields[1], data.len()).as_bytes());
         hash.update(&data);
         if hex::encode(hash.finalize()) != oid {
@@ -1292,9 +1292,9 @@ fn check_reachable(repo: &Repo, commit: &str) -> Result<()> {
 /// Git objects are a derived local cache. Validate the exact object identity before publishing.
 fn write_object(s: &Path, kind: &str, data: &[u8], expected: &str) -> Result<()> {
     let _write = crate::trace::span("Git write object");
-    use sha1::{Digest, Sha1};
+    use layr_hashers::{Digest, GitCompatible};
     let header = format!("{kind} {}\0", data.len());
-    let mut hash = Sha1::new();
+    let mut hash = GitCompatible::new();
     hash.update(header.as_bytes());
     hash.update(data);
     let oid = hex::encode(hash.finalize());
@@ -2025,6 +2025,26 @@ pub fn drop_remote_refs(repo: &Repo, remote: &str) -> Result<()> {
 /// Rewrite the `packed-refs` of a line's `.git` folder when it differs from the bridge store. A
 /// folder the line owner made is left alone.
 pub fn refresh_packed_refs(repo: &Repo, line: &Line) -> Result<()> {
+    refresh_packed_refs_to(repo, line, &packed_refs_text(repo)?)
+}
+
+/// After a fetch: the `packed-refs` of the `.git` folder of every line of this machine, so git in a
+/// line sees the remote refs that layr has, not the ones of the line's start. A line that fails
+/// keeps its old refs, with a warning.
+pub fn refresh_all_packed_refs(repo: &Repo) -> Result<()> {
+    let want = packed_refs_text(repo)?;
+    for line in repo.lines()? {
+        if line.machine != repo.p.store.machine.id {
+            continue;
+        }
+        if let Err(e) = refresh_packed_refs_to(repo, &line, &want) {
+            eprintln!("warning: the git refs of line {} stay as they were: {e:#}", line.name);
+        }
+    }
+    Ok(())
+}
+
+fn refresh_packed_refs_to(repo: &Repo, line: &Line, want: &str) -> Result<()> {
     let w = repo.working(line);
     let dir = match fsutil::open_dir_nofollow(&w.join(".git")) {
         Ok(d) => d,
@@ -2033,7 +2053,6 @@ pub fn refresh_packed_refs(repo: &Repo, line: &Line) -> Result<()> {
     if !fsutil::is_layer(&w, ".git", &fsutil::meta_of(&dir.metadata()?)) {
         return Ok(());
     }
-    let want = packed_refs_text(repo)?;
     let cur = fsutil::read_at(&dir, "packed-refs").map(|c| String::from_utf8_lossy(&c).into_owned()).unwrap_or_default();
     if cur == want {
         return Ok(());

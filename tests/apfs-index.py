@@ -31,22 +31,14 @@ try:
  assert run(work,'rev-parse','head').stdout.strip()==old_head and not pending_left()
  run(work,'fsck');print('PASS database failure restores the same staged tree',flush=True)
  with sqlite3.connect(db) as c:c.execute('DROP TRIGGER fail_commit')
- # Kill after the publish (the state tree is in place) and before the record. No test hook changes product behavior.
- proc=subprocess.Popen([binary,'save','-qm','interrupted'],cwd=work,env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
- stopped=False
- try:
-  deadline=time.monotonic()+20
-  while time.monotonic()<deadline and proc.poll() is None:
-   if pending_root.exists() and any((d/'journal.json').exists() for d in pending_root.iterdir()):
-    j=pending_journal()
-    if (project/('deltas' if j.get('thin') else 'states')/j['state']).exists():
-     os.kill(proc.pid,signal.SIGSTOP);stopped=True;break
-   time.sleep(.001)
-  assert stopped,'commit finished before the test could stop it'
-  with sqlite3.connect(db) as c:assert c.execute('SELECT count(*) FROM states WHERE id=?',(j['state'],)).fetchone()[0]==0
- finally:
-  if proc.poll() is None:proc.kill()
-  proc.communicate(timeout=20)
+ # Kill after the publish (the state tree is in place) and before the record: the failpoint
+ # LAYR_TEST_SAVE_KILL=before-record (as tests/t124-save-crash.sh). A stop by polling missed the
+ # short window between the publish and the record.
+ killed=subprocess.run([binary,'save','-qm','interrupted'],cwd=work,env=dict(env,LAYR_TEST_SAVE_KILL='before-record'),capture_output=True,text=True)
+ assert killed.returncode!=0,(killed.returncode,killed.stderr)
+ j=pending_journal()
+ assert (project/('deltas' if j.get('thin') else 'states')/j['state']).exists(),'the killed save published its tree'
+ with sqlite3.connect(db) as c:assert c.execute('SELECT count(*) FROM states WHERE id=?',(j['state'],)).fetchone()[0]==0
  st=run(work,'status','--porcelain');assert st.stdout=='M  d0/f0\n',st.stdout
  assert stage().stat().st_ino==ino and (stage()/'d0/f0').read_bytes()==b'staged\n'
  assert run(work,'rev-parse','head').stdout.strip()==old_head and not pending_left()

@@ -369,10 +369,7 @@ fn waiting_message(meta: &Path) -> String {
         return PLAIN.to_string();
     }
     let secs = (ids::now_ms() - holder["since_ms"].as_i64().unwrap_or(0)).max(0) / 1000;
-    format!(
-        "layr: waiting for the project lock: held by '{}' (pid {pid}) for {secs} s",
-        holder["command"].as_str().unwrap_or("")
-    )
+    format!("layr: waiting for the project lock: held by '{}' (pid {pid}) for {secs} s", holder["command"].as_str().unwrap_or(""))
 }
 
 /// True when a process with this pid exists (it may belong to another user).

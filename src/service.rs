@@ -427,7 +427,9 @@ fn periodic(root: &Path, hourly: bool) {
             if let Ok(_lock) = repo.p.lock() {
                 let _ = crate::gitbridge::sync_store_access(&repo);
             }
-            let _ = crate::cmd::admin::gc_repair_quiet(&ctx, &repo);
+            if let Err(e) = crate::cmd::admin::gc_repair_quiet(&ctx, &repo) {
+                eprintln!("layr periodic repair ({name}): {e:#}");
+            }
         }
     }
 }

@@ -4,7 +4,7 @@ use crate::{canonical, keys, record};
 use anyhow::{bail, ensure, Context, Result};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use layr_hashers::{ContentAddress, Digest};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,7 +86,7 @@ pub struct Index {
 }
 
 pub fn line_hash(line: &str) -> String {
-    hex::encode(Sha256::digest(line.as_bytes()))
+    hex::encode(ContentAddress::digest(line.as_bytes()))
 }
 fn id(value: &str) -> Result<()> {
     ensure!(uuid::Uuid::parse_str(value).is_ok_and(|v| v.to_string() == value), "invalid index identity");

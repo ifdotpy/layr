@@ -44,8 +44,8 @@ impl View {
     }
 
     pub fn id(&self) -> Result<String> {
-        use sha2::{Digest, Sha256};
-        Ok(hex::encode(Sha256::digest(serde_json::to_vec(self)?)))
+        use layr_hashers::{ContentAddress, Digest};
+        Ok(hex::encode(ContentAddress::digest(serde_json::to_vec(self)?)))
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -303,7 +303,7 @@ pub fn validate(r: &Record) -> anyhow::Result<()> {
     }
     if let Some(proof) = d.get("request") {
         use layr_store::request::{Action, Signed};
-        use sha2::{Digest, Sha256};
+        use layr_hashers::{ContentAddress, Digest};
         let text = proof.as_str().ok_or_else(|| anyhow::anyhow!("request proof must preserve exact envelope bytes"))?;
         let signed = Signed::parse(text.as_bytes())?;
         let public = d["person_key"].as_str().ok_or_else(|| anyhow::anyhow!("request proof has no public key"))?;
@@ -323,7 +323,7 @@ pub fn validate(r: &Record) -> anyhow::Result<()> {
             || d["request_id"] != request.id
             || r.actor.name != format!("person:{}", request.person)
             || r.actor.uid != u32::MAX
-            || d["request_digest"] != hex::encode(Sha256::digest(object.as_bytes()))
+            || d["request_digest"] != hex::encode(ContentAddress::digest(object.as_bytes()))
         {
             bail!("request proof does not match its operation record");
         }
@@ -340,7 +340,7 @@ pub fn validate(r: &Record) -> anyhow::Result<()> {
                         && a["kind"] == expected
                         && a["subject"]["id"] == *state
                         && a["signer"] == format!("person:{}", request.person)
-                        && a["payload_digest"] == hex::encode(Sha256::digest(signed.r.get().as_bytes()))
+                        && a["payload_digest"] == hex::encode(ContentAddress::digest(signed.r.get().as_bytes()))
                         && match &request.action {
                             Action::Declassify { scope, .. } => scope.rsplit_once('@').is_some_and(|(path, prefix)| {
                                 d["declassify"]["path"] == path
@@ -415,8 +415,8 @@ pub fn validate(r: &Record) -> anyhow::Result<()> {
             uuid("payload reference", id)?;
         }
         if let Some(result) = d.get("check") {
-            use sha2::{Digest, Sha256};
-            if a.kind != "check" || a.payload_digest != hex::encode(Sha256::digest(serde_json::to_vec(result)?)) {
+            use layr_hashers::{ContentAddress, Digest};
+            if a.kind != "check" || a.payload_digest != hex::encode(ContentAddress::digest(serde_json::to_vec(result)?)) {
                 bail!("check payload digest does not match its signed result");
             }
         }

@@ -4,7 +4,7 @@ use layr_model::{probes, Model, Project, Record, StateKind, Subject};
 use layr_store::{format, keys, record};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
+use layr_hashers::{ContentAddress, Digest};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -255,7 +255,7 @@ fn page_outputs(
     let mut machines = Vec::new();
     for (id, data) in &project.machines {
         let public = data["public_key"].as_str().context("machine record has no public key")?;
-        let mut row = json!({"id":id,"fingerprint":format!("sha256:{}",hex::encode(Sha256::digest(hex::decode(public)?))),"trusted":project.trusted.contains_key(id)});
+        let mut row = json!({"id":id,"fingerprint":format!("sha256:{}",hex::encode(ContentAddress::digest(hex::decode(public)?))),"trusted":project.trusted.contains_key(id)});
         if let Some(name) = data.get("name") {
             row["name"] = name.clone();
         }

@@ -3,7 +3,7 @@ use super::{reader, writer, Options, Store};
 use crate::{ctx::Ctx, ids, model::Record, repo::Repo};
 use anyhow::{bail, Context, Result};
 use layr_model::release::{self, File, Files};
-use sha2::{Digest, Sha256};
+use layr_hashers::{ContentAddress, Digest};
 use std::{
     fs::{self, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
@@ -25,7 +25,7 @@ fn encrypt(mut input: fs::File, recipient: &str) -> Result<(fs::File, u64, Strin
     let recipient = age::x25519::Recipient::from_str(recipient).map_err(|_| anyhow::anyhow!("invalid release recipient"))?;
     let encryptor = age::Encryptor::with_recipients(std::iter::once(&recipient as &dyn age::Recipient))?;
     let mut writer = encryptor.wrap_output(&mut output)?;
-    let mut hash = Sha256::new();
+    let mut hash = ContentAddress::new();
     let mut size = 0;
     let mut buffer = [0u8; 65536];
     loop {
@@ -201,7 +201,7 @@ impl Store {
             let temporary = directory.join(format!(".layr-release-{}", ids::new_id()));
             let result = (|| -> Result<()> {
                 let mut out = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temporary)?;
-                let mut hash = Sha256::new();
+                let mut hash = ContentAddress::new();
                 let mut size = 0;
                 let mut buffer = [0u8; 65536];
                 loop {
