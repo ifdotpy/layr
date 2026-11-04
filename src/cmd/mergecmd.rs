@@ -1797,6 +1797,7 @@ mod approval_tests {
             cache_shared: false,
             cache_platform: None,
             cache_of: None,
+            cache_key_parts: Default::default(),
         };
         let base = state(StateKind::Commit, vec![]);
         let derived = state(StateKind::Derived, vec![]);
