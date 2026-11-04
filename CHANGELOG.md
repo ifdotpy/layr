@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.24.0](https://github.com/ifdotpy/layr/compare/v0.23.0...v0.24.0) (2026-11-04)
+
+
+### Features
+
+* **cache:** npm adapter: prune offline, warm online ([#233](https://github.com/ifdotpy/layr/issues/233)) ([5c6d73f](https://github.com/ifdotpy/layr/commit/5c6d73f3a2cfe5817a320567df65079ca1def6f2))
+* **follow:** the follow pass builds the standard commands before it saves the caches ([#232](https://github.com/ifdotpy/layr/issues/232)) ([6188ebc](https://github.com/ifdotpy/layr/commit/6188ebc85992a3d24cc5c59501d023d13a8bb1f5))
+
+
+### Bug Fixes
+
+* **retest:** find cargo through rustup, name install failures, write no file on a protected line ([#237](https://github.com/ifdotpy/layr/issues/237)) ([31b3b85](https://github.com/ifdotpy/layr/commit/31b3b85732a9d2b05967fc81c8c2f7bfee8f6fbd))
+* **save:** Count the lines of the saved state in the save summary on macOS ([#239](https://github.com/ifdotpy/layr/issues/239)) ([105178f](https://github.com/ifdotpy/layr/commit/105178f2bb8b2a2ba81e6189b4afc564f9b19fe7))
+
 ## [0.23.0](https://github.com/ifdotpy/layr/compare/v0.22.2...v0.23.0) (2026-11-04)
 
 
