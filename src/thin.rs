@@ -1302,17 +1302,9 @@ pub fn delete_states(p: &Project, ids: &[String]) -> Result<BTreeSet<String>> {
     Ok(gone)
 }
 
-/// Remove the layer of `id` from the bases table. Its base is queued for the free step again when
-/// no other layer is made over it and no owner keeps it (the rule of free.rs).
+/// Remove the layer of `id` from the bases table.
 fn forget_layer(p: &Project, id: &str) -> Result<()> {
-    let base = p.db.base_of_layer(id)?;
-    p.db.forget_base(id)?;
-    if let Some(base) = base {
-        if !p.db.has_layer_child(&base)? && !p.db.is_owned(&base)? {
-            p.db.queue_free(&base)?;
-        }
-    }
-    Ok(())
+    p.db.forget_base(id)
 }
 
 /// Delete the trees of a state now, also when other thin states use it as their base: those
