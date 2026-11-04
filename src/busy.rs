@@ -23,6 +23,8 @@ pub fn user_of(path: &Path) -> Result<Option<User>> {
     let mut pids: Vec<u32> =
         std::fs::read_dir("/proc")?.flatten().filter_map(|e| e.file_name().to_str().and_then(|n| n.parse().ok())).collect();
     pids.sort_unstable();
+    // LAYR_TRACE shows the canonical path that the /proc links are compared with.
+    let _t = crate::trace::named(|| format!("busy check {} ({} processes)", path.display(), pids.len()));
     for pid in pids {
         let dir = std::path::PathBuf::from("/proc").join(pid.to_string());
         if uses(&dir, &path) {

@@ -29,10 +29,21 @@ l line new -q w
 W=$P/w
 cd $W
 
-# A build: the writer holds the cargo lock open and keeps writing, like cargo does.
+# cargo clean, then a build: the cache of the line (made by line new) goes, and the build makes
+# target again as a plain folder. The busy check looks at plain folders; a cache layer is saved as it is.
+cd $W
+rm -rf target
 mkdir -p target/debug
+no "the build starts with a plain target folder" is_cache $W/target
+
+# A build: the writer holds the cargo lock open and keeps writing, like cargo does.
 (exec 3>target/debug/.cargo-lock; while :; do date >> target/debug/out; sleep 0.05; done) &
 WRITER=$!
+echo "diag: writer pid $WRITER"
+ls -l /proc/$WRITER/fd || true
+echo "diag: writer cwd -> $(readlink /proc/$WRITER/cwd)"
+echo "diag: target canonical -> $(readlink -f $W/target)"
+ok "the writer holds target/debug/.cargo-lock open" sh -c "ls -l /proc/$WRITER/fd | grep -q 'target/debug/.cargo-lock'"
 sleep 1
 ino=$(stat -c %i target)
 size1=$(stat -c %s target/debug/out)
@@ -43,8 +54,10 @@ no "a save keeps target a plain folder" is_cache $W/target
 sleep 1
 size2=$(stat -c %s target/debug/out)
 ok "the writer keeps writing into target" test "$size2" -gt "$size1"
-out=$(l save --caches --cache target 2>&1)
-eq "an explicit save refuses the busy folder" "1" "$?"
+out=$(LAYR_TRACE=1 l save --caches --cache target 2>&1)
+rc=$?
+echo "diag: busy trace: $(echo "$out" | grep -i busy | tr '\n' ' ')"
+eq "an explicit save refuses the busy folder" "1" "$rc"
 has "the refusal names the pid" "in use by pid $WRITER (" "$out"
 has "the refusal says when to run again" "run again when the build ends" "$out"
 eq "the refused save keeps the inode" "$ino" "$(stat -c %i target)"
