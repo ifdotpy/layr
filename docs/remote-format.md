@@ -147,8 +147,9 @@ machines. Source states keep frames.
   WebAssembly.
 
 - A writer compresses and uploads packs on background threads (one per core), while it chunks
-  the next files. It keeps a local copy of the indexes it writes. A reader loads a missing pack
-  together with the next packs of its restore order, in parallel.
+  the next files. It keeps a local copy of the indexes it writes. A restore plans the packs of the
+  files it writes, in its order; background threads load and decode them ahead of it, at most 64
+  packs ahead (about 256 MiB). A pack outside the plan, or dropped behind it, loads when needed.
 
 - Push manifest: a file whose path, mode, size and modification time (nanoseconds) equal its
   entry in the pushed tree of the nearest pushed ancestor keeps that entry, and the walk does not
@@ -166,9 +167,10 @@ every workspace crate was rebuilt (1930 more files differ).
 | first push | 546 MiB, 19 to 20 s | 382 MiB, 22 s |
 | next push, small | 37 MiB, 12 s | 20 MiB, 5 s |
 | next push, big | 166 MiB, 20 s | 104 MiB, 7 s |
-| clone, warm page cache (3 runs, alternating) | 17.6, 8.3, 7.2 s | 29.9, 10.4, 7.5 s |
+| clone, cold archive (2 runs, alternating) | 19.8, 37.3 s | 18.8, 33.0 s |
 
-The next push reads only changed files (8322 of 8700 files unread for big).
+The next push reads only changed files (8322 of 8700 files unread for big). For the cold clone,
+the archive was on a disk image that was attached again before each clone.
 
 ## Keys and recovery
 

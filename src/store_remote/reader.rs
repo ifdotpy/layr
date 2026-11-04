@@ -262,17 +262,20 @@ impl<'a> Reader<'a> {
             }
         }
         let mut written = 0;
-        if !tree.chunks.is_empty() {
-            // The chunks in the order of the loop below, so packs load ahead in parallel.
-            let (backend, identity) = (self.backend, self.identity);
-            self.chunks.get_or_insert_with(|| super::chunked::Reader::new(backend, identity)).plan(tree.chunks.values().flatten())?;
-        }
-        for (path, entry) in &tree.files {
-            if base
-                .and_then(|b| b.files.get(path))
+        let unchanged = |path: &String, entry: &Entry| {
+            base.and_then(|b| b.files.get(path))
                 .is_some_and(|old| (old.0.as_str(), old.1, old.2.as_str()) == (entry.0.as_str(), entry.1, entry.2.as_str()))
                 && base.and_then(|b| b.times.get(path)) == tree.times.get(path)
-            {
+        };
+        if !tree.chunks.is_empty() {
+            // The chunks of the files that the loop below writes, in its order, so their packs
+            // load ahead in the background.
+            let ids = tree.files.iter().filter(|(path, entry)| !unchanged(path, entry)).filter_map(|(path, _)| tree.chunks.get(path)).flatten();
+            let (backend, identity) = (self.backend, self.identity);
+            self.chunks.get_or_insert_with(|| super::chunked::Reader::new(backend, identity)).plan(ids)?;
+        }
+        for (path, entry) in &tree.files {
+            if unchanged(path, entry) {
                 continue;
             }
             let data = match tree.chunks.get(path) {

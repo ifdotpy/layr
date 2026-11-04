@@ -365,20 +365,123 @@ impl<'a> Writer<'a> {
     }
 }
 
-/// Reads chunked files of a layer. Packs are cached in memory, up to a bound. `plan` gives the
-/// order of the chunks that the caller will read; a missing pack then comes with the next packs of
-/// that order, fetched in parallel.
+/// Reads chunked files of a layer. `plan` gives the order of the chunks that the caller reads;
+/// background threads then load and decode the packs of that order ahead of the caller, within a
+/// memory bound. A pack outside the plan, or evicted, loads when it is needed.
 pub(crate) struct Reader<'a> {
     backend: &'a Backend,
     identity: String,
     places: Option<Places>,
-    indexes: BTreeMap<String, Index>,
+    indexes: std::sync::Arc<BTreeMap<String, Index>>,
     packs: BTreeMap<String, std::sync::Arc<Vec<u8>>>,
-    pack_bytes: usize,
-    order: Vec<String>,
+    prefetch: Option<Prefetch>,
 }
 
-const READ_CACHE: usize = 256 << 20;
+/// Packs that the prefetch keeps decoded ahead of the reader: about 256 MiB.
+const AHEAD: usize = 64;
+
+struct Shared {
+    order: Vec<String>,
+    /// Decoded packs by position in `order`, and the positions that finished (loaded or failed).
+    ready: std::sync::Mutex<(BTreeMap<usize, std::sync::Arc<Vec<u8>>>, BTreeSet<usize>)>,
+    changed: std::sync::Condvar,
+    /// The position of the pack that the reader needs now.
+    reader: std::sync::atomic::AtomicUsize,
+    next: std::sync::atomic::AtomicUsize,
+    stop: std::sync::atomic::AtomicBool,
+}
+
+struct Prefetch {
+    shared: std::sync::Arc<Shared>,
+    position: BTreeMap<String, usize>,
+    threads: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl Prefetch {
+    fn start(backend: &Backend, identity: &str, indexes: std::sync::Arc<BTreeMap<String, Index>>, order: Vec<String>) -> Self {
+        use std::sync::atomic::Ordering;
+        let position = order.iter().enumerate().map(|(i, pack)| (pack.clone(), i)).collect();
+        let shared = std::sync::Arc::new(Shared {
+            order,
+            ready: std::sync::Mutex::new((BTreeMap::new(), BTreeSet::new())),
+            changed: std::sync::Condvar::new(),
+            reader: std::sync::atomic::AtomicUsize::new(0),
+            next: std::sync::atomic::AtomicUsize::new(0),
+            stop: std::sync::atomic::AtomicBool::new(false),
+        });
+        let threads = (0..parallel())
+            .map(|_| {
+                let (shared, backend, identity, indexes) = (shared.clone(), backend.clone(), identity.to_string(), indexes.clone());
+                std::thread::spawn(move || loop {
+                    let at = shared.next.fetch_add(1, Ordering::SeqCst);
+                    if at >= shared.order.len() {
+                        return;
+                    }
+                    // Stay within AHEAD packs of the reader.
+                    {
+                        let mut guard = shared.ready.lock().unwrap();
+                        while at >= shared.reader.load(Ordering::SeqCst) + AHEAD && !shared.stop.load(Ordering::SeqCst) {
+                            guard = shared.changed.wait(guard).unwrap();
+                        }
+                    }
+                    if shared.stop.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    let pack = &shared.order[at];
+                    let loaded = (|| -> Result<Vec<u8>> {
+                        let index = match indexes.get(pack) {
+                            Some(index) => index.clone(),
+                            None => index(&backend, None, &identity, pack)?,
+                        };
+                        let body = backend.get(&chunks::pack_name(pack))?.with_context(|| format!("chunk pack {pack} is missing"))?;
+                        chunks::open_pack(&keys::decrypt(&identity, &body)?, &index)
+                    })();
+                    let mut guard = shared.ready.lock().unwrap();
+                    // A failure (a release moved the chunks, a read error) is not reported here:
+                    // the reader loads the pack itself and reports, or lists the packs again.
+                    if let Ok(data) = loaded {
+                        guard.0.insert(at, std::sync::Arc::new(data));
+                    }
+                    guard.1.insert(at);
+                    shared.changed.notify_all();
+                })
+            })
+            .collect();
+        Self { shared, position, threads }
+    }
+
+    /// The decoded pack, waiting for the prefetch when the pack is in the plan. None when the pack
+    /// is not in the plan, failed, or was dropped behind the reader: the caller loads it itself.
+    fn take(&self, pack: &str) -> Option<std::sync::Arc<Vec<u8>>> {
+        use std::sync::atomic::Ordering;
+        let &at = self.position.get(pack)?;
+        self.shared.reader.fetch_max(at, Ordering::SeqCst);
+        self.shared.changed.notify_all();
+        let mut guard = self.shared.ready.lock().unwrap();
+        loop {
+            if let Some(data) = guard.0.get(&at).cloned() {
+                // Keep a few packs behind the reader: deduplicated chunks often point back.
+                let keep = self.shared.reader.load(Ordering::SeqCst).saturating_sub(4);
+                guard.0.retain(|position, _| *position >= keep);
+                return Some(data);
+            }
+            if guard.1.contains(&at) || self.shared.stop.load(Ordering::SeqCst) {
+                return None;
+            }
+            guard = self.shared.changed.wait(guard).unwrap();
+        }
+    }
+}
+
+impl Drop for Prefetch {
+    fn drop(&mut self) {
+        self.shared.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.shared.changed.notify_all();
+        for thread in self.threads.drain(..) {
+            let _ = thread.join();
+        }
+    }
+}
 
 impl<'a> Reader<'a> {
     pub(crate) fn new(backend: &'a Backend, identity: &str) -> Self {
@@ -386,77 +489,54 @@ impl<'a> Reader<'a> {
             backend,
             identity: identity.to_string(),
             places: None,
-            indexes: BTreeMap::new(),
+            indexes: std::sync::Arc::new(BTreeMap::new()),
             packs: BTreeMap::new(),
-            pack_bytes: 0,
-            order: Vec::new(),
+            prefetch: None,
         }
     }
 
     fn places(&mut self, fresh: bool) -> Result<&Places> {
         if self.places.is_none() || fresh {
-            self.indexes = indexes(self.backend, None, &self.identity)?;
+            self.indexes = std::sync::Arc::new(indexes(self.backend, None, &self.identity)?);
             self.places = Some(places_of(&self.indexes));
         }
         Ok(self.places.as_ref().unwrap())
     }
 
-    /// The chunks that the caller reads next, in order.
+    /// The chunks that the caller reads next, in order: their packs load in the background.
     pub(crate) fn plan<'i>(&mut self, ids: impl IntoIterator<Item = &'i String>) -> Result<()> {
         let places = self.places(false)?.clone();
         let mut seen = BTreeSet::new();
-        self.order = ids
+        let order: Vec<String> = ids
             .into_iter()
             .filter_map(|id| places.get(id).map(|place| place.pack.clone()))
             .filter(|pack| seen.insert(pack.clone()))
             .collect();
+        self.prefetch = None;
+        if !order.is_empty() {
+            self.prefetch = Some(Prefetch::start(self.backend, &self.identity, self.indexes.clone(), order));
+        }
         Ok(())
     }
 
-    /// Loads `pack` and the packs after it in the plan, as many as run at once and fit the cache.
-    fn load(&mut self, pack: &str) -> Result<()> {
-        let mut batch = vec![pack.to_string()];
-        if let Some(at) = self.order.iter().position(|p| p == pack) {
-            for next in &self.order[at + 1..] {
-                if batch.len() >= parallel() || (batch.len() + 1) * chunks::PACK_LIMIT > READ_CACHE {
-                    break;
-                }
-                if !self.packs.contains_key(next) {
-                    batch.push(next.clone());
-                }
-            }
+    /// One pack outside the prefetch, loaded now. At most a few stay in memory.
+    fn load(&mut self, pack: &str) -> Result<Option<std::sync::Arc<Vec<u8>>>> {
+        if let Some(data) = self.packs.get(pack) {
+            return Ok(Some(data.clone()));
         }
-        if self.pack_bytes + batch.len() * chunks::PACK_LIMIT > READ_CACHE {
+        let index = match self.indexes.get(pack) {
+            Some(index) => index.clone(),
+            None => index(self.backend, None, &self.identity, pack)?,
+        };
+        let Some(body) = self.backend.get(&chunks::pack_name(pack))? else {
+            return Ok(None);
+        };
+        let data = std::sync::Arc::new(chunks::open_pack(&keys::decrypt(&self.identity, &body)?, &index)?);
+        if self.packs.len() >= 8 {
             self.packs.clear();
-            self.pack_bytes = 0;
         }
-        let (backend, identity, indexes) = (self.backend, self.identity.as_str(), &self.indexes);
-        type Loaded = Result<Option<(String, Vec<u8>)>>;
-        let loaded: Vec<Loaded> = std::thread::scope(|scope| {
-            let handles: Vec<_> = batch
-                .iter()
-                .map(|pack| {
-                    scope.spawn(move || -> Loaded {
-                        let index = match indexes.get(pack) {
-                            Some(index) => index.clone(),
-                            None => index(backend, None, identity, pack)?,
-                        };
-                        let Some(body) = backend.get(&chunks::pack_name(pack))? else {
-                            return Ok(None);
-                        };
-                        Ok(Some((pack.clone(), chunks::open_pack(&keys::decrypt(identity, &body)?, &index)?)))
-                    })
-                })
-                .collect();
-            handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("pack read panicked")))).collect()
-        });
-        for result in loaded {
-            if let Some((pack, data)) = result? {
-                self.pack_bytes += data.len();
-                self.packs.insert(pack, std::sync::Arc::new(data));
-            }
-        }
-        Ok(())
+        self.packs.insert(pack.to_string(), data.clone());
+        Ok(Some(data))
     }
 
     /// Appends chunk `id` to `out`, which may not pass `size` bytes.
@@ -466,11 +546,12 @@ impl<'a> Reader<'a> {
             let Some(place) = self.places(attempt == 1)?.get(id).cloned() else {
                 continue;
             };
-            if !self.packs.contains_key(&place.pack) {
-                self.load(&place.pack)?;
-            }
-            let Some(data) = self.packs.get(&place.pack) else {
-                continue;
+            let data = match self.prefetch.as_ref().filter(|_| attempt == 0).and_then(|p| p.take(&place.pack)) {
+                Some(data) => data,
+                None => match self.load(&place.pack)? {
+                    Some(data) => data,
+                    None => continue,
+                },
             };
             if out.len() as u64 + place.length > size {
                 bail!("chunks exceed their file size");
