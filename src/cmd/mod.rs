@@ -22,6 +22,7 @@ pub mod replicate;
 pub mod requests;
 pub mod transfer;
 pub mod view;
+pub mod project;
 pub mod volume;
 pub mod work;
 
@@ -72,6 +73,7 @@ impl<'a> Here<'a> {
 
 pub fn here(ctx: &Ctx) -> Result<Here<'_>> {
     let loc = ctx.locate()?;
+    crate::store::set_holder_line(loc.line.as_deref());
     let repo = Repo::open(ctx, &loc.project)?;
     let line = match &loc.line {
         Some(n) => Some(repo.line(n)?),
@@ -232,7 +234,7 @@ pub const COMMANDS: &[&str] = &[
     "checks", "ref", "release", "queue", "request", "requests", "view", "attest", "attestations", "change", "comment", "probe",
     "gc", "du", "fsck", "reindex", "init", "projects", "machines", "debug", "config", "cache", "layer", "remote", "fetch", "pull",
     "push", "git-sync", "git", "clone", "overlay", "export", "sync", "serve-peer", "worktree", "branch", "commit", "stash",
-    "cherry-pick", "rebase", "revert", "checkout", "switch", "person", "mount", "daemon", "follow", "volume",
+    "cherry-pick", "rebase", "revert", "checkout", "switch", "person", "mount", "daemon", "follow", "volume", "project",
 ];
 
 pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
@@ -336,6 +338,7 @@ pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
         "remote" => remote::remote(ctx, &rest),
         "follow" => followcmd::follow(ctx, &rest),
         "volume" => volume::volume(ctx, &rest),
+        "project" => project::project(ctx, &rest),
         "fetch" => remote::fetch(ctx, &rest),
         "pull" => remote::pull(ctx, &rest),
         "push" => remote::push(ctx, &rest),

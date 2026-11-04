@@ -79,15 +79,9 @@ pub mod git {
         }
     }
 
-    /// Branches to import after a fetch (the caller holds no project lock): the requested ones, the ones imported before, and the
+    /// The remote refs to import after a fetch: the requested ones, the ones imported before, and the
     /// ones that match a line name or the default branch.
-    fn import_after_fetch(
-        ctx: &Ctx,
-        repo: &Repo,
-        remote: &str,
-        refs: &[(String, String)],
-        only: Option<&str>,
-    ) -> Result<Vec<(String, String, bool)>> {
+    fn wanted_refs(repo: &Repo, remote: &str, refs: &[(String, String)], only: Option<&str>) -> Result<Vec<(String, String)>> {
         let mut out = Vec::new();
         let lines: Vec<String> = repo.lines()?.into_iter().map(|l| l.name).collect();
         for (name, commit) in refs {
@@ -103,19 +97,46 @@ pub mod git {
                         || ["main", "master"].contains(&branch)
                 }
             };
-            if !wanted {
-                continue;
+            if wanted {
+                out.push((name.clone(), commit.clone()));
             }
-            let prev = repo.p.db.remote_ref(name)?;
-            // The import takes the project lock for one commit at a time.
-            let (st, fresh) = gitbridge::import_commit_unlocked(ctx, repo, commit, name, ctx.caller.uid)?;
-            if prev.as_ref().map(|p| p.0 != st).unwrap_or(true) && !fresh {
-                let _lock = repo.p.lock()?;
-                let mut rec = Record::new("remote.ref");
-                rec.data = serde_json::json!({"ref": name, "state": st, "commit": commit});
-                repo.commit_record(ctx, rec)?;
+        }
+        Ok(out)
+    }
+
+    /// Tries of an import whose remote ref moved while it was planned (`gitbridge::Moved`).
+    const IMPORT_TRIES: usize = 3;
+
+    /// Import the wanted refs with no project lock held. Each ref is planned without the lock and
+    /// written under it in short chunks (`gitbridge::import_ref`). A ref that moved meanwhile is planned again.
+    fn import_after_fetch(
+        ctx: &Ctx,
+        repo: &Repo,
+        remote: &str,
+        refs: &[(String, String)],
+        only: Option<&str>,
+    ) -> Result<Vec<(String, String, bool)>> {
+        let mut refs = refs.to_vec();
+        for attempt in 1..=IMPORT_TRIES {
+            let wanted = wanted_refs(repo, remote, &refs, only)?;
+            match import_wanted(ctx, repo, &wanted) {
+                Ok(out) => return Ok(out),
+                Err(e) if e.is::<gitbridge::Moved>() && attempt < IMPORT_TRIES => {
+                    // Plan again from the refs the Git store holds now: a concurrent fetch may have stored a newer tip.
+                    refs = gitbridge::stored_remote_refs(repo, remote)?;
+                }
+                Err(e) => return Err(e),
             }
-            out.push((name.clone(), st, prev.map(|p| p.0).is_none()));
+        }
+        unreachable!("the last try returns")
+    }
+
+    fn import_wanted(ctx: &Ctx, repo: &Repo, wanted: &[(String, String)]) -> Result<Vec<(String, String, bool)>> {
+        let mut out = Vec::new();
+        for (name, commit) in wanted {
+            let prev = repo.p.db.remote_ref(name)?.map(|p| p.0);
+            let st = gitbridge::import_ref(ctx, repo, commit, name, prev.clone())?;
+            out.push((name.clone(), st, prev.is_none()));
         }
         Ok(out)
     }
@@ -211,10 +232,11 @@ pub mod git {
         let line = h.line()?.clone();
         repo.require(ctx, "export").map_err(|e| exit(1, e.to_string()))?;
         repo.authorize_line(ctx, &line, crate::repo::LineOp::Save)?;
-        let _lock = repo.p.lock()?;
         let line = repo.line(&line.id)?;
         gitbridge::check_git_head(repo, &line)?;
         let state = repo.state(&line.head)?;
+        // The export is read and written as Git objects: pin the state, hold no project lock.
+        repo.hold(repo.pin(&[state.id.as_str()])?);
         if !state.conflicts.is_empty() {
             return Err(exit(
                 1,
@@ -232,6 +254,7 @@ pub mod git {
                 made.into_iter().map(|(s, c)| (s, serde_json::Value::String(c))).collect();
             let mut rec = Record::new("export");
             rec.data = serde_json::json!({"export": ids::new_id(), "state": state.id, "remote": GIT_SYNC_REMOTE, "branch": line.name, "commit": commit, "commits": commits, "status": "local"});
+            let _lock = repo.p.lock()?;
             repo.commit_record(ctx, rec)?;
         }
         if !repo.working(&line).join(".git").is_dir() {
@@ -240,11 +263,25 @@ pub mod git {
                 format!("error: line '{}' has no .git folder; commit {} is in the project git store", line.name, &commit[..10]),
             ));
         }
-        gitbridge::refresh_git_folder(repo, &line)?;
+        refresh_line_git(repo, &line)?;
         if !a.has("-q") {
             outln!(ctx, "{} (state {})", commit, ids::short(&state.id));
         }
         Ok(0)
+    }
+
+    /// Write the .git folder of `line` under the line lock, not the project lock. A save may move the
+    /// head meanwhile: the folder then shows an older head, so it is written again (three tries).
+    fn refresh_line_git(repo: &Repo, line: &crate::model::Line) -> Result<()> {
+        for _ in 0..3 {
+            let current = repo.line(&line.id)?;
+            let _line = repo.line_lock(&current)?;
+            gitbridge::refresh_git_folder(repo, &current)?;
+            if repo.line(&line.id)?.head == current.head {
+                return Ok(());
+            }
+        }
+        Err(exit(1, format!("line '{}' moved during the .git refresh; run the command again", line.name)))
     }
 
     pub fn push(ctx: &Ctx, args: &[String]) -> Result<i32> {
@@ -329,6 +366,8 @@ pub mod git {
         }
         crate::secrets::check_history(ctx, repo, &state_id)?;
         let state = repo.state(&state_id)?;
+        // The state is read by the export below: keep it on disk until the command ends.
+        repo.hold(repo.pin(&[state_id.as_str()])?);
         if !state.conflicts.is_empty() {
             return Err(exit(
                 1,
@@ -385,7 +424,8 @@ pub mod git {
                 return Ok(0);
             }
         }
-        let lock = repo.p.lock()?;
+        // The export commits are Git writes and tree reads: they run with no project lock. Only the
+        // prepared record is written under it.
         let (export_id, commit) = match prepared {
             Some((eid, c)) => (eid, c),
             None => {
@@ -404,26 +444,28 @@ pub mod git {
                 let commits: serde_json::Map<String, serde_json::Value> =
                     made.into_iter().map(|(s, c)| (s, serde_json::Value::String(c))).collect();
                 let eid = ids::new_id();
+                let _lock = repo.p.lock()?;
                 let mut rec = Record::new("export");
                 rec.data = serde_json::json!({"export": eid, "state": state_id, "remote": remote, "branch": branch, "commit": c, "parent": parent, "squash": a.has("--squash"), "commits": commits, "status": "prepared"});
                 repo.commit_record(ctx, rec)?;
                 (eid, c)
             }
         };
-        drop(lock);
         if a.has("-n") {
             outln!(ctx, "Would push {} (state {}) to {url} {branch}", &commit[..10], ids::short(&state_id));
             return Ok(0);
         }
         let before = gitbridge::ls_remote(ctx, repo, &url, &branch).ok().flatten();
         gitbridge::push(ctx, repo, &url, &commit, &branch, a.has("-f") || a.has("--force-with-lease"))?;
-        let _lock = repo.p.lock()?;
-        let mut rec = Record::new("export");
-        rec.data = serde_json::json!({"export": export_id, "state": state_id, "remote": remote, "branch": branch, "commit": commit, "status": "pushed"});
-        repo.commit_record(ctx, rec)?;
+        {
+            let _lock = repo.p.lock()?;
+            let mut rec = Record::new("export");
+            rec.data = serde_json::json!({"export": export_id, "state": state_id, "remote": remote, "branch": branch, "commit": commit, "status": "pushed"});
+            repo.commit_record(ctx, rec)?;
+        }
         let _ = gitbridge::git_out(&gitbridge::store(repo), &["update-ref", &format!("refs/remotes/{remote}/{branch}"), &commit]);
         if let Some(l) = &line {
-            if let Err(e) = gitbridge::refresh_git_folder(repo, &repo.line(&l.id)?) {
+            if let Err(e) = refresh_line_git(repo, l) {
                 eprintln!("warning: .git folder not updated: {e:#}");
             }
         }

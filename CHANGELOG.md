@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.22.1](https://github.com/ifdotpy/layr/compare/v0.22.0...v0.22.1) (2026-11-04)
+
+
+### Performance
+
+* **gc:** Plan gc --repair before the project lock and read overlays once ([#210](https://github.com/ifdotpy/layr/issues/210)) ([0c9ef96](https://github.com/ifdotpy/layr/commit/0c9ef9694b36aa1beef0790134aac0b23f6f9940)), closes [#194](https://github.com/ifdotpy/layr/issues/194)
+
+## [0.22.0](https://github.com/ifdotpy/layr/compare/v0.21.0...v0.22.0) (2026-11-04)
+
+
+### Features
+
+* **store:** Move a project to another volume ([#185](https://github.com/ifdotpy/layr/issues/185)) ([eef3a84](https://github.com/ifdotpy/layr/commit/eef3a84e0dfa0df1aa2550f6f24bc1391104a3d6))
+
+
+### Performance
+
+* **line:** unseal cache copies in one pass, skip the ownership walk of a clone ([#198](https://github.com/ifdotpy/layr/issues/198)) ([380ded1](https://github.com/ifdotpy/layr/commit/380ded144b6a91c044caf973706e79cd8b903b48))
+* **lock:** Name the lock holder and save a deleted line's work before the lock ([#204](https://github.com/ifdotpy/layr/issues/204)) ([62ae203](https://github.com/ifdotpy/layr/commit/62ae2033bc5d93d24d37da1be27a1cc6590342a6))
+* **lock:** Plan git imports with no project lock, write them in short chunks ([b67c78d](https://github.com/ifdotpy/layr/commit/b67c78d48062892eeb812a53088e99c6fd2f6c5e)), closes [#194](https://github.com/ifdotpy/layr/issues/194)
+* **lock:** Skip the metadata check under the lock after a pre-lock compare ([#205](https://github.com/ifdotpy/layr/issues/205)) ([51377d4](https://github.com/ifdotpy/layr/commit/51377d469b006a8748d8a65bbfe3113d77dd5aac)), closes [#194](https://github.com/ifdotpy/layr/issues/194)
+* **lock:** Transfer before the project lock in git fetch, pull and push ([#206](https://github.com/ifdotpy/layr/issues/206)) ([b67c78d](https://github.com/ifdotpy/layr/commit/b67c78d48062892eeb812a53088e99c6fd2f6c5e))
+* **lock:** Upload and materialize store remotes outside the project lock ([#209](https://github.com/ifdotpy/layr/issues/209)) ([a539099](https://github.com/ifdotpy/layr/commit/a539099dba46502d227b321aaa0f24c49e3d09b2)), closes [#194](https://github.com/ifdotpy/layr/issues/194)
+* **lock:** Write working folders under a line lock, commit under the project lock ([#200](https://github.com/ifdotpy/layr/issues/200)) ([39446b9](https://github.com/ifdotpy/layr/commit/39446b9abf236825acd68fcaf85c78a428497732))
+* **save:** Prepare a named save's index and compare before the project lock ([#207](https://github.com/ifdotpy/layr/issues/207)) ([9173c70](https://github.com/ifdotpy/layr/commit/9173c70cabafbb07f40256a6f810e5f78a75eaf6))
+* **status:** Compute line overlaps in under a second in a large project ([#201](https://github.com/ifdotpy/layr/issues/201)) ([2bf3238](https://github.com/ifdotpy/layr/commit/2bf3238322f126cedf006db11e4fed8b4b60d20c))
+
 ## [0.21.0](https://github.com/ifdotpy/layr/compare/v0.20.0...v0.21.0) (2026-11-04)
 
 

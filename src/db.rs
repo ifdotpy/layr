@@ -402,6 +402,12 @@ impl Db {
         Ok(v)
     }
 
+    /// The number of records and the newest row. Records are only added, so an equal mark means
+    /// no record came in: everything derived from the records is unchanged.
+    pub fn records_mark(&self) -> Result<(i64, i64)> {
+        Ok(self.conn.query_row("SELECT count(*), coalesce(max(rowid), 0) FROM records", [], |r| Ok((r.get(0)?, r.get(1)?)))?)
+    }
+
     /// All stored lines in apply order.
     pub fn all_lines(&self) -> Result<Vec<String>> {
         let mut st = self.conn.prepare("SELECT raw FROM records ORDER BY time, machine, seq")?;
@@ -755,6 +761,24 @@ impl Db {
             Some(r) => Some(serde_json::from_str(&r)?),
             None => None,
         })
+    }
+
+    /// Every state id, with whether it is auxiliary (cache or derived): one query for a history walk.
+    pub fn state_auxiliary(&self) -> Result<Vec<(String, bool)>> {
+        let mut st = self.conn.prepare("SELECT id, kind IN (?1, ?2) FROM states")?;
+        let v = st
+            .query_map(params![kind_str(StateKind::Cache), kind_str(StateKind::Derived)], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(v)
+    }
+
+    /// Every parent edge (state, parent), each state's parents in order: one query for a history walk.
+    pub fn parent_edges(&self) -> Result<Vec<(String, String)>> {
+        let mut st = self.conn.prepare("SELECT state, parent FROM parents ORDER BY state, ord")?;
+        let v = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?.collect::<Result<Vec<_>, _>>()?;
+        Ok(v)
     }
 
     pub fn state_flags(&self, id: &str) -> Result<Option<(bool, bool)>> {
@@ -1243,10 +1267,12 @@ impl Db {
 
     /// Overlay policy and metadata follow their signed records across machines.
     pub fn overlay_config(&self, key: &str) -> Result<Option<serde_json::Value>> {
+        // `key` and `key@<machine>`. The range ('@' to 'A') reads the primary key index; a
+        // `substr` test read the whole table on every call.
         let value: Option<Option<String>> = self
             .conn
             .query_row(
-                "SELECT value FROM config WHERE key=?1 OR substr(key,1,length(?1)+1)=?1||'@' ORDER BY ord DESC LIMIT 1",
+                "SELECT value FROM config WHERE key=?1 OR (key>=?1||'@' AND key<?1||'A') ORDER BY ord DESC LIMIT 1",
                 params![key],
                 |row| row.get(0),
             )

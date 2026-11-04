@@ -21,7 +21,7 @@ fn index_file(root: &Path) -> PathBuf {
 }
 
 /// The project file of moved paths, below the project's `meta` folder.
-fn paths_file_in(meta: &Path) -> PathBuf {
+pub(crate) fn paths_file_in(meta: &Path) -> PathBuf {
     meta.join("line-paths.json")
 }
 
@@ -56,7 +56,8 @@ impl Project<'_> {
         paths_file_in(&self.meta_dir())
     }
 
-    fn moved_paths(&self) -> BTreeMap<String, PathBuf> {
+    /// The moved folders of this project: line id to folder.
+    pub(crate) fn moved_paths(&self) -> BTreeMap<String, PathBuf> {
         std::fs::read(self.paths_file()).ok().and_then(|d| serde_json::from_slice(&d).ok()).unwrap_or_default()
     }
 

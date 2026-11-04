@@ -225,9 +225,7 @@ impl<'a> Repo<'a> {
         if self.p.is_overlay() {
             return Ok(out);
         }
-        for (name, root) in self.removed_overlays()? {
-            self.free_removed_overlay(ctx, &name, &root)?;
-        }
+        self.free_removed_overlays(ctx)?;
         for name in self.overlay_names()? {
             if !self.overlay_setting(&name, "cache")?.and_then(|v| v.as_bool()).unwrap_or(false) {
                 continue;
@@ -238,29 +236,47 @@ impl<'a> Repo<'a> {
             }
             let orepo = self.overlay_repo(&name)?;
             let _lock = orepo.p.lock()?;
-            let mut orphans = Vec::new();
-            for ol in orepo.p.db.lines()? {
-                if let Some(id) = ol.name.strip_prefix("line-") {
-                    if self.p.db.line_deleted(id)? {
-                        orphans.push(ol);
-                    }
+            let orphans = self.orphan_cache_lines(&orepo)?;
+            out.extend(self.drop_overlay_lines(ctx, &orepo, &name, &orphans)?);
+        }
+        Ok(out)
+    }
+
+    /// Free the states of the cache overlays that `overlay remove` removed. The caller holds the
+    /// project lock.
+    pub fn free_removed_overlays(&self, ctx: &Ctx) -> Result<()> {
+        for (name, root) in self.removed_overlays()? {
+            self.free_removed_overlay(ctx, &name, &root)?;
+        }
+        Ok(())
+    }
+
+    /// The lines of the cache overlay project `orepo` whose project line is deleted. It only reads.
+    pub fn orphan_cache_lines(&self, orepo: &Repo) -> Result<Vec<Line>> {
+        let mut orphans = Vec::new();
+        for ol in orepo.p.db.lines()? {
+            if let Some(id) = ol.name.strip_prefix("line-") {
+                if self.p.db.line_deleted(id)? {
+                    orphans.push(ol);
                 }
             }
-            for ol in orphans {
-                let mut rec = Record::new("line.delete");
-                rec.lines.insert(
-                    ol.id.clone(),
-                    LineChange {
-                        before: Some(orepo.line_state(&ol, &ol.head)),
-                        after: None,
-                        working_before: None,
-                        working_after: None,
-                    },
-                );
-                rec.data = serde_json::json!({"name": ol.name});
-                orepo.commit_record(ctx, rec)?;
-                out.push((name.clone(), ol.name.clone()));
-            }
+        }
+        Ok(orphans)
+    }
+
+    /// Delete these lines of the overlay project `orepo`. Returns the overlay and line names. The
+    /// caller holds the locks of the project and of the overlay project.
+    pub fn drop_overlay_lines(&self, ctx: &Ctx, orepo: &Repo, name: &str, lines: &[Line]) -> Result<Vec<(String, String)>> {
+        let mut out = Vec::new();
+        for ol in lines {
+            let mut rec = Record::new("line.delete");
+            rec.lines.insert(
+                ol.id.clone(),
+                LineChange { before: Some(orepo.line_state(ol, &ol.head)), after: None, working_before: None, working_after: None },
+            );
+            rec.data = serde_json::json!({"name": ol.name});
+            orepo.commit_record(ctx, rec)?;
+            out.push((name.to_string(), ol.name.clone()));
         }
         Ok(out)
     }
@@ -518,8 +534,9 @@ impl<'a> Repo<'a> {
                 fsutil::remove_entry(w, &folder)?;
             }
             fsutil::make_parents(w, &folder, Some((uid, gid)))?;
-            btrfs::cache_snapshot(&orepo.p.state_path(&sid), &cp)?;
-            crate::repo::give_tree(&cp, uid, gid)?;
+            let uniform = btrfs::cache_snapshot(&orepo.p.state_path(&sid), &cp)?;
+            let source_owner = orepo.p.db.state(&sid)?.and_then(|s| s.cache_by);
+            crate::repo::give_cache_tree(&cp, uniform, source_owner, uid, gid)?;
             let _lock = orepo.p.lock()?;
             orepo.ensure_overlay_line(ctx, &Repo::overlay_line_name(&info, &line.id, line.owner), &sid, line.owner)?;
             taken.push(folder);
@@ -654,14 +671,10 @@ impl<'a> Repo<'a> {
         }
     }
 
-    /// The lock of one line for the cache hook. The hooks of a line run one at a time. It is a file of the
-    /// project's meta folder, and it is not the project lock.
-    fn prune_lock(&self, line: &Line) -> Result<std::fs::File> {
-        let dir = self.p.meta_dir().join("line-locks");
-        std::fs::create_dir_all(&dir)?;
-        let f = std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(dir.join(&line.id))?;
-        rustix::fs::flock(&f, rustix::fs::FlockOperation::LockExclusive)?;
-        Ok(f)
+    /// The lock of one line for the cache hook. The hooks of a line run one at a time. It is the line lock
+    /// (`Project::line_lock`): a command that already holds it in this process takes it again without waiting.
+    fn prune_lock(&self, line: &Line) -> Result<crate::store::LineLock> {
+        self.p.line_lock(&line.id, &line.name)
     }
 
     /// The cache folders of `line` that an interrupted hook left damaged. A save skips them: a prune of a folder
