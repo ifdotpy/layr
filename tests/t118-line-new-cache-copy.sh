@@ -30,6 +30,8 @@ fi
 cd $P/w || exit 1
 eq "the line gets the cache" v1 "$(cat target/debug/x)"
 eq "the hard-linked name has its data" v1 "$(cat target/debug/x-link)"
+eq "every entry of the copy has the owner of its root" \
+    "$(ls -ldn target | awk '{print $3":"$4}')" "$(ls -ln target/debug/x | awk '{print $3":"$4}')"
 echo changed > target/debug/x
 echo new > target/debug/added
 eq "the parent line keeps its cache" v1 "$(cat $P/main/target/debug/x)"

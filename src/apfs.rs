@@ -806,9 +806,14 @@ pub(crate) fn seal(path: &Path, readonly: bool, for_delete: bool) -> Result<()> 
     // One flag change per entry: several threads share them. A folder is opened before its
     // content is read, and sealed after its content.
     let open = |p: &Path| -> Result<bool> {
+        // The mode is read only when a delete needs it: one flag change is the whole cost otherwise.
+        if !for_delete {
+            crate::sys::apfs_immutable(p, false)?;
+            return Ok(false);
+        }
         let m = fs::symlink_metadata(p)?;
         crate::sys::apfs_immutable(p, false)?;
-        if for_delete && m.is_dir() && m.mode() & 0o700 != 0o700 {
+        if m.is_dir() && m.mode() & 0o700 != 0o700 {
             fs::set_permissions(p, fs::Permissions::from_mode((m.mode() & 0o7777) | 0o700))?;
         }
         Ok(m.is_dir())
@@ -831,13 +836,18 @@ pub(crate) fn seal(path: &Path, readonly: bool, for_delete: bool) -> Result<()> 
         return if readonly { Ok(crate::sys::apfs_immutable(path, true)?) } else { open(path).map(|_| ()) };
     }
     if !readonly {
+        // All folders first, then all files in one parallel pass: a level with few entries used to
+        // run serially (a node_modules copy of 47k entries took 8 s). A listing needs no flag change.
+        let (mut dirs, mut files) = (vec![path.to_path_buf()], Vec::new());
         let mut level = vec![path.to_path_buf()];
         while !level.is_empty() {
-            each_parallel(&level, |d| open(d).map(|_| ()))?;
-            let (sub, files) = children(&level)?;
-            each_parallel(&files, |f| open(f).map(|_| ()))?;
+            let (sub, f) = children(&level)?;
+            files.extend(f);
+            dirs.extend(sub.iter().cloned());
             level = sub;
         }
+        each_parallel(&dirs, |d| open(d).map(|_| ()))?;
+        each_parallel(&files, |f| open(f).map(|_| ()))?;
         return Ok(());
     }
     let mut levels = vec![vec![path.to_path_buf()]];
@@ -1011,8 +1021,12 @@ pub fn scan_snapshot(src: &Path, dst: &Path) -> Result<()> {
 /// A writable copy of a cache folder, cloned at once. Hard links become separate files: build
 /// output has many (cargo links each binary into `target/debug`), and a copy that keeps them
 /// copies every file one by one. A cache is regenerable, so only the links are lost.
-pub fn cache_snapshot(src: &Path, dst: &Path) -> Result<()> {
-    snapshot_with(src, dst, false, false)
+///
+/// Returns true when the copy is one clone. A clone gives every entry the owner of the new folder
+/// (CLONE_NOOWNERCOPY), so the root tells the owner of the whole copy.
+pub fn cache_snapshot(src: &Path, dst: &Path) -> Result<bool> {
+    let scan = copy_snapshot(src, dst, false, false)?;
+    Ok(!needs_file_copies(src, &scan, false))
 }
 
 /// A copy of a tree made before a store lock (`prepare_snapshot`).
