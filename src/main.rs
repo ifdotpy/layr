@@ -78,7 +78,15 @@ use std::collections::HashMap;
 
 mod cache_hook;
 
+// CLI overrides must also reach child processes and legacy entry points that read the
+// environment directly. Only call this from main's single-threaded startup path.
 #[allow(unsafe_code)]
+fn set_startup_env(key: &str, value: &str) {
+    // SAFETY: main calls this before starting threads; hidden worker commands return
+    // before reaching global option parsing.
+    unsafe { std::env::set_var(key, value) };
+}
+
 fn main() {
     // The cache adapters of the binary (issue #167). Core reaches them only through `cache_hook`.
     cache_hook::register(layr_cache::adapters());
@@ -139,18 +147,15 @@ fn main() {
                 argv.drain(..2);
             }
             "--root" if argv.len() > 1 => {
-                // SAFETY: global options are parsed at startup, before this process starts threads.
-                unsafe { std::env::set_var("LAYR_ROOT", &argv[1]) };
+                set_startup_env("LAYR_ROOT", &argv[1]);
                 argv.drain(..2);
             }
             "--project" if argv.len() > 1 => {
-                // SAFETY: global options are parsed at startup, before this process starts threads.
-                unsafe { std::env::set_var("LAYR_PROJECT", &argv[1]) };
+                set_startup_env("LAYR_PROJECT", &argv[1]);
                 argv.drain(..2);
             }
             "--line" if argv.len() > 1 => {
-                // SAFETY: global options are parsed at startup, before this process starts threads.
-                unsafe { std::env::set_var("LAYR_LINE", &argv[1]) };
+                set_startup_env("LAYR_LINE", &argv[1]);
                 argv.drain(..2);
             }
             "--no-pager" | "--no-optional-locks" | "-P" => {
@@ -190,8 +195,9 @@ fn main() {
     }
     if matches!(argv.first().map(String::as_str), Some("init" | "daemon")) {
         // Before the store opens: the override applies to the process that opens the store.
-        // SAFETY: this runs during startup, before any threads are started.
-        unsafe { rootcheck::take_allow_flag(&mut argv) };
+        if rootcheck::take_allow_flag(&mut argv) {
+            set_startup_env(rootcheck::ALLOW_VAR, "1");
+        }
     }
     if let Some(command) = argv.first() {
         if !cmd::COMMANDS.contains(&command.as_str()) {

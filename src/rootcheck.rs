@@ -17,18 +17,11 @@ pub const ALLOW_VAR: &str = "LAYR_ALLOW_ROOT_SNAPSHOTS";
 /// The command-line form of `ALLOW_VAR`, accepted by `init` and `daemon`.
 pub const ALLOW_FLAG: &str = "--allow-root-snapshots";
 
-/// Remove the override flag from `argv` and set the override variable for this process. The
-/// process that opens the store must be the one that receives the flag.
-/// # Safety
-/// Call only before the process starts any other threads.
-#[allow(unsafe_code)]
-pub unsafe fn take_allow_flag(argv: &mut Vec<String>) {
+/// Remove the override flag from `argv` and report whether it was present.
+pub fn take_allow_flag(argv: &mut Vec<String>) -> bool {
     let before = argv.len();
     argv.retain(|arg| arg != ALLOW_FLAG);
-    if argv.len() != before {
-        // SAFETY: the caller guarantees that no other threads are running.
-        unsafe { std::env::set_var(ALLOW_VAR, "1") };
-    }
+    argv.len() != before
 }
 
 #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
