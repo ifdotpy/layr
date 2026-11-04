@@ -1542,7 +1542,8 @@ pub fn failpoint(point: &str) {
     }
 }
 
-#[cfg(test)]
+/// The parallel empty is APFS only; other file systems delete a tree in place (OverlayFS through its registry).
+#[cfg(all(test, target_os = "macos"))]
 mod trash_tests {
     use super::empty_trash;
     use std::fs;
