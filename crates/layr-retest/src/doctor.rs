@@ -47,7 +47,7 @@ pub fn llvm_major(text: &str) -> Option<u32> {
 }
 
 /// Lines of a test source that start a workspace bin by a path or by an env variable that is not
-/// `env!("CARGO_BIN_EXE_<name>")`. Cargo builds such a bin without coverage, so a change of its code
+/// `CARGO_BIN_EXE_<name>`. Cargo builds such a bin without coverage, so a change of its code
 /// selects nothing and forces a full run. Returns (line number, line).
 pub fn bin_path_hits(src: &str, bins: &[String]) -> Vec<(usize, String)> {
     let names: Vec<String> = bins.iter().map(|b| b.to_uppercase().replace('-', "_")).collect();
@@ -66,6 +66,33 @@ pub fn bin_path_hits(src: &str, bins: &[String]) -> Vec<(usize, String)> {
             })
         });
         if hard || env_bin {
+            out.push((i + 1, t.to_string()));
+        }
+    }
+    out
+}
+
+/// The cargo variables whose value is a path of this folder: `env!` of one compiles the path into the crate.
+const PATH_VARS: &[&str] = &["CARGO_MANIFEST_DIR", "CARGO_BIN_EXE_", "CARGO_TARGET_TMPDIR", "OUT_DIR"];
+
+/// Lines of a source that compile a path of this folder in: `env!` or `option_env!` of a path variable
+/// (`PATH_VARS`). Such a crate names the line's folder, so a cache taken at another path (another line,
+/// another machine) builds it again. `OUT_DIR` is in the target folder and moves with it: it is not listed.
+/// Returns (line number, line).
+pub fn compiled_path_hits(src: &str) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    for (i, l) in src.lines().enumerate() {
+        let t = l.trim();
+        if t.starts_with("//") {
+            continue;
+        }
+        let hit = ["env!(\"", "option_env!(\""].iter().any(|p| {
+            t.split(p).skip(1).any(|rest| {
+                let name = rest.split('"').next().unwrap_or("");
+                PATH_VARS.iter().any(|v| *v != "OUT_DIR" && (name == *v || (v.ends_with('_') && name.starts_with(v))))
+            })
+        });
+        if hit {
             out.push((i + 1, t.to_string()));
         }
     }
@@ -394,6 +421,7 @@ pub fn check(root: &Path) -> Vec<Finding> {
 
     let mut files = Vec::new();
     rust_files(root, &mut files);
+    let all_files = files.clone();
     let mut hits = 0;
     for p in files {
         let Ok(src) = std::fs::read_to_string(&p) else { continue };
@@ -402,7 +430,7 @@ pub fn check(root: &Path) -> Vec<Finding> {
         for (n, l) in bin_path_hits(part, &bins) {
             hits += 1;
             f.push(warn(format!(
-                "{}:{}: starts a bin by path or env variable, not instrumented, forces full runs; use env!(\"CARGO_BIN_EXE_<name>\"): {l}",
+                "{}:{}: starts a bin by path or env variable, not instrumented, forces full runs; use std::env::var(\"CARGO_BIN_EXE_<name>\") (cargo and nextest set it when an integration test runs): {l}",
                 p.strip_prefix(root).unwrap_or(&p).display(),
                 n + skipped
             )));
@@ -410,6 +438,28 @@ pub fn check(root: &Path) -> Vec<Finding> {
     }
     if hits == 0 {
         f.push(ok("no test starts a workspace bin by a path or an env variable"));
+    }
+    let mut paths = 0;
+    for p in &all_files {
+        let Ok(src) = std::fs::read_to_string(p) else { continue };
+        let tests = test_part(p, &src);
+        let first_test_line = src[..src.len() - tests.len()].matches('\n').count();
+        for (n, l) in compiled_path_hits(&src) {
+            paths += 1;
+            let advice = if n > first_test_line {
+                "read it at run time with std::env::var (cargo and nextest set CARGO_MANIFEST_DIR for every test, and CARGO_BIN_EXE_<name> for integration tests)"
+            } else {
+                "take the path at run time (an argument, a config file or the executable's location)"
+            };
+            f.push(warn(format!(
+                "{}:{}: compiles a path of this folder in, so a cache taken at another path builds this crate again; {advice}: {l}",
+                p.strip_prefix(root).unwrap_or(p).display(),
+                n
+            )));
+        }
+    }
+    if paths == 0 {
+        f.push(ok("no crate compiles a path of this folder in (env! of CARGO_MANIFEST_DIR or CARGO_BIN_EXE_*)"));
     }
 
     let recs: Vec<_> = std::fs::read_dir(root.join(".layr-retest"))
@@ -482,6 +532,16 @@ mod tests {
         assert!(bin_path_hits("let h = std::env::var(\"HOME\");", &bins()).is_empty());
         assert!(bin_path_hits("let h = std::env::var(\"LAYR_TEST_ROOT\");", &["layr".to_string()]).is_empty());
         assert!(bin_path_hits(concat!("// target/", "debug is not used\n"), &bins()).is_empty());
+    }
+
+    #[test]
+    fn finds_compiled_in_paths() {
+        assert_eq!(compiled_path_hits("let d = env!(\"CARGO_MANIFEST_DIR\");").len(), 1);
+        assert_eq!(compiled_path_hits("let b = env!(\"CARGO_BIN_EXE_layr\");").len(), 1);
+        assert_eq!(compiled_path_hits("let t = option_env!(\"CARGO_TARGET_TMPDIR\");").len(), 1);
+        assert_eq!(compiled_path_hits("include!(concat!(env!(\"OUT_DIR\"), \"/gen.rs\"));").len(), 0, "OUT_DIR moves with target");
+        assert_eq!(compiled_path_hits("let d = std::env::var(\"CARGO_MANIFEST_DIR\");").len(), 0, "the run-time form");
+        assert_eq!(compiled_path_hits("// env!(\"CARGO_MANIFEST_DIR\")").len(), 0);
     }
 
     #[test]
