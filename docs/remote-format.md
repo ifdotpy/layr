@@ -160,8 +160,10 @@ machines. Source states keep frames.
   entry in the pushed tree of the nearest pushed ancestor keeps that entry, and the walk does not
   read it, as git and rsync trust their stat data. This works for frames and chunks, also when a
   history limit deleted the ancestor here, because the pushed tree names the times (`times`). A
-  reused chunked entry counts as reused for the check before the tree publishes.
-  `LAYR_PUSH_REHASH=1` reads every file again.
+  reused chunked entry counts as reused for the check before the tree publishes. An entry keeps
+  only its own form: a framed entry in a layer that goes up as chunks (a cache pushed before chunks)
+  is read again, in a full walk and in a delta, so the cache moves to chunks once, a fetch reads it
+  in parallel, and the next sweep deletes the old parts. `LAYR_PUSH_REHASH=1` reads every file again.
 
 Measured with `layr push --caches` to a `file://` store on macOS. Base: a cargo `target/debug`
 (2.2 GiB). Small: the same folder after a merge of a few changes (453 files differ). Big: after

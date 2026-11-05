@@ -847,6 +847,16 @@ fn upload_state_journal(
             chunks.remove(&change.path);
         }
     }
+    // A delta keeps the entries of the base. A framed entry of the base in a layer that goes up as chunks (a cache
+    // pushed before chunks) is read again, so it moves to chunks once, as in a full walk below.
+    let framed: Vec<String> = match (&changed, chunker.is_some()) {
+        (Some(_), true) => files.iter().filter(|(p, e)| e.1 > 0 && !chunks.contains_key(*p)).map(|(p, _)| p.clone()).collect(),
+        _ => Vec::new(),
+    };
+    for path in &framed {
+        files.remove(path);
+        times.remove(path);
+    }
     // Read and SHA-256 time of the walk, and files taken from the manifest, for `LAYR_TRACE`.
     let mut walk_time = (std::time::Duration::ZERO, std::time::Duration::ZERO);
     let mut unread = 0usize;
@@ -869,13 +879,16 @@ fn upload_state_journal(
         let time = file_time(root, path);
         // A file with the path, mode, size and time (in nanoseconds) of the pushed tree has its
         // content: the walk takes the entry without reading the file, as git and rsync do with
-        // their stat data. A chunked entry needs this push's chunker, or it is read again.
+        // their stat data. The entry must have the form of this push: a chunked entry needs this push's chunker,
+        // and a framed entry in a layer that goes up as chunks (a cache pushed before chunks) is read again, so it
+        // moves to chunks once and a fetch reads it in parallel.
         if let (Some(old_tree), Some(time)) = (manifest, time) {
             if let Some(old) = old_tree.files.get(path).filter(|old| {
                 old.0 == mode && old.1 == meta.size && old_tree.times.get(path) == Some(&time)
             }) {
                 let ids = old_tree.chunks.get(path);
-                if ids.is_none() || chunker.is_some() {
+                // An empty file has no chunks in either form.
+                if ids.is_some() == chunker.is_some() || meta.size == 0 {
                     if let (Some(ids), Some(chunker)) = (ids, chunker.as_mut()) {
                         chunker.reuse(&old.2, ids);
                         chunks.insert(path.to_string(), ids.clone());
@@ -958,6 +971,10 @@ fn upload_state_journal(
             if let Some(meta) = &change.new {
                 visit(&change.path, meta)?;
             }
+        }
+        for path in &framed {
+            let meta = std::fs::symlink_metadata(fsutil::safe_join(root, path)?)?;
+            visit(path, &fsutil::meta_of(&meta))?;
         }
     } else {
         walk_state(root, &mut visit)?;
