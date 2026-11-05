@@ -2759,6 +2759,9 @@ pub fn config(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if k == "queue.probes" && !val.is_null() && !val.is_boolean() {
         return Err(exit(128, "queue.probes must be true or false"));
     }
+    if k == "queue.push" && !val.is_null() && !val.as_str().is_some_and(|v| !v.is_empty()) {
+        return Err(exit(128, "queue.push must be the name of a remote"));
+    }
     if k == "queue.run" && !val.is_null() {
         let value = val.as_str().ok_or_else(|| exit(128, "queue.run must be a comma-separated list of line names"))?;
         for name in value.split(',').map(str::trim).filter(|s| !s.is_empty()) {

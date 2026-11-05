@@ -81,7 +81,8 @@ btrfs, a project store or root.
 - Token fields hold SHA-256 hashes only, never tokens. `layr gateway token` prints a new token
   once and adds its hash to this file.
 - TLS: systemd `LoadCredential=tls.crt` and `tls.key` (Desk's model), or `--tls tailscale`.
-- Config keys of the Layr service used by the executor profile: `queue.run` (workstream core-2)
+- Config keys of the Layr service used by the executor profile: `queue.push <remote>` (the queue pass pushes
+  each line it merged into to that remote; `queue run --push <remote>` for one run), `queue.run` (workstream core-2)
   and `registry.listen`, `registry.user` (workstream oci).
 
 ## Client credentials for the gateway
