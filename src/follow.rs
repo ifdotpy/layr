@@ -184,7 +184,25 @@ impl<'a> Repo<'a> {
         let fetched = revs::resolve(self, Some(line), &rb)?;
         let head = self.line(&line.id)?.head;
         if fetched == head || self.is_ancestor(&fetched, &head)? {
-            return Ok(Some("up to date".into()));
+            // A pass that merged but saved no cache (it stopped, or an older layr ran it) leaves the head without
+            // a cache, and new lines start cold. This pass runs the cache step again; once the caches are saved
+            // with the head, the next passes do nothing.
+            let now = self.line(&line.id)?;
+            let behind = self.caches_behind_head(&now)?;
+            if behind.is_empty() {
+                return Ok(Some("up to date".into()));
+            }
+            {
+                let _lock = self.p.lock()?;
+                if has_unsaved(&self.locked_status(&now)?.0) {
+                    return Ok(Some("up to date; caches not saved: unsaved work".into()));
+                }
+            }
+            // No merge ran, so no cache of another line is taken: the line's own caches are built and saved.
+            return Ok(Some(match self.take_follow_caches(ctx, line, Vec::new(), Some(&head), true) {
+                Ok(_) => format!("up to date; caches saved with the head ({})", behind.join(", ")),
+                Err(e) => format!("up to date; caches not saved: {e:#}"),
+            }));
         }
         if !explicit && refused.is_some_and(|r| r.remote == fetched && r.line == head) {
             return Ok(None);
