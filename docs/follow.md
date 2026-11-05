@@ -33,7 +33,9 @@
    the line head changes. `layr follow` and `--run` always try.
 5. Caches, only after a merge:
    - Candidate lines: lines with an `export` record to that remote in the last 14 days, newest
-     export first. A line is a candidate through the state of its export.
+     export first. A line is a candidate through the state of its export. A remote with the same
+     repository URL counts as that remote (`git@host:path`, `ssh://` and `https://` forms of one
+     repository match), so a push over https is a source of a follow over ssh.
    - For each candidate, in order: a protected line needs its merge rule (`merge_met_rule`), and the
      squash-safe content check (`caches_contained`, #133) must pass. Then `pull_caches` takes the
      folders that the candidate has and no earlier candidate took. An error of one candidate (its
