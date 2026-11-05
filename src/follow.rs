@@ -322,6 +322,13 @@ impl<'a> Repo<'a> {
         }
         // Prunes each taken folder, then saves the caches of the line.
         admin::save(ctx, &["--caches".to_string(), "-q".to_string()])?;
+        // A save with no build (a local merge) is not warm for the new head: a followed line gets the mark, and its
+        // next follow pass builds and saves again. Only a followed line reads the mark, so only it gets one.
+        if warm {
+            self.set_unbuilt(line, false)?;
+        } else if target(self, line)?.is_some() {
+            self.set_unbuilt(line, true)?;
+        }
         Ok((taken, refusal))
     }
 
