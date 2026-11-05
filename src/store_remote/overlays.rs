@@ -457,7 +457,8 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
             }
             if let Some(recipient) = &paper_recipient {
                 scoped.backend.put_new("slots/paper.age", keys::seal_slot(identity, recipient)?)?;
-            } else {
+            } else if !repo.need_overlay(&name)?.cache {
+                // A cache is regenerable: the paper key need not open it.
                 report.omitted.push(format!("overlay {name}: no paper slot; run once with LAYR_PAPER_KEY_FILE to add it"));
             }
         }

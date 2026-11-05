@@ -366,14 +366,50 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
     repo.p.verify_records()?;
     // A list is enough for a writer without permission to read encrypted objects.
     let stage = crate::trace::span("store records");
+    // A reader checks that the remote history of this machine is the local one. Another store
+    // with the same machine identity writes other records under the same numbers; a push from it
+    // must fail, not skip or drop its records.
+    // `own-records` names the newest segment of this machine that this store wrote or checked.
+    let own_file = store.dir.join("own-records");
+    // A root key epoch keeps this folder and can reuse segment names: the epoch is in the name.
+    let scope = store.epoch.as_ref().map_or("root", |e| e.key.epoch.as_str()).to_string();
+    let known = std::fs::read_to_string(&own_file).unwrap_or_default();
+    let seen = |key: &str| known.trim() == format!("{scope} {key}");
+    let identity = if blind_layer { None } else { store.identity(&descriptor, None).ok() };
+    let own_history = |key: &str, seq: u64| -> Result<()> {
+        let Some(identity) = &identity else { return Ok(()) };
+        if seen(key) {
+            return Ok(());
+        }
+        let body = store.backend.get(key)?.context("record segment disappeared")?;
+        let body = String::from_utf8(keys::decrypt(identity, &body)?)?;
+        let remote = body.lines().last().unwrap_or_default();
+        if repo.p.db.record_line(&store.machine, seq)?.as_deref() != Some(remote) {
+            bail!(
+                "the remote has other records of this machine ({}, record {seq}): another store uses this machine identity; run one writer per identity",
+                store.machine
+            );
+        }
+        Ok(())
+    };
     for machine in repo.p.db.record_machines()? {
         let mut last = 0;
+        let mut last_key = None;
         for object in if blind_layer { Vec::new() } else { store.backend.list(&format!("records/{machine}/"))? } {
             let (m, _, end) = format::parse_segment_name(&object.key).context("invalid remote segment name")?;
             if m != machine {
                 bail!("segment is outside its machine prefix");
             }
-            last = last.max(end);
+            if end > last {
+                last = end;
+                last_key = Some(object.key);
+            }
+        }
+        if let Some(key) = last_key.as_deref().filter(|_| machine == store.machine) {
+            own_history(key, last)?;
+            if !seen(key) {
+                std::fs::write(&own_file, format!("{scope} {key}"))?;
+            }
         }
         let lines = repo.p.db.lines_after(&machine, last)?;
         if lines.is_empty() {
@@ -392,7 +428,13 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
             let mut bytes = lines[start..end].join("\n").into_bytes();
             bytes.push(b'\n');
             // Publish ordered, bounded segments. A retry resumes after the last complete segment.
-            store.backend.put_new(&format::segment_name(&machine, first, last), keys::encrypt(&descriptor.recipient, &bytes)?)?;
+            let name = format::segment_name(&machine, first, last);
+            if !store.backend.put_new(&name, keys::encrypt(&descriptor.recipient, &bytes)?)? && machine == store.machine {
+                own_history(&name, last)?;
+            }
+            if machine == store.machine {
+                std::fs::write(&own_file, format!("{scope} {name}"))?;
+            }
             report.records += end - start;
             start = end;
         }
