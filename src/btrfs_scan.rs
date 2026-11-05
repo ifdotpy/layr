@@ -10,8 +10,8 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, ErrorKind};
 use std::os::fd::AsFd;
-use std::os::unix::fs::MetadataExt;
 use std::os::unix::ffi::OsStringExt;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 pub type PartId = usize;
@@ -27,24 +27,29 @@ pub struct Plan {
 }
 
 fn mount_points(data: &[u8]) -> io::Result<Vec<PathBuf>> {
-    data.split(|&b| b == b'\n').filter(|line| !line.is_empty()).map(|line| {
-        let field = line.split(|&b| b == b' ').filter(|v| !v.is_empty()).nth(4).ok_or_else(invalid)?;
-        let mut decoded = Vec::with_capacity(field.len());
-        let mut i = 0;
-        while i < field.len() {
-            if field[i] == b'\\' {
-                let digits = field.get(i + 1..i + 4).ok_or_else(invalid)?;
-                if !digits.iter().all(|d| (b'0'..=b'7').contains(d)) { return Err(invalid()); }
-                let value = u16::from(digits[0] - b'0') * 64 + u16::from(digits[1] - b'0') * 8 + u16::from(digits[2] - b'0');
-                decoded.push(u8::try_from(value).map_err(|_| invalid())?);
-                i += 4;
-            } else {
-                decoded.push(field[i]);
-                i += 1;
+    data.split(|&b| b == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let field = line.split(|&b| b == b' ').filter(|v| !v.is_empty()).nth(4).ok_or_else(invalid)?;
+            let mut decoded = Vec::with_capacity(field.len());
+            let mut i = 0;
+            while i < field.len() {
+                if field[i] == b'\\' {
+                    let digits = field.get(i + 1..i + 4).ok_or_else(invalid)?;
+                    if !digits.iter().all(|d| (b'0'..=b'7').contains(d)) {
+                        return Err(invalid());
+                    }
+                    let value = u16::from(digits[0] - b'0') * 64 + u16::from(digits[1] - b'0') * 8 + u16::from(digits[2] - b'0');
+                    decoded.push(u8::try_from(value).map_err(|_| invalid())?);
+                    i += 4;
+                } else {
+                    decoded.push(field[i]);
+                    i += 1;
+                }
             }
-        }
-        Ok(PathBuf::from(std::ffi::OsString::from_vec(decoded)))
-    }).collect()
+            Ok(PathBuf::from(std::ffi::OsString::from_vec(decoded)))
+        })
+        .collect()
 }
 
 pub fn nested_mount(parts: &[PathBuf]) -> io::Result<Option<PathBuf>> {
@@ -74,7 +79,15 @@ struct RootIdentity {
 }
 
 fn root_identity(item: &[u8]) -> io::Result<RootIdentity> {
-    Ok(RootIdentity { uuid: bytes(item, ROOT_UUID)?, parent: bytes(item, ROOT_PARENT_UUID)?, received: bytes(item, ROOT_RECEIVED_UUID)? })
+    // A legacy writer may leave stale UUID fields behind.
+    if le64(item, ROOT_GENERATION)? != le64(item, ROOT_GENERATION_V2)? {
+        return Err(invalid());
+    }
+    Ok(RootIdentity {
+        uuid: bytes(item, ROOT_UUID)?,
+        parent: bytes(item, ROOT_PARENT_UUID)?,
+        received: bytes(item, ROOT_RECEIVED_UUID)?,
+    })
 }
 
 fn lineage(start: RootIdentity, roots: &HashMap<[u8; 16], RootIdentity>) -> [u8; 16] {
@@ -103,7 +116,9 @@ const INODE_EXTREF: u32 = 13;
 const EXTENT_DATA: u32 = 108;
 const ROOT_REF: u32 = 156;
 const ROOT_ITEM: u32 = 132;
-// Offsets of the UUID fields in the packed on-disk btrfs_root_item.
+// Offsets of the generation and UUID fields in the packed on-disk btrfs_root_item.
+const ROOT_GENERATION: usize = 160;
+const ROOT_GENERATION_V2: usize = 239;
 const ROOT_UUID: usize = 247;
 const ROOT_PARENT_UUID: usize = 263;
 const ROOT_RECEIVED_UUID: usize = 279;
@@ -536,6 +551,8 @@ mod tests {
         let root = root_identity(&item).unwrap();
         assert_eq!((root.uuid, root.parent, root.received), ([1; 16], [2; 16], [3; 16]));
         assert!(root_identity(&item[..item.len() - 1]).is_err());
+        item[ROOT_GENERATION] = 1;
+        assert!(root_identity(&item).is_err());
     }
 
     #[test]
@@ -587,7 +604,10 @@ mod tests {
     fn extent_fixtures() {
         let mut data = vec![0; EXTENT_INLINE_HEADER + 7];
         data[..8].copy_from_slice(&42u64.to_le_bytes());
-        assert_eq!(extent([1; 16], 8, 9, &data).unwrap(), Some((ExtentKey::Inline { lineage: [1; 16], ino: 8, offset: 9, generation: 42 }, 7)));
+        assert_eq!(
+            extent([1; 16], 8, 9, &data).unwrap(),
+            Some((ExtentKey::Inline { lineage: [1; 16], ino: 8, offset: 9, generation: 42 }, 7))
+        );
         data.resize(EXTENT_REGULAR_SIZE, 0);
         data[EXTENT_TYPE] = FILE_EXTENT_REG;
         data[EXTENT_BYTENR..EXTENT_BYTENR + 8].copy_from_slice(&4096u64.to_le_bytes());

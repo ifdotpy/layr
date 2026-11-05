@@ -290,6 +290,8 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
     let keys: Mutex<HashMap<(FsId, ExtentKey), (usize, u64)>> = Mutex::new(HashMap::new());
     let results: Vec<Mutex<Result<PartSpace>>> = parts.iter().map(|_| Mutex::new(Ok(PartSpace::default()))).collect();
     #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+    let nested = std::sync::atomic::AtomicBool::new(false);
+    #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
     let outside = {
         let paths: Vec<_> = parts.iter().map(|(_, path)| path.clone()).collect();
         let plan = std::thread::scope(|scope| {
@@ -298,6 +300,7 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
                     crate::sys::lower_thread_priority();
                     if let Some(mount) = crate::btrfs_scan::nested_mount(&paths)? {
                         eprintln!("note: nested mount {}: walking files instead", mount.display());
+                        nested.store(true, std::sync::atomic::Ordering::Relaxed);
                         return Ok(None);
                     }
                     crate::btrfs_scan::plan(root, &paths).map(Some)
@@ -381,6 +384,9 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
     let seen: Vec<_> = parts.iter().map(|_| Mutex::new(std::collections::HashSet::new())).collect();
     crate::fsutil::work_queue(units, |(i, path), _add| {
         let in_trash = parts[i].0 == "trash" || parts[i].0.ends_with(": trash");
+        #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+        let unit_fs =
+            if nested.load(std::sync::atomic::Ordering::Relaxed) { filesystem_or_empty(&path) } else { Ok(filesystems[i]) };
         let mut own = 0u64;
         let mut local: HashMap<ExtentKey, u64> = HashMap::new();
         let mut collect = |h: &crate::fsutil::Held| {
@@ -391,17 +397,24 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
             }
         };
         #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
-        let walked = crate::fsutil::fiemap_visit_shallow(&path, &seen[i], &mut |child| _add((i, child)), &mut collect);
+        let walked = match unit_fs {
+            Ok(Some(fsid)) => {
+                crate::fsutil::fiemap_visit_shallow(&path, &seen[i], &mut |child| _add((i, child)), &mut collect).map(|()| fsid)
+            }
+            Ok(None) => return,
+            Err(err) => Err(err.into()),
+        };
         #[cfg(not(all(target_os = "linux", not(feature = "overlayfs"))))]
-        let walked = crate::storage::visit_space(&path, &mut collect);
+        let walked =
+            crate::storage::visit_space(&path, &mut collect).map(|()| filesystems[i].expect("only present parts are walked"));
         let mut result = results[i].lock().unwrap();
         match walked {
             Err(e) if in_trash && vanished(&e) => {}
             Err(e) => *result = Err(e),
-            Ok(()) => {
+            Ok(fsid) => {
                 let mut all = keys.lock().unwrap();
                 for (k, b) in local {
-                    let e = all.entry((filesystems[i].expect("only present parts are walked"), k)).or_insert((i, b));
+                    let e = all.entry((fsid, k)).or_insert((i, b));
                     if e.0 != i {
                         e.0 = SHARED;
                     }

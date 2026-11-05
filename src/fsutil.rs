@@ -1408,9 +1408,10 @@ fn fiemap_held(extents: &[crate::sys::MappedExtent], dev: u64, ino: u64, f: &mut
     let alloc = extents.iter().map(|x| x.len).sum();
     let own = extents.iter().filter(|x| !x.shared).map(|x| x.len).sum();
     // An inode key preserves hard-link sharing when FIEMAP has no physical address.
-    let shared: Vec<_> = extents.iter().map(|x| {
-        (x.addr.map_or(ExtentKey::Unaddressed { dev, ino, offset: x.logical }, ExtentKey::Disk), x.len)
-    }).collect();
+    let shared: Vec<_> = extents
+        .iter()
+        .map(|x| (x.addr.map_or(ExtentKey::Unaddressed { dev, ino, offset: x.logical }, ExtentKey::Disk), x.len))
+        .collect();
     f(&Held { alloc, own, exclusive: 0, shared: &shared });
 }
 

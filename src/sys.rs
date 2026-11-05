@@ -1763,7 +1763,12 @@ pub fn fiemap_extents(file: &std::fs::File) -> io::Result<Vec<MappedExtent>> {
         }
         for e in &map.extents[..mapped] {
             let addressable = e.flags & FIEMAP_UNSTABLE == 0;
-            out.push(MappedExtent { logical: e.logical, addr: (addressable && e.physical != 0).then_some(e.physical), len: e.length, shared: e.flags & EXTENT_SHARED != 0 });
+            out.push(MappedExtent {
+                logical: e.logical,
+                addr: (addressable && e.physical != 0).then_some(e.physical),
+                len: e.length,
+                shared: e.flags & EXTENT_SHARED != 0,
+            });
             if e.flags & EXTENT_LAST != 0 {
                 return Ok(out);
             }
