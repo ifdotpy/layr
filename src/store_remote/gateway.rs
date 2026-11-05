@@ -72,6 +72,32 @@ fn bytes(response: Response, limit: usize) -> Result<Vec<u8>> {
     }
     Ok(data)
 }
+/// Tries of a request that the gateway refuses as busy (503 or 429) before the error goes to the caller.
+const BUSY_TRIES: u32 = 8;
+
+/// Sends with `send` again while the gateway answers busy (503, 429): it waits `Retry-After` (at most 30 s) or a
+/// doubling backoff from 0.5 s to 8 s, at most `BUSY_TRIES` times. A refused request did nothing on the gateway, so
+/// a GET, a conditional PUT and a DELETE may go again. Other answers return at once.
+fn send_busy(mut send: impl FnMut() -> Result<Response>) -> Result<Response> {
+    let mut wait = std::time::Duration::from_millis(500);
+    let mut attempt = 1;
+    loop {
+        let response = send()?;
+        if !matches!(response.status().as_u16(), 429 | 503) || attempt >= BUSY_TRIES {
+            return Ok(response);
+        }
+        let after = response
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map(|s| std::time::Duration::from_secs(s.min(30)));
+        std::thread::sleep(after.unwrap_or(wait));
+        wait = (wait * 2).min(std::time::Duration::from_secs(8));
+        attempt += 1;
+    }
+}
+
 fn json<T: serde::de::DeserializeOwned>(response: Response, limit: usize) -> Result<T> {
     if !response.status().is_success() {
         bail!("gateway: HTTP {}", response.status().as_u16());
@@ -272,7 +298,7 @@ impl Gateway {
             if let Some(body) = body {
                 request = request.json(body);
             }
-            request.send().map_err(reqwest::Error::without_url).map_err(Into::into)
+            send_busy(|| request.try_clone().context("gateway request cannot be sent again")?.send().map_err(reqwest::Error::without_url).map_err(Into::into))
         };
         if let Some(token) = token {
             return json(send(token)?, 512 << 10);
@@ -362,7 +388,7 @@ impl Gateway {
                     .header("content-type", if action == "token" { "application/json" } else { "application/octet-stream" })
                     .body(data.clone());
             }
-            request.send().map_err(reqwest::Error::without_url).map_err(Into::into)
+            send_busy(|| request.try_clone().context("gateway request cannot be sent again")?.send().map_err(reqwest::Error::without_url).map_err(Into::into))
         };
         if person {
             let response = send(Some(&self.session_token(false)?))?;
@@ -864,6 +890,40 @@ mod tests {
         let result = gateway.list("states/");
         server.join().unwrap();
         result
+    }
+
+    #[test]
+    fn a_busy_gateway_is_asked_again() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for answer in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let mut request = Vec::new();
+                let mut byte = [0];
+                while !request.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).unwrap();
+                    request.push(byte[0]);
+                }
+                if answer < 2 {
+                    let status = if answer == 0 { "503 Service Unavailable" } else { "429 Too Many Requests" };
+                    write!(stream, "HTTP/1.1 {status}\r\nRetry-After: 0\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                } else {
+                    let body = serde_json::to_vec(&serde_json::json!({"objects": [], "continuation": null})).unwrap();
+                    write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+                    let _ = stream.write_all(&body);
+                }
+            }
+        });
+        let mut gateway = Gateway::open("layr+https://localhost/project").unwrap();
+        gateway.base = reqwest::Url::parse(&format!("http://{address}/v1/p/project/")).unwrap();
+        gateway.token = Some("fixture.write".into());
+        let result = gateway.list("states/");
+        server.join().unwrap();
+        assert!(result.unwrap().is_empty(), "a 503 and a 429 are asked again");
     }
 
     #[test]
