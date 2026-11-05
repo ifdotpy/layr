@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.29.0](https://github.com/ifdotpy/layr/compare/v0.28.0...v0.29.0) (2026-11-05)
+
+
+### Features
+
+* **checks:** platforms in check results, and checks pending for CI ([#272](https://github.com/ifdotpy/layr/issues/272)) ([49549dd](https://github.com/ifdotpy/layr/commit/49549dd2afc3fc1f7a21139d1f2240c6c623eee6))
+
+
+### Bug Fixes
+
+* **follow:** the pass after a local merge builds the caches of the new head ([#283](https://github.com/ifdotpy/layr/issues/283)) ([9674131](https://github.com/ifdotpy/layr/commit/967413142ef7853d6b6a5b2fca09aac08d6d1f4c))
+* **push:** fail when another store writes as this machine ([#280](https://github.com/ifdotpy/layr/issues/280)) ([5fafaf9](https://github.com/ifdotpy/layr/commit/5fafaf9af9da2dbf8b12b501d78a8e6c431eeeba))
+* **remote:** gc of a file store does not fail on a put in flight ([#278](https://github.com/ifdotpy/layr/issues/278)) ([8043980](https://github.com/ifdotpy/layr/commit/804398035c640654612793d0821a3ff7199c785e))
+
 ## [0.28.0](https://github.com/ifdotpy/layr/compare/v0.27.0...v0.28.0) (2026-11-05)
 
 
