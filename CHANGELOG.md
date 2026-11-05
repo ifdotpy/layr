@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.30.0](https://github.com/ifdotpy/layr/compare/v0.29.1...v0.30.0) (2026-11-05)
+
+
+### Features
+
+* **checks:** warm check copies that give their caches back, and checks run --state ([#286](https://github.com/ifdotpy/layr/issues/286)) ([8685476](https://github.com/ifdotpy/layr/commit/868547658a1a7a7303952acf9e6510b5dc593adb))
+
+
+### Bug Fixes
+
+* **caches:** take the cache saved with a line's head, and give new readers caches at push ([#285](https://github.com/ifdotpy/layr/issues/285)) ([84c590f](https://github.com/ifdotpy/layr/commit/84c590f8e81653f1bcca02f85ecc7387945a48a3))
+* **push:** move cache files that a push before chunks left in parts to chunks ([#291](https://github.com/ifdotpy/layr/issues/291)) ([ea59cad](https://github.com/ifdotpy/layr/commit/ea59cadf21dc5250dd3e67dca8fcc71d92773495))
+* **remote:** clones that take only the caches they use, and survive a fresh trust or a sweep ([#289](https://github.com/ifdotpy/layr/issues/289)) ([4e3b6ce](https://github.com/ifdotpy/layr/commit/4e3b6cee99acf3cb710ff2732e09bb66c4de218d))
+
 ## [0.29.1](https://github.com/ifdotpy/layr/compare/v0.29.0...v0.29.1) (2026-11-05)
 
 
