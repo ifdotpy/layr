@@ -136,12 +136,16 @@ machines. Source states keep frames.
   never change after publication. A local copy of each index is kept in `chunk-indexes/`.
 - Dedup: a writer skips a chunk that a published index or its own open pack holds. Before it puts
   the tree, it lists the indexes again. A reused chunk that a deletion released meanwhile goes up
-  again from the file. A deletion between that check and the tree put remains possible. `fsck`
-  reports such a tree, and the next push of its line repairs it.
+  again from the file. The wait of the sweep (below) covers a deletion between that check and the
+  tree put. `fsck` reports such a tree, and the next push of its line repairs it.
 - Deletion (`chunked::release`): when chunk ids lose their last live tree, each pack that holds
   one is rewritten. Its live chunks go to a new pack and index, and the old pack and index are
   deleted. A pack without live chunks is deleted directly. No dead chunk stays in a pack. The new
   pack is put before the deletes, so a crash leaves a duplicate, and a rerun deletes the same objects.
+- Two writers: a sweep releases a dead chunk only when a pass of the same machine found it dead at
+  least 2 hours before (`dead-chunks` in the layer store) and finds it dead again. A push of
+  another machine that reused the chunk meanwhile names it in its tree, so the chunk is live at the
+  next pass and loses its mark. A push that takes longer than the wait can still race.
 - A reader that does not find a chunk lists the packs once more: a rewrite may have moved it.
 - The remote cache sweep (`store_remote::sweep`) deletes the chunks that its dead trees name and no
   kept tree names, through `chunked::release`, after the trees. A pack that no tree names (a push

@@ -36,10 +36,31 @@ pub struct Swept {
     pub chunk_bytes: u64,
     /// Kept trees that name a chunk that no pack holds (a deletion raced their push).
     pub missing: usize,
+    /// Dead chunks that wait for a later pass (`CHUNK_GRACE`).
+    pub chunks_waiting: usize,
 }
 
 /// A pack index younger than this may belong to a push in flight.
 const PACK_GRACE: i64 = 24 * 3600;
+
+/// A dead chunk is released only when a pass of this machine found it dead at least this long before and finds it
+/// dead again. A writer that reused the chunk in a push in flight (its tree is not listed yet) names it in a tree
+/// before then, and the chunk is live at the next pass. The test hook `LAYR_TEST_CHUNK_GRACE` (seconds) sets it.
+const CHUNK_GRACE: i64 = 2 * 3600;
+
+fn chunk_grace() -> i64 {
+    std::env::var("LAYR_TEST_CHUNK_GRACE").ok().and_then(|v| v.parse().ok()).unwrap_or(CHUNK_GRACE)
+}
+
+/// The dead chunks that passes of this machine found, with the time each was first found dead (`dead-chunks` in
+/// the layer store, `<chunk> <unix time>` lines).
+fn dead_marks(dir: &std::path::Path) -> BTreeMap<String, i64> {
+    std::fs::read_to_string(dir.join("dead-chunks"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.split_once(' ').and_then(|(id, t)| Some((id.to_string(), t.parse().ok()?))))
+        .collect()
+}
 
 /// Delete the dead cache trees of the layer `store` of a cache overlay: the trees of states that the
 /// overlay's records know (`known`) and do not keep (`kept`), and their parts that no kept tree links.
@@ -203,6 +224,33 @@ fn sweep_chunks(
             if dead.contains(id) {
                 swept.chunks += 1;
                 swept.chunk_bytes += length;
+            }
+        }
+    }
+    // Only the chunks that an earlier pass found dead `chunk_grace` ago go now; the others are marked for a later
+    // pass. A chunk that is live again loses its mark.
+    if !dry_run {
+        let marks = dead_marks(&store.dir);
+        // A marked chunk whose tree an earlier pass deleted is still dead while no live tree names it and a pack
+        // holds it.
+        dead.extend(marks.keys().filter(|id| !live.contains(*id) && held.contains(id.as_str())).cloned());
+        let now_marks: BTreeMap<String, i64> = dead.iter().map(|id| (id.clone(), marks.get(id).copied().unwrap_or(now))).collect();
+        if now_marks != marks {
+            let text: String = now_marks.iter().map(|(id, t)| format!("{id} {t}\n")).collect();
+            crate::fsutil::atomic_write(&store.dir.join("dead-chunks"), text.as_bytes(), 0o600)?;
+        }
+        let grace = chunk_grace();
+        let young = now_marks.iter().filter(|(_, t)| now - **t < grace).count();
+        swept.chunks_waiting = young;
+        dead.retain(|id| now_marks.get(id).is_some_and(|t| now - t >= grace));
+        swept.chunks = 0;
+        swept.chunk_bytes = 0;
+        for index in indexes.values() {
+            for (id, _, length) in &index.chunks {
+                if dead.contains(id) {
+                    swept.chunks += 1;
+                    swept.chunk_bytes += length;
+                }
             }
         }
     }
