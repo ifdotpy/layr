@@ -16,17 +16,19 @@ use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::process::Command;
 
-/// Lower this thread's CPU and I/O priority for background work, best effort.
+/// Lower the calling thread's CPU and I/O priority, best effort. Call only from threads
+/// dedicated to background work: on Linux these priorities apply per thread.
 #[cfg(target_os = "linux")]
 pub fn lower_thread_priority() {
     const NICE_LOWEST: libc::c_int = 19;
     const IOPRIO_WHO_PROCESS: libc::c_int = 1;
-    const IOPRIO_CLASS_IDLE: libc::c_int = 3;
+    const IOPRIO_CLASS_BE: libc::c_int = 2;
+    const IOPRIO_BE_LOWEST: libc::c_int = 7;
     const IOPRIO_CLASS_SHIFT: libc::c_int = 13;
     // SAFETY: both calls operate on the calling thread, and have no pointer arguments.
     unsafe {
         libc::setpriority(libc::PRIO_PROCESS, 0, NICE_LOWEST);
-        libc::syscall(libc::SYS_ioprio_set, IOPRIO_WHO_PROCESS, 0, IOPRIO_CLASS_IDLE << IOPRIO_CLASS_SHIFT);
+        libc::syscall(libc::SYS_ioprio_set, IOPRIO_WHO_PROCESS, 0, (IOPRIO_CLASS_BE << IOPRIO_CLASS_SHIFT) | IOPRIO_BE_LOWEST);
     }
 }
 
@@ -1207,9 +1209,7 @@ pub fn apfs_xattrs_where(path: &std::path::Path, read_value: impl Fn(&[u8]) -> b
         let mut value = vec![0u8; 256];
         let n = loop {
             // SAFETY: as above.
-            let n = unsafe {
-                libc::getxattr(cp.as_ptr(), cn.as_ptr(), value.as_mut_ptr().cast(), value.len(), 0, libc::XATTR_NOFOLLOW)
-            };
+            let n = unsafe { libc::getxattr(cp.as_ptr(), cn.as_ptr(), value.as_mut_ptr().cast(), value.len(), 0, libc::XATTR_NOFOLLOW) };
             if n >= 0 {
                 break n as usize;
             }
@@ -1628,15 +1628,7 @@ pub fn fiemap_full(file: &std::fs::File) -> io::Result<Vec<(u64, u64, u64, u32)>
     let mut out = Vec::new();
     let mut start = 0u64;
     loop {
-        let mut map = Map {
-            start,
-            length: u64::MAX - start,
-            flags: 0,
-            mapped: 0,
-            count: COUNT as u32,
-            reserved: 0,
-            extents: [Extent::default(); COUNT],
-        };
+        let mut map = Map { start, length: u64::MAX - start, flags: 0, mapped: 0, count: COUNT as u32, reserved: 0, extents: [Extent::default(); COUNT] };
         // SAFETY: the descriptor is live and `map` is a valid fiemap buffer with room for COUNT extents.
         if unsafe { libc::ioctl(file.as_raw_fd(), FS_IOC_FIEMAP as _, &mut map as *mut Map) } != 0 {
             return Err(io::Error::last_os_error());
@@ -1656,15 +1648,20 @@ pub fn fiemap_full(file: &std::fs::File) -> io::Result<Vec<(u64, u64, u64, u32)>
     }
 }
 
+/// An extent returned by FIEMAP; unstable addresses are absent.
+#[cfg(target_os = "linux")]
+pub struct MappedExtent {
+    pub addr: Option<u64>,
+    pub len: u64,
+    pub shared: bool,
+}
+
 /// The extents of an open file (`FIEMAP`): physical address, length, and whether another file
 /// or snapshot shares it (`FIEMAP_EXTENT_SHARED`). btrfs, XFS and ext4.
 #[cfg(target_os = "linux")]
-pub fn fiemap_extents(file: &std::fs::File) -> io::Result<Vec<(u64, u64, bool)>> {
+pub fn fiemap_extents(file: &std::fs::File) -> io::Result<Vec<MappedExtent>> {
     const FS_IOC_FIEMAP: libc::c_ulong = 0xC020_660B;
     const EXTENT_LAST: u32 = 0x1;
-    const EXTENT_UNKNOWN: u32 = 0x2;
-    const EXTENT_DELALLOC: u32 = 0x4;
-    const EXTENT_DATA_INLINE: u32 = 0x200;
     const EXTENT_SHARED: u32 = 0x2000;
     const COUNT: usize = 256;
     #[repr(C)]
@@ -1690,15 +1687,7 @@ pub fn fiemap_extents(file: &std::fs::File) -> io::Result<Vec<(u64, u64, bool)>>
     let mut out = Vec::new();
     let mut start = 0u64;
     loop {
-        let mut map = Map {
-            start,
-            length: u64::MAX - start,
-            flags: 0,
-            mapped: 0,
-            count: COUNT as u32,
-            reserved: 0,
-            extents: [Extent::default(); COUNT],
-        };
+        let mut map = Map { start, length: u64::MAX - start, flags: 0, mapped: 0, count: COUNT as u32, reserved: 0, extents: [Extent::default(); COUNT] };
         // SAFETY: the descriptor is live and `map` is a valid fiemap buffer with room for COUNT extents.
         if unsafe { libc::ioctl(file.as_raw_fd(), FS_IOC_FIEMAP as _, &mut map as *mut Map) } != 0 {
             return Err(io::Error::last_os_error());
@@ -1708,8 +1697,8 @@ pub fn fiemap_extents(file: &std::fs::File) -> io::Result<Vec<(u64, u64, bool)>>
             return Ok(out);
         }
         for e in &map.extents[..mapped] {
-            let addressable = e.flags & (EXTENT_UNKNOWN | EXTENT_DELALLOC | EXTENT_DATA_INLINE) == 0;
-            out.push((if addressable { e.physical } else { 0 }, e.length, e.flags & EXTENT_SHARED != 0));
+            let addressable = e.flags & FIEMAP_UNSTABLE == 0;
+            out.push(MappedExtent { addr: (addressable && e.physical != 0).then_some(e.physical), len: e.length, shared: e.flags & EXTENT_SHARED != 0 });
             if e.flags & EXTENT_LAST != 0 {
                 return Ok(out);
             }

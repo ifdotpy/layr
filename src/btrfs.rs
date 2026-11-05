@@ -3,13 +3,13 @@
 
 use crate::sys;
 use anyhow::{anyhow, bail, Context, Result};
-use std::fs;
 use std::fs::File;
 use std::io::Read;
 use std::os::fd::AsFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::fs;
 
 const BTRFS_SUPER_MAGIC: i64 = 0x9123_683e;
 const FIRST_FREE_OBJECTID: u64 = 256;

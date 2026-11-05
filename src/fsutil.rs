@@ -214,7 +214,10 @@ fn refuse_case_clash_apfs(root: &Path, rel: &str) -> Result<()> {
                 continue;
             }
             let parent = done.rsplit_once('/').map(|(p, _)| format!("{p}/")).unwrap_or_default();
-            bail!("{done} and {parent}{stored} {}", clash_reason(sensitive));
+            bail!(
+                "{done} and {parent}{stored} {}",
+                clash_reason(sensitive)
+            );
         }
         if fs::symlink_metadata(&path).is_err() {
             break;
@@ -348,7 +351,10 @@ fn refuse_remaining_clashes(dst: &Path, gone: &[&str], write: &[&str]) -> Result
                 let other = if parent.is_empty() { stored } else { format!("{parent}/{stored}") };
                 // After the removals, nothing but empty folders may stay there.
                 if !holds_no_files(dst, &other, &leaves) {
-                    bail!("{done} and {other} {}", clash_reason(sensitive));
+                    bail!(
+                        "{done} and {other} {}",
+                        clash_reason(sensitive)
+                    );
                 }
                 break;
             }
@@ -1230,9 +1236,7 @@ pub fn git_writable(w: &Path, writable: bool) {
         let _ = rustix::fs::fchmod(&g, mode);
     }
     for s in subs {
-        if let Ok(fd) =
-            rustix::fs::openat(&g, s, OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty())
-        {
+        if let Ok(fd) = rustix::fs::openat(&g, s, OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty()) {
             let _ = rustix::fs::fchmod(&fd, mode);
         }
     }
@@ -1269,6 +1273,53 @@ pub fn rename_tree(from: impl AsRef<Path>, to: impl AsRef<Path>) -> Result<()> {
 pub struct Space {
     pub total: u64,
     pub unique: u64,
+}
+
+/// Use the parallelism available to this process, including system-imposed limits.
+pub fn workers() -> usize {
+    std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+}
+
+/// Run a dynamic queue of background jobs, each of which can add more jobs.
+pub fn work_queue<T: Send>(seed: Vec<T>, work: impl Fn(T, &dyn Fn(T)) + Sync) {
+    use std::collections::VecDeque;
+    use std::sync::{Condvar, Mutex};
+    if seed.is_empty() {
+        return;
+    }
+    let pending = seed.len();
+    let queue = Mutex::new((VecDeque::from(seed), pending));
+    let ready = Condvar::new();
+    std::thread::scope(|scope| {
+        for _ in 0..workers() {
+            scope.spawn(|| {
+                crate::sys::lower_thread_priority();
+                loop {
+                    let job = {
+                        let mut q = queue.lock().unwrap();
+                        while q.0.is_empty() && q.1 != 0 {
+                            q = ready.wait(q).unwrap();
+                        }
+                        match q.0.pop_front() {
+                            Some(job) => job,
+                            None => break,
+                        }
+                    };
+                    work(job, &|child| {
+                        let mut q = queue.lock().unwrap();
+                        q.1 += 1;
+                        q.0.push_back(child);
+                        ready.notify_one();
+                    });
+                    let mut q = queue.lock().unwrap();
+                    q.1 -= 1;
+                    if q.1 == 0 {
+                        ready.notify_all();
+                    }
+                }
+            });
+        }
+    });
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1340,13 +1391,13 @@ pub fn apfs_space(root: &Path) -> Result<Space> {
 
 /// Account for unaddressable extents separately from addressable extents.
 #[cfg(target_os = "linux")]
-fn fiemap_held(extents: &[(u64, u64, bool)], f: &mut dyn FnMut(&Held)) {
-    let alloc = extents.iter().map(|x| x.1).sum();
-    let own = extents.iter().filter(|x| !x.2).map(|x| x.1).sum();
+fn fiemap_held(extents: &[crate::sys::MappedExtent], f: &mut dyn FnMut(&Held)) {
+    let alloc = extents.iter().map(|x| x.len).sum();
+    let own = extents.iter().filter(|x| !x.shared).map(|x| x.len).sum();
     // Inline and delayed extents have no physical address, so address zero
     // cannot identify shared data across different files.
-    let exclusive = extents.iter().filter(|x| x.0 == 0).map(|x| x.1).sum();
-    let shared: Vec<_> = extents.iter().filter(|x| x.0 != 0).map(|x| (ExtentKey::Disk(x.0), x.1)).collect();
+    let exclusive = extents.iter().filter(|x| x.addr.is_none()).map(|x| x.len).sum();
+    let shared: Vec<_> = extents.iter().filter_map(|x| x.addr.map(|addr| (ExtentKey::Disk(addr), x.len))).collect();
     f(&Held { alloc, own, exclusive, shared: &shared });
 }
 
@@ -1421,8 +1472,9 @@ mod range_tests {
     fn unaddressable_extents_are_not_deduplicated_by_address_zero() {
         let mut own = 0;
         let mut keys = Vec::new();
-        for extents in [&[(0, 4096, false), (8192, 4096, true)][..], &[(0, 4096, false)][..]] {
-            super::fiemap_held(extents, &mut |held| {
+        use crate::sys::MappedExtent;
+        for extents in [vec![MappedExtent { addr: None, len: 4096, shared: false }, MappedExtent { addr: Some(8192), len: 4096, shared: true }], vec![MappedExtent { addr: None, len: 4096, shared: false }]] {
+            super::fiemap_held(&extents, &mut |held| {
                 own += held.exclusive;
                 keys.extend_from_slice(held.shared);
             });
