@@ -466,7 +466,13 @@ fn sweep_temporaries(root: &Path, dir: &Path, cutoff: i64, dry: bool, out: &mut 
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
-        let m = fs::symlink_metadata(&path)?;
+        let temporary = entry.file_name().to_string_lossy().starts_with(".put-");
+        let m = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            // A put in flight renames or unlinks its temporary file after the read of the folder.
+            Err(error) if temporary && error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
         if m.file_type().is_symlink() {
             continue;
         }
@@ -474,7 +480,7 @@ fn sweep_temporaries(root: &Path, dir: &Path, cutoff: i64, dry: bool, out: &mut 
             sweep_temporaries(root, &path, cutoff, dry, out)?;
             continue;
         }
-        if !entry.file_name().to_string_lossy().starts_with(".put-") {
+        if !temporary {
             continue;
         }
         let modified = m.modified()?.duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64;

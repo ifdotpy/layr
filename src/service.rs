@@ -661,11 +661,14 @@ pub fn daemon(args: &[String]) -> Result<i32> {
             match crate::sys::fork() {
                 Ok(crate::sys::Fork::Child) => {
                     drop(listener);
-                    if user_mode {
-                        crate::follow::tick(&root, Caller::from_uid(own));
-                    } else {
+                    let caller = Caller::from_uid(if user_mode { own } else { 0 });
+                    if !user_mode {
                         periodic(&root, hourly);
-                        crate::follow::tick(&root, Caller::from_uid(0));
+                    }
+                    crate::follow::tick(&root, caller.clone());
+                    // Dead cache states in remotes that nobody pushes to (docs/cache-overlays.md).
+                    if hourly {
+                        crate::store_remote::sweep_tick(&root, caller);
                     }
                     std::process::exit(0);
                 }

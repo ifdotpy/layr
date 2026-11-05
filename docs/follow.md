@@ -19,7 +19,10 @@
 ## One pass (`Repo::follow_pass`)
 
 1. Fetch: `layr git fetch <remote> <branch>`.
-2. Stop when the remote state is the line head or an ancestor of it (result: up to date).
+2. Stop when the remote state is the line head or an ancestor of it (result: up to date). If a cache folder has
+   no cache saved with the head (an earlier pass stopped before its save, or a save moved the head), build and
+   save the line's own caches as in step 5, with no other line as a source (result: up to date; caches saved
+   with the head). Unsaved work skips this save. A damaged folder waits for its prune.
 3. Stop when the line has unsaved work: a changed file or a conflict (result: `skipped: unsaved work`).
    Nothing is saved for it. An untracked file is not unsaved work: the merge keeps it out of the state,
    and refuses a remote state that writes its path (the pair is then recorded as in step 4).
@@ -30,7 +33,9 @@
    the line head changes. `layr follow` and `--run` always try.
 5. Caches, only after a merge:
    - Candidate lines: lines with an `export` record to that remote in the last 14 days, newest
-     export first. A line is a candidate through the state of its export.
+     export first. A line is a candidate through the state of its export. A remote with the same
+     repository URL counts as that remote (`git@host:path`, `ssh://` and `https://` forms of one
+     repository match), so a push over https is a source of a follow over ssh.
    - For each candidate, in order: a protected line needs its merge rule (`merge_met_rule`), and the
      squash-safe content check (`caches_contained`, #133) must pass. Then `pull_caches` takes the
      folders that the candidate has and no earlier candidate took. An error of one candidate (its

@@ -178,7 +178,21 @@ There are two kinds of remote:
 - A **layr remote** (a store: `file://`, `s3://`, `layr+https://`; or a peer: `ssh://`) takes the
   whole repository: the shared set and every overlay, each overlay encrypted for its readers, as
   [overlay sync](overlay-sync-design.md) decides. Cache overlays travel too. A receiving machine
-  imports a cache state only for its own platform.
+  imports a cache state only for its own platform. A store remote keeps only the cache states that
+  the records keep (`src/store_remote/sweep.rs`): the push of a cache overlay deletes the trees of
+  the states that its records know and do not keep (beyond `history` on each line and platform, of
+  deleted lines), and the data parts that no kept tree links, parts first. A tree stays when its
+  state is not known here yet (another machine pushed it), when a kept tree is a delta of it, or
+  when it is the nearest pushed ancestor of a kept state whose tree is not there yet (a push in
+  flight on another machine reuses its parts). The daemon runs the same pass for each store remote
+  of each project every hour, so a remote that nobody pushes to loses its dead caches too (a remote
+  that cannot be reached is tried at the next pass). `layr fsck --caches --remote <name>` lists what
+  the pass would delete (exit 1 when there is something); `layr gc --remote <name>` runs it. A
+  key change (a reader removal, a closer access mode) starts a new key epoch, and a reader takes
+  only the newest published key: once the key of the new epoch is published, the push and the pass
+  delete all cache states of the older epochs whose keys were in the same key listing. An epoch
+  whose key is not published yet (a key change in flight) stays. Records and slots of an old
+  epoch stay; they are small.
 - A **git remote** takes one layer. The shared set goes to the project's git remotes (`origin`),
   as today. An overlay goes to its own git repository: `layr overlay remote add <overlay> <url>`
   records `overlay.<name>.git.<remote>` in the overlay's own records, so only its readers see the
@@ -657,10 +671,14 @@ the write (as `git checkout` does), so a warm cache looked stale and one or more
   with the cache state. No other record holds it.
 - A line that takes caches (`line new`, `merge`, the follow pass, `merge --caches-only`) gives each
   tracked file whose size and content hash equal the recorded ones the recorded time back. A file
-  with other bytes keeps the time of its write, so the tool builds it again.
+  with other bytes must look newer than the build output, so the tool builds it again: it keeps
+  its time when that time is after the save of the cache (the time of `.layr-times`), and gets the
+  current time otherwise. A line's files can carry an old time, because a clone keeps the time of
+  the first write; a cache built later from other bytes then looked current, and cargo linked a
+  stale crate.
 - This is safe by content: the build output is current for the bytes it was built from, whatever
-  the time. Two caches that recorded other bytes for one file leave its time; with equal bytes the
-  file gets the older time.
+  the time. Two caches that recorded other bytes for one file count as other bytes; with equal
+  bytes the file gets the older time.
 - Cost: one walk and one hash of the tracked files per save and per take (Studio, about 4,100
   files and 118 MB: measured in the PR). A take reads only files of the recorded size whose time
   differs.

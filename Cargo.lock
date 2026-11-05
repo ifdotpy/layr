@@ -1472,7 +1472,7 @@ dependencies = [
 
 [[package]]
 name = "layr"
-version = "0.25.0"
+version = "0.28.0"
 dependencies = [
  "age",
  "anyhow",
@@ -1584,6 +1584,7 @@ dependencies = [
  "ruzstd",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "ssh-key",
  "uuid",
  "zstd-safe",

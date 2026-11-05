@@ -612,6 +612,44 @@ impl<'a> Repo<'a> {
         Ok(None)
     }
 
+    /// The cache folders of `line` with no cache saved with its head: a cache in the working folder whose
+    /// newest saved state on this line's overlay line was saved with another state, or no state was saved.
+    /// `save --caches` with no named change saves with an automatic state over the head: that counts. A
+    /// damaged folder is left out: the save refuses it until a prune of it succeeds.
+    pub fn caches_behind_head(&self, line: &Line) -> Result<Vec<String>> {
+        let w = self.working(line);
+        let damaged = self.damaged_folders(line)?;
+        let mut out = Vec::new();
+        for (name, folder) in self.folder_overlays()? {
+            if damaged.contains(&folder) || !fsutil::safe_join(&w, &folder).is_ok_and(|p| btrfs::is_subvolume(&p)) {
+                continue;
+            }
+            let orepo = self.overlay_repo(&name)?;
+            let ol_name = crate::overlay::cache_line_name(&line.id);
+            let ol = match orepo.p.db.line_by_name(&ol_name)? {
+                Some(ol) => Some(ol),
+                None => orepo.unnamed_platform_line(&ol_name)?,
+            };
+            let of = match ol {
+                Some(ol) => orepo.p.db.state(&ol.head)?.and_then(|s| s.cache_of),
+                None => None,
+            };
+            let saved = match of {
+                Some(of) if of == line.head => true,
+                Some(of) => self
+                    .p
+                    .db
+                    .state(&of)?
+                    .is_some_and(|st| st.kind == StateKind::Auto && st.parents.first() == Some(&line.head)),
+                None => false,
+            };
+            if !saved {
+                out.push(folder);
+            }
+        }
+        Ok(out)
+    }
+
     /// Put the cache overlays into the new working folder `w` of `line` (made from `start`, or
     /// from the line `source`): each folder overlay whose folder the ignore rules ignore gets a
     /// writable snapshot of its cache state unless the state holds files there (it replaces an old

@@ -19,6 +19,29 @@ use std::path::{Path, PathBuf};
 const KEY_PREFIX: &str = "follow.";
 /// Only lines with an export to the remote this recent are cache sources.
 const CACHE_SOURCE_MS: i64 = 14 * 24 * 3600 * 1000;
+
+/// A remote URL without its transport and user: `git@host:path`, `ssh://git@host/path` and `https://host/path`
+/// give `host/path`, with no `.git` and no slash at the end. A local path stays as it is.
+fn repo_key(url: &str) -> String {
+    let u = url.trim().trim_end_matches('/');
+    let u = u.strip_suffix(".git").unwrap_or(u);
+    let (rest, scheme) = match u.split_once("://") {
+        Some((_, r)) => (r, true),
+        None => (u, false),
+    };
+    let rest = rest.rsplit_once('@').map_or(rest, |(_, r)| r);
+    if scheme {
+        return match rest.split_once('/') {
+            Some((host, path)) => format!("{}/{path}", host.to_lowercase()),
+            None => rest.to_lowercase(),
+        };
+    }
+    // The scp form `host:path` of ssh; a local path has no `:` before its first `/`.
+    match rest.split_once(':') {
+        Some((host, path)) if !host.contains('/') && !host.is_empty() => format!("{}/{}", host.to_lowercase(), path),
+        _ => rest.to_string(),
+    }
+}
 /// The results of the passes, in the project meta folder. Local to this machine.
 const RESULTS: &str = "follow.json";
 
@@ -184,7 +207,25 @@ impl<'a> Repo<'a> {
         let fetched = revs::resolve(self, Some(line), &rb)?;
         let head = self.line(&line.id)?.head;
         if fetched == head || self.is_ancestor(&fetched, &head)? {
-            return Ok(Some("up to date".into()));
+            // A pass that merged but saved no cache (it stopped, or an older layr ran it) leaves the head without
+            // a cache, and new lines start cold. This pass runs the cache step again; once the caches are saved
+            // with the head, the next passes do nothing.
+            let now = self.line(&line.id)?;
+            let behind = self.caches_behind_head(&now)?;
+            if behind.is_empty() {
+                return Ok(Some("up to date".into()));
+            }
+            {
+                let _lock = self.p.lock()?;
+                if has_unsaved(&self.locked_status(&now)?.0) {
+                    return Ok(Some("up to date; caches not saved: unsaved work".into()));
+                }
+            }
+            // No merge ran, so no cache of another line is taken: the line's own caches are built and saved.
+            return Ok(Some(match self.take_follow_caches(ctx, line, Vec::new(), Some(&head), true) {
+                Ok(_) => format!("up to date; caches saved with the head ({})", behind.join(", ")),
+                Err(e) => format!("up to date; caches not saved: {e:#}"),
+            }));
         }
         if !explicit && refused.is_some_and(|r| r.remote == fetched && r.line == head) {
             return Ok(None);
@@ -317,14 +358,32 @@ impl<'a> Repo<'a> {
         Ok(Ok(self.pull_caches(ctx, &now, &Source::Line(&theirs), done)?))
     }
 
-    /// Lines with an export to `remote` in the last 14 days, newest export first. An export names
-    /// a state, and the state names its line.
+    /// The remotes of the repository of `remote`: `remote` itself and each remote with the same URL key
+    /// (`repo_key`). A push over https and a follow over ssh name one repository.
+    fn same_repo_remotes(&self, remote: &str) -> Result<BTreeSet<String>> {
+        let mut urls = Vec::new();
+        for (k, val) in self.p.db.config_all()? {
+            if let Some(n) = k.strip_prefix("remote.").and_then(|x| x.strip_suffix(".url")) {
+                let url: String = serde_json::from_str(&val).unwrap_or(val.clone());
+                urls.push((n.to_string(), repo_key(&url)));
+            }
+        }
+        let mut out = BTreeSet::from([remote.to_string()]);
+        if let Some((_, key)) = urls.iter().find(|(n, _)| n == remote) {
+            out.extend(urls.iter().filter(|(_, k)| k == key).map(|(n, _)| n.clone()));
+        }
+        Ok(out)
+    }
+
+    /// Lines with an export to `remote` (or to a remote of the same repository) in the last 14 days, newest
+    /// export first. An export names a state, and the state names its line.
     fn cache_sources(&self, remote: &str) -> Result<Vec<Line>> {
         let since = ids::now_ms() - CACHE_SOURCE_MS;
+        let remotes = self.same_repo_remotes(remote)?;
         let mut seen = BTreeSet::new();
         let mut out = Vec::new();
         for rec in self.p.db.records_since(since)?.into_iter().rev() {
-            if rec.op != "export" || rec.data["remote"].as_str() != Some(remote) {
+            if rec.op != "export" || !rec.data["remote"].as_str().is_some_and(|r| remotes.contains(r)) {
                 continue;
             }
             let Some(state) = rec.data["state"].as_str() else { continue };
@@ -391,4 +450,20 @@ fn with_repo<T>(root: &Path, caller: &Caller, cwd: PathBuf, name: &str, f: impl 
     };
     let repo = Repo::open(&ctx, name)?;
     f(&repo, &ctx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::repo_key;
+
+    #[test]
+    fn ssh_and_https_remotes_of_one_repository_match() {
+        let k = "github.com/ifdotpy/layr-studio";
+        assert_eq!(repo_key("git@github.com:ifdotpy/layr-studio.git"), k);
+        assert_eq!(repo_key("https://github.com/ifdotpy/layr-studio.git"), k);
+        assert_eq!(repo_key("https://user@GitHub.com/ifdotpy/layr-studio/"), k);
+        assert_eq!(repo_key("ssh://git@github.com/ifdotpy/layr-studio"), k);
+        assert_ne!(repo_key("https://github.com/ifdotpy/layr"), k);
+        assert_eq!(repo_key("/tmp/remote.git"), "/tmp/remote");
+    }
 }

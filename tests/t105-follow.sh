@@ -135,6 +135,31 @@ has "the pass with a missing source state merges" "fast-forward" "$out"
 no "a missing source state does not stop the cache step" grep -q "caches not taken" <<<"$out"
 eq "main has the caches of the next source" bin-good "$(cat target/debug/x 2>/dev/null)"
 
+# 4c. A head with no cache saved with it (a save after the last cache save, or a pass of an older layr that
+#     saved nothing): the up-to-date pass saves the caches, and the next pass does nothing. The remote takes
+#     the head, so the pass is up to date.
+echo c4 > c4.txt; l add c4.txt; l save -m "local c4" -q
+echo bin-main > target/debug/x
+l git push -q origin HEAD:refs/heads/main >/dev/null 2>&1
+cd $U; git pull -q origin main; cd $P/main
+has "an up-to-date pass saves the caches with the head" "up to date; caches saved with the head (target)" "$(l follow --run 2>&1)"
+eq "the next pass does nothing" "origin/main: up to date" "$(l follow --run 2>/dev/null)"
+eq "the pass keeps the cache files" bin-main "$(cat target/debug/x 2>/dev/null)"
+
+# 4d. A line that pushes over another remote of the same repository (https next to ssh; here file:// next to the
+#     path) is a cache source of the pass that follows origin.
+l git remote add other "file://$R" >/dev/null 2>&1
+l line new viaother main >/dev/null
+cd $P/viaother
+echo viaother > viaother.txt; l add viaother.txt; l save -m "viaother work" -q
+rm -rf target; mkdir -p target/debug; echo bin-viaother > target/debug/x
+l save --caches -q
+l git push -q other HEAD:refs/heads/viaother >/dev/null 2>&1
+cd $U; git pull -q origin main; echo viaother > viaother.txt; git add viaother.txt; git commit -qm "squash viaother"; git push -q origin main
+cd $P/main
+has "the pass merges the line pushed over the other remote" "fast-forward" "$(l follow --run 2>&1)"
+eq "main has the caches of the line pushed over the other remote" bin-viaother "$(cat target/debug/x 2>/dev/null)"
+
 # 5. A conflicting remote change: main keeps its head, and the error shows in layr follow.
 echo local > src/a.txt; l save -a -m "local a" -q
 cd $U; echo remote > src/a.txt; git commit -qam "remote a"; git push -q origin main

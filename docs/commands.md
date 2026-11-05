@@ -44,6 +44,13 @@ changes files of the project, and the new line is protected. The command refuses
 uncommitted changes, one with more worktrees, a subfolder of a checkout, and a checkout on
 another file system than the store. The project name is the folder name unless given.
 
+layr ignores what git ignores: the `.gitignore` and `.layrignore` files of the tree, and the
+local file `.git/info/exclude` of a line folder (below the root's rule files, as in git; it never
+goes into a state). `init --from-git` adds the patterns of the user's `core.excludesFile` (or
+`~/.config/git/ignore`) to the checkout's `.git/info/exclude` first, so the import takes no file
+that `git status` did not show, and keeps all local patterns as the project setting `ignore.local`.
+The `.git` folder of each line of the project gets them in its `info/exclude`.
+
 Person signing-key pins are machine-local: enrollment pins them on the executor, and an admin can later run `layr access person-key <login> <public-key>` there.
 Pins do not replicate because a trusted writer machine must not replace a person's key and impersonate their approvals.
 

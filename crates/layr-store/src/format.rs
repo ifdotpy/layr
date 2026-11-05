@@ -76,12 +76,37 @@ pub struct Tree {
     /// trees of layr 0.25 and older, which restore files with the time of the restore.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub times: BTreeMap<String, u64>,
+    /// The content-defined chunks of a file of a cache layer, by chunk id (`chunks::id`), in
+    /// order. Such a file has no frame links: its chunks live in pack objects of the layer
+    /// (`chunks::Pack`). Empty in trees that only have frames.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub chunks: BTreeMap<String, Vec<String>>,
 }
 
 impl Tree {
     pub fn canonical(&self) -> Result<Vec<u8>> {
         use super::canonical::string;
-        let mut out = String::from("{\"files\":{");
+        let mut out = String::from("{");
+        // Canonical JSON sorts keys: "chunks" < "files" < "times".
+        if !self.chunks.is_empty() {
+            out.push_str("\"chunks\":{");
+            for (number, (path, ids)) in self.chunks.iter().enumerate() {
+                if number != 0 {
+                    out.push(',');
+                }
+                string(path, &mut out);
+                out.push_str(":[");
+                for (number, id) in ids.iter().enumerate() {
+                    if number != 0 {
+                        out.push(',');
+                    }
+                    string(id, &mut out);
+                }
+                out.push(']');
+            }
+            out.push_str("},");
+        }
+        out.push_str("\"files\":{");
         for (number, (path, entry)) in self.files.iter().enumerate() {
             if number != 0 {
                 out.push(',');
@@ -136,6 +161,15 @@ impl Tree {
         if let Some(path) = tree.times.keys().find(|p| !tree.files.contains_key(*p)) {
             bail!("tree time of a missing file {path:?}");
         }
+        for (path, ids) in &tree.chunks {
+            let entry = tree.files.get(path).with_context(|| format!("tree chunks of a missing file {path:?}"))?;
+            if ids.is_empty() || ids.len() as u64 > entry.1 / crate::chunks::MIN as u64 + 1 {
+                bail!("invalid chunk count");
+            }
+            if !ids.iter().all(|id| crate::chunks::valid_id(id)) {
+                bail!("invalid chunk id");
+            }
+        }
         for (path, entry) in &tree.files {
             if !safe_path(path) {
                 bail!("unsafe tree path {path:?}");
@@ -145,6 +179,13 @@ impl Tree {
             }
             if entry.2.len() != 64 || hex::decode(&entry.2).is_err() {
                 bail!("invalid SHA-256");
+            }
+            // A file has frames or chunks, never both.
+            if tree.chunks.contains_key(path) {
+                if !entry.3.is_empty() {
+                    bail!("a chunked file has frame links");
+                }
+                continue;
             }
             if entry.3.is_empty() || entry.3.len() > MAX_FILE_DELTAS + 1 {
                 bail!("invalid file chain length");
@@ -281,17 +322,41 @@ mod tests {
             ],
         );
         let tree =
-            Tree { files: BTreeMap::from([("plain".into(), entry.clone()), ("caf\u{e9}/\u{1f642}".into(), entry.clone())]), times: BTreeMap::new() };
+            Tree { files: BTreeMap::from([("plain".into(), entry.clone()), ("caf\u{e9}/\u{1f642}".into(), entry.clone())]), times: BTreeMap::new(), chunks: BTreeMap::new() };
         assert_eq!(tree.canonical().unwrap(), canonical(&serde_json::to_value(&tree).unwrap()).unwrap());
         Tree::parse(&tree.canonical().unwrap()).unwrap();
-        let escaped = Tree { files: BTreeMap::from([("\n\t\\\"".into(), entry.clone())]), times: BTreeMap::new() };
+        let escaped = Tree { files: BTreeMap::from([("\n\t\\\"".into(), entry.clone())]), times: BTreeMap::new(), chunks: BTreeMap::new() };
         assert_eq!(escaped.canonical().unwrap(), canonical(&serde_json::to_value(&escaped).unwrap()).unwrap());
         assert_eq!(Tree::default().canonical().unwrap(), canonical(&serde_json::to_value(Tree::default()).unwrap()).unwrap());
         // File times: the same bytes as the generic canonical form, and a time needs its file.
-        let timed = Tree { files: BTreeMap::from([("a".into(), entry.clone())]), times: BTreeMap::from([("a".into(), 1_793_820_425_267_530_733)]) };
+        let timed = Tree { files: BTreeMap::from([("a".into(), entry.clone())]), times: BTreeMap::from([("a".into(), 1_793_820_425_267_530_733)]), chunks: BTreeMap::new() };
         assert_eq!(timed.canonical().unwrap(), canonical(&serde_json::to_value(&timed).unwrap()).unwrap());
         assert_eq!(Tree::parse(&timed.canonical().unwrap()).unwrap(), timed);
-        let orphan = Tree { files: BTreeMap::from([("a".into(), entry)]), times: BTreeMap::from([("b".into(), 1)]) };
+        // Chunks: canonical key order ("chunks" first), no links on a chunked file, valid ids.
+        let id = "ab".repeat(32);
+        let chunked_entry = Entry("100644".into(), 70_000, "cd".repeat(32), vec![]);
+        let chunked = Tree {
+            files: BTreeMap::from([("a".into(), entry.clone()), ("t/lib.rlib".into(), chunked_entry.clone())]),
+            times: BTreeMap::from([("a".into(), 5)]),
+            chunks: BTreeMap::from([("t/lib.rlib".into(), vec![id.clone(), id.clone()])]),
+        };
+        assert_eq!(chunked.canonical().unwrap(), canonical(&serde_json::to_value(&chunked).unwrap()).unwrap());
+        assert_eq!(Tree::parse(&chunked.canonical().unwrap()).unwrap(), chunked);
+        let mut both = chunked.clone();
+        both.files.get_mut("t/lib.rlib").unwrap().3 = entry.3.clone();
+        assert!(Tree::parse(&both.canonical().unwrap()).is_err(), "a chunked file with links");
+        let mut neither = chunked.clone();
+        neither.chunks.clear();
+        assert!(Tree::parse(&neither.canonical().unwrap()).is_err(), "a file without links or chunks");
+        for bad in [vec![], vec!["AB".repeat(32)], vec!["ab".repeat(31)], vec![id.clone(); 7]] {
+            let mut tree = chunked.clone();
+            tree.chunks.insert("t/lib.rlib".into(), bad);
+            assert!(Tree::parse(&tree.canonical().unwrap()).is_err());
+        }
+        let mut missing = chunked.clone();
+        missing.chunks.insert("gone".into(), vec![id]);
+        assert!(Tree::parse(&missing.canonical().unwrap()).is_err(), "chunks of a missing file");
+        let orphan = Tree { files: BTreeMap::from([("a".into(), entry)]), times: BTreeMap::from([("b".into(), 1)]), chunks: BTreeMap::new() };
         assert!(Tree::parse(&orphan.canonical().unwrap()).is_err());
     }
     use super::*;
