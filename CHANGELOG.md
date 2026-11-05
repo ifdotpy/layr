@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.27.0](https://github.com/ifdotpy/layr/compare/v0.26.0...v0.27.0) (2026-11-05)
+
+
+### Features
+
+* **remote:** a push deletes the dead cache states in the store ([#269](https://github.com/ifdotpy/layr/issues/269)) ([b508660](https://github.com/ifdotpy/layr/commit/b508660409b0f6ea43ff77e9facdc7cd1a17d410))
+
+
+### Bug Fixes
+
+* **cache:** a source file with other bytes looks newer than the taken cache ([#276](https://github.com/ifdotpy/layr/issues/276)) ([71b9091](https://github.com/ifdotpy/layr/commit/71b9091ce34158794e8854a567bdd6a3df93bb5d))
+* **follow:** an up-to-date pass saves the caches when the head has none ([#275](https://github.com/ifdotpy/layr/issues/275)) ([c6611b2](https://github.com/ifdotpy/layr/commit/c6611b216b492746ccfc2ae18baa7a93102ed93f))
+* **ignore:** honour .git/info/exclude and the user's core.excludesFile ([#267](https://github.com/ifdotpy/layr/issues/267)) ([fd71b50](https://github.com/ifdotpy/layr/commit/fd71b509f4adcb49d839b109cefed6cb2f01f101))
+
 ## [0.26.0](https://github.com/ifdotpy/layr/compare/v0.25.0...v0.26.0) (2026-11-04)
 
 
