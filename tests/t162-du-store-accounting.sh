@@ -1,5 +1,4 @@
 #!/bin/bash
-# ci:
 # Exact btrfs accounting through the real store report. The btrfs CI job runs all tests.
 . "$(dirname "$0")/lib.sh"
 set -e
@@ -82,10 +81,10 @@ eq "remaining half clone owns the whole extent" $(( $(printf %s "$partial" | val
 btrfs subvolume create "$LAYR_ROOT/inline-a" >/dev/null
 before_inline=$(report)
 python3 - "$LAYR_ROOT/inline-a" <<'PY'
-import pathlib, sys
+import os, pathlib, sys
 p = pathlib.Path(sys.argv[1])
 for i, n in enumerate((101, 203, 307)):
-    (p / str(i)).write_bytes(bytes([65 + i]) * n)
+    (p / str(i)).write_bytes(os.urandom(n))
 PY
 inline=$(report)
 # These assertions expose the current FIEMAP physical-address-zero collision:
