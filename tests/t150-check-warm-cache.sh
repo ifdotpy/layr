@@ -21,7 +21,7 @@ l save --caches -q
 # The checked head has no cache of its own: it takes the cache of its parent, as `line new` does.
 echo change > change.txt; l add change.txt >/dev/null; l save -qm change
 l protect main >/dev/null 2>&1 || true
-l config check.unit 'test "$(cat target/built)" = warm && test ! -e target/debug/.fingerprint/p-aaa && echo more > target/new' >/dev/null
+l config check.unit 'test "$(cat target/built)" = warm && test ! -e target/debug/.fingerprint/p-aaa && echo more > target/new && touch "target/by-$LAYR_TRY_STATE"' >/dev/null
 l config checks.lines '{"main":["unit"]}' >/dev/null
 l config --local checks.runner true >/dev/null
 out=$(l checks watch --once --json 2>"$T/watch.err")
@@ -59,7 +59,9 @@ has "run executes the change check of that state" '"count":1' "$out"
 has "with its cache" '"exit":0' "$out"
 has "a second run finds nothing to do" '"count":0,"pending":0' "$(l checks run --state "$s" --json 2>&1)"
 l line new w3 "$s" >/dev/null 2>&1
-no "a state off the protected lines gives no caches back" test -e "$LAYR_ROOT/projects/p/lines/w3/target/new"
+# The pr line started warm from main's check cache: only the marker of the pr check itself must be missing.
+by() { (cd "$LAYR_ROOT/projects/p/lines/$1/target" && ls -1 | grep '^by-' | sort); }
+eq "a state off the protected lines gives no caches back" "$(by pr)" "$(by w3)"
 no "and gets no checks line" grep -q "pr.checks-" <<<"$(l line list 2>&1)"
 eq "pending agrees" 0 "$(l checks pending --state "$s" --json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["pending"]))')"
 no "run needs --state" l checks run
