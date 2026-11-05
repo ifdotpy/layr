@@ -353,7 +353,7 @@ pub fn visit_space(path: &Path, f: &mut dyn FnMut(&crate::fsutil::Held)) -> Resu
 
 /// Bytes that a copy of `path` occupies on another btrfs file system: each distinct extent once.
 pub(crate) fn copy_need(path: &Path) -> Result<u64> {
-    let mut keys: std::collections::HashMap<u64, u64> = Default::default();
+    let mut keys: std::collections::HashMap<crate::fsutil::ExtentKey, u64> = Default::default();
     crate::fsutil::fiemap_visit(path, &mut |h| {
         for &(key, size) in h.shared {
             keys.entry(key).or_insert(size);

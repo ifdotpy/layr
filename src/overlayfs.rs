@@ -1711,7 +1711,7 @@ pub fn visit_space(path: &Path, f: &mut dyn FnMut(&crate::fsutil::Held)) -> Resu
 /// an upper layer hides is only in its layer.
 pub(crate) fn copy_need(path: &Path) -> Result<u64> {
     let src = absolute(path)?;
-    let mut keys: HashMap<u64, u64> = Default::default();
+    let mut keys: HashMap<crate::fsutil::ExtentKey, u64> = Default::default();
     crate::fsutil::fiemap_visit(path, &mut |h| {
         for &(key, size) in h.shared {
             keys.entry(key).or_insert(size);

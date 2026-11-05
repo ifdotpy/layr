@@ -1278,13 +1278,26 @@ pub struct Space {
 /// What one file holds for `layr du`: its allocated bytes, the bytes that no other file shares,
 /// and data that clones of it share, by a key that names that data with its size (the APFS
 /// clone id, or the physical address of a Linux extent).
+/// What names a piece of file data for `layr du --store`, so that copies that share it count once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ExtentKey {
+    /// Data at a device address (btrfs disk_bytenr, or the FIEMAP physical address).
+    Disk(u64),
+    /// Inline btrfs data, which lives in metadata: snapshots that share the file share the item.
+    Inline { ino: u64, offset: u64, generation: u64 },
+    /// An APFS clone id: files cloned from one another share it.
+    ApfsClone(u64),
+    /// Shared APFS bytes without a clone id, keyed by their file id.
+    ApfsFile(u64),
+}
+
 pub struct Held<'a> {
     pub alloc: u64,
     /// Bytes that the file system reports as not shared (`layr du` of lines).
     pub own: u64,
     /// The part of `own` that has no key (`layr du --store` counts it for its part alone).
     pub exclusive: u64,
-    pub shared: &'a [(u64, u64)],
+    pub shared: &'a [(ExtentKey, u64)],
 }
 
 impl Space {
@@ -1312,7 +1325,7 @@ pub fn apfs_visit(root: &Path, f: &mut dyn FnMut(&Held)) -> Result<()> {
                 // Shared bytes without a clone id get a key of their own file (top bit set).
                 let rest = e.alloc.saturating_sub(e.private);
                 let key = if e.clone != 0 { e.clone } else { e.ino | 1 << 63 };
-                let shared = [(key, rest)];
+                let shared = [(ExtentKey::ApfsClone(key), rest)];
                 let own = e.private.min(e.alloc);
                 f(&Held { alloc: e.alloc, own, exclusive: own, shared: &shared[..usize::from(rest > 0)] });
             }
@@ -1352,7 +1365,7 @@ pub fn fiemap_visit(root: &Path, f: &mut dyn FnMut(&Held)) -> Result<()> {
                         // Every extent has a key: ext4 never flags a shared extent, and a file seen
                         // through an OverlayFS mount is the same extent as its layer file.
                         let own = extents.iter().filter(|x| !x.2).map(|x| x.1).sum();
-                        let shared: Vec<(u64, u64)> = extents.iter().map(|x| (x.0, x.1)).collect();
+                        let shared: Vec<(ExtentKey, u64)> = extents.iter().map(|x| (ExtentKey::Disk(x.0), x.1)).collect();
                         f(&Held { alloc, own, exclusive: 0, shared: &shared });
                     }
                     Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {}

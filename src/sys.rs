@@ -66,6 +66,70 @@ const GET_SUBVOL_INFO: libc::c_ulong = 0x81f8_943c;
 const FICLONERANGE: libc::c_ulong = 0x4020_940d;
 pub const SUBVOL_RDONLY: u64 = 1 << 1;
 
+/// The UAPI `btrfs_ioctl_search_key`, in native byte order.
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct SearchKey {
+    pub tree_id: u64,
+    pub min_objectid: u64,
+    pub max_objectid: u64,
+    pub min_offset: u64,
+    pub max_offset: u64,
+    pub min_transid: u64,
+    pub max_transid: u64,
+    pub min_type: u32,
+    pub max_type: u32,
+    pub nr_items: u32,
+    pub unused: u32,
+    pub unused1: [u64; 4],
+}
+
+/// Reusable, aligned storage for TREE_SEARCH_V2's flexible array argument.
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+pub struct TreeSearch {
+    args: Vec<u64>,
+    size: usize,
+}
+
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+impl TreeSearch {
+    pub fn new(size: usize) -> Self {
+        const WORD: usize = std::mem::size_of::<u64>();
+        let prefix = std::mem::size_of::<SearchKey>() + WORD;
+        Self { args: vec![0; (prefix + size).div_ceil(WORD)], size }
+    }
+
+    pub fn run(&mut self, fd: BorrowedFd<'_>, key: &mut SearchKey) -> io::Result<(usize, &[u8])> {
+        const TREE_SEARCH_V2: libc::c_ulong = 0xc070_9411;
+        const WORD: usize = std::mem::size_of::<u64>();
+        let prefix = std::mem::size_of::<SearchKey>() + WORD;
+        loop {
+            // SAFETY: the allocation is aligned for SearchKey and contains the key, size and
+            // output buffer; the returned slice cannot outlive or overlap a subsequent call.
+            unsafe {
+                let ptr = self.args.as_mut_ptr().cast::<u8>();
+                ptr.cast::<SearchKey>().write(*key);
+                let size_ptr = ptr.add(std::mem::size_of::<SearchKey>()).cast::<u64>();
+                size_ptr.write(self.size as u64);
+                if libc::ioctl(fd.as_raw_fd(), TREE_SEARCH_V2 as _, ptr) < 0 {
+                    let error = io::Error::last_os_error();
+                    let required = usize::try_from(size_ptr.read()).unwrap_or(0);
+                    if error.raw_os_error() != Some(libc::EOVERFLOW) || required <= self.size {
+                        return Err(error);
+                    }
+                    let len = prefix.checked_add(required).ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
+                    self.args.resize(len.div_ceil(WORD), 0);
+                    self.size = required;
+                    continue;
+                }
+                *key = ptr.cast::<SearchKey>().read();
+                return Ok((key.nr_items as usize, std::slice::from_raw_parts(ptr.add(prefix), self.size)));
+            }
+        }
+    }
+}
+
 #[repr(C)]
 struct VolArgsV2 {
     fd: i64,
