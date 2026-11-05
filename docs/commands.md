@@ -204,10 +204,10 @@ file; on btrfs, XFS and ext4 the extents that a snapshot or reflink shares carry
 `du --store` covers the whole store: each line folder, each other folder of a project (`states`,
 `deltas`, `git`, `meta`) and `trash`. For each part it shows `frees`: the bytes that only this part
 holds, also data that its own files share among themselves, which deleting the part frees. Shared
-data counts once under a key that names it (the APFS clone id, or the physical address of an
-extent), and belongs to a part when no other part references it. The last lines show the data that
-several parts share and the store total. It reads every file's metadata (on Linux it opens each
-file), so a large store takes minutes; 4 workers share the folders of `states` and `deltas`.
+data counts once under a key that names it, and belongs to a part when no other part references it.
+The last lines show the data that several parts share and the store total. On btrfs, the bulk scan
+counts whole allocated extents, including compressed and partially referenced extents. It reports
+committed on-disk allocation, so writes from the current transaction may not appear yet.
 
 Storage is freed when a state loses its last owner (docs/ownership.md). A command that drops
 the last owner of a state moves its storage to the trash after its commit and after the store

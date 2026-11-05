@@ -110,6 +110,18 @@ eq "inline snapshot moves 611 bytes to shared" $(( $(printf %s "$inline" | value
 eq "inline original frees no shared payload" 0 "$(printf %s "$snapshot" | value frees inline-a)"
 eq "inline snapshot frees no shared payload" 0 "$(printf %s "$snapshot" | value frees inline-b)"
 
+btrfs subvolume create "$LAYR_ROOT/unrelated-a" >/dev/null
+btrfs subvolume create "$LAYR_ROOT/unrelated-b" >/dev/null
+unrelated_before=$(report)
+random_file 101 "$LAYR_ROOT/unrelated-a/file"
+random_file 101 "$LAYR_ROOT/unrelated-b/file"
+sync
+eq "unrelated inline fixture uses equal inode numbers" "$(stat -c %i "$LAYR_ROOT/unrelated-a/file")" "$(stat -c %i "$LAYR_ROOT/unrelated-b/file")"
+unrelated_after=$(report)
+eq "unrelated inline files both count" $(( $(printf %s "$unrelated_before" | value total) + 202 )) "$(printf %s "$unrelated_after" | value total)"
+eq "first unrelated inline file is private" 101 "$(printf %s "$unrelated_after" | value frees unrelated-a)"
+eq "second unrelated inline file is private" 101 "$(printf %s "$unrelated_after" | value frees unrelated-b)"
+
 # Compressed extents count their physical size. compsize reports that size in
 # bytes when installed; otherwise only the nonzero, sub-logical bounds are known.
 mkdir "$LAYR_ROOT/compressed"

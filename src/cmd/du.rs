@@ -296,13 +296,17 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
             scope
                 .spawn(|| {
                     crate::sys::lower_thread_priority();
-                    crate::btrfs_scan::plan(root, &paths)
+                    if let Some(mount) = crate::btrfs_scan::nested_mount(&paths)? {
+                        eprintln!("note: nested mount {}: walking files instead", mount.display());
+                        return Ok(None);
+                    }
+                    crate::btrfs_scan::plan(root, &paths).map(Some)
                 })
                 .join()
                 .unwrap()
         });
         match plan {
-            Ok(plan) => {
+            Ok(Some(plan)) => {
                 let failed = Mutex::new(None);
                 let bulk = Mutex::new(HashMap::new());
                 crate::fsutil::work_queue(plan.units, |unit, _| {
@@ -335,6 +339,7 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
                     Some(plan.outside)
                 }
             }
+            Ok(None) => None,
             Err(err) => {
                 if !matches!(err.raw_os_error(), Some(libc::EPERM | libc::EACCES | libc::ENOTTY | libc::EINVAL)) {
                     eprintln!("warning: bulk btrfs scan failed: {err}; walking files instead");

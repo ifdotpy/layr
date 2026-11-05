@@ -1335,7 +1335,10 @@ pub enum ExtentKey {
     Disk(u64),
     /// Inline btrfs data, which lives in metadata: snapshots that share the file share the item.
     #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
-    Inline { ino: u64, offset: u64, generation: u64 },
+    Inline { lineage: [u8; 16], ino: u64, offset: u64, generation: u64 },
+    /// Data without a physical address, identified by its inode and logical offset.
+    #[cfg(target_os = "linux")]
+    Unaddressed { dev: u64, ino: u64, offset: u64 },
     /// An APFS clone id: files cloned from one another share it.
     #[cfg(target_os = "macos")]
     ApfsClone(u64),
@@ -1401,14 +1404,14 @@ pub fn apfs_space(root: &Path) -> Result<Space> {
 
 /// Account for unaddressable extents separately from addressable extents.
 #[cfg(target_os = "linux")]
-fn fiemap_held(extents: &[crate::sys::MappedExtent], f: &mut dyn FnMut(&Held)) {
+fn fiemap_held(extents: &[crate::sys::MappedExtent], dev: u64, ino: u64, f: &mut dyn FnMut(&Held)) {
     let alloc = extents.iter().map(|x| x.len).sum();
     let own = extents.iter().filter(|x| !x.shared).map(|x| x.len).sum();
-    // Inline and delayed extents have no physical address, so address zero
-    // cannot identify shared data across different files.
-    let exclusive = extents.iter().filter(|x| x.addr.is_none()).map(|x| x.len).sum();
-    let shared: Vec<_> = extents.iter().filter_map(|x| x.addr.map(|addr| (ExtentKey::Disk(addr), x.len))).collect();
-    f(&Held { alloc, own, exclusive, shared: &shared });
+    // An inode key preserves hard-link sharing when FIEMAP has no physical address.
+    let shared: Vec<_> = extents.iter().map(|x| {
+        (x.addr.map_or(ExtentKey::Unaddressed { dev, ino, offset: x.logical }, ExtentKey::Disk), x.len)
+    }).collect();
+    f(&Held { alloc, own, exclusive: 0, shared: &shared });
 }
 
 /// Visit the files of a folder on Linux: the extents of each, shared ones by physical address.
@@ -1427,7 +1430,7 @@ pub fn fiemap_visit(root: &Path, f: &mut dyn FnMut(&Held)) -> Result<()> {
                 walk(&e.path(), f, seen)?;
             } else if m.is_file() && (m.nlink() <= 1 || seen.insert((m.dev(), m.ino()))) {
                 match File::open(e.path()).and_then(|file| crate::sys::fiemap_extents(&file)) {
-                    Ok(extents) => fiemap_held(&extents, f),
+                    Ok(extents) => fiemap_held(&extents, m.dev(), m.ino(), f),
                     Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {}
                     Err(err) => return Err(err).with_context(|| e.path().display().to_string()),
                 }
@@ -1458,7 +1461,7 @@ pub fn fiemap_visit_shallow(
             dirs(entry.path());
         } else if m.is_file() && (m.nlink() <= 1 || seen.lock().unwrap().insert((m.dev(), m.ino()))) {
             match File::open(entry.path()).and_then(|file| crate::sys::fiemap_extents(&file)) {
-                Ok(extents) => fiemap_held(&extents, f),
+                Ok(extents) => fiemap_held(&extents, m.dev(), m.ino(), f),
                 Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {}
                 Err(err) => return Err(err).with_context(|| entry.path().display().to_string()),
             }
@@ -1498,17 +1501,17 @@ mod range_tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn unaddressable_extents_are_not_deduplicated_by_address_zero() {
-        let mut own = 0;
         let mut keys = Vec::new();
         use crate::sys::MappedExtent;
-        for extents in [vec![MappedExtent { addr: None, len: 4096, shared: false }, MappedExtent { addr: Some(8192), len: 4096, shared: true }], vec![MappedExtent { addr: None, len: 4096, shared: false }]] {
-            super::fiemap_held(&extents, &mut |held| {
-                own += held.exclusive;
+        for ino in [1, 1, 2] {
+            let extents = [MappedExtent { logical: 0, addr: None, len: 4096, shared: false }];
+            super::fiemap_held(&extents, 7, ino, &mut |held| {
+                assert_eq!(held.own, 4096);
                 keys.extend_from_slice(held.shared);
             });
         }
-        assert_eq!(own, 8192);
-        assert_eq!(keys, [(super::ExtentKey::Disk(8192), 4096)]);
+        assert_eq!(keys[0], keys[1]);
+        assert_ne!(keys[0], keys[2]);
     }
 
     #[test]
