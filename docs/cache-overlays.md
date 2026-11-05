@@ -671,10 +671,14 @@ the write (as `git checkout` does), so a warm cache looked stale and one or more
   with the cache state. No other record holds it.
 - A line that takes caches (`line new`, `merge`, the follow pass, `merge --caches-only`) gives each
   tracked file whose size and content hash equal the recorded ones the recorded time back. A file
-  with other bytes keeps the time of its write, so the tool builds it again.
+  with other bytes must look newer than the build output, so the tool builds it again: it keeps
+  its time when that time is after the save of the cache (the time of `.layr-times`), and gets the
+  current time otherwise. A line's files can carry an old time, because a clone keeps the time of
+  the first write; a cache built later from other bytes then looked current, and cargo linked a
+  stale crate.
 - This is safe by content: the build output is current for the bytes it was built from, whatever
-  the time. Two caches that recorded other bytes for one file leave its time; with equal bytes the
-  file gets the older time.
+  the time. Two caches that recorded other bytes for one file count as other bytes; with equal
+  bytes the file gets the older time.
 - Cost: one walk and one hash of the tracked files per save and per take (Studio, about 4,100
   files and 118 MB: measured in the PR). A take reads only files of the recorded size whose time
   differs.

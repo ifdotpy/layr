@@ -4,8 +4,11 @@
 //! from a state, a merge and a follow pass write source files with a new time, so a warm cache looks stale. A cache
 //! save writes `.layr-times` into each cache folder: path, time, size and content hash of each tracked file of the
 //! working copy. The file goes with the cache (snapshots, copies, overlay layers) and goes away with it. A line that
-//! takes the cache gives each file whose bytes equal the recorded bytes the recorded time back. A file with other
-//! bytes keeps its time, so the tool builds it again. Equal bytes make the build output current, whatever the time.
+//! takes the cache gives each file whose bytes equal the recorded bytes the recorded time back. Equal bytes make the
+//! build output current, whatever the time. A file with other bytes must look newer than the build output, so the
+//! tool builds it again: one whose time is not after the save of the cache (the time of `.layr-times`) gets the
+//! current time. A line's files can carry an old time (a clone keeps the time of the first write), and a cache
+//! built later from other bytes would look current otherwise.
 
 use crate::fsutil;
 use crate::ignore_rules::Rules;
@@ -134,8 +137,14 @@ pub fn record(w: &Path, folders: &[String]) -> Result<()> {
 /// caches, it gets the older time. Returns the number of files that got a time.
 pub fn apply(w: &Path, folders: &[String]) -> Result<usize> {
     let mut want: BTreeMap<String, Option<Entry>> = BTreeMap::new();
+    // The newest save of the caches: build output is not newer than it.
+    let mut saved = (i64::MIN, 0);
     for f in folders {
-        let Ok(text) = std::fs::read_to_string(fsutil::safe_join(w, f)?.join(FILE)) else { continue };
+        let path = fsutil::safe_join(w, f)?.join(FILE);
+        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        if let Ok(m) = std::fs::metadata(&path) {
+            saved = saved.max((m.mtime(), m.mtime_nsec()));
+        }
         for (rel, e) in decode(&text) {
             match want.get_mut(&rel) {
                 None => {
@@ -160,17 +169,28 @@ pub fn apply(w: &Path, folders: &[String]) -> Result<usize> {
     let _t = crate::trace::span("source times: apply");
     // Only a file of the recorded size and another time is read.
     let mut cand: Vec<(&str, &Entry)> = Vec::new();
+    // Files with other bytes whose time is not after the save.
+    let mut older: Vec<&str> = Vec::new();
     for (rel, e) in &want {
-        let Some(e) = e else { continue };
         let Ok(m) = std::fs::symlink_metadata(w.join(rel)) else { continue };
-        if m.is_file() && m.len() == e.size && (m.mtime(), m.mtime_nsec()) != (e.sec, e.nsec) {
-            cand.push((rel.as_str(), e));
+        if !m.is_file() {
+            continue;
+        }
+        let time = (m.mtime(), m.mtime_nsec());
+        match e {
+            Some(e) if m.len() == e.size && time != (e.sec, e.nsec) => cand.push((rel.as_str(), e)),
+            Some(e) if m.len() == e.size => {}
+            _ if time <= saved => older.push(rel.as_str()),
+            _ => {}
         }
     }
     let hashes = hash_all(w, &cand.iter().map(|(rel, _)| *rel).collect::<Vec<_>>());
     let mut n = 0;
     for ((rel, e), hash) in cand.into_iter().zip(hashes) {
         if hash.as_deref() != Some(e.hash.as_str()) {
+            if std::fs::symlink_metadata(w.join(rel)).is_ok_and(|m| (m.mtime(), m.mtime_nsec()) <= saved) {
+                older.push(rel);
+            }
             continue;
         }
         let f = std::fs::OpenOptions::new().write(true).open(w.join(rel));
@@ -178,6 +198,14 @@ pub fn apply(w: &Path, folders: &[String]) -> Result<usize> {
         if let Ok(f) = f {
             if fsutil::set_mtime(&f, e.sec, e.nsec).is_ok() {
                 n += 1;
+            }
+        }
+    }
+    if !older.is_empty() {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
+        for rel in older {
+            if let Ok(f) = std::fs::OpenOptions::new().write(true).open(w.join(rel)) {
+                let _ = fsutil::set_mtime(&f, now.as_secs() as i64, now.subsec_nanos() as i64);
             }
         }
     }
@@ -242,9 +270,36 @@ mod tests {
         std::fs::write(w.join("src/a.rs"), "two\n").unwrap();
         set(&w.join("src/a.rs"), 1_100_000_000);
         record(&w, &["node_modules".to_string()]).unwrap();
-        set(&w.join("src/a.rs"), 1_200_000_000);
+        let after = mtime(&w.join("node_modules").join(FILE));
+        set(&w.join("src/a.rs"), after.0 + 3600);
         assert_eq!(apply(&w, &["target".to_string(), "node_modules".to_string()]).unwrap(), 0);
-        assert_eq!(mtime(&w.join("src/a.rs")), (1_200_000_000, 0));
+        assert_eq!(mtime(&w.join("src/a.rs")), (after.0 + 3600, 0), "a time after both saves stays");
+        set(&w.join("src/a.rs"), 1_000_000_000);
+        apply(&w, &["target".to_string(), "node_modules".to_string()]).unwrap();
+        assert!(mtime(&w.join("src/a.rs")) > after, "an older time goes past the saves");
+        let _ = std::fs::remove_dir_all(&w);
+    }
+
+    #[test]
+    fn other_bytes_with_an_old_time_get_a_time_after_the_save() {
+        // The cache is built from older bytes after the file got its time (a clone keeps it), so
+        // the time alone would make the build output look current.
+        let w = tmp("older");
+        std::fs::write(w.join("src/a.rs"), "old\n").unwrap();
+        std::fs::write(w.join("src/b.rs"), "one\n").unwrap();
+        std::fs::write(w.join("target/out"), "built").unwrap();
+        record(&w, &["target".to_string()]).unwrap();
+        let saved = mtime(&w.join("target").join(FILE));
+        std::fs::write(w.join("src/a.rs"), "new\n").unwrap();
+        std::fs::write(w.join("src/b.rs"), "longer\n").unwrap();
+        set(&w.join("src/a.rs"), 1_000_000_000);
+        set(&w.join("src/b.rs"), 1_000_000_000);
+        assert_eq!(apply(&w, &["target".to_string()]).unwrap(), 0);
+        assert!(mtime(&w.join("src/a.rs")) > saved, "same size, other bytes");
+        assert!(mtime(&w.join("src/b.rs")) > saved, "other size");
+        let now = mtime(&w.join("src/a.rs"));
+        apply(&w, &["target".to_string()]).unwrap();
+        assert_eq!(mtime(&w.join("src/a.rs")), now, "a second apply leaves the new time");
         let _ = std::fs::remove_dir_all(&w);
     }
 
