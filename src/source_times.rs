@@ -249,6 +249,8 @@ mod tests {
         // A checkout writes both files with a new time; b gets other bytes of the same size.
         std::fs::write(w.join("src/a.rs"), "fn a() {}\n").unwrap();
         std::fs::write(w.join("src/b.rs"), "fn c() {}\n").unwrap();
+        // A coarse clock can give the write the time of the save; the write comes later.
+        set(&w.join("src/b.rs"), mtime(&w.join("target").join(FILE)).0 + 3600);
         let b_time = mtime(&w.join("src/b.rs"));
         assert_eq!(apply(&w, &["target".to_string()]).unwrap(), 1);
         assert_eq!(mtime(&w.join("src/a.rs")), (1_000_000_000, 0));
