@@ -91,7 +91,7 @@ fn places_of(indexes: &BTreeMap<String, Index>) -> Places {
 }
 
 /// The published pack indexes of the layer, by pack.
-fn indexes(backend: &Backend, dir: Option<&Path>, identity: &str) -> Result<BTreeMap<String, Index>> {
+pub(crate) fn indexes(backend: &Backend, dir: Option<&Path>, identity: &str) -> Result<BTreeMap<String, Index>> {
     let packs = packs(backend)?;
     // Forget cached indexes of packs that are gone, so the cache does not grow.
     if let Some(Ok(entries)) = dir.map(|dir| std::fs::read_dir(cache_dir(dir))) {
@@ -380,10 +380,13 @@ pub(crate) struct Reader<'a> {
 /// Packs that the prefetch keeps decoded ahead of the reader: about 256 MiB.
 const AHEAD: usize = 64;
 
+/// Decoded packs by position in the plan, and the positions that finished (loaded or failed).
+type Ready = (BTreeMap<usize, std::sync::Arc<Vec<u8>>>, BTreeSet<usize>);
+
 struct Shared {
     order: Vec<String>,
     /// Decoded packs by position in `order`, and the positions that finished (loaded or failed).
-    ready: std::sync::Mutex<(BTreeMap<usize, std::sync::Arc<Vec<u8>>>, BTreeSet<usize>)>,
+    ready: std::sync::Mutex<Ready>,
     changed: std::sync::Condvar,
     /// The position of the pack that the reader needs now.
     reader: std::sync::atomic::AtomicUsize,
@@ -579,8 +582,6 @@ impl<'a> Reader<'a> {
 /// only those, and return the objects to delete: packs and indexes whose chunks are all dead or
 /// copied. The new pack is published before the caller deletes anything, so a crash leaves at
 /// worst a duplicate, and a rerun gives the same objects to delete.
-// The remote deletion runner (sweep, docs/cache-overlays.md) calls it; until then only tests do.
-#[allow(dead_code)]
 pub(crate) fn release(store: &Store, identity: &str, recipient: &str, dead: &BTreeSet<String>) -> Result<Vec<String>> {
     let mut delete = Vec::new();
     let all = packs(&store.backend)?;

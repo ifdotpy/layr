@@ -76,4 +76,22 @@ env LAYR_ROOT="$T/d/store" LAYR_PAPER_KEY_FILE="$T/paper.txt" "$LAYR" clone "fil
 (cd "$T/d/store/projects/p/lines/main" && env LAYR_ROOT="$T/d/store" "$LAYR" line new far main >/dev/null 2>&1)
 ok "the changed file has its new content" cmp "$P/main/target/debug/out" "$T/d/store/projects/p/lines/far/target/debug/out"
 ok "an unchanged file is still complete" cmp "$P/main/target/debug/deps/libbig-2222222222222222.rlib" "$T/d/store/projects/p/lines/far/target/debug/deps/libbig-2222222222222222.rlib"
+
+# No dead chunk stays, with no gc call: the pushes above made older cache states dead, and their
+# sweep rewrote the packs that held their chunks.
+out=$(l fsck --caches --remote archive 2>&1); rc=$?
+eq "fsck --caches --remote finds nothing unreachable" 0 "$rc"
+has "and it counts chunks" "0 unreachable chunk(s)" "$out"
+has "and no tree misses a chunk" "0 tree(s) with missing chunks" "$out"
+# A line with a cache file of its own: its chunks go with the line.
+before=$(packs | wc -l | tr -d ' ')
+l line new z main >/dev/null 2>&1
+(cd "$P/z" && python3 -c 'import os,sys; open(sys.argv[1],"wb").write(os.urandom(1 << 20))' target/debug/zonly && l save --caches -q && l push archive -q --caches >/dev/null 2>&1)
+ok "the line's push adds a pack" test "$(packs | wc -l | tr -d ' ')" -gt "$before"
+l line delete -D z >/dev/null
+l push archive -q --caches >/dev/null 2>&1
+out=$(l fsck --caches --remote archive 2>&1); rc=$?
+eq "after the line delete and a push nothing is unreachable" 0 "$rc"
+has "no chunk of the line is left" "0 unreachable chunk(s)" "$out"
+eq "its pack is gone" "$before" "$(packs | wc -l | tr -d ' ')"
 finish

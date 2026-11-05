@@ -465,12 +465,15 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
         // The push makes the old caches of the overlay dead on the remote too: delete them now.
         if repo.overlay_setting(&name, "cache")?.and_then(|v| v.as_bool()).unwrap_or(false) {
             let swept = sweep_layer(repo, &name, &orepo, &scoped, false)?;
-            if !swept.trees.is_empty() {
+            if !swept.trees.is_empty() || !swept.packs.is_empty() {
                 eprintln!(
-                    "layr: overlay {name}: deleted {} dead cache state(s) and {} part(s) ({} bytes) in the remote",
+                    "layr: overlay {name}: deleted {} dead cache state(s) and {} part(s) ({} bytes), {} dead chunk(s) in {} pack object(s) ({} bytes) in the remote",
                     swept.trees.len(),
                     swept.parts.len(),
-                    swept.bytes
+                    swept.bytes,
+                    swept.chunks,
+                    swept.packs.len(),
+                    swept.chunk_bytes
                 );
             }
         }
@@ -509,11 +512,12 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
         // The key of this epoch is published: the caches of the older epochs have no reader now.
         if repo.overlay_setting(&name, "cache")?.and_then(|v| v.as_bool()).unwrap_or(false) {
             let swept = sweep_old_epochs(store, &orepo.p.id, &published.key.epoch, &listed, false)?;
-            if !swept.trees.is_empty() || !swept.parts.is_empty() {
+            if !swept.trees.is_empty() || !swept.parts.is_empty() || !swept.packs.is_empty() {
                 eprintln!(
-                    "layr: overlay {name}: deleted {} cache state(s) and {} part(s) of older key epochs in the remote",
+                    "layr: overlay {name}: deleted {} cache state(s), {} part(s) and {} chunk object(s) of older key epochs in the remote",
                     swept.trees.len(),
-                    swept.parts.len()
+                    swept.parts.len(),
+                    swept.packs.len()
                 );
             }
         }
@@ -564,6 +568,20 @@ fn sweep_old_epochs(
         }
         swept.parts.extend(parts);
         swept.trees.extend(trees);
+        // Chunk packs of the old epoch: nothing names them once its trees are gone. Packs and
+        // indexes go after the trees, so a reader never finds a tree without its chunks.
+        let chunks: Vec<String> = store
+            .backend
+            .list(&format!("overlays/{overlay}/epochs/{epoch}/chunks/"))?
+            .into_iter()
+            .map(|o| o.key)
+            .collect();
+        for key in &chunks {
+            if !dry_run {
+                store.backend.delete(key)?;
+            }
+        }
+        swept.packs.extend(chunks);
     }
     Ok(swept)
 }
@@ -638,6 +656,7 @@ pub(super) fn sweep_caches(store: &Store, ctx: &Ctx, repo: &Repo, dry_run: bool)
         let mut swept = sweep_layer(repo, &name, &orepo, &scoped, dry_run)?;
         swept.trees.extend(old.trees);
         swept.parts.extend(old.parts);
+        swept.packs.extend(old.packs);
         out.push((name.clone(), swept));
     }
     Ok(out)

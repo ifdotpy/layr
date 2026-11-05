@@ -143,6 +143,11 @@ machines. Source states keep frames.
   deleted. A pack without live chunks is deleted directly. No dead chunk stays in a pack. The new
   pack is put before the deletes, so a crash leaves a duplicate, and a rerun deletes the same objects.
 - A reader that does not find a chunk lists the packs once more: a rewrite may have moved it.
+- The remote cache sweep (`store_remote::sweep`) deletes the chunks that its dead trees name and no
+  kept tree names, through `chunked::release`, after the trees. A pack that no tree names (a push
+  that stopped before its tree) goes when its index is older than a day and holds no live chunk.
+  An older key epoch loses all of its `chunks/` with its trees. `layr fsck --caches --remote`
+  reports unreachable chunks and kept trees with missing chunks, and exits 1 when either exists.
 - `layr_store::reader::chunked_file` reads a chunked file from supplied packs and indexes, also in
   WebAssembly.
 
