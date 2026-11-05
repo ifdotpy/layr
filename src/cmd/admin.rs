@@ -187,6 +187,10 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
                     }
                     // Retention when caches are made, not only in gc: no daemon has to run.
                     trash_excess_caches(repo)?;
+                    // The size limit of a folder overlay (`gc=lru:<size>`), now that a build may have grown it.
+                    if let Err(e) = repo.cache_lru_line(&l, &caches) {
+                        eprintln!("warning: cache size limits not applied: {e:#}");
+                    }
                 }
                 if !a.has("-q") {
                     outln!(ctx, "{} {}", l.name, ids::display(&s.id));

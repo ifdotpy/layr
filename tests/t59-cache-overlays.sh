@@ -87,13 +87,13 @@ eq "main has the merged line's files" "changed w" "$(cat target/debug/x target/d
 eq "the incoming file wins" "changed" "$(cat target/debug/x)"
 eq "status stays clean" "" "$(l status --short)"
 
-# 6. gc lru:<size> trims the cache folders of the lines, oldest files first.
+# 6. gc lru:<size> trims the cache folder of a line at its save --caches, oldest files first, with no gc.
 head -c 300000 /dev/zero > $P/rel/target/debug/big
 head -c 150000 /dev/zero > $P/rel/target/debug/mid
 touch -t 200001010000 $P/rel/target/debug/x
 touch -t 200101010000 $P/rel/target/debug/mid
 ok "set a size limit" l overlay set cache.target --gc lru:400K
-l gc --repair -q >/dev/null 2>&1
+(cd $P/rel && l save --caches -q >/dev/null 2>&1)
 no "the oldest file went" test -e $P/rel/target/debug/x
 no "the next oldest went until the folder fits" test -e $P/rel/target/debug/mid
 ok "the newest file stayed" test -e $P/rel/target/debug/big

@@ -1060,6 +1060,21 @@ impl<'a> Repo<'a> {
     /// `gc lru:<size>` of the folder overlays: in the working folder of each line, delete the
     /// files of the folder that were used least recently (the newer of access and change time)
     /// until the folder is at most the size. Returns the deleted bytes.
+    /// `cache_gc_lru` for the cache folders `folders` of one line, after its `save --caches`: the folders that a
+    /// build may have grown, with no walk of the other lines.
+    pub fn cache_lru_line(&self, line: &Line, folders: &[String]) -> Result<u64> {
+        let mut freed = 0;
+        let w = self.working(line);
+        for (name, folder) in self.folder_overlays()?.into_iter().filter(|(_, f)| folders.contains(f)) {
+            let Some(limit) = self.overlay_props(&name)?.gc_lru else { continue };
+            let Ok(cp) = fsutil::safe_join(&w, &folder) else { continue };
+            if btrfs::is_subvolume(&cp) {
+                freed += lru_trim(&cp, limit)?;
+            }
+        }
+        Ok(freed)
+    }
+
     pub fn cache_gc_lru(&self) -> Result<u64> {
         let mut freed = 0;
         for (name, folder) in self.folder_overlays()? {
