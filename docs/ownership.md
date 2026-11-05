@@ -245,6 +245,11 @@ state is freed:
   step at the end of that command writes its `ref.expire` record and frees what only it kept.
   Before, only `gc --repair` expired refs.
 
+The operation that makes such data dead removes it, at the end of the command (`free.rs`): a line
+delete removes the saved status and live compare of the line and its overlay bases, and a head
+that moves away from a state removes that state's git index unless a line head still names it or
+it has a Git commit. Only the named items are looked at.
+
 Quarantine data (`git-damaged-*`) is never freed automatically: it can hold the only copy. `layr gc`
 lists it with its size and age, and `layr gc --drop-quarantine <path>` removes one after the owner
 looked at it.

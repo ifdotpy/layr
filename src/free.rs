@@ -19,6 +19,25 @@ static OPENED: Mutex<BTreeSet<(PathBuf, String)>> = Mutex::new(BTreeSet::new());
 /// long chain gets a complete tree, in the background (`keyframe_heads`).
 static MOVED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 
+/// States that a line head left, and lines that a record deleted, in this command (`Db::derive`): their derived
+/// data goes at the end of the command (`drop_derived`).
+static LEFT: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+static DELETED_LINES: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+/// A line head left `state`.
+pub fn head_left(state: &str) {
+    if let Ok(mut left) = LEFT.lock() {
+        left.insert(state.to_string());
+    }
+}
+
+/// A record deleted the line `id`.
+pub fn line_deleted(id: &str) {
+    if let Ok(mut deleted) = DELETED_LINES.lock() {
+        deleted.insert(id.to_string());
+    }
+}
+
 /// A record moved a line head to `state`.
 pub fn head_moved(state: &str) {
     if let Ok(mut moved) = MOVED.lock() {
@@ -48,9 +67,16 @@ pub fn finish(ctx: &crate::ctx::Ctx) {
         Err(_) => return,
     };
     let moved: BTreeSet<String> = MOVED.lock().map(|mut m| std::mem::take(&mut *m)).unwrap_or_default();
+    let left: BTreeSet<String> = LEFT.lock().map(|mut m| std::mem::take(&mut *m)).unwrap_or_default();
+    let deleted: BTreeSet<String> = DELETED_LINES.lock().map(|mut m| std::mem::take(&mut *m)).unwrap_or_default();
     for name in names {
         if !moved.is_empty() {
             keyframe_heads(store, &name, &moved);
+        }
+        if !left.is_empty() || !deleted.is_empty() {
+            if let Err(e) = drop_derived(store, &name, &left, &deleted) {
+                eprintln!("layr: derived data of {name} stays until the next command that changes it: {e:#}");
+            }
         }
         // A ref whose time ran out releases its owners now: the free step below frees what it kept.
         if expired_refs(store, &name) {
@@ -131,6 +157,33 @@ pub fn keyframe_process(root: &std::path::Path, name: &str, id: &str) -> Result<
         }
     }
     finish_project(&p)?;
+    Ok(())
+}
+
+/// The derived data of lines that a record deleted (the saved status and live compare, the overlay bases) and the
+/// git index of a state that no line head names any more and that has no Git commit. Only the named items are
+/// looked at; nothing walks the project.
+fn drop_derived(store: &Store, name: &str, left: &BTreeSet<String>, deleted: &BTreeSet<String>) -> Result<()> {
+    let p = Project::open(store, name)?;
+    for id in deleted {
+        let _ = std::fs::remove_file(p.meta_dir().join("status").join(format!("{id}.cache")));
+        let _ = std::fs::remove_file(p.meta_dir().join("overlap-live").join(format!("{id}.json")));
+        if let Ok(rd) = std::fs::read_dir(p.base_dir()) {
+            for e in rd.flatten() {
+                if e.file_name().to_string_lossy().split('@').next() == Some(id.as_str()) {
+                    let _ = crate::storage::delete_tree(&e.path());
+                }
+            }
+        }
+    }
+    if !left.is_empty() {
+        let heads: BTreeSet<String> = p.db.lines()?.into_iter().map(|l| l.head).collect();
+        for state in left.iter().filter(|s| !heads.contains(*s) && crate::model::is_uuid(s)) {
+            if p.db.git_commit_of(state)?.is_none() {
+                let _ = std::fs::remove_file(p.git_dir().join("layr-index").join(state));
+            }
+        }
+    }
     Ok(())
 }
 
