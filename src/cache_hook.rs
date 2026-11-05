@@ -75,6 +75,8 @@ pub struct Report {
 pub struct Done {
     pub log: String,
     pub folder_ok: bool,
+    /// A build (`warm`) ran to its end. False when it stopped at its time limit or failed; true for the other modes.
+    pub built: bool,
 }
 
 /// The command that starts a worker: the layr binary with `__cache-hook`, or the test binary in tests.
@@ -130,7 +132,7 @@ pub enum Mode {
 
 /// `run` for `mode`.
 pub fn run_mode(mode: Mode, setting: Option<&str>, folder: &Path, uid: u32, limit: Duration) -> Done {
-    let quiet = Done { log: String::new(), folder_ok: true };
+    let quiet = Done { log: String::new(), folder_ok: true, built: true };
     // Nothing to do, so nothing is started or logged: the hook is off, the owner is root (the hook runs as the
     // owner, and root is never pruned), or no adapter applies to the folder.
     if setting == Some("none") || uid == 0 {
@@ -138,7 +140,11 @@ pub fn run_mode(mode: Mode, setting: Option<&str>, folder: &Path, uid: u32, limi
     }
     match setting {
         Some(name) if !registered().iter().any(|a| a.name() == name) => {
-            return Done { log: format!("{}: not pruned: unknown prune adapter '{name}'", folder.display()), folder_ok: true };
+            return Done {
+                log: format!("{}: not pruned: unknown prune adapter '{name}'", folder.display()),
+                folder_ok: true,
+                built: true,
+            };
         }
         None if !registered().iter().any(|a| a.detects(folder)) => return quiet,
         _ => {}
@@ -160,7 +166,7 @@ pub fn relocate(setting: Option<&str>, folder: &Path, at: &Path, uid: u32) -> Do
         None => registered().iter().any(|a| a.detects(folder)),
     };
     if !applies {
-        return Done { log: String::new(), folder_ok: true };
+        return Done { log: String::new(), folder_ok: true, built: true };
     }
     let launch = Launch { exe: std::env::current_exe().unwrap_or_else(|_| "layr".into()), args: vec![WORKER_ARG.into()] };
     relocate_with(&launch, &[], setting, folder, at, uid)
@@ -181,7 +187,7 @@ pub fn relocate_with(launch: &Launch, env: &[(&str, &str)], setting: Option<&str
         Run::Failed(e) => format!("{shown}: not relocated: {e}"),
         Run::Killed => format!("{shown}: not relocated: timed out after {} s", RELOCATE_LIMIT.as_secs()),
     };
-    Done { log, folder_ok: true }
+    Done { log, folder_ok: true, built: true }
 }
 
 /// The build of the standard commands in a worker. After a stop at the hard limit the adapter's `recover` runs,
@@ -189,8 +195,12 @@ pub fn relocate_with(launch: &Launch, env: &[(&str, &str)], setting: Option<&str
 #[allow(clippy::too_many_arguments)]
 pub fn warm_with(launch: &Launch, env: &[(&str, &str)], setting: Option<&str>, folder: &Path, uid: u32, limit: Duration, wait: Duration) -> Done {
     let shown = folder.display();
+    let mut built = false;
     let log = match execute(launch, env, "warm", setting, folder, uid, limit, wait) {
-        Run::Report(r) if r.pruned => format!("{shown}: built with {}", r.adapter),
+        Run::Report(r) if r.pruned => {
+            built = true;
+            format!("{shown}: built with {}", r.adapter)
+        }
         Run::Report(r) => format!("{shown}: not built with {}: {}", r.adapter, r.reason),
         Run::Start(e) => format!("{shown}: not built: cannot start the cache hook: {e}"),
         Run::Failed(e) => format!("{shown}: not built: {e}"),
@@ -201,14 +211,15 @@ pub fn warm_with(launch: &Launch, env: &[(&str, &str)], setting: Option<&str>, f
                 Run::Report(r) if r.folder_ok => Done {
                     log: format!("{shown}: not built: timed out after {} s, processes stopped", limit.as_secs()),
                     folder_ok: true,
+                    built: false,
                 },
-                Run::Report(r) => Done { log: damaged(folder, &r.reason), folder_ok: false },
-                Run::Start(e) | Run::Failed(e) => Done { log: damaged(folder, &e), folder_ok: false },
-                Run::Killed => Done { log: damaged(folder, "the recovery timed out"), folder_ok: false },
+                Run::Report(r) => Done { log: damaged(folder, &r.reason), folder_ok: false, built: false },
+                Run::Start(e) | Run::Failed(e) => Done { log: damaged(folder, &e), folder_ok: false, built: false },
+                Run::Killed => Done { log: damaged(folder, "the recovery timed out"), folder_ok: false, built: false },
             };
         }
     };
-    Done { log, folder_ok: true }
+    Done { log, folder_ok: true, built }
 }
 
 /// What one worker run ended with.
@@ -273,12 +284,14 @@ fn execute(launch: &Launch, env: &[(&str, &str)], mode: &str, setting: Option<&s
 pub fn run_with(launch: &Launch, env: &[(&str, &str)], setting: Option<&str>, folder: &Path, uid: u32, limit: Duration, wait: Duration) -> Done {
     let shown = folder.display();
     if setting == Some("none") {
-        return Done { log: format!("{shown}: prune is off"), folder_ok: true };
+        return Done { log: format!("{shown}: prune is off"), folder_ok: true, built: true };
     }
     match execute(launch, env, "prune", setting, folder, uid, limit, wait) {
-        Run::Report(r) => Done { log: describe(folder, &r), folder_ok: r.folder_ok },
-        Run::Start(e) => Done { log: format!("{shown}: not pruned: cannot start the cache hook: {e}"), folder_ok: true },
-        Run::Failed(e) => Done { log: format!("{shown}: not pruned: {e}"), folder_ok: false },
+        Run::Report(r) => Done { log: describe(folder, &r), folder_ok: r.folder_ok, built: true },
+        Run::Start(e) => {
+            Done { log: format!("{shown}: not pruned: cannot start the cache hook: {e}"), folder_ok: true, built: true }
+        }
+        Run::Failed(e) => Done { log: format!("{shown}: not pruned: {e}"), folder_ok: false, built: true },
         Run::Killed => {
             // The hard limit passed: the processes of the hook are stopped. Put the folder back, or report it damaged.
             let restore = execute(launch, env, "recover", setting, folder, uid, RECOVER_LIMIT, RECOVER_LIMIT + GRACE);
@@ -290,10 +303,11 @@ pub fn run_with(launch: &Launch, env: &[(&str, &str)], setting: Option<&str>, fo
                         if r.restored { "restored from its copy" } else { "nothing to restore" }
                     ),
                     folder_ok: true,
+                    built: true,
                 },
-                Run::Report(r) => Done { log: damaged(folder, &r.reason), folder_ok: false },
-                Run::Start(e) | Run::Failed(e) => Done { log: damaged(folder, &e), folder_ok: false },
-                Run::Killed => Done { log: damaged(folder, "the recovery timed out"), folder_ok: false },
+                Run::Report(r) => Done { log: damaged(folder, &r.reason), folder_ok: false, built: true },
+                Run::Start(e) | Run::Failed(e) => Done { log: damaged(folder, &e), folder_ok: false, built: true },
+                Run::Killed => Done { log: damaged(folder, "the recovery timed out"), folder_ok: false, built: true },
             }
         }
     }
@@ -593,12 +607,12 @@ mod tests {
         let dir = folder("warm");
         let ms = Duration::from_millis;
         let done = warm_with(&launch(), &TEST_ENV, Some("ok"), &dir, me(), ms(5000), ms(20000));
-        assert!(done.log.contains("built with ok"), "{}", done.log);
+        assert!(done.log.contains("built with ok") && done.built, "{}", done.log);
         assert!(dir.join("built.txt").exists());
         let done = warm_with(&launch(), &TEST_ENV, Some("fail"), &dir, me(), ms(5000), ms(20000));
-        assert!(done.log.contains("not built with fail: no build"), "{}", done.log);
+        assert!(done.log.contains("not built with fail: no build") && !done.built, "{}", done.log);
         let done = warm_with(&launch(), &TEST_ENV, Some("slow"), &dir, me(), ms(200), ms(500));
-        assert!(done.log.contains("timed out") && done.folder_ok, "{}", done.log);
+        assert!(done.log.contains("timed out") && done.folder_ok && !done.built, "{}", done.log);
     }
 
     #[test]

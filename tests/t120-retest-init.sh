@@ -150,6 +150,18 @@ has "the follow pass builds the cache folder" "built with cargo" "$tick"
 eq "after a remote change without a line, a new line from main compiles 0 crates" 0 "$(compiled $P/t5 build --locked)"
 eq "and 0 test crates" 0 "$(compiled $P/t5 test --locked --no-run)"
 
+# 1c. A build that does not finish (a compile error on the remote) leaves main marked: the next pass builds again,
+#     and after the fix the pass after a good build does nothing.
+cd $U && git pull -q origin main
+printf 'pub fn a() -> i32 {\n    not_here()\n}\n' > crates/a/src/lib.rs && git add crates/a/src && git commit -qm "a: broken" && git push -q origin main || fail "the broken remote change failed"
+has "the pass of a broken change does not build" "not built with cargo" "$(cd $P/main && ly follow --tick 2>&1)"
+(cd $P/main && ly follow --tick >/dev/null 2>&1)
+has "the next pass builds again" "up to date; caches saved with the head" "$(cd $P/main && ly follow 2>&1)"
+cd $U && printf 'pub fn a() -> i32 {\n    2 - 1\n}\n' > crates/a/src/lib.rs && git add crates/a/src && git commit -qm "a: fixed" && git push -q origin main || fail "the fix on the remote failed"
+has "the pass of the fix builds" "built with cargo" "$(cd $P/main && ly follow --tick 2>&1)"
+(cd $P/main && ly follow --tick >/dev/null 2>&1)
+no "the pass after a good build does nothing" sh -c 'echo "$1" | grep -q "caches saved"' _ "$(cd $P/main && ly follow 2>&1)"
+
 # 2. A local merge into protected main takes and saves the caches of the line (as the follow pass does). A docs change
 #    keeps every crate file, so a new line from main compiles 0 crates.
 (cd $P/main && ly line new w main $OWNER_ARG >/dev/null 2>&1)
