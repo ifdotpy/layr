@@ -170,6 +170,9 @@ sweep = [["build", "--workspace", "--exclude", "studio-native-client", "--tests"
 retest = [["test", "--workspace", "--no-run"]]
 ```
 
+- `env` holds strings. A table named `macos` or `linux` in it applies on that OS only, over the plain values, for
+  paths that differ by OS: `env = { CARGO_INCREMENTAL = "1", macos = { CC = "<clang>", SDKROOT = "<sdk>" } }`. The
+  cache key, the prune listing and retest read the same table.
 - `sweep` lists cargo commands without `cargo`. It runs each command in `target` with `env`, as a listing
   (see "Freshness"). The listing adds `-v --message-format json`. A command whose units are not all fresh
   skips the folder; the listing never builds a unit that is not fresh.

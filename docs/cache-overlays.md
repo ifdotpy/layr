@@ -611,6 +611,15 @@ was built at another path, and `at` is the path where the folder is used from no
 | --- | --- |
 | `layr line new` | after the project lock, when the line folder is in place (the owner cannot enter the store's work folder) |
 | `layr merge`, `merge --caches-only`, a follow pass | in `pull_caches`, after each folder is in place |
+| an automatic check (docs/checks.md) | on its copy, for the place where the check sees it |
+
+The registry sources are the one path that relocation cannot change. Cargo keeps the absolute path of each
+registry source (`<CARGO_HOME>/registry/src/...`) in the unit's fingerprint, so a cache built with another
+CARGO_HOME builds every registry crate again; only the workspace crates stay warm. Use one absolute CARGO_HOME on
+every machine that shares caches (the laptop shell, check runners, CI), outside any user home, for example
+`/usr/local/share/layr-checks/<project>/cargo`. A check can read it read-only: an offline build writes nothing
+there. When a cache came from a registry folder that this machine does not have, the relocation prints
+`built with the cargo registry at <path>, which this machine does not have` (`CacheAdapter::relocation_note`).
 
 The worker runs it as the owner, root too, also with `prune=none`, with a 60 s limit. It runs no process
 and never fails a command. The cargo adapter reads the dep-info files (`<profile>/deps/*.d`). The first

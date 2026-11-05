@@ -97,15 +97,23 @@ const KEY_ENV: &[&str] = &[
     "AR",
 ];
 
+/// The names of the per-OS tables of the `env` table (`std::env::consts::OS`).
+const OS_TABLES: [&str; 2] = ["macos", "linux"];
+
 /// The `env` table of `[workspace.metadata.layr-retest]` in `<root>/Cargo.toml`, read without cargo: the env that
 /// retest and the gate pin for every cargo call. Empty when the file or the table is missing or bad.
 pub fn pinned_env(root: &Path) -> Vec<(String, String)> {
     let Ok(text) = std::fs::read_to_string(root.join("Cargo.toml")) else { return Vec::new() };
     let Ok(doc) = text.parse::<toml::Table>() else { return Vec::new() };
     let env = doc.get("workspace").and_then(|w| w.get("metadata")).and_then(|m| m.get("layr-retest")).and_then(|r| r.get("env"));
-    env.and_then(|e| e.as_table())
-        .map(|t| t.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect())
-        .unwrap_or_default()
+    let Some(table) = env.and_then(|e| e.as_table()) else { return Vec::new() };
+    let strings = |t: &toml::Table| t.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect::<Vec<_>>();
+    let mut out = strings(table);
+    // `macos = { ... }` and `linux = { ... }` apply on that OS only, over the plain values.
+    if let Some(own) = table.get(std::env::consts::OS).and_then(|v| v.as_table()) {
+        out.extend(strings(own));
+    }
+    out
 }
 
 /// Reads the retest settings of the workspace at `root`. Missing settings are empty. A missing `env` is empty too:
@@ -114,11 +122,21 @@ pub fn pinned_env(root: &Path) -> Vec<(String, String)> {
 pub fn settings(host: &dyn Host, root: &Path) -> Result<Settings> {
     let meta = metadata(host, root)?;
     let cfg = &meta["metadata"]["layr-retest"];
-    let mut env: Vec<(String, String)> = match cfg["env"].as_object() {
-        Some(obj) => obj
-            .iter()
+    let entries = |obj: &serde_json::Map<String, serde_json::Value>| -> Result<Vec<(String, String)>> {
+        obj.iter()
+            .filter(|(k, v)| !(v.is_object() && OS_TABLES.contains(&k.as_str())))
             .map(|(k, v)| Ok((k.clone(), v.as_str().context("env: each value is a string")?.to_string())))
-            .collect::<Result<_>>()?,
+            .collect()
+    };
+    let mut env: Vec<(String, String)> = match cfg["env"].as_object() {
+        Some(obj) => {
+            let mut env = entries(obj)?;
+            // `macos = { ... }` and `linux = { ... }` apply on that OS only, over the plain values.
+            if let Some(own) = obj.get(std::env::consts::OS).and_then(|v| v.as_object()) {
+                env.extend(entries(own)?);
+            }
+            env
+        }
         None => Vec::new(),
     };
     Ok(Settings {
@@ -501,6 +519,15 @@ impl CacheAdapter for Cargo {
     fn relocated(&self, folder: &Path, at: &Path) -> Result<usize, String> {
         crate::relocate::relocate(folder, at).map_err(|e| format!("{e:#}"))
     }
+
+    fn relocation_note(&self, folder: &Path) -> Option<String> {
+        let old = crate::relocate::foreign_registry(folder)?;
+        Some(format!(
+            "built with the cargo registry at {}, which this machine does not have: cargo builds every registry crate \
+             again. Use one CARGO_HOME path on every machine (docs/cache-overlays.md)",
+            old.display()
+        ))
+    }
 }
 
 /// Builds the `sweep` commands of the project into `target`, with the project env. It may fetch crates (a merged
@@ -548,7 +575,14 @@ fn prune_in(host: &dyn Host, root: &Path, target: &Path) -> Result<Outcome> {
                 freed += n;
                 busy += b;
             }
-            Listed::NotFresh(why) => kept.push(format!("{profile}: a unit is not fresh ({why})")),
+            Listed::NotFresh(why) => {
+                // A registry source at another path is another CARGO_HOME: name the one that the listing used.
+                let home = match why.contains("the path to the source changed") {
+                    true => format!("; the listing used CARGO_HOME {}", cargo_home(&env).display()),
+                    false => String::new(),
+                };
+                kept.push(format!("{profile}: a unit is not fresh ({why}{home})"))
+            }
             Listed::Busy(holder) => kept.push(format!("{profile}: build lock busy (holder: {holder})")),
         }
     }
@@ -565,4 +599,28 @@ fn prune_in(host: &dyn Host, root: &Path, target: &Path) -> Result<Outcome> {
     // A busy lock keeps its profile folder (the others are swept), as the module doc says.
     let _ = busy;
     Ok(Outcome::Pruned { freed })
+}
+
+#[cfg(test)]
+mod pinned_env_tests {
+    use super::pinned_env;
+
+    #[test]
+    fn the_table_of_this_os_applies_over_the_plain_values() {
+        let root = std::env::temp_dir().join(format!("layr-pinned-env-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[workspace.metadata.layr-retest]\nenv = { CARGO_INCREMENTAL = \"1\", CC = \"cc\", macos = { CC = \"mac-cc\", SDKROOT = \"sdk\" }, linux = { CC = \"linux-cc\" } }\n",
+        )
+        .unwrap();
+        let env = pinned_env(&root);
+        let last = |k: &str| env.iter().rev().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
+        assert_eq!(last("CARGO_INCREMENTAL"), Some("1"));
+        let own = if cfg!(target_os = "macos") { "mac-cc" } else { "linux-cc" };
+        assert_eq!(last("CC"), Some(own));
+        assert_eq!(last("SDKROOT"), cfg!(target_os = "macos").then_some("sdk"));
+        assert!(!env.iter().any(|(n, _)| n == "macos" || n == "linux"));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 }

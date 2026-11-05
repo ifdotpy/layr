@@ -162,7 +162,7 @@ pub fn local_config(ctx: &Ctx, repo: &Repo, a: &Parsed) -> Result<i32> {
     Ok(0)
 }
 
-const USAGE: &str = "usage: layr checks watch [--once] [--privileged-only] [--interval <seconds>] [--json]\n       layr checks pending [--state <rev>] [--platform <os>-<arch>] [--json]\nTo list check results, use layr attestations.";
+const USAGE: &str = "usage: layr checks watch [--once] [--privileged-only] [--interval <seconds>] [--json]\n       layr checks run --state <rev> [--privileged-only] [--json]\n       layr checks pending [--state <rev>] [--platform <os>-<arch>] [--json]\nTo list check results, use layr attestations.";
 
 pub fn checks(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let a = parse(
@@ -172,14 +172,19 @@ pub fn checks(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if a.pos == ["pending"] && a.paths.is_empty() && !a.has("--once") && !a.has("--privileged-only") && a.get("--interval").is_none() {
         return pending(ctx, &a);
     }
-    if a.pos != ["watch"] || !a.paths.is_empty() || a.get("--state").is_some() || a.get("--platform").is_some() {
+    // `run`: one pass over the jobs of one exact state, such as a commit that CI fetched from Git.
+    let run = a.pos == ["run"];
+    if !(a.pos == ["watch"] || run) || !a.paths.is_empty() || a.get("--state").is_some() != run || a.get("--platform").is_some() {
+        return Err(exit(128, USAGE));
+    }
+    if run && (a.has("--once") || a.get("--interval").is_some()) {
         return Err(exit(128, USAGE));
     }
     if !cfg!(any(target_os = "linux", target_os = "macos")) {
         bail!("automatic checks require Linux or macOS");
     }
     if ctx.caller.is_root() {
-        bail!("checks watch needs a non-root service user through the layr daemon");
+        bail!("checks {} needs a non-root service user through the layr daemon", a.pos[0]);
     }
     let interval: u64 = a.get("--interval").unwrap_or("5").parse().context("invalid check interval")?;
     if !(1..=3600).contains(&interval) {
@@ -187,6 +192,7 @@ pub fn checks(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let h = here(ctx)?;
     h.repo.require(ctx, "try")?;
+    let state = a.get("--state").map(|rev| crate::revs::resolve(&h.repo, h.line.as_ref(), rev)).transpose()?;
     // Match the queue runner: one watcher per project without holding the project write lock.
     let lock =
         std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(h.repo.p.meta_dir().join("checks.lock"))?;
@@ -195,7 +201,7 @@ pub fn checks(ctx: &Ctx, args: &[String]) -> Result<i32> {
     loop {
         let h = here(ctx)?;
         h.repo.require(ctx, "try")?;
-        let results = scan(ctx, &h.repo, a.has("--privileged-only"))?;
+        let results = scan(ctx, &h.repo, a.has("--privileged-only"), state.as_deref())?;
         if a.has("--json") {
             outln!(
                 ctx,
@@ -218,7 +224,7 @@ pub fn checks(ctx: &Ctx, args: &[String]) -> Result<i32> {
         // Flush each cycle: service output otherwise stays buffered throughout a watch.
         use std::io::Write;
         ctx.out.borrow_mut().flush()?;
-        if a.has("--once") {
+        if a.has("--once") || run {
             return Ok(if results.checks.iter().any(|r| r["exit"] != 0) { 1 } else { 0 });
         }
         std::thread::sleep(std::time::Duration::from_secs(interval));
@@ -275,6 +281,8 @@ struct Scan {
 struct Plan {
     policy: layr_model::Project,
     main_states: BTreeSet<String>,
+    /// The heads (also intermediate) of the protected lines in `checks.lines`, with the line name.
+    heads: BTreeMap<String, String>,
     jobs: BTreeSet<(String, String, Option<String>)>,
     commands: BTreeMap<String, String>,
     privileged: BTreeSet<String>,
@@ -309,6 +317,7 @@ fn plan(repo: &Repo, state: Option<&str>) -> Result<Plan> {
         }
     }
     let mut watched_lines = BTreeMap::new();
+    let mut heads = BTreeMap::new();
     for (line, checks) in lines.as_object().context("checks.lines must be an object")? {
         if policy.access_policy(crate::ids::now_ms(), false).rule_for(line).is_none() {
             bail!("automatic line '{line}' must be protected");
@@ -319,17 +328,19 @@ fn plan(repo: &Repo, state: Option<&str>) -> Result<Plan> {
             for name in &checks {
                 jobs.insert((head.clone(), name.clone()));
             }
+            heads.insert(head.clone(), line.name.clone());
         }
-        watched_lines.insert(line.id, checks);
+        watched_lines.insert(line.id, (line.name.clone(), checks));
     }
     // Include intermediate heads when more than one version arrived between scans.
     if !watched_lines.is_empty() {
         for record in repo.p.db.records(usize::MAX >> 1)? {
             for (id, movement) in record.lines {
-                if let (Some(names), Some(after)) = (watched_lines.get(&id), movement.after) {
+                if let (Some((line, names)), Some(after)) = (watched_lines.get(&id), movement.after) {
                     for name in names {
                         jobs.insert((after.head.clone(), name.clone()));
                     }
+                    heads.insert(after.head.clone(), line.clone());
                 }
             }
         }
@@ -351,7 +362,7 @@ fn plan(repo: &Repo, state: Option<&str>) -> Result<Plan> {
         .into_iter()
         .flat_map(|(state, name)| platforms_of(&platforms, &name).into_iter().map(move |p| (state.clone(), name.clone(), p)))
         .collect();
-    Ok(Plan { policy, main_states, jobs, commands, privileged })
+    Ok(Plan { policy, main_states, heads, jobs, commands, privileged })
 }
 
 /// Whether an active executor check of `state` ran the argv `argv` with the privileged mode
@@ -372,8 +383,9 @@ fn attested(repo: &Repo, state: &str, argv: &[String], privileged: bool, want: O
     }))
 }
 
-fn scan(ctx: &Ctx, repo: &Repo, privileged_only: bool) -> Result<Scan> {
-    let Plan { policy, main_states, jobs, commands, privileged } = plan(repo, None)?;
+/// One pass of the executor: runs the jobs that no attestation covers, of every state or of `state` only.
+fn scan(ctx: &Ctx, repo: &Repo, privileged_only: bool, state: Option<&str>) -> Result<Scan> {
+    let Plan { policy, main_states, heads, jobs, commands, privileged } = plan(repo, state)?;
     let here = platform();
     let limits = Limits {
         timeout: setting(&policy, "checks.timeout", json!(900))?.as_u64().context("invalid checks.timeout")?,
@@ -418,10 +430,11 @@ fn scan(ctx: &Ctx, repo: &Repo, privileged_only: bool) -> Result<Scan> {
             }
             continue;
         }
-        let result = super::admin::with_try_copy(ctx, repo, &state, &[], false, |dir| {
+        let result = super::admin::with_try_copy(ctx, repo, &state, &[], false, true, |dir| {
             let started = std::time::Instant::now();
             #[cfg(any(target_os = "linux", target_os = "macos"))]
-            let (code, log, truncated) = execute(ctx, repo, dir, &state, &argv, is_privileged, &limits)?;
+            let back = heads.get(&state).map(String::as_str);
+            let (code, log, truncated) = execute(ctx, repo, dir, &state, &argv, is_privileged, &limits, back)?;
             #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             let (code, log, truncated): (i32, Vec<u8>, bool) = {
                 bail!("automatic checks require Linux");
@@ -510,6 +523,7 @@ fn execute(
     argv: &[String],
     privileged: bool,
     limits: &Limits,
+    back: Option<&str>,
 ) -> Result<(i32, Vec<u8>, bool)> {
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     use std::process::Command;
@@ -542,6 +556,7 @@ fn execute(
         // cp -a also copies the source root's mode over the prepared folder.
         // Restore traversal for the suite's unprivileged service clients.
         std::fs::set_permissions(&private.path, std::fs::Permissions::from_mode(0o711))?;
+        relocate_copy(repo, 0, &private.path, &private.path)?;
         home = private.path.join(format!(".check-home-{}", crate::ids::new_id()));
         std::fs::DirBuilder::new().mode(0o700).create(&home)?;
         // Keep test mounts private so killing a timed-out suite releases its mounts too.
@@ -557,6 +572,8 @@ fn execute(
             &[("HOME".into(), home.display().to_string()), ("LAYR_TRY_STATE".into(), state.to_string())],
         )?;
     } else {
+        // The check sees the copy at /work: its warm caches must not name the line they were built in.
+        relocate_copy(repo, ctx.caller.uid, dir, std::path::Path::new("/work"))?;
         if !std::path::Path::new("/usr/bin/bwrap").is_file() {
             bail!("bubblewrap is required for automatic checks; install bubblewrap");
         }
@@ -600,7 +617,54 @@ fn execute(
             .current_dir("/");
         crate::privs::command_as(&mut command, ctx.caller.uid, &[])?;
     }
-    run_check(command, limits)
+    let result = run_check(command, limits)?;
+    // A privileged copy is a plain folder of root: only a sandboxed check gives its caches back.
+    if result.0 == 0 && private.is_none() {
+        if let Some(line) = back {
+            save_back(ctx, repo, line, state, dir);
+        }
+    }
+    Ok(result)
+}
+
+/// The caches that a passing check of a head of the protected line `line` built in its copy `dir`, saved with that
+/// head as the caches of the line `<line>.checks-<os>-<arch>` (made at the first such check; its head stays there).
+/// `line new X <line>` on any machine of the platform then takes them (`cache_source`): one build per head warms
+/// the next check and every machine. A protected head is reviewed code built in the sandbox, so the caches are
+/// shared like the caches of a protected line. A pull request state never gives caches back. A failure here
+/// leaves the check result as it is.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn save_back(ctx: &Ctx, repo: &Repo, line: &str, state: &str, dir: &std::path::Path) {
+    let r = (|| -> Result<usize> {
+        let folders: Vec<String> = repo
+            .folder_overlays()?
+            .into_iter()
+            .map(|(_, folder)| folder)
+            .filter(|folder| crate::fsutil::safe_join(dir, folder).is_ok_and(|p| crate::storage::is_subvolume(&p)))
+            .collect();
+        if folders.is_empty() {
+            return Ok(0);
+        }
+        let name = format!("{line}.checks-{}", platform());
+        let _lock = repo.p.lock()?;
+        let checks_line = match repo.p.db.line_by_name(&name)? {
+            Some(l) => l,
+            None => repo.create_line(ctx, &name, state, ctx.caller.uid)?,
+        };
+        Ok(repo.save_cache_overlays_in(ctx, &checks_line, dir, &folders, true, state)?.len())
+    })();
+    if let Err(e) = r {
+        eprintln!("layr checks: caches of {state} not saved: {e:#}");
+    }
+}
+
+/// The cache folders of a check copy `dir`, which the check sees at `at`: units that name the line where they were
+/// built (a compiled-in path) build again, as in a new line (`relocate_caches`).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn relocate_copy(repo: &Repo, uid: u32, dir: &std::path::Path, at: &std::path::Path) -> Result<()> {
+    let folders: Vec<String> = repo.folder_overlays()?.into_iter().map(|(_, folder)| folder).collect();
+    repo.relocate_folders(uid, &folders, dir, at);
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -637,12 +701,13 @@ fn macos_profile(work: &std::path::Path, seed: &std::path::Path) -> Result<Strin
 #[cfg(target_os = "macos")]
 fn execute(
     ctx: &Ctx,
-    _repo: &Repo,
+    repo: &Repo,
     dir: &std::path::Path,
     state: &str,
     argv: &[String],
     privileged: bool,
     limits: &Limits,
+    back: Option<&str>,
 ) -> Result<(i32, Vec<u8>, bool)> {
     use std::os::unix::fs::DirBuilderExt;
     if privileged {
@@ -650,10 +715,12 @@ fn execute(
     }
     // Keep the writable tree outside the personal home. The no-follow APFS
     // helpers need readable ancestor directories, not access to the home tree.
-    let private =
-        crate::repo::Temp { path: std::path::PathBuf::from(format!("/private/var/tmp/layr-check-{}", crate::ids::new_id())) };
+    // A clone needs one volume: a store on another volume (a disk image) keeps the copy in its own
+    // work folder, so a warm cache folder is cloned and not copied.
+    let tmp = std::path::Path::new("/private/var/tmp");
+    let base = if std::fs::metadata(dir)?.dev() == std::fs::metadata(tmp)?.dev() { tmp.to_path_buf() } else { repo.p.work_dir() };
+    let private = crate::repo::Temp { path: base.join(format!("layr-check-{}", crate::ids::new_id())) };
     std::fs::DirBuilder::new().mode(0o700).create(&private.path)?;
-    // A clone needs one volume; a store on another volume (a disk image) takes a plain copy.
     let same_volume = std::fs::metadata(dir)?.dev() == std::fs::metadata(&private.path)?.dev();
     let status = std::process::Command::new("/bin/cp")
         .args([if same_volume { "-cR" } else { "-R" }, "--"])
@@ -664,6 +731,7 @@ fn execute(
         bail!("cannot prepare private macOS check folder");
     }
     let dir = std::fs::canonicalize(&private.path)?;
+    relocate_copy(repo, ctx.caller.uid, &dir, &dir)?;
     let home = dir.join(format!(".check-home-{}", crate::ids::new_id()));
     std::fs::DirBuilder::new().mode(0o700).create(&home)?;
     let seed = std::path::PathBuf::from(crate::privs::user(ctx.caller.uid)?.home).join("Library/Application Support/Layr/checks");
@@ -676,7 +744,13 @@ fn execute(
         ("LAYR_CHECK_SEED".into(), seed.display().to_string()),
         ("PATH".into(), "/opt/homebrew/opt/coreutils/libexec/gnubin:/opt/homebrew/opt/gnu-sed/libexec/gnubin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin".into()),
     ])?;
-    run_check(command, limits)
+    let result = run_check(command, limits)?;
+    if result.0 == 0 {
+        if let Some(line) = back {
+            save_back(ctx, repo, line, state, &dir);
+        }
+    }
+    Ok(result)
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

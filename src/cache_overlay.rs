@@ -446,17 +446,29 @@ impl<'a> Repo<'a> {
         shared: bool,
         project_state: &str,
     ) -> Result<Vec<(String, String, String)>> {
-        let w = self.working(line);
+        self.save_cache_overlays_in(ctx, line, &self.working(line), paths, shared, project_state)
+    }
+
+    /// `save_cache_overlays` from the folder `w` instead of the line's working folder (a check copy).
+    pub fn save_cache_overlays_in(
+        &self,
+        ctx: &Ctx,
+        line: &Line,
+        w: &Path,
+        paths: &[String],
+        shared: bool,
+        project_state: &str,
+    ) -> Result<Vec<(String, String, String)>> {
         let mut out = Vec::new();
         for p in paths {
-            let cp = fsutil::safe_join(&w, p)?;
+            let cp = fsutil::safe_join(w, p)?;
             if !btrfs::is_subvolume(&cp) {
                 continue;
             }
             let name = self.ensure_cache_overlay(ctx, p)?;
             let info = self.need_overlay(&name)?;
             let orepo = self.overlay_repo(&name)?;
-            let CacheKey { key, parts } = self.cache_key(ctx, &name, &w, line.owner)?;
+            let CacheKey { key, parts } = self.cache_key(ctx, &name, w, line.owner)?;
             let id = ids::new_id();
             {
                 let _lock = orepo.p.lock()?;
@@ -670,6 +682,33 @@ impl<'a> Repo<'a> {
     /// overlay line at that state. Returns the folders that got a cache.
     pub fn take_caches(&self, ctx: &Ctx, line: &Line, start: &str, source: Option<&Line>, w: &Path) -> Result<Vec<String>> {
         let mut taken = Vec::new();
+        for (name, folder, sid) in self.place_caches(ctx, line, start, source, w)? {
+            let info = self.need_overlay(&name)?;
+            let orepo = self.overlay_repo(&name)?;
+            let _lock = orepo.p.lock()?;
+            orepo.ensure_overlay_line(ctx, &Repo::overlay_line_name(&info, &line.id, line.owner), &sid, line.owner)?;
+            taken.push(folder);
+        }
+        // The new files have the time of the checkout; the ones the caches were built from get their time back.
+        if let Err(e) = crate::source_times::apply(w, &taken) {
+            eprintln!("warning: source file times of the caches not set: {e:#}");
+        }
+        Ok(taken)
+    }
+
+    /// The caches of a folder `w` that only lives for one command (a check copy): as `take_caches`,
+    /// without overlay lines, so the copy writes no record. Returns the folders that got a cache.
+    pub fn copy_caches(&self, ctx: &Ctx, line: &Line, start: &str, w: &Path) -> Result<Vec<String>> {
+        let taken: Vec<String> = self.place_caches(ctx, line, start, None, w)?.into_iter().map(|(_, folder, _)| folder).collect();
+        if let Err(e) = crate::source_times::apply(w, &taken) {
+            eprintln!("warning: source file times of the caches not set: {e:#}");
+        }
+        Ok(taken)
+    }
+
+    /// The writable cache snapshots of `take_caches` in `w`: overlay name, folder and cache state.
+    fn place_caches(&self, ctx: &Ctx, line: &Line, start: &str, source: Option<&Line>, w: &Path) -> Result<Vec<(String, String, String)>> {
+        let mut taken = Vec::new();
         if self.p.is_overlay() {
             return Ok(taken);
         }
@@ -699,7 +738,6 @@ impl<'a> Repo<'a> {
                 self.report_key_miss(&name, &folder, &from, uid, &key.parts);
                 continue;
             };
-            let info = self.need_overlay(&name)?;
             let orepo = self.overlay_repo(&name)?;
             orepo.hold(orepo.pin(&[sid.as_str()])?);
             let _t = crate::trace::named(|| format!("take_caches {folder} of line {} from state {sid} (line {})", line.name, line.id));
@@ -711,13 +749,7 @@ impl<'a> Repo<'a> {
             let uniform = btrfs::cache_snapshot(&orepo.p.state_path(&sid), &cp)?;
             let source_owner = orepo.p.db.state(&sid)?.and_then(|s| s.cache_by);
             crate::repo::give_cache_tree(&cp, uniform, source_owner, uid, gid)?;
-            let _lock = orepo.p.lock()?;
-            orepo.ensure_overlay_line(ctx, &Repo::overlay_line_name(&info, &line.id, line.owner), &sid, line.owner)?;
-            taken.push(folder);
-        }
-        // The new files have the time of the checkout; the ones the caches were built from get their time back.
-        if let Err(e) = crate::source_times::apply(w, &taken) {
-            eprintln!("warning: source file times of the caches not set: {e:#}");
+            taken.push((name, folder, sid));
         }
         Ok(taken)
     }
@@ -878,7 +910,13 @@ impl<'a> Repo<'a> {
     /// path. It never fails: the outcome is one log line on stderr, none when nothing changed.
     pub fn relocate_caches(&self, line: &Line, folders: &[String], root: &Path) {
         let (uid, _) = self.owner_ids(line);
-        let working = self.working(line);
+        let _t = crate::trace::named(|| format!("relocate caches of line {}", line.name));
+        self.relocate_folders(uid, folders, root, &self.working(line));
+    }
+
+    /// The cache folders `folders` of `root`, used below `at` from now on (a line's working folder, or the place
+    /// where a check sees its copy): the relocation hook of each, run as `uid`.
+    pub fn relocate_folders(&self, uid: u32, folders: &[String], root: &Path, working: &Path) {
         for folder in folders {
             let setting = match self.folder_overlay_of(folder).and_then(|o| o.map(|name| self.overlay_props(&name)).transpose()) {
                 Ok(props) => props.and_then(|p| p.prune),
@@ -887,7 +925,7 @@ impl<'a> Repo<'a> {
                     continue;
                 }
             };
-            let paths = fsutil::safe_join(root, folder).and_then(|p| Ok((p, fsutil::safe_join(&working, folder)?)));
+            let paths = fsutil::safe_join(root, folder).and_then(|p| Ok((p, fsutil::safe_join(working, folder)?)));
             let (path, at) = match paths {
                 Ok(p) => p,
                 Err(e) => {
@@ -898,7 +936,7 @@ impl<'a> Repo<'a> {
             if !path.is_dir() {
                 continue;
             }
-            let _t = crate::trace::named(|| format!("relocate {folder} of line {}", line.name));
+            let _t = crate::trace::named(|| format!("relocate {folder}"));
             let done = crate::cache_hook::relocate(setting.as_deref(), &path, &at, uid);
             if !done.log.is_empty() {
                 eprintln!("layr: relocate {}", done.log);

@@ -60,7 +60,38 @@ laptop ran on `macos-aarch64` is not run again on another `macos-aarch64` machin
 `layr checks pending [--state <rev>] [--platform <os>-<arch>] [--json]` lists the check jobs that
 no active executor result covers for the platform (default: this machine's). `--state` limits
 the list to one state and adds the change checks (`checks.changes`) for it. A CI job resolves its
-commit with `layr rev-parse <commit>`, fetches the project records, and runs only these checks. The referenced derived state contains `check.log`.
+commit with `layr rev-parse <commit>`, fetches the project records, and runs only these checks.
+
+`layr checks run --state <rev> [--privileged-only] [--json]` is one executor pass over the jobs of
+that one state: the same jobs as `checks pending --state`, run with the same sandbox, approval and
+lock rules as `watch`, attested in the same way. Its JSON line and exit code are those of
+`watch --once`. A CI job for a Git commit fetches it (`layr git fetch <remote> <branch>`), runs
+`layr checks run --state <commit>`, and pushes the results.
+
+A check starts warm. Its copy of the state gets the cache of each cache overlay by the rules of
+`layr line new <state>` ([cache overlays](cache-overlays.md)): the newest cache saved with the state
+or its nearest ancestor that has one, of this platform and with a fitting key, from the caller's
+own caches or those of a protected line. The check can write in the copy, cache folders included.
+Nothing goes back: the copy and its caches are gone after the check, and the copy writes no
+overlay line. The key uses the environment of the caller of `checks`, not the empty environment of
+the sandbox, so pin key variables in the project (`[workspace.metadata.layr-retest] env` for cargo).
+The copy's caches are relocated to the place where the check sees them (`/work` on Linux, the
+private copy on macOS), so a unit with a compiled-in path of another line builds again.
+
+A passing check of a head of a protected line in `checks.lines` gives its caches back. The executor
+saves the cache folders of the copy as cache states saved with that head, on the line
+`<line>.checks-<os>-<arch>` (for example `main.checks-linux-aarch64`). The first such check makes
+the line at its head, and its head stays there. Each line keeps its newest cache (`history=last`),
+and the next push deletes the older cache states on the remote. Another machine of the platform then
+starts warm from that head (`layr line new X <state>`, and `layr line new X main` when main's own
+cache is of an older head): one build per head warms the next check and every machine. A protected
+head is reviewed code built in the sandbox, so these caches count as caches of a protected line for
+other users. A check of any other state, such as a pull request, gives nothing back. A privileged
+check gives nothing back either: its copy is a plain folder of root. A runner that pushes after its
+checks publishes the caches: `layr fetch <remote>`, `layr checks run --state <head>` (or
+`checks watch --once`), `layr push <remote> --caches`.
+
+The referenced derived state contains `check.log`.
 The ref retains logs through GC and syncs with ordinary project refs/states. Read
 logs with `layr show <log_ref>:check.log`; inspect evidence with
 `layr attestations <state> --kind check --json`. The site uses these attestations.
