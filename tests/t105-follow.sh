@@ -117,7 +117,8 @@ r["trees"] = {k: v for k, v in r["trees"].items() if uuid not in k}
 json.dump(r, open(path, "w"))
 PY
 fi
-for d in "$P_ROOT/states/$(dashed "$gone_head")" "$P_ROOT/deltas/$(dashed "$gone_head")"; do
+# The cache snapshots of the state go with it (`<state>@<path>`): a store with a state that lost only its tree.
+for d in "$P_ROOT/states/$(dashed "$gone_head")" "$P_ROOT/deltas/$(dashed "$gone_head")" "$P_ROOT/states/$(dashed "$gone_head")"@*; do
     [ -e "$d" ] || continue
     # A saved state on OverlayFS (Linux) is a read-only mount, maybe stacked.
     while command -v mountpoint >/dev/null && mountpoint -q "$d"; do umount "$d" || break; done

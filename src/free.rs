@@ -7,13 +7,18 @@
 
 use crate::store::{Project, Store};
 use anyhow::Result;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 /// Projects this process opened: `(store root, project name)`. `finish` frees their queues when
 /// the command ends and forgets them.
 static OPENED: Mutex<BTreeSet<(PathBuf, String)>> = Mutex::new(BTreeSet::new());
+
+/// The queue that a free pass of this process left for a project (`(store root, project name)`): the states that
+/// wait as the base of a live layer. The free step at the end of the command skips a project whose queue is still
+/// the same, so a command that ran the pass itself (`gc --repair`) does not walk the layers again.
+static LEFT_QUEUED: Mutex<BTreeMap<(PathBuf, String), Vec<String>>> = Mutex::new(BTreeMap::new());
 
 /// Line heads that records of this command moved to (`Db::derive`): at the end of the command a thin head with a
 /// long chain gets a complete tree, in the background (`keyframe_heads`).
@@ -85,7 +90,7 @@ pub fn finish(ctx: &crate::ctx::Ctx) {
             }
         }
         // A project without pending work is not opened: an open prints its trace (LAYR_TRACE).
-        if !pending(store, &name) {
+        if !pending(store, &name) || unchanged_queue(store, &name) {
             continue;
         }
         let Ok(p) = Project::open(store, &name) else { continue };
@@ -246,6 +251,22 @@ fn pending(store: &Store, name: &str) -> bool {
     .unwrap_or(false)
 }
 
+/// True when a free pass of this process left the queue of project `name` as it is now and no pin is held: a new
+/// pass would find the same waiting bases.
+fn unchanged_queue(store: &Store, name: &str) -> bool {
+    let Some(left) = LEFT_QUEUED.lock().ok().and_then(|m| m.get(&(store.root.clone(), name.to_string())).cloned()) else {
+        return false;
+    };
+    let Ok(dir) = store.project_dir(name) else { return false };
+    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY;
+    let Ok(conn) = rusqlite::Connection::open_with_flags(crate::store::db_file(&dir), flags) else { return false };
+    let pins = conn.query_row("SELECT EXISTS(SELECT 1 FROM owners WHERE kind='pin')", [], |r| r.get::<_, bool>(0)).unwrap_or(true);
+    let Ok(mut st) = conn.prepare("SELECT state FROM free_queue ORDER BY state") else { return false };
+    let Ok(rows) = st.query_map([], |r| r.get::<_, String>(0)) else { return false };
+    let now: Vec<String> = rows.flatten().collect();
+    !pins && now == left
+}
+
 /// Move the storage of every dead queued state of a project to the trash. A state that a live
 /// thin layer still uses as its base stays queued: it goes when that layer goes (APFS). Returns
 /// the number of states whose storage went.
@@ -258,7 +279,13 @@ pub fn finish_project(p: &Project) -> Result<usize> {
         // A caller that already holds the lock (it is not taken twice: a second lock would wait).
         let _lock = if p.holds_lock() { None } else { Some(p.lock()?) };
         release_dead_pins(p)?;
-        free_queued(p)?
+        let gone = free_queued(p)?;
+        let mut left = p.db.queued_frees()?;
+        left.sort();
+        if let Ok(mut m) = LEFT_QUEUED.lock() {
+            m.insert((p.store.root.clone(), p.name.clone()), left);
+        }
+        gone
     };
     if !gone.is_empty() {
         crate::store::kick_trash(&p.trash_dir()?);
