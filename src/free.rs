@@ -209,10 +209,17 @@ fn drop_trees(p: &Project, states: Vec<String>) -> Result<Vec<String>> {
     let bases: BTreeSet<String> = p.db.present_layer_bases()?.into_iter().collect();
     // A tree that git built lately stays (`gitbridge::keep_newest_built` frees it when newer ones push it out).
     let (recent, states): (Vec<String>, Vec<String>) = states.into_iter().partition(|s| crate::gitbridge::recently_built(p, s));
+    for state in &recent {
+        p.db.set_present(state, true)?;
+    }
     p.db.dequeue_frees(&recent)?;
     let (waiting, candidates): (Vec<String>, Vec<String>) = states.into_iter().partition(|s| bases.contains(s));
     let buildable = crate::gitbridge::buildable_states(p, &candidates)?;
+    // Owned again, and not a tree that git can build: it is live, as in `free_queued`.
     let keep: Vec<String> = candidates.iter().filter(|s| !buildable.contains(*s)).cloned().collect();
+    for state in &keep {
+        p.db.set_present(state, true)?;
+    }
     p.db.dequeue_frees(&keep)?;
     let drop: Vec<String> = buildable.into_iter().collect();
     let gone = p.delete_states(&drop);
