@@ -1148,7 +1148,7 @@ fn run_check_in(
     // The check runs outside the store lock on this state: a free step must not remove it meanwhile.
     let _pin = repo.pin(&[state])?;
     let layers = view.map(|v| v.layers.as_slice()).unwrap_or(&[]);
-    with_try_copy(ctx, repo, state, layers, keep, |dir| {
+    with_try_copy(ctx, repo, state, layers, keep, false, |dir| {
         if !quiet {
             eprintln!("layr: running '{command}' in {} (state {})", dir.display(), ids::short(state));
         }
@@ -1181,6 +1181,7 @@ pub fn with_try_copy<T>(
     state: &str,
     layers: &[crate::overlay::Layer],
     keep: bool,
+    caches: bool,
     run: impl FnOnce(&Path) -> Result<T>,
 ) -> Result<T> {
     let name = format!(".try-{:016x}", rand::random::<u64>());
@@ -1197,6 +1198,13 @@ pub fn with_try_copy<T>(
     } else {
         let view = crate::overlay::View::new(state.to_string(), layers.to_vec());
         repo.materialize_view(ctx, &tmp_line, &view, &dir)?;
+    }
+    if caches {
+        // A check starts warm: the cache of the state, by the rules of `line new <state>`.
+        if let Err(e) = repo.copy_caches(ctx, &tmp_line, state, &dir) {
+            let _ = btrfs::delete_tree(&dir);
+            return Err(e);
+        }
     }
     let result = run(&dir);
     if keep {
