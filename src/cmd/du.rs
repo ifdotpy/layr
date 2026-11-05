@@ -23,7 +23,10 @@ fn line_spaces(lines: &[(String, PathBuf)]) -> Vec<Result<Space>> {
         })();
         let mut result = results[i].lock().unwrap();
         match (result.as_mut(), walked) {
-            (Ok(total), Ok(space)) => { total.total += space.total; total.unique += space.unique; }
+            (Ok(total), Ok(space)) => {
+                total.total += space.total;
+                total.unique += space.unique;
+            }
             (_, Err(e)) => *result = Err(e),
             _ => {}
         }
@@ -269,13 +272,21 @@ fn filesystem(path: &Path) -> std::io::Result<FsId> {
     Ok(FsId::Device(path.metadata()?.dev()))
 }
 
+fn filesystem_or_empty(path: &Path) -> std::io::Result<Option<FsId>> {
+    match filesystem(path) {
+        Ok(id) => Ok(Some(id)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
 /// `layr du --store`: the space of every part of the store, and what deleting each one frees.
 /// Data that clones share counts once, under its key (`fsutil::Held`): it belongs to a part
 /// when no other part references it.
 fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
     const SHARED: usize = usize::MAX;
     let parts = parts(root)?;
-    let filesystems: Vec<_> = parts.iter().map(|(_, path)| filesystem(path)).collect::<std::io::Result<_>>()?;
+    let filesystems: Vec<_> = parts.iter().map(|(_, path)| filesystem_or_empty(path)).collect::<std::io::Result<_>>()?;
     let keys: Mutex<HashMap<(FsId, ExtentKey), (usize, u64)>> = Mutex::new(HashMap::new());
     let results: Vec<Mutex<Result<PartSpace>>> = parts.iter().map(|_| Mutex::new(Ok(PartSpace::default()))).collect();
     #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
@@ -299,8 +310,11 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
                     }
                     let mut all = bulk.lock().unwrap();
                     for ((part, key), bytes) in local {
-                        let entry = all.entry((filesystems[part], key)).or_insert((part, bytes));
-                        if entry.0 != part { entry.0 = SHARED; }
+                        let Some(fsid) = filesystems[part] else { continue };
+                        let entry = all.entry((fsid, key)).or_insert((part, bytes));
+                        if entry.0 != part {
+                            entry.0 = SHARED;
+                        }
                         entry.1 = entry.1.max(bytes);
                     }
                 });
@@ -323,6 +337,9 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
     // OverlayFS layer registry entries contain metadata as well as data trees.
     let mut units: Vec<(usize, PathBuf)> = Vec::new();
     for (i, (name, path)) in parts.iter().enumerate() {
+        if filesystems[i].is_none() {
+            continue;
+        }
         #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
         if outside.as_ref().is_some_and(|outside| !outside.contains(&i)) {
             continue;
@@ -330,7 +347,9 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
         if name == "overlayfs layers" {
             for e in std::fs::read_dir(path.join("objects"))? {
                 let data = e?.path().join("data");
-                if data.is_dir() { units.push((i, data)); }
+                if data.is_dir() {
+                    units.push((i, data));
+                }
             }
         } else {
             #[cfg(not(all(target_os = "linux", not(feature = "overlayfs"))))]
@@ -368,11 +387,15 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
             Ok(()) => {
                 let mut all = keys.lock().unwrap();
                 for (k, b) in local {
-                    let e = all.entry((filesystems[i], k)).or_insert((i, b));
-                    if e.0 != i { e.0 = SHARED; }
+                    let e = all.entry((filesystems[i].expect("only present parts are walked"), k)).or_insert((i, b));
+                    if e.0 != i {
+                        e.0 = SHARED;
+                    }
                     e.1 = e.1.max(b);
                 }
-                if let Ok(p) = result.as_mut() { p.own += own; }
+                if let Ok(p) = result.as_mut() {
+                    p.own += own;
+                }
             }
         }
     });
@@ -421,6 +444,12 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
 mod tests {
     use super::vanished;
     use std::path::PathBuf;
+
+    #[test]
+    fn vanished_part_has_no_filesystem() {
+        let path = std::env::temp_dir().join(format!("layr-du-missing-{}", std::process::id()));
+        assert!(super::filesystem_or_empty(&path).unwrap().is_none());
+    }
 
     #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
     #[test]
