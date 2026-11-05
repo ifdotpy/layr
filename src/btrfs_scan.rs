@@ -99,7 +99,12 @@ fn header(b: &[u8]) -> io::Result<(Key, usize)> {
         native32(b, HEADER_LEN)? as usize,
     ))
 }
-fn search(file: &File, scanner: &mut TreeSearch, mut key: SearchKey, mut f: impl FnMut(Key, &[u8]) -> io::Result<()>) -> io::Result<()> {
+fn search(
+    file: &File,
+    scanner: &mut TreeSearch,
+    mut key: SearchKey,
+    mut f: impl FnMut(Key, &[u8]) -> io::Result<()>,
+) -> io::Result<()> {
     let first_type = key.min_type;
     loop {
         key.nr_items = u32::MAX;
@@ -122,7 +127,9 @@ fn search(file: &File, scanner: &mut TreeSearch, mut key: SearchKey, mut f: impl
             return Ok(());
         };
         if next.kind > key.max_type {
-            let Some(ino) = next.ino.checked_add(1) else { return Ok(()); };
+            let Some(ino) = next.ino.checked_add(1) else {
+                return Ok(());
+            };
             next = Key { ino, kind: first_type, offset: 0 };
         }
         if next.ino > key.max_objectid {
@@ -185,7 +192,9 @@ struct Refs {
 impl Refs {
     fn add(&mut self, ino: u64, parent: u64) {
         match self.first.entry(ino) {
-            std::collections::hash_map::Entry::Vacant(e) => { e.insert(parent); }
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(parent);
+            }
             std::collections::hash_map::Entry::Occupied(e) if *e.get() != parent => {
                 self.extra.entry(ino).or_default().push(parent);
             }
@@ -195,20 +204,37 @@ impl Refs {
 }
 
 // Directories have one parent. The sentinel prevents loops on corrupt metadata.
-fn directory_part(ino: u64, parts: &HashMap<u64, PartId>, refs: &Refs, memo: &mut HashMap<u64, Option<PartId>>) -> Option<PartId> {
-    if let Some(&p) = parts.get(&ino) { return Some(p); }
-    if let Some(&p) = memo.get(&ino) { return p; }
+fn directory_part(
+    ino: u64,
+    parts: &HashMap<u64, PartId>,
+    refs: &Refs,
+    memo: &mut HashMap<u64, Option<PartId>>,
+) -> Option<PartId> {
+    if let Some(&p) = parts.get(&ino) {
+        return Some(p);
+    }
+    if let Some(&p) = memo.get(&ino) {
+        return p;
+    }
     memo.insert(ino, None);
     let result = refs.first.get(&ino).and_then(|&p| directory_part(p, parts, refs, memo));
     memo.insert(ino, result);
     result
 }
 
-fn file_parts(ino: u64, parts: &HashMap<u64, PartId>, refs: &Refs, memo: &mut HashMap<u64, Option<PartId>>, out: &mut Vec<PartId>) {
+fn file_parts(
+    ino: u64,
+    parts: &HashMap<u64, PartId>,
+    refs: &Refs,
+    memo: &mut HashMap<u64, Option<PartId>>,
+    out: &mut Vec<PartId>,
+) {
     out.clear();
     for &parent in refs.first.get(&ino).into_iter().chain(refs.extra.get(&ino).into_iter().flatten()) {
         if let Some(part) = directory_part(parent, parts, refs, memo) {
-            if !out.contains(&part) { out.push(part); }
+            if !out.contains(&part) {
+                out.push(part);
+            }
         }
     }
     out.sort_unstable();
@@ -296,7 +322,17 @@ pub fn plan(store: &Path, parts: &[PathBuf]) -> io::Result<Plan> {
     let mut trees: HashMap<u64, HashMap<u64, PartId>> = HashMap::new();
     let mut outside = Vec::new();
     for (part, path) in parts.iter().enumerate() {
-        let file = File::open(path)?;
+        // Trash or a line can disappear after the caller lists the parts; it is then empty.
+        let file = match File::open(path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+        };
+        let metadata = match file.metadata() {
+            Ok(metadata) => metadata,
+            Err(e) if e.kind() == ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+        };
         match sys::filesystem_uuid(file.as_fd()) {
             Ok(id) if id == fsid => {}
             Ok(_) => {
@@ -310,7 +346,7 @@ pub fn plan(store: &Path, parts: &[PathBuf]) -> io::Result<Plan> {
             Err(e) => return Err(e),
         }
         let tree = sys::subvol_id(file.as_fd())?;
-        add_part(&mut trees, tree, file.metadata()?.ino(), part);
+        add_part(&mut trees, tree, metadata.ino(), part);
     }
     let mut children: HashMap<u64, Vec<(u64, u64)>> = HashMap::new();
     let mut q = query(ROOT_TREE);
@@ -350,19 +386,27 @@ pub fn visit(unit: &TreeUnit, f: &mut dyn FnMut(PartId, &Held)) -> io::Result<()
     let mut groups = FileGroups::default();
     let mut parent_scratch = Vec::new();
     search(&file, &mut TreeSearch::new(SEARCH_BUFFER), query(unit.tree), |k, item| {
-        if groups.current.is_some_and(|ino| ino != k.ino) { groups.finish(); }
+        if groups.current.is_some_and(|ino| ino != k.ino) {
+            groups.finish();
+        }
         match k.kind {
             INODE_ITEM => {
                 let mode = u32::from_le_bytes(bytes(item, INODE_MODE)?);
-                if mode & libc::S_IFMT == libc::S_IFREG { groups.start(k.ino); }
+                if mode & libc::S_IFMT == libc::S_IFREG {
+                    groups.start(k.ino);
+                }
             }
             INODE_REF | INODE_EXTREF => {
                 parent_scratch.clear();
                 parents(k, item, &mut parent_scratch)?;
-                for &parent in &parent_scratch { refs.add(k.ino, parent); }
+                for &parent in &parent_scratch {
+                    refs.add(k.ino, parent);
+                }
             }
             EXTENT_DATA if groups.current == Some(k.ino) => {
-                if let Some(ext) = extent(k.ino, k.offset, item)? { groups.scratch.push(ext); }
+                if let Some(ext) = extent(k.ino, k.offset, item)? {
+                    groups.scratch.push(ext);
+                }
             }
             _ => {}
         }
@@ -376,7 +420,9 @@ pub fn visit(unit: &TreeUnit, f: &mut dyn FnMut(PartId, &Held)) -> io::Result<()
         let alloc = shared.iter().map(|x| x.1).sum();
         let held = Held { alloc, own: 0, exclusive: 0, shared };
         file_parts(ino, &unit.parts, &refs, &mut memo, &mut parts);
-        for &part in &parts { f(part, &held); }
+        for &part in &parts {
+            f(part, &held);
+        }
     }
     Ok(())
 }
@@ -451,7 +497,9 @@ mod tests {
         assert!(parents(Key { ino: 9, kind: INODE_EXTREF, offset: 0 }, &item[..EXTREF_HEADER], &mut Vec::new()).is_err());
         let parts = HashMap::from([(10, 0), (20, 1)]);
         let mut refs = Refs::default();
-        for (ino, parent) in [(30, 10), (40, 30), (40, 20), (40, 20)] { refs.add(ino, parent); }
+        for (ino, parent) in [(30, 10), (40, 30), (40, 20), (40, 20)] {
+            refs.add(ino, parent);
+        }
         let mut out = Vec::new();
         file_parts(40, &parts, &refs, &mut HashMap::new(), &mut out);
         assert_eq!(out, [0, 1]);
