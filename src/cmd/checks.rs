@@ -644,7 +644,7 @@ fn macos_profile(work: &std::path::Path, seed: &std::path::Path) -> Result<Strin
 #[cfg(target_os = "macos")]
 fn execute(
     ctx: &Ctx,
-    _repo: &Repo,
+    repo: &Repo,
     dir: &std::path::Path,
     state: &str,
     argv: &[String],
@@ -657,10 +657,12 @@ fn execute(
     }
     // Keep the writable tree outside the personal home. The no-follow APFS
     // helpers need readable ancestor directories, not access to the home tree.
-    let private =
-        crate::repo::Temp { path: std::path::PathBuf::from(format!("/private/var/tmp/layr-check-{}", crate::ids::new_id())) };
+    // A clone needs one volume: a store on another volume (a disk image) keeps the copy in its own
+    // work folder, so a warm cache folder is cloned and not copied.
+    let tmp = std::path::Path::new("/private/var/tmp");
+    let base = if std::fs::metadata(dir)?.dev() == std::fs::metadata(tmp)?.dev() { tmp.to_path_buf() } else { repo.p.work_dir() };
+    let private = crate::repo::Temp { path: base.join(format!("layr-check-{}", crate::ids::new_id())) };
     std::fs::DirBuilder::new().mode(0o700).create(&private.path)?;
-    // A clone needs one volume; a store on another volume (a disk image) takes a plain copy.
     let same_volume = std::fs::metadata(dir)?.dev() == std::fs::metadata(&private.path)?.dev();
     let status = std::process::Command::new("/bin/cp")
         .args([if same_volume { "-cR" } else { "-R" }, "--"])
