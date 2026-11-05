@@ -93,6 +93,18 @@ fn hostname() -> String {
     fs::read_to_string("/etc/hostname").map(|s| s.trim().to_string()).unwrap_or_else(|_| "machine".into())
 }
 
+/// The name of a new machine: `LAYR_MACHINE_NAME` when it is set (a CI job names its short-lived machine, and a
+/// trust delegation checks the name prefix), else the host name.
+fn new_machine_name() -> Result<String> {
+    match std::env::var("LAYR_MACHINE_NAME") {
+        Ok(name) if !name.is_empty() => {
+            check_name("machine", &name)?;
+            Ok(name)
+        }
+        _ => Ok(hostname()),
+    }
+}
+
 /// The store root with the links above it resolved once (for example `/tmp` to `/private/tmp`).
 /// Links below the root stay refused: the no-follow walks in `sys` open every component of a
 /// path, so a link inside the store cannot redirect a write.
@@ -151,7 +163,7 @@ impl Store {
             let id = ids::new_id();
             let key = SigningKey::generate(&mut rand::rngs::OsRng);
             create_machine_file(&mdir.join("id"), id.as_bytes())?;
-            create_machine_file(&mdir.join("name"), hostname().as_bytes())?;
+            create_machine_file(&mdir.join("name"), new_machine_name()?.as_bytes())?;
             create_machine_file(&mdir.join("key"), hex::encode(key.to_bytes()).as_bytes())?;
         }
         let id = fs::read_to_string(mdir.join("id"))?.trim().to_string();
