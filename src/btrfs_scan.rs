@@ -247,18 +247,10 @@ struct FileGroups {
     extents: Vec<(ExtentKey, u64)>,
     files: Vec<(u64, std::ops::Range<usize>)>,
 }
-fn extent_order(key: ExtentKey) -> (u8, u64, u64, u64) {
-    match key {
-        ExtentKey::Disk(n) => (0, n, 0, 0),
-        ExtentKey::Inline { ino, offset, generation } => (1, ino, offset, generation),
-        ExtentKey::ApfsClone(n) => (2, n, 0, 0),
-        ExtentKey::ApfsFile(n) => (3, n, 0, 0),
-    }
-}
 impl FileGroups {
     fn finish(&mut self) {
         if let Some(ino) = self.current.take() {
-            self.scratch.sort_unstable_by_key(|&(key, _)| extent_order(key));
+            self.scratch.sort_unstable_by_key(|&(key, _)| key);
             let start = self.extents.len();
             for (key, size) in self.scratch.drain(..) {
                 if self.extents.len() > start && self.extents.last().is_some_and(|last| last.0 == key) {
