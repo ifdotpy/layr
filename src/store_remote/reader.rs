@@ -512,6 +512,13 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
     };
     report.git_packs = super::gitpack::fetch(store, repo, &identity)?;
     let required = required_states(repo, &records.lines, opts)?;
+    // `--heads`: the heads of the lines and what an undo of a line delete needs; the other states stay on the remote.
+    let heads: Option<BTreeSet<String>> = opts.heads.then(|| -> Result<BTreeSet<String>> {
+        let mut keep: BTreeSet<String> = repo.p.db.lines()?.into_iter().map(|l| l.head).collect();
+        keep.extend(deletion_dependencies(&records.lines)?);
+        Ok(keep)
+    }).transpose()?;
+    let mut left = Vec::new();
     let states = attempts(&store.backend)?;
     let mut reader = Reader::new(&store.backend, &identity, &records.keys);
     let mut missing = Vec::new();
@@ -526,6 +533,12 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
             None => bail!("remote tree {id} has no state record"),
         };
         if !wanted(&state, opts) && !required.contains(id) {
+            continue;
+        }
+        if heads.as_ref().is_some_and(|keep| !repo.p.is_overlay() && !keep.contains(id)) {
+            if !repo.p.has_state(id) {
+                left.push(id.clone());
+            }
             continue;
         }
         // A cache overlay state of another platform stays on the remote (docs/cache-overlays.md).
@@ -561,6 +574,14 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
         } else {
             missing.push(state);
         }
+    }
+    if !left.is_empty() {
+        // A read of such a state restores it from this remote (`restore_state`).
+        let path = super::states_left_file(&store.dir);
+        let mut all: BTreeSet<String> = std::fs::read_to_string(&path).unwrap_or_default().lines().map(str::to_owned).collect();
+        all.extend(left.iter().cloned());
+        crate::fsutil::atomic_write(&path, format!("{}\n", all.into_iter().collect::<Vec<_>>().join("\n")).as_bytes(), 0o600)?;
+        report.omitted.push(format!("{} state(s) of the history: on the remote, restored on first read (--heads)", left.len()));
     }
     for state in super::writer::parents_first(missing)? {
         let id = state.id.clone();
