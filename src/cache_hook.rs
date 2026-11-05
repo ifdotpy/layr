@@ -163,7 +163,17 @@ pub fn relocate(setting: Option<&str>, folder: &Path, at: &Path, uid: u32) -> Do
         return Done { log: String::new(), folder_ok: true };
     }
     let launch = Launch { exe: std::env::current_exe().unwrap_or_else(|_| "layr".into()), args: vec![WORKER_ARG.into()] };
-    relocate_with(&launch, &[], setting, folder, at, uid)
+    let mut done = relocate_with(&launch, &[], setting, folder, at, uid);
+    // The note only reads the folder, so it needs no worker.
+    let note = registered()
+        .iter()
+        .find(|a| setting.map_or_else(|| a.detects(folder), |name| a.name() == name))
+        .and_then(|a| a.relocation_note(folder));
+    if let Some(note) = note {
+        let line = format!("{}: {note}", at.display());
+        done.log = if done.log.is_empty() { line } else { format!("{}\nlayr: relocate {line}", done.log) };
+    }
+    done
 }
 
 /// `relocate` with the worker started by `launch` and extra environment for it. A failure changes no file that a

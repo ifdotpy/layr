@@ -15,6 +15,8 @@ cd "$LAYR_ROOT/projects/p/lines/main" || exit 1
 # A cargo unit that names this line by a compiled-in path (env!("CARGO_MANIFEST_DIR")).
 mkdir -p target/debug/deps target/debug/.fingerprint/p-aaa; echo warm > target/built
 printf '%s/target/debug/deps/p-aaa.d: src/lib.rs\n\nsrc/lib.rs:\n\n# env-dep:CARGO_MANIFEST_DIR=%s\n' "$PWD" "$PWD" > target/debug/deps/p-aaa.d
+# A registry crate built from a CARGO_HOME that this machine does not have.
+printf '%s/target/debug/deps/serde-eee.d: /nowhere/.cargo/registry/src/idx/serde/lib.rs\n' "$PWD" > target/debug/deps/serde-eee.d
 l save --caches -q
 # The checked head has no cache of its own: it takes the cache of its parent, as `line new` does.
 echo change > change.txt; l add change.txt >/dev/null; l save -qm change
@@ -26,6 +28,7 @@ out=$(l checks watch --once --json 2>"$T/watch.err")
 no "the check finds the cache of its state and writes in it" grep -q '"exit":1' <<<"$out"
 has "it ran on both heads of main" '"count":2' "$out"
 has "the copy's unit that named the line builds again" "1 units named the old path" "$(cat "$T/watch.err")"
+has "a registry that this machine does not have is named" "registry at /nowhere/.cargo/registry/src, which this machine does not have" "$(cat "$T/watch.err")"
 no "the line's own cache does not get the check's file" test -e target/new
 eq "the line's cache is the same" warm "$(cat target/built)"
 ok "the copy's unit that named the line built again there, the line keeps its own" test -d target/debug/.fingerprint/p-aaa

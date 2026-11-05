@@ -501,6 +501,15 @@ impl CacheAdapter for Cargo {
     fn relocated(&self, folder: &Path, at: &Path) -> Result<usize, String> {
         crate::relocate::relocate(folder, at).map_err(|e| format!("{e:#}"))
     }
+
+    fn relocation_note(&self, folder: &Path) -> Option<String> {
+        let old = crate::relocate::foreign_registry(folder)?;
+        Some(format!(
+            "built with the cargo registry at {}, which this machine does not have: cargo builds every registry crate \
+             again. Use one CARGO_HOME path on every machine (docs/cache-overlays.md)",
+            old.display()
+        ))
+    }
 }
 
 /// Builds the `sweep` commands of the project into `target`, with the project env. It may fetch crates (a merged

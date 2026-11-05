@@ -53,6 +53,12 @@ pub trait CacheAdapter: Send + Sync {
         let _ = (folder, at);
         Ok(0)
     }
+    /// What a user should know about `folder` from another place that `relocated` cannot change, such as outputs
+    /// that name a tool folder this machine does not have and so build again. Only reads. The default says nothing.
+    fn relocation_note(&self, folder: &Path) -> Option<String> {
+        let _ = folder;
+        None
+    }
     /// The environment variables that change what a build writes into `folder`. A cache built with other values
     /// builds again, so their values are parts of the cache key. The default names none.
     fn key_env(&self) -> &'static [&'static str] {

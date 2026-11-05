@@ -35,6 +35,28 @@ pub fn relocate(target: &Path, at: &Path) -> Result<usize> {
     Ok(stale)
 }
 
+/// The registry source folder (`<CARGO_HOME>/registry/src`) that the units of `target` were built from, when this
+/// machine does not have it. Cargo keeps the absolute path of a registry source in the unit's fingerprint, so with
+/// another CARGO_HOME every registry crate builds again. Reads the dep-info files until one names a registry source.
+pub fn foreign_registry(target: &Path) -> Option<PathBuf> {
+    const MARK: &str = "/registry/src/";
+    for profile in profiles(target).ok()? {
+        for entry in fs::read_dir(profile.join("deps")).ok()?.flatten() {
+            if !entry.file_name().to_str().is_some_and(|n| n.ends_with(".d")) {
+                continue;
+            }
+            let Ok(text) = fs::read_to_string(entry.path()) else { continue };
+            let Some(line) = text.lines().next() else { continue };
+            let Some(path) = line.split_once(": ").and_then(|(_, list)| paths(list).find(|p| p.contains(MARK))) else {
+                continue;
+            };
+            let root = PathBuf::from(&path[..path.find(MARK)? + MARK.len() - 1]);
+            return (!root.is_dir()).then_some(root);
+        }
+    }
+    None
+}
+
 /// The profile folders of `target`: the folders with a `deps` and a `.fingerprint` folder (`debug`, `release`, a
 /// custom profile), also below a target triple.
 fn profiles(target: &Path) -> Result<Vec<PathBuf>> {
@@ -165,6 +187,22 @@ mod tests {
 
     fn fresh(target: &Path, package: &str, hash: &str) -> bool {
         target.join("debug/.fingerprint").join(format!("{package}-{hash}")).is_dir()
+    }
+
+    #[test]
+    fn a_registry_that_this_machine_does_not_have_is_named() {
+        let root = scratch("registry");
+        let target = root.join("target");
+        let old = "/lines/old/target/debug/deps";
+        unit(&target, "own-aaa", "own", &format!("{old}/own-aaa.d: src/lib.rs\n"));
+        assert_eq!(foreign_registry(&target), None, "no registry crate: nothing to say");
+        unit(&target, "serde-eee", "serde", &format!("{old}/serde-eee.d: /nowhere/u/.cargo/registry/src/idx/serde/lib.rs\n"));
+        assert_eq!(foreign_registry(&target), Some(PathBuf::from("/nowhere/u/.cargo/registry/src")));
+        let here = root.join("home/registry/src");
+        fs::create_dir_all(&here).unwrap();
+        fs::write(target.join("debug/deps/serde-eee.d"), format!("{old}/serde-eee.d: {}/idx/serde/lib.rs\n", here.display())).unwrap();
+        assert_eq!(foreign_registry(&target), None, "this machine has that registry");
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
