@@ -15,7 +15,7 @@
 //! so that no dead chunk stays in a pack. A pack whose chunks no tree names at all (a push that
 //! stopped before its tree) goes when its index is older than a day and none of its chunks is live.
 
-use super::format::{parse_tree_name, tree_name};
+use super::format::{parse_data_name, parse_tree_name, tree_name};
 use super::reader::{records, Reader};
 use super::Store;
 use anyhow::Result;
@@ -53,15 +53,24 @@ pub(super) fn sweep(
     let descriptor = store.descriptor()?;
     let identity = store.identity(&descriptor, None)?;
     let records = records(&store.backend, &identity, &descriptor.project)?;
-    let trees: Vec<(String, String)> = store.backend.list("states/")?.iter().filter_map(|o| parse_tree_name(&o.key)).collect();
+    let objects = store.backend.list("states/")?;
+    let trees: Vec<(String, String)> = objects.iter().filter_map(|o| parse_tree_name(&o.key)).collect();
     let mut reader = Reader::new(&store.backend, &identity, &records.keys);
     let mut swept = Swept::default();
     let mut keep: BTreeSet<(String, String)> = BTreeSet::new();
+    // `LAYR_TRACE=1`: why each tree stays.
+    let why = |state: &str, reason: String| {
+        if std::env::var_os("LAYR_TRACE").is_some() {
+            eprintln!("trace sweep keeps {}: {reason}", crate::ids::short(state));
+        }
+    };
     for (state, attempt) in &trees {
         if !known(state) {
             swept.unknown += 1;
+            why(state, "not known here".into());
             keep.insert((state.clone(), attempt.clone()));
         } else if kept.contains(state) {
+            why(state, "live".into());
             keep.insert((state.clone(), attempt.clone()));
         }
     }
@@ -72,18 +81,22 @@ pub(super) fn sweep(
         for _ in 0..1000 {
             let Some(id) = at else { break };
             if pushed.contains(id.as_str()) {
+                why(&id, format!("nearest pushed ancestor of live state {} whose tree is not on the remote", crate::ids::short(state)));
                 keep.extend(trees.iter().filter(|(s, _)| *s == id).cloned());
                 break;
             }
             at = parent(&id);
         }
     }
-    // A kept delta tree needs its base trees.
+    // A kept delta tree needs its base trees to decode (a tree is a zstd delta on its base tree), but not their
+    // data: the parts and chunks that stay are the ones that the trees kept for their own state link.
+    let own = keep.clone();
     let mut pending: Vec<(String, String)> = keep.iter().cloned().collect();
     while let Some((state, attempt)) = pending.pop() {
         let (header, _, _) = reader.tree(&state, &attempt)?;
         if let Some(base) = header.base {
             if keep.insert(base.clone()) {
+                why(&base.0, format!("base tree of {}", crate::ids::short(&state)));
                 pending.push(base);
             }
         }
@@ -91,18 +104,20 @@ pub(super) fn sweep(
     let mut linked = BTreeSet::new();
     let mut live_chunks: BTreeSet<String> = BTreeSet::new();
     let mut kept_chunks: Vec<BTreeSet<String>> = Vec::new();
-    for (state, attempt) in &keep {
+    for (state, attempt) in &own {
         let (_, _, tree) = reader.tree(state, attempt)?;
         linked.extend(tree.files.values().flat_map(|e| e.3.iter().map(|l| l.object())));
         let named: BTreeSet<String> = tree.chunks.values().flatten().cloned().collect();
         live_chunks.extend(named.iter().cloned());
         kept_chunks.push(named);
     }
+    // The data of a tree that stays only as a base: its parts go unless a tree of `own` links them.
+    let bases: Vec<&(String, String)> = keep.iter().filter(|t| !own.contains(*t)).collect();
     let dead: Vec<&(String, String)> = trees.iter().filter(|t| !keep.contains(*t)).collect();
     let mut parts = BTreeSet::new();
     let mut frames = BTreeSet::new();
     let mut dead_chunks: BTreeSet<String> = BTreeSet::new();
-    for (state, attempt) in &dead {
+    for (state, attempt) in dead.iter().copied().chain(bases.iter().copied()) {
         let (_, _, tree) = reader.tree(state, attempt)?;
         dead_chunks.extend(tree.chunks.values().flatten().filter(|id| !live_chunks.contains(*id)).cloned());
         for link in tree.files.values().flat_map(|e| e.3.iter()) {
@@ -113,6 +128,16 @@ pub(super) fn sweep(
                 }
                 parts.insert(object);
             }
+        }
+    }
+    // Parts of an attempt that published no tree (a push that stopped) and that no kept tree links. After 24 hours no
+    // writer can still publish a tree that links them: writers stop at +23 h, as in `gc --remote`.
+    let cutoff = chrono::Utc::now().timestamp() - 86400;
+    let with_tree: BTreeSet<&(String, String)> = trees.iter().collect();
+    for object in &objects {
+        let Some((state, attempt, _)) = parse_data_name(&object.key) else { continue };
+        if object.modified < cutoff && !linked.contains(&object.key) && !with_tree.contains(&(state, attempt)) {
+            parts.insert(object.key.clone());
         }
     }
     for part in parts {
