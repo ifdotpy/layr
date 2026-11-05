@@ -1331,12 +1331,16 @@ pub fn work_queue<T: Send>(seed: Vec<T>, work: impl Fn(T, &dyn Fn(T)) + Sync) {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ExtentKey {
     /// Data at a device address (btrfs disk_bytenr, or the FIEMAP physical address).
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     Disk(u64),
     /// Inline btrfs data, which lives in metadata: snapshots that share the file share the item.
+    #[cfg_attr(any(not(target_os = "linux"), feature = "overlayfs"), allow(dead_code))]
     Inline { ino: u64, offset: u64, generation: u64 },
     /// An APFS clone id: files cloned from one another share it.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     ApfsClone(u64),
     /// Shared APFS bytes without a clone id, keyed by their file id.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     ApfsFile(u64),
 }
 
