@@ -1,8 +1,10 @@
 #!/bin/bash
 # ci: macos
-# `line new X <line>` takes the cache saved with the line's head (docs/cache-overlays.md): when the
-# line's own cache is of an older head and another machine (CI) saved a cache with the head itself,
-# the new line gets that one. A cache of the line at its head still comes first.
+# `line new X <line>` takes the shared cache saved with the line's head (docs/cache-overlays.md): when the
+# line's own cache is of an older head and a protected line or a check runner saved a cache with the head
+# itself, the new line gets that one. A user's cache of an unprotected line at that head does not count, and
+# a cache of the line at its head still comes first. A machine trusted after the caches were saved gets them
+# at the next push.
 . "$(dirname "$0")/lib.sh"
 [ "$(id -u)" != 0 ] || { echo "$(basename "$0") (not as root): 0 passed, 0 failed"; exit 0; }
 
@@ -30,7 +32,13 @@ eq "the CI line starts from the laptop's older cache" laptop-old "$(cat "$Q/ci/t
 (cd "$Q/ci" && echo ci > target/a && cl save --caches -q && cl push origin -q --caches >/dev/null 2>&1)
 l fetch archive -q >/dev/null 2>&1
 l line new w main >/dev/null 2>&1
-eq "a new line of main takes the cache that CI saved with main's head" ci "$(cat "$P/w/target/a" 2>&1)"
+eq "a cache of an unprotected line at main's head is not taken" laptop-old "$(cat "$P/w/target/a" 2>&1)"
+# A protected line at main's head saves a shared cache with that head.
+l line new rel main >/dev/null 2>&1
+l protect rel >/dev/null 2>&1
+(cd "$P/rel" && echo shared > target/a && l save --caches -q)
+l line new w3 main >/dev/null 2>&1
+eq "a new line of main takes the shared cache saved with main's head" shared "$(cat "$P/w3/target/a" 2>&1)"
 echo laptop-new > target/a; l save --caches -q
 l line new w2 main >/dev/null 2>&1
 eq "a cache of the line at its head comes first" laptop-new "$(cat "$P/w2/target/a" 2>&1)"

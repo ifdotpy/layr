@@ -589,9 +589,14 @@ impl<'a> Repo<'a> {
         let start = match from {
             Source::Line(l) => {
                 if let Some(s) = of_line(&l.id)? {
-                    // The line's own cache was built at an older head, and another line or machine
-                    // (CI) saved a cache with the head itself: that one fits the head better.
-                    let at_head = saved_with.get(&l.head).filter(|_| !counts_for.get(&s).is_some_and(|of| of.contains(&l.head)));
+                    // The line's own cache was built at an older head, and a protected line or a check
+                    // runner (CI) saved a shared cache with the head itself: that one fits the head better.
+                    // A user's cache of an unprotected line at the same head does not count (t14).
+                    let shared = |id: &&String| orepo.p.db.state(id).ok().flatten().is_some_and(|st| st.cache_shared);
+                    let at_head = saved_with
+                        .get(&l.head)
+                        .filter(shared)
+                        .filter(|_| !counts_for.get(&s).is_some_and(|of| of.contains(&l.head)));
                     return Ok(Some(at_head.cloned().unwrap_or(s)));
                 }
                 l.head.clone()

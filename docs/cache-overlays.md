@@ -299,8 +299,9 @@ Built on 2026-10-27: folder overlays and caches as cache overlays. Tests:
   line's overlay line. Each state records the user, the platform (`<os>-<arch>`) and whether the
   line is protected, with the rules of `design.md` section 5 for who may take it.
 - `line new X <line>` takes the newest cache state of that line (dogfood item 10). When that cache
-  was built at an older head of the line and a usable cache was saved with the head itself (by
-  another line or machine, such as CI), it takes the cache of the head. A merge of a line takes
+  was built at an older head of the line and a shared cache was saved with the head itself (by a
+  protected line, or by a check of that head: `<line>.checks-<platform>`, docs/checks.md), it takes
+  the cache of the head. A user's cache of an unprotected line at the head does not count. A merge of a line takes
   its caches by the same rule.
   `line new X <state>` takes the cache of the state, else of its nearest ancestor that has one
   (item 21). For each state on that walk it takes first the newest cache saved with it
