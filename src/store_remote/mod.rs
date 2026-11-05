@@ -37,6 +37,8 @@ pub struct Options {
     pub desk_prefix: Option<String>,
     /// `--caches-of <line>`: restore only the cache states that `line new X <line>` takes for these lines.
     pub caches_of: Vec<String>,
+    /// `--heads`: restore only the heads of the lines; the other states stay on the remote and come on first read.
+    pub heads: bool,
     /// The cache states of `caches_of` in one cache overlay, set by the overlay fetch (None: every usable one).
     pub only_caches: Option<std::collections::BTreeSet<String>>,
 }
@@ -211,8 +213,22 @@ pub fn restore_git_objects(ctx: &Ctx, repo: &Repo) -> Result<usize> {
     Ok(installed)
 }
 
+/// The states that a `--heads` clone or fetch left on a store remote (`states-left` in its local folder).
+pub(super) fn states_left_file(dir: &std::path::Path) -> std::path::PathBuf {
+    dir.join("states-left")
+}
+
 pub fn restore_state(repo: &Repo, id: &str) -> Result<()> {
-    let names = store_copies(repo)?.remove(id).unwrap_or_default();
+    let mut names = store_copies(repo)?.remove(id).unwrap_or_default();
+    // A `--heads` clone or fetch left the state on the remote that it read.
+    for (key, _) in repo.p.db.config_all()? {
+        let Some(name) = key.strip_prefix("cloud.remote.").and_then(|k| k.strip_suffix(".url")) else { continue };
+        let Ok(url) = crate::cmd::remote::remote_url(repo, name) else { continue };
+        let left = std::fs::read_to_string(states_left_file(&store_dir(repo, &url))).unwrap_or_default();
+        if left.lines().any(|line| line == id) && !names.iter().any(|n| n == name) {
+            names.push(name.to_string());
+        }
+    }
     if names.is_empty() {
         bail!("state {} is not on this machine (run layr fetch <remote>)", crate::ids::short(id));
     }

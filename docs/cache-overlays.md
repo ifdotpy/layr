@@ -182,7 +182,10 @@ There are two kinds of remote:
   (`usable_cache`: shared, or of the caller). `layr clone <url> --caches-of <line>[,<line>]` and
   `layr fetch <remote> --caches-of ...` restore only the caches that `line new X <line>` takes for
   those lines: the newest cache of the line, and the newest cache saved with its head or nearest
-  ancestor (a CI clone for one commit). A cache state that a push removes while a fetch runs, and a
+  ancestor (a CI clone for one commit). `--heads` restores only the heads of the lines (and what an
+  undo of a line delete needs): the other states of the history stay on the remote, the clone names
+  them in `states-left` of the remote's local folder, and a command that reads one restores it
+  from there. A plain clone restores the whole history and works offline. A cache state that a push removes while a fetch runs, and a
   cache overlay that a fetch cannot read, omit; the fetch goes on. A store remote keeps only the cache states that
   the records keep (`src/store_remote/sweep.rs`): the push of a cache overlay deletes the trees of
   the states that its records know and do not keep (beyond `history` on each line and platform, of

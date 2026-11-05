@@ -905,6 +905,7 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
             .flag("--auto")
             .flag("--caches")
             .value("--caches-of")
+            .flag("--heads")
             .flag("-q|--quiet")
             .flag("--json")
             .flag("--command")
@@ -993,6 +994,7 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
                 public: false,
                 caches_of: caches_of(&a),
                 only_caches: None,
+                heads: a.has("--heads"),
             };
             let mut store = store_remote::open_named(&a.pos[0], &h.repo)?;
             store.configure(ctx, &store_remote::ConfigureOptions::default())?;
@@ -1173,6 +1175,7 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
             .flag("--auto")
             .flag("--caches")
             .value("--caches-of")
+            .flag("--heads")
             .flag("--json")
             .flag("-q|--quiet"),
         args,
@@ -1201,6 +1204,7 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
             desk_prefix: a.get("--desk-prefix").map(str::to_owned),
             caches_of: caches_of(&a),
             only_caches: None,
+            heads: a.has("--heads"),
         };
         let report = store.clone_into(ctx, &mut repo, &opts)?;
         store_remote::backend::trace_requests();
