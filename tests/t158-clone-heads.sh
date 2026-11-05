@@ -31,4 +31,15 @@ no "with the files of that state" test -f "$T/x/store/projects/p/lines/old/h5.tx
 yl() { env LAYR_ROOT="$T/y/store" "$LAYR" "$@"; }
 yl clone "file://$T/archive" p >/dev/null 2>&1
 ok "a plain clone restores more states than the --heads clone did" test "$(states y)" -gt "$(( $(states x) - 1 ))"
+
+# A push that published a state after a clone read the records: the clone sees a tree without its record. It takes
+# the rest, says so, and the next fetch takes that state.
+mkdir -p "$T/archive/states/01a1aaaa-0000-7000-8000-000000000009"
+echo later > "$T/archive/states/01a1aaaa-0000-7000-8000-000000000009/deadbeef.tree.age"
+zl() { env LAYR_ROOT="$T/z/store" "$LAYR" "$@"; }
+read zid zkey <<<"$(zl remote self --json | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["id"], d["public_key"])')"
+l remote trust cloud "$zid" --public-key "$zkey" >/dev/null; l push cloud -q >/dev/null 2>&1
+out=$(zl clone "file://$T/archive" p 2>&1); code=$?
+eq "a tree whose record the clone did not read does not fail it" 0 "$code"
+has "it says why it left the tree" "its record is not taken here yet" "$out"
 finish

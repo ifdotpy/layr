@@ -523,14 +523,15 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
     let mut reader = Reader::new(&store.backend, &identity, &records.keys);
     let mut missing = Vec::new();
     for id in states.keys() {
-        // An overlay leaves out the records of a signer that is not trusted here yet, and so their states.
+        // A tree whose record this fetch did not read: a push published both after this fetch read the records
+        // (the record first, then the tree), or an overlay left out the records of a signer that is not trusted
+        // here yet. The next fetch takes it; nothing is imported without its record.
         let state = match repo.p.db.state(id)? {
             Some(state) => state,
-            None if repo.p.is_overlay() => {
+            None => {
                 report.omitted.push(format!("state {}: its record is not taken here yet", crate::ids::short(id)));
                 continue;
             }
-            None => bail!("remote tree {id} has no state record"),
         };
         if !wanted(&state, opts) && !required.contains(id) {
             continue;
