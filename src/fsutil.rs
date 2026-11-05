@@ -1343,6 +1343,19 @@ pub enum ExtentKey {
 /// What one file holds for `layr du`: its allocated bytes, the bytes that no other file shares,
 /// and data that clones of it share, by a key that names that data with its size (the APFS
 /// clone id, or the physical address of a Linux extent).
+/// What names a piece of file data for `layr du --store`, so that copies that share it count once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ExtentKey {
+    /// Data at a device address (btrfs disk_bytenr, or the FIEMAP physical address).
+    Disk(u64),
+    /// Inline btrfs data, which lives in metadata: snapshots that share the file share the item.
+    Inline { ino: u64, offset: u64, generation: u64 },
+    /// An APFS clone id: files cloned from one another share it.
+    ApfsClone(u64),
+    /// Shared APFS bytes without a clone id, keyed by their file id.
+    ApfsFile(u64),
+}
+
 pub struct Held<'a> {
     pub alloc: u64,
     /// Bytes that the file system reports as not shared (`layr du` of lines).
@@ -1375,8 +1388,13 @@ pub fn apfs_visit(root: &Path, f: &mut dyn FnMut(&Held)) -> Result<()> {
                 }
             } else if e.links <= 1 || seen.insert(e.ino) {
                 let rest = e.alloc.saturating_sub(e.private);
+<<<<<<< head
                 let key = if e.clone != 0 { ExtentKey::ApfsClone(e.clone) } else { ExtentKey::ApfsFile(e.ino) };
                 let shared = [(key, rest)];
+=======
+                let key = if e.clone != 0 { e.clone } else { e.ino | 1 << 63 };
+                let shared = [(ExtentKey::ApfsClone(key), rest)];
+>>>>>>> main
                 let own = e.private.min(e.alloc);
                 f(&Held { alloc: e.alloc, own, exclusive: own, shared: &shared[..usize::from(rest > 0)] });
             }
@@ -1423,7 +1441,18 @@ pub fn fiemap_visit(root: &Path, f: &mut dyn FnMut(&Held)) -> Result<()> {
                 walk(&e.path(), f, seen)?;
             } else if m.is_file() && (m.nlink() <= 1 || seen.insert((m.dev(), m.ino()))) {
                 match File::open(e.path()).and_then(|file| crate::sys::fiemap_extents(&file)) {
+<<<<<<< head
                     Ok(extents) => fiemap_held(&extents, f),
+=======
+                    Ok(extents) => {
+                        let alloc = extents.iter().map(|x| x.1).sum();
+                        // Every extent has a key: ext4 never flags a shared extent, and a file seen
+                        // through an OverlayFS mount is the same extent as its layer file.
+                        let own = extents.iter().filter(|x| !x.2).map(|x| x.1).sum();
+                        let shared: Vec<(ExtentKey, u64)> = extents.iter().map(|x| (ExtentKey::Disk(x.0), x.1)).collect();
+                        f(&Held { alloc, own, exclusive: 0, shared: &shared });
+                    }
+>>>>>>> main
                     Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {}
                     Err(err) => return Err(err).with_context(|| e.path().display().to_string()),
                 }

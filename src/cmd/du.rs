@@ -296,6 +296,7 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
             units.push((i, path.clone()));
         }
     }
+<<<<<<< head
     let keys: Mutex<HashMap<(FsId, ExtentKey), (usize, u64)>> = Mutex::new(HashMap::new());
     let results: Vec<Mutex<Result<PartSpace>>> = parts.iter().map(|_| Mutex::new(Ok(PartSpace::default()))).collect();
     #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
@@ -325,6 +326,45 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
                     let e = all.entry((filesystems[i], k)).or_insert((i, b));
                     if e.0 != i { e.0 = SHARED; }
                     e.1 = e.1.max(b);
+=======
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let keys: Mutex<HashMap<crate::fsutil::ExtentKey, (usize, u64)>> = Mutex::new(HashMap::new());
+    let results: Vec<Mutex<Result<PartSpace>>> = parts.iter().map(|_| Mutex::new(Ok(PartSpace::default()))).collect();
+    std::thread::scope(|s| {
+        for _ in 0..WORKERS.min(units.len()) {
+            s.spawn(|| loop {
+                let u = next.fetch_add(1, Ordering::Relaxed);
+                let Some((i, path)) = units.get(u) else { break };
+                let i = *i;
+                let in_trash = parts[i].0 == "trash" || parts[i].0.ends_with(": trash");
+                let mut own = 0u64;
+                let mut local: HashMap<crate::fsutil::ExtentKey, u64> = HashMap::new();
+                let walked = crate::storage::visit_space(path, &mut |h| {
+                    own += h.exclusive;
+                    for &(k, b) in h.shared {
+                        let e = local.entry(k).or_insert(0);
+                        *e = (*e).max(b);
+                    }
+                });
+                let mut result = results[i].lock().unwrap();
+                match walked {
+                    // The emptier removed this entry during the walk: it holds nothing now.
+                    Err(e) if in_trash && vanished(&e) => {}
+                    Err(e) => *result = Err(e),
+                    Ok(()) => {
+                        let mut all = keys.lock().unwrap();
+                        for (k, b) in local {
+                            let e = all.entry(k).or_insert((i, b));
+                            if e.0 != i {
+                                e.0 = SHARED;
+                            }
+                            e.1 = e.1.max(b);
+                        }
+                        if let Ok(p) = result.as_mut() {
+                            p.own += own;
+                        }
+                    }
+>>>>>>> main
                 }
                 if let Ok(p) = result.as_mut() { p.own += own; }
             }

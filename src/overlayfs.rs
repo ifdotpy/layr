@@ -1712,7 +1712,10 @@ pub fn visit_space(path: &Path, f: &mut dyn FnMut(&crate::fsutil::Held)) -> Resu
 pub(crate) fn copy_need(path: &Path) -> Result<u64> {
     let src = absolute(path)?;
     let mut keys: HashMap<crate::fsutil::ExtentKey, u64> = Default::default();
+<<<<<<< head
     let mut exclusive = 0;
+=======
+>>>>>>> main
     crate::fsutil::fiemap_visit(path, &mut |h| {
         exclusive += h.exclusive;
         for &(key, size) in h.shared {

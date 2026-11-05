@@ -32,6 +32,9 @@ mod ids;
 use layr_store::http;
 mod ignore_rules;
 mod lineops;
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+#[allow(dead_code)] // The store du caller is integrated separately.
+mod btrfs_scan;
 mod linepaths;
 mod merge;
 mod model;
