@@ -557,7 +557,14 @@ fn prune_in(host: &dyn Host, root: &Path, target: &Path) -> Result<Outcome> {
                 freed += n;
                 busy += b;
             }
-            Listed::NotFresh(why) => kept.push(format!("{profile}: a unit is not fresh ({why})")),
+            Listed::NotFresh(why) => {
+                // A registry source at another path is another CARGO_HOME: name the one that the listing used.
+                let home = match why.contains("the path to the source changed") {
+                    true => format!("; the listing used CARGO_HOME {}", cargo_home(&env).display()),
+                    false => String::new(),
+                };
+                kept.push(format!("{profile}: a unit is not fresh ({why}{home})"))
+            }
             Listed::Busy(holder) => kept.push(format!("{profile}: build lock busy (holder: {holder})")),
         }
     }
