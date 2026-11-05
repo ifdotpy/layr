@@ -1002,6 +1002,7 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
             }
             let report =
                 if op == "push" { store.push(ctx, &mut h.repo, &opts)? } else { store.fetch(ctx, &mut h.repo, &opts)? };
+            store_remote::backend::trace_requests();
             if a.has("--index") {
                 store.write_index(ctx, &h.repo)?;
             }
@@ -1009,10 +1010,14 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
                 print_store_report(ctx, &report, op, a.has("--json"), a.has("-q"))?;
                 return Ok(2);
             }
+            // A transfer record names the states that the remote holds now (their `store` owners). A push that sent
+            // no state writes none: it would be the only news of the next push, and every idle push would make one.
             if op == "push" {
-                for (overlay, data) in &report.overlay_transfers {
+                for (overlay, data) in report.overlay_transfers.iter().filter(|(_, data)| data.states_sent > 0) {
                     h.repo.overlay_repo(overlay)?.record_transfer(ctx, op, name, &url, data)?;
                 }
+            }
+            if op == "push" && !report.state_ids.is_empty() {
                 h.repo.record_transfer(
                     ctx,
                     op,
@@ -1198,6 +1203,7 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
             only_caches: None,
         };
         let report = store.clone_into(ctx, &mut repo, &opts)?;
+        store_remote::backend::trace_requests();
         let _lock = repo.p.lock()?;
         set_config(ctx, &repo, "cloud.remote.origin.url", json!(url))?;
         store.save_pin(ctx, &repo, "origin")?;

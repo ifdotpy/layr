@@ -682,7 +682,8 @@ fn sweep_layer(repo: &Repo, name: &str, orepo: &Repo, scoped: &Store, dry_run: b
     let Some(kept) = repo.cache_kept(name)? else { return Ok(Default::default()) };
     let known = |id: &str| orepo.p.db.state(id).ok().flatten().is_some();
     let parent = |id: &str| orepo.p.db.state(id).ok().flatten().and_then(|s| s.parents.first().cloned());
-    super::sweep::sweep(scoped, &kept, &known, &parent, dry_run)
+    let local: Vec<String> = orepo.p.export_jsonl()?.lines().map(str::to_owned).collect();
+    super::sweep::sweep(scoped, &local, &kept, &known, &parent, dry_run)
 }
 
 /// Delete (with `dry_run`: only list) the dead cache states of each cache overlay of `repo` in the
@@ -789,8 +790,11 @@ pub(super) fn fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, repor
             if !op.id.is_empty() && op.id != published.key.overlay {
                 bail!("overlay {name} has another project id");
             }
-            // Overlay records must use the same trusted machine keys as the parent.
-            let records = reader::records(&backend, &identity, &published.key.overlay)?;
+            // Overlay records must use the same trusted machine keys as the parent. The layer's own fetch below reads
+            // the same segments: both skip the ones read and checked before (`seen-records` of the layer).
+            let local: Vec<String> = if op.id.is_empty() { Vec::new() } else { op.export_jsonl()?.lines().map(str::to_owned).collect() };
+            let seen = reader::seen_file(&store.dir.join("overlays").join(&published.key.overlay).join(&published.key.epoch));
+            let records = reader::records_with_local(&backend, &identity, &published.key.overlay, &local, Some(&seen))?;
             let trusted = trusted_keys(repo)?;
             // A machine trusted after this fetch read the project records (a long clone, while a runner that
             // was just trusted pushes) has records here before its trust record: they wait for a later fetch.

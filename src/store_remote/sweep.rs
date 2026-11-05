@@ -16,7 +16,7 @@
 //! stopped before its tree) goes when its index is older than a day and none of its chunks is live.
 
 use super::format::{parse_tree_name, tree_name};
-use super::reader::{records, Reader};
+use super::reader::Reader;
 use super::Store;
 use anyhow::Result;
 use std::collections::{BTreeMap, BTreeSet};
@@ -45,6 +45,7 @@ const PACK_GRACE: i64 = 24 * 3600;
 /// overlay's records know (`known`) and do not keep (`kept`), and their parts that no kept tree links.
 pub(super) fn sweep(
     store: &Store,
+    local: &[String],
     kept: &BTreeSet<String>,
     known: &dyn Fn(&str) -> bool,
     parent: &dyn Fn(&str) -> Option<String>,
@@ -52,7 +53,14 @@ pub(super) fn sweep(
 ) -> Result<Swept> {
     let descriptor = store.descriptor()?;
     let identity = store.identity(&descriptor, None)?;
-    let records = records(&store.backend, &identity, &descriptor.project)?;
+    // The keys of the signers: the segments that a fetch or an earlier sweep checked are not read again.
+    let records = super::reader::records_with_local(
+        &store.backend,
+        &identity,
+        &descriptor.project,
+        local,
+        Some(&super::reader::seen_file(&store.dir)),
+    )?;
     let trees: Vec<(String, String)> = store.backend.list("states/")?.iter().filter_map(|o| parse_tree_name(&o.key)).collect();
     let mut reader = Reader::new(&store.backend, &identity, &records.keys);
     let mut swept = Swept::default();

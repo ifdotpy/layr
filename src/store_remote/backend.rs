@@ -265,8 +265,14 @@ impl Backend {
         }
     }
 
+    /// A backend that sends its own requests (not a view of another backend): its calls are counted.
+    fn is_leaf(&self) -> bool {
+        matches!(self, Self::S3(_) | Self::Gateway(_) | Self::File(..))
+    }
+
     pub fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
         check_key(key)?;
+        let _io = Io::start("get", key, self.is_leaf());
         match self {
             Self::Epoch(epoch) => {
                 if !epoch_object(key) {
@@ -352,6 +358,7 @@ impl Backend {
         if !prefix.is_empty() {
             check_key(prefix.trim_end_matches('/'))?;
         }
+        let _io = Io::start("list", prefix, self.is_leaf());
         match self {
             Self::Epoch(epoch) => {
                 if !epoch_object(prefix) {
@@ -736,5 +743,48 @@ mod temporary_tests {
         assert!(!old.exists());
         assert!(root.join("a/.put-new").exists() && root.join("a/object").exists());
         fs::remove_dir_all(root).unwrap();
+    }
+}
+
+/// The requests of this process by kind (`get records`, `list chunks`, ...): count and milliseconds, for `LAYR_TRACE`.
+static IO: std::sync::Mutex<std::collections::BTreeMap<String, (u64, f64)>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// One counted request; it adds its time when it ends.
+struct Io(Option<(String, std::time::Instant)>);
+
+impl Io {
+    fn start(op: &str, key: &str, leaf: bool) -> Self {
+        if !leaf || std::env::var_os("LAYR_TRACE").is_none() {
+            return Self(None);
+        }
+        // The kind is the folder that names the object: `records`, `states`, `chunks`, `keys`, `slots`, `git`.
+        let kind = ["records", "states", "chunks", "keys", "slots", "git", "files", "claims", "requests"]
+            .into_iter()
+            .find(|k| key.split('/').any(|part| part == *k))
+            .unwrap_or_else(|| key.split('/').next().unwrap_or(""));
+        Self(Some((format!("{op} {kind}"), std::time::Instant::now())))
+    }
+}
+
+impl Drop for Io {
+    fn drop(&mut self) {
+        if let Some((kind, start)) = self.0.take() {
+            let ms = start.elapsed().as_secs_f64() * 1000.0;
+            let mut io = IO.lock().unwrap_or_else(|e| e.into_inner());
+            let entry = io.entry(kind).or_default();
+            entry.0 += 1;
+            entry.1 += ms;
+        }
+    }
+}
+
+/// With `LAYR_TRACE`, prints the requests of this process by kind, and forgets them.
+pub fn trace_requests() {
+    if std::env::var_os("LAYR_TRACE").is_none() {
+        return;
+    }
+    let mut io = IO.lock().unwrap_or_else(|e| e.into_inner());
+    for (kind, (count, ms)) in std::mem::take(&mut *io) {
+        eprintln!("trace {ms:>8.1} ms  remote {kind}: {count} request(s)");
     }
 }

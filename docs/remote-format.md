@@ -212,6 +212,11 @@ writer that can read the store compares the newest remote segment of its own mac
 number. If it already exists, it compares the segment that it was about to write, too. A difference fails the push
 ("another store uses this machine identity"), and the push publishes no records. `own-records` in the remote's local
 folder names the newest own segment that the writer wrote or checked, so that segment needs no read again.
+A reader keeps `seen-records` in the same folder (one per overlay layer): each segment that it read and checked, with
+its listing time. A segment that the file names with the same time, and whose records are all here, is not read
+again, so an idle fetch and the cache sweep of a push read no segment. A replaced object has another time and is
+read and checked again. A push that sent no state writes no transfer record, so idle runners make no new segments.
+`LAYR_TRACE=1` prints the requests of a fetch, push or clone by kind (`remote get records: 1 request(s)`).
 A state retry uses a new attempt. A lost response can leave another complete attempt with the same state ID.
 No retry replaces an object. An incomplete attempt does not become visible as a state.
 The local index records only attempts whose tree publication completed.

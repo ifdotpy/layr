@@ -10,6 +10,7 @@ use anyhow::{bail, Context, Result};
 use ed25519_dalek::VerifyingKey;
 use layr_hashers::{ContentAddress, Digest};
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
 #[derive(Debug)]
 pub(super) struct Records {
@@ -20,14 +21,40 @@ pub(super) struct Records {
 }
 
 pub(super) fn records(backend: &Backend, identity: &str, project: &str) -> Result<Records> {
-    records_with_local(backend, identity, project, &[])
+    records_with_local(backend, identity, project, &[], None)
 }
 
-fn records_with_local(backend: &Backend, identity: &str, project: &str, local: &[String]) -> Result<Records> {
+/// The segments (`key modified`) that a fetch of this store read and checked: `seen-records` in its local folder.
+pub(super) fn seen_file(dir: &Path) -> PathBuf {
+    dir.join("seen-records")
+}
+
+/// `seen`: the `seen-records` file of this store. A segment that it names with the same time, and whose records are
+/// all here, was read and checked before: it is not read again, so an idle fetch reads no segment. A segment with
+/// another time (a replaced object) or with records that are not here is read and checked, and the file is written
+/// again after a fetch that checked every segment.
+pub(super) fn records_with_local(backend: &Backend, identity: &str, project: &str, local: &[String], seen: Option<&Path>) -> Result<Records> {
     let mut machines: BTreeMap<String, BTreeMap<u64, String>> = BTreeMap::new();
     let mut overlaps = 0;
+    let known: std::collections::BTreeSet<String> =
+        seen.and_then(|path| std::fs::read_to_string(path).ok()).map(|text| text.lines().map(str::to_owned).collect()).unwrap_or_default();
+    let mut have: BTreeMap<String, std::collections::BTreeSet<u64>> = BTreeMap::new();
+    if !known.is_empty() {
+        for line in local {
+            let record = oplog::parse_line(line, None)?.record;
+            have.entry(record.machine).or_default().insert(record.seq);
+        }
+    }
+    let mut checked = Vec::new();
     for object in backend.list("records/")? {
         let (machine, first, last) = format::parse_segment_name(&object.key).context("invalid record segment name")?;
+        let stamp = format!("{} {}", object.key, object.modified);
+        let here = || have.get(&machine).is_some_and(|seqs| (first..=last).all(|seq| seqs.contains(&seq)));
+        if known.contains(&stamp) && here() {
+            checked.push(stamp);
+            continue;
+        }
+        checked.push(stamp);
         let body = backend.get(&object.key)?.context("record segment disappeared")?;
         let body = String::from_utf8(keys::decrypt(identity, &body)?)?;
         let mut expected = first;
@@ -104,6 +131,12 @@ fn records_with_local(backend: &Backend, identity: &str, project: &str, local: &
         let r = oplog::parse_line(l, None).expect("record checked").record;
         (r.time, r.machine, r.seq)
     });
+    if let Some(path) = seen {
+        // Only after every segment was checked: a failed read leaves the old file.
+        if let Err(e) = crate::fsutil::atomic_write(path, format!("{}\n", checked.join("\n")).as_bytes(), 0o600) {
+            eprintln!("warning: {}: {e:#}", path.display());
+        }
+    }
     Ok(Records { lines, keys, overlaps, gaps })
 }
 
@@ -481,7 +514,7 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
     let descriptor = store.descriptor()?;
     let identity = store.identity(&descriptor, opts.paper_key.as_deref())?;
     let local: Vec<String> = repo.p.export_jsonl()?.lines().map(str::to_string).collect();
-    let records = records_with_local(&store.backend, &identity, &descriptor.project, &local)?;
+    let records = records_with_local(&store.backend, &identity, &descriptor.project, &local, Some(&seen_file(&store.dir)))?;
     let bootstrap = repo.p.id.is_empty();
     if !bootstrap {
         for (machine, key) in &records.keys {
@@ -756,6 +789,39 @@ mod tests {
             .unwrap());
     }
     #[test]
+    fn a_checked_segment_is_not_read_again_and_a_replaced_one_is() {
+        let (backend, identity, key, root) = fixture();
+        let lines = vec![line(1, &key), line(2, &key)];
+        segment(&backend, &identity, 1, 2, &lines);
+        let seen = root.join("seen-records");
+        assert_eq!(records_with_local(&backend, &identity, PROJECT, &[], Some(&seen)).unwrap().lines.len(), 2);
+        // The records are here and the object has the same time: the next fetch does not read it.
+        let object = root.join(format::segment_name(MACHINE, 1, 2));
+        let time = std::fs::metadata(&object).unwrap().modified().unwrap();
+        std::fs::write(&object, b"not a segment").unwrap();
+        std::fs::File::options().write(true).open(&object).unwrap().set_modified(time).unwrap();
+        assert_eq!(records_with_local(&backend, &identity, PROJECT, &lines, Some(&seen)).unwrap().lines.len(), 2);
+        // A replaced object has another time: it is read and checked again.
+        let mut other = Record::new("config");
+        other.id = "01a12290-0000-7000-8000-0000000000ff".into();
+        other.machine = MACHINE.into();
+        other.project = PROJECT.into();
+        other.seq = 2;
+        let forged = vec![line(1, &key), oplog::sign_line(&other, &key).unwrap()];
+        std::fs::remove_file(&object).unwrap();
+        segment(&backend, &identity, 1, 2, &forged);
+        std::fs::File::options()
+            .write(true)
+            .open(&object)
+            .unwrap()
+            .set_modified(time + std::time::Duration::from_secs(10))
+            .unwrap();
+        let error = records_with_local(&backend, &identity, PROJECT, &lines, Some(&seen)).unwrap_err().to_string();
+        assert!(error.contains("conflicting history"), "{error}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn writers_can_forward_overlapping_segments_of_a_third_machine() {
         let (backend, identity, key, root) = fixture();
         let lines: Vec<String> = (1..=12).map(|seq| line(seq, &key)).collect();
@@ -801,7 +867,7 @@ mod tests {
         let local = vec![line(1, &key)];
         let other = ed25519_dalek::SigningKey::from_bytes(&[8; 32]);
         segment(&backend, &identity, 1, 1, &[line(1, &other)]);
-        let error = records_with_local(&backend, &identity, PROJECT, &local).unwrap_err().to_string();
+        let error = records_with_local(&backend, &identity, PROJECT, &local, None).unwrap_err().to_string();
         assert!(error.contains("first-record key does not match"));
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -851,7 +917,7 @@ mod tests {
         let (backend, identity, key, root) = fixture();
         let lines: Vec<String> = (1..=5).map(|seq| line(seq, &key)).collect();
         segment(&backend, &identity, 3, 5, &lines[2..]);
-        let fetched = records_with_local(&backend, &identity, PROJECT, &lines[..2]).unwrap();
+        let fetched = records_with_local(&backend, &identity, PROJECT, &lines[..2], None).unwrap();
         assert_eq!(fetched.lines.len(), 5);
         assert!(fetched.gaps.is_empty());
         assert_eq!(fetched.overlaps, 0);
