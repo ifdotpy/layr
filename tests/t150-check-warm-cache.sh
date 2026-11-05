@@ -29,8 +29,13 @@ has "the copy's unit that named the line builds again" "1 units named the old pa
 no "the line's own cache does not get the check's file" test -e target/new
 eq "the line's cache is the same" warm "$(cat target/built)"
 ok "the copy's unit that named the line built again there, the line keeps its own" test -d target/debug/.fingerprint/p-aaa
-l line new w main >/dev/null 2>&1
-no "a new line does not get the check's file either" test -e "$LAYR_ROOT/projects/p/lines/w/target/new"
+# The check of a protected head gives its caches back, saved with that head, on the line main.checks-<platform>.
+plat=$(uname -s | tr 'A-Z' 'a-z' | sed 's/darwin/macos/')-$(uname -m | sed 's/arm64/aarch64/')
+has "the check gives its caches back on its own line" "main.checks-$plat" "$(l line list 2>&1)"
+head=$(l rev-parse main)
+l line new w "$head" >/dev/null 2>&1
+eq "a new line from the checked head takes the check's caches" more "$(cat "$LAYR_ROOT/projects/p/lines/w/target/new" 2>&1)"
+has "the old cache states of that line go at once" "0 unreachable state(s)" "$(l fsck --caches 2>&1)"
 no "the check's state is not in the line" grep -qx "target/built" <<<"$(l ls-files)"
 has "the check copy leaves no overlay line behind" "0 overlay line(s) of deleted lines" "$(l fsck --caches 2>&1)"
 
@@ -50,6 +55,9 @@ fi
 has "run executes the change check of that state" '"count":1' "$out"
 has "with its cache" '"exit":0' "$out"
 has "a second run finds nothing to do" '"count":0,"pending":0' "$(l checks run --state "$s" --json 2>&1)"
+l line new w3 "$s" >/dev/null 2>&1
+no "a state off the protected lines gives no caches back" test -e "$LAYR_ROOT/projects/p/lines/w3/target/new"
+no "and gets no checks line" grep -q "pr.checks-" <<<"$(l line list 2>&1)"
 eq "pending agrees" 0 "$(l checks pending --state "$s" --json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["pending"]))')"
 no "run needs --state" l checks run
 finish

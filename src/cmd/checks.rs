@@ -281,6 +281,8 @@ struct Scan {
 struct Plan {
     policy: layr_model::Project,
     main_states: BTreeSet<String>,
+    /// The heads (also intermediate) of the protected lines in `checks.lines`, with the line name.
+    heads: BTreeMap<String, String>,
     jobs: BTreeSet<(String, String, Option<String>)>,
     commands: BTreeMap<String, String>,
     privileged: BTreeSet<String>,
@@ -315,6 +317,7 @@ fn plan(repo: &Repo, state: Option<&str>) -> Result<Plan> {
         }
     }
     let mut watched_lines = BTreeMap::new();
+    let mut heads = BTreeMap::new();
     for (line, checks) in lines.as_object().context("checks.lines must be an object")? {
         if policy.access_policy(crate::ids::now_ms(), false).rule_for(line).is_none() {
             bail!("automatic line '{line}' must be protected");
@@ -325,17 +328,19 @@ fn plan(repo: &Repo, state: Option<&str>) -> Result<Plan> {
             for name in &checks {
                 jobs.insert((head.clone(), name.clone()));
             }
+            heads.insert(head.clone(), line.name.clone());
         }
-        watched_lines.insert(line.id, checks);
+        watched_lines.insert(line.id, (line.name.clone(), checks));
     }
     // Include intermediate heads when more than one version arrived between scans.
     if !watched_lines.is_empty() {
         for record in repo.p.db.records(usize::MAX >> 1)? {
             for (id, movement) in record.lines {
-                if let (Some(names), Some(after)) = (watched_lines.get(&id), movement.after) {
+                if let (Some((line, names)), Some(after)) = (watched_lines.get(&id), movement.after) {
                     for name in names {
                         jobs.insert((after.head.clone(), name.clone()));
                     }
+                    heads.insert(after.head.clone(), line.clone());
                 }
             }
         }
@@ -357,7 +362,7 @@ fn plan(repo: &Repo, state: Option<&str>) -> Result<Plan> {
         .into_iter()
         .flat_map(|(state, name)| platforms_of(&platforms, &name).into_iter().map(move |p| (state.clone(), name.clone(), p)))
         .collect();
-    Ok(Plan { policy, main_states, jobs, commands, privileged })
+    Ok(Plan { policy, main_states, heads, jobs, commands, privileged })
 }
 
 /// Whether an active executor check of `state` ran the argv `argv` with the privileged mode
@@ -380,7 +385,7 @@ fn attested(repo: &Repo, state: &str, argv: &[String], privileged: bool, want: O
 
 /// One pass of the executor: runs the jobs that no attestation covers, of every state or of `state` only.
 fn scan(ctx: &Ctx, repo: &Repo, privileged_only: bool, state: Option<&str>) -> Result<Scan> {
-    let Plan { policy, main_states, jobs, commands, privileged } = plan(repo, state)?;
+    let Plan { policy, main_states, heads, jobs, commands, privileged } = plan(repo, state)?;
     let here = platform();
     let limits = Limits {
         timeout: setting(&policy, "checks.timeout", json!(900))?.as_u64().context("invalid checks.timeout")?,
@@ -428,7 +433,8 @@ fn scan(ctx: &Ctx, repo: &Repo, privileged_only: bool, state: Option<&str>) -> R
         let result = super::admin::with_try_copy(ctx, repo, &state, &[], false, true, |dir| {
             let started = std::time::Instant::now();
             #[cfg(any(target_os = "linux", target_os = "macos"))]
-            let (code, log, truncated) = execute(ctx, repo, dir, &state, &argv, is_privileged, &limits)?;
+            let back = heads.get(&state).map(String::as_str);
+            let (code, log, truncated) = execute(ctx, repo, dir, &state, &argv, is_privileged, &limits, back)?;
             #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             let (code, log, truncated): (i32, Vec<u8>, bool) = {
                 bail!("automatic checks require Linux");
@@ -517,6 +523,7 @@ fn execute(
     argv: &[String],
     privileged: bool,
     limits: &Limits,
+    back: Option<&str>,
 ) -> Result<(i32, Vec<u8>, bool)> {
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     use std::process::Command;
@@ -610,7 +617,45 @@ fn execute(
             .current_dir("/");
         crate::privs::command_as(&mut command, ctx.caller.uid, &[])?;
     }
-    run_check(command, limits)
+    let result = run_check(command, limits)?;
+    // A privileged copy is a plain folder of root: only a sandboxed check gives its caches back.
+    if result.0 == 0 && private.is_none() {
+        if let Some(line) = back {
+            save_back(ctx, repo, line, state, dir);
+        }
+    }
+    Ok(result)
+}
+
+/// The caches that a passing check of a head of the protected line `line` built in its copy `dir`, saved with that
+/// head as the caches of the line `<line>.checks-<os>-<arch>` (made at the first such check; its head stays there).
+/// `line new X <line>` on any machine of the platform then takes them (`cache_source`): one build per head warms
+/// the next check and every machine. A protected head is reviewed code built in the sandbox, so the caches are
+/// shared like the caches of a protected line. A pull request state never gives caches back. A failure here
+/// leaves the check result as it is.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn save_back(ctx: &Ctx, repo: &Repo, line: &str, state: &str, dir: &std::path::Path) {
+    let r = (|| -> Result<usize> {
+        let folders: Vec<String> = repo
+            .folder_overlays()?
+            .into_iter()
+            .map(|(_, folder)| folder)
+            .filter(|folder| crate::fsutil::safe_join(dir, folder).is_ok_and(|p| crate::storage::is_subvolume(&p)))
+            .collect();
+        if folders.is_empty() {
+            return Ok(0);
+        }
+        let name = format!("{line}.checks-{}", platform());
+        let _lock = repo.p.lock()?;
+        let checks_line = match repo.p.db.line_by_name(&name)? {
+            Some(l) => l,
+            None => repo.create_line(ctx, &name, state, ctx.caller.uid)?,
+        };
+        Ok(repo.save_cache_overlays_in(ctx, &checks_line, dir, &folders, true, state)?.len())
+    })();
+    if let Err(e) = r {
+        eprintln!("layr checks: caches of {state} not saved: {e:#}");
+    }
 }
 
 /// The cache folders of a check copy `dir`, which the check sees at `at`: units that name the line where they were
@@ -662,6 +707,7 @@ fn execute(
     argv: &[String],
     privileged: bool,
     limits: &Limits,
+    back: Option<&str>,
 ) -> Result<(i32, Vec<u8>, bool)> {
     use std::os::unix::fs::DirBuilderExt;
     if privileged {
@@ -698,7 +744,13 @@ fn execute(
         ("LAYR_CHECK_SEED".into(), seed.display().to_string()),
         ("PATH".into(), "/opt/homebrew/opt/coreutils/libexec/gnubin:/opt/homebrew/opt/gnu-sed/libexec/gnubin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin".into()),
     ])?;
-    run_check(command, limits)
+    let result = run_check(command, limits)?;
+    if result.0 == 0 {
+        if let Some(line) = back {
+            save_back(ctx, repo, line, state, &dir);
+        }
+    }
+    Ok(result)
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

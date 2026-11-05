@@ -446,17 +446,29 @@ impl<'a> Repo<'a> {
         shared: bool,
         project_state: &str,
     ) -> Result<Vec<(String, String, String)>> {
-        let w = self.working(line);
+        self.save_cache_overlays_in(ctx, line, &self.working(line), paths, shared, project_state)
+    }
+
+    /// `save_cache_overlays` from the folder `w` instead of the line's working folder (a check copy).
+    pub fn save_cache_overlays_in(
+        &self,
+        ctx: &Ctx,
+        line: &Line,
+        w: &Path,
+        paths: &[String],
+        shared: bool,
+        project_state: &str,
+    ) -> Result<Vec<(String, String, String)>> {
         let mut out = Vec::new();
         for p in paths {
-            let cp = fsutil::safe_join(&w, p)?;
+            let cp = fsutil::safe_join(w, p)?;
             if !btrfs::is_subvolume(&cp) {
                 continue;
             }
             let name = self.ensure_cache_overlay(ctx, p)?;
             let info = self.need_overlay(&name)?;
             let orepo = self.overlay_repo(&name)?;
-            let CacheKey { key, parts } = self.cache_key(ctx, &name, &w, line.owner)?;
+            let CacheKey { key, parts } = self.cache_key(ctx, &name, w, line.owner)?;
             let id = ids::new_id();
             {
                 let _lock = orepo.p.lock()?;
