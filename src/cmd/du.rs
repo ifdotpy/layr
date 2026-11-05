@@ -2,15 +2,87 @@
 use super::here;
 use crate::args::{parse, Spec};
 use crate::ctx::Ctx;
-use crate::fsutil::Space;
+use crate::fsutil::{ExtentKey, Space};
 use anyhow::{bail, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 
-/// Lines read at the same time: the walks read only metadata, so a few in parallel are enough.
-const WORKERS: usize = 4;
+/// Use the parallelism available to this process, including any system-imposed limit.
+fn workers() -> usize {
+    std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+}
+
+/// On btrfs, schedule directories independently so a single large line can use the pool.
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+fn line_spaces(lines: &[(String, PathBuf)]) -> Vec<Result<Space>> {
+    use std::collections::{HashSet, VecDeque};
+    use std::sync::Condvar;
+
+    let queue = Mutex::new((lines.iter().enumerate().map(|(i, (_, p))| (i, p.clone())).collect::<VecDeque<_>>(), lines.len()));
+    let ready = Condvar::new();
+    let seen: Vec<_> = lines.iter().map(|_| Mutex::new(HashSet::new())).collect();
+    let results: Vec<_> = lines.iter().map(|_| Mutex::new(Ok(Space::default()))).collect();
+    std::thread::scope(|scope| {
+        for _ in 0..workers() {
+            scope.spawn(|| {
+                crate::sys::lower_thread_priority();
+                loop {
+                    let (i, path) = {
+                        let mut q = queue.lock().unwrap();
+                        while q.0.is_empty() && q.1 != 0 {
+                            q = ready.wait(q).unwrap();
+                        }
+                        match q.0.pop_front() {
+                            Some(job) => job,
+                            None => break,
+                        }
+                    };
+                    let walked = (|| -> Result<Space> {
+                        let children = match std::fs::read_dir(&path) {
+                            Ok(entries) => entries,
+                            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Ok(Space::default()),
+                            Err(e) => return Err(e.into()),
+                        };
+                        let mut dirs = Vec::new();
+                        for child in children {
+                            let child = child?;
+                            if child.file_type()?.is_dir() {
+                                dirs.push((i, child.path()));
+                            }
+                        }
+                        {
+                            let mut q = queue.lock().unwrap();
+                            q.1 += dirs.len();
+                            q.0.extend(dirs);
+                            ready.notify_all();
+                        }
+                        let mut space = Space::default();
+                        crate::fsutil::fiemap_visit_shallow(&path, &seen[i], &mut |held| space.add(held))?;
+                        Ok(space)
+                    })();
+                    let mut result = results[i].lock().unwrap();
+                    match (result.as_mut(), walked) {
+                        (Ok(total), Ok(space)) => {
+                            total.total += space.total;
+                            total.unique += space.unique;
+                        }
+                        (_, Err(e)) => *result = Err(e),
+                        _ => {}
+                    }
+                    drop(result);
+                    let mut q = queue.lock().unwrap();
+                    q.1 -= 1;
+                    if q.1 == 0 {
+                        ready.notify_all();
+                    }
+                }
+            });
+        }
+    });
+    results.into_iter().map(|r| r.into_inner().unwrap()).collect()
+}
 
 pub fn du(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let a = parse(&Spec::new().flag("--json").flag("--store").flag("--volumes"), args)?;
@@ -43,20 +115,29 @@ pub fn du(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
     }
     // No store lock: the walks only read the line folders.
-    let next = std::sync::atomic::AtomicUsize::new(0);
-    let results: Vec<std::sync::Mutex<Option<Result<Space>>>> = lines.iter().map(|_| Default::default()).collect();
-    std::thread::scope(|s| {
-        for _ in 0..WORKERS.min(lines.len()) {
-            s.spawn(|| loop {
-                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let Some((_, path)) = lines.get(i) else { break };
-                *results[i].lock().unwrap() = Some(crate::storage::space(path));
-            });
-        }
-    });
+    #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+    let results = line_spaces(&lines);
+    #[cfg(not(all(target_os = "linux", not(feature = "overlayfs"))))]
+    let results = {
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let results: Vec<std::sync::Mutex<Option<Result<Space>>>> = lines.iter().map(|_| Default::default()).collect();
+        std::thread::scope(|s| {
+            for _ in 0..workers().min(lines.len()) {
+                s.spawn(|| {
+                    crate::sys::lower_thread_priority();
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some((_, path)) = lines.get(i) else { break };
+                        *results[i].lock().unwrap() = Some(crate::storage::space(path));
+                    }
+                });
+            }
+        });
+        results.into_iter().map(|r| r.into_inner().unwrap().expect("every line was read")).collect::<Vec<_>>()
+    };
     let mut rows = Vec::new();
     for ((name, path), r) in lines.into_iter().zip(results) {
-        match r.into_inner().unwrap().expect("every line was read") {
+        match r {
             Ok(space) => rows.push((name, path, space)),
             Err(e) => eprintln!("warning: line '{name}': {e:#}"),
         }
@@ -247,40 +328,43 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
         }
     }
     let next = std::sync::atomic::AtomicUsize::new(0);
-    let keys: Mutex<HashMap<u64, (usize, u64)>> = Mutex::new(HashMap::new());
+    let keys: Mutex<HashMap<ExtentKey, (usize, u64)>> = Mutex::new(HashMap::new());
     let results: Vec<Mutex<Result<PartSpace>>> = parts.iter().map(|_| Mutex::new(Ok(PartSpace::default()))).collect();
     std::thread::scope(|s| {
-        for _ in 0..WORKERS.min(units.len()) {
-            s.spawn(|| loop {
-                let u = next.fetch_add(1, Ordering::Relaxed);
-                let Some((i, path)) = units.get(u) else { break };
-                let i = *i;
-                let in_trash = parts[i].0 == "trash" || parts[i].0.ends_with(": trash");
-                let mut own = 0u64;
-                let mut local: HashMap<u64, u64> = HashMap::new();
-                let walked = crate::storage::visit_space(path, &mut |h| {
-                    own += h.exclusive;
-                    for &(k, b) in h.shared {
-                        let e = local.entry(k).or_insert(0);
-                        *e = (*e).max(b);
-                    }
-                });
-                let mut result = results[i].lock().unwrap();
-                match walked {
-                    // The emptier removed this entry during the walk: it holds nothing now.
-                    Err(e) if in_trash && vanished(&e) => {}
-                    Err(e) => *result = Err(e),
-                    Ok(()) => {
-                        let mut all = keys.lock().unwrap();
-                        for (k, b) in local {
-                            let e = all.entry(k).or_insert((i, b));
-                            if e.0 != i {
-                                e.0 = SHARED;
-                            }
-                            e.1 = e.1.max(b);
+        for _ in 0..workers().min(units.len()) {
+            s.spawn(|| {
+                crate::sys::lower_thread_priority();
+                loop {
+                    let u = next.fetch_add(1, Ordering::Relaxed);
+                    let Some((i, path)) = units.get(u) else { break };
+                    let i = *i;
+                    let in_trash = parts[i].0 == "trash" || parts[i].0.ends_with(": trash");
+                    let mut own = 0u64;
+                    let mut local: HashMap<ExtentKey, u64> = HashMap::new();
+                    let walked = crate::storage::visit_space(path, &mut |h| {
+                        own += h.exclusive;
+                        for &(k, b) in h.shared {
+                            let e = local.entry(k).or_insert(0);
+                            *e = (*e).max(b);
                         }
-                        if let Ok(p) = result.as_mut() {
-                            p.own += own;
+                    });
+                    let mut result = results[i].lock().unwrap();
+                    match walked {
+                        // The emptier removed this entry during the walk: it holds nothing now.
+                        Err(e) if in_trash && vanished(&e) => {}
+                        Err(e) => *result = Err(e),
+                        Ok(()) => {
+                            let mut all = keys.lock().unwrap();
+                            for (k, b) in local {
+                                let e = all.entry(k).or_insert((i, b));
+                                if e.0 != i {
+                                    e.0 = SHARED;
+                                }
+                                e.1 = e.1.max(b);
+                            }
+                            if let Ok(p) = result.as_mut() {
+                                p.own += own;
+                            }
                         }
                     }
                 }
@@ -309,10 +393,7 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
     rows.sort_by(|x, y| (y.1.own + y.1.sole).cmp(&(x.1.own + x.1.sole)).then_with(|| x.0.cmp(y.0)));
     let total = rows.iter().map(|r| r.1.own + r.1.sole).sum::<u64>() + shared;
     if json {
-        let v: Vec<_> = rows
-            .iter()
-            .map(|(n, s)| serde_json::json!({"part": n, "frees": s.own + s.sole}))
-            .collect();
+        let v: Vec<_> = rows.iter().map(|(n, s)| serde_json::json!({"part": n, "frees": s.own + s.sole})).collect();
         outln!(ctx, "{}", serde_json::to_string(&serde_json::json!({"parts": v, "shared": shared, "total": total}))?);
         return Ok(0);
     }
@@ -332,6 +413,27 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
 mod tests {
     use super::vanished;
     use std::path::PathBuf;
+
+    #[test]
+    fn worker_count_matches_the_system_limit() {
+        assert_eq!(super::workers(), std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get));
+    }
+
+    #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+    #[test]
+    fn line_directory_units_count_hard_links_once() {
+        let dir = std::env::temp_dir().join(format!("layr-du-parallel-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("a")).unwrap();
+        std::fs::create_dir_all(dir.join("b")).unwrap();
+        std::fs::write(dir.join("a/file"), vec![1u8; 8192]).unwrap();
+        std::fs::hard_link(dir.join("a/file"), dir.join("b/link")).unwrap();
+        let expected = crate::fsutil::fiemap_space(&dir);
+        let actual = super::line_spaces(&[("line".into(), dir.clone())]).pop().unwrap();
+        if let Ok(expected) = expected {
+            assert_eq!(actual.unwrap(), expected);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn a_removed_path_is_vanished_and_other_errors_are_not() {

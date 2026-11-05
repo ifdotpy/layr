@@ -231,6 +231,8 @@ sudo tests/run.sh           # integration tests: each file gets a fresh btrfs on
 ```
 
 Unsafe code is limited to `src/sys.rs`. Commit messages say what changed and why, in plain words.
+Code adapts to its machine: limits such as thread counts come from the system, not developer-tuned constants.
+Work that a user or a running build waits on comes first. Background jobs, scans and reports run at lowered CPU and I/O priority.
 
 ## License
 

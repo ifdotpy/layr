@@ -840,7 +840,13 @@ pub fn snapshot(src: &Path, dst: &Path, readonly: bool) -> Result<()> {
                 parent.plain,
                 parent.hard_links,
                 parent.bases.len(),
-                if plain { "COPY (plain)" } else if !readonly && parent.hard_links { "LAYER + COPY (hard links)" } else { "LAYER" }
+                if plain {
+                    "COPY (plain)"
+                } else if !readonly && parent.hard_links {
+                    "LAYER + COPY (hard links)"
+                } else {
+                    "LAYER"
+                }
             )
         });
         (state.home.clone(), parent, nested, plain, Building::begin(&state.home)?)
@@ -1222,7 +1228,10 @@ fn visible_entry(root: &Path, root_dev: u64, rel: &str) -> Result<Option<ScanEnt
     if m.is_dir() && (m.dev() != root_dev || is_subvolume(&full)) {
         return Ok(None);
     }
-    Ok(Some(ScanEntry { meta: crate::fsutil::meta_of(&m), stamp: Some((m.mtime(), m.mtime_nsec(), m.ctime(), m.ctime_nsec(), m.mode())) }))
+    Ok(Some(ScanEntry {
+        meta: crate::fsutil::meta_of(&m),
+        stamp: Some((m.mtime(), m.mtime_nsec(), m.ctime(), m.ctime_nsec(), m.mode())),
+    }))
 }
 // The layers above the ones both trees share, top first. `None` when either tree is not an
 // OverlayFS mount of this store or the two share no layer.
@@ -1384,7 +1393,9 @@ pub fn candidates(parent: &Path, child: &Path) -> Result<Vec<crate::changes::Cha
             // Same size, mode, modification and change time (the check git calls racy): equal
             // without a read. Other files get their exact changed ranges, which a merge needs.
             let quick = !exact
-                && a.get(p).zip(b.get(p)).is_some_and(|(x, y)| x.stamp.is_some() && x.stamp == y.stamp && x.meta.size == y.meta.size);
+                && a.get(p)
+                    .zip(b.get(p))
+                    .is_some_and(|(x, y)| x.stamp.is_some() && x.stamp == y.stamp && x.meta.size == y.meta.size);
             c.ranges = Some(if quick { Vec::new() } else { changed_ranges(&parent.join(p), &child.join(p))? });
         }
     }
@@ -1696,7 +1707,9 @@ pub fn space(path: &Path) -> Result<crate::fsutil::Space> {
     };
     let total = crate::fsutil::fiemap_space(path)?;
     match upper {
-        Some(upper) if upper.is_dir() => Ok(crate::fsutil::Space { total: total.total, unique: crate::fsutil::fiemap_space(&upper)?.unique }),
+        Some(upper) if upper.is_dir() => {
+            Ok(crate::fsutil::Space { total: total.total, unique: crate::fsutil::fiemap_space(&upper)?.unique })
+        }
         _ => Ok(total),
     }
 }
@@ -1711,8 +1724,10 @@ pub fn visit_space(path: &Path, f: &mut dyn FnMut(&crate::fsutil::Held)) -> Resu
 /// an upper layer hides is only in its layer.
 pub(crate) fn copy_need(path: &Path) -> Result<u64> {
     let src = absolute(path)?;
-    let mut keys: HashMap<u64, u64> = Default::default();
+    let mut keys: HashMap<crate::fsutil::ExtentKey, u64> = Default::default();
+    let mut exclusive = 0;
     crate::fsutil::fiemap_visit(path, &mut |h| {
+        exclusive += h.exclusive;
         for &(key, size) in h.shared {
             keys.entry(key).or_insert(size);
         }
@@ -1723,6 +1738,7 @@ pub(crate) fn copy_need(path: &Path) -> Result<u64> {
             let folder = state.home.join("objects").join(&id);
             if folder.is_dir() {
                 crate::fsutil::fiemap_visit(&folder, &mut |h| {
+                    exclusive += h.exclusive;
                     for &(key, size) in h.shared {
                         keys.entry(key).or_insert(size);
                     }
@@ -1730,7 +1746,7 @@ pub(crate) fn copy_need(path: &Path) -> Result<u64> {
             }
         }
     }
-    Ok(keys.values().sum())
+    Ok(exclusive + keys.values().sum::<u64>())
 }
 
 /// Allocated bytes of `path` with shared data counted per file.
@@ -1844,7 +1860,8 @@ impl Files {
         let from = File::open(src).with_context(|| format!("open {}", src.display()))?;
         let key = crate::project_copy::plain_extents(&from);
         let shared = key.as_ref().and_then(|k| self.seen.get(k).cloned());
-        let to = fs::OpenOptions::new().write(true).create_new(true).open(dst).with_context(|| format!("create {}", dst.display()))?;
+        let to =
+            fs::OpenOptions::new().write(true).create_new(true).open(dst).with_context(|| format!("create {}", dst.display()))?;
         match &shared {
             Some(first) => clone_file(&File::open(first)?, &to).with_context(|| format!("share {}", dst.display()))?,
             None => clone_file(&from, &to).with_context(|| format!("copy {}", src.display()))?,

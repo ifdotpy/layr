@@ -214,10 +214,7 @@ fn refuse_case_clash_apfs(root: &Path, rel: &str) -> Result<()> {
                 continue;
             }
             let parent = done.rsplit_once('/').map(|(p, _)| format!("{p}/")).unwrap_or_default();
-            bail!(
-                "{done} and {parent}{stored} {}",
-                clash_reason(sensitive)
-            );
+            bail!("{done} and {parent}{stored} {}", clash_reason(sensitive));
         }
         if fs::symlink_metadata(&path).is_err() {
             break;
@@ -351,10 +348,7 @@ fn refuse_remaining_clashes(dst: &Path, gone: &[&str], write: &[&str]) -> Result
                 let other = if parent.is_empty() { stored } else { format!("{parent}/{stored}") };
                 // After the removals, nothing but empty folders may stay there.
                 if !holds_no_files(dst, &other, &leaves) {
-                    bail!(
-                        "{done} and {other} {}",
-                        clash_reason(sensitive)
-                    );
+                    bail!("{done} and {other} {}", clash_reason(sensitive));
                 }
                 break;
             }
@@ -1236,7 +1230,9 @@ pub fn git_writable(w: &Path, writable: bool) {
         let _ = rustix::fs::fchmod(&g, mode);
     }
     for s in subs {
-        if let Ok(fd) = rustix::fs::openat(&g, s, OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty()) {
+        if let Ok(fd) =
+            rustix::fs::openat(&g, s, OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty())
+        {
             let _ = rustix::fs::fchmod(&fd, mode);
         }
     }
@@ -1275,6 +1271,18 @@ pub struct Space {
     pub unique: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ExtentKey {
+    /// Data at a device address (btrfs disk_bytenr, or the FIEMAP physical address).
+    Disk(u64),
+    /// Inline btrfs data, which lives in metadata: snapshots that share the file share the item.
+    Inline { ino: u64, offset: u64, generation: u64 },
+    /// An APFS clone id: files cloned from one another share it.
+    ApfsClone(u64),
+    /// Shared APFS bytes without a clone id, keyed by their file id.
+    ApfsFile(u64),
+}
+
 /// What one file holds for `layr du`: its allocated bytes, the bytes that no other file shares,
 /// and data that clones of it share, by a key that names that data with its size (the APFS
 /// clone id, or the physical address of a Linux extent).
@@ -1284,7 +1292,7 @@ pub struct Held<'a> {
     pub own: u64,
     /// The part of `own` that has no key (`layr du --store` counts it for its part alone).
     pub exclusive: u64,
-    pub shared: &'a [(u64, u64)],
+    pub shared: &'a [(ExtentKey, u64)],
 }
 
 impl Space {
@@ -1309,9 +1317,8 @@ pub fn apfs_visit(root: &Path, f: &mut dyn FnMut(&Held)) -> Result<()> {
                     Err(err) => return Err(err.into()),
                 }
             } else if e.links <= 1 || seen.insert(e.ino) {
-                // Shared bytes without a clone id get a key of their own file (top bit set).
                 let rest = e.alloc.saturating_sub(e.private);
-                let key = if e.clone != 0 { e.clone } else { e.ino | 1 << 63 };
+                let key = if e.clone != 0 { ExtentKey::ApfsClone(e.clone) } else { ExtentKey::ApfsFile(e.ino) };
                 let shared = [(key, rest)];
                 let own = e.private.min(e.alloc);
                 f(&Held { alloc: e.alloc, own, exclusive: own, shared: &shared[..usize::from(rest > 0)] });
@@ -1331,6 +1338,18 @@ pub fn apfs_space(root: &Path) -> Result<Space> {
     Ok(space)
 }
 
+/// Account for unaddressable extents separately from addressable extents.
+#[cfg(target_os = "linux")]
+fn fiemap_held(extents: &[(u64, u64, bool)], f: &mut dyn FnMut(&Held)) {
+    let alloc = extents.iter().map(|x| x.1).sum();
+    let own = extents.iter().filter(|x| !x.2).map(|x| x.1).sum();
+    // Inline and delayed extents have no physical address, so address zero
+    // cannot identify shared data across different files.
+    let exclusive = extents.iter().filter(|x| x.0 == 0).map(|x| x.1).sum();
+    let shared: Vec<_> = extents.iter().filter(|x| x.0 != 0).map(|x| (ExtentKey::Disk(x.0), x.1)).collect();
+    f(&Held { alloc, own, exclusive, shared: &shared });
+}
+
 /// Visit the files of a folder on Linux: the extents of each, shared ones by physical address.
 #[cfg(target_os = "linux")]
 pub fn fiemap_visit(root: &Path, f: &mut dyn FnMut(&Held)) -> Result<()> {
@@ -1347,14 +1366,7 @@ pub fn fiemap_visit(root: &Path, f: &mut dyn FnMut(&Held)) -> Result<()> {
                 walk(&e.path(), f, seen)?;
             } else if m.is_file() && (m.nlink() <= 1 || seen.insert((m.dev(), m.ino()))) {
                 match File::open(e.path()).and_then(|file| crate::sys::fiemap_extents(&file)) {
-                    Ok(extents) => {
-                        let alloc = extents.iter().map(|x| x.1).sum();
-                        // Every extent has a key: ext4 never flags a shared extent, and a file seen
-                        // through an OverlayFS mount is the same extent as its layer file.
-                        let own = extents.iter().filter(|x| !x.2).map(|x| x.1).sum();
-                        let shared: Vec<(u64, u64)> = extents.iter().map(|x| (x.0, x.1)).collect();
-                        f(&Held { alloc, own, exclusive: 0, shared: &shared });
-                    }
+                    Ok(extents) => fiemap_held(&extents, f),
                     Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {}
                     Err(err) => return Err(err).with_context(|| e.path().display().to_string()),
                 }
@@ -1363,6 +1375,32 @@ pub fn fiemap_visit(root: &Path, f: &mut dyn FnMut(&Held)) -> Result<()> {
         Ok(())
     }
     walk(root, f, &mut Default::default())
+}
+
+/// Visit just the files directly in a directory, sharing hard-link tracking with other units.
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+pub fn fiemap_visit_shallow(
+    root: &Path,
+    seen: &std::sync::Mutex<std::collections::HashSet<(u64, u64)>>,
+    f: &mut dyn FnMut(&Held),
+) -> Result<()> {
+    let entries = match fs::read_dir(root) {
+        Ok(v) => v,
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Ok(()),
+        Err(e) => return Err(e).with_context(|| root.display().to_string()),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let m = entry.metadata()?;
+        if m.is_file() && (m.nlink() <= 1 || seen.lock().unwrap().insert((m.dev(), m.ino()))) {
+            match File::open(entry.path()).and_then(|file| crate::sys::fiemap_extents(&file)) {
+                Ok(extents) => fiemap_held(&extents, f),
+                Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {}
+                Err(err) => return Err(err).with_context(|| entry.path().display().to_string()),
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `Space` of a folder on Linux.
@@ -1377,6 +1415,21 @@ pub fn fiemap_space(root: &Path) -> Result<Space> {
 mod range_tests {
     use super::{copy_index_entry, merged_ranges};
     use std::fs;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unaddressable_extents_are_not_deduplicated_by_address_zero() {
+        let mut own = 0;
+        let mut keys = Vec::new();
+        for extents in [&[(0, 4096, false), (8192, 4096, true)][..], &[(0, 4096, false)][..]] {
+            super::fiemap_held(extents, &mut |held| {
+                own += held.exclusive;
+                keys.extend_from_slice(held.shared);
+            });
+        }
+        assert_eq!(own, 8192);
+        assert_eq!(keys, [(super::ExtentKey::Disk(8192), 4096)]);
+    }
 
     #[test]
     fn ranges_merge_and_clip() {
