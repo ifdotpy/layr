@@ -276,9 +276,50 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
     const SHARED: usize = usize::MAX;
     let parts = parts(root)?;
     let filesystems: Vec<_> = parts.iter().map(|(_, path)| filesystem(path)).collect::<std::io::Result<_>>()?;
+    let keys: Mutex<HashMap<(FsId, ExtentKey), (usize, u64)>> = Mutex::new(HashMap::new());
+    let results: Vec<Mutex<Result<PartSpace>>> = parts.iter().map(|_| Mutex::new(Ok(PartSpace::default()))).collect();
+    #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+    let outside = {
+        let paths: Vec<_> = parts.iter().map(|(_, path)| path.clone()).collect();
+        match crate::btrfs_scan::plan(root, &paths) {
+            Ok(plan) => {
+                let failed = Mutex::new(false);
+                crate::fsutil::work_queue(plan.units, |unit, _| {
+                    let mut local = HashMap::<(usize, ExtentKey), u64>::new();
+                    let visited = crate::btrfs_scan::visit(&unit, &mut |part, held| {
+                        for &(key, bytes) in held.shared {
+                            let value = local.entry((part, key)).or_default();
+                            *value = (*value).max(bytes);
+                        }
+                    });
+                    if visited.is_err() {
+                        *failed.lock().unwrap() = true;
+                        return;
+                    }
+                    let mut all = keys.lock().unwrap();
+                    for ((part, key), bytes) in local {
+                        let entry = all.entry((filesystems[part], key)).or_insert((part, bytes));
+                        if entry.0 != part { entry.0 = SHARED; }
+                        entry.1 = entry.1.max(bytes);
+                    }
+                });
+                if *failed.lock().unwrap() {
+                    keys.lock().unwrap().clear();
+                    None
+                } else {
+                    Some(plan.outside)
+                }
+            }
+            Err(_) => None,
+        }
+    };
     // OverlayFS layer registry entries contain metadata as well as data trees.
     let mut units: Vec<(usize, PathBuf)> = Vec::new();
     for (i, (name, path)) in parts.iter().enumerate() {
+        #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+        if outside.as_ref().is_some_and(|outside| !outside.contains(&i)) {
+            continue;
+        }
         if name == "overlayfs layers" {
             for e in std::fs::read_dir(path.join("objects"))? {
                 let data = e?.path().join("data");
@@ -296,9 +337,6 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
             units.push((i, path.clone()));
         }
     }
-<<<<<<< head
-    let keys: Mutex<HashMap<(FsId, ExtentKey), (usize, u64)>> = Mutex::new(HashMap::new());
-    let results: Vec<Mutex<Result<PartSpace>>> = parts.iter().map(|_| Mutex::new(Ok(PartSpace::default()))).collect();
     #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
     let seen: Vec<_> = parts.iter().map(|_| Mutex::new(std::collections::HashSet::new())).collect();
     crate::fsutil::work_queue(units, |(i, path), _add| {
@@ -326,45 +364,6 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
                     let e = all.entry((filesystems[i], k)).or_insert((i, b));
                     if e.0 != i { e.0 = SHARED; }
                     e.1 = e.1.max(b);
-=======
-    let next = std::sync::atomic::AtomicUsize::new(0);
-    let keys: Mutex<HashMap<crate::fsutil::ExtentKey, (usize, u64)>> = Mutex::new(HashMap::new());
-    let results: Vec<Mutex<Result<PartSpace>>> = parts.iter().map(|_| Mutex::new(Ok(PartSpace::default()))).collect();
-    std::thread::scope(|s| {
-        for _ in 0..WORKERS.min(units.len()) {
-            s.spawn(|| loop {
-                let u = next.fetch_add(1, Ordering::Relaxed);
-                let Some((i, path)) = units.get(u) else { break };
-                let i = *i;
-                let in_trash = parts[i].0 == "trash" || parts[i].0.ends_with(": trash");
-                let mut own = 0u64;
-                let mut local: HashMap<crate::fsutil::ExtentKey, u64> = HashMap::new();
-                let walked = crate::storage::visit_space(path, &mut |h| {
-                    own += h.exclusive;
-                    for &(k, b) in h.shared {
-                        let e = local.entry(k).or_insert(0);
-                        *e = (*e).max(b);
-                    }
-                });
-                let mut result = results[i].lock().unwrap();
-                match walked {
-                    // The emptier removed this entry during the walk: it holds nothing now.
-                    Err(e) if in_trash && vanished(&e) => {}
-                    Err(e) => *result = Err(e),
-                    Ok(()) => {
-                        let mut all = keys.lock().unwrap();
-                        for (k, b) in local {
-                            let e = all.entry(k).or_insert((i, b));
-                            if e.0 != i {
-                                e.0 = SHARED;
-                            }
-                            e.1 = e.1.max(b);
-                        }
-                        if let Ok(p) = result.as_mut() {
-                            p.own += own;
-                        }
-                    }
->>>>>>> main
                 }
                 if let Ok(p) = result.as_mut() { p.own += own; }
             }
