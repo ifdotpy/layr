@@ -283,7 +283,8 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
         let paths: Vec<_> = parts.iter().map(|(_, path)| path.clone()).collect();
         match crate::btrfs_scan::plan(root, &paths) {
             Ok(plan) => {
-                let failed = Mutex::new(false);
+                let failed = Mutex::new(None);
+                let bulk = Mutex::new(HashMap::new());
                 crate::fsutil::work_queue(plan.units, |unit, _| {
                     let mut local = HashMap::<(usize, ExtentKey), u64>::new();
                     let visited = crate::btrfs_scan::visit(&unit, &mut |part, held| {
@@ -292,25 +293,31 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
                             *value = (*value).max(bytes);
                         }
                     });
-                    if visited.is_err() {
-                        *failed.lock().unwrap() = true;
+                    if let Err(err) = visited {
+                        *failed.lock().unwrap() = Some(err);
                         return;
                     }
-                    let mut all = keys.lock().unwrap();
+                    let mut all = bulk.lock().unwrap();
                     for ((part, key), bytes) in local {
                         let entry = all.entry((filesystems[part], key)).or_insert((part, bytes));
                         if entry.0 != part { entry.0 = SHARED; }
                         entry.1 = entry.1.max(bytes);
                     }
                 });
-                if *failed.lock().unwrap() {
-                    keys.lock().unwrap().clear();
+                if let Some(err) = failed.into_inner().unwrap() {
+                    eprintln!("warning: bulk btrfs scan failed: {err}; walking files instead");
                     None
                 } else {
+                    *keys.lock().unwrap() = bulk.into_inner().unwrap();
                     Some(plan.outside)
                 }
             }
-            Err(_) => None,
+            Err(err) => {
+                if !matches!(err.raw_os_error(), Some(libc::EPERM | libc::EACCES | libc::ENOTTY | libc::EINVAL)) {
+                    eprintln!("warning: bulk btrfs scan failed: {err}; walking files instead");
+                }
+                None
+            }
         }
     };
     // OverlayFS layer registry entries contain metadata as well as data trees.
