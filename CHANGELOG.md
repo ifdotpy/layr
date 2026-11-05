@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.29.1](https://github.com/ifdotpy/layr/compare/v0.29.0...v0.29.1) (2026-11-05)
+
+
+### Bug Fixes
+
+* **follow:** a build that does not finish leaves the line marked, so the next pass builds again ([#288](https://github.com/ifdotpy/layr/issues/288)) ([3046664](https://github.com/ifdotpy/layr/commit/3046664d6e53d715da89570bb53f72eac8fdb9ea))
+
 ## [0.29.0](https://github.com/ifdotpy/layr/compare/v0.28.0...v0.29.0) (2026-11-05)
 
 
