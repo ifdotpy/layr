@@ -516,7 +516,15 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
     let mut reader = Reader::new(&store.backend, &identity, &records.keys);
     let mut missing = Vec::new();
     for id in states.keys() {
-        let state = repo.p.db.state(id)?.with_context(|| format!("remote tree {id} has no state record"))?;
+        // An overlay leaves out the records of a signer that is not trusted here yet, and so their states.
+        let state = match repo.p.db.state(id)? {
+            Some(state) => state,
+            None if repo.p.is_overlay() => {
+                report.omitted.push(format!("state {}: its record is not taken here yet", crate::ids::short(id)));
+                continue;
+            }
+            None => bail!("remote tree {id} has no state record"),
+        };
         if !wanted(&state, opts) && !required.contains(id) {
             continue;
         }
@@ -527,6 +535,16 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
                 crate::ids::short(id),
                 state.cache_platform.as_deref().unwrap_or("")
             ));
+            continue;
+        }
+        // A cache of another user's unprotected line is never taken here (`usable_cache`): its data stays on the
+        // remote, so a clone downloads only the caches that its lines can start from.
+        if repo.p.is_overlay()
+            && state.cache_of.is_some()
+            && !required.contains(id)
+            && !(ctx.caller.is_root() || state.cache_shared || state.cache_by == Some(ctx.caller.uid))
+        {
+            report.omitted.push(format!("cache state {}: of another user's line", crate::ids::short(id)));
             continue;
         }
         if repo.p.has_state(id) {
