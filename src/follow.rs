@@ -315,16 +315,18 @@ impl<'a> Repo<'a> {
         }
         // A change without a cache (a merge on the remote of a branch with no line here) leaves units to build. The
         // build runs once here, so the lines from this line start warm (docs/follow.md).
+        let mut built = true;
         if warm {
             for folder in &folders {
-                self.warm_cache_folder(line, folder);
+                built &= self.warm_cache_folder(line, folder);
             }
         }
         // Prunes each taken folder, then saves the caches of the line.
         admin::save(ctx, &["--caches".to_string(), "-q".to_string()])?;
-        // A save with no build (a local merge) is not warm for the new head: a followed line gets the mark, and its
-        // next follow pass builds and saves again. Only a followed line reads the mark, so only it gets one.
-        if warm {
+        // A save with no build (a local merge), or after a build that stopped (its time limit, a compile error), is
+        // not warm for the new head: a followed line gets the mark, and its next follow pass builds and saves again.
+        // Only a followed line reads the mark, so only it gets one.
+        if warm && built {
             self.set_unbuilt(line, false)?;
         } else if target(self, line)?.is_some() {
             self.set_unbuilt(line, true)?;

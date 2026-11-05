@@ -816,20 +816,30 @@ impl<'a> Repo<'a> {
     }
 
     /// The build hook (`warm`) for `folder` of `line`: the adapter of its overlay (the `prune` property names it)
-    /// builds the project's standard commands into the folder. It never fails: the outcome is one log line.
-    pub fn warm_cache_folder(&self, line: &Line, folder: &str) {
+    /// builds the project's standard commands into the folder. It never fails: the outcome is one log line. Returns
+    /// whether the build ran to its end.
+    pub fn warm_cache_folder(&self, line: &Line, folder: &str) -> bool {
         let (uid, _) = self.owner_ids(line);
         let setting = match self.folder_overlay_of(folder).and_then(|o| o.map(|name| self.overlay_props(&name)).transpose()) {
             Ok(props) => props.and_then(|p| p.prune),
-            Err(e) => return eprintln!("layr: build {folder}: not built: {e:#}"),
+            Err(e) => {
+                eprintln!("layr: build {folder}: not built: {e:#}");
+                return false;
+            }
         };
         let path = match fsutil::safe_join(&self.working(line), folder) {
             Ok(p) => p,
-            Err(e) => return eprintln!("layr: build {folder}: not built: {e:#}"),
+            Err(e) => {
+                eprintln!("layr: build {folder}: not built: {e:#}");
+                return false;
+            }
         };
         let _line = match self.prune_lock(line) {
             Ok(f) => f,
-            Err(e) => return eprintln!("layr: build {folder}: not built: {e:#}"),
+            Err(e) => {
+                eprintln!("layr: build {folder}: not built: {e:#}");
+                return false;
+            }
         };
         let _t = crate::trace::named(|| format!("warm {folder} of line {}", line.name));
         let done = crate::cache_hook::run_mode(
@@ -848,6 +858,7 @@ impl<'a> Repo<'a> {
         if !done.log.is_empty() {
             eprintln!("layr: build {}", done.log);
         }
+        done.built
     }
 
     /// The relocation hook for the cache folders `folders` of `line` in `root` (its working folder, or the folder
