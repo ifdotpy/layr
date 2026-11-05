@@ -2,6 +2,7 @@
 
 pub(crate) mod backend;
 pub(crate) mod browse;
+pub(crate) mod chunked;
 pub(crate) mod epochs;
 pub(crate) mod gateway;
 mod gitpack;
@@ -936,14 +937,18 @@ pub fn command(ctx: &Ctx, operation: &str, args: &[String]) -> Result<i32> {
             for (overlay, swept) in overlays::sweep_caches(&store, ctx, &h.repo, true)? {
                 outln!(
                     ctx,
-                    "remote {name} overlay {overlay}: {} unreachable cache state(s), {} part(s), {} bytes; {} state(s) not known here kept",
+                    "remote {name} overlay {overlay}: {} unreachable cache state(s), {} part(s), {} bytes; {} unreachable chunk(s) in {} pack object(s), {} bytes; {} tree(s) with missing chunks; {} state(s) not known here kept",
                     swept.trees.len(),
                     swept.parts.len(),
                     swept.bytes,
+                    swept.chunks,
+                    swept.packs.len(),
+                    swept.chunk_bytes,
+                    swept.missing,
                     swept.unknown
                 );
-                trees += swept.trees.len() + swept.parts.len();
-                bytes += swept.bytes;
+                trees += swept.trees.len() + swept.parts.len() + swept.packs.len() + swept.missing;
+                bytes += swept.bytes + swept.chunk_bytes;
             }
             outln!(ctx, "remote {name}: unreachable cache data: {trees} object(s), {bytes} bytes");
             if trees > 0 {
@@ -985,9 +990,17 @@ pub fn command(ctx: &Ctx, operation: &str, args: &[String]) -> Result<i32> {
         }
         "gc" => {
             for (overlay, swept) in overlays::sweep_caches(&store, ctx, &h.repo, a.has("-n"))? {
-                if !a.has("-q") && !swept.trees.is_empty() {
+                if !a.has("-q") && (!swept.trees.is_empty() || !swept.packs.is_empty()) {
                     let verb = if a.has("-n") { "would delete" } else { "deleted" };
-                    outln!(ctx, "overlay {overlay}: {verb} {} dead cache state(s), {} bytes", swept.trees.len(), swept.bytes);
+                    outln!(
+                        ctx,
+                        "overlay {overlay}: {verb} {} dead cache state(s), {} bytes; {} dead chunk(s) in {} pack object(s), {} bytes",
+                        swept.trees.len(),
+                        swept.bytes,
+                        swept.chunks,
+                        swept.packs.len(),
+                        swept.chunk_bytes
+                    );
                 }
             }
             let deleted = store.gc(a.has("-n"))?;
@@ -1041,8 +1054,15 @@ pub fn sweep_tick(root: &std::path::Path, caller: crate::ctx::Caller) {
             });
             match swept {
                 Ok(list) => {
-                    for (overlay, s) in list.into_iter().filter(|(_, s)| !s.trees.is_empty()) {
-                        eprintln!("layr daemon: {project} remote {remote} overlay {overlay}: deleted {} dead cache state(s), {} bytes", s.trees.len(), s.bytes);
+                    for (overlay, s) in list.into_iter().filter(|(_, s)| !s.trees.is_empty() || !s.packs.is_empty()) {
+                        eprintln!(
+                            "layr daemon: {project} remote {remote} overlay {overlay}: deleted {} dead cache state(s), {} bytes; {} dead chunk(s) in {} pack object(s), {} bytes",
+                            s.trees.len(),
+                            s.bytes,
+                            s.chunks,
+                            s.packs.len(),
+                            s.chunk_bytes
+                        );
                     }
                 }
                 Err(e) => eprintln!("layr daemon: {project} remote {remote}: cache sweep skipped: {e:#}"),

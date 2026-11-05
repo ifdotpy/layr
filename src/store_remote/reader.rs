@@ -116,6 +116,7 @@ pub(super) struct Reader<'a> {
     parts: BTreeMap<String, Vec<u8>>,
     part_bytes: usize,
     gets: std::cell::Cell<usize>,
+    chunks: Option<super::chunked::Reader<'a>>,
 }
 
 impl<'a> Reader<'a> {
@@ -129,6 +130,7 @@ impl<'a> Reader<'a> {
             parts: BTreeMap::new(),
             part_bytes: 0,
             gets: std::cell::Cell::new(0),
+            chunks: None,
         }
     }
     pub fn get_count(&self) -> usize {
@@ -200,7 +202,27 @@ impl<'a> Reader<'a> {
     pub fn tree_depth(&self, state: &str, attempt: &str) -> Result<usize> {
         self.depths.get(&(state.to_string(), attempt.to_string())).copied().context("tree depth was not decoded")
     }
+    /// The content of the file `path` of `tree`, from frames or from chunks.
+    pub fn read_file(&mut self, tree: &Tree, path: &str) -> Result<Vec<u8>> {
+        let entry = tree.files.get(path).context("file is not in its tree")?;
+        match tree.chunks.get(path) {
+            Some(ids) => self.read_chunked(entry, ids),
+            None => self.read(entry),
+        }
+    }
+    /// A chunked file of a cache layer (`Tree::chunks`), checked against its tree entry.
+    pub fn read_chunked(&mut self, entry: &Entry, ids: &[String]) -> Result<Vec<u8>> {
+        let (backend, identity) = (self.backend, self.identity);
+        let data = self.chunks.get_or_insert_with(|| super::chunked::Reader::new(backend, identity)).file(ids, entry.1)?;
+        if data.len() as u64 != entry.1 || hex::encode(ContentAddress::digest(&data)) != entry.2 {
+            bail!("file size or SHA-256 does not match its tree");
+        }
+        Ok(data)
+    }
     pub fn read(&mut self, entry: &Entry) -> Result<Vec<u8>> {
+        if entry.3.is_empty() {
+            bail!("a chunked file needs its chunk ids (Reader::read_file)");
+        }
         let mut data = Vec::new();
         for (index, link) in entry.3.iter().enumerate().rev() {
             let key = link.object();
@@ -240,15 +262,26 @@ impl<'a> Reader<'a> {
             }
         }
         let mut written = 0;
-        for (path, entry) in &tree.files {
-            if base
-                .and_then(|b| b.files.get(path))
+        let unchanged = |path: &String, entry: &Entry| {
+            base.and_then(|b| b.files.get(path))
                 .is_some_and(|old| (old.0.as_str(), old.1, old.2.as_str()) == (entry.0.as_str(), entry.1, entry.2.as_str()))
                 && base.and_then(|b| b.times.get(path)) == tree.times.get(path)
-            {
+        };
+        if !tree.chunks.is_empty() {
+            // The chunks of the files that the loop below writes, in its order, so their packs
+            // load ahead in the background.
+            let ids = tree.files.iter().filter(|(path, entry)| !unchanged(path, entry)).filter_map(|(path, _)| tree.chunks.get(path)).flatten();
+            let (backend, identity) = (self.backend, self.identity);
+            self.chunks.get_or_insert_with(|| super::chunked::Reader::new(backend, identity)).plan(ids)?;
+        }
+        for (path, entry) in &tree.files {
+            if unchanged(path, entry) {
                 continue;
             }
-            let data = self.read(entry)?;
+            let data = match tree.chunks.get(path) {
+                Some(ids) => self.read_chunked(entry, ids)?,
+                None => self.read(entry)?,
+            };
             target.mkdirs_for(path, None)?;
             if target.stat(path).is_some() {
                 target.remove(path)?;
@@ -570,8 +603,8 @@ pub(super) fn verify(store: &Store, files: bool) -> Result<Report> {
             }
             report.states += 1;
             if files {
-                for entry in tree.files.values() {
-                    reader.read(entry)?;
+                for path in tree.files.keys() {
+                    reader.read_file(&tree, path)?;
                     report.files += 1;
                 }
             }
@@ -748,7 +781,7 @@ mod tests {
             hex::encode(ContentAddress::digest(content)),
             vec![format::Link(STATE.into(), "0123abcd".into(), 0, 0, frame.len() as u64, "full".into())],
         );
-        let tree = Tree { files: BTreeMap::from([("a.txt".into(), entry.clone())]), times: BTreeMap::new() };
+        let tree = Tree { files: BTreeMap::from([("a.txt".into(), entry.clone())]), times: BTreeMap::new(), chunks: BTreeMap::new() };
         let canonical = tree.canonical().unwrap();
         let mut header = Header {
             v: 2,

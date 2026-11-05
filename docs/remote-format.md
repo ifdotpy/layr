@@ -108,6 +108,75 @@ The clone retains its project and returns status 2 when some heads are absent.
 A later fetch creates the pending working folders when their verified state trees become available.
 It preserves existing working folders and their edits.
 
+## Chunks of cache layers
+
+A cache state loses its base at its next save (`history=last`), so a push cannot make a delta
+against the old file. Build output also changes paths: cargo names a rebuilt unit with a new hash.
+So a cache layer stores its files as content-defined chunks, which match across paths, lines and
+machines. Source states keep frames.
+
+- A writer chunks the files of a cache layer when it can open the layer identity. A write-only
+  machine writes frames, and a reader reads both.
+- Chunks: FastCDC with normalized chunking (`layr_store::chunks`). The minimum is 16 KiB, the target
+  is 64 KiB and the maximum is 256 KiB. The gear table and the masks are fixed. A test pins the cut
+  points, because a change would stop chunks of older pushes from matching.
+- A chunk id is HMAC-SHA256 of the chunk, in lowercase hex. The key is HKDF-SHA256 with the layer
+  identity as the input key, the epoch id as the salt and `layr cache chunk key v1` as the label.
+  The store cannot test whether it holds a known chunk. A new epoch gives new ids.
+- A tree names the chunks of a file in `chunks`: `{"chunks":{"<path>":["<id>",...]},"files":...}`.
+  The entry of such a file has no links. Every other file has links and no chunks. The key is left
+  out when it is empty, so older trees keep their bytes and signatures. Older readers refuse a tree
+  with chunks. The tree header stays `v` 2.
+- Packs: `chunks/<pack UUID>.pack.age` holds about 4 MiB of chunks (`PACK_TARGET`; at most one
+  chunk more) as one zstd frame at level 12 with long-distance matching and a window up to 2^27.
+  `chunks/<pack UUID>.index.age` lists `{"chunks":[["<id>",offset,length],...],"v":1}` in
+  plaintext order. Both are encrypted to the layer recipient. The writer puts the pack first and
+  the index second. A pack without an index is an unfinished upload, and no tree may name its chunks.
+- No object maps chunks to packs. A writer and a reader list `chunks/` and read the indexes, which
+  never change after publication. A local copy of each index is kept in `chunk-indexes/`.
+- Dedup: a writer skips a chunk that a published index or its own open pack holds. Before it puts
+  the tree, it lists the indexes again. A reused chunk that a deletion released meanwhile goes up
+  again from the file. A deletion between that check and the tree put remains possible. `fsck`
+  reports such a tree, and the next push of its line repairs it.
+- Deletion (`chunked::release`): when chunk ids lose their last live tree, each pack that holds
+  one is rewritten. Its live chunks go to a new pack and index, and the old pack and index are
+  deleted. A pack without live chunks is deleted directly. No dead chunk stays in a pack. The new
+  pack is put before the deletes, so a crash leaves a duplicate, and a rerun deletes the same objects.
+- A reader that does not find a chunk lists the packs once more: a rewrite may have moved it.
+- The remote cache sweep (`store_remote::sweep`) deletes the chunks that its dead trees name and no
+  kept tree names, through `chunked::release`, after the trees. A pack that no tree names (a push
+  that stopped before its tree) goes when its index is older than a day and holds no live chunk.
+  An older key epoch loses all of its `chunks/` with its trees. `layr fsck --caches --remote`
+  reports unreachable chunks and kept trees with missing chunks, and exits 1 when either exists.
+- `layr_store::reader::chunked_file` reads a chunked file from supplied packs and indexes, also in
+  WebAssembly.
+
+- A writer compresses and uploads packs on background threads (one per core), while it chunks
+  the next files. It keeps a local copy of the indexes it writes. A restore plans the packs of the
+  files it writes, in its order; background threads load and decode them ahead of it, at most 64
+  packs ahead (about 256 MiB). A pack outside the plan, or dropped behind it, loads when needed.
+
+- Push manifest: a file whose path, mode, size and modification time (nanoseconds) equal its
+  entry in the pushed tree of the nearest pushed ancestor keeps that entry, and the walk does not
+  read it, as git and rsync trust their stat data. This works for frames and chunks, also when a
+  history limit deleted the ancestor here, because the pushed tree names the times (`times`). A
+  reused chunked entry counts as reused for the check before the tree publishes.
+  `LAYR_PUSH_REHASH=1` reads every file again.
+
+Measured with `layr push --caches` to a `file://` store on macOS. Base: a cargo `target/debug`
+(2.2 GiB). Small: the same folder after a merge of a few changes (453 files differ). Big: after
+every workspace crate was rebuilt (1930 more files differ).
+
+| | frames (0.25.0) | chunks |
+| --- | --- | --- |
+| first push | 546 MiB, 19 to 20 s | 382 MiB, 22 s |
+| next push, small | 37 MiB, 12 s | 20 MiB, 5 s |
+| next push, big | 166 MiB, 20 s | 104 MiB, 7 s |
+| clone, cold archive (2 runs, alternating) | 19.8, 37.3 s | 18.8, 33.0 s |
+
+The next push reads only changed files (8322 of 8700 files unread for big). For the cold clone,
+the archive was on a disk image that was attached again before each clone.
+
 ## Keys and recovery
 
 The vault identity is an age X25519 identity. `store.json` contains only its recipient.

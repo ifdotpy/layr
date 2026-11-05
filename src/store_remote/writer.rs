@@ -38,6 +38,10 @@ impl ContentHashes {
         self.entries.insert(sha, links);
     }
     fn seed(&mut self, sha: String, links: Vec<Link>) {
+        // A chunked file has no frames to reuse (`Tree::chunks`).
+        if links.is_empty() {
+            return;
+        }
         if !self.entries.contains_key(&sha) {
             self.insert(sha, links);
         }
@@ -482,6 +486,9 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
     drop(stage);
     let stage = crate::trace::span("store collect hashes");
     let mut hashes = ContentHashes { entries: journal.hashes()?, ..Default::default() };
+    // File content to chunk ids from pushed trees, like `hashes` for frames: a cache base is gone
+    // locally after its next save, but its tree still says which files the store holds.
+    let mut chunk_hashes: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let pending = journal.pending()?;
     if !pending.is_empty() || !recovered.is_empty() {
         let started = std::time::Instant::now();
@@ -514,6 +521,7 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
             for entry in tree.files.values() {
                 hashes.seed(entry.2.clone(), entry.3.clone());
             }
+            seed_chunks(&mut chunk_hashes, &tree);
             journal.checkpoint(&id, attempt, depth, &hashes.dirty, &protected)?;
             hashes.dirty.clear();
             index.get_mut(&id).unwrap().depth = depth;
@@ -561,6 +569,7 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
                     for entry in pushed.tree.files.values() {
                         hashes.seed(entry.2.clone(), entry.3.clone());
                     }
+                    seed_chunks(&mut chunk_hashes, &pushed.tree);
                     (id, pushed)
                 })
             }
@@ -571,6 +580,9 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
         let root = repo.state_root(&state.id)?;
         // A base that a history limit deleted here (docs/cache-overlays.md) cannot be compared:
         // the state goes up as a complete tree.
+        // The pushed tree of the nearest ancestor names the size, time and content of each file
+        // (`manifest` in `upload_state_journal`), also when a history limit deleted it here.
+        let manifest = base.as_ref().map(|(_, pushed)| pushed.tree.clone());
         let base = base.filter(|(id, _)| repo.p.has_state(id));
         if let Some((id, _)) = &base {
             repo.hold(repo.pin(&[id.as_str()])?);
@@ -583,6 +595,8 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
             &root,
             base.as_ref(),
             &mut hashes,
+            &mut chunk_hashes,
+            manifest.as_ref(),
             base_root.as_deref(),
             btrfs_identity(&root, &state.subvol),
             Some(&mut journal),
@@ -729,6 +743,8 @@ fn upload_state_journal(
     root: &Path,
     base: Option<&(String, Pushed)>,
     hashes: &mut ContentHashes,
+    chunk_hashes: &mut BTreeMap<String, Vec<String>>,
+    manifest: Option<&Tree>,
     base_root: Option<&Path>,
     btrfs: Option<format::BtrfsIdentity>,
     mut journal: Option<&mut super::push_journal::Journal>,
@@ -749,6 +765,15 @@ fn upload_state_journal(
         if delta_root.is_some() { base.map(|(_, p)| p.tree.files.clone()).unwrap_or_default() } else { BTreeMap::new() };
     let mut times =
         if delta_root.is_some() { base.map(|(_, p)| p.tree.times.clone()).unwrap_or_default() } else { BTreeMap::new() };
+    let mut chunks =
+        if delta_root.is_some() { base.map(|(_, p)| p.tree.chunks.clone()).unwrap_or_default() } else { BTreeMap::new() };
+    // A cache layer that this machine can open goes up as chunks (`chunked`); others as frames.
+    let mut chunker = match store.layer.as_ref().and_then(|layer| Some((layer.identity.as_deref()?, layer.chunk_key?))) {
+        Some((identity, key)) => {
+            Some(super::chunked::Writer::open(store, &descriptor.recipient, identity, key, std::mem::take(chunk_hashes))?)
+        }
+        None => None,
+    };
     let mut current = Vec::new();
     let mut part_entries = Vec::new();
     let mut part = 0;
@@ -773,11 +798,18 @@ fn upload_state_journal(
             if let Some(old) = &change.old_path {
                 files.remove(old);
                 times.remove(old);
+                chunks.remove(old);
             }
             files.remove(&change.path);
             times.remove(&change.path);
+            chunks.remove(&change.path);
         }
     }
+    // Read and SHA-256 time of the walk, and files taken from the manifest, for `LAYR_TRACE`.
+    let mut walk_time = (std::time::Duration::ZERO, std::time::Duration::ZERO);
+    let mut unread = 0usize;
+    // `LAYR_PUSH_REHASH=1` reads every file again, whatever the manifest says.
+    let manifest = manifest.filter(|_| std::env::var_os("LAYR_PUSH_REHASH").is_none());
     let mut visit = |path: &str, meta: &fsutil::Meta| -> Result<bool> {
         if crate::repo::skip_path(path) {
             return Ok(false);
@@ -792,10 +824,41 @@ fn upload_state_journal(
             bail!("state has a special file: {path}");
         }
         let mode = format!("{:o}", meta.git_mode());
+        let time = file_time(root, path);
+        // A file with the path, mode, size and time (in nanoseconds) of the pushed tree has its
+        // content: the walk takes the entry without reading the file, as git and rsync do with
+        // their stat data. A chunked entry needs this push's chunker, or it is read again.
+        if let (Some(old_tree), Some(time)) = (manifest, time) {
+            if let Some(old) = old_tree.files.get(path).filter(|old| {
+                old.0 == mode && old.1 == meta.size && old_tree.times.get(path) == Some(&time)
+            }) {
+                let ids = old_tree.chunks.get(path);
+                if ids.is_none() || chunker.is_some() {
+                    if let (Some(ids), Some(chunker)) = (ids, chunker.as_mut()) {
+                        chunker.reuse(&old.2, ids);
+                        chunks.insert(path.to_string(), ids.clone());
+                    }
+                    files.insert(path.to_string(), old.clone());
+                    times.insert(path.to_string(), time);
+                    unread += 1;
+                    return Ok(true);
+                }
+            }
+        }
+        let started = std::time::Instant::now();
         let data = content(root, path, &mode)?;
+        let read = started.elapsed();
         let sha = hex::encode(ContentAddress::digest(&data));
-        if let Some(time) = file_time(root, path) {
+        walk_time.0 += read;
+        walk_time.1 += started.elapsed() - read;
+        if let Some(time) = time {
             times.insert(path.to_string(), time);
+        }
+        if let Some(chunker) = chunker.as_mut().filter(|_| !data.is_empty()) {
+            let ids = chunker.file(&sha, &data)?;
+            files.insert(path.to_string(), Entry(mode, data.len() as u64, sha, Vec::new()));
+            chunks.insert(path.to_string(), ids);
+            return Ok(true);
         }
         if let Some(chain) = hashes.get(&sha) {
             files.insert(path.to_string(), Entry(mode, data.len() as u64, sha, chain.clone()));
@@ -858,6 +921,11 @@ fn upload_state_journal(
         walk_state(root, &mut visit)?;
     }
     drop(visit);
+    if std::env::var_os("LAYR_TRACE").is_some() {
+        eprintln!("trace {:>8.1} ms  store walk read", walk_time.0.as_secs_f64() * 1000.0);
+        eprintln!("trace {:>8.1} ms  store walk sha256", walk_time.1.as_secs_f64() * 1000.0);
+        eprintln!("trace {unread:>8} files store walk unread (manifest)");
+    }
     if !current.is_empty() {
         if let Some(journal) = journal.as_deref_mut() {
             journal.prepare_part(state, &attempt, part, &part_entries)?;
@@ -865,9 +933,15 @@ fn upload_state_journal(
         put_part(store, descriptor, state, &attempt, part, current, &part_entries)?;
         part += 1;
     }
+    if let Some(mut chunker) = chunker {
+        chunker.finish(root, &chunks, &|root: &Path, path: &str| content(root, path, &files[path].0))?;
+        bytes += chunker.bytes;
+        frames += chunker.packs;
+        *chunk_hashes = chunker.into_hashes();
+    }
     drop(stage);
     let stage = crate::trace::span("store tree encode");
-    let tree = Tree { files, times };
+    let tree = Tree { files, times, chunks };
     let canonical_tree = tree.canonical()?;
     let delta_base = base.filter(|(_, p)| p.depth + 1 < format::FULL_TREE_EVERY);
     let encoded_base;
@@ -930,9 +1004,19 @@ fn upload_state(
     btrfs: Option<format::BtrfsIdentity>,
 ) -> Result<(Pushed, usize, u64)> {
     let mut index = ContentHashes { entries: std::mem::take(hashes), ..Default::default() };
-    let result = upload_state_journal(store, descriptor, state, root, base, &mut index, base_root, btrfs, None);
+    let result =
+        upload_state_journal(store, descriptor, state, root, base, &mut index, &mut BTreeMap::new(), None, base_root, btrfs, None);
     *hashes = index.entries;
     result
+}
+
+/// Records which chunks the files of a pushed tree have.
+fn seed_chunks(chunk_hashes: &mut BTreeMap<String, Vec<String>>, tree: &Tree) {
+    for (path, ids) in &tree.chunks {
+        if let Some(entry) = tree.files.get(path) {
+            chunk_hashes.entry(entry.2.clone()).or_insert_with(|| ids.clone());
+        }
+    }
 }
 
 fn btrfs_identity(root: &Path, signed_uuid: &str) -> Option<format::BtrfsIdentity> {

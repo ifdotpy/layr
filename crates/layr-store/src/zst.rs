@@ -149,6 +149,24 @@ pub fn compress(data: &[u8], base: Option<&[u8]>) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// One frame of `data` at `level` with a window that covers the input (up to `WINDOW_LOG_MAX`)
+/// and long-distance matching: a pack of chunks repeats code across its files.
+#[cfg(feature = "native")]
+pub fn compress_level(data: &[u8], level: i32) -> Result<Vec<u8>> {
+    use zstd_safe::{CCtx, CParameter};
+    let mut cctx = CCtx::create();
+    cctx.set_parameter(CParameter::CompressionLevel(level)).map_err(error)?;
+    cctx.set_parameter(CParameter::ContentSizeFlag(true)).map_err(error)?;
+    let window_log = (u64::BITS - (data.len() as u64).leading_zeros() + 1).clamp(10, WINDOW_LOG_MAX);
+    cctx.set_parameter(CParameter::WindowLog(window_log)).map_err(error)?;
+    if window_log > 16 {
+        cctx.set_parameter(CParameter::EnableLongDistanceMatching(true)).map_err(error)?;
+    }
+    let mut out = Vec::with_capacity(zstd_safe::compress_bound(data.len()));
+    cctx.compress2(&mut out, data).map_err(error)?;
+    Ok(out)
+}
+
 #[cfg(all(test, feature = "native"))]
 mod tests {
     use super::*;
@@ -238,6 +256,19 @@ mod rust_tests {
         let delta = compress(&changed, Some(&base)).unwrap();
         assert_eq!(decompress_rust(&delta, Some(&base), changed.len()).unwrap(), changed);
         assert!(decompress_rust(&delta, None, LIMIT).is_err());
+    }
+
+    #[test]
+    fn rust_decoder_reads_pack_frames_with_a_long_window() {
+        // A chunk pack: 4 MiB with repeats far apart, at the pack level with long-distance matching.
+        let block = tests::text(20_000);
+        let mut data = Vec::new();
+        while data.len() < 4 << 20 {
+            data.extend_from_slice(&block);
+        }
+        let frame = compress_level(&data, crate::chunks::PACK_LEVEL).unwrap();
+        assert!(frame.len() * 10 < data.len());
+        assert_eq!(decompress_rust(&frame, None, data.len()).unwrap(), data);
     }
 
     #[test]

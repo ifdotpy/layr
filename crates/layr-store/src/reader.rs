@@ -30,7 +30,10 @@ pub fn tree(
 /// Read a file from encrypted data parts supplied by their object names.
 /// The entry must come from a verified tree.
 pub fn file(identity: &str, entry: &format::Entry, parts: &BTreeMap<String, Vec<u8>>) -> Result<Vec<u8>> {
-    if entry.3.is_empty() || entry.3.len() > format::MAX_FILE_DELTAS + 1 {
+    if entry.3.is_empty() {
+        bail!("a chunked file of a cache layer: read it with reader::chunked_file");
+    }
+    if entry.3.len() > format::MAX_FILE_DELTAS + 1 {
         bail!("invalid file chain length");
     }
     let mut data = Vec::new();
@@ -47,6 +50,42 @@ pub fn file(identity: &str, entry: &format::Entry, parts: &BTreeMap<String, Vec<
         let frame = plain.get(start..end).context("frame is outside its part")?;
         let limit = if index == 0 { usize::try_from(entry.1)? } else { zst::LIMIT };
         data = zst::decompress_with_limit(frame, if link.5 == "delta" { Some(&data) } else { None }, limit)?;
+    }
+    if data.len() as u64 != entry.1 || hex::encode(ContentAddress::digest(&data)) != entry.2 {
+        bail!("file size or SHA-256 does not match its tree");
+    }
+    Ok(data)
+}
+
+/// Read a chunked file of a cache layer (`format::Tree::chunks`). `packs` holds the encrypted pack
+/// objects and `indexes` the verified indexes, both by pack id; the caller finds them by listing
+/// `chunks/` of the layer. The entry and the ids must come from a verified tree.
+pub fn chunked_file(
+    identity: &str,
+    entry: &format::Entry,
+    ids: &[String],
+    indexes: &BTreeMap<String, crate::chunks::Index>,
+    packs: &BTreeMap<String, Vec<u8>>,
+) -> Result<Vec<u8>> {
+    let mut places = BTreeMap::new();
+    for (pack, index) in indexes {
+        for (id, offset, length) in &index.chunks {
+            places.entry(id.as_str()).or_insert((pack.as_str(), *offset, *length));
+        }
+    }
+    let mut opened: BTreeMap<&str, Vec<u8>> = BTreeMap::new();
+    let mut data = Vec::new();
+    for id in ids {
+        let &(pack, offset, length) = places.get(id.as_str()).with_context(|| format!("chunk {id} has no pack"))?;
+        if !opened.contains_key(pack) {
+            let object = packs.get(pack).with_context(|| format!("missing chunk pack {pack}"))?;
+            opened.insert(pack, crate::chunks::open_pack(&keys::decrypt(identity, object)?, &indexes[pack])?);
+        }
+        let chunk = opened[pack].get(offset as usize..(offset + length) as usize).context("chunk is outside its pack")?;
+        if data.len() as u64 + length > entry.1 {
+            bail!("chunks exceed their file size");
+        }
+        data.extend_from_slice(chunk);
     }
     if data.len() as u64 != entry.1 || hex::encode(ContentAddress::digest(&data)) != entry.2 {
         bail!("file size or SHA-256 does not match its tree");
@@ -72,7 +111,7 @@ mod tests {
         let mut parts = BTreeMap::new();
         parts.insert(link.object(), keys::encrypt(&recipient, &frame).unwrap());
         let entry = format::Entry("100644".into(), data.len() as u64, hex::encode(ContentAddress::digest(data)), vec![link]);
-        let source = format::Tree { files: BTreeMap::from([("file".into(), entry)]), times: BTreeMap::new() };
+        let source = format::Tree { files: BTreeMap::from([("file".into(), entry)]), times: BTreeMap::new(), chunks: BTreeMap::new() };
         let canonical = source.canonical().unwrap();
         let mut header = format::Header {
             v: 2,
@@ -98,5 +137,32 @@ mod tests {
         wrong.2 = "0".repeat(64);
         assert!(file(&identity, &wrong, &parts).is_err());
         assert!(file(&identity, &parsed.files["file"], &BTreeMap::new()).is_err());
+    }
+
+    #[test]
+    fn supplied_packs_restore_and_authenticate_a_chunked_file() {
+        let identity = keys::generate_identity();
+        let recipient = keys::recipient_of(&identity).unwrap();
+        let key = crate::chunks::key(&identity, "epoch");
+        let data: Vec<u8> = (0..300_000u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+        let mut builder = crate::chunks::Builder::default();
+        let mut ids = Vec::new();
+        for chunk in crate::chunks::split(&data) {
+            let id = crate::chunks::id(&key, chunk);
+            builder.add(id.clone(), chunk);
+            ids.push(id);
+        }
+        let (frame, index) = builder.finish().unwrap();
+        let pack = "01a12290-0000-7000-8000-000000000009".to_string();
+        let indexes = BTreeMap::from([(pack.clone(), index)]);
+        let packs = BTreeMap::from([(pack, keys::encrypt(&recipient, &frame).unwrap())]);
+        let entry = format::Entry("100644".into(), data.len() as u64, hex::encode(ContentAddress::digest(&data)), vec![]);
+        assert_eq!(chunked_file(&identity, &entry, &ids, &indexes, &packs).unwrap(), data);
+        assert!(file(&identity, &entry, &BTreeMap::new()).is_err(), "frames reader refuses a chunked file");
+        let mut wrong = entry.clone();
+        wrong.2 = "0".repeat(64);
+        assert!(chunked_file(&identity, &wrong, &ids, &indexes, &packs).is_err());
+        assert!(chunked_file(&identity, &entry, &ids[1..], &indexes, &packs).is_err(), "a missing chunk changes the hash");
+        assert!(chunked_file(&identity, &entry, &ids, &indexes, &BTreeMap::new()).is_err());
     }
 }
