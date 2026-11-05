@@ -549,6 +549,7 @@ fn execute(
         // cp -a also copies the source root's mode over the prepared folder.
         // Restore traversal for the suite's unprivileged service clients.
         std::fs::set_permissions(&private.path, std::fs::Permissions::from_mode(0o711))?;
+        relocate_copy(repo, 0, &private.path, &private.path)?;
         home = private.path.join(format!(".check-home-{}", crate::ids::new_id()));
         std::fs::DirBuilder::new().mode(0o700).create(&home)?;
         // Keep test mounts private so killing a timed-out suite releases its mounts too.
@@ -564,6 +565,8 @@ fn execute(
             &[("HOME".into(), home.display().to_string()), ("LAYR_TRY_STATE".into(), state.to_string())],
         )?;
     } else {
+        // The check sees the copy at /work: its warm caches must not name the line they were built in.
+        relocate_copy(repo, ctx.caller.uid, dir, std::path::Path::new("/work"))?;
         if !std::path::Path::new("/usr/bin/bwrap").is_file() {
             bail!("bubblewrap is required for automatic checks; install bubblewrap");
         }
@@ -608,6 +611,15 @@ fn execute(
         crate::privs::command_as(&mut command, ctx.caller.uid, &[])?;
     }
     run_check(command, limits)
+}
+
+/// The cache folders of a check copy `dir`, which the check sees at `at`: units that name the line where they were
+/// built (a compiled-in path) build again, as in a new line (`relocate_caches`).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn relocate_copy(repo: &Repo, uid: u32, dir: &std::path::Path, at: &std::path::Path) -> Result<()> {
+    let folders: Vec<String> = repo.folder_overlays()?.into_iter().map(|(_, folder)| folder).collect();
+    repo.relocate_folders(uid, &folders, dir, at);
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -673,6 +685,7 @@ fn execute(
         bail!("cannot prepare private macOS check folder");
     }
     let dir = std::fs::canonicalize(&private.path)?;
+    relocate_copy(repo, ctx.caller.uid, &dir, &dir)?;
     let home = dir.join(format!(".check-home-{}", crate::ids::new_id()));
     std::fs::DirBuilder::new().mode(0o700).create(&home)?;
     let seed = std::path::PathBuf::from(crate::privs::user(ctx.caller.uid)?.home).join("Library/Application Support/Layr/checks");

@@ -1,27 +1,34 @@
 #!/bin/bash
 # ci: macos
 # A check starts warm (docs/checks.md): its copy of the state gets the cache of the state by the
-# rules of `line new <state>`, the check can write there, and the line's own cache stays as it was.
+# rules of `line new <state>`, relocated to the copy, the check can write there, and the line's own cache stays as
+# it was.
 . "$(dirname "$0")/lib.sh"
 [ "$(id -u)" != 0 ] || { echo "$(basename "$0") (not as root): 0 passed, 0 failed"; exit 0; }
 
 sample "$T/src"
 echo 'target regenerable' > "$T/src/.layrattributes"
 echo '/target' >> "$T/src/.gitignore"
+printf '[package]\nname = "p"\nversion = "0.1.0"\n' > "$T/src/Cargo.toml"
 l init p --from "$T/src" -q >/dev/null
 cd "$LAYR_ROOT/projects/p/lines/main" || exit 1
-mkdir -p target; echo warm > target/built; l save --caches -q
+# A cargo unit that names this line by a compiled-in path (env!("CARGO_MANIFEST_DIR")).
+mkdir -p target/debug/deps target/debug/.fingerprint/p-aaa; echo warm > target/built
+printf '%s/target/debug/deps/p-aaa.d: src/lib.rs\n\nsrc/lib.rs:\n\n# env-dep:CARGO_MANIFEST_DIR=%s\n' "$PWD" "$PWD" > target/debug/deps/p-aaa.d
+l save --caches -q
 # The checked head has no cache of its own: it takes the cache of its parent, as `line new` does.
 echo change > change.txt; l add change.txt >/dev/null; l save -qm change
 l protect main >/dev/null 2>&1 || true
-l config check.unit 'test "$(cat target/built)" = warm && echo more > target/new' >/dev/null
+l config check.unit 'test "$(cat target/built)" = warm && test ! -e target/debug/.fingerprint/p-aaa && echo more > target/new' >/dev/null
 l config checks.lines '{"main":["unit"]}' >/dev/null
 l config --local checks.runner true >/dev/null
-out=$(l checks watch --once --json 2>&1)
+out=$(l checks watch --once --json 2>"$T/watch.err")
 no "the check finds the cache of its state and writes in it" grep -q '"exit":1' <<<"$out"
 has "it ran on both heads of main" '"count":2' "$out"
+has "the copy's unit that named the line builds again" "1 units named the old path" "$(cat "$T/watch.err")"
 no "the line's own cache does not get the check's file" test -e target/new
 eq "the line's cache is the same" warm "$(cat target/built)"
+ok "the copy's unit that named the line built again there, the line keeps its own" test -d target/debug/.fingerprint/p-aaa
 l line new w main >/dev/null 2>&1
 no "a new line does not get the check's file either" test -e "$LAYR_ROOT/projects/p/lines/w/target/new"
 no "the check's state is not in the line" grep -qx "target/built" <<<"$(l ls-files)"

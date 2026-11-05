@@ -874,7 +874,13 @@ impl<'a> Repo<'a> {
     /// path. It never fails: the outcome is one log line on stderr, none when nothing changed.
     pub fn relocate_caches(&self, line: &Line, folders: &[String], root: &Path) {
         let (uid, _) = self.owner_ids(line);
-        let working = self.working(line);
+        let _t = crate::trace::named(|| format!("relocate caches of line {}", line.name));
+        self.relocate_folders(uid, folders, root, &self.working(line));
+    }
+
+    /// The cache folders `folders` of `root`, used below `at` from now on (a line's working folder, or the place
+    /// where a check sees its copy): the relocation hook of each, run as `uid`.
+    pub fn relocate_folders(&self, uid: u32, folders: &[String], root: &Path, working: &Path) {
         for folder in folders {
             let setting = match self.folder_overlay_of(folder).and_then(|o| o.map(|name| self.overlay_props(&name)).transpose()) {
                 Ok(props) => props.and_then(|p| p.prune),
@@ -883,7 +889,7 @@ impl<'a> Repo<'a> {
                     continue;
                 }
             };
-            let paths = fsutil::safe_join(root, folder).and_then(|p| Ok((p, fsutil::safe_join(&working, folder)?)));
+            let paths = fsutil::safe_join(root, folder).and_then(|p| Ok((p, fsutil::safe_join(working, folder)?)));
             let (path, at) = match paths {
                 Ok(p) => p,
                 Err(e) => {
@@ -894,7 +900,7 @@ impl<'a> Repo<'a> {
             if !path.is_dir() {
                 continue;
             }
-            let _t = crate::trace::named(|| format!("relocate {folder} of line {}", line.name));
+            let _t = crate::trace::named(|| format!("relocate {folder}"));
             let done = crate::cache_hook::relocate(setting.as_deref(), &path, &at, uid);
             if !done.log.is_empty() {
                 eprintln!("layr: relocate {}", done.log);
