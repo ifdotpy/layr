@@ -322,7 +322,13 @@ impl<'a> Repo<'a> {
             }
         }
         // Prunes each taken folder, then saves the caches of the line.
-        admin::save(ctx, &["--caches".to_string(), "-q".to_string()])?;
+        // The follow pass runs in the background, so its prune may take long on a loaded machine.
+        let save = || admin::save(ctx, &["--caches".to_string(), "-q".to_string()]);
+        if warm {
+            Repo::with_prune_limit(crate::cache_hook::BACKGROUND_PRUNE_LIMIT, save)?;
+        } else {
+            save()?;
+        }
         // A save with no build (a local merge), or after a build that stopped (its time limit, a compile error), is
         // not warm for the new head: a followed line gets the mark, and its next follow pass builds and saves again.
         // Only a followed line reads the mark, so only it gets one.
@@ -464,6 +470,17 @@ fn with_repo<T>(root: &Path, caller: &Caller, cwd: PathBuf, name: &str, f: impl 
 #[cfg(test)]
 mod tests {
     use super::repo_key;
+    use crate::repo::Repo;
+    use std::time::Duration;
+
+    #[test]
+    fn the_background_prune_limit_holds_inside_and_is_restored_after() {
+        let inside =
+            Repo::with_prune_limit(Duration::from_secs(600), || Repo::with_prune_limit(Duration::from_secs(5), || 1) + 1);
+        assert_eq!(inside, 2);
+        assert_eq!(Repo::prune_limit(), crate::cache_hook::HOOK_LIMIT);
+        assert_eq!(Repo::with_prune_limit(Duration::from_secs(600), Repo::prune_limit), Duration::from_secs(600));
+    }
 
     #[test]
     fn ssh_and_https_remotes_of_one_repository_match() {

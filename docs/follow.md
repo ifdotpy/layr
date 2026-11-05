@@ -26,6 +26,8 @@
    saves the caches with no build; on a followed line it leaves a mark (`meta/line-locks/<line>.unbuilt`), so
    this step builds and saves them on the next pass and removes the mark. A build that does not finish (its time
    limit, a compile error) leaves the mark too: the next pass builds again, and cargo goes on from the units it made.
+   The prune of the pass has a limit of 10 min (`BACKGROUND_PRUNE_LIMIT`), not the 120 s of a command: no one waits
+   for it, and a loaded machine makes a prune of seconds take minutes.
 3. Stop when the line has unsaved work: a changed file or a conflict (result: `skipped: unsaved work`).
    Nothing is saved for it. An untracked file is not unsaved work: the merge keeps it out of the state,
    and refuses a remote state that writes its path (the pair is then recorded as in step 4).

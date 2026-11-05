@@ -22,6 +22,12 @@ use anyhow::{bail, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+thread_local! {
+    /// The prune limit of this thread: `HOOK_LIMIT` (a command waits for the prune), or a longer one that
+    /// `Repo::with_prune_limit` sets for the background follow pass.
+    static PRUNE_LIMIT: std::cell::Cell<std::time::Duration> = const { std::cell::Cell::new(crate::cache_hook::HOOK_LIMIT) };
+}
+
 /// A folder path as a folder overlay keeps it: relative, without `.`, `..` or empty parts, not
 /// `.git`.
 pub fn folder_path(s: &str) -> Result<String> {
@@ -959,6 +965,19 @@ impl<'a> Repo<'a> {
         }
     }
 
+    /// Runs `f` with `limit` as the prune limit of this thread (the background follow pass), then restores it.
+    pub fn with_prune_limit<T>(limit: std::time::Duration, f: impl FnOnce() -> T) -> T {
+        let old = PRUNE_LIMIT.with(|l| l.replace(limit));
+        let out = f();
+        PRUNE_LIMIT.with(|l| l.set(old));
+        out
+    }
+
+    /// The prune limit of this thread (`with_prune_limit`).
+    pub fn prune_limit() -> std::time::Duration {
+        PRUNE_LIMIT.with(|l| l.get())
+    }
+
     fn prune_folder(&self, line: &Line, overlay: Option<&str>, folder: &str, root: &Path) {
         let (uid, _) = self.owner_ids(line);
         let setting = match overlay {
@@ -977,7 +996,7 @@ impl<'a> Repo<'a> {
             Ok(f) => f,
             Err(e) => return eprintln!("layr: prune {folder}: not pruned: {e:#}"),
         };
-        let done = crate::cache_hook::run(setting.as_deref(), &path, uid, crate::cache_hook::HOOK_LIMIT);
+        let done = crate::cache_hook::run(setting.as_deref(), &path, uid, Self::prune_limit());
         if let Err(e) = self.set_damaged(line, folder, !done.folder_ok) {
             eprintln!("layr: prune {folder}: cannot record the damaged state: {e:#}");
         }
