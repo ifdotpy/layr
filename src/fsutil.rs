@@ -1290,6 +1290,16 @@ pub fn work_queue<T: Send>(seed: Vec<T>, work: impl Fn(T, &dyn Fn(T)) + Sync) {
     let pending = seed.len();
     let queue = Mutex::new((VecDeque::from(seed), pending));
     let ready = Condvar::new();
+    struct Pending<'a, T>(&'a Mutex<(VecDeque<T>, usize)>, &'a Condvar);
+    impl<T> Drop for Pending<'_, T> {
+        fn drop(&mut self) {
+            let mut q = self.0.lock().unwrap();
+            q.1 -= 1;
+            if q.1 == 0 {
+                self.1.notify_all();
+            }
+        }
+    }
     std::thread::scope(|scope| {
         for _ in 0..workers() {
             scope.spawn(|| {
@@ -1305,17 +1315,13 @@ pub fn work_queue<T: Send>(seed: Vec<T>, work: impl Fn(T, &dyn Fn(T)) + Sync) {
                             None => break,
                         }
                     };
+                    let _pending = Pending(&queue, &ready);
                     work(job, &|child| {
                         let mut q = queue.lock().unwrap();
                         q.1 += 1;
                         q.0.push_back(child);
                         ready.notify_one();
                     });
-                    let mut q = queue.lock().unwrap();
-                    q.1 -= 1;
-                    if q.1 == 0 {
-                        ready.notify_all();
-                    }
                 }
             });
         }
@@ -1433,6 +1439,7 @@ pub fn fiemap_visit(root: &Path, f: &mut dyn FnMut(&Held)) -> Result<()> {
 pub fn fiemap_visit_shallow(
     root: &Path,
     seen: &std::sync::Mutex<std::collections::HashSet<(u64, u64)>>,
+    dirs: &mut dyn FnMut(std::path::PathBuf),
     f: &mut dyn FnMut(&Held),
 ) -> Result<()> {
     let entries = match fs::read_dir(root) {
@@ -1443,7 +1450,9 @@ pub fn fiemap_visit_shallow(
     for entry in entries {
         let entry = entry?;
         let m = entry.metadata()?;
-        if m.is_file() && (m.nlink() <= 1 || seen.lock().unwrap().insert((m.dev(), m.ino()))) {
+        if m.is_dir() {
+            dirs(entry.path());
+        } else if m.is_file() && (m.nlink() <= 1 || seen.lock().unwrap().insert((m.dev(), m.ino()))) {
             match File::open(entry.path()).and_then(|file| crate::sys::fiemap_extents(&file)) {
                 Ok(extents) => fiemap_held(&extents, f),
                 Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {}
@@ -1466,6 +1475,21 @@ pub fn fiemap_space(root: &Path) -> Result<Space> {
 mod range_tests {
     use super::{copy_index_entry, merged_ranges};
     use std::fs;
+
+    #[test]
+    fn work_queue_finishes_dynamic_jobs_and_propagates_panics() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let count = AtomicUsize::new(0);
+        super::work_queue(vec![0], |depth, add| {
+            count.fetch_add(1, Ordering::Relaxed);
+            if depth < 3 {
+                add(depth + 1);
+                add(depth + 1);
+            }
+        });
+        assert_eq!(count.load(Ordering::Relaxed), 15);
+        assert!(std::panic::catch_unwind(|| super::work_queue(vec![()], |(), _| panic!("job failed"))).is_err());
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

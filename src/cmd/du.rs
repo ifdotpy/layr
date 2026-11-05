@@ -17,19 +17,8 @@ fn line_spaces(lines: &[(String, PathBuf)]) -> Vec<Result<Space>> {
     let seed = lines.iter().enumerate().map(|(i, (_, path))| (i, path.clone())).collect();
     crate::fsutil::work_queue(seed, |(i, path), add| {
         let walked = (|| -> Result<Space> {
-            let children = match std::fs::read_dir(&path) {
-                Ok(entries) => entries,
-                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Ok(Space::default()),
-                Err(e) => return Err(e.into()),
-            };
-            for child in children {
-                let child = child?;
-                if child.file_type()?.is_dir() {
-                    add((i, child.path()));
-                }
-            }
             let mut space = Space::default();
-            crate::fsutil::fiemap_visit_shallow(&path, &seen[i], &mut |held| space.add(held))?;
+            crate::fsutil::fiemap_visit_shallow(&path, &seen[i], &mut |child| add((i, child)), &mut |held| space.add(held))?;
             Ok(space)
         })();
         let mut result = results[i].lock().unwrap();
@@ -323,18 +312,7 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
             }
         };
         #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
-        let walked = (|| -> Result<()> {
-            let children = match std::fs::read_dir(&path) {
-                Ok(entries) => entries,
-                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Ok(()),
-                Err(e) => return Err(e.into()),
-            };
-            for child in children {
-                let child = child?;
-                if child.file_type()?.is_dir() { _add((i, child.path())); }
-            }
-            crate::fsutil::fiemap_visit_shallow(&path, &seen[i], &mut collect)
-        })();
+        let walked = crate::fsutil::fiemap_visit_shallow(&path, &seen[i], &mut |child| _add((i, child)), &mut collect);
         #[cfg(not(all(target_os = "linux", not(feature = "overlayfs"))))]
         let walked = crate::storage::visit_space(&path, &mut collect);
         let mut result = results[i].lock().unwrap();
