@@ -700,8 +700,12 @@ the write (as `git checkout` does), so a warm cache looked stale and one or more
   the first write; a cache built later from other bytes then looked current, and cargo linked a
   stale crate.
 - This is safe by content: the build output is current for the bytes it was built from, whatever
-  the time. Two caches that recorded other bytes for one file count as other bytes; with equal
-  bytes the file gets the older time.
+  the time. With equal bytes in two caches, the file gets the older time.
+- Two caches can record other bytes for one file: a line saves only `target` after a change, and
+  its `node_modules` keeps an older save. A line from it takes both. The file gets the time that
+  the caches with its bytes recorded, when that time is after the save of each cache with other
+  bytes: those see a newer file and build again, and the others stay warm. Otherwise the file
+  counts as other bytes.
 - Cost: one walk and one hash of the tracked files per save and per take (Studio, about 4,100
   files and 118 MB: measured in the PR). A take reads only files of the recorded size whose time
-  differs.
+  differs, and the files that two caches recorded with other bytes.
