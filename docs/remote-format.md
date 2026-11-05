@@ -204,6 +204,12 @@ Another segment can fill a gap. An overlap is normal; `fsck --remote` reports it
 A writer lists a machine's segments before upload. Its segment starts after the highest last sequence number in that listing.
 A record segment keeps its name and signed plaintext across retries.
 A 412 means the object already exists. Readers verify its record signatures and reject a conflicting sequence.
+A machine identity has one writer. A second store with the same identity (a copy of `machine/`) continues the
+records after a clone, but its records differ from the other store's records with the same numbers. Before upload, a
+writer that can read the store compares the newest remote segment of its own machine with its local record of that
+number. If it already exists, it compares the segment that it was about to write, too. A difference fails the push
+("another store uses this machine identity"), and the push publishes no records. `own-records` in the remote's local
+folder names the newest own segment that the writer wrote or checked, so that segment needs no read again.
 A state retry uses a new attempt. A lost response can leave another complete attempt with the same state ID.
 No retry replaces an object. An incomplete attempt does not become visible as a state.
 The local index records only attempts whose tree publication completed.
