@@ -70,7 +70,7 @@ jobs:
           cargo build --release --locked --target "${{ matrix.target }}"
           bin="target/${{ matrix.target }}/release/layr"
           "$bin" version
-          if [ "$RUNNER_OS" = Linux ]; then file "$bin" | tee /dev/stderr | grep -q "statically linked"; fi
+          if [ "$RUNNER_OS" = Linux ]; then file "$bin" | tee /dev/stderr | grep -Eq "static(-pie|ally) linked"; fi
           name="layr-$TAG-${{ matrix.platform }}"
           mkdir "$name" && cp "$bin" "$name/layr"
           tar -czf "$name.tar.gz" "$name"
