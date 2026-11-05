@@ -2,7 +2,8 @@
 # ci: overlayfs
 # A save never swaps a cache folder that a process uses. While a writer holds a file open in target/,
 # saves leave target/ as it is (same inode, no swap folder, not a cache), and an explicit save
-# --caches refuses it with the pid. After the writer stops, a save makes target/ a cache.
+# --caches refuses it with the pid. A process that only reads target/ does not stop a save: after
+# the writer stops, a save makes target/ a cache while the reader keeps its file open.
 # Linux only: the btrfs CI job runs every test, the OverlayFS job runs this one.
 if [ "$(uname -s)" != Linux ]; then
     echo "t118-cache-busy.sh: not a Linux run, 0 passed, 0 failed"
@@ -58,16 +59,23 @@ rc=$?
 echo "diag: busy trace: $(echo "$out" | grep -i busy | tr '\n' ' ')"
 eq "an explicit save refuses the busy folder" "1" "$rc"
 has "the refusal names the pid" "in use by pid $WRITER (" "$out"
+has "the refusal says the pid writes" "writes $(readlink -f $W/target)/debug/" "$out"
 has "the refusal says when to run again" "run again when the build ends" "$out"
 eq "the refused save keeps the inode" "$ino" "$(stat -c %i target)"
 eq "a refused save makes no swap folder" "" "$(ls -d target.layr-* 2>/dev/null)"
 no "target is not a cache while the build runs" is_cache $W/target
 
+# A reader, like a service that scans the folder, holds a file open for reading only.
+(exec 3<target/debug/out; exec sleep 60) &
+READER=$!
 kill $WRITER 2>/dev/null
 wait $WRITER 2>/dev/null
 sleep 1
+ok "the reader holds target/debug/out open" sh -c "ls -l /proc/$READER/fd | grep -q 'target/debug/out'"
 l save -q
-ok "after the build, a save makes target a cache" is_cache $W/target
+ok "after the build, a save makes target a cache while a reader runs" is_cache $W/target
+kill $READER 2>/dev/null
+wait $READER 2>/dev/null
 eq "no swap folder is left" "" "$(ls -d target.layr-* 2>/dev/null)"
 ok "the build output is kept" test -s $W/target/debug/out
 finish
