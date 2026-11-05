@@ -516,7 +516,15 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
     let mut reader = Reader::new(&store.backend, &identity, &records.keys);
     let mut missing = Vec::new();
     for id in states.keys() {
-        let state = repo.p.db.state(id)?.with_context(|| format!("remote tree {id} has no state record"))?;
+        // An overlay leaves out the records of a signer that is not trusted here yet, and so their states.
+        let state = match repo.p.db.state(id)? {
+            Some(state) => state,
+            None if repo.p.is_overlay() => {
+                report.omitted.push(format!("state {}: its record is not taken here yet", crate::ids::short(id)));
+                continue;
+            }
+            None => bail!("remote tree {id} has no state record"),
+        };
         if !wanted(&state, opts) && !required.contains(id) {
             continue;
         }
@@ -529,6 +537,25 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
             ));
             continue;
         }
+        // `--caches-of`: only the caches that a new line from those lines takes.
+        // A cache state is the head of its overlay line, so `required` names it, but a cache that is not here is only
+        // a cache that no line takes here: nothing else needs its files.
+        if repo.p.is_overlay()
+            && state.cache_of.is_some()
+            && opts.only_caches.as_ref().is_some_and(|only| !only.contains(id))
+        {
+            report.omitted.push(format!("cache state {}: not for --caches-of", crate::ids::short(id)));
+            continue;
+        }
+        // A cache of another user's unprotected line is never taken here (`usable_cache`): its data stays on the
+        // remote, so a clone downloads only the caches that its lines can start from.
+        if repo.p.is_overlay()
+            && state.cache_of.is_some()
+            && !(ctx.caller.is_root() || state.cache_shared || state.cache_by == Some(ctx.caller.uid))
+        {
+            report.omitted.push(format!("cache state {}: of another user's line", crate::ids::short(id)));
+            continue;
+        }
         if repo.p.has_state(id) {
             repo.p.db.set_present(id, true)?;
         } else {
@@ -537,7 +564,17 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
     }
     for state in super::writer::parents_first(missing)? {
         let id = state.id.clone();
-        report.files += restore_one(repo, &mut reader, &states, &state)?;
+        let files = match restore_one(repo, &mut reader, &states, &state) {
+            Ok(files) => files,
+            // A cache state that a push removed while this fetch ran (its sweep deletes parts, then the tree, of a
+            // cache that a newer state replaced): the cache is regenerable, so it omits, and the fetch goes on.
+            Err(e) if repo.p.is_overlay() && state.cache_of.is_some() => {
+                report.omitted.push(format!("cache state {}: not restored ({e:#})", crate::ids::short(&id)));
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        report.files += files;
         report.states += 1;
         report.state_ids.push(id.clone());
     }

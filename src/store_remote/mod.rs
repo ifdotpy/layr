@@ -35,6 +35,10 @@ pub struct Options {
     pub caches: bool,
     pub paper_key: Option<String>,
     pub desk_prefix: Option<String>,
+    /// `--caches-of <line>`: restore only the cache states that `line new X <line>` takes for these lines.
+    pub caches_of: Vec<String>,
+    /// The cache states of `caches_of` in one cache overlay, set by the overlay fetch (None: every usable one).
+    pub only_caches: Option<std::collections::BTreeSet<String>>,
 }
 
 #[derive(Debug, Default, Serialize)]

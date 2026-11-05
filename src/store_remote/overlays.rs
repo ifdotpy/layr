@@ -56,6 +56,64 @@ impl Published {
     }
 }
 
+/// The cache states of the cache overlay `orepo` that `line new X <line>` takes for each of `lines`, from the records
+/// alone (the states are not here yet): the newest cache of the line's own overlay line, and the newest cache saved
+/// with its head or else with its nearest ancestor that has one (`cache_source`).
+fn caches_of_lines(repo: &Repo, orepo: &Repo, lines: &[String]) -> Result<BTreeSet<String>> {
+    let mut saved_with: BTreeMap<String, String> = BTreeMap::new();
+    for (id, of) in orepo.p.db.cache_states_known()? {
+        // A save with no named change saves with an automatic state over the head: it counts for the head.
+        if let Some(st) = repo.p.db.state(&of)? {
+            if st.kind == crate::model::StateKind::Auto {
+                if let Some(parent) = st.parents.first() {
+                    saved_with.entry(parent.clone()).or_insert_with(|| id.clone());
+                }
+            }
+        }
+        saved_with.entry(of).or_insert(id);
+    }
+    let mut out = BTreeSet::new();
+    for name in lines {
+        let line = repo.line(name).with_context(|| format!("--caches-of: no line {name}"))?;
+        if let Some(own) = orepo.p.db.line_by_name(&crate::overlay::cache_line_name(&line.id))? {
+            out.insert(own.head);
+        }
+        let mut seen = BTreeSet::new();
+        let mut queue = std::collections::VecDeque::from([line.head.clone()]);
+        while let Some(id) = queue.pop_front() {
+            if seen.len() >= 200 || !seen.insert(id.clone()) {
+                continue;
+            }
+            if let Some(cache) = saved_with.get(&id) {
+                out.insert(cache.clone());
+                break;
+            }
+            if let Some(state) = repo.p.db.state(&id)? {
+                queue.extend(state.parents);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The signers of `keys` that `trusted` does not name yet. A signer that it names with another key is an error.
+fn not_trusted_yet(
+    keys: &BTreeMap<String, VerifyingKey>,
+    trusted: &BTreeMap<String, VerifyingKey>,
+) -> std::result::Result<BTreeSet<String>, String> {
+    let mut waiting = BTreeSet::new();
+    for (machine, key) in keys {
+        match trusted.get(machine) {
+            Some(known) if known == key => {}
+            Some(_) => return Err(machine.clone()),
+            None => {
+                waiting.insert(machine.clone());
+            }
+        }
+    }
+    Ok(waiting)
+}
+
 pub(crate) fn trusted_keys(repo: &Repo) -> Result<BTreeMap<String, VerifyingKey>> {
     let mut keys = BTreeMap::new();
     keys.insert(repo.p.store.machine.id.clone(), repo.p.store.machine.key.verifying_key());
@@ -699,63 +757,83 @@ pub(super) fn fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, repor
         published.insert(name, key);
     }
     for (name, published) in published {
-        if store.is_public_reader() && published.key.access_mode != layr_store::epochs::Mode::Public {
-            continue;
-        }
-        if !published.key.hidden && repo.overlay_info(&name)?.is_none() {
-            bail!("overlay key names an unknown overlay {name}");
-        }
-        let backend = store.backend.scoped(&published.prefix())?;
-        let identity = open_identity(
-            &backend,
-            &published.key,
-            Some((&store.machine, &store.key)),
-            store.person.as_ref(),
-            opts.paper_key.as_deref().or(store.paper_key_text.as_deref()),
-        )?
-        .or_else(|| identities.remove(&name));
-        let Some(identity) = identity else {
-            if !published.key.hidden {
-                report.omitted.push(format!("overlay {name}: no key on this machine"));
+        let is_cache = repo.overlay_info(&name).ok().flatten().is_some_and(|info| info.cache);
+        let mut one = || -> Result<()> {
+            if store.is_public_reader() && published.key.access_mode != layr_store::epochs::Mode::Public {
+                return Ok(());
             }
-            continue;
-        };
-        let pname = format!("{}%{name}", repo.p.name);
-        let mut op = if crate::store::db_file(&ctx.store.project_dir(&pname)?).exists() {
-            Project::open_partial(&ctx.store, &pname)?
-        } else {
-            Project::create_empty_overlay(&ctx.store, &pname)?
-        };
-        if !op.id.is_empty() && op.id != published.key.overlay {
-            bail!("overlay {name} has another project id");
-        }
-        // Overlay records must use the same trusted machine keys as the parent.
-        let records = reader::records(&backend, &identity, &published.key.overlay)?;
-        let trusted = trusted_keys(repo)?;
-        for (machine, key) in &records.keys {
-            if trusted.get(machine) != Some(key) {
-                bail!("overlay {name}: untrusted record signer {machine}");
+            if !published.key.hidden && repo.overlay_info(&name)?.is_none() {
+                bail!("overlay key names an unknown overlay {name}");
             }
+            let backend = store.backend.scoped(&published.prefix())?;
+            let identity = open_identity(
+                &backend,
+                &published.key,
+                Some((&store.machine, &store.key)),
+                store.person.as_ref(),
+                opts.paper_key.as_deref().or(store.paper_key_text.as_deref()),
+            )?
+            .or_else(|| identities.remove(&name));
+            let Some(identity) = identity else {
+                if !published.key.hidden {
+                    report.omitted.push(format!("overlay {name}: no key on this machine"));
+                }
+                return Ok(());
+            };
+            let pname = format!("{}%{name}", repo.p.name);
+            let mut op = if crate::store::db_file(&ctx.store.project_dir(&pname)?).exists() {
+                Project::open_partial(&ctx.store, &pname)?
+            } else {
+                Project::create_empty_overlay(&ctx.store, &pname)?
+            };
+            if !op.id.is_empty() && op.id != published.key.overlay {
+                bail!("overlay {name} has another project id");
+            }
+            // Overlay records must use the same trusted machine keys as the parent.
+            let records = reader::records(&backend, &identity, &published.key.overlay)?;
+            let trusted = trusted_keys(repo)?;
+            // A machine trusted after this fetch read the project records (a long clone, while a runner that
+            // was just trusted pushes) has records here before its trust record: they wait for a later fetch.
+            let waiting = not_trusted_yet(&records.keys, &trusted)
+                .map_err(|machine| anyhow::anyhow!("overlay {name}: record signer {machine} is trusted here with another key"))?;
+            let lines: Vec<String> = records
+                .lines
+                .iter()
+                .filter(|line| oplog::parse_line(line, None).is_ok_and(|s| !waiting.contains(&s.record.machine)))
+                .cloned()
+                .collect();
+            if !waiting.is_empty() {
+                let names: Vec<&str> = waiting.iter().map(String::as_str).collect();
+                report
+                    .omitted
+                    .push(format!("overlay {name}: records of machine {} not trusted here yet; a later fetch takes them", names.join(", ")));
+            }
+            if !lines.contains(&published.line) {
+                bail!("overlay {name}: published key is absent from the overlay log");
+            }
+            authorities.get(&name).context("overlay has no creator authority")?.validate(&lines, &published.key.overlay, &trusted)?;
+            // An epoch includes the complete log, so a new reader needs no older layer identity.
+            if op.id.is_empty() {
+                op.import_lines(&lines, crate::store::Trust::All)?;
+                op.reload_id()?;
+            }
+            let mut orepo = Repo { p: op, ctx: None };
+            for (machine, key) in records.keys.iter().filter(|(machine, _)| !waiting.contains(*machine)) {
+                crate::cmd::replicate::trust(ctx, &orepo.p, machine, &hex::encode(key.to_bytes()))?;
+            }
+            let mut scoped = layer(store, &published, Some(identity), false)?;
+            let mut opts = opts.clone();
+            if is_cache && !opts.caches_of.is_empty() {
+                opts.only_caches = Some(caches_of_lines(repo, &orepo, &opts.caches_of)?);
+            }
+            merge(report, reader::fetch(&mut scoped, ctx, &mut orepo, &opts)?, &name, "fetch");
+            Ok(())
+        };
+        match one() {
+            // A cache is regenerable: its overlay omits, and the clone or fetch of the rest goes on.
+            Err(e) if is_cache => report.omitted.push(format!("overlay {name}: {e:#}")),
+            r => r?,
         }
-        if !records.lines.contains(&published.line) {
-            bail!("overlay {name}: published key is absent from the overlay log");
-        }
-        authorities.get(&name).context("overlay has no creator authority")?.validate(
-            &records.lines,
-            &published.key.overlay,
-            &trusted,
-        )?;
-        // An epoch includes the complete log, so a new reader needs no older layer identity.
-        if op.id.is_empty() {
-            op.import_lines(&records.lines, crate::store::Trust::All)?;
-            op.reload_id()?;
-        }
-        let mut orepo = Repo { p: op, ctx: None };
-        for (machine, key) in &records.keys {
-            crate::cmd::replicate::trust(ctx, &orepo.p, machine, &hex::encode(key.to_bytes()))?;
-        }
-        let mut scoped = layer(store, &published, Some(identity), false)?;
-        merge(report, reader::fetch(&mut scoped, ctx, &mut orepo, opts)?, &name, "fetch");
     }
     Ok(())
 }
@@ -763,6 +841,17 @@ pub(super) fn fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, repor
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_signer_not_trusted_yet_waits_and_another_key_fails() {
+        let key = |n: u8| ed25519_dalek::SigningKey::from_bytes(&[n; 32]).verifying_key();
+        let keys: BTreeMap<String, VerifyingKey> = [("a".to_string(), key(1)), ("r".to_string(), key(2))].into();
+        let trusted: BTreeMap<String, VerifyingKey> = [("a".to_string(), key(1))].into();
+        assert_eq!(not_trusted_yet(&keys, &trusted), Ok(BTreeSet::from(["r".to_string()])));
+        let other: BTreeMap<String, VerifyingKey> = [("a".to_string(), key(1)), ("r".to_string(), key(3))].into();
+        assert_eq!(not_trusted_yet(&keys, &other), Err("r".to_string()));
+        assert_eq!(not_trusted_yet(&keys, &keys), Ok(BTreeSet::new()));
+    }
     #[test]
     #[ignore = "invoked by t35 with its actual store and machine keys"]
     fn overlay_ciphertexts_reject_nonreader_keys() {

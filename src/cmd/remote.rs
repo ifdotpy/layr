@@ -904,6 +904,7 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
             .flag("--index")
             .flag("--auto")
             .flag("--caches")
+            .value("--caches-of")
             .flag("-q|--quiet")
             .flag("--json")
             .flag("--command")
@@ -990,6 +991,8 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
                 paper_key: a.get("--paper-key").map(str::to_owned),
                 desk_prefix: None,
                 public: false,
+                caches_of: caches_of(&a),
+                only_caches: None,
             };
             let mut store = store_remote::open_named(&a.pos[0], &h.repo)?;
             store.configure(ctx, &store_remote::ConfigureOptions::default())?;
@@ -1080,6 +1083,11 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
     Ok(code)
 }
 
+/// The lines of `--caches-of <line>[,<line>]`.
+fn caches_of(a: &crate::args::Parsed) -> Vec<String> {
+    a.get("--caches-of").map(|v| v.split(',').filter(|s| !s.is_empty()).map(str::to_owned).collect()).unwrap_or_default()
+}
+
 fn print_store_report(ctx: &Ctx, report: &store_remote::Report, op: &str, json_output: bool, quiet: bool) -> Result<()> {
     if json_output {
         outln!(ctx, "{}", serde_json::to_string(report)?);
@@ -1159,6 +1167,7 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
             .flag("--public")
             .flag("--auto")
             .flag("--caches")
+            .value("--caches-of")
             .flag("--json")
             .flag("-q|--quiet"),
         args,
@@ -1185,6 +1194,8 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
             caches: a.has("--caches"),
             paper_key: a.get("--paper-key").map(str::to_owned),
             desk_prefix: a.get("--desk-prefix").map(str::to_owned),
+            caches_of: caches_of(&a),
+            only_caches: None,
         };
         let report = store.clone_into(ctx, &mut repo, &opts)?;
         let _lock = repo.p.lock()?;

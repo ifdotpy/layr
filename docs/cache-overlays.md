@@ -178,7 +178,12 @@ There are two kinds of remote:
 - A **layr remote** (a store: `file://`, `s3://`, `layr+https://`; or a peer: `ssh://`) takes the
   whole repository: the shared set and every overlay, each overlay encrypted for its readers, as
   [overlay sync](overlay-sync-design.md) decides. Cache overlays travel too. A receiving machine
-  imports a cache state only for its own platform. A store remote keeps only the cache states that
+  imports a cache state only for its own platform, and only a state that a line here can take
+  (`usable_cache`: shared, or of the caller). `layr clone <url> --caches-of <line>[,<line>]` and
+  `layr fetch <remote> --caches-of ...` restore only the caches that `line new X <line>` takes for
+  those lines: the newest cache of the line, and the newest cache saved with its head or nearest
+  ancestor (a CI clone for one commit). A cache state that a push removes while a fetch runs, and a
+  cache overlay that a fetch cannot read, omit; the fetch goes on. A store remote keeps only the cache states that
   the records keep (`src/store_remote/sweep.rs`): the push of a cache overlay deletes the trees of
   the states that its records know and do not keep (beyond `history` on each line and platform, of
   deleted lines), and the data parts that no kept tree links, parts first. A tree stays when its

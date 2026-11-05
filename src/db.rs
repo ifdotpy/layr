@@ -871,6 +871,16 @@ impl Db {
 
     /// The present states of a cache overlay that name the project state they were saved with
     /// (`cache_of`), newest first: (state, project state).
+    /// `cache_states`, also of the states that are not on this machine yet (a fetch plans with them).
+    pub fn cache_states_known(&self) -> Result<Vec<(String, String)>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT id, json_extract(rec, '$.cache_of') FROM states
+             WHERE deleted=0 AND json_extract(rec, '$.cache_of') IS NOT NULL ORDER BY time DESC",
+        )?;
+        let v = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?.collect::<Result<Vec<_>, _>>()?;
+        Ok(v)
+    }
+
     pub fn cache_states(&self) -> Result<Vec<(String, String)>> {
         let mut st = self.conn.prepare_cached(
             "SELECT id, json_extract(rec, '$.cache_of') FROM states

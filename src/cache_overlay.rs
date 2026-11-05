@@ -680,6 +680,17 @@ impl<'a> Repo<'a> {
     /// writable snapshot of its cache state unless the state holds files there (it replaces an old
     /// cache of the state), and the line gets an
     /// overlay line at that state. Returns the folders that got a cache.
+    /// Whether this machine has the overlay `name` of the cache folder `folder`; prints why not.
+    fn has_overlay_here(&self, name: &str, folder: &str) -> bool {
+        match self.overlay_repo(name) {
+            Ok(_) => true,
+            Err(e) => {
+                eprintln!("layr: no cache for {folder}: overlay {name} is not on this machine ({e:#}); a trusted reader gets it at the next fetch");
+                false
+            }
+        }
+    }
+
     pub fn take_caches(&self, ctx: &Ctx, line: &Line, start: &str, source: Option<&Line>, w: &Path) -> Result<Vec<String>> {
         let mut taken = Vec::new();
         for (name, folder, sid) in self.place_caches(ctx, line, start, source, w)? {
@@ -729,6 +740,10 @@ impl<'a> Repo<'a> {
             if !self.applies_in(&name, &folder, w)? {
                 continue;
             }
+            // A machine that does not read the overlay (no key here yet) starts this folder cold.
+            if !self.has_overlay_here(&name, &folder) {
+                continue;
+            }
             let from = match source {
                 Some(s) => Source::Line(s),
                 None => Source::State(start),
@@ -775,7 +790,7 @@ impl<'a> Repo<'a> {
         let own = self.own(line);
         let shared = self.policy().rule_for(&line.name).is_some();
         for (name, folder) in self.folder_overlays()? {
-            if skip.contains(&folder) || !self.applies_in(&name, &folder, &w)? {
+            if skip.contains(&folder) || !self.applies_in(&name, &folder, &w)? || !self.has_overlay_here(&name, &folder) {
                 continue;
             }
             let key = self.cache_key(ctx, &name, &w, uid)?;
