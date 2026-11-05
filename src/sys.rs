@@ -34,7 +34,13 @@ pub fn check_limits_before_exec(cmd: &mut Command, memory: u64, processes: u64, 
                 (libc::RLIMIT_CORE, 0),
                 (libc::RLIMIT_FSIZE, memory),
             ] {
-                let limit = libc::rlimit { rlim_cur: value as _, rlim_max: value as _ };
+                // Only root raises a hard limit: a lower hard limit of the caller stays in force.
+                let mut now = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+                if libc::getrlimit(resource, &mut now) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                let value = (value as libc::rlim_t).min(now.rlim_max);
+                let limit = libc::rlimit { rlim_cur: value, rlim_max: value };
                 if libc::setrlimit(resource, &limit) != 0 {
                     return Err(io::Error::last_os_error());
                 }

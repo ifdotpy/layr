@@ -33,7 +33,7 @@ only. Fetch into an existing project never grants local access.
 | `checks.changes` | `[]` | Checks for every immutable logical change version |
 | `checks.lines` | `{}` | Protected line names mapped to check name arrays |
 | `checks.privileged` | `[]` | Explicit names permitted to execute as root |
-| `checks.platforms` | `{}` | Check names mapped to `linux` or `macos`; unset names run on either |
+| `checks.platforms` | `{}` | Check names mapped to a platform or a list of platforms: `linux`, `macos` (any architecture), or `linux-x86_64`, `linux-aarch64`, `macos-x86_64`, `macos-aarch64`. A check must pass once on each entry; an unset name runs once on any platform |
 | `checks.timeout` | `900` | Wall timeout and per-process CPU seconds; 1–86400 |
 | `checks.memory` | `4294967296` | Linux per-process address-space limit; maximum file size on either platform |
 | `checks.processes` | `256` (Linux), `4096` (Mac) | Hard process limit for the sandbox user |
@@ -52,7 +52,15 @@ an opted-in runner executes all checks. A Linux laptop VM can also be a runner.
 The lock is local, not a distributed lease: run one active runner per project and platform.
 
 Each result is the existing `check` attestation with state, command, argv, exit,
-`privileged`, and `log_ref`. The referenced derived state contains `check.log`.
+`privileged`, `platform` (`<os>-<arch>` of the machine that ran it), and `log_ref`. A result
+counts for a platform entry that its platform meets, from any trusted machine: a check that a
+laptop ran on `macos-aarch64` is not run again on another `macos-aarch64` machine, and a
+`linux-x86_64` entry still needs its own run.
+
+`layr checks pending [--state <rev>] [--platform <os>-<arch>] [--json]` lists the check jobs that
+no active executor result covers for the platform (default: this machine's). `--state` limits
+the list to one state and adds the change checks (`checks.changes`) for it. A CI job resolves its
+commit with `layr rev-parse <commit>`, fetches the project records, and runs only these checks. The referenced derived state contains `check.log`.
 The ref retains logs through GC and syncs with ordinary project refs/states. Read
 logs with `layr show <log_ref>:check.log`; inspect evidence with
 `layr attestations <state> --kind check --json`. The site uses these attestations.
