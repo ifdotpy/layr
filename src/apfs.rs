@@ -2168,7 +2168,7 @@ pub fn visit_space(path: &Path, f: &mut dyn FnMut(&crate::fsutil::Held)) -> Resu
 /// plus each clone key (shared data) once. Clones inside the copy stay clones.
 pub(crate) fn copy_need(path: &Path) -> Result<u64> {
     let mut own = 0u64;
-    let mut keys: HashMap<u64, u64> = HashMap::new();
+    let mut keys: HashMap<crate::fsutil::ExtentKey, u64> = HashMap::new();
     visit_space(path, &mut |h| {
         own += h.own;
         for &(key, size) in h.shared {

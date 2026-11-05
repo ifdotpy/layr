@@ -1,0 +1,462 @@
+//! Bulk accounting uses whole btrfs disk extents, including compressed and partially referenced
+//! extents. Repeated references in one file count once. Inline items count their stored payload;
+//! holes do not count. These keys describe the btrfs allocation, not FIEMAP's merged ranges.
+//! Each tree is read once with TREE_SEARCH_V2, which requires CAP_SYS_ADMIN.
+
+use crate::fsutil::{ExtentKey, Held};
+use crate::sys::{self, SearchKey, TreeSearch};
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::{self, ErrorKind};
+use std::os::fd::AsFd;
+use std::os::unix::fs::MetadataExt;
+use std::path::{Path, PathBuf};
+
+pub type PartId = usize;
+pub struct TreeUnit {
+    pub root: PathBuf,
+    pub parts: HashMap<u64, PartId>,
+    tree: u64,
+}
+pub struct Plan {
+    pub units: Vec<TreeUnit>,
+    pub outside: Vec<PartId>,
+}
+
+fn add_part(trees: &mut HashMap<u64, HashMap<u64, PartId>>, tree: u64, ino: u64, part: PartId) {
+    trees.entry(tree).or_default().insert(ino, part);
+}
+
+const ROOT_TREE: u64 = 1;
+const ROOT_INO: u64 = 256;
+const INODE_ITEM: u32 = 1;
+const INODE_REF: u32 = 12;
+const INODE_EXTREF: u32 = 13;
+const EXTENT_DATA: u32 = 108;
+const ROOT_REF: u32 = 156;
+const MAX_KEY_TYPE: u32 = u8::MAX as u32;
+const SEARCH_BUFFER: usize = 1024 * 1024;
+const LOOKUP_BUFFER: usize = 16 * 1024;
+const HEADER_SIZE: usize = 32;
+const HEADER_OBJECTID: usize = 8;
+const HEADER_OFFSET: usize = 16;
+const HEADER_TYPE: usize = 24;
+const HEADER_LEN: usize = 28;
+const INODE_MODE: usize = 52;
+const REF_NAME_LEN: usize = 8;
+const REF_HEADER: usize = 10;
+const EXTREF_PARENT: usize = 0;
+const EXTREF_NAME_LEN: usize = 16;
+const EXTREF_HEADER: usize = 18;
+const EXTENT_GENERATION: usize = 0;
+const EXTENT_TYPE: usize = 20;
+const EXTENT_INLINE_HEADER: usize = 21;
+const EXTENT_BYTENR: usize = 21;
+const EXTENT_DISK_BYTES: usize = 29;
+const EXTENT_REGULAR_SIZE: usize = 53;
+const FILE_EXTENT_INLINE: u8 = 0;
+const FILE_EXTENT_REG: u8 = 1;
+const FILE_EXTENT_PREALLOC: u8 = 2;
+const ROOT_REF_DIRID: usize = 0;
+
+fn invalid() -> io::Error {
+    io::Error::new(ErrorKind::InvalidData, "invalid btrfs tree search item")
+}
+fn bytes<const N: usize>(b: &[u8], off: usize) -> io::Result<[u8; N]> {
+    b.get(off..off.checked_add(N).ok_or_else(invalid)?).ok_or_else(invalid)?.try_into().map_err(|_| invalid())
+}
+fn le64(b: &[u8], off: usize) -> io::Result<u64> {
+    Ok(u64::from_le_bytes(bytes(b, off)?))
+}
+fn le16(b: &[u8], off: usize) -> io::Result<u16> {
+    Ok(u16::from_le_bytes(bytes(b, off)?))
+}
+fn native64(b: &[u8], off: usize) -> io::Result<u64> {
+    Ok(u64::from_ne_bytes(bytes(b, off)?))
+}
+fn native32(b: &[u8], off: usize) -> io::Result<u32> {
+    Ok(u32::from_ne_bytes(bytes(b, off)?))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Key {
+    ino: u64,
+    kind: u32,
+    offset: u64,
+}
+fn advance(k: Key) -> Option<Key> {
+    if let Some(offset) = k.offset.checked_add(1) {
+        Some(Key { offset, ..k })
+    } else if k.kind < MAX_KEY_TYPE {
+        Some(Key { kind: k.kind + 1, offset: 0, ..k })
+    } else {
+        k.ino.checked_add(1).map(|ino| Key { ino, kind: 0, offset: 0 })
+    }
+}
+fn header(b: &[u8]) -> io::Result<(Key, usize)> {
+    Ok((
+        Key { ino: native64(b, HEADER_OBJECTID)?, kind: native32(b, HEADER_TYPE)?, offset: native64(b, HEADER_OFFSET)? },
+        native32(b, HEADER_LEN)? as usize,
+    ))
+}
+fn search(file: &File, scanner: &mut TreeSearch, mut key: SearchKey, mut f: impl FnMut(Key, &[u8]) -> io::Result<()>) -> io::Result<()> {
+    let first_type = key.min_type;
+    loop {
+        key.nr_items = u32::MAX;
+        let (count, buf) = scanner.run(file.as_fd(), &mut key)?;
+        if count == 0 {
+            return Ok(());
+        }
+        let mut pos = 0usize;
+        let mut last = None;
+        for _ in 0..count {
+            let h = buf.get(pos..pos + HEADER_SIZE).ok_or_else(invalid)?;
+            let (k, len) = header(h)?;
+            let start = pos + HEADER_SIZE;
+            let end = start.checked_add(len).ok_or_else(invalid)?;
+            f(k, buf.get(start..end).ok_or_else(invalid)?)?;
+            pos = end;
+            last = Some(k);
+        }
+        let Some(mut next) = last.and_then(advance) else {
+            return Ok(());
+        };
+        if next.kind > key.max_type {
+            let Some(ino) = next.ino.checked_add(1) else { return Ok(()); };
+            next = Key { ino, kind: first_type, offset: 0 };
+        }
+        if next.ino > key.max_objectid {
+            return Ok(());
+        }
+        key.min_objectid = next.ino;
+        key.min_type = next.kind;
+        key.min_offset = next.offset;
+    }
+}
+fn query(tree: u64) -> SearchKey {
+    SearchKey {
+        tree_id: tree,
+        max_objectid: u64::MAX,
+        max_offset: u64::MAX,
+        max_transid: u64::MAX,
+        max_type: MAX_KEY_TYPE,
+        ..Default::default()
+    }
+}
+fn parents(key: Key, item: &[u8], out: &mut Vec<u64>) -> io::Result<()> {
+    let (hdr, name, parent) = match key.kind {
+        INODE_REF => (REF_HEADER, REF_NAME_LEN, false),
+        INODE_EXTREF => (EXTREF_HEADER, EXTREF_NAME_LEN, true),
+        _ => return Ok(()),
+    };
+    let mut pos = 0;
+    while pos < item.len() {
+        let rest = &item[pos..];
+        let p = if parent { le64(rest, EXTREF_PARENT)? } else { key.offset };
+        let len = le16(rest, name)? as usize;
+        pos = pos.checked_add(hdr + len).filter(|&n| n <= item.len()).ok_or_else(invalid)?;
+        out.push(p);
+    }
+    Ok(())
+}
+fn extent(ino: u64, offset: u64, item: &[u8]) -> io::Result<Option<(ExtentKey, u64)>> {
+    let ty = *item.get(EXTENT_TYPE).ok_or_else(invalid)?;
+    match ty {
+        FILE_EXTENT_INLINE => Ok(Some((
+            ExtentKey::Inline { ino, offset, generation: le64(item, EXTENT_GENERATION)? },
+            item.len().checked_sub(EXTENT_INLINE_HEADER).ok_or_else(invalid)? as u64,
+        ))),
+        FILE_EXTENT_REG | FILE_EXTENT_PREALLOC => {
+            if item.len() < EXTENT_REGULAR_SIZE {
+                return Err(invalid());
+            }
+            let disk = le64(item, EXTENT_BYTENR)?;
+            Ok((disk != 0).then_some((ExtentKey::Disk(disk), le64(item, EXTENT_DISK_BYTES)?)))
+        }
+        _ => Err(invalid()),
+    }
+}
+
+#[derive(Default)]
+struct Refs {
+    first: HashMap<u64, u64>,
+    extra: HashMap<u64, Vec<u64>>,
+}
+impl Refs {
+    fn add(&mut self, ino: u64, parent: u64) {
+        match self.first.entry(ino) {
+            std::collections::hash_map::Entry::Vacant(e) => { e.insert(parent); }
+            std::collections::hash_map::Entry::Occupied(e) if *e.get() != parent => {
+                self.extra.entry(ino).or_default().push(parent);
+            }
+            _ => {}
+        }
+    }
+}
+
+// Directories have one parent. The sentinel prevents loops on corrupt metadata.
+fn directory_part(ino: u64, parts: &HashMap<u64, PartId>, refs: &Refs, memo: &mut HashMap<u64, Option<PartId>>) -> Option<PartId> {
+    if let Some(&p) = parts.get(&ino) { return Some(p); }
+    if let Some(&p) = memo.get(&ino) { return p; }
+    memo.insert(ino, None);
+    let result = refs.first.get(&ino).and_then(|&p| directory_part(p, parts, refs, memo));
+    memo.insert(ino, result);
+    result
+}
+
+fn file_parts(ino: u64, parts: &HashMap<u64, PartId>, refs: &Refs, memo: &mut HashMap<u64, Option<PartId>>, out: &mut Vec<PartId>) {
+    out.clear();
+    for &parent in refs.first.get(&ino).into_iter().chain(refs.extra.get(&ino).into_iter().flatten()) {
+        if let Some(part) = directory_part(parent, parts, refs, memo) {
+            if !out.contains(&part) { out.push(part); }
+        }
+    }
+    out.sort_unstable();
+}
+
+#[derive(Default)]
+struct FileGroups {
+    current: Option<u64>,
+    scratch: Vec<(ExtentKey, u64)>,
+    extents: Vec<(ExtentKey, u64)>,
+    files: Vec<(u64, std::ops::Range<usize>)>,
+}
+fn extent_order(key: ExtentKey) -> (u8, u64, u64, u64) {
+    match key {
+        ExtentKey::Disk(n) => (0, n, 0, 0),
+        ExtentKey::Inline { ino, offset, generation } => (1, ino, offset, generation),
+        ExtentKey::ApfsClone(n) => (2, n, 0, 0),
+        ExtentKey::ApfsFile(n) => (3, n, 0, 0),
+    }
+}
+impl FileGroups {
+    fn finish(&mut self) {
+        if let Some(ino) = self.current.take() {
+            self.scratch.sort_unstable_by_key(|&(key, _)| extent_order(key));
+            let start = self.extents.len();
+            for (key, size) in self.scratch.drain(..) {
+                if self.extents.len() > start && self.extents.last().is_some_and(|last| last.0 == key) {
+                    let last = self.extents.last_mut().unwrap();
+                    last.1 = last.1.max(size);
+                } else {
+                    self.extents.push((key, size));
+                }
+            }
+            self.files.push((ino, start..self.extents.len()));
+        }
+    }
+    fn start(&mut self, ino: u64) {
+        self.finish();
+        self.current = Some(ino);
+    }
+}
+
+fn lookup_part(
+    file: &File,
+    tree: u64,
+    ino: u64,
+    scanner: &mut TreeSearch,
+    parts: &HashMap<u64, PartId>,
+    memo: &mut HashMap<u64, Option<PartId>>,
+) -> io::Result<Option<PartId>> {
+    if let Some(&part) = parts.get(&ino) {
+        return Ok(Some(part));
+    }
+    if let Some(&part) = memo.get(&ino) {
+        return Ok(part);
+    }
+    if ino == ROOT_INO {
+        return Ok(None);
+    }
+    // Directory hard links are prohibited by btrfs; one parent is enough.
+    let mut query = query(tree);
+    query.min_objectid = ino;
+    query.max_objectid = ino;
+    query.min_type = INODE_REF;
+    query.max_type = INODE_EXTREF;
+    let mut refs = Vec::new();
+    search(file, scanner, query, |k, v| parents(k, v, &mut refs))?;
+    // Insert a sentinel first to guard corrupt parent cycles.
+    memo.insert(ino, None);
+    let mut part = None;
+    for parent in refs {
+        if let Some(p) = lookup_part(file, tree, parent, scanner, parts, memo)? {
+            part = Some(p);
+            break;
+        }
+    }
+    memo.insert(ino, part);
+    Ok(part)
+}
+
+/// Plan one unit for each reachable subvolume. Other filesystems are returned to the caller.
+pub fn plan(store: &Path, parts: &[PathBuf]) -> io::Result<Plan> {
+    let root = File::open(store)?;
+    let fsid = sys::filesystem_uuid(root.as_fd())?;
+    let mut trees: HashMap<u64, HashMap<u64, PartId>> = HashMap::new();
+    let mut outside = Vec::new();
+    for (part, path) in parts.iter().enumerate() {
+        let file = File::open(path)?;
+        match sys::filesystem_uuid(file.as_fd()) {
+            Ok(id) if id == fsid => {}
+            Ok(_) => {
+                outside.push(part);
+                continue;
+            }
+            Err(e) if matches!(e.raw_os_error(), Some(libc::ENOTTY | libc::EINVAL)) => {
+                outside.push(part);
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+        let tree = sys::subvol_id(file.as_fd())?;
+        add_part(&mut trees, tree, file.metadata()?.ino(), part);
+    }
+    let mut children: HashMap<u64, Vec<(u64, u64)>> = HashMap::new();
+    let mut q = query(ROOT_TREE);
+    q.min_type = ROOT_REF;
+    q.max_type = ROOT_REF;
+    search(&root, &mut TreeSearch::new(SEARCH_BUFFER), q, |k, item| {
+        if k.kind == ROOT_REF {
+            children.entry(k.ino).or_default().push((k.offset, le64(item, ROOT_REF_DIRID)?));
+        }
+        Ok(())
+    })?;
+    // Iterate until no new root is reached; a unit explicitly named by a part already wins at
+    // its root, while ordinary nested part folders still win during ancestry resolution.
+    let mut scanner = TreeSearch::new(LOOKUP_BUFFER);
+    let mut pending: Vec<_> = trees.keys().copied().collect();
+    while let Some(tree) = pending.pop() {
+        let mut memo = HashMap::new();
+        for &(child, dir) in children.get(&tree).into_iter().flatten() {
+            if let Some(part) = lookup_part(&root, tree, dir, &mut scanner, &trees[&tree], &mut memo)? {
+                if let std::collections::hash_map::Entry::Vacant(entry) = trees.entry(child).or_default().entry(ROOT_INO) {
+                    entry.insert(part);
+                    pending.push(child);
+                }
+            }
+        }
+    }
+    Ok(Plan {
+        units: trees.into_iter().map(|(tree, parts)| TreeUnit { root: store.to_path_buf(), tree, parts }).collect(),
+        outside,
+    })
+}
+
+/// Visit each regular inode once for each part that contains one of its hard links.
+pub fn visit(unit: &TreeUnit, f: &mut dyn FnMut(PartId, &Held)) -> io::Result<()> {
+    let file = File::open(&unit.root)?;
+    let mut refs = Refs::default();
+    let mut groups = FileGroups::default();
+    let mut parent_scratch = Vec::new();
+    search(&file, &mut TreeSearch::new(SEARCH_BUFFER), query(unit.tree), |k, item| {
+        if groups.current.is_some_and(|ino| ino != k.ino) { groups.finish(); }
+        match k.kind {
+            INODE_ITEM => {
+                let mode = u32::from_le_bytes(bytes(item, INODE_MODE)?);
+                if mode & libc::S_IFMT == libc::S_IFREG { groups.start(k.ino); }
+            }
+            INODE_REF | INODE_EXTREF => {
+                parent_scratch.clear();
+                parents(k, item, &mut parent_scratch)?;
+                for &parent in &parent_scratch { refs.add(k.ino, parent); }
+            }
+            EXTENT_DATA if groups.current == Some(k.ino) => {
+                if let Some(ext) = extent(k.ino, k.offset, item)? { groups.scratch.push(ext); }
+            }
+            _ => {}
+        }
+        Ok(())
+    })?;
+    groups.finish();
+    let mut memo = HashMap::new();
+    let mut parts = Vec::new();
+    for (ino, range) in groups.files {
+        let shared = &groups.extents[range];
+        let alloc = shared.iter().map(|x| x.1).sum();
+        let held = Held { alloc, own: 0, exclusive: 0, shared };
+        file_parts(ino, &unit.parts, &refs, &mut memo, &mut parts);
+        for &part in &parts { f(part, &held); }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grouped_extents_deduplicate_per_inode() {
+        let mut groups = FileGroups::default();
+        groups.start(10);
+        groups.scratch.extend([(ExtentKey::Disk(100), 4), (ExtentKey::Disk(100), 8)]);
+        groups.start(11);
+        groups.scratch.push((ExtentKey::Disk(100), 8));
+        groups.finish();
+        assert_eq!(groups.files, [(10, 0..1), (11, 1..2)]);
+        assert_eq!(groups.extents, [(ExtentKey::Disk(100), 8), (ExtentKey::Disk(100), 8)]);
+    }
+
+    #[test]
+    fn grouping_parts_by_tree() {
+        let mut trees = HashMap::new();
+        add_part(&mut trees, 8, 300, 0);
+        add_part(&mut trees, 8, 301, 1);
+        add_part(&mut trees, 9, ROOT_INO, 2);
+        assert_eq!(trees.len(), 2);
+        assert_eq!(trees[&8], HashMap::from([(300, 0), (301, 1)]));
+        assert_eq!(trees[&9], HashMap::from([(ROOT_INO, 2)]));
+    }
+
+    #[test]
+    fn headers_and_advance() {
+        let mut h = [0; HEADER_SIZE];
+        h[HEADER_OBJECTID..HEADER_OBJECTID + 8].copy_from_slice(&17u64.to_ne_bytes());
+        h[HEADER_OFFSET..HEADER_OFFSET + 8].copy_from_slice(&24u64.to_ne_bytes());
+        h[HEADER_TYPE..HEADER_TYPE + 4].copy_from_slice(&INODE_REF.to_ne_bytes());
+        h[HEADER_LEN..HEADER_LEN + 4].copy_from_slice(&9u32.to_ne_bytes());
+        let (k, len) = header(&h).unwrap();
+        assert_eq!((k, len), (Key { ino: 17, kind: INODE_REF, offset: 24 }, 9));
+        assert!(header(&h[..HEADER_SIZE - 1]).is_err());
+        assert_eq!(advance(Key { ino: 1, kind: 2, offset: u64::MAX }), Some(Key { ino: 1, kind: 3, offset: 0 }));
+        assert_eq!(advance(Key { ino: 1, kind: MAX_KEY_TYPE, offset: u64::MAX }), Some(Key { ino: 2, kind: 0, offset: 0 }));
+        assert_eq!(advance(Key { ino: u64::MAX, kind: MAX_KEY_TYPE, offset: u64::MAX }), None);
+    }
+
+    #[test]
+    fn extent_fixtures() {
+        let mut data = vec![0; EXTENT_INLINE_HEADER + 7];
+        data[..8].copy_from_slice(&42u64.to_le_bytes());
+        assert_eq!(extent(8, 9, &data).unwrap(), Some((ExtentKey::Inline { ino: 8, offset: 9, generation: 42 }, 7)));
+        data.resize(EXTENT_REGULAR_SIZE, 0);
+        data[EXTENT_TYPE] = FILE_EXTENT_REG;
+        data[EXTENT_BYTENR..EXTENT_BYTENR + 8].copy_from_slice(&4096u64.to_le_bytes());
+        data[EXTENT_DISK_BYTES..EXTENT_DISK_BYTES + 8].copy_from_slice(&8192u64.to_le_bytes());
+        assert_eq!(extent(1, 0, &data).unwrap(), Some((ExtentKey::Disk(4096), 8192)));
+        data[EXTENT_TYPE] = FILE_EXTENT_PREALLOC;
+        assert_eq!(extent(1, 0, &data).unwrap(), Some((ExtentKey::Disk(4096), 8192)));
+        data[EXTENT_BYTENR..EXTENT_BYTENR + 8].fill(0);
+        assert_eq!(extent(1, 0, &data).unwrap(), None);
+        assert!(extent(1, 0, &data[..EXTENT_REGULAR_SIZE - 1]).is_err());
+    }
+
+    #[test]
+    fn refs_and_attribution() {
+        let mut item = vec![0; EXTREF_HEADER + 1];
+        item[..8].copy_from_slice(&20u64.to_le_bytes());
+        item[EXTREF_NAME_LEN..EXTREF_NAME_LEN + 2].copy_from_slice(&1u16.to_le_bytes());
+        let mut p = Vec::new();
+        parents(Key { ino: 9, kind: INODE_EXTREF, offset: 0 }, &item, &mut p).unwrap();
+        assert_eq!(p, [20]);
+        assert!(parents(Key { ino: 9, kind: INODE_EXTREF, offset: 0 }, &item[..EXTREF_HEADER], &mut Vec::new()).is_err());
+        let parts = HashMap::from([(10, 0), (20, 1)]);
+        let mut refs = Refs::default();
+        for (ino, parent) in [(30, 10), (40, 30), (40, 20), (40, 20)] { refs.add(ino, parent); }
+        let mut out = Vec::new();
+        file_parts(40, &parts, &refs, &mut HashMap::new(), &mut out);
+        assert_eq!(out, [0, 1]);
+        let nested = HashMap::from([(10, 0), (30, 1)]);
+        file_parts(40, &nested, &refs, &mut HashMap::new(), &mut out);
+        assert_eq!(out, [1]);
+    }
+}

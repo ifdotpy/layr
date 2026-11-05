@@ -247,7 +247,7 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
         }
     }
     let next = std::sync::atomic::AtomicUsize::new(0);
-    let keys: Mutex<HashMap<u64, (usize, u64)>> = Mutex::new(HashMap::new());
+    let keys: Mutex<HashMap<crate::fsutil::ExtentKey, (usize, u64)>> = Mutex::new(HashMap::new());
     let results: Vec<Mutex<Result<PartSpace>>> = parts.iter().map(|_| Mutex::new(Ok(PartSpace::default()))).collect();
     std::thread::scope(|s| {
         for _ in 0..WORKERS.min(units.len()) {
@@ -257,7 +257,7 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
                 let i = *i;
                 let in_trash = parts[i].0 == "trash" || parts[i].0.ends_with(": trash");
                 let mut own = 0u64;
-                let mut local: HashMap<u64, u64> = HashMap::new();
+                let mut local: HashMap<crate::fsutil::ExtentKey, u64> = HashMap::new();
                 let walked = crate::storage::visit_space(path, &mut |h| {
                     own += h.exclusive;
                     for &(k, b) in h.shared {
