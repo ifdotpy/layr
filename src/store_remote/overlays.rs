@@ -56,6 +56,46 @@ impl Published {
     }
 }
 
+/// The cache states of the cache overlay `orepo` that `line new X <line>` takes for each of `lines`, from the records
+/// alone (the states are not here yet): the newest cache of the line's own overlay line, and the newest cache saved
+/// with its head or else with its nearest ancestor that has one (`cache_source`).
+fn caches_of_lines(repo: &Repo, orepo: &Repo, lines: &[String]) -> Result<BTreeSet<String>> {
+    let mut saved_with: BTreeMap<String, String> = BTreeMap::new();
+    for (id, of) in orepo.p.db.cache_states_known()? {
+        // A save with no named change saves with an automatic state over the head: it counts for the head.
+        if let Some(st) = repo.p.db.state(&of)? {
+            if st.kind == crate::model::StateKind::Auto {
+                if let Some(parent) = st.parents.first() {
+                    saved_with.entry(parent.clone()).or_insert_with(|| id.clone());
+                }
+            }
+        }
+        saved_with.entry(of).or_insert(id);
+    }
+    let mut out = BTreeSet::new();
+    for name in lines {
+        let line = repo.line(name).with_context(|| format!("--caches-of: no line {name}"))?;
+        if let Some(own) = orepo.p.db.line_by_name(&crate::overlay::cache_line_name(&line.id))? {
+            out.insert(own.head);
+        }
+        let mut seen = BTreeSet::new();
+        let mut queue = std::collections::VecDeque::from([line.head.clone()]);
+        while let Some(id) = queue.pop_front() {
+            if seen.len() >= 200 || !seen.insert(id.clone()) {
+                continue;
+            }
+            if let Some(cache) = saved_with.get(&id) {
+                out.insert(cache.clone());
+                break;
+            }
+            if let Some(state) = repo.p.db.state(&id)? {
+                queue.extend(state.parents);
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// The signers of `keys` that `trusted` does not name yet. A signer that it names with another key is an error.
 fn not_trusted_yet(
     keys: &BTreeMap<String, VerifyingKey>,
@@ -777,7 +817,11 @@ pub(super) fn fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, repor
                 crate::cmd::replicate::trust(ctx, &orepo.p, machine, &hex::encode(key.to_bytes()))?;
             }
             let mut scoped = layer(store, &published, Some(identity), false)?;
-            merge(report, reader::fetch(&mut scoped, ctx, &mut orepo, opts)?, &name, "fetch");
+            let mut opts = opts.clone();
+            if is_cache && !opts.caches_of.is_empty() {
+                opts.only_caches = Some(caches_of_lines(repo, &orepo, &opts.caches_of)?);
+            }
+            merge(report, reader::fetch(&mut scoped, ctx, &mut orepo, &opts)?, &name, "fetch");
             Ok(())
         };
         match one() {
