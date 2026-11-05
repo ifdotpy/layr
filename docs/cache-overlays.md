@@ -298,7 +298,11 @@ Built on 2026-10-27: folder overlays and caches as cache overlays. Tests:
   setting `overlay.<name>.cache = true`. It then saves one snapshot of the folder as a state of the
   line's overlay line. Each state records the user, the platform (`<os>-<arch>`) and whether the
   line is protected, with the rules of `design.md` section 5 for who may take it.
-- `line new X <line>` takes the newest cache state of that line (dogfood item 10).
+- `line new X <line>` takes the newest cache state of that line (dogfood item 10). When that cache
+  was built at an older head of the line and a shared cache was saved with the head itself (by a
+  protected line, or by a check of that head: `<line>.checks-<platform>`, docs/checks.md), it takes
+  the cache of the head. A user's cache of an unprotected line at the head does not count. A merge of a line takes
+  its caches by the same rule.
   `line new X <state>` takes the cache of the state, else of its nearest ancestor that has one
   (item 21). For each state on that walk it takes first the newest cache saved with it
   (`cache_of`; a cache saved with an automatic state counts for its parent, the line head), and
@@ -316,7 +320,9 @@ Built on 2026-10-27: folder overlays and caches as cache overlays. Tests:
   the merge prints `Caches of '<line>' not merged`.
 - Cache overlay readers: the owner and every machine the project trusts (`machine:<UUID>`), not
   `*`. Local users take caches by the rules of `design.md` section 5 (their own, or saved on a
-  protected line).
+  protected line). A key manager adds a machine trusted since the overlay was made at its next
+  `save --caches` or push of the overlay, so a push right after `remote trust` gives the new
+  machine the caches that exist.
 - `layr cache pull <line or state>` (removed in section 15): the same for one line, without a merge (item 24).
 - `layr cache list -v` (removed in section 15) showed the size of each cache folder and the overlay state
   the line saved; `overlay list` shows both.
