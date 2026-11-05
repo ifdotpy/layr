@@ -142,8 +142,8 @@ fn spawn_keyframe(root: &std::path::Path, name: &str, id: &str) {
 /// The background keyframe (`layr __keyframe`): under the project lock, a head that still is a thin state with a
 /// long chain gets a complete tree. A command that opened the layers of the state before reads them without the
 /// lock, so the layer stays for `thin.view_seconds`, as a view that a command used. Then the layer goes and the
-/// free step moves the bases that nothing uses now. One process per project at a time; another one finds the work
-/// done or leaves it to the next save.
+/// free step moves the bases that nothing uses now. One process per project makes complete trees at a time; another
+/// one finds the work done or leaves it to the next save.
 #[cfg(target_os = "macos")]
 pub fn keyframe_process(root: &std::path::Path, name: &str, id: &str) -> Result<()> {
     let store = Store::open(root)?;
@@ -160,6 +160,8 @@ pub fn keyframe_process(root: &std::path::Path, name: &str, id: &str) -> Result<
         }
         crate::thin::complete_tree(&p, id)?;
     }
+    // The wait holds no lock: the keyframe of a newer head must not wait for it.
+    drop(lock);
     let wait = p.config_u64("thin.view_seconds", crate::thin::VIEW_IN_USE_SECONDS);
     std::thread::sleep(std::time::Duration::from_secs(wait));
     {

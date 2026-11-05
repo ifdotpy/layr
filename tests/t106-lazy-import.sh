@@ -69,15 +69,20 @@ CMD='! grep -qx "change 130" big.txt'
 RESULT=$(l bisect run --json --good $C10 --bad head -- sh -c "$CMD")
 eq "bisect over the imported range finds commit 130" "$(l rev-parse $C130)" "$(l rev-parse "$(printf '%s' "$RESULT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["state"])')")"
 
-# A state built for a command that needs its tree (try) is freed by gc --repair and built again.
+# A state built for a command that needs its tree (try) stays among the newest `import.trees` built trees. The
+# next builds push it out and free it in that command, with no gc, and it is built again when a command needs it.
 l diff $C30 $C31 > $T/d3031.out
 has "layr diff of commits 30 and 31 names the changed file" "big.txt" "$(cat $T/d3031.out)"
+l config import.trees 1 >/dev/null
 l try -q $C30 -- true
 l try -q $C31 -- true
 built=$(trees)
-l gc --repair -q
-# The two states that try built have no owner: they go. Heads and undo records keep theirs.
-ok "gc --repair frees the built states that no owner keeps" test "$(trees)" -le $((built - 2))
+# Commits that bisect and diff did not build: each try builds one. C7 first: C3 is no base of it.
+l try -q $(commit_of 7) -- true
+l try -q $(commit_of 3) -- true
+# The states that the ring let go and no owner keeps went in the build that pushed them out.
+ok "a newer build frees the built states that no owner keeps" test "$(trees)" -le $((built - 1))
+eq "gc --repair finds no built state to free" "freed 0 built Git state(s) (rebuilt on read)" "$(l gc --repair 2>&1 | grep 'built Git state')"
 ok "the tip and the old line keep their trees" test "$(l log --json | wc -l | tr -d ' ')" -eq 200
 l diff $C30 $C31 > $T/d3031b.out
 ok "a freed state reads again with the same content" cmp -s $T/d3031.out $T/d3031b.out
