@@ -67,10 +67,15 @@ jobs:
         run: |
           rustup target add "${{ matrix.target }}"
           export LAYR_BUILD_ID="$(git rev-parse --short=7 HEAD)" LAYR_BUILD_DATE="$(git show -s --format=%cs HEAD)"
-          cargo build --release --locked --target "${{ matrix.target }}"
+          # The local release profile keeps debug info for backtraces with lines. The asset drops it (205 MB to
+          # about 20 MB on Linux) and keeps the symbols, so a backtrace still names functions.
+          cargo build --release --locked --target "${{ matrix.target }}" --config 'profile.release.strip="debuginfo"'
           bin="target/${{ matrix.target }}/release/layr"
           "$bin" version
           if [ "$RUNNER_OS" = Linux ]; then file "$bin" | tee /dev/stderr | grep -Eq "static(-pie|ally) linked"; fi
+          size=$(wc -c < "$bin")
+          echo "size $size"
+          [ "$size" -le 33554432 ] || { echo "::error::layr is $size bytes, over 32 MiB"; exit 1; }
           name="layr-$TAG-${{ matrix.platform }}"
           mkdir "$name" && cp "$bin" "$name/layr"
           tar -czf "$name.tar.gz" "$name"
