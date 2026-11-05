@@ -272,6 +272,10 @@ show them.
 (pins excluded) and lists the present states that no owner names (leaks). It prints one line with
 the leaks and their bytes, and exits 1 when anything differs.
 
+No daemon runs `gc --repair`. `layr daemon` writes a daily report to its log, `layr garbage report
+(<project>): ...`, for each project where the check or `fsck --caches` finds something. A report names a
+gap in an operation that should have freed the data.
+
 `layr gc --repair` makes the table equal to the replay (pins of live processes kept, pins of dead
 ones released), marks the leaked states dead, releases expired refs, trims cache snapshots beyond
 `retention.caches`, runs the existing cache and overlay upkeep, runs the free step, and empties
