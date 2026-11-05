@@ -292,7 +292,16 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
     #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
     let outside = {
         let paths: Vec<_> = parts.iter().map(|(_, path)| path.clone()).collect();
-        match crate::btrfs_scan::plan(root, &paths) {
+        let plan = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    crate::sys::lower_thread_priority();
+                    crate::btrfs_scan::plan(root, &paths)
+                })
+                .join()
+                .unwrap()
+        });
+        match plan {
             Ok(plan) => {
                 let failed = Mutex::new(None);
                 let bulk = Mutex::new(HashMap::new());
