@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.28.0](https://github.com/ifdotpy/layr/compare/v0.27.0...v0.28.0) (2026-11-05)
+
+
+### Features
+
+* **remote:** Store cache layers as content-defined chunks in pack objects ([#270](https://github.com/ifdotpy/layr/issues/270)) ([4923fc9](https://github.com/ifdotpy/layr/commit/4923fc9b6f046240859b364465158b910ee94423))
+
+
+### Bug Fixes
+
+* **follow:** a push over another remote of the same repository is a cache source ([#279](https://github.com/ifdotpy/layr/issues/279)) ([1770ddb](https://github.com/ifdotpy/layr/commit/1770ddb139bbad8d741f32f916851bea45ba3102))
+
 ## [0.27.0](https://github.com/ifdotpy/layr/compare/v0.26.0...v0.27.0) (2026-11-05)
 
 
