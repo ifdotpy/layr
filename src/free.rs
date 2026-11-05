@@ -36,7 +36,8 @@ pub fn register(store: &Store, name: &str) {
 /// The free step of the projects that this command opened. Errors wait for the next command
 /// (the queue keeps the states). Test only: `LAYR_TEST_EXIT_AFTER_COMMIT` exits with status 86
 /// here, before any storage moves, when a queue is not empty (tests/t99-ownership-free.sh).
-pub fn finish(store: &Store) {
+pub fn finish(ctx: &crate::ctx::Ctx) {
+    let store = &ctx.store;
     release_held();
     let names: Vec<String> = match OPENED.lock() {
         Ok(mut opened) => {
@@ -50,6 +51,12 @@ pub fn finish(store: &Store) {
     for name in names {
         if !moved.is_empty() {
             keyframe_heads(store, &name, &moved);
+        }
+        // A ref whose time ran out releases its owners now: the free step below frees what it kept.
+        if expired_refs(store, &name) {
+            if let Err(e) = expire_refs(ctx, &name) {
+                eprintln!("layr: expired refs of {name} stay until the next command: {e:#}");
+            }
         }
         // A project without pending work is not opened: an open prints its trace (LAYR_TRACE).
         if !pending(store, &name) {
@@ -124,6 +131,31 @@ pub fn keyframe_process(root: &std::path::Path, name: &str, id: &str) -> Result<
         }
     }
     finish_project(&p)?;
+    Ok(())
+}
+
+/// True when a ref of project `name` has expired (a read-only query; no project open).
+fn expired_refs(store: &Store, name: &str) -> bool {
+    let Ok(dir) = store.project_dir(name) else { return false };
+    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY;
+    let Ok(conn) = rusqlite::Connection::open_with_flags(crate::store::db_file(&dir), flags) else { return false };
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM refs WHERE deleted=0 AND expires_at IS NOT NULL AND expires_at<=?1)",
+        [crate::ids::now_ms()],
+        |r| r.get::<_, bool>(0),
+    )
+    .unwrap_or(false)
+}
+
+/// The `ref.expire` record of each expired ref of project `name`, under its lock.
+fn expire_refs(ctx: &crate::ctx::Ctx, name: &str) -> Result<()> {
+    let repo = crate::repo::Repo::open(ctx, name)?;
+    let _lock = repo.p.lock()?;
+    for expired in repo.p.db.expired_refs(crate::ids::now_ms())? {
+        let mut rec = crate::model::Record::new("ref.expire");
+        rec.data = serde_json::json!({"ref_change": crate::model::RefChange { name: expired.name.clone(), before: Some(expired), after: None }});
+        repo.commit_record(ctx, rec)?;
+    }
     Ok(())
 }
 

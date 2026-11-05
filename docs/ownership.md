@@ -241,6 +241,9 @@ state is freed:
   after a free, layr runs `git gc --prune=now` in the background when more than 1 GiB of loose
   or unreferenced objects collected (`git count-objects`);
 - OCI derived refs: a `ref` owner with an expiry (`oci.retention`, default 30 days), not `None`.
+  A ref with an expiry (`ref set --ttl`, OCI) ends at the first command after its time: the free
+  step at the end of that command writes its `ref.expire` record and frees what only it kept.
+  Before, only `gc --repair` expired refs.
 
 Quarantine data (`git-damaged-*`) is never freed automatically: it can hold the only copy. `layr gc`
 lists it with its size and age, and `layr gc --drop-quarantine <path>` removes one after the owner
