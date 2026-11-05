@@ -162,7 +162,7 @@ pub fn local_config(ctx: &Ctx, repo: &Repo, a: &Parsed) -> Result<i32> {
     Ok(0)
 }
 
-const USAGE: &str = "usage: layr checks watch [--once] [--privileged-only] [--interval <seconds>] [--json]\n       layr checks pending [--state <rev>] [--platform <os>-<arch>] [--json]\nTo list check results, use layr attestations.";
+const USAGE: &str = "usage: layr checks watch [--once] [--privileged-only] [--interval <seconds>] [--json]\n       layr checks run --state <rev> [--privileged-only] [--json]\n       layr checks pending [--state <rev>] [--platform <os>-<arch>] [--json]\nTo list check results, use layr attestations.";
 
 pub fn checks(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let a = parse(
@@ -172,14 +172,19 @@ pub fn checks(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if a.pos == ["pending"] && a.paths.is_empty() && !a.has("--once") && !a.has("--privileged-only") && a.get("--interval").is_none() {
         return pending(ctx, &a);
     }
-    if a.pos != ["watch"] || !a.paths.is_empty() || a.get("--state").is_some() || a.get("--platform").is_some() {
+    // `run`: one pass over the jobs of one exact state, such as a commit that CI fetched from Git.
+    let run = a.pos == ["run"];
+    if !(a.pos == ["watch"] || run) || !a.paths.is_empty() || a.get("--state").is_some() != run || a.get("--platform").is_some() {
+        return Err(exit(128, USAGE));
+    }
+    if run && (a.has("--once") || a.get("--interval").is_some()) {
         return Err(exit(128, USAGE));
     }
     if !cfg!(any(target_os = "linux", target_os = "macos")) {
         bail!("automatic checks require Linux or macOS");
     }
     if ctx.caller.is_root() {
-        bail!("checks watch needs a non-root service user through the layr daemon");
+        bail!("checks {} needs a non-root service user through the layr daemon", a.pos[0]);
     }
     let interval: u64 = a.get("--interval").unwrap_or("5").parse().context("invalid check interval")?;
     if !(1..=3600).contains(&interval) {
@@ -187,6 +192,7 @@ pub fn checks(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let h = here(ctx)?;
     h.repo.require(ctx, "try")?;
+    let state = a.get("--state").map(|rev| crate::revs::resolve(&h.repo, h.line.as_ref(), rev)).transpose()?;
     // Match the queue runner: one watcher per project without holding the project write lock.
     let lock =
         std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(h.repo.p.meta_dir().join("checks.lock"))?;
@@ -195,7 +201,7 @@ pub fn checks(ctx: &Ctx, args: &[String]) -> Result<i32> {
     loop {
         let h = here(ctx)?;
         h.repo.require(ctx, "try")?;
-        let results = scan(ctx, &h.repo, a.has("--privileged-only"))?;
+        let results = scan(ctx, &h.repo, a.has("--privileged-only"), state.as_deref())?;
         if a.has("--json") {
             outln!(
                 ctx,
@@ -218,7 +224,7 @@ pub fn checks(ctx: &Ctx, args: &[String]) -> Result<i32> {
         // Flush each cycle: service output otherwise stays buffered throughout a watch.
         use std::io::Write;
         ctx.out.borrow_mut().flush()?;
-        if a.has("--once") {
+        if a.has("--once") || run {
             return Ok(if results.checks.iter().any(|r| r["exit"] != 0) { 1 } else { 0 });
         }
         std::thread::sleep(std::time::Duration::from_secs(interval));
@@ -372,8 +378,9 @@ fn attested(repo: &Repo, state: &str, argv: &[String], privileged: bool, want: O
     }))
 }
 
-fn scan(ctx: &Ctx, repo: &Repo, privileged_only: bool) -> Result<Scan> {
-    let Plan { policy, main_states, jobs, commands, privileged } = plan(repo, None)?;
+/// One pass of the executor: runs the jobs that no attestation covers, of every state or of `state` only.
+fn scan(ctx: &Ctx, repo: &Repo, privileged_only: bool, state: Option<&str>) -> Result<Scan> {
+    let Plan { policy, main_states, jobs, commands, privileged } = plan(repo, state)?;
     let here = platform();
     let limits = Limits {
         timeout: setting(&policy, "checks.timeout", json!(900))?.as_u64().context("invalid checks.timeout")?,
@@ -418,7 +425,7 @@ fn scan(ctx: &Ctx, repo: &Repo, privileged_only: bool) -> Result<Scan> {
             }
             continue;
         }
-        let result = super::admin::with_try_copy(ctx, repo, &state, &[], false, |dir| {
+        let result = super::admin::with_try_copy(ctx, repo, &state, &[], false, true, |dir| {
             let started = std::time::Instant::now();
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             let (code, log, truncated) = execute(ctx, repo, dir, &state, &argv, is_privileged, &limits)?;

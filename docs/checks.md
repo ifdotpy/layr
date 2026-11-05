@@ -60,7 +60,23 @@ laptop ran on `macos-aarch64` is not run again on another `macos-aarch64` machin
 `layr checks pending [--state <rev>] [--platform <os>-<arch>] [--json]` lists the check jobs that
 no active executor result covers for the platform (default: this machine's). `--state` limits
 the list to one state and adds the change checks (`checks.changes`) for it. A CI job resolves its
-commit with `layr rev-parse <commit>`, fetches the project records, and runs only these checks. The referenced derived state contains `check.log`.
+commit with `layr rev-parse <commit>`, fetches the project records, and runs only these checks.
+
+`layr checks run --state <rev> [--privileged-only] [--json]` is one executor pass over the jobs of
+that one state: the same jobs as `checks pending --state`, run with the same sandbox, approval and
+lock rules as `watch`, attested in the same way. Its JSON line and exit code are those of
+`watch --once`. A CI job for a Git commit fetches it (`layr git fetch <remote> <branch>`), runs
+`layr checks run --state <commit>`, and pushes the results.
+
+A check starts warm. Its copy of the state gets the cache of each cache overlay by the rules of
+`layr line new <state>` ([cache overlays](cache-overlays.md)): the newest cache saved with the state
+or its nearest ancestor that has one, of this platform and with a fitting key, from the caller's
+own caches or those of a protected line. The check can write in the copy, cache folders included.
+Nothing goes back: the copy and its caches are gone after the check, and the copy writes no
+overlay line. The key uses the environment of the caller of `checks`, not the empty environment of
+the sandbox, so pin key variables in the project (`[workspace.metadata.layr-retest] env` for cargo).
+
+The referenced derived state contains `check.log`.
 The ref retains logs through GC and syncs with ordinary project refs/states. Read
 logs with `layr show <log_ref>:check.log`; inspect evidence with
 `layr attestations <state> --kind check --json`. The site uses these attestations.

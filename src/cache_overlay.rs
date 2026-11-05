@@ -657,6 +657,33 @@ impl<'a> Repo<'a> {
     /// overlay line at that state. Returns the folders that got a cache.
     pub fn take_caches(&self, ctx: &Ctx, line: &Line, start: &str, source: Option<&Line>, w: &Path) -> Result<Vec<String>> {
         let mut taken = Vec::new();
+        for (name, folder, sid) in self.place_caches(ctx, line, start, source, w)? {
+            let info = self.need_overlay(&name)?;
+            let orepo = self.overlay_repo(&name)?;
+            let _lock = orepo.p.lock()?;
+            orepo.ensure_overlay_line(ctx, &Repo::overlay_line_name(&info, &line.id, line.owner), &sid, line.owner)?;
+            taken.push(folder);
+        }
+        // The new files have the time of the checkout; the ones the caches were built from get their time back.
+        if let Err(e) = crate::source_times::apply(w, &taken) {
+            eprintln!("warning: source file times of the caches not set: {e:#}");
+        }
+        Ok(taken)
+    }
+
+    /// The caches of a folder `w` that only lives for one command (a check copy): as `take_caches`,
+    /// without overlay lines, so the copy writes no record. Returns the folders that got a cache.
+    pub fn copy_caches(&self, ctx: &Ctx, line: &Line, start: &str, w: &Path) -> Result<Vec<String>> {
+        let taken: Vec<String> = self.place_caches(ctx, line, start, None, w)?.into_iter().map(|(_, folder, _)| folder).collect();
+        if let Err(e) = crate::source_times::apply(w, &taken) {
+            eprintln!("warning: source file times of the caches not set: {e:#}");
+        }
+        Ok(taken)
+    }
+
+    /// The writable cache snapshots of `take_caches` in `w`: overlay name, folder and cache state.
+    fn place_caches(&self, ctx: &Ctx, line: &Line, start: &str, source: Option<&Line>, w: &Path) -> Result<Vec<(String, String, String)>> {
+        let mut taken = Vec::new();
         if self.p.is_overlay() {
             return Ok(taken);
         }
@@ -686,7 +713,6 @@ impl<'a> Repo<'a> {
                 self.report_key_miss(&name, &folder, &from, uid, &key.parts);
                 continue;
             };
-            let info = self.need_overlay(&name)?;
             let orepo = self.overlay_repo(&name)?;
             orepo.hold(orepo.pin(&[sid.as_str()])?);
             let _t = crate::trace::named(|| format!("take_caches {folder} of line {} from state {sid} (line {})", line.name, line.id));
@@ -698,13 +724,7 @@ impl<'a> Repo<'a> {
             let uniform = btrfs::cache_snapshot(&orepo.p.state_path(&sid), &cp)?;
             let source_owner = orepo.p.db.state(&sid)?.and_then(|s| s.cache_by);
             crate::repo::give_cache_tree(&cp, uniform, source_owner, uid, gid)?;
-            let _lock = orepo.p.lock()?;
-            orepo.ensure_overlay_line(ctx, &Repo::overlay_line_name(&info, &line.id, line.owner), &sid, line.owner)?;
-            taken.push(folder);
-        }
-        // The new files have the time of the checkout; the ones the caches were built from get their time back.
-        if let Err(e) = crate::source_times::apply(w, &taken) {
-            eprintln!("warning: source file times of the caches not set: {e:#}");
+            taken.push((name, folder, sid));
         }
         Ok(taken)
     }

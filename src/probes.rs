@@ -343,7 +343,7 @@ pub fn run(ctx: &Ctx, repo: &Repo, input: &Input, selected: Option<&str>) -> Res
         if source_status(repo, input) != "available" {
             bail!("{}; probe '{name}' has no retained result", source_status(repo, input));
         }
-        let result = crate::cmd::admin::with_try_copy(ctx, repo, &input.state, &input.layers, false, |dir| {
+        let result = crate::cmd::admin::with_try_copy(ctx, repo, &input.state, &input.layers, false, false, |dir| {
             if source_status(repo, input) != "available" {
                 bail!("{}", source_status(repo, input));
             }
