@@ -146,7 +146,20 @@ has "an up-to-date pass saves the caches with the head" "up to date; caches save
 eq "the next pass does nothing" "origin/main: up to date" "$(l follow --run 2>/dev/null)"
 eq "the pass keeps the cache files" bin-main "$(cat target/debug/x 2>/dev/null)"
 
-# 4d. A line that pushes over another remote of the same repository (https next to ssh; here file:// next to the
+# 4d. A local merge of a line into main saves the caches with no build: the next pass builds and saves them, and the
+#     pass after it does nothing. The remote takes the head, so the passes are up to date.
+l line new loc main >/dev/null
+cd $P/loc
+echo loc > loc.txt; l add loc.txt; l save -m "loc work" -q
+l save --caches -q
+cd $P/main
+l merge loc -q >/dev/null 2>&1
+l git push -q origin HEAD:refs/heads/main >/dev/null 2>&1
+cd $U; git pull -q origin main; cd $P/main
+has "the pass after a local merge builds and saves the caches" "up to date; caches saved with the head (target)" "$(l follow --run 2>&1)"
+eq "the next pass does nothing" "origin/main: up to date" "$(l follow --run 2>/dev/null)"
+
+# 4e. A line that pushes over another remote of the same repository (https next to ssh; here file:// next to the
 #     path) is a cache source of the pass that follows origin.
 l git remote add other "file://$R" >/dev/null 2>&1
 l line new viaother main >/dev/null

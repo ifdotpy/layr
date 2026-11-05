@@ -614,11 +614,13 @@ impl<'a> Repo<'a> {
 
     /// The cache folders of `line` with no cache saved with its head: a cache in the working folder whose
     /// newest saved state on this line's overlay line was saved with another state, or no state was saved.
-    /// `save --caches` with no named change saves with an automatic state over the head: that counts. A
-    /// damaged folder is left out: the save refuses it until a prune of it succeeds.
+    /// `save --caches` with no named change saves with an automatic state over the head: that counts, unless the
+    /// save ran with no build (`set_unbuilt`). A damaged folder is left out: the save refuses it until a prune of it
+    /// succeeds.
     pub fn caches_behind_head(&self, line: &Line) -> Result<Vec<String>> {
         let w = self.working(line);
         let damaged = self.damaged_folders(line)?;
+        let unbuilt = self.unbuilt_file(line).exists();
         let mut out = Vec::new();
         for (name, folder) in self.folder_overlays()? {
             if damaged.contains(&folder) || !fsutil::safe_join(&w, &folder).is_ok_and(|p| btrfs::is_subvolume(&p)) {
@@ -635,12 +637,11 @@ impl<'a> Repo<'a> {
                 None => None,
             };
             let saved = match of {
+                _ if unbuilt => false,
                 Some(of) if of == line.head => true,
-                Some(of) => self
-                    .p
-                    .db
-                    .state(&of)?
-                    .is_some_and(|st| st.kind == StateKind::Auto && st.parents.first() == Some(&line.head)),
+                Some(of) => {
+                    self.p.db.state(&of)?.is_some_and(|st| st.kind == StateKind::Auto && st.parents.first() == Some(&line.head))
+                }
                 None => false,
             };
             if !saved {
@@ -922,6 +923,23 @@ impl<'a> Repo<'a> {
             Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BTreeSet::new()),
             Err(e) => Err(e.into()),
+        }
+    }
+
+    /// The mark of a followed line whose caches were saved with no build after its head moved (a local merge):
+    /// `caches_behind_head` counts its cache folders, so the next follow pass builds and saves them.
+    fn unbuilt_file(&self, line: &Line) -> PathBuf {
+        self.p.meta_dir().join("line-locks").join(format!("{}.unbuilt", line.id))
+    }
+
+    pub fn set_unbuilt(&self, line: &Line, unbuilt: bool) -> Result<()> {
+        let path = self.unbuilt_file(line);
+        if unbuilt {
+            return crate::fsutil::atomic_write(&path, line.head.as_bytes(), 0o600);
+        }
+        match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+            _ => Ok(()),
         }
     }
 
