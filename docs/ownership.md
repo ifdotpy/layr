@@ -234,8 +234,9 @@ lists it with its size and age, and `layr gc --drop-quarantine <path>` removes o
 looked at it.
 
 Cache swap leftovers (`<cache>.layr-old-<id>`, `<cache>.layr-new-<id>`) are cache data, not quarantine.
-`layr gc` lists them with their size; `layr gc --repair` moves them to the trash unless a process uses
-them or their swap is not finished.
+`layr gc` lists them with their size; `layr gc --repair` moves them to the trash unless a process can
+write into them (its working directory, a file open for writing, a shared writable map) or their swap
+is not finished. A process that only reads keeps its open files.
 
 ## Trash
 
