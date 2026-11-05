@@ -646,6 +646,10 @@ fn empty_tree(path: &Path, late: &(dyn Fn() -> bool + Sync), deleted: &mut usize
     }
     match crate::storage::delete_tree(path) {
         Ok(()) => *deleted += 1,
+        // Another emptier deleted it, or an entry of it, at the same time: that is no failure. A path that is still
+        // here goes in the next pass.
+        Err(_) if fs::symlink_metadata(path).is_err() => *deleted += 1,
+        Err(e) if e.chain().any(|c| c.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)) => {}
         Err(e) => failed.push(format!("{}: {e:#}", path.display())),
     }
     true
@@ -1618,6 +1622,32 @@ pub fn failpoint(point: &str) {
 mod trash_tests {
     use super::empty_trash;
     use std::fs;
+
+    #[test]
+    fn two_emptiers_of_one_trash_report_no_failure() {
+        for round in 0..5 {
+            let dir = std::env::temp_dir().join(format!("layr-trash-race-{}", crate::ids::new_id()));
+            for t in 0..4 {
+                for i in 0..400 {
+                    let sub = dir.join(format!("t{t}")).join(format!("d{}", i % 20));
+                    fs::create_dir_all(&sub).unwrap();
+                    fs::write(sub.join(format!("f{i}")), b"x").unwrap();
+                }
+            }
+            let failed: Vec<String> = std::thread::scope(|scope| {
+                let a = scope.spawn(|| empty_trash(&dir, None).1);
+                let b = scope.spawn(|| empty_trash(&dir, None).1);
+                let mut f = a.join().unwrap();
+                f.extend(b.join().unwrap());
+                f
+            });
+            // A pass may leave a path that the other emptier was deleting; a second pass ends it.
+            let (_, again) = empty_trash(&dir, None);
+            assert!(failed.is_empty() && again.is_empty(), "round {round}: {failed:?} {again:?}");
+            assert!(fs::read_dir(&dir).unwrap().next().is_none(), "round {round}: the trash is empty");
+            fs::remove_dir(&dir).unwrap();
+        }
+    }
 
     #[test]
     fn a_folder_of_many_entries_goes_whole_and_a_spent_budget_deletes_nothing() {
