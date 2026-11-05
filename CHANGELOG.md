@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.30.1](https://github.com/ifdotpy/layr/compare/v0.30.0...v0.30.1) (2026-11-05)
+
+
+### Bug Fixes
+
+* **follow:** the prune of the background pass gets 10 min, not the 120 s of a command ([#294](https://github.com/ifdotpy/layr/issues/294)) ([4be07b4](https://github.com/ifdotpy/layr/commit/4be07b4921fb1392d5198e0edb2141cfc69bb346))
+
 ## [0.30.0](https://github.com/ifdotpy/layr/compare/v0.29.1...v0.30.0) (2026-11-05)
 
 
