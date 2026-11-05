@@ -26,6 +26,9 @@ use std::time::{Duration, Instant};
 pub const HOOK_LIMIT: Duration = Duration::from_secs(120);
 /// The soft limit of one build of the standard commands (`warm`): a build of a large project takes minutes.
 pub const WARM_LIMIT: Duration = Duration::from_secs(30 * 60);
+/// The soft limit of a prune in the background follow pass: no one waits for it, and a loaded machine (tests of other
+/// lines) makes a prune of seconds take minutes. A prune cut at its limit keeps its garbage until the next pass.
+pub const BACKGROUND_PRUNE_LIMIT: Duration = Duration::from_secs(10 * 60);
 /// The hard limit is the soft limit plus this grace: the parent kills the worker's process group then.
 const GRACE: Duration = Duration::from_secs(10);
 /// The time limit of a recovery worker (it only restores a copy), and the time the parent waits for it.
