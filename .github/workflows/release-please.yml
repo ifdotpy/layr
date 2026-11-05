@@ -2,10 +2,19 @@ name: release-please
 
 # Keeps a release pull request with the next version and its notes (CHANGELOG.md) from the
 # Conventional Commits on main. Merging that pull request tags the version and makes the
-# GitHub release.
+# GitHub release. The assets job then builds the layr binary of each platform and attaches it
+# to that release. A release made with GITHUB_TOKEN starts no other workflow, so the build is a
+# job here. A run by hand (workflow_dispatch) attaches the binaries to an existing tag.
 on:
   push:
     branches: [main]
+  pull_request:
+    paths: [.github/workflows/release-please.yml]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag (for example v0.28.0)
+        required: true
 
 permissions:
   contents: write
@@ -13,9 +22,62 @@ permissions:
 
 jobs:
   release-please:
+    if: github.event_name == 'push'
     runs-on: ubuntu-24.04
+    outputs:
+      created: ${{ steps.release.outputs.release_created }}
+      tag: ${{ steps.release.outputs.tag_name }}
     steps:
       - uses: googleapis/release-please-action@v4
+        id: release
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+  assets:
+    needs: release-please
+    # A pull request that changes this file builds the binaries and attaches nothing.
+    if: >-
+      always() && (needs.release-please.outputs.created == 'true' || github.event_name == 'workflow_dispatch'
+      || github.event_name == 'pull_request')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - platform: linux-aarch64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          - platform: macos-aarch64
+            runner: macos-15
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    env:
+      TAG: ${{ needs.release-please.outputs.tag || inputs.tag || 'pr' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.sha || needs.release-please.outputs.tag || inputs.tag }}
+      - name: Install musl
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
+      - name: Build
+        run: |
+          rustup target add "${{ matrix.target }}"
+          export LAYR_BUILD_ID="$(git rev-parse --short=7 HEAD)" LAYR_BUILD_DATE="$(git show -s --format=%cs HEAD)"
+          cargo build --release --locked --target "${{ matrix.target }}"
+          bin="target/${{ matrix.target }}/release/layr"
+          "$bin" version
+          if [ "$RUNNER_OS" = Linux ]; then file "$bin" | tee /dev/stderr | grep -Eq "static(-pie|ally) linked"; fi
+          name="layr-$TAG-${{ matrix.platform }}"
+          mkdir "$name" && cp "$bin" "$name/layr"
+          tar -czf "$name.tar.gz" "$name"
+          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+          echo "ASSET=$name.tar.gz" >> "$GITHUB_ENV"
+      - name: Attach to the release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" "$ASSET" "$ASSET.sha256" --clobber
