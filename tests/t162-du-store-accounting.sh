@@ -52,6 +52,18 @@ eq "reflink adds no store bytes" "$(printf %s "$one" | value total)" "$(printf %
 eq "reflink moves the extent to shared" $(( $(printf %s "$one" | value shared) + 2 * MiB )) "$(printf %s "$cloned" | value shared)"
 eq "neither line frees the reflink" "$(printf %s "$base" | value frees p/lines/main)" "$(printf %s "$cloned" | value frees p/lines/main)"
 
+# A plain store folder and a subvolume must use the same extent keys.
+mkdir "$LAYR_ROOT/plain"
+plain_base=$(report)
+random_file $((2 * MiB)) plain-source
+plain_one=$(report)
+cp --reflink=always plain-source "$LAYR_ROOT/plain/clone"
+plain_clone=$(report)
+eq "plain-folder reflink adds no store bytes" "$(printf %s "$plain_one" | value total)" "$(printf %s "$plain_clone" | value total)"
+eq "plain-folder reflink moves the extent to shared" $(( $(printf %s "$plain_one" | value shared) + 2 * MiB )) "$(printf %s "$plain_clone" | value shared)"
+eq "line does not free the plain-folder reflink" "$(printf %s "$plain_base" | value frees p/lines/main)" "$(printf %s "$plain_clone" | value frees p/lines/main)"
+eq "plain folder does not free the reflink" 0 "$(printf %s "$plain_clone" | value frees plain)"
+
 # A range clone of the second half still pins the entire physical extent.
 # Check the fixture is one extent before relying on that precise expectation.
 random_file $((2 * MiB)) partial-source
