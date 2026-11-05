@@ -15,6 +15,17 @@ use std::sync::{Mutex, OnceLock};
 /// the command ends and forgets them.
 static OPENED: Mutex<BTreeSet<(PathBuf, String)>> = Mutex::new(BTreeSet::new());
 
+/// Line heads that records of this command moved to (`Db::derive`): at the end of the command a thin head with a
+/// long chain gets a complete tree, in the background (`keyframe_heads`).
+static MOVED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+/// A record moved a line head to `state`.
+pub fn head_moved(state: &str) {
+    if let Ok(mut moved) = MOVED.lock() {
+        moved.insert(state.to_string());
+    }
+}
+
 /// Called when a project opens: its queue is checked at the end of the command.
 pub fn register(store: &Store, name: &str) {
     if let Ok(mut opened) = OPENED.lock() {
@@ -35,7 +46,11 @@ pub fn finish(store: &Store) {
         }
         Err(_) => return,
     };
+    let moved: BTreeSet<String> = MOVED.lock().map(|mut m| std::mem::take(&mut *m)).unwrap_or_default();
     for name in names {
+        if !moved.is_empty() {
+            keyframe_heads(store, &name, &moved);
+        }
         // A project without pending work is not opened: an open prints its trace (LAYR_TRACE).
         if !pending(store, &name) {
             continue;
@@ -53,6 +68,63 @@ pub fn finish(store: &Store) {
     if let Ok(mut opened) = OPENED.lock() {
         opened.retain(|(root, _)| *root != store.root);
     }
+}
+
+/// The heads in `moved` that are thin states of project `name` with a chain longer than `thin.chain`: each gets a
+/// complete tree in a background process (`layr __keyframe`), so that no chain grows without end and the bases
+/// below it can go. A layer walk of at most `thin.chain` steps per moved head; no walk of the project.
+fn keyframe_heads(store: &Store, name: &str, moved: &BTreeSet<String>) {
+    #[cfg(target_os = "macos")]
+    {
+        let Ok(dir) = store.project_dir(name) else { return };
+        let delta = |id: &str| dir.join("deltas").join(id);
+        if !moved.iter().any(|id| delta(id).is_dir()) {
+            return;
+        }
+        let Ok(p) = Project::open(store, name) else { return };
+        let max = p.config_u64("thin.chain", crate::thin::MAX_CHAIN) as usize;
+        for id in moved.iter().filter(|id| p.delta_path(id).is_dir()) {
+            if crate::thin::chain_len(&p, id) > max {
+                spawn_keyframe(&store.root, name, id);
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (store, name, moved);
+}
+
+/// Start `layr __keyframe <store> <project> <state>` in the background; without it the next command tries again.
+#[cfg(target_os = "macos")]
+fn spawn_keyframe(root: &std::path::Path, name: &str, id: &str) {
+    let Ok(exe) = std::env::current_exe() else { return };
+    let _ = std::process::Command::new(exe)
+        .args(["__keyframe".as_ref(), root.as_os_str(), name.as_ref(), id.as_ref()])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
+/// The background keyframe (`layr __keyframe`): under the project lock, a head that still is a thin state with a
+/// long chain gets a complete tree, then the free step moves the bases that nothing uses now. One process per
+/// project at a time; another one finds the work done.
+#[cfg(target_os = "macos")]
+pub fn keyframe_process(root: &std::path::Path, name: &str, id: &str) -> Result<()> {
+    let store = Store::open(root)?;
+    let p = Project::open(&store, name)?;
+    let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(p.meta_dir().join("keyframe.lock"))?;
+    if rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).is_err() {
+        return Ok(());
+    }
+    {
+        let _lock = p.lock()?;
+        let max = p.config_u64("thin.chain", crate::thin::MAX_CHAIN) as usize;
+        if p.delta_path(id).is_dir() && crate::thin::chain_len(&p, id) > max {
+            crate::thin::make_keyframe(&p, id)?;
+        }
+    }
+    finish_project(&p)?;
+    Ok(())
 }
 
 /// True when a project has queued states or pins to release. Reads the database directly.
@@ -92,8 +164,15 @@ pub fn finish_project(p: &Project) -> Result<usize> {
 fn free_queued(p: &Project) -> Result<Vec<String>> {
     let queued = p.db.queued_frees()?;
     let mut dead = Vec::new();
+    let mut treeless = Vec::new();
     for state in queued {
         if p.db.is_owned(&state)? {
+            // Only record owners keep it (it lost its last tree owner): an imported state can lose its tree, git
+            // builds it again on read. The others keep their tree.
+            if !p.db.has_tree_owner(&state)? && p.has_state(&state) {
+                treeless.push(state);
+                continue;
+            }
             // Owned again (a record named it after its death): it is live, if its storage is here.
             if p.has_state(&state) {
                 p.db.set_present(&state, true)?;
@@ -103,8 +182,9 @@ fn free_queued(p: &Project) -> Result<Vec<String>> {
             dead.push(state);
         }
     }
+    let mut gone_trees = drop_trees(p, treeless)?;
     if dead.is_empty() {
-        return Ok(Vec::new());
+        return Ok(std::mem::take(&mut gone_trees));
     }
     for state in &dead {
         if let Some(s) = p.db.state(state)? {
@@ -113,8 +193,36 @@ fn free_queued(p: &Project) -> Result<Vec<String>> {
             }
         }
     }
-    let gone = p.delete_states(&dead);
+    let mut gone = p.delete_states(&dead);
     p.db.dequeue_frees(&gone)?;
+    gone.extend(gone_trees);
+    Ok(gone)
+}
+
+/// The trees of the owned states `states` that only record owners keep: an imported state that git can build
+/// loses its tree and stays as a record (`present=0`). A base of a present thin layer stays queued until its layers
+/// go. Any other state keeps its tree and leaves the queue. Returns the states whose tree went.
+fn drop_trees(p: &Project, states: Vec<String>) -> Result<Vec<String>> {
+    if states.is_empty() {
+        return Ok(Vec::new());
+    }
+    let bases: BTreeSet<String> = p.db.present_layer_bases()?.into_iter().collect();
+    // A tree that git built lately stays (`gitbridge::keep_newest_built` frees it when newer ones push it out).
+    let (recent, states): (Vec<String>, Vec<String>) = states.into_iter().partition(|s| crate::gitbridge::recently_built(p, s));
+    p.db.dequeue_frees(&recent)?;
+    let (waiting, candidates): (Vec<String>, Vec<String>) = states.into_iter().partition(|s| bases.contains(s));
+    let buildable = crate::gitbridge::buildable_states(p, &candidates)?;
+    let keep: Vec<String> = candidates.iter().filter(|s| !buildable.contains(*s)).cloned().collect();
+    p.db.dequeue_frees(&keep)?;
+    let drop: Vec<String> = buildable.into_iter().collect();
+    let gone = p.delete_states(&drop);
+    for state in &gone {
+        if !p.has_state(state) {
+            p.db.set_present(state, false)?;
+        }
+    }
+    p.db.dequeue_frees(&gone)?;
+    let _ = waiting;
     Ok(gone)
 }
 

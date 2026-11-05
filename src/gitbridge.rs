@@ -973,21 +973,26 @@ fn stored_commit(repo: &Repo, state: &str) -> Result<Option<String>> {
 /// The states of `states` that `build_tree` can build (`buildable`), checked with one `git cat-file`
 /// process for all of them: one process per state took minutes on a long imported history.
 pub fn buildable_set(repo: &Repo, states: &[String]) -> Result<BTreeSet<String>> {
+    buildable_states(&repo.p, states)
+}
+
+/// `buildable_set` for a project (the free step has no `Repo`).
+pub fn buildable_states(p: &crate::store::Project, states: &[String]) -> Result<BTreeSet<String>> {
     let mut out = BTreeSet::new();
-    if states.is_empty() || !has_store(repo) {
+    if states.is_empty() || !p.git_dir().join("objects").is_dir() {
         return Ok(out);
     }
     let mut cat: Option<CatFile> = None;
     for state in states {
-        let imported = matches!(repo.p.db.state(state), Ok(Some(s)) if s.kind == StateKind::Import);
-        if !imported || !repo.p.db.has_git_import(state).unwrap_or(false) {
+        let imported = matches!(p.db.state(state), Ok(Some(s)) if s.kind == StateKind::Import);
+        if !imported || !p.db.has_git_import(state).unwrap_or(false) {
             continue;
         }
-        let squash = repo.p.db.squash_commits_of(state)?;
-        for c in repo.p.db.git_commits_of(state)?.into_iter().filter(|c| !squash.contains(c)) {
+        let squash = p.db.squash_commits_of(state)?;
+        for c in p.db.git_commits_of(state)?.into_iter().filter(|c| !squash.contains(c)) {
             let cat = match &mut cat {
                 Some(c) => c,
-                None => cat.insert(CatFile::new(&store(repo))?),
+                None => cat.insert(CatFile::new(&p.git_dir())?),
             };
             // A missing object answers "<oid> missing" and the process stays usable.
             if cat.object(&c, "commit").is_ok() {
@@ -1078,6 +1083,59 @@ pub fn build_tree(repo: &Repo, state: &str, source: Option<&Path>) -> Result<()>
         return Err(e);
     }
     repo.p.db.set_present(state, true)?;
+    if let Err(e) = keep_newest_built(&repo.p, state) {
+        eprintln!("warning: older built Git trees stay: {e:#}");
+    }
+    Ok(())
+}
+
+/// The trees that git built for states that no tree owner keeps: the newest `import.trees` stay, so a second
+/// `try` or `bisect` of the same commit reads its tree (`meta/built/<state>`).
+pub const BUILT_TREES: u64 = 16;
+
+fn built_dir(p: &crate::store::Project) -> PathBuf {
+    p.meta_dir().join("built")
+}
+
+/// Whether `state` is among the trees that git built last (`keep_newest_built`).
+pub fn recently_built(p: &crate::store::Project, state: &str) -> bool {
+    built_dir(p).join(state).is_file()
+}
+
+/// Marks `state` as built now, and frees the trees of the built states beyond the newest `import.trees` that no
+/// tree owner keeps and no thin layer uses as its base: git builds them again on read. The caller holds the
+/// project lock.
+fn keep_newest_built(p: &crate::store::Project, state: &str) -> Result<()> {
+    let dir = built_dir(p);
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join(state), b"")?;
+    let max = p.config_u64("import.trees", BUILT_TREES) as usize;
+    let mut stamps: Vec<(std::time::SystemTime, String)> = std::fs::read_dir(&dir)?
+        .flatten()
+        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.file_name().to_string_lossy().into_owned())))
+        .filter(|(_, id)| crate::model::is_uuid(id))
+        .collect();
+    if stamps.len() <= max {
+        return Ok(());
+    }
+    stamps.sort_by(|a, b| b.0.cmp(&a.0));
+    let bases: BTreeSet<String> = p.db.present_layer_bases()?.into_iter().collect();
+    let mut drop = Vec::new();
+    for (_, id) in stamps.into_iter().skip(max) {
+        if id == state || bases.contains(&id) {
+            continue;
+        }
+        // A tree owner keeps it: the free step drops it when that owner goes.
+        if !p.db.has_tree_owner(&id)? && p.has_state(&id) {
+            drop.push(id.clone());
+        }
+        let _ = std::fs::remove_file(dir.join(&id));
+    }
+    for id in p.delete_states(&drop) {
+        if !p.has_state(&id) {
+            p.db.set_present(&id, false)?;
+        }
+    }
     Ok(())
 }
 

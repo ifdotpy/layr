@@ -485,6 +485,7 @@ impl Db {
                      ON CONFLICT(line, machine) DO UPDATE SET head=?3, time=?4, ord=?5 WHERE excluded.ord > line_heads.ord",
                 )?
                 .execute(params![id, rec.machine, a.head, rec.time, ord])?;
+                crate::free::head_moved(&a.head);
             }
             let row_machine: Option<String> =
                 tx.prepare_cached("SELECT machine FROM lines WHERE id=?1")?.query_row(params![id], |r| r.get(0)).optional()?;

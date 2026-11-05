@@ -87,6 +87,7 @@ ok "built states were more than the tip" test "$built" -gt 1
 
 # The same log with every tree on disk (the tree path, as before the change) in the same run. The
 # log that reads from git must take at most three times as long.
+l config import.trees 1000 >/dev/null
 for c in $C; do l try -q $c -- true; done
 ok "every commit of the history has its tree on disk (at least 200 entries)" test "$(trees)" -ge 200
 start=$(now)

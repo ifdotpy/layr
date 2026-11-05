@@ -1771,7 +1771,7 @@ fn leftovers(ctx: &Ctx, repo: &Repo, repair: bool, dry: bool, quiet: bool) -> Re
 /// Owner kinds that keep the tree of a state (docs/ownership.md, "Storage that a live state
 /// needs"). `parent`, `derived`, `ref`, `tag`, `remote-ref` and `export` keep only the record.
 /// `conflict` is kept too: a conflict needs the trees of its base, ours and theirs.
-const TREE_OWNERS: [&str; 8] = ["head", "auto", "undo", "deleted", "park", "overlay", "pin", "conflict"];
+use crate::owners::TREE_OWNERS;
 
 /// `gc --repair`: frees the trees of imported states that no owner keeps, and that git can build
 /// again (`gitbridge::build_tree`). A dry run lists them and frees nothing.
