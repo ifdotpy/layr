@@ -15,6 +15,8 @@ cd $LAYR_ROOT/projects/it/lines/main || exit 1
 l protect main --remove >/dev/null 2>&1 || true
 l config undo.ops 1 >/dev/null
 l config retention.auto 1 >/dev/null
+# The ring of trees that git built lately keeps one: c1, which the reset builds, pushes c2 out of it.
+l config import.trees 1 >/dev/null
 has "the imported head keeps its tree" "would free 0 built Git state(s)" "$(l gc -n --repair 2>/dev/null)"
 # main goes back to c1 (a complete tree: c2 is no layer's base), and the next operation moves c2 out of the undo ring.
 l reset --hard "$c1" -q >/dev/null 2>&1

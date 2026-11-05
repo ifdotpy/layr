@@ -30,8 +30,9 @@ pub const VIEW_SECONDS: u64 = 600;
 /// The views that stay when a command makes a new one (setting `thin.views`): the newest ones.
 pub const VIEWS: u64 = 16;
 /// A view that a command used within this time stays also beyond `thin.views`: another command may read it now
-/// (setting `thin.view_seconds`).
-const VIEW_IN_USE_SECONDS: u64 = 60;
+/// (setting `thin.view_seconds`). A background keyframe waits as long before it drops the layer that a reader may
+/// still read.
+pub const VIEW_IN_USE_SECONDS: u64 = 60;
 
 #[derive(Debug, Clone)]
 pub struct Layer {

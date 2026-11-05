@@ -139,8 +139,10 @@ fn spawn_keyframe(root: &std::path::Path, name: &str, id: &str) {
 }
 
 /// The background keyframe (`layr __keyframe`): under the project lock, a head that still is a thin state with a
-/// long chain gets a complete tree, then the free step moves the bases that nothing uses now. One process per
-/// project at a time; another one finds the work done.
+/// long chain gets a complete tree. A command that opened the layers of the state before reads them without the
+/// lock, so the layer stays for `thin.view_seconds`, as a view that a command used. Then the layer goes and the
+/// free step moves the bases that nothing uses now. One process per project at a time; another one finds the work
+/// done or leaves it to the next save.
 #[cfg(target_os = "macos")]
 pub fn keyframe_process(root: &std::path::Path, name: &str, id: &str) -> Result<()> {
     let store = Store::open(root)?;
@@ -152,7 +154,17 @@ pub fn keyframe_process(root: &std::path::Path, name: &str, id: &str) -> Result<
     {
         let _lock = p.lock()?;
         let max = p.config_u64("thin.chain", crate::thin::MAX_CHAIN) as usize;
-        if p.delta_path(id).is_dir() && crate::thin::chain_len(&p, id) > max {
+        if !p.delta_path(id).is_dir() || crate::thin::chain_len(&p, id) <= max {
+            return Ok(());
+        }
+        crate::thin::complete_tree(&p, id)?;
+    }
+    let wait = p.config_u64("thin.view_seconds", crate::thin::VIEW_IN_USE_SECONDS);
+    std::thread::sleep(std::time::Duration::from_secs(wait));
+    {
+        let _lock = p.lock()?;
+        // A command can remove the view in the wait: then the state stays thin and the next save tries again.
+        if p.state_path(id).is_dir() && p.delta_path(id).is_dir() {
             crate::thin::make_keyframe(&p, id)?;
         }
     }
@@ -178,10 +190,17 @@ fn drop_derived(store: &Store, name: &str, left: &BTreeSet<String>, deleted: &BT
     }
     if !left.is_empty() {
         let heads: BTreeSet<String> = p.db.lines()?.into_iter().map(|l| l.head).collect();
+        let mut caches_left = false;
         for state in left.iter().filter(|s| !heads.contains(*s) && crate::model::is_uuid(s)) {
             if p.db.git_commit_of(state)?.is_none() {
                 let _ = std::fs::remove_file(p.git_dir().join("layr-index").join(state));
             }
+            caches_left |= p.db.state(state)?.is_some_and(|s| s.caches.values().any(|n| p.cache_path(state, n).exists()));
+        }
+        // A head left a state with cache snapshots: it no longer keeps them, so those beyond `retention.caches` go.
+        if caches_left {
+            let _lock = p.lock()?;
+            crate::cmd::admin::trash_excess_caches(&p)?;
         }
     }
     Ok(())

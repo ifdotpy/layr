@@ -90,7 +90,9 @@ On APFS a thin state is a layer over a base state (`src/thin.rs`). A command tha
 to a thin state whose chain is longer than `thin.chain` (32) starts `layr __keyframe` in the
 background: it gives that head a complete tree under the project lock and runs the free step, so no
 chain grows without end and the bases below can go. The walk is at most `thin.chain` steps for each
-moved head; nothing walks the project.
+moved head; nothing walks the project. A command that opened the layers of that head before reads them
+without the lock, so the layer stays `thin.view_seconds` (60 s, as a view in use) after the complete
+tree is made, and only then goes.
 
 A view is a complete copy of a thin state that a read made (`thin::complete_tree`). When a command
 makes a new view, only the newest `thin.views` (16) stay; the others go to the trash, and the next
