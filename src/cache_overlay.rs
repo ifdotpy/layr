@@ -391,7 +391,7 @@ impl<'a> Repo<'a> {
     /// Add machines that the project trusts since the cache overlay was made to its readers. Only a
     /// key manager of the overlay may; elsewhere the readers stay, and the next save on a manager
     /// adds them. A failure leaves the readers as they were.
-    fn sync_cache_readers(&self, ctx: &Ctx, name: &str) {
+    pub(crate) fn sync_cache_readers(&self, ctx: &Ctx, name: &str) {
         let r = (|| -> Result<()> {
             let orepo = self.overlay_repo(name)?;
             let have: BTreeSet<String> = orepo
@@ -569,6 +569,8 @@ impl<'a> Repo<'a> {
         // no named change saves with an automatic state over the head: that cache counts for the
         // head too.
         let mut saved_with: std::collections::HashMap<String, String> = Default::default();
+        // The project states that each usable cache state counts for.
+        let mut counts_for: std::collections::HashMap<String, Vec<String>> = Default::default();
         for (id, of) in orepo.p.db.cache_states()? {
             if !self.usable_cache(&orepo, &info.root, &id, uid, key)? {
                 continue;
@@ -577,15 +579,20 @@ impl<'a> Repo<'a> {
                 if st.kind == crate::model::StateKind::Auto {
                     if let Some(parent) = st.parents.first() {
                         saved_with.entry(parent.clone()).or_insert_with(|| id.clone());
+                        counts_for.entry(id.clone()).or_default().push(parent.clone());
                     }
                 }
             }
+            counts_for.entry(id.clone()).or_default().push(of.clone());
             saved_with.entry(of).or_insert(id);
         }
         let start = match from {
             Source::Line(l) => {
                 if let Some(s) = of_line(&l.id)? {
-                    return Ok(Some(s));
+                    // The line's own cache was built at an older head, and another line or machine
+                    // (CI) saved a cache with the head itself: that one fits the head better.
+                    let at_head = saved_with.get(&l.head).filter(|_| !counts_for.get(&s).is_some_and(|of| of.contains(&l.head)));
+                    return Ok(Some(at_head.cloned().unwrap_or(s)));
                 }
                 l.head.clone()
             }

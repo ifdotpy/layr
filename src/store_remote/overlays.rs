@@ -349,6 +349,11 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
         store.pin.as_ref().and_then(|pin| pin.paper_recipient.clone())
     };
     for name in repo.visible_overlay_names(ctx)? {
+        // A machine trusted since the last cache save reads the caches from this push on, not only
+        // after the next save.
+        if repo.need_overlay(&name)?.cache {
+            repo.sync_cache_readers(ctx, &name);
+        }
         let orepo = match repo.overlay_repo(&name) {
             Ok(orepo) => orepo,
             Err(_) => {
