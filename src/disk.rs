@@ -170,19 +170,28 @@ impl Disk {
 
     fn refresh(&self) -> Result<()> {
         let (snapshot, _, _, _) = Self::load(&self.url, &self.env, &self.access)?;
-        *self.snapshot.write().unwrap() = Arc::new(snapshot);
+        let new = Arc::new(snapshot);
+        let old = {
+            let mut guard = self.snapshot.write().unwrap();
+            std::mem::replace(&mut *guard, new)
+        };
+        // Dropping the old tree can be expensive; let foreground lookups proceed first.
+        drop(old);
         Ok(())
     }
 
     fn background(self: &Arc<Self>, interval: Duration) {
         let weak = Arc::downgrade(self);
-        std::thread::spawn(move || loop {
-            std::thread::sleep(interval);
-            let Some(disk) = weak.upgrade() else {
-                return;
-            };
-            if disk.refresh().is_err() {
-                eprintln!("layr mount: refresh failed; the previous view remains available");
+        std::thread::spawn(move || {
+            crate::sys::lower_thread_priority();
+            loop {
+                std::thread::sleep(interval);
+                let Some(disk) = weak.upgrade() else {
+                    return;
+                };
+                if disk.refresh().is_err() {
+                    eprintln!("layr mount: refresh failed; the previous view remains available");
+                }
             }
         });
     }

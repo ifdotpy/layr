@@ -16,15 +16,21 @@ use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::process::Command;
 
+#[cfg(target_os = "linux")]
+const NICE_LOWEST: libc::c_int = 19;
+#[cfg(target_os = "linux")]
+const IOPRIO_WHO_PROCESS: libc::c_int = 1;
+#[cfg(target_os = "linux")]
+const IOPRIO_CLASS_BE: libc::c_int = 2;
+#[cfg(target_os = "linux")]
+const IOPRIO_BE_LOWEST: libc::c_int = 7;
+#[cfg(target_os = "linux")]
+const IOPRIO_CLASS_SHIFT: libc::c_int = 13;
+
 /// Lower the calling thread's CPU and I/O priority, best effort. Call only from threads
 /// dedicated to background work: on Linux these priorities apply per thread.
 #[cfg(target_os = "linux")]
 pub fn lower_thread_priority() {
-    const NICE_LOWEST: libc::c_int = 19;
-    const IOPRIO_WHO_PROCESS: libc::c_int = 1;
-    const IOPRIO_CLASS_BE: libc::c_int = 2;
-    const IOPRIO_BE_LOWEST: libc::c_int = 7;
-    const IOPRIO_CLASS_SHIFT: libc::c_int = 13;
     // SAFETY: both calls operate on the calling thread, and have no pointer arguments.
     unsafe {
         libc::setpriority(libc::PRIO_PROCESS, 0, NICE_LOWEST);
@@ -32,8 +38,78 @@ pub fn lower_thread_priority() {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+thread_local! {
+    static BACKGROUND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(target_os = "macos")]
+pub fn lower_thread_priority() {
+    BACKGROUND.set(true);
+    // SAFETY: this changes only the calling thread and has no pointer arguments.
+    unsafe {
+        libc::setpriority(libc::PRIO_DARWIN_THREAD, 0, libc::PRIO_DARWIN_BG);
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn lower_thread_priority() {}
+
+/// Lower priority for a process dedicated to background work and its future workers.
+#[cfg(target_os = "macos")]
+pub fn lower_process_priority() {
+    BACKGROUND.set(true);
+    // SAFETY: this changes only the calling process and has no pointer arguments.
+    unsafe {
+        libc::setpriority(libc::PRIO_DARWIN_PROCESS, 0, libc::PRIO_DARWIN_BG);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn lower_process_priority() {
+    lower_thread_priority();
+}
+
+/// Make a child of a background thread a background process on macOS. Linux inherits priorities.
+#[cfg(target_os = "macos")]
+pub fn inherit_background(cmd: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    if BACKGROUND.get() {
+        // SAFETY: the child calls only setpriority before exec; failure is best effort.
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setpriority(libc::PRIO_DARWIN_PROCESS, 0, libc::PRIO_DARWIN_BG);
+                Ok(())
+            });
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn inherit_background(_cmd: &mut Command) {}
+
+#[cfg(all(test, target_os = "linux"))]
+mod priority_tests {
+    use super::{IOPRIO_BE_LOWEST, IOPRIO_CLASS_BE, IOPRIO_CLASS_SHIFT, IOPRIO_WHO_PROCESS, NICE_LOWEST};
+
+    fn priority() -> (libc::c_int, libc::c_long) {
+        // SAFETY: both calls query the calling thread and have no pointer arguments.
+        unsafe { (libc::getpriority(libc::PRIO_PROCESS, 0), libc::syscall(libc::SYS_ioprio_get, IOPRIO_WHO_PROCESS, 0)) }
+    }
+
+    #[test]
+    fn lowers_only_the_calling_thread() {
+        let before = priority();
+        let child = std::thread::spawn(|| {
+            super::lower_thread_priority();
+            priority()
+        })
+        .join()
+        .unwrap();
+        assert_eq!(child, (NICE_LOWEST, ((IOPRIO_CLASS_BE << IOPRIO_CLASS_SHIFT) | IOPRIO_BE_LOWEST).into()));
+        assert_eq!(priority(), before);
+    }
+}
 
 /// Bound automatic check processes before executing any project code.
 #[cfg(any(target_os = "linux", target_os = "macos"))]

@@ -91,6 +91,7 @@ fn main() {
     let mut argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.first().map(String::as_str) == Some("__empty-trash") && argv.len() == 2 {
         // The trash of a store, emptied in the background after a command (`store::Lock`).
+        crate::sys::lower_process_priority();
         if let Err(e) = crate::store::empty_trash_process(std::path::Path::new(&argv[1])) {
             eprintln!("layr empty trash: {e:#}");
             std::process::exit(1);
