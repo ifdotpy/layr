@@ -50,7 +50,7 @@ assert cache['folder'] == 'target' and cache['state'] == 'cache', cache
 assert cache['properties'] == {'history': 1, 'quiet': True, 'merge': 'union-theirs', 'gc': 'none', 'prune': 'auto'}, cache
 assert 'size' not in cache and isinstance(cache['saved'], str), cache
 PY
-# Fix the measured tree at exactly 11 bytes, excluding the saved source-time metadata.
+# Fix the measured tree at exactly 12 bytes, excluding the saved source-time metadata.
 rm -f target/.layr-times
 mkdir -p target/nested
 printf payload > target/nested/extra
