@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.32.0](https://github.com/ifdotpy/layr/compare/v0.31.0...v0.32.0) (2026-11-06)
+
+
+### Features
+
+* **daemon:** a daily garbage report instead of the hourly repair ([#315](https://github.com/ifdotpy/layr/issues/315)) ([d117748](https://github.com/ifdotpy/layr/commit/d11774811a55d82d5e1c41e89a6607b8897aa8b4))
+* **ownership:** free data in the operation that makes it dead ([#304](https://github.com/ifdotpy/layr/issues/304)) ([3ed4f30](https://github.com/ifdotpy/layr/commit/3ed4f301223f95fd1c6d8fc5b94bef4920fc0026))
+* **queue:** push merged lines and apply person requests in the daemon ([#311](https://github.com/ifdotpy/layr/issues/311)) ([740b2fa](https://github.com/ifdotpy/layr/commit/740b2fad53746a6918935864f0438e042a010353))
+* **release:** attach --public-files writes plaintext release files for the gateway ([#314](https://github.com/ifdotpy/layr/issues/314)) ([c12637c](https://github.com/ifdotpy/layr/commit/c12637cc5eb8a946810074ff91d28ffc6d2604fe))
+
+
+### Bug Fixes
+
+* **cache:** a process that only reads a cache folder does not stop its save ([#306](https://github.com/ifdotpy/layr/issues/306)) ([0de0f1d](https://github.com/ifdotpy/layr/commit/0de0f1de581edcfc589f1f5333c3d054c4f0c3b8))
+* **records:** parse floats exactly; a bad check digest no longer stops a fetch ([#317](https://github.com/ifdotpy/layr/issues/317)) ([fdcff0f](https://github.com/ifdotpy/layr/commit/fdcff0f206da5f870f6f549a2cca12f66381fa46))
+* **remote:** a cache state with a missing chunk fails before its files are read, once ([#309](https://github.com/ifdotpy/layr/issues/309)) ([bb0f435](https://github.com/ifdotpy/layr/commit/bb0f4357e26de97c4eefdd1b92bae212a7a49899))
+* **remote:** a sweep releases a dead chunk only after a second pass 2 hours later ([#310](https://github.com/ifdotpy/layr/issues/310)) ([475f0f9](https://github.com/ifdotpy/layr/commit/475f0f9004f8e33612f6ba0ad0542dc1bc92ce60))
+
+
+### Performance
+
+* **du:** scan btrfs metadata in bulk and size workers to the machine ([#308](https://github.com/ifdotpy/layr/issues/308)) ([071a6c6](https://github.com/ifdotpy/layr/commit/071a6c6a0d34f77c696a55cd26fe57118d238abe))
+* **remote:** read record segments 32 at a time ([#313](https://github.com/ifdotpy/layr/issues/313)) ([4cc3357](https://github.com/ifdotpy/layr/commit/4cc33572df4a2fd493255d81224a87e7e3a6b259))
+* **service:** run background work at lowered CPU and I/O priority ([#318](https://github.com/ifdotpy/layr/issues/318)) ([0a6ef8f](https://github.com/ifdotpy/layr/commit/0a6ef8f811b3e8fc24da1c350daced83cf3e7ca1))
+
 ## [0.31.0](https://github.com/ifdotpy/layr/compare/v0.30.1...v0.31.0) (2026-11-05)
 
 
