@@ -429,6 +429,16 @@ pub fn approval_count(
         + person_approval_count(repo, policy, rule, base, subject, layr_model::protection::ApprovalMode::Ref)?)
 }
 
+/// The policy in the form of the model (`layr_model::policy::Policy`).
+pub fn shared_policy(policy: &Policy) -> layr_model::policy::Policy {
+    layr_model::policy::Policy {
+        access: policy.access.clone(),
+        grants: policy.grants.clone(),
+        deny: policy.deny.clone(),
+        protect: policy.protect.clone(),
+    }
+}
+
 pub fn person_approval_count(
     repo: &crate::repo::Repo,
     policy: &Policy,
@@ -437,11 +447,5 @@ pub fn person_approval_count(
     subject: &str,
     mode: layr_model::protection::ApprovalMode,
 ) -> anyhow::Result<usize> {
-    let shared = layr_model::policy::Policy {
-        access: policy.access.clone(),
-        grants: policy.grants.clone(),
-        deny: policy.deny.clone(),
-        protect: policy.protect.clone(),
-    };
-    Ok(repo.read_model()?.allowed_person_approvals(subject, base, mode, &shared, rule).len())
+    Ok(repo.read_model()?.allowed_person_approvals(subject, base, mode, &shared_policy(policy), rule).len())
 }

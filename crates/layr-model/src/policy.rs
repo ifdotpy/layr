@@ -82,6 +82,14 @@ pub struct RuleSpec {
     /// Who may approve: principals (an approver matches all of them); none: a maintainer.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub approvers: Vec<String>,
+    /// Path owners: a merge whose change touches a path of the pattern needs an approval of the merged state by one
+    /// of these principals (`layr protect <line> --owner <path>=<principal>,...`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub owners: BTreeMap<String, Vec<String>>,
+    /// Paths whose change keeps an approval: an approval of an earlier version of the same change counts for a newer
+    /// version that changes only these paths after it (`layr protect <line> --keep-approvals <path>,...`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keep_approvals: Vec<String>,
 }
 
 /// The rule that applies to a line or ref: every matching pattern combined, the most restrictive value
@@ -96,12 +104,30 @@ pub struct Rule {
     pub paths: BTreeMap<String, Role>,
     pub approvals: u32,
     pub approvers: Vec<String>,
+    /// Owner groups (a path pattern and its principals); each one that a change touches needs its own approval.
+    pub owners: Vec<(String, Vec<String>)>,
+    pub keep_approvals: Vec<String>,
 }
 
 impl Rule {
     /// The role a merge needs that changes `path`: `update`, or higher for a path rule.
     pub fn role_for_path(&self, path: &str) -> Role {
         self.paths.iter().filter(|(pat, _)| path_matches(pat, path)).map(|(_, r)| *r).fold(self.update, Role::max)
+    }
+
+    /// The owner groups that a change of `paths` needs an approval of: one approval per matching pattern, by one of
+    /// its principals.
+    pub fn owners_for<'a>(&self, paths: impl IntoIterator<Item = &'a str> + Clone) -> Vec<(String, Vec<String>)> {
+        self.owners
+            .iter()
+            .filter(|(pattern, _)| paths.clone().into_iter().any(|path| path_matches(pattern, path)))
+            .cloned()
+            .collect()
+    }
+
+    /// An approval of an earlier version stays for a newer one that changed only `paths` after it.
+    pub fn keeps_approval<'a>(&self, mut paths: impl Iterator<Item = &'a str>) -> bool {
+        !self.keep_approvals.is_empty() && paths.all(|path| self.keep_approvals.iter().any(|pattern| path_matches(pattern, path)))
     }
 }
 
@@ -127,6 +153,8 @@ impl RuleSpec {
             paths: self.paths.iter().map(|(p, r)| (p.clone(), Role::parse(r).unwrap_or(Role::Admin))).collect(),
             approvals: self.approvals.unwrap_or(0),
             approvers: self.approvers.clone(),
+            owners: self.owners.iter().map(|(p, who)| (p.clone(), who.clone())).collect(),
+            keep_approvals: self.keep_approvals.clone(),
         }
     }
 }
@@ -324,6 +352,18 @@ impl Policy {
                         }
                         v
                     },
+                    // The owner groups of every rule, each needing its own approval; a path keeps approvals only
+                    // when every rule keeps it.
+                    owners: {
+                        let mut v = o.owners;
+                        for group in r.owners {
+                            if !v.contains(&group) {
+                                v.push(group);
+                            }
+                        }
+                        v
+                    },
+                    keep_approvals: o.keep_approvals.into_iter().filter(|p| r.keep_approvals.contains(p)).collect(),
                 },
             });
         }

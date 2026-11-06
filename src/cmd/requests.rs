@@ -298,7 +298,9 @@ fn effect(ctx: &Ctx, repo: &Repo, request: &Request) -> Result<Record> {
             repo.source_state(state)?;
             repo.line(into)?;
             let rule = policy.rule_for(into).unwrap_or_else(|| crate::access::RuleSpec::default().rule());
-            if !policy.person_may_approve(&rule, login) {
+            // An owner of a path of the line (`--owner`) approves for that path.
+            let owner = rule.owners.iter().any(|(_, who)| who.iter().any(|p| p == &format!("person:{login}")));
+            if !policy.person_may_approve(&rule, login) && !owner {
                 bail!("person is not an approver for this line");
             }
             let withdraw = matches!(request.action, Action::Withdraw { .. });
