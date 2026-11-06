@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.34.0](https://github.com/ifdotpy/layr/compare/v0.33.0...v0.34.0) (2026-11-06)
+
+
+### Features
+
+* **caches:** a sweep entry with its own target folder, command and env ([#332](https://github.com/ifdotpy/layr/issues/332)) ([fd87e6f](https://github.com/ifdotpy/layr/commit/fd87e6f5f8683eb4bc753610622404e688a69720))
+* **change:** change diff --since-review starts at the version you approved ([#326](https://github.com/ifdotpy/layr/issues/326)) ([7d357ab](https://github.com/ifdotpy/layr/commit/7d357ab768943cc4a1228c9ae51b6e6e37019bc4))
+* **merge:** a protected merge needs a passing check on each platform of checks.platforms ([#325](https://github.com/ifdotpy/layr/issues/325)) ([c9b85e7](https://github.com/ifdotpy/layr/commit/c9b85e7f38e618e0b30935037aa9cab3bfa2271f))
+* **probes:** HTML structure snapshots drop generated ids, times and ignored attributes ([#327](https://github.com/ifdotpy/layr/issues/327)) ([217ff18](https://github.com/ifdotpy/layr/commit/217ff18e8b83ef098d01cc798a85233e81f6c752))
+
+
+### Bug Fixes
+
+* **caches:** gc=lru removes whole build units and the folders it empties ([#330](https://github.com/ifdotpy/layr/issues/330)) ([9d001fb](https://github.com/ifdotpy/layr/commit/9d001fba9748c78c768b6ebf4665605e8aca59aa))
+* **gateway:** reads and create-only writes are asked again while the gateway restarts ([#329](https://github.com/ifdotpy/layr/issues/329)) ([3cd92e8](https://github.com/ifdotpy/layr/commit/3cd92e8014fb66221f5d521112b718bfe1c1713f))
+* **paths:** one argument with many lines names the cause ([#328](https://github.com/ifdotpy/layr/issues/328)) ([aa94d71](https://github.com/ifdotpy/layr/commit/aa94d712bd848ed1f6a72078cec8284e4645036e))
+* **release:** public release files reach the gateway at the root of the store ([#324](https://github.com/ifdotpy/layr/issues/324)) ([2162af3](https://github.com/ifdotpy/layr/commit/2162af3b4bc13a3c525c6f8a3452f85bf68643aa))
+* **remote:** a 404 that says no such project is an error, not a missing object ([#334](https://github.com/ifdotpy/layr/issues/334)) ([7231496](https://github.com/ifdotpy/layr/commit/72314966d04c2dbefb64706bc4b836b9cf83423c))
+* **revs:** a Git commit id with several states resolves to one of them ([#333](https://github.com/ifdotpy/layr/issues/333)) ([7dc73e5](https://github.com/ifdotpy/layr/commit/7dc73e5d90cdaf8279a6c54e70cd8d3fc36597e0))
+
 ## [0.33.0](https://github.com/ifdotpy/layr/compare/v0.32.0...v0.33.0) (2026-11-06)
 
 
