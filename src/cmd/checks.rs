@@ -91,12 +91,12 @@ pub fn platform() -> String {
 }
 
 /// Whether the platform `have` (`<os>-<arch>`) meets the entry `want` of `checks.platforms`.
-fn meets(want: &str, have: &str) -> bool {
+pub(crate) fn meets(want: &str, have: &str) -> bool {
     have == want || have.strip_prefix(want).is_some_and(|arch| arch.starts_with('-'))
 }
 
 /// The platform entries of the check `name`; None: one run on any platform.
-fn platforms_of(platforms: &Value, name: &str) -> Vec<Option<String>> {
+pub(crate) fn platforms_of(platforms: &Value, name: &str) -> Vec<Option<String>> {
     match platforms.get(name) {
         Some(Value::String(one)) => vec![Some(one.clone())],
         Some(Value::Array(list)) => list.iter().filter_map(|e| e.as_str().map(|e| Some(e.to_owned()))).collect(),

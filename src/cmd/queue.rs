@@ -263,6 +263,13 @@ fn run_entries(ctx: &Ctx, repo: &Repo, into: Option<&str>, skip_busy: bool) -> R
             break (result, probes);
         };
         let (outcome, probes) = outcome;
+        // A check that waits for a runner of another platform keeps the entry pending; the entries after it wait too.
+        if outcome.as_ref().err().is_some_and(|e| e.downcast_ref::<super::mergecmd::ChecksWaiting>().is_some()) {
+            if let Err(e) = &outcome {
+                eprintln!("layr queue: entry '{}' waits: {e:#}", entry.id);
+            }
+            break;
+        }
         match outcome {
             Ok(0) => {}
             result => {

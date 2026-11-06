@@ -663,8 +663,40 @@ fn run_line_checks(
     quiet: bool,
     queue: Option<&QueuedMerge<'_>>,
 ) -> Result<()> {
+    let platforms = repo.p.config_value("checks.platforms")?.unwrap_or_else(|| serde_json::json!({}));
     for (name, command) in &settled.commands {
         let argv = layr_model::protection::check_argv(command);
+        // A check with platforms (`checks.platforms`) needs a passing run on each of them: a run of this machine
+        // counts for its own platform only, and another platform waits for its runner.
+        let wants: Vec<String> = super::checks::platforms_of(&platforms, name).into_iter().flatten().collect();
+        if !wants.is_empty() {
+            let here = super::checks::platform();
+            for want in &wants {
+                if passed_on(repo, candidate, &argv, want)? {
+                    continue;
+                }
+                if !super::checks::meets(want, &here) {
+                    return Err(anyhow::Error::from(ChecksWaiting(format!(
+                        "check '{name}' has no passing run on {want} for {}, the state '{}' would take; a {want} runner runs it (layr checks watch)",
+                        ids::short(candidate),
+                        line.name
+                    ))));
+                }
+                let code = super::admin::run_check(ctx, repo, candidate, &argv, command, quiet)?;
+                if code != 0 {
+                    return Err(exit(
+                        1,
+                        format!(
+                            "error: check '{name}' failed (exit {code}) on {}, the state '{}' would take; the line stays at {}",
+                            ids::short(candidate),
+                            line.name,
+                            ids::short(head)
+                        ),
+                    ));
+                }
+            }
+            continue;
+        }
         let evidence = layr_model::protection::required_check(
             name,
             Some(command),
@@ -902,6 +934,28 @@ pub(crate) fn caches_contained(repo: &Repo, line: &Line, theirs: &Line) -> Resul
         }
     }
     Ok(None)
+}
+
+/// A required check has no passing run on a platform that this machine is not: the merge waits for that runner. A
+/// queue entry stays pending.
+#[derive(Debug)]
+pub struct ChecksWaiting(pub String);
+impl std::fmt::Display for ChecksWaiting {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for ChecksWaiting {}
+
+/// Whether an active check attestation of `state` with `argv` passed on a platform that meets `want`.
+fn passed_on(repo: &Repo, state: &str, argv: &[String], want: &str) -> Result<bool> {
+    let subject = crate::model::Subject { kind: "state".into(), id: state.to_owned() };
+    Ok(crate::probes::active_checks(repo, &subject)?.into_values().any(|(_, r)| {
+        let check = &r.data["check"];
+        check["argv"] == serde_json::json!(argv)
+            && check["exit"].as_i64() == Some(0)
+            && check["platform"].as_str().is_some_and(|have| super::checks::meets(want, have))
+    }))
 }
 
 #[derive(Debug)]
