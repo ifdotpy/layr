@@ -290,8 +290,17 @@ fn filesystem_fd(file: &std::fs::File, dev: u64) -> FsId {
     crate::sys::filesystem_uuid(file.as_fd()).map(FsId::BtrfsUuid).unwrap_or(FsId::Device(dev))
 }
 
+#[cfg(feature = "overlayfs")]
+fn overlay_namespace<'a>(path: &'a Path, backing: Option<&'a Path>) -> &'a Path {
+    backing.unwrap_or(path)
+}
+
 fn filesystem(path: &Path) -> std::io::Result<FsId> {
     use std::os::unix::fs::MetadataExt;
+    #[cfg(feature = "overlayfs")]
+    let backing = crate::storage::du_backing(path);
+    #[cfg(feature = "overlayfs")]
+    let path = overlay_namespace(path, backing.as_deref());
     #[cfg(target_os = "linux")]
     {
         if let Ok(file) = std::fs::File::open(path) {
@@ -515,6 +524,15 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
 mod tests {
     use super::vanished;
     use std::path::PathBuf;
+
+    #[cfg(feature = "overlayfs")]
+    #[test]
+    fn overlay_mount_uses_backing_namespace() {
+        let view = std::path::Path::new("/store/line");
+        let backing = std::path::Path::new("/store/.layr-overlayfs");
+        assert_eq!(super::overlay_namespace(view, Some(backing)), backing);
+        assert_eq!(super::overlay_namespace(view, None), view);
+    }
 
     #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
     #[test]

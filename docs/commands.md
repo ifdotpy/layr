@@ -207,7 +207,8 @@ holds, also data that its own files share among themselves, which deleting the p
 data counts once under a key that names it, and belongs to a part when no other part references it.
 The last lines show the data that several parts share and the store total. On btrfs, the bulk scan
 counts whole allocated extents, including compressed and partially referenced extents. It reports
-committed on-disk allocation, so writes from the current transaction may not appear yet.
+committed on-disk allocation, so writes from the current transaction may not appear yet. On
+OverlayFS, data awaiting writeback can count more than once when seen through a view and its layer.
 
 Storage is freed when a state loses its last owner (docs/ownership.md). A command that drops
 the last owner of a state moves its storage to the trash after its commit and after the store
