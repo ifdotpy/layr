@@ -228,7 +228,7 @@ Git bridge:
 Overlays (files with their own readers and history, shown in lines):
    overlay create, set, list, readers, use, move, remote, log, show, diff, grep, ls-files
 Projects and machines:
-   init [--allow-root-snapshots], projects, project delete <project>, config, cache, export, gc, du [<line>...] [--json], fsck [--caches], reindex,
+   init [--allow-root-snapshots], projects, project delete <project>, config, export, gc, du [<line>...] [--json], fsck [--caches], reindex,
    daemon [--allow-root-snapshots]
 
 Lines are folders: <root>/projects/<project>/lines/<line>. Run commands inside a line folder.
@@ -238,15 +238,14 @@ Lines are folders: <root>/projects/<project>/lines/<line>. Run commands inside a
 const OVERLAY_READS: &[&str] =
     &["log", "show", "diff", "grep", "ls-files", "blame", "rev-parse", "merge-base", "fsck", "reindex", "help", "version"];
 
-/// Public command names, including removed commands with a replacement diagnostic.
+/// Public command names.
 pub const COMMANDS: &[&str] = &[
     "help", "--help", "-h", "version", "--version", "status", "diff", "show", "log", "rev-parse", "merge-base", "blame",
     "index", "grep", "ls-files", "add", "rm", "mv", "apply", "restore", "reset", "retest", "park", "clean", "line", "tag", "adopt",
-    "merge", "pick", "invert", "replay", "save", "undo", "op", "try", "bisect", "access", "protect", "approve", "approvals",
-    "checks", "ref", "release", "queue", "request", "requests", "view", "attest", "attestations", "change", "comment", "probe",
-    "gc", "du", "fsck", "reindex", "init", "projects", "machines", "debug", "config", "cache", "layer", "remote", "fetch", "pull",
-    "push", "git-sync", "git", "clone", "overlay", "export", "sync", "serve-peer", "worktree", "branch", "commit", "stash",
-    "cherry-pick", "rebase", "revert", "checkout", "switch", "person", "mount", "daemon", "follow", "volume", "project",
+    "merge", "pick", "invert", "replay", "save", "undo", "op", "try", "bisect", "access", "protect", "approve", "checks", "ref",
+    "release", "queue", "request", "requests", "view", "attest", "attestations", "change", "comment", "probe", "gc", "du",
+    "fsck", "reindex", "init", "projects", "debug", "config", "remote", "fetch", "pull", "push", "git", "clone", "overlay",
+    "export", "sync", "serve-peer", "person", "mount", "daemon", "follow", "volume", "project",
 ];
 
 pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
@@ -259,21 +258,6 @@ pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
         }
     };
     let rest: Vec<String> = rest.to_vec();
-    // Removed commands fail before repository lookup and overlay policy checks.
-    let replacement = match cmd {
-        "branch" => Some("line"),
-        "commit" => Some("save -m <message>"),
-        "stash" => Some("park"),
-        "cherry-pick" => Some("pick"),
-        "rebase" => Some("replay"),
-        "revert" => Some("invert"),
-        "checkout" | "switch" => return branch::removed_switch(ctx, &rest),
-        "cache" => return admin::removed_cache(&rest),
-        _ => None,
-    };
-    if let Some(new) = replacement {
-        return Err(exit(2, format!("layr {cmd} was removed. Use 'layr {new}'.")));
-    }
     // An overlay (`<project>%<overlay>`) is read through layr only: its history, by its readers.
     if ctx.env("LAYR_PROJECT").map(|p| p.contains('%')).unwrap_or(false) {
         let reading = OVERLAY_READS.contains(&cmd)
@@ -324,7 +308,6 @@ pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
         "access" => admin::access(ctx, &rest),
         "protect" => admin::protect(ctx, &rest),
         "approve" => admin::approve(ctx, &rest),
-        "approvals" => Err(exit(1, "this command was removed; use 'layr attestations <rev> [--kind <kind>]'")),
         "checks" => checks::checks(ctx, &rest),
         "ref" => refs::refs(ctx, &rest),
         "release" => release::release(ctx, &rest),
@@ -343,10 +326,8 @@ pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
         "reindex" => admin::reindex(ctx, &rest),
         "init" => admin::init(ctx, &rest),
         "projects" => admin::projects(ctx, &rest),
-        "machines" => Err(exit(128, "use layr remote list or layr remote trust <name> <machine>")),
         "debug" => admin::debug(ctx, &rest),
         "config" => admin::config(ctx, &rest),
-        "layer" => Err(exit(1, "this command was removed; use 'layr overlay list'")),
         "remote" => remote::remote(ctx, &rest),
         "follow" => followcmd::follow(ctx, &rest),
         "volume" => volume::volume(ctx, &rest),
@@ -354,16 +335,12 @@ pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
         "fetch" => remote::fetch(ctx, &rest),
         "pull" => remote::pull(ctx, &rest),
         "push" => remote::push(ctx, &rest),
-        "git-sync" => Err(exit(128, "use layr git sync")),
         "git" => remote::git::run(ctx, &rest),
         "clone" => remote::clone(ctx, &rest),
         "overlay" => overlaycmd::overlay(ctx, &rest),
         "export" => transfer::export(ctx, &rest),
         "sync" => remote::sync(ctx, &rest),
         "serve-peer" => replicate::serve(ctx, &rest),
-        "worktree" => {
-            Err(exit(1, "layr has no worktrees: each line is a folder. Create one with 'layr line new <name> [<rev>]'."))
-        }
         other => Err(exit(1, format!("layr: '{other}' is not a layr command. See 'layr help'."))),
     }
 }
