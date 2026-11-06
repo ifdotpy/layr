@@ -86,6 +86,8 @@ Logs: `~/Library/Logs/layr-daemon.log`. Stop: `launchctl bootout gui/$(id -u)/ws
 `layr follow` prints one warning line when no daemon of this user serves the store: none runs, or
 a daemon serves another store (follow passes then run only on `layr follow --run`). A daemon
 built before the store root was reported prints `the layr daemon runs an older build; restart it`.
+A daemon of another build than the client (an install without a daemon restart) prints
+`the layr daemon runs another layr build than this one; restart it`.
 
 ## Linux
 
