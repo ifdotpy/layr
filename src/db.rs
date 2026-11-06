@@ -101,16 +101,38 @@ const RETIRED: &[&str] = &["slots", "mirrors", "groups", "group_lines", "checks"
 /// Indexes of older versions on the records table, dropped on migration.
 const RETIRED_INDEXES: &[&str] = &["records_legacy_evidence"];
 
+/// Runs `step` again while SQLite reports a lock it gives up on at once: SQLITE_PROTOCOL (the WAL index lock,
+/// under heavy load) and SQLITE_BUSY where no busy handler applies. Both are temporary; at most about 30 s.
+fn retry_locked<T>(mut step: impl FnMut() -> rusqlite::Result<T>) -> rusqlite::Result<T> {
+    let mut wait = std::time::Duration::from_millis(5);
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        match step() {
+            Err(e)
+                if matches!(
+                    e.sqlite_error_code(),
+                    Some(rusqlite::ErrorCode::FileLockingProtocolFailed | rusqlite::ErrorCode::DatabaseBusy)
+                ) && std::time::Instant::now() < until =>
+            {
+                std::thread::sleep(wait);
+                wait = (wait * 2).min(std::time::Duration::from_millis(500));
+            }
+            other => return other,
+        }
+    }
+}
+
 impl Db {
     /// Open the database. Returns it and whether the derived tables must be rebuilt.
     pub fn open(path: &Path) -> Result<Db> {
         let conn = Connection::open(path)?;
         conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
-        conn.pragma_update(None, "journal_mode", "WAL")?;
+        // Before the pragmas: switching to WAL takes a lock too.
+        conn.busy_timeout(std::time::Duration::from_secs(30))?;
+        retry_locked(|| conn.pragma_update(None, "journal_mode", "WAL"))?;
         // FULL: a committed record survives a power loss. The database has its own subvolume,
         // so this fsync costs a few milliseconds even right after a snapshot.
-        conn.pragma_update(None, "synchronous", "FULL")?;
-        conn.busy_timeout(std::time::Duration::from_secs(30))?;
+        retry_locked(|| conn.pragma_update(None, "synchronous", "FULL"))?;
         // A current schema needs no write lock: one read transaction decides, so read commands
         // do not wait for a writer.
         // An old schema with records is not touched here: its derived tables stay as they are,
@@ -280,7 +302,7 @@ impl Db {
 
     /// Run `f` in one write transaction (`BEGIN IMMEDIATE`): all or nothing.
     pub fn with_tx<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
-        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        retry_locked(|| self.conn.execute_batch("BEGIN IMMEDIATE"))?;
         match f() {
             Ok(v) => {
                 // A failed COMMIT (a full disk) can leave the transaction open: roll it back so the
