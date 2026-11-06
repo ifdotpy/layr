@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.33.0](https://github.com/ifdotpy/layr/compare/v0.32.0...v0.33.0) (2026-11-06)
+
+
+### Features
+
+* **checks:** checks.after runs a check only after the checks it needs passed ([#316](https://github.com/ifdotpy/layr/issues/316)) ([2781b1b](https://github.com/ifdotpy/layr/commit/2781b1b689b8993ea94d350b46b271deb48a3f35))
+
+
+### Bug Fixes
+
+* **remote:** a Git pack that lists commits it does not hold does not stop a clone ([#321](https://github.com/ifdotpy/layr/issues/321)) ([9d29fd2](https://github.com/ifdotpy/layr/commit/9d29fd20d664f7c72dbc763092a43dd73ebb3bef))
+
+
+### Performance
+
+* **remote:** bound transfer memory and zstd decoding, size the retest gate to the host ([#319](https://github.com/ifdotpy/layr/issues/319)) ([3febac2](https://github.com/ifdotpy/layr/commit/3febac28c7338c27c6e386b7d00794574cf76692))
+
 ## [0.32.0](https://github.com/ifdotpy/layr/compare/v0.31.0...v0.32.0) (2026-11-06)
 
 
